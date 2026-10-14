@@ -210,6 +210,66 @@ def test_prime_deadline_stays_inside_the_finishing_reserve(monkeypatch) -> None:
     assert seen == [1000.0 + 300.0 - _FINISHING_EXIT_MARGIN_SEC - 60.0]
 
 
+def test_prime_deadline_leaves_the_auto_fix_reserve_alone(monkeypatch) -> None:
+    """``--auto-fix`` runs after the release, so the prime must not eat its reserve (#3238)."""
+    from types import SimpleNamespace
+
+    import kicad_tools.router.access_witness as access_witness
+    from kicad_tools.cli.route_cmd import (
+        _FINISHING_EXIT_MARGIN_SEC,
+        _prime_access_witness,
+        _set_wall_clock_deadline,
+    )
+
+    _fake_clock(monkeypatch, 1000.0)
+    seen: list = []
+    monkeypatch.setattr(
+        access_witness,
+        "witness_for_router",
+        lambda router, deadline=None: seen.append(deadline),
+    )
+    args = SimpleNamespace(timeout=900.0, auto_fix=True)
+    _set_wall_clock_deadline(args)
+    assert args._auto_fix_reserve > 0.0
+    reserves = _FINISHING_EXIT_MARGIN_SEC + args._post_route_reserve + args._auto_fix_reserve
+
+    # Routing ends exactly at its deadline -- the stranded-pad case the prime
+    # is for.  Everything left belongs to auto-fix and the finishing stages.
+    _fake_clock(monkeypatch, args._routing_deadline)
+    _prime_access_witness(_populated_rtree_router(), args)
+    assert seen == []
+
+    # Routing finished 100 s early: the prime may spend that slack, and no more.
+    early = args._routing_deadline - 100.0
+    _fake_clock(monkeypatch, early)
+    _prime_access_witness(_populated_rtree_router(), args)
+    assert seen == [pytest.approx(args._wall_clock_deadline - reserves)]
+    assert seen[0] <= args._wall_clock_deadline - args._auto_fix_reserve - args._post_route_reserve
+
+
+def test_prime_is_skipped_when_auto_fix_and_finishing_reserves_eat_the_budget(monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    import kicad_tools.router.access_witness as access_witness
+    from kicad_tools.cli.route_cmd import _prime_access_witness
+
+    _fake_clock(monkeypatch, 1000.0)
+    seen: list = []
+    monkeypatch.setattr(
+        access_witness,
+        "witness_for_router",
+        lambda router, deadline=None: seen.append(deadline),
+    )
+    # 200 s left: enough for the 60 s finishing reserve alone, not with 180 s auto-fix.
+    args = SimpleNamespace(
+        _wall_clock_deadline=1000.0 + 200.0,
+        _post_route_reserve=60.0,
+        _auto_fix_reserve=180.0,
+    )
+    _prime_access_witness(_populated_rtree_router(), args)
+    assert seen == []
+
+
 def test_prime_is_skipped_when_the_reserve_has_eaten_the_budget(monkeypatch, tmp_path) -> None:
     """Budget gone: no prime, no cache, and the sidecar is still journal-only (#6273)."""
     from types import SimpleNamespace
@@ -272,3 +332,42 @@ def test_journal_truncation_after_a_prime_drops_the_cache() -> None:
     assert router._access_witness_cache is not None
     _truncate_journal_to(router, (0, False))
     assert getattr(router, "_access_witness_cache", None) is None
+
+
+def test_cap_truncated_witness_is_memoized_but_deadline_truncated_is_not(monkeypatch) -> None:
+    """Only a deadline truncation forces a later replay; a structural cap does not (#6391).
+
+    An unbounded replay stops at the same 64-pad / evaluation / journal cap, so
+    caching a cap-truncated witness from the bounded prime loses nothing -- and
+    discarding it would replay twice and lose the primed ``closing_markings``.
+    """
+    from types import SimpleNamespace
+
+    import kicad_tools.router.access_witness as access_witness
+
+    clock = {"now": 1000.0}
+    monkeypatch.setattr(access_witness, "time", SimpleNamespace(monotonic=lambda: clock["now"]))
+    calls: list = []
+
+    def fake_replay(journal, router, deadline=None):
+        calls.append(deadline)
+        return AccessWitness(record_count=len(journal), truncated=True)
+
+    monkeypatch.setattr(access_witness, "replay", fake_replay)
+
+    # Cap-truncated: the deadline is still in the future when the replay ends.
+    router = _populated_rtree_router()
+    first = access_witness.witness_for_router(router, deadline=2000.0)
+    assert first.truncated
+    assert router._access_witness_cache is first
+    assert access_witness.witness_for_router(router) is first
+    assert calls == [2000.0]
+
+    # Deadline-truncated: the clock has reached the deadline -- not memoized.
+    calls.clear()
+    router = _populated_rtree_router()
+    clock["now"] = 3000.0
+    access_witness.witness_for_router(router, deadline=2500.0)
+    assert getattr(router, "_access_witness_cache", None) is None
+    access_witness.witness_for_router(router)
+    assert calls == [2500.0, None]

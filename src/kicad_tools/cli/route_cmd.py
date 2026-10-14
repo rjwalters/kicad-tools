@@ -2495,15 +2495,20 @@ def _prime_access_witness_deadline(args) -> tuple[bool, float | None]:
     Returns ``(run, deadline)``.  Without ``--timeout`` the prime is the same
     unbounded replay the post-release sidecar writer used to do, only earlier:
     ``(True, None)``.  Under ``--timeout`` it may spend only what is left
-    beyond the post-route finishing reserve (:func:`_post_route_reserve`),
-    i.e. ``_finishing_time_left(args) - args._post_route_reserve``; when that
-    is not in the future the prime is skipped (``(False, None)``) and the
-    sidecars fall back to today's post-release behaviour (#6273).
+    beyond BOTH reserves carved out of the routing deadline: the post-route
+    finishing reserve (:func:`_post_route_reserve`, #6273) and the
+    ``--auto-fix`` reserve (:func:`_auto_fix_budget`, #3238) -- auto-fix runs
+    after the release, so time the prime took from it would be gone.  That is
+    ``_finishing_time_left(args) - _post_route_reserve - _auto_fix_reserve``;
+    when that is not in the future the prime is skipped (``(False, None)``) and
+    the sidecars fall back to today's post-release behaviour.
     """
     time_left = _finishing_time_left(args)
     if time_left is None:
         return True, None
-    reserve = float(getattr(args, "_post_route_reserve", 0.0) or 0.0)
+    reserve = float(getattr(args, "_post_route_reserve", 0.0) or 0.0) + float(
+        getattr(args, "_auto_fix_reserve", 0.0) or 0.0
+    )
     budget = time_left - reserve
     if budget <= 0.0:
         return False, None
