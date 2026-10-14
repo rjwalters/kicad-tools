@@ -1970,11 +1970,16 @@ def compute_multi_resolution_plan(
     if has_ref and uniform_result.off_grid_pads > 0:
         # Find components with off-grid pads at the chosen resolution+offset
         off_grid_refs: dict[str, list] = {}
+        # All pads of each component, regardless of grid alignment.  The
+        # off-grid subset above decides *whether* a component escalates; the
+        # full set decides the zone's pitch (issue #6328).
+        all_pads_by_ref: dict[str, list] = {}
         offset = uniform_result.origin_offset
         for pad in pad_list:
             ref = getattr(pad, "component_key", getattr(pad, "ref", None))
             if ref is None:
                 continue
+            all_pads_by_ref.setdefault(ref, []).append(pad)
             x_on = _is_on_grid_with_offset(pad.x, coarse_resolution, offset[0])
             y_on = _is_on_grid_with_offset(pad.y, coarse_resolution, offset[1])
             if not (x_on and y_on):
@@ -2008,8 +2013,17 @@ def compute_multi_resolution_plan(
             for ref, ref_pads in off_grid_refs.items():
                 if len(ref_pads) < 2:
                     continue
+                # Solve the pitch from ALL of the component's pads, not just
+                # the off-grid subset (issue #6328).  Which pads fall off the
+                # *global* coarse grid depends on where the part sits on the
+                # board, so solving from that subset made the pitch depend on
+                # placement: board 05's U2 got 0.05 mm at 1x (24/59 pads fed
+                # in) but 0.005 mm at 1.05x (25/59).  The full pad set depends
+                # only on the footprint's internal geometry, so the pitch is
+                # translation-invariant (U2 -> 0.0125 mm at both scales).  The
+                # zone bbox below is already built from all pads.
                 fine_res, x_off, y_off = _compute_zone_resolution_and_offset(
-                    ref_pads,
+                    all_pads_by_ref[ref],
                     coarse_resolution=coarse_resolution,
                     min_fine_resolution=min_escalation_fine_resolution,
                 )

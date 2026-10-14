@@ -646,6 +646,92 @@ class TestMultiResolutionGridPlan:
         assert "U2" in refs
 
 
+def _translation_board(dx: float, dy: float, extra: dict | None = None) -> dict:
+    """Board for the issue #6328 regressions.
+
+    ``J1`` is 40 pads on a 1.0 mm lattice, which pins the coarse grid to
+    0.1 mm with a zero origin offset.  ``U1`` is a two-row part translated
+    by ``(dx, dy)``: row A sits on a 1.0 mm lattice, row B is the same
+    lattice shifted by 0.0125 mm in x.  Its internal geometry needs a
+    0.0125 mm zone.  Which rows land off the *global* coarse grid depends on
+    the translation -- at ``dx=0`` only row B is off-grid, and row B alone
+    aligns at 0.1 mm with a shifted offset.
+    """
+    pads: dict = {}
+    for i in range(40):
+        pads[("J1", str(i + 1))] = make_pad(
+            x=5.0 + (i % 20), y=5.0 + (i // 20), net=i + 1, ref="J1", pin=str(i + 1)
+        )
+    pin = 0
+    for i in range(4):
+        for row_y, shift_x in ((0.0, 0.0), (3.0, 0.0125)):
+            pin += 1
+            pads[("U1", str(pin))] = make_pad(
+                x=20.0 + dx + i * 1.0 + shift_x,
+                y=20.0 + dy + row_y,
+                net=100 + pin,
+                ref="U1",
+                pin=str(pin),
+            )
+    if extra:
+        pads.update(extra)
+    return pads
+
+
+class TestFineZonePitchTranslationInvariance:
+    """A fine zone's pitch must not depend on where its part sits (issue #6328).
+
+    The off-grid escalation used to hand the pitch solver only the pads that
+    were off the global coarse grid.  That subset changes as the part moves,
+    so board 05's ``U2`` flipped between 0.05 mm and 0.005 mm across
+    placement-only changes.
+    """
+
+    @pytest.mark.parametrize(
+        ("dx", "dy"),
+        [(0.0, 0.0), (0.025, 0.0), (0.03, 0.0), (0.07, 0.0), (0.0, 0.0125), (0.07, 0.033)],
+    )
+    def test_zone_pitch_independent_of_translation(self, dx, dy):
+        plan = compute_multi_resolution_plan(
+            pads=_translation_board(dx, dy),
+            clearance=0.15,
+            board_width=40.0,
+            board_height=40.0,
+        )
+
+        assert plan is not None
+        assert plan.coarse_resolution == pytest.approx(0.1)
+        zones = {z.ref: z for z in plan.fine_zones}
+        assert set(zones) == {"U1"}
+        # Solved from all 8 pads: x residues need 0.0125 mm wherever U1 sits.
+        assert zones["U1"].resolution == pytest.approx(0.0125)
+
+    def test_single_off_grid_pad_component_does_not_escalate(self):
+        """Only one off-grid pad: no zone, even though the full pad set is larger.
+
+        The off-grid subset still gates escalation (``len(ref_pads) < 2``);
+        only the pitch is solved from all pads.
+        """
+        extra = {
+            ("U9", "1"): make_pad(x=30.0, y=30.0, net=200, ref="U9", pin="1"),
+            ("U9", "2"): make_pad(x=31.0, y=30.0, net=201, ref="U9", pin="2"),
+            ("U9", "3"): make_pad(x=32.0125, y=30.0, net=202, ref="U9", pin="3"),
+            ("MH1", "1"): make_pad(x=35.0125, y=35.0125, net=0, ref="MH1", pin="1"),
+        }
+        plan = compute_multi_resolution_plan(
+            pads=_translation_board(0.03, 0.0, extra),
+            clearance=0.15,
+            board_width=40.0,
+            board_height=40.0,
+        )
+
+        assert plan is not None
+        refs = {z.ref for z in plan.fine_zones}
+        assert "U1" in refs
+        assert "U9" not in refs
+        assert "MH1" not in refs
+
+
 class TestFineZone:
     """Tests for FineZone dataclass."""
 
