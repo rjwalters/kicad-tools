@@ -4784,6 +4784,12 @@ class Autorouter:
         from .lattice.class_pad_repair import PAIR_LENGTH_TOLERANCE_MM
 
         repair = getattr(pf, "class_pad_repair_stats", None)
+        if stats.lattice_builds > 1:
+            print(
+                f"  Pad class clearance (#6489): re-negotiated with "
+                f"{len(pf._class_pad_growth)} grown pad keep-out(s) "
+                f"(lattice_builds={stats.lattice_builds})"
+            )
         if repair is not None and repair.skipped == "voltage-map":
             print(
                 "  Pad class clearance (#6395): skipped -- HV pairwise clearance "
@@ -17945,6 +17951,7 @@ class Autorouter:
         Returns:
             Sorted list of demoted net ids (empty in the common case).
         """
+        self.last_floor_demoted_nets = []
         if not self.routes:
             return []
         net_routes = self._build_net_routes_map()
@@ -17958,7 +17965,10 @@ class Autorouter:
         demoted = self._demote_seg_seg_overlap_nets(net_routes, neg_router, finalize=True)
         # Issue #6243: authored netclass minima, whichever engine or post-pass
         # produced the copper.  Dormant (one dict check) without floors.
-        demoted.extend(self.demote_authored_floor_violation_nets())
+        floor_demoted = self.demote_authored_floor_violation_nets()
+        # Issue #6489: let the CLI name the real reason for these demotions.
+        self.last_floor_demoted_nets = sorted(set(floor_demoted))
+        demoted.extend(floor_demoted)
         demoted.extend(self.demote_routing_short_nets())
         return sorted(set(demoted))
 

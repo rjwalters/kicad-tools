@@ -55,7 +55,7 @@ from __future__ import annotations
 import math
 from collections import defaultdict
 from collections.abc import Collection, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from ..authored_clearance import pad_authored_floor
@@ -101,6 +101,14 @@ class ClassPadRepairStats:
     via_remaining: int = 0
     #: Why the repair did not run at all (``"voltage-map"``), else ``None``.
     skipped: str | None = None
+    #: Issue #6489: pads still short of their class after the repair, over EVERY
+    #: route (pair legs and unmovable copper included), as pad index -> the
+    #: clearance that pad's pairs require.  The lattice grows exactly these
+    #: pads' keep-out and negotiates again; empty means nothing is left.
+    unrepaired_pads: dict[int, float] = field(default_factory=dict)
+    #: Track-vs-pad shortfalls left over every route (the figure the
+    #: re-negotiation must reduce to be kept).
+    total_remaining: int = 0
 
 
 @dataclass
@@ -286,6 +294,18 @@ def repair_class_pad_pairs(
             for seg in route.segments
         )
 
+    def record_left() -> None:
+        """Issue #6489: shortfalls left over every route, and their pads."""
+        left: dict[int, float] = {}
+        total = 0
+        for key, route in routes.items():
+            for seg in route.segments:
+                for i, required, _gap in pad_shortfalls(key, seg, class_only=True):
+                    total += 1
+                    left[i] = max(left.get(i, 0.0), required)
+        stats.unrepaired_pads = left
+        stats.total_remaining = total
+
     # Via-vs-pad shortfalls: reported only (a via move drags every layer).
     n_layers = pf.layer_stack.num_layers
     for key, route in routes.items():
@@ -314,6 +334,7 @@ def repair_class_pad_pairs(
     candidates = detect(strict=True)
     if not candidates:
         stats.pair_skipped = pair_left()
+        record_left()
         return stats
 
     committed = None
@@ -356,6 +377,7 @@ def repair_class_pad_pairs(
     stats.remaining = len(detect(strict=False))
     stats.repaired = max(0, stats.found - stats.remaining)
     stats.pair_skipped = pair_left()
+    record_left()
     return stats
 
 
