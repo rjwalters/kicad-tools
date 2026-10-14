@@ -103,12 +103,10 @@ TMUX_SOCKET="loom"
 # Used only for the human "Config:" display line -- naming every present tier
 # instead of a single legacy path (#4062).
 _loom_status_config_tiers_present() {
-    local dp
+    local dp rel
     dp="$(_loom_config_private_defaults_path)"
     [[ -n "$dp" && -f "$dp" ]] && echo "$dp"
-    [[ -f "$REPO_ROOT/$LOOM_CONFIG_LEGACY_REL" ]] && echo "$REPO_ROOT/$LOOM_CONFIG_LEGACY_REL"
-    [[ -f "$REPO_ROOT/$LOOM_CONFIG_PROJECT_REL" ]] && echo "$REPO_ROOT/$LOOM_CONFIG_PROJECT_REL"
-    [[ -f "$REPO_ROOT/$LOOM_CONFIG_LOCAL_REL" ]] && echo "$REPO_ROOT/$LOOM_CONFIG_LOCAL_REL"
+    for rel in "$LOOM_CONFIG_LEGACY_REL" "$LOOM_CONFIG_PROJECT_REL" .loom-local/fleet-repo.json "$LOOM_CONFIG_LOCAL_REL"; do [[ -f "$REPO_ROOT/$rel" ]] && echo "$REPO_ROOT/$rel"; done
     # Explicit trailing success: under `set -o pipefail`, this function's exit
     # status is whatever its last statement returned. The common case (no
     # local/private-defaults tier present) makes the last `[[ -f ]] && echo`
@@ -603,7 +601,7 @@ emit_human() {
     if [[ -n "$config_tiers_present" ]]; then
         echo -e "  Config:    ${CYAN}$config_tiers_present${NC}"
     else
-        echo -e "  Config:    ${GRAY}(none found — checked .loom/config.json, .loom-project/project.json, .loom-local/local.json)${NC}"
+        echo -e "  Config:    ${GRAY}(none found — checked .loom/config.json, .loom-project/project.json, .loom-local/fleet-repo.json, .loom-local/local.json)${NC}"
     fi
     echo -e "  Socket:    ${CYAN}tmux -L $TMUX_SOCKET${NC}"
     echo ""

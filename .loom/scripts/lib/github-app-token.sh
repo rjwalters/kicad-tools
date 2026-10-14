@@ -306,42 +306,6 @@ _github_app_needs_remint() {
   [[ "$remaining" -lt 600 ]]
 }
 
-# --- Proxied-host gate (#9988, C5 of #9983) ---
-#
-# On a proxied host the egress gateway owns App minting: the resolved forge
-# egress policy (#9984) names `principal.credentialRef`, and this file's two
-# direct REST calls below must never run. `_github_app_gateway_owned` returns
-# 0 (with $_GH_APP_LAST_ERROR set) exactly then, and every path that could
-# reach the network checks it first.
-#
-# The policy is read through `loom-daemon forge egress policy`, never parsed
-# here: resolution (env > machine > repo, first present wins, never merged)
-# lives in one place, `loom-daemon/src/forge_egress/policy.rs`. Anything
-# short of a resolved credentialRef -- no policy, an unreadable one (exit 2),
-# no daemon binary, or an older binary without `forge egress` -- leaves the
-# script's behaviour unchanged. A host is only proxied once its daemon can
-# say so; dispatch and spawn already refuse on an unreadable policy.
-# Memoised per process (and inherited by the CLI's subshell).
-# requires-daemon: forge optional   No binary, or one predating `forge egress policy` (any non-zero exit / no credentialRef), is treated as "no policy": the gate stays open and minting proceeds exactly as before #9988.
-# shellcheck source=./locate-daemon-bin.sh
-source "$_LOOM_GH_APP_LIB_DIR/locate-daemon-bin.sh"
-_GH_APP_EGRESS_GATE=""
-_github_app_gateway_owned() {
-  if [[ -z "$_GH_APP_EGRESS_GATE" ]]; then
-    _GH_APP_EGRESS_GATE="open"
-    local bin ref
-    bin="$(loom_resolve_self_daemon_bin 2>/dev/null)" || bin=""
-    if [[ -n "$bin" ]] \
-      && ref=$("$bin" forge egress policy 2>/dev/null | jq -r '.policy.principal.credentialRef // empty | strings' 2>/dev/null) \
-      && [[ -n "$ref" ]]; then
-      _GH_APP_EGRESS_GATE="proxied"
-    fi
-  fi
-  [[ "$_GH_APP_EGRESS_GATE" == "proxied" ]] || return 1
-  _GH_APP_LAST_ERROR="proxied host: App minting is gateway-owned (forge egress policy sets principal.credentialRef); not calling the GitHub API directly"
-  return 0
-}
-
 # --- Network calls (installation resolution + token minting) ---
 #
 # Neither of these is required for the unit test suite (#4430 AC: "none
@@ -352,13 +316,12 @@ _github_app_gateway_owned() {
 # on stdout. Requires a fresh JWT (github_app_jwt).
 _github_app_api_get_installation() {
   local nwo="$1" jwt resp http_code body
-  _github_app_gateway_owned && return 1 # proxied host (loom-daemon forge egress policy): no request
   jwt=$(github_app_jwt) || return 1
   resp=$(curl -sS -w '\n%{http_code}' \
     -H "Authorization: Bearer $jwt" \
     -H "Accept: application/vnd.github+json" \
     -H "X-GitHub-Api-Version: 2022-11-28" \
-    "https://api.github.com/repos/${nwo}/installation" 2>/dev/null) || { # loom:egress-exception=github-app-bootstrap
+    "https://api.github.com/repos/${nwo}/installation" 2>/dev/null) || {
     _GH_APP_LAST_ERROR="could not reach the GitHub API to resolve the installation for ${nwo}"
     return 1
   }
@@ -386,13 +349,12 @@ _github_app_api_get_installation() {
 # '{"token":...,"expires_at":...}' on stdout. Requires a fresh JWT.
 _github_app_api_mint_token() {
   local installation_id="$1" jwt resp http_code body
-  _github_app_gateway_owned && return 1 # proxied host (loom-daemon forge egress policy): no request
   jwt=$(github_app_jwt) || return 1
   resp=$(curl -sS -w '\n%{http_code}' -X POST \
     -H "Authorization: Bearer $jwt" \
     -H "Accept: application/vnd.github+json" \
     -H "X-GitHub-Api-Version: 2022-11-28" \
-    "https://api.github.com/app/installations/${installation_id}/access_tokens" 2>/dev/null) || { # loom:egress-exception=github-app-bootstrap
+    "https://api.github.com/app/installations/${installation_id}/access_tokens" 2>/dev/null) || {
     _GH_APP_LAST_ERROR="could not reach the GitHub API to mint an installation token for installation ${installation_id}"
     return 1
   }
@@ -431,7 +393,6 @@ github_app_get_token() {
   if ! github_app_configured; then
     return 1
   fi
-  _github_app_gateway_owned && return 1 # proxied host (loom-daemon forge egress policy): no request
   local owner="${nwo%%/*}"
   if [[ -z "$owner" || "$owner" == "$nwo" ]]; then
     _GH_APP_LAST_ERROR="expected owner/repo, got '${nwo}'"
@@ -486,10 +447,7 @@ github_app_get_token() {
 # subcommands below. Both ALWAYS exit 0 and communicate outcome through a JSON
 # envelope on stdout (`status` field) -- this sidesteps relying on distinct
 # process exit codes surviving a `Command` capture, and keeps the daemon-side
-# parser to "read one line of JSON, branch on `.status`". One deliberate
-# exception: on a proxied host (`_github_app_gateway_owned`) `get-token`
-# prints an error envelope and exits 78 (EX_CONFIG) without any request --
-# minting there is the gateway's job, not a fallback-to-ambient condition.
+# parser to "read one line of JSON, branch on `.status`".
 if [[ "${BASH_SOURCE[0]:-$0}" == "${0}" ]]; then
   _gh_app_cmd="${1:-}"
   case "$_gh_app_cmd" in
@@ -520,11 +478,6 @@ if [[ "${BASH_SOURCE[0]:-$0}" == "${0}" ]]; then
       if ! github_app_configured; then
         jq -cn --arg message "$_GH_APP_LAST_ERROR" '{status:"not_configured", message:$message}'
         exit 0
-      fi
-      if _github_app_gateway_owned; then # loom-daemon forge egress policy names a credentialRef
-        jq -cn --arg message "$_GH_APP_LAST_ERROR" '{status:"error", message:$message}'
-        echo "github-app-token.sh: $_GH_APP_LAST_ERROR" >&2
-        exit 78
       fi
       # `github_app_get_token` sets GITHUB_APP_INSTALLATION_ID /
       # GITHUB_APP_TOKEN_EXPIRES_AT as a side effect, but `$(...)` command

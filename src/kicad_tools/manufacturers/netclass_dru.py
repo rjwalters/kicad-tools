@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Iterable
 
 #: Sentinel markers of the kct-owned router net-class block.  Distinct from
 #: the fab-floors (#4600), creepage (#4508) and keepout (#6039) markers.
@@ -97,7 +98,54 @@ def is_coupled_diff_pair(name_a: str | None, name_b: str | None) -> bool:
     return kicad_coupled_complement(name_a) == name_b
 
 
-def netclass_condition(name: str, *, router: bool) -> str:
+def is_router_coupled_pair(
+    name_a: str | None,
+    name_b: str | None,
+    recorded: Iterable[Iterable[str]] = (),
+) -> bool:
+    """Whether a router class's clearance skips the gap between two nets.
+
+    The single predicate both engines share (Issue #6429): KiCad's own
+    ``isCoupledDiffPair()`` (:func:`is_coupled_diff_pair`), or a pair the
+    router recorded as coupled-routed under ``meta.kct_router_diff_pairs``
+    (names KiCad does not recognise, e.g. ``X_POS``/``X_NEG``, ``x_p``/``x_n``).
+    The ``.kicad_dru`` side is :func:`netclass_condition`'s ``extra_pairs``.
+    Order-insensitive; exact, case-sensitive names.
+    """
+    if not name_a or not name_b:
+        return False
+    if is_coupled_diff_pair(name_a, name_b):
+        return True
+    key = frozenset((name_a, name_b))
+    return len(key) == 2 and any(frozenset(pair) == key for pair in recorded)
+
+
+def _dru_string(value: str) -> str:
+    return value.replace("\\", "\\\\").replace("'", "\\'")
+
+
+def coupled_pair_exemption(extra_pairs: Iterable[tuple[str, str]] = ()) -> str:
+    """The DRC expression true for the two halves of a coupled pair.
+
+    Without ``extra_pairs`` exactly :data:`COUPLED_DIFF_PAIR`.  Each recorded
+    pair adds a net-name term in **both** orderings (``A=P, B=N`` and ``A=N,
+    B=P``): measured on kicad-cli 10.0.6, a one-sided term does not exempt the
+    pair -- KiCad evaluates the rule with the items in both orders and applies
+    it whenever either order matches (Issue #6429).
+    """
+    terms = [COUPLED_DIFF_PAIR]
+    for p, n in extra_pairs:
+        ep, en = _dru_string(p), _dru_string(n)
+        terms.append(f"(A.NetName == '{ep}' && B.NetName == '{en}')")
+        terms.append(f"(A.NetName == '{en}' && B.NetName == '{ep}')")
+    if len(terms) == 1:
+        return COUPLED_DIFF_PAIR
+    return "(" + " || ".join(terms) + ")"
+
+
+def netclass_condition(
+    name: str, *, router: bool, extra_pairs: Iterable[tuple[str, str]] = ()
+) -> str:
     """The DRC condition selecting copper of netclass ``name``.
 
     ``router=True`` (a class kct declared from the router's map, Issue #6390)
@@ -114,18 +162,28 @@ def netclass_condition(name: str, *, router: bool) -> str:
       class clearance flags exactly the copper the router intended.  The fab
       floor still applies to the pair.
 
+    ``extra_pairs`` are the pairs the router coupled-routed whose names
+    KiCad's ``isCoupledDiffPair()`` does not recognise (``X_POS``/``X_NEG``,
+    ``x_p``/``x_n``; recorded under ``meta.kct_router_diff_pairs``, Issue
+    #6429).  They join the exemption by exact net name, in both orderings
+    (see :func:`coupled_pair_exemption`).  Without them the condition is
+    byte-identical to the #6390 one.
+
     Authored classes keep KiCad's full semantics.
     """
-    escaped = name.replace("\\", "\\\\").replace("'", "\\'")
+    escaped = _dru_string(name)
     condition = f"A.NetClass == '{escaped}' || B.NetClass == '{escaped}'"
     if not router:
         return condition
-    return f"({condition}) && !({SAME_FOOTPRINT_PADS}) && !{COUPLED_DIFF_PAIR}"
+    exemption = coupled_pair_exemption(extra_pairs)
+    return f"({condition}) && !({SAME_FOOTPRINT_PADS}) && !{exemption}"
 
 
-def render_netclass_rule(name: str, clearance: float) -> str:
+def render_netclass_rule(
+    name: str, clearance: float, extra_pairs: Iterable[tuple[str, str]] = ()
+) -> str:
     """One router-class clearance rule (same grammar as the reviewed rules)."""
-    condition = netclass_condition(name, router=True)
+    condition = netclass_condition(name, router=True, extra_pairs=extra_pairs)
     return (
         f"(rule {json.dumps(NETCLASS_RULE_PREFIX + name)}\n"
         f"  (condition {json.dumps(condition)})\n"
@@ -163,15 +221,20 @@ def netclass_block_rules(
     return sorted(rules, key=lambda item: (item[1], item[0]))
 
 
-def merge_netclass_block(existing: str | None, rules: list[tuple[str, float]]) -> str | None:
+def merge_netclass_block(
+    existing: str | None,
+    rules: list[tuple[str, float]],
+    extra_pairs: Iterable[tuple[str, str]] = (),
+) -> str | None:
     """Merge the router net-class block into ``.kicad_dru`` content.
 
     Same contract as :func:`~kicad_tools.manufacturers.keepout_dru.merge_keepout_block`:
     rules present -> replace any existing block with a fresh one appended at
     the end; no rules -> remove a stale block, otherwise return ``existing``
     unchanged (boards without router classes stay byte-identical).
-    Idempotent.
+    ``extra_pairs``: see :func:`netclass_condition`.  Idempotent.
     """
+    pairs = list(extra_pairs)
     pattern = re.compile(
         r"\n*" + re.escape(DRU_NETCLASS_BLOCK_BEGIN) + r".*?" + re.escape(DRU_NETCLASS_BLOCK_END),
         re.DOTALL,
@@ -186,7 +249,7 @@ def merge_netclass_block(existing: str | None, rules: list[tuple[str, float]]) -
     body = [
         "# The router's net classes, declared in the routed .kicad_pro. Without",
         "# these the unconditional fab-floor clearance above outranks them.",
-        *(render_netclass_rule(name, clearance) for name, clearance in rules),
+        *(render_netclass_rule(name, clearance, pairs) for name, clearance in rules),
     ]
     block = f"{DRU_NETCLASS_BLOCK_BEGIN}\n" + "\n".join(body) + f"\n{DRU_NETCLASS_BLOCK_END}"
     if base is None or not base.strip():

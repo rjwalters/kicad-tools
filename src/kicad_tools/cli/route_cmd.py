@@ -2800,6 +2800,13 @@ _interrupt_state: dict[str, Any] = {
     # ``partial_save_info``: what the last partial save wrote (which state,
     # which placement), for the ``.timeout.json`` receipt.
     "partial_save_info": None,
+    # Issue #6324: the exit code ``_handle_interrupt`` decided on (5 = partial
+    # saved, 130 = nothing saved), recorded BEFORE it raises ``SystemExit``.
+    # That raise is discarded when the signal lands inside a ``__del__``, so
+    # the route flows poll this at their stage boundaries
+    # (``_interrupt_requested_exit``) and a repeat interrupt reuses it instead
+    # of overwriting the first ``_partial`` board.
+    "interrupt_exit": None,
 }
 
 
@@ -2823,7 +2830,16 @@ def _pcb_text(pcb: Any) -> str:
 
 
 def _handle_interrupt(signum, frame):
-    """Handle Ctrl+C by setting the interrupted flag and saving partial results."""
+    """Handle Ctrl+C by setting the interrupted flag and saving partial results.
+
+    Issue #6324: the ``SystemExit`` raised here is the only thing that stops a
+    long native/A* stage promptly, so it stays -- but Python discards it when
+    the signal is delivered while a ``__del__`` runs.  The outcome is therefore
+    recorded in ``_interrupt_state`` first, and every route flow polls it at
+    its stage boundaries (``_interrupt_requested_exit``).  A repeat interrupt
+    after a completed save exits with the recorded code without saving again,
+    so it can no longer overwrite the first ``_partial`` board.
+    """
     # Adaptive/combined routing also installs this handler for SIGTERM.
     # A supervisor deadline must never promote its best-completed attempt.
     from .route_deadline import CONTROL_ENV, _deadline_signal
@@ -2831,6 +2847,10 @@ def _handle_interrupt(signum, frame):
     if signum == signal.SIGTERM and CONTROL_ENV in os.environ:
         _deadline_signal(signum, frame)
     _interrupt_state["interrupted"] = True
+    recorded = _interrupt_state.get("interrupt_exit")
+    if recorded is not None:
+        # Already saved (or found nothing to save) for this run: stop now.
+        sys.exit(recorded)
     if not _interrupt_state["quiet"]:
         print("\n\n⚠ Interrupt received! Saving partial results...")
     # Save partial results immediately
@@ -2838,7 +2858,68 @@ def _handle_interrupt(signum, frame):
     # Exit with code 5 to indicate SIGINT interruption with saved partial results.
     # This is distinct from code 2 (partial routing below threshold) so scripts can
     # distinguish user-interrupted from router-decided-partial.
-    sys.exit(5 if saved else 130)  # 130 = 128 + SIGINT (2)
+    code = 5 if saved else 130  # 130 = 128 + SIGINT (2)
+    _interrupt_state["interrupt_exit"] = code
+    sys.exit(code)
+
+
+def _reset_interrupt_outcome() -> None:
+    """Forget a previous run's interrupt (issue #6324).
+
+    Called wherever a flow resets ``_interrupt_state["interrupted"]``.
+    """
+    _interrupt_state["interrupted"] = False
+    _interrupt_state["interrupt_exit"] = None
+
+
+def _interrupt_pending() -> bool:
+    """Whether a Ctrl+C / SIGTERM / supervisor deadline has been delivered.
+
+    Cheap enough for a per-iteration check (issue #6324); used where a loop
+    has to unwind before it can act on :func:`_interrupt_requested_exit`.
+    """
+    from .route_deadline import deadline_fired
+
+    return bool(_interrupt_state["interrupted"]) or deadline_fired()
+
+
+def _interrupt_requested_exit() -> int | None:
+    """Stage-boundary poll for an interrupt whose exit was swallowed (#6324).
+
+    Returns ``None`` when no interrupt has been delivered.  Otherwise it ends
+    the run the way the signal handler would have, had its raise survived:
+
+    * a supervisor deadline re-raises ``RouteDeadlineExpired``, so the handler
+      in ``_in_process_main_impl`` writes the ``_partial`` (exactly once --
+      the swallowed raise never reached it) and exits ``TIMEOUT_EXIT``;
+    * a Ctrl+C / SIGTERM returns the exit code ``_handle_interrupt`` recorded
+      (5 when it saved the partial, 130 when it had nothing to save).
+
+    It never saves itself.  Callers return the code straight away, so no later
+    stage runs and the normal save never follows a reported interrupt.
+    """
+    from .route_deadline import RouteDeadlineExpired, deadline_fired
+
+    if deadline_fired():
+        raise RouteDeadlineExpired()
+    if not _interrupt_state["interrupted"]:
+        return None
+    recorded = _interrupt_state.get("interrupt_exit")
+    # Flag set but no recorded outcome: the handler was itself cut short
+    # before its save finished (#6325's window), so nothing is known saved.
+    return recorded if recorded is not None else 130
+
+
+def _stage_boundary(stage: str) -> int | None:
+    """Poll for a swallowed interrupt, then publish ``stage`` (issue #6324).
+
+    Returns the exit code to return when the run must stop; ``None`` means
+    carry on (and ``stage`` has been recorded for the deadline supervisor).
+    """
+    stop = _interrupt_requested_exit()
+    if stop is None:
+        record_stage(stage)
+    return stop
 
 
 # Issue #4559: per-invocation record of whether ``_main_impl`` seeded the
@@ -2913,9 +2994,13 @@ def _process_state_guard() -> "Iterator[None]":
         _interrupt_state["router"] = None
         _interrupt_state["output_path"] = None
         _interrupt_state["pcb_path"] = None
-        _interrupt_state["interrupted"] = False
+        _reset_interrupt_outcome()
         _interrupt_state["access_witness_path"] = None
         _reset_partial_save_state()
+        # Issue #6324: a deadline delivered to this invocation is spent.
+        from .route_deadline import reset_deadline_state
+
+        reset_deadline_state()
 
 
 def _restore_best_trial(router: Any, info: dict[str, Any]) -> None:
@@ -3951,6 +4036,60 @@ class DRCConstraintPropagationError(ValueError):
     """Authored source constraints could not safely reach the routed output."""
 
 
+def _router_coupled_pairs(
+    output_path: Path, net_class_map: dict | None, router: object | None = None
+) -> list[tuple[str, str]] | None:
+    """The ``(P, N)`` pairs the router coupled-routes (Issue #6429).
+
+    :func:`~kicad_tools.router.diffpair_detection.coupled_engaged_pairs` over
+    the router's nets (or, without a router, the routed board's) and its
+    effective class map.  ``None`` when there is no class map, so the sidecar
+    writer keeps whatever an earlier route recorded -- the same contract as
+    ``net_class_map=None``.
+    """
+    if net_class_map is None:
+        return None
+    from kicad_tools.router.diffpair_detection import coupled_engaged_pairs
+
+    net_names = getattr(router, "net_names", None)
+    if not isinstance(net_names, dict) or not net_names:
+        from kicad_tools.manufacturers.project_generator import board_net_names
+
+        net_names = board_net_names(output_path) if Path(output_path).exists() else None
+    if not net_names:
+        return []
+    return coupled_engaged_pairs(
+        net_names, net_class_map, getattr(router, "kicad_diff_pair_groups", None)
+    )
+
+
+def _warn_unrecognised_coupled_pairs(pairs: list[tuple[str, str]] | None, quiet: bool) -> None:
+    """One warning per coupled pair KiCad does not recognise by name (#6429).
+
+    The router couples ``X_POS``/``X_NEG``, ``x_p``/``x_n`` and declared
+    pairs whatever their names; KiCad pairs nets only by its
+    ``MatchDpSuffix`` rule.  Their clearance exemption is carried explicitly
+    (``meta.kct_router_diff_pairs``), but KiCad's native diff-pair checks
+    (``diff_pair_gap`` / ``diff_pair_uncoupled``) will not see them.  A
+    warning, never a refusal: coupling stays on.
+    """
+    if quiet or not pairs:
+        return
+    from kicad_tools.manufacturers.netclass_dru import is_coupled_diff_pair
+
+    for p, n in pairs:
+        if is_coupled_diff_pair(p, n) or is_coupled_diff_pair(n, p):
+            continue
+        print(
+            f"  Warning: diff pair {p}/{n} is coupled-routed but KiCad does not "
+            "recognise it as a pair (KiCad pairs nets only by a trailing '+'/'-' "
+            "or uppercase 'P'/'N', ignoring trailing digits and '_'); its "
+            "intra-pair clearance exemption is recorded explicitly, but KiCad's "
+            "native diff_pair_gap / diff_pair_uncoupled checks will not see it. "
+            "A KiCad-recognised name (e.g. X_P/X_N) avoids this (issue #6429)."
+        )
+
+
 def _write_drc_constraint_sidecars(
     output_path: Path,
     manufacturer: str,
@@ -3959,6 +4098,7 @@ def _write_drc_constraint_sidecars(
     quiet: bool = False,
     source_pcb_path: Path | None = None,
     net_class_map: dict | None = None,
+    coupled_pairs: list[tuple[str, str]] | None = None,
 ) -> None:
     """Emit ``.kicad_pro`` + ``.kicad_dru`` next to the routed PCB.
 
@@ -4006,6 +4146,11 @@ def _write_drc_constraint_sidecars(
             and matching ``.kicad_dru`` rules, so ``kicad-cli`` and
             ``kct check`` enforce the clearances the router routed to.
             ``None`` keeps whatever an earlier route declared.
+        coupled_pairs: The ``(P, N)`` pairs the router coupled-routes
+            (:func:`_router_coupled_pairs`, Issue #6429).  Those KiCad does
+            not recognise by name are recorded in the ``.kicad_pro`` and
+            exempted from the router class's clearance in both engines.
+            ``None`` keeps whatever an earlier route recorded.
     """
     try:
         from kicad_tools.manufacturers import (
@@ -4048,6 +4193,7 @@ def _write_drc_constraint_sidecars(
             copper_oz=copper_oz,
             source_pcb_path=source_pcb_path,
             router_net_classes=net_class_map,
+            router_coupled_pairs=coupled_pairs,
         )
     except (ValueError, OSError, KeyError) as e:
         if source_pcb_path is not None:
@@ -4301,6 +4447,10 @@ def run_post_route_drc(
     # sidecars a prior run may have left behind.
     _effective_class_map = dict(net_class_map or {})
     _effective_class_map.update(loaded_net_class_map or {})
+    # Issue #6429: the pairs the router coupled, so both engines exempt their
+    # intra-pair gap even when KiCad does not recognise the names.
+    _coupled_pairs = _router_coupled_pairs(output_path, _effective_class_map or None, router)
+    _warn_unrecognised_coupled_pairs(_coupled_pairs, quiet)
     _write_drc_constraint_sidecars(
         output_path,
         manufacturer,
@@ -4309,6 +4459,7 @@ def run_post_route_drc(
         quiet=quiet,
         source_pcb_path=source_pcb_path,
         net_class_map=_effective_class_map or None,
+        coupled_pairs=_coupled_pairs,
     )
 
     # Issue #6273: the sidecars above are cheap and always written; the
@@ -4850,6 +5001,8 @@ def _run_placement_feedback(
             per_net_timeout=per_net_timeout,
             stagnation_patience=stagnation_patience,
             outer_timeout=outer_timeout,
+            # Issue #6324: stop between iterations once an interrupt landed.
+            stop_requested=_interrupt_pending,
         )
     except Exception as exc:
         if not quiet:
@@ -5600,6 +5753,7 @@ def _fill_zones_after_route(
                 return
             # Use the same propagated source/fabrication constraints as DRC,
             # before native filling can bake a weaker default into the output.
+            class_map = _pour_closer_net_class_map(router, args)
             _write_drc_constraint_sidecars(
                 output_path,
                 args.manufacturer,
@@ -5607,7 +5761,8 @@ def _fill_zones_after_route(
                 copper_oz=float(getattr(args, "copper_oz", 1.0) or 1.0),
                 quiet=quiet,
                 source_pcb_path=Path(args.pcb),
-                net_class_map=_pour_closer_net_class_map(router, args),
+                net_class_map=class_map,
+                coupled_pairs=_router_coupled_pairs(output_path, class_map, router),
             )
             fill_around_fixed_copper(output_path, disposition.preserve_copper_nets)
             if not quiet:
@@ -5674,6 +5829,7 @@ def _fill_zones_after_route(
         and getattr(args, "pcb", None)
         and getattr(args, "manufacturer", None)
     ):
+        class_map = _pour_closer_net_class_map(router, args)
         _write_drc_constraint_sidecars(
             output_path,
             args.manufacturer,
@@ -5681,7 +5837,8 @@ def _fill_zones_after_route(
             copper_oz=float(getattr(args, "copper_oz", 1.0) or 1.0),
             quiet=True,
             source_pcb_path=Path(args.pcb),
-            net_class_map=_pour_closer_net_class_map(router, args),
+            net_class_map=class_map,
+            coupled_pairs=_router_coupled_pairs(output_path, class_map, router),
         )
 
     _fill_started = time.monotonic()
@@ -9999,6 +10156,9 @@ def route_with_layer_escalation(
     _attempted_rung_fingerprints: set[tuple[int, str, bool, tuple[str, ...]]] = set()
 
     for attempt_num, (layer_count, layer_stack, via_in_pad_fallback) in enumerate(layer_configs, 1):
+        # Issue #6324: an interrupt whose exit was swallowed ends the ladder.
+        if _interrupt_pending():
+            break
         # Issue #5014: recompute the --reserve-plane-layers hard restriction
         # for THIS attempt's stack. ``rules`` is a single mutable object
         # shared across every rung of this ladder (only ``layer_stack``
@@ -10644,6 +10804,11 @@ def route_with_layer_escalation(
             successful_result = result
             break
 
+    # Issue #6324: an interrupt swallowed during an attempt stops the run here.
+    _stop_rc = _interrupt_requested_exit()
+    if _stop_rc is not None:
+        return _stop_rc
+
     # Handle results
     if not quiet:
         print("\n" + "=" * 60)
@@ -10702,6 +10867,9 @@ def route_with_layer_escalation(
     #   * only when there are still failed nets to address.
     # The loop mutates ``final_result.router.routes`` in place, so we
     # refresh ``final_result``'s stats afterwards before optimize/save.
+    _stop_rc = _interrupt_requested_exit()  # issue #6324
+    if _stop_rc is not None:
+        return _stop_rc
     _maybe_run_placement_feedback_escalation(
         final_result,
         successful_result,
@@ -10717,6 +10885,9 @@ def route_with_layer_escalation(
     # feasible board's escalation tail is byte-identical.  Rebinds the
     # placement source when a delta was kept -- the copper below was computed
     # against the MOVED footprints.
+    _stop_rc = _interrupt_requested_exit()  # issue #6324
+    if _stop_rc is not None:
+        return _stop_rc
     pcb_path = _maybe_run_placement_delta_feedback_escalation(
         final_result,
         successful_result,
@@ -10741,7 +10912,9 @@ def route_with_layer_escalation(
     if _post_passes_enabled:
         _mark_nongrid_routes_for_post_pass(final_result.router, args, quiet=quiet)
 
-    record_stage("optimization")
+    _stop_rc = _stage_boundary("optimization")  # issue #6324
+    if _stop_rc is not None:
+        return _stop_rc
     # Optimize traces
     if (
         _post_passes_enabled
@@ -10795,7 +10968,9 @@ def route_with_layer_escalation(
         )
         _record_stage_quality(_stage_quality, STAGE_POST_OPTIMIZE, final_result.router)
 
-    record_stage("drc-nudge")
+    _stop_rc = _stage_boundary("drc-nudge")  # issue #6324
+    if _stop_rc is not None:
+        return _stop_rc
     # Post-optimization DRC nudge pass (#4281: gated like the optimizer --
     # the nudge is NOT covered by --no-optimize, so it needs its own gate).
     # Issue #6273: like the optimizer, it yields to save / fill / DRC when
@@ -10826,7 +11001,9 @@ def route_with_layer_escalation(
         )
         _record_stage_quality(_stage_quality, STAGE_POST_NUDGE, final_result.router)
 
-    record_stage("consolidation")
+    _stop_rc = _stage_boundary("consolidation")  # issue #6324
+    if _stop_rc is not None:
+        return _stop_rc
     # Issue #4732: post-nudge collinear consolidation.  Runs LAST of the
     # geometric passes so it also absorbs fragments the nudge introduced.
     _run_consolidation_pass(
@@ -10837,7 +11014,9 @@ def route_with_layer_escalation(
         quiet=quiet,
     )
 
-    record_stage("finalization")
+    _stop_rc = _stage_boundary("finalization")  # issue #6324
+    if _stop_rc is not None:
+        return _stop_rc
     # Issue #4208 (Unit 3): re-run the Unit-2 seg-seg finalize gate
     # over the post-optimize/post-nudge copper.  An rtree-less
     # optimizer can introduce a cross-net crossing the pre-optimize
@@ -10878,6 +11057,11 @@ def route_with_layer_escalation(
     # runs (and stashes its result for the JSON report) before the release.
     _stash_unrouted_diagnosis(final_result.router, args)
     _release_routing_engine_state(final_result.router)
+
+    # Issue #6324: never go on to the normal save after an interrupt.
+    _stop_rc = _interrupt_requested_exit()
+    if _stop_rc is not None:
+        return _stop_rc
 
     # Save output
     if args.dry_run:
@@ -11288,7 +11472,7 @@ def route_with_rule_relaxation(
     _reset_partial_save_state()
     _interrupt_state["quiet"] = quiet
     _interrupt_state["router"] = None
-    _interrupt_state["interrupted"] = False
+    _reset_interrupt_outcome()
     _interrupt_state["best_completed_attempt"] = False
     prev_sigint = signal.signal(signal.SIGINT, _handle_interrupt)
     prev_sigterm = signal.signal(signal.SIGTERM, _handle_interrupt)
@@ -11313,6 +11497,9 @@ def route_with_rule_relaxation(
     # rather than letting tier 0 greedily consume the full ``--timeout``.
     _relaxation_max_attempts = max(1, len(tiers))
     for _tier_idx, tier in enumerate(tiers):
+        # Issue #6324: an interrupt whose exit was swallowed ends the ladder.
+        if _interrupt_pending():
+            break
         # Issue #2802: honor the total wall-clock deadline before starting
         # another rule-relaxation tier.
         if _deadline_expired(args):
@@ -11669,6 +11856,11 @@ def route_with_rule_relaxation(
     signal.signal(signal.SIGTERM, prev_sigterm)
     _interrupt_state["best_completed_attempt"] = False
 
+    # Issue #6324: an interrupt swallowed during an attempt stops the run here.
+    _stop_rc = _interrupt_requested_exit()
+    if _stop_rc is not None:
+        return _stop_rc
+
     # Handle results
     if not quiet:
         print("\n" + "=" * 60)
@@ -11713,6 +11905,9 @@ def route_with_rule_relaxation(
     # is set and rule relaxation stalled with unrouted nets.  Before this
     # hook, --placement-feedback was silently dropped on the rule-relaxation
     # dispatch path (--adaptive-rules without effective --auto-layers).
+    _stop_rc = _interrupt_requested_exit()  # issue #6324
+    if _stop_rc is not None:
+        return _stop_rc
     _maybe_run_placement_feedback_escalation(
         final_result,
         successful_result,
@@ -11728,6 +11923,9 @@ def route_with_rule_relaxation(
     # feasible board's escalation tail is byte-identical.  Rebinds the
     # placement source when a delta was kept -- the copper below was computed
     # against the MOVED footprints.
+    _stop_rc = _interrupt_requested_exit()  # issue #6324
+    if _stop_rc is not None:
+        return _stop_rc
     pcb_path = _maybe_run_placement_delta_feedback_escalation(
         final_result,
         successful_result,
@@ -11764,7 +11962,9 @@ def route_with_rule_relaxation(
     if _post_passes_enabled:
         _mark_nongrid_routes_for_post_pass(final_result.router, args, quiet=quiet)
 
-    record_stage("optimization")
+    _stop_rc = _stage_boundary("optimization")  # issue #6324
+    if _stop_rc is not None:
+        return _stop_rc
     # Optimize traces
     if (
         _post_passes_enabled
@@ -11815,7 +12015,9 @@ def route_with_rule_relaxation(
         )
         _record_stage_quality(_stage_quality, STAGE_POST_OPTIMIZE, final_result.router)
 
-    record_stage("drc-nudge")
+    _stop_rc = _stage_boundary("drc-nudge")  # issue #6324
+    if _stop_rc is not None:
+        return _stop_rc
     # Post-optimization DRC nudge pass (#4281: gated like the optimizer --
     # the nudge is NOT covered by --no-optimize, so it needs its own gate).
     # Issue #6273: like the optimizer, it yields to save / fill / DRC when
@@ -11844,7 +12046,9 @@ def route_with_rule_relaxation(
         )
         _record_stage_quality(_stage_quality, STAGE_POST_NUDGE, final_result.router)
 
-    record_stage("consolidation")
+    _stop_rc = _stage_boundary("consolidation")  # issue #6324
+    if _stop_rc is not None:
+        return _stop_rc
     # Issue #4732: post-nudge collinear consolidation.  Runs LAST of the
     # geometric passes so it also absorbs fragments the nudge introduced.
     _run_consolidation_pass(
@@ -11855,7 +12059,9 @@ def route_with_rule_relaxation(
         quiet=quiet,
     )
 
-    record_stage("finalization")
+    _stop_rc = _stage_boundary("finalization")  # issue #6324
+    if _stop_rc is not None:
+        return _stop_rc
     # Issue #4208 (Unit 3): re-run the Unit-2 seg-seg finalize gate
     # over the post-optimize/post-nudge copper.  An rtree-less
     # optimizer can introduce a cross-net crossing the pre-optimize
@@ -11896,6 +12102,11 @@ def route_with_rule_relaxation(
     # runs (and stashes its result for the JSON report) before the release.
     _stash_unrouted_diagnosis(final_result.router, args)
     _release_routing_engine_state(final_result.router)
+
+    # Issue #6324: never go on to the normal save after an interrupt.
+    _stop_rc = _interrupt_requested_exit()
+    if _stop_rc is not None:
+        return _stop_rc
 
     # Save output
     if args.dry_run:
@@ -12597,6 +12808,10 @@ def route_with_mfr_tier_escalation(
                     args=args,
                     quiet=quiet,
                 )
+                # Issue #6324: an interrupt swallowed in the inner ladder ends this one.
+                _stop_rc = _interrupt_requested_exit()
+                if _stop_rc is not None:
+                    return _stop_rc
 
             last_exit_code = inner_rc
             final_exit_code = inner_rc
@@ -13088,6 +13303,10 @@ def route_with_size_escalation(
             args=args,
             quiet=quiet,
         )
+        # Issue #6324: an interrupt swallowed in the inner ladder ends this one.
+        _stop_rc = _interrupt_requested_exit()
+        if _stop_rc is not None:
+            return _stop_rc
 
         last_exit_code = inner_rc
 
@@ -13195,6 +13414,10 @@ def route_with_size_escalation(
                     args=args,
                     quiet=quiet,
                 )
+                # Issue #6324: an interrupt swallowed in the inner ladder ends this one.
+                _stop_rc = _interrupt_requested_exit()
+                if _stop_rc is not None:
+                    return _stop_rc
                 last_exit_code = inner_rc
                 # Read the final attempt's metrics and decide once more.
                 last_result_final = getattr(args, "_last_layer_result", None)
@@ -13780,7 +14003,7 @@ def route_with_combined_escalation(
     _reset_partial_save_state()
     _interrupt_state["quiet"] = quiet
     _interrupt_state["router"] = None
-    _interrupt_state["interrupted"] = False
+    _reset_interrupt_outcome()
     _interrupt_state["best_completed_attempt"] = False
     prev_sigint = signal.signal(signal.SIGINT, _handle_interrupt)
     prev_sigterm = signal.signal(signal.SIGTERM, _handle_interrupt)
@@ -13821,6 +14044,9 @@ def route_with_combined_escalation(
     CL_CONSECUTIVE = 2
 
     for _layer_idx, (layer_count, layer_stack) in enumerate(layer_configs):
+        # Issue #6324: an interrupt whose exit was swallowed ends the ladder.
+        if _interrupt_pending():
+            break
         # Issue #2802: honor the total wall-clock deadline before starting
         # another layer-stack column of the 2D search.
         if _deadline_expired(args):
@@ -13837,6 +14063,9 @@ def route_with_combined_escalation(
 
         best_completion_for_layer: float | None = None
         for _tier_idx, tier in enumerate(tiers):
+            # Issue #6324: see the column check above.
+            if _interrupt_pending():
+                break
             # Issue #2802: honor the deadline before each tier within the
             # current layer column.
             if _deadline_expired(args):
@@ -14222,6 +14451,11 @@ def route_with_combined_escalation(
     signal.signal(signal.SIGTERM, prev_sigterm)
     _interrupt_state["best_completed_attempt"] = False
 
+    # Issue #6324: an interrupt swallowed during an attempt stops the run here.
+    _stop_rc = _interrupt_requested_exit()
+    if _stop_rc is not None:
+        return _stop_rc
+
     # Print results matrix
     if not quiet:
         print("\n" + "=" * 60)
@@ -14287,6 +14521,9 @@ def route_with_combined_escalation(
     # nets.  Before this hook, --placement-feedback was silently dropped on
     # the combined-escalation dispatch path (--auto-layers --adaptive-rules
     # together).
+    _stop_rc = _interrupt_requested_exit()  # issue #6324
+    if _stop_rc is not None:
+        return _stop_rc
     _maybe_run_placement_feedback_escalation(
         final_result,
         successful_result,
@@ -14302,6 +14539,9 @@ def route_with_combined_escalation(
     # feasible board's escalation tail is byte-identical.  Rebinds the
     # placement source when a delta was kept -- the copper below was computed
     # against the MOVED footprints.
+    _stop_rc = _interrupt_requested_exit()  # issue #6324
+    if _stop_rc is not None:
+        return _stop_rc
     pcb_path = _maybe_run_placement_delta_feedback_escalation(
         final_result,
         successful_result,
@@ -14338,7 +14578,9 @@ def route_with_combined_escalation(
     if _post_passes_enabled:
         _mark_nongrid_routes_for_post_pass(final_result.router, args, quiet=quiet)
 
-    record_stage("optimization")
+    _stop_rc = _stage_boundary("optimization")  # issue #6324
+    if _stop_rc is not None:
+        return _stop_rc
     # Optimize traces
     if (
         _post_passes_enabled
@@ -14389,7 +14631,9 @@ def route_with_combined_escalation(
         )
         _record_stage_quality(_stage_quality, STAGE_POST_OPTIMIZE, final_result.router)
 
-    record_stage("drc-nudge")
+    _stop_rc = _stage_boundary("drc-nudge")  # issue #6324
+    if _stop_rc is not None:
+        return _stop_rc
     # Post-optimization DRC nudge pass (#4281: gated like the optimizer --
     # the nudge is NOT covered by --no-optimize, so it needs its own gate).
     # Issue #6273: like the optimizer, it yields to save / fill / DRC when
@@ -14418,7 +14662,9 @@ def route_with_combined_escalation(
         )
         _record_stage_quality(_stage_quality, STAGE_POST_NUDGE, final_result.router)
 
-    record_stage("consolidation")
+    _stop_rc = _stage_boundary("consolidation")  # issue #6324
+    if _stop_rc is not None:
+        return _stop_rc
     # Issue #4732: post-nudge collinear consolidation.  Runs LAST of the
     # geometric passes so it also absorbs fragments the nudge introduced.
     _run_consolidation_pass(
@@ -14429,7 +14675,9 @@ def route_with_combined_escalation(
         quiet=quiet,
     )
 
-    record_stage("finalization")
+    _stop_rc = _stage_boundary("finalization")  # issue #6324
+    if _stop_rc is not None:
+        return _stop_rc
     # Issue #4208 (Unit 3): re-run the Unit-2 seg-seg finalize gate
     # over the post-optimize/post-nudge copper.  An rtree-less
     # optimizer can introduce a cross-net crossing the pre-optimize
@@ -14470,6 +14718,11 @@ def route_with_combined_escalation(
     # runs (and stashes its result for the JSON report) before the release.
     _stash_unrouted_diagnosis(final_result.router, args)
     _release_routing_engine_state(final_result.router)
+
+    # Issue #6324: never go on to the normal save after an interrupt.
+    _stop_rc = _interrupt_requested_exit()
+    if _stop_rc is not None:
+        return _stop_rc
 
     # Save output
     if args.dry_run:
@@ -15808,18 +16061,31 @@ def _net_name_for_lattice_key(router: "Autorouter", key: object) -> str:
     """Resolve a lattice ``failure_reasons``/endpoints key to a net name.
 
     Issue #4477.  Singles are keyed ``(net_id, seq)`` (issue #4278); coupled
-    diff pairs are keyed ``("pair", p_net_id, n_net_id)`` (issue #4270).  Any
-    other shape (defensive) falls back to ``str(key)`` rather than raising --
-    a reporting helper must never break the completion pass it is reporting
-    on.
+    diff pairs are keyed ``("pair", p_net_id, n_net_id)`` (issue #4270), or
+    ``("pair", p, n, seg_idx)`` for one segment of a chained pair, whose
+    in-part hops are ``(net_id, "hop", i)`` (issue #6378).  An
+    uncoupled-fallback leg is ``(pair_key, "P"|"N")`` (issue #6373) and is
+    named by its own net.  Any other shape (defensive) falls back to
+    ``str(key)`` rather than raising -- a reporting helper must never break
+    the completion pass it is reporting on.
     """
-    if isinstance(key, tuple) and len(key) == 3 and key[0] == "pair":
-        _tag, p_id, n_id = key
+    if (
+        isinstance(key, tuple)
+        and len(key) == 2
+        and key[1] in ("P", "N")
+        and isinstance(key[0], tuple)
+        and len(key[0]) >= 3
+        and key[0][0] == "pair"
+    ):
+        leg_net = key[0][1] if key[1] == "P" else key[0][2]
+        return router.net_names.get(leg_net, str(leg_net))
+    if isinstance(key, tuple) and len(key) in (3, 4) and key[0] == "pair":
+        p_id, n_id = key[1], key[2]
         p_name = router.net_names.get(p_id, str(p_id))
         n_name = router.net_names.get(n_id, str(n_id))
         return f"{p_name}/{n_name}"
-    if isinstance(key, tuple) and len(key) == 2:
-        net_id, _seq = key
+    if isinstance(key, tuple) and len(key) in (2, 3) and isinstance(key[0], int):
+        net_id = key[0]
         return router.net_names.get(net_id, str(net_id))
     return str(key)
 
@@ -20132,7 +20398,7 @@ def _run_main_impl(args, parser, argv) -> int:
     _interrupt_state["pcb_path"] = pcb_path
     _reset_partial_save_state()
     _interrupt_state["quiet"] = quiet
-    _interrupt_state["interrupted"] = False
+    _reset_interrupt_outcome()
     signal.signal(signal.SIGINT, _handle_interrupt)
 
     record_stage("routing-conflict-fallback-conversion")
@@ -21145,10 +21411,17 @@ def _run_main_impl(args, parser, argv) -> int:
                 _save_partial_results()
             return 1
 
-        # Check if interrupted and save partial results
-        if _interrupt_state["interrupted"]:
+        # Check if interrupted and save partial results.  Only the
+        # ``KeyboardInterrupt`` branch above reaches here unsaved; when the
+        # handler already saved (its ``SystemExit`` swallowed inside a
+        # ``__del__``, issue #6324) its recorded exit code is reused and the
+        # ``_partial`` is not rewritten.
+        if _interrupt_state["interrupted"] and _interrupt_state.get("interrupt_exit") is None:
             _save_partial_results()
-            return 5  # Exit code 5 indicates interruption with partial results saved
+            _interrupt_state["interrupt_exit"] = 5  # interrupted, partial results saved
+        _stop_rc = _interrupt_requested_exit()
+        if _stop_rc is not None:
+            return _stop_rc
 
         # Issue #2595: placement-routing feedback loop.  When the user
         # opted in via --placement-feedback and the initial pass left
@@ -21169,6 +21442,10 @@ def _run_main_impl(args, parser, argv) -> int:
                 args=args,
                 quiet=quiet,
             )
+            # Issue #6324: an interrupt swallowed during the feedback loop.
+            _stop_rc = _interrupt_requested_exit()
+            if _stop_rc is not None:
+                return _stop_rc
 
         # Issue #4468 (epic #3438 Phase 3): classifier-driven placement-DELTA
         # feedback.  Runs after (and independently of) the geometry loop above:
@@ -21198,6 +21475,10 @@ def _run_main_impl(args, parser, argv) -> int:
             )
             if _moved_placement_path is not None:
                 pcb_path = _moved_placement_path
+            # Issue #6324: stop before the cache write and every later stage.
+            _stop_rc = _interrupt_requested_exit()
+            if _stop_rc is not None:
+                return _stop_rc
 
         _rss.mark("post-negotiation")
         # Canonicalize the committed-copper boundary for every strategy,
@@ -21245,7 +21526,9 @@ def _run_main_impl(args, parser, argv) -> int:
 
         _rss.mark("post-cache-write")
 
-    record_stage("optimization")
+    _stop_rc = _stage_boundary("optimization")  # issue #6324
+    if _stop_rc is not None:
+        return _stop_rc
     # Get pre-optimization statistics (also used in the no-optimize path
     # below so the segment/via summary print does not raise
     # UnboundLocalError when --no-optimize is set).
@@ -21318,7 +21601,9 @@ def _run_main_impl(args, parser, argv) -> int:
         )
         _record_stage_quality(_stage_quality, STAGE_POST_OPTIMIZE, router)
 
-    record_stage("drc-nudge")
+    _stop_rc = _stage_boundary("drc-nudge")  # issue #6324
+    if _stop_rc is not None:
+        return _stop_rc
     # Post-optimization DRC nudge pass (#4281: gated like the optimizer --
     # the nudge is NOT covered by --no-optimize, so it needs its own gate).
     # Issue #6273: like the optimizer, it yields to save / fill / DRC when
@@ -21347,7 +21632,9 @@ def _run_main_impl(args, parser, argv) -> int:
         )
         _record_stage_quality(_stage_quality, STAGE_POST_NUDGE, router)
 
-    record_stage("consolidation")
+    _stop_rc = _stage_boundary("consolidation")  # issue #6324
+    if _stop_rc is not None:
+        return _stop_rc
     # Issue #4732: post-nudge collinear consolidation.  Runs LAST of the
     # geometric passes so it also absorbs fragments the nudge introduced.
     _run_consolidation_pass(
@@ -21358,7 +21645,9 @@ def _run_main_impl(args, parser, argv) -> int:
         quiet=quiet,
     )
 
-    record_stage("finalization")
+    _stop_rc = _stage_boundary("finalization")  # issue #6324
+    if _stop_rc is not None:
+        return _stop_rc
     # Issue #4208 (Unit 3): re-run the Unit-2 seg-seg finalize gate
     # over the post-optimize/post-nudge copper.  An rtree-less
     # optimizer can introduce a cross-net crossing the pre-optimize
@@ -21710,6 +21999,11 @@ def _run_main_impl(args, parser, argv) -> int:
                         f"clearance violation(s) remain after routing"
                     )
                 print(f"  {format_clearance_violations(clearance_violations)}")
+
+    # Issue #6324: never go on to the normal save after an interrupt.
+    _stop_rc = _interrupt_requested_exit()
+    if _stop_rc is not None:
+        return _stop_rc
 
     # Save output
     output_content = ""  # Tracks written content for output connectivity verification

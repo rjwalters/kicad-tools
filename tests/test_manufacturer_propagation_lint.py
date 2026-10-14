@@ -74,13 +74,15 @@ _SRC_ROOT = _REPO_ROOT / "src" / "kicad_tools"
 _MODULE_SCOPE = "<module>"
 
 _ALLOWLIST: dict[str, dict[str, tuple[int, str]]] = {
-    # Router core: default-constructed router.  ``_run_monte_carlo_trial``
-    # holds the ``rules_dict``-spread default (a ternary that emits *two*
-    # bare ``DesignRules()`` calls on one line); ``Autorouter.__init__``
+    # Router core: default-constructed router.  ``build_worker_router`` (the
+    # shared Monte Carlo / evolutionary worker builder, #6347) holds the
+    # ``rules_dict``-spread default (a ternary that emits *two* bare
+    # ``DesignRules()`` calls on one line; ``manufacturer`` flows through
+    # ``rules_dict`` when present); ``Autorouter.__init__``
     # holds the constructor ``rules or DesignRules()`` fallback.  Reaching
     # either means the caller did not pass rules.
     "router/core.py": {
-        "_run_monte_carlo_trial": (
+        "build_worker_router": (
             2,
             "worker-process rules_dict-spread default (ternary: two calls)",
         ),
@@ -132,16 +134,6 @@ _ALLOWLIST: dict[str, dict[str, tuple[int, str]]] = {
     "benchmark/generators.py": {
         "generate_bga_breakout": (1, "Synthetic benchmark generator fixture"),
         "generate_random_board": (1, "Synthetic benchmark generator fixture"),
-    },
-    # Evolutionary algorithm: constructs DesignRules from a serialised
-    # rules_dict to recreate router state across worker processes.  The
-    # ``manufacturer`` field flows through ``rules_dict`` if present.
-    # ``_run_evolutionary_trial`` also uses the two-call ternary form.
-    "router/algorithms/evolutionary.py": {
-        "_run_evolutionary_trial": (
-            2,
-            "Evolutionary worker rules_dict-spread; manufacturer flows via dict (ternary: two calls)",
-        ),
     },
 }
 

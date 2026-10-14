@@ -110,7 +110,7 @@ missing=""
 while IFS= read -r label; do
     [[ -z "$label" ]] && continue
     [[ "$json_out" == *"\"$label\""* ]] || missing+=" json:$label"
-    [[ "$jqnot_out" == *"contains([\"$label\"])"* ]] || missing+=" jq-not:$label"
+    [[ "$jqnot_out" == *"== \"$label\")"* ]] || missing+=" jq-not:$label"
     [[ "$search_out" == *"-label:\"$label\""* ]] || missing+=" search:$label"
 done <<< "$lines_out"
 
@@ -195,10 +195,10 @@ fi
 for case in /nonexistent old empty-answer; do
     bin="$case"; [[ "$case" == /* ]] || bin="$stub_dir/$case"
     f_out="$(run_with "$bin")"
-    if [[ "$f_out" == "external" ]]; then
-        pass "fallback path ($case daemon): the offline array (external) is used"
+    if [[ "$f_out" == $'loom:frozen\nexternal' ]]; then
+        pass "fallback path ($case daemon): the offline array (loom:frozen, external) is used"
     else
-        fail "fallback path ($case daemon): expected 'external', got: $f_out"
+        fail "fallback path ($case daemon): expected 'loom:frozen external', got: $f_out"
     fi
 done
 

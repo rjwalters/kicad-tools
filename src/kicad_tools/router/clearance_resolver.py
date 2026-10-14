@@ -184,9 +184,11 @@ __all__ = [
     "DEFAULT_VIA_CLEARANCE_MM",
     "DeclaredClearanceRules",
     "ResolvedClearance",
+    "RoutingClearances",
     "RuleSource",
     "read_declared_clearance_rules",
     "resolve_base_clearance",
+    "resolve_routing_clearances",
     "resolve_via_clearance",
     "strictest_net_class_clearance",
     "trace_via_clearance_mm",
@@ -839,13 +841,85 @@ def _read_dru_clearance(dru_path: Path) -> float | None:
 
 
 #: One atom of a via-scoped DRU condition: ``A.Type == 'Via'`` and friends.
-_TYPE_ATOM_RE = re.compile(r"""^\(*\s*[AB]\.Type\s*==\s*['"]([A-Za-z_ ]+)['"]\s*\)*$""")
+#: Parentheses are *not* tolerated here: an atom is matched only after
+#: :func:`_strip_enclosing_parens` has removed balanced enclosing pairs, so
+#: a stray ``(`` / ``)`` means the atom was cut out of a larger
+#: sub-expression and must not be read on its own (#6294).
+_TYPE_ATOM_RE = re.compile(r"""^\s*[AB]\.Type\s*==\s*['"]([A-Za-z_ ]+)['"]\s*$""")
 
 #: Copper types a via-scoped clause may name besides the via itself.  A
 #: clause pairing a via with a *pad* or a *zone* does not govern the
 #: trace/via or via/via pairs ``via_clearance`` is consulted for, so it is
 #: not read (#6280).
 _VIA_PEER_TYPES = frozenset({"via", "track"})
+
+
+def _split_top_level(expression: str, separator: str) -> list[str] | None:
+    """Split *expression* on *separator* only at parenthesis depth 0.
+
+    Quoted strings are skipped so a ``(`` or ``||`` inside a literal never
+    counts.  Returns ``None`` when the parentheses are unbalanced (#6294).
+    """
+    parts: list[str] = []
+    depth = 0
+    quote: str | None = None
+    start = 0
+    i = 0
+    n = len(expression)
+    while i < n:
+        ch = expression[i]
+        if quote is not None:
+            if ch == quote:
+                quote = None
+        elif ch in "'\"":
+            quote = ch
+        elif ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth < 0:
+                return None
+        elif depth == 0 and expression.startswith(separator, i):
+            parts.append(expression[start:i])
+            i += len(separator)
+            start = i
+            continue
+        i += 1
+    if depth != 0 or quote is not None:
+        return None
+    parts.append(expression[start:])
+    return parts
+
+
+def _strip_enclosing_parens(expression: str) -> str:
+    """Remove every parenthesis pair that encloses the *whole* expression.
+
+    ``((A.Type == 'Via'))`` becomes ``A.Type == 'Via'``, but
+    ``(A) && (B)`` is left alone: its leading ``(`` closes before the end.
+    Assumes balanced input (checked by :func:`_split_top_level`).
+    """
+    text = expression.strip()
+    while text.startswith("(") and text.endswith(")"):
+        depth = 0
+        quote: str | None = None
+        closes_at_end = False
+        for i, ch in enumerate(text):
+            if quote is not None:
+                if ch == quote:
+                    quote = None
+            elif ch in "'\"":
+                quote = ch
+            elif ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+                if depth == 0:
+                    closes_at_end = i == len(text) - 1
+                    break
+        if not closes_at_end:
+            break
+        text = text[1:-1].strip()
+    return text
 
 
 def _is_via_scoped_condition(expression: str) -> bool:
@@ -859,19 +933,31 @@ def _is_via_scoped_condition(expression: str) -> bool:
     pairs whatever the other clauses say.  Anything else -- a net-class or
     layer test, a negation, a function call -- needs a DRC-expression
     evaluator this module does not have, and is ignored rather than guessed.
+
+    ``||`` and ``&&`` are split only at parenthesis depth 0, so a
+    parenthesised ``(A.Type == 'Via' || B.Type == 'Via') && A.NetClass ==
+    'HV'`` is a *single* net-class-scoped clause, not a board-wide via
+    rule (#6294).  Unbalanced parentheses are never recognised.
     """
-    for clause in expression.split("||"):
-        atoms = [atom.strip() for atom in clause.split("&&")]
-        types: list[str] = []
-        for atom in atoms:
-            match = _TYPE_ATOM_RE.match(atom)
-            if match is None:
-                types = []
-                break
-            types.append(match.group(1).strip().lower())
-        if types and "via" in types and all(kind in _VIA_PEER_TYPES for kind in types):
-            return True
-    return False
+    text = _strip_enclosing_parens(expression)
+    clauses = _split_top_level(text, "||")
+    if clauses is None:
+        return False
+    if len(clauses) > 1:
+        return any(_is_via_scoped_condition(clause) for clause in clauses)
+
+    atoms = _split_top_level(text, "&&")
+    if atoms is None:
+        return False
+    types: list[str] = []
+    for atom in atoms:
+        match = _TYPE_ATOM_RE.match(_strip_enclosing_parens(atom))
+        if match is None:
+            # A non-type test, or a parenthesised sub-expression that still
+            # holds ``||`` / ``&&``: not a pure type-test conjunction.
+            return False
+        types.append(match.group(1).strip().lower())
+    return bool(types) and "via" in types and all(kind in _VIA_PEER_TYPES for kind in types)
 
 
 def _read_dru_clearances(dru_path: Path) -> tuple[float | None, float | None]:
@@ -1250,3 +1336,109 @@ def resolve_via_clearance(
             resolved.source_label,
         )
     return resolved
+
+
+# ---------------------------------------------------------------------------
+# The shared routing-tool entry point (#6283)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class RoutingClearances:
+    """The trace and via clearance a routing tool should apply (#6283).
+
+    Attributes:
+        trace: The resolved board-wide base (:func:`resolve_base_clearance`).
+        via: The resolved via clearance (:func:`resolve_via_clearance`).
+        manufacturer: The fab profile whose floor was applied, or ``None``
+            when none was configured or discoverable.
+    """
+
+    trace: ResolvedClearance
+    via: ResolvedClearance
+    manufacturer: str | None = None
+
+    @property
+    def trace_mm(self) -> float:
+        return self.trace.required_mm
+
+    @property
+    def via_mm(self) -> float:
+        return self.via.required_mm
+
+    @property
+    def warnings(self) -> list[str]:
+        """Every resolver warning, trace first, de-duplicated."""
+        out: list[str] = []
+        for resolved in (self.trace, self.via):
+            if resolved.warning and resolved.warning not in out:
+                out.append(resolved.warning)
+        return out
+
+
+def resolve_routing_clearances(
+    pcb_path: str | Path,
+    *,
+    target_mm: float,
+    manufacturer: str | None = None,
+    discover_manufacturer: bool = True,
+) -> RoutingClearances:
+    """Resolve ``trace_clearance`` / ``via_clearance`` for a routing tool (#6283).
+
+    ``kct route`` resolves both values from the board's ``.kicad_pro`` /
+    ``.kicad_dru`` through its own CLI wrappers.  ``kct route-auto`` and the
+    MCP ``route_net`` tool took both from the ``.kicad_pcb`` alone
+    (:meth:`~kicad_tools.router.io.ParsedDesignRules.to_design_rules`), so a
+    project rule the board's own DRC enforces was invisible to them.  This is
+    the one place those tools resolve the pair.
+
+    * The trace base is :func:`resolve_base_clearance` with ``target_mm`` as a
+      **non-explicit** target: a declared project rule above it raises it, and
+      nothing declared leaves it untouched.
+    * The via clearance is :func:`resolve_via_clearance` with ``target_mm`` as
+      its nothing-declared fallback (not the 0.20mm dataclass default), so a
+      board that declares nothing keeps today's ``via_clearance`` exactly.
+    * The fab floor comes from ``manufacturer`` or, when that is ``None`` and
+      ``discover_manufacturer`` is set, from the board's ``project.kct``
+      ``target_fab`` (:func:`kicad_tools.sync.discover.resolve_target_fab_for_pcb`).
+      With neither, no floor applies -- matching ``kct route`` without ``--mfr``.
+
+    Args:
+        pcb_path: Path to the ``.kicad_pcb``; sidecars are found by suffix.
+        target_mm: The clearance the tool would otherwise use -- the
+            ``.kicad_pcb``'s own ``min_clearance``.
+        manufacturer: An explicit fab profile, if the caller has one.
+        discover_manufacturer: Look up the board's declared ``target_fab``
+            when ``manufacturer`` is ``None``.
+
+    Returns:
+        Both resolved values with provenance and any warnings.  Never raises
+        on missing or malformed sidecars.
+    """
+    from .mfr_limits import resolve_clearance
+
+    if manufacturer is None and discover_manufacturer:
+        try:
+            from kicad_tools.sync.discover import resolve_target_fab_for_pcb
+
+            manufacturer = resolve_target_fab_for_pcb(pcb_path)
+        except Exception:  # pragma: no cover - discovery is best-effort
+            manufacturer = None
+
+    fab_floor = resolve_clearance(manufacturer)
+    declared = read_declared_clearance_rules(pcb_path)
+
+    trace = resolve_base_clearance(
+        target_mm=target_mm,
+        declared=declared,
+        fab_floor_mm=fab_floor,
+        manufacturer=manufacturer,
+    )
+    via = resolve_via_clearance(
+        declared=declared,
+        fab_floor_mm=fab_floor,
+        manufacturer=manufacturer,
+        default_mm=target_mm,
+        trace_clearance_mm=trace.required_mm,
+    )
+    return RoutingClearances(trace=trace, via=via, manufacturer=manufacturer)

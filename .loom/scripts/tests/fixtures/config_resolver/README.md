@@ -24,6 +24,12 @@ Deliberately exercises, in one tree:
   but that knob was retired in #5743, so this fixture now uses a name with no
   runtime meaning to avoid implying the merge test depends on any specific
   live knob)
+- **The per-repo fleet tier** (`.loom-local/fleet-repo.json`, #11738) sitting
+  between `.loom-project` and `.loom-local`: `overriddenByFleetRepo` (project
+  sets it, the fleet tier wins), `overriddenByLocal` (the fleet tier sets it,
+  local still wins), `autonomous.workFinder.intervalSecs` (the fleet tier beats
+  the legacy value inside a nested object), and `guards.sqlDdl` (an explicit
+  `null` in the fleet tier clears the legacy `true`)
 
 The private/shared-defaults tier is intentionally left out of this fixture
 (every consumer sets `LOOM_CONFIG_DEFAULTS_FILE=""` before resolving it, to

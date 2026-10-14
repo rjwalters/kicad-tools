@@ -166,7 +166,8 @@
 # writes is in neither that table nor its install-time-only list. It covers:
 # every pure-copy surface above, `.agents/skills/` (same marker gate),
 # `.claude/README.md` and `.github/CONFIGURATION.md` (when present),
-# `.claude/biome.jsonc`, the managed `.gitignore` block, the retired-payload
+# `.claude/biome.jsonc`, the managed `.gitignore` block, the Loom-managed
+# block of `.github/labels.yml` (#11033), the retired-payload
 # sweep, and `.loom/CLAUDE.md` / `.loom/AGENTS.md` (re-rendered from the
 # template with the install date the file carries, which this script does not
 # do). It honors `.loom/resync-ignore` in the forms this script reports.
@@ -221,11 +222,14 @@
 #                             managed-section-markers design this comment
 #                             references; the rest of the file's body content is
 #                             left untouched.
-#   .github/labels.yml (the FILE itself), .github/workflows/*
+#   .github/labels.yml (outside its managed block), .github/workflows/*
 #                            - the FILE content is repo-customized (a consumer
 #                              may add their own labels above/below the
 #                              LOOM-MANAGED block, #4187) and is not resynced
-#                              here. Its role as the source of truth for the
+#                              here. Only the block between the BEGIN/END LOOM
+#                              LABELS markers is (#11033, see
+#                              refresh_labels_block() below; it never deletes a
+#                              live label). Its role as the source of truth for the
 #                              LIVE FORGE label set is a different story,
 #                              though (#6716): resync DOES now re-check the
 #                              target repo's live labels against this file
@@ -814,10 +818,10 @@ resolve_defaults() {
 
 # requires-daemon: resync-payload optional   #8961 no source tree: resync from the daemon's embedded payload; an absent/older binary (no such verb) or a refusal (exit 1) keeps the failure below.
 if ! resolve_defaults; then
-    _rp="${LOOM_DAEMON_BIN:-$(command -v loom-daemon || echo "${LOOM_DAEMON_BIN_DIR:-$HOME/.local/bin}/loom-daemon")}"; _rpa=(--workspace "$REPO_ROOT"); [[ "$DRY_RUN" -eq 1 ]] && _rpa+=(--dry-run); _rpw="found no loom-daemon that has it (looked at $_rp: missing or too old)"
-    if [[ -z "$OUTPUT_DIR" ]] && "$_rp" resync-payload --help >/dev/null 2>&1; then "$_rp" resync-payload "${_rpa[@]}"; _rprc=$?; [[ "$_rprc" -eq 1 ]] || exit "$_rprc"; _rpw="$_rp refused or failed (see above)"; fi
+    _rp="${LOOM_DAEMON_BIN:-$(command -v loom-daemon || echo "${LOOM_DAEMON_BIN_DIR:-$HOME/.local/bin}/loom-daemon")}"; _rpa=(--workspace "$REPO_ROOT"); [[ "$DRY_RUN" -eq 1 ]] && _rpa+=(--dry-run); _rpw="found no loom-daemon that has it (looked at $_rp: missing or too old)"; _rpfix=" Install or update loom-daemon, or set .loom/loom-source-path to a local clone of the Loom source repo."
+    if [[ -z "$OUTPUT_DIR" ]] && "$_rp" resync-payload --help >/dev/null 2>&1; then "$_rp" resync-payload "${_rpa[@]}"; _rprc=$?; [[ "$_rprc" -eq 1 ]] || exit "$_rprc"; _rpw="$_rp refused or failed (see above; it also exits 1 when it applied everything but could not refresh a labels block with malformed markers)"; _rpfix=" Its own output above names the cause and the fix."; fi
     err "Could not locate a defaults/ source tree to sync from: no \$REPO_ROOT/defaults, no usable path in the gitignored .loom/loom-source-path sidecar (missing on a fresh clone), no loom_source in .loom/install-metadata.json."
-    err "Fallback \`loom-daemon resync-payload\` (the daemon's embedded payload, #8961): $_rpw. Install or update loom-daemon, or set .loom/loom-source-path to a local clone of the Loom source repo."; exit 1
+    err "Fallback \`loom-daemon resync-payload\` (the daemon's embedded payload, #8961): $_rpw.$_rpfix"; exit 1
 fi
 SOURCE_ROOT="$(dirname "$DEFAULTS_DIR")"
 
@@ -2371,6 +2375,175 @@ if [[ -f "$DEFAULTS_DIR/pricing.json" ]]; then
     sync_one "$DEFAULTS_DIR/pricing.json" "$WRITE_ROOT/.loom/pricing.json" ".loom/pricing.json"
 fi
 
+# ---------- the Loom-managed block of .github/labels.yml (#11033) ----------
+#
+# The file is co-owned (#4187): Loom's labels sit between `# BEGIN LOOM LABELS`
+# and `# END LOOM LABELS`, and a consumer may keep its own labels above or below.
+# The installer splices the block, but no resync ever refreshed it, so a label
+# upstream added (loom:needs-revision) never arrived and a label upstream retired
+# (loom:urgent) stayed declared, and the forge drift check below re-created it
+# minutes after `labels migrate --apply` deleted it.
+#
+# The rule, shared with the daemon resync (labels_block.rs; keep the two equal):
+#   * one BEGIN and one END marker, BEGIN first: the bytes from the start of the
+#     BEGIN line to the end of the END line are replaced by the same range of
+#     defaults/.github/labels.yml. Every byte outside that range is kept as is.
+#   * no marker at all: the block is appended after a blank line.
+#   * no file: the shipped file is written.
+#   * anything else (a second BEGIN or END, END before BEGIN, a lone marker, or a
+#     line that looks like a marker but is not exactly one): nothing is written,
+#     a warning names the problem and the run counts it as a failure (exit 1).
+# A marker is a line that is exactly `# BEGIN LOOM LABELS` / `# END LOOM LABELS`
+# (trailing whitespace or CR allowed). A pin of `.github/labels.yml` in
+# .loom/resync-ignore skips the step. Only the FILE changes here: no live forge
+# label is ever deleted (that is `loom-daemon labels migrate --apply`).
+
+LABELS_BEGIN_MARKER='# BEGIN LOOM LABELS'
+LABELS_END_MARKER='# END LOOM LABELS'
+
+# Classify a labels file's markers. Prints `none`, `ok <begin> <end>` (1-based
+# line numbers) or `malformed <reason>`.
+_labels_block_lines() {
+    awk -v B="$LABELS_BEGIN_MARKER" -v E="$LABELS_END_MARKER" '
+        function exact(line, m,   rest) {
+            if (substr(line, 1, length(m)) != m) return 0
+            rest = substr(line, length(m) + 1)
+            return rest ~ /^[ \t\r]*$/
+        }
+        {
+            if (exact($0, B)) { nb++; if (!b) b = NR; next }
+            if (exact($0, E)) { ne++; if (!e) e = NR; next }
+            if ($0 ~ /^[ \t]*#[ \t]*(BEGIN|END)[ \t]+LOOM[ \t]+LABELS/) bad = NR
+        }
+        END {
+            if (bad)              { print "malformed line " bad " looks like a marker but is not exactly one"; exit }
+            if (nb == 0 && ne == 0) { print "none"; exit }
+            if (nb != 1 || ne != 1) { print "malformed " nb " BEGIN and " ne " END marker(s), expected one of each"; exit }
+            if (e < b)            { print "malformed END marker (line " e ") comes before BEGIN (line " b ")"; exit }
+            print "ok " b " " e
+        }' "$1"
+}
+
+# Print the file's lines <from>..<to> with no newline after the last one.
+_labels_line_range() {
+    local text
+    text="$(sed -n "${2},${3}p" "$1"; printf x)"
+    text="${text%x}"
+    printf '%s' "${text%$'\n'}"
+}
+
+refresh_labels_block() {
+    local rel=".github/labels.yml"
+    local src="$DEFAULTS_DIR/.github/labels.yml" dst="$WRITE_ROOT/.github/labels.yml"
+    [[ -f "$src" ]] || return 0
+
+    if is_ignored "$rel"; then
+        note "  ${YELLOW}skipped${NC}   $rel ${YELLOW}(pinned in .loom/resync-ignore)${NC}"
+        N_SKIPPED=$((N_SKIPPED + 1))
+        return 0
+    fi
+    if [[ -L "$dst" || -L "$WRITE_ROOT/.github" ]]; then
+        note "  ${YELLOW}skipped${NC}   $rel ${YELLOW}(symlink)${NC}"
+        N_SKIPPED=$((N_SKIPPED + 1))
+        return 0
+    fi
+    if [[ -e "$dst" && ! -f "$dst" ]]; then
+        warn "$rel is not a regular file; its Loom-managed label block was NOT refreshed"
+        record_failure "$rel"
+        return 1
+    fi
+
+    local src_shape
+    src_shape="$(_labels_block_lines "$src")"
+    if [[ "$src_shape" != ok\ * ]]; then
+        warn "the source $rel has no usable Loom-managed block ($src_shape); $rel was NOT refreshed"
+        record_failure "$rel"
+        return 1
+    fi
+    local sb se block
+    read -r _ sb se <<< "$src_shape"
+    block="$(_labels_line_range "$src" "$sb" "$se"; printf x)"
+    block="${block%x}"
+
+    local verb_pres="create" verb_past="created" new shape="" before after
+    if [[ ! -e "$dst" ]]; then
+        new="$(cat "$src"; printf x)"
+        new="${new%x}"
+    else
+        shape="$(_labels_block_lines "$dst")"
+        case "$shape" in
+            ok\ *)
+                local db de
+                read -r _ db de <<< "$shape"
+                before="$( ((db > 1)) && head -n "$((db - 1))" "$dst"; printf x)"
+                before="${before%x}"
+                # Everything after the END line's own text, starting with its
+                # newline (empty when END is the last line with none).
+                after="$(tail -n +"$de" "$dst"; printf x)"
+                after="${after%x}"
+                if [[ "$after" == *$'\n'* ]]; then
+                    after=$'\n'"${after#*$'\n'}"
+                else
+                    after=""
+                fi
+                new="$before$block$after"
+                ;;
+            none)
+                new="$(cat "$dst"; printf x)"
+                new="${new%x}"
+                if [[ -n "$new" ]]; then
+                    [[ "$new" == *$'\n' ]] || new+=$'\n'
+                    new+=$'\n'
+                fi
+                new+="$block"$'\n'
+                ;;
+            *)
+                warn "$rel: ${shape#malformed }. Its Loom-managed label block was NOT refreshed; fix the BEGIN/END LOOM LABELS markers by hand, then resync again"
+                record_failure "$rel"
+                return 1
+                ;;
+        esac
+        verb_pres="update"
+        verb_past="updated"
+        local cur
+        cur="$(cat "$dst"; printf x)"
+        cur="${cur%x}"
+        if [[ "$cur" == "$new" ]]; then
+            N_UNCHANGED=$((N_UNCHANGED + 1))
+            return 0
+        fi
+    fi
+
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+        printf '%b\n' "  ${BOLD}would ${verb_pres}${NC} $rel (Loom-managed label block)"
+        return 0
+    fi
+    mkdir -p "$(dirname "$dst")" 2>/dev/null
+    STAGED_TMP="$(mktemp "$(dirname "$dst")/.resync-stage.XXXXXX" 2>/dev/null)" || STAGED_TMP=""
+    if [[ -z "$STAGED_TMP" ]] || ! printf '%s' "$new" > "$STAGED_TMP"; then
+        err "failed to stage $rel"
+        cleanup_staged_tmp
+        record_failure "$rel"
+        return 1
+    fi
+    local mode
+    mode="$(file_mode "$dst")"
+    [[ -n "$mode" ]] || mode="$(file_mode "$src")"
+    [[ -z "$mode" ]] || chmod "$mode" "$STAGED_TMP" 2>/dev/null || true
+    if ! mv -f "$STAGED_TMP" "$dst" 2>/dev/null; then
+        err "failed to install $rel (could not rename the staged copy into place)"
+        cleanup_staged_tmp
+        record_failure "$rel"
+        return 1
+    fi
+    STAGED_TMP=""
+    N_UPDATED=$((N_UPDATED + 1))
+    printf '%b\n' "  ${GREEN}${verb_past}${NC}   $rel (Loom-managed label block)"
+    return 0
+}
+
+refresh_labels_block
+
 # ---------- remove retired payload files (#5981) ----------
 #
 # Every surface above has now been walked, so it's safe to prune files that
@@ -2957,7 +3130,7 @@ refresh_gitignore_block() {
         warn "  Newer runtime paths (e.g. .loom/sweep-checkpoint/, .loom/worktrees-local/) may stay untracked-and-unignored."
         return 0
     fi
-    EGRESS_BIN="$bin"   # #9996: reused by the forge egress doctor step below
+    EGRESS_BIN="$bin"   # reused by the labels migrate step below
     # `update-gitignore` has no dedicated --dry-run; on a dry run we only probe
     # that the subcommand exists (never writing), so the preview neither mutates
     # nor claims a refresh a pre-#4280 binary cannot perform.
@@ -3397,8 +3570,9 @@ collect_resync_dirt() {
             # is_resync_surface_path() mirror), so on any repo where a run
             # touched either surface its own output was classified as foreign
             # dirt: the hint below went silent and `land-resync-commit.sh`
-            # refused to land the run it was printed for.
-            .claude/commands/loom/*|.claude/README.md|.github/CONFIGURATION.md|.loom/install-metadata.json|.loom/CLAUDE.md|.gitattributes|.gitignore|.agents/skills/*)
+            # refused to land the run it was printed for. `.github/labels.yml`
+            # is refresh_labels_block()'s output (#11033).
+            .claude/commands/loom/*|.claude/README.md|.github/CONFIGURATION.md|.github/labels.yml|.loom/install-metadata.json|.loom/CLAUDE.md|.gitattributes|.gitignore|.agents/skills/*)
                 RESYNC_DIRT_PATHS+=("$path")
                 ;;
             *)
@@ -3628,25 +3802,6 @@ if [[ "${DRY_RUN:-0}" != "1" && -r "$_PRESENCE_LIB" ]]; then
         || warn "operator presence wiring not fully applied (see messages above); resync itself completed."
 fi
 
-# #9996: forge egress routing check, delegated to the daemon (the shell never
-# parses the policy). Last step so a failure cannot cut the sync short; the
-# doctor's own exit code is carried to the final exit. --dry-run exits earlier
-# (before this step), so it never runs the doctor and never fails.
-# requires-daemon: forge optional   older daemon without `forge egress`: warn, never fail
-EGRESS_RC=0
-if [[ -n "$EGRESS_BIN" ]]; then
-    if ! "$EGRESS_BIN" forge egress --help >/dev/null 2>&1; then
-        warn "forge egress check unavailable: '$EGRESS_BIN' has no 'forge egress' subcommand (rebuild the daemon)."
-    else
-        egress_output="$(cd "$REPO_ROOT" && "$EGRESS_BIN" forge egress doctor 2>&1)" || EGRESS_RC=$?
-        if [[ -n "$egress_output" ]]; then
-            printf '%b\n' "${YELLOW}[resync] Forge egress (loom-daemon forge egress doctor):${NC}"
-            printf '%s\n' "$egress_output" | sed 's/^/    /'
-        fi
-        [[ "$EGRESS_RC" -eq 0 ]] || warn "forge egress routing check failed (exit $EGRESS_RC); resync itself completed."
-    fi
-fi
-
 # 75 (EX_TEMPFAIL), matching create-issue.sh's DEFERRED convention: the
 # surface sync itself SUCCEEDED and must not be re-run blindly, but one
 # check did not execute, so this run is not a clean bill of health. A
@@ -3655,4 +3810,4 @@ fi
 if [[ "$LABEL_CHECK_BROKEN" -eq 1 || "$GUARD_CHECK_BROKEN" -eq 1 ]]; then
     exit 75
 fi
-exit "${EGRESS_RC:-0}"
+exit 0

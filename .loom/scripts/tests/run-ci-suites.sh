@@ -167,9 +167,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 WIRED_MANIFEST="$SCRIPT_DIR/ci-wired.txt"
 PER_SUITE_TIMEOUT="${LOOM_CI_SUITE_TIMEOUT:-1200}"
-# Suites stub `gh` (LOOM_GH_BIN or a fake on PATH); a host forge-egress
-# policy's launcher must never outrank the stub in a loom-daemon they run (#9995).
-export LOOM_GH_NO_POLICY_LAUNCHER=1
 
 PLAN_ONLY=false
 PRINT_CANDIDATES=false

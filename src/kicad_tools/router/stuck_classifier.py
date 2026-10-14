@@ -1137,29 +1137,34 @@ def classify_stuck_nets_from_pcb(
     # Pour-carried incomplete nets: connectivity is expected to be closed by
     # copper fill (zone/pour), so a signal-geometry analysis would misclassify
     # them.  Union of (a) the ML-tagged advisory set the analyzer populates and
-    # (b) zone-backed plane/power nets that are still incomplete.  These are
-    # routed to POUR_DISCONTINUOUS in the second pass below rather than dropped.
+    # (b) incomplete nets that actually have a zone on the board
+    # (``is_plane_net``; deliberately zone *existence*, not fill -- an unfilled
+    # zone is still a fill problem).  These are routed to POUR_DISCONTINUOUS in
+    # the second pass below rather than dropped.
+    #
+    # Issue #6327: a ``power``-typed net (name heuristic only) with NO zone is
+    # NOT pour-carried -- nothing but routed copper can connect it (board 05
+    # ``VM``), so it falls through to the signal-failure pass below.
     pour_carried_names: set[str] = set(analysis.advisory_incomplete_names)
     pour_carried_names.update(
-        n.net_name
-        for n in analysis.nets
-        if n.net_type in ("plane", "power") and n.status == "incomplete"
+        n.net_name for n in analysis.nets if n.is_plane_net and n.status == "incomplete"
     )
 
     diagnoses: list[StuckNetDiagnosis] = []
     for net in analysis.nets:
         if net.net_name in excluded_nets:
             continue
-        if net.net_type != "signal":
+        # ``plane`` nets always have a zone, so they are pour-carried and
+        # handled by the second pass.  Zone-less ``power`` nets are admitted
+        # here (issue #6327) -- NetStatus.is_advisory_incomplete would treat
+        # them as pour residuals regardless of zones, so it is not consulted.
+        if net.net_type not in ("signal", "power"):
             continue
         if net.status != "incomplete":
             continue
-        # Skip advisory (plane/pour) residuals -- not genuine signal gaps.
-        if net.is_advisory_incomplete:
-            continue
-        # Signal-named nets the ML pour-net classifier tagged as pour-carried
-        # pass the guards above; route them to POUR_DISCONTINUOUS instead of
-        # letting them receive an incorrect signal-failure classification.
+        # Nets the ML pour-net classifier tagged, or that have a zone, are
+        # routed to POUR_DISCONTINUOUS instead of receiving an incorrect
+        # signal-failure classification.
         if net.net_name in pour_carried_names:
             continue
 

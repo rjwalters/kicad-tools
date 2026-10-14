@@ -50,7 +50,7 @@ Advisory-only: always exits `0`, **must not block** the sweep. It warns on stder
 - **macOS:** even with a user-idle sleep assertion (Amphetamine, `caffeinate -dimsu`), Maintenance Sleep can still tear down sockets. Fix: `sudo pmset -c sleep 0`, or turn OFF your sleep manager's "allow system sleep when display is off".
 - **systemd Linux:** wrap the session in `systemd-inhibit --what=idle:sleep --who=loom --why=sweep -- <cmd>`, which IS reliable.
 
-Heed it before an overnight sweep. Also run `loom-daemon forge egress assert` (#9984; silent 0 with no policy); on non-zero, quote its codes + fixes in the summary (advisory; dispatch/spawn enforce).
+Heed it before an overnight sweep.
 
 ## Main Branch Freshness (#3770)
 

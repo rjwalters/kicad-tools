@@ -168,6 +168,21 @@ result=$(
 assert_eq "$result" "safe-default" "indexing through a scalar soft-fails to default under set -e (does not abort)"
 rm -rf "$repo"
 
+# --- Test 10b: per-repo fleet tier (#11738) sits above project, below local ---
+echo "Test 10b: .loom-local/fleet-repo.json beats .loom-project and .loom/config.json, loses to local.json"
+repo=$(new_repo)
+mkdir -p "$repo/.loom" "$repo/.loom-project" "$repo/.loom-local"
+echo '{"a": "legacy", "b": "legacy", "c": "legacy", "g": {"x": true, "y": 1}}' > "$repo/.loom/config.json"
+echo '{"a": "project", "b": "project"}' > "$repo/.loom-project/project.json"
+echo '{"a": "fleet-repo", "b": "fleet-repo", "g": {"x": null}}' > "$repo/.loom-local/fleet-repo.json"
+echo '{"a": "local"}' > "$repo/.loom-local/local.json"
+assert_eq "$(loom_resolve_config "$repo" | jq -S -c .)" \
+    '{"a":"local","b":"fleet-repo","c":"legacy","g":{"x":null,"y":1}}' \
+    "fleet-repo tier: beats project/legacy, local wins, null clears"
+rm -f "$repo/.loom-local/fleet-repo.json"
+assert_eq "$(loom_config_get "$repo" "b")" "project" "absent fleet-repo file -> project value as before"
+rm -rf "$repo"
+
 # --- Test 11: cross-language conformance fixture (#4039 AC) ---
 # The same fixture tree must resolve identically from Rust and Bash -- see
 # defaults/scripts/tests/fixtures/config_resolver/README.md. Rust:

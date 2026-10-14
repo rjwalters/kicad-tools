@@ -43,7 +43,7 @@ incident citation, and fixes**:
 ### Key Commands
 
 ```bash
-# Check if there are already open proposals (don't spam)
+# Check if there are already open proposals (don't spam; loom:frozen counts)
 gh issue list --label="loom:architect" --state=open --limit 500
 
 # Create new proposal — blue-badge label applied atomically at creation (#5047)

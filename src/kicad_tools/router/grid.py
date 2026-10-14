@@ -1278,6 +1278,10 @@ class RoutingGrid:
         self._seg_rtree_envelopes: dict[int, dict[int, _SegEnvelope]] = {}
         self._seg_rtree_pending: dict[int, dict[int, tuple[Segment, _SegEnvelope]]] = {}
         self._rtree_available = RTREE_AVAILABLE
+        # Issue #6303: nesting depth of ``segment_index_suspended()``.  While
+        # non-zero, ``validate_segment_clearance`` ignores the segment R-tree
+        # and walks ``self.routes`` directly (see that context manager).
+        self._seg_rtree_suspended: int = 0
 
         # Issue #2960: Via R-tree spatial index.
         #
@@ -4925,6 +4929,7 @@ class RoutingGrid:
         seg_layer_idx = self.layer_to_index(seg.layer.value)
         use_rtree = (
             self._rtree_available
+            and not self._seg_rtree_suspended
             and self._seg_rtree_count >= RTREE_SEGMENT_THRESHOLD
             and seg_layer_idx in self._seg_rtree
         )
@@ -5770,6 +5775,30 @@ class RoutingGrid:
         for route in self.routes:
             for via in route.vias:
                 self._rtree_insert_via(via)
+
+    @contextmanager
+    def segment_index_suspended(self) -> Iterator[None]:
+        """Make ``validate_segment_clearance`` read ``self.routes``, not the R-tree.
+
+        Issue #6303: the segment R-tree is maintained by ``mark_route`` /
+        ``unmark_route`` and therefore describes the copper that was *marked*,
+        not whatever list ``self.routes`` currently points at.  A caller that
+        temporarily rebinds ``self.routes`` to some other copper (the access
+        witness replay steps the board forward through the commit journal this
+        way) would otherwise have every segment-clearance query answered from
+        the finished board once 32+ segments are indexed, while the via checks
+        -- which read ``self.routes`` -- see the rebound copper.
+
+        Inside this context ``validate_segment_clearance`` takes its
+        brute-force branch over ``self.routes``.  The index itself is left
+        untouched (no entries are removed, ``_seg_rtree_count`` is unchanged),
+        so it is exactly as it was on exit, normal or exceptional.  Re-entrant.
+        """
+        self._seg_rtree_suspended += 1
+        try:
+            yield
+        finally:
+            self._seg_rtree_suspended -= 1
 
     def invalidate_spatial_index(self) -> None:
         """Rebuild the R-tree spatial index with current clearance values.

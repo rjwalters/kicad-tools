@@ -683,6 +683,33 @@ def _format_pad_ref(pad: Pad) -> str:
     return f"steiner@({pad.x:.3f},{pad.y:.3f})"
 
 
+def _aggregate_pair_outcome(segment_outcomes: list[str]) -> str:
+    """One lattice diff-pair outcome from its chain segments (issue #6378).
+
+    * a single segment (every pair without an interior part): its outcome,
+      unchanged;
+    * every segment ``coupled``: ``"coupled"``;
+    * every segment in the #6373 fallback: ``"uncoupled-fallback:<reason>"``
+      (the first segment's reason);
+    * some segments coupled: ``"partially-coupled:<k>/<n>"``;
+    * otherwise (no segment coupled, not all in fallback): the first
+      non-coupled segment's outcome.
+    """
+    if not segment_outcomes:
+        return "not-attempted"
+    if len(segment_outcomes) == 1:
+        return segment_outcomes[0]
+    n = len(segment_outcomes)
+    k = sum(1 for o in segment_outcomes if o == "coupled")
+    if k == n:
+        return "coupled"
+    if k > 0:
+        return f"partially-coupled:{k}/{n}"
+    if all(o.startswith("uncoupled-fallback:") for o in segment_outcomes):
+        return segment_outcomes[0]
+    return next(o for o in segment_outcomes if not o.startswith("uncoupled-fallback:"))
+
+
 def _star_topology_pads(pads: list[Pad]) -> tuple[Pad, list[Pad]]:
     """Pick the star hub + terminal order for a net's lattice/mesh connections.
 
@@ -827,6 +854,144 @@ def worker_router_kwargs(config: dict) -> dict[str, Any]:
     return kwargs
 
 
+def build_worker_router(config: dict) -> Autorouter:
+    """Rebuild a parent's routing problem inside a trial worker process.
+
+    Issue #6347: the single construction site shared by
+    ``_run_monte_carlo_trial`` and the evolutionary optimizer's
+    ``_run_evolutionary_trial``.  Each payload key of
+    ``_serialize_for_parallel`` used to be replayed by two hand-maintained
+    copies of this sequence, and four keys drifted between them (#5374 edge
+    keepout, #5555 obstacles, #6343 layer stack/budgets, #6008 rule areas --
+    the last one never reached evolutionary workers at all).  Callers keep
+    only their own seeding, net-order and scoring logic.
+
+    The sequence: design rules, ``Autorouter`` with the parent's layer stack
+    and search budgets, pads, the component-hole census, nets, pour-net
+    overrides, the board-edge keepout, ``add_obstacle`` keepouts and the
+    parent's resolved keepout rule areas.
+
+    Args:
+        config: A ``_serialize_for_parallel`` payload (plus the caller's own
+            trial keys, which are ignored here).
+
+    Returns:
+        A fresh ``Autorouter`` ready for ``route_trial``.
+    """
+    from kicad_tools.router.layers import Layer
+    from kicad_tools.router.primitives import Pad
+    from kicad_tools.router.rules import DesignRules
+
+    rules_dict = config.get("rules_dict", {})
+    rules = DesignRules(**rules_dict) if rules_dict else DesignRules()
+
+    router = Autorouter(
+        width=config["width"],
+        height=config["height"],
+        origin_x=config["origin_x"],
+        origin_y=config["origin_y"],
+        rules=rules,
+        net_class_map=config.get("net_class_map"),
+        physics_enabled=False,  # Skip physics in workers for simplicity
+        # Issue #6343: same layer stack and search budgets as the parent.
+        **worker_router_kwargs(config),
+    )
+
+    for pad_data in config["pads_data"]:
+        ref = pad_data["ref"]
+        layer_data = pad_data["layer"]
+        if isinstance(layer_data, int):
+            # Serialized as Layer enum value (integer)
+            pad_layer = Layer(layer_data)
+        elif isinstance(layer_data, str):
+            # Serialized as KiCad layer name (string)
+            try:
+                pad_layer = Layer.from_kicad_name(layer_data)
+            except ValueError:
+                pad_layer = Layer.F_CU  # Default for unknown layers
+        elif isinstance(layer_data, Layer):
+            pad_layer = layer_data
+        else:
+            pad_layer = Layer.F_CU  # Default fallback
+
+        # Add directly to avoid component grouping overhead
+        pad = Pad(
+            x=pad_data["x"],
+            y=pad_data["y"],
+            width=pad_data["width"],
+            height=pad_data["height"],
+            net=pad_data["net"],
+            net_name=pad_data["net_name"],
+            layer=pad_layer,
+            ref=ref,
+            component_id=pad_data.get("component_id", ref),
+            terminal_id=pad_data.get("terminal_id", ""),
+            pin=str(pad_data["number"]),
+            through_hole=pad_data.get("through_hole", False),
+            drill=pad_data.get("drill", 0.0),
+            drill_size=pad_data.get("drill_size"),
+            drill_rotation=pad_data.get("drill_rotation", 0.0),
+            footprint_name=pad_data.get("footprint_name", ""),
+            steiner_point=pad_data.get("steiner_point", False),
+            # Issue #4910: keep the pad's residual board rotation; dropping
+            # it would rebuild every rotated pad as axis-aligned.
+            rotation=pad_data.get("rotation", 0.0),
+            shape=pad_data.get("shape", "rect"),
+        )
+        key = pad.key
+        if key in router.pads and router.pads[key].net != pad.net:
+            raise ValueError(f"Physical terminal {key!r} has conflicting nets")
+        router.pads[key] = pad
+        router.all_pads.append(pad)
+        router.grid.add_pad(pad, pin_pitch=pad_data.get("pin_pitch"))
+
+    # Physical drill census, after the pads (the Monte Carlo worker's order,
+    # kept as-is).  The payload's census already carries every live pad
+    # (``component_holes_for_router``), so the order does not change the
+    # resulting hole set.  A missing legacy payload is unknown, not a
+    # verified empty census.
+    router._loaded_component_holes = config.get("component_holes")
+    router.grid.install_component_hole_census(router._loaded_component_holes)
+
+    # Restore nets and net_names
+    router.nets = {
+        int(k): list(dict.fromkeys((key[0], key[1]) for key in keys))
+        for k, keys in config["nets"].items()
+    }
+    router.net_names = {int(k): v for k, v in config["net_names"].items()}
+
+    # Restore pour-net overrides so _is_pour_net() returns correct results
+    router._pour_nets_without_zones = set(config.get("pour_nets_without_zones", []))
+
+    # Issue #5374: reinstall the board-edge keepout on the worker's own
+    # grid.  The parent's ``_edge_segments`` / ``_edge_clearance`` never
+    # cross the ProcessPoolExecutor boundary automatically -- they only
+    # reach this worker via ``_serialize_for_parallel``'s "edge_segments" /
+    # "edge_clearance" keys.  Store them back on the router too so
+    # ``validate_routes`` can still flag edge violations, matching
+    # parent-process behaviour.
+    edge_segments = config.get("edge_segments")
+    edge_clearance = config.get("edge_clearance")
+    if edge_segments is not None:
+        router._edge_segments = edge_segments
+        router._edge_clearance = edge_clearance
+        if edge_segments and edge_clearance:
+            router.grid.add_edge_keepout(edge_segments, edge_clearance)
+
+    # Issue #5555: same treatment for ``add_obstacle`` keepouts -- they only
+    # reach this worker via the "obstacles" key of the serialized config.
+    install_serialized_obstacles(router, config)
+
+    # Issue #6008: keepout rule areas resolved by the parent.  Installed by
+    # ``_prepare_routing`` at the start of the worker's ``route_all_*`` call;
+    # an absent key (older payload) leaves the worker without a source and
+    # therefore with no areas, as before.
+    if "rule_area_keepouts" in config:
+        router._rule_area_keepouts_payload = list(config["rule_area_keepouts"] or ())
+
+    return router
+
+
 def _run_monte_carlo_trial(config: dict) -> tuple[list, float, int]:
     """Run a single Monte Carlo trial in a worker process.
 
@@ -853,11 +1018,6 @@ def _run_monte_carlo_trial(config: dict) -> tuple[list, float, int]:
     Returns:
         Tuple of (routes, score, trial_num)
     """
-    # Import inside worker to avoid issues with multiprocessing
-    from kicad_tools.router.core import Autorouter
-    from kicad_tools.router.layers import Layer
-    from kicad_tools.router.rules import DesignRules
-
     trial_num = config["trial_num"]
     seed = config["seed"]
     base_order = config["base_order"]
@@ -866,127 +1026,7 @@ def _run_monte_carlo_trial(config: dict) -> tuple[list, float, int]:
     # Set random seed for reproducibility
     random.seed(seed)
 
-    # Recreate design rules
-    rules_dict = config.get("rules_dict", {})
-    rules = DesignRules(**rules_dict) if rules_dict else DesignRules()
-
-    # Create new Autorouter instance
-    router = Autorouter(
-        width=config["width"],
-        height=config["height"],
-        origin_x=config["origin_x"],
-        origin_y=config["origin_y"],
-        rules=rules,
-        net_class_map=config.get("net_class_map"),
-        physics_enabled=False,  # Skip physics in workers for simplicity
-        **worker_router_kwargs(config),
-    )
-
-    # Add pads from serialized data
-    for pad_data in config["pads_data"]:
-        ref = pad_data["ref"]
-        # Convert layer data to Layer enum
-        layer_data = pad_data["layer"]
-        if isinstance(layer_data, int):
-            # Serialized as Layer enum value (integer)
-            pad_layer = Layer(layer_data)
-        elif isinstance(layer_data, str):
-            # Serialized as KiCad layer name (string)
-            try:
-                pad_layer = Layer.from_kicad_name(layer_data)
-            except ValueError:
-                pad_layer = Layer.F_CU  # Default for unknown layers
-        elif isinstance(layer_data, Layer):
-            # Already a Layer enum
-            pad_layer = layer_data
-        else:
-            pad_layer = Layer.F_CU  # Default fallback
-
-        pad_info = {
-            "number": pad_data["number"],
-            "x": pad_data["x"],
-            "y": pad_data["y"],
-            "width": pad_data["width"],
-            "height": pad_data["height"],
-            "net": pad_data["net"],
-            "net_name": pad_data["net_name"],
-            "layer": pad_layer,
-            "through_hole": pad_data.get("through_hole", False),
-            "drill": pad_data.get("drill", 0.0),
-            "rotation": pad_data.get("rotation", 0.0),
-            "shape": pad_data.get("shape", "rect"),
-        }
-        # Add directly to avoid component grouping overhead
-        from kicad_tools.router.primitives import Pad
-
-        pin = str(pad_info["number"])
-        pad = Pad(
-            x=pad_info["x"],
-            y=pad_info["y"],
-            width=pad_info["width"],
-            height=pad_info["height"],
-            net=pad_info["net"],
-            net_name=pad_info["net_name"],
-            layer=pad_info["layer"],
-            ref=ref,
-            component_id=pad_data.get("component_id", ref),
-            terminal_id=pad_data.get("terminal_id", ""),
-            pin=pin,
-            through_hole=pad_info["through_hole"],
-            drill=pad_info["drill"],
-            drill_size=pad_data.get("drill_size"),
-            drill_rotation=pad_data.get("drill_rotation", 0.0),
-            footprint_name=pad_data.get("footprint_name", ""),
-            steiner_point=pad_data.get("steiner_point", False),
-            rotation=pad_info["rotation"],
-            shape=pad_info["shape"],
-        )
-        key = pad.key
-        if key in router.pads and router.pads[key].net != pad.net:
-            raise ValueError(f"Physical terminal {key!r} has conflicting nets")
-        router.pads[key] = pad
-        router.all_pads.append(pad)
-        router.grid.add_pad(pad, pin_pitch=pad_data.get("pin_pitch"))
-
-    # A missing legacy payload is unknown, not a verified empty census.
-    router._loaded_component_holes = config.get("component_holes")
-    router.grid.install_component_hole_census(router._loaded_component_holes)
-
-    # Restore nets and net_names
-    router.nets = {
-        int(k): list(dict.fromkeys((key[0], key[1]) for key in keys))
-        for k, keys in config["nets"].items()
-    }
-    router.net_names = {int(k): v for k, v in config["net_names"].items()}
-
-    # Restore pour-net overrides so _is_pour_net() returns correct results
-    router._pour_nets_without_zones = set(config.get("pour_nets_without_zones", []))
-
-    # Issue #5374: reinstall the board-edge keepout on the worker's own
-    # grid.  The parent's ``_edge_segments`` / ``_edge_clearance`` never
-    # cross the ProcessPoolExecutor boundary automatically -- they only
-    # reach this worker via ``_serialize_for_parallel``'s "edge_segments" /
-    # "edge_clearance" keys.  Store them back on the router too so
-    # ``validate_routes`` (invoked by ``_evaluate_solution`` below) can
-    # still flag edge violations, matching parent-process behaviour.
-    edge_segments = config.get("edge_segments")
-    edge_clearance = config.get("edge_clearance")
-    if edge_segments is not None:
-        router._edge_segments = edge_segments
-        router._edge_clearance = edge_clearance
-        if edge_segments and edge_clearance:
-            router.grid.add_edge_keepout(edge_segments, edge_clearance)
-
-    # Issue #5555: same treatment for ``add_obstacle`` keepouts -- they only
-    # reach this worker via the "obstacles" key of the serialized config.
-    install_serialized_obstacles(router, config)
-
-    # Issue #6008: keepout rule areas resolved by the parent.  Installed by
-    # ``_prepare_routing`` at the start of the worker's ``route_all_*`` call;
-    # an absent key (older payload) leaves the worker without a source and
-    # therefore with no areas, as before.
-    if "rule_area_keepouts" in config:
-        router._rule_area_keepouts_payload = list(config["rule_area_keepouts"] or ())
+    router = build_worker_router(config)
 
     # Shuffle net order (first trial uses base order)
     if trial_num == 0:
@@ -1693,6 +1733,15 @@ class Autorouter:
         # Issue #4270: per-diff-pair coupled-routing outcomes for the lattice
         # engine ("coupled" or a decline reason), keyed by pair base name.
         self._lattice_pair_outcomes: dict[str, str] = {}
+        # Issue #6378: a pair that passes through an interior part (board 03
+        # USB_D through the ESD part U2) is routed as a chain -- one coupled
+        # connection per segment plus single-ended P/N hops inside the part.
+        # ``_lattice_pair_hops`` holds those hops as ``(key, net, pad_a,
+        # pad_b)``; ``_lattice_pair_segment_outcomes`` the per-segment
+        # outcomes ``(pair_name, "REF.PIN->REF.PIN", outcome)`` of a
+        # multi-segment pair (empty for single-segment pairs).
+        self._lattice_pair_hops: list[tuple[object, int, Pad, Pad]] = []
+        self._lattice_pair_segment_outcomes: list[tuple[str, str, str]] = []
         # Issue #4472 (epic #4465, Phase 2): localized per-link lattice build.
         # When set to a WORLD-coordinate ``(x1, y1, x2, y2)`` box,
         # :meth:`_ensure_lattice_pathfinder` builds the octilinear lattice +
@@ -4308,16 +4357,28 @@ class Autorouter:
         reserved endpoints.
 
         Returns ``(coupled, reserved)`` where ``reserved`` maps each pair
-        net id to its two reserved main-run pad keys.  Pairs whose pad
+        net id to its reserved main-run pad keys.  Pairs whose pad
         topology cannot form a coupled main run are recorded in
         :attr:`_lattice_pair_outcomes` as declined and fall back to the
         ordinary single-ended star (no coupled attempt was possible).
+
+        Issue #6378: the main run follows the pair's signal path
+        (:func:`choose_pair_chain`).  A pair passing through an interior
+        part emits one coupled connection per chain segment, keyed
+        ``("pair", p, n, seg_idx)``, and the part's internal entry -> exit
+        hops land in :attr:`_lattice_pair_hops` as single-ended
+        connections; ``reserved`` then holds every chain endpoint pad.  A
+        pair with no interior part keeps today's single farthest-apart
+        trunk and its ``("pair", p, n)`` key, byte for byte.  A segment end
+        whose P/N midpoint lies inside a foreign pad's keep-out gets a
+        relocated virtual endpoint (:func:`relocate_pair_anchor`).
         """
-        from .lattice.coupled import CoupledConnection, choose_pair_endpoints
+        from .lattice.coupled import CoupledConnection, choose_pair_chain
 
         coupled: list[Any] = []
         reserved: dict[int, list[tuple[str, str]]] = {}
         self._lattice_pair_outcomes = {}
+        self._lattice_pair_hops = []
         # Issue #6437: net id -> partner net id for EVERY detected pair (engaged
         # or not), so the pad-class repair holds all pair-net copper to a skew
         # budget, whatever its key shape.
@@ -4363,13 +4424,12 @@ class Autorouter:
             n_id = d.pair.negative.net_id
             keyed_p = [(k, self.pads[k]) for k in self.nets.get(p_id, []) if k in self.pads]
             keyed_n = [(k, self.pads[k]) for k in self.nets.get(n_id, []) if k in self.pads]
-            chosen = choose_pair_endpoints([p for _, p in keyed_p], [p for _, p in keyed_n])
-            if chosen is None:
+            chain = choose_pair_chain([p for _, p in keyed_p], [p for _, p in keyed_n])
+            if chain is None:
                 # Degenerate pad topology: no coupled main run is possible,
                 # so the nets stay on the ordinary single-ended star.
                 self._lattice_pair_outcomes[pair_name] = "no-endpoint-couples"
                 continue
-            (ip_a, in_a), (ip_b, in_b) = chosen
             nc = self.net_class_map.get(p_name) or self.net_class_map.get(n_name)
             if nc is None:
                 nc = synth_routing.get(net_to_class.get(p_name, ""))
@@ -4393,9 +4453,13 @@ class Autorouter:
                 except Exception:
                     pass
             pitch = trace_w + intra
-            coupled.append(
-                CoupledConnection(
-                    key=("pair", p_id, n_id),
+            multi = len(chain.segments) > 1
+            res_p: list[tuple[str, str]] = []
+            res_n: list[tuple[str, str]] = []
+            for seg_idx, ((ip_a, in_a), (ip_b, in_b)) in enumerate(chain.segments):
+                pc = CoupledConnection(
+                    # Single-segment pairs keep the pre-#6378 key shape.
+                    key=("pair", p_id, n_id, seg_idx) if multi else ("pair", p_id, n_id),
                     pair_name=pair_name,
                     pad_p_a=keyed_p[ip_a][1],
                     pad_n_a=keyed_n[in_a][1],
@@ -4404,10 +4468,87 @@ class Autorouter:
                     net_class=nc,
                     pitch=pitch,
                 )
-            )
-            reserved[p_id] = [keyed_p[ip_a][0], keyed_p[ip_b][0]]
-            reserved[n_id] = [keyed_n[in_a][0], keyed_n[in_b][0]]
+                coupled.append(self._lattice_relocate_pair_anchors(pc))
+                for key in (keyed_p[ip_a][0], keyed_p[ip_b][0]):
+                    if key not in res_p:
+                        res_p.append(key)
+                for key in (keyed_n[in_a][0], keyed_n[in_b][0]):
+                    if key not in res_n:
+                        res_n.append(key)
+            for (ip_e, in_e), (ip_x, in_x) in chain.hops:
+                for net, keyed, i_e, i_x in (
+                    (p_id, keyed_p, ip_e, ip_x),
+                    (n_id, keyed_n, in_e, in_x),
+                ):
+                    hop_key = (net, "hop", len(self._lattice_pair_hops))
+                    self._lattice_pair_hops.append((hop_key, net, keyed[i_e][1], keyed[i_x][1]))
+            reserved[p_id] = res_p
+            reserved[n_id] = res_n
         return coupled, reserved
+
+    def _lattice_relocate_pair_anchors(self, pc: Any) -> Any:
+        """Move a blocked coupled endpoint off its part (issue #6378).
+
+        When a segment end's P/N midpoint sits inside a foreign pad's
+        keep-out (board 03 U2: GND between D+/D-), the fat centerline can
+        never leave it.  :func:`relocate_pair_anchor` slides that end's
+        virtual endpoint toward the segment's other end until it clears; an
+        unblocked end keeps ``anchor=None`` (no change).  Defensive: any
+        failure returns ``pc`` unchanged.
+        """
+        from dataclasses import replace
+
+        from .lattice.coupled import relocate_pair_anchor
+
+        try:
+            pf = self._ensure_lattice_pathfinder()
+            obstacles = pf.obstacles
+            ends = (pc.pad_p_a, pc.pad_n_a, pc.pad_p_b, pc.pad_n_b)
+            common = set.intersection(*(set(pf._pad_layer_indices(p)) for p in ends))
+            if not common:
+                return pc
+            layers = tuple(sorted(common))
+            sites = {(round(p.x, 6), round(p.y, 6), p.net) for p in ends}
+            exempt = frozenset(
+                idx
+                for idx, pad in enumerate(obstacles.pads)
+                if (round(pad.x, 6), round(pad.y, 6), pad.net) in sites
+            )
+            pair_nets = {pc.pad_p_a.net, pc.pad_n_a.net}
+            half = pc.pitch / 2.0
+            # The rule-area mask (+ #6401 pour-pad via reservations) installed
+            # by ``_negotiate_lattice_netset`` before this call.
+            keepouts = getattr(pf, "_keepouts", None)
+            trace_half = (getattr(pc.net_class, "trace_width", None) or self.rules.trace_width) / 2
+            anchor_a = relocate_pair_anchor(
+                obstacles,
+                pc.pad_p_a,
+                pc.pad_n_a,
+                pc.mid_b,
+                half_pitch=half,
+                layers=layers,
+                exempt=exempt,
+                pair_nets=pair_nets,
+                keepouts=keepouts,
+                trace_half=trace_half,
+            )
+            anchor_b = relocate_pair_anchor(
+                obstacles,
+                pc.pad_p_b,
+                pc.pad_n_b,
+                anchor_a if anchor_a is not None else pc.mid_a,
+                half_pitch=half,
+                layers=layers,
+                exempt=exempt,
+                pair_nets=pair_nets,
+                keepouts=keepouts,
+                trace_half=trace_half,
+            )
+        except Exception:
+            return pc
+        if anchor_a is None and anchor_b is None:
+            return pc
+        return replace(pc, anchor_a=anchor_a, anchor_b=anchor_b)
 
     def _negotiate_lattice_netset(self) -> dict[int, list[Route]]:
         """Negotiate every routable net through the shared lattice (#4278).
@@ -4508,6 +4649,14 @@ class Autorouter:
             anchor, terminals = _star_topology_pads(pads)
             for seq, other in enumerate(terminals):
                 connections.append(((net, seq), anchor, other, net_class))
+
+        # Issue #6378: a chained pair's hop through an interior part (U2.3 ->
+        # U2.4 on board 03) is an ordinary single-ended connection, not a
+        # coupled attempt -- the part's own pads sit between P and N there.
+        for hop_key, hop_net, hop_a, hop_b in self._lattice_pair_hops:
+            hop_name = self.net_names.get(hop_net) or hop_a.net_name
+            hop_class = self.net_class_map.get(hop_name) if hop_name else None
+            connections.append((hop_key, hop_a, hop_b, hop_class))
 
         # Issue #4477: remember each connection's pad endpoints keyed exactly
         # as ``pf.failure_reasons`` keys them, so an unroutable-link report
@@ -4667,10 +4816,14 @@ class Autorouter:
                     isinstance(net_id, tuple)
                     and len(key) == 2
                     and key[1] in ("P", "N")
-                    and len(net_id) == 3
+                    and len(net_id) >= 3
+                    and net_id[0] == "pair"
                 ):
                     # Issue #6373: an uncoupled-fallback leg keyed
                     # ``(pair_key, "P"|"N")`` -- name it by its own net.
+                    # Issue #6378: ``pair_key`` is ``("pair", p, n)`` or,
+                    # for one segment of a chained pair, ``("pair", p, n,
+                    # seg_idx)``.
                     net_id = net_id[1] if key[1] == "P" else net_id[2]
                 if isinstance(net_id, int):
                     name = self.net_names.get(net_id, str(net_id))
@@ -4688,12 +4841,32 @@ class Autorouter:
         # coupled / declined-with-reason, mirroring failure_reasons.
         if coupled or self._lattice_pair_outcomes:
             outcomes = getattr(pf, "pair_outcomes", {})
+            # Issue #6378: a chained pair has several segments sharing one
+            # ``pair_name``; aggregate them instead of letting the last
+            # segment overwrite the others.
+            seg_outcomes: dict[str, list[tuple[str, str]]] = {}
             for pc in coupled:
-                self._lattice_pair_outcomes[pc.pair_name] = outcomes.get(pc.key, "not-attempted")
+                label = f"{pc.pad_p_a.ref}.{pc.pad_p_a.pin}->{pc.pad_p_b.ref}.{pc.pad_p_b.pin}"
+                seg_outcomes.setdefault(pc.pair_name, []).append(
+                    (label, outcomes.get(pc.key, "not-attempted"))
+                )
+            self._lattice_pair_segment_outcomes = []
+            for name, segs in seg_outcomes.items():
+                self._lattice_pair_outcomes[name] = _aggregate_pair_outcome(
+                    [o for _label, o in segs]
+                )
+                if len(segs) > 1:
+                    self._lattice_pair_segment_outcomes.extend(
+                        (name, label, o) for label, o in segs
+                    )
             n_coupled = sum(1 for v in self._lattice_pair_outcomes.values() if v == "coupled")
             print(f"  Diff pairs (lattice): {n_coupled}/{len(self._lattice_pair_outcomes)} coupled")
             for name, outcome in sorted(self._lattice_pair_outcomes.items()):
                 print(f"    {name}: {outcome}")
+                for idx, (label, seg_outcome) in enumerate(
+                    (label, o) for n, label, o in self._lattice_pair_segment_outcomes if n == name
+                ):
+                    print(f"      {name}[{idx}] {label}: {seg_outcome}")
             self._print_pair_threshold_report()
             # Issue #6373: a pair routed by the uncoupled fallback is a
             # diff-pair WARNING (coupling / skew not guaranteed), not an open
@@ -4704,6 +4877,19 @@ class Autorouter:
                         f"  WARNING: diff pair {name} routed uncoupled "
                         f"(coupled run declined: {outcome.split(':', 1)[1]}); "
                         "intra-pair gap and length matching are not guaranteed"
+                    )
+                elif outcome.startswith("partially-coupled:"):
+                    # Issue #6378: name the segments that did not couple.
+                    uncoupled = [
+                        f"{label} ({o})"
+                        for n, label, o in self._lattice_pair_segment_outcomes
+                        if n == name and o != "coupled"
+                    ]
+                    print(
+                        f"  WARNING: diff pair {name} only partially coupled "
+                        f"({outcome.split(':', 1)[1]} segments); uncoupled: "
+                        f"{', '.join(uncoupled)}; intra-pair gap and length "
+                        "matching are not guaranteed there"
                     )
 
         by_net: dict[int, list[Route]] = {}
@@ -14455,6 +14641,68 @@ class Autorouter:
                             row.append("x")
                     flush_print("    [relief-debug] " + "".join(row))
 
+    def _relief_probe_clearance_violation(
+        self,
+        routes: list[Route],
+        net: int,
+        net_pads: list[Pad],
+    ) -> str | None:
+        """Run relief probe copper through the active backend's commit validator.
+
+        Issue #6286.  Relief probes skip post-route clearance validation by
+        design (they deliberately cross foreign halos), so probe copper may
+        only be committed after it passes the same
+        ``_validate_route_clearance`` gate a normal-mode route clears.  The
+        two backends share the gate but not its signature: the C++ one keys
+        its same-component carve-out on the start/end pads, the Python one
+        on their component refs.  A probe route does not carry its pads, so
+        each route's endpoints are matched to the nearest pads of ``net``.
+
+        Returns:
+            ``None`` when every route passes (or the backend has no
+            validator), else a short description of the first violation.
+        """
+        validate = getattr(self.router, "_validate_route_clearance", None)
+        if validate is None or not net_pads:
+            return None
+
+        def nearest_pad(x: float, y: float, skip: Pad | None = None) -> Pad:
+            candidates = [p for p in net_pads if p is not skip] or net_pads
+            return min(candidates, key=lambda p: (p.x - x) ** 2 + (p.y - y) ** 2)
+
+        for route in routes:
+            if route.segments:
+                head = (route.segments[0].x1, route.segments[0].y1)
+                tail = (route.segments[-1].x2, route.segments[-1].y2)
+            elif route.vias:
+                head = tail = (route.vias[0].x, route.vias[0].y)
+            else:
+                continue
+            start = nearest_pad(*head)
+            end = nearest_pad(*tail, skip=start)
+
+            if isinstance(self.router, CppPathfinder):
+                net_class = self.net_class_map.get(start.net_name)
+                trace_width = net_class.trace_width if net_class else self.rules.trace_width
+                clearance = net_class.clearance if net_class else self.rules.trace_clearance
+                trace_radius_cells = max(
+                    1, math.ceil((trace_width / 2 + clearance) / self.grid.resolution)
+                )
+                found = validate(route, start, end, trace_radius_cells, net_class=net_class)
+                if found is not None:
+                    kind = getattr(found, "kind", None) or "clearance"
+                    return f"{kind} at ({found[0]:.3f}, {found[1]:.3f})"
+            else:
+                refs = {p.component_key for p in (start, end) if p.component_key}
+                if not validate(
+                    route,
+                    net,
+                    component_pitches=getattr(self.router, "component_pitches", None),
+                    exclude_refs=refs or None,
+                ):
+                    return "post-route clearance"
+        return None
+
     def _relief_probe(
         self,
         net: int,
@@ -15175,9 +15423,26 @@ class Autorouter:
                     committed_routes = normal_routes
                 else:
                     # Normal-mode re-route failed (timeout / cost-shape
-                    # divergence).  Fall back to the probe path -- it is
-                    # conflict-free by construction, which is strictly
-                    # better than losing the rescue.
+                    # divergence).  Fall back to the probe path -- but only
+                    # after it passes the same post-route clearance
+                    # validator normal mode applies.  "Conflict-free" means
+                    # the probe crossed no rippable owner net's cells; the
+                    # probe never went through geometric validation, so it
+                    # can hold a via closer to a foreign pad than the rules
+                    # allow (issue #6286: board 05 vias at 0.05-0.085 mm
+                    # the C++ validator had just rejected).
+                    violation = self._relief_probe_clearance_violation(
+                        probe_routes, failed_net, pads_by_net.get(failed_net, [])
+                    )
+                    if violation is not None:
+                        flush_print_fn(
+                            f"  Relief rescue: {failed_name} normal-mode re-route "
+                            f"failed and the relief probe path fails clearance "
+                            f"validation ({violation}) -- rolling back "
+                            f"(issue #6286) ({elapsed_fn()})"
+                        )
+                        _rollback()
+                        return False
                     for route in probe_routes:
                         self._mark_route(route)
                     committed_routes = probe_routes
@@ -15239,7 +15504,8 @@ class Autorouter:
             _rollback()
             return False
 
-        # Commit the failed net's conflict-free probe route.
+        # Commit the failed net's route: the normal-mode re-route, or the
+        # probe path once it passed clearance validation (#6286).
         net_routes[failed_net] = committed_routes
         for route in committed_routes:
             self.grid.mark_route_usage(route)
@@ -19485,6 +19751,7 @@ class Autorouter:
         per_net_timeout: float | None = None,
         stagnation_patience: int = 3,
         outer_timeout: float | None = None,
+        stop_requested: Callable[[], bool] | None = None,
     ) -> PlacementFeedbackResult:
         """Route with automatic placement adjustment on failures.
 
@@ -19535,6 +19802,9 @@ class Autorouter:
                 exceeded between iterations the loop exits with
                 ``exit_reason="pf_timeout"``.  Default None (no outer
                 cap).
+            stop_requested: Issue #6324: optional predicate checked once
+                per outer iteration; True exits with
+                ``exit_reason="pf_interrupted"``.  Default None.
 
         Returns:
             PlacementFeedbackResult with:
@@ -19592,6 +19862,7 @@ class Autorouter:
             max_movement=max_movement,
             stagnation_patience=stagnation_patience,
             outer_timeout=outer_timeout,
+            stop_requested=stop_requested,
         )
 
         return feedback_loop.run(

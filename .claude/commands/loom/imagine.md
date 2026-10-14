@@ -257,7 +257,7 @@ Install Loom into the new repository:
 # Wait for PR to be created
 sleep 2
 
-# Find and merge the installation PR
+# Find and merge the installation PR (new repo: no loom:frozen)
 PR_NUMBER=$(gh pr list --label "loom:review-requested" --limit 500 --json number --jq '.[0].number')
 
 if [ -n "$PR_NUMBER" ]; then

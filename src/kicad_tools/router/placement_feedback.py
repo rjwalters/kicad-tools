@@ -359,6 +359,9 @@ class PlacementFeedbackResult:
             * ``"pf_timeout"`` -- the optional outer wall-clock budget
               passed via ``outer_timeout`` was exceeded between
               iterations.
+            * ``"pf_interrupted"`` -- the optional ``stop_requested``
+              callback reported an interrupt (Ctrl+C / deadline) between
+              iterations (#6324).
 
             Symmetric with the ``route_all_negotiated`` callback's
             ``converged``/``stagnated``/``timeout`` strings (#2597) but
@@ -435,6 +438,7 @@ class PlacementFeedbackLoop:
         max_movement: float | None = 5.0,
         stagnation_patience: int = 3,
         outer_timeout: float | None = None,
+        stop_requested: Callable[[], bool] | None = None,
     ):
         """Initialize the feedback loop.
 
@@ -464,6 +468,13 @@ class PlacementFeedbackLoop:
                 exceeded between iterations the loop exits with
                 ``pf_timeout``.  Default None (no outer cap; only the
                 per-iteration negotiated-router ``timeout`` applies).
+            stop_requested: Issue #6324: optional predicate checked at the
+                top of each iteration, next to ``outer_timeout``.  When it
+                returns True the loop exits with ``pf_interrupted`` (best
+                snapshot restored as for a timeout) instead of starting
+                another re-route.  ``kct route`` passes "an interrupt was
+                delivered", so a Ctrl+C whose ``SystemExit`` was swallowed
+                still stops the loop.  Default None (never stops).
         """
         self.router = router
         self.pcb = pcb
@@ -472,6 +483,7 @@ class PlacementFeedbackLoop:
         self.max_movement: float | None = max_movement
         self.stagnation_patience: int = stagnation_patience
         self.outer_timeout: float | None = outer_timeout
+        self.stop_requested: Callable[[], bool] | None = stop_requested
         self._strategy_generator = StrategyGenerator()
         self._strategy_applicator = StrategyApplicator()
         # Snapshot of original positions, populated lazily the first time
@@ -610,6 +622,12 @@ class PlacementFeedbackLoop:
                         f"exiting placement feedback loop."
                     )
                 exit_reason = "pf_timeout"
+                break
+            # Issue #6324: an interrupt the process did not act on.
+            if self.stop_requested is not None and self.stop_requested():
+                if self.verbose:
+                    print("\n  Interrupt requested; exiting placement feedback loop.")
+                exit_reason = "pf_interrupted"
                 break
 
             if self.verbose:

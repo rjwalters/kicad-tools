@@ -288,10 +288,6 @@ chmod +x "$STUB_DIR/gh"
 
 export LOOM_TEST_STUB_DIR="$STUB_DIR"
 export PATH="$STUB_DIR:$PATH"
-# The windowed closed-issue search (#9208) is a daemon-side forge call, so the
-# daemon must spawn the stub above too -- never a host forge-egress policy's
-# managed launcher, which would send every case's query to the real forge.
-export LOOM_GH_NO_POLICY_LAUNCHER=1
 unset LOOM_GH_BIN LOOM_REPO LOOM_FORGE_TYPE
 
 reset_state() {

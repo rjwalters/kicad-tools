@@ -244,7 +244,7 @@ the resolution for, and `main` moving again would just repeat the cycle (the
 # Parked set (gh ANDs repeated --label values). Skip any that also carry
 # loom:operator-only — already routed to a human.
 gh pr list --label "loom:blocked" --label "loom:changes-requested" --state open --limit 500 \
-  --json number,title,labels --jq '.[] | "#\(.number) \(.title)"'
+  --json number,title,labels --jq '.[] | select(any(.labels[]?.name; . == "loom:frozen") | not) | "#\(.number) \(.title)"'
 
 # Decide from the FULL history, not the last comment alone.
 gh pr view "$PR_NUMBER" --comments
@@ -685,7 +685,7 @@ loom-daemon forge wait-checks <number> --timeout 20
 gh pr view <number> --json closingIssuesReferences --jq '.closingIssuesReferences[].number'
 
 # List blocked issues
-gh issue list --label "loom:blocked" --state open --limit 500
+gh issue list --label "loom:blocked" --search "-label:loom:frozen" --state open --limit 500
 
 # Check API rate limit
 gh api rate_limit

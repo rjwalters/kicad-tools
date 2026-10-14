@@ -10,7 +10,7 @@
 #   1. LOOM: Prefer merge-pr.sh over 'gh pr merge'
 #   2. LOOM: Block 'pip install -e' inside worktrees (issue #2495, #4079)
 #   3. LOOM: Ask before real-registry-mutating `loom-daemon workspace
-#      add|remove|set-priority` (issue #4326)
+#      add|remove|set-weight` (issue #4326)
 #   4. LOOM: Deny Bash writes that edit an INSTALLED Loom file in place in a
 #      CONSUMER repo (issue #7995) — the Bash-idiom counterpart of the
 #      Edit/Write denial in guard-worktree-paths.sh
@@ -1571,7 +1571,7 @@ decision_log_enabled() {
 # =============================================================================
 # Workspace-registry guard toggle — default ON (issue #4326).
 #
-# The `loom-daemon workspace add|remove|set-priority` ask (below) is a useful
+# The `loom-daemon workspace add|remove|set-weight` ask (below) is a useful
 # default backstop against accidentally mutating the operator's real
 # ~/.loom/workspaces.json, but — like every other category guard in this
 # file — a repo/session can opt out via the same
@@ -1763,32 +1763,6 @@ if echo "$GH_PR_MERGE_SCAN_TEXT" | grep -qE 'gh\s+pr\s+merge'; then
 fi
 
 # =============================================================================
-# LOOM: Deny typed bypasses of the managed gh launcher (issue #9989, C6 of
-# epic #9983) — raw HTTP to the GitHub API host, `gh api` with an absolute
-# URL, GH_HOST / GH_CONFIG_DIR overrides, gh's hostname flag or api-host
-# config key, `gh auth login|setup-git|refresh`, gh under an emptied `env`,
-# a path-qualified gh other than the launcher, SDK installs/imports (full list
-# in guard.rs's `Bypass` enum, not repeated here). Classification, policy resolution and the
-# guards.forgeEgress / LOOM_GUARD_FORGE_EGRESS toggle all live in
-# `loom-daemon forge egress guard` (loom-daemon/src/forge_egress/guard.rs);
-# this block only passes it the same masked text the merge redirect scans and
-# denies on its exit-1 + `BLOCKED [routing.denied-by-guard]` answer. Inert
-# with no policy, an observe-only one, or no/older daemon (exit 2 = allow).
-# The bash regex is a fork-free prefilter so most commands never exec it; it
-# is also tried with quotes/backslashes stripped so g\h / g""h still reach it.
-# =============================================================================
-
-# requires-daemon: forge optional   a daemon without `forge egress guard` exits 2 on the unknown verb, which this block treats as allow (rule inert).
-FORGE_EGRESS_PREFILTER='(^|[^[:alnum:]_.-])gh([^[:alnum:]_.-]|$)|[Gg][Ii][Tt][Hh][Uu][Bb]|GH_(HOST|CONFIG_DIR)|[Oo][Cc][Tt][Oo]|(^|[^[:alnum:]_])env[[:space:]]+-'
-if [[ "$GH_PR_MERGE_SCAN_TEXT" =~ $FORGE_EGRESS_PREFILTER || "${GH_PR_MERGE_SCAN_TEXT//[\"\'\\]/}" =~ $FORGE_EGRESS_PREFILTER ]]; then
-    FORGE_EGRESS_RC=0
-    FORGE_EGRESS_DENY=$(cd "${REPO_ROOT:-${CWD:-.}}" 2>/dev/null && "${LOOM_DAEMON_SELF_BIN:-loom-daemon}" forge egress guard --for-command "$GH_PR_MERGE_SCAN_TEXT" 2>/dev/null) || FORGE_EGRESS_RC=$?
-    if [[ "$FORGE_EGRESS_RC" -eq 1 && "$FORGE_EGRESS_DENY" == "BLOCKED [routing.denied-by-guard]"* ]]; then
-        deny "$FORGE_EGRESS_DENY" "loom:forge-egress"
-    fi
-fi
-
-# =============================================================================
 # LOOM: Per-role tool restriction (issue #8256) — a role whose JSON declares
 # toolPolicy.allowedCapabilities cannot reach an undeclared sensitive
 # capability (ssh, cloud CLIs, gh secret, credential stores), however it was
@@ -1876,7 +1850,7 @@ fi
 # LOOM: Ask before registry-mutating `loom-daemon workspace` commands
 # (Issue #4326)
 #
-# `loom-daemon workspace add|remove|set-priority` mutate the machine-level
+# `loom-daemon workspace add|remove|set-weight` mutate the machine-level
 # workspace registry (Issue #3926), normally `~/.loom/workspaces.json` — a
 # SHARED file, not scoped to any one repo/worktree/session. An ad-hoc
 # verification step (a builder/auditor sweep exercising registry behavior)
@@ -1897,10 +1871,10 @@ fi
 # list` is read-only and is NEVER matched by this guard.
 # =============================================================================
 
-if echo "$COMMAND" | grep -qE '(^|[/[:space:];&|])loom-daemon[[:space:]]+workspace[[:space:]]+(add|remove|set-priority)([[:space:]]|$)'; then
+if echo "$COMMAND" | grep -qE '(^|[/[:space:];&|])loom-daemon[[:space:]]+workspace[[:space:]]+(add|remove|set-weight|set-priority)([[:space:]]|$)'; then
     if workspace_registry_guard_enabled; then
         if [[ -z "${LOOM_WORKSPACES_PATH:-}" ]] && ! echo "$COMMAND" | grep -qE 'LOOM_WORKSPACES_PATH='; then
-            ask "This mutates the machine-level workspace registry ('loom-daemon workspace add/remove/set-priority') — by default that is the operator's REAL ~/.loom/workspaces.json, shared across every repo/session (Issue #4326: a leaked test entry once sat at top dispatch priority for most of a day). If this is a test/verification step, prefix the command with LOOM_WORKSPACES_PATH=<scratch-file> to isolate it from the real registry. If this IS an intentional real-registry change, confirm to proceed."
+            ask "This mutates the machine-level workspace registry ('loom-daemon workspace add/remove/set-weight') — by default that is the operator's REAL ~/.loom/workspaces.json, shared across every repo/session (Issue #4326: a leaked test entry once sat at top dispatch priority for most of a day). If this is a test/verification step, prefix the command with LOOM_WORKSPACES_PATH=<scratch-file> to isolate it from the real registry. If this IS an intentional real-registry change, confirm to proceed."
         fi
     fi
 fi

@@ -118,16 +118,16 @@ If a label token in the description is not in the repo's actual label set, **do 
 
    ```bash
    "$GH_READ" api --paginate "repos/{owner}/{repo}/issues?state=open&labels=loom:issue&per_page=100" \
-     --jq '[.[] | select(.pull_request == null) | {number, title, labels: [.labels[].name], updatedAt: .updated_at}]'
+     --jq '[.[] | select(.pull_request == null and all(.labels[].name; . != "loom:frozen")) | {number, title, labels: [.labels[].name], updatedAt: .updated_at}]'
    ```
 
-   Candidate resolution is an observation read, so the REST retry routes through `$GH_READ` exactly like the GraphQL call it replaces (the wrapper caches `gh api` GETs too and degrades to plain `gh api` when absent). The **uncached carve-outs** listed under "Cached forge reads (`gh-cached`)" — claim arbitration, Mode C's C0 pre-flight, merge gating — stay on plain `gh api` if they need this fallback.
+   Candidate resolution is an observation read, so the REST retry routes through `$GH_READ` exactly like the GraphQL call it replaces (it caches `gh api` GETs and degrades to plain `gh api` when absent). The **uncached carve-outs** listed under "Cached forge reads (`gh-cached`)" — claim arbitration, Mode C's C0 pre-flight, merge gating — stay on plain `gh api` if they need this fallback.
 
-   **`/issues` returns pull requests too.** GitHub's REST issue endpoint includes PRs; drop them with `select(.pull_request == null)` (what `check-duplicate.sh` does) or Mode B will resolve PR numbers as issue candidates.
+   **`/issues` returns pull requests too**: drop them with `select(.pull_request == null)` (as `check-duplicate.sh` does) or Mode B resolves PR numbers as issue candidates. The same `select` drops `loom:frozen`.
 
 4. **Preserve every Mode B safeguard — this is a transport substitution, not a policy change.** Deduplicate the resulting numbers (preserve first-seen order) and union them with any explicit numeric tokens exactly as on the GraphQL path; keep the **explicit limit** (never rely on REST's default `per_page=30`, mirroring this skill's explicit-`--limit` convention); and apply the same edge-case rules — zero matches → print the resolved REST query and its empty result, then EXIT cleanly (edge case #1); results at the cap → warn that the set was truncated and ask the operator to narrow before proceeding (edge case #2). Because `--paginate` walks past the cap, the truncation point is now a client-side decision: state the cap you applied in that warning.
 
-5. **Announce the degradation.** Log one warning to stderr (e.g. `warning: gh issue list rate-limited (GraphQL quota exhausted), falling back to REST via gh api`) and repeat it above the candidate set shown at the confirmation gate, so the operator knows the plan was resolved over the fallback path.
+5. **Announce the degradation.** Log one warning to stderr (e.g. `warning: gh issue list rate-limited (GraphQL quota exhausted), falling back to REST via gh api`) and repeat it above the candidate set shown at the confirmation gate, so the operator knows the fallback was used.
 
 6. **Label validation degrades on the same ladder.** `gh label list` is GraphQL-backed, so under exhaustion the unknown-label guard goes `gh label list` → `"$GH_READ" api --paginate "repos/{owner}/{repo}/labels?per_page=100" --jq '.[].name'` (the live, complete label set — preferred) → `.github/labels.yml` (the "Offline fallback" above; Loom-managed subset only, so false "unknown-label" rejections are possible). Drop to the YAML only when the REST read also fails. **The unknown-label safety rule is unchanged at every rung**: never fabricate a `--label <name>` filter for a label you could not verify — ask the operator to clarify or supply explicit issue numbers.
 
