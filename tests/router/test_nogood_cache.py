@@ -6,7 +6,11 @@ import pytest
 
 from kicad_tools.router.core import Autorouter
 from kicad_tools.router.layers import Layer
-from kicad_tools.router.nogood_cache import NogoodCache, nogood_cache_from_env
+from kicad_tools.router.nogood_cache import (
+    NogoodCache,
+    attempt_may_have_timed_out,
+    nogood_cache_from_env,
+)
 from kicad_tools.router.rules import DesignRules
 
 
@@ -65,13 +69,13 @@ KEY = NogoodCache.make_key(1, [(2.0, 2.0, "F.Cu", 1), (8.0, 8.0, "F.Cu", 1)], Fa
 
 
 def test_key_stable_and_discriminating():
-    assert NogoodCache.make_key(
-        1, [(2.0, 2.0, "F.Cu", 1), (8.0, 8.0, "F.Cu", 1)], False, 0.5
-    ) == KEY
+    assert (
+        NogoodCache.make_key(1, [(2.0, 2.0, "F.Cu", 1), (8.0, 8.0, "F.Cu", 1)], False, 0.5) == KEY
+    )
     assert NogoodCache.make_key(1, [(2.0, 2.0, "F.Cu", 1), (8.0, 8.0, "F.Cu", 1)], True, 0.5) != KEY
-    assert NogoodCache.make_key(
-        1, [(2.0, 2.0, "F.Cu", 1), (8.0, 8.0, "F.Cu", 1)], False, 0.6
-    ) != KEY
+    assert (
+        NogoodCache.make_key(1, [(2.0, 2.0, "F.Cu", 1), (8.0, 8.0, "F.Cu", 1)], False, 0.6) != KEY
+    )
 
 
 def test_unchanged_copper_hits_even_after_unrelated_generation_bump():
@@ -169,3 +173,34 @@ def test_oracle_stale_failure_not_served_after_blocker_removed(monkeypatch, marg
 def test_default_has_no_cache(monkeypatch):
     monkeypatch.delenv("KCT_NOGOOD_CACHE", raising=False)
     assert _walled_router()._get_nogood_cache() is None
+
+
+# -- time-limited failures must never be cached --------------------------------
+
+
+def test_attempt_may_have_timed_out_helper():
+    assert not attempt_may_have_timed_out(1e6, None)
+    assert not attempt_may_have_timed_out(0.1, 10.0)
+    assert attempt_may_have_timed_out(9.5, 10.0)
+    assert attempt_may_have_timed_out(12.0, 10.0)
+
+
+def test_single_edge_time_limited_failure_not_cached(monkeypatch):
+    """A 2-pin A* that exhausts its own budget is not a cumulative timeout,
+    so only the elapsed-time guard keeps it out of the cache."""
+    monkeypatch.setenv("KCT_NOGOOD_CACHE", "1")
+    r = _walled_router()
+    cache = r._get_nogood_cache()
+    assert cache is not None
+    routes = r._route_net_negotiated(1, 0.5, per_net_timeout=1e-9)
+    assert not [x for x in routes if x.segments]
+    assert cache.stats.insertions == 0 and len(cache) == 0
+
+
+def test_generous_timeout_still_caches_genuine_failure(monkeypatch):
+    monkeypatch.setenv("KCT_NOGOOD_CACHE", "1")
+    r = _walled_router()
+    cache = r._get_nogood_cache()
+    assert cache is not None
+    r._route_net_negotiated(1, 0.5, per_net_timeout=600.0)
+    assert cache.stats.insertions == 1

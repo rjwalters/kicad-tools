@@ -3,8 +3,11 @@
 Experiment-only, opt-in, default OFF.  A *nogood* is a net-routing attempt that
 failed completely (no route committed, no timeout) together with a fingerprint
 of the copper the attempt could see.  If the same attempt is requested again
-while that fingerprint is unchanged, the search is deterministic and will fail
-the same way, so the retry can be answered from the cache.
+while that fingerprint is unchanged, the occupancy-driven part of the search is
+the same and is expected to fail the same way, so the retry can be answered from
+the cache.  This is an assumption, not a verified property: negotiation history
+costs are *not* part of the key or the fingerprint (see the soundness caveats
+below).
 
 Independent derivation (no upstream code consulted or adapted):
 
@@ -22,10 +25,22 @@ Independent derivation (no upstream code consulted or adapted):
 * **Soundness caveat** -- a bounded window can miss copper outside it that would
   open a detour.  That is a *false hit* (loses routability) and is exactly what
   the experiment measures; ``margin_cells=None`` cannot false-hit on occupancy.
+* **History costs not keyed** -- negotiated-congestion history costs evolve
+  between iterations but are not part of the key or fingerprint.  That is fine
+  for reachability-type failures (no path exists through the window's copper)
+  but a cost-driven failure could in principle differ on retry.
+* **Time-limited failures are not cached** -- a failure is inserted only when
+  the net-level timeout bookkeeping reports no cumulative budget exhaustion
+  *and* the attempt did not consume (most of) its ``per_net_timeout``
+  (:func:`attempt_may_have_timed_out`).  The second guard catches a single A*
+  edge that ran out of its own time budget, which otherwise looks like an
+  ordinary failure.  It can only *suppress* an insertion, never serve one.
 * **Bounded** -- LRU with ``max_entries``.  Eviction only ever causes a miss
   (more work), never a different answer.
-* **Deterministic** -- no wall-clock, no randomness; counters depend only on the
-  call sequence.
+* **Deterministic** -- no randomness, and lookups never consult a clock.  With
+  no ``per_net_timeout`` the counters depend only on the call sequence; with a
+  timeout, whether a failure is *inserted* can depend on wall time (it errs
+  toward not caching).
 """
 
 from __future__ import annotations
@@ -156,6 +171,28 @@ class NogoodCache:
         while len(self._entries) > self.max_entries:
             self._entries.popitem(last=False)
             self.stats.evictions += 1
+
+
+#: Fraction of ``per_net_timeout`` an attempt may consume before its failure is
+#: treated as possibly time-limited (and therefore not cached).  Below 1.0 so a
+#: search that stopped right at its deadline is never mistaken for a fast,
+#: genuine failure.
+TIMEOUT_GUARD_FRACTION = 0.9
+
+
+def attempt_may_have_timed_out(elapsed_s: float, per_net_timeout: float | None) -> bool:
+    """True when a failed attempt may have been cut short by its time budget.
+
+    Every A* search inside a negotiated net attempt receives at most the
+    remaining ``per_net_timeout`` budget, so a search that stopped on its time
+    limit implies the whole attempt used (about) the full budget.  Treating any
+    attempt that consumed ``TIMEOUT_GUARD_FRACTION`` of the budget as
+    time-limited is conservative: it can only skip caching a genuine failure,
+    never cache a time-dependent one that finished early.
+    """
+    if per_net_timeout is None:
+        return False
+    return elapsed_s >= per_net_timeout * TIMEOUT_GUARD_FRACTION
 
 
 def nogood_cache_from_env(env: dict[str, str] | None = None) -> NogoodCache | None:

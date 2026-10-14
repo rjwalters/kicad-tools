@@ -52,9 +52,15 @@ The routed-copper SHA-256 is identical across all three arms on every board.
 
 ## Findings
 
-1. **No soundness failure observed.** Completion, connectivity, vias and
-   wirelength match baseline on all boards, and copper is byte-identical, so no
-   cached failure suppressed a feasible route (including the m20 bounded window).
+1. **No soundness failure observed, but the evidence is weak.** Completion,
+   connectivity, vias and wirelength match baseline on all boards, and the
+   copper is byte-identical, so no cached failure suppressed a feasible route.
+   This includes the m20 bounded window. The finding rests on only **2 cache
+   hits** across all boards, both on board 03. Every other attempt was a miss
+   and behaved exactly like baseline by construction. Two served nogoods show
+   that the cache did no harm on these inputs. They do not prove soundness.
+   The safety argument comes from the design (full-grid fingerprint) and the
+   unit oracle tests, not from this run.
 2. **Benefit is small and narrow.** Only board 03 produced hits: 2 hits cut A*
    calls 283 -> 263 (-7.1%) and wall time ~16% (275 -> 231 s). Wall time is load
    dependent on this shared host; A* calls are the load-independent figure and
@@ -69,6 +75,21 @@ Five boards, one seed, one run per row; no variance estimate. The stagnation /
 overflow-heavy subjects where retries repeat most were not available as
 separate frozen inputs beyond 03 and 02. The fingerprint is occupancy-only; a
 change in net-class/clearance rules mid-run is covered only by the key context.
+
+The timeout guard as measured covered only *cumulative* net-budget exhaustion
+(`_last_timeout_failures`). A single A* edge that hit its own time limit looked
+like an ordinary failure and could have been cached, even though such a nogood
+depends on time. The guard now also refuses to insert any failed attempt that
+used at least 90% of its `per_net_timeout`
+(`attempt_may_have_timed_out`, with a regression test). That rule can only
+suppress an insertion. Some timing dependence remains: whether a failure gets
+*inserted* can vary with host load when a timeout is configured.
+
+Negotiation history costs are not part of the key or the fingerprint. For
+reachability-type failures, where no path exists through the fingerprinted
+copper, that is harmless. A failure caused by accumulated costs could, in
+principle, come out differently on retry, so "deterministic given the
+fingerprint" is an assumption and has not been verified.
 
 ## Verdict: refine
 

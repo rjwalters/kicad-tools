@@ -16206,6 +16206,7 @@ class Autorouter:
                 if failure_callback is not None:
                     failure_callback(src, tgt)
 
+        ng_start = time.monotonic() if nogood is not None else 0.0
         new_routes = neg_router.route_net_negotiated(
             pad_objs,
             present_cost_factor,
@@ -16219,7 +16220,14 @@ class Autorouter:
             and failed_pairs
             and not neg_router._last_timeout_failures
         ):
-            nogood.insert(ng_key, self.grid, ng_win, tuple(failed_pairs))
+            from .nogood_cache import attempt_may_have_timed_out
+
+            # ``_last_timeout_failures`` only records cumulative net-budget
+            # exhaustion; a single A* edge that hit its own time limit looks
+            # like an ordinary failure.  Never cache a possibly time-limited
+            # failure -- it is not a function of the fingerprinted copper.
+            if not attempt_may_have_timed_out(time.monotonic() - ng_start, per_net_timeout):
+                nogood.insert(ng_key, self.grid, ng_win, tuple(failed_pairs))
         routes.extend(new_routes)
         return routes
 
