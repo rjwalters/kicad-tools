@@ -221,6 +221,12 @@ class TestBlockingCopperReport:
                 "--skip-drc",
                 "--complete-report",
                 str(report_path),
+                # This test pins the report schema, not deadline behaviour
+                # (TestBoundedTermination owns that). A generous per-link
+                # budget keeps a loaded CI runner from hitting the 30s
+                # default backstop (Issue #6468).
+                "--per-net-timeout",
+                "600",
             ]
         )
         assert report_path.exists()
