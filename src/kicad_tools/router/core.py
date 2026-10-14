@@ -16296,6 +16296,7 @@ class Autorouter:
                 if failure_callback is not None:
                     failure_callback(src, tgt)
 
+        ng_start = time.monotonic() if nogood is not None else 0.0
         new_routes = neg_router.route_net_negotiated(
             pad_objs,
             present_cost_factor,
@@ -16310,13 +16311,19 @@ class Autorouter:
             and all(ng_definitive)
             and not neg_router._last_timeout_failures
         ):
-            nogood.insert(
-                ng_key,
-                self.grid,
-                ng_win,
-                (tuple(failed_pairs), ng_reason[0] if ng_reason else None),
-                ng_extra,
-            )
+            from .nogood_cache import attempt_may_have_timed_out
+
+            # Belt and braces next to the drained-search gate above: a failure
+            # that used (most of) its wall-clock budget is never cached.  It
+            # can only suppress an insertion.
+            if not attempt_may_have_timed_out(time.monotonic() - ng_start, per_net_timeout):
+                nogood.insert(
+                    ng_key,
+                    self.grid,
+                    ng_win,
+                    (tuple(failed_pairs), ng_reason[0] if ng_reason else None),
+                    ng_extra,
+                )
         routes.extend(new_routes)
         return routes
 

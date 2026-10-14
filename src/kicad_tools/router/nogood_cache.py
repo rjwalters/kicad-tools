@@ -38,12 +38,17 @@ Independent derivation (no upstream code consulted or adapted):
   miss a change outside it that opens a detour: that *false hit* is a heuristic
   the experiment measures, not a sound mode.  ``KCT_NOGOOD_CACHE_IGNORE_PF``
   drops the present-cost factor from the key and is deliberately unsound.
+* **Wall-clock guard** -- as a second, insertion-only check, a failed attempt
+  that used 90% or more of its ``per_net_timeout`` is never inserted
+  (:func:`attempt_may_have_timed_out`).  Whether a failure is *inserted* can
+  therefore depend on wall time when a timeout is set; lookups never read a
+  clock.
 * **Cost** -- the whole-grid digest is recomputed on every lookup that finds an
   entry and on every insertion (no per-attempt incremental hashing).
 * **Bounded** -- LRU with ``max_entries``.  Eviction only ever causes a miss
   (more work), never a different answer.
-* **Deterministic** -- no wall-clock, no randomness; counters depend only on the
-  call sequence.
+* **Deterministic** -- no randomness, and lookups never read a clock.  With no
+  ``per_net_timeout`` the counters depend only on the call sequence.
 """
 
 from __future__ import annotations
@@ -256,6 +261,24 @@ class NogoodCache:
         while len(self._entries) > self.max_entries:
             self._entries.popitem(last=False)
             self.stats.evictions += 1
+
+
+#: Fraction of ``per_net_timeout`` an attempt may consume before its failure is
+#: treated as possibly time-limited (and therefore not cached).  Below 1.0 so a
+#: search that stopped right at its deadline is never mistaken for a fast,
+#: genuine failure.
+TIMEOUT_GUARD_FRACTION = 0.9
+
+
+def attempt_may_have_timed_out(elapsed_s: float, per_net_timeout: float | None) -> bool:
+    """True when a failed attempt may have been cut short by its time budget.
+
+    Redundant with :func:`search_failure_is_definitive` (a timed-out search
+    never drains its open set) and kept as a second, insertion-only guard.
+    """
+    if per_net_timeout is None:
+        return False
+    return elapsed_s >= per_net_timeout * TIMEOUT_GUARD_FRACTION
 
 
 def nogood_cache_from_env(env: dict[str, str] | None = None) -> NogoodCache | None:

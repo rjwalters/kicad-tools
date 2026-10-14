@@ -25,7 +25,10 @@ repository's own grid/negotiation structures.
   iteration-cap give-ups, post-route-validation resume exhaustion, skipped
   fallbacks and refused commits are never inserted: under a budget, a
   different cost field can reach the goal, so such a failure says nothing
-  about the next attempt.
+  about the next attempt. A second, insertion-only guard also skips any
+  failed attempt that used 90% or more of its `per_net_timeout`; it is
+  redundant with the drained-search gate, and makes insertion (never lookup)
+  depend on wall time when a timeout is set.
 - **Failure window:** `full` (default) is the whole grid. `m<N>` slices the
   per-cell planes to the terminals' bounding box padded by N cells.
 - **Validity signal:** a BLAKE2b digest, recomputed on **every** lookup that
@@ -70,7 +73,7 @@ iteration cap, and the old code served the stale failure.
 
 ## Tests
 
-`tests/router/test_nogood_cache.py` (20 tests, `--no-cov`): key stability and
+`tests/router/test_nogood_cache.py` (23 tests, `--no-cov`): key stability and
 budget context, bounded-window hit after an out-of-window change,
 relevant-change invalidation, full fingerprint covering `_usage_count`,
 `_history_cost`, `_is_obstacle`, `_is_zone` and `_pad_blocked` with the
@@ -78,7 +81,8 @@ generation unchanged, `_saved*` snapshots ignored, the drained-search gate
 (NO_PATH vs ITERATION_LIMIT / TIMEOUT / skipped fallback / refused commit),
 eviction safety, deterministic counters, env default-off, and two safety
 oracles: a wall removed between attempts, and history removed under an
-iteration cap. Both oracles assert that the retry routes instead of serving
+iteration cap, plus the wall-clock guard (a 1e-9 s budget is never cached; a
+generous one still caches a drained failure). Both oracles assert that the retry routes instead of serving
 the stale failure.
 
 ## Experiment
