@@ -16,9 +16,9 @@ from kicad_tools.cli import route_cmd, route_deadline
 from kicad_tools.router.primitives import Route, Segment
 from tests.test_route_partial_preserved_copper_6553 import (  # noqa: F401
     _board_text,
+    _CheckpointThenDeadline,
     _clean_state,
     _copper,
-    _CheckpointThenDeadline,
 )
 
 
