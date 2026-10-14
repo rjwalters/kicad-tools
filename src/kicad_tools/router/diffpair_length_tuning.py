@@ -101,6 +101,13 @@ class DiffPairTuneResult:
               segment long enough to host any trombone amplitude.
             * ``"unrouted"`` -- one or both halves were not in
               ``routes_by_net``.
+            * ``"not_length_critical"`` -- the engagement gate declined the
+              pair (``length_critical=False``); no change was made.
+            * ``"skew_limit_not_enforced"`` -- Issue #6664: in the
+              checker-limit engagement mode the pair's skew limit resolves
+              to ``skew_severity="warning"`` (an uncited protocol value
+              ``kct check`` only warns on), so the router declines to
+              tune it; no change was made.
         attempts: Number of trombone insertions actually attempted.
         inserts_applied: Number of trombones whose post-insertion check
             passed and were committed.
@@ -108,6 +115,9 @@ class DiffPairTuneResult:
         skew_after_mm: Pair skew after the (possibly empty) sequence of
             successful insertions.
         message: Human-readable summary.
+        tolerance_mm: The skew limit the pair was tuned against (Issue
+            #6664: reported next to the before/after skew).  ``None`` when
+            the caller did not record it.
     """
 
     success: bool = False
@@ -117,6 +127,7 @@ class DiffPairTuneResult:
     skew_before_mm: float = 0.0
     skew_after_mm: float = 0.0
     message: str = ""
+    tolerance_mm: float | None = None
     # The trombone results, kept for diagnostic / test inspection.  An
     # entry is present for every attempt (including rejected ones).
     serpentine_results: list[SerpentineResult] = field(default_factory=list)

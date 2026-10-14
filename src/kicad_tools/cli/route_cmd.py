@@ -1995,6 +1995,130 @@ def _run_consolidation_pass(
         print(f"  Consolidation: {stats.summary()}")
 
 
+def _diffpair_skew_tuning_mode(args: argparse.Namespace) -> str | None:
+    """Which diff-pair skew tuning (if any) runs after routing.
+
+    * ``"length_critical"`` -- ``--length-match-diffpairs`` (Issue #2648),
+      on every engine: tune ``length_critical`` classes to
+      ``effective_skew_tolerance(0.5)``.  Unchanged by Issue #6664.
+    * ``"checker_skew_limit"`` -- Issue #6664: the resolved engine is
+      ``lattice`` and ``--differential-pairs`` is set.  Tune every pair whose
+      skew ``kct check`` fails as an error, to the checker's own limit.  Grid
+      is frozen for new pair features until #6448, so it never auto-engages.
+    * ``None`` -- no tuning.
+    """
+    if getattr(args, "length_match_diffpairs", False):
+        return "length_critical"
+    if getattr(args, "differential_pairs", False) and _resolve_route_engine(args) == "lattice":
+        return "checker_skew_limit"
+    return None
+
+
+def _run_diffpair_skew_tuning(
+    router: Any,
+    args: argparse.Namespace,
+    *,
+    quiet: bool = False,
+) -> Any:
+    """Run the post-route diff-pair skew tuner when engaged (see
+    :func:`_diffpair_skew_tuning_mode`).  Returns the per-pair results, or
+    ``None`` when the tuner did not run."""
+    mode = _diffpair_skew_tuning_mode(args)
+    if mode is None:
+        return None
+    if mode == "length_critical" and not args.differential_pairs:
+        if not quiet:
+            print(
+                "\n--- Length-Match Diff-Pairs: skipped ---\n"
+                "  --length-match-diffpairs requires --differential-pairs "
+                "(no detection means no pairs to tune)."
+            )
+        return None
+
+    from kicad_tools.router.diffpair_detection import detect_diff_pairs
+
+    if mode == "length_critical":
+        if not quiet:
+            print("\n--- Length-Match Diff-Pairs (Epic #2556 Phase 3I) ---")
+        detected_pairs = detect_diff_pairs(net_names=router.net_names)
+    else:
+        if not quiet:
+            print("\n--- Diff-Pair Skew Tuning (lattice, kct check skew limit; Issue #6664) ---")
+        # Issue #6664 (#6447 item 4): detect with the class map, so
+        # class-declared pairs (diffpair_partner) are found, not only
+        # _P/_N-suffixed ones.  ``router.net_class_map`` is keyed by NET
+        # name; the detector looks classes up by CLASS name.
+        net_to_class: dict[str, str] = {}
+        class_routing: dict = {}
+        for net_name, net_class in (getattr(router, "net_class_map", None) or {}).items():
+            class_name = getattr(net_class, "name", None)
+            if class_name:
+                net_to_class[net_name] = class_name
+                class_routing.setdefault(class_name, net_class)
+        detected_pairs = detect_diff_pairs(
+            net_names=router.net_names,
+            net_class_routing=class_routing or None,
+            net_to_class=net_to_class or None,
+        )
+    if not detected_pairs:
+        if not quiet:
+            print("  No differential pairs detected; nothing to tune.")
+        return None
+
+    # Snapshot connectivity for the pad-to-pad invariant.
+    _ci_snapshot_skew = _connectivity_snapshot(router)
+    if mode == "length_critical":
+        tune_results = router.apply_diffpair_length_tuning(
+            detected_pairs=detected_pairs,
+            verbose=not quiet,
+        )
+    else:
+        tune_results = router.apply_diffpair_length_tuning(
+            detected_pairs=detected_pairs,
+            verbose=not quiet,
+            engage="checker_skew_limit",
+        )
+    _enforce_connectivity_invariant_or_exit(
+        router,
+        _ci_snapshot_skew,
+        phase="length_match_diffpairs",
+        args=args,
+        quiet=quiet,
+    )
+    if not quiet:
+        n_tuned = sum(1 for r in tune_results.values() if r.reason == "tuned")
+        n_clean = sum(1 for r in tune_results.values() if r.reason == "already_within_tolerance")
+        n_rollback = sum(
+            1 for r in tune_results.values() if r.reason == "post_insertion_drc_violation"
+        )
+        n_budget = sum(1 for r in tune_results.values() if r.reason == "exceeded_max_inserts")
+        if mode == "length_critical":
+            n_skipped = sum(1 for r in tune_results.values() if r.reason == "not_length_critical")
+            print(
+                f"  Summary: {n_tuned} tuned, {n_clean} clean, "
+                f"{n_rollback} rolled back, {n_budget} budget-exhausted, "
+                f"{n_skipped} skipped (not length-critical)"
+            )
+        else:
+            n_declined = sum(
+                1 for r in tune_results.values() if r.reason == "skew_limit_not_enforced"
+            )
+            n_over = sum(
+                1
+                for r in tune_results.values()
+                if r.tolerance_mm is not None
+                and r.reason != "skew_limit_not_enforced"
+                and r.skew_after_mm > r.tolerance_mm
+            )
+            print(
+                f"  Summary: {n_tuned} tuned, {n_clean} clean, "
+                f"{n_rollback} rolled back, {n_budget} budget-exhausted, "
+                f"{n_declined} declined (limit is a warning), "
+                f"{n_over} still over the kct check skew limit"
+            )
+    return tune_results
+
+
 def _engine_post_passes_enabled(
     args: argparse.Namespace,
     *,
@@ -22623,61 +22747,11 @@ def _run_main_impl(args, parser, argv) -> int:
             if pre_vias > 0:
                 print(f"  Vias:     {pre_vias} -> {post_vias} ({-via_reduction:+.1f}%)")
 
-    # Differential-pair length-match (skew) tuning -- Epic #2556 Phase 3I (Issue #2648).
-    # Engaged via --length-match-diffpairs (opt-in).  Requires --differential-pairs;
-    # otherwise emit a warning and short-circuit (no detection means no pairs).
-    if getattr(args, "length_match_diffpairs", False) and router.routes:
-        if not args.differential_pairs:
-            if not quiet:
-                print(
-                    "\n--- Length-Match Diff-Pairs: skipped ---\n"
-                    "  --length-match-diffpairs requires --differential-pairs "
-                    "(no detection means no pairs to tune)."
-                )
-        else:
-            from kicad_tools.router.diffpair_detection import detect_diff_pairs
-
-            if not quiet:
-                print("\n--- Length-Match Diff-Pairs (Epic #2556 Phase 3I) ---")
-            detected_pairs = detect_diff_pairs(net_names=router.net_names)
-            if not detected_pairs:
-                if not quiet:
-                    print("  No differential pairs detected; nothing to tune.")
-            else:
-                # Snapshot connectivity for the pad-to-pad invariant.
-                _ci_snapshot_skew = _connectivity_snapshot(router)
-                tune_results = router.apply_diffpair_length_tuning(
-                    detected_pairs=detected_pairs,
-                    verbose=not quiet,
-                )
-                _enforce_connectivity_invariant_or_exit(
-                    router,
-                    _ci_snapshot_skew,
-                    phase="length_match_diffpairs",
-                    args=args,
-                    quiet=quiet,
-                )
-                if not quiet:
-                    n_tuned = sum(1 for r in tune_results.values() if r.reason == "tuned")
-                    n_clean = sum(
-                        1 for r in tune_results.values() if r.reason == "already_within_tolerance"
-                    )
-                    n_rollback = sum(
-                        1
-                        for r in tune_results.values()
-                        if r.reason == "post_insertion_drc_violation"
-                    )
-                    n_budget = sum(
-                        1 for r in tune_results.values() if r.reason == "exceeded_max_inserts"
-                    )
-                    n_skipped = sum(
-                        1 for r in tune_results.values() if r.reason == "not_length_critical"
-                    )
-                    print(
-                        f"  Summary: {n_tuned} tuned, {n_clean} clean, "
-                        f"{n_rollback} rolled back, {n_budget} budget-exhausted, "
-                        f"{n_skipped} skipped (not length-critical)"
-                    )
+    # Differential-pair length-match (skew) tuning -- Epic #2556 Phase 3I
+    # (Issue #2648) via --length-match-diffpairs, and auto-engaged on lattice
+    # output with --differential-pairs (Issue #6664).
+    if router.routes:
+        _run_diffpair_skew_tuning(router, args, quiet=quiet)
 
     # N-trace match-group length-match (skew) tuning -- Epic #2661 Phase 3H
     # (Issue #2723).  Engaged via --length-match-groups (opt-in).  Runs

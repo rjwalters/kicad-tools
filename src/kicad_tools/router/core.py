@@ -19551,6 +19551,8 @@ class Autorouter:
         self,
         detected_pairs: list,
         verbose: bool = True,
+        *,
+        engage: str = "length_critical",
     ) -> dict[tuple[str, str], DiffPairTuneResult]:
         """Apply per-pair length-match (skew) tuning to detected diff pairs.
 
@@ -19570,6 +19572,16 @@ class Autorouter:
                 Pairs whose net class is not length-critical are skipped
                 in-place via the engagement gate.
             verbose: Whether to print progress information.
+            engage: Engagement policy.  ``"length_critical"`` (default, the
+                ``--length-match-diffpairs`` contract of Issue #2648): tune
+                only pairs whose class is ``length_critical=True``, against
+                ``effective_skew_tolerance(0.5)``.  ``"checker_skew_limit"``
+                (Issue #6664, the lattice auto-engage path): tune every pair
+                whose skew limit ``kct check`` enforces as an error --
+                ``resolve_pair_thresholds(...).skew_severity == "error"`` --
+                against that same ``skew_mm``, regardless of
+                ``length_critical``.  A pair whose limit resolves to a
+                warning is declined with ``reason="skew_limit_not_enforced"``.
 
         Returns:
             ``{(p_net_name, n_net_name): DiffPairTuneResult}`` for each
@@ -19577,6 +19589,9 @@ class Autorouter:
             gate -- the result's ``reason`` discriminates).
         """
         from .diffpair_length_tuning import tune_diff_pair_skew
+
+        if engage not in ("length_critical", "checker_skew_limit"):
+            raise ValueError(f"unknown diff-pair tuning engagement policy: {engage!r}")
 
         results: dict[tuple[str, str], DiffPairTuneResult] = {}
 
@@ -19630,6 +19645,28 @@ class Autorouter:
                 intra_pair_clearance_mm = self._pair_gap_mm(net_class)
                 length_critical = net_class.length_critical
 
+            if engage == "checker_skew_limit":
+                # Issue #6664: engage on the limit ``kct check`` fails the
+                # board on, and tune to exactly that number -- the single
+                # source shared with the checker (#6442/#6443).
+                from kicad_tools.validate.diffpair_engagement import (
+                    resolve_pair_thresholds,
+                )
+
+                thresholds = resolve_pair_thresholds(
+                    getattr(self, "net_class_map", None), p_name, n_name
+                )
+                tolerance_mm = thresholds.skew_mm
+                length_critical = True
+                if thresholds.skew_severity != "error":
+                    result = self._declined_skew_result(
+                        dp, routes_by_net, tolerance_mm, thresholds.skew_severity
+                    )
+                    results[(p_name, n_name)] = result
+                    if verbose:
+                        print(self._format_skew_tune_line(p_name, n_name, result))
+                    continue
+
             p_route, n_route, result = tune_diff_pair_skew(
                 dp,
                 routes_by_net,
@@ -19679,9 +19716,12 @@ class Autorouter:
                         published.append(replacements.pop(fragment.net))
                 self.restore_route_snapshot(published, replaced_routes=previous)
 
+            result.tolerance_mm = tolerance_mm
             results[(p_name, n_name)] = result
 
-            if verbose:
+            if verbose and engage == "checker_skew_limit":
+                print(self._format_skew_tune_line(p_name, n_name, result))
+            elif verbose:
                 summary = f"  {p_name}/{n_name}: {result.reason}"
                 if result.inserts_applied:
                     summary += (
@@ -19699,6 +19739,52 @@ class Autorouter:
             num_copper_layers=num_layers,
         )
         return results
+
+    @staticmethod
+    def _declined_skew_result(
+        dp,
+        routes_by_net: dict[int, Route],
+        tolerance_mm: float,
+        severity: str,
+    ) -> DiffPairTuneResult:
+        """A no-change result for a pair whose skew limit the checker only warns on."""
+        from .length import LengthTracker
+
+        p_route = routes_by_net.get(dp.pair.positive.net_id)
+        n_route = routes_by_net.get(dp.pair.negative.net_id)
+        skew = 0.0
+        if p_route is not None and n_route is not None:
+            skew = abs(
+                LengthTracker.calculate_route_length(p_route)
+                - LengthTracker.calculate_route_length(n_route)
+            )
+        return DiffPairTuneResult(
+            success=True,
+            reason="skew_limit_not_enforced",
+            skew_before_mm=skew,
+            skew_after_mm=skew,
+            tolerance_mm=tolerance_mm,
+            message=(
+                f"Skew limit {tolerance_mm:.3f}mm resolves to severity "
+                f"{severity!r}; kct check does not fail on it, so it is not tuned."
+            ),
+        )
+
+    @staticmethod
+    def _format_skew_tune_line(p_name: str, n_name: str, result: DiffPairTuneResult) -> str:
+        """One report line per pair for the checker-limit tuning path (Issue #6664)."""
+        limit = f"{result.tolerance_mm:.3f}mm" if result.tolerance_mm is not None else "n/a"
+        line = (
+            f"  {p_name}/{n_name}: {result.reason} "
+            f"(skew {result.skew_before_mm:.3f}mm -> {result.skew_after_mm:.3f}mm, "
+            f"limit {limit}"
+        )
+        if result.inserts_applied:
+            line += f", {result.inserts_applied} inserts"
+        line += ")"
+        if result.tolerance_mm is not None and result.skew_after_mm > result.tolerance_mm:
+            line += " -- STILL OVER LIMIT"
+        return line
 
     def apply_match_group_tuning(
         self,
