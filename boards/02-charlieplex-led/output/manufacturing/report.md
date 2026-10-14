@@ -2,7 +2,7 @@
 title: "charlieplex_3x3_routed"
 subtitle: "Design Report"
 author: "kicad-tools 0.22.0"
-date: "Rev 1 | 2026-10-13 | jlcpcb"
+date: "Rev 1 | 2026-10-14 | jlcpcb"
 geometry: "margin=1in"
 fontsize: 11pt
 colorlinks: true
