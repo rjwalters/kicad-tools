@@ -895,7 +895,8 @@ class DRCChecker:
         authored = self.authored_min_clearance_mm
         fallback = max(self.design_rules.min_clearance_mm, authored or 0.0)
         router_rules = None
-        if self.net_class_map:
+        class_map = self.net_class_map
+        if class_map:
             from kicad_tools.router.rules import DesignRules as RouterDesignRules
 
             router_rules = RouterDesignRules(
@@ -905,12 +906,12 @@ class DRCChecker:
         threshold_map: dict[tuple[int, int], float] = {}
         for key in probe._build_diff_pair_set(self.pcb):
             nc = None
-            if router_rules is not None:
+            if router_rules is not None and class_map:
                 for nid in key:
-                    nc = self.net_class_map.get(names.get(nid, ""))
+                    nc = class_map.get(names.get(nid, ""))
                     if nc is not None:
                         break
-            if nc is not None:
+            if nc is not None and router_rules is not None:
                 threshold_map[key] = router_rules.pair_gap(nc).gap_mm
             else:
                 threshold_map[key] = fallback
