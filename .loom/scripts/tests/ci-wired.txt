@@ -54,6 +54,7 @@ test-champion-premise-false-close.sh
 test-champion-promotion-throughput.sh
 test-champion-standing-authorization.sh
 test-check-ci-status.sh
+test-ci-suite-manifest-installed-layout.sh
 test-check-config-no-host-paths.sh
 test-check-conflict-markers.sh
 test-check-evaluating-staleness.sh

@@ -62,6 +62,22 @@ EXCLUDED_MANIFEST="$SCRIPT_DIR/ci-excluded.txt"
 # "scripts" only picks up top-level scripts/test-*.sh, not subdirectories.
 EXTERNAL_TEST_DIRS=("tests/hooks" "defaults/hooks/tests" "tests/install" "tests/hermit" "scripts")
 
+# Installed layout: this checker also ships into an installing repo as
+# .loom/scripts/tests/, beside verbatim copies of both manifests. There the
+# `/`-qualified entries name Loom source-tree suites that are never installed,
+# and the external directories (when present at all) hold the INSTALLING
+# repo's own suites, which Loom's manifests do not govern. So in that layout
+# the check narrows to this directory: every shipped `test-*.sh` here must
+# still be in exactly one manifest, bare entries must still exist, and
+# qualified entries are skipped rather than reported missing. Without this the
+# shipped copy failed on every qualified entry in every installing repo, so it
+# could not be used to confirm the partition after a resync.
+INSTALLED_LAYOUT=0
+if [[ "$(basename "$(dirname "$(dirname "$SCRIPT_DIR")")")" != "defaults" ]]; then
+    INSTALLED_LAYOUT=1
+    EXTERNAL_TEST_DIRS=()
+fi
+
 fail=0
 err() { printf 'ERROR: %s\n' "$1" >&2; fail=1; }
 
@@ -92,7 +108,7 @@ while IFS= read -r name; do
     actual_local+=("$name")
 done < <(cd "$SCRIPT_DIR" && for f in test-*.sh; do [[ -e "$f" ]] && printf '%s\n' "$f"; done | read_into_lines)
 actual_external=()
-for rel_dir in "${EXTERNAL_TEST_DIRS[@]}"; do
+for rel_dir in ${EXTERNAL_TEST_DIRS[@]+"${EXTERNAL_TEST_DIRS[@]}"}; do
     ext_dir="$REPO_ROOT/$rel_dir"
     [[ -d "$ext_dir" ]] || continue
     while IFS= read -r name; do
@@ -146,6 +162,8 @@ listed="$(printf '%s\n' ${wired[@]+"${wired[@]}"} ${excluded[@]+"${excluded[@]}"
 while IFS= read -r name; do
     [[ -n "$name" ]] || continue
     if [[ "$name" == */* ]]; then
+        # Source-tree-only suite; never installed (see INSTALLED_LAYOUT).
+        [[ "$INSTALLED_LAYOUT" -eq 1 ]] && continue
         suite_path="$REPO_ROOT/$name"
     else
         suite_path="$SCRIPT_DIR/$name"
@@ -165,5 +183,8 @@ fi
 if [[ "$fail" -eq 0 ]]; then
     printf 'OK: %d suites (%d wired, %d excluded) — every test-*.sh is accounted for.\n' \
         "${#actual[@]}" "${#wired[@]}" "${#excluded[@]}"
+    if [[ "$INSTALLED_LAYOUT" -eq 1 ]]; then
+        printf 'NOTE: installed layout — source-tree-only (path-qualified) entries were not checked.\n'
+    fi
 fi
 exit "$fail"

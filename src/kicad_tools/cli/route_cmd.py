@@ -19874,7 +19874,15 @@ def _run_main_impl(args, parser, argv) -> int:
         elif grid_auto_result.memory_forced_unsafe_grid and not (
             args.force or getattr(args, "allow_unsafe_grid", False)
         ):
+            from kicad_tools.router.io import format_max_cells_option
+
             recommended = args.clearance / 2
+            # Issue #6306: name the concrete --max-cells value that clears the gate.
+            _safe_cells = grid_auto_result.safe_grid_cells
+            _n_off = 1 if _safe_cells else 0
+            _safe_cells_opt = (
+                f"  1. {format_max_cells_option(_safe_cells)}\n" if _safe_cells else ""
+            )
             print(
                 f"Error: Auto-grid selected {grid_auto_result.resolution}mm > "
                 f"clearance/2 ({recommended}mm) because the memory budget cap "
@@ -19884,11 +19892,11 @@ def _run_main_impl(args, parser, argv) -> int:
                 f"produce clearance-violating vias/segments (DRC shorts).\n"
                 f"An unrouted net is strictly safer than a short.\n\n"
                 f"Options:\n"
-                f"  1. Enlarge or split the board (fewer cells per mm^2)\n"
-                f"  2. Add routing layers (--auto-layers / --starting-layers)\n"
-                f"  3. Loosen the manufacturer clearance (looser --manufacturer "
+                f"{_safe_cells_opt}"
+                f"  {1 + _n_off}. Add routing layers (--auto-layers / --starting-layers)\n"
+                f"  {2 + _n_off}. Loosen the manufacturer clearance (looser --manufacturer "
                 f"profile or larger --clearance)\n"
-                f"  4. Pass --allow-unsafe-grid (or --force) to route anyway and "
+                f"  {3 + _n_off}. Pass --allow-unsafe-grid (or --force) to route anyway and "
                 f"accept the DRC risk (not recommended)\n",
                 file=sys.stderr,
             )

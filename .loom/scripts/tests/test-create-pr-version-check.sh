@@ -49,7 +49,18 @@ WS_STUB_DIR="$(mktemp -d)"
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/write-scope-stub.sh"
 write_scope_allow_all "$WS_STUB_DIR"
 CREATE_PR="$(cd "$SCRIPT_DIR/.." && pwd)/create-pr.sh"
-REAL_VERSION_SCRIPT="$(cd "$SCRIPT_DIR/../../.." && pwd)/scripts/version.sh"
+# T5-T7 need Loom's OWN scripts/version.sh, which lives at the source-tree
+# root and is never shipped into an installing repo. Resolve it only when this
+# suite runs from the source layout (defaults/scripts/tests/): in an installed
+# copy (.loom/scripts/tests/) the same relative path is
+# <repo-root>/scripts/version.sh, which is either absent or the installing
+# repo's own, unrelated script -- copying that into a fixture would test the
+# wrong thing. Empty means "not available": T1-T4 (hermetic, stubbed) still
+# run against the shipped create-pr.sh, and T5-T7 SKIP.
+REAL_VERSION_SCRIPT=""
+if [[ "$(basename "$(dirname "$(dirname "$SCRIPT_DIR")")")" == "defaults" ]]; then
+  REAL_VERSION_SCRIPT="$(cd "$SCRIPT_DIR/../../.." && pwd)/scripts/version.sh"
+fi
 
 # Colors
 RED='\033[0;31m'
@@ -92,7 +103,8 @@ if [[ ! -x "$CREATE_PR" ]]; then
   echo "ERROR: $CREATE_PR is not executable" >&2
   exit 1
 fi
-if [[ ! -f "$REAL_VERSION_SCRIPT" ]]; then
+if [[ -n "$REAL_VERSION_SCRIPT" && ! -f "$REAL_VERSION_SCRIPT" ]]; then
+  # Source layout but no version.sh: the source tree itself is broken.
   echo "ERROR: $REAL_VERSION_SCRIPT not found" >&2
   exit 1
 fi
@@ -219,6 +231,16 @@ rm -rf "$NO_SCRIPT_REPO"
 LOOM_VERSION_CHECK_SCRIPT="$STUB_DIR/version-mismatch.sh" \
   run_create_pr --title "fix: something" --body "Closes #203" --head "feature/issue-203"
 assert_eq "1" "$EXIT_CODE" "Explicit LOOM_VERSION_CHECK_SCRIPT override is honored over auto-detection"
+
+if [[ -z "$REAL_VERSION_SCRIPT" ]]; then
+  echo ""
+  echo "SKIP: T5-T7 are source-tree-only (scripts/version.sh is not shipped into an installed repo); T1-T4 ran"
+  echo ""
+  echo "────────────────────────────────"
+  echo "Results: $TESTS_PASSED/$TESTS_RUN passed, $TESTS_FAILED failed"
+  [[ $TESTS_FAILED -gt 0 ]] && exit 1
+  exit 0
+fi
 
 # === T5-T7: the REAL scripts/version.sh against a from-scratch fixture repo,
 # proving create-pr.sh + version.sh compose correctly end to end. ===
