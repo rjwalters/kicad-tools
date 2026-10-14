@@ -1564,9 +1564,10 @@ removes the premise: at 1x, `USB_D+` already routes, so expansion has no net
 to win back.
 
 Harness: `scripts/research/shrink_experiment.py` (imports
-`expand_route_experiment.py`). Result rows for the lattice run:
-`data/research/expand_route_shrink/03_rigid_shrink.json`. Routed boards stay
-in scratch.
+`expand_route_experiment.py`). The lattice run's harness output is committed
+as written, as `data/research/expand_route_shrink/03_lattice_*.json` (see
+`data/research/README.md`). Routed boards stay in scratch, and the paths
+inside the JSON point at that scratch tree.
 
 ### Lattice protocol on current main (the run that decides)
 
@@ -1582,13 +1583,40 @@ kct route --route-engine lattice --strategy basic --layers 4 --no-auto-layers \
     --no-placement-delta-feedback --seed 42 --no-cache --grid 0.05
 ```
 
-Step 1 used `expand_route_experiment.py route --grid-policy pinned --grid-mm
-0.05 --extra '<protocol>'`. The shrink used `shrink_experiment.py --extra
-'<protocol>'`, so the repair route ran under the same protocol. The host is
+The commands below regenerate the experiment. They do not reproduce these
+values exactly: the boards are rerouted, and the wall-clock deadline depends
+on host load.
+
+```bash
+W=/path/to/scratch   # outside the repo
+P="--route-engine lattice --strategy basic --layers 4 --no-auto-layers \
+   --deterministic-budget --per-net-iterations 1000000 --no-placement-delta-feedback"
+ERE=scripts/research/expand_route_experiment.py
+# Step 1: one command per row (scale/mode -> file)
+uv run python $ERE route --boards 03 --grid-policy pinned --grid-mm 0.05 --seed 42 \
+    --timeout 900 --extra "$P" --scales 1.0 --modes rigid \
+    --work-dir $W/a --json 03_lattice_1x_s42.json
+#   --scales 1.5 --modes rigid   -> 03_lattice_rigid15_s42.json   (--timeout 900)
+#   --scales 1.5 --modes uniform -> 03_lattice_uniform15_s42.json (--timeout 900)
+#   --scales 1.5 --modes rigid   -> 03_lattice_rigid15_s42_rep.json (--timeout 2400)
+#   --scales 1.5 --modes rigid   -> 03_lattice_rigid15_s42_rep_t900.json (--timeout 900)
+# Steps 2-4: shrink the first rigid 1.5x route
+uv run python scripts/research/shrink_experiment.py \
+    --src boards/03-usb-joystick/output/usb_joystick.kicad_pcb \
+    --routed $W/b/03-rigid-1.5-pinned/usb_joystick_routed.kicad_pcb \
+    --scaled-input $W/b/03-rigid-1.5-pinned/usb_joystick.kicad_pcb \
+    --scale 1.5 --seed 42 --extra "$P" --timeout 2400 \
+    --out-dir $W/shrink --json 03_lattice_shrink_s42.json
+#   same with --timeout 900 -> 03_lattice_shrink_s42_t900.json (repair hit the deadline)
+```
+
+The repair route in the shrink step ran under the same protocol. The host is
 an 8-core machine whose load average was between 13 and 53 during the runs,
 because other agents were running.
 
-**Step 1: the 1.5x rigid route, and the 1x baseline.**
+**Step 1: the 1.5x rigid route, and the 1x baseline.** Source:
+`03_lattice_1x_s42.json`, `03_lattice_uniform15_s42.json` and
+`03_lattice_rigid15_s42.json` (`rows[0]`).
 
 | Placement | Nets (all) | Signal nets unfinished | `kct check --mfr` errors | `kicad-cli` errors (unconnected) | Pours split | Vias | Wire mm |
 |---|---|---|---|---|---|---|---|
@@ -1602,14 +1630,19 @@ because other agents were running.
   only partially coupled. Its connector leg `J1.B6->U2.3` falls back to an
   uncoupled route (`pair-no-path` at 1x and uniform 1.5x, `pair-leg-keepout`
   at rigid 1.5x). Pair continuity is 19.4 %, 38.2 % and 46.1 % against a
-  70 % threshold. Expansion raises the continuity figure but does not couple
+  70 % threshold. These coupling details and percentages come from each
+  row's `route.log`, which is not committed; the JSON records only the rule
+  counts. Expansion raises the continuity figure but does not couple
   the leg. That leg is tracked by #6378 and #6444. The 1x `VBUS` pour split
   is tracked by #6589.
-- **The rigid row reproduces.** A second run with a 2400 s budget produced
-  copper identical to the first run, apart from UUIDs. A second run with the
-  900 s budget did not: it hit the wall-clock deadline at 907.8 s (load
-  average about 41) and finished with 1 signal net open and 212 `kicad-cli`
-  errors. `--deterministic-budget` makes each net's search reproducible, but
+- **The rigid row reproduces.** A second run with a 2400 s budget
+  (`03_lattice_rigid15_s42_rep.json`) produced copper identical to the first
+  run, apart from UUIDs. That was checked with a diff of the two routed
+  boards, which are not committed. The JSON rows agree on every graded
+  figure. A second run with the 900 s budget
+  (`03_lattice_rigid15_s42_rep_t900.json`) did not: it hit the wall-clock
+  deadline at 907.8 s (load average about 41) and finished with 1 signal net
+  open and 212 `kicad-cli` errors. `--deterministic-budget` makes each net's search reproducible, but
   the overall `--timeout` is still wall-clock. On a loaded host, a deadline
   cut-off can therefore look like a different route.
 - **No footprint moved during the route.** Feedback was off. Every footprint
@@ -1618,7 +1651,9 @@ because other agents were running.
   rotation spelled `270` versus `-90`; the census now compares rotations
   modulo 360.
 
-**Step 2: the inverse map (acceptance criterion 1).** The routed board has
+**Step 2: the inverse map (acceptance criterion 1).** Source:
+`03_lattice_shrink_s42.json` (top level, `s0_naive`, and
+`s0_naive.displaced_detail` for the per-net counts and histogram). The routed board has
 825 segments, 69 vias and 48 connected copper components. 200 vertices
 translate with their cluster, and 1519 scale by 1/1.5 about the outline
 centre (148.5, 87.5).
@@ -1631,7 +1666,9 @@ centre (148.5, 87.5).
 - The naive board grades 6/27 nets, 18 signal nets open, 350 `kct check`
   errors and 709 `kicad-cli` errors (41 unconnected).
 
-**Step 3: repair with existing machinery.**
+**Step 3: repair with existing machinery.** Source:
+`03_lattice_shrink_s42.json` (`s1_snap`, `s2_reroute`), and
+`03_lattice_shrink_s42_t900.json` for the attempt that hit the deadline.
 
 - **Snap.** Each pad-attached vertex translates with its pad's footprint
   (394 vertices), and free vertices stay scaled. All 298 displaced ends land
@@ -1642,13 +1679,15 @@ centre (148.5, 87.5).
   `tracks_crossing`, ...). Every one of the 27 nets except `USB_CC2` is named
   in a violation.
 - **Rip and re-route.** Every net named in a `kicad-cli` violation or left
-  stuck was ripped: 26 of 27 nets, 878 of 894 segments and vias. Only
-  `USB_CC2` (one item) survived. `kct route --preserve-existing` then
+  stuck was ripped: 26 of 27 nets, 878 of 894 segments and vias. The 16
+  items that survived are all on `USB_CC2`. `kct route --preserve-existing` then
   re-routed under the same protocol. The first attempt hit the 900 s deadline
-  during zone fill and wrote no board. With a 2400 s budget it finished in
+  (during zone fill, per its route log) and wrote no board. With a 2400 s budget it finished in
   1377 s.
 
-**Step 4: grade (acceptance criterion 2).**
+**Step 4: grade (acceptance criterion 2).** Source: the `grade` objects in
+`03_lattice_shrink_s42.json`. The comparison row is from
+`03_lattice_1x_s42.json`.
 
 | Stage | Nets (all) | Signal nets unfinished | `kct check --mfr jlcpcb` | `kicad-cli pcb drc --refill-zones` (unconnected) |
 |---|---|---|---|---|
@@ -1678,6 +1717,18 @@ re-routed, not kept.
   completes `USB_D+`.
 
 ### First run: grid engine, the issue's command (superseded by the lattice run above)
+
+**Provenance: no committed file backs the numbers in this subsection.**
+The step-1 harness JSON and the `shrink_experiment.py --json` output from this
+run were written to `/tmp/ers-03/` on the worker host and are gone. Every
+figure below, including route lengths, via counts and the miss-distance
+histogram, was read from that run's output and cannot be re-read from the
+repo. Treat them like the "not committed" rows above (#6304). The lattice
+run above replaces them, and its data is committed.
+
+This run used the grid engine, `--seed 42`, the pinned 0.05 mm grid and a
+900 s budget, with placement-delta feedback at its default (on), on a
+shared, loaded host.
 
 #### Step 1: the 1.5x rigid route did not reproduce as complete and clean
 
@@ -1725,7 +1776,8 @@ pad more than a few tenths of a millimetre from the centroid is missed.
   repair, and it is a coordinate rule, not `drc_nudge`. It trades the
   displacement for geometry: 342 `kct check` errors (99 `clearance_pad_segment`,
   98 `clearance_segment_via`, 68 `clearance_segment_segment`, ...) and 648
-  `kicad-cli` errors, with 24 of 27 nets named in a violation. Segments that
+  `kicad-cli` errors, with 24 of 27 nets named in a violation (25 entries, counting kicad-cli's
+  `<no net>` bucket). Segments that
   now join a moved end and a scaled end are no longer on the routing grid,
   at 45 degrees or at clearance; `drc_nudge` moves segments by tenths of a
   millimetre and cannot repair violations of this size, and it only runs
