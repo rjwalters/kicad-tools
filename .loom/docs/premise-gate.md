@@ -228,15 +228,11 @@ Stdout is `KEY=VALUE` lines: `SCOPE`, `TRIGGER`, `RECORD`, `VERDICT`, plus
 **`11` — route it, do not enrich.**
 
 ```bash
-gh issue comment <N> --body "Routing to the operator: <why a human must rule>. \
-Disagreement axis: <the axis two well-informed people would still disagree on, \
-and why it is a preference rather than a fact>."
-gh issue edit <N> --add-label "loom:operator-only,loom:operator-decision"
+loom-daemon operator-decision apply <N> --input d.json   # writes the decision block, adds loom:operator
 ```
 
-Both labels in the **same** command, and the comment MUST name the
-disagreement axis — that is `curator.md` § "Applying `loom:operator-only`" and
-`label-state-machine.md` § "`loom:operator-only` sub-kinds", unchanged. This
+The decision's ranked options MUST name the disagreement axis in their whys —
+that is `label-state-machine.md` § "Routing to a human", unchanged. This
 gate invents no label and relaxes none of those requirements.
 
 **`13` — the premise is false.** Close or rescope per CLAUDE.md § "Issues Are
@@ -349,8 +345,8 @@ enrichment pass is spent.
 
 - #7855 — the incident. #8309 — the prose rule that preceded this.
   #8310 — the predecessor closed for a stale citation. #8269 — the parent.
-- `defaults/docs/label-state-machine.md` § "`loom:operator-only` sub-kinds" —
-  the taxonomy this routes into, unchanged.
+- `defaults/docs/label-state-machine.md` § "Routing to a human" — the
+  route this takes, unchanged.
 - [shell-language-policy.md](https://github.com/rjwalters/loom/blob/main/.loom/docs/shell-language-policy.md),
   [file-size-policy.md](https://github.com/rjwalters/loom/blob/main/.loom/docs/file-size-policy.md) —
   why the implementation is Rust behind a stub.

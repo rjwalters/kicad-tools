@@ -6,17 +6,17 @@
 # #6715 originally reported that Champion's epic-escalation path
 # (champion-epic.md, "Step 4: Reject" -> escalate-to-operator branch) strips
 # `loom:epic` when it routes an unrevised epic to
-# `loom:operator-only,loom:operator-decision` -- which would leave the epic
+# `loom:operator` -- which would leave the epic
 # permanently invisible to every downstream Champion pass (epics are
 # discovered BY the `loom:epic` label), even after a human revises it, since
 # nothing would ever re-apply the label.
 #
 # Curator investigation for #6715 found the hypothesis does NOT reproduce
 # against this repo's current `defaults/`: the escalation `gh issue edit` is
-# add-only (`--add-label "loom:operator-only,loom:operator-decision"`, no
+# add-only (`--add-label "loom:operator"`, no
 # `--remove-label` at all). This suite is the anti-regression mechanism that
 # keeps it that way, modeled directly on
-# defaults/scripts/tests/test-operator-only-subkind.sh's pattern:
+# defaults/scripts/tests/test-operator-hold-routing.sh's pattern:
 #
 #   1. LINT -- no `--remove-label` anywhere under defaults/ ever targets
 #      `loom:epic` (a static grep, exercised against pass/fail fixtures so it
@@ -38,7 +38,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 # (consumer repos, and Loom's own dogfooded checkout), falling back to the
 # defaults/ source-tree path (a bare source checkout with no installed copy
 # yet). See issue #6194 / #6241 (same convention as
-# test-operator-only-subkind.sh).
+# test-operator-hold-routing.sh).
 if [[ -d "$REPO_ROOT/.claude/commands/loom" ]]; then
     ROLE_DIR="$REPO_ROOT/.claude/commands/loom"
 else
@@ -70,7 +70,7 @@ fail() { TESTS_RUN=$((TESTS_RUN + 1)); TESTS_FAILED=$((TESTS_FAILED + 1)); echo 
 
 # Print every offending "<file>:<line>: <text>" -- a line where a
 # `--remove-label` argument's token list literally contains `loom:epic`.
-# Mirrors test-operator-only-subkind.sh's per-argument isolation so a
+# Mirrors test-operator-hold-routing.sh's per-argument isolation so a
 # multi-flag command (`--remove-label "loom:building" --add-label
 # "loom:epic"`, which does NOT remove the epic label) is not a false
 # positive.
@@ -119,7 +119,7 @@ cat >"$FIXTURE_DIR/bad.md" <<'EOF'
 Escalate to the operator:
 
 ```bash
-gh issue edit <number> --remove-label "loom:epic" --add-label "loom:operator-only,loom:operator-decision"
+gh issue edit <number> --remove-label "loom:epic" --add-label "loom:operator"
 ```
 EOF
 if [[ -n "$(scan_file "$FIXTURE_DIR/bad.md")" ]]; then
@@ -129,7 +129,7 @@ else
 fi
 
 cat >"$FIXTURE_DIR/bad2.md" <<'EOF'
-gh issue edit "$N" --remove-label "loom:building,loom:epic" --add-label "loom:operator-only"
+gh issue edit "$N" --remove-label "loom:building,loom:epic" --add-label "loom:operator"
 EOF
 if [[ -n "$(scan_file "$FIXTURE_DIR/bad2.md")" ]]; then
     pass "--remove-label with loom:epic in a comma-separated list is reported"
@@ -141,7 +141,7 @@ fi
 echo ""
 echo "Test 2: lint accepts compliant (add-only, or unrelated removal) forms"
 cat >"$FIXTURE_DIR/good.md" <<'EOF'
-gh issue edit <number> --add-label "loom:operator-only,loom:operator-decision"
+gh issue edit <number> --add-label "loom:operator"
 gh issue edit <number> --remove-label "loom:building" --add-label "loom:epic"
 gh issue edit "$N" --remove-label "loom:issue" --add-label "loom:building"
 Prose mentioning loom:epic without a --remove-label flag is fine.
@@ -193,7 +193,7 @@ if [[ -f "$CHAMPION_EPIC" ]]; then
     # issue's test plan: this MUST fail the same check above.
     BUGGY_BLOCK='ESCALATE_MARKER="<!-- champion:epic-escalated -->"
 gh issue comment <number> --body "$ESCALATE_MARKER" \
-  && gh issue edit <number> --remove-label "loom:epic" --add-label "loom:operator-only,loom:operator-decision"'
+  && gh issue edit <number> --remove-label "loom:epic" --add-label "loom:operator"'
     if grep -qE -- '--remove-label[ \t]*=?[ \t]*"?loom:epic\b' <<<"$BUGGY_BLOCK"; then
         pass "the same check correctly FAILS a deliberately-reintroduced regression fixture"
     else

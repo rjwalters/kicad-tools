@@ -359,7 +359,7 @@ else
     assert_doc_contains "$CHAMPION_PROMO_MD" 'gh issue close <number> --reason "not planned"' \
         "champion-issue-promo.md's close template uses --reason \"not planned\""
     assert_doc_contains "$CHAMPION_PROMO_MD" "is deliberately **not** applied here" \
-        "champion-issue-promo.md states loom:operator-only is NOT applied on a premise-false close"
+        "champion-issue-promo.md states loom:operator is NOT applied on a premise-false close"
     assert_doc_contains "$CHAMPION_PROMO_MD" "CLOSE_PREMISE_FALSE" \
         "champion-issue-promo.md's gate computes a CLOSE_PREMISE_FALSE decision variable"
     assert_doc_contains "$CHAMPION_PROMO_MD" "Re-run EACH cited mechanical" \
@@ -428,8 +428,8 @@ if [[ ! -f "$LABEL_STATE_MD" ]]; then
 else
     assert_doc_contains "$LABEL_STATE_MD" "champion:premise-false-closed" \
         "label-state-machine.md's Champion escalation row records the close marker"
-    assert_doc_contains "$LABEL_STATE_MD" "no \`loom:operator-only\` and no sub-kind" \
-        "label-state-machine.md states the close path applies no operator-only sub-kind"
+    assert_doc_contains "$LABEL_STATE_MD" "no hold label, since nothing is routed to a human" \
+        "label-state-machine.md states the close path applies no hold label"
 fi
 
 if [[ ! -f "$CLAUDE_MD" ]]; then

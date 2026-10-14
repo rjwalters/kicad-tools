@@ -53,7 +53,6 @@ below. Types/ranges are strict **on this surface** (see Validation).
 | `dispatch` | `weightBonusVeryImportant` | 100 | 0–1000000 (integer) | Points added while the repo has dispatchable `loom:very-important` work (#11742). Hot-applies | — | — |
 | `dispatch` | `weightBonusImportant` | 20 | 0–1000000 (integer) | Points added while the repo has dispatchable `loom:important` work (#11742). Hot-applies | — | — |
 
-`dispatch.drawTemperature` (the #11684 softmax temperature) is retired by #11742: it is still accepted so an existing config keeps starting, and ignored.
 | `lifecycle` | `leaseTtlMinutes` | 15.0 | >0–1440 | Lease-freshness TTL (#6286) | — | `LOOM_LEASE_TTL_MINUTES` |
 | `lifecycle` | `idleExitMinutes` | 60 | 1–10080 | Idle-exit turnaround (#4467) | `autonomous.idleExit.idleMinutes` | `LOOM_AUTONOMOUS_IDLE_EXIT_MINUTES` |
 | `rework` | `buildBackoffHigh` | 40 | 1–100000 | Per-repo PR-debt level that engages a repo's build back-off (#9410, #10624) | `autonomous.workFinder.buildBackoff.high` | — |
@@ -64,6 +63,8 @@ below. Types/ranges are strict **on this surface** (see Validation).
 | `champion` | `tier3Cap` | 1 | 0–100 | Unused since #11512; parsed for config compatibility (old Tier 3 per-pass cap) | — | `LOOM_CHAMPION_TIER3_CAP` |
 | `champion` | `tier3BacklogCap` | 5 | 0–1000 | Unused since #11512; parsed for config compatibility (old Tier 3 backlog gate) | — | `LOOM_CHAMPION_TIER3_BACKLOG_CAP` |
 
+`dispatch.drawTemperature` (the #11684 softmax temperature) is retired by #11742: it is still accepted so an existing config keeps starting, and ignored.
+
 The `champion` values enter the run digest. Champion's shell snippets read
 the `LOOM_CHAMPION_*` env vars directly, so the resolver honours them at the
 top tier (provenance `env`) with the shell's own parse: a non-negative
@@ -71,6 +72,31 @@ integer wins (`0` included, unclamped), empty/non-integer falls through. The
 daemon does not yet export block/vector values into role sessions (follow-up
 on #10753): until it does, a config/vector value is digested but only the env
 var changes Champion's behaviour.
+
+### Role-runner knobs (`autonomous.roleRunner.*`)
+
+These are not hyperparameter-surface fields: they live under `autonomous.roleRunner`
+(resolved per root, re-read every role-runner tick) and keep their own validation
+(an invalid value drops to the default). The full table, with env overrides and
+semantics, is in [`daemon-reference.md`](daemon-reference.md) (search for
+`autonomous.roleRunner`). The ones that change how much work runs:
+
+| Key | Default | Governs |
+|---|---|---|
+| `enabled` | `false` | Periodic standalone support-role runner on/off (#4015) |
+| `maxConcurrent` | the 7 interval-default roles | Host-wide ceiling on concurrently-running role agents (#6102) |
+| `roleMaxConcurrent` | `max(1, maxConcurrent / 2)` per role | Per-role budget under the ceiling (#9391) |
+| `eventTriggers.enabled` | `false` | Event-driven curator/auditor/guide launches instead of every interval (#10816) |
+| `eventTriggers.maxQuietSecs` | 86400 | A gated role that has not launched in this long launches anyway |
+| `demandWidth.enabled` | `true` | Demand-weighted role admission (#9392); `false` restores Phase 1 admission |
+| `demandWidth.perRun` | 3 | Queued PRs per role run in the PR-role width |
+| `demandWidth.max` | 4 | Upper clamp on judge, doctor and champion width (still capped by the role budget) |
+| `demandWidth.reserve` / `nonPrFloor` | `true` / 1 | Champion-first ceiling reservation, and the slots it always leaves for non-PR roles |
+| `demandWidth.laneK` / `perRepoCap` / `doctorMaxPerRepo` | 10 / 3 / `perRepoCap` | Per-repository judge and doctor lanes (#10630, #10632) |
+| `demandWidth.staleSecs` | 1800 | Demand-ledger entries older than this are stale (unobserved axis) |
+
+`eventTriggers` and `demandWidth` change how many role records are written; see
+[`telemetry-kind-pick-decision.md`](telemetry-kind-pick-decision.md).
 
 ## Precedence
 

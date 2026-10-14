@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# test-guide-work-plan-operator-only-exclude.sh - Regression test for issue #7008
+# test-guide-work-plan-operator-hold-exclude.sh - Regression test for issue #7008
 #
 # guide.md's `render_plan_body()` (WORK_PLAN.md's machine-generated region)
 # has SIX forge queries: `starred`/`ready`/`building`/`review`/`approved`/
@@ -53,6 +53,9 @@
 #   4. NEGATIVE CONTROL: the pre-fix (unfiltered) `ready`/`building`
 #      pipelines DO include the operator-only issues — i.e. this test would
 #      have failed before the fix (reproduces #6245's flap).
+#
+# #11795: `loom:operator-only` folded into `loom:operator`; the queries and
+# fixtures below use the new name.
 #
 # Hermetic: `gh` is stubbed with fixture JSON; only the real `jq` binary is
 # invoked (skipped if unavailable) — no forge/network calls.
@@ -108,7 +111,7 @@ pass "render_plan_body() body extracted from $GUIDE_MD"
 # Test 1: STRUCTURE — ready/building queries carry the exclusion clauses
 # ---------------------------------------------------------------------------
 echo ""
-echo "Test 1: the ready/building queries exclude loom:operator-only (and, #7071, loom:blocked)"
+echo "Test 1: the ready/building queries exclude loom:operator (and, #7071, loom:blocked)"
 
 # #7083: the query itself was renamed ready_json= (it is filtered again,
 # against the open-linked-PR exclusion set, before the final `ready=` bullet
@@ -119,16 +122,27 @@ echo "Test 1: the ready/building queries exclude loom:operator-only (and, #7071,
 READY_LINE="$(grep -n '^  ready_json=' <<<"$RPB_BODY" || true)"
 BUILDING_LINE="$(grep -n '^  building=' <<<"$RPB_BODY" || true)"
 
-if grep -q '^  ready_json=\$("\$GH_READ" issue list --label "loom:issue" --search "-label:loom:building -label:loom:operator-only -label:loom:blocked[ "]' <<<"$RPB_BODY"; then
-    pass "the ready_json= query excludes loom:building, loom:operator-only, and loom:blocked via --search"
+# Since #11795 the exclusion sets are the registry's, retired names included
+# until `labels migrate` has moved every item: hold_q (every hold) for Ready,
+# op_q (the operator holds) for In Progress. The literals are the fallback for
+# a daemon without --with-retired.
+if grep -qF "  hold_q=\$(loom-daemon labels list --property hold --with-retired 2>/dev/null || printf 'loom:blocked\\nloom:operator\\nloom:frozen')" <<<"$RPB_BODY" \
+   && grep -qF "  op_q=\$(loom-daemon labels list --property operator_gate --with-retired 2>/dev/null || echo loom:operator)" <<<"$RPB_BODY"; then
+    pass "hold_q / op_q are the registry's sets (--with-retired), falling back to the three holds / loom:operator"
 else
-    fail "expected ready_json= to carry --search \"-label:loom:building -label:loom:operator-only -label:loom:blocked\" (got: $READY_LINE)"
+    fail "expected hold_q= / op_q= to query the registry with --with-retired and the literal fallback"
 fi
 
-if grep -q '^  building=\$("\$GH_READ" issue list --label "loom:building" --search "-label:loom:operator-only[ "]' <<<"$RPB_BODY"; then
-    pass "the building= query excludes loom:operator-only via --search"
+if grep -q '^  ready_json=\$("\$GH_READ" issue list --label "loom:issue" --search "-label:loom:building \$(sed .s/^/-label:/. <<<"\$hold_q"' <<<"$RPB_BODY"; then
+    pass "the ready_json= query excludes loom:building and every hold label via --search"
 else
-    fail "expected building= to carry --search \"-label:loom:operator-only\" (got: $BUILDING_LINE)"
+    fail "expected ready_json= to carry --search \"-label:loom:building <hold_q>\" (got: $READY_LINE)"
+fi
+
+if grep -q '^  building=\$("\$GH_READ" issue list --label "loom:building" --search "\$(sed .s/^/-label:/. <<<"\$op_q"' <<<"$RPB_BODY"; then
+    pass "the building= query excludes the operator holds via --search"
+else
+    fail "expected building= to carry --search \"<op_q>\" (got: $BUILDING_LINE)"
 fi
 
 if ! command -v jq >/dev/null 2>&1; then
@@ -187,28 +201,51 @@ mkdir -p "$TMPROOT/fixtures"
 FIX="$TMPROOT/fixtures"
 
 # `ready` fixture (loom:issue query): #6068 plain-eligible, #6245 mirrors the
-# real-world repro (loom:issue + loom:operator-only + loom:operator-blocked),
+# real-world repro (loom:issue + loom:operator),
 # #6100 a loom:issue + loom:building issue (also excluded by `ready`'s own
-# --search clause, independent of operator-only), #6805 (#7071) a loom:issue
+# --search clause, independent of operator-held), #6805 (#7071) a loom:issue
 # + loom:blocked issue — the combination this suite's extension covers.
 cat > "$FIX/issue-loom_issue.json" <<'JSON'
 [
   {"number":6068,"title":"Plain ready issue","labels":[{"name":"loom:issue"}]},
-  {"number":6245,"title":"Guard ask-pattern false positive","labels":[{"name":"loom:issue"},{"name":"loom:operator-only"},{"name":"loom:operator-blocked"}]},
+  {"number":6245,"title":"Guard ask-pattern false positive","labels":[{"name":"loom:issue"},{"name":"loom:operator"}]},
   {"number":6100,"title":"Already-building issue","labels":[{"name":"loom:issue"},{"name":"loom:building"}]},
-  {"number":6805,"title":"Blocked-but-approved issue","labels":[{"name":"loom:issue"},{"name":"loom:blocked"}]}
+  {"number":6805,"title":"Blocked-but-approved issue","labels":[{"name":"loom:issue"},{"name":"loom:blocked"}]},
+  {"number":6806,"title":"Unmigrated operator-only issue","labels":[{"name":"loom:issue"},{"name":"loom:operator-only"}]},
+  {"number":6807,"title":"Unmigrated operator-blocked issue","labels":[{"name":"loom:issue"},{"name":"loom:operator-blocked"}]}
 ]
 JSON
 
-# `building` fixture: #6500 plain-eligible, #6501 gained loom:operator-only.
+# `building` fixture: #6500 plain-eligible, #6501 gained loom:operator.
 cat > "$FIX/issue-loom_building.json" <<'JSON'
 [
   {"number":6500,"title":"Plain building issue","labels":[{"name":"loom:building"}]},
-  {"number":6501,"title":"Building issue that gained operator-only","labels":[{"name":"loom:building"},{"name":"loom:operator-only"}]}
+  {"number":6501,"title":"Building issue that gained operator-held","labels":[{"name":"loom:building"},{"name":"loom:operator"}]},
+  {"number":6502,"title":"Building issue held by an unmigrated name","labels":[{"name":"loom:building"},{"name":"loom:operator-only"}]}
 ]
 JSON
 
-RENDER="$(LOOM_FIXTURE_DIR="$FIX" GH_READ="$GH_STUB" RPB_SRC="$RPB_BODY" bash -c 'eval "$RPB_SRC"; render_plan_body')"
+# `loom-daemon labels list --property P --with-retired`: the registry's sets,
+# retired names included (#11795) -- the real daemon's answer when one is
+# built, else those sets spelled out.
+mkdir -p "$TMPROOT/bin"
+REAL_DAEMON="${LOOM_TEST_REAL_DAEMON:-${LOOM_DAEMON_BIN:-}}"
+for prop in hold operator_gate; do
+    if [[ -n "$REAL_DAEMON" && -x "$REAL_DAEMON" ]]; then
+        "$REAL_DAEMON" labels list --property "$prop" --with-retired >"$TMPROOT/registry-$prop"
+    elif [[ "$prop" == "hold" ]]; then
+        printf '%s\n' loom:blocked loom:operator loom:frozen loom:operator-only loom:operator-decision \
+            loom:operator-mechanical loom:operator-blocked loom:needs-capability >"$TMPROOT/registry-$prop"
+    else
+        printf '%s\n' loom:operator loom:operator-only loom:operator-decision loom:operator-mechanical \
+            loom:operator-blocked >"$TMPROOT/registry-$prop"
+    fi
+done
+printf '#!/usr/bin/env bash\n[ "$1 $2 $3 ${5:-}" = "labels list --property --with-retired" ] || exit 2\ncat "%s/registry-$4"\n' \
+    "$TMPROOT" >"$TMPROOT/bin/loom-daemon"
+chmod +x "$TMPROOT/bin/loom-daemon"
+
+RENDER="$(PATH="$TMPROOT/bin:$PATH" LOOM_FIXTURE_DIR="$FIX" GH_READ="$GH_STUB" RPB_SRC="$RPB_BODY" bash -c 'eval "$RPB_SRC"; render_plan_body')"
 
 if [[ -z "$RENDER" ]]; then
     fail "render_plan_body() produced no output against the fixtures (harness broken)"
@@ -220,15 +257,15 @@ READY_BODY="$(awk '/^## Ready/{flag=1; next} /^## /{flag=0} flag' <<<"$RENDER")"
 BUILDING_BODY="$(awk '/^## In Progress/{flag=1; next} /^## /{flag=0} flag' <<<"$RENDER")"
 
 # ---------------------------------------------------------------------------
-# Test 2 (AC): the real render_plan_body() excludes operator-only issues
+# Test 2 (AC): the real render_plan_body() excludes operator-held issues
 # ---------------------------------------------------------------------------
 echo ""
-echo "Test 2: render_plan_body() excludes loom:operator-only from Ready/In Progress"
+echo "Test 2: render_plan_body() excludes loom:operator from Ready/In Progress"
 
 if grep -q '#6245' <<<"$READY_BODY"; then
-    fail "#6245 (loom:issue + loom:operator-only) must NOT appear in the Ready section"
+    fail "#6245 (loom:issue + loom:operator) must NOT appear in the Ready section"
 else
-    pass "#6245 (loom:issue + loom:operator-only) is excluded from the Ready section"
+    pass "#6245 (loom:issue + loom:operator) is excluded from the Ready section"
 fi
 
 if grep -q '#6100' <<<"$READY_BODY"; then
@@ -238,9 +275,9 @@ else
 fi
 
 if grep -q '#6501' <<<"$BUILDING_BODY"; then
-    fail "#6501 (loom:building + loom:operator-only) must NOT appear in the In Progress section"
+    fail "#6501 (loom:building + loom:operator) must NOT appear in the In Progress section"
 else
-    pass "#6501 (loom:building + loom:operator-only) is excluded from the In Progress section"
+    pass "#6501 (loom:building + loom:operator) is excluded from the In Progress section"
 fi
 
 # ---------------------------------------------------------------------------
@@ -255,11 +292,25 @@ else
     pass "#6805 (loom:issue + loom:blocked) is excluded from the Ready section"
 fi
 
+# #11795 transition: a hold name `labels migrate` has not moved yet still holds.
+for n in 6806 6807; do
+    if grep -q "#$n" <<<"$READY_BODY"; then
+        fail "#$n (loom:issue + an unmigrated retired hold) must NOT appear in the Ready section"
+    else
+        pass "#$n (loom:issue + an unmigrated retired hold) is excluded from the Ready section"
+    fi
+done
+if grep -q '#6502' <<<"$BUILDING_BODY"; then
+    fail "#6502 (loom:building + loom:operator-only) must NOT appear in the In Progress section"
+else
+    pass "#6502 (loom:building + loom:operator-only) is excluded from the In Progress section"
+fi
+
 # ---------------------------------------------------------------------------
 # Test 3: NO OVER-EXCLUSION — plain issues still render
 # ---------------------------------------------------------------------------
 echo ""
-echo "Test 3: plain (non-operator-only) issues still render"
+echo "Test 3: plain (non-operator-held) issues still render"
 
 if grep -q '#6068' <<<"$READY_BODY"; then
     pass "#6068 (plain loom:issue) still appears in the Ready section"

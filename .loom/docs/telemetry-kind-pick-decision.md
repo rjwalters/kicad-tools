@@ -214,6 +214,12 @@ Derived from the shipped default cadences, **not measured on a live fleet**:
 | guide | 900 s | up to 96 |
 | architect | 3600 s | up to 24 |
 
+The cadences above are the defaults with `autonomous.roleRunner.eventTriggers.enabled` off
+and demand-weighted width at its defaults. Turning event triggers on lowers curator, auditor
+and guide record volume (a quiet role launches only on a new input, or at `maxQuietSecs`),
+and `demandWidth` can run several judge, doctor or champion lanes at once, which raises it.
+The figures below do not model either.
+
 A role record is only written for a tick that was admitted and run; a root held
 back at admission writes none. With 1 root and the default roles, that is about
 1,440 + 288*3 + 144*3 + 96 + 24 = roughly 2.9 k rows/day per host; each extra

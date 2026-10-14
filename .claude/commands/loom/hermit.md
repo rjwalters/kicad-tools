@@ -421,7 +421,7 @@ EOF
 ### Approach 1: Standalone Removal Issue
 
 1. **Hermit (You)** -> Creates issue with `loom:hermit` label
-2. **Human/Champion Review** -> Adds `loom:issue` to approve, OR closes to reject. Champion itself almost never closes here — a rejection keeps `loom:hermit` and escalates to `loom:operator-only` after repeated unrevised rejections (`champion-issue-promo.md` Step 4). Champion closes directly only when every recurring finding is a re-verified-false premise (#7657, "premise-false close gate") — else a human decides.
+2. **Human/Champion Review** -> Adds `loom:issue` to approve, OR closes to reject. Champion itself almost never closes here — a rejection keeps `loom:hermit` and escalates to `loom:operator` after repeated unrevised rejections (`champion-issue-promo.md` Step 4). Champion closes directly only when every recurring finding is a re-verified-false premise (#7657, "premise-false close gate") — else a human decides.
 3. **Curator** (optional) -> enhances the approved issue
 4. **Worker** -> implements it (claims with `loom:building`)
 5. **Reviewer** -> verifies on the PR that the removal breaks nothing

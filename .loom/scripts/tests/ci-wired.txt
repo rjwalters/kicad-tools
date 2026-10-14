@@ -53,6 +53,7 @@ test-champion-pr-merge-negation-guard.sh
 test-champion-premise-false-close.sh
 test-champion-promotion-throughput.sh
 test-champion-standing-authorization.sh
+test-champion-targeted-modes.sh
 test-check-ci-status.sh
 test-ci-suite-manifest-installed-layout.sh
 test-check-config-no-host-paths.sh
@@ -112,7 +113,7 @@ test-guide-docs-pr-race.sh
 test-guide-docs-telemetry.sh
 test-guide-operator-attention-fold.sh
 test-guide-blocked-unblock-limit.sh
-test-guide-operator-only-exclude.sh
+test-guide-operator-hold-exclude.sh
 test-guide-plan-body-stable-sort.sh
 test-guide-pool-pressure-defer.sh
 test-guide-superseding-block-merge-state.sh
@@ -125,7 +126,7 @@ test-guide-work-log-pr-pagination.sh
 test-guide-work-log-self-loop.sh
 test-guide-work-plan-approved-review-label-fidelity.sh
 test-guide-work-plan-debounce.sh
-test-guide-work-plan-operator-only-exclude.sh
+test-guide-work-plan-operator-hold-exclude.sh
 test-guide-work-plan-ready-open-pr-exclude.sh
 test-hard-exclusion-labels.sh
 test-host-sleep-config.sh
@@ -155,6 +156,7 @@ test-merge-admission-telemetry.sh
 test-merge-pr-app-permission-fallback.sh
 test-merge-pr-auto-merge-disabled-fallback.sh
 test-merge-pr-auto-queued-stacked-children.sh
+test-merge-pr-expected-head.sh
 test-merge-pr-pr-state.sh
 test-merge-pr-check-runs-404-fallback.sh
 test-merge-pr-daemon-version-floor.sh
@@ -164,7 +166,7 @@ test-merge-pr-tree-checks.sh
 test-merge-pr-ci-result.sh
 test-merge-pr-required-checks.sh
 test-nextest-daemon-guard.sh
-test-operator-only-subkind.sh
+test-operator-hold-routing.sh
 test-post-verdict.sh
 test-pr-worktree-isolation.sh
 test-probe-tokens-fallback.sh

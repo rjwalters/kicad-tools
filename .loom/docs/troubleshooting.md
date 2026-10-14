@@ -1478,40 +1478,29 @@ Run the sync script — or create the one label directly — to reconcile:
 
 ```bash
 gh label list --search operator                      # empty => not provisioned
-gh label create "loom:operator-only" --color F97316 \
-  --description "Requires human action or ruling outside automation (creds, infra, hardware); sweep skips"
+gh label create "loom:operator" --color EA580C \
+  --description "A human must act or decide; the body says which"
 ```
 
 **GitHub caps label descriptions at 100 characters.** A `labels.yml` entry with a
 longer description fails to sync (HTTP 422 "description is too long") and the label
 silently never gets created. Keep descriptions at or under 100 chars.
 
-#### `loom:blocked` vs `loom:operator-only` vs `loom:needs-capability`
+#### `loom:blocked` vs `loom:operator` vs `loom:frozen`
 
-These status labels look similar but mean different things to the automation:
+The three holds (`.loom/docs/label-state-machine.md` → "The three holds"):
 
-- **`loom:blocked`** — work is *automatable* but currently waiting on a dependency
-  (another issue, an unmerged PR, missing context). The intent is "unblock it, then
-  a Builder can proceed."
-- **`loom:operator-only`** — work requires a *human to act or rule outside
-  automation entirely* (rotating credentials, infra changes, hardware access,
-  manual deploys — or an owner-gated decision: an issue the code owner filed as a
-  TODO on owner-tracked code, where the design direction is the owner's call).
-  Sweep skips these in pre-flight rather than attempting them; a human must
-  do the work off-automation before the issue can proceed.
-- **`loom:needs-capability`** (#5817) — a narrower claim than `loom:operator-only`:
-  blocked on a missing tool/agent capability, not an operator-by-right decision.
-  Sweep skips these identically to `loom:operator-only` in pre-flight today; the
-  filed capability-request issue should be linked (`Depends on #N` / `Requires
-  #N`). See `.loom/docs/label-state-machine.md` § "`loom:needs-capability` — a
-  narrower claim than `loom:operator-only`" for the full split rationale.
+- **`loom:blocked`** — waiting on something automation resolves (another
+  issue, an unmerged PR, a missing capability with its capability marker). It
+  self-releases once the blocker resolves.
+- **`loom:operator`** — a human must act or decide: credentials, infra,
+  hardware, a ruling. The body says which (a `decision` block, a capability
+  marker, a `Blocked by #N` line). Sweep skips these issues in pre-flight.
+- **`loom:frozen`** — not now; only a human removes it.
 
-Reaching for `loom:blocked` when you mean `loom:operator-only` (or
-`loom:needs-capability`) conflates "waiting on a dependency" with "needs a human
-action outside automation," which muddies the daemon/sweep skip semantics. Use
-`loom:operator-only` for the human-must-act-off-automation case, and
-`loom:needs-capability` specifically when the blocker is missing tooling rather
-than a human ruling.
+The retired `loom:operator-only` / `-decision` / `-mechanical` /
+`-blocked` and `loom:needs-capability` labels map onto these (#11795; table in
+`label-state-machine.md`).
 
 ### An operator edit to `.loom/config.json` disappeared (#4641)
 

@@ -75,19 +75,12 @@ loom-daemon park-record apply --issue 812 --blocked-by XXX,YYY,ZZZ --by builder 
 ```
 
 > **`loom:blocked` is the terminal state for a decomposition — not
-> `loom:operator-only` (#5819).** Size is not a routing signal: "this is too
+> `loom:operator` (#5819).** Size is not a routing signal: "this is too
 > big for one PR" is a `loom:blocked` parent with children filed, and the
-> pipeline picks it up again on its own. Reserve `loom:operator-only` for a
-> PO-level decision or a human-hands step (#10001; rule: `curator.md` →
-> "Applying `loom:operator-only`"), never "requires judgement". When you do
-> apply it, **never apply it alone** — add exactly one sub-kind in that command
-> (`loom:operator-blocked` / `loom:operator-mechanical` /
-> `loom:operator-decision`), e.g.
-> `loom-daemon operator-decision apply 812 --input d.json --also-label loom:operator-only --remove-label loom:building`.
-> Being unsure which sub-kind fits means the analysis isn't finished — it is
-> **not** a reason to default to `loom:operator-decision` (#5826). Full rule,
-> including the machine-readable `Blocked by #N` line required with
-> `loom:operator-blocked`: `builder.md` → "Applying `loom:operator-only`".
+> pipeline picks it up again on its own. Reserve `loom:operator` for a
+> PO-level decision or a human-hands step (#10001), never "requires
+> judgement"; rule: `.loom/docs/label-state-machine.md` → "Routing to a
+> human".
 
 ### Sub-issue labeling (mirrors curator.md decomposition rule)
 

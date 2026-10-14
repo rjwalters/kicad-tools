@@ -304,9 +304,9 @@ if [[ -f "$CHAMPION_EPIC" ]]; then
         fi
 
         # Wiring, not prose: the section's own invariants legitimately *name*
-        # loom:operator-only in order to forbid it, so only an actual label
+        # loom:operator in order to forbid it, so only an actual label
         # application or an actual counter assignment counts as a violation.
-        if grep -qE -- '--add-label.*loom:operator-only' <<<"$STANDDOWN" \
+        if grep -qE -- '--add-label.*loom:operator' <<<"$STANDDOWN" \
             || grep -qE '(ESCALATE_UNREVISED|UNREVISED_EVALS|SKIP_STREAK|PRIOR_REJECTIONS)=' <<<"$STANDDOWN" \
             || grep -q 'LOOM_MAX_UNREVISED_EVALUATIONS' <<<"$STANDDOWN"; then
             fail "stand-down section wires an escalation counter or operator-only routing"

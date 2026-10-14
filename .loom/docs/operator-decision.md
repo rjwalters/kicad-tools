@@ -1,7 +1,8 @@
 # Operator decisions: ranked options, one helper (#9344)
 
-**Load when**: you are about to put `loom:operator-decision` on an issue, or
-you are repairing an issue labelled `loom:decision-malformed`.
+**Load when**: you are about to route a ruling to the operator (`loom:operator`
++ a `decision` block), or you are repairing an issue labelled
+`loom:decision-malformed`.
 
 An operator decision is not free prose. The operator should be able to read
 the question, see the options you already weighed, ranked, and vote with one
@@ -24,9 +25,10 @@ one-option "please advise" is refused.
 
 ## The helper
 
-Never hand-apply `loom:operator-decision`. Write the decision as JSON and let
+Never hand-write a decision. Write it as JSON and let
 `loom-daemon operator-decision` validate it, render it into the body, and
-apply the label:
+apply `loom:operator` (#11795: the `decision` block, not a label, is what
+makes a hold a ruling):
 
 ```bash
 cat > /tmp/decision.json <<'EOF'
@@ -49,11 +51,11 @@ loom-daemon operator-decision validate --input /tmp/decision.json
 
 # Relabel an existing issue (preview first with --dry-run):
 loom-daemon operator-decision apply 1234 --input /tmp/decision.json \
-  --also-label loom:operator-only --remove-label loom:building
+  --remove-label loom:building
 
 # Or file a new one:
 loom-daemon operator-decision apply --new --title "Cache backend" \
-  --input /tmp/decision.json --also-label loom:operator-only
+  --input /tmp/decision.json
 ```
 
 `--input -` reads the JSON from stdin.
@@ -71,7 +73,7 @@ loom-daemon operator-decision apply --new --title "Cache backend" \
    stacking a second one, so the same input applied twice gives the same body.
    A hand-written ` ```decision ` block is replaced too.
 4. **Labels only after the body write succeeds.** It adds
-   `loom:operator-decision` and any `--also-label` labels. Then it removes any
+   `loom:operator` and any `--also-label` labels. Then it removes any
    `--remove-label` labels that are present, and `loom:decision-malformed` if
    present, since a valid body is the repair.
 
@@ -108,6 +110,6 @@ Curator owns the repair (#10057; see "Repairing `loom:decision-malformed`" in
 the Curator role). The bounce comment names the failing reasons. Rebuild the
 decision JSON from options already in the thread (never invent options) and
 run `apply` on the issue. That rewrites the body, restores
-`loom:operator-decision`, and clears the bounce label. If there is no real
+`loom:operator`, and clears the bounce label. If there is no real
 operator call to reconstruct, do not force one through the helper: re-route
 the issue per the Curator role instead.

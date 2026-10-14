@@ -34,7 +34,7 @@ migrated (table below).
 **Priority changes order, never eligibility or admission** (operator ruling,
 #11508). A priority issue is dispatched only once it is `loom:issue` (there is
 no priority side listing), and no priority exempts a candidate from any gate
-(caps, build back-off, file overlap, repo-sharding slice).
+(caps, build back-off, file overlap).
 
 ## Selection: workspace first, then issue
 
@@ -76,7 +76,7 @@ red-main fix is an issue carrying `<!-- loom:main-red-fix -->` whose repo's
 `main` is verified red this tick. While `main` is red nothing in that repo can
 merge, so the fix leads its workspace and adds the red-main bonus to the
 workspace's weight in the draw. It is not a level and changes no gate: it keeps only its existing bypass
-of the build back-off, the file-overlap gate and the repo-sharding slice,
+of the build back-off and the file-overlap gate,
 which a red `main` would otherwise deadlock. On a green `main` the marker
 grants nothing. With `autonomous.workFinder.redMainAutofile.enabled` on (off
 by default), the daemon files that issue itself when `main` turns red, and

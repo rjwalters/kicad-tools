@@ -285,7 +285,7 @@ assert_eq "ExpectedButDead" "$install_state" "unreachable --json: daemon.install
 #    stub reports non-zero counts.
 # ===================================================================
 echo "Test 8: work queue counts + renders the proposal labels"
-GH_LABEL_COUNTS="loom:issue=1 loom:review-requested=2 loom:pr=3 loom:architect=4 loom:hermit=5 loom:curated=6 loom:auditor=7 loom:operator-only=8 loom:operator-blocked=3 loom:operator-decision=5"
+GH_LABEL_COUNTS="loom:issue=1 loom:review-requested=2 loom:pr=3 loom:architect=4 loom:hermit=5 loom:curated=6 loom:auditor=7 loom:operator=8 loom:blocked=3 loom:frozen=5"
 run_status LOOM_DAEMON_BIN=/nonexistent LOOM_WORKSPACES_PATH="$WORKDIR/no-such-registry.json"
 assert_contains "Pending proposals:" "$OUT" "work queue prints the Pending proposals line"
 assert_contains "loom:architect 4" "$OUT" "work queue reports the loom:architect count"
@@ -293,9 +293,10 @@ assert_contains "loom:hermit 5" "$OUT" "work queue reports the loom:hermit count
 assert_contains "loom:curated 6" "$OUT" "work queue reports the loom:curated count"
 assert_contains "loom:auditor 7" "$OUT" "work queue reports the loom:auditor count"
 assert_contains "Parked:" "$OUT" "work queue prints the Parked line (#5664)"
-assert_contains "loom:operator-only 8" "$OUT" "work queue reports the loom:operator-only count"
-assert_contains "blocked: 3" "$OUT" "work queue reports the loom:operator-blocked sub-count"
-assert_contains "decision: 5" "$OUT" "work queue reports the loom:operator-decision sub-count"
+assert_contains "loom:operator 8" "$OUT" "work queue reports the loom:operator count"
+assert_contains "loom:blocked 3" "$OUT" "work queue reports the loom:blocked count"
+assert_contains "loom:frozen 5" "$OUT" "work queue reports the loom:frozen count"
+assert_not_contains "operator-only" "$OUT" "no retired hold label in the Parked line (#11795)"
 unset GH_LABEL_COUNTS
 
 run_status_json LOOM_DAEMON_BIN=/nonexistent LOOM_WORKSPACES_PATH="$WORKDIR/no-such-registry.json" GH_LABEL_COUNTS="loom:architect=9"
@@ -309,15 +310,15 @@ assert_eq "9" "$architect" "work_queue --json includes loom:architect"
 # ===================================================================
 run_status LOOM_DAEMON_BIN=/nonexistent LOOM_WORKSPACES_PATH="$WORKDIR/no-such-registry.json"
 assert_contains "Parked:" "$OUT" "the Parked line is shown even when nothing is parked"
-assert_contains "loom:operator-only 0" "$OUT" "an empty backlog reports zero parked, not an omitted line"
+assert_contains "loom:operator 0" "$OUT" "an empty backlog reports zero parked, not an omitted line"
 
-run_status_json LOOM_DAEMON_BIN=/nonexistent LOOM_WORKSPACES_PATH="$WORKDIR/no-such-registry.json" GH_LABEL_COUNTS="loom:operator-only=2 loom:operator-blocked=2"
-operator_only="$(echo "$OUT" | jq -r '.work_queue."loom:operator-only"' 2>/dev/null)"
-operator_blocked="$(echo "$OUT" | jq -r '.work_queue."loom:operator-blocked"' 2>/dev/null)"
-operator_decision="$(echo "$OUT" | jq -r '.work_queue."loom:operator-decision"' 2>/dev/null)"
-assert_eq "2" "$operator_only" "work_queue --json includes loom:operator-only"
-assert_eq "2" "$operator_blocked" "work_queue --json includes loom:operator-blocked"
-assert_eq "0" "$operator_decision" "work_queue --json defaults loom:operator-decision to 0 when unset (stub default)"
+run_status_json LOOM_DAEMON_BIN=/nonexistent LOOM_WORKSPACES_PATH="$WORKDIR/no-such-registry.json" GH_LABEL_COUNTS="loom:operator=2 loom:blocked=2"
+held_operator="$(echo "$OUT" | jq -r '.work_queue."loom:operator"' 2>/dev/null)"
+held_blocked="$(echo "$OUT" | jq -r '.work_queue."loom:blocked"' 2>/dev/null)"
+held_frozen="$(echo "$OUT" | jq -r '.work_queue."loom:frozen"' 2>/dev/null)"
+assert_eq "2" "$held_operator" "work_queue --json includes loom:operator"
+assert_eq "2" "$held_blocked" "work_queue --json includes loom:blocked"
+assert_eq "0" "$held_frozen" "work_queue --json defaults loom:frozen to 0 when unset (stub default)"
 
 # ===================================================================
 # 9. LOOM_DAEMON_BIN pointed at a non-executable path: treated identically

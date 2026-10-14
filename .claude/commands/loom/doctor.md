@@ -430,7 +430,7 @@ harder over time.
 ### Priority 2: PRs with Changes Requested (NORMAL)
 
 **Find PRs with review feedback that aren't already claimed and are not on an
-explicit hard hold (`loom:blocked` / `loom:operator-only`).**
+explicit hard hold (`loom:blocked` / `loom:frozen`).**
 
 > **Claim discipline for every queue above.** The `loom:treating` filter in this
 > queue is a point-in-time snapshot: a claim can land between your list call and
@@ -439,8 +439,8 @@ explicit hard hold (`loom:blocked` / `loom:operator-only`).**
 > from PR Fix Mode, or from an explicit user instruction — run the
 > "Stale `loom:treating` Claim Check" in the Work Process below.
 >
-> **Operator-hold exclusion (Priority 2 queue, #5272).** `loom:blocked` and
-> `loom:operator-only` are the same generic "a human took this out of
+> **Hold exclusion (Priority 2 queue, #5272).** `loom:blocked` and
+> `loom:frozen` are the same generic "taken out of
 > automated flow" signal the work-finder already honors for `loom:issue` rows
 > — the shared queue excludes both so autonomous Finding Work never
 > auto-claims a held PR. This does not change PR Fix Mode or an explicit user
@@ -448,7 +448,7 @@ explicit hard hold (`loom:blocked` / `loom:operator-only`).**
 > decision to work on that specific PR, same as everywhere else in this file.
 >
 > **Why this query does NOT also exclude `loom:operator` (#7660).** Unlike
-> `loom:blocked` / `loom:operator-only` above, `loom:operator` is
+> `loom:blocked` / `loom:frozen` above, `loom:operator` is
 > **deliberately left unfiltered** here — this is not an oversight. When
 > Champion routes a stale, held PR from `loom:pr` to `loom:changes-requested`,
 > it intentionally *keeps* `loom:operator` so this Priority 2 queue can still
@@ -458,60 +458,32 @@ explicit hard hold (`loom:blocked` / `loom:operator-only`).**
 > fixed (held PRs becoming permanently stuck as `CONFLICTING`, unreachable by
 > Doctor) — do not add one.
 >
-> **Operator-hold exclusion (Priority 1 queue, #5978).** `loom:operator`
-> (Champion's merge-risk hold) is a *different* label from `loom:blocked` /
-> `loom:operator-only` above — see `.loom/docs/label-state-machine.md`. Doctor
-> is not yet a wired entry/exit point for `loom:operator` (see that doc's
-> "Not yet wired" table) — this exclusion is therefore **filter-only**: the
-> shared queue skips `loom:operator` approved-conflict PRs (feedback rows remain eligible) so autonomous Finding Work never
-> rebases/pushes to a held PR, but Doctor must not itself add or remove
-> `loom:operator`. Don't drop this filter when Doctor is eventually wired as a
-> real entry/exit point — re-derive it from that wiring instead. Same PR Fix
-> Mode / explicit-user-instruction carve-out as the Priority 2 note above.
+> **Operator-hold exclusion (Priority 1 queue, #5978).** The shared queue
+> skips `loom:operator` approved-conflict PRs (feedback rows remain eligible)
+> so autonomous Finding Work never rebases/pushes to a held PR. Outside
+> "Routing to a human" below, Doctor never adds or removes `loom:operator`
+> (see `.loom/docs/label-state-machine.md`). Same PR Fix Mode /
+> explicit-user-instruction carve-out as the Priority 2 note above.
 
-### Applying `loom:operator-only`: a sub-kind label is REQUIRED (#5819)
+### Routing to a human
 
-Doctor's normal flow only **filters** on `loom:operator-only` (the queries
-above). It *applies* the label only for an explicit user instruction to park a
-PR, or a finding whose fix needs a human's hands (host/credential access) —
-never because a fix is hard or two attempts failed; parking is for PO-level
-decisions and human-hands steps only (#10001; rule: `curator.md` → "Applying
-`loom:operator-only`"). **Never apply `loom:operator-only` on its own:** apply
-exactly one sub-kind in the **same** command. Purely additive — the
-operator-hold exclusion above and every filter keyed on it are unaffected:
-
-| Sub-kind | Apply when |
-|---|---|
-| `loom:operator-blocked` | Waiting on a **named** issue/PR/piece of infrastructure that does not exist yet — self-clearing once that lands |
-| `loom:operator-mechanical` | Needs host or admin access, a credential, or another mechanical action — no judgement required (the typical Doctor case: a fix that requires a secret rotation or a machine you cannot reach) |
-| `loom:operator-decision` | The fix requires authority you structurally cannot hold — a preference call or an authority act (binds the entity, irreversible disclosure, spending, credentials only the operator holds, accepting risk on the entity's behalf, physical-world action) |
+Doctor's normal flow only **filters** on holds. It *applies* one only for an
+explicit user instruction to park a PR, or a finding whose fix needs a
+human's hands (a secret rotation, a machine you cannot reach) — never because
+a fix is hard or two attempts failed (#10001). The rule is
+`.loom/docs/label-state-machine.md` → "Routing to a human": a human's hands →
+`loom:operator` + a capability marker and a comment naming the step; a ruling
+→ `loom-daemon operator-decision apply`; either can carry a `Blocked by #N`
+line; automation-resolvable waiting → `loom:blocked` with a park record.
 
 ```bash
 ./.loom/scripts/post-comment.sh <number> --pr --body "Routing to the operator: <what a human must do>."
-gh pr edit <number> --add-label "loom:operator-only,loom:operator-mechanical"
+gh pr edit <number> --add-label "loom:operator" --remove-label "loom:changes-requested"
 ```
 
-**Being unsure which sub-kind applies means you haven't finished diagnosing
-the fix, not that the bare label is safe to reach for (#5826).**
-`loom:operator-decision` is **not** a safe default when the kind is not
-obvious — before applying it, run the falsifiability test from
-`.loom/docs/label-state-machine.md`: name the axis two well-informed people
-would still disagree on, and show it is a preference, not a fact. If you
-cannot name that axis, the fix is determined — finish diagnosing it instead of
-parking. If the only gap is a missing objective, file a decision
-whose options are the candidate objectives (#10000).
-
-**If you chose `loom:operator-blocked`**, the same comment MUST name the blocker
-in machine-readable form: a literal `Blocked by #N` / `Depends on #N` /
-`Requires #N` line (the exact phrasings `detect-dependency-cycle.sh` and
-`warn-operator-gated.sh` parse by regex). A backtick-quoted reference in prose
-does not satisfy this.
-
-**If you chose `loom:operator-decision`**, use `loom-daemon operator-decision
-apply` (`operator-decision.md`); the ranked whys name the axis.
-
-Full taxonomy and rationale: `.loom/docs/label-state-machine.md` →
-"`loom:operator-only` sub-kinds".
+Drop `loom:changes-requested` in the same edit: on a PR `loom:operator` is
+not a park (#7660), so the label alone would hand the PR straight back to
+your own queue.
 
 ### Stale-Verdict Check (before claiming from Priority 1 or Priority 2)
 
@@ -564,7 +536,9 @@ gh pr list --state=open --json number,title,labels,mergeable \
 ```bash
 # Check primary queues first
 PRIORITY_1=$(gh pr list --label="loom:pr" --state=open --json number,mergeable,labels | jq '[.[] | select(.mergeable == "CONFLICTING") | select(any(.labels[]?.name; . == "loom:frozen") | not)] | length')
-PRIORITY_2=$(gh pr list --search "is:open is:pr label:loom:changes-requested -label:loom:blocked -label:loom:operator-only -label:loom:frozen" --json number | jq 'length')
+# PR-lane parks: holds but loom:operator (#7660), retired names incl. (#11795)
+PR_PARKS=$(loom-daemon labels list --property hold --with-retired 2>/dev/null | grep -vx 'loom:operator' || printf 'loom:blocked\nloom:frozen')
+PRIORITY_2=$(gh pr list --search "is:open is:pr label:loom:changes-requested $(sed 's/^/-label:/' <<<"$PR_PARKS" | tr '\n' ' ')" --json number | jq 'length')
 
 if [ "$PRIORITY_1" -eq 0 ] && [ "$PRIORITY_2" -eq 0 ]; then
   echo "No labeled work, checking fallback queue..."

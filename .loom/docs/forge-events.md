@@ -368,6 +368,119 @@ What it must do to satisfy this consumer:
   the requested `after` fell outside the retention window;
 - answer 401/403 for a bad key and 404 for an unknown host.
 
+## 8. The state mirror (`forge.mirror`): discovery reads and wakes
+
+A **state mirror** is a second piece of operator infrastructure, separate
+from the per-host feed above. It keeps, per repo, the issues and PRs the
+fleet asks about (state, labels, author, body, sub-issue counts, head and
+base) current from GitHub App webhooks, corrects what webhooks miss with a
+slow reconcile, and stamps every answer with the repo's **freshness
+watermark**: `last_event_at`, `last_reconciled_at` and `served_at`. It also
+serves a per-repo, sequence-numbered **change stream**. The daemon uses it
+for two things, both off unless configured.
+
+```json
+"forge": { "mirror": {
+  "origin": "https://events.example.com",
+  "keyRef": "ssm:///events/keys/host-a",
+  "region": "example-region-1",
+  "maxStalenessSecs": 600,
+  "changePollSecs": 30
+} }
+```
+
+- **`origin`**: `https://<host>` or a bare host, never a GitHub host.
+- **`keyRef`** (`key_ref` is accepted too): `ssm://<parameter>` (read with
+  the AWS CLI and an explicit region: `region`, else `AWS_REGION`, else
+  `AWS_DEFAULT_REGION`) or `file:<path>`, as for `forge.gateway`
+  ([`github-authentication.md`](github-authentication.md)). The key is held
+  in memory and sent only as `Authorization: Bearer`.
+- **`awsProfile`** (optional): as for `forge.gateway`. Unset, an `ssm://`
+  read runs as the host's instance role; set, it names a profile in the
+  default `~/.aws` files; invalid, `ssm://` reads are refused.
+- **`maxStalenessSecs`** (default 600, clamped to 30-900): the discovery
+  bound. 900 is this ADR's hard staleness cap.
+- **`changePollSecs`** (default 30, clamped to 10-300): the change-stream
+  pull cadence.
+
+Put a fleet-wide value in the fleet tier and a canary in one host's tier.
+The daemon re-reads the block every minute and re-reads the key every five
+minutes, or at once after a `401`.
+
+### 8.1 Discovery reads
+
+The work finder's candidate listings and the stage-dwell sampler's stage
+listings ask the mirror first: `GET /v1/mirror/items?repo=&label=&state=open`
+(every page, with bodies). The answer is used only when **every** page's
+watermark is fresh:
+
+- the mirror knows the repo, it has not moved, and it has completed at least
+  one reconcile (before that its holdings may be only what webhooks named);
+- the newest of `last_event_at` and `last_reconciled_at` is within
+  `maxStalenessSecs` of `served_at`;
+- `served_at` is within `maxStalenessSecs` of the host's clock.
+
+Anything else (stale, unknown, never reconciled, moved, an error, a timeout,
+a malformed answer) reads the listing exactly as before, through the
+ETag-cached REST path and the gateway when one is set. A stale or unknown
+repo is not asked again for two minutes, or until the change stream reports
+a change for it, and after any failed request no
+listing asks the mirror for 60 seconds, so a down mirror costs one bounded
+wait, not one per listing. A listing never fails, and never reads as an
+empty queue, because of the mirror.
+
+An idle repo whose last event and reconcile are both older than the bound
+falls back. That costs little: an unchanged REST listing is a `304`. The
+mirror's saving is on active repos, where every host used to pay its own
+`200` for the same change.
+
+**Decision reads never come from the mirror.** Claim, label-transition and
+merge reads stay on their current path (the poll gate's invariant 3: reads
+that gate a decision are never held). The mirror's listing answers only discovery reads, and a source
+test pins its two call sites.
+
+### 8.2 Wakes
+
+While a mirror is live, the daemon pulls `GET /v1/changes?repos=…&after=…`
+for the repos it serves (its workspace and every provisioned root) every
+`changePollSecs`. It keeps its own cursor per repo in
+`$HOME/.loom/forge-mirror/cursors.json`, for one origin.
+
+- A repo with no cursor is baselined at its latest change, with no prompt,
+  so a restart never replays history.
+- Each pull that returns changes publishes **one** `forge.event` prompt with
+  `source: "github-events-mirror"`, `count`, webhook-style `types`
+  (`issues`, `pull_request`, `check_run`) and the changed `repos`. The armed
+  early-tick consumers (§4.1) act on it exactly as on a feed page, under the
+  same spacing floor and coalescing. The changed repos also invalidate the
+  poll gate's holds.
+- A cursor the stream truncated, or one past the repo's latest change (the
+  mirror's log was reset), re-baselines and prompts once.
+
+Delivery is at-least-once and a change is a nudge: the prompt carries no
+number, label, title or state, and the loop it ticks re-reads through its own
+path. Polling stays the floor at the existing cadence, so a dead stream costs
+latency only. To get early ticks, arm the consumers as in §4.1 (for example
+`forgeEvents.events.workFinderTick: true`); the per-host feed (§2) does not
+have to be enabled.
+
+### 8.3 Measuring it
+
+- `loom.forge.mirror.reads{caller, repo, outcome}`: `outcome` is `hit`,
+  `stale`, `unknown`, `error` or `skipped`. Every non-`hit` fell back to the
+  forge. `caller = wake` counts change-stream requests (`repo = -`).
+- `loom.forge.mirror.changes{repo, kind}` and
+  `loom.forge.mirror.wake_latency{repo}` (summed seconds from a change at the
+  mirror to the pull that saw it; divide by `changes` for the mean).
+
+That discovery no longer reaches GitHub shows as `loom.forge.calls` for
+`caller` `work_finder` and `stage_dwell` falling while `reads{outcome=hit}`
+rises.
+
+**Break-glass.** Unset `forge.mirror`. Within a minute no listing asks the
+mirror and no change stream is pulled; every read is exactly what it was
+before. The fleet store fetch never depends on the mirror.
+
 ## See also
 
 - [ADR-0021](https://github.com/rjwalters/loom/blob/main/docs/adr/0021-forge-event-plane.md) — the decision and its
@@ -376,4 +489,5 @@ What it must do to satisfy this consumer:
   backend, same shape
 - [`credential-storage.md`](credential-storage.md) — where keys may live
 - [`network-inputs.md`](network-inputs.md) — where this feed sits among every network input to the daemon (rows 6-7)
-- Source: `loom-daemon/src/forge_events.rs`
+- Source: `loom-daemon/src/forge_events.rs`; the state mirror (§8):
+  `loom-daemon/src/forge_mirror.rs` and `forge_mirror/`

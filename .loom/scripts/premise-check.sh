@@ -21,7 +21,7 @@
 # Exit codes (contract):
 #   0   PROCEED          out of scope, or a consistent verdict=clear record
 #   10  RECORD-REQUIRED  in scope, no record - do the check BEFORE enriching
-#   11  ROUTE-OPERATOR   loom:operator-only + loom:operator-decision, no pass
+#   11  ROUTE-OPERATOR   loom:operator + a decision block (operator-decision apply), no pass
 #   12  RECORD-MALFORMED the record fails a structural rule (treat as 10)
 #   13  PREMISE-FALSE    the behaviour does not exist as described
 #   1   ERROR            FAILS CLOSED - treat as 10, never as 0

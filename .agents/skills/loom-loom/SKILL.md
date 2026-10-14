@@ -216,7 +216,7 @@ When the daemon is running, you coordinate work via MCP tools where available, a
    ```
    The frozen v0.10.0 topic taxonomy is:
    - `sweep.issue.{N}.phase`     — phase transitions (curator → builder → judge → doctor → merge)
-   - `sweep.issue.{N}.blocker`   — a sweep added a `loom:blocked` or `loom:operator-only` label
+   - `sweep.issue.{N}.blocker`   — a sweep added a `loom:blocked` or `loom:operator` label
    - `sweep.issue.{N}.exited`    — clean exit (with `exit_code` and `duration_sec`)
    - `sweep.issue.{N}.crashed`   — non-zero exit / OOM (with `checkpoint_phase`)
    - `sweep.global.dispatch`     — daemon accepted a new `dispatch_sweep` request
@@ -674,8 +674,9 @@ loom-clean --deep       # Also remove build artifacts
 | `loom:curated` | Enhanced, awaiting approval | Curator |
 | `loom:issue` | Approved and ready for work | Champion/Human |
 | `loom:building` | Being implemented | Builder |
-| `loom:blocked` | Work is blocked | Builder |
-| `loom:operator-only` | Needs a human; sweep skips | Human |
+| `loom:blocked` | Waiting; self-releases | Builder |
+| `loom:operator` | A human must act or decide | Any role |
+| `loom:frozen` | Not now | Human |
 | `loom:important`, `loom:very-important` | Order, promotion cap | Human/Guide/Champion |
 
 **Workflow labels (PR lifecycle):**
@@ -701,12 +702,7 @@ loom-clean --deep       # Also remove build artifacts
 
 **Troubleshooting**
 
-**Issue stuck in `loom:building`:**
-```bash
-loom-recover-orphans --recover
-```
-
-**Orphaned sweeps after daemon crash:**
+**Issue stuck in `loom:building`, or orphaned sweeps after a daemon crash:**
 ```bash
 loom-recover-orphans --recover
 ```

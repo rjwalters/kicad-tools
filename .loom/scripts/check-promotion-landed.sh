@@ -34,7 +34,7 @@
 #   check-promotion-landed.sh --issue <n> --apply     # report + reconcile
 #
 # With --apply, on a MISMATCH this script:
-#   1. If the issue carries `loom:operator-only` (a human owns it), does
+#   1. If the issue carries `loom:operator` (a human owns it), does
 #      nothing. DECISION=ALREADY_ESCALATED (#6942).
 #   2. Otherwise adds `loom:issue`, verifies the addition with a read-back,
 #      and posts a reconciliation comment. DECISION=COMPLETED. If the edit or
@@ -58,7 +58,7 @@
 #        e.g. loom:issue -> loom:building or -> loom:blocked — nothing to
 #        reconcile in any of these cases, #6933).
 #        ALSO used for DECISION=ALREADY_ESCALATED (the issue carries
-#        loom:operator-only — a human already owns it, #6942).
+#        loom:operator — a human already owns it, #6942).
 #   1  = usage or environment error (bad args, `gh`/`jq` missing, a required
 #        `gh` read failed)
 #   10 = NOT_OPEN (issue is closed — nothing left to reconcile)
@@ -241,11 +241,14 @@ fi
 # refusal leaves this a report-only MISMATCH.
 WRITE_REPO="$(source "$(dirname "${BASH_SOURCE[0]}")/lib/forge-helpers.sh" && loom_write_repo "${LOOM_REPO:-}" 2>"$GH_STDERR")" || { emit "MISMATCH" "$REASON; --apply refused: loom-daemon forge may-write: $(tr '\n' ' ' <"$GH_STDERR")"; exit 11; }
 
-# A human already owns an issue carrying loom:operator-only (a run of this
-# script before #11512, which escalated when it could not recover a tier, or
-# an operator's own hold): never promote over it (#6942).
-if jq -e '.labels[] | select(.name=="loom:operator-only")' <<<"$ISSUE_JSON" >/dev/null 2>&1; then
-  emit "ALREADY_ESCALATED" "$REASON; the issue carries loom:operator-only — a human owns it, nothing further to do"
+# A held issue is never promoted over (#6942): loom:operator (a run of this
+# script before #11512, which escalated when it could not recover a tier, or an
+# operator's own hold), or any other hold. The set is the registry's, with the
+# retired names `labels migrate` has not moved yet (#11795; #11843 drops
+# --with-retired); the fallback is for a missing or older daemon.
+# requires-daemon: labels optional   a missing or older binary takes the fallback list
+if HELD="$(jq -r --arg h "$("${LOOM_DAEMON_BIN:-loom-daemon}" labels list --property hold --with-retired 2>/dev/null || echo loom:blocked loom:operator loom:frozen loom:operator-only loom:operator-decision loom:operator-mechanical loom:operator-blocked loom:needs-capability)" '[.labels[].name | select(IN($h | splits("[ \n]+")))] | first // empty' <<<"$ISSUE_JSON" 2>/dev/null)" && [[ -n "$HELD" ]]; then
+  emit "ALREADY_ESCALATED" "$REASON; the issue carries the hold $HELD — a human owns it, nothing further to do"
   exit 0
 fi
 

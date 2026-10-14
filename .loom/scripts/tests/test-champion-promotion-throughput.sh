@@ -125,7 +125,8 @@ mkdir -p "$FIXTURE_DIR/bin"
 
 # Open issues the stub serves. No priority level: #101-#103 are promoted and
 # unheld (the only real default-level occupants); #104 (curated) and #105
-# (Hermit) still wait for promotion; #107/#108 are promoted but held (#7613).
+# (Hermit) still wait for promotion; #107/#108 are promoted but held (#7613);
+# #109 is held by a retired name `labels migrate` has not moved yet (#11795).
 # #201 is very important; #301/#302 are important.
 cat >"$FIXTURE_DIR/issues.json" <<'JSON'
 [
@@ -134,8 +135,9 @@ cat >"$FIXTURE_DIR/issues.json" <<'JSON'
  {"number":103,"labels":[{"name":"loom:issue"},{"name":"loom:curated"}]},
  {"number":104,"labels":[{"name":"loom:curated"}]},
  {"number":105,"labels":[{"name":"loom:hermit"}]},
- {"number":107,"labels":[{"name":"loom:issue"},{"name":"loom:operator-only"}]},
+ {"number":107,"labels":[{"name":"loom:issue"},{"name":"loom:operator"}]},
  {"number":108,"labels":[{"name":"loom:building"},{"name":"loom:blocked"}]},
+ {"number":109,"labels":[{"name":"loom:issue"},{"name":"loom:operator-only"}]},
  {"number":201,"labels":[{"name":"loom:issue"},{"name":"loom:very-important"}]},
  {"number":301,"labels":[{"name":"loom:issue"},{"name":"loom:important"}]},
  {"number":302,"labels":[{"name":"loom:building"},{"name":"loom:important"}]}
@@ -158,6 +160,20 @@ done
 jq --arg l "$label" '[.[] | select([.labels[].name] | index($l))]' "$LOOM_TEST_ISSUES" | jq -r "$expr"
 STUB
 chmod +x "$FIXTURE_DIR/bin/gh"
+
+# `loom-daemon labels list --property hold --with-retired`: the registry's hold
+# set, retired names included (#11795) -- the real daemon's answer when one is
+# built, else that set spelled out.
+REAL_DAEMON="${LOOM_TEST_REAL_DAEMON:-${LOOM_DAEMON_BIN:-}}"
+if [[ -n "$REAL_DAEMON" && -x "$REAL_DAEMON" ]]; then
+    "$REAL_DAEMON" labels list --property hold --with-retired >"$FIXTURE_DIR/hold-labels"
+else
+    printf '%s\n' loom:blocked loom:operator loom:frozen loom:operator-only loom:operator-decision \
+        loom:operator-mechanical loom:operator-blocked loom:needs-capability >"$FIXTURE_DIR/hold-labels"
+fi
+printf '#!/usr/bin/env bash\n[ "$*" = "labels list --property hold --with-retired" ] || exit 2\ncat "%s"\n' \
+    "$FIXTURE_DIR/hold-labels" >"$FIXTURE_DIR/bin/loom-daemon"
+chmod +x "$FIXTURE_DIR/bin/loom-daemon"
 
 BLOCK="$(first_bash_block "$PROMO_MD" "Backlog Balance Check")"
 printf '%s\n' "$BLOCK" >"$FIXTURE_DIR/balance.sh"
@@ -208,13 +224,13 @@ else
     # Negative control: drop the held-issue exclusion (#7613). The same
     # fixture must then count the two held issues, or the occupant
     # assertions above prove nothing.
-    sed 's/select(\[\.labels\[\]\.name\] | any(IN("loom:operator-only","loom:blocked","loom:frozen")) | not) |//' \
+    sed 's/select(\[\.labels\[\]\.name\] | any(IN(\$h\[\])) | not) |//' \
         "$FIXTURE_DIR/balance.sh" >"$FIXTURE_DIR/balance-old.sh"
     if cmp -s "$FIXTURE_DIR/balance.sh" "$FIXTURE_DIR/balance-old.sh"; then
         fail "negative control: could not strip the held-issue filter (has the block changed shape?)"
     else
         OUT="$(run_balance balance-old.sh)"
-        assert_contains "$OUT" "default (no level):  5 promoted (occupants: #101,#102,#103,#107,#108)" \
+        assert_contains "$OUT" "default (no level):  6 promoted (occupants: #101,#102,#103,#107,#108,#109)" \
             "negative control: without the filter the held issues count as occupants"
     fi
 fi

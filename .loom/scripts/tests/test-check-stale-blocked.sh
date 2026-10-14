@@ -610,15 +610,26 @@ assert_contains "$LAST_STDERR" "PR #8314" \
 assert_not_contains "$LAST_STDERR" "PROSE-ONLY PARK" \
     "T6d: a park record in the PR body is a declaration, not a prose-only park"
 
-# The same PR, now carrying `loom:operator-only`: the #4634/#7267 superseding
+# The same PR, now carrying `loom:operator`: the #4634/#7267 superseding
 # gate downgrades the unblock to held rather than clearing it.
 pr_fixture 8314 "<!-- loom:park Blocked by: #8322 by=doctor at=2026-09-19T12:09:00Z -->" "OPEN" \
-    '[{"id":"x","name":"loom:operator-only","color":"ABCDEF"}]'
+    '[{"id":"x","name":"loom:operator","color":"ABCDEF"}]'
 run_check
 assert_contains "$LAST_STDERR" "SUPERSEDED BLOCK" \
     "T6e: a PR held by its own label is superseded, not ready to unpark"
 assert_not_contains "$LAST_STDERR" "STALE BLOCK" \
     "T6f: a superseded PR is not also reported as a plain stale block"
+
+# Transition (#11795): an item not yet migrated still carries the retired
+# `loom:operator-only`, which the daemon reads as `loom:operator` until
+# `labels migrate` relabels it, so it supersedes the same way.
+pr_fixture 8314 "<!-- loom:park Blocked by: #8322 by=doctor at=2026-09-19T12:09:00Z -->" "OPEN" \
+    '[{"id":"x","name":"loom:operator-only","color":"ABCDEF"}]'
+run_check
+assert_contains "$LAST_STDERR" "SUPERSEDED BLOCK" \
+    "T6e2: an unmigrated loom:operator-only hold still supersedes (#11795 transition)"
+assert_not_contains "$LAST_STDERR" "STALE BLOCK" \
+    "T6f2: and is not also reported as a plain stale block"
 
 # `loom:changes-requested` is deliberately NOT in the self-block set: it is the
 # ordinary review cycle, not a pending human decision.

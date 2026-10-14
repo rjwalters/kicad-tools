@@ -50,8 +50,8 @@ transitions store first would have been a materially larger change than
 | **segment** | A closed interval between two *observed* events on one PR. A PR still waiting contributes no segment sample — it appears in the live queue view instead. |
 | **lap** | One traversal of review → verdict. A PR may have several; they are kept as separate samples, never averaged into one. |
 | **verdict** | A `labeled loom:pr` or `labeled loom:changes-requested` event. A verdict *removal* is not a verdict. |
-| **operator gate** | Any of `loom:operator`, `loom:operator-only`, `loom:needs-capability` — the labels that mean a **person** is the only transition out. The four `loom:operator-*` sub-kinds always accompany `loom:operator-only`, so they are shown as detail rather than counted as gates. |
-| **parked** | `work_finder::PARK_LABELS` (`loom:blocked`, `loom:operator-only`). Reused, never re-listed: a park set that drifted from the work finder's own would report a PR as reachable when nothing can reach it. |
+| **operator gate** | The registry's `operator_gate` labels (`loom:operator` since #11795) — the labels that mean a **person** is the only transition out. Events on pre-#11795 PRs may still name the retired `loom:operator-*` labels; they read as history, not as gates. |
+| **parked** | `work_finder::PARK_LABELS` (the registry's `park` set). Reused, never re-listed: a park set that drifted from the work finder's own would report a PR as reachable when nothing can reach it. |
 | **absent vs. zero** | An unmeasured segment is `None` and prints `—`, **never** `0`. This is the single most important rule here, because a `0` in a latency table reads as *instant*. |
 | **push** | A `committed` or `head_ref_force_pushed` timeline entry. See the caveat below. |
 

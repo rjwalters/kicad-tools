@@ -172,17 +172,11 @@ Writes stay literal `gh` (so the guard hooks still see them). Full policy:
 **Skip any item labelled `loom:frozen`**: don't read it as work, comment on it, or relabel it. Only a human removes it.
 
 ```bash
-# Find all human-approved issues ready for work (exclude building issues,
-# loom:operator-only issues, and loom:blocked issues — #6941: labels.yml
-# documents loom:operator-only as "sweep skips", so Builder can never act on
-# one, exactly like loom:blocked; #7071: loom:blocked itself was never
-# excluded here even though a curated issue can carry both loom:issue and
-# loom:blocked simultaneously — neither must ever surface as
-# ready work).
-# NOTE: gh ANDs --label values, so `--label "!loom:building"` matches a literal
-# label no issue carries and silently returns an empty set. Exclude building,
-# operator-only, and blocked issues with raw search terms instead.
-"$GH_READ" issue list --label "loom:issue" --search "-label:loom:building -label:loom:operator-only -label:loom:blocked -label:loom:frozen" --state open --json number,title,labels,body
+# Human-approved issues ready for work: not building and not held (#6941,
+# #7071). gh ANDs --label values, so exclude with raw search terms. The hold
+# set is the registry's, retired names included until `labels migrate` (#11795).
+HOLD_Q=$(loom-daemon labels list --property hold --with-retired 2>/dev/null || printf 'loom:blocked\nloom:operator\nloom:frozen')
+"$GH_READ" issue list --label "loom:issue" --search "-label:loom:building $(sed 's/^/-label:/' <<<"$HOLD_Q" | tr '\n' ' ')" --state open --json number,title,labels,body
 ```
 
 ## Priority Labels and Duplicate Checks
@@ -1845,14 +1839,9 @@ render_plan_body() {
     --jq 'sort_by(.number) | .[] | select(any(.labels[]?.name; . == "loom:frozen") | not) | "- **#\(.number)**: \(.title)"')
   imp=$("$GH_READ" issue list --label "loom:important" --state open --limit 200 --json number,title,labels \
     --jq 'sort_by(.number) | .[] | select(any(.labels[]?.name; . == "loom:frozen") | not) | "- **#\(.number)**: \(.title)"')
-  # #7008: exclude loom:operator-only (a human-only decision, not buildable
-  # by automation) the same way the "Finding Work" search does; `ready` also
-  # excludes loom:building (an issue already claimed is no longer "ready").
-  # #7071: also exclude loom:blocked — a curated issue can carry both
-  # loom:issue and loom:blocked at once (Curator applies loom:blocked
-  # pre-approval, and a dependency-driven block can land on an
-  # already-approved issue too), and it is exactly as unbuildable as
-  # loom:operator-only, so it must never render as "Ready" either.
+  # #7008/#7071: `ready` excludes every hold (registry sets, retired names
+  # included until `labels migrate`, #11795) and loom:building, the same way
+  # "Finding Work" does; `building` excludes the operator holds.
   #
   # #7083: `ready_json` is fetched here as raw JSON (not pre-formatted
   # bullets) because it still needs one more filter below — issues already
@@ -1860,10 +1849,12 @@ render_plan_body() {
   # merge-pending, not "ready for implementation" — but that exclusion set
   # can only be derived once `approved_json` (fetched further down) is in
   # hand, so the final bullet-formatted `ready` is assembled after it.
-  local ready_json
-  ready_json=$("$GH_READ" issue list --label "loom:issue" --search "-label:loom:building -label:loom:operator-only -label:loom:blocked -label:loom:frozen" --state open --limit 200 --json number,title \
+  local ready_json hold_q op_q
+  hold_q=$(loom-daemon labels list --property hold --with-retired 2>/dev/null || printf 'loom:blocked\nloom:operator\nloom:frozen')
+  op_q=$(loom-daemon labels list --property operator_gate --with-retired 2>/dev/null || echo loom:operator)
+  ready_json=$("$GH_READ" issue list --label "loom:issue" --search "-label:loom:building $(sed 's/^/-label:/' <<<"$hold_q" | tr '\n' ' ')" --state open --limit 200 --json number,title \
     --jq 'sort_by(.number)')
-  building=$("$GH_READ" issue list --label "loom:building" --search "-label:loom:operator-only -label:loom:frozen" --state open --limit 200 --json number,title \
+  building=$("$GH_READ" issue list --label "loom:building" --search "$(sed 's/^/-label:/' <<<"$op_q" | tr '\n' ' ') -label:loom:frozen" --state open --limit 200 --json number,title \
     --jq 'sort_by(.number) | .[] | "- **#\(.number)**: \(.title)"')
   review=$("$GH_READ" pr list --label "loom:review-requested" --state open --limit 200 --json number,title,labels \
     --jq 'sort_by(.number) | .[] | select(any(.labels[]?.name; . == "loom:frozen") | not) | "- **#\(.number)**: \(.title)"')

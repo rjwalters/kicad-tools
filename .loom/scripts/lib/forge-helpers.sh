@@ -2061,6 +2061,15 @@ forge_get_required_status_check_contexts() {
   # configures no required checks, with a stderr warning so the relaxation is
   # never silent; any other failure still fails the whole lookup closed.
   #
+  # #11855: the GraphQL `branchProtectionRule` field needs `Administration:
+  # read`, which a read-only App token lacks ("Resource not accessible by
+  # integration"). On ANY GraphQL failure the classic source is re-read from
+  # the REST branch summary (`GET .../branches/<b>`, read access alone), the
+  # same answer as Rust `stale_checks::fetch::classic_from_branch`. A reply
+  # with no `protected` flag, a protected branch whose summary (or its
+  # `required_status_checks`) is withheld, or a REST failure, still fails closed,
+  # reporting the GraphQL error (so the plan-gate check below still sees it).
+  #
   # `$branch` goes through url_encode_path_segment for the REST call because
   # it lands in a URL path there (#9109). The GraphQL call below deliberately
   # does NOT encode it: `-F ref=refs/heads/$branch` is a typed variable VALUE
@@ -2069,7 +2078,7 @@ forge_get_required_status_check_contexts() {
   local ruleset_rc=0 classic_rc=0 ruleset_out="" classic_out="" _pg
   local query='query($owner: String!, $name: String!, $ref: String!) { repository(owner: $owner, name: $name) { ref(qualifiedName: $ref) { branchProtectionRule { requiredStatusCheckContexts } } } }'
   ruleset_out="$("$gh_cmd" api "repos/${FORGE_OWNER}/${FORGE_REPO}/rules/branches/$(url_encode_path_segment "${branch}")" --jq '.[]? | select(.type == "required_status_checks") | .parameters.required_status_checks[]?.context' 2>&1)" || ruleset_rc=1
-  classic_out="$("$gh_cmd" api graphql -f "query=$query" -F "owner=$FORGE_OWNER" -F "name=$FORGE_REPO" -F "ref=refs/heads/$branch" --jq '.data.repository.ref.branchProtectionRule.requiredStatusCheckContexts // [] | .[]' 2>&1)" || classic_rc=1
+  classic_out="$("$gh_cmd" api graphql -f "query=$query" -F "owner=$FORGE_OWNER" -F "name=$FORGE_REPO" -F "ref=refs/heads/$branch" --jq '.data.repository.ref.branchProtectionRule.requiredStatusCheckContexts // [] | .[]' 2>&1)" || { _pg="$classic_out"; classic_out="$("$gh_cmd" api "repos/${FORGE_OWNER}/${FORGE_REPO}/branches/$(url_encode_path_segment "${branch}")" --jq 'if (.protected | type) != "boolean" then error("no protected flag") elif .protected and (((.protection | type) != "object") or ((.protection.required_status_checks | type) != "object")) then error("protection summary withheld") else ((.protection.required_status_checks // {}) | ((.contexts // []) + [(.checks // [])[].context]) | .[]) end' 2>&1)" || { classic_out="$_pg"; classic_rc=1; }; }
   [[ "$ruleset_rc" -eq 0 ]] || { _pg=$(printf '%s' "$ruleset_out" | tr '[:upper:]' '[:lower:]'); [[ "$_pg" == *"upgrade to github"* && "$_pg" == *"make this repository public"* ]] && { echo "forge-helpers: ruleset required-checks lookup for '$branch' is plan-gated (#8872) -- treating as no required checks: $ruleset_out" >&2; ruleset_out=""; } || return 1; }; [[ "$classic_rc" -eq 0 ]] || { _pg=$(printf '%s' "$classic_out" | tr '[:upper:]' '[:lower:]'); [[ "$_pg" == *"upgrade to github"* && "$_pg" == *"make this repository public"* ]] && { echo "forge-helpers: classic branch-protection required-checks lookup for '$branch' is plan-gated (#8872) -- treating as no required checks: $classic_out" >&2; classic_out=""; } || return 1; }
   # Union, order-preserving, de-duplicated: a context can legitimately be
   # required by BOTH a ruleset and a classic rule, and the callers' `comm`

@@ -87,7 +87,7 @@ echo ""
 echo "Test group 2: the consolidation gate's guardrails"
 expect "gate runs before loom:curated"                "$RS" "Consolidation gate — before \`loom:curated\`"
 expect "only triage/unlabeled siblings"               "$RS" "\`loom:triage\`/unlabeled siblings"
-for label in 'loom:curating' 'loom:building' 'loom:issue' 'loom:blocked' 'loom:operator-only'; do
+for label in 'loom:curating' 'loom:building' 'loom:issue' 'loom:blocked' 'loom:operator'; do
     expect "never absorbs a $label issue"             "$RS" "$label"
 done
 expect "never absorbs a hard-excluded issue"          "$RS" "hard-exclusion label"

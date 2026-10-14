@@ -134,7 +134,7 @@ assert_contains "Skip: state != OPEN" 'state != OPEN'
 assert_contains "Skip: loom:blocked PRs" 'loom:blocked'
 assert_contains "Skip: no actionable label" 'no actionable label'
 assert_contains "Skip: multiple actionable labels" 'multiple actionable labels'
-assert_contains "Skip: loom:operator-only PRs" 'loom:operator-only'
+assert_contains "Skip: loom:frozen PRs" 'loom:frozen'
 
 echo
 echo "--- Load-bearing constraints (#3289, #3298, #3373) ---"

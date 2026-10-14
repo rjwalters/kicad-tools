@@ -186,7 +186,7 @@ loop, the existing silent-skip ladder (#4967) reaches the same bound.
 ### When the operator is asked
 
 The operator is asked only through
-`loom-daemon operator-decision apply <N> --also-label loom:operator-only`,
+`loom-daemon operator-decision apply <N>` (which adds `loom:operator`),
 with 2 to 4 ranked options ([`operator-decision.md`](operator-decision.md)).
 Champion never applies a bare operator hold. There are two cases:
 

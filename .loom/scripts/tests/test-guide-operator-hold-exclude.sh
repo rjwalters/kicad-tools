@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# test-guide-operator-only-exclude.sh - Regression test for issues #6941,
+# test-guide-operator-hold-exclude.sh - Regression test for issues #6941,
 # #7071, #9244 and #11103.
 #
 # #6941 / #7071: guide.md's "Finding Work" ready-queue search must exclude
@@ -74,9 +74,13 @@ if [[ ! -f "$GUIDE_MD" ]]; then
 fi
 
 # ---------------------------------------------------------------------------
-echo "Test 1: the ready-queue search excludes building, operator-only and blocked"
-assert_grep '\-label:loom:building \-label:loom:operator-only \-label:loom:blocked' "$GUIDE_MD" \
-    "the ready-queue search term excludes loom:building, loom:operator-only, and loom:blocked"
+echo "Test 1: the ready-queue search excludes building, operator and blocked"
+# Since #11795 the hold set is the registry's (retired names included until
+# `labels migrate` has moved every item); the literal list is the fallback.
+assert_grep "^HOLD_Q=\\\$\\(loom-daemon labels list --property hold --with-retired 2>/dev/null \\|\\| printf 'loom:blocked\\\\nloom:operator\\\\nloom:frozen'\\)" "$GUIDE_MD" \
+    "the ready-queue hold set is the registry's (--with-retired), falling back to loom:blocked, loom:operator, loom:frozen"
+assert_grep 'issue list --label "loom:issue" --search "-label:loom:building \$\(sed .s/\^/-label:/. <<<"\$HOLD_Q"' "$GUIDE_MD" \
+    "the ready-queue search term excludes loom:building and every hold label"
 
 # ---------------------------------------------------------------------------
 echo ""

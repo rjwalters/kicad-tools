@@ -3,9 +3,11 @@
 # `<!-- loom:capability=<name> -->` convention (#6892), anchored per the #4840
 # rule so both sides of the fleet parse the same marker identically.
 #
-# This marker is meaningful ONLY alongside the `loom:operator-mechanical`
-# sub-kind label (see defaults/docs/label-state-machine.md, "Capability-
-# declaration convention"). This script does not look at labels at all --
+# The marker is what makes a held item a mechanical ask (#11795): on a
+# `loom:operator` item with no decision block it is the capability lane's key;
+# on a `loom:blocked` item it names the capability being waited on (see
+# defaults/docs/label-state-machine.md, "Capability marker"). This script does
+# not look at labels at all --
 # callers decide whether the marker applies to the item they read it from.
 #
 # Reads an issue/PR body from stdin, extracts every
@@ -30,7 +32,7 @@
 # Exit codes:
 #   0 - one or more valid capability markers found (printed to stdout)
 #   1 - no capability markers found at all (not an error -- most items,
-#       including most loom:operator-mechanical items, declare none)
+#       including most held items, declare none)
 #   2 - at least one marker was found but failed closed-vocabulary
 #       validation; the offending value(s) are named on stderr. Per the
 #       fail-closed rule, an unrecognized value is a hard signal, not a

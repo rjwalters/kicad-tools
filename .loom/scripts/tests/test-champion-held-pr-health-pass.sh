@@ -34,7 +34,7 @@
 #   4. `loom:operator` is KEPT on the held-and-stale route (narrowing #5802,
 #      which clears it on the unheld route) — the human merge decision is still
 #      outstanding, and Doctor's `loom:changes-requested` queue filters
-#      `loom:blocked` / `loom:operator-only`, not `loom:operator`.
+#      `loom:blocked` / `loom:frozen`, not `loom:operator`.
 #
 # Follow-up incident (#6848/#6852): the #6720 fix routes ANY held-and-stale PR
 # to Doctor, including one whose ONLY blocker is the standing hold itself (no

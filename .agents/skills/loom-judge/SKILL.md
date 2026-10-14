@@ -247,54 +247,19 @@ Your review authority extends past the PR to its **underlying issue**: an issue 
 
 **Guardrails (safety — do NOT skip these):**
 - **Always comment the rationale BEFORE closing.** `--reason "not planned"` marks a judgment call, not a fix.
-- **Never close an issue that encodes a still-pending human decision.** If the right call needs a human (policy, a controversial trade-off, security/access), route it — `loom:blocked` or `loom:operator-only` **plus exactly one sub-kind label**, per "Applying `loom:operator-only`" immediately below, with a comment — do **not** close it.
+- **Never close an issue that encodes a still-pending human decision.** If the right call needs a human (policy, a controversial trade-off, security/access), route it per "Routing to a human" immediately below, with a comment — do **not** close it.
 - **Never invent new labels.** Use only the existing label set.
 - **A closed issue leaves the queue automatically** (the autonomous work-finder only polls *open* `loom:issue` items); a **rescoped** issue must have `loom:issue` removed so it is not re-dispatched with a stale scope.
 
-### Applying `loom:operator-only`: a sub-kind label is REQUIRED (#5819)
+### Routing to a human
 
 Park only a PO-level question you are not entitled to settle, or a
-human-hands step — not a hard or uncertain review (#10001; rule: `curator.md`
-→ "Applying `loom:operator-only`"). **Never apply `loom:operator-only` on its
-own** — on an issue *or* a PR: apply exactly one sub-kind in the **same**
-command. Purely additive — every filter/skip keyed on the base label (sweep
-pre-flight, `warn-operator-gated.sh`, Doctor's and Champion's exclusions) is
-unchanged:
-
-| Sub-kind | Apply when |
-|---|---|
-| `loom:operator-blocked` | Waiting on a **named** issue/PR/piece of infrastructure that does not exist yet — self-clearing once that lands |
-| `loom:operator-mechanical` | Needs host or admin access, a credential, or another mechanical action — no judgement required |
-| `loom:operator-decision` | The act requires authority an agent structurally cannot hold — a preference call or an authority act (binds the entity, irreversible disclosure, spending, credentials only the operator holds, accepting risk on the entity's behalf, physical-world action, "which side ships first") |
-
-```bash
-# Issue (or PR: same command) holding a decision only a human can make, as
-# 2-4 ranked options each with a why (.loom/docs/operator-decision.md):
-loom-daemon operator-decision apply <number> --input d.json --also-label loom:operator-only
-```
-
-**Being unsure which sub-kind applies means the review question is not yet
-answered, not that the bare label is safe to reach for (#5826).**
-`loom:operator-decision` is **not** a safe default when the kind is not
-obvious — before applying it, run the falsifiability test from
-`.loom/docs/label-state-machine.md`: name the axis two well-informed people
-would still disagree on, and show it is a preference, not a fact. If you
-cannot name that axis, the question is answerable — answer it instead of
-routing it. If the only gap is a missing objective, file a decision
-whose options are the candidate objectives (#10000).
-
-**If you chose `loom:operator-blocked`**, the same comment MUST name the blocker
-in machine-readable form: a literal `Blocked by #N` / `Depends on #N` /
-`Requires #N` line (the exact phrasings `detect-dependency-cycle.sh` and
-`warn-operator-gated.sh` parse by regex). A backtick-quoted reference in prose
-does not satisfy this — the phrase itself must be present so a later automated
-pass can tell when the blocker clears.
-
-**If you chose `loom:operator-decision`**, the options' whys MUST name the
-disagreement axis and why it is a preference, not a fact.
-
-Full taxonomy and rationale: `.loom/docs/label-state-machine.md` →
-"`loom:operator-only` sub-kinds".
+human-hands step — not a hard or uncertain review (#10001). The rule is
+`.loom/docs/label-state-machine.md` → "Routing to a human": a ruling, on an
+issue or a PR → `loom-daemon operator-decision apply <number> --input d.json`
+(2-4 ranked options; adds `loom:operator`); a human's hands → `loom:operator`
++ a capability marker (+ `Blocked by #N` if it waits on something named);
+automation-resolvable waiting → `loom:blocked` with a park record.
 
 ## Argument Handling
 
@@ -942,13 +907,13 @@ invalidate*. Passing `--anchor` fixes most of them (the guard stamps the
 marker on a rejection, writing no labels; an unmarked *approval* is STALE
 and re-queued, never anchored, #9258), and the residual `11`s are exactly the PRs an operator
 needs named — typically ones on a `loom:blocked` / `loom:operator` /
-`loom:operator-only` hold, where the guard deliberately declines to comment.
+`loom:frozen` hold, where the guard deliberately declines to comment.
 
 The guard removes the stale verdict label (plus its per-tree companions
 `loom:ci-failure` / `loom:merge-conflict`), adds `loom:review-requested`, and
 posts a comment naming the old and new SHAs so the transition is auditable
 rather than a silent label flip. It refuses to clear a PR carrying
-`loom:blocked` / `loom:operator` / `loom:operator-only` — those are deliberate
+`loom:blocked` / `loom:operator` / `loom:frozen` — those are deliberate
 holds, and un-parking them is not yours (or the guard's) to do; it still
 reports `STALE` so you know not to trust the verdict.
 

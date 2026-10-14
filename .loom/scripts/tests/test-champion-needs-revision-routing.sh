@@ -307,8 +307,8 @@ assert_not_contains "$STANDDOWN_ROW" "no label change" \
 assert_doc_contains "$THROUGHPUT_DOC" "Stand down: release the \`loom:evaluating\` claim" \
     "the doc's stand-down row matches the claim release"
 assert_contains "$STEP4" "loom-daemon operator-decision apply" "an escalation is filed as a ranked decision"
-assert_contains "$STEP4" "--also-label loom:operator-only" "the decision keeps the operator-only skip"
-assert_not_contains "$STEP4" '--add-label "loom:operator-only' "Step 4 never hand-applies loom:operator-only"
+assert_not_contains "$STEP4" "--also-label loom:operator" "the decision needs no extra hold label (apply adds loom:operator, #11795)"
+assert_not_contains "$STEP4" '--add-label "loom:operator' "Step 4 never hand-applies loom:operator"
 assert_not_contains "$STEP4" 'SUB_KIND' "the hand-picked sub-kind is gone"
 ESCALATE="$(printf '%s\n' "$STEP4" | bash_block_with 'operator-decision apply')"
 # shellcheck disable=SC2016  # the literal variable name is what the template must carry
