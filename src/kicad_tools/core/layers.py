@@ -14,6 +14,7 @@ the two endpoint layers KiCad lists in ``(layers "F.Cu" "B.Cu")``).
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterable
 
 # Canonical copper layer ordering from top (front) to bottom (back).
@@ -179,3 +180,34 @@ def resolve_via_type(
     if outer_ends == 2 and layer_pair[0] != layer_pair[1]:
         return None, layer_pair
     return ("blind" if outer_ends else "buried"), layer_pair
+
+
+def warn_derived_via_type(
+    log: logging.Logger,
+    writer: str,
+    layers: tuple[str, ...] | list[str],
+    x: float,
+    y: float,
+    keyword: str | None,
+) -> None:
+    """Log that *writer* derived a ``blind`` / ``buried`` keyword (Issue #6485).
+
+    Called by every writer that hands :func:`resolve_via_type` a ``None``
+    type.  A derived keyword changes the fab process the board needs, and
+    neither ``kct check --mfr`` nor kicad-cli DRC reports a blind or buried
+    via on a profile that cannot build one (Issue #6518), so this warning is
+    the only signal.  A no-op when ``keyword`` is ``None`` (a through via).
+    """
+    if keyword is None:
+        return
+    log.warning(
+        "%s: layers %s are a partial span, so the via at (%s, %s) is "
+        "written as (via %s ...). It needs a fab process with %s vias; "
+        "pass via_type='through' for an ordinary through via.",
+        writer,
+        tuple(layers),
+        x,
+        y,
+        keyword,
+        keyword,
+    )

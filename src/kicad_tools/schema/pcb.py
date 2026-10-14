@@ -6768,20 +6768,11 @@ class PCB:
         # Issue #6485: resolve the type before anything is recorded, so the
         # dedup key, the stored ``Via`` and the written node all describe the
         # barrel KiCad will actually build.
-        from ..core.layers import resolve_via_type
+        from ..core.layers import resolve_via_type, warn_derived_via_type
 
         resolved_type, resolved_layers = resolve_via_type(layers, via_type)
-        if via_type is None and resolved_type is not None:
-            logger.warning(
-                "add_via: layers %s are a partial span, so the via at (%s, %s) is "
-                "written as (via %s ...). It needs a fab process with %s vias; "
-                "pass via_type='through' for an ordinary through via.",
-                tuple(layers),
-                x,
-                y,
-                resolved_type,
-                resolved_type,
-            )
+        if via_type is None:
+            warn_derived_via_type(logger, "add_via", layers, x, y, resolved_type)
         layers = cast("tuple[str, str]", resolved_layers)
 
         net_number = 0

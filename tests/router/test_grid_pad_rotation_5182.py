@@ -148,8 +148,22 @@ def test_layer_span_and_same_net(net, through, layer, span, valid):
     result = cpp._impl.validate_route([], [via], 1, [], 0.127, 0.4, 0.1)
     expected = valid or net == 1
     assert result.valid is expected
-    py_via = Via(x, y, 0.1, 0.2, tuple([Layer.F_CU, Layer.B_CU][i] for i in span), 1)
+    # Issue #6485: the native ``Via`` above is handed its span directly, so
+    # its Python twin is the via that keeps the span it carries -- a micro
+    # via.  A non-micro via is drilled F.Cu..B.Cu whatever pair it records.
+    layers = tuple([Layer.F_CU, Layer.B_CU][i] for i in span)
+    py_via = Via(x, y, 0.1, 0.2, layers, 1, is_micro=True)
     assert (grid.worst_via_pad_deficit(py_via, 1)[0] == 0) is expected
+    # The same pair on a NON-micro via is a through barrel: it reaches the
+    # pad on either side, so only same-net contact is legal -- and the native
+    # validator agrees once it is given the drilled span the backend projects.
+    through_via = Via(x, y, 0.1, 0.2, layers, 1)
+    assert (grid.worst_via_pad_deficit(through_via, 1)[0] == 0) is (net == 1)
+    via.layer_from, via.layer_to = (
+        grid.layer_to_index(layer.value) for layer in through_via.drilled_layers
+    )
+    drilled = cpp._impl.validate_route([], [via], 1, [], 0.127, 0.4, 0.1)
+    assert drilled.valid is (net == 1)
     if not expected:
         assert result.violation_type == 8
         assert (result.violation_x, result.violation_y) == (10, 10)

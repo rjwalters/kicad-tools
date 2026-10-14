@@ -31,7 +31,7 @@ from kicad_tools.core.layers import resolve_via_type
 from kicad_tools.router.diffpair_routing import CoupledPathfinder, _via_spans_layer
 from kicad_tools.router.grid import RoutingGrid
 from kicad_tools.router.layers import Layer, LayerStack
-from kicad_tools.router.primitives import Pad, Via
+from kicad_tools.router.primitives import Pad, Route, Segment, Via
 from kicad_tools.router.rules import DesignRules
 from kicad_tools.schema.pcb import PCB
 from kicad_tools.sexp.builders import via_node
@@ -134,6 +134,112 @@ def test_diffpair_gates_see_the_drilled_barrel():
 
 
 # ---------------------------------------------------------------------------
+# One barrel, one verdict: the Python gates and the C++ validator agree
+# ---------------------------------------------------------------------------
+
+_PARITY_LAYERS = (Layer.F_CU, Layer.IN1_CU, Layer.IN2_CU, Layer.B_CU)
+
+
+def _parity_grid():
+    rules = DesignRules(
+        trace_width=0.2, trace_clearance=0.2, via_clearance=0.2, grid_resolution=0.2
+    )
+    grid = RoutingGrid(20, 20, rules, layer_stack=LayerStack.four_layer_all_signal())
+    pads = {
+        name: Pad(x=x, y=y, width=0.6, height=0.6, net=net, net_name=name, ref=ref, pin="1")
+        for name, net, ref, x, y in (
+            ("SIG", 2, "U1", 2.0, 2.0),
+            ("TRACE", 1, "U2", 2.0, 18.0),
+        )
+    }
+    for pad in pads.values():
+        grid.add_pad(pad)
+    return rules, grid, pads
+
+
+def _parity_via(*, is_micro: bool) -> Via:
+    """A via whose LOGICAL pair is F.Cu/In1.Cu, sitting on the trace line."""
+    return Via(
+        x=10.0,
+        y=10.0,
+        drill=0.3,
+        diameter=0.6,
+        layers=(Layer.F_CU, Layer.IN1_CU),
+        net=2,
+        net_name="SIG",
+        is_micro=is_micro,
+    )
+
+
+def _parity_trace(layer: Layer) -> Segment:
+    return Segment(5.0, 10.0, 15.0, 10.0, 0.2, layer, 1, "TRACE")
+
+
+@pytest.mark.parametrize("is_micro", [False, True])
+@pytest.mark.parametrize("layer", _PARITY_LAYERS)
+def test_python_and_cpp_gates_agree_on_a_partial_pair_via(layer, is_micro):
+    """Review item on PR #6514: the drilled-span conversion was half done.
+
+    ``validate_via_clearance`` and the C++ ``validate_route`` still read the
+    logical ``via.layers`` pair while ``worst_via_segment_deficit`` read the
+    drilled span, so a non-micro F.Cu/In1.Cu via over a B.Cu trace was valid
+    to two gates and a 0.6 mm deficit to the third.  All three now judge the
+    barrel that is fabricated; a micro via keeps its span in all three.
+    """
+    from kicad_tools.router.cpp_backend import CppGrid, CppPathfinder, is_cpp_available
+
+    if not is_cpp_available():
+        pytest.skip("native backend unavailable; run kct build-native")
+
+    rules, grid, pads = _parity_grid()
+    grid.mark_route(Route(net=1, net_name="TRACE", segments=[_parity_trace(layer)]))
+    via = _parity_via(is_micro=is_micro)
+    # Non-micro: a through barrel, hit on every layer.  Micro: F.Cu..In1.Cu.
+    hit = (not is_micro) or layer in (Layer.F_CU, Layer.IN1_CU)
+
+    assert grid.validate_via_clearance(via, exclude_net=2)[0] is not hit
+    assert (grid.worst_via_segment_deficit(via, exclude_net=2)[0] > 0) is hit
+
+    backend = CppPathfinder(CppGrid.from_routing_grid(grid), rules)
+    violation = backend._validate_route_clearance(
+        Route(net=2, net_name="SIG", vias=[via]), pads["SIG"], pads["SIG"], 1
+    )
+    assert (violation is not None) is hit
+    if hit:
+        assert violation.kind == "via-seg"
+
+
+@pytest.mark.parametrize("is_micro", [False, True])
+@pytest.mark.parametrize("layer", _PARITY_LAYERS)
+def test_cpp_stores_a_committed_via_on_its_drilled_span(layer, is_micro):
+    """The reverse insertion order: the via is committed, the trace arrives.
+
+    ``sync_stored_routes`` used to hand ``add_stored_via`` the logical pair,
+    so the native validator let a B.Cu trace run through a committed
+    non-micro F.Cu/In1.Cu via that ``to_sexp`` writes as F.Cu/B.Cu.
+    """
+    from kicad_tools.router.cpp_backend import CppGrid, CppPathfinder, is_cpp_available
+
+    if not is_cpp_available():
+        pytest.skip("native backend unavailable; run kct build-native")
+
+    rules, grid, pads = _parity_grid()
+    grid.mark_route(Route(net=2, net_name="SIG", vias=[_parity_via(is_micro=is_micro)]))
+    trace = _parity_trace(layer)
+    hit = (not is_micro) or layer in (Layer.F_CU, Layer.IN1_CU)
+
+    backend = CppPathfinder(CppGrid.from_routing_grid(grid), rules)
+    violation = backend._validate_route_clearance(
+        Route(net=1, net_name="TRACE", segments=[trace]), pads["TRACE"], pads["TRACE"], 1
+    )
+    assert (violation is not None) is hit
+    if hit:
+        assert violation.kind == "seg-via"
+        # The Python twin already rejects it (it never filtered by layer).
+        assert not grid.validate_segment_clearance(trace, exclude_net=1)[0]
+
+
+# ---------------------------------------------------------------------------
 # The live producer: coupled diff-pair on a four-signal-layer grid
 # ---------------------------------------------------------------------------
 
@@ -221,6 +327,19 @@ def test_scan_catches_the_node_it_guards_against():
 
 def _node_text(layers, via_type=None) -> str:
     return via_node(1.0, 2.0, 0.6, 0.3, layers, 1, "u-1", via_type=via_type).to_string()
+
+
+def test_via_node_warns_only_when_it_derives_the_keyword(caplog):
+    """Deriving an HDI via type is never silent, whichever writer does it."""
+    with caplog.at_level(logging.WARNING, logger="kicad_tools.sexp.builders"):
+        _node_text(("F.Cu", "B.Cu"))
+        _node_text(("F.Cu", "In1.Cu"), "blind")
+        _node_text(("F.Cu", "In1.Cu"), "through")
+        assert caplog.text == ""
+        _node_text(("In1.Cu", "In2.Cu"))
+    assert "via_node" in caplog.text
+    assert "partial span" in caplog.text and "buried" in caplog.text
+    assert "via_type='through'" in caplog.text
 
 
 @pytest.mark.parametrize(
@@ -375,18 +494,22 @@ def test_mcp_persist_keeps_micro_and_drills_the_rest_through(tmp_path):
     assert _keywordless_partial(text) == []
 
 
-def test_block_exporter_never_writes_a_keywordless_partial_via():
+def test_block_exporter_never_writes_a_keywordless_partial_via(caplog):
     from kicad_tools.pcb.exporter import KiCadPCBExporter
 
     exporter = KiCadPCBExporter.__new__(KiCadPCBExporter)
     exporter._uuid = lambda: "u-1"  # type: ignore[method-assign]
     exporter._format_coord = lambda value: str(value)  # type: ignore[method-assign]
-    assert _vias(exporter._generate_via(1, 2, 0.6, 0.3, ("F.Cu", "In1.Cu"), 1)) == [
-        ("blind", ("F.Cu", "In1.Cu"))
-    ]
-    assert _vias(exporter._generate_via(1, 2, 0.6, 0.3, ("F.Cu", "B.Cu"), 1)) == [
-        (None, ("F.Cu", "B.Cu"))
-    ]
+    with caplog.at_level(logging.WARNING, logger="kicad_tools.pcb.exporter"):
+        assert _vias(exporter._generate_via(1, 2, 0.6, 0.3, ("F.Cu", "B.Cu"), 1)) == [
+            (None, ("F.Cu", "B.Cu"))
+        ]
+        assert caplog.text == ""
+        assert _vias(exporter._generate_via(1, 2, 0.6, 0.3, ("F.Cu", "In1.Cu"), 1)) == [
+            ("blind", ("F.Cu", "In1.Cu"))
+        ]
+    # Deriving an HDI via type is never silent.
+    assert "partial span" in caplog.text and "blind" in caplog.text
 
 
 # ---------------------------------------------------------------------------

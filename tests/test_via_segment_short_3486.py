@@ -140,8 +140,11 @@ class TestWorstViaSegmentDeficitGeometry:
     def test_segment_on_layer_outside_barrel_span_ignored(self, grid_4l: RoutingGrid) -> None:
         """A barrel that does not reach the segment's layer cannot short it.
 
-        A blind via spanning only F.Cu..In1.Cu must not flag an
-        overlapping In2.Cu trace.
+        A via spanning only F.Cu..In1.Cu must not flag an overlapping
+        In2.Cu trace.  Issue #6485: the router's only such via is a MICRO
+        via; the same pair on a non-micro via is drilled through the whole
+        stack (KiCad builds a keyword-less via that way), so that barrel
+        does short the In2.Cu trace and must be reported.
         """
         # Overlapping trace on In2.Cu.
         foreign = _foreign_segment_route(
@@ -151,10 +154,18 @@ class TestWorstViaSegmentDeficitGeometry:
 
         # Barrel spans F.Cu..In1.Cu only -- does not reach In2.Cu.
         via = _via(7.0, 12.4, net=3, layers=(Layer.F_CU, Layer.IN1_CU))
+        via.is_micro = True
         deficit, loc = grid_4l.worst_via_segment_deficit(via, exclude_net=3)
 
         assert deficit == 0.0
         assert loc is None
+
+        # Issue #6485: without ``is_micro`` the same pair is a through barrel.
+        through = _via(7.0, 12.4, net=3, layers=(Layer.F_CU, Layer.IN1_CU))
+        deficit, loc = grid_4l.worst_via_segment_deficit(through, exclude_net=3)
+
+        assert deficit == pytest.approx(0.25, abs=1e-6)
+        assert loc == (7.0, 12.4)
 
     def test_inner_layer_short_detected(self, grid_4l: RoutingGrid) -> None:
         """A through-via barrel is copper on inner layers too (#3487)."""

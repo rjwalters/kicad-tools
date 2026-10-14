@@ -15,7 +15,11 @@ Usage:
     )
 """
 
+import logging
+
 from .parser import SExp
+
+logger = logging.getLogger(__name__)
 
 
 def fmt(val: float) -> int | float:
@@ -447,9 +451,12 @@ def via_node(
     # Issue #6485: one write-time rule for every new via node -- a partial
     # span always carries its keyword, an explicit ``blind`` / ``buried`` is
     # emitted rather than dropped.
-    from kicad_tools.core.layers import resolve_via_type
+    from kicad_tools.core.layers import resolve_via_type, warn_derived_via_type
 
     type_token, written_layers = resolve_via_type(layers, via_type)
+    if via_type is None:
+        # Deriving an HDI via type is never silent (same warning as add_via).
+        warn_derived_via_type(logger, "via_node", layers, x, y, type_token)
     layers_node = SExp.list("layers", *written_layers)
     net_node = _net_node(net, net_name)
     if type_token is not None:

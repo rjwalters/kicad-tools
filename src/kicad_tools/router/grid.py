@@ -5180,8 +5180,12 @@ class RoutingGrid:
         # declared F.Cu..B.Cu crosses In1/In2), so judge foreign segments on
         # the whole span -- not just on its two endpoint layers, which let an
         # inner-layer trace pass right through a through via's annulus.
+        # Issue #6485: that span is ``via.drilled_layers``.  A non-micro via
+        # is a through barrel whatever logical pair ``via.layers`` records,
+        # so this gate agrees with ``worst_via_segment_deficit`` and with
+        # the span the C++ backend is handed (``cpp_backend.py``).
         endpoints: list[int] = []
-        for layer in via.layers:
+        for layer in via.drilled_layers:
             with suppress(KeyError, ValueError):
                 endpoints.append(self.layer_to_index(layer.value))
         via_layer_indices: set[int] = (
