@@ -65,7 +65,12 @@ from ..primitives import Pad, Route, Segment, pad_half_extents
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from .pathfinder import LatticePathfinder
 
-__all__ = ["PAIR_LENGTH_TOLERANCE_MM", "ClassPadRepairStats", "repair_class_pad_pairs"]
+__all__ = [
+    "PAIR_LENGTH_TOLERANCE_MM",
+    "ClassPadRepairStats",
+    "pad_class_requirements",
+    "repair_class_pad_pairs",
+]
 
 #: Extra gap past the requirement for a moved segment, mm.  Absorbs the 4-decimal
 #: rounding of the KiCad writer (5e-5) with a wide safety factor.
@@ -164,6 +169,21 @@ def _point_in_pad(x: float, y: float, pad: Pad) -> bool:
     return abs(x - pad.x) <= hw + _EPS and abs(y - pad.y) <= hh + _EPS
 
 
+def pad_class_requirements(pf: LatticePathfinder) -> list[float] | None:
+    """Each pad's own clearance requirement, aligned with ``pf.pads``.
+
+    ``max(pad class, authored floor, board base)``: the pad side of every
+    track-vs-pad pair the repair enforces.  ``None`` when the router installed
+    no pad classes (:meth:`LatticePathfinder.set_pad_class_clearances`).
+    """
+    classes = pf.pad_class_clearances
+    if classes is None:
+        return None
+    floors = pf.rules.net_clearance_floors
+    base = pf.rules.trace_clearance
+    return [max(classes[i], pad_authored_floor(p, floors), base) for i, p in enumerate(pf.pads)]
+
+
 def repair_class_pad_pairs(
     pf: LatticePathfinder,
     routes: dict[object, Route],
@@ -201,9 +221,9 @@ def repair_class_pad_pairs(
         stats.skipped = "voltage-map"
         return stats
     pads: Sequence[Pad] = pf.pads
-    floors = pf.rules.net_clearance_floors
     base = pf.rules.trace_clearance
-    pad_req = [max(classes[i], pad_authored_floor(p, floors), base) for i, p in enumerate(pads)]
+    pad_req = pad_class_requirements(pf)
+    assert pad_req is not None  # ``classes`` was checked above
     if not any(r > base + _EPS for r in pad_req):
         return stats
     pair_set = frozenset(pair_nets)

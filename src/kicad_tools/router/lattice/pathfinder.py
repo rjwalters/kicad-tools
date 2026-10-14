@@ -97,6 +97,26 @@ _MAX_PAD_GROWTH_ROUNDS = 2
 
 
 @dataclass(frozen=True)
+class PadGrowthRound:
+    """One #6489 grown-keep-out re-negotiation attempt, for the log (issue #6670).
+
+    ``grown`` pads were added by this attempt.  ``footprints`` names the parts
+    whose whole class-floored pad set was grown because a shortfall moved to a
+    sibling pad (empty for the targeted growth), see
+    :meth:`LatticePathfinder.route_netset`.  ``kept`` is whether the attempt
+    replaced the previous result; a rejected attempt is rolled back.
+    """
+
+    grown: int
+    footprints: tuple[str, ...]
+    routed_before: int
+    routed_after: int
+    left_before: int
+    left_after: int
+    kept: bool
+
+
+@dataclass(frozen=True)
 class LatticeNegotiationStats:
     """Outcome of a :meth:`LatticePathfinder.route_netset` negotiation run."""
 
@@ -288,6 +308,8 @@ class LatticePathfinder:
         # Issue #6489: pad index -> class clearance, for pads whose keep-out
         # grows because the class-pad repair could not clear them.
         self._class_pad_growth: dict[int, float] = {}
+        # Issue #6670: what each growth round did (kept or rolled back).
+        self.class_pad_growth_rounds: list[PadGrowthRound] = []
         # Per-connection decline reasons for the best negotiation pass
         # (honest shortfall diagnosis; reset by :meth:`route_netset`).
         self.failure_reasons: dict[object, str] = {}
@@ -2685,8 +2707,26 @@ class LatticePathfinder:
         new result is kept only if it routes at least as much with fewer
         shortfalls.  With nothing left the first result is returned untouched
         (no rebuild, ``lattice_builds`` unchanged).
+
+        Issue #6670: in a pad array (a BGA's power balls, a connector's GND
+        pins) a track pushed off one grown pad moves a lattice row over and
+        lands just as close to the NEXT ungrown pad of the same part.  Board
+        06rf's USB3 fallback legs walked U2's GND/+1V2 balls that way: two
+        rounds cut 9 shortfalls to 7 to 2 and the backstop then deleted
+        USB3_TX2- and USB3_RX2+.  So when a round's shortfalls land on a part
+        whose pads were already grown, every pad of that part with a class
+        above the base is tried grown at once.  If that attempt is rejected
+        (it routes less, or leaves no fewer shortfalls), the round falls back
+        to growing only the offending pads, as before, so a round is never
+        worse than the pre-#6670 one.  A part seen for the first time grows
+        only its offending pads, so a board that converges in one round is
+        unchanged.  :attr:`class_pad_growth_rounds` records every attempt.
         """
+        from .class_pad_repair import pad_class_requirements
+
+        deadline = kwargs.get("deadline")
         self._class_pad_growth = {}
+        self.class_pad_growth_rounds = []
         best = self._route_netset_once(connections, **kwargs)
         for _round in range(_MAX_PAD_GROWTH_ROUNDS):
             rstats = self.class_pad_repair_stats
@@ -2699,34 +2739,74 @@ class LatticePathfinder:
             }
             if not wanted:
                 break
-            saved = (
-                self.failure_reasons,
-                self.pair_outcomes,
-                self.class_pad_repair_stats,
-                dict(self._class_pad_growth),
-                self._lattice,
-                self._obstacles,
+            grown_parts = {self.pads[i].ref for i in self._class_pad_growth if self.pads[i].ref}
+            recurring = tuple(
+                sorted({self.pads[i].ref for i in wanted if self.pads[i].ref in grown_parts})
             )
-            self._class_pad_growth.update(wanted)
-            self._lattice = None
-            self._obstacles = None
-            routes, stats = self._route_netset_once(connections, **kwargs)
-            new_left = (
-                self.class_pad_repair_stats.total_remaining if self.class_pad_repair_stats else 0
-            )
-            old_left = saved[2].total_remaining if saved[2] else 0
-            if stats.routed >= best[1].routed and new_left < old_left:
-                best = (routes, replace(stats, lattice_builds=self.lattice_builds))
-                continue
-            (
-                self.failure_reasons,
-                self.pair_outcomes,
-                self.class_pad_repair_stats,
-                self._class_pad_growth,
-                self._lattice,
-                self._obstacles,
-            ) = saved
-            break
+            attempts: list[tuple[dict[int, float], tuple[str, ...]]] = []
+            if recurring:
+                whole = dict(wanted)
+                reqs = pad_class_requirements(self) or []
+                base = self.rules.trace_clearance
+                for j, req in enumerate(reqs):
+                    if (
+                        self.pads[j].ref in recurring
+                        and req > base + 1e-9
+                        and req > max(whole.get(j, 0.0), self._class_pad_growth.get(j, 0.0)) + 1e-9
+                    ):
+                        whole[j] = req
+                if len(whole) > len(wanted):
+                    attempts.append((whole, recurring))
+            # The targeted growth (the pre-#6670 round) is the fallback when a
+            # whole-part growth is rejected, so a round is never worse than it.
+            attempts.append((wanted, ()))
+            kept = False
+            for grow, parts in attempts:
+                if deadline is not None and time.monotonic() >= deadline:
+                    break
+                saved = (
+                    self.failure_reasons,
+                    self.pair_outcomes,
+                    self.class_pad_repair_stats,
+                    dict(self._class_pad_growth),
+                    self._lattice,
+                    self._obstacles,
+                )
+                self._class_pad_growth.update(grow)
+                self._lattice = None
+                self._obstacles = None
+                routes, stats = self._route_netset_once(connections, **kwargs)
+                new_left = (
+                    self.class_pad_repair_stats.total_remaining
+                    if self.class_pad_repair_stats
+                    else 0
+                )
+                old_left = saved[2].total_remaining if saved[2] else 0
+                kept = stats.routed >= best[1].routed and new_left < old_left
+                self.class_pad_growth_rounds.append(
+                    PadGrowthRound(
+                        grown=len(grow),
+                        footprints=parts,
+                        routed_before=best[1].routed,
+                        routed_after=stats.routed,
+                        left_before=old_left,
+                        left_after=new_left,
+                        kept=kept,
+                    )
+                )
+                if kept:
+                    best = (routes, replace(stats, lattice_builds=self.lattice_builds))
+                    break
+                (
+                    self.failure_reasons,
+                    self.pair_outcomes,
+                    self.class_pad_repair_stats,
+                    self._class_pad_growth,
+                    self._lattice,
+                    self._obstacles,
+                ) = saved
+            if not kept:
+                break
         routes, stats = best
         return routes, replace(stats, lattice_builds=self.lattice_builds)
 
