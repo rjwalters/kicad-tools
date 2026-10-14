@@ -1,4 +1,12 @@
-"""Stored copper retains physical spans when routing selects a layer subset."""
+"""Stored copper retains physical spans when routing selects a layer subset.
+
+Issue #6485: the physical span of a router ``Via`` is ``Via.drilled_layers``.
+The router has no blind/buried process, so the only via that stops short of
+the outer pair is a micro via; every other via is drilled F.Cu..B.Cu whatever
+pair ``layers`` records (KiCad builds a keyword-less via that way).  The
+partial-span projection is therefore pinned on micro vias, and the same pair
+on a non-micro via must be stored and validated as a through barrel.
+"""
 
 import pytest
 
@@ -76,20 +84,28 @@ def test_through_via_blocks_every_selected_layer(active, reverse):
 def test_blind_and_buried_copper_does_not_spread_to_unrelated_layers(span):
     active = [Layer.F_CU, Layer.IN1_CU, Layer.IN2_CU, Layer.B_CU]
     grid, native, pathfinder = _context(active)
-    grid.routes.append(Route(2, "stored", vias=[Via(4, 4, 0.3, 0.6, span, 2)]))
+    grid.routes.append(Route(2, "stored", vias=[Via(4, 4, 0.3, 0.6, span, 2, is_micro=True)]))
     pathfinder._sync_stored_routes(grid)
     lo, hi = sorted(layer.value for layer in span)
     for i, layer in enumerate(active):
         assert _native_trace_valid(native, i) is not (lo <= layer.value <= hi)
+
+    # Issue #6485: the same pair on a NON-micro via is a through barrel, so
+    # it is stored on every selected layer -- the layers the logical pair
+    # left out are exactly where the fabricated barrel used to go unseen.
+    grid, native, pathfinder = _context(active)
+    grid.routes.append(Route(2, "stored", vias=[Via(4, 4, 0.3, 0.6, span, 2)]))
+    pathfinder._sync_stored_routes(grid)
+    assert all(not _native_trace_valid(native, i) for i in range(len(active)))
 
 
 def test_off_grid_via_still_enforces_global_drill_spacing():
     from kicad_tools.router import router_cpp
 
     grid, native, pathfinder = _context([Layer.F_CU])
-    grid.routes.append(
-        Route(2, "stored", vias=[Via(4, 4, 0.3, 0.6, (Layer.IN1_CU, Layer.IN2_CU), 2)])
-    )
+    # Issue #6485: only a micro via stops short of the outer pair.
+    buried = Via(4, 4, 0.3, 0.6, (Layer.IN1_CU, Layer.IN2_CU), 2, is_micro=True)
+    grid.routes.append(Route(2, "stored", vias=[buried]))
     pathfinder._sync_stored_routes(grid)
     assert _native_trace_valid(native, 0)  # No barrel copper on F.Cu.
     candidate = router_cpp.Via()
@@ -104,6 +120,15 @@ def test_off_grid_via_still_enforces_global_drill_spacing():
     assert native._impl.validate_route([], [candidate], 2, [], 0.15, 0.2, 0.5).valid
     candidate.net, candidate.x = 1, 4.5
     assert not native._impl.validate_route([], [candidate], 1, [], 0.15, 0.2, 0.5).valid
+
+    # Issue #6485: the same inner pair on a NON-micro via is drilled through
+    # F.Cu, so it is on-grid copper there, not just a hole to keep clear of.
+    grid, native, pathfinder = _context([Layer.F_CU])
+    grid.routes.append(
+        Route(2, "stored", vias=[Via(4, 4, 0.3, 0.6, (Layer.IN1_CU, Layer.IN2_CU), 2)])
+    )
+    pathfinder._sync_stored_routes(grid)
+    assert not _native_trace_valid(native, 0)
 
 
 def _validate(pathfinder, route):
@@ -155,22 +180,32 @@ def test_reordered_stack_keeps_unrelated_plane_outside_blind_via(reverse):
     active = [Layer.F_CU, Layer.B_CU, Layer.IN1_CU]
     grid, native, pathfinder = _context(active)
     span = (Layer.IN1_CU, Layer.F_CU) if reverse else (Layer.F_CU, Layer.IN1_CU)
-    grid.routes.append(Route(2, "stored", vias=[Via(4, 4, 0.3, 0.6, span, 2)]))
+    # Issue #6485: the via that stops at In1.Cu is a micro via.
+    grid.routes.append(Route(2, "stored", vias=[Via(4, 4, 0.3, 0.6, span, 2, is_micro=True)]))
     pathfinder._sync_stored_routes(grid)
     assert not _native_trace_valid(native, 0)
     assert _native_trace_valid(native, 1)
     assert not _native_trace_valid(native, 2)
 
+    def candidate(is_micro):
+        return Route(1, "candidate", vias=[Via(4, 4, 0.3, 0.6, span, 1, is_micro=is_micro)])
+
     # Candidate-side projection must likewise avoid treating B.Cu as spanned.
     grid.routes[:] = [Route(2, "stored", segments=[Segment(3, 4, 5, 4, 0.2, Layer.B_CU, 2)])]
     native.invalidate_stored_routes()
-    assert _validate(pathfinder, Route(1, "candidate", vias=[Via(4, 4, 0.3, 0.6, span, 1)])) is None
+    assert _validate(pathfinder, candidate(True)) is None
+    # ... but a NON-micro via on the same pair is drilled through B.Cu (#6485).
+    assert _validate(pathfinder, candidate(False)) is not None
     grid.routes[:] = [Route(2, "stored", segments=[Segment(3, 4, 5, 4, 0.2, Layer.IN1_CU, 2)])]
     native.invalidate_stored_routes()
-    assert (
-        _validate(pathfinder, Route(1, "candidate", vias=[Via(4, 4, 0.3, 0.6, span, 1)]))
-        is not None
-    )
+    assert _validate(pathfinder, candidate(True)) is not None
+    assert _validate(pathfinder, candidate(False)) is not None
+
+    # Stored side, non-micro: the through barrel occupies B.Cu as well.
+    grid.routes[:] = [Route(2, "stored", vias=[Via(4, 4, 0.3, 0.6, span, 2)])]
+    native.invalidate_stored_routes()
+    pathfinder._sync_stored_routes(grid)
+    assert all(not _native_trace_valid(native, i) for i in range(len(active)))
 
 
 @pytest.mark.parametrize("reverse", [False, True])
