@@ -50,6 +50,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -1622,6 +1623,25 @@ def write_sidecar(net_class_map: dict, output_dir: Path) -> Path:
     return sidecar_path
 
 
+def copy_project_sidecars(source_pcb: Path, frame_pcb: Path) -> list[Path]:
+    """Copy ``source_pcb``'s ``.kicad_pro`` / ``.kicad_dru`` beside ``frame_pcb``.
+
+    ``kct route`` resolves declared clearance rules (board minimum, netclass,
+    DRU via rules) from sidecars sharing the PCB's stem; the translated routing
+    frame has none, so without this the route cannot see the project's rules
+    (Issue #6285).  The files hold no coordinates, so no translation is needed.
+    Missing sidecars are skipped.  Returns the files written.
+    """
+    written: list[Path] = []
+    for suffix in (".kicad_pro", ".kicad_dru"):
+        src = source_pcb.with_suffix(suffix)
+        if src.exists():
+            dst = frame_pcb.with_suffix(suffix)
+            shutil.copy2(src, dst)
+            written.append(dst)
+    return written
+
+
 def route_pcb(input_path: Path, output_path: Path) -> bool:
     """Route the PCB by invoking ``kct route`` with the proven flag recipe.
 
@@ -1824,6 +1844,7 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     if frame_dx != 0.0 or frame_dy != 0.0:
         route_input = output_path.parent / "matchgroup_test_routing_frame.kicad_pcb"
         route_input.write_text(translate_pcb_text(input_text, frame_dx, frame_dy))
+        copy_project_sidecars(input_path, route_input)
         print(
             f"\n   Routing-frame translation: input shifted by "
             f"({frame_dx:+g}, {frame_dy:+g}) mm to the historical "
