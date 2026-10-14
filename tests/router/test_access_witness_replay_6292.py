@@ -79,6 +79,13 @@ def _reference_replay(
     copper = _ReplayCopper()
     evaluations = 0
     saved = grid.routes
+    # Issue #6303: the one deliberate departure from "verbatim".  The pre-#6292
+    # loop rebound ``grid.routes`` but left the grid's segment R-tree (which
+    # indexes the FINISHED board) answering segment clearance once 32+
+    # segments were marked, so it judged stubs against the wrong copper.  The
+    # oracle must judge the same copper the replay does.
+    suspension = grid.segment_index_suspended()
+    suspension.__enter__()
     try:
         grid.routes = copper.routes
 
@@ -115,6 +122,7 @@ def _reference_replay(
             baseline = {k: _state_label(a) for k, a in state.items()}
     finally:
         grid.routes = saved
+        suspension.__exit__(None, None, None)
 
     out = []
     for key in pad_keys:

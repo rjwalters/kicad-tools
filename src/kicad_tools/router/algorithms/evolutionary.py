@@ -233,13 +233,7 @@ def _run_evolutionary_trial(config: dict) -> tuple[list, float, int]:
     """
     import random as _random
 
-    from kicad_tools.router.core import (
-        Autorouter,
-        install_serialized_obstacles,
-        worker_router_kwargs,
-    )
-    from kicad_tools.router.layers import Layer
-    from kicad_tools.router.rules import DesignRules
+    from kicad_tools.router.core import build_worker_router
 
     chrom_idx = config["chrom_idx"]
     seed = config["seed"]
@@ -248,104 +242,10 @@ def _run_evolutionary_trial(config: dict) -> tuple[list, float, int]:
 
     _random.seed(seed)
 
-    # Recreate design rules
-    rules_dict = config.get("rules_dict", {})
-    rules = DesignRules(**rules_dict) if rules_dict else DesignRules()
-
-    # Create new Autorouter instance
-    router = Autorouter(
-        width=config["width"],
-        height=config["height"],
-        origin_x=config["origin_x"],
-        origin_y=config["origin_y"],
-        rules=rules,
-        net_class_map=config.get("net_class_map"),
-        physics_enabled=False,
-        # Issue #6343: same layer stack and search budgets as the parent.
-        **worker_router_kwargs(config),
-    )
-
-    # Add pads from serialized data
-    router._loaded_component_holes = config.get("component_holes")
-    router.grid.install_component_hole_census(router._loaded_component_holes)
-
-    for pad_data in config["pads_data"]:
-        ref = pad_data["ref"]
-        layer_data = pad_data["layer"]
-        if isinstance(layer_data, int):
-            pad_layer = Layer(layer_data)
-        elif isinstance(layer_data, str):
-            try:
-                pad_layer = Layer.from_kicad_name(layer_data)
-            except ValueError:
-                pad_layer = Layer.F_CU
-        elif isinstance(layer_data, Layer):
-            pad_layer = layer_data
-        else:
-            pad_layer = Layer.F_CU
-
-        from kicad_tools.router.primitives import Pad
-
-        pin = str(pad_data["number"])
-        pad = Pad(
-            x=pad_data["x"],
-            y=pad_data["y"],
-            width=pad_data["width"],
-            height=pad_data["height"],
-            net=pad_data["net"],
-            net_name=pad_data["net_name"],
-            layer=pad_layer,
-            ref=ref,
-            component_id=pad_data.get("component_id", ref),
-            terminal_id=pad_data.get("terminal_id", ""),
-            pin=pin,
-            through_hole=pad_data.get("through_hole", False),
-            drill=pad_data.get("drill", 0.0),
-            drill_size=pad_data.get("drill_size"),
-            drill_rotation=pad_data.get("drill_rotation", 0.0),
-            footprint_name=pad_data.get("footprint_name", ""),
-            steiner_point=pad_data.get("steiner_point", False),
-            # Issue #4910: ``pads_data`` is produced by ``Autorouter``'s
-            # worker-config serializer, which carries the pad's residual
-            # board rotation; dropping it here would silently rebuild every
-            # rotated pad as axis-aligned in the worker process.
-            rotation=pad_data.get("rotation", 0.0),
-            shape=pad_data.get("shape", "rect"),
-        )
-        key = pad.key
-        if key in router.pads and router.pads[key].net != pad.net:
-            raise ValueError(f"Physical terminal {key!r} has conflicting nets")
-        router.pads[key] = pad
-        router.all_pads.append(pad)
-        router.grid.add_pad(pad, pin_pitch=pad_data.get("pin_pitch"))
-
-    # Restore nets and net_names
-    router.nets = {
-        int(k): list(dict.fromkeys((key[0], key[1]) for key in keys))
-        for k, keys in config["nets"].items()
-    }
-    router.net_names = {int(k): v for k, v in config["net_names"].items()}
-
-    # Restore pour-net overrides so _is_pour_net() returns correct results
-    router._pour_nets_without_zones = set(config.get("pour_nets_without_zones", []))
-
-    # Issue #5374: reinstall the board-edge keepout on the worker's own
-    # grid.  ``_serialize_for_parallel`` carries it across the process
-    # boundary via the "edge_segments" / "edge_clearance" config keys;
-    # without reinstalling it here the worker's A* search can route
-    # straight through cells the parent process would have blocked.
-    edge_segments = config.get("edge_segments")
-    edge_clearance = config.get("edge_clearance")
-    if edge_segments is not None:
-        router._edge_segments = edge_segments
-        router._edge_clearance = edge_clearance
-        if edge_segments and edge_clearance:
-            router.grid.add_edge_keepout(edge_segments, edge_clearance)
-
-    # Issue #5555: ``add_obstacle`` keepouts have the same problem -- they
-    # only reach this worker through the "obstacles" key of the serialized
-    # config, so replay them onto the worker's own grid before routing.
-    install_serialized_obstacles(router, config)
+    # Issue #6347: the same construction sequence as the Monte Carlo
+    # worker (rules, pads, census, keepouts, rule areas, ...), shared so the
+    # two can no longer drift apart.
+    router = build_worker_router(config)
 
     # Issue #6345: route in the chromosome's net order.  ``route_all(order)``
     # re-sorted it back to the priority order, so every chromosome routed the
