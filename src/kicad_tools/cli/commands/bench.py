@@ -51,6 +51,8 @@ started around it, so no timing number is even produced to discard.
 from __future__ import annotations
 
 import json
+import re
+import shutil
 import subprocess
 import sys
 import time
@@ -156,6 +158,11 @@ def _run_bench_external(args) -> int:
     )
 
     json_mode = wants_json(args)
+    suite = getattr(args, "suite", None)
+    if suite == "pcbworld":
+        return _run_bench_pcbworld(args)
+    if suite not in (None, "deeppcb"):
+        return _fail(json_mode, f"unknown suite {suite!r} (expected 'deeppcb' or 'pcbworld')")
     tuned = getattr(args, "tuned", False)
     protocol = PROTOCOL_TUNED if tuned else PROTOCOL_ZERO_TOUCH
 
@@ -338,6 +345,7 @@ def _run_one_board(
     protocol: str = "zero-touch",
     net_class_map_path: Path | None = None,
     diff_pairs: Sequence[tuple[str, str]] | None = None,
+    prepared_input: Any = None,
 ):
     """Fetch, normalize, route, and measure one board. Returns a ``BenchmarkReport``.
 
@@ -347,6 +355,11 @@ def _run_one_board(
     as ``--net-class-map`` and engages ``--differential-pairs`` so the
     declared diff-pair classes are actually routed as coupled pairs rather
     than falling through to the default single-ended strategy.
+
+    ``prepared_input`` (``--suite pcbworld``, issue #6331) is a prepared
+    ``guide`` board (``PreparedBoard``): fetch and ``normalize_board`` are
+    skipped -- the board is already stripped and ripping it up again could
+    alter the task -- and the board is verified to hold no tracks or vias.
 
     ``route_fn`` may return a legacy integer or ``RouteAttemptResult`` with
     explicit placement metadata for this invocation, including no-output
@@ -362,30 +375,41 @@ def _run_one_board(
 
         route = _route_main
 
-    source_path = cache_dir / spec.slug / Path(spec.board_path).name
-    if skip_fetch:
-        if not source_path.exists():
-            raise BenchExternalError(
-                f"--skip-fetch given but {source_path} does not exist -- "
-                "fetch it first (drop --skip-fetch, or run "
-                "benchmarks/external/fetch_boards.py directly)"
-            )
-    else:
+    baseline = None
+    if prepared_input is not None:
+        normalized_path = output_dir / "prepared" / f"{spec.slug}.kicad_pcb"
+        normalized_path.parent.mkdir(parents=True, exist_ok=True)
         if verbose:
-            print(f"  fetching {spec.name} @ {spec.commit[:12]} ...")
-        fetch_kwargs = {"opener": opener} if opener is not None else {}
-        try:
-            source_path = fetch_boards.fetch_board(spec, cache_dir, **fetch_kwargs)
-        except fetch_boards.FetchError as exc:
-            raise BenchExternalError(str(exc)) from exc
+            print("  guide board: skipping normalize (no rip-up), verifying no copper ...")
+        _assert_no_copper(prepared_input.guide_pcb)
+        shutil.copyfile(prepared_input.guide_pcb, normalized_path)
+        if prepared_input.guide_pro is not None:
+            shutil.copyfile(prepared_input.guide_pro, normalized_path.with_suffix(".kicad_pro"))
+    else:
+        source_path = cache_dir / spec.slug / Path(spec.board_path).name
+        if skip_fetch:
+            if not source_path.exists():
+                raise BenchExternalError(
+                    f"--skip-fetch given but {source_path} does not exist -- "
+                    "fetch it first (drop --skip-fetch, or run "
+                    "benchmarks/external/fetch_boards.py directly)"
+                )
+        else:
+            if verbose:
+                print(f"  fetching {spec.name} @ {spec.commit[:12]} ...")
+            fetch_kwargs = {"opener": opener} if opener is not None else {}
+            try:
+                source_path = fetch_boards.fetch_board(spec, cache_dir, **fetch_kwargs)
+            except fetch_boards.FetchError as exc:
+                raise BenchExternalError(str(exc)) from exc
 
-    normalized_path = output_dir / "normalized" / f"{spec.slug}.kicad_pcb"
-    if verbose:
-        print("  normalizing (rip-up copper, capture human baseline) ...")
-    try:
-        baseline = normalize.normalize_board(source_path, normalized_path)
-    except normalize.NormalizeError as exc:
-        raise BenchExternalError(str(exc)) from exc
+        normalized_path = output_dir / "normalized" / f"{spec.slug}.kicad_pcb"
+        if verbose:
+            print("  normalizing (rip-up copper, capture human baseline) ...")
+        try:
+            baseline = normalize.normalize_board(source_path, normalized_path)
+        except normalize.NormalizeError as exc:
+            raise BenchExternalError(str(exc)) from exc
 
     # Named per protocol AND slug (issue #5280): a tuned and a zero-touch run
     # against the same board slug must never share -- and thus never
@@ -459,6 +483,8 @@ def _run_one_board(
             f"human baseline (pre-rip-up): {baseline.segments} segments, "
             f"{baseline.vias} vias, {baseline.trace_length_mm:.1f}mm, "
             f"{baseline.unrouted_pads} unrouted pads"
+            if baseline is not None
+            else "PCBWorld guide board: used as prepared (no normalize / rip-up)"
         ),
     ]
     if not output_exists:
@@ -481,7 +507,9 @@ def _run_one_board(
 
     return collect_report(
         measured_path,
-        board_id=spec.slug,
+        # Prepared corpus boards keep their stable source/split/board ID
+        # (``pcbworld/d3a/<NNNN_name>``); files on disk use the safe slug.
+        board_id=prepared_input.board_id if prepared_input is not None else spec.slug,
         protocol=protocol,
         board_commit=spec.commit,
         board_source=spec.repo_url,
@@ -501,3 +529,205 @@ def _run_one_board(
         route_stopped_before_routing=route_stopped_before_routing,
         pre_route_path=normalized_path,
     )
+
+
+def _assert_no_copper(pcb_path: Path) -> None:
+    """Guide boards must hold zero tracks/vias; anything else is a hard error."""
+    text = pcb_path.read_text(encoding="utf-8", errors="replace")
+    n = len(re.findall(r"^\s*\((?:segment|via|arc)\b", text, re.MULTILINE))
+    if n:
+        raise BenchExternalError(
+            f"{pcb_path} already contains {n} track/via item(s); the pcbworld suite "
+            "does not run normalize on guide boards and requires an unrouted input"
+        )
+
+
+def _load_pcbworld() -> Any:
+    """Import ``benchmarks/external/pcbworld.py`` (same mechanism as the other siblings)."""
+    _external_dir()
+    import pcbworld  # type: ignore[import-not-found]
+
+    return pcbworld
+
+
+def _run_bench_pcbworld(args, *, runner: Any = None, opener: Any = None) -> int:
+    """``kct bench external --suite pcbworld --split d3a --limit K`` (issue #6331).
+
+    Fetch pinned PCBWorld/PCBench into the benchmark cache, prepare the
+    selected D3 ``guide`` boards with PCBWorld's own (external) prep, route
+    them with ``kct route`` (no normalize), measure with the local gates,
+    then score with PCBWorld's own scorer. The two verdicts are recorded
+    separately in each report (``external_scores.pcbworld`` vs. the local
+    ``kct_check`` / ``kicad_cli_drc`` blocks).
+    """
+    import dataclasses
+
+    from kicad_tools.benchmark.external import (
+        PROTOCOL_ZERO_TOUCH,
+        ExternalScores,
+        PCBWorldScore,
+        probe_backend,
+        render_markdown,
+    )
+
+    json_mode = wants_json(args)
+    if getattr(args, "tuned", False) or getattr(args, "boards", None):
+        return _fail(
+            json_mode, "--suite pcbworld does not support --tuned or --board (use --split/--limit)"
+        )
+
+    try:
+        fetch_boards, _normalize = _load_external_modules()
+        pcbworld = _load_pcbworld()
+    except BenchExternalError as exc:
+        return _fail(json_mode, str(exc))
+
+    run = runner if runner is not None else subprocess.run
+    split = getattr(args, "split", None) or "d3a"
+    limit = getattr(args, "limit", None) or 3
+    skip_fetch = getattr(args, "skip_fetch", False)
+
+    try:
+        corpus_path = (
+            Path(args.manifest) if getattr(args, "manifest", None) else pcbworld.DEFAULT_CORPUS_PATH
+        )
+        corpus = pcbworld.load_corpus(corpus_path)
+        tools = pcbworld.resolve_tools(corpus, runner=run)
+        cache_dir = fetch_boards.resolve_cache_dir(
+            Path(args.cache_dir) if getattr(args, "cache_dir", None) else None
+        )
+        fetch_kwargs = {"opener": opener} if opener is not None else {}
+        # Names come from PCBWorld's own split files, so fetch PCBWorld first.
+        pw_dir = pcbworld.fetch_pcbworld(corpus, cache_dir, skip_fetch=skip_fetch, **fetch_kwargs)
+        names = pcbworld.select_boards(corpus, split, pw_dir, limit)
+        pb_dir = pcbworld.fetch_pcbench(
+            corpus, cache_dir, names=names, skip_fetch=skip_fetch, **fetch_kwargs
+        )
+        prepared = pcbworld.prepare_boards(
+            corpus,
+            tools,
+            split=split,
+            names=names,
+            pcbworld_dir=pw_dir,
+            pcbench_dir=pb_dir,
+            work_dir=cache_dir / "pcbworld" / "work" / f"{split}-{limit}",
+            runner=run,
+        )
+    except pcbworld.PCBWorldError as exc:
+        return _fail(json_mode, str(exc))
+
+    output_dir = (
+        Path(args.output_dir) if getattr(args, "output_dir", None) else cache_dir / "results"
+    )
+    output_dir.mkdir(parents=True, exist_ok=True)
+    seed = getattr(args, "seed", 42)
+    verbose = getattr(args, "verbose", False) and not json_mode
+    backend = probe_backend()
+    if not backend.timing_valid:
+        print(
+            "WARNING: C++ router backend unavailable -- wall-clock timing is refused for this "
+            "run (run `kct build-native`).",
+            file=sys.stderr,
+        )
+
+    reports: dict[str, Any] = {}
+    errors: dict[str, str] = {}
+    with stdout_to_stderr_when(json_mode):
+        for board in prepared:
+            spec = fetch_boards.BoardSpec(
+                slug=board.slug,
+                name=board.board_id,
+                repo_url=corpus.pcbench_repo_url,
+                vcs="github",
+                commit=corpus.pcbench_commit,
+                board_path=board.guide_pcb.name,
+                license=corpus.pcbench_license,
+            )
+            try:
+                report = _run_one_board(
+                    spec,
+                    fetch_boards,
+                    _normalize,
+                    cache_dir=cache_dir,
+                    output_dir=output_dir,
+                    seed=seed,
+                    manufacturer=getattr(args, "manufacturer", "jlcpcb"),
+                    layers=getattr(args, "layers", 4),
+                    skip_fetch=True,
+                    run_kicad_cli=not getattr(args, "skip_kicad_cli_drc", False),
+                    kicad_cli_timeout=getattr(args, "kicad_cli_timeout", 300),
+                    backend=backend,
+                    verbose=verbose,
+                    protocol=PROTOCOL_ZERO_TOUCH,
+                    prepared_input=board,
+                )
+            except BenchExternalError as exc:
+                print(f"error: {board.board_id}: {exc}", file=sys.stderr)
+                errors[board.board_id] = str(exc)
+                continue
+            reports[board.board_id] = report
+
+        # PCBWorld's own verdict, one scorer invocation for the whole subset.
+        by_id = {b.board_id: b for b in prepared}
+        scoring_inputs = {}
+        for board_id in reports:
+            board = by_id[board_id]
+            routed = output_dir / "routed" / f"{board.slug}.{PROTOCOL_ZERO_TOUCH}.kicad_pcb"
+            scoring_inputs[board_id] = (board, routed if routed.exists() else None)
+        try:
+            pw_dir_scores = pcbworld.score_boards(
+                corpus,
+                tools,
+                scoring_inputs,
+                pcbworld_dir=pw_dir,
+                scoring_dir=output_dir / "pcbworld-scoring",
+                seed=seed,
+                runner=run,
+            )
+        except pcbworld.PCBWorldError as exc:
+            pw_dir_scores = {
+                bid: {
+                    "available": False,
+                    "comparable": False,
+                    "unavailable_reason": str(exc),
+                    "comparable_reason": str(exc),
+                }
+                for bid in reports
+            }
+
+        final = []
+        for board_id, report in reports.items():
+            score = PCBWorldScore.from_payload(pw_dir_scores[board_id])
+            report = dataclasses.replace(report, external_scores=ExternalScores(pcbworld=score))
+            final.append(report)
+            json_path = output_dir / f"{by_id[board_id].slug}.{report.protocol}.json"
+            report.write_json(json_path)
+            cp = "unavailable" if score.clean_pass is None else str(score.clean_pass)
+            print(
+                f"{board_id}: local {report.completion.completion_pct:.1f}% complete; "
+                f"PCBWorld CP: {cp} -> {json_path}"
+            )
+
+        markdown_path = None
+        if final:
+            markdown = render_markdown(
+                final, title=f"External autorouter benchmark results (pcbworld {split})"
+            )
+            markdown_path = output_dir / f"report.pcbworld.{split}.md"
+            markdown_path.write_text(markdown, encoding="utf-8")
+            print()
+            print(markdown)
+
+    if json_mode:
+        emit_json(
+            {
+                "reports": [r.to_dict() for r in final],
+                "errors": errors,
+                "output_dir": str(output_dir),
+                "markdown_path": str(markdown_path) if markdown_path else None,
+                "success": bool(final) and not errors,
+            }
+        )
+    if not final:
+        return 1
+    return 1 if errors else 0
