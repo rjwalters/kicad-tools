@@ -16252,7 +16252,6 @@ class Autorouter:
         failed_pairs: list[tuple[Pad, Pad]] = []
         ng_definitive: list[bool] = []  # one entry per recorded failure
         ng_reason: list[int] = []  # last #6369 failure code, for replay
-        cb = failure_callback
         if nogood is not None:
             from .nogood_cache import (
                 reset_search_exhausted,
@@ -16284,8 +16283,9 @@ class Autorouter:
                 return routes
 
             reset_search_exhausted(search_router)
+            downstream_callback = failure_callback
 
-            def cb(src: Pad, tgt: Pad) -> None:
+            def record_nogood_failure(src: Pad, tgt: Pad) -> None:
                 failed_pairs.append((src, tgt))
                 ng_definitive.append(search_failure_is_definitive(search_router))
                 get_info = getattr(search_router, "get_last_failure_info", None)
@@ -16293,8 +16293,10 @@ class Autorouter:
                 if info and info.get("failure_reason"):
                     ng_reason[:] = [int(info["failure_reason"])]
                 reset_search_exhausted(search_router)
-                if failure_callback is not None:
-                    failure_callback(src, tgt)
+                if downstream_callback is not None:
+                    downstream_callback(src, tgt)
+
+            failure_callback = record_nogood_failure
 
         ng_start = time.monotonic() if nogood is not None else 0.0
         new_routes = neg_router.route_net_negotiated(
@@ -16302,7 +16304,7 @@ class Autorouter:
             present_cost_factor,
             mark_route,
             per_net_timeout=per_net_timeout,
-            failure_callback=cb,
+            failure_callback=failure_callback,
         )
         if (
             nogood is not None
