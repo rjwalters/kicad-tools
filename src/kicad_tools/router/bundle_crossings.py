@@ -252,8 +252,12 @@ def _is_signal_net(name: str) -> bool:
         return False
     if is_ground_rail_name(name):
         base = _rail_base_name(name)
+        # _rail_base_name returns None when the name has no rail base;
+        # `bool(base)` would not narrow the Optional for mypy.
+        if not base:
+            return False
         # GND_SENSE-style names are signals that merely start with GND.
-        return bool(base) and _has_signal_qualifier(base)
+        return _has_signal_qualifier(base)
     return True
 
 
