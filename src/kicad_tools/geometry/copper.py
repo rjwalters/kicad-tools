@@ -26,8 +26,10 @@ only missing primitive was the trace-segment polygon this module provides.
 
 It also owns the single pad-outline primitive, :func:`pad_copper_outline`
 (Issues #6452, #6453): the exact rect / roundrect / circle / oval copper of a
-pad, never eroded, with contact decided by a positive intersection area
-(:data:`CONTACT_AREA_EPSILON`).  Every connectivity model builds its pad
+pad, never eroded.  Pad-pad and pad-fill contact is overlap or a shared
+edge (within a tessellation allowance, Issue #6490); pad-via contact is a
+positive intersection area (:data:`CONTACT_AREA_EPSILON`).  Every
+connectivity model builds its pad
 geometry from it via :mod:`kicad_tools.validate.copper_contact`.
 
 ``shapely`` is a core dependency (see :mod:`kicad_tools._shapely`); these
@@ -49,11 +51,12 @@ if _has_shapely():  # pragma: no cover - import guard exercised by environment
 
 
 # Minimum intersection area (mm^2) that counts as copper contact between a
-# pad outline and other copper (fill, pad, via annulus).  Far below any real
-# thermal spoke or solid tie (a 0.05 mm deep contact on a 0.3 mm pad is
-# ~0.015 mm^2) and far above floating-point noise on a shared edge, so a
-# tangent outline is never contact and any real overlap always is
-# (Issues #6452, #6453).
+# pad outline and a via annulus (and between two via annuli).  Far below any
+# real contact (a 0.05 mm deep contact on a 0.3 mm pad is ~0.015 mm^2) and
+# far above floating-point noise on a shared edge (Issues #6452, #6453).
+# Exact pad outlines against other pads or fills instead bond at zero gap,
+# matching kicad-cli on a shared edge (Issue #6490; see
+# ``kicad_tools.validate.copper_contact._TOUCH``).
 CONTACT_AREA_EPSILON: float = 1e-6
 
 # Inward erosion (mm) for pad shapes this module does NOT model exactly
@@ -165,10 +168,9 @@ def pad_copper_outline(
     The outline is oriented by the pad's **absolute** angle (``pad.rotation``
     already includes the footprint rotation; KiCad's negated-angle
     convention, Issue #6460), centred on the pad anchor plus its rotated
-    ``(offset ...)``, and is **not** eroded: contact is decided by a positive
-    intersection area (:data:`CONTACT_AREA_EPSILON`) against the other
-    copper, exactly as KiCad collides a pad's effective shape with a zone
-    fill.  With the true rounded corners there is no over-reach to cancel --
+    ``(offset ...)``, and is **not** eroded: contact is decided against the
+    other copper exactly as KiCad collides a pad's effective shape with a
+    zone fill (a shared edge touches, Issue #6490).  With the true rounded corners there is no over-reach to cancel --
     the old 0.1 mm erosion of a sharp box both hid real shallow contact
     (#6453) and was load-bearing only because the box's corners grazed
     foreign pours.
