@@ -607,6 +607,98 @@ def _write_board_as_read_atomic(pcb_path: str, output_path: str) -> None:
         raise
 
 
+@dataclasses.dataclass
+class SnapSilkRepair:
+    """Reference-text repair after the decoupling snap (issue #6256).
+
+    ``moved`` names the references whose text was re-anchored; ``unresolved``
+    holds ``(reference, status, reason)`` for affected references the solver
+    could not clear (left exactly where they were, never hidden or resized);
+    ``error`` is set when the repair could not run at all.
+    """
+
+    affected: list[str] = dataclasses.field(default_factory=list)
+    moved: list[str] = dataclasses.field(default_factory=list)
+    unresolved: list[tuple[str, str, str]] = dataclasses.field(default_factory=list)
+    error: str | None = None
+
+    def as_dict(self) -> dict:
+        return {
+            "affected": list(self.affected),
+            "moved": list(self.moved),
+            "unresolved": [
+                {"reference": ref, "status": status, "reason": reason}
+                for ref, status, reason in self.unresolved
+            ],
+            "error": self.error,
+        }
+
+    def warnings(self) -> list[str]:
+        """Problems a caller must surface: a skipped repair or unresolved refs."""
+        if self.error:
+            return [f"snap silk repair skipped: {self.error}"]
+        return [
+            f"reference {ref} left in place after decoupling snap ({status}: {reason})"
+            for ref, status, reason in self.unresolved
+        ]
+
+    def lines(self) -> list[str]:
+        """Human-readable summary: what moved, then every warning."""
+        out: list[str] = []
+        if self.moved:
+            out.append(f"Snap silk repair: moved reference text of {', '.join(self.moved)}")
+        out.extend(f"WARNING: {w}" for w in self.warnings())
+        return out
+
+
+def repair_snapped_silk_refs(
+    output_path: str | Path, snap_moves: Sequence[SnapMove]
+) -> SnapSilkRepair | None:
+    """Re-anchor reference text disturbed by the decoupling snap (issue #6256).
+
+    The snap moves a cap by its footprint ``(at ...)`` only, so the cap's
+    reference text keeps its footprint-local offset and can land on a
+    neighbour's pad or silk, and the cap's pads can land under a neighbour's
+    reference text. This runs :class:`~kicad_tools.silkscreen.place_refs.SilkRefPlacer`
+    on the written board, restricted to the snapped caps and to the
+    footprints whose reference text now collides with a snapped cap. Every
+    other reference is left byte-identical, and nothing runs (``None``) when
+    the snap moved nothing.
+    """
+    if not snap_moves:
+        return None
+    from kicad_tools.silkscreen.place_refs import SilkRefPlacer
+
+    caps = sorted({move.cap for move in snap_moves})
+    repair = SnapSilkRepair()
+    try:
+        placer = SilkRefPlacer(output_path)
+        affected = set(caps) | placer.refs_blocked_by(caps)
+        repair.affected = sorted(affected)
+        result = placer.plan(only=affected)
+        repair.moved = sorted(p.footprint_ref for p in result.moved)
+        repair.unresolved = sorted(
+            (p.footprint_ref, p.status, p.reason)
+            for p in (*result.unplaceable, *result.under_component_fallback)
+        )
+        if placer.apply(result):
+            out = Path(output_path)
+            fd, tmp_path = tempfile.mkstemp(
+                dir=str(out.parent), prefix=".placement_", suffix=".tmp"
+            )
+            os.close(fd)
+            try:
+                placer.save(tmp_path)
+                Path(tmp_path).replace(out)
+            except BaseException:
+                with contextlib.suppress(OSError):
+                    Path(tmp_path).unlink(missing_ok=True)
+                raise
+    except Exception as exc:  # the placement itself is already written
+        return SnapSilkRepair(affected=caps, error=str(exc))
+    return repair
+
+
 def _decoupling_report(
     vector: PlacementVector,
     components: Sequence[ComponentDef],
@@ -1977,6 +2069,7 @@ def run_optimize_placement(
     if not quiet:
         print(f"\nWriting result to: {output_path}")
 
+    silk_repair: SnapSilkRepair | None = None
     try:
         if route_check_report is not None and route_check_report.accepted_stage == "incumbent":
             # Route check kept the board as read: write it untouched (the
@@ -1986,6 +2079,9 @@ def run_optimize_placement(
             _write_placements_to_pcb_atomic(
                 pcb_path, output_path, best_vector, components, board_origin
             )
+            # The snap moved caps by their footprint origin only: re-anchor
+            # the reference text it disturbed (issue #6256).
+            silk_repair = repair_snapped_silk_refs(output_path, snap_moves)
     except Exception as e:
         rc = _placement_error(
             pcb_path,
@@ -1998,6 +2094,14 @@ def run_optimize_placement(
 
             traceback.print_exc()
         return rc
+
+    if silk_repair is not None:
+        if not quiet:
+            for line in silk_repair.lines():
+                print(f"  {line}")
+        elif not as_json:
+            for warning in silk_repair.warnings():
+                print(f"WARNING: {warning}", file=sys.stderr)
 
     if not quiet:
         print("Done.")
@@ -2015,6 +2119,9 @@ def run_optimize_placement(
                     **base_document,
                     **route_check_doc,
                     "mode": "optimize",
+                    "snap_silk_repair": (
+                        silk_repair.as_dict() if silk_repair is not None else None
+                    ),
                     "scores": {
                         "initial": _score_document(seed_score),
                         "final": _score_document(final_score),
