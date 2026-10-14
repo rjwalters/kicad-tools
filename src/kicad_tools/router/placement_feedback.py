@@ -12,6 +12,7 @@ import contextlib
 import copy
 import json
 import math
+import signal
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -110,6 +111,40 @@ class _TrialInFlight:
     @property
     def mirror_applied(self) -> bool:
         return len(self.mirror_flips) % 2 == 1
+
+
+@contextlib.contextmanager
+def _signals_deferred():
+    """Hold SIGINT/SIGTERM/SIGALRM until the block ends (issue #6325).
+
+    A mirror application (and its re-application) is not atomic: the
+    footprint cosmetics change outside ``_snapshot_placement`` and
+    ``_TrialInFlight.mirror_flips`` is only appended once the application
+    returns.  A handler that ran in between would count the wrong parity and
+    save silk/fab on the wrong side.  Deferring the signals makes the
+    application plus its bookkeeping one step as far as a handler can tell;
+    the pending signal is delivered the moment the block exits.  A no-op where
+    ``pthread_sigmask`` does not exist or off the main thread's control.
+    """
+    mask = getattr(signal, "pthread_sigmask", None)
+    if mask is None:
+        yield
+        return
+    held = {
+        n
+        for n in (signal.SIGINT, signal.SIGTERM, getattr(signal, "SIGALRM", None))
+        if n is not None
+    }
+    try:
+        old = mask(signal.SIG_BLOCK, held)
+    except (ValueError, OSError):
+        yield
+        return
+    try:
+        yield
+    finally:
+        # Restore only what we added, so an already-blocked signal stays so.
+        mask(signal.SIG_UNBLOCK, held - set(old))
 
 
 def _journal_mark(router: Any) -> tuple[int, bool] | None:
@@ -1730,8 +1765,9 @@ class PlacementDeltaFeedbackLoop(PlacementFeedbackLoop):
         """
         if self.pcb is not None:
             while trial.mirror_applied:
-                self._strategy_applicator.apply_strategy(self.pcb, trial.strategy)
-                trial.mirror_flips.append(None)
+                with _signals_deferred():
+                    self._strategy_applicator.apply_strategy(self.pcb, trial.strategy)
+                    trial.mirror_flips.append(None)
         self._restore_pad_nets(trial.pad_nets)
         self._restore_placement(trial.placement)
         self._restore_router_pads(trial.router_pads)
@@ -2669,7 +2705,12 @@ class PlacementDeltaFeedbackLoop(PlacementFeedbackLoop):
             )
             self._trial = trial
 
-            result = self._strategy_applicator.apply_strategy(self.pcb, strategy)
+            # Issue #6325: a mirror's application and its flip count must not
+            # be split by a signal handler (see ``_signals_deferred``).
+            with _signals_deferred():
+                result = self._strategy_applicator.apply_strategy(self.pcb, strategy)
+                if result.success and delta.kind == "mirror":
+                    trial.mirror_flips.append(None)
             if not result.success:
                 self._trial = None
                 # A rewind that landed inside the failed application has
@@ -2680,8 +2721,6 @@ class PlacementDeltaFeedbackLoop(PlacementFeedbackLoop):
                 if self.verbose:
                     print(f"  Delta application failed: {result.message}")
                 break
-            if delta.kind == "mirror":
-                trial.mirror_flips.append(None)
             # Keep the router's flat pad geometry in lockstep with the PCB.
             self._apply_delta_to_router_pads(delta)
 

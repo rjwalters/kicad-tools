@@ -1406,3 +1406,81 @@ class TestAccessWitnessOfAnInterruptedTrial:
         assert _live_copper(router.commit_journal) == sorted(
             (t.net, t.x1, t.y1, t.x2, t.y2) for t in router.routes
         )
+
+
+# --------------------------------------------------------------------------- #
+# Issue #6325: a signal inside a mirror's application                          #
+# --------------------------------------------------------------------------- #
+
+
+class TestSignalInsideAMirrorApplication:
+    """A real SIGINT that lands between a mirror's cosmetics flip and its count.
+
+    The silk/fab flip is outside the placement snapshot, so the undo has to
+    know whether the application finished.  The handler must see a finished
+    (or not started) application, never half of one.
+    """
+
+    @staticmethod
+    def _board_with_silk(path: Path) -> None:
+        text = _board_text().replace(
+            '(property "Reference" "R3")',
+            '(property "Reference" "R3")\n'
+            '    (fp_text user "X" (at 0 1.5) (layer "F.SilkS")'
+            " (effects (font (size 1 1) (thickness 0.15))))\n"
+            '    (fp_line (start -1 1) (end 1 1) (layer "F.Fab") (width 0.1))',
+        )
+        path.write_text(text)
+
+    @staticmethod
+    def _deltas_with_mirror() -> list[PlacementDelta]:
+        return [
+            PlacementDelta(net_name="B", target_ref="R2", kind="translate", dx=_MOVE, dy=0.0),
+            PlacementDelta(net_name="C", target_ref="R3", kind="mirror"),
+        ]
+
+    @pytest.mark.parametrize("landing", [1, 2], ids=["forward", "revert"])
+    def test_silk_and_fab_stay_on_the_front(self, tmp_path, monkeypatch, landing):
+        from kicad_tools.recovery.applicator import StrategyApplicator
+
+        source = tmp_path / "board.kicad_pcb"
+        output = tmp_path / "board_routed.kicad_pcb"
+        self._board_with_silk(source)
+        router = _CopperRouter()
+        monkeypatch.setattr(
+            _CopperRouter,
+            "route_with_placement_delta_feedback",
+            lambda self, **kw: Autorouter.route_with_placement_delta_feedback(
+                self, delta_proposer=lambda _p: self._deltas(), **kw
+            ),
+        )
+        router._deltas = self._deltas_with_mirror
+
+        real = StrategyApplicator._mirror_footprint_cosmetics
+        calls = {"n": 0}
+
+        def flip_then_signal(applicator, fp):
+            real(applicator, fp)
+            calls["n"] += 1
+            if calls["n"] == landing:
+                signal.raise_signal(signal.SIGINT)
+
+        monkeypatch.setattr(StrategyApplicator, "_mirror_footprint_cosmetics", flip_then_signal)
+        previous = signal.signal(
+            signal.SIGINT, lambda signum, frame: route_cmd._handle_interrupt(signum, frame)
+        )
+        try:
+            with pytest.raises(SystemExit):
+                _run_loop(router, source, output)
+        finally:
+            signal.signal(signal.SIGINT, previous)
+
+        assert calls["n"] >= landing, "the mirror trial must have been reached"
+        partial = _partial(output).read_text()
+        r3 = partial[partial.index('"R3"') - 200 :]
+        assert "B.SilkS" not in partial and "B.Fab" not in partial
+        assert '"F.SilkS"' in r3 and '"F.Fab"' in r3
+        assert PCB.load(_partial(output)).footprints
+        for fp in PCB.load(_partial(output)).footprints:
+            if fp.reference == "R3":
+                assert str(fp.layer) == "F.Cu"
