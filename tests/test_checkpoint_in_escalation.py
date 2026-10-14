@@ -62,7 +62,9 @@ def _make_args(**overrides):
         "edge_clearance": 0.25,
         "escape_routing": None,
         "no_optimize": True,
-        "dry_run": True,
+        # Issue #6563: a dry run gets no checkpoint writer, so these
+        # checkpoint-forwarding tests run the real (mocked-router) save path.
+        "dry_run": False,
         # Issue #3051: required for callback build.
         "checkpoint_interval": 30.0,
         # Adaptive-rules / mfr-tier specific defaults so the rule and
@@ -73,6 +75,7 @@ def _make_args(**overrides):
         "layers": "2",
         "no_early_stop": False,
         "no_auto_build_native": True,
+        "skip_drc": True,
     }
     defaults.update(overrides)
     return SimpleNamespace(**defaults)
@@ -368,10 +371,18 @@ class TestCheckpointActuallyWritesInEscalation:
         # Custom route_all_negotiated that invokes the forwarded
         # checkpoint_callback before returning.  Simulates the iteration-0
         # best-so-far snapshot landing on disk before a hypothetical kill.
+        # Issue #6563: the helper args are no longer ``dry_run`` (a dry run
+        # gets no checkpoint writer), so the final save later overwrites
+        # ``out`` with the mock router's (empty) copper.  Snapshot the file
+        # right after the checkpoint fires -- the kill-mid-loop moment.
+        on_disk_after_checkpoint: list[str] = []
+
         def _fake_route_all_negotiated(*args, **kwargs):
             cb = kwargs.get("checkpoint_callback")
             if cb is not None:
                 cb([sample_route], IterationMetrics(iteration=1, routed_count=1, overflow=0))
+                if out.exists():
+                    on_disk_after_checkpoint.append(out.read_text())
             return []
 
         router.route_all_negotiated.side_effect = _fake_route_all_negotiated
@@ -391,8 +402,10 @@ class TestCheckpointActuallyWritesInEscalation:
         # Output file exists AND contains at least one segment.  Pre-fix:
         # callback was never forwarded, so this assertion failed with 0
         # segments (or no file at all).
-        assert out.exists(), "Issue #3051: output PCB must exist after callback invocation"
-        segment_count = out.read_text().count("(segment")
+        assert on_disk_after_checkpoint, (
+            "Issue #3051: output PCB must exist after callback invocation"
+        )
+        segment_count = on_disk_after_checkpoint[0].count("(segment")
         assert segment_count >= 1, (
             f"Issue #3051: expected >=1 (segment after checkpoint, got "
             f"{segment_count}.  This is the kill-mid-loop regression."

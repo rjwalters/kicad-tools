@@ -2092,6 +2092,7 @@ def _make_checkpoint_callback(
     router_provider: "Callable[[], Autorouter] | None" = None,
     source_pcb_path: Path | None = None,
     best_checkpoint: "BestCheckpointWriter | None" = None,
+    dry_run: bool = False,
 ):
     """Build a checkpoint callback for ``route_all_negotiated`` (Issue #2808).
 
@@ -2137,7 +2138,12 @@ def _make_checkpoint_callback(
         written, so a layer-escalation attempt that restarts from a worse
         state can never overwrite a better earlier checkpoint.  When it is
         set, a callback is returned even if ``interval <= 0``.
+
+        ``dry_run`` (Issue #6563): a ``--dry-run`` writes no files, so no
+        callback is returned regardless of ``interval``/``best_checkpoint``.
     """
+    if dry_run:
+        return None
     if interval <= 0 and best_checkpoint is None:
         return None
 
@@ -2897,6 +2903,9 @@ def _finalize_routes(
 # Global state for Ctrl+C handling
 _interrupt_state: dict[str, Any] = {
     "interrupted": False,
+    # Issue #6563: set by ``_main_impl`` from ``--dry-run``; makes
+    # ``_save_partial_results`` a no-op so a dry run never writes a board.
+    "dry_run": False,
     "router": None,
     "output_path": None,
     "pcb_path": None,
@@ -3197,6 +3206,9 @@ def _save_partial_results() -> bool:
     quiet = _interrupt_state["quiet"]
 
     if router is None or output_path is None or pcb_path is None:
+        return False
+    # Issue #6563: a --dry-run never writes files, even when interrupted.
+    if _interrupt_state.get("dry_run"):
         return False
 
     # Issue #6314: restore BEFORE looking at ``router.routes``.  A trial clears
@@ -10525,6 +10537,7 @@ def route_with_layer_escalation(
         router_provider=lambda: router,
         source_pcb_path=Path(getattr(args, "pcb", pcb_path)),
         best_checkpoint=getattr(args, "_best_checkpoint", None),
+        dry_run=bool(getattr(args, "dry_run", False)),
     )
 
     # Issue #3923: pre-rung deduplication.  The escalation ladder built by
@@ -11895,6 +11908,7 @@ def route_with_rule_relaxation(
         router_provider=lambda: router,
         source_pcb_path=Path(getattr(args, "pcb", pcb_path)),
         best_checkpoint=getattr(args, "_best_checkpoint", None),
+        dry_run=bool(getattr(args, "dry_run", False)),
     )
 
     # Issue #2823: precompute total tier count so per-attempt budget can
@@ -14432,6 +14446,7 @@ def route_with_combined_escalation(
         router_provider=lambda: router,
         source_pcb_path=Path(getattr(args, "pcb", pcb_path)),
         best_checkpoint=getattr(args, "_best_checkpoint", None),
+        dry_run=bool(getattr(args, "dry_run", False)),
     )
 
     # 2D search: prioritize fewer layers first, then stricter rules.
@@ -18142,7 +18157,13 @@ def _route_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Show what would be done without writing output",
+        help=(
+            "Print the analytical routing plan (grid, cells, memory budget) "
+            "and exit without loading the router, routing, or writing any "
+            "file.  On the escalation flows (--auto-layers, the default; "
+            "--auto-pcb-size; --auto-mfr-tier; --adaptive-rules) the plan is "
+            "printed once per layer count the ladder would try."
+        ),
     )
     parser.add_argument(
         "--analyze",
@@ -19490,6 +19511,9 @@ def _main_impl(argv: list[str] | None = None) -> int:
     from .route_deadline import CONTROL_ENV, TIMEOUT_EXIT, RouteDeadlineExpired
     from .route_placement import finish
 
+    # Issue #6563: defense in depth -- the partial-save writer is a no-op for a
+    # dry run.  The flag is module-global, so it is scoped to this call.
+    _interrupt_state["dry_run"] = bool(getattr(args, "dry_run", False))
     try:
         # Issue #5938: under --format json every progress/diagnostic print
         # from the (very chatty) routing pipeline goes to stderr; only the
@@ -19596,6 +19620,8 @@ def _main_impl(argv: list[str] | None = None) -> int:
                 args._placement_output_before = output.stat() if output.exists() else None
             finish(args, TIMEOUT_EXIT)
         raise
+    finally:
+        _interrupt_state["dry_run"] = False
 
 
 def _lint_gate_unstage_args(args, gate, requested_output) -> None:
@@ -19661,6 +19687,108 @@ def _emit_route_json_fallback(args, exit_code: int) -> None:
         ),
         file=json_stdout(),
     )
+
+
+def _dry_run_layer_counts(pcb_path: Path, args, argv) -> tuple[list[int], bool]:
+    """Layer counts the run would try, and whether layers escalate.
+
+    Issue #6563.  When layers escalate (``--auto-layers``, the default, or
+    ``--auto-pcb-size`` which implies it unless ``--no-auto-layers`` was
+    passed), this is the same filtered ladder
+    (``--starting-layers`` .. ``--max-layers``, declared stackup) the inner
+    ``route_with_layer_escalation`` walks.  Otherwise it is the fixed layer
+    count: ``--layers N`` or the stack auto-detected from the board.
+    """
+    _argv = argv if argv is not None else sys.argv
+    escalates_layers = bool(getattr(args, "auto_layers", False)) or (
+        bool(getattr(args, "auto_pcb_size", False)) and "--no-auto-layers" not in _argv
+    )
+    if escalates_layers:
+        return list(_mfr_tier_reachable_layer_counts(pcb_path, args)), True
+    layers = getattr(args, "layers", "auto")
+    if layers == "auto":
+        from kicad_tools.router.io import detect_layer_stack
+
+        return [detect_layer_stack(pcb_path.read_text()).num_layers], False
+    return [6 if layers == "6" else 4 if str(layers).startswith("4") else 2], False
+
+
+def _print_dry_run_plan(
+    pcb_path: Path,
+    output_path: Path,
+    args,
+    argv,
+    *,
+    grid_explicit: bool,
+) -> int:
+    """Print the analytical ``--dry-run`` plan and return without routing.
+
+    Issue #6563: runs before every route flow dispatch, so a dry run loads no
+    router, routes nothing and writes no file -- on the escalation flows as
+    well as the single attempt.  The plan is the #4263 analytical grid plan,
+    printed once per layer count the run would try (a single plan for a
+    fixed layer count).  ``--auto-pcb-size`` / ``--auto-mfr-tier`` /
+    ``--adaptive-rules`` rungs change the board size or rules per attempt;
+    the plan reports the board and rules as given (the first rung).
+
+    The explicit-grid vs clearance refusal is applied here too, so a dry run
+    reports the same configuration error a real run would.
+    """
+    quiet = args.quiet
+    if grid_explicit and args.grid > args.clearance and not args.force:
+        print(
+            f"Error: Grid resolution {args.grid}mm exceeds clearance {args.clearance}mm.\n"
+            f"This WILL cause DRC violations.\n\n"
+            f"Options:\n"
+            f"  1. Use a finer grid: --grid {args.clearance / 2}\n"
+            f"  2. Use --grid auto for automatic selection\n"
+            f"  3. Use --force to override (not recommended)\n",
+            file=sys.stderr,
+        )
+        return 1
+
+    layer_counts, escalates = _dry_run_layer_counts(pcb_path, args, argv)
+    flows = []
+    if getattr(args, "auto_pcb_size", False):
+        flows.append("--auto-pcb-size")
+    if getattr(args, "auto_mfr_tier", False):
+        flows.append("--auto-mfr-tier")
+    if escalates:
+        flows.append("--auto-layers")
+    if getattr(args, "adaptive_rules", False):
+        flows.append("--adaptive-rules")
+    if not quiet:
+        print("\n--- Dry run: routing plan (no routing, no files written) ---")
+        print(f"Input:          {pcb_path}")
+        print(f"Output:         {output_path} (not written)")
+        print(f"Flow:           {' + '.join(flows) if flows else 'single attempt'}")
+        print(f"Layer counts:   {', '.join(str(n) for n in layer_counts)}")
+        if flows and flows != ["--auto-layers"]:
+            print(
+                "Note:           size/tier/rule rungs are not expanded; the plan "
+                "uses the board and rules as given (first rung)."
+            )
+    for num_layers in layer_counts:
+        plan = compute_dry_run_grid_plan(
+            pcb_path=pcb_path,
+            selected_grid=args.grid,
+            clearance=args.clearance,
+            num_layers=num_layers,
+            max_cells=getattr(args, "max_cells", 500_000),
+            engine=_resolve_route_engine(args),
+        )
+        if plan is None:
+            if not quiet:
+                print(
+                    "Dry run: no detectable board outline; cannot compute the "
+                    "grid plan.  No routing performed."
+                )
+            return 0
+        if not quiet:
+            if len(layer_counts) > 1:
+                print(f"\n[{num_layers}-layer rung]")
+            print(format_dry_run_grid_plan(plan))
+    return 0
 
 
 def _run_main_impl(args, parser, argv) -> int:
@@ -20406,6 +20534,22 @@ def _run_main_impl(args, parser, argv) -> int:
         )
         return 2
 
+    # Issue #6563: --dry-run must print the plan and exit BEFORE any
+    # escalation dispatch and before the single-attempt auto-pour staging.
+    # The #4263 analytical short-circuit used to sit after both: the default
+    # --auto-layers flow (and --auto-pcb-size, --auto-mfr-tier,
+    # --adaptive-rules) routed for real and wrote checkpoint/partial/final
+    # files, and even --layers N staged a copy of the board at --output.
+    # ``--analyze --dry-run`` keeps its downstream analysis path.
+    if args.dry_run and not args.analyze:
+        return _print_dry_run_plan(
+            pcb_path,
+            output_path,
+            args,
+            argv,
+            grid_explicit=grid_auto_result is None,
+        )
+
     # Issue #3352 (P_AS3): --auto-pcb-size wraps the layer escalation path
     # with an outer size-escalation loop.  Q5 decision: --auto-pcb-size
     # IMPLIES --auto-layers unless --no-auto-layers was explicit (the
@@ -20682,35 +20826,6 @@ def _run_main_impl(args, parser, argv) -> int:
             print(f"  Signal layers:  {', '.join(signal_layers)}")
             if plane_layers:
                 print(f"  Plane layers:   {', '.join(plane_layers)}")
-
-    # Issue #4263: analytical --dry-run short-circuit.
-    #
-    # A plain ``--dry-run`` only needs the strategy/grid selection verdict, so
-    # report it analytically and return BEFORE ``load_pcb_for_routing`` (which
-    # allocates the full RoutingGrid at route_cmd's load site and, on a large
-    # board, is the >45s / OOM step).  ``args.grid`` is already a float here
-    # (explicit value, or resolved from ``--grid auto`` above) and
-    # ``layer_stack`` is known, so the plan reuses the allocation-free
-    # selection math without touching the router.
-    #
-    # ``--analyze --dry-run`` is intentionally left to the downstream
-    # complexity/routability path (route_cmd:~10183), which needs a loaded
-    # ``router``; only the plain dry run short-circuits here.
-    if args.dry_run and not args.analyze:
-        dry_run_plan = compute_dry_run_grid_plan(
-            pcb_path=pcb_path,
-            selected_grid=args.grid,
-            clearance=args.clearance,
-            num_layers=layer_stack.num_layers,
-            max_cells=getattr(args, "max_cells", 500_000),
-            engine=_resolve_route_engine(args),
-        )
-        if dry_run_plan is not None:
-            if not quiet:
-                print(format_dry_run_grid_plan(dry_run_plan))
-            return 0
-        # No detectable board outline: fall through to the normal load path
-        # rather than guess dimensions (the pre-#4263 dry-run behavior).
 
     # Load PCB
     if not quiet:
@@ -21437,6 +21552,7 @@ def _run_main_impl(args, parser, argv) -> int:
             router_provider=lambda: router,
             source_pcb_path=Path(getattr(args, "pcb", pcb_path)),
             best_checkpoint=getattr(args, "_best_checkpoint", None),
+            dry_run=bool(getattr(args, "dry_run", False)),
         )
 
         # Define routing function for profiling
