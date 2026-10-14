@@ -95,10 +95,48 @@ class _TrialInFlight:
     pad_nets: _PadNetSnapshot | None
     routes: list[Route]
     mirror_flips: list[None] = field(default_factory=list)
+    # Issue #6320: ``CommitJournal.mark()`` of the router's commit journal when
+    # the trial began -- ``(length, truncated)`` -- or ``None`` for a router
+    # without one.  A restore that skips the grid rebuild truncates the journal
+    # back to it, so the access-witness sidecar a partial save writes describes
+    # the copper that save contains rather than the discarded trial's.
+    journal_mark: tuple[int, bool] | None = None
+    # Set once a no-rebuild restore has truncated the journal to
+    # ``journal_mark``.  From then on the journal describes the restored
+    # routes while the grid still holds the trial's copper, so a later grid
+    # rebuild of this trial must not journal its reset-and-re-mark on top.
+    journal_rewound: bool = False
 
     @property
     def mirror_applied(self) -> bool:
         return len(self.mirror_flips) % 2 == 1
+
+
+def _journal_mark(router: Any) -> tuple[int, bool] | None:
+    """``router.commit_journal.mark()``, or ``None`` when there is no journal."""
+    journal = getattr(router, "commit_journal", None)
+    mark = getattr(journal, "mark", None)
+    if mark is None:
+        return None
+    length, truncated = mark()
+    return int(length), bool(truncated)
+
+
+def _truncate_journal_to(router: Any, journal_mark: tuple[int, bool] | None) -> None:
+    """Rewind ``router.commit_journal`` to *journal_mark* (issue #6320).
+
+    Drops the memoized access witness too when anything was cut: that cache is
+    keyed on the journal's length alone, which a re-grown journal could match.
+    """
+    if journal_mark is None:
+        return
+    journal = getattr(router, "commit_journal", None)
+    if journal is None:
+        return
+    length, truncated = journal_mark
+    if journal.truncate_to(length, truncated):
+        with contextlib.suppress(Exception):  # a frozen / slotted stub router
+            router._access_witness_cache = None
 
 
 def _router_pad_key(pad: Any) -> tuple[str, str]:
@@ -1699,8 +1737,24 @@ class PlacementDeltaFeedbackLoop(PlacementFeedbackLoop):
         self._restore_router_pads(trial.router_pads)
         if rebuild_grid:
             self._rebuild_grid_for_routes(trial.routes)
+            if trial.journal_rewound:
+                # Issue #6320: a no-rebuild restore already cut the journal
+                # back to the trial's start, so it lists exactly the restored
+                # routes -- but the grid this rebuild reset still held the
+                # trial's copper.  Its reset journaled the removal of routes the
+                # journal no longer has and its re-mark journaled the restored
+                # routes a second time; drop both (and anything the resumed
+                # trial journaled in between).  Checked AFTER the rebuild: a
+                # signal-handler restore can land in the middle of it.
+                _truncate_journal_to(self.router, trial.journal_mark)
         else:
             self.router.routes = copy.deepcopy(trial.routes)
+            # Issue #6320: no grid event says the trial's copper is gone, so
+            # forget what the trial journaled instead.  A revert that rebuilds
+            # the grid needs no such step: it journals the removal and the
+            # re-mark itself.
+            trial.journal_rewound = True
+            _truncate_journal_to(self.router, trial.journal_mark)
 
     def _abandon_rewound_trial(self, trial: _TrialInFlight) -> bool:
         """Finish undoing *trial* if it was discarded under ``run_delta``.
@@ -2611,6 +2665,7 @@ class PlacementDeltaFeedbackLoop(PlacementFeedbackLoop):
                 router_pads=pre_pads,
                 pad_nets=pre_pad_nets,
                 routes=pre_routes,
+                journal_mark=_journal_mark(self.router),
             )
             self._trial = trial
 
