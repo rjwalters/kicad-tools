@@ -81,6 +81,12 @@ def _netclass_project(clearance: float, min_clearance: float | None = None) -> d
         "A.Type == 'via' && B.Type == 'track'",
         'B.Type == "Via"',
         "(A.Type == 'Via') || A.NetClass == 'HV'",
+        # Redundant nesting is fine (#6294).
+        "((A.Type == 'Via'))",
+        # The first clause alone selects every via (#6294).
+        "A.Type == 'Via' || (B.Type == 'Via' && A.NetClass == 'HV')",
+        "(A.Type == 'Via' || B.Type == 'Via')",
+        "(A.Type == 'Via') && (B.Type == 'Track')",
     ],
 )
 def test_via_scoped_conditions_are_recognised(condition: str) -> None:
@@ -96,6 +102,15 @@ def test_via_scoped_conditions_are_recognised(condition: str) -> None:
         "A.Type != 'Via'",
         "A.Type == 'Via' && A.NetClass == 'HV'",
         "A.Via_Type != 'Micro'",
+        # A parenthesised ``||`` group ANDed with a net-class test is
+        # net-class-scoped, not board-wide (#6294).
+        "(A.Type == 'Via' || B.Type == 'Via') && A.NetClass == 'HV'",
+        "A.NetClass == 'HV' && (A.Type == 'Via' || B.Type == 'Via')",
+        # Unbalanced parentheses are never recognised (#6294).
+        "(A.Type == 'Via'",
+        "A.Type == 'Via')",
+        # A ``||`` inside a quoted literal is not an operator.
+        "A.NetClass == 'x || A.Type == \"Via\"'",
     ],
 )
 def test_other_conditions_are_not_read_as_via_rules(condition: str) -> None:
