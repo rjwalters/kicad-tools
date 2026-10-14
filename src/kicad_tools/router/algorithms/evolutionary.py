@@ -3,7 +3,7 @@
 Extends the Monte Carlo multi-start routing approach with population-based
 search.  Instead of independent random trials, this module maintains a
 population of *RoutingChromosomes* encoding per-net parameters (net ordering,
-A* weight, preferred start layer, strategy flags) and evolves them using
+A* heuristic weight, preferred layer) and evolves them using
 tournament selection, order crossover (OX), and mutation operators.
 
 The evolutionary loop reuses the same infrastructure as Monte Carlo routing
@@ -55,29 +55,32 @@ if TYPE_CHECKING:
 class RoutingChromosome:
     """Encodes per-net routing parameters for the evolutionary optimizer.
 
-    Only ``net_order`` reaches the router (issue #6345).  The
-    ``astar_weights``, ``preferred_layers`` and ``strategy_flags`` genes are
-    evolved but currently **inert**: no evaluation path forwards them, because
-    ``Autorouter`` has no per-net A* heuristic-weight hook and the per-net
-    layer-preference hook (``net_class_map`` ``preferred_layers``) has no
-    "no preference" value the seed chromosome could carry without changing the
-    baseline.  Whether an evaluation uses negotiated routing is a run-wide
-    choice (``use_negotiated``), not a per-net gene.  Plumbing the remaining
-    genes is tracked as a follow-up to #6345.
+    Every gene reaches the router (issues #6345, #6366): ``net_order`` is the
+    routing sequence, ``astar_weights`` is installed as a per-net A*
+    heuristic weight (``Autorouter.trial_gene_overrides``) and
+    ``preferred_layers`` is injected through the ``net_class_map`` layer
+    preference hook (hard-avoided layers are never preferred).  The layer
+    gene is only evolved on a backend that honours layer preferences (the
+    pure-Python ``Router``); the native C++ pathfinder has no layer-preference
+    cost, so on that (default) backend ``preferred_layers`` stays empty and
+    only ``net_order`` and ``astar_weights`` are evolved.  A net that is
+    absent from ``astar_weights`` searches at weight 1.0 and a net absent from
+    ``preferred_layers`` has no layer preference, so the seed chromosome
+    (all weights 1.0, no preferences) routes exactly like the default.
+    Whether an evaluation uses negotiated routing is a run-wide choice
+    (``use_negotiated``), not a per-net gene.
 
     Attributes:
         net_order: Permutation of net IDs (routing sequence).
-        astar_weights: Per-net A* heuristic weight multiplier (inert).
-        preferred_layers: Per-net preferred start layer index (0 = F.Cu,
-            1 = B.Cu, etc.) (inert).
-        strategy_flags: Per-net boolean flags (inert).
+        astar_weights: Per-net A* heuristic weight (1.0 = default).
+        preferred_layers: Per-net preferred grid layer index; omitted nets
+            have no preference.
         fitness: Cached fitness score (higher is better).
     """
 
     net_order: list[int] = field(default_factory=list)
     astar_weights: dict[int, float] = field(default_factory=dict)
     preferred_layers: dict[int, int] = field(default_factory=dict)
-    strategy_flags: dict[int, bool] = field(default_factory=dict)
     fitness: float = float("-inf")
 
     def copy(self) -> RoutingChromosome:
@@ -86,7 +89,6 @@ class RoutingChromosome:
             net_order=list(self.net_order),
             astar_weights=dict(self.astar_weights),
             preferred_layers=dict(self.preferred_layers),
-            strategy_flags=dict(self.strategy_flags),
             fitness=self.fitness,
         )
 
@@ -126,25 +128,35 @@ def order_crossover(parent1: RoutingChromosome, parent2: RoutingChromosome) -> R
     child = RoutingChromosome(net_order=child_order)  # type: ignore[arg-type]
 
     # --- uniform crossover for continuous / discrete genes ---
-    all_nets = set(parent1.astar_weights) | set(parent2.astar_weights)
-    for net in all_nets:
+    all_nets = (
+        set(parent1.astar_weights)
+        | set(parent2.astar_weights)
+        | set(parent1.preferred_layers)
+        | set(parent2.preferred_layers)
+    )
+    for net in sorted(all_nets):
         src = parent1 if random.random() < 0.5 else parent2
         if net in src.astar_weights:
             child.astar_weights[net] = src.astar_weights[net]
         if net in src.preferred_layers:
             child.preferred_layers[net] = src.preferred_layers[net]
-        if net in src.strategy_flags:
-            child.strategy_flags[net] = src.strategy_flags[net]
 
     return child
 
 
-def mutate(chromosome: RoutingChromosome, mutation_rate: float = 0.1) -> RoutingChromosome:
+def mutate(
+    chromosome: RoutingChromosome,
+    mutation_rate: float = 0.1,
+    num_layers: int = 2,
+) -> RoutingChromosome:
     """Apply mutation operators to a chromosome (in-place, returns same ref).
 
     * **Swap mutation** on net order (swap two random positions).
     * **Gaussian perturbation** on A* weights.
-    * **Random flip** for preferred layer and strategy flags.
+    * **Layer move** for preferred layers: a net moves to a different grid
+      layer in ``range(num_layers)`` or drops its preference; a net with no
+      preference may gain one.  Boards with fewer than two layers have no
+      alternative layer, so preferences are left alone.
     """
     # --- swap mutation on permutation ---
     if len(chromosome.net_order) >= 2 and random.random() < mutation_rate:
@@ -161,15 +173,18 @@ def mutate(chromosome: RoutingChromosome, mutation_rate: float = 0.1) -> Routing
             w += random.gauss(0, 0.2)
             chromosome.astar_weights[net] = max(0.5, min(3.0, w))
 
-    # --- random flip for preferred layer ---
-    for net in list(chromosome.preferred_layers):
-        if random.random() < mutation_rate * 0.5:
-            chromosome.preferred_layers[net] = 1 - chromosome.preferred_layers[net]
-
-    # --- random flip for strategy flags ---
-    for net in list(chromosome.strategy_flags):
-        if random.random() < mutation_rate * 0.3:
-            chromosome.strategy_flags[net] = not chromosome.strategy_flags[net]
+    # --- layer move for preferred layer ---
+    if num_layers >= 2:
+        for net in chromosome.net_order:
+            if random.random() < mutation_rate * 0.5:
+                current = chromosome.preferred_layers.get(net)
+                options: list[int | None] = [None, *range(num_layers)]
+                options = [o for o in options if o != current]
+                choice = random.choice(options)
+                if choice is None:
+                    chromosome.preferred_layers.pop(net, None)
+                else:
+                    chromosome.preferred_layers[net] = choice
 
     return chromosome
 
@@ -250,15 +265,17 @@ def _run_evolutionary_trial(config: dict) -> tuple[list, float, int]:
     # Issue #6345: route in the chromosome's net order.  ``route_all(order)``
     # re-sorted it back to the priority order, so every chromosome routed the
     # same sequence and the whole population scored identically.
-    routes = route_trial(
-        router,
-        net_order,
-        use_negotiated=bool(config.get("use_negotiated", False)),
-        negotiated_kwargs=config.get("negotiated_kwargs"),
-        seed=seed,
-        timeout=config.get("trial_timeout"),
-        per_net_timeout=config.get("per_net_timeout"),
-    )
+    # Issue #6366: the chromosome's per-net A* weights and layer preferences.
+    with router.trial_gene_overrides(config.get("astar_weights"), config.get("preferred_layers")):
+        routes = route_trial(
+            router,
+            net_order,
+            use_negotiated=bool(config.get("use_negotiated", False)),
+            negotiated_kwargs=config.get("negotiated_kwargs"),
+            seed=seed,
+            timeout=config.get("trial_timeout"),
+            per_net_timeout=config.get("per_net_timeout"),
+        )
     total_nets = len([n for n in router.nets if n != 0])
     score = _score_routes(routes, total_nets)
 
@@ -285,6 +302,7 @@ class EvolutionaryRoutingOptimizer:
         crossover_rate: Probability of applying crossover.
         mutation_rate: Per-gene mutation probability.
         tournament_size: Tournament selection size.
+        num_layers: Routable grid-layer count (preferred-layer gene domain).
     """
 
     def __init__(
@@ -295,6 +313,7 @@ class EvolutionaryRoutingOptimizer:
         crossover_rate: float = 0.8,
         mutation_rate: float = 0.15,
         tournament_size: int = 3,
+        num_layers: int = 2,
     ):
         self.pop_size = pop_size
         self.generations = generations
@@ -302,6 +321,7 @@ class EvolutionaryRoutingOptimizer:
         self.crossover_rate = crossover_rate
         self.mutation_rate = mutation_rate
         self.tournament_size = tournament_size
+        self.num_layers = num_layers
 
     # ---- population initialisation ----
 
@@ -310,13 +330,21 @@ class EvolutionaryRoutingOptimizer:
         base_order: list[int],
         get_priority: callable,
         seed: int,
+        num_layers: int | None = None,
     ) -> list[RoutingChromosome]:
         """Create initial population.
 
         The first chromosome uses the priority-sorted base order; the rest
-        are random shuffles within priority tiers.
+        are random shuffles within priority tiers.  The seed has weight 1.0
+        everywhere and no layer preferences (issue #6366).  ``num_layers`` is
+        the board's routable grid-layer count; preferences are drawn from
+        ``range(num_layers)`` plus "none"; ``None`` (default) uses the
+        optimizer's own :attr:`num_layers` gene domain.
         """
         from ..algorithms.monte_carlo import MonteCarloRouter
+
+        if num_layers is None:
+            num_layers = self.num_layers
 
         total_nets = len(base_order)
         mc = MonteCarloRouter(total_nets)
@@ -327,8 +355,6 @@ class EvolutionaryRoutingOptimizer:
         base_chrom = RoutingChromosome(net_order=list(base_order))
         for net in base_order:
             base_chrom.astar_weights[net] = 1.0
-            base_chrom.preferred_layers[net] = 0
-            base_chrom.strategy_flags[net] = False
         population.append(base_chrom)
 
         # Remaining: random shuffles with cross-tier promotions
@@ -341,8 +367,10 @@ class EvolutionaryRoutingOptimizer:
             chrom = RoutingChromosome(net_order=order)
             for net in base_order:
                 chrom.astar_weights[net] = max(0.5, min(3.0, random.gauss(1.0, 0.3)))
-                chrom.preferred_layers[net] = random.choice([0, 1])
-                chrom.strategy_flags[net] = False
+                if num_layers >= 2:
+                    pick = random.choice([None, *range(num_layers)])
+                    if pick is not None:
+                        chrom.preferred_layers[net] = pick
             population.append(chrom)
 
         return population
@@ -368,7 +396,7 @@ class EvolutionaryRoutingOptimizer:
             else:
                 child = p1.copy()
 
-            child = mutate(child, self.mutation_rate)
+            child = mutate(child, self.mutation_rate, self.num_layers)
             new_pop.append(child)
 
         return new_pop
@@ -406,8 +434,9 @@ def run_evolutionary(
             chromosomes too, and chromosomes still running in worker
             processes are abandoned) and the best result found so far is
             returned.  Default ``None`` means no wall-clock limit.  Each
-            evaluation gets an equal share of what is left for the current
-            generation (issue #6345).
+            evaluation gets an equal share of what is left across the
+            remaining chromosomes of this and all later generations
+            (issues #6345, #6366).
         use_negotiated: Evaluate chromosomes with ``route_all_negotiated``
             rather than one ``route_all`` pass (issue #6345).
         negotiated_kwargs: Extra ``route_all_negotiated`` kwargs.
@@ -461,9 +490,19 @@ def _run_evolutionary(
         num_workers = min(pop_size, os.cpu_count() or 4)
     num_workers = min(num_workers, pop_size)
 
+    # Issue #6366: the preferred-layer gene only exists on a backend whose
+    # pathfinder honours layer preferences (the pure-Python ``Router``).  The
+    # native C++ backend has no layer-preference cost, so there the gene
+    # domain is empty (``num_layers=0``) and no chromosome carries one.
+    layer_gene_domain = (
+        int(autorouter.grid.num_layers)
+        if getattr(autorouter, "supports_layer_preferences", False)
+        else 0
+    )
     optimizer = EvolutionaryRoutingOptimizer(
         pop_size=pop_size,
         generations=generations,
+        num_layers=layer_gene_domain,
     )
 
     if verbose:
@@ -476,6 +515,11 @@ def _run_evolutionary(
             print(f"  Parallel workers: {num_workers}", flush=True)
         if timeout is not None:
             print(f"  Timeout: {timeout:.1f}s", flush=True)
+        if layer_gene_domain == 0:
+            print(
+                "  Preferred-layer gene: off (pathfinder has no layer-preference cost)",
+                flush=True,
+            )
 
     # Prepare base net order (same as Monte Carlo; issue #6345: honours a
     # user ``--order-method`` order)
@@ -536,6 +580,7 @@ def _run_evolutionary(
                 on_result=_on_result,
                 base_order=base_order,
                 trial_kwargs=trial_kwargs,
+                generations_left=generations - gen,
             )
         else:
             routes_scores = _evaluate_sequential(
@@ -548,6 +593,7 @@ def _run_evolutionary(
                 on_result=_on_result,
                 base_order=base_order,
                 trial_kwargs=trial_kwargs,
+                generations_left=generations - gen,
             )
 
         # Issue #6343: an evaluation cut short by the deadline returns with
@@ -638,6 +684,7 @@ def _evaluate_sequential(
     on_result: _ResultCallback | None = None,
     base_order: list[int] | None = None,
     trial_kwargs: dict | None = None,
+    generations_left: int = 1,
 ) -> list[tuple[list, float]]:
     """Evaluate every chromosome sequentially.
 
@@ -658,15 +705,21 @@ def _evaluate_sequential(
             if base_order is not None
             else list(chrom.net_order)
         )
-        routes = route_trial(
-            autorouter,
-            order,
-            use_negotiated=bool(trial_kwargs.get("use_negotiated", False)),
-            negotiated_kwargs=trial_kwargs.get("negotiated_kwargs"),
-            seed=eval_seed,
-            timeout=trial_timeout(deadline, len(population) - idx),
-            per_net_timeout=trial_kwargs.get("per_net_timeout"),
-        )
+        # Issue #6366: share the time left over this generation's remaining
+        # chromosomes AND every later generation.
+        trials_left = (len(population) - idx) + len(population) * (generations_left - 1)
+        # Issue #6366: apply the chromosome's genes, restored on exit so the
+        # next chromosome (and the caller) see no leftover state.
+        with autorouter.trial_gene_overrides(chrom.astar_weights, chrom.preferred_layers):
+            routes = route_trial(
+                autorouter,
+                order,
+                use_negotiated=bool(trial_kwargs.get("use_negotiated", False)),
+                negotiated_kwargs=trial_kwargs.get("negotiated_kwargs"),
+                seed=eval_seed,
+                timeout=trial_timeout(deadline, trials_left),
+                per_net_timeout=trial_kwargs.get("per_net_timeout"),
+            )
         score = _score_routes(routes, total_nets)
         results.append((routes, score))
         if on_result is not None:
@@ -684,6 +737,7 @@ def _evaluate_parallel(
     on_result: _ResultCallback | None = None,
     base_order: list[int] | None = None,
     trial_kwargs: dict | None = None,
+    generations_left: int = 1,
 ) -> list[tuple[list, float]]:
     """Evaluate every chromosome in parallel using ProcessPoolExecutor.
 
@@ -692,8 +746,11 @@ def _evaluate_parallel(
     """
     base_config = autorouter._serialize_for_parallel()
     trial_kwargs = trial_kwargs or {}
-    # Issue #6345: equal share of the time left, over this generation's waves.
-    per_trial_timeout = trial_timeout(deadline, len(population), num_workers)
+    # Issue #6345/#6366: equal share of the time left, over the waves of this
+    # generation and every later one (generation 1 must not eat the budget).
+    per_trial_timeout = trial_timeout(
+        deadline, len(population) * max(1, generations_left), num_workers
+    )
 
     trial_configs = []
     for idx, chrom in enumerate(population):
@@ -709,6 +766,8 @@ def _evaluate_parallel(
                 ),
                 "use_negotiated": bool(trial_kwargs.get("use_negotiated", False)),
                 "negotiated_kwargs": dict(trial_kwargs.get("negotiated_kwargs") or {}),
+                "astar_weights": dict(chrom.astar_weights),
+                "preferred_layers": dict(chrom.preferred_layers),
                 "trial_timeout": per_trial_timeout,
                 "per_net_timeout": trial_kwargs.get("per_net_timeout"),
             }

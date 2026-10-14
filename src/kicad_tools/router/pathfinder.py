@@ -222,6 +222,17 @@ class Router:
     - GreedyHeuristic: Fast but suboptimal
     """
 
+    # Issue #6366: per-net A* heuristic-weight overrides (net id -> weight),
+    # consulted by ``route`` when the caller passes the default weight.
+    # ``Autorouter`` installs its own dict here; the empty class default is
+    # never mutated.
+    net_astar_weights: dict[int, float] = {}
+
+    # Issue #6366: this pathfinder honours ``NetClassRouting.preferred_layers``
+    # (``_get_layer_preference_cost``), so the evolutionary ``preferred_layers``
+    # gene is live on this backend.  ``CppPathfinder`` sets this False.
+    supports_layer_preferences: bool = True
+
     # Issue #3441: the pure-Python pathfinder implements waypoint injection
     # (#2330) -- off-grid pad positions are injected directly into the A*
     # search graph (see ``_create_waypoint`` / ``_waypoint_grid_edges``).
@@ -4409,6 +4420,10 @@ class Router:
         # Issue #5923: clamp to the bounded-excursion wall deadline, if any
         # (identity otherwise) -- same choke point as ``CppPathfinder.route``.
         per_net_timeout = _wall_deadline.clamp_search_timeout(per_net_timeout)
+        # Issue #6366: per-net A* weight override (evolutionary gene).
+        net_weights = getattr(self, "net_astar_weights", None)
+        if weight == 1.0 and net_weights:
+            weight = net_weights.get(start.net, weight)
         if not self._per_call_timing_enabled:
             return self._route_impl(
                 start,

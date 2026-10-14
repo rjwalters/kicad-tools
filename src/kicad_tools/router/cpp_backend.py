@@ -1305,6 +1305,20 @@ class CppPathfinder:
     A* routing.
     """
 
+    # Issue #6366: per-net A* heuristic-weight overrides (net id -> weight),
+    # consulted by ``route`` when the caller passes the default weight.
+    # ``Autorouter`` installs its own dict here; the empty class default is
+    # never mutated.
+    net_astar_weights: dict[int, float] = {}
+
+    # Issue #6366: the native A* has NO per-net layer-preference cost -- it
+    # never reads ``NetClassRouting.preferred_layers`` (only hard
+    # ``avoid_layers``, #4433).  The evolutionary optimiser checks this flag
+    # and evolves no ``preferred_layers`` gene on this backend rather than
+    # carrying a gene that silently does nothing.  Flip to True if/when a
+    # layer-preference cost is ported to ``cpp/src/pathfinder.cpp``.
+    supports_layer_preferences: bool = False
+
     # Issue #3441: the C++ pathfinder has NO waypoint-injection support
     # (#2330 was implemented only in the pure-Python ``Router``).  This
     # capability flag keeps ``Autorouter.use_waypoint_injection`` honest:
@@ -2182,6 +2196,10 @@ class CppPathfinder:
         # no single search may run past the excursion's wall deadline.
         # Identity when no deadline is installed.
         per_net_timeout = _wall_deadline.clamp_search_timeout(per_net_timeout)
+        # Issue #6366: per-net A* weight override (evolutionary gene).
+        net_weights = getattr(self, "net_astar_weights", None)
+        if weight == 1.0 and net_weights:
+            weight = net_weights.get(start.net, weight)
         if not self._per_call_timing_enabled:
             try:
                 return self._route_impl(
