@@ -78,6 +78,14 @@ KICAD_HOLE_TO_COPPER_CLEARANCE = 0.25
 #: of a foreign through-hole pad / via drill.
 MIN_HOLE_TO_HOLE_CLEARANCE = 0.5
 
+#: A pad from :func:`find_all_pad_bboxes`:
+#: ``(min_x, min_y, max_x, max_y, net_num, shape, bound_r)`` (Issue #6683
+#: appended ``shape`` and ``bound_r``; ``[4]`` is still the net).
+#: ``bound_r`` is ``max(w, h) / 2`` of the UNROTATED pad size: the exact
+#: radius of a ``circle`` and the enclosing-circle radius of an ``oval``
+#: (stadium) at any rotation.
+PadBBox = tuple[float, float, float, float, int, str, float]
+
 
 def _count_copper_layers(pcb_path: Path) -> int:
     """Count the number of copper layers in the PCB.
@@ -1025,9 +1033,7 @@ def find_smd_pad_bboxes_on_nets(
     return bboxes
 
 
-def find_all_pad_bboxes(
-    sexp: SExp, exclude_nets: set[int] | None = None
-) -> list[tuple[float, float, float, float, int]]:
+def find_all_pad_bboxes(sexp: SExp, exclude_nets: set[int] | None = None) -> list[PadBBox]:
     """Return AABBs for ALL pads, optionally excluding specific nets.
 
     Issue #3433: rectangle-aware clearance source for the straight
@@ -1050,11 +1056,22 @@ def find_all_pad_bboxes(
         sexp: PCB S-expression.
         exclude_nets: Net numbers to exclude (e.g., the stitched nets).
 
+    Issue #6683: each entry also carries the pad ``shape`` and its
+    unrotated bounding radius ``max(w, h) / 2`` as sixth and seventh
+    (APPENDED, so ``b[4]`` stays the net) elements, so the via-vs-pad
+    checks can treat a ``circle`` pad exactly and every other shape by its
+    box (see :func:`_pad_copper_gap`).  A circle's box is its exact
+    bounding square (no rotation inflation).  When the pad's own
+    board-absolute ``(at x y ANGLE)`` disagrees with the footprint angle,
+    the box is the union of both orientations' boxes, so a pad-local
+    rotation can only make the model more conservative, never flip a rect
+    pad's long axis the wrong way.
+
     Returns:
-        List of ``(min_x, min_y, max_x, max_y, net_num)`` tuples in
+        List of ``(min_x, min_y, max_x, max_y, net_num, shape, bound_r)`` tuples in
         board coordinates (mm).
     """
-    bboxes: list[tuple[float, float, float, float, int]] = []
+    bboxes: list[PadBBox] = []
     if exclude_nets is None:
         exclude_nets = set()
     name_to_num = get_name_to_net_map(sexp)
@@ -1094,20 +1111,19 @@ def find_all_pad_bboxes(
                 continue
             width = size_node.get_float(0) or 0.0
             height = size_node.get_float(1) or 0.0
+            shape = pad.get_string(2) or "rect"
 
-            total_rotation = fp_rotation_deg % 360
-            if abs(total_rotation - 90) < 0.001 or abs(total_rotation - 270) < 0.001:
-                bbox_w, bbox_h = height, width
-            elif abs(total_rotation) < 0.001 or abs(total_rotation - 180) < 0.001:
-                bbox_w, bbox_h = width, height
+            if shape == "circle":
+                # Exact bounding square; rotation-invariant.
+                half_w = half_h = max(width, height) / 2
             else:
-                abs_cos = abs(cos_r)
-                abs_sin = abs(sin_r)
-                bbox_w = width * abs_cos + height * abs_sin
-                bbox_h = width * abs_sin + height * abs_cos
+                half_w, half_h = _rotated_rect_half_extents(width, height, fp_rotation_deg)
+                pad_angle = pad_at.get_float(2)
+                if pad_angle is not None:
+                    pw, ph = _rotated_rect_half_extents(width, height, pad_angle)
+                    half_w = max(half_w, pw)
+                    half_h = max(half_h, ph)
 
-            half_w = bbox_w / 2
-            half_h = bbox_h / 2
             bboxes.append(
                 (
                     board_x - half_w,
@@ -1115,10 +1131,31 @@ def find_all_pad_bboxes(
                     board_x + half_w,
                     board_y + half_h,
                     net_num,
+                    shape,
+                    max(width, height) / 2,
                 )
             )
 
     return bboxes
+
+
+def _rotated_rect_half_extents(
+    width: float, height: float, rotation_deg: float
+) -> tuple[float, float]:
+    """Half extents of the AABB of a ``width`` x ``height`` rect rotated by
+    ``rotation_deg`` (cardinal angles swap or keep the dimensions exactly)."""
+    total_rotation = rotation_deg % 360
+    if abs(total_rotation - 90) < 0.001 or abs(total_rotation - 270) < 0.001:
+        return height / 2, width / 2
+    if abs(total_rotation) < 0.001 or abs(total_rotation - 180) < 0.001:
+        return width / 2, height / 2
+    rad = math.radians(rotation_deg)
+    abs_cos = abs(math.cos(rad))
+    abs_sin = abs(math.sin(rad))
+    return (
+        (width * abs_cos + height * abs_sin) / 2,
+        (width * abs_sin + height * abs_cos) / 2,
+    )
 
 
 def _segment_to_rect_distance(
@@ -1152,6 +1189,92 @@ def _segment_to_rect_distance(
         segment_to_segment_distance(x1, y1, x2, y2, max_x, max_y, min_x, max_y),
         segment_to_segment_distance(x1, y1, x2, y2, min_x, max_y, min_x, min_y),
     )
+
+
+def _pad_copper_gap(
+    x1: float,
+    y1: float,
+    x2: float,
+    y2: float,
+    pad_bbox: PadBBox
+    | tuple[float, float, float, float, int, str]
+    | tuple[float, float, float, float, int],
+) -> float:
+    """Copper-edge distance from a segment (a point when the ends coincide)
+    to a pad from :func:`find_all_pad_bboxes`; 0.0 when they overlap.
+
+    Issue #6683: the circle model of :func:`find_all_pads`
+    (``max(w, h) / 2``) is the INSCRIBED circle of a square pad, so a
+    stitch via at a rect pad's corner was under-checked by up to
+    ``(sqrt(2) - 1) x half-side`` (board 07 U4.E3/E5 vs U4.F3/F5).
+
+    * ``circle``: exact (centre distance minus radius) -- BGA escapes rely
+      on the diagonal room a box would take away.
+    * ``oval``: the larger of the box gap and the enclosing-circle gap.
+      The circle's radius is ``bound_r`` -- ``max(w, h) / 2`` of the
+      UNROTATED size, i.e. the stadium's half-length, which encloses it at
+      every rotation.  Both gaps bound the true stadium gap from below, so
+      the larger is still safe, and it is never smaller than the old
+      ``find_all_pads`` circle-model gap.  (The AABB's half-side is NOT a
+      safe radius off-axis: a 2.0 x 0.5 oval at 45 deg has a 0.884 AABB
+      half-side but a 1.0 tip.)  A 6-tuple without ``bound_r`` falls back
+      to the box's half-diagonal, which always encloses.
+    * everything else (``rect``, ``roundrect``, ``trapezoid``, ``custom``,
+      or a legacy 5-tuple without a shape): the box, which is exact for a
+      rect and conservative by at most the corner relief otherwise.
+    """
+    min_x, min_y, max_x, max_y = pad_bbox[0], pad_bbox[1], pad_bbox[2], pad_bbox[3]
+    shape = pad_bbox[5] if len(pad_bbox) > 5 else "rect"
+    cx = (min_x + max_x) / 2
+    cy = (min_y + max_y) / 2
+    centre_dist = point_to_segment_distance(cx, cy, x1, y1, x2, y2)
+    if shape == "circle":
+        return max(0.0, centre_dist - (max_x - min_x) / 2)
+    box_gap = _segment_to_rect_distance(x1, y1, x2, y2, min_x, min_y, max_x, max_y)
+    if shape == "oval":
+        if len(pad_bbox) > 6:
+            bound_r = float(pad_bbox[6])
+        else:
+            bound_r = math.hypot(max_x - min_x, max_y - min_y) / 2
+        return max(box_gap, centre_dist - bound_r)
+    return box_gap
+
+
+def _pad_conflict(
+    x1: float,
+    y1: float,
+    x2: float,
+    y2: float,
+    required: float,
+    other_net_pads: list[tuple[float, float, float, int]],
+    other_net_pad_bboxes: list[PadBBox] | None,
+) -> bool:
+    """True when a segment (or point) comes within ``required`` of any
+    other-net pad's copper edge.
+
+    Issue #6683: the single via-vs-pad / leg-vs-pad predicate for every
+    stitch placement strategy.  Shape-aware (:func:`_pad_copper_gap`) when
+    ``other_net_pad_bboxes`` is supplied; otherwise the legacy circle model
+    from ``other_net_pads`` (back-compat for direct callers).
+    """
+    if other_net_pad_bboxes is None:
+        for px, py, p_radius, _pnet in other_net_pads:
+            if point_to_segment_distance(px, py, x1, y1, x2, y2) < required + p_radius:
+                return True
+        return False
+    for bbox in other_net_pad_bboxes:
+        # Cheap reject: the pad lies wholly inside its half-diagonal circle.
+        half_diag = math.hypot(bbox[2] - bbox[0], bbox[3] - bbox[1]) / 2
+        cx = (bbox[0] + bbox[2]) / 2
+        cy = (bbox[1] + bbox[3]) / 2
+        if point_to_segment_distance(cx, cy, x1, y1, x2, y2) - half_diag >= required:
+            continue
+        # 1 nm (KiCad's internal unit) of slack: a gap computed as exactly
+        # ``required`` must not be rejected on float noise (a 0.3 mm gap
+        # comes out as 0.29999999999999716).
+        if _pad_copper_gap(x1, y1, x2, y2, bbox) < required - 1e-6:
+            return True
+    return False
 
 
 def _via_drill_overlaps_pad_bbox(
@@ -1696,6 +1819,7 @@ def identify_nearest_obstacle(
     other_net_pads: list[tuple[float, float, float, int]] | None = None,
     other_net_filled_polygons: list[FilledPolygon] | None = None,
     net_map: dict[int, str] | None = None,
+    other_net_pad_bboxes: list[PadBBox] | None = None,
 ) -> SkipDetail:
     """Identify the nearest obstacle preventing via placement near a pad.
 
@@ -1718,6 +1842,11 @@ def identify_nearest_obstacle(
             making it easier to trace stitching failures back to specific
             signal nets.  See issue #3267 (board 04 U2.35) for the
             motivating case.
+        other_net_pad_bboxes: Optional shape-aware pads from
+            :func:`find_all_pad_bboxes`.  When given, a pad's reported
+            ``gap`` is the copper-edge gap (:func:`_pad_copper_gap`) that
+            the placement strategies test, not the circle-model gap
+            (Issue #6683).
 
     Returns:
         SkipDetail with the type, location, and reason of the nearest obstacle
@@ -1791,10 +1920,24 @@ def identify_nearest_obstacle(
                 f"gap={effective:.2f}mm need={clearance:.2f}mm",
             )
 
-    # Check other-net pads
-    for px, py, p_radius, pnet in other_net_pads:
+    # Check other-net pads (Issue #6683: shape-aware gap when bboxes given)
+    pad_obstacles: list[tuple[float, float, int, float]] = []
+    if other_net_pad_bboxes is not None:
+        for bbox in other_net_pad_bboxes:
+            pad_obstacles.append(
+                (
+                    (bbox[0] + bbox[2]) / 2,
+                    (bbox[1] + bbox[3]) / 2,
+                    bbox[4],
+                    _pad_copper_gap(pad.x, pad.y, pad.x, pad.y, bbox) - via_radius,
+                )
+            )
+    else:
+        for px, py, p_radius, pnet in other_net_pads:
+            dist = math.sqrt((px - pad.x) ** 2 + (py - pad.y) ** 2)
+            pad_obstacles.append((px, py, pnet, dist - via_radius - p_radius))
+    for px, py, pnet, effective in pad_obstacles:
         dist = math.sqrt((px - pad.x) ** 2 + (py - pad.y) ** 2)
-        effective = dist - via_radius - p_radius
         if dist < best_dist:
             best_dist = dist
             best = SkipDetail(
@@ -2005,7 +2148,7 @@ def calculate_via_position(
     other_net_pads: list[tuple[float, float, float, int]] | None = None,
     trace_width: float = 0.0,
     other_net_filled_polygons: list[FilledPolygon] | None = None,
-    other_net_pad_bboxes: list[tuple[float, float, float, float, int]] | None = None,
+    other_net_pad_bboxes: list[PadBBox] | None = None,
     other_net_drills: list[tuple[float, float, float, int]] | None = None,
     via_drill: float = 0.0,
     min_hole_to_hole: float = 0.5,
@@ -2196,24 +2339,20 @@ def calculate_via_position(
             if conflict:
                 continue
 
-            # Check for conflicts with other-net pads
-            if box_pads and other_net_pad_bboxes is not None:
-                # Issue #6401: a reserved site is cleared against pad boxes.
-                for bmin_x, bmin_y, bmax_x, bmax_y, _pnet in other_net_pad_bboxes:
-                    dist = _segment_to_rect_distance(
-                        via_x, via_y, via_x, via_y, bmin_x, bmin_y, bmax_x, bmax_y
-                    )
-                    if dist < via_radius + clearance + hole_extra:
-                        conflict = True
-                        break
-            else:
-                for px, py, p_radius, _pnet in other_net_pads:
-                    dist = math.sqrt((px - via_x) ** 2 + (py - via_y) ** 2)
-                    # Clearance is from via edge to pad edge
-                    min_dist = via_radius + p_radius + clearance + hole_extra
-                    if dist < min_dist:
-                        conflict = True
-                        break
+            # Check for conflicts with other-net pads.  Issue #6683: every
+            # candidate (not only #6401's reserved ``box_pads`` sites) is
+            # cleared against the shape-aware pad model when bboxes are
+            # supplied -- the circle model under-sizes a rect pad's corner.
+            # Clearance is from via edge to pad edge.
+            conflict = _pad_conflict(
+                via_x,
+                via_y,
+                via_x,
+                via_y,
+                via_radius + clearance + hole_extra,
+                other_net_pads,
+                other_net_pad_bboxes,
+            )
 
             if conflict:
                 continue
@@ -2324,36 +2463,17 @@ def calculate_via_position(
                 # legitimate escape that runs parallel to the SHORT
                 # axis of an elongated QFP pad (board-04 U2.47 went
                 # from stitched to stranded under the circle check).
-                if other_net_pad_bboxes is not None:
-                    for bmin_x, bmin_y, bmax_x, bmax_y, _pnet in other_net_pad_bboxes:
-                        dist = _segment_to_rect_distance(
-                            pad.x,
-                            pad.y,
-                            via_x,
-                            via_y,
-                            bmin_x,
-                            bmin_y,
-                            bmax_x,
-                            bmax_y,
-                        )
-                        if dist < trace_half_width + clearance:
-                            conflict = True
-                            break
-                else:
-                    # Fallback for callers that only supply the circle
-                    # model (back-compat with existing call sites).
-                    for px, py, p_radius, _pnet in other_net_pads:
-                        dist = point_to_segment_distance(
-                            px,
-                            py,
-                            pad.x,
-                            pad.y,
-                            via_x,
-                            via_y,
-                        )
-                        if dist < trace_half_width + p_radius + clearance:
-                            conflict = True
-                            break
+                # Callers that only supply the circle model fall back to it
+                # (back-compat); see :func:`_pad_conflict`.
+                conflict = _pad_conflict(
+                    pad.x,
+                    pad.y,
+                    via_x,
+                    via_y,
+                    trace_half_width + clearance,
+                    other_net_pads,
+                    other_net_pad_bboxes,
+                )
 
                 if conflict:
                     continue
@@ -2392,6 +2512,7 @@ def _check_dogleg_path_clearance(
     other_net_track_index: TrackSpatialIndex[TrackSegment] | None = None,
     *,
     stub_layer: str | None = None,
+    other_net_pad_bboxes: list[PadBBox] | None = None,
 ) -> bool:
     """Check if a dog-leg (L-shaped) trace path has adequate clearance.
 
@@ -2408,6 +2529,9 @@ def _check_dogleg_path_clearance(
     stub is emitted on.  When set, only other-net tracks on that layer are
     tested; ``None`` tests tracks on every layer.  Vias, pads and fills are
     never filtered.
+
+    ``other_net_pad_bboxes`` (Issue #6683): shape-aware pads from
+    :func:`find_all_pad_bboxes`; when given they replace the circle model.
 
     Returns True if path is clear, False if there's a conflict.
     """
@@ -2452,12 +2576,17 @@ def _check_dogleg_path_clearance(
             if dist < min_dist:
                 return False
 
-        # Check against other-net pads
-        for px, py, p_radius, _pnet in other_net_pads:
-            dist = point_to_segment_distance(px, py, leg_sx, leg_sy, leg_ex, leg_ey)
-            min_dist = trace_half_width + p_radius + clearance
-            if dist < min_dist:
-                return False
+        # Check against other-net pads (Issue #6683: shape-aware)
+        if _pad_conflict(
+            leg_sx,
+            leg_sy,
+            leg_ex,
+            leg_ey,
+            trace_half_width + clearance,
+            other_net_pads,
+            other_net_pad_bboxes,
+        ):
+            return False
 
         # Check against other-net filled polygons (zone fill copper)
         if other_net_filled_polygons:
@@ -2492,6 +2621,7 @@ def calculate_dogleg_via_position(
     same_net_filled_polygons: list[FilledPolygon] | None = None,
     same_net_fill_layer: str | None = None,
     other_net_track_index: TrackSpatialIndex[TrackSegment] | None = None,
+    other_net_pad_bboxes: list[PadBBox] | None = None,
 ) -> tuple[float, float, float, float] | None:
     """Calculate a dog-leg (L-shaped) via placement for fine-pitch components.
 
@@ -2528,6 +2658,11 @@ def calculate_dogleg_via_position(
             used only for the ``other_net_drills`` hole-to-hole check.
         min_hole_to_hole: Minimum drill edge-to-edge spacing (mm) for the
             ``other_net_drills`` check (default: the module fab floor).
+        other_net_pad_bboxes: Optional shape-aware pads from
+            :func:`find_all_pad_bboxes` (Issue #6683).  When given, the via
+            point and every leg are cleared against them (rect pads by
+            their box, circle pads exactly) instead of the circle model in
+            ``other_net_pads``, which under-sizes a rect pad's corner.
 
     Returns:
         Tuple of (via_x, via_y, intermediate_x, intermediate_y) for an L-shaped
@@ -2685,13 +2820,15 @@ def calculate_dogleg_via_position(
                         continue
 
                     # Check other-net pad clearance at via position
-                    for px, py, p_radius, _pnet in other_net_pads:
-                        dist = math.sqrt((px - via_x) ** 2 + (py - via_y) ** 2)
-                        min_dist = via_radius + p_radius + clearance + hole_extra
-                        if dist < min_dist:
-                            conflict = True
-                            break
-                    if conflict:
+                    if _pad_conflict(
+                        via_x,
+                        via_y,
+                        via_x,
+                        via_y,
+                        via_radius + clearance + hole_extra,
+                        other_net_pads,
+                        other_net_pad_bboxes,
+                    ):
                         continue
 
                     # Check other-net filled polygon clearance at via position
@@ -2752,6 +2889,7 @@ def calculate_dogleg_via_position(
                             other_net_filled_polygons,
                             other_net_track_index,
                             stub_layer=_stub_layer(pad),
+                            other_net_pad_bboxes=other_net_pad_bboxes,
                         ):
                             continue
 
@@ -2770,6 +2908,7 @@ def _check_multileg_path_clearance(
     other_net_track_index: TrackSpatialIndex[TrackSegment] | None = None,
     *,
     stub_layer: str | None = None,
+    other_net_pad_bboxes: list[PadBBox] | None = None,
 ) -> bool:
     """Check if a multi-segment trace path has adequate clearance.
 
@@ -2784,6 +2923,9 @@ def _check_multileg_path_clearance(
     stub is emitted on.  When set, only other-net tracks on that layer are
     tested; ``None`` tests tracks on every layer.  Vias and pads are never
     filtered.
+
+    ``other_net_pad_bboxes`` (Issue #6683): shape-aware pads from
+    :func:`find_all_pad_bboxes`; when given they replace the circle model.
 
     Returns True if path is clear, False if there's a conflict.
     """
@@ -2822,14 +2964,93 @@ def _check_multileg_path_clearance(
             if dist < min_dist:
                 return False
 
-        # Check against other-net pads
-        for px, py, p_radius, _pnet in other_net_pads:
-            dist = point_to_segment_distance(px, py, leg_sx, leg_sy, leg_ex, leg_ey)
-            min_dist = trace_half_width + p_radius + clearance
-            if dist < min_dist:
-                return False
+        # Check against other-net pads (Issue #6683: shape-aware)
+        if _pad_conflict(
+            leg_sx,
+            leg_sy,
+            leg_ex,
+            leg_ey,
+            trace_half_width + clearance,
+            other_net_pads,
+            other_net_pad_bboxes,
+        ):
+            return False
 
     return True
+
+
+def _escape_row_axis(nearby_pads: list[tuple[float, float]]) -> int | None:
+    """Row axis for :func:`calculate_extended_escape_position`: ``0`` when the
+    nearby other-net pads spread more along X (a horizontal row), ``1`` when
+    they spread more along Y, ``None`` with fewer than two nearby pads."""
+    if len(nearby_pads) < 2:
+        return None
+    xs = [px for px, _ in nearby_pads]
+    ys = [py for _, py in nearby_pads]
+    # Pads spread more horizontally -> row is horizontal
+    return 0 if max(xs) - min(xs) >= max(ys) - min(ys) else 1
+
+
+#: Two pad centres closer than this on one axis share a row / column.
+_SAME_ROW_TOL_MM = 0.1
+
+
+def _extended_escape_axial_distances(
+    pad_x: float,
+    pad_y: float,
+    nearby_pads: list[tuple[float, float]],
+    axial_distances: list[float],
+    escape_distance: float,
+    row_axis: int | None,
+) -> list[float]:
+    """Axial step candidates for :func:`calculate_extended_escape_position`.
+
+    Issue #6683: on a 1.27 mm-pitch BGA the fixed 0.5 / 0.8 / 1.0 mm axial
+    steps put the via 3 um inside clearance of a square neighbour's corner
+    (hidden by the old inscribed-circle pad model), and the next legal step
+    (2.0 mm) steals the NEXT pad's channel, stranding a pad.  Half the grid
+    pitch -- the channel centre -- is the interstitial site with the most
+    room, so it is added to ``axial_distances``.
+
+    The pitch is measured ONLY along ``row_axis`` (the smallest non-zero
+    offset of a nearby pad on that axis), so the perpendicular side rows of
+    a QFP never inject their own spacing and only one value is ever added.
+    Same-row neighbours alone are not enough: on a BGA they are often pads
+    of the net being stitched, which are not in the other-net pool (board
+    07 U4.E6 has none), so pads in adjacent rows supply the pitch too.  It
+    is used only when the pad sits in a square grid (a BGA): the pitch on
+    the other axis must match within 0.02 mm.  A two-column package (SOIC,
+    SOP: 1.27 mm along a column, ~5.4 mm across) never qualifies, whichever
+    way :func:`_escape_row_axis` reads its spread.  The channel centre must
+    also be no shorter than the first existing step and not duplicate one,
+    so fine-pitch rows (QFP: 0.25 mm half pitch) and BGAs at 1.0 mm pitch or
+    finer are unchanged too.
+    """
+    if row_axis is None or not axial_distances:
+        return axial_distances
+    col_axis = 1 - row_axis
+    here = (pad_x, pad_y)
+    row_deltas = [
+        abs(p[row_axis] - here[row_axis])
+        for p in nearby_pads
+        if abs(p[row_axis] - here[row_axis]) > _SAME_ROW_TOL_MM
+    ]
+    col_deltas = [
+        abs(p[col_axis] - here[col_axis])
+        for p in nearby_pads
+        if abs(p[col_axis] - here[col_axis]) > _SAME_ROW_TOL_MM
+    ]
+    if not row_deltas or not col_deltas:
+        return axial_distances
+    row_pitch = min(row_deltas)
+    if abs(row_pitch - min(col_deltas)) > 0.02:
+        return axial_distances
+    half_pitch = row_pitch / 2
+    if axial_distances[0] <= half_pitch <= escape_distance and all(
+        abs(half_pitch - d) > 0.02 for d in axial_distances
+    ):
+        return sorted([*axial_distances, half_pitch])
+    return axial_distances
 
 
 def calculate_extended_escape_position(
@@ -2849,6 +3070,7 @@ def calculate_extended_escape_position(
     same_net_filled_polygons: list[FilledPolygon] | None = None,
     same_net_fill_layer: str | None = None,
     other_net_track_index: TrackSpatialIndex[TrackSegment] | None = None,
+    other_net_pad_bboxes: list[PadBBox] | None = None,
 ) -> tuple[float, float, list[tuple[float, float]]] | None:
     """Calculate an extended escape route for pads in dense IC pin fields.
 
@@ -2890,6 +3112,11 @@ def calculate_extended_escape_position(
             skips the check (back-compat).
         min_hole_to_hole: Minimum drill edge-to-edge spacing (mm) for the
             ``other_net_drills`` check (default: the module fab floor).
+        other_net_pad_bboxes: Optional shape-aware pads from
+            :func:`find_all_pad_bboxes` (Issue #6683).  When given, the via
+            point and every leg are cleared against them (rect pads by
+            their box, circle pads exactly) instead of the circle model in
+            ``other_net_pads``, which under-sizes a rect pad's corner.
 
     Returns:
         Tuple of (via_x, via_y, waypoints) where waypoints is a list of
@@ -2922,22 +3149,15 @@ def calculate_extended_escape_position(
     ]
 
     # Determine primary and secondary axes based on pad row orientation
-    if len(nearby_pads) >= 2:
-        xs = [px for px, _ in nearby_pads]
-        ys = [py for _, py in nearby_pads]
-        x_spread = max(xs) - min(xs)
-        y_spread = max(ys) - min(ys)
-
-        # Pads spread more horizontally -> row is horizontal
-        # Escape perpendicular (vertical) is preferred
-        if x_spread >= y_spread:
-            # Horizontal row: axial along X, escape along Y
-            axial_dirs = [(1, 0), (-1, 0)]
-            escape_dirs = [(0, 1), (0, -1)]
-        else:
-            # Vertical row: axial along Y, escape along X
-            axial_dirs = [(0, 1), (0, -1)]
-            escape_dirs = [(1, 0), (-1, 0)]
+    row_axis = _escape_row_axis(nearby_pads)
+    if row_axis == 0:
+        # Horizontal row: axial along X, escape along Y
+        axial_dirs = [(1, 0), (-1, 0)]
+        escape_dirs = [(0, 1), (0, -1)]
+    elif row_axis == 1:
+        # Vertical row: axial along Y, escape along X
+        axial_dirs = [(0, 1), (0, -1)]
+        escape_dirs = [(1, 0), (-1, 0)]
     else:
         axial_dirs = [(1, 0), (-1, 0), (0, 1), (0, -1)]
         escape_dirs = [(0, 1), (0, -1), (1, 0), (-1, 0)]
@@ -2963,6 +3183,16 @@ def calculate_extended_escape_position(
         pad_radius + offset * 4,
     ]
     breakout_offsets = [d for d in breakout_offsets if d <= escape_distance]
+
+    # Issue #6683: sample the channel centre of a regular pad grid (see
+    # :func:`_extended_escape_axial_distances`).  The Z-shape strategy keeps
+    # its original first five base steps (plus a channel centre that falls
+    # among them), so an inserted step never pushes a base step out.
+    z_axial_limit = axial_distances[:5][-1] if axial_distances else 0.0
+    axial_distances = _extended_escape_axial_distances(
+        pad.x, pad.y, nearby_pads, axial_distances, escape_distance, row_axis
+    )
+    z_axial_distances = [d for d in axial_distances if d <= z_axial_limit]
 
     # Hole-to-copper guard (see calculate_via_position).
     hole_extra = 0.0
@@ -2999,11 +3229,18 @@ def calculate_extended_escape_position(
             if dist < via_radius + ov_size / 2 + clearance + hole_extra:
                 return False
 
-        # Check other-net pad clearance
-        for px, py, p_radius, _pnet in other_net_pads:
-            dist = math.sqrt((px - vx) ** 2 + (py - vy) ** 2)
-            if dist < via_radius + p_radius + clearance + hole_extra:
-                return False
+        # Check other-net pad clearance (Issue #6683: shape-aware -- the
+        # board 07 U4.E3/E5 vias sat 0.19 mm from U4.F3/F5's square corners)
+        if _pad_conflict(
+            vx,
+            vy,
+            vx,
+            vy,
+            via_radius + clearance + hole_extra,
+            other_net_pads,
+            other_net_pad_bboxes,
+        ):
+            return False
 
         # Issue #4177: drill hole-to-hole guard.  The checks above use
         # COPPER geometry; a via dropped within ``min_hole_to_hole`` (drill
@@ -3071,6 +3308,7 @@ def calculate_extended_escape_position(
                             clearance,
                             other_net_track_index,
                             stub_layer=_stub_layer(pad),
+                            other_net_pad_bboxes=other_net_pad_bboxes,
                         ):
                             continue
 
@@ -3116,6 +3354,7 @@ def calculate_extended_escape_position(
                             clearance,
                             other_net_track_index,
                             stub_layer=_stub_layer(pad),
+                            other_net_pad_bboxes=other_net_pad_bboxes,
                         ):
                             continue
 
@@ -3137,7 +3376,7 @@ def calculate_extended_escape_position(
                 if abs(axial_dx * escape_dx + axial_dy * escape_dy) > 0.1:
                     continue
 
-                for axial_dist in axial_distances[:5]:
+                for axial_dist in z_axial_distances:
                     wp2_x = wp1_x + axial_dx * axial_dist
                     wp2_y = wp1_y + axial_dy * axial_dist
 
@@ -3170,6 +3409,7 @@ def calculate_extended_escape_position(
                                 clearance,
                                 other_net_track_index,
                                 stub_layer=_stub_layer(pad),
+                                other_net_pad_bboxes=other_net_pad_bboxes,
                             ):
                                 continue
 
@@ -3240,10 +3480,16 @@ def calculate_extended_escape_position(
                 dist = point_to_segment_distance(ovx, ovy, sx, sy, ex, ey)
                 if dist < trace_half_width + ov_size / 2 + clearance:
                     return False
-            for px, py, p_radius, _pnet in other_net_pads:
-                dist = point_to_segment_distance(px, py, sx, sy, ex, ey)
-                if dist < trace_half_width + p_radius + clearance:
-                    return False
+            if _pad_conflict(
+                sx,
+                sy,
+                ex,
+                ey,
+                trace_half_width + clearance,
+                other_net_pads,
+                other_net_pad_bboxes,
+            ):
+                return False
         return True
 
     angular_steps = 16  # 22.5deg increments — covers diagonals
@@ -5585,7 +5831,7 @@ def run_stitch(
         pad: PadInfo,
     ) -> tuple[
         list[tuple[float, float, float, int]],
-        list[tuple[float, float, float, float, int]],
+        list[PadBBox],
         list[tuple[float, float, float, int]],
     ]:
         """Per-pad obstacle pools = pre-existing other-net copper plus the
@@ -5742,6 +5988,7 @@ def run_stitch(
                 other_net_tracks=eff_other_net_tracks,
                 other_net_vias=eff_other_net_vias,
                 other_net_pads=eff_pads,
+                other_net_pad_bboxes=eff_pad_bboxes,
                 trace_width=trace_width,
                 other_net_filled_polygons=eff_other_fill,
                 via_drill=drill,
@@ -5766,6 +6013,7 @@ def run_stitch(
                     other_net_tracks=eff_other_net_tracks,
                     other_net_vias=eff_other_net_vias,
                     other_net_pads=eff_pads,
+                    other_net_pad_bboxes=eff_pad_bboxes,
                     trace_width=trace_width,
                     via_drill=drill,
                     other_net_drills=eff_drills,
@@ -5809,6 +6057,7 @@ def run_stitch(
                                 other_net_tracks=eff_other_net_tracks,
                                 other_net_vias=eff_other_net_vias,
                                 other_net_pads=eff_pads,
+                                other_net_pad_bboxes=eff_pad_bboxes,
                                 trace_width=trace_width,
                                 other_net_filled_polygons=eff_other_fill,
                                 via_drill=micro_via_drill,
@@ -5832,6 +6081,7 @@ def run_stitch(
                                 other_net_tracks=eff_other_net_tracks,
                                 other_net_vias=eff_other_net_vias,
                                 other_net_pads=eff_pads,
+                                other_net_pad_bboxes=eff_pad_bboxes,
                                 trace_width=trace_width,
                                 via_drill=micro_via_drill,
                                 other_net_drills=eff_drills,
@@ -6120,7 +6370,7 @@ def run_stitch(
                 # Genuinely no placement even against pre-existing copper --
                 # this is a real obstruction, not a self-inflicted cross-net
                 # rejection.  Record the skip diagnostic as before.
-                diag_pads, _diag_bboxes, _diag_drills = _sibling_pools(pad)
+                diag_pads, diag_bboxes, _diag_drills = _sibling_pools(pad)
                 detail = identify_nearest_obstacle(
                     pad,
                     micro_via_size if micro_via else via_size,
@@ -6131,6 +6381,7 @@ def run_stitch(
                     diag_pads,
                     pad_other_fill,
                     net_map=obstacle_net_map,
+                    other_net_pad_bboxes=diag_bboxes,
                 )
                 result.skip_details.append((pad, detail))
                 strategy_note = (
@@ -6168,7 +6419,7 @@ def run_stitch(
                 clearance,
                 pad_other_fill,
             ):
-                diag_pads, _diag_bboxes, _diag_drills = _sibling_pools(pad)
+                diag_pads, diag_bboxes, _diag_drills = _sibling_pools(pad)
                 detail = identify_nearest_obstacle(
                     pad,
                     fallback_via_size,
@@ -6179,6 +6430,7 @@ def run_stitch(
                     diag_pads,
                     pad_other_fill,
                     net_map=obstacle_net_map,
+                    other_net_pad_bboxes=diag_bboxes,
                 )
                 result.skip_details.append((pad, detail))
                 result.pads_skipped.append(

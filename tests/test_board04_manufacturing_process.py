@@ -622,3 +622,29 @@ def test_tie_via_skipped_only_for_a_pad_already_welded_off_pad(tmp_path, welded)
     recipe = _recipe()
     pcb = PCB.load(path)
     assert recipe._pad_has_offpad_bond(pcb, 33.25, 25.838, "GND") == ("U2.23" if welded else None)
+
+
+@pytest.mark.parametrize("reaches_via", [True, False])
+def test_tie_via_skipped_for_a_multi_leg_off_pad_weld(tmp_path, reaches_via):
+    """Issue #6683: a shape-aware stitch welds LQFP VSS pads through a
+    dog-leg / extended escape (pad -> waypoint -> via).  That bond must be
+    recognized, or ``tie_power_pads`` drops its legacy in-pad micro via onto
+    the NRST B.Cu track (U2.8 / U2.23 shorted GND to NRST in board 04's CI).
+    A path that stops short of the via is not a bond."""
+    from kicad_tools.schema.pcb import PCB
+
+    end = "33.75 27.4" if reaches_via else "33.6 27.4"
+    text = f"""(kicad_pcb (version 20240108) (generator "test")
+      (layers (0 "F.Cu" signal) (31 "B.Cu" signal)) (net 0 "") (net 1 "GND")
+      (footprint "test" (layer "F.Cu") (at 33.25 26.16)
+        (property "Reference" "U2")
+        (pad "23" smd rect (at 0 0) (size 0.3 1.475) (layers "F.Cu") (net 1 "GND")))
+      (via (at 33.75 27.4) (size 0.3) (drill 0.15) (layers "F.Cu" "B.Cu") (net 1))
+      (segment (start 33.25 26.16) (end 33.25 27.4) (width 0.15) (layer "F.Cu") (net 1))
+      (segment (start 33.25 27.4) (end {end}) (width 0.15) (layer "F.Cu") (net 1))
+    )"""
+    path = tmp_path / "tie.kicad_pcb"
+    path.write_text(text)
+    pcb = PCB.load(path)
+    expected = "U2.23" if reaches_via else None
+    assert _recipe()._pad_has_offpad_bond(pcb, 33.25, 25.838, "GND") == expected
