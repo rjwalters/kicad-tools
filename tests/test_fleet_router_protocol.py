@@ -508,18 +508,36 @@ def test_ses_round_trip_preserves_placement_and_pad_nets(fr, prep, tmp_path):
     assert out.read_text().count("(segment ") == 2
 
 
-def test_ses_import_loss_is_reported_not_hidden(fr, prep, tmp_path):
-    """Standard Freerouting nesting: our importer drops it; the audit must say so."""
+def test_ses_import_nested_session_with_resolution_is_lossless(fr, prep, tmp_path):
+    """Standard Freerouting nesting and ``(resolution um 10)`` import cleanly since #6593."""
     ses = tmp_path / "b.ses"
     ses.write_text(NESTED_SES)
     out = tmp_path / "routed.kicad_pcb"
     lost, counts = fr.ses_import(ses, prep.pcb, out)
     assert counts["ses"]["wires"] == 2
+    assert counts["imported_wires"] == 2
+    assert lost == []
+    assert out.exists()
+
+
+def test_ses_import_reports_dropped_wires_and_unapplied_resolution(fr, prep, tmp_path, monkeypatch):
+    """A regression in the importer must still surface as a loss, not be hidden."""
+    from kicad_tools.export.ses import SESToKiCadImporter
+
+    real_parse = SESToKiCadImporter.parse
+
+    def lossy_parse(self):
+        real_parse(self)
+        self._wires = self._wires[:1]
+        self._resolution_unit, self._resolution = "um", 1.0
+
+    monkeypatch.setattr(SESToKiCadImporter, "parse", lossy_parse)
+    ses = tmp_path / "b.ses"
+    ses.write_text(NESTED_SES)
+    lost, _ = fr.ses_import(ses, prep.pcb, tmp_path / "routed.kicad_pcb")
     details = [e["detail"] for e in lost]
-    if counts["imported_wires"] < 2:  # today: 0 (issue #6593)
-        assert f"{counts['imported_wires']}/2 SES wires imported" in details
-    assert any("resolution um 10" in d for d in details)
-    assert out.exists()  # the merge base is always written, even with 0 routes
+    assert "1/2 SES wires imported" in details
+    assert any("resolution um 10" in d and "applied um 1" in d for d in details)
 
 
 # ---------------------------------------------------------------------------

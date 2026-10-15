@@ -801,13 +801,17 @@ def ses_import(ses: Path, prepared: Path, out: Path) -> tuple[list[dict[str, str
         lost.append(
             {"kind": "ses_import", "detail": f"{len(imp.vias)}/{raw['vias']} SES vias imported"}
         )
-    if raw["resolution"] not in (None, 1.0):
+    # Since #6593 the importer honours ``(resolution UNIT N)``; a loss only
+    # remains if what it applied differs from what the session declares.
+    if raw["resolution"] is not None and (
+        (imp._resolution_unit, imp._resolution) != (raw["resolution_unit"], raw["resolution"])
+    ):
         lost.append(
             {
                 "kind": "ses_import",
                 "detail": (
                     f"SES resolution {raw['resolution_unit']} {raw['resolution']:g}: "
-                    "importer assumes 1 unit = 1 um"
+                    f"importer applied {imp._resolution_unit} {imp._resolution:g}"
                 ),
             }
         )

@@ -33,6 +33,36 @@ Both upstream routers are GPL-3.0. The ecosystem registry marks them `copyleft-i
 
   It needs CMake ≥ 3.28, a C++20 compiler, Boost ≥ 1.81, Eigen3 3.4, SQLite3, nlohmann_json 3, CLI11 and zstd. The CMake presets assume g++-15, Ninja and ccache, so the commands above bypass them. If the build fails, keep its log and pass `--tracemaker-build-log`. The row is then recorded as `tool-failure` / `build` with the log attached. Do not substitute a mock.
 
+
+### Building TraceMaker's missing dependencies without touching the host
+
+Dependencies the host lacks are built into a scratch prefix, outside the repository, never installed. On a host with Boost, Eigen3, SQLite3 and zstd development packages, only the two header-only libraries were missing (Ubuntu 24.04, CMake 3.28, g++ 13; the presets' g++-15 is not needed):
+
+```bash
+P=/tmp/fleet/prefix
+git clone --depth 1 -b v3.11.3 https://github.com/nlohmann/json  && cmake -S json  -B json/b  -DJSON_BuildTests=OFF -DCMAKE_INSTALL_PREFIX=$P && cmake --install json/b
+git clone --depth 1 -b v2.4.2  https://github.com/CLIUtils/CLI11 && cmake -S CLI11 -B CLI11/b -DCLI11_BUILD_TESTS=OFF -DCLI11_BUILD_EXAMPLES=OFF -DCMAKE_INSTALL_PREFIX=$P && cmake --install CLI11/b
+# then the TraceMaker configure command above with -DCMAKE_PREFIX_PATH=$P
+```
+
+## Live smoke: board 00 (2026-10-15)
+
+`run.py run --boards 00 --wall-cap 300` at kct `ccfc97260`, kicad-cli 10.0.6, native backend 1.0.0, TraceMaker `89ff58ca` (built as above; build environment recorded in the manifest's `tracemaker.build_environment`; binary sha256 prefix `49d99f58...`) and fastroute `e5d52c45` (binary sha256 prefix `f141bce5...`). The full binary hashes and the run's `results.json` were not retained from the original run host; the next live run records them (see #6335). Fleet inputs for boards 03 and 06 had drifted since the first freeze, so the manifest was re-frozen.
+
+| Tool | Outcome | Connections | DRC errors | Unconnected | Vias | Wirelength mm | Wall s |
+|---|---|---|---|---|---|---|---|
+| input | reference | 0/3 | 0 | 3 | 0 | 0 | |
+| kct | success | 3/3 | 0 | 0 | 0 | 8.71 | 9.41 |
+| tracemaker | success | 3/3 | 0 | 0 | 0 | 29.66 | 0.16 |
+| fastroute | non-comparable (11 constraints lost at the DSN/SES boundary) | 3/3 | 0 | 0 | 0 | 30.17 | 0.01 |
+
+The fastroute row is `non-comparable` because 11 constraints are lost, none of them caused by #6593 or #6594 (both closed on 2026-10-14, before this run's base):
+
+- **10 `dru` entries:** JLCPCB fab-floor rules the DSN exporter does not represent (silk clearance, `hole_clearance` x2, `annular_width` x2, `edge_clearance`, `physical_hole_clearance`, text thickness, text height, and the `Reviewed clearance - Power` clearance). Tracked in #6765.
+- **1 `ses_import` entry** ("SES resolution um 10: importer assumes 1 unit = 1 um"). This was a false loss: since #6593 the importer honours `(resolution um 10)` and the imported 30.17 mm agrees with TraceMaker's 29.66 mm. `run.py:ses_import` now reports a loss only when the resolution the importer applied differs from the one the session declares.
+
+This is a single run on one simple board, so it says nothing about router quality. The full matrix is #6335.
+
 ## Running
 
 ```bash
@@ -115,7 +145,6 @@ Every output is copied into a **fresh** grading directory beside copies of the f
 
 Findings at the build revision (issues filed separately; out of scope here):
 
-- **#6593:** the SES importer drops every wire from a standard Freerouting/fastroute session, because nets nest the wires under `network_out`. It also ignores `(resolution um 10)`.
-- **#6594:** the DSN exporter reads neither the `.kicad_pro` net classes nor the `.kicad_dru`, and emits no zones or keepouts. On board 09, whose pad nets use the KiCad-10 name-only `(net "X")` form, it exports **no nets or pads at all**.
-
-Until those are fixed, every fastroute row is `non-comparable` by construction.
+- **#6593 (closed):** the SES importer dropped every wire from a standard Freerouting/fastroute session, because nets nest the wires under `network_out`. It also ignored `(resolution um 10)`.
+- **#6594 (closed):** the DSN exporter read neither the `.kicad_pro` net classes nor the `.kicad_dru`, and emitted no zones or keepouts. On board 09, whose pad nets use the KiCad-10 name-only `(net "X")` form, it exported **no nets or pads at all**.
+- **#6765 (open):** the DSN exporter still does not represent the JLCPCB fab-floor `.kicad_dru` rules. Until it does, a fastroute row stays `non-comparable` on any board whose `.kicad_dru` carries them (10 losses on board 00).
