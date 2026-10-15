@@ -245,3 +245,17 @@ def test_auto_path_measures_skew_with_via_barrels_like_the_checker():
     assert after == pytest.approx(result.skew_after_mm)
     assert result.reason == "tuned", result.message
     assert after <= 0.1
+
+
+def test_pair_skew_tuning_runs_before_match_group_tuning():
+    """The group tuner (#6674) adds identical meanders to both legs of a pair,
+    so it preserves whatever pair skew it receives: pair skew must be fixed
+    first.  Pin the call order in the route pipeline."""
+    import inspect
+
+    from kicad_tools.cli import route_cmd
+
+    source = inspect.getsource(route_cmd)
+    pair_call = source.index("_run_diffpair_skew_tuning(router, args, quiet=quiet)")
+    group_call = source.index("_mg_engage = _match_group_tuning_engage(args, router)")
+    assert pair_call < group_call
