@@ -3778,6 +3778,19 @@ def _add_route_parser(subparsers) -> None:
             "effect when --grid is an explicit value."
         ),
     )
+    # Issue #6666: previously declared only by ``route_cmd``'s own parser, so
+    # ``kct route ... --grid-strategy uniform`` died with "unrecognized
+    # arguments".  Keep choices/default identical to route_cmd.py.
+    route_parser.add_argument(
+        "--grid-strategy",
+        choices=["adaptive", "uniform"],
+        default="adaptive",
+        help=(
+            "Grid strategy when --grid auto is used. "
+            "'adaptive' (default) uses multi-resolution grids with fine zones "
+            "around fine-pitch components. 'uniform' forces single-resolution grid."
+        ),
+    )
     route_parser.add_argument(
         "--trace-width",
         type=float,
@@ -4011,6 +4024,17 @@ def _add_route_parser(subparsers) -> None:
             "channel instead of competing greedily.  Default OFF "
             "(byte-identical when absent)."
         ),
+    )
+    route_parser.add_argument(
+        "--escape-corridor-assignment",
+        choices=("greedy", "flow"),
+        default="greedy",
+        # Issue #6352 (EXPERIMENTAL, research-only): joint min-cost-flow
+        # pin -> exit assignment for the escape-corridor planner.  Hidden from
+        # --help -- it exists so scripts/research/escape_flow_experiment.py can
+        # select the treatment arm; ``flow`` implies
+        # --escape-corridor-reservation.  Default ``greedy`` is byte-identical.
+        help=argparse.SUPPRESS,
     )
     route_parser.add_argument(
         "--no-plane-via-reservation",

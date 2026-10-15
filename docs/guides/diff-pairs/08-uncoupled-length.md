@@ -43,8 +43,29 @@ How KiCad measures, and so how kct does (pinned on kicad-cli 10.0.6 by
 * **Meanders:** KiCad's `diff_pair_uncoupled` is known to misreport on them. No
   committed board has one; the first fixture belongs to the length-tuning phase
   (#6447).
-* **Per-terminal figure:** the strict per-terminal allowance with the courtyard
-  ignored is a routing target, not yet a check.
+
+### The per-terminal figure (kct-only)
+
+Issue #6615. The rule also holds every **terminal** (a footprint with a pad on
+the net) to `max_uncoupled_per_terminal_mm`, counting only uncoupled copper
+**outside every terminal's gather-ignore region**. KiCad has no equivalent: no
+`.kicad_dru` rule is written and the finding says `kct-only`. The total is
+unchanged.
+
+* **Region**: the courtyard (`F.CrtYd` + `B.CrtYd`, every copper layer). Class
+  field `gather_ignore`: `"courtyard"` (default, radius 0 mm), a number `r`
+  (grown by `r` mm) or `"none"`. #6441/#6443 settle no radius, and TI SPRAAR7J
+  §3.3 measures its allowance from the package, so a non-zero default would
+  hide copper the source counts. **No courtyard** (or one that does not
+  close): the pads' bounding box plus 0.25 mm (IPC-7351 courtyard excess),
+  named `pad bounding box` in the finding.
+* **Who pays**: the terminal nearest *along the copper* (endpoints,
+  T-junctions and vias form the graph), so each end of a net is checked on its
+  own; copper connected to no terminal goes to the nearest in a straight line.
+  With `"none"` the per-terminal figures sum to the net's total.
+* **Severity** follows the per-terminal limit's source (class or cited:
+  `error`; `uncited`: `warning`). A net with no pads has no figure. Board 03's
+  worst terminal is U2 on `USB_D+`, 1.959 mm against 6.35 mm.
 
 ### Pairs KiCad does not recognise by name
 

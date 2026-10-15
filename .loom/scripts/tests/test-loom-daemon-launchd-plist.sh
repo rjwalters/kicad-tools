@@ -146,6 +146,12 @@ trap 'rm -rf "$WORKDIR"' EXIT
 trap 'rm -rf "$WORKDIR"; exit 1' INT TERM
 mkdir -p "$WORKDIR/.loom/logs"
 
+# #11934: daemon-start reads the resolved config's autonomous.workFinder.enabled.
+# Pin the machine tier to an absent file so a host whose
+# ~/.local/share/loom/config/defaults.json enables the work finder (a fleet
+# dispatcher) renders this suite's plain-start previews hermetically.
+export LOOM_CONFIG_DEFAULTS_FILE="$WORKDIR/no-machine-config-defaults.json"
+
 FAKE_BIN="$WORKDIR/fake-loom-daemon"
 cat > "$FAKE_BIN" <<'EOF'
 #!/usr/bin/env bash

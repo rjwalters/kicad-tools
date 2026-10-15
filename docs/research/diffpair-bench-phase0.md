@@ -248,7 +248,9 @@ Seed sensitivity: the `pair_digest`s of `06b` grid, `06rf` lattice and `06rf` gr
 identical at 42 and 43. So the per-pair table below lists those cells once, as `42/43`.
 Three other rows match earlier files. `06b` grid @42/@43 matches
 `determinism-06b-grid-b9041b37.json`, `06rf` lattice @42 matches `fix-6550-68db9374.json`,
-and `06b` lattice @43 has the same digest as `fix-6535`'s seed-42 row (`26c276ae7da77a54`).
+and `06b` lattice @43 has the same digest as `fix-6535`'s seed-42 row (`6afd7e125b79f3aa`).
+(All committed digests were re-hashed under #6638, which drops continuity/skew limits from
+`pair_digest`. This row was `26c276ae7da77a54` before that change.)
 
 Per pair, in PR #6556's format. The verdict columns are kct/kicad-cli. `-` means the rule
 has no limit on that pair, or the pair is `unrouted` (one or both nets are not

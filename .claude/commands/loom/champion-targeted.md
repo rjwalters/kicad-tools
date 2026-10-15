@@ -66,7 +66,7 @@ outcome vocabulary for each mode is the table in its section. Never invent one.
 | Outcome | When |
 |---|---|
 | `merged` | Step 3 printed `CHAMPION-MERGE-OUTCOME pr=N rc=0` |
-| `held` | Champion's hold (`loom:blocked`) binds (Health Pass ran), or Janitor Part 1 skipped another's park |
+| `held` | Champion's hold (`loom:blocked`) binds (Health Pass ran), or Janitor Part 1 / Step 3 exit 10 (`CHAMPION-HOLD-SKIP`) skipped a park |
 | `rejected` | A criterion failed and the PR Rejection Workflow ran (Janitor, stale route, CI) |
 | `requeued` | Exit 3, 4, 5, 7, 9 (`CHAMPION-PIN-MISSING`): not merged, still approved, no "Merge Failed" |
 | `head-moved` | `merge-pr.sh` exit **8**: the head is no longer `EVALUATED_SHA`. Not a failure: post no "Merge Failed", leave the labels; the next step evaluates the new head |

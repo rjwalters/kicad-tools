@@ -2335,10 +2335,18 @@ class CppPathfinder:
         routable_layers = self._grid.get_routable_indices()
         if start_layers is None:
             start_layers = (
-                routable_layers if getattr(start, "through_hole", False) else [start_layer]
+                routable_layers
+                if (
+                    getattr(start, "through_hole", False) or getattr(start, "layer_agnostic", False)
+                )
+                else [start_layer]
             )
         if end_layers is None:
-            end_layers = routable_layers if getattr(end, "through_hole", False) else [end_layer]
+            end_layers = (
+                routable_layers
+                if (getattr(end, "through_hole", False) or getattr(end, "layer_agnostic", False))
+                else [end_layer]
+            )
 
         # Filter start/end layers by allowed_layers constraint
         if self._rules.allowed_layers is not None:

@@ -1578,6 +1578,19 @@ class SubGridRouter:
         if landing_layer is None:
             return None
 
+        # Issue #6646: a micro via may only span stack-adjacent copper
+        # layers.  The outer-layer fallback of the landing-layer selector is
+        # non-adjacent on a 4+ layer board without an inner signal layer.
+        if is_micro and abs(landing_layer_idx - self.grid.layer_to_index(pad.layer.value)) != 1:
+            logger.debug(
+                "In-pad micro-via rescue for %s.%s skipped: landing layer %d "
+                "is not stack-adjacent to the pad layer (Issue #6646)",
+                pad.ref,
+                pad.pin,
+                landing_layer_idx,
+            )
+            return None
+
         via = Via(
             x=pad.x,
             y=pad.y,

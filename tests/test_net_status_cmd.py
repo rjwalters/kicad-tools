@@ -576,3 +576,40 @@ class TestNetFilterScoping:
         main([str(incomplete_pcb), "--why", "--format", "json"])
         data = json.loads(capsys.readouterr().out)
         assert "net_filter" not in data
+
+
+class TestNetStatusPortablePcbPath:
+    """Issue #6532: ``--format json`` never records an absolute PCB path."""
+
+    def test_absolute_path_under_cwd_is_cwd_relative(
+        self, connected_pcb: Path, monkeypatch, capsys
+    ):
+        monkeypatch.chdir(connected_pcb.parent.parent)
+        main([str(connected_pcb.resolve()), "--format", "json"])
+        data = json.loads(capsys.readouterr().out)
+        assert data["pcb"] == f"{connected_pcb.parent.name}/connected.kicad_pcb"
+
+    def test_absolute_path_outside_cwd_is_bare_name(
+        self, connected_pcb: Path, tmp_path_factory, monkeypatch, capsys
+    ):
+        monkeypatch.chdir(tmp_path_factory.mktemp("elsewhere"))
+        main([str(connected_pcb.resolve()), "--format", "json"])
+        data = json.loads(capsys.readouterr().out)
+        assert data["pcb"] == "connected.kicad_pcb"
+
+    def test_relative_path_is_unchanged(self, connected_pcb: Path, monkeypatch, capsys):
+        monkeypatch.chdir(connected_pcb.parent.parent)
+        rel = f"{connected_pcb.parent.name}/connected.kicad_pcb"
+        main([rel, "--format", "json"])
+        data = json.loads(capsys.readouterr().out)
+        assert data["pcb"] == rel
+
+    def test_why_json_is_portable(
+        self, incomplete_pcb: Path, tmp_path_factory, monkeypatch, capsys
+    ):
+        from kicad_tools.cli.net_status_cmd import output_why
+
+        monkeypatch.chdir(tmp_path_factory.mktemp("elsewhere"))
+        output_why(incomplete_pcb.resolve(), "json")
+        data = json.loads(capsys.readouterr().out)
+        assert data["pcb"] == "incomplete.kicad_pcb"

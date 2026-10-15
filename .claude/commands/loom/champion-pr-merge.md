@@ -108,46 +108,31 @@ verdict state; Part 2 resolves an *out-of-date* one.
 
 ### Part 1: Contradictory verdict labels (#4570, generalized #7018)
 
-It is a fail-safe against a real race
-(#4570, PR #4560 incident, 2026-07-30): two Judges reviewing the same PR
-concurrently can leave it carrying **both** `loom:pr` and
-`loom:changes-requested` simultaneously — an off-graph state the label
-lifecycle never intends to produce (see the mutual-exclusion invariant
-documented in `.github/labels.yml`). Judge's and Doctor's Verdict-Time CAS
-Recheck (`judge.md` / `doctor.md`) prevent this at write time going forward,
-but this janitor is the mechanized fail-safe for any instance that still
-slips through (a pre-existing contradictory state from before this fix
-shipped, a manual label edit, or a bug elsewhere) — mechanizing exactly the
-manual correction the incident required a human-in-the-loop Judge to perform.
-
-**Also catches `loom:pr` + `loom:review-requested`** (#7018, twelve open PRs
-observed carrying one of these contradictory pairs on 2026-08-28): `loom:pr`
-here is stray debris left behind by an operator-ruling label swap, or by the
-staleness guard's own clear step which (before #7018) only stripped the ONE
-verdict label it detected as stale, never a second, already-stray one. Either
-co-occurring label means `loom:pr` does not currently describe reality:
-something is either actively re-requesting review or already rejected the
-tree. Whichever one is present, the resolution is the same — remove `loom:pr`
-and let a fresh Judge pass decide again.
+A fail-safe for an off-graph state (mutual-exclusion invariant,
+`.github/labels.yml`): `loom:pr` beside `loom:changes-requested` (two Judges
+raced, #4570) or `loom:review-requested` (stray `loom:pr` debris from a label
+swap or a partial staleness clear, #7018). Judge's and Doctor's Verdict-Time
+CAS Recheck prevent it at write time; this catches what still slips through.
+Either way `loom:pr` does not describe reality: remove it and let a fresh
+Judge pass decide again.
 
 **Verification / resolution command** (run once per candidate `loom:pr` PR,
 before Step 1 of the 6 criteria below):
 
 ```bash
 PR_NUMBER=<number>
-# Plain `gh` — NOT "$GH_READ": this label read decides whether the PR is
-# eligible to merge, so it must be live (see "Cached forge reads").
-LABELS=$(gh pr view "$PR_NUMBER" --json labels --jq '[.labels[].name] | join(",")')
-
-# Whichever OTHER verdict-class label (if any) is standing beside loom:pr —
-# loom:changes-requested (a terminal rejection) or loom:review-requested (an
-# active or pending re-review) both mean loom:pr no longer describes reality.
+# Live labels + TRUSTED comments, in code (#11932). contradiction: loom:pr
+# beside the verdict label in `detail=`. champion-hold: criteria #2/#3 decide.
+# foreign-park (loom:blocked, no standing Champion hold marker) or a failed
+# read (exit 3): skip — no merge attempt, no comment, no label change.
+# Exit 2 is a loom-daemon older than the verb: on to the criteria.
+HC=$(loom-daemon champion-hold classify --pr "$PR_NUMBER" 2>/dev/null); HRC=$?
 OTHER_VERDICT_LABEL=""
-if echo "$LABELS" | grep -qw "loom:changes-requested"; then
-  OTHER_VERDICT_LABEL="loom:changes-requested"
-elif echo "$LABELS" | grep -qw "loom:review-requested"; then
-  OTHER_VERDICT_LABEL="loom:review-requested"
-fi
+case "$HRC $HC" in
+  "0 "*" state=clear "*|"0 "*" state=champion-hold "*|"2 ") ;;
+  "0 "*" state=contradiction "*) OTHER_VERDICT_LABEL=${HC##* detail=} ;;
+  *) echo "SKIP #$PR_NUMBER: ${HC:-rc=$HRC} — no merge, no comment"; continue ;;
+esac
 
 if [ -n "$OTHER_VERDICT_LABEL" ]; then
   JANITOR_MARKER="<!-- champion:verdict-janitor-notice -->"
@@ -187,12 +172,8 @@ though the janitor just removed `loom:pr`, a fresh Judge pass on the
 corrected state (which re-adds `loom:pr` if it approves) is what makes the PR
 eligible again, not this loop continuing on to the 6 criteria below.
 
-**The one exception (#11861): `loom:pr` + `loom:blocked` with a standing
-Champion hold marker** (`<!-- champion:merge-risk-hold -->` /
-`<!-- champion:critical-file-hold -->`) is Champion's own hold. Never strip
-`loom:pr` from it; criteria #2/#3 decide whether it still binds. Without a
-standing marker it is another actor's park: skip the PR (`continue`), no
-comment, no label change.
+`loom:pr` + `loom:blocked` is legal only as Champion's own hold (#11861):
+never strip `loom:pr` from it. The classifier above decides whose park it is.
 
 ### Part 2: Stale approval — the verdict predates the current head (#5686)
 
@@ -1873,7 +1854,9 @@ git checkout main 2>/dev/null || true
 # `--pr N` (#11859): a live pin means this block MUST set EXPECTED_HEAD=<sha>. Live: <60 min old, or <24h while its step's agent runs (#11902).
 PF="$(git rev-parse --git-common-dir)/loom-champion-pin-pr-$PR_NUMBER"; PIN=; PIN_PID=; { read -r PIN PIN_PID < "$PF"; } 2>/dev/null
 { [ -n "$(find "$PF" -mmin -60)" ] || { [ "${PIN_PID:-0}" -gt 1 ] && kill -0 "$PIN_PID" && [ -n "$(find "$PF" -mmin -1440)" ]; } || PIN=; } 2>/dev/null
-if [ -n "$PIN" ] && [ "${EXPECTED_HEAD:-}" != "$PIN" ]; then MERGE_RC=9; echo "CHAMPION-PIN-MISSING pr=$PR_NUMBER: set EXPECTED_HEAD=$PIN in this block; not merging"; else
+if [ -n "$PIN" ] && [ "${EXPECTED_HEAD:-}" != "$PIN" ]; then MERGE_RC=9; echo "CHAMPION-PIN-MISSING pr=$PR_NUMBER: set EXPECTED_HEAD=$PIN in this block; not merging";
+# #11932: only `state=clear` (or exit 2: a daemon older than the verb) merges.
+elif HC=$(loom-daemon champion-hold classify --pr "$PR_NUMBER" 2>/dev/null); case "$? $HC" in "0 "*" state=clear "*|"2 ") false ;; esac; then MERGE_RC=10; echo "CHAMPION-HOLD-SKIP pr=$PR_NUMBER: ${HC:-unreadable}; not merging"; else
 # Queue mode (#10256): only a DIRECT first stdout line + rc 0 falls through.
 HEAD_SHA=${EXPECTED_HEAD:-$(gh pr view "$PR_NUMBER" --json headRefOid -q .headRefOid)}
 QE=$(mktemp); QOUT=$(loom-daemon forge merge-queue step "$PR_NUMBER" \
@@ -1905,13 +1888,12 @@ fi
 [ "$MERGE_RC" -eq 0 ] && { LOOM_AUTO_MERGE_TIMEOUT=420 \
   ./.loom/scripts/merge-pr.sh "$PR_NUMBER" --auto --redate-stale-checks ${EXPECTED_HEAD:+--expected-head "$EXPECTED_HEAD"} || MERGE_RC=$?; }
 
-if [ "$MERGE_RC" -eq 7 ] || [ "$MERGE_RC" -eq 3 ] || [ "$MERGE_RC" -eq 4 ] || [ "$MERGE_RC" -eq 5 ] || [ "$MERGE_RC" -eq 8 ] || [ "$MERGE_RC" -eq 9 ]; then
-  # Not failures: nothing merged, PR stays approved, no "Merge Failed" comment.
-  # See "exit codes 3-7" below; 9 is CHAMPION-PIN-MISSING (the pin was lost).
+if [ "$MERGE_RC" -eq 7 ] || [ "$MERGE_RC" -eq 3 ] || [ "$MERGE_RC" -eq 4 ] || [ "$MERGE_RC" -eq 5 ] || [ "$MERGE_RC" -eq 8 ] || [ "$MERGE_RC" -eq 9 ] || [ "$MERGE_RC" -eq 10 ]; then
+  # Not failures: nothing merged, no "Merge Failed" comment. See "exit codes 3-7".
   echo "PR #$PR_NUMBER not merged this pass (exit $MERGE_RC) — re-queuing instead of failing"
 elif [ "$MERGE_RC" -ne 0 ]; then
   echo "Merge failed for PR #$PR_NUMBER"
-  # Post failure comment (see Error Handling section)
+  # Post the once-per-head failure comment (Error Handling)
 fi
 
 # Completion sentinel — keep LAST. A killed call never reaches it, so its
@@ -3129,15 +3111,20 @@ The **Capped-PR Recovery Pass** drains the same way (oldest first, one decision 
 If the merge fails for any reason:
 
 1. **Capture error message**
-2. **Add comment to PR** with error details
+2. **Add comment to PR** with error details — **once per head** (#11932)
 3. **Do NOT remove `loom:pr` label**
 4. **Report error in completion summary**
 5. **Continue to next PR** (don't abort entire iteration)
 
-Example error comment:
+The comment, marker-guarded: `merge-failed-marker` prints the marker only
+while no trusted notice for this head stands; otherwise nothing is posted.
 
 ```bash
-./.loom/scripts/post-comment.sh <number> --pr --body "**Champion: Merge Failed**
+PR_NUMBER=<number>
+HEAD_SHA=$(gh pr view "$PR_NUMBER" --json headRefOid -q .headRefOid)
+MF=$(loom-daemon champion-hold merge-failed-marker --pr "$PR_NUMBER" --head "$HEAD_SHA") &&
+./.loom/scripts/post-comment.sh "$PR_NUMBER" --pr --body "$MF
+**Champion: Merge Failed**
 
 Auto-merge failed:
 
@@ -3171,6 +3158,8 @@ Never the failure exit **1**; each means "the merge did not happen":
 - **9** — Step 3's `CHAMPION-PIN-MISSING` (`--pr N`, #11859, #11861): the block
   lacked the `EXPECTED_HEAD` its live pin names, so nothing ran. The pin was
   lost, not the merge.
+- **10** — Step 3's `CHAMPION-HOLD-SKIP` (#11932): not `state=clear`, so no
+  merge attempt (a hold or another actor's park).
 
 **Do not follow the 5 failure steps above for any of these outcomes:**
 

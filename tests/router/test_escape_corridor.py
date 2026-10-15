@@ -601,3 +601,36 @@ def test_escape_router_threads_flag_and_plans(
     # The escape router built for the run sees the flag ON and the plans.
     assert on._escape.enable_escape_corridor_reservation is True
     assert on._escape.escape_corridor_plans is on._escape_corridor_plans
+
+
+def test_greedy_default_strategy_through_autorouter(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Issue #6352: with the flow strategy off (the default) the reservation
+    pre-pass builds greedy plans, keeps no flow counters, and prints no
+    flow line -- the #4474 output is unchanged."""
+    on = _make_router_with_dense_qfn(enable=True)
+    assert on.escape_corridor_assignment == "greedy"
+    _stub_heavy_escape(on, monkeypatch)
+    on._run_escape_prephase()
+    assert on._escape_corridor_plans
+    assert all(p.assignment == "greedy" for p in on._escape_corridor_plans)
+    assert all(p.fallback_reason is None for p in on._escape_corridor_plans)
+    assert on._escape_flow_counters == {}
+    assert "Escape-flow" not in capsys.readouterr().out
+
+
+def test_flow_strategy_through_autorouter(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Issue #6352: selecting the flow strategy routes the same pre-pass
+    through the min-cost-flow assignment and counts the outcome."""
+    on = _make_router_with_dense_qfn(enable=True)
+    on.escape_corridor_assignment = "flow"
+    _stub_heavy_escape(on, monkeypatch)
+    on._run_escape_prephase()
+    assert on._escape_corridor_plans
+    counters = on._escape_flow_counters
+    assert counters["packages"] == len(on._escape_corridor_plans)
+    assert counters["planned"] + counters["infeasible"] + counters["empty"] == counters["packages"]
+    assert "Escape-flow summary: packages=" in capsys.readouterr().out

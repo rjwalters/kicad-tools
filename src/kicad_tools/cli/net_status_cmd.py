@@ -47,6 +47,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from kicad_tools.analysis.net_status import NetStatus, NetStatusAnalyzer, NetStatusResult
+from kicad_tools.cli.check_cmd import portable_report_path
 
 if TYPE_CHECKING:
     from kicad_tools.router.stuck_classifier import StuckNetDiagnosis
@@ -473,7 +474,7 @@ def output_json(
 ) -> None:
     """Output results as JSON."""
     data: dict[str, Any] = {
-        "pcb": str(pcb_path),
+        "pcb": portable_report_path(pcb_path),
         "connectivity_model": "strict" if strict else "legacy_proximity",
         "summary": {
             "total_nets": result.total_nets,
@@ -734,7 +735,7 @@ def output_why(pcb_path: Path, fmt: str, strict: bool = True, net: str | None = 
 
     if fmt == "json":
         data = {
-            "pcb": str(pcb_path),
+            "pcb": portable_report_path(pcb_path),
             "connectivity_model": "strict" if strict else "legacy_proximity",
             **result.to_dict(),
         }

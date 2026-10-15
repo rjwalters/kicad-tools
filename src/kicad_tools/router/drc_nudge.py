@@ -570,6 +570,8 @@ def _expand_via_layers(surviving: Via, removed: Via) -> None:
     top, bottom = copper_span(*surviving.layers, *removed.layers)
     if top != surviving.layers[0] or bottom != surviving.layers[1]:
         surviving.layers = (top, bottom)
+        # Issue #6677: a widened blind/buried via must not keep a stale keyword.
+        surviving.refresh_span_type()
 
 
 def _compute_merge_threshold(router: Autorouter) -> float:

@@ -35,6 +35,7 @@ import numpy as np
 from kicad_tools.core.types import copper_span
 
 from . import wall_deadline as _wall_deadline
+from .clearance_kernel import CLEARANCE_EPSILON_MM
 from .clearance_resolver import trace_via_clearance_mm
 from .geometry import segments_intersect as _geom_segments_intersect
 from .grid import RoutingGrid
@@ -187,8 +188,11 @@ class AStarNode:
     via_from_parent: bool = field(compare=False, default=False)
     direction: tuple[int, int] = field(compare=False, default=(0, 0))  # (dx, dy) from parent
     seq: int = field(compare=False, default=0)
-    # Issue #6473: nearest via node on this node's path (itself when it was
-    # reached through a via); twin of the native ``AStarNode::via_anc``.
+    # Issue #6473: nearest via node strictly above this node on its path
+    # (``None`` when there is none); twin of the native ``AStarNode::via_anc``.
+    # Never ``self`` (issue #6526): a self-reference made every via node a
+    # reference cycle, so a search's node tree outlived it until the cyclic
+    # GC ran.  A node reached through a via is found via ``via_from_parent``.
     via_anc: Optional["AStarNode"] = field(compare=False, default=None, repr=False)
 
     def __lt__(self, other: "AStarNode") -> bool:
@@ -1987,12 +1991,22 @@ class Router:
         :meth:`RoutingGrid.validate_same_net_drill_spacing`, which measures
         the vias :meth:`_convert_path_to_route` emits at these cell centres.
         A via stack at one cell (F -> In1 -> B) is one drill.
+
+        The floor carries the shared ``CLEARANCE_EPSILON_MM`` slack (issue
+        #6528), like the validator and the native twin: a pair exactly on the
+        floor whose float gap rounds to ``0.4999999999999998`` is legal.
+
+        Walks ``current`` itself when it was reached through a via, then each
+        ``via_anc`` (nearest via strictly above, issue #6526) up to the root.
         """
-        node = current.via_anc
+        node = current if current.via_from_parent else current.via_anc
         if node is None:
             return True
         rules = self.rules
-        floor = max(rules.min_drill_clearance, getattr(rules, "min_hole_to_hole", 0.0))
+        floor = (
+            max(rules.min_drill_clearance, getattr(rules, "min_hole_to_hole", 0.0))
+            - CLEARANCE_EPSILON_MM
+        )
         radius = rules.via_drill / 2
         wx, wy = self.grid.grid_to_world(current.x, current.y)
         while node is not None:
@@ -2000,8 +2014,7 @@ class Router:
                 vx, vy = self.grid.grid_to_world(node.x, node.y)
                 if math.sqrt((wx - vx) ** 2 + (wy - vy) ** 2) - radius - radius < floor:
                     return False
-            parent = node.parent
-            node = parent.via_anc if parent is not None else None
+            node = node.via_anc
         return True
 
     def _own_pad_gate_inputs(self, start: Pad, end: Pad) -> tuple[set[str] | None, float]:
@@ -4614,8 +4627,10 @@ class Router:
         end_layer = self.grid.layer_to_index(end.layer.value)
 
         # Get all valid start/end layers for this pad type
-        start_layers = routable_layers if start.through_hole else [start_layer]
-        end_layers = routable_layers if end.through_hole else [end_layer]
+        start_layers = (
+            routable_layers if (start.through_hole or start.layer_agnostic) else [start_layer]
+        )
+        end_layers = routable_layers if (end.through_hole or end.layer_agnostic) else [end_layer]
 
         # Issue #956/#977: Calculate pad metal area bounds for expanded start/goal regions
         # When pads don't align with the routing grid, we accept reaching any cell
@@ -5420,7 +5435,7 @@ class Router:
                         False,
                         new_direction,
                         seq=next(seq_counter),
-                        via_anc=current.via_anc,
+                        via_anc=current if current.via_from_parent else current.via_anc,
                     )
                     heapq.heappush(open_set, neighbor_node)
 
@@ -5572,8 +5587,8 @@ class Router:
                         current,
                         True,
                         seq=next(seq_counter),
+                        via_anc=current if current.via_from_parent else current.via_anc,
                     )
-                    neighbor_node.via_anc = neighbor_node
                     heapq.heappush(open_set, neighbor_node)
 
         # No path found.  Issue #6098: the open set is empty only when the
@@ -6265,6 +6280,8 @@ class Router:
                     top, bottom = copper_span(*existing_via.layers, *new_via.layers)
                     if top != existing_via.layers[0] or bottom != existing_via.layers[1]:
                         existing_via.layers = (top, bottom)
+                        # Issue #6677: keep span_type consistent with new span.
+                        existing_via.refresh_span_type()
 
                     # Remove the new via since we're reusing the existing one
                     vias_to_remove.add(i)
@@ -6467,8 +6484,10 @@ class Router:
         routable_layers = self.grid.get_routable_indices()
         start_layer = self.grid.layer_to_index(start.layer.value)
         end_layer = self.grid.layer_to_index(end.layer.value)
-        start_layers = routable_layers if start.through_hole else [start_layer]
-        end_layers = routable_layers if end.through_hole else [end_layer]
+        start_layers = (
+            routable_layers if (start.through_hole or start.layer_agnostic) else [start_layer]
+        )
+        end_layers = routable_layers if (end.through_hole or end.layer_agnostic) else [end_layer]
 
         # Apply layer constraints
         if self.rules.allowed_layers is not None:
@@ -7120,7 +7139,7 @@ class Router:
                     False,
                     new_direction,
                     seq=neighbor_seq,
-                    via_anc=current.via_anc,
+                    via_anc=current if current.via_from_parent else current.via_anc,
                 )
                 heapq.heappush(open_set, neighbor_node)
                 nodes[neighbor_key] = neighbor_node
@@ -7237,8 +7256,8 @@ class Router:
                     current,
                     True,
                     seq=neighbor_seq,
+                    via_anc=current if current.via_from_parent else current.via_anc,
                 )
-                neighbor_node.via_anc = neighbor_node
                 heapq.heappush(open_set, neighbor_node)
                 nodes[neighbor_key] = neighbor_node
 

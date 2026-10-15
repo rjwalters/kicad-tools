@@ -943,6 +943,10 @@ def run_route_command(args) -> int:
     # tests/test_cli_parser_drift.py.
     if getattr(args, "max_cells", 500_000) != 500_000:
         sub_argv.extend(["--max-cells", str(args.max_cells)])
+    # Issue #6666: forward --grid-strategy only when it differs from the shared
+    # "adaptive" default, keeping flag-off argv byte-identical.
+    if getattr(args, "grid_strategy", "adaptive") != "adaptive":
+        sub_argv.extend(["--grid-strategy", args.grid_strategy])
     # Issue #4700: --trace-width now carries a ``None`` sentinel (unset) so the
     # inner command can raise the default to the manufacturer's own minimum
     # trace width.  Forward it only when the user actually passed a value --
@@ -1025,6 +1029,11 @@ def run_route_command(args) -> int:
     # when the user set it (byte-identical when absent).
     if getattr(args, "escape_corridor_reservation", False):
         sub_argv.append("--escape-corridor-reservation")
+    # Issue #6352 (EXPERIMENTAL): forward the hidden flow-assignment selector
+    # only when it differs from the "greedy" default (argv byte-identical
+    # otherwise).
+    if getattr(args, "escape_corridor_assignment", "greedy") != "greedy":
+        sub_argv.extend(["--escape-corridor-assignment", args.escape_corridor_assignment])
     # Issue #5891 (epic #5508 Phase 2): forward --no-pad-access-invariant.  Both
     # parsers declare it as store_true defaulting to False (the invariant itself
     # is ON by default), so only forward the OPT-OUT when the user set it --

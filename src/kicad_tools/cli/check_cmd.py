@@ -3237,10 +3237,13 @@ def _print_measurement_summary(violations: list[DRCViolation]) -> None:
             return "continuity"
         if rule_id == "diffpair_uncoupled_length":
             from kicad_tools.validate.rules.diffpair_uncoupled_length import (
+                is_per_terminal_finding,
                 is_via_count_finding,
             )
 
-            return "vias" if is_via_count_finding(v) else "uncoupled"
+            if is_via_count_finding(v):
+                return "vias"
+            return "uncpl/term" if is_per_terminal_finding(v) else "uncoupled"
         return "skew"
 
     rows: list[tuple[str, str, str, str, str]] = []
@@ -3618,6 +3621,33 @@ def print_coverage_stanza(coverage: dict) -> None:
             print(f"  {tag}UNKNOWN {name}: {c.reason} (zero findings here is not a pass)")
 
 
+def portable_report_path(pcb_path: Path | str, cwd: Path | None = None) -> str:
+    """Return a host-independent form of *pcb_path* for a JSON report.
+
+    Committed board evidence used to echo the absolute host path of the
+    checked PCB (``/home/...``, ``/Users/...``, ``/private/var/...``), which
+    leaked worker layouts into the repo and made hash-bound bytes depend on
+    the machine that produced them (Issue #6532).  The rule is:
+
+    * a relative path is returned unchanged;
+    * an absolute path under the current working directory is returned
+      relative to it (POSIX separators);
+    * any other absolute path is reduced to its bare filename.
+
+    Both sides are resolved before comparing, so a symlinked tmp dir (macOS
+    ``/var`` -> ``/private/var``) still matches.  The result is never
+    absolute.
+    """
+    path = Path(pcb_path)
+    if not path.is_absolute():
+        return str(pcb_path)
+    base = Path.cwd() if cwd is None else Path(cwd)
+    try:
+        return path.resolve().relative_to(base.resolve()).as_posix()
+    except (ValueError, OSError):
+        return path.name
+
+
 def output_json(
     violations: list[DRCViolation],
     results: DRCResults,
@@ -3687,7 +3717,7 @@ def output_json(
         summary_data.update(_coverage_summary(coverage))
 
     data: dict = {
-        "file": str(pcb_path),
+        "file": portable_report_path(pcb_path),
         "manufacturer": mfr,
         "layers": layers,
         "summary": summary_data,
@@ -3794,7 +3824,7 @@ def write_json_report(
         summary_data.update(_coverage_summary(coverage))
 
     data: dict = {
-        "file": str(pcb_path),
+        "file": portable_report_path(pcb_path),
         "manufacturer": mfr,
         "layers": layers,
         "summary": summary_data,
