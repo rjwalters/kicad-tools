@@ -4713,9 +4713,9 @@ class Autorouter:
             return pc
         return replace(pc, anchor_a=anchor_a, anchor_b=anchor_b)
 
-    #: Extra radius on a #6697 pair-escape via site, so the sealed net's via
-    #: still clears foreign copper after landing on a nearby lattice node.
-    _PAIR_ESCAPE_SITE_MARGIN_MM = 0.1
+    #: How far (mm) a #6697 pair-escape via site may move from the pad edge
+    #: to land on a lattice node where the sealed net's via is legal.
+    _PAIR_ESCAPE_SITE_SEARCH_MM = 0.5
 
     def _lattice_reserve_pair_escape_sites(
         self, pf: Any, obstacles: Any, pc: Any, pair_nets: set[int]
@@ -4725,9 +4725,11 @@ class Autorouter:
         :func:`~.lattice.coupled.sandwiched_pad_escape_sites` finds, at each
         segment end, a routed single-layer pad between the pair's own pads
         (board 03: VBUS U2.5 between USB_D+ U2.4 and USB_D- U2.6).  Each site
-        joins the pathfinder's keepout mask as a disc (via + clearance +
-        :attr:`_PAIR_ESCAPE_SITE_MARGIN_MM`, all layers, tracks and vias) that
-        every net but the sealed one keeps out of.  The anchor relocation, the
+        is moved to the nearest lattice node (within
+        :attr:`_PAIR_ESCAPE_SITE_SEARCH_MM`) where the sealed net's via is
+        legal -- the via can only ever land on a node -- and joins the
+        pathfinder's keepout mask as a disc (via + clearance, all layers,
+        tracks and vias) that every net but the sealed one keeps out of.  The anchor relocation, the
         fat pair search and every other net then leave the pad its exit, and
         the sealed net can drop its via there.  Idempotent per site name, so
         a rebuilt connection list (#6535 tap-chain retry) adds nothing twice.
@@ -4742,7 +4744,7 @@ class Autorouter:
         if not routed:
             return
         num_layers = int(pf.num_layers)
-        via_radius = float(self.rules.via_diameter) / 2.0
+        via_radius = float(pf.rules.via_diameter) / 2.0
         new: list[Any] = []
         mask = getattr(pf, "_keepouts", None)
         have = {a.name for a in (mask.areas if mask else ())}
@@ -4765,17 +4767,19 @@ class Autorouter:
                 name = f"pair-escape-via:{name_net}:{pad.ref}.{pad.pin}"
                 if name in have:
                     continue
-                have.add(name)
                 # The sealed net's class clearance, floored at the pair's and
                 # the board's: the strongest spacing anything keeps from it.
                 clearance = self._lattice_escape_clearance(pad.net, pc.net_class)
+                node = self._lattice_escape_via_node(pf, pad.net, site, clearance)
+                if node is None:
+                    continue
+                have.add(name)
+                site = node
                 new.append(
                     KeepoutArea(
-                        polygon=_regular_polygon(
-                            site[0],
-                            site[1],
-                            via_radius + clearance + self._PAIR_ESCAPE_SITE_MARGIN_MM,
-                        ),
+                        # A hair over the via + clearance: the polygon is
+                        # circumscribed, the via sits exactly on its centre.
+                        polygon=_regular_polygon(site[0], site[1], via_radius + clearance + 1e-3),
                         layers=frozenset(range(num_layers)),
                         blocks_tracks=True,
                         blocks_vias=True,
@@ -4789,6 +4793,37 @@ class Autorouter:
                 )
         if new:
             pf.set_keepouts(LatticeKeepoutMask(tuple(mask.areas if mask else ()) + tuple(new)))
+
+    def _lattice_escape_via_node(
+        self, pf: Any, net: int, site: tuple[float, float], clearance: float
+    ) -> tuple[float, float] | None:
+        """The lattice node nearest ``site`` where ``net`` may drop a via (#6697).
+
+        Legal means :meth:`LatticePathfinder._via_ok` on an empty board (no
+        via-in-pad on the default fab tier, foreign pads cleared by
+        ``clearance``, rule areas honoured).  ``None`` when no node within
+        :attr:`_PAIR_ESCAPE_SITE_SEARCH_MM` qualifies.
+        """
+        lattice = pf.build()
+        unit = float(lattice.unit)
+        if unit <= 0.0:
+            return None
+        reach = self._PAIR_ESCAPE_SITE_SEARCH_MM
+        k0 = lattice.node_key(site[0] - reach, site[1] - reach)
+        k1 = lattice.node_key(site[0] + reach, site[1] + reach)
+        committed = pf._fresh_committed()
+        best: tuple[float, tuple[float, float]] | None = None
+        for i in range(k0[0], k1[0] + 1):
+            for j in range(k0[1], k1[1] + 1):
+                if (i, j) not in lattice.nodes:
+                    continue
+                pt = lattice.node_point((i, j))
+                d = math.hypot(pt[0] - site[0], pt[1] - site[1])
+                if d > reach or (best is not None and d >= best[0]):
+                    continue
+                if pf._via_ok((i, j), net, committed, clearance=clearance):
+                    best = (d, pt)
+        return None if best is None else best[1]
 
     def _lattice_escape_clearance(self, net: int, pair_class: Any) -> float:
         """Clearance kept from a #6697 escape via of ``net`` (mm)."""
