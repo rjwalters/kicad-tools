@@ -235,15 +235,15 @@ assert_eq "no" "$(grep -qF -- "cargo build" <<<"$LAST_OUT" && echo yes || echo n
 # The wiring above proves the shell side; these prove the binary side of the
 # same incident: the exact #8248 timeline goes in, exit 1 + a refusal naming
 # the check and both timestamps comes out; a fresh run yields the sentinel.
-INCIDENT_PAYLOAD='{"tip_sha":"abc123","base_tip":"2026-09-18T11:45:21Z","required":["File Size Ratchet"],"check_runs":[{"name":"File Size Ratchet","status":"completed","conclusion":"success","started_at":"2026-09-17T22:54:20Z"}]}'
-FRESH_PAYLOAD='{"tip_sha":"abc123","base_tip":"2026-09-18T11:45:21Z","required":["File Size Ratchet"],"check_runs":[{"name":"File Size Ratchet","status":"completed","conclusion":"success","started_at":"2026-09-18T12:00:00Z"}]}'
+INCIDENT_PAYLOAD='{"tip_sha":"abc123","base_tip":"2026-09-18T11:45:21Z","required":["Markdown Token Ratchet"],"check_runs":[{"name":"Markdown Token Ratchet","status":"completed","conclusion":"success","started_at":"2026-09-17T22:54:20Z"}]}'
+FRESH_PAYLOAD='{"tip_sha":"abc123","base_tip":"2026-09-18T11:45:21Z","required":["Markdown Token Ratchet"],"check_runs":[{"name":"Markdown Token Ratchet","status":"completed","conclusion":"success","started_at":"2026-09-18T12:00:00Z"}]}'
 
 set +e
 BIN_OUT="$(printf '%s' "$INCIDENT_PAYLOAD" | "$REAL_DAEMON_BIN" merge-pr stale-checks --pr 8078 --repo rjwalters/loom --head-sha deadbeef --base-ref main --from-stdin 2>&1)"
 BIN_RC=$?
 set -e
 assert_eq "1" "$BIN_RC" "real binary: incident timeline -> exit 1 (the merge is refused)"
-assert_contains "$BIN_OUT" "File Size Ratchet" "real binary: refusal names the stale check"
+assert_contains "$BIN_OUT" "Markdown Token Ratchet" "real binary: refusal names the stale check"
 assert_contains "$BIN_OUT" "2026-09-17 22:54:20 UTC" "real binary: refusal names the run timestamp"
 assert_contains "$BIN_OUT" "2026-09-18 11:45:21 UTC" "real binary: refusal names the base-tip timestamp"
 
@@ -266,14 +266,14 @@ assert_contains "$BIN_OUT" "LOOM-STALE-CHECKS-CLEAN" "real binary: fresh run pri
 #      (an in-place re-run cannot launder it);
 #   2. a base move that touches nothing the check reads is CLEAN even though the
 #      run's started_at predates the base tip (the busy-main race of #8641).
-SCOPED_STALE='{"tip_sha":"abc123","base_tip":"2026-09-18T11:45:21Z","required":["File Size Ratchet"],
-"check_runs":[{"name":"File Size Ratchet","status":"completed","conclusion":"success","started_at":"2026-09-18T16:26:47Z"}],
-"pr_files":[{"filename":"loom-daemon/src/main_health_gate.rs","status":"modified"}],
-"base_moves":{"File Size Ratchet":{"tested_base":"803f0c7d","files":[{"filename":"scripts/file-size-baseline.txt","status":"modified"}]}}}'
-SCOPED_FRESH='{"tip_sha":"abc123","base_tip":"2026-09-18T11:45:21Z","required":["File Size Ratchet"],
-"check_runs":[{"name":"File Size Ratchet","status":"completed","conclusion":"success","started_at":"2026-09-17T22:54:20Z"}],
+SCOPED_STALE='{"tip_sha":"abc123","base_tip":"2026-09-18T11:45:21Z","required":["Markdown Token Ratchet"],
+"check_runs":[{"name":"Markdown Token Ratchet","status":"completed","conclusion":"success","started_at":"2026-09-18T16:26:47Z"}],
+"pr_files":[{"filename":"defaults/.claude/commands/loom/builder.md","status":"modified"}],
+"base_moves":{"Markdown Token Ratchet":{"tested_base":"803f0c7d","files":[{"filename":"scripts/markdown-token-baseline.txt","status":"modified"}]}}}'
+SCOPED_FRESH='{"tip_sha":"abc123","base_tip":"2026-09-18T11:45:21Z","required":["Markdown Token Ratchet"],
+"check_runs":[{"name":"Markdown Token Ratchet","status":"completed","conclusion":"success","started_at":"2026-09-17T22:54:20Z"}],
 "pr_files":[{"filename":"defaults/docs/some-doc.md","status":"modified"}],
-"base_moves":{"File Size Ratchet":{"tested_base":"803f0c7d","files":[{"filename":"dashboard/web/src/app.ts","status":"modified"}]}}}'
+"base_moves":{"Markdown Token Ratchet":{"tested_base":"803f0c7d","files":[{"filename":"dashboard/web/src/app.ts","status":"modified"}]}}}'
 
 set +e
 BIN_OUT="$(printf '%s' "$SCOPED_STALE" | "$REAL_DAEMON_BIN" merge-pr stale-checks --pr 8078 --repo rjwalters/loom --head-sha deadbeef --base-ref main --from-stdin 2>&1)"
@@ -281,7 +281,7 @@ BIN_RC=$?
 set -e
 assert_eq "1" "$BIN_RC" "real binary: input-scoped stale -> exit 1 even though the run postdates the tip"
 assert_contains "$BIN_OUT" "803f0c7d" "the refusal names the base the check actually tested"
-assert_contains "$BIN_OUT" "scripts/file-size-baseline.txt" "the refusal names the base-move path that did it"
+assert_contains "$BIN_OUT" "scripts/markdown-token-baseline.txt" "the refusal names the base-move path that did it"
 assert_contains "$BIN_OUT" "in place will not clear it" "the refusal says an in-place re-run cannot fix it"
 
 set +e

@@ -722,23 +722,56 @@ def _aggregate_pair_outcome(segment_outcomes: list[str]) -> str:
     return next(o for o in segment_outcomes if not o.startswith("uncoupled-fallback:"))
 
 
+@functools.cache
+def _lattice_tap_retry_outcomes() -> frozenset[str]:
+    """``uncoupled-fallback:pair-<r>`` for every exhausted-search reason ``r``.
+
+    Built from :data:`kicad_tools.router.lattice.pathfinder.EXHAUSTED_SEARCH_REASONS`
+    -- the constants ``_route_impl`` actually returns -- so a renamed or
+    refined decline reason cannot silently drift out of the tap-chain retry
+    gate (issue #6743).  The ``pair-`` prefix and the ``uncoupled-fallback:``
+    wrapper are the ones ``_route_pair_impl`` and the #6373 fallback apply.
+    Imported lazily, like the pathfinder itself, so ``core`` stays cheap to
+    import.
+    """
+    from .lattice.pathfinder import EXHAUSTED_SEARCH_REASONS
+
+    return frozenset(f"uncoupled-fallback:pair-{r}" for r in EXHAUSTED_SEARCH_REASONS)
+
+
 def _lattice_tap_chain_retry_pairs(
     coupled: list[Any], outcomes: dict[object, str], available: set[str]
 ) -> frozenset[str]:
     """Single-trunk pairs to retry as tap chains (issue #6535).
 
     A pair qualifies when its connection is the single trunk (the 3-tuple
-    ``("pair", p, n)`` key -- a #6378 chained pair is not retried), the trunk
-    declined with exactly ``pair-no-path`` (and was therefore routed by the
+    ``("pair", p, n)`` key -- a #6378 chained pair is not retried), the trunk's
+    coupled A* ran and was exhausted (and the pair was therefore routed by the
     #6373 uncoupled fallback), and :func:`choose_pair_tap_chain` offered a
     different chain for it (``available``).
+
+    "Exhausted" is :func:`_lattice_tap_retry_outcomes`: ``pair-no-path`` and its
+    two diagnostic refinements, ``pair-no-path-keepout-constrained`` (#4605;
+    #6697 made the fat pair search consult the keepout mask, so a board with
+    #6401 plane-via reservations now reports this) and
+    ``pair-no-path-layer-constrained`` (#4979).  Issue #6743: the gate used to
+    compare the bare ``pair-no-path`` literal, so #6697's honest relabel
+    silently disabled this retry and board 06b fell from 3/4 to 0/4 coupled.
+    The layer-constrained refinement is included for the same reason: the
+    reason labels are a precedence order (keepout outranks layer outranks
+    plain), not distinct failure classes, so a search pruned by BOTH a keepout
+    and a layer set already qualifies -- excluding one pruned only by the layer
+    set would be incoherent.  A tap chain does not lift either constraint; it
+    only re-routes around the tap part, and the #6550 keep rule discards a
+    retry that does not improve coupling.  Declines where no corridor search
+    ran or the failure is not the corridor (``pair-no-parity``,
+    ``pair-partner-pad``, ``pair-empty-route``, ...) never qualify.
     """
+    exhausted = _lattice_tap_retry_outcomes()
     return frozenset(
         pc.pair_name
         for pc in coupled
-        if len(pc.key) == 3
-        and pc.pair_name in available
-        and outcomes.get(pc.key) == "uncoupled-fallback:pair-no-path"
+        if len(pc.key) == 3 and pc.pair_name in available and outcomes.get(pc.key) in exhausted
     )
 
 
@@ -4678,6 +4711,10 @@ class Autorouter:
             )
             pair_nets = {pc.pad_p_a.net, pc.pad_n_a.net}
             half = pc.pitch / 2.0
+            # Issue #6697: first reserve an escape via site for a routed pad
+            # the pair start would seal in (board 03 VBUS U2.5), so the
+            # anchor below slides past it instead of capping it.
+            self._lattice_reserve_pair_escape_sites(pf, obstacles, pc, pair_nets)
             # The rule-area mask (+ #6401 pour-pad via reservations) installed
             # by ``_negotiate_lattice_netset`` before this call.
             keepouts = getattr(pf, "_keepouts", None)
@@ -4711,6 +4748,128 @@ class Autorouter:
         if anchor_a is None and anchor_b is None:
             return pc
         return replace(pc, anchor_a=anchor_a, anchor_b=anchor_b)
+
+    #: How far (mm) a #6697 pair-escape via site may move from the pad edge
+    #: to land on a lattice node where the sealed net's via is legal.
+    _PAIR_ESCAPE_SITE_SEARCH_MM = 0.5
+
+    def _lattice_reserve_pair_escape_sites(
+        self, pf: Any, obstacles: Any, pc: Any, pair_nets: set[int]
+    ) -> None:
+        """Reserve a via site for a routed pad a pair start would seal (#6697).
+
+        :func:`~.lattice.coupled.sandwiched_pad_escape_sites` finds, at each
+        segment end, a routed single-layer pad between the pair's own pads
+        (board 03: VBUS U2.5 between USB_D+ U2.4 and USB_D- U2.6).  Each site
+        is moved to the nearest lattice node (within
+        :attr:`_PAIR_ESCAPE_SITE_SEARCH_MM`) where the sealed net's via is
+        legal -- the via can only ever land on a node -- and joins the
+        pathfinder's keepout mask as a disc (via + clearance, all layers,
+        tracks and vias) that every net but the sealed one keeps out of.  The anchor relocation, the
+        fat pair search and every other net then leave the pad its exit, and
+        the sealed net can drop its via there.  Idempotent per site name, so
+        a rebuilt connection list (#6535 tap-chain retry) adds nothing twice.
+        """
+        from .lattice.coupled import sandwiched_pad_escape_sites
+        from .lattice.obstacles import KeepoutArea, LatticeKeepoutMask
+        from .plane_via_sites import _regular_polygon
+
+        routed = frozenset(
+            net for net, keys in self.nets.items() if net and len(dict.fromkeys(keys)) >= 2
+        )
+        if not routed:
+            return
+        num_layers = int(pf.num_layers)
+        via_radius = float(pf.rules.via_diameter) / 2.0
+        new: list[Any] = []
+        mask = getattr(pf, "_keepouts", None)
+        have = {a.name for a in (mask.areas if mask else ())}
+        ends = (
+            (pc.pad_p_a, pc.pad_n_a, pc.mid_b),
+            (pc.pad_p_b, pc.pad_n_b, pc.mid_a),
+        )
+        for pad_p, pad_n, toward in ends:
+            for pad, site in sandwiched_pad_escape_sites(
+                obstacles,
+                pad_p,
+                pad_n,
+                toward,
+                pair_nets=pair_nets,
+                routed_nets=routed,
+                via_radius=via_radius,
+                clearance_for=lambda net: self._lattice_escape_clearance(net, pc.net_class),
+            ):
+                name_net = self.net_names.get(pad.net) or pad.net_name or str(pad.net)
+                name = f"pair-escape-via:{name_net}:{pad.ref}.{pad.pin}"
+                if name in have:
+                    continue
+                # The sealed net's class clearance, floored at the pair's and
+                # the board's: the strongest spacing anything keeps from it.
+                clearance = self._lattice_escape_clearance(pad.net, pc.net_class)
+                node = self._lattice_escape_via_node(pf, pad.net, site, clearance)
+                if node is None:
+                    continue
+                have.add(name)
+                site = node
+                new.append(
+                    KeepoutArea(
+                        # A hair over the via + clearance: the polygon is
+                        # circumscribed, the via sits exactly on its centre.
+                        polygon=_regular_polygon(site[0], site[1], via_radius + clearance + 1e-3),
+                        layers=frozenset(range(num_layers)),
+                        blocks_tracks=True,
+                        blocks_vias=True,
+                        exempt=frozenset({pad.net}),
+                        name=name,
+                    )
+                )
+                print(
+                    f"  Pair escape via site (#6697): {name_net} {pad.ref}.{pad.pin} sits "
+                    f"between {pc.pair_name}'s pads; reserved at ({site[0]:.3f}, {site[1]:.3f})"
+                )
+        if new:
+            pf.set_keepouts(LatticeKeepoutMask(tuple(mask.areas if mask else ()) + tuple(new)))
+
+    def _lattice_escape_via_node(
+        self, pf: Any, net: int, site: tuple[float, float], clearance: float
+    ) -> tuple[float, float] | None:
+        """The lattice node nearest ``site`` where ``net`` may drop a via (#6697).
+
+        Legal means :meth:`LatticePathfinder._via_ok` on an empty board (no
+        via-in-pad on the default fab tier, foreign pads cleared by
+        ``clearance``, rule areas honoured).  ``None`` when no node within
+        :attr:`_PAIR_ESCAPE_SITE_SEARCH_MM` qualifies.
+        """
+        lattice = pf.build()
+        unit = float(lattice.unit)
+        if unit <= 0.0:
+            return None
+        reach = self._PAIR_ESCAPE_SITE_SEARCH_MM
+        k0 = lattice.node_key(site[0] - reach, site[1] - reach)
+        k1 = lattice.node_key(site[0] + reach, site[1] + reach)
+        committed = pf._fresh_committed()
+        best: tuple[float, tuple[float, float]] | None = None
+        for i in range(k0[0], k1[0] + 1):
+            for j in range(k0[1], k1[1] + 1):
+                if (i, j) not in lattice.nodes:
+                    continue
+                pt = lattice.node_point((i, j))
+                d = math.hypot(pt[0] - site[0], pt[1] - site[1])
+                if d > reach or (best is not None and d >= best[0]):
+                    continue
+                if pf._via_ok((i, j), net, committed, clearance=clearance):
+                    best = (d, pt)
+        return None if best is None else best[1]
+
+    def _lattice_escape_clearance(self, net: int, pair_class: Any) -> float:
+        """Clearance kept from a #6697 escape via of ``net`` (mm)."""
+        name = self.net_names.get(net)
+        nc = self.net_class_map.get(name) if name else None
+        return max(
+            float(self.rules.trace_clearance),
+            float(getattr(nc, "clearance", None) or 0.0),
+            float(getattr(pair_class, "clearance", None) or 0.0),
+        )
 
     def _negotiate_lattice_netset(self) -> dict[int, list[Route]]:
         """Negotiate every routable net through the shared lattice (#4278).
@@ -4882,7 +5041,9 @@ class Autorouter:
             return routes, stats_
 
         routes_by_key, stats = _negotiate(connections, coupled)
-        # Issue #6535: a single trunk that declined ``pair-no-path`` because a
+        # Issue #6535: a single trunk that declined ``pair-no-path`` (or a
+        # #4605/#4979 ``-keepout-``/``-layer-constrained`` refinement of it,
+        # issue #6743) because a
         # tap part (board 06 LVDS termination resistor) straddles its corridor
         # gets one retry as an IC -> tap -> IC chain.  Pairs whose trunk
         # coupled -- and boards with no such pair -- never reach this.
@@ -5170,8 +5331,8 @@ class Autorouter:
         of either net has no clearing tie (a single-layer SMD receptacle has
         room for only one of the two crossing ties -- board 06rf USB2_D), the
         pair keeps today's connections for every extra, so P and N are not
-        attached by different mechanisms (unless only one net of the pair has
-        an eligible extra, which is then tied alone).  A tie must also clear
+        attached by different mechanisms.  That includes a pair where only one
+        net has an eligible extra: neither net is tied (#6697).  A tie must also clear
         fixed fills and other-net preserved vias.  No ties at all when the
         pathfinder is unavailable or an HV pairwise table is installed (not
         modelled by the planner).
@@ -5299,7 +5460,21 @@ class Autorouter:
                 continue
             group = [net]
             partner = partners.get(net)
-            if partner in eligible and partner not in done:
+            if partner is None or partner not in eligible:
+                # Issue #6697: all or nothing means BOTH nets.  A half-tie
+                # (one net tied, its partner routed single-ended) attached P
+                # and N by different mechanisms and made 06rf USB2_D's
+                # uncoupled length worse (8.677 -> 12.951 mm).
+                done.add(net)
+                names = "/".join(
+                    self.net_names.get(g, str(g)) for g in (net, partner) if g is not None
+                )
+                print(
+                    f"  Diff-pair ties {names}: not used (partner net has no tie "
+                    "candidate); extras routed as before (issues #6698, #6697)"
+                )
+                continue
+            if partner not in done:
                 group.append(partner)
             done.update(group)
             local = list(accepted)
@@ -5403,6 +5578,18 @@ class Autorouter:
         # Every pair's first-run coupling, read before the retry's
         # ``route_netset`` replaces ``pf.pair_outcomes`` (issue #6550).
         first_coupling = _lattice_pair_coupling(first_coupled, pf.pair_outcomes)
+        # Issue #6743: name the decline reason(s) that actually qualified the
+        # retried trunks (``pair-no-path`` or a ``-keepout-``/``-layer-
+        # constrained`` refinement, see :func:`_lattice_tap_retry_outcomes`).
+        declined = ", ".join(
+            sorted(
+                {
+                    pf.pair_outcomes[pc.key].removeprefix("uncoupled-fallback:")
+                    for pc in first_coupled
+                    if pc.pair_name in retry_pairs and pc.key in pf.pair_outcomes
+                }
+            )
+        )
         if pf._class_pad_growth:
             # The first negotiation left grown pad keep-outs (#6489) baked into
             # the lattice; ``route_netset`` starts from ungrown pads, so the
@@ -5420,7 +5607,7 @@ class Autorouter:
         score = sum(k / n for name, (k, n) in coupling.items() if name in retry_pairs)
         print(
             f"  Diff pairs (lattice): tap-chain retry for {len(retry_pairs)} pair(s) whose "
-            f"trunk declined pair-no-path ({', '.join(sorted(retry_pairs))}): "
+            f"trunk declined {declined or 'pair-no-path'} ({', '.join(sorted(retry_pairs))}): "
             f"{'kept' if kept else 'discarded'} (coupled segments {first_score:g} -> "
             f"{score:g}, unrouted connections {first_failed} -> {failed}"
             f"{', deadline hit' if stats.deadline_hit else ''}"

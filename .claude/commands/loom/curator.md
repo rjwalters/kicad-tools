@@ -445,7 +445,7 @@ Then decide on `$CLAIM_STATE`:
 |---|---|---|
 | `unclaimed` | the issue does not actually carry `loom:curating` right now | Claim it normally: `gh api repos/{owner}/{repo}/issues/$N/labels -f 'labels[]=loom:curating'` |
 | `fresh` | a Curator is plausibly still enhancing this issue | **Do not stomp the claim.** Record a stand-down (see below), then skip this issue and continue to the next candidate. |
-| `stale` | no *claimant* activity for ≥ `LOOM_STALE_CURATING_MINUTES` (default **30**) — the claiming Curator's process almost certainly died mid-enhancement | Reclaim (see below), then proceed with normal curation. |
+| `stale` | no *claimant* activity for ≥ `LOOM_STALE_CURATING_MINUTES` (default **45**) — the claiming Curator's process almost certainly died mid-enhancement | Reclaim (see below), then proceed with normal curation. |
 | `stale-bounded-fallback` | the stand-down streak reached `LOOM_MAX_STANDDOWN_STREAK` (default **3**) **and** the claim's own age is ≥ `LOOM_STALE_CURATING_MINUTES` | Force-reclaim (see below) — the livelock breaker. |
 | `unknown` | a timeline/label read failed, or its markers could not be authenticated (#9548) | **Fail safe: treat exactly like `fresh`.** Never stomp a claim on API failure or missing data. |
 
@@ -514,7 +514,7 @@ this reclaim comment:
 
 ```bash
 gh api -X DELETE repos/{owner}/{repo}/issues/$N/labels/loom%3Acurating
-./.loom/scripts/post-comment.sh $N --body "Reclaiming loom:curating claim: $STANDDOWN_COUNT stand-down passes, no curation progress for ${LOOM_STALE_CURATING_MINUTES:-30}m (bounded by LOOM_MAX_STANDDOWN_STREAK=${LOOM_MAX_STANDDOWN_STREAK:-3}) — breaking the livelock."
+./.loom/scripts/post-comment.sh $N --body "Reclaiming loom:curating claim: $STANDDOWN_COUNT stand-down passes, no curation progress for ${LOOM_STALE_CURATING_MINUTES:-45}m (bounded by LOOM_MAX_STANDDOWN_STREAK=${LOOM_MAX_STANDDOWN_STREAK:-3}) — breaking the livelock."
 gh api repos/{owner}/{repo}/issues/$N/labels -f 'labels[]=loom:curating'
 # Continue with normal curation
 ```
@@ -524,7 +524,7 @@ pass the pool gate first, else stand down):
 
 ```bash
 gh api -X DELETE repos/{owner}/{repo}/issues/$N/labels/loom%3Acurating
-./.loom/scripts/post-comment.sh $N --body "Reclaiming stale loom:curating claim (idle ${IDLE_MINUTES}m > ${LOOM_STALE_CURATING_MINUTES:-30}m, no claimant activity) — the prior sweep likely died mid-enhancement."
+./.loom/scripts/post-comment.sh $N --body "Reclaiming stale loom:curating claim (idle ${IDLE_MINUTES}m > ${LOOM_STALE_CURATING_MINUTES:-45}m, no claimant activity) — the prior sweep likely died mid-enhancement."
 gh api repos/{owner}/{repo}/issues/$N/labels -f 'labels[]=loom:curating'
 # Continue with normal curation
 ```
@@ -537,7 +537,7 @@ not been resynced yet): fall back to the **age-only** rule — read the latest
 **not** reintroduce a "any comment after the claim means fresh" test — that is
 precisely the defect this section exists to fix.
 
-**Env vars**: `LOOM_STALE_CURATING_MINUTES` (default **30**, the Judge's
+**Env vars**: `LOOM_STALE_CURATING_MINUTES` (default **45**, the Judge's
 `LOOM_STALE_REVIEWING_MINUTES` default, since a Curator pass runs about as long
 as a review; raise it for long measurement passes) and
 `LOOM_MAX_STANDDOWN_STREAK` (default **3**, shared with `judge.md`/`doctor.md`).

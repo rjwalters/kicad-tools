@@ -559,13 +559,41 @@ class TestRouteAutoFallbackPlumbing:
     def test_bidirectional_exhausted_status(self):
         router = self._make(10)
         a, b = self._pads()
-        # Wall off the end pad's row on every layer so the search drains.
-        for layer in range(router.grid.num_layers):
-            for gy in range(router.grid.rows):
-                router.grid.grid[layer][gy][router.grid.world_to_grid(25.0, 5.0)[0]].blocked = True
+        grid = router.grid
+        # Issue #6750: route_bidirectional only reports exhaustion once BOTH
+        # frontiers are empty, so the drain covers every cell reachable from
+        # either pad.  A single wall across the board left the whole 500x400x2
+        # grid reachable (~50s on CI against a 60s timeout).  Instead confine
+        # each pad to a small pocket (+/-2 mm) on every layer: the pockets are
+        # disjoint, so the search still drains and fails, but cheaply.
+        pockets = []
+        for pad in (a, b):
+            cx, cy = grid.world_to_grid(pad.x, pad.y)
+            pockets.append((cx - 20, cx + 20, cy - 20, cy + 20))
+
+        def in_pocket(gx, gy):
+            return any(x0 <= gx <= x1 and y0 <= gy <= y1 for x0, x1, y0, y1 in pockets)
+
+        for layer in range(grid.num_layers):
+            for gy in range(grid.rows):
+                row = grid.grid[layer][gy]
+                for gx in range(grid.cols):
+                    if not in_pocket(gx, gy):
+                        row[gx].blocked = True
         assert router.route_bidirectional(a, b) is None
         assert router.last_route_exhausted is True
         assert router.last_route_deadline_hit is False
+
+        # Control: joining the pockets with a corridor along the pads' row
+        # makes the same search succeed, so the failure above is caused by
+        # the confinement and not by an unrelated setup problem.
+        _, row_y = grid.world_to_grid(a.x, a.y)
+        for layer in range(grid.num_layers):
+            for gy in range(row_y - 3, row_y + 4):
+                for gx in range(grid.cols):
+                    grid.grid[layer][gy][gx].blocked = False
+        assert router.route_bidirectional(a, b) is not None
+        assert router.last_route_exhausted is False
 
     def test_deadline_hit_in_bidirectional_half(self, monkeypatch):
         """Expired budget: the bidirectional half hits the deadline; no retry."""

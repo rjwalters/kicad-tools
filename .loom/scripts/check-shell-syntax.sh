@@ -158,7 +158,7 @@ FAIL_COUNT=0
 FAIL_NAMES=()
 CHECKED=0
 
-for f in "${FILES[@]}"; do
+for f in ${FILES[@]+"${FILES[@]}"}; do
     CHECKED=$((CHECKED + 1))
     err_out=$(bash -n "$f" 2>&1)
     rc=$?

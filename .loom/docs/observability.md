@@ -834,7 +834,9 @@ every span also names the endpoint: `github.route` (a template such as
 `github.api.route`), `http.request.method`, and `github.command` (`pr view`
 for an agent front read), so `api.rest` and `agent_gh_front` spend can be
 ranked by route. That pass also
-emits a `pass.summary` log per pass and a `pass.verdict` per artifact; see
+emits a `pass.summary` log per pass and a `pass.verdict` per artifact; Champion
+steps add `pass.verdict` rows with `mechanism=step:champion` and a
+`stage_items{state="pr_refused"}` gauge (#12027); see
 [`telemetry-schema.md`](telemetry-schema.md) and
 `defaults/observability/signoz/pass-queries.sql`.
 

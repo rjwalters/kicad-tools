@@ -114,7 +114,7 @@ fi
 pass "tdd_merge_base_run() extracted from the shipped judge-reference.md and parses as bash"
 
 # shellcheck disable=SC1090
-source <(printf '%s\n' "$FN_SRC")
+eval "$FN_SRC"
 
 # =====================================================================
 # Fixture: a two-commit repo. BASE has the bug; HEAD has the fix plus

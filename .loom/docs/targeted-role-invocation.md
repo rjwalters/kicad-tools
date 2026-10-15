@@ -192,8 +192,9 @@ without a sweep around it gets neither unless the engine does both.
   `LOOM_STEP_OUTCOME` and `CHAMPION-STEP`, applies the post-state rule
   (`classify`) and maps each class to its effect. The step spawn (#11906)
   reads a step's last `LOOM_STEP_OUTCOME` line from its log into its end
-  record and role-tick capture. Computing each role's post-state from the
-  forge is still to do, as is the Builder no-op release above.
+  record and role-tick capture. The work finder's step tick computes each
+  role's post-state from the claim release's own read, before its restore
+  write (`step_dispatch/step_end.rs`, #11909).
 - **Doctor** was out of this audit's scope (it was already targeted). Its PR
   Fix Mode has no kind probe: it should take gate 2 of the Judge row.
 - **The Judge lane assigner** hands fallback rows to `/loom:judge <PR>`. The
