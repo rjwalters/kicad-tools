@@ -1075,6 +1075,41 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
                     return False
         return True
 
+    def _shipped_path_ok(
+        net: str,
+        p0: tuple[float, float],
+        p1: tuple[float, float],
+        layer: str,
+        width: float,
+    ) -> bool:
+        """``_path_ok`` for the copper that actually SHIPS (Issue #6748).
+
+        This stage emits straight chords; step 12's ``quantize_pcb_file``
+        later replaces every off-45-degree chord with a two-leg dogleg, and
+        picks the variant (diagonal-first or the axis-first flip) against
+        the project's own clearance floor -- not the per-pair class
+        clearance enforced here.  A 30-degree stub that cleared a foreign
+        BGA pad by 0.2 mm straight therefore shipped as a dogleg 0.149 mm
+        from it.  An off-angle chord is accepted only when the straight
+        chord AND both dogleg variants clear, so whichever one step 12
+        keeps is legal.  Doglegs are built from the ``.3f`` coordinates
+        ``_emit_seg`` writes, which is what the quantizer reads back.
+        """
+        from kicad_tools.router.quantize import dogleg_points, is_45_aligned
+
+        if not _path_ok(net, p0, p1, layer, width):
+            return False
+        a = (round(p0[0], 3), round(p0[1], 3))
+        b = (round(p1[0], 3), round(p1[1], 3))
+        if is_45_aligned(b[0] - a[0], b[1] - a[1]):
+            return True
+        for axis_first in (False, True):
+            verts = dogleg_points(a[0], a[1], b[0], b[1], axis_first=axis_first)
+            for q0, q1 in zip(verts[:-1], verts[1:], strict=True):
+                if not _path_ok(net, q0, q1, layer, width):
+                    return False
+        return True
+
     directions = [(math.cos(a * math.pi / 4.0), math.sin(a * math.pi / 4.0)) for a in range(8)]
     # Near offsets first (the BGA diagonal hollow sits at 0.898 mm); the
     # long tail handles lane escapes -- a pad boxed in by parallel
@@ -1229,7 +1264,7 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
                         vx, vy = round(x0 + dx * off, 3), round(y0 + dy * off, 3)
                         if not _via_ok(net, vx, vy):
                             continue
-                        if not _path_ok(net, (x0, y0), (vx, vy), "F.Cu", STUB_W):
+                        if not _shipped_path_ok(net, (x0, y0), (vx, vy), "F.Cu", STUB_W):
                             continue
                         vgeom = Point(vx, vy).buffer(VIA_R)
                         if any(vgeom.intersects(own[i][0]) for i in primary_set):
@@ -1254,7 +1289,7 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
                             vy = round(y0 + math.sin(radians) * off, 3)
                             if not _via_ok(net, vx, vy):
                                 continue
-                            if not _path_ok(net, (x0, y0), (vx, vy), "F.Cu", STUB_W):
+                            if not _shipped_path_ok(net, (x0, y0), (vx, vy), "F.Cu", STUB_W):
                                 continue
                             vgeom = Point(vx, vy).buffer(VIA_R)
                             if any(vgeom.intersects(own[i][0]) for i in primary_set):
@@ -1327,7 +1362,7 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
                         ux, uy = vec[0] / norm, vec[1] / norm
                         p0 = (pa.x - ux * 0.35, pa.y - uy * 0.35)
                         p1 = (pb.x + ux * 0.35, pb.y + uy * 0.35)
-                    if not _path_ok(net, p0, p1, lay, BRIDGE_W):
+                    if not _shipped_path_ok(net, p0, p1, lay, BRIDGE_W):
                         continue
                     _emit_seg(net, p0, p1, lay, BRIDGE_W)
                     _append_own(
@@ -1381,7 +1416,7 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
                         end = ray.interpolate(min(best_t + 0.35, 12.0))
                         p0 = (origin.x, origin.y)
                         p1 = (end.x, end.y)
-                        if not _path_ok(net, p0, p1, best_lay, BRIDGE_W):
+                        if not _shipped_path_ok(net, p0, p1, best_lay, BRIDGE_W):
                             continue
                         _emit_seg(net, p0, p1, best_lay, BRIDGE_W)
                         _append_own(
@@ -1435,7 +1470,9 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
                         layers=("F.Cu", "In1.Cu", "In2.Cu", "B.Cu"),
                         retreats=(0.5, 0.9, 1.4),
                         via_ok=lambda p, _net=net: _via_ok(_net, *p),
-                        path_ok=lambda a, b, lay, _net=net: _path_ok(_net, a, b, lay, BRIDGE_W),
+                        path_ok=lambda a, b, lay, _net=net: _shipped_path_ok(
+                            _net, a, b, lay, BRIDGE_W
+                        ),
                         new_via_layers=all_layers,
                     )
                     if plan is None:

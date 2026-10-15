@@ -250,3 +250,143 @@ def test_repair_copper_keeps_the_power_clearance_from_a_foreign_segment(
         assert copper_gap(via, gnd) >= POWER_CLEARANCE - 1e-4
     for seg in segments:
         assert copper_gap(seg, gnd) >= POWER_CLEARANCE - 1e-4
+
+
+# --- the copper that SHIPS: step 12 quantizes off-angle chords -------------
+#
+# Board 06's repair emits straight chords and step 12 (``quantize_pcb_file``)
+# later replaces every off-45-degree one with a two-leg dogleg, choosing the
+# variant against the project's clearance floor (0.1016 mm), not the pair
+# clearance.  The first board 06 regen with the per-pair fix shipped a +1V2
+# stub as a dogleg 0.149 mm from GND U3.35 that way.  So an off-angle chord
+# is accepted only when the straight chord AND both dogleg variants clear.
+
+#: Two ``+1V2`` In1.Cu fills whose nearest-point bridge is a ~11-degree chord.
+_BRIDGE_FIXTURE = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (1 "In1.Cu" signal)
+    (2 "In2.Cu" signal)
+    (31 "B.Cu" signal)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "+1V2")
+  (net 2 "SIG")
+{blocker}
+  (zone (net 1) (net_name "+1V2") (layer "In1.Cu")
+    (uuid "zone-primary")
+    (fill yes)
+    (polygon
+      (pts (xy 130 80) (xy 140 80) (xy 141 85) (xy 140 90) (xy 130 90))
+    )
+    (filled_polygon
+      (layer "In1.Cu")
+      (pts (xy 130 80) (xy 140 80) (xy 141 85) (xy 140 90) (xy 130 90))
+    )
+  )
+  (zone (net 1) (net_name "+1V2") (layer "In1.Cu")
+    (uuid "zone-island")
+    (fill yes)
+    (polygon
+      (pts (xy 144 86.5) (xy 145 87.5) (xy 155 87.5) (xy 155 95) (xy 145 95) (xy 144 87.5))
+    )
+    (filled_polygon
+      (layer "In1.Cu")
+      (pts (xy 144 86.5) (xy 145 87.5) (xy 155 87.5) (xy 155 95) (xy 145 95) (xy 144 87.5))
+    )
+  )
+)
+"""
+#: The bridge sub-stage B proposes (nearest points + 0.35 mm overshoot).
+OFF_ANGLE_BRIDGE = ((144.343, 86.569), (140.484, 85.797))
+#: A foreign via 0.63 mm from that straight chord but 0.175 mm from the
+#: horizontal leg of its default (diagonal-first) dogleg.
+DOGLEG_BLOCKER = (142.85, 85.297)
+
+
+def _sig_via(x: float, y: float) -> str:
+    return (
+        f'  (via (at {x} {y}) (size 0.45) (drill 0.2) (layers "F.Cu" "B.Cu") '
+        '(net 2) (uuid "via-sig"))'
+    )
+
+
+def _shipped_legs(seg: KSegment) -> list[list[KSegment]]:
+    """Every leg set step 12 may ship for ``seg`` (straight if 45-aligned)."""
+    from kicad_tools.router.quantize import dogleg_points, is_45_aligned
+
+    if is_45_aligned(seg.x2 - seg.x1, seg.y2 - seg.y1):
+        return [[seg]]
+    variants = []
+    for axis_first in (False, True):
+        verts = dogleg_points(seg.x1, seg.y1, seg.x2, seg.y2, axis_first=axis_first)
+        variants.append(
+            [
+                KSegment(a[0], a[1], b[0], b[1], seg.width)
+                for a, b in zip(verts[:-1], verts[1:], strict=True)
+            ]
+        )
+    return variants
+
+
+def _bridge_segments(before: str, after: str) -> list[KSegment]:
+    added = [line for line in after.splitlines() if line not in before.splitlines()]
+    num = r"(-?[\d.]+)"
+    return [
+        KSegment(float(m[1]), float(m[2]), float(m[3]), float(m[4]), float(m[5]))
+        for line in added
+        if (m := re.search(rf"\(start {num} {num}\) \(end {num} {num}\) \(width {num}\)", line))
+    ]
+
+
+def test_the_bridge_fixture_grazes_only_through_the_quantized_dogleg():
+    """Control: the straight chord clears; its default dogleg does not."""
+    straight = KSegment(*OFF_ANGLE_BRIDGE[0], *OFF_ANGLE_BRIDGE[1], 0.2)
+    via = KVia(*DOGLEG_BLOCKER, 0.45)
+    assert copper_gap(straight, via) >= POWER_CLEARANCE
+    diag_first, axis_first = _shipped_legs(straight)
+    assert OLD_FLAT_CLEARANCE < min(copper_gap(leg, via) for leg in diag_first) < POWER_CLEARANCE
+    assert min(copper_gap(leg, via) for leg in axis_first) >= POWER_CLEARANCE
+
+
+def test_no_quantized_variant_of_a_repair_chord_grazes_foreign_copper(
+    generate_design_mod, tmp_path, capsys
+):
+    board = tmp_path / "dogleg_graze.kicad_pcb"
+    board.write_text(_BRIDGE_FIXTURE.format(blocker=_sig_via(*DOGLEG_BLOCKER)))
+    before = board.read_text()
+
+    generate_design_mod._repair_pour_connectivity(board, ["+1V2"])
+    capsys.readouterr()
+
+    via = KVia(*DOGLEG_BLOCKER, 0.45)
+    for seg in _bridge_segments(before, board.read_text()):
+        for legs in _shipped_legs(seg):
+            gap = min(copper_gap(leg, via) for leg in legs)
+            assert gap >= POWER_CLEARANCE - 1e-4, (
+                f"repair chord ({seg.x1}, {seg.y1}) -> ({seg.x2}, {seg.y2}) can ship as a "
+                f"dogleg {gap:.4f} mm from the SIG via (Power clearance {POWER_CLEARANCE} mm)"
+            )
+
+
+def test_an_off_angle_bridge_whose_doglegs_all_clear_is_still_taken(
+    generate_design_mod, tmp_path, capsys
+):
+    """The guard must not drop legal bridges: with the via moved clear of
+    both dogleg variants, the same off-angle chord is emitted as before."""
+    board = tmp_path / "dogleg_clear.kicad_pcb"
+    board.write_text(_BRIDGE_FIXTURE.format(blocker=_sig_via(142.85, 84.6)))
+    before = board.read_text()
+
+    assert generate_design_mod._repair_pour_connectivity(board, ["+1V2"]) == (0, 1)
+    assert "UNREPAIRED" not in capsys.readouterr().out
+    segments = _bridge_segments(before, board.read_text())
+    assert [(s.x1, s.y1, s.x2, s.y2) for s in segments] == [
+        (*OFF_ANGLE_BRIDGE[0], *OFF_ANGLE_BRIDGE[1])
+    ]
