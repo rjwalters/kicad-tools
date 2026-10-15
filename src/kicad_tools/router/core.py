@@ -5143,6 +5143,7 @@ class Autorouter:
             pf.pair_outcomes,
             pf.class_pad_repair_stats,
             dict(pf._class_pad_growth),
+            list(getattr(pf, "class_pad_growth_rounds", [])),
             pf._lattice,
             pf._obstacles,
         )
@@ -5184,6 +5185,7 @@ class Autorouter:
             pf.pair_outcomes,
             pf.class_pad_repair_stats,
             pf._class_pad_growth,
+            pf.class_pad_growth_rounds,
             pf._lattice,
             pf._obstacles,
         ) = saved
