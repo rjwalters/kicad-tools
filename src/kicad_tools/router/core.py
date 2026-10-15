@@ -20062,21 +20062,7 @@ class Autorouter:
         results: dict[tuple[str, str], DiffPairTuneResult] = {}
 
         # Complete-net views include fixed escapes and every mutable fragment.
-        fragments_by_net: dict[int, list[Route]] = {}
-        for route in self.routes:
-            fragments_by_net.setdefault(route.net, []).append(route)
-        routes_by_net = {
-            net: fragments[0]
-            if len(fragments) == 1
-            else Route(
-                net=net,
-                net_name=fragments[0].net_name,
-                segments=[segment for route in fragments for segment in route.segments],
-                vias=[via for route in fragments for via in route.vias],
-                is_escape=all(route.is_escape for route in fragments),
-            )
-            for net, fragments in fragments_by_net.items()
-        }
+        routes_by_net = self._net_routes_merged()
         fixed_segment_ids = {id(s) for r in self.routes if r.is_escape for s in r.segments}
 
         # Update the skew tracker so the post-tuning results are queryable.
@@ -20421,6 +20407,33 @@ class Autorouter:
             cache[1], (p for p in self.pads.values() if not p.steiner_point)
         )
 
+    def _net_routes_merged(self) -> dict[int, Route]:
+        """One complete-net :class:`Route` per net, for the length tuners.
+
+        A net can be held as several Route fragments (fixed escapes plus
+        channel routes).  Multi-fragment nets are merged into one Route
+        carrying every fragment's segments and vias.  Fragments that meet at a
+        via each carry it; the length measure (``kicad_length.route_geometry``)
+        counts such a via once, so the merged Route measures as the whole net
+        (Issue #6792).  A single-fragment net keeps its Route object, so the
+        tuners can still edit it in place.
+        """
+        fragments_by_net: dict[int, list[Route]] = {}
+        for route in self.routes:
+            fragments_by_net.setdefault(route.net, []).append(route)
+        return {
+            net: fragments[0]
+            if len(fragments) == 1
+            else Route(
+                net=net,
+                net_name=fragments[0].net_name,
+                segments=[s for r in fragments for s in r.segments],
+                vias=[v for r in fragments for v in r.vias],
+                is_escape=all(r.is_escape for r in fragments),
+            )
+            for net, fragments in fragments_by_net.items()
+        }
+
     def _checker_route_length(self, num_layers: int) -> Callable[[Route], float]:
         """``Route -> mm`` measured the way ``kct check``'s skew rule measures (#6664).
 
@@ -20544,21 +20557,7 @@ class Autorouter:
 
         # A net can contain separate escape and channel Route objects. The
         # tuner needs their complete geometry for lengths and foreign clearance.
-        fragments_by_net: dict[int, list[Route]] = {}
-        for route in self.routes:
-            fragments_by_net.setdefault(route.net, []).append(route)
-        routes_by_net = {
-            net: fragments[0]
-            if len(fragments) == 1
-            else Route(
-                net=net,
-                net_name=fragments[0].net_name,
-                segments=[s for r in fragments for s in r.segments],
-                vias=[v for r in fragments for v in r.vias],
-                is_escape=all(r.is_escape for r in fragments),
-            )
-            for net, fragments in fragments_by_net.items()
-        }
+        routes_by_net = self._net_routes_merged()
         fixed_segment_ids = {id(s) for r in self.routes if r.is_escape for s in r.segments}
 
         # Update the match-group skew tracker so the post-tuning results are
@@ -22136,6 +22135,7 @@ class Autorouter:
             float(self.rules.cost_straight),
         )
         setter(budgets)
+        self._install_escape_fences(regions)
         if budgets and getattr(self, "_pad_lane_budget_count_logged", None) != len(budgets):
             self._pad_lane_budget_count_logged = len(budgets)
             flush_print(
@@ -22145,6 +22145,58 @@ class Autorouter:
                 f"penalty {lane_penalty_factor():.2f}x cost_straight (Issue #6382)"
             )
         return len(budgets)
+
+    def _install_escape_fences(self, regions: list) -> int:
+        """Install the fine-pitch lanes for the hard escape fences (Issue #6761).
+
+        A connection that starts or ends on a fine-pitch column pad may not
+        cross another net's lane of that column, nor drop a via into it (see
+        :func:`kicad_tools.router.pad_lanes.escape_fence_rects`), so the first
+        wide net out of a column can no longer seal its neighbours' exits
+        (board 05: PHASE_C over U2.10/U2.11).  No-op (and clears previous
+        lanes) under ``KCT_DISABLE_ESCAPE_FENCES=1``, on the Python backend,
+        or with no fine-pitch region.
+
+        Returns:
+            Number of lanes installed.
+        """
+        setter = getattr(self.router, "set_pad_lane_fences", None)
+        if setter is None:
+            return 0
+        from .pad_lanes import collect_fence_lanes, escape_fences_disabled, tight_fence_lanes
+
+        if escape_fences_disabled() or not regions:
+            setter([])
+            return 0
+        fence_lanes = collect_fence_lanes(
+            self.pads.values(),
+            regions,
+            lambda pad: self.grid.layer_to_index(pad.layer.value),
+        )
+        # Only columns whose lanes are narrower than a via footprint of their
+        # own nets: there a via or a turn inside the band necessarily takes a
+        # neighbour's exit.  A coarser column (U1's 0.8 mm TQFP on board 05)
+        # keeps the soft #6382 lanes alone.
+        fence_lanes = tight_fence_lanes(
+            fence_lanes,
+            self._net_via_diameter,
+            float(self.rules.via_clearance),
+        )
+        setter(fence_lanes)
+        if fence_lanes and getattr(self, "_escape_fence_count_logged", None) != len(fence_lanes):
+            self._escape_fence_count_logged = len(fence_lanes)
+            flush_print(
+                f"  Escape fences: {len(fence_lanes)} fine-pitch lane(s) fenced for "
+                f"connections that start or end on their column (Issue #6761)"
+            )
+        return len(fence_lanes)
+
+    def _net_via_diameter(self, net: int) -> float:
+        """The via diameter ``net`` routes with (its net class, else the board rule)."""
+        net_class = self.net_class_map.get(self.net_names.get(net, ""))
+        if net_class is not None and getattr(net_class, "via_size", None):
+            return float(net_class.via_size)
+        return float(self.rules.via_diameter)
 
     def _build_pad_channel_budgets(
         self,

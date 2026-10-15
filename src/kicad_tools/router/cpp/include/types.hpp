@@ -326,7 +326,7 @@ namespace router {
 // so the authored gate measures a roundrect with the file's corner ratio (or
 // as a rect when unknown) instead of a hardcoded 0.25.  The Python side passes
 // it on every pad, so a v55 .so must be rejected.
-constexpr int ROUTER_CPP_BUILD_VERSION = 56;
+constexpr int ROUTER_CPP_BUILD_VERSION = 57;
 
 
 // Issue #4071: fixed-capacity owner-set size for per-cell corridor
@@ -683,12 +683,19 @@ struct PadBounds {
 // Used by:
 //   Pathfinder::run_astar_loop / Pathfinder::route (the per-cell cost
 //   helper ``get_pad_channel_cost`` consults a pre-built lookup table).
+// Issue #6761: ``PadChannelBudget.layer`` value marking a hard *via* fence.
+// A via fence never prices a trace step; the via-expansion branches refuse a
+// layer change at any of its cells.  A budget with an infinite
+// ``overflow_penalty`` on a real layer (>= 0) is a hard *trace* fence: the
+// search never steps onto (or drops a via onto) its cells.
+constexpr int PAD_VIA_FENCE_LAYER = -2;
+
 struct PadChannelBudget {
     int gx1 = 0;
     int gy1 = 0;
     int gx2 = 0;
     int gy2 = 0;
-    int layer = -1;        // -1 = applies to all routing layers
+    int layer = -1;        // -1 = applies to all routing layers; -2 = via fence (#6761)
     int capacity = 0;      // 0 = inert (no penalty enforced)
     float overflow_penalty = 0.0f;
     uint32_t origin_pad_ref_hash = 0;  // Reserved for future per-package use.

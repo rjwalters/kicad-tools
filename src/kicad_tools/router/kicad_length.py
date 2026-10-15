@@ -630,12 +630,26 @@ def _lname(layer: Any) -> str:
 
 
 def route_geometry(route: Route) -> tuple[list[LSeg], list[LVia]]:
-    """Neutral segments and vias of a router :class:`Route`."""
+    """Neutral segments and vias of a router :class:`Route`.
+
+    Issue #6792: a via listed more than once (same position, diameter and
+    span) is one physical via and is returned once.  The tuners measure a net
+    held as several fragments by merging them into one Route, and fragments
+    that meet at a via each carry it; charging its span per copy over-counts
+    the net (by ~1.05 mm for In1.Cu + In2.Cu fragments sharing a via in a
+    through-hole pad on a 1.6 mm 4-layer board).
+    """
     segs = [LSeg(s.x1, s.y1, s.x2, s.y2, _lname(s.layer)) for s in route.segments]
-    vias = []
+    vias: list[LVia] = []
+    seen: set[tuple[float, float, float, str, str]] = set()
     for v in route.vias:
         a, b = getattr(v, "drilled_layers", v.layers)
-        vias.append(LVia(v.x, v.y, v.diameter, (_lname(a), _lname(b))))
+        la, lb = _lname(a), _lname(b)
+        key = (round(v.x, 6), round(v.y, 6), round(v.diameter, 6), la, lb)
+        if key in seen:
+            continue
+        seen.add(key)
+        vias.append(LVia(v.x, v.y, v.diameter, (la, lb)))
     return segs, vias
 
 

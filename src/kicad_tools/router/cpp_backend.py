@@ -93,7 +93,11 @@ logger = logging.getLogger(__name__)
 # P and N via of the move.  A v53 .so returns coupled via pairs below it.
 # v56 (Issue #6718): ``Grid3D.set_pad_authored`` takes a trailing ``rratio``
 # (the file's roundrect corner ratio); a v55 .so rejects the argument.
-_REQUIRED_CPP_BUILD_VERSION = 56
+# v57 (Issue #6761): both A* loops honour hard escape fences -- a
+# ``PadChannelBudget`` with an infinite penalty refuses the cell, and
+# ``layer == -2`` is a via-only fence.  A v56 .so would price the fences as
+# an ordinary (infinite) cost and read ``layer == -2`` as out of range.
+_REQUIRED_CPP_BUILD_VERSION = 57
 
 
 # Issue #5599: human-readable names for the ``ValidationResult::violation_type``
@@ -1630,6 +1634,11 @@ class CppPathfinder:
         # Kept separate from the #3143 list so neither setter clobbers the
         # other; :meth:`_filter_pad_channel_budgets_for_net` concatenates.
         self._pad_lane_budgets: list = []  # list[router_cpp.PadChannelBudget]
+        # Issue #6761: fine-pitch lanes for the hard escape fences, set by
+        # :meth:`set_pad_lane_fences`; turned into per-connection budgets by
+        # :meth:`_escape_fence_budgets`.
+        self._pad_lane_fences: list = []  # list[pad_lanes.FenceLane]
+        self._escape_fence_fallbacks = 0
 
     def set_segment_foreign_context(
         self,
@@ -1739,6 +1748,44 @@ class CppPathfinder:
         lane list.  Pass ``None`` or ``[]`` to clear.
         """
         self._pad_lane_budgets = list(budgets) if budgets else []
+
+    def set_pad_lane_fences(self, fence_lanes: list | None) -> None:
+        """Install the fine-pitch lanes the escape fences are built from (Issue #6761).
+
+        Pass ``None`` or ``[]`` to clear (no connection is fenced).  See
+        :func:`kicad_tools.router.pad_lanes.escape_fence_rects`.
+        """
+        self._pad_lane_fences = list(fence_lanes) if fence_lanes else []
+
+    def _escape_fence_budgets(
+        self,
+        start: Pad,
+        end: Pad,
+        *,
+        trace_width: float,
+        trace_clearance: float,
+        via_size: float,
+    ) -> list:
+        """Hard escape fences for one connection (Issue #6761).
+
+        Empty unless ``start`` or ``end`` is a pad of a fine-pitch column.
+        The bands leave room for a minimum-width (``rules.trace_width``)
+        straight exit along every other-net lane centreline of that column.
+        """
+        fence_lanes = getattr(self, "_pad_lane_fences", None)
+        if not fence_lanes:
+            return []
+        from .pad_lanes import build_escape_fence_budgets
+
+        foreign_half = float(self._rules.trace_width) / 2.0
+        return build_escape_fence_budgets(
+            fence_lanes,
+            (getattr(start, "key", None), getattr(end, "key", None)),
+            int(start.net),
+            self._grid,
+            trace_band_mm=float(trace_width) / 2.0 + float(trace_clearance) + foreign_half,
+            via_band_mm=float(via_size) / 2.0 + float(self._rules.via_clearance) + foreign_half,
+        )
 
     def invalidate_pad_geometry_cache(self) -> None:
         """Mirror changed physical drills before the next native via query."""
@@ -2519,6 +2566,18 @@ class CppPathfinder:
         # accumulated avoidance boosts and remaining budget) instead of only
         # continuing the preserved open set.  Every pushed setter is
         # idempotent, so calling them again before a restart is safe.
+        # Issue #6761: hard escape fences when this connection starts or ends
+        # on a fine-pitch column pad.  ``fence_state`` lets the first failed
+        # search drop them (see the retry below).
+        escape_fences = self._escape_fence_budgets(
+            start,
+            end,
+            trace_width=net_trace_width,
+            trace_clearance=net_trace_clearance,
+            via_size=net_via_size,
+        )
+        fence_state = {"on": bool(escape_fences)}
+
         def _run_fresh_search(timeout_s: float, max_iters: int):
             self._sync_pairwise_domains_to_cpp()
             # Give the C++ search the routing net's copper half-extents so the
@@ -2620,11 +2679,20 @@ class CppPathfinder:
                 # an escape pad is not penalised for routing through its
                 # OWN escape endpoint -- only contention from OTHER nets
                 # is shaped.
-                self._filter_pad_channel_budgets_for_net(start.net),
+                self._filter_pad_channel_budgets_for_net(start.net)
+                + (escape_fences if fence_state["on"] else []),
             )
 
         try:
             result = _run_fresh_search(timeout_seconds, self._effective_search_iterations)
+            if not result.success and fence_state["on"]:
+                # Issue #6761: a fence reshapes an escape, it must never lose
+                # a connection -- when the fenced search finds nothing (e.g.
+                # an obstacle inside the lane forces an early turn), retry
+                # once on the unfenced cost function.
+                fence_state["on"] = False
+                self._escape_fence_fallbacks = getattr(self, "_escape_fence_fallbacks", 0) + 1
+                result = _run_fresh_search(timeout_seconds, self._effective_search_iterations)
 
             if not result.success:
                 # Issue #2476: Capture structured failure diagnostics from
