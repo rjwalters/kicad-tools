@@ -177,11 +177,14 @@ PINNED_RECIPE_FLAGS = [
 #:   R2 without --allow-offboard            | 0/37 attempted (31 nets placement-invalid)
 #:   R2 + --allow-offboard (THIS RECIPE)    | 29/51  | 18     | 124
 #:
-#: The 0/37 -> 29/51 recovery is the #6666 fix: the adaptive multi-resolution
-#: branch no longer pre-empts the dense-package escape pre-phase
-#: (``Escape routes: U8 10 / J2 32 / U5 22``).  The 18 routing-caused shorts and
-#: the exit 124 (stage deadline during partial-save) are tracked separately;
-#: neither is caused by the escape/adaptive selection.
+#: Before the #6666 fix the ``--allow-offboard`` row exited 1 at escape: the
+#: adaptive multi-resolution branch's Phase 1 escaped 0/14 pads of U8 and
+#: hard-failed.  ``kct route`` now previews that Phase 1 and falls back to the
+#: dense-package escape pre-phase (``Escape routes: U8 10 / J2 32 / U5 22``).
+#: The 29/51 is NOT reproducible run-to-run: the stage deadline fires before
+#: the iteration backstop.  The 18 routing-caused shorts and the exit 124
+#: (deadline during partial-save) are tracked separately; neither is caused by
+#: the escape/adaptive selection.
 R2_RECIPE_FLAGS = [
     "--manufacturer",
     "jlcpcb-tier1",
