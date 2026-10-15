@@ -529,7 +529,7 @@ class FixSuggestionGenerator:
         suggestions.extend(
             [
                 "Run 'Annotate Schematic' to reassign unique references",
-                "Manually edit one component's reference to be unique",
+                "Re-run 'kct sch annotate <schematic>' to make each reference unique",
                 "Check for copy-paste errors that duplicated components",
                 "Verify multi-unit symbols have correct unit assignments",
             ]

@@ -635,7 +635,7 @@ class ERCExplainer:
                 priority=1,
             ),
             FixSuggestion(
-                description="Manually edit one symbol's reference to be unique",
+                description="Re-run 'kct sch annotate <schematic>' to make each reference unique",
                 priority=2,
             ),
             FixSuggestion(
@@ -854,7 +854,7 @@ class ERCExplainer:
                 priority=1,
             ),
             FixSuggestion(
-                description="Manually enter reference designator (press E to edit)",
+                description="Re-run annotation to assign reference designators automatically",
                 priority=2,
             ),
         ]

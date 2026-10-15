@@ -6601,7 +6601,7 @@ def output_result(
 
     # Output skipped pads with obstacle diagnostics
     if result.pads_skipped:
-        print("\nSkipped pads (manual placement needed):")
+        print("\nSkipped pads (re-run with a smaller --via-size/--drill, or file a stitch-gap issue):")
         for pad, reason in result.pads_skipped[:5]:
             print(f"  {pad.reference}.{pad.pad_number}: {reason}")
         if len(result.pads_skipped) > 5:
@@ -6681,7 +6681,7 @@ def output_result(
         for pad, _reason in result.needs_routed_fanout[:5]:
             print(f"      - {pad.net_name}: {pad.reference}.{pad.pad_number}")
     if result.pads_skipped:
-        print(f"  ! Skipped {len(result.pads_skipped)} pads (manual placement needed)")
+        print(f"  ! Skipped {len(result.pads_skipped)} pads (re-run with a smaller --via-size/--drill, or file a stitch-gap issue)")
 
     if dry_run:
         print("\n(dry run - no changes made)")
