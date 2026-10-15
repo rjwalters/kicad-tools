@@ -346,6 +346,10 @@ def canonicalize_board_uuids(doc: SExp, *, keep: Collection[str] = ()) -> int:
     boards that differ only in random UUIDs come out identical.  Safe to run
     again after a KiCad round trip; a second run on its own output is a
     no-op.
+
+    Note: copper kept from the input board keeps its original UUID and is not
+    re-ordered, so a tuned net mixing kept and new copper at a 3+-way junction
+    can still drift.
     """
     keep_set = {k.lower() for k in keep}
     taken: set[str] = set()
@@ -396,13 +400,17 @@ def canonicalize_board_uuids(doc: SExp, *, keep: Collection[str] = ()) -> int:
         if child.name in ("segment", "via"):
             by_net.setdefault((child.name, _net_text(child)), []).append(child)
     for nodes in by_net.values():
-        keys = [_copper_order_key(n) for n in nodes]
-        if any(k is None for k in keys):
-            continue  # unparseable copper keeps its own content UUID
-        ordered = [n for _, n in sorted(zip(keys, nodes, strict=True), key=lambda kn: kn[0])]
-        ids = sorted(new_ids[id(n)] for n in nodes)
-        for node, value in zip(ordered, ids, strict=True):
-            new_ids[id(node)] = value
+        pairs: list[tuple[tuple, SExp]] = []
+        for n in nodes:
+            order_key = _copper_order_key(n)
+            if order_key is None:
+                break
+            pairs.append((order_key, n))
+        else:
+            ordered = [n for _, n in sorted(pairs, key=lambda kn: kn[0])]
+            ids = sorted(new_ids[id(n)] for n in nodes)
+            for node, value in zip(ordered, ids, strict=True):
+                new_ids[id(node)] = value
     for child in minted:
         current = _id_value(child)
         new = new_ids[id(child)]
