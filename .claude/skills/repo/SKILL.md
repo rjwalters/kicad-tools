@@ -35,7 +35,7 @@ costs.
 | [[browser]] | Check the environment's browser-automation stack — Browser Use CLI, official agent skill, auth, cloud credit/concurrency health — and offer confirm-gated installs; report-first, provisions only (never drives a browser) |
 | [[sudo]] | Opt-in passwordless-sudo setup for a dev machine — install a `visudo`-validated `/etc/sudoers.d` drop-in (blanket `ALL` or a scoped command list) so an agent over SSH isn't blocked on password prompts; always confirmed first, validated with rollback on failure |
 | [[update-tools]] | Check installed tool packages (Loom, Anvil, …) against their sources and offer updates |
-| [[deps]] | Third-party dependency currency — reconcile organization policy, Renovate or Dependabot setup, and bot PRs; report-only under `--check` |
+| [[deps]] | Third-party dependency currency — reconcile organization policy, Dependabot-first setup with cooldown (Renovate opt-in), and bot PRs; report-only under `--check` |
 | [[optimize-ci]] | Audit GitHub Actions for wasted CI minutes — change-relevance path filtering (required-check safe), cache keys, superseded runs; ranked by measured savings, report-only unless `--apply`. Its deterministic half is `scripts/repo/repo-optimize-ci.py` (installed to `.claude/skills/repo/scripts/`) |
 | [[org-policy]] | Preview or deploy canonical rjwalters/repo preferences to the client's GitHub owner/.github repository through a policy PR |
 | [[decide]] | Put operator decisions to the operator as ranked options — best to worst, each with why — so they can answer with a number |
