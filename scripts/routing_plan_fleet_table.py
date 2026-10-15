@@ -71,7 +71,15 @@ def _load_plan(directory: Path):
     sidecars = sorted(directory.glob("*.routing_plan.json"))
     if not sidecars:
         raise SystemExit(f"{directory}: no *.routing_plan.json sidecar")
-    return RoutingPlan.from_dict(json.loads(sidecars[0].read_text())), sidecars[0]
+    # A deadline-limited run leaves the canonical sidecar with no board next
+    # to it; prefer one whose sibling .kicad_pcb exists (#6694).
+    measurable = [
+        s
+        for s in sidecars
+        if s.with_name(s.name.replace(".routing_plan.json", ".kicad_pcb")).is_file()
+    ]
+    chosen = (measurable or sidecars)[0]
+    return RoutingPlan.from_dict(json.loads(chosen.read_text())), chosen
 
 
 def _load_net_status(directory: Path, sidecar: Path) -> dict:
