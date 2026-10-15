@@ -4901,6 +4901,16 @@ class Autorouter:
                 f"{len(pf._class_pad_growth)} grown pad keep-out(s) "
                 f"(lattice_builds={stats.lattice_builds})"
             )
+            # Issue #6670: say whether each growth round was kept or rolled
+            # back -- the count above is the restored one after a rollback.
+            for n, rnd in enumerate(getattr(pf, "class_pad_growth_rounds", ()), 1):
+                parts = f" (whole part: {', '.join(rnd.footprints)})" if rnd.footprints else ""
+                print(
+                    f"    growth attempt {n}: +{rnd.grown} pad(s){parts}; routed "
+                    f"{rnd.routed_before}->{rnd.routed_after}, track-pad shortfalls "
+                    f"{rnd.left_before}->{rnd.left_after}: "
+                    f"{'kept' if rnd.kept else 'rolled back'}"
+                )
         if repair is not None and repair.skipped == "voltage-map":
             print(
                 "  Pad class clearance (#6395): skipped -- HV pairwise clearance "
@@ -5133,6 +5143,7 @@ class Autorouter:
             pf.pair_outcomes,
             pf.class_pad_repair_stats,
             dict(pf._class_pad_growth),
+            list(getattr(pf, "class_pad_growth_rounds", [])),
             pf._lattice,
             pf._obstacles,
         )
@@ -5174,6 +5185,7 @@ class Autorouter:
             pf.pair_outcomes,
             pf.class_pad_repair_stats,
             pf._class_pad_growth,
+            pf.class_pad_growth_rounds,
             pf._lattice,
             pf._obstacles,
         ) = saved
@@ -18669,9 +18681,12 @@ class Autorouter:
             if not routed:
                 break
             hit = routed[0]
+            # Issue #6670: name the foreign copper.  A pour pad neutralised to
+            # net 0 read as "net 0 pad", hiding the GND class floor and the pad.
+            other = hit.other_label or f"net {hit.other_net} {hit.kind}"
             flush_print(
                 f"    Net {hit.net} ({self.net_names.get(hit.net, '?')}): {hit.actual:.3f}mm "
-                f"from net {hit.other_net} {hit.kind} at ({hit.x:.3f}, {hit.y:.3f}) is below "
+                f"from {other} at ({hit.x:.3f}, {hit.y:.3f}) is below "
                 f"the authored netclass minimum {hit.required:.3f}mm; demoted to unrouted"
             )
             victims.append(hit.net)
