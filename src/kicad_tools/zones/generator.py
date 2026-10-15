@@ -1256,8 +1256,8 @@ def _assign_layers_for_pour_nets(
       a descending priority scheme so multiple power nets coexist.
     - 4-layer: GROUND -> ``In1.Cu`` priority 1; first POWER -> ``In2.Cu``
       priority 0; additional POWER -> ``F.Cu`` with non-zero priorities.
-      With ``plane_rank`` (Issue #6714) "first" is the most widespread
-      power net rather than the first one listed.
+      With ``plane_rank`` (Issue #6714) "first" is the power net feeding
+      the most footprints, the first one listed on a tie.
 
     Split-ground designs (mixed-signal boards with multiple distinct
     ``NetClass.GROUND`` nets, e.g. ``GNDA`` + ``GNDD``):
@@ -1300,14 +1300,14 @@ def _assign_layers_for_pour_nets(
             pre-existing zones on the board (see
             :func:`_existing_zone_priority_by_layer`).  ``None``/empty
             preserves the legacy behaviour.
-        plane_rank: Issue #6714 -- per-net sort key (larger = wider spread,
-            see :func:`_power_plane_rank`) that picks which POWER net gets
-            the one inner power plane on a 4+ layer single-ground board.
-            The highest-ranked power net takes ``In2.Cu``; ties keep the
-            ``pour_nets`` order, and every other power net keeps its
-            relative order on ``F.Cu``.  ``None`` (or a net missing from
-            the map) keeps the legacy rule: the first power net in
-            ``pour_nets`` takes the plane.
+        plane_rank: Issue #6714 -- per-net sort key (larger = needs the
+            plane more, see :func:`_power_plane_rank`) that picks which
+            POWER net gets the one inner power plane on a 4+ layer
+            single-ground board.  The highest-ranked power net takes
+            ``In2.Cu``; ties keep the ``pour_nets`` order, and every other
+            power net keeps its relative order on ``F.Cu``.  ``None`` (or a
+            net missing from the map, which ranks lowest) keeps the legacy
+            rule: the first power net in ``pour_nets`` takes the plane.
 
     Returns:
         List of (net_name, layer, priority) tuples.  Every ground-class
@@ -1347,9 +1347,9 @@ def _assign_layers_for_pour_nets(
                 assignments.append((power_nets[0][0], "In2.Cu", 0))
             else:
                 if plane_rank and len(power_nets) > 1:
-                    # Issue #6714: the plane goes to the most widespread
-                    # rail, not to whichever power net the classifier listed
-                    # first (that is net-number order).  On board 06rf the
+                    # Issue #6714: the plane goes to the rail feeding the
+                    # most parts, not to whichever power net the classifier
+                    # listed first (that is net-number order).  On board 06rf the
                     # 5-pad local VBUS_USB (net 1) took In2.Cu once #6686
                     # made it a pour, pushing the board-wide +3V3 onto a
                     # carved F.Cu outline that boxed connector pads in.
@@ -1474,26 +1474,26 @@ SINGLE_PAD_FALLBACK_SIDE_MM = 4.0
 def _power_plane_rank(pcb: PCB, net_name: str) -> tuple[float, ...]:
     """How strongly ``net_name`` needs a full inner plane (Issue #6714).
 
-    ``(distinct footprints, pad-centre bounding-box area in mm^2, pad
-    count)``, compared as a tuple: a rail feeding many parts across the
-    board is what a plane is for, while a net local to one or two parts
-    (a connector's ``VBUS``) is served by a carved outer-layer outline.
-    Pads with no footprint reference (or a ``#`` power-symbol stand-in)
-    are ignored, as in :func:`_net_pad_positions_absolute`.
+    ``(distinct footprints carrying a pad of the net,)``: a rail feeding
+    many parts across the board is what a plane is for, while a net local to
+    one or two parts (a connector's ``VBUS``) is served by a carved
+    outer-layer outline.  Footprints with no reference (or a ``#``
+    power-symbol stand-in) are ignored, as in
+    :func:`_net_pad_positions_absolute`.
+
+    Deliberately the footprint count ONLY, so a tie keeps the listed order:
+    on board 07rf ``+1V2`` and ``+1V8`` both feed 5 parts, and breaking that
+    tie by pad spread or pad count moved the plane to ``+1V8`` and stranded
+    a ``+1V2`` BGA ball on the F.Cu pour (0 -> 2 open pour links).
     """
-    refs: set[str] = set()
-    for fp in pcb.footprints:
-        if not fp.reference or fp.reference.startswith("#"):
-            continue
-        if any(pad.net_name == net_name for pad in fp.pads):
-            refs.add(fp.reference)
-    positions = _net_pad_positions_absolute(pcb, net_name)
-    if not positions:
-        return (0.0, 0.0, 0.0)
-    xs = [x for x, _ in positions]
-    ys = [y for _, y in positions]
-    area = (max(xs) - min(xs)) * (max(ys) - min(ys))
-    return (float(len(refs)), round(area, 3), float(len(positions)))
+    refs = {
+        fp.reference
+        for fp in pcb.footprints
+        if fp.reference
+        and not fp.reference.startswith("#")
+        and any(pad.net_name == net_name for pad in fp.pads)
+    }
+    return (float(len(refs)),)
 
 
 def _net_pad_positions_absolute(
