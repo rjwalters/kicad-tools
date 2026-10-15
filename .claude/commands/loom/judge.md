@@ -272,7 +272,9 @@ section for the full carve-out list).
 
 **Before either command below, run the Verdict-Time CAS Recheck** (see "Verdict-Time CAS Recheck" under Evaluation Process) — abort instead of writing if the recheck finds your claim lost, another Judge's verdict already landed, or the head SHA moved out from under your review. That recheck also hands you `$VERDICT_SHA`, the head SHA every verdict comment below **must** be stamped with.
 
-**Post every verdict comment through `./.loom/scripts/post-verdict.sh`, never a bare `gh pr comment` (#6382).** It takes `$VERDICT_SHA` as an argument and appends the `<!-- loom:verdict-sha ... -->` marker itself, so the marker cannot be typed-and-forgotten the way it can in a hand-written heredoc — the same reasoning behind `create-pr.sh` / `merge-pr.sh` existing instead of raw `gh` calls in this prompt. See "Verdict SHA Marker" under Evaluation Process for why the marker matters; it applies to **every** verdict-label write in this document, not just the two below.
+**Post every verdict comment through `./.loom/scripts/post-verdict.sh`, never a bare `gh pr comment` (#6382).** It takes `$VERDICT_SHA` as an argument and appends the `<!-- loom:verdict-sha ... -->` marker itself, so the marker cannot be typed-and-forgotten the way it can in a hand-written heredoc — the same reasoning behind `create-pr.sh` / `merge-pr.sh`. See "Verdict SHA Marker" under Evaluation Process for why the marker matters; it applies to **every** verdict-label write in this document, not just the two below.
+
+**`post-verdict.sh` is the SOLE merge-gating verdict writer — never approve with a bare `gh pr edit --add-label "loom:pr"` or a hand-typed marker (#12136).** That bypass drops the marker (#6319), and post-#9258 a markerless `loom:pr` is a HARD STALL: re-queued, never merged.
 
 **After approval (green → blue):**
 ```bash
@@ -286,7 +288,7 @@ section for the full carve-out list).
     --body "Issues found that need addressing before approval..."
 ```
 
-**`post-verdict.sh` applies the verdict label itself (#10581)** and verifies it: approve leaves `loom:pr` and strips `loom:changes-requested`, `loom:ci-failure`, `loom:reviewing`, `loom:review-requested`; changes-requested leaves `loom:changes-requested` and strips `loom:pr`, `loom:reviewing`, `loom:review-requested`. A trailing `&& gh pr edit` in older examples below is redundant but harmless; add only companions (`loom:ci-failure`, `loom:merge-conflict`) yourself. The label is the PRIMARY deliverable — the sweep validates labels, not comments — so **exit 8** (comment posted, labels did not hold) means run the printed repair command now. **Exit 7**, no approval stands: `loom:ci-failure` is on the PR, another verdict at this same head is changes-requested (do not approve over it without a new push; `--overrules-prior "<why each point no longer blocks>"` only when you verified every point), the PR state was unreadable, or a concurrent changes-requested from another host won (labels flipped). A same-head repeat within 10 minutes is deduped: stand down.
+**`post-verdict.sh` applies the verdict label itself (#10581)** and verifies it: approve leaves `loom:pr` and strips `loom:changes-requested`, `loom:ci-failure`, `loom:reviewing`, `loom:review-requested`; changes-requested leaves `loom:changes-requested` and strips `loom:pr`, `loom:reviewing`, `loom:review-requested`. A trailing `&& gh pr edit` in older examples below is redundant but harmless **only because `post-verdict.sh` ran first and stamped the marker**; never add `loom:pr` with a bare `gh pr edit` as the approval itself (#12136). Add only companions (`loom:ci-failure`, `loom:merge-conflict`) yourself. The label is the PRIMARY deliverable — the sweep validates labels, not comments — so **exit 8** (comment posted, labels did not hold) means run the printed repair command now. **Exit 7**, no approval stands: `loom:ci-failure` is on the PR, another verdict at this same head is changes-requested (do not approve over it without a new push; `--overrules-prior "<why each point no longer blocks>"` only when you verified every point), the PR state was unreadable, or a concurrent changes-requested from another host won (labels flipped). A same-head repeat within 10 minutes is deduped: stand down.
 
 **Label transitions:**
 - `loom:review-requested` (green) → `loom:pr` (blue) [approved, ready for Champion auto-merge]
@@ -702,7 +704,8 @@ completion write — see `doctor.md`'s "Verdict-Time CAS Recheck".
 
 **Pre-approval checklist** (verify before executing approval commands):
 - [ ] I am posting my verdict through `./.loom/scripts/post-verdict.sh`, NOT a
-      bare `gh pr comment` and NOT `gh pr review`
+      bare `gh pr comment`, NOT a bare `gh pr edit --add-label "loom:pr"`,
+      and NOT `gh pr review` — it is the sole merge-gating writer (#12136)
 - [ ] I understand `gh pr review --approve` WILL fail with "cannot approve your own PR"
 - [ ] All CI checks pass (verified via `forge wait-checks`)
 - [ ] Merge state is CLEAN (verified via `gh pr view --json mergeStateStatus`)
@@ -729,14 +732,11 @@ A review verdict is a statement about **a specific tree**, not about a PR.
 "*this* code is approved". Neither claim survives the head SHA moving — but
 before #5686 the *label* did, because nothing recorded which tree it covered.
 
-**Incident this closes (rjwalters/repo#192, 2026-08-08)**: Judge correctly
-requested changes at 02:22 for a genuinely-failing test. At 02:55 the branch
-was rebased onto main and force-pushed; the failing test now passed and CI
-went green. The PR then sat carrying `loom:changes-requested` with **nothing
-re-queueing it** — the label said a verdict had already been rendered, so no
-Judge reclaimed it, and an operator had to clear the label by hand. The
-inverse is worse and is the direction to fear: a `loom:pr` approval that
-survives a force-push lets Champion auto-merge a tree **nobody approved**.
+**Incident this closes (rjwalters/repo#192, 2026-08-08)**: a correct
+`loom:changes-requested` survived a rebase+force-push that made CI green, and
+nothing re-queued the PR until an operator cleared the label by hand. The
+inverse is the direction to fear: a `loom:pr` approval that survives a
+force-push lets Champion auto-merge a tree **nobody approved**.
 
 **The rule**: every verdict-label write in this document is posted through
 
@@ -754,11 +754,9 @@ appends the marker itself —
 ```
 
 (or `verdict=changes-requested`) — so it is never typed as prose and cannot be
-dropped from a heredoc by mistake. This is the same HTML-comment marker
-convention as `<!-- loom:standdown claim=... -->` (claim freshness) and
-`<!-- loom:fallback-evaluated sha=... -->` (fallback dedup); it answers a
-third question — **which tree does this verdict describe** — and is what
-makes the verdict invalidatable later.
+dropped by mistake. Same HTML-comment convention as `<!-- loom:standdown ... -->`
+and `<!-- loom:fallback-evaluated ... -->`; it records **which tree this verdict
+describes** and is what makes the verdict invalidatable later.
 
 **This applies to EVERY verdict-label write in this file**, not just the two
 in Label Workflow: the DIRTY/merge-conflict rejection, the CI-failure
@@ -770,23 +768,22 @@ exactly the pre-#5686 danger. Route every one of them through
 `post-verdict.sh` — do not hand-write the comment for "just this one" site.
 
 **Routing through `post-verdict.sh` closes the *typo/omission* failure mode,
-not the *bypass* one (#6382).** Before this script existed, the marker was
-compliance-by-memory end to end: measured in production, it was dropped on
-roughly one verdict in four (#6319) — by the same judge identity, in the same
-90-minute window, so it was a compliance *rate*, not a stale prompt. Once a
-verdict is posted through `post-verdict.sh`, that specific failure mode is
-gone — the marker is an argument, not prose, so there is no "forgot to append
-it" outcome for that call. What remains possible is a model deviating from
-this document and calling raw `gh pr comment` instead; the pre-approval
-checklist above exists to catch that. Two mechanical backstops catch what
+not the *bypass* one (#6382).** The marker was once compliance-by-memory and
+was dropped on roughly one verdict in four (#6319) — a compliance *rate*, not
+a stale prompt. Once posted through `post-verdict.sh` the marker is an
+argument, not prose, so there is no "forgot to append it" outcome. What
+remains possible is deviating from this document and calling raw `gh pr
+comment` (or a bare `gh pr edit --add-label "loom:pr"`) instead; the
+pre-approval checklist above exists to catch that. Two backstops catch what
 gets through: the stale-verdict sweep below (guard `--clear --anchor`) and
 `loom-daemon`'s `reconcile_pr_verdicts` tick. A markerless **approval** is
 re-queued (`loom:pr` → `loom:review-requested`), **never anchored** (#9258);
 only a markerless rejection is anchored at the head *as of that run*.
 
 **Neither backstop knows which tree you reviewed**, so a markerless approval
-is lost work, never a merge. Only the marker `post-verdict.sh` writes at
-verdict time records the truth. Use it.
+is **lost work that HARD-STALLS the PR** (#12136): it never merges until
+re-posted through `post-verdict.sh`, the only path that lands an approval.
+Bypassing it is never a shortcut. Use it.
 
 **Only stamp genuine verdicts.** Stand-down notes, progress comments,
 fallback-queue notes, and the stale-verdict notice itself are not verdicts and
