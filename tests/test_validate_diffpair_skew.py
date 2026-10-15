@@ -317,13 +317,18 @@ class TestDeriveSkewDataViaInclusive:
             n_net: _StubNet(n_net, n_name),
         }
         segs = [
-            _StubSegment(start=(0.0, 0.0), end=(10.0, 0.0), net_number=p_net, net_name=p_name),
+            _StubSegment(start=(0.0, 0.0), end=(5.0, 0.0), net_number=p_net, net_name=p_name),
+            _StubSegment(
+                start=(5.0, 0.0), end=(10.0, 0.0), layer="B.Cu", net_number=p_net, net_name=p_name
+            ),
             _StubSegment(start=(0.0, 1.0), end=(10.0, 1.0), net_number=n_net, net_name=n_name),
         ]
-        # A single F.Cu<->B.Cu via on the positive half only.
+        # A single F.Cu<->B.Cu via on the positive half only, joining its
+        # F.Cu and B.Cu halves (a via whose tracks use one layer only is a
+        # zero-height stub to kicad-cli, #6725).
         vias = [
             _StubVia(
-                position=(10.0, 0.0),
+                position=(5.0, 0.0),
                 layers=["F.Cu", "B.Cu"],
                 net_number=p_net,
                 net_name=p_name,
@@ -429,8 +434,8 @@ class TestSkewDriftPrevention:
     def _build_both_forms(
         self,
         *,
-        p_segments: list[tuple[tuple[float, float], tuple[float, float]]],
-        n_segments: list[tuple[tuple[float, float], tuple[float, float]]],
+        p_segments: list[tuple],
+        n_segments: list[tuple],
         p_vias_layers: list[list[str]] | None = None,
         n_vias_layers: list[list[str]] | None = None,
         p_net: int = 4,
@@ -438,26 +443,32 @@ class TestSkewDriftPrevention:
         p_name: str = "USB_D+",
         n_name: str = "USB_D-",
     ) -> tuple[_StubPCB, Route, Route]:
-        """Return (pcb_stub, p_route, n_route) for the same physical routing."""
+        """Return (pcb_stub, p_route, n_route) for the same physical routing.
+
+        A segment is ``(start, end)`` on F.Cu or ``(start, end, layer)``; vias
+        sit at the origin.
+        """
         from kicad_tools.router.layers import Layer
         from kicad_tools.router.primitives import Route, Segment, Via
 
         # PCB-schema-shape stub.
         pcb_segments: list[_StubSegment] = []
-        for start, end in p_segments:
+        for start, end, *layer in p_segments:
             pcb_segments.append(
                 _StubSegment(
                     start=start,
                     end=end,
+                    layer=layer[0] if layer else "F.Cu",
                     net_number=p_net,
                     net_name=p_name,
                 )
             )
-        for start, end in n_segments:
+        for start, end, *layer in n_segments:
             pcb_segments.append(
                 _StubSegment(
                     start=start,
                     end=end,
+                    layer=layer[0] if layer else "F.Cu",
                     net_number=n_net,
                     net_name=n_name,
                 )
@@ -499,11 +510,11 @@ class TestSkewDriftPrevention:
                     x2=end[0],
                     y2=end[1],
                     width=0.2,
-                    layer=Layer.F_CU,
+                    layer=_layer_lookup[layer[0] if layer else "F.Cu"],
                     net=p_net,
                     net_name=p_name,
                 )
-                for start, end in p_segments
+                for start, end, *layer in p_segments
             ],
             vias=[
                 Via(
@@ -531,11 +542,11 @@ class TestSkewDriftPrevention:
                     x2=end[0],
                     y2=end[1],
                     width=0.2,
-                    layer=Layer.F_CU,
+                    layer=_layer_lookup[layer[0] if layer else "F.Cu"],
                     net=n_net,
                     net_name=n_name,
                 )
-                for start, end in n_segments
+                for start, end, *layer in n_segments
             ],
             vias=[
                 Via(
@@ -666,7 +677,9 @@ class TestSkewDriftPrevention:
         from kicad_tools.validate.diffpair_skew import derive_skew_data
 
         pcb, p_route, n_route = self._build_both_forms(
-            p_segments=[((0.0, 0.0), (10.0, 0.0))],
+            # P changes layer at the origin via (a via whose tracks use one
+            # layer only is a zero-height stub to kicad-cli, #6725).
+            p_segments=[((-5.0, 0.0), (0.0, 0.0), "B.Cu"), ((0.0, 0.0), (5.0, 0.0))],
             n_segments=[((0.0, 1.0), (10.0, 1.0))],
             p_vias_layers=[["F.Cu", "B.Cu"]],  # F.Cu->B.Cu through-via on P
             n_vias_layers=[],  # no via on N
