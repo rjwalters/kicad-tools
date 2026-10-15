@@ -237,10 +237,13 @@ def tune_diff_pair_skew(
             only ever adds segment length; via length is constant across
             insertions.  ``None`` (default) keeps the segment-only measure.
         max_uncoupled_mm: Issue #6795.  Optional uncoupled-length limit
-            (the one ``kct check`` enforces).  A candidate meander whose
-            shorter half measures more uncoupled length against the partner
-            than this is rejected like a failed placement and the next option
-            is tried; when none fits the pair keeps its pre-insert state.
+            (the one ``kct check`` enforces).  A candidate meander that leaves
+            the pair's figure -- ``max`` of both halves' uncoupled lengths,
+            as the checker measures it -- over this limit AND above its
+            pre-insert value is rejected like a failed placement and the next
+            option is tried; when none fits the pair keeps its pre-insert
+            state.  A pair already over the limit may still be tuned so long
+            as the meander does not grow its uncoupled figure.
             ``None`` (default) applies no guard.
 
     Returns:
@@ -298,7 +301,7 @@ def tune_diff_pair_skew(
             result,
         )
 
-    from kicad_tools.validate.rules.diffpair_uncoupled_length import measure_uncoupled
+    from kicad_tools.validate.rules.diffpair_uncoupled_length import UNCOUPLED_EPSILON_MM
 
     from .length import LengthTracker  # avoid cycle
 
@@ -407,6 +410,7 @@ def tune_diff_pair_skew(
         candidate_route = None
         drc_rejected = False
         generator_failure = ""
+        pre_insert_figure: float | None = None  # computed on first need (#6795)
         for cand_route, cand_serp in _placement_options(
             base_config=base_config,
             current_shorter=current_shorter,
@@ -430,17 +434,24 @@ def tune_diff_pair_skew(
                 generator_failure = "serpentine added no length"
                 continue
             # Uncoupled-length guard (issue #6795): do not trade a skew error
-            # for an uncoupled-length error.
-            if (
-                max_uncoupled_mm is not None
-                and measure_uncoupled(
-                    _checker_segments(cand_route.segments),
-                    _checker_segments(longer_route.segments),
-                )
-                > max_uncoupled_mm
-            ):
-                generator_failure = "uncoupled length exceeds limit"
-                continue
+            # for an uncoupled-length error.  The figure is the one
+            # ``kct check`` judges -- the MAX of both halves' uncoupled
+            # lengths -- so a meander that breaks the longer half's coupling
+            # counts too.  Only a meander that leaves the pair over the limit
+            # AND worse than before this insert is rejected: on a pair already
+            # over the limit (on either half) the skew can still be fixed as
+            # long as the uncoupled figure does not grow.
+            if max_uncoupled_mm is not None:
+                cand_figure = _pair_uncoupled_mm(cand_route, longer_route)
+                if cand_figure > max_uncoupled_mm + UNCOUPLED_EPSILON_MM:
+                    if pre_insert_figure is None:
+                        pre_insert_figure = _pair_uncoupled_mm(current_shorter, longer_route)
+                    if cand_figure > pre_insert_figure + UNCOUPLED_EPSILON_MM:
+                        generator_failure = (
+                            f"uncoupled length exceeds limit ({cand_figure:.3f} mm > "
+                            f"{max_uncoupled_mm:.3f} mm, was {pre_insert_figure:.3f} mm)"
+                        )
+                        continue
             # Post-insertion DRC self-check.  The candidate route's new
             # segments must not violate intra-pair clearance against the
             # partner OR collide with any other routed net's segments.
@@ -531,6 +542,20 @@ def tune_diff_pair_skew(
 def _checker_segments(segments: list[Segment]) -> list[tuple[float, float, float, float, str]]:
     """Segments as the ``(x1, y1, x2, y2, layer)`` tuples the uncoupled-length rule reads."""
     return [(s.x1, s.y1, s.x2, s.y2, str(s.layer)) for s in segments]
+
+
+def _pair_uncoupled_mm(a: Route, b: Route) -> float:
+    """The pair's uncoupled-length figure as ``kct check`` judges it (issue #6795).
+
+    ``diffpair_uncoupled_length`` fails a pair on ``max(uncoupled(P),
+    uncoupled(N))``, each half measured against the other, so this is
+    symmetric in its arguments.
+    """
+    from kicad_tools.validate.rules.diffpair_uncoupled_length import measure_uncoupled
+
+    sa = _checker_segments(a.segments)
+    sb = _checker_segments(b.segments)
+    return max(measure_uncoupled(sa, sb), measure_uncoupled(sb, sa))
 
 
 # ---------------------------------------------------------------------------

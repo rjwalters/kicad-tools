@@ -292,3 +292,75 @@ def test_skew_tune_line_prints_message_for_non_success():
         DiffPairTuneResult(success=False, reason="overshoot", message="overshot the partner"),
     )
     assert "overshot the partner" in line
+
+
+# -- Issue #6795: the uncoupled-length limit reaches the tuner ----------------
+
+
+def test_checker_path_passes_class_uncoupled_total_to_tuner():
+    nc = NetClassRouting(
+        name="LVDS", length_critical=False, skew_tolerance_mm=0.1, max_uncoupled_total_mm=7.5
+    )
+    ar = _router(nc)
+    calls, spy = _spy()
+    with patch.object(dlt_module, "tune_diff_pair_skew", spy):
+        ar.apply_diffpair_length_tuning(
+            detected_pairs=_pairs(ar), verbose=False, engage="checker_skew_limit"
+        )
+    assert len(calls) == 1
+    assert calls[0]["max_uncoupled_mm"] == pytest.approx(7.5)
+
+
+def test_checker_path_derives_uncoupled_limit_from_component_count():
+    """Per-terminal allowance x components, counted like ``net_component_counts``.
+
+    P lands on three components and N on two; the checker's limit uses the
+    larger count (``PairMeasure.components``), so 2.0 mm x 3.
+    """
+    from kicad_tools.router.primitives import Pad
+    from kicad_tools.validate.rules.diffpair_uncoupled_length import uncoupled_limit
+
+    nc = NetClassRouting(
+        name="LVDS",
+        length_critical=False,
+        skew_tolerance_mm=0.1,
+        max_uncoupled_per_terminal_mm=2.0,
+    )
+    ar = _router(nc)
+    for i, (ref, pin, net, name) in enumerate(
+        [
+            ("U1", "1", 1, P_NAME),
+            ("U1", "3", 1, P_NAME),  # a second pad on U1 is still one component
+            ("J1", "1", 1, P_NAME),
+            ("R1", "1", 1, P_NAME),
+            ("U1", "2", 2, N_NAME),
+            ("J1", "2", 2, N_NAME),
+        ]
+    ):
+        ar.pads[(ref, pin)] = Pad(
+            x=30.0 + i, y=15.0, width=0.5, height=0.5, net=net, net_name=name, ref=ref, pin=pin
+        )
+    thresholds = resolve_pair_thresholds(ar.net_class_map, P_NAME, N_NAME)
+    expected, _ = uncoupled_limit(thresholds, 3)
+    assert expected == pytest.approx(6.0)
+
+    calls, spy = _spy()
+    with patch.object(dlt_module, "tune_diff_pair_skew", spy):
+        ar.apply_diffpair_length_tuning(
+            detected_pairs=_pairs(ar), verbose=False, engage="checker_skew_limit"
+        )
+    assert len(calls) == 1
+    assert calls[0]["max_uncoupled_mm"] == pytest.approx(expected)
+
+
+def test_length_critical_path_applies_no_uncoupled_guard():
+    """``--length-match-diffpairs`` keeps its pre-#6795 behaviour: no guard."""
+    nc = NetClassRouting(
+        name="LVDS", length_critical=True, skew_tolerance_mm=0.1, max_uncoupled_total_mm=7.5
+    )
+    ar = _router(nc)
+    calls, spy = _spy()
+    with patch.object(dlt_module, "tune_diff_pair_skew", spy):
+        ar.apply_diffpair_length_tuning(detected_pairs=_pairs(ar), verbose=False)
+    assert len(calls) == 1
+    assert calls[0]["max_uncoupled_mm"] is None
