@@ -301,6 +301,67 @@ class TestShortAttribution:
         assert shorts
         assert all(v.origin == "routing" for v in shorts)
 
+    def test_trace_through_foreign_body_past_corner_overlap_is_routing(self) -> None:
+        """Judge case 1: a corner-sliver overlap must not excuse a body crossing.
+
+        J1.1 (A) and J2.1 (B) overlap only in a 0.01 x 0.01 mm corner.  A net-A
+        trace starting in J1.1 cuts through J2.1's body far from the sliver:
+        that is a real routing short even though the copper touches J1.1.
+        """
+        router = _router()
+        router.pads[("J1", "1")] = _pad("1", 10.0, 1, "A", ref="J1", width=1.0, height=1.0)
+        router.pads[("J2", "1")] = _pad(
+            "1", 10.99, 2, "B", ref="J2", y=10.99, width=1.0, height=1.0
+        )
+        router.net_names.update({1: "A", 2: "B"})
+        assert [(o.pad_a, o.pad_b) for o in find_input_pad_overlaps(router.pads)] == [
+            ("J1.1", "J2.1")
+        ]
+        router.routes.append(
+            Route(
+                net=1,
+                net_name="A",
+                segments=[
+                    Segment(x1=10.0, y1=10.0, x2=12.5, y2=11.3, layer=Layer.F_CU, width=0.2, net=1)
+                ],
+                vias=[],
+            )
+        )
+
+        shorts = shorting_violations(validate_routes(router))
+
+        assert [v.obstacle_pad for v in shorts] == ["J2.1"]
+        assert shorts[0].origin == "routing"
+        assert not shorts[0].is_input_defect
+        assert short_origin_summary(shorts) == (
+            "0 pre-existing in the input board (input defect), "
+            "1 caused by routing (routing failure)"
+        )
+
+    def test_trace_running_through_whole_overlapping_pad_is_routing(self) -> None:
+        """Judge case 2: the chorus U8 shape, but the trace crosses all of U8.2.
+
+        The SPI_MOSI trace leaves U8.1's centre and runs through U8.2 out to
+        x=14, covering U8.2's x 10.74..11.39 which U8.1 does not overlap.
+        """
+        router = _stale_u8_router()
+        router.routes.append(
+            Route(
+                net=1,
+                net_name="SPI_MOSI",
+                segments=[
+                    Segment(x1=10.0, y1=10.0, x2=14.0, y2=10.0, layer=Layer.F_CU, width=0.2, net=1)
+                ],
+                vias=[],
+            )
+        )
+
+        shorts = shorting_violations(validate_routes(router))
+
+        assert [v.obstacle_pad for v in shorts] == ["U8.2"]
+        assert shorts[0].origin == "routing"
+        assert not shorts[0].is_input_defect
+
     def test_banner_points_at_input_pads(self, capsys: pytest.CaptureFixture[str]) -> None:
         router = _stale_u8_router()
         router.routes.append(_via_route(1, "SPI_MOSI", 10.0))

@@ -539,6 +539,46 @@ def _pad_copper_polygon(pad: Pad):
 #: pads that merely touch along an edge or corner.
 _PAD_OVERLAP_MIN_AREA_MM2 = 1e-6
 
+#: Tolerance (mm) when testing that copper's contact with a foreign pad lies
+#: inside the own-net pad overlapping it (#6693): absorbs float noise from the
+#: polygon intersection without excusing any visible intrusion.
+_INTRUSION_TOLERANCE_MM = 1e-4
+
+
+def _intrusion_inside_partner(
+    obstacle: Pad,
+    partner: Pad,
+    x1: float,
+    y1: float,
+    x2: float,
+    y2: float,
+    half: float,
+) -> bool:
+    """Whether copper's contact with ``obstacle`` lies inside ``partner`` (#6693).
+
+    The copper is the segment ``(x1, y1)-(x2, y2)`` buffered by ``half`` (a
+    disc when the endpoints coincide, i.e. a via).  It is attributed to the
+    input only when ``(copper & obstacle) - partner`` is empty: every point
+    where it meets the foreign pad is already shorted by the input's own pad
+    overlap, so no copper placement could have avoided it.  Uses the same pad
+    polygons as :func:`find_input_pad_overlaps`.  A zero-area contact (copper
+    grazing the obstacle's edge) must also be covered, so a graze outside the
+    overlap stays a routing short.
+    """
+    from shapely import LineString, Point
+
+    if (x1, y1) == (x2, y2):
+        copper = Point(x1, y1).buffer(half, 32)
+    else:
+        copper = LineString([(x1, y1), (x2, y2)]).buffer(half, 32)
+    contact = copper.intersection(_pad_copper_polygon(obstacle))
+    if contact.is_empty:
+        # The shapely envelope disagrees with the validator's distance model
+        # (e.g. a circle pad's disc vs its rect): don't excuse the short.
+        return False
+    covered: bool = _pad_copper_polygon(partner).buffer(_INTRUSION_TOLERANCE_MM).covers(contact)
+    return covered
+
 
 def find_input_pad_overlaps(pads) -> list[InputPadOverlap]:
     """Different-net pad pairs whose copper overlaps (Issue #6693).
@@ -3238,7 +3278,14 @@ def validate_routes(
                 gap = pad_point_distance(partner, x1, y1) - half
             else:
                 gap = pad_segment_distance(partner, x1, y1, x2, y2) - half
-            if gap <= 0.0:
+            if gap > 0.0:
+                continue
+            # The copper touching its own pad is not enough: an escape
+            # segment that starts in A and then cuts through B's body away
+            # from the A/B overlap is a real routing short.  Only the part
+            # of the copper's contact with B that A already covers is
+            # pre-existing, so require ``(copper & B) - A`` to be empty.
+            if _intrusion_inside_partner(obstacle, partner, x1, y1, x2, y2, half):
                 return name
         return ""
 
