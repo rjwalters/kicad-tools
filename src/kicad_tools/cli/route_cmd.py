@@ -4780,6 +4780,46 @@ def count_cross_engine_duplicates(
     return duplicates
 
 
+def _native_drc_failure_advice(geo) -> list[str]:
+    """Per-cause advice for a native kicad-cli DRC that did not complete (#6724).
+
+    Upgrade KiCad only for an unsupported option or a board kicad-cli could
+    not load; blame memory only for a SIGKILL (the OOM killer's signal); for
+    any other failure point at kicad-cli's own output (already in the note).
+    """
+    import signal
+
+    from kicad_tools.drc.geometric import (
+        REASON_LOAD_FAILED,
+        REASON_UNSUPPORTED,
+    )
+
+    reason = getattr(geo, "reason", None)
+    returncode = getattr(geo, "returncode", None)
+    if reason == REASON_UNSUPPORTED:
+        return [
+            "The board was NOT checked by KiCad: this kicad-cli rejected an option kct passed.",
+            "Upgrade KiCad (kicad-cli) to a version that supports it.",
+        ]
+    if reason == REASON_LOAD_FAILED:
+        return [
+            "The board was NOT checked by KiCad: kicad-cli could not load the board file.",
+            "It is possibly saved in a newer KiCad file format than this kicad-cli reads "
+            "(e.g. a KiCad 10 board on KiCad 8/9); upgrade KiCad (kicad-cli).",
+        ]
+    if isinstance(returncode, int) and returncode == -signal.SIGKILL:
+        return [
+            "The board was NOT checked by KiCad: kicad-cli was killed (SIGKILL), most "
+            "likely by the out-of-memory killer.",
+            "Re-run when kicad-cli has enough memory.",
+        ]
+    return [
+        "The board was NOT checked by KiCad; a failed kicad-cli run is never a clean result.",
+        "kicad-cli's error output is quoted above; run 'kicad-cli pcb drc' on the board to "
+        "reproduce the failure.",
+    ]
+
+
 def run_post_route_drc(
     output_path: Path,
     manufacturer: str,
@@ -5082,37 +5122,8 @@ def run_post_route_drc(
         if not quiet and native_drc_failed:
             print("\n--- DRC Validation ---")
             print(f"  DRC FAILURE: native kicad-cli DRC did not complete ({geo.note}).")
-            geo_rc = getattr(geo, "returncode", None)
-            if getattr(geo, "reason", None) == "kicad_cli_unsupported_option":
-                # Issue #6724: a usage error, not a crash -- don't blame memory.
-                print(
-                    "    The board was NOT checked by KiCad: this kicad-cli rejected "
-                    "an option kct passed."
-                )
-                print("    Upgrade KiCad (kicad-cli) to a version that supports it.")
-            elif geo_rc == 3:
-                # ERR_INVALID_INPUT_FILE: the board failed to load.
-                print("    The board was NOT checked by KiCad: kicad-cli could not load it.")
-                print(
-                    "    A likely cause is a board saved by a newer KiCad than this "
-                    "kicad-cli (e.g. a KiCad 10 board on KiCad 8/9); upgrade KiCad."
-                )
-            elif geo_rc == -9:
-                print(
-                    "    The board was NOT checked by KiCad; a kicad-cli crash is never "
-                    "a clean result."
-                )
-                print(
-                    "    kicad-cli was killed (SIGKILL, likely out of memory). Re-run "
-                    "when it has enough memory, or run 'kicad-cli pcb drc' on the "
-                    "board to see the failure."
-                )
-            else:
-                print(
-                    "    The board was NOT checked by KiCad; a kicad-cli failure is never "
-                    "a clean result."
-                )
-                print("    Run 'kicad-cli pcb drc' on the board to see the failure.")
+            for line in _native_drc_failure_advice(geo):
+                print(f"    {line}")
             if results.error_count > 0 or warning_count > 0:
                 print(f"  Internal errors: {results.error_count}")
                 if warning_count > 0:

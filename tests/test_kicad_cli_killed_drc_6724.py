@@ -124,15 +124,20 @@ class TestRunGeometricDrc:
         assert res.ran is False
         assert res.reason == REASON_CRASH
 
-    def test_non_zero_exit_is_a_crash(self, monkeypatch, tmp_path):
+    def test_exit_3_is_a_load_failure(self, monkeypatch, tmp_path):
         """Exit 3 is kicad-cli's "failed to load board" status."""
         _fake_kicad_cli(monkeypatch, geometric, returncode=3, report=None)
 
         res = run_geometric_drc(tmp_path / "b.kicad_pcb", kicad_cli=FAKE_CLI)
 
         assert res.ran is False
-        assert res.reason == REASON_CRASH
-        assert "exit 3" in (res.note or "")
+        assert res.reason == geometric.REASON_LOAD_FAILED
+        assert res.failed is True
+        assert res.returncode == 3
+        note = res.note or ""
+        assert "could not load the board" in note
+        assert "file format newer" in note
+        assert "memory" not in note and "killed" not in note
 
     def test_missing_report_is_no_report(self, monkeypatch, tmp_path):
         _fake_kicad_cli(monkeypatch, geometric, returncode=0, report=None)
@@ -211,11 +216,32 @@ def test_describe_returncode():
     assert "SIGKILL" in geometric.describe_returncode(-9)
     assert "out of memory" in geometric.describe_returncode(-9)
     assert "SIGSEGV" in geometric.describe_returncode(-11)
-    assert "could not load the board" in geometric.describe_returncode(3)
+    load = geometric.describe_returncode(3)
+    assert "could not load the board" in load and "file format newer" in load
+    assert "memory" not in load
     assert geometric.describe_returncode(7) == "kicad-cli exited with status 7"
-    usage = geometric.describe_returncode(geometric.KICAD_CLI_ERR_ARGS)
-    assert "status 1" in usage and "newer KiCad" not in usage
+    usage = geometric.describe_returncode(
+        geometric.KICAD_CLI_ERR_ARGS, stdout="Unknown argument: --refill-zones\nUsage: drc"
+    )
+    assert "does not support --refill-zones" in usage and "newer KiCad" in usage
     assert "memory" not in usage and "killed" not in usage
+
+
+def test_describe_returncode_exit_1_without_unknown_argument_is_neutral():
+    """Exit 1 alone is not proof of an unsupported option (Judge, PR #6746)."""
+    plain = geometric.describe_returncode(geometric.KICAD_CLI_ERR_ARGS)
+    assert plain == "kicad-cli exited with status 1 (usage or launch error)"
+    other = geometric.describe_returncode(
+        geometric.KICAD_CLI_ERR_ARGS, stderr="Traceback: wrapper failed: cannot open display"
+    )
+    assert other == "kicad-cli exited with status 1 (usage or launch error)"
+    assert geometric.classify_returncode(1, "", "boom") == geometric.REASON_EXIT_ERROR
+    assert (
+        geometric.classify_returncode(1, "Unknown argument: --x", "")
+        == geometric.REASON_UNSUPPORTED
+    )
+    assert geometric.classify_returncode(3) == geometric.REASON_LOAD_FAILED
+    assert geometric.classify_returncode(-9) == REASON_CRASH
 
 
 # ---------------------------------------------------------------------------
@@ -414,8 +440,7 @@ class TestExitStatusWording:
         res = run_geometric_drc(tmp_path / "b.kicad_pcb", kicad_cli=cli)
 
         assert res.ran is False and res.failed is True
-        assert res.reason == REASON_CRASH
-        assert res.reason != geometric.REASON_UNSUPPORTED
+        assert res.reason == geometric.REASON_EXIT_ERROR
         note = res.note or ""
         assert "exited with status 1" in note
         assert "cannot open display" in note
@@ -462,7 +487,7 @@ class TestExitStatusWording:
 
         out = capsys.readouterr().out
         assert errors >= 1
-        assert "could not load it" in out and "upgrade KiCad" in out
+        assert "could not load the board file" in out and "upgrade KiCad" in out
         assert "memory" not in out and "DRC PASSED" not in out
 
 
@@ -486,7 +511,9 @@ class TestRefillProbeIsDefinitive:
         drc_runs = [argv for argv in _logged_argvs(tmp_path) if "--help" not in argv]
         assert "--refill-zones" in drc_runs[0], "unknown support must not drop the refill"
 
-    def test_killed_probe_on_kicad9_still_fails_loudly_not_silently(self, tmp_path):
+    def test_killed_probe_on_kicad9_retries_without_refill(self, tmp_path):
+        """Issue #6775: the ``Unknown argument`` rejection is retried once
+        without ``--refill-zones`` instead of failing the DRC."""
         cli = _fake_cli(
             tmp_path,
             help_body="os.kill(os.getpid(), signal.SIGKILL)",
@@ -500,8 +527,10 @@ class TestRefillProbeIsDefinitive:
 
         res = run_geometric_drc(tmp_path / "b.kicad_pcb", kicad_cli=cli)
 
-        assert res.ran is False and res.reason == geometric.REASON_UNSUPPORTED
-        assert "--refill-zones" in (res.note or "")
+        assert res.ran is True and res.reason == REASON_OK, res.note
+        drc_runs = [argv for argv in _logged_argvs(tmp_path) if "--help" not in argv]
+        assert len(drc_runs) == 2
+        assert "--refill-zones" in drc_runs[0] and "--refill-zones" not in drc_runs[1]
 
     def test_failed_probe_is_not_cached(self, tmp_path):
         from kicad_tools.cli import runner
@@ -561,6 +590,298 @@ class TestRefillProbeIsDefinitive:
         probe_timeout, run_timeout = seen
         assert probe_timeout == runner._REFILL_PROBE_TIMEOUT_S
         assert run_timeout is not None and run_timeout <= 50
+
+
+# ---------------------------------------------------------------------------
+# Exit-status classification, probe robustness, per-cause advice
+# (second Judge review on PR #6746)
+# ---------------------------------------------------------------------------
+
+KICAD10_HELP = KICAD9_HELP + "  --refill-zones          Refill zones before running DRC\n"
+
+
+def _flex_kicad_cli(
+    tmp_path: Path,
+    *,
+    help_text: str = KICAD10_HELP,
+    kill_help: bool = False,
+    rejects: tuple[str, ...] = (),
+    drc_exit: int = 0,
+    drc_stderr: str = "",
+) -> Path:
+    """Like :func:`_script_kicad_cli`, plus a SIGKILLed ``--help`` probe and a
+    DRC that fails with ``drc_exit`` / ``drc_stderr`` (writing no report)."""
+    log = tmp_path / "argv.log"
+    cli = tmp_path / "kicad-cli"
+    cli.write_text(
+        f"#!{sys.executable}\n"
+        "import json, os, signal, sys\n"
+        f"log, rejects, help_text, report = {str(log)!r}, {rejects!r}, {help_text!r}, "
+        f"{VALID_REPORT!r}\n"
+        f"kill_help, drc_exit, drc_stderr = {kill_help!r}, {drc_exit!r}, {drc_stderr!r}\n"
+        "argv = sys.argv[1:]\n"
+        "open(log, 'a').write(json.dumps(argv) + '\\n')\n"
+        "if '--help' in argv:\n"
+        "    if kill_help:\n"
+        "        os.kill(os.getpid(), signal.SIGKILL)\n"
+        "    sys.stdout.write(help_text); sys.exit(0)\n"
+        "for arg in argv:\n"
+        "    if arg in rejects:\n"
+        "        sys.stdout.write('Unknown argument: ' + arg + '\\n' + help_text); sys.exit(1)\n"
+        "if drc_exit:\n"
+        "    sys.stderr.write(drc_stderr); sys.exit(drc_exit)\n"
+        "open(argv[argv.index('--output') + 1], 'w').write(report)\n"
+    )
+    cli.chmod(cli.stat().st_mode | stat.S_IXUSR)
+    return cli
+
+
+def _drc_runs(tmp_path: Path) -> list[list[str]]:
+    return [argv for argv in _logged_argvs(tmp_path) if "--help" not in argv]
+
+
+def _probes(tmp_path: Path) -> list[list[str]]:
+    return [argv for argv in _logged_argvs(tmp_path) if "--help" in argv]
+
+
+def _route_gate_output(monkeypatch, tmp_path, cli: Path, capsys) -> tuple[int, str]:
+    from unittest.mock import MagicMock, patch
+
+    import kicad_tools.cli.runner as runner_mod
+    from kicad_tools.cli.route_cmd import run_post_route_drc
+
+    monkeypatch.setattr(runner_mod, "find_kicad_cli", lambda: cli)
+    pcb = tmp_path / "board.kicad_pcb"
+    pcb.write_text("(kicad_pcb)")
+    clean = MagicMock(error_count=0, warning_count=0, errors=[], warnings=[])
+    with (
+        patch("kicad_tools.validate.DRCChecker") as checker_cls,
+        patch("kicad_tools.schema.pcb.PCB"),
+    ):
+        checker_cls.return_value.check_all.return_value = clean
+        errors, _warnings = run_post_route_drc(
+            output_path=pcb, manufacturer="jlcpcb", layers=2, quiet=False
+        )
+    return errors, capsys.readouterr().out
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="needs an executable script")
+class TestExitOneIsNotAlwaysUnsupported:
+    """Exit 1 without an ``Unknown argument`` line is a generic failure."""
+
+    STDERR = "Traceback: wrapper failed: cannot open display\n"
+
+    def test_geometric_exit_1_unrelated_error(self, tmp_path):
+        cli = _flex_kicad_cli(tmp_path, drc_exit=1, drc_stderr=self.STDERR)
+
+        res = run_geometric_drc(tmp_path / "b.kicad_pcb", kicad_cli=cli)
+
+        assert res.ran is False
+        assert res.failed is True
+        assert res.reason == geometric.REASON_EXIT_ERROR
+        assert res.reason != geometric.REASON_UNSUPPORTED
+        note = res.note or ""
+        assert "exited with status 1" in note
+        assert "cannot open display" in note, "the stderr tail must be kept"
+        assert "newer KiCad" not in note and "does not support" not in note
+        # Not mistaken for a --refill-zones rejection: no retry.
+        assert len(_drc_runs(tmp_path)) == 1
+
+    def test_run_drc_exit_1_unrelated_error(self, tmp_path):
+        from kicad_tools.cli import runner
+
+        cli = _flex_kicad_cli(tmp_path, drc_exit=1, drc_stderr=self.STDERR)
+
+        res = runner.run_drc(
+            tmp_path / "b.kicad_pcb",
+            output_path=tmp_path / "out.json",
+            schematic_parity=False,
+            kicad_cli=cli,
+        )
+
+        assert res.success is False
+        assert "exited with status 1" in res.stderr
+        assert "cannot open display" in res.stderr
+        assert "newer KiCad" not in res.stderr and "usage error" not in res.stderr
+
+    def test_route_gate_exit_1_does_not_say_upgrade(self, monkeypatch, tmp_path, capsys):
+        cli = _flex_kicad_cli(tmp_path, drc_exit=1, drc_stderr=self.STDERR)
+
+        errors, out = _route_gate_output(monkeypatch, tmp_path, cli, capsys)
+
+        assert errors >= 1
+        assert "DRC FAILURE" in out and "cannot open display" in out
+        assert "Upgrade KiCad" not in out and "upgrade KiCad" not in out
+        assert "memory" not in out
+        assert "DRC PASSED" not in out
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="needs an executable script")
+class TestRefillProbeRobustness:
+    """A killed/timed-out ``--help`` probe is never cached as "no refill"."""
+
+    def test_killed_probe_still_refills_on_kicad10(self, tmp_path, caplog):
+        from kicad_tools.cli import runner
+
+        cli = _flex_kicad_cli(tmp_path, kill_help=True)
+
+        assert runner._kicad_drc_supports_refill(cli) is False
+        assert runner._kicad_drc_supports_refill.inconclusive(cli) is True
+        res = run_geometric_drc(tmp_path / "b.kicad_pcb", kicad_cli=cli)
+
+        assert res.ran is True and res.reason == REASON_OK
+        runs = _drc_runs(tmp_path)
+        assert len(runs) == 1
+        assert "--refill-zones" in runs[0], "an unknown probe must not drop the refill"
+        # Not cached: the next call probes again.
+        run_geometric_drc(tmp_path / "b.kicad_pcb", kicad_cli=cli)
+        assert len(_probes(tmp_path)) >= 3
+
+    def test_killed_probe_on_kicad9_retries_without_refill(self, tmp_path, caplog):
+        import logging
+
+        cli = _flex_kicad_cli(
+            tmp_path, kill_help=True, rejects=("--refill-zones",), help_text=KICAD9_HELP
+        )
+
+        with caplog.at_level(logging.WARNING):
+            res = run_geometric_drc(tmp_path / "b.kicad_pcb", kicad_cli=cli)
+
+        assert res.ran is True and res.reason == REASON_OK
+        runs = _drc_runs(tmp_path)
+        assert len(runs) == 2
+        assert "--refill-zones" in runs[0] and "--refill-zones" not in runs[1]
+        assert any(
+            r.levelno == logging.WARNING and "WITHOUT --refill-zones" in r.getMessage()
+            for r in caplog.records
+        )
+        # The rejection is definitive and memoised: the next run goes straight
+        # to the no-refill command.
+        run_geometric_drc(tmp_path / "b.kicad_pcb", kicad_cli=cli)
+        runs = _drc_runs(tmp_path)
+        assert len(runs) == 3 and "--refill-zones" not in runs[2]
+
+    def test_definitive_kicad9_probe_warns_when_running_without_refill(self, tmp_path, caplog):
+        import logging
+
+        cli = _flex_kicad_cli(tmp_path, rejects=("--refill-zones",), help_text=KICAD9_HELP)
+
+        with caplog.at_level(logging.WARNING):
+            res = run_geometric_drc(tmp_path / "b.kicad_pcb", kicad_cli=cli)
+
+        assert res.ran is True
+        assert any("WITHOUT --refill-zones" in r.getMessage() for r in caplog.records)
+
+    def test_probe_has_a_timeout_and_timeouts_are_not_cached(self, monkeypatch):
+        from kicad_tools.cli import runner
+
+        seen: list = []
+
+        def fake_run(cmd, *args, **kwargs):
+            seen.append(kwargs.get("timeout"))
+            raise subprocess.TimeoutExpired(cmd, kwargs.get("timeout") or 0)
+
+        monkeypatch.setattr(runner.subprocess, "run", fake_run)
+
+        assert runner._kicad_drc_supports_refill(FAKE_CLI) is False
+        assert runner._kicad_drc_supports_refill(FAKE_CLI) is False
+        assert runner._kicad_drc_supports_refill.inconclusive(FAKE_CLI) is True
+        assert seen == [runner._REFILL_PROBE_TIMEOUT_S] * 2
+        assert runner._REFILL_PROBE_TIMEOUT_S <= 30
+
+    def test_failed_probe_status_is_not_cached(self, monkeypatch):
+        from kicad_tools.cli import runner
+
+        calls: list = []
+
+        def fake_run(cmd, *args, **kwargs):
+            calls.append(cmd)
+            return subprocess.CompletedProcess(cmd, -signal.SIGKILL, "", "")
+
+        monkeypatch.setattr(runner.subprocess, "run", fake_run)
+
+        assert runner._kicad_drc_supports_refill(FAKE_CLI) is False
+        assert runner._kicad_drc_supports_refill(FAKE_CLI) is False
+        assert runner._kicad_drc_supports_refill.inconclusive(FAKE_CLI) is True
+        assert len(calls) == 2
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="needs an executable script")
+class TestLoadFailureAndRouteAdvice:
+    def test_exit_3_load_failure_message(self, tmp_path):
+        cli = _flex_kicad_cli(tmp_path, drc_exit=3, drc_stderr="Failed to load board\n")
+
+        res = run_geometric_drc(tmp_path / "b.kicad_pcb", kicad_cli=cli)
+
+        assert res.reason == geometric.REASON_LOAD_FAILED
+        note = res.note or ""
+        assert "could not load the board" in note
+        assert "file format newer" in note
+        assert "Failed to load board" in note  # kicad-cli's own stderr
+        assert "memory" not in note
+
+    def test_route_gate_load_failure_does_not_blame_memory(self, monkeypatch, tmp_path, capsys):
+        cli = _flex_kicad_cli(tmp_path, drc_exit=3, drc_stderr="Failed to load board\n")
+
+        errors, out = _route_gate_output(monkeypatch, tmp_path, cli, capsys)
+
+        assert errors >= 1
+        assert "could not load the board file" in out
+        assert "newer KiCad file format" in out
+        assert "memory" not in out
+        assert "DRC PASSED" not in out
+
+    @pytest.mark.parametrize(
+        ("reason", "returncode", "must", "must_not"),
+        [
+            (
+                geometric.REASON_UNSUPPORTED,
+                1,
+                ["Upgrade KiCad"],
+                ["memory"],
+            ),
+            (
+                geometric.REASON_LOAD_FAILED,
+                3,
+                ["could not load the board file", "upgrade KiCad"],
+                ["memory"],
+            ),
+            (
+                REASON_CRASH,
+                -signal.SIGKILL,
+                ["SIGKILL", "enough memory"],
+                ["pgrade KiCad"],
+            ),
+            (
+                REASON_CRASH,
+                -signal.SIGSEGV,
+                ["error output is quoted above"],
+                ["memory", "pgrade KiCad"],
+            ),
+            (
+                geometric.REASON_EXIT_ERROR,
+                1,
+                ["error output is quoted above"],
+                ["memory", "pgrade KiCad"],
+            ),
+            (
+                REASON_NO_REPORT,
+                None,
+                ["error output is quoted above"],
+                ["memory", "pgrade KiCad"],
+            ),
+        ],
+    )
+    def test_route_advice_is_per_reason(self, reason, returncode, must, must_not):
+        from kicad_tools.cli.route_cmd import _native_drc_failure_advice
+
+        geo = geometric.GeometricDRCResult(ran=False, reason=reason, returncode=returncode)
+        text = " ".join(_native_drc_failure_advice(geo))
+
+        for needle in must:
+            assert needle in text, (needle, text)
+        for needle in must_not:
+            assert needle not in text, (needle, text)
 
 
 # ---------------------------------------------------------------------------
