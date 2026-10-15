@@ -528,8 +528,9 @@ class FixSuggestionGenerator:
 
         suggestions.extend(
             [
-                "Run 'Annotate Schematic' to reassign unique references",
-                "Manually edit one component's reference to be unique",
+                "Run 'kct sch re-annotate <schematic>' to renumber references uniquely",
+                "Renumber only the duplicated prefix with "
+                "'kct sch re-annotate <schematic> --prefix <PREFIX>'",
                 "Check for copy-paste errors that duplicated components",
                 "Verify multi-unit symbols have correct unit assignments",
             ]
@@ -594,7 +595,7 @@ class FixSuggestionGenerator:
     def _suggest_unannotated(self, violation: ERCViolation) -> list[str]:
         """Suggest fixes for unannotated symbol errors."""
         return [
-            "Run 'Annotate Schematic' from Tools menu",
+            "Run 'kct sch re-annotate <schematic> --unannotated-only' to assign references",
             "Manually enter a reference designator for the symbol",
             "Check annotation settings (start number, prefix)",
             "Verify the symbol has a Reference field",

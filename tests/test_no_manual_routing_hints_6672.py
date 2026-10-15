@@ -91,3 +91,34 @@ def test_no_manual_routing_string_literals_in_src() -> None:
             ):
                 offenders.append(f"{path.relative_to(_SRC)}:{node.lineno}: {node.value!r}")
     assert not offenders, "\n".join(offenders)
+
+
+# Issue #6704: widen the policy beyond routing to other "do it by hand" hints.
+_MANUAL_OTHER = re.compile(
+    r"manual placement|manually edit|manual(ly)?\s+(review|intervention)"
+    r"|\bintervention\b|verify placement manually|press E to edit",
+    re.IGNORECASE,
+)
+
+
+def test_no_manual_intervention_string_literals_in_src() -> None:
+    """No user-facing string under src/ tells the user to step in by hand."""
+    offenders: list[str] = []
+    for path in _SRC.rglob("*.py"):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        docstrings = {
+            id(node.value)
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Expr)
+            and isinstance(node.value, ast.Constant)
+            and isinstance(node.value.value, str)
+        }
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Constant)
+                and isinstance(node.value, str)
+                and id(node) not in docstrings
+                and _MANUAL_OTHER.search(node.value)
+            ):
+                offenders.append(f"{path.relative_to(_SRC)}:{node.lineno}: {node.value!r}")
+    assert not offenders, "\n".join(offenders)

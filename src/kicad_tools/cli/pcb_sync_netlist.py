@@ -347,7 +347,7 @@ def sync_netlist(
                 # silently mistaken for a routing-density failure downstream.
                 result.warnings.append(
                     "No Edge.Cuts outline detected; new footprints placed at "
-                    "board origin (0, 0) — verify placement manually."
+                    "board origin (0, 0) — run 'kct check' to verify placement."
                 )
             x_offset = 0.0
             for action in result.added:
