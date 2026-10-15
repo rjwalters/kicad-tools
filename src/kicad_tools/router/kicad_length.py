@@ -687,6 +687,34 @@ class KicadLengthModel:
             segs, vias, self.pads_by_net.get(route.net, []), self.stackup, partial_net=True
         )
 
+    def routes_length(self, routes: Iterable[Route]) -> float:
+        """Length of one net held as several :class:`Route` fragments.
+
+        Summing :meth:`route_length` over fragments charges a via's span once
+        per fragment that touches it: two fragments on In1.Cu and In2.Cu that
+        share a via inside a through-hole pad each reach the pad side plus
+        their own inner layer, so the pad-side stretch is counted twice.  This
+        measures the merged geometry once (a via listed by several fragments
+        counts once), matching the PCB form of the whole net.
+        """
+        route_list = list(routes)
+        if not route_list:
+            return 0.0
+        segs: list[LSeg] = []
+        vias: list[LVia] = []
+        seen: set[tuple[float, float, float, tuple[str, str]]] = set()
+        for route in route_list:
+            r_segs, r_vias = route_geometry(route)
+            segs.extend(r_segs)
+            for via in r_vias:
+                key = (round(via.x, 6), round(via.y, 6), via.diameter, tuple(via.layers))
+                if key not in seen:
+                    seen.add(key)
+                    vias.append(via)
+        return net_length(
+            segs, vias, self.pads_by_net.get(route_list[0].net, []), self.stackup, partial_net=True
+        )
+
     def net_length_pcb(self, pcb: PCB, net_id: int) -> float:
         segs, vias, _pads = pcb_net_geometry(pcb, net_id)
         return net_length(segs, vias, self.pads_by_net.get(net_id, []), self.stackup)

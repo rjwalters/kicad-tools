@@ -150,6 +150,44 @@ class TestViaConnectedSpan:
         )
         assert model.route_length(route) == pytest.approx(5.0 + 1.58)
 
+    def test_fragments_sharing_tht_pad_via_count_span_once(self):
+        # Issue #6792: In1.Cu and In2.Cu fragments share a via inside a
+        # through-hole pad.  Summed per fragment the pad-side..In1 stretch is
+        # charged twice; the net-level entry point matches the PCB form.
+        stackup = KicadStackup.default(1.6, 4)
+        pad = LPad(10.0, 0.0, 1.2, 1.2, layers=None, side="F.Cu")
+        model = KicadLengthModel(stackup, {1: [pad]})
+        via = Via(10.0, 0.0, 0.3, 0.6, (Layer.F_CU, Layer.B_CU), net=1)
+
+        def frag(layer: Layer, x2: float) -> Route:
+            return Route(
+                net=1,
+                net_name="N",
+                segments=[Segment(10.0, 0.0, x2, 0.0, 0.2, layer, net=1)],
+                vias=[via],
+            )
+
+        routes = [frag(Layer.IN1_CU, 14.0), frag(Layer.IN2_CU, 6.0)]
+        whole = net_length(
+            [LSeg(10, 0, 14, 0, "In1.Cu"), LSeg(10, 0, 6, 0, "In2.Cu")],
+            [LVia(10.0, 0.0, 0.6, ("F.Cu", "B.Cu"))],
+            [pad],
+            stackup,
+        )
+        naive = sum(model.route_length(r) for r in routes)
+        assert naive > whole + 0.5
+        assert model.routes_length(routes) == pytest.approx(whole)
+
+    def test_single_fragment_routes_length_equals_route_length(self):
+        model = KicadLengthModel.default(1.6, 4)
+        route = Route(
+            net=1,
+            net_name="N",
+            segments=[Segment(0.0, 0.0, 5.0, 0.0, 0.2, Layer.F_CU, net=1)],
+            vias=[Via(5.0, 0.0, 0.3, 0.6, (Layer.F_CU, Layer.B_CU), net=1)],
+        )
+        assert model.routes_length([route]) == pytest.approx(model.route_length(route))
+
 
 class TestPadViaTrim:
     def test_diagonal_entry_into_via(self):
