@@ -66,6 +66,8 @@ from .optimizer.serpentine import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from .diffpair_detection import DetectedPair
     from .grid import RoutingGrid
     from .primitives import Route, Segment
@@ -101,6 +103,17 @@ class DiffPairTuneResult:
               segment long enough to host any trombone amplitude.
             * ``"unrouted"`` -- one or both halves were not in
               ``routes_by_net``.
+            * ``"not_length_critical"`` -- the engagement gate declined the
+              pair (``length_critical=False``); no change was made.
+            * ``"skew_limit_not_enforced"`` -- Issue #6664: in the
+              checker-limit engagement mode the pair's skew limit resolves
+              to ``skew_severity="warning"`` (an uncited protocol value
+              ``kct check`` only warns on), so the router declines to
+              tune it; no change was made.
+            * ``"rolled_back_skew_worse"`` -- Issue #6664 backstop in the
+              checker-limit path: the insertions would have left the
+              checker-measured skew larger than before, so they were
+              discarded; no change was made.
         attempts: Number of trombone insertions actually attempted.
         inserts_applied: Number of trombones whose post-insertion check
             passed and were committed.
@@ -108,6 +121,9 @@ class DiffPairTuneResult:
         skew_after_mm: Pair skew after the (possibly empty) sequence of
             successful insertions.
         message: Human-readable summary.
+        tolerance_mm: The skew limit the pair was tuned against (Issue
+            #6664: reported next to the before/after skew).  ``None`` when
+            the caller did not record it.
     """
 
     success: bool = False
@@ -117,6 +133,7 @@ class DiffPairTuneResult:
     skew_before_mm: float = 0.0
     skew_after_mm: float = 0.0
     message: str = ""
+    tolerance_mm: float | None = None
     # The trombone results, kept for diagnostic / test inspection.  An
     # entry is present for every attempt (including rejected ones).
     serpentine_results: list[SerpentineResult] = field(default_factory=list)
@@ -157,6 +174,8 @@ def tune_diff_pair_skew(
     grid: RoutingGrid | None = None,
     prefer_reserved_slack: bool = False,
     fixed_segment_ids: set[int] | None = None,
+    extra_clearance_ok: Callable[[list[Segment], int], bool] | None = None,
+    route_length: Callable[[Route], float] | None = None,
 ) -> tuple[Route, Route, DiffPairTuneResult]:
     """Tune the skew of a detected diff pair by serpentining the shorter half.
 
@@ -200,6 +219,21 @@ def tune_diff_pair_skew(
         prefer_reserved_slack: Issue #4085.  Gate for the slack-aware
             segment preference above.  Default ``False`` (inert).  Has no
             effect unless ``grid`` is also supplied.
+        extra_clearance_ok: Issue #6664.  Optional extra post-insertion
+            gate ``(new_segments, shorter_net_id) -> bool`` run after the
+            built-in segment-vs-segment self-check.  ``False`` rolls the
+            insertion back exactly like a built-in violation
+            (``reason="post_insertion_drc_violation"``).  The lattice
+            auto-engage path uses it for foreign pads, vias and net-class
+            clearances; ``None`` (default) keeps the pre-#6664 check.
+        route_length: Issue #6664.  Optional ``Route -> mm`` measure used
+            for every length and skew the tuner compares.  The lattice
+            auto-engage path passes the checker's via-inclusive measure
+            (segments plus drilled via barrel length), so a pair with
+            unequal via counts is tuned on the skew ``kct check`` reports
+            and the *checker's* shorter half gets the bump.  The serpentine
+            only ever adds segment length; via length is constant across
+            insertions.  ``None`` (default) keeps the segment-only measure.
 
     Returns:
         ``(p_route, n_route, result)`` where ``p_route`` and ``n_route`` are
@@ -259,8 +293,9 @@ def tune_diff_pair_skew(
     from .length import LengthTracker  # avoid cycle
     from .primitives import Route
 
-    l_p = LengthTracker.calculate_route_length(p_route)
-    l_n = LengthTracker.calculate_route_length(n_route)
+    measure = route_length or LengthTracker.calculate_route_length
+    l_p = measure(p_route)
+    l_n = measure(n_route)
     skew = abs(l_p - l_n)
 
     # Already within tolerance -- byte-for-byte unchanged.
@@ -348,7 +383,7 @@ def tune_diff_pair_skew(
         # using the configured maximum (1 mm by default) needlessly adds
         # 2 mm and can hit a neighboring lane before the DRC guard rejects
         # it. Scale that final loop to the actual remaining target instead.
-        length_needed = serpentine_target - LengthTracker.calculate_route_length(current_shorter)
+        length_needed = serpentine_target - measure(current_shorter)
         amplitude = base_config.amplitude
         if length_needed > 0:
             amplitude = min(amplitude, length_needed / 2.0)
@@ -380,8 +415,13 @@ def tune_diff_pair_skew(
                 is_escape=current_shorter.is_escape,
             )
         else:
+            # ``add_serpentine`` targets segment length; offset the
+            # (insertion-invariant) via length out of the target.
+            via_extra = measure(current_shorter) - LengthTracker.calculate_route_length(
+                current_shorter
+            )
             candidate_route, serp_result = attempt_generator.add_serpentine(
-                current_shorter, serpentine_target
+                current_shorter, serpentine_target - via_extra
             )
         result.serpentine_results.append(serp_result)
 
@@ -407,6 +447,9 @@ def tune_diff_pair_skew(
             longer_net_id=longer_id,
             routes_by_net=routes_by_net,
             intra_pair_clearance_mm=intra_pair_clearance_mm,
+        ) or (
+            extra_clearance_ok is not None
+            and not extra_clearance_ok(serp_result.new_segments, shorter_id)
         ):
             # Rollback: discard the candidate, return the ORIGINAL shorter
             # route (and the original longer route reference).
@@ -425,7 +468,7 @@ def tune_diff_pair_skew(
         # Commit this attempt's new route and re-measure skew.
         current_shorter = candidate_route
         result.inserts_applied += 1
-        new_shorter_length = LengthTracker.calculate_route_length(current_shorter)
+        new_shorter_length = measure(current_shorter)
         current_skew = (
             abs(new_shorter_length - target_length)
             if longer_is_p
@@ -450,9 +493,7 @@ def tune_diff_pair_skew(
         )
 
     result.skew_after_mm = (
-        abs(target_length - LengthTracker.calculate_route_length(current_shorter))
-        if result.inserts_applied > 0
-        else skew
+        abs(target_length - measure(current_shorter)) if result.inserts_applied > 0 else skew
     )
 
     # Assemble return values, restoring P/N polarity ordering.  The
