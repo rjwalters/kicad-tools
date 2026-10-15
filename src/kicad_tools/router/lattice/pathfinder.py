@@ -92,6 +92,22 @@ _GOAL: _State = (("GOAL",), -1)  # type: ignore[assignment]
 # widens the candidate set, never the copper.
 _OVERSIZE_STUB_KMAX = 4096
 
+#: Decline reasons ``_route_impl`` returns when its A* actually RAN and was
+#: exhausted (issues #6373, #4605, #4979).  The plain value and its two
+#: "constrained" refinements differ only in which diagnostic label wins when a
+#: keepout mask or a hard layer set pruned candidates on the way -- every one of
+#: them still means "a search ran and found no path".  Consumers that gate on
+#: exhaustion (the #6535 tap-chain retry, issue #6743) must use this set rather
+#: than compare one literal, so a diagnostic refinement cannot silently disable
+#: them.  ``no-egress-start``/``-end`` are deliberately NOT here: they name a
+#: dead-end escape at an endpoint, not an exhausted corridor search.
+REASON_NO_PATH = "no-path"
+REASON_NO_PATH_KEEPOUT = "no-path-keepout-constrained"
+REASON_NO_PATH_LAYER = "no-path-layer-constrained"
+EXHAUSTED_SEARCH_REASONS: frozenset[str] = frozenset(
+    {REASON_NO_PATH, REASON_NO_PATH_KEEPOUT, REASON_NO_PATH_LAYER}
+)
+
 #: Issue #6489: most re-negotiations with grown pads after a class-pad repair.
 _MAX_PAD_GROWTH_ROUNDS = 2
 
@@ -2084,7 +2100,7 @@ class LatticePathfinder:
             # pruned candidates), which is honest without claiming it was the
             # sole cause of the shortfall.
             if ko_pruned:
-                return None, "no-path-keepout-constrained"
+                return None, REASON_NO_PATH_KEEPOUT
             # Issue #6381: when every surviving escape stub of one end is a
             # dead end (no legal full-width edge or via out of its landing
             # node), THAT is why the search failed -- regardless of whether
@@ -2123,8 +2139,8 @@ class LatticePathfinder:
             # (the keepout wording above), and it is never a licence to ship
             # the forbidden copper: this branch returns no route at all.
             if layer_pruned:
-                return None, "no-path-layer-constrained"
-            return None, "no-path"
+                return None, REASON_NO_PATH_LAYER
+            return None, REASON_NO_PATH
 
         # -- reconstruct ---------------------------------------------------
         chain: list[_State] = [end_state]
