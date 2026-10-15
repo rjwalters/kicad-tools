@@ -690,7 +690,8 @@ covers created → curated, curated → `loom:issue`, building → review reques
 and review requested → merged. Beside the per-label counts, `stage_items` has
 queue states from one ETag-cached open-items walk per repo (#11847):
 `triage`, `unlabeled`, `curated_not_promoted`, `issue_open_pr`,
-`issue_no_pr`, `parked` and `pr_held`. They are absent, not `0`, for a repo
+`issue_no_pr`, `parked`, `pr_held` and `pr_champion_held` (the Champion-hold
+label shape, `loom:pr` + `loom:blocked`, #11905; it reads no marker, so markerless parks count too). They are absent, not `0`, for a repo
 whose walk did not complete. `stage_items` is per repo, so a per-host total is `sum by (state)`, and the
 states overlap, so never sum across them. It reads ETag-cached stage listings every 5
 minutes plus at most 8 per-item reads per sample, never per tick. With

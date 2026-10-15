@@ -773,6 +773,14 @@ assert_contains "$out" "not main" "non-main: warning names the reason"
 assert_eq "$(git -C "$CK" rev-parse HEAD)" "$before_head" "non-main: HEAD unchanged"
 assert_eq "$(git -C "$CK" symbolic-ref --short HEAD)" "topic" "non-main: branch unchanged"
 
+echo "Test 27b: an untracked machine config tier does not block the fast-forward"
+CK=$(make_synced_checkout); H=$(mktemp -d); advance_origin "$CK"
+mkdir -p "$CK/config"; echo '{}' > "$CK/config/defaults.json"
+out=$(HOME="$H" LOOM_HOME="$CK" PATH="$NODAEMON_PATH" bash "$CK/scripts/loom" update 2>&1)
+assert_contains "$out" "fast-forwarded" "untracked config/ only: checkout is fast-forwarded"
+assert_eq "$(git -C "$CK" rev-parse HEAD)" "$(git -C "$CK" rev-parse origin/main)" "untracked config/ only: HEAD == origin/main"
+assert_eq "$(cat "$CK/config/defaults.json")" "{}" "untracked config/ only: the config file is preserved"
+
 echo "Test 28: 'update --check' / '--dry-run' neither provision nor ff-sync (#10238)"
 CK=$(make_synced_checkout); H=$(mktemp -d); advance_origin "$CK"; before_head="$(git -C "$CK" rev-parse HEAD)"
 for f in --check --dry-run; do

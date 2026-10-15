@@ -39,6 +39,7 @@ test-build-gate-timeout.sh
 test-build-rs-watchset.sh
 test-build-slot.sh
 test-cargo-test-daemon-guard.sh
+test-champion-capped-hold-routing.sh
 test-champion-ci-checks-no-checks-signal.sh
 test-champion-critical-file-check.sh
 test-champion-evaluating-reclaim-trust.sh
