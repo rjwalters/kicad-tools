@@ -120,7 +120,7 @@ allowlist (`local_eval::CHEAP_CHECKS`), it does the following:
   `bash --noprofile --norc -eo pipefail <file>`.
 
 The allowlist covers toolchain-free gates that finish in seconds: Conflict
-Marker Check, File Size Ratchet, Markdown Token Ratchet, Role Prompt Prefix
+Marker Check, Markdown Token Ratchet, Role Prompt Prefix
 Ratchet, Docs/Defaults Parity Check, Doc Table-of-Contents Freshness, Vendored
 Private-Reference Scrub, and Dangling Link Check. Dangling Link Check needs
 `lychee` on `PATH` at **exactly** the version `ci.yml`'s install step pins

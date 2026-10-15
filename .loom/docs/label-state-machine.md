@@ -322,10 +322,14 @@ run unless `--apply`; writes are paced under the shared secondary write limit
 |---|---|
 | A PR carrying an operator-hold name and a **standing** trusted Champion hold marker, at `loom:pr` or out at Doctor (`loom:changes-requested`) | A reason-only park record and `loom:blocked`, then `loom:operator` itself removed. **`loom:pr` is never touched**, so the approval survives; a PR at `loom:changes-requested` stays Doctor work (Doctor serves a trusted-marker Champion hold) |
 | A proposal (`loom:curated` / `loom:architect` / `loom:hermit` / `loom:auditor`) carrying `loom:operator` that Champion escalated for a dependency-only finding (`<!-- champion:proposal-escalated -->`, every recurring finding a dependency with a reference) | Blockers still open: one park record per blocker, `loom:blocked`, `loom:operator` removed, a comment. Every blocker closed: `loom:operator` removed (the #5664 un-escalation, one last time). A cross-repo blocker: left on `loom:operator` |
+| An issue carrying `loom:operator` that the daemon's no-op hold parked before #12024 (a trusted `<!-- loom:noop-hold-kind=hold (#10156) -->` notice with no `kind=released` notice after it) | The daemon's `no-op hold` park record (`by=daemon`) and `loom:blocked`, then `loom:operator` removed. A daemon adopts the park from the forge and releases it when the issue's fingerprint changes ([No-op hold](#no-op-hold-10156)). Checked before the escalation row, since such an issue is usually `loom:curated` |
 | Anything else, and every retired name (`loom:operator-only`, `-decision`, `-mechanical`, `-blocked`) | Untouched here. The retired names may be a human's: the retired-name migration maps them to `loom:operator`, a park |
 
 Only `loom:operator` itself is ever removed, and only where a trusted Champion
-marker (or escalation record) says a role applied it.
+marker, escalation record or no-op hold notice says a role or the daemon
+applied it. A no-op hold applied before #11795 under `loom:operator-only` +
+`loom:operator-decision` is picked up by rerunning `--holds` after the
+retired-name migration.
 
 **Order and rollout gate.**
 
@@ -717,7 +721,7 @@ above. Nothing about the guard changes for any other blocking label.
 
 ## Label registry: the source of truth (#10013)
 
-> **Step dispatch (accepted design, #11894; not yet implemented).** Under `autonomous.workFinder.stepDispatch: on`, `stale_after_minutes` (live since #11898, see below) is the claim liveness of the five claim labels; a `queued` item state marks a PR in GitHub's merge queue, never drawn for a merge step; and a dead step's claim is restored to its own role's ready stage. See [`docs/design/work-finder-step-dispatch.md`](https://github.com/rjwalters/loom/blob/main/docs/design/work-finder-step-dispatch.md) §12.
+> **Step dispatch (#11894, live since #11909).** `stale_after_minutes` (live since #11898, see below) is the claim liveness of the five claim labels; a `queued` item state marks a PR in GitHub's merge queue, never drawn for a merge step; and a dead step's claim is restored to its own role's ready stage. See [`docs/design/work-finder-step-dispatch.md`](https://github.com/rjwalters/loom/blob/main/docs/design/work-finder-step-dispatch.md) §12.
 
 `defaults/labels.json` is the single source of truth for label semantics: each
 label's name, description, color, `kind`, `applied_by`/`removed_by`, and the
@@ -743,8 +747,10 @@ queries `operator_gate`; `label_literal_guard.rs` pins the rest). Changes go
 in the registry.
 The `propagate` table (#10012) was removed (#11510) after #11104 removed
 the star-liveness pass that read it. `lifecycle` is inert.
-`stale_after_minutes` is live for the five claim labels (#11898): curating 30,
-evaluating 15, building 15, reviewing 30, treating 60 minutes. It is the
+`stale_after_minutes` is live for the five claim labels (#11898): curating 45,
+evaluating 45, building 15, reviewing 45, treating 60 minutes (curating,
+evaluating and reviewing were raised by #11909 past the 30-minute step
+timeout, so a running step's claim never reads as stale). It is the
 default claim-liveness window (`loom-daemon/src/claim_liveness.rs`); the env
 overrides (`LOOM_STALE_<NAME>_MINUTES`) still win, and `loom:building`'s value
 is the lease TTL, because Builder liveness is the renewed lease. A dead step's
@@ -757,7 +763,55 @@ mapping the forge-side migration (#11511) applies. It is never rendered into
 
 ## No-op hold (#10156)
 
-A sweep that ends as a no-op (the `noop-cooldown record` IPC, or a Curator-only stop the reaper classifies) is counted per issue. After `autonomous.workFinder.noopCooldown.holdThreshold` consecutive no-ops (default 3, env `LOOM_WORK_FINDER_NOOP_HOLD_THRESHOLD`, `0` disables) with an unchanged fingerprint (labels minus claim churn, non-bot comments, linked-PR state, `## Dependencies` state), the daemon parks the issue: `loom:blocked` when dependencies are named, otherwise `loom:operator`, with one `<!-- loom:noop-hold (#10156) -->` comment. A priority label does not exempt an issue and is never touched. To unpark, remove the park labels and re-add `loom:issue`; any new comment, label change, linked-PR change or dependency change also restarts the count.
+A Builder step that ends `noop` (the step ledger's outcome, except a
+`ci_pending` wait), a sweep that self-reports a no-op (the `noop-cooldown
+record` IPC), or a Curator-only stop the reaper classifies is counted per issue
+against a fingerprint of what the conclusion depends on: labels minus lane
+churn (`loom:issue`, `loom:curated`, the claim labels), non-bot comments,
+linked-PR state and `## Dependencies` state. An unchanged fingerprint extends
+the streak; a changed one restarts it. The streak lives outside the step
+ledger, so Champion's promotion verdict, which clears every step cooldown on
+the item, does not reset it: a promote / Builder-no-op cycle parks at the
+threshold (#12024).
+
+**The streak is the fleet's (#12024).** Each host advertises its own count,
+with the fingerprint's digest, on the peer-claim channel (a `noop_streak` ad),
+and the hold compares this host's count **plus every peer's count on the same
+fingerprint** with `autonomous.workFinder.noopCooldown.holdThreshold` (default
+3, env `LOOM_WORK_FINDER_NOOP_HOLD_THRESHOLD`, `0` disables). Three no-ops on
+three dispatchers park an issue as surely as three on one. Parking or releasing
+publishes a streak break that resets every host's count. Without peer
+coordination (`safehouse.enabled` false) the streak is the host's own.
+
+**The park is `loom:blocked`, never `loom:operator`.** At the threshold the
+daemon writes a daemon-hold park record into the body
+(`<!-- loom:park Blocked by: (unstated) by=daemon at=… reason="no-op hold" -->`),
+adds `loom:blocked` (removing `loom:issue`), and posts one
+`<!-- loom:noop-hold (#10156) -->` notice that records the fingerprint digest
+(`<!-- loom:noop-hold-fp=… -->`). This holds whether the remaining work looks
+like a dependency or a human decision: the daemon must be able to release its
+own hold, and `loom:operator` is only removed by a human (#11861). A `loom:curated`
+issue that no-ops is parked the same way, so Champion does not re-promote it
+while nothing has changed. A priority label does not exempt an issue and is
+never touched; a `loom:frozen` issue gets no write.
+
+**Release is by fingerprint change.** The daemon re-reads each held issue
+(every 5 minutes on the host that parked it, every 30 minutes on a host that
+adopted it from the forge) and, once anything in the fingerprint changes (a
+comment, a label, a linked PR, a dependency closing), removes `loom:blocked`,
+restores `loom:issue` (unless another hold or lane veto is on it) and posts a
+`kind=released` notice. Any host adopts a no-op park it finds on the forge (the
+park record plus the notice) once per process, so the hold outlives the host
+that applied it. The stale-blocked release pass skips this record as a daemon
+hold. A human can also remove `loom:blocked` by hand; the next no-op then starts
+a fresh streak.
+
+**Holds applied before #12024** sit on `loom:operator` with the notice above.
+The daemon no longer lifts them (it never removes `loom:operator`); move them
+with `loom-daemon labels migrate --holds` (dry run, then `--apply`), which
+swaps `loom:operator` for the park record and `loom:blocked`; a daemon then
+adopts and releases them as above. See
+[Migrating the holds a role applied](#migrating-the-holds-a-role-applied-11861).
 
 ## Partial-increment remainder hold (#9264)
 

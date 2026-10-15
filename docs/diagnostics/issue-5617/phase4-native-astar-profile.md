@@ -212,3 +212,60 @@ uv run kct build-native --force            # restore the Release build
 Slice `native.json` to phase 4 by taking the second-largest profile (the route
 child) and accumulating sample weights between the `[phase 4 @ …]` and
 `[phase 5 @ …]` offsets in the script's log.
+
+## Follow-up: one via-drop verdict per `(x, y)` per loop call
+
+Takes up item 1 of "What is left in phase 4" above. `ViaBlockMemo` removed
+the per-*target-layer* repeat inside one expansion; the per-*node* repeat was
+still there. A node at `(x, y, L1)` -- in particular every node a via just
+reached from `(x, y, L0)` -- asks `is_via_blocked_diag` the exact question
+`(x, y, L0)` already answered: the inputs are the cell plus values fixed for
+the whole search (net, sharing mode, via radius, emit/fill overrides,
+`relief_mode_`) and the grid, which nothing in `pathfinder.cpp` mutates and
+Python cannot touch mid-call (the bindings hold the GIL).
+
+`run_astar_loop()` now consults an epoch-stamped `(x, y)` table
+(`Pathfinder::via_verdict_`, same generation-stamp scheme as the #3309 search
+arrays). The epoch advances at the top of **every** `run_astar_loop()` call --
+fresh search and each `resume()` -- so no verdict survives a point where
+Python could change the grid or the search parameters. The verdict and its
+`out_*` blocker diagnostics are replayed, so the per-layer `via_block_count`
+bookkeeping is unchanged, and the table is bypassed while a pairwise matrix is
+installed (same reason as `ViaBlockMemo`). The one-shot `route()` loop keeps
+`ViaBlockMemo`. No binding surface change (build version stays 55).
+
+### Paired measurement (Release build, no profiler)
+
+Host `loom-worker-2` (AWS, Intel Xeon Platinum 8488C, 16 vCPU, shared
+dispatch worker, 1-min load 2.9-5.1 during every run), Ubuntu 24.04, Linux
+7.0.0-1014-aws, CPython 3.12.3, g++ 13.3.0, kicad-cli 10.0.6, native build
+version 55. Base = `origin/main` `22ee53af`; the base `.so` for `base2` was
+built from `git archive origin/main` sources with the same CMake Release
+configuration and swapped in. Runs were sequential, in the order listed.
+
+| run | build | phase 4 | re-route child | whole script (wall) | user CPU |
+|---|---|---:|---:|---:|---:|
+| base1 | `22ee53af` | 349.8 s | 485.8 s | 8:35.0 | 596.7 s |
+| after1 | this change | 291.4 s | 436.1 s | 7:45.4 | 547.5 s |
+| after2 | this change | 288.2 s | 428.4 s | 7:38.4 | 540.6 s |
+| base2 | `22ee53af` | 342.5 s | 475.5 s | 8:24.4 | 584.6 s |
+
+**Phase 4: -16 % (mean 346.2 s -> 289.8 s). Re-route child: -10 % (480.7 s
+-> 432.3 s). Whole script: -9 % (8:29.7 -> 7:41.9).** Every other phase is
+unchanged within noise.
+
+### Equivalence and determinism
+
+All four runs: `diffpair_test_routed.kicad_pcb` identical after masking
+`(uuid ...)` / `(tstamp ...)` (object UUIDs differ between any two runs,
+base vs base included); the other nine `regression-output/` files
+byte-identical; routing logs identical line for line with timings masked;
+gate verdict identical (DRC errors 9 / allowed 18, reach 21/21, pour
+connectivity OK, all 3 diff-pair rules exercised, 23 routes / 5594 segments /
+35 vias). after1 and after2 are identical to each other, so `PYTHONHASHSEED=42`
+/ `--seed 42` determinism holds.
+
+`tests/router/test_via_verdict_epoch_5617.py` pins the cache's lifetime: a
+second `route_resumable()` on the same `Pathfinder`, after a foreign via is
+stored on the first search's via site, must move its via. A build that skips
+the per-call epoch bump fails that test (checked by hand).

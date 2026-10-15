@@ -165,6 +165,7 @@ it, only a hold label names a reason; other candidates are undecided.
 `PickSkipReason::from_disposition`, so a new disposition must be classified
 there. The step engine's weight-0 exclusions map through the parallel total match
 `PickSkipReason::from_exclusion`: `pool_exhausted` → `quota`, `build_backoff`
+→ `backoff`, `ci_pending` (a Judge step whose PR head has CI running, #12042)
 → `backoff`, `frozen` / `operator` / `hard_exclusion` → `operator_hold`,
 `claimed` / `queued` → `in_flight`, `shared_pr` → `pr_open_skip`, `sequenced`
 → `overlap_chain`, `blocked` → `blocked`, `capability_missing` →
@@ -218,7 +219,7 @@ one tick are not counted as multiple ticks.
 
 ## Record volume
 
-> **Step dispatch (accepted design, #11894; not yet implemented).** Under `autonomous.workFinder.stepDispatch: on`, item roles leave the fixed role-runner cadences, so this table no longer holds for them. Work-finder rows gain the step, the item-draw weight terms and `age_source`. See [`docs/design/work-finder-step-dispatch.md`](https://github.com/rjwalters/loom/blob/main/docs/design/work-finder-step-dispatch.md) §12.
+> **Step dispatch (#11894, live since #11909).** Item roles have left the fixed role-runner cadences, so this table no longer holds for Curator, Judge and Doctor. Work-finder records carry `item_draw` (the step, the weight terms, `age_source`, and `weight_overflow`), and each work-finder row's `stage` names its step. See [`docs/design/work-finder-step-dispatch.md`](https://github.com/rjwalters/loom/blob/main/docs/design/work-finder-step-dispatch.md) §12.
 
 Derived from the shipped default cadences, **not measured on a live fleet**:
 
