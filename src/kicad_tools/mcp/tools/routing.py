@@ -1376,7 +1376,11 @@ def _generate_suggestions(net_status, net_pads: list[dict], pcb: PCB) -> list[st
 
     # General suggestions
     suggestions.append("Try adjusting layer_preference parameter")
-    suggestions.append("Manual routing may be required for complex paths")
+    # Issue #6672: point at automation, never at hand-routing.
+    suggestions.append(
+        "Diagnose the blocker with `kct net-status --why`; if the router still "
+        "cannot complete the net, file it as a router-gap issue"
+    )
 
     return suggestions
 
