@@ -17915,7 +17915,7 @@ def _route_parser() -> argparse.ArgumentParser:
             "KiCad-oracle completion rounds for pour nets (Issue #5785). After "
             "the zone fill, route exactly the links kicad-cli reports as "
             "unconnected_items on GND/VCC-style pours, up to N rounds, stopping "
-            "at zero or when the count stops falling. Default 3; 0 disables the "
+            "at zero or when the count stops falling. Default 12; 0 disables the "
             "loop and the stranded-pad verdict."
         ),
     )

@@ -52,7 +52,11 @@ from kicad_tools.cli.format_options import (
 )
 from kicad_tools.core.sexp_file import load_pcb, save_pcb, verify_pcb_write
 from kicad_tools.router.track_index import TrackSpatialIndex, build_track_index
-from kicad_tools.router.via_clearance import drill_hole_to_hole_clear
+from kicad_tools.router.via_clearance import (
+    COORD_WRITE_GUARD_MM,
+    HOLE_TO_HOLE_TOLERANCE,
+    drill_hole_to_hole_clear,
+)
 from kicad_tools.schema.pcb import _is_footprint_tag
 from kicad_tools.sexp import SExp
 from kicad_tools.sexp.builders import segment_node, via_node
@@ -78,13 +82,37 @@ KICAD_HOLE_TO_COPPER_CLEARANCE = 0.25
 #: of a foreign through-hole pad / via drill.
 MIN_HOLE_TO_HOLE_CLEARANCE = 0.5
 
+#: Issue #6671: drill floor slack for :func:`drill_hole_to_hole_clear`,
+#: which already forgives ``HOLE_TO_HOLE_TOLERANCE``; adding it back keeps
+#: the full :data:`COORD_WRITE_GUARD_MM` of rounding slack.
+DRILL_FLOOR_SLACK_MM = COORD_WRITE_GUARD_MM + HOLE_TO_HOLE_TOLERANCE
+
+
+def _same_net_via_spacing(
+    via_size: float, clearance: float, via_drill: float, min_hole_to_hole: float
+) -> float:
+    """Minimum centre distance between two stitch vias of one net (#3855, #6671).
+
+    Copper clearance or the drill hole-to-hole floor, whichever is larger,
+    plus :data:`COORD_WRITE_GUARD_MM` -- both vias may be new (placed in the
+    same pass) and both are rounded to 0.01 mm when written.
+    """
+    spacing = via_size + clearance
+    if via_drill > 0:
+        spacing = max(spacing, min_hole_to_hole + via_drill)
+    return spacing + COORD_WRITE_GUARD_MM
+
+
 #: A pad from :func:`find_all_pad_bboxes`:
-#: ``(min_x, min_y, max_x, max_y, net_num, shape, bound_r)`` (Issue #6683
-#: appended ``shape`` and ``bound_r``; ``[4]`` is still the net).
+#: ``(min_x, min_y, max_x, max_y, net_num, shape, bound_r, corner_r)``
+#: (Issue #6683 appended ``shape`` and ``bound_r``, Issue #6671
+#: ``corner_r``; ``[4]`` is still the net).
 #: ``bound_r`` is ``max(w, h) / 2`` of the UNROTATED pad size: the exact
 #: radius of a ``circle`` and the enclosing-circle radius of an ``oval``
-#: (stadium) at any rotation.
-PadBBox = tuple[float, float, float, float, int, str, float]
+#: (stadium) at any rotation.  ``corner_r`` is a ``roundrect`` pad's
+#: corner radius when the box is exact (cardinal angles, no chamfer), else
+#: 0.0 (the plain box).
+PadBBox = tuple[float, float, float, float, int, str, float, float]
 
 
 def _count_copper_layers(pcb_path: Path) -> int:
@@ -1113,6 +1141,7 @@ def find_all_pad_bboxes(sexp: SExp, exclude_nets: set[int] | None = None) -> lis
             height = size_node.get_float(1) or 0.0
             shape = pad.get_string(2) or "rect"
 
+            corner_r = 0.0
             if shape == "circle":
                 # Exact bounding square; rotation-invariant.
                 half_w = half_h = max(width, height) / 2
@@ -1123,6 +1152,10 @@ def find_all_pad_bboxes(sexp: SExp, exclude_nets: set[int] | None = None) -> lis
                     pw, ph = _rotated_rect_half_extents(width, height, pad_angle)
                     half_w = max(half_w, pw)
                     half_h = max(half_h, ph)
+                if shape == "roundrect":
+                    corner_r = _roundrect_corner_radius(
+                        pad, width, height, fp_rotation_deg, pad_angle
+                    )
 
             bboxes.append(
                 (
@@ -1133,10 +1166,47 @@ def find_all_pad_bboxes(sexp: SExp, exclude_nets: set[int] | None = None) -> lis
                     net_num,
                     shape,
                     max(width, height) / 2,
+                    corner_r,
                 )
             )
 
     return bboxes
+
+
+def _is_cardinal(angle_deg: float) -> bool:
+    """Whether ``angle_deg`` is a multiple of 90 degrees (to 0.001)."""
+    rem = angle_deg % 90
+    return rem < 0.001 or rem > 90 - 0.001
+
+
+def _roundrect_corner_radius(
+    pad: SExp,
+    width: float,
+    height: float,
+    fp_rotation_deg: float,
+    pad_angle: float | None,
+) -> float:
+    """Corner radius of a ``roundrect`` pad's box, or 0.0 when unsafe (#6671).
+
+    KiCad's corner radius is ``roundrect_rratio * min(w, h)`` (ratio capped
+    at 0.5).  It is only exact when the box is axis-aligned, i.e. both the
+    footprint angle and the pad's own angle are cardinal; a pad-local 90
+    degree turn widens the box to the union of both orientations
+    (:func:`find_all_pad_bboxes`), and the rounded union still contains the
+    true rounded pad, because both share the radius.  A chamfered pad has
+    square (cut) corners elsewhere, so it keeps the plain box.
+    """
+    if not _is_cardinal(fp_rotation_deg):
+        return 0.0
+    if pad_angle is not None and not _is_cardinal(pad_angle):
+        return 0.0
+    if pad.find_child("chamfer_ratio") is not None or pad.find_child("chamfer") is not None:
+        return 0.0
+    ratio_node = pad.find_child("roundrect_rratio")
+    if ratio_node is None:
+        return 0.0
+    ratio = min(max(ratio_node.get_float(0) or 0.0, 0.0), 0.5)
+    return ratio * min(width, height)
 
 
 def _rotated_rect_half_extents(
@@ -1197,6 +1267,7 @@ def _pad_copper_gap(
     x2: float,
     y2: float,
     pad_bbox: PadBBox
+    | tuple[float, float, float, float, int, str, float]
     | tuple[float, float, float, float, int, str]
     | tuple[float, float, float, float, int],
 ) -> float:
@@ -1219,9 +1290,14 @@ def _pad_copper_gap(
       safe radius off-axis: a 2.0 x 0.5 oval at 45 deg has a 0.884 AABB
       half-side but a 1.0 tip.)  A 6-tuple without ``bound_r`` falls back
       to the box's half-diagonal, which always encloses.
-    * everything else (``rect``, ``roundrect``, ``trapezoid``, ``custom``,
-      or a legacy 5-tuple without a shape): the box, which is exact for a
-      rect and conservative by at most the corner relief otherwise.
+    * ``roundrect`` with a ``corner_r`` (Issue #6671): exact -- the inner
+      box ``corner_r`` in from each side, grown by ``corner_r``.  A plain
+      box over-refuses diagonal sites by ``(sqrt(2) - 1) x corner_r``
+      (0.093 mm beside a 0.9 x 0.95, rratio 0.25 0603 pad: board 03 C5).
+    * everything else (``rect``, ``trapezoid``, ``custom``, a ``roundrect``
+      without a usable radius, or a legacy 5-tuple without a shape): the
+      box, which is exact for a rect and conservative by at most the corner
+      relief otherwise.
     """
     min_x, min_y, max_x, max_y = pad_bbox[0], pad_bbox[1], pad_bbox[2], pad_bbox[3]
     shape = pad_bbox[5] if len(pad_bbox) > 5 else "rect"
@@ -1237,6 +1313,13 @@ def _pad_copper_gap(
         else:
             bound_r = math.hypot(max_x - min_x, max_y - min_y) / 2
         return max(box_gap, centre_dist - bound_r)
+    corner_r = float(pad_bbox[7]) if len(pad_bbox) > 7 else 0.0
+    if shape == "roundrect" and corner_r > 0.0:
+        r = min(corner_r, (max_x - min_x) / 2, (max_y - min_y) / 2)
+        inner = _segment_to_rect_distance(
+            x1, y1, x2, y2, min_x + r, min_y + r, max_x - r, max_y - r
+        )
+        return max(0.0, inner - r)
     return box_gap
 
 
@@ -2281,9 +2364,10 @@ def calculate_via_position(
             # center-to-center is ``min_hole_to_hole + via_drill`` (two
             # equal radii).  The copper threshold ``via_size + clearance``
             # may be smaller than this on tight floors, so take the max.
-            same_net_min_dist = via_size + clearance
-            if via_drill > 0:
-                same_net_min_dist = max(same_net_min_dist, min_hole_to_hole + via_drill)
+            # Issue #6671: plus the 0.01 mm write-rounding guard.
+            same_net_min_dist = _same_net_via_spacing(
+                via_size, clearance, via_drill, min_hole_to_hole
+            )
             for vx, vy, _vnet in existing_vias:
                 dist = math.sqrt((vx - via_x) ** 2 + (vy - via_y) ** 2)
                 if dist < same_net_min_dist:
@@ -2368,7 +2452,8 @@ def calculate_via_position(
                 for dx_, dy_, ddrill, _dnet in other_net_drills:
                     center_dist = math.sqrt((dx_ - via_x) ** 2 + (dy_ - via_y) ** 2)
                     edge_dist = center_dist - cand_drill_radius - ddrill / 2
-                    if edge_dist + 1e-3 < min_hole_to_hole:
+                    # Issue #6671: keep the write-rounding guard.
+                    if edge_dist < min_hole_to_hole + COORD_WRITE_GUARD_MM:
                         conflict = True
                         break
 
@@ -2683,6 +2768,7 @@ def calculate_dogleg_via_position(
 
     via_radius = via_size / 2
     trace_half_width = trace_width / 2
+    same_net_spacing = _same_net_via_spacing(via_size, clearance, via_drill, min_hole_to_hole)
 
     pad_radius = max(pad.width, pad.height) / 2
 
@@ -2772,10 +2858,11 @@ def calculate_dogleg_via_position(
                     # Check via position clearance (same as straight-line)
                     conflict = False
 
-                    # Check same-net via spacing
+                    # Check same-net via spacing (Issue #6671: with the drill
+                    # hole-to-hole floor, as the straight strategy does).
                     for vx, vy, _vnet in existing_vias:
                         dist = math.sqrt((vx - via_x) ** 2 + (vy - via_y) ** 2)
-                        if dist < via_size + clearance:
+                        if dist < same_net_spacing:
                             conflict = True
                             break
                     if conflict:
@@ -2868,7 +2955,7 @@ def calculate_dogleg_via_position(
                             via_y,
                             via_drill,
                             [(dx_, dy_, dd_) for dx_, dy_, dd_, _dn in other_net_drills],
-                            min_hole_to_hole=min_hole_to_hole,
+                            min_hole_to_hole=min_hole_to_hole + DRILL_FLOOR_SLACK_MM,
                         ):
                             continue
 
@@ -3135,6 +3222,7 @@ def calculate_extended_escape_position(
 
     via_radius = via_size / 2
     trace_half_width = trace_width / 2
+    same_net_spacing = _same_net_via_spacing(via_size, clearance, via_drill, min_hole_to_hole)
     pad_radius = max(pad.width, pad.height) / 2
 
     # Issue #4432: same-net fill containment gate (see calculate_via_position).
@@ -3207,7 +3295,7 @@ def calculate_extended_escape_position(
         # Check same-net via spacing
         for evx, evy, _vnet in existing_vias:
             dist = math.sqrt((evx - vx) ** 2 + (evy - vy) ** 2)
-            if dist < via_size + clearance:
+            if dist < same_net_spacing:
                 return False
 
         # Check other-net track clearance
@@ -3254,7 +3342,7 @@ def calculate_extended_escape_position(
                 vy,
                 via_drill,
                 [(dx_, dy_, dd_) for dx_, dy_, dd_, _dn in other_net_drills],
-                min_hole_to_hole=min_hole_to_hole,
+                min_hole_to_hole=min_hole_to_hole + DRILL_FLOOR_SLACK_MM,
             ):
                 return False
 
