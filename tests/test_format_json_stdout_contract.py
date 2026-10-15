@@ -528,6 +528,10 @@ def test_flag_variants_extend_registered_leaves():
         assert argv[: len(leaf.split())] == leaf.split(), variant
 
 
+# The variant subprocess gets 2x ``_SUBPROCESS_TIMEOUT_S``, which exceeds CI's global
+# ``--timeout=60``; without a larger per-test budget pytest-timeout fires first and
+# the in-test process-group kill never gets to report cleanly (#6733).
+@pytest.mark.timeout(3 * _SUBPROCESS_TIMEOUT_S)
 @pytest.mark.parametrize("variant", sorted(FLAG_VARIANT_ARGV))
 def test_format_json_flag_variant_stdout_is_a_single_json_document(variant, tmp_path):
     scratch = tmp_path / "proj"
