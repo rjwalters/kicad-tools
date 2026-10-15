@@ -591,9 +591,24 @@ class Pad:
     shape: str = "rect"
     """Authored shape; absent programmatic metadata uses a conservative rectangle.
 
-    Circles alone use a disc. Oval and roundrect use their enclosing rotated
-    rectangle until exact rounded geometry is supported. Custom/trapezoid
-    nominal dimensions do not bound their copper and are rejected explicitly.
+    The clearance kernel (:func:`~kicad_tools.router.clearance_shapes.pad_shape`)
+    measures circles as discs and ovals as stadiums -- both are fully
+    determined by ``width``/``height``. A roundrect's corner radius is
+    ``roundrect_rratio * min(width, height)``, so it is measured exactly only
+    when :attr:`roundrect_rratio` carries the file's ratio; without one it is
+    measured as its enclosing rotated rectangle (never an assumed ratio, which
+    would over-round a small-ratio pad's corners and hide a real near-miss --
+    issue #6718). Grid/AABB consumers still use the enclosing rectangle.
+    Custom/trapezoid nominal dimensions do not bound their copper and are
+    rejected explicitly.
+    """
+
+    roundrect_rratio: float | None = None
+    """The file's ``(roundrect_rratio X)`` for a ``roundrect`` pad (issue #6718).
+
+    ``None`` means "unknown": the clearance kernel then treats the roundrect as
+    its rectangle, which can only over-report a corner near-miss. Ignored for
+    every other shape.
     """
 
     # Physical drill metadata, independent of the copper's residual rotation.

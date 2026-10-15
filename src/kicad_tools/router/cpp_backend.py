@@ -91,7 +91,9 @@ logger = logging.getLogger(__name__)
 # v54 (Issue #6473): ``CoupledPathfinder.route`` holds a layer change to the
 # fab hole-to-hole floor against the pair's own earlier vias and between the
 # P and N via of the move.  A v53 .so returns coupled via pairs below it.
-_REQUIRED_CPP_BUILD_VERSION = 55
+# v56 (Issue #6718): ``Grid3D.set_pad_authored`` takes a trailing ``rratio``
+# (the file's roundrect corner ratio); a v55 .so rejects the argument.
+_REQUIRED_CPP_BUILD_VERSION = 56
 
 
 # Issue #5599: human-readable names for the ``ValidationResult::violation_type``
@@ -4298,7 +4300,13 @@ class CppPathfinder:
         t0 = time.monotonic()
         # Python Router.route() does not accept start_layers/end_layers;
         # it derives layer information internally from pad attributes.
-        route = self._py_router.route(
+        # Issue #6527: opt-in bidirectional A* for the fallback (default off).
+        _fallback_route = (
+            self._py_router.route_auto
+            if getattr(self._py_router.rules, "fallback_bidirectional", False) is True
+            else self._py_router.route
+        )
+        route = _fallback_route(
             start,
             end,
             net_class=net_class,
@@ -5139,10 +5147,14 @@ def sync_authored_floors(cpp_grid: CppGrid, py_grid: RoutingGrid) -> None:
             "Rebuild the native router (`kct build-native`): authored netclass "
             "clearance support (Issue #6243) is required"
         )
+    from .clearance_shapes import pad_kernel_params
+
     for index, pad in enumerate(py_grid._pads):
+        # Issue #6718: the same effective (shape, rratio) ``pad_shape`` uses.
+        shape, rratio = pad_kernel_params(pad)
         impl.set_pad_authored(
             index,
-            pad.shape,
+            shape,
             pad.width,
             pad.height,
             pad.rotation,
@@ -5150,6 +5162,7 @@ def sync_authored_floors(cpp_grid: CppGrid, py_grid: RoutingGrid) -> None:
             pad.y,
             pad.drill if pad.through_hole else 0.0,
             float(pad.authored_clearance),
+            rratio,
         )
     # Installs the floors and rebuilds the native index (or drops it when
     # nothing is active any more).

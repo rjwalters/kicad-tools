@@ -64,17 +64,20 @@ __all__ = [
     "gap_deficit",
     "hole_gap",
     "overlaps",
+    "pad_kernel_params",
     "pad_shape",
     "segment_shape",
     "shapes_clear",
     "via_shape",
 ]
 
-#: KiCad's default roundrect corner ratio, used when a pad carries no explicit
-#: one.  The router's :class:`~kicad_tools.router.primitives.Pad` has no
-#: ``roundrect_rratio`` field, so this is the only value available -- and it is
-#: the same default ``clearance_kernel.make_pad`` documents.
+#: KiCad's default roundrect corner ratio -- the ``make_pad`` signature default.
+#: :func:`pad_shape` never substitutes it for a router pad's missing ratio
+#: (issue #6718); it is only the don't-care argument of a ``rect`` build.
 DEFAULT_ROUNDRECT_RRATIO = 0.25
+
+#: KiCad clamps ``roundrect_rratio`` to ``[0, 0.5]`` (``PAD::SetRoundRectRadiusRatio``).
+_MAX_ROUNDRECT_RRATIO = 0.5
 
 
 def segment_shape(seg: Segment) -> KSegment:
@@ -102,6 +105,24 @@ def via_shape(via: Via) -> KVia:
     return KVia(x=via.x, y=via.y, diameter=via.diameter, drill=via.drill)
 
 
+def pad_kernel_params(pad: Pad) -> tuple[str, float]:
+    """The effective ``(shape, rratio)`` the kernel builds ``pad`` from (#6718).
+
+    A ``roundrect`` uses the file's ``pad.roundrect_rratio`` clamped to
+    KiCad's ``[0, 0.5]``; with no ratio (``None``) it degrades to ``rect``.
+    Every other shape passes through with the unused default ratio.  The
+    native authored gate (``cpp_backend`` ``set_pad_authored``) receives the
+    same pair, so Python and C++ measure the same copper.
+    """
+    shape = pad.shape
+    if shape != "roundrect":
+        return shape, DEFAULT_ROUNDRECT_RRATIO
+    file_rratio = getattr(pad, "roundrect_rratio", None)
+    if file_rratio is None:
+        return "rect", DEFAULT_ROUNDRECT_RRATIO
+    return shape, min(max(float(file_rratio), 0.0), _MAX_ROUNDRECT_RRATIO)
+
+
 def pad_shape(pad: Pad) -> KPad:
     """A :class:`~primitives.Pad` as kernel copper.
 
@@ -114,12 +135,20 @@ def pad_shape(pad: Pad) -> KPad:
 
     A through-hole pad is copper on every layer, and its hole is modelled from
     ``pad.drill`` so hole queries have something to read.
+
+    A ``roundrect`` uses the file's ``pad.roundrect_rratio`` (clamped to
+    KiCad's ``[0, 0.5]``). When the ratio is unknown (``None``) the pad is
+    measured as its rectangle -- conservative, since the rectangle contains
+    every roundrect of the same size. Assuming KiCad's 0.25 default instead
+    would round a small-ratio pad's corners away and hide a real corner
+    near-miss (issue #6718).
     """
+    shape, rratio = pad_kernel_params(pad)
     return make_pad(
-        pad.shape,
+        shape,
         pad.width,
         pad.height,
-        DEFAULT_ROUNDRECT_RRATIO,
+        rratio,
         pad.rotation,
         pad.x,
         pad.y,

@@ -259,7 +259,8 @@ def router_pad(spec: PadSpec, nets: dict[str, int]) -> Pad:
     ``io.py`` parser here, so the full board angle is the residual.  ``shape``
     is carried verbatim so a consumer that models a circle as a disc and a
     roundrect as its bounding rectangle does exactly that -- the
-    ``roundrect-corner-gap`` fixture depends on it.
+    ``roundrect-corner-gap`` fixture depends on it.  A roundrect also carries
+    the fixture's ``roundrect_rratio``, as the ``io.py`` loaders do (#6718).
     """
     shape = spec.shape
     return Pad(
@@ -275,6 +276,7 @@ def router_pad(spec: PadSpec, nets: dict[str, int]) -> Pad:
         through_hole=False,
         rotation=spec.rotation,
         shape=shape.shape,
+        roundrect_rratio=shape.roundrect_rratio if shape.shape == "roundrect" else None,
     )
 
 

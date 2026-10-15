@@ -1029,6 +1029,7 @@ def build_worker_router(config: dict) -> Autorouter:
             # it would rebuild every rotated pad as axis-aligned.
             rotation=pad_data.get("rotation", 0.0),
             shape=pad_data.get("shape", "rect"),
+            roundrect_rratio=pad_data.get("roundrect_rratio"),
         )
         key = pad.key
         if key in router.pads and router.pads[key].net != pad.net:
@@ -3105,6 +3106,7 @@ class Autorouter:
                 drill=pad_info.get("drill", 0.0),
                 rotation=pad_info.get("rotation", 0.0),
                 shape=pad_info.get("shape", "rect"),
+                roundrect_rratio=pad_info.get("roundrect_rratio"),
                 # Issue #6243: a neutralised pad keeps its authored minimum.
                 authored_clearance=float(pad_info.get("authored_clearance", 0.0) or 0.0),
             )
@@ -18331,6 +18333,7 @@ class Autorouter:
                     "steiner_point": pad.steiner_point,
                     "rotation": pad.rotation,
                     "shape": pad.shape,
+                    "roundrect_rratio": pad.roundrect_rratio,
                     "pin_pitch": self.grid._pad_pin_pitch.get(id(pad)),
                 }
             )
@@ -20352,10 +20355,21 @@ class Autorouter:
         # Issue #6725: measure exactly as kicad-cli / ``kct check`` do (board
         # stackup span between connected layers, pad/via clipping) through the
         # one shared function; ``board_thickness_mm`` and
-        # ``blind_buried_supported`` no longer enter the measurement.
+        # ``blind_buried_supported`` no longer enter the length measurement.
         board_thickness_mm: float | None = None
-        blind_buried_supported = False
         length_model = self._kicad_length_model(num_layers)
+
+        # Issue #6675: the resolved via model is still plumbed through the
+        # engagement gate, the tuner and the rollback guard so they agree on
+        # what the router may emit.  Sourced from ``self.via_rules`` (an
+        # optional attribute); defaults to False (through-holes only).
+        blind_buried_supported = False
+        _via_rules = getattr(self, "via_rules", None)
+        if _via_rules is not None:
+            blind_buried_supported = bool(
+                getattr(_via_rules, "allow_blind", False)
+                or getattr(_via_rules, "allow_buried", False)
+            )
 
         self._match_group_tracker.record_routes(
             routes=self.routes,
@@ -20448,8 +20462,21 @@ class Autorouter:
                     group, self.net_names, getattr(self, "net_class_map", None)
                 )
                 length_critical = True
+                # Issue #6675: the gate, the rollback guard below and the
+                # tuner all measure with the RESOLVED via model.  ``kct check``
+                # (``validate/checker.py`` -> ``derive_group_skew_data``)
+                # always measures with ``blind_buried_supported=False``; the
+                # two agree on every board the router emits (through-holes
+                # only), but an HDI board allowing blind/buried vias would
+                # see router and checker diverge here -- by design, not by
+                # accident.
                 spread_mm = self._checker_group_spread_mm(
-                    group, routes_by_net, board_thickness_mm, num_layers, length_model
+                    group,
+                    routes_by_net,
+                    board_thickness_mm,
+                    num_layers,
+                    length_model,
+                    blind_buried_supported=blind_buried_supported,
                 )
                 if spread_mm is None or spread_mm <= tolerance_mm:
                     results[group.name] = {}
@@ -20468,6 +20495,24 @@ class Autorouter:
                         f"  {group.name}: spread {spread_mm:.3f}mm > limit "
                         f"{tolerance_mm:.3f}mm; tuning"
                     )
+
+            # Issue #6675: the pair-skew invariant needs each pair's own
+            # checker limit, so a pair the diff-pair tuner (#6664) left inside
+            # it stays inside it while the group tuner lengthens the lane.
+            pair_skew_limits_mm: dict[tuple[int, int], float] | None = None
+            if engage == "checker_limit" and group.pair_ids:
+                from kicad_tools.validate.diffpair_engagement import (
+                    resolve_pair_thresholds,
+                )
+
+                pair_skew_limits_mm = {
+                    (p_id, n_id): resolve_pair_thresholds(
+                        getattr(self, "net_class_map", None),
+                        self.net_names.get(p_id, ""),
+                        self.net_names.get(n_id, ""),
+                    ).skew_mm
+                    for p_id, n_id in group.pair_ids
+                }
 
             # Phase 2F (#2701) requires intra_pair_clearance_mm
             # unconditionally for groups whose pair_ids is non-empty.  The
@@ -20492,6 +20537,8 @@ class Autorouter:
                     blind_buried_supported=blind_buried_supported,
                     length_model=length_model,
                     fixed_segment_ids=fixed_segment_ids,
+                    pair_fallbacks=engage == "checker_limit",
+                    pair_skew_limits_mm=pair_skew_limits_mm,
                 )
             except ValueError as exc:
                 # Defensive: a malformed group (e.g. mixed pair/scalar
@@ -20501,6 +20548,34 @@ class Autorouter:
                     print(f"  {group.name}: skipped ({exc})")
                 results[group.name] = {}
                 continue
+
+            # Issue #6675 rollback guard: in checker-limit mode a group that is
+            # still over the limit after tuning keeps NONE of its serpentines.
+            # Committing meanders that do not clear the error only adds copper
+            # (07rf DDR_DATA_BYTE_0: "8 tuned" next to an unchanged 18.171mm).
+            still_over_limit: tuple[float, float] | None = None
+            if engage == "checker_limit":
+                spread_after = self._checker_group_spread_mm(
+                    group,
+                    routes_by_net,
+                    board_thickness_mm,
+                    num_layers,
+                    length_model,
+                    blind_buried_supported=blind_buried_supported,
+                )
+                if spread_after is not None and spread_after > tolerance_mm:
+                    still_over_limit = (spread_after, tolerance_mm)
+                    from .match_group_tuning import mark_group_rolled_back
+
+                    group_results = mark_group_rolled_back(
+                        group_results,
+                        before_by_net,
+                        spread_mm=spread_after,
+                        tolerance_mm=tolerance_mm,
+                    )
+                    for net in group_results:
+                        if net in before_by_net:
+                            routes_by_net[net] = before_by_net[net]
 
             # The tuner mutates its lookup as members commit. Compare against
             # the pre-call view, preserving original fragments on no-op/rollback.
@@ -20558,7 +20633,13 @@ class Autorouter:
                     (res.length_before_mm, res.length_after_mm)
                     for (_r, res) in group_results.values()
                 )
-                if _skew is not None:
+                if still_over_limit is not None:
+                    print(
+                        f"    STILL OVER LIMIT: spread {still_over_limit[0]:.3f}mm > "
+                        f"limit {still_over_limit[1]:.3f}mm after tuning; "
+                        "rolled back every serpentine in the group"
+                    )
+                elif _skew is not None:
                     _skew_before, _skew_after = _skew
                     print(f"    skew: {_skew_before:.3f}mm -> {_skew_after:.3f}mm")
                 # Issue #3440 addendum: rollbacks / budget exhaustion /
@@ -20570,6 +20651,7 @@ class Autorouter:
                     "exceeded_max_inserts",
                     "cascade_budget_exhausted",
                     "no_suitable_segment",
+                    "rolled_back_pair_skew",
                 )
                 for member_net_id in sorted(group_results):
                     res = group_results[member_net_id][1]
@@ -20599,6 +20681,8 @@ class Autorouter:
         board_thickness_mm: float | None,
         num_copper_layers: int,
         length_model: KicadLengthModel | None = None,
+        *,
+        blind_buried_supported: bool = False,
     ) -> float | None:
         """Return ``group``'s skew measured the way ``kct check`` measures it.
 
@@ -20607,6 +20691,10 @@ class Autorouter:
         diff-pair member contributes ``(L_P + L_N) / 2``, and every length is
         the shared kicad-cli-exact measurement (issue #6725).  Returns ``None`` when a member is unrouted
         or fewer than two lanes exist -- the checker omits such groups.
+
+        ``blind_buried_supported`` (Issue #6675) is the router's resolved via
+        model, so the engagement gate, the rollback guard and the tuner agree.
+        The default ``False`` is what ``kct check`` always uses.
         """
         from .match_group_length import MatchGroupTracker
 
@@ -20618,7 +20706,7 @@ class Autorouter:
                 route,
                 board_thickness_mm,
                 num_copper_layers,
-                blind_buried_supported=False,
+                blind_buried_supported=blind_buried_supported,
                 length_model=length_model,
             )
 
