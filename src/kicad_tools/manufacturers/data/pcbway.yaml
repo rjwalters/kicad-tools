@@ -11,6 +11,34 @@
 #
 # All measurements in millimeters unless otherwise noted.
 #
+# Via-type capabilities (Issue #6640, verified 2026-10-14):
+# ``blind_buried_vias_supported`` is ``true`` on the 4- and 6-layer configs
+# only.  ``micro_vias_supported`` stays ``false`` everywhere: the micro-via
+# claim is sourced (below) but ``validate/rules/dimensions.py`` skips every
+# dimension check for micro vias (#3118), so turning the flag on would let
+# out-of-window or non-adjacent-layer microvias pass.  Enabling it is blocked
+# on encoding the 4-8 mil laser-drill window, PCBWay's "dielectric thickness
+# cannot exceed 0.15mm" limit and the single-dielectric (adjacent-layer) span
+# (follow-up to #6640).
+#   - https://www.pcbway.com/hdi-pcb.html: "PCBWay manufactures and assembles
+#     HDI PCBs designed with blind, buried, and micro-via technologies";
+#     capability table "Via Types: Blind via, buried via, through-hole via",
+#     "HDI builds 1+N+1, 2+N+2, ... , 6+N+6", "Min. laser drilling Standard
+#     4 mil", "Max. laser drilling 8 mil".
+#   - https://www.pcbway.com/capabilities.html, "Advanced PCB" table, row 2
+#     "Blind and Buried Vias": "HDI(1+1+....+N+......+1+1)" is listed as
+#     "Normal process"; row 1 lists "3L<=Layers<=16L" as normal process.
+# The smallest HDI build (1+N+1) needs at least four copper layers, so the
+# 2-layer configs keep the fail-closed ``false`` default.  HDI is quoted as
+# an "Advanced PCB" option (capabilities.html), not part of the standard
+# build.
+#
+# Scope of the check: ``kct check`` verifies that the fab offers the via type
+# and applies the drill/diameter/annular-ring floors to blind and buried vias.
+# It does NOT verify that the span set is laminable (overlapping or staggered
+# spans, mechanical blind vias such as F.Cu to In2.Cu on 6 layers, buried
+# spans with no matching core); PCBWay reviews the stackup at quote time.
+#
 # PCBWay offers via-in-pad (epoxy-filled, plated-over) as a standard
 # option, so ``via_in_pad_supported: true`` on every stackup block.
 # Mirrors the router's MFR_PCBWAY.via_in_pad_supported in
@@ -92,6 +120,8 @@ design_rules:
     inner_copper_oz: 0.5
     via_in_pad_supported: true     # PCBWay offers via-in-pad as a standard option
     via_in_pad_process_id: pcbway-via-in-pad  # #5009: real PCBWay via-in-pad process
+    blind_buried_vias_supported: true  # #6640: PCBWay hdi-pcb.html "Via Types: Blind via, buried via", verified 2026-10-14
+    # micro_vias_supported stays false (default): sourced but not yet encodable, see header (#6640)
 
   6layer_1oz:
     min_trace_width_mm: 0.0889      # 3.5 mil
@@ -115,3 +145,5 @@ design_rules:
     inner_copper_oz: 0.5
     via_in_pad_supported: true     # PCBWay offers via-in-pad as a standard option
     via_in_pad_process_id: pcbway-via-in-pad  # #5009: real PCBWay via-in-pad process
+    blind_buried_vias_supported: true  # #6640: PCBWay hdi-pcb.html "Via Types: Blind via, buried via", verified 2026-10-14
+    # micro_vias_supported stays false (default): sourced but not yet encodable, see header (#6640)
