@@ -1052,18 +1052,15 @@ def _persist_routing_result_to_pcb(pcb: PCB, result, net_name: str) -> tuple[int
             #
             # Issue #6678: an imported KiCad ``blind`` / ``buried`` via
             # (``Via.span_type``, #6662) is drilled only through its declared
-            # span.  Hand it to ``add_via`` with ``via_type=None`` so the
-            # keyword is worked out from that span (``blind`` with one outer
-            # end, ``buried`` with none) instead of widening it to a through
-            # via.
+            # span.  Pass its declared keyword explicitly so it is preserved
+            # instead of widened to a through via.  ``via_type=None`` would
+            # also write the right keyword, but through ``add_via``'s
+            # derivation path, which logs a WARNING (meant for writers that
+            # *invent* a partial span) advising ``via_type='through'`` -- the
+            # very bug this fixes.
             is_micro = bool(getattr(via, "is_micro", False))
             span_type = getattr(via, "span_type", None)
-            if is_micro:
-                via_type: str | None = "micro"
-            elif span_type is not None:
-                via_type = None
-            else:
-                via_type = "through"
+            via_type = "micro" if is_micro else (span_type or "through")
             added_via = pcb.add_via(
                 x=float(via.x),
                 y=float(via.y),

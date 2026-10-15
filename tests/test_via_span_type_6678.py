@@ -14,6 +14,7 @@ non-micro via as a full-stack through via:
 
 from __future__ import annotations
 
+import logging
 import re
 from pathlib import Path
 from types import SimpleNamespace
@@ -22,7 +23,8 @@ import pytest
 
 from kicad_tools.router.diffpair_length import DiffPairLengthTracker
 from kicad_tools.router.layers import Layer
-from kicad_tools.router.primitives import Via
+from kicad_tools.router.match_group_length import MatchGroup, MatchGroupTracker
+from kicad_tools.router.primitives import Route, Segment, Via
 from kicad_tools.schema.pcb import PCB
 
 THICKNESS = 1.6
@@ -138,7 +140,7 @@ def test_pcb_path_measures_declared_span(tmp_path, via_text, expected, blind_bur
 # ---------------------------------------------------------------------------
 
 
-def test_mcp_persist_keeps_blind_and_buried(tmp_path):
+def test_mcp_persist_keeps_blind_and_buried(tmp_path, caplog):
     from kicad_tools.mcp.tools.routing import _persist_routing_result_to_pcb
 
     pcb, path = _board(tmp_path)
@@ -168,8 +170,18 @@ def test_mcp_persist_keeps_blind_and_buried(tmp_path):
             ),
         ],
     )
-    _, vias_written, _, _ = _persist_routing_result_to_pcb(pcb, result, "SIG")
+    with caplog.at_level(logging.WARNING):
+        _, vias_written, _, _ = _persist_routing_result_to_pcb(pcb, result, "SIG")
     assert vias_written == 4
+    # The keyword is preserved, not derived: ``add_via``'s derivation-path
+    # warning ("... partial span ... pass via_type='through'") is for writers
+    # that invent a blind/buried via, and its advice would reintroduce #6678.
+    partial_span_warnings = [
+        r.getMessage()
+        for r in caplog.records
+        if r.levelno >= logging.WARNING and "partial span" in r.getMessage()
+    ]
+    assert partial_span_warnings == []
     pcb.save(str(path))
     text = path.read_text()
     assert sorted(_vias(text), key=repr) == sorted(
@@ -184,3 +196,74 @@ def test_mcp_persist_keeps_blind_and_buried(tmp_path):
     # And the round trip reads them back with the same keyword.
     reloaded = PCB.load(str(path))
     assert sorted(v.via_type or "" for v in reloaded.vias) == ["", "blind", "buried", "micro"]
+
+
+# ---------------------------------------------------------------------------
+# Match-group paths: where the bug was visible in production
+# (``router/core.py`` MatchGroupTracker and ``validate/match_group_skew.py``,
+# both with ``blind_buried_supported=False``).
+# ---------------------------------------------------------------------------
+
+
+def test_match_group_tracker_buried_via_contributes_only_its_span():
+    seg = Segment(0.0, 0.0, 10.0, 0.0, 0.2, Layer.IN1_CU, net=100, net_name="DQ0")
+    via_route = Route(
+        net=100,
+        net_name="DQ0",
+        segments=[seg],
+        vias=[
+            Via(
+                x=10.0,
+                y=0.0,
+                drill=0.2,
+                diameter=0.45,
+                layers=(Layer.IN1_CU, Layer.IN2_CU),
+                net=100,
+                net_name="DQ0",
+                span_type="buried",
+            )
+        ],
+    )
+    plain_route = Route(
+        net=101,
+        net_name="DQ1",
+        segments=[Segment(0.0, 1.0, 10.0, 1.0, 0.2, Layer.IN1_CU, net=101, net_name="DQ1")],
+    )
+    group = MatchGroup(name="DDR_DATA", net_ids=[100, 101], tolerance=0.5)
+
+    tracker = MatchGroupTracker()
+    tracker.record_routes(
+        [via_route, plain_route],
+        [group],
+        board_thickness_mm=THICKNESS,
+        num_copper_layers=LAYERS,
+        blind_buried_supported=False,
+    )
+
+    lengths = tracker.get_group_lengths(group)
+    assert lengths[100] == pytest.approx(10.0 + ONE_SPAN)
+    assert tracker.get_all_skews()["DDR_DATA"] == pytest.approx(ONE_SPAN)
+
+
+def test_validate_match_group_skew_buried_via_contributes_only_its_span(tmp_path):
+    from kicad_tools.router.rules import NetClassRouting
+    from kicad_tools.validate.match_group_skew import derive_group_skew_data
+
+    head = _HEAD.replace('(net 1 "SIG")', '(net 1 "DQ0")\n  (net 2 "DQ1")')
+    body = (
+        '  (segment (start 95 100) (end 105 100) (width 0.2) (layer "In1.Cu") (net 1) (uuid "s1"))\n'
+        '  (via buried (at 105 100) (size 0.45) (drill 0.2) (layers "In1.Cu" "In2.Cu")'
+        ' (net 1) (uuid "v1"))\n'
+        '  (segment (start 95 102) (end 105 102) (width 0.2) (layer "In1.Cu") (net 2) (uuid "s2"))\n'
+    )
+    path = tmp_path / "board.kicad_pcb"
+    path.write_text(head + body + ")\n")
+    pcb = PCB.load(str(path))
+
+    nc = NetClassRouting(name="DDR", length_match_group="DDR_DATA")
+    # Default ``blind_buried_supported`` (False) -- the production setting.
+    skew_data, groups, _ = derive_group_skew_data(
+        pcb, {"DQ0": nc, "DQ1": nc}, board_thickness_mm=THICKNESS, num_copper_layers=LAYERS
+    )
+    assert [g.name for g in groups] == ["DDR_DATA"]
+    assert skew_data["DDR_DATA"] == pytest.approx(ONE_SPAN)
