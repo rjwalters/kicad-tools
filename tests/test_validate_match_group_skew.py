@@ -878,8 +878,9 @@ class TestGroupSkewDataMatchesRouter:
             "via-traversing drift-prevention: PCB-side via length formula "
             "must produce the same result as router-side"
         )
-        # Sanity: DQ0 has +1.6mm via length -> skew = 1.6.
-        assert abs(rederived_skews["DDR_DATA"] - 1.6) < 1e-9
+        # Sanity: DQ0 has +1.58 mm via length (KiCad default stackup F.Cu->B.Cu
+        # span on a 1.6 mm board, Issue #6725) -> skew = 1.58.
+        assert abs(rederived_skews["DDR_DATA"] - 1.58) < 1e-9
 
 
 # ---------------------------------------------------------------------------
@@ -945,10 +946,10 @@ class TestDeriveGroupSkewViaContribution:
             "via-inclusive skew regression (Issue #3915): a member with an "
             "extra full-stack via must contribute its drilled length to the skew"
         )
-        assert abs(skew_data["DDR_DATA"] - 1.6) < 1e-9
+        assert abs(skew_data["DDR_DATA"] - 1.58) < 1e-9
 
-    def test_via_length_ignored_when_thickness_none(self):
-        """Pre-fix behaviour: ``board_thickness_mm=None`` -> via contributes 0.0."""
+    def test_via_length_comes_from_board_stackup_when_thickness_none(self):
+        """Issue #6725: the stackup is the board's own, so no thickness arg is needed."""
         from kicad_tools.router.rules import NetClassRouting
         from kicad_tools.validate.match_group_skew import derive_group_skew_data
 
@@ -956,12 +957,11 @@ class TestDeriveGroupSkewViaContribution:
         net_class_map = {"DQ0": nc, "DQ1": nc, "DQ2": nc, "DQ3": nc}
 
         pcb = self._pcb_with_extra_via()
-        # board_thickness_mm defaults to None -> via-blind.
         skew_data, _, _ = derive_group_skew_data(pcb, net_class_map)
 
         assert "DDR_DATA" in skew_data
-        # All copper lengths equal; via is invisible without thickness.
-        assert skew_data["DDR_DATA"] == 0.0
+        # All copper lengths equal; the via adds KiCad's default F.Cu->B.Cu span.
+        assert abs(skew_data["DDR_DATA"] - 1.58) < 1e-9
 
 
 class TestCheckerThreadsBoardThickness:
@@ -1043,7 +1043,8 @@ class TestCheckerThreadsBoardThickness:
             pcb, net_class_map, board_thickness_mm=1.6, num_copper_layers=4
         )
 
-        assert skew_blind["DDR_DATA"] == 0.0
+        # Issue #6725: both callsites read the stackup from the board.
+        assert abs(skew_blind["DDR_DATA"] - 1.58) < 1e-9
         assert skew_seen["DDR_DATA"] > 1.5
 
 

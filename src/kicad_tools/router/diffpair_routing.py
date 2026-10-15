@@ -952,6 +952,14 @@ def _route_via_signature(route: Route | None, num_copper_layers: int) -> tuple[i
     The count is kept alongside the span sum because the promoted model depends
     only on the count while the un-promoted one depends only on the span sum;
     requiring both to match makes the signature sufficient for either.
+
+    Issue #6725: ``diffpair_length_skew`` now charges each via KiCad's stackup
+    height between the layers it connects (non-uniform on a real stackup).
+    Equal signatures still imply the same via *shapes* on both legs for the
+    router's own vias (every non-micro via is a through barrel on identical
+    layers), so the proxy stays a conservative symmetry gate rather than an
+    exact length; the exact figure comes from
+    :mod:`kicad_tools.router.kicad_length`.
     """
     if route is None:
         return (0, 0)

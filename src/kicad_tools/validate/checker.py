@@ -1007,7 +1007,6 @@ class DRCChecker:
         skew_data, limits = derive_skew_limits(
             self.pcb,
             self.net_class_map,
-            board_thickness_mm=self.design_rules.board_thickness_mm,
             num_copper_layers=self.layers,
         )
         engaged_pairs, _ = derive_engagement_state(self.pcb, self.net_class_map)
@@ -1332,7 +1331,6 @@ class DRCChecker:
             group_skew_data, tracker_match_groups, threshold_map = derive_group_skew_data(
                 self.pcb,
                 self.net_class_map,
-                board_thickness_mm=self.design_rules.board_thickness_mm,
                 num_copper_layers=self.layers,
             )
             rule = MatchGroupLengthSkewRule(

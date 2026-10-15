@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     from kicad_tools.progress import ProgressCallback
 
     from .io import FineZone
+    from .kicad_length import KicadLengthModel
     from .pathfinder import Router
     from .region_graph import RegionGraph
     from .routing_plan import RoutingPlan
@@ -20164,33 +20165,56 @@ class Autorouter:
 
         return ok
 
+    def _kicad_length_model(self, num_layers: int) -> KicadLengthModel:
+        """The kicad-cli-exact length model for this router's board (issue #6725).
+
+        The stackup is the one the router writes into: the source PCB's own
+        (explicit ``(setup (stackup))``, else KiCad's default for its
+        ``(general (thickness))``) when the router was loaded from a board
+        file, otherwise KiCad's default for the manufacturer profile's board
+        thickness.  Pad copper comes from ``self.pads`` so track chains
+        entering a pad are clipped to its centre exactly as ``kct check`` /
+        kicad-cli measure them.
+        """
+        from .kicad_length import KicadLengthModel, KicadStackup
+
+        cache = getattr(self, "_kicad_stackup_cache", None)
+        if cache is None or cache[0] != num_layers:
+            stackup: KicadStackup | None = None
+            source = getattr(self, "_impedance_source_pcb_path", None)
+            if source is not None:
+                try:
+                    from kicad_tools.schema.pcb import PCB
+
+                    candidate = KicadStackup.from_pcb(PCB.load(source))
+                    if len(candidate.copper) == num_layers:
+                        stackup = candidate
+                except Exception:  # noqa: BLE001 - fall back to the default stackup
+                    stackup = None
+            if stackup is None:
+                thickness = None
+                _mfr_rules = self._build_manufacturer_design_rules()
+                if _mfr_rules is not None:
+                    thickness = getattr(_mfr_rules, "board_thickness_mm", None)
+                stackup = KicadStackup.default(thickness or 1.6, num_layers)
+            cache = (num_layers, stackup)
+            self._kicad_stackup_cache = cache
+        return KicadLengthModel.for_router(
+            cache[1], (p for p in self.pads.values() if not p.steiner_point)
+        )
+
     def _checker_route_length(self, num_layers: int) -> Callable[[Route], float]:
         """``Route -> mm`` measured the way ``kct check``'s skew rule measures (#6664).
 
-        Board thickness comes from the manufacturer profile (the checker
-        reads ``design_rules.board_thickness_mm``); standard vias count as
-        full through-vias unless the board allows blind/buried drilling
-        (Issue #4007, mirrored from :meth:`apply_match_group_tuning`).
+        Issue #6725: the shared kicad-cli-exact measurement
+        (:mod:`kicad_tools.router.kicad_length`) -- the same function the
+        checker applies to the written board, so the tuner converges on the
+        number ``kct check`` and kicad-cli report.
         """
-        board_thickness_mm: float | None = None
-        _mfr_rules = self._build_manufacturer_design_rules()
-        if _mfr_rules is not None:
-            board_thickness_mm = getattr(_mfr_rules, "board_thickness_mm", None)
-        blind_buried_supported = False
-        _via_rules = getattr(self, "via_rules", None)
-        if _via_rules is not None:
-            blind_buried_supported = bool(
-                getattr(_via_rules, "allow_blind", False)
-                or getattr(_via_rules, "allow_buried", False)
-            )
+        model = self._kicad_length_model(num_layers)
 
         def measure(route: Route) -> float:
-            return DiffPairLengthTracker._measure_route(
-                route,
-                board_thickness_mm,
-                num_layers,
-                blind_buried_supported=blind_buried_supported,
-            )
+            return model.route_length(route)
 
         return measure
 
@@ -20325,44 +20349,13 @@ class Autorouter:
         else:
             num_layers = 2
 
-        # Issue #3931: the board thickness the tuner uses to compute per-via
-        # drilled length MUST match the value the ``match_group_length_skew``
-        # DRC rule measures with, or the tuner would target a different skew
-        # than the checker validates.  The router's own ``self.rules``
-        # (``router.rules.DesignRules``) has NO ``board_thickness_mm`` field
-        # -- only ``manufacturers.base.DesignRules`` does (see the
-        # ``update_diffpair_skew`` docstring above).  The DRC checker reads
-        # the manufacturer profile's ``board_thickness_mm``, so we source the
-        # SAME value here via ``_build_manufacturer_design_rules`` (the
-        # manufacturer profile's DesignRules, honoring ``self.rules.manufacturer``
-        # and the layer count).  When that helper is unavailable (manufacturers
-        # module missing) we fall back to ``None`` -> vias contribute 0.0 and
-        # the tuner stays via-blind (byte-for-byte legacy behavior).  Record
-        # the tracker's lengths via-inclusively too, so post-tuning skew
-        # queries reflect drilled length.
+        # Issue #6725: measure exactly as kicad-cli / ``kct check`` do (board
+        # stackup span between connected layers, pad/via clipping) through the
+        # one shared function; ``board_thickness_mm`` and
+        # ``blind_buried_supported`` no longer enter the measurement.
         board_thickness_mm: float | None = None
-        _mfr_rules = self._build_manufacturer_design_rules()
-        if _mfr_rules is not None:
-            board_thickness_mm = getattr(_mfr_rules, "board_thickness_mm", None)
-
-        # Issue #4007: resolve whether the board supports blind/buried vias.
-        # The router only ever emits through-holes (``standard_*layer`` via
-        # rules; ``hdi_4layer`` is defined but never instantiated) plus
-        # laser-drilled MICRO in-pad vias, so blind/buried support is False
-        # for every current board.  When False, the length measurement
-        # promotes each standard (non-micro) via to a full through-via --
-        # matching what KiCad's post-route zone-fill re-save materializes on
-        # disk, so the tuner's converged skew equals what ``kct check``
-        # re-derives from the committed PCB.  Sourced from ``self.via_rules``
-        # (an optional attribute) so an HDI board can opt back into partial
-        # spans; defaults to False.
         blind_buried_supported = False
-        _via_rules = getattr(self, "via_rules", None)
-        if _via_rules is not None:
-            blind_buried_supported = bool(
-                getattr(_via_rules, "allow_blind", False)
-                or getattr(_via_rules, "allow_buried", False)
-            )
+        length_model = self._kicad_length_model(num_layers)
 
         self._match_group_tracker.record_routes(
             routes=self.routes,
@@ -20370,6 +20363,7 @@ class Autorouter:
             num_copper_layers=num_layers,
             board_thickness_mm=board_thickness_mm,
             blind_buried_supported=blind_buried_supported,
+            length_model=length_model,
         )
 
         # Issue #3317 follow-up (judge change-request on PR #3317):
@@ -20455,7 +20449,7 @@ class Autorouter:
                 )
                 length_critical = True
                 spread_mm = self._checker_group_spread_mm(
-                    group, routes_by_net, board_thickness_mm, num_layers
+                    group, routes_by_net, board_thickness_mm, num_layers, length_model
                 )
                 if spread_mm is None or spread_mm <= tolerance_mm:
                     results[group.name] = {}
@@ -20496,6 +20490,7 @@ class Autorouter:
                     board_thickness_mm=board_thickness_mm,
                     num_copper_layers=num_layers,
                     blind_buried_supported=blind_buried_supported,
+                    length_model=length_model,
                     fixed_segment_ids=fixed_segment_ids,
                 )
             except ValueError as exc:
@@ -20593,6 +20588,7 @@ class Autorouter:
             num_copper_layers=num_layers,
             board_thickness_mm=board_thickness_mm,
             blind_buried_supported=blind_buried_supported,
+            length_model=length_model,
         )
         return results
 
@@ -20602,14 +20598,14 @@ class Autorouter:
         routes_by_net: dict[int, Route],
         board_thickness_mm: float | None,
         num_copper_layers: int,
+        length_model: KicadLengthModel | None = None,
     ) -> float | None:
         """Return ``group``'s skew measured the way ``kct check`` measures it.
 
         Mirrors :func:`~kicad_tools.validate.match_group_skew.derive_group_skew_data`
         (Issue #6674): single-ended members contribute their length, each
-        diff-pair member contributes ``(L_P + L_N) / 2``, and every standard
-        via counts as a full through-via (``blind_buried_supported=False``,
-        the checker's default).  Returns ``None`` when a member is unrouted
+        diff-pair member contributes ``(L_P + L_N) / 2``, and every length is
+        the shared kicad-cli-exact measurement (issue #6725).  Returns ``None`` when a member is unrouted
         or fewer than two lanes exist -- the checker omits such groups.
         """
         from .match_group_length import MatchGroupTracker
@@ -20623,6 +20619,7 @@ class Autorouter:
                 board_thickness_mm,
                 num_copper_layers,
                 blind_buried_supported=False,
+                length_model=length_model,
             )
 
         lanes: list[float] = []

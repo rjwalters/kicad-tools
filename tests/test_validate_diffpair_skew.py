@@ -332,9 +332,8 @@ class TestDeriveSkewDataViaInclusive:
         return _StubPCB(_nets=nets, _segments=segs, _vias=vias)
 
     def test_via_blind_without_board_thickness(self):
-        """Default call (no ``board_thickness_mm``) -> via contributes 0 mm,
-        so the copper-symmetric pair reads 0.0 skew (the old via-blind
-        behaviour the AC3 fix must NOT change for the no-thickness path)."""
+        """Issue #6725: no ``board_thickness_mm`` needed -- the via's KiCad
+        stackup span (1.58 mm default 1.6 mm board) comes from the board."""
         from kicad_tools.router.rules import NetClassRouting
         from kicad_tools.validate.diffpair_skew import derive_skew_data
 
@@ -344,7 +343,7 @@ class TestDeriveSkewDataViaInclusive:
         pcb = self._pair_pcb_with_via_on_positive()
         skew_data, _ = derive_skew_data(pcb, net_class_map)
 
-        assert skew_data[("USB_D+", "USB_D-")] == 0.0
+        assert abs(skew_data[("USB_D+", "USB_D-")] - 1.58) < 1e-9
 
     def test_via_inclusive_with_board_thickness(self):
         """4-layer board with ``board_thickness_mm`` supplied -> the lone via
@@ -699,8 +698,8 @@ class TestSkewDriftPrevention:
             "via-traversing drift-prevention: PCB-side via length formula "
             "must produce the same result as router-side"
         )
-        # Sanity: P has +1.6mm via length, so skew is 1.6 mm.
-        assert abs(rederived_skews[("USB_D+", "USB_D-")] - 1.6) < 1e-9
+        # Sanity: P has +1.58 mm via length (KiCad default stackup span).
+        assert abs(rederived_skews[("USB_D+", "USB_D-")] - 1.58) < 1e-9
 
 
 # ---------------------------------------------------------------------------
