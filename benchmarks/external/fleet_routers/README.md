@@ -47,7 +47,7 @@ git clone --depth 1 -b v2.4.2  https://github.com/CLIUtils/CLI11 && cmake -S CLI
 
 ## Live smoke: board 00 (2026-10-15)
 
-`run.py run --boards 00 --wall-cap 300` at kct `ccfc97260`, kicad-cli 10.0.6, native backend 1.0.0, TraceMaker `89ff58ca` (built as above; build environment recorded in the manifest's `tracemaker.build_environment`; binary sha256 prefix `49d99f58...`) and fastroute `e5d52c45` (binary sha256 prefix `f141bce5...`). The full binary hashes and the run's `results.json` were not retained from the original run host; the next live run records them (see #6335). Fleet inputs for boards 03 and 06 had drifted since the first freeze, so the manifest was re-frozen.
+`run.py run --boards 00 --wall-cap 300` at kct `ccfc97260`, kicad-cli 10.0.6, native backend 1.0.0, TraceMaker `89ff58ca` (built as above; build environment recorded in the manifest's `tracemaker.build_environment`; binary sha256 prefix `49d99f58...`) and fastroute `e5d52c45` (binary sha256 prefix `f141bce5...`). The full binary hashes and the run's `results.json` were not retained from that host; the full-matrix run (issue #6335) retained both. See [`verdict.md`](verdict.md), [`results.json`](results.json) and `evidence/`. Fleet inputs for boards 03 and 06 had drifted since the first freeze, so the manifest was re-frozen.
 
 | Tool | Outcome | Connections | DRC errors | Unconnected | Vias | Wirelength mm | Wall s |
 |---|---|---|---|---|---|---|---|
@@ -61,7 +61,7 @@ The fastroute row is `non-comparable` because 11 constraints are lost, none of t
 - **10 `dru` entries:** JLCPCB fab-floor rules the DSN exporter does not represent (silk clearance, `hole_clearance` x2, `annular_width` x2, `edge_clearance`, `physical_hole_clearance`, text thickness, text height, and the `Reviewed clearance - Power` clearance). Tracked in #6765.
 - **1 `ses_import` entry** ("SES resolution um 10: importer assumes 1 unit = 1 um"). This was a false loss: since #6593 the importer honours `(resolution um 10)` and the imported 30.17 mm agrees with TraceMaker's 29.66 mm. `run.py:ses_import` now reports a loss only when the resolution the importer applied differs from the one the session declares.
 
-This is a single run on one simple board, so it says nothing about router quality. The full matrix is #6335.
+This is a single run on one simple board, so it says nothing about router quality. The full matrix is in [`verdict.md`](verdict.md) (#6335).
 
 ## Running
 
