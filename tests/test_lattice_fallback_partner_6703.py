@@ -442,3 +442,82 @@ def test_partner_aware_legs_keep_out_of_an_area_array_pour_neck(monkeypatch) -> 
     assert route(None)
     # ... and with the #6673 link keep-outs neither partner-aware leg enters one.
     assert route(LatticeKeepoutMask(areas)) == []
+
+
+# ---------------------------------------------------------------------------
+# The flush keep rule (#6735): a partner-aware pair is kept only if it routes
+# more legs, or cuts the summed skew by >= _MIN_FLUSH_SKEW_GAIN_MM with no
+# added class-pad shortfall.  ``better()`` is a closure, so each case drives
+# ``_route_fallback_pairs_into`` with one pair and stubbed legs/scores.
+# ---------------------------------------------------------------------------
+
+
+class _StubResult:
+    def __init__(self, tag: str) -> None:
+        self.route = tag
+
+
+def _keep_rule_winner(
+    monkeypatch,
+    *,
+    blind: tuple[bool, float, int],
+    aware: tuple[bool, float, int],
+) -> str:
+    """Which legs the flush keeps; each tuple is (both legs routed, skew, shortfalls)."""
+    pf, pairs = _open_pairs(1)
+    pc = pairs[0]
+
+    def legs(tag: str, both: bool) -> dict:
+        return {
+            "P": (_StubResult(f"{tag}-P"), ""),
+            "N": (_StubResult(f"{tag}-N"), "") if both else (None, "no way"),
+        }
+
+    blind_legs, aware_legs = legs("blind", blind[0]), legs("aware", aware[0])
+    scores = {id(blind_legs): blind[1:], id(aware_legs): aware[1:]}
+
+    monkeypatch.setattr(LatticePathfinder, "_partner_blind_legs", lambda self, pc, **kw: blind_legs)
+    monkeypatch.setattr(
+        LatticePathfinder, "_partner_aware_legs", lambda self, pc, **kw: (aware_legs, False)
+    )
+    monkeypatch.setattr(LatticePathfinder, "_pair_skew", lambda self, lg: scores[id(lg)][0])
+    monkeypatch.setattr(
+        LatticePathfinder, "_legs_shortfalls", lambda self, pc, lg: scores[id(lg)][1]
+    )
+    monkeypatch.setattr(LatticePathfinder, "_commit_single", lambda self, *a, **k: None)
+
+    routes: dict = {}
+    pf._route_fallback_pairs_into(
+        pairs, routes, committed=pf._fresh_committed(), history={}, present=0.0, escape_plan={}
+    )
+    return routes[(pc.key, "P")].split("-")[0]
+
+
+def test_keep_rule_rejects_a_shortfall_only_gain(monkeypatch) -> None:
+    got = _keep_rule_winner(monkeypatch, blind=(True, 1.0, 1), aware=(True, 1.0, 0))
+    assert got == "blind"
+
+
+def test_keep_rule_rejects_a_skew_gain_below_the_margin(monkeypatch) -> None:
+    got = _keep_rule_winner(monkeypatch, blind=(True, 1.0, 0), aware=(True, 0.9, 0))
+    assert got == "blind"
+
+
+def test_keep_rule_rejects_a_skew_gain_that_adds_a_shortfall(monkeypatch) -> None:
+    got = _keep_rule_winner(monkeypatch, blind=(True, 1.0, 0), aware=(True, 0.7, 1))
+    assert got == "blind"
+
+
+def test_keep_rule_keeps_aware_legs_that_route_more(monkeypatch) -> None:
+    got = _keep_rule_winner(monkeypatch, blind=(False, 1.0, 0), aware=(True, 2.0, 1))
+    assert got == "aware"
+
+
+def test_keep_rule_keeps_a_material_skew_gain_without_shortfall(monkeypatch) -> None:
+    got = _keep_rule_winner(monkeypatch, blind=(True, 1.0, 0), aware=(True, 0.7, 0))
+    assert got == "aware"
+
+
+def test_keep_rule_margin_is_inclusive(monkeypatch) -> None:
+    got = _keep_rule_winner(monkeypatch, blind=(True, 1.0, 0), aware=(True, 0.75, 0))
+    assert got == "aware"
