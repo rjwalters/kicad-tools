@@ -316,6 +316,15 @@ def _perimeter_wrap_candidates(
     return unique
 
 
+def _pad_gap(pad1: Pad, pad2: Pad) -> float:
+    """Edge-to-edge distance between two pads' board-space bounding boxes."""
+    hx1, hy1 = pad_half_extents(pad1)
+    hx2, hy2 = pad_half_extents(pad2)
+    gx = max(0.0, abs(pad2.x - pad1.x) - hx1 - hx2)
+    gy = max(0.0, abs(pad2.y - pad1.y) - hy1 - hy2)
+    return math.hypot(gx, gy)
+
+
 def create_intra_ic_routes(
     net: int,
     pads: list[tuple[str, str]],
@@ -323,6 +332,7 @@ def create_intra_ic_routes(
     rules,
     net_class_map: dict[str, NetClassRouting] | None = None,
     obstacle_segments: list[Segment] | None = None,
+    neighbours_only: bool = False,
 ) -> tuple[list[Route], set[int]]:
     """Create direct routes for same-IC pins on the same net.
 
@@ -345,6 +355,13 @@ def create_intra_ic_routes(
         obstacle_segments: Optional previously routed segments of other
             nets; perimeter-wrap fallbacks are validated against these so
             the wrap cannot collide with existing copper
+        neighbours_only: Issue #6799 -- tie only pins whose copper gap is
+            narrower than one trace plus its clearance on each side (no
+            copper of any net can pass between them), only with a straight
+            tie, and never with the perimeter-wrap fallback.  That is the
+            neighbouring duplicate-pin pattern (PGND1/PGND2 at 0.65 mm
+            pitch).  Kelvin nets use it; other same-IC pins of a Kelvin net
+            keep their own branch to the shunt.
 
     Returns:
         Tuple of (routes created, set of pad indices that were connected)
@@ -394,6 +411,8 @@ def create_intra_ic_routes(
             trace_width = _get_trace_width_for_net(net_name, rules, net_class_map)
             clearance = _get_clearance_for_net(net_name, rules, net_class_map)
             layer = pad1.layer  # Use pad layer (typically F.Cu for SMD)
+            if neighbours_only and _pad_gap(pad1, pad2) >= trace_width + 2 * clearance:
+                continue  # Room for a trace between them: separate terminals
 
             direct = [(pad1.x, pad1.y), (pad2.x, pad2.y)]
             path: list[tuple[float, float]] | None = None
@@ -417,7 +436,7 @@ def create_intra_ic_routes(
                 obstacle_segments=obstacle_segments,
             ):
                 path = direct
-            else:
+            elif not neighbours_only:
                 # Issue #3480: direct path violates same-package pad
                 # clearance -- try a perimeter wrap around the pad field.
                 # Wraps leave the package envelope, so validate against
@@ -473,10 +492,10 @@ def create_intra_ic_routes(
             if path is None:
                 # No legal direct or wrap path: defer this pair to the
                 # main A* router (do NOT mark the pads connected).
+                reason = "direct ties only" if neighbours_only else "no legal perimeter wrap"
                 print(
                     f"  Intra-IC defer: {ref} pins {pads[idx1][1]}->{pads[idx2][1]} "
-                    f"(direct path violates {clearance:.3f}mm pad clearance, "
-                    "no legal perimeter wrap)"
+                    f"(direct path violates {clearance:.3f}mm pad clearance, {reason})"
                 )
                 continue
 

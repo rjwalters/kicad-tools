@@ -3623,6 +3623,51 @@ class Autorouter:
             obstacle_segments=obstacle_segments,
         )
 
+    def _create_kelvin_terminal_ties(
+        self, net: int, pads: list[tuple[str, str]]
+    ) -> tuple[list[Route], set[int]]:
+        """Tie neighbouring same-net pins of one package on a Kelvin net.
+
+        Issue #6799.  A Kelvin star routes every terminal to the shunt on its
+        own, isolated from its siblings.  On board 05 that sent the DRV8313's
+        adjacent PGND pins U2.6 and U2.7 (GND_SENSE, 0.65 mm pitch) out as two
+        branches; U2.7's branch dropped a via in U2.6's only exit lane and
+        U2.6 stayed unconnected.  The two pins are one terminal, so they get
+        the straight pad-to-pad tie every non-Kelvin net already gets, and the
+        star routes one branch for the pair.
+
+        Only pins too close for any trace to pass between them are tied, only
+        with a straight tie (``neighbours_only``), and resistor pads are never
+        tied (a four-terminal shunt keeps its force and sense pads apart).
+        Other same-package terminals keep their own branch to the shunt.
+
+        Returns:
+            ``(routes, connected_indices)`` with indices into ``pads``, the
+            shape :meth:`_create_intra_ic_routes` returns.
+        """
+        from .kelvin import is_tieable_kelvin_terminal
+
+        index_map = [
+            i
+            for i, key in enumerate(pads)
+            if key in self.pads and is_tieable_kelvin_terminal(self.pads[key])
+        ]
+        if len(index_map) < 2:
+            return [], set()
+        obstacle_segments = [
+            seg for route in self.routes if route.net != net for seg in route.segments
+        ]
+        routes, local = create_intra_ic_routes(
+            net,
+            [pads[i] for i in index_map],
+            self.pads,
+            self.rules,
+            self.net_class_map,
+            obstacle_segments=obstacle_segments,
+            neighbours_only=True,
+        )
+        return routes, {index_map[i] for i in local}
+
     def _get_unrouted_pads(self, exclude_net: int | None = None) -> list[Pad]:
         """Get list of pads that haven't been routed yet.
 
@@ -5748,11 +5793,21 @@ class Autorouter:
                 for layer, width in layer_widths.items():
                     print(f"    {layer}: {width * 1000:.1f}mil ({width:.3f}mm)")
 
-        # Kelvin terminals must each reach the shunt. An intra-IC shortcut
-        # would join two sense branches before the topology planner sees them.
+        # Kelvin terminals must each reach the shunt. A general intra-IC
+        # shortcut would join two sense branches before the topology planner
+        # sees them; only neighbouring duplicate pins are tied (#6799).
         kelvin = detect_kelvin_topology([self.pads[p] for p in pads] + stub_targets)
         if kelvin is not None:
-            pads_for_routing = pads
+            tie_routes, tied = self._create_kelvin_terminal_ties(net, pads)
+            for route in tie_routes:
+                self._mark_route(route)
+                routes.append(route)
+                self.routes.append(route)
+            pads_for_routing = reduce_pads_after_intra_ic(pads, tied, pad_lookup=self.pads)
+            if tied:
+                kelvin = detect_kelvin_topology(
+                    [self.pads[p] for p in pads_for_routing] + stub_targets
+                )
         else:
             # Handle intra-IC connections first
             intra_routes, connected_indices = self._create_intra_ic_routes(net, pads)
@@ -16721,7 +16776,16 @@ class Autorouter:
         routes: list[Route] = []
         kelvin = detect_kelvin_topology([self.pads[p] for p in pads] + stub_targets)
         if kelvin is not None:
-            pads_for_routing = pads
+            # Issue #6799: neighbouring duplicate pins are one Kelvin terminal.
+            tie_routes, tied = self._create_kelvin_terminal_ties(net, pads)
+            for route in tie_routes:
+                self._mark_route(route)
+                routes.append(route)
+            pads_for_routing = reduce_pads_after_intra_ic(pads, tied, pad_lookup=self.pads)
+            if tied:
+                kelvin = detect_kelvin_topology(
+                    [self.pads[p] for p in pads_for_routing] + stub_targets
+                )
         else:
             intra_routes, connected_indices = self._create_intra_ic_routes(net, pads)
             for route in intra_routes:
