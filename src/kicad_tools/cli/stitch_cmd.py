@@ -79,9 +79,12 @@ KICAD_HOLE_TO_COPPER_CLEARANCE = 0.25
 MIN_HOLE_TO_HOLE_CLEARANCE = 0.5
 
 #: A pad from :func:`find_all_pad_bboxes`:
-#: ``(min_x, min_y, max_x, max_y, net_num, shape)`` (Issue #6683 appended
-#: ``shape``; ``[4]`` is still the net).
-PadBBox = tuple[float, float, float, float, int, str]
+#: ``(min_x, min_y, max_x, max_y, net_num, shape, bound_r)`` (Issue #6683
+#: appended ``shape`` and ``bound_r``; ``[4]`` is still the net).
+#: ``bound_r`` is ``max(w, h) / 2`` of the UNROTATED pad size: the exact
+#: radius of a ``circle`` and the enclosing-circle radius of an ``oval``
+#: (stadium) at any rotation.
+PadBBox = tuple[float, float, float, float, int, str, float]
 
 
 def _count_copper_layers(pcb_path: Path) -> int:
@@ -1053,8 +1056,9 @@ def find_all_pad_bboxes(sexp: SExp, exclude_nets: set[int] | None = None) -> lis
         sexp: PCB S-expression.
         exclude_nets: Net numbers to exclude (e.g., the stitched nets).
 
-    Issue #6683: each entry also carries the pad ``shape`` as a sixth
-    (APPENDED, so ``b[4]`` stays the net) element, so the via-vs-pad
+    Issue #6683: each entry also carries the pad ``shape`` and its
+    unrotated bounding radius ``max(w, h) / 2`` as sixth and seventh
+    (APPENDED, so ``b[4]`` stays the net) elements, so the via-vs-pad
     checks can treat a ``circle`` pad exactly and every other shape by its
     box (see :func:`_pad_copper_gap`).  A circle's box is its exact
     bounding square (no rotation inflation).  When the pad's own
@@ -1064,7 +1068,7 @@ def find_all_pad_bboxes(sexp: SExp, exclude_nets: set[int] | None = None) -> lis
     pad's long axis the wrong way.
 
     Returns:
-        List of ``(min_x, min_y, max_x, max_y, net_num, shape)`` tuples in
+        List of ``(min_x, min_y, max_x, max_y, net_num, shape, bound_r)`` tuples in
         board coordinates (mm).
     """
     bboxes: list[PadBBox] = []
@@ -1128,6 +1132,7 @@ def find_all_pad_bboxes(sexp: SExp, exclude_nets: set[int] | None = None) -> lis
                     board_y + half_h,
                     net_num,
                     shape,
+                    max(width, height) / 2,
                 )
             )
 
@@ -1191,7 +1196,9 @@ def _pad_copper_gap(
     y1: float,
     x2: float,
     y2: float,
-    pad_bbox: PadBBox | tuple[float, float, float, float, int],
+    pad_bbox: PadBBox
+    | tuple[float, float, float, float, int, str]
+    | tuple[float, float, float, float, int],
 ) -> float:
     """Copper-edge distance from a segment (a point when the ends coincide)
     to a pad from :func:`find_all_pad_bboxes`; 0.0 when they overlap.
@@ -1203,8 +1210,15 @@ def _pad_copper_gap(
 
     * ``circle``: exact (centre distance minus radius) -- BGA escapes rely
       on the diagonal room a box would take away.
-    * ``oval``: the larger of the box gap and the bounding-circle gap; both
-      bound the stadium from below, so the larger is still safe.
+    * ``oval``: the larger of the box gap and the enclosing-circle gap.
+      The circle's radius is ``bound_r`` -- ``max(w, h) / 2`` of the
+      UNROTATED size, i.e. the stadium's half-length, which encloses it at
+      every rotation.  Both gaps bound the true stadium gap from below, so
+      the larger is still safe, and it is never smaller than the old
+      ``find_all_pads`` circle-model gap.  (The AABB's half-side is NOT a
+      safe radius off-axis: a 2.0 x 0.5 oval at 45 deg has a 0.884 AABB
+      half-side but a 1.0 tip.)  A 6-tuple without ``bound_r`` falls back
+      to the box's half-diagonal, which always encloses.
     * everything else (``rect``, ``roundrect``, ``trapezoid``, ``custom``,
       or a legacy 5-tuple without a shape): the box, which is exact for a
       rect and conservative by at most the corner relief otherwise.
@@ -1218,7 +1232,11 @@ def _pad_copper_gap(
         return max(0.0, centre_dist - (max_x - min_x) / 2)
     box_gap = _segment_to_rect_distance(x1, y1, x2, y2, min_x, min_y, max_x, max_y)
     if shape == "oval":
-        return max(box_gap, centre_dist - max(max_x - min_x, max_y - min_y) / 2)
+        if len(pad_bbox) > 6:
+            bound_r = float(pad_bbox[6])
+        else:
+            bound_r = math.hypot(max_x - min_x, max_y - min_y) / 2
+        return max(box_gap, centre_dist - bound_r)
     return box_gap
 
 
@@ -2961,6 +2979,80 @@ def _check_multileg_path_clearance(
     return True
 
 
+def _escape_row_axis(nearby_pads: list[tuple[float, float]]) -> int | None:
+    """Row axis for :func:`calculate_extended_escape_position`: ``0`` when the
+    nearby other-net pads spread more along X (a horizontal row), ``1`` when
+    they spread more along Y, ``None`` with fewer than two nearby pads."""
+    if len(nearby_pads) < 2:
+        return None
+    xs = [px for px, _ in nearby_pads]
+    ys = [py for _, py in nearby_pads]
+    # Pads spread more horizontally -> row is horizontal
+    return 0 if max(xs) - min(xs) >= max(ys) - min(ys) else 1
+
+
+#: Two pad centres closer than this on one axis share a row / column.
+_SAME_ROW_TOL_MM = 0.1
+
+
+def _extended_escape_axial_distances(
+    pad_x: float,
+    pad_y: float,
+    nearby_pads: list[tuple[float, float]],
+    axial_distances: list[float],
+    escape_distance: float,
+    row_axis: int | None,
+) -> list[float]:
+    """Axial step candidates for :func:`calculate_extended_escape_position`.
+
+    Issue #6683: on a 1.27 mm-pitch BGA the fixed 0.5 / 0.8 / 1.0 mm axial
+    steps put the via 3 um inside clearance of a square neighbour's corner
+    (hidden by the old inscribed-circle pad model), and the next legal step
+    (2.0 mm) steals the NEXT pad's channel, stranding a pad.  Half the grid
+    pitch -- the channel centre -- is the interstitial site with the most
+    room, so it is added to ``axial_distances``.
+
+    The pitch is measured ONLY along ``row_axis`` (the smallest non-zero
+    offset of a nearby pad on that axis), so the perpendicular side rows of
+    a QFP never inject their own spacing and only one value is ever added.
+    Same-row neighbours alone are not enough: on a BGA they are often pads
+    of the net being stitched, which are not in the other-net pool (board
+    07 U4.E6 has none), so pads in adjacent rows supply the pitch too.  It
+    is used only when the pad sits in a square grid (a BGA): the pitch on
+    the other axis must match within 0.02 mm.  A two-column package (SOIC,
+    SOP: 1.27 mm along a column, ~5.4 mm across) never qualifies, whichever
+    way :func:`_escape_row_axis` reads its spread.  The channel centre must
+    also be no shorter than the first existing step and not duplicate one,
+    so fine-pitch rows (QFP: 0.25 mm half pitch) and BGAs at 1.0 mm pitch or
+    finer are unchanged too.
+    """
+    if row_axis is None or not axial_distances:
+        return axial_distances
+    col_axis = 1 - row_axis
+    here = (pad_x, pad_y)
+    row_deltas = [
+        abs(p[row_axis] - here[row_axis])
+        for p in nearby_pads
+        if abs(p[row_axis] - here[row_axis]) > _SAME_ROW_TOL_MM
+    ]
+    col_deltas = [
+        abs(p[col_axis] - here[col_axis])
+        for p in nearby_pads
+        if abs(p[col_axis] - here[col_axis]) > _SAME_ROW_TOL_MM
+    ]
+    if not row_deltas or not col_deltas:
+        return axial_distances
+    row_pitch = min(row_deltas)
+    if abs(row_pitch - min(col_deltas)) > 0.02:
+        return axial_distances
+    half_pitch = row_pitch / 2
+    if axial_distances[0] <= half_pitch <= escape_distance and all(
+        abs(half_pitch - d) > 0.02 for d in axial_distances
+    ):
+        return sorted([*axial_distances, half_pitch])
+    return axial_distances
+
+
 def calculate_extended_escape_position(
     pad: PadInfo,
     offset: float,
@@ -3057,22 +3149,15 @@ def calculate_extended_escape_position(
     ]
 
     # Determine primary and secondary axes based on pad row orientation
-    if len(nearby_pads) >= 2:
-        xs = [px for px, _ in nearby_pads]
-        ys = [py for _, py in nearby_pads]
-        x_spread = max(xs) - min(xs)
-        y_spread = max(ys) - min(ys)
-
-        # Pads spread more horizontally -> row is horizontal
-        # Escape perpendicular (vertical) is preferred
-        if x_spread >= y_spread:
-            # Horizontal row: axial along X, escape along Y
-            axial_dirs = [(1, 0), (-1, 0)]
-            escape_dirs = [(0, 1), (0, -1)]
-        else:
-            # Vertical row: axial along Y, escape along X
-            axial_dirs = [(0, 1), (0, -1)]
-            escape_dirs = [(1, 0), (-1, 0)]
+    row_axis = _escape_row_axis(nearby_pads)
+    if row_axis == 0:
+        # Horizontal row: axial along X, escape along Y
+        axial_dirs = [(1, 0), (-1, 0)]
+        escape_dirs = [(0, 1), (0, -1)]
+    elif row_axis == 1:
+        # Vertical row: axial along Y, escape along X
+        axial_dirs = [(0, 1), (0, -1)]
+        escape_dirs = [(1, 0), (-1, 0)]
     else:
         axial_dirs = [(1, 0), (-1, 0), (0, 1), (0, -1)]
         escape_dirs = [(0, 1), (0, -1), (1, 0), (-1, 0)]
@@ -3099,29 +3184,15 @@ def calculate_extended_escape_position(
     ]
     breakout_offsets = [d for d in breakout_offsets if d <= escape_distance]
 
-    # Issue #6683: sample the channel centre between pad rows.  On a
-    # 1.27 mm-pitch BGA the fixed 0.5 / 0.8 / 1.0 mm axial steps put the via
-    # 3 um inside clearance of a square neighbour's corner, which the old
-    # inscribed-circle pad model hid; the next legal step (2.0 mm) then
-    # steals the NEXT pad's channel and cascades into a stranded pad.  Half
-    # the grid pitch is the interstitial site with the most room.  Only
-    # added when it is no shorter than the existing first step, so
-    # fine-pitch rows (QFP) keep their candidate order.
-    for axis in (0, 1):
-        deltas = [
-            abs((px, py)[axis] - (pad.x, pad.y)[axis])
-            for px, py in nearby_pads
-            if abs((px, py)[axis] - (pad.x, pad.y)[axis]) > 0.1
-        ]
-        if not deltas:
-            continue
-        half_pitch = min(deltas) / 2
-        if (
-            axial_distances
-            and axial_distances[0] <= half_pitch <= escape_distance
-            and all(abs(half_pitch - d) > 0.02 for d in axial_distances)
-        ):
-            axial_distances = sorted([*axial_distances, half_pitch])
+    # Issue #6683: sample the channel centre of a regular pad grid (see
+    # :func:`_extended_escape_axial_distances`).  The Z-shape strategy keeps
+    # its original first five base steps (plus a channel centre that falls
+    # among them), so an inserted step never pushes a base step out.
+    z_axial_limit = axial_distances[:5][-1] if axial_distances else 0.0
+    axial_distances = _extended_escape_axial_distances(
+        pad.x, pad.y, nearby_pads, axial_distances, escape_distance, row_axis
+    )
+    z_axial_distances = [d for d in axial_distances if d <= z_axial_limit]
 
     # Hole-to-copper guard (see calculate_via_position).
     hole_extra = 0.0
@@ -3305,7 +3376,7 @@ def calculate_extended_escape_position(
                 if abs(axial_dx * escape_dx + axial_dy * escape_dy) > 0.1:
                     continue
 
-                for axial_dist in axial_distances[:5]:
+                for axial_dist in z_axial_distances:
                     wp2_x = wp1_x + axial_dx * axial_dist
                     wp2_y = wp1_y + axial_dy * axial_dist
 
