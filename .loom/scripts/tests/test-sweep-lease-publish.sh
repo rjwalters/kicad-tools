@@ -20,7 +20,7 @@
 #   (c) a fresh lease held by a DIFFERENT host -> exit 4, nothing posted
 #   (d) a STALE lease (past TTL), same host or a peer's, does not block
 #       publication
-#   (e) regression (#5783): a fresh lease from a DIFFERENT sweep on the SAME
+#   (e) regression (kicad-tools#5783): a fresh lease from a DIFFERENT sweep on the SAME
 #       host -> exit 4, nothing posted (a same-host peer is just as live a
 #       worktree co-occupancy hazard as a different-host one -- see the
 #       "sweep-issue-5783-1790637192" style two-call sequence below, which
@@ -60,9 +60,9 @@
 #       away -- the phantom-block mechanism that lets a multi-host race
 #       churn indefinitely instead of converging. Mirrors sweep-lease-fence.
 #       sh's own #6485 yield-exclusion fix, applied here on the write side.
-#   (p) regression (#5783 AC4): two SEQUENTIAL, real `publish` calls for the
+#   (p) regression (kicad-tools#5783 AC4): two SEQUENTIAL, real `publish` calls for the
 #       SAME issue with the SAME host but two DIFFERENT --sweep-id values --
-#       exactly the observed #5781 incident shape -- result in exactly ONE
+#       exactly the observed kicad-tools#5781 incident shape -- result in exactly ONE
 #       proceeding (the first: exit 0, one comment posted) and the second
 #       exiting 4 with nothing posted, using the script's own freshly-posted
 #       comment as the second call's evidence (not a hand-authored fixture).
@@ -71,50 +71,17 @@
 #   ./.loom/scripts/tests/test-sweep-lease-publish.sh
 
 set -uo pipefail
+# shellcheck source=lib/write-scope-fixture.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/write-scope-fixture.sh"
 
 TEST_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPTS_DIR="$(cd "$TEST_DIR/.." && pwd)"
 SCRIPT="$SCRIPTS_DIR/sweep-lease-publish.sh"
 
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-NC='\033[0m'
+# shellcheck source=lib/assert.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/assert.sh"
 
-TESTS_RUN=0
-TESTS_PASSED=0
-TESTS_FAILED=0
 
-assert_eq() {
-    local expected="$1" actual="$2" msg="$3"
-    TESTS_RUN=$((TESTS_RUN + 1))
-    if [[ "$expected" == "$actual" ]]; then
-        TESTS_PASSED=$((TESTS_PASSED + 1))
-        echo -e "  ${GREEN}PASS${NC}: $msg"
-    else
-        TESTS_FAILED=$((TESTS_FAILED + 1))
-        echo -e "  ${RED}FAIL${NC}: $msg"
-        echo "    Expected: '$expected'"
-        echo "    Actual:   '$actual'"
-    fi
-}
-
-# assert_contains/assert_not_contains use a pure-bash substring match (no
-# forked printf|grep pipeline) so a transient fork/exec failure under
-# run-ci-suites.sh's parallel suite pool can never masquerade as a genuine
-# content mismatch (#7819, #7874).
-assert_contains() {
-    local haystack="$1" needle="$2" msg="$3"
-    TESTS_RUN=$((TESTS_RUN + 1))
-    if [[ "$haystack" == *"$needle"* ]]; then
-        TESTS_PASSED=$((TESTS_PASSED + 1))
-        echo -e "  ${GREEN}PASS${NC}: $msg"
-    else
-        TESTS_FAILED=$((TESTS_FAILED + 1))
-        echo -e "  ${RED}FAIL${NC}: $msg"
-        echo "    Expected substring: '$needle'"
-        echo "    In: '$haystack'"
-    fi
-}
 
 assert_true() {
     local cond="$1" msg="$2"
@@ -137,10 +104,10 @@ STUB_DIR="$(mktemp -d)"
 trap 'rm -rf "$STUB_DIR" 2>/dev/null || true' EXIT
 
 # --- Stub gh on PATH ------------------------------------------------------
-#   gh api [-R repo] repos/{owner}/{repo}/issues/<N>/comments --paginate --jq F
+#   gh api repos/{owner}/{repo}/issues/<N>/comments --paginate --jq F
 #       -> applies the real `jq` filter F to $STUB_DIR/comments.json (or "[]");
 #          fails if $STUB_DIR/comments-fail exists
-#   gh api [-R repo] --method POST repos/{owner}/{repo}/issues/<N>/comments -F body=@-
+#   gh api --method POST repos/{owner}/{repo}/issues/<N>/comments -F body=@-
 #       -> resolves the body EXACTLY as real gh would (only -F reads stdin;
 #          -f is a literal string), writes it to $STUB_DIR/post-<n>.body,
 #          appends a line to $STUB_DIR/post-calls.log, prints a comment JSON;
@@ -158,7 +125,9 @@ if [[ "$1" == "api" ]]; then
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --method) method="$2"; shift 2 ;;
-      -R) shift 2 ;;
+      -R|--repo)
+        # Real `gh api` has no -R/--repo flag (#9552): fail exactly like it.
+        echo "unknown shorthand flag: 'R' in -R" >&2; exit 1 ;;
       --paginate) shift ;;
       --jq) jq_filter="$2"; shift 2 ;;
       -f)
@@ -177,6 +146,7 @@ if [[ "$1" == "api" ]]; then
         ;;
     esac
   done
+  echo "$path" >> "$D/api-paths.log"
   resolve_body() {
     if [[ -n "$have_typed_body" ]]; then
       case "$typed_body" in
@@ -238,6 +208,15 @@ chmod +x "$STUB_DIR/gh"
 
 export LOOM_TEST_STUB_DIR="$STUB_DIR"
 export PATH="$STUB_DIR:$PATH"
+# #9548: the subject filters lease markers through `forge trusted-comments`.
+# shellcheck source=lib/trust-stub.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/trust-stub.sh"
+loom_trust_stub "$STUB_DIR"
+# #9548: The lease write vets its write target through the write scope before it
+# writes. It runs from a checkout registered as acme/widget (origin, .loom/, push
+# reported to the permission probe), so the real decision admits it.
+write_scope_register "$STUB_DIR/checkout" acme/widget
+cd "$STUB_DIR/checkout" || exit 1
 # Deterministic identity + clock for every case below.
 export LOOM_HOST_ID="studio-host"
 # Issue #6322/#6333: by default (no LOOM_LEASE_PUBLISH_HOSTNAME opt-in), the
@@ -333,7 +312,7 @@ run_script publish 6320 --sweep-id sweep-run-A --ttl-minutes 1
 assert_eq "0" "$RC" "(d) --ttl-minutes tightens freshness: a 2-min-old peer lease is stale at ttl=1"
 assert_eq "1" "$(post_count)" "(d) ... and publication proceeds"
 
-# --- (e) regression (#5783): fresh lease, same host, DIFFERENT sweep id ->
+# --- (e) regression (kicad-tools#5783): fresh lease, same host, DIFFERENT sweep id ->
 # exit 4, nothing posted (was: publish anyway, the bug this issue fixes) ---
 reset_state
 lease_json "$OPAQUE_HOST" "sweep-run-OLD" "$FRESH_ISO" > "$STUB_DIR/comments.json"
@@ -342,7 +321,7 @@ assert_eq "4" "$RC" "(e) same-host/different-sweep fresh lease now exits 4, not 
 assert_eq "0" "$(post_count)" "(e) nothing is posted over the same-host peer's live lease"
 assert_contains "$ERR" "different sweep on THIS SAME host" "(e) stderr names the same-host peer condition distinctly from the cross-host one"
 
-# --- (p) regression (#5783 AC4): two sequential real `publish` calls, same
+# --- (p) regression (kicad-tools#5783 AC4): two sequential real `publish` calls, same
 # issue, same host, different --sweep-id -> exactly one proceeds ----------
 reset_state
 run_script publish 6320 --sweep-id sweep-issue-5783-a
@@ -574,6 +553,17 @@ assert_eq "1" "$HELP_RC" "--help exits 1 (usage-exit convention, matches sweep-l
 "$SCRIPT" bogus-command > /dev/null 2>&1
 BOGUS_RC=$?
 assert_true "$([[ "$BOGUS_RC" -ne 0 ]] && echo true || echo false)" "an unknown command exits non-zero"
+
+# --- (p) LOOM_REPO set -> the repo is addressed in the endpoint PATH, never
+# via `-R` (#9552): `gh api` has no -R flag, so the old splice made both the
+# read and the POST fail and no lease was ever written.
+reset_state
+: > "$STUB_DIR/api-paths.log"
+LOOM_REPO=acme/widget run_script publish 6320 --sweep-id sweep-repo-set
+assert_eq "0" "$RC" "(p) LOOM_REPO set -> exit 0 (publish succeeds)"
+assert_eq "1" "$(post_count)" "(p) LOOM_REPO set: the lease comment was actually posted"
+assert_eq "repos/acme/widget/issues/6320/comments
+repos/acme/widget/issues/6320/comments" "$(cat "$STUB_DIR/api-paths.log")" "(p) LOOM_REPO set: both the read and the POST name the repo in the path"
 
 echo ""
 echo "Results: $TESTS_PASSED/$TESTS_RUN passed"

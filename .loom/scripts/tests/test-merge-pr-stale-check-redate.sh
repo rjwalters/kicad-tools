@@ -47,27 +47,8 @@ TEST_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HELPERS_DIR="$(cd "$TEST_DIR/.." && pwd)"
 MERGE_PR_SRC="$HELPERS_DIR/merge-pr.sh"
 
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-NC='\033[0m'
-
-TESTS_RUN=0
-TESTS_PASSED=0
-TESTS_FAILED=0
-
-assert_eq() {
-    local expected="$1" actual="$2" msg="$3"
-    TESTS_RUN=$((TESTS_RUN + 1))
-    if [[ "$expected" == "$actual" ]]; then
-        TESTS_PASSED=$((TESTS_PASSED + 1))
-        echo -e "  ${GREEN}PASS${NC}: $msg"
-    else
-        TESTS_FAILED=$((TESTS_FAILED + 1))
-        echo -e "  ${RED}FAIL${NC}: $msg"
-        echo "    Expected: '$expected'"
-        echo "    Actual:   '$actual'"
-    fi
-}
+# shellcheck source=lib/assert.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/assert.sh"
 
 assert_contains() {
     local haystack="$1" needle="$2" msg="$3"
@@ -102,14 +83,6 @@ info()    { echo "INFO: $*"; }
 success() { echo "OK: $*"; }
 warning() { echo "WARN: $*" >&2; }
 error()   { echo "ERROR: $*" >&2; exit 1; }
-
-# --- The #6074/#6752 credential ladder the guard's call is wrapped in (#5741) -
-# The extracted function invokes `forge_cmd_perm_safe`, so the suite must
-# provide the real one or every case would fail with exit 127. Sourced BEFORE
-# the shared globals below on purpose: forge-helpers.sh assigns FORGE_TYPE=""
-# at source time, which would otherwise clobber this suite's FORGE_TYPE.
-# shellcheck source=../lib/forge-helpers.sh
-source "$HELPERS_DIR/lib/forge-helpers.sh"
 
 # --- The real binary, for the subcommand-exists assertion at the end ---
 # shellcheck source=lib/require-daemon-bin.sh
@@ -317,7 +290,7 @@ unset REDATE_STALE_CHECKS
 # T11: the flag is accepted by the argument parser and advertised in --help.
 HELP_OUT="$(bash "$MERGE_PR_SRC" --help 2>&1)"
 assert_contains "$HELP_OUT" "--redate-stale-checks" "--help advertises the flag"
-assert_contains "$HELP_OUT" "4 = stale required checks re-running in place" "--help documents exit 4"
+assert_contains "$HELP_OUT" "4 = stale required checks re-dated by a no-op push" "--help documents exit 4"
 assert_contains "$(grep -c -- '--redate-stale-checks) REDATE_STALE_CHECKS=true' "$MERGE_PR_SRC")" "1" \
     "the argument parser has exactly one arm for the flag"
 
