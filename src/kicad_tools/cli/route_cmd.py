@@ -5082,6 +5082,7 @@ def run_post_route_drc(
         if not quiet and native_drc_failed:
             print("\n--- DRC Validation ---")
             print(f"  DRC FAILURE: native kicad-cli DRC did not complete ({geo.note}).")
+            geo_rc = getattr(geo, "returncode", None)
             if getattr(geo, "reason", None) == "kicad_cli_unsupported_option":
                 # Issue #6724: a usage error, not a crash -- don't blame memory.
                 print(
@@ -5089,15 +5090,29 @@ def run_post_route_drc(
                     "an option kct passed."
                 )
                 print("    Upgrade KiCad (kicad-cli) to a version that supports it.")
-            else:
+            elif geo_rc == 3:
+                # ERR_INVALID_INPUT_FILE: the board failed to load.
+                print("    The board was NOT checked by KiCad: kicad-cli could not load it.")
+                print(
+                    "    A likely cause is a board saved by a newer KiCad than this "
+                    "kicad-cli (e.g. a KiCad 10 board on KiCad 8/9); upgrade KiCad."
+                )
+            elif geo_rc == -9:
                 print(
                     "    The board was NOT checked by KiCad; a kicad-cli crash is never "
                     "a clean result."
                 )
                 print(
-                    "    Re-run when kicad-cli has enough memory, or run "
-                    "'kicad-cli pcb drc' on the board to see the failure."
+                    "    kicad-cli was killed (SIGKILL, likely out of memory). Re-run "
+                    "when it has enough memory, or run 'kicad-cli pcb drc' on the "
+                    "board to see the failure."
                 )
+            else:
+                print(
+                    "    The board was NOT checked by KiCad; a kicad-cli failure is never "
+                    "a clean result."
+                )
+                print("    Run 'kicad-cli pcb drc' on the board to see the failure.")
             if results.error_count > 0 or warning_count > 0:
                 print(f"  Internal errors: {results.error_count}")
                 if warning_count > 0:

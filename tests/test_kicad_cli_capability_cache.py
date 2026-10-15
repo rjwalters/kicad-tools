@@ -93,7 +93,9 @@ def test_capability_cache_is_keyed_by_path_not_shared_globally(monkeypatch, tmp_
     def fake_run(cmd, capture_output=True, text=True, **kwargs):
         calls.append(cmd[0])
         supports = cmd[0] == str(cli_b)
-        return _fake_completed(stdout="--refill-zones" if supports else "")
+        return _fake_completed(
+            stdout="--refill-zones" if supports else "Usage: drc [--output OUTPUT_FILE]"
+        )
 
     monkeypatch.setattr(runner.subprocess, "run", fake_run)
 

@@ -1265,29 +1265,81 @@ def _run_fill_zones_native(
         return KiCadCLIResult(success=False, stderr=f"Failed to fill zones: {e}")
 
 
-@lru_cache(maxsize=8)
-def _kicad_drc_supports_refill(kicad_cli: Path) -> bool:
-    """Check whether ``kicad-cli pcb drc`` supports ``--refill-zones``.
+#: Seconds the ``pcb drc --help`` capability probe may take.  Help output is
+#: instant; a stall means kicad-cli is wedged (#5877/#5932) and must not hold
+#: the caller past its own budget.
+_REFILL_PROBE_TIMEOUT_S = 30.0
+
+
+class _DrcRefillProbe:
+    """Does ``kicad-cli pcb drc`` support ``--refill-zones``?  (Issue #6724)
 
     KiCad 10+ added explicit ``--refill-zones`` and ``--save-board`` flags.
     Earlier versions (8, 9) always refill zones as part of DRC.
 
-    Memoised per ``kicad_cli`` path (Issue #5566) for the same reason as
-    :func:`_kicad_cli_has_fill_zones`: flag support cannot change between
-    calls in the same process, but this probe is otherwise re-run once per
-    :func:`_run_fill_zones_via_drc` call *and* once per
+    Memoised per ``kicad_cli`` path (Issue #5566): flag support cannot change
+    between calls in the same process, but the probe is otherwise re-run once
+    per :func:`_run_fill_zones_via_drc` call *and* once per
     :func:`_remediate_starved_thermal` refill pass -- each an independent,
     gated ``kicad-cli`` launch under ``KCT_NATIVE_MAX_CONCURRENCY``.
+
+    Only a *definitive* answer is cached: exit 0 with either the flag listed
+    or usage text that lacks it.  A killed, failed, timed-out or empty probe
+    answers ``False`` for that call but is not cached, and is recorded in
+    :meth:`inconclusive` so the geometric DRC gate can tell "this kicad-cli
+    has no ``--refill-zones``" from "we could not find out" (it passes the
+    flag in the latter case and lets kicad-cli's own ``Unknown argument``
+    rejection decide).
     """
-    try:
-        result = subprocess.run(
-            [str(kicad_cli), "pcb", "drc", "--help"],
-            capture_output=True,
-            text=True,
-        )
-        return "--refill-zones" in result.stdout
-    except Exception:
-        return False
+
+    def __init__(self) -> None:
+        self._answers: dict[Path, bool] = {}
+        self._inconclusive: set[Path] = set()
+
+    def __call__(self, kicad_cli: Path) -> bool:
+        kicad_cli = Path(kicad_cli)
+        if kicad_cli in self._answers:
+            return self._answers[kicad_cli]
+        answer = self._probe(kicad_cli)
+        if answer is None:
+            self._inconclusive.add(kicad_cli)
+            return False
+        self._inconclusive.discard(kicad_cli)
+        self._answers[kicad_cli] = answer
+        return answer
+
+    def inconclusive(self, kicad_cli: Path) -> bool:
+        """True if the latest probe of ``kicad_cli`` gave no definitive answer."""
+        return Path(kicad_cli) in self._inconclusive
+
+    def cache_clear(self) -> None:
+        self._answers.clear()
+        self._inconclusive.clear()
+
+    @staticmethod
+    def _probe(kicad_cli: Path) -> bool | None:
+        try:
+            result = subprocess.run(
+                [str(kicad_cli), "pcb", "drc", "--help"],
+                capture_output=True,
+                text=True,
+                timeout=_REFILL_PROBE_TIMEOUT_S,
+            )
+        except Exception:
+            return None
+        if result.returncode != 0:
+            return None
+        stdout = result.stdout if isinstance(result.stdout, str) else ""
+        if "--refill-zones" in stdout:
+            return True
+        # Exit 0 without the flag only counts when it really was the help
+        # text: an empty or garbled reply says nothing about the flag.
+        if "Usage" in stdout or "--output" in stdout:
+            return False
+        return None
+
+
+_kicad_drc_supports_refill = _DrcRefillProbe()
 
 
 def _snapshot_net_declarations(pcb_path: Path) -> list:

@@ -132,7 +132,7 @@ class TestRunGeometricDrc:
 
         assert res.ran is False
         assert res.reason == REASON_CRASH
-        assert "status 3" in (res.note or "")
+        assert "exit 3" in (res.note or "")
 
     def test_missing_report_is_no_report(self, monkeypatch, tmp_path):
         _fake_kicad_cli(monkeypatch, geometric, returncode=0, report=None)
@@ -211,9 +211,10 @@ def test_describe_returncode():
     assert "SIGKILL" in geometric.describe_returncode(-9)
     assert "out of memory" in geometric.describe_returncode(-9)
     assert "SIGSEGV" in geometric.describe_returncode(-11)
-    assert geometric.describe_returncode(3) == "kicad-cli exited with status 3"
+    assert "could not load the board" in geometric.describe_returncode(3)
+    assert geometric.describe_returncode(7) == "kicad-cli exited with status 7"
     usage = geometric.describe_returncode(geometric.KICAD_CLI_ERR_ARGS)
-    assert "usage error" in usage and "newer KiCad" in usage
+    assert "status 1" in usage and "newer KiCad" not in usage
     assert "memory" not in usage and "killed" not in usage
 
 
@@ -367,6 +368,199 @@ class TestKicadWithoutRefillZones:
         assert "DRC FAILURE" in out and "does not support --severity-all" in out
         assert "memory" not in out and "crash" not in out
         assert "DRC PASSED" not in out
+
+
+def _fake_cli(tmp_path: Path, *, help_body: str, drc_body: str, help_text: str = "") -> Path:
+    """A kicad-cli stand-in whose ``--help`` and DRC behaviour are scripted.
+
+    ``help_body`` / ``drc_body`` are Python statements run for ``--help`` and
+    for a DRC invocation; ``help_text`` is available to them.  Every argv is
+    logged to ``argv.log``.
+    """
+    log = tmp_path / "argv.log"
+    cli = tmp_path / "kicad-cli"
+    cli.write_text(
+        f"#!{sys.executable}\n"
+        "import json, os, signal, sys\n"
+        f"log, help_text, report = {str(log)!r}, {help_text!r}, {VALID_REPORT!r}\n"
+        "argv = sys.argv[1:]\n"
+        "open(log, 'a').write(json.dumps(argv) + '\\n')\n"
+        "if '--help' in argv:\n"
+        + "".join(f"    {line}\n" for line in help_body.splitlines())
+        + "".join(f"{line}\n" for line in drc_body.splitlines())
+    )
+    cli.chmod(cli.stat().st_mode | stat.S_IXUSR)
+    return cli
+
+
+_WRITE_REPORT = "open(argv[argv.index('--output') + 1], 'w').write(report)"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="needs an executable script")
+class TestExitStatusWording:
+    """Exit 1 is only an "unsupported option" when kicad-cli says so, and a
+    board-load failure (exit 3) is not blamed on memory."""
+
+    def test_exit1_without_unknown_argument_is_a_plain_failure(self, tmp_path):
+        cli = _fake_cli(
+            tmp_path,
+            help_body="sys.stdout.write(help_text); sys.exit(0)",
+            help_text=KICAD9_HELP,
+            drc_body=(
+                "sys.stderr.write('Traceback: wrapper failed: cannot open display\\n')\nsys.exit(1)"
+            ),
+        )
+
+        res = run_geometric_drc(tmp_path / "b.kicad_pcb", kicad_cli=cli)
+
+        assert res.ran is False and res.failed is True
+        assert res.reason == REASON_CRASH
+        assert res.reason != geometric.REASON_UNSUPPORTED
+        note = res.note or ""
+        assert "exited with status 1" in note
+        assert "cannot open display" in note
+        assert "Upgrade" not in note and "does not support" not in note
+
+    def test_describe_returncode_1_is_neutral(self):
+        text = geometric.describe_returncode(1)
+        assert "status 1" in text
+        assert "newer KiCad" not in text and "does not support" not in text
+
+    def test_describe_returncode_3_names_the_board_load_failure(self):
+        text = geometric.describe_returncode(3)
+        assert "could not load the board" in text
+        assert "newer than this kicad-cli" in text and "upgrade KiCad" in text
+        assert "memory" not in text
+
+    def test_route_gate_board_load_failure_says_upgrade_not_memory(
+        self, monkeypatch, tmp_path, capsys
+    ):
+        from unittest.mock import MagicMock, patch
+
+        import kicad_tools.cli.runner as runner_mod
+        from kicad_tools.cli.route_cmd import run_post_route_drc
+
+        cli = _fake_cli(
+            tmp_path,
+            help_body="sys.stdout.write(help_text); sys.exit(0)",
+            help_text=KICAD9_HELP,
+            drc_body="sys.stderr.write('Failed to load board\\n'); sys.exit(3)",
+        )
+        monkeypatch.setattr(runner_mod, "find_kicad_cli", lambda: cli)
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text("(kicad_pcb)")
+        clean = MagicMock(error_count=0, warning_count=0, errors=[], warnings=[])
+
+        with (
+            patch("kicad_tools.validate.DRCChecker") as checker_cls,
+            patch("kicad_tools.schema.pcb.PCB"),
+        ):
+            checker_cls.return_value.check_all.return_value = clean
+            errors, _warnings = run_post_route_drc(
+                output_path=pcb, manufacturer="jlcpcb", layers=2, quiet=False
+            )
+
+        out = capsys.readouterr().out
+        assert errors >= 1
+        assert "could not load it" in out and "upgrade KiCad" in out
+        assert "memory" not in out and "DRC PASSED" not in out
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="needs an executable script")
+class TestRefillProbeIsDefinitive:
+    """A killed, failed or timed-out ``--help`` probe must not be cached as
+    "no ``--refill-zones``", nor silently drop the refill from a KiCad 10 run."""
+
+    HELP10 = KICAD9_HELP + "  --refill-zones          Refill zones before running DRC\n"
+
+    def test_killed_probe_does_not_turn_kicad10_into_a_no_refill_run(self, tmp_path):
+        cli = _fake_cli(
+            tmp_path,
+            help_body="os.kill(os.getpid(), signal.SIGKILL)",
+            drc_body=_WRITE_REPORT,
+        )
+
+        res = run_geometric_drc(tmp_path / "b.kicad_pcb", kicad_cli=cli)
+
+        assert res.ran is True, res.note
+        drc_runs = [argv for argv in _logged_argvs(tmp_path) if "--help" not in argv]
+        assert "--refill-zones" in drc_runs[0], "unknown support must not drop the refill"
+
+    def test_killed_probe_on_kicad9_still_fails_loudly_not_silently(self, tmp_path):
+        cli = _fake_cli(
+            tmp_path,
+            help_body="os.kill(os.getpid(), signal.SIGKILL)",
+            help_text=KICAD9_HELP,
+            drc_body=(
+                "if '--refill-zones' in argv:\n"
+                "    sys.stdout.write('Unknown argument: --refill-zones\\n'); sys.exit(1)\n"
+                + _WRITE_REPORT
+            ),
+        )
+
+        res = run_geometric_drc(tmp_path / "b.kicad_pcb", kicad_cli=cli)
+
+        assert res.ran is False and res.reason == geometric.REASON_UNSUPPORTED
+        assert "--refill-zones" in (res.note or "")
+
+    def test_failed_probe_is_not_cached(self, tmp_path):
+        from kicad_tools.cli import runner
+
+        cli = _fake_cli(
+            tmp_path,
+            help_body="sys.exit(2)",
+            drc_body=_WRITE_REPORT,
+        )
+
+        assert runner._kicad_drc_supports_refill(cli) is False
+        assert runner._kicad_drc_supports_refill.inconclusive(cli) is True
+        assert runner._kicad_drc_supports_refill(cli) is False
+        probes = [argv for argv in _logged_argvs(tmp_path) if "--help" in argv]
+        assert len(probes) == 2, "an inconclusive probe must be retried"
+
+    def test_empty_help_is_not_a_definitive_no(self, tmp_path):
+        from kicad_tools.cli import runner
+
+        cli = _fake_cli(tmp_path, help_body="sys.exit(0)", drc_body=_WRITE_REPORT)
+
+        assert runner._kicad_drc_supports_refill(cli) is False
+        assert runner._kicad_drc_supports_refill.inconclusive(cli) is True
+
+    def test_timed_out_probe_is_inconclusive(self, monkeypatch, tmp_path):
+        from kicad_tools.cli import runner
+
+        def hang(*_a, **_k):
+            raise subprocess.TimeoutExpired("kicad-cli", 30)
+
+        monkeypatch.setattr(runner.subprocess, "run", hang)
+
+        assert runner._kicad_drc_supports_refill(tmp_path / "kicad-cli") is False
+        assert runner._kicad_drc_supports_refill.inconclusive(tmp_path / "kicad-cli") is True
+
+    def test_probe_has_a_timeout_and_counts_against_the_budget(self, monkeypatch, tmp_path):
+        from kicad_tools.cli import runner
+
+        seen: list[float | None] = []
+        real_run = subprocess.run
+
+        def spy(cmd, *a, **k):
+            seen.append(k.get("timeout"))
+            return real_run(cmd, *a, **k)
+
+        monkeypatch.setattr(runner.subprocess, "run", spy)
+        cli = _fake_cli(
+            tmp_path,
+            help_body="sys.stdout.write(help_text); sys.exit(0)",
+            help_text=self.HELP10,
+            drc_body=_WRITE_REPORT,
+        )
+
+        res = run_geometric_drc(tmp_path / "b.kicad_pcb", kicad_cli=cli, timeout=50)
+
+        assert res.ran is True
+        probe_timeout, run_timeout = seen
+        assert probe_timeout == runner._REFILL_PROBE_TIMEOUT_S
+        assert run_timeout is not None and run_timeout <= 50
 
 
 # ---------------------------------------------------------------------------
