@@ -992,23 +992,28 @@ void Grid3D::index_route_geometry(GeometryBins& bins, size_t index,
     }
 }
 
+std::vector<size_t> Grid3D::gather_route_geometry(const GeometryBins& bins,
+                                                  float minx, float miny,
+                                                  float maxx, float maxy) {
+    std::vector<size_t> result;
+    if (bins.empty()) return result;
+    for (int y = static_cast<int>(std::floor(miny / 2.0f));
+         y <= static_cast<int>(std::floor(maxy / 2.0f)); ++y) {
+        for (int x = static_cast<int>(std::floor(minx / 2.0f));
+             x <= static_cast<int>(std::floor(maxx / 2.0f)); ++x) {
+            const auto it = bins.find({x, y});
+            if (it != bins.end()) result.insert(result.end(), it->second.begin(), it->second.end());
+        }
+    }
+    std::sort(result.begin(), result.end());
+    result.erase(std::unique(result.begin(), result.end()), result.end());
+    return result;
+}
+
 std::pair<std::vector<size_t>, std::vector<size_t>> Grid3D::route_geometry_candidates(
     float minx, float miny, float maxx, float maxy) const {
-    auto gather = [&](const GeometryBins& bins) {
-        std::vector<size_t> result;
-        for (int y = static_cast<int>(std::floor(miny / 2.0f));
-             y <= static_cast<int>(std::floor(maxy / 2.0f)); ++y) {
-            for (int x = static_cast<int>(std::floor(minx / 2.0f));
-                 x <= static_cast<int>(std::floor(maxx / 2.0f)); ++x) {
-                const auto it = bins.find({x, y});
-                if (it != bins.end()) result.insert(result.end(), it->second.begin(), it->second.end());
-            }
-        }
-        std::sort(result.begin(), result.end());
-        result.erase(std::unique(result.begin(), result.end()), result.end());
-        return result;
-    };
-    return {gather(route_segment_bins_), gather(route_via_bins_)};
+    return {gather_route_geometry(route_segment_bins_, minx, miny, maxx, maxy),
+            gather_route_geometry(route_via_bins_, minx, miny, maxx, maxy)};
 }
 
 void Grid3D::add_stored_segment(float x1, float y1, float x2, float y2,
@@ -1480,11 +1485,14 @@ bool Grid3D::trace_stored_vias_clear(const Segment& s, float clearance,
     namespace ck = ::router::clearance;
     if (stored_vias_.empty()) return true;
     const float margin = s.width / 2 + std::max({clearance, partner_clearance, max_pairwise_clearance_});
-    const auto candidates = route_geometry_candidates(
+    // Issue #5617: vias only -- this runs on every A* neighbour step, and it
+    // used to gather and sort the stored-segment bins too, then discard them
+    // (docs/diagnostics/issue-5617/phase4-native-astar-profile.md).
+    const auto via_candidates = gather_route_geometry(route_via_bins_,
         std::min(s.x1, s.x2) - margin, std::min(s.y1, s.y2) - margin,
         std::max(s.x1, s.x2) + margin, std::max(s.y1, s.y2) + margin);
     const ck::KSegment candidate{s.x1, s.y1, s.x2, s.y2, s.width, s.layer};
-    for (size_t i : candidates.second) {
+    for (size_t i : via_candidates) {
         const auto& via = stored_vias_[i];
         if (via.net == s.net || s.layer < via.layer_from || s.layer > via.layer_to) continue;
         const auto cp = closest_point_on_segment(via.x, via.y, s.x1, s.y1, s.x2, s.y2);
