@@ -25,8 +25,8 @@ These tests pin two contracts so a future silent-no-op regression (cf.
    without a net_class_map.
 2. **Parity (the fix):** ``kct check --net-class-map <sidecar>`` reports the
    bare error set PLUS exactly the three families, with the family-level
-   counts pinned (diffpair_length_skew=4, diffpair_routing_continuity=4,
-   match_group_length_skew=1 on board 07).
+   counts pinned in ``BOARD_07_EXPECTED_FAMILY_DELTA`` (diffpair_length_skew=5,
+   match_group_length_skew=1 on board 07 since #6725; see #6802).
 
 It also exercises the CI gate's net-class-map resolver
 (``scripts/ci/net_class_map_resolver.py``) directly: committed-sidecar
@@ -95,16 +95,30 @@ NET_CLASS_GATED_FAMILIES: tuple[str, ...] = (
     "match_group_length_skew",
 )
 
-# The archived synthetic witness includes the September MIPI repair: only
-# DQS/TMDS residuals contribute two skew errors. The same residuals still fall
-# below the continuity threshold, but continuity is info-only since #6443 and
-# no longer an error, and no board 07 class declares an uncoupled-length limit.
-# The real assembled SDRAM demo has its own zero-error readiness checks.
+# Re-pinned by #6802 after PR #6729 (#6725) switched ``kct check`` to measure
+# net length exactly as kicad-cli does (pad/via trims + stackup via height).
+# Bisected: 8555f0924 (before #6729) reported 2 skew errors (DQS, TMDS_D2);
+# 940d66415 (#6729 merge) and every later merge through a34d5a632 report the
+# set below, unchanged by #6779/#6780/#6792. The committed artifact did not
+# change; the old pins were measured with the pre-#6725 length model.
+#
+# Verified against Docker kicad/kicad:10.0 (kicad-cli 10.0.6) on this exact
+# file with per-net length + per-pair/group skew rules: every per-net length
+# agrees within 0.05 um, and kicad-cli raises skew_out_of_range for the same
+# six findings -- DQS 6.7722, MIPI_CLK 0.1198, MIPI_DAT0 0.1292, MIPI_DAT1
+# 0.1063, TMDS_D2 4.9094 mm (pairs), and ADDR_BUS 1.0998 mm (> 0.5 mm group
+# tolerance; A3 44.8727 vs A4 43.7728 mm). The MIPI pairs, which the old model
+# placed within 0.05 mm, are 0.11-0.13 mm apart under kicad-cli as well.
+# (kicad-cli additionally flags TMDS_D0/TMDS_D1, whose N nets are unrouted;
+# kct reports those as connectivity, not skew, both before and after #6729.)
+# Continuity is info-only since #6443 and no board 07 class declares an
+# uncoupled-length limit, so those families stay at 0. The real assembled
+# SDRAM demo has its own zero-error readiness checks.
 BOARD_07_EXPECTED_FAMILY_DELTA = {
-    "diffpair_length_skew": 2,
+    "diffpair_length_skew": 5,
     "diffpair_routing_continuity": 0,
     "diffpair_uncoupled_length": 0,
-    "match_group_length_skew": 0,
+    "match_group_length_skew": 1,
 }
 
 
@@ -329,7 +343,7 @@ class TestBoard07KctCheckParity:
             )
 
     def test_sidecar_adds_exactly_the_three_families(self, bare: dict, with_sidecar: dict) -> None:
-        """WITH-sidecar set == bare set PLUS exactly the three families.
+        """WITH-sidecar set == bare set PLUS exactly the pinned gated families.
 
         Pins the family-level delta so a silent-no-op regression in any one
         rule is caught (cf. #3098 / PR #3145).
@@ -347,11 +361,11 @@ class TestBoard07KctCheckParity:
             )
 
         # The added families are EXACTLY the gated families that the
-        # committed artifact still has errors for (Issue #3440: the
-        # match-group tuner now brings board 07's groups within
-        # tolerance, so match_group_length_skew is gated-but-clean --
-        # its ENGAGEMENT is pinned by the matchgroup CI gate's
-        # rules_checked_by_rule assertion, not by an error count here).
+        # committed artifact still has errors for: diffpair_length_skew and
+        # match_group_length_skew (ADDR_BUS) since the kicad-cli-exact length
+        # model (#6725 / PR #6729; re-pinned by #6802). Families pinned at 0
+        # are gated-but-clean; their ENGAGEMENT is pinned elsewhere (e.g. the
+        # matchgroup CI gate's rules_checked_by_rule assertion).
         added = {
             family
             for family in sidecar_counts
@@ -377,7 +391,7 @@ class TestBoard07KctCheckParity:
             )
 
     def test_total_error_count_delta(self, bare: dict, with_sidecar: dict) -> None:
-        """Total error count rises by the sum of the three family deltas."""
+        """Total error count rises by the sum of the gated family deltas."""
         bare_total = bare["summary"]["errors"]
         sidecar_total = with_sidecar["summary"]["errors"]
         assert sidecar_total - bare_total == sum(BOARD_07_EXPECTED_FAMILY_DELTA.values())
@@ -400,9 +414,10 @@ class TestCiGateCountsGatedFamilies:
     def test_board_07_gate_counts_diffpair_and_matchgroup(self) -> None:
         """The preserved synthetic witness retains both real and gated findings.
 
-        The MIPI repair removes two skew/continuity pairs and one open. The
-        corrected drill/pad intersection check (#5012) also exposes five
-        unsupported partial drill overlaps under the default manufacturer.
+        The corrected drill/pad intersection check (#5012) exposes five
+        unsupported partial drill overlaps under the default manufacturer;
+        the net-class-gated families add the six kicad-cli-confirmed skew
+        findings pinned in ``BOARD_07_EXPECTED_FAMILY_DELTA`` (#6802).
         These are preserved fixture findings, not manufacturing waivers.
         """
         if not BOARD_07_PCB.is_file():
