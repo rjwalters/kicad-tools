@@ -187,6 +187,50 @@ void Pathfinder::ensure_search_arrays_sized() {
     ++search_current_gen_;
 }
 
+// Issue #5617: see ``via_verdict_`` in pathfinder.hpp.  Same generation-
+// stamp scheme as ``ensure_search_arrays_sized()``: O(1) invalidation per
+// epoch, full reset only on a grid resize or a uint32 wraparound.
+void Pathfinder::begin_via_verdict_epoch() {
+    const int cols = grid_.cols();
+    const int rows = grid_.rows();
+    if (cols != via_verdict_cols_ || rows != via_verdict_rows_) {
+        const size_t total = static_cast<size_t>(cols) * static_cast<size_t>(rows);
+        via_verdict_gen_.assign(total, 0u);
+        via_verdict_.assign(total, ViaVerdict{});
+        via_verdict_cols_ = cols;
+        via_verdict_rows_ = rows;
+        via_verdict_epoch_ = 0;
+    }
+    if (via_verdict_epoch_ == std::numeric_limits<uint32_t>::max()) {
+        std::fill(via_verdict_gen_.begin(), via_verdict_gen_.end(), 0u);
+        via_verdict_epoch_ = 0;
+    }
+    ++via_verdict_epoch_;
+}
+
+bool Pathfinder::search_via_blocked_cached(int x, int y, int& out_blocking_net,
+                                           float& out_world_x, float& out_world_y) {
+    if (grid_.pairwise_active()) {
+        return is_via_blocked_diag(x, y, search_net_, search_negotiated_mode_,
+                                   search_via_radius_cells_,
+                                   out_blocking_net, out_world_x, out_world_y);
+    }
+    const size_t idx = static_cast<size_t>(y) * static_cast<size_t>(via_verdict_cols_) +
+                       static_cast<size_t>(x);
+    ViaVerdict& v = via_verdict_[idx];
+    if (via_verdict_gen_[idx] != via_verdict_epoch_) {
+        const bool result = is_via_blocked_diag(
+            x, y, search_net_, search_negotiated_mode_, search_via_radius_cells_,
+            v.blocking_net, v.world_x, v.world_y);
+        v.blocked = result ? 1 : 0;
+        via_verdict_gen_[idx] = via_verdict_epoch_;
+    }
+    out_blocking_net = v.blocking_net;
+    out_world_x = v.world_x;
+    out_world_y = v.world_y;
+    return v.blocked != 0;
+}
+
 bool Pathfinder::trace_halo_cell_clear(int cx, int cy, int layer, int x1, int y1,
                                        int x2, int y2, int net, int partner) const {
     if (!grid_.route_cell_has_geometry(cx, cy, layer)) return false;
@@ -2278,6 +2322,9 @@ RouteResult Pathfinder::run_astar_loop() {
 
     constexpr int kTimeoutCheckInterval = 1024;
 
+    // Issue #5617: via-drop verdicts are valid for this call only.
+    begin_via_verdict_epoch();
+
     while (!search_open_set_.empty() && last_iterations_ < search_max_iterations_) {
         last_iterations_++;
 
@@ -2730,18 +2777,17 @@ RouteResult Pathfinder::run_astar_loop() {
 
         // Try layer change (via)
         int own_vias_clear = -1;  // Issue #6464: lazily evaluated once per node
-        ViaBlockMemo via_memo;    // Issue #5617: once per node, not per layer
         for (int new_layer : routable_layers_) {
             if (new_layer == current.layer) continue;
 
             // Issue #2476: Diagnostic-aware via blocking check so we can
             // record which stored-via net rejected our candidate slot.
+            // Issue #5617: one verdict per (x, y) per loop call, replayed
+            // for every other target layer and every other layer's node.
             int blocking_net = 0;
             float block_wx = 0.0f, block_wy = 0.0f;
-            if (via_memo.blocked(*this, current.x, current.y, search_net_,
-                                 search_negotiated_mode_,
-                                 search_via_radius_cells_,
-                                 blocking_net, block_wx, block_wy)) {
+            if (search_via_blocked_cached(current.x, current.y,
+                                          blocking_net, block_wx, block_wy)) {
                 if (blocking_net != 0) {
                     ++search_via_block_count_;
                     search_last_blocking_net_ = blocking_net;
