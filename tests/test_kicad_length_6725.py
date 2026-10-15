@@ -511,10 +511,60 @@ class TestKicadCliProbes:
         pad = LPad(10.7, 0.0, 1.0, 1.0, layers=frozenset({_B}))
         assert _probe([(0, 0, 10, 0, _F)], [pad]) == pytest.approx(11.58, abs=1e-4)
 
-    def test_through_hole_pad_does_not_connect_a_via(self):
-        pad = LPad(5.0, 0.0, 1.0, 1.0, shape="circle", layers=None)
-        via = LVia(5.0, 0.0, 0.6, (_F, _B))
-        assert _probe([(0, 0, 5, 0, _F)], [pad], [via]) == pytest.approx(5.0, abs=1e-4)
+    @pytest.mark.parametrize(
+        ("side", "track_layer", "expected"),
+        [
+            (_F, _F, 4.0),  # pad adds F.Cu, already connected: still a stub
+            (_F, _B, 5.58),  # pad adds F.Cu to the B.Cu track: full span
+            (_B, _F, 5.58),
+            (_B, _B, 4.0),
+            (_F, "In1.Cu", 4.5325),
+            (_B, "In1.Cu", 5.0475),
+        ],
+    )
+    def test_through_hole_pad_connects_its_footprint_side(self, side, track_layer, expected):
+        pad = LPad(10.0, 0.0, 1.2, 1.2, layers=None, side=side)
+        segs = [(10, 0, 14, 0, track_layer)]
+        assert _probe(segs, [pad]) == pytest.approx(expected, abs=1e-4)
+
+    def test_through_hole_pad_connects_off_centre_via(self):
+        pad = LPad(10.0, 0.0, 1.2, 1.2, layers=None, side=_F)
+        via = LVia(10.1, 0.0, 0.6, (_F, _B))
+        got = _probe([(10.1, 0, 14, 0, _B)], [pad], [via])
+        assert got == pytest.approx(5.48, abs=1e-4)
+
+    def test_through_hole_pad_side_read_from_footprint(self, tmp_path):
+        board = _MERGE_BOARD.split("  (net 0")[0] + (
+            '  (net 0 "") (net 1 "N1")\n'
+            '  (footprint "T:TH" (layer "B.Cu") (uuid "51111111-1111-1111-1111-111111111111")'
+            " (at 50 50)\n"
+            '    (pad "1" thru_hole circle (at 0 0) (size 1.2 1.2) (drill 0.6)'
+            ' (layers "*.Cu" "*.Mask") (net 1 "N1")'
+            ' (uuid "51111111-1111-1111-1111-111111111112")))\n'
+            '  (segment (start 50 50) (end 54 50) (width 0.2) (layer "F.Cu") (net 1)'
+            ' (uuid "51111111-1111-1111-1111-111111111113"))\n'
+            '  (via (at 50 50) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 1)'
+            ' (uuid "51111111-1111-1111-1111-111111111114"))\n'
+            ")\n"
+        )
+        path = tmp_path / "board.kicad_pcb"
+        path.write_text(board)
+        pcb = PCB.load(str(path))
+        assert DiffPairLengthTracker.measure_net_from_pcb(pcb, 1) == pytest.approx(5.58, abs=1e-4)
+
+    @pytest.mark.parametrize(
+        ("via_x", "expected"),
+        [(10.0, 4.0325), (10.15, 3.9264), (9.85, 4.2083)],
+    )
+    def test_via_in_pad_trims_compose(self, via_x, expected):
+        # A run ends at an SMD pad centre that also lies inside a via.  The via
+        # straightens the end to its own centre first; the pad then trims it
+        # only when the via sits on the pad centre.  The stretch is never
+        # removed twice.
+        pad = LPad(10.0, 0.0, 1.2, 1.2, layers=frozenset({_F}))
+        via = LVia(via_x, 0.0, 0.6, (_F, _B))
+        segs = [(10, 0, 10.2, 0.2, _F), (10.2, 0.2, 14, 0.2, _F)]
+        assert _probe(segs, [pad], [via]) == pytest.approx(expected, abs=1e-4)
 
     def test_track_passing_through_via_does_not_connect_it(self):
         segs = [(0, 0, 10, 0, _F), (9, 0.1, 12, 0.1, _B)]

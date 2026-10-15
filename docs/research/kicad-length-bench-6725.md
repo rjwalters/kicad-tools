@@ -99,18 +99,25 @@ consulted, and `router/kicad_length.py` is written from these observations.
    run that never leaves the copper is kept.
 3. **A stub via has zero height.** The via span runs between the layers the
    via is connected on. A layer counts when a track ends inside the via copper
-   on it, or when a surface pad on it overlaps the via copper. A track that
-   only passes through the via counts for nothing, and so does a through-hole
-   pad. A via connected on fewer than two layers gets zero height: 5.0000 mm
-   for a 5 mm track ending in a via. It does not fall back to the declared
-   span. The Route form keeps the declared span for such a via, because a
-   router `Route` can be one fragment of a net.
+   on it, or when a pad on it overlaps the via copper. A surface pad adds its
+   own layers, and a through-hole pad adds only its footprint's side: F.Cu for
+   a front footprint, B.Cu for a back one. A track that only passes through
+   the via adds nothing. A via connected on fewer than two layers gets zero
+   height: 5.0000 mm for a 5 mm track ending in a via. It does not fall back
+   to the declared span. The Route form keeps the declared span for such a
+   via, because a router `Route` can be one fragment of a net.
+4. **Via and pad trims compose.** When a run ends at a pad centre inside a
+   via, the via straightens the end to its own centre first. The pad then
+   trims the end only if the via sits exactly on the pad centre, so the
+   in-via stretch is never removed twice. Probes: 4.0325 mm with the via on
+   the pad centre; with the via 0.15 mm right or left of it, the F.Cu run
+   measures 3.9264 mm or 4.2083 mm.
 
 ## Known limitation
 
 At a junction of three or more endpoints, kicad-cli's result depends on item
 order. In every probe that order was file load order. The PCB form uses file
-order, and it matches every bench net and all but two of 57 probes. The two
+order, and it matches every bench net and all but two of 76 probes. The two
 misses are runs that loop back through a junction inside a via. The tuners'
 Route form uses router order, so at such junctions it can drift from the
 written board's number by one track stub. This happened on 06rf `PCIE_TX-`,

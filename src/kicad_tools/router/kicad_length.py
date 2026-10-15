@@ -28,7 +28,9 @@ Run-end trimming
     via's copper, has its in-copper stretch replaced by a straight line from
     the boundary crossing to the centre (nothing changes when the run never
     leaves the copper).  Each pad or via trims at most one end of a run, and
-    the run's first end wins.
+    the run's first end wins.  Vias act first and pads second, each on the
+    path the previous trims left, so a via inside a pad takes over the end
+    unless it sits exactly on the pad centre.
 
 Via height (``KicadStackup.span``)
     The copper-plus-dielectric height between the two end layers.  An outer
@@ -42,10 +44,11 @@ Via height (``KicadStackup.span``)
 Via span
     The span runs between the outermost layers the via is connected on: a
     layer where a track of the net ends inside the via copper, or the layer of
-    a surface pad of the net whose copper overlaps the via (through-hole pads
-    add nothing).  A via connected on fewer than two layers is a stub and adds
-    no height.  The Route form keeps the declared span for such a via instead,
-    because one router ``Route`` can be a fragment of its net.
+    a pad of the net whose copper overlaps the via (a surface pad adds its
+    own layers, a through-hole pad only its footprint's side).  A via
+    connected on fewer than two layers is a stub and adds no height.  The
+    Route form keeps the declared span for such a via instead, because one
+    router ``Route`` can be a fragment of its net.
 """
 
 from __future__ import annotations
@@ -96,7 +99,9 @@ class LPad:
 
     ``w``/``h`` are in the pad's own frame, rotated by ``rot`` degrees using
     KiCad's pad convention.  ``layers`` is the set of copper layer names the
-    pad is on, or ``None`` for all copper layers (through-hole).
+    pad is on, or ``None`` for all copper layers (through-hole).  ``side`` is
+    the copper layer of the footprint's side: the one layer on which a
+    through-hole pad connects a via it overlaps.
     """
 
     x: float
@@ -107,6 +112,7 @@ class LPad:
     shape: str = "rect"
     rratio: float = 0.25
     layers: frozenset[str] | None = None
+    side: str = "F.Cu"
 
 
 # ---------------------------------------------------------------------------
@@ -422,31 +428,27 @@ class _RunBuilder:
         return out
 
 
-def _end_trim(shape: _Shape, path: list[Point]) -> float:
-    """Length saved by straightening ``path``'s opening stretch inside ``shape``.
+def _straighten_start(shape: _Shape, path: list[Point]) -> list[Point]:
+    """``path`` with its opening stretch inside ``shape`` straightened.
 
     ``path[0]`` lies inside ``shape``.  The stretch up to where ``path`` first
-    leaves the copper is replaced by a straight line from that crossing to the
-    shape's centre; a path that never leaves is left alone.
+    leaves the copper becomes a straight line from the shape's centre to that
+    crossing, so the result starts at the centre.  A path that never leaves
+    the copper is returned unchanged.
     """
-    inside = 0.0
-    for a, b in pairwise(path):
-        if shape.contains(*b):
-            inside += math.dist(a, b)
-            continue
-        exit_pt = _crossing(shape, a, b)
-        inside += math.dist(a, exit_pt)
-        return inside - math.dist(exit_pt, (shape.x, shape.y))
-    return 0.0
+    for i, (a, b) in enumerate(pairwise(path)):
+        if not shape.contains(*b):
+            return [(shape.x, shape.y), _crossing(shape, a, b), *path[i + 1 :]]
+    return path
 
 
-def _trim_one_end(shape: _Shape, run: _Run, touches) -> float:
-    """Trim the first of ``run``'s two ends for which ``touches(point)`` holds."""
-    if touches(run.points[0]):
-        return _end_trim(shape, run.points)
-    if touches(run.points[-1]):
-        return _end_trim(shape, run.points[::-1])
-    return 0.0
+def _straighten_one_end(shape: _Shape, path: list[Point], touches) -> list[Point]:
+    """Straighten the first of ``path``'s two ends for which ``touches`` holds."""
+    if touches(path[0]):
+        return _straighten_start(shape, path)
+    if touches(path[-1]):
+        return _straighten_start(shape, path[::-1])[::-1]
+    return path
 
 
 # ---------------------------------------------------------------------------
@@ -488,11 +490,9 @@ def _via_height(
             if copper.contains(s.x1, s.y1) or copper.contains(s.x2, s.y2):
                 layers.add(pos)
     for pad in pads:
-        if pad.layers is None:
-            continue
         if _pad_shape(pad).gap_to(via.x, via.y) >= radius:
             continue
-        for name in pad.layers:
+        for name in (pad.side,) if pad.layers is None else pad.layers:
             pos = stackup.position(name)
             if pos is not None and lo <= pos <= hi:
                 layers.add(pos)
@@ -524,14 +524,10 @@ def net_length(
 
     total = 0.0
     for run in _RunBuilder(seg_list).runs():
-        total += run.length
-        for pad in pad_list:
-            if not _pad_on_layer(pad, run.layer):
-                continue
-            centre = (pad.x, pad.y)
-            total -= _trim_one_end(
-                _pad_shape(pad), run, lambda p, c=centre: math.dist(p, c) <= _CENTRE_TOL
-            )
+        # Vias first, then pads, each acting on the path the previous one left:
+        # a via straightens a run end to its own centre, so a pad still trims
+        # that end only when the via sits exactly on the pad centre.
+        path = run.points
         for via in via_list:
             if stackup is not None:
                 positions = _via_positions(via, stackup)
@@ -541,7 +537,15 @@ def net_length(
                 ):
                     continue
             shape = _via_shape(via)
-            total -= _trim_one_end(shape, run, lambda p, s=shape: s.contains(*p))
+            path = _straighten_one_end(shape, path, lambda p, s=shape: s.contains(*p))
+        for pad in pad_list:
+            if not _pad_on_layer(pad, run.layer):
+                continue
+            centre = (pad.x, pad.y)
+            path = _straighten_one_end(
+                _pad_shape(pad), path, lambda p, c=centre: math.dist(p, c) <= _CENTRE_TOL
+            )
+        total += _Run(run.layer, path).length
 
     if stackup is not None:
         for via in via_list:
@@ -576,6 +580,7 @@ def _pcb_pads(pcb: PCB, net_id: int) -> list[LPad]:
                     shape=pad.shape,
                     rratio=_pad_rratio(pad),
                     layers=layers,
+                    side="B.Cu" if getattr(fp, "layer", "F.Cu") == "B.Cu" else "F.Cu",
                 )
             )
     return pads
@@ -638,6 +643,8 @@ def router_pad(pad: Any) -> LPad:
         shape=getattr(pad, "shape", None) or "rect",
         rratio=_pad_rratio(pad),
         layers=layers,
+        # Router pads carry no footprint side; their layer is the best guess.
+        side=_lname(pad.layer),
     )
 
 
