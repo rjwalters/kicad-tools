@@ -25,32 +25,40 @@ How KiCad measures, and so how kct does (pinned on kicad-cli 10.0.6 by
 | Question | KiCad's answer |
 |---|---|
 | Per net or P + N summed? | Per net; the pair's figure is `max(uncoupled(P), uncoupled(N))`. |
-| What is coupled? | The projected overlap of same-layer segments that are parallel (anti-parallel too) to within about 0.01°. 0.02° is already uncoupled. |
+| What is coupled? | The projected overlap of a P segment and an N segment on one layer whose lines never meet in KiCad's 32-bit coordinates (anti-parallel too; 0.005° still couples on 20 mm traces, 0.02° does not), **unless copper stands between them** (see "How pairs are formed"). |
 | Distance limit? | None, unless a `diff_pair_gap (max ..)` is present. kct emits only `(min ..)`, so two parallel runs 10 mm apart are coupled. |
 | Via barrels? | Not counted. Vias that sit side by side cost nothing; offset vias cost only the track copper left without a partner. |
 
+### How pairs are formed
+
+Issue #6554. KiCad pairs primitives; kct repeats it (to 1 µm on every
+committed pair, board 06's regression fixture and the pinned probes):
+
+* Each parallel same-layer P/N segment pair couples over its overlap, and the
+  pairs are **summed**, not unioned (a net can read negative; kct clamps at 0).
+* A pair does **not** couple when other copper (a track of any net, the pair's
+  own included, a via or a pad, at any distance) reaches the probe between the
+  two overlaps' nearest points, which is where the overlap starts on the **P
+  trace's stored direction** (1 nm rounding can move it on a diagonal).
+* Exempt: a track or via touching an **end of the overlap**, and a pad that
+  one of the two traces **leaves** (KiCad's ray-cast pad test: a point on the
+  top or right edge is outside, on the bottom or left edge inside). So a stub
+  buried in its own pad does not pair; board 06's two are its extra 0.325 mm.
+
 ### Known divergences
 
-* **KiCad's figure is larger than kct's on real copper.** KiCad does not
-  couple two parallel runs when a nearer non-parallel neighbour intervenes;
-  kct couples any parallel overlap. On the committed boards KiCad reports
-  10.405 / 0.964 mm for board 03's `USB_D` / `USB_MCU_D` and 1.541 mm for each
-  board 06 LVDS pair, against kct's 8.130 / 0.849 / 1.216 mm. kct's figure is a
-  lower bound, so a pair that sits within ~3 mm of its limit can pass kct and
-  fail kicad-cli. `test_known_divergence_kct_never_exceeds_kicad_on_committed_copper`
-  pins the gap. Every committed pair is far below its limit in both engines.
+* kct models every pad as its (rotated) rectangle; KiCad uses the pad's
+  shape (a rounded corner can let a probe past). Zones never block.
 * **Arcs** are not measured by kct.
-* **Meanders:** KiCad's `diff_pair_uncoupled` is known to misreport on them. No
-  committed board has one; the first fixture belongs to the length-tuning phase
-  (#6447).
+* **Meanders:** KiCad's `diff_pair_uncoupled` is known to misreport on them; the
+  first fixture belongs to the length-tuning phase (#6447).
 
 ### The per-terminal figure (kct-only)
 
 Issue #6615. The rule also holds every **terminal** (a footprint with a pad on
 the net) to `max_uncoupled_per_terminal_mm`, counting only uncoupled copper
-**outside every terminal's gather-ignore region**. KiCad has no equivalent: no
-`.kicad_dru` rule is written and the finding says `kct-only`. The total is
-unchanged.
+**outside every terminal's gather-ignore region**. KiCad has no equivalent (no
+`.kicad_dru` rule; the finding says `kct-only`). The total is unchanged.
 
 * **Region**: the courtyard (`F.CrtYd` + `B.CrtYd`, every copper layer). Class
   field `gather_ignore`: `"courtyard"` (default, radius 0 mm), a number `r`
@@ -70,15 +78,11 @@ unchanged.
 ### Pairs KiCad does not recognise by name
 
 KiCad pairs nets only by its `MatchDpSuffix` rule (`+`/`-` or `P`/`N`). For
-`X_POS`/`X_NEG` the `.kicad_dru` carries the net-name-scoped `skew` rule
-(without `within_diff_pairs`; it still reports `|L_p - L_n|`) and `via_count`
-rule, so both engines check them. `diff_pair_gap` and `diff_pair_uncoupled`
-are ignored by KiCad for such pairs whatever their condition says, so no rule
-is written and `kct check` reports one `info` line per pair saying the limit
-is kct-only.
-
-A pair KiCad recognises but the router did not couple gets no pair rules, so
-kicad-cli never checks a pair kct does not.
+`X_POS`/`X_NEG` the `.kicad_dru` carries net-name-scoped `skew` (without
+`within_diff_pairs`; it still reports `|L_p - L_n|`) and `via_count` rules.
+KiCad ignores `diff_pair_gap` and `diff_pair_uncoupled` for such pairs, so none
+is written and `kct check` reports one `info` line per pair: kct-only. A pair
+the router left uncoupled gets no pair rules (kicad-cli checks none kct skips).
 
 ## Native rules in the `.kicad_dru`
 
@@ -89,6 +93,6 @@ recognises by name into a managed `.kicad_dru` block, at the gap it routed
 The same block carries, per pair and at the limits `kct check` resolves
 (same resolver, same severity): `diff_pair_uncoupled (max ..)`,
 `skew (max ..) (within_diff_pairs)` and `via_count (max ..)`, scoped by
-`A.inDiffPair('<base>')`. A limit that is an `uncited` protocol value is
-written with `(severity warning)`; KiCad accepts only `error`, `warning`,
-`ignore` and `exclusion`, so continuity has no native rule.
+`A.inDiffPair('<base>')`. An `uncited` protocol limit gets `(severity
+warning)`; KiCad accepts only `error`, `warning`, `ignore` and `exclusion`;
+continuity has no native rule.
