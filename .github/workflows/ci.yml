@@ -347,6 +347,9 @@ jobs:
       # latency for a hung test is therefore bounded at 60 s + 120 s, the same
       # ceiling option 2 would have set globally, and the deadline still
       # measures the test's own work. Subprocess timeouts are untouched.
+      # Issue #6716: the credit is applied DURING the wait (before every poll
+      # sleep), not once a permit arrives -- crediting afterwards let SIGALRM
+      # fire inside the queue wait, killing tests that were merely queued.
       # See src/kicad_tools/native_concurrency.py "Timeout credit".
       KCT_NATIVE_MAX_CONCURRENCY: "2"
       # Explicit diagnostic opt-in only; PR body is evaluated, never passed

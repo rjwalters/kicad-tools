@@ -45,9 +45,15 @@ slot wait crossed the 60 s CI cap failed, and marking the current offenders
 simply moved the failure to the next-heaviest native-using test (observed on
 PR #5573).
 
-So a wait *is* given back: after blocking for a permit, the gate adds exactly
-the measured wait to the deadline that is already armed, restoring "the
-deadline measures the test's own work". Only an armed ``ITIMER_REAL`` with a
+So a wait *is* given back: while blocking for a permit, the gate keeps adding
+the time waited so far to the deadline that is already armed, restoring "the
+deadline measures the test's own work". The credit is applied *during* the
+wait, before every poll sleep, not once the wait is over (Issue #6716): a
+deadline that only learned about the queue time after a permit arrived could
+already have fired inside the wait, which is exactly what killed queued tests
+in ``time.sleep`` under CI load. Each poll credits only the time since the
+previous credit (plus the sleep it is about to take), so the per-test total
+equals the measured wait. Only an armed ``ITIMER_REAL`` with a
 live Python ``SIGALRM`` handler is touched -- pytest-timeout's signal method,
 which is its default wherever ``SIGALRM`` exists -- and only from the main
 thread. Anything else (thread method, no timer armed, non-pytest use) is left
@@ -62,6 +68,13 @@ and only tests that actually queued pay any of it. A credited test that times
 out anyway still reports its *configured* timeout ("Timeout (>60.0s)"), which
 now understates elapsed wall clock by the credit; ``credited_s`` in the permit
 records is the exact amount, per launch and per test.
+
+While a test is queued its remaining budget therefore stays flat until the cap
+is spent, after which the alarm fires normally. One small residual window is
+accepted (Issue #6716): a test that starts queueing with less budget left than
+the time between two credits -- the slot probes of one poll pass, well under
+one ``_MAX_POLL_SECONDS`` interval, since each sleep is credited before it is
+taken -- can still be killed inside the wait.
 """
 
 from __future__ import annotations
@@ -401,13 +414,28 @@ def _acquire(limit: int, environ: Any) -> _Permit:
         _record({"event": "unbounded", "reason": "slot_directory_unavailable"})
         return _Permit(None, None, 0.0)
     poll = _MIN_POLL_SECONDS
+    # Wait time already offered to the armed deadline (Issue #6716), and the
+    # part of it that was actually granted. Crediting happens incrementally
+    # *during* the wait, so a queued test's deadline can never expire while it
+    # is still sleeping between polls (until its per-test cap is spent).
+    accounted = 0.0
+    credited = 0.0
+
+    def settle(waited: float) -> float:
+        """Credit any wait not yet offered; return the total granted."""
+        nonlocal accounted, credited
+        if waited > accounted:
+            credited += _credit_wait(waited - accounted, environ)
+            accounted = waited
+        return credited
+
     while True:
         for index in range(limit):
             try:
                 fd = _try_slot(directory, index)
             except OSError as exc:
                 waited = time.monotonic() - started
-                credited = _credit_wait(waited, environ)
+                credited = settle(waited)
                 _notice(f"slot file unavailable ({exc.__class__.__name__}); launching unbounded")
                 _record(
                     {
@@ -420,7 +448,7 @@ def _acquire(limit: int, environ: Any) -> _Permit:
                 return _Permit(None, None, waited)
             if fd is not None:
                 waited = time.monotonic() - started
-                credited = _credit_wait(waited, environ)
+                credited = settle(waited)
                 _record(
                     {
                         "event": "acquire",
@@ -435,7 +463,7 @@ def _acquire(limit: int, environ: Any) -> _Permit:
             # Measured worst-case native lifetime in this pool is 2.7 s, so a
             # wait this long means a defect, not contention. Proceed unbounded
             # rather than converting it into an unbounded hang.
-            credited = _credit_wait(waited, environ)
+            credited = settle(waited)
             _notice(
                 f"no slot after {waited:.0f}s (limit {limit}); launching unbounded. "
                 f"Credited {credited:.1f}s of that wait back to the caller's deadline; "
@@ -450,6 +478,12 @@ def _acquire(limit: int, environ: Any) -> _Permit:
                 }
             )
             return _Permit(None, None, waited)
+        # Pre-pay the sleep we are about to take: ``time.sleep`` never returns
+        # early (PEP 475), so by the next poll the test really has waited at
+        # least this long and the running total still equals the measured
+        # wait. Without the pre-payment a deadline with less than ``poll``
+        # left could still fire inside this sleep.
+        settle(waited + poll)
         time.sleep(poll)
         poll = min(poll * 2, _MAX_POLL_SECONDS)
 
