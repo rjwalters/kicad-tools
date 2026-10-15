@@ -171,7 +171,7 @@
       "stem": "usb_joystick",
       "input": {
         "path": "boards/03-usb-joystick/output/usb_joystick.kicad_pcb",
-        "sha256": "d771b9caf6f5a4971973240bf591609d8189db1e14f1fb96e1fe964938c8aef1"
+        "sha256": "3691a5a5775ecde3c7ff28ce35dcaa005837ba16ed6a8ca508a16f1b3382702e"
       },
       "input_copper": {
         "segments": 0,
@@ -186,7 +186,7 @@
       },
       "dru": {
         "path": "boards/03-usb-joystick/output/usb_joystick_routed.kicad_dru",
-        "sha256": "ec7cc2667b09044fe99abbf83f2afe5abdd9c2a3115af899eb5512e02349f8a3",
+        "sha256": "c44d93c7564deb55af71cc3effd698cf79c8d29362f04e0d95268aaab0dd3e93",
         "provenance": "kct-managed fab floors",
         "note": "sibling of the committed routed reference; manufacturer rules, not router tuning"
       },
@@ -197,7 +197,7 @@
       "routing_sidecars": [
         {
           "path": "boards/03-usb-joystick/output/net_class_map.json",
-          "sha256": "fe61a63498f311cc4493a4e945ca1d76e2c41d62e035945ed1969a875b580cc9"
+          "sha256": "7cd983fbef924a0a3ed934e129fd7a79dd60830a194ea786fca8e74294f53268"
         }
       ]
     },
@@ -287,7 +287,7 @@
       },
       "dru": {
         "path": "boards/06-diffpair-test/output/diffpair_test_routed.kicad_dru",
-        "sha256": "75032785e922be8b6714527d8115448292c63fc35a6946be0377ecc5c5a3f3d6",
+        "sha256": "825b4a72d64154263d5c41685256590510d5358a7b8b3fdac45ac31a3052c466",
         "provenance": "kct-managed fab floors",
         "note": "sibling of the committed routed reference; manufacturer rules, not router tuning"
       },

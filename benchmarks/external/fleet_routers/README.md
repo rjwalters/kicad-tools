@@ -33,6 +33,31 @@ Both upstream routers are GPL-3.0. The ecosystem registry marks them `copyleft-i
 
   It needs CMake ≥ 3.28, a C++20 compiler, Boost ≥ 1.81, Eigen3 3.4, SQLite3, nlohmann_json 3, CLI11 and zstd. The CMake presets assume g++-15, Ninja and ccache, so the commands above bypass them. If the build fails, keep its log and pass `--tracemaker-build-log`. The row is then recorded as `tool-failure` / `build` with the log attached. Do not substitute a mock.
 
+
+### Building TraceMaker's missing dependencies without touching the host
+
+Dependencies the host lacks are built into a scratch prefix, outside the repository, never installed. On a host with Boost, Eigen3, SQLite3 and zstd development packages, only the two header-only libraries were missing (Ubuntu 24.04, CMake 3.28, g++ 13; the presets' g++-15 is not needed):
+
+```bash
+P=/tmp/fleet/prefix
+git clone --depth 1 -b v3.11.3 https://github.com/nlohmann/json  && cmake -S json  -B json/b  -DJSON_BuildTests=OFF -DCMAKE_INSTALL_PREFIX=$P && cmake --install json/b
+git clone --depth 1 -b v2.4.2  https://github.com/CLIUtils/CLI11 && cmake -S CLI11 -B CLI11/b -DCLI11_BUILD_TESTS=OFF -DCLI11_BUILD_EXAMPLES=OFF -DCMAKE_INSTALL_PREFIX=$P && cmake --install CLI11/b
+# then the TraceMaker configure command above with -DCMAKE_PREFIX_PATH=$P
+```
+
+## Live smoke: board 00 (2026-10-15)
+
+`run.py run --boards 00 --wall-cap 300` at kct `ccfc97260`, kicad-cli 10.0.6, native backend 1.0.0, TraceMaker `89ff58ca` (sha256 `49d99f58...`, built as above) and fastroute `e5d52c45` (sha256 `f141bce5...`). Fleet inputs for boards 03 and 06 had drifted since the first freeze, so the manifest was re-frozen.
+
+| Tool | Outcome | Connections | DRC errors | Unconnected | Vias | Wirelength mm | Wall s |
+|---|---|---|---|---|---|---|---|
+| input | reference | 0/3 | 0 | 3 | 0 | 0 | |
+| kct | success | 3/3 | 0 | 0 | 0 | 8.71 | 9.41 |
+| tracemaker | success | 3/3 | 0 | 0 | 0 | 29.66 | 0.16 |
+| fastroute | non-comparable (11 constraints lost at the DSN/SES boundary) | 3/3 | 0 | 0 | 0 | 30.17 | 0.01 |
+
+The fastroute row stays `non-comparable` until #6593 and #6594 are fixed. This is a single run on one simple board, so it says nothing about router quality. The full matrix is #6335.
+
 ## Running
 
 ```bash
