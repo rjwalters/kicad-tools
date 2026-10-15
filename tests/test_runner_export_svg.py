@@ -101,3 +101,40 @@ def test_export_svg_reports_failure_when_no_output(tmp_path: Path):
 
     assert not res.success
     assert "SVG export produced no output" in res.stderr
+
+
+def test_export_svg_killed_with_partial_output_is_failure(tmp_path: Path):
+    """A kicad-cli killed mid-write (-9) must not pass on a truncated file (#6742)."""
+    pcb = tmp_path / "board.kicad_pcb"
+    pcb.write_text("(kicad_pcb)")
+    out = tmp_path / "pcb-front.svg"
+
+    def fake_run(cmd, *args, **kwargs):
+        out.write_text("<svg><g")  # truncated, non-empty
+        return MagicMock(returncode=-9, stdout="", stderr="")
+
+    with patch(f"{_RUNNER}.subprocess.run", side_effect=fake_run):
+        res = run_pcb_export_svg(pcb, out, ["F.Cu"], kicad_cli=Path("/usr/bin/kicad-cli"))
+
+    assert not res.success
+    assert res.return_code == -9
+    assert "SIGKILL" in res.stderr
+
+
+def test_render_killed_with_partial_output_is_failure(tmp_path: Path):
+    from kicad_tools.cli.runner import run_pcb_render
+
+    pcb = tmp_path / "board.kicad_pcb"
+    pcb.write_text("(kicad_pcb)")
+    out = tmp_path / "render.png"
+
+    def fake_run(cmd, *args, **kwargs):
+        out.write_bytes(b"\x89PNG partial")
+        return MagicMock(returncode=-9, stdout="", stderr="")
+
+    with patch(f"{_RUNNER}.subprocess.run", side_effect=fake_run):
+        res = run_pcb_render(pcb, out, kicad_cli=Path("/usr/bin/kicad-cli"))
+
+    assert not res.success
+    assert res.return_code == -9
+    assert "SIGKILL" in res.stderr
