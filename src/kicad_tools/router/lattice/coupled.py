@@ -48,6 +48,8 @@ from .geometry import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from ..primitives import Pad
     from .obstacles import CommittedCopper, LatticeKeepoutMask, LatticeObstacleModel
 
@@ -793,6 +795,75 @@ def relocate_pair_anchor(
             if attach_clear(pad_p, end_p, layer) and attach_clear(pad_n, end_n, layer):
                 return anchor
     return None
+
+
+def sandwiched_pad_escape_sites(
+    obstacles: LatticeObstacleModel,
+    pad_p: Pad,
+    pad_n: Pad,
+    toward: Pt,
+    *,
+    pair_nets: set[int],
+    routed_nets: set[int] | frozenset[int],
+    via_radius: float,
+    clearance_for: Callable[[int], float],
+) -> list[tuple[Pad, Pt]]:
+    """Via sites for routed pads sealed in by a coupled pair's start (#6697).
+
+    When a pair segment starts at two pads of one part that straddle a
+    foreign pad (board 03 U2: VBUS U2.5 between D+ U2.4 and D- U2.6), the
+    P/N midpoint lies on that pad and :func:`relocate_pair_anchor` slides
+    the fat centerline's endpoint just past its outer edge.  The pair start
+    then caps the pad's only outward exit; its sides are the pair pads, and
+    its inner end faces the part body.  A pour net used to get a #6401 via
+    site there, which pushed the anchor further out.  A *routed* net (board
+    03 VBUS since #6599) has none, so it was stranded.
+
+    Returns ``(pad, site)`` for each single-layer pad of a ``routed_nets`` net
+    (not a pair net) whose copper contains the P/N midpoint: ``site`` is a
+    via centre just off the pad's outer edge on the side facing ``toward``
+    (the same side the anchor slides to).  A site is kept only when that via
+    clears every other-net pad (any layer: the barrel spans the stack) by
+    ``clearance_for(net)``.
+    """
+    mid = ((pad_p.x + pad_n.x) / 2.0, (pad_p.y + pad_n.y) / 2.0)
+    ux, uy = pad_p.x - pad_n.x, pad_p.y - pad_n.y
+    axis_len = math.hypot(ux, uy)
+    if axis_len <= _EPS:
+        return []
+    nx, ny = -uy / axis_len, ux / axis_len
+    if (toward[0] - mid[0]) * nx + (toward[1] - mid[1]) * ny < 0:
+        nx, ny = -nx, -ny
+    from ..primitives import pad_half_extents
+
+    def box_gap(other: Pad, pt: Pt) -> float:
+        hw, hh = pad_half_extents(other)
+        return math.hypot(max(abs(pt[0] - other.x) - hw, 0.0), max(abs(pt[1] - other.y) - hh, 0.0))
+
+    out: list[tuple[Pad, Pt]] = []
+    for idx in obstacles.pads_near(mid[0], mid[1], mid[0], mid[1]):
+        pad = obstacles.pads[idx]
+        if not pad.net or pad.net in pair_nets or pad.net not in routed_nets:
+            continue
+        if len(obstacles.pad_layer_indices[idx]) != 1:
+            continue  # a through-hole pad already has its own barrel
+        if box_gap(pad, mid) > _EPS:
+            continue  # the midpoint is not on this pad's copper
+        hw, hh = pad_half_extents(pad)
+        # Support distance of the pad box along the outward normal.
+        reach = abs(nx) * hw + abs(ny) * hh
+        site = (pad.x + nx * (reach + via_radius), pad.y + ny * (reach + via_radius))
+        need = via_radius + clearance_for(pad.net)
+        span = need + 3.0
+        if any(
+            obstacles.pads[j].net != pad.net and box_gap(obstacles.pads[j], site) < need - 1e-6
+            for j in obstacles.pads_near(
+                site[0] - span, site[1] - span, site[0] + span, site[1] + span
+            )
+        ):
+            continue
+        out.append((pad, site))
+    return out
 
 
 # ---------------------------------------------------------------------------
