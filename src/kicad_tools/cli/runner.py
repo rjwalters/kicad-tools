@@ -4,6 +4,7 @@ Provides functions to locate and run kicad-cli commands for
 ERC validation, DRC validation, netlist export, and more.
 """
 
+import contextlib
 import json
 import os
 import re
@@ -420,7 +421,10 @@ def run_erc(
             result.stderr or ""
         )
         empty_output = not output_path.exists() or output_path.stat().st_size == 0
-        kicad_cli_errored = result.returncode != 0 and empty_output
+        # Issue #6724: a kicad-cli killed by a signal (negative status, e.g.
+        # the OOM killer) or one that left the pre-created file empty never
+        # produced a report, whatever its exit status.
+        kicad_cli_errored = result.returncode < 0 or empty_output
 
         if load_failed or kicad_cli_errored:
             return KiCadCLIResult(
@@ -492,6 +496,10 @@ def run_drc(
         import os
 
         os.close(fd)
+    # Issue #6724: the report must be one kicad-cli wrote on THIS run.  A
+    # pre-created (mkstemp) or left-over file survived a killed kicad-cli
+    # and read as a clean report, so clear it before the run.
+    Path(output_path).unlink(missing_ok=True)
 
     # Build command
     cmd = [
@@ -518,7 +526,12 @@ def run_drc(
     try:
         result = subprocess.run(cmd, capture_output=True, text=True)
 
-        if output_path.exists():
+        # Issue #6724: without ``--exit-code-violations`` kicad-cli exits 0
+        # even when it finds violations, so another status (a load failure is
+        # 3, a signal kill such as the OOM killer is negative) is a failure --
+        # as is a missing, empty or truncated report.
+        problem = drc_report_problem(output_path, result.returncode, format=format)
+        if problem is None:
             return KiCadCLIResult(
                 success=True,
                 output_path=output_path,
@@ -526,17 +539,46 @@ def run_drc(
                 stderr=result.stderr,
                 return_code=result.returncode,
             )
-        else:
-            return KiCadCLIResult(
-                success=False,
-                stderr=result.stderr or "DRC produced no output",
-                return_code=result.returncode,
-            )
+        stderr = (result.stderr or "").strip()
+        return KiCadCLIResult(
+            success=False,
+            stdout=result.stdout,
+            stderr=f"DRC failed: {problem}" + (f"\n{stderr}" if stderr else ""),
+            return_code=result.returncode,
+        )
 
     except FileNotFoundError as e:
         return KiCadCLIResult(success=False, stderr=f"kicad-cli not found: {e}")
     except subprocess.SubprocessError as e:
         return KiCadCLIResult(success=False, stderr=f"Failed to run DRC: {e}")
+
+
+def drc_report_problem(output_path: Path, returncode: int, *, format: str = "json") -> str | None:
+    """Why a ``kicad-cli pcb drc`` run did not produce a trustworthy report.
+
+    ``None`` means it did: kicad-cli exited 0 and wrote a complete report.
+    Otherwise a short reason (Issue #6724).  Without ``--exit-code-violations``
+    kicad-cli exits 0 when it finds violations (verified on 10.0.6), so any
+    status other than 0 or the documented "violations found" code 5 means the
+    board was not checked.
+    """
+    from kicad_tools.drc.geometric import (
+        KICAD_CLI_DRC_OK_EXIT_CODES,
+        describe_returncode,
+        load_kicad_cli_json_report,
+    )
+
+    if returncode not in KICAD_CLI_DRC_OK_EXIT_CODES:
+        return describe_returncode(returncode)
+    output_path = Path(output_path)
+    if format == "json":
+        return load_kicad_cli_json_report(output_path)
+    try:
+        if not output_path.is_file() or output_path.stat().st_size == 0:
+            return "kicad-cli wrote no DRC report"
+    except OSError as exc:
+        return f"kicad-cli DRC report unreadable: {exc}"
+    return None
 
 
 def run_refill_zones(
@@ -611,8 +653,10 @@ def run_refill_zones(
         result = subprocess.run(cmd, capture_output=True, text=True)
 
         # A produced report means the command ran to completion (a non-zero
-        # exit code here signals DRC violations, not a fill failure).
-        if report_path.exists() and report_path.stat().st_size > 0:
+        # exit code here signals DRC violations, not a fill failure).  Issue
+        # #6724: a signal kill (negative status) did not complete, whatever
+        # it left in the pre-created report file.
+        if result.returncode >= 0 and report_path.exists() and report_path.stat().st_size > 0:
             _restore_net_declarations(pcb_path, input_net_nodes, input_element_nets)
             return KiCadCLIResult(
                 success=True,
@@ -621,9 +665,16 @@ def run_refill_zones(
                 stderr=result.stderr,
                 return_code=result.returncode,
             )
+        from kicad_tools.drc.geometric import describe_returncode
+
+        failure = (
+            describe_returncode(result.returncode)
+            if result.returncode < 0
+            else "no report produced"
+        )
         return KiCadCLIResult(
             success=False,
-            stderr=result.stderr or "Zone refill via DRC failed — no report produced",
+            stderr=result.stderr or f"Zone refill via DRC failed — {failure}",
             return_code=result.returncode,
         )
     except FileNotFoundError as e:
@@ -993,11 +1044,18 @@ def _remediate_starved_thermal(
             if refill and _kicad_drc_supports_refill(kicad_cli):
                 cmd.extend(["--refill-zones", "--save-board"])
             cmd.append(str(pcb_path))
-            subprocess.run(cmd, capture_output=True, text=True)
+            proc = subprocess.run(cmd, capture_output=True, text=True)
             _restore_net_declarations(pcb_path, input_net_nodes, input_element_nets)
+            # Issue #6724: a killed kicad-cli (negative status) or a missing,
+            # empty or truncated report is "no report", never an empty one.
+            if proc.returncode < 0:
+                return None
             if not report_path.exists() or report_path.stat().st_size == 0:
                 return None
-            parsed = json.loads(report_path.read_text())
+            try:
+                parsed = json.loads(report_path.read_text())
+            except ValueError:
+                return None
             return parsed if isinstance(parsed, dict) else None
         finally:
             report_path.unlink(missing_ok=True)
@@ -2029,6 +2087,12 @@ def _run_fill_zones_via_drc(
     # :func:`_strip_stale_zone_fills`.  Only when the run refills AND saves:
     # a KiCad 8/9 DRC refills in memory but persists nothing, so stripping
     # there would ship the board unfilled.
+    # Issue #6724: the board as it was before this run, so a kicad-cli killed
+    # mid ``--save-board`` cannot leave a truncated board behind.
+    try:
+        pre_run_bytes: bytes | None = target_pcb.read_bytes() if refills else None
+    except OSError:
+        pre_run_bytes = None
     unfilled_backup = _strip_stale_zone_fills(target_pcb) if refills else None
     # Issue #6023: the stripped board's bytes.  KiCad's --save-board always
     # rewrites the file (with fresh fills), so a board still holding exactly
@@ -2053,6 +2117,23 @@ def _run_fill_zones_via_drc(
         # DRC returns non-zero when there are violations, but the zones
         # are still filled.  We treat it as success when the DRC report
         # was actually produced (meaning the command ran to completion).
+        # Issue #6724: except after a signal kill (negative status, e.g. the
+        # OOM killer) -- the run did not complete, and its --save-board may
+        # not have either, so the ``finally`` restores the previous fills.
+        if result.returncode < 0:
+            from kicad_tools.drc.geometric import describe_returncode
+
+            if unfilled_backup is None and pre_run_bytes is not None:
+                # No stale fills to restore in ``finally``: put back the
+                # board kicad-cli may have been rewriting when it died.
+                with contextlib.suppress(OSError):
+                    target_pcb.write_bytes(pre_run_bytes)
+            return KiCadCLIResult(
+                success=False,
+                stdout=result.stdout,
+                stderr=f"Zone fill via DRC failed — {describe_returncode(result.returncode)}",
+                return_code=result.returncode,
+            )
         if drc_report.exists() and drc_report.stat().st_size > 0:
             if stripped is not None and _board_unchanged(target_pcb, stripped, stripped_mtime_ns):
                 # The DRC ran (report written) but the board was not saved:

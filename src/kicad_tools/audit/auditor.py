@@ -1042,7 +1042,7 @@ class ManufacturingAudit:
                 report_path = Path(f.name)
 
             try:
-                subprocess.run(
+                proc = subprocess.run(
                     [
                         "kicad-cli",
                         "sch",
@@ -1057,6 +1057,21 @@ class ManufacturingAudit:
                     timeout=60,
                     check=False,
                 )
+
+                # Issue #6724: the report file above is pre-created empty, and
+                # an empty file parses as a clean ERC.  A kicad-cli killed by a
+                # signal (e.g. the OOM killer) or one that wrote nothing did
+                # not check the schematic: fail loud via the handler below.
+                if proc.returncode < 0 or (
+                    report_path.exists() and report_path.stat().st_size == 0
+                ):
+                    from kicad_tools.drc.geometric import describe_returncode
+
+                    raise RuntimeError(
+                        describe_returncode(proc.returncode)
+                        if proc.returncode < 0
+                        else f"kicad-cli wrote an empty ERC report (exit {proc.returncode})"
+                    )
 
                 if report_path.exists():
                     from kicad_tools.erc import ERCReport

@@ -612,7 +612,14 @@ def _print_unverified_banner(args, output_path, headline: str) -> None:
     """Replace a SUCCESS banner whose verification was skipped (issue #6273)."""
     checks = _unverified_checks(args)
     print(f"UNVERIFIED: {headline}")
-    print(f"  Skipped for --timeout: {', '.join(checks)} -- the board was NOT verified.")
+    failure = getattr(args, "_stranded_pour_failure", None)
+    failure = failure if isinstance(failure, str) and failure else None
+    timed = [c for c in checks if not (failure and c == "stranded-pour check")]
+    if timed:
+        print(f"  Skipped for --timeout: {', '.join(timed)} -- the board was NOT verified.")
+    if failure and len(timed) < len(checks):
+        # Issue #6724: kicad-cli itself failed, not the --timeout budget.
+        print(f"  kicad-cli failed during the stranded-pour check ({failure}) -- NOT verified.")
     print(
         f"  Run 'kct check {output_path} --mfr {getattr(args, 'manufacturer', 'jlcpcb')}' "
         "before manufacturing (exit code "
@@ -5041,10 +5048,29 @@ def run_post_route_drc(
         # (strict_drc=False) preserves the internal-only PASS for KiCad-less
         # environments.
         strict_drc_failed = strict_drc and not geo.ran
-        if strict_drc_failed:
+        # Issue #6724: kicad-cli was found but crashed, was killed (e.g. by
+        # the OOM killer) or left no usable report.  That is not a
+        # KiCad-less environment, so it fails the gate even without
+        # --strict-drc: the board was meant to be judged and was not.
+        native_drc_failed = getattr(geo, "failed", False) is True and not strict_drc_failed
+        if strict_drc_failed or native_drc_failed:
             error_count += 1
 
-        if not quiet and strict_drc_failed:
+        if not quiet and native_drc_failed:
+            print("\n--- DRC Validation ---")
+            print(f"  DRC FAILURE: native kicad-cli DRC did not complete ({geo.note}).")
+            print(
+                "    The board was NOT checked by KiCad; a kicad-cli crash is never a clean result."
+            )
+            print(
+                "    Re-run when kicad-cli has enough memory, or run "
+                "'kicad-cli pcb drc --refill-zones' on the board to see the failure."
+            )
+            if results.error_count > 0 or warning_count > 0:
+                print(f"  Internal errors: {results.error_count}")
+                if warning_count > 0:
+                    print(f"  Internal warnings: {warning_count}")
+        elif not quiet and strict_drc_failed:
             print("\n--- DRC Validation ---")
             reason_text = geo.note or "native geometric DRC did not run"
             print(f"  STRICT DRC FAILURE: native kicad-cli DRC did not run ({reason_text}).")
@@ -8373,12 +8399,18 @@ def _run_pour_oracle_stage(output_path: Path, *, args, quiet: bool = False, rout
     so the run exits :data:`EXIT_UNVERIFIED` rather than passing the gate.
     """
     from kicad_tools.router.completion_verdict import allow_stranded_pour_pads, oracle_rounds
-    from kicad_tools.router.oracle_completion import DEFAULT_ORACLE_ROUNDS, STOP_DEADLINE
+    from kicad_tools.router.oracle_completion import (
+        DEFAULT_ORACLE_ROUNDS,
+        STOP_DEADLINE,
+        STOP_NOT_RUN,
+    )
 
     args._stranded_pour_links = 0
     # Issue #6273: True when the check was cut by --timeout before KiCad
     # reported anything -- the count above is then unknown, not 0.
     args._stranded_pour_unknown = False
+    # Issue #6724: why the check is unknown when kicad-cli failed (not --timeout).
+    args._stranded_pour_failure = None
     args._allow_stranded_pour_pads = allow_stranded_pour_pads(
         bool(getattr(args, "allow_stranded_pour_pads", False))
     )
@@ -8447,6 +8479,16 @@ def _run_pour_oracle_stage(output_path: Path, *, args, quiet: bool = False, rout
     if not result.ran:
         if not quiet:
             print(f"  skipped: {result.note or 'kicad-cli DRC did not run'}")
+        if result.stop_reason == STOP_NOT_RUN:
+            # Issue #6724: kicad-cli is installed (checked above) but its
+            # first DRC crashed, was killed or timed out, so the stranded-pad
+            # count was never measured.  Reporting 0 would pass the #5785
+            # gate on a board KiCad may call unconnected (boards 03/04 printed
+            # a false "0 -> 0 (converged)" after an OOM kill).
+            args._stranded_pour_unknown = True
+            args._stranded_pour_failure = result.note or "kicad-cli DRC did not run"
+            if not quiet:
+                print("  stranded-pour status UNKNOWN -- the run is reported unverified")
         if result.stop_reason == STOP_DEADLINE:
             # Issue #6273: the deadline, not KiCad, ended the check, so the
             # stranded-pad count was never measured.  0 would pass the #5785

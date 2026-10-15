@@ -18,6 +18,8 @@ def test_run_geometric_drc_preserves_error_gate_and_counts_warnings(monkeypatch,
 
     def fake_run(cmd, **_kwargs):
         captured["cmd"] = list(cmd)
+        # Issue #6724: the report must be one kicad-cli actually wrote.
+        Path(cmd[cmd.index("--output") + 1]).write_text('{"violations": []}')
         return SimpleNamespace(returncode=0)
 
     warning = SimpleNamespace(type_str="copper_sliver", is_error=False)

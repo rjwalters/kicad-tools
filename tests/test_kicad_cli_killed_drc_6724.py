@@ -1,0 +1,541 @@
+"""A killed or failed kicad-cli is never a clean DRC (Issue #6724).
+
+``run_geometric_drc`` used to pre-create its report file, ignore kicad-cli's
+exit status and check only that the file existed.  When the OOM killer killed
+kicad-cli, the empty pre-created file parsed as a report with 0 violations and
+0 unconnected items, so ``kct route``'s pour oracle printed ``0 -> 0
+(converged)`` on boards KiCad calls unconnected.
+
+These tests stub kicad-cli to be killed, exit non-zero, or leave a missing,
+empty or truncated report, and check that every DRC/ERC call site reports a
+failure instead of a clean result.  They also keep the happy path honest.
+"""
+
+from __future__ import annotations
+
+import json
+import signal
+import stat
+import subprocess
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+from kicad_tools.drc import geometric
+from kicad_tools.drc.geometric import (
+    REASON_CRASH,
+    REASON_NO_REPORT,
+    REASON_OK,
+    run_geometric_drc,
+)
+
+FAKE_CLI = Path("/fake/kicad-cli")
+
+#: A complete kicad-cli 10 JSON DRC report with one unconnected pour link.
+VALID_REPORT = json.dumps(
+    {
+        "$schema": "https://schemas.kicad.org/drc.v1.json",
+        "coordinate_units": "mm",
+        "date": "2026-10-15T00:00:00+0000",
+        "kicad_version": "10.0.6",
+        "source": "board.kicad_pcb",
+        "violations": [],
+        "unconnected_items": [
+            {
+                "description": "Missing connection between items",
+                "items": [
+                    {
+                        "description": "Pad 1 [GND] of C1 on F.Cu",
+                        "pos": {"x": 10.0, "y": 10.0},
+                        "uuid": "00000000-0000-0000-0000-000000000001",
+                    },
+                    {
+                        "description": "Pad 2 [GND] of C2 on F.Cu",
+                        "pos": {"x": 20.0, "y": 10.0},
+                        "uuid": "00000000-0000-0000-0000-000000000002",
+                    },
+                ],
+                "severity": "error",
+                "type": "unconnected_items",
+            }
+        ],
+        "schematic_parity": [],
+    }
+)
+TRUNCATED_REPORT = VALID_REPORT[: len(VALID_REPORT) // 2]
+
+
+def _fake_kicad_cli(monkeypatch, module, *, returncode: int, report: str | None):
+    """Stub ``module.subprocess.run`` as one kicad-cli invocation.
+
+    ``report`` is written to the ``--output`` path (``None`` writes nothing).
+    The stub also records whether that path already existed when kicad-cli
+    started, which is how the old pre-created-report bug looked.
+    """
+    seen: dict = {}
+
+    def fake_run(cmd, *args, **kwargs):
+        out_flag = "--output" if "--output" in cmd else "-o"
+        out = Path(cmd[cmd.index(out_flag) + 1])
+        seen["cmd"] = list(cmd)
+        seen["pre_existing"] = out.exists()
+        if report is not None:
+            out.write_text(report)
+        text = kwargs.get("text", False)
+        empty = "" if text else b""
+        return subprocess.CompletedProcess(cmd, returncode, empty, empty)
+
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+    return seen
+
+
+# ---------------------------------------------------------------------------
+# run_geometric_drc
+# ---------------------------------------------------------------------------
+
+
+class TestRunGeometricDrc:
+    def test_killed_without_report_is_a_crash(self, monkeypatch, tmp_path):
+        seen = _fake_kicad_cli(monkeypatch, geometric, returncode=-signal.SIGKILL, report=None)
+
+        res = run_geometric_drc(tmp_path / "b.kicad_pcb", kicad_cli=FAKE_CLI)
+
+        assert seen["pre_existing"] is False, "the report must not be pre-created"
+        assert res.ran is False
+        assert res.reason == REASON_CRASH
+        assert res.failed is True
+        assert "SIGKILL" in (res.note or "")
+        assert res.error_count == 0 and res.unconnected_count == 0
+
+    def test_killed_after_writing_a_report_is_still_a_crash(self, monkeypatch, tmp_path):
+        """A complete-looking report does not redeem a signal kill."""
+        _fake_kicad_cli(monkeypatch, geometric, returncode=-signal.SIGKILL, report=VALID_REPORT)
+
+        res = run_geometric_drc(tmp_path / "b.kicad_pcb", kicad_cli=FAKE_CLI)
+
+        assert res.ran is False
+        assert res.reason == REASON_CRASH
+
+    def test_non_zero_exit_is_a_crash(self, monkeypatch, tmp_path):
+        """Exit 3 is kicad-cli's "failed to load board" status."""
+        _fake_kicad_cli(monkeypatch, geometric, returncode=3, report=None)
+
+        res = run_geometric_drc(tmp_path / "b.kicad_pcb", kicad_cli=FAKE_CLI)
+
+        assert res.ran is False
+        assert res.reason == REASON_CRASH
+        assert "status 3" in (res.note or "")
+
+    def test_missing_report_is_no_report(self, monkeypatch, tmp_path):
+        _fake_kicad_cli(monkeypatch, geometric, returncode=0, report=None)
+
+        res = run_geometric_drc(tmp_path / "b.kicad_pcb", kicad_cli=FAKE_CLI)
+
+        assert res.ran is False
+        assert res.reason == REASON_NO_REPORT
+        assert res.failed is True
+
+    def test_empty_report_is_no_report(self, monkeypatch, tmp_path):
+        _fake_kicad_cli(monkeypatch, geometric, returncode=0, report="")
+
+        res = run_geometric_drc(tmp_path / "b.kicad_pcb", kicad_cli=FAKE_CLI)
+
+        assert res.ran is False
+        assert res.reason == REASON_NO_REPORT
+
+    def test_truncated_report_is_no_report(self, monkeypatch, tmp_path):
+        _fake_kicad_cli(monkeypatch, geometric, returncode=0, report=TRUNCATED_REPORT)
+
+        res = run_geometric_drc(tmp_path / "b.kicad_pcb", kicad_cli=FAKE_CLI)
+
+        assert res.ran is False
+        assert res.reason == REASON_NO_REPORT
+
+    def test_clean_run_still_reports(self, monkeypatch, tmp_path):
+        """No regression on the happy path: the report is read as before."""
+        seen = _fake_kicad_cli(monkeypatch, geometric, returncode=0, report=VALID_REPORT)
+
+        res = run_geometric_drc(tmp_path / "b.kicad_pcb", kicad_cli=FAKE_CLI)
+
+        assert res.ran is True
+        assert res.reason == REASON_OK
+        assert res.failed is False
+        assert res.error_count == 0
+        assert res.unconnected_count == 1
+        out = Path(seen["cmd"][seen["cmd"].index("--output") + 1])
+        assert not out.exists(), "the temporary report directory is cleaned up"
+
+    def test_documented_violations_exit_code_with_report_is_ok(self, monkeypatch, tmp_path):
+        """5 is kicad-cli's "violations found" status (--exit-code-violations)."""
+        _fake_kicad_cli(monkeypatch, geometric, returncode=5, report=VALID_REPORT)
+
+        res = run_geometric_drc(tmp_path / "b.kicad_pcb", kicad_cli=FAKE_CLI)
+
+        assert res.ran is True
+        assert res.unconnected_count == 1
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="needs POSIX signals")
+    def test_real_process_killed_by_signal(self, tmp_path):
+        """An actual executable that SIGKILLs itself, through the real subprocess."""
+        cli = tmp_path / "kicad-cli"
+        cli.write_text("#!/bin/sh\nkill -9 $$\n")
+        cli.chmod(cli.stat().st_mode | stat.S_IXUSR)
+
+        res = run_geometric_drc(tmp_path / "b.kicad_pcb", kicad_cli=cli)
+
+        assert res.ran is False
+        assert res.reason == REASON_CRASH
+        assert "SIGKILL" in (res.note or "")
+
+
+class TestSavedFillCheck:
+    def test_killed_saved_fill_run_is_failed(self, monkeypatch, tmp_path):
+        _fake_kicad_cli(monkeypatch, geometric, returncode=-signal.SIGKILL, report=None)
+
+        check = geometric.check_saved_fill(tmp_path / "b.kicad_pcb", kicad_cli=FAKE_CLI)
+
+        assert check.ran is False
+        assert check.failed is True
+        assert check.ok is False
+
+
+def test_describe_returncode():
+    assert "SIGKILL" in geometric.describe_returncode(-9)
+    assert "out of memory" in geometric.describe_returncode(-9)
+    assert "SIGSEGV" in geometric.describe_returncode(-11)
+    assert geometric.describe_returncode(3) == "kicad-cli exited with status 3"
+
+
+# ---------------------------------------------------------------------------
+# The kct route pour oracle and its stranded-pour gate
+# ---------------------------------------------------------------------------
+
+
+class TestPourOracle:
+    def test_killed_oracle_does_not_converge(self, monkeypatch, tmp_path):
+        """Boards 03/04: a killed first DRC printed ``0 -> 0 (converged)``."""
+        from kicad_tools.router.oracle_completion import STOP_NOT_RUN, run_oracle_completion
+
+        _fake_kicad_cli(monkeypatch, geometric, returncode=-signal.SIGKILL, report=None)
+        pcb = tmp_path / "b.kicad_pcb"
+        pcb.write_text("(kicad_pcb)")
+
+        def closer(*_a, **_k):  # pragma: no cover - must not be reached
+            raise AssertionError("the closer ran on an unmeasured board")
+
+        result = run_oracle_completion(
+            pcb,
+            oracle=lambda p: run_geometric_drc(p, kicad_cli=FAKE_CLI),
+            closer=closer,
+            nets={"GND"},
+        )
+
+        assert result.ran is False
+        assert result.converged is False
+        assert result.stop_reason == STOP_NOT_RUN
+        assert "SIGKILL" in (result.note or "")
+
+    def test_pour_stage_reports_unverified_not_zero(self, monkeypatch, tmp_path, capsys):
+        """The stage records "unknown" so the route exits unverified, not 0."""
+        import kicad_tools.cli.runner as runner_mod
+        import kicad_tools.cli.stitch_cmd as stitch_mod
+        import kicad_tools.core.sexp_file as sexp_mod
+        from kicad_tools.cli import route_cmd
+
+        _fake_kicad_cli(monkeypatch, geometric, returncode=-signal.SIGKILL, report=None)
+        monkeypatch.setattr(runner_mod, "find_kicad_cli", lambda: FAKE_CLI)
+        monkeypatch.setattr(sexp_mod, "load_pcb", lambda _p: object())
+        monkeypatch.setattr(stitch_mod, "find_all_plane_nets", lambda _doc: ["GND"])
+        monkeypatch.setattr(
+            route_cmd,
+            "_make_pour_oracle",
+            lambda _args: lambda p: run_geometric_drc(p, kicad_cli=FAKE_CLI),
+        )
+        pcb = tmp_path / "b.kicad_pcb"
+        pcb.write_text("(kicad_pcb)")
+        args = SimpleNamespace(
+            dry_run=False, oracle_rounds=None, allow_stranded_pour_pads=False, timeout=None
+        )
+
+        n = route_cmd._run_pour_oracle_stage(pcb, args=args)
+
+        out = capsys.readouterr().out
+        assert n == 0
+        assert "converged" not in out
+        assert "UNKNOWN" in out
+        assert args._stranded_pour_unknown is True
+        assert route_cmd._unverified_checks(args) == ["stranded-pour check"]
+        assert route_cmd._unverified_exit(0, args) == route_cmd.EXIT_UNVERIFIED
+
+        route_cmd._print_unverified_banner(args, pcb, "routed")
+        banner = capsys.readouterr().out
+        assert "kicad-cli failed during the stranded-pour check" in banner
+        assert "Skipped for --timeout" not in banner
+
+
+# ---------------------------------------------------------------------------
+# The recipe pipeline gate
+# ---------------------------------------------------------------------------
+
+
+class TestRecipeGate:
+    @pytest.mark.parametrize("require_drc", [True, False])
+    def test_crashed_drc_fails_the_gate(self, monkeypatch, tmp_path, require_drc):
+        """require_drc=False excuses a missing kicad-cli, never a crashed one."""
+        from kicad_tools.recipes.gate import evaluate_pipeline_gate
+
+        _fake_kicad_cli(monkeypatch, geometric, returncode=-signal.SIGKILL, report=None)
+        monkeypatch.setattr("kicad_tools.cli.runner.find_kicad_cli", lambda: FAKE_CLI)
+        pcb = tmp_path / "board_routed.kicad_pcb"
+        pcb.write_text("(kicad_pcb)")
+
+        res = evaluate_pipeline_gate(pcb, route_ok=True, require_drc=require_drc)
+
+        assert res.drc_ran is False
+        assert res.drc_ok is False
+        assert any("geometric DRC failed" in r for r in res.reasons)
+
+
+# ---------------------------------------------------------------------------
+# cli/runner.py
+# ---------------------------------------------------------------------------
+
+
+class TestRunnerRunDrc:
+    @pytest.mark.parametrize(
+        ("returncode", "report"),
+        [
+            (-signal.SIGKILL, None),
+            (-signal.SIGKILL, VALID_REPORT),
+            (3, None),
+            (0, None),
+            (0, ""),
+            (0, TRUNCATED_REPORT),
+        ],
+        ids=["killed", "killed-with-report", "exit-3", "no-report", "empty", "truncated"],
+    )
+    def test_failures_are_not_success(self, monkeypatch, tmp_path, returncode, report):
+        from kicad_tools.cli import runner
+
+        _fake_kicad_cli(monkeypatch, runner, returncode=returncode, report=report)
+
+        res = runner.run_drc(tmp_path / "b.kicad_pcb", kicad_cli=FAKE_CLI)
+
+        assert res.success is False
+        assert "DRC failed" in res.stderr
+
+    def test_report_is_not_pre_created(self, monkeypatch, tmp_path):
+        from kicad_tools.cli import runner
+
+        seen = _fake_kicad_cli(monkeypatch, runner, returncode=0, report=VALID_REPORT)
+
+        res = runner.run_drc(tmp_path / "b.kicad_pcb", kicad_cli=FAKE_CLI)
+
+        assert seen["pre_existing"] is False
+        assert res.success is True
+        assert res.output_path is not None and res.output_path.read_text() == VALID_REPORT
+        res.output_path.unlink()
+
+    def test_stale_report_at_output_path_is_not_reused(self, monkeypatch, tmp_path):
+        from kicad_tools.cli import runner
+
+        out = tmp_path / "drc.json"
+        out.write_text(VALID_REPORT)  # from an earlier, successful run
+        _fake_kicad_cli(monkeypatch, runner, returncode=-signal.SIGKILL, report=None)
+
+        res = runner.run_drc(tmp_path / "b.kicad_pcb", output_path=out, kicad_cli=FAKE_CLI)
+
+        assert res.success is False
+        assert not out.exists()
+
+    def test_text_report_happy_path(self, monkeypatch, tmp_path):
+        from kicad_tools.cli import runner
+
+        _fake_kicad_cli(monkeypatch, runner, returncode=0, report="** Drc report **\n")
+
+        res = runner.run_drc(tmp_path / "b.kicad_pcb", format="report", kicad_cli=FAKE_CLI)
+
+        assert res.success is True
+        assert res.output_path is not None
+        res.output_path.unlink()
+
+
+class TestRunnerOtherSites:
+    def test_run_erc_killed_with_partial_report_fails(self, monkeypatch, tmp_path):
+        from kicad_tools.cli import runner
+
+        _fake_kicad_cli(monkeypatch, runner, returncode=-signal.SIGKILL, report='{"sheets": [')
+
+        res = runner.run_erc(tmp_path / "b.kicad_sch", kicad_cli=FAKE_CLI)
+
+        assert res.success is False
+
+    def test_run_erc_empty_report_with_exit_0_fails(self, monkeypatch, tmp_path):
+        from kicad_tools.cli import runner
+
+        _fake_kicad_cli(monkeypatch, runner, returncode=0, report=None)
+
+        res = runner.run_erc(tmp_path / "b.kicad_sch", kicad_cli=FAKE_CLI)
+
+        assert res.success is False
+
+    def test_run_refill_zones_killed_fails(self, monkeypatch, tmp_path):
+        from kicad_tools.cli import runner
+
+        monkeypatch.setattr(runner, "_kicad_drc_supports_refill", lambda _cli: True)
+        _fake_kicad_cli(monkeypatch, runner, returncode=-signal.SIGKILL, report=TRUNCATED_REPORT)
+        pcb = tmp_path / "b.kicad_pcb"
+        pcb.write_text("(kicad_pcb (version 20240108) (generator pcbnew))")
+
+        res = runner.run_refill_zones(pcb, kicad_cli=FAKE_CLI)
+
+        assert res.success is False
+        assert "SIGKILL" in res.stderr
+
+    def test_fill_zones_via_drc_killed_fails_and_restores(self, monkeypatch, tmp_path):
+        from kicad_tools.cli import runner
+
+        board = "(kicad_pcb (version 20240108) (generator pcbnew))\n"
+        pcb = tmp_path / "b.kicad_pcb"
+        pcb.write_text(board)
+        monkeypatch.setattr(runner, "_kicad_drc_supports_refill", lambda _cli: True)
+
+        def fake_run(cmd, *a, **k):
+            Path(cmd[cmd.index("--output") + 1]).write_text(TRUNCATED_REPORT)
+            Path(cmd[-1]).write_text("(kicad_pcb (versi")  # killed mid-save
+            return subprocess.CompletedProcess(cmd, -signal.SIGKILL, "", "")
+
+        monkeypatch.setattr(runner.subprocess, "run", fake_run)
+
+        res = runner._run_fill_zones_via_drc(pcb, None, FAKE_CLI)
+
+        assert res.success is False
+        assert "SIGKILL" in res.stderr
+        assert pcb.read_text() == board
+
+
+# ---------------------------------------------------------------------------
+# Other kicad-cli call sites
+# ---------------------------------------------------------------------------
+
+
+class TestOtherCallSites:
+    def test_audit_erc_killed_does_not_pass(self, monkeypatch, tmp_path):
+        import kicad_tools.audit.auditor as auditor_mod
+        from kicad_tools.audit import ManufacturingAudit
+
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text("(kicad_pcb)")
+        (tmp_path / "board.kicad_sch").write_text("(kicad_sch)")
+        _fake_kicad_cli(monkeypatch, auditor_mod, returncode=-signal.SIGKILL, report=None)
+
+        status = ManufacturingAudit(pcb, manufacturer="jlcpcb")._check_erc()
+
+        assert status.passed is False
+        assert status.blocking_error_count >= 1
+        assert "SIGKILL" in status.details
+
+    def test_audit_erc_empty_report_does_not_pass(self, monkeypatch, tmp_path):
+        import kicad_tools.audit.auditor as auditor_mod
+        from kicad_tools.audit import ManufacturingAudit
+
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text("(kicad_pcb)")
+        (tmp_path / "board.kicad_sch").write_text("(kicad_sch)")
+        _fake_kicad_cli(monkeypatch, auditor_mod, returncode=0, report=None)
+
+        status = ManufacturingAudit(pcb, manufacturer="jlcpcb")._check_erc()
+
+        assert status.passed is False
+
+    def test_audit_geometric_merge_records_crash(self, monkeypatch, tmp_path):
+        import kicad_tools.cli.runner as runner_mod
+        from kicad_tools.audit import ManufacturingAudit
+        from kicad_tools.audit.auditor import DRCStatus
+
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text("(kicad_pcb)")
+        monkeypatch.setattr(runner_mod, "find_kicad_cli", lambda: FAKE_CLI)
+        _fake_kicad_cli(monkeypatch, geometric, returncode=-signal.SIGKILL, report=None)
+        status = DRCStatus()
+
+        ManufacturingAudit(pcb, manufacturer="jlcpcb")._merge_geometric_drc(status)
+
+        assert status.geometric_drc_ran is False
+        assert "SIGKILL" in (status.geometric_drc_note or "")
+
+    def test_benchmark_metrics_crash_is_not_ran(self, monkeypatch, tmp_path):
+        import kicad_tools.cli.runner as runner_mod
+        from kicad_tools.benchmark.external.metrics import run_kicad_cli_drc
+
+        monkeypatch.setattr(runner_mod, "find_kicad_cli", lambda: FAKE_CLI)
+        _fake_kicad_cli(monkeypatch, geometric, returncode=-signal.SIGKILL, report=None)
+
+        summary = run_kicad_cli_drc(tmp_path / "b.kicad_pcb")
+
+        assert summary.ran is False
+        assert "SIGKILL" in (summary.note or "")
+
+    def test_sch_validate_erc_killed_is_reported(self, monkeypatch, tmp_path):
+        from kicad_tools.cli import sch_validate
+
+        monkeypatch.setattr(sch_validate, "find_kicad_cli", lambda: FAKE_CLI)
+        _fake_kicad_cli(monkeypatch, sch_validate, returncode=-signal.SIGKILL, report=None)
+
+        issues = sch_validate.run_erc(str(tmp_path / "b.kicad_sch"))
+
+        assert any("ERC check failed" in i.message and "SIGKILL" in i.message for i in issues)
+
+    def test_export_netlist_killed_fails(self, monkeypatch, tmp_path):
+        from kicad_tools.cli import export_netlist
+
+        out = tmp_path / "b.net"
+        out.write_text("(export (version D))")  # stale, from an earlier run
+        _fake_kicad_cli(monkeypatch, export_netlist, returncode=-signal.SIGKILL, report=None)
+
+        ok, err = export_netlist.export_netlist(tmp_path / "b.kicad_sch", out, FAKE_CLI)
+
+        assert ok is False
+        assert "SIGKILL" in err
+
+    def test_readiness_kicad_cli_killed_fails(self, monkeypatch, tmp_path):
+        import kicad_tools.cli.runner as runner_mod
+        from kicad_tools.cli import readiness_cmd
+
+        out = tmp_path / "out.pdf"
+        monkeypatch.setattr(runner_mod, "find_kicad_cli", lambda: FAKE_CLI)
+        _fake_kicad_cli(monkeypatch, readiness_cmd, returncode=-signal.SIGKILL, report="%PDF-1.")
+
+        run = readiness_cmd._run_kicad_cli(["sch", "export", "pdf", "--output", str(out)], out)
+
+        assert run.ok is False
+        assert "SIGKILL" in (run.detail or "")
+
+    @pytest.mark.parametrize("kind", ["drc", "erc"])
+    def test_preflight_empty_report_is_not_clean(self, tmp_path, kind):
+        from kicad_tools.export.preflight import PreflightChecker, PreflightConfig
+
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text("(kicad_pcb)")
+        report = tmp_path / f"{kind}_report.json"
+        report.write_text("")
+        config = PreflightConfig(**{f"{kind}_report_path": report})
+        checker = PreflightChecker(pcb, config=config)
+
+        result = checker._check_drc() if kind == "drc" else checker._check_erc()
+
+        assert result.status == "WARN"
+        assert "empty" in result.message
+
+
+def test_no_stray_temp_reports_left(monkeypatch, tmp_path):
+    """The private report directory is removed on every exit path."""
+    import tempfile
+
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    for rc, report in ((-9, None), (0, ""), (0, TRUNCATED_REPORT), (0, VALID_REPORT)):
+        _fake_kicad_cli(monkeypatch, geometric, returncode=rc, report=report)
+        run_geometric_drc(tmp_path / "b.kicad_pcb", kicad_cli=FAKE_CLI)
+    assert [p.name for p in tmp_path.iterdir()] == []

@@ -181,15 +181,17 @@ def test_deadline_before_first_drc_marks_status_unknown(monkeypatch, tmp_path, c
     assert "UNKNOWN" in capsys.readouterr().out
 
 
-def test_kicad_cli_not_run_is_not_a_deadline_skip(monkeypatch, tmp_path):
-    """Only the deadline makes the status unknown; other skips keep #5785's behaviour."""
+def test_kicad_cli_failed_first_drc_marks_status_unknown(monkeypatch, tmp_path):
+    """Issue #6724: an installed kicad-cli whose first DRC did not run (crash,
+    OOM kill, no report) leaves the stranded-pad count unknown, never 0."""
     _stub_pour_stage(
         monkeypatch, OracleCompletionResult(ran=False, stop_reason=STOP_NOT_RUN, note="x")
     )
     args = _stage_args()
     route_cmd._run_pour_oracle_stage(tmp_path / "b.kicad_pcb", args=args, quiet=True)
-    assert args._stranded_pour_unknown is False
-    assert route_cmd._unverified_checks(args) == []
+    assert args._stranded_pour_unknown is True
+    assert args._stranded_pour_failure == "x"
+    assert route_cmd._unverified_checks(args) == ["stranded-pour check"]
 
 
 # =============================================================================
