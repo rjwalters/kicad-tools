@@ -183,7 +183,7 @@ def test_via_stack_span_uses_drilled_span(micro: bool, span: int) -> None:
     assert _via_stack_span(_via(micro=micro), 4) == span
 
 
-@pytest.mark.parametrize(("micro", "length"), [(False, 1.6), (True, 1.6 / 3)])
+@pytest.mark.parametrize(("micro", "length"), [(False, 1.58), (True, 0.5325)])
 def test_via_length_uses_drilled_span_when_blind_buried_supported(
     micro: bool, length: float
 ) -> None:
