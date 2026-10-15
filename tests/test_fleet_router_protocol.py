@@ -403,16 +403,20 @@ def rule_bearing(tmp_path, board00_pcb):
 
 
 def test_dsn_audit_detects_omitted_constraints(fr, rule_bearing):
+    not_routing: list = []
     lost = fr.dsn_audit(
         rule_bearing,
         rule_bearing.with_suffix(".kicad_pro"),
         rule_bearing.with_suffix(".kicad_dru"),
         rule_bearing.with_suffix(".dsn"),
+        not_routing,
     )
     kinds = {e["kind"] for e in lost}
-    assert {"dru", "keepout", "zone", "copper_text"} <= kinds
+    assert {"keepout", "zone", "copper_text"} <= kinds
     details = " ".join(e["detail"] for e in lost)
-    assert "edge_clearance" in details
+    # Issue #6756: a fab-only rule is reported as not-routing, not as a loss.
+    assert "dru" not in kinds and "edge_clearance" not in details
+    assert [n["type"] for n in not_routing] == ["edge_clearance"]
     # Issue #6642: only the genuinely omitted rule area and zone are reported;
     # the plain keepout ("ko") and the GND pour are exported since #6594.
     keepouts = [e["detail"] for e in lost if e["kind"] == "keepout"]
@@ -719,3 +723,79 @@ def test_outcome_vocabulary_is_closed(fr):
 def test_work_dir_inside_repo_is_refused(fr, tmp_path):
     assert fr.main(["run", "--work-dir", str(REPO_ROOT / "tmp-fleet"), "--tools", ""]) == 2
     assert not (REPO_ROOT / "tmp-fleet").exists()
+
+
+def _audit_with_dru(fr, rule_bearing, dru_text, *, dsn_edit=None):
+    dsn = rule_bearing.with_suffix(".dsn")
+    rule_bearing.with_suffix(".kicad_dru").write_text(dru_text)
+    if dsn_edit is not None:
+        from kicad_tools.export.dsn import KiCadToDSNExporter
+
+        dsn.write_text(dsn_edit(KiCadToDSNExporter(rule_bearing).export(dsn)))
+    not_routing: list = []
+    lost = fr.dsn_audit(
+        rule_bearing,
+        rule_bearing.with_suffix(".kicad_pro"),
+        rule_bearing.with_suffix(".kicad_dru"),
+        dsn,
+        not_routing,
+    )
+    return [e for e in lost if e["kind"] == "dru"], not_routing
+
+
+def test_dsn_audit_fab_only_rules_are_not_routing_not_lost(fr, rule_bearing):
+    dru, not_routing = _audit_with_dru(
+        fr,
+        rule_bearing,
+        '(version 1)\n(rule "Silk" (constraint silk_clearance (min 0.15mm)))\n'
+        '(rule "Ann" (constraint annular_width (min 0.13mm)))\n'
+        '(rule "Edge" (constraint edge_clearance (min 0.5mm)))\n',
+    )
+    assert dru == []
+    assert {n["type"] for n in not_routing} == {
+        "silk_clearance",
+        "annular_width",
+        "edge_clearance",
+    }
+
+
+_POWER_RULE = (
+    "(version 1)\n"
+    '(rule "Reviewed clearance - Power" (condition "A.NetClass == \'Power\' || '
+    "B.NetClass == 'Power'\") (constraint clearance (min 0.2mm)))\n"
+)
+
+
+def test_dsn_audit_class_clearance_covered_by_class_block(fr, rule_bearing):
+    dru, _ = _audit_with_dru(fr, rule_bearing, _POWER_RULE)  # Power clearance 0.3 >= 0.2
+    assert dru == []
+
+
+def test_dsn_audit_class_clearance_lost_when_class_block_weaker_or_absent(fr, rule_bearing):
+    def weaken(text):
+        start = text.index("(class Power")
+        head, tail = text[:start], text[start:]
+        return head + re.sub(r"\(clearance [\d.]+\)", "(clearance 100.0)", tail, count=1)
+
+    dru, _ = _audit_with_dru(fr, rule_bearing, _POWER_RULE, dsn_edit=weaken)
+    assert len(dru) == 1 and "Reviewed clearance - Power" in dru[0]["detail"]
+
+    def drop(text):
+        return re.sub(r"\n    \(class Power\b.*?\n    \)", "", text, count=1, flags=re.S)
+
+    dru, _ = _audit_with_dru(fr, rule_bearing, _POWER_RULE, dsn_edit=drop)
+    assert len(dru) == 1
+
+
+def test_dsn_audit_unexpressible_routing_rules_stay_lost(fr, rule_bearing):
+    dru, not_routing = _audit_with_dru(
+        fr,
+        rule_bearing,
+        "(version 1)\n"
+        '(rule "Layered" (layer "F.Cu") (constraint clearance (min 0.5mm)))\n'
+        '(rule "NoClass" (condition "A.Type == \'Via\'") (constraint clearance (min 0.5mm)))\n'
+        '(rule "Ghost" (condition "A.NetClass == \'Nope\'") (constraint clearance (min 0.5mm)))\n',
+    )
+    named = " ".join(e["detail"] for e in dru)
+    assert "'Layered'" in named and "'NoClass'" in named and "'Ghost'" in named
+    assert not_routing == []
