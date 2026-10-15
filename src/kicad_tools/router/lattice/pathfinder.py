@@ -46,7 +46,7 @@ from __future__ import annotations
 import heapq
 import math
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -58,6 +58,7 @@ from ..rules import DesignRules
 from .coupled import CoupledConnection
 from .escape_plan import EscapeChoice, chosen_stub, foreign_reservations, plan_tapered_escapes
 from .geometry import Pt, Rect, dist, pt_in_rect, seg_seg_dist
+from .guide import PartnerGuide
 from .history import PhysicalHistory
 from .obstacles import (
     CommittedCopper,
@@ -110,6 +111,29 @@ EXHAUSTED_SEARCH_REASONS: frozenset[str] = frozenset(
 
 #: Issue #6489: most re-negotiations with grown pads after a class-pad repair.
 _MAX_PAD_GROWTH_ROUNDS = 2
+
+# Issue #6703: partner-corridor cost for uncoupled diff-pair fallback legs
+# (see :class:`~kicad_tools.router.lattice.guide.PartnerGuide`).  A guided leg
+# routes free within ``_GUIDE_NEAR_PITCHES`` pair pitches of its partner on
+# the same layer, and pays up to ``_GUIDE_WEIGHT * _GUIDE_CAP_MM`` extra per mm
+# of length beyond that.
+_GUIDE_NEAR_PITCHES = 2.0
+_GUIDE_CAP_MM = 2.0
+_GUIDE_WEIGHT = 1.0
+
+
+# One fallback leg pair: ``{"P"|"N": (search result or None, reason)}`` (#6703).
+_FallbackLegs = dict[str, tuple["_RouteResult | None", str]]
+
+# Through-via barrel length assumed when the router supplies no
+# :attr:`LatticePathfinder.pair_length_measure` (a standard 1.6 mm board).
+_DEFAULT_VIA_LENGTH_MM = 1.6
+
+
+def _default_pair_length(route: Route) -> float:
+    """Track length plus one board thickness per (through) via, in mm."""
+    tracks = sum(math.hypot(s.x2 - s.x1, s.y2 - s.y1) for s in route.segments)
+    return tracks + _DEFAULT_VIA_LENGTH_MM * len(route.vias)
 
 
 @dataclass(frozen=True)
@@ -292,6 +316,15 @@ class LatticePathfinder:
         self.margin = margin
         # Per-via-hop layer-change cost (mm-equivalent; spike default 3.0).
         self.via_cost = via_cost
+        # Issue #6703: ``Route -> mm`` used to rank the uncoupled-fallback leg
+        # candidates by skew.  The router sets the skew checker's via-inclusive
+        # measure; ``None`` -> tracks plus a 1.6 mm barrel per through-via.
+        self.pair_length_measure: Callable[[Route], float] | None = None
+        self._shortfall_memo: dict[int, tuple[_RouteResult, int]] = {}
+        # Issue #6703: raised only while a partner-aware fallback leg is
+        # SEARCHED (never while it is committed), so its copper clears every
+        # pad's own class -- see :meth:`_partner_aware_legs`.
+        self._search_clearance_floor = 0.0
 
         xs = [p[0] for p in outline]
         ys = [p[1] for p in outline]
@@ -727,7 +760,9 @@ class LatticePathfinder:
         tw = getattr(net_class, "trace_width", None) or self.rules.trace_width
         clr = getattr(net_class, "clearance", None) or 0.0
         authored = self.rules.authored_floor(net) if net is not None else 0.0
-        return tw / 2.0, max(clr, self.rules.trace_clearance, authored)
+        return tw / 2.0, max(
+            clr, self.rules.trace_clearance, authored, self._search_clearance_floor
+        )
 
     def _hard_avoided_layers(self, net_class: object | None) -> frozenset[int]:
         """Grid-layer indices to HARD-block for this connection (issue #4979).
@@ -1531,6 +1566,7 @@ class LatticePathfinder:
         stubs_override: tuple[list, list] | None = None,
         exempt_pads: frozenset[int] | None = None,
         escape_plan: dict[int, EscapeChoice] | None = None,
+        guide: PartnerGuide | None = None,
     ) -> tuple[_RouteResult | None, str]:
         """Apply physical Kelvin isolation throughout every search stage."""
         from ..kelvin import detect_kelvin_topology
@@ -1564,6 +1600,7 @@ class LatticePathfinder:
                 stubs_override=stubs_override,
                 exempt_pads=exempt_pads,
                 escape_plan=escape_plan,
+                guide=guide,
             )
         finally:
             committed.kelvin_guard = previous
@@ -1584,6 +1621,7 @@ class LatticePathfinder:
         stubs_override: tuple[list, list] | None = None,
         exempt_pads: frozenset[int] | None = None,
         escape_plan: dict[int, EscapeChoice] | None = None,
+        guide: PartnerGuide | None = None,
     ) -> tuple[_RouteResult | None, str]:
         """Route one connection, staging via-in-pad as a last resort (#4475).
 
@@ -1635,6 +1673,8 @@ class LatticePathfinder:
         }
         if escape_plan and not fat:
             search_kwargs["escape_plan"] = escape_plan
+        if guide is not None and not fat:
+            search_kwargs["guide"] = guide
         if not last_resort:
             return self._route_search(start, end, net_class, **search_kwargs)
 
@@ -1678,6 +1718,7 @@ class LatticePathfinder:
         exempt_pads: frozenset[int] | None = None,
         via_in_pad_override: bool | None = None,
         escape_plan: dict[int, EscapeChoice] | None = None,
+        guide: PartnerGuide | None = None,
     ) -> tuple[_RouteResult | None, str]:
         """A* over the (node, layer) graph; returns ``(result, reason)``.
 
@@ -1990,6 +2031,9 @@ class LatticePathfinder:
                     continue
                 step = elen + present * history.get(("e", edge, layer), 0.0)
                 step += copper_cost(lattice.node_point(key), lattice.node_point(nbr), layer, body_w)
+                if guide is not None:
+                    # Issue #6703: soft pull toward the partner leg's corridor.
+                    step += guide.edge_cost(lattice.node_point(key), lattice.node_point(nbr), layer)
                 tentative = g + step
                 if tentative < g_score.get(nstate, math.inf) - 1e-12:
                     g_score[nstate] = tentative
@@ -2711,6 +2755,68 @@ class LatticePathfinder:
                         return "self-drc-segment-via-coincident"
         return None
 
+    def _search_single(
+        self,
+        item: Connection,
+        *,
+        committed: CommittedCopper,
+        history: dict[Resource, float],
+        present: float,
+        escape_plan: dict[int, EscapeChoice],
+        guide: PartnerGuide | None = None,
+    ) -> tuple[_RouteResult | None, str]:
+        """Search ONE single-ended connection without committing it.
+
+        Returns ``(result, "ok")`` when the route passed the search AND the
+        final self-DRC gate, else ``(None, reason)``.  ``guide`` (issue
+        #6703) is the partner leg's soft corridor cost for a diff-pair
+        fallback leg; ``None`` is the ordinary single-ended search.
+        """
+        _key, start, end, net_class = item
+        options: dict[str, Any] = {"escape_plan": escape_plan} if escape_plan else {}
+        if guide is not None:
+            options["guide"] = guide
+        result, reason = self._route_impl(
+            start,
+            end,
+            net_class,
+            committed=committed,
+            history=history,
+            present=present,
+            **options,
+        )
+        if result is None:
+            return None, reason
+        # Final self-DRC gate (#4318): a route whose own segment body
+        # runs across its own via center is malformed copper the
+        # checker cannot repair -- decline it honestly rather than
+        # ship a 0.000mm segment-to-via coincidence.
+        self_reason = self._self_drc_reason(result)
+        if self_reason is not None:
+            return None, self_reason
+        return result, "ok"
+
+    def _commit_single(
+        self,
+        item: Connection,
+        result: _RouteResult,
+        routes: dict[object, Route],
+        committed: CommittedCopper,
+    ) -> None:
+        """Record ``result`` under ``item``'s key and commit its copper."""
+        key, start, _end, net_class = item
+        routes[key] = result.route
+        # Commit each segment at the width it was EMITTED at (issue
+        # #4293): the widened lattice body is spaced against 2.6 mm
+        # copper as 2.6 mm copper, and a tapered escape neck is spaced
+        # honestly as neck copper -- never the taper cheating the
+        # spacing model.  Clearance stays the class clearance (#4271).
+        _half, clr = self._conn_geometry(net_class, start.net)
+        for layer_idx, points, widths in result.runs:
+            committed.add_run_widths(layer_idx, points, start.net, [w / 2.0 for w in widths], clr)
+        for via_pt in result.via_points:
+            committed.add_via(via_pt, start.net, clr)
+
     def _route_single_into(
         self,
         item: Connection,
@@ -2728,38 +2834,282 @@ class LatticePathfinder:
         Returns ``None`` on success (``routes[key]`` set and the copper
         committed), else the decline reason -- nothing is committed then.
         """
-        key, start, end, net_class = item
-        plan_options: dict[str, Any] = {"escape_plan": escape_plan} if escape_plan else {}
-        result, reason = self._route_impl(
-            start,
-            end,
-            net_class,
-            committed=committed,
-            history=history,
-            present=present,
-            **plan_options,
+        result, reason = self._search_single(
+            item, committed=committed, history=history, present=present, escape_plan=escape_plan
         )
         if result is None:
             return reason
-        # Final self-DRC gate (#4318): a route whose own segment body
-        # runs across its own via center is malformed copper the
-        # checker cannot repair -- decline it honestly rather than
-        # ship a 0.000mm segment-to-via coincidence.
-        self_reason = self._self_drc_reason(result)
-        if self_reason is not None:
-            return self_reason
-        routes[key] = result.route
-        # Commit each segment at the width it was EMITTED at (issue
-        # #4293): the widened lattice body is spaced against 2.6 mm
-        # copper as 2.6 mm copper, and a tapered escape neck is spaced
-        # honestly as neck copper -- never the taper cheating the
-        # spacing model.  Clearance stays the class clearance (#4271).
-        _half, clr = self._conn_geometry(net_class, start.net)
-        for layer_idx, points, widths in result.runs:
-            committed.add_run_widths(layer_idx, points, start.net, [w / 2.0 for w in widths], clr)
-        for via_pt in result.via_points:
-            committed.add_via(via_pt, start.net, clr)
+        self._commit_single(item, result, routes, committed)
         return None
+
+    def _partner_guide(self, result: _RouteResult, pc: CoupledConnection) -> PartnerGuide:
+        """The #6703 corridor cost built from one routed fallback leg."""
+        pitch = max(pc.pitch, 1e-3)
+        return PartnerGuide(
+            result.runs,
+            near=_GUIDE_NEAR_PITCHES * pitch,
+            cap=_GUIDE_CAP_MM,
+            weight=_GUIDE_WEIGHT,
+        )
+
+    def _fallback_items(self, pc: CoupledConnection) -> dict[str, Connection]:
+        """The two single-ended leg connections of a declined pair (#6373)."""
+        return {
+            pol: ((pc.key, pol), pad_a, pad_b, pc.net_class)
+            for pol, pad_a, pad_b in (
+                ("P", pc.pad_p_a, pc.pad_p_b),
+                ("N", pc.pad_n_a, pc.pad_n_b),
+            )
+        }
+
+    def _pair_skew(self, legs: _FallbackLegs) -> float | None:
+        """``|len_P - len_N|`` of a fully routed leg pair, else ``None``."""
+        p_r, n_r = legs["P"][0], legs["N"][0]
+        if p_r is None or n_r is None:
+            return None
+        measure = self.pair_length_measure or _default_pair_length
+        return abs(measure(p_r.route) - measure(n_r.route))
+
+    def _legs_shortfalls(self, pc: CoupledConnection, legs: _FallbackLegs) -> int:
+        """Class-pad shortfalls of a leg pair (see :func:`class_pad_shortfalls`)."""
+        from .class_pad_repair import class_pad_shortfalls
+
+        total = 0
+        for pol in ("P", "N"):
+            res = legs[pol][0]
+            if res is not None:
+                memo = self._shortfall_memo
+                hit = memo.get(id(res))
+                if hit is None or hit[0] is not res:
+                    hit = (res, class_pad_shortfalls(self, res.route, pc.net_class))
+                    memo[id(res)] = hit
+                total += hit[1]
+        return total
+
+    def _partner_blind_legs(
+        self,
+        pc: CoupledConnection,
+        *,
+        committed: CommittedCopper,
+        history: dict[Resource, float],
+        present: float,
+        escape_plan: dict[int, EscapeChoice],
+    ) -> _FallbackLegs:
+        """The pre-#6703 fallback: P, then N, as unrelated nets (committed)."""
+        items = self._fallback_items(pc)
+        legs: _FallbackLegs = {}
+        for pol in ("P", "N"):
+            res, reason = self._search_single(
+                items[pol],
+                committed=committed,
+                history=history,
+                present=present,
+                escape_plan=escape_plan,
+            )
+            if res is not None:
+                self._commit_single(items[pol], res, {}, committed)
+            legs[pol] = (res, reason)
+        return legs
+
+    def _partner_aware_legs(
+        self,
+        pc: CoupledConnection,
+        *,
+        committed: CommittedCopper,
+        history: dict[Resource, float],
+        present: float,
+        escape_plan: dict[int, EscapeChoice],
+    ) -> tuple[_FallbackLegs, bool]:
+        """Route a declined pair's two legs partner-aware (issue #6703; committed).
+
+        Four candidates are built:
+
+        * P unguided, then N unguided (the pre-#6703 result);
+        * P unguided, then N guided by P's corridor (:class:`PartnerGuide`);
+        * N unguided, then P unguided;
+        * N unguided, then P guided by N's corridor.
+
+        The second leg of a candidate is searched against committed copper
+        that holds the candidate's first leg (a :meth:`CommittedCopper.begin_trial`
+        that is rolled back), so every candidate is legal exactly as it would
+        be had it been routed alone.  The winner has the most routed legs,
+        then the fewest class-pad shortfalls, then the smallest skew
+        (:meth:`_pair_skew`), then the smallest total length; ties keep the earlier candidate, so the selection is
+        deterministic.  Its legs are committed.  Returns ``(legs,
+        is_partner_blind)`` -- the flag is set when the winner is the pre-#6703
+        candidate itself.
+        """
+        items = self._fallback_items(pc)
+        kw: dict[str, Any] = {
+            "committed": committed,
+            "history": history,
+            "present": present,
+            "escape_plan": escape_plan,
+        }
+
+        from .class_pad_repair import pad_class_requirements
+
+        # A shortfall against a pad's own class left on a diff-pair net gets
+        # the net demoted (the class-pad repair may barely move pair copper),
+        # so the partner-aware legs are searched at the strictest pad class:
+        # their copper then needs no repair at all.  Committed copper keeps
+        # the leg's own class clearance.
+        pad_req = pad_class_requirements(self) if self._pairwise is None else None
+        floor = max(pad_req) if pad_req else 0.0
+
+        def search(pol: str, guide: PartnerGuide | None = None) -> tuple[_RouteResult | None, str]:
+            self._search_clearance_floor = floor
+            try:
+                return self._search_single(items[pol], guide=guide, **kw)
+            finally:
+                self._search_clearance_floor = 0.0
+
+        candidates: list[_FallbackLegs] = []
+        firsts: _FallbackLegs = {}
+        for lead, follow in (("P", "N"), ("N", "P")):
+            first = search(lead)
+            firsts[lead] = first
+            lead_res = first[0]
+            if lead_res is None:
+                continue
+            mark = committed.begin_trial()
+            try:
+                self._commit_single(items[lead], lead_res, {}, committed)
+                plain = search(follow)
+                guided = search(follow, self._partner_guide(lead_res, pc))
+            finally:
+                committed.rollback_trial(mark)
+            # The plain P-led candidate IS the pre-#6703 result; listed first
+            # so it wins every tie.
+            candidates.append({lead: first, follow: plain})
+            if guided[0] is not None:
+                candidates.append({lead: first, follow: guided})
+        if firsts["P"][0] is None:
+            # P cannot route even alone: the pre-#6703 shape (N routed on
+            # its own) leads, and wins unless an N-led candidate is no worse.
+            candidates.insert(0, {"P": firsts["P"], "N": firsts["N"]})
+
+        measure = self.pair_length_measure or _default_pair_length
+
+        def rank(cand: _FallbackLegs) -> tuple[int, int, float, float]:
+            p_r, n_r = cand["P"][0], cand["N"][0]
+            routed = (p_r is not None) + (n_r is not None)
+            short = self._legs_shortfalls(pc, cand)
+            if p_r is None or n_r is None:
+                return (-routed, short, 0.0, 0.0)
+            lp, ln = measure(p_r.route), measure(n_r.route)
+            # Rounded to 1 um so float noise never flips a tie.
+            return (-routed, short, round(abs(lp - ln), 3), round(lp + ln, 3))
+
+        best = min(candidates, key=rank)  # ``min`` keeps the first on ties
+        for pol in ("P", "N"):
+            res = best[pol][0]
+            if res is not None:
+                self._commit_single(items[pol], res, {}, committed)
+        # ``candidates[0]`` is the partner-blind (pre-#6703) leg pair whenever
+        # the strict pad-class search changed nothing.
+        own = min(self._conn_geometry(pc.net_class, it[1].net)[1] for it in items.values())
+        return {"P": best["P"], "N": best["N"]}, best is candidates[0] and floor <= own + 1e-9
+
+    def _route_fallback_pairs_into(
+        self,
+        pairs: list[CoupledConnection],
+        routes: dict[object, Route],
+        *,
+        committed: CommittedCopper,
+        history: dict[Resource, float],
+        present: float,
+        escape_plan: dict[int, EscapeChoice],
+    ) -> list[dict[str, tuple[Connection, str | None]]]:
+        """Route every deferred fallback pair's legs (#6373), skew-aware (#6703).
+
+        Pre-#6703 each leg was routed as an unrelated net (P, then N), so
+        wherever a wall forced a detour the legs took different ways round
+        it and the pair's skew grew by mm.  Each pair now picks its best
+        partner-aware candidate (:meth:`_partner_aware_legs`).
+
+        Pairs routed one after another compete for the same escape channels,
+        so a pair's best choice can push a LATER pair's legs onto a worse
+        detour, or off the board (07rf: TMDS_D1 matched by sending its N leg
+        over B.Cu, where TMDS_D0's N leg then found no way at all).  So each
+        pair's partner-aware choice is weighed by a rollout: the remaining
+        pairs are routed partner-blind behind it, and the choice is kept only
+        when the whole flush then scores better than with the pair's own
+        partner-blind legs: more routed legs, then fewer class-pad shortfalls
+        (:func:`~.class_pad_repair.class_pad_shortfalls` -- one left on a
+        diff-pair net gets the net demoted), then a smaller summed skew.  A
+        tie keeps the pre-#6703 copper.  The comparison baseline at every step
+        is the flush already secured, so the result never scores worse than
+        the pre-#6703 flush from the same state.
+
+        Commits the kept flush.  Returns, per pair, ``{"P"|"N": (leg_item,
+        decline reason or None)}``.
+        """
+        kw: dict[str, Any] = {
+            "committed": committed,
+            "history": history,
+            "present": present,
+            "escape_plan": escape_plan,
+        }
+
+        def score(flush: list[_FallbackLegs]) -> tuple[int, int, float]:
+            routed = sum(legs[pol][0] is not None for legs in flush for pol in ("P", "N"))
+            short = sum(
+                self._legs_shortfalls(pc, legs) for pc, legs in zip(pairs, flush, strict=True)
+            )
+            skews = [self._pair_skew(legs) for legs in flush]
+            return (-routed, short, round(sum(sk for sk in skews if sk is not None), 3))
+
+        def recommit(pc: CoupledConnection, legs: _FallbackLegs) -> None:
+            items = self._fallback_items(pc)
+            for pol in ("P", "N"):
+                res = legs[pol][0]
+                if res is not None:
+                    self._commit_single(items[pol], res, {}, committed)
+
+        self._shortfall_memo = {}
+        # ``rest`` is always the partner-blind routing of the pairs not yet
+        # decided, under the copper committed so far; initially the whole
+        # pre-#6703 flush.
+        mark = committed.begin_trial()
+        rest = [self._partner_blind_legs(pc, **kw) for pc in pairs]
+        committed.rollback_trial(mark)
+        chosen: list[_FallbackLegs] = []
+        for i, pc in enumerate(pairs):
+            mark = committed.begin_trial()
+            aware, is_blind = self._partner_aware_legs(pc, **kw)
+            if is_blind:
+                # Same copper as the partner-blind leg pair: nothing to weigh.
+                committed.keep_trial(mark)
+                chosen.append(aware)
+                rest = rest[1:]
+                continue
+            inner = committed.begin_trial()
+            aware_rest = [self._partner_blind_legs(q, **kw) for q in pairs[i + 1 :]]
+            committed.rollback_trial(inner)
+            if score([*chosen, aware, *aware_rest]) < score([*chosen, *rest]):
+                committed.keep_trial(mark)
+                chosen.append(aware)
+                rest = aware_rest
+            else:
+                committed.rollback_trial(mark)
+                recommit(pc, rest[0])
+                chosen.append(rest[0])
+                rest = rest[1:]
+        self._shortfall_memo = {}
+        out: list[dict[str, tuple[Connection, str | None]]] = []
+        for pc, legs in zip(pairs, chosen, strict=True):
+            items = self._fallback_items(pc)
+            per: dict[str, tuple[Connection, str | None]] = {}
+            for pol in ("P", "N"):
+                res, reason = legs[pol]
+                if res is not None:
+                    routes[items[pol][0]] = res.route
+                    per[pol] = (items[pol], None)
+                else:
+                    per[pol] = (items[pol], reason)
+            out.append(per)
+        return out
 
     def route_netset(
         self,
@@ -3060,26 +3410,26 @@ class LatticePathfinder:
 
             def flush_fallbacks() -> None:
                 nonlocal routed_items, fallback_legs
-                for fb in deferred_fallback:
+                if not deferred_fallback:
+                    return
+                # Issue #6703: the legs are routed partner-aware so a pair's
+                # two legs take the same way round an obstacle wall.
+                flushed = self._route_fallback_pairs_into(
+                    list(deferred_fallback),
+                    routes,
+                    committed=committed,
+                    history=history,
+                    present=present,
+                    escape_plan=escape_plan,
+                )
+                for legs in flushed:
                     legs_ok = 0
-                    for pol, pad_a, pad_b in (
-                        ("P", fb.pad_p_a, fb.pad_p_b),
-                        ("N", fb.pad_n_a, fb.pad_n_b),
-                    ):
-                        leg_key = (fb.key, pol)
-                        leg_item = (leg_key, pad_a, pad_b, fb.net_class)
-                        leg_reason = self._route_single_into(
-                            leg_item,
-                            routes,
-                            committed=committed,
-                            history=history,
-                            present=present,
-                            escape_plan=escape_plan,
-                        )
+                    for pol in ("P", "N"):
+                        leg_item, leg_reason = legs[pol]
                         if leg_reason is None:
                             legs_ok += 1
                         else:
-                            reasons[leg_key] = leg_reason
+                            reasons[leg_item[0]] = leg_reason
                             failed.append((0, leg_item))
                     fallback_legs += legs_ok
                     if legs_ok == 2:
