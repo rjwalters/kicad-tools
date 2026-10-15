@@ -797,7 +797,8 @@ def run_oracle_completion(
     """Close the KiCad-reported unconnected links on ``nets``, round by round.
 
     Termination is guaranteed: at most ``max_rounds`` rounds, each with at
-    most ``2 + max_retries`` closer attempts, and the loop stops early when
+    most ``3 + max_retries`` attempts (the retries, one footprint escalation
+    and one final re-check of a pruned attempt), and the loop stops early when
 
     * the in-scope link count reaches zero (``converged``),
     * the closer places nothing (``no_closer``),
@@ -955,6 +956,9 @@ def run_oracle_completion(
         last_refs: set[str] = set()
         round_keys: set[str] = set()
         escalated = False
+        #: Whether the round already spent its one final re-check of a
+        #: pruned attempt (see the budget check below).
+        rechecked = False
         blamed_refs: set[str] = set()
         #: Issue #6671: an attempt whose culprits were withdrawn from the
         #: board in place (``closer.withdraw``); the next evaluation re-checks
@@ -1007,6 +1011,19 @@ def run_oracle_completion(
                     k for k in round_keys if closer_key_refs(k) & blamed_refs
                 }
                 if escalated or not escalation - banned:
+                    if reuse is not None and not rechecked:
+                        # The pending attempt has had its last culprits
+                        # withdrawn but was never re-checked.  Discarding it
+                        # unchecked throws away every clean closure of the
+                        # round (06rf on main after #6664: four retries, the
+                        # last pruning J3/U3 welds, then 131 -> 131).  Spend
+                        # ONE more oracle run on it; it is kept only if that
+                        # run passes every gate, and a further regression
+                        # ends the round as before.
+                        rechecked = True
+                        budget += 1
+                        say("    retry budget spent; re-checking the pruned attempt once")
+                        continue
                     if reuse is not None:
                         pcb_path.write_bytes(backup)
                         reuse = None

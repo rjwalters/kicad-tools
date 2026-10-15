@@ -588,6 +588,94 @@ class TestRegressionWithdrawsInPlace:
         assert res.rounds[0].kept and res.rounds[0].links_after == 1
 
 
+class TwoBadWeldsBoard:
+    """Welds on ``U2`` and ``U4`` each raise one DRC error, but the oracle only
+    reports the first one present -- the second shows up once the first is
+    withdrawn, as a fresh regression on an already-pruned attempt."""
+
+    SITES = {"U1": (1.0, 0.0), "U2": (50.0, 50.0), "U3": (3.0, 0.0), "U4": (60.0, 60.0)}
+
+    def __init__(self, tmp_path: Path):
+        self.path = tmp_path / "b.kicad_pcb"
+        self.path.write_text("")
+
+    def welded(self) -> list[str]:
+        return [t for t in self.path.read_text().split(",") if t]
+
+    def oracle(self, _path: Path) -> GeometricDRCResult:
+        welded = self.welded()
+        links = [v for v, ref in zip(_links(4), self.SITES, strict=True) if ref not in welded]
+        bad = [_err(self.SITES[r]) for r in ("U2", "U4") if r in welded][:1]
+        return GeometricDRCResult(
+            ran=True, error_count=len(bad), error_violations=bad, unconnected_items=links
+        )
+
+    def __call__(self, path, links, banned):
+        """The closer: weld every pad not banned (by key or by footprint)."""
+        att = ClosureAttempt()
+        for ref, at in self.SITES.items():
+            key = f"pad:GND:{ref}.1"
+            if key in banned or footprint_key(ref) in banned:
+                continue
+            att.footprints[key] = [(*at, *at, 0.3)]
+            att.sites[key] = [at]
+            att.applied += 1
+        path.write_text(",".join(k.split(":")[2].split(".")[0] for k in att.footprints))
+        return att
+
+    def withdraw(self, path, before, footprints):
+        refs = {k.split(":")[2].split(".")[0] for k in footprints}
+        path.write_text(",".join(r for r in self.welded() if r not in refs))
+        return len(refs)
+
+
+class TestPrunedAttemptIsRechecked:
+    def test_a_pruned_attempt_gets_one_final_recheck_instead_of_being_discarded(self, tmp_path):
+        # max_retries=0: attempt 1 blames U2 (withdrawn), the escalation
+        # withdraws U2 wholesale, attempt 2 then blames U4 (withdrawn) and
+        # the budget is spent.  Before, the pruned attempt -- U1 + U3, clean
+        # -- was thrown away unchecked; now it gets one more oracle run.
+        b = TwoBadWeldsBoard(tmp_path)
+        closer = b
+        lines: list[str] = []
+        res = run_oracle_completion(
+            b.path,
+            oracle=b.oracle,
+            closer=closer,
+            nets={"GND"},
+            max_rounds=1,
+            max_retries=0,
+            log=lines.append,
+        )
+        assert any("re-checking the pruned attempt once" in line for line in lines)
+        first = res.rounds[0]
+        assert first.kept and (first.links_before, first.links_after) == (4, 2)
+        assert first.errors_after == 0 and first.attempts == 3
+        assert set(b.welded()) == {"U1", "U3"}
+
+    def test_the_recheck_is_spent_only_once(self, tmp_path):
+        # A third bad weld that the re-check uncovers still ends the round,
+        # restoring the board -- the extra check is one oracle run, not a loop.
+        b = TwoBadWeldsBoard(tmp_path)
+        b.SITES = {**TwoBadWeldsBoard.SITES, "U5": (70.0, 70.0)}
+
+        def oracle(_path):
+            welded = b.welded()
+            links = [v for v, ref in zip(_links(5), b.SITES, strict=True) if ref not in welded]
+            bad = [_err(b.SITES[r]) for r in ("U2", "U4", "U5") if r in welded][:1]
+            return GeometricDRCResult(
+                ran=True, error_count=len(bad), error_violations=bad, unconnected_items=links
+            )
+
+        closer = b
+        res = run_oracle_completion(
+            b.path, oracle=oracle, closer=closer, nets={"GND"}, max_rounds=1, max_retries=0
+        )
+        first = res.rounds[0]
+        assert not first.kept and first.attempts == 3
+        assert b.welded() == []
+
+
 class TestWriteRoundingGuard:
     """Board writers round to 0.01 mm; drill spacing keeps that slack (#6671)."""
 
