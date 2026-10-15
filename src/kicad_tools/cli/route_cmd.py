@@ -10700,6 +10700,7 @@ def route_with_layer_escalation(
         # to a HARD constraint for the ampacity-free case (nets with a declared
         # ``target_ampacity`` are hard-blocked regardless of this flag).
         strict_layers=getattr(args, "strict_layers", False),
+        fallback_bidirectional=getattr(args, "fallback_bidirectional", False),
         # Issue #4475 (epic #4465 Phase 3): stage the lattice engine's
         # same-net via-in-pad attach as a LAST RESORT (in-layer / free-space
         # via first) instead of the #4284 opportunistic tier-only gate.
@@ -12360,6 +12361,7 @@ def route_with_rule_relaxation(
             auto_mfr_tier_in_progress=getattr(args, "_auto_mfr_tier_in_progress", False),
             # Issue #4433: forward --strict-layers (hard per-net avoid_layers).
             strict_layers=getattr(args, "strict_layers", False),
+            fallback_bidirectional=getattr(args, "fallback_bidirectional", False),
             # Issue #4475 (epic #4465 Phase 3): stage via-in-pad as a
             # LAST RESORT on the lattice engine. Default off is
             # bit-for-bit pre-#4475.
@@ -14968,6 +14970,7 @@ def route_with_combined_escalation(
                 auto_mfr_tier_in_progress=getattr(args, "_auto_mfr_tier_in_progress", False),
                 # Issue #4433: forward --strict-layers (hard per-net avoid_layers).
                 strict_layers=getattr(args, "strict_layers", False),
+                fallback_bidirectional=getattr(args, "fallback_bidirectional", False),
                 # Issue #4475 (epic #4465 Phase 3): stage via-in-pad as a
                 # LAST RESORT on the lattice engine. Default off is
                 # bit-for-bit pre-#4475.
@@ -19068,6 +19071,17 @@ def _route_parser() -> argparse.ArgumentParser:
     # parser.py flag; both sites must stay in sync per
     # ``tests/test_cli_parser_drift.py``.
     parser.add_argument(
+        "--fallback-bidirectional",
+        action="store_true",
+        default=False,
+        help=(
+            "Issue #6527 (experimental, default off): let the C++ backend's "
+            "Python fallback use route_auto (bidirectional A* for paths of "
+            ">= bidirectional_threshold cells, one-way retry sharing one "
+            "deadline) instead of the one-way route()."
+        ),
+    )
+    parser.add_argument(
         "--strict-layers",
         action="store_true",
         default=False,
@@ -21293,6 +21307,7 @@ def _run_main_impl(args, parser, argv) -> int:
         # to a HARD constraint for the ampacity-free case (nets with a declared
         # ``target_ampacity`` are hard-blocked regardless of this flag).
         strict_layers=getattr(args, "strict_layers", False),
+        fallback_bidirectional=getattr(args, "fallback_bidirectional", False),
         # Issue #4475 (epic #4465 Phase 3): stage the lattice engine's
         # same-net via-in-pad attach as a LAST RESORT (in-layer / free-space
         # via first) instead of the #4284 opportunistic tier-only gate.

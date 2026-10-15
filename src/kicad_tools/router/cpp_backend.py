@@ -4300,7 +4300,13 @@ class CppPathfinder:
         t0 = time.monotonic()
         # Python Router.route() does not accept start_layers/end_layers;
         # it derives layer information internally from pad attributes.
-        route = self._py_router.route(
+        # Issue #6527: opt-in bidirectional A* for the fallback (default off).
+        _fallback_route = (
+            self._py_router.route_auto
+            if getattr(self._py_router.rules, "fallback_bidirectional", False) is True
+            else self._py_router.route
+        )
+        route = _fallback_route(
             start,
             end,
             net_class=net_class,

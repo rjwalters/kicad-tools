@@ -4715,6 +4715,18 @@ def _add_route_parser(subparsers) -> None:
             "actually run and passed."
         ),
     )
+    # Issue #6527: mirror of the inner route_cmd.py flag (parser drift test).
+    route_parser.add_argument(
+        "--fallback-bidirectional",
+        action="store_true",
+        default=False,
+        help=(
+            "Issue #6527 (experimental, default off): let the C++ backend's "
+            "Python fallback use route_auto (bidirectional A* for paths of "
+            ">= bidirectional_threshold cells, one-way retry sharing one "
+            "deadline) instead of the one-way route()."
+        ),
+    )
     # Issue #4433: opt-in HARD per-net avoid_layers.  Mirror of the inner
     # route_cmd.py flag; both sites must stay in sync per
     # ``tests/test_cli_parser_drift.py``.

@@ -442,6 +442,11 @@ class DesignRules:
     # see :meth:`NetClassRouting.hard_avoided_layer_indices`.
     strict_layers: bool = False
 
+    # Issue #6527: when True, the C++ backend's Python fallback calls
+    # ``Router.route_auto`` (bidirectional A* for long paths, one-way retry
+    # sharing one deadline) instead of ``Router.route``.  Default off.
+    fallback_bidirectional: bool = False
+
     # Bidirectional A* configuration (Issue #964)
     # Enable parallel frontier exploration for large paths
     bidirectional_search: bool = True  # Enable bidirectional A* by default
