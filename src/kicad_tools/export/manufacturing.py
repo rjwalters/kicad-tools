@@ -770,6 +770,20 @@ class ManufacturingPackage:
             pass
 
         try:
+            if report_path.stat().st_size == 0:
+                # DRC was attempted but wrote nothing -- most likely kicad-cli
+                # was killed (e.g. OOM) before it produced a report. An empty
+                # file parses as 0 violations, so it must not read as clean.
+                logger.warning(
+                    f"DRC report {report_path.name} is empty (0 bytes); kicad-cli "
+                    "was likely killed before writing it. The safety floor cannot "
+                    "verify connectivity -- re-run DRC."
+                )
+                return
+        except OSError:
+            pass
+
+        try:
             from ..drc.report import DRCReport
             from ..drc.violation import ViolationType
 

@@ -2385,6 +2385,17 @@ def run_pcb_export_svg(
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
 
+        if result.returncode != 0:
+            # A killed kicad-cli (e.g. OOM, -9) can leave a truncated
+            # non-empty file behind; never report that as success.
+            from ..drc.geometric import describe_returncode
+
+            return KiCadCLIResult(
+                success=False,
+                stderr=f"SVG export failed: {describe_returncode(result.returncode)}"
+                + (f": {result.stderr.strip()}" if result.stderr and result.stderr.strip() else ""),
+                return_code=result.returncode,
+            )
         if output_path.exists() and output_path.stat().st_size > 0:
             return KiCadCLIResult(
                 success=True,
@@ -2662,6 +2673,17 @@ def run_pcb_render(
             env=_render_env(kicad_cli),
         )
 
+        if result.returncode != 0:
+            # A killed kicad-cli (e.g. OOM, -9) can leave a truncated
+            # non-empty file behind; never report that as success.
+            from ..drc.geometric import describe_returncode
+
+            return KiCadCLIResult(
+                success=False,
+                stderr=f"3D render failed: {describe_returncode(result.returncode)}"
+                + (f": {result.stderr.strip()}" if result.stderr and result.stderr.strip() else ""),
+                return_code=result.returncode,
+            )
         if output_path.exists() and output_path.stat().st_size > 0:
             return KiCadCLIResult(
                 success=True,

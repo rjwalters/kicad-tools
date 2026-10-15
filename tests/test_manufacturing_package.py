@@ -1827,6 +1827,30 @@ class TestDRCSafetyFloor:
         assert not result.success
         assert any("short" in e.lower() for e in result.errors), result.errors
 
+    def test_safety_floor_warns_on_empty_report(self, tmp_path, monkeypatch, caplog):
+        """A zero-byte report (killed kicad-cli) warns instead of reading as clean (#6742)."""
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        pcb = project_dir / "board.kicad_pcb"
+        pcb.write_text("(kicad_pcb)")
+        (project_dir / "board.kicad_sch").write_text("(kicad_sch)")
+        (project_dir / "drc_report.json").write_text("")
+
+        self._patch_assembly(monkeypatch)
+
+        config = ManufacturingConfig(
+            include_report=False,
+            include_project_zip=False,
+            preflight=PreflightConfig(skip_all=True),
+        )
+        pkg = ManufacturingPackage(pcb_path=pcb, manufacturer="jlcpcb", config=config)
+        with caplog.at_level(logging.WARNING):
+            pkg.export(tmp_path / "out")
+
+        assert any(
+            "is empty" in r.getMessage() and "killed" in r.getMessage() for r in caplog.records
+        )
+
     def test_skip_drc_floor_overrides_safety_floor(self, tmp_path, monkeypatch, caplog):
         """The explicit --skip-drc-floor escape hatch bypasses the floor -- loudly."""
         project_dir = tmp_path / "project"
