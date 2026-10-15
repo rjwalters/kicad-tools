@@ -1309,6 +1309,57 @@ def test_tap_chain_retry_pairs_selection() -> None:
     assert got == frozenset({"A"})
 
 
+def test_tap_chain_retry_pairs_accepts_constrained_no_path_refinements() -> None:
+    """Issue #6743: #6697 made the fat pair search report the honest
+    ``pair-no-path-keepout-constrained`` (#4605) on boards with plane-via
+    reservations, and the exact-literal gate silently stopped retrying --
+    board 06b fell from 3/4 to 0/4 coupled.  Every exhausted-search reason
+    qualifies; declines that are not an exhausted corridor search do not."""
+    from types import SimpleNamespace
+
+    from kicad_tools.router.core import _lattice_tap_chain_retry_pairs
+    from kicad_tools.router.lattice.pathfinder import EXHAUSTED_SEARCH_REASONS
+
+    def pc(key, name):
+        return SimpleNamespace(key=key, pair_name=name)
+
+    coupled = [
+        pc(("pair", 1, 2), "KO"),
+        pc(("pair", 3, 4), "LAYER"),
+        pc(("pair", 5, 6), "PLAIN"),
+        pc(("pair", 7, 8), "PARTNER"),
+        pc(("pair", 9, 10), "PARITY"),
+        pc(("pair", 11, 12), "EGRESS"),
+        pc(("pair", 13, 14), "KO_NOALT"),  # qualifying reason, no alternative
+    ]
+    outcomes = {
+        ("pair", 1, 2): "uncoupled-fallback:pair-no-path-keepout-constrained",
+        ("pair", 3, 4): "uncoupled-fallback:pair-no-path-layer-constrained",
+        ("pair", 5, 6): "uncoupled-fallback:pair-no-path",
+        ("pair", 7, 8): "uncoupled-fallback:pair-partner-pad",
+        ("pair", 9, 10): "uncoupled-fallback:pair-no-parity",
+        ("pair", 11, 12): "uncoupled-fallback:pair-no-egress-start",
+        ("pair", 13, 14): "uncoupled-fallback:pair-no-path-keepout-constrained",
+    }
+    available = {"KO", "LAYER", "PLAIN", "PARTNER", "PARITY", "EGRESS"}
+    got = _lattice_tap_chain_retry_pairs(coupled, outcomes, available)
+    assert got == frozenset({"KO", "LAYER", "PLAIN"})
+
+    # The gate is derived from the reasons the pathfinder actually returns, so
+    # a future rename/refinement there cannot drift out of it unnoticed.
+    assert {
+        "no-path",
+        "no-path-keepout-constrained",
+        "no-path-layer-constrained",
+    } == EXHAUSTED_SEARCH_REASONS
+    for reason in EXHAUSTED_SEARCH_REASONS:
+        one = [pc(("pair", 1, 2), "X")]
+        got = _lattice_tap_chain_retry_pairs(
+            one, {("pair", 1, 2): f"uncoupled-fallback:pair-{reason}"}, {"X"}
+        )
+        assert got == frozenset({"X"}), reason
+
+
 # ---------------------------------------------------------------------------
 # Issue #6550: the retry's keep rule scores every pair, and the discard path
 # restores the first negotiation exactly
