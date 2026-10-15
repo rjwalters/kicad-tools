@@ -256,12 +256,20 @@ class DiffPairLengthTracker:
         router via with a partial logical pair still measures the full
         thickness; only micro vias (and duck-typed vias without
         ``drilled_layers``) measure a partial span.
+
+        Issue #6678: an imported KiCad ``blind`` / ``buried`` via
+        (``Via.span_type``) is written back with its keyword, so KiCad drills
+        it only through its declared span -- it is never promoted.  Like a
+        micro via it measures that span even when ``blind_buried_supported``
+        is ``False``.
         """
         # Issue #4007: a standard (non-micro) via on a board that does not
         # support blind/buried vias drills the full stack -- KiCad promotes
         # it to a through-via on serialization.  Measure that shipped
-        # geometry so the tuner and the checker agree.
-        if not blind_buried_supported and not getattr(via, "is_micro", False):
+        # geometry so the tuner and the checker agree.  Issue #6678: a via
+        # that carries a blind/buried keyword keeps its span.
+        keeps_span = getattr(via, "is_micro", False) or getattr(via, "span_type", None) is not None
+        if not blind_buried_supported and not keeps_span:
             return board_thickness_mm
 
         # Issue #6502: the drilled span -- a non-micro router via is a through
@@ -394,7 +402,8 @@ class DiffPairLengthTracker:
                 standard (non-micro) via is measured as a full through-via
                 because the board's stackup does not support blind/buried
                 drilling -- KiCad promotes every such via to F.Cu->B.Cu on
-                serialization.  Micro vias (``via_type == "micro"``) keep
+                serialization.  Micro, blind and buried vias (``via_type``
+                ``"micro"`` / ``"blind"`` / ``"buried"``, Issue #6678) keep
                 their actual partial span.  Defaults to ``True``
                 (byte-for-byte legacy partial-span behavior).
 
@@ -444,8 +453,11 @@ class DiffPairLengthTracker:
             # to a through-via on serialization).  Micro vias keep their
             # actual partial span.  Mirrors the router-Route path in
             # :meth:`_via_length`.
-            is_micro = getattr(via, "via_type", None) == "micro"
-            if not blind_buried_supported and not is_micro:
+            # Issue #6678: a ``blind`` / ``buried`` keyword is drilled only
+            # through its declared span, exactly like ``micro`` -- KiCad
+            # never promotes a via that carries a type keyword.
+            keeps_span = getattr(via, "via_type", None) in ("micro", "blind", "buried")
+            if not blind_buried_supported and not keeps_span:
                 total += board_thickness_mm
                 continue
             try:
