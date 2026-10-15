@@ -171,9 +171,6 @@ def derive_group_skew_data(
     # primitives.  See module docstring.
     from kicad_tools.router.match_group_detection import detect_match_groups
     from kicad_tools.router.match_group_length import MatchGroupTracker
-    from kicad_tools.validate.rules.match_group_length_skew import (
-        DEFAULT_MATCH_GROUP_TOLERANCE_MM,
-    )
 
     # Build the {net_id: net_name} map the detector expects.
     net_names: dict[int, str] = {}
@@ -309,18 +306,7 @@ def derive_group_skew_data(
         # detect_match_groups).  Issue #3916: pair-only groups have empty
         # ``net_ids``, so fall back to the P-leg of the first pair for the
         # net-class anchor (pairs are sorted, so this is deterministic).
-        if grp.net_ids:
-            first_net_id = grp.net_ids[0]
-        else:
-            first_net_id = grp.pair_ids[0][0]
-        first_net_name = net_names.get(first_net_id)
-        nc = net_class_map.get(first_net_name) if first_net_name else None
-        if nc is not None and hasattr(nc, "effective_length_match_tolerance"):
-            threshold_map[grp.name] = nc.effective_length_match_tolerance(
-                default=DEFAULT_MATCH_GROUP_TOLERANCE_MM,
-            )
-        else:
-            threshold_map[grp.name] = DEFAULT_MATCH_GROUP_TOLERANCE_MM
+        threshold_map[grp.name] = resolve_group_tolerance_mm(grp, net_names, net_class_map)
 
         logger.info(
             "[match-group-skew] %s skew=%.3f mm (members=%d, tolerance=%.3f)",
@@ -336,6 +322,40 @@ def derive_group_skew_data(
     group_skew_data = dict(sorted(group_skew_data.items(), key=lambda kv: kv[0]))
 
     return group_skew_data, detected, threshold_map
+
+
+def resolve_group_tolerance_mm(
+    group: MatchGroup,
+    net_names: dict[int, str],
+    net_class_map: dict[str, NetClassRouting] | None,
+) -> float:
+    """Return the skew tolerance ``kct check`` enforces for ``group`` (mm).
+
+    The single resolution shared by the checker
+    (:func:`derive_group_skew_data`) and the router's auto-engaged
+    match-group tuner (Issue #6674), so both tune and check against one
+    number.  The class anchor is the first single-ended member by net id,
+    or the P leg of the first pair for a pair-only group (Issue #3916);
+    its :meth:`NetClassRouting.effective_length_match_tolerance` wins,
+    falling back to ``DEFAULT_MATCH_GROUP_TOLERANCE_MM``.
+    """
+    from kicad_tools.validate.rules.match_group_length_skew import (
+        DEFAULT_MATCH_GROUP_TOLERANCE_MM,
+    )
+
+    if group.net_ids:
+        first_net_id: int | None = group.net_ids[0]
+    elif group.pair_ids:
+        first_net_id = group.pair_ids[0][0]
+    else:
+        first_net_id = None
+    first_net_name = net_names.get(first_net_id) if first_net_id is not None else None
+    nc = (net_class_map or {}).get(first_net_name) if first_net_name else None
+    if nc is not None and hasattr(nc, "effective_length_match_tolerance"):
+        return nc.effective_length_match_tolerance(
+            default=DEFAULT_MATCH_GROUP_TOLERANCE_MM,
+        )
+    return DEFAULT_MATCH_GROUP_TOLERANCE_MM
 
 
 def _net_has_geometry(pcb: PCB, net_id: int) -> bool:

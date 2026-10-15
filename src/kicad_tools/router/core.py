@@ -19704,6 +19704,7 @@ class Autorouter:
         self,
         detected_groups: list[MatchGroup],
         verbose: bool = True,
+        engage: str = "length_critical",
     ) -> dict[str, dict[int, tuple[Route, Any]]]:
         """Apply N-trace serpentine tuning to detected match groups.
 
@@ -19732,6 +19733,18 @@ class Autorouter:
                 :func:`tune_match_group_v2` and returned with
                 ``reason="not_length_critical"``.
             verbose: Whether to print progress information.
+            engage: Engagement policy.  ``"length_critical"`` (default,
+                the ``--length-match-groups`` behaviour) gates on the
+                class's ``length_critical`` flag and tunes to
+                ``effective_length_match_tolerance(0.5)``.
+                ``"checker_limit"`` (Issue #6674, the lattice auto-engaged
+                path) engages on the limit ``kct check`` enforces: the
+                tolerance comes from
+                :func:`~kicad_tools.validate.match_group_skew.resolve_group_tolerance_mm`
+                and a group is tuned only when its checker-measured
+                spread (single-ended lengths plus pair averages, vias
+                included) exceeds that tolerance.  Other groups are not
+                touched and map to an empty result dict.
 
         Returns:
             ``{group_name: {net_id: (route, result)}}`` for each group
@@ -19856,6 +19869,9 @@ class Autorouter:
             pads_by_net.setdefault(pad.net, []).append(pad)
         pad_clearance_mm = self.rules.trace_clearance
 
+        if engage not in ("length_critical", "checker_limit"):
+            raise ValueError(f"unknown match-group engage policy: {engage!r}")
+
         for group in detected_groups:
             # Default per-class info.  When a net class is not configured
             # for this group's reference net (the common synthetic-test
@@ -19884,6 +19900,41 @@ class Autorouter:
             # definition the TIGHTER floor, so clamp it to the
             # intra-group floor.
             intra_pair_clearance_mm = min(intra_pair_clearance_mm, intra_group_clearance_mm)
+
+            if engage == "checker_limit":
+                # Issue #6674: engage on the number ``kct check`` fails the
+                # board on.  ``match_group_length_skew`` is error severity for
+                # every declared group regardless of ``length_critical``, so
+                # the class flag does not gate here; the tolerance comes from
+                # the checker's own resolver.
+                from kicad_tools.validate.match_group_skew import (
+                    resolve_group_tolerance_mm,
+                )
+
+                tolerance_mm = resolve_group_tolerance_mm(
+                    group, self.net_names, getattr(self, "net_class_map", None)
+                )
+                length_critical = True
+                spread_mm = self._checker_group_spread_mm(
+                    group, routes_by_net, board_thickness_mm, num_layers
+                )
+                if spread_mm is None or spread_mm <= tolerance_mm:
+                    results[group.name] = {}
+                    if verbose:
+                        if spread_mm is None:
+                            print(f"  {group.name}: not tuned (a member is unrouted)")
+                        else:
+                            print(
+                                f"  {group.name}: within limit "
+                                f"(spread {spread_mm:.3f}mm <= {tolerance_mm:.3f}mm); "
+                                "not tuned"
+                            )
+                    continue
+                if verbose:
+                    print(
+                        f"  {group.name}: spread {spread_mm:.3f}mm > limit "
+                        f"{tolerance_mm:.3f}mm; tuning"
+                    )
 
             # Phase 2F (#2701) requires intra_pair_clearance_mm
             # unconditionally for groups whose pair_ids is non-empty.  The
@@ -20005,6 +20056,50 @@ class Autorouter:
             blind_buried_supported=blind_buried_supported,
         )
         return results
+
+    @staticmethod
+    def _checker_group_spread_mm(
+        group: MatchGroup,
+        routes_by_net: dict[int, Route],
+        board_thickness_mm: float | None,
+        num_copper_layers: int,
+    ) -> float | None:
+        """Return ``group``'s skew measured the way ``kct check`` measures it.
+
+        Mirrors :func:`~kicad_tools.validate.match_group_skew.derive_group_skew_data`
+        (Issue #6674): single-ended members contribute their length, each
+        diff-pair member contributes ``(L_P + L_N) / 2``, and every standard
+        via counts as a full through-via (``blind_buried_supported=False``,
+        the checker's default).  Returns ``None`` when a member is unrouted
+        or fewer than two lanes exist -- the checker omits such groups.
+        """
+        from .match_group_length import MatchGroupTracker
+
+        def _length(net_id: int) -> float | None:
+            route = routes_by_net.get(net_id)
+            if route is None or (not route.segments and not route.vias):
+                return None
+            return MatchGroupTracker._measure_route_total(
+                route,
+                board_thickness_mm,
+                num_copper_layers,
+                blind_buried_supported=False,
+            )
+
+        lanes: list[float] = []
+        for net_id in group.net_ids:
+            length = _length(net_id)
+            if length is None:
+                return None
+            lanes.append(length)
+        for p_id, n_id in group.pair_ids:
+            l_p, l_n = _length(p_id), _length(n_id)
+            if l_p is None or l_n is None:
+                return None
+            lanes.append((l_p + l_n) / 2.0)
+        if len(lanes) < 2:
+            return None
+        return max(lanes) - min(lanes)
 
     def _resolve_net_class_for_group(self, group: MatchGroup) -> Any | None:
         """Best-effort lookup of the NetClassRouting for a match group.

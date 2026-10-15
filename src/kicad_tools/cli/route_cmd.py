@@ -1913,6 +1913,28 @@ def _resolve_route_engine(args: argparse.Namespace) -> str:
     return getattr(args, "route_engine", "grid") or "grid"
 
 
+def _match_group_tuning_engage(args: argparse.Namespace, router: Any) -> str | None:
+    """Return the match-group tuning engage policy for this run, or ``None``.
+
+    Issue #6674:
+
+    * ``--length-match-groups`` -> ``"length_critical"`` on every engine
+      (the legacy opt-in behaviour, unchanged).
+    * no flag, ``--route-engine lattice``, and at least one loaded net class
+      declares ``length_match_group`` -> ``"checker_limit"``: tune the
+      groups ``kct check`` would fail, to the checker's own tolerance.
+    * otherwise (including every grid run without the flag) -> ``None``.
+    """
+    if getattr(args, "length_match_groups", False):
+        return "length_critical"
+    if _resolve_route_engine(args) != "lattice":
+        return None
+    net_class_map = getattr(router, "net_class_map", None) or {}
+    if any(nc.effective_length_match_group() for nc in net_class_map.values()):
+        return "checker_limit"
+    return None
+
+
 def _run_consolidation_pass(
     router: Any,
     args: argparse.Namespace,
@@ -22662,11 +22684,25 @@ def _run_main_impl(args, parser, argv) -> int:
     # AFTER --length-match-diffpairs so the within-pair skew invariant is
     # preserved before group tuning perturbs lane lengths.  Graceful
     # short-circuit when no groups are declared / detected.
-    if getattr(args, "length_match_groups", False) and router.routes:
+    #
+    # Issue #6674: on the lattice engine the tuner also runs WITHOUT the
+    # flag, for declared groups whose spread exceeds the limit ``kct check``
+    # enforces (``engage="checker_limit"``).  Grid is not auto-engaged
+    # (frozen for pair-adjacent features until #6448); the explicit flag
+    # keeps its legacy ``length_critical`` gating on every engine.
+    _mg_engage = _match_group_tuning_engage(args, router)
+    _mg_auto = _mg_engage == "checker_limit"
+    if _mg_engage is not None and router.routes:
         from kicad_tools.router.match_group_detection import detect_match_groups
 
         if not quiet:
-            print("\n--- Length-Match Groups (Epic #2661 Phase 3H) ---")
+            if _mg_auto:
+                print(
+                    "\n--- Length-Match Groups (auto: lattice, kct check "
+                    "match_group_length_skew limit; Issue #6674) ---"
+                )
+            else:
+                print("\n--- Length-Match Groups (Epic #2661 Phase 3H) ---")
         # Issue #3440: --length-match-groups silently no-ops without
         # length_match_group declarations (detection consults
         # NetClassRouting declarations exclusively when suffix inference
@@ -22722,6 +22758,7 @@ def _run_main_impl(args, parser, argv) -> int:
             tune_results_groups = router.apply_match_group_tuning(
                 detected_groups=detected_groups,
                 verbose=not quiet,
+                engage=_mg_engage,
             )
             _enforce_connectivity_invariant_or_exit(
                 router,
