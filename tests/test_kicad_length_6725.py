@@ -487,3 +487,63 @@ class TestKicadLineMerging:
         assert model.route_length(route) == pytest.approx(
             DiffPairLengthTracker.measure_net_from_pcb(pcb, 1), abs=1e-9
         )
+
+
+# ---------------------------------------------------------------------------
+# Further kicad-cli probes (Docker kicad/kicad:10.0, 10.0.6; 4-layer default
+# stackup, so a connected F.Cu-B.Cu via adds 1.58 mm).  Expected values are
+# kicad-cli's reported net length for the same geometry.
+# ---------------------------------------------------------------------------
+
+_F, _B = "F.Cu", "B.Cu"
+_VIA = LVia(10.0, 0.0, 0.6, (_F, _B))
+
+
+def _probe(segs, pads=(), vias=(_VIA,)):
+    return net_length(
+        [LSeg(*s) for s in segs], list(vias), list(pads), KicadStackup.default(1.6, 4)
+    )
+
+
+class TestKicadCliProbes:
+    def test_smd_pad_overlapping_via_copper_connects_its_layer(self):
+        # B.Cu pad does not contain the via centre, only overlaps its copper.
+        pad = LPad(10.7, 0.0, 1.0, 1.0, layers=frozenset({_B}))
+        assert _probe([(0, 0, 10, 0, _F)], [pad]) == pytest.approx(11.58, abs=1e-4)
+
+    def test_through_hole_pad_does_not_connect_a_via(self):
+        pad = LPad(5.0, 0.0, 1.0, 1.0, shape="circle", layers=None)
+        via = LVia(5.0, 0.0, 0.6, (_F, _B))
+        assert _probe([(0, 0, 5, 0, _F)], [pad], [via]) == pytest.approx(5.0, abs=1e-4)
+
+    def test_track_passing_through_via_does_not_connect_it(self):
+        segs = [(0, 0, 10, 0, _F), (9, 0.1, 12, 0.1, _B)]
+        assert _probe(segs) == pytest.approx(13.0, abs=1e-4)
+
+    @pytest.mark.parametrize(
+        ("reverse", "expected"),
+        [(False, 9.5972), (True, 9.7564)],
+    )
+    def test_run_with_both_ends_in_one_via_trims_its_first_end(self, reverse, expected):
+        run = [(10.1, 0, 10.1, 2, _F), (10.1, 2, 10.2, 2, _F), (10.2, 2, 10.2, 0.1, _F)]
+        if reverse:
+            run = [(x2, y2, x1, y1, layer) for x1, y1, x2, y2, layer in run]
+        assert _probe([*run, (10, 0, 14, 0, _B)]) == pytest.approx(expected, abs=1e-4)
+
+    @pytest.mark.parametrize(("f_first", "expected"), [(True, 19.0871), (False, 19.3635)])
+    def test_four_end_junction_follows_input_order(self, f_first, expected):
+        # F.Cu wiggles to the via centre through (10.2, 0.2); a B.Cu track
+        # passes through the same point.  The run grown first stops there.
+        f_run = [(0, 0, 9.8, 0, _F), (9.8, 0, 10.2, 0.2, _F), (10.2, 0.2, 10, 0, _F)]
+        b_runs = [(10, 0, 14, 0, _B), (10.5, 0.5, 10.2, 0.2, _B), (10.2, 0.2, 10.2, 3, _B)]
+        segs = f_run + b_runs if f_first else b_runs + f_run
+        assert _probe(segs) == pytest.approx(expected, abs=1e-4)
+
+    def test_three_end_junction_seeded_by_first_segment(self):
+        # Branch a (two segments) reaches junction J inside the via first, so
+        # it stops there and branches b and c join into one pass-through run.
+        a1, a2 = (0, 0, 5, 0.5, _F), (5, 0.5, 10.2, 0, _F)
+        b, c = (10.2, 0, 10.2, 5, _F), (10.2, 0, 15, 0, _F)
+        stub = (10, 0, 10, -5, _B)
+        assert _probe([a1, b, c, a2, stub]) == pytest.approx(26.4305, abs=1e-4)
+        assert _probe([b, a1, c, a2, stub]) == pytest.approx(26.7053, abs=1e-4)

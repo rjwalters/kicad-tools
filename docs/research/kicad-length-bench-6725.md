@@ -66,7 +66,7 @@ Lengths and skews are in mm. The d columns give kct minus kicad-cli, in µm.
   disagreements.
 - The 07rf match-group single-ended members (DQ0..DQ7, DM0, A0..A7) were checked
   the same way and agree within 0.7 µm. The A-bus residual is consistent
-  with KiCad polygonising roundrect pad corners (`ERROR_INSIDE`).
+  with KiCad approximating roundrect pad corners as polygons.
 
 ## What the bench found (fixed on this branch)
 
@@ -79,29 +79,39 @@ The first run used the #6729 model on `main`. It disagreed with kicad-cli on 5 o
 | 06rf USB2_D+ | -104 µm | track passes through a mid-net pad centre |
 | 06rf PCIE_TX- | -566 µm | lines end inside a via, off-centre (4-way junction) |
 
-The bench exposed three rules that the model had wrong. All three follow kicad-cli 10's
-`pcbnew/length_delay_calculation` (behaviour, not code):
+The bench exposed three rules that the model had wrong. They were pinned down
+with black-box kicad-cli probes: small hand-written boards run through Docker
+`kicad/kicad:10.0` DRC, reading each net's reported length. No KiCad source was
+consulted, and `router/kicad_length.py` is written from these observations.
 
-1. **kicad-cli merges segments into lines before clipping.** Two lines join only
-   where exactly two line endpoints meet on the same layer. A track that runs
-   *through* a pad centre is one line there and is not clipped at that pad.
-   Only a line *ending* exactly at a pad centre is clipped. A junction of three
-   or more endpoints splits the net into separate lines.
-2. **Via clipping does not need the centre.** A line with an end anywhere
-   inside the via copper is clipped at the via boundary and replaced by a
-   straight line to the via centre. One end is clipped per via, and a line
-   that never leaves the copper is kept.
-3. **A stub via has zero height.** A via whose tracks (or a pad the via sits
-   in) touch fewer than two layers gets zero height. This was confirmed with
-   kicad-cli 10.0.6 on a fixture: 5.0000 mm for a 5 mm track ending in a via.
-   It does not fall back to the declared span. The Route form keeps the declared
-   span for such a via, because a router `Route` can be one fragment of a net.
+1. **Segments are grouped into runs before trimming.** A run is an unbranched
+   chain on one layer. Two segment ends continue a run only when they are the
+   only two track ends at that point, counting every layer, and share a layer.
+   A track that runs *through* a pad centre is one run there and is not trimmed
+   at that pad. Only a run *ending* exactly at a pad centre is trimmed. Where
+   three or more ends meet, the result depends on file order: the run grown
+   first stops at the junction, and the remaining ends there can still pair
+   up into one run.
+2. **Via trimming does not need the centre.** A run with an end anywhere
+   inside the via copper is clipped at the via boundary and continued straight
+   to the via centre. A run passing through a via is not trimmed. A via trims
+   at most one end of a run (the run's first end when both lie in it), and a
+   run that never leaves the copper is kept.
+3. **A stub via has zero height.** The via span runs between the layers the
+   via is connected on. A layer counts when a track ends inside the via copper
+   on it, or when a surface pad on it overlaps the via copper. A track that
+   only passes through the via counts for nothing, and so does a through-hole
+   pad. A via connected on fewer than two layers gets zero height: 5.0000 mm
+   for a 5 mm track ending in a via. It does not fall back to the declared
+   span. The Route form keeps the declared span for such a via, because a
+   router `Route` can be one fragment of a net.
 
 ## Known limitation
 
-At a junction of three or more endpoints, kicad-cli's merge result depends on
-item order. kicad-cli uses pointer order, in practice file load order. The PCB
-form uses file order and matches it. The tuners' Route form uses router order,
-so on such junctions it can drift by a track stub from the written board's
-number. This happened on 06rf `PCIE_TX-`, where the tuner read 1.289 mm against
-`kct check`'s 1.006 mm. Follow-up: #6778.
+At a junction of three or more endpoints, kicad-cli's result depends on item
+order. In every probe that order was file load order. The PCB form uses file
+order, and it matches every bench net and all but two of 57 probes. The two
+misses are runs that loop back through a junction inside a via. The tuners'
+Route form uses router order, so at such junctions it can drift from the
+written board's number by one track stub. This happened on 06rf `PCIE_TX-`,
+where the tuner read 1.289 mm and `kct check` read 1.006 mm. Follow-up: #6778.
