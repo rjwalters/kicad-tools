@@ -1395,6 +1395,138 @@ def test_authored_pair_floor_rule_parity() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Issue #6728: the native authored gate measures each roundrect's file ratio
+# ---------------------------------------------------------------------------
+#
+# ``_authored_scene`` never gives a roundrect a ``roundrect_rratio``, so
+# ``pad_kernel_params`` degrades every one to ``rect`` and the ratio argument
+# of ``set_pad_authored`` (#6718) is never exercised with a real value.  This
+# deterministic scene does: one 2 x 2 mm roundrect per file ratio (plus the
+# clamp above 0.5 and the ``None`` rectangle fallback), each probed at all
+# four corners along the diagonal.  A corner of radius R pulls the copper back
+# by R * (sqrt(2) - 1) along the diagonal, so a probe ``d`` mm from the sharp
+# corner sits ``d + R * (sqrt(2) - 1)`` from the rounded one -- the probe
+# distances below straddle the floor differently for every ratio.  A native
+# side that ignores, drops (0.0) or hardcodes (0.25) the ratio flips at least
+# one verdict and breaks parity.
+
+# (roundrect_rratio, effective ratio after pad_kernel_params); None -> rect.
+_RRATIO_CASES = ((0.0, 0.0), (0.1, 0.1), (0.25, 0.25), (0.5, 0.5), (0.7, 0.5), (None, 0.0))
+_RRATIO_PAD = 2.0
+_RRATIO_FLOOR = 0.3
+# Gaps to the *sharp* corner: each lands >= 0.03 mm from the floor for every
+# ratio above, far outside the float32 verdict band.
+_RRATIO_DISTANCES = (0.05, 0.15, 0.25)
+
+
+def _rratio_scene():
+    """Roundrect pads (net 1, floor 0.3) and corner probes (net 2, no floor)."""
+    from kicad_tools.router.grid import RoutingGrid
+    from kicad_tools.router.layers import Layer
+    from kicad_tools.router.primitives import Pad, Segment, Via
+    from kicad_tools.router.rules import DesignRules
+
+    layers = (Layer.F_CU, Layer.B_CU)
+    grid = RoutingGrid(
+        6 * len(_RRATIO_CASES),
+        8,
+        DesignRules(
+            trace_clearance=0.1, via_clearance=0.1, net_clearance_floors={1: _RRATIO_FLOOR}
+        ),
+    )
+    half = _RRATIO_PAD / 2
+    root2 = math.sqrt(2.0)
+    probes = []  # (probe, rratio, expected_clear, label)
+    for i, (rratio, effective) in enumerate(_RRATIO_CASES):
+        cx, cy = 3.0 + 6.0 * i, 4.0
+        grid.add_pad(
+            Pad(
+                cx,
+                cy,
+                _RRATIO_PAD,
+                _RRATIO_PAD,
+                1,
+                "N1",
+                layer=Layer.F_CU,
+                ref=f"U{i}",
+                pin="1",
+                shape="roundrect",
+                roundrect_rratio=rratio,
+            )
+        )
+        pullback = effective * _RRATIO_PAD * (root2 - 1.0)
+        for sx, sy in ((1, 1), (-1, 1), (-1, -1), (1, -1)):
+            ux, uy = sx / root2, sy / root2  # outward diagonal
+            kx, ky = cx + sx * half, cy + sy * half  # the sharp corner
+            for d in _RRATIO_DISTANCES:
+                expected = d + pullback >= _RRATIO_FLOOR
+                label = f"rratio={rratio} corner=({sx},{sy}) d={d}"
+                # A 0.6 mm via whose rim is d from the sharp corner.
+                r = 0.3 + d
+                probes.append(
+                    (
+                        Via(kx + ux * r, ky + uy * r, 0.3, 0.6, layers, 2),
+                        rratio,
+                        expected,
+                        f"via {label}",
+                    )
+                )
+                # A short 0.2 mm trace across the diagonal, edge d from the corner.
+                r = 0.1 + d
+                px, py = kx + ux * r, ky + uy * r
+                tx, ty = -uy * 0.1, ux * 0.1
+                probes.append(
+                    (
+                        Segment(px - tx, py - ty, px + tx, py + ty, 0.2, Layer.F_CU, 2),
+                        rratio,
+                        expected,
+                        f"segment {label}",
+                    )
+                )
+    return grid, probes
+
+
+@requires_cpp
+def test_authored_gate_roundrect_rratio_parity() -> None:
+    """Both authored gates measure each roundrect with its file ratio (#6728)."""
+    from kicad_tools.router.cpp_backend import CppGrid
+    from kicad_tools.router.primitives import Via
+
+    grid, probes = _rratio_scene()
+    impl = CppGrid.from_routing_grid(grid)._impl
+    assert impl.authored_active()
+    verdicts: dict[float | None, set[bool]] = {}
+    for probe, rratio, expected, label in probes:
+        assert not _authored_on_boundary(grid, probe), f"{label}: inside the verdict band"
+        py_clear = grid.authored_violation(probe, probe.net) is None
+        if isinstance(probe, Via):
+            cpp_clear = impl.authored_via_clear(probe.x, probe.y, probe.diameter, probe.net)
+        else:
+            cpp_clear = impl.authored_segment_clear(
+                probe.x1,
+                probe.y1,
+                probe.x2,
+                probe.y2,
+                probe.width,
+                grid.layer_to_index(probe.layer.value),
+                probe.net,
+            )
+        assert py_clear == expected, f"{label}: Python gate says clear={py_clear}"
+        assert cpp_clear == py_clear, f"{label}: native clear={cpp_clear}, Python {py_clear}"
+        verdicts.setdefault(rratio, set()).add(py_clear)
+    # Non-vacuous: every ratio's probes split, except the extremes, which the
+    # distances pin to all-reject (sharp) and all-accept (fully rounded).
+    assert verdicts == {
+        0.0: {False},
+        0.1: {False, True},
+        0.25: {False, True},
+        0.5: {True},
+        0.7: {True},
+        None: {False},
+    }
+
+
+# ---------------------------------------------------------------------------
 # Issue #6272: the trace/via floor is independent of insertion order
 # ---------------------------------------------------------------------------
 #
