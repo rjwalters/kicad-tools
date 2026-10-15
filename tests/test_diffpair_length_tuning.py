@@ -413,7 +413,14 @@ class TestPostInsertionRollback:
             net_name="VCC",
             segments=[Segment(0.0, -0.5, 10.0, -0.5, 0.2, Layer.F_CU, net=3, net_name="VCC")],
         )
-        routes = {1: p, 2: n, 3: neighbor}
+        # Issue #6788: the tuner now also tries the reverse side, so block
+        # the +y side (toward the partner) the same way.
+        neighbor_inner = Route(
+            net=4,
+            net_name="VCC2",
+            segments=[Segment(0.0, 0.5, 10.0, 0.5, 0.2, Layer.F_CU, net=4, net_name="VCC2")],
+        )
+        routes = {1: p, 2: n, 3: neighbor, 4: neighbor_inner}
         original_p = p
         original_p_segments = p.segments
 
@@ -455,9 +462,11 @@ class TestSuccessfulTuning:
         p = _straight_route(1, "USB_D+", 20.0)
         n = _straight_route(2, "USB_D-", 20.0 + skew, y=0.5)
         neighbor = _straight_route(3, "NEIGHBOR", 20.0, y=neighbor_y)
+        # Mirror neighbor on the reverse side (the tuner tries both, #6788).
+        mirror = _straight_route(4, "MIRROR", 20.0, y=-neighbor_y)
         p_out, n_out, result = tune_diff_pair_skew(
             _make_pair(),
-            {1: p, 2: n, 3: neighbor},
+            {1: p, 2: n, 3: neighbor, 4: mirror},
             tolerance_mm=0.05,
             intra_pair_clearance_mm=0.1,
         )
@@ -915,3 +924,70 @@ class TestTunerSlackThreading:
         # error and must have attempted at least one insertion.
         assert result.attempts >= 1
         assert result.reason in {"tuned", "exceeded_max_inserts", "no_suitable_segment"}
+
+
+# =============================================================================
+# Issue #6788: exact-fit sizing, overshoot handling, placement search
+# =============================================================================
+
+
+class TestExactFitAndPlacementSearch:
+    def test_multi_loop_deficit_closes_in_one_insert_without_overshoot(self):
+        """5.255 mm skew used to add 3 x 2 mm loops and overshoot by 0.745."""
+        from kicad_tools.router.length import LengthTracker
+
+        p = _straight_route(1, "USB_D+", 20.0, y=0.0)
+        n = _straight_route(2, "USB_D-", 25.255, y=5.0)
+        p_out, n_out, result = tune_diff_pair_skew(
+            _make_pair(), {1: p, 2: n}, tolerance_mm=0.5, intra_pair_clearance_mm=0.1
+        )
+        assert result.success is True
+        assert result.reason == "tuned"
+        assert result.inserts_applied == 1
+        assert n_out is n
+        shorter_len = LengthTracker.calculate_route_length(p_out)
+        assert 0.0 <= 25.255 - shorter_len <= 0.5
+
+    def test_noop_serpentine_is_not_counted_as_an_insert(self):
+        """An option adding 0 mm is skipped; a later real option is the insert."""
+        from kicad_tools.router.optimizer.serpentine import SerpentineResult
+
+        p = _straight_route(1, "USB_D+", 20.0, y=0.0)
+        n = _straight_route(2, "USB_D-", 25.0, y=5.0)
+
+        def noop(self, route, _target):
+            return route, SerpentineResult(success=True, new_segments=route.segments.copy())
+
+        with patch.object(SerpentineGenerator, "add_serpentine", noop):
+            _p, _n, result = tune_diff_pair_skew(
+                _make_pair(), {1: p, 2: n}, tolerance_mm=0.5, intra_pair_clearance_mm=0.1
+            )
+        assert result.success is True
+        assert result.inserts_applied == 1
+
+    def test_blocked_start_end_finds_clear_middle(self):
+        """A foreign track hugging the host's start end must not fail the pair."""
+        p = _straight_route(1, "USB_D+", 30.0, y=0.0)
+        n = _straight_route(2, "USB_D-", 33.0, y=5.0)
+        # Foreign track on the hinted (-y) side only over the first 8 mm.
+        blocker = Route(
+            net=3,
+            net_name="BLOCK",
+            segments=[Segment(0.0, -0.8, 8.0, -0.8, 0.2, Layer.F_CU, net=3, net_name="BLOCK")],
+        )
+        _p, _n, result = tune_diff_pair_skew(
+            _make_pair(),
+            {1: p, 2: n, 3: blocker},
+            tolerance_mm=0.5,
+            intra_pair_clearance_mm=0.1,
+        )
+        assert result.success is True
+        assert result.reason == "tuned"
+
+    def test_exact_fit_matches_legacy_single_loop(self):
+        from kicad_tools.router.diffpair_length_tuning import exact_fit_amplitude
+
+        assert exact_fit_amplitude(1.5, 1.0) == (1, 0.75)
+        assert exact_fit_amplitude(5.0, 1.0)[0] == 3
+        loops, amp = exact_fit_amplitude(5.0, 1.0)
+        assert 2 * loops * amp == pytest.approx(5.0, abs=1e-6)
