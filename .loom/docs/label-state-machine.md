@@ -717,7 +717,7 @@ above. Nothing about the guard changes for any other blocking label.
 
 ## Label registry: the source of truth (#10013)
 
-> **Step dispatch (accepted design, #11894; not yet implemented).** Under `autonomous.workFinder.stepDispatch: on`, `stale_after_minutes` (live since #11898, see below) is the claim liveness of the five claim labels; a `queued` item state marks a PR in GitHub's merge queue, never drawn for a merge step; and a dead step's claim is restored to its own role's ready stage. See [`docs/design/work-finder-step-dispatch.md`](https://github.com/rjwalters/loom/blob/main/docs/design/work-finder-step-dispatch.md) §12.
+> **Step dispatch (#11894, live since #11909).** `stale_after_minutes` (live since #11898, see below) is the claim liveness of the five claim labels; a `queued` item state marks a PR in GitHub's merge queue, never drawn for a merge step; and a dead step's claim is restored to its own role's ready stage. See [`docs/design/work-finder-step-dispatch.md`](https://github.com/rjwalters/loom/blob/main/docs/design/work-finder-step-dispatch.md) §12.
 
 `defaults/labels.json` is the single source of truth for label semantics: each
 label's name, description, color, `kind`, `applied_by`/`removed_by`, and the
@@ -743,8 +743,10 @@ queries `operator_gate`; `label_literal_guard.rs` pins the rest). Changes go
 in the registry.
 The `propagate` table (#10012) was removed (#11510) after #11104 removed
 the star-liveness pass that read it. `lifecycle` is inert.
-`stale_after_minutes` is live for the five claim labels (#11898): curating 30,
-evaluating 15, building 15, reviewing 30, treating 60 minutes. It is the
+`stale_after_minutes` is live for the five claim labels (#11898): curating 45,
+evaluating 45, building 15, reviewing 45, treating 60 minutes (curating,
+evaluating and reviewing were raised by #11909 past the 30-minute step
+timeout, so a running step's claim never reads as stale). It is the
 default claim-liveness window (`loom-daemon/src/claim_liveness.rs`); the env
 overrides (`LOOM_STALE_<NAME>_MINUTES`) still win, and `loom:building`'s value
 is the lease TTL, because Builder liveness is the renewed lease. A dead step's

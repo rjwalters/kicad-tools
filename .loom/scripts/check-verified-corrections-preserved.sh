@@ -84,20 +84,21 @@ normalize_paragraphs() {
 
 OLD_SECTION="$(extract_section "$OLD_FILE")"
 
-if [[ -z "${OLD_SECTION// /}" ]]; then
+# "No non-space char" == the old -z "${X// /}", minus bash 3.2's ${//} cost (#12044).
+if [[ "$OLD_SECTION" != *[!\ ]* ]]; then
   echo "check-verified-corrections-preserved: OK — old body has no '## Verified corrections' section (nothing to preserve)."
   exit 0
 fi
 
 NEW_SECTION="$(extract_section "$NEW_FILE")"
 
-if [[ -z "${NEW_SECTION// /}" ]]; then
+if [[ "$NEW_SECTION" != *[!\ ]* ]]; then
   echo "check-verified-corrections-preserved: FAIL — old body has a '## Verified corrections' section but the new body has none at all. A re-curation pass may append to this section but must never remove it." >&2
   exit 1
 fi
 
 OLD_PARAS="$(printf '%s' "$OLD_SECTION" | normalize_paragraphs)"
-NEW_PARAS="$(printf '%s' "$NEW_SECTION" | normalize_paragraphs)"
+NEW_LINES="$(printf '%s' "$NEW_SECTION" | normalize_paragraphs | tr '\036' '\n')"
 
 MISSING=0
 while IFS= read -r -d $'\x1e' para; do
@@ -105,17 +106,15 @@ while IFS= read -r -d $'\x1e' para; do
   # Exact-match a normalized old paragraph against the set of normalized new
   # paragraphs. grep -F/-x avoids both regex-metacharacter surprises in
   # issue text and accidental substring matches across paragraph boundaries.
-  # NOTE: do the 0x1e -> newline conversion via bash parameter expansion
-  # (${var//pat/repl}) into a here-string, not a `tr | grep -q` pipe. Under
-  # `set -o pipefail`, `grep -qFx` exits as soon as it finds its first match
-  # (that's what -q means), which sends the upstream `tr` a SIGPIPE; tr's
-  # resulting non-zero exit then becomes the *pipeline's* exit status even
-  # though grep genuinely found the match. That produced false-positive FAILs
-  # on large "## Verified corrections" sections, especially when the match
-  # landed early in the paragraph stream (#6768). The parameter expansion
-  # below is pure bash string substitution -- no pipe, no subprocess, so
-  # there is nothing for pipefail to trip over.
-  if ! grep -qFx -- "$para" <<< "${NEW_PARAS//$'\x1e'/$'\n'}"; then
+  # NOTE: match against NEW_LINES, built once above via a full-reading
+  # `normalize_paragraphs | tr` (no early exit, so no SIGPIPE), fed here as a
+  # here-string -- never a `tr | grep -q` pipe. Under `set -o pipefail`,
+  # `grep -q` exits on its first match, SIGPIPEs the upstream `tr`, and tr's
+  # non-zero exit becomes the pipeline's status: false-positive FAILs on large
+  # sections (#6768). Nor a per-iteration ${NEW_PARAS//$'\x1e'/$'\n'}: bash
+  # 3.2's ${//} is quadratic -- ~13 s per call on a 300-paragraph section, so
+  # the loop hung past CI's 1200 s suite timeout on macOS (#12044).
+  if ! grep -qFx -- "$para" <<< "$NEW_LINES"; then
     MISSING=$((MISSING + 1))
     echo "check-verified-corrections-preserved: missing verified-corrections paragraph:" >&2
     echo "  $para" >&2

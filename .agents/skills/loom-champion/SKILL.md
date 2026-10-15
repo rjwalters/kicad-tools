@@ -87,7 +87,7 @@ NOT used for it, #4966):
 > `champion-issue-promo.md` → "Pass 0b: Stale `loom:evaluating` Claim Re-Scan"
 > runs immediately after Pass 0, before this discovery query, and removes the
 > label from any issue whose claim has gone stale (the labeled event's age
-> exceeds `LOOM_STALE_EVALUATING_MINUTES`, default 15 — a prior Champion pass
+> exceeds `LOOM_STALE_EVALUATING_MINUTES`, default 45 — a prior Champion pass
 > that died mid-evaluation without writing a verdict). Those issues then match
 > the query below in the same pass. Without that scan, a stale claim would be
 > permanent: the only actor that could notice the claim was abandoned is the
@@ -121,7 +121,9 @@ If found, **read and follow instructions in `.claude/commands/loom/champion-issu
 
 If no curated issues need promotion, check for well-formed proposals, with
 Priority 2's exclusions (see its note on why `loom:issue`/`loom:building` are
-required) and `title`/`body` fetch:
+required) and `title`/`body` fetch. Also exclude `loom:curated`: a curated
+proposal is Priority 2's (a `--issue` step's under step dispatch), and the
+`--non-item` pass, which runs this query, must never evaluate one (#11922):
 
 ```bash
 # Architect proposals, Hermit proposals, Auditor bug reports
@@ -132,7 +134,7 @@ gh issue list \
   --state=open \
   --limit=500 \
   --json number,title,body,labels,comments,createdAt \
-  --jq '($ENV.HOLDS | split("\n")) as $h | sort_by([([.labels[].name] | if index("loom:very-important") then 0 elif index("loom:important") then 1 else 2 end), .createdAt]) | .[] | select([.labels[].name] | any(IN("loom:evaluating","loom:issue","loom:building") or IN($h[])) | not) |
+  --jq '($ENV.HOLDS | split("\n")) as $h | sort_by([([.labels[].name] | if index("loom:very-important") then 0 elif index("loom:important") then 1 else 2 end), .createdAt]) | .[] | select([.labels[].name] | any(IN("loom:evaluating","loom:issue","loom:building","loom:curated") or IN($h[])) | not) |
   "#\(.number) \(.title) ['"$P"']"'
 done
 ```
@@ -143,7 +145,9 @@ If found, **read and follow instructions in `.claude/commands/loom/champion-issu
 
 ### Priority 4: Epic Proposals Ready to Evaluate
 
-If no individual proposals need promotion, check for epic proposals:
+If no individual proposals need promotion, check for epic proposals (a
+`loom:curated` epic stays in this query: step dispatch never draws an epic
+for `--issue`, so under `--non-item` this is its only owner, #11922):
 
 ```bash
 # Epic proposals, highest priority level first (#11103)

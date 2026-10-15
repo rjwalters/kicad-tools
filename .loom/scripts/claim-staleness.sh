@@ -65,9 +65,9 @@
 #   --label LABEL            Claim label: loom:reviewing | loom:treating |
 #                            loom:curating (or any loom:* claim label).
 #   --stale-minutes M        Idle/age threshold. Default per label:
-#                            reviewing $LOOM_STALE_REVIEWING_MINUTES (30),
+#                            reviewing $LOOM_STALE_REVIEWING_MINUTES (45),
 #                            treating  $LOOM_STALE_TREATING_MINUTES  (60),
-#                            curating  $LOOM_STALE_CURATING_MINUTES  (30).
+#                            curating  $LOOM_STALE_CURATING_MINUTES  (45).
 #   --max-standdown-streak K Bounded-fallback cap. Default
 #                            $LOOM_MAX_STANDDOWN_STREAK (3).
 #   --role NAME              Role name used in the stand-down comment text
@@ -184,9 +184,9 @@ command -v jq >/dev/null 2>&1 || _die "jq not found on PATH" 3
 
 if [[ -z "$STALE_MINUTES" ]]; then
     case "$LABEL" in
-        loom:reviewing) STALE_MINUTES="${LOOM_STALE_REVIEWING_MINUTES:-30}" ;;
+        loom:reviewing) STALE_MINUTES="${LOOM_STALE_REVIEWING_MINUTES:-45}" ;;
         loom:treating) STALE_MINUTES="${LOOM_STALE_TREATING_MINUTES:-60}" ;;
-        loom:curating) STALE_MINUTES="${LOOM_STALE_CURATING_MINUTES:-30}" ;;
+        loom:curating) STALE_MINUTES="${LOOM_STALE_CURATING_MINUTES:-45}" ;;
         *) STALE_MINUTES="${LOOM_STALE_CLAIM_MINUTES:-30}" ;;
     esac
 fi

@@ -108,10 +108,9 @@ the next step, after a fresh evaluation.
 
 ## `--non-item`: the interval run without item queues
 
-The role runner launches this when the root sets
-`autonomous.roleRunner.championMode: "non-item"` (daemon-reference.md). Item
-work (curated issues, `loom:pr` PRs) arrives as `--issue` / `--pr` steps
-instead; this pass must not act on it.
+The role runner launches every interval and idle-edge Champion run this way
+(#11909). Item work (curated issues, `loom:pr` PRs) arrives as `--issue` /
+`--pr` steps; this pass must not act on it.
 
 | Runs | Source |
 |---|---|
@@ -130,8 +129,8 @@ steps; this pass has no follow-on queue of its own.
 **The only writes this pass makes to a `loom:curated` issue** are Pass 0b /
 0c's reconciliations of a verdict or claim already decided (clear a stale
 claim, land an approved promotion). It never
-claims, evaluates or writes a verdict on one, and it writes nothing on a
-`loom:pr` PR (the census only reads them).
+claims, evaluates or writes a verdict on a curated proposal (epics are
+Priority 4's), and it writes nothing on a `loom:pr` PR.
 
 Outcome: `done`, or `idle` when every queue was empty. The completion report's
 `Merge-risk holds:` line is still mandatory.
