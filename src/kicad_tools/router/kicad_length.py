@@ -630,12 +630,26 @@ def _lname(layer: Any) -> str:
 
 
 def route_geometry(route: Route) -> tuple[list[LSeg], list[LVia]]:
-    """Neutral segments and vias of a router :class:`Route`."""
+    """Neutral segments and vias of a router :class:`Route`.
+
+    Issue #6792: a via listed more than once (same position, diameter and
+    span) is one physical via and is returned once.  The tuners measure a net
+    held as several fragments by merging them into one Route, and fragments
+    that meet at a via each carry it; charging its span per copy over-counts
+    the net (by ~1.05 mm for In1.Cu + In2.Cu fragments sharing a via in a
+    through-hole pad on a 1.6 mm 4-layer board).
+    """
     segs = [LSeg(s.x1, s.y1, s.x2, s.y2, _lname(s.layer)) for s in route.segments]
-    vias = []
+    vias: list[LVia] = []
+    seen: set[tuple[float, float, float, str, str]] = set()
     for v in route.vias:
         a, b = getattr(v, "drilled_layers", v.layers)
-        vias.append(LVia(v.x, v.y, v.diameter, (_lname(a), _lname(b))))
+        la, lb = _lname(a), _lname(b)
+        key = (round(v.x, 6), round(v.y, 6), round(v.diameter, 6), la, lb)
+        if key in seen:
+            continue
+        seen.add(key)
+        vias.append(LVia(v.x, v.y, v.diameter, (la, lb)))
     return segs, vias
 
 
@@ -695,34 +709,6 @@ class KicadLengthModel:
         segs, vias = route_geometry(route)
         return net_length(
             segs, vias, self.pads_by_net.get(route.net, []), self.stackup, partial_net=True
-        )
-
-    def routes_length(self, routes: Iterable[Route]) -> float:
-        """Length of one net held as several :class:`Route` fragments.
-
-        Summing :meth:`route_length` over fragments charges a via's span once
-        per fragment that touches it: two fragments on In1.Cu and In2.Cu that
-        share a via inside a through-hole pad each reach the pad side plus
-        their own inner layer, so the pad-side stretch is counted twice.  This
-        measures the merged geometry once (a via listed by several fragments
-        counts once), matching the PCB form of the whole net.
-        """
-        route_list = list(routes)
-        if not route_list:
-            return 0.0
-        segs: list[LSeg] = []
-        vias: list[LVia] = []
-        seen: set[tuple[float, float, float, tuple[str, str]]] = set()
-        for route in route_list:
-            r_segs, r_vias = route_geometry(route)
-            segs.extend(r_segs)
-            for via in r_vias:
-                key = (round(via.x, 6), round(via.y, 6), via.diameter, tuple(via.layers))
-                if key not in seen:
-                    seen.add(key)
-                    vias.append(via)
-        return net_length(
-            segs, vias, self.pads_by_net.get(route_list[0].net, []), self.stackup, partial_net=True
         )
 
     def net_length_pcb(self, pcb: PCB, net_id: int) -> float:

@@ -20062,21 +20062,7 @@ class Autorouter:
         results: dict[tuple[str, str], DiffPairTuneResult] = {}
 
         # Complete-net views include fixed escapes and every mutable fragment.
-        fragments_by_net: dict[int, list[Route]] = {}
-        for route in self.routes:
-            fragments_by_net.setdefault(route.net, []).append(route)
-        routes_by_net = {
-            net: fragments[0]
-            if len(fragments) == 1
-            else Route(
-                net=net,
-                net_name=fragments[0].net_name,
-                segments=[segment for route in fragments for segment in route.segments],
-                vias=[via for route in fragments for via in route.vias],
-                is_escape=all(route.is_escape for route in fragments),
-            )
-            for net, fragments in fragments_by_net.items()
-        }
+        routes_by_net = self._net_routes_merged()
         fixed_segment_ids = {id(s) for r in self.routes if r.is_escape for s in r.segments}
 
         # Update the skew tracker so the post-tuning results are queryable.
@@ -20403,6 +20389,33 @@ class Autorouter:
             cache[1], (p for p in self.pads.values() if not p.steiner_point)
         )
 
+    def _net_routes_merged(self) -> dict[int, Route]:
+        """One complete-net :class:`Route` per net, for the length tuners.
+
+        A net can be held as several Route fragments (fixed escapes plus
+        channel routes).  Multi-fragment nets are merged into one Route
+        carrying every fragment's segments and vias.  Fragments that meet at a
+        via each carry it; the length measure (``kicad_length.route_geometry``)
+        counts such a via once, so the merged Route measures as the whole net
+        (Issue #6792).  A single-fragment net keeps its Route object, so the
+        tuners can still edit it in place.
+        """
+        fragments_by_net: dict[int, list[Route]] = {}
+        for route in self.routes:
+            fragments_by_net.setdefault(route.net, []).append(route)
+        return {
+            net: fragments[0]
+            if len(fragments) == 1
+            else Route(
+                net=net,
+                net_name=fragments[0].net_name,
+                segments=[s for r in fragments for s in r.segments],
+                vias=[v for r in fragments for v in r.vias],
+                is_escape=all(r.is_escape for r in fragments),
+            )
+            for net, fragments in fragments_by_net.items()
+        }
+
     def _checker_route_length(self, num_layers: int) -> Callable[[Route], float]:
         """``Route -> mm`` measured the way ``kct check``'s skew rule measures (#6664).
 
@@ -20524,21 +20537,7 @@ class Autorouter:
 
         # A net can contain separate escape and channel Route objects. The
         # tuner needs their complete geometry for lengths and foreign clearance.
-        fragments_by_net: dict[int, list[Route]] = {}
-        for route in self.routes:
-            fragments_by_net.setdefault(route.net, []).append(route)
-        routes_by_net = {
-            net: fragments[0]
-            if len(fragments) == 1
-            else Route(
-                net=net,
-                net_name=fragments[0].net_name,
-                segments=[s for r in fragments for s in r.segments],
-                vias=[v for r in fragments for v in r.vias],
-                is_escape=all(r.is_escape for r in fragments),
-            )
-            for net, fragments in fragments_by_net.items()
-        }
+        routes_by_net = self._net_routes_merged()
         fixed_segment_ids = {id(s) for r in self.routes if r.is_escape for s in r.segments}
 
         # Update the match-group skew tracker so the post-tuning results are

@@ -150,13 +150,15 @@ class TestViaConnectedSpan:
         )
         assert model.route_length(route) == pytest.approx(5.0 + 1.58)
 
-    def test_fragments_sharing_tht_pad_via_count_span_once(self):
-        # Issue #6792: In1.Cu and In2.Cu fragments share a via inside a
-        # through-hole pad.  Summed per fragment the pad-side..In1 stretch is
-        # charged twice; the net-level entry point matches the PCB form.
+    @staticmethod
+    def _shared_via_fragments() -> tuple[list[Route], float]:
+        """Issue #6792: In1.Cu and In2.Cu fragments sharing a via in a THT pad.
+
+        Each fragment carries the shared via, as router fragments that meet at
+        a via do.  Returns the fragments and the whole-net (PCB form) length.
+        """
         stackup = KicadStackup.default(1.6, 4)
         pad = LPad(10.0, 0.0, 1.2, 1.2, layers=None, side="F.Cu")
-        model = KicadLengthModel(stackup, {1: [pad]})
         via = Via(10.0, 0.0, 0.3, 0.6, (Layer.F_CU, Layer.B_CU), net=1)
 
         def frag(layer: Layer, x2: float) -> Route:
@@ -167,26 +169,76 @@ class TestViaConnectedSpan:
                 vias=[via],
             )
 
-        routes = [frag(Layer.IN1_CU, 14.0), frag(Layer.IN2_CU, 6.0)]
         whole = net_length(
             [LSeg(10, 0, 14, 0, "In1.Cu"), LSeg(10, 0, 6, 0, "In2.Cu")],
             [LVia(10.0, 0.0, 0.6, ("F.Cu", "B.Cu"))],
             [pad],
             stackup,
         )
-        naive = sum(model.route_length(r) for r in routes)
-        assert naive > whole + 0.5
-        assert model.routes_length(routes) == pytest.approx(whole)
+        return [frag(Layer.IN1_CU, 14.0), frag(Layer.IN2_CU, 6.0)], whole
 
-    def test_single_fragment_routes_length_equals_route_length(self):
-        model = KicadLengthModel.default(1.6, 4)
-        route = Route(
+    def test_merged_fragments_count_shared_via_once(self):
+        # Issue #6792: a Route listing the same via twice (the tuners' merge of
+        # two fragments that each carry it) measures as the whole net, not
+        # with the via's span charged per copy (+1.05 mm here).
+        routes, whole = self._shared_via_fragments()
+        model = KicadLengthModel(
+            KicadStackup.default(1.6, 4),
+            {1: [LPad(10.0, 0.0, 1.2, 1.2, layers=None, side="F.Cu")]},
+        )
+        merged = Route(
             net=1,
             net_name="N",
-            segments=[Segment(0.0, 0.0, 5.0, 0.0, 0.2, Layer.F_CU, net=1)],
-            vias=[Via(5.0, 0.0, 0.3, 0.6, (Layer.F_CU, Layer.B_CU), net=1)],
+            segments=[s for r in routes for s in r.segments],
+            vias=[v for r in routes for v in r.vias],
         )
-        assert model.routes_length([route]) == pytest.approx(model.route_length(route))
+        assert len(merged.vias) == 2
+        assert whole == pytest.approx(9.0475, abs=1e-4)
+        assert model.route_length(merged) == pytest.approx(whole)
+
+    def test_distinct_via_objects_at_same_spot_count_once(self):
+        # Two fragments may carry equal but distinct Via objects.
+        routes, whole = self._shared_via_fragments()
+        model = KicadLengthModel(
+            KicadStackup.default(1.6, 4),
+            {1: [LPad(10.0, 0.0, 1.2, 1.2, layers=None, side="F.Cu")]},
+        )
+        merged = Route(
+            net=1,
+            net_name="N",
+            segments=[s for r in routes for s in r.segments],
+            vias=[
+                Via(10.0, 0.0, 0.3, 0.6, (Layer.F_CU, Layer.B_CU), net=1),
+                Via(10.0, 0.0, 0.3, 0.6, (Layer.F_CU, Layer.B_CU), net=1),
+            ],
+        )
+        assert model.route_length(merged) == pytest.approx(whole)
+
+    def test_tuner_merged_net_measure_matches_whole_net(self):
+        # Issue #6792: both skew tuners measure a multi-fragment net through
+        # ``_net_routes_merged`` + ``_checker_route_length``; that number must
+        # be the whole-net length kicad-cli reports, not the fragment sum.
+        from kicad_tools.router.core import Autorouter
+
+        routes, whole = self._shared_via_fragments()
+        ar = Autorouter(width=40.0, height=20.0)
+        ar.pads[("J1", "1")] = Pad(
+            x=10.0,
+            y=0.0,
+            width=1.2,
+            height=1.2,
+            net=1,
+            net_name="N",
+            ref="J1",
+            pin="1",
+            through_hole=True,
+            drill=0.6,
+        )
+        ar.routes = list(routes)
+        merged = ar._net_routes_merged()[1]
+        measure = ar._checker_route_length(4)
+        assert measure(merged) == pytest.approx(whole)
+        assert measure(merged) == pytest.approx(9.0475, abs=1e-4)
 
 
 class TestPadViaTrim:
