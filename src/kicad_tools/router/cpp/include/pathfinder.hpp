@@ -432,6 +432,8 @@ private:
     // A* g_score, so its scale is comparable to ``rules_.cost_straight``
     // (typically 1.0) -- a penalty of 5.0 is roughly 5 cells of detour.
     float get_pad_channel_cost(int x, int y, int layer) const;
+    // Issue #6761: True iff a hard via fence covers (x, y) for this search.
+    bool is_pad_via_fenced(int x, int y) const;
 
     // Core A* loop shared by route(), route_resumable(), and resume().
     // Returns RouteResult with success=true if goal reached, or success=false
