@@ -555,6 +555,49 @@ private:
     // (mirrors PR #3232's canonical pattern for ``is_trace_blocked``).
     std::vector<std::pair<int8_t, int8_t>> via_kernel_offsets_;
 
+    // Issue #5617: one ``is_via_blocked_diag`` verdict per expanded node.
+    //
+    // Both A* loops try a via to every other routable layer, and each try
+    // used to call ``is_via_blocked_diag(current.x, current.y, ...)`` afresh.
+    // Nothing that call reads depends on the destination layer: the barrel
+    // spans the whole stack, so the predicate already walks every layer
+    // itself, and the grid it reads does not change inside one expansion.
+    // On a 4-layer board the via-drop phase was asking the same question
+    // three times per node -- 44 % of the Board 06 re-route's phase 4.
+    //
+    // The memo replays the first answer, including its ``out_*`` blocker
+    // diagnostics, so each caller's per-layer bookkeeping (the #2476
+    // ``via_block_count`` increment) runs exactly as before.  It stays off
+    // while a pairwise (cross-domain) matrix is installed: that branch's
+    // ``note_pairwise_block`` counts every refusal into the Python-visible
+    // ``pairwise_block_count``, and replaying the verdict would under-count.
+    struct ViaBlockMemo {
+        int state = -1;  // -1 = not evaluated, 0 = clear, 1 = blocked
+        int blocking_net = 0;
+        float world_x = 0.0f;
+        float world_y = 0.0f;
+
+        bool blocked(const Pathfinder& pf, int x, int y, int net, bool allow_sharing,
+                     int radius_override, int& out_blocking_net,
+                     float& out_world_x, float& out_world_y) {
+            if (state < 0) {
+                const bool result = pf.is_via_blocked_diag(
+                    x, y, net, allow_sharing, radius_override,
+                    out_blocking_net, out_world_x, out_world_y);
+                if (pf.grid_.pairwise_active()) return result;
+                state = result ? 1 : 0;
+                blocking_net = out_blocking_net;
+                world_x = out_world_x;
+                world_y = out_world_y;
+                return result;
+            }
+            out_blocking_net = blocking_net;
+            out_world_x = world_x;
+            out_world_y = world_y;
+            return state != 0;
+        }
+    };
+
     // Issue #4848: distance-sorted offsets for the soft pairwise avoidance
     // band, the ring-ordered analogue of ``via_kernel_offsets_``.  Every entry
     // lies in the annulus ``(hard_r, hard_r + band]`` and carries its

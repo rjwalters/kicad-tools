@@ -729,6 +729,13 @@ private:
     GeometryBins route_via_bins_;
     static void index_route_geometry(GeometryBins& bins, size_t index,
                                      float minx, float miny, float maxx, float maxy);
+    // The sorted, de-duplicated indices one bin set holds under a world box --
+    // each half of ``route_geometry_candidates``.  Issue #5617: callers that
+    // only consult one kind (``trace_stored_vias_clear`` reads vias alone) ask
+    // for that half instead of paying for the other's gather + sort.
+    static std::vector<size_t> gather_route_geometry(const GeometryBins& bins,
+                                                     float minx, float miny,
+                                                     float maxx, float maxy);
 
     // Issue #6243: authored per-net minima.  ``authored_index_`` is null
     // while the gate is dormant; otherwise it buckets every pad and stored

@@ -1977,6 +1977,7 @@ RouteResult Pathfinder::route(
 
         // Try layer change (via)
         int own_vias_clear = -1;  // Issue #6464: lazily evaluated once per node
+        ViaBlockMemo via_memo;    // Issue #5617: once per node, not per layer
         for (int new_layer : routable_layers_) {
             if (new_layer == current.layer) continue;
 
@@ -1985,9 +1986,9 @@ RouteResult Pathfinder::route(
             // rule is what caused the rejection.
             int blocking_net = 0;
             float block_wx = 0.0f, block_wy = 0.0f;
-            if (is_via_blocked_diag(current.x, current.y, net, negotiated_mode,
-                                    via_radius_cells,
-                                    blocking_net, block_wx, block_wy)) {
+            if (via_memo.blocked(*this, current.x, current.y, net, negotiated_mode,
+                                 via_radius_cells,
+                                 blocking_net, block_wx, block_wy)) {
                 if (blocking_net != 0) {
                     ++via_block_count;
                     last_blocking_net = blocking_net;
@@ -2729,6 +2730,7 @@ RouteResult Pathfinder::run_astar_loop() {
 
         // Try layer change (via)
         int own_vias_clear = -1;  // Issue #6464: lazily evaluated once per node
+        ViaBlockMemo via_memo;    // Issue #5617: once per node, not per layer
         for (int new_layer : routable_layers_) {
             if (new_layer == current.layer) continue;
 
@@ -2736,10 +2738,10 @@ RouteResult Pathfinder::run_astar_loop() {
             // record which stored-via net rejected our candidate slot.
             int blocking_net = 0;
             float block_wx = 0.0f, block_wy = 0.0f;
-            if (is_via_blocked_diag(current.x, current.y, search_net_,
-                                    search_negotiated_mode_,
-                                    search_via_radius_cells_,
-                                    blocking_net, block_wx, block_wy)) {
+            if (via_memo.blocked(*this, current.x, current.y, search_net_,
+                                 search_negotiated_mode_,
+                                 search_via_radius_cells_,
+                                 blocking_net, block_wx, block_wy)) {
                 if (blocking_net != 0) {
                     ++search_via_block_count_;
                     search_last_blocking_net_ = blocking_net;

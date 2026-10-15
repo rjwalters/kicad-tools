@@ -18,6 +18,8 @@
 #include <algorithm>
 #include <cmath>
 #include <string>
+#include <type_traits>
+#include <variant>
 
 #include <nanobind/nanobind.h>
 #include <nanobind/stl/pair.h>
@@ -969,6 +971,35 @@ bool clear(const KShape& a, const KShape& b, double required_mm)
     return copper_gap(a, b) >= required_mm - CLEARANCE_EPSILON_MM;
 }
 
+// Issue #5617: typed twins of ``clear`` -- each is the matching ``copper_gap``
+// branch above with the variant construction taken out.  Keep them in step
+// with the dispatcher: same ``layers_interact`` gate (only a segment pair can
+// fail it; a via spans every layer), same canonical (lower-rank-first)
+// argument order.
+
+bool clear(const KSegment& a, const KSegment& b, double required_mm)
+{
+    if (a.layer != ALL_LAYERS && b.layer != ALL_LAYERS && a.layer != b.layer) {
+        return NO_INTERACTION >= required_mm - CLEARANCE_EPSILON_MM;
+    }
+    return copper_gap_seg_seg(a, b) >= required_mm - CLEARANCE_EPSILON_MM;
+}
+
+bool clear(const KSegment& a, const KVia& b, double required_mm)
+{
+    return copper_gap_seg_via(a, b) >= required_mm - CLEARANCE_EPSILON_MM;
+}
+
+bool clear(const KVia& a, const KSegment& b, double required_mm)
+{
+    return copper_gap_seg_via(b, a) >= required_mm - CLEARANCE_EPSILON_MM;
+}
+
+bool clear(const KVia& a, const KVia& b, double required_mm)
+{
+    return copper_gap_via_via(a, b) >= required_mm - CLEARANCE_EPSILON_MM;
+}
+
 // ---------------------------------------------------------------------------
 // Indexed-consumer primitives (Epic #5509, Phase 3f)
 // ---------------------------------------------------------------------------
@@ -1117,7 +1148,24 @@ void register_clearance_kernel(nb::module_& m)
 
     m.def("clear",
           [](const KShape& a, const KShape& b, double required_mm) {
-              return router::clearance::clear(a, b, required_mm);
+              // Issue #5617: route the segment/via pair kinds through the
+              // typed overloads the A* search calls, so the cross-port
+              // parity corpus exercises the code the router actually runs.
+              return std::visit(
+                  [&](const auto& p, const auto& q) -> bool {
+                      using P = std::decay_t<decltype(p)>;
+                      using Q = std::decay_t<decltype(q)>;
+                      constexpr bool p_typed =
+                          std::is_same_v<P, KSegment> || std::is_same_v<P, KVia>;
+                      constexpr bool q_typed =
+                          std::is_same_v<Q, KSegment> || std::is_same_v<Q, KVia>;
+                      if constexpr (p_typed && q_typed) {
+                          return router::clearance::clear(p, q, required_mm);
+                      } else {
+                          return router::clearance::clear(a, b, required_mm);
+                      }
+                  },
+                  a, b);
           },
           "a"_a, "b"_a, "required_mm"_a,
           "copper_gap(a, b) >= required_mm - CLEARANCE_EPSILON_MM.");
