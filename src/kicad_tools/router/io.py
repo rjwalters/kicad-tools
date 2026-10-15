@@ -3009,7 +3009,7 @@ def validate_routes(
     def _kpad(pad: Pad) -> KPad:
         kpad = _pad_kshapes.get(id(pad))
         if kpad is None:
-            kpad = _kernel_pad_shape(pad)
+            kpad = _kernel_pad_shape(pad, roundrect_as_rect=True)
             _pad_kshapes[id(pad)] = kpad
         return kpad
 

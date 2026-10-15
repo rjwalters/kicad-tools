@@ -102,7 +102,7 @@ def via_shape(via: Via) -> KVia:
     return KVia(x=via.x, y=via.y, diameter=via.diameter, drill=via.drill)
 
 
-def pad_shape(pad: Pad) -> KPad:
+def pad_shape(pad: Pad, *, roundrect_as_rect: bool = False) -> KPad:
     """A :class:`~primitives.Pad` as kernel copper.
 
     ``pad.rotation`` is the *residual* board-space angle (issue #4910): the
@@ -114,9 +114,17 @@ def pad_shape(pad: Pad) -> KPad:
 
     A through-hole pad is copper on every layer, and its hole is modelled from
     ``pad.drill`` so hole queries have something to read.
+
+    ``roundrect_as_rect`` measures a ``roundrect`` pad as its enclosing
+    rectangle.  The router ``Pad`` carries no ``roundrect_rratio``, so the
+    default 0.25 is an assumption: a pad whose file ratio is smaller has
+    squarer corners than modelled, and a near-miss past that corner reads
+    farther than it is (Issue #6718 review).  Violation checks that must
+    never under-report pass ``True`` until the ratio is plumbed through.
     """
+    shape = "rect" if roundrect_as_rect and pad.shape == "roundrect" else pad.shape
     return make_pad(
-        pad.shape,
+        shape,
         pad.width,
         pad.height,
         DEFAULT_ROUNDRECT_RRATIO,

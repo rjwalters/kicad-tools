@@ -107,7 +107,6 @@ def _pad_violations(router: Autorouter, route: Route) -> list:
     [
         ("circle", 0.7, 0.7),
         ("oval", 0.9, 1.7),
-        ("roundrect", 0.7, 0.7),
     ],
 )
 def test_track_past_a_rounded_pad_at_a_legal_gap_is_clean(
@@ -122,6 +121,38 @@ def test_track_past_a_rounded_pad_at_a_legal_gap_is_clean(
     rect_gap = TRUE_GAP + _support(shape, width, height) - _support("rect", width, height)
     assert rect_gap < CLEARANCE
     assert _pad_violations(router, Route(net=1, net_name="SIG", segments=[seg], vias=[])) == []
+
+
+def test_track_past_a_roundrect_pad_corner_is_not_hidden_by_assumed_ratio() -> None:
+    """A roundrect pad is measured as its rectangle (the router has no rratio).
+
+    A 2.0 x 2.0 pad with file ratio 0.1 has a 0.2 mm corner radius; the
+    kernel's default 0.25 would model a 0.5 mm radius and read a real
+    0.10 mm near-miss past the corner as ~0.22 mm, hiding the violation.
+    """
+    router = _router()
+    _add_pad(router, "roundrect", 2.0, 2.0)
+    # Place the track 0.10 mm off the true (ratio 0.1) corner.
+    r = 0.1 * 2.0
+    support = (1.0 - r) * (_N[0] + _N[1]) + r
+    d = support + 0.10 + TRACE_W / 2.0
+    cx, cy = PX + d * _N[0], PY + d * _N[1]
+    tx, ty = _N[0], -_N[1]
+    seg = Segment(x1=cx - tx, y1=cy - ty, x2=cx + tx, y2=cy + ty, layer=Layer.F_CU, width=TRACE_W)
+    found = _pad_violations(router, Route(net=1, net_name="SIG", segments=[seg], vias=[]))
+    assert len(found) == 1
+    assert found[0].distance < CLEARANCE
+
+
+def test_via_past_a_roundrect_pad_corner_is_not_hidden_by_assumed_ratio() -> None:
+    router = _router()
+    _add_pad(router, "roundrect", 2.0, 2.0)
+    r = 0.1 * 2.0
+    support = (1.0 - r) * (_N[0] + _N[1]) + r
+    via = _via_at_gap(support, 0.10)
+    found = _pad_violations(router, Route(net=1, net_name="SIG", segments=[], vias=[via]))
+    assert len(found) == 1
+    assert found[0].distance < CLEARANCE
 
 
 def test_the_same_track_past_a_square_pad_is_a_violation() -> None:

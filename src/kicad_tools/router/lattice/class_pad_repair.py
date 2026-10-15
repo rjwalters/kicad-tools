@@ -245,7 +245,7 @@ def repair_class_pad_pairs(
                 continue  # the search already held this pair
             # The exact clearance kernel: what both DRC engines measure and,
             # since issue #6718, what ``validate_routes`` measures too.
-            gap = copper_gap(shape, pad_shape(pad))
+            gap = copper_gap(shape, pad_shape(pad, roundrect_as_rect=True))
             if gap < required - _EPS:
                 found.append((i, required, gap))
         return found
@@ -316,7 +316,10 @@ def repair_class_pad_pairs(
                 hw, hh = pad_half_extents(pad)
                 if abs(pad.x - via.x) > hw + r or abs(pad.y - via.y) > hh + r:
                     continue
-                if copper_gap(shape, pad_shape(pad)) < max(own, pad_req[i]) - _EPS:
+                if (
+                    copper_gap(shape, pad_shape(pad, roundrect_as_rect=True))
+                    < max(own, pad_req[i]) - _EPS
+                ):
                     stats.via_found += 1
     stats.via_remaining = stats.via_found
 
