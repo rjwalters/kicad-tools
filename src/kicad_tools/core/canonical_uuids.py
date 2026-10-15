@@ -37,11 +37,29 @@ first loads the routed board:
    whose UUID is *not* in ``keep`` (the input board's UUIDs) -- is re-keyed
    to ``uuid5`` of its own content, like ``stitch_cmd._stitch_uuid``.
    Copper carried over from the input board keeps its authored UUID.
+   Within each net, the segments' (and the vias') new UUIDs are handed out
+   in :func:`segment_order_key` (:func:`via_order_key`) order (Issue
+   #6778), so the net's tracks end up in that order in the file; see
+   "Net order" below.
 3. **Top-level copper is put in UUID order**, so the first KiCad load sees
    the same track order every later ``--save-board`` round trip will.
 
 Identical copper then always reaches KiCad with identical UUIDs in an
 identical order, so the fill it produces is reproducible.
+
+Net order (Issue #6778)
+-----------------------
+kicad-cli's net length merges a net's tracks into lines, and where three or
+more track ends meet the result depends on the order the tracks are loaded
+in, i.e. file order (:mod:`kicad_tools.router.kicad_length`).  Plain
+``uuid5`` order is effectively random per net, so the router's skew tuners,
+which measure a ``Route`` before it is written, could not know it: on 07rf
+the match-group tuner closed ``DDR_DATA_BYTE_0`` to 0.000 mm and ``kct
+check`` then read 0.284 mm off the written board.  So each net takes its own
+set of content ``uuid5`` values sorted, and they are assigned in
+:func:`segment_order_key` order.  The UUID set and the assignment both
+depend only on the copper, so everything above still holds, and the tuners
+sort a ``Route`` by the same key before measuring it.
 
 Limit (Issue #6215): this holds for **short-free** copper.  On load KiCad
 gives every connected copper cluster one net, and when a cluster shorts
@@ -64,6 +82,8 @@ from kicad_tools.sexp.vscore import is_vscore_uuid
 
 __all__ = [
     "UUID_BEARING_TAGS",
+    "segment_order_key",
+    "via_order_key",
     "canonical_footprint_uuid",
     "canonicalize_board_uuids",
     "canonicalize_pcb_file_uuids",
@@ -252,6 +272,54 @@ def canonical_footprint_uuid(ordinal: int) -> str:
     return str(uuid.uuid5(_NAMESPACE, _item_key("board", "footprint", ordinal)))
 
 
+def segment_order_key(
+    x1: float, y1: float, x2: float, y2: float, layer: str
+) -> tuple[str, float, float, float, float]:
+    """Where a router segment sits among its net's segments in the file (Issue #6778).
+
+    Coordinates are compared as written (4 decimals), so a router ``Route``
+    and the board file it becomes sort identically.  Segments that tie are
+    identical copper, so their relative order cannot change a length.
+    """
+    return (layer, round(x1, 4), round(y1, 4), round(x2, 4), round(y2, 4))
+
+
+def via_order_key(x: float, y: float, layers: tuple[str, str]) -> tuple[float, float, str, str]:
+    """Where a router via sits among its net's vias in the file (Issue #6778)."""
+    return (round(x, 4), round(y, 4), layers[0], layers[1])
+
+
+def _xy(node: SExp, tag: str) -> tuple[float, float] | None:
+    child = node.get(tag)
+    if child is None:
+        return None
+    x, y = child.get_float(0), child.get_float(1)
+    return None if x is None or y is None else (x, y)
+
+
+def _copper_order_key(node: SExp) -> tuple | None:
+    """:func:`segment_order_key` / :func:`via_order_key` of a copper node, if parseable."""
+    if node.name == "segment":
+        start, end, layer = _xy(node, "start"), _xy(node, "end"), node.get("layer")
+        if start is None or end is None or layer is None or layer.get_string(0) is None:
+            return None
+        return segment_order_key(*start, *end, str(layer.get_string(0)))
+    if node.name == "via":
+        at, layers = _xy(node, "at"), node.get("layers")
+        if at is None or layers is None:
+            return None
+        names = [layers.get_string(i) for i in range(2)]
+        if names[0] is None or names[1] is None:
+            return None
+        return via_order_key(*at, (str(names[0]), str(names[1])))
+    return None
+
+
+def _net_text(node: SExp) -> str:
+    net = node.get("net")
+    return net.to_string(compact=True) if net is not None else ""
+
+
 def _content_key(node: SExp) -> str:
     """Whitespace-free text of ``node`` with its UUID child left out."""
     parts = [child.to_string(compact=True) for child in node.children if child.name not in _ID_TAGS]
@@ -301,19 +369,43 @@ def canonicalize_board_uuids(doc: SExp, *, keep: Collection[str] = ()) -> int:
     # so a footprint child can never claim one of these values.  Twins with
     # identical content are interchangeable, so numbering them in file order
     # is still a function of the copper.
-    seen: dict[str, int] = {}
-    for child in doc.children:
-        if child.name not in _COPPER_TAGS:
-            continue
+    minted: list[SExp] = [
+        child
+        for child in doc.children
+        if child.name in _COPPER_TAGS and _id_value(child) not in keep_set
+    ]
+    # Release every re-keyed id before minting any: a re-run hands a net's
+    # UUIDs out in a different order than it mints them, so one node's new
+    # value is often another's current one.
+    for child in minted:
         current = _id_value(child)
-        if current is not None and current in keep_set:
-            continue
+        if current is not None:
+            taken.discard(current)
+    seen: dict[str, int] = {}
+    new_ids: dict[int, str] = {}
+    for child in minted:
         key = _content_key(child)
         ordinal = seen.get(key, 0)
         seen[key] = ordinal + 1
-        if current is not None:
-            taken.discard(current)
-        new = _mint(f"copper:{key}:{ordinal}", taken)
+        new_ids[id(child)] = _mint(f"copper:{key}:{ordinal}", taken)
+    # Issue #6778: each net's segments (and vias) take their net's UUIDs in
+    # ascending order, sorted by ``segment_order_key`` (``via_order_key``),
+    # so the net lands in the file in the order the tuners measured it in.
+    by_net: dict[tuple[str, str], list[SExp]] = {}
+    for child in minted:
+        if child.name in ("segment", "via"):
+            by_net.setdefault((child.name, _net_text(child)), []).append(child)
+    for nodes in by_net.values():
+        keys = [_copper_order_key(n) for n in nodes]
+        if any(k is None for k in keys):
+            continue  # unparseable copper keeps its own content UUID
+        ordered = [n for _, n in sorted(zip(keys, nodes, strict=True), key=lambda kn: kn[0])]
+        ids = sorted(new_ids[id(n)] for n in nodes)
+        for node, value in zip(ordered, ids, strict=True):
+            new_ids[id(node)] = value
+    for child in minted:
+        current = _id_value(child)
+        new = new_ids[id(child)]
         if new != current:
             _set_uuid(child, new, id_tag)
             if current is not None:
