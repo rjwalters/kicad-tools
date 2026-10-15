@@ -2096,11 +2096,13 @@ def _run_diffpair_skew_tuning(
             1 for r in tune_results.values() if r.reason == "post_insertion_drc_violation"
         )
         n_budget = sum(1 for r in tune_results.values() if r.reason == "exceeded_max_inserts")
+        n_overshoot = sum(1 for r in tune_results.values() if r.reason == "overshoot")
         if mode == "length_critical":
             n_skipped = sum(1 for r in tune_results.values() if r.reason == "not_length_critical")
             print(
                 f"  Summary: {n_tuned} tuned, {n_clean} clean, "
                 f"{n_rollback} rolled back, {n_budget} budget-exhausted, "
+                f"{n_overshoot} overshoot, "
                 f"{n_skipped} skipped (not length-critical)"
             )
         else:
@@ -2117,6 +2119,7 @@ def _run_diffpair_skew_tuning(
             print(
                 f"  Summary: {n_tuned} tuned, {n_clean} clean, "
                 f"{n_rollback} rolled back, {n_budget} budget-exhausted, "
+                f"{n_overshoot} overshoot, "
                 f"{n_declined} declined (limit is a warning), "
                 f"{n_over} still over the kct check skew limit"
             )

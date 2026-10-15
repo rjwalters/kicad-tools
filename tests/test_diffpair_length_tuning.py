@@ -991,3 +991,66 @@ class TestExactFitAndPlacementSearch:
         assert exact_fit_amplitude(5.0, 1.0)[0] == 3
         loops, amp = exact_fit_amplitude(5.0, 1.0)
         assert 2 * loops * amp == pytest.approx(5.0, abs=1e-6)
+
+
+# =============================================================================
+# Issue #6795: uncoupled-length guard and overshoot revert accounting
+# =============================================================================
+
+
+class TestUncoupledGuardAndOvershootRevert:
+    def test_tiny_uncoupled_limit_rejects_meander_and_leaves_pair_untouched(self):
+        p = _straight_route(1, "USB_D+", 20.0, y=0.0)
+        n = _straight_route(2, "USB_D-", 25.0, y=5.0)
+        p_out, n_out, result = tune_diff_pair_skew(
+            _make_pair(),
+            {1: p, 2: n},
+            tolerance_mm=0.5,
+            intra_pair_clearance_mm=0.1,
+            max_uncoupled_mm=1e-6,
+        )
+        assert result.success is False
+        assert result.inserts_applied == 0
+        assert p_out is p and p_out.segments is p.segments
+        assert n_out is n
+        assert "uncoupled length exceeds limit" in result.message
+
+    def test_none_or_generous_limit_matches_unguarded_result(self):
+        def run(**kw):
+            p = _straight_route(1, "USB_D+", 20.0, y=0.0)
+            n = _straight_route(2, "USB_D-", 25.0, y=5.0)
+            p_out, _n, result = tune_diff_pair_skew(
+                _make_pair(),
+                {1: p, 2: n},
+                tolerance_mm=0.5,
+                intra_pair_clearance_mm=0.1,
+                **kw,
+            )
+            return [(s.x1, s.y1, s.x2, s.y2) for s in p_out.segments], result.reason
+
+        base = run()
+        assert base[1] == "tuned"
+        assert run(max_uncoupled_mm=None) == base
+        assert run(max_uncoupled_mm=1000.0) == base
+
+    def test_overshoot_revert_resets_inserts_applied(self):
+        from kicad_tools.router.optimizer.serpentine import SerpentineResult
+
+        p = _straight_route(1, "USB_D+", 20.0, y=0.0)
+        n = _straight_route(2, "USB_D-", 25.0, y=5.0)
+
+        def too_long(self, route, _target):
+            extra = Segment(0.0, -1.0, 40.0, -1.0, 0.2, Layer.F_CU, net=1, net_name="USB_D+")
+            segs = [*route.segments, extra]
+            return (
+                Route(net=route.net, net_name=route.net_name, segments=segs),
+                SerpentineResult(success=True, new_segments=[extra]),
+            )
+
+        with patch.object(SerpentineGenerator, "add_serpentine", too_long):
+            p_out, _n, result = tune_diff_pair_skew(
+                _make_pair(), {1: p, 2: n}, tolerance_mm=0.5, intra_pair_clearance_mm=0.1
+            )
+        assert result.reason == "overshoot"
+        assert p_out is p
+        assert result.inserts_applied == 0

@@ -260,3 +260,35 @@ def test_pair_skew_tuning_runs_before_match_group_tuning():
     pair_call = source.index("_run_diffpair_skew_tuning(router, args, quiet=quiet)")
     group_call = source.index("_mg_engage = _match_group_tuning_engage(args, router)")
     assert pair_call < group_call
+
+
+def test_summary_lines_count_overshoot(capsys):
+    """Issue #6795: ``overshoot`` has its own bucket in both Summary lines."""
+    from kicad_tools.cli import route_cmd
+    from kicad_tools.router.diffpair_length_tuning import DiffPairTuneResult
+
+    results = {
+        ("A_P", "A_N"): DiffPairTuneResult(reason="overshoot", tolerance_mm=0.1),
+        ("B_P", "B_N"): DiffPairTuneResult(reason="overshoot", tolerance_mm=0.1),
+    }
+    for args, label in ((_args("lattice"), "lattice"), (_args("grid", length_match=True), "grid")):
+        router = _mock_router()
+        router.apply_diffpair_length_tuning.return_value = results
+        with (
+            patch.object(route_cmd, "_connectivity_snapshot", return_value=None),
+            patch.object(route_cmd, "_enforce_connectivity_invariant_or_exit"),
+        ):
+            route_cmd._run_diffpair_skew_tuning(router, args, quiet=False)
+        out = capsys.readouterr().out
+        assert "2 overshoot" in out, label
+
+
+def test_skew_tune_line_prints_message_for_non_success():
+    from kicad_tools.router.diffpair_length_tuning import DiffPairTuneResult
+
+    line = Autorouter._format_skew_tune_line(
+        "A_P",
+        "A_N",
+        DiffPairTuneResult(success=False, reason="overshoot", message="overshot the partner"),
+    )
+    assert "overshot the partner" in line

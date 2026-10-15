@@ -20103,6 +20103,15 @@ class Autorouter:
         if engage == "checker_skew_limit":
             route_length = self._checker_route_length(num_layers)
 
+        # Issue #6795: component count per net, for the uncoupled-length limit.
+        net_components: dict[str, int] = {}
+        if engage == "checker_skew_limit":
+            refs: dict[str, set[str]] = {}
+            for pad in self.pads.values():
+                if pad.net_name and pad.ref:
+                    refs.setdefault(pad.net_name, set()).add(pad.ref)
+            net_components = {name: len(r) for name, r in refs.items()}
+
         for dp in detected_pairs:
             # Default per-class info.  When a net class is not configured for
             # this pair (the common synthetic-test case) the tuner is
@@ -20112,6 +20121,7 @@ class Autorouter:
             tolerance_mm = 0.5
             intra_pair_clearance_mm = self.rules.trace_clearance
             length_critical = True
+            max_uncoupled_mm: float | None = None
 
             p_name = dp.pair.positive.net_name
             n_name = dp.pair.negative.net_name
@@ -20136,6 +20146,13 @@ class Autorouter:
                 )
                 tolerance_mm = thresholds.skew_mm
                 length_critical = True
+                from kicad_tools.validate.rules.diffpair_uncoupled_length import (
+                    uncoupled_limit,
+                )
+
+                max_uncoupled_mm, _how = uncoupled_limit(
+                    thresholds, max(net_components.get(p_name, 0), net_components.get(n_name, 0))
+                )
                 if thresholds.skew_severity != "error":
                     result = self._declined_skew_result(
                         dp, routes_by_net, tolerance_mm, thresholds.skew_severity, route_length
@@ -20172,6 +20189,7 @@ class Autorouter:
                     else None
                 ),
                 route_length=route_length,
+                max_uncoupled_mm=max_uncoupled_mm,
             )
             if (
                 engage == "checker_skew_limit"
@@ -20459,6 +20477,8 @@ class Autorouter:
         if result.inserts_applied:
             line += f", {result.inserts_applied} inserts"
         line += ")"
+        if not result.success and result.message and result.reason not in ("tuned",):
+            line += f" -- {result.message}"
         if result.tolerance_mm is not None and result.skew_after_mm > result.tolerance_mm:
             line += " -- STILL OVER LIMIT"
         return line

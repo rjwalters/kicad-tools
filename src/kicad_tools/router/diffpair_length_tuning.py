@@ -177,6 +177,7 @@ def tune_diff_pair_skew(
     fixed_segment_ids: set[int] | None = None,
     extra_clearance_ok: Callable[[list[Segment], int], bool] | None = None,
     route_length: Callable[[Route], float] | None = None,
+    max_uncoupled_mm: float | None = None,
 ) -> tuple[Route, Route, DiffPairTuneResult]:
     """Tune the skew of a detected diff pair by serpentining the shorter half.
 
@@ -235,6 +236,12 @@ def tune_diff_pair_skew(
             and the *checker's* shorter half gets the bump.  The serpentine
             only ever adds segment length; via length is constant across
             insertions.  ``None`` (default) keeps the segment-only measure.
+        max_uncoupled_mm: Issue #6795.  Optional uncoupled-length limit
+            (the one ``kct check`` enforces).  A candidate meander whose
+            shorter half measures more uncoupled length against the partner
+            than this is rejected like a failed placement and the next option
+            is tried; when none fits the pair keeps its pre-insert state.
+            ``None`` (default) applies no guard.
 
     Returns:
         ``(p_route, n_route, result)`` where ``p_route`` and ``n_route`` are
@@ -290,6 +297,8 @@ def tune_diff_pair_skew(
             n_route if n_route is not None else _empty_route(n_id, pair.pair.negative.net_name),
             result,
         )
+
+    from kicad_tools.validate.rules.diffpair_uncoupled_length import measure_uncoupled
 
     from .length import LengthTracker  # avoid cycle
 
@@ -391,6 +400,8 @@ def tune_diff_pair_skew(
             )
             if current_skew >= skew:
                 current_shorter = original_shorter_route
+                # Reverted to the original route: no insert survives (#6795).
+                result.inserts_applied = 0
             break
 
         candidate_route = None
@@ -417,6 +428,18 @@ def tune_diff_pair_skew(
             # An option that adds no copper is not an insert (issue #6788).
             if measure(cand_route) - measure(current_shorter) <= 1e-9:
                 generator_failure = "serpentine added no length"
+                continue
+            # Uncoupled-length guard (issue #6795): do not trade a skew error
+            # for an uncoupled-length error.
+            if (
+                max_uncoupled_mm is not None
+                and measure_uncoupled(
+                    _checker_segments(cand_route.segments),
+                    _checker_segments(longer_route.segments),
+                )
+                > max_uncoupled_mm
+            ):
+                generator_failure = "uncoupled length exceeds limit"
                 continue
             # Post-insertion DRC self-check.  The candidate route's new
             # segments must not violate intra-pair clearance against the
@@ -503,6 +526,11 @@ def tune_diff_pair_skew(
         assert longer_route is n_route
         assert longer_route.segments is original_longer_segments
         return current_shorter, n_route, result
+
+
+def _checker_segments(segments: list[Segment]) -> list[tuple[float, float, float, float, str]]:
+    """Segments as the ``(x1, y1, x2, y2, layer)`` tuples the uncoupled-length rule reads."""
+    return [(s.x1, s.y1, s.x2, s.y2, str(s.layer)) for s in segments]
 
 
 # ---------------------------------------------------------------------------
