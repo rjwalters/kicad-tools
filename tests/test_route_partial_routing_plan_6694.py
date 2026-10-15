@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import importlib.util
 import json
+from pathlib import Path
 
 from kicad_tools.cli import route_cmd
 from kicad_tools.router.routing_plan import RoutingPlan
@@ -50,6 +52,7 @@ def test_partial_save_writes_plan_sidecar(tmp_path):
     assert partial.exists() and not out.exists()
     data = json.loads(sidecar.read_text())
     assert data["source"]["pcb"] == str(partial)
+    assert RoutingPlan.from_dict(data) is not None
 
 
 def test_partial_save_without_plan_writes_no_sidecar(tmp_path):
@@ -74,3 +77,24 @@ def test_plan_failure_does_not_lose_partial_board(tmp_path, monkeypatch):
     monkeypatch.setattr(route_cmd, "_write_routing_plan_sidecar", boom)
     assert route_cmd._save_partial_results() is True
     assert (tmp_path / "out_partial.kicad_pcb").exists()
+
+
+def test_fleet_table_prefers_sidecar_with_board(tmp_path):
+    spec = importlib.util.spec_from_file_location(
+        "routing_plan_fleet_table",
+        Path(__file__).resolve().parent.parent / "scripts" / "routing_plan_fleet_table.py",
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    payload = json.dumps(RoutingPlan().to_dict())
+    (tmp_path / "out.routing_plan.json").write_text(payload)  # no sibling board
+    (tmp_path / "out_partial.routing_plan.json").write_text(payload)
+    (tmp_path / "out_partial.kicad_pcb").write_text(_BOARD)
+
+    _, sidecar = mod._load_plan(tmp_path)
+    assert sidecar.name == "out_partial.routing_plan.json"
+
+    (tmp_path / "out_partial.kicad_pcb").unlink()  # nothing measurable: old behaviour
+    _, sidecar = mod._load_plan(tmp_path)
+    assert sidecar.name == "out.routing_plan.json"
