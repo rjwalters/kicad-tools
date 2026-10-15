@@ -278,3 +278,44 @@ def test_find_all_pad_bboxes_appends_shape() -> None:
     q = by_shape["roundrect"]
     assert q[2] - q[0] == pytest.approx(1.5)
     assert q[3] - q[1] == pytest.approx(1.5)
+
+
+# ---------------------------------------------------------------------------
+# Channel-centre sampling (board 07 cascade)
+# ---------------------------------------------------------------------------
+
+
+def test_extended_escape_samples_channel_centre_on_1_27mm_bga() -> None:
+    """Board 07's U4 is a 1.27 mm-pitch BGA of 0.45 mm square lands.
+
+    The fixed 0.5 mm axial step lands the escape via 0.197 mm from the
+    neighbour's corner (the DRC violation the circle model hid).  Once that
+    is rejected, the next fixed step (2.0 mm) took the NEXT pad's channel and
+    stranded U4.E6 on the board.  Half the pitch -- the channel centre --
+    is sampled instead.
+    """
+    bboxes, circles = _grid(1.27, "rect")
+    legacy = calculate_extended_escape_position(
+        STITCHED, 0.5, VIA_SIZE, [], CLEARANCE, other_net_pads=circles
+    )
+    assert legacy is not None
+    # The circle model still accepts the 0.5 mm step, 3 um inside clearance.
+    assert legacy[0] == pytest.approx(0.5)
+    assert _min_via_gap(legacy, bboxes) == pytest.approx(0.197, abs=1e-3)
+
+    fixed = calculate_extended_escape_position(
+        STITCHED, 0.5, VIA_SIZE, [], CLEARANCE, other_net_pads=circles, other_net_pad_bboxes=bboxes
+    )
+    assert fixed is not None
+    assert fixed[0] == pytest.approx(1.27 / 2)
+    assert _min_via_gap(fixed, bboxes) >= CLEARANCE
+
+
+def test_round_pad_1_27mm_bga_keeps_first_step() -> None:
+    """Round lands clear the 0.5 mm step, so the channel centre is not used."""
+    bboxes, circles = _grid(1.27, "circle")
+    pos = calculate_extended_escape_position(
+        STITCHED, 0.5, VIA_SIZE, [], CLEARANCE, other_net_pads=circles, other_net_pad_bboxes=bboxes
+    )
+    assert pos is not None
+    assert pos[0] == pytest.approx(0.5)

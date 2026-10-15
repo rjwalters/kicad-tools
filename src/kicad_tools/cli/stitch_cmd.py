@@ -3099,6 +3099,30 @@ def calculate_extended_escape_position(
     ]
     breakout_offsets = [d for d in breakout_offsets if d <= escape_distance]
 
+    # Issue #6683: sample the channel centre between pad rows.  On a
+    # 1.27 mm-pitch BGA the fixed 0.5 / 0.8 / 1.0 mm axial steps put the via
+    # 3 um inside clearance of a square neighbour's corner, which the old
+    # inscribed-circle pad model hid; the next legal step (2.0 mm) then
+    # steals the NEXT pad's channel and cascades into a stranded pad.  Half
+    # the grid pitch is the interstitial site with the most room.  Only
+    # added when it is no shorter than the existing first step, so
+    # fine-pitch rows (QFP) keep their candidate order.
+    for axis in (0, 1):
+        deltas = [
+            abs((px, py)[axis] - (pad.x, pad.y)[axis])
+            for px, py in nearby_pads
+            if abs((px, py)[axis] - (pad.x, pad.y)[axis]) > 0.1
+        ]
+        if not deltas:
+            continue
+        half_pitch = min(deltas) / 2
+        if (
+            axial_distances
+            and axial_distances[0] <= half_pitch <= escape_distance
+            and all(abs(half_pitch - d) > 0.02 for d in axial_distances)
+        ):
+            axial_distances = sorted([*axial_distances, half_pitch])
+
     # Hole-to-copper guard (see calculate_via_position).
     hole_extra = 0.0
     if via_drill > 0:
