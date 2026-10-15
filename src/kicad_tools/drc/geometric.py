@@ -22,7 +22,6 @@ from __future__ import annotations
 import logging
 import subprocess
 import tempfile
-import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -40,6 +39,7 @@ __all__ = [
     "GeometricDRCResult",
     "SavedFillCheck",
     "check_saved_fill",
+    "classify_returncode",
     "describe_returncode",
     "load_kicad_cli_json_report",
     "run_geometric_drc",
@@ -53,19 +53,34 @@ REASON_OK = "ok"  # kicad-cli ran and produced a report
 REASON_ABSENT = "kicad_cli_absent"  # kicad-cli not found on PATH
 REASON_TIMEOUT = "kicad_cli_timeout"  # kicad-cli exceeded the timeout budget
 REASON_NO_REPORT = "kicad_cli_no_report"  # kicad-cli ran but wrote no report
-REASON_CRASH = "kicad_cli_crash"  # kicad-cli raised/crashed/exited non-zero
-# kicad-cli rejected its command line (exit 1, ``EXIT_CODES::ERR_ARGS``): an
-# option kct passed is not supported by this kicad-cli version (Issue #6724).
+REASON_CRASH = "kicad_cli_crash"  # kicad-cli was killed by a signal or raised
+# kicad-cli rejected an option kct passed (exit 1 with an ``Unknown argument:
+# <opt>`` line): this kicad-cli version does not support it (Issue #6724).
 REASON_UNSUPPORTED = "kicad_cli_unsupported_option"
+# kicad-cli could not load the board (exit 3, ``EXIT_CODES::ERR_INVALID_INPUT_FILE``),
+# most often a board saved by a newer KiCad than this kicad-cli (Issue #6724).
+REASON_LOAD_FAILED = "kicad_cli_load_failed"
+# kicad-cli exited with any other non-zero status (Issue #6724).  Exit 1 without
+# an ``Unknown argument`` line lands here too: a wrapper/launcher failure or a
+# missing argument is not "unsupported option".
+REASON_EXIT_ERROR = "kicad_cli_exit_error"
 
 #: ``kicad-cli``'s argument/usage-error exit status (``EXIT_CODES::ERR_ARGS``).
 #: KiCad 9's ``pcb drc`` returns it, prints ``Unknown argument: --refill-zones``
-#: plus its usage text on stdout, and writes no report.
+#: plus its usage text on stdout, and writes no report.  Exit 1 alone is not
+#: proof of a usage error: only the ``Unknown argument`` line is.
 KICAD_CLI_ERR_ARGS = 1
 
 #: ``kicad-cli``'s ``EXIT_CODES::ERR_INVALID_INPUT_FILE``: the board failed to
 #: load.  KiCad 9 gives it for a KiCad 10-format ``.kicad_pcb``.
 KICAD_CLI_ERR_INVALID_INPUT_FILE = 3
+
+#: Note text for a board kicad-cli could not load (Issue #6775).
+LOAD_FAILED_DETAIL = (
+    "kicad-cli could not load the board (exit 3); a likely cause is a board "
+    "file format newer than this kicad-cli (e.g. a KiCad 10 board on "
+    "KiCad 8/9) -- upgrade KiCad"
+)
 
 #: ``kicad-cli pcb drc`` exit codes that can accompany a complete report:
 #: 0, and 5 (``EXIT_CODES::ERR_RC_VIOLATIONS``, only with
@@ -78,14 +93,39 @@ KICAD_CLI_DRC_OK_EXIT_CODES: frozenset[int] = frozenset({0, 5})
 #: usable report (Issue #6724).  Unlike :data:`REASON_ABSENT` (a KiCad-less
 #: environment, where callers may soft-degrade), these are failures of the
 #: check itself: the board was not judged and must not read as clean.
-FAILED_REASONS: frozenset[str] = frozenset({REASON_CRASH, REASON_NO_REPORT, REASON_UNSUPPORTED})
+FAILED_REASONS: frozenset[str] = frozenset(
+    {REASON_CRASH, REASON_NO_REPORT, REASON_UNSUPPORTED, REASON_LOAD_FAILED, REASON_EXIT_ERROR}
+)
 
 
-def describe_returncode(returncode: int) -> str:
+def classify_returncode(returncode: int, stdout: object = None, stderr: object = None) -> str:
+    """The ``REASON_*`` for a kicad-cli exit status outside the OK set (Issue #6724).
+
+    * negative (signal kill, e.g. the OOM killer's SIGKILL): :data:`REASON_CRASH`
+    * 1 **with** an ``Unknown argument: <opt>`` line: :data:`REASON_UNSUPPORTED`
+    * 3: :data:`REASON_LOAD_FAILED`
+    * anything else, including exit 1 without that line: :data:`REASON_EXIT_ERROR`
+    """
+    if returncode < 0:
+        return REASON_CRASH
+    if returncode == KICAD_CLI_ERR_ARGS and unknown_argument(stdout, stderr):
+        return REASON_UNSUPPORTED
+    if returncode == KICAD_CLI_ERR_INVALID_INPUT_FILE:
+        return REASON_LOAD_FAILED
+    return REASON_EXIT_ERROR
+
+
+def describe_returncode(returncode: int, *, stdout: object = None, stderr: object = None) -> str:
     """Human-readable description of a non-zero kicad-cli exit status.
 
     A negative ``returncode`` means the process was killed by that signal
     (``-9`` is SIGKILL, which is what the Linux OOM killer sends).
+
+    Exit 1 is described as an unsupported option only when ``stdout`` /
+    ``stderr`` carry kicad-cli's ``Unknown argument: <opt>`` line; otherwise
+    it is a plain "exited with status 1" (Issue #6724).  Exit 3 says the board
+    could not be loaded.  The streams are only inspected, never quoted:
+    callers append their own stderr tail.
     """
     if returncode < 0:
         import signal
@@ -97,16 +137,17 @@ def describe_returncode(returncode: int) -> str:
         hint = " (out of memory?)" if returncode == -signal.SIGKILL else ""
         return f"kicad-cli was killed by {name}{hint}"
     if returncode == KICAD_CLI_ERR_ARGS:
+        option = unknown_argument(stdout, stderr)
+        if option:
+            return (
+                f"this kicad-cli does not support {option} (exit 1, usage error); "
+                "a newer KiCad version is required for it"
+            )
         # Exit 1 is ERR_ARGS, but a wrapper or launcher failure exits 1 too;
-        # only an ``Unknown argument:`` line (see :func:`unknown_argument`)
-        # proves an unsupported option, so say no more than the status here.
+        # without an ``Unknown argument:`` line say no more than the status.
         return "kicad-cli exited with status 1 (usage or launch error)"
     if returncode == KICAD_CLI_ERR_INVALID_INPUT_FILE:
-        return (
-            "kicad-cli could not load the board (exit 3); a likely cause is a board "
-            "file format newer than this kicad-cli (e.g. a KiCad 10 board on "
-            "KiCad 8/9) -- upgrade KiCad"
-        )
+        return LOAD_FAILED_DETAIL
     return f"kicad-cli exited with status {returncode}"
 
 
@@ -206,6 +247,8 @@ class GeometricDRCResult:
     reason: str = REASON_OK
     unconnected_items: list[DRCViolation] = field(default_factory=list)
     error_violations: list[DRCViolation] = field(default_factory=list)
+    #: kicad-cli's exit status when it failed (Issue #6724), so callers can
+    #: give per-cause advice (memory only for a SIGKILL).  ``None`` otherwise.
     returncode: int | None = None
 
     @property
@@ -272,17 +315,20 @@ def run_geometric_drc(
     ``ran=False`` and an explanatory ``note`` so callers can degrade
     gracefully without ever silently overstating cleanliness.
 
-    Issue #6724: a kicad-cli killed by a signal (e.g. the OOM killer) or
-    exiting non-zero returns ``reason=REASON_CRASH``; a missing, empty,
-    truncated or non-DRC report returns ``reason=REASON_NO_REPORT``.  Both
-    set :attr:`GeometricDRCResult.failed`.  The report file is no longer
+    Issue #6724: a kicad-cli killed by a signal (e.g. the OOM killer) returns
+    ``reason=REASON_CRASH``; exit 3 (board failed to load, often a newer
+    KiCad file format) ``REASON_LOAD_FAILED``; exit 1 with an ``Unknown
+    argument: <opt>`` line ``REASON_UNSUPPORTED`` naming the option; any other
+    non-zero exit ``REASON_EXIT_ERROR`` with kicad-cli's stderr tail; a
+    missing, empty, truncated or non-DRC report ``REASON_NO_REPORT``.  All set
+    :attr:`GeometricDRCResult.failed`.  The report file is no longer
     pre-created, so an empty file can never pass for a clean run.
 
-    ``--refill-zones`` only exists from KiCad 10, so it is passed only when
-    the kicad-cli advertises it (``_kicad_drc_supports_refill``, memoised).
-    KiCad 8/9 run the check without it instead of rejecting the command line.
-    A command line kicad-cli does reject (exit 1) returns
-    ``reason=REASON_UNSUPPORTED`` naming the option, never a crash.
+    ``--refill-zones`` only exists from KiCad 10.  It is passed unless the
+    kicad-cli's ``pcb drc --help`` definitively omits it; when that probe is
+    unknown (killed, timed out) it is attempted, and a kicad-cli that rejects
+    it is re-run once without it.  Every run without a requested refill logs
+    a WARNING (see :func:`kicad_tools.cli.runner.run_kicad_drc_command`).
 
     Args:
         pcb_path: Path to the ``.kicad_pcb`` file to check.
@@ -319,33 +365,11 @@ def run_geometric_drc(
         return GeometricDRCResult(ran=False, note=KICAD_CLI_ABSENT_NOTE, reason=REASON_ABSENT)
 
     # Issue #6724: ``--refill-zones`` only exists from KiCad 10.  KiCad 8/9's
-    # ``pcb drc`` rejects it (exit 1, usage text, no report), so passing it
-    # unconditionally meant the geometric DRC never ran there.  Pass it only
-    # when this kicad-cli advertises it (memoised probe).
-    #
-    # A probe that was killed, failed or timed out is not "no refill": the
-    # answer is unknown, so the flag is passed and kicad-cli's own
-    # ``Unknown argument`` rejection (below) decides, rather than silently
-    # checking stale fills.  The probe's time comes out of ``timeout``.
-    probe_started = time.monotonic()
-    use_refill = False
-    if refill_zones:
-        from kicad_tools.cli import runner as _runner
-
-        use_refill = bool(_runner._kicad_drc_supports_refill(Path(kicad_cli)))
-        inconclusive = getattr(_runner._kicad_drc_supports_refill, "inconclusive", None)
-        if not use_refill and callable(inconclusive) and inconclusive(Path(kicad_cli)):
-            logger.warning(
-                "kicad-cli %s: could not probe --refill-zones support; passing it anyway",
-                kicad_cli,
-            )
-            use_refill = True
-        elif not use_refill:
-            logger.info(
-                "kicad-cli %s has no --refill-zones; running geometric DRC without it",
-                kicad_cli,
-            )
-    run_timeout = max(timeout - (time.monotonic() - probe_started), 1.0)
+    # ``pcb drc`` rejects it (exit 1, ``Unknown argument``, no report).
+    # ``run_kicad_drc_command`` passes it unless the capability probe said
+    # "unsupported", retries without it when kicad-cli rejects it, and logs a
+    # WARNING whenever the DRC runs without a requested refill.
+    from kicad_tools.cli.runner import run_kicad_drc_command
 
     # Issue #6724: never pre-create the report.  A pre-created empty file
     # survived a killed kicad-cli and parsed as a clean, zero-violation
@@ -354,25 +378,30 @@ def run_geometric_drc(
     try:
         with tempfile.TemporaryDirectory(prefix="kct-geodrc-") as td:
             report_path = Path(td) / "drc.json"
-            cmd = [
-                str(kicad_cli),
-                "pcb",
-                "drc",
-                *(["--refill-zones"] if use_refill else []),
-                *(["--all-track-errors"] if all_track_errors else []),
-                "--format",
-                "json",
-                # Request all severities so warning-only native checks such as
-                # copper_sliver can be reconciled.  ``by_type`` below remains
-                # error-only for backward compatibility with existing gates.
-                "--severity-all",
-                "--units",
-                "mm",
-                "--output",
-                str(report_path),
-                str(pcb_path),
-            ]
-            proc = subprocess.run(cmd, capture_output=True, timeout=run_timeout, check=False)
+
+            def build_cmd(refill: bool) -> list[str]:
+                return [
+                    str(kicad_cli),
+                    "pcb",
+                    "drc",
+                    *(["--refill-zones"] if refill else []),
+                    *(["--all-track-errors"] if all_track_errors else []),
+                    "--format",
+                    "json",
+                    # Request all severities so warning-only native checks such
+                    # as copper_sliver can be reconciled.  ``by_type`` below
+                    # remains error-only for backward compatibility.
+                    "--severity-all",
+                    "--units",
+                    "mm",
+                    "--output",
+                    str(report_path),
+                    str(pcb_path),
+                ]
+
+            proc, _refilled = run_kicad_drc_command(
+                build_cmd, Path(kicad_cli), refill_zones=refill_zones, timeout=timeout
+            )
 
             # Issue #6724: without ``--exit-code-violations`` kicad-cli exits 0
             # whether or not it finds violations (verified on 10.0.6: a board
@@ -382,25 +411,15 @@ def run_geometric_drc(
             # still needs a complete report below.
             returncode = getattr(proc, "returncode", 0)
             if isinstance(returncode, int) and returncode not in KICAD_CLI_DRC_OK_EXIT_CODES:
-                reason = REASON_CRASH
-                detail = describe_returncode(returncode)
-                option = (
-                    unknown_argument(getattr(proc, "stdout", None), getattr(proc, "stderr", None))
-                    if returncode == KICAD_CLI_ERR_ARGS
-                    else None
-                )
-                if option:
-                    # Only an ``Unknown argument:`` line proves an unsupported
-                    # option; any other exit 1 is a plain failure below.
-                    reason = REASON_UNSUPPORTED
-                    detail = (
-                        f"this kicad-cli does not support {option} (exit 1, usage "
-                        "error); a newer KiCad version is required for it"
-                    )
-                else:
-                    stderr = _stderr_tail(getattr(proc, "stderr", None))
-                    if stderr:
-                        detail = f"{detail}: {stderr}"
+                stdout = getattr(proc, "stdout", None)
+                stderr = getattr(proc, "stderr", None)
+                reason = classify_returncode(returncode, stdout, stderr)
+                detail = describe_returncode(returncode, stdout=stdout, stderr=stderr)
+                if reason != REASON_UNSUPPORTED:
+                    # Anything but a named usage error: show what kicad-cli said.
+                    tail = _stderr_tail(stderr)
+                    if tail:
+                        detail = f"{detail}: {tail}"
                 logger.warning("Geometric DRC (kicad-cli) failed: %s", detail)
                 return GeometricDRCResult(
                     ran=False,

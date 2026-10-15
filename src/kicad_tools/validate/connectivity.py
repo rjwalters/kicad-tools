@@ -510,7 +510,6 @@ class ConnectivityValidator:
         if self.pcb_path is None:
             return None
 
-        import subprocess
         import tempfile
 
         from kicad_tools.cli.runner import find_kicad_cli
@@ -533,28 +532,28 @@ class ConnectivityValidator:
                     stacklevel=2,
                 )
             return None
-        from kicad_tools.cli.runner import _kicad_drc_supports_refill
+        from kicad_tools.cli.runner import run_kicad_drc_command
 
         # Issue #6724: KiCad 8/9 reject --refill-zones (exit 1, no report);
-        # pass it only when this kicad-cli supports it.
-        refill_args = ["--refill-zones"] if _kicad_drc_supports_refill(Path(kicad_cli)) else []
+        # it is passed unless this kicad-cli definitively lacks it, and a
+        # rejected run is retried without it.
         with tempfile.NamedTemporaryFile(suffix=".json") as report_file:
-            proc = subprocess.run(
-                [
+            proc, _refilled = run_kicad_drc_command(
+                lambda refill: [
                     str(kicad_cli),
                     "pcb",
                     "drc",
-                    *refill_args,
+                    *(["--refill-zones"] if refill else []),
                     "--format",
                     "json",
                     "-o",
                     report_file.name,
                     str(self.pcb_path),
                 ],
-                capture_output=True,
-                text=True,
+                Path(kicad_cli),
+                refill_zones=True,
                 timeout=120,
-                check=False,
+                text=True,
             )
             if proc.returncode not in (0, 5):
                 import warnings
