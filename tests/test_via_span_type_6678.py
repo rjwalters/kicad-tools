@@ -121,7 +121,10 @@ def _board(tmp_path: Path, vias: str = "") -> tuple[PCB, Path]:
 @pytest.mark.parametrize(
     "via_text,expected",
     [
-        ('(via buried (at 100 100) (size 0.45) (drill 0.2) (layers "In1.Cu" "In2.Cu")', SPAN_IN1_IN2),
+        (
+            '(via buried (at 100 100) (size 0.45) (drill 0.2) (layers "In1.Cu" "In2.Cu")',
+            SPAN_IN1_IN2,
+        ),
         ('(via blind (at 100 100) (size 0.45) (drill 0.2) (layers "F.Cu" "In1.Cu")', SPAN_F_IN1),
         ('(via micro (at 100 100) (size 0.3) (drill 0.1) (layers "F.Cu" "In1.Cu")', SPAN_F_IN1),
         ('(via (at 100 100) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu")', SPAN_THROUGH),
