@@ -12,7 +12,18 @@
       "command": "tracemaker route <in.kicad_pcb> -o <out.kicad_pcb> --work <tracemaker_work> --seed <seed> --threads <threads> --no-gpu --no-kb --json <summary.json>",
       "cli_verified_from": "src/app/main.cpp at the pinned commit (route subcommand options)",
       "learned_state": "--no-kb: the cross-run knowledge base is neither read nor written",
-      "determinism_note": "upstream claims output is identical at any --threads under --work; not verified by this protocol"
+      "determinism_note": "upstream claims output is identical at any --threads under --work; not verified by this protocol",
+      "build_environment": {
+        "os": "Ubuntu 24.04",
+        "cmake": "3.28",
+        "compiler": "g++ 13 (the presets' g++-15 is not needed)",
+        "system_packages": "Boost, Eigen3, SQLite3 and zstd development packages from the host (versions not recorded)",
+        "scratch_prefix_deps": {
+          "nlohmann_json": "v3.11.3 (-DJSON_BuildTests=OFF)",
+          "CLI11": "v2.4.2 (-DCLI11_BUILD_TESTS=OFF -DCLI11_BUILD_EXAMPLES=OFF)"
+        },
+        "scratch_prefix_recipe": "clone each at the tag, cmake -S <src> -B <src>/b -DCMAKE_INSTALL_PREFIX=/tmp/fleet/prefix && cmake --install <src>/b; then configure TraceMaker with -DCMAKE_PREFIX_PATH=/tmp/fleet/prefix. Nothing is installed on the host."
+      }
     },
     "fastroute": {
       "repo_url": "https://github.com/parisxmas/fastroute",
