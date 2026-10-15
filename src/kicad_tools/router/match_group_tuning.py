@@ -174,6 +174,7 @@ from .optimizer.serpentine import (
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
 
+    from .kicad_length import KicadLengthModel
     from .match_group_length import MatchGroup
     from .primitives import Pad, Route, Segment
 
@@ -504,6 +505,7 @@ def tune_match_group_v2(
     board_thickness_mm: float | None = None,
     num_copper_layers: int = 4,
     blind_buried_supported: bool = True,
+    length_model: KicadLengthModel | None = None,
     fixed_segment_ids: set[int] | None = None,
     pair_fallbacks: bool = False,
     pair_skew_limits_mm: dict[tuple[int, int], float] | None = None,
@@ -744,6 +746,7 @@ def tune_match_group_v2(
             board_thickness_mm=board_thickness_mm,
             num_copper_layers=num_copper_layers,
             blind_buried_supported=blind_buried_supported,
+            length_model=length_model,
             pair_fallbacks=pair_fallbacks,
             pair_skew_limits_mm=pair_skew_limits_mm,
         )
@@ -764,6 +767,7 @@ def tune_match_group_v2(
         board_thickness_mm=board_thickness_mm,
         num_copper_layers=num_copper_layers,
         blind_buried_supported=blind_buried_supported,
+        length_model=length_model,
         fixed_segment_ids=fixed_segment_ids,
     )
 
@@ -785,6 +789,7 @@ def _tune_match_group_single_ended(
     board_thickness_mm: float | None = None,
     num_copper_layers: int = 4,
     blind_buried_supported: bool = True,
+    length_model: KicadLengthModel | None = None,
     fixed_segment_ids: set[int] | None = None,
     reference_length_mm: float | None = None,
     hint_routes: dict[int, Route] | None = None,
@@ -864,6 +869,7 @@ def _tune_match_group_single_ended(
             board_thickness_mm,
             num_copper_layers,
             blind_buried_supported=blind_buried_supported,
+            length_model=length_model,
         )
 
     member_lengths: dict[int, float] = {}
@@ -2668,6 +2674,7 @@ def _tune_pair_lane_with_fallbacks(
     board_thickness_mm: float | None,
     num_copper_layers: int,
     blind_buried_supported: bool,
+    length_model: KicadLengthModel | None = None,
     measure: Callable[[Route], float],
     pair_skew_limit_mm: float | None,
 ) -> tuple[Route, Route, int]:
@@ -2964,6 +2971,7 @@ def _tune_pair_lane_with_fallbacks(
             board_thickness_mm=board_thickness_mm,
             num_copper_layers=num_copper_layers,
             blind_buried_supported=blind_buried_supported,
+            length_model=length_model,
             fixed_segment_ids=fixed_segment_ids,
             measure=measure,
             skew_allowance_mm=skew_allowance,
@@ -3028,6 +3036,7 @@ def _tune_pair_legs_single_ended(
     board_thickness_mm: float | None,
     num_copper_layers: int,
     blind_buried_supported: bool,
+    length_model: KicadLengthModel | None = None,
     fixed_segment_ids: set[int] | None,
     measure: Callable[[Route], float],
     skew_allowance_mm: float,
@@ -3101,6 +3110,7 @@ def _tune_pair_legs_single_ended(
             board_thickness_mm=board_thickness_mm,
             num_copper_layers=num_copper_layers,
             blind_buried_supported=blind_buried_supported,
+            length_model=length_model,
             fixed_segment_ids=locked,
             reference_length_mm=target,
             hint_routes={partner: routes_by_net[partner], **other_member_routes},
@@ -3147,6 +3157,7 @@ def _tune_match_group_of_pairs(
     board_thickness_mm: float | None = None,
     num_copper_layers: int = 4,
     blind_buried_supported: bool = True,
+    length_model: KicadLengthModel | None = None,
     pair_fallbacks: bool = False,
     pair_skew_limits_mm: dict[tuple[int, int], float] | None = None,
 ) -> dict[int, tuple[Route, TuneResult]]:
@@ -3230,6 +3241,7 @@ def _tune_match_group_of_pairs(
             board_thickness_mm,
             num_copper_layers,
             blind_buried_supported=blind_buried_supported,
+            length_model=length_model,
         )
 
     member_lengths: dict[int, float] = {}
@@ -3446,6 +3458,7 @@ def _tune_match_group_of_pairs(
                 board_thickness_mm=board_thickness_mm,
                 num_copper_layers=num_copper_layers,
                 blind_buried_supported=blind_buried_supported,
+                length_model=length_model,
                 measure=_measure,
                 pair_skew_limit_mm=(pair_skew_limits_mm or {}).get((p_id, n_id)),
             )
@@ -3760,6 +3773,7 @@ def _tune_match_group_of_pairs(
             board_thickness_mm=board_thickness_mm,
             num_copper_layers=num_copper_layers,
             blind_buried_supported=blind_buried_supported,
+            length_model=length_model,
             reference_length_mm=ref_length,
         )
         for nid, (r_route, r_result) in scalar_results.items():

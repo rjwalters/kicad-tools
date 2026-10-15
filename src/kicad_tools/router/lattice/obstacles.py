@@ -526,6 +526,65 @@ class CommittedCopper:
         # its class gap instead of collapsing to the global via gap.
         self.vias: list[tuple[Pt, int, float]] = []
         self.via_copper: list[tuple[Pt, int, float, tuple[int, ...]]] = []
+        # Issue #6703: trial journal (see :meth:`begin_trial`).  ``None`` when
+        # no trial is open -- the pre-#6703 add path, byte-for-byte.
+        self._journal: list[tuple[int, Pt, Pt, int, float, float]] | None = None
+        self._trial_depth = 0
+
+    # -- trial commits (issue #6703) ---------------------------------------
+
+    def begin_trial(self) -> tuple[int, int, int]:
+        """Open a (nestable) trial; returns the mark to end it with.
+
+        Every commit made while a trial is open is journaled, so
+        :meth:`rollback_trial` can undo exactly the commits made since its
+        mark.  The uncoupled diff-pair fallback (#6703) uses this to try
+        several leg orders, keep the best-matched one and roll the rest back.
+        """
+        if self._journal is None:
+            self._journal = []
+        self._trial_depth += 1
+        return (len(self._journal), len(self.vias), len(self.via_copper))
+
+    def rollback_trial(self, mark: tuple[int, int, int]) -> None:
+        """Undo every commit made since ``mark`` and close that trial."""
+        journal = self._journal
+        if journal is None or self._trial_depth <= 0:
+            raise RuntimeError("no CommittedCopper trial is open")
+        while len(journal) > mark[0]:
+            layer, a, b, net, hw, clr = journal.pop()
+            index = self.copper[layer]
+            item = (a, b, net, hw, clr)
+            for key in index._cells_for_seg(a, b, pad=hw + clr + 0.5):
+                bucket = index.buckets[key]
+                # Commits append, so a reverse-order undo pops each item
+                # from the tail of every cell it was added to.
+                if not bucket or bucket[-1] != item:
+                    raise RuntimeError("CommittedCopper trial journal out of sync")
+                bucket.pop()
+        del self.vias[mark[1] :]
+        del self.via_copper[mark[2] :]
+        self._end_trial()
+
+    def keep_trial(self, mark: tuple[int, int, int]) -> None:
+        """Close the trial opened at ``mark`` keeping its commits.
+
+        Inside an enclosing trial the commits stay journaled, so the outer
+        trial can still roll them back.
+        """
+        if self._journal is None or self._trial_depth <= 0:
+            raise RuntimeError("no CommittedCopper trial is open")
+        self._end_trial()
+
+    def _end_trial(self) -> None:
+        self._trial_depth -= 1
+        if self._trial_depth == 0:
+            self._journal = None
+
+    def _add_seg(self, layer: int, a: Pt, b: Pt, net: int, hw: float, clr: float) -> None:
+        self.copper[layer].add(a, b, net, hw, clr)
+        if self._journal is not None:
+            self._journal.append((layer, a, b, net, hw, clr))
 
     # -- mutation --------------------------------------------------------
 
@@ -542,7 +601,7 @@ class CommittedCopper:
         clr = self.clearance if clearance is None else clearance
         for a, b in zip(points, points[1:], strict=False):
             if dist(a, b) > 1e-9:
-                self.copper[layer].add(a, b, net, half_width, clr)
+                self._add_seg(layer, a, b, net, half_width, clr)
 
     def add_run_widths(
         self,
@@ -564,7 +623,7 @@ class CommittedCopper:
         clr = self.clearance if clearance is None else clearance
         for (a, b), hw in zip(zip(points, points[1:], strict=False), seg_halves, strict=False):
             if dist(a, b) > 1e-9:
-                self.copper[layer].add(a, b, net, hw, clr)
+                self._add_seg(layer, a, b, net, hw, clr)
 
     def add_via(
         self,

@@ -212,9 +212,10 @@ def test_auto_path_measures_skew_with_via_barrels_like_the_checker():
     """07rf regression guard: the checker counts drilled via length.
 
     P is 20.0 mm of track with no vias; N is 18.5 mm of track plus two
-    through vias (2 x 1.6 mm on the default 1.6 mm board), i.e. 21.7 mm as
+    through vias (2 x 1.58 mm: KiCad's stackup span on the default 1.6 mm
+    board, Issue #6725), i.e. 21.66 mm as
     ``kct check`` measures it.  A via-blind tuner would lengthen N and push
-    the checker's skew from 1.7 mm up; the auto path must lengthen P.
+    the checker's skew from 1.66 mm up; the auto path must lengthen P.
     """
     from kicad_tools.router.primitives import Via
 
@@ -231,13 +232,13 @@ def test_auto_path_measures_skew_with_via_barrels_like_the_checker():
     n_segments = ar.routes[1].segments
     measure = ar._checker_route_length(2)
     before = abs(measure(ar.routes[0]) - measure(ar.routes[1]))
-    assert before == pytest.approx(1.7)
+    assert before == pytest.approx(1.66)
 
     results = ar.apply_diffpair_length_tuning(
         detected_pairs=_pairs(ar), verbose=False, engage="checker_skew_limit"
     )
     result = results[(P_NAME, N_NAME)]
-    assert result.skew_before_mm == pytest.approx(1.7)
+    assert result.skew_before_mm == pytest.approx(1.66)
     by_net = {r.net: r for r in ar.routes}
     assert by_net[2].segments == n_segments  # the checker's longer half is never touched
     after = abs(measure(by_net[1]) - measure(by_net[2]))

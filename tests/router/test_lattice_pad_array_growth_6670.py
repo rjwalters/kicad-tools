@@ -98,13 +98,29 @@ def _min_gap(routes: dict, pads: list[Pad]) -> float:
     )
 
 
-def test_fallback_legs_through_a_gnd_ball_field_keep_the_power_floor() -> None:
+def _partner_blind_fallback(monkeypatch) -> None:
+    """Route fallback legs the pre-#6703 way (P, then N, as unrelated nets).
+
+    Issue #6703 searches partner-aware fallback legs at the strictest pad
+    class, so on this fixture they keep the floor without any growth round.
+    The growth mechanism under test is still the only remedy for partner-blind
+    legs, so this test routes them that way.
+    """
+
+    def blind(self, pc, **kw):
+        return self._partner_blind_legs(pc, **kw), True
+
+    monkeypatch.setattr(LatticePathfinder, "_partner_aware_legs", blind)
+
+
+def test_fallback_legs_through_a_gnd_ball_field_keep_the_power_floor(monkeypatch) -> None:
     """The 06rf mechanism, small: legs routed past neutralised GND balls.
 
     Before the fix the second growth round grew only the newly hit balls and
     the leg landed next to yet another one, leaving copper the backstop
     would delete.  Now the whole part grows and the legs keep 0.2 mm.
     """
+    _partner_blind_fallback(monkeypatch)
     pf, pc, gnd = _bga_pair()
     routes, stats = pf.route_netset([], coupled=[pc], uncoupled_fallback=True)
     assert pf.pair_outcomes[pc.key].startswith("uncoupled-fallback:")
@@ -117,6 +133,22 @@ def test_fallback_legs_through_a_gnd_ball_field_keep_the_power_floor() -> None:
     assert rounds and all(r.kept for r in rounds)
     # The shortfall moved to another U2 ball, so the last round grew all of U2.
     assert rounds[-1].footprints == ("U2",)
+
+
+def test_partner_aware_fallback_legs_keep_the_power_floor_without_growth() -> None:
+    """Issue #6703: partner-aware legs are searched at the strictest pad class.
+
+    The same pair keeps 0.2 mm from every GND ball on the first negotiation,
+    so no grown-keep-out round (and no lattice rebuild) is needed.
+    """
+    pf, pc, gnd = _bga_pair()
+    routes, stats = pf.route_netset([], coupled=[pc], uncoupled_fallback=True)
+    assert pf.pair_outcomes[pc.key].startswith("uncoupled-fallback:")
+    assert (pc.key, "P") in routes and (pc.key, "N") in routes
+    assert stats.routed == stats.total
+    assert _min_gap(routes, gnd) >= POWER - EPS
+    assert pf.class_pad_growth_rounds == []
+    assert stats.lattice_builds == 1
 
 
 def _stub_stats(routed: int) -> LatticeNegotiationStats:

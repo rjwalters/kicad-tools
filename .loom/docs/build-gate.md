@@ -597,6 +597,9 @@ gate reds on a **dispatch worker** while the same commit is green in CI:
   gate deliberately does **not** sanitize the environment wholesale: it needs
   the real `PATH`/`HOME`/credential environment to run at all, and an `env -i`
   wrapper would hide exactly the host-shaped reds this section is about.
+  Since #9851 the Rust step is also hermetic to `LOOM_RUNTIME*` through
+  `.cargo/config.toml` `[env]`, which forces `LOOM_RUNTIME` and every
+  `LOOM_RUNTIME_<ROLE>` empty for cargo-run test binaries.
 
 **The gate runs at a mild throttle relative to sweeps (#4020, revises #3985).**
 `build-gate.sh` now defaults to `nice 5` — a mild positive niceness, a real but

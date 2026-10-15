@@ -3930,7 +3930,7 @@ def test_equal_via_signatures_cancel_the_skew_rule_via_term(thickness, blind_bur
 
 
 def test_unequal_via_signatures_are_exactly_the_measured_board06_skew():
-    """0 vias vs 2 through-vias on a 1.6 mm 4-layer board = 3.2 mm of skew."""
+    """0 vias vs 2 through-vias on a 1.6 mm 4-layer board = 3.16 mm of skew (KiCad stackup span, #6725)."""
     from kicad_tools.router.diffpair_length import DiffPairLengthTracker
     from kicad_tools.router.diffpair_routing import _route_via_signature
 
@@ -3943,7 +3943,7 @@ def test_unequal_via_signatures_are_exactly_the_measured_board06_skew():
     skew = DiffPairLengthTracker._measure_route(
         shadow_leg, 1.6, 4, blind_buried_supported=False
     ) - DiffPairLengthTracker._measure_route(guide_leg, 1.6, 4, blind_buried_supported=False)
-    assert abs(skew - 3.2) < 1e-9
+    assert abs(skew - 3.16) < 1e-9
 
 
 def test_via_signature_tolerates_an_odd_via_count_without_crashing():

@@ -333,7 +333,7 @@ class TestViaLengthPolicy:
                 )
             ],
         )
-        plain_route = _make_straight_route(101, "DQ1", 11.6)
+        plain_route = _make_straight_route(101, "DQ1", 11.58)
         group = _make_ddr_group(net_ids=[100, 101])
 
         tracker = MatchGroupTracker()
@@ -342,8 +342,8 @@ class TestViaLengthPolicy:
         )
 
         lengths = tracker.get_group_lengths(group)
-        assert abs(lengths[100] - 11.6) < 1e-9
-        assert abs(lengths[101] - 11.6) < 1e-9
+        assert abs(lengths[100] - 11.58) < 1e-9
+        assert abs(lengths[101] - 11.58) < 1e-9
         # Skew = 0 because we sized the plain route to match.
         assert tracker.get_group_skew(group) < 1e-9
 
@@ -403,7 +403,7 @@ class TestViaLengthPolicy:
                 )
             ],
         )
-        expected_via_mm = 1.6 * 1 / 3
+        expected_via_mm = 0.5325  # Issue #6725: F.Cu full + 0.48 + In1 half
         plain_route = _make_straight_route(101, "DQ1", 10.0 + expected_via_mm)
         group = _make_ddr_group(net_ids=[100, 101])
 
@@ -475,11 +475,12 @@ class TestThroughViaPromotion:
         )
         # Issue #6502: a standard via is a drilled-through barrel whatever
         # its logical pair, so it reads the full thickness under either policy.
+        # Issue #6725: KiCad's default stackup height of the drilled F.Cu->B.Cu
+        # barrel (1.6 mm board - 2 x 0.01 mm mask), same under either policy.
         default = DiffPairLengthTracker._via_length(via, 1.6, 4)
-        assert abs(default - 1.6) < 1e-9
-        # Promoted (blind unsupported): full board thickness.
+        assert abs(default - 1.58) < 1e-9
         promoted = DiffPairLengthTracker._via_length(via, 1.6, 4, blind_buried_supported=False)
-        assert abs(promoted - 1.6) < 1e-9
+        assert abs(promoted - 1.58) < 1e-9
 
     def test_via_length_micro_keeps_partial_span_when_unsupported(self):
         """A micro via is NOT promoted even when blind vias are unsupported."""
@@ -493,7 +494,7 @@ class TestThroughViaPromotion:
             is_micro=True,
         )
         promoted = DiffPairLengthTracker._via_length(micro, 1.6, 4, blind_buried_supported=False)
-        assert abs(promoted - 1.6 * 1 / 3) < 1e-9
+        assert abs(promoted - 0.5325) < 1e-9
 
     def test_tuner_measured_length_matches_pcb_through_via_measurement(self):
         """The route-object length (promoted) equals the promoted PCB measurement.
@@ -532,8 +533,9 @@ class TestThroughViaPromotion:
             pcb, 100, board_thickness_mm=1.6, num_copper_layers=4, blind_buried_supported=False
         )
 
-        # Both measure 10mm copper + 1.6mm through-via = 11.6mm.
-        assert abs(route_len - 11.6) < 1e-9
+        # Issue #6725: KiCad measures the span the via connects on (tracks on
+        # F.Cu and In1.Cu), not its declared barrel: 10mm + 0.5325mm.
+        assert abs(route_len - 10.5325) < 1e-9
         assert abs(route_len - pcb_len) < 1e-9
 
     def test_group_converges_to_matching_skew_under_promotion(self):
@@ -544,11 +546,11 @@ class TestThroughViaPromotion:
         1.6mm; A0 must be that much longer to match -- mirroring the board 07
         ADDR_BUS geometry the tuner produces.
         """
-        # A4: 10mm copper + 1.6mm promoted through-via = 11.6mm.
+        # A4: 10mm copper + 0.5325mm connected F.Cu->In1.Cu span (Issue #6725).
         a4 = self._blind_via_route(100, "A4")
-        # A0: a flat 11.6mm route (no via) -- the length the tuner would
-        # meander a planar member to, once it accounts for A4's through-via.
-        a0 = _make_straight_route(101, "A0", 11.6)
+        # A0: a flat 10.5325mm route (no via) -- the length the tuner would
+        # meander a planar member to, once it accounts for A4's via.
+        a0 = _make_straight_route(101, "A0", 10.5325)
         group = _make_ddr_group(net_ids=[100, 101])
 
         tracker = MatchGroupTracker()
@@ -561,8 +563,8 @@ class TestThroughViaPromotion:
         )
 
         lengths = tracker.get_group_lengths(group)
-        assert abs(lengths[100] - 11.6) < 1e-9
-        assert abs(lengths[101] - 11.6) < 1e-9
+        assert abs(lengths[100] - 10.5325) < 1e-9
+        assert abs(lengths[101] - 10.5325) < 1e-9
         assert tracker.get_group_skew(group) < 1e-9
 
         # Issue #6502: A4's standard via is drilled through whatever its
@@ -794,6 +796,7 @@ class TestMeasureNetFromPcbDelegation:
             board_thickness_mm=None,
             num_copper_layers=2,
             blind_buried_supported=True,
+            length_model=None,
         )
 
     def test_forwarder_returns_same_value_as_diffpair_primitive(self):
@@ -824,11 +827,11 @@ class TestMeasureNetFromPcbDelegation:
         )
 
         assert diffpair_result == match_group_result
-        # Sanity: segments are 10 + 5 = 15 mm, via is 1.6 mm -> 16.6 mm total.
-        assert abs(match_group_result - 16.6) < 1e-9
+        # Sanity: segments are 10 + 5 = 15 mm, via is 1.58 mm (Issue #6725) -> 16.58 mm.
+        assert abs(match_group_result - 16.58) < 1e-9
 
-    def test_forwarder_zero_via_length_when_thickness_none(self):
-        """Without ``board_thickness_mm``, vias contribute 0.0 (mirrors policy)."""
+    def test_forwarder_via_length_from_board_stackup_when_thickness_none(self):
+        """Issue #6725: the stackup comes from the board, no thickness arg needed."""
         pcb = _StubPCB(
             _segments=[
                 _StubSegment(start=(0.0, 0.0), end=(10.0, 0.0), net_number=100),
@@ -843,8 +846,8 @@ class TestMeasureNetFromPcbDelegation:
         )
 
         result = MatchGroupTracker.measure_net_from_pcb(pcb, 100)
-        # 10 mm segments + 0 mm via = 10 mm.
-        assert abs(result - 10.0) < 1e-9
+        # 10 mm segments + 1.58 mm default-stackup F.Cu->B.Cu span.
+        assert abs(result - 11.58) < 1e-9
 
 
 # =============================================================================

@@ -6,6 +6,7 @@ ERC validation, DRC validation, netlist export, and more.
 
 import contextlib
 import json
+import logging
 import os
 import re
 import shutil
@@ -20,6 +21,8 @@ from functools import lru_cache
 from pathlib import Path
 
 from kicad_tools.schema.pcb import FOOTPRINT_TAGS, _is_footprint_tag
+
+logger = logging.getLogger(__name__)
 
 #: Seconds to wait for ``kicad-cli version`` before declaring a candidate wedged.
 #: A healthy-but-cold KiCad 10 on macOS was measured at a steady ~6 s
@@ -520,19 +523,28 @@ def run_drc(
         cmd.append("--schematic-parity")
     if all_track_errors:
         cmd.append("--all-track-errors")
-    if refill_zones and _kicad_drc_supports_refill(Path(kicad_cli)):
-        cmd.append("--refill-zones")
 
-    cmd.append(str(pcb_path))
+    def build_cmd(refill: bool) -> list[str]:
+        return [*cmd, *(["--refill-zones"] if refill else []), str(pcb_path)]
 
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True)
+        # Issue #6724: --refill-zones only on a kicad-cli that accepts it
+        # (attempted when unknown, retried without it on rejection).
+        result, _refilled = run_kicad_drc_command(
+            build_cmd, Path(kicad_cli), refill_zones=refill_zones, text=True
+        )
 
         # Issue #6724: without ``--exit-code-violations`` kicad-cli exits 0
         # even when it finds violations, so another status (a load failure is
         # 3, a signal kill such as the OOM killer is negative) is a failure --
         # as is a missing, empty or truncated report.
-        problem = drc_report_problem(output_path, result.returncode, format=format)
+        problem = drc_report_problem(
+            output_path,
+            result.returncode,
+            format=format,
+            stdout=result.stdout,
+            stderr=result.stderr,
+        )
         if problem is None:
             return KiCadCLIResult(
                 success=True,
@@ -555,7 +567,14 @@ def run_drc(
         return KiCadCLIResult(success=False, stderr=f"Failed to run DRC: {e}")
 
 
-def drc_report_problem(output_path: Path, returncode: int, *, format: str = "json") -> str | None:
+def drc_report_problem(
+    output_path: Path,
+    returncode: int,
+    *,
+    format: str = "json",
+    stdout: object = None,
+    stderr: object = None,
+) -> str | None:
     """Why a ``kicad-cli pcb drc`` run did not produce a trustworthy report.
 
     ``None`` means it did: kicad-cli exited 0 and wrote a complete report.
@@ -571,7 +590,9 @@ def drc_report_problem(output_path: Path, returncode: int, *, format: str = "jso
     )
 
     if returncode not in KICAD_CLI_DRC_OK_EXIT_CODES:
-        return describe_returncode(returncode)
+        # ``stdout``/``stderr`` let exit 1 name a rejected option; without an
+        # ``Unknown argument`` line it is a plain non-zero exit (Issue #6724).
+        return describe_returncode(returncode, stdout=stdout, stderr=stderr)
     output_path = Path(output_path)
     if format == "json":
         return load_kicad_cli_json_report(output_path)
@@ -922,7 +943,7 @@ def run_fill_zones(
     # ``--refill-zones``) keeps the original, unconditional refill.
     if result.success and result.output_path is not None:
         already_freshly_refilled = (not _kicad_cli_has_fill_zones(kicad_cli)) and (
-            _kicad_drc_supports_refill(kicad_cli)
+            _kicad_drc_supports_refill(kicad_cli) is True
         )
         remediation_kwargs: dict = {}
         if time_left is not None:
@@ -1270,6 +1291,9 @@ def _run_fill_zones_native(
 #: the caller past its own budget.
 _REFILL_PROBE_TIMEOUT_S = 30.0
 
+#: The option the ``--refill-zones`` probe looks for.
+REFILL_ZONES_OPTION = "--refill-zones"
+
 
 class _DrcRefillProbe:
     """Does ``kicad-cli pcb drc`` support ``--refill-zones``?  (Issue #6724)
@@ -1312,6 +1336,13 @@ class _DrcRefillProbe:
         """True if the latest probe of ``kicad_cli`` gave no definitive answer."""
         return Path(kicad_cli) in self._inconclusive
 
+    def record(self, kicad_cli: Path, supported: bool) -> None:
+        """Memoise a definitive answer learned elsewhere (e.g. a DRC run that
+        rejected ``--refill-zones`` with ``Unknown argument``)."""
+        kicad_cli = Path(kicad_cli)
+        self._inconclusive.discard(kicad_cli)
+        self._answers[kicad_cli] = supported
+
     def cache_clear(self) -> None:
         self._answers.clear()
         self._inconclusive.clear()
@@ -1340,6 +1371,90 @@ class _DrcRefillProbe:
 
 
 _kicad_drc_supports_refill = _DrcRefillProbe()
+
+
+def _refill_probe_inconclusive(kicad_cli: Path) -> bool:
+    """True if the refill probe could not tell whether ``kicad_cli`` has the flag.
+
+    Tolerates a probe replaced by a plain callable (tests monkeypatch
+    ``_kicad_drc_supports_refill`` with lambdas): no ``inconclusive`` means
+    every answer is definitive.
+    """
+    inconclusive = getattr(_kicad_drc_supports_refill, "inconclusive", None)
+    return bool(callable(inconclusive) and inconclusive(Path(kicad_cli)))
+
+
+def run_kicad_drc_command(
+    build_cmd: Callable[[bool], list[str]],
+    kicad_cli: Path,
+    *,
+    refill_zones: bool,
+    timeout: float | None = None,
+    text: bool = False,
+) -> tuple["subprocess.CompletedProcess", bool]:
+    """Run a ``kicad-cli pcb drc`` command, with ``--refill-zones`` when possible.
+
+    ``build_cmd(refill)`` returns the argv, including ``--refill-zones`` iff
+    ``refill`` is true.  Returns ``(completed process, refilled)``.
+
+    Issue #6775: KiCad 8/9 reject ``--refill-zones`` (exit 1, ``Unknown
+    argument: --refill-zones``, no report).  The option is passed unless the
+    capability probe *definitively* said it is unsupported; when the probe's
+    answer is unknown (killed, timed out) the option is attempted and, if
+    kicad-cli rejects it, the run is retried once without it (and that
+    definitive answer is memoised).  Running without a requested refill is
+    logged as a WARNING, never silently.
+
+    ``timeout`` is the whole budget (probe + run + retry); a
+    :class:`subprocess.TimeoutExpired` propagates to the caller.
+    """
+    from kicad_tools.drc.geometric import KICAD_CLI_ERR_ARGS, unknown_argument
+
+    deadline = None if timeout is None else _monotonic() + timeout
+
+    def remaining() -> float | None:
+        if deadline is None:
+            return None
+        return max(deadline - _monotonic(), 1.0)
+
+    use_refill = False
+    if refill_zones:
+        use_refill = bool(_kicad_drc_supports_refill(Path(kicad_cli)))
+        if not use_refill and _refill_probe_inconclusive(kicad_cli):
+            # Unknown is not "no": let kicad-cli's own parser decide.
+            use_refill = True
+    proc = subprocess.run(
+        build_cmd(use_refill),
+        capture_output=True,
+        text=text,
+        timeout=remaining(),
+        check=False,
+    )
+    if (
+        use_refill
+        and getattr(proc, "returncode", 0) == KICAD_CLI_ERR_ARGS
+        and unknown_argument(getattr(proc, "stdout", None), getattr(proc, "stderr", None))
+        == REFILL_ZONES_OPTION
+    ):
+        record = getattr(_kicad_drc_supports_refill, "record", None)
+        if callable(record):
+            record(Path(kicad_cli), False)
+        use_refill = False
+        proc = subprocess.run(
+            build_cmd(False),
+            capture_output=True,
+            text=text,
+            timeout=remaining(),
+            check=False,
+        )
+    if refill_zones and not use_refill:
+        logger.warning(
+            "kicad-cli %s does not support --refill-zones; DRC ran WITHOUT "
+            "--refill-zones, so zone fills are the ones saved in the board "
+            "file and may be stale",
+            kicad_cli,
+        )
+    return proc, use_refill
 
 
 def _snapshot_net_declarations(pcb_path: Path) -> list:
@@ -2131,7 +2246,7 @@ def _run_fill_zones_via_drc(
     ]
 
     # KiCad 10+ requires explicit flags to refill zones and persist changes.
-    refills = _kicad_drc_supports_refill(kicad_cli)
+    refills = _kicad_drc_supports_refill(kicad_cli) is True
     if refills:
         cmd.extend(["--refill-zones", "--save-board"])
 
