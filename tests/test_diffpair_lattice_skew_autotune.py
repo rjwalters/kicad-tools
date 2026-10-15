@@ -181,3 +181,67 @@ def test_lattice_auto_engages_with_checker_limit_and_flag_keeps_old_mode():
     router.apply_diffpair_length_tuning.assert_called_once()
     assert router.apply_diffpair_length_tuning.call_args.kwargs["engage"] == "checker_skew_limit"
     assert enforce.call_args.kwargs["phase"] == "length_match_diffpairs"
+
+
+def test_auto_path_bump_respects_foreign_pad_class_clearance():
+    """A bump may not pass a foreign pad closer than that pad's class clearance.
+
+    Board 06rf regression guard: the built-in self-check only sees segments at
+    the intra-pair gap, so a bump landed 0.163 mm from a 0.2 mm ``Power`` pad.
+    """
+    from kicad_tools.router.primitives import Pad
+
+    nc = NetClassRouting(name="LVDS", length_critical=False, skew_tolerance_mm=0.1)
+    ar = _router(nc)
+    ar.net_names[3] = "+5V"
+    ar.net_class_map["+5V"] = NetClassRouting(name="Power", clearance=0.2)
+    pad = Pad(x=10.0, y=-0.5, width=0.4, height=0.4, net=3, net_name="+5V", ref="C1", pin="1")
+    ar.grid._pads = [pad]
+    ok = ar._skew_tune_foreign_clearance_ok(
+        {r.net: r for r in ar.routes}, partner_of={1: 2, 2: 1}, intra_pair_clearance_mm=0.15
+    )
+    width = 0.2
+    # Pad edge at y=-0.3; a trace centred at y=-0.3+0.1+0.163 is 0.163 mm clear.
+    near = Segment(5.0, -0.037, 15.0, -0.037, width, Layer.F_CU, net=1, net_name=P_NAME)
+    far = Segment(5.0, 0.0, 15.0, 0.0, width, Layer.F_CU, net=1, net_name=P_NAME)
+    assert ok([near], 1) is False
+    assert ok([far], 1) is True
+
+
+def test_auto_path_measures_skew_with_via_barrels_like_the_checker():
+    """07rf regression guard: the checker counts drilled via length.
+
+    P is 20.0 mm of track with no vias; N is 18.5 mm of track plus two
+    through vias (2 x 1.6 mm on the default 1.6 mm board), i.e. 21.7 mm as
+    ``kct check`` measures it.  A via-blind tuner would lengthen N and push
+    the checker's skew from 1.7 mm up; the auto path must lengthen P.
+    """
+    from kicad_tools.router.primitives import Via
+
+    nc = NetClassRouting(name="LVDS", length_critical=False, skew_tolerance_mm=0.1)
+    ar = _router(nc)
+    vias = [
+        Via(x=x, y=1.0, drill=0.3, diameter=0.6, layers=(Layer.F_CU, Layer.B_CU), net=2)
+        for x in (1.0, 2.0)
+    ]
+    ar.routes = [
+        _route(1, P_NAME, 20.0, 0.0),
+        Route(net=2, net_name=N_NAME, segments=_route(2, N_NAME, 18.5, 1.0).segments, vias=vias),
+    ]
+    n_segments = ar.routes[1].segments
+    measure = ar._checker_route_length(2)
+    before = abs(measure(ar.routes[0]) - measure(ar.routes[1]))
+    assert before == pytest.approx(1.7)
+
+    results = ar.apply_diffpair_length_tuning(
+        detected_pairs=_pairs(ar), verbose=False, engage="checker_skew_limit"
+    )
+    result = results[(P_NAME, N_NAME)]
+    assert result.skew_before_mm == pytest.approx(1.7)
+    by_net = {r.net: r for r in ar.routes}
+    assert by_net[2].segments == n_segments  # the checker's longer half is never touched
+    after = abs(measure(by_net[1]) - measure(by_net[2]))
+    assert after <= before
+    assert after == pytest.approx(result.skew_after_mm)
+    assert result.reason == "tuned", result.message
+    assert after <= 0.1

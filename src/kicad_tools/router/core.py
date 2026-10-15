@@ -19625,6 +19625,18 @@ class Autorouter:
             num_copper_layers=num_layers,
         )
 
+        # Issue #6664: the checker-limit path measures skew exactly as
+        # ``kct check`` does -- segments plus drilled via barrels at the
+        # manufacturer profile's board thickness, standard vias promoted to
+        # through-vias (``derive_skew_limits`` -> ``measure_net_from_pcb``).
+        # A via-blind measure picks the wrong "shorter" half on a pair with
+        # unequal via counts and can make the checker's skew worse (07rf
+        # TMDS_D2: 1.029 -> 5.029 mm).  The ``length_critical`` path keeps its
+        # segment-only measure (byte-identical ``--length-match-diffpairs``).
+        route_length = None
+        if engage == "checker_skew_limit":
+            route_length = self._checker_route_length(num_layers)
+
         for dp in detected_pairs:
             # Default per-class info.  When a net class is not configured for
             # this pair (the common synthetic-test case) the tuner is
@@ -19660,7 +19672,7 @@ class Autorouter:
                 length_critical = True
                 if thresholds.skew_severity != "error":
                     result = self._declined_skew_result(
-                        dp, routes_by_net, tolerance_mm, thresholds.skew_severity
+                        dp, routes_by_net, tolerance_mm, thresholds.skew_severity, route_length
                     )
                     results[(p_name, n_name)] = result
                     if verbose:
@@ -19681,7 +19693,40 @@ class Autorouter:
                 grid=self.grid,
                 prefer_reserved_slack=self.enable_slack_corridor_widening,
                 fixed_segment_ids=fixed_segment_ids,
+                extra_clearance_ok=(
+                    self._skew_tune_foreign_clearance_ok(
+                        routes_by_net,
+                        partner_of={
+                            dp.pair.positive.net_id: dp.pair.negative.net_id,
+                            dp.pair.negative.net_id: dp.pair.positive.net_id,
+                        },
+                        intra_pair_clearance_mm=intra_pair_clearance_mm,
+                    )
+                    if engage == "checker_skew_limit"
+                    else None
+                ),
+                route_length=route_length,
             )
+            if (
+                engage == "checker_skew_limit"
+                and result.inserts_applied
+                and result.skew_after_mm > result.skew_before_mm + 1e-9
+            ):
+                # Issue #6664 backstop: never ship a "tune" that leaves the
+                # checker's skew worse than it found it.
+                p_route = routes_by_net[dp.pair.positive.net_id]
+                n_route = routes_by_net[dp.pair.negative.net_id]
+                result = DiffPairTuneResult(
+                    success=False,
+                    reason="rolled_back_skew_worse",
+                    attempts=result.attempts,
+                    skew_before_mm=result.skew_before_mm,
+                    skew_after_mm=result.skew_before_mm,
+                    message=(
+                        f"Tuning would raise skew {result.skew_before_mm:.3f}mm -> "
+                        f"{result.skew_after_mm:.3f}mm; rolled back."
+                    ),
+                )
 
             changed = {
                 net: route
@@ -19740,24 +19785,167 @@ class Autorouter:
         )
         return results
 
+    def _skew_tune_foreign_clearance_ok(
+        self,
+        routes_by_net: dict[int, Route],
+        *,
+        partner_of: dict[int, int],
+        intra_pair_clearance_mm: float,
+    ) -> Callable[[list[Any], int], bool]:
+        """Foreign-copper gate for a skew-tuning bump (Issue #6664).
+
+        The tuner's built-in self-check measures new segments against other
+        nets' *segments* at the pair's intra-pair gap.  ``kct check`` and
+        KiCad hold foreign copper to ``max(class(a), class(b))`` and also
+        check pads and vias, so a bump could pass the built-in check and
+        still land 0.163 mm from a 0.2 mm ``Power`` pad (board 06rf).  This
+        gate rejects a bump whose segments come closer than
+        ``max(board clearance, own class clearance, foreign class
+        clearance, component clearance)`` to any foreign pad, via or
+        segment on the same layer.  The pair's own partner is held to the
+        intra-pair gap instead (the coupled pair legitimately runs closer
+        than the class clearance), matching the built-in self-check.
+        """
+        from kicad_tools.core.geometry import point_to_segment_distance, segment_clearance
+
+        from .grid import pad_segment_edge_clearance
+
+        class_map = getattr(self, "net_class_map", None) or {}
+        net_names = getattr(self, "net_names", None) or {}
+        base = float(self.rules.trace_clearance)
+        pads = list(getattr(self.grid, "_pads", None) or self.pads.values())
+        pitches = self.component_pitches
+
+        def class_clearance(net: int, name: str = "") -> float:
+            key = (net_names.get(net, "") if net else "") or name
+            nc = class_map.get(key) if key else None
+            return float(getattr(nc, "clearance", 0.0) or 0.0) if nc is not None else 0.0
+
+        def ok(new_segments: list[Any], net: int) -> bool:
+            own = max(base, class_clearance(net))
+            partner = partner_of.get(net)
+            for seg in new_segments:
+                half = seg.width / 2
+                lo_x, hi_x = min(seg.x1, seg.x2), max(seg.x1, seg.x2)
+                lo_y, hi_y = min(seg.y1, seg.y2), max(seg.y1, seg.y2)
+                for pad in pads:
+                    if pad.net == net or getattr(pad, "steiner_point", False):
+                        continue
+                    if not pad.through_hole and pad.layer != seg.layer:
+                        continue
+                    reach = max(pad.width, pad.height) + half + 1.0
+                    if (
+                        pad.x < lo_x - reach
+                        or pad.x > hi_x + reach
+                        or pad.y < lo_y - reach
+                        or pad.y > hi_y + reach
+                    ):
+                        continue
+                    required = (
+                        intra_pair_clearance_mm
+                        if pad.net == partner
+                        else max(
+                            own,
+                            class_clearance(pad.net, pad.net_name or ""),
+                            self.rules.get_clearance_for_component(
+                                pad.ref, pitches.get(pad.component_key) if pitches else None
+                            ),
+                        )
+                    )
+                    gap = pad_segment_edge_clearance(pad, seg.x1, seg.y1, seg.x2, seg.y2, half)
+                    if gap + 1e-9 < required:
+                        return False
+                for other_net, route in routes_by_net.items():
+                    if other_net == net:
+                        continue
+                    required = (
+                        intra_pair_clearance_mm
+                        if other_net == partner
+                        else max(own, class_clearance(other_net))
+                    )
+                    for via in route.vias:
+                        radius = via.diameter / 2
+                        dist = point_to_segment_distance(
+                            via.x, via.y, seg.x1, seg.y1, seg.x2, seg.y2
+                        )
+                        if dist - half - radius + 1e-9 < required:
+                            return False
+                    for other in route.segments:
+                        if other.layer != seg.layer:
+                            continue
+                        margin = required + half + other.width / 2
+                        if (
+                            min(other.x1, other.x2) > hi_x + margin
+                            or max(other.x1, other.x2) < lo_x - margin
+                            or min(other.y1, other.y2) > hi_y + margin
+                            or max(other.y1, other.y2) < lo_y - margin
+                        ):
+                            continue
+                        gap = segment_clearance(
+                            seg.x1,
+                            seg.y1,
+                            seg.x2,
+                            seg.y2,
+                            seg.width,
+                            other.x1,
+                            other.y1,
+                            other.x2,
+                            other.y2,
+                            other.width,
+                        )
+                        if gap + 1e-9 < required:
+                            return False
+            return True
+
+        return ok
+
+    def _checker_route_length(self, num_layers: int) -> Callable[[Route], float]:
+        """``Route -> mm`` measured the way ``kct check``'s skew rule measures (#6664).
+
+        Board thickness comes from the manufacturer profile (the checker
+        reads ``design_rules.board_thickness_mm``); standard vias count as
+        full through-vias unless the board allows blind/buried drilling
+        (Issue #4007, mirrored from :meth:`apply_match_group_tuning`).
+        """
+        board_thickness_mm: float | None = None
+        _mfr_rules = self._build_manufacturer_design_rules()
+        if _mfr_rules is not None:
+            board_thickness_mm = getattr(_mfr_rules, "board_thickness_mm", None)
+        blind_buried_supported = False
+        _via_rules = getattr(self, "via_rules", None)
+        if _via_rules is not None:
+            blind_buried_supported = bool(
+                getattr(_via_rules, "allow_blind", False)
+                or getattr(_via_rules, "allow_buried", False)
+            )
+
+        def measure(route: Route) -> float:
+            return DiffPairLengthTracker._measure_route(
+                route,
+                board_thickness_mm,
+                num_layers,
+                blind_buried_supported=blind_buried_supported,
+            )
+
+        return measure
+
     @staticmethod
     def _declined_skew_result(
         dp,
         routes_by_net: dict[int, Route],
         tolerance_mm: float,
         severity: str,
+        route_length: Callable[[Route], float] | None = None,
     ) -> DiffPairTuneResult:
         """A no-change result for a pair whose skew limit the checker only warns on."""
         from .length import LengthTracker
 
+        measure = route_length or LengthTracker.calculate_route_length
         p_route = routes_by_net.get(dp.pair.positive.net_id)
         n_route = routes_by_net.get(dp.pair.negative.net_id)
         skew = 0.0
         if p_route is not None and n_route is not None:
-            skew = abs(
-                LengthTracker.calculate_route_length(p_route)
-                - LengthTracker.calculate_route_length(n_route)
-            )
+            skew = abs(measure(p_route) - measure(n_route))
         return DiffPairTuneResult(
             success=True,
             reason="skew_limit_not_enforced",

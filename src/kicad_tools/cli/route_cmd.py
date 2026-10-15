@@ -2046,15 +2046,12 @@ def _run_diffpair_skew_tuning(
             print("\n--- Diff-Pair Skew Tuning (lattice, kct check skew limit; Issue #6664) ---")
         # Issue #6664 (#6447 item 4): detect with the class map, so
         # class-declared pairs (diffpair_partner) are found, not only
-        # _P/_N-suffixed ones.  ``router.net_class_map`` is keyed by NET
-        # name; the detector looks classes up by CLASS name.
-        net_to_class: dict[str, str] = {}
-        class_routing: dict = {}
-        for net_name, net_class in (getattr(router, "net_class_map", None) or {}).items():
-            class_name = getattr(net_class, "name", None)
-            if class_name:
-                net_to_class[net_name] = class_name
-                class_routing.setdefault(class_name, net_class)
+        # _P/_N-suffixed ones -- the same synthesis ``kct check`` uses.
+        from kicad_tools.router.diffpair_detection import build_synth_routing
+
+        class_routing, net_to_class = build_synth_routing(
+            getattr(router, "net_class_map", None) or {}
+        )
         detected_pairs = detect_diff_pairs(
             net_names=router.net_names,
             net_class_routing=class_routing or None,
