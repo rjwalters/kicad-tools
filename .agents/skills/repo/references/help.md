@@ -71,7 +71,7 @@ stashes, untracked files) always need an explicit opt-in.
 | /repo:scrub | What does the public surface expose? Code, history, issues, PRs, forks — report-only |
 | /repo:host-optimize | Prep/re-check a Mac (or Linux box) for heavy Loom/agent build use — Gatekeeper churn, backup-agent interference, build-tree bloat |
 | /repo:update-tools | Keep Loom/Anvil/Repo Skills installs current |
-| /repo:deps | Keep third-party deps current — reconcile organization policy, Renovate or Dependabot, and bot PRs |
+| /repo:deps | Keep third-party deps current — reconcile organization policy, Dependabot-first setup (Renovate opt-in), and bot PRs |
 | /repo:optimize-ci | CI slow or expensive — find unfiltered jobs, broken cache keys, superseded runs; ranked by measured minutes saved |
 | /repo:org-policy | Preview/install canonical organization preferences from the current client repo |
 
