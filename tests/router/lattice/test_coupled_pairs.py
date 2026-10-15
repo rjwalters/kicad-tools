@@ -1008,6 +1008,108 @@ def test_core_reports_partially_coupled_pair(capsys) -> None:
     assert "J1.1->U2.3 (uncoupled-fallback:" in out
 
 
+# Issue #6697: board 03's U2.5 (VBUS) sits between the pair pads U2.4/U2.6.
+# Its inner end faces a sealed pocket (the U2.3->U2.4 / U2.1->U2.6 hops on
+# both sides, U2.2 and its GND via beyond), so its only exit is outward --
+# exactly where the relocated pair anchor starts the coupled run.
+_VBUS_POWER = NetClassRouting(name="Power", trace_width=0.5, clearance=0.2)
+
+
+def _sealed_vbus_pads() -> list[Pad]:
+    far = Pad(
+        x=_SOT_OUT_X,
+        y=11.0,
+        width=1.0,
+        height=1.0,
+        net=10,
+        net_name="VBUS",
+        layer=Layer.F_CU,
+        ref="J9",
+        pin="1",
+        through_hole=True,
+        drill=0.4,
+    )
+    # Stands in for board 03's U2.2 GND via: fills the pocket between the rows.
+    plug = Pad(
+        x=15.0,
+        y=6.0,
+        width=1.0,
+        height=1.2,
+        net=30,
+        net_name="X",
+        layer=Layer.F_CU,
+        ref="U2",
+        pin="7",
+    )
+    return [far, plug]
+
+
+def test_sandwiched_pad_escape_site_sits_off_the_outer_edge() -> None:
+    from kicad_tools.router.lattice.coupled import sandwiched_pad_escape_sites
+
+    router = _chain_autorouter(_sealed_vbus_pads())
+    pf = router._ensure_lattice_pathfinder()
+    pads = _chain_pads()
+    kw = {"pair_nets": {1, 2}, "via_radius": 0.3, "clearance_for": lambda _n: 0.2}
+    sites = sandwiched_pad_escape_sites(
+        pf.obstacles, pads["U2.4"], pads["U2.6"], (27.0, 6.0), routed_nets={10}, **kw
+    )
+    assert [(p.ref, p.pin) for p, _s in sites] == [("U2", "5")]
+    site = sites[0][1]
+    # Just past U2.5's outer (+x) edge, on the side the segment runs to.
+    assert site == pytest.approx((_SOT_OUT_X + _SOT_W / 2.0 + 0.3, 6.0))
+    # Facing the body, the via would sit in the plugged pocket: no legal
+    # site.  An unrouted net gets nothing either.
+    assert (
+        sandwiched_pad_escape_sites(
+            pf.obstacles, pads["U2.4"], pads["U2.6"], (0.0, 6.0), routed_nets={10}, **kw
+        )
+        == []
+    )
+    assert (
+        sandwiched_pad_escape_sites(
+            pf.obstacles, pads["U2.4"], pads["U2.6"], (27.0, 6.0), routed_nets=set(), **kw
+        )
+        == []
+    )
+
+
+def test_core_reserves_no_escape_site_for_an_unrouted_sandwiched_pad() -> None:
+    # The plain chain: U2.5 is VBUS's only pad, so nothing is reserved and
+    # the anchors are exactly the #6378 ones.
+    router = _chain_autorouter()
+    coupled, _reserved = router._lattice_coupled_connections()
+    mask = router._ensure_lattice_pathfinder()._keepouts
+    assert not any(a.name.startswith("pair-escape-via:") for a in (mask.areas if mask else ()))
+    assert coupled[1].anchor_a == pytest.approx((17.44, 6.0))
+
+
+def test_core_pair_leaves_a_sealed_routed_pad_its_escape_via(capsys) -> None:
+    # Fails before #6697: the anchor sat just off U2.5's edge, VBUS could
+    # only leave through the pair corridor, and negotiation split the pair
+    # (``partially-coupled:1/2``).  Now U2.5 gets a via site the pair routes
+    # around: both segments couple AND VBUS drops its via there.
+    router = _chain_autorouter(_sealed_vbus_pads())
+    router.net_class_map["VBUS"] = _VBUS_POWER
+    routes = {net: router.route_net(net) for net in (1, 2, 10)}
+    pads = _chain_pads()
+    far = _sealed_vbus_pads()[0]
+    stats = router._lattice_negotiation_stats
+    assert stats.routed == stats.total and stats.converged, stats
+    assert _net_connected(routes[10], [pads["U2.5"], far])
+    assert router._lattice_pair_outcomes == {"D": "coupled"}, router._lattice_pair_outcomes
+    out = capsys.readouterr().out
+    assert "Pair escape via site (#6697): VBUS U2.5 sits between D's pads" in out
+    mask = router._ensure_lattice_pathfinder()._keepouts
+    (site,) = [a for a in mask.areas if a.name == "pair-escape-via:VBUS:U2.5"]
+    assert site.exempt == frozenset({10})
+    vias = [v for r in routes[10] for v in r.vias]
+    assert any(
+        site.bbox[0] <= v.x <= site.bbox[2] and site.bbox[1] <= v.y <= site.bbox[3] for v in vias
+    ), vias
+    assert all(o == "coupled" for _n, _l, o in router._lattice_pair_segment_outcomes)
+
+
 def test_core_single_segment_pair_keeps_legacy_key() -> None:
     router = _autorouter({"D+": _HS, "D-": _HS})
     coupled, reserved = router._lattice_coupled_connections()
