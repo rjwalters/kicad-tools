@@ -81,11 +81,14 @@ if TYPE_CHECKING:
     from .grid import RoutingGrid
 
 __all__ = [
+    "AreaArrayLink",
     "PlaneFill",
     "PlaneViaSite",
     "PlaneViaSiteRules",
     "PlaneViaReservation",
     "PlaneViaStub",
+    "area_array_link_keepout_areas",
+    "area_array_pour_links",
     "plane_fill_pullback",
     "plane_fills_from_pcb",
     "plane_via_keepout_areas",
@@ -170,6 +173,31 @@ class PlaneViaStub:
     site_y: float
 
 
+@dataclass(frozen=True)
+class AreaArrayLink:
+    """Two orthogonally adjacent same-pour pads of an area array (#6673).
+
+    The pour's fill joins the two pads through the channel between them; a
+    foreign track crossing that channel, or a foreign via on an interstitial
+    beside it, cuts the cluster's fill in two.
+
+    Attributes:
+        net_name: The pour net both pads carry.
+        layer: Lattice layer index of the pads and of the pour.
+        a, b: ``REF.PIN`` of the two pads.
+        ax, ay, bx, by: The two pad centres (mm).
+    """
+
+    net_name: str
+    layer: int
+    a: str
+    b: str
+    ax: float
+    ay: float
+    bx: float
+    by: float
+
+
 @dataclass
 class PlaneViaReservation:
     """Result of :func:`reserve_plane_via_sites`.
@@ -188,6 +216,13 @@ class PlaneViaReservation:
             straight outward escape from ONE side (the pin can still jog away
             from it).  A site that would block a pin from both sides is never
             taken: that pad goes to ``unreserved``.
+        array_links: Issue #6673 -- the protected pad-to-pad links of
+            area-array pour clusters (:func:`area_array_pour_links`), as
+            lattice keep-outs.  Empty unless a pour floods an area array's
+            own pad layer.
+        array_links_released: Issue #6673 -- ``REF.PIN`` of foreign array
+            pads whose every escape the links would have sealed; the links
+            around them were dropped.
     """
 
     sites: list[PlaneViaSite] = field(default_factory=list)
@@ -196,6 +231,8 @@ class PlaneViaReservation:
     stubs: list[PlaneViaStub] = field(default_factory=list)
     rules: PlaneViaSiteRules = field(default_factory=PlaneViaSiteRules)
     blocked_escapes: list[tuple[str, str]] = field(default_factory=list)
+    array_links: list[AreaArrayLink] = field(default_factory=list)
+    array_links_released: list[str] = field(default_factory=list)
 
 
 def _pad_name(pad: Pad) -> str:
@@ -853,6 +890,22 @@ def _plane_pads(grid: RoutingGrid, nets: Sequence[str]) -> list[Pad]:
     return sorted(pads, key=lambda p: (p.net_name, p.ref, p.pin, p.x, p.y))
 
 
+def _interior_test(
+    positions: Iterable[tuple[float, float]], tolerance: float
+) -> Callable[[float, float], bool]:
+    """``(x, y) -> bool``: strictly inside the bounding box of ``positions``."""
+    pts = list(positions)
+    x0 = min(x for x, _ in pts)
+    x1 = max(x for x, _ in pts)
+    y0 = min(y for _, y in pts)
+    y1 = max(y for _, y in pts)
+
+    def interior(x: float, y: float) -> bool:
+        return x0 + tolerance < x < x1 - tolerance and y0 + tolerance < y < y1 - tolerance
+
+    return interior
+
+
 def select_plane_via_pads(
     pads: Sequence[Pad],
     nets: Iterable[str],
@@ -904,14 +957,7 @@ def select_plane_via_pads(
             for p in candidates:
                 skipped[_pad_name(p)] = f"footprint has {len(positions)} pad(s)"
             continue
-        x0 = min(x for x, _ in positions)
-        x1 = max(x for x, _ in positions)
-        y0 = min(y for _, y in positions)
-        y1 = max(y for _, y in positions)
-
-        def interior(x: float, y: float) -> bool:
-            return x0 + tolerance < x < x1 - tolerance and y0 + tolerance < y < y1 - tolerance
-
+        interior = _interior_test(positions, tolerance)
         # Count interior pad NUMBERS, not copper pieces: an exposed pad split
         # into thermal sub-pads repeats one number and its paste apertures
         # carry none (board 05's U2/U3), while a BGA field numbers every ball.
@@ -929,6 +975,263 @@ def select_plane_via_pads(
                 selected.append(p)
     selected.sort(key=lambda p: (p.net_name, p.ref, p.pin, p.x, p.y))
     return selected, skipped
+
+
+def _array_lattice(body: Sequence[Pad], tolerance: float) -> dict[tuple[int, int], Pad] | None:
+    """Index an area array's pads by integer ``(row, column)`` (#6673).
+
+    The pitch is the smallest centre-to-centre distance between two pad
+    positions and the axes follow that nearest-neighbour vector, so a
+    rotated footprint indexes the same way.  ``None`` when any pad is off
+    the lattice (a staggered or irregular array): the cluster/channel model
+    below assumes a full rectangular grid of balls.
+    """
+    positions = sorted({(round(p.x, 4), round(p.y, 4)) for p in body})
+    if len(positions) < 4:
+        return None
+    pts = np.asarray(positions, dtype=float)
+    diff = pts[:, None, :] - pts[None, :, :]
+    dist = np.hypot(diff[..., 0], diff[..., 1])
+    np.fill_diagonal(dist, np.inf)
+    pitch = float(dist.min())
+    if not math.isfinite(pitch) or pitch <= 2 * tolerance:
+        return None
+    i, j = np.unravel_index(int(np.argmin(dist)), dist.shape)
+    theta = math.atan2(pts[j, 1] - pts[i, 1], pts[j, 0] - pts[i, 0])
+    # Fold onto [0, 90deg): either nearest-neighbour axis names the lattice.
+    theta = math.fmod(theta, math.pi / 2.0)
+    if theta < 0:
+        theta += math.pi / 2.0
+    c, s_ = math.cos(theta), math.sin(theta)
+    x0, y0 = positions[0]
+    snap = tolerance / pitch * 2.0 + 0.05
+    out: dict[tuple[int, int], Pad] = {}
+    for pad in sorted(body, key=lambda p: (p.pin, p.x, p.y)):
+        dx, dy = pad.x - x0, pad.y - y0
+        u = (dx * c + dy * s_) / pitch
+        v = (-dx * s_ + dy * c) / pitch
+        ru, rv = round(u), round(v)
+        if abs(u - ru) > snap or abs(v - rv) > snap:
+            return None
+        out.setdefault((int(rv), int(ru)), pad)
+    return out
+
+
+def area_array_pour_links(
+    pads: Sequence[Pad],
+    plane_layers: Mapping[str, Iterable[int]],
+    layer_index: Callable[[object], int],
+    *,
+    tolerance: float = 0.05,
+) -> tuple[list[AreaArrayLink], list[str]]:
+    """Links that keep an area array's same-pour pad clusters whole (#6673).
+
+    :func:`select_plane_via_pads` skips area arrays on purpose: a BGA field
+    escapes by trace, and a via beside every ball would block those
+    escapes.  That is right when the pour sits on another layer.  When a
+    pour floods the array's *own* pad layer (a 4-layer board's third power
+    net goes on ``F.Cu``, ``zones.generator._assign_layers_for_pour_nets``),
+    the field's balls reach the pour only through that layer's fill
+    between them -- and nothing stopped a foreign track from running down
+    the channel between two of them.  Board 07rf: a lattice ``TMDS_D2_P``
+    leg ran between U4's rows C and D, a ``TMDS`` via took the B/C
+    interstitial, and balls C3/C4 were left on a 0.53 mm2 fill island no
+    stitch could legally reach.
+
+    For each area-array footprint (same rule as :func:`select_plane_via_pads`:
+    more than one interior pad number) whose pads index onto a rectangular
+    lattice (:func:`_array_lattice`), every pair of row- or column-adjacent
+    SMD pads of one pour net, on a layer that net's pour floods, is a link.
+    :func:`area_array_link_keepout_areas` turns each link into a keep-out on
+    that layer, so a foreign track cannot cross between the two pads and a
+    foreign via cannot take an interstitial beside them.  Tracks running
+    *along* a channel at the cluster's edge are not affected.
+
+    Foreign pads must keep an exit.  A foreign SMD pad on the link layer is
+    *sealed* when, walking the array's interstitial faces from its four
+    corners without crossing a foreign link, it reaches neither the array's
+    outside nor an interstitial with no link on any side (where it could
+    drop a via).  Every link on the sides of a sealed pad's corner faces is
+    then dropped, and the pad is reported.
+
+    Args:
+        pads: Every pad on the board.
+        plane_layers: Pour net -> lattice layer indices its pour floods.
+        layer_index: Maps a pad's :class:`~.layers.Layer` to that index.
+        tolerance: Perimeter / lattice-snap tolerance (mm).
+
+    Returns:
+        ``(links, released)``: the links in deterministic order, and the
+        ``REF.PIN`` of each sealed foreign pad whose links were dropped.
+    """
+    layers_of = {name: frozenset(int(x) for x in idx) for name, idx in plane_layers.items() if idx}
+    if not layers_of:
+        return [], []
+    by_ref: dict[str, list[Pad]] = {}
+    for pad in pads:
+        if pad.ref and not pad.steiner_point:
+            by_ref.setdefault(pad.ref, []).append(pad)
+
+    def pad_layer(pad: Pad) -> int | None:
+        try:
+            return int(layer_index(pad.layer))
+        except Exception:
+            return None
+
+    links: list[AreaArrayLink] = []
+    released: list[str] = []
+    for ref in sorted(by_ref):
+        body = by_ref[ref]
+        if not any(p.net_name in layers_of and not p.through_hole for p in body):
+            continue
+        positions = {(round(p.x, 4), round(p.y, 4)) for p in body}
+        if len(positions) < 4:
+            continue
+        interior = _interior_test(positions, tolerance)
+        if len({p.pin for p in body if p.pin and interior(p.x, p.y)}) <= 1:
+            continue
+        cells = _array_lattice(body, tolerance)
+        if cells is None:
+            continue
+
+        def poured_layer(pad: Pad) -> int | None:
+            if pad.through_hole or pad.net_name not in layers_of:
+                return None
+            layer = pad_layer(pad)
+            return layer if layer is not None and layer in layers_of[pad.net_name] else None
+
+        # (layer, cell_a, cell_b) -> link, cell_a < cell_b.
+        found: dict[tuple[int, tuple[int, int], tuple[int, int]], AreaArrayLink] = {}
+        for cell in sorted(cells):
+            pad = cells[cell]
+            layer = poured_layer(pad)
+            if layer is None:
+                continue
+            for nb in ((cell[0] + 1, cell[1]), (cell[0], cell[1] + 1)):
+                other = cells.get(nb)
+                if other is None or other.net_name != pad.net_name:
+                    continue
+                if poured_layer(other) != layer:
+                    continue
+                found[(layer, cell, nb)] = AreaArrayLink(
+                    net_name=pad.net_name,
+                    layer=layer,
+                    a=_pad_name(pad),
+                    b=_pad_name(other),
+                    ax=pad.x,
+                    ay=pad.y,
+                    bx=other.x,
+                    by=other.y,
+                )
+        if not found:
+            continue
+
+        rows = [r for r, _ in cells]
+        cols = [c for _, c in cells]
+        r0, r1, c0, c1 = min(rows), max(rows), min(cols), max(cols)
+
+        def sides(face: tuple[int, int]) -> list[tuple[tuple[int, int], tuple[int, int]]]:
+            # Face (a, b) is the interstitial square with corners (a, b),
+            # (a+1, b), (a, b+1), (a+1, b+1); each side is a cell pair.
+            a, b = face
+            return [
+                ((a, b), (a, b + 1)),
+                ((a + 1, b), (a + 1, b + 1)),
+                ((a, b), (a + 1, b)),
+                ((a, b + 1), (a + 1, b + 1)),
+            ]
+
+        def across(face: tuple[int, int], side_index: int) -> tuple[int, int]:
+            a, b = face
+            return [(a - 1, b), (a + 1, b), (a, b - 1), (a, b + 1)][side_index]
+
+        def outside(face: tuple[int, int]) -> bool:
+            return not (r0 <= face[0] < r1 and c0 <= face[1] < c1)
+
+        for cell in sorted(cells):
+            pad = cells[cell]
+            if pad.through_hole or not pad.net_name:
+                continue
+            layer = pad_layer(pad)
+            if layer is None:
+                continue
+            blocked = {
+                (ca, cb)
+                for (lyr, ca, cb), link in found.items()
+                if lyr == layer and link.net_name != pad.net_name
+            }
+            if not blocked:
+                continue
+            corners = [
+                (cell[0] - 1, cell[1] - 1),
+                (cell[0] - 1, cell[1]),
+                (cell[0], cell[1] - 1),
+                (cell[0], cell[1]),
+            ]
+            seen = set(corners)
+            stack = list(corners)
+            free = False
+            while stack:
+                face = stack.pop()
+                face_sides = sides(face)
+                if outside(face) or not any(sd in blocked for sd in face_sides):
+                    free = True
+                    break
+                for k, sd in enumerate(face_sides):
+                    if sd in blocked:
+                        continue
+                    nxt = across(face, k)
+                    if nxt not in seen:
+                        seen.add(nxt)
+                        stack.append(nxt)
+            if free:
+                continue
+            for face in corners:
+                for ca, cb in sides(face):
+                    if (ca, cb) in blocked:
+                        found.pop((layer, ca, cb), None)
+            released.append(_pad_name(pad))
+        links.extend(found[key] for key in sorted(found))
+    return links, released
+
+
+def area_array_link_keepout_areas(
+    links: Sequence[AreaArrayLink],
+    *,
+    pullback: Mapping[tuple[str, int], float],
+) -> list[Any]:
+    """Project area-array pour links onto lattice keep-outs (Issue #6673).
+
+    Each link becomes a capsule around the segment between the two pad
+    centres, of radius the pour's fill pullback (:func:`plane_fill_pullback`)
+    on the link's layer only, blocking tracks and vias.  A foreign track
+    therefore cannot cross between the two pads, and a foreign via whose
+    pour knockout would reach the segment -- one on an interstitial beside
+    it -- cannot land; a track running along the channel next to the
+    cluster keeps its full width of room.
+
+    Args:
+        links: From :func:`area_array_pour_links`.
+        pullback: ``(net, layer)`` -> fill pullback (mm).  A link with no
+            entry is skipped.
+    """
+    from .lattice.obstacles import KeepoutArea
+
+    areas: list[Any] = []
+    for link in links:
+        radius = pullback.get((link.net_name, link.layer))
+        if not radius or radius <= 0:
+            continue
+        areas.append(
+            KeepoutArea(
+                polygon=_capsule_polygon(link.ax, link.ay, link.bx, link.by, float(radius)),
+                layers=frozenset({link.layer}),
+                blocks_tracks=True,
+                blocks_vias=True,
+                name=f"pour-array-link:{link.net_name}:{link.a}-{link.b}",
+            )
+        )
+    return areas
 
 
 def _regular_polygon(
@@ -1242,7 +1545,11 @@ def reserve_router_plane_via_sites(
     3. stores the same sites as lattice keep-out areas on
        ``router._plane_via_keepout_areas``, which
        ``Autorouter._negotiate_lattice_netset`` installs next to the board's
-       rule areas (the lattice engine never reads the grid's occupancy).
+       rule areas (the lattice engine never reads the grid's occupancy);
+    4. Issue #6673: adds :func:`area_array_pour_links` keep-outs (lattice
+       only) for every area array whose same-pour ball clusters sit on a
+       layer their pour floods, so signal copper cannot island part of the
+       cluster's fill.  Needs ``plane_fills`` to know the pour layers.
 
     The site geometry is the via the post-route oracle places
     (``via_diameter`` / ``via_drill``, defaulting to the router's rules) at
@@ -1265,14 +1572,12 @@ def reserve_router_plane_via_sites(
             copper clearance only (the #6401 behaviour).
 
     Returns:
-        The reservation (empty when there are no eligible pads).
+        The reservation (no sites when there are no eligible pads).
     """
     grid = router.grid
     nets = sorted(set(nets))
-    pads, _skipped = select_plane_via_pads(list(grid._pads), nets)
-    if not pads:
-        router._plane_via_keepout_areas = ()
-        return PlaneViaReservation()
+    board_pads = list(grid._pads)
+    pads, _skipped = select_plane_via_pads(board_pads, nets)
 
     drules = router.rules
     gap = max(float(drules.trace_clearance), float(clearance or 0.0))
@@ -1282,17 +1587,6 @@ def reserve_router_plane_via_sites(
         class_clearance = getattr(net_class, "clearance", None) if net_class else None
         if class_clearance:
             gap = max(gap, float(class_clearance))
-    defaults = PlaneViaSiteRules()
-    rules = PlaneViaSiteRules(
-        via_diameter=max(float(via_diameter or 0.0), float(drules.via_diameter)),
-        via_drill=max(float(via_drill or 0.0), float(drules.via_drill)),
-        clearance=gap,
-        hole_to_hole=defaults.hole_to_hole,
-        stub_width=float(stub_width or drules.trace_width),
-        max_reach=defaults.max_reach,
-        exact_pads=True,
-    )
-    reservation = reserve_plane_via_sites(grid, nets, rules, pads=pads)
 
     stack = getattr(router, "layer_stack", None)
 
@@ -1322,13 +1616,44 @@ def reserve_router_plane_via_sites(
             if index is not None:
                 fill_layers.setdefault(name, []).append((index, plane_fill_pullback(fill, gap)))
 
-    router._plane_via_keepout_areas = tuple(
-        plane_via_keepout_areas(
+    if pads:
+        defaults = PlaneViaSiteRules()
+        rules = PlaneViaSiteRules(
+            via_diameter=max(float(via_diameter or 0.0), float(drules.via_diameter)),
+            via_drill=max(float(via_drill or 0.0), float(drules.via_drill)),
+            clearance=gap,
+            hole_to_hole=defaults.hole_to_hole,
+            stub_width=float(stub_width or drules.trace_width),
+            max_reach=defaults.max_reach,
+            exact_pads=True,
+        )
+        reservation = reserve_plane_via_sites(grid, nets, rules, pads=pads)
+        areas = plane_via_keepout_areas(
             reservation,
             clearance=gap,
             layer_index=layer_index,
             num_layers=int(grid.num_layers),
             plane_fills=fill_layers,
         )
+    else:
+        reservation = PlaneViaReservation()
+        areas = []
+
+    # Issue #6673: a pour that floods an area array's own pad layer keeps
+    # its same-net ball clusters whole (lattice engine only, like the sites).
+    pullback: dict[tuple[str, int], float] = {}
+    for name, entries in fill_layers.items():
+        for index, pb in entries:
+            key = (name, int(index))
+            pullback[key] = max(pullback.get(key, 0.0), float(pb))
+    links, released = area_array_pour_links(
+        board_pads,
+        {name: [index for index, _pb in entries] for name, entries in fill_layers.items()},
+        layer_index,
     )
+    reservation.array_links = links
+    reservation.array_links_released = released
+    areas = list(areas) + area_array_link_keepout_areas(links, pullback=pullback)
+
+    router._plane_via_keepout_areas = tuple(areas)
     return reservation

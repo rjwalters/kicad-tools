@@ -7141,6 +7141,18 @@ def _apply_plane_via_reservation(
         logger.warning("Plane-via reservation skipped: %s", exc)
         return
     args._plane_via_reservation = reservation
+    links = getattr(reservation, "array_links", None) or []
+    if links and not quiet:
+        # Issue #6673: same-pour ball clusters of an area array on a layer
+        # their pour floods are kept whole on the lattice engine.
+        link_nets = sorted({link.net_name for link in links})
+        print(
+            f"  Area-array pour continuity (#6673): {len(links)} protected link(s) "
+            f"on {', '.join(link_nets)}"
+        )
+        released = getattr(reservation, "array_links_released", None) or []
+        if released:
+            print(f"    links dropped to keep an exit for: {', '.join(released)}")
     if quiet or not (reservation.sites or reservation.unreserved):
         return
     served = sum(len(site.pads) for site in reservation.sites)
