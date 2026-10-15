@@ -4710,6 +4710,10 @@ class Autorouter:
             )
             pair_nets = {pc.pad_p_a.net, pc.pad_n_a.net}
             half = pc.pitch / 2.0
+            # Issue #6697: first reserve an escape via site for a routed pad
+            # the pair start would seal in (board 03 VBUS U2.5), so the
+            # anchor below slides past it instead of capping it.
+            self._lattice_reserve_pair_escape_sites(pf, obstacles, pc, pair_nets)
             # The rule-area mask (+ #6401 pour-pad via reservations) installed
             # by ``_negotiate_lattice_netset`` before this call.
             keepouts = getattr(pf, "_keepouts", None)
@@ -4743,6 +4747,128 @@ class Autorouter:
         if anchor_a is None and anchor_b is None:
             return pc
         return replace(pc, anchor_a=anchor_a, anchor_b=anchor_b)
+
+    #: How far (mm) a #6697 pair-escape via site may move from the pad edge
+    #: to land on a lattice node where the sealed net's via is legal.
+    _PAIR_ESCAPE_SITE_SEARCH_MM = 0.5
+
+    def _lattice_reserve_pair_escape_sites(
+        self, pf: Any, obstacles: Any, pc: Any, pair_nets: set[int]
+    ) -> None:
+        """Reserve a via site for a routed pad a pair start would seal (#6697).
+
+        :func:`~.lattice.coupled.sandwiched_pad_escape_sites` finds, at each
+        segment end, a routed single-layer pad between the pair's own pads
+        (board 03: VBUS U2.5 between USB_D+ U2.4 and USB_D- U2.6).  Each site
+        is moved to the nearest lattice node (within
+        :attr:`_PAIR_ESCAPE_SITE_SEARCH_MM`) where the sealed net's via is
+        legal -- the via can only ever land on a node -- and joins the
+        pathfinder's keepout mask as a disc (via + clearance, all layers,
+        tracks and vias) that every net but the sealed one keeps out of.  The anchor relocation, the
+        fat pair search and every other net then leave the pad its exit, and
+        the sealed net can drop its via there.  Idempotent per site name, so
+        a rebuilt connection list (#6535 tap-chain retry) adds nothing twice.
+        """
+        from .lattice.coupled import sandwiched_pad_escape_sites
+        from .lattice.obstacles import KeepoutArea, LatticeKeepoutMask
+        from .plane_via_sites import _regular_polygon
+
+        routed = frozenset(
+            net for net, keys in self.nets.items() if net and len(dict.fromkeys(keys)) >= 2
+        )
+        if not routed:
+            return
+        num_layers = int(pf.num_layers)
+        via_radius = float(pf.rules.via_diameter) / 2.0
+        new: list[Any] = []
+        mask = getattr(pf, "_keepouts", None)
+        have = {a.name for a in (mask.areas if mask else ())}
+        ends = (
+            (pc.pad_p_a, pc.pad_n_a, pc.mid_b),
+            (pc.pad_p_b, pc.pad_n_b, pc.mid_a),
+        )
+        for pad_p, pad_n, toward in ends:
+            for pad, site in sandwiched_pad_escape_sites(
+                obstacles,
+                pad_p,
+                pad_n,
+                toward,
+                pair_nets=pair_nets,
+                routed_nets=routed,
+                via_radius=via_radius,
+                clearance_for=lambda net: self._lattice_escape_clearance(net, pc.net_class),
+            ):
+                name_net = self.net_names.get(pad.net) or pad.net_name or str(pad.net)
+                name = f"pair-escape-via:{name_net}:{pad.ref}.{pad.pin}"
+                if name in have:
+                    continue
+                # The sealed net's class clearance, floored at the pair's and
+                # the board's: the strongest spacing anything keeps from it.
+                clearance = self._lattice_escape_clearance(pad.net, pc.net_class)
+                node = self._lattice_escape_via_node(pf, pad.net, site, clearance)
+                if node is None:
+                    continue
+                have.add(name)
+                site = node
+                new.append(
+                    KeepoutArea(
+                        # A hair over the via + clearance: the polygon is
+                        # circumscribed, the via sits exactly on its centre.
+                        polygon=_regular_polygon(site[0], site[1], via_radius + clearance + 1e-3),
+                        layers=frozenset(range(num_layers)),
+                        blocks_tracks=True,
+                        blocks_vias=True,
+                        exempt=frozenset({pad.net}),
+                        name=name,
+                    )
+                )
+                print(
+                    f"  Pair escape via site (#6697): {name_net} {pad.ref}.{pad.pin} sits "
+                    f"between {pc.pair_name}'s pads; reserved at ({site[0]:.3f}, {site[1]:.3f})"
+                )
+        if new:
+            pf.set_keepouts(LatticeKeepoutMask(tuple(mask.areas if mask else ()) + tuple(new)))
+
+    def _lattice_escape_via_node(
+        self, pf: Any, net: int, site: tuple[float, float], clearance: float
+    ) -> tuple[float, float] | None:
+        """The lattice node nearest ``site`` where ``net`` may drop a via (#6697).
+
+        Legal means :meth:`LatticePathfinder._via_ok` on an empty board (no
+        via-in-pad on the default fab tier, foreign pads cleared by
+        ``clearance``, rule areas honoured).  ``None`` when no node within
+        :attr:`_PAIR_ESCAPE_SITE_SEARCH_MM` qualifies.
+        """
+        lattice = pf.build()
+        unit = float(lattice.unit)
+        if unit <= 0.0:
+            return None
+        reach = self._PAIR_ESCAPE_SITE_SEARCH_MM
+        k0 = lattice.node_key(site[0] - reach, site[1] - reach)
+        k1 = lattice.node_key(site[0] + reach, site[1] + reach)
+        committed = pf._fresh_committed()
+        best: tuple[float, tuple[float, float]] | None = None
+        for i in range(k0[0], k1[0] + 1):
+            for j in range(k0[1], k1[1] + 1):
+                if (i, j) not in lattice.nodes:
+                    continue
+                pt = lattice.node_point((i, j))
+                d = math.hypot(pt[0] - site[0], pt[1] - site[1])
+                if d > reach or (best is not None and d >= best[0]):
+                    continue
+                if pf._via_ok((i, j), net, committed, clearance=clearance):
+                    best = (d, pt)
+        return None if best is None else best[1]
+
+    def _lattice_escape_clearance(self, net: int, pair_class: Any) -> float:
+        """Clearance kept from a #6697 escape via of ``net`` (mm)."""
+        name = self.net_names.get(net)
+        nc = self.net_class_map.get(name) if name else None
+        return max(
+            float(self.rules.trace_clearance),
+            float(getattr(nc, "clearance", None) or 0.0),
+            float(getattr(pair_class, "clearance", None) or 0.0),
+        )
 
     def _negotiate_lattice_netset(self) -> dict[int, list[Route]]:
         """Negotiate every routable net through the shared lattice (#4278).
@@ -5204,8 +5330,8 @@ class Autorouter:
         of either net has no clearing tie (a single-layer SMD receptacle has
         room for only one of the two crossing ties -- board 06rf USB2_D), the
         pair keeps today's connections for every extra, so P and N are not
-        attached by different mechanisms (unless only one net of the pair has
-        an eligible extra, which is then tied alone).  A tie must also clear
+        attached by different mechanisms.  That includes a pair where only one
+        net has an eligible extra: neither net is tied (#6697).  A tie must also clear
         fixed fills and other-net preserved vias.  No ties at all when the
         pathfinder is unavailable or an HV pairwise table is installed (not
         modelled by the planner).
@@ -5333,7 +5459,21 @@ class Autorouter:
                 continue
             group = [net]
             partner = partners.get(net)
-            if partner in eligible and partner not in done:
+            if partner is None or partner not in eligible:
+                # Issue #6697: all or nothing means BOTH nets.  A half-tie
+                # (one net tied, its partner routed single-ended) attached P
+                # and N by different mechanisms and made 06rf USB2_D's
+                # uncoupled length worse (8.677 -> 12.951 mm).
+                done.add(net)
+                names = "/".join(
+                    self.net_names.get(g, str(g)) for g in (net, partner) if g is not None
+                )
+                print(
+                    f"  Diff-pair ties {names}: not used (partner net has no tie "
+                    "candidate); extras routed as before (issues #6698, #6697)"
+                )
+                continue
+            if partner not in done:
                 group.append(partner)
             done.update(group)
             local = list(accepted)

@@ -234,7 +234,7 @@ FAIL_COUNT=0
 FAIL_NAMES=()
 CHECKED=0
 
-for f in "${FILES[@]}"; do
+for f in ${FILES[@]+"${FILES[@]}"}; do
     # -I: skip binary files. Also skips anything unreadable, which is not this
     # check's business to adjudicate.
     hits=$(grep -InE "$MARKER_ERE" "$f" 2>/dev/null) || hits=""

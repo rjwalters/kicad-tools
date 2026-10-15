@@ -4679,6 +4679,16 @@ daemon logs `maxConcurrent=N is IGNORED` when a config edit is shadowed). See
 the `autonomous.workFinder.maxConcurrent` row in the config reference table
 (below, under "Config surface").
 
+The other work-finder tuning keys ride the same per-tick read (#12090), so
+fleet-gitops can retune a live daemon without a restart:
+
+| Live (re-read every tick) | Restart required |
+|---------------------------|------------------|
+| `maxConcurrent`, `maxConcurrentPerRepo`, `maxAdmissionsPerTick` (and their `hyperparameters.dispatch` homes), `extraSkipLabels`, `redFixEscalateAfterSecs`, `saturationBrake.*`, `autonomous.hostBreaker.*` | `enabled`, `intervalSecs` / `hyperparameters.dispatch.tickIntervalSecs`, every `LOOM_*` env override |
+
+`loom-daemon fleet-config render` classifies a changed path from the same
+table in code (`fleet_store::reload`).
+
 > **This cap bounds SWEEP dispatch only (#6102).** Role-runner agents
 > (Curator / Judge / Doctor / Champion / Guide / …) are spawned by the role
 > runner's own interval and idle-edge loops and **never pass through this
@@ -6370,14 +6380,14 @@ knobs not yet audited here.
 |------------|--------------|---------|-------|
 | `autonomous.model` | *(per-dispatch `dispatch_sweep` `model` param)* | `sonnet` | Model pinned on **every** daemon-dispatched child (work-finder, epic supervisor, and `dispatch_sweep` when its `model` param is absent). See below (#3944) |
 | `autonomous.workFinder.enabled` | `LOOM_WORK_FINDER` | `false` | Master on/off for the finder loop. **Restart required** — read once, before the loop is spawned; flipping it in config alone does not start/stop an already-running daemon's loop (#5963) |
-| `autonomous.workFinder.intervalSecs` | `LOOM_WORK_FINDER_INTERVAL_SECS` | `60` | Zero/invalid → default |
+| `autonomous.workFinder.intervalSecs` | `LOOM_WORK_FINDER_INTERVAL_SECS` | `60` | Zero/invalid → default. **Restart required** — it also seeds the forge-event poll gate's base cadence and the armed early-tick registration, which a ticker-only re-arm would leave stale (#12090 follow-up) |
 | `autonomous.workFinder.maxConcurrent` | `LOOM_WORK_FINDER_MAX_CONCURRENT` | `3` | The per-machine **sweep-dispatch** admission knob since #4512 — **it bounds sweeps only; role-runner agents are admitted outside it and carry their own `autonomous.roleRunner.maxConcurrent` ceiling (#6102)** — an operator ceiling, not a fixed target, tuned empirically from `loom-daemon calibrate` / `status`. Per-machine **and workload-dependent** (#4903): ~10+ on an 8-core API-bound (software) worker, but **2–3** on the same 8 cores running analog/simulation sweeps. **Hot-applies (#9060)** — re-read every multi-workspace tick, so a config edit takes effect on the next tick without a restart; the transition is logged once (`work_finder: configured_max A -> B (source=config)`). The **env override is restart-only** (process environment is fixed at launch) and, while set, shadows config — the daemon logs `maxConcurrent=N is IGNORED` when that happens. The startup log line names the resolved value and its layer, `source=env`/`config`/`default` (#6203). See [Sizing `maxConcurrent`](#sizing-maxconcurrent-per-machine-and-per-workload-4512-4903) below |
-| `autonomous.workFinder.maxAdmissionsPerTick` | `LOOM_WORK_FINDER_MAX_ADMISSIONS_PER_TICK` | `3` | Per-tick **ramp** cap (#4234) — bounds how many *new* sweeps one tick may admit, independent of `maxConcurrent`/the dynamic cap. Zero/invalid → default; resolved once at startup — a startup-capture pattern `maxConcurrent` no longer shares (it hot-applies since #9060). **Restart required** to pick up a change (#5963) |
+| `autonomous.workFinder.maxAdmissionsPerTick` | `LOOM_WORK_FINDER_MAX_ADMISSIONS_PER_TICK` | `3` | Per-tick **ramp** cap (#4234) — bounds how many *new* sweeps one tick may admit, independent of `maxConcurrent`/the dynamic cap. Zero/invalid → default. **Live** since #12090 — re-read every tick on the same path as `maxConcurrent` (#9060); a change logs `maxAdmissionsPerTick OLD -> NEW (source=…)` once at INFO. The env override is read only at daemon start |
 | `autonomous.workFinder.maxConcurrentPerRepo` | `LOOM_WORK_FINDER_MAX_CONCURRENT_PER_REPO` | *(absent = uncapped)* | How many of the shared `maxConcurrent` budget's slots ONE repo may hold (#9090). **Absent is uncapped, not a number**: this is opt-in, so an upgrade throttles nothing. Setting it also turns on **track affinity** (a repo with a live sweep sorts ahead of a cold repo — ordering only, always subordinate to the cap). A candidate whose repo is at the cap is *deferred*, never dropped (`deferred_repo_cap` / the `repo_cap` decision reason), and the slot goes to another repo's candidate in the same tick. Zero/invalid → absent (a literal cap of `0` would deadlock every repo). A value above `maxConcurrent` is harmless. **Hot-applies (#9090)** — re-read every multi-workspace tick on the same path as `maxConcurrent`, transition logged once. See [Per-repo dispatch cap + track affinity](#per-repo-dispatch-cap--track-affinity-9090) |
-| `autonomous.workFinder.saturationBrake.enabled` | `LOOM_ADMISSION_BRAKE` | `true` | Saturation admission brake on/off (#4903). A safety backstop — **defaults on**. Holds *new* admissions while the host is already saturated; never preempts a running sweep. Env truthy (`1`/`true`/`yes`/`on`) enables, any other value disables; wins over config. **Restart required** — resolved once at startup and registered as a process-global handle alongside the host breaker (#5963). See [Saturation admission brake](#saturation-admission-brake-4903) below |
-| `autonomous.workFinder.saturationBrake.loadPerCoreHold` | `LOOM_ADMISSION_BRAKE_LOAD_PER_CORE` | `0.95` (`4.0` before #5270) | Load-per-core at/over which new admissions are held for that tick. `<= 0`/invalid → default. Since #5270 sits deliberately *below* the host breaker's `2.5` trip: the brake is now the primary "dumb mode" CPU gate and engages first (since #11709: `sustainTicks` readings over both the load and `cpuBusyHold` bars), the breaker remains the slower sustained-distress trip. **Restart required** — same startup-resolved global as `enabled` above (#5963) |
-| `autonomous.workFinder.saturationBrake.cpuBusyHold` | `LOOM_ADMISSION_BRAKE_CPU_BUSY` | `0.90` | Measured CPU-busy fraction (`1 − idle`) that must **also** be reached before the brake holds (#11709) — load-per-core alone never holds. Outside `(0, 1]`/invalid → default. **Restart required** |
-| `autonomous.workFinder.saturationBrake.sustainTicks` | `LOOM_ADMISSION_BRAKE_SUSTAIN_TICKS` | `3` | Consecutive over-threshold work-finder ticks required before the brake holds (#11709); any tick under either bar resets the count. `0`/invalid → default. **Restart required** |
+| `autonomous.workFinder.saturationBrake.enabled` | `LOOM_ADMISSION_BRAKE` | `true` | Saturation admission brake on/off (#4903). A safety backstop — **defaults on**. Holds *new* admissions while the host is already saturated; never preempts a running sweep. Env truthy (`1`/`true`/`yes`/`on`) enables, any other value disables; wins over config. **Live** since #12090 — every `saturationBrake.*` key is re-resolved each tick and pushed into the process-global handle (a change logs once at INFO as `admission_brake: saturationBrake … -> …`); env overrides are read only at daemon start. See [Saturation admission brake](#saturation-admission-brake-4903) below |
+| `autonomous.workFinder.saturationBrake.loadPerCoreHold` | `LOOM_ADMISSION_BRAKE_LOAD_PER_CORE` | `0.95` (`4.0` before #5270) | Load-per-core at/over which new admissions are held for that tick. `<= 0`/invalid → default. Since #5270 sits deliberately *below* the host breaker's `2.5` trip: the brake is now the primary "dumb mode" CPU gate and engages first (since #11709: `sustainTicks` readings over both the load and `cpuBusyHold` bars), the breaker remains the slower sustained-distress trip. **Live** (#12090), like `enabled` above |
+| `autonomous.workFinder.saturationBrake.cpuBusyHold` | `LOOM_ADMISSION_BRAKE_CPU_BUSY` | `0.90` | Measured CPU-busy fraction (`1 − idle`) that must **also** be reached before the brake holds (#11709) — load-per-core alone never holds. Outside `(0, 1]`/invalid → default. **Live** (#12090) |
+| `autonomous.workFinder.saturationBrake.sustainTicks` | `LOOM_ADMISSION_BRAKE_SUSTAIN_TICKS` | `3` | Consecutive over-threshold work-finder ticks required before the brake holds (#11709); any tick under either bar resets the count. `0`/invalid → default. **Live** (#12090) |
 | `autonomous.workFinder.saturationBrake.starvationWarnSecs` | `LOOM_ADMISSION_BRAKE_STARVATION_WARN_SECS` | `300` | Seconds of continuous held+0-in-flight before the `WARN`-level `STARVING` log fires once per streak (#5715). `<= 0`/invalid → default. See [Starvation escape hatch](#starvation-escape-hatch-5715) |
 | `autonomous.workFinder.saturationBrake.starvationEscapeSecs` | `LOOM_ADMISSION_BRAKE_STARVATION_ESCAPE_SECS` | `900` | Seconds of continuous held+0-in-flight before the escape hatch yields one tick despite the raw load still being over threshold, logged at `ERROR` (#5715). `<= 0`/invalid → default |
 | `autonomous.workFinder.buildBackoff.enabled` | *(config only)* | `true` | Build back-off on review + merge debt (#9410), per repo (#10624). While a repo's is engaged, no new issue build is admitted in that repo whatever its priority; only a verified red-main fix bypasses it. Reads the role runner's demand ledger, so it is inert with the role runner off. `false` → pre-#9410 admission. Non-bool → default. **Live**. See [Build back-off on review and merge debt](#build-back-off-on-review-and-merge-debt-9410) |
@@ -6407,11 +6417,12 @@ knobs not yet audited here.
 | `autonomous.workFinder.redMainAutofile.enabled` | — | `false` | Auto-file, reuse and close the red-main fix issue (#11766). Off by default; `true` turns it on (set fleet-wide through the fleet config). **Hot-applies.** See "Auto-filed red-main fix issue (#11766)" above |
 | `autonomous.workFinder.redMainAutofile.intervalSecs` | — | `600` | Seconds between reconciles of one repo's auto-filed fix issue (#11766); a gate verdict change reconciles sooner. Positive integer; anything else uses the default. **Hot-applies** |
 | `autonomous.workFinder.redFixEscalateAfterSecs` | — | `1800` | How long a `<!-- loom:main-red-fix -->` candidate may wait unclaimed on a red `main` before the daemon files one `loom:operator` alert issue for it (#10118). Positive integer seconds; anything else uses the default. **Hot-applies** (read when a fix is waiting). See "Unpromoted red-main fixes (#10118)" above |
+| `autonomous.workFinder.tickDeadlineSecs` | — | `90` | The wall-clock deadline of one work-finder tick body (#12074). Every forge read from the pre-dispatch holds through the step gather gets only the time left (its own timeout is clamped), a read past the deadline is not sent (a shed: the gather uses its last good listing, a fact keeps the value that passes the item), and once it passes no further repo is gathered: the tick draws from what it gathered, reports `loom.dispatch.gather_truncated`, and the next tick starts at the first repo skipped. The deadline clock starts after the tick's local pre-dispatch work (eager reclaim, CPU sample). At least one repo is gathered every tick, and its reads get at least 20 s even past the deadline. Inside the tick, a read whose readers are out of budget (a rate-limit back-off) is shed rather than moved to the writer App, whatever its class; any other cause (a failing gateway, a coverage miss) still reaches the writer. A repo whose gather was starved (failed, last-good only, or no open-PR listing) for 3 ticks in a row gets one tick on the writer: every budget shed is lifted for that tick, deferrable listings included. Three consecutive gateway attempts that time out or fail with an unmarked 5xx withdraw the gateway for the default window; any gateway answer, on any read path, resets the count. The step tick's open-PR listing stays a Gate read, with its last good copy standing in when it fails. The draw's own claim reads run outside the deadline. Positive integer seconds; anything else uses the default. **Hot-applies** (read at the start of each tick) |
 | *(env only)* | `LOOM_OPEN_PR_MEMO` | `true` | Verified-open-PR memo for the #4123 open-PR dispatch guard (#6788). Falsy (`0`/`false`/`no`/`off`) disables; anything else (including unset) enables. When on, the guard (a) reuses a verified "issue #N has open linked PR #M" answer for 15 minutes instead of re-running the closes-graph query on every work-finder tick, and (b) when **both** the GraphQL probe and its #5911 REST fallback fail, re-verifies that one known PR over a single `GET repos/{owner}/{repo}/pulls/{M}` before conceding. The documented fail-open contract is unchanged: with no memo, or if that recheck also cannot answer, the guard still proceeds. In-memory only — a daemon restart clears it. Disable only to restore the exact pre-#6788 probe |
 | *(env only)* | `LOOM_GUARD_ISSUE_SNAPSHOT` | `true` | Conditional (ETag) issue reads for the 2.5 closed-issue and 2.7 park-label dispatch guards (W9). Falsy (`0`/`false`/`no`/`off`) restores the unconditional `guard.issue_state` / `guard.issue_labels` reads. When on, 2.5 reads `repos/{owner}/{repo}/issues/{N}` reader-first (`guard.issue_view`) and 2.7 reads it on the writer (`guard.issue_labels_view`), each with `If-None-Match` from its own store entry, so a re-attempted, unchanged candidate costs a free `304`. The verdict is always taken from the body the read serves. For 10 minutes after this daemon writes issue N of the repo (keyed by repo and number; a write whose repo is unknown, including a `{owner}/{repo}` placeholder path with no explicit target, is a wildcard that pins N in every repo; the parse is deliberately loose, so any numeric argument of a `gh issue|pr` write may be pinned, and a mis-parse can only add a pin, never drop one), both reads of N are sent without an ETag and keep their identity: 2.5 stays reader-first, 2.7 stays on the writer. Any failure falls back to the unconditional read |
 | *(env only)* | `LOOM_EMPTY_POOL_BREAKER_THRESHOLD` | `3` | How many **distinct** sources must hit an unsatisfiable token selection (exit 78) inside the window below before new dispatch to that workspace is paused (#6614). A source is an issue dispatch, or — since #7607 — a `(workspace, role)` role tick whose pre-spawn pool preflight found zero spawnable accounts. Distinct *sources*, not raw failures: one issue cycling through its own `dispatchBackoff`, or one role looping on one workspace, can never trip it. Crossing it trips the existing pre-flight advisory (#4386) + half-open dispatch gate (#5030) — one loud `ERROR` plus a `daemon.preflight.advisory` event — and the first dispatch that gets past token selection clears it. Zero/invalid → default |
 | *(env only)* | `LOOM_EMPTY_POOL_BREAKER_WINDOW_SECS` | `1800` | Trailing window over which those distinct sources are counted (#6614) — twice the old 900 s `dispatchBackoff.maxSecs` plateau, so a systemic fault always accumulates while isolated failures spaced further apart never do. Zero/invalid → default |
-| `autonomous.hostBreaker.enabled` | `LOOM_HOST_BREAKER` | `true` | Host-distress circuit breaker on/off (#4235). A safety backstop — **defaults on**. Env truthy (`1`/`true`/`yes`/`on`) enables, any other value disables; wins over config. **Restart required** — resolved once at startup and registered as a process-global handle (#5963). See [Host-distress circuit breaker](#host-distress-circuit-breaker-4235) below |
+| `autonomous.hostBreaker.enabled` | `LOOM_HOST_BREAKER` | `true` | Host-distress circuit breaker on/off (#4235). A safety backstop — **defaults on**. Env truthy (`1`/`true`/`yes`/`on`) enables, any other value disables; wins over config. **Live** since #12090 — every `hostBreaker.*` key is re-resolved each work-finder tick and pushed into the process-global handle (a change logs once at INFO as `host_breaker: hostBreaker … -> …`); env overrides are read only at daemon start. See [Host-distress circuit breaker](#host-distress-circuit-breaker-4235) below |
 | `autonomous.hostBreaker.loadPerCoreTrip` | `LOOM_HOST_BREAKER_LOAD_PER_CORE` | `2.5` | Load-per-core at/over which a tick counts toward tripping. `<= 0`/invalid → default |
 | `autonomous.hostBreaker.sustainTicks` | `LOOM_HOST_BREAKER_SUSTAIN_TICKS` | `3` | Consecutive over-threshold work-finder ticks required to trip (a single spike never trips). Zero/invalid → default |
 | `autonomous.hostBreaker.cooldownSecs` | `LOOM_HOST_BREAKER_COOLDOWN_SECS` | `300` | Cool-down window held after distress subsides before dispatch resumes. Zero/invalid → default |
@@ -6571,7 +6582,9 @@ environment unchanged. The paths above re-render it.
 
 There is no roll window, no per-host offset and no jitter. On startup and on
 every tick the self-update loop compares the fleet floor (`loom_min_version`,
-above) with the version it is running, and acts on that tick.
+above) with the version it is running, and acts on that tick. (The *first
+gathers after* a roll are jittered per host; see "Post-restart jitter for the
+first fleet-wide gather (#12073)".)
 
 What it does depends on whether the host reads a fleet store (`fleet.repo`).
 **This applies to every fleet host, whatever `autonomous.autoUpdate.enabled`
@@ -6650,6 +6663,20 @@ says** (#10954): the loop is spawned on every host with a fleet store, and
   newest release; on a host with no fleet store it still switches the opt-in
   loop on and off. Should a floor-only loop's host stop reading a fleet store
   while running, its ticks check nothing rather than start chasing.
+  `auto_update.enabled` in `status --json` means "the loop runs"; the setting
+  itself is `auto_update.config_enabled` (#11042). An explicit
+  `autoUpdate.enabled: false` on a fleet host logs one INFO line at startup
+  saying it is ignored for the floor.
+- **Status says why a host below the floor is not rolling** (#11042):
+  `auto_update.floor_not_rolling` in `status --json` (and the tick record's
+  `floor_not_rolling`) is one of `unsatisfiable`, `no_release`,
+  `unsupervised`, `backoff`, `terminal`, `roll_refused`; the human status
+  prints `Below the fleet floor, NOT rolling (<reason>)`.
+- **An unsupervised host fetches each target once** (#11042). With no
+  launchd/systemd supervisor the pause-and-roll refuses to start (H7
+  `unsupervised`). The release is installed by that first fetch, and later
+  ticks for the same target do not download it again (they report
+  `unsupervised`); a manual restart runs it. A newer target is fetched once.
 - **There is no per-host opt-out from a floor roll.** `autoUpdate.enabled=false`
   does not stop one, and neither does the fleet store's `paused` run state
   ([Run-state enforcement](#run-state-enforcement-9598)): a fleet-paused host
@@ -7660,6 +7687,42 @@ nothing changed answers `304 Not Modified`, which costs **zero** rate limit.
 The cache is in-memory, per (workspace, query), for the daemon's lifetime; a
 restart re-fetches each listing once. PR-side claim listings stay on
 `gh pr list` (they need `headRefName`, which REST issue rows do not carry).
+
+### Post-restart jitter for the first fleet-wide gather (#12073)
+
+That re-fetch is a burst when the fleet restarts together: a floor raise rolls
+every dispatcher at about the same moment, and on 2026-10-15 nine daemons'
+first full gathers drained every gateway App within one five-minute window.
+So after a start, the **first run** of each loop that gathers across the fleet
+waits a per-host delay, then runs on its normal cadence:
+
+- the work finder's first tick (step gather, discovery listings, inline
+  intake);
+- the collector's forge gathers (captain facts, stage dwell, fleet state),
+  which now run on their own snapshot-cadence timer whose first tick is the
+  delay; host-local samples (`host.health`, tokens, disk) still run from boot;
+- the no-op hold re-checks on the reaper tick.
+
+The delay is a stable hash (FNV-1a) of the host id modulo the window, so a
+host always takes the same offset and the fleet spreads across the window. It
+counts from the first of those loops to start (`startup_jitter::arm`), and the
+boot log names it: `startup_jitter: first fleet-wide gathers wait Ns after
+start`.
+
+| Knob | Default | Meaning |
+|---|---|---|
+| `LOOM_STARTUP_JITTER_WINDOW_SECS` (env) > `autonomous.startupJitterWindowSecs` (any config tier) | `600` on a fleet host (a fleet store is configured: `fleet.repo` / `LOOM_FLEET_REPO`), `0` otherwise | Window in seconds; `0` disables the delay |
+
+The default only delays fleet hosts, where the herd exists: a single-host or
+dev daemon dispatches from boot as before. `status --json` reports the armed
+delay as `startup_jitter_delay_secs`, and `loom-daemon health` adds it to the
+work finder's first-tick grace (2 × interval), so a host still inside its
+window reads "warming up", not "no work-finder tick observed".
+
+Not covered: the startup claim-reconciliation pass (it gates the first
+admission and is per-repo `loom:building` only) and the stale-blocked release
+and fleet-state passes being retired by #11301 (fleet state is covered while it
+remains, through the collector's forge timer).
 
 ### Agent CI wait: `forge wait-checks` (#10330)
 

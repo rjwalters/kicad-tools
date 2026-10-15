@@ -492,7 +492,7 @@ rm -f "$FIXTURE12"/.loom/*.bak
   # $(scripts/version.sh list)'s entries plus install-metadata.json -- never
   # the lockfiles -- and commit. Cargo.lock/mcp-loom/package-lock.json stay
   # modified-but-uncommitted.
-  mapfile -t _t12_version_files < <(./scripts/version.sh list)
+  _t12_version_files=(); while IFS= read -r _l; do _t12_version_files+=("$_l"); done < <(./scripts/version.sh list)
   git add "${_t12_version_files[@]}" .loom/install-metadata.json
   git commit -q -m "chore: bump version to $NEW_V"
 )

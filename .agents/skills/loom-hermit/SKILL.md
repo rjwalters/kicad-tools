@@ -205,6 +205,8 @@ Look for these patterns that often indicate bloat. *For detailed examples with b
 - Premature generalization
 - Unused configuration options
 
+**Very large source files**: you may propose splitting one into sibling modules when the split makes the code clearer. This is a judgement call — no fixed line threshold, no CI gate (#12099).
+
 ## How to Analyze
 
 ### 1. Dependency Analysis

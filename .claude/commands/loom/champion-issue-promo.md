@@ -793,6 +793,34 @@ fi
 gh issue edit "$ISSUE_NUMBER" --add-label "loom:evaluating"
 ```
 
+**Post-claim candidacy recheck (#11989).** The claim only says nobody else is
+evaluating *right now*. Your candidate list was read earlier, so another
+Champion (this host's next tick, or a peer host's) may have claimed, decided
+and released this issue in between: on one issue (2026-10-15) one host promoted
+the issue and released its claim at 00:01:59Z, and a second host, working from
+the same stale list, claimed it at 00:02:00Z and promoted it again, with a
+second approval comment. Right after claiming, re-read the issue **uncached**
+(plain `gh`, never `"$GH_READ"`) and step back if a verdict already landed:
+
+```bash
+POST_CLAIM=$(gh issue view "$ISSUE_NUMBER" --json state,labels \
+  --jq '[.state, ([.labels[].name] | join(","))] | @tsv')
+if ! printf '%s\n' "$POST_CLAIM" | awk -F'\t' '
+     $1 != "OPEN" { exit 1 }
+     $2 ~ /(^|,)loom:(issue|building|operator)(,|$)/ { exit 1 }
+     $2 !~ /(^|,)loom:(curated|architect|hermit|auditor)(,|$)/ { exit 1 }'; then
+  gh issue edit "$ISSUE_NUMBER" --remove-label "loom:evaluating"
+  echo "#$ISSUE_NUMBER was decided since discovery ($POST_CLAIM) — claim released, skipping"
+  # Continue the batch to the next issue. No comment, no other label.
+fi
+```
+
+A label claim is not a compare-and-swap: two passes that both find no claim in
+the same second both add it. The recheck above closes the sequential case,
+which is the one observed; the simultaneous one stays possible and is caught
+by the verdict-time recheck below only when the other pass has already
+written its verdict.
+
 `LOOM_STALE_EVALUATING_MINUTES` (default **45**) — named to mirror `LOOM_STALE_REVIEWING_MINUTES`/`LOOM_STALE_TREATING_MINUTES`; longer than a Champion step's 30-minute timeout (#11909), so a running promotion step's claim never reads as stale. `check-evaluating-staleness.sh` reads the same env var (or an explicit `--threshold-minutes`) for its own default.
 
 **Release the claim** — `--remove-label "loom:evaluating"` — as part of the SAME command that writes the verdict (promote, revise, block or escalate) in Steps 3/4 below, never as a separate call. This keeps "claimed but no verdict written yet" the only window where the label is genuinely in flight.
@@ -806,6 +834,8 @@ RECHECK_LABELS=$(gh issue view "$ISSUE_NUMBER" --json labels --jq '[.labels[].na
 ```
 
 If `loom:evaluating` is no longer present (reclaimed as stale by a concurrent Champion pass while you were evaluating), **abort**: do not comment, do not write any label. A later pass will pick this issue up cleanly.
+
+Abort the same way if `RECHECK_LABELS` already carries `loom:issue`, `loom:building` or `loom:operator`: another pass wrote a verdict while you evaluated (#11989), and a second one would only duplicate or contradict it. Release your claim first (`gh issue edit "$ISSUE_NUMBER" --remove-label "loom:evaluating"`), then move on.
 
 ---
 
