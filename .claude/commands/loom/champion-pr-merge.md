@@ -122,29 +122,27 @@ before Step 1 of the 6 criteria below):
 ```bash
 PR_NUMBER=<number>
 # Live labels + TRUSTED comments, in code (#11932). contradiction: loom:pr
-# beside the verdict label in `detail=`. champion-hold: criteria #2/#3 decide.
+# beside the verdict label in `detail=`. champion-hold: criteria #2/#3 decide;
+# stray-operator (a fleet-added loom:operator on it, #11970): drop it, ditto.
 # foreign-park (loom:blocked, no standing Champion hold marker) or a failed
-# read (exit 3): skip — no merge attempt, no comment, no label change.
-# Exit 2 is a loom-daemon older than the verb: on to the criteria.
+# read (exit 3): skip, with no merge, comment or label change. Exit 2: an
+# older loom-daemon, on to the criteria.
 HC=$(loom-daemon champion-hold classify --pr "$PR_NUMBER" 2>/dev/null); HRC=$?
 OTHER_VERDICT_LABEL=""
 case "$HRC $HC" in
   "0 "*" state=clear "*|"0 "*" state=champion-hold "*|"2 ") ;;
+  "0 "*" state=stray-operator "*) gh pr edit "$PR_NUMBER" --remove-label "loom:operator" ;;
   "0 "*" state=contradiction "*) OTHER_VERDICT_LABEL=${HC##* detail=} ;;
   *) echo "SKIP #$PR_NUMBER: ${HC:-rc=$HRC} — no merge, no comment"; continue ;;
 esac
 
 if [ -n "$OTHER_VERDICT_LABEL" ]; then
   JANITOR_MARKER="<!-- champion:verdict-janitor-notice -->"
-  # Idempotency guard — mirrors the stale-PR notice pattern below: only
-  # comment + relabel once per contradictory episode, so a 10-minute cron
-  # tick doesn't re-post while the contradiction is being resolved.
-  # Cached ("$GH_READ") — a marker grep only answers "did I already post
-  # this?", and your own `--clear-cache` after posting keeps it honest.
-  # `startswith`, not a bare substring match: a genuine notice always emits
-  # the marker as its literal first line, but a later comment can quote it
-  # in prose while discussing the notice without being the notice itself
-  # (#5371) — a substring match would then wrongly suppress the real post.
+  # Idempotency guard (as the stale-PR notice below): comment + relabel once
+  # per contradictory episode. Cached ("$GH_READ"): a marker grep only asks
+  # "did I already post this?", and your `--clear-cache` after posting keeps
+  # it honest. `startswith`, not a substring: a later comment may quote the
+  # marker in prose without being the notice (#5371).
   if [ "$("$GH_READ" pr view "$PR_NUMBER" --json comments --jq "[.comments[].body] | any(startswith(\"$JANITOR_MARKER\"))")" = "true" ]; then
     echo "Verdict-janitor notice already posted for #$PR_NUMBER — skipping (still not eligible to merge)"
   else

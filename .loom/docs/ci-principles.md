@@ -198,7 +198,11 @@ undoes each of `ci.yml`'s speed trade-offs: an unpartitioned full run with no
 first build, the whole release target matrix minus signing, every
 `package-lock.json`, `cargo deny` against `deny.toml`, the shell suites at
 parallelism 1 and 8 and on macOS/bash 3.2, `nextest` three times over for
-flakes, Rust beta, and the Docker smokes without their path filter.
+flakes, Rust beta, the Docker smokes without their path filter, the Docker-backed
+session-exec / private-workspace fixtures, and the `--ignored` real-service
+suites (pinned Collector / ClickHouse running the committed SigNoz SQL
+verbatim) that the PR gate no longer runs since #11967 — a PR that breaks one
+of those artifacts is caught here within a day, not pre-merge.
 Since #11966 `Release Build Check` runs on a PR only when image inputs
 changed, so a non-image PR's release-profile observation is owed by the
 `push` run of its merge commit and the daily `release-matrix` (and

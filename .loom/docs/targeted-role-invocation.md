@@ -179,7 +179,7 @@ without a sweep around it gets neither unless the engine does both.
   an issue-path `loom:lease`, because every issue-path reader assumes one
   claim per number: a live Curator lease would read as a peer to the Builder
   that follows it. The step engine's spawn (#11906) takes it for a daemon
-  Curator step, with `LOOM_SWEEP_CLAIM_OWNED`. An attended or role-runner
+  Curator step (`LOOM_SWEEP_CLAIM_OWNED` is a Builder step's alone). An attended or role-runner
   `/loom:curator <N>` still claims by label, with `claim-staleness.sh` and
   `stale_after_minutes` (`loom:curating`, 30) as the liveness, until its
   prompt is taught the lease.

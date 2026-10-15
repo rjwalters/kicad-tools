@@ -469,6 +469,15 @@ if [[ "$PLAN_ONLY" == "true" ]]; then
     exit 0
 fi
 
+# No per-suite bound in CI is a refusal, not a fallback (#11964): with neither
+# `timeout` nor `gtimeout` one hung suite runs until the JOB's cap kills the
+# whole leg, and a cut-off job leaves no report naming it (the macOS daily leg
+# lost 180 min a night this way). Developer machines keep the optional wrapper.
+if [[ -z "$timeout_cmd" && "${GITHUB_ACTIONS:-}" == "true" ]]; then
+    echo "::error::run-ci-suites.sh: no \`timeout\` or \`gtimeout\` on PATH — refusing to run suites with no per-suite timeout in CI (install coreutils; #11964)" >&2
+    exit 1
+fi
+
 # Live-host leak guard (#8077): fingerprint the surfaces a test run must never
 # move — every reachable `daemon.log`'s boot-block count, the supervised unit's
 # restart identity, the systemd --user unit-file name set, the shared token
@@ -560,10 +569,26 @@ run_suite() {
     printf '%s %s %s %s %s %s %s\n' \
         "$rc" "$dur" "$retried" "$first_rc" "$retry_rc" "$start" "$end" \
         >"$RESULTS_DIR/$log_name.result"
+    # Streamed as each suite finishes (#11964), not only in the ordered report
+    # after the pool drains: a job cut off by its own cap never reaches that
+    # report, and this line is then the only record of what finished — at
+    # parallelism 1 the hung suite is the next one in the manifest. The `FAIL `
+    # token is what ci-daily.yml's failure excerpt greps for. One short printf,
+    # so concurrent workers do not interleave mid-line.
+    local note=""
+    [[ "$retried" == "1" ]] && note=" (retried — first exit $first_rc)"
+    [[ "$first_rc" == "124" || "$rc" == "124" ]] && note="$note (hit the ${PER_SUITE_TIMEOUT}s per-suite timeout)"
+    if [[ "$rc" -eq 0 ]]; then
+        printf '[suite done] PASS  %s %ss%s\n' "$suite" "$dur" "$note"
+    else
+        printf '[suite done] FAIL  %s %ss (exit %s)%s\n' "$suite" "$dur" "$rc" "$note"
+    fi
 }
 
 printf '\n=== Running %d CI-wired shell suites (parallelism %d, timeout %ss each) ===\n\n' \
     "${#suites[@]}" "$PARALLELISM" "$PER_SUITE_TIMEOUT"
+# Which wrapper enforces that timeout (#11964): NONE means suites run unbounded.
+printf 'Per-suite timeout wrapper: %s\n\n' "${timeout_cmd:-NONE}"
 if [[ -n "$SERIAL_LANE_SUITES" ]]; then
     printf 'Serial lane (run alone after the pool drains, #6622 AC5): %s\n\n' \
         "$SERIAL_LANE_SUITES"

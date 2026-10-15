@@ -155,12 +155,21 @@ wf_env=(env -u LOOM_WORK_FINDER -u LOOM_MAIN_HEALTH_GATE
     LOOM_AUTONOMY_MARKER="$WF_REPO/state/autonomy-desired"
     LOOM_WATCHDOG_LABEL="com.example.loom-sandbox-$$-wf-watchdog")
 
-# WF2. Inspection: a plain start over the config warns; --from-config neither
-#      warns nor forces LOOM_WORK_FINDER.
+# WF2. Inspection: a plain start over the config warns where the start's own
+#      LOOM_WORK_FINDER=0 is rendered (the plist); --from-config neither warns
+#      nor forces LOOM_WORK_FINDER.
 wf2_out=$( cd "$WF_REPO" && "${wf_env[@]}" LOOM_DAEMON_BIN="$FAKE_BIN" \
-    bash "$START_SCRIPT" --print-unit 2>&1 >/dev/null )
+    bash "$START_SCRIPT" --print-plist 2>&1 >/dev/null )
 assert_contains "$wf2_out" "autonomous.workFinder.enabled: true" \
     "WF2: a plain start over a config-enabled work finder is a detected downgrade"
+# WF2u. A systemd unit never carries the start's 0 (#11951), so the config
+#       keeps the work finder on and a plain start is not a downgrade there.
+wf2u_out=$( cd "$WF_REPO" && "${wf_env[@]}" LOOM_DAEMON_BIN="$FAKE_BIN" \
+    bash "$START_SCRIPT" --print-unit 2>&1 )
+assert_not_contains "$wf2u_out" "autonomy downgrade" \
+    "WF2u: a plain start over a config-enabled work finder is not a downgrade on systemd (#11951)"
+assert_not_contains "$wf2u_out" "Environment=LOOM_WORK_FINDER=" \
+    "WF2u: the systemd unit does not carry the start's LOOM_WORK_FINDER=0 (#11951)"
 wf2c_out=$( cd "$WF_REPO" && "${wf_env[@]}" LOOM_DAEMON_BIN="$FAKE_BIN" \
     bash "$START_SCRIPT" --from-config --print-unit 2>&1 )
 assert_not_contains "$wf2c_out" "autonomy downgrade" \
@@ -227,6 +236,31 @@ assert_eq "WF=[1]" "$(cat "$WF_REPO/state/daemon-env" 2>/dev/null)" \
     "WF5: --work-finder on the config-enabled host starts with LOOM_WORK_FINDER=1"
 [[ -s "$WF_REPO/state/daemon-env" ]] || echo "  start output: $wf5_out"
 stop_fixture_daemon "$WF_REPO/.loom/.daemon.pid"
+
+# WF6. #11951: a systemd unit no longer carries autonomy env, so --work-finder
+#      on a host where nothing else turns the work finder on cannot be
+#      honoured. The inspection mode names it; a real start refuses on it.
+WF6_HOME="$WORKDIR/wf6-home"; mkdir -p "$WF6_HOME/.loom"
+wf6_out=$( cd "$WORKDIR/live-state" && env -u LOOM_WORK_FINDER -u LOOM_MAIN_HEALTH_GATE \
+    HOME="$WF6_HOME" LOOM_DAEMON_BIN="$FAKE_BIN" \
+    LOOM_SOCKET_PATH="$WF6_HOME/.loom/loom-daemon.sock" \
+    LOOM_AUTONOMY_MARKER="$WF6_HOME/.loom/autonomy-desired" \
+    bash "$START_SCRIPT" --work-finder --print-unit 2>&1 )
+assert_contains "$wf6_out" "WARNING (#11951): --work-finder asks for LOOM_WORK_FINDER=1" \
+    "WF6: an unhonourable --work-finder on systemd is named (#11951)"
+assert_eq "" "$(grep '^Environment=LOOM_WORK_FINDER=' <<<"$wf6_out")" \
+    "WF6: the unit does not carry --work-finder's value (#11951)"
+# WF6b. The same flag with a drop-in that turns the work finder on is met.
+mkdir -p "$WF6_HOME/.config/systemd/user/loom-daemon.service.d"
+printf '%s\n' '[Service]' 'Environment=LOOM_WORK_FINDER=1' \
+    > "$WF6_HOME/.config/systemd/user/loom-daemon.service.d/15-autonomy.conf"
+wf6b_out=$( cd "$WORKDIR/live-state" && env -u LOOM_WORK_FINDER -u LOOM_MAIN_HEALTH_GATE \
+    -u LOOM_SYSTEMD_UNIT HOME="$WF6_HOME" LOOM_DAEMON_BIN="$FAKE_BIN" \
+    LOOM_SOCKET_PATH="$WF6_HOME/.loom/loom-daemon.sock" \
+    LOOM_AUTONOMY_MARKER="$WF6_HOME/.loom/autonomy-desired" \
+    bash "$START_SCRIPT" --work-finder --print-unit 2>&1 )
+assert_not_contains "$wf6b_out" "(#11951)" \
+    "WF6b: --work-finder is met by a drop-in that sets the work finder on"
 
 TESTS_RUN=$((TESTS_RUN + 1))
 if live_state_sandbox_assert_untouched; then

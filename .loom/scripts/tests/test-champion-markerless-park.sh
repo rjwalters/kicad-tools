@@ -2,6 +2,8 @@
 # test-champion-markerless-park.sh - #11932: a `loom:pr` + `loom:blocked` PR
 # with no Champion hold marker (another actor's park) gets no merge attempt and
 # no comment, and the "Merge Failed" comment posts at most once per head.
+# #11970: a hold the fleet re-labelled `loom:operator` (`state=stray-operator`)
+# loses that label and nothing else.
 #
 # Extract-and-execute (#7979): the SHIPPED bash blocks are lifted out of
 # champion-pr-merge.md and run with `gh`, `loom-daemon`, `$GH_READ`,
@@ -157,6 +159,10 @@ reset; run_janitor "$(line champion-hold merge-risk)"
 check "Champion's own hold: falls through to the criteria, untouched" \
     eval 'has JANITOR-FELL-THROUGH && [[ $(log_count POST) == 0 && $(log_count EDIT) == 0 ]]'
 
+reset; run_janitor "$(line stray-operator critical-file)"
+check "stray-operator: removes only loom:operator, no comment, on to the criteria" \
+    eval 'has JANITOR-FELL-THROUGH && grep -q "EDIT pr edit 42 --remove-label loom:operator" "$STUB_LOG" && [[ $(log_count EDIT) == 1 && $(log_count POST) == 0 ]]'
+
 reset; run_janitor "$(line clear)"
 check "clear: falls through to the criteria" eval 'has JANITOR-FELL-THROUGH && [[ $(log_count EDIT) == 0 ]]'
 
@@ -167,7 +173,7 @@ check "contradiction: loom:pr is stripped" eval 'grep -q "EDIT pr edit 42 --remo
 
 # ---------------------------------------------------------------------------
 echo "--- 2. Step 3 (merge) ---"
-for state in foreign-park champion-hold contradiction; do
+for state in foreign-park champion-hold contradiction stray-operator; do
     reset; run_step3 "$(line "$state")"
     check "$state: no merge attempt (no merge-pr.sh, no merge-queue step)" \
         eval '[[ $(log_count MERGE) == 0 && $(log_count QUEUE) == 0 ]]'

@@ -97,6 +97,7 @@ test-worktree-lease-co-occupancy.sh  Needs a built loom-daemon: worktree.sh's sh
 # runs as its own direct step in ci.yml and/or build-gate.sh; excluded here
 # (rather than wired) to avoid double-running it via run-ci-suites.sh.
 scripts/test-ci-result-gate.sh  Already wired directly in ci.yml's always-run Structural Checks job ("Test the CI Result aggregate gate", #10444); excluded here to avoid double-running it behind the path filter.
+scripts/test-ci-daily-classify.sh  Already wired directly in ci.yml's always-run Structural Checks job ("Test the ci-daily timeout classifier and report wiring", #11964); excluded here to avoid double-running it behind the path filter.
 scripts/test-ci-image-inputs.sh  Already wired directly in ci.yml's always-run Structural Checks job ("Test the image-input detection and the image gate wiring", #10825); excluded here to avoid double-running it behind the path filter.
 scripts/test-release-decision.sh  Already wired directly in ci.yml's always-run Structural Checks job ("Test the release decision and release.yml wiring", #10826); excluded here to avoid double-running it behind the path filter.
 scripts/test-version-bump-gate.sh  Already wired directly in ci.yml's always-run Structural Checks job (the version-bump cadence gate test, #11174); excluded here to avoid double-running it behind the path filter.
