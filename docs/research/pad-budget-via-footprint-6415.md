@@ -29,7 +29,7 @@ own-net exempt) passed. `ROUTER_CPP_BUILD_VERSION` 56 -> 57 in the experiment.
 
 Board 05, grid engine, 4 layers, `--no-auto-layers --deterministic-budget
 --per-net-iterations 1000000 --no-placement-delta-feedback --seed 42
---no-cache --timeout 4500`, main `ccfc9726`-lineage (`d43f454b`), same host,
+--no-cache --timeout 4500`, main `d43f454b`, same host,
 both runs concurrent (load 1-3). One build; the "main" arm is
 `KCT_PAD_BUDGET_VIA_SCALE=0`, which disables the footprint charge and leaves
 the centre-cell path (the byte-identity of that arm to a stock main build was
@@ -37,8 +37,8 @@ established in #6422 and not re-checked here).
 
 | Arm | Routed signal nets | Unfinished (net-status) | VM U2.11 |
 |---|---|---|---|
-| main (scale 0) | 30/33 | GND_SENSE, PWM_B, nTRIP, ... | not listed as unrouted |
-| tip-weighted (scale 1) | 29/33 | PWM_B, VM, nFAULT, ... | **stranded** |
+| main (scale 0) | 30/33 | GND_SENSE, PWM_B, nTRIP | connected in this run |
+| tip-weighted (scale 1) | 29/33 | GND_SENSE, PWM_B, VM, nFAULT | **stranded** |
 
 Gate result: routed nets 29 < 30 (fails 1) and VM U2.11 not connected (fails
 2). Criteria 3 and 4 were not evaluated; the gate had already failed and the
@@ -47,7 +47,8 @@ issue forbids a second tuning iteration.
 ## Conclusion
 
 Cost shaping alone cannot reorder the via sites on PHASE_C's corridor:
-sealing a tip is made expensive, so the router seals something else (here
-different nets strand: VM and nFAULT instead of GND_SENSE and nTRIP). The
+sealing a tip is made expensive, so the router seals something else (here VM
+and nFAULT strand instead of nTRIP; VM was not stranded in the baseline arm of
+this run, so the baseline is itself unstable run to run, as #6422 also saw). The
 fix must change PHASE_C's escape (layer or approach) or VM's pour link, not
 the via cost. Router code is unchanged by this issue.
