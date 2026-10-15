@@ -4675,6 +4675,10 @@ class Autorouter:
             )
             pair_nets = {pc.pad_p_a.net, pc.pad_n_a.net}
             half = pc.pitch / 2.0
+            # Issue #6697: first reserve an escape via site for a routed pad
+            # the pair start would seal in (board 03 VBUS U2.5), so the
+            # anchor below slides past it instead of capping it.
+            self._lattice_reserve_pair_escape_sites(pf, obstacles, pc, pair_nets)
             # The rule-area mask (+ #6401 pour-pad via reservations) installed
             # by ``_negotiate_lattice_netset`` before this call.
             keepouts = getattr(pf, "_keepouts", None)
@@ -4708,6 +4712,93 @@ class Autorouter:
         if anchor_a is None and anchor_b is None:
             return pc
         return replace(pc, anchor_a=anchor_a, anchor_b=anchor_b)
+
+    #: Extra radius on a #6697 pair-escape via site, so the sealed net's via
+    #: still clears foreign copper after landing on a nearby lattice node.
+    _PAIR_ESCAPE_SITE_MARGIN_MM = 0.1
+
+    def _lattice_reserve_pair_escape_sites(
+        self, pf: Any, obstacles: Any, pc: Any, pair_nets: set[int]
+    ) -> None:
+        """Reserve a via site for a routed pad a pair start would seal (#6697).
+
+        :func:`~.lattice.coupled.sandwiched_pad_escape_sites` finds, at each
+        segment end, a routed single-layer pad between the pair's own pads
+        (board 03: VBUS U2.5 between USB_D+ U2.4 and USB_D- U2.6).  Each site
+        joins the pathfinder's keepout mask as a disc (via + clearance +
+        :attr:`_PAIR_ESCAPE_SITE_MARGIN_MM`, all layers, tracks and vias) that
+        every net but the sealed one keeps out of.  The anchor relocation, the
+        fat pair search and every other net then leave the pad its exit, and
+        the sealed net can drop its via there.  Idempotent per site name, so
+        a rebuilt connection list (#6535 tap-chain retry) adds nothing twice.
+        """
+        from .lattice.coupled import sandwiched_pad_escape_sites
+        from .lattice.obstacles import KeepoutArea, LatticeKeepoutMask
+        from .plane_via_sites import _regular_polygon
+
+        routed = frozenset(
+            net for net, keys in self.nets.items() if net and len(dict.fromkeys(keys)) >= 2
+        )
+        if not routed:
+            return
+        num_layers = int(pf.num_layers)
+        via_radius = float(self.rules.via_diameter) / 2.0
+        new: list[Any] = []
+        mask = getattr(pf, "_keepouts", None)
+        have = {a.name for a in (mask.areas if mask else ())}
+        ends = (
+            (pc.pad_p_a, pc.pad_n_a, pc.mid_b),
+            (pc.pad_p_b, pc.pad_n_b, pc.mid_a),
+        )
+        for pad_p, pad_n, toward in ends:
+            for pad, site in sandwiched_pad_escape_sites(
+                obstacles,
+                pad_p,
+                pad_n,
+                toward,
+                pair_nets=pair_nets,
+                routed_nets=routed,
+                via_radius=via_radius,
+                clearance_for=lambda net: self._lattice_escape_clearance(net, pc.net_class),
+            ):
+                name_net = self.net_names.get(pad.net) or pad.net_name or str(pad.net)
+                name = f"pair-escape-via:{name_net}:{pad.ref}.{pad.pin}"
+                if name in have:
+                    continue
+                have.add(name)
+                # The sealed net's class clearance, floored at the pair's and
+                # the board's: the strongest spacing anything keeps from it.
+                clearance = self._lattice_escape_clearance(pad.net, pc.net_class)
+                new.append(
+                    KeepoutArea(
+                        polygon=_regular_polygon(
+                            site[0],
+                            site[1],
+                            via_radius + clearance + self._PAIR_ESCAPE_SITE_MARGIN_MM,
+                        ),
+                        layers=frozenset(range(num_layers)),
+                        blocks_tracks=True,
+                        blocks_vias=True,
+                        exempt=frozenset({pad.net}),
+                        name=name,
+                    )
+                )
+                print(
+                    f"  Pair escape via site (#6697): {name_net} {pad.ref}.{pad.pin} sits "
+                    f"between {pc.pair_name}'s pads; reserved at ({site[0]:.3f}, {site[1]:.3f})"
+                )
+        if new:
+            pf.set_keepouts(LatticeKeepoutMask(tuple(mask.areas if mask else ()) + tuple(new)))
+
+    def _lattice_escape_clearance(self, net: int, pair_class: Any) -> float:
+        """Clearance kept from a #6697 escape via of ``net`` (mm)."""
+        name = self.net_names.get(net)
+        nc = self.net_class_map.get(name) if name else None
+        return max(
+            float(self.rules.trace_clearance),
+            float(getattr(nc, "clearance", None) or 0.0),
+            float(getattr(pair_class, "clearance", None) or 0.0),
+        )
 
     def _negotiate_lattice_netset(self) -> dict[int, list[Route]]:
         """Negotiate every routable net through the shared lattice (#4278).
