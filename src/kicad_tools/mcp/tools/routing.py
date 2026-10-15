@@ -299,7 +299,7 @@ def route_net(
                 # Check if through-hole
                 is_through_hole = "*.Cu" in (pad.layers or [])
 
-                from kicad_tools.router.io import _schema_pad_shape
+                from kicad_tools.router.io import _schema_pad_rratio, _schema_pad_shape
 
                 pad_info = {
                     "number": pad.number,
@@ -318,6 +318,7 @@ def route_net(
                     # obstacle models need for a correct rotated-pad AABB.
                     "rotation": pad.rotation,
                     "shape": _schema_pad_shape(pad, fp.reference),
+                    "roundrect_rratio": _schema_pad_rratio(pad),
                 }
                 component_pads[fp.reference].append(pad_info)
                 net_pads.append(pad_info)
@@ -1222,7 +1223,7 @@ def _build_pads_for_net(
 
             is_through_hole = "*.Cu" in pad_layers
 
-            from kicad_tools.router.io import _schema_pad_shape
+            from kicad_tools.router.io import _schema_pad_rratio, _schema_pad_shape
 
             pads.append(
                 RouterPad(
@@ -1241,6 +1242,7 @@ def _build_pads_for_net(
                     # in ``_build_router_pads``-style dict above (#4910).
                     rotation=pad.rotation,
                     shape=_schema_pad_shape(pad, fp.reference),
+                    roundrect_rratio=_schema_pad_rratio(pad),
                 )
             )
 

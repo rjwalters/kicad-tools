@@ -88,6 +88,7 @@ def _pad(
     rotation: float = 0.0,
     layer: Layer = Layer.F_CU,
     ref: str = "P1",
+    roundrect_rratio: float | None = None,
 ) -> Pad:
     return Pad(
         x=x,
@@ -102,6 +103,7 @@ def _pad(
         through_hole=False,
         rotation=rotation,
         shape=shape,
+        roundrect_rratio=roundrect_rratio,
     )
 
 
@@ -224,7 +226,9 @@ def test_rotated_roundrect_is_measured_on_its_outline_not_its_box() -> None:
     every raster-bounded model -- this consumer included, until Phase 4a.
     """
     grid = _grid()
-    pad = _pad(7.0, 7.0, shape="roundrect", rotation=45.0)
+    # Issue #6718: the outline needs the file's ratio; without one the pad is
+    # (conservatively) its rectangle.
+    pad = _pad(7.0, 7.0, shape="roundrect", rotation=45.0, roundrect_rratio=0.25)
     grid.add_pad(pad)
 
     radius = 0.25 * min(pad.width, pad.height)

@@ -322,7 +322,11 @@ namespace router {
 // between the P and N via of the move itself.  A v53 .so returns coupled
 // routes with via pairs below the floor, and diverges from the Python coupled
 // loop, which applies the same check.
-constexpr int ROUTER_CPP_BUILD_VERSION = 55;
+// v56 (Issue #6718): ``Grid3D::set_pad_authored`` gained a trailing ``rratio``
+// so the authored gate measures a roundrect with the file's corner ratio (or
+// as a rect when unknown) instead of a hardcoded 0.25.  The Python side passes
+// it on every pad, so a v55 .so must be rejected.
+constexpr int ROUTER_CPP_BUILD_VERSION = 56;
 
 
 // Issue #4071: fixed-capacity owner-set size for per-cell corridor

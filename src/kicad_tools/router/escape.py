@@ -355,6 +355,8 @@ def escape_endpoint_pad(
         drill=pad.drill if unchanged and extent is None else 0.0,
         rotation=rotation,
         shape=shape,
+        # Issue #6718: an unchanged terminal keeps its authored roundrect corners.
+        roundrect_rratio=pad.roundrect_rratio if shape == pad.shape else None,
         escape_terminal=not (unchanged and extent is None),
     )
 

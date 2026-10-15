@@ -376,7 +376,7 @@ NB_MODULE(router_cpp, m) {
         .def("authored_pair_floor", &Grid3D::authored_pair_floor, "net_a"_a, "net_b"_a)
         .def("set_pad_authored", &Grid3D::set_pad_authored,
              "index"_a, "shape"_a, "width"_a, "height"_a, "rotation"_a,
-             "x"_a, "y"_a, "drill"_a, "item_floor"_a)
+             "x"_a, "y"_a, "drill"_a, "item_floor"_a, "rratio"_a)
         .def("rebuild_authored_index", &Grid3D::rebuild_authored_index)
         .def("authored_active", &Grid3D::authored_active)
         .def("authored_segment_clear", &Grid3D::authored_segment_clear,

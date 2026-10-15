@@ -2772,6 +2772,7 @@ def load_pads_for_analysis(pcb_path_or_text: str | Path) -> list[Pad]:
                     footprint_name=footprint_name,
                     rotation=pad_rotation,
                     shape=pad_shape,
+                    roundrect_rratio=_pad_rratio_from_block(pad_block, pad_shape),
                 )
             )
 
@@ -4733,6 +4734,7 @@ def route_pcb(
                     "y": cy + ry,
                     "width": pad.get("width", 0.5),
                     "shape": pad.get("shape", "rect"),
+                    "roundrect_rratio": pad.get("roundrect_rratio"),
                     "height": pad.get("height", 0.5),
                     "net": net_num,
                     "net_name": net_name,
@@ -4823,6 +4825,32 @@ def _pad_shape_from_block(pad_block: str, ref: str, pin: str) -> str:
         pin=pin,
         has_padstack=re.search(r"\(padstack(?:\s|\))", pad_block) is not None,
     )
+
+
+def _pad_rratio_from_block(pad_block: str, shape: str) -> float | None:
+    """The file's ``(roundrect_rratio X)`` for a ``roundrect`` pad (issue #6718).
+
+    Returns ``None`` for any other shape, and for a roundrect whose block
+    carries no parseable ratio -- the clearance kernel then measures it as its
+    rectangle (conservative) rather than assuming KiCad's 0.25 default.
+    """
+    if shape != "roundrect":
+        return None
+    match = re.search(r"\(roundrect_rratio\s+([-+\d.eE]+)\s*\)", pad_block)
+    if match is None:
+        return None
+    try:
+        return float(match.group(1))
+    except ValueError:
+        return None
+
+
+def _schema_pad_rratio(pad) -> float | None:
+    """``schema.pcb.Pad.roundrect_rratio`` for a roundrect pad, else ``None``."""
+    if getattr(pad, "shape", None) != "roundrect":
+        return None
+    value = getattr(pad, "roundrect_rratio", None)
+    return float(value) if value is not None else None
 
 
 def _schema_pad_shape(pad, ref: str) -> str:
@@ -5022,6 +5050,7 @@ def _install_fine_pitch_regions_from_components(
                         drill=float(pad_info.get("drill", 0.0)),
                         rotation=float(pad_info.get("rotation", 0.0)),
                         shape=pad_info.get("shape", "rect"),
+                        roundrect_rratio=pad_info.get("roundrect_rratio"),
                     )
                 )
             except (TypeError, ValueError, KeyError):
@@ -5545,6 +5574,7 @@ def load_pcb_for_routing(
                     "layer": pad_layer,
                     "rotation": pad_rotation,
                     "shape": pad_shape,
+                    "roundrect_rratio": _pad_rratio_from_block(pad_block, pad_shape),
                 }
             )
 

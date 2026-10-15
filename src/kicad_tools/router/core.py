@@ -1028,6 +1028,7 @@ def build_worker_router(config: dict) -> Autorouter:
             # it would rebuild every rotated pad as axis-aligned.
             rotation=pad_data.get("rotation", 0.0),
             shape=pad_data.get("shape", "rect"),
+            roundrect_rratio=pad_data.get("roundrect_rratio"),
         )
         key = pad.key
         if key in router.pads and router.pads[key].net != pad.net:
@@ -3104,6 +3105,7 @@ class Autorouter:
                 drill=pad_info.get("drill", 0.0),
                 rotation=pad_info.get("rotation", 0.0),
                 shape=pad_info.get("shape", "rect"),
+                roundrect_rratio=pad_info.get("roundrect_rratio"),
                 # Issue #6243: a neutralised pad keeps its authored minimum.
                 authored_clearance=float(pad_info.get("authored_clearance", 0.0) or 0.0),
             )
@@ -18330,6 +18332,7 @@ class Autorouter:
                     "steiner_point": pad.steiner_point,
                     "rotation": pad.rotation,
                     "shape": pad.shape,
+                    "roundrect_rratio": pad.roundrect_rratio,
                     "pin_pitch": self.grid._pad_pin_pitch.get(id(pad)),
                 }
             )
