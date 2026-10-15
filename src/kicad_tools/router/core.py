@@ -4059,6 +4059,12 @@ class Autorouter:
                 )
             )
         self._lattice_pathfinder.fixed_fills = self.grid.fixed_fills
+        # Issue #6703: rank uncoupled-fallback leg candidates on the skew
+        # ``kct check`` reports (segments plus drilled via barrels).
+        if hasattr(self, "rules") and hasattr(self, "layer_stack"):
+            self._lattice_pathfinder.pair_length_measure = self._checker_route_length(
+                len(self.layer_stack.layers) if self.layer_stack is not None else 2
+            )
         if hasattr(self._lattice_pathfinder, "set_escape_boundary"):
             self._lattice_pathfinder.set_escape_boundary(
                 self._edge_segments, self._edge_clearance or 0.0

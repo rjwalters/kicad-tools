@@ -499,3 +499,49 @@ def _try_move(
             old.x1, old.y1, old.x2, old.y2 = new.x1, new.y1, new.x2, new.y2
         return True
     return False
+
+
+def class_pad_shortfalls(pf: LatticePathfinder, route: Route, net_class: object | None) -> int:
+    """Count ``route``'s track-vs-pad pairs below the pad's own class (#6703).
+
+    The lattice search holds foreign pads only to the connection's own
+    clearance; a pad whose class asks for more is enforced afterwards by
+    :func:`repair_class_pad_pairs`.  On a diff-pair net that repair may move
+    copper only within a 0.01 mm skew budget (#6437), so a leftover shortfall
+    there ends with the whole net demoted by the router's backstop.  The
+    uncoupled-fallback leg chooser uses this count to prefer leg pairs the
+    repair will not have to touch.
+    """
+    pad_req = pad_class_requirements(pf)
+    if pad_req is None or pf._pairwise is not None or not route.segments:
+        return 0
+    own = pf._conn_geometry(net_class, route.net)[1]
+    candidates = [i for i, req in enumerate(pad_req) if req > own + _EPS]
+    if not candidates:
+        return 0
+    pads = pf.pads
+    reach_max = max(pad_req[i] for i in candidates) + 0.5
+    count = 0
+    for seg in route.segments:
+        try:
+            layer = pf.layer_stack.layer_enum_to_index(seg.layer)
+        except Exception:
+            continue
+        reach = seg.width / 2.0 + reach_max
+        x0, x1 = min(seg.x1, seg.x2) - reach, max(seg.x1, seg.x2) + reach
+        y0, y1 = min(seg.y1, seg.y2) - reach, max(seg.y1, seg.y2) + reach
+        shape = None
+        for i in candidates:
+            pad = pads[i]
+            if pad.net == route.net:
+                continue
+            hw, hh = pad_half_extents(pad)
+            if pad.x + hw < x0 or pad.x - hw > x1 or pad.y + hh < y0 or pad.y - hh > y1:
+                continue
+            if layer not in pf._pad_layer_indices(pad):
+                continue
+            if shape is None:
+                shape = segment_shape(seg)
+            if copper_gap(shape, pad_shape(pad)) < max(own, pad_req[i]) - _EPS:
+                count += 1
+    return count
