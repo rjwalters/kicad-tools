@@ -552,6 +552,90 @@ def test_slot_wait_is_credited_back_to_the_waiting_tests_deadline(tmp_path, monk
     assert remaining <= 10.0 + permit.waited_s
 
 
+class _TimedOut(Exception):
+    """Stands in for pytest-timeout's ``Failed: Timeout`` raised from SIGALRM."""
+
+
+def _kill_on_alarm(*_):
+    raise _TimedOut
+
+
+def _queue_behind_a_held_slot(tmp_path, monkeypatch, *, owner: str, credit: str | None):
+    slots = tmp_path / "slots"
+    handles = _hold_every_slot(slots, 1)
+    monkeypatch.setenv(native_concurrency.ENV_SLOT_DIR, str(slots))
+    monkeypatch.setenv(native_concurrency.ENV_WAIT_SECONDS, "30")
+    monkeypatch.setenv(native_concurrency.ENV_LOG, str(tmp_path / "records"))
+    if credit is None:
+        monkeypatch.delenv(native_concurrency.ENV_CREDIT_SECONDS, raising=False)
+    else:
+        monkeypatch.setenv(native_concurrency.ENV_CREDIT_SECONDS, credit)
+    monkeypatch.setenv("PYTEST_CURRENT_TEST", f"tests/t.py::{owner} (call)")
+    return handles
+
+
+def test_deadline_is_extended_while_still_queued_for_a_permit(tmp_path, monkeypatch):
+    """Issue #6716: a deadline shorter than the queue wait must not fire in it.
+
+    The waiter's own budget (0.2 s) runs out long before the held slot is
+    released (0.8 s). Crediting only once the permit arrives is too late --
+    SIGALRM fires inside the poll loop's ``time.sleep`` -- so the credit has to
+    keep pushing the armed deadline out while the test is still waiting.
+    """
+    handles = _queue_behind_a_held_slot(
+        tmp_path, monkeypatch, owner="test_queued_6716", credit=None
+    )
+    timer = _release_after(handles, 0.8)
+    permit = None
+    try:
+        with _own_the_alarm(0.2):
+            signal.signal(signal.SIGALRM, _kill_on_alarm)
+            permit = native_concurrency._acquire(1, os.environ)
+            remaining, _ = signal.getitimer(signal.ITIMER_REAL)
+            bounded = permit.bounded
+            signal.setitimer(signal.ITIMER_REAL, 0)
+    finally:
+        timer.cancel()
+        if permit is not None:
+            permit.release()
+        for handle in handles:
+            with contextlib.suppress(Exception):
+                handle.close()
+    assert bounded is True
+    assert permit.waited_s >= 0.7
+    # The whole wait was given back, so (nearly) the original budget is left.
+    assert 0.0 < remaining <= 0.2 + 0.06
+    records = [
+        json.loads(line)
+        for path in (tmp_path / "records").glob("slots-*.jsonl")
+        for line in path.read_text().splitlines()
+    ]
+    acquire = [record for record in records if record["event"] == "acquire"]
+    assert acquire[0]["credited_s"] == pytest.approx(permit.waited_s, abs=0.01)
+
+
+def test_queued_waiter_is_still_killed_once_its_credit_cap_is_spent(tmp_path, monkeypatch):
+    """Hang detection stays bounded: own timeout plus the cap, then SIGALRM."""
+    handles = _queue_behind_a_held_slot(
+        tmp_path, monkeypatch, owner="test_capped_6716", credit="0.3"
+    )
+    timer = _release_after(handles, 3.0)
+    started = time.monotonic()
+    try:
+        with _own_the_alarm(0.2):
+            signal.signal(signal.SIGALRM, _kill_on_alarm)
+            with pytest.raises(_TimedOut):
+                native_concurrency._acquire(1, os.environ)
+            elapsed = time.monotonic() - started
+    finally:
+        timer.cancel()
+        for handle in handles:
+            with contextlib.suppress(Exception):
+                handle.close()
+    # Killed at ~0.2 s + 0.3 s cap -- well before the slot would free up.
+    assert 0.45 <= elapsed < 1.5
+
+
 def test_credit_is_capped_per_test_and_reset_for_the_next_test(monkeypatch):
     monkeypatch.setenv(native_concurrency.ENV_CREDIT_SECONDS, "0.5")
     monkeypatch.setenv("PYTEST_CURRENT_TEST", "tests/t.py::test_a (call)")
