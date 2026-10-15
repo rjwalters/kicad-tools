@@ -5167,8 +5167,8 @@ class Autorouter:
         of either net has no clearing tie (a single-layer SMD receptacle has
         room for only one of the two crossing ties -- board 06rf USB2_D), the
         pair keeps today's connections for every extra, so P and N are not
-        attached by different mechanisms (unless only one net of the pair has
-        an eligible extra, which is then tied alone).  A tie must also clear
+        attached by different mechanisms.  That includes a pair where only one
+        net has an eligible extra: neither net is tied (#6697).  A tie must also clear
         fixed fills and other-net preserved vias.  No ties at all when the
         pathfinder is unavailable or an HV pairwise table is installed (not
         modelled by the planner).
@@ -5296,7 +5296,21 @@ class Autorouter:
                 continue
             group = [net]
             partner = partners.get(net)
-            if partner in eligible and partner not in done:
+            if partner is None or partner not in eligible:
+                # Issue #6697: all or nothing means BOTH nets.  A half-tie
+                # (one net tied, its partner routed single-ended) attached P
+                # and N by different mechanisms and made 06rf USB2_D's
+                # uncoupled length worse (8.677 -> 12.951 mm).
+                done.add(net)
+                names = "/".join(
+                    self.net_names.get(g, str(g)) for g in (net, partner) if g is not None
+                )
+                print(
+                    f"  Diff-pair ties {names}: not used (partner net has no tie "
+                    "candidate); extras routed as before (issues #6698, #6697)"
+                )
+                continue
+            if partner not in done:
                 group.append(partner)
             done.update(group)
             local = list(accepted)

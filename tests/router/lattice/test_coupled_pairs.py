@@ -1753,6 +1753,31 @@ def test_core_ties_a_pair_all_or_nothing(capsys, monkeypatch) -> None:
     )
 
 
+def test_core_ties_neither_net_when_only_one_has_a_candidate(capsys, monkeypatch) -> None:
+    # Issue #6697: when only D+ has an eligible far-row extra (D-'s B7 shares
+    # no routing layer with its anchor here), tying D+ alone would attach P
+    # and N by different mechanisms -- the half-tie that made 06rf USB2_D's
+    # uncoupled length worse.  Neither net is tied.
+    router = _usbc_autorouter()
+    pf = router._ensure_lattice_pathfinder()
+    real = pf._pad_layer_indices
+
+    def layers(pad):
+        if pad.ref == "J1" and pad.pin == "B7":
+            return []
+        return real(pad)
+
+    monkeypatch.setattr(pf, "_pad_layer_indices", layers)
+    today = _todays_connections(router, monkeypatch)
+    _c, conns = router._lattice_netset_connections()
+    assert router._lattice_pair_ties == []
+    assert conns == today
+    assert any(k == (1, 0) for k, *_ in conns) and any(k == (2, 0) for k, *_ in conns)
+    assert "Diff-pair ties D+/D-: not used (partner net has no tie candidate)" in (
+        capsys.readouterr().out
+    )
+
+
 def test_core_declines_ties_through_a_fixed_fill(capsys) -> None:
     # Preserved zone fills / degraded custom-pad copper are in neither
     # ``pf.pads`` nor ``existing_routes``: a fill across the connector must
