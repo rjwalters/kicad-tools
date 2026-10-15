@@ -269,11 +269,11 @@ def test_pair_declines_when_fat_envelope_is_blocked() -> None:
 
 def test_pair_declines_when_emitted_leg_violates_keepout() -> None:
     # A track-keepout rule area spanning the pair corridor on both layers
-    # (#4605/#4672).  The fat centerline search deliberately skips the
-    # keepout mask, so the coarse search succeeds -- the finish gate's
-    # emitted-leg re-verification (probing every leg segment at trace_w/2)
-    # must catch the violation and decline with the ``pair-leg-keepout``
-    # attribution, emitting NOTHING (never split, #3906).
+    # (#4605/#4672).  The wall is un-passable, so the pair must decline and
+    # emit NOTHING (never split, #3906).  Since #6697 the fat centerline
+    # search sees the mask itself and reports ``pair-no-path``; the finish
+    # gate's emitted-leg re-verification stays as the backstop for the attach
+    # doglegs (``pair-leg-keepout``).
     from kicad_tools.router.lattice.obstacles import KeepoutArea, LatticeKeepoutMask
 
     wall = KeepoutArea(
@@ -288,8 +288,12 @@ def test_pair_declines_when_emitted_leg_violates_keepout() -> None:
     pf, pc = _pair_board()
     pf.set_keepouts(LatticeKeepoutMask([wall]))
     routes, stats = pf.route_netset([], coupled=[pc])
-    assert pf.pair_outcomes[pc.key] == "pair-leg-keepout", pf.pair_outcomes
-    assert pf.failure_reasons[pc.key] == "pair-leg-keepout"
+    assert pf.pair_outcomes[pc.key] in {
+        "pair-no-path",
+        "pair-no-path-keepout-constrained",
+        "pair-leg-keepout",
+    }, pf.pair_outcomes
+    assert pf.failure_reasons[pc.key] == pf.pair_outcomes[pc.key]
     assert routes == {}
     assert stats.routed == 0 and stats.total == 1
     # Control: the identical board with no keepout couples cleanly (proves
@@ -298,6 +302,38 @@ def test_pair_declines_when_emitted_leg_violates_keepout() -> None:
     routes2, stats2 = pf2.route_netset([], coupled=[pc2])
     assert pf2.pair_outcomes[pc2.key] == "coupled"
     assert stats2.routed == 1 and routes2
+
+
+def test_pair_detours_around_a_keepout_reservation_and_still_couples() -> None:
+    # Issue #6697: a small keepout (the shape of a #6401 pour-pad via
+    # reservation) sits ON the straight pair corridor, with room to go
+    # around it.  The fat centerline search used to skip the keepout mask, so
+    # the shortest path ran straight through it and the finish gate declined
+    # the pair (``pair-leg-keepout``) -- on board 03 this lost USB_MCU_D's
+    # coupling once negotiation history displaced the centerline onto the
+    # U1.5 GND reservation.  The search must route around it and couple.
+    from kicad_tools.router.lattice.obstacles import KeepoutArea, LatticeKeepoutMask
+
+    site = KeepoutArea(
+        polygon=((14.0, 4.0), (16.0, 4.0), (16.0, 7.0), (14.0, 7.0)),
+        layers=frozenset({0, 1}),
+        blocks_tracks=True,
+        blocks_vias=True,
+        only=None,
+        exempt=frozenset(),
+        name="plane-via-fill:GND:U1.5",
+    )
+    pf, pc = _pair_board()
+    mask = LatticeKeepoutMask([site])
+    pf.set_keepouts(mask)
+    routes, _stats = pf.route_netset([], coupled=[pc])
+    assert pf.pair_outcomes[pc.key] == "coupled", pf.pair_outcomes
+    for pol in ("P", "N"):
+        for seg in routes[(pc.key, pol)].segments:
+            layer = 0 if seg.layer.name.startswith("F") else 1
+            assert not mask.segment_blocked(
+                (seg.x1, seg.y1), (seg.x2, seg.y2), layer, seg.net, seg.width / 2.0
+            )
 
 
 def test_pair_declines_when_emitted_leg_violates_pairwise_pad_requirement() -> None:

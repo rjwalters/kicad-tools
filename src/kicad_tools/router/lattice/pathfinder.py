@@ -913,6 +913,14 @@ class LatticePathfinder:
                         committed, point, layer, pair_nets, extra_clearance
                     ):
                         continue
+                    # Issue #6697: the stub's lattice node is where the
+                    # emitted legs start their offset body; keep it a pair
+                    # envelope clear of any keepout (reserved via site) so the
+                    # finish gate does not decline a corridor the search chose.
+                    if self._keepouts is not None and self._keepouts.segment_blocked(
+                        point, point, layer, net, half + math.sqrt(2.0) * extra_clearance
+                    ):
+                        continue
                 else:
                     if obstacles.node_blocked(key, layer, net):
                         continue
@@ -1713,6 +1721,25 @@ class LatticePathfinder:
         # coupled centerline skips the mask in-search; its emitted legs are
         # re-verified in ``_route_pair_impl``'s finish gate.
         ko = None if fat else self._keepouts
+        # Issue #6697: the fat centerline body ALSO honours the keepout mask,
+        # at the pair ENVELOPE half-width (``trace/2 + pitch/2``): the nearer
+        # emitted leg then clears the area by exactly its own half-width.
+        # Without this, history pressure from a congested pass displaced the
+        # centerline onto a reserved pour-pad via site (board 03 U1.5 GND
+        # reservation) that only the finish gate saw, declining a pair that
+        # had coupled on pass 0.
+        fat_ko = self._keepouts if fat else None
+        fat_ko_half = (
+            (getattr(net_class, "trace_width", None) or self.rules.trace_width) / 2.0
+            + extra_clearance
+            if fat
+            else 0.0
+        )
+        # A node is a possible polyline VERTEX, and the +/- pitch/2 offset
+        # mitres a 90-degree turn out to pitch/2 * sqrt(2) from the
+        # centerline, so vertices are probed at the mitred reach (board 03:
+        # a 0.2 mm V-jog put the offset leg 0.1 mm inside the U1.5 site).
+        fat_ko_node_half = fat_ko_half + (math.sqrt(2.0) - 1.0) * extra_clearance if fat else 0.0
         ko_pruned = False
         # Issue #4979: set when a via-hop was skipped because its target
         # layer is hard-avoided for this net -- lets the final "no-path"
@@ -1898,6 +1925,13 @@ class LatticePathfinder:
                         ) and committed_seg_clear_grown(
                             committed, pa, pb, layer, pair_nets, extra_clearance
                         )
+                        if (
+                            ok
+                            and fat_ko is not None
+                            and fat_ko.segment_blocked(pa, pb, layer, net, fat_ko_half)
+                        ):
+                            ok = False
+                            ko_pruned = True
                     else:
                         ok, ko_hit = self._body_edge_legal(
                             edge, layer, net, half, clr, committed, extra=extra, pw=pw, ko=ko
@@ -1922,6 +1956,13 @@ class LatticePathfinder:
                         ) and committed_point_clear_grown(
                             committed, npt, layer, pair_nets, extra_clearance
                         )
+                        if (
+                            nok
+                            and fat_ko is not None
+                            and fat_ko.segment_blocked(npt, npt, layer, net, fat_ko_node_half)
+                        ):
+                            nok = False
+                            ko_pruned = True
                     else:
                         nok, ko_hit = self._body_node_legal(
                             nbr, layer, net, half, clr, committed, extra=extra, pw=pw, ko=ko
@@ -2227,6 +2268,7 @@ class LatticePathfinder:
         net: int,
         pair_nets: set[int],
         committed: CommittedCopper,
+        half: float = 0.0,
     ) -> list[Pt] | None:
         """Dogleg from the exact pad position to an emitted leg endpoint.
 
@@ -2248,6 +2290,13 @@ class LatticePathfinder:
                     ok = False
                     break
                 if not committed.seg_clear(a, b, layer, net):
+                    ok = False
+                    break
+                # Issue #6697: the other dogleg orientation may clear a
+                # reserved via site / rule area the first one clips.
+                if self._keepouts is not None and self._keepouts.segment_blocked(
+                    a, b, layer, net, half
+                ):
                     ok = False
                     break
             if ok:
@@ -2472,10 +2521,14 @@ class LatticePathfinder:
                 (net_p, pc.pad_p_a, pc.pad_p_b, leg_p),
                 (net_n, pc.pad_n_a, pc.pad_n_b, leg_n),
             ):
-                attach_a = self._pair_attach(pad_a, leg[0], layer, net, pair_nets, committed)
+                attach_a = self._pair_attach(
+                    pad_a, leg[0], layer, net, pair_nets, committed, trace_w / 2.0
+                )
                 if attach_a is None:
                     return None, "pair-pad-attach"
-                attach_b = self._pair_attach(pad_b, leg[-1], layer, net, pair_nets, committed)
+                attach_b = self._pair_attach(
+                    pad_b, leg[-1], layer, net, pair_nets, committed, trace_w / 2.0
+                )
                 if attach_b is None:
                     return None, "pair-pad-attach"
                 full = attach_a[:-1] + leg + list(reversed(attach_b))[1:]
@@ -2987,6 +3040,36 @@ class LatticePathfinder:
             fallback_pairs: list[Any] = []
             fallback_legs = 0
             coupled_count = 0
+            deferred_fallback: list[Any] = []
+
+            def flush_fallbacks() -> None:
+                nonlocal routed_items, fallback_legs
+                for fb in deferred_fallback:
+                    legs_ok = 0
+                    for pol, pad_a, pad_b in (
+                        ("P", fb.pad_p_a, fb.pad_p_b),
+                        ("N", fb.pad_n_a, fb.pad_n_b),
+                    ):
+                        leg_key = (fb.key, pol)
+                        leg_item = (leg_key, pad_a, pad_b, fb.net_class)
+                        leg_reason = self._route_single_into(
+                            leg_item,
+                            routes,
+                            committed=committed,
+                            history=history,
+                            present=present,
+                            escape_plan=escape_plan,
+                        )
+                        if leg_reason is None:
+                            legs_ok += 1
+                        else:
+                            reasons[leg_key] = leg_reason
+                            failed.append((0, leg_item))
+                    fallback_legs += legs_ok
+                    if legs_ok == 2:
+                        routed_items += 1
+                deferred_fallback.clear()
+
             for _idx, (_length, kind, item) in enumerate(items):
                 # Issue #4472: abort mid-pass on the deadline too, so a single
                 # slow search inside one pass cannot overrun the budget.
@@ -3008,33 +3091,16 @@ class LatticePathfinder:
                         item, committed=committed, history=history, present=present
                     )
                     if pres is None and uncoupled_fallback:
-                        # Issue #6373: route the declined pair's main run as
-                        # two single-ended legs, right now, before any single.
+                        # Issue #6373: a declined pair's main run is routed as
+                        # two single-ended legs.  Issue #6697: DEFERRED until
+                        # every pair has had its coupled attempt (see
+                        # ``flush_fallbacks``), so one pair's uncoupled legs
+                        # never pre-block a sibling pair's coupled corridor
+                        # (board 03: USB_D[0]'s fallback USB_D- leg ran
+                        # through USB_D[1]'s corridor).
                         pair_outcomes[item.key] = f"uncoupled-fallback:{preason}"
                         fallback_pairs.append(item)
-                        legs_ok = 0
-                        for pol, pad_a, pad_b in (
-                            ("P", item.pad_p_a, item.pad_p_b),
-                            ("N", item.pad_n_a, item.pad_n_b),
-                        ):
-                            leg_key = (item.key, pol)
-                            leg_item = (leg_key, pad_a, pad_b, item.net_class)
-                            leg_reason = self._route_single_into(
-                                leg_item,
-                                routes,
-                                committed=committed,
-                                history=history,
-                                present=present,
-                                escape_plan=escape_plan,
-                            )
-                            if leg_reason is None:
-                                legs_ok += 1
-                            else:
-                                reasons[leg_key] = leg_reason
-                                failed.append((0, leg_item))
-                        fallback_legs += legs_ok
-                        if legs_ok == 2:
-                            routed_items += 1
+                        deferred_fallback.append(item)
                         continue
                     if pres is None:
                         reasons[item.key] = preason
@@ -3054,6 +3120,7 @@ class LatticePathfinder:
                         half, clr = self._conn_geometry(item.net_class, leg_net)
                         committed.add_run(layer_idx, points, leg_net, half, clr)
                     continue
+                flush_fallbacks()
                 key = item[0]
                 reason = self._route_single_into(
                     item,
@@ -3068,6 +3135,8 @@ class LatticePathfinder:
                     failed.append((kind, item))
                     continue
                 routed_items += 1
+
+            flush_fallbacks()
 
             score = (
                 (routed_items, coupled_count, fallback_legs)
