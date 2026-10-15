@@ -597,3 +597,106 @@ class TestKicadCliProbes:
         stub = (10, 0, 10, -5, _B)
         assert _probe([a1, b, c, a2, stub]) == pytest.approx(26.4305, abs=1e-4)
         assert _probe([b, a1, c, a2, stub]) == pytest.approx(26.7053, abs=1e-4)
+
+
+# ---------------------------------------------------------------------------
+# Issue #6780: router pads carry their footprint side, so the Route form
+# measures a via inside a back-side through-hole pad like the PCB form does.
+# ---------------------------------------------------------------------------
+
+
+def _tht_side_board(fp_layer: str) -> str:
+    smd_layers = '"B.Cu" "B.Mask"' if fp_layer == "B.Cu" else '"F.Cu" "F.Mask"'
+    return _MERGE_BOARD.split("  (net 0")[0] + (
+        '  (net 0 "") (net 1 "N1")\n'
+        f'  (footprint "T:TH" (layer "{fp_layer}")'
+        ' (uuid "61111111-1111-1111-1111-111111111111") (at 50 50)\n'
+        '    (property "Reference" "J1" (at 0 -2 0) (layer "F.SilkS")'
+        ' (uuid "61111111-1111-1111-1111-111111111115"))\n'
+        '    (pad "1" thru_hole rect (at 0 0) (size 1.2 1.2) (drill 0.6)'
+        ' (layers "*.Cu" "*.Mask") (net 1 "N1")'
+        ' (uuid "61111111-1111-1111-1111-111111111112"))\n'
+        f'    (pad "2" smd rect (at 4 0) (size 0.6 0.6) (layers {smd_layers})'
+        ' (net 1 "N1") (uuid "61111111-1111-1111-1111-111111111113")))\n'
+        '  (segment (start 50 50) (end 54 50) (width 0.2) (layer "B.Cu") (net 1)'
+        ' (uuid "61111111-1111-1111-1111-111111111114"))\n'
+        '  (via (at 50 50) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 1)'
+        ' (uuid "61111111-1111-1111-1111-111111111116"))\n'
+        "  (gr_rect (start 40 40) (end 70 70) (stroke (width 0.1) (type default))"
+        ' (fill none) (layer "Edge.Cuts") (uuid "61111111-1111-1111-1111-111111111117"))\n'
+        ")\n"
+    )
+
+
+class TestRouterPadFootprintSide:
+    @pytest.mark.parametrize(("fp_layer", "side"), [("B.Cu", Layer.B_CU), ("F.Cu", Layer.F_CU)])
+    def test_loaded_pads_report_footprint_side(self, tmp_path, fp_layer, side):
+        from kicad_tools.router.io import load_pads_for_analysis, load_pcb_for_routing
+        from kicad_tools.router.kicad_length import router_pad
+
+        path = tmp_path / "board.kicad_pcb"
+        path.write_text(_tht_side_board(fp_layer))
+        router, _ = load_pcb_for_routing(str(path), validate_drc=False)
+        for pads in (list(router.pads.values()), load_pads_for_analysis(path.read_text())):
+            tht = [p for p in pads if p.through_hole]
+            assert len(tht) == 1
+            assert tht[0].side is side
+            assert router_pad(tht[0]).side == fp_layer
+            # Routing geometry is untouched: a through-hole pad stays F.Cu.
+            assert tht[0].layer is Layer.F_CU
+            smd = [p for p in pads if not p.through_hole]
+            assert smd[0].layer.kicad_name == fp_layer
+
+    @pytest.mark.parametrize(("fp_layer", "expected"), [("B.Cu", 4.0), ("F.Cu", 5.58)])
+    def test_route_form_equals_pcb_form_for_via_in_tht_pad(self, tmp_path, fp_layer, expected):
+        # A via inside a through-hole pad, with a B.Cu-only fragment.  A
+        # back-side footprint's pad connects the via on B.Cu only, so the via
+        # is a stub (no height); a front-side one adds F.Cu: full 1.58 mm.
+        from kicad_tools.router.io import load_pcb_for_routing
+
+        path = tmp_path / "board.kicad_pcb"
+        path.write_text(_tht_side_board(fp_layer))
+        pcb = PCB.load(str(path))
+        pcb_len = DiffPairLengthTracker.measure_net_from_pcb(pcb, 1)
+        assert pcb_len == pytest.approx(expected, abs=1e-9)
+
+        # The router keeps file coordinates (PCB.load re-origins), so the
+        # Route is written in the file's frame, as the router would emit it.
+        router, _ = load_pcb_for_routing(str(path), validate_drc=False)
+        net = next(p.net for p in router.pads.values() if p.through_hole)
+        route = Route(
+            net=net,
+            net_name="N1",
+            segments=[Segment(50, 50, 54, 50, 0.2, Layer.B_CU, net=net, net_name="N1")],
+            vias=[Via(50, 50, 0.3, 0.6, (Layer.F_CU, Layer.B_CU), net=net)],
+        )
+        model = KicadLengthModel.for_router(KicadStackup.from_pcb(pcb), router.pads.values())
+        assert model.route_length(route) == pytest.approx(pcb_len, abs=1e-9)
+        assert DiffPairLengthTracker._measure_route(
+            route, None, 4, length_model=model
+        ) == pytest.approx(pcb_len, abs=1e-9)
+
+
+def test_route_form_via_in_tht_pad_is_a_stub():
+    # Issue #6780: a Route fragment's via inside a through-hole pad connected
+    # on one layer is a stub in the Route form too (the barrel, not the via,
+    # joins the layers); away from a pad it keeps its declared span.
+    stackup = KicadStackup.default(1.6, 4)
+    via = LVia(10.0, 0.0, 0.6, (_F, _B))
+    segs = [LSeg(10, 0, 14, 0, _F)]
+    tht = LPad(10.0, 0.0, 1.2, 1.2, layers=None, side=_F)
+    assert net_length(segs, [via], [tht], stackup, partial_net=True) == pytest.approx(4.0)
+    assert net_length(segs, [via], [], stackup, partial_net=True) == pytest.approx(5.58)
+
+
+def test_worker_payload_round_trips_pad_side(tmp_path):
+    # The parallel-worker payload rebuilds Pads; the footprint side survives.
+    from kicad_tools.router.core import build_worker_router
+    from kicad_tools.router.io import load_pcb_for_routing
+
+    path = tmp_path / "board.kicad_pcb"
+    path.write_text(_tht_side_board("B.Cu"))
+    router, _ = load_pcb_for_routing(str(path), validate_drc=False)
+    worker = build_worker_router(router._serialize_for_parallel())
+    sides = {p.pin: p.side for p in worker.pads.values()}
+    assert sides == {"1": Layer.B_CU, "2": Layer.B_CU}
