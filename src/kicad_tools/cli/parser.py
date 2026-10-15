@@ -4147,7 +4147,7 @@ def _add_route_parser(subparsers) -> None:
     )
     # Issue #5785: KiCad-oracle completion loop controls.  The inner parser at
     # route_cmd.py declares both (``--oracle-rounds`` defaults to None so the
-    # KCT_ORACLE_COMPLETION env var and the built-in default of 3 still apply
+    # KCT_ORACLE_COMPLETION env var and the built-in default of 12 still apply
     # when unset); both sites must stay in sync, enforced by
     # ``tests/test_cli_parser_drift.py``.
     route_parser.add_argument(
@@ -4159,7 +4159,7 @@ def _add_route_parser(subparsers) -> None:
             "KiCad-oracle completion rounds for pour nets (Issue #5785). After "
             "the zone fill, route exactly the links kicad-cli reports as "
             "unconnected_items on GND/VCC-style pours, up to N rounds, stopping "
-            "at zero or when the count stops falling. Default 3; 0 disables the "
+            "at zero or when the count stops falling. Default 12; 0 disables the "
             "loop and the stranded-pad verdict."
         ),
     )

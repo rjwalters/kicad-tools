@@ -853,7 +853,9 @@ class TestPerNetLinkGate:
         res = run_oracle_completion(
             b.path, oracle=b.oracle, closer=closer, nets={"GND", "+3.3V"}, max_retries=2
         )
-        assert calls["n"] == 3
+        # 1 + max_retries attempts, plus the one footprint-withdrawal attempt
+        # (Issue #6671) -- still bounded.
+        assert calls["n"] == 4
         assert res.stop_reason == STOP_NO_PROGRESS and b.state() == (3, 0)
 
     def test_attribution_skips_zone_anchors_and_far_copper(self):

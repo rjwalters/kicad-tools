@@ -86,6 +86,17 @@ DEFAULT_MIN_HOLE_TO_HOLE = 0.5
 #: DRC post-check agree on borderline geometry.
 HOLE_TO_HOLE_TOLERANCE = 1e-3
 
+#: Issue #6671: slack for the board writers' 0.01 mm coordinate rounding
+#: (:func:`kicad_tools.sexp.builders.fmt`).  Each axis moves by at most
+#: 0.005 mm, so one via moves by at most ``0.005 * sqrt(2)`` ~= 0.0071 mm.
+#: When BOTH vias of a pair are new (placed in the same pass, both still
+#: unrounded) their centres can close by twice that, ~= 0.0142 mm, on a
+#: diagonal.  0.015 covers that worst case.  (06rf: two GND welds planned
+#: 0.800 mm apart were written 0.797 mm apart, a jlcpcb
+#: ``hole_to_hole_clearance`` error of 0.497 < 0.500 mm.)  Drill spacing
+#: checks keep this much slack.
+COORD_WRITE_GUARD_MM = 0.015
+
 
 def drill_hole_to_hole_clear(
     x: float,
