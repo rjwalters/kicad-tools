@@ -1516,9 +1516,9 @@ def _usbc_pads(*, smd: bool = False) -> dict[str, Pad]:
     return pads
 
 
-def _usbc_chain_pads() -> dict[str, Pad]:
+def _usbc_chain_pads(*, smd: bool = False) -> dict[str, Pad]:
     pads = {k: v for k, v in _chain_pads().items() if not k.startswith("J1.")}
-    return {**{f"J1.{k}": v for k, v in _usbc_pads().items()}, **pads}
+    return {**{f"J1.{k}": v for k, v in _usbc_pads(smd=smd).items()}, **pads}
 
 
 def test_choose_pair_chain_launches_from_the_row_facing_the_chain() -> None:
@@ -1634,7 +1634,7 @@ def test_equivalent_pin_tie_roundrect_falls_back_to_the_pad_box() -> None:
     )
 
 
-def _usbc_autorouter() -> object:
+def _usbc_autorouter(*, smd: bool = False) -> object:
     from kicad_tools.router.core import Autorouter
 
     # Board 03 under the protocol: 0.15 mm board clearance, jlcpcb 4-layer
@@ -1644,7 +1644,7 @@ def _usbc_autorouter() -> object:
     router = Autorouter(
         30, 12, strategy="lattice", rules=rules, net_class_map={"D+": _HS, "D-": _HS}
     )
-    for key, pad in _usbc_chain_pads().items():
+    for key, pad in _usbc_chain_pads(smd=smd).items():
         router.pads[(pad.ref, key)] = pad
         router.nets.setdefault(pad.net, []).append((pad.ref, key))
         router.net_names[pad.net] = pad.net_name
@@ -1681,17 +1681,37 @@ def test_core_ties_the_far_usbc_row_as_fixed_copper(capsys, monkeypatch) -> None
     assert router._lattice_connection_endpoints[(1, "tie", 0)] == ("J1.B6", "J1.A6")
 
 
+def _todays_connections(router, monkeypatch) -> list:
+    """The connection list with the #6698 tie pass switched off."""
+    with monkeypatch.context() as m:
+        m.setattr(router, "_lattice_plan_pair_ties", lambda reserved: set())
+        _c, conns = router._lattice_netset_connections()
+    return conns
+
+
 def test_core_without_a_tie_keeps_todays_connections(monkeypatch) -> None:
     import kicad_tools.router.lattice.coupled as coupled_mod
 
     router = _usbc_autorouter()
     router._ensure_lattice_pathfinder()
-    monkeypatch.setattr(router, "_lattice_tie_planner", lambda: None)
-    _c, today = router._lattice_netset_connections()
-    monkeypatch.undo()
-
+    today = _todays_connections(router, monkeypatch)
     monkeypatch.setattr(coupled_mod, "plan_equivalent_pin_tie", lambda *a, **k: None)
     _c, declined = router._lattice_netset_connections()
     assert router._lattice_pair_ties == []
     assert declined == today
     assert any(k == (1, 0) for k, *_ in today) and any(k == (2, 0) for k, *_ in today)
+
+
+def test_core_ties_a_pair_all_or_nothing(capsys, monkeypatch) -> None:
+    # A single-layer (SMD) receptacle has room for only one of the two
+    # crossing ties: the pair keeps today's connections for BOTH extras
+    # rather than attaching D+ and D- by different mechanisms (board 06rf).
+    router = _usbc_autorouter(smd=True)
+    router._ensure_lattice_pathfinder()
+    today = _todays_connections(router, monkeypatch)
+    _c, conns = router._lattice_netset_connections()
+    assert router._lattice_pair_ties == []
+    assert conns == today
+    assert "Diff-pair ties D+/D-: not used (J1.B7->J1.A7 has no clearing tie)" in (
+        capsys.readouterr().out
+    )

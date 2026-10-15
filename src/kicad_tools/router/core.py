@@ -5059,10 +5059,9 @@ class Autorouter:
         )
 
         connections: list[tuple[object, Pad, Pad, object]] = []
-        # Issue #6698: generated same-part equivalent-pin ties (reset on every
-        # call -- the #6535 tap-chain retry rebuilds them).
-        self._lattice_pair_ties = []
-        tie_planner = self._lattice_tie_planner() if reserved else None
+        # Issue #6698: generated same-part equivalent-pin ties (rebuilt on
+        # every call -- the #6535 tap-chain retry calls this again).
+        tied = self._lattice_plan_pair_ties(reserved)
         for net, pad_keys in self.nets.items():
             if net == 0:
                 continue
@@ -5093,7 +5092,7 @@ class Autorouter:
                     # Issue #6698: an extra on the anchor's own part (the far
                     # row of a USB-C receptacle) is tied by a generated,
                     # exactly verified stub instead of a lattice search.
-                    if tie_planner is not None and tie_planner(net, net_class, anchor, other):
+                    if (net, seq) in tied:
                         continue
                     connections.append(((net, seq), anchor, other, net_class))
                 continue
@@ -5139,32 +5138,44 @@ class Autorouter:
         self._lattice_connection_endpoints = endpoints
         return coupled, connections
 
-    def _lattice_tie_planner(self) -> Any:
-        """A closure that ties a pair-net extra to its same-part anchor (#6698).
+    def _lattice_plan_pair_ties(
+        self, reserved: dict[int, list[tuple[str, str]]]
+    ) -> set[tuple[int, int]]:
+        """Tie each engaged pair's same-part extras to their anchors (#6698).
 
-        ``plan(net, net_class, anchor, extra) -> bool``: when ``extra`` sits on
-        the anchor's own footprint within :data:`MAX_TIE_STUB_MM`, generate the
-        octilinear tie with :func:`plan_equivalent_pin_tie` (exact pad copper,
-        class width necked down to ``rules.min_trace_width_floor`` at the
-        least), record it in :attr:`_lattice_pair_ties` and return ``True``;
-        otherwise return ``False`` and the caller emits today's single-ended
-        connection, byte for byte.  The width is read from
-        ``self.net_class_map`` at call time -- after impedance synthesis.
-        Returns ``None`` (no ties at all) when the pathfinder is unavailable
-        or an HV pairwise table is installed (not modelled by the planner).
+        Rebuilds :attr:`_lattice_pair_ties` and returns the ``(net, seq)``
+        extras it tied -- :meth:`_lattice_netset_connections` emits no
+        single-ended connection for those.  An extra is *eligible* when its
+        nearest reserved anchor (the same pick the connection loop makes) is
+        on the same footprint within :data:`MAX_TIE_STUB_MM` and both pads
+        share a routing layer.  It is tied with :func:`plan_equivalent_pin_tie`
+        (exact pad copper; the class width from ``self.net_class_map`` --
+        after impedance synthesis -- necked down to
+        ``rules.min_trace_width_floor`` at the least).
+
+        Ties are committed per pair, all or nothing: when any eligible extra
+        of either net has no clearing tie (a single-layer SMD receptacle has
+        room for only one of the two crossing ties -- board 06rf USB2_D), the
+        pair keeps today's connections for every extra, so P and N are never
+        attached by different mechanisms.  No ties at all when the
+        pathfinder is unavailable or an HV pairwise table is installed (not
+        modelled by the planner).
         """
+        self._lattice_pair_ties = []
+        if not reserved:
+            return set()
         from .lattice.coupled import MAX_TIE_STUB_MM, PlannedTie, plan_equivalent_pin_tie
         from .primitives import Segment
 
         try:
             pf = self._ensure_lattice_pathfinder()
             if getattr(pf, "_pairwise", None) is not None:
-                return None
+                return set()
             layer_stack = pf.layer_stack
             routable = set(layer_stack.get_routable_indices())
             all_pads = list(pf.pads)
         except Exception:
-            return None
+            return set()
         keepouts = getattr(pf, "_keepouts", None)
         layer_cache: dict[int, tuple[int, ...]] = {}
 
@@ -5195,16 +5206,33 @@ class Autorouter:
                     continue
                 half = (seg.width or self.rules.trace_width) / 2.0
                 fixed_runs.append((idx, (seg.x1, seg.y1), (seg.x2, seg.y2), half, seg.net))
-        accepted: list[PlannedTie] = []
 
-        def plan(net: int, net_class: Any, anchor: Pad, extra: Pad) -> bool:
-            if not anchor.ref or anchor.ref != extra.ref:
-                return False
-            if math.hypot(anchor.x - extra.x, anchor.y - extra.y) > MAX_TIE_STUB_MM:
-                return False
-            layers = sorted(set(pad_layers(anchor)) & set(pad_layers(extra)) & routable)
-            if not layers:
-                return False
+        # Eligible extras per pair net, keyed and anchored exactly as the
+        # connection loop keys and anchors them.
+        eligible: dict[int, list[tuple[int, Pad, Pad, Any, list[int]]]] = {}
+        for net, pad_keys in self.nets.items():
+            res_keys = reserved.get(net)
+            if net == 0 or not res_keys:
+                continue
+            keyed = [(k, self.pads[k]) for k in dict.fromkeys(pad_keys) if k in self.pads]
+            if len(keyed) < 2:
+                continue
+            net_name = self.net_names.get(net) or keyed[0][1].net_name
+            net_class = self.net_class_map.get(net_name) if net_name else None
+            res_pads = [p for k, p in keyed if k in res_keys]
+            extras = [p for k, p in keyed if k not in res_keys]
+            for seq, other in enumerate(extras):
+                anchor = min(res_pads, key=lambda rp: math.hypot(rp.x - other.x, rp.y - other.y))
+                if not anchor.ref or anchor.ref != other.ref:
+                    continue
+                if math.hypot(anchor.x - other.x, anchor.y - other.y) > MAX_TIE_STUB_MM:
+                    continue
+                layers = sorted(set(pad_layers(anchor)) & set(pad_layers(other)) & routable)
+                if layers:
+                    eligible.setdefault(net, []).append((seq, anchor, other, net_class, layers))
+
+        def plan(net: int, item: Any, accepted: list[PlannedTie]) -> PlannedTie | None:
+            _seq, anchor, extra, net_class, layers = item
             width = getattr(net_class, "trace_width", None) or self.rules.trace_width
             blocked = None
             if keepouts is not None:
@@ -5213,7 +5241,7 @@ class Autorouter:
                     return bool(keepouts.segment_blocked(a, b, layer, net, half))
 
             try:
-                tie = plan_equivalent_pin_tie(
+                return plan_equivalent_pin_tie(
                     extra,
                     anchor,
                     all_pads,
@@ -5228,44 +5256,79 @@ class Autorouter:
                     blocked=blocked,
                 )
             except Exception:
-                return False
-            if tie is None:
-                return False
-            accepted.append(tie)
-            name = self.net_names.get(net) or extra.net_name
-            layer_enum = layer_stack.index_to_layer_enum(tie.layer)
-            route = Route(
-                net=net,
-                net_name=name,
-                segments=[
-                    Segment(
-                        x1=a[0],
-                        y1=a[1],
-                        x2=b[0],
-                        y2=b[1],
-                        width=tie.width,
-                        layer=layer_enum,
-                        net=net,
-                        net_name=name,
-                    )
-                    for a, b in zip(tie.points, tie.points[1:], strict=False)
-                ],
-            )
-            ends = (f"{extra.ref}.{extra.pin}", f"{anchor.ref}.{anchor.pin}")
-            key = (net, "tie", len(self._lattice_pair_ties))
-            self._lattice_pair_ties.append((key, route, ends))
-            necked = (
-                f" (necked from {tie.class_width:.2f} mm)"
-                if tie.width < tie.class_width - 1e-9
-                else ""
-            )
-            print(
-                f"  Diff-pair tie {name} {ends[0]}->{ends[1]}: {layer_enum.kicad_name} "
-                f"{tie.length:.2f} mm @ {tie.width:.2f} mm{necked}"
-            )
-            return True
+                return None
 
-        return plan
+        partners = getattr(self, "_lattice_pair_net_ids", None) or {}
+        accepted: list[PlannedTie] = []
+        tied: set[tuple[int, int]] = set()
+        done: set[int] = set()
+        for net in list(eligible):
+            if net in done:
+                continue
+            group = [net]
+            partner = partners.get(net)
+            if partner in eligible and partner not in done:
+                group.append(partner)
+            done.update(group)
+            local = list(accepted)
+            planned: list[tuple[int, Any, PlannedTie]] = []
+            declined: str | None = None
+            for g in group:
+                for item in eligible[g]:
+                    tie = plan(g, item, local)
+                    if tie is None:
+                        declined = f"{item[2].ref}.{item[2].pin}->{item[1].ref}.{item[1].pin}"
+                        break
+                    local.append(tie)
+                    planned.append((g, item, tie))
+                if declined:
+                    break
+            names = "/".join(self.net_names.get(g, str(g)) for g in group)
+            if declined:
+                print(
+                    f"  Diff-pair ties {names}: not used ({declined} has no clearing tie); "
+                    "extras routed as before (issue #6698)"
+                )
+                continue
+            accepted = local
+            for g, (seq, anchor, extra, _nc, _layers), tie in planned:
+                self._lattice_commit_pair_tie(g, anchor, extra, tie, Segment, layer_stack)
+                tied.add((g, seq))
+        return tied
+
+    def _lattice_commit_pair_tie(
+        self, net: int, anchor: Pad, extra: Pad, tie: Any, segment_cls: Any, layer_stack: Any
+    ) -> None:
+        """Record one planned tie as a fixed :class:`Route` and log it (#6698)."""
+        name = self.net_names.get(net) or extra.net_name
+        layer_enum = layer_stack.index_to_layer_enum(tie.layer)
+        route = Route(
+            net=net,
+            net_name=name,
+            segments=[
+                segment_cls(
+                    x1=a[0],
+                    y1=a[1],
+                    x2=b[0],
+                    y2=b[1],
+                    width=tie.width,
+                    layer=layer_enum,
+                    net=net,
+                    net_name=name,
+                )
+                for a, b in zip(tie.points, tie.points[1:], strict=False)
+            ],
+        )
+        ends = (f"{extra.ref}.{extra.pin}", f"{anchor.ref}.{anchor.pin}")
+        key = (net, "tie", len(self._lattice_pair_ties))
+        self._lattice_pair_ties.append((key, route, ends))
+        necked = (
+            f" (necked from {tie.class_width:.2f} mm)" if tie.width < tie.class_width - 1e-9 else ""
+        )
+        print(
+            f"  Diff-pair tie {name} {ends[0]}->{ends[1]}: {layer_enum.kicad_name} "
+            f"{tie.length:.2f} mm @ {tie.width:.2f} mm{necked}"
+        )
 
     def _lattice_tap_chain_retry(
         self,
