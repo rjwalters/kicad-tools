@@ -26,7 +26,7 @@ from kicad_tools.router.grid import RoutingGrid
 from kicad_tools.router.heuristics import HeuristicContext
 from kicad_tools.router.layers import Layer, LayerStack
 from kicad_tools.router.pathfinder import AStarNode, Router
-from kicad_tools.router.primitives import Pad, Segment
+from kicad_tools.router.primitives import Pad, Segment, Via
 from kicad_tools.router.rules import DesignRules
 from tests.router.test_pad_exact_validator_parity_6375 import (
     CASES,
@@ -492,35 +492,76 @@ def _child_via_anc(parent: AStarNode) -> AStarNode | None:
     return parent if parent.via_from_parent else parent.via_anc
 
 
-def test_own_path_vias_clear_walks_every_earlier_via() -> None:
+def _via_path(*via_columns: int, end: int, row: int = 10) -> AStarNode:
+    """A straight path along ``row`` dropping a via at each of ``via_columns``."""
+    node = AStarNode(0.0, 0.0, 0, row, 0)
+    layer = 0
+    for gx in range(1, end + 1):
+        node = AStarNode(0.0, 0.0, gx, row, layer, node, False, via_anc=_child_via_anc(node))
+        if gx in via_columns:
+            layer = 1 - layer
+            node = AStarNode(0.0, 0.0, gx, row, layer, node, True, via_anc=_child_via_anc(node))
+    return node
+
+
+# Issue #6528: every start column, not just the one that happens to round
+# the on-floor gap (7 cells = 0.5 mm) up rather than to 0.4999999999999998.
+@pytest.mark.parametrize("start", range(1, 40))
+def test_own_path_vias_clear_walks_every_earlier_via(start: int) -> None:
     router, _pads, rules = _walled_router()
     floor_cells = math.ceil((0.5 + rules.via_drill) / rules.grid_resolution)  # 7 cells = 0.7 mm
 
-    def _path(*via_columns: int, end: int) -> AStarNode:
-        """A straight row-10 path dropping a via at each of ``via_columns``."""
-        node = AStarNode(0.0, 0.0, 0, 10, 0)
-        layer = 0
-        for gx in range(1, end + 1):
-            node = AStarNode(0.0, 0.0, gx, 10, layer, node, False, via_anc=_child_via_anc(node))
-            if gx in via_columns:
-                layer = 1 - layer
-                node = AStarNode(0.0, 0.0, gx, 10, layer, node, True, via_anc=_child_via_anc(node))
-        return node
-
-    assert router._own_path_vias_clear(_path(end=20))  # no via on the path yet
-    assert not router._own_path_vias_clear(_path(10, end=10 + floor_cells - 1))
-    assert router._own_path_vias_clear(_path(10, end=10 + floor_cells))
+    assert router._own_path_vias_clear(_via_path(end=start + 10))  # no via on the path yet
+    assert not router._own_path_vias_clear(_via_path(start, end=start + floor_cells - 1))
+    assert router._own_path_vias_clear(_via_path(start, end=start + floor_cells))
     # The nearest via is far enough, an EARLIER one is not: the walk must not
     # stop at the first ancestor.  (Path doubles back in x.)
-    far = _path(10, 30, end=30)
+    far = _via_path(start, start + 20, end=start + 20)
     back = far
-    for gx in range(29, 13, -1):
+    for gx in range(start + 19, start + 3, -1):
         back = AStarNode(0.0, 0.0, gx, 10, back.layer, back, False, via_anc=_child_via_anc(back))
     assert not router._own_path_vias_clear(back)
     # A via stack at one cell is one drill.
-    stacked = _path(10, end=10)
+    stacked = _via_path(start, end=start)
     assert stacked.via_from_parent
     assert router._own_path_vias_clear(stacked)
+
+
+@pytest.mark.parametrize("cells", [6, 7, 8])
+def test_own_path_vias_clear_agrees_with_drill_spacing_validator(cells: int) -> None:
+    """Issue #6528: the search and the tolerant validator agree on every pair.
+
+    Via pairs 6, 7 and 8 cells apart (0.4, 0.5 and 0.6 mm drill-to-drill on
+    the #6464 rules: drill 0.2 mm, floor 0.5 mm, 0.1 mm grid) along one row,
+    for 50 start columns, measured at the world points ``grid_to_world``
+    gives -- the same points ``_convert_path_to_route`` emits vias at.
+    """
+    router, _pads, rules = _walled_router()
+    grid = router.grid
+    disagreements = []
+    for start in range(1, 51):
+        node = _via_path(start, start + cells, end=start + cells)
+        assert node.via_from_parent
+        vias = [
+            Via(
+                x=wx,
+                y=wy,
+                drill=rules.via_drill,
+                diameter=rules.via_diameter,
+                layers=(Layer.F_CU, Layer.B_CU),
+                net=NET,
+            )
+            for wx, wy in (grid.grid_to_world(gx, 10) for gx in (start, start + cells))
+        ]
+        validator_ok, _clearance, _loc = grid.validate_same_net_drill_spacing(
+            vias[1], NET, route_vias=vias
+        )
+        search_ok = router._own_path_vias_clear(node)
+        if search_ok != validator_ok:
+            disagreements.append((start, search_ok, validator_ok))
+        # 6 cells is under the floor for every column; 7 and 8 are legal.
+        assert search_ok is (cells >= 7), (start, cells)
+    assert disagreements == []
 
 
 # --- Issue #6526: ``via_anc`` must never point at its own node ----------------

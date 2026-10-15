@@ -321,6 +321,9 @@ def parse_vias(pcb_text: str) -> dict[str, list[Via]]:
             net=net,
             net_name=net_name,
             is_micro=is_micro,
+            # Issue #6662: a KiCad blind/buried via is drilled only through
+            # its span; keep the keyword so the model and re-writes agree.
+            span_type=via_type_token if via_type_token in ("blind", "buried") else None,
         )
 
         if net_name not in vias_by_net:

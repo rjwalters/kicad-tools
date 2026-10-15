@@ -877,6 +877,10 @@ MIGRATED_KERNEL_CALLERS: frozenset[str] = frozenset(
         # ``halo_offsets``, whose membership is the kernel's own ``copper_gap``
         # queried in grid-cell units, instead of a Chebyshev square.
         "router/grid.py",
+        # Issue #6528: the Python own-path via check subtracts the kernel's
+        # shared ``CLEARANCE_EPSILON_MM`` constant so it agrees with the C++
+        # gate.  Constant only -- no kernel geometry is called (like grid.py).
+        "router/pathfinder.py",
         # Epic #5509 Phase 3b (#5661), consumer group 4: the Python search-time
         # route-halo refinement.  ``RouteHaloGeometry.clear`` builds a
         # ``KSegment``/``KVia`` for the candidate and for each surviving
