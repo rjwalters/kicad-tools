@@ -1015,7 +1015,6 @@ For additional PR quality guidelines, see **builder-pr.md**.
 - Pass the fast-tier pre-flight (`loom-daemon preflight --issue N`) plus targeted tests for what you touched; CI runs the full suite (#11690)
 - **Run the project's formatter + linter on your changed files before committing** — discover the commands from repo convention (`buildGate.command`, `CONTRIBUTING.md`, CI workflow, or the language's standard tool). A format-only CI failure is a **guaranteed Judge rejection** that costs a Doctor cycle — see **builder-pr.md § "Format and Lint Changed Files"**
 - **Test-first discipline, for behavior changes**: write the failing test (or bug-reproducing test) before the fix, confirm it fails for the right reason, then implement to green. Record a `TDD:` line in the PR's Test Plan section — Judge re-verifies it against the diff, not just your say-so. Full requirement, format, and advisory/blocking rules: **builder-pr.md § "Test-First Discipline (TDD line)"** (ADR-0015).
-- **If you touched an already-large file, run `scripts/check-file-size-budget.sh` before pushing.** On failure, extract into a sibling file first; never grow it in place.
 
 ### Live Verification You Cannot Perform: Say So, Don't Claim It
 

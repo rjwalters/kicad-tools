@@ -1278,7 +1278,8 @@ echo "PASS: All CI checks passing"
 
 **A merge-risk hold governs *merging*. It does not suspend *health reporting*.**
 Before #6720 the sticky-hold bail-out skipped criteria #4/#5/#6 on a held PR,
-and #5's stale route is the only path from `loom:pr` to Doctor: 20 of 21 held
+and #5's stale route is the only path from `loom:pr` to Doctor (held: only if
+`HELD_CI_FAILING=true`, #6852): 20 of 21 held
 PRs sat `CONFLICTING` with Doctor's queue empty (2026-08-22).
 
 ### When this pass runs
@@ -1336,9 +1337,9 @@ The hold is unchanged and still governs the merge — this notice reports *healt
 
 **What happens next, without any human action:**
 - The hold keeps binding; Champion will not auto-merge a conflicted PR either way (criterion #4).
-- Once this PR passes the 24h recency window it is routed to Doctor (\`loom:pr\` → \`loom:changes-requested\`) for a rebase, **with the hold marker preserved** — a rebase does not launder a held PR into an unheld one.
+- The PR waits on the hold; it goes to Doctor (\`loom:changes-requested\`, hold kept) only if CI also fails (#6852).
 
-**What a human can do now**, if this should not wait for that window:
+**What a human can do now**, if this should not keep waiting:
 - Rebase it yourself, or
 - Clear the hold (start a comment with \`clear the hold — <why>\`) and let the normal conflict/Doctor flow take over.
 
@@ -1356,7 +1357,8 @@ queue is exactly "`loom:pr` + `CONFLICTING`", and it excludes every park —
 before (#5978) — so autonomous Finding Work never rebases and force-pushes a
 held PR. That exclusion is correct and this section does **not** reverse it: a
 held+conflicting PR is *surfaced* here, and only becomes Doctor's work through
-the recency route below, which lands it on `loom:changes-requested` (Doctor's
+the recency route below (only if `HELD_CI_FAILING=true`, #6852), which lands it
+on `loom:changes-requested` (Doctor's
 *Priority 2* queue, which serves `loom:changes-requested` + `loom:blocked` with
 a standing trusted Champion hold marker, #11861).
 Conflict alone is a report; conflict plus staleness is a route.
