@@ -2960,6 +2960,36 @@ class LatticePathfinder:
             fallback_pairs: list[Any] = []
             fallback_legs = 0
             coupled_count = 0
+            deferred_fallback: list[Any] = []
+
+            def flush_fallbacks() -> None:
+                nonlocal routed_items, fallback_legs
+                for fb in deferred_fallback:
+                    legs_ok = 0
+                    for pol, pad_a, pad_b in (
+                        ("P", fb.pad_p_a, fb.pad_p_b),
+                        ("N", fb.pad_n_a, fb.pad_n_b),
+                    ):
+                        leg_key = (fb.key, pol)
+                        leg_item = (leg_key, pad_a, pad_b, fb.net_class)
+                        leg_reason = self._route_single_into(
+                            leg_item,
+                            routes,
+                            committed=committed,
+                            history=history,
+                            present=present,
+                            escape_plan=escape_plan,
+                        )
+                        if leg_reason is None:
+                            legs_ok += 1
+                        else:
+                            reasons[leg_key] = leg_reason
+                            failed.append((0, leg_item))
+                    fallback_legs += legs_ok
+                    if legs_ok == 2:
+                        routed_items += 1
+                deferred_fallback.clear()
+
             for _idx, (_length, kind, item) in enumerate(items):
                 # Issue #4472: abort mid-pass on the deadline too, so a single
                 # slow search inside one pass cannot overrun the budget.
@@ -2981,33 +3011,16 @@ class LatticePathfinder:
                         item, committed=committed, history=history, present=present
                     )
                     if pres is None and uncoupled_fallback:
-                        # Issue #6373: route the declined pair's main run as
-                        # two single-ended legs, right now, before any single.
+                        # Issue #6373: a declined pair's main run is routed as
+                        # two single-ended legs.  Issue #6697: DEFERRED until
+                        # every pair has had its coupled attempt (see
+                        # ``flush_fallbacks``), so one pair's uncoupled legs
+                        # never pre-block a sibling pair's coupled corridor
+                        # (board 03: USB_D[0]'s fallback USB_D- leg ran
+                        # through USB_D[1]'s corridor).
                         pair_outcomes[item.key] = f"uncoupled-fallback:{preason}"
                         fallback_pairs.append(item)
-                        legs_ok = 0
-                        for pol, pad_a, pad_b in (
-                            ("P", item.pad_p_a, item.pad_p_b),
-                            ("N", item.pad_n_a, item.pad_n_b),
-                        ):
-                            leg_key = (item.key, pol)
-                            leg_item = (leg_key, pad_a, pad_b, item.net_class)
-                            leg_reason = self._route_single_into(
-                                leg_item,
-                                routes,
-                                committed=committed,
-                                history=history,
-                                present=present,
-                                escape_plan=escape_plan,
-                            )
-                            if leg_reason is None:
-                                legs_ok += 1
-                            else:
-                                reasons[leg_key] = leg_reason
-                                failed.append((0, leg_item))
-                        fallback_legs += legs_ok
-                        if legs_ok == 2:
-                            routed_items += 1
+                        deferred_fallback.append(item)
                         continue
                     if pres is None:
                         reasons[item.key] = preason
@@ -3027,6 +3040,7 @@ class LatticePathfinder:
                         half, clr = self._conn_geometry(item.net_class, leg_net)
                         committed.add_run(layer_idx, points, leg_net, half, clr)
                     continue
+                flush_fallbacks()
                 key = item[0]
                 reason = self._route_single_into(
                     item,
@@ -3041,6 +3055,8 @@ class LatticePathfinder:
                     failed.append((kind, item))
                     continue
                 routed_items += 1
+
+            flush_fallbacks()
 
             score = (
                 (routed_items, coupled_count, fallback_legs)
