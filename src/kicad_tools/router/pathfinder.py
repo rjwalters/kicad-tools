@@ -6374,6 +6374,8 @@ class Router:
         negotiated_mode: bool = False,
         present_cost_factor: float = 0.0,
         weight: float = 1.0,
+        per_net_timeout: float | None = None,
+        extra_goal_cells: set[tuple[int, int, int]] | None = None,
     ) -> Route | None:
         """Route between two pads using bidirectional A* search.
 
@@ -6397,10 +6399,29 @@ class Router:
             negotiated_mode: If True, allow sharing resources with cost penalty
             present_cost_factor: Multiplier for current sharing penalty
             weight: A* weight factor (1.0 = optimal, >1.0 = faster but suboptimal)
+            per_net_timeout: Optional wall-clock budget (seconds) for this search
+                (Issue #6527).  Sampled every 1024 iterations, like ``_route_impl``;
+                on expiry ``last_route_deadline_hit`` is set and None returned.
+            extra_goal_cells: Steiner tree goal cells (Issue #6527).  The
+                bidirectional search has no multi-goal support, so a non-empty
+                set is never silently ignored: the search declines (returns
+                None without exhausting) and the caller must use the one-way
+                :meth:`route`, which honours the goals.
 
         Returns:
             Route if path found, None otherwise
         """
+        # Issue #6527: status attributes mirror ``_route_impl`` (reset first so
+        # every early exit leaves them in a defined state).
+        self.last_route_exhausted = False
+        self.last_route_deadline_hit = False
+        self.last_route_deadline_iterations = 0
+
+        if extra_goal_cells:
+            return None
+
+        per_net_timeout = _wall_deadline.clamp_search_timeout(per_net_timeout)
+
         # Issue #966: Clear via cache at start of route (grid state may have changed)
         self.clear_via_cache()
 
@@ -6694,8 +6715,19 @@ class Router:
         if self._max_iterations_override is not None:
             max_iterations = min(max_iterations, self._max_iterations_override)
 
+        bidi_deadline = time.monotonic() + per_net_timeout if per_net_timeout is not None else None
+        bidi_deadline_hit = False
+
         while (forward_open or backward_open) and iterations < max_iterations:
             iterations += 1
+
+            # Issue #6527: per-net wall-clock deadline (same cadence as _route_impl)
+            if bidi_deadline is not None and iterations % 1024 == 0:
+                if time.monotonic() >= bidi_deadline:
+                    bidi_deadline_hit = True
+                    self.last_route_deadline_hit = True
+                    self.last_route_deadline_iterations = iterations
+                    break
 
             # Alternate between forward and backward search
             # Process forward step
@@ -6798,6 +6830,8 @@ class Router:
                 end,
             )
 
+        # Issue #6527: only drained frontiers prove unreachability (#6098).
+        self.last_route_exhausted = not forward_open and not backward_open and not bidi_deadline_hit
         return None
 
     def _expand_bidirectional_neighbors(
@@ -7349,6 +7383,8 @@ class Router:
         negotiated_mode: bool = False,
         present_cost_factor: float = 0.0,
         weight: float = 1.0,
+        per_net_timeout: float | None = None,
+        extra_goal_cells: set[tuple[int, int, int]] | None = None,
     ) -> Route | None:
         """Route using automatic algorithm selection.
 
@@ -7357,8 +7393,11 @@ class Router:
         - Distance between pads (bidirectional for long paths)
         - Configuration settings
 
-        This is the recommended entry point for routing, as it automatically
-        selects the best algorithm for the task.
+        Issue #6527: ``per_net_timeout`` is ONE budget shared by a failed
+        bidirectional attempt and its one-way retry (the retry receives only
+        the time remaining).  ``extra_goal_cells`` is forwarded; the
+        bidirectional search declines Steiner-goal requests so the one-way
+        search (which honours them) runs.
 
         Args:
             start: Source pad
@@ -7367,26 +7406,59 @@ class Router:
             negotiated_mode: If True, allow sharing resources with cost penalty
             present_cost_factor: Multiplier for current sharing penalty
             weight: A* weight factor
+            per_net_timeout: Optional shared wall-clock budget in seconds
+            extra_goal_cells: Optional Steiner tree goal cells
 
         Returns:
             Route if path found, None otherwise
         """
-        # Check if bidirectional search is enabled
         if not self.rules.bidirectional_search:
-            return self.route(start, end, net_class, negotiated_mode, present_cost_factor, weight)
+            return self.route(
+                start,
+                end,
+                net_class,
+                negotiated_mode,
+                present_cost_factor,
+                weight,
+                per_net_timeout=per_net_timeout,
+                extra_goal_cells=extra_goal_cells,
+            )
 
         # Calculate Manhattan distance in grid cells
         start_gx, start_gy = self.grid.world_to_grid(start.x, start.y)
         end_gx, end_gy = self.grid.world_to_grid(end.x, end.y)
         manhattan_dist = abs(end_gx - start_gx) + abs(end_gy - start_gy)
 
-        # Use bidirectional for paths exceeding threshold
-        if manhattan_dist >= self.rules.bidirectional_threshold:
+        remaining = per_net_timeout
+        # Use bidirectional for paths exceeding threshold (and no Steiner goals)
+        if manhattan_dist >= self.rules.bidirectional_threshold and not extra_goal_cells:
+            t0 = time.monotonic()
             result = self.route_bidirectional(
-                start, end, net_class, negotiated_mode, present_cost_factor, weight
+                start,
+                end,
+                net_class,
+                negotiated_mode,
+                present_cost_factor,
+                weight,
+                per_net_timeout=per_net_timeout,
             )
             if result is not None:
                 return result
+            if per_net_timeout is not None:
+                remaining = per_net_timeout - (time.monotonic() - t0)
+                if remaining <= 0 or self.last_route_deadline_hit:
+                    # Budget spent in the bidirectional half: no retry.
+                    self.last_route_deadline_hit = True
+                    return None
             # Fall back to standard A* if bidirectional fails
 
-        return self.route(start, end, net_class, negotiated_mode, present_cost_factor, weight)
+        return self.route(
+            start,
+            end,
+            net_class,
+            negotiated_mode,
+            present_cost_factor,
+            weight,
+            per_net_timeout=remaining,
+            extra_goal_cells=extra_goal_cells,
+        )
