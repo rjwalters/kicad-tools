@@ -46,13 +46,15 @@ def test_pair_improvement_cannot_hide_new_physical_error():
     assert gate.unexpected_baseline_errors(key, errors) == {}
 
 
-def test_board06_power_clearance_allowance_is_an_exact_ceiling():
+def test_board06_power_clearance_errors_are_not_accepted():
+    """Issue #6772: the #6763 allowance for 3 Power-class clearance errors is gone."""
     gate = load("check_diffpair_coverage")
     key = "boards/06-diffpair-test/regression-fixture/diffpair_test_routed.kicad_pcb"
-    errors = {"diffpair_length_skew": 9, "netclass_clearance_copper": 3}
+    assert not hasattr(gate, "ACCEPTED_NON_PAIR_ERRORS")
+    errors = {"diffpair_length_skew": 9, "netclass_clearance_copper": 1}
+    assert gate.unexpected_baseline_errors(key, errors) == {"netclass_clearance_copper": 1}
+    errors["netclass_clearance_copper"] = 0
     assert gate.unexpected_baseline_errors(key, errors) == {}
-    errors["netclass_clearance_copper"] = 4
-    assert gate.unexpected_baseline_errors(key, errors) == {"netclass_clearance_copper": 4}
 
 
 def test_matchgroup_improvement_cannot_hide_new_physical_error():
