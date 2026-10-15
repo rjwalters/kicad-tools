@@ -206,7 +206,16 @@ fi
 [[ "${1:-} ${2:-}" == "forge verdict-labels" ]] && { echo "LOOM-VERDICT-LABELS OK"; exit 0; }
 [[ "${1:-} ${2:-}" == "forge verdict-lock" ]] && exit 0
 [[ "${1:-} ${2:-}" == "forge verdict-reconcile" ]] && { echo "LOOM-VERDICT-RECONCILE STABLE"; exit 0; }
-echo "mock loom-daemon: forge comment not under test here" >&2
+# #9865: comments post only through the daemon; the mock lands them on the
+# suite's stub gh (as `gh issue comment`) so the call-log assertions still hold.
+if [[ "${1:-} ${2:-}" == "forge comment" ]]; then
+  _n="$3"; shift 3; _repo=""; _body=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in --repo) _repo="$2"; shift 2 ;; --body) _body="$2"; shift 2 ;; *) shift ;; esac
+  done
+  exec gh issue comment "$_n" --repo "$_repo" --body "$_body"
+fi
+echo "mock loom-daemon: unexpected invocation: $*" >&2
 exit 127
 MOCK
 chmod +x "$STUB_DIR/loom-daemon"

@@ -182,14 +182,20 @@ if [[ "$1" == "api" ]]; then
   for _a in "$@"; do
     case "$_a" in repos/*) path="$_a"; break ;; esac
   done
-  # #9774: a POST to the comments endpoint is the daemon chokepoint's shape
-  # (forge comment -> gh api --input -); this suite's subject is the
-  # reconcile flow over the recorded gh ladder, so fail that POST and let
-  # forge_gh_comment_rl_safe fall back to the recorded `issue comment` shape.
+  # #9774/#9865: a POST to the comments endpoint is the daemon chokepoint's
+  # shape (forge comment -> gh api --input FILE) and the only comment path
+  # now; record it in the `issue comment` shape the assertions read.
   # (Reads — the issue-N.json fetches — end at the issue number, not
   # /comments, and are unaffected.)
   case "$path" in
-    */comments) exit 1 ;;
+    */comments)
+      _in=""; _prev=""
+      for _a in "$@"; do [[ "$_prev" == "--input" ]] && _in="$_a"; _prev="$_a"; done
+      _rest="${path#repos/}"; _repo="${_rest%%/issues/*}"
+      _num="${_rest#*/issues/}"; _num="${_num%%/*}"
+      echo "issue comment $_num --repo $_repo --body $(jq -r .body "$_in" 2>/dev/null)" >> "$STUB_DIR_FROM_ENV/gh-calls.log"
+      exit 0
+      ;;
   esac
   num="${path##*/}"
   canned="$STUB_DIR_FROM_ENV/issue-$num.json"

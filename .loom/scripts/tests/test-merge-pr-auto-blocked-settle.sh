@@ -117,9 +117,6 @@ _extract_block() {
     awk '/^_check_verdict_label_contradiction\(\) \{/ { print; exit }' "$MERGE_PR_SRC"
     _extract_block '_wait_for_checks_then_sync_merge() {'
     _extract_block '_revalidate_merge_guards() {'
-    # The CI-run gate (#10567) is defined AND invoked on one line in merge-pr.sh,
-    # so it cannot be extracted; it has its own tests. Stub it as clear here.
-    echo '_check_ci_result() { return 0; }'
 } > "$FUNCS_FILE"
 
 for fn in error_head_moved _check_loom_pr_label _check_verdict_label_contradiction \

@@ -136,8 +136,10 @@ assert_ge 1 "$(call_site_count "$REBASE_STACKED_CHILDREN_SH")" \
 echo ""
 echo "New call sites (#7341):"
 # --- New call sites this issue adds ---
-assert_ge 3 "$(call_site_count "$JUDGE_MD")" \
-  "judge.md gates all three of its own direct rebase+push recipes (DIRTY, BEHIND, simple-conflict)"
+# #12063 removed judge.md's BEHIND update recipe (a BEHIND PR is reviewed
+# as-is), leaving two gated rebase+push recipes.
+assert_ge 2 "$(call_site_count "$JUDGE_MD")" \
+  "judge.md gates both of its own direct rebase+push recipes (DIRTY, simple-conflict)"
 assert_ge 1 "$(call_site_count "$BUILDER_WORKTREE_MD")" \
   "builder-worktree.md gates its conflict-resolution rebase+push recipe"
 assert_ge 1 "$(call_site_count "$RECONCILE_STACK_SH")" \

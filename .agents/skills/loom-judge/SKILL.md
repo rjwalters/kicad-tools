@@ -454,7 +454,7 @@ Full policy, TTL/invalidation semantics, and the manual verification steps:
 4. **Understand context**: Read PR description and linked issues
 4b. **Check docs-only fast-path eligibility** (see "Docs-Only Fast Path (WORK_LOG / WORK_PLAN / README, #6134)" below) — if the changed-file list is an exact match against the fast-path allowlist, skip steps 5-7b and the "Evaluation Focus Areas" review entirely; go straight to CI Status Check (step 8), the formal-review reconciliation gate (step 8b — **not** skipped: a docs-only diff can still carry an unresolved formal review, #7647) and the fast-path approval write. Otherwise continue normally.
 5. **Check out code**: Use the existing builder worktree, else `./.loom/scripts/pr-worktree.sh <number>` — never a bare `gh pr checkout` in the main checkout (see "PR Branch Isolation" and Worktree-Aware Code Access below). Capture `REVIEW_HEAD_SHA=$(gh pr view <number> --json headRefOid --jq '.headRefOid')` here — step 11's recheck compares against it, and your verdict marker records it.
-6. **Rebase check**: Verify PR is up-to-date with main (see Rebase Check section below)
+6. **Rebase check**: Verify PR has no merge conflicts with main (see Rebase Check section below)
 7. **Targeted checks only**: read the diff and trust the green CI from step 2b. At most run scoped tests for a specific doubt (Scoped Test Execution below); never the full suite or `buildGate.command`
 7b. **Execute test plan**: Parse PR description for "## Test Plan" section.
     If found, classify each step as automatable or observation-only.
@@ -723,7 +723,7 @@ completion write — see `doctor.md`'s "Verdict-Time CAS Recheck".
       and NOT `gh pr review` — it is the sole merge-gating writer (#12136)
 - [ ] I understand `gh pr review --approve` WILL fail with "cannot approve your own PR"
 - [ ] All CI checks pass (verified via `forge wait-checks`)
-- [ ] Merge state is CLEAN (verified via `gh pr view --json mergeStateStatus`)
+- [ ] Merge state is CLEAN or BEHIND (verified via `gh pr view --json mergeStateStatus`; BEHIND is reviewed as-is, see "BEHIND: review as-is")
 - [ ] I will NEVER call `gh pr review` in any form
 - [ ] `post-verdict.sh` exited 0 (it applied the verdict label; exit 8 = run its repair command)
 - [ ] If my review body came from a scratch file, the filename is namespaced by
@@ -1056,12 +1056,12 @@ Using the existing worktree directly is faster and avoids this error entirely.
 
 This check applies everywhere the judge would run `gh pr checkout`:
 - **Step 5** of the evaluation process (primary code access)
-- **Rebase workflows** (DIRTY/BEHIND merge states)
+- **Rebase workflows** (DIRTY merge state)
 - **Trivial fix workflows** (when fixing minor issues directly)
 
 ## Rebase Check (BEFORE Evaluation)
 
-**After checkout, verify the PR is up-to-date with main before starting code evaluation.**
+**After checkout, check the PR for merge conflicts with main before starting code evaluation** (being behind main is fine, #12063).
 
 This catches merge conflicts early in the evaluation cycle, preventing wasted effort on code that will need to be rebased anyway.
 
@@ -1116,7 +1116,7 @@ gh pr view <number> --json mergeStateStatus --jq '.mergeStateStatus'
 | Status | Action |
 |--------|--------|
 | `CLEAN` | Continue to evaluation |
-| `BEHIND` | Attempt rebase (see If BEHIND section below) |
+| `BEHIND` | Continue to evaluation, no update push (see BEHIND below) |
 | `DIRTY` | Attempt automated rebase (see If DIRTY section below) |
 | `BLOCKED`/`UNSTABLE` | Continue to evaluation (CI issue, not branch issue) |
 
@@ -1201,27 +1201,14 @@ fi
 | Update succeeds but CI may fail | Continue to evaluation - CI verification handles this |
 | Update would empty the PR or drop a hand-made merge resolution | `rebase-guard` blocks (#9282, was #8298); fall back to change request |
 
-### If BEHIND: Attempt Rebase
+### BEHIND: review as-is (#12063)
 
-```bash
-BRANCH=$(git branch --show-current); PUSH_LEASE_SHA=$(git rev-parse HEAD)  # pin first (#9487)
-BRANCH_UPDATE=$(loom-daemon branch-update strategy) || BRANCH_UPDATE=merge  # #10771
-git fetch origin main
-if [ "$BRANCH_UPDATE" = rebase ]; then git rebase origin/main; else git merge --no-ff -m "Merge origin/main into $BRANCH (Judge: branch behind main)" origin/main; fi || exit 1
-
-# Version gate (see DIRTY path): on failure abort; request changes naming the file(s) to revert.
-if [ -x ./.loom/scripts/version-check-gate.sh ] && ! ./.loom/scripts/version-check-gate.sh --fix-hint "then push."; then
-  echo "Version-bearing files out of sync after update (see BLOCKER:/Fix: above) - aborting push"
-  exit 1
-fi
-RG=0; loom-daemon forge rebase-guard --base origin/main || RG=$?
-[ "$RG" = 0 ] && exit 1
-[ "$RG" = 1 ] || echo "WARNING: rebase-guard gave no answer (rc=$RG) - pushing UNCHECKED (#9282)" >&2
-
-loom-daemon lease pr fence <number> --role judge --watch-pid "${LOOM_AGENT_SESSION_PID:-${CLAUDE_PID:-$PPID}}"
-[[ $? =~ ^[02]$ ]] || exit 1  # lease lost: stand down
-if [ "$BRANCH_UPDATE" = rebase ]; then git push --force-with-lease="$BRANCH:$PUSH_LEASE_SHA"; else git push origin "HEAD:$BRANCH"; fi
-```
+`BEHIND` is not a blocker: the ruleset does not require branches to be up to
+date, so a BEHIND PR merges as it is. Do **not** merge or rebase `origin/main`
+into it: that push moves the head, voids your own verdict and costs a CI run
+for nothing. Review the head in front of you, and do not re-judge an approved
+PR only because `main` moved. Only `DIRTY` (a real conflict) is updated here
+or routed to Doctor.
 
 ### Simple vs Complex Conflicts
 
@@ -1303,7 +1290,6 @@ FEEDBACK
 ### Edge Cases
 
 - **Rebase succeeds but CI fails**: Continue with evaluation (CI failure is a code issue, not a conflict issue)
-- **PR already rebased by someone else**: `BEHIND` status should be gone, continue normally
 - **Rebase creates new test failures**: Continue evaluation - Judge catches this during normal CI check phase
 - **Multiple conflicting files**: If ANY conflict is complex, treat entire rebase as complex (request changes)
 
@@ -1361,7 +1347,7 @@ gh pr view <PR_NUMBER> --json mergeStateStatus --jq '.mergeStateStatus'
 | `CLEAN` | All checks pass, no conflicts | Safe to approve |
 | `BLOCKED` | Required checks failing | Request changes |
 | `UNSTABLE` | Non-required checks failing | Do not approve (all-CI policy) |
-| `BEHIND` | Branch needs rebase | Attempt rebase |
+| `BEHIND` | Base moved since the branch point | Review as-is; not a blocker (#12063) |
 | `DIRTY` | Merge conflicts | Attempt automated rebase (see Rebase Check section) |
 | `UNKNOWN` | Status not computed yet | Wait and retry |
 

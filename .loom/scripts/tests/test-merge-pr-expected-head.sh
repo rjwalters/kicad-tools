@@ -97,6 +97,7 @@ if ! grep -q -- '--expected-head)' "$PARSE"; then echo "FATAL: could not extract
 run_parse() {
     set +e
     LAST_OUT="$( (PR_NUMBER=""; EXPECTED_HEAD_SHA=""; ALLOW_RED_REQUIRED=()
+        warning() { echo "WARN: $*" >&2; }
         # shellcheck disable=SC1090
         source "$PARSE"; echo "PIN=$EXPECTED_HEAD_SHA PR=$PR_NUMBER") 2>&1 )"; LAST_RC=$?
     set -e
@@ -108,6 +109,11 @@ set -- --expected-head "$SHA_256" 7 --auto; run_parse "$@"
 assert_contains "$LAST_OUT" "PIN=$SHA_256 PR=7" "64-hex (SHA-256 repo) is accepted, in any position"
 set -- 7 --auto; run_parse "$@"
 assert_contains "$LAST_OUT" "PIN= PR=7" "no flag: no pin"
+# --redate-stale-checks was removed outright (#12063): an unresynced caller
+# that still passes it is refused, never silently merged.
+set -- 7 --auto --redate-stale-checks --expected-head "$SHA_A"; run_parse "$@"
+assert_eq 1 "$LAST_RC" "--redate-stale-checks is refused (removed, #12063)"
+assert_contains "$LAST_OUT" "Unknown option: --redate-stale-checks" "--redate-stale-checks: says why"
 for bad in "${SHA_A:0:12}" "$(tr a A <<<"$SHA_A")" "${SHA_A}0" "--auto"; do
     set -- 7 --expected-head "$bad"; run_parse "$@"
     assert_eq 1 "$LAST_RC" "rejected value '${bad:0:16}': exit 1"

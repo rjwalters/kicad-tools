@@ -168,7 +168,6 @@ test-merge-pr-daemon-version-floor.sh
 test-merge-pr-rate-limit-fallback.sh
 test-merge-pr-stacked-child-branch-delete.sh
 test-merge-pr-tree-checks.sh
-test-merge-pr-ci-result.sh
 test-merge-pr-required-checks.sh
 test-nextest-daemon-guard.sh
 test-operator-hold-routing.sh

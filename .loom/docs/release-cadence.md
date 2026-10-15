@@ -25,8 +25,20 @@ direction (2026-10-09) is **at most one release a day**.
   `defaults/` changed since that bump. Otherwise it exits green and changes
   nothing, with `deferred: last bump <sha> at <UTC>; next bump eligible at
   <UTC>` (or `nothing to release`) in the job summary. The gate is re-checked
-  after every `git fetch` in the push-retry loop, so a bump that lands mid-race
-  makes the run defer instead of bumping twice.
+  after every `git fetch` in the publish-retry loop, so a bump that lands
+  mid-race makes the run defer instead of bumping twice.
+- **How the bump reaches `main` (#12063).** The workflow never pushes. Its
+  `bump-version` job runs the gate and `scripts/version.sh bump patch`; its
+  `publish` job, the only one with `id-token: write` and with no action in
+  it, POSTs the changed version files to the fleet publisher with a GitHub
+  Actions OIDC token. The publisher commits them as `loom-fleet-publisher`
+  only if they are exactly a one-patch-step bump of the `parent` named, and
+  only while `main` is still at that parent. On `409 head_moved` or `503
+  upstream_ambiguous` the job re-reads `main` and re-runs the gate; if `main`
+  moved without touching a version file, the same bump is sent with the new
+  tip as its parent, and if a version file changed, the next run recomputes
+  it (a forced run fails red and has to be dispatched again). Any refusal
+  fails the run red; there is no fallback to a direct push.
 - **The interval.** Repository variable `RELEASE_MIN_INTERVAL`, in seconds;
   unset means `86400`. A non-integer or negative value fails the run red — it
   never falls back to "always bump". `0` explicitly disables the limit. A

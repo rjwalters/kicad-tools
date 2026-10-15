@@ -57,9 +57,9 @@ By default a hold whose follower head moved since the marker was written is
 voided and re-planned on the next tick, because the marker no longer describes
 the tree it holds.
 
-**A tree-identical re-date is not a moved head (#10398).** The documented
-remedy for a stale chain head is to re-date it with a tree-identical commit
-and re-run CI (#8248/#8919). If the forge proves the new head's tree equals the
+**A tree-identical re-date is not a moved head (#10398).** A tree-identical
+commit (such as the #8508 re-date push, retired by #12063) moves the head
+without changing the tree. If the forge proves the new head's tree equals the
 pinned head's tree (the same `kind=tree` test that carries a review verdict
 across a re-date), the pass keeps the PR's sequencing state as it is:
 
