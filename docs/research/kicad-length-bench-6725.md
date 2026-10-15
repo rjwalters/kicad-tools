@@ -105,7 +105,11 @@ consulted, and `router/kicad_length.py` is written from these observations.
    the via adds nothing. A via connected on fewer than two layers gets zero
    height: 5.0000 mm for a 5 mm track ending in a via. It does not fall back
    to the declared span. The Route form keeps the declared span for such a
-   via, because a router `Route` can be one fragment of a net.
+   via, because a router `Route` can be one fragment of a net. The exception
+   is a via inside a through-hole pad: the pad's barrel, not the via, carries
+   any layer change, so both forms measure it as a stub. Router pads carry
+   their footprint's side (`Pad.side`) so the Route form applies the
+   footprint-side rule too (#6780).
 4. **Via and pad trims compose.** When a run ends at a pad centre inside a
    via, the via straightens the end to its own centre first. The pad then
    trims the end only if the via sits exactly on the pad centre, so the
@@ -122,3 +126,14 @@ misses are runs that loop back through a junction inside a via. The tuners'
 Route form uses router order, so at such junctions it can drift from the
 written board's number by one track stub. This happened on 06rf `PCIE_TX-`,
 where the tuner read 1.289 mm and `kct check` read 1.006 mm. Follow-up: #6778.
+
+### Circular through-hole pads: 0.19 µm off
+
+A via inside a **circular** through-hole pad measures 0.19 µm off kicad-cli.
+kct trims the run end against the true circle; kicad-cli appears to
+approximate the circle with a polygon, so its boundary crossing lands
+slightly elsewhere. The 0.1 µm bench tolerance therefore holds only for
+rectangular and rounded-rectangle pads. kct deliberately does not replicate
+the polygon: the error is far below any manufacturing or skew budget, and
+matching it would mean reproducing an internal approximation rather than
+the copper (#6780).
