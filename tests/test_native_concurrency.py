@@ -216,10 +216,14 @@ def test_install_does_not_patch_subprocess_when_unconfigured(tmp_path):
         (["kicad-cli", "pcb", "drc", "--help"], False),
         (["kicad-cli", "pcb", "fill-zones", "--help"], False),
         (["/opt/kicad/bin/kicad-cli", "--version"], False),
-        # "version" (no dashes) is a real subcommand, not the "--version"
-        # flag, and a launch that also names a board must still be gated
-        # even if some other flag happens to be present.
-        (["/opt/kicad/bin/kicad-cli", "version"], True),
+        # "version" (no dashes) is the discovery probe's spelling of
+        # "--version": just as cheap, never loads a board, so it is not gated
+        # either (Issue #6786) -- but only in the subcommand position.
+        (["/opt/kicad/bin/kicad-cli", "version"], False),
+        (["kicad-cli", "version", "--format", "about"], False),
+        (["kicad-cli", "pcb", "drc", "version"], True),
+        # A launch that also names a board must still be gated even if some
+        # other flag happens to be present.
         (
             ["kicad-cli", "pcb", "drc", "--output", "report.json", "board.kicad_pcb"],
             True,
@@ -244,6 +248,8 @@ def test_classification_matches_the_independent_observer():
         ["kicad-cli", "pcb", "drc", "--help"],
         ["kicad-cli", "pcb", "fill-zones", "--help"],
         ["/opt/kicad/bin/kicad-cli", "--version"],
+        ["kicad-cli", "version", "--format", "about"],
+        ["kicad-cli", "pcb", "drc", "version"],
     ]
     for argv in cases:
         expected = observer.category(argv) in ("kicad-cli", "kicad-python-fill")
@@ -263,10 +269,43 @@ def test_capability_probe_category_is_distinct_from_native_categories():
     analyzer = _load_analyzer_module()
     assert observer.category(["kicad-cli", "pcb", "drc", "--help"]) == "kicad-cli-probe"
     assert observer.category(["kicad-cli", "--version"]) == "kicad-cli-probe"
+    assert observer.category(["kicad-cli", "version"]) == "kicad-cli-probe"
     assert "kicad-cli-probe" not in analyzer.NATIVE_CATEGORIES
     # A real launch is unaffected and stays in both places.
     assert observer.category(["kicad-cli", "pcb", "drc", "board.kicad_pcb"]) == "kicad-cli"
     assert "kicad-cli" in analyzer.NATIVE_CATEGORIES
+
+
+def test_kicad_cli_lookups_never_wait_for_a_native_permit(monkeypatch, tmp_path):
+    """Locating kicad-cli / reading its version must not queue (Issue #6786).
+
+    ``kct mfr apply-rules`` only *looks up* kicad-cli (to warn when the SMD pad
+    clearance rule is inert on the installed version), yet with every permit
+    held by real DRC launches its ``kicad-cli version`` probe queued behind
+    them -- a wait no parent subprocess timeout is credited for, which timed
+    out ``test_format_json_stdout_is_a_single_json_document[mfr apply-rules]``
+    in CI. Capture the argv both lookup sites really launch, so a future
+    spelling change cannot silently put them back behind the gate.
+    """
+    from kicad_tools.cli import runner
+    from kicad_tools.export import gerber
+
+    launched: list[list[str]] = []
+
+    def fake_run(args, *_, **__):
+        launched.append(list(args))
+        return subprocess.CompletedProcess(args, 0, "10.0.6\n", "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    fake_cli = tmp_path / "kicad-cli"
+    assert runner._probe_kicad_cli(fake_cli, timeout=1) is True
+    runner.PROBED_KICAD_CLI_VERSIONS.pop(str(fake_cli), None)
+    monkeypatch.setattr(gerber, "_KICAD_CLI_VERSION_CACHE", {})
+    assert gerber.get_kicad_cli_version(fake_cli) == "10.0.6"
+
+    assert len(launched) == 2
+    for argv in launched:
+        assert not native_concurrency.is_native_launch(argv), argv
 
 
 def test_executable_keyword_is_classified(tmp_path):
