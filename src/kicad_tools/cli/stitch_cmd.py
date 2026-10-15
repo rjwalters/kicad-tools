@@ -5812,6 +5812,123 @@ def run_stitch(
             return (via_pos, dogleg_pos, extended_pos, False)
         return (via_pos, dogleg_pos, extended_pos, False)
 
+    # Issue #6684: commit-time drop filters.  The #3271 via_in_pad filter
+    # and the #3855/#4177/#6289 drill hole-to-hole filter used to run AFTER
+    # this loop and drop placements from ``result.vias_added`` -- but by
+    # then each dropped via had already been appended to ``existing_vias``
+    # (so ``is_pad_connected`` credited a later same-net pad as "already
+    # connected" through copper that is never written: board 07's U4.E4 via
+    # U4.D5's filtered via), recorded as a cross-net obstacle, and counted
+    # in ``micro_vias_placed``.  The keep-or-drop decision is now taken
+    # per placement, before any of that bookkeeping.  Neither filter's
+    # inputs depend on placements (``sexp`` is not mutated until the write
+    # pass below), so they are built once here.
+    #
+    # #3271: manufacturers that forbid via-in-pad (e.g. JLCPCB standard
+    # tier).  The placement strategies push the via off the originating pad
+    # but do NOT consider neighbouring same-net SMD pads on the same
+    # footprint, so on dense QFN / BGA parts the via can land on top of a
+    # same-net neighbour -- geometrically clear of other-net copper, but
+    # flagged by ``ViaInPadRule``.  This uses the same SMD-pad-bbox
+    # containment geometry as the DRC rule, so it drops exactly the
+    # placements the rule would flag.  Through-hole pads are excluded: they
+    # already have a plated hole.
+    vip_bboxes_by_net: dict[int, list[tuple[float, float, float, float]]] = {}
+    if avoid_pad_overlap:
+        net_numbers_local = {
+            num for num, name in get_net_map(sexp).items() if name in set(net_names)
+        }
+        for net_num, min_x, min_y, max_x, max_y in find_smd_pad_bboxes_on_nets(
+            sexp, net_numbers_local
+        ):
+            vip_bboxes_by_net.setdefault(net_num, []).append((min_x, min_y, max_x, max_y))
+
+    # #3855: the per-strategy ``calculate_via_position`` guard catches
+    # straight-line placements at candidate selection, but the dog-leg /
+    # extended-escape strategies place vias through separate paths, so this
+    # is the single chokepoint guaranteeing NO committed stitch via sits
+    # within ``min_hole_to_hole`` (drill edge-to-edge) of an existing drilled
+    # hole (any through-hole pad, any other-net via, or another kept stitch
+    # via).  The via is dropped (the pad falls back to the plane pour)
+    # rather than nudged.  The GND-stitch-vs-J1.S2 case (#3855) is a
+    # same-net via-vs-pad pair -- two distinct drilled holes that never
+    # merge -- so same-net PADS are NOT excluded.
+    #
+    # #4177: a stitch via for net A must see EVERY other net's pre-existing
+    # drills, sibling stitch-target net B's included, so the registry is
+    # split and each exclusion policy is honoured per candidate:
+    #   * PAD drills: ALL nets, including the via's own net.  Only the via's
+    #     own TARGET pad is exempted (coincident-with-center check below).
+    #   * VIA drills: exclude ONLY a coincident own-net via (#6289: a
+    #     distinct own-net via is a separate drilled hole).
+    all_pad_drills = find_all_drills(sexp, include_vias=False)
+    all_via_drills = find_all_drills(sexp, include_pads=False)
+    # Drills of the stitch vias KEPT so far, in loop order.
+    kept_stitch_drills: list[tuple[float, float, float]] = []
+
+    def _commit_drop_reason(placement: ViaPlacement) -> str | None:
+        """Return the skip reason if a filter drops ``placement``, else ``None``.
+
+        Issue #6684: also bumps the matching filter counter on a drop.  The
+        caller must record nothing else for a dropped placement.
+        """
+        if avoid_pad_overlap:
+            candidate_bboxes = vip_bboxes_by_net.get(placement.pad.net_number, [])
+            in_pad = any(
+                _via_drill_inside_pad_bbox(placement.via_x, placement.via_y, placement.drill, bbox)
+                or (
+                    strict_drill_overlap
+                    and _via_drill_overlaps_pad_bbox(
+                        placement.via_x, placement.via_y, placement.drill, bbox
+                    )
+                )
+                for bbox in candidate_bboxes
+            )
+            if in_pad:
+                result.via_in_pad_filtered += 1
+                return (
+                    "via_in_pad: standard placement would land drill "
+                    "inside same-net SMD pad (avoid_pad_overlap=True); "
+                    "pad relies on the plane pour for connectivity"
+                )
+
+        cand_r = placement.drill / 2.0
+        via_net = placement.pad.net_number
+        existing_board_drills = all_pad_drills + [
+            d
+            for d in all_via_drills
+            if d[3] != via_net or math.hypot(d[0] - placement.via_x, d[1] - placement.via_y) > 1e-3
+        ]
+        # A via placed right beside its own (through-hole) target pad is the
+        # desired escape geometry: skip any registry entry coincident with
+        # the target pad center.
+        tgt_x, tgt_y = placement.pad.x, placement.pad.y
+        conflict = False
+        for ex, ey, edrill, _enet in existing_board_drills:
+            if abs(ex - tgt_x) < 1e-3 and abs(ey - tgt_y) < 1e-3:
+                continue  # the via's own target through-hole pad
+            edge = math.hypot(ex - placement.via_x, ey - placement.via_y) - cand_r - edrill / 2.0
+            if edge + 1e-3 < min_hole_to_hole:
+                conflict = True
+                break
+        if not conflict:
+            for px, py, pdrill in kept_stitch_drills:
+                edge = (
+                    math.hypot(px - placement.via_x, py - placement.via_y) - cand_r - pdrill / 2.0
+                )
+                if edge + 1e-3 < min_hole_to_hole:
+                    conflict = True
+                    break
+        if conflict:
+            result.hole_to_hole_rejected += 1
+            return (
+                "hole_to_hole: stitch via drill within "
+                f"{min_hole_to_hole:.2f}mm of an existing drilled hole "
+                "(#3855/#4177); pad relies on the plane pour for "
+                "connectivity"
+            )
+        return None
+
     # Process each pad
     for pad in pads:
         # Assemble per-pad obstacle lists augmented with cross-net stitch
@@ -6042,16 +6159,15 @@ def run_stitch(
             # Fallback via clears foreign pour copper: place the
             # least-violating via anyway and log it so the marginal cross-net
             # graze (against sibling stitch geometry only) is auditable.
-            result.connectivity_fallback.append(
-                (
-                    pad,
-                    "cross-net co-check left no clearing placement; placed via "
-                    "against pre-existing copper to preserve pour connectivity "
-                    "(connectivity > marginal cross-net clearance graze)",
-                )
+            # (Issue #6684: logged at commit time, only if the via is kept.)
+            fallback_note = (
+                "cross-net co-check left no clearing placement; placed via "
+                "against pre-existing copper to preserve pour connectivity "
+                "(connectivity > marginal cross-net clearance graze)"
             )
         else:
             via_pos, dogleg_pos, extended_pos, is_micro = placement_result
+            fallback_note = None
 
         # Determine actual via dimensions (micro or standard)
         actual_via_size = micro_via_size if is_micro else via_size
@@ -6088,11 +6204,6 @@ def run_stitch(
                 layers=layers,
                 via_type=via_type_str,
             )
-
-            result.vias_added.append(placement)
-            if is_micro:
-                result.micro_vias_placed += 1
-
             # Create a multi-waypoint trace segment
             trace = TraceSegment(
                 pad=pad,
@@ -6102,13 +6213,6 @@ def run_stitch(
                 layer=pad.layer,
                 waypoints=waypoints,
             )
-            result.traces_added.append(trace)
-
-            # Add to existing vias list
-            existing_vias.append((via_x, via_y, pad.net_number))
-            # Issue #3633: feed this stitch via + trace into the cross-net
-            # obstacle pool so later-placed foreign-net stitches clear it.
-            _record_placed(placement, trace)
         elif dogleg_pos is not None:
             # Dog-leg placement: (via_x, via_y, intermediate_x, intermediate_y)
             via_x, via_y, intermediate_x, intermediate_y = dogleg_pos
@@ -6122,11 +6226,6 @@ def run_stitch(
                 layers=layers,
                 via_type=via_type_str,
             )
-
-            result.vias_added.append(placement)
-            if is_micro:
-                result.micro_vias_placed += 1
-
             # Create an L-shaped trace segment
             trace = TraceSegment(
                 pad=pad,
@@ -6137,13 +6236,6 @@ def run_stitch(
                 intermediate_x=intermediate_x,
                 intermediate_y=intermediate_y,
             )
-            result.traces_added.append(trace)
-
-            # Add to existing vias list
-            existing_vias.append((via_x, via_y, pad.net_number))
-            # Issue #3633: feed this stitch via + trace into the cross-net
-            # obstacle pool so later-placed foreign-net stitches clear it.
-            _record_placed(placement, trace)
         else:
             # Straight-line placement
             placement = ViaPlacement(
@@ -6155,11 +6247,6 @@ def run_stitch(
                 layers=layers,
                 via_type=via_type_str,
             )
-
-            result.vias_added.append(placement)
-            if is_micro:
-                result.micro_vias_placed += 1
-
             # Create a straight trace segment from pad center to via center
             trace = TraceSegment(
                 pad=pad,
@@ -6168,176 +6255,28 @@ def run_stitch(
                 width=trace_width,
                 layer=pad.layer,
             )
-            result.traces_added.append(trace)
 
-            # Add to existing vias list
-            existing_vias.append((via_pos[0], via_pos[1], pad.net_number))
-            # Issue #3633: feed this stitch via + trace into the cross-net
-            # obstacle pool so later-placed foreign-net stitches clear it.
-            _record_placed(placement, trace)
+        # Issue #6684: decide keep-or-drop BEFORE recording anything, so a
+        # dropped via never counts as connectivity for a later same-net pad,
+        # never sits in the cross-net obstacle pool and is never counted.
+        # The dropped pad is skipped and falls back to the pour.
+        drop_reason = _commit_drop_reason(placement)
+        if drop_reason is not None:
+            result.pads_skipped.append((pad, drop_reason))
+            continue
 
-    # Issue #3271: pad-aware post-filter for manufacturers that forbid
-    # via-in-pad (e.g. JLCPCB standard tier).
-    #
-    # The placement strategies above push the via off the originating pad
-    # by ``pad_radius + offset`` but do NOT consider neighbouring same-net
-    # pads on the same footprint.  On dense QFN / BGA components the
-    # standard offset can land the via on top of a neighbour pad on the
-    # same net -- geometrically clear of other-net copper, but rejected by
-    # the JLCPCB tier-1 manufacturability rule because plated-over
-    # via-in-pad processing is not supported.  See ``ViaInPadRule`` and
-    # issue #3271 for the pre-emption rationale.
-    #
-    # We use the same SMD-pad-bbox containment geometry the DRC rule
-    # uses, so this filter drops exactly the placements the rule would
-    # later flag.  Through-hole pads are intentionally excluded: they
-    # already have a plated hole, so a via inside them is not a
-    # manufacturability concern.
-    if avoid_pad_overlap and result.vias_added:
-        net_numbers_local = {
-            num for num, name in get_net_map(sexp).items() if name in set(net_names)
-        }
-        pad_bboxes = find_smd_pad_bboxes_on_nets(sexp, net_numbers_local)
-        # Group bboxes by net for O(N+M) scan rather than O(N*M).
-        bboxes_by_net: dict[int, list[tuple[float, float, float, float]]] = {}
-        for net_num, min_x, min_y, max_x, max_y in pad_bboxes:
-            bboxes_by_net.setdefault(net_num, []).append((min_x, min_y, max_x, max_y))
-
-        kept_vias: list[ViaPlacement] = []
-        kept_traces: list[TraceSegment] = []
-        # Index traces by their pad object identity so we can drop the
-        # trace alongside the via when the placement is filtered out.
-        # Multiple placements per pad are not produced by ``run_stitch``
-        # (one via per skipped pad), so id-keying is sufficient.
-        for placement, trace in zip(result.vias_added, result.traces_added, strict=True):
-            candidate_bboxes = bboxes_by_net.get(placement.pad.net_number, [])
-            in_pad = any(
-                _via_drill_inside_pad_bbox(placement.via_x, placement.via_y, placement.drill, bbox)
-                or (
-                    strict_drill_overlap
-                    and _via_drill_overlaps_pad_bbox(
-                        placement.via_x, placement.via_y, placement.drill, bbox
-                    )
-                )
-                for bbox in candidate_bboxes
-            )
-            if in_pad:
-                result.via_in_pad_filtered += 1
-                if placement.pad.net_number == trace.pad.net_number:
-                    # The pad whose escape we just filtered loses its
-                    # stitch; record so the user-facing summary makes the
-                    # trade-off explicit.  The diagnostic reason mirrors
-                    # the DRC rule's wording.
-                    result.pads_skipped.append(
-                        (
-                            placement.pad,
-                            "via_in_pad: standard placement would land drill "
-                            "inside same-net SMD pad (avoid_pad_overlap=True); "
-                            "pad relies on the plane pour for connectivity",
-                        )
-                    )
-                continue
-            kept_vias.append(placement)
-            kept_traces.append(trace)
-        result.vias_added = kept_vias
-        result.traces_added = kept_traces
-
-    # Issue #3855: drill hole-to-hole drop pass.  The per-strategy
-    # ``calculate_via_position`` guard catches straight-line placements at
-    # the candidate-selection stage, but the dog-leg / extended-escape
-    # strategies place vias through separate paths.  This post-placement
-    # filter is the single chokepoint that guarantees NO committed stitch
-    # via sits within ``min_hole_to_hole`` (drill edge-to-edge) of an
-    # existing drilled hole (any through-hole pad, OR any other-net via,
-    # OR another just-placed stitch via).  Mirrors the #3271
-    # ``--avoid-pad-overlap`` drop shape: the via is dropped (the pad
-    # falls back to the plane pour) rather than nudged.  The GND-stitch-
-    # vs-J1.S2 case (#3855) is a same-net via-vs-pad pair -- two distinct
-    # drilled holes that never merge -- so same-net PADS are NOT excluded.
-    if result.vias_added:
-        MIN_HOLE_TO_HOLE = min_hole_to_hole
-        # Issue #4177: the prior ``find_all_drills(sexp, exclude_nets=
-        # net_numbers)`` excluded EVERY stitch-target net's drills, so on a
-        # ``--net GND --net +3.3V`` run a GND stitch via was never checked
-        # against a pre-existing +3.3V via / through-hole pad drill (and
-        # vice versa) -- the exact -0.000mm coincident-hole, different-net
-        # short reported here.  A stitch via for net A must see EVERY other
-        # net's pre-existing drills, including sibling stitch-target net B's.
-        #
-        # We split the registry so the two exclusion policies (which differ)
-        # are each honoured per-candidate:
-        #   * PAD drills: keep ALL nets, including the via's own net.  A via
-        #     and a same-net plated pad are two distinct drilled holes that
-        #     never "merge" (the #3855 J1-S2 case), so the hole-to-hole
-        #     floor applies regardless of net.  Only the via's own TARGET
-        #     pad is exempted, via the coincident-with-center check below.
-        #   * VIA drills: exclude ONLY the via's own net (same-net via
-        #     stacking is legal and intentional); sibling stitch-target
-        #     nets' pre-existing vias remain hard obstacles.
-        all_pad_drills = find_all_drills(sexp, include_vias=False)
-        all_via_drills = find_all_drills(sexp, include_pads=False)
-
-        h2h_kept_vias: list[ViaPlacement] = []
-        h2h_kept_traces: list[TraceSegment] = []
-        placed_so_far: list[tuple[float, float, float]] = []
-        for placement, trace in zip(result.vias_added, result.traces_added, strict=True):
-            cand_r = placement.drill / 2.0
-            via_net = placement.pad.net_number
-            # Issue #6289: only a COINCIDENT own-net via (true stacking) is
-            # exempt.  A distinct own-net via is a separate drilled hole, so
-            # the fab hole-to-hole floor applies to it exactly as
-            # ``kct check --mfr`` measures it (board 05: +24V/+3V3 stitch
-            # vias 0.457-0.496 mm from an existing same-net via).
-            existing_board_drills = all_pad_drills + [
-                d
-                for d in all_via_drills
-                if d[3] != via_net
-                or math.hypot(d[0] - placement.via_x, d[1] - placement.via_y) > 1e-3
-            ]
-            # The via intentionally connects ``placement.pad``; if that pad
-            # is itself a drilled (through-hole) hole, a via placed right
-            # beside it is the desired escape geometry, not a stray
-            # conflict.  Exclude the target pad's own drill from the check
-            # by skipping any registry entry coincident with the pad
-            # center (within a tight epsilon).
-            tgt_x, tgt_y = placement.pad.x, placement.pad.y
-            conflict = False
-            for ex, ey, edrill, _enet in existing_board_drills:
-                if abs(ex - tgt_x) < 1e-3 and abs(ey - tgt_y) < 1e-3:
-                    continue  # the via's own target through-hole pad
-                edge = (
-                    math.hypot(ex - placement.via_x, ey - placement.via_y) - cand_r - edrill / 2.0
-                )
-                if edge + 1e-3 < MIN_HOLE_TO_HOLE:
-                    conflict = True
-                    break
-            if not conflict:
-                for px, py, pdrill in placed_so_far:
-                    edge = (
-                        math.hypot(px - placement.via_x, py - placement.via_y)
-                        - cand_r
-                        - pdrill / 2.0
-                    )
-                    if edge + 1e-3 < MIN_HOLE_TO_HOLE:
-                        conflict = True
-                        break
-            if conflict:
-                result.hole_to_hole_rejected += 1
-                result.pads_skipped.append(
-                    (
-                        placement.pad,
-                        "hole_to_hole: stitch via drill within "
-                        f"{MIN_HOLE_TO_HOLE:.2f}mm of an existing drilled hole "
-                        "(#3855/#4177); pad relies on the plane pour for "
-                        "connectivity",
-                    )
-                )
-                continue
-            placed_so_far.append((placement.via_x, placement.via_y, placement.drill))
-            h2h_kept_vias.append(placement)
-            h2h_kept_traces.append(trace)
-        result.vias_added = h2h_kept_vias
-        result.traces_added = h2h_kept_traces
+        if fallback_note is not None:
+            result.connectivity_fallback.append((pad, fallback_note))
+        kept_stitch_drills.append((placement.via_x, placement.via_y, placement.drill))
+        result.vias_added.append(placement)
+        if is_micro:
+            result.micro_vias_placed += 1
+        result.traces_added.append(trace)
+        # Add to existing vias list
+        existing_vias.append((placement.via_x, placement.via_y, pad.net_number))
+        # Issue #3633: feed this stitch via + trace into the cross-net
+        # obstacle pool so later-placed foreign-net stitches clear it.
+        _record_placed(placement, trace)
 
     # Apply changes if not dry run
     if not dry_run and result.vias_added:
