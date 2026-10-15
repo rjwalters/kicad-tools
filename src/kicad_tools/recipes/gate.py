@@ -296,7 +296,16 @@ def evaluate_pipeline_gate(
     )
 
     drc_blocking: dict[str, int] = {}
-    if not drc.ran:
+    if getattr(drc, "failed", False) is True:
+        # Issue #6724: kicad-cli was found but crashed, was killed or left no
+        # usable report.  require_drc=False only excuses a KiCad-less
+        # environment; a failed check never certifies the board.
+        geometric_ok = False
+        reasons.append(
+            f"geometric DRC failed ({drc.note or drc.reason}); "
+            "kicad-cli did not complete, so the board was not checked"
+        )
+    elif not drc.ran:
         if require_drc:
             geometric_ok = False
             reasons.append(
@@ -330,14 +339,17 @@ def evaluate_pipeline_gate(
         saved_check = check_saved_fill(routed_pcb, refilled=drc, timeout=drc_timeout)
     if saved_check is not None:
         if not saved_check.ran:
-            saved_fill_ok = not require_drc
+            # Issue #6724: a crashed/killed kicad-cli fails the leg outright.
+            saved_failed = getattr(saved_check, "failed", False) is True
+            saved_fill_ok = not require_drc and not saved_failed
+            if saved_failed:
+                verdict = "kicad-cli did not complete, so the saved copper was not checked"
+            elif require_drc:
+                verdict = "cannot certify the saved copper (require_drc=True)"
+            else:
+                verdict = "saved-fill leg unverified (require_drc=False)"
             reasons.append(
-                f"saved-fill DRC did not run ({saved_check.note or 'no report'}); "
-                + (
-                    "cannot certify the saved copper (require_drc=True)"
-                    if require_drc
-                    else "saved-fill leg unverified (require_drc=False)"
-                )
+                f"saved-fill DRC did not run ({saved_check.note or 'no report'}); {verdict}"
             )
         elif saved_check.regressions:
             saved_fill_ok = False

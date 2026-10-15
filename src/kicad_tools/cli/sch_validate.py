@@ -114,7 +114,7 @@ def run_erc(schematic_path: str) -> list[ValidationIssue]:
             output_file = f.name
 
         try:
-            subprocess.run(
+            proc = subprocess.run(
                 [
                     kicad_cli,
                     "sch",
@@ -130,6 +130,18 @@ def run_erc(schematic_path: str) -> list[ValidationIssue]:
                 text=True,
                 timeout=60,
             )
+
+            # Issue #6724: the output file is pre-created empty, which used to
+            # read as "no ERC findings".  A kicad-cli killed by a signal or one
+            # that wrote nothing did not check the schematic.
+            if proc.returncode < 0 or Path(output_file).stat().st_size == 0:
+                from kicad_tools.drc.geometric import describe_returncode
+
+                raise RuntimeError(
+                    describe_returncode(proc.returncode)
+                    if proc.returncode < 0
+                    else f"kicad-cli wrote no ERC report (exit {proc.returncode})"
+                )
 
             # Parse results
             if Path(output_file).exists():

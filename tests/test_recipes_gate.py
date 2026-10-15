@@ -266,6 +266,8 @@ class TestAuthoritativeEngine:
             "kicad_tools.cli.runner.find_kicad_cli", lambda: Path("/usr/bin/kicad-cli")
         )
         monkeypatch.setattr("kicad_tools.drc.geometric.subprocess.run", fake_run)
+        # Issue #6724: model a kicad-cli that supports --refill-zones (10+).
+        monkeypatch.setattr("kicad_tools.cli.runner._kicad_drc_supports_refill", lambda _cli: True)
 
         pcb = tmp_path / "board_routed.kicad_pcb"
         pcb.write_text("(kicad_pcb)")

@@ -983,6 +983,16 @@ class PreflightChecker:
                 message=f"DRC report not found: {report_path}",
             )
 
+        # Issue #6724: an empty report (kicad-cli killed before writing it)
+        # parses as zero findings; it is not evidence of a clean DRC.
+        if report_path.stat().st_size == 0:
+            return PreflightResult(
+                name="drc",
+                status="WARN",
+                message=f"DRC report is empty: {report_path}",
+                details="kicad-cli may have been killed or crashed; re-run DRC",
+            )
+
         try:
             from ..drc.report import DRCReport
 
@@ -1044,6 +1054,16 @@ class PreflightChecker:
                 name="erc",
                 status="WARN",
                 message=f"ERC report not found: {report_path}",
+            )
+
+        # Issue #6724: an empty report (kicad-cli killed before writing it)
+        # parses as zero findings; it is not evidence of a clean ERC.
+        if report_path.stat().st_size == 0:
+            return PreflightResult(
+                name="erc",
+                status="WARN",
+                message=f"ERC report is empty: {report_path}",
+                details="kicad-cli may have been killed or crashed; re-run ERC",
             )
 
         try:

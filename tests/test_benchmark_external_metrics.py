@@ -1051,6 +1051,8 @@ class TestAllTrackErrors:
             return sp.CompletedProcess(cmd, 0, b"", b"")
 
         monkeypatch.setattr(geometric.subprocess, "run", fake_run)
+        # Issue #6724: model a kicad-cli that supports --refill-zones (10+).
+        monkeypatch.setattr("kicad_tools.cli.runner._kicad_drc_supports_refill", lambda _cli: True)
         geometric.run_geometric_drc(
             tmp_path / "b.kicad_pcb", kicad_cli=Path("/fake/kicad-cli"), **kwargs
         )

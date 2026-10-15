@@ -1407,6 +1407,9 @@ def test_run_geometric_drc_passes_refill_zones() -> None:
     monkey = pytest.MonkeyPatch()
     try:
         monkey.setattr(geo_mod.subprocess, "run", _fake_run)
+        # Issue #6724: --refill-zones is passed only to a kicad-cli that
+        # supports it (KiCad 10+); model one.
+        monkey.setattr("kicad_tools.cli.runner._kicad_drc_supports_refill", lambda _cli: True)
         # The report file never gets written by our fake, so the helper
         # returns ran=False -- that is fine; we only assert on the argv.
         geo_mod.run_geometric_drc(

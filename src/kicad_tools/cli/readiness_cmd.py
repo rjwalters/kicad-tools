@@ -337,12 +337,28 @@ def _run_kicad_cli(args: Sequence[str], output: Path) -> EngineRun:
     if binary is None:
         return EngineRun(ok=False, detail="kicad-cli not found on PATH")
     output.parent.mkdir(parents=True, exist_ok=True)
+    # Issue #6724: an artefact left by an earlier run must not pass for this
+    # run's output when kicad-cli fails or is killed.
+    output.unlink(missing_ok=True)
     try:
         completed = subprocess.run(
             [str(binary), *args], capture_output=True, text=True, timeout=600, check=False
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         return EngineRun(ok=False, detail=f"kicad-cli failed: {exc}")
+    if completed.returncode != 0:
+        # None of these invocations passes ``--exit-code-violations``, so a
+        # non-zero status (a load failure, or a signal kill such as the OOM
+        # killer, which may leave a truncated file) means no usable output.
+        from kicad_tools.drc.geometric import describe_returncode
+
+        detail = (completed.stderr or completed.stdout or "").strip().splitlines()
+        return EngineRun(
+            ok=False,
+            detail=describe_returncode(completed.returncode)
+            + (f": {detail[-1]}" if detail else ""),
+            returncode=completed.returncode,
+        )
     if not output.is_file() or output.stat().st_size == 0:
         detail = (completed.stderr or completed.stdout or "").strip().splitlines()
         return EngineRun(

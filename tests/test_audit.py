@@ -125,7 +125,8 @@ class TestMergeGeometricDrc:
         def _fake_run(cmd, *args, **kwargs):
             # Materialise the --output path so the method proceeds to parse.
             out_idx = cmd.index("--output") + 1
-            Path(cmd[out_idx]).write_text("{}")
+            # Issue #6724: a real kicad-cli report always has a violations list.
+            Path(cmd[out_idx]).write_text('{"violations": []}')
 
             class _R:
                 returncode = 0
