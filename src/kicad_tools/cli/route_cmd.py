@@ -15783,21 +15783,30 @@ def _should_use_escape_routing(router, escape_flag: bool | None, quiet: bool) ->
     Returns:
         True if escape routing should be used.
     """
+    use_escape, message = _escape_routing_decision(router, escape_flag)
+    if message is not None and not quiet:
+        print(message)
+    return use_escape
+
+
+def _escape_routing_decision(router, escape_flag: bool | None) -> tuple[bool, str | None]:
+    """Silent core of :func:`_should_use_escape_routing` (Issue #6666).
+
+    Returns ``(use_escape, message)``; ``message`` is the line
+    ``_should_use_escape_routing`` prints, so a caller that needs the decision
+    before it knows whether to announce it can print it later.
+    """
     if escape_flag is True:
-        if not quiet:
-            print("  Escape routing: enabled (--escape-routing)")
-        return True
+        return True, "  Escape routing: enabled (--escape-routing)"
     if escape_flag is False:
-        return False
+        return False, None
 
     # Auto-detect dense packages
     dense_packages = router.detect_dense_packages()
     if dense_packages:
-        if not quiet:
-            refs = [p.ref for p in dense_packages]
-            print(f"  Escape routing: auto-enabled (dense packages: {refs})")
-        return True
-    return False
+        refs = [p.ref for p in dense_packages]
+        return True, f"  Escape routing: auto-enabled (dense packages: {refs})"
+    return False, None
 
 
 def _parse_region_box(
@@ -21845,40 +21854,59 @@ def _run_main_impl(args, parser, argv) -> int:
             nonlocal diffpair_warnings, relaxed_nets_report, diffpair_budget_exit_pairs
 
             # Issue #6666: decide escape routing ONCE, before the adaptive
-            # branch.  ``_should_use_escape_routing`` prints its verdict, so it
-            # must not be re-evaluated below.  Before this, the adaptive branch
-            # returned before the escape decision was ever made, so any board
-            # with a multi-resolution plan silently lost the dense-package
-            # escape pre-phase (``route_with_escape``).  That path was latent
-            # until PR #4877 made ``load_pads_for_analysis`` read KiCad 7+
-            # refs; afterwards every auto-grid board with a fine-pitch package
-            # took it, and chorus-test's U5/U8 escapes collapsed (30/51 ->
-            # 19/51 at 8a98a69f1).
-            use_escape_routing = _should_use_escape_routing(router, escape_routing_flag, quiet)
+            # branch (the decision prints, so it must not be re-evaluated).
+            # The adaptive branch used to return before this decision was
+            # ever made.  That was latent until PR #4877 let
+            # ``compute_multi_resolution_plan`` see KiCad 7+ refs; after it,
+            # a board whose adaptive Phase 1 escapes 0 pads of a fine-pitch
+            # part (chorus-test's U8 once #6646 declined full-stack micro
+            # vias) hard-failed with FinePitchEscapeFailure instead of
+            # reaching the dense-package escape pre-phase that used to route
+            # it (30/51).
+            #
+            # The pre-phase only pre-empts the adaptive branch when the
+            # adaptive Phase 1 WOULD hard-fail (a read-only preview of the
+            # same escape search).  Boards whose Phase 1 succeeds keep the
+            # adaptive branch byte-for-byte: on board 07 the escape pre-phase
+            # routes far worse than adaptive (#3438), so pre-empting on
+            # every dense package regressed it.
             use_adaptive_grid = multi_res_plan is not None and multi_res_plan.is_multi_resolution
-            if use_adaptive_grid and use_escape_routing:
-                # The escape pre-phase wins over the adaptive grid.  The
-                # plan's fine zones are already on ``router.fine_zones``, so
-                # the escape router's sub-grid stage still uses them.
-                use_adaptive_grid = False
-                if not quiet:
-                    flush_print(
-                        "  Adaptive multi-resolution grid skipped: the dense-package "
-                        "escape pre-phase takes precedence (#6666)"
-                    )
-
-            # Adaptive multi-resolution routing (when --grid auto selects it
-            # and no dense package needs the escape pre-phase)
+            use_escape_routing, escape_message = _escape_routing_decision(
+                router, escape_routing_flag
+            )
+            adaptive_router = None
             if use_adaptive_grid:
                 from kicad_tools.router.adaptive_grid import AdaptiveGridRouter
 
-                if not quiet:
-                    flush_print("  Using adaptive multi-resolution grid strategy")
                 adaptive_router = AdaptiveGridRouter(
                     grid=router.grid,
                     rules=router.rules,  # Issue #6243: carries authored minima
                     router=router,
                 )
+                if use_escape_routing:
+                    phase1_failure = adaptive_router.preview_phase1(router.pads)
+                    if phase1_failure is None:
+                        # Adaptive Phase 1 escapes every fine-pitch part:
+                        # keep the adaptive branch (its own escapes).
+                        use_escape_routing = False
+                        escape_message = None
+                    else:
+                        use_adaptive_grid = False
+                        if not quiet:
+                            flush_print(
+                                "  Adaptive multi-resolution grid skipped: its Phase 1 "
+                                f"would escape 0/{phase1_failure.attempted_pads} pads of "
+                                f"{phase1_failure.component_ref}; falling back to the "
+                                "dense-package escape pre-phase (#6666)"
+                            )
+            if escape_message is not None and not quiet:
+                flush_print(escape_message)
+
+            # Adaptive multi-resolution routing (when --grid auto selects it)
+            if use_adaptive_grid:
+                assert adaptive_router is not None
+                if not quiet:
+                    flush_print("  Using adaptive multi-resolution grid strategy")
 
                 # Build nets dict (filter to routable multi-pad nets)
                 adaptive_nets = {
