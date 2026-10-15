@@ -5459,10 +5459,14 @@ def run_stitch(
 
     # Auto-detect target layers per net if not specified
     net_target_layers: dict[str, str | None] = {}
+    # Issue #6701: the real zone layers of each net, kept so the pad loop can
+    # refuse a via whose span reaches no same-net pour off the pad's layer.
+    net_zone_layers: dict[str, list[str]] = {}
     copper_layers = get_copper_layers(sexp)
     if target_layer is None:
         for net_name in net_names:
             zone_layers = find_zones_for_net(sexp, net_name)
+            net_zone_layers[net_name] = zone_layers
             if zone_layers and not _should_use_stackup_fallback(zone_layers, copper_layers):
                 # Zone found on an inner layer -- use it directly
                 net_target_layers[net_name] = zone_layers[0]
@@ -6031,6 +6035,28 @@ def run_stitch(
             connected = False
         if connected:
             result.already_connected += 1
+            continue
+
+        # Issue #6701: when every pour of this net sits on the pad's own layer
+        # a stitch via can reach no same-net copper anywhere else -- the
+        # stackup-inferred target (#2044) names an inner layer this net has
+        # no plane on, the fill gate goes no-op, and the through via lands
+        # as a kicad-cli ``via_dangling``.  Skip the pad with an explicit
+        # reason instead.  An explicit ``--target-layer`` is the user's call,
+        # and a net with no zones at all keeps the stackup inference.
+        pad_net_zone_layers = net_zone_layers.get(pad.net_name, [])
+        if (
+            target_layer is None
+            and pad_net_zone_layers
+            and all(layer == pad.layer for layer in pad_net_zone_layers)
+        ):
+            result.pads_skipped.append(
+                (
+                    pad,
+                    "no same-net pour on any layer other than the pad's layer "
+                    f"({pad.layer}); a via would dangle",
+                )
+            )
             continue
 
         # Attempt placement against the cross-net-augmented obstacle lists

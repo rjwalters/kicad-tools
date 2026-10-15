@@ -1633,10 +1633,16 @@ class TestStackupAwareFallback:
         gnd_vias = [v for v in result.vias_added if v.pad.net_name == "GND"]
         v33_vias = [v for v in result.vias_added if v.pad.net_name == "+3.3V"]
 
+        assert gnd_vias, "GND (B.Cu pour) must still get a stitch via"
         for via in gnd_vias:
             assert via.layers == ("F.Cu", "B.Cu")
-        for via in v33_vias:
-            assert via.layers == ("F.Cu", "B.Cu")
+
+        # Issue #6701: +3.3V's only pour is on F.Cu, the pad's own layer, so a
+        # via would reach no +3.3V copper and dangle -- skip it explicitly.
+        assert v33_vias == []
+        v33_skips = [reason for pad, reason in result.pads_skipped if pad.net_name == "+3.3V"]
+        assert len(v33_skips) == 1
+        assert "no same-net pour on any layer other than the pad's layer" in v33_skips[0]
 
     def test_inner_zone_not_overridden(self, stitch_zone_pcb: Path):
         """Zones on inner layers should be used directly, not overridden by stackup."""

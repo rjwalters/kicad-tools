@@ -61,7 +61,7 @@ R9_NEAR_C1_SITE = _smd("R9", 110.2, 110.82, 1, "GND", "000000000200")
 # that via's copper halo (0.3 + 0.3 + 0.2 clearance = 0.8 mm), clear of all
 # copper that is actually written.
 R7_VCC = _smd("R7", 111.07, 110.82, 2, "VCC", "000000000300") + (
-    '  (zone (net 2) (net_name "VCC") (layer "F.Cu") (uuid "zone-2") (hatch edge 0.5) '
+    '  (zone (net 2) (net_name "VCC") (layer "B.Cu") (uuid "zone-2") (hatch edge 0.5) '
     "(connect_pads (clearance 0.2)) (min_thickness 0.2) (filled_areas_thickness no) "
     "(fill yes (thermal_gap 0.2) (thermal_bridge_width 0.3)) "
     "(polygon (pts (xy 130 130) (xy 139 130) (xy 139 139) (xy 130 139))))\n"

@@ -17,8 +17,9 @@ This test pins that behaviour on two axes:
 
 2. **Functional:** the underlying stitch primitive
    (:func:`kicad_tools.cli.stitch_cmd.run_stitch`) places at least one
-   via on each of GND / +24V / +3V3 when run (dry-run) against the
-   committed routed artifact.  This is the same auto-detected-net path
+   via on GND when run (dry-run) against the committed routed artifact,
+   and (Issue #6701) places none on +24V / +3V3, whose only pours sit on
+   the pads' own layer.  This is the same auto-detected-net path
    ``stitch_pcb`` drives via the CLI, and it proves the stranded pour
    pads are reachable -- i.e. the pipeline step will actually connect
    them on a fresh regen.
@@ -49,10 +50,16 @@ ROUTED_PCB = (
     / "tests/fixtures/historical_demo_boards/05-bldc-motor-controller/output/bldc_controller_routed.kicad_pcb"
 )
 
-# The three pour nets the issue calls out as strander-prone.  +5V is a
-# pour net too but its pads happen to sit on the pour layer, so we do not
-# require a via on it (the auto-detect path still considers it).
-REQUIRED_STITCH_NETS = ("GND", "+24V", "+3V3")
+# The pour nets the issue calls out as strander-prone.  In the committed
+# historical artifact only GND's pour (B.Cu) is on a different layer from
+# its pads.  +24V / +3V3 (and +5V / VIN) are poured on F.Cu only -- the
+# pads' own layer -- so a stitch via would reach no same-net copper and
+# dangle; since Issue #6701 run_stitch skips those pads with an explicit
+# reason instead of placing a via (previously it targeted an inner layer
+# those nets have no plane on).
+REQUIRED_STITCH_NETS = ("GND",)
+PAD_LAYER_ONLY_POUR_NETS = ("+24V", "+3V3")
+PAD_LAYER_ONLY_REASON = "no same-net pour on any layer other than the pad's layer"
 
 
 class TestBoard05StitchPipelineStatic:
@@ -160,7 +167,7 @@ class TestBoard05StitchPipelineFunctional:
         self,
         routed_pcb_copy: Path,
     ) -> None:
-        """run_stitch places >=1 via on each of GND / +24V / +3V3.
+        """run_stitch places >=1 via on GND and none on pad-layer-only pours.
 
         Drives the same auto-detected-net stitch that ``stitch_pcb``
         runs via the CLI, in dry-run, against a copy of the committed
@@ -205,3 +212,11 @@ class TestBoard05StitchPipelineFunctional:
             "would survive a fresh regen. Inspect StitchResult.pads_skipped "
             "for per-pad rejection reasons."
         )
+
+        # Issue #6701: nets poured only on the pads' own layer get no
+        # (dangling) via; every such pad is skipped with an explicit reason.
+        for net in PAD_LAYER_ONLY_POUR_NETS:
+            assert vias_per_net.get(net, 0) == 0, f"{net} got a via that would dangle"
+            reasons = [r for pad, r in result.pads_skipped if pad.net_name == net]
+            assert reasons, f"{net} pads should be reported in pads_skipped"
+            assert all(PAD_LAYER_ONLY_REASON in r for r in reasons), reasons
