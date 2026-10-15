@@ -122,6 +122,14 @@ _GUIDE_CAP_MM = 2.0
 _GUIDE_WEIGHT = 1.0
 
 
+# Issue #6703: at most this many fallback pairs per flush get the partner-aware
+# candidates and their partner-blind rollout of the later pairs; the rest keep
+# the pre-#6703 partner-blind legs.  Each such pair costs about six leg
+# searches plus two per later pair, so the cap keeps one flush LINEAR in the
+# number of fallback pairs (``2n + K * (6 + 2n)`` searches, against ``2n``
+# before) instead of quadratic, and the flush runs on every negotiation pass.
+_MAX_PARTNER_AWARE_PAIRS = 4
+
 # One fallback leg pair: ``{"P"|"N": (search result or None, reason)}`` (#6703).
 _FallbackLegs = dict[str, tuple["_RouteResult | None", str]]
 
@@ -321,10 +329,6 @@ class LatticePathfinder:
         # measure; ``None`` -> tracks plus a 1.6 mm barrel per through-via.
         self.pair_length_measure: Callable[[Route], float] | None = None
         self._shortfall_memo: dict[int, tuple[_RouteResult, int]] = {}
-        # Issue #6703: raised only while a partner-aware fallback leg is
-        # SEARCHED (never while it is committed), so its copper clears every
-        # pad's own class -- see :meth:`_partner_aware_legs`.
-        self._search_clearance_floor = 0.0
 
         xs = [p[0] for p in outline]
         ys = [p[1] for p in outline]
@@ -760,9 +764,7 @@ class LatticePathfinder:
         tw = getattr(net_class, "trace_width", None) or self.rules.trace_width
         clr = getattr(net_class, "clearance", None) or 0.0
         authored = self.rules.authored_floor(net) if net is not None else 0.0
-        return tw / 2.0, max(
-            clr, self.rules.trace_clearance, authored, self._search_clearance_floor
-        )
+        return tw / 2.0, max(clr, self.rules.trace_clearance, authored)
 
     def _hard_avoided_layers(self, net_class: object | None) -> frozenset[int]:
         """Grid-layer indices to HARD-block for this connection (issue #4979).
@@ -2911,6 +2913,59 @@ class LatticePathfinder:
             legs[pol] = (res, reason)
         return legs
 
+    def _strict_pad_pairwise(
+        self, pc: CoupledConnection, items: dict[str, Connection]
+    ) -> LatticePairwise | None:
+        """Per-pad class keep-out for a fallback pair's leg search (#6703).
+
+        The lattice search holds every foreign pad only to the connection's
+        own clearance; a pad whose class asks for more is fixed afterwards by
+        the class-pad repair, which may barely move diff-pair copper (#6437).
+        This projects the pads whose own class (:func:`pad_class_requirements`)
+        is stricter than the leg's onto a :class:`LatticePairwise` keyed
+        ``(leg net, pad net)``.  Installed only while a partner-aware leg is
+        SEARCHED, it widens exactly those pads' keep-outs
+        (:meth:`LatticeObstacleModel.pairwise_pad_blocked`); every other
+        obstacle -- tracks, vias, keep-outs and the remaining pads -- keeps
+        the leg's own clearance.  (A board-wide floor at the strictest class,
+        the first cut of #6703, held every obstacle to one high-clearance pad
+        class's gap.)  Committed copper never carries it: the projection is
+        not threaded into :class:`CommittedCopper`.
+
+        ``None`` when no pad is stricter than either leg (the searches are
+        then exactly the partner-blind ones), when the router installed no
+        pad classes, or when a real HV pairwise projection is already active
+        (it governs pad clearance itself, and the repair is skipped there).
+        """
+        from .class_pad_repair import pad_class_requirements
+        from .pairwise import LatticePairwise
+
+        if self._pairwise is not None:
+            return None
+        pad_req = pad_class_requirements(self)
+        if not pad_req:
+            return None
+        by_pad_net: dict[int, float] = {}
+        for pad, req in zip(self.pads, pad_req, strict=False):
+            if pad.net is None:
+                continue
+            if req > by_pad_net.get(pad.net, 0.0):
+                by_pad_net[pad.net] = req
+        required: dict[tuple[int, int], float] = {}
+        max_by_net: dict[int, float] = {}
+        for item in items.values():
+            leg_net = item[1].net
+            own = self._conn_geometry(pc.net_class, leg_net)[1]
+            for pad_net, req in by_pad_net.items():
+                if pad_net == leg_net or req <= own + 1e-9:
+                    continue
+                key = (leg_net, pad_net) if leg_net < pad_net else (pad_net, leg_net)
+                required[key] = max(required.get(key, 0.0), req)
+                max_by_net[leg_net] = max(max_by_net.get(leg_net, 0.0), req)
+        if not required:
+            return None
+        return LatticePairwise(required_by_pair=required, zones=(), max_by_net=max_by_net)
+
     def _partner_aware_legs(
         self,
         pc: CoupledConnection,
@@ -2929,8 +2984,8 @@ class LatticePathfinder:
         * N unguided, then P unguided;
         * N unguided, then P guided by N's corridor.
 
-        Every leg is searched at the strictest pad class of the board (see
-        below).  The second leg of a candidate is searched against committed
+        Every leg is searched holding each foreign pad at that pad's own class
+        (see :meth:`_strict_pad_pairwise`).  The second leg of a candidate is searched against committed
         copper that holds the candidate's first leg (a
         :meth:`CommittedCopper.begin_trial` that is rolled back), so every
         candidate is legal exactly as it would be had it been routed alone.
@@ -2949,22 +3004,24 @@ class LatticePathfinder:
             "escape_plan": escape_plan,
         }
 
-        from .class_pad_repair import pad_class_requirements
-
         # A shortfall against a pad's own class left on a diff-pair net gets
         # the net demoted (the class-pad repair may barely move pair copper),
-        # so the partner-aware legs are searched at the strictest pad class:
-        # their copper then needs no repair at all.  Committed copper keeps
-        # the leg's own class clearance.
-        pad_req = pad_class_requirements(self) if self._pairwise is None else None
-        floor = max(pad_req) if pad_req else 0.0
+        # so the partner-aware legs keep every foreign pad at that pad's own
+        # class while they are searched: their copper then needs no repair.
+        # Only the pads whose class is stricter than the leg's own are
+        # widened (a per-pad projection, :meth:`_strict_pad_pairwise`); tracks,
+        # vias and keep-outs keep the leg's own clearance, and committed
+        # copper is stored at it.
+        strict = self._strict_pad_pairwise(pc, items)
 
         def search(pol: str, guide: PartnerGuide | None = None) -> tuple[_RouteResult | None, str]:
-            self._search_clearance_floor = floor
+            if strict is None:
+                return self._search_single(items[pol], guide=guide, **kw)
+            previous, self._pairwise = self._pairwise, strict
             try:
                 return self._search_single(items[pol], guide=guide, **kw)
             finally:
-                self._search_clearance_floor = 0.0
+                self._pairwise = previous
 
         candidates: list[_FallbackLegs] = []
         firsts: _FallbackLegs = {}
@@ -3009,9 +3066,8 @@ class LatticePathfinder:
             if res is not None:
                 self._commit_single(items[pol], res, {}, committed)
         # ``candidates[0]`` is the partner-blind (pre-#6703) leg pair whenever
-        # the strict pad-class search changed nothing.
-        own = min(self._conn_geometry(pc.net_class, it[1].net)[1] for it in items.values())
-        return {"P": best["P"], "N": best["N"]}, best is candidates[0] and floor <= own + 1e-9
+        # no pad needed widening (the searches were then the plain ones).
+        return {"P": best["P"], "N": best["N"]}, best is candidates[0] and strict is None
 
     def _route_fallback_pairs_into(
         self,
@@ -3022,6 +3078,7 @@ class LatticePathfinder:
         history: dict[Resource, float],
         present: float,
         escape_plan: dict[int, EscapeChoice],
+        deadline: float | None = None,
     ) -> list[dict[str, tuple[Connection, str | None]]]:
         """Route every deferred fallback pair's legs (#6373), skew-aware (#6703).
 
@@ -3043,6 +3100,12 @@ class LatticePathfinder:
         tie keeps the pre-#6703 copper.  The comparison baseline at every step
         is the flush already secured, so the result never scores worse than
         the pre-#6703 flush from the same state.
+
+        Bounded cost: only the first :data:`_MAX_PARTNER_AWARE_PAIRS` pairs
+        are weighed this way, and once ``deadline`` (``time.monotonic()``)
+        passes no further pair is -- every remaining pair keeps the
+        partner-blind legs the rollout already computed, so an expired budget
+        costs no new search.
 
         Commits the kept flush.  Returns, per pair, ``{"P"|"N": (leg_item,
         decline reason or None)}``.
@@ -3078,6 +3141,15 @@ class LatticePathfinder:
         committed.rollback_trial(mark)
         chosen: list[_FallbackLegs] = []
         for i, pc in enumerate(pairs):
+            if i >= _MAX_PARTNER_AWARE_PAIRS or (
+                deadline is not None and time.monotonic() >= deadline
+            ):
+                # Out of budget: the remaining pairs keep their partner-blind
+                # legs (``rest`` is exactly that routing under ``chosen``).
+                for q, legs in zip(pairs[i:], rest, strict=True):
+                    recommit(q, legs)
+                chosen.extend(rest)
+                break
             mark = committed.begin_trial()
             aware, is_blind = self._partner_aware_legs(pc, **kw)
             if is_blind:
@@ -3423,6 +3495,7 @@ class LatticePathfinder:
                     history=history,
                     present=present,
                     escape_plan=escape_plan,
+                    deadline=deadline,
                 )
                 for legs in flushed:
                     legs_ok = 0

@@ -54,7 +54,7 @@ def _pad(x: float, y: float, net: int, name: str, ref: str, layer: Layer = Layer
     )
 
 
-def _walled_pair() -> tuple[LatticePathfinder, CoupledConnection]:
+def _walled_pair(extra: tuple[Pad, ...] = ()) -> tuple[LatticePathfinder, CoupledConnection]:
     outline = [(0.0, 0.0), (30.0, 0.0), (30.0, 12.0), (0.0, 12.0)]
     p_a = _pad(3.0, 5.0, 1, "D+", "J1")
     n_a = _pad(3.0, 6.0, 2, "D-", "J1")
@@ -65,7 +65,8 @@ def _walled_pair() -> tuple[LatticePathfinder, CoupledConnection]:
         _pad(_WALL_X, mid, 9, "WALL", "WF", Layer.F_CU, width=0.6, height=height),
         _pad(_WALL_X, mid, 9, "WALL", "WB", Layer.B_CU, width=0.6, height=height),
     ]
-    pf = LatticePathfinder(outline, [p_a, n_a, p_b, n_b, *walls], _RULES, LayerStack.two_layer())
+    pads = [p_a, n_a, p_b, n_b, *walls, *extra]
+    pf = LatticePathfinder(outline, pads, _RULES, LayerStack.two_layer())
     pc = CoupledConnection(
         key=("pair", 1, 2),
         pair_name="D",
@@ -191,3 +192,137 @@ def test_committed_trial_rolls_back_exactly() -> None:
     assert after == before
     assert committed.seg_clear((0.0, 1.0), (5.0, 1.0), 0, 3)
     assert not committed.via_copper[1:]
+
+
+# -- review follow-ups (PR #6735) ---------------------------------------------
+
+
+def test_one_very_strict_pad_class_does_not_disable_the_partner_aware_legs(
+    monkeypatch,
+) -> None:
+    # A board with ONE very strict pad class (a 1.5 mm HV-style pad, ten
+    # times the legs' own 0.15 mm), well away from the legs.  Only that pad's
+    # keep-out is widened while the legs are searched, so the walled pair
+    # still gets the matched legs -- a board-wide floor at 1.5 mm (the first
+    # cut of #6703) held the legs, the wall and each other to 1.5 mm too, and
+    # the partner-aware candidates could no longer pass below the wall.
+    pf, pc = _walled_pair((_pad(8.0, 10.5, 7, "HV", "HV1"),))
+    _decline_coupled(pf, monkeypatch)
+    pf.set_pad_class_clearances([0.15] * (len(pf.pads) - 1) + [1.5])
+
+    strict = pf._strict_pad_pairwise(pc, pf._fallback_items(pc))
+    assert strict is not None
+    # Only the strict pad's net is projected, for each leg.
+    assert dict(strict.required_by_pair) == {(1, 7): 1.5, (2, 7): 1.5}
+
+    routes, stats = pf.route_netset([], coupled=[pc], uncoupled_fallback=True)
+    assert stats.routed == 2 and stats.total == 2, stats
+    route_p, route_n = routes[(pc.key, "P")], routes[(pc.key, "N")]
+    assert _past_wall(route_p) == _past_wall(route_n)
+    assert abs(_length(route_p) - _length(route_n)) < 0.5
+
+
+def test_strict_pad_projection_is_off_when_no_pad_is_stricter() -> None:
+    pf, pc = _walled_pair()
+    assert pf._strict_pad_pairwise(pc, pf._fallback_items(pc)) is None  # no classes
+    pf.set_pad_class_clearances([0.15] * len(pf.pads))
+    assert pf._strict_pad_pairwise(pc, pf._fallback_items(pc)) is None
+
+
+def _open_pairs(n: int) -> tuple[LatticePathfinder, list[CoupledConnection]]:
+    """``n`` straight, independent diff pairs on an open two-layer board."""
+    outline = [(0.0, 0.0), (20.0, 0.0), (20.0, 3.0 * n + 3.0), (0.0, 3.0 * n + 3.0)]
+    pads: list[Pad] = []
+    pairs: list[CoupledConnection] = []
+    for k in range(n):
+        y = 1.5 + 3.0 * k
+        pn, nn = 10 + 2 * k, 11 + 2 * k
+        p_a = _pad(2.0, y, pn, f"D{k}+", f"J{k}")
+        n_a = _pad(2.0, y + 1.0, nn, f"D{k}-", f"J{k}")
+        p_b = _pad(18.0, y, pn, f"D{k}+", f"U{k}")
+        n_b = _pad(18.0, y + 1.0, nn, f"D{k}-", f"U{k}")
+        pads += [p_a, n_a, p_b, n_b]
+        pairs.append(
+            CoupledConnection(
+                key=("pair", pn, nn),
+                pair_name=f"D{k}",
+                pad_p_a=p_a,
+                pad_n_a=n_a,
+                pad_p_b=p_b,
+                pad_n_b=n_b,
+                net_class=_HS,
+                pitch=_PITCH,
+            )
+        )
+    pf = LatticePathfinder(outline, pads, _RULES, LayerStack.two_layer())
+    # One pad class stricter than the legs' own, so no pair is trivially
+    # partner-blind and every pair would be weighed without the cap.
+    pf.set_pad_class_clearances([0.3] * len(pads))
+    return pf, pairs
+
+
+def _count_calls(monkeypatch, name: str) -> list[int]:
+    calls = [0]
+    original = getattr(LatticePathfinder, name)
+
+    def counted(self, *a, **k):
+        calls[0] += 1
+        return original(self, *a, **k)
+
+    monkeypatch.setattr(LatticePathfinder, name, counted)
+    return calls
+
+
+def test_flush_cost_is_capped_linear_in_the_fallback_pairs(monkeypatch) -> None:
+    from kicad_tools.router.lattice import pathfinder as pfmod
+
+    n = pfmod._MAX_PARTNER_AWARE_PAIRS + 3
+    pf, pairs = _open_pairs(n)
+    aware = _count_calls(monkeypatch, "_partner_aware_legs")
+    searches = _count_calls(monkeypatch, "_search_single")
+    committed = pf._fresh_committed()
+    out = pf._route_fallback_pairs_into(
+        pairs, {}, committed=committed, history={}, present=0.0, escape_plan={}
+    )
+    assert len(out) == n
+    assert all(per[pol][1] is None for per in out for pol in ("P", "N"))
+    k = pfmod._MAX_PARTNER_AWARE_PAIRS
+    assert aware[0] == k
+    # 2n partner-blind searches up front, then per weighed pair at most six
+    # candidate searches and a two-search rollout of every later pair.
+    assert searches[0] <= 2 * n + k * (6 + 2 * n)
+
+
+def test_expired_deadline_keeps_the_partner_blind_flush(monkeypatch) -> None:
+    import time as _time
+
+    pf, pairs = _open_pairs(3)
+    aware = _count_calls(monkeypatch, "_partner_aware_legs")
+    searches = _count_calls(monkeypatch, "_search_single")
+    routes: dict = {}
+    out = pf._route_fallback_pairs_into(
+        pairs,
+        routes,
+        committed=pf._fresh_committed(),
+        history={},
+        present=0.0,
+        escape_plan={},
+        deadline=_time.monotonic() - 1.0,
+    )
+    assert aware[0] == 0
+    assert searches[0] == 2 * len(pairs)  # the pre-#6703 flush's own cost
+    assert all(per[pol][1] is None for per in out for pol in ("P", "N"))
+
+    # Same copper as the partner-blind legs routed one after another.
+    pf2, pairs2 = _open_pairs(3)
+    committed = pf2._fresh_committed()
+    for pc in pairs2:
+        legs = pf2._partner_blind_legs(
+            pc, committed=committed, history={}, present=0.0, escape_plan={}
+        )
+        for pol in ("P", "N"):
+            got = routes[(pc.key, pol)].segments
+            want = legs[pol][0].route.segments
+            assert [(s.x1, s.y1, s.x2, s.y2, s.layer) for s in got] == [
+                (s.x1, s.y1, s.x2, s.y2, s.layer) for s in want
+            ]
