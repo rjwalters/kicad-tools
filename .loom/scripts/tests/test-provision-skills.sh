@@ -308,6 +308,115 @@ else
     echo "  SKIP: resync-installed.sh not found"
 fi
 
+# ── Test 14: a stale machine checkout never wins over the synced source ───────
+# A host's ~/.local/share/loom was a month-old real clone (0.19.27) while
+# resync synced from a fresh source (0.19.1159); the user-scope /loom:* link
+# pointed into the stale clone and shadowed every repo's own copy, so agents
+# followed long-retired label rules.
+# Fixtures live under mktemp, which the temp-root refusal would reject; Tests
+# 14-18 and 20-21 treat no root as temporary, Test 19 restores the real list.
+export LOOM_SKILLS_TEMP_ROOTS=""
+echo "Test 14: [reference_root] replaces an older machine checkout"
+OLD=$(make_real_checkout); echo "0.19.27" > "$OLD/VERSION"
+NEW=$(make_real_checkout); echo "0.19.1160" > "$NEW/VERSION"
+HOME_T=$(mktemp -d)
+out=$(HOME="$HOME_T" provision_loom_skills "$OLD" "$HOME_T/.claude" "$NEW" 2>&1)
+assert_eq "$(readlink "$HOME_T/.claude/commands/loom")" "$NEW/defaults/.claude/commands/loom" \
+    "commands link points into the newer reference, not the stale checkout"
+assert_eq "$(readlink "$HOME_T/.claude/agents/loom-judge.md")" "$NEW/defaults/.claude/agents/loom-judge.md" \
+    "agent links point into the newer reference too"
+assert_contains "$out" "is at 0.19.27, older than 0.19.1160" "the fallback is warned with both versions"
+
+echo "Test 15: an existing link into the stale checkout is repointed to the reference"
+HOME_T=$(mktemp -d)
+HOME="$HOME_T" provision_loom_skills "$OLD" "$HOME_T/.claude" >/dev/null 2>&1
+assert_eq "$(readlink "$HOME_T/.claude/commands/loom")" "$OLD/defaults/.claude/commands/loom" \
+    "precondition: without a reference the stale checkout is linked"
+HOME="$HOME_T" provision_loom_skills "$OLD" "$HOME_T/.claude" "$NEW" >/dev/null 2>&1
+assert_eq "$(readlink "$HOME_T/.claude/commands/loom")" "$NEW/defaults/.claude/commands/loom" \
+    "a later run with the reference repoints the stale link"
+
+echo "Test 16: an up-to-date (or newer) machine checkout is kept"
+SAME=$(make_real_checkout); echo "0.19.1160" > "$SAME/VERSION"
+HOME_T=$(mktemp -d)
+out=$(HOME="$HOME_T" provision_loom_skills "$SAME" "$HOME_T/.claude" "$NEW" 2>&1)
+assert_eq "$(readlink "$HOME_T/.claude/commands/loom")" "$SAME/defaults/.claude/commands/loom" \
+    "an equal-version checkout keeps the links"
+[[ "$out" == *"older than"* ]] && fail "warned about an up-to-date checkout" || pass "no warning for an up-to-date checkout"
+NEWER=$(make_real_checkout); echo "0.20.1" > "$NEWER/VERSION"
+HOME_T=$(mktemp -d)
+HOME="$HOME_T" provision_loom_skills "$NEWER" "$HOME_T/.claude" "$NEW" >/dev/null 2>&1
+assert_eq "$(readlink "$HOME_T/.claude/commands/loom")" "$NEWER/defaults/.claude/commands/loom" \
+    "a newer checkout keeps the links"
+LINKED=$(mktemp -d); ln -s "$OLD" "$LINKED/loom"
+HOME_T=$(mktemp -d)
+HOME="$HOME_T" provision_loom_skills "$LINKED/loom" "$HOME_T/.claude" "$OLD" >/dev/null 2>&1
+assert_eq "$(readlink "$HOME_T/.claude/commands/loom")" "$LINKED/loom/defaults/.claude/commands/loom" \
+    "a checkout that IS the reference (through a symlink) keeps linking through the checkout path"
+
+echo "Test 17: a checkout without a readable VERSION falls back to the reference"
+NOVER=$(make_real_checkout)
+HOME_T=$(mktemp -d)
+out=$(HOME="$HOME_T" provision_loom_skills "$NOVER" "$HOME_T/.claude" "$NEW" 2>&1)
+assert_eq "$(readlink "$HOME_T/.claude/commands/loom")" "$NEW/defaults/.claude/commands/loom" \
+    "no VERSION -> the reference"
+assert_contains "$out" "has no readable VERSION" "the reason is named"
+assert_eq "$(_pskill_version_lt 0.19.99 0.19.1160 && echo lt || echo ge)" "lt" "version compare is numeric per component"
+assert_eq "$(_pskill_version_lt 0.19.1160 0.19.27 && echo lt || echo ge)" "ge" "version compare is not lexical"
+
+echo "Test 18: resync-installed.sh passes its SOURCE_ROOT as the reference"
+if [[ -f "$RESYNC" ]]; then
+    RR4=$(make_resync_repo); echo "0.19.1160" > "$RR4/VERSION"
+    HR4=$(mktemp -d)
+    STALE=$(make_real_checkout); echo "0.19.27" > "$STALE/VERSION"
+    (cd "$RR4" && HOME="$HR4" LOOM_HOME="$STALE" bash "$RESYNC" >/dev/null 2>&1)
+    assert_eq "$(readlink "$HR4/.claude/commands/loom")" "$(cd "$RR4" && pwd -P)/defaults/.claude/commands/loom" \
+        "resync links the source it synced from, not the stale LOOM_HOME checkout"
+else
+    echo "  SKIP: resync-installed.sh not found"
+fi
+
+echo "Test 19: the link never moves to an OLDER tree than it points into now"
+OLD=$(make_real_checkout); echo "0.19.27" > "$OLD/VERSION"
+REFA=$(make_real_checkout); echo "0.19.1160" > "$REFA/VERSION"
+REFB=$(make_real_checkout); echo "0.19.1100" > "$REFB/VERSION"
+HOME_T=$(mktemp -d)
+HOME="$HOME_T" provision_loom_skills "$OLD" "$HOME_T/.claude" "$REFA" >/dev/null 2>&1
+HOME="$HOME_T" provision_loom_skills "$OLD" "$HOME_T/.claude" "$REFB" >/dev/null 2>&1
+assert_eq "$(readlink "$HOME_T/.claude/commands/loom")" "$REFA/defaults/.claude/commands/loom" \
+    "a later resync from an older source keeps the newer current target"
+REFC=$(make_real_checkout); echo "0.19.1200" > "$REFC/VERSION"
+HOME="$HOME_T" provision_loom_skills "$OLD" "$HOME_T/.claude" "$REFC" >/dev/null 2>&1
+assert_eq "$(readlink "$HOME_T/.claude/commands/loom")" "$REFC/defaults/.claude/commands/loom" \
+    "a newer source still moves the link forward"
+
+echo "Test 20: a reference under a temporary directory is refused"
+TMPROOT=$(mktemp -d)
+REFT="$TMPROOT/clone"; mkdir -p "$REFT"; cp -R "$REFA/." "$REFT/"
+HOME_T=$(mktemp -d)
+out=$(LOOM_SKILLS_TEMP_ROOTS="$TMPROOT" HOME="$HOME_T" provision_loom_skills "$OLD" "$HOME_T/.claude" "$REFT" 2>&1)
+assert_eq "$(readlink "$HOME_T/.claude/commands/loom")" "$OLD/defaults/.claude/commands/loom" \
+    "a temp-dir reference is not linked (the checkout is kept)"
+assert_contains "$out" "temporary directory" "the refusal is warned"
+assert_eq "$(LOOM_SKILLS_TEMP_ROOTS="/tmp $TMPROOT" _pskill_is_temp "$REFT" && echo temp || echo stable)" "temp" "a path under a listed root is temporary"
+assert_eq "$(LOOM_SKILLS_TEMP_ROOTS="/nonexistent-root" _pskill_is_temp "$REFT" && echo temp || echo stable)" "stable" "a path under no listed root is stable"
+( unset LOOM_SKILLS_TEMP_ROOTS; _pskill_is_temp /tmp ) && pass "the default list treats /tmp as temporary" || fail "the default list does not cover /tmp"
+
+echo "Test 21: switching trees prunes agents only the old tree shipped; deprovision removes reference links"
+OLD2=$(make_real_checkout); echo "0.19.27" > "$OLD2/VERSION"
+echo "# loom-retired agent" > "$OLD2/defaults/.claude/agents/loom-retired.md"
+HOME_T=$(mktemp -d)
+HOME="$HOME_T" provision_loom_skills "$OLD2" "$HOME_T/.claude" >/dev/null 2>&1
+[[ -L "$HOME_T/.claude/agents/loom-retired.md" ]] && pass "precondition: the old-only agent is linked" || fail "precondition: old-only agent not linked"
+HOME="$HOME_T" provision_loom_skills "$OLD2" "$HOME_T/.claude" "$REFC" >/dev/null 2>&1
+[[ -e "$HOME_T/.claude/agents/loom-retired.md" || -L "$HOME_T/.claude/agents/loom-retired.md" ]] \
+    && fail "an agent only the old tree ships kept its link" || pass "an agent only the old tree ships is pruned on the switch"
+mkdir -p "$HOME_T/.claude/agents"; echo OPERATOR > "$HOME_T/.claude/agents/loom-mine.md"
+deprovision_loom_skills "$OLD2" "$HOME_T/.claude" >/dev/null 2>&1
+[[ -L "$HOME_T/.claude/commands/loom" ]] && fail "deprovision left a link into the reference tree" || pass "deprovision removes a commands link into the reference tree"
+[[ -L "$HOME_T/.claude/agents/loom-judge.md" ]] && fail "deprovision left an agent link into the reference tree" || pass "deprovision removes agent links into the reference tree"
+assert_eq "$(cat "$HOME_T/.claude/agents/loom-mine.md")" "OPERATOR" "deprovision still preserves a real operator file"
+
 echo ""
 echo "======================================"
 echo "test-provision-skills.sh: $TESTS_PASSED/$TESTS_RUN passed, $TESTS_FAILED failed"

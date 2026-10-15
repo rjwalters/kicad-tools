@@ -65,6 +65,16 @@ Why each gate sits where it does:
   The never-overridable tokens (`TARGET_IS_PR`, `CLOSED`, `FROZEN`,
   `OPERATOR`, `OPEN_PR`) refuse whoever claimed. A step engine that pre-claims a Builder
   step must export the same `LOOM_SWEEP_CLAIM_OWNED=<N>`, or not pre-claim.
+- **The step engine pre-takes only the lease for every other role (#11906).**
+  Judge, Doctor, Curator and Champion read a fresh claim label as another
+  agent's, so for their steps the daemon takes the role-keyed lease alone
+  (`lease pr claim --role <role> --step <step>`, under the step's sweep id)
+  and the prompt applies its own label. The session's `lease pr claim`
+  (no `--step`) resolves the same sweep id (`LOOM_TERMINAL_ID`), and a lease
+  is owned by role, host and sweep (the step is metadata), so it re-attaches
+  to that lease (exit 0) rather than standing down. A
+  lease held by `$LOOM_SWEEP_ID` is the session's own: each prompt says so
+  beside its claim, the same override `LEASE_ALREADY_HELD` has for Builder.
 - **An operator's explicit word overrides a claim, never a category.** An
   attended `/loom:builder <N>` told to resume or force a claim (the
   operator's own crashed run, say) passes `BUILDING` / `LEASE_ALREADY_HELD` /
@@ -88,12 +98,12 @@ the same place as `loom:frozen`, writing nothing:
 Every targeted step ends in exactly one class. The class decides what the
 step-outcome ledger does next, so the four must be told apart:
 
-| Class | Meaning | Ledger effect (proposed) |
+| Class | Meaning | Ledger effect (#11900) |
 |---|---|---|
 | `verdict` | The role reached a decision that moved the item: Judge approved or requested changes, Builder opened a PR or parked the issue, Curator curated, parked or closed it | none; the next step comes from the labels |
-| `noop` | The role took (or evaluated) the item and found nothing to do | the existing per-item no-op cooldown |
-| `refused` | The item was not this step's to act on: wrong kind, wrong state, a skip label, a fresh peer claim, or the pool gate | none for a state refusal (the item must be re-classified); a short cooldown for `pool_gate` and `claimed` |
-| `failed` | The step did not complete for a reason unrelated to the item's state: a crash, a probe that could not answer, a claim left held | the fast-fail ladder |
+| `noop` | The role took (or evaluated) the item and found nothing to do | a cooldown per `(item, step)`, of the issue-keyed no-op cooldown's default length (1 h); `ci_pending` does not count toward the repeat cap |
+| `refused` | The item was not this step's to act on: wrong kind, wrong state, a skip label, a fresh peer claim, or the pool gate | a short cooldown for `pool_gate` and `claimed`; `claim_lost` redraws (counted). A state refusal re-classifies the item. A second identical state refusal, or a second `claim_lost`, in a row on the same `(item, step)` arms the refusal cooldown, doubling to 24 h. No refusal counts toward the repeat cap |
+| `failed` | The step did not complete for a reason unrelated to the item's state: a crash, a probe that could not answer, a claim left held | fast, Builder step: the fast-fail ladder; fast, any other step (Curator, Champion promotion, a PR step): the ledger's own doubling window, never the issue quarantine, whose release restores `loom:issue`; slow: counted toward the repeat cap only |
 
 ### How the daemon tells them apart
 
@@ -162,13 +172,28 @@ without a sweep around it gets neither unless the engine does both.
 
 ## Gaps left to other work
 
-- **A Curator lease.** `loom:curating` has no lease record, so a live
-  Curator's claim is told from a dead one only by the 30-minute idle clock.
-  The step engine's "`step` field on leases" work adds an issue lease with
-  `step=curator`; until then the label plus `claim-staleness.sh` is the
-  claim.
-- **The classifier itself.** Nothing reads `LOOM_STEP_OUTCOME` or the
-  post-state table yet. The step-outcome ledger implements them.
+- **The Curator prompt does not take its lease yet.** #11898 added the
+  Curator lease: `loom-daemon lease pr claim <N> --role curator` (marker
+  `<!-- loom:pr-lease role=curator host=… sweep=… step=curator -->` when a step
+  claims it). It is role-keyed, like the Judge and Doctor leases, rather than
+  an issue-path `loom:lease`, because every issue-path reader assumes one
+  claim per number: a live Curator lease would read as a peer to the Builder
+  that follows it. The step engine's spawn (#11906) takes it for a daemon
+  Curator step, with `LOOM_SWEEP_CLAIM_OWNED`. An attended or role-runner
+  `/loom:curator <N>` still claims by label, with `claim-staleness.sh` and
+  `stale_after_minutes` (`loom:curating`, 30) as the liveness, until its
+  prompt is taught the lease.
+  A dead daemon step does not strip such a label-only claim (#11969): its
+  release reads a claim label applied more than 60 s after the step started,
+  and outside the step's own lease, as another claimant's and writes nothing.
+  The same holds for an attended Doctor, which also claims by label alone.
+- **The classifier.** The step-outcome ledger (#11900,
+  `loom-daemon/src/step_dispatch/outcome_ledger.rs`) parses
+  `LOOM_STEP_OUTCOME` and `CHAMPION-STEP`, applies the post-state rule
+  (`classify`) and maps each class to its effect. The step spawn (#11906)
+  reads a step's last `LOOM_STEP_OUTCOME` line from its log into its end
+  record and role-tick capture. Computing each role's post-state from the
+  forge is still to do, as is the Builder no-op release above.
 - **Doctor** was out of this audit's scope (it was already targeted). Its PR
   Fix Mode has no kind probe: it should take gate 2 of the Judge row.
 - **The Judge lane assigner** hands fallback rows to `/loom:judge <PR>`. The

@@ -50,13 +50,12 @@ RECONCILE="$SCRIPTS_DIR/reconcile-stack.sh"
 # shellcheck source=lib/require-daemon-bin.sh
 source "$TEST_DIR/lib/require-daemon-bin.sh"
 loom_test_require_daemon_bin "$SCRIPTS_DIR" "reconcile-stack"
-# #9548: this suite's subject vets its write target (`forge may-write`)
-# first; that decision is not what this suite tests (test-write-scope.sh does),
-# and without this the outcome would depend on the host's loom-daemon.
-WS_STUB_DIR="$(mktemp -d)"
-# shellcheck source=lib/write-scope-stub.sh
-source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/write-scope-stub.sh"
-write_scope_allow_all "$WS_STUB_DIR"
+# #9548: a real run vets its write target (`loom_write_repo`) before it pushes
+# or retargets. Each sandbox clone is registered as owner/repo
+# (write-scope-fixture.sh), so the real gate admits it; see setup_sandbox for
+# how the clone stays offline with a GitHub origin.
+# shellcheck source=lib/write-scope-fixture.sh
+source "$TEST_DIR/lib/write-scope-fixture.sh"
 
 # shellcheck source=lib/assert.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/assert.sh"
@@ -83,7 +82,15 @@ GH_STUB_DIR=""
 GH_EDIT_LOG=""
 GIT_STUB_DIR=""
 
-git_q() { git -c advice.detachedHead=false -c protocol.file.allow=always "$@"; }
+# The sandbox clone's raw `origin` is this GitHub URL (what the write-scope
+# gate reads); its TRANSPORT goes to the bare $REMOTE. See setup_sandbox.
+ORIGIN_URL="https://github.com/owner/repo.git"
+# git_q passes that transport rewrite too ($LOOM_TEST_ORIGIN_TRANSPORT
+# overrides the bare remote, for a fetch that must fail).
+git_q() {
+    git -c advice.detachedHead=false -c protocol.file.allow=always \
+        -c "url.${LOOM_TEST_ORIGIN_TRANSPORT:-${REMOTE:-/nonexistent}}.insteadOf=$ORIGIN_URL" "$@"
+}
 
 # Build a fresh sandbox:
 #   remote.git  — bare "origin"
@@ -151,6 +158,18 @@ setup_sandbox() {
         exit 2
     fi
 
+    # #9548: register the clone as owner/repo, which repoints its raw origin
+    # to $ORIGIN_URL: both write-scope deciders read that raw URL (the daemon
+    # from `git config`, the shell fallback from `git remote get-url`). NOT
+    # `url.<bare>.insteadOf` in the clone's config: `git remote get-url`
+    # applies it, so the shell fallback would read the bare path while the
+    # daemon reads the raw URL. Instead the stub git below (and git_q) pass the
+    # rewrite with `-c` only to the transport commands (fetch, push,
+    # ls-remote, pull), which therefore still reach the bare remote, offline.
+    # Registered after the gh stub path is known: the fixture's LOOM_GH_BIN
+    # answers the permission probe and hands every other call to it.
+    WRITE_SCOPE_INNER_GH="$SANDBOX/bin/gh" write_scope_register "$MAIN" owner/repo
+
     # Stub gh on PATH: resolve the child head branch and record `pr edit`.
     GH_STUB_DIR="$SANDBOX/bin"
     mkdir -p "$GH_STUB_DIR"
@@ -172,8 +191,9 @@ exit 3
 STUB
     chmod +x "$GH_STUB_DIR/gh"
 
-    # Stub `git` that transparently delegates to the REAL git for everything
-    # except a --force-with-lease push made while LOOM_TEST_FAKE_REJECT=1: in
+    # Stub `git` that transparently delegates to the REAL git (adding the
+    # origin transport rewrite to fetch/push/ls-remote/pull, see above) for
+    # everything except a --force-with-lease push made while LOOM_TEST_FAKE_REJECT=1: in
     # that one case it runs the real push (so the remote genuinely updates,
     # exactly like the LFS-hook race in #6695), then discards the real exit
     # code and prints a synthetic rejection instead — modeling a push that
@@ -198,6 +218,10 @@ while [[ \$_i -lt \${#_args[@]} ]]; do
         *)     _sub="\${_args[\$_i]}"; break ;;
     esac
 done
+_rw=()
+case "\$_sub" in
+    fetch|push|ls-remote|pull) _rw=(-c "url.\${LOOM_TEST_ORIGIN_TRANSPORT:-$REMOTE}.insteadOf=$ORIGIN_URL") ;;
+esac
 if [[ "\$_sub" == "push" && -n "\${LOOM_TEST_PUSH_RACE_SCRIPT:-}" && ! -f "$SANDBOX/.race-fired" ]]; then
     # #9487: fire a one-shot race hook at the instant of the push — AFTER the
     # script captured its lease pin. The hook lands a conflicting commit on the
@@ -207,10 +231,10 @@ if [[ "\$_sub" == "push" && -n "\${LOOM_TEST_PUSH_RACE_SCRIPT:-}" && ! -f "$SAND
     # that agreement and clobbers; the pinned one must still reject.
     : > "$SANDBOX/.race-fired"
     "\$LOOM_TEST_PUSH_RACE_SCRIPT"
-    exec "\$REAL_GIT" "\$@"
+    exec "\$REAL_GIT" "\${_rw[@]}" "\$@"
 fi
 if [[ "\$_sub" == "push" && "\${LOOM_TEST_FAKE_REJECT:-0}" == "1" ]]; then
-    "\$REAL_GIT" "\$@"
+    "\$REAL_GIT" "\${_rw[@]}" "\$@"
     rc=\$?
     if [[ \$rc -eq 0 ]]; then
         echo "To $REMOTE" >&2
@@ -221,7 +245,7 @@ if [[ "\$_sub" == "push" && "\${LOOM_TEST_FAKE_REJECT:-0}" == "1" ]]; then
     fi
     exit "\$rc"
 fi
-exec "\$REAL_GIT" "\$@"
+exec "\$REAL_GIT" \${_rw[@]+"\${_rw[@]}"} "\$@"
 STUB
     chmod +x "$GIT_STUB_DIR/git"
 }
@@ -253,6 +277,7 @@ run_reconcile() {
         LOOM_TEST_FAKE_REJECT="${LOOM_TEST_FAKE_REJECT:-0}" \
         LOOM_TEST_PUSH_RACE_SCRIPT="${LOOM_TEST_PUSH_RACE_SCRIPT:-}" \
         LOOM_VERSION_CHECK_SCRIPT="${LOOM_VERSION_CHECK_SCRIPT:-}" \
+        LOOM_TEST_ORIGIN_TRANSPORT="${LOOM_TEST_ORIGIN_TRANSPORT:-}" \
         GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0="protocol.file.allow" GIT_CONFIG_VALUE_0="always" \
         bash "$RECONCILE" "$CHILD_PR" "$PARENT_BR" "$@" 2>&1
     )" || RUN_RC=$?
@@ -471,7 +496,7 @@ set -e
 REAL_GIT="$(command -v git)"
 "\$REAL_GIT" -c protocol.file.allow=always -C "$CONFLICT_CLONE_D2" push -q origin "$CHILD_BR"
 # …and the sibling's fetch advances the SHARED remote-tracking ref in \$MAIN.
-"\$REAL_GIT" -c protocol.file.allow=always -C "$MAIN" fetch -q origin "$CHILD_BR"
+"\$REAL_GIT" -c protocol.file.allow=always -c "url.$REMOTE.insteadOf=$ORIGIN_URL" -C "$MAIN" fetch -q origin "$CHILD_BR"
 RACE
 chmod +x "$RACE_SCRIPT"
 
@@ -679,9 +704,9 @@ setup_sandbox
 git_q -C "$MAIN" checkout -q main
 git_q -C "$MAIN" reset -q --hard HEAD~1
 CHILD_BEFORE_K="$(git_q -C "$MAIN" rev-parse "$CHILD_BR")"
-git_q -C "$MAIN" remote set-url origin "$SANDBOX/not-a-repository"
-
-run_reconcile "$MAIN"
+# Origin's transport, not its URL: the URL must stay the registered one, or the
+# write-scope gate (not the fetch) would be what refuses.
+LOOM_TEST_ORIGIN_TRANSPORT="$SANDBOX/not-a-repository" run_reconcile "$MAIN"
 
 assert_eq "1" "$RUN_RC" "K: a fetch failure is a precondition failure (exit 1), not a silent degrade"
 assert_contains "$RUN_OUT" "FETCH" "K: the diagnostics name the failing prerequisite"

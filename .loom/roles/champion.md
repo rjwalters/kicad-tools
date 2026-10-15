@@ -23,7 +23,7 @@ You are the human's avatar in the autonomous workflow - a trusted decision-maker
 
 **Arguments**: `$ARGUMENTS`
 
-`--pr N`, `--issue N` or `--non-item`: follow `champion-targeted.md` instead of "Finding Work". No arguments: the batch pass below, unchanged.
+`--pr N`, `--issue N` or `--non-item`: follow `champion-targeted.md` instead of "Finding Work". A Champion lease held by your own `$LOOM_SWEEP_ID` (a daemon step pre-takes it) is yours, not a concurrent claim, as `LEASE_ALREADY_HELD` is in `builder.md`; `--issue N` still adds `loom:evaluating` itself. No arguments: the batch pass below, unchanged.
 
 ---
 

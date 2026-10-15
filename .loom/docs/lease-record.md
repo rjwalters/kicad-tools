@@ -691,11 +691,22 @@ about 20 minutes until one force-pushed over the other.
 the same lease semantics, **keyed by role**:
 
 ```
-<!-- loom:pr-lease role=<doctor|judge> host=<host-id> sweep=<sweep-id> -->
+<!-- loom:pr-lease role=<doctor|judge|curator|champion> host=<host-id> sweep=<sweep-id>[ step=<step>] -->
 <!-- loom:pr-lease-yield role=… host=… sweep=… earliest_host=… earliest_sweep=… -->
 <!-- loom:pr-lease-released role=… host=… sweep=… -->
 ```
 
+- **Step claims (#11898).** The same family carries the step engine's claims
+  that have no issue-path lease: `--role curator` (`loom:curating`, on an
+  issue) and `--role champion` (`--step champion_promote`: `loom:evaluating` on
+  an issue; the default `champion_merge`: a merge on a PR, no label, so its
+  renewer has no label-absence stop). `--step <step>` records an additive
+  fourth token, `step=<step>`, after `sweep=`; a reader that reads three
+  tokens is unaffected, and an older binary ignores the two new roles. An
+  issue-path lease names its step on its **second** line instead,
+  `<!-- loom:lease-step step=builder -->` (`sweep_registry/lease_step.rs`),
+  because the issue-path readers take everything after ` sweep=` on the first
+  line as the sweep id.
 - **Separate marker family.** None of these starts with `<!-- loom:lease host=`,
   so no issue-path reader (publish, fence, renew, reclaim, dispatch ordering,
   check-claim, co-occupancy) ever sees one. Those readers assume one claim per

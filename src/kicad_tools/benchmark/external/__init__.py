@@ -9,6 +9,7 @@ and renders it as a per-board markdown table.
 See ``docs/benchmark-external-report-schema.md`` for the schema contract.
 """
 
+from .d3 import aggregate_d3, select_at5
 from .metrics import (
     ARTIFACT_SOURCE_FALLBACK_INPUT,
     ARTIFACT_SOURCE_ROUTER_OUTPUT,
@@ -46,7 +47,7 @@ from .metrics import (
     run_kct_check,
     run_kicad_cli_drc,
 )
-from .render import render_markdown, render_report_markdown
+from .render import render_d3_markdown, render_markdown, render_report_markdown
 
 __all__ = [
     "ARTIFACT_SOURCE_FALLBACK_INPUT",
@@ -75,6 +76,7 @@ __all__ = [
     "PCBWorldScore",
     "RouteOutcome",
     "TimingMetrics",
+    "aggregate_d3",
     "build_route_outcome",
     "build_timing",
     "collect_report",
@@ -82,8 +84,10 @@ __all__ = [
     "measure_copper",
     "measure_diff_pairs",
     "probe_backend",
+    "render_d3_markdown",
     "render_markdown",
     "render_report_markdown",
     "run_kct_check",
     "run_kicad_cli_drc",
+    "select_at5",
 ]

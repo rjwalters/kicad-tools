@@ -264,6 +264,22 @@ OUT=$(run_precheck)
 assert_contains "$OUT" "MANUAL=true" "a legacy loom:operator removal is release (e)"
 echo
 
+echo "Test 7c: a loom:operator removal AFTER the capped-hold recommendation clears the inbox, not the hold (#11905)"
+REC_COMMENT=$(jq -n '{author: {login: "loom-fleet-dispatch"}, body: "<!-- champion:capped-hold-recommendation -->\nreview it", createdAt: "2026-10-10T06:00:00Z"}')
+FIX_COMMENTS="[$HOLD_COMMENT, $REC_COMMENT]"
+FIX_EVENTS=$(UNLABELED=loom:operator unlabeled_event "2026-10-10T12:00:00Z")
+OUT=$(run_precheck)
+assert_contains "$OUT" "BLOCKED=true PRIOR=true MANUAL=false" "the inbox clearing is not release (e)"
+assert_contains "$OUT" "PARK park-record apply --pr 10280 --reason champion merge-risk hold --by champion" "the missing loom:blocked is repaired instead"
+FIX_EVENTS=$(unlabeled_event "2026-10-10T12:00:00Z")
+OUT=$(run_precheck)
+assert_contains "$OUT" "MANUAL=true" "a human loom:blocked removal still releases after the recommendation"
+FIX_EVENTS=$(UNLABELED=loom:operator unlabeled_event "2026-10-10T03:00:00Z")
+OUT=$(run_precheck)
+assert_contains "$OUT" "MANUAL=true" "a loom:operator removal before the recommendation still releases"
+FIX_COMMENTS="[$HOLD_COMMENT]"
+echo
+
 echo "Test 8: head moved AND label removed -> (c) is the reason, MANUAL still set for the outcome rule"
 FIX_PR=$(pr_json "abcdef1234567890" loom:pr); FIX_EVENTS=$(unlabeled_event "2026-10-10T12:00:00Z")
 OUT=$(run_precheck)

@@ -346,7 +346,10 @@ If a number is provided (e.g., `/doctor 123`):
 1. Treat that number as the target **PR** to fix. `loom:frozen` or any `loom:operator*` label on it (#11861): refuse, writing nothing
 2. **Skip** the "Finding Work" section entirely
 3. Claim the PR exactly as in Work Process step 2 (a dispatched PR can
-   already be claimed by a concurrent Doctor)
+   already be claimed by a concurrent Doctor). A lease held by your own
+   `$LOOM_SWEEP_ID` is yours, not a peer's: a daemon step pre-takes it, and
+   `lease pr claim` re-attaches (exit 0) — continue and add `loom:treating`
+   yourself, the same override `LEASE_ALREADY_HELD` has in `builder.md`
 4. Proceed directly to fixing that PR
 
 **How judge feedback reaches you.** When `/loom:sweep` dispatches a Doctor after a

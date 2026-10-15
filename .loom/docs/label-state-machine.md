@@ -276,7 +276,9 @@ hands: Doctor skips it and Judge and Champion never see it. The Capped-PR
 Recovery Pass, which also reads `loom:blocked` + `loom:changes-requested`,
 never grants it a cycle or removes `loom:blocked`; it posts one comment
 (`<!-- champion:capped-hold-recommendation -->`) asking a human to review it,
-close it or remove the hold. Find such PRs with
+close it or remove the hold, and adds `loom:operator` (the inbox, #11905). Only
+a human removes that label (`labels migrate --holds` leaves it); removing it
+releases nothing. Find such PRs with
 `gh pr list --label loom:blocked --label loom:changes-requested`.
 
 ### The out-of-band AC hold on an issue (#6883)
@@ -715,7 +717,7 @@ above. Nothing about the guard changes for any other blocking label.
 
 ## Label registry: the source of truth (#10013)
 
-> **Step dispatch (accepted design, #11894; not yet implemented).** Under `autonomous.workFinder.stepDispatch: on`, `stale_after_minutes` (described below as inert) becomes live claim liveness for the five claim labels; a `queued` item state marks a PR in GitHub's merge queue, never drawn for a merge step; and a dead step's claim is restored to its own role's ready stage. See [`docs/design/work-finder-step-dispatch.md`](https://github.com/rjwalters/loom/blob/main/docs/design/work-finder-step-dispatch.md) §12.
+> **Step dispatch (accepted design, #11894; not yet implemented).** Under `autonomous.workFinder.stepDispatch: on`, `stale_after_minutes` (live since #11898, see below) is the claim liveness of the five claim labels; a `queued` item state marks a PR in GitHub's merge queue, never drawn for a merge step; and a dead step's claim is restored to its own role's ready stage. See [`docs/design/work-finder-step-dispatch.md`](https://github.com/rjwalters/loom/blob/main/docs/design/work-finder-step-dispatch.md) §12.
 
 `defaults/labels.json` is the single source of truth for label semantics: each
 label's name, description, color, `kind`, `applied_by`/`removed_by`, and the
@@ -740,8 +742,15 @@ registry, and so are the shell scripts' hold sets (`warn-operator-gated.sh`
 queries `operator_gate`; `label_literal_guard.rs` pins the rest). Changes go
 in the registry.
 The `propagate` table (#10012) was removed (#11510) after #11104 removed
-the star-liveness pass that read it. `stale_after_minutes` and `lifecycle`
-are inert. A retired label leaves `labels` for the top-level `retired`
+the star-liveness pass that read it. `lifecycle` is inert.
+`stale_after_minutes` is live for the five claim labels (#11898): curating 30,
+evaluating 15, building 15, reviewing 30, treating 60 minutes. It is the
+default claim-liveness window (`loom-daemon/src/claim_liveness.rs`); the env
+overrides (`LOOM_STALE_<NAME>_MINUTES`) still win, and `loom:building`'s value
+is the lease TTL, because Builder liveness is the renewed lease. A dead step's
+claim is restored to its role's ready stage: curating → triage, evaluating →
+curated, building → issue (held while the issue's PR is open), reviewing →
+review-requested, treating → changes-requested. A retired label leaves `labels` for the top-level `retired`
 array (#11513): `{name, replaced_by, owned, retired_in}`, the old -> new
 mapping the forge-side migration (#11511) applies. It is never rendered into
 `labels.yml`, so `sync-labels.sh` cannot re-create it.

@@ -125,7 +125,7 @@ If a number is provided (e.g., `/curator 42`):
    gh api "repos/{owner}/{repo}/issues/<number>" --jq '[(.pull_request != null), .state, ([.labels[].name] | join(","))] | @tsv'   # live; true = a PR
    gh api repos/{owner}/{repo}/issues/<number>/labels -f 'labels[]=loom:curating'
    ```
-2. **Skip** "Finding Work" and curate directly
+2. **Skip** "Finding Work" and curate directly. A Curator lease held by your own `$LOOM_SWEEP_ID` (a daemon step pre-takes it; `loom-daemon lease pr check <number> --role curator` prints `held-self`) is yours, not a peer's — still add `loom:curating` yourself, the same override `LEASE_ALREADY_HELD` has in `builder.md`
 3. End with `LOOM_STEP_OUTCOME role=curator target=<n> class=<verdict|noop|refused|failed> reason=<token>` (`.loom/docs/targeted-role-invocation.md`)
 
 **CRITICAL**: pool gate, kind probe, then claim, BEFORE any other work; `loom:curating` is the claim. Gate fails: no claim, report it deferred. **Kind probe: `true` (a PR) or a failed read means refuse** (no label or body write, #9929); the labels API accepts a PR number silently. So do `closed`, `loom:frozen`, any `loom:operator*` label (#11861) and a hard-exclusion label (#11863). Applies to every claim path (supplied, resumed, discovered).
