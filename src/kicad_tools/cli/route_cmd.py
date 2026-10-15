@@ -8539,6 +8539,44 @@ def _print_input_clearance_findings(
         print(f"    ... and {len(violations) - 20} more")
 
 
+def _report_input_pad_overlaps(router, args, pcb_path, *, quiet: bool = False) -> None:
+    """Print a pre-route ``INPUT DEFECT`` block for overlapping pads (#6693).
+
+    Different-net pads whose copper already overlaps in the input board short
+    their nets before any routing happens, and any copper the router lands on
+    one of them touches the other.  Surfacing them up front tells the user the
+    post-route shorts against those pads are input defects, not routing
+    failures.  Report-only: exit codes are unchanged.  Printed once per run
+    (the escalation ladders reload the board per attempt).
+    """
+    if quiet or getattr(args, "_input_pad_overlaps_reported", False):
+        return
+    from kicad_tools.router.io import input_pad_overlaps, summarize_input_pad_overlaps
+
+    try:
+        overlaps = input_pad_overlaps(router)
+    except Exception:  # pragma: no cover - diagnostic only, never fatal
+        return
+    with contextlib.suppress(AttributeError):
+        args._input_pad_overlaps_reported = True
+    if not overlaps:
+        return
+    print("\n--- INPUT DEFECT: overlapping different-net pads ---")
+    print(
+        f"  {len(overlaps)} pair(s) of different-net pads already overlap in the input "
+        f"board -- these nets are shorted before routing:"
+    )
+    for line in summarize_input_pad_overlaps(overlaps):
+        print(f"    {line}")
+    for o in overlaps[:5]:
+        print(f"    e.g. {o.pad_a} ({o.net_a}) overlaps {o.pad_b} ({o.net_b})")
+    print(
+        "  Shorts against these pads are counted as pre-existing in the input board "
+        "(input defect), not caused by routing."
+    )
+    print(f"  Inspect: kct check {pcb_path} --only clearance  (clearance_pad_pad SHORT findings)")
+
+
 def _print_short_findings(shorts: "Sequence[ClearanceViolation]") -> None:
     """Report cross-net copper overlap explicitly (Issue #5862)."""
     from kicad_tools.router.io import describe_short, short_origin_summary
@@ -8577,6 +8615,8 @@ def _print_short_failure_banner(shorts: "Sequence[ClearanceViolation]", output_p
     listed in their own section.
     """
     from kicad_tools.router.io import (
+        ORIGIN_INPUT,
+        ORIGIN_INPUT_PAD_OVERLAP,
         describe_input_clearance,
         describe_short,
         short_origin_summary,
@@ -8599,12 +8639,20 @@ def _print_short_failure_banner(shorts: "Sequence[ClearanceViolation]", output_p
         print()
         print("Copper of different nets physically overlaps. KiCad DRC reports this")
         print("class as `shorting_items`; this board is NOT manufacturable as written.")
-        if any(v.is_input_defect for v in real_shorts):
+        if any(v.origin == ORIGIN_INPUT for v in real_shorts):
             # Issue #6229: an inherited short fails the run like a routing short
             # (the output is unmanufacturable either way), but the fix is in the
             # input board, not in the router's settings.
             print("Shorts marked 'pre-existing' were already in the input board and were")
             print("kept by --preserve-existing; fix or remove that copper in the input.")
+        if any(v.origin == ORIGIN_INPUT_PAD_OVERLAP for v in real_shorts):
+            # Issue #6693: the obstacle pad already overlaps a pad of the
+            # routed net in the input, so no copper placement can clear it.
+            print("Shorts marked 'pads ... already overlap' are against a pad whose copper")
+            print("already overlaps a different-net pad in the input board (e.g. a stale")
+            print("pad angle on a rotated footprint); no routing can clear them. Fix the")
+            print("pad geometry in the input; `kct check <pcb> --only clearance` lists the")
+            print("overlapping pads as `clearance_pad_pad` SHORT findings.")
     if near_misses:
         if real_shorts:
             print()
@@ -10949,6 +10997,8 @@ def route_with_layer_escalation(
         _apply_net_class_map_sidecar(router, args, quiet=quiet)
         # Issue #4431: attach the --voltage-map HV pairwise-clearance table.
         _apply_pairwise_clearance(router, args, quiet=quiet)
+        # Issue #6693: name overlapping different-net input pads up front.
+        _report_input_pad_overlaps(router, args, display_input_path, quiet=quiet)
         # Issue #5520: --no-routing-plan (report-only plan stage).
         _apply_routing_plan_flag(router, args)
         # Issue #5521: --plan-gate refuses an infeasible plan here --
@@ -12256,6 +12306,8 @@ def route_with_rule_relaxation(
         _apply_net_class_map_sidecar(router, args, quiet=quiet)
         # Issue #4431: attach the --voltage-map HV pairwise-clearance table.
         _apply_pairwise_clearance(router, args, quiet=quiet)
+        # Issue #6693: name overlapping different-net input pads up front.
+        _report_input_pad_overlaps(router, args, display_input_path, quiet=quiet)
         # Issue #5520: --no-routing-plan (report-only plan stage).
         _apply_routing_plan_flag(router, args)
         # Issue #5521: --plan-gate refuses an infeasible plan here --
@@ -14865,6 +14917,8 @@ def route_with_combined_escalation(
             _apply_net_class_map_sidecar(router, args, quiet=quiet)
             # Issue #4431: attach the --voltage-map HV pairwise-clearance table.
             _apply_pairwise_clearance(router, args, quiet=quiet)
+            # Issue #6693: name overlapping different-net input pads up front.
+            _report_input_pad_overlaps(router, args, display_input_path, quiet=quiet)
             # Issue #5520: --no-routing-plan (report-only plan stage).
             _apply_routing_plan_flag(router, args)
             # Issue #5521: --plan-gate refuses an infeasible plan here --
@@ -21213,6 +21267,8 @@ def _run_main_impl(args, parser, argv) -> int:
     _apply_net_class_map_sidecar(router, args, quiet=quiet)
     # Issue #4431: attach the --voltage-map HV pairwise-clearance table.
     _apply_pairwise_clearance(router, args, quiet=quiet)
+    # Issue #6693: name overlapping different-net input pads up front.
+    _report_input_pad_overlaps(router, args, display_input_path, quiet=quiet)
     # Issue #5520: --no-routing-plan (report-only plan stage).
     _apply_routing_plan_flag(router, args)
     # Issue #5521: --plan-gate refuses an infeasible plan here --
