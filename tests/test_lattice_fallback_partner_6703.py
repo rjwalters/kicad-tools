@@ -326,3 +326,105 @@ def test_expired_deadline_keeps_the_partner_blind_flush(monkeypatch) -> None:
             assert [(s.x1, s.y1, s.x2, s.y2, s.layer) for s in got] == [
                 (s.x1, s.y1, s.x2, s.y2, s.layer) for s in want
             ]
+
+
+def test_partner_aware_legs_keep_out_of_an_area_array_pour_neck(monkeypatch) -> None:
+    # Review fix 1 (PR #6735): on 06rf the partner-aware legs, which need no
+    # class-pad growth round, must still leave an area array's pour necks
+    # alone.  A 5x5 BGA with a 3x3 same-pour cluster in the middle (the
+    # #6673 links between its balls are keep-outs) and a declined pair whose
+    # balls sit on rows A and E either side of the cluster: P's shortest leg
+    # runs down a channel through the middle of the cluster, across its
+    # necks (checked below by routing without the keep-outs).
+    from kicad_tools.router.lattice.obstacles import LatticeKeepoutMask
+    from kicad_tools.router.plane_via_sites import (
+        PlaneFill,
+        area_array_link_keepout_areas,
+        area_array_pour_links,
+        plane_fill_pullback,
+    )
+
+    pitch, cx, cy = 1.27, 15.0, 10.0
+    pour, pour_net, gnd = "+1V8", 5, 3
+    stack = LayerStack.two_layer()
+    f_cu = stack.layer_enum_to_index(Layer.F_CU)
+    legs = {(0, 2): (1, "D+"), (4, 2): (1, "D+"), (0, 3): (2, "D-"), (4, 3): (2, "D-")}
+    cluster = {(r, c) for r in (1, 2, 3) for c in (1, 2, 3)}
+    pads: list[Pad] = []
+    for r in range(5):
+        for c in range(5):
+            net, name = legs.get((r, c), (pour_net, pour) if (r, c) in cluster else (gnd, "GND"))
+            pads.append(
+                Pad(
+                    x=cx + (c - 2) * pitch,
+                    y=cy + (r - 2) * pitch,
+                    width=0.45,
+                    height=0.45,
+                    net=net,
+                    net_name=name,
+                    layer=Layer.F_CU,
+                    ref="U1",
+                    pin=f"{'ABCDE'[r]}{c + 1}",
+                )
+            )
+    # One strict pad class far from the BGA, so the partner-aware search
+    # (with its per-pad projection) really runs instead of short-cutting to
+    # the partner-blind legs.
+    pads.append(_pad(2.0, 2.0, 9, "HV", "HV1"))
+    links, _released = area_array_pour_links(pads, {pour: [f_cu]}, stack.layer_enum_to_index)
+    assert len(links) == 12
+    pullback = plane_fill_pullback(PlaneFill(layer="F.Cu", clearance=0.3, min_thickness=0.25), 0.2)
+    areas = area_array_link_keepout_areas(links, pullback={(pour, f_cu): pullback})
+
+    from kicad_tools.router.lattice.geometry import seg_near_polygon
+
+    def route(mask: LatticeKeepoutMask | None) -> list[str]:
+        """Route the declined pair; return the keep-outs its legs enter."""
+        pf = LatticePathfinder(
+            [(0.0, 0.0), (30.0, 0.0), (30.0, 20.0), (0.0, 20.0)], pads, _RULES, stack
+        )
+        pf.set_keepouts(mask)
+        pf.set_pad_class_clearances([0.15] * (len(pads) - 1) + [1.0])
+        by_cell = {
+            (round((p.y - cy) / pitch) + 2, round((p.x - cx) / pitch) + 2): p for p in pads[:25]
+        }
+        pc = CoupledConnection(
+            key=("pair", 1, 2),
+            pair_name="D",
+            pad_p_a=by_cell[(0, 2)],
+            pad_n_a=by_cell[(0, 3)],
+            pad_p_b=by_cell[(4, 2)],
+            pad_n_b=by_cell[(4, 3)],
+            net_class=_HS,
+            pitch=_PITCH,
+        )
+        _decline_coupled(pf, monkeypatch)
+        assert pf._strict_pad_pairwise(pc, pf._fallback_items(pc)) is not None
+        routes, stats = pf.route_netset([], coupled=[pc], uncoupled_fallback=True)
+        assert stats.routed == 2, stats
+        hit: list[str] = []
+        for pol in ("P", "N"):
+            r = routes[(pc.key, pol)]
+            for seg in r.segments:
+                if seg.layer == Layer.F_CU:
+                    hit += [
+                        a.name
+                        for a in areas
+                        if seg_near_polygon(
+                            (seg.x1, seg.y1), (seg.x2, seg.y2), a.polygon, seg.width / 2.0
+                        )
+                    ]
+            for via in r.vias:
+                hit += [
+                    a.name
+                    for a in areas
+                    if seg_near_polygon(
+                        (via.x, via.y), (via.x, via.y), a.polygon, via.diameter / 2.0
+                    )
+                ]
+        return hit
+
+    # Unguarded, the legs do cut the cluster's necks ...
+    assert route(None)
+    # ... and with the #6673 link keep-outs neither partner-aware leg enters one.
+    assert route(LatticeKeepoutMask(areas)) == []
