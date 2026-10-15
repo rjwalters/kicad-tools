@@ -4697,6 +4697,33 @@ def generate_thermal_via_positions(
     return positions
 
 
+def _per_net_base_pools(
+    sexp: SExp,
+    net_numbers: set[int],
+    other_net_tracks: list[TrackSegment],
+    other_net_vias: list[tuple[float, float, float, int]],
+) -> tuple[
+    dict[int, list[TrackSegment]],
+    dict[int, list[tuple[float, float, float, int]]],
+]:
+    """Per-target-net track/via obstacle pools (Issues #6668, #6685).
+
+    ``other_net_tracks`` / ``other_net_vias`` exclude every stitch-target
+    net.  Each target net's pool here is that base plus every pre-existing
+    track / via of the OTHER target nets -- never its own net's.
+    """
+    target_net_tracks = [t for t in find_all_track_segments(sexp) if t.net_number in net_numbers]
+    target_net_vias = [v for v in find_all_board_vias(sexp) if v[3] in net_numbers]
+    tracks_by_net: dict[int, list[TrackSegment]] = {}
+    vias_by_net: dict[int, list[tuple[float, float, float, int]]] = {}
+    for _net in net_numbers:
+        tracks_by_net[_net] = other_net_tracks + [
+            t for t in target_net_tracks if t.net_number != _net
+        ]
+        vias_by_net[_net] = other_net_vias + [v for v in target_net_vias if v[3] != _net]
+    return tracks_by_net, vias_by_net
+
+
 def run_thermal_stitch(
     pcb_path: Path,
     net_names: list[str],
@@ -4820,6 +4847,11 @@ def run_thermal_stitch(
     target_via_drills = [
         d for d in find_all_drills(sexp, include_pads=False) if d[3] in target_net_nums
     ]
+    # Issue #6685: per-target-net track/via pools (sibling nets' pre-existing
+    # copper is an obstacle; own-net copper is not).
+    base_tracks_by_net, base_vias_by_net = _per_net_base_pools(
+        sexp, target_net_nums, other_net_tracks, other_net_vias
+    )
 
     # Per-net same-net via positions (existing + newly placed).  Treated
     # as obstacles to prevent stacking on the same net.  A via placed for
@@ -4918,7 +4950,7 @@ def run_thermal_stitch(
 
         # Cross-net obstacles: starting set + any vias we've placed on
         # other target nets during this run.
-        other_net_vias_with_placed = list(other_net_vias)
+        other_net_vias_with_placed = list(base_vias_by_net.get(pad_net, other_net_vias))
         for cx, cy, cn in cross_net_placed_vias:
             if cn != pad_net:
                 other_net_vias_with_placed.append((cx, cy, via_size, cn))
@@ -4956,7 +4988,7 @@ def run_thermal_stitch(
                 vy,
                 via_size,
                 clearance,
-                other_net_tracks,
+                base_tracks_by_net.get(pad_net, other_net_tracks),
                 other_net_vias_with_placed,
                 other_net_pads_with_siblings,
                 same_net_vias_for_pad,
@@ -5103,6 +5135,13 @@ def run_blanket_stitch(
     # target-net pad/drill on a net DIFFERENT than the one being stitched.
     target_pad_circles = [p for p in find_all_pads(sexp) if p[3] in target_net_nums]
     target_pad_drills = [d for d in find_all_drills(sexp) if d[3] in target_net_nums]
+    # Issue #6685: sibling target-net VIA drills + per-net track/via pools.
+    target_via_drills = [
+        d for d in find_all_drills(sexp, include_pads=False) if d[3] in target_net_nums
+    ]
+    base_tracks_by_net, base_vias_by_net = _per_net_base_pools(
+        sexp, target_net_nums, other_net_tracks, other_net_vias
+    )
 
     # Collect all existing same-net vias (to prevent stacking)
     all_same_net_vias = find_existing_vias(sexp, target_net_nums)
@@ -5137,9 +5176,11 @@ def run_blanket_stitch(
         other_net_pads_with_siblings = other_net_pads + [
             p for p in target_pad_circles if p[3] != net_number
         ]
-        other_net_drills_with_siblings = other_net_drills + [
-            d for d in target_pad_drills if d[3] != net_number
-        ]
+        other_net_drills_with_siblings = (
+            other_net_drills
+            + [d for d in target_pad_drills if d[3] != net_number]
+            + [d for d in target_via_drills if d[3] != net_number]
+        )
 
         # Determine target layer
         if target_layer:
@@ -5198,8 +5239,8 @@ def run_blanket_stitch(
                     gy,
                     via_size,
                     clearance,
-                    other_net_tracks,
-                    other_net_vias,
+                    base_tracks_by_net.get(net_number, other_net_tracks),
+                    base_vias_by_net.get(net_number, other_net_vias),
                     other_net_pads_with_siblings,
                     same_net_via_positions,
                     other_fill,
@@ -5529,16 +5570,11 @@ def run_stitch(
     # these pools as flat, unfiltered obstacle lists).  ``run_stitch`` writes
     # no copper until after the pad loop, so the pools are fixed: build them
     # -- and their #5240 track index -- once per target NET, never per pad.
-    target_net_tracks = [t for t in find_all_track_segments(sexp) if t.net_number in net_numbers]
-    target_net_vias = [v for v in find_all_board_vias(sexp) if v[3] in net_numbers]
-    base_tracks_by_net: dict[int, list[TrackSegment]] = {}
-    base_vias_by_net: dict[int, list[tuple[float, float, float, int]]] = {}
+    base_tracks_by_net, base_vias_by_net = _per_net_base_pools(
+        sexp, net_numbers, other_net_tracks, other_net_vias
+    )
     base_index_by_net: dict[int, TrackSpatialIndex[TrackSegment] | None] = {}
     for _net in net_numbers:
-        base_tracks_by_net[_net] = other_net_tracks + [
-            t for t in target_net_tracks if t.net_number != _net
-        ]
-        base_vias_by_net[_net] = other_net_vias + [v for v in target_net_vias if v[3] != _net]
         base_index_by_net[_net] = build_track_index(base_tracks_by_net[_net])
 
     def _sibling_pools(
