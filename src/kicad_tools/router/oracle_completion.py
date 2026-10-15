@@ -95,6 +95,12 @@ DEFAULT_ORACLE_ROUNDS = 12
 #: Most floating fill islands bonded per net in one attempt.
 MAX_ISLAND_JOINS = 16
 
+#: Issue #6671: footprint escalations one oracle round may spend.  Each
+#: withdraws every closure on footprints NOT yet escalated and costs one more
+#: oracle run.  06rf (after #6664) needs two: U2's BGA welds first, then
+#: J3's connector welds, which slice the +1V2 pour one at a time.
+MAX_FOOTPRINT_ESCALATIONS = 3
+
 #: Issue #6384: the ``offset`` / ``escape_distance`` pad welds pass to
 #: ``run_stitch``.  ``PourLinkCloser.weld_clearance`` derives each pad's
 #: neighbourhood from the SAME values (via ``max_via_reach_mm``), so the
@@ -797,8 +803,9 @@ def run_oracle_completion(
     """Close the KiCad-reported unconnected links on ``nets``, round by round.
 
     Termination is guaranteed: at most ``max_rounds`` rounds, each with at
-    most ``3 + max_retries`` attempts (the retries, one footprint escalation
-    and one final re-check of a pruned attempt), and the loop stops early when
+    most ``2 + max_retries + MAX_FOOTPRINT_ESCALATIONS`` attempts (the
+    retries, up to :data:`MAX_FOOTPRINT_ESCALATIONS` footprint escalations and
+    one final re-check of a pruned attempt), and the loop stops early when
 
     * the in-scope link count reaches zero (``converged``),
     * the closer places nothing (``no_closer``),
@@ -955,7 +962,8 @@ def run_oracle_completion(
         ref_hits: Counter[str] = Counter()
         last_refs: set[str] = set()
         round_keys: set[str] = set()
-        escalated = False
+        escalated_refs: set[str] = set()
+        escalations = 0
         #: Whether the round already spent its one final re-check of a
         #: pruned attempt (see the budget check below).
         rechecked = False
@@ -1006,11 +1014,19 @@ def run_oracle_completion(
                 # blamed -- in two or more of the round's regressions, else
                 # in the last one -- and try once more: one dense footprint
                 # must not veto the board.
-                blamed_refs = {r for r, n in ref_hits.items() if n >= 2} or set(last_refs)
+                # Issue #6671: up to MAX_FOOTPRINT_ESCALATIONS per round, each
+                # on footprints not escalated yet (a second dense footprint
+                # can keep regressing once the first is gone: 06rf U2, J3).
+                hot = {r for r, n in ref_hits.items() if n >= 2} - escalated_refs
+                blamed_refs = hot or (set(last_refs) - escalated_refs)
                 escalation = {footprint_key(ref) for ref in blamed_refs} | {
                     k for k in round_keys if closer_key_refs(k) & blamed_refs
                 }
-                if escalated or not escalation - banned:
+                if (
+                    escalations >= MAX_FOOTPRINT_ESCALATIONS
+                    or not blamed_refs
+                    or not escalation - banned
+                ):
                     if reuse is not None and not rechecked:
                         # The pending attempt has had its last culprits
                         # withdrawn but was never re-checked.  Discarding it
@@ -1029,7 +1045,8 @@ def run_oracle_completion(
                         reuse = None
                     stop = last_regression
                     break
-                escalated = True
+                escalations += 1
+                escalated_refs |= blamed_refs
                 budget += 1
                 refs = ", ".join(sorted(blamed_refs))
                 say(f"    retry budget spent; withdrawing every closure on {refs}")

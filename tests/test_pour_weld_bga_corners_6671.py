@@ -17,6 +17,7 @@ from pathlib import Path
 
 import pytest
 
+import kicad_tools.router.oracle_completion as oc
 from kicad_tools.cli.stitch_cmd import (
     PadInfo,
     _pad_conflict,
@@ -630,11 +631,14 @@ class TwoBadWeldsBoard:
 
 
 class TestPrunedAttemptIsRechecked:
-    def test_a_pruned_attempt_gets_one_final_recheck_instead_of_being_discarded(self, tmp_path):
-        # max_retries=0: attempt 1 blames U2 (withdrawn), the escalation
-        # withdraws U2 wholesale, attempt 2 then blames U4 (withdrawn) and
-        # the budget is spent.  Before, the pruned attempt -- U1 + U3, clean
+    def test_a_pruned_attempt_gets_one_final_recheck_instead_of_being_discarded(
+        self, tmp_path, monkeypatch
+    ):
+        # One escalation, max_retries=0: attempt 1 blames U2 (withdrawn),
+        # the escalation withdraws U2 wholesale, attempt 2 then blames U4
+        # (withdrawn) and the budget is spent.  Before, the pruned attempt -- U1 + U3, clean
         # -- was thrown away unchecked; now it gets one more oracle run.
+        monkeypatch.setattr(oc, "MAX_FOOTPRINT_ESCALATIONS", 1)
         b = TwoBadWeldsBoard(tmp_path)
         closer = b
         lines: list[str] = []
@@ -653,9 +657,10 @@ class TestPrunedAttemptIsRechecked:
         assert first.errors_after == 0 and first.attempts == 3
         assert set(b.welded()) == {"U1", "U3"}
 
-    def test_the_recheck_is_spent_only_once(self, tmp_path):
+    def test_the_recheck_is_spent_only_once(self, tmp_path, monkeypatch):
         # A third bad weld that the re-check uncovers still ends the round,
         # restoring the board -- the extra check is one oracle run, not a loop.
+        monkeypatch.setattr(oc, "MAX_FOOTPRINT_ESCALATIONS", 1)
         b = TwoBadWeldsBoard(tmp_path)
         b.SITES = {**TwoBadWeldsBoard.SITES, "U5": (70.0, 70.0)}
 
@@ -673,6 +678,51 @@ class TestPrunedAttemptIsRechecked:
         )
         first = res.rounds[0]
         assert not first.kept and first.attempts == 3
+        assert b.welded() == []
+
+    def test_a_second_footprint_is_escalated_after_the_first(self, tmp_path):
+        # Default budget: U2 is escalated, then U4 -- a footprint not yet
+        # escalated -- instead of the round giving up after one escalation.
+        b = TwoBadWeldsBoard(tmp_path)
+        lines: list[str] = []
+        res = run_oracle_completion(
+            b.path,
+            oracle=b.oracle,
+            closer=b,
+            nets={"GND"},
+            max_rounds=1,
+            max_retries=0,
+            log=lines.append,
+        )
+        escalations = [line for line in lines if "withdrawing every closure on" in line]
+        assert [line.rsplit(" ", 1)[-1] for line in escalations] == ["U2", "U4"]
+        first = res.rounds[0]
+        assert first.kept and first.links_after == 2 and first.errors_after == 0
+        assert {footprint_key("U2"), footprint_key("U4")} <= set(first.banned)
+
+    def test_escalations_are_bounded(self, tmp_path):
+        # Five footprints that each regress in turn: three escalations and
+        # the final re-check, then the round gives up and restores the board.
+        from kicad_tools.router.oracle_completion import MAX_FOOTPRINT_ESCALATIONS
+
+        bad = ("U2", "U4", "U5", "U6", "U7")
+        b = TwoBadWeldsBoard(tmp_path)
+        b.SITES = {"U1": (1.0, 0.0), **{r: (50.0 + 10 * i, 50.0) for i, r in enumerate(bad)}}
+
+        def oracle(_path):
+            welded = b.welded()
+            links = [v for v, ref in zip(_links(6), b.SITES, strict=True) if ref not in welded]
+            errs = [_err(b.SITES[r]) for r in bad if r in welded][:1]
+            return GeometricDRCResult(
+                ran=True, error_count=len(errs), error_violations=errs, unconnected_items=links
+            )
+
+        res = run_oracle_completion(
+            b.path, oracle=oracle, closer=b, nets={"GND"}, max_rounds=1, max_retries=0
+        )
+        first = res.rounds[0]
+        assert not first.kept
+        assert first.attempts == 1 + MAX_FOOTPRINT_ESCALATIONS + 1
         assert b.welded() == []
 
 
