@@ -872,14 +872,36 @@ def test_dsn_audit_zone_and_smd_pad_clearance_are_not_representable(fr, rule_bea
         fr,
         rule_bearing,
         "(version 1)\n"
-        '(rule "Native zone clearance" (layer "F.Cu") (constraint clearance (min 0.3mm)))\n'
-        '(rule "SMD Pad Clearance - jlcpcb" (constraint clearance (min 0.5mm)))\n',
+        '(rule "Native zone clearance" (layer "F.Cu")\n'
+        "  (condition \"(A.Type == 'Zone' && A.NetName == 'GND') || "
+        "(B.Type == 'Zone' && B.NetName == 'GND')\")\n"
+        "  (constraint clearance (min 0.3mm)))\n"
+        '(rule "SMD Pad Clearance - jlcpcb"\n'
+        "  (condition \"A.Type == 'Pad' && B.Type == 'Pad' && A.Pad_Type == 'SMD' && "
+        "B.Pad_Type == 'SMD' && A.Net != B.Net\")\n"
+        "  (constraint clearance (min 0.5mm)))\n",
     )
     assert dru == []
     assert {n["rule"] for n in not_routing} == {
         "Native zone clearance",
         "SMD Pad Clearance - jlcpcb",
     }
+
+
+def test_dsn_audit_name_only_zone_or_smd_rule_is_still_a_loss(fr, rule_bearing):
+    """The name alone is not enough: a rule whose condition also selects
+    tracks (or has none) is still something the router must honour."""
+    dru, not_routing = _audit_with_dru(
+        fr,
+        rule_bearing,
+        "(version 1)\n"
+        '(rule "Native zone clearance" (layer "F.Cu") (constraint clearance (min 0.3mm)))\n'
+        '(rule "SMD Pad Clearance - jlcpcb"\n'
+        "  (condition \"A.Type == 'Pad' && B.Type == 'Track'\")\n"
+        "  (constraint clearance (min 0.5mm)))\n",
+    )
+    assert not_routing == []
+    assert len(dru) == 2
 
 
 def test_dsn_audit_diff_pair_length_rules_stay_lost(fr, rule_bearing):

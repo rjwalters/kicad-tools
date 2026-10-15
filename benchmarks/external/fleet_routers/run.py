@@ -589,13 +589,30 @@ NOT_ROUTING_CONSTRAINTS = frozenset(
     }
 )
 
-# Issue #6784: ``clearance`` rules a DSN router cannot influence, by rule name
-# prefix. ``Native zone clearance`` is applied by the zone filler (the scorer
-# runs ``--refill-zones``); ``SMD Pad Clearance`` is pad-to-pad spacing between
-# footprints, fixed by placement and identical for every router. Diff-pair
-# ``skew`` / ``diff_pair_uncoupled`` / ``via_count`` are deliberately NOT here:
-# they stay losses (see README, "Rules a DSN cannot carry").
-NOT_ROUTING_RULE_PREFIXES = ("Native zone clearance", "SMD Pad Clearance")
+# Issue #6784: ``clearance`` rules a DSN router cannot influence, matched on
+# rule name prefix AND condition so a renamed or hand-edited rule that also
+# touches tracks/vias is still audited. ``Native zone clearance`` (condition
+# selects a ``Zone``) is applied by the zone filler (the scorer runs
+# ``--refill-zones``); ``SMD Pad Clearance`` (condition selects SMD pads on
+# both sides) is pad-to-pad spacing between footprints, fixed by placement and
+# identical for every router. Diff-pair ``skew`` / ``diff_pair_uncoupled`` /
+# ``via_count`` are deliberately NOT here: they stay losses (see README,
+# "Rules a DSN cannot carry").
+
+
+def _is_not_routing_clearance_rule(rule: dict) -> bool:
+    """Whether a ``clearance`` rule is zone-fill or SMD pad-to-pad only."""
+    name = rule["name"]
+    cond = re.sub(r"\s+", "", rule.get("condition") or "")
+    if name.startswith("Native zone clearance"):
+        return "Type=='Zone'" in cond
+    if name.startswith("SMD Pad Clearance"):
+        return all(
+            f"{side}.{term}" in cond
+            for side in ("A", "B")
+            for term in ("Type=='Pad'", "Pad_Type=='SMD'")
+        )
+    return False
 
 
 def _condition_classes(condition: str | None) -> list[str]:
@@ -753,7 +770,7 @@ def dsn_audit(
         for rule in _dru_rules(dru.read_text()):
             for c in rule["constraints"]:
                 if c["type"] in NOT_ROUTING_CONSTRAINTS or (
-                    c["type"] == "clearance" and rule["name"].startswith(NOT_ROUTING_RULE_PREFIXES)
+                    c["type"] == "clearance" and _is_not_routing_clearance_rule(rule)
                 ):
                     if not_routing is not None:
                         not_routing.append(

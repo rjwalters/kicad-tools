@@ -951,7 +951,7 @@ class KiCadToDSNExporter:
         if not outline or self._edge_clearance <= 0:
             return outline
         try:
-            from shapely.geometry import Polygon
+            from shapely.geometry import Polygon  # type: ignore[import-untyped]
 
             ring: list[tuple[float, float]] = []
             for pt in outline:  # gr_line outlines repeat each shared vertex
