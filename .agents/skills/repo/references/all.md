@@ -323,12 +323,24 @@ Two currency checks run here, both report-first.
 itself, … against their sources. Report what's behind and offer to update.
 
 **Third-party dependencies** (see [[deps]]): run `[[deps]] --check`. Report the
-installed organization policy/source, detected provider (Renovate, Dependabot,
-or intentional mixed coverage), config/app status, vulnerability alerts,
-security PR ownership, cooldown and automerge policy, and open dependency PRs.
+installed organization policy/source, detected provider (Dependabot by
+default; Renovate if opted in, or intentional mixed coverage), config/app
+status, vulnerability alerts, **open Dependabot alerts by severity**, security
+PR ownership, cooldown and automerge policy, and open dependency PRs.
 These are independent states: an intentionally disabled Dependabot security-PR
-flag is expected when Renovate owns fixes. Missing Dependabot config does not
-mean automation is absent.
+flag is expected only when an opted-in Renovate owns fixes. Missing Dependabot
+config does not mean automation is absent.
+
+**The alerting flag and the open-alert count are different findings — carry
+both.** `alerts ON` means detection is enabled, not that nothing is detected;
+[[deps]] step 1 reads `GET repos/OWNER/REPO/dependabot/alerts?state=open`
+separately for exactly that reason, and reports `UNKNOWN` (never `0 open`)
+when the token cannot read it. Carry its count, severity breakdown, and the
+count of alerts with **no open fix PR** into this stage's line and the final
+summary. A sweep that reported only the flag and the open-PR counts is how a
+`Deps:` line reads clean on a repo with open vulnerabilities (issue #551): the
+alerts whose fix is blocked by a lockfile pin or an override never produce a
+PR, so no PR count can stand in for them.
 
 Summarize open PRs as real forward majors, other pending work, and genuinely
 stale PRs. Use [[deps]]' base-manifest **and lockfile** comparison; a permissive
@@ -374,7 +386,7 @@ Scrub:        1 at HEAD deferred (identity: docs/runbook.md:41); 63 history-only
 Docs:         2 fixed (README table, CHANGELOG entry), 1 deferred: docs/analysis/ missing README
 Tidy:         freed 240 MB (build/, .cache/, 3 empty dirs)
 Tools:        Anvil updated 1.4.0 → 1.5.1; Loom current
-Deps:         Renovate, org policy current, alerts ON, security PRs: Renovate, age: 14d/1d, automerge OFF, 3 open PRs (0 majors, 2 stale)
+Deps:         Dependabot, org policy current, alerts ON, 2 open alerts (1 high, 1 medium — 1 with no open fix PR), security PRs: Dependabot, cooldown 14d, automerge OFF, 3 open PRs (0 majors, 2 stale)
 Reset:        on main (up to date), tree clean, 4 branches deleted, 1 stash kept
 Skipped:      remote (never part of /repo:all); deps install/review (confirm-first — run /repo:deps); scrub --deep/--owner/--forks (run /repo:scrub)
 ```
@@ -385,6 +397,22 @@ state the repo is in. Tracked orphans are named individually rather than
 counted: the whole point of deferring one is that the user has to decide about
 that specific file later, and a bare `2 orphans deferred` sends them back to
 re-run the audit to find out which.
+
+The `Deps:` line carries an **open-alert clause in every run**, in one of these
+forms — never silently dropped, because an absent clause is indistinguishable
+from "nothing is vulnerable":
+
+```
+Deps:         …, alerts ON, 0 open alerts, security PRs: …
+Deps:         …, alerts ON, 2 open alerts (1 high, 1 medium — 1 with no open fix PR), security PRs: …
+Deps:         …, alerts ON, open alerts UNKNOWN (needs security_events read), security PRs: …
+Deps:         …, alerts OFF, open alerts n/a (alerts disabled), security PRs: …
+```
+
+Name the uncovered packages in the line itself when there are only one or two
+(`1 with no open fix PR: lodash (npm) → 4.17.21`); with more, carry the count
+here and leave the per-package table to the stage output, the same way tracked
+orphans are named individually above. `UNKNOWN` is never rendered as `0`.
 
 When stage 2's early sync-and-switch ran, the `Reset:` line still carries the
 pruning half's outcome — branches, worktrees, and stashes reviewed — and notes
