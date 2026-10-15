@@ -481,11 +481,58 @@ def _dru_rules(text: str) -> list[dict[str, Any]]:
             {
                 "name": name,
                 "conditioned": "(condition" in blk,
+                "condition": (re.search(r'\(condition\s+"([^"]*)"', blk) or [None, None])[1],
                 "layer_scoped": "(layer" in blk,
                 "constraints": constraints,
             }
         )
     return rules
+
+
+# Issue #6765: DRU constraint types with no Specctra construct. A DSN carries
+# copper clearance/width/via geometry only -- not silkscreen, text, drill-to-
+# copper, annular ring or board-edge/hole-edge checks -- so a router fed a DSN
+# cannot lose them; they are post-route checks, reported apart from losses.
+_DRU_NOT_REPRESENTABLE = frozenset(
+    {
+        "silk_clearance",
+        "hole_clearance",
+        "annular_width",
+        "edge_clearance",
+        "physical_hole_clearance",
+        "text_thickness",
+        "text_height",
+    }
+)
+
+# A clearance condition that is a NetClass match plus only the exemptions kct's
+# generated per-class rules add (same-footprint pad pairs, coupled diff pairs).
+# The class match is what a class (rule ...) could carry, but the exemptions
+# have no Specctra form, so exporting it would be stricter than the DRU: it is
+# not-representable rather than a loss. Any other condition stays a loss.
+_NETCLASS_MATCH = re.compile(
+    r"\(\s*[AB]\.NetClass\s*==\s*'[^']+'(?:\s*\|\|\s*[AB]\.NetClass\s*==\s*'[^']+')*\s*\)"
+)
+_EXEMPTIONS = (
+    re.compile(
+        r"!\(\s*A\.Type\s*==\s*'Pad'\s*&&\s*B\.Type\s*==\s*'Pad'"
+        r"\s*&&\s*A\.Reference\s*==\s*B\.Reference\s*\)"
+    ),
+    re.compile(r"!A\.isCoupledDiffPair\(\)"),
+)
+
+
+def _clearance_is_exemption_only(rule: dict[str, Any]) -> bool:
+    """True for a NetClass-scoped clearance whose extra clauses are pure exemptions."""
+    cond = rule.get("condition")
+    if not cond or rule["layer_scoped"]:
+        return False
+    rest, n = _NETCLASS_MATCH.subn("", cond, count=1)
+    if n != 1:
+        return False
+    for ex in _EXEMPTIONS:
+        rest = ex.sub("", rest)
+    return not rest.replace("&&", "").strip()
 
 
 def _dsn_unit_mm(dsn: str) -> float:
@@ -574,7 +621,11 @@ def _zone_copper_layers(zone: Any, board_layers: list[str]) -> list[str]:
 
 
 def dsn_audit(
-    pcb: Path, project: Path | None, dru: Path | None, dsn_path: Path
+    pcb: Path,
+    project: Path | None,
+    dru: Path | None,
+    dsn_path: Path,
+    not_representable: list[dict[str, str]] | None = None,
 ) -> list[dict[str, str]]:
     """List every board/rule constraint the exported DSN does not carry.
 
@@ -582,6 +633,10 @@ def dsn_audit(
     exist yet) and compares what it *emitted* against what the board, its
     frozen project and its frozen DRU declare. Each entry is
     ``{"kind", "detail"}``; an empty list means no loss was detected.
+
+    Issue #6765: DRU rules Specctra has no vocabulary for (silk, hole, annular,
+    edge, text) are not losses; they are appended to ``not_representable``
+    (same entry shape) when the caller passes a list.
     """
     from kicad_tools.export.dsn import KiCadToDSNExporter
     from kicad_tools.schema.pcb import PCB
@@ -679,6 +734,18 @@ def dsn_audit(
         }
         for rule in _dru_rules(dru.read_text()):
             for c in rule["constraints"]:
+                if c["type"] in _DRU_NOT_REPRESENTABLE or (
+                    c["type"] == "clearance" and _clearance_is_exemption_only(rule)
+                ):
+                    if not_representable is not None:
+                        not_representable.append(
+                            {
+                                "kind": "dru",
+                                "detail": f"rule {rule['name']!r}: {c['type']} "
+                                f"min {c['min_mm']} mm has no Specctra form",
+                            }
+                        )
+                    continue
                 floor = implied.get(c["type"])
                 if (
                     floor is not None
@@ -967,6 +1034,7 @@ class RunRecord:
     output: str | None = None
     partial_artifact: str | None = None
     lost_constraints: list[dict[str, str]] = field(default_factory=list)
+    not_representable: list[dict[str, str]] = field(default_factory=list)
     placement_violations: list[str] = field(default_factory=list)
     tool_config: dict[str, Any] = field(default_factory=dict)
     interchange: dict[str, Any] | None = None
@@ -1147,6 +1215,7 @@ def run_tool(
                 prep.frozen_dir / f"{prep.stem}.kicad_pro",
                 prep.frozen_dir / f"{prep.stem}.kicad_dru",
                 dsn,
+                rec.not_representable,
             )
         except Exception as exc:  # noqa: BLE001
             rec.outcome, rec.stage, rec.reason = "scorer-failure", "dsn-export", repr(exc)

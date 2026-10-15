@@ -105,13 +105,15 @@ Every output is copied into a **fresh** grading directory beside copies of the f
 - class values exported differently, whether relaxed or tightened, read from each class's own `(class ...)` block;
 - net-class assignments the DSN's class membership does not reproduce;
 - project board rules (edge clearance, stricter floors);
-- DRU constraints the DSN's global values do not already imply;
+- DRU constraints the DSN's global values do not already imply (except the not-representable ones below);
 - rule areas whose track/via restriction has no matching `keepout`/`wire_keepout`/`via_keepout` on each of their copper layers;
 - copper zones with no matching `(plane ...)` for their net on each of their layers;
 - copper-layer text;
 - copper layers, pads or nets missing from the export.
 
 `ses_import` then counts the wires and vias in the raw session, compares that with what the importer kept, and checks the session's resolution. Any loss makes the row `non-comparable`, and the concrete constraints are listed in the row.
+
+**Not representable (issue #6765).** DRU constraints Specctra has no construct for (`silk_clearance`, `hole_clearance`, `annular_width`, `edge_clearance`, `physical_hole_clearance`, `text_thickness`, `text_height`) are post-route checks, so a router fed a DSN cannot lose them. The same holds for a `NetClass`-scoped clearance whose only extra clauses are kct's same-footprint-pad and coupled-pair exemptions: exporting it would be stricter than the DRU. These are listed under `not_representable` in `results.json` and do not make the row `non-comparable`. Any other conditioned or layer-scoped rule stays a loss.
 
 Findings at the build revision (issues filed separately; out of scope here):
 

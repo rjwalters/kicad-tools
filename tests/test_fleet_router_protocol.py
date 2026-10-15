@@ -403,16 +403,20 @@ def rule_bearing(tmp_path, board00_pcb):
 
 
 def test_dsn_audit_detects_omitted_constraints(fr, rule_bearing):
+    not_representable: list = []
     lost = fr.dsn_audit(
         rule_bearing,
         rule_bearing.with_suffix(".kicad_pro"),
         rule_bearing.with_suffix(".kicad_dru"),
         rule_bearing.with_suffix(".dsn"),
+        not_representable,
     )
     kinds = {e["kind"] for e in lost}
-    assert {"dru", "keepout", "zone", "copper_text"} <= kinds
+    assert {"keepout", "zone", "copper_text"} <= kinds
     details = " ".join(e["detail"] for e in lost)
-    assert "edge_clearance" in details
+    # Issue #6765: Specctra has no edge-clearance form, so it is classified apart.
+    assert "dru" not in kinds and "edge_clearance" not in details
+    assert any("edge_clearance" in e["detail"] for e in not_representable)
     # Issue #6642: only the genuinely omitted rule area and zone are reported;
     # the plain keepout ("ko") and the GND pour are exported since #6594.
     keepouts = [e["detail"] for e in lost if e["kind"] == "keepout"]
@@ -463,6 +467,54 @@ def test_dsn_audit_detects_dropped_class_rules_and_membership(fr, rule_bearing):
     assert "(class Power" not in stripped
     dsn.write_text(stripped)
     assert {"kind": "netclass", "detail": "net class 'Power' not exported"} in audit()
+
+
+def test_dsn_audit_not_representable_dru_is_not_a_loss(fr, rule_bearing):
+    """Issue #6765: Specctra-inexpressible DRU rules are classified, not lost."""
+    dru = rule_bearing.with_suffix(".kicad_dru")
+    dru.write_text(
+        '(version 1)\n(rule "Edge" (constraint edge_clearance (min 0.5mm)))\n'
+        '(rule "Silk" (constraint silk_clearance (min 0.1mm)))\n'
+        '(rule "Txt" (constraint text_height (min 1.0mm)))\n'
+        '(rule "Reviewed clearance - Power"\n'
+        "  (condition \"(A.NetClass == 'Power' || B.NetClass == 'Power') && "
+        "!(A.Type == 'Pad' && B.Type == 'Pad' && A.Reference == B.Reference) && "
+        '!A.isCoupledDiffPair()")\n'
+        "  (constraint clearance (min 5mm)))\n"
+    )
+    nr: list = []
+    lost = fr.dsn_audit(
+        rule_bearing,
+        rule_bearing.with_suffix(".kicad_pro"),
+        dru,
+        rule_bearing.with_suffix(".dsn"),
+        nr,
+    )
+    assert not [e for e in lost if e["kind"] == "dru"], lost
+    types = " ".join(e["detail"] for e in nr)
+    for t in ("edge_clearance", "silk_clearance", "text_height", "clearance"):
+        assert t in types, nr
+    assert len(nr) == 4
+
+
+def test_dsn_audit_inexpressible_conditioned_clearance_is_still_a_loss(fr, rule_bearing):
+    dru = rule_bearing.with_suffix(".kicad_dru")
+    dru.write_text(
+        '(version 1)\n(rule "Cond" (condition "A.Type == \'Via\'") '
+        "(constraint clearance (min 5mm)))\n"
+        '(rule "Edge" (constraint edge_clearance (min 0.5mm)))\n'
+    )
+    nr: list = []
+    lost = fr.dsn_audit(
+        rule_bearing,
+        rule_bearing.with_suffix(".kicad_pro"),
+        dru,
+        rule_bearing.with_suffix(".dsn"),
+        nr,
+    )
+    dru_lost = [e["detail"] for e in lost if e["kind"] == "dru"]
+    assert len(dru_lost) == 1 and "'Cond'" in dru_lost[0], dru_lost
+    assert len(nr) == 1 and "edge_clearance" in nr[0]["detail"]
 
 
 def test_dsn_audit_without_project_is_a_loss(fr, prep, tmp_path):
@@ -590,7 +642,8 @@ def test_fastroute_partial_ses_then_hang_is_timeout(fr, prep, board00, tmp_path)
     assert rec.outcome == "timeout"
     assert rec.partial_artifact and rec.partial_artifact.endswith(".ses")
     assert rec.score is None
-    assert rec.lost_constraints  # the DSN audit ran before routing
+    # the DSN audit ran before routing (board 00's DRU is all not-representable)
+    assert rec.not_representable and not rec.lost_constraints
 
 
 def test_rerun_cannot_reuse_stale_artifacts(fr, prep, board00, tmp_path):
