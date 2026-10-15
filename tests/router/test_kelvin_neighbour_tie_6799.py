@@ -184,3 +184,81 @@ def test_neighbours_only_never_ties_across_room_for_a_trace():
     # The ordinary pass still ties every same-IC pair it can.
     _, connected_all = create_intra_ic_routes(1, keys, lookup, rules)
     assert connected_all == {0, 1, 2}
+
+
+# Boundary: ``trace_width + 2 * clearance`` = 0.25 + 2 * 0.125 = 0.5 mm, and
+# every value below is exact in binary, so the comparison is not at the mercy
+# of float rounding.  Pads are 0.5 mm tall, so the copper gap is pitch - 0.5.
+BOUNDARY_RULES = {"trace_width": 0.25, "trace_clearance": 0.125}
+
+
+@pytest.mark.parametrize(
+    ("pitch", "tied"),
+    [
+        (0.9375, True),  # gap 0.4375 mm: no trace fits -> one terminal
+        (1.0, False),  # gap exactly 0.5 mm: a trace just fits -> two terminals
+        (1.0625, False),  # gap 0.5625 mm: room for a trace -> two terminals
+    ],
+)
+def test_kelvin_tie_switches_off_at_trace_plus_two_clearances(pitch, tied):
+    """Pin where the #6799 tie turns on and off on a real Kelvin net."""
+    router = Autorouter(
+        22,
+        22,
+        force_python=True,
+        physics_enabled=False,
+        rules=DesignRules(**BOUNDARY_RULES),
+    )
+    router.add_component(
+        "U1",
+        [
+            {
+                "number": str(n),
+                "x": COLUMN_X,
+                "y": 8.0 + (n - 1) * pitch,
+                "width": 1.5,
+                "height": 0.5,
+                "net": SENSE,
+                "net_name": "GND_SENSE",
+            }
+            for n in (1, 2)
+        ],
+    )
+    router.add_component(
+        "U2",
+        [
+            {
+                "number": "1",
+                "x": COLUMN_X,
+                "y": 16.0,
+                "width": 1.0,
+                "height": 1.0,
+                "net": SENSE,
+                "net_name": "GND_SENSE",
+            }
+        ],
+    )
+    router.add_component(
+        "R1",
+        [
+            {
+                "number": "1",
+                "x": 4.0,
+                "y": 12.0,
+                "width": 1.2,
+                "height": 3.0,
+                "net": SENSE,
+                "net_name": "GND_SENSE",
+            }
+        ],
+    )
+    pads = list(router.nets[SENSE])
+    routes, connected = router._create_kelvin_terminal_ties(SENSE, pads)
+
+    if tied:
+        assert {pads[i] for i in connected} == {("U1", "1"), ("U1", "2")}
+        assert len(routes) == 1
+    else:
+        # Two separate terminals: each keeps its own branch to the shunt.
+        assert connected == set()
+        assert routes == []

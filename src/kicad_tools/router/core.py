@@ -3632,14 +3632,20 @@ class Autorouter:
         own, isolated from its siblings.  On board 05 that sent the DRV8313's
         adjacent PGND pins U2.6 and U2.7 (GND_SENSE, 0.65 mm pitch) out as two
         branches; U2.7's branch dropped a via in U2.6's only exit lane and
-        U2.6 stayed unconnected.  The two pins are one terminal, so they get
-        the straight pad-to-pad tie every non-Kelvin net already gets, and the
+        U2.6 stayed unconnected.  Such pins are *assumed* to be one terminal
+        (joined inside the package; this is not verified), so they get the
+        straight pad-to-pad tie every non-Kelvin net already gets, and the
         star routes one branch for the pair.
 
         Only pins too close for any trace to pass between them are tied, only
         with a straight tie (``neighbours_only``), and resistor pads are never
         tied (a four-terminal shunt keeps its force and sense pads apart).
         Other same-package terminals keep their own branch to the shunt.
+
+        Limitation: the choice is purely geometric, so an adjacent force pin
+        and high-impedance sense input of one non-resistor package on the
+        same sense-named net (regulator OUT/SENSE, connector F+/S+) are tied
+        too.  See :func:`kelvin.is_tieable_kelvin_terminal`.
 
         Returns:
             ``(routes, connected_indices)`` with indices into ``pads``, the

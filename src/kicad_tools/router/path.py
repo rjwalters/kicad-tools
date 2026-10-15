@@ -361,7 +361,9 @@ def create_intra_ic_routes(
             tie, and never with the perimeter-wrap fallback.  That is the
             neighbouring duplicate-pin pattern (PGND1/PGND2 at 0.65 mm
             pitch).  Kelvin nets use it; other same-IC pins of a Kelvin net
-            keep their own branch to the shunt.
+            keep their own branch to the shunt.  The tied pins are assumed
+            to be joined inside the package; only geometry is checked, so a
+            force pin and an adjacent sense input on one net are tied too.
 
     Returns:
         Tuple of (routes created, set of pad indices that were connected)
