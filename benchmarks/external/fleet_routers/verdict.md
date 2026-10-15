@@ -85,11 +85,31 @@ The counts below come from each fastroute row's `lost_constraints` in `results.j
 
 What would make these rows comparable, by category:
 
-- **Net-class clearances (all 22).** Each is a `NetClass == 'X'` clearance whose only other clauses are kct's same-footprint-pad and coupled-diff-pair exemptions. Specctra has no form for those exemptions. PR #6770 (closes #6765, head `6790e8c`, open) reclassifies exactly these rules as not-representable. Running its classifier on every lost rule here flags all 22 of them and none of the others. After #6770, 00, 01, 02 and 04 have no losses, and 03/05/06/07/09 keep 12/2/9/1/1.
+- **Net-class clearances (all 22).** Each is a `NetClass == 'X'` clearance whose only other clauses are kct's same-footprint-pad and coupled-diff-pair exemptions. They are counted lost because the frozen `.kicad_pro` (the pre-route one) defines only `Default`, while the frozen `_routed.kicad_dru` names classes that only the routed sibling project defines. No net is in those classes under the graded project, so the exporter emits no class for them and `kicad-cli` applies the rules to no net. Neither #6768 nor PR #6770 (#6765, superseded and empty) changes this; see the current-main note below. Tracked in #6800.
 - **Board copper-to-edge clearance (05, 06, 07, 09).** DSN-expressible, for example by insetting the exported boundary. The exporter does not do this today. Tracked in #6784.
 - **`diff_pair_gap` (2 on 03, 4 on 06).** Its 0.15 mm minimum equals the pair nets' exported class clearance (`HighSpeed` on 03, `LVDS` on 06), so the DSN already implies it. The audit counts it lost only because it compares nothing but clearance, width, via and hole against the DSN. Tracked in #6784.
 - **Native zone clearances (03) and `SMD Pad Clearance` (05).** These are not router-side constraints. The scorer refills zones, so the filler applies the zone clearance, and pad-to-pad spacing between footprints is fixed by placement. Both are candidates for `not_representable`. That classification decision is also recorded in #6784.
 - **Diff-pair `skew`, `diff_pair_uncoupled`, `via_count` (6 on 03, 4 on 06).** These are post-route length and coupling checks with no construct in our DSN exporter. No open fix covers them. Unless they are classified as not-representable (#6784 asks for that decision), 03 and 06 stay non-comparable for any DSN-fed router.
+
+### Current main (2026-10-15, kct `847666c8`)
+
+The table above is the measurement at kct `9a1fb50494be` and is unchanged. Re-running only the driver's `prepare_board` + `dsn_audit` on current main (no routing; the manifest verifies clean) gives these losses per board:
+
+| Board | Losses | Net-class clearances | Diff-pair rules |
+|---|---|---|---|
+| 00 | 1 | 1 | – |
+| 01 | 1 | 1 | – |
+| 02 | 2 | 2 | – |
+| 03 | 8 | 2 | 6 (`diff_pair_uncoupled`, `skew`, `via_count` for USB_D and USB_MCU_D) |
+| 04 | 2 | 2 | – |
+| 05 | 7 | 7 | – |
+| 06 | 5 | 1 | 4 (`skew`, LVDS1–4) |
+| 07 | 6 | 6 | – |
+| 09 | 0 | – | – |
+
+- **Gone since the table was measured (#6784):** copper-to-edge clearance on 05/06/07/09 (the exporter now insets the boundary), `diff_pair_gap` on 03/06, native zone clearances on 03 and `SMD Pad Clearance` on 05. The last two are now in `not_routing_rules`.
+- **Kept on purpose (#6784):** the diff-pair `skew` / `diff_pair_uncoupled` / `via_count` rules on 03 and 06.
+- **Still counted: the same 22 net-class clearances.** The DSN exporter does write class clearances when the project defines the classes. Auditing the routed triplets (`*_routed.kicad_{pcb,pro,dru}`) reports none of these 22; for example, board 00 exports `(class Power ... (clearance 200.0))`. That is what the PR #6770 Doctor audit measured. The driver, however, grades against the pre-route `.kicad_pro`, where no net is in those classes. Whether to count these rules as inert or to freeze a project that defines the classes is decided in #6800.
 
 The DRC failures on 02, 03, 05, 06, 07 and 09 (annular ring, hole clearance, shorting, solder-mask bridge) are diagnostic only. This run does not isolate their cause. **Fastroute's routing quality is not established by this run.**
 
@@ -105,6 +125,5 @@ Observed, not explained: TraceMaker's via-in-pad findings (02–06, 09) coincide
 
 ## Follow-ups
 
-- Re-run the fastroute rows (with a manifest re-freeze) once #6770 and #6784 land. 07 and 09 should then have no losses. 03 and 06 become comparable only if #6784 classifies the diff-pair length/coupling rules as not-representable.
-- #5947 consumes these rows. Follow-up filed for the DSN-gate losses #6770 does not cover: #6784.
-
+- Re-run the fastroute rows (with a manifest re-freeze) once #6800 is decided. #6784 has landed. After #6800, 00, 01, 02, 04, 05, 07 and 09 should have no losses. 03 and 06 stay non-comparable for DSN routers because of the diff-pair length and coupling rules #6784 keeps as losses.
+- #5947 consumes these rows.
