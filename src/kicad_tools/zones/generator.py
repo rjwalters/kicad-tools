@@ -84,7 +84,7 @@ from __future__ import annotations
 import math
 import sys
 import uuid as uuid_module
-from collections.abc import Collection, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -1246,6 +1246,7 @@ def _assign_layers_for_pour_nets(
     copper_layer_count: int,
     pour_nets: list[tuple[str, NetClass]],
     existing_zone_priority_by_layer: dict[str, int] | None = None,
+    plane_rank: Mapping[str, tuple[float, ...]] | None = None,
 ) -> list[tuple[str, str, int]]:
     """Assign layers and priorities for pour nets based on board stackup.
 
@@ -1255,6 +1256,8 @@ def _assign_layers_for_pour_nets(
       a descending priority scheme so multiple power nets coexist.
     - 4-layer: GROUND -> ``In1.Cu`` priority 1; first POWER -> ``In2.Cu``
       priority 0; additional POWER -> ``F.Cu`` with non-zero priorities.
+      With ``plane_rank`` (Issue #6714) "first" is the most widespread
+      power net rather than the first one listed.
 
     Split-ground designs (mixed-signal boards with multiple distinct
     ``NetClass.GROUND`` nets, e.g. ``GNDA`` + ``GNDD``):
@@ -1297,6 +1300,14 @@ def _assign_layers_for_pour_nets(
             pre-existing zones on the board (see
             :func:`_existing_zone_priority_by_layer`).  ``None``/empty
             preserves the legacy behaviour.
+        plane_rank: Issue #6714 -- per-net sort key (larger = wider spread,
+            see :func:`_power_plane_rank`) that picks which POWER net gets
+            the one inner power plane on a 4+ layer single-ground board.
+            The highest-ranked power net takes ``In2.Cu``; ties keep the
+            ``pour_nets`` order, and every other power net keeps its
+            relative order on ``F.Cu``.  ``None`` (or a net missing from
+            the map) keeps the legacy rule: the first power net in
+            ``pour_nets`` takes the plane.
 
     Returns:
         List of (net_name, layer, priority) tuples.  Every ground-class
@@ -1335,6 +1346,20 @@ def _assign_layers_for_pour_nets(
                 # Single power net gets its own inner layer
                 assignments.append((power_nets[0][0], "In2.Cu", 0))
             else:
+                if plane_rank and len(power_nets) > 1:
+                    # Issue #6714: the plane goes to the most widespread
+                    # rail, not to whichever power net the classifier listed
+                    # first (that is net-number order).  On board 06rf the
+                    # 5-pad local VBUS_USB (net 1) took In2.Cu once #6686
+                    # made it a pour, pushing the board-wide +3V3 onto a
+                    # carved F.Cu outline that boxed connector pads in.
+                    plane_idx = max(
+                        range(len(power_nets)),
+                        key=lambda k: (plane_rank.get(power_nets[k][0], ()), -k),
+                    )
+                    power_nets = [power_nets[plane_idx]] + [
+                        pn for k, pn in enumerate(power_nets) if k != plane_idx
+                    ]
                 # Multiple power nets: first gets In2.Cu, rest go on F.Cu
                 # with decreasing priorities so they don't fully override each other.
                 # NOTE: Full-board overlapping zones on the same layer still produce
@@ -1444,6 +1469,31 @@ PAD_SAFE_MARGIN_MM = 0.3
 # single pad (or all its pads coincide).  Slightly larger than the margin
 # alone so single-pad nets still receive a usable copper patch.
 SINGLE_PAD_FALLBACK_SIDE_MM = 4.0
+
+
+def _power_plane_rank(pcb: PCB, net_name: str) -> tuple[float, ...]:
+    """How strongly ``net_name`` needs a full inner plane (Issue #6714).
+
+    ``(distinct footprints, pad-centre bounding-box area in mm^2, pad
+    count)``, compared as a tuple: a rail feeding many parts across the
+    board is what a plane is for, while a net local to one or two parts
+    (a connector's ``VBUS``) is served by a carved outer-layer outline.
+    Pads with no footprint reference (or a ``#`` power-symbol stand-in)
+    are ignored, as in :func:`_net_pad_positions_absolute`.
+    """
+    refs: set[str] = set()
+    for fp in pcb.footprints:
+        if not fp.reference or fp.reference.startswith("#"):
+            continue
+        if any(pad.net_name == net_name for pad in fp.pads):
+            refs.add(fp.reference)
+    positions = _net_pad_positions_absolute(pcb, net_name)
+    if not positions:
+        return (0.0, 0.0, 0.0)
+    xs = [x for x, _ in positions]
+    ys = [y for _, y in positions]
+    area = (max(xs) - min(xs)) * (max(ys) - min(ys))
+    return (float(len(refs)), round(area, 3), float(len(positions)))
 
 
 def _net_pad_positions_absolute(
@@ -2579,7 +2629,12 @@ def auto_create_zones_for_pour_nets(
     # the new zone tied its priority, kept the full-board outline, and
     # KiCad's UUID tie-break decided which zone starved.
     existing_by_layer = _existing_zone_priority_by_layer(gen.pcb, {name for name, _ in pour_nets})
-    assignments = _assign_layers_for_pour_nets(copper_layer_count, pour_nets, existing_by_layer)
+    assignments = _assign_layers_for_pour_nets(
+        copper_layer_count,
+        pour_nets,
+        existing_by_layer,
+        plane_rank={name: _power_plane_rank(gen.pcb, name) for name, _ in pour_nets},
+    )
 
     # Outline allocator (#2771): compute per-net bounding outlines for any
     # layer that hosts more than one zone.  Sole-layer zones (typically
