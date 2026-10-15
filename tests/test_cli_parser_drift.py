@@ -107,7 +107,6 @@ INNER_ONLY_ALLOWLIST: frozenset[str] = frozenset(
         "--edge-clearance",
         "--escape-routing",
         "--no-escape-routing",
-        "--grid-strategy",
         "--hierarchical",
         "--min-clearance",
         "--multi-resolution",

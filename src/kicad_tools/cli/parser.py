@@ -3778,6 +3778,19 @@ def _add_route_parser(subparsers) -> None:
             "effect when --grid is an explicit value."
         ),
     )
+    # Issue #6666: previously declared only by ``route_cmd``'s own parser, so
+    # ``kct route ... --grid-strategy uniform`` died with "unrecognized
+    # arguments".  Keep choices/default identical to route_cmd.py.
+    route_parser.add_argument(
+        "--grid-strategy",
+        choices=["adaptive", "uniform"],
+        default="adaptive",
+        help=(
+            "Grid strategy when --grid auto is used. "
+            "'adaptive' (default) uses multi-resolution grids with fine zones "
+            "around fine-pitch components. 'uniform' forces single-resolution grid."
+        ),
+    )
     route_parser.add_argument(
         "--trace-width",
         type=float,
