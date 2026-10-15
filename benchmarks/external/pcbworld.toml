@@ -33,7 +33,13 @@ required_major = 9
 [prep]
 # The scored variant (config `board_filename` in configs/datasets/d3.json).
 variant = "guide"
+# NOTE (issue #6332): this is the *routed* guide board -- make_guide.md at the
+# pin says "the routed guide board is the artifact the benchmark loads", and
+# PCBWorld deletes its tracks/vias at reset(). kct routes from the bare
+# variant make_guide writes alongside it, and uses the routed guide only as
+# the human wirelength/via reference.
 guide_board_filename = "processed_v9_guide_v3.kicad_pcb"
+unrouted_board_filename = "processed_v9_guide_v3_unrouted.kicad_pcb"
 # Where PCBWorld's own split files live inside the PCBWorld checkout.
 splits_file = "experiments/kdd/configs/quickstart/splits.json"
 
@@ -49,3 +55,11 @@ partition = "test"
 splits_key = "d3b"
 difficulty = "medium"
 partition = "test"
+
+# Named sub-denominators, read from PCBWorld's own files at the pin. fair95 is
+# the "PCBench fair-95" set PCBWorld's RQ2 table scores d3a routability/DRV on
+# (excludes 0004, 0024, 0035, 0077 and the train-only 0096). Reported next to,
+# never instead of, the full 99-board split.
+[subsets.fair95]
+split = "d3a"
+path = "methods/baselines/rule_based/eval/_scripts/pcbench_fair95.txt"

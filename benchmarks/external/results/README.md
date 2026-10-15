@@ -1,5 +1,15 @@
 # Committed zero-touch benchmark results
 
+## Index of dated runs
+
+| Directory | What |
+|---|---|
+| [`2026-09-12/`](2026-09-12/) | External benchmark attempts (issue #5297): STRF, PocketBeagle, BeagleConnect Freedom |
+| [`2026-09-15/`](2026-09-15/) | BeagleConnect Freedom preserved partial routing (issue #5348) |
+| [`2026-10-15-pcbworld-d3a/`](2026-10-15-pcbworld-d3a/) | PCBWorld D3-A baseline (issue #6332): **not run** (no KiCad 9 / PCBWorld engine on the host); seed-variation evidence + exact rerun command |
+
+The sections below describe the original top-level files (issue #4942).
+
 Epic #4932 Phase 2, issue #4942. These are the JSON + markdown artifacts
 `kct bench external` produced for the two boards Phase 2 covers beyond
 STRF (#4941's own smoke-tested fixture run): **PocketBeagle** and
