@@ -569,13 +569,14 @@ def test_uncoupled_fallback_pair_leg_avoids_the_slot(monkeypatch) -> None:
     assert _left(pf, routes) == 0
 
 
-def test_partner_aware_fallback_legs_avoid_the_slot_without_a_rebuild() -> None:
-    # Issue #6703: partner-aware legs are searched at the strictest pad class,
-    # so they clear the slot on the first negotiation.
+def test_partner_aware_fallback_legs_still_clear_the_slot() -> None:
+    # Issue #6703: the partner-aware flush keeps its own legs only for a
+    # material skew gain (PR #6735 review); dodging a class-pad shortfall
+    # alone is left to the growth round, which still clears the slot.
     pf, pc = _slot_pair()
     routes, stats = pf.route_netset([], coupled=[pc], uncoupled_fallback=True)
     assert pf.pair_outcomes[pc.key].startswith("uncoupled-fallback:")
-    assert stats.lattice_builds == 1
+    assert stats.lattice_builds <= 2
     legs = [k for k in routes if isinstance(k, tuple) and k[1:] in (("P",), ("N",))]
     assert len(legs) == 2
     assert _left(pf, routes) == 0

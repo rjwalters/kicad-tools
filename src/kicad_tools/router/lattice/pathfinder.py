@@ -130,6 +130,17 @@ _GUIDE_WEIGHT = 1.0
 # before) instead of quadratic, and the flush runs on every negotiation pass.
 _MAX_PARTNER_AWARE_PAIRS = 4
 
+# Issue #6703 (PR #6735 review): a partner-aware leg's clearance to EVERY
+# obstacle is raised to a stricter pad class only when that class is at most
+# this many times the leg's own clearance; stricter (outlier) pad classes are
+# kept clear per pad.  See ``LatticePathfinder._strict_pad_pairwise``.
+_SEARCH_FLOOR_MAX_FACTOR = 2.0
+
+# Issue #6703 (PR #6735 review): least summed-skew reduction (mm) for which a
+# fallback flush keeps a pair's partner-aware legs over its partner-blind
+# ones at the same routed-leg count (and no extra class-pad shortfall).
+_MIN_FLUSH_SKEW_GAIN_MM = 0.25
+
 # One fallback leg pair: ``{"P"|"N": (search result or None, reason)}`` (#6703).
 _FallbackLegs = dict[str, tuple["_RouteResult | None", str]]
 
@@ -329,6 +340,10 @@ class LatticePathfinder:
         # measure; ``None`` -> tracks plus a 1.6 mm barrel per through-via.
         self.pair_length_measure: Callable[[Route], float] | None = None
         self._shortfall_memo: dict[int, tuple[_RouteResult, int]] = {}
+        # Issue #6703: raised only while a partner-aware fallback leg is
+        # SEARCHED (never while it is committed) -- see
+        # :meth:`_strict_pad_pairwise`.
+        self._search_clearance_floor = 0.0
 
         xs = [p[0] for p in outline]
         ys = [p[1] for p in outline]
@@ -764,7 +779,9 @@ class LatticePathfinder:
         tw = getattr(net_class, "trace_width", None) or self.rules.trace_width
         clr = getattr(net_class, "clearance", None) or 0.0
         authored = self.rules.authored_floor(net) if net is not None else 0.0
-        return tw / 2.0, max(clr, self.rules.trace_clearance, authored)
+        return tw / 2.0, max(
+            clr, self.rules.trace_clearance, authored, self._search_clearance_floor
+        )
 
     def _hard_avoided_layers(self, net_class: object | None) -> frozenset[int]:
         """Grid-layer indices to HARD-block for this connection (issue #4979).
@@ -2915,7 +2932,7 @@ class LatticePathfinder:
 
     def _strict_pad_pairwise(
         self, pc: CoupledConnection, items: dict[str, Connection]
-    ) -> LatticePairwise | None:
+    ) -> tuple[LatticePairwise | None, float]:
         """Per-pad class keep-out for a fallback pair's leg search (#6703).
 
         The lattice search holds every foreign pad only to the connection's
@@ -2926,25 +2943,32 @@ class LatticePathfinder:
         ``(leg net, pad net)``.  Installed only while a partner-aware leg is
         SEARCHED, it widens exactly those pads' keep-outs
         (:meth:`LatticeObstacleModel.pairwise_pad_blocked`); every other
-        obstacle -- tracks, vias, keep-outs and the remaining pads -- keeps
-        the leg's own clearance.  (A board-wide floor at the strictest class,
-        the first cut of #6703, held every obstacle to one high-clearance pad
-        class's gap.)  Committed copper never carries it: the projection is
-        not threaded into :class:`CommittedCopper`.
+        obstacle keeps the leg's own clearance.  Committed copper never
+        carries it: the projection is not threaded into
+        :class:`CommittedCopper`.
 
-        ``None`` when no pad is stricter than either leg (the searches are
-        then exactly the partner-blind ones), when the router installed no
-        pad classes, or when a real HV pairwise projection is already active
-        (it governs pad clearance itself, and the repair is skipped there).
+        Also returns the search clearance FLOOR: the strictest of those pad
+        classes that is at most :data:`_SEARCH_FLOOR_MAX_FACTOR` times the
+        legs' own clearance (``0.0`` when there is none).  The first cut of
+        #6703 raised the floor to the strictest class on the board, so one
+        outlier class (a high-voltage pad) held every obstacle of every
+        candidate at its gap (PR #6735 review); such a pad is now kept clear
+        through the projection only.
+
+        ``(None, 0.0)`` when no pad is stricter than either leg (the searches
+        are then exactly the partner-blind ones), when the router installed
+        no pad classes, or when a real HV pairwise projection is already
+        active (it governs pad clearance itself, and the repair is skipped
+        there).
         """
         from .class_pad_repair import pad_class_requirements
         from .pairwise import LatticePairwise
 
         if self._pairwise is not None:
-            return None
+            return None, 0.0
         pad_req = pad_class_requirements(self)
         if not pad_req:
-            return None
+            return None, 0.0
         by_pad_net: dict[int, float] = {}
         for pad, req in zip(self.pads, pad_req, strict=False):
             if pad.net is None:
@@ -2963,8 +2987,14 @@ class LatticePathfinder:
                 required[key] = max(required.get(key, 0.0), req)
                 max_by_net[leg_net] = max(max_by_net.get(leg_net, 0.0), req)
         if not required:
-            return None
-        return LatticePairwise(required_by_pair=required, zones=(), max_by_net=max_by_net)
+            return None, 0.0
+        own_min = min(self._conn_geometry(pc.net_class, it[1].net)[1] for it in items.values())
+        cap = _SEARCH_FLOOR_MAX_FACTOR * own_min + 1e-9
+        floor = max((req for req in required.values() if req <= cap), default=0.0)
+        return (
+            LatticePairwise(required_by_pair=required, zones=(), max_by_net=max_by_net),
+            floor,
+        )
 
     def _partner_aware_legs(
         self,
@@ -3008,20 +3038,30 @@ class LatticePathfinder:
         # the net demoted (the class-pad repair may barely move pair copper),
         # so the partner-aware legs keep every foreign pad at that pad's own
         # class while they are searched: their copper then needs no repair.
-        # Only the pads whose class is stricter than the leg's own are
-        # widened (a per-pad projection, :meth:`_strict_pad_pairwise`); tracks,
-        # vias and keep-outs keep the leg's own clearance, and committed
-        # copper is stored at it.
-        strict = self._strict_pad_pairwise(pc, items)
+        # Two parts (see :meth:`_strict_pad_pairwise`):
+        #
+        # * every pad stricter than the leg is widened to its own class (a
+        #   per-pad projection, whatever that class is);
+        # * the leg's clearance to EVERY obstacle is raised to the strictest
+        #   pad class that is at most ``_SEARCH_FLOOR_MAX_FACTOR`` times its
+        #   own (board 07rf: 0.2 mm for a 0.1 mm TMDS leg).  The spacing that
+        #   buys is what leaves room for the later TMDS legs there; an
+        #   outlier class (a 1.5 mm HV pad) is held per pad only, so it can
+        #   no longer push every candidate off the board.
+        #
+        # Committed copper keeps the leg's own clearance.
+        strict, floor = self._strict_pad_pairwise(pc, items)
 
         def search(pol: str, guide: PartnerGuide | None = None) -> tuple[_RouteResult | None, str]:
-            if strict is None:
-                return self._search_single(items[pol], guide=guide, **kw)
-            previous, self._pairwise = self._pairwise, strict
+            previous = self._pairwise
+            if strict is not None:
+                self._pairwise = strict
+            self._search_clearance_floor = floor
             try:
                 return self._search_single(items[pol], guide=guide, **kw)
             finally:
                 self._pairwise = previous
+                self._search_clearance_floor = 0.0
 
         candidates: list[_FallbackLegs] = []
         firsts: _FallbackLegs = {}
@@ -3067,7 +3107,10 @@ class LatticePathfinder:
                 self._commit_single(items[pol], res, {}, committed)
         # ``candidates[0]`` is the partner-blind (pre-#6703) leg pair whenever
         # no pad needed widening (the searches were then the plain ones).
-        return {"P": best["P"], "N": best["N"]}, best is candidates[0] and strict is None
+        return (
+            {"P": best["P"], "N": best["N"]},
+            best is candidates[0] and strict is None and floor == 0.0,
+        )
 
     def _route_fallback_pairs_into(
         self,
@@ -3094,10 +3137,17 @@ class LatticePathfinder:
         pair's partner-aware choice is weighed by a rollout: the remaining
         pairs are routed partner-blind behind it, and the choice is kept only
         when the whole flush then scores better than with the pair's own
-        partner-blind legs: more routed legs, then fewer class-pad shortfalls
-        (:func:`~.class_pad_repair.class_pad_shortfalls` -- one left on a
-        diff-pair net gets the net demoted), then a smaller summed skew.  A
-        tie keeps the pre-#6703 copper.  The comparison baseline at every step
+        partner-blind legs: more routed legs, or the same number with the
+        summed skew at least :data:`_MIN_FLUSH_SKEW_GAIN_MM` smaller and no
+        more class-pad shortfalls (:func:`~.class_pad_repair.class_pad_shortfalls`).
+        Anything else keeps the pre-#6703 copper.  Shortfalls alone never
+        justify the change: skew is what the partner-aware legs are for, and
+        a partner-blind shortfall is still cleared by the #6489 pad-growth
+        round.  On board 06rf (PR #6735 review), keeping legs that only dodged
+        a shortfall, or cut the skew by 0.1 mm, moved a USB3_TX2 via onto
+        B.Cu under J1, pushed USB3_TX1's partner-blind N leg across the spot
+        the pour oracle bridges the two VBUS_USB islands at, and left one
+        kicad-cli unconnected item that main does not have.  The comparison baseline at every step
         is the flush already secured, so the result never scores worse than
         the pre-#6703 flush from the same state.
 
@@ -3117,13 +3167,22 @@ class LatticePathfinder:
             "escape_plan": escape_plan,
         }
 
-        def score(flush: list[_FallbackLegs]) -> tuple[int, int, float]:
+        def score(flush: list[_FallbackLegs]) -> tuple[int, float, int]:
             routed = sum(legs[pol][0] is not None for legs in flush for pol in ("P", "N"))
             short = sum(
                 self._legs_shortfalls(pc, legs) for pc, legs in zip(pairs, flush, strict=True)
             )
             skews = [self._pair_skew(legs) for legs in flush]
-            return (-routed, short, round(sum(sk for sk in skews if sk is not None), 3))
+            return (-routed, round(sum(sk for sk in skews if sk is not None), 3), short)
+
+        def better(aware: tuple[int, float, int], blind: tuple[int, float, int]) -> bool:
+            # More routed legs always wins.  Otherwise the partner-aware legs
+            # must cut the summed skew by a material margin without adding a
+            # class-pad shortfall: every leg it moves perturbs the rest of
+            # the board, so a marginal gain is not worth the churn.
+            if aware[0] != blind[0]:
+                return aware[0] < blind[0]
+            return aware[1] <= blind[1] - _MIN_FLUSH_SKEW_GAIN_MM and aware[2] <= blind[2]
 
         def recommit(pc: CoupledConnection, legs: _FallbackLegs) -> None:
             items = self._fallback_items(pc)
@@ -3161,7 +3220,7 @@ class LatticePathfinder:
             inner = committed.begin_trial()
             aware_rest = [self._partner_blind_legs(q, **kw) for q in pairs[i + 1 :]]
             committed.rollback_trial(inner)
-            if score([*chosen, aware, *aware_rest]) < score([*chosen, *rest]):
+            if better(score([*chosen, aware, *aware_rest]), score([*chosen, *rest])):
                 committed.keep_trial(mark)
                 chosen.append(aware)
                 rest = aware_rest

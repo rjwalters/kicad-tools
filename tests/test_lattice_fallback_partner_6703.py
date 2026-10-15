@@ -210,8 +210,10 @@ def test_one_very_strict_pad_class_does_not_disable_the_partner_aware_legs(
     _decline_coupled(pf, monkeypatch)
     pf.set_pad_class_clearances([0.15] * (len(pf.pads) - 1) + [1.5])
 
-    strict = pf._strict_pad_pairwise(pc, pf._fallback_items(pc))
+    strict, floor = pf._strict_pad_pairwise(pc, pf._fallback_items(pc))
     assert strict is not None
+    # 1.5 mm is ten times the legs' own 0.15 mm: never a board-wide floor.
+    assert floor == 0.0
     # Only the strict pad's net is projected, for each leg.
     assert dict(strict.required_by_pair) == {(1, 7): 1.5, (2, 7): 1.5}
 
@@ -224,9 +226,21 @@ def test_one_very_strict_pad_class_does_not_disable_the_partner_aware_legs(
 
 def test_strict_pad_projection_is_off_when_no_pad_is_stricter() -> None:
     pf, pc = _walled_pair()
-    assert pf._strict_pad_pairwise(pc, pf._fallback_items(pc)) is None  # no classes
+    assert pf._strict_pad_pairwise(pc, pf._fallback_items(pc)) == (None, 0.0)  # no classes
     pf.set_pad_class_clearances([0.15] * len(pf.pads))
-    assert pf._strict_pad_pairwise(pc, pf._fallback_items(pc)) is None
+    assert pf._strict_pad_pairwise(pc, pf._fallback_items(pc)) == (None, 0.0)
+
+
+def test_a_modest_stricter_pad_class_becomes_the_search_floor() -> None:
+    # A class within ``_SEARCH_FLOOR_MAX_FACTOR`` of the legs' own clearance
+    # (0.25 mm against 0.15 mm, like 07rf's 0.2 mm pads against 0.1 mm TMDS
+    # legs) is ALSO the search floor; the outlier 1.5 mm class is not.
+    pf, pc = _walled_pair((_pad(8.0, 10.5, 7, "HV", "HV1"), _pad(8.0, 1.0, 8, "PWR", "C1")))
+    pf.set_pad_class_clearances([0.15] * (len(pf.pads) - 2) + [1.5, 0.25])
+    strict, floor = pf._strict_pad_pairwise(pc, pf._fallback_items(pc))
+    assert strict is not None
+    assert floor == pytest.approx(0.25)
+    assert pf._search_clearance_floor == 0.0  # raised only during a search
 
 
 def _open_pairs(n: int) -> tuple[LatticePathfinder, list[CoupledConnection]]:
@@ -399,7 +413,7 @@ def test_partner_aware_legs_keep_out_of_an_area_array_pour_neck(monkeypatch) -> 
             pitch=_PITCH,
         )
         _decline_coupled(pf, monkeypatch)
-        assert pf._strict_pad_pairwise(pc, pf._fallback_items(pc)) is not None
+        assert pf._strict_pad_pairwise(pc, pf._fallback_items(pc))[0] is not None
         routes, stats = pf.route_netset([], coupled=[pc], uncoupled_fallback=True)
         assert stats.routed == 2, stats
         hit: list[str] = []
