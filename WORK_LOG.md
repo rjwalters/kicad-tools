@@ -1419,3 +1419,7 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 ## 2026-09-28 — v0.22.0 release cut
 
 - v0.22.0 bump PR opened after an in-session release-prep sweep: CI runner cpuset fix for the resized heavy-lane host (#5753), pre-release fixes to the new pin1_marker/via_under_body/width_consistency rules (#5748/#5749/#5750), board-05 DRU test isolation (#5746), board-03 reach-test flake (#5752), CHANGELOG reconciled to a zero-gap report; headliners: new kct check rules, SMD pad clearance emission, unified route clearance resolver.
+
+## 2026-10-15 — v0.23.0 release cut
+
+- v0.23.0 release PR opened by hand (manual fallback in RELEASING.md; `AUTO_RELEASE` is unset, so the daily workflow only dry-runs). 451 changelog fragments assembled; release-gate gaps closed in #6752.
