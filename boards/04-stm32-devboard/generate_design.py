@@ -1766,6 +1766,22 @@ def _pad_has_offpad_bond(pcb, x: float, y: float, net: str) -> str | None:
             box = pad_absolute_bbox(pad, fp)
             if not inside((x, y), box):
                 continue
+            # Issue #6683: the weld may be a multi-leg escape (pad -> dog-leg
+            # or extended-escape waypoints -> via), not one straight track.
+            # Follow same-net track endpoints out of the pad and accept any
+            # through via that copper reaches outside the pad.
+            segments = [(seg.start, seg.end) for seg in pcb.segments if seg.net_number in numbers]
+            reached = [p for a, b in segments for p in (a, b) if inside(p, box)]
+            frontier = list(reached)
+            while frontier:
+                point = frontier.pop()
+                for a, b in segments:
+                    for here, there in ((a, b), (b, a)):
+                        if math.dist(here, point) < 1e-3 and not any(
+                            math.dist(there, r) < 1e-3 for r in reached
+                        ):
+                            reached.append(there)
+                            frontier.append(there)
             for via in pcb.vias:
                 if (
                     via.net_number not in numbers
@@ -1773,12 +1789,8 @@ def _pad_has_offpad_bond(pcb, x: float, y: float, net: str) -> str | None:
                     or inside(via.position, box)
                 ):
                     continue
-                for seg in pcb.segments:
-                    if seg.net_number not in numbers:
-                        continue
-                    for a, b in ((seg.start, seg.end), (seg.end, seg.start)):
-                        if inside(a, box) and math.dist(b, via.position) < 1e-3:
-                            return f"{fp.reference}.{pad.number}"
+                if any(math.dist(via.position, r) < 1e-3 for r in reached):
+                    return f"{fp.reference}.{pad.number}"
             return None
     return None
 
