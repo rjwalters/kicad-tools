@@ -399,7 +399,7 @@ class StrategyGenerator:
             FailureCause.PIN_ACCESS: "Cannot access pin; consider component rotation or repositioning",
         }.get(
             failure.root_cause,
-            "Complex failure requiring manual review and intervention",
+            "Complex failure; run 'kct net-status --why' for the diagnosis, or file a router-gap issue",
         )
 
         return ResolutionStrategy(

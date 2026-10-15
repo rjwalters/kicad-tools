@@ -335,12 +335,12 @@ class TestFixSuggestion:
         """Test creating a fix suggestion with command."""
         fix = FixSuggestion(
             description="Run annotation",
-            command="kct sch annotate design.kicad_sch",
+            command="kct sch re-annotate design.kicad_sch",
             priority=1,
         )
 
         assert fix.description == "Run annotation"
-        assert fix.command == "kct sch annotate design.kicad_sch"
+        assert fix.command == "kct sch re-annotate design.kicad_sch"
         assert fix.priority == 1
 
     def test_fix_suggestion_defaults(self):
