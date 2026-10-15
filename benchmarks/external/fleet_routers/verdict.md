@@ -65,11 +65,33 @@ Issue #6335 (parent #5943, protocol #6334). Single predeclared run per board/too
 - TraceMaker: 100% completion on 00–06 (06: 90/90) and 0 DRC errors on all of them except 03 (1 `starved_thermal`). It needs 0.1–220 s on those boards. It **timed out on 07** and on **09 finished at 589.7 s with 114/124 connections (10 unconnected)**. Its clean pass is `false` on 02–06 because `kct check` reports `via_in_pad` (3, 30, 6, 15, 10 on 02, 03, 04, 05, 06 respectively) and, on 04, one `hole_to_hole_clearance`; these are manufacturing-profile findings that `kicad-cli` DRC does not flag. On 09 `kct check` also reports 9 `connectivity`, 1 `hole_to_hole_clearance` and 29 `via_in_pad`.
 - fastroute: **every row is `non-comparable`** (see below), so none supports a ranking. Diagnostic numbers: 0 DRC errors on 00, 01, 04; 6 `annular_width` on 02; 83 on 03 (75/115 connected); 20 on 05; 20 on 06 (82/90); 549 on 07 (130/161); 20 on 09 (117/124).
 
-**Where each succeeds or fails.** Simple boards (00, 01): all three connect everything with zero DRC errors; kct is shortest on wirelength for 00 (8.71 mm vs 29.66 / 30.17) and TraceMaker on 01 (54.02 vs 65.25 mm, 0 vs 5 vias). On the mid-size boards (02, 04, 06) kct and TraceMaker both complete; kct is clean on the `kct check` profile where TraceMaker is not, TraceMaker is faster on 02, 04 and 06 (19.7 s vs 185.4 s; 33.5 s vs 55.8 s; 49.4 s vs 62.4 s). On the densest boards neither is uniformly better: only TraceMaker completes 05; neither completes 07; only TraceMaker returns a (partial, 10 unconnected) result on 09; on 03 TraceMaker completes where kct leaves one connection. These are single runs on one seed, so differences of this size are anecdotes, not rankings.
+**Where each succeeds or fails.** Simple boards (00, 01): all three connect everything with zero DRC errors; kct is shortest on wirelength for 00 (8.71 mm vs 29.66 / 30.17) and TraceMaker on 01 (54.02 vs 65.25 mm, 0 vs 5 vias). On the mid-size boards (02, 04, 06) kct and TraceMaker both complete; kct is clean on the `kct check` profile where TraceMaker is not (a home-referee comparison: `kct check` is our own checker, and its JLCPCB-profile `via_in_pad` rule is one `kicad-cli` does not flag), TraceMaker is faster on 02, 04 and 06 (19.7 s vs 185.4 s; 33.5 s vs 55.8 s; 49.4 s vs 62.4 s). On the densest boards neither is uniformly better: only TraceMaker completes 05; neither completes 07; only TraceMaker returns a (partial, 10 unconnected) result on 09; on 03 TraceMaker completes where kct leaves one connection. These are single runs on one seed, so differences of this size are anecdotes, not rankings.
 
 ## Why fastroute rows are non-comparable
 
-`kicad_tools.export.dsn` does not represent the 10 JLCPCB fab-floor `.kicad_dru` rules (tracked in #6765, open and out of scope here) nor, on 05, 06, 07 and 09, the project `min_copper_edge_clearance` (0.3 mm) board rule. The affected counts are 00:1, 01:1, 02:2, 03:14, 04:2, 05:9, 06:10, 07:7, 09:1 lost constraints, each listed per row in `results.json` (`lost_constraints`). The DRC failures on 02, 03, 05, 06, 07, 09 (annular ring, hole clearance, shorting, solder-mask bridge) are consistent with routing against a view that omitted those rules, but this run does not isolate that cause. **Fastroute's routing quality is not established by this run.** The fastroute rows should be re-run after #6765 lands and the manifest is re-frozen.
+The counts below come from each fastroute row's `lost_constraints` in `results.json`. This run's base already includes #6768 (issue #6756). The 9 JLCPCB fab-only `.kicad_dru` rules on 00–07 (silk, hole clearance, annular ring, copper-to-edge and hole-to-edge rules, text size) therefore sit in `not_routing_rules` and are **not** counted as losses. The losses that make these rows non-comparable fall into these categories:
+
+| Board | Losses | Net-class clearances (exemption-scoped) | Native zone clearances | Diff-pair rules | `SMD Pad Clearance - jlcpcb` | Board `min_copper_edge_clearance` 0.3 mm |
+|---|---|---|---|---|---|---|
+| 00 | 1 | 1 (`Reviewed clearance - Power`) | – | – | – | – |
+| 01 | 1 | 1 (`Reviewed clearance - Power`) | – | – | – | – |
+| 02 | 2 | 2 (`Reviewed clearance - Clock/Power`) | – | – | – | – |
+| 03 | 14 | 2 (`Reviewed clearance - Clock/Power`) | 4 (GND on F.Cu/In1.Cu/B.Cu, VCC on In2.Cu) | 8 (USB_D and USB_MCU_D: `diff_pair_gap`, `diff_pair_uncoupled`, `skew`, `via_count` each) | – | – |
+| 04 | 2 | 2 (`kct net class clearance - Clock/Power`) | – | – | – | – |
+| 05 | 9 | 7 (`Reviewed clearance - Audio/Debug/Differential/Digital/Clock/HighCurrentSignal/Power`) | – | – | 1 | 1 |
+| 06 | 10 | 1 (`Reviewed clearance - Power`) | – | 8 (LVDS1–4: `diff_pair_gap`, `skew` each) | – | 1 |
+| 07 | 7 | 6 (`Reviewed clearance - AUX/SDRAM_ADDRESS/SDRAM_BYTE0/SDRAM_BYTE1/SDRAM_COMMAND/SWD_CLOCK`) | – | – | – | 1 |
+| 09 | 1 | – | – | – | – | 1 |
+
+What would make these rows comparable, by category:
+
+- **Net-class clearances (all 22).** Each is a `NetClass == 'X'` clearance whose only other clauses are kct's same-footprint-pad and coupled-diff-pair exemptions. Specctra has no form for those exemptions. PR #6770 (closes #6765, head `6790e8c`, open) reclassifies exactly these rules as not-representable. Running its classifier on every lost rule here flags all 22 of them and none of the others. After #6770, 00, 01, 02 and 04 have no losses, and 03/05/06/07/09 keep 12/2/9/1/1.
+- **Board copper-to-edge clearance (05, 06, 07, 09).** DSN-expressible, for example by insetting the exported boundary. The exporter does not do this today. Tracked in #6784.
+- **`diff_pair_gap` (2 on 03, 4 on 06).** Its 0.15 mm minimum equals the pair nets' exported class clearance (`HighSpeed` on 03, `LVDS` on 06), so the DSN already implies it. The audit counts it lost only because it compares nothing but clearance, width, via and hole against the DSN. Tracked in #6784.
+- **Native zone clearances (03) and `SMD Pad Clearance` (05).** These are not router-side constraints. The scorer refills zones, so the filler applies the zone clearance, and pad-to-pad spacing between footprints is fixed by placement. Both are candidates for `not_representable`. That classification decision is also recorded in #6784.
+- **Diff-pair `skew`, `diff_pair_uncoupled`, `via_count` (6 on 03, 4 on 06).** These are post-route length and coupling checks with no construct in our DSN exporter. No open fix covers them. Unless they are classified as not-representable (#6784 asks for that decision), 03 and 06 stay non-comparable for any DSN-fed router.
+
+The DRC failures on 02, 03, 05, 06, 07 and 09 (annular ring, hole clearance, shorting, solder-mask bridge) are diagnostic only. This run does not isolate their cause. **Fastroute's routing quality is not established by this run.**
 
 ## Evidence, provenance and independence
 
@@ -83,6 +105,6 @@ Observed, not explained: TraceMaker's via-in-pad findings (02–06, 09) coincide
 
 ## Follow-ups
 
-- Re-run the fastroute rows after #6765 (and a manifest re-freeze).
-- #5947 consumes these rows. No duplicate issues filed.
+- Re-run the fastroute rows (with a manifest re-freeze) once #6770 and #6784 land. 07 and 09 should then have no losses. 03 and 06 become comparable only if #6784 classifies the diff-pair length/coupling rules as not-representable.
+- #5947 consumes these rows. Follow-up filed for the DSN-gate losses #6770 does not cover: #6784.
 
