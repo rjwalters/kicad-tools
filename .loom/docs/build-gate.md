@@ -278,14 +278,10 @@ and does not call this script:
 
 - each gate is its own named step under `if: ${{ !cancelled() }}`, so one red
   gate never hides another and the step name says which one failed; and
-- each step sits inside a `# component:` marker that `loom-daemon`'s
-  required-check freshness guard pins per component
-  ([`stale_checks/inputs.rs`](https://github.com/rjwalters/loom/blob/main/loom-daemon/src/merge_pr/stale_checks/inputs.rs)
-  `REQUIRED_CHECKS`), whose pin test fails if a component's steps run a script
-  missing from that component's spec.
+- each step sits inside a `# component:` marker naming its gate group.
 
 Having CI invoke the aggregate instead would collapse fifteen named steps into
-one opaque one and break that pin test. Reading the workflow costs CI nothing
+one opaque one. Reading the workflow costs CI nothing
 and changes nothing about it.
 
 #### Ordering, and why it is unconditional
@@ -350,8 +346,8 @@ the audit that says what the gate does and does not predict.
 
 **Audited at** `9ca463f06afa2864aa58f3adbeb8e1a4d743a2ad` (`main`, workflow
 `.github/workflows/ci.yml`). Re-audit when the jobs below change. The set of
-required status contexts is `REQUIRED_CONTEXTS` in
-[`stale_checks/inputs.rs`](https://github.com/rjwalters/loom/blob/main/loom-daemon/src/merge_pr/stale_checks/inputs.rs):
+required status contexts is the `main` ruleset's (`gh api
+repos/{owner}/{repo}/rules/branches/main`):
 `Structural Checks`, `Shell Syntax (macos-latest)`, `Daemon Checks`, `CI Result`.
 `Install Surface Checks` is **not** itself required; it reaches `main`'s merge
 gate only through `CI Result`.
@@ -597,6 +593,9 @@ gate reds on a **dispatch worker** while the same commit is green in CI:
   gate deliberately does **not** sanitize the environment wholesale: it needs
   the real `PATH`/`HOME`/credential environment to run at all, and an `env -i`
   wrapper would hide exactly the host-shaped reds this section is about.
+  Since #9851 the Rust step is also hermetic to `LOOM_RUNTIME*` through
+  `.cargo/config.toml` `[env]`, which forces `LOOM_RUNTIME` and every
+  `LOOM_RUNTIME_<ROLE>` empty for cargo-run test binaries.
 
 **The gate runs at a mild throttle relative to sweeps (#4020, revises #3985).**
 `build-gate.sh` now defaults to `nice 5` — a mild positive niceness, a real but

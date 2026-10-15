@@ -815,6 +815,9 @@ rules. A genuinely session-global `CARGO_TARGET_DIR` — an operator redirecting
 *all* builds — is still honored for the main workspace, unchanged. Both are
 pinned by `tests/hooks/test-post-worktree-target-dir.sh`.
 
+When no main-workspace binary exists the hook prints a skip line and exits; it
+never runs `cargo build` (#11329), so a new worktree creates no release build.
+
 **Two attribution rules are relaxed for these directories, and only for these.**
 `<root>/wt/<the worktree's own directory name>` is checked *structurally*, so
 matching it is itself the proof the path belongs to one worktree:
@@ -1135,68 +1138,6 @@ Both `scripts/install/provision-daemon.sh` (every install/reprovision) and
 they find one — scoped to a symlink whose target resolves through a
 `loom-tools` path segment and no longer exists, so a same-named script you
 authored yourself is never touched. No manual action needed on either path.
-
-### Every merge re-stales every open PR in a consumer repo (#9589)
-
-**Symptom**: in a repo other than loom itself, each merge makes every other
-open PR's green required check (a lint job, a ratchet) stale:
-`Merge blocked: … this required check has no entry in the input-scope table
-and no declaration in .loom/stale-check-inputs.json`. Each PR then needs a
-re-date push and a fresh CI run before it can merge.
-
-**Cause**: loom's freshness guard only knows its own checks' inputs, and an
-unknown check is stale on any base move. **Fix**: commit
-`.loom/stale-check-inputs.json` on the default branch, declaring what each
-required check reads. See [stale-check-inputs](stale-check-inputs.md). If the
-refusal persists, look for a `Warning: … ignoring .loom/stale-check-inputs.json`
-line, which means the declaration was rejected and names why.
-
-### Every merge blocked by the freshness guard on a private free-plan repo (#8844)
-
-**Symptom**: on a **private** repository owned by a GitHub Free account or
-org, every `merge-pr.sh` run stops at the #8248 required-check freshness
-guard, whatever the PR looks like:
-
-```
-Error: Merge blocked: PR #N's required-check freshness guard (#8248) could not run —
-'loom-daemon merge-pr stale-checks' exited 2 without the LOOM-STALE-CHECKS-CLEAN signal.
-[...]
-
-What it reported: Merge blocked: PR #N's required-check freshness guard (#8248) could not
-determine whether the green required checks predate the base tip — ruleset lookup failed:
-gh: Upgrade to GitHub Pro or make this repository public to enable this feature. (HTTP 403)
-```
-
-`merge-pr.sh` wraps the subcommand's own refusal under `What it reported:`
-(#8873); a host whose script predates that fix prints only the outer "could
-not run" paragraph, and you have to re-run the `gh api` call below to see
-which failure it was.
-
-No flag helps: `--allow-unapproved` overrides a missing review and
-`--redate-stale-checks` re-dates a stale check; neither is this condition.
-
-**Root cause**: rulesets and branch protection are paid features for private
-repositories. `GET /repos/{owner}/{repo}/rules/branches/{branch}` answers 403
-with that message, and the guard — correctly fail-closed on any lookup it
-cannot complete — refused every merge.
-
-**Fixed in `loom-daemon merge-pr stale-checks`**: that ONE message is now read
-as "this repository's plan has no rulesets, so nothing can be a *required*
-check", the lookup yields no required contexts, and the guard returns its
-`LOOM-STALE-CHECKS-CLEAN` sentinel while printing a `Warning:` on stderr
-naming the gated source. The match is on the message, never on the status
-code — a token missing a scope, SSO enforcement and a rate-limit refusal are
-all 403s too, and there required checks may genuinely exist. Every one of
-those still exits 2 and still refuses the merge.
-
-**If you still see a block here**, read the forge error quoted under `What it
-reported:`: it is a different failure (network, auth scope, rate limit, 404,
-5xx), and the refusal names it rather than telling you to rebuild a binary
-that ran fine (#8873 — the build/install remedy is offered only when the
-subcommand printed nothing at all, i.e. it is missing or too old). Fix the
-lookup — `gh api "repos/{owner}/{repo}/rules/branches/main"` reproduces it in
-one call — rather than reaching for a `LOOM_DAEMON_BIN` shim. And if the host's
-binary predates the fix, roll it (next section).
 
 ### `merge-pr.sh` refuses after a `git pull` — roll the daemon (#8285)
 

@@ -114,8 +114,7 @@ commit-status write), the `merge_group` workflow or daemon pass that runs
 (confirms GitHub-reported merge, routes drops by verified reason, reports an
 unknown reason as unknown), revocation-then-dequeue before Loom-owned
 stale-verdict transitions (`forge disable-auto-merge`, claim-reconciliation
-disarm), a daemon-tick sweep, a comment-backed `GrantStore`, a refusal of the
-direct re-date remedy in queue mode, and deduplicated enqueue/removed/merged
+disarm), a daemon-tick sweep, a comment-backed `GrantStore`, and deduplicated enqueue/removed/merged
 telemetry. Direct mode makes no forge call from any of these. Issue closure
 stays GitHub's `Closes #N` on the confirmed merge; worktree cleanup stays the
 reaper's merged-PR pass.
@@ -136,8 +135,7 @@ merge modes. Every other result (queued, dropped, merged, undetermined, invalid
 mode, unprovable mode, empty output) sets `MERGE_RC=7`: nothing merged, the PR
 stays approved, no direct merge. The non-queue 7s are surfaced as
 `CHAMPION-MERGE-QUEUE-STALL` plus one head-keyed PR notice. See
-`merge-pr-exit-code-exceptions.md` → "Exit 7". Because the Champion never calls `merge-pr.sh` in
-queue mode, the direct re-date remedy is never run there. Failure mode guarded:
+`merge-pr-exit-code-exceptions.md` → "Exit 7". Failure mode guarded:
 a queue-mode PR merged directly, bypassing the authorization protocol.
 
 ## Still not done

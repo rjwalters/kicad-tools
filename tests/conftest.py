@@ -213,11 +213,16 @@ def _clear_find_kicad_cli_cache():
     that mocks ``shutil.which`` / ``Path.exists`` would otherwise leak its
     result into (or inherit a stale result from) neighbouring tests.
     """
-    from kicad_tools.cli.runner import find_kicad_cli
+    from kicad_tools.cli.runner import _kicad_drc_supports_refill, find_kicad_cli
 
+    # Issue #6724: the ``--refill-zones`` probe is memoised per kicad-cli path
+    # too; a test that stubs ``subprocess.run`` would otherwise cache "no
+    # refill support" for a real kicad-cli path and leak it to later tests.
     find_kicad_cli.cache_clear()
+    _kicad_drc_supports_refill.cache_clear()
     yield
     find_kicad_cli.cache_clear()
+    _kicad_drc_supports_refill.cache_clear()
 
 
 @pytest.fixture(scope="session", autouse=True)

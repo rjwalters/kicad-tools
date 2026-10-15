@@ -612,7 +612,14 @@ def _print_unverified_banner(args, output_path, headline: str) -> None:
     """Replace a SUCCESS banner whose verification was skipped (issue #6273)."""
     checks = _unverified_checks(args)
     print(f"UNVERIFIED: {headline}")
-    print(f"  Skipped for --timeout: {', '.join(checks)} -- the board was NOT verified.")
+    failure = getattr(args, "_stranded_pour_failure", None)
+    failure = failure if isinstance(failure, str) and failure else None
+    timed = [c for c in checks if not (failure and c == "stranded-pour check")]
+    if timed:
+        print(f"  Skipped for --timeout: {', '.join(timed)} -- the board was NOT verified.")
+    if failure and len(timed) < len(checks):
+        # Issue #6724: kicad-cli itself failed, not the --timeout budget.
+        print(f"  kicad-cli failed during the stranded-pour check ({failure}) -- NOT verified.")
     print(
         f"  Run 'kct check {output_path} --mfr {getattr(args, 'manufacturer', 'jlcpcb')}' "
         "before manufacturing (exit code "
@@ -4773,6 +4780,46 @@ def count_cross_engine_duplicates(
     return duplicates
 
 
+def _native_drc_failure_advice(geo) -> list[str]:
+    """Per-cause advice for a native kicad-cli DRC that did not complete (#6724).
+
+    Upgrade KiCad only for an unsupported option or a board kicad-cli could
+    not load; blame memory only for a SIGKILL (the OOM killer's signal); for
+    any other failure point at kicad-cli's own output (already in the note).
+    """
+    import signal
+
+    from kicad_tools.drc.geometric import (
+        REASON_LOAD_FAILED,
+        REASON_UNSUPPORTED,
+    )
+
+    reason = getattr(geo, "reason", None)
+    returncode = getattr(geo, "returncode", None)
+    if reason == REASON_UNSUPPORTED:
+        return [
+            "The board was NOT checked by KiCad: this kicad-cli rejected an option kct passed.",
+            "Upgrade KiCad (kicad-cli) to a version that supports it.",
+        ]
+    if reason == REASON_LOAD_FAILED:
+        return [
+            "The board was NOT checked by KiCad: kicad-cli could not load the board file.",
+            "It is possibly saved in a newer KiCad file format than this kicad-cli reads "
+            "(e.g. a KiCad 10 board on KiCad 8/9); upgrade KiCad (kicad-cli).",
+        ]
+    if isinstance(returncode, int) and returncode == -signal.SIGKILL:
+        return [
+            "The board was NOT checked by KiCad: kicad-cli was killed (SIGKILL), most "
+            "likely by the out-of-memory killer.",
+            "Re-run when kicad-cli has enough memory.",
+        ]
+    return [
+        "The board was NOT checked by KiCad; a failed kicad-cli run is never a clean result.",
+        "kicad-cli's error output is quoted above; run 'kicad-cli pcb drc' on the board to "
+        "reproduce the failure.",
+    ]
+
+
 def run_post_route_drc(
     output_path: Path,
     manufacturer: str,
@@ -5041,10 +5088,48 @@ def run_post_route_drc(
         # (strict_drc=False) preserves the internal-only PASS for KiCad-less
         # environments.
         strict_drc_failed = strict_drc and not geo.ran
-        if strict_drc_failed:
+        # Issue #6724: kicad-cli was found but crashed, was killed (e.g. by
+        # the OOM killer) or left no usable report.  That is not a
+        # KiCad-less environment, so it fails the gate even without
+        # --strict-drc: the board was meant to be judged and was not.
+        native_drc_failed = getattr(geo, "failed", False) is True and not strict_drc_failed
+        if strict_drc_failed or native_drc_failed:
             error_count += 1
 
-        if not quiet and strict_drc_failed:
+        def _list_findings(shown_error_count: int) -> None:
+            # Show first few violations
+            shown = 0
+            for v in results.errors[:5]:
+                location = f" at ({v.location[0]:.2f}, {v.location[1]:.2f})" if v.location else ""
+                print(f"    - {v.rule_id}: {v.message}{location}")
+                shown += 1
+            if shown_error_count > 5:
+                print(f"    ... and {shown_error_count - 5} more errors")
+
+            if warning_count > 0 and shown < 5:
+                for v in results.warnings[: 5 - shown]:
+                    location = (
+                        f" at ({v.location[0]:.2f}, {v.location[1]:.2f})" if v.location else ""
+                    )
+                    print(f"    - {v.rule_id}: {v.message}{location}")
+                if warning_count > (5 - shown):
+                    print(f"    ... and {warning_count - (5 - shown)} more warnings")
+
+            print(f"\n  Run 'kct check {output_path} --mfr {manufacturer}' for full details")
+            if shown_error_count > 0:
+                print(f"  Run 'kct fix-drc {output_path}' to auto-repair clearance violations")
+
+        if not quiet and native_drc_failed:
+            print("\n--- DRC Validation ---")
+            print(f"  DRC FAILURE: native kicad-cli DRC did not complete ({geo.note}).")
+            for line in _native_drc_failure_advice(geo):
+                print(f"    {line}")
+            if results.error_count > 0 or warning_count > 0:
+                print(f"  Internal errors: {results.error_count}")
+                if warning_count > 0:
+                    print(f"  Internal warnings: {warning_count}")
+                _list_findings(results.error_count)
+        elif not quiet and strict_drc_failed:
             print("\n--- DRC Validation ---")
             reason_text = geo.note or "native geometric DRC did not run"
             print(f"  STRICT DRC FAILURE: native kicad-cli DRC did not run ({reason_text}).")
@@ -5094,29 +5179,7 @@ def run_post_route_drc(
                 if warning_count > 0:
                     print(f"  Warnings: {warning_count}")
 
-                # Show first few violations
-                shown = 0
-                for v in results.errors[:5]:
-                    location = (
-                        f" at ({v.location[0]:.2f}, {v.location[1]:.2f})" if v.location else ""
-                    )
-                    print(f"    - {v.rule_id}: {v.message}{location}")
-                    shown += 1
-                if error_count > 5:
-                    print(f"    ... and {error_count - 5} more errors")
-
-                if warning_count > 0 and shown < 5:
-                    for v in results.warnings[: 5 - shown]:
-                        location = (
-                            f" at ({v.location[0]:.2f}, {v.location[1]:.2f})" if v.location else ""
-                        )
-                        print(f"    - {v.rule_id}: {v.message}{location}")
-                    if warning_count > (5 - shown):
-                        print(f"    ... and {warning_count - (5 - shown)} more warnings")
-
-                print(f"\n  Run 'kct check {output_path} --mfr {manufacturer}' for full details")
-                if error_count > 0:
-                    print(f"  Run 'kct fix-drc {output_path}' to auto-repair clearance violations")
+                _list_findings(error_count)
 
         return error_count, warning_count
 
@@ -8373,12 +8436,18 @@ def _run_pour_oracle_stage(output_path: Path, *, args, quiet: bool = False, rout
     so the run exits :data:`EXIT_UNVERIFIED` rather than passing the gate.
     """
     from kicad_tools.router.completion_verdict import allow_stranded_pour_pads, oracle_rounds
-    from kicad_tools.router.oracle_completion import DEFAULT_ORACLE_ROUNDS, STOP_DEADLINE
+    from kicad_tools.router.oracle_completion import (
+        DEFAULT_ORACLE_ROUNDS,
+        STOP_DEADLINE,
+        STOP_NOT_RUN,
+    )
 
     args._stranded_pour_links = 0
     # Issue #6273: True when the check was cut by --timeout before KiCad
     # reported anything -- the count above is then unknown, not 0.
     args._stranded_pour_unknown = False
+    # Issue #6724: why the check is unknown when kicad-cli failed (not --timeout).
+    args._stranded_pour_failure = None
     args._allow_stranded_pour_pads = allow_stranded_pour_pads(
         bool(getattr(args, "allow_stranded_pour_pads", False))
     )
@@ -8447,6 +8516,16 @@ def _run_pour_oracle_stage(output_path: Path, *, args, quiet: bool = False, rout
     if not result.ran:
         if not quiet:
             print(f"  skipped: {result.note or 'kicad-cli DRC did not run'}")
+        if result.stop_reason == STOP_NOT_RUN:
+            # Issue #6724: kicad-cli is installed (checked above) but its
+            # first DRC crashed, was killed or timed out, so the stranded-pad
+            # count was never measured.  Reporting 0 would pass the #5785
+            # gate on a board KiCad may call unconnected (boards 03/04 printed
+            # a false "0 -> 0 (converged)" after an OOM kill).
+            args._stranded_pour_unknown = True
+            args._stranded_pour_failure = result.note or "kicad-cli DRC did not run"
+            if not quiet:
+                print("  stranded-pour status UNKNOWN -- the run is reported unverified")
         if result.stop_reason == STOP_DEADLINE:
             # Issue #6273: the deadline, not KiCad, ended the check, so the
             # stranded-pad count was never measured.  0 would pass the #5785

@@ -422,12 +422,19 @@ class TestBlindBuriedConsistency:
     def _spied_measure():
         real = MatchGroupTracker._measure_route_total
 
-        def measure(route, board_thickness_mm, num_copper_layers, blind_buried_supported=True):
+        def measure(
+            route,
+            board_thickness_mm,
+            num_copper_layers,
+            blind_buried_supported=True,
+            length_model=None,
+        ):
             length = real(
                 route,
                 board_thickness_mm,
                 num_copper_layers,
                 blind_buried_supported=blind_buried_supported,
+                length_model=length_model,
             )
             if route.net == 1 and not blind_buried_supported:
                 length += 1.0

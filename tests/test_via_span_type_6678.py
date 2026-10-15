@@ -29,7 +29,12 @@ from kicad_tools.schema.pcb import PCB
 
 THICKNESS = 1.6
 LAYERS = 4
-ONE_SPAN = THICKNESS / (LAYERS - 1)
+# Issue #6725: KiCad's default 4-layer stackup on a 1.6 mm board (0.035 mm
+# copper, 0.48 mm dielectric, mask excluded; inner end layers count half).
+SPAN_IN1_IN2 = 0.515
+SPAN_F_IN1 = 0.5325
+SPAN_F_IN2 = 1.0475
+SPAN_THROUGH = 1.58
 
 _VIA_RE = re.compile(
     r'\(via(?:\s+(micro|blind|buried))?\s*\(.*?\(layers\s+"([^"]+)"\s+"([^"]+)"\)', re.S
@@ -64,7 +69,7 @@ def test_buried_in1_in2_via_contributes_only_its_span(blind_buried_supported):
     length = DiffPairLengthTracker._via_length(
         via, THICKNESS, LAYERS, blind_buried_supported=blind_buried_supported
     )
-    assert length == pytest.approx(ONE_SPAN)
+    assert length == pytest.approx(SPAN_IN1_IN2)
 
 
 @pytest.mark.parametrize("blind_buried_supported", [True, False])
@@ -73,7 +78,7 @@ def test_blind_via_contributes_only_its_span(blind_buried_supported):
     length = DiffPairLengthTracker._via_length(
         via, THICKNESS, LAYERS, blind_buried_supported=blind_buried_supported
     )
-    assert length == pytest.approx(2 * ONE_SPAN)
+    assert length == pytest.approx(SPAN_F_IN2)
 
 
 @pytest.mark.parametrize("blind_buried_supported", [True, False])
@@ -83,11 +88,11 @@ def test_through_and_micro_unchanged(blind_buried_supported):
         through = _router_via(layers)
         assert DiffPairLengthTracker._via_length(
             through, THICKNESS, LAYERS, blind_buried_supported=blind_buried_supported
-        ) == pytest.approx(THICKNESS)
+        ) == pytest.approx(SPAN_THROUGH)
     micro = _router_via((Layer.F_CU, Layer.IN1_CU), is_micro=True)
     assert DiffPairLengthTracker._via_length(
         micro, THICKNESS, LAYERS, blind_buried_supported=blind_buried_supported
-    ) == pytest.approx(ONE_SPAN)
+    ) == pytest.approx(SPAN_F_IN1)
 
 
 # ---------------------------------------------------------------------------
@@ -116,15 +121,27 @@ def _board(tmp_path: Path, vias: str = "") -> tuple[PCB, Path]:
 @pytest.mark.parametrize(
     "via_text,expected",
     [
-        ('(via buried (at 100 100) (size 0.45) (drill 0.2) (layers "In1.Cu" "In2.Cu")', ONE_SPAN),
-        ('(via blind (at 100 100) (size 0.45) (drill 0.2) (layers "F.Cu" "In1.Cu")', ONE_SPAN),
-        ('(via micro (at 100 100) (size 0.3) (drill 0.1) (layers "F.Cu" "In1.Cu")', ONE_SPAN),
-        ('(via (at 100 100) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu")', THICKNESS),
+        (
+            '(via buried (at 100 100) (size 0.45) (drill 0.2) (layers "In1.Cu" "In2.Cu")',
+            SPAN_IN1_IN2,
+        ),
+        ('(via blind (at 100 100) (size 0.45) (drill 0.2) (layers "F.Cu" "In1.Cu")', SPAN_F_IN1),
+        ('(via micro (at 100 100) (size 0.3) (drill 0.1) (layers "F.Cu" "In1.Cu")', SPAN_F_IN1),
+        ('(via (at 100 100) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu")', SPAN_THROUGH),
     ],
 )
 @pytest.mark.parametrize("blind_buried_supported", [True, False])
 def test_pcb_path_measures_declared_span(tmp_path, via_text, expected, blind_buried_supported):
-    pcb, _ = _board(tmp_path, f'  {via_text} (net 1) (uuid "v1"))\n')
+    # Issue #6725: kicad-cli charges a via the span between the layers its
+    # tracks actually use (a bare or one-layer stub via gets zero height), so
+    # the via carries a 5 mm track on each of its declared end layers.
+    top, bottom = _vias(via_text)[0][1]
+    tracks = (
+        f'  (segment (start 95 100) (end 100 100) (width 0.2) (layer "{top}") (net 1) (uuid "s1"))\n'
+        f'  (segment (start 100 100) (end 105 100) (width 0.2) (layer "{bottom}") (net 1)'
+        ' (uuid "s2"))\n'
+    )
+    pcb, _ = _board(tmp_path, f'  {via_text} (net 1) (uuid "v1"))\n' + tracks)
     length = DiffPairLengthTracker.measure_net_from_pcb(
         pcb,
         1,
@@ -132,7 +149,7 @@ def test_pcb_path_measures_declared_span(tmp_path, via_text, expected, blind_bur
         num_copper_layers=LAYERS,
         blind_buried_supported=blind_buried_supported,
     )
-    assert length == pytest.approx(expected)
+    assert length == pytest.approx(10.0 + expected)
 
 
 # ---------------------------------------------------------------------------
@@ -206,14 +223,18 @@ def test_mcp_persist_keeps_blind_and_buried(tmp_path, caplog):
 
 
 def test_match_group_tracker_buried_via_contributes_only_its_span():
-    seg = Segment(0.0, 0.0, 10.0, 0.0, 0.2, Layer.IN1_CU, net=100, net_name="DQ0")
+    # The buried via joins an In1.Cu half to an In2.Cu half (a via whose
+    # tracks use one layer only is a zero-height stub to kicad-cli, #6725).
     via_route = Route(
         net=100,
         net_name="DQ0",
-        segments=[seg],
+        segments=[
+            Segment(0.0, 0.0, 5.0, 0.0, 0.2, Layer.IN1_CU, net=100, net_name="DQ0"),
+            Segment(5.0, 0.0, 10.0, 0.0, 0.2, Layer.IN2_CU, net=100, net_name="DQ0"),
+        ],
         vias=[
             Via(
-                x=10.0,
+                x=5.0,
                 y=0.0,
                 drill=0.2,
                 diameter=0.45,
@@ -241,8 +262,8 @@ def test_match_group_tracker_buried_via_contributes_only_its_span():
     )
 
     lengths = tracker.get_group_lengths(group)
-    assert lengths[100] == pytest.approx(10.0 + ONE_SPAN)
-    assert tracker.get_all_skews()["DDR_DATA"] == pytest.approx(ONE_SPAN)
+    assert lengths[100] == pytest.approx(10.0 + SPAN_IN1_IN2)
+    assert tracker.get_all_skews()["DDR_DATA"] == pytest.approx(SPAN_IN1_IN2)
 
 
 def test_validate_match_group_skew_buried_via_contributes_only_its_span(tmp_path):
@@ -251,9 +272,10 @@ def test_validate_match_group_skew_buried_via_contributes_only_its_span(tmp_path
 
     head = _HEAD.replace('(net 1 "SIG")', '(net 1 "DQ0")\n  (net 2 "DQ1")')
     body = (
-        '  (segment (start 95 100) (end 105 100) (width 0.2) (layer "In1.Cu") (net 1) (uuid "s1"))\n'
-        '  (via buried (at 105 100) (size 0.45) (drill 0.2) (layers "In1.Cu" "In2.Cu")'
+        '  (segment (start 95 100) (end 100 100) (width 0.2) (layer "In1.Cu") (net 1) (uuid "s1"))\n'
+        '  (via buried (at 100 100) (size 0.45) (drill 0.2) (layers "In1.Cu" "In2.Cu")'
         ' (net 1) (uuid "v1"))\n'
+        '  (segment (start 100 100) (end 105 100) (width 0.2) (layer "In2.Cu") (net 1) (uuid "s3"))\n'
         '  (segment (start 95 102) (end 105 102) (width 0.2) (layer "In1.Cu") (net 2) (uuid "s2"))\n'
     )
     path = tmp_path / "board.kicad_pcb"
@@ -266,4 +288,4 @@ def test_validate_match_group_skew_buried_via_contributes_only_its_span(tmp_path
         pcb, {"DQ0": nc, "DQ1": nc}, board_thickness_mm=THICKNESS, num_copper_layers=LAYERS
     )
     assert [g.name for g in groups] == ["DDR_DATA"]
-    assert skew_data["DDR_DATA"] == pytest.approx(ONE_SPAN)
+    assert skew_data["DDR_DATA"] == pytest.approx(SPAN_IN1_IN2)

@@ -40,7 +40,6 @@
 #
 # It therefore needs a built loom-daemon; it is wired in the "Native Port
 # Suites" CI job, which builds one first, and FAILS (never skips) without one.
-# Strategy mirrors test-merge-pr-stale-required-checks.sh (#8248).
 #
 # Usage:
 #   ./.loom/scripts/tests/test-merge-pr-head-sync-retry.sh
@@ -126,7 +125,7 @@ trap 'rm -rf "$FUNCS_FILE" "$STUB_DIR" 2>/dev/null || true' EXIT
 # _refresh_precondition_sha is a single dense line (the file is ratchet-frozen
 # and `shell-budget --check` refuses any growth of the portable pool), so it is
 # captured by `print; next` rather than by the brace-matching the other two
-# need — the same split test-merge-pr-stale-required-checks.sh makes.
+# need.
 awk '
   /^_refresh_precondition_sha\(\) \{/ { print; next }
   /^error_head_moved\(\) \{/          { capture=1 }

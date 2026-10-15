@@ -353,6 +353,7 @@ def escape_endpoint_pad(
         pin=pad.pin,
         through_hole=pad.through_hole if unchanged and extent is None else False,
         drill=pad.drill if unchanged and extent is None else 0.0,
+        side=pad.side,
         rotation=rotation,
         shape=shape,
         # Issue #6718: an unchanged terminal keeps its authored roundrect corners.

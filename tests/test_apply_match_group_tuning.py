@@ -23,6 +23,8 @@ from __future__ import annotations
 import inspect
 from unittest.mock import patch
 
+import pytest
+
 from kicad_tools.router.core import Autorouter
 from kicad_tools.router.layers import Layer
 from kicad_tools.router.match_group_length import MatchGroup, MatchGroupSource
@@ -642,8 +644,10 @@ class TestViaInclusiveStackupThreading:
         # The manufacturer profile's board thickness (default 1.6 mm for the
         # synthesized adapter) must reach the tuner so via drilled length is
         # compensable.
-        assert "board_thickness_mm" in captured
-        assert captured["board_thickness_mm"] == 1.6
+        # Issue #6725: the tuner measures through the shared kicad-cli-exact
+        # model (board stackup + pad copper), not a thickness figure.
+        model = captured["length_model"]
+        assert model.stackup.span("F.Cu", "B.Cu") == pytest.approx(1.58)
         # The copper-layer count must match the tracker's (bare autorouter
         # with no layer_stack defaults to 2).
         assert captured["num_copper_layers"] == 2

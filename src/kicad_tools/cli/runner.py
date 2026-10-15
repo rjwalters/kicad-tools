@@ -4,7 +4,9 @@ Provides functions to locate and run kicad-cli commands for
 ERC validation, DRC validation, netlist export, and more.
 """
 
+import contextlib
 import json
+import logging
 import os
 import re
 import shutil
@@ -19,6 +21,8 @@ from functools import lru_cache
 from pathlib import Path
 
 from kicad_tools.schema.pcb import FOOTPRINT_TAGS, _is_footprint_tag
+
+logger = logging.getLogger(__name__)
 
 #: Seconds to wait for ``kicad-cli version`` before declaring a candidate wedged.
 #: A healthy-but-cold KiCad 10 on macOS was measured at a steady ~6 s
@@ -420,7 +424,10 @@ def run_erc(
             result.stderr or ""
         )
         empty_output = not output_path.exists() or output_path.stat().st_size == 0
-        kicad_cli_errored = result.returncode != 0 and empty_output
+        # Issue #6724: a kicad-cli killed by a signal (negative status, e.g.
+        # the OOM killer) or one that left the pre-created file empty never
+        # produced a report, whatever its exit status.
+        kicad_cli_errored = result.returncode < 0 or empty_output
 
         if load_failed or kicad_cli_errored:
             return KiCadCLIResult(
@@ -471,7 +478,9 @@ def run_drc(
             violation, not just the first per track) -- the gate the fleet's
             manufacturability check uses (Issue #6431).
         refill_zones: Pass ``--refill-zones`` (refill before checking; the
-            board file is not saved).
+            board file is not saved).  Only when this kicad-cli supports it
+            (KiCad 10+); KiCad 8/9 reject the option, so it is dropped there
+            (Issue #6724).
 
     Returns:
         KiCadCLIResult with success status and output path
@@ -492,6 +501,10 @@ def run_drc(
         import os
 
         os.close(fd)
+    # Issue #6724: the report must be one kicad-cli wrote on THIS run.  A
+    # pre-created (mkstemp) or left-over file survived a killed kicad-cli
+    # and read as a clean report, so clear it before the run.
+    Path(output_path).unlink(missing_ok=True)
 
     # Build command
     cmd = [
@@ -510,15 +523,29 @@ def run_drc(
         cmd.append("--schematic-parity")
     if all_track_errors:
         cmd.append("--all-track-errors")
-    if refill_zones:
-        cmd.append("--refill-zones")
 
-    cmd.append(str(pcb_path))
+    def build_cmd(refill: bool) -> list[str]:
+        return [*cmd, *(["--refill-zones"] if refill else []), str(pcb_path)]
 
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True)
+        # Issue #6724: --refill-zones only on a kicad-cli that accepts it
+        # (attempted when unknown, retried without it on rejection).
+        result, _refilled = run_kicad_drc_command(
+            build_cmd, Path(kicad_cli), refill_zones=refill_zones, text=True
+        )
 
-        if output_path.exists():
+        # Issue #6724: without ``--exit-code-violations`` kicad-cli exits 0
+        # even when it finds violations, so another status (a load failure is
+        # 3, a signal kill such as the OOM killer is negative) is a failure --
+        # as is a missing, empty or truncated report.
+        problem = drc_report_problem(
+            output_path,
+            result.returncode,
+            format=format,
+            stdout=result.stdout,
+            stderr=result.stderr,
+        )
+        if problem is None:
             return KiCadCLIResult(
                 success=True,
                 output_path=output_path,
@@ -526,17 +553,55 @@ def run_drc(
                 stderr=result.stderr,
                 return_code=result.returncode,
             )
-        else:
-            return KiCadCLIResult(
-                success=False,
-                stderr=result.stderr or "DRC produced no output",
-                return_code=result.returncode,
-            )
+        stderr = (result.stderr or "").strip()
+        return KiCadCLIResult(
+            success=False,
+            stdout=result.stdout,
+            stderr=f"DRC failed: {problem}" + (f"\n{stderr}" if stderr else ""),
+            return_code=result.returncode,
+        )
 
     except FileNotFoundError as e:
         return KiCadCLIResult(success=False, stderr=f"kicad-cli not found: {e}")
     except subprocess.SubprocessError as e:
         return KiCadCLIResult(success=False, stderr=f"Failed to run DRC: {e}")
+
+
+def drc_report_problem(
+    output_path: Path,
+    returncode: int,
+    *,
+    format: str = "json",
+    stdout: object = None,
+    stderr: object = None,
+) -> str | None:
+    """Why a ``kicad-cli pcb drc`` run did not produce a trustworthy report.
+
+    ``None`` means it did: kicad-cli exited 0 and wrote a complete report.
+    Otherwise a short reason (Issue #6724).  Without ``--exit-code-violations``
+    kicad-cli exits 0 when it finds violations (verified on 10.0.6), so any
+    status other than 0 or the documented "violations found" code 5 means the
+    board was not checked.
+    """
+    from kicad_tools.drc.geometric import (
+        KICAD_CLI_DRC_OK_EXIT_CODES,
+        describe_returncode,
+        load_kicad_cli_json_report,
+    )
+
+    if returncode not in KICAD_CLI_DRC_OK_EXIT_CODES:
+        # ``stdout``/``stderr`` let exit 1 name a rejected option; without an
+        # ``Unknown argument`` line it is a plain non-zero exit (Issue #6724).
+        return describe_returncode(returncode, stdout=stdout, stderr=stderr)
+    output_path = Path(output_path)
+    if format == "json":
+        return load_kicad_cli_json_report(output_path)
+    try:
+        if not output_path.is_file() or output_path.stat().st_size == 0:
+            return "kicad-cli wrote no DRC report"
+    except OSError as exc:
+        return f"kicad-cli DRC report unreadable: {exc}"
+    return None
 
 
 def run_refill_zones(
@@ -611,8 +676,10 @@ def run_refill_zones(
         result = subprocess.run(cmd, capture_output=True, text=True)
 
         # A produced report means the command ran to completion (a non-zero
-        # exit code here signals DRC violations, not a fill failure).
-        if report_path.exists() and report_path.stat().st_size > 0:
+        # exit code here signals DRC violations, not a fill failure).  Issue
+        # #6724: a signal kill (negative status) did not complete, whatever
+        # it left in the pre-created report file.
+        if result.returncode >= 0 and report_path.exists() and report_path.stat().st_size > 0:
             _restore_net_declarations(pcb_path, input_net_nodes, input_element_nets)
             return KiCadCLIResult(
                 success=True,
@@ -621,9 +688,16 @@ def run_refill_zones(
                 stderr=result.stderr,
                 return_code=result.returncode,
             )
+        from kicad_tools.drc.geometric import describe_returncode
+
+        failure = (
+            describe_returncode(result.returncode)
+            if result.returncode < 0
+            else "no report produced"
+        )
         return KiCadCLIResult(
             success=False,
-            stderr=result.stderr or "Zone refill via DRC failed — no report produced",
+            stderr=result.stderr or f"Zone refill via DRC failed — {failure}",
             return_code=result.returncode,
         )
     except FileNotFoundError as e:
@@ -869,7 +943,7 @@ def run_fill_zones(
     # ``--refill-zones``) keeps the original, unconditional refill.
     if result.success and result.output_path is not None:
         already_freshly_refilled = (not _kicad_cli_has_fill_zones(kicad_cli)) and (
-            _kicad_drc_supports_refill(kicad_cli)
+            _kicad_drc_supports_refill(kicad_cli) is True
         )
         remediation_kwargs: dict = {}
         if time_left is not None:
@@ -993,11 +1067,18 @@ def _remediate_starved_thermal(
             if refill and _kicad_drc_supports_refill(kicad_cli):
                 cmd.extend(["--refill-zones", "--save-board"])
             cmd.append(str(pcb_path))
-            subprocess.run(cmd, capture_output=True, text=True)
+            proc = subprocess.run(cmd, capture_output=True, text=True)
             _restore_net_declarations(pcb_path, input_net_nodes, input_element_nets)
+            # Issue #6724: a killed kicad-cli (negative status) or a missing,
+            # empty or truncated report is "no report", never an empty one.
+            if proc.returncode < 0:
+                return None
             if not report_path.exists() or report_path.stat().st_size == 0:
                 return None
-            parsed = json.loads(report_path.read_text())
+            try:
+                parsed = json.loads(report_path.read_text())
+            except ValueError:
+                return None
             return parsed if isinstance(parsed, dict) else None
         finally:
             report_path.unlink(missing_ok=True)
@@ -1205,29 +1286,175 @@ def _run_fill_zones_native(
         return KiCadCLIResult(success=False, stderr=f"Failed to fill zones: {e}")
 
 
-@lru_cache(maxsize=8)
-def _kicad_drc_supports_refill(kicad_cli: Path) -> bool:
-    """Check whether ``kicad-cli pcb drc`` supports ``--refill-zones``.
+#: Seconds the ``pcb drc --help`` capability probe may take.  Help output is
+#: instant; a stall means kicad-cli is wedged (#5877/#5932) and must not hold
+#: the caller past its own budget.
+_REFILL_PROBE_TIMEOUT_S = 30.0
+
+#: The option the ``--refill-zones`` probe looks for.
+REFILL_ZONES_OPTION = "--refill-zones"
+
+
+class _DrcRefillProbe:
+    """Does ``kicad-cli pcb drc`` support ``--refill-zones``?  (Issue #6724)
 
     KiCad 10+ added explicit ``--refill-zones`` and ``--save-board`` flags.
     Earlier versions (8, 9) always refill zones as part of DRC.
 
-    Memoised per ``kicad_cli`` path (Issue #5566) for the same reason as
-    :func:`_kicad_cli_has_fill_zones`: flag support cannot change between
-    calls in the same process, but this probe is otherwise re-run once per
-    :func:`_run_fill_zones_via_drc` call *and* once per
+    Memoised per ``kicad_cli`` path (Issue #5566): flag support cannot change
+    between calls in the same process, but the probe is otherwise re-run once
+    per :func:`_run_fill_zones_via_drc` call *and* once per
     :func:`_remediate_starved_thermal` refill pass -- each an independent,
     gated ``kicad-cli`` launch under ``KCT_NATIVE_MAX_CONCURRENCY``.
+
+    Only a *definitive* answer is cached: exit 0 with either the flag listed
+    or usage text that lacks it.  A killed, failed, timed-out or empty probe
+    answers ``False`` for that call but is not cached, and is recorded in
+    :meth:`inconclusive` so the geometric DRC gate can tell "this kicad-cli
+    has no ``--refill-zones``" from "we could not find out" (it passes the
+    flag in the latter case and lets kicad-cli's own ``Unknown argument``
+    rejection decide).
     """
-    try:
-        result = subprocess.run(
-            [str(kicad_cli), "pcb", "drc", "--help"],
+
+    def __init__(self) -> None:
+        self._answers: dict[Path, bool] = {}
+        self._inconclusive: set[Path] = set()
+
+    def __call__(self, kicad_cli: Path) -> bool:
+        kicad_cli = Path(kicad_cli)
+        if kicad_cli in self._answers:
+            return self._answers[kicad_cli]
+        answer = self._probe(kicad_cli)
+        if answer is None:
+            self._inconclusive.add(kicad_cli)
+            return False
+        self._inconclusive.discard(kicad_cli)
+        self._answers[kicad_cli] = answer
+        return answer
+
+    def inconclusive(self, kicad_cli: Path) -> bool:
+        """True if the latest probe of ``kicad_cli`` gave no definitive answer."""
+        return Path(kicad_cli) in self._inconclusive
+
+    def record(self, kicad_cli: Path, supported: bool) -> None:
+        """Memoise a definitive answer learned elsewhere (e.g. a DRC run that
+        rejected ``--refill-zones`` with ``Unknown argument``)."""
+        kicad_cli = Path(kicad_cli)
+        self._inconclusive.discard(kicad_cli)
+        self._answers[kicad_cli] = supported
+
+    def cache_clear(self) -> None:
+        self._answers.clear()
+        self._inconclusive.clear()
+
+    @staticmethod
+    def _probe(kicad_cli: Path) -> bool | None:
+        try:
+            result = subprocess.run(
+                [str(kicad_cli), "pcb", "drc", "--help"],
+                capture_output=True,
+                text=True,
+                timeout=_REFILL_PROBE_TIMEOUT_S,
+            )
+        except Exception:
+            return None
+        if result.returncode != 0:
+            return None
+        stdout = result.stdout if isinstance(result.stdout, str) else ""
+        if "--refill-zones" in stdout:
+            return True
+        # Exit 0 without the flag only counts when it really was the help
+        # text: an empty or garbled reply says nothing about the flag.
+        if "Usage" in stdout or "--output" in stdout:
+            return False
+        return None
+
+
+_kicad_drc_supports_refill = _DrcRefillProbe()
+
+
+def _refill_probe_inconclusive(kicad_cli: Path) -> bool:
+    """True if the refill probe could not tell whether ``kicad_cli`` has the flag.
+
+    Tolerates a probe replaced by a plain callable (tests monkeypatch
+    ``_kicad_drc_supports_refill`` with lambdas): no ``inconclusive`` means
+    every answer is definitive.
+    """
+    inconclusive = getattr(_kicad_drc_supports_refill, "inconclusive", None)
+    return bool(callable(inconclusive) and inconclusive(Path(kicad_cli)))
+
+
+def run_kicad_drc_command(
+    build_cmd: Callable[[bool], list[str]],
+    kicad_cli: Path,
+    *,
+    refill_zones: bool,
+    timeout: float | None = None,
+    text: bool = False,
+) -> tuple["subprocess.CompletedProcess", bool]:
+    """Run a ``kicad-cli pcb drc`` command, with ``--refill-zones`` when possible.
+
+    ``build_cmd(refill)`` returns the argv, including ``--refill-zones`` iff
+    ``refill`` is true.  Returns ``(completed process, refilled)``.
+
+    Issue #6775: KiCad 8/9 reject ``--refill-zones`` (exit 1, ``Unknown
+    argument: --refill-zones``, no report).  The option is passed unless the
+    capability probe *definitively* said it is unsupported; when the probe's
+    answer is unknown (killed, timed out) the option is attempted and, if
+    kicad-cli rejects it, the run is retried once without it (and that
+    definitive answer is memoised).  Running without a requested refill is
+    logged as a WARNING, never silently.
+
+    ``timeout`` is the whole budget (probe + run + retry); a
+    :class:`subprocess.TimeoutExpired` propagates to the caller.
+    """
+    from kicad_tools.drc.geometric import KICAD_CLI_ERR_ARGS, unknown_argument
+
+    deadline = None if timeout is None else _monotonic() + timeout
+
+    def remaining() -> float | None:
+        if deadline is None:
+            return None
+        return max(deadline - _monotonic(), 1.0)
+
+    use_refill = False
+    if refill_zones:
+        use_refill = bool(_kicad_drc_supports_refill(Path(kicad_cli)))
+        if not use_refill and _refill_probe_inconclusive(kicad_cli):
+            # Unknown is not "no": let kicad-cli's own parser decide.
+            use_refill = True
+    proc = subprocess.run(
+        build_cmd(use_refill),
+        capture_output=True,
+        text=text,
+        timeout=remaining(),
+        check=False,
+    )
+    if (
+        use_refill
+        and getattr(proc, "returncode", 0) == KICAD_CLI_ERR_ARGS
+        and unknown_argument(getattr(proc, "stdout", None), getattr(proc, "stderr", None))
+        == REFILL_ZONES_OPTION
+    ):
+        record = getattr(_kicad_drc_supports_refill, "record", None)
+        if callable(record):
+            record(Path(kicad_cli), False)
+        use_refill = False
+        proc = subprocess.run(
+            build_cmd(False),
             capture_output=True,
-            text=True,
+            text=text,
+            timeout=remaining(),
+            check=False,
         )
-        return "--refill-zones" in result.stdout
-    except Exception:
-        return False
+    if refill_zones and not use_refill:
+        logger.warning(
+            "kicad-cli %s does not support --refill-zones; DRC ran WITHOUT "
+            "--refill-zones, so zone fills are the ones saved in the board "
+            "file and may be stale",
+            kicad_cli,
+        )
+    return proc, use_refill
 
 
 def _snapshot_net_declarations(pcb_path: Path) -> list:
@@ -2019,7 +2246,7 @@ def _run_fill_zones_via_drc(
     ]
 
     # KiCad 10+ requires explicit flags to refill zones and persist changes.
-    refills = _kicad_drc_supports_refill(kicad_cli)
+    refills = _kicad_drc_supports_refill(kicad_cli) is True
     if refills:
         cmd.extend(["--refill-zones", "--save-board"])
 
@@ -2029,6 +2256,12 @@ def _run_fill_zones_via_drc(
     # :func:`_strip_stale_zone_fills`.  Only when the run refills AND saves:
     # a KiCad 8/9 DRC refills in memory but persists nothing, so stripping
     # there would ship the board unfilled.
+    # Issue #6724: the board as it was before this run, so a kicad-cli killed
+    # mid ``--save-board`` cannot leave a truncated board behind.
+    try:
+        pre_run_bytes: bytes | None = target_pcb.read_bytes() if refills else None
+    except OSError:
+        pre_run_bytes = None
     unfilled_backup = _strip_stale_zone_fills(target_pcb) if refills else None
     # Issue #6023: the stripped board's bytes.  KiCad's --save-board always
     # rewrites the file (with fresh fills), so a board still holding exactly
@@ -2053,6 +2286,18 @@ def _run_fill_zones_via_drc(
         # DRC returns non-zero when there are violations, but the zones
         # are still filled.  We treat it as success when the DRC report
         # was actually produced (meaning the command ran to completion).
+        # Issue #6724: except after a signal kill (negative status, e.g. the
+        # OOM killer) -- the run did not complete, and its --save-board may
+        # not have either, so the ``finally`` restores the previous fills.
+        if result.returncode < 0:
+            from kicad_tools.drc.geometric import describe_returncode
+
+            return KiCadCLIResult(
+                success=False,
+                stdout=result.stdout,
+                stderr=f"Zone fill via DRC failed — {describe_returncode(result.returncode)}",
+                return_code=result.returncode,
+            )
         if drc_report.exists() and drc_report.stat().st_size > 0:
             if stripped is not None and _board_unchanged(target_pcb, stripped, stripped_mtime_ns):
                 # The DRC ran (report written) but the board was not saved:
@@ -2092,6 +2337,14 @@ def _run_fill_zones_via_drc(
         return KiCadCLIResult(success=False, stderr=f"Failed to fill zones: {e}")
     finally:
         if not filled:
+            if unfilled_backup is None and pre_run_bytes is not None:
+                # Issue #6724: no stale fills to restore below, but a kicad-cli
+                # killed (signal) or timed out mid ``--save-board`` may have
+                # left the board half-written: put back the pre-run bytes.
+                # A run that did not refill or save leaves them unchanged.
+                if not _board_unchanged(target_pcb, pre_run_bytes):
+                    with contextlib.suppress(OSError):
+                        target_pcb.write_bytes(pre_run_bytes)
             _restore_stale_zone_fills(target_pcb, unfilled_backup)
         # Clean up the temporary DRC report.
         drc_report.unlink(missing_ok=True)
@@ -2247,6 +2500,17 @@ def run_pcb_export_svg(
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
 
+        if result.returncode != 0:
+            # A killed kicad-cli (e.g. OOM, -9) can leave a truncated
+            # non-empty file behind; never report that as success.
+            from ..drc.geometric import describe_returncode
+
+            return KiCadCLIResult(
+                success=False,
+                stderr=f"SVG export failed: {describe_returncode(result.returncode)}"
+                + (f": {result.stderr.strip()}" if result.stderr and result.stderr.strip() else ""),
+                return_code=result.returncode,
+            )
         if output_path.exists() and output_path.stat().st_size > 0:
             return KiCadCLIResult(
                 success=True,
@@ -2524,6 +2788,17 @@ def run_pcb_render(
             env=_render_env(kicad_cli),
         )
 
+        if result.returncode != 0:
+            # A killed kicad-cli (e.g. OOM, -9) can leave a truncated
+            # non-empty file behind; never report that as success.
+            from ..drc.geometric import describe_returncode
+
+            return KiCadCLIResult(
+                success=False,
+                stderr=f"3D render failed: {describe_returncode(result.returncode)}"
+                + (f": {result.stderr.strip()}" if result.stderr and result.stderr.strip() else ""),
+                return_code=result.returncode,
+            )
         if output_path.exists() and output_path.stat().st_size > 0:
             return KiCadCLIResult(
                 success=True,

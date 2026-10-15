@@ -29,6 +29,9 @@ OUTPUT = "KCT_NATIVE_OBSERVER_OUTPUT"
 #: concurrency permit, so it must not be classified into the same bucket
 #: as a real board-loading launch here either.
 _CAPABILITY_PROBE_FLAGS = frozenset({"--help", "--version"})
+#: Likewise ``_CAPABILITY_PROBE_SUBCOMMANDS``: ``kicad-cli version`` (argv[1]
+#: only) is the discovery probe's spelling and is ungated too (Issue #6786).
+_CAPABILITY_PROBE_SUBCOMMANDS = frozenset({"version"})
 
 
 def category(argv):
@@ -36,7 +39,9 @@ def category(argv):
     words = [os.fsdecode(x) for x in argv] if isinstance(argv, (list, tuple)) else []
     executable = Path(words[0]).name if words else ""
     if executable == "kicad-cli":
-        if not _CAPABILITY_PROBE_FLAGS.isdisjoint(words[1:]):
+        if not _CAPABILITY_PROBE_FLAGS.isdisjoint(words[1:]) or (
+            len(words) > 1 and words[1] in _CAPABILITY_PROBE_SUBCOMMANDS
+        ):
             return "kicad-cli-probe"
         return "kicad-cli"
     if executable.startswith("python"):

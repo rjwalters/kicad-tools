@@ -1115,3 +1115,47 @@ class TestCheckCairosvgMacosAutoDetect:
             result = _check_cairosvg()
 
         assert result is False
+
+
+class TestKilledKicadCli:
+    """A killed kicad-cli (-9) must fail even if it left partial output (#6742)."""
+
+    def test_export_svg_killed_with_partial_output(self, tmp_path):
+        from unittest.mock import MagicMock
+
+        from kicad_tools.mcp.tools.screenshot import _export_svg
+
+        svg = tmp_path / "out.svg"
+
+        def fake_run(cmd, **kwargs):
+            svg.write_text("<svg><g")
+            return MagicMock(returncode=-9, stdout="", stderr="")
+
+        with patch("kicad_tools.mcp.tools.screenshot.subprocess.run", side_effect=fake_run):
+            ok, msg = _export_svg(
+                tmp_path / "b.kicad_pcb", svg, ["F.Cu"], kicad_cli=Path("/usr/bin/kicad-cli")
+            )
+
+        assert not ok
+        assert "SIGKILL" in msg
+
+    @patch("kicad_tools.mcp.tools.screenshot._check_cairosvg", return_value=True)
+    @patch(
+        "kicad_tools.mcp.tools.screenshot.find_kicad_cli", return_value=Path("/usr/bin/kicad-cli")
+    )
+    def test_schematic_svg_killed_with_partial_output(self, mock_find, mock_cairo, tmp_path):
+        from unittest.mock import MagicMock
+
+        sch = tmp_path / "s.kicad_sch"
+        sch.write_text("(kicad_sch)")
+
+        def fake_run(cmd, **kwargs):
+            out_dir = Path(cmd[cmd.index("--output") + 1])
+            (out_dir / "s.svg").write_text("<svg><g")
+            return MagicMock(returncode=-9, stdout="", stderr="")
+
+        with patch("kicad_tools.mcp.tools.screenshot.subprocess.run", side_effect=fake_run):
+            result = screenshot_schematic(sch_path=str(sch))
+
+        assert result["success"] is False
+        assert "SIGKILL" in result["error_message"]

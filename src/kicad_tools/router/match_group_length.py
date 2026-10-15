@@ -100,11 +100,11 @@ from enum import Enum
 from typing import TYPE_CHECKING
 
 from .diffpair_length import DiffPairLengthTracker
-from .length import LengthTracker
 
 if TYPE_CHECKING:
     from kicad_tools.schema.pcb import PCB
 
+    from .kicad_length import KicadLengthModel
     from .primitives import Route
 
 
@@ -225,6 +225,7 @@ class MatchGroupTracker:
         board_thickness_mm: float | None = None,
         num_copper_layers: int = 2,
         blind_buried_supported: bool = True,
+        length_model: KicadLengthModel | None = None,
     ) -> None:
         """Measure and record the routed length of each member of each group.
 
@@ -241,11 +242,11 @@ class MatchGroupTracker:
             num_copper_layers: Number of copper layers in the stack (used
                 to compute per-via drilled length when ``board_thickness_mm``
                 is supplied).  Defaults to ``2`` (typical 2-layer stack).
-            blind_buried_supported: When ``False`` (Issue #4007), a
-                standard (non-micro) via is measured as a full through-via
-                to match KiCad's post-route via promotion on boards without
-                blind/buried drilling.  Defaults to ``True`` (legacy
-                partial-span behavior).
+            blind_buried_supported: Ignored (Issue #6725): KiCad measures the
+                connected span whatever the barrel.
+            length_model: Issue #6725 -- the kicad-cli-exact measurement
+                (board stackup + pad copper); takes precedence over
+                ``board_thickness_mm`` / ``num_copper_layers``.
 
         Notes:
             * Routes whose ``net`` is not a member of any supplied group
@@ -300,6 +301,7 @@ class MatchGroupTracker:
                     board_thickness_mm,
                     num_copper_layers,
                     blind_buried_supported=blind_buried_supported,
+                    length_model=length_model,
                 )
                 self.lengths[net_id] = length
                 measured.append(length)
@@ -315,6 +317,7 @@ class MatchGroupTracker:
                         board_thickness_mm,
                         num_copper_layers,
                         blind_buried_supported=blind_buried_supported,
+                        length_model=length_model,
                     )
                     self.lengths[p_id] = l_p
                     measured.append(l_p)
@@ -324,6 +327,7 @@ class MatchGroupTracker:
                         board_thickness_mm,
                         num_copper_layers,
                         blind_buried_supported=blind_buried_supported,
+                        length_model=length_model,
                     )
                     self.lengths[n_id] = l_n
                     measured.append(l_n)
@@ -342,55 +346,32 @@ class MatchGroupTracker:
         board_thickness_mm: float | None,
         num_copper_layers: int,
         blind_buried_supported: bool = True,
+        length_model: KicadLengthModel | None = None,
     ) -> float:
-        """Return the geometric length of a route in mm, including via drill.
+        """Return the kicad-cli length of a route in mm (Issue #6725).
 
-        Delegates to :meth:`LengthTracker.calculate_route_length` for the
-        segment portion (single source of truth -- see
-        ``LengthTracker.calculate_route_length`` in ``length.py``)
-        and to :meth:`DiffPairLengthTracker._via_length` for the per-via
-        drilled-length policy (the Phase 3H formula at
-        ``DiffPairLengthTracker._via_length`` in ``diffpair_length.py``).
-
-        Keeping the math in the diff-pair tracker (rather than duplicating
-        it here) preserves single source of truth: a future change to the
-        via-length formula touches one place, and the drift-prevention
-        test in this module's suite catches any reimplementation attempt.
+        A pure forward to :meth:`DiffPairLengthTracker._measure_route` (which
+        supersedes the old per-via ``_via_length`` thickness model), which
+        delegates to the shared :mod:`kicad_tools.router.kicad_length`
+        implementation -- the same function ``kct check`` uses, so the
+        tuner, the pair tuner and the checker cannot drift.
 
         Args:
             route: The route whose length to measure.
-            board_thickness_mm: Total stackup thickness in mm.  ``None``
-                ->  vias contribute ``0.0``.
+            board_thickness_mm: With ``num_copper_layers``, builds KiCad's
+                default stackup when ``length_model`` is ``None``; ``None``
+                -> vias contribute ``0.0``.
             num_copper_layers: Number of copper layers in the stack.
-            blind_buried_supported: When ``False`` (Issue #4007), a
-                standard (non-micro) via is measured as a full through-via
-                (see :meth:`DiffPairLengthTracker._via_length`).  Defaults
-                to ``True`` (the drilled span, ``Via.drilled_layers``: a
-                standard router via is through, a micro via partial;
-                issue #6502).
-
-        Returns:
-            Total geometric length (segments + vias) in mm.
+            blind_buried_supported: Ignored (kept for compatibility).
+            length_model: Board stackup + pad copper (preferred).
         """
-        # Segment portion -- the single source of truth for segment
-        # summation (do NOT inline the dx/dy/sqrt loop).
-        total = LengthTracker.calculate_route_length(route)
-
-        # Via portion.  When the caller did not supply board_thickness_mm
-        # (or the stack has fewer than 2 layers) we cannot compute a
-        # drilled length and document that vias contribute 0.0.  Mirrors
-        # DiffPairLengthTracker._measure_route in diffpair_length.py.
-        if board_thickness_mm is None or num_copper_layers <= 1:
-            return total
-
-        for via in route.vias:
-            total += DiffPairLengthTracker._via_length(
-                via,
-                board_thickness_mm,
-                num_copper_layers,
-                blind_buried_supported=blind_buried_supported,
-            )
-        return total
+        return DiffPairLengthTracker._measure_route(
+            route,
+            board_thickness_mm,
+            num_copper_layers,
+            blind_buried_supported=blind_buried_supported,
+            length_model=length_model,
+        )
 
     # =========================================================================
     # Per-group queries
@@ -492,6 +473,7 @@ class MatchGroupTracker:
         board_thickness_mm: float | None = None,
         num_copper_layers: int = 2,
         blind_buried_supported: bool = True,
+        length_model: KicadLengthModel | None = None,
     ) -> float:
         """Return the geometric routed length of a net in mm, read from a routed PCB.
 
@@ -532,6 +514,7 @@ class MatchGroupTracker:
             board_thickness_mm=board_thickness_mm,
             num_copper_layers=num_copper_layers,
             blind_buried_supported=blind_buried_supported,
+            length_model=length_model,
         )
 
     # =========================================================================

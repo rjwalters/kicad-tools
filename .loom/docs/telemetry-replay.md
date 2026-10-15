@@ -5,6 +5,13 @@ slices 1 and R3/R4), the `fleet.state` record (slice R1),
 `loom-daemon telemetry-replay --as-of <t>` (slice R6) and its `--check`
 against the forge with the daily agreement report (slice R7, #11128).
 
+> **The `fleet.state` producer was removed (#11301).** The daemon no longer
+> sends `fleet.state`, so the replay reads only the records already in a
+> store, and a host with none in the window is reported `unknown`, never
+> empty. Fleet state is now a consumer's computation from the facts the daemon
+> still exports. This contract and its SQL stay as the reference for that
+> history; retiring them is a follow-up.
+
 The question this contract answers: **what did the fleet look like at instant
 `t`, as a daemon running at `t` could have known it?** Backtesting
 (#10193) and any retroactive analysis depend on it.

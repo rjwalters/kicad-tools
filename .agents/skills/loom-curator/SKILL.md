@@ -1647,8 +1647,9 @@ never edit. Champion's `PRIOR_REJECTIONS` bounds the rounds: `.loom/docs/promoti
 
 ## Draining `loom:blocked-unnamed` (#10558)
 
-The daemon labels a `loom:blocked` issue naming no blocker or reason
-`loom:blocked-unnamed`. Every pass, regardless of Priority 0-2, query
+The daemon used to label a `loom:blocked` issue naming no blocker or reason
+`loom:blocked-unnamed`; that pass was retired (#11301), so the label is only
+on issues it queued before then. Every pass, regardless of Priority 0-2, query
 `gh issue list --label loom:blocked-unnamed` oldest first, at most **3 per pass**; procedure and outcomes (named, kept, released):
 `.loom/docs/unnamed-block-review.md`. Never add `loom:issue`.
 
@@ -1658,7 +1659,7 @@ The daemon labels a `loom:blocked` issue naming no blocker or reason
 are retired: "Checking Operator-Held Premises" (#6849, which commented when a
 parked reference closed) and "De-escalating Fact-Based Champion Escalations"
 (#7650, which removed the label). A dependency-only wait is a `loom:blocked`
-park, which the daemon's release pass lifts; everything left on
+park (nothing lifts it automatically since #11301); everything left on
 `loom:operator` waits for a human, who removes the label.
 `loom:decision-malformed` is the exception that is not one: the operator's
 bounce hands that item to Curator ("Repairing `loom:decision-malformed`").

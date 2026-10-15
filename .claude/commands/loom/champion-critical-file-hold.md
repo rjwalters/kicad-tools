@@ -156,7 +156,7 @@ gh pr edit $PR_NUMBER --remove-label \"loom:blocked\"
 
 Removing \`loom:blocked\` is your release, and it is durable (#9016): Champion
 will **not** put it back while this PR's change is the one this notice
-describes. A push that changes the diff re-arms the hold (a re-date push or a
+describes. A push that changes the diff re-arms the hold (a tree-identical push or a
 clean merge of \`main\` does not, #9416); one that leaves every critical-file
 pattern clears it. \`loom:pr\` stays: Judge's approval stands.
 ${CF_WF_NOTE}

@@ -117,53 +117,23 @@ the next person to add one will have an equally good argument.
    job while the always-run required checks stay green, as on #10403), when
    any job failed or was cancelled, or when a job was skipped only because its
    upstream did not succeed. A skip the path filter decided still passes. The
-   rule lives in `scripts/ci-result-gate.sh`; `merge-pr.sh` independently
-   refuses a head whose latest `CI` run is not `success` and names the
-   cancelled jobs. Remedy: `gh run rerun --failed <run>` (in place, never a
-   cancel). `CI Result` becomes a required context only after it has reported
-   on `main`; that ruleset change is an operator step.
+   rule lives in `scripts/ci-result-gate.sh`. `merge-pr.sh` no longer
+   re-checks the `CI` run itself (#12063): `CI Result` as the required
+   context is what GitHub gates the merge on. Remedy: `gh run rerun --failed
+   <run>` (in place, never a cancel). The ruleset change is an operator step.
 
 8. **Group required gates by component, and judge each component on its own
    inputs.** Many tiny required jobs compete for the concurrent-job cap, so
    #9065 folded 19 of them into `Structural Checks`, `Daemon Checks` and the
    macOS `Shell Syntax` leg. Each gate keeps a `# component: <name>` marker
-   and its own input spec. The freshness guard calls a composite stale when
-   *any* component is stale, never on the union of their inputs, so grouping
-   does not make merges go stale more often. Every step runs under
+   and its own input spec. Every step runs under
    `!cancelled()`, so one red gate cannot hide another.
 
-9. **Narrowing what a *result* covers is not path-filtering what a *check*
-   runs.** Rule 3 forbids deciding whether to RUN a check from a path set.
-   The freshness guard asks a different question — "can merging this PR turn
-   a check that already ran and passed red?" — and answering it needs the
-   input set the check actually read (`merge_pr/stale_checks/inputs.rs`).
-   Three narrowings live there, and both must obey the same three constraints:
-   **derive the scope from the repo's own text, never a hand-maintained
-   second copy**; **keep it per-file, never per-commit**; and **fail closed
-   to the broader answer on any doubt**.
-   - *Machine restamps* (#8919, #9065): the release version bump and the
-     `chore: resync installed Loom surfaces` metadata stamp are discounted
-     from the base-move diff, per FILE and only for lines matching each
-     field's pinned value shape. A resync that also rewrote an installed
-     surface leaves that surface in the diff.
-   - *`ci.yml` block attribution* (#9065): one path covers ~25 jobs of which
-     three are required, so a change set's `ci.yml` hunks are attributed to
-     the job and `# component:` block they edit, read from the workflow's own
-     text. **Both sides** are attributed, each against the tree its patch
-     diffs *to* — the base tip for the base move, the PR head for the PR's
-     own delta — and each independently, so one side's doubt never narrows
-     the other. A preamble edit, a structural deletion, an unparseable hunk,
-     a touched line past the file's end, or markers that disagree with the
-     guard's component table all restore the whole-file meaning on that side.
-     Nothing is skipped and no check's coverage narrows — every gate still
-     runs on every PR.
-   - *Per-repo declarations* (#9589): a consumer repo's required contexts are
-     absent from loom's table, so each is stale on any base move unless the
-     repo declares its inputs in `.loom/stale-check-inputs.json`
-     ([stale-check-inputs](stale-check-inputs.md)). The declaration is the
-     repo's own text, read from the base tip, and is itself a global input of
-     every check it declares. An unlisted context gets no guessed default, and
-     any malformed or unreadable file is ignored with a warning.
+9. *(Retired by #12063.)* This rule governed the input scoping of the
+   `merge-pr.sh` required-check freshness guard (#8248/#8919/#9065/#9589),
+   which was deleted: a PR whose required checks are green at its head is
+   not re-tested because the base moved. Rule 3 still forbids path-filtering
+   what a check runs.
 
 10. **Every speed trade-off on the merge gate is owed a slow run somewhere
     else.** Rules 7 and 8 make a fast gate legitimate; they do not make it
@@ -313,7 +283,7 @@ a cancellation rate.
 - #7745 / #7761 — the same "a skipped check must not read as a pass" rule,
   learned in the resync and guard layers
 - #8248 / #8919 / #9065 — the required-check freshness guard, its input-scoped
-  predicate, and rule 9's two narrowings
+  predicate, and rule 9's narrowings (all retired by #12063)
 - #9065 / #9069 — the wall-time work rule 10 exists to balance, and #9085 —
   `ci-daily.yml`, the slow run that balances it
 - #10826 — releases only from a green `main` `CI` run, at its `head_sha`

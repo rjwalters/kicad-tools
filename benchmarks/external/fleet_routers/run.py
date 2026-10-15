@@ -470,6 +470,7 @@ def _dru_rules(text: str) -> list[dict[str, Any]]:
         blk = text[s:e]
         m = re.match(r'\(rule\s+(?:"([^"]*)"|(\S+))', blk)
         name = (m.group(1) or m.group(2)) if m else "?"
+        cond = re.search(r'\(condition\s+"((?:[^"\\]|\\.)*)"', blk)
         constraints = []
         for cm in re.finditer(r"\(constraint\s+(\w+)((?:\s*\([^()]*\))*)\s*\)", blk):
             mn = re.search(r"\(min\s+([-\d.]+)\s*(mm|mil)?\)", cm.group(2))
@@ -481,58 +482,12 @@ def _dru_rules(text: str) -> list[dict[str, Any]]:
             {
                 "name": name,
                 "conditioned": "(condition" in blk,
-                "condition": (re.search(r'\(condition\s+"([^"]*)"', blk) or [None, None])[1],
+                "condition": cond.group(1) if cond else None,
                 "layer_scoped": "(layer" in blk,
                 "constraints": constraints,
             }
         )
     return rules
-
-
-# Issue #6765: DRU constraint types with no Specctra construct. A DSN carries
-# copper clearance/width/via geometry only -- not silkscreen, text, drill-to-
-# copper, annular ring or board-edge/hole-edge checks -- so a router fed a DSN
-# cannot lose them; they are post-route checks, reported apart from losses.
-_DRU_NOT_REPRESENTABLE = frozenset(
-    {
-        "silk_clearance",
-        "hole_clearance",
-        "annular_width",
-        "edge_clearance",
-        "physical_hole_clearance",
-        "text_thickness",
-        "text_height",
-    }
-)
-
-# A clearance condition that is a NetClass match plus only the exemptions kct's
-# generated per-class rules add (same-footprint pad pairs, coupled diff pairs).
-# The class match is what a class (rule ...) could carry, but the exemptions
-# have no Specctra form, so exporting it would be stricter than the DRU: it is
-# not-representable rather than a loss. Any other condition stays a loss.
-_NETCLASS_MATCH = re.compile(
-    r"\(\s*[AB]\.NetClass\s*==\s*'[^']+'(?:\s*\|\|\s*[AB]\.NetClass\s*==\s*'[^']+')*\s*\)"
-)
-_EXEMPTIONS = (
-    re.compile(
-        r"!\(\s*A\.Type\s*==\s*'Pad'\s*&&\s*B\.Type\s*==\s*'Pad'"
-        r"\s*&&\s*A\.Reference\s*==\s*B\.Reference\s*\)"
-    ),
-    re.compile(r"!A\.isCoupledDiffPair\(\)"),
-)
-
-
-def _clearance_is_exemption_only(rule: dict[str, Any]) -> bool:
-    """True for a NetClass-scoped clearance whose extra clauses are pure exemptions."""
-    cond = rule.get("condition")
-    if not cond or rule["layer_scoped"]:
-        return False
-    rest, n = _NETCLASS_MATCH.subn("", cond, count=1)
-    if n != 1:
-        return False
-    for ex in _EXEMPTIONS:
-        rest = ex.sub("", rest)
-    return not rest.replace("&&", "").strip()
 
 
 def _dsn_unit_mm(dsn: str) -> float:
@@ -620,23 +575,97 @@ def _zone_copper_layers(zone: Any, board_layers: list[str]) -> list[str]:
     return out
 
 
+# DRU constraint types no Specctra router consumes (fab/silk/edge geometry).
+# The referee ``kicad-cli`` DRC grades them, so they are not DSN losses.
+NOT_ROUTING_CONSTRAINTS = frozenset(
+    {
+        "silk_clearance",
+        "text_thickness",
+        "text_height",
+        "annular_width",
+        "edge_clearance",
+        "physical_hole_clearance",
+        "hole_clearance",
+    }
+)
+
+# Issue #6784: ``clearance`` rules a DSN router cannot influence, matched on
+# rule name prefix AND condition so a renamed or hand-edited rule that also
+# touches tracks/vias is still audited. ``Native zone clearance`` (condition
+# selects a ``Zone``) is applied by the zone filler (the scorer runs
+# ``--refill-zones``); ``SMD Pad Clearance`` (condition selects SMD pads on
+# both sides) is pad-to-pad spacing between footprints, fixed by placement and
+# identical for every router. Diff-pair ``skew`` / ``diff_pair_uncoupled`` /
+# ``via_count`` are deliberately NOT here: they stay losses (see README,
+# "Rules a DSN cannot carry").
+
+
+def _is_not_routing_clearance_rule(rule: dict) -> bool:
+    """Whether a ``clearance`` rule is zone-fill or SMD pad-to-pad only."""
+    name = rule["name"]
+    cond = re.sub(r"\s+", "", rule.get("condition") or "")
+    if name.startswith("Native zone clearance"):
+        return "Type=='Zone'" in cond
+    if name.startswith("SMD Pad Clearance"):
+        return all(
+            f"{side}.{term}" in cond
+            for side in ("A", "B")
+            for term in ("Type=='Pad'", "Pad_Type=='SMD'")
+        )
+    return False
+
+
+def _condition_classes(condition: str | None) -> list[str]:
+    """Net class names a DRU condition selects via ``NetClass == '...'``."""
+    if not condition:
+        return []
+    return [
+        m.replace("\\'", "'").replace("\\\\", "\\")
+        for m in re.findall(r"NetClass\s*==\s*'((?:[^'\\]|\\.)*)'", condition)
+    ]
+
+
+def _dsn_boundary_inset_mm(dsn: str, outline: list[tuple[float, float]]) -> float | None:
+    """How far the emitted ``(boundary ...)`` sits inside the board outline.
+
+    ``None`` when either polygon is missing or invalid.
+    """
+    from shapely.geometry import Polygon
+
+    m = re.search(r"\(boundary\s*\(path\s+\S+\s+\S+\s+([^)]*)\)", dsn)
+    if not m or not outline:
+        return None
+    scale = _dsn_unit_mm(dsn)
+    nums = [float(v) * scale for v in m.group(1).split()]
+    if len(nums) < 6:
+        return None
+    emitted = Polygon(list(zip(nums[0::2], nums[1::2], strict=False)))
+    ring: list[tuple[float, float]] = []
+    for pt in outline:
+        if not ring or pt != ring[-1]:
+            ring.append(pt)
+    board = Polygon(ring)
+    if not (emitted.is_valid and board.is_valid) or not board.buffer(1e-6).contains(emitted):
+        return None
+    return float(emitted.exterior.distance(board.exterior))
+
+
 def dsn_audit(
     pcb: Path,
     project: Path | None,
     dru: Path | None,
     dsn_path: Path,
-    not_representable: list[dict[str, str]] | None = None,
+    not_routing: list[dict[str, str]] | None = None,
 ) -> list[dict[str, str]]:
     """List every board/rule constraint the exported DSN does not carry.
+
+    DRU constraints no router consumes (``NOT_ROUTING_CONSTRAINTS``) are not
+    losses; when ``not_routing`` is given they are appended to it instead.
 
     Exports with this repo's ``KiCadToDSNExporter`` (if ``dsn_path`` does not
     exist yet) and compares what it *emitted* against what the board, its
     frozen project and its frozen DRU declare. Each entry is
     ``{"kind", "detail"}``; an empty list means no loss was detected.
-
-    Issue #6765: DRU rules Specctra has no vocabulary for (silk, hole, annular,
-    edge, text) are not losses; they are appended to ``not_representable``
-    (same entry shape) when the caller passes a list.
     """
     from kicad_tools.export.dsn import KiCadToDSNExporter
     from kicad_tools.schema.pcb import PCB
@@ -717,7 +746,13 @@ def dsn_audit(
         rules = pro.get("board", {}).get("design_settings", {}).get("rules", {})
         edge = rules.get("min_copper_edge_clearance") or 0.0
         if float(edge) > 0:
-            loss("board_rule", f"min_copper_edge_clearance {edge} mm not exported")
+            inset = _dsn_boundary_inset_mm(dsn, exp._board_outline)
+            if inset is None or inset < float(edge) - 1e-3:
+                loss(
+                    "board_rule",
+                    f"min_copper_edge_clearance {edge} mm not exported "
+                    f"(boundary inset {inset or 0:g} mm)",
+                )
         for key, dsn_val in (("min_clearance", dsn_clear), ("min_track_width", dsn_width)):
             v = rules.get(key)
             if v is not None and float(v) > dsn_val + 1e-9:
@@ -734,18 +769,57 @@ def dsn_audit(
         }
         for rule in _dru_rules(dru.read_text()):
             for c in rule["constraints"]:
-                if c["type"] in _DRU_NOT_REPRESENTABLE or (
-                    c["type"] == "clearance" and _clearance_is_exemption_only(rule)
+                if c["type"] in NOT_ROUTING_CONSTRAINTS or (
+                    c["type"] == "clearance" and _is_not_routing_clearance_rule(rule)
                 ):
-                    if not_representable is not None:
-                        not_representable.append(
+                    if not_routing is not None:
+                        not_routing.append(
                             {
-                                "kind": "dru",
-                                "detail": f"rule {rule['name']!r}: {c['type']} "
-                                f"min {c['min_mm']} mm has no Specctra form",
+                                "rule": rule["name"],
+                                "type": c["type"],
+                                "min_mm": c["min_mm"],
                             }
                         )
                     continue
+                if (
+                    c["type"] == "clearance"
+                    and c["min_mm"] is not None
+                    and rule["conditioned"]
+                    and not rule["layer_scoped"]
+                ):
+                    # A class-scoped clearance is carried by that class's
+                    # emitted (class ...) block, which the exporter writes
+                    # without the same-footprint / coupled-pair exemptions.
+                    names = _condition_classes(rule.get("condition"))
+                    covered = [
+                        dsn_classes.get("kicad_default" if n == "Default" else n) for n in names
+                    ]
+                    if names and all(
+                        g is not None
+                        and g["clearance"] is not None
+                        and g["clearance"] >= c["min_mm"] - 1e-9
+                        for g in covered
+                    ):
+                        continue
+                if c["type"] == "diff_pair_gap" and c["min_mm"] is not None:
+                    # No DSN construct; the gap is implied when every net the
+                    # rule selects is routed under a class clearance >= it.
+                    # A rule with no net-class condition is judged against
+                    # every pair net's exported class (stricter gap = loss).
+                    names = _condition_classes(rule.get("condition"))
+                    if names:
+                        gots = [
+                            dsn_classes.get("kicad_default" if n == "Default" else n) for n in names
+                        ]
+                    else:
+                        gots = list(dsn_classes.values())
+                    if gots and all(
+                        g is not None
+                        and g["clearance"] is not None
+                        and g["clearance"] >= c["min_mm"] - 1e-9
+                        for g in gots
+                    ):
+                        continue
                 floor = implied.get(c["type"])
                 if (
                     floor is not None
@@ -868,13 +942,17 @@ def ses_import(ses: Path, prepared: Path, out: Path) -> tuple[list[dict[str, str
         lost.append(
             {"kind": "ses_import", "detail": f"{len(imp.vias)}/{raw['vias']} SES vias imported"}
         )
-    if raw["resolution"] not in (None, 1.0):
+    # Since #6593 the importer honours ``(resolution UNIT N)``; a loss only
+    # remains if what it applied differs from what the session declares.
+    if raw["resolution"] is not None and (
+        (imp._resolution_unit, imp._resolution) != (raw["resolution_unit"], raw["resolution"])
+    ):
         lost.append(
             {
                 "kind": "ses_import",
                 "detail": (
                     f"SES resolution {raw['resolution_unit']} {raw['resolution']:g}: "
-                    "importer assumes 1 unit = 1 um"
+                    f"importer applied {imp._resolution_unit} {imp._resolution:g}"
                 ),
             }
         )
@@ -1034,7 +1112,7 @@ class RunRecord:
     output: str | None = None
     partial_artifact: str | None = None
     lost_constraints: list[dict[str, str]] = field(default_factory=list)
-    not_representable: list[dict[str, str]] = field(default_factory=list)
+    not_routing_rules: list[dict[str, Any]] = field(default_factory=list)
     placement_violations: list[str] = field(default_factory=list)
     tool_config: dict[str, Any] = field(default_factory=dict)
     interchange: dict[str, Any] | None = None
@@ -1215,7 +1293,7 @@ def run_tool(
                 prep.frozen_dir / f"{prep.stem}.kicad_pro",
                 prep.frozen_dir / f"{prep.stem}.kicad_dru",
                 dsn,
-                rec.not_representable,
+                rec.not_routing_rules,
             )
         except Exception as exc:  # noqa: BLE001
             rec.outcome, rec.stage, rec.reason = "scorer-failure", "dsn-export", repr(exc)
