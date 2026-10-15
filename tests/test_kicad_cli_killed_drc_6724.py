@@ -275,6 +275,35 @@ class TestPourOracle:
         assert "Skipped for --timeout" not in banner
 
 
+class TestPostRouteDrc:
+    def test_crashed_native_drc_fails_without_strict(self, monkeypatch, tmp_path, capsys):
+        """A killed kicad-cli is not a KiCad-less environment: no soft PASS."""
+        from unittest.mock import MagicMock, patch
+
+        import kicad_tools.cli.runner as runner_mod
+        from kicad_tools.cli.route_cmd import run_post_route_drc
+
+        monkeypatch.setattr(runner_mod, "find_kicad_cli", lambda: FAKE_CLI)
+        _fake_kicad_cli(monkeypatch, geometric, returncode=-signal.SIGKILL, report=None)
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text("(kicad_pcb)")
+        clean = MagicMock(error_count=0, warning_count=0, errors=[], warnings=[])
+
+        with (
+            patch("kicad_tools.validate.DRCChecker") as checker_cls,
+            patch("kicad_tools.schema.pcb.PCB"),
+        ):
+            checker_cls.return_value.check_all.return_value = clean
+            errors, _warnings = run_post_route_drc(
+                output_path=pcb, manufacturer="jlcpcb", layers=2, quiet=False
+            )
+
+        out = capsys.readouterr().out
+        assert errors >= 1
+        assert "DRC FAILURE" in out and "SIGKILL" in out
+        assert "DRC PASSED" not in out
+
+
 # ---------------------------------------------------------------------------
 # The recipe pipeline gate
 # ---------------------------------------------------------------------------

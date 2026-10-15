@@ -5056,6 +5056,29 @@ def run_post_route_drc(
         if strict_drc_failed or native_drc_failed:
             error_count += 1
 
+        def _list_findings(shown_error_count: int) -> None:
+            # Show first few violations
+            shown = 0
+            for v in results.errors[:5]:
+                location = f" at ({v.location[0]:.2f}, {v.location[1]:.2f})" if v.location else ""
+                print(f"    - {v.rule_id}: {v.message}{location}")
+                shown += 1
+            if shown_error_count > 5:
+                print(f"    ... and {shown_error_count - 5} more errors")
+
+            if warning_count > 0 and shown < 5:
+                for v in results.warnings[: 5 - shown]:
+                    location = (
+                        f" at ({v.location[0]:.2f}, {v.location[1]:.2f})" if v.location else ""
+                    )
+                    print(f"    - {v.rule_id}: {v.message}{location}")
+                if warning_count > (5 - shown):
+                    print(f"    ... and {warning_count - (5 - shown)} more warnings")
+
+            print(f"\n  Run 'kct check {output_path} --mfr {manufacturer}' for full details")
+            if shown_error_count > 0:
+                print(f"  Run 'kct fix-drc {output_path}' to auto-repair clearance violations")
+
         if not quiet and native_drc_failed:
             print("\n--- DRC Validation ---")
             print(f"  DRC FAILURE: native kicad-cli DRC did not complete ({geo.note}).")
@@ -5070,6 +5093,7 @@ def run_post_route_drc(
                 print(f"  Internal errors: {results.error_count}")
                 if warning_count > 0:
                     print(f"  Internal warnings: {warning_count}")
+                _list_findings(results.error_count)
         elif not quiet and strict_drc_failed:
             print("\n--- DRC Validation ---")
             reason_text = geo.note or "native geometric DRC did not run"
@@ -5120,29 +5144,7 @@ def run_post_route_drc(
                 if warning_count > 0:
                     print(f"  Warnings: {warning_count}")
 
-                # Show first few violations
-                shown = 0
-                for v in results.errors[:5]:
-                    location = (
-                        f" at ({v.location[0]:.2f}, {v.location[1]:.2f})" if v.location else ""
-                    )
-                    print(f"    - {v.rule_id}: {v.message}{location}")
-                    shown += 1
-                if error_count > 5:
-                    print(f"    ... and {error_count - 5} more errors")
-
-                if warning_count > 0 and shown < 5:
-                    for v in results.warnings[: 5 - shown]:
-                        location = (
-                            f" at ({v.location[0]:.2f}, {v.location[1]:.2f})" if v.location else ""
-                        )
-                        print(f"    - {v.rule_id}: {v.message}{location}")
-                    if warning_count > (5 - shown):
-                        print(f"    ... and {warning_count - (5 - shown)} more warnings")
-
-                print(f"\n  Run 'kct check {output_path} --mfr {manufacturer}' for full details")
-                if error_count > 0:
-                    print(f"  Run 'kct fix-drc {output_path}' to auto-repair clearance violations")
+                _list_findings(error_count)
 
         return error_count, warning_count
 
