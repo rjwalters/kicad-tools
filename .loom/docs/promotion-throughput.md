@@ -10,7 +10,7 @@ Three throttles caused that tail. Each is fixed below.
 
 ## 1. Promotion runs every pass, even while PRs remain
 
-> **Step dispatch (accepted design, #11894; not yet implemented).** Under `autonomous.workFinder.stepDispatch: on`, promotion runs as one terminal targeted Champion step per curated issue (`/loom:champion --issue N`). The PR-row and promotion slices and `tier2Cap` described below don't apply to those steps. See [`docs/design/work-finder-step-dispatch.md`](https://github.com/rjwalters/loom/blob/main/docs/design/work-finder-step-dispatch.md) §12.
+> **Step dispatch (#11894, live since #11909).** Promotion runs as one terminal targeted Champion step per curated issue (`/loom:champion --issue N`), drawn by the work finder. The interval Champion runs `--non-item` only, so the PR-row and promotion slices and `tier2Cap` described below no longer drive promotion. See [`docs/design/work-finder-step-dispatch.md`](https://github.com/rjwalters/loom/blob/main/docs/design/work-finder-step-dispatch.md) §12.
 
 Champion used to promote only once no PRs remained. A repository with a steady
 or held PR queue never reached promotion. On 2026-10-07, rjwalters/loom had 38

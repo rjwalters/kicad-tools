@@ -571,6 +571,10 @@ private:
     // while a pairwise (cross-domain) matrix is installed: that branch's
     // ``note_pairwise_block`` counts every refusal into the Python-visible
     // ``pairwise_block_count``, and replaying the verdict would under-count.
+    //
+    // Only the one-shot ``route()`` loop still uses this per-node memo; the
+    // resumable ``run_astar_loop()`` uses the per-``(x, y)`` ``via_verdict_``
+    // table below, which subsumes it.
     struct ViaBlockMemo {
         int state = -1;  // -1 = not evaluated, 0 = clear, 1 = blocked
         int blocking_net = 0;
@@ -597,6 +601,48 @@ private:
             return state != 0;
         }
     };
+
+    // Issue #5617: one ``is_via_blocked_diag`` verdict per ``(x, y)`` per
+    // ``run_astar_loop()`` call -- the cross-node sibling of ``ViaBlockMemo``.
+    //
+    // The via-drop check's inputs are the cell ``(x, y)`` plus values that
+    // are fixed for the whole resumable search (``search_net_``,
+    // ``search_negotiated_mode_``, ``search_via_radius_cells_``, the emit /
+    // fill overrides, ``relief_mode_``) and the grid, which the loop never
+    // mutates (no ``Grid3D`` mutator is reachable from ``pathfinder.cpp``)
+    // and Python cannot touch mid-call (the bindings hold the GIL).  The
+    // layer the node sits on is NOT an input: a through via spans the stack.
+    // So a node at ``(x, y, L1)`` -- typically the one a via from
+    // ``(x, y, L0)`` just reached -- asks exactly the question ``(x, y, L0)``
+    // already answered.
+    //
+    // The table is epoch-stamped like the #3309 search arrays and the epoch
+    // advances at the top of EVERY ``run_astar_loop()`` call (fresh search
+    // and each ``resume()``), so nothing is carried across a point where
+    // Python could have changed the grid or the search parameters.  The
+    // verdict *and* its ``out_*`` blocker diagnostics are replayed, so the
+    // caller's per-layer ``via_block_count`` bookkeeping is unchanged.  Like
+    // ``ViaBlockMemo`` it is bypassed while a pairwise (cross-domain) matrix
+    // is installed: ``note_pairwise_block`` counts every refusal.
+    struct ViaVerdict {
+        int8_t blocked = 0;
+        int blocking_net = 0;
+        float world_x = 0.0f;
+        float world_y = 0.0f;
+    };
+    std::vector<uint32_t> via_verdict_gen_;
+    std::vector<ViaVerdict> via_verdict_;
+    uint32_t via_verdict_epoch_ = 0;
+    int via_verdict_cols_ = 0;
+    int via_verdict_rows_ = 0;
+
+    // Size the table for the current grid and start a new epoch.
+    void begin_via_verdict_epoch();
+
+    // ``is_via_blocked_diag`` for the active resumable search, memoised on
+    // ``(x, y)`` for the current epoch.
+    bool search_via_blocked_cached(int x, int y, int& out_blocking_net,
+                                   float& out_world_x, float& out_world_y);
 
     // Issue #4848: distance-sorted offsets for the soft pairwise avoidance
     // band, the ring-ordered analogue of ``via_kernel_offsets_``.  Every entry

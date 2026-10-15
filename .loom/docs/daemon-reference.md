@@ -4000,7 +4000,7 @@ Thresholds are minutes-scale, not hours, and env-overridable:
 
 | Claim label | Env var | Default |
 |-------------|---------|---------|
-| `loom:reviewing` | `LOOM_STALE_REVIEWING_MINUTES` | 30 — the SAME env var `.claude/commands/loom/judge.md`'s "Stale `loom:reviewing` Claim Check" already established, so the agent-side fast path and this always-on daemon backstop share one convention |
+| `loom:reviewing` | `LOOM_STALE_REVIEWING_MINUTES` | 45 (30 before #11909; longer than a Judge step's 30-minute timeout) — the SAME env var `.claude/commands/loom/judge.md`'s "Stale `loom:reviewing` Claim Check" already established, so the agent-side fast path and this always-on daemon backstop share one convention |
 | `loom:treating` | `LOOM_STALE_TREATING_MINUTES` | 60 — a Doctor's fix cycle legitimately runs longer than a single Judge review pass; the SAME env var `.claude/commands/loom/doctor.md`'s "Stale `loom:treating` Claim Check" fast path uses (#4527) |
 
 Reclaiming removes only the stale claim label — the PR's state label (still
@@ -4079,7 +4079,7 @@ explicit `/curator <number>` naming it) and runs the stale-claim check —
 there is no periodic sweep that reclaims it in the background the way
 `reconcile_pr_claims` does for `loom:reviewing`/`loom:treating` or
 `reconcile_workspace` does for `loom:building`. `LOOM_STALE_CURATING_MINUTES`
-(default 30, matching `LOOM_STALE_REVIEWING_MINUTES`) and
+(default 45, matching `LOOM_STALE_REVIEWING_MINUTES`) and
 `LOOM_MAX_STANDDOWN_STREAK` are shared with the Judge/Doctor convention
 above. Extending `claim_reconciliation` to cover `loom:curating` as a fourth
 surface (mirroring `reconcile_pr_claims`'s `decide_pr`, keyed off the same
@@ -6392,7 +6392,7 @@ knobs not yet audited here.
 | `autonomous.workFinder.quarantine.instaCrashSecs` | `LOOM_WORK_FINDER_QUARANTINE_INSTA_CRASH_SECS` | `60` | Checkpoint-less death within this window of dispatch counts as an insta-crash. Zero/invalid → default |
 | `autonomous.workFinder.quarantine.maxReleaseAttempts` | `LOOM_WORK_FINDER_QUARANTINE_MAX_RELEASE_ATTEMPTS` | `20` | Consecutive failed `loom:blocked` → `loom:issue` **release** retries before the reaper gives up on one issue and logs a single `ERROR` for a human (#8953). Bounds the *release* retry, not insta-crash accrual. A retry skipped because the shared rate-limit breaker is suppressed does not count. Zero/invalid → default |
 | `autonomous.workFinder.dispatchBackoff.enabled` | `LOOM_DISPATCH_BACKOFF` | `true` | Per-issue dispatch backoff on/off (#4485). A safety backstop — defaults on. Env truthy (`1`/`true`/`yes`/`on`) enables, any other value disables; wins over config |
-| `autonomous.workFinder.dispatchBackoff.baseSecs` | `LOOM_DISPATCH_BACKOFF_BASE_SECS` | `60` | Backoff applied after the **first** failed dispatch of an issue; doubles per consecutive failure. Zero/invalid → default |
+| `autonomous.workFinder.dispatchBackoff.baseSecs` | `LOOM_DISPATCH_BACKOFF_BASE_SECS` | `60` | Backoff applied after the **first** failed dispatch of an issue; doubles per consecutive failure. Zero/invalid → default (a zero is refused with a warning, since #12006: the base is never below 1 s) |
 | `autonomous.workFinder.dispatchBackoff.maxSecs` | `LOOM_DISPATCH_BACKOFF_MAX_SECS` | `21600` | Ceiling on the doubling (6 h since #11854; was 900) — also the idle window after which an issue's consecutive-failure tally restarts at zero. Only an issue-attributable fast failure climbs to it; every other cause (lost lease race, token-pool death, environmental class, open-PR refusal or yield, `dispatch-backoff record`) stays capped at 900 s. Zero/invalid → default; clamped up to `baseSecs` |
 | `autonomous.workFinder.noopCooldown.enabled` | `LOOM_WORK_FINDER_NOOP_COOLDOWN` | `true` | No-op re-dispatch cooldown on/off (#6670). A safety backstop — defaults on. Env truthy (`1`/`true`/`yes`/`on`) enables, any other value disables; wins over config |
 | `autonomous.workFinder.noopCooldown.cooldownSecs` | `LOOM_WORK_FINDER_NOOP_COOLDOWN_SECS` | `3600` | How long a self-reported no-op release (`loom-daemon noop-cooldown record` / `RecordNoopRelease`) holds an issue out of dispatch. Flat, non-exponential — every record re-arms the same window. Zero/invalid → default. `/loom:sweep`'s Builder phase is the first in-repo caller via `defaults/scripts/record-noop-release.sh` (#6740) — see "No-op re-dispatch cooldown (#6670)" below |
@@ -6452,7 +6452,7 @@ knobs not yet audited here.
 | `autonomous.roleRunner.onIdle` | *(config only)* | `[]` (none) | Subset of all **8** shipped roles — the 7 above **plus `architect`**, which is reachable here and nowhere else by default (#5656) — to fire on the work-finder **idle edge** (#4364) — the non-idle → idle transition (0 in-flight sweeps AND nothing dispatched this tick), in addition to the interval cadence. Absent → none (opposite default from `roles`); unknown names ignored with a warning. Debounced to min 60s per (root, role) and skipped while that role's interval/idle run is in progress. **Requires the work finder enabled** to observe idleness (a startup warning fires if set with the work finder off). **Also gated by that same root's own `enabled`** (#4377) — see below |
 | `autonomous.roleRunner.onIdleMaxWait` | *(config only)* | *(unset — no promotion, today's idle-edge-only firing)* | **Per-role starvation guard for an `onIdle` role (#7511).** A `{"<role>": "<duration>"}` object (e.g. `{"hermit": "24h", "auditor": "72h"}`, duration strings `<n>s`/`<n>m`/`<n>h`/`<n>d`) naming the longest a role may go without a completed tick before it is **promoted** into the next interval-cadence pass — see [`onIdleMaxWait` — promoting a starved `onIdle` role](#onidlemaxwait--promoting-a-starved-onidle-role-7511) below |
 | `autonomous.roleRunner.architectMaxProposals` | `LOOM_ARCHITECT_MAX_PROPOSALS` | `5` | **Per-invocation** cap on how many proposal issues one `architect` dispatch may file (#5656) — the actuator-saturation limit of the idle-edge control loop. Passed to the session as `/loom:architect --max-proposals <n>`, which `architect.md` enforces as a hard ceiling. Per-repo on purpose (the workable cap grows with a repo's maturity — ~5 while work is narrow, 7+ once it fans out), so it is read from each root's own config. Zero/negative/non-integer at either tier drops to the next one (a cap of `0` would spend a whole session forbidden from producing anything). Ignored for every other role |
-| `autonomous.roleRunner.championMode` | *(config only)* | `"all"` | **Which of Champion's queues a role-runner Champion tick works (#11859).** `"all"` (or absent) dispatches `/loom:champion`, the batch pass, byte-for-byte unchanged. `"non-item"` dispatches `/loom:champion --non-item`: proposals (architect/hermit/auditor), epics, Doctor-cap parked PRs, rollout checks and the batch-wide Pass 0 / held-PR census, but **no** curated-issue promotion and **no** `loom:pr` merge; those arrive as targeted `/loom:champion --issue N` / `--pr N` steps (`champion-targeted.md`). Set it on a root whose item work has moved to step dispatch, so the interval Champion keeps its other queues without double-acting on an item. Applies to the interval and idle-edge launches alike; `roles` membership is unaffected (keep `champion` listed). Per root and live (re-read every tick). No env override on purpose: it must differ per root during a staged rollout. Case-insensitive; any other value warns and runs `"all"`. Ignored for every other role |
+| `autonomous.roleRunner.championMode` | *(config only)* | *(retired)* | **Retired by #11909.** Every role-runner Champion launch is `/loom:champion --non-item`: proposals (architect/hermit/auditor), epics, Doctor-cap parked PRs, rollout checks and the batch-wide Pass 0 / held-PR census. Curated-issue promotion and `loom:pr` merges are work-finder steps (`/loom:champion --issue N` / `--pr N`, `champion-targeted.md`). Any value is ignored with a warning |
 | **`curator.backlogTarget`** (top-level `curator`, not `autonomous.*`) | *(config only)* | *(unset: step skipped)* | **How many open issues this repo should hold (#11819).** Read through the full config resolver, so any tier may set it (machine defaults < `.loom/config.json` < `.loom-project/project.json` < fleet `.loom-local/fleet-repo.json` < host `.loom-local/local.json`). When set, each role-runner Curator dispatch counts the repo's open issues (one REST `search/issues` call, PRs excluded) and passes `/loom:curator --backlog-level <lenient\|normal\|strict> --backlog-open <n> --backlog-target <n>` from `r = open / target` (`< 0.5` lenient, `0.5`–`1.0` normal, `> 1.0` strict), which runs `curator.md`'s keep-or-close admission step on `loom:triage` issues; a failed count passes `normal` (no `--backlog-open`) and logs a `WARN`. Each such dispatch exports one `backlog.level` OTLP log. Unset, zero, negative or non-integer: no count, no flags, no record. Attended `/curator`, `/curator <n>` and `/loom:sweep` pass no flags. Per-repo, live |
 | `autonomous.balance.idleGate` | `LOOM_BALANCE_IDLE_GATE` | `false` | **Pipeline-empty gate for hermit/architect idle generation (#10817, slice 4 of #10630).** Off: an `onIdle` edge means a host slot is free, exactly as before (no ledger read, no log line). On: `hermit` and `architect` additionally need this repo's pipeline empty -- no review/changes/merge debt in the demand ledger (`role_runner::demand`) and, where observed, no ready/building issues; any observed work denies the run even with free slots. Unobserved axes never deny nor newly grant (today's host-slot rule applies). Other idle roles are untouched; `architectMaxProposals` still caps a granted architect run. A grant logs `role_runner: idle grant root=<r> role=<role> trigger=idle reason=pipeline-empty`. Precedence env > config > default; truthy `1/true/yes/on`, falsy `0/false/no/off`, an invalid env value warns and falls back to config. Per-repo, live |
 | `autonomous.roleRunner.collisionDetection` | `LOOM_ROLE_RUNNER_DETECT_COLLISIONS` | inherits `autonomous.collisionDetection.enabled`, else `false` | Cross-host role-tick collision baseline (#4623). Detection only — a pre-tick probe of that role's own label queue, logged/counted, never acted on. Absent → falls through to #4085's shared toggle; see [Cross-host role-tick collision detection](#cross-host-role-tick-collision-detection-4623) |
@@ -7057,6 +7057,47 @@ write. Disabled with the quarantine. **Note:** each armed window is broadcast
 once to peer hosts (#7477), and `loom-daemon quarantine clear <issue>` (there
 is no separate `dispatch-backoff clear`) clears only this host's window and
 park — a peer keeps skipping the issue until the window it received expires.
+**The streak is fleet-wide (#11942).** Each `DispatchBackoffArmed` broadcast
+also carries the sender's own fast-failure streak (`0` when the window was
+armed by any other cause: a lost lease race, an environmental class, an
+open-PR yield). A receiving host keeps one count per peer host, replacing it
+rather than adding to it, and parks when its **own** streak plus every peer's
+reaches the quarantine `threshold` — so three hosts failing fast once each park
+the issue, where before none of them reached three. Our own echo and an
+unknown-host ad contribute `0`, and an ad without a count (an older peer, or a
+landed cooldown's window) leaves the tally alone. A peer's count is read against
+the reader's own `maxSecs` from local receipt and is dropped after at most a
+day. Without peer coordination each host counts alone, as before. The park also
+survives a daemon restart: the startup pass keeps a marked `loom:blocked` park
+younger than its TTL on the forge and rebuilds the in-memory quarantine from the
+marker's timestamp, instead of releasing it. Source:
+`loom-daemon/src/peer_claims/fast_fail_tally.rs`,
+`loom-daemon/src/sweep_registry/fast_fail_fleet.rs`.
+
+**Streak breaks and the `streak_break` marker (#12006).** The streak is
+consecutive across the fleet, so whatever breaks it on one host breaks it on all
+of them: real progress on an issue, and `loom-daemon quarantine clear <issue>`,
+broadcast a **break** — a `DispatchBackoffArmed` ad with `streak_break = true`,
+a zero window and a zero streak. A receiver drops every host's count for the
+issue and resets its own streak to start over, but leaves every backoff
+**window** running. An ordinary ladder ad carries `streak_break = false`, so a
+zero streak on it breaks only the sender's own entry; an ad from an older peer
+with no marker is read as before (a zero window and a zero streak is a break).
+Because a zero window used to be the only break signal, an ordinary ad always
+advertises a window of at least 1 s, and `baseSecs` / `maxSecs` are floored at
+1 s: a zero from env or config is refused with a warning and the default is
+used, and a hand-built zero config is clamped to 1 s with a warning.
+
+**Startup quarantine pass is retried once (#12005).** The startup pass over
+`loom:blocked` parks skips a workspace while the shared GitHub rate-limit
+breaker is cooling. The skipped roots are now kept, and once per process a
+background thread waits for the breaker to clear and runs the pass over those
+roots (releasing expired parks and restoring live ones). It does no forge work
+while the trip lasts and does not chase the breaker again if a fresh trip skips
+a root a second time; the periodic sweeps' TTL expiry covers what is left. A
+tick that counts an error now also names its cause on the `loom.dispatch.tick`
+span as `loom.dispatch.error_kind`; the value set is in
+[`telemetry-schema.md`](telemetry-schema.md).
 Alongside it, the registry counts its **own** `loom:issue`/`loom:building` writes
 per issue and logs a loud `LABEL FLAPPING` warning at 6 writes in 5 minutes
 (a healthy dispatch writes exactly 2), so the pattern shows up in `daemon.log`
@@ -7668,8 +7709,9 @@ reported"), so a vacuous `GREEN` would be a false pass.
 By default a failing check is `RED` as soon as it is terminal, even while other
 checks still run — right for a caller that only *refuses* on it (the approval
 gate in `post-verdict.sh`, `merge-pr.sh`, Champion). Under `--settle-red` a
-failure is `RED` only once nothing observed is pending, the required set is
-known and every required context has registered; until then the wait stays
+failure is `RED` only once nothing observed is pending — the required set
+does not hold it back, so a failed required-context lookup cannot hide a
+finished red (#12022); until then the wait stays
 pending (`TIMEOUT <sha> <pending>` at the deadline, plus a stderr note
 `wait-checks: --settle-red: already failing: <names>`). The Judge uses it before
 a changes-requested CI verdict, which must name the failing test from
@@ -10751,7 +10793,7 @@ yields `not-running`.
 
 ### Autonomous periodic support-role runner (#4015)
 
-> **Step dispatch (accepted design, #11894; not yet implemented).** For a root with `autonomous.workFinder.stepDispatch: on`, the item roles (Curator, Champion promote and merge, Judge, Doctor) are dispatched as steps by the work finder rather than on these intervals, and `demandWidth` doesn't apply. Champion's non-item passes keep running here under `championMode: "non-item"`. The two concurrency budgets merge in the design's last phase. See [`docs/design/work-finder-step-dispatch.md`](https://github.com/rjwalters/loom/blob/main/docs/design/work-finder-step-dispatch.md) §12.
+> **Step dispatch (#11894, live since #11909).** The item roles (Curator, Champion promote and merge, Judge, Doctor) are dispatched as steps by the work finder, never on these intervals: Curator, Judge and Doctor named in `roles` or `onIdle` are ignored with a warning, and `demandWidth` doesn't apply to them. Champion runs here as `/loom:champion --non-item` only; `championMode` is retired and ignored with a warning. The two concurrency budgets merge in #11911. See [`docs/design/work-finder-step-dispatch.md`](https://github.com/rjwalters/loom/blob/main/docs/design/work-finder-step-dispatch.md) §12. The Judge CI gate (#12003) lives on the step path too (#12042): a Judge step whose PR head has CI running is a `ci_pending` pass until CI concludes, and a `ci_pending` no-op cools down for 10 min, not the 1 h no-op window ([`pr-planning.md`](pr-planning.md)).
 
 Before this loop, the periodic **standalone** support roles — Champion,
 Curator, Judge, Auditor, Guide — ran ONLY via GitHub Actions cron
@@ -11048,16 +11090,11 @@ naming it in `roles` (1h default cadence). Both paths pass the resolved
 per-invocation cap through as `/loom:architect --max-proposals <n>`; see
 `architectMaxProposals` in the config table above.
 
-**Champion's non-item mode (#11859).** A root whose curated issues and
-`loom:pr` PRs are worked as per-item steps (`/loom:champion --issue N` /
-`--pr N`) keeps its interval Champion for everything else:
-
-```json
-{ "autonomous": { "roleRunner": { "enabled": true, "championMode": "non-item" } } }
-```
-
-Every Champion launch on that root is then `/loom:champion --non-item`; see
-`championMode` in the config table above and `champion-targeted.md`.
+**Champion runs non-item only (#11859, #11909).** Curated issues and `loom:pr`
+PRs are worked as per-item steps the work finder draws (`/loom:champion
+--issue N` / `--pr N`), so every interval and idle-edge Champion launch is
+`/loom:champion --non-item`. `championMode` is retired; see the config table
+above and `champion-targeted.md`.
 
 
 `onIdle` (#4364) lists the subset of the shipped roles to *also* fire on the

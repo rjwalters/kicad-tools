@@ -21,7 +21,7 @@
 #
 # WHAT THIS SUITE DOES
 #
-#   1. BEHAVIOUR -- champion.md's Priority 2 query and Priority 3 loop are
+#   1. BEHAVIOUR -- champion.md's Priority 2 query, Priority 3 loop and Priority 4 query are
 #      EXTRACTED and EXECUTED against a stubbed `gh`.
 #   2. BEHAVIOUR -- curator.md's send-back queue is extracted and executed, and
 #      its unanswered-marker check is executed against the hash Champion's OWN
@@ -201,6 +201,45 @@ EOF
 if [[ -s "$FIXTURE_DIR/p2.sh" ]]; then
     assert_eq "#34 #33 #32 #35 #31" "$(run_query p2.sh "$FIXTURE_DIR/levels.json" | numbers_of)" \
         "very-important, then important (oldest first), then the rest oldest first; a retired star carries no level"
+fi
+
+echo ""
+echo "Test 1c: every curated proposal and epic has exactly one owner in non-item mode (#11922)"
+# `--non-item` runs Priority 3 and 4 but never Priority 2. Under step dispatch
+# a curated architect/hermit/auditor proposal is a `--issue` Champion step, so
+# Priority 3 must skip it (else two owners). A curated EPIC is never a step
+# (the classifier routes `loom:epic` before `loom:curated`), so Priority 4 must
+# keep it (else no owner in non-item mode).
+cat >"$FIXTURE_DIR/curated-proposals.json" <<'EOF2'
+[
+ {"number":40,"title":"plain architect","createdAt":"2026-10-01T00:00:00Z","labels":[{"name":"loom:architect"}]},
+ {"number":41,"title":"curated architect","createdAt":"2026-10-01T00:00:00Z","labels":[{"name":"loom:architect"},{"name":"loom:curated"}]},
+ {"number":42,"title":"curated hermit","createdAt":"2026-10-01T00:00:00Z","labels":[{"name":"loom:hermit"},{"name":"loom:curated"}]},
+ {"number":43,"title":"curated auditor","createdAt":"2026-10-01T00:00:00Z","labels":[{"name":"loom:auditor"},{"name":"loom:curated"}]},
+ {"number":44,"title":"plain epic","createdAt":"2026-10-01T00:00:00Z","labels":[{"name":"loom:epic"}]},
+ {"number":45,"title":"curated epic","createdAt":"2026-10-01T00:00:00Z","labels":[{"name":"loom:epic"},{"name":"loom:curated"}]}
+]
+EOF2
+section_body "Priority 4: Epic Proposals" <"$CHAMPION_MD" \
+    | bash_block_with '--label="loom:epic"' >"$FIXTURE_DIR/p4.sh"
+NONITEM_RUNS="$(awk '/^## `--non-item`/{on=1;next} on&&/^## /{exit} on' "$TARGETED_MD")"
+if [[ ! -s "$FIXTURE_DIR/p3.sh" || ! -s "$FIXTURE_DIR/p4.sh" ]]; then
+    fail "could not extract champion.md's Priority 3 loop and Priority 4 query"
+else
+    assert_eq "#40" "$(run_query p3.sh "$FIXTURE_DIR/curated-proposals.json" | numbers_of)" \
+        "Priority 3 skips curated architect, hermit and auditor proposals"
+    assert_eq "#44 #45" "$(run_query p4.sh "$FIXTURE_DIR/curated-proposals.json" | numbers_of)" \
+        "Priority 4 keeps a curated epic"
+    # The non-item pass's queues, from champion-targeted.md's own table.
+    assert_contains "$NONITEM_RUNS" "| Priority 4: epic proposals |" "--non-item runs Priority 4"
+    assert_contains "$NONITEM_RUNS" "and Priority 2 (the curated query)" "--non-item skips Priority 2"
+    NONITEM_SEEN=" $( { run_query p3.sh "$FIXTURE_DIR/curated-proposals.json"; run_query p4.sh "$FIXTURE_DIR/curated-proposals.json"; } | numbers_of) "
+    for n in 41 42 43; do
+        assert_not_contains "$NONITEM_SEEN" " #$n " "--non-item never evaluates curated proposal #$n (its --issue step owns it)"
+    done
+    assert_contains "$NONITEM_SEEN" " #45 " "--non-item still evaluates the curated epic #45 (no --issue step owns it)"
+    assert_eq "#41 #42 #43 #45" "$(run_query p2.sh "$FIXTURE_DIR/curated-proposals.json" | numbers_of)" \
+        "batch Priority 2 still sees every curated proposal and epic"
 fi
 
 # ---------------------------------------------------------------------------

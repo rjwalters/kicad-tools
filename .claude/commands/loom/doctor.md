@@ -790,7 +790,7 @@ CLAIM_HEAD_SHA=$(gh pr view $N --json headRefOid --jq '.headRefOid')
 ```
 
 **Env vars**: `LOOM_STALE_TREATING_MINUTES` (default **60**) — deliberately
-longer than the Judge's `LOOM_STALE_REVIEWING_MINUTES` (30): a Doctor's fix
+longer than the Judge's `LOOM_STALE_REVIEWING_MINUTES` (45): a Doctor's fix
 cycle (assess all CI failures → fix → verify locally → push → re-verify
 remotely) legitimately runs longer than a single review pass. The script picks
 the **treating** default from the `--label` you pass; do not borrow the Judge's

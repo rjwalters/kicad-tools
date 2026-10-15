@@ -517,7 +517,7 @@ Then decide on `$CLAIM_STATE`:
 |---|---|---|
 | `unclaimed` | the PR does not actually carry `loom:reviewing` right now | Claim it (step 2). |
 | `fresh` | a Judge is plausibly still working this PR | **Do not stomp the claim.** Record a stand-down (see below), then skip this PR and continue the batch to the next candidate PR. |
-| `stale` | no *claimant* activity for ≥ `LOOM_STALE_REVIEWING_MINUTES` (default **30**) — the claiming Judge's process almost certainly died mid-review | Reclaim (see below), then proceed with the normal review from step 3. |
+| `stale` | no *claimant* activity for ≥ `LOOM_STALE_REVIEWING_MINUTES` (default **45**) — the claiming Judge's process almost certainly died mid-review | Reclaim (see below), then proceed with the normal review from step 3. |
 | `stale-bounded-fallback` | the stand-down streak reached `LOOM_MAX_STANDDOWN_STREAK` (default **3**) **and** the claim's own age is ≥ `LOOM_STALE_REVIEWING_MINUTES` | Force-reclaim (see below) — the livelock breaker. |
 | `unknown` | a timeline/label read failed, or its markers could not be authenticated (#9548) | **Fail safe: treat exactly like `fresh`.** Never stomp a claim on API failure or missing data. |
 
@@ -581,7 +581,7 @@ reclaim comment:
 # The lease first: a live peer lease (exit 4) means stand down, label untouched.
 loom-daemon lease pr claim $N --role judge --watch-pid "${LOOM_AGENT_SESSION_PID:-${CLAUDE_PID:-$PPID}}"; [[ $? =~ ^[02]$ ]] &&
 gh pr edit $N --remove-label "loom:reviewing" &&
-gh pr comment $N --body "Reclaiming loom:reviewing claim: $STANDDOWN_COUNT consecutive stand-down passes have accumulated against claim $CLAIMED_AT (age ≥ ${LOOM_STALE_REVIEWING_MINUTES:-30}m) with no actual review progress (bounded fallback, LOOM_MAX_STANDDOWN_STREAK=${LOOM_MAX_STANDDOWN_STREAK:-3}) — breaking the livelock." &&
+gh pr comment $N --body "Reclaiming loom:reviewing claim: $STANDDOWN_COUNT consecutive stand-down passes have accumulated against claim $CLAIMED_AT (age ≥ ${LOOM_STALE_REVIEWING_MINUTES:-45}m) with no actual review progress (bounded fallback, LOOM_MAX_STANDDOWN_STREAK=${LOOM_MAX_STANDDOWN_STREAK:-3}) — breaking the livelock." &&
 gh pr edit $N --add-label "loom:reviewing"
 # Continue to step 3 (Check merge state) and evaluate normally
 ```
@@ -592,12 +592,12 @@ gh pr edit $N --add-label "loom:reviewing"
 # The lease first: a live peer lease (exit 4) means stand down, label untouched.
 loom-daemon lease pr claim $N --role judge --watch-pid "${LOOM_AGENT_SESSION_PID:-${CLAUDE_PID:-$PPID}}"; [[ $? =~ ^[02]$ ]] &&
 gh pr edit $N --remove-label "loom:reviewing" &&
-gh pr comment $N --body "Reclaiming stale loom:reviewing claim (idle ${IDLE_MINUTES}m > ${LOOM_STALE_REVIEWING_MINUTES:-30}m with no claimant activity) — a prior Judge's parent sweep likely died mid-review." &&
+gh pr comment $N --body "Reclaiming stale loom:reviewing claim (idle ${IDLE_MINUTES}m > ${LOOM_STALE_REVIEWING_MINUTES:-45}m with no claimant activity) — a prior Judge's parent sweep likely died mid-review." &&
 gh pr edit $N --add-label "loom:reviewing"
 # Continue to step 3 (Check merge state) and evaluate normally
 ```
 
-**Env vars**: `LOOM_STALE_REVIEWING_MINUTES` (default **30**) — named to
+**Env vars**: `LOOM_STALE_REVIEWING_MINUTES` (default **45**) — named to
 mirror `LOOM_STALE_BUILDING_HOURS` (`loom-daemon/src/claim_reconciliation.rs`,
 the analogous no-record staleness threshold for `loom:building` claims), but
 on a **minutes**, not hours, scale, since review turnaround (5–15 minutes) is

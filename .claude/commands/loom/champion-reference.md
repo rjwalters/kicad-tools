@@ -280,7 +280,7 @@ gh pr view "$PR_NUMBER" --comments
 # aggregate updatedAt, which Champion's own comment would bump (see #4966).
 VERDICT_MARKER="<!-- champion:proposal-verdict:body-$BODY_HASH -->"
 
-# Concurrency: claim before evaluating, staleness-aware (LOOM_STALE_EVALUATING_MINUTES, default 15m).
+# Concurrency: claim before evaluating, staleness-aware (LOOM_STALE_EVALUATING_MINUTES, default 45m).
 gh issue edit <number> --add-label "loom:evaluating"
 ```
 

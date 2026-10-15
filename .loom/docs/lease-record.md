@@ -767,7 +767,17 @@ the same lease semantics, **keyed by role**:
   to the released marker (the digest is the sorted `loom:*` label set, claim
   labels left out). It skips the record while the head has a check run in
   progress that started under 6 h ago; a run stuck longer no longer exempts
-  the pass. Those records, from trusted authors and at the PR's current head
+  the pass. A Judge that stood down because the head's CI was still running
+  says so with `release --skip-reason ci-pending` (#12008; any other or absent
+  reason is the default). `release` reads the head's CI as one of three states:
+  **Young** (something pending started under 6 h ago: exempt, as above),
+  **Settled** (nothing pending: a `ci-pending` pass is exempt, because CI
+  finished after the pass looked; any other pass is recorded) or **Stuck**
+  (something pending, but every pending run or status is past 6 h or has no
+  start stamp: never exempt, `ci-pending` or not). Stuck CI is not exempted
+  because `forge wait-checks` has no age cap and the PR planner serves exactly
+  such PRs ([`pr-planning.md`](pr-planning.md)); recording them keeps the loop
+  bounded. Those records, from trusted authors and at the PR's current head
   and digest, hold the PR out of `pr-queue --role judge`, the role runner's
   Judge gate and a Judge `claim` (exit 6, nothing written): one hour after
   the first, four after the second, and after the third until the oldest of

@@ -237,7 +237,7 @@ This issue's \`loom:evaluating\` claim has gone stale and been reclaimed $PRIOR_
     ./.loom/scripts/post-comment.sh "$N" --body "$RECLAIM_MARKER
 **Champion: Reclaiming stale \`loom:evaluating\` claim**
 
-This issue's \`loom:evaluating\` claim is ${AGE_MIN}m old (>= the ${LOOM_STALE_EVALUATING_MINUTES:-15}m threshold) — a prior evaluation likely died mid-pass without a verdict. Releasing the claim so the issue re-enters the promotion queue; a later pass evaluates from scratch.
+This issue's \`loom:evaluating\` claim is ${AGE_MIN}m old (>= the ${LOOM_STALE_EVALUATING_MINUTES:-45}m threshold) — a prior evaluation likely died mid-pass without a verdict. Releasing the claim so the issue re-enters the promotion queue; a later pass evaluates from scratch.
 
 ---
 *Automated by Champion role*" \
@@ -786,14 +786,14 @@ elif [ "$DECISION" = "FRESH" ]; then
   echo "#$ISSUE_NUMBER already claimed by a concurrent evaluation (${CLAIM_AGE_MIN}m ago) — skipping, not stomping"
   # Continue the batch to the next issue.
 elif [ "$DECISION" = "STALE" ]; then
-  echo "Reclaiming stale loom:evaluating claim on #$ISSUE_NUMBER (age ${CLAIM_AGE_MIN}m >= ${LOOM_STALE_EVALUATING_MINUTES:-15}m) — a prior Champion pass likely died mid-evaluation"
+  echo "Reclaiming stale loom:evaluating claim on #$ISSUE_NUMBER (age ${CLAIM_AGE_MIN}m >= ${LOOM_STALE_EVALUATING_MINUTES:-45}m) — a prior Champion pass likely died mid-evaluation"
 fi
 # DECISION=NOT_PRESENT (STALE_RC=10) means no concurrent claim exists at all — fall straight through to claiming, same as before.
 
 gh issue edit "$ISSUE_NUMBER" --add-label "loom:evaluating"
 ```
 
-`LOOM_STALE_EVALUATING_MINUTES` (default **15**) — named to mirror `LOOM_STALE_REVIEWING_MINUTES`/`LOOM_STALE_TREATING_MINUTES`, on a shorter scale since proposal evaluation has no build/CI wait. `check-evaluating-staleness.sh` reads the same env var (or an explicit `--threshold-minutes`) for its own default.
+`LOOM_STALE_EVALUATING_MINUTES` (default **45**) — named to mirror `LOOM_STALE_REVIEWING_MINUTES`/`LOOM_STALE_TREATING_MINUTES`; longer than a Champion step's 30-minute timeout (#11909), so a running promotion step's claim never reads as stale. `check-evaluating-staleness.sh` reads the same env var (or an explicit `--threshold-minutes`) for its own default.
 
 **Release the claim** — `--remove-label "loom:evaluating"` — as part of the SAME command that writes the verdict (promote, revise, block or escalate) in Steps 3/4 below, never as a separate call. This keeps "claimed but no verdict written yet" the only window where the label is genuinely in flight.
 

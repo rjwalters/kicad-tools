@@ -10,9 +10,9 @@ On PR #11974 (YAML and docs only) a Judge posted `changes-requested` +
 jobs still ran. `wait-checks` reports RED as soon as one check fails, and
 `gh run view --log-failed` cannot read a log until the whole run completes, so
 the verdict named no test. The test was a tracked flake (#11073); attempt 2 was
-green minutes later. The wrong verdict cost a Judge cycle and an operator
-re-review. This file prevents three things: a CI verdict on a partial run, a
-CI verdict that names no test, and a changes-requested for a known flake.
+green minutes later. This file prevents three things: a CI verdict on a
+partial run, a CI verdict that names no test, and a changes-requested for a
+known flake.
 
 ## 1. The run must be finished
 
@@ -49,11 +49,13 @@ Route to step 4 only when **all** of these hold. Otherwise go to step 5.
 - **Attempt 1.** Each failing run's `attempt` is `1`. A head that goes red again on
   attempt 2 or later gets the normal verdict. Never rerun the same head twice.
 - **Every failing test qualifies**, by one of:
-  - **Tracked flake**: an issue, open or closed, names that exact test
+  - **Tracked flake**: an issue, open or closed, whose title calls a test
+    flaky or intermittent and whose title or body names that exact test
     (`gh issue list --state all --search '"<test name>" in:title,body'`).
-    A closed one means its fix did not hold; that still counts (#11974's test
-    was tracked by the closed #11073). The diff must not change that test or
-    the code it exercises: there a red is the PR's until proven otherwise.
+    Merely naming it (the issue that added it, this PR's own) does not count.
+    A closed tracker still counts: its fix did not hold (#11073). The diff
+    must not touch that test or the code it exercises: there a red is the
+    PR's until proven otherwise.
   - **Untouched**: the diff touches neither the test, the code it exercises,
     nor its fixtures, **and** the diff touches no CI or test-harness config
     (`.github/workflows/*`, `.config/nextest.toml`, `Cargo.toml`/`Cargo.lock`,
@@ -62,9 +64,8 @@ Route to step 4 only when **all** of these hold. Otherwise go to step 5.
 - **No failing step is a deterministic gate** (lint, fmt, build, `check-*.sh`)
   unless an open issue tracks that exact gate as flaky.
 
-Why this is safe when wrong: if a PR-caused red is misread as a flake, the
-rerun fails again on attempt 2 and the normal verdict follows. The cost is one
-rerun, never a silenced failure.
+A PR-caused red misread as a flake costs one rerun: a red on attempt 2 gets
+the normal verdict, and the tracker comment keeps attempt 1 on record.
 
 ## 4. Flake route: record, then rerun once
 
