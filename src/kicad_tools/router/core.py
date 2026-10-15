@@ -20487,11 +20487,6 @@ class Autorouter:
                         f"{tolerance_mm:.3f}mm; tuning"
                     )
 
-            # Phase 2F (#2701) requires intra_pair_clearance_mm
-            # unconditionally for groups whose pair_ids is non-empty.  The
-            # single-ended path inside tune_match_group_v2 ignores it
-            # (see match_group_tuning.py docstring).  We pass it
-            # unconditionally so the dispatch is fully transparent here.
             # Issue #6675: the pair-skew invariant needs each pair's own
             # checker limit, so a pair the diff-pair tuner (#6664) left inside
             # it stays inside it while the group tuner lengthens the lane.
@@ -20510,6 +20505,11 @@ class Autorouter:
                     for p_id, n_id in group.pair_ids
                 }
 
+            # Phase 2F (#2701) requires intra_pair_clearance_mm
+            # unconditionally for groups whose pair_ids is non-empty.  The
+            # single-ended path inside tune_match_group_v2 ignores it
+            # (see match_group_tuning.py docstring).  We pass it
+            # unconditionally so the dispatch is fully transparent here.
             before_by_net = dict(routes_by_net)
             try:
                 group_results = tune_match_group_v2(

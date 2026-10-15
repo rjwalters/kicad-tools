@@ -3177,6 +3177,10 @@ def _tune_match_group_of_pairs(
     scalars and pairs are tuned with their respective specialized
     geometries.
 
+    With ``pair_fallbacks`` (Issue #6675) each lane is handed to
+    :func:`_tune_pair_lane_with_fallbacks` instead of the single-host mirror
+    cascade below.
+
     See :func:`tune_match_group_v2` for the public docstring.
     """
     base_config = config or SerpentineConfig()
