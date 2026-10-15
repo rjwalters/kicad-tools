@@ -24,6 +24,7 @@ from kicad_tools.router.kicad_length import (
     LSeg,
     LVia,
     net_length,
+    pcb_net_geometry,
 )
 from kicad_tools.router.layers import Layer
 from kicad_tools.router.match_group_length import MatchGroupTracker
@@ -126,11 +127,28 @@ class TestViaConnectedSpan:
         got = net_length(segs, [via], [], stackup)
         assert got == pytest.approx(10.0 + 0.5325)
 
-    def test_unconnected_via_falls_back_to_declared_span(self):
+    def test_stub_via_has_no_height(self):
+        # kicad-cli 10.0.6 (Docker) measures 5.0000 on this geometry: a via
+        # connected on one layer only is a stub and charges zero height (it
+        # does not fall back to its declared F.Cu-B.Cu span).
         stackup = KicadStackup.default(1.6, 4)
         via = LVia(5.0, 0.0, 0.6, ("F.Cu", "B.Cu"))
         got = net_length([LSeg(0, 0, 5, 0, "F.Cu")], [via], [], stackup)
-        assert got == pytest.approx(5.0 + 1.58)
+        assert got == pytest.approx(5.0)
+
+    def test_route_fragment_stub_via_keeps_declared_span(self):
+        # A router Route can be one fragment of a net (a pad-to-via escape
+        # whose other-layer continuation is a separate Route), so the Route
+        # form charges a one-layer via its declared span: what the whole net
+        # measures once the continuation is there.
+        model = KicadLengthModel.default(1.6, 4)
+        route = Route(
+            net=1,
+            net_name="N",
+            segments=[Segment(0.0, 0.0, 5.0, 0.0, 0.2, Layer.F_CU, net=1)],
+            vias=[Via(5.0, 0.0, 0.3, 0.6, (Layer.F_CU, Layer.B_CU), net=1)],
+        )
+        assert model.route_length(route) == pytest.approx(5.0 + 1.58)
 
 
 class TestPadViaTrim:
@@ -304,3 +322,278 @@ def test_matches_kicad_cli_within_one_micron(tmp_path, stackup):
         pytest.skip("kicad-cli reported no length constraint violation")
     pcb = PCB.load(str(path))
     assert DiffPairLengthTracker.measure_net_from_pcb(pcb, 1) == pytest.approx(actual[0], abs=1e-3)
+
+
+# ---------------------------------------------------------------------------
+# Line merging and off-centre via ends (Issue #6725 bench follow-up)
+# ---------------------------------------------------------------------------
+#
+# The bench comparison on boards 03/06b/06rf/07rf (kicad-cli 10.0.6) found two
+# behaviours the first model missed:
+#
+# * kicad-cli first merges segments into lines, joining two lines only where
+#   exactly two line endpoints meet on one layer.  A track that passes
+#   *through* a pad centre is one line there, so that pad clips nothing
+#   (06rf USB2_D+: 0.104 mm, 06b LVDS1_N: 0.103 mm, 03 USB_D: 0.18 mm).
+# * A line with an end anywhere inside a via's copper -- not only at the
+#   centre -- is clipped at the via and run straight to the centre
+#   (06rf PCIE_TX-: 0.566 mm, a 4-way junction inside the via).
+
+_MERGE_BOARD = """(kicad_pcb (version 20241229) (generator "pcbnew") (generator_version "9.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers (0 "F.Cu" signal) (4 "In1.Cu" signal) (6 "In2.Cu" signal) (2 "B.Cu" signal)
+    (9 "F.Adhes" user "F.Adhesive") (25 "Edge.Cuts" user) (1 "F.Mask" user) (3 "B.Mask" user) (5 "F.SilkS" user "F.Silkscreen") (7 "B.SilkS" user "B.Silkscreen"))
+  (net 0 "") (net 1 "N1") (net 2 "N2")
+  (footprint "T:R3" (layer "F.Cu") (uuid "11111111-1111-1111-1111-111111111111") (at 50 50)
+    (pad "1" smd rect (at 0 0) (size 0.6 0.6) (layers "F.Cu" "F.Mask") (net 1 "N1") (uuid "11111111-1111-1111-1111-111111111112"))
+    (pad "2" smd rect (at 3 0) (size 0.6 0.6) (layers "F.Cu" "F.Mask") (net 1 "N1") (uuid "11111111-1111-1111-1111-111111111113"))
+    (pad "3" smd rect (at 0 6) (size 0.6 0.6) (layers "F.Cu" "F.Mask") (net 2 "N2") (uuid "11111111-1111-1111-1111-111111111114")))
+  (segment (start 50 50) (end 52 50) (width 0.2) (layer "F.Cu") (net 1) (uuid "21111111-1111-1111-1111-111111111111"))
+  (segment (start 52 50) (end 53.1 50.1) (width 0.2) (layer "F.Cu") (net 1) (uuid "21111111-1111-1111-1111-111111111112"))
+  (segment (start 53.1 50.1) (end 53 50) (width 0.2) (layer "F.Cu") (net 1) (uuid "21111111-1111-1111-1111-111111111113"))
+  (segment (start 53 50) (end 53.2 49.9) (width 0.2) (layer "F.Cu") (net 1) (uuid "21111111-1111-1111-1111-111111111114"))
+  (segment (start 53.2 49.9) (end 59.8 49.9) (width 0.2) (layer "F.Cu") (net 1) (uuid "21111111-1111-1111-1111-111111111115"))
+  (segment (start 59.8 49.9) (end 60.2 50.2) (width 0.2) (layer "F.Cu") (net 1) (uuid "21111111-1111-1111-1111-111111111116"))
+  (segment (start 60.2 50.2) (end 60 50) (width 0.2) (layer "F.Cu") (net 1) (uuid "21111111-1111-1111-1111-111111111117"))
+  (via (at 60 50) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 1) (uuid "31111111-1111-1111-1111-111111111111"))
+  (segment (start 60 50) (end 60.2 50.2) (width 0.2) (layer "B.Cu") (net 1) (uuid "21111111-1111-1111-1111-111111111118"))
+  (segment (start 60.2 50.2) (end 61 50.2) (width 0.2) (layer "B.Cu") (net 1) (uuid "21111111-1111-1111-1111-111111111119"))
+  (segment (start 61 50.2) (end 64 53) (width 0.2) (layer "B.Cu") (net 1) (uuid "21111111-1111-1111-1111-11111111111a"))
+  (segment (start 50 56) (end 55 56) (width 0.2) (layer "F.Cu") (net 2) (uuid "21111111-1111-1111-1111-11111111111b"))
+  (via (at 55 56) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 2) (uuid "31111111-1111-1111-1111-111111111112"))
+  (gr_rect (start 40 40) (end 70 70) (stroke (width 0.1) (type default)) (fill none) (layer "Edge.Cuts") (uuid "41111111-1111-1111-1111-111111111111"))
+)
+"""
+
+#: kicad-cli 10.0.6 (Docker ``kicad/kicad:10.0``) ``length`` actuals on
+#: ``_MERGE_BOARD``.
+_MERGE_KICAD_CLI = {1: 17.3296, 2: 5.0000}
+
+
+def _merge_hand_value() -> float:
+    """N1 of ``_MERGE_BOARD`` worked by hand (see the comments)."""
+    h = math.hypot
+    # Line 1: pad 1 -> through pad 2's centre (merged, so pad 2 clips nothing)
+    # -> ends at (60.2, 50.2), inside the via but off-centre: clipped where
+    # y=49.9 leaves the r=0.3 via, then straight to the via centre.
+    x_in = 60.0 - math.sqrt(0.3**2 - 0.1**2)
+    line1 = 2.0 + h(1.1, 0.1) + h(0.1, 0.1) + h(0.2, 0.1) + (x_in - 53.2) + h(60 - x_in, 0.1)
+    # Line 2: the F.Cu stub (60.2,50.2)->(60,50): never leaves the via, kept.
+    line2 = h(0.2, 0.2)
+    # Line 3: B.Cu from the via centre, clipped where y=50.2 leaves the via.
+    x_out = 60.0 + math.sqrt(0.3**2 - 0.2**2)
+    line3 = h(x_out - 60, 0.2) + (61 - x_out) + h(3.0, 2.8)
+    return line1 + line2 + line3 + 1.58  # + via F.Cu-B.Cu, KiCad default 4L
+
+
+class TestKicadLineMerging:
+    def test_track_through_pad_centre_is_not_clipped(self):
+        pad = LPad(3.0, 0.0, 0.6, 0.6, layers=frozenset({"F.Cu"}))
+        segs = [
+            LSeg(0.0, 0.0, 2.0, 0.0, "F.Cu"),
+            LSeg(2.0, 0.0, 3.1, 0.1, "F.Cu"),
+            LSeg(3.1, 0.1, 3.0, 0.0, "F.Cu"),
+            LSeg(3.0, 0.0, 3.2, -0.1, "F.Cu"),
+            LSeg(3.2, -0.1, 6.0, -0.1, "F.Cu"),
+        ]
+        raw = sum(math.hypot(s.x2 - s.x1, s.y2 - s.y1) for s in segs)
+        assert net_length(segs, [], [pad], None) == pytest.approx(raw, abs=1e-12)
+
+    def test_track_ending_at_pad_centre_is_clipped(self):
+        # The same pad as a line *end* (no onward track) is clipped.
+        pad = LPad(3.0, 0.0, 0.6, 0.6, layers=frozenset({"F.Cu"}))
+        segs = [
+            LSeg(0.0, 0.0, 2.0, 0.0, "F.Cu"),
+            LSeg(2.0, 0.0, 3.1, 0.1, "F.Cu"),
+            LSeg(3.1, 0.1, 3.0, 0.0, "F.Cu"),
+        ]
+        raw = sum(math.hypot(s.x2 - s.x1, s.y2 - s.y1) for s in segs)
+        assert net_length(segs, [], [pad], None) < raw - 1e-3
+
+    def test_three_way_junction_splits_lines(self):
+        # Three F.Cu tracks meet at (2, 0): no single line passes through the
+        # pad at the far end of the branch, so only the branch ending at the
+        # pad centre is clipped -- and only once.
+        pad = LPad(2.0, 1.0, 0.6, 0.6, layers=frozenset({"F.Cu"}))
+        segs = [
+            LSeg(0.0, 0.0, 2.0, 0.0, "F.Cu"),
+            LSeg(2.0, 0.0, 4.0, 0.0, "F.Cu"),
+            LSeg(2.0, 0.0, 2.1, 0.9, "F.Cu"),
+            LSeg(2.1, 0.9, 2.0, 1.0, "F.Cu"),
+        ]
+        raw = sum(math.hypot(s.x2 - s.x1, s.y2 - s.y1) for s in segs)
+        # Clipped where x=2.0+0.1*(y)/0.9 crosses y=0.7, then straight up.
+        y_in = 0.7
+        x_in = 2.0 + 0.1 * y_in / 0.9
+        inside = math.hypot(2.1 - x_in, 0.9 - y_in) + math.hypot(0.1, 0.1)
+        straight = math.hypot(x_in - 2.0, 1.0 - y_in)
+        assert net_length(segs, [], [pad], None) == pytest.approx(raw - inside + straight)
+
+    def test_line_ending_off_centre_inside_via_is_clipped(self):
+        stackup = KicadStackup.default(1.6, 4)
+        pcb_segs = [
+            LSeg(53.2, 49.9, 59.8, 49.9, "F.Cu"),
+            LSeg(59.8, 49.9, 60.2, 50.2, "F.Cu"),
+            LSeg(60.2, 50.2, 60.0, 50.0, "F.Cu"),
+            LSeg(60.0, 50.0, 60.2, 50.2, "B.Cu"),
+            LSeg(60.2, 50.2, 61.0, 50.2, "B.Cu"),
+        ]
+        via = LVia(60.0, 50.0, 0.6, ("F.Cu", "B.Cu"))
+        h = math.hypot
+        x_in = 60.0 - math.sqrt(0.3**2 - 0.1**2)
+        x_out = 60.0 + math.sqrt(0.3**2 - 0.2**2)
+        expected = (
+            (x_in - 53.2)
+            + h(60 - x_in, 0.1)
+            + h(0.2, 0.2)
+            + h(x_out - 60, 0.2)
+            + (61 - x_out)
+            + 1.58
+        )
+        assert net_length(pcb_segs, [via], [], stackup) == pytest.approx(expected)
+
+    def test_merge_fixture_matches_hand_value_and_kicad_cli(self, tmp_path):
+        path = tmp_path / "board.kicad_pcb"
+        path.write_text(_MERGE_BOARD)
+        pcb = PCB.load(str(path))
+        n1 = DiffPairLengthTracker.measure_net_from_pcb(pcb, 1)
+        n2 = DiffPairLengthTracker.measure_net_from_pcb(pcb, 2)
+        assert n1 == pytest.approx(_merge_hand_value(), abs=1e-9)
+        assert n1 == pytest.approx(_MERGE_KICAD_CLI[1], abs=1e-4)
+        assert n2 == pytest.approx(_MERGE_KICAD_CLI[2], abs=1e-4)
+
+    def test_merge_fixture_route_form_equals_pcb_form(self, tmp_path):
+        path = tmp_path / "board.kicad_pcb"
+        path.write_text(_MERGE_BOARD)
+        pcb = PCB.load(str(path))
+        # The loader may re-origin coordinates, so take everything from the PCB.
+        segs, vias, lpads = pcb_net_geometry(pcb, 1)
+        layer = {"F.Cu": Layer.F_CU, "B.Cu": Layer.B_CU}
+        route = Route(
+            net=1,
+            net_name="N1",
+            segments=[
+                Segment(s.x1, s.y1, s.x2, s.y2, 0.2, layer[s.layer], net=1, net_name="N1")
+                for s in segs
+            ],
+            vias=[Via(v.x, v.y, 0.3, v.diameter, (Layer.F_CU, Layer.B_CU), net=1) for v in vias],
+        )
+        pads = [
+            Pad(x=p.x, y=p.y, width=p.w, height=p.h, net=1, net_name="N1", shape="rect")
+            for p in lpads
+        ]
+        model = KicadLengthModel.for_router(KicadStackup.from_pcb(pcb), pads)
+        assert model.route_length(route) == pytest.approx(
+            DiffPairLengthTracker.measure_net_from_pcb(pcb, 1), abs=1e-9
+        )
+
+
+# ---------------------------------------------------------------------------
+# Further kicad-cli probes (Docker kicad/kicad:10.0, 10.0.6; 4-layer default
+# stackup, so a connected F.Cu-B.Cu via adds 1.58 mm).  Expected values are
+# kicad-cli's reported net length for the same geometry.
+# ---------------------------------------------------------------------------
+
+_F, _B = "F.Cu", "B.Cu"
+_VIA = LVia(10.0, 0.0, 0.6, (_F, _B))
+
+
+def _probe(segs, pads=(), vias=(_VIA,)):
+    return net_length(
+        [LSeg(*s) for s in segs], list(vias), list(pads), KicadStackup.default(1.6, 4)
+    )
+
+
+class TestKicadCliProbes:
+    def test_smd_pad_overlapping_via_copper_connects_its_layer(self):
+        # B.Cu pad does not contain the via centre, only overlaps its copper.
+        pad = LPad(10.7, 0.0, 1.0, 1.0, layers=frozenset({_B}))
+        assert _probe([(0, 0, 10, 0, _F)], [pad]) == pytest.approx(11.58, abs=1e-4)
+
+    @pytest.mark.parametrize(
+        ("side", "track_layer", "expected"),
+        [
+            (_F, _F, 4.0),  # pad adds F.Cu, already connected: still a stub
+            (_F, _B, 5.58),  # pad adds F.Cu to the B.Cu track: full span
+            (_B, _F, 5.58),
+            (_B, _B, 4.0),
+            (_F, "In1.Cu", 4.5325),
+            (_B, "In1.Cu", 5.0475),
+        ],
+    )
+    def test_through_hole_pad_connects_its_footprint_side(self, side, track_layer, expected):
+        pad = LPad(10.0, 0.0, 1.2, 1.2, layers=None, side=side)
+        segs = [(10, 0, 14, 0, track_layer)]
+        assert _probe(segs, [pad]) == pytest.approx(expected, abs=1e-4)
+
+    def test_through_hole_pad_connects_off_centre_via(self):
+        pad = LPad(10.0, 0.0, 1.2, 1.2, layers=None, side=_F)
+        via = LVia(10.1, 0.0, 0.6, (_F, _B))
+        got = _probe([(10.1, 0, 14, 0, _B)], [pad], [via])
+        assert got == pytest.approx(5.48, abs=1e-4)
+
+    def test_through_hole_pad_side_read_from_footprint(self, tmp_path):
+        board = _MERGE_BOARD.split("  (net 0")[0] + (
+            '  (net 0 "") (net 1 "N1")\n'
+            '  (footprint "T:TH" (layer "B.Cu") (uuid "51111111-1111-1111-1111-111111111111")'
+            " (at 50 50)\n"
+            '    (pad "1" thru_hole circle (at 0 0) (size 1.2 1.2) (drill 0.6)'
+            ' (layers "*.Cu" "*.Mask") (net 1 "N1")'
+            ' (uuid "51111111-1111-1111-1111-111111111112")))\n'
+            '  (segment (start 50 50) (end 54 50) (width 0.2) (layer "F.Cu") (net 1)'
+            ' (uuid "51111111-1111-1111-1111-111111111113"))\n'
+            '  (via (at 50 50) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 1)'
+            ' (uuid "51111111-1111-1111-1111-111111111114"))\n'
+            ")\n"
+        )
+        path = tmp_path / "board.kicad_pcb"
+        path.write_text(board)
+        pcb = PCB.load(str(path))
+        assert DiffPairLengthTracker.measure_net_from_pcb(pcb, 1) == pytest.approx(5.58, abs=1e-4)
+
+    @pytest.mark.parametrize(
+        ("via_x", "expected"),
+        [(10.0, 4.0325), (10.15, 3.9264), (9.85, 4.2083)],
+    )
+    def test_via_in_pad_trims_compose(self, via_x, expected):
+        # A run ends at an SMD pad centre that also lies inside a via.  The via
+        # straightens the end to its own centre first; the pad then trims it
+        # only when the via sits on the pad centre.  The stretch is never
+        # removed twice.
+        pad = LPad(10.0, 0.0, 1.2, 1.2, layers=frozenset({_F}))
+        via = LVia(via_x, 0.0, 0.6, (_F, _B))
+        segs = [(10, 0, 10.2, 0.2, _F), (10.2, 0.2, 14, 0.2, _F)]
+        assert _probe(segs, [pad], [via]) == pytest.approx(expected, abs=1e-4)
+
+    def test_track_passing_through_via_does_not_connect_it(self):
+        segs = [(0, 0, 10, 0, _F), (9, 0.1, 12, 0.1, _B)]
+        assert _probe(segs) == pytest.approx(13.0, abs=1e-4)
+
+    @pytest.mark.parametrize(
+        ("reverse", "expected"),
+        [(False, 9.5972), (True, 9.7564)],
+    )
+    def test_run_with_both_ends_in_one_via_trims_its_first_end(self, reverse, expected):
+        run = [(10.1, 0, 10.1, 2, _F), (10.1, 2, 10.2, 2, _F), (10.2, 2, 10.2, 0.1, _F)]
+        if reverse:
+            run = [(x2, y2, x1, y1, layer) for x1, y1, x2, y2, layer in run]
+        assert _probe([*run, (10, 0, 14, 0, _B)]) == pytest.approx(expected, abs=1e-4)
+
+    @pytest.mark.parametrize(("f_first", "expected"), [(True, 19.0871), (False, 19.3635)])
+    def test_four_end_junction_follows_input_order(self, f_first, expected):
+        # F.Cu wiggles to the via centre through (10.2, 0.2); a B.Cu track
+        # passes through the same point.  The run grown first stops there.
+        f_run = [(0, 0, 9.8, 0, _F), (9.8, 0, 10.2, 0.2, _F), (10.2, 0.2, 10, 0, _F)]
+        b_runs = [(10, 0, 14, 0, _B), (10.5, 0.5, 10.2, 0.2, _B), (10.2, 0.2, 10.2, 3, _B)]
+        segs = f_run + b_runs if f_first else b_runs + f_run
+        assert _probe(segs) == pytest.approx(expected, abs=1e-4)
+
+    def test_three_end_junction_seeded_by_first_segment(self):
+        # Branch a (two segments) reaches junction J inside the via first, so
+        # it stops there and branches b and c join into one pass-through run.
+        a1, a2 = (0, 0, 5, 0.5, _F), (5, 0.5, 10.2, 0, _F)
+        b, c = (10.2, 0, 10.2, 5, _F), (10.2, 0, 15, 0, _F)
+        stub = (10, 0, 10, -5, _B)
+        assert _probe([a1, b, c, a2, stub]) == pytest.approx(26.4305, abs=1e-4)
+        assert _probe([b, a1, c, a2, stub]) == pytest.approx(26.7053, abs=1e-4)

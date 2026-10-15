@@ -1,11 +1,9 @@
 """KiCad-exact net length: the one measurement shared by checker and tuners.
 
-Issue #6725.  ``kicad-cli`` (10.0.x) computes a net's length as::
+Issue #6725.  Black-box comparison against ``kicad-cli`` 10.0.x (Docker
+``kicad/kicad:10.0``) gives a net's length as::
 
-    length = sum(segment lengths)
-           - sum over each pad/via a track chain enters:
-                 (chain length inside the pad/via copper)
-               - (straight line from the boundary crossing to the centre)
+    length = sum(track runs, each trimmed at its two ends)
            + sum over vias: stackup_height(top connected layer, bottom connected layer)
 
 This module is the single implementation of that formula.  Both measurement
@@ -17,6 +15,23 @@ forms reduce to the same neutral geometry (:class:`LSeg`, :class:`LVia`,
 * Route form -- :meth:`KicadLengthModel.route_length` (the router's pair and
   match-group skew tuners).
 
+Track runs
+    Segments are first grouped into runs: unbranched chains on one layer.  Two
+    segment ends continue one run only when they are the only two unclaimed
+    track ends at that point (counting every layer) and share a layer.  Where
+    three or more ends meet, the run grown first (input order) stops there and
+    the remaining ends may still pair up.  A run never closes on itself.
+
+Run-end trimming
+    Only a run's two ends are trimmed; a run passing *through* a pad or via is
+    measured in full.  A run end exactly at a pad's centre, or anywhere inside a
+    via's copper, has its in-copper stretch replaced by a straight line from
+    the boundary crossing to the centre (nothing changes when the run never
+    leaves the copper).  Each pad or via trims at most one end of a run, and
+    the run's first end wins.  Vias act first and pads second, each on the
+    path the previous trims left, so a via inside a pad takes over the end
+    unless it sits exactly on the pad centre.
+
 Via height (``KicadStackup.span``)
     The copper-plus-dielectric height between the two end layers.  An outer
     copper layer (F.Cu / B.Cu) that is an end layer counts in full, an inner
@@ -27,15 +42,13 @@ Via height (``KicadStackup.span``)
     ``(general (thickness))``).
 
 Via span
-    The span uses the layers the via actually connects on (a track of the net
-    ends inside the via, or a pad of the net sits on it), not its declared
-    ``(layers ...)``.  A via connected on fewer than two layers falls back to
-    the declared span.
-
-Pad/via trimming
-    A track chain entering a pad or via copper is clipped at the copper
-    boundary and the in-copper portion is replaced by a straight line to the
-    centre.  Zero when the track runs straight to the centre.
+    The span runs between the outermost layers the via is connected on: a
+    layer where a track of the net ends inside the via copper, or the layer of
+    a pad of the net whose copper overlaps the via (a surface pad adds its
+    own layers, a through-hole pad only its footprint's side).  A via
+    connected on fewer than two layers is a stub and adds no height.  The
+    Route form keeps the declared span for such a via instead, because one
+    router ``Route`` can be a fragment of its net.
 """
 
 from __future__ import annotations
@@ -43,6 +56,7 @@ from __future__ import annotations
 import math
 from collections.abc import Iterable
 from dataclasses import dataclass, field
+from itertools import pairwise
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -85,7 +99,9 @@ class LPad:
 
     ``w``/``h`` are in the pad's own frame, rotated by ``rot`` degrees using
     KiCad's pad convention.  ``layers`` is the set of copper layer names the
-    pad is on, or ``None`` for all copper layers (through-hole).
+    pad is on, or ``None`` for all copper layers (through-hole).  ``side`` is
+    the copper layer of the footprint's side: the one layer on which a
+    through-hole pad connects a via it overlaps.
     """
 
     x: float
@@ -96,6 +112,7 @@ class LPad:
     shape: str = "rect"
     rratio: float = 0.25
     layers: frozenset[str] | None = None
+    side: str = "F.Cu"
 
 
 # ---------------------------------------------------------------------------
@@ -280,6 +297,32 @@ class _Shape:
             return r <= 0 or math.hypot(cx, cy) < r + eps
         return ax < hw + eps and ay < hh + eps
 
+    def gap_to(self, px: float, py: float) -> float:
+        """Distance from ``(px, py)`` to this copper (0 inside it).
+
+        Every supported outline is a rectangle with rounded corners: radius 0
+        (rect), a fraction of the short side (roundrect), or half the short
+        side (oval, circle).
+        """
+        dx, dy = px - self.x, py - self.y
+        if self.kind == "circle":
+            return max(math.hypot(dx, dy) - self.w / 2.0, 0.0)
+        if self.rot:
+            from kicad_tools.core.geometry import rotate_pad_offset
+
+            dx, dy = rotate_pad_offset(dx, dy, -self.rot)
+        hw, hh = self.w / 2.0, self.h / 2.0
+        if self.kind == "oval":
+            r = min(hw, hh)
+        elif self.kind == "roundrect":
+            ratio = _DEFAULT_RRATIO if self.rratio is None else self.rratio
+            r = min(ratio * min(self.w, self.h), hw, hh)
+        else:
+            r = 0.0
+        ox = max(abs(dx) - (hw - r), 0.0)
+        oy = max(abs(dy) - (hh - r), 0.0)
+        return max(math.hypot(ox, oy) - r, 0.0)
+
 
 def _pad_shape(pad: LPad) -> _Shape:
     kind = pad.shape if pad.shape in ("circle", "oval", "roundrect") else "rect"
@@ -310,52 +353,102 @@ def _key(x: float, y: float) -> tuple[float, float]:
     return (round(x, _KEY_DIGITS), round(y, _KEY_DIGITS))
 
 
-def _trim_for_shape(shape: _Shape, segs: list[LSeg]) -> float:
-    """Length removed from ``segs`` (one layer) by clipping at ``shape``."""
-    if not any(shape.contains(s.x1, s.y1) or shape.contains(s.x2, s.y2) for s in segs):
-        return 0.0
-    adj: dict[tuple[float, float], list[int]] = {}
-    for i, s in enumerate(segs):
-        adj.setdefault(_key(s.x1, s.y1), []).append(i)
-        adj.setdefault(_key(s.x2, s.y2), []).append(i)
+Point = tuple[float, float]
 
-    def pt(i: int, end: int) -> tuple[float, float]:
-        s = segs[i]
-        return (s.x1, s.y1) if end == 0 else (s.x2, s.y2)
 
-    visited: set[int] = set()
-    trim = 0.0
-    centre = (shape.x, shape.y)
-    for i in range(len(segs)):
-        for end in (0, 1):
-            if i in visited or not shape.contains(*pt(i, end)):
+# ---------------------------------------------------------------------------
+# Track runs
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class _Run:
+    """An unbranched chain of segments on one layer, as an ordered polyline."""
+
+    layer: str
+    points: list[Point]
+
+    @property
+    def length(self) -> float:
+        return sum(math.dist(a, b) for a, b in pairwise(self.points))
+
+
+class _RunBuilder:
+    """Greedy grouping of a net's segments into :class:`_Run` polylines.
+
+    Every segment end starts *free*.  Runs are seeded in input order and grown
+    from the seed's second end, then from its first end.  At each growth point
+    the free ends there are counted across all layers: growth continues only
+    into a single other free end on the same layer belonging to an unused
+    segment; otherwise the run's end is fixed there and stops being free.
+    """
+
+    def __init__(self, segs: list[LSeg]) -> None:
+        self.segs = segs
+        self.at: dict[tuple[float, float], list[tuple[int, int]]] = {}
+        for idx, seg in enumerate(segs):
+            for side in (0, 1):
+                self.at.setdefault(_key(*self._point(idx, side)), []).append((idx, side))
+        self.free = {(idx, side) for idx in range(len(segs)) for side in (0, 1)}
+        self.used: set[int] = set()
+
+    def _point(self, idx: int, side: int) -> Point:
+        s = self.segs[idx]
+        return (s.x1, s.y1) if side == 0 else (s.x2, s.y2)
+
+    def _grow(self, idx: int, side: int) -> list[Point]:
+        """Points appended beyond segment end ``(idx, side)``, nearest first."""
+        tail: list[Point] = []
+        end = (idx, side)
+        while end in self.free:
+            self.free.discard(end)
+            here = _key(*self._point(*end))
+            others = [e for e in self.at[here] if e in self.free]
+            if len(others) != 1:
+                break
+            nxt_idx, nxt_side = others[0]
+            if nxt_idx in self.used or self.segs[nxt_idx].layer != self.segs[idx].layer:
+                break
+            self.free.discard(others[0])
+            self.used.add(nxt_idx)
+            end = (nxt_idx, 1 - nxt_side)
+            tail.append(self._point(*end))
+        return tail
+
+    def runs(self) -> list[_Run]:
+        out: list[_Run] = []
+        for idx, seg in enumerate(self.segs):
+            if idx in self.used:
                 continue
-            # A walk starts only where a track ends at the pad/via centre
-            # (kicad-cli leaves a track that ends elsewhere inside the copper
-            # untouched).  A vertex inside the copper that merely continues the
-            # chain is reached by the walk from the chain's own end.
-            if math.dist(pt(i, end), centre) > _CENTRE_TOL:
-                continue
-            cur, entry = i, end
-            inside = 0.0
-            while True:
-                visited.add(cur)
-                a, b = pt(cur, entry), pt(cur, 1 - entry)
-                if not shape.contains(*b):
-                    x = _crossing(shape, a, b)
-                    inside += math.dist(a, x)
-                    trim += inside - math.dist(x, centre)
-                    break
-                inside += math.dist(a, b)
-                nxt = [j for j in adj.get(_key(*b), []) if j not in visited]
-                if len(nxt) != 1:
-                    # The chain never leaves the copper (ends or forks inside
-                    # it): kicad-cli measures it untouched.
-                    break
-                j = nxt[0]
-                cur = j
-                entry = 0 if _key(*pt(j, 0)) == _key(*b) else 1
-    return trim
+            self.used.add(idx)
+            forward = self._grow(idx, 1)
+            backward = self._grow(idx, 0)
+            points = [*reversed(backward), self._point(idx, 0), self._point(idx, 1), *forward]
+            out.append(_Run(seg.layer, points))
+        return out
+
+
+def _straighten_start(shape: _Shape, path: list[Point]) -> list[Point]:
+    """``path`` with its opening stretch inside ``shape`` straightened.
+
+    ``path[0]`` lies inside ``shape``.  The stretch up to where ``path`` first
+    leaves the copper becomes a straight line from the shape's centre to that
+    crossing, so the result starts at the centre.  A path that never leaves
+    the copper is returned unchanged.
+    """
+    for i, (a, b) in enumerate(pairwise(path)):
+        if not shape.contains(*b):
+            return [(shape.x, shape.y), _crossing(shape, a, b), *path[i + 1 :]]
+    return path
+
+
+def _straighten_one_end(shape: _Shape, path: list[Point], touches) -> list[Point]:
+    """Straighten the first of ``path``'s two ends for which ``touches`` holds."""
+    if touches(path[0]):
+        return _straighten_start(shape, path)
+    if touches(path[-1]):
+        return _straighten_start(shape, path[::-1])[::-1]
+    return path
 
 
 # ---------------------------------------------------------------------------
@@ -367,35 +460,46 @@ def _pad_on_layer(pad: LPad, layer: str) -> bool:
     return pad.layers is None or layer in pad.layers
 
 
-def _via_connected_span(
+def _via_positions(via: LVia, stackup: KicadStackup) -> tuple[int, int] | None:
+    """Top and bottom stack positions of the via's declared span."""
+    declared = [stackup.position(n) for n in via.layers]
+    if any(p is None for p in declared):
+        return None
+    lo, hi = sorted(p for p in declared if p is not None)
+    return lo, hi
+
+
+def _via_height(
     via: LVia,
     segs: list[LSeg],
     pads: list[LPad],
     stackup: KicadStackup,
-) -> tuple[str, str]:
-    """Layers the via connects on (min/max by stack position), else declared."""
-    declared = [stackup.position(n) for n in via.layers]
-    if any(p is None for p in declared):
-        return via.layers
-    lo_d, hi_d = sorted(p for p in declared if p is not None)
-    shape = _via_shape(via)
-    copper = stackup.copper
-    found: set[int] = set()
+    partial_net: bool,
+) -> float:
+    """Stackup height charged for ``via`` (see "Via span" in the module docs)."""
+    positions = _via_positions(via, stackup)
+    if positions is None:
+        return stackup.span(*via.layers)
+    lo, hi = positions
+    copper = _via_shape(via)
+    radius = via.diameter / 2.0
+    layers: set[int] = set()
     for s in segs:
         pos = stackup.position(s.layer)
-        if pos is None or not (lo_d <= pos <= hi_d):
-            continue
-        if shape.contains(s.x1, s.y1) or shape.contains(s.x2, s.y2):
-            found.add(pos)
+        if pos is not None and lo <= pos <= hi:
+            if copper.contains(s.x1, s.y1) or copper.contains(s.x2, s.y2):
+                layers.add(pos)
     for pad in pads:
-        if not _pad_shape(pad).contains(via.x, via.y):
+        if _pad_shape(pad).gap_to(via.x, via.y) >= radius:
             continue
-        for pos in range(lo_d, hi_d + 1):
-            if _pad_on_layer(pad, copper[pos]):
-                found.add(pos)
-    if len(found) >= 2:
-        return copper[min(found)], copper[max(found)]
-    return via.layers
+        for name in (pad.side,) if pad.layers is None else pad.layers:
+            pos = stackup.position(name)
+            if pos is not None and lo <= pos <= hi:
+                layers.add(pos)
+    if len(layers) >= 2:
+        names = stackup.copper
+        return stackup.span(names[min(layers)], names[max(layers)])
+    return stackup.span(*via.layers) if partial_net else 0.0
 
 
 def net_length(
@@ -403,45 +507,49 @@ def net_length(
     vias: Iterable[LVia],
     pads: Iterable[LPad],
     stackup: KicadStackup | None,
+    *,
+    partial_net: bool = False,
 ) -> float:
     """Length of one net exactly as kicad-cli measures it (see module docs).
 
-    ``stackup`` of ``None`` charges vias nothing (segments and trims only).
+    ``stackup`` of ``None`` charges vias nothing (runs and trims only).
+    ``partial_net`` marks geometry that may be only part of its net (a router
+    ``Route``): a via connected on fewer than two layers then keeps its
+    declared span instead of counting as a zero-height stub.  Junction
+    resolution follows input order, which is file order for the PCB form.
     """
     seg_list = list(segs)
     via_list = list(vias)
     pad_list = list(pads)
 
-    total = sum(math.hypot(s.x2 - s.x1, s.y2 - s.y1) for s in seg_list)
-
-    by_layer: dict[str, list[LSeg]] = {}
-    for s in seg_list:
-        by_layer.setdefault(s.layer, []).append(s)
-
-    for pad in pad_list:
-        shape = _pad_shape(pad)
-        for layer, layer_segs in by_layer.items():
-            if _pad_on_layer(pad, layer):
-                total -= _trim_for_shape(shape, layer_segs)
-
-    for via in via_list:
-        shape = _via_shape(via)
-        positions = None
-        if stackup is not None:
-            declared = [stackup.position(n) for n in via.layers]
-            if all(p is not None for p in declared):
-                positions = sorted(p for p in declared if p is not None)
-        for layer, layer_segs in by_layer.items():
-            if stackup is not None and positions is not None:
-                pos = stackup.position(layer)
-                if pos is None or not (positions[0] <= pos <= positions[-1]):
+    total = 0.0
+    for run in _RunBuilder(seg_list).runs():
+        # Vias first, then pads, each acting on the path the previous one left:
+        # a via straightens a run end to its own centre, so a pad still trims
+        # that end only when the via sits exactly on the pad centre.
+        path = run.points
+        for via in via_list:
+            if stackup is not None:
+                positions = _via_positions(via, stackup)
+                pos = stackup.position(run.layer)
+                if positions is not None and (
+                    pos is None or not positions[0] <= pos <= positions[1]
+                ):
                     continue
-            total -= _trim_for_shape(shape, layer_segs)
+            shape = _via_shape(via)
+            path = _straighten_one_end(shape, path, lambda p, s=shape: s.contains(*p))
+        for pad in pad_list:
+            if not _pad_on_layer(pad, run.layer):
+                continue
+            centre = (pad.x, pad.y)
+            path = _straighten_one_end(
+                _pad_shape(pad), path, lambda p, c=centre: math.dist(p, c) <= _CENTRE_TOL
+            )
+        total += _Run(run.layer, path).length
 
     if stackup is not None:
         for via in via_list:
-            top, bottom = _via_connected_span(via, seg_list, pad_list, stackup)
-            total += stackup.span(top, bottom)
+            total += _via_height(via, seg_list, pad_list, stackup, partial_net)
     return total
 
 
@@ -472,6 +580,7 @@ def _pcb_pads(pcb: PCB, net_id: int) -> list[LPad]:
                     shape=pad.shape,
                     rratio=_pad_rratio(pad),
                     layers=layers,
+                    side="B.Cu" if getattr(fp, "layer", "F.Cu") == "B.Cu" else "F.Cu",
                 )
             )
     return pads
@@ -534,6 +643,8 @@ def router_pad(pad: Any) -> LPad:
         shape=getattr(pad, "shape", None) or "rect",
         rratio=_pad_rratio(pad),
         layers=layers,
+        # Router pads carry no footprint side; their layer is the best guess.
+        side=_lname(pad.layer),
     )
 
 
@@ -572,7 +683,9 @@ class KicadLengthModel:
 
     def route_length(self, route: Route) -> float:
         segs, vias = route_geometry(route)
-        return net_length(segs, vias, self.pads_by_net.get(route.net, []), self.stackup)
+        return net_length(
+            segs, vias, self.pads_by_net.get(route.net, []), self.stackup, partial_net=True
+        )
 
     def net_length_pcb(self, pcb: PCB, net_id: int) -> float:
         segs, vias, _pads = pcb_net_geometry(pcb, net_id)

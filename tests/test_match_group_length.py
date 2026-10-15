@@ -808,11 +808,13 @@ class TestMeasureNetFromPcbDelegation:
         pcb = _StubPCB(
             _segments=[
                 _StubSegment(start=(0.0, 0.0), end=(10.0, 0.0), net_number=100),
-                _StubSegment(start=(10.0, 0.0), end=(10.0, 5.0), net_number=100),
+                # Issue #6725: the via joins two layers (a one-layer stub via
+                # has zero height to kicad-cli).
+                _StubSegment(start=(10.0, 0.0), end=(10.0, 5.0), net_number=100, layer="B.Cu"),
             ],
             _vias=[
                 _StubVia(
-                    position=(10.0, 5.0),
+                    position=(10.0, 0.0),
                     layers=["F.Cu", "B.Cu"],
                     net_number=100,
                 )
@@ -834,11 +836,12 @@ class TestMeasureNetFromPcbDelegation:
         """Issue #6725: the stackup comes from the board, no thickness arg needed."""
         pcb = _StubPCB(
             _segments=[
-                _StubSegment(start=(0.0, 0.0), end=(10.0, 0.0), net_number=100),
+                _StubSegment(start=(0.0, 0.0), end=(5.0, 0.0), net_number=100),
+                _StubSegment(start=(5.0, 0.0), end=(10.0, 0.0), net_number=100, layer="B.Cu"),
             ],
             _vias=[
                 _StubVia(
-                    position=(10.0, 0.0),
+                    position=(5.0, 0.0),
                     layers=["F.Cu", "B.Cu"],
                     net_number=100,
                 )
