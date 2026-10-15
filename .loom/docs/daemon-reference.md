@@ -7623,7 +7623,7 @@ restart re-fetches each listing once. PR-side claim listings stay on
 ### Agent CI wait: `forge wait-checks` (#10330)
 
 `loom-daemon forge wait-checks <PR|SHA> [--timeout SECS] [--required-only]
-[--repo O/R] [--base BRANCH]` is the agent-side counterpart of the steady-state
+[--settle-red] [--repo O/R] [--base BRANCH]` is the agent-side counterpart of the steady-state
 work above: it waits for a PR's (or a commit's) CI with REST reads revalidated by
 ETag — `pulls/{n}` (head SHA; the same entry `forge pr view --cached` holds),
 `commits/{sha}/check-runs` and `commits/{sha}/status` — so an unchanged poll is
@@ -7663,6 +7663,19 @@ otherwise settle is `ERROR`. Under `--required-only`, a base branch that require
 no contexts falls back to the default-mode decision over every observed check,
 with a stderr note — `gh pr checks --required` errors there ("no required checks
 reported"), so a vacuous `GREEN` would be a false pass.
+
+**RED is early by default; `--settle-red` waits for the run to finish (#12011).**
+By default a failing check is `RED` as soon as it is terminal, even while other
+checks still run — right for a caller that only *refuses* on it (the approval
+gate in `post-verdict.sh`, `merge-pr.sh`, Champion). Under `--settle-red` a
+failure is `RED` only once nothing observed is pending, the required set is
+known and every required context has registered; until then the wait stays
+pending (`TIMEOUT <sha> <pending>` at the deadline, plus a stderr note
+`wait-checks: --settle-red: already failing: <names>`). The Judge uses it before
+a changes-requested CI verdict, which must name the failing test from
+`gh run view <run_id> --log-failed` — and that log is not readable until the
+whole run completes (PR #11974: a verdict on a partial run named no test, and the
+red leg was a tracked flake).
 
 **Refusals are classified (#10633).** A `401`/`403`/`429` is classified by
 `forge_denial` from the response body, `gh`'s stderr and the rate-limit headers:

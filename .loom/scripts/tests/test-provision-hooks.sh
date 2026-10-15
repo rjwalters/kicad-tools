@@ -64,6 +64,10 @@ if [[ ! -f "$PROVISION_LIB" ]]; then
 fi
 command -v jq >/dev/null 2>&1 || { echo "jq required for these tests"; exit 1; }
 
+# A daemon-spawned session exports this (2am#4501); every wrapper
+# case below that does not set it must see the checkout path.
+unset LOOM_HOOKS_HOME
+
 # shellcheck source=/dev/null
 source "$PROVISION_LIB"
 
@@ -256,6 +260,22 @@ assert_contains "$WOUT" "MACHINE-RAN:$LOOMREPO" "#4806 AC(c): copies absent -> m
 # 8e: Loom workspace but machine checkout absent -> no-op (fail-open)
 out=$(cd "$LOOMREPO" && LOOM_HOME="/nonexistent/checkout" bash -c "$CMD" </dev/null 2>/dev/null); wrc=$?
 [[ -z "$out" && "$wrc" == "0" ]] && pass "machine checkout absent -> silent no-op (exit 0)" || fail "expected silent exit 0 when checkout absent, got out='$out' rc=$wrc"
+
+# 8f: the daemon's own release hooks (2am#4501). A daemon-spawned
+# session carries LOOM_HOOKS_HOME (the hooks unpacked from the running
+# binary); the wrapper prefers it, and falls back to the checkout when the
+# variable is blank or its hook file is missing, so nothing fails open that
+# did not before.
+REL8=$(mktemp -d)
+mkdir -p "$REL8/defaults/hooks"
+printf '#!/usr/bin/env bash\necho "RELEASE-RAN:$LOOM_PROJECT_ROOT"\nexit 0\n' > "$REL8/defaults/hooks/guard-destructive.sh"
+chmod +x "$REL8/defaults/hooks/guard-destructive.sh"
+out=$(cd "$LOOMREPO" && LOOM_HOOKS_HOME="$REL8" LOOM_HOME="$CHK" bash -c "$CMD" </dev/null 2>/dev/null)
+assert_contains "$out" "RELEASE-RAN:$LOOMREPO" "2am#4501: LOOM_HOOKS_HOME set -> the daemon's release hook runs, not the checkout's"
+out=$(cd "$LOOMREPO" && LOOM_HOOKS_HOME="" LOOM_HOME="$CHK" bash -c "$CMD" </dev/null 2>/dev/null)
+assert_contains "$out" "MACHINE-RAN:$LOOMREPO" "2am#4501: LOOM_HOOKS_HOME blank -> the checkout's hook runs"
+out=$(cd "$LOOMREPO" && LOOM_HOOKS_HOME="/nonexistent/release" LOOM_HOME="$CHK" bash -c "$CMD" </dev/null 2>/dev/null)
+assert_contains "$out" "MACHINE-RAN:$LOOMREPO" "2am#4501: LOOM_HOOKS_HOME without the hook -> falls back to the checkout, never fails open"
 
 # ── Test 9: deprovision removes only Loom-owned entries ──────────────────────
 echo "Test 9: deprovision strips Loom-owned entries, preserves operator hooks"

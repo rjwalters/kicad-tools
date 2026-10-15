@@ -318,7 +318,7 @@ _github_app_api_get_installation() {
   local nwo="$1" jwt resp http_code body
   jwt=$(github_app_jwt) || return 1
   resp=$(curl -sS -w '\n%{http_code}' \
-    -H "Authorization: Bearer $jwt" \
+    --config <(printf 'header = "Authorization: Bearer %s"\n' "$jwt") \
     -H "Accept: application/vnd.github+json" \
     -H "X-GitHub-Api-Version: 2022-11-28" \
     "https://api.github.com/repos/${nwo}/installation" 2>/dev/null) || {
@@ -351,7 +351,7 @@ _github_app_api_mint_token() {
   local installation_id="$1" jwt resp http_code body
   jwt=$(github_app_jwt) || return 1
   resp=$(curl -sS -w '\n%{http_code}' -X POST \
-    -H "Authorization: Bearer $jwt" \
+    --config <(printf 'header = "Authorization: Bearer %s"\n' "$jwt") \
     -H "Accept: application/vnd.github+json" \
     -H "X-GitHub-Api-Version: 2022-11-28" \
     "https://api.github.com/app/installations/${installation_id}/access_tokens" 2>/dev/null) || {

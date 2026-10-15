@@ -35,6 +35,22 @@ decides which host owns a workspace. An unsharded host owns every workspace, so
 a single daemon is unaffected, and the duplicate cleanup above covers a fleet
 that is not sharded.
 
+## Only a landable predecessor anchors a hold (#12010)
+
+A PR is only ever held behind a predecessor that is ready to land: `loom:pr`,
+with no `loom:changes-requested`, `loom:ci-failure`, `loom:blocked` or
+`loom:operator` (#10371), not itself sequenced behind such a PR (#10465), and
+**landable now**. Each tick the pass reads every such approved PR's check runs
+on its current head and its mergeability, both as conditional (ETag'd) REST
+reads that cost nothing for an unchanged head. A PR with a completed `failure`
+or `timed_out` check, or that GitHub reports as conflicting with its base, is
+treated as not ready: no new hold is planned behind it, and an existing soft
+hold behind it is released on that tick, with a comment naming the red checks
+or the conflict. Pending CI, a `cancelled` run, and unknown mergeability change
+nothing, so a freshly re-dated head does not churn holds. Human holds (no
+`source=pass`), stacked bases and consolidation reservations are unaffected.
+Once the predecessor is green again it is ordered oldest-first as before.
+
 ## A pinned head that moves
 
 By default a hold whose follower head moved since the marker was written is

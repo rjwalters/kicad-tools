@@ -315,8 +315,11 @@ echo "Testing installation-id validation (#4456)..."
 # constant so no signing is required.
 STUB_INSTALL_BODY='{"id": 55}'
 STUB_INSTALL_CODE='200'
+export STUB_CURL_ARGV_LOG="$WORK_DIR/curl-argv.log"
+: > "$STUB_CURL_ARGV_LOG"
 curl() {
     local url=""
+    printf '%s\n' "$*" >> "$STUB_CURL_ARGV_LOG"
     for _a in "$@"; do url="$_a"; done
     case "$url" in
         */installation) printf '%s\n%s' "$STUB_INSTALL_BODY" "$STUB_INSTALL_CODE" ;;
@@ -328,6 +331,16 @@ github_app_jwt() { echo "fake.jwt.signature"; }
 
 export LOOM_GITHUB_APP_ID="424242"
 export LOOM_GITHUB_APP_KEY_PATH="$KEY_PATH"
+
+# Credentials must never reach curl's argv (#10463): the stub records every
+# invocation's argv; run both API helpers, then assert no Authorization header.
+_github_app_api_get_installation "acme/widgets" >/dev/null 2>&1 || true
+_github_app_api_mint_token "55" >/dev/null 2>&1 || true
+if [[ -s "$STUB_CURL_ARGV_LOG" ]] && ! grep -q 'Authorization:\|fake\.jwt' "$STUB_CURL_ARGV_LOG"; then
+    pass "curl argv carries no Authorization header or JWT (#10463)"
+else
+    fail "curl argv must not contain 'Authorization:' or the JWT" "$(cat "$STUB_CURL_ARGV_LOG")"
+fi
 
 # Valid numeric id -> echoed, success.
 STUB_INSTALL_BODY='{"id": 55}'

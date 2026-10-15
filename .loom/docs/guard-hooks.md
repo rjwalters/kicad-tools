@@ -32,6 +32,27 @@ from the tracked `.loom-project/project.json` (or legacy `.loom/config.json`)
 through the tiered resolver. Implementation vs. policy are split: scripts machine-
 level, config per-repo.
 
+**Daemon-spawned sessions run the daemon's own release (2am#4501).** A host
+that updates `loom-daemon` from release artifacts never moves the machine checkout, so
+hooks run from it lagged the daemon that launched the session. The binary embeds
+its `defaults/` tree. On first use, `loom-daemon` unpacks the hook-runtime part of it
+(everything but `tests/`) once per distinct payload into
+`~/.local/share/loom-daemon/hooks-home/<version>-<sha>/`. It exports that path to
+every session it spawns as `LOOM_HOOKS_HOME`, and the wrapper prefers
+`$LOOM_HOOKS_HOME/defaults/hooks/<name>`. When the variable is unset or blank (an
+attended session), or the file is missing there, the wrapper falls back to the
+checkout, so nothing fails open that did not before. `loom-daemon hooks-home`
+prints the directory. `LOOM_HOOKS_HOME` set in the daemon's own environment is a
+pin, and set empty it turns the export off. Older copies are pruned only when they
+are outside the newest three and more than three days past their last use
+(`hooks_home.rs`). The tree is private to the user: the base is `0700`, no file or
+directory in it is group- or world-writable whatever the umask, and a copy that
+fails that check, or is not owned by the user, is unpacked again rather than
+reused. Hooks that log beside their own tree write `hook-errors.log` and the
+decision logs to `<hooks-home>/<key>/.loom/logs`, which moves with each release.
+`guard-background-subagents.sh` resolves its root as `/` there and stays enabled
+(stricter, not fail-open).
+
 Each user-scope entry is a **fail-open, self-gating** command wrapper, because a
 user-scope hook fires in *every* repo the operator opens:
 

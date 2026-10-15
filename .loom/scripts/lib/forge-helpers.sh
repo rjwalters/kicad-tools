@@ -228,6 +228,16 @@ _gitea_validate_basic_auth() {
 
 # --- Gitea API Helper ---
 
+# _gitea_auth_cfg -> curl config line carrying the Gitea credential (values
+# escaped for a double-quoted config string; backslash/quote escaped, CR/LF
+# stripped). Used with `curl --config <(_gitea_auth_cfg)` so credentials never
+# reach curl's argv (#10463).
+_gitea_auth_cfg() {
+  local t="${_GITEA_TOKEN//[$'\r\n']/}" u="${_GITEA_USERNAME//[$'\r\n']/}"
+  t="${t//\\/\\\\}"; t="${t//\"/\\\"}"; u="${u//\\/\\\\}"; u="${u//\"/\\\"}"
+  if [[ -n "$u" ]]; then printf 'user = "%s:%s"\n' "$u" "$t"; else printf 'header = "Authorization: token %s"\n' "$t"; fi
+}
+
 # Make a Gitea API request using curl.
 # Usage: gitea_api METHOD path [curl-args...]
 # Returns: response body on stdout, exit code 0 on 2xx, 1 on error
@@ -259,26 +269,14 @@ gitea_api() {
   local http_code
   local response
 
-  if [[ -n "$_GITEA_USERNAME" ]]; then
-    # HTTP Basic Auth (username + password). curl handles base64 encoding
-    # of "user:pass" internally; we never echo the password to the log.
-    response=$(curl -s -w "\n%{http_code}" \
-      -X "$method" \
-      -u "${_GITEA_USERNAME}:${_GITEA_TOKEN}" \
-      -H "Content-Type: application/json" \
-      -H "Accept: application/json" \
-      "$@" \
-      "$url" 2>/dev/null)
-  else
-    # Token auth (existing behavior, unchanged).
-    response=$(curl -s -w "\n%{http_code}" \
-      -X "$method" \
-      -H "Authorization: token $_GITEA_TOKEN" \
-      -H "Content-Type: application/json" \
-      -H "Accept: application/json" \
-      "$@" \
-      "$url" 2>/dev/null)
-  fi
+  # Basic Auth (username set) or token auth; credential rides a curl config, not argv.
+  response=$(curl -s -w "\n%{http_code}" \
+    -X "$method" \
+    --config <(_gitea_auth_cfg) \
+    -H "Content-Type: application/json" \
+    -H "Accept: application/json" \
+    "$@" \
+    "$url" 2>/dev/null)
 
   http_code=$(echo "$response" | tail -1)
   local body
@@ -1987,19 +1985,11 @@ forge_get_required_status_check_contexts() {
 
     local url="${_GITEA_BASE_URL}/api/v1/repos/${FORGE_OWNER}/${FORGE_REPO}/branch_protections/${branch}"
     local response
-    if [[ -n "$_GITEA_USERNAME" ]]; then
-      response=$(curl -s -w "\n%{http_code}" \
-        -X GET \
-        -u "${_GITEA_USERNAME}:${_GITEA_TOKEN}" \
-        -H "Accept: application/json" \
-        "$url" 2>/dev/null) || return 1
-    else
-      response=$(curl -s -w "\n%{http_code}" \
-        -X GET \
-        -H "Authorization: token $_GITEA_TOKEN" \
-        -H "Accept: application/json" \
-        "$url" 2>/dev/null) || return 1
-    fi
+    response=$(curl -s -w "\n%{http_code}" \
+      -X GET \
+      --config <(_gitea_auth_cfg) \
+      -H "Accept: application/json" \
+      "$url" 2>/dev/null) || return 1
 
     local http_code body
     http_code=$(echo "$response" | tail -1)

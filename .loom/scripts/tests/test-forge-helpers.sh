@@ -378,13 +378,19 @@ echo "Testing gitea_api auth mode selection (Basic vs token)..."
 
 SHIM_DIR=$(mktemp -d)
 CURL_ARGS_FILE=$(mktemp)
-export CURL_ARGS_FILE
+CURL_CFG_FILE=$(mktemp)
+export CURL_ARGS_FILE CURL_CFG_FILE
 cat > "$SHIM_DIR/curl" <<'SHIM'
 #!/usr/bin/env bash
 # Record argv (one per line) and emit a fake 200 OK response.
-: > "$CURL_ARGS_FILE"
+: > "$CURL_ARGS_FILE"; : > "$CURL_CFG_FILE"
+prev=""
 for a in "$@"; do
   printf '%s\n' "$a" >> "$CURL_ARGS_FILE"
+  # Credentials travel via `--config <(...)` (#10463): capture the config
+  # contents separately; they must NOT appear in argv.
+  if [[ "$prev" == "--config" ]]; then cat "$a" >> "$CURL_CFG_FILE"; fi
+  prev="$a"
 done
 # gitea_api expects body lines followed by a final-line HTTP status code.
 printf '{"ok":true}\n200\n'
@@ -397,7 +403,7 @@ _GITEA_TOKEN="tok-abc"
 _GITEA_USERNAME=""
 PATH="$SHIM_DIR:$PATH" gitea_api GET "user" >/dev/null 2>&1 || true
 
-if grep -q "^Authorization: token tok-abc$" "$CURL_ARGS_FILE"; then
+if grep -qx 'header = "Authorization: token tok-abc"' "$CURL_CFG_FILE"; then
     TESTS_RUN=$((TESTS_RUN + 1)); TESTS_PASSED=$((TESTS_PASSED + 1))
     echo -e "  ${GREEN}PASS${NC}: token mode sends 'Authorization: token …' header"
 else
@@ -414,21 +420,29 @@ else
     echo -e "  ${GREEN}PASS${NC}: token mode does NOT use '-u'"
 fi
 
+if grep -q 'tok-abc\|Authorization:' "$CURL_ARGS_FILE"; then
+    TESTS_RUN=$((TESTS_RUN + 1)); TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "  ${RED}FAIL${NC}: token mode leaked the credential onto curl argv (#10463)"
+else
+    TESTS_RUN=$((TESTS_RUN + 1)); TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "  ${GREEN}PASS${NC}: token mode keeps the credential off curl argv"
+fi
+
 # --- Subtest 2: Basic mode sends -u user:pass and NOT Authorization: token ---
 _GITEA_USERNAME="alice"
 _GITEA_BASE_URL="https://gitea.example.com"
 PATH="$SHIM_DIR:$PATH" gitea_api GET "user" >/dev/null 2>&1 || true
 
-if grep -qx -- "-u" "$CURL_ARGS_FILE" && grep -qx -- "alice:tok-abc" "$CURL_ARGS_FILE"; then
+if grep -qx 'user = "alice:tok-abc"' "$CURL_CFG_FILE"; then
     TESTS_RUN=$((TESTS_RUN + 1)); TESTS_PASSED=$((TESTS_PASSED + 1))
-    echo -e "  ${GREEN}PASS${NC}: Basic mode sends '-u user:pass'"
+    echo -e "  ${GREEN}PASS${NC}: Basic mode sends user:pass via curl config"
 else
     TESTS_RUN=$((TESTS_RUN + 1)); TESTS_FAILED=$((TESTS_FAILED + 1))
-    echo -e "  ${RED}FAIL${NC}: Basic mode missing '-u user:pass'"
+    echo -e "  ${RED}FAIL${NC}: Basic mode missing user:pass curl config"
     echo "    curl argv:"; sed 's/^/      /' "$CURL_ARGS_FILE"
 fi
 
-if grep -q "^Authorization: token" "$CURL_ARGS_FILE"; then
+if grep -q "Authorization: token" "$CURL_CFG_FILE"; then
     TESTS_RUN=$((TESTS_RUN + 1)); TESTS_FAILED=$((TESTS_FAILED + 1))
     echo -e "  ${RED}FAIL${NC}: Basic mode unexpectedly sent 'Authorization: token …'"
 else
