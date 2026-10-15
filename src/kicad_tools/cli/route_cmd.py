@@ -5082,13 +5082,22 @@ def run_post_route_drc(
         if not quiet and native_drc_failed:
             print("\n--- DRC Validation ---")
             print(f"  DRC FAILURE: native kicad-cli DRC did not complete ({geo.note}).")
-            print(
-                "    The board was NOT checked by KiCad; a kicad-cli crash is never a clean result."
-            )
-            print(
-                "    Re-run when kicad-cli has enough memory, or run "
-                "'kicad-cli pcb drc --refill-zones' on the board to see the failure."
-            )
+            if getattr(geo, "reason", None) == "kicad_cli_unsupported_option":
+                # Issue #6724: a usage error, not a crash -- don't blame memory.
+                print(
+                    "    The board was NOT checked by KiCad: this kicad-cli rejected "
+                    "an option kct passed."
+                )
+                print("    Upgrade KiCad (kicad-cli) to a version that supports it.")
+            else:
+                print(
+                    "    The board was NOT checked by KiCad; a kicad-cli crash is never "
+                    "a clean result."
+                )
+                print(
+                    "    Re-run when kicad-cli has enough memory, or run "
+                    "'kicad-cli pcb drc' on the board to see the failure."
+                )
             if results.error_count > 0 or warning_count > 0:
                 print(f"  Internal errors: {results.error_count}")
                 if warning_count > 0:

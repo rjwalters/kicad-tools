@@ -533,13 +533,18 @@ class ConnectivityValidator:
                     stacklevel=2,
                 )
             return None
+        from kicad_tools.cli.runner import _kicad_drc_supports_refill
+
+        # Issue #6724: KiCad 8/9 reject --refill-zones (exit 1, no report);
+        # pass it only when this kicad-cli supports it.
+        refill_args = ["--refill-zones"] if _kicad_drc_supports_refill(Path(kicad_cli)) else []
         with tempfile.NamedTemporaryFile(suffix=".json") as report_file:
             proc = subprocess.run(
                 [
                     str(kicad_cli),
                     "pcb",
                     "drc",
-                    "--refill-zones",
+                    *refill_args,
                     "--format",
                     "json",
                     "-o",

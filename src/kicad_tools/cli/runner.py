@@ -475,7 +475,9 @@ def run_drc(
             violation, not just the first per track) -- the gate the fleet's
             manufacturability check uses (Issue #6431).
         refill_zones: Pass ``--refill-zones`` (refill before checking; the
-            board file is not saved).
+            board file is not saved).  Only when this kicad-cli supports it
+            (KiCad 10+); KiCad 8/9 reject the option, so it is dropped there
+            (Issue #6724).
 
     Returns:
         KiCadCLIResult with success status and output path
@@ -518,7 +520,7 @@ def run_drc(
         cmd.append("--schematic-parity")
     if all_track_errors:
         cmd.append("--all-track-errors")
-    if refill_zones:
+    if refill_zones and _kicad_drc_supports_refill(Path(kicad_cli)):
         cmd.append("--refill-zones")
 
     cmd.append(str(pcb_path))
@@ -2123,11 +2125,6 @@ def _run_fill_zones_via_drc(
         if result.returncode < 0:
             from kicad_tools.drc.geometric import describe_returncode
 
-            if unfilled_backup is None and pre_run_bytes is not None:
-                # No stale fills to restore in ``finally``: put back the
-                # board kicad-cli may have been rewriting when it died.
-                with contextlib.suppress(OSError):
-                    target_pcb.write_bytes(pre_run_bytes)
             return KiCadCLIResult(
                 success=False,
                 stdout=result.stdout,
@@ -2173,6 +2170,14 @@ def _run_fill_zones_via_drc(
         return KiCadCLIResult(success=False, stderr=f"Failed to fill zones: {e}")
     finally:
         if not filled:
+            if unfilled_backup is None and pre_run_bytes is not None:
+                # Issue #6724: no stale fills to restore below, but a kicad-cli
+                # killed (signal) or timed out mid ``--save-board`` may have
+                # left the board half-written: put back the pre-run bytes.
+                # A run that did not refill or save leaves them unchanged.
+                if not _board_unchanged(target_pcb, pre_run_bytes):
+                    with contextlib.suppress(OSError):
+                        target_pcb.write_bytes(pre_run_bytes)
             _restore_stale_zone_fills(target_pcb, unfilled_backup)
         # Clean up the temporary DRC report.
         drc_report.unlink(missing_ok=True)

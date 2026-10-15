@@ -25,6 +25,8 @@ def test_run_geometric_drc_preserves_error_gate_and_counts_warnings(monkeypatch,
     warning = SimpleNamespace(type_str="copper_sliver", is_error=False)
     error = SimpleNamespace(type_str="clearance", is_error=True)
     monkeypatch.setattr(geometric.subprocess, "run", fake_run)
+    # Issue #6724: model a kicad-cli that supports --refill-zones (KiCad 10+).
+    monkeypatch.setattr("kicad_tools.cli.runner._kicad_drc_supports_refill", lambda _cli: True)
     monkeypatch.setattr(
         drc_package.DRCReport,
         "load",
