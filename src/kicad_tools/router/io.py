@@ -52,6 +52,7 @@ if TYPE_CHECKING:
     from kicad_tools.progress import ProgressCallback
 
     from .board_clearance_rules import BoardClearanceRules
+    from .clearance_shapes import KPad, KShape
     from .primitives import Pad, Route, Segment
     from .stub_terminals import StubTerminal
 
@@ -61,6 +62,11 @@ from .class_clearance_floors import (
     merge_named_floors,
     remember_authored_floors,
 )
+from .clearance_shapes import NO_INTERACTION as _NO_INTERACTION
+from .clearance_shapes import copper_gap as _copper_gap
+from .clearance_shapes import pad_shape as _kernel_pad_shape
+from .clearance_shapes import segment_shape as _kernel_segment_shape
+from .clearance_shapes import via_shape as _kernel_via_shape
 from .core import Autorouter
 from .fixed_copper import FixedPadCopper, custom_pad_copper, degraded_pad_copper
 from .geometry import (
@@ -70,7 +76,7 @@ from .geometry import (
     segment_to_segment_distance as _geom_seg_to_seg_dist,
 )
 from .layers import Layer, LayerDefinition, LayerStack, LayerType
-from .pad_geometry import pad_local_point, pad_point_distance, pad_segment_distance
+from .pad_geometry import pad_point_distance, pad_segment_distance
 from .rules import DEFAULT_NET_CLASS_MAP, DesignRules, NetClassRouting
 
 # Floating-point tolerance for clearance comparisons in validate_routes
@@ -2766,6 +2772,7 @@ def load_pads_for_analysis(pcb_path_or_text: str | Path) -> list[Pad]:
                     footprint_name=footprint_name,
                     rotation=pad_rotation,
                     shape=pad_shape,
+                    roundrect_rratio=_pad_rratio_from_block(pad_block, pad_shape),
                 )
             )
 
@@ -2990,6 +2997,27 @@ def validate_routes(
         ]
         for route in router.routes
     ]
+
+    # Issue #6718: pads are measured as their real copper (round, oval,
+    # roundrect, rect) through the shared clearance kernel -- the model
+    # ``kct check``, kicad-cli and the kept-copper audit below already use.
+    # The previous rectangle model held a round pad to its bounding square,
+    # so a trace passing the rounded corner read ~0.145 mm closer than it
+    # was and fed phantom violations to rip-up, the short gate and the
+    # DRC-nudge repair.  Kernel pads are built once per pad.
+    _pad_kshapes: dict[int, KPad] = {}
+
+    def _kpad(pad: Pad) -> KPad:
+        kpad = _pad_kshapes.get(id(pad))
+        if kpad is None:
+            kpad = _kernel_pad_shape(pad)
+            _pad_kshapes[id(pad)] = kpad
+        return kpad
+
+    def _kernel_pad_gap(shape: KShape, pad: Pad) -> float:
+        """Edge-to-edge gap from kernel copper ``shape`` to ``pad``'s real copper."""
+        gap = _copper_gap(shape, _kpad(pad))
+        return math.inf if gap == _NO_INTERACTION else gap
 
     # Memoized per-net-pair clearance.  ``max()`` is symmetric, so
     # ``_get_pair_clearance(a, b, ...) == _get_pair_clearance(b, a, ...)``;
@@ -3308,6 +3336,7 @@ def validate_routes(
                 seg_mid_y,
                 seg_half_len,
             ) = seg_geom
+            seg_kshape: KShape | None = None  # kernel copper, built on the first near pad
 
             # --- Segment-to-pad checks ---
             for (
@@ -3335,27 +3364,15 @@ def validate_routes(
                 if gap_lower_bound >= pair_clear - _CLEARANCE_EPSILON_MM:
                     continue
 
-                # Calculate minimum distance from the segment to the
-                # pad's true axis-aligned rectangle.  Issue #3592: the
-                # previous model treated every pad as a circle of radius
-                # ``max(width, height) / 2``, which over-estimated the
-                # extent of long, thin SMD pads (e.g. an LQFP land at
-                # 1.475 x 0.3 mm) along their short axis by ~0.6 mm and
-                # produced false-positive ``[pad]`` clearance violations
-                # for traces that legally clear the rectangular copper.
-                # Transform to the residual-angle local pad frame so the
-                # rectangle represents rotated copper, not its enlarged AABB.
-                effective_dist = (
-                    _segment_to_aabb_distance(
-                        *pad_local_point(pad, segment.x1, segment.y1),
-                        *pad_local_point(pad, segment.x2, segment.y2),
-                        0.0,
-                        0.0,
-                        pad.width / 2,
-                        pad.height / 2,
-                    )
-                    - seg_half_width
-                )
+                # Exact edge-to-edge gap from the trace to the pad's real
+                # copper (Issue #6718): the shared clearance kernel models
+                # circle / oval / roundrect / rect pads at their residual
+                # rotation (Issue #3592's long thin lands included), so a
+                # trace past a round pad's corner is not held to the
+                # pad's bounding square.
+                if seg_kshape is None:
+                    seg_kshape = _kernel_segment_shape(segment)
+                effective_dist = _kernel_pad_gap(seg_kshape, pad)
 
                 if effective_dist < pair_clear - _CLEARANCE_EPSILON_MM:
                     # Detect component-inherent violations: obstacle pad is
@@ -3637,6 +3654,7 @@ def validate_routes(
 
         for via in route.vias:
             via_radius = via.diameter / 2
+            via_kshape: KShape | None = None  # kernel copper, built on the first near pad
 
             for (ref, num), pad in router.pads.items():
                 # Issue #6225: a skipped pour-net pad (net id rewritten to
@@ -3650,11 +3668,21 @@ def validate_routes(
                 if pad.net == 0 and not pad.net_name:
                     continue
 
-                # Issue #3592: model the pad as its true axis-aligned
-                # rectangle rather than a bounding circle so anisotropic
-                # SMD lands do not produce false-positive via-clearance
-                # violations along their short axis.
-                effective_dist = pad_point_distance(pad, via.x, via.y) - via_radius
+                # Cheap lower-bound rejection: the pad's half-diagonal
+                # bounds its copper whatever its shape, so a pad whose
+                # bounding circle clears the via cannot violate.
+                if (
+                    math.hypot(pad.x - via.x, pad.y - via.y) - via_radius - _pad_radius(pad)
+                    >= via_clear - _CLEARANCE_EPSILON_MM
+                ):
+                    continue
+
+                # Exact edge-to-edge gap to the pad's real copper through
+                # the shared clearance kernel (Issue #6718; #3592's
+                # anisotropic SMD lands are exact here too).
+                if via_kshape is None:
+                    via_kshape = _kernel_via_shape(via)
+                effective_dist = _kernel_pad_gap(via_kshape, pad)
 
                 if effective_dist < via_clear - _CLEARANCE_EPSILON_MM:
                     # Issue #2757: cross-net pad on the same component is
@@ -4392,108 +4420,6 @@ def _segment_to_segment_distance(
     return _geom_seg_to_seg_dist(x1, y1, x2, y2, x3, y3, x4, y4)
 
 
-def _point_to_aabb_distance(
-    px: float, py: float, cx: float, cy: float, half_w: float, half_h: float
-) -> float:
-    """Minimum distance from a point to an axis-aligned rectangle.
-
-    The rectangle is centred at ``(cx, cy)`` with half-extents
-    ``half_w`` (X) and ``half_h`` (Y).  Returns 0.0 when the point is
-    inside the rectangle.
-
-    Issue #3592: the segment-to-pad clearance check previously modelled
-    every pad as a CIRCLE of radius ``max(width, height) / 2``.  For a
-    long, thin SMD pad (e.g. an LQFP land at 1.475 x 0.3 mm) that
-    over-estimates the pad extent along the short axis by ~0.6 mm,
-    producing false-positive clearance violations when a trace passes
-    the pad's narrow side at a distance that is legal against the real
-    rectangular copper.  Modelling the pad as its true axis-aligned
-    bounding box (pad dimensions are already rotated into PCB space at
-    load time, see ``load_pcb_for_routing``) removes that bias.
-    """
-    dx = max(abs(px - cx) - half_w, 0.0)
-    dy = max(abs(py - cy) - half_h, 0.0)
-    return math.hypot(dx, dy)
-
-
-def _segment_to_aabb_distance(
-    x1: float,
-    y1: float,
-    x2: float,
-    y2: float,
-    cx: float,
-    cy: float,
-    half_w: float,
-    half_h: float,
-) -> float:
-    """Signed centerline distance from a segment to an axis-aligned rect.
-
-    Sign convention (matches ``validate.rules.clearance.
-    _rect_segment_centerline_distance``):
-
-    - **Positive** -- segment is entirely outside the rectangle.
-    - **Zero**     -- segment touches/crosses the rectangle boundary.
-    - **Negative** -- the segment centerline lies inside the rectangle;
-      the magnitude is the deepest penetration (smallest distance to an
-      escaping edge), so the post-route DRC summary can still flag
-      "trace runs through pad metal" with a meaningful depth.
-
-    Used by the segment-to-pad clearance check so that anisotropic pads
-    are modelled by their true rectangular footprint rather than a
-    bounding circle (issue #3592).
-    """
-    left, right = cx - half_w, cx + half_w
-    bottom, top = cy - half_h, cy + half_h
-
-    def _inside(px: float, py: float) -> bool:
-        return left <= px <= right and bottom <= py <= top
-
-    p1_in = _inside(x1, y1)
-    p2_in = _inside(x2, y2)
-
-    if p1_in and p2_in:
-        # Whole centerline inside the rect -- report the deepest
-        # (most negative) signed penetration along the segment.
-        def _signed_depth(px: float, py: float) -> float:
-            gap_x = max(px - right, left - px)
-            gap_y = max(py - top, bottom - py)
-            return max(gap_x, gap_y)
-
-        deepest = min(_signed_depth(x1, y1), _signed_depth(x2, y2))
-        steps = 32
-        dx, dy = x2 - x1, y2 - y1
-        for i in range(1, steps):
-            t = i / steps
-            d = _signed_depth(x1 + t * dx, y1 + t * dy)
-            if d < deepest:
-                deepest = d
-        return deepest
-
-    if p1_in != p2_in:
-        # One endpoint inside, one outside -- the centerline crosses an
-        # edge, so it touches the boundary.
-        return 0.0
-
-    # Both endpoints outside: the segment either clears the rectangle or
-    # crosses straight through it.  Decompose the rectangle into its four
-    # edges and take the minimum segment-to-edge distance; a crossing
-    # produces distance 0 because the segment intersects an edge.
-    corners = [
-        (left, top),
-        (right, top),
-        (right, bottom),
-        (left, bottom),
-    ]
-    best = math.inf
-    for i in range(4):
-        ax, ay = corners[i]
-        bx, by = corners[(i + 1) % 4]
-        d = _geom_seg_to_seg_dist(x1, y1, x2, y2, ax, ay, bx, by)
-        if d < best:
-            best = d
-    return best
-
-
 def detect_layer_stack(pcb_text: str) -> LayerStack:
     """Auto-detect layer stack configuration from a KiCad PCB file.
 
@@ -4808,6 +4734,7 @@ def route_pcb(
                     "y": cy + ry,
                     "width": pad.get("width", 0.5),
                     "shape": pad.get("shape", "rect"),
+                    "roundrect_rratio": pad.get("roundrect_rratio"),
                     "height": pad.get("height", 0.5),
                     "net": net_num,
                     "net_name": net_name,
@@ -4898,6 +4825,32 @@ def _pad_shape_from_block(pad_block: str, ref: str, pin: str) -> str:
         pin=pin,
         has_padstack=re.search(r"\(padstack(?:\s|\))", pad_block) is not None,
     )
+
+
+def _pad_rratio_from_block(pad_block: str, shape: str) -> float | None:
+    """The file's ``(roundrect_rratio X)`` for a ``roundrect`` pad (issue #6718).
+
+    Returns ``None`` for any other shape, and for a roundrect whose block
+    carries no parseable ratio -- the clearance kernel then measures it as its
+    rectangle (conservative) rather than assuming KiCad's 0.25 default.
+    """
+    if shape != "roundrect":
+        return None
+    match = re.search(r"\(roundrect_rratio\s+([-+\d.eE]+)\s*\)", pad_block)
+    if match is None:
+        return None
+    try:
+        return float(match.group(1))
+    except ValueError:
+        return None
+
+
+def _schema_pad_rratio(pad) -> float | None:
+    """``schema.pcb.Pad.roundrect_rratio`` for a roundrect pad, else ``None``."""
+    if getattr(pad, "shape", None) != "roundrect":
+        return None
+    value = getattr(pad, "roundrect_rratio", None)
+    return float(value) if value is not None else None
 
 
 def _schema_pad_shape(pad, ref: str) -> str:
@@ -5097,6 +5050,7 @@ def _install_fine_pitch_regions_from_components(
                         drill=float(pad_info.get("drill", 0.0)),
                         rotation=float(pad_info.get("rotation", 0.0)),
                         shape=pad_info.get("shape", "rect"),
+                        roundrect_rratio=pad_info.get("roundrect_rratio"),
                     )
                 )
             except (TypeError, ValueError, KeyError):
@@ -5620,6 +5574,7 @@ def load_pcb_for_routing(
                     "layer": pad_layer,
                     "rotation": pad_rotation,
                     "shape": pad_shape,
+                    "roundrect_rratio": _pad_rratio_from_block(pad_block, pad_shape),
                 }
             )
 

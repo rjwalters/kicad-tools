@@ -723,11 +723,11 @@ double Grid3D::authored_pair_floor(int net_a, int net_b) const {
 
 void Grid3D::set_pad_authored(size_t index, const std::string& shape, double width,
                               double height, double rotation, double x, double y,
-                              double drill, double item_floor) {
+                              double drill, double item_floor, double rratio) {
     if (index >= pads_.size()) return;
     if (authored_pad_specs_.size() < pads_.size()) authored_pad_specs_.resize(pads_.size());
     authored_pad_specs_[index] = {true, shape, width, height, rotation, x, y, drill,
-                                  std::max(0.0, item_floor)};
+                                  std::max(0.0, item_floor), rratio};
     if (item_floor > 0.0) authored_items_ = true;
 }
 
@@ -740,8 +740,8 @@ void Grid3D::authored_index_pad(size_t i) {
     double cx = pad.x, cy = pad.y, w = pad.width, h = pad.height;
     if (i < authored_pad_specs_.size() && authored_pad_specs_[i].set) {
         const auto& spec = authored_pad_specs_[i];
-        item.shape = ck::make_pad(spec.shape, spec.width, spec.height, 0.25, spec.rotation,
-                                  spec.x, spec.y, layer, spec.drill);
+        item.shape = ck::make_pad(spec.shape, spec.width, spec.height, spec.rratio,
+                                  spec.rotation, spec.x, spec.y, layer, spec.drill);
         item.floor = std::max(net_clearance_floor(pad.net), spec.floor);
         cx = spec.x; cy = spec.y; w = spec.width; h = spec.height;
     } else {

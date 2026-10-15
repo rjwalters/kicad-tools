@@ -315,7 +315,7 @@ class PlaceRouteOptimizer:
                 # Determine if through-hole
                 is_pth = pad.type == "thru_hole"
 
-                from kicad_tools.router.io import _schema_pad_shape
+                from kicad_tools.router.io import _schema_pad_rratio, _schema_pad_shape
 
                 pads.append(
                     {
@@ -336,6 +336,7 @@ class PlaceRouteOptimizer:
                         # correct rotated-pad bounding box.
                         "rotation": pad.rotation,
                         "shape": _schema_pad_shape(pad, ref),
+                        "roundrect_rratio": _schema_pad_rratio(pad),
                     }
                 )
 

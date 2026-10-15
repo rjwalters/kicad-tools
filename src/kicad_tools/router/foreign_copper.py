@@ -411,11 +411,14 @@ def board_copper(pcb: Any) -> list[ForeignItem]:
                     if str(getattr(pad, "type", "")) == "np_thru_hole" and _npth_is_bare(pad, w, h):
                         continue  # a bare NPTH hole carries no copper
                     cx, cy = pad_center(pad, fp)
+                    # Issue #6718: a real ratio of 0 is a sharp corner, not
+                    # "missing" -- only an absent attribute takes the default.
+                    rratio = getattr(pad, "roundrect_rratio", None)
                     pad_copper = make_pad(
                         str(pad.shape),
                         w,
                         h,
-                        float(getattr(pad, "roundrect_rratio", 0.25) or 0.25),
+                        0.25 if rratio is None else float(rratio),
                         float(getattr(pad, "rotation", 0.0) or 0.0),
                         cx,
                         cy,
