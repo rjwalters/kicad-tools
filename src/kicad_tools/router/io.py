@@ -70,7 +70,7 @@ from .geometry import (
     segment_to_segment_distance as _geom_seg_to_seg_dist,
 )
 from .layers import Layer, LayerDefinition, LayerStack, LayerType
-from .pad_geometry import pad_local_point, pad_point_distance
+from .pad_geometry import pad_local_point, pad_point_distance, pad_segment_distance
 from .rules import DEFAULT_NET_CLASS_MAP, DesignRules, NetClassRouting
 
 # Floating-point tolerance for clearance comparisons in validate_routes
@@ -295,6 +295,15 @@ class PCBDesignRules:
         )
 
 
+#: ``ClearanceViolation.origin`` for copper kept by ``--preserve-existing`` (#6229).
+ORIGIN_INPUT = "input"
+#: ``ClearanceViolation.origin`` for a short against a pad that already
+#: overlaps a pad of the copper's own net in the input board (#6693).
+ORIGIN_INPUT_PAD_OVERLAP = "input_pad_overlap"
+#: Origins whose short already existed in the input board.
+INPUT_DEFECT_ORIGINS = frozenset({ORIGIN_INPUT, ORIGIN_INPUT_PAD_OVERLAP})
+
+
 @dataclass
 class ClearanceViolation:
     """A potential clearance violation detected during post-route validation.
@@ -344,13 +353,28 @@ class ClearanceViolation:
     # produced it; ``"input"`` means it is copper kept verbatim from the
     # input board by ``--preserve-existing`` -- an input defect the router
     # inherited, not one it created.
+    #
+    # Issue #6693: ``"input_pad_overlap"`` means routed copper touches a pad of
+    # its own net that already overlaps the obstacle pad in the input board
+    # (e.g. a stale pad angle makes neighbouring fine-pitch pads overlap).  The
+    # two nets were shorted before routing began; no placement of the routed
+    # copper can clear the obstacle, so the short is an input defect too.
     origin: str = "routing"
     obstacle_pad: str = ""  # "REF.PIN" when ``obstacle_type == "pad"`` (Issue #6229)
+    #: Issue #6693: "REF.PIN" of the own-net pad that overlaps ``obstacle_pad``
+    #: in the input board (set only when ``origin == "input_pad_overlap"``).
+    overlapping_pad: str = ""
 
     @property
     def is_input_defect(self) -> bool:
-        """True when the offending copper was kept from the input board (#6229)."""
-        return self.origin == "input"
+        """True when the short already existed in the input board (#6229, #6693).
+
+        Either the offending copper was kept from the input board by
+        ``--preserve-existing`` (``origin == "input"``), or it touches a pad
+        that already overlaps the obstacle pad in the input
+        (``origin == "input_pad_overlap"``).
+        """
+        return self.origin in INPUT_DEFECT_ORIGINS
 
     @property
     def is_short(self) -> bool:
@@ -389,6 +413,12 @@ def describe_short(v: ClearanceViolation) -> str:
     loc = f" at ({v.location[0]:.3f}, {v.location[1]:.3f})" if v.location else ""
     layer_str = f" on {v.layer.kicad_name}" if v.layer is not None else ""
     overlap = f": overlap {-v.distance:.3f}mm"
+    if v.origin == ORIGIN_INPUT_PAD_OVERLAP:
+        return (
+            f"pre-existing short in input board (pads {v.overlapping_pad} and "
+            f"{v.obstacle_pad} already overlap): "
+            f"{_input_pair_label(v)}{loc}{layer_str}{overlap}"
+        )
     if v.is_input_defect:
         return (
             "pre-existing short in input board (kept by --preserve-existing): "
@@ -460,6 +490,192 @@ def kicad_rule_severity(pcb_path: str | Path | None, rule: str, default: str = "
     if isinstance(value, str) and value.lower() in KICAD_SEVERITY_LEVELS:
         return value.lower()
     return default
+
+
+@dataclass(frozen=True)
+class InputPadOverlap:
+    """Two different-net pads whose copper overlaps in the input board (#6693).
+
+    Found on the router's own pad model (:attr:`Autorouter.pads`), so it
+    agrees with the post-route short check in :func:`validate_routes`.
+    ``kct check`` reports the same pairs as ``clearance_pad_pad`` ``SHORT``
+    findings.
+    """
+
+    pad_a: str  # "REF.PIN"
+    pad_b: str
+    ref_a: str
+    ref_b: str
+    net_a: str
+    net_b: str
+
+
+def _pad_net_key(pad: Pad) -> int | str | None:
+    """Electrical identity of a pad for the overlap scan, ``None`` if unconnected.
+
+    Skipped pour-net pads carry net id ``0`` plus their name (Issue #6225),
+    so they are keyed by name; a pad with neither is truly unconnected.
+    """
+    if pad.net != 0:
+        return pad.net
+    return f"name:{pad.net_name}" if pad.net_name else None
+
+
+def _pad_copper_polygon(pad: Pad):
+    """Shapely polygon of a pad's copper envelope (rotated rect, or a disc)."""
+    from shapely import Point, Polygon  # type: ignore[import-untyped]
+
+    if pad.shape == "circle":
+        return Point(pad.x, pad.y).buffer(min(pad.width, pad.height) / 2.0, 32)
+    hw, hh = pad.width / 2.0, pad.height / 2.0
+    # Inverse of ``pad_local_point``: board = centre + R(-rotation) . local.
+    angle = math.radians(pad.rotation)
+    c, s = math.cos(angle), math.sin(angle)
+    corners = [(-hw, -hh), (hw, -hh), (hw, hh), (-hw, hh)]
+    return Polygon([(pad.x + c * lx + s * ly, pad.y - s * lx + c * ly) for lx, ly in corners])
+
+
+#: Minimum overlap area (mm^2) that counts as overlapping copper: excludes
+#: pads that merely touch along an edge or corner.
+_PAD_OVERLAP_MIN_AREA_MM2 = 1e-6
+
+#: Tolerance (mm) when testing that copper's contact with a foreign pad lies
+#: inside the own-net pad overlapping it (#6693): absorbs float noise from the
+#: polygon intersection without excusing any visible intrusion.
+_INTRUSION_TOLERANCE_MM = 1e-4
+
+
+def _intrusion_inside_partner(
+    obstacle: Pad,
+    partner: Pad,
+    x1: float,
+    y1: float,
+    x2: float,
+    y2: float,
+    half: float,
+) -> bool:
+    """Whether copper's contact with ``obstacle`` lies inside ``partner`` (#6693).
+
+    The copper is the segment ``(x1, y1)-(x2, y2)`` buffered by ``half`` (a
+    disc when the endpoints coincide, i.e. a via).  It is attributed to the
+    input only when ``(copper & obstacle) - partner`` is empty: every point
+    where it meets the foreign pad is already shorted by the input's own pad
+    overlap, so no copper placement could have avoided it.  Uses the same pad
+    polygons as :func:`find_input_pad_overlaps`.  A zero-area contact (copper
+    grazing the obstacle's edge) must also be covered, so a graze outside the
+    overlap stays a routing short.
+    """
+    from shapely import LineString, Point
+
+    if (x1, y1) == (x2, y2):
+        copper = Point(x1, y1).buffer(half, 32)
+    else:
+        copper = LineString([(x1, y1), (x2, y2)]).buffer(half, 32)
+    contact = copper.intersection(_pad_copper_polygon(obstacle))
+    if contact.is_empty:
+        # The shapely envelope disagrees with the validator's distance model
+        # (e.g. a circle pad's disc vs its rect): don't excuse the short.
+        return False
+    covered: bool = _pad_copper_polygon(partner).buffer(_INTRUSION_TOLERANCE_MM).covers(contact)
+    return covered
+
+
+def find_input_pad_overlaps(pads) -> list[InputPadOverlap]:
+    """Different-net pad pairs whose copper overlaps (Issue #6693).
+
+    ``pads`` is a ``{(ref, pin): Pad}`` mapping (``Autorouter.pads``).  Two
+    pads overlap when they share a copper layer (SMD on the same layer, or
+    either is through-hole) and their envelopes intersect with positive area.
+    Unconnected pads and virtual Steiner points are ignored.  Pairs are
+    returned in ``pads`` order.
+    """
+    from shapely import STRtree
+
+    entries: list[tuple[str, str, Pad, int | str]] = []
+    for (ref, pin), pad in pads.items():
+        if getattr(pad, "steiner_point", False):
+            continue
+        key = _pad_net_key(pad)
+        if key is None:
+            continue
+        entries.append((ref, pin, pad, key))
+    if len(entries) < 2:
+        return []
+    polys = [_pad_copper_polygon(e[2]) for e in entries]
+    tree = STRtree(polys)
+    overlaps: list[InputPadOverlap] = []
+    for i, (ref_a, pin_a, pad_a, key_a) in enumerate(entries):
+        for j in sorted(int(k) for k in tree.query(polys[i])):
+            if j <= i:
+                continue
+            ref_b, pin_b, pad_b, key_b = entries[j]
+            if key_a == key_b:
+                continue
+            if not (pad_a.through_hole or pad_b.through_hole or pad_a.layer == pad_b.layer):
+                continue
+            if polys[i].intersection(polys[j]).area <= _PAD_OVERLAP_MIN_AREA_MM2:
+                continue
+            overlaps.append(
+                InputPadOverlap(
+                    pad_a=f"{ref_a}.{pin_a}",
+                    pad_b=f"{ref_b}.{pin_b}",
+                    ref_a=ref_a,
+                    ref_b=ref_b,
+                    net_a=pad_a.net_name or f"Net {pad_a.net}",
+                    net_b=pad_b.net_name or f"Net {pad_b.net}",
+                )
+            )
+    return overlaps
+
+
+def input_pad_overlaps(router: Autorouter) -> list[InputPadOverlap]:
+    """:func:`find_input_pad_overlaps` over ``router.pads``, memoized (#6693).
+
+    Pads are fixed for a routing run, so the scan is cached on the router
+    (keyed by the identity and size of its pad map).
+    """
+    pads = getattr(router, "pads", None) or {}
+    cache_key = (id(pads), len(pads))
+    cached = getattr(router, "_input_pad_overlap_cache", None)
+    if cached is not None and cached[0] == cache_key:
+        hit: list[InputPadOverlap] = cached[1]
+        return hit
+    overlaps = find_input_pad_overlaps(pads)
+    with contextlib.suppress(AttributeError):
+        setattr(router, "_input_pad_overlap_cache", (cache_key, overlaps))  # noqa: B010
+    return overlaps
+
+
+def _input_overlap_partners(router: Autorouter) -> dict[int, list[tuple[str, Pad]]]:
+    """``id(pad) -> [("REF.PIN", overlapping foreign-net pad), ...]`` (#6693)."""
+    overlaps = input_pad_overlaps(router)
+    if not overlaps:
+        return {}
+    by_name = {f"{ref}.{pin}": pad for (ref, pin), pad in router.pads.items()}
+    partners: dict[int, list[tuple[str, Pad]]] = {}
+    for o in overlaps:
+        pad_a, pad_b = by_name.get(o.pad_a), by_name.get(o.pad_b)
+        if pad_a is None or pad_b is None:
+            continue
+        partners.setdefault(id(pad_a), []).append((o.pad_b, pad_b))
+        partners.setdefault(id(pad_b), []).append((o.pad_a, pad_a))
+    return partners
+
+
+def summarize_input_pad_overlaps(overlaps: list[InputPadOverlap]) -> list[str]:
+    """``["U8: 19 overlapping different-net pad pair(s)", ...]`` (#6693).
+
+    Grouped by footprint (``"J2/J4"`` for a pair spanning two footprints),
+    largest group first.
+    """
+    counts: Counter[str] = Counter()
+    for o in overlaps:
+        group = o.ref_a if o.ref_a == o.ref_b else "/".join(sorted((o.ref_a, o.ref_b)))
+        counts[group] += 1
+    return [
+        f"{group}: {n} overlapping different-net pad pair(s)"
+        for group, n in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+    ]
 
 
 def short_origin_summary(shorts: list[ClearanceViolation]) -> str:
@@ -3022,6 +3238,57 @@ def validate_routes(
         _existing_seg_obstacles_by_net[route_net] = entries
         return entries
 
+    # Issue #6693: a short against a pad that already overlaps a pad of the
+    # copper's own net in the input board is an input defect -- the nets were
+    # shorted before routing began and no copper placement can clear the
+    # obstacle.  The overlap scan is lazy (it only runs once a pad short is
+    # found) and memoized on the router.
+    _overlap_partners: dict[int, list[tuple[str, Pad]]] | None = None
+
+    def _input_overlap_pad(
+        obstacle: Pad,
+        route_net: int,
+        route_name: str | None,
+        copper_layer: Layer | None,
+        x1: float,
+        y1: float,
+        x2: float,
+        y2: float,
+        half: float,
+    ) -> str:
+        """ "REF.PIN" of the own-net pad overlapping ``obstacle`` that the copper
+        touches, or ``""`` when the short is the routing's own (#6693)."""
+        nonlocal _overlap_partners
+        if _overlap_partners is None:
+            try:
+                _overlap_partners = _input_overlap_partners(router)
+            except Exception:  # pragma: no cover - diagnostic only, never fatal
+                logger.debug("input pad-overlap scan failed", exc_info=True)
+                _overlap_partners = {}
+        for name, partner in _overlap_partners.get(id(obstacle), ()):
+            if not _pad_on_net(partner, route_net, route_name):
+                continue
+            if (
+                copper_layer is not None
+                and not partner.through_hole
+                and partner.layer != copper_layer
+            ):
+                continue
+            if (x1, y1) == (x2, y2):
+                gap = pad_point_distance(partner, x1, y1) - half
+            else:
+                gap = pad_segment_distance(partner, x1, y1, x2, y2) - half
+            if gap > 0.0:
+                continue
+            # The copper touching its own pad is not enough: an escape
+            # segment that starts in A and then cuts through B's body away
+            # from the A/B overlap is a real routing short.  Only the part
+            # of the copper's contact with B that A already covers is
+            # pre-existing, so require ``(copper & B) - A`` to be empty.
+            if _intrusion_inside_partner(obstacle, partner, x1, y1, x2, y2, half):
+                return name
+        return ""
+
     # Check each route segment against pads of different nets
     for route_idx, route in enumerate(router.routes):
         route_net = route.net
@@ -3122,6 +3389,21 @@ def validate_routes(
                         and effective_dist >= 0.0
                         and _same_component_relaxation_active(ref)
                     )
+                    overlap_pad = (
+                        _input_overlap_pad(
+                            pad,
+                            route_net,
+                            route.net_name or net_names.get(route_net),
+                            seg_layer,
+                            segment.x1,
+                            segment.y1,
+                            segment.x2,
+                            segment.y2,
+                            seg_half_width,
+                        )
+                        if effective_dist <= 0.0
+                        else ""
+                    )
 
                     violations.append(
                         ClearanceViolation(
@@ -3145,6 +3427,8 @@ def validate_routes(
                             component_inherent=is_component_inherent,
                             layer=segment.layer,
                             obstacle_pad=f"{ref}.{pad.pin}",
+                            origin=ORIGIN_INPUT_PAD_OVERLAP if overlap_pad else "routing",
+                            overlapping_pad=overlap_pad,
                         )
                     )
 
@@ -3391,6 +3675,21 @@ def validate_routes(
                         and effective_dist >= 0.0
                         and _same_component_relaxation_active(ref)
                     )
+                    overlap_pad = (
+                        _input_overlap_pad(
+                            pad,
+                            route_net,
+                            route_name,
+                            None,
+                            via.x,
+                            via.y,
+                            via.x,
+                            via.y,
+                            via_radius,
+                        )
+                        if effective_dist <= 0.0
+                        else ""
+                    )
 
                     violations.append(
                         ClearanceViolation(
@@ -3412,8 +3711,9 @@ def validate_routes(
                             ),
                             location=(pad.x, pad.y),
                             component_inherent=is_component_inherent,
-                            origin=via_origin,
+                            origin=ORIGIN_INPUT_PAD_OVERLAP if overlap_pad else via_origin,
                             obstacle_pad=f"{ref}.{num}",
+                            overlapping_pad=overlap_pad,
                         )
                     )
 
