@@ -3405,14 +3405,12 @@ def _save_partial_results() -> bool:
             # write below, so a deadline run keeps its most useful diagnostic
             # without reaching the canonical save.  Pure JSON dump of an
             # already-built plan (milliseconds); non-fatal on any failure.
-            try:
+            with contextlib.suppress(Exception):
                 _write_routing_plan_sidecar(
                     cast(Path, save_path),
                     getattr(router, "routing_plan", None),
                     quiet=True,
                 )
-            except Exception:
-                pass
 
             # Issue #5639: the deadline / SIGINT save path is the ONLY save
             # path a deadline-killed run ever reaches -- the normal save path

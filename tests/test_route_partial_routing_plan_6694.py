@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-from types import SimpleNamespace
 
 from kicad_tools.cli import route_cmd
 from kicad_tools.router.routing_plan import RoutingPlan
