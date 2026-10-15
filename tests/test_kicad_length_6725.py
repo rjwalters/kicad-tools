@@ -162,6 +162,46 @@ class TestPadViaTrim:
         assert net_length(segs, [], [pad], None) == pytest.approx(raw)
 
 
+class TestRoundrectRatioDefault:
+    """A roundrect pad with no ``roundrect_rratio`` uses KiCad's 0.25 (Judge, PR #6729)."""
+
+    @staticmethod
+    def _length(rratio: float | None) -> float:
+        pad = Pad(
+            x=0.0,
+            y=0.0,
+            width=1.0,
+            height=0.6,
+            net=1,
+            net_name="N",
+            layer=Layer.F_CU,
+            shape="roundrect",
+            roundrect_rratio=rratio,
+        )
+        model = KicadLengthModel.for_router(KicadStackup.default(1.6, 2), [pad])
+        # Enters the pad through a bend near its rounded corner so the
+        # roundrect boundary test is actually exercised.
+        route = Route(
+            net=1,
+            net_name="N",
+            segments=[
+                Segment(-3.0, 0.28, -0.45, 0.28, 0.2, Layer.F_CU, net=1),
+                Segment(-0.45, 0.28, 0.0, 0.0, 0.2, Layer.F_CU, net=1),
+            ],
+        )
+        return model.route_length(route)
+
+    def test_none_ratio_does_not_crash_and_uses_kicad_default(self):
+        assert self._length(None) == pytest.approx(self._length(0.25), abs=1e-12)
+
+    def test_router_pad_maps_none_to_default(self):
+        from kicad_tools.router.kicad_length import router_pad
+
+        pad = Pad(x=0, y=0, width=1, height=0.6, net=1, net_name="N", shape="roundrect")
+        assert pad.roundrect_rratio is None
+        assert router_pad(pad).rratio == 0.25
+
+
 def _route_form(pcb: PCB) -> tuple[Route, KicadLengthModel]:
     """The fixture net as the router holds it (Route + router Pad)."""
     seg = lambda a, b, c, d, layer: Segment(a, b, c, d, 0.2, layer, net=1, net_name="N1")  # noqa: E731

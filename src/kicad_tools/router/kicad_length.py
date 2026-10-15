@@ -228,6 +228,21 @@ def _pcb_thickness(pcb: PCB) -> float:
 # ---------------------------------------------------------------------------
 
 
+_DEFAULT_RRATIO = 0.25
+"""KiCad's ``roundrect_rratio`` when a roundrect pad carries none."""
+
+
+def _pad_rratio(pad: Any) -> float:
+    """``pad.roundrect_rratio``, or KiCad's default when absent or ``None``.
+
+    The router :class:`~kicad_tools.router.primitives.Pad` always has the
+    attribute but defaults it to ``None`` (issue #6718), so a plain
+    ``getattr(..., 0.25)`` would hand ``None`` to the shape test.
+    """
+    value = getattr(pad, "roundrect_rratio", None)
+    return _DEFAULT_RRATIO if value is None else float(value)
+
+
 @dataclass(frozen=True)
 class _Shape:
     x: float
@@ -236,7 +251,7 @@ class _Shape:
     w: float
     h: float
     rot: float = 0.0
-    rratio: float = 0.25
+    rratio: float | None = 0.25
 
     def contains(self, px: float, py: float) -> bool:
         dx, dy = px - self.x, py - self.y
@@ -256,7 +271,8 @@ class _Shape:
             cy = max(ay - (hh - hw), 0.0)
             return math.hypot(ax, cy) < hw + eps
         if self.kind == "roundrect":
-            r = min(self.rratio * min(self.w, self.h), hw, hh)
+            ratio = _DEFAULT_RRATIO if self.rratio is None else self.rratio
+            r = min(ratio * min(self.w, self.h), hw, hh)
             cx = max(ax - (hw - r), 0.0)
             cy = max(ay - (hh - r), 0.0)
             if ax >= hw + eps or ay >= hh + eps:
@@ -454,7 +470,7 @@ def _pcb_pads(pcb: PCB, net_id: int) -> list[LPad]:
                     h=pad.size[1],
                     rot=pad.rotation,
                     shape=pad.shape,
-                    rratio=getattr(pad, "roundrect_rratio", 0.25),
+                    rratio=_pad_rratio(pad),
                     layers=layers,
                 )
             )
@@ -515,8 +531,8 @@ def router_pad(pad: Any) -> LPad:
         w=pad.width,
         h=pad.height,
         rot=getattr(pad, "rotation", 0.0) or 0.0,
-        shape=getattr(pad, "shape", "rect"),
-        rratio=getattr(pad, "roundrect_rratio", 0.25),
+        shape=getattr(pad, "shape", None) or "rect",
+        rratio=_pad_rratio(pad),
         layers=layers,
     )
 
