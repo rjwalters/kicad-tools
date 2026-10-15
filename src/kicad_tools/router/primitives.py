@@ -259,6 +259,19 @@ class Via:
                 f"Via.span_type must be 'blind', 'buried' or None, got {self.span_type!r}"
             )
 
+    def refresh_span_type(self) -> None:
+        """Re-derive :attr:`span_type` after :attr:`layers` was widened (issue #6677).
+
+        Only an imported blind/buried via carries a keyword to keep honest; a
+        router-created through via (``span_type`` None) is never turned into a
+        blind one.  A span touching both outer layers drops the keyword, one
+        outer layer is ``blind``, none is ``buried``.
+        """
+        if self.span_type is None:
+            return
+        outer = sum(1 for lyr in set(self.layers) if lyr in (Layer.F_CU, Layer.B_CU))
+        self.span_type = None if outer >= 2 else ("blind" if outer == 1 else "buried")
+
     @property
     def drilled_layers(self) -> tuple[Layer, Layer]:
         """The layer pair this via is physically drilled between (issue #6485).
