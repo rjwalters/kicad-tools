@@ -330,7 +330,9 @@ _FIXTURE_PCB = """(kicad_pcb
 """
 
 _FIXTURE_PRO = {
-    "board": {"design_settings": {"rules": {"min_copper_edge_clearance": 0.3}}},
+    "board": {
+        "design_settings": {"rules": {"min_copper_edge_clearance": 0.3, "min_hole_clearance": 0.25}}
+    },
     "net_settings": {
         "classes": [
             {
@@ -424,7 +426,36 @@ class TestProjectNetClasses:
 
     def test_inexpressible_project_minimum_is_listed(self, tmp_path):
         exporter = KiCadToDSNExporter(_write_fixture(tmp_path))
-        assert any("min_copper_edge_clearance 0.3 mm" in o for o in exporter.omissions)
+        assert any("min_hole_clearance 0.25 mm" in o for o in exporter.omissions)
+
+    def test_edge_clearance_insets_boundary_and_is_not_omitted(self, tmp_path):
+        exporter = KiCadToDSNExporter(_write_fixture(tmp_path))
+        dsn = exporter.export()
+        assert not any("min_copper_edge_clearance" in o for o in exporter.omissions)
+        m = re.search(r"\(boundary\s*\(path pcb 0([^)]*)\)", dsn)
+        pts = [float(v) for v in m.group(1).split()]
+        xs, ys = pts[0::2], pts[1::2]
+        # the 40 x 30 mm outline, inset 0.3 mm on every side (um)
+        assert (min(xs), max(xs), min(ys), max(ys)) == (300.0, 39700.0, 300.0, 29700.0)
+
+    def test_zero_edge_clearance_keeps_outline(self, tmp_path):
+        pro = {**_FIXTURE_PRO, "board": {"design_settings": {"rules": {}}}}
+        dsn = KiCadToDSNExporter(_write_fixture(tmp_path, pro=pro)).export()
+        m = re.search(r"\(boundary\s*\(path pcb 0([^)]*)\)", dsn)
+        pts = [float(v) for v in m.group(1).split()]
+        assert (min(pts[0::2]), max(pts[0::2])) == (0.0, 40000.0)
+
+    def test_pad_inside_edge_band_is_listed_not_an_error(self, tmp_path):
+        import json
+
+        pcb = _write_fixture(tmp_path)
+        text = pcb.read_text(encoding="utf-8")
+        # move the R_0603 footprint so its pads straddle the left edge band
+        pcb.write_text(text.replace("(at 10 10)", "(at 0.1 10)", 1), encoding="utf-8")
+        assert json.loads(pcb.with_suffix(".kicad_pro").read_text())
+        exporter = KiCadToDSNExporter(pcb)
+        exporter.export()
+        assert any("copper-to-edge band" in o for o in exporter.omissions)
 
 
 class TestDruFloors:
@@ -555,10 +586,10 @@ class TestExportDsnCliOmissions:
         assert _run_pcb(argv) == 0
         payload = json.loads(capsys.readouterr().out)
         assert payload["success"] is True
-        assert any("min_copper_edge_clearance" in o for o in payload["omissions"])
+        assert any("min_hole_clearance" in o for o in payload["omissions"])
 
     def test_text_lists_omissions(self, tmp_path, capsys):
         pcb = _write_fixture(tmp_path)
         assert _run_pcb(["pcb", "export-dsn", str(pcb), "-o", str(tmp_path / "b.dsn")]) == 0
         out = capsys.readouterr().out
-        assert "Not exported" in out and "min_copper_edge_clearance" in out
+        assert "Not exported" in out and "min_hole_clearance" in out

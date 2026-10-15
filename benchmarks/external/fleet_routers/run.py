@@ -589,6 +589,14 @@ NOT_ROUTING_CONSTRAINTS = frozenset(
     }
 )
 
+# Issue #6784: ``clearance`` rules a DSN router cannot influence, by rule name
+# prefix. ``Native zone clearance`` is applied by the zone filler (the scorer
+# runs ``--refill-zones``); ``SMD Pad Clearance`` is pad-to-pad spacing between
+# footprints, fixed by placement and identical for every router. Diff-pair
+# ``skew`` / ``diff_pair_uncoupled`` / ``via_count`` are deliberately NOT here:
+# they stay losses (see README, "Rules a DSN cannot carry").
+NOT_ROUTING_RULE_PREFIXES = ("Native zone clearance", "SMD Pad Clearance")
+
 
 def _condition_classes(condition: str | None) -> list[str]:
     """Net class names a DRU condition selects via ``NetClass == '...'``."""
@@ -598,6 +606,31 @@ def _condition_classes(condition: str | None) -> list[str]:
         m.replace("\\'", "'").replace("\\\\", "\\")
         for m in re.findall(r"NetClass\s*==\s*'((?:[^'\\]|\\.)*)'", condition)
     ]
+
+
+def _dsn_boundary_inset_mm(dsn: str, outline: list[tuple[float, float]]) -> float | None:
+    """How far the emitted ``(boundary ...)`` sits inside the board outline.
+
+    ``None`` when either polygon is missing or invalid.
+    """
+    from shapely.geometry import Polygon
+
+    m = re.search(r"\(boundary\s*\(path\s+\S+\s+\S+\s+([^)]*)\)", dsn)
+    if not m or not outline:
+        return None
+    scale = _dsn_unit_mm(dsn)
+    nums = [float(v) * scale for v in m.group(1).split()]
+    if len(nums) < 6:
+        return None
+    emitted = Polygon(list(zip(nums[0::2], nums[1::2], strict=False)))
+    ring: list[tuple[float, float]] = []
+    for pt in outline:
+        if not ring or pt != ring[-1]:
+            ring.append(pt)
+    board = Polygon(ring)
+    if not (emitted.is_valid and board.is_valid) or not board.buffer(1e-6).contains(emitted):
+        return None
+    return float(emitted.exterior.distance(board.exterior))
 
 
 def dsn_audit(
@@ -696,7 +729,13 @@ def dsn_audit(
         rules = pro.get("board", {}).get("design_settings", {}).get("rules", {})
         edge = rules.get("min_copper_edge_clearance") or 0.0
         if float(edge) > 0:
-            loss("board_rule", f"min_copper_edge_clearance {edge} mm not exported")
+            inset = _dsn_boundary_inset_mm(dsn, exp._board_outline)
+            if inset is None or inset < float(edge) - 1e-3:
+                loss(
+                    "board_rule",
+                    f"min_copper_edge_clearance {edge} mm not exported "
+                    f"(boundary inset {inset or 0:g} mm)",
+                )
         for key, dsn_val in (("min_clearance", dsn_clear), ("min_track_width", dsn_width)):
             v = rules.get(key)
             if v is not None and float(v) > dsn_val + 1e-9:
@@ -713,7 +752,9 @@ def dsn_audit(
         }
         for rule in _dru_rules(dru.read_text()):
             for c in rule["constraints"]:
-                if c["type"] in NOT_ROUTING_CONSTRAINTS:
+                if c["type"] in NOT_ROUTING_CONSTRAINTS or (
+                    c["type"] == "clearance" and rule["name"].startswith(NOT_ROUTING_RULE_PREFIXES)
+                ):
                     if not_routing is not None:
                         not_routing.append(
                             {
@@ -741,6 +782,25 @@ def dsn_audit(
                         and g["clearance"] is not None
                         and g["clearance"] >= c["min_mm"] - 1e-9
                         for g in covered
+                    ):
+                        continue
+                if c["type"] == "diff_pair_gap" and c["min_mm"] is not None:
+                    # No DSN construct; the gap is implied when every net the
+                    # rule selects is routed under a class clearance >= it.
+                    # A rule with no net-class condition is judged against
+                    # every pair net's exported class (stricter gap = loss).
+                    names = _condition_classes(rule.get("condition"))
+                    if names:
+                        gots = [
+                            dsn_classes.get("kicad_default" if n == "Default" else n) for n in names
+                        ]
+                    else:
+                        gots = list(dsn_classes.values())
+                    if gots and all(
+                        g is not None
+                        and g["clearance"] is not None
+                        and g["clearance"] >= c["min_mm"] - 1e-9
+                        for g in gots
                     ):
                         continue
                 floor = implied.get(c["type"])

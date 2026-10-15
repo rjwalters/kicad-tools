@@ -134,14 +134,21 @@ Every output is copied into a **fresh** grading directory beside copies of the f
 - net classes missing from the DSN;
 - class values exported differently, whether relaxed or tightened, read from each class's own `(class ...)` block;
 - net-class assignments the DSN's class membership does not reproduce;
-- project board rules (edge clearance, stricter floors);
-- DRU constraints the DSN's global values do not already imply;
+- project board rules (stricter floors; a copper-to-edge clearance counts as carried only when the emitted `(boundary ...)` is inset from the board outline by at least that amount, issue #6784);
+- DRU constraints the DSN's global values do not already imply (a `diff_pair_gap` is implied when every selected net class is exported with a clearance at least that large; a stricter gap is a loss);
 - rule areas whose track/via restriction has no matching `keepout`/`wire_keepout`/`via_keepout` on each of their copper layers;
 - copper zones with no matching `(plane ...)` for their net on each of their layers;
 - copper-layer text;
 - copper layers, pads or nets missing from the export.
 
 `ses_import` then counts the wires and vias in the raw session, compares that with what the importer kept, and checks the session's resolution. Any loss makes the row `non-comparable`, and the concrete constraints are listed in the row.
+
+### Rules a DSN cannot carry (issue #6784)
+
+Edge clearance is carried by the exporter insetting `(boundary ...)`. Pads that already sit in the band are fixed placement and are listed as an exporter omission, not a loss. Three further groups are decided as follows:
+
+- **`Native zone clearance`** (board 03) and **`SMD Pad Clearance - *`** (board 05) are `not_representable`: they are reported under `not_routing`, graded by the referee, and are not DSN losses. The scorer refills zones (`--refill-zones`), so the zone filler applies the first, not the router. The second is pad-to-pad spacing between footprints, fixed by placement and identical for every router.
+- **Diff-pair `skew`, `diff_pair_uncoupled` and `via_count`** (boards 03, 06) stay losses, so those rows remain `non-comparable` for DSN routers. They are post-route length and coupling checks. kct's DSN exporter has no construct for them, and it is unverified whether fastroute consumes a Specctra length or pair rule. Calling them `not_representable` would hide a real handicap: `kct route` honours them and a DSN router cannot be told. Revisit if fastroute is shown to consume them.
 
 Findings at the build revision (issues filed separately; out of scope here):
 
