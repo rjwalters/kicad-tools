@@ -149,8 +149,9 @@ _TRIVIAL_CONDITIONS: dict[str, frozenset[str]] = {
 }
 
 #: ``.kicad_pro`` ``design_settings.rules`` minima Specctra cannot express.
+#: ``min_copper_edge_clearance`` is not listed: it is carried by insetting the
+#: exported ``(boundary ...)`` (issue #6784).
 _INEXPRESSIBLE_PROJECT_MINIMA = (
-    "min_copper_edge_clearance",
     "min_hole_clearance",
     "min_hole_to_hole",
     "min_through_hole_diameter",
@@ -199,6 +200,7 @@ class KiCadToDSNExporter:
         self._planes: list[tuple[str, str, list[tuple[float, float]]]] = []
         self._keepouts: list[tuple[str, str, list[tuple[float, float]]]] = []
         self._omissions: list[str] = []
+        self._edge_clearance: float = 0.0  # mm, .kicad_pro min_copper_edge_clearance
         self._via_padstack_name: str = ""
 
     def _load(self) -> None:
@@ -605,6 +607,7 @@ class KiCadToDSNExporter:
                 continue
             for info in self._classes.values():
                 setattr(info, attr, max(getattr(info, attr), floor))
+        self._edge_clearance = _mm(section.get("min_copper_edge_clearance"), 0.0)
         for key in _INEXPRESSIBLE_PROJECT_MINIMA:
             value = _mm(section.get(key), 0.0)
             if value > 0:
@@ -933,6 +936,64 @@ class KiCadToDSNExporter:
         parts.append(")")
         return "\n".join(parts)
 
+    def _boundary_points(self) -> list[tuple[float, float]]:
+        """The outline exported as ``(boundary ...)``, inset by the edge clearance.
+
+        Specctra has no copper-to-edge rule, but a router never places copper
+        outside the boundary, so insetting the polygon by
+        ``min_copper_edge_clearance`` carries it as plain geometry. Pads that
+        already sit inside the band are fixed placement: they stay where they
+        are and are listed as an omission rather than routed through. When the
+        inset cannot be computed the original outline is exported and the
+        clearance is listed as not carried.
+        """
+        outline = self._board_outline
+        if not outline or self._edge_clearance <= 0:
+            return outline
+        try:
+            from shapely.geometry import Polygon  # type: ignore[import-untyped]
+
+            ring: list[tuple[float, float]] = []
+            for pt in outline:  # gr_line outlines repeat each shared vertex
+                if not ring or pt != ring[-1]:
+                    ring.append(pt)
+            if len(ring) > 1 and ring[0] == ring[-1]:
+                ring.pop()
+            poly = Polygon(ring)
+            inset = poly.buffer(-self._edge_clearance, join_style=2) if poly.is_valid else None
+        except (ImportError, ValueError):
+            inset = None
+        if inset is None or inset.is_empty or inset.geom_type != "Polygon":
+            self._omit(
+                f".kicad_pro rule min_copper_edge_clearance {self._edge_clearance:g} mm: "
+                "board outline cannot be inset; boundary exported uninset"
+            )
+            return outline
+        in_band = sorted(
+            f"{fp.reference}.{pad.number}"
+            for fp in self._footprints
+            for pad in fp.pads
+            if not inset.buffer(1e-6).contains(self._pad_center(fp, pad))
+        )
+        if in_band:
+            self._omit(
+                f"{len(in_band)} pad(s) sit inside the {self._edge_clearance:g} mm "
+                f"copper-to-edge band (fixed placement): {', '.join(in_band)}"
+            )
+        return list(inset.exterior.coords)[:-1]
+
+    @staticmethod
+    def _pad_center(fp: FootprintInfo, pad: PadInfo) -> Any:
+        import math
+
+        from shapely.geometry import Point
+
+        a = math.radians(-fp.rotation)  # KiCad rotation is CCW on a y-down board
+        return Point(
+            fp.x + pad.x * math.cos(a) - pad.y * math.sin(a),
+            fp.y + pad.x * math.sin(a) + pad.y * math.cos(a),
+        )
+
     def _generate_structure(self) -> str:
         """Generate the (structure ...) section."""
         lines: list[str] = []
@@ -948,16 +1009,16 @@ class KiCadToDSNExporter:
             lines.append("      )")
             lines.append("    )")
 
-        # Board boundary
-        if self._board_outline:
+        # Board boundary, inset by min_copper_edge_clearance (issue #6784)
+        boundary = self._boundary_points()
+        if boundary:
             lines.append("    (boundary")
             lines.append("      (path pcb 0")
-            for x, y in self._board_outline:
+            for x, y in boundary:
                 lines.append(f"        {mm_to_um(x):.1f} {mm_to_um(y):.1f}")
             # Close the polygon
-            if self._board_outline:
-                x0, y0 = self._board_outline[0]
-                lines.append(f"        {mm_to_um(x0):.1f} {mm_to_um(y0):.1f}")
+            x0, y0 = boundary[0]
+            lines.append(f"        {mm_to_um(x0):.1f} {mm_to_um(y0):.1f}")
             lines.append("      )")
             lines.append("    )")
 

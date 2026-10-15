@@ -799,3 +799,119 @@ def test_dsn_audit_unexpressible_routing_rules_stay_lost(fr, rule_bearing):
     named = " ".join(e["detail"] for e in dru)
     assert "'Layered'" in named and "'NoClass'" in named and "'Ghost'" in named
     assert not_routing == []
+
+
+def _audit_pro(fr, rule_bearing, edit_pro, dru_text=None):
+    pro_path = rule_bearing.with_suffix(".kicad_pro")
+    pro = json.loads(pro_path.read_text())
+    edit_pro(pro)
+    pro_path.write_text(json.dumps(pro))
+    dru = rule_bearing.with_suffix(".kicad_dru")
+    if dru_text is not None:
+        dru.write_text(dru_text)
+    not_routing: list = []
+    lost = fr.dsn_audit(rule_bearing, pro_path, dru, rule_bearing.with_suffix(".dsn"), not_routing)
+    return lost, not_routing
+
+
+def _set_edge(value):
+    def edit(pro):
+        pro.setdefault("board", {}).setdefault("design_settings", {}).setdefault("rules", {})[
+            "min_copper_edge_clearance"
+        ] = value
+
+    return edit
+
+
+def test_dsn_audit_edge_clearance_carried_by_inset_boundary(fr, rule_bearing):
+    lost, _ = _audit_pro(fr, rule_bearing, _set_edge(0.3))
+    assert [e for e in lost if e["kind"] == "board_rule"] == []
+
+
+def test_dsn_audit_edge_clearance_lost_when_boundary_not_inset_enough(fr, rule_bearing):
+    _audit_pro(fr, rule_bearing, _set_edge(0.3))  # export once with the inset
+    dsn = rule_bearing.with_suffix(".dsn")
+    # Restore the raw outline: the DSN on disk is what the audit trusts.
+    from kicad_tools.export.dsn import KiCadToDSNExporter
+
+    exp = KiCadToDSNExporter(rule_bearing)
+    exp._load()
+    exp._edge_clearance = 0.0
+    dsn.write_text(exp.export())
+    lost, _ = _audit_pro(fr, rule_bearing, _set_edge(0.3))
+    assert any(e["kind"] == "board_rule" and "min_copper_edge" in e["detail"] for e in lost)
+
+
+def test_dsn_audit_zero_edge_clearance_is_not_a_loss(fr, rule_bearing):
+    lost, _ = _audit_pro(fr, rule_bearing, _set_edge(0))
+    assert [e for e in lost if e["kind"] == "board_rule"] == []
+
+
+def test_dsn_audit_diff_pair_gap_implied_by_class_clearance(fr, rule_bearing):
+    rule = (
+        '(version 1)\n(rule "Gap" (condition "A.NetClass == \'Power\'") '
+        "(constraint diff_pair_gap (min {gap}mm)))\n"
+    )
+    dru, _ = _audit_with_dru(fr, rule_bearing, rule.format(gap=0.3))  # == Power clearance
+    assert dru == []
+    dru, _ = _audit_with_dru(fr, rule_bearing, rule.format(gap=0.2))
+    assert dru == []
+
+
+def test_dsn_audit_diff_pair_gap_stricter_than_class_clearance_is_lost(fr, rule_bearing):
+    rule = (
+        '(version 1)\n(rule "Gap" (condition "A.NetClass == \'Power\'") '
+        "(constraint diff_pair_gap (min 0.4mm)))\n"
+    )
+    dru, _ = _audit_with_dru(fr, rule_bearing, rule)
+    assert len(dru) == 1 and "diff_pair_gap" in dru[0]["detail"]
+
+
+def test_dsn_audit_zone_and_smd_pad_clearance_are_not_representable(fr, rule_bearing):
+    dru, not_routing = _audit_with_dru(
+        fr,
+        rule_bearing,
+        "(version 1)\n"
+        '(rule "Native zone clearance" (layer "F.Cu")\n'
+        "  (condition \"(A.Type == 'Zone' && A.NetName == 'GND') || "
+        "(B.Type == 'Zone' && B.NetName == 'GND')\")\n"
+        "  (constraint clearance (min 0.3mm)))\n"
+        '(rule "SMD Pad Clearance - jlcpcb"\n'
+        "  (condition \"A.Type == 'Pad' && B.Type == 'Pad' && A.Pad_Type == 'SMD' && "
+        "B.Pad_Type == 'SMD' && A.Net != B.Net\")\n"
+        "  (constraint clearance (min 0.5mm)))\n",
+    )
+    assert dru == []
+    assert {n["rule"] for n in not_routing} == {
+        "Native zone clearance",
+        "SMD Pad Clearance - jlcpcb",
+    }
+
+
+def test_dsn_audit_name_only_zone_or_smd_rule_is_still_a_loss(fr, rule_bearing):
+    """The name alone is not enough: a rule whose condition also selects
+    tracks (or has none) is still something the router must honour."""
+    dru, not_routing = _audit_with_dru(
+        fr,
+        rule_bearing,
+        "(version 1)\n"
+        '(rule "Native zone clearance" (layer "F.Cu") (constraint clearance (min 0.3mm)))\n'
+        '(rule "SMD Pad Clearance - jlcpcb"\n'
+        "  (condition \"A.Type == 'Pad' && B.Type == 'Track'\")\n"
+        "  (constraint clearance (min 0.5mm)))\n",
+    )
+    assert not_routing == []
+    assert len(dru) == 2
+
+
+def test_dsn_audit_diff_pair_length_rules_stay_lost(fr, rule_bearing):
+    dru, not_routing = _audit_with_dru(
+        fr,
+        rule_bearing,
+        "(version 1)\n"
+        '(rule "Skew" (condition "A.NetClass == \'Power\'") (constraint skew (max 0.1mm)))\n'
+        '(rule "Unc" (condition "A.NetClass == \'Power\'") '
+        "(constraint diff_pair_uncoupled (max 5mm)))\n"
+        '(rule "Vias" (condition "A.NetClass == \'Power\'") (constraint via_count (max 2)))\n',
+    )
+    assert len(dru) == 3 and not_routing == []
