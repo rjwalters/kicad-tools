@@ -57,6 +57,33 @@ assert_not_contains() {
     if [[ "$1" != *"$2"* ]]; then pass "$3"; else fail "$3" "expected NOT to contain '$2'; got: $(head -c 400 <<<"$1")"; fi
 }
 
+# _tbound <seconds> <cmd...>: bound a harness call WITHOUT requiring coreutils
+# `timeout` (#12045) — stock macOS ships neither `timeout` nor `gtimeout`.
+# Falls back to perl's `alarm`, which survives `exec` (a hung child dies of
+# SIGALRM, rc 142 rather than 124; no assert compares that code). With no
+# mechanism at all it refuses (rc 125, loud on stderr) — never runs unbounded.
+if command -v timeout >/dev/null 2>&1; then
+    _TBOUND=timeout
+elif command -v gtimeout >/dev/null 2>&1; then
+    _TBOUND=gtimeout
+elif command -v perl >/dev/null 2>&1; then
+    _TBOUND=perl
+else
+    _TBOUND=""
+fi
+_tbound() {
+    local secs="$1"
+    shift
+    case "$_TBOUND" in
+        perl) perl -e 'alarm shift; exec @ARGV or die "exec $ARGV[0]: $!\n"' "$secs" "$@" ;;
+        "")
+            echo "test-run-job.sh: no timeout/gtimeout/perl to bound '$1' — refusing to run it unbounded" >&2
+            return 125
+            ;;
+        *) "$_TBOUND" "$secs" "$@" ;;
+    esac
+}
+
 TMP_ROOT="$(mktemp -d)"
 # Canonicalized on purpose: the seam refuses a symlinked mount source (it would
 # break path parity), and on macOS `mktemp -d` hands back a `/var/...` path
@@ -409,6 +436,40 @@ assert_eq "78" "$?" "executor independently rejects a symlinked socket mount"
 assert_contains "$out" "host-root-equivalent" "executor-side symlink refusal cites the security rationale"
 assert_not_contains "$(cat "$FAKE_DOCKER_LOG")" "innocent.sock" "no docker run was issued for the smuggled socket mount"
 
+# DANGLING links (#12045): the link's target need not exist on the validating
+# host. BSD `readlink -f` exits 1 there (and prints a truncated prefix), and
+# GNU fails too once the target's PARENT is missing, so `_rj_realpath` used to
+# hand back the innocent spelling and the symlink refusal never fired. These
+# targets are guaranteed absent on every host, so the cases above that lean on
+# whether /var/run/docker.sock happens to exist cannot mask this.
+mkdir -p "$SYMDIR/sockdir"
+ln -sf "$SYMDIR/sockdir/docker.sock" "$SYMDIR/dangling.sock"
+out="$("$RUN_JOB" --dry-run --image alpine --mount "$SYMDIR/dangling.sock" -- true 2>&1)"
+assert_eq "78" "$?" "refuses a DANGLING symlink to a docker socket (target absent on this host)"
+assert_contains "$out" "is a symlink to \"$SYMDIR/sockdir/docker.sock\"" "the dangling-link refusal names the resolved target"
+assert_contains "$out" "host-root-equivalent" "the dangling-link target is matched against the socket refusal"
+nested_target="/run/loom-absent-12045-$$/podman.sock"
+ln -sf "$nested_target" "$SYMDIR/nested.sock"
+out="$("$RUN_JOB" --dry-run --image alpine --mount "$SYMDIR/nested.sock" -- true 2>&1)"
+assert_eq "78" "$?" "refuses a symlink whose target's PARENT is missing too (GNU and BSD both fail to resolve it)"
+assert_contains "$out" "is a symlink to \"$nested_target\"" "the missing-parent refusal names the full target, not a truncated prefix"
+assert_contains "$out" "podman.sock\": a mounted container-runtime socket is host-root-equivalent" "the missing-parent target is matched by name"
+nested_evil="$(jq -nc --arg p "$SYMDIR/nested.sock" \
+    '{schema:"loom.run-job/v1", id:"job-nestedevil", image:"alpine",
+      command:["true"], workdir:"", network:"none",
+      mounts:[{path:$p, mode:"rw"}],
+      env:{}, limits:{cpus:"",memory:""}, timeoutSeconds:0}')"
+out="$(bash "$EXEC_LIB" run "$(printf '%s' "$nested_evil" | base64 | tr -d '\n')" 2>&1)"
+assert_eq "78" "$?" "executor independently rejects a symlink whose target's parent is missing"
+assert_not_contains "$(cat "$FAKE_DOCKER_LOG")" "nested.sock" "no docker run was issued for the missing-parent link"
+ln -sf loop.lnk "$SYMDIR/loop.lnk"
+out="$("$RUN_JOB" --dry-run --image alpine --mount "$SYMDIR/loop.lnk" -- true 2>&1)"
+assert_eq "78" "$?" "refuses a self-referential symlink loop"
+# Unit level: a plain missing NON-symlink path still comes back unchanged, so
+# the fallbacks never invent a symlink refusal for an absent path.
+absent="/loom-absent-12045-$$/sub/leaf"
+assert_eq "$absent" "$(LOOM_RUN_JOB_SOURCE_ONLY=1 bash -c '. "$1"; _rj_realpath "$2"' _ "$EXEC_LIB" "$absent")" "_rj_realpath returns a missing non-symlink path unchanged"
+
 # The executor re-validates independently: a client that skips its own
 # pre-flight (or lies) still cannot talk the executor into a socket mount.
 evil="$(jq -nc '{schema:"loom.run-job/v1", id:"job-evil", image:"alpine",
@@ -707,12 +768,12 @@ echo "=== 16. A nonzero --timeout never outlives the job it guards (#7875) ==="
 # Every transport exercised below is PIPE-backed, which is the whole point: a
 # file-backed transport stand-in cannot observe this class of bug at all (a
 # held descriptor on a regular file blocks nobody), which is exactly how a
-# 100%-green suite shipped a broken `--timeout`. `timeout 30` bounds a
+# 100%-green suite shipped a broken `--timeout`. `_tbound 30` bounds a
 # regression to a fast failure instead of a 45s one.
 reset_state
 export FAKE_JOB_EXIT=0
 start=$SECONDS
-timeout 30 "$RUN_JOB" --executor local --id job-to-local --image alpine --timeout 45 -- true >/dev/null 2>&1
+_tbound 30 "$RUN_JOB" --executor local --id job-to-local --image alpine --timeout 45 -- true >/dev/null 2>&1
 rc=$?
 elapsed=$((SECONDS - start))
 assert_eq "0" "$rc" "local transport: a job carrying --timeout 45 still exits 0"
@@ -727,7 +788,7 @@ reset_state
 export FAKE_JOB_EXIT=0
 start=$SECONDS
 LOOM_JOB_EXECUTOR_HOST=to.example \
-    timeout 30 "$RUN_JOB" --executor ssh --id job-to-ssh --image alpine --timeout 40 -- true >/dev/null 2>&1
+    _tbound 30 "$RUN_JOB" --executor ssh --id job-to-ssh --image alpine --timeout 40 -- true >/dev/null 2>&1
 rc=$?
 elapsed=$((SECONDS - start))
 assert_eq "0" "$rc" "ssh transport: a job carrying --timeout 40 still exits 0"
@@ -744,7 +805,7 @@ reset_state
 export FAKE_JOB_EXIT=0
 export FAKE_JOB_WAIT_SLEEP=5
 errfile="$TMP_ROOT/err.16"
-timeout 40 "$RUN_JOB" --executor local --id job-to-fire --image alpine --timeout 1 -- true >/dev/null 2>"$errfile"
+_tbound 40 "$RUN_JOB" --executor local --id job-to-fire --image alpine --timeout 1 -- true >/dev/null 2>"$errfile"
 assert_contains "$(cat "$errfile")" "# LOOM_RUN_JOB_TIMEOUT id=job-to-fire after=1s" "an expired timeout still fires and announces itself"
 assert_contains "$(cat "$FAKE_DOCKER_LOG")" "stop --time" "an expired timeout stops the job GRACEFULLY (never docker kill)"
 assert_not_contains "$(cat "$FAKE_DOCKER_LOG")" "kill loom-job-job-to-fire" "an expired timeout never SIGKILLs the job"
@@ -796,15 +857,15 @@ echo "=== 17. A malformed invocation errors out; it never spins (#7875) ==="
 # is a far worse failure shape than an error.
 reset_state
 for flag in --spec --image --mount --workdir --env --cpus --memory --network --timeout --id --executor; do
-    out="$(timeout 10 "$RUN_JOB" "$flag" 2>&1)"
+    out="$(_tbound 10 "$RUN_JOB" "$flag" 2>&1)"
     rc=$?
     assert_eq "78" "$rc" "'run-job.sh $flag' with no value exits 78 (it does not spin)"
     assert_contains "$out" "'$flag' requires a value" "'$flag' with no value names the offending flag"
 done
-out="$(timeout 10 "$RUN_JOB" --nonesuch 2>&1)"
+out="$(_tbound 10 "$RUN_JOB" --nonesuch 2>&1)"
 assert_eq "78" "$?" "an unknown option still exits 78"
 assert_contains "$out" "unknown option" "an unknown option is named as such"
-out="$(timeout 10 "$RUN_JOB" attach 2>&1)"
+out="$(_tbound 10 "$RUN_JOB" attach 2>&1)"
 assert_eq "78" "$?" "'attach' with no job id exits 78 (it does not spin)"
 assert_contains "$out" "requires a job id" "'attach' with no id says a job id is required"
 

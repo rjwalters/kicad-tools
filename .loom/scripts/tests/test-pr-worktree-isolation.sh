@@ -133,14 +133,27 @@ if [[ -s "$probe_dir/probe.txt" ]]; then
         fail "occupied-worktree probe prints processes for a nonexistent worktree"
     fi
     mkdir -p "$probe_dir/.loom/worktrees/pr-1"
-    (cd "$probe_dir/.loom/worktrees/pr-1" && setsid sleep 30 >/dev/null 2>&1 &)
+    # `setsid` is util-linux; macOS does not ship it (#12045). The subshell
+    # exiting right after the `&` already reparents the sleeper, which is the
+    # property the probe needs, so fall back to that rather than starting
+    # nothing. The sleeper outlives the probe by a wide margin: the probe runs
+    # `lsof` once per user process on macOS, which on a busy host took >30s
+    # and let the old `sleep 30` exit before the probe reached its pid.
+    sleeper_cmd="sleep 600"
+    launcher=()
+    command -v setsid >/dev/null 2>&1 && launcher=(setsid)
+    (cd "$probe_dir/.loom/worktrees/pr-1" && {
+        ${launcher[@]+"${launcher[@]}"} $sleeper_cmd >/dev/null 2>&1 &
+        echo $! >"$probe_dir/sleeper.pid"
+    })
     sleep 0.3
-    if run_probe pr-1 | grep -q "sleep 30"; then
+    if run_probe pr-1 | grep -q "$sleeper_cmd"; then
         pass "occupied-worktree probe reports a live process inside an existing worktree"
     else
         fail "occupied-worktree probe misses a live process inside an existing worktree"
     fi
-    pkill -u "$(id -u)" -f "^sleep 30$" 2>/dev/null || true
+    kill "$(cat "$probe_dir/sleeper.pid" 2>/dev/null)" 2>/dev/null || true
+    pkill -u "$(id -u)" -f "^$sleeper_cmd\$" 2>/dev/null || true
 else
     fail "could not extract the occupied-worktree probe snippet from doctor.md"
 fi
@@ -408,6 +421,29 @@ else
 fi
 
 cd "$REPO_ROOT"
+
+# --- Test 5 (#11194): Judge guidance and helper --help agree on the fallback ---
+echo ""
+echo "Test 5: judge.md and pr-worktree.sh --help agree (no fabricated judge-* checkout)"
+JUDGE_MD="$REPO_ROOT/defaults/.claude/commands/loom/judge.md"
+[[ -f "$REPO_ROOT/.claude/commands/loom/judge.md" ]] && JUDGE_MD="$REPO_ROOT/.claude/commands/loom/judge.md"
+HELP_OUT=$("$PR_WORKTREE_SH" --help 2>&1)
+assert_grep "pr-worktree\.sh <PR_NUMBER>" "$JUDGE_MD" \
+    "judge.md routes the no-builder-checkout case through pr-worktree.sh"
+assert_grep "Never.*invent a .judge-\*" "$JUDGE_MD" \
+    "judge.md forbids inventing a judge-* checkout after a helper failure"
+if grep -qE "Judge's supported review checkout" <<<"$HELP_OUT" \
+    && grep -qE "names the holder" <<<"$HELP_OUT" \
+    && grep -qE "invent a judge-\* directory" <<<"$HELP_OUT"; then
+    pass "pr-worktree.sh --help states the Judge fallback and its collision failure behavior"
+else
+    fail "pr-worktree.sh --help does not match the Judge fallback guidance"
+fi
+if grep -qE "use worktree\.sh instead" <<<"$HELP_OUT"; then
+    fail "pr-worktree.sh --help still redirects issue PRs to worktree.sh"
+else
+    pass "pr-worktree.sh --help no longer contradicts judge.md"
+fi
 
 # --- Summary ---
 echo ""

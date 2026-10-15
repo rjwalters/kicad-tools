@@ -1,7 +1,7 @@
 # Role-Prompt & Operator-Dispatch-Brief Authoring Discipline
 
 Loom ratchets the **size** of its ten role prompts —
-[file-size-policy.md](https://github.com/rjwalters/loom/blob/main/.loom/docs/file-size-policy.md)'s
+[prompt-budget-policy.md](https://github.com/rjwalters/loom/blob/main/.loom/docs/prompt-budget-policy.md)'s
 markdown-token freeze (repo-local to the loom source repo),
 `check-role-prompt-budget.sh`'s whole-prefix ceiling (#8073) — but has never
 had a discipline for whether a prompt (or an ad-hoc operator dispatch brief,

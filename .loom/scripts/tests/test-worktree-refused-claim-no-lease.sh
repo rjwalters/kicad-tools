@@ -20,6 +20,7 @@
 #   8. `git worktree add` itself fails                   -> no worktree, no lease
 #   9. --sparse on an existing worktree, reconfigure fails -> no lease
 #  10. --sparse on an existing worktree, reconfigure ok    -> leased
+#  11-13. #9828: OPEN_PR refuses only a fresh branch, not origin/local reuse
 
 set -euo pipefail
 
@@ -98,7 +99,7 @@ expect_refused_no_lease() { # <issue> <label>
     fi
 }
 
-echo "Test 1: open linked PR (check-claim exit 0) -> refused, no lease"
+echo "Test 1: open linked PR (check-claim exit 0), fresh branch -> refused, no lease"
 STUB_CHECK_CLAIM_RC=0 run_wt 501
 expect_refused_no_lease 501 "check-claim"
 
@@ -141,6 +142,32 @@ if [[ "$RC" -ne 0 && "$(lease_calls)" -eq 0 ]]; then pass "failed reconfigure, n
 echo "Test 10: --sparse on existing worktree, reconfigure succeeds -> leased"
 STUB_SPARSE_RC=0 run_wt 502 --sparse docs
 if [[ "$RC" -eq 0 ]] && grep -q '^lease ensure 502 ' "$LOG"; then pass "reconfigure leases"; else fail "rc=$RC leases=$(lease_calls)"; cat "$TMP/out.log"; fi
+
+# #9828: the check-claim probe guards fresh-branch creation ONLY. A caller
+# reusing an existing feature/issue-<N> branch (a Doctor continuing the open
+# PR) must not be refused with OPEN_PR.
+echo "Test 11: OPEN_PR + only origin/feature/issue-511 -> created, tracks origin"
+# The branch needs its own commit: one that is an ancestor of main counts as
+# already landed (#5657), as does a tree-equal one, and correctly falls through to a fresh branch.
+git checkout -q -b feature/issue-511 && echo w > pr-work.txt && git add pr-work.txt && git commit -q -m pr-work
+git push -q origin feature/issue-511 && git checkout -q main && git branch -D -q feature/issue-511
+git fetch -q origin
+STUB_CHECK_CLAIM_RC=0 run_wt 511
+upstream=$(git -C .loom/worktrees/issue-511 rev-parse --abbrev-ref '@{upstream}' 2>/dev/null || true)
+if [[ "$RC" -eq 0 && "$upstream" == "origin/feature/issue-511" ]]; then pass "origin reuse not refused, tracks origin"; else fail "rc=$RC upstream=$upstream"; cat "$TMP/out.log"; fi
+if grep -q '^forge check-claim 511' "$LOG"; then fail "probe ran on the origin-reuse path"; else pass "probe skipped on origin reuse"; fi
+
+echo "Test 12: OPEN_PR + only local feature/issue-512 -> created"
+git branch feature/issue-512
+STUB_CHECK_CLAIM_RC=0 run_wt 512
+if [[ "$RC" -eq 0 && -e .loom/worktrees/issue-512/.git ]]; then pass "local reuse not refused"; else fail "rc=$RC"; cat "$TMP/out.log"; fi
+if grep -q '^forge check-claim 512' "$LOG"; then fail "probe ran on the local-reuse path"; else pass "probe skipped on local reuse"; fi
+
+echo "Test 13: OPEN_PR + no local or origin branch -> still refused on the fresh-branch path"
+STUB_CHECK_CLAIM_RC=0 run_wt 513
+expect_refused_no_lease 513 "fresh-branch OPEN_PR"
+if grep -q '^forge check-claim 513 --force-claim' "$LOG"; then pass "probe ran on the fresh-branch path"; else fail "probe did not run"; cat "$LOG"; fi
+if git show-ref --verify --quiet refs/heads/feature/issue-513; then fail "branch created despite refusal"; else pass "no branch created"; fi
 
 echo
 echo "Tests run: $TESTS_RUN, failed: $TESTS_FAILED"

@@ -503,22 +503,27 @@ fi
 # OpenAI model IDs is epic #4167 Phase 4. Until then LOOM_MODEL is forwarded
 # verbatim and the adapter's static default is "whatever the profile already
 # chose", which is the operator's own selection.
-CODEX_DEFAULT_MODEL="${LOOM_CODEX_MODEL:-}"
+#
+# `model@effort` rung grammar (#8387): split on the first `@`. Only the base is
+# ever forwarded as `-m`; the suffix is the LOWEST-priority effort source,
+# routed below as `-c model_reasoning_effort=` (explicit -c > --effort >
+# LOOM_EFFORT > suffix). Empty base -> falls through to the next source;
+# empty suffix -> no effort. An explicit `-m foo@high` in args is left unchanged.
+MODEL_SUFFIX_EFFORT=""; _m_base=""
+[[ "$HAS_MODEL_ARG" == "true" ]] || for _m_src in LOOM_MODEL LOOM_CODEX_MODEL; do
+    _m_val="${!_m_src:-}"; _m_base="${_m_val%%@*}"; MODEL_SUFFIX_EFFORT="${_m_base:+${_m_val:${#_m_base}+1}}"
+    [[ "$_m_val" != *@* ]] || log_info "spawn-codex: split $_m_src='$_m_val' -> model=${_m_base:-<empty; ignored, falls through to the default-model path>} effort=${MODEL_SUFFIX_EFFORT:-none} (lowest-precedence effort source)"
+    [[ -z "$_m_base" ]] || break
+done
 EFFECTIVE_MODEL=""
 if [[ "$HAS_MODEL_ARG" == "true" ]]; then
-    if [[ -n "${LOOM_MODEL:-}" ]]; then
-        log_info "spawn-codex: explicit -m/--model in args wins over LOOM_MODEL='$LOOM_MODEL'"
-    fi
+    [[ -z "${LOOM_MODEL:-}" ]] || log_info "spawn-codex: explicit -m/--model in args wins over LOOM_MODEL='$LOOM_MODEL'"
     EFFECTIVE_MODEL="$EXPLICIT_MODEL"
     log_info "spawn-codex: model=${EXPLICIT_MODEL:-default} (from -m/--model arg)"
-elif [[ -n "${LOOM_MODEL:-}" ]]; then
-    EFFECTIVE_MODEL="$LOOM_MODEL"
-    PASSTHROUGH_ARGS+=(-m "$LOOM_MODEL")
-    log_info "spawn-codex: model=$LOOM_MODEL (from LOOM_MODEL)"
-elif [[ -n "$CODEX_DEFAULT_MODEL" ]]; then
-    EFFECTIVE_MODEL="$CODEX_DEFAULT_MODEL"
-    PASSTHROUGH_ARGS+=(-m "$CODEX_DEFAULT_MODEL")
-    log_info "spawn-codex: model=$CODEX_DEFAULT_MODEL (from LOOM_CODEX_MODEL adapter default)"
+elif [[ -n "$_m_base" ]]; then
+    EFFECTIVE_MODEL="$_m_base"
+    PASSTHROUGH_ARGS+=(-m "$_m_base")
+    log_info "spawn-codex: model=$_m_base (from $_m_src)"
 else
     log_info "spawn-codex: model=default"
 fi
@@ -557,18 +562,20 @@ fi
 # --- Effort selection ---
 # `codex exec` has no `--effort` flag; the equivalent knob is the
 # `model_reasoning_effort` config key. Mirrors the model precedence: an explicit
-# `-c model_reasoning_effort=` in the passthrough args wins, then LOOM_EFFORT,
-# then nothing (no override emitted, CLI default preserved).
+# `-c model_reasoning_effort=` in the passthrough args wins, then --effort, then
+# LOOM_EFFORT, then a `model@effort` suffix (#8387), then nothing (no override
+# emitted, CLI default preserved).
 if [[ "$HAS_EFFORT_OVERRIDE" == "true" ]]; then
-    if [[ -n "${LOOM_EFFORT:-}" ]]; then
-        log_info "spawn-codex: explicit -c model_reasoning_effort= wins over LOOM_EFFORT='$LOOM_EFFORT'"
-    fi
+    [[ -z "${LOOM_EFFORT:-}" ]] || log_info "spawn-codex: explicit -c model_reasoning_effort= wins over LOOM_EFFORT='$LOOM_EFFORT'"
 elif [[ -n "$GENERIC_EFFORT" ]]; then
     PASSTHROUGH_ARGS+=(-c "model_reasoning_effort=$GENERIC_EFFORT")
     log_info "spawn-codex: effort=$GENERIC_EFFORT (from --effort)"
 elif [[ -n "${LOOM_EFFORT:-}" ]]; then
     PASSTHROUGH_ARGS+=(-c "model_reasoning_effort=$LOOM_EFFORT")
     log_info "spawn-codex: effort=$LOOM_EFFORT (from LOOM_EFFORT)"
+elif [[ -n "$MODEL_SUFFIX_EFFORT" ]]; then
+    PASSTHROUGH_ARGS+=(-c "model_reasoning_effort=$MODEL_SUFFIX_EFFORT")
+    log_info "spawn-codex: effort=$MODEL_SUFFIX_EFFORT (from model@effort suffix)"
 fi
 
 # --- Sandbox mapping (SAFETY-CRITICAL; see header + guardrail-parity-codex.md) ---

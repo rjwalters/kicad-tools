@@ -120,10 +120,12 @@ loop can tune a whole run with one env export.
 
 Notes:
 
-- Every tranche-1 field **hot-applies** (#9768): the work-finder trio, idle
-  exit, and the backoff pair re-read config every tick, and the lease TTL
-  re-resolves from the layer on every lease check — a committed-block edit
-  lands without a daemon restart. (The single-knob env vars are process
+- Tranche-1 fields **hot-apply** (#9768): `maxConcurrent`, the weight
+  bonuses, idle exit, and the backoff pair re-read config every tick,
+  `maxAdmissionsPerTick` does too since #12090, and the lease TTL re-resolves
+  from the layer on every lease check — a committed-block edit lands without
+  a daemon restart. The exception is `dispatch.tickIntervalSecs`, which still
+  needs a restart (#12090). (The single-knob env vars are process
   environment: fixed at launch, as always.)
 - A legacy key and a block key may coexist; the block wins per field, the
   legacy key fills fields the block omits.
