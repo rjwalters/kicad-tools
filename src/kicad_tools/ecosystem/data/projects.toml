@@ -84,7 +84,7 @@ repo_url = "https://github.com/DingoOz/TraceMaker"
 vcs = "github"
 category = "autorouter"
 relation = "peer"
-verdict = "watch"
+verdict = "benchmarked"
 # The LICENSE file is the GPLv3 text; NOTICE carries
 # `SPDX-License-Identifier: GPL-3.0-or-later` and adds a section-7 permission
 # to link NVIDIA's CUDA runtime. GitHub's detector reports the deprecated
@@ -108,7 +108,12 @@ last_verified = "2026-10-06"
 pinned_commit = "89ff58ca86b2104ac6c55ae8a5dc77e4ab3e8d00"
 # Issue #6352: our independent (ideas-only) test of its min-cost-flow
 # escape-corridor idea -- a null result on this fleet.
-research_docs = ["docs/research/kct-route-escape-flow-experiment.md"]
+# Issue #6335: first live fixed-placement run on our fleet (one run per board,
+# 600 s cap, TraceMaker 89ff58ca).
+research_docs = [
+  "docs/research/kct-route-escape-flow-experiment.md",
+  "benchmarks/external/fleet_routers/verdict.md",
+]
 summary = """
 C++20/CUDA KiCad 9/10 router that reads and writes `.kicad_pcb` directly \
 and is judged by `kicad-cli` DRC. Octilinear-lattice A\\* with exact \
@@ -125,10 +130,13 @@ the input board, looser than our 0-DRC bar. Days old; copyleft, so ideas \
 only, and run only as an external binary.\
 """
 reeval_trigger = """
-Run it head-to-head against `kct route` on our fleet and on a PCBWorld \
-split disjoint from its development set, re-scored under our 0-total-DRC \
-bar (issues #5942, #5943). If it holds up, move to `benchmarked`; its \
-portfolio-under-budget and escape/negotiation ideas are tracked in #5947.\
+Measured on our fleet (issue #6335, one seed and one run per board, 600 s \
+cap, fixed placement, kicad-cli 10.0.6): 100% completion on boards 00-06 \
+with 0 DRC errors except one `starved_thermal` on 03, but `kct check` \
+reports via-in-pad on 02-06 and 09; it timed out on 07 and left 10 of 124 \
+connections open on 09. Not yet run on a PCBWorld D3 split disjoint from \
+its development set (issues #5942, #6331-#6333). Its portfolio-under-budget \
+and escape/negotiation ideas are tracked in #5947.\
 """
 
 [projects.freerouting]
@@ -192,11 +200,23 @@ patches the gaps in KiCad's lossy Specctra export (DRU clearances, \
 keepouts, planes). Like freerouting it routes a translated view rather \
 than the board file. Copyleft, so ideas only.\
 """
+research_docs = ["benchmarks/external/fleet_routers/verdict.md"]
 reeval_trigger = """
-If our benchmarks ever need a DSN-based baseline, measure fastroute in \
-place of freerouting -- same algorithms, a fraction of the runtime -- \
-and record whether its plugin's export fixes close the DSN round-trip \
-gaps that keep us on the board file.\
+Issue #6335 ran it on our fleet (boards 00-07, 09): every row is \
+`non-comparable`, so its routing quality is not established; DRC errors \
+appeared on 02, 03, 05, 06, 07 and 09. The fab-only DRU rules were already \
+excluded (#6768); the losses are exemption-scoped net-class clearances \
+(all boards but 09; reclassified as not-representable by PR #6770 for \
+#6765), the 0.3 mm copper-to-edge clearance on 05/06/07/09 and \
+`diff_pair_gap` on 03/06 (both DSN-expressible, #6784), native zone \
+clearances on 03 and `SMD Pad Clearance` on 05 (fill/placement-enforced, \
+classification asked in #6784), and diff-pair skew/uncoupled/via-count \
+rules on 03/06 (no DSN construct; those boards stay non-comparable unless \
+#6784 classifies them). Re-run with a re-frozen manifest after #6770 and \
+#6784. If our benchmarks ever need a DSN-based baseline, \
+measure fastroute in place of freerouting -- same algorithms, a fraction of \
+the runtime -- and record whether its plugin's export fixes close the DSN \
+round-trip gaps that keep us on the board file.\
 """
 
 [projects.orthoroute]
