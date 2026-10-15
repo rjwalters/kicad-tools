@@ -1472,3 +1472,277 @@ def test_discarded_tap_chain_retry_equals_a_run_without_retry(capsys, monkeypatc
     for f in dataclasses.fields(a):
         if f.name != "elapsed_s":
             assert getattr(a, f.name) == getattr(b, f.name), f.name
+
+
+# ---------------------------------------------------------------------------
+# Issue #6698: launch from the row facing the chain + generated row ties
+# ---------------------------------------------------------------------------
+
+# A USB-C receptacle's D+/D- rows (board 03 J1, GCT USB4085): 0.7 mm round THT
+# pads, 0.85 mm pitch, rows 1.35 mm apart.  The A row faces the ESD part U2;
+# the B row sits behind it, its D+/D- order mirrored (B6 behind A7).
+_USBC_A_X, _USBC_B_X = 3.0, 1.65
+_USBC_LO, _USBC_HI = 5.575, 6.425
+
+
+def _usbc(x: float, y: float, net: int, name: str, pin: str) -> Pad:
+    return Pad(
+        x=x,
+        y=y,
+        width=0.7,
+        height=0.7,
+        net=net,
+        net_name=name,
+        layer=Layer.F_CU,
+        ref="J1",
+        pin=pin,
+        through_hole=True,
+        drill=0.4,
+        shape="circle",
+    )
+
+
+def _usbc_pads(*, smd: bool = False) -> dict[str, Pad]:
+    pads = {
+        "A6": _usbc(_USBC_A_X, _USBC_LO, 1, "D+", "A6"),
+        "A7": _usbc(_USBC_A_X, _USBC_HI, 2, "D-", "A7"),
+        "B6": _usbc(_USBC_B_X, _USBC_HI, 1, "D+", "B6"),
+        "B7": _usbc(_USBC_B_X, _USBC_LO, 2, "D-", "B7"),
+    }
+    if smd:
+        from dataclasses import replace
+
+        pads = {k: replace(p, through_hole=False, drill=0.0) for k, p in pads.items()}
+    return pads
+
+
+def _usbc_chain_pads(*, smd: bool = False) -> dict[str, Pad]:
+    pads = {k: v for k, v in _chain_pads().items() if not k.startswith("J1.")}
+    return {**{f"J1.{k}": v for k, v in _usbc_pads(smd=smd).items()}, **pads}
+
+
+def test_choose_pair_chain_launches_from_the_row_facing_the_chain() -> None:
+    from kicad_tools.router.lattice.coupled import choose_pair_chain
+
+    pads = _usbc_chain_pads()
+    ps = [pads[k] for k in ("J1.B6", "J1.A6", "U2.3", "U2.4", "U1.P")]
+    ns = [pads[k] for k in ("J1.B7", "J1.A7", "U2.1", "U2.6", "U1.N")]
+    # The farthest-apart end is still the walled-in B row ...
+    ends = choose_pair_endpoints(ps, ns)
+    assert ends is not None and ends[0] == (0, 0)
+    chain = choose_pair_chain(ps, ns)
+    assert chain is not None
+    # ... but segment 0 now starts at the A row; hops and the far end are unchanged.
+    assert chain.segments == [((1, 1), (2, 2)), ((3, 3), (4, 4))]
+    assert chain.hops == [((2, 2), (3, 3))]
+
+
+def test_choose_pair_chain_end_repick_needs_an_interior_part() -> None:
+    from kicad_tools.router.lattice.coupled import choose_pair_chain
+
+    # Dual-row end, no interior part: the single farthest-apart trunk (B row).
+    usbc = _usbc_pads()
+    far_p = _pad(27.0, 5.5, 1, "D+", ref="U1")
+    far_n = _pad(27.0, 6.5, 2, "D-", ref="U1")
+    ps = [usbc["B6"], usbc["A6"], far_p]
+    ns = [usbc["B7"], usbc["A7"], far_n]
+    chain = choose_pair_chain(ps, ns)
+    assert chain is not None
+    assert chain.segments == [choose_pair_endpoints(ps, ns)] and chain.hops == []
+
+
+def _tie_kwargs(**over):
+    kw = {"width": 0.30, "clearance": 0.15, "min_width": 0.1016}
+    kw.update(over)
+    return kw
+
+
+def _plan_both(pads: dict[str, Pad], layers, **over):
+    from kicad_tools.router.lattice.coupled import plan_equivalent_pin_tie
+
+    foreign = list(pads.values())
+    tie_p = plan_equivalent_pin_tie(pads["B6"], pads["A6"], foreign, layers, **_tie_kwargs(**over))
+    accepted = [tie_p] if tie_p is not None else []
+    tie_n = plan_equivalent_pin_tie(
+        pads["B7"], pads["A7"], foreign, layers, accepted=accepted, **_tie_kwargs(**over)
+    )
+    return tie_p, tie_n
+
+
+def _tie_pad_clearance(tie, pad: Pad) -> float:
+    from shapely.geometry import LineString, Point
+
+    copper = LineString(tie.points).buffer(tie.width / 2.0, quad_segs=64)
+    return copper.distance(Point(pad.x, pad.y).buffer(pad.width / 2.0, quad_segs=64))
+
+
+def test_equivalent_pin_ties_neck_down_onto_different_layers() -> None:
+    pads = _usbc_pads()
+    tie_p, tie_n = _plan_both(pads, [0, 1])
+    assert tie_p is not None and tie_n is not None
+    for tie in (tie_p, tie_n):
+        assert tie.length == pytest.approx(1.70, abs=0.01)
+        assert tie.width == pytest.approx(0.20)
+        assert tie.class_width == pytest.approx(0.30)
+        assert all(_is_octilinear(a, b) for a, b in zip(tie.points, tie.points[1:], strict=False))
+    # The two ties cross, so they land on different layers.
+    assert tie_p.layer != tie_n.layer
+    # Exact copper clears every other-net pad by the class clearance.
+    for tie in (tie_p, tie_n):
+        for pad in pads.values():
+            if pad.net != tie.net:
+                assert _tie_pad_clearance(tie, pad) >= 0.15 - 1e-6
+
+
+def test_equivalent_pin_tie_single_layer_connector_yields_one_tie() -> None:
+    tie_p, tie_n = _plan_both(_usbc_pads(smd=True), [0])
+    assert tie_p is not None and tie_n is None
+
+
+def test_equivalent_pin_tie_declines_when_no_fab_width_fits() -> None:
+    tie_p, tie_n = _plan_both(_usbc_pads(), [0, 1], clearance=0.25)
+    assert tie_p is None and tie_n is None
+    # Without a fab floor there is no neck-down: 0.30 mm never fits.
+    assert _plan_both(_usbc_pads(), [0, 1], min_width=None) == (None, None)
+
+
+def test_equivalent_pin_tie_roundrect_falls_back_to_the_pad_box() -> None:
+    from dataclasses import replace
+
+    from kicad_tools.router.lattice.coupled import plan_equivalent_pin_tie
+
+    pads = _usbc_pads()
+    # A roundrect foreign pad (``_pad_waiver_polygon`` returns None for it) is
+    # its full bounding box -- never "no obstacle".  A 0.3 mm probe 0.38 mm
+    # off the D+ tie's diagonal leaves room for a necked tie as a circle, but
+    # its box corner points at the leg and leaves none.
+    off = 0.38 / math.sqrt(2.0)
+    mid = ((_USBC_B_X + _USBC_B_X + 0.85) / 2.0, (_USBC_HI + _USBC_LO) / 2.0)
+    probe = replace(
+        pads["B7"], x=mid[0] + off, y=mid[1] + off, width=0.3, height=0.3, net=9, net_name="X"
+    )
+    as_circle = plan_equivalent_pin_tie(
+        pads["B6"], pads["A6"], [*pads.values(), probe], [0], **_tie_kwargs()
+    )
+    assert as_circle is not None, "the round probe leaves room"
+    boxed = replace(probe, shape="roundrect")
+    assert (
+        plan_equivalent_pin_tie(
+            pads["B6"], pads["A6"], [*pads.values(), boxed], [0], **_tie_kwargs()
+        )
+        is None
+    )
+
+
+def _usbc_autorouter(*, smd: bool = False) -> object:
+    from kicad_tools.router.core import Autorouter
+
+    # Board 03 under the protocol: 0.15 mm board clearance, jlcpcb 4-layer
+    # 1 oz fab floor (``rules.min_trace_width_floor``, #4700).
+    rules = DesignRules(trace_width=0.2, trace_clearance=0.15, manufacturer="jlcpcb")
+    rules.min_trace_width_floor = 0.1016
+    router = Autorouter(
+        30, 12, strategy="lattice", rules=rules, net_class_map={"D+": _HS, "D-": _HS}
+    )
+    for key, pad in _usbc_chain_pads(smd=smd).items():
+        router.pads[(pad.ref, key)] = pad
+        router.nets.setdefault(pad.net, []).append((pad.ref, key))
+        router.net_names[pad.net] = pad.net_name
+    return router
+
+
+def test_core_ties_the_far_usbc_row_as_fixed_copper(capsys, monkeypatch) -> None:
+    router = _usbc_autorouter()
+    pf = router._ensure_lattice_pathfinder()
+    seen: dict = {}
+    real = pf.route_netset
+
+    def spy(conns, **kw):
+        seen.setdefault("fixed", kw.get("fixed_copper"))
+        seen.setdefault("conns", list(conns))
+        return real(conns, **kw)
+
+    monkeypatch.setattr(pf, "route_netset", spy)
+    routes_p = router.route_net(1)
+    routes_n = router.route_net(2)
+    out = capsys.readouterr().out
+    assert "Diff-pair tie D+ J1.B6->J1.A6" in out and "Diff-pair tie D- J1.B7->J1.A7" in out
+    assert "D[0] J1.A6->U2.3" in out
+    ties = router._lattice_pair_ties
+    assert [t[0] for t in ties] == [(1, "tie", 0), (2, "tie", 1)]
+    # No single-ended connection for a tied extra.
+    assert not any(isinstance(k, tuple) and k[1:] == (0,) for k, *_ in seen["conns"])
+    tie_routes = [route for _k, route, _e in ties]
+    assert all(any(r is f for f in seen["fixed"]) for r in tie_routes)
+    assert all(any(r is t for t in routes_p + routes_n) for r in tie_routes)
+    pads = _usbc_chain_pads()
+    assert _net_connected(routes_p, [pads[k] for k in ("J1.A6", "J1.B6", "U2.3", "U2.4", "U1.P")])
+    assert _net_connected(routes_n, [pads[k] for k in ("J1.A7", "J1.B7", "U2.1", "U2.6", "U1.N")])
+    assert router._lattice_connection_endpoints[(1, "tie", 0)] == ("J1.B6", "J1.A6")
+
+
+def _todays_connections(router, monkeypatch) -> list:
+    """The connection list with the #6698 tie pass switched off."""
+    with monkeypatch.context() as m:
+        m.setattr(router, "_lattice_plan_pair_ties", lambda reserved: set())
+        _c, conns = router._lattice_netset_connections()
+    return conns
+
+
+def test_core_without_a_tie_keeps_todays_connections(monkeypatch) -> None:
+    import kicad_tools.router.lattice.coupled as coupled_mod
+
+    router = _usbc_autorouter()
+    router._ensure_lattice_pathfinder()
+    today = _todays_connections(router, monkeypatch)
+    monkeypatch.setattr(coupled_mod, "plan_equivalent_pin_tie", lambda *a, **k: None)
+    _c, declined = router._lattice_netset_connections()
+    assert router._lattice_pair_ties == []
+    assert declined == today
+    assert any(k == (1, 0) for k, *_ in today) and any(k == (2, 0) for k, *_ in today)
+
+
+def test_core_ties_a_pair_all_or_nothing(capsys, monkeypatch) -> None:
+    # A single-layer (SMD) receptacle has room for only one of the two
+    # crossing ties: the pair keeps today's connections for BOTH extras
+    # rather than attaching D+ and D- by different mechanisms (board 06rf).
+    router = _usbc_autorouter(smd=True)
+    router._ensure_lattice_pathfinder()
+    today = _todays_connections(router, monkeypatch)
+    _c, conns = router._lattice_netset_connections()
+    assert router._lattice_pair_ties == []
+    assert conns == today
+    assert "Diff-pair ties D+/D-: not used (J1.B7->J1.A7 has no clearing tie)" in (
+        capsys.readouterr().out
+    )
+
+
+def test_core_declines_ties_through_a_fixed_fill(capsys) -> None:
+    # Preserved zone fills / degraded custom-pad copper are in neither
+    # ``pf.pads`` nor ``existing_routes``: a fill across the connector must
+    # veto every dogleg, and the all-or-nothing rule then drops both ties.
+    from shapely.geometry import box
+
+    from kicad_tools.router.fixed_copper import FixedFill, FixedFillObstacles
+
+    router = _usbc_autorouter()
+    copper = box(_USBC_B_X - 0.2, _USBC_LO - 0.5, _USBC_A_X + 0.2, _USBC_HI + 0.5)
+    router.grid.install_fixed_fills(
+        FixedFillObstacles(tuple(FixedFill("GND", 99, layer, 0.2, copper) for layer in (0, 1)))
+    )
+    router._lattice_netset_connections()
+    assert router._lattice_pair_ties == []
+    assert "Diff-pair ties D+/D-: not used" in capsys.readouterr().out
+
+
+def test_core_declines_ties_through_a_preserved_other_net_via(capsys) -> None:
+    from kicad_tools.router.primitives import Route, Via
+
+    router = _usbc_autorouter()
+    mid = ((_USBC_A_X + _USBC_B_X) / 2.0, (_USBC_LO + _USBC_HI) / 2.0)
+    via = Via(x=mid[0], y=mid[1], drill=0.6, diameter=1.2, layers=(Layer.F_CU, Layer.B_CU), net=99)
+    router.existing_routes.append(Route(net=99, net_name="GND", segments=[], vias=[via]))
+    router._ensure_lattice_pathfinder()
+    router._lattice_netset_connections()
+    assert router._lattice_pair_ties == []
+    assert "Diff-pair ties D+/D-: not used" in capsys.readouterr().out
