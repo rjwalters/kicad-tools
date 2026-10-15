@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 
+from kicad_tools.explain.checks import connectivity
 from kicad_tools.explain.checks.bom_health import BomFieldHealthCheck
 from kicad_tools.explain.checks.connectivity import (
     LedSeriesResistorCheck,
@@ -530,10 +531,14 @@ def test_led_resistor_array_prefix_still_counts(tmp_path: Path) -> None:
     assert LedSeriesResistorCheck().check(_load_pcb(tmp_path, body)) == []
 
 
-def test_led_matrix_32x32_is_fast(tmp_path: Path) -> None:
-    """Perf guard: the side walk must not re-flood the matrix per LED."""
-    import time
+def test_led_matrix_32x32_walk_work_is_bounded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Perf guard: the side walk must not re-flood the matrix per LED.
 
+    Counts ``_ref_prefix`` calls (one per footprint visited by the walk)
+    instead of wall-clock time, so CI load cannot make it flaky.
+    """
     size = 32
     names = ["VCC", "GND"]
     names += [f"ROW{i}" for i in range(size)]
@@ -552,9 +557,19 @@ def test_led_matrix_32x32_is_fast(tmp_path: Path) -> None:
             ref += 1
     pcb = _load_pcb(tmp_path, body)
 
-    start = time.perf_counter()
+    calls = 0
+    real_ref_prefix = connectivity._ref_prefix
+
+    def counting_ref_prefix(ref: str) -> str:
+        nonlocal calls
+        calls += 1
+        return real_ref_prefix(ref)
+
+    monkeypatch.setattr(connectivity, "_ref_prefix", counting_ref_prefix)
     LedSeriesResistorCheck().check(pcb)
-    assert time.perf_counter() - start < 1.0
+    # Measured 34,816 calls on 2026-10-15; a per-LED re-flood multiplies this
+    # by roughly the net fan-out (32x or more), so ~2x headroom is safe.
+    assert calls < 70_000
 
 
 _BOARD02 = (
