@@ -136,8 +136,8 @@ Everything downstream reads its presence as *proof that a rejection was posted*:
   match with `PRIOR_REJECTIONS == 0`, **or one whose marker-bearing comment is
   not itself a rejection** (#8795), is a stray marker the check below refuses
   to tally or escalate on.
-- `loom:operator` (formerly `loom:operator-only` / `-decision`) may only ever
-  be applied by Step 4's escalation branch, to an epic with real, recurring rejection findings.
+- `loom:operator` may only ever be applied by
+  Step 4's escalation branch, to an epic with real, recurring rejection findings.
   **A passing epic is never routed to the operator by this file.** Passing with
   nothing left to do is terminal-for-now, not stuck; parking it manufactures
   operator load and drops it from Step 0's completion-first check.
@@ -188,8 +188,7 @@ PRIOR_REJECTIONS=$(printf '%s\n' "$EPIC_JSON" | jq \
 # criterion 3 refuses to close past (#7734, #11795): loom:operator is Step 4's
 # own terminal state and an operator's park; loom:blocked / loom:frozen are
 # parks, which escalating would silently undo. All end the pass identically.
-# Registry sets, retired names included (the retired loom:operator-only and
-# its sub-kinds fold into loom:operator, 2am#4345).
+# Registry sets: champion-common.md "Hold set".
 HOLDS=$(loom-daemon labels list --property hold --with-retired 2>/dev/null || printf 'loom:blocked\nloom:operator\nloom:frozen'); export HOLDS
 OP_HOLDS=$(loom-daemon labels list --property operator_gate --with-retired 2>/dev/null || echo loom:operator); export OP_HOLDS
 HELD_BY=$(printf '%s\n' "$EPIC_JSON" | jq -r \
@@ -423,12 +422,11 @@ All $EPIC_CHILD_STRONG_CLOSED linked children are closed (discovered via: $EPIC_
 else
   # Not confident enough to close unilaterally — one mechanical ask, then hands off.
   # loom:operator with no decision block: "is this epic done?" is a fact the
-  # operator can confirm by looking, not a preference call (2am#4345: the
-  # retired loom:operator-mechanical sub-kind folded into loom:operator).
+  # operator can confirm by looking, not a preference call.
   ASK_MARKER="<!-- champion:epic-completion-ask -->"
   printf '%s\n' "$EPIC_JSON" | jq -e --arg m "$ASK_MARKER" \
     '.comments[] | select(.body | contains($m))' >/dev/null || {
-    gh issue comment "$EPIC_NUMBER" --body "$ASK_MARKER
+    ./.loom/scripts/post-comment.sh "$EPIC_NUMBER" --body "$ASK_MARKER
 **Champion: This Epic Looks Complete — Close?**
 
 Every child found for this epic is closed (via: $EPIC_CHILD_SOURCES), so its structural Phase 1/2/3 criteria are no longer meaningful to re-run. $UNCERTAINTY
@@ -628,7 +626,7 @@ title_prefix_phase_issues() {
 # exactly what missed a differently-formed existing marker for the same
 # phase (#6967). The broader hit set is then narrowed precisely by
 # canonicalized comparison below, so this is strictly more inclusive, never
-# less precise.
+# less precise. Includes loom:frozen (dedup).
 CANDIDATE_PHASE_ISSUES=$(${GH_READ:-gh} issue list \
   --label="loom:epic-phase" \
   --state=all \
@@ -669,10 +667,10 @@ if [ "$EXISTING_COUNT" -gt 0 ]; then
     --jq --arg m "$STANDDOWN_MARKER" '[.comments[] | select(.body | contains($m))] | length')
   if [ "$ALREADY_COMMENTED" -eq 0 ]; then
     ISSUE_LIST=$(printf '%s\n' "$EXISTING_PHASE_ISSUES" | jq -r '.[] | "- #\(.number) (\(.state)): \(.title)"')
-    gh issue comment "$EPIC_NUMBER" --body "$STANDDOWN_MARKER
-**Champion: Phase $PHASE Issues Already Exist — Skipping Creation**
+    ./.loom/scripts/post-comment.sh "$EPIC_NUMBER" --body "$STANDDOWN_MARKER
+**Champion: Phase $PHASE Issues Already Exist — Skipping**
 
-Found $EXISTING_COUNT existing issue(s) already covering phase $PHASE (matched by canonical phase form — \`$PHASE_MARKER\`, an equivalent letter-form marker (#6967), or an \`[Epic #$EPIC_NUMBER] Phase $PHASE\` title prefix (#5837)):
+Found $EXISTING_COUNT existing issue(s) covering phase $PHASE (canonical form: \`$PHASE_MARKER\`, letter-form — #6967, or an \`[Epic #$EPIC_NUMBER] Phase $PHASE\` title prefix — #5837):
 
 $ISSUE_LIST
 
@@ -750,7 +748,7 @@ EOF
 
 ```bash
 # Add comment tracking Phase 1 creation
-gh issue comment <epic-number> --body "**Champion: Epic Approved**
+./.loom/scripts/post-comment.sh <epic-number> --body "**Champion: Epic Approved**
 
 Phase 1 issues created and awaiting individual approval:
 - #<issue-1>: <title>
@@ -787,19 +785,16 @@ UNREVISED_EVALS=$(( PRIOR_REJECTIONS + SKIP_STREAK ))
 `PRIOR_REJECTIONS >= 1` ties this branch to a **real, posted**
 `Champion Review: Epic Needs Revision` comment: an epic nobody has ever rejected
 must never reach it, whatever markers its thread carries (#7666). Keep
-`loom:epic` (parked, not withdrawn) and apply
-`loom:operator` (#5671, #11795): repeatedly failing structural criteria is a
-judgement call about shape, never a self-clearing dependency wait, so
-`loom:blocked` is never right here. (The `loom:operator-only` +
-`loom:operator-decision` pair this used to apply is retired into
-`loom:operator`, 2am#4345.)
+`loom:epic` (parked, not withdrawn) and apply `loom:operator`: repeatedly
+failing structural criteria is a judgement call about shape, never a
+self-clearing dependency wait, so a `Blocked by #N` line is never right here.
 
 ```bash
 ESCALATE_MARKER="<!-- champion:epic-escalated -->"
-gh issue comment <number> --body "$ESCALATE_MARKER
+./.loom/scripts/post-comment.sh <number> --body "$ESCALATE_MARKER
 **Champion: Escalating to Operator — Epic Rejected Repeatedly Without Revision**
 
-This epic has been evaluated $UNREVISED_EVALS+ times with converging feedback ($PRIOR_REJECTIONS posted rejection(s) plus $SKIP_STREAK silent skip(s) of an unchanged epic), but has not been revised to address it. Re-running an identical evaluation each cycle changes nothing, and skipping it silently forever would leave it invisible; escalating is the only move that makes progress.
+Evaluated $UNREVISED_EVALS+ times with converging feedback ($PRIOR_REJECTIONS rejections plus $SKIP_STREAK silent skips of an unchanged epic), but has not been revised to address it. Re-running an identical evaluation each cycle changes nothing, and skipping it silently forever would leave it invisible; escalating is the only move that makes progress.
 
 **Recurring findings:**
 - [Criterion that failed, repeated across rejections]: [Specific reason]
@@ -832,7 +827,7 @@ feedback and keep the `loom:epic` label.
 # Both markers are load-bearing: $VERDICT_MARKER makes the next cycle skip
 # silently; the skip tally (seeded at 0) is what that silent skip increments, so
 # the epic still escalates on schedule while staying quiet.
-gh issue comment <number> --body "$VERDICT_MARKER
+./.loom/scripts/post-comment.sh <number> --body "$VERDICT_MARKER
 <!-- champion:epic-unrevised-skips:$BODY_HASH:0 -->
 **Champion Review: Epic Needs Revision**
 
@@ -964,7 +959,8 @@ title_prefix_phase_issues() {
 # into each phase-issue body (see Step 3): `<!-- loom:epic:<epic>:phase:<n> -->`.
 # This is an exact, drift-free token — unlike the old natural-language
 # "Epic: #N Phase: N" phrase, which never matched the "**Epic**: #N" /
-# "**Phase**: 1 of N" prose the body template actually emits.
+# "**Phase**: 1 of N" prose the body template actually emits. Includes
+# loom:frozen (dedup).
 CANDIDATE_PHASE_ISSUES=$(gh issue list \
   --label="loom:epic-phase" \
   --state=all \
@@ -1056,7 +1052,7 @@ else
       # changed), or no prior marker exists for this phase at all (first-ever
       # status comment). Post as before, with the marker embedded so the next
       # unchanged pass can detect the match.
-      gh issue comment "$EPIC_NUMBER" --body "**Champion: Phase progress update**
+      ./.loom/scripts/post-comment.sh "$EPIC_NUMBER" --body "**Champion: Phase progress update**
 
 $PROGRESS_LINE
 
