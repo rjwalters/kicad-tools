@@ -910,8 +910,8 @@ Keeping \`loom:pr\`. This PR stays in the queue and is re-checked each tick agai
   # per reason, the label only when missing), so safe every tick the hold
   # binds. Beside loom:pr with the marker it is Champion's own hold: the one
   # exception to the verdict-label invariant, served by `pr-queue --role
-  # champion`, so the release precheck still fires each tick. The stale-blocked
-  # release pass skips a reason-only record. Never applied in place of loom:pr.
+  # champion`, so the release precheck still fires each tick. Never applied in
+  # place of loom:pr.
   loom-daemon park-record apply --pr "$PR_NUMBER" --reason "champion merge-risk hold" \
     --by champion >/dev/null 2>&1 || true
 

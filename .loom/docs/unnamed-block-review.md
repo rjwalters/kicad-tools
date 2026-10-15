@@ -7,9 +7,10 @@ Procedure for Curator's "Draining `loom:blocked-unnamed`" section.
 `loom-daemon check-stale-blocked` classifies a `loom:blocked` issue that names
 no blocker and states no reason as **Undocumented**. Guide's unblock sweep skips
 it and Curator's discovery queries exclude `loom:blocked`, so it never re-enters
-any queue. The daemon tick (beside `release-stale-blocked`, #10556) therefore
-applies `loom:blocked-unnamed` to each such **issue** (never a PR), and Curator
-drains it.
+any queue. A daemon tick used to apply `loom:blocked-unnamed` to each such
+**issue** (never a PR) for Curator to drain. That tick was retired with the
+release pass (#11301): nothing applies the label any more, and Curator drains
+the issues that still carry it.
 
 The tick never labels an issue that carries: `loom:operator` or
 `loom:frozen`; `loom:curating` or

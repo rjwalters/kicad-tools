@@ -36,6 +36,7 @@
 - [Stacked-PR dependency — #3729 (v1), #3747 (v2 item 1)](#stacked-pr-dependency--3729-v1-3747-v2-item-1)
 - [Epic supervisor (#3842)](#epic-supervisor-3842)
 - [Curator intake reconcile (#10041)](#curator-intake-reconcile-10041)
+- [Retired loops: the `loom:blocked` release pass and `fleet.state` (#11301)](#retired-loops-the-loomblocked-release-pass-and-fleetstate-11301)
 - [Autonomous work finder (#3810)](#autonomous-work-finder-3810)
 - [Operability — config, start/stop, E2E (Phase D, #3813)](#operability--config-startstop-e2e-phase-d-3813)
 - [Reader withdrawal kill switch (`LOOM_READ_ROUTING`)](#reader-withdrawal-kill-switch-loom_read_routing)
@@ -229,6 +230,7 @@ issue** — the v0.10.0 set is intentionally frozen.
 | `sweep.issue.{N}.resume_dispatched` | Daemon reaper (#4256) | `{pr, checkpoint_phase?, dispatched, repo?}` |
 | `sweep.global.dispatch`   | Daemon                          | `{sweep_id, kind}` |
 | `sweep.global.completed`  | Daemon                          | `{sweep_id, outcome}` |
+| `step.item.{N}.ended`     | Step tick settle pass (#12152)  | `{item, role, class, reason, ran_for_sec, repo?}`: one per ended step, after the step ledger classified it (`item` is the PR for a PR step); the narration sink's completion trigger for a merged Champion merge step |
 | `epic.issue.{N}.decompose` | Epic supervisor (#3842)        | `{epic, action, state}` |
 | `epic.issue.{N}.expand`    | Epic supervisor (#3842)        | `{epic, action, state}` |
 | `epic.issue.{N}.join`      | Epic supervisor (#3842)        | `{epic, action, state}` |
@@ -4614,6 +4616,37 @@ On a multi-host fleet the pass can run once, on the fleet captain, instead of
 on every dispatcher: set `fleet.intakeReconcile.singleton`. See
 [Intake reconcile on the captain](#intake-reconcile-on-the-captain-w7).
 
+## Retired loops: the `loom:blocked` release pass and `fleet.state` (#11301)
+
+Two per-host loops were removed so that the daemon exports facts and
+consumers compute from them, the same split as provenance and ETAs. Together
+they were the largest GitHub read cost a host made on its own initiative.
+
+- **The `loom:blocked` release pass** (`stale_blocked_release`, #10556,
+  #10763) and the `loom:blocked-unnamed` queue pass beside it (#10558). No
+  daemon task removes `loom:blocked` any more. A blocked issue or PR stays
+  blocked until a role (Guide's unblock sweep, Champion's post-merge
+  dependent check or targeted step) or a human clears it. The
+  `release-stale-blocked` verb is gone. `LOOM_RELEASE_STALE_BLOCKED`,
+  `LOOM_RELEASE_STALE_BLOCKED_INTERVAL_SECS` and
+  `LOOM_RELEASE_STALE_BLOCKED_MAX_WRITES` are no longer read.
+  `host.health.managed_repos[].stale_blocked_release` is no longer sent.
+  `pass.summary` / `pass.verdict` stay registered but have no producer.
+  The read-only `check-stale-blocked` advisory and `merge-pr.sh`'s
+  `notify-cleared-blockers` comment are unchanged: both are on-demand verbs,
+  not loops.
+- **The `fleet.state` producer** (`observability/fleet_state`, #10196). The
+  collector pass and the post-tick pass no longer build, diff or send
+  `fleet.state`, and so no longer derive `eta.stage_outcome` or `pr.resolved`
+  from consecutive views. All three kinds stay registered so stored records
+  decode, but nothing sends them. `telemetry-replay` and its `--check` read only
+  records already in the store. A consumer that needs fleet state computes it
+  from the facts the daemon still exports (`sweep.*`, `stage.work_started`,
+  `pick.decision`, `queue.snapshot`, `host.health`) and from the forge's label
+  history.
+
+Neither loop had a config key, so no fleet configuration needs to change.
+
 ## Autonomous work finder (#3810)
 
 The **work finder** (Phase A of epic #3809,
@@ -7720,9 +7753,8 @@ work finder's first-tick grace (2 × interval), so a host still inside its
 window reads "warming up", not "no work-finder tick observed".
 
 Not covered: the startup claim-reconciliation pass (it gates the first
-admission and is per-repo `loom:building` only) and the stale-blocked release
-and fleet-state passes being retired by #11301 (fleet state is covered while it
-remains, through the collector's forge timer).
+admission and is per-repo `loom:building` only). The stale-blocked release and
+fleet-state passes were removed by #11301.
 
 ### Agent CI wait: `forge wait-checks` (#10330)
 

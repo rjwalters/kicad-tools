@@ -216,8 +216,8 @@ cycle) is added only when loom-ui's error tracking shows it is needed.
 | [`operator.presence`](#operatorpresence) | log, OTLP only (journal-buffered) | `loom-daemon presence beat` (opt-in operator hook) → `observability/otlp/mapping/operator_presence.rs` |
 | [`checkout.external_change`](#checkoutexternal_change) | log, OTLP only | `fleet_sync/checkout_ff/external_change.rs` |
 | Captain gauges: `loom.captain.gauge_age_seconds`, `loom.captain.gauge_fallback`, `loom.forge.stage_dwell`, `loom.forge.stage_items` ([`metric.points`](#metricpoints)) | metric | `observability/captain_gauges.rs`, `observability/ops/stage_dwell.rs` |
-| [`eta.stage_outcome`](#etastage_outcome) (kept, non-ETA owner since #11126) | log, OTLP only | `observability/fleet_state/outcomes.rs` (diff of two `fleet.state` views) |
-| [`pr.resolved`](#prresolved) (kept, non-ETA owner since #11126) | log, OTLP only | `observability/fleet_state/outcomes.rs` (a PR that left the review listings) |
+| [`eta.stage_outcome`](#etastage_outcome) (kept, non-ETA owner since #11126) | log, OTLP only | none since #11301 (was `observability/fleet_state/outcomes.rs`, a diff of two `fleet.state` views) |
+| [`pr.resolved`](#prresolved) (kept, non-ETA owner since #11126) | log, OTLP only | none since #11301 (was `observability/fleet_state/outcomes.rs`, a PR that left the review listings) |
 
 The captain gauges are emitted by non-ETA code. Since Stage 2 of #11098,
 `fleet.captainGauges.ref` has its own default (`eta-fit`, the branch the
@@ -531,6 +531,14 @@ paired `sweep.outcome`).
 ```
 
 `result` is one of `success`, `failure`, `cancelled`, `blocked`.
+
+Only an issue sweep emits `sweep.completed`. A step (one role session on one
+item, the item-first step dispatch of #12009) never does: its end is
+`role_tick.outcome` with `source = "step"` and, for Champion,
+`pass.verdict`. So since step dispatch, `sweep.completed` counts only the
+remaining issue sweeps and is not a measure of merged work. For "is merged
+work reaching the public feed", read `loom.feed.completions` (#12152), whose
+`kind = step` series is a merged Champion merge step.
 
 #### Per-model token usage (Issue #6384)
 
@@ -2103,6 +2111,8 @@ GitHub rate limit (Issue #10022):
 | `loom.forge.mirror.changes` | delta `Sum` | `{change}`; labels `repo`, `kind` | changes the state mirror's change stream delivered since the previous point; `kind` ∈ `issue`, `pr`, `label`, `check`, `pr_merged`, `other` |
 | `loom.forge.mirror.wake_latency` | delta `Sum` | `s`; label `repo` | summed seconds from a change at the mirror (its `at`) to the pull that saw it; divided by `loom.forge.mirror.changes` it is the mean wake latency |
 | `loom.stage_entry.lookups` | delta `Sum` | `{lookup}`; labels `repo`, `kind` | stage-entry times the step engine's provider (`step_dispatch::stage_entry`, #11897) looked up since the previous point, flushed on the same tick, by the source that answered in `kind`: `mirror` (the state mirror's per-item `labels_at`), `events` (the issue's `labeled` events, from the provider's persisted cache or one budgeted read), `created` (the item's creation time) or `none` (not even that). The `mirror` + `events` share is the stage-age coverage the step-dispatch design gates on (#11894). Nothing consumes the provider yet, so the series is empty until the item draw lands. Past 1024 series a new one is counted under `repo` = `overflow`. Accumulated only while an ops sink is registered |
+| `loom.feed.completions` | delta `Sum` | `{completion}`; labels `kind`, `outcome` | public-feed `completion` envelopes the safehouse narration sink built since the previous point (#12152), flushed on the same tick, by the trigger that found the merge in `kind`: `sweep_exit` (an issue sweep's `SweepExited`), `step` (a Champion merge step's `step.item.{N}.ended`) or `reconcile` (the periodic merge-reconciliation pass); `outcome` is `narrated`, or `seeded` for a fresh host's first pass, which records merges without posting them (#4649). The direct measure of merged work reaching the feed: a step emits no `sweep.completed`, so since step dispatch (#12009) that record no longer tracks it. Accumulated only while an ops sink is registered |
+| `loom.feed.reconcile_passes` | delta `Sum` | `{pass}`; label `outcome` | merge-reconciliation ticks of the narration sink that had a workspace to visit (#12152), by `outcome`: `ran` (the forge answered; the workspace's watermark advanced), `deferred` (the rate-limit breaker was cooling; the tick is not spent and the workspace catches up from its watermark later) or `failed` (the forge read failed; the watermark holds). Accumulated only while an ops sink is registered |
 
 `resource` ∈ `core`, `graphql` (`search` too on a bucket point). On an
 ambient-login host's points `account` is the validated `gh` login, else
@@ -2395,6 +2405,8 @@ token's prefix inside the probing process.
 
 ### `pr.resolved`
 
+> **No producer since #11301.** The daemon's `fleet.state` loop (`observability/fleet_state`), this kind's only producer, was removed: Loom exports facts, and a consumer computes fleet state from them (`sweep.*`, `stage.work_started`, `pick.decision`, `queue.snapshot`, `host.health`, and the forge's own label history). The kind stays registered so records already in a store still decode; nothing new is sent. The text below describes what daemons before the removal sent.
+
 A PR that left the review listings, with its forge merge or close instant
 (Issue #10519). Envelopes carry `schema_version: 12`. **OTLP-only**
 (native: `false`). It gives a SigNoz reader a merge/close instant wherever the
@@ -2440,6 +2452,8 @@ promise). Provenance is required, and exports as `loom.eta.version` /
 | `loom` | object | the observing daemon's provenance (required) |
 
 ### `eta.stage_outcome`
+
+> **No producer since #11301.** The daemon's `fleet.state` loop (`observability/fleet_state`), this kind's only producer, was removed: Loom exports facts, and a consumer computes fleet state from them (`sweep.*`, `stage.work_started`, `pick.decision`, `queue.snapshot`, `host.health`, and the forge's own label history). The kind stays registered so records already in a store still decode; nothing new is sent. The text below describes what daemons before the removal sent.
 
 One stage an item actually left (Issue #10929). Envelopes carry
 `schema_version: 12`. **OTLP-only** (native: `false`). The wire tag keeps its
@@ -2589,10 +2603,12 @@ Full field reference, the SigNoz rank-at-instant query and the rows/day volume:
 
 ### `pass.summary` and `pass.verdict`
 
+> **No producer since #11301.** The `loom:blocked` release pass, the only emitter, was removed. The kinds stay registered for records already in a store and for a future pass that reuses the shape.
+
 What a pass over forge artifacts did (Issue #10752): one `pass.summary` per
-pass per workspace, and one `pass.verdict` per artifact it decided. Today the
-`loom:blocked` release pass (#10556, `stale_blocked::release_gh`) emits them
-as mechanism `stale_blocked_release`. The shape also fits a role's per-item
+pass per workspace, and one `pass.verdict` per artifact it decided. Until
+#11301 the `loom:blocked` release pass (#10556) emitted them as mechanism
+`stale_blocked_release`; nothing emits them now. The shape also fits a role's per-item
 verdicts (Guide's unblock outcomes, Champion's promotion verdicts) with `role`
 set. Envelopes carry `schema_version: 12`. **OTLP-only** (native: `false`).
 The body is the record's JSON. The scalars ride as `loom.pass.*` attributes
@@ -2756,6 +2772,8 @@ ORDER BY t;
 ```
 
 ### `fleet.state`
+
+> **No producer since #11301.** The daemon's `fleet.state` loop (`observability/fleet_state`) was removed: Loom exports facts, and a consumer computes fleet state from them (`sweep.*`, `stage.work_started`, `pick.decision`, `queue.snapshot`, `host.health`, and the forge's own label history). The kind stays registered so records already in a store still decode; nothing new is sent. The text below describes what daemons before the removal sent.
 
 This host's own view of the work it holds, the PRs under review in its repos,
 and its ready queue (Issue #10196). It is the state record of the replay
@@ -3241,7 +3259,8 @@ sent `priority`, a tier where lower dispatched first, #9244); it is omitted for 
 workspace and on older daemons, never defaulted. Additive, no `schema_version`
 bump.
 
-**`managed_repos[].stale_blocked_release` (#10763).** This host's
+**`managed_repos[].stale_blocked_release` (#10763; not sent since #11301,
+when the release pass was removed; a reader ignores it).** This host's
 `loom:blocked` release-pass tallies for the repo since the daemon started:
 `released` and `reparked` (applied writes only), `last_outcome`, and `ticks`, a
 count per outcome key (`ran`, `not_due`, `skipped_shard`, `denied_scope`,

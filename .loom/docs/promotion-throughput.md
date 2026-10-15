@@ -237,7 +237,7 @@ A premise-false close (#7657) ends the issue instead. What this retired:
   anyway: Curator's revise always changes the hash. `PRIOR_REJECTIONS` alone
   bounds the round trip.
 - **The dependency defer**, which left the issue curated with a marker patched
-  onto a comment. It is a block now, lifted by `release-stale-blocked`.
+  onto a comment. It is a block now, lifted by a role or a human (#11301).
 - **`loom:needs-revision`.** `labels.json` retires it onto `loom:triage` with
   `also_remove: ["loom:curated"]`, so `loom-daemon labels migrate` moves an
   open item to the state a revise verdict writes today. A migrated item has no

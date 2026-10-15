@@ -52,8 +52,8 @@ Runs every pass, whether or not PRs remain ("Autonomous Operation" below,
 fresh claim from a concurrent Champion evaluation, #4954), and the holds
 `loom:operator`, `loom:blocked` and `loom:frozen` — each is already a terminal
 state (#5163). `loom:blocked` is no longer "outside Champion's promotion
-authority": it is Champion's own block verdict, re-evaluated once
-`release-stale-blocked` lifts it (#11860). Also exclude `loom:issue` and
+authority": it is Champion's own block verdict, re-evaluated once lifted
+(#11860, #11301). Also exclude `loom:issue` and
 `loom:building` (why: the note below the query, #5285). Every evaluation ends in
 a verdict (promote, revise to `loom:triage`, block, escalate), so nothing
 evaluated is re-discovered here. `title`/`body` feed `champion-issue-promo.md`'s
@@ -63,8 +63,8 @@ NOT used for it, #4966):
 > **`loom:operator` is excluded and never examined (#11861).** It is a no-op
 > for every role; only a human removes it. A dependency-only finding never
 > lands there: it is a `loom:blocked` park (`park-record apply
-> --blocked-by`, #11860), which the daemon's stale-blocked release pass lifts
-> when the blocker closes, so the issue matches this query again. (Pass 0's
+> --blocked-by`, #11860); once lifted (#11301), the issue matches this query
+> again. (Pass 0's
 > un-escalation of such holds is retired.) **Any hold you apply** follows
 > `.loom/docs/label-state-machine.md` → "Routing to a human" (#10001).
 

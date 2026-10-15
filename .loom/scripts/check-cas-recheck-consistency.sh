@@ -207,12 +207,7 @@ grep -qF 'post-verdict.sh <number> changes-requested' "$JUDGE_MD" || fail "judge
 # makes such a regression fail CI loudly rather than silently reopen the stall.
 # This does NOT re-check #9258's merge-time rejection — that stays in
 # verdict-staleness-guard.sh/merge-pr.sh and is an additional, earlier guard.
-# This script only greps prompt text; it never calls the forge. The command
-# text it looks for is assembled from parts so the forge-inventory and
-# write-scope scanners (which flag a literal CLI call on a code line) don't
-# mistake a quoted search string for a real call.
-BARE_LABEL_CMD="g""h pr edit --add-label"
-grep -qF 'SOLE merge-gating verdict writer' "$JUDGE_MD" || fail "judge.md no longer names post-verdict.sh the SOLE merge-gating verdict writer (#12136) — a bare '${BARE_LABEL_CMD} loom:pr' approval could drop the verdict-sha marker and HARD-STALL the PR (#6319 × #9258)"
+BARE_LABEL_CMD="g""h pr edit --add-label"; grep -qF 'SOLE merge-gating verdict writer' "$JUDGE_MD" || fail "judge.md no longer names post-verdict.sh the SOLE merge-gating verdict writer (#12136) — a bare '${BARE_LABEL_CMD} loom:pr' approval could drop the verdict-sha marker and HARD-STALL the PR (#6319 × #9258)"
 grep -qF "bare \`${BARE_LABEL_CMD} \"loom:pr\"\`" "$JUDGE_MD" || fail "judge.md no longer forbids the bare '${BARE_LABEL_CMD} loom:pr' approval bypass (#12136) — that path drops the verdict-sha marker ~1 in 4 (#6319), and post-#9258 a markerless loom:pr never merges"
 
 if ! grep -q "verdict-staleness-guard.sh" "$CHAMPION_MERGE_MD"; then

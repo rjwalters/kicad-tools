@@ -164,9 +164,9 @@ escalation whose blocker had closed. `loom:operator` is now a no-op for every
 role, Champion included: only a human removes it. A dependency-only finding
 never lands there any more: Step 4's dependency-timing gate parks it on
 `loom:blocked` with one park record per open blocker
-(`park-record apply --blocked-by`, #11860), and the daemon's
-stale-blocked release pass lifts that park when the blockers close, so the
-proposal matches the discovery query again. The escalations made before
+(`park-record apply --blocked-by`, #11860). The park stays until a role or a
+human lifts it once the blockers close (the daemon's release pass was retired,
+#11301); then the proposal matches the discovery query again. The escalations made before
 #11861 were moved by `loom-daemon labels migrate --holds`
 (`.loom/docs/label-state-machine.md` → "Migrating the holds a role applied").
 
@@ -612,7 +612,8 @@ fi
 
 `DEP_RC=3` (`REEVALUATE`: every recorded blocker has closed) or `4`
 (`PROMOTE_SUBSET`) falls through to the Idempotency check and a fresh
-evaluation. `release-stale-blocked` lifts the block once the blockers close.
+evaluation. Nothing lifts the block automatically once the blockers close
+(#11301): a role or a human clears it.
 
 ---
 
@@ -970,7 +971,7 @@ The gate is deliberately conservative in one direction: a finding counts as depe
 
 **A `[premise-false]`-tagged bullet is excluded from that "every finding must be dependency-attributable" test, not treated as a disqualifying merits finding (#7904).** That finding kind self-clears through its own separate mechanism — the premise-false close gate below re-verifies the cited mechanical check against current `main` — never by waiting on a blocker, so a premise-false bullet mixed with a genuine open-dependency bullet must still `DEFER` (`REASON: premise-false-only` is reported only when *every* finding was premise-false, leaving nothing to classify; it is a distinct reason from `merits-finding` precisely so the caller can route it to the close gate below instead of escalating). An ordinary merits finding mixed with a premise-false one still escalates exactly as before — the exclusion applies only to the premise-false tag itself.
 
-**A block is not bounded by a streak cap**, on purpose: it ends when the blocker closes and `release-stale-blocked` lifts `loom:blocked` (the changed body brings a fresh evaluation), an event this pass cannot manufacture. A "block N times then escalate" cap would re-create #5664. A blocker that never closes is `detect-dependency-cycle.sh`'s (a deadlock) or a human's.
+**A block is not bounded by a streak cap**, on purpose: it ends when the blocker closes and a role or a human lifts `loom:blocked` (the changed body brings a fresh evaluation; nothing lifts it automatically since #11301), an event this pass cannot manufacture. A "block N times then escalate" cap would re-create #5664. A blocker that never closes is `detect-dependency-cycle.sh`'s (a deadlock) or a human's.
 
 **Otherwise (`DEP_RC=1`), the dependency-timing gate does not save this proposal.** Before escalating, assemble `RECURRING_FINDINGS_TEXT` and run the premise-false close gate below — it can end this pass in a close instead of an escalation.
 
@@ -1131,7 +1132,7 @@ Continue evaluating issues until all have been processed or all applicable level
 ### When NOT to Promote
 
 Regardless of quality, do NOT promote an issue if any of the following holds. The holds are already terminal; the rest get a Step 4 verdict, never a skip (#11860):
-- Issue has `loom:blocked` label. A block is re-evaluated once its blocker closes: `release-stale-blocked` lifts it, or a targeted step finds every park-record blocker closed (`champion-targeted.md`). Departs from `champion.md` Priority 2's "outside Champion's promotion authority" (#11860)
+- Issue has `loom:blocked` label. A block is re-evaluated once its blocker closes and it is lifted: by a targeted step that finds every park-record blocker closed (`champion-targeted.md`), or by a human (nothing lifts it automatically since #11301). Departs from `champion.md` Priority 2's "outside Champion's promotion authority" (#11860)
 - Issue has `loom:operator` label (a human must act or decide — credentials, infra rotations, manual deploys, hardware access, a ruling; sweep will skip these in pre-flight, so promoting to `loom:issue` would only stall the queue). This is also the terminal state the N=2 escalation in Step 4 routes to, so an escalated proposal is automatically excluded from every future pass. No exception (#11861): only a human removes it; while it is present, nothing here acts on it.
 - Issue title contains "DISCUSSION" or "RFC" (requires human input: escalate)
 - Issue mentions breaking changes without migration plan (revise)

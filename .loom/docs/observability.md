@@ -828,7 +828,8 @@ same facts per call (#10343): `github.http.{status,not_modified,requests,source}
 the bucket join keys `github.{resource,account,cred_owner,role}`. Since
 #10752 a span also carries `github.repo`, a write carries `github.number`, and
 a call made by a daemon pass inside its caller scope carries `github.caller`
-(the `loom:blocked` release pass: `stale_blocked_release`). Since #11407
+(for example `stale_blocked_release`, the retired `loom:blocked` release
+pass, #11301). Since #11407
 every span also names the endpoint: `github.route` (a template such as
 `/repos/{owner}/{repo}/pulls/{n}`, from the same finite table as gh-shim's
 `github.api.route`), `http.request.method`, and `github.command` (`pr view`

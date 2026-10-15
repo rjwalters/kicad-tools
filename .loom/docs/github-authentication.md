@@ -879,8 +879,8 @@ stopped it, and why it was hard to diagnose:
   never registers one, so a secondary-limit refusal neither stops the rest of
   that invocation nor reaches the next one, and a loop of them keeps bursting.
   The classifier does match secondary-limit phrasing, which is why the
-  daemon's own every-workspace pass (`release-stale-blocked`) is gated on the
-  breaker and a shell loop is not.
+  daemon's own every-workspace passes are gated on the breaker and a shell
+  loop is not.
 
 If you do have to visit several repositories from a shell, pace the
 invocations, and stop the whole loop at the first rate-limit refusal instead
