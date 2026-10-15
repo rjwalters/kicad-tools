@@ -9805,7 +9805,82 @@ def _add_bench_parser(subparsers) -> None:
         "--limit",
         type=int,
         default=None,
-        help="--suite pcbworld: number of boards in the deterministic smoke subset (default: 3)",
+        help=(
+            "--suite pcbworld: number of boards in the deterministic subset (default: 3; with "
+            "--full-split, the size of this invocation's window, default: the rest of the split)"
+        ),
+    )
+    bench_external.add_argument(
+        "--full-split",
+        dest="full_split",
+        action="store_true",
+        help=(
+            "--suite pcbworld: the denominator is the WHOLE split (d3a = 99 boards); "
+            "--offset/--limit only bound which boards this invocation attempts. Writes "
+            "results.json + report.d3.md with an explicit record for every board x rollout"
+        ),
+    )
+    bench_external.add_argument(
+        "--offset",
+        type=int,
+        default=None,
+        help="--suite pcbworld: skip the first N boards of the split (bounded windows)",
+    )
+    bench_external.add_argument(
+        "--rollouts",
+        type=int,
+        default=None,
+        help=(
+            "--suite pcbworld: declared rollouts per board, seeds --seed .. --seed+N-1 "
+            "(default: 1). @5 keeps the rollout with the largest PCBWorld potential gain"
+        ),
+    )
+    bench_external.add_argument(
+        "--deterministic-baseline",
+        dest="deterministic_baseline",
+        action="store_true",
+        help=(
+            "--suite pcbworld: declare kct route a deterministic baseline (one rollout; "
+            "@5 reported equal to @1, PCBWorld's convention). Back it with "
+            "benchmarks/external/seed_variation.py evidence"
+        ),
+    )
+    bench_external.add_argument(
+        "--resume",
+        action="store_true",
+        help=(
+            "--suite pcbworld: keep earlier attempt records whose identity (board, rollout, "
+            "seed, input hash, tool commit, pins, KiCad version, router options) still "
+            "matches; anything else is discarded and re-attempted. Without it the ledger "
+            "is cleared"
+        ),
+    )
+    bench_external.add_argument(
+        "--max-attempts",
+        dest="max_attempts",
+        type=int,
+        default=None,
+        help="--suite pcbworld: stop after N new routing attempts (resume later with --resume)",
+    )
+    bench_external.add_argument(
+        "--route-timeout",
+        dest="route_timeout",
+        type=int,
+        default=None,
+        help=(
+            "--suite pcbworld: forwarded as `kct route --timeout` (hard per-attempt budget, "
+            "seconds); a timed-out attempt is always a failure"
+        ),
+    )
+    bench_external.add_argument(
+        "--render-d3",
+        dest="render_d3",
+        metavar="RESULTS_JSON",
+        default=None,
+        help=(
+            "Re-render report.d3.md next to a committed PCBWorld results.json (no routing, "
+            "no network) and exit"
+        ),
     )
     bench_external.add_argument(
         "--tuned",

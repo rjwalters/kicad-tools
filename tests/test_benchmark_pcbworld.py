@@ -23,7 +23,14 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 EXTERNAL_DIR = REPO_ROOT / "benchmarks" / "external"
 
 GUIDE = "processed_v9_guide_v3.kicad_pcb"
+GUIDE_UNROUTED = "processed_v9_guide_v3_unrouted.kicad_pcb"
 UNROUTED_PCB = '(kicad_pcb (version 20240108)\n  (net 0 "")\n  (gr_line (start 0 0) (end 1 1)))\n'
+# make_guide's routed guide board: the human copper with per-net guide widths.
+ROUTED_GUIDE_PCB = (
+    '(kicad_pcb (version 20240108)\n  (net 0 "")\n  (gr_line (start 0 0) (end 1 1))\n'
+    "  (segment (start 0 0) (end 10 0) (width 0.25) (layer F.Cu) (net 1))\n"
+    "  (via (at 10 0) (size 0.6) (drill 0.3) (layers F.Cu B.Cu) (net 1)))\n"
+)
 NAMES = ["0003_kitspace_grove_adaptor", "0004_S1G-Mod_JST_Adapter", "0008_CapPCB_CapPcb"]
 
 
@@ -73,6 +80,8 @@ def _pcbworld_tar(corpus, names=NAMES) -> bytes:
                     },
                 }
             ),  # fmt: skip
+            # PCBWorld's fair-95 list analogue: every board but the second.
+            corpus.subsets["fair95"][1]: "# fair subset\n" + "\n".join(names[::2]) + "\n",
             "configs/datasets/d3.json": json.dumps(
                 {
                     "_test_overrides": {"medium": {"0373_old": "0376_new"}},
@@ -129,8 +138,20 @@ def _fake_cli(tmp_path: Path) -> str:
     return str(p)
 
 
-def make_runner(*, kicad_version="9.0.3", copper_in_guide=False, eval_rows=None, calls=None):
-    """Fake subprocess.run covering kicad-cli, the 4 prep steps and eval.pipeline."""
+def make_runner(
+    *,
+    kicad_version="9.0.3",
+    copper_in_guide=False,
+    eval_rows=None,
+    calls=None,
+    skip_guide_for=(),
+):
+    """Fake subprocess.run covering kicad-cli, the 4 prep steps and eval.pipeline.
+
+    Like the real ``make_guide`` it writes the *routed* guide board plus its
+    ``_unrouted`` variant (``copper_in_guide`` leaves copper in the latter);
+    ``skip_guide_for`` names PCBench folders whose guide is not produced.
+    """
     calls = calls if calls is not None else []
 
     def runner(argv, **kw):
@@ -144,10 +165,13 @@ def make_runner(*, kicad_version="9.0.3", copper_in_guide=False, eval_rows=None,
             for d in Path(env["PCBENCH_PCBS_ROOT"]).iterdir():
                 out = base / d.name
                 out.mkdir(parents=True, exist_ok=True)
+                if d.name in skip_guide_for:
+                    continue
                 text = UNROUTED_PCB + (
                     "(segment (start 0 0) (end 1 1))\n" if copper_in_guide else ""
                 )
-                (out / GUIDE).write_text(text)
+                (out / GUIDE).write_text(ROUTED_GUIDE_PCB)
+                (out / GUIDE_UNROUTED).write_text(text)
                 (out / GUIDE).with_suffix(".kicad_pro").write_text("{}")
         if argv[1].endswith("sort_prefix.py"):
             src, dst = Path(env["PCBENCH_NEWDRC_OUT"]), Path(env["PCBENCH_SORTED_OUT"])
@@ -312,7 +336,10 @@ class TestPrepare:
         calls: list = []
         prepared = self._prep(pcbworld, corpus, tools, tmp_path, make_runner(calls=calls))
         assert [b.board_id for b in prepared] == [f"pcbworld/d3a/{n}" for n in NAMES[:2]]
-        assert all(b.guide_pcb.name == corpus.guide_board_filename for b in prepared)
+        # kct routes the bare variant; the routed guide is only the human reference.
+        assert all(b.guide_pcb.name == corpus.unrouted_board_filename for b in prepared)
+        assert all(b.reference_pcb.name == corpus.guide_board_filename for b in prepared)
+        assert all(b.guide_pro.name == "processed_v9_guide_v3.kicad_pro" for b in prepared)
         assert all(len(b.input_sha256) == 64 for b in prepared)
         steps = [Path(c[0][1]).stem for c in calls if c[0][-1] != "--version"]
         assert steps == ["convert_v9", "drc_fix_v9", "make_guide", "sort_prefix"]
@@ -339,6 +366,36 @@ class TestPrepare:
     def test_guide_with_copper_is_rejected(self, pcbworld, corpus, tools, tmp_path):
         with pytest.raises(pcbworld.PCBWorldError, match="track/via"):
             self._prep(pcbworld, corpus, tools, tmp_path, make_runner(copper_in_guide=True))
+
+    def test_routed_guide_is_not_the_routing_input(self, pcbworld, corpus, tools, tmp_path):
+        """Issue #6332: PCBWorld's board_filename is the ROUTED guide (reset() strips it)."""
+        prepared = self._prep(pcbworld, corpus, tools, tmp_path, make_runner())
+        for b in prepared:
+            assert pcbworld.count_copper_items(b.reference_pcb) > 0
+            assert pcbworld.count_copper_items(b.guide_pcb) == 0
+
+    def test_per_board_failure_is_recorded_not_raised(self, pcbworld, corpus, tools, tmp_path):
+        failures: dict[str, str] = {}
+        opener = FakeOpener(corpus)
+        pw = pcbworld.fetch_pcbworld(corpus, tmp_path, opener=opener)
+        pb = pcbworld.fetch_pcbench(corpus, tmp_path, names=NAMES[:2], opener=opener)
+        prepared = pcbworld.prepare_boards(
+            corpus, tools, split="d3a", names=NAMES[:2], pcbworld_dir=pw, pcbench_dir=pb,
+            work_dir=tmp_path / "work", runner=make_runner(skip_guide_for=(NAMES[1][5:],)),
+            failures=failures,
+        )  # fmt: skip
+        assert [b.name for b in prepared] == [NAMES[0]]
+        assert list(failures) == [f"pcbworld/d3a/{NAMES[1]}"]
+        assert "produced no" in failures[f"pcbworld/d3a/{NAMES[1]}"]
+
+    def test_full_split_and_fair95_subset(self, pcbworld, corpus, tmp_path):
+        pw = pcbworld.fetch_pcbworld(corpus, tmp_path, opener=FakeOpener(corpus))
+        assert pcbworld.select_boards(corpus, "d3a", pw, None) == NAMES
+        assert corpus.subsets["fair95"][0] == "d3a"
+        assert pcbworld.load_subset(corpus, "fair95", pw) == ("d3a", [NAMES[0], NAMES[2]])
+        (pw / corpus.subsets["fair95"][1]).unlink()
+        with pytest.raises(pcbworld.PCBWorldError, match="cannot read"):
+            pcbworld.load_subset(corpus, "fair95", pw)
 
     def test_failed_step_is_actionable(self, pcbworld, corpus, tools, tmp_path):
         inner = make_runner()
