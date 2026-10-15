@@ -85,6 +85,8 @@ The counts below come from each fastroute row's `lost_constraints` in `results.j
 
 What would make these rows comparable, by category:
 
+- **Current-main note (audit re-run at `a34d5a63`, 2026-10-15, issue #6800).** The audit now reports a class-scoped clearance whose named classes have no member nets under the frozen project under `not_routing`, not as a loss. Re-running prepare + `dsn_audit` on boards 00–07 (manifest unchanged) gives 0 losses on 00, 01, 02, 04, 05, 07; 6 on 03 (diff-pair `uncoupled`/`skew`/`via_count`) and 4 on 06 (LVDS `skew`). The per-board counts in the table above predate this change.
+
 - **Net-class clearances (all 22).** Each is a `NetClass == 'X'` clearance whose only other clauses are kct's same-footprint-pad and coupled-diff-pair exemptions. Specctra has no form for those exemptions. PR #6770 (closes #6765, head `6790e8c`, open) reclassifies exactly these rules as not-representable. Running its classifier on every lost rule here flags all 22 of them and none of the others. After #6770, 00, 01, 02 and 04 have no losses, and 03/05/06/07/09 keep 12/2/9/1/1.
 - **Board copper-to-edge clearance (05, 06, 07, 09).** DSN-expressible, for example by insetting the exported boundary. The exporter does not do this today. Tracked in #6784.
 - **`diff_pair_gap` (2 on 03, 4 on 06).** Its 0.15 mm minimum equals the pair nets' exported class clearance (`HighSpeed` on 03, `LVDS` on 06), so the DSN already implies it. The audit counts it lost only because it compares nothing but clearance, width, via and hole against the DSN. Tracked in #6784.
