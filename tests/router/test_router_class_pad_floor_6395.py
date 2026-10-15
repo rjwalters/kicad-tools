@@ -529,7 +529,7 @@ def test_single_ended_route_avoids_a_slot_the_repair_cannot_clear() -> None:
     assert stats.lattice_builds == 2  # one targeted growth round, no more
 
 
-def test_uncoupled_fallback_pair_leg_avoids_the_slot() -> None:
+def _slot_pair():
     from kicad_tools.router.lattice.coupled import CoupledConnection
 
     def pad(x: float, y: float, net: int, name: str, ref: str) -> Pad:
@@ -550,9 +550,32 @@ def test_uncoupled_fallback_pair_leg_avoids_the_slot() -> None:
         net_class=None,
         pitch=1.0,
     )
+    return pf, pc
+
+
+def test_uncoupled_fallback_pair_leg_avoids_the_slot(monkeypatch) -> None:
+    # Pre-#6703 (partner-blind) legs reach the slot; the grown keep-out round
+    # moves them out of it.
+    def blind(self, pc, **kw):
+        return self._partner_blind_legs(pc, **kw), True
+
+    monkeypatch.setattr(LatticePathfinder, "_partner_aware_legs", blind)
+    pf, pc = _slot_pair()
     routes, stats = pf.route_netset([], coupled=[pc], uncoupled_fallback=True)
     assert pf.pair_outcomes[pc.key].startswith("uncoupled-fallback:")
     assert stats.lattice_builds == 2
+    legs = [k for k in routes if isinstance(k, tuple) and k[1:] in (("P",), ("N",))]
+    assert len(legs) == 2
+    assert _left(pf, routes) == 0
+
+
+def test_partner_aware_fallback_legs_avoid_the_slot_without_a_rebuild() -> None:
+    # Issue #6703: partner-aware legs are searched at the strictest pad class,
+    # so they clear the slot on the first negotiation.
+    pf, pc = _slot_pair()
+    routes, stats = pf.route_netset([], coupled=[pc], uncoupled_fallback=True)
+    assert pf.pair_outcomes[pc.key].startswith("uncoupled-fallback:")
+    assert stats.lattice_builds == 1
     legs = [k for k in routes if isinstance(k, tuple) and k[1:] in (("P",), ("N",))]
     assert len(legs) == 2
     assert _left(pf, routes) == 0
