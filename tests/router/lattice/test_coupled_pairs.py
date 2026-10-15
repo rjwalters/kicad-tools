@@ -1715,3 +1715,34 @@ def test_core_ties_a_pair_all_or_nothing(capsys, monkeypatch) -> None:
     assert "Diff-pair ties D+/D-: not used (J1.B7->J1.A7 has no clearing tie)" in (
         capsys.readouterr().out
     )
+
+
+def test_core_declines_ties_through_a_fixed_fill(capsys) -> None:
+    # Preserved zone fills / degraded custom-pad copper are in neither
+    # ``pf.pads`` nor ``existing_routes``: a fill across the connector must
+    # veto every dogleg, and the all-or-nothing rule then drops both ties.
+    from shapely.geometry import box
+
+    from kicad_tools.router.fixed_copper import FixedFill, FixedFillObstacles
+
+    router = _usbc_autorouter()
+    copper = box(_USBC_B_X - 0.2, _USBC_LO - 0.5, _USBC_A_X + 0.2, _USBC_HI + 0.5)
+    router.grid.install_fixed_fills(
+        FixedFillObstacles(tuple(FixedFill("GND", 99, layer, 0.2, copper) for layer in (0, 1)))
+    )
+    router._lattice_netset_connections()
+    assert router._lattice_pair_ties == []
+    assert "Diff-pair ties D+/D-: not used" in capsys.readouterr().out
+
+
+def test_core_declines_ties_through_a_preserved_other_net_via(capsys) -> None:
+    from kicad_tools.router.primitives import Route, Via
+
+    router = _usbc_autorouter()
+    mid = ((_USBC_A_X + _USBC_B_X) / 2.0, (_USBC_LO + _USBC_HI) / 2.0)
+    via = Via(x=mid[0], y=mid[1], drill=0.6, diameter=1.2, layers=(Layer.F_CU, Layer.B_CU), net=99)
+    router.existing_routes.append(Route(net=99, net_name="GND", segments=[], vias=[via]))
+    router._ensure_lattice_pathfinder()
+    router._lattice_netset_connections()
+    assert router._lattice_pair_ties == []
+    assert "Diff-pair ties D+/D-: not used" in capsys.readouterr().out

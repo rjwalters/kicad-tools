@@ -5156,8 +5156,10 @@ class Autorouter:
         Ties are committed per pair, all or nothing: when any eligible extra
         of either net has no clearing tie (a single-layer SMD receptacle has
         room for only one of the two crossing ties -- board 06rf USB2_D), the
-        pair keeps today's connections for every extra, so P and N are never
-        attached by different mechanisms.  No ties at all when the
+        pair keeps today's connections for every extra, so P and N are not
+        attached by different mechanisms (unless only one net of the pair has
+        an eligible extra, which is then tied alone).  A tie must also clear
+        fixed fills and other-net preserved vias.  No ties at all when the
         pathfinder is unavailable or an HV pairwise table is installed (not
         modelled by the planner).
         """
@@ -5177,6 +5179,7 @@ class Autorouter:
         except Exception:
             return set()
         keepouts = getattr(pf, "_keepouts", None)
+        fixed_fills = getattr(pf, "fixed_fills", None)
         layer_cache: dict[int, tuple[int, ...]] = {}
 
         def pad_layers(pad: Pad) -> tuple[int, ...]:
@@ -5206,6 +5209,16 @@ class Autorouter:
                     continue
                 half = (seg.width or self.rules.trace_width) / 2.0
                 fixed_runs.append((idx, (seg.x1, seg.y1), (seg.x2, seg.y2), half, seg.net))
+            # Preserved vias are zero-length runs at the via radius on every
+            # layer the barrel spans (a point obstacle for the planner).
+            for via in getattr(route, "vias", None) or ():
+                try:
+                    lo, hi = sorted(layer_stack.layer_enum_to_index(lyr) for lyr in via.layers)
+                except Exception:
+                    continue
+                pt = (via.x, via.y)
+                for idx in range(lo, hi + 1):
+                    fixed_runs.append((idx, pt, pt, via.diameter / 2.0, via.net))
 
         # Eligible extras per pair net, keyed and anchored exactly as the
         # connection loop keys and anchors them.
@@ -5234,11 +5247,17 @@ class Autorouter:
         def plan(net: int, item: Any, accepted: list[PlannedTie]) -> PlannedTie | None:
             _seq, anchor, extra, net_class, layers = item
             width = getattr(net_class, "trace_width", None) or self.rules.trace_width
-            blocked = None
-            if keepouts is not None:
+            clearance = clearance_for(net)
 
-                def blocked(a: Any, b: Any, layer: int, half: float) -> bool:
-                    return bool(keepouts.segment_blocked(a, b, layer, net, half))
+            def blocked(a: Any, b: Any, layer: int, half: float) -> bool:
+                # Fixed fills (preserved zone fills, degraded custom-pad
+                # copper) are in neither ``pf.pads`` nor ``existing_routes``;
+                # veto them for every leg, with or without rule areas.
+                if fixed_fills and not fixed_fills.segment_clear(a, b, layer, half, clearance):
+                    return True
+                return keepouts is not None and bool(
+                    keepouts.segment_blocked(a, b, layer, net, half)
+                )
 
             try:
                 return plan_equivalent_pin_tie(
@@ -5247,7 +5266,7 @@ class Autorouter:
                     all_pads,
                     layers,
                     width=width,
-                    clearance=clearance_for(net),
+                    clearance=clearance,
                     min_width=self.rules.min_trace_width_floor,
                     accepted=accepted,
                     on_layer=lambda pad, layer: layer in pad_layers(pad),
