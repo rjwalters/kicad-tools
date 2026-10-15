@@ -528,6 +528,12 @@ def test_flag_variants_extend_registered_leaves():
         assert argv[: len(leaf.split())] == leaf.split(), variant
 
 
+# CI runs pytest with ``--timeout=60``, which would preempt the 2 * 50 s inner
+# guard below (a genuine hang then surfaces as a pytest-timeout traceback, not
+# the "did not finish" message, and ``route --lint-gate`` -- 21.4 s idle -- fails
+# under ~3x CI slowdown). The per-test marker overrides the CLI value and leaves
+# headroom so the inner guard, which kills the process group, stays authoritative.
+@pytest.mark.timeout(2 * _SUBPROCESS_TIMEOUT_S + 30)
 @pytest.mark.parametrize("variant", sorted(FLAG_VARIANT_ARGV))
 def test_format_json_flag_variant_stdout_is_a_single_json_document(variant, tmp_path):
     scratch = tmp_path / "proj"

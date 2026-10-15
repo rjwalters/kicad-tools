@@ -873,6 +873,317 @@ runs) are also worth comparing with ours once its qualification work \
 publishes results.\
 """
 
+[projects.kicad-ai-assistant]
+name = "KiCad AI Assistant"
+slug = "paul356/KiCad-AI-Assistant"
+repo_url = "https://github.com/paul356/KiCad-AI-Assistant"
+vcs = "github"
+category = "agent-interface"
+relation = "peer"
+verdict = "watch"
+license = "MIT"
+license_compat = "mit-clean"
+language = "Python"
+stars = 112
+last_push = "2026-10-15"
+last_verified = "2026-10-15"
+research_docs = ["docs/research/reporecon-kicad-ai-sweep.md"]
+summary = """
+a KiCad 10 action plugin that embeds an LLM chat panel inside the editor and \
+exposes a built-in MCP server (also runnable standalone) with schematic and \
+PCB editing, placement, zones and DRC/ERC tools. Live-editor surface, so it \
+sits on the GUI side of our non-goals; read from README only, not run.\
+"""
+reeval_trigger = """
+Diff its PCB-placement and schematic-analysis tool catalog against \
+`kct mcp serve`; being MIT, anything worth having can move with attribution.\
+"""
+
+[projects.kicad-harness]
+name = "kicad-harness"
+slug = "zxkmm/kicad-harness"
+repo_url = "https://github.com/zxkmm/kicad-harness"
+vcs = "github"
+category = "agent-interface"
+relation = "peer"
+verdict = "watch"
+license = "AGPL-3.0"
+license_compat = "copyleft-ideas-only"
+language = "Python"
+stars = 33
+last_push = "2026-10-11"
+last_verified = "2026-10-15"
+research_docs = ["docs/research/reporecon-kicad-ai-sweep.md"]
+summary = """
+an Agent Skill plus a Python tool (`kh`) that gives an agent library \
+lookup, region renders to PNG, DRC/ERC, IPC editing of an open board and \
+datasheet-to-footprint generation; its distinctive idea is a repo the agent \
+is expected to edit and push while using it. AGPL: ideas only, read from \
+README only.\
+"""
+reeval_trigger = """
+Compare its render-and-look loop and footprint-from-datasheet flow with \
+our `/kct:*` skills and `kct` footprint generation; ideas only.\
+"""
+
+[projects.blwfish-kicad-mcp]
+name = "blwfish/kicad-mcp"
+slug = "blwfish/kicad-mcp"
+repo_url = "https://github.com/blwfish/kicad-mcp"
+vcs = "github"
+category = "agent-interface"
+relation = "peer"
+verdict = "watch"
+license = "MIT"
+license_compat = "mit-clean"
+language = "Python"
+stars = 25
+last_push = "2026-10-12"
+last_verified = "2026-10-15"
+research_docs = ["docs/research/reporecon-kicad-ai-sweep.md"]
+summary = """
+an MCP server (18 domain-router tools, 2,000+ tests) that takes an agent \
+from schematic to placed, Freerouting-routed, zoned and panelized board; \
+its own README recommends Freerouting v2.2.3 for routing. Same end-to-end \
+promise as `kct`, routed through an external router. Read from README only.\
+"""
+reeval_trigger = """
+Re-read if a changelog claims routing completeness or DRC-clean output; \
+the 12-router tool-grouping idea is worth comparing with our MCP tool \
+economy work.\
+"""
+
+[projects.mcp-server-kicad]
+name = "mcp-server-kicad"
+slug = "ProductOfAmerica/mcp-server-kicad"
+repo_url = "https://github.com/ProductOfAmerica/mcp-server-kicad"
+vcs = "github"
+category = "agent-interface"
+relation = "peer"
+verdict = "watch"
+license = "GPL-3.0"
+license_compat = "copyleft-ideas-only"
+language = "Python"
+stars = 13
+last_push = "2026-10-15"
+last_verified = "2026-10-15"
+research_docs = ["docs/research/reporecon-kicad-ai-sweep.md"]
+summary = """
+a 109-tool MCP server that edits KiCad files on disk (schematic capture, \
+PCB layout, libraries, ERC/DRC, exports) with Freerouting for routing and \
+an `auto_place_decoupling_cap` helper. File-based like us. GPL: ideas \
+only, read from README only.\
+"""
+reeval_trigger = """
+Compare its decoupling-cap auto-placement with ours if we ship one; ideas \
+only.\
+"""
+
+[projects.kicad-copilot]
+name = "KiCad Copilot"
+slug = "biosshot/kicad-copilot"
+repo_url = "https://github.com/biosshot/kicad-copilot"
+vcs = "github"
+category = "agent-interface"
+relation = "peer"
+verdict = "watch"
+license = "MIT"
+license_compat = "mit-clean"
+language = "JavaScript"
+stars = 16
+last_push = "2026-08-23"
+last_verified = "2026-10-15"
+research_docs = ["docs/research/reporecon-kicad-ai-sweep.md"]
+summary = """
+a file-oriented MCP server (no IPC, no plugin) for schematic generation, a \
+JavaScript placement DSL with PNG/SVG preview, local routing through \
+`eda-copilot-router` with a managed KiCadRoutingTools backend, simple \
+pours, and integrated kicad-happy analysis. Its router is KRT, which we \
+have already benchmarked, so there is no separate router to measure. \
+Read from README only.\
+"""
+reeval_trigger = """
+Its placement DSL is the one idea worth a second look against \
+`kct place`; a router benchmark is only warranted if it stops wrapping KRT.\
+"""
+
+[projects.kipilot-mcp]
+name = "KiPilot MCP"
+slug = "belaszalontai/kipilot-mcp"
+repo_url = "https://github.com/belaszalontai/kipilot-mcp"
+vcs = "github"
+category = "agent-interface"
+relation = "peer"
+verdict = "watch"
+license = "Apache-2.0"
+license_compat = "permissive-ideas-only"
+language = "Python"
+stars = 11
+last_push = "2026-09-17"
+last_verified = "2026-10-15"
+research_docs = ["docs/research/reporecon-kicad-ai-sweep.md"]
+summary = """
+a 135-tool MCP server over KiCad 10's official `kicad-python` IPC API, \
+including export jobs, design-rule access and netlist import. Live-GUI \
+session by design, the opposite of our offline stance. Apache-2.0: ideas \
+only. Read from README only.\
+"""
+reeval_trigger = """
+Re-read only if we add an IPC-backed mode.\
+"""
+
+[projects.traces]
+name = "traces"
+slug = "usetraces/traces"
+repo_url = "https://github.com/usetraces/traces"
+vcs = "github"
+category = "agent-interface"
+relation = "downstream"
+verdict = "watch"
+license = "MIT"
+license_compat = "mit-clean"
+language = "Python + TypeScript"
+stars = 6
+last_push = "2026-09-08"
+last_verified = "2026-10-15"
+research_docs = ["docs/research/reporecon-kicad-ai-sweep.md"]
+summary = """
+local, bring-your-own-key tooling for KiCad: a semantic component-sourcing \
+MCP server, a KiCad plugin and a `/src` semantic rule-check skill. Sourcing \
+and schematic review, not layout, so it complements `kct` rather than \
+competing. Read from README only.\
+"""
+reeval_trigger = """
+Look at the `/src` semantic rule-check idea if we extend schematic review.\
+"""
+
+[projects.agentic-kicad-skills]
+name = "Agentic KiCad Skills"
+slug = "IxTechCrypto/kicad-skills"
+repo_url = "https://github.com/IxTechCrypto/kicad-skills"
+vcs = "github"
+category = "agent-interface"
+relation = "reference"
+verdict = "watch"
+license = "MIT"
+license_compat = "mit-clean"
+language = "Python"
+stars = 6
+last_push = "2026-10-08"
+last_verified = "2026-10-15"
+research_docs = ["docs/research/reporecon-kicad-ai-sweep.md"]
+summary = """
+modular agent skills (board-regime classifier, high-current, high-speed, \
+RF, datasheet-to-footprint) with verification scripts for KiCad 10. Same \
+shape as our `/kct:*` skills; content is design-rule guidance. Read from \
+README only.\
+"""
+reeval_trigger = """
+Cross-read its regime classifier against `/kct:ee-review` when that skill \
+is next revised.\
+"""
+
+[projects.kicad-llm-plugin]
+name = "kicad-llm-plugin"
+slug = "jasiek/kicad-llm-plugin"
+repo_url = "https://github.com/jasiek/kicad-llm-plugin"
+vcs = "github"
+category = "agent-interface"
+relation = "downstream"
+verdict = "watch"
+license = "MIT"
+license_compat = "mit-clean"
+language = "Python"
+stars = 22
+last_push = "2026-02-06"
+last_verified = "2026-10-15"
+research_docs = ["docs/research/reporecon-kicad-ai-sweep.md"]
+summary = """
+a KiCad plugin that sends the schematic to a chosen local or remote LLM \
+and renders a design-review report (fatal flaws, good practice, \
+nice-to-haves). Review only; no editing. Read from README only.\
+"""
+reeval_trigger = """
+None; revisit only if it grows beyond schematic review.\
+"""
+
+[projects.iron-emperor]
+name = "IronEmperor"
+slug = "thehengyao/iron-emperor"
+repo_url = "https://github.com/thehengyao/iron-emperor"
+vcs = "github"
+category = "agent-interface"
+relation = "reference"
+verdict = "watch"
+license = "MIT"
+license_compat = "mit-clean"
+language = "Python"
+stars = 11
+last_push = "2026-06-09"
+last_verified = "2026-10-15"
+research_docs = ["docs/research/reporecon-kicad-ai-sweep.md"]
+summary = """
+an LCSC/JLCPCB-centred generator that turns a plain-language brief into a \
+BOM, KiCad project and 3D-printed enclosure through a multi-agent \
+pipeline. Generator, not a layout tool; its value is parts sourcing. Read \
+from README only.\
+"""
+reeval_trigger = """
+None unless it publishes routed-board results.\
+"""
+
+[projects.kicad-agentic-mcp]
+name = "kicad-agentic-mcp"
+slug = "nevenfo/kicad-agentic-mcp"
+repo_url = "https://github.com/nevenfo/kicad-agentic-mcp"
+vcs = "github"
+category = "agent-interface"
+relation = "peer"
+verdict = "watch"
+license = "AGPL-3.0"
+license_compat = "copyleft-ideas-only"
+language = "Rust"
+stars = 5
+last_push = "2026-10-12"
+last_verified = "2026-10-15"
+research_docs = ["docs/research/reporecon-kicad-ai-sweep.md"]
+summary = """
+a Rust MCP server and agentic control layer for KiCad 10 that mixes LLM \
+planning with deterministic tools. Days old, AGPL: ideas only. Listed from \
+its description and licence file; README not studied.\
+"""
+reeval_trigger = """
+Re-read once it has a release.\
+"""
+
+[projects.ai-circuit-design-tests]
+name = "ai-circuit-design-tests"
+slug = "devbisme/ai-circuit-design-tests"
+repo_url = "https://github.com/devbisme/ai-circuit-design-tests"
+vcs = "github"
+category = "benchmark"
+relation = "reference"
+verdict = "watch"
+license = "NONE"
+license_compat = "unlicensed"
+language = "Python"
+stars = 6
+last_push = "2026-10-13"
+last_verified = "2026-10-15"
+research_docs = ["docs/research/reporecon-kicad-ai-sweep.md"]
+summary = """
+a third-party test bench that runs AI KiCad tools (copperhead, kicad-happy, \
+kicad-harness, KiCad AI Assistant, kicad-mcp-pro, kicad-mcp-server, \
+Konnect, skidl-skills) on real design prompts and records transcripts, \
+cost and an executive summary per run. kicad-tools is not among the tools \
+tested; the README invites outside evaluations as issues. No LICENSE: \
+all rights reserved, ideas only.\
+"""
+reeval_trigger = """
+If it adds a kicad-tools run, read the transcript for agent-facing \
+failures; otherwise offer a run (see the research note).\
+"""
+
 # ------------------------------------------------------ fabrication and CI
 
 [projects.kibot]

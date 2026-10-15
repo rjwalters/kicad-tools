@@ -1709,6 +1709,22 @@ visibility, which #9294 closed:
   fleet-wide outage as ordinary output. A DEGRADED channel now prints a
   `DEGRADED (…)` line with its reason directly under the counters.
 
+### Fleet-wide no-op hold streak (#12024)
+
+The no-op hold (#10156) parks an issue after `holdThreshold` consecutive no-op
+sweeps with an unchanged fingerprint. Its streak used to be per host, so a loop
+spread across six dispatchers never tripped it (ten no-ops in 97 minutes, no
+host above two). Each counted no-op now publishes a `ClaimKind::NoopStreak` ad
+(`noop_streak` on the wire) carrying the sender's **own** count in
+`consecutive` and the fingerprint's digest in a new `fingerprint` field. The
+receiver keeps one entry per host and the counting host adds the peers' counts
+**on the same fingerprint** to its own, so a change to the issue restarts the
+fleet streak without an announcement. Parking or releasing the hold publishes
+a break (`streak_break: true`) that drops every host's entry and resets each
+host's local count. It is a new kind, so an older peer drops it as unknown and
+nothing else on the wire changes. See `peer_claims::noop_streak_tally` and
+[`label-state-machine.md` → No-op hold](label-state-machine.md#no-op-hold-10156).
+
 ### Fleet-wide token-pool exhaustion hold: the third brake lane (#8001)
 
 #7477 above brakes **one issue**. `work_finder::pool_preflight`'s hold (#7708)

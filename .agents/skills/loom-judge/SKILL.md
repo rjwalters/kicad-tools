@@ -216,20 +216,15 @@ own discipline:
 Pick the right path before any `gh pr checkout` mutation:
 
 - **An existing builder worktree** (`.loom/worktrees/issue-N`, left behind by an active `/loom:sweep` that already ran Builder) — reuse it directly, no checkout needed (see "Worktree-Aware Code Access" below).
-- **Loom-issue PRs with no existing builder worktree** — branch matches the strict pattern `^feature/issue-([0-9]+)$`:
-  ```bash
-  ./.loom/scripts/worktree.sh <ISSUE_NUMBER>
-  cd .loom/worktrees/issue-<ISSUE_NUMBER>
-  gh pr checkout <PR_NUMBER>   # safe: already inside the issue worktree
-  ```
-- **External-fork, ad-hoc, or unlabeled PRs** — any other branch shape (e.g., `fix/foo-bar`, `release-1`, `jperla:fix/claude-code-2.1-compat`), or any time you cannot resolve an issue number:
+- **No builder worktree (any PR shape)** — use the supported review helper:
   ```bash
   ./.loom/scripts/pr-worktree.sh <PR_NUMBER>
   cd .loom/worktrees/pr-<PR_NUMBER>
   # pr-worktree.sh already ran `gh pr checkout` inside the worktree
   ```
+  **Honor its result.** Exit `0`: ready, reusing `pr-<N>` if present. Non-zero: stop. On a branch collision, reuse the named builder `issue-N` holder after "Verify the Worktree Matches the PR" below; otherwise stop/report or use `git merge-tree`/`gh pr diff` read-only review. **Never** invent a `judge-*`/`review-*` directory or another naming scheme, run raw `git worktree add`, or use bare `gh pr checkout` to bypass failure.
 
-Both worktree paths get a `.loom-managed` sentinel and are auto-cleaned by `merge-pr.sh` on merge. **Never fall back to a bare `gh pr checkout <N>` in the current directory** — every "no worktree exists" branch in this document's checkout snippets routes through `pr-worktree.sh`, mirroring the pattern in `doctor.md`.
+`pr-worktree.sh` writes a `.loom-managed` sentinel; `merge-pr.sh` auto-cleans it on merge. Every "no worktree exists" branch in this document routes through it, mirroring `doctor.md`.
 
 ## Issues Are Suggestions — Close or Rescope With Rationale (Role Autonomy)
 
@@ -1004,8 +999,8 @@ if [ -d ".loom/worktrees/issue-${ISSUE_NUM}" ]; then
 else
     # No builder worktree — self-cleaning worktree via pr-worktree.sh, not a
     # bare checkout in the current directory
-    ./.loom/scripts/pr-worktree.sh <number>
-    cd ".loom/worktrees/pr-<number>"
+    # On a non-zero exit the cd is skipped: reuse the named holder or stop
+    ./.loom/scripts/pr-worktree.sh <number> && cd ".loom/worktrees/pr-<number>"
 fi
 ```
 
@@ -1191,7 +1186,7 @@ This PR has merge conflicts with main that could not be resolved automatically.
 
 Please bring the branch up to date and resolve them: `git fetch origin && git merge origin/main`, then a plain `git push` (rebase only if `loom-daemon branch-update strategy` prints `rebase`, then push with a pinned `--force-with-lease=<branch>:<sha>`).
 
-I'll re-evaluate once conflicts are resolved, or the Doctor role will handle this.
+Will re-evaluate once conflicts are resolved, or the Doctor role will handle this.
 EOF
 )" && \
         gh pr edit $PR_NUMBER --remove-label "loom:review-requested" --remove-label "loom:reviewing" --add-label "loom:changes-requested" --add-label "loom:merge-conflict"
@@ -1986,8 +1981,7 @@ ISSUE_NUM=$(gh pr view <number> --json headRefName --jq '.headRefName' | sed 's/
 if [ -d ".loom/worktrees/issue-${ISSUE_NUM}" ]; then
     cd ".loom/worktrees/issue-${ISSUE_NUM}"
 else
-    ./.loom/scripts/pr-worktree.sh <number>
-    cd ".loom/worktrees/pr-<number>"
+    ./.loom/scripts/pr-worktree.sh <number> && cd ".loom/worktrees/pr-<number>"
 fi
 ```
 

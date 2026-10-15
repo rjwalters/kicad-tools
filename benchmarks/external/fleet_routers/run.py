@@ -470,6 +470,7 @@ def _dru_rules(text: str) -> list[dict[str, Any]]:
         blk = text[s:e]
         m = re.match(r'\(rule\s+(?:"([^"]*)"|(\S+))', blk)
         name = (m.group(1) or m.group(2)) if m else "?"
+        cond = re.search(r'\(condition\s+"((?:[^"\\]|\\.)*)"', blk)
         constraints = []
         for cm in re.finditer(r"\(constraint\s+(\w+)((?:\s*\([^()]*\))*)\s*\)", blk):
             mn = re.search(r"\(min\s+([-\d.]+)\s*(mm|mil)?\)", cm.group(2))
@@ -481,6 +482,7 @@ def _dru_rules(text: str) -> list[dict[str, Any]]:
             {
                 "name": name,
                 "conditioned": "(condition" in blk,
+                "condition": cond.group(1) if cond else None,
                 "layer_scoped": "(layer" in blk,
                 "constraints": constraints,
             }
@@ -573,10 +575,42 @@ def _zone_copper_layers(zone: Any, board_layers: list[str]) -> list[str]:
     return out
 
 
+# DRU constraint types no Specctra router consumes (fab/silk/edge geometry).
+# The referee ``kicad-cli`` DRC grades them, so they are not DSN losses.
+NOT_ROUTING_CONSTRAINTS = frozenset(
+    {
+        "silk_clearance",
+        "text_thickness",
+        "text_height",
+        "annular_width",
+        "edge_clearance",
+        "physical_hole_clearance",
+        "hole_clearance",
+    }
+)
+
+
+def _condition_classes(condition: str | None) -> list[str]:
+    """Net class names a DRU condition selects via ``NetClass == '...'``."""
+    if not condition:
+        return []
+    return [
+        m.replace("\\'", "'").replace("\\\\", "\\")
+        for m in re.findall(r"NetClass\s*==\s*'((?:[^'\\]|\\.)*)'", condition)
+    ]
+
+
 def dsn_audit(
-    pcb: Path, project: Path | None, dru: Path | None, dsn_path: Path
+    pcb: Path,
+    project: Path | None,
+    dru: Path | None,
+    dsn_path: Path,
+    not_routing: list[dict[str, str]] | None = None,
 ) -> list[dict[str, str]]:
     """List every board/rule constraint the exported DSN does not carry.
+
+    DRU constraints no router consumes (``NOT_ROUTING_CONSTRAINTS``) are not
+    losses; when ``not_routing`` is given they are appended to it instead.
 
     Exports with this repo's ``KiCadToDSNExporter`` (if ``dsn_path`` does not
     exist yet) and compares what it *emitted* against what the board, its
@@ -679,6 +713,36 @@ def dsn_audit(
         }
         for rule in _dru_rules(dru.read_text()):
             for c in rule["constraints"]:
+                if c["type"] in NOT_ROUTING_CONSTRAINTS:
+                    if not_routing is not None:
+                        not_routing.append(
+                            {
+                                "rule": rule["name"],
+                                "type": c["type"],
+                                "min_mm": c["min_mm"],
+                            }
+                        )
+                    continue
+                if (
+                    c["type"] == "clearance"
+                    and c["min_mm"] is not None
+                    and rule["conditioned"]
+                    and not rule["layer_scoped"]
+                ):
+                    # A class-scoped clearance is carried by that class's
+                    # emitted (class ...) block, which the exporter writes
+                    # without the same-footprint / coupled-pair exemptions.
+                    names = _condition_classes(rule.get("condition"))
+                    covered = [
+                        dsn_classes.get("kicad_default" if n == "Default" else n) for n in names
+                    ]
+                    if names and all(
+                        g is not None
+                        and g["clearance"] is not None
+                        and g["clearance"] >= c["min_mm"] - 1e-9
+                        for g in covered
+                    ):
+                        continue
                 floor = implied.get(c["type"])
                 if (
                     floor is not None
@@ -801,13 +865,17 @@ def ses_import(ses: Path, prepared: Path, out: Path) -> tuple[list[dict[str, str
         lost.append(
             {"kind": "ses_import", "detail": f"{len(imp.vias)}/{raw['vias']} SES vias imported"}
         )
-    if raw["resolution"] not in (None, 1.0):
+    # Since #6593 the importer honours ``(resolution UNIT N)``; a loss only
+    # remains if what it applied differs from what the session declares.
+    if raw["resolution"] is not None and (
+        (imp._resolution_unit, imp._resolution) != (raw["resolution_unit"], raw["resolution"])
+    ):
         lost.append(
             {
                 "kind": "ses_import",
                 "detail": (
                     f"SES resolution {raw['resolution_unit']} {raw['resolution']:g}: "
-                    "importer assumes 1 unit = 1 um"
+                    f"importer applied {imp._resolution_unit} {imp._resolution:g}"
                 ),
             }
         )
@@ -967,6 +1035,7 @@ class RunRecord:
     output: str | None = None
     partial_artifact: str | None = None
     lost_constraints: list[dict[str, str]] = field(default_factory=list)
+    not_routing_rules: list[dict[str, Any]] = field(default_factory=list)
     placement_violations: list[str] = field(default_factory=list)
     tool_config: dict[str, Any] = field(default_factory=dict)
     interchange: dict[str, Any] | None = None
@@ -1147,6 +1216,7 @@ def run_tool(
                 prep.frozen_dir / f"{prep.stem}.kicad_pro",
                 prep.frozen_dir / f"{prep.stem}.kicad_dru",
                 dsn,
+                rec.not_routing_rules,
             )
         except Exception as exc:  # noqa: BLE001
             rec.outcome, rec.stage, rec.reason = "scorer-failure", "dsn-export", repr(exc)
