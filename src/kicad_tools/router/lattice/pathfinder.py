@@ -2924,20 +2924,22 @@ class LatticePathfinder:
 
         Four candidates are built:
 
-        * P unguided, then N unguided (the pre-#6703 result);
+        * P unguided, then N unguided (the pre-#6703 order);
         * P unguided, then N guided by P's corridor (:class:`PartnerGuide`);
         * N unguided, then P unguided;
         * N unguided, then P guided by N's corridor.
 
-        The second leg of a candidate is searched against committed copper
-        that holds the candidate's first leg (a :meth:`CommittedCopper.begin_trial`
-        that is rolled back), so every candidate is legal exactly as it would
-        be had it been routed alone.  The winner has the most routed legs,
-        then the fewest class-pad shortfalls, then the smallest skew
-        (:meth:`_pair_skew`), then the smallest total length; ties keep the earlier candidate, so the selection is
-        deterministic.  Its legs are committed.  Returns ``(legs,
-        is_partner_blind)`` -- the flag is set when the winner is the pre-#6703
-        candidate itself.
+        Every leg is searched at the strictest pad class of the board (see
+        below).  The second leg of a candidate is searched against committed
+        copper that holds the candidate's first leg (a
+        :meth:`CommittedCopper.begin_trial` that is rolled back), so every
+        candidate is legal exactly as it would be had it been routed alone.
+        The winner has the most routed legs, then the fewest class-pad
+        shortfalls, then the smallest skew (:meth:`_pair_skew`), then the
+        smallest total length; ties keep the earlier candidate, so the
+        selection is deterministic.  Its legs are committed.  Returns
+        ``(legs, is_partner_blind)`` -- the flag is set when the winner is
+        exactly the copper :meth:`_partner_blind_legs` would have produced.
         """
         items = self._fallback_items(pc)
         kw: dict[str, Any] = {
@@ -2979,8 +2981,8 @@ class LatticePathfinder:
                 guided = search(follow, self._partner_guide(lead_res, pc))
             finally:
                 committed.rollback_trial(mark)
-            # The plain P-led candidate IS the pre-#6703 result; listed first
-            # so it wins every tie.
+            # The plain P-led candidate keeps the pre-#6703 order; listed
+            # first so it wins every tie.
             candidates.append({lead: first, follow: plain})
             if guided[0] is not None:
                 candidates.append({lead: first, follow: guided})
