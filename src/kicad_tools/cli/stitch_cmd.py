@@ -4697,6 +4697,33 @@ def generate_thermal_via_positions(
     return positions
 
 
+def _per_net_base_pools(
+    sexp: SExp,
+    net_numbers: set[int],
+    other_net_tracks: list[TrackSegment],
+    other_net_vias: list[tuple[float, float, float, int]],
+) -> tuple[
+    dict[int, list[TrackSegment]],
+    dict[int, list[tuple[float, float, float, int]]],
+]:
+    """Per-target-net track/via obstacle pools (Issues #6668, #6685).
+
+    ``other_net_tracks`` / ``other_net_vias`` exclude every stitch-target
+    net.  Each target net's pool here is that base plus every pre-existing
+    track / via of the OTHER target nets -- never its own net's.
+    """
+    target_net_tracks = [t for t in find_all_track_segments(sexp) if t.net_number in net_numbers]
+    target_net_vias = [v for v in find_all_board_vias(sexp) if v[3] in net_numbers]
+    tracks_by_net: dict[int, list[TrackSegment]] = {}
+    vias_by_net: dict[int, list[tuple[float, float, float, int]]] = {}
+    for _net in net_numbers:
+        tracks_by_net[_net] = other_net_tracks + [
+            t for t in target_net_tracks if t.net_number != _net
+        ]
+        vias_by_net[_net] = other_net_vias + [v for v in target_net_vias if v[3] != _net]
+    return tracks_by_net, vias_by_net
+
+
 def run_thermal_stitch(
     pcb_path: Path,
     net_names: list[str],
@@ -4820,6 +4847,11 @@ def run_thermal_stitch(
     target_via_drills = [
         d for d in find_all_drills(sexp, include_pads=False) if d[3] in target_net_nums
     ]
+    # Issue #6685: per-target-net track/via pools (sibling nets' pre-existing
+    # copper is an obstacle; own-net copper is not).
+    base_tracks_by_net, base_vias_by_net = _per_net_base_pools(
+        sexp, target_net_nums, other_net_tracks, other_net_vias
+    )
 
     # Per-net same-net via positions (existing + newly placed).  Treated
     # as obstacles to prevent stacking on the same net.  A via placed for
@@ -4918,7 +4950,7 @@ def run_thermal_stitch(
 
         # Cross-net obstacles: starting set + any vias we've placed on
         # other target nets during this run.
-        other_net_vias_with_placed = list(other_net_vias)
+        other_net_vias_with_placed = list(base_vias_by_net.get(pad_net, other_net_vias))
         for cx, cy, cn in cross_net_placed_vias:
             if cn != pad_net:
                 other_net_vias_with_placed.append((cx, cy, via_size, cn))
@@ -4956,7 +4988,7 @@ def run_thermal_stitch(
                 vy,
                 via_size,
                 clearance,
-                other_net_tracks,
+                base_tracks_by_net.get(pad_net, other_net_tracks),
                 other_net_vias_with_placed,
                 other_net_pads_with_siblings,
                 same_net_vias_for_pad,
@@ -5103,6 +5135,13 @@ def run_blanket_stitch(
     # target-net pad/drill on a net DIFFERENT than the one being stitched.
     target_pad_circles = [p for p in find_all_pads(sexp) if p[3] in target_net_nums]
     target_pad_drills = [d for d in find_all_drills(sexp) if d[3] in target_net_nums]
+    # Issue #6685: sibling target-net VIA drills + per-net track/via pools.
+    target_via_drills = [
+        d for d in find_all_drills(sexp, include_pads=False) if d[3] in target_net_nums
+    ]
+    base_tracks_by_net, base_vias_by_net = _per_net_base_pools(
+        sexp, target_net_nums, other_net_tracks, other_net_vias
+    )
 
     # Collect all existing same-net vias (to prevent stacking)
     all_same_net_vias = find_existing_vias(sexp, target_net_nums)
@@ -5137,9 +5176,11 @@ def run_blanket_stitch(
         other_net_pads_with_siblings = other_net_pads + [
             p for p in target_pad_circles if p[3] != net_number
         ]
-        other_net_drills_with_siblings = other_net_drills + [
-            d for d in target_pad_drills if d[3] != net_number
-        ]
+        other_net_drills_with_siblings = (
+            other_net_drills
+            + [d for d in target_pad_drills if d[3] != net_number]
+            + [d for d in target_via_drills if d[3] != net_number]
+        )
 
         # Determine target layer
         if target_layer:
@@ -5198,8 +5239,8 @@ def run_blanket_stitch(
                     gy,
                     via_size,
                     clearance,
-                    other_net_tracks,
-                    other_net_vias,
+                    base_tracks_by_net.get(net_number, other_net_tracks),
+                    base_vias_by_net.get(net_number, other_net_vias),
                     other_net_pads_with_siblings,
                     same_net_via_positions,
                     other_fill,
@@ -5518,6 +5559,24 @@ def run_stitch(
     target_pad_bboxes = [b for b in find_all_pad_bboxes(sexp) if b[4] in net_numbers]
     target_pad_drills = [d for d in find_all_drills(sexp) if d[3] in net_numbers]
 
+    # Issue #6668: the TRACK/VIA analogue of ``_sibling_pools``.  The
+    # ``other_net_tracks`` / ``other_net_vias`` pools above exclude every
+    # stitch-target net, so in a multi-net call (board 07: ``--net GND --net
+    # +1V2 --net +1V8``) a +1V8 extended escape for U3.12 was drawn straight
+    # through U3.11's PRE-EXISTING GND fanout stub and via -- a real
+    # GND/+1V8 short.  Each target net's pool is every pre-existing track /
+    # via EXCEPT its own (own-net copper must never block its own escape: a
+    # pad's fanout stub starts on the pad, and the placement helpers treat
+    # these pools as flat, unfiltered obstacle lists).  ``run_stitch`` writes
+    # no copper until after the pad loop, so the pools are fixed: build them
+    # -- and their #5240 track index -- once per target NET, never per pad.
+    base_tracks_by_net, base_vias_by_net = _per_net_base_pools(
+        sexp, net_numbers, other_net_tracks, other_net_vias
+    )
+    base_index_by_net: dict[int, TrackSpatialIndex[TrackSegment] | None] = {}
+    for _net in net_numbers:
+        base_index_by_net[_net] = build_track_index(base_tracks_by_net[_net])
+
     def _sibling_pools(
         pad: PadInfo,
     ) -> tuple[
@@ -5562,9 +5621,9 @@ def run_stitch(
 
     # Issue #3633: cross-net co-check of just-placed stitch geometry.
     #
-    # ``other_net_tracks`` / ``other_net_vias`` above are pre-filtered to
-    # exclude *all* stitch nets, so pre-existing routed copper on a sibling
-    # stitch net does not block placement.  But the stitch step also EMITS
+    # ``base_tracks_by_net`` / ``base_vias_by_net`` above hold the
+    # PRE-EXISTING copper of every other net, sibling stitch nets included
+    # (issue #6668).  But the stitch step also EMITS
     # new copper (a via plus a pad-to-via trace) for every pad it processes.
     # Previously the placed via was appended to ``existing_vias`` (checked
     # only for same-net via-to-via spacing) and the trace was buffered in
@@ -5582,10 +5641,10 @@ def run_stitch(
     # placement helpers treat their ``other_net_*`` arguments as flat
     # obstacle lists (no internal net filtering), so we filter by net here
     # when assembling the per-pad augmented lists.
-    # Issue #5240: the pre-existing foreign-net track pool never changes
-    # during the pad loop, so index it once here; per-pad pools that add
-    # just-placed cross-net stitch geometry get their own index below.
-    base_track_index = build_track_index(other_net_tracks)
+    # Issue #5240: the pre-existing foreign-net track pools never change
+    # during the pad loop, so they are indexed once per target net above
+    # (``base_index_by_net``); per-pad pools that add just-placed cross-net
+    # stitch geometry get their own index below.
 
     placed_stitch_tracks: list[TrackSegment] = []
     placed_stitch_vias: list[tuple[float, float, float, int]] = []
@@ -5799,20 +5858,26 @@ def run_stitch(
             seg for seg in placed_stitch_tracks if seg.net_number != pad.net_number
         ]
         cross_net_stitch_vias = [v for v in placed_stitch_vias if v[3] != pad.net_number]
-        eff_other_net_tracks = other_net_tracks + cross_net_stitch_tracks
+        # Issue #6668: this pad's pre-existing foreign copper -- every other
+        # net, SIBLING stitch nets included, never its own net.
+        pad_base_tracks = base_tracks_by_net[pad.net_number]
+        pad_base_index = base_index_by_net[pad.net_number]
+        eff_other_net_tracks = pad_base_tracks + cross_net_stitch_tracks
         # Issue #6428: a site this pad's earlier weld cut a foreign pour at
         # is held as a foreign via for this pad -- in every placement pass,
         # the pre-existing-copper fallbacks below included.
         avoided = (avoid_sites or {}).get(f"{pad.reference}.{pad.pad_number}", ())
-        pad_base_vias = other_net_vias + [(float(x), float(y), via_size, -1) for x, y in avoided]
+        pad_base_vias = base_vias_by_net[pad.net_number] + [
+            (float(x), float(y), via_size, -1) for x, y in avoided
+        ]
         eff_other_net_vias = pad_base_vias + cross_net_stitch_vias
         # Issue #5240: index the foreign-net track pool once per pad and
         # share it across every placement strategy this pad tries.  When no
         # cross-net stitch geometry has been placed yet the pool's contents
-        # are the pre-existing list, so the pre-built base index is reused
-        # (it yields the same segment objects in the same order).
+        # are this net's pre-existing list, so its pre-built per-net base
+        # index is reused (same segment objects in the same order).
         eff_track_index = (
-            build_track_index(eff_other_net_tracks) if cross_net_stitch_tracks else base_track_index
+            build_track_index(eff_other_net_tracks) if cross_net_stitch_tracks else pad_base_index
         )
         # Issue #6400: this pad's own-net fill and its foreign fill pool
         # (pre-existing other-net fill plus sibling target nets' fills).
@@ -5873,8 +5938,12 @@ def run_stitch(
             # obstacle pool).  This restores the load-bearing via that existed
             # before the co-check tightened, accepting the marginal cross-net
             # band intrusion rather than leaving the pad disconnected.
+            # Issue #6668: "pre-existing copper" includes SIBLING stitch
+            # nets' existing tracks/vias -- an overlap with copper that was
+            # already on the board is a real short, not a self-inflicted
+            # graze, so only the just-placed stitch geometry is dropped.
             fallback_result = _attempt_placement(
-                pad, other_net_tracks, pad_base_vias, eff_track_index=base_track_index
+                pad, pad_base_tracks, pad_base_vias, eff_track_index=pad_base_index
             )
             if fallback_result is None:
                 # Issue #4432: distinguish an OFF-FILL failure from a genuine
@@ -5888,10 +5957,10 @@ def run_stitch(
                 if pad_own_fill and (
                     _attempt_placement(
                         pad,
-                        other_net_tracks,
+                        pad_base_tracks,
                         pad_base_vias,
                         enforce_fill_gate=False,
-                        eff_track_index=base_track_index,
+                        eff_track_index=pad_base_index,
                     )
                     is not None
                 ):
@@ -5914,8 +5983,8 @@ def run_stitch(
                     micro_via_size if micro_via else via_size,
                     clearance,
                     existing_vias,
-                    other_net_tracks,
-                    other_net_vias,
+                    pad_base_tracks,
+                    base_vias_by_net[pad.net_number],
                     diag_pads,
                     pad_other_fill,
                     net_map=obstacle_net_map,
@@ -5962,8 +6031,8 @@ def run_stitch(
                     fallback_via_size,
                     clearance,
                     existing_vias,
-                    other_net_tracks,
-                    other_net_vias,
+                    pad_base_tracks,
+                    base_vias_by_net[pad.net_number],
                     diag_pads,
                     pad_other_fill,
                     net_map=obstacle_net_map,

@@ -282,6 +282,72 @@ class AdaptiveGridRouter:
             rules,
             escape_search_radius=escape_search_radius,
         )
+        # Issue #6666: a Phase-1 escape search computed by
+        # :meth:`preview_phase1` (no grid mutation), reused by the next
+        # :meth:`route_adaptive` call so the search is not run twice.
+        self._phase1_preview: tuple[dict[str, float], SubGridResult] | None = None
+
+    def _phase1_search(
+        self,
+        pads: dict[tuple[str, str], Pad],
+    ) -> tuple[dict[str, float], SubGridResult] | None:
+        """Identify fine-pitch components and search their escapes.
+
+        Read-only: ``analyze_pads`` + ``generate_escape_segments`` do not touch
+        the grid; only ``apply_escape_segments`` does.  Returns ``None`` when
+        Phase 1 has nothing to do.
+        """
+        fine_components = identify_fine_pitch_components(
+            pads,
+            self.grid.resolution,
+            self.fine_pitch_threshold,
+        )
+        if not fine_components:
+            logger.info("No fine-pitch components detected, skipping Phase 1")
+            return None
+
+        logger.info(
+            "Fine-pitch components: %s",
+            ", ".join(f"{ref} ({res:.4f}mm)" for ref, res in fine_components.items()),
+        )
+
+        # Filter to only pads from fine-pitch components
+        fine_pads = [pad for pad in pads.values() if pad.component_key in fine_components]
+        if not fine_pads:
+            return None
+
+        analysis = self._subgrid.analyze_pads(fine_pads)
+        if not analysis.has_off_grid_pads:
+            logger.info("No off-grid pads detected, sub-grid routing not needed")
+            return fine_components, SubGridResult(analysis=analysis)
+
+        logger.info(analysis.format_summary())
+        return fine_components, self._subgrid.generate_escape_segments(analysis)
+
+    def preview_phase1(
+        self,
+        pads: dict[tuple[str, str], Pad],
+    ) -> FinePitchEscapeFailure | None:
+        """Predict whether Phase 1 would hard-fail, without routing (Issue #6666).
+
+        Runs the same escape search :meth:`route_adaptive` would, but does not
+        apply any escape to the grid.  Returns the :class:`FinePitchEscapeFailure`
+        Phase 1 would raise (some fine-pitch component escapes 0 pads), else
+        ``None``.  The search result is cached and reused by the next
+        :meth:`route_adaptive` call, which must receive the same ``pads``.
+
+        ``kct route`` uses this to fall back to the dense-package escape
+        pre-phase (``Autorouter.route_with_escape``) instead of aborting.
+        """
+        self._phase1_preview = self._phase1_search(pads)
+        if self._phase1_preview is None:
+            return None
+        fine_components, subgrid_result = self._phase1_preview
+        try:
+            self._raise_if_component_fully_failed(subgrid_result, fine_components)
+        except FinePitchEscapeFailure as exc:
+            return exc
+        return None
 
     def route_adaptive(
         self,
@@ -346,30 +412,39 @@ class AdaptiveGridRouter:
         """
         logger.info("Phase 1: Pad escape routing")
 
-        # Identify which components need fine-grid treatment
-        fine_components = identify_fine_pitch_components(
-            pads,
-            self.grid.resolution,
-            self.fine_pitch_threshold,
-        )
+        # Issue #6666: reuse a preview_phase1() search when one is pending,
+        # applying its escapes now (the mutating step of route_with_subgrid).
+        preview = self._phase1_preview
+        self._phase1_preview = None
+        if preview is not None:
+            fine_components, subgrid_result = preview
+            if subgrid_result.analysis is not None and subgrid_result.analysis.has_off_grid_pads:
+                self._subgrid.apply_escape_segments(subgrid_result)
+        else:
+            # Identify which components need fine-grid treatment
+            fine_components = identify_fine_pitch_components(
+                pads,
+                self.grid.resolution,
+                self.fine_pitch_threshold,
+            )
 
-        if not fine_components:
-            logger.info("No fine-pitch components detected, skipping Phase 1")
-            return SubGridResult(), [], {}
+            if not fine_components:
+                logger.info("No fine-pitch components detected, skipping Phase 1")
+                return SubGridResult(), [], {}
 
-        logger.info(
-            "Fine-pitch components: %s",
-            ", ".join(f"{ref} ({res:.4f}mm)" for ref, res in fine_components.items()),
-        )
+            logger.info(
+                "Fine-pitch components: %s",
+                ", ".join(f"{ref} ({res:.4f}mm)" for ref, res in fine_components.items()),
+            )
 
-        # Filter to only pads from fine-pitch components
-        fine_pads = [pad for pad in pads.values() if pad.component_key in fine_components]
+            # Filter to only pads from fine-pitch components
+            fine_pads = [pad for pad in pads.values() if pad.component_key in fine_components]
 
-        if not fine_pads:
-            return SubGridResult(), [], {}
+            if not fine_pads:
+                return SubGridResult(), [], {}
 
-        # Run sub-grid escape routing
-        subgrid_result = self._subgrid.route_with_subgrid(fine_pads)
+            # Run sub-grid escape routing
+            subgrid_result = self._subgrid.route_with_subgrid(fine_pads)
         escape_routes = self._subgrid.get_escape_routes(subgrid_result)
 
         if subgrid_result.analysis:

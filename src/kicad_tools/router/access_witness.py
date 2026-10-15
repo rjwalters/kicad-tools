@@ -249,8 +249,11 @@ def _via_to_list(via: Via, net_name: str) -> list[Any]:
         via.net,
         flags,
     ]
-    if via.net_name != net_name:
+    if via.net_name != net_name or via.span_type is not None:
         encoded.append(via.net_name)
+    if via.span_type is not None:
+        # Issue #6677: index 9; older sidecars simply lack it (-> None).
+        encoded.append(via.span_type)
     return encoded
 
 
@@ -266,6 +269,7 @@ def _via_from_list(payload: Sequence[Any], net_name: str) -> Via:
         net_name=str(payload[8]) if len(payload) > 8 else net_name,
         in_pad=bool(flags & _VIA_FLAG_IN_PAD),
         is_micro=bool(flags & _VIA_FLAG_IS_MICRO),
+        span_type=str(payload[9]) if len(payload) > 9 and payload[9] else None,
     )
 
 

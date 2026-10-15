@@ -14,33 +14,29 @@
 # role prompt each time (deferred, lower-priority AC of #5455).
 #
 # Decision, in priority order (first match wins):
-#   1. BOT AUTHOR — `gh pr view --json author` -> `.author.is_bot == true`
-#      (Dependabot, Renovate, github-actions[bot], etc). Such a PR is outside
+#   1. BOT AUTHOR — REST `pulls/<N>` -> `.user.type == "Bot"` (#9340: no
+#      GraphQL; Dependabot, Renovate, github-actions[bot]). Such a PR is outside
 #      the Loom label workflow by construction: the fallback path deliberately
 #      never applies labels to it, so it can never leave the fallback query's
 #      result set through any Loom-side action. Skip permanently, independent
 #      of the cap or velocity below. (#5455 AC "structurally exclude PRs the
 #      fallback queue can never advance")
-#   2. DRAFT PR — `gh pr view --json isDraft` -> `.isDraft == true`. The
-#      author has explicitly signaled the PR is not ready for review (GitHub
-#      draft state), so a fallback-mode verdict is not meaningful yet. This is
-#      orthogonal to bot-authorship (a human author's PR can be a draft; a
-#      bot's PR could in principle also be one), so it is its own priority
-#      step and exit code rather than folded into the bot-author check.
-#      Checked before the cap so it never counts toward MARKER_COUNT or costs
-#      a comments-fetch API call. Read fresh on every invocation (never
-#      cached), so once the author marks the PR "Ready for review" the very
-#      next pass falls through to the cap/dedup logic with no further code
-#      change. (#5535)
-#   3. LIFETIME CAP — total `loom:fallback-evaluated` marker comments on the
+#   2. LIFETIME CAP — total `loom:fallback-evaluated` marker comments on the
 #      PR, counted across ALL head SHAs over the PR's full history (not just
 #      the current SHA), has reached --cap. See "Why the cap is per-PR-
 #      lifetime, not per-SHA" below. (#5455 AC "hard per-PR cap ... independent
 #      of marker/SHA state")
-#   4. SHA DEDUP — the existing #5058 mechanism: the most recent marker's SHA
+#   3. SHA DEDUP — the existing #5058 mechanism: the most recent marker's SHA
 #      already equals the PR's current head SHA, i.e. nothing has changed
 #      since the last evaluation.
-#   5. Otherwise: OK to evaluate.
+#   4. Otherwise: OK to evaluate.
+#
+# Markers for 2/3 (and the velocity count below) are counted only from a
+# TRUSTED author (#9548/#9716): the marker SUPPRESSES review, so an outsider
+# able to comment on a public repo's PR must not be able to post one and
+# silence the fallback queue's own safety net. See "trusted-author filter on
+# the fallback-evaluated marker" below for the filter and its fail-safe
+# direction.
 #
 # Independent of the decision above: VELOCITY ALERT. If the marker-comment
 # count within the trailing --velocity-window-hours meets or exceeds
@@ -86,7 +82,6 @@
 #   10 = SKIP: bot author
 #   11 = SKIP: lifetime cap reached
 #   12 = SKIP: SHA dedup (already evaluated at the current head SHA)
-#   13 = SKIP: draft PR (author has not requested review)
 #   1  = usage or environment error (bad args, `gh` call failed) — the caller
 #        should treat this the same as any other fallback-queue `gh` failure,
 #        NOT as "no work available".
@@ -95,6 +90,8 @@
 # the candidate list of unlabeled open PRs itself (the `gh pr list ... | select
 # no loom: label` query) stays in judge.md — this is deliberately a single-PR
 # gate, called once per candidate in the fallback walk.
+
+# requires-daemon: forge optional   #9537 — `forge is-fleet` answers "is this PR author one of Loom's own Apps"; with no daemon, or one that predates the verb (clap exits 2), is_fleet_author falls back to the exact `loom-fleet-dispatch(-N)` family pattern (`app/` or `[bot]` spelling, #9340), so an old binary degrades to the pre-#9537 behaviour (plus the numbered members), never to a failure.
 
 set -euo pipefail
 
@@ -168,43 +165,55 @@ emit() {
 GH_STDERR="$(mktemp)"
 trap 'rm -f "$GH_STDERR" 2>/dev/null || true' EXIT
 
-# --- Step 1: bot-author check + draft check + current head SHA -------------
-PR_JSON="$(gh pr view "$PR" --json author,headRefOid,isDraft 2>"$GH_STDERR")" || {
-  echo "ERROR: 'gh pr view $PR --json author,headRefOid,isDraft' failed: $(cat "$GH_STDERR" 2>/dev/null)" >&2
+# --- Step 1: bot-author check + current head SHA ---------------------------
+PR_JSON="$(gh api "repos/{owner}/{repo}/pulls/$PR" 2>"$GH_STDERR")" || {
+  echo "ERROR: 'gh api .../pulls/$PR' failed: $(cat "$GH_STDERR" 2>/dev/null)" >&2
   exit 1
 }
-
-IS_BOT="$(jq -r '.author.is_bot // false' <<<"$PR_JSON" 2>/dev/null || echo "false")"
-AUTHOR_LOGIN="$(jq -r '.author.login // empty' <<<"$PR_JSON" 2>/dev/null || true)"
-HEAD_SHA="$(jq -r '.headRefOid // empty' <<<"$PR_JSON" 2>/dev/null || true)"
-IS_DRAFT="$(jq -r '.isDraft // false' <<<"$PR_JSON" 2>/dev/null || echo "false")"
+# REST, not `gh pr view` (GraphQL — #9340: one exhausted GraphQL pool aborted the pass).
+IS_BOT="$(jq -r '.user.type == "Bot"' <<<"$PR_JSON" 2>/dev/null || echo "false")"
+AUTHOR_LOGIN="$(jq -r '.user.login // empty' <<<"$PR_JSON" 2>/dev/null || true)"
+HEAD_SHA="$(jq -r '.head.sha // empty' <<<"$PR_JSON" 2>/dev/null || true)"
 
 if [[ -z "$HEAD_SHA" ]]; then
   echo "ERROR: could not resolve head SHA for PR #$PR from: $PR_JSON" >&2
   exit 1
 fi
 
-# Loom's own GitHub App dispatch identity is reported by GitHub as
-# `is_bot: true` (same as Dependabot/Renovate/github-actions[bot]), but it is
-# NOT an external bot outside the Loom label workflow — it's Loom's own PR
-# creation path. Allowlist it by exact `.author.login` match so it proceeds
-# to the cap/dedup checks below like any other Loom-authored PR, instead of
-# being permanently invisible to both the primary and fallback Judge queues
-# (#6982). This narrows the bot-author check; it does not weaken it for
-# genuinely external bots.
-if [[ "$IS_BOT" == "true" && "$AUTHOR_LOGIN" != "app/loom-fleet-dispatch" ]]; then
+# Loom's own GitHub App identities are reported by GitHub as `type: Bot`
+# (same as Dependabot/Renovate/github-actions[bot]), but they are NOT external
+# bots outside the Loom label workflow — they are Loom's own PR creation path.
+# Let them through to the cap/dedup checks below like any other Loom-authored
+# PR, instead of being permanently invisible to both the primary and fallback
+# Judge queues (#6982). This narrows the bot-author check; it does not weaken
+# it for genuinely external bots.
+#
+# #9537: WHICH logins are Loom's is the forge identity broker's answer
+# (`loom-daemon forge is-fleet`: the writer, each reader, legacy logins), not
+# a literal here. The old exact `app/loom-fleet-dispatch` match already missed
+# the numbered pool Apps, and broke outright when an App was renamed. With no
+# daemon, or an older one without the verb (clap exits 2), fall back to Loom's
+# default family, exact name or `-<digits>`, GraphQL `app/` or REST `[bot]`.
+_JFG_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+is_fleet_author() {
+  local login="$1" bin="" rc
+  if [[ -f "$_JFG_DIR/lib/locate-daemon-bin.sh" ]]; then
+    # shellcheck source=lib/locate-daemon-bin.sh
+    source "$_JFG_DIR/lib/locate-daemon-bin.sh"
+    bin="$(loom_locate_daemon_bin "$(cd "$_JFG_DIR/../.." 2>/dev/null && pwd)" 2>/dev/null || true)"
+  fi
+  if [[ -n "$bin" ]]; then
+    rc=0
+    "$bin" forge is-fleet "$login" >/dev/null 2>&1 || rc=$?
+    [[ $rc -eq 0 ]] && return 0
+    [[ $rc -eq 1 ]] && return 1
+  fi
+  [[ "$login" =~ ^(app/)?loom-fleet-dispatch(-[0-9]+)?(\[bot\])?$ ]]
+}
+
+if [[ "$IS_BOT" == "true" ]] && ! is_fleet_author "$AUTHOR_LOGIN"; then
   emit "SKIP" "bot-author (outside Loom label workflow; fallback queue cannot advance it)" "$HEAD_SHA" 0 0 0
   exit 10
-fi
-
-# --- Step 1b: draft-PR check ------------------------------------------------
-# Orthogonal to bot authorship: a human author's PR can be a draft, and a
-# bot's PR could in principle also be one. Checked before the cap/comments
-# fetch (like the bot-author check above), so it never counts toward
-# MARKER_COUNT or costs a comments-fetch API call. (#5535)
-if [[ "$IS_DRAFT" == "true" ]]; then
-  emit "SKIP" "draft PR (author has not requested review)" "$HEAD_SHA" 0 0 0
-  exit 13
 fi
 
 # --- Step 2: fetch every fallback-evaluated marker across the PR's full
@@ -218,6 +227,28 @@ COMMENTS_JSON="$(gh api "repos/{owner}/{repo}/issues/$PR/comments" --paginate 2>
   exit 1
 }
 
+# `<!-- loom:fallback-evaluated sha=... -->` is a control phrase that
+# SUPPRESSES review (it feeds the lifetime cap and the SHA dedup below), so
+# per #9548/#9716 it counts only from a trusted author: a repo insider by
+# author_association, one of THIS fleet's Apps, this daemon's own identity, or
+# `forge.trustedCommenters`. Without the filter, any outsider able to comment
+# on a public repo's PR could post a well-formed marker and silence the
+# Judge's one fallback-mode safety net on their own PR — the exact gap #9716
+# names. `loom-daemon forge trusted-comments` reads a REST comment listing
+# (which carries `user.login` + `author_association`; `gh --json` spells an
+# App as a bare login and cannot be used here, same reasoning as
+# merge-pr.sh's `_trusted_pr_comments`) and returns the trusted subset in the
+# same shape.
+#
+# requires-daemon: forge optional   Without the `trusted-comments` verb (absent binary, or one predating #9548) no author can be authenticated, so EVERY marker counts as absent — never the unfiltered listing. That is the safe direction here: it can only make the guard evaluate a PR it might otherwise have skipped (extra fallback-mode comments, bounded by --cap/--velocity-threshold same as any other PR), never let an outsider's marker suppress a real review.
+TRUSTED_COMMENTS_JSON="$COMMENTS_JSON"
+if [[ -n "$COMMENTS_JSON" && "$COMMENTS_JSON" != "[]" ]]; then
+  TRUSTED_COMMENTS_JSON="$(printf '%s\n' "$COMMENTS_JSON" | "${LOOM_DAEMON_BIN:-loom-daemon}" forge trusted-comments 2>/dev/null)" || {
+    echo "trusted-comments: could not authenticate comment authors ('loom-daemon forge trusted-comments' failed); loom:fallback-evaluated markers read as absent (#9548/#9716)" >&2
+    TRUSTED_COMMENTS_JSON="[]"
+  }
+fi
+
 # One "<ISO-8601 created_at>\t<sha>" line per marker comment, oldest first
 # (matches --paginate's page order). `test(...)` guards the `capture(...)`
 # call so a non-matching comment body is filtered out via `select` rather
@@ -227,7 +258,7 @@ MARKER_LINES="$(jq -r '
   | select(.body != null and (.body | test("<!-- loom:fallback-evaluated sha=[0-9a-f]+ -->")))
   | [.created_at, (.body | capture("<!-- loom:fallback-evaluated sha=(?<sha>[0-9a-f]+) -->").sha)]
   | @tsv
-' <<<"$COMMENTS_JSON" 2>/dev/null || true)"
+' <<<"$TRUSTED_COMMENTS_JSON" 2>/dev/null || true)"
 
 MARKER_COUNT=0
 if [[ -n "$MARKER_LINES" ]]; then
