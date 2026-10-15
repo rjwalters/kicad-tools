@@ -1049,7 +1049,18 @@ def _persist_routing_result_to_pcb(pcb: PCB, result, net_name: str) -> tuple[int
             # it was written -- and drilled -- as a through via).  Every
             # other router via is drilled through the whole stack, whatever
             # logical layer pair it carries in memory.
+            #
+            # Issue #6678: an imported KiCad ``blind`` / ``buried`` via
+            # (``Via.span_type``, #6662) is drilled only through its declared
+            # span.  Pass its declared keyword explicitly so it is preserved
+            # instead of widened to a through via.  ``via_type=None`` would
+            # also write the right keyword, but through ``add_via``'s
+            # derivation path, which logs a WARNING (meant for writers that
+            # *invent* a partial span) advising ``via_type='through'`` -- the
+            # very bug this fixes.
             is_micro = bool(getattr(via, "is_micro", False))
+            span_type = getattr(via, "span_type", None)
+            via_type = "micro" if is_micro else (span_type or "through")
             added_via = pcb.add_via(
                 x=float(via.x),
                 y=float(via.y),
@@ -1057,7 +1068,7 @@ def _persist_routing_result_to_pcb(pcb: PCB, result, net_name: str) -> tuple[int
                 drill=float(getattr(via, "drill", 0.3)),
                 layers=layer_pair,
                 net=net_name,
-                via_type="micro" if is_micro else "through",
+                via_type=via_type,
             )
             if added_via is not None:
                 vias_written += 1
