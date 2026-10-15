@@ -630,6 +630,20 @@ class Pad:
     default -- defers entirely to ``DesignRules.net_clearance_floors``.
     """
 
+    side: Layer | None = None
+    """Copper layer of the owning footprint's side (issue #6780).
+
+    ``Layer.F_CU`` for a front footprint, ``Layer.B_CU`` for a back one;
+    ``None`` when the constructor did not know (programmatic pads), in which
+    case consumers fall back to :attr:`layer`.  A through-hole pad's
+    :attr:`layer` is always ``F.Cu`` (the loaders do not record per-layer
+    copper for ``*.Cu`` pads), so only this field tells a back-side
+    footprint's through-hole pad apart.  Only the kicad-cli length model
+    (:func:`~kicad_tools.router.kicad_length.router_pad`) reads it: kicad-cli
+    connects a via inside a through-hole pad on the footprint's side only.
+    Routing, clearance and grid code ignore it.
+    """
+
     @property
     def component_key(self) -> str:
         """Physical component key used for grouping and geometric exemptions."""

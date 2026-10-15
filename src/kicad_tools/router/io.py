@@ -2691,7 +2691,11 @@ def load_pads_for_analysis(pcb_path_or_text: str | Path) -> list[Pad]:
         for section in re.split(r"(?=\((?:footprint|module)\s)", pcb_text)
         if section.startswith("(footprint") or section.startswith("(module")
     ]
-    for section, component_id in zip(footprint_sections, source_keys, strict=True):
+    for section, component_id, footprint in zip(
+        footprint_sections, source_keys, identity_document.footprints, strict=True
+    ):
+        # Issue #6780: the footprint's copper side, for the length model.
+        fp_side = Layer.B_CU if footprint.layer == "B.Cu" else Layer.F_CU
         # Get footprint library name (e.g. "Package_QFP:TQFP-32_7x7mm_P0.8mm")
         footprint_name_match = re.search(r'\(footprint\s+"([^"]*)"', section)
         footprint_name = footprint_name_match.group(1) if footprint_name_match else ""
@@ -2769,6 +2773,7 @@ def load_pads_for_analysis(pcb_path_or_text: str | Path) -> list[Pad]:
                     pin=pin,
                     layer=layer,
                     through_hole=is_thru,
+                    side=fp_side,
                     footprint_name=footprint_name,
                     rotation=pad_rotation,
                     shape=pad_shape,
@@ -5388,6 +5393,8 @@ def load_pcb_for_routing(
         fp_rot = float(at_match.group(3)) if at_match.group(3) else 0
 
         ref = _footprint_reference(section)
+        # Issue #6780: the footprint's copper side, for the length model.
+        fp_side = Layer.B_CU if footprint.layer == "B.Cu" else Layer.F_CU
 
         # Parse pads - extract complete (pad ...) blocks
         # KiCad 7+ uses multi-line pad definitions, so we need to extract
@@ -5572,6 +5579,7 @@ def load_pcb_for_routing(
                     "through_hole": pad_type == "thru_hole",
                     "drill": drill_size,
                     "layer": pad_layer,
+                    "side": fp_side,
                     "rotation": pad_rotation,
                     "shape": pad_shape,
                     "roundrect_rratio": _pad_rratio_from_block(pad_block, pad_shape),

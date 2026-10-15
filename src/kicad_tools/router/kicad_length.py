@@ -48,7 +48,10 @@ Via span
     own layers, a through-hole pad only its footprint's side).  A via
     connected on fewer than two layers is a stub and adds no height.  The
     Route form keeps the declared span for such a via instead, because one
-    router ``Route`` can be a fragment of its net.
+    router ``Route`` can be a fragment of its net -- except for a via inside a
+    through-hole pad, whose barrel (not the via) carries any layer change, so
+    both forms measure it as a stub (issue #6780).  Router pads carry their
+    footprint's side (``Pad.side``) for the through-hole rule above.
 """
 
 from __future__ import annotations
@@ -489,9 +492,11 @@ def _via_height(
         if pos is not None and lo <= pos <= hi:
             if copper.contains(s.x1, s.y1) or copper.contains(s.x2, s.y2):
                 layers.add(pos)
+    in_through_hole_pad = False
     for pad in pads:
         if _pad_shape(pad).gap_to(via.x, via.y) >= radius:
             continue
+        in_through_hole_pad = in_through_hole_pad or pad.layers is None
         for name in (pad.side,) if pad.layers is None else pad.layers:
             pos = stackup.position(name)
             if pos is not None and lo <= pos <= hi:
@@ -499,7 +504,11 @@ def _via_height(
     if len(layers) >= 2:
         names = stackup.copper
         return stackup.span(names[min(layers)], names[max(layers)])
-    return stackup.span(*via.layers) if partial_net else 0.0
+    # Issue #6780: a via inside a through-hole pad is not a fragment's layer
+    # change -- the pad's barrel already joins every layer -- so the Route
+    # form measures it as the PCB form does (a stub) rather than assuming a
+    # continuation through the via.
+    return stackup.span(*via.layers) if partial_net and not in_through_hole_pad else 0.0
 
 
 def net_length(
@@ -643,8 +652,9 @@ def router_pad(pad: Any) -> LPad:
         shape=getattr(pad, "shape", None) or "rect",
         rratio=_pad_rratio(pad),
         layers=layers,
-        # Router pads carry no footprint side; their layer is the best guess.
-        side=_lname(pad.layer),
+        # Issue #6780: the loaders record the footprint side; a programmatic
+        # pad without one falls back to its own layer.
+        side=_lname(getattr(pad, "side", None) or pad.layer),
     )
 
 
