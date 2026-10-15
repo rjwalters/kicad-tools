@@ -2996,6 +2996,33 @@ def _finalize_signal_copper(
         raise
 
 
+def _write_router_netclass_sidecars(routed_path: Path, net_class_map: dict) -> list[Path]:
+    """Write the routed ``.kicad_pro``/``.kicad_dru`` with the router's classes.
+
+    Issue #6763: delegates to ``write_drc_constraints(router_net_classes=...)``
+    (the helper ``kct route`` uses, #6390) so both DRC engines hold the copper
+    to ``build_net_class_map()``.  Idempotent; authored classes win.
+    """
+    from kicad_tools.manufacturers import get_profile, write_drc_constraints
+    from kicad_tools.schema.pcb import PCB
+
+    try:
+        layers = len(PCB.load(str(routed_path)).copper_layers) or 4
+    except Exception:
+        layers = 4
+    profile = get_profile("jlcpcb")
+    written = write_drc_constraints(
+        routed_path,
+        profile.get_design_rules(layers=layers, copper_oz=1.0),
+        manufacturer_id=profile.id,
+        layers=layers,
+        copper_oz=1.0,
+        router_net_classes=net_class_map,
+    )
+    print("   DRC-constraint sidecars: " + ", ".join(str(w) for w in written))
+    return written
+
+
 def route_pcb(input_path: Path, output_path: Path) -> bool:
     """Route the PCB with per-protocol net-class engagement.
 
@@ -3819,6 +3846,12 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     sidecar_path = output_path.parent / "net_class_map.json"
     sidecar_path.write_text(_json.dumps(net_class_map_to_dict(net_class_map), indent=2))
     print(f"   Wrote net-class-map sidecar: {sidecar_path}")
+
+    # Issue #6763: declare the recipe's router net classes (Power 0.2 mm, ...)
+    # in the routed ``.kicad_pro`` / ``.kicad_dru`` -- the same call ``kct
+    # route`` makes (#6390).  Without it the project carries ``Default`` only,
+    # so ``kicad-cli pcb drc`` never enforces the clearance the router used.
+    _write_router_netclass_sidecars(output_path, net_class_map)
 
     # Issue #2835: emit copper-pour zones for GND + power nets so the
     # net-status report doesn't flag pour-net pads as "incomplete".
