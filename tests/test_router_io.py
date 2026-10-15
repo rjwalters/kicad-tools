@@ -2151,13 +2151,14 @@ class TestValidateRoutesLowerBoundRejection:
         router.routes.append(route)
 
         checked_pads: list[tuple[object, ...]] = []
-        real_fn = io_mod._segment_to_aabb_distance
+        # Issue #6718: the exact segment-vs-pad gap is the clearance kernel's.
+        real_fn = io_mod._copper_gap
 
-        def _counting_segment_to_aabb_distance(*args, **kwargs):
+        def _counting_copper_gap(*args, **kwargs):
             checked_pads.append(args)
             return real_fn(*args, **kwargs)
 
-        monkeypatch.setattr(io_mod, "_segment_to_aabb_distance", _counting_segment_to_aabb_distance)
+        monkeypatch.setattr(io_mod, "_copper_gap", _counting_copper_gap)
 
         violations = validate_routes(router)
 
