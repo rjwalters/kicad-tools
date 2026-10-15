@@ -721,23 +721,56 @@ def _aggregate_pair_outcome(segment_outcomes: list[str]) -> str:
     return next(o for o in segment_outcomes if not o.startswith("uncoupled-fallback:"))
 
 
+@functools.cache
+def _lattice_tap_retry_outcomes() -> frozenset[str]:
+    """``uncoupled-fallback:pair-<r>`` for every exhausted-search reason ``r``.
+
+    Built from :data:`kicad_tools.router.lattice.pathfinder.EXHAUSTED_SEARCH_REASONS`
+    -- the constants ``_route_impl`` actually returns -- so a renamed or
+    refined decline reason cannot silently drift out of the tap-chain retry
+    gate (issue #6743).  The ``pair-`` prefix and the ``uncoupled-fallback:``
+    wrapper are the ones ``_route_pair_impl`` and the #6373 fallback apply.
+    Imported lazily, like the pathfinder itself, so ``core`` stays cheap to
+    import.
+    """
+    from .lattice.pathfinder import EXHAUSTED_SEARCH_REASONS
+
+    return frozenset(f"uncoupled-fallback:pair-{r}" for r in EXHAUSTED_SEARCH_REASONS)
+
+
 def _lattice_tap_chain_retry_pairs(
     coupled: list[Any], outcomes: dict[object, str], available: set[str]
 ) -> frozenset[str]:
     """Single-trunk pairs to retry as tap chains (issue #6535).
 
     A pair qualifies when its connection is the single trunk (the 3-tuple
-    ``("pair", p, n)`` key -- a #6378 chained pair is not retried), the trunk
-    declined with exactly ``pair-no-path`` (and was therefore routed by the
+    ``("pair", p, n)`` key -- a #6378 chained pair is not retried), the trunk's
+    coupled A* ran and was exhausted (and the pair was therefore routed by the
     #6373 uncoupled fallback), and :func:`choose_pair_tap_chain` offered a
     different chain for it (``available``).
+
+    "Exhausted" is :func:`_lattice_tap_retry_outcomes`: ``pair-no-path`` and its
+    two diagnostic refinements, ``pair-no-path-keepout-constrained`` (#4605;
+    #6697 made the fat pair search consult the keepout mask, so a board with
+    #6401 plane-via reservations now reports this) and
+    ``pair-no-path-layer-constrained`` (#4979).  Issue #6743: the gate used to
+    compare the bare ``pair-no-path`` literal, so #6697's honest relabel
+    silently disabled this retry and board 06b fell from 3/4 to 0/4 coupled.
+    The layer-constrained refinement is included for the same reason: the
+    reason labels are a precedence order (keepout outranks layer outranks
+    plain), not distinct failure classes, so a search pruned by BOTH a keepout
+    and a layer set already qualifies -- excluding one pruned only by the layer
+    set would be incoherent.  A tap chain does not lift either constraint; it
+    only re-routes around the tap part, and the #6550 keep rule discards a
+    retry that does not improve coupling.  Declines where no corridor search
+    ran or the failure is not the corridor (``pair-no-parity``,
+    ``pair-partner-pad``, ``pair-empty-route``, ...) never qualify.
     """
+    exhausted = _lattice_tap_retry_outcomes()
     return frozenset(
         pc.pair_name
         for pc in coupled
-        if len(pc.key) == 3
-        and pc.pair_name in available
-        and outcomes.get(pc.key) == "uncoupled-fallback:pair-no-path"
+        if len(pc.key) == 3 and pc.pair_name in available and outcomes.get(pc.key) in exhausted
     )
 
 
@@ -4881,7 +4914,9 @@ class Autorouter:
             return routes, stats_
 
         routes_by_key, stats = _negotiate(connections, coupled)
-        # Issue #6535: a single trunk that declined ``pair-no-path`` because a
+        # Issue #6535: a single trunk that declined ``pair-no-path`` (or a
+        # #4605/#4979 ``-keepout-``/``-layer-constrained`` refinement of it,
+        # issue #6743) because a
         # tap part (board 06 LVDS termination resistor) straddles its corridor
         # gets one retry as an IC -> tap -> IC chain.  Pairs whose trunk
         # coupled -- and boards with no such pair -- never reach this.
@@ -5402,6 +5437,18 @@ class Autorouter:
         # Every pair's first-run coupling, read before the retry's
         # ``route_netset`` replaces ``pf.pair_outcomes`` (issue #6550).
         first_coupling = _lattice_pair_coupling(first_coupled, pf.pair_outcomes)
+        # Issue #6743: name the decline reason(s) that actually qualified the
+        # retried trunks (``pair-no-path`` or a ``-keepout-``/``-layer-
+        # constrained`` refinement, see :func:`_lattice_tap_retry_outcomes`).
+        declined = ", ".join(
+            sorted(
+                {
+                    pf.pair_outcomes[pc.key].removeprefix("uncoupled-fallback:")
+                    for pc in first_coupled
+                    if pc.pair_name in retry_pairs and pc.key in pf.pair_outcomes
+                }
+            )
+        )
         if pf._class_pad_growth:
             # The first negotiation left grown pad keep-outs (#6489) baked into
             # the lattice; ``route_netset`` starts from ungrown pads, so the
@@ -5419,7 +5466,7 @@ class Autorouter:
         score = sum(k / n for name, (k, n) in coupling.items() if name in retry_pairs)
         print(
             f"  Diff pairs (lattice): tap-chain retry for {len(retry_pairs)} pair(s) whose "
-            f"trunk declined pair-no-path ({', '.join(sorted(retry_pairs))}): "
+            f"trunk declined {declined or 'pair-no-path'} ({', '.join(sorted(retry_pairs))}): "
             f"{'kept' if kept else 'discarded'} (coupled segments {first_score:g} -> "
             f"{score:g}, unrouted connections {first_failed} -> {failed}"
             f"{', deadline hit' if stats.deadline_hit else ''}"
