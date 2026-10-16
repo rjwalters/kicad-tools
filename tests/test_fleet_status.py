@@ -2047,6 +2047,84 @@ class TestExtractPcbNamedNets:
         assert result is None
 
 
+class TestNameOnlyNetDialect:
+    """Issue #6815: KiCad 10 name-only pad nets ``(net "VCC")``."""
+
+    def test_name_only_pads_match_numbered_form(self, tmp_path):
+        from kicad_tools.cli.fleet_cmd import _extract_pcb_named_nets
+
+        numbered = tmp_path / "numbered.kicad_pcb"
+        numbered.write_text(
+            """(kicad_pcb
+          (net 0 "")
+          (net 1 "VCC")
+          (net 2 "GND")
+          (footprint "R_0402"
+            (pad "1" smd rect (at 0 0) (size 0.5 0.5) (layers "F.Cu") (net 1 "VCC"))
+            (pad "2" smd rect (at 1 0) (size 0.5 0.5) (layers "F.Cu") (net 2 "GND"))
+          )
+        )"""
+        )
+        name_only = tmp_path / "name_only.kicad_pcb"
+        name_only.write_text(
+            """(kicad_pcb
+          (footprint "R_0402"
+            (pad "1" smd rect (at 0 0) (size 0.5 0.5) (layers "F.Cu") (net "VCC"))
+            (pad "2" smd rect (at 1 0) (size 0.5 0.5) (layers "F.Cu") (net "GND"))
+          )
+        )"""
+        )
+        assert _extract_pcb_named_nets(name_only) == {"VCC", "GND"}
+        assert _extract_pcb_named_nets(name_only) == _extract_pcb_named_nets(numbered)
+
+    def test_committed_board_02_has_no_drift(self):
+        from kicad_tools.cli.fleet_cmd import _detect_source_drift
+
+        board = Path(__file__).resolve().parent.parent / "boards" / "02-charlieplex-led"
+        pcbs = sorted((board / "output").glob("*_routed.kicad_pcb"))
+        if not pcbs:
+            pytest.skip("board 02 routed PCB not present")
+        result = _detect_source_drift(pcbs[0], board)
+        assert result[0] is False
+        assert result[1] == result[2]
+        assert result[2]
+
+
+class TestSpecDiscoveryAndSkipped:
+    """Issue #6815: project.kct discovery and skipped-board reporting."""
+
+    def test_project_kct_artifacts_discovery_and_skipped(self, tmp_path):
+        from kicad_tools.cli.fleet_cmd import (
+            _discover_boards,
+            _find_skipped_boards,
+            _format_json,
+            _format_table,
+        )
+
+        boards = tmp_path / "boards"
+        b9 = boards / "09-spec"
+        (b9 / "output").mkdir(parents=True)
+        pcb = b9 / "output" / "thing.kicad_pcb"
+        pcb.write_text("(kicad_pcb)")
+        (b9 / "project.kct").write_text(
+            "kct_version: '1.0'\n"
+            "project:\n  name: thing\n  artifacts:\n    pcb: output/thing.kicad_pcb\n"
+        )
+        b8 = boards / "08-concept"
+        b8.mkdir()
+        (b8 / "project.kct").write_text("kct_version: '1.0'\nproject:\n  name: c\n")
+
+        found = _discover_boards(boards, "*_routed.kicad_pcb")
+        assert [b.name for b in found] == ["09-spec"]
+        skipped = _find_skipped_boards(boards, "*_routed.kicad_pcb")
+        assert [x["name"] for x in skipped] == ["08-concept"]
+        assert "no output/ directory" in skipped[0]["reason"]
+        assert "skipped: 08-concept" in _format_table(
+            found, boards, ship_only=False, skipped=skipped
+        )
+        assert json.loads(_format_json(found, boards, skipped))["skipped"] == skipped
+
+
 class TestSingleBoardDirDiscovery:
     """Auto-detection of single-board-dir vs parent-dir invocations (#3938)."""
 
