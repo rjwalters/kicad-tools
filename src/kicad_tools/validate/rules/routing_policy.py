@@ -34,7 +34,10 @@ A net of an engaged differential pair whose pair limits resolve a via cap
 is already held to it by ``diffpair_uncoupled_length``
 (:func:`~kicad_tools.validate.diffpair_engagement.resolve_pair_thresholds`).
 The caller passes those nets as ``deferred_via_nets`` and this rule skips
-their via check, so a pair net is never reported twice.
+their via check, so a pair net is never reported twice.  Only a pair the pair
+rule actually measures (straight track on both nets) is deferred: a
+half-routed pair is skipped there, so this rule checks its via cap itself
+(Issue #6820).
 
 Missing policy (opt-in)
 =======================
