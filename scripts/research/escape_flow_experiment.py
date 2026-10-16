@@ -84,6 +84,12 @@ BOARDS: dict[str, Board] = {
         "03",
         "boards/03-usb-joystick/output/usb_joystick.kicad_pcb",
         layers=4,
+        # Issue #6829: without the committed map USB_D is held to the generic
+        # 0.5 mm skew default instead of its declared USB2_FS limit.
+        kct_args=(
+            "--net-class-map",
+            str(REPO / "boards/03-usb-joystick/output/net_class_map.json"),
+        ),
         role="subject: U1 QFP-44",
     ),
     "04": Board(
