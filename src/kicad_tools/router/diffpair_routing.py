@@ -2023,6 +2023,10 @@ class CoupledPathfinder:
         # ``best_state=n/a (cpp)`` instead of a misleading ``best_state=None``
         # for the C++ path, which carries no Python ``CoupledState`` object.
         self.last_coupled_backend: str = "python"
+        # Issue #6860: why the most-recent ``route_coupled`` declined the pair
+        # before searching (an SMD pad on a layer the pair may not use, or no
+        # permitted layer at all); ``None`` when the search ran.
+        self.last_decline_reason: str | None = None
 
         # Issue #3508: per-search move-rejection counters keyed by
         # rejection reason (sym/asym x blocked/spacing/floor/trail,
@@ -3405,10 +3409,12 @@ class CoupledPathfinder:
           (``hard_avoided_layer_indices(rules.strict_layers)``: ampacity
           classes, or ``--strict-layers``).
 
-        Never returns an empty list: when filtering would empty it the pad
-        layer alone is returned (no layer change possible), mirroring the
-        defensive non-empty rule in ``_apply_allowed_layers_to_routable``.
+        May return an empty list (Issue #6860): ``route_coupled`` then
+        declines the pair, exactly as the single-ended router returns
+        ``None`` when its filtered start/end layer sets are empty.
+        ``pad_layer`` is kept for call-site compatibility and is unused.
         """
+        del pad_layer
         base = list(self.grid.get_routable_indices())
         allowed = self.rules.allowed_layers
         hard_avoided: set[int] = set()
@@ -3424,7 +3430,41 @@ class CoupledPathfinder:
             if idx not in hard_avoided
             and (allowed is None or Layer(self.grid.index_to_layer(idx)).kicad_name in allowed)
         ]
-        return permitted or [pad_layer]
+        return permitted
+
+    def _coupled_layer_decline_reason(
+        self,
+        coupled_layers: list[int],
+        p_start: Pad,
+        p_end: Pad,
+        n_start: Pad,
+        n_end: Pad,
+    ) -> str | None:
+        """Why the coupled search must decline this pair, or ``None`` (#6860).
+
+        Mirrors the single-ended router, which returns ``None`` when the
+        ``allowed_layers`` / hard ``avoid_layers`` filters leave a start or
+        end pad with no legal layer.  A through-hole pad has copper on every
+        layer, so it only fails when no layer is permitted at all; any other
+        pad (SMD) is reachable on its own layer only.
+        """
+        if not coupled_layers:
+            return "no permitted routing layer (allowed_layers / hard avoid_layers)"
+        for role, pad in (
+            ("P start", p_start),
+            ("P end", p_end),
+            ("N start", n_start),
+            ("N end", n_end),
+        ):
+            if pad.through_hole:
+                continue
+            pad_layer = self.grid.layer_to_index(pad.layer.value)
+            if pad_layer not in coupled_layers:
+                return (
+                    f"{role} SMD pad {pad.ref}.{pad.pin} on {pad.layer.kicad_name}, "
+                    "a layer the pair may not use (allowed_layers / hard avoid_layers)"
+                )
+        return None
 
     def _try_cpp_route_coupled(
         self,
@@ -3718,6 +3758,8 @@ class CoupledPathfinder:
         self.last_coupled_backend = "python"
         # Issue #3508: reset the per-search rejection counters.
         self.last_rejections = collections.defaultdict(int)
+        # Issue #6860: reset the pre-search decline reason.
+        self.last_decline_reason = None
 
         # Issue #4065: stash the pads for the C++-path reconstruction helper
         # (it recovers width/net/name from the same Pad objects the Python
@@ -3745,6 +3787,24 @@ class CoupledPathfinder:
         coupled_layers = self._coupled_routable_layers(
             p_start.net_name, n_start.net_name, start_layer
         )
+        # Issue #6860: decline the pair exactly where the single-ended router
+        # does (``cpp_backend.py`` allowed-layers / hard-avoid seed filters):
+        # no permitted layer at all, or an SMD start/end pad whose only copper
+        # layer is forbidden.  Returning ``None`` sends the pair down the
+        # normal declined-pair fallback instead of committing copper on a
+        # forbidden layer.
+        decline_reason = self._coupled_layer_decline_reason(
+            coupled_layers, p_start, p_end, n_start, n_end
+        )
+        if decline_reason is not None:
+            self.last_decline_reason = decline_reason
+            logger.info(
+                "coupled search declined pair %s/%s: %s",
+                p_start.net_name,
+                n_start.net_name,
+                decline_reason,
+            )
+            return None
         # A through-hole start pad has copper on every layer, so the pair may
         # leave it on any permitted one; move off a disallowed pad layer.
         if start_layer not in coupled_layers and p_start.through_hole and n_start.through_hole:
@@ -11873,6 +11933,11 @@ class DiffPairRouter:
                 f"rejections={dict(pathfinder.last_rejections)} "
                 f"success={result is not None}"
             )
+            # Issue #6860: say why a pair never searched (layer decline), so
+            # its fallback to independent routing is not read as a stall.
+            decline_reason = getattr(pathfinder, "last_decline_reason", None)
+            if decline_reason is not None:
+                print(f"    [coupled-declined] pair={pair.name} reason={decline_reason}")
 
             # Issue #4459: structured per-pair ground-truth report.  Classify
             # this attempt into the #4409 failure taxonomy so Phases 2-5 can
@@ -11990,10 +12055,22 @@ class DiffPairRouter:
                     if pose_remaining >= _POSE_CENTERLINE_MIN_BUDGET_S
                     else None
                 )
+            # Issue #6860: a pair the coupled search declined on layer grounds
+            # must not be rebuilt by the pose trunk either (it is single-layer
+            # on the pad layer, i.e. on the forbidden layer).
+            pose_layer_declined = getattr(pathfinder, "last_decline_reason", None) is not None
             if (
                 result is None
                 and self.enable_pose_centerline
                 and not spec.polarity_swap
+                and pose_layer_declined
+            ):
+                print("    [coupled-pose] skipped: pair declined on layer grounds")
+            if (
+                result is None
+                and self.enable_pose_centerline
+                and not spec.polarity_swap
+                and not pose_layer_declined
                 and pose_timeout is None
             ):
                 print("    [coupled-pose] skipped: per-pair wall-clock budget spent")
@@ -12001,6 +12078,7 @@ class DiffPairRouter:
                 result is None
                 and self.enable_pose_centerline
                 and not spec.polarity_swap
+                and not pose_layer_declined
                 and pose_timeout is not None
             ):
                 from .diffpair_pose import route_centerline_pose
