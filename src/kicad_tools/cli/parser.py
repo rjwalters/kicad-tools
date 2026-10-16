@@ -17,6 +17,7 @@ from kicad_tools import __version__
 from kicad_tools.benchmark.cases import Difficulty
 from kicad_tools.cli.copper_weight import add_check_copper_argument
 from kicad_tools.cli.format_options import add_format_flag
+from kicad_tools.cli.route_exit_codes_help import ROUTE_EXIT_CODES_EPILOG
 from kicad_tools.manufacturers import get_all_manufacturer_names
 
 __all__ = ["create_parser"]
@@ -3577,11 +3578,13 @@ def _add_route_parser(subparsers) -> None:
         "route",
         help="Autoroute a PCB",
         epilog=(
-            "PERFORMANCE: The C++ backend provides 10-100x faster routing. "
+            ROUTE_EXIT_CODES_EPILOG
+            + "\nPERFORMANCE: The C++ backend provides 10-100x faster routing. "
             "Check status with 'kct build-native --check' and build with "
             "'kct build-native'. The --backend flag defaults to 'auto' which "
             "uses C++ when available and falls back to Python otherwise."
         ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     route_parser.add_argument("pcb", help="Path to .kicad_pcb file")
     route_parser.add_argument("-o", "--output", help="Output file path")

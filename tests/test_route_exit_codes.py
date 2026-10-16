@@ -666,6 +666,36 @@ class TestRouteExitCodeEpilog:
         )
 
 
+class TestOuterRouteHelpExitCodes:
+    """``kct route --help`` (the outer parser) lists the exit-code ladder (issue #6291)."""
+
+    @staticmethod
+    def _outer_help_text():
+        import argparse
+
+        from kicad_tools.cli.parser import create_parser
+
+        parser = create_parser()
+        sub = next(a for a in parser._actions if isinstance(a, argparse._SubParsersAction))
+        return sub.choices["route"].format_help()
+
+    def test_outer_help_documents_exit_10(self):
+        text = self._outer_help_text()
+        assert "exit codes:" in text
+        assert "  10 UNVERIFIED" in text
+
+    def test_outer_help_documents_each_exit_code(self):
+        text = self._outer_help_text()
+        for code in range(6):
+            assert f"  {code}  " in text
+
+    def test_outer_and_inner_epilogs_share_one_source(self):
+        from kicad_tools.cli.route_exit_codes_help import ROUTE_EXIT_CODES_EPILOG
+
+        assert ROUTE_EXIT_CODES_EPILOG in self._outer_help_text()
+        assert ROUTE_EXIT_CODES_EPILOG in TestRouteExitCodeEpilog._capture_help_text()
+
+
 # ---------------------------------------------------------------------------
 # SIGINT exit code disambiguation (issue #2018)
 # ---------------------------------------------------------------------------

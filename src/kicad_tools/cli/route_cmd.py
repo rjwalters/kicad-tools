@@ -63,7 +63,6 @@ import re
 import shutil
 import signal
 import sys
-import textwrap
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -72,6 +71,7 @@ from typing import TYPE_CHECKING, Any, TypedDict, cast
 from kicad_tools.core.kicad_lock import check_kicad_lock
 
 from .route_deadline import record_stage, restore_stage
+from .route_exit_codes_help import ROUTE_EXIT_CODES_EPILOG
 from .route_placement import for_attempt, select_result
 
 if TYPE_CHECKING:
@@ -15858,32 +15858,7 @@ def _route_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="kicad-tools route",
         description="Autoroute a KiCad PCB file",
-        epilog=textwrap.dedent("""\
-            exit codes:
-              0  all nets routed (or meets --min-completion), DRC clean
-              1  fatal failure -- no nets routed
-              2  partial routing -- below threshold or requested placement-blocked nets
-              3  post-route validation or processing failed:
-                 DRC violations remain, --auto-fix rolled back (issue #2852),
-                 the --voltage-map HV pairwise audit failed (issue #4588),
-                 selective zone filling failed, or staged repair could not
-                 preserve fixed copper and net membership
-              4  partial routing AND segment-segment or HV pairwise
-                 clearance violations (issues #1666, #4588)
-              5  interrupted by SIGINT with partial results saved
-              8  --complete: one or more unroutable links remain (issue #4477)
-              9  a pre-route gate fired -- detailed routing was not started;
-                 the stderr prefix says which:
-                 [crosstail-gate] --census-advisory-gate predicts an inert
-                 crossover lattice (issue #4799, before any router work), or
-                 [plan-gate] --plan-gate found the routing plan infeasible
-                 (issue #5510-1c, after the plan stage, before any detailed
-                 routing); --force overrides the latter
-              10 UNVERIFIED -- would have been 0, but the post-route DRC and/or
-                 stranded-pour check was skipped because --timeout ran out
-                 (issue #6273); the board is saved, run 'kct check' on it.
-                 JSON summary.verdict is "unverified"
-        """),
+        epilog=ROUTE_EXIT_CODES_EPILOG,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("pcb", help="Path to .kicad_pcb file")
