@@ -17,9 +17,13 @@ unchanged and the emitted legs pass the #3907 ``Segment`` 45-degree choke
 untouched.  Copper is geometric -- :class:`CommittedCopper` and DRC do not
 care that offset vertices sit off-node.
 
-**v1 pair agents are planar** (``allow_vias=False``): a pair that cannot
+**The fat pair search is planar** (``allow_vias=False``): a pair that cannot
 complete a coupled run on one layer DECLINES honestly, with a per-pair
-reason, and never ships a short (#3906 discipline).  The coupled agent
+reason, and never ships a short (#3906 discipline).  Issue #6444 adds one
+retry for a run whose planar search is exhausted: fan-via terminal gateways
+(:mod:`.gateway`) move the run to another layer -- each net fans out to one
+through via per end on its pad layer, and the same planar search couples the
+run between the via pairs on the gateway layer.  The coupled agent
 itself never splits; issue #6373 added an opt-in (``route_netset(...,
 uncoupled_fallback=True)``, always on from the autorouter) that then routes
 the declined pair's main run as two ordinary single-ended legs, reported as

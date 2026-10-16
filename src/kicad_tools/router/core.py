@@ -4931,6 +4931,32 @@ class Autorouter:
             float(getattr(pair_class, "clearance", None) or 0.0),
         )
 
+    def _lattice_pair_gateway_limits(
+        self, pairs: list[Any]
+    ) -> dict[object, tuple[float | None, int | None]]:
+        """Per-segment protocol limits for the #6444 gateway retry.
+
+        ``{pc.key: (max uncoupled mm per terminal, max vias per net)}`` from
+        :func:`~kicad_tools.validate.diffpair_engagement.resolve_pair_thresholds`
+        -- the same resolver ``kct check`` uses, so a gateway is never built
+        that the checker would then fail on fan length or via count.
+        """
+        from kicad_tools.validate.diffpair_engagement import resolve_pair_thresholds
+
+        limits: dict[object, tuple[float | None, int | None]] = {}
+        ncm = getattr(self, "net_class_map", None)
+        for pc in pairs:
+            try:
+                t = resolve_pair_thresholds(
+                    ncm,
+                    self.net_names.get(pc.pad_p_a.net) or pc.pad_p_a.net_name or "",
+                    self.net_names.get(pc.pad_n_a.net) or pc.pad_n_a.net_name or "",
+                )
+            except Exception:  # limits are a bound, never a reason to crash
+                continue
+            limits[pc.key] = (t.max_uncoupled_per_terminal_mm, t.max_vias_per_net)
+        return limits
+
     def _negotiate_lattice_netset(self) -> dict[int, list[Route]]:
         """Negotiate every routable net through the shared lattice (#4278).
 
@@ -5083,6 +5109,17 @@ class Autorouter:
                 fixed = fixed_copper + [route for _key, route, _ends in ties]
                 clearance = dict(fixed_clearance)
                 _seed_clearance(fixed, clearance)
+            # Issue #6444: each segment's protocol limits bound its fan-via
+            # gateway retry (fan length, vias per net).
+            if hasattr(pf, "pair_gateway_limits"):
+                pf.pair_gateway_limits = self._lattice_pair_gateway_limits(pairs)
+                # A single trunk that has a #6535 tap chain keeps that retry
+                # first: the chain couples on the pad layer without vias,
+                # which is exactly today's copper for LVDS-style pairs.
+                taps: set[str] = set(getattr(self, "_lattice_tap_chain_pairs", set()) or ())
+                pf.pair_gateway_skip = frozenset(
+                    pc.key for pc in pairs if len(pc.key) == 3 and pc.pair_name in taps
+                )
             routes, stats_ = pf.route_netset(
                 conns,
                 coupled=pairs,
@@ -5095,6 +5132,9 @@ class Autorouter:
                 uncoupled_fallback=True,
                 # Issue #6437: pair-net copper moves only within a skew budget.
                 pair_nets=getattr(self, "_lattice_pair_net_ids", None),
+                # Issue #6444: a segment whose planar search is exhausted gets
+                # one fan-via gateway retry on another layer.
+                **({"pair_gateways": True} if hasattr(pf, "pair_gateway_limits") else {}),
             )
             for key, route, _ends in ties:
                 routes[key] = route
@@ -5242,6 +5282,27 @@ class Autorouter:
                     (label, o) for n, label, o in self._lattice_pair_segment_outcomes if n == name
                 ):
                     print(f"      {name}[{idx}] {label}: {seg_outcome}")
+            # Issue #6444: name every fan-via gateway, and why a retried
+            # segment's gateway declined (layer, setback, vias, candidates per
+            # terminal).  Printed AFTER the outcome list, whose layout the
+            # diff-pair bench parses.
+            gateways = getattr(pf, "pair_gateways", {}) or {}
+            gateway_log = getattr(pf, "pair_gateway_log", {}) or {}
+            rollback = getattr(pf, "pair_gateway_rollback", None)
+            if isinstance(rollback, str):
+                print(f"  Diff-pair gateway (lattice): {rollback}")
+            for pc in coupled:
+                label = f"{pc.pad_p_a.ref}.{pc.pad_p_a.pin}->{pc.pad_p_b.ref}.{pc.pad_p_b.pin}"
+                if pc.key in gateways:
+                    print(
+                        f"  Diff-pair gateway (lattice) {pc.pair_name} {label}: "
+                        f"coupled through {gateways[pc.key]}"
+                    )
+                elif pc.key in gateway_log and outcomes.get(pc.key, "") != "coupled":
+                    print(
+                        f"  Diff-pair gateway (lattice) {pc.pair_name} {label}: "
+                        f"{gateway_log[pc.key]}"
+                    )
             self._print_pair_threshold_report()
             # Issue #6373: a pair routed by the uncoupled fallback is a
             # diff-pair WARNING (coupling / skew not guaranteed), not an open

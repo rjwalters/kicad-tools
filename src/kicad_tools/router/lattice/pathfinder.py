@@ -47,7 +47,7 @@ import heapq
 import math
 import time
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -57,6 +57,7 @@ from ..quantize import dogleg_points
 from ..rules import DesignRules
 from .coupled import CoupledConnection
 from .escape_plan import EscapeChoice, chosen_stub, foreign_reservations, plan_tapered_escapes
+from .gateway import Gateway, GatewaySite
 from .geometry import Pt, Rect, dist, pt_in_rect, seg_seg_dist
 from .guide import PartnerGuide
 from .history import PhysicalHistory
@@ -108,6 +109,20 @@ REASON_NO_PATH_LAYER = "no-path-layer-constrained"
 EXHAUSTED_SEARCH_REASONS: frozenset[str] = frozenset(
     {REASON_NO_PATH, REASON_NO_PATH_KEEPOUT, REASON_NO_PATH_LAYER}
 )
+
+#: Issue #6444: pair-segment decline reasons that earn ONE fan-via gateway
+#: retry (``route_netset(..., pair_gateways=True)``): an exhausted planar
+#: search (every :data:`EXHAUSTED_SEARCH_REASONS` refinement, as
+#: ``_route_pair_impl`` prefixes it) or emitted legs clipping a keepout.  A
+#: named set, like the #6535 tap-retry gate, so a diagnostic refinement of a
+#: reason cannot silently disable the retry.
+GATEWAY_RETRY_REASONS: frozenset[str] = frozenset(
+    {f"pair-{r}" for r in EXHAUSTED_SEARCH_REASONS} | {"pair-leg-keepout"}
+)
+
+#: Issue #6444: net id the fat pair search sees a gateway's own vias under
+#: (``_route_pair_impl(keep_clear=...)``) -- never a real net.
+_KEEP_CLEAR_NET = -6444
 
 #: Issue #6489: most re-negotiations with grown pads after a class-pad repair.
 _MAX_PAD_GROWTH_ROUNDS = 2
@@ -219,6 +234,11 @@ class _PairResult:
     routes: list[Route]  # [P route, N route]
     runs: list[tuple[int, int, list[Pt]]]  # (net, layer_index, polyline) per leg
     resources: set[Resource]  # the fat centerline's lattice resources
+    # Issue #6444: ``(net, site)`` of every fan via of a gateway-coupled pair
+    # (empty for a planar pair), committed with the legs.
+    vias: list[tuple[int, Pt]] = field(default_factory=list)
+    # Issue #6444: log line naming the gateway (``None`` for a planar pair).
+    gateway: str | None = None
 
 
 def _diverse_pair_stubs(
@@ -384,6 +404,21 @@ class LatticePathfinder:
         # Per-diff-pair outcome for the best pass: "coupled" or a decline
         # reason, keyed by ``CoupledConnection.key`` (issue #4270).
         self.pair_outcomes: dict[object, str] = {}
+        # Issue #6444: fan-via gateway retry state.  ``pair_gateway_limits``
+        # maps a ``CoupledConnection.key`` to the protocol's
+        # ``(max uncoupled mm per terminal, max vias per net)`` (either may be
+        # ``None``), installed by the caller -- the pathfinder never resolves
+        # protocols itself.  ``pair_gateway_log`` holds the latest gateway
+        # diagnostic per key; ``pair_gateways`` names the gateway of every
+        # pair the BEST pass coupled through one.
+        self.pair_gateway_limits: dict[object, tuple[float | None, int | None]] = {}
+        self.pair_gateway_log: dict[object, str] = {}
+        self.pair_gateways: dict[object, str] = {}
+        # Keys the caller excludes from the gateway retry (a trunk the #6535
+        # tap-chain retry handles first).
+        self.pair_gateway_skip: frozenset[object] = frozenset()
+        # Log line when :meth:`route_netset` re-negotiated without gateways.
+        self.pair_gateway_rollback: str | None = None
         # Issue #4355: immovable copper from NON-listed nets (the preserved
         # ``router.existing_routes``), pre-processed into per-segment seed
         # tuples ``(layer_idx, a, b, net, half_width, clearance)`` plus via
@@ -1474,9 +1509,31 @@ class LatticePathfinder:
         this way). The unconditional OTHER-net grown-rect veto below is
         never affected by this override.
         """
-        lattice = self.build()
+        point = self.build().node_point(key)
+        return self._via_ok_at(
+            point,
+            net,
+            committed,
+            via_in_pad_override=via_in_pad_override,
+            clearance=clearance,
+        )
+
+    def _via_ok_at(
+        self,
+        point: Pt,
+        net: int,
+        committed: CommittedCopper,
+        *,
+        via_in_pad_override: bool | None = None,
+        clearance: float | None = None,
+    ) -> bool:
+        """:meth:`_via_ok` at an arbitrary point (issue #6444 fan-via gateways).
+
+        Identical legality -- the lattice-node variant only resolves the
+        node's coordinates first -- so a gateway via is held to exactly the
+        rules every negotiated via meets.
+        """
         obstacles = self.obstacles
-        point = lattice.node_point(key)
         via_radius = self.rules.via_diameter / 2.0
         if not self._escape_boundary.segment_clear(point, point, via_radius):
             return False
@@ -2418,6 +2475,8 @@ class LatticePathfinder:
         committed: CommittedCopper,
         history: dict[Resource, float],
         present: float,
+        layers: tuple[int, ...] | None = None,
+        keep_clear: tuple[tuple[Pt, float], ...] = (),
     ) -> tuple[_PairResult | None, str]:
         """Route one engaged diff pair as a fat centerline agent (#4270).
 
@@ -2435,6 +2494,17 @@ class LatticePathfinder:
         once per consistent parity -- this lets a pair whose direct approach
         would need a polarity twist hook around an endpoint and approach
         from the reverse direction instead of declining outright.
+
+        ``layers`` (issue #6444) overrides the layer the run is searched on.
+        The fan-via gateway retry passes its gateway layer here, with the
+        endpoint "pads" being the virtual via pads; ``None`` keeps the
+        intersection of the four endpoint pads' layers.  ``keep_clear``
+        (issue #6444) lists ``(via site, clearance)`` the fat SEARCH must
+        treat as foreign obstacles although they belong to the pair's own
+        nets: the gateway vias sit a via-to-via gap apart, wider than the
+        pair pitch, so a centerline passing between them would lay each leg
+        over the partner's via.  The finish gate still sees them as the pair's
+        own copper (so each leg can attach to its via).
         """
         from .coupled import (
             assign_polarity,
@@ -2454,6 +2524,8 @@ class LatticePathfinder:
             for p in (pc.pad_p_a, pc.pad_n_a, pc.pad_p_b, pc.pad_n_b)
         ]
         common = tuple(sorted(set.intersection(*layer_sets)))
+        if layers is not None:
+            common = tuple(sorted(set(common) & set(layers)))
         if not common:
             return None, "pair-no-common-layer"
 
@@ -2500,33 +2572,52 @@ class LatticePathfinder:
             if (round(pad.x, 6), round(pad.y, 6), pad.net) in endpoint_sites
         )
 
+        # Issue #6444: gateway vias are foreign to the fat search only (see
+        # ``keep_clear``); a nested trial adds them under a sentinel net id
+        # around each search call and rolls them back before the finish gate.
+        def guard_open() -> tuple[int, int, int] | None:
+            if not keep_clear:
+                return None
+            mark = committed.begin_trial()
+            for site, clr in keep_clear:
+                committed.add_via(site, _KEEP_CLEAR_NET, clr)
+            return mark
+
+        def guard_close(mark: tuple[int, int, int] | None) -> None:
+            if mark is not None:
+                committed.rollback_trial(mark)
+
         # Collect EVERY legal fat stub in the search radius, then downselect
         # for geometric diversity.  A count-capped nearest-first scan can
         # exhaust itself inside an enclosed pocket (the board-06 BGA guard
         # ring) and never reach the one dogleg that threads the way out.
-        raw_a = self.pad_stubs(
-            v_a,
-            net_p,
-            committed,
-            kmax=10_000,
-            extra_clearance=half_pitch,
-            partner_net=net_n,
-            layers=common,
-            exempt_pads=exempt,
-        )
+        guard = guard_open()
+        try:
+            raw_a = self.pad_stubs(
+                v_a,
+                net_p,
+                committed,
+                kmax=10_000,
+                extra_clearance=half_pitch,
+                partner_net=net_n,
+                layers=common,
+                exempt_pads=exempt,
+            )
+            raw_b = self.pad_stubs(
+                v_b,
+                net_p,
+                committed,
+                kmax=10_000,
+                extra_clearance=half_pitch,
+                partner_net=net_n,
+                layers=common,
+                exempt_pads=exempt,
+            )
+        finally:
+            guard_close(guard)
         stubs_a = _diverse_pair_stubs(raw_a, pc.mid_a, (pc.pad_p_a, pc.pad_n_a))
         if not stubs_a:
             return None, "pair-escape-a"
-        raw_b = self.pad_stubs(
-            v_b,
-            net_p,
-            committed,
-            kmax=10_000,
-            extra_clearance=half_pitch,
-            partner_net=net_n,
-            layers=common,
-            exempt_pads=exempt,
-        )
         stubs_b = _diverse_pair_stubs(raw_b, pc.mid_b, (pc.pad_p_b, pc.pad_n_b))
         if not stubs_b:
             return None, "pair-escape-b"
@@ -2711,24 +2802,28 @@ class LatticePathfinder:
         for bit in sorted((True, False), key=parity_rank):
             if not by_bit_a[bit] or not by_bit_b[bit]:
                 continue
-            result, search_reason = self._route_impl(
-                v_a,
-                v_b,
-                pc.net_class,
-                committed=committed,
-                history=history,
-                present=present,
-                allow_vias=False,
-                extra_clearance=half_pitch,
-                partner_net=net_n,
-                stubs_override=(by_bit_a[bit], by_bit_b[bit]),
-                # The exemption is for the perpendicular-gated stub doglegs
-                # ONLY: the A* body sees every pad -- including the pair's
-                # own -- as an obstacle, else the shortest fat path hugs an
-                # endpoint pad row and the emitted legs land on the
-                # partner's copper (board-06 MIPI lesson).
-                exempt_pads=frozenset(),
-            )
+            guard = guard_open()
+            try:
+                result, search_reason = self._route_impl(
+                    v_a,
+                    v_b,
+                    pc.net_class,
+                    committed=committed,
+                    history=history,
+                    present=present,
+                    allow_vias=False,
+                    extra_clearance=half_pitch,
+                    partner_net=net_n,
+                    stubs_override=(by_bit_a[bit], by_bit_b[bit]),
+                    # The exemption is for the perpendicular-gated stub
+                    # doglegs ONLY: the A* body sees every pad -- including
+                    # the pair's own -- as an obstacle, else the shortest fat
+                    # path hugs an endpoint pad row and the emitted legs land
+                    # on the partner's copper (board-06 MIPI lesson).
+                    exempt_pads=frozenset(),
+                )
+            finally:
+                guard_close(guard)
             if result is None:
                 reason = (
                     search_reason if search_reason.startswith("pair-") else f"pair-{search_reason}"
@@ -2739,6 +2834,506 @@ class LatticePathfinder:
                 return pres, "ok"
             reason = finish_reason
         return None, reason
+
+    # -- fan-via terminal gateways (issue #6444) --------------------------------
+
+    def _gateway_pad_class_clear(
+        self, a: Pt, b: Pt, layer: int | None, net: int, half: float, reqs: list[float] | None
+    ) -> bool:
+        """True when ``a-b`` keeps every other-net pad's OWN class clearance.
+
+        The static masks space copper at the querying net's clearance; the
+        pad side of a track-vs-pad pair is ``max(own, pad class)`` (#6395),
+        which the post-route class-pad repair enforces only on single-ended
+        copper.  Gateway copper is pair-owned and never moved, so it is held
+        to the pad class here.  ``layer=None`` probes every layer (a via).
+        """
+        if reqs is None:
+            return True
+        from .coupled import seg_rect_dist
+
+        reach = half + max(reqs, default=0.0) + 0.5
+        x0, x1 = min(a[0], b[0]) - reach, max(a[0], b[0]) + reach
+        y0, y1 = min(a[1], b[1]) - reach, max(a[1], b[1]) + reach
+        for idx in self.obstacles.pads_near(x0, y0, x1, y1):
+            pad = self.pads[idx]
+            if pad.net == net:
+                continue
+            if layer is not None and layer not in self.obstacles.pad_layer_indices[idx]:
+                continue
+            hw, hh = pad_half_extents(pad)
+            rect = (pad.x - hw, pad.y - hh, pad.x + hw, pad.y + hh)
+            if seg_rect_dist(a, b, rect) < half + reqs[idx] - 1e-6:
+                return False
+        return True
+
+    def _gateway_fan_ok(
+        self,
+        poly: list[Pt],
+        layer: int,
+        net: int,
+        half: float,
+        clr: float,
+        committed: CommittedCopper,
+        reqs: list[float] | None,
+    ) -> bool:
+        """Exact verification of one gateway fan leg (pad -> via, pad layer).
+
+        The same gates a negotiated single-ended leg passes: Edge.Cuts, the
+        static pad masks at the leg's class surcharge (the pair partner's
+        pads are foreign here -- unlike the coupled body, a fan is a plain
+        single trace), committed copper (which holds the partner's gateway
+        via and fan during the check), keepout rule areas, HV pairwise pad
+        keep-outs and the pad class floor.
+        """
+        from .coupled import pads_block_segment_grown
+
+        extra = max(0.0, half + clr - self._agent_radius)
+        for a, b in zip(poly, poly[1:], strict=False):
+            if dist(a, b) <= 1e-9:
+                continue
+            if not self._escape_boundary.segment_clear(a, b, half):
+                return False
+            if pads_block_segment_grown(self.obstacles, a, b, layer, {net}, extra):
+                return False
+            if not committed.seg_clear(a, b, layer, net, half, clr):
+                return False
+            if self._keepouts is not None and self._keepouts.segment_blocked(
+                a, b, layer, net, half
+            ):
+                return False
+            if self._pairwise is not None and self.obstacles.pairwise_pad_blocked(
+                a, b, layer, net, half, extra, self._pairwise
+            ):
+                return False
+            if not self._gateway_pad_class_clear(a, b, layer, net, half, reqs):
+                return False
+        return True
+
+    def _gateway_site_fans(
+        self,
+        site: GatewaySite,
+        pad_p: Pad,
+        pad_n: Pad,
+        pad_layer: int,
+        half: float,
+        clr: float,
+        committed: CommittedCopper,
+        reqs: list[float] | None,
+    ) -> tuple[list[Pt], list[Pt]] | None:
+        """Legality oracle for one gateway site (``gateway.enumerate_gateways``).
+
+        Checks, inside a rolled-back trial so each check sees the previous
+        commit: P via, then N via (the via-to-via gap to P's), then P's fan
+        (clear of N's via), then N's fan (clear of P's via and fan).  Via
+        legality is :meth:`_via_ok_at` -- the negotiated-via rule, including
+        the fab tier's via-in-pad gate -- plus the pad class floor.  Returns
+        the two fan polylines, or ``None``.
+        """
+        via_r = self.rules.via_diameter / 2.0
+        body = self._gateway_body_box(pad_p.ref)
+        if body is not None and any(
+            body[0] < v[0] < body[2] and body[1] < v[1] < body[3] for v in (site.via_p, site.via_n)
+        ):
+            return None
+        mark = committed.begin_trial()
+        try:
+            for net, via in ((pad_p.net, site.via_p), (pad_n.net, site.via_n)):
+                if not self._via_ok_at(via, net, committed, clearance=clr):
+                    return None
+                if not self._gateway_pad_class_clear(via, via, None, net, via_r, reqs):
+                    return None
+                committed.add_via(via, net, clr)
+            fans: list[list[Pt]] = []
+            for pad, via in ((pad_p, site.via_p), (pad_n, site.via_n)):
+                accepted: list[Pt] | None = None
+                for axis_first in (False, True):
+                    poly = dogleg_points(pad.x, pad.y, via[0], via[1], axis_first=axis_first)
+                    if self._gateway_fan_ok(poly, pad_layer, pad.net, half, clr, committed, reqs):
+                        accepted = poly
+                        break
+                if accepted is None:
+                    return None
+                committed.add_run(pad_layer, accepted, pad.net, half, clr)
+                fans.append(accepted)
+            return fans[0], fans[1]
+        finally:
+            committed.rollback_trial(mark)
+
+    def _gateway_body_box(self, ref: str | None) -> Rect | None:
+        """Between-rows box a gateway via must stay OUT of, for part ``ref``.
+
+        A fan via between the two pad rows of a dual-row part splits the
+        part's own pours: on board 06rf a USB-C gateway between J1's A and B
+        rows cut the F.Cu ``VBUS_USB`` pour in two and left the board with
+        unconnected items.  So for a part whose SMD pads sit on exactly two
+        distinct rows (or columns) -- a USB-C receptacle, a dual-row header,
+        an SOIC -- the box spanning its pads is off-limits to gateway vias.
+        Single-row parts (an HDMI receptacle's signal row), four-sided parts
+        and area arrays (a dogbone via in a BGA ball field IS the standard
+        escape; the pad masks keep it off every ball) are not restricted.
+        ``None`` = no restriction.
+        """
+        if not ref:
+            return None
+        cache: dict[str, Rect | None] = self.__dict__.setdefault("_gateway_body_cache", {})
+        if ref in cache:
+            return cache[ref]
+        # SMD pads only: a connector's through-hole shield/mounting pins sit
+        # outside its signal rows and must not count as a row.
+        pads = [p for p in self.pads if p.ref == ref and not p.through_hole and p.drill <= 0]
+        box: Rect | None = None
+        if len(pads) >= 4:
+            xs = {round(p.x, 3) for p in pads}
+            ys = {round(p.y, 3) for p in pads}
+            if len(xs) == 2 or len(ys) == 2:
+                box = (min(xs), min(ys), max(xs), max(ys))
+        cache[ref] = box
+        return box
+
+    def _gateway_layers(self, pc: CoupledConnection) -> list[int]:
+        """Candidate gateway layers of a segment, in index order.
+
+        Every routable layer the pair's class may use that is NOT already a
+        layer all four endpoint pads share (the planar attempt searched
+        those).  Empty when this engine cannot emit a via for the class (a
+        through via lands on both outer layers, see ``_route_search``'s
+        via-span guard) -- the 2-layer / single-layer decline.
+        """
+        if self.num_layers < 2:
+            return []
+        blocked = self._hard_avoided_layers(pc.net_class)
+        if blocked & {0, self.num_layers - 1}:
+            return []
+        try:
+            routable = set(self.layer_stack.get_routable_indices())
+        except Exception:
+            routable = set(range(self.num_layers))
+        planar = set.intersection(
+            *(
+                set(self._pad_layer_indices(p))
+                for p in (pc.pad_p_a, pc.pad_n_a, pc.pad_p_b, pc.pad_n_b)
+            )
+        )
+        return sorted(
+            layer
+            for layer in routable
+            if 0 <= layer < self.num_layers and layer not in blocked and layer not in planar
+        )
+
+    def _route_pair_gateway(
+        self,
+        pc: CoupledConnection,
+        *,
+        committed: CommittedCopper,
+        history: dict[Resource, float],
+        present: float,
+        deadline: float | None = None,
+    ) -> tuple[_PairResult | None, str]:
+        """Couple a declined segment on another layer through fan vias (#6444).
+
+        For each candidate gateway layer ``L``: at each end whose pads do not
+        own ``L``, enumerate legal gateways (one through via per net plus a
+        verified pad-layer fan leg each, :mod:`.gateway`); then route the
+        ``MAX_GATEWAY_COMBOS`` cheapest handedness-consistent end-A x end-B
+        combinations with the unchanged pair agent (:meth:`_route_pair_impl`,
+        ``layers=(L,)``) between virtual via pads, with both gateways
+        committed in a trial so the coupled legs are verified against the
+        partner's vias.  The first success is returned with its fans and vias
+        as pair-owned copper; the trial is always rolled back (the caller
+        commits the result, all or nothing -- #3906).
+
+        P and N get the same via count by construction (one per gatewayed
+        end each); a count above the protocol's ``max_vias_per_net``
+        (:attr:`pair_gateway_limits`) declines before any search.  The fans
+        are pruned to the protocol's per-terminal uncoupled budget.
+        Diagnostics (layer, gateway per end, via counts, candidates per
+        terminal) land in :attr:`pair_gateway_log` either way.
+        """
+        from .gateway import enumerate_gateways, rank_gateway_combos
+
+        net_p, net_n = pc.pad_p_a.net, pc.pad_n_a.net
+        trace_w = getattr(pc.net_class, "trace_width", None) or self.rules.trace_width
+        half = trace_w / 2.0
+        _h, clr = self._conn_geometry(pc.net_class, net_p)
+        clr = max(clr, self._conn_geometry(pc.net_class, net_n)[1])
+        max_fan, max_vias = self.pair_gateway_limits.get(pc.key, (None, None))
+        via_r = self.rules.via_diameter / 2.0
+        via_gap = max(
+            self._via_via_gap,
+            self.rules.via_diameter + clr,
+            self._same_net_via_gap,
+        )
+        reqs = None
+        if self.pad_class_clearances is not None:
+            from .class_pad_repair import pad_class_requirements
+
+            reqs = pad_class_requirements(self)
+
+        layers = self._gateway_layers(pc)
+        if not layers:
+            self.pair_gateway_log[pc.key] = "gateway: no other routable layer"
+            return None, "pair-gateway-no-layer"
+
+        ends = (
+            (pc.pad_p_a, pc.pad_n_a, pc.mid_b),
+            (pc.pad_p_b, pc.pad_n_b, pc.mid_a),
+        )
+        notes: list[str] = []
+        reason = "pair-gateway-no-candidates"
+        for layer in layers:
+            lname = self._layer_name(layer)
+            per_end: list[list[Gateway | None]] = []
+            counts: list[str] = []
+            for pad_p, pad_n, toward in ends:
+                own = set(self._pad_layer_indices(pad_p)) & set(self._pad_layer_indices(pad_n))
+                if layer in own:
+                    per_end.append([None])
+                    counts.append("pad")
+                    continue
+                if not own:
+                    per_end.append([])
+                    counts.append("0")
+                    continue
+                pad_layer = min(own)
+
+                def check(
+                    site: GatewaySite,
+                    pad_p: Pad = pad_p,
+                    pad_n: Pad = pad_n,
+                    pad_layer: int = pad_layer,
+                ) -> tuple[list[Pt], list[Pt]] | None:
+                    return self._gateway_site_fans(
+                        site, pad_p, pad_n, pad_layer, half, clr, committed, reqs
+                    )
+
+                found, legal = enumerate_gateways(
+                    (pad_p.x, pad_p.y),
+                    (pad_n.x, pad_n.y),
+                    toward,
+                    layer,
+                    check,
+                    pitch=pc.pitch,
+                    via_gap=via_gap,
+                    max_fan_mm=max_fan,
+                )
+                per_end.append(list(found))
+                counts.append(f"{len(found)}/{legal}")
+            gated = sum(1 for e in per_end if e and e[0] is not None)
+            notes.append(f"{lname}: candidates A={counts[0]} B={counts[1]}")
+            if gated == 0:
+                continue
+            if max_vias is not None and gated > max_vias:
+                reason = "pair-gateway-via-limit"
+                notes[-1] += f" (needs {gated} via(s)/net > limit {max_vias})"
+                continue
+            if not per_end[0] or not per_end[1]:
+                continue
+            reason = "pair-gateway-no-path"
+            for ga, gb in rank_gateway_combos(per_end[0], per_end[1]):
+                if deadline is not None and time.monotonic() >= deadline:
+                    self.pair_gateway_log[pc.key] = "gateway: " + "; ".join(notes + ["deadline"])
+                    return None, "pair-gateway-deadline"
+                pres, why = self._try_gateway_combo(
+                    pc,
+                    layer,
+                    (ga, gb),
+                    committed=committed,
+                    history=history,
+                    present=present,
+                    half=half,
+                    clr=clr,
+                    via_r=via_r,
+                    reqs=reqs,
+                )
+                if pres is None:
+                    reason = f"pair-gateway-{why.removeprefix('pair-')}"
+                    continue
+                desc = []
+                for tag, g in (("A", ga), ("B", gb)):
+                    desc.append(f"{tag}: {'pad layer' if g is None else g.describe()}")
+                pres.gateway = (
+                    f"gateway {lname} ({'; '.join(desc)}); vias P/N={gated}/{gated}; "
+                    + "; ".join(notes)
+                )
+                self.pair_gateway_log[pc.key] = pres.gateway
+                return pres, "ok"
+        self.pair_gateway_log[pc.key] = f"gateway declined ({reason}): " + "; ".join(notes)
+        return None, reason
+
+    def _try_gateway_combo(
+        self,
+        pc: CoupledConnection,
+        layer: int,
+        combo: tuple[Gateway | None, Gateway | None],
+        *,
+        committed: CommittedCopper,
+        history: dict[Resource, float],
+        present: float,
+        half: float,
+        clr: float,
+        via_r: float,
+        reqs: list[float] | None,
+    ) -> tuple[_PairResult | None, str]:
+        """Route one (gateway A, gateway B) combination; see the caller."""
+        ga, gb = combo
+        ends = ((ga, pc.pad_p_a, pc.pad_n_a), (gb, pc.pad_p_b, pc.pad_n_b))
+        mark = committed.begin_trial()
+        try:
+            # Commit end A, then RE-VERIFY end B against it (the two ends'
+            # vias and fans were each checked alone at enumeration time).
+            for g, pad_p, pad_n in ends:
+                if g is None:
+                    continue
+                pad_layer = min(
+                    set(self._pad_layer_indices(pad_p)) & set(self._pad_layer_indices(pad_n))
+                )
+                fans = self._gateway_site_fans(
+                    g.site, pad_p, pad_n, pad_layer, half, clr, committed, reqs
+                )
+                if fans is None or (tuple(fans[0]), tuple(fans[1])) != (g.fan_p, g.fan_n):
+                    return None, "pair-gateway-conflict"
+                for net, via in ((pad_p.net, g.site.via_p), (pad_n.net, g.site.via_n)):
+                    committed.add_via(via, net, clr)
+                committed.add_run(pad_layer, list(g.fan_p), pad_p.net, half, clr)
+                committed.add_run(pad_layer, list(g.fan_n), pad_n.net, half, clr)
+
+            def vpad(g: Gateway | None, pad: Pad, via: Pt | None) -> Pad:
+                if g is None or via is None:
+                    return pad
+                return replace(pad, x=via[0], y=via[1], width=0.0, height=0.0, through_hole=True)
+
+            # The coupled body starts just beyond each via pair, along the
+            # gateway heading, where its whole envelope clears both vias; the
+            # unchanged ``_pair_attach`` doglegs join each via to its leg.
+            reach = pc.pitch / 2.0 + half + clr + via_r + 1e-3
+            anchors = [None if g is None else self._gateway_anchor(g.site, reach) for g in (ga, gb)]
+            if any(g is not None and a is None for g, a in zip((ga, gb), anchors, strict=True)):
+                return None, "pair-gateway-anchor"
+            vpc = replace(
+                pc,
+                pad_p_a=vpad(ga, pc.pad_p_a, ga.site.via_p if ga else None),
+                pad_n_a=vpad(ga, pc.pad_n_a, ga.site.via_n if ga else None),
+                pad_p_b=vpad(gb, pc.pad_p_b, gb.site.via_p if gb else None),
+                pad_n_b=vpad(gb, pc.pad_n_b, gb.site.via_n if gb else None),
+                anchor_a=anchors[0] if ga is not None else pc.anchor_a,
+                anchor_b=anchors[1] if gb is not None else pc.anchor_b,
+            )
+            keep = tuple(
+                (site, clr)
+                for g in (ga, gb)
+                if g is not None
+                for site in (g.site.via_p, g.site.via_n)
+            )
+            pres, reason = self._route_pair_impl(
+                vpc,
+                committed=committed,
+                history=history,
+                present=present,
+                layers=(layer,),
+                keep_clear=keep,
+            )
+        finally:
+            committed.rollback_trial(mark)
+        if pres is None:
+            return None, reason
+
+        # The coupled legs were verified against committed copper at the
+        # board-global trace half-width; hold them to the class geometry
+        # against the partner's gateway vias explicitly.
+        vias: list[tuple[int, Pt]] = []
+        for g, pad_p, pad_n in ends:
+            if g is not None:
+                vias.extend(((pad_p.net, g.site.via_p), (pad_n.net, g.site.via_n)))
+        for net, _layer, pts in pres.runs:
+            for a, b in zip(pts, pts[1:], strict=False):
+                for vnet, site in vias:
+                    if vnet == net:
+                        continue
+                    if seg_seg_dist(a, b, site, site) < half + via_r + clr - 1e-6:
+                        return None, "pair-gateway-leg-via"
+                if not self._gateway_pad_class_clear(a, b, layer, net, half, reqs):
+                    return None, "pair-gateway-leg-pad-class"
+
+        # Assemble the pair-owned copper: fan A + coupled leg + fan B per net.
+        runs: list[tuple[int, int, list[Pt]]] = []
+        routes: list[Route] = []
+        trace_w = 2.0 * half
+        for idx, (net, leg_layer, leg) in enumerate(pres.runs):
+            pieces: list[tuple[int, list[Pt]]] = []
+            pol_p = idx == 0
+            for g, pad_p, pad_n in ends:
+                if g is None:
+                    continue
+                pad_layer = min(
+                    set(self._pad_layer_indices(pad_p)) & set(self._pad_layer_indices(pad_n))
+                )
+                pieces.append((pad_layer, list(g.fan_p if pol_p else g.fan_n)))
+            pieces.append((leg_layer, leg))
+            route = Route(net=net, net_name=pres.routes[idx].net_name)
+            for piece_layer, poly in pieces:
+                emitted = self._emit_leg(net, route.net_name, poly, piece_layer, trace_w)
+                if emitted is None:
+                    return None, "pair-gateway-empty-route"
+                route.segments.extend(emitted.segments)
+                runs.append((net, piece_layer, poly))
+            top = self.layer_stack.index_to_layer_enum(0)
+            bottom = self.layer_stack.index_to_layer_enum(self.num_layers - 1)
+            for vnet, site in vias:
+                if vnet != net:
+                    continue
+                route.vias.append(
+                    Via(
+                        x=site[0],
+                        y=site[1],
+                        drill=self.rules.via_drill,
+                        diameter=self.rules.via_diameter,
+                        layers=(top, bottom),
+                        net=net,
+                        net_name=route.net_name,
+                    )
+                )
+            routes.append(route)
+        if len(routes[0].vias) != len(routes[1].vias):
+            return None, "pair-gateway-via-count"
+        return _PairResult(routes=routes, runs=runs, resources=pres.resources, vias=vias), "ok"
+
+    def _gateway_anchor(self, site: GatewaySite, reach: float) -> Pt | None:
+        """Start point of a gateway's coupled body (issue #6444).
+
+        The ideal start is :func:`_gateway_anchor` (just past the via pair
+        along the heading).  It is snapped to the nearest lattice node that
+        is still ``reach`` clear of both vias and ahead of their midpoint:
+        an off-node start makes the fat stub a dogleg with a sub-0.01 mm jog
+        whose ``+/- pitch/2`` offset collapses (``pair-offset-degenerate``),
+        while a node start leaves straight octilinear stubs.  Falls back to
+        the ideal point when no node qualifies within 1 mm of it.
+        """
+        from .gateway import HEADINGS
+
+        ideal = _gateway_anchor(site, reach)
+        if ideal is None:
+            return None
+        h = HEADINGS[site.heading]
+        g = ((site.via_p[0] + site.via_n[0]) / 2.0, (site.via_p[1] + site.via_n[1]) / 2.0)
+        best: tuple[float, Pt] | None = None
+        for point in self.build().nodes.values():
+            d = dist(point, ideal)
+            if d > 1.0 or (best is not None and d >= best[0]):
+                continue
+            if (point[0] - g[0]) * h[0] + (point[1] - g[1]) * h[1] <= 1e-9:
+                continue
+            if dist(point, site.via_p) < reach or dist(point, site.via_n) < reach:
+                continue
+            best = (d, point)
+        return ideal if best is None else best[1]
+
+    def _layer_name(self, layer: int) -> str:
+        try:
+            enum = self.layer_stack.index_to_layer_enum(layer)
+            return str(getattr(enum, "kicad_name", None) or enum)
+        except Exception:
+            return f"L{layer}"
 
     # -- multi-net negotiation ------------------------------------------------
 
@@ -3249,6 +3844,79 @@ class LatticePathfinder:
         connections: list[Connection],
         **kwargs: Any,
     ) -> tuple[dict[object, Route], LatticeNegotiationStats]:
+        """Negotiate with grown-pad rounds (#6489), guarding gateways (#6444).
+
+        See :meth:`_route_netset_grown` for the negotiation itself.  Issue
+        #6444: a gateway changes which corridors every later net finds, so a
+        run that coupled a pair through a fan-via gateway but leaves a
+        class-pad shortfall the repair could not clear (the post-route
+        backstop would then demote that net -- board 06rf, USB3_TX2+) is
+        re-negotiated once WITHOUT gateways and the better result kept: more
+        routed connections, then fewer shortfalls; a tie keeps the gateway
+        run.  A clean gateway run (the common case) costs nothing extra.
+        """
+        self.pair_gateway_rollback = None
+        result = self._route_netset_grown(connections, **kwargs)
+        rstats = self.class_pad_repair_stats
+        left = rstats.total_remaining if rstats is not None else 0
+        if (
+            not kwargs.get("pair_gateways")
+            or not self.pair_gateways
+            or left <= 0
+            or result[1].deadline_hit
+        ):
+            return result
+        deadline = kwargs.get("deadline")
+        if deadline is not None and time.monotonic() >= deadline:
+            return result
+        saved = (
+            self.failure_reasons,
+            self.pair_outcomes,
+            self.pair_gateways,
+            dict(self.pair_gateway_log),
+            self.class_pad_repair_stats,
+            dict(self._class_pad_growth),
+            list(self.class_pad_growth_rounds),
+            self._lattice,
+            self._obstacles,
+        )
+        if self._class_pad_growth:
+            self._lattice = None  # rebuild without the gateway run's growth
+            self._obstacles = None
+        alt = self._route_netset_grown(connections, **{**kwargs, "pair_gateways": False})
+        astats = self.class_pad_repair_stats
+        alt_left = astats.total_remaining if astats is not None else 0
+        if alt[1].routed > result[1].routed or (
+            alt[1].routed == result[1].routed and alt_left < left
+        ):
+            self.pair_gateway_rollback = (
+                f"gateway run left {left} class-pad shortfall(s); "
+                f"re-negotiated without gateways ({alt_left} left): kept"
+            )
+            self.pair_gateway_log = {}  # the kept run attempted no gateway
+            return alt
+        (
+            self.failure_reasons,
+            self.pair_outcomes,
+            self.pair_gateways,
+            self.pair_gateway_log,
+            self.class_pad_repair_stats,
+            self._class_pad_growth,
+            self.class_pad_growth_rounds,
+            self._lattice,
+            self._obstacles,
+        ) = saved
+        self.pair_gateway_rollback = (
+            f"gateway run left {left} class-pad shortfall(s); a run without gateways "
+            f"was no better ({alt_left} left): gateways kept"
+        )
+        return result
+
+    def _route_netset_grown(
+        self,
+        connections: list[Connection],
+        **kwargs: Any,
+    ) -> tuple[dict[object, Route], LatticeNegotiationStats]:
         """Negotiate, then re-negotiate once with grown pads if needed (#6489).
 
         :meth:`_route_netset_once` repairs class-pad shortfalls geometrically.
@@ -3296,22 +3964,39 @@ class LatticePathfinder:
                 sorted({self.pads[i].ref for i in wanted if self.pads[i].ref in grown_parts})
             )
             attempts: list[tuple[dict[int, float], tuple[str, ...]]] = []
-            if recurring:
+
+            def whole_part(parts: tuple[str, ...], wanted: dict[int, float] = wanted) -> dict:
                 whole = dict(wanted)
                 reqs = pad_class_requirements(self) or []
                 base = self.rules.trace_clearance
                 for j, req in enumerate(reqs):
                     if (
-                        self.pads[j].ref in recurring
+                        self.pads[j].ref in parts
                         and req > base + 1e-9
                         and req > max(whole.get(j, 0.0), self._class_pad_growth.get(j, 0.0)) + 1e-9
                     ):
                         whole[j] = req
+                return whole
+
+            if recurring:
+                whole = whole_part(recurring)
                 if len(whole) > len(wanted):
                     attempts.append((whole, recurring))
             # The targeted growth (the pre-#6670 round) is the fallback when a
             # whole-part growth is rejected, so a round is never worse than it.
             attempts.append((wanted, ()))
+            # Issue #6444: a gateway reshapes the corridors the fallback legs
+            # find, so a shortfall can land on a part for the FIRST time and
+            # the targeted growth then fails to clear it (board 06rf's U2,
+            # which main clears with a round-2 whole-part growth).  In a run
+            # that coupled through a gateway, a rejected targeted growth is
+            # followed by the whole-part growth of the offending parts; it is
+            # kept only by the same rule (more routed, fewer shortfalls).
+            if kwargs.get("pair_gateways") and self.pair_gateways and not recurring:
+                first = tuple(sorted({self.pads[i].ref for i in wanted if self.pads[i].ref}))
+                whole = whole_part(first) if first else wanted
+                if len(whole) > len(wanted):
+                    attempts.append((whole, first))
             kept = False
             for grow, parts in attempts:
                 if deadline is not None and time.monotonic() >= deadline:
@@ -3319,6 +4004,7 @@ class LatticePathfinder:
                 saved = (
                     self.failure_reasons,
                     self.pair_outcomes,
+                    self.pair_gateways,
                     self.class_pad_repair_stats,
                     dict(self._class_pad_growth),
                     self._lattice,
@@ -3333,7 +4019,7 @@ class LatticePathfinder:
                     if self.class_pad_repair_stats
                     else 0
                 )
-                old_left = saved[2].total_remaining if saved[2] else 0
+                old_left = saved[3].total_remaining if saved[3] else 0
                 kept = stats.routed >= best[1].routed and new_left < old_left
                 self.class_pad_growth_rounds.append(
                     PadGrowthRound(
@@ -3352,6 +4038,7 @@ class LatticePathfinder:
                 (
                     self.failure_reasons,
                     self.pair_outcomes,
+                    self.pair_gateways,
                     self.class_pad_repair_stats,
                     self._class_pad_growth,
                     self._lattice,
@@ -3376,6 +4063,7 @@ class LatticePathfinder:
         deadline: float | None = None,
         uncoupled_fallback: bool = False,
         pair_nets: Mapping[int, int] | None = None,
+        pair_gateways: bool = False,
     ) -> tuple[dict[object, Route], LatticeNegotiationStats]:
         """PathFinder/VPR-style negotiation over capacity-1 lattice resources.
 
@@ -3455,6 +4143,17 @@ class LatticePathfinder:
         This bounds a ``--complete`` completion pass so a pathological search
         aborts within a per-link budget instead of grinding (issue #4434).
         ``None`` preserves the pre-#4472 unbudgeted (iteration-capped) loop.
+
+        Issue #6444: with ``pair_gateways=True`` a pair segment whose planar
+        attempt declines with a reason in :data:`GATEWAY_RETRY_REASONS` gets
+        one fan-via gateway retry (:meth:`_route_pair_gateway`).  The retries
+        are DEFERRED until every pair of the pass has had its planar attempt
+        (the #6697 discipline), so a gateway's vias never pre-block a pair
+        that couples planar: those keep exactly the copper they get without
+        the retry.  A gateway success is reported ``"coupled"`` (named in
+        :attr:`pair_gateways`); a gateway decline keeps the original planar
+        decline reason and the segment takes the usual fallback.  ``False``
+        (the default) is the pre-#6444 negotiation byte-for-byte.
         """
         # Issue #4477: wall-clock the WHOLE negotiation (not just the
         # deadline check) so a report can honestly say "elapsed Xs of a Ys
@@ -3482,6 +4181,7 @@ class LatticePathfinder:
         best_routes: dict[object, Route] = {}
         best_reasons: dict[object, str] = {}
         best_pair_outcomes: dict[object, str] = {}
+        best_pair_gateways: dict[object, str] = {}
         best_count = -1
         # Issue #6373: best-pass ranking ``(routed_items, coupled_count,
         # fallback_legs)``.  ``routed_items`` keeps its pre-#6373 meaning
@@ -3540,9 +4240,59 @@ class LatticePathfinder:
             fallback_legs = 0
             coupled_count = 0
             deferred_fallback: list[Any] = []
+            # Issue #6444: declined segments awaiting their gateway retry.
+            deferred_gateway: list[tuple[Any, str]] = []
+            pass_gateways: dict[object, str] = {}
+
+            def commit_pair(item: Any, pres: _PairResult) -> None:
+                routes[(item.key, "P")] = pres.routes[0]
+                routes[(item.key, "N")] = pres.routes[1]
+                # Legs are EMITTED at the pair class width (#4270), so
+                # commit them at the same width + clearance (#4271) --
+                # emission and spacing must agree.
+                for leg_net, layer_idx, points in pres.runs:
+                    # Issue #6243: each leg stores its own authored side.
+                    half, clr = self._conn_geometry(item.net_class, leg_net)
+                    committed.add_run(layer_idx, points, leg_net, half, clr)
+                # Issue #6444: a gateway's fan vias are pair-owned copper too.
+                for via_net, site in pres.vias:
+                    _half, clr = self._conn_geometry(item.net_class, via_net)
+                    committed.add_via(site, via_net, clr)
+
+            def flush_gateways() -> None:
+                nonlocal routed_items, coupled_count
+                pending = list(deferred_gateway)
+                deferred_gateway.clear()
+                for item, preason in pending:
+                    if deadline is not None and time.monotonic() >= deadline:
+                        gres = None
+                    else:
+                        gres, _greason = self._route_pair_gateway(
+                            item,
+                            committed=committed,
+                            history=history,
+                            present=present,
+                            deadline=deadline,
+                        )
+                    if gres is None:
+                        if not uncoupled_fallback:
+                            reasons[item.key] = preason
+                            failed.append((1, item))
+                        continue
+                    pair_outcomes[item.key] = "coupled"
+                    pass_gateways[item.key] = gres.gateway or "gateway"
+                    coupled_count += 1
+                    routed_items += 1
+                    reasons.pop(item.key, None)
+                    if item in deferred_fallback:
+                        deferred_fallback.remove(item)
+                    if item in fallback_pairs:
+                        fallback_pairs.remove(item)
+                    commit_pair(item, gres)
 
             def flush_fallbacks() -> None:
                 nonlocal routed_items, fallback_legs
+                flush_gateways()
                 if not deferred_fallback:
                     return
                 # Issue #6703: the legs are routed partner-aware so a pair's
@@ -3590,6 +4340,14 @@ class LatticePathfinder:
                     pres, preason = self._route_pair_impl(
                         item, committed=committed, history=history, present=present
                     )
+                    gateway_retry = (
+                        pres is None
+                        and pair_gateways
+                        and preason in GATEWAY_RETRY_REASONS
+                        and item.key not in self.pair_gateway_skip
+                    )
+                    if gateway_retry:
+                        deferred_gateway.append((item, preason))
                     if pres is None and uncoupled_fallback:
                         # Issue #6373: a declined pair's main run is routed as
                         # two single-ended legs.  Issue #6697: DEFERRED until
@@ -3603,22 +4361,16 @@ class LatticePathfinder:
                         deferred_fallback.append(item)
                         continue
                     if pres is None:
-                        reasons[item.key] = preason
                         pair_outcomes[item.key] = preason
+                        if gateway_retry:
+                            continue  # reason/failed recorded by flush_gateways
+                        reasons[item.key] = preason
                         failed.append((kind, item))
                         continue
                     pair_outcomes[item.key] = "coupled"
                     coupled_count += 1
                     routed_items += 1
-                    routes[(item.key, "P")] = pres.routes[0]
-                    routes[(item.key, "N")] = pres.routes[1]
-                    # Legs are EMITTED at the pair class width (#4270), so
-                    # commit them at the same width + clearance (#4271) --
-                    # emission and spacing must agree.
-                    for leg_net, layer_idx, points in pres.runs:
-                        # Issue #6243: each leg stores its own authored side.
-                        half, clr = self._conn_geometry(item.net_class, leg_net)
-                        committed.add_run(layer_idx, points, leg_net, half, clr)
+                    commit_pair(item, pres)
                     continue
                 flush_fallbacks()
                 key = item[0]
@@ -3654,6 +4406,7 @@ class LatticePathfinder:
                 best_routes = routes
                 best_reasons = reasons
                 best_pair_outcomes = pair_outcomes
+                best_pair_gateways = pass_gateways
                 best_fallback_pairs = len(fallback_pairs)
                 best_fallback_legs = fallback_legs
 
@@ -3753,6 +4506,7 @@ class LatticePathfinder:
 
         self.failure_reasons = best_reasons
         self.pair_outcomes = best_pair_outcomes
+        self.pair_gateways = best_pair_gateways
         # Issue #6395: hold the best pass's single-ended copper to each pad's
         # own net class (``max(own, pad)``).  Pair legs (coupled and
         # uncoupled-fallback) stay put and count as foreign copper.  Issue
@@ -3808,6 +4562,28 @@ class LatticePathfinder:
             budget_s=budget_s,
         )
         return best_routes, stats
+
+
+def _gateway_anchor(site: GatewaySite, reach: float, step: float = 0.05) -> Pt | None:
+    """Start of a gateway's coupled body (issue #6444).
+
+    The nearest point along the gateway heading from the via pair's midpoint
+    that is at least ``reach`` (pair half-envelope + clearance + via radius)
+    from both vias, so the fat centerline can start there with the vias as
+    obstacles.  ``None`` past 4 mm (never on a sane via pitch).
+    """
+    from .gateway import HEADINGS
+
+    h = HEADINGS[site.heading]
+    g = ((site.via_p[0] + site.via_n[0]) / 2.0, (site.via_p[1] + site.via_n[1]) / 2.0)
+    k = 0
+    while k * step <= 4.0:
+        d = k * step
+        pt = (round(g[0] + h[0] * d, 6), round(g[1] + h[1] * d, 6))
+        if dist(pt, site.via_p) >= reach and dist(pt, site.via_n) >= reach:
+            return pt
+        k += 1
+    return None
 
 
 def _outline_from_edges(
