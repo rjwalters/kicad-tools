@@ -389,6 +389,13 @@ private:
     bool is_trace_blocked(int gx, int gy, int layer, int net,
                           int from_x = -1, int from_y = -1) const;
     bool is_via_blocked(int gx, int gy, int net) const;
+    // Issue #6840: would a via drilled at (gx, gy) land inside a non-
+    // through-hole pad?  Mirror of ``Pathfinder``'s ``allow_smd_vias`` sweep
+    // (rotated-rectangle envelope, drill radius).  The coupled via move asks
+    // it even at the pair's own endpoint pads, where ``is_via_blocked`` is
+    // waived -- that waiver is about pad metal, not the fab's via-in-pad
+    // process.
+    bool via_drill_in_smd_pad(int gx, int gy) const;
 
     inline bool at_goal(int x, int y, int gx, int gy) const {
         return x == gx && y == gy;

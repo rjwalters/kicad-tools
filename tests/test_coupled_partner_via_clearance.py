@@ -98,14 +98,14 @@ _RULES = {
 }
 
 
-def _converging_pair(start_pitch: float, backend: str):
+def _converging_pair(start_pitch: float, backend: str, **rule_overrides):
     """F.Cu start pads ``start_pitch`` apart, B.Cu goal pads 0.3 mm apart.
 
     The pair must change layer, and the cheapest place is at the wide start;
     from there the rails converge to the 3-cell target spacing and, without
     the #6840 guard, pass straight beside the partner's barrel.
     """
-    rules = DesignRules(**_RULES)
+    rules = DesignRules(**{**_RULES, **rule_overrides})
     grid = RoutingGrid(width=8.0, height=8.0, rules=rules)
     nc = NetClassRouting(
         name="HS", trace_width=0.2, clearance=0.15, intra_pair_clearance=0.1, coupled_routing=True
@@ -132,6 +132,8 @@ def _converging_pair(start_pitch: float, backend: str):
         net_class_map={"DP+": nc, "DP-": nc},
     )
     pf._use_cpp_coupled = backend == "cpp"
+    for pad in pads:
+        grid.add_pad(pad)
     result = pf.route_coupled(*pads, max_iterations_budget=200_000)
     if result is not None:
         assert pf.last_coupled_backend == backend
@@ -201,6 +203,67 @@ def test_tight_start_pitch_never_yields_a_partner_via_overlap(backend):
     assert seg_via >= floor - 1e-9, f"P/N segment-vs-via gap {seg_via:.4f} < {floor}"
     assert via_via >= floor - 1e-9, f"P/N via-vs-via gap {via_via:.4f} < {floor}"
     assert DiffPairRouter._pair_physical_overlap_report(p_route, n_route) is None
+
+
+def _ffc_pair(manufacturer: str | None, backend: str):
+    """06rf J4-like start: 0.3 x 0.8 mm SMD pads at 0.8 mm pitch on F.Cu."""
+    kw = dict(_RULES)
+    if manufacturer:
+        kw["manufacturer"] = manufacturer
+    rules = DesignRules(**kw)
+    grid = RoutingGrid(width=8.0, height=8.0, rules=rules)
+    nc = NetClassRouting(
+        name="HS", trace_width=0.2, clearance=0.15, intra_pair_clearance=0.1, coupled_routing=True
+    )
+    pads = (
+        Pad(x=2.0, y=2.0, width=0.3, height=0.8, net=1, net_name="DP+", layer=Layer.F_CU),
+        Pad(x=2.3, y=6.0, width=0.2, height=0.2, net=1, net_name="DP+", layer=Layer.B_CU),
+        Pad(x=2.8, y=2.0, width=0.3, height=0.8, net=2, net_name="DP-", layer=Layer.F_CU),
+        Pad(x=2.6, y=6.0, width=0.2, height=0.2, net=2, net_name="DP-", layer=Layer.B_CU),
+    )
+    for pad in pads:
+        grid.add_pad(pad)
+    pf = CoupledPathfinder(
+        grid=grid,
+        rules=rules,
+        target_spacing_cells=3,
+        min_spacing_cells=3,
+        net_class_map={"DP+": nc, "DP-": nc},
+    )
+    pf._use_cpp_coupled = backend == "cpp"
+    return rules, grid, pf.route_coupled(*pads, max_iterations_budget=200_000)
+
+
+def _vias_in_smd_pads(grid: RoutingGrid, routes, drill: float) -> list[tuple[float, float]]:
+    from kicad_tools.router.pad_geometry import pad_point_distance
+
+    return [
+        (via.x, via.y)
+        for route in routes
+        for via in route.vias
+        for pad in grid._pads
+        if not pad.through_hole and pad_point_distance(pad, via.x, via.y) < drill / 2
+    ]
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_no_via_in_an_smd_pad_when_the_fab_cannot_fill_it(backend):
+    """jlcpcb has no via-in-pad process; the endpoint waiver must not bypass it.
+
+    The coupled via move skips ``_is_via_blocked`` at the pair's own pads, so
+    before #6840 the cheapest route drilled both vias straight into the F.Cu
+    start pads (06rf MIPI_CLK at 700k: two ``via_in_pad`` errors in
+    ``kct check --mfr jlcpcb``).  Without a manufacturer the in-pad vias are
+    still allowed (the control).
+    """
+    rules, grid, result = _ffc_pair(None, backend)
+    assert result is not None
+    assert _vias_in_smd_pads(grid, result, rules.via_drill), "control: in-pad vias allowed"
+
+    rules, grid, result = _ffc_pair("jlcpcb", backend)
+    assert result is not None
+    assert all(route.vias for route in result)
+    assert _vias_in_smd_pads(grid, result, rules.via_drill) == []
 
 
 def test_backends_agree_on_the_converging_pair():

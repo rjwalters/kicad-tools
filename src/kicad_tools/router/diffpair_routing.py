@@ -2017,6 +2017,16 @@ class CoupledPathfinder:
         # P via vs N via.  Installed per ``route_coupled`` call from the pair's
         # widths (see :meth:`_partner_via_radii_cells`); ``0`` is "off".
         self._partner_via_radii: tuple[float, float, float] = (0.0, 0.0, 0.0)
+        # Issue #6840: the fab's via-in-pad capability (same resolution as
+        # ``Pathfinder._allow_smd_vias``).  The via move consults it even at
+        # the pair's own endpoint pads, where ``_is_via_blocked`` is waived.
+        self._allow_smd_vias = True
+        if rules.manufacturer:
+            from .mfr_limits import get_mfr_limits
+
+            with contextlib.suppress(ValueError):
+                self._allow_smd_vias = bool(get_mfr_limits(rules.manufacturer).via_in_pad_supported)
+        self._smd_pad_drill_memo: dict[tuple[int, int], bool] = {}
 
         # Pre-calculate trace clearance radius
         self._trace_half_width_cells = max(
@@ -2383,6 +2393,29 @@ class CoupledPathfinder:
         if self._near_cells(px, py, n_visited, r_n):
             return False
         return not self._near_cells(nx, ny, p_visited, r_p)
+
+    def _via_drill_in_smd_pad(self, gx: int, gy: int) -> bool:
+        """Would a via drilled at ``(gx, gy)`` land inside an SMD pad? (#6840).
+
+        Mirror of the C++ ``CoupledPathfinder::via_drill_in_smd_pad`` and of
+        ``Pathfinder``'s ``allow_smd_vias`` sweep: the drill centre within the
+        drill radius of a non-through-hole pad's rotated rectangle.  Memoised
+        per cell for the life of the pathfinder (pads do not move mid-search).
+        """
+        key = (gx, gy)
+        hit = self._smd_pad_drill_memo.get(key)
+        if hit is None:
+            from .pad_geometry import pad_point_distance
+
+            wx, wy = self.grid.grid_to_world(gx, gy)
+            radius = self.rules.via_drill / 2.0
+            hit = any(
+                pad_point_distance(pad, wx, wy) < radius
+                for pad in getattr(self.grid, "_pads", ())
+                if not pad.through_hole
+            )
+            self._smd_pad_drill_memo[key] = hit
+        return hit
 
     def _coupled_own_vias_clear(
         self, state: CoupledState, own_vias: list[tuple[int, int]] | None
@@ -3015,6 +3048,7 @@ class CoupledPathfinder:
         # Issue #6840: partner-copper clearance of the two new barrels; also
         # layer-independent, evaluated once and shared with the swap move.
         partner_via_ok: bool | None = None
+        smd_vias_ok: bool | None = None
 
         # Try layer change (via) - both traces must change layer together
         routable_layers = self.grid.get_routable_indices()
@@ -3033,6 +3067,16 @@ class CoupledPathfinder:
                 )
             if not partner_via_ok:
                 self.last_rejections["via_partner_clear"] += 1
+                continue
+            # Issue #6840: the fab's via-in-pad process, at the endpoint pads
+            # too (where ``_is_via_blocked`` is waived below).
+            if smd_vias_ok is None:
+                smd_vias_ok = self._allow_smd_vias or not (
+                    self._via_drill_in_smd_pad(state.p_pos.x, state.p_pos.y)
+                    or self._via_drill_in_smd_pad(state.n_pos.x, state.n_pos.y)
+                )
+            if not smd_vias_ok:
+                self.last_rejections["via_in_pad"] += 1
                 continue
 
             # Check if vias can be placed at both positions.  Skip the

@@ -175,6 +175,24 @@ _CPP_IMPORT_ERROR: str | None = None
 # can report the numbers the staleness guard actually cares about, even after
 # the version guard below nulls out ``router_cpp``.
 _CPP_BUILD_VERSION: int | None = None
+
+
+def _allow_smd_vias(rules) -> bool:
+    """May a via be drilled into an SMD pad under ``rules.manufacturer``?
+
+    Unknown manufacturer -> unspecified capability is retained (permissive),
+    matching ``pathfinder.Router``'s fallback.  Shared by the single-ended and
+    the coupled (Issue #6840) rules marshalling.
+    """
+    from .mfr_limits import get_mfr_limits
+
+    allow = True
+    if getattr(rules, "manufacturer", None):
+        with contextlib.suppress(ValueError):
+            allow = bool(get_mfr_limits(rules.manufacturer).via_in_pad_supported)
+    return allow
+
+
 _CPP_EXTENSION_PATH: str | None = None
 try:
     if TYPE_CHECKING:
@@ -1392,16 +1410,7 @@ class CppPathfinder:
         cpp_rules = router_cpp.DesignRules()
         cpp_rules.trace_width = rules.trace_width
         cpp_rules.trace_clearance = rules.trace_clearance
-        from .mfr_limits import get_mfr_limits
-
-        cpp_rules.allow_smd_vias = True
-        if rules.manufacturer:
-            # Unknown manufacturer -> unspecified capability is retained
-            # (permissive), matching pathfinder.Router's fallback.
-            with contextlib.suppress(ValueError):
-                cpp_rules.allow_smd_vias = bool(
-                    get_mfr_limits(rules.manufacturer).via_in_pad_supported
-                )
+        cpp_rules.allow_smd_vias = _allow_smd_vias(rules)
         cpp_rules.via_drill = rules.via_drill
         cpp_rules.via_diameter = rules.via_diameter
         cpp_rules.via_clearance = rules.via_clearance
@@ -5416,6 +5425,10 @@ class CppCoupledPathfinder:
         # this issue wires up).  Marshalled here so a future coupled-attractor
         # port needs no additional plumbing.
         cpp_rules.cost_corridor_attractor = float(rules.cost_corridor_attractor)
+        # Issue #6840: the fab's via-in-pad capability, resolved exactly as the
+        # single-ended marshalling does, so the coupled via move can refuse a
+        # barrel drilled into an SMD pad (its endpoint waiver let one through).
+        cpp_rules.allow_smd_vias = _allow_smd_vias(rules)
         self._impl = router_cpp.CoupledPathfinder(
             cpp_grid._impl,
             cpp_rules,

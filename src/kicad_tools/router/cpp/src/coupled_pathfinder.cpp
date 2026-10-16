@@ -139,6 +139,30 @@ bool CoupledPathfinder::is_trace_blocked(int gx, int gy, int layer, int net,
                                   gx, gy, net);
 }
 
+// Issue #6840: see the header.  Same arithmetic as ``Pathfinder``'s
+// ``!rules_.allow_smd_vias`` sweep.
+bool CoupledPathfinder::via_drill_in_smd_pad(int gx, int gy) const {
+    const auto [wx, wy] = grid_.grid_to_world(gx, gy);
+    const float drill_radius = rules_.via_drill / 2.0f;
+    for (const auto& pad : grid_.pads()) {
+        if (pad.layer_idx < 0) continue;  // Through-hole pad, not SMD.
+        float local_x = static_cast<float>(wx) - pad.x;
+        float local_y = static_cast<float>(wy) - pad.y;
+        if (pad.rotation != 0.0f) {
+            // Invert KiCad's clockwise residual rotation, as in grid.cpp.
+            const float angle = pad.rotation * 3.14159265358979323846f / 180.0f;
+            const float c = std::cos(angle), s = std::sin(angle);
+            const float rotated_x = c * local_x - s * local_y;
+            local_y = s * local_x + c * local_y;
+            local_x = rotated_x;
+        }
+        const float dx = std::max(std::abs(local_x) - pad.width / 2.0f, 0.0f);
+        const float dy = std::max(std::abs(local_y) - pad.height / 2.0f, 0.0f);
+        if (dx * dx + dy * dy < drill_radius * drill_radius) return true;
+    }
+    return false;
+}
+
 // Mirror of Python ``_is_via_blocked`` (diffpair_routing.py:793-832).
 bool CoupledPathfinder::is_via_blocked(int gx, int gy, int net) const {
     // Issue #6008: via-blocking keepout rule areas (Python
@@ -967,6 +991,7 @@ CoupledRouteResult CoupledPathfinder::route(
             // Issue #6840: partner-copper clearance of the two new barrels;
             // layer-independent too, so evaluated once.
             int partner_via_ok = -1;
+            int smd_vias_ok = -1;
             for (int new_layer : routable_layers) {
                 if (new_layer == current.p_layer) continue;
                 if (own_h2h_clear < 0) {
@@ -979,6 +1004,14 @@ CoupledRouteResult CoupledPathfinder::route(
                                                         current.n_x, current.n_y) ? 1 : 0;
                 }
                 if (partner_via_ok == 0) { rej("via_partner_clear"); continue; }
+                // Issue #6840: the fab's via-in-pad process, at the endpoint
+                // pads too (where ``is_via_blocked`` is waived).
+                if (smd_vias_ok < 0) {
+                    smd_vias_ok = (rules_.allow_smd_vias ||
+                                   (!via_drill_in_smd_pad(current.p_x, current.p_y) &&
+                                    !via_drill_in_smd_pad(current.n_x, current.n_y))) ? 1 : 0;
+                }
+                if (smd_vias_ok == 0) { rej("via_in_pad"); continue; }
                 if (!p_at_ep && is_via_blocked(current.p_x, current.p_y, p_net)) { rej("via_blocked_p"); continue; }
                 if (!n_at_ep && is_via_blocked(current.n_x, current.n_y, n_net)) { rej("via_blocked_n"); continue; }
                 if (!p_at_ep && is_trace_blocked(current.p_x, current.p_y, new_layer, p_net)) { rej("via_trace_blocked_p"); continue; }
