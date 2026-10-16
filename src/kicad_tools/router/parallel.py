@@ -363,6 +363,7 @@ class ParallelRouter:
         # Enable thread safety on grid
         if not self.router.grid.thread_safe:
             # Create new grid with thread safety enabled
+            from .edge_keepout import install_edge_keepout
             from .grid import RoutingGrid
 
             old_grid = self.router.grid
@@ -382,6 +383,11 @@ class ParallelRouter:
             install_areas = getattr(self.router, "_install_grid_rule_area_keepouts", None)
             if install_areas is not None:
                 install_areas()
+            # Issue #6822: replay the board-edge keepout too -- every Edge.Cuts
+            # loop, interior windows included -- with the same clearance (or
+            # #6043 floor) the loader installed.  Without this the rebuilt
+            # grid let parallel routing cross the board edge or a cutout.
+            install_edge_keepout(self.router, self.router.grid)
 
         # Find independent groups
         clearance = self.router.rules.trace_clearance * 2
