@@ -123,9 +123,15 @@ At a junction of three or more endpoints, kicad-cli's result depends on item
 order. In every probe that order was file load order. The PCB form uses file
 order, and it matches every bench net and all but two of 76 probes. The two
 misses are runs that loop back through a junction inside a via. The tuners'
-Route form uses router order, so at such junctions it can drift from the
+Route form used router order, so at such junctions it could drift from the
 written board's number by one track stub. This happened on 06rf `PCIE_TX-`,
-where the tuner read 1.289 mm and `kct check` read 1.006 mm. Follow-up: #6778.
+where the tuner read 1.289 mm and `kct check` read 1.006 mm.
+
+Fixed in #6778. `kct route` re-keys router copper to content-derived UUIDs
+and puts it in UUID order (#6052), and KiCad's saves keep that order. Each
+net now takes its UUIDs in `segment_order_key` order, a fixed geometric
+order. The Route form sorts a `Route` by the same key and measures its
+coordinates as written (4 decimals).
 
 ### Circular through-hole pads: 0.19 µm off
 

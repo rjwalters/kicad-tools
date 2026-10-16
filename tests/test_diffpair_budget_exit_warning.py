@@ -517,6 +517,20 @@ def test_partial_exit_keeps_budget_exit_promotion():
     collapse signature does NOT hold, so the #3270 promotion still runs for
     the budget-exited pair's nets -- board-06-style behaviour is unchanged."""
     router = _one_easy_one_hard_pair_router()
+    # Issue #6807: pin the pose-centerline search OFF.  The hard pair's
+    # joint A* stops on its *iteration* budget (20000 iters, ~0.2 s with the
+    # C++ backend), and since #5895 (cc39c2849) the pose search then gets
+    # whatever is left of the 0.5 s per-pair wall clock -- but only when at
+    # least ``_POSE_CENTERLINE_MIN_BUDGET_S`` (0.25 s) remains.  On a fast
+    # host (macOS arm64: ~0.27 s left) the pose search runs and *routes* the
+    # hard pair as a centerline trunk, so nothing budget-exits; on a slower
+    # host (Linux CI) less than 0.25 s is left, the search is skipped and the
+    # pair defers.  Both are correct #5895 behaviour; which one you get is a
+    # wall-clock race.  This test pins the #4107 partial-exit promotion
+    # logic, which needs the hard pair to budget-exit, so take the race out.
+    # The pose search's own budget contract is covered by
+    # ``test_pose_search_honours_a_spent_wall_clock_budget`` below.
+    router._diffpair.enable_pose_centerline = False
     config = DifferentialPairConfig(enabled=True, spacing=0.8)
 
     promotion_at_strategy: dict[str, set[int]] = {}
