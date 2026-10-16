@@ -2355,7 +2355,12 @@ jobs:
     # ``matchgroup-routing-regression`` job.  Board 07 carries allowlisted
     # DRC residuals (.github/routed-drc-tolerance.yml) and routes PARTIAL
     # by design, so no Overall: PASSED / status:ok / drc_violations:0
-    # assertions apply.  If #3438 ever makes the 5 nets routable, graduate
+    # assertions apply.  The one DRC assertion is the copper-safety ratchet
+    # (#6738): clearance/short/crossing/hole/edge errors on the fresh regen
+    # may not exceed .github/copper-safety-drc-floor.yml.  NOTE: this job is
+    # suspended (#5097, see the ``if:`` above), so that ratchet is DORMANT
+    # until BOARD_07_CI_ENABLED is lifted (#5164); it has been verified
+    # locally only.  If #3438 ever makes the 5 nets routable, graduate
     # this job to --lvs-only + a plain copper-clean assertion.
     # Advisory until a repo admin adds it to branch protection.
     name: Board 07 End-to-End (LVS known opens)
@@ -2487,6 +2492,22 @@ jobs:
             --stem matchgroup_test \
             --lvs-known-opens "DQ3,DQ4,MIPI_DAT0_N,TMDS_D0_N,TMDS_D1_N" \
             /tmp/board07-staging/07-matchgroup-test
+
+      - name: Copper-safety DRC ratchet (kicad-cli, #6738)
+        # Fresh-regen DRC, category-scoped: clearance / shorting_items /
+        # tracks_crossing / hole_clearance / copper_edge_clearance may not
+        # exceed the floor in .github/copper-safety-drc-floor.yml.  kicad-cli
+        # exits non-zero when it finds violations, so its status is ignored
+        # (|| true) and the checker is the gate: it fails on a missing,
+        # empty or truncated report, so a killed kicad-cli never reads as
+        # 0 errors (#6724).
+        run: |
+          set -uo pipefail
+          rm -f /tmp/board07-ci/drc.json
+          kicad-cli pcb drc --format json --severity-all --refill-zones \
+            -o /tmp/board07-ci/drc.json \
+            /tmp/board07-ci/matchgroup_test_routed.kicad_pcb || true
+          uv run python scripts/ci/check_copper_safety_drc.py /tmp/board07-ci/drc.json
 
       - name: Collect failed routing bundle (diagnostic reproduction, #5067)
         # Sibling of board-06-end-to-end's collection step; see its comment
