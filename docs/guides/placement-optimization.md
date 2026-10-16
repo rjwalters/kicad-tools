@@ -32,10 +32,10 @@ kct placement check board.kicad_pcb --format json
 
 ```bash
 # Get AI-friendly placement suggestions
-kct placement suggestions board.kicad_pcb
+kct placement suggest board.kicad_pcb
 
 # Export for LLM processing
-kct placement suggestions board.kicad_pcb --format json > suggestions.json
+kct placement suggest board.kicad_pcb --format json > suggestions.json
 ```
 
 ### Optimize Placement
@@ -45,7 +45,7 @@ kct placement suggestions board.kicad_pcb --format json > suggestions.json
 kct placement optimize board.kicad_pcb -o optimized.kicad_pcb
 
 # With specific focus
-kct placement optimize board.kicad_pcb --thermal --grouping
+kct placement optimize board.kicad_pcb --thermal --cluster
 ```
 
 ---

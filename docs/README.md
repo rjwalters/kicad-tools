@@ -30,6 +30,17 @@ Step-by-step guides for common tasks:
 | [LCSC/EasyEDA 3D Models](guides/lcsc-3d-models.md) | Fetch-on-demand 3D models for LCSC parts |
 | [Routing Benchmark Suite](guides/benchmarking.md) | Measure router quality and detect regressions |
 | [MCP Server](mcp/README.md) | Enable AI agents to interact via Model Context Protocol |
+| [Stackup Presets](guides/stackup-presets.md) | Named JLCPCB stackups and legacy migration |
+| [Physical Copper Gap](guides/physical-copper-gap.md) | Physical copper gap preflight in `kct check` |
+| [Mask-to-Copper](guides/mask-to-copper.md) | Checking mask-to-copper clearance and exposure |
+| [Mask Geometry](guides/mask-geometry.md) | Inspecting standard soldermask geometry |
+| [Netclass Diagnostics](guides/netclass-diagnostics.md) | Read-only netclass diagnostics |
+| [Footprint Arc Coordinates](guides/footprint-arc-schema.md) | How footprint arc midpoints are preserved |
+| [Analog Threshold Budgets](guides/analog-threshold-budgets.md) | Evaluate reviewed analog threshold sidecars |
+| [Drive Budget](guides/drive-budget.md) | Weak-source and gate-drive budget review |
+| [Resistor Rating](guides/resistor-rating.md) | Resistor operating budgets from a reviewed sidecar |
+| [Factory Selection](guides/factory-selection.md) | Compare factory-selected component evidence |
+| [Submission Preparation](guides/submission-preparation.md) | Offline assembly submission preparation |
 
 ### Reference
 Detailed reference documentation:
@@ -43,11 +54,20 @@ Detailed reference documentation:
 | [Python API](reference/api.md) | Module-by-module API documentation |
 | [Manufacturer Rules](reference/manufacturers.md) | JLCPCB, OSHPark, PCBWay design rules |
 | [Circuit Blocks](reference/circuit-blocks.md) | Reusable schematic building blocks |
+| [RoutingPlan Sidecar](reference/routing-plan.md) | `<output_stem>.routing_plan.json` written by every default `kct route` |
+| [Commit-Journal Sidecar](reference/commit-journal.md) | `<output_stem>.access_witness.json` pad-access witness |
+| [KiCad Lock Policy](reference/kicad-lock-policy.md) | KiCad lock-marker advisories on save |
+| [`board.json` Schema](board-json-schema.md) | Normalized per-board data contract (`kct board-metrics`) |
+| [External Benchmark Report Schema](benchmark-external-report-schema.md) | Per-board report contract for `kct bench external` |
+| [Agent Surfaces](agent-surfaces.md) | What each `kct` skill needs from its harness |
+| [Ecosystem](ecosystem.md) | Where kicad-tools sits among related projects (`kct ecosystem`) |
 
 ### For Contributors
 - [Development Guide](contributing/development.md) - Setup, testing, code style
 - [Stacked PRs](contributing/stacked-prs.md) - What CI does and does not validate for PRs not based on `main`
 - [Agent Guidance](contributing/agent-guidance.md) - Single source of the contributor guidance rendered into `CLAUDE.md` and `AGENTS.md`
+- [Squad Coordination](contributing/squad.md) - Shared chatroom and goal board for agents working in this repo
+- [KiCad Image Pin](contributing/kicad-image-pin.md) - Bumping the pinned KiCad container image used by CI
 
 ### Research Notes & Audits
 Point-in-time working documents — dated entries describe the tree as of their date:

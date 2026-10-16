@@ -235,9 +235,9 @@ kct build . --step route
 kct build . --step verify
 
 # Export for specific manufacturer
-kct export --manufacturer jlcpcb \
-    output/led_indicator_routed.kicad_pcb \
-    output/led_indicator.kicad_sch \
+kct export output/led_indicator_routed.kicad_pcb \
+    --mfr jlcpcb \
+    --sch output/led_indicator.kicad_sch \
     -o output/jlcpcb/
 
 # Generate BOM only
