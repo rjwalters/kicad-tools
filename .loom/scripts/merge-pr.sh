@@ -1946,7 +1946,7 @@ _wait_for_checks_then_sync_merge() {
       # through to the pending wait below, exactly as before.
       case "$_cf_rc:$_cf_out" in
         1:LOOM-CHECK-FAILURE-REQUIRED$'\t'*) error "Cannot merge PR #$PR_NUMBER: a required status check has failed (${_cf_out#*$'\t'}). Fix the check and re-run the merge." ;;
-        0:LOOM-CHECK-FAILURE-PROCEED) info "PR #$PR_NUMBER: only informational (non-required) check(s) failing; proceeding to synchronous merge"; return 0 ;;
+        0:LOOM-CHECK-FAILURE-PROCEED) info "PR #$PR_NUMBER: only informational (non-required) check(s) failing ($(printf '%s' "$failing" | sort -u | tr '\n' ' ')— not in the ruleset's required contexts, so they do not block); proceeding to synchronous merge"; return 0 ;;
         0:LOOM-CHECK-FAILURE-PENDING) ;;
         *) error "Merge blocked: PR #$PR_NUMBER's failing-check classification (#8191 slice) could not run — '${LOOM_DAEMON_BIN:-loom-daemon} merge-pr checks-failure' exited $_cf_rc without a recognized LOOM-CHECK-FAILURE-* sentinel. A guard that cannot run refuses the merge rather than passing it. $(_mp_daemon_roll_hint merge-pr "$(command -v "${LOOM_DAEMON_BIN:-loom-daemon}" 2>/dev/null || true)")" ;;
       esac

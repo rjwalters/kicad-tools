@@ -1,6 +1,6 @@
 {
-  "loom_version": "0.19.1167",
-  "loom_commit": "485f7d1deeb27051ebafb710f0b0cda276b49399",
+  "loom_version": "0.19.1169",
+  "loom_commit": "db3504e7df39ed71aa43d66b89851b6fe39f2483",
   "install_date": "2026-08-10",
   "installed_files": [
     ".claude/agents/loom-architect.md",
@@ -532,7 +532,9 @@
     ".loom/scripts/tests/test-land-resync-commit.sh",
     ".loom/scripts/tests/test-per-worktree-target-dir.sh",
     ".loom/scripts/tests/test-spawn-claude-memory-max.sh",
-    ".loom/scripts/verify-proposal-refs.sh"
+    ".loom/scripts/verify-proposal-refs.sh",
+    ".loom/scripts/tests/test-champion-epic-escalation-evaluations.sh",
+    ".loom/hooks/guard-worktree-paths.sh"
   ],
   "last_resync": "2026-10-16",
   "loom_source_remote": "https://github.com/rjwalters/loom.git",

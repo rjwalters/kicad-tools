@@ -43,6 +43,7 @@ test-champion-capped-hold-routing.sh
 test-champion-ci-checks-no-checks-signal.sh
 test-champion-critical-file-check.sh
 test-champion-evaluating-reclaim-trust.sh
+test-champion-epic-escalation-evaluations.sh
 test-champion-epic-escalation-respects-human-hold.sh
 test-champion-epic-phase-marker-normalization.sh
 test-champion-epic-verdict-marker-scope.sh

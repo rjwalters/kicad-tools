@@ -332,6 +332,8 @@
 # partial-increment reset (#9264) when the issue body carries a
 # `loom:remainder-hold` marker. Removed by a human. Champion's merge-risk and
 # critical-file PR holds are loom:blocked, not this label (#11861).
+# Requires a stated reason class: defaults/docs/label-state-machine.md
+# § "Routing to a human".
 - name: loom:operator
   description: "A human must act or decide; the body's decision block says what. Only a human removes it."
   color: "EA580C"  # orange-600 - operator-action signal

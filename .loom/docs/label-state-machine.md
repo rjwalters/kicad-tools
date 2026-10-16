@@ -99,6 +99,17 @@ structurally cannot.
 | Waiting on something automation will resolve: an issue, a PR, infrastructure | `loom:blocked` with a park record (`loom-daemon park-record apply`, [`park-record.md`](park-record.md)), or at least a literal `Blocked by #N` / `Depends on #N` / `Requires #N` line in the same comment (the phrasings `detect-dependency-cycle.sh` and `warn-operator-gated.sh` parse; a backtick-quoted reference does not count) |
 | Waiting on a capability a fleet host may hold (host or admin access, a credential profile) | `loom:blocked` with a reason-only park record and a `<!-- loom:capability=<name> -->` marker naming it, plus a linked capability-request issue: the capability lane (below) proposes it on a host that holds it |
 
+**`loom:operator` needs a stated reason class.** Only these classes qualify:
+physical (bench, hardware, or an install on an operator machine);
+credential/access (grant, mint or rotate); money (spend or a standing cost);
+irreversible or outward-facing (publish, delete, migrate, someone else's
+system); firewall/legal; decision (a ranked 2-4 option question, best first,
+each with a why). A human-hands `loom:operator` comment opens with one
+`Operator reason: <class> — <one line>` line. A decision routed through
+`operator-decision apply` already satisfies `decision`; add no extra line. An
+item that fits no class does not belong: the label comes off and the item
+returns to the queue.
+
 **One hold per decision.** The operator's ruling (a dashboard vote, or a
 human removing the label) lifts `loom:operator`, so never add an unrelated
 `loom:operator` hold to an item that already carries a `decision` block: the

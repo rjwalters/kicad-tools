@@ -1067,6 +1067,11 @@ Exhausted rounds are not evidence of a preference call: three failed edits to an
 
 ```bash
 ESCALATE_MARKER="<!-- champion:proposal-escalated -->"
+# Evaluations counted (#12081): each posted rejection, linked, plus the unrevised re-entry if UNREVISED=yes.
+EVALUATIONS_TEXT=$(gh api "repos/{owner}/{repo}/issues/<number>/comments" --paginate \
+  --jq '.[] | select(.body | contains("Champion Review: NEEDS REVISION")) | "- posted rejection: " + .html_url')
+[ "$UNREVISED" = "yes" ] && EVALUATIONS_TEXT="$EVALUATIONS_TEXT
+- 1 unrevised re-entry, no comment (body unchanged since the last rejection above)"
 loom-daemon operator-decision apply <number> --input /tmp/decision-<number>.json \
   --remove-label loom:evaluating
 # Exit 0 only: apply rewrote the body, so re-run the Idempotency check's
@@ -1076,7 +1081,10 @@ loom-daemon operator-decision apply <number> --input /tmp/decision-<number>.json
 $VERDICT_MARKER
 **Champion: Escalating to Operator — Repeated Rejection Without Revision**
 
-[$PRIOR_REJECTIONS rejection(s), the last on an unrevised body if UNREVISED=yes. Name the row above and why no agent revision settles it. The ranked options are in the body.]
+[$PRIOR_REJECTIONS posted rejection(s), plus an unrevised re-entry if UNREVISED=yes (read "N posted + M unrevised", never "rejected N+M times"). Name the row above and why no agent revision settles it. The ranked options are in the body.]
+
+**Evaluations counted:**
+$EVALUATIONS_TEXT
 
 **Recurring findings:**
 - [Criterion that failed, repeated across rejections]: [Specific reason]

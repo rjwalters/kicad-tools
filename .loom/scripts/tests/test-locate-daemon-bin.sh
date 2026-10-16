@@ -542,6 +542,45 @@ out=$( env -i PATH="$MINIMAL_PATH" HOME="$T27/empty-home" LOOM_DAEMON_BIN_DIR="$
 assert_eq "$T27/custom-install-dir/loom-daemon" "$out" \
     "\$LOOM_DAEMON_BIN_DIR's machine-level install is the SELF chain's last tier (#8712)"
 
+# ---------- 28. #10079: a repo-local build OLDER than the installed daemon is
+#                skipped (stale target/ shadowing the install), with a stderr line.
+T28="$WORKDIR_N/t28"
+LIB28="$(make_self_lib "$T28/checkout")"
+make_real_daemon "$T28/checkout/target/release/loom-daemon" "0.19.1"
+make_real_daemon "$T28/home/.local/bin/loom-daemon" "0.19.640"
+out=$( env -i PATH="$MINIMAL_PATH" HOME="$T28/home" \
+    bash -c "source '$LIB28'; loom_resolve_self_daemon_bin" 2>/dev/null )
+assert_eq "$T28/home/.local/bin/loom-daemon" "$out" \
+    "a stale repo-local build (0.19.1) loses to a newer installed daemon (0.19.640) (#10079)"
+err28=$( env -i PATH="$MINIMAL_PATH" HOME="$T28/home" \
+    bash -c "source '$LIB28'; loom_resolve_self_daemon_bin >/dev/null" 2>&1 )
+assert_contains "0.19.640" "$err28" "…and the skip line names the installed version"
+
+# ---------- 29. a NEWER repo-local build still wins (a developer's fresh build) --
+T29="$WORKDIR_N/t29"
+LIB29="$(make_self_lib "$T29/checkout")"
+make_real_daemon "$T29/checkout/target/release/loom-daemon" "0.19.700"
+make_real_daemon "$T29/home/.local/bin/loom-daemon" "0.19.640"
+out=$( env -i PATH="$MINIMAL_PATH" HOME="$T29/home" \
+    bash -c "source '$LIB29'; loom_resolve_self_daemon_bin" 2>/dev/null )
+assert_eq "$T29/checkout/target/release/loom-daemon" "$out" \
+    "a repo-local build newer than the installed daemon is still preferred (#10079)"
+
+# ---------- 30. an unparseable local --version fails open: behaviour unchanged --
+T30="$WORKDIR_N/t30"
+LIB30="$(make_self_lib "$T30/checkout")"
+mkdir -p "$T30/checkout/target/release"
+cat > "$T30/checkout/target/release/loom-daemon" <<'EOF'
+#!/usr/bin/env bash
+echo "loom-daemon 0-dev"
+EOF
+chmod +x "$T30/checkout/target/release/loom-daemon"
+make_real_daemon "$T30/home/.local/bin/loom-daemon" "0.19.640"
+out=$( env -i PATH="$MINIMAL_PATH" HOME="$T30/home" \
+    bash -c "source '$LIB30'; loom_resolve_self_daemon_bin" 2>/dev/null )
+assert_eq "$T30/checkout/target/release/loom-daemon" "$out" \
+    "an unparseable local \`--version\` keeps the repo-local build (fail open) (#10079)"
+
 # ---------- summary ----------
 echo
 echo "Ran $TESTS_RUN tests: $TESTS_PASSED passed, $TESTS_FAILED failed"

@@ -30,6 +30,18 @@ source "$SRC"
 # shellcheck source=lib/assert.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/assert.sh"
 
+# The pattern tables live only in `loom-daemon classify-error` (#11219), so the
+# vector sections below run through the library's native delegation and are
+# exercisable only when a capable binary resolved. With none, they are a
+# counted skip and the degraded-answer section at the bottom still runs.
+if [[ -z "${_CLASSIFY_DAEMON_BIN:-}" ]]; then
+    TESTS_RUN=$((TESTS_RUN + 1))
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "  ${GREEN}PASS${NC}: no loom-daemon with classify-error resolved; pattern vectors skipped (degraded answers asserted below)"
+    echo "mode: degraded"
+else
+echo "mode: native delegation via $_CLASSIFY_DAEMON_BIN"
+
 echo "--- classify_error: TOKEN_EXHAUSTED phrase family (#5631) ---"
 
 # Table: description | CLI output | expected category
@@ -173,7 +185,7 @@ unrecognised Kimi config fault falls through to the daemon-mode catch-all|error:
 EOF
 
 # An unknown provider selector must never make classification FAIL — "kimi"
-# matches no table in _classify_error_provider by design, and the exit-code-first
+# matches no provider table by design, and the exit-code-first
 # rules still apply ahead of any output inspection.
 assert_eq "SUCCESS" "$(classify_error 'provider.rate_limit: 429 rate limit exceeded' 0 kimi)" \
     "a CLEAN Kimi exit stays SUCCESS even when its stream quoted a 429 (#3233)"
@@ -223,93 +235,17 @@ else
 fi
 
 echo
-echo '--- conformance: the native `loom-daemon classify-error` (#11208) ---'
+echo '--- native `loom-daemon classify-error` direct checks (#11208) ---'
 
-# The suite runs in whichever mode the environment gives it, exactly like
-# production: when a daemon binary resolves, the assertions above already ran
-# through classify-error.sh's native delegation; with none, they ran the
-# in-file fallback tables. This section ADDS the differential check —
-# shell tables vs the native subcommand on the same inputs — whenever a
-# binary is available, and says so (never silently skips) when it is not.
-#
-# Resolution mirrors the library's own chain softly: the suite must still
-# pass, as pure fallback evidence, in a shell job with no build at all.
-parity_bin=""
-if declare -F loom_resolve_self_daemon_bin >/dev/null 2>&1; then
-    parity_bin="$(loom_resolve_self_daemon_bin)"
-fi
-if [[ -z "$parity_bin" ]] && [[ -n "${LOOM_DAEMON_SELF_BIN:-}" && -x "${LOOM_DAEMON_SELF_BIN}" ]]; then
-    parity_bin="${LOOM_DAEMON_SELF_BIN}"
-fi
-if [[ -z "$parity_bin" ]]; then
-    parity_bin="$(command -v loom-daemon 2>/dev/null || true)"
-fi
-# A resolved binary that cannot answer classify-error (an older release) is
-# not a parity partner — that is the version-skew case the fallback exists
-# for, and it degrades this section to the same counted skip.
-if [[ -n "$parity_bin" ]]; then
-    "$parity_bin" classify-error --transient RECOVERABLE >/dev/null 2>&1 \
-        || parity_bin=""
-fi
-
-shell_fallback_classify() {
-    # The FALLBACK path only: the engine's exit-code short-circuits (shared
-    # by both paths — that is why the native side asserts them directly
-    # below), then the provider tables + generic table, driven directly so
-    # the comparison cannot be skewed by the delegation under test.
-    local output="$1" exit_code="$2" provider="$3" pr
-    if [[ "$exit_code" -eq 124 || "$exit_code" -eq 137 ]]; then
-        printf '%s\n' "TIMEOUT"
-        return
-    fi
-    if [[ "$exit_code" -eq 0 ]]; then
-        printf '%s\n' "SUCCESS"
-        return
-    fi
-    pr="$(_classify_error_provider "$output" "$provider")"
-    if [[ -n "$pr" ]]; then
-        printf '%s\n' "$pr"
-    else
-        _classify_error_generic "$output"
-    fi
-}
-
-if [[ -z "$parity_bin" ]]; then
-    TESTS_RUN=$((TESTS_RUN + 1))
-    TESTS_PASSED=$((TESTS_PASSED + 1))
-    echo -e "  ${GREEN}PASS${NC}: ran in shell-FALLBACK mode (no loom-daemon with classify-error resolved; native parity not exercisable here)"
-    echo "mode: fallback"
-else
-    echo "mode: native delegation via $parity_bin"
+# The fixture-driven vectors above already ran through the library's native
+# delegation. This section drives the subcommand itself: engine short-circuits,
+# the --transient exit-code contract, $LOOM_RUNTIME, --stdout-tail and usage
+# errors. The shell tables it used to be diffed against were deleted (#11219).
+parity_bin="$_CLASSIFY_DAEMON_BIN"
+{
     native_classify() {
         printf '%s' "$1" | "$parity_bin" classify-error --exit-code "$2" --provider "$3" 2>/dev/null
     }
-
-    # Parity on every row of the shared vectors file: shell tables, native
-    # subcommand and the recorded expectation must all agree.
-    parity_rows=0
-    parity_bad=0
-    while IFS=$'\t' read -r expected exit_code provider desc output; do
-        [[ -z "$expected" || "$expected" == \#* ]] && continue
-        parity_rows=$((parity_rows + 1))
-        shell_ans="$(shell_fallback_classify "$output" "$exit_code" "$provider")"
-        native_ans="$(native_classify "$output" "$exit_code" "$provider")"
-        if [[ "$shell_ans" == "$expected" && "$native_ans" == "$expected" ]]; then
-            :
-        else
-            parity_bad=$((parity_bad + 1))
-            echo -e "  ${RED}FAIL${NC}: parity: $desc"
-            echo "    expected: '$expected'  shell: '$shell_ans'  native: '$native_ans'"
-        fi
-    done < "$VECTORS"
-    TESTS_RUN=$((TESTS_RUN + 1))
-    if [[ "$parity_bad" -eq 0 && "$parity_rows" -gt 0 ]]; then
-        TESTS_PASSED=$((TESTS_PASSED + 1))
-        echo -e "  ${GREEN}PASS${NC}: shell tables and native classifier agree on all $parity_rows vectors"
-    else
-        TESTS_FAILED=$((TESTS_FAILED + 1))
-        echo -e "  ${RED}FAIL${NC}: $parity_bad/$parity_rows vectors disagree between shell and native"
-    fi
 
     # Engine short-circuits, straight through the subcommand.
     assert_eq "TIMEOUT" "$(native_classify "hit your weekly limit" 124 claude)" \
@@ -354,7 +290,7 @@ else
     rm -f "$tail_file"
 
     # Usage errors keep stdout EMPTY (the shell delegation reads that as
-    # "could not ask" and falls back) and exit 2.
+    # "could not ask" and degrades) and exit 2.
     TESTS_RUN=$((TESTS_RUN + 1))
     usage_out="$(printf '%s' 'x' | "$parity_bin" classify-error --provider claude 2>/dev/null)"
     usage_rc=0
@@ -366,28 +302,38 @@ else
         TESTS_FAILED=$((TESTS_FAILED + 1))
         echo -e "  ${RED}FAIL${NC}: native: missing --exit-code: rc=$usage_rc stdout='$usage_out' (want rc 2, empty stdout)"
     fi
+}
 fi
 
 echo
 echo "--- delegation safety: a binary that cannot answer is never asked ---"
 
 # A resolved binary that fails the library's one-time capability probe (here
-# /bin/false: exit 1 to everything, the same code `--transient` uses for
-# "terminal") must be dropped at source time. Were it asked, every retryable
-# category would read as terminal. Runs in a subshell so the re-source does
-# not disturb the mode the rest of this suite ran in.
-skew_out="$(
-    LOOM_DAEMON_SELF_BIN=/bin/false
+# a stub that exits 1 to everything, the same code `--transient` uses for
+# "terminal"; /bin/false is not portable to macOS) must be dropped at
+# source time. Were it asked, every retryable
+# category would read as terminal. With no binary the documented fail-safe
+# degraded answer applies (#11219): exit-code short-circuits stay exact,
+# any other non-zero exit is RECOVERABLE, and every category is retryable.
+# Runs in a subshell so the re-source does not disturb the mode of the rest.
+NOCAP_STUB="$(mktemp)"
+printf '#!/bin/sh\nexit 1\n' > "$NOCAP_STUB"
+chmod +x "$NOCAP_STUB"
+degraded_out="$(
+    LOOM_DAEMON_SELF_BIN="$NOCAP_STUB"
     export LOOM_DAEMON_SELF_BIN
     # shellcheck source=../lib/classify-error.sh
     source "$SRC"
     printf 'bin=%s ' "${_CLASSIFY_DAEMON_BIN:-none}"
     classification_is_transient TOKEN_EXHAUSTED && printf 'exhausted=retry ' || printf 'exhausted=terminal '
     classification_is_transient TOKEN_EXPIRED && printf 'expired=retry ' || printf 'expired=terminal '
-    printf 'class=%s' "$(classify_error "You've hit your weekly limit" 1 claude)"
+    printf 'class=%s ' "$(classify_error "You've hit your weekly limit" 1 claude)"
+    printf 'ok=%s ' "$(classify_error "You've hit your weekly limit" 0 claude)"
+    printf 'timeout=%s' "$(classify_error "" 124 claude)"
 )"
-assert_eq "bin=none exhausted=retry expired=terminal class=TOKEN_EXHAUSTED" "$skew_out" \
-    "a binary failing the capability probe is dropped; fallback answers stay correct"
+assert_eq "bin=none exhausted=retry expired=retry class=RECOVERABLE ok=SUCCESS timeout=TIMEOUT" "$degraded_out" \
+    "no capable binary: documented degraded answer (RECOVERABLE / retry; exit-code short-circuits exact)"
+rm -f "$NOCAP_STUB"
 
 echo
 echo "Results: $TESTS_PASSED/$TESTS_RUN passed, $TESTS_FAILED failed"

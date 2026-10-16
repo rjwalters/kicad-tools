@@ -728,7 +728,13 @@ the same lease semantics, **keyed by role**:
   `loom:pr-lease-yield` record and exits 4. A winner starts the renewer and
   exits 0, and only then does the role add its label. The label is a
   projection of the lease, never the evidence. After its own lease is posted,
-  an unverifiable ordering proceeds, as on the issue path.
+  an unverifiable ordering proceeds, as on the issue path, for a stepless
+  claim (a role prompt's own, which fences before every push and verdict). A
+  `--step` claim (the step engine's pre-claim, which spawns a session on exit
+  0) instead reads back twice more after 2 s and 5 s; if the order is still
+  unverifiable it marks its own lease released (one PATCH, no read) and exits
+  5, which the engine records as `claim_unverified` and cools down for that
+  item alone (#12252).
 - **Doctor activity guard (#12105).** The role key means a Doctor's `claim`
   sees only other Doctors. So before it posts, a Doctor also stands down
   (exit 7, nothing written) when another actor is working the PR: a live

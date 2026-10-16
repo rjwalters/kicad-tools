@@ -93,7 +93,7 @@ tier-1/tier-2:
   transcript, and no account/usage-pool integration (points 2 and 4 are
   skipped outright). Point 3 (Error classification) is satisfied by the
   **generic-transient fallthrough only**: a tier-3 runtime gets no bespoke
-  pattern table in `classify-error.sh`. Passing its name as the
+  pattern table in the native classifier (`loom-daemon classify-error`). Passing its name as the
   `classify_error` provider argument is safe by construction — an
   unregistered provider matches no table and resolves through the shared
   engine's exit-code-first ordering and generic transients, exactly like any
