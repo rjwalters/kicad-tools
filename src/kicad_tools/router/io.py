@@ -2808,6 +2808,68 @@ def _get_pair_clearance(
     return max(clearance_a, clearance_b)
 
 
+def _coupled_pair_trace_gaps(
+    router: Autorouter,
+    net_names: dict[int, str],
+    net_class_map: dict[str, NetClassRouting] | None,
+) -> dict[frozenset[int], float]:
+    """``{frozenset((p_id, n_id)): gap_mm}`` for every engaged coupled pair (Issue #6810).
+
+    The trace-to-trace requirement between the P and N copper of a pair the
+    router coupled-routes is that pair's floored diff-pair gap, not the net
+    class's clearance -- the rule both external engines apply: ``kct check``
+    skips same-pair segments in ``ClearanceRule`` and holds them to
+    ``DesignRules.pair_gap`` (``DiffPairClearanceIntraRule``), and the
+    exported DRU exempts the pair from the class clearance and adds
+    ``diff_pair_gap``.  The pair set is the same
+    :func:`~kicad_tools.router.diffpair_detection.coupled_engaged_pairs` the
+    DRU exemption uses, and the gap the same
+    :func:`~kicad_tools.router.diffpair_routing._floored_pair_gap` the DRU's
+    ``diff_pair_gap`` value comes from, so the three checks agree by
+    construction.  A ``+``/``-`` named pair the router does not engage
+    (Kelvin ``ISENSE+``/``ISENSE-``, #4178) is absent and keeps the full
+    clearance.
+
+    Recomputed per call (no memo): it is one pass over the net names,
+    negligible next to the segment sweeps, and so can never replay a gap
+    from a class map or rule set that has since changed.
+    """
+    if not net_class_map or not net_names:
+        return {}
+    groups = getattr(router, "kicad_diff_pair_groups", None)
+
+    from .diffpair_detection import (
+        build_synth_routing,
+        coupled_engaged_pairs,
+        coupled_pair_net_class,
+    )
+    from .diffpair_routing import _floored_pair_gap
+
+    gaps: dict[frozenset[int], float] = {}
+    try:
+        pairs = coupled_engaged_pairs(net_names, net_class_map, groups)
+        if pairs:
+            name_to_id: dict[str, int] = {}
+            for nid, name in net_names.items():
+                name_to_id.setdefault(name, nid)
+            synth = build_synth_routing(net_class_map)
+            for p, n in pairs:
+                p_id = name_to_id.get(p)
+                n_id = name_to_id.get(n)
+                if p_id is None or n_id is None or p_id == n_id:
+                    continue
+                nc = coupled_pair_net_class(p, n, net_class_map, synth)
+                if nc is None:
+                    continue
+                gap = _floored_pair_gap(router, nc)
+                if gap > 0.0:
+                    gaps[frozenset((p_id, n_id))] = gap
+    except Exception:  # pragma: no cover - never let pair lookup break validation
+        logger.debug("coupled pair-gap lookup failed; using class clearance", exc_info=True)
+        gaps = {}
+    return gaps
+
+
 def _pad_on_net(pad: Pad, route_net: int, route_name: str | None) -> bool:
     """True when ``pad`` belongs to the same electrical net as the copper.
 
@@ -3037,6 +3099,22 @@ def validate_routes(
         value = _get_pair_clearance(net_a, net_b, clearance, net_names, ncm)
         _pair_clearance_cache[key] = value
         return value
+
+    # Issue #6810: trace-to-trace requirement between two nets.  P against N
+    # of an engaged coupled pair is held to the pair's floored diff-pair gap
+    # (the value ``kct check`` and the exported DRU's ``diff_pair_gap`` use),
+    # not the class clearance -- a pair laid at its own gap is the intended
+    # geometry, not a violation.  Every other net pair, and every pad / via
+    # requirement (those keep ``_pair_clearance``), is unchanged.  The gap is
+    # still positive, so P/N overlap is still reported as a short.
+    _coupled_trace_gaps = _coupled_pair_trace_gaps(router, net_names, ncm)
+
+    def _trace_pair_clearance(net_a: int, net_b: int) -> float:
+        if _coupled_trace_gaps:
+            gap = _coupled_trace_gaps.get(frozenset((net_a, net_b)))
+            if gap is not None:
+                return gap
+        return _pair_clearance(net_a, net_b)
 
     # Issue #3545: NET-AWARE component_inherent classification.  A
     # same-component FOREIGN-net pad violation is only "inherent" (and
@@ -3465,7 +3543,7 @@ def validate_routes(
                 # Issue #5240: the required clearance depends only on the
                 # two nets, so resolve it once per route pair instead of
                 # once per segment pair.
-                pair_clear = _pair_clearance(route_net, other_route.net)
+                pair_clear = _trace_pair_clearance(route_net, other_route.net)
                 pair_limit = pair_clear - _CLEARANCE_EPSILON_MM
 
                 for (
@@ -3554,7 +3632,7 @@ def validate_routes(
                 if other_layer != seg_layer:
                     continue
 
-                pair_clear = _pair_clearance(route_net, other_net)
+                pair_clear = _trace_pair_clearance(route_net, other_net)
 
                 # Same guaranteed circle lower bound the routes-vs-routes
                 # sweep above uses: skip the exact distance call only when
@@ -4303,6 +4381,16 @@ def kept_copper_clearance_violations(
     def pair_clearance(net_a: int, net_b: int) -> float:
         return _get_pair_clearance(net_a, net_b, clearance, net_names, ncm)
 
+    # Issue #6810: ``_kept_copper_violations`` reads its ``pair_clearance``
+    # only for trace-to-trace pairs (and only without ``board_rules``, whose
+    # DRU already carries the coupled-pair exemption), so the coupled
+    # pair-gap view goes there; foreign pads keep ``pair_clearance``.
+    coupled_gaps = _coupled_pair_trace_gaps(router, net_names, ncm)
+
+    def trace_pair_clearance(net_a: int, net_b: int) -> float:
+        gap = coupled_gaps.get(frozenset((net_a, net_b))) if coupled_gaps else None
+        return gap if gap is not None else pair_clearance(net_a, net_b)
+
     obstacles_cache: dict[tuple[int, str | None], list] = {}
 
     def pad_obstacles(route_net: int, route_name: str | None) -> list:
@@ -4318,7 +4406,7 @@ def kept_copper_clearance_violations(
         pad_obstacles=pad_obstacles,
         route_net_name=route_net_name,
         resolve_net_name=resolve_net_name,
-        pair_clearance=pair_clearance,
+        pair_clearance=trace_pair_clearance,
         via_clear=via_clear,
         clearance_bound=max(clearance, via_clear, *(c.clearance for c in (ncm or {}).values())),
         shorts=False,

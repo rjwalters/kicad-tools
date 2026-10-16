@@ -274,6 +274,41 @@ def coupled_engaged_pairs(
     return sorted(pairs)
 
 
+def coupled_pair_net_class(
+    p: str,
+    n: str,
+    net_class_map: dict[str, NetClassRouting],
+    synth: tuple[dict, dict[str, str]] | None = None,
+) -> NetClassRouting | None:
+    """The class whose intra-pair gap a coupled ``(P, N)`` pair is laid at.
+
+    Found by net name (P, then N), then through the class-name keyed view
+    (:func:`build_synth_routing`), the lookup the lattice uses.  ``None``
+    when neither net resolves to a class carrying an intra-pair gap.  Shared
+    by the exported ``diff_pair_gap`` rule (``route_cmd._router_pair_gaps``,
+    Issue #6443) and the pre-save validator (``io.validate_routes``, Issue
+    #6810) so both read the same class for the same pair.
+
+    Args:
+        p: Positive net name.
+        n: Negative net name.
+        net_class_map: The router's ``{net_name: NetClassRouting}`` map.
+        synth: Optional precomputed ``build_synth_routing(net_class_map)``
+            result, for callers resolving many pairs.
+    """
+    nc = net_class_map.get(p) or net_class_map.get(n)
+    if nc is None:
+        synth_routing, net_to_class = (
+            synth if synth is not None else build_synth_routing(net_class_map)
+        )
+        nc = synth_routing.get(net_to_class.get(p, "")) or synth_routing.get(
+            net_to_class.get(n, "")
+        )
+    if nc is None or not hasattr(nc, "effective_intra_pair_clearance"):
+        return None
+    return nc
+
+
 # =============================================================================
 # Internals
 # =============================================================================
