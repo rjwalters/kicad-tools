@@ -918,6 +918,19 @@ def _add_check_parser(subparsers) -> None:
         ),
     )
     check_parser.add_argument(
+        "--require-routing-policy",
+        dest="require_routing_policy",
+        action="store_true",
+        help=(
+            "Fail the routing_policy check for every sensitive net class "
+            "(length_critical, noise_sensitive, length_match_group or "
+            "diffpair_partner) whose routed nets declare neither "
+            "max_vias_per_net nor length_constraint.max_length in the "
+            "net-class map (Issue #6044).  Pour nets are exempt.  Needs a "
+            "net-class map.  Off by default."
+        ),
+    )
+    check_parser.add_argument(
         "--no-net-class-map",
         dest="no_net_class_map",
         action="store_true",
