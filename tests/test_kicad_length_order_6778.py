@@ -170,3 +170,27 @@ def test_route_form_measures_written_coordinates(tmp_path):
     model = _model()
     pcb = _routed(tmp_path, route.to_sexp())
     assert model.route_length(route) == pytest.approx(model.net_length_pcb(pcb, 1), abs=1e-12)
+
+
+def _merged_with_duplicate_via(order: list[int]) -> Route:
+    """``_route(order)`` as a tuner holds a net merged from fragments.
+
+    Fragments that meet at a via each carry it, so the merged Route lists the
+    via twice (#6792) while its segments still form the 3+-way junction.
+    """
+    route = _route(order)
+    dup = Via(*_VIA, 0.3, 0.6, (Layer.F_CU, Layer.B_CU), net=1, net_name="N1")
+    return Route(net=1, net_name="N1", segments=route.segments, vias=[*route.vias, dup])
+
+
+@pytest.mark.parametrize("order", _ORDERS)
+def test_merged_route_with_duplicate_via_equals_kct_check_length(tmp_path, order):
+    # Issue #6812: route_geometry must dedupe shared vias (#6792) *and* read
+    # segments in file order (#6778) at once.  Dropping the dedupe charges the
+    # via span twice; dropping the sort lets the junction resolve in
+    # Route.segments order, which differs from the file for some orders.
+    model = _model()
+    pcb = _routed(tmp_path, _route(order).to_sexp())
+    assert model.route_length(_merged_with_duplicate_via(order)) == pytest.approx(
+        model.net_length_pcb(pcb, 1), abs=1e-9
+    )

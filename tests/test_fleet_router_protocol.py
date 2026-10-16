@@ -612,7 +612,8 @@ def test_fastroute_partial_ses_then_hang_is_timeout(fr, prep, board00, tmp_path)
     assert rec.outcome == "timeout"
     assert rec.partial_artifact and rec.partial_artifact.endswith(".ses")
     assert rec.score is None
-    assert rec.lost_constraints  # the DSN audit ran before routing
+    # the DSN audit ran before routing: its inert-rule output is recorded
+    assert rec.not_routing_rules
 
 
 def test_rerun_cannot_reuse_stale_artifacts(fr, prep, board00, tmp_path):
@@ -797,7 +798,38 @@ def test_dsn_audit_unexpressible_routing_rules_stay_lost(fr, rule_bearing):
         '(rule "Ghost" (condition "A.NetClass == \'Nope\'") (constraint clearance (min 0.5mm)))\n',
     )
     named = " ".join(e["detail"] for e in dru)
-    assert "'Layered'" in named and "'NoClass'" in named and "'Ghost'" in named
+    assert "'Layered'" in named and "'NoClass'" in named
+    # Issue #6800: 'Nope' has no member nets, so Ghost is inert, not a loss.
+    assert "'Ghost'" not in named
+    assert [r["rule"] for r in not_routing] == ["Ghost"]
+
+
+def test_dsn_audit_class_clearance_on_empty_class_is_not_routing(fr, rule_bearing):
+    dru, not_routing = _audit_with_dru(
+        fr,
+        rule_bearing,
+        "(version 1)\n"
+        '(rule "Empty one" (condition "A.NetClass == \'Nope\'") '
+        "(constraint clearance (min 0.5mm)))\n"
+        "(rule \"Empty two\" (condition \"A.NetClass == 'Nope' || B.NetClass == 'Void'\") "
+        "(constraint clearance (min 0.5mm)))\n",
+    )
+    assert dru == []
+    assert not_routing == [
+        {"rule": "Empty one", "type": "clearance", "min_mm": 0.5},
+        {"rule": "Empty two", "type": "clearance", "min_mm": 0.5},
+    ]
+
+
+def test_dsn_audit_class_clearance_mixed_empty_and_populated_stays_lost(fr, rule_bearing):
+    dru, not_routing = _audit_with_dru(
+        fr,
+        rule_bearing,
+        "(version 1)\n"
+        "(rule \"Mixed\" (condition \"A.NetClass == 'Nope' || B.NetClass == 'Power'\") "
+        "(constraint clearance (min 100mm)))\n",
+    )
+    assert len(dru) == 1 and "'Mixed'" in dru[0]["detail"]
     assert not_routing == []
 
 

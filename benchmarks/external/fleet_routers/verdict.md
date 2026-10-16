@@ -85,6 +85,8 @@ The counts below come from each fastroute row's `lost_constraints` in `results.j
 
 What would make these rows comparable, by category:
 
+- **Current-main note (audit re-run at `a34d5a63`, 2026-10-15, issue #6800).** The audit now reports a class-scoped clearance whose named classes have no member nets under the frozen project under `not_routing`, not as a loss. Re-running prepare + `dsn_audit` on boards 00–07 (manifest unchanged) gives 0 losses on 00, 01, 02, 04, 05, 07; 6 on 03 (diff-pair `uncoupled`/`skew`/`via_count`) and 4 on 06 (LVDS `skew`). The per-board counts in the table above predate this change.
+
 - **Net-class clearances (all 22).** Each is a `NetClass == 'X'` clearance whose only other clauses are kct's same-footprint-pad and coupled-diff-pair exemptions. They are counted lost because the frozen `.kicad_pro` (the pre-route one) defines only `Default`, while the frozen `_routed.kicad_dru` names classes that only the routed sibling project defines. No net is in those classes under the graded project, so the exporter emits no class for them and `kicad-cli` applies the rules to no net. Neither #6768 nor PR #6770 (#6765, superseded and empty) changes this; see the current-main note below. Tracked in #6800.
 - **Board copper-to-edge clearance (05, 06, 07, 09).** DSN-expressible, for example by insetting the exported boundary. The exporter does not do this today. Tracked in #6784.
 - **`diff_pair_gap` (2 on 03, 4 on 06).** Its 0.15 mm minimum equals the pair nets' exported class clearance (`HighSpeed` on 03, `LVDS` on 06), so the DSN already implies it. The audit counts it lost only because it compares nothing but clearance, width, via and hole against the DSN. Tracked in #6784.

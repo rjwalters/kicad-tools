@@ -688,6 +688,8 @@ def dsn_audit(
     board = PCB.load(str(pcb))
     pad_nets = {p.net_name for fp in board.footprints for p in fp.pads if p.net_name}
 
+    # Net membership under the frozen project; ``None`` when there is none.
+    members: dict[str, set[str]] | None = None
     if project is not None and project.exists():
         from kicad_tools.router.board_clearance_rules import BoardClearanceRules
 
@@ -697,7 +699,7 @@ def dsn_audit(
         # block, not the DSN's global defaults -- since #6594 the exporter
         # writes per-class rules and membership.
         resolver = BoardClearanceRules.from_board(pcb)
-        members: dict[str, set[str]] = {}
+        members = {}
         for net in pad_nets:
             for c in resolver.netclasses_of(net) or ("Default",):
                 members.setdefault(c, set()).add(net)
@@ -791,6 +793,18 @@ def dsn_audit(
                     # emitted (class ...) block, which the exporter writes
                     # without the same-footprint / coupled-pair exemptions.
                     names = _condition_classes(rule.get("condition"))
+                    if members is not None and names and not any(members.get(n) for n in names):
+                        # Every named class is empty under the graded (frozen)
+                        # project, so the rule constrains no routed net.
+                        if not_routing is not None:
+                            not_routing.append(
+                                {
+                                    "rule": rule["name"],
+                                    "type": c["type"],
+                                    "min_mm": c["min_mm"],
+                                }
+                            )
+                        continue
                     covered = [
                         dsn_classes.get("kicad_default" if n == "Default" else n) for n in names
                     ]
