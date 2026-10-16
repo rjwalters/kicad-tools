@@ -33,8 +33,8 @@
       "size": 2559
     },
     "design-source.zip": {
-      "sha256": "5ac9420db1d3016d76076bee4db364709353ea3415a52fd17bd036bd529e7271",
-      "size": 359573
+      "sha256": "c4e07274e88e94d2278023cfd442be65fca75ff716857de4f27b32fb6b26174e",
+      "size": 359986
     },
     "firmware/Makefile": {
       "sha256": "f105bf145347705a625a825aad34614c3e4001c7260793991f68cca37587516c",
@@ -53,8 +53,8 @@
       "size": 3516
     },
     "gerbers/gerbers.zip": {
-      "sha256": "0fe2464c94f6914f0361cbbba1afea78d65794855e300456cef0c6681cdddc62",
-      "size": 270690
+      "sha256": "f8efef2d672555daabc8ae9a7346d4b8be4b247bcd4b90ea971d9bf9e6039955",
+      "size": 270932
     },
     "images/assembly.png": {
       "sha256": "56e07c74420ae321cbca7dd1e6b55dca323e3f65523ae66c82c27913820a3445",
@@ -97,8 +97,8 @@
       "size": 4103
     },
     "kicad_project.zip": {
-      "sha256": "c1ee19148479d420be6286294521edf52a7af71ad27345f952d5dbfa22025173",
-      "size": 511224
+      "sha256": "875af0eff99ed1af4f80a29a29a0860992f8846e21538898577552934dbebedf",
+      "size": 511942
     },
     "lvs.json": {
       "sha256": "52fed944df95bc4d3650b2774ce6b714e731e310d9d9a761553b25055b3e1a25",
@@ -109,7 +109,7 @@
       "size": 1214
     },
     "native-erc.json": {
-      "sha256": "31dbdaf2bf4bbed40e102749fe337c2abab78b14bad18bbc6a6cdf0d6f6b0d8a",
+      "sha256": "48e717e6483d9b988994ec404ee2204506e06c9733a0042ff59838ce72c933ad",
       "size": 988
     },
     "project.kct": {

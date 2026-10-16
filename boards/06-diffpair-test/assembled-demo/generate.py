@@ -18,6 +18,7 @@ import yaml
 
 from kicad_tools.core.project_file import create_minimal_project, save_project
 from kicad_tools.core.schematic_uuids import UuidMinter
+from kicad_tools.operations.pintype import annotate_pcb_file_pintypes
 from kicad_tools.router.rules import NetClassRouting, net_class_map_to_dict
 from kicad_tools.schematic import PinDef, PinSide, PinType, SymbolDef, generate_symbol_sexp
 from kicad_tools.schematic.models.schematic import Schematic
@@ -403,7 +404,14 @@ def main():
     out.mkdir(parents=True, exist_ok=True)
     parts = components()
     make_schematic(out, parts)
-    make_pcb(out, parts)
+    pcb_path = make_pcb(out, parts)
+    # Issue #6025: carry schematic pin names/types onto the pads right after
+    # the unrouted PCB is written, before routing consumes it.  The router
+    # keeps pad metadata, so the routed PCB inherits the ``(pintype ...)``
+    # evidence ``kct detect-mistakes`` reads for rails.
+    annotation = annotate_pcb_file_pintypes(pcb_path, out / "diffpair_test.kicad_sch")
+    if annotation.missing_pads:
+        raise RuntimeError(f"pads without a schematic pin: {annotation.missing_pads}")
     # Only the source project is authored here.  ``kct route --output
     # diffpair_test_routed.kicad_pcb`` derives the routed sidecar from it (and
     # refuses to overwrite an unrelated pre-existing one, issue #6258).

@@ -50,6 +50,32 @@ ANNOTATED_BOARDS = [
         ),
     ),
     (
+        "04-stm32-devboard",
+        "stm32_devboard.kicad_sch",
+        ("stm32_devboard.kicad_pcb", "stm32_devboard_routed.kicad_pcb"),
+    ),
+    (
+        "05-bldc-motor-controller",
+        "bldc_controller.kicad_sch",
+        ("bldc_controller.kicad_pcb", "bldc_controller_routed.kicad_pcb"),
+    ),
+    (
+        "06-diffpair-test",
+        "diffpair_test.kicad_sch",
+        ("diffpair_test.kicad_pcb", "diffpair_test_routed.kicad_pcb"),
+    ),
+    (
+        "07-matchgroup-test",
+        "matchgroup_test.kicad_sch",
+        (
+            "matchgroup_test.kicad_pcb",
+            "matchgroup_test_routed.kicad_pcb",
+            # The board real_design/build.py validated, hash-pinned by
+            # readiness.json; it must equal the published routed PCB.
+            "readiness/checked.kicad_pcb",
+        ),
+    ),
+    (
         "09-usbc-pd-power",
         "usbc_pd_power.kicad_sch",
         ("usbc_pd_power.kicad_pcb",),

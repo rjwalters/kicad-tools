@@ -36,6 +36,20 @@ def circuit_identity(pcb: PCB) -> dict:
     return result
 
 
+def annotate_pads(pcb: Path, schematic: Path) -> int:
+    """Copy schematic pin names/electrical types onto ``pcb``'s pads (issue #6025).
+
+    ``kct detect-mistakes`` reads the ``(pintype ...)`` evidence for rails.
+    Every numbered pad must map to a schematic pin.
+    """
+    from kicad_tools.operations.pintype import annotate_pcb_file_pintypes
+
+    annotation = annotate_pcb_file_pintypes(pcb, schematic)
+    if annotation.missing_pads:
+        raise ValueError(f"Pads without a schematic pin: {annotation.missing_pads}")
+    return annotation.annotated
+
+
 def build(output: Path) -> dict:
     fixture = ROOT / "authored-source"
     manifest = json.loads((fixture / "manifest.json").read_text())
@@ -69,6 +83,10 @@ def build(output: Path) -> dict:
                 shutil.copy2(path, output / path.name)
         for name in manifest["sha256"]:
             shutil.copy2(fixture / name, output / name)
+        # Issue #6025: the authored fixture is hash-bound and immutable, so the
+        # schematic pin names/types are carried onto the pads of the copy,
+        # the first unrouted PCB this recipe writes.
+        annotate_pads(output / "sdram_demo.kicad_pcb", output / "sdram_demo.kicad_sch")
         constraints = json.loads((output / "sdram_constraints.json").read_text())
         constraints.update(stackup=manifest["stackup"], trace_width_mm=0.18)
         (output / "sdram_constraints.json").write_text(json.dumps(constraints, indent=2) + "\n")

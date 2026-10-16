@@ -251,12 +251,8 @@ evidence, which catches rails the name heuristic misses (`VREG_1V2`, `VCAP1`).
 The generators write PCBs directly, so they have to add this data
 themselves ([#5985]):
 
-- **Board 04** calls `annotate_pcb_file_pintypes(pcb_path, sch_path)` right
-  after it writes the unrouted PCB. The router merges tracks into that text,
-  so the routed PCB inherits the annotation. Its committed outputs have not
-  been regenerated yet ([#6025]).
-- **Board 09** calls it right after it writes the PCB, and its committed
-  output carries `pintype` ([#5998]). A buck converter's switch-node pin
+- **Board 09** calls `annotate_pcb_file_pintypes(pcb_path, sch_path)` right
+  after it writes the PCB, and its committed output carries `pintype` ([#5998]). A buck converter's switch-node pin
   (`SW`, `LX`, `PH`) is typed `power_out`, but `kct detect-mistakes` does not
   treat the switch node as a rail.
 - **Boards 00 and 01** call it right after they write the unrouted PCB, and
@@ -273,10 +269,23 @@ themselves ([#5985]):
   regenerated through `scripts/boards/regenerate_boards_03_04_6076.py`; copper
   is byte-identical in count and position. The two joystick mounting pads
   `J2.MP` have no schematic pin and carry none ([#6025]).
-- **Other boards** are not wired yet, and their committed outputs carry no
-  `pintype` ([#6025]). To annotate a board by hand, run this on its unrouted
-  and routed PCBs. It edits only the pads' `pinfunction`/`pintype` children
-  and keeps every other byte:
+- **Boards 04, 05 and 06** call it right after they write the unrouted PCB
+  (`generate_design.py`, `redesign/hardware.py`, `assembled-demo/generate.py`).
+  Their routed copper is reviewed and hash-bound, so it was not re-routed:
+  `scripts/boards/annotate_pintypes_6025.py` regenerates each unrouted PCB
+  with the board's generator, annotates the routed PCB in place, and swaps in
+  re-plotted copper Gerbers. It refuses any change beyond the pads'
+  `pinfunction`/`pintype` children and the Gerber `%TO.P` pad attributes.
+  `refresh_readiness.py` then re-pinned each `readiness.json` ([#6025]).
+- **Board 07**'s `real_design/build_source.py` and `build.py` annotate the
+  copies they make of the hash-bound authored and reviewed-routing fixtures,
+  which stay unannotated. `refresh_bundles_6404.py` published the routed PCB
+  `build.py` validated, with its evidence (`output/readiness/checked.*`).
+  `output/matchgroup_test.kicad_pcb` has no producer and was annotated in
+  place ([#6025]).
+- **Board 08** has no committed PCB yet. To annotate a new or external
+  board by hand, run this on its unrouted and routed PCBs. It edits only the
+  pads' `pinfunction`/`pintype` children and keeps every other byte:
 
   ```bash
   uv run kct pcb annotate-pintypes boards/04-stm32-devboard/output/stm32_devboard.kicad_pcb \

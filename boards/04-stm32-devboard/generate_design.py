@@ -2215,6 +2215,8 @@ def main() -> int:
         # router merges tracks into this text, so the routed PCB inherits the
         # ``(pintype ...)`` evidence ``kct detect-mistakes`` reads for rails.
         annotation = annotate_pcb_file_pintypes(pcb_path, sch_path)
+        if annotation.missing_pads:  # Issue #6025: every pad maps to a pin
+            raise RuntimeError(f"pads without a schematic pin: {annotation.missing_pads}")
         print(f"   Pad pin types annotated: {annotation.annotated}")
 
         # Step 5: Route PCB

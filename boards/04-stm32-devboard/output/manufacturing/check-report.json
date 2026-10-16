@@ -1,5 +1,5 @@
 {
-  "file": "/home/ubuntu/GitHub/kicad-tools/.loom/worktrees/issue-6269/boards/04-stm32-devboard/output/stm32_devboard_routed.kicad_pcb",
+  "file": "boards/04-stm32-devboard/output/stm32_devboard_routed.kicad_pcb",
   "manufacturer": "jlcpcb-tier1",
   "layers": 0,
   "summary": {
@@ -7,7 +7,7 @@
     "warnings": 0,
     "infos": 0,
     "waived": 0,
-    "rules_checked": 56,
+    "rules_checked": 57,
     "rules_checked_by_rule": {
       "connectivity": 1,
       "copper_sliver": 1,
