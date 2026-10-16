@@ -423,6 +423,27 @@ def test_passing_control_budget_alone_lets_the_captured_pair_couple(searches):
     assert open_phase["iteration_limited"] is False
 
 
+def test_shipped_flagoff_phase_budget_lets_the_captured_pair_couple(searches):
+    """At the shipped flag-off default the open phase couples (Issue #6835).
+
+    ``COUPLED_FLAGOFF_MAX_ITERATIONS`` is a total shared by the two phases: the
+    corridor phase gets at most half, the open phase the remainder, so every
+    phase is guaranteed at least half.  TMDS_D1 needs 213,996 open-phase
+    iterations, so half the shipped default must cover that; a later budget
+    cut below it fails here rather than silently un-coupling Board07 again.
+    """
+    from kicad_tools.router import diffpair_routing
+
+    phase_budget = 350_000
+    assert diffpair_routing.COUPLED_FLAGOFF_MAX_ITERATIONS // 2 >= 213_996
+    [_, open_phase] = _replay(
+        _with_route_args(searches, OPEN, max_iterations_budget=phase_budget, timeout_seconds=0.0)
+    )
+    assert open_phase["success"] is True
+    assert open_phase["iterations"] == 213_996
+    assert open_phase["iteration_limited"] is False
+
+
 def test_control_free_space_needs_more_than_the_budget(searches):
     """An empty grid (no raster, no pads, no routes) still misses at 20,000.
 

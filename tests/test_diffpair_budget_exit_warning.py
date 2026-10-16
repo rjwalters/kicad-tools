@@ -518,8 +518,11 @@ def test_partial_exit_keeps_budget_exit_promotion():
     the budget-exited pair's nets -- board-06-style behaviour is unchanged."""
     router = _one_easy_one_hard_pair_router()
     # Issue #6807: pin the pose-centerline search OFF.  The hard pair's
-    # joint A* stops on its *iteration* budget (20000 iters, ~0.2 s with the
-    # C++ backend), and since #5895 (cc39c2849) the pose search then gets
+    # joint A* stops on a budget -- since #6835 raised the flag-off default
+    # to 350000 iters/phase that is the *wall-clock* budget (~136k open-phase
+    # iters, ~1.5 s with the C++ backend; it was the 20000-iteration phase
+    # cap, ~0.2 s, before) -- and either way ``last_timeout_exceeded`` makes
+    # it budget-exit.  Since #5895 (cc39c2849) the pose search then gets
     # whatever is left of the 0.5 s per-pair wall clock -- but only when at
     # least ``_POSE_CENTERLINE_MIN_BUDGET_S`` (0.25 s) remains.  On a fast
     # host (macOS arm64: ~0.27 s left) the pose search runs and *routes* the
