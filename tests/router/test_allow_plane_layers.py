@@ -176,6 +176,64 @@ def test_cpp_routable_layers_restored_for_next_net() -> None:
         assert not {s.layer for s in second.segments} & {Layer.IN1_CU, Layer.IN2_CU}
 
 
+@pytest.mark.skipif(not is_cpp_available(), reason="router_cpp not built")
+def test_cpp_single_layer_lock_holds_for_opted_in_net() -> None:
+    """A caller's ``[0]`` lock (``_layer_locked_router``) is never widened.
+
+    Judge finding on PR #6884: the widening re-added every allowed layer
+    missing from the vector, turning a ``[0]`` no-via probe into
+    ``[0, 2, 3]``.  With F.Cu walled, a lock-respecting search must fail.
+    """
+    from kicad_tools.router.cpp_backend import CppGrid, CppPathfinder
+
+    rules = _rules()
+    # SMD pads on F.Cu, as in the lock's real use (a planar pad-layer probe):
+    # the only seed layer is the locked one.
+    pads = [
+        Pad(x=x, y=5.0, width=1.0, height=1.0, net=1, net_name="SIG", layer=Layer.F_CU,
+            ref=ref, pin="1")
+        for x, ref in ((3.0, "J1"), (17.0, "J2"))
+    ]  # fmt: skip
+    grid = _walled_grid(rules, pads)
+    pf = CppPathfinder(
+        CppGrid.from_routing_grid(grid), rules, diagonal_routing=True,
+        net_class_map={"SIG": _opted()},
+    )  # fmt: skip
+    pushed: list[list[int]] = []
+    real_setter = pf.set_routable_layers
+
+    def recording_setter(layers: list[int]) -> None:
+        pushed.append(list(layers))
+        real_setter(layers)
+
+    pf.set_routable_layers = recording_setter  # type: ignore[method-assign]
+    # Observe the C++ search alone: the pure-Python fallback never sees the
+    # C++ ``routable_layers_`` vector (a lock is a native-only concept).
+    pf._try_python_fallback = lambda *a, **k: None  # type: ignore[method-assign]
+    pf.set_routable_layers([0])
+    route = pf.route(pads[0], pads[1])
+    assert pushed == [[0]], f"the [0] lock was widened during route(): {pushed}"
+    assert pf._routable_layers == [0]
+    assert route is None, "F.Cu is walled: a search honouring the [0] lock cannot route"
+
+
+def test_cpp_widening_adds_only_opted_in_planes() -> None:
+    """Widening adds the class's excluded opted-in layers only (not In1.Cu)."""
+    if not is_cpp_available():
+        pytest.skip("router_cpp not built")
+    from kicad_tools.router.cpp_backend import CppGrid, CppPathfinder
+
+    rules = _rules()
+    grid = _walled_grid(rules, [])
+    pf = CppPathfinder(CppGrid.from_routing_grid(grid), rules, diagonal_routing=True)
+    assert pf._opted_in_plane_layers(_opted(), frozenset()) == [IN2]
+    assert pf._opted_in_plane_layers(_opted(layers=[0, IN2]), frozenset()) == [IN2]
+    assert pf._opted_in_plane_layers(_opted(), frozenset({IN2})) == []
+    assert pf._opted_in_plane_layers(NetClassRouting(name="Plain"), frozenset()) == []
+    pf.set_routable_layers([0])  # a caller's lock
+    assert pf._opted_in_plane_layers(_opted(), frozenset()) == []
+
+
 # ---------------------------------------------------------------------------
 # Coupled search + tie step filter (both nets must opt in)
 # ---------------------------------------------------------------------------
