@@ -52,12 +52,13 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from ..layers import LayerStack
+from ..pairplan.gateway import Gateway, GatewaySite
+from ..pairplan.gateway import gateway_anchor_point as _gateway_anchor
 from ..primitives import Pad, Route, Segment, Via, pad_half_extents
 from ..quantize import dogleg_points
 from ..rules import DesignRules
 from .coupled import CoupledConnection
 from .escape_plan import EscapeChoice, chosen_stub, foreign_reservations, plan_tapered_escapes
-from .gateway import Gateway, GatewaySite
 from .geometry import Pt, Rect, dist, pt_in_rect, seg_seg_dist
 from .guide import PartnerGuide
 from .history import PhysicalHistory
@@ -3050,7 +3051,7 @@ class LatticePathfinder:
         Diagnostics (layer, gateway per end, via counts, candidates per
         terminal) land in :attr:`pair_gateway_log` either way.
         """
-        from .gateway import enumerate_gateways, rank_gateway_combos
+        from ..pairplan.gateway import enumerate_gateways, rank_gateway_combos
 
         net_p, net_n = pc.pad_p_a.net, pc.pad_n_a.net
         trace_w = getattr(pc.net_class, "trace_width", None) or self.rules.trace_width
@@ -3309,7 +3310,7 @@ class LatticePathfinder:
         while a node start leaves straight octilinear stubs.  Falls back to
         the ideal point when no node qualifies within 1 mm of it.
         """
-        from .gateway import HEADINGS
+        from ..pairplan.gateway import HEADINGS
 
         ideal = _gateway_anchor(site, reach)
         if ideal is None:
@@ -4562,28 +4563,6 @@ class LatticePathfinder:
             budget_s=budget_s,
         )
         return best_routes, stats
-
-
-def _gateway_anchor(site: GatewaySite, reach: float, step: float = 0.05) -> Pt | None:
-    """Start of a gateway's coupled body (issue #6444).
-
-    The nearest point along the gateway heading from the via pair's midpoint
-    that is at least ``reach`` (pair half-envelope + clearance + via radius)
-    from both vias, so the fat centerline can start there with the vias as
-    obstacles.  ``None`` past 4 mm (never on a sane via pitch).
-    """
-    from .gateway import HEADINGS
-
-    h = HEADINGS[site.heading]
-    g = ((site.via_p[0] + site.via_n[0]) / 2.0, (site.via_p[1] + site.via_n[1]) / 2.0)
-    k = 0
-    while k * step <= 4.0:
-        d = k * step
-        pt = (round(g[0] + h[0] * d, 6), round(g[1] + h[1] * d, 6))
-        if dist(pt, site.via_p) >= reach and dist(pt, site.via_n) >= reach:
-            return pt
-        k += 1
-    return None
 
 
 def _outline_from_edges(

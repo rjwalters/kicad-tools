@@ -4635,7 +4635,8 @@ class Autorouter:
         trunk that declined ``pair-no-path``.  Every engaged pair that HAS such
         an alternative is recorded in :attr:`_lattice_tap_chain_pairs`.
         """
-        from .lattice.coupled import CoupledConnection, choose_pair_chain, choose_pair_tap_chain
+        from .lattice.coupled import CoupledConnection
+        from .pairplan.chain import choose_pair_chain, choose_pair_tap_chain
 
         coupled: list[Any] = []
         reserved: dict[int, list[tuple[str, str]]] = {}
@@ -5495,7 +5496,7 @@ class Autorouter:
         self._lattice_pair_ties = []
         if not reserved:
             return set()
-        from .lattice.coupled import MAX_TIE_STUB_MM, PlannedTie, plan_equivalent_pin_tie
+        from .pairplan.tie import MAX_TIE_STUB_MM, PlannedTie, plan_equivalent_pin_tie
         from .primitives import Segment
 
         try:
