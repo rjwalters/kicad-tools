@@ -137,6 +137,8 @@ class DRCChecker:
         mask_copper_request: MaskCopperRequest | None = None,
         physical_copper_gap_mm: float | None = None,
         authored_min_clearance_mm: float | None = None,
+        require_routing_policy: bool = False,
+        routing_policy_defer_pair_vias: bool = True,
     ) -> None:
         """Initialize the DRC checker.
 
@@ -231,6 +233,16 @@ class DRCChecker:
                 ``None``.  Floors the within-pair gap that
                 ``diffpair_clearance_intra`` enforces, matching
                 ``DesignRules.pair_gap()`` in the router (Issue #6575).
+            require_routing_policy: When True, ``routing_policy`` reports
+                every sensitive net class (``length_critical``,
+                ``noise_sensitive``, ``length_match_group`` or
+                ``diffpair_partner``) that declares neither
+                ``max_vias_per_net`` nor ``length_constraint.max_length``
+                (Issue #6044).  Off by default.
+            routing_policy_defer_pair_vias: When True (default),
+                ``routing_policy`` leaves the via cap of engaged diff-pair
+                nets to ``diffpair_uncoupled_length`` so it is not reported
+                twice.  Pass False when that category does not run.
 
         Raises:
             ValueError: If manufacturer ID is not recognized
@@ -247,6 +259,15 @@ class DRCChecker:
         self.copper_oz = copper_oz
         self.suppress_library = suppress_library
         self.net_class_map = net_class_map
+        # Issue #6044: ``routing_policy`` options.  ``require_routing_policy``
+        # makes a sensitive net class with no declared policy an error
+        # (``kct check --require-routing-policy``).  With
+        # ``routing_policy_defer_pair_vias`` (the default) the via cap of an
+        # engaged diff-pair net is left to ``diffpair_uncoupled_length``, so
+        # it is not reported twice; the CLI clears it when that category is
+        # deselected.
+        self.require_routing_policy = require_routing_policy
+        self.routing_policy_defer_pair_vias = routing_policy_defer_pair_vias
         self.courtyard_waivers = courtyard_waivers
         # Issue #4980: declared branch-specific current-path intents, kept
         # as a plain list so ``check_path_ampacity`` degrades to an empty
@@ -341,6 +362,7 @@ class DRCChecker:
         "check_impedance",
         "check_isolated_copper",
         "check_match_group_length_skew",
+        "check_routing_policy",
         "check_silkscreen",
         "check_solder_mask_pads",
         "check_mask_to_copper",
@@ -1339,6 +1361,64 @@ class DRCChecker:
                 threshold_map=threshold_map,
                 emit_info=self._emit_skew_info,
             )
+        return self._absolutize(rule.check(self.pcb, self.design_rules))
+
+    def routing_policy_deferred_via_nets(self) -> set[str]:
+        """Nets whose via cap ``diffpair_uncoupled_length`` already enforces.
+
+        Issue #6044: an engaged pair whose resolved pair limits carry a
+        ``max_vias_per_net`` (from the class or the protocol default) is
+        held to it by the pair rule, so ``routing_policy`` skips the via
+        check of both its nets.
+
+        Issue #6820: only a pair the pair rule actually measures (straight
+        track on BOTH nets, :func:`pair_is_measured`) is deferred.  The pair
+        rule skips a half-routed pair outright, so deferring it silently
+        dropped the cap -- ``routing_policy`` now evaluates it itself.
+        """
+        if self.net_class_map is None or not self.routing_policy_defer_pair_vias:
+            return set()
+        from kicad_tools.validate.diffpair_engagement import (
+            derive_engagement_state,
+            resolve_pair_thresholds,
+        )
+        from kicad_tools.validate.rules.diffpair_uncoupled_length import pair_is_measured
+
+        engaged_pairs, _ = derive_engagement_state(self.pcb, self.net_class_map)
+        names = {n.number: n.name for n in self.pcb.nets.values() if n.name}
+        deferred: set[str] = set()
+        for a, b in engaged_pairs:
+            na, nb = names.get(a), names.get(b)
+            if not na or not nb:
+                continue
+            if resolve_pair_thresholds(self.net_class_map, na, nb).max_vias_per_net is None:
+                continue
+            if not pair_is_measured(self.pcb, a, b):
+                continue  # the pair rule skips it: routing_policy must check it
+            deferred.update((na, nb))
+        return deferred
+
+    def check_routing_policy(self) -> DRCResults:
+        """Hold nets to their declared via cap and maximum routed length.
+
+        Issue #6044.  Reads ``max_vias_per_net`` and
+        ``length_constraint.max_length`` from each net's net-class-map
+        entry (see :mod:`~kicad_tools.validate.rules.routing_policy`).
+        Limits fire only where declared; with ``require_routing_policy``
+        a sensitive class without either limit is an error.  A no-op
+        without a ``net_class_map``.
+        """
+        from .rules.routing_policy import RoutingPolicyRule
+
+        if not self.net_class_map:
+            return DRCResults()
+        rule = RoutingPolicyRule(
+            self.net_class_map,
+            require_policy=self.require_routing_policy,
+            deferred_via_nets=self.routing_policy_deferred_via_nets(),
+            num_copper_layers=self.layers or len(self.pcb.copper_layers),
+            emit_info=self._emit_skew_info,
+        )
         return self._absolutize(rule.check(self.pcb, self.design_rules))
 
     def check_silkscreen(self) -> DRCResults:

@@ -62,8 +62,9 @@ Division floors deliberately — three sweeps on six usable cores get 2 each,
 never 2.67 rounded up — so the shares can only ever under-subscribe the host.
 The one exception is the 1-core floor: a budget below 1 core would deadlock a
 sweep, so more sweeps than usable cores still get 1 each. That is a bounded
-overshoot (N cores, not N x host) and it is the admission side's job to not
-get there — see [`admission_brake`](https://github.com/rjwalters/loom/blob/main/loom-daemon/src/admission_brake.rs).
+overshoot (N cores, not N x host). Keeping the sweep count below the usable
+core count is the operator's job: the only admission cap is
+`autonomous.workFinder.maxConcurrent` (#12406).
 
 ### Where the concurrent-sweep count comes from
 
@@ -174,11 +175,9 @@ tier order used throughout Loom (see `spawn-claude.sh`'s own niceness knobs,
   siblings all finish keeps its smaller share until it exits.
 - **Compute consumed by anything that is not a sweep** — a human's own
   `cargo build`, an unrelated service on the box. The divisor counts sweeps,
-  not load; the load-aware side is
-  [`admission_brake`](https://github.com/rjwalters/loom/blob/main/loom-daemon/src/admission_brake.rs)
-  / [`host_breaker`](https://github.com/rjwalters/loom/blob/main/loom-daemon/src/host_breaker.rs),
-  which gate whether a *new* sweep starts (they never resize a running one —
-  that gap is what #5979 closed).
+  not load. The daemon has no load-aware admission gate (#12406 removed
+  them); an operator watches the exported `loom.host.*` load, RAM and disk
+  metrics and sets `autonomous.workFinder.maxConcurrent` to match.
 - **Hosts whose concurrent agents the local daemon does not track** — the
   count comes from `loom-daemon status --json`. Agents launched outside the
   daemon (a hand-run `claude` that never went through `spawn-claude.sh`) are

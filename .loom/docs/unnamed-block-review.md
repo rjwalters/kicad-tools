@@ -67,7 +67,7 @@ Then do **exactly one** of:
 
 | Finding | Action |
 |---|---|
-| **An open blocker exists** (issue or PR, often named only in a comment) | `loom-daemon park-record apply <n> --blocked-by <ref> --by curator`. A cross-repo blocker goes in `--reason` until `OWNER/REPO#N` refs are supported. Outcome `named`. |
+| **An open blocker exists** (issue or PR, often named only in a comment) | `loom-daemon park-record apply <n> --blocked-by <ref> --by curator`. A cross-repo blocker is passed as `--blocked-by OWNER/REPO#N` (supported since #10443). Outcome `named`. |
 | **A real hold with no numbered blocker** (human step, ruling, external event) | `loom-daemon park-record apply <n> --reason "<why>" --by curator`. The stated reason makes the issue `HeldWithReason`, so the tick does not re-queue it while that hold stands. A genuine human ask is routed per the operator-label rules in `label-state-machine.md` instead of parked. Outcome `kept`. |
 | **Nothing blocks it** | Remove `loom:blocked` and post an evidence comment (what you checked, and what is closed). **Never add `loom:issue`.** If label history shows `loom:issue` was applied before the block, say so and add `loom:curated` so Champion's normal promotion lane can re-approve it. Outcome `released`. |
 

@@ -68,6 +68,7 @@ def _init_type_category_map() -> None:
             # fixable nature (serpentine tuning of the shorter members up
             # to the longest, Phase 2E's domain), categorized identically.
             ViolationType.MATCH_GROUP_LENGTH_SKEW: ViolationCategory.ROUTING,
+            ViolationType.ROUTING_POLICY: ViolationCategory.ROUTING,
             ViolationType.TRACK_WIDTH: ViolationCategory.ROUTING,
             ViolationType.TRACK_ANGLE: ViolationCategory.ROUTING,
             ViolationType.DIMENSION_TRACE_WIDTH: ViolationCategory.ROUTING,
@@ -194,6 +195,10 @@ class ViolationType(Enum):
     # identity is the group's *name* (Phase 1B convention), not a P/N
     # name tuple.
     MATCH_GROUP_LENGTH_SKEW = "match_group_length_skew"
+    # Per-net routing policy (Issue #6044): a net's declared
+    # ``max_vias_per_net`` / ``length_constraint.max_length``, or a sensitive
+    # class with no policy under ``--require-routing-policy``.
+    ROUTING_POLICY = "routing_policy"
     # Differential-pair routing continuity (Issue #2640, Epic #2556 Phase 2G).
     # Fires when an *engaged* differential pair's coupled fraction (the
     # share of P's routed length whose nearest point on N is within the
@@ -392,6 +397,8 @@ class ViolationType(Enum):
             # above).  This entry is the only defense; do NOT delete it
             # as "redundant".
             "match_group_length_skew": cls.MATCH_GROUP_LENGTH_SKEW,
+            # Issue #6044.  Explicit: the fuzzy fallback would yield UNKNOWN.
+            "routing_policy": cls.ROUTING_POLICY,
             # Differential-pair routing continuity (Issue #2640, Epic #2556
             # Phase 2G).  MUST be aliased explicitly even though the
             # rule_id string ``"diffpair_routing_continuity"`` does NOT

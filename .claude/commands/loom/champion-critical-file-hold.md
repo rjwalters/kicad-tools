@@ -74,7 +74,12 @@ CF_JSON=$(gh pr view "$PR_NUMBER" --json comments,labels,headRefOid)
 CF_TRUST=raw; T=$(loom-daemon forge trusted-comments --fetch "$PR_NUMBER" --gh-shape) && CF_JSON=$(jq --argjson c "$T" '.comments = $c' <<<"$CF_JSON") && CF_TRUST=ok
 HEAD_SHA=$(jq -r '.headRefOid' <<<"$CF_JSON")
 HOLD_LABEL_NOW=$(jq -r '[.labels[].name] | any(. == "loom:blocked")' <<<"$CF_JSON")
-cf_park() { loom-daemon park-record apply --pr "$PR_NUMBER" --reason "champion critical-file hold" --by champion >/dev/null 2>&1 || true; }
+cf_park() {
+  loom-daemon park-record apply --pr "$PR_NUMBER" --reason "champion critical-file hold" --by champion >/dev/null 2>&1 || true
+  # #10937: an OPEN issue/PR the hold waits on, if the notice names one; inert (Guide skips a standing Champion hold)
+  for N in ${CF_BLOCKER_NUMBERS:-}; do loom-daemon park-record apply --pr "$PR_NUMBER" --blocked-by "$N" \
+    --reason "champion critical-file hold: human evidence gate" --by champion >/dev/null 2>&1 || true; done
+}
 
 LAST_STATE=$(jq -r --arg h "$HOLD_MARKER" --arg c "$CLEARED_MARKER" --arg r "$RELEASED_MARKER" \
   '[.comments[] | select((.body | startswith($h)) or (.body | startswith($c)) or (.body | startswith($r)))] | last | .body // ""' <<<"$CF_JSON")

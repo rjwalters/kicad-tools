@@ -7391,6 +7391,12 @@ sql_ddl_exec_match() {
             return toupper(substr(l, RSTART, RLENGTH))
         return ""
     }
+    function is_wrapper(w,   base) {
+        base = w
+        sub(/^.*\//, "", base)
+        sub(/^\\/, "", base)
+        return base ~ /^(env|command|exec|builtin|sudo|doas|nohup|setsid|nice|ionice|stdbuf|timeout|time|xargs|unbuffer)$/
+    }
     function runs_sql(cmd, toks, m,   j, base) {
         base = cmd
         sub(/^.*\//, "", base)
@@ -7413,20 +7419,27 @@ sql_ddl_exec_match() {
         for (i = 1; i <= n; i++) {
             seg = segs[i]
             sub(/^[ \t]+/, "", seg)
-            sub(/^sudo[ \t]+/, "", seg)
-            if (sub(/^env([ \t]+|$)/, "", seg)) {
-                sub(/^[ \t]+/, "", seg)
-                stripped = 1
-                while (stripped) {
-                    stripped = 0
-                    if (sub(/^-u[ \t]+[^ \t]+([ \t]+|$)/, "", seg)) { stripped = 1; continue }
-                    if (sub(/^-i([ \t]+|$)/, "", seg))              { stripped = 1; continue }
-                    if (sub(/^--([ \t]+|$)/, "", seg))              { break }
+            # Unwrap command-prefix wrappers (#12237). The list mirrors the
+            # heredoc-interpreter scan earlier in this file; keep them in sync.
+            # After a wrapper, skip its -flags, VAR=val and numeric operands. A
+            # bare word right after a flag is that flag operand (`sudo -u pg
+            # psql`, `nice -n 10`) unless it is itself a DB client or wrapper,
+            # so `sudo -E psql` still unwraps to psql.
+            mr = split(seg, raw, /[ \t]+/)
+            j = 1
+            while (j <= mr && raw[j] ~ /^[A-Za-z_][A-Za-z0-9_]*=/) j++
+            while (j <= mr && is_wrapper(raw[j])) {
+                j++
+                prevflag = 0
+                while (j <= mr) {
+                    if (raw[j] ~ /^-/) { prevflag = 1; j++; continue }
+                    if (raw[j] ~ /^[A-Za-z_][A-Za-z0-9_]*=/ || raw[j] ~ /^[0-9]+([.][0-9]+)?[smhd]?$/) { prevflag = 0; j++; continue }
+                    if (prevflag && !is_wrapper(raw[j]) && !runs_sql(raw[j], raw, mr)) { prevflag = 0; j++; continue }
+                    break
                 }
             }
-            while (sub(/^[A-Za-z_][A-Za-z0-9_]*=[^ \t]*[ \t]+/, "", seg)) {}
-            sub(/^[ \t]+/, "", seg)
-            m = split(seg, toks, /[ \t]+/)
+            m = 0
+            for (k = j; k <= mr; k++) toks[++m] = raw[k]
             if (m == 0 || !runs_sql(toks[1], toks, m)) continue
             ph = phrase(segs[i])
             if (ph != "") { print ph; exit }
@@ -8067,6 +8080,108 @@ wt_write_mktemp_same_command_safe() {
         # nothing else to the same NAME anywhere in the command.
         if (total == 1 && safe == 1) print "SAFE"
         else if (total == 2 && safe == 1 && canon == 1 && safeat == 1 && canonat == 2) print "SAFE"
+        else print "UNSAFE"
+    }')
+    [[ "$verdict" == "SAFE" ]]
+}
+
+# =============================================================================
+# write-confinement /tmp-CWD LOOP-VARIABLE RESOLUTION (#12285)
+#
+# Sibling of wt_write_mktemp_same_command_safe() for routine scratch work:
+#
+#     cd /tmp/probe && for name in a b; do echo x > "$name.gds"; done
+#
+# The target starts with an unexpanded `$`, so the "root unknown" deny
+# (worktree-write-confinement-unresolved-var) fires even though every value the
+# variable can take is a bare literal word and the cwd is a literal /tmp
+# directory -- the write cannot leave /tmp/probe. Skip that deny ONLY when ALL
+# hold (each is lexical and fails closed):
+#
+#   1. The tracked cwd is a literal /tmp/<dir>[/<dir>...] path (components
+#      start alphanumeric, so no `.`/`..`; no `$`, backtick or quote) outside
+#      every managed worktree and the main checkout, AND the
+#      command has an earlier `cd /tmp/<literal>` segment, so the cwd came from
+#      this command and not from the hook's inherited cwd.
+#   2. The target is `$var`/`${var}` plus a literal suffix with no `/`, `..`,
+#      `$`, backtick or quote.
+#   3. EVERY binding of var in the command is a literal `for var in <words>` or
+#      `var=<word>` whose words are `/`-free, `..`-free, non-absolute names,
+#      and the first binding precedes the first use of the target. Any other
+#      rebinding (read, +=, eval, source, unset, ...) or no binding at all keeps
+#      the deny.
+#   4. The command contains no `ln` command word: a symlink created in the same
+#      command could redirect the write out of /tmp/<dir>. A symlink that
+#      already exists from an EARLIER command remains a residual gap, since the
+#      guard is lexical and never resolves paths.
+# =============================================================================
+wt_write_tmp_cwd_loop_var_safe() {
+    local target="$1" cwd="$2" cmdtext="$3" t c1 c2 varname suffix verdict
+    t="$target"
+    if [[ ${#t} -ge 2 ]]; then
+        c1="${t:0:1}"; c2="${t: -1}"
+        if [[ ("$c1" == '"' && "$c2" == '"') || ("$c1" == "'" && "$c2" == "'") ]]; then
+            t="${t:1:${#t}-2}"
+        fi
+    fi
+    if [[ "$t" =~ ^\$\{([A-Za-z_][A-Za-z0-9_]*)\}(.*)$ ]]; then
+        varname="${BASH_REMATCH[1]}"; suffix="${BASH_REMATCH[2]}"
+    elif [[ "$t" =~ ^\$([A-Za-z_][A-Za-z0-9_]*)(.*)$ ]]; then
+        varname="${BASH_REMATCH[1]}"; suffix="${BASH_REMATCH[2]}"
+    else
+        return 1
+    fi
+    [[ "$suffix" =~ ^[A-Za-z0-9._+@%,=:-]*$ ]] || return 1
+    [[ "$suffix" == *..* ]] && return 1
+    c1="${cwd:0:1}"; c2="${cwd: -1}"
+    if [[ ${#cwd} -ge 2 && ("$c1" == '"' || "$c1" == "'") && "$c1" == "$c2" ]]; then
+        cwd="${cwd:1:${#cwd}-2}"
+    fi
+    [[ "$cwd" =~ ^/tmp(/[A-Za-z0-9_][A-Za-z0-9._-]*)+$ ]] || return 1
+    # A checkout or worktree that itself lives under /tmp is still protected.
+    _wt_in_protected_area "$cwd" && return 1
+    # A symlink made in this same command could redirect the write.
+    [[ "$cmdtext" =~ (^|[^A-Za-z0-9_.-])ln([[:space:]]|$) ]] && return 1
+    verdict=$(printf '%s' "$cmdtext" | awk -v varname="$varname" -v tok="\$${varname}${suffix}" -v btok="\${${varname}}${suffix}" "$_QSPLIT_AWK""$_MKTEMP_REBIND_AWK"'
+    function strip_q(w,   a, b) {
+        a = substr(w, 1, 1); b = substr(w, length(w), 1)
+        if (length(w) >= 2 && (a == "\"" || a == "\047") && a == b) return substr(w, 2, length(w) - 2)
+        return w
+    }
+    function lit_ok(w) { return w ~ /^[A-Za-z0-9_][A-Za-z0-9._-]*$/ }
+    {
+        $0 = qsplit($0)
+        n = split($0, segs, "\n")
+        for (i = 1; i <= n; i++) {
+            seg = segs[i]
+            sub(/^[ \t]+/, "", seg)
+            sub(/[ \t]+$/, "", seg)
+            while (sub(/^(do|then|else|elif|if|while|until|!|\{|\()[ \t]+/, "", seg)) { }
+            if (seg ~ /^cd[ \t]+/) {
+                w = seg; sub(/^cd[ \t]+/, "", w); sub(/[ \t].*$/, "", w)
+                w = strip_q(w)
+                if (cdat == 0 && w ~ /^\/tmp(\/[A-Za-z0-9_][A-Za-z0-9._-]*)+$/) cdat = i
+            }
+            if (useat == 0 && (index(seg, tok) > 0 || index(seg, btok) > 0)) useat = i
+            bseg = _mktemp_strip_decl_kw(seg)
+            if (seg ~ ("^for[ \t]+" varname "[ \t]+in[ \t]+")) {
+                total++
+                w = seg; sub(/^for[ \t]+[A-Za-z0-9_]+[ \t]+in[ \t]+/, "", w)
+                m = split(w, words, /[ \t]+/)
+                ok = (m >= 1)
+                for (k = 1; k <= m; k++) if (!lit_ok(words[k])) ok = 0
+                if (ok) { valid++; if (firstbind == 0) firstbind = i }
+            } else if (length(bseg) > length(varname) + 1 && substr(bseg, 1, length(varname) + 1) == varname "=") {
+                total++
+                w = strip_q(substr(bseg, length(varname) + 2))
+                if (lit_ok(w)) { valid++; if (firstbind == 0) firstbind = i }
+            } else if (_mktemp_is_other_rebind(seg, varname)) {
+                total++
+            }
+        }
+    }
+    END {
+        if (total >= 1 && total == valid && cdat > 0 && useat > 0 && cdat < useat && firstbind > 0 && firstbind < useat) print "SAFE"
         else print "UNSAFE"
     }')
     [[ "$verdict" == "SAFE" ]]
@@ -10216,6 +10331,12 @@ if worktree_isolation_guard_enabled && \
                             fi
                         fi
                         if wt_write_mktemp_same_command_safe "$_wtarget" "$COMMAND_WT_MKTEMP_SCAN"; then
+                            continue
+                        fi
+                        # #12285: literal-loop-variable scratch write under a
+                        # literal `cd /tmp/<dir>` -- see
+                        # wt_write_tmp_cwd_loop_var_safe()'s doc comment.
+                        if wt_write_tmp_cwd_loop_var_safe "$_wtarget" "$_wcwd" "$COMMAND_WT_MKTEMP_SCAN"; then
                             continue
                         fi
                         deny "BLOCKED: Bash-tool write target '${_wtarget}' is an unexpanded shell variable from the path root down, so this guard cannot tell where the write lands — it may resolve to an absolute path inside the main repository checkout ('${_WT_MAIN_ROOT}'), and a Loom-managed worktree exists in this repository. Unresolvable write targets fail closed (#4921). Need this variable resolved instead? Declare it literally in the SAME command, before the write: VAR=/literal/path; <write> -- the guard's same-command resolver (record_assign()/resolve_var(), #4881) substitutes it before this check runs, so the write is judged on the real resolved path. A false or self-serving declaration gains nothing: the resolved path is still checked against this same containment rule, so it can never grant an allow beyond what writing that literal path outright would already grant (#6172). Otherwise, write to an explicit literal path — inside your issue worktree ($(_wt_worktree_hint)) for repo files, or a spelled-out /tmp path for scratch. Not a Builder and need to write here directly? Set guards.worktreeIsolation:false in .loom/config.json for the session -- an inline 'LOOM_GUARD_WORKTREE_ISOLATION=0 <command>' prefix does NOT work (this hook runs as a separate process). (#4178)" "worktree-write-confinement-unresolved-var"  # scan-reads: COMMAND_ASK_SCAN,COMMAND_WT_MKTEMP_SCAN

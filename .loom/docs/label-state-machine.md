@@ -24,6 +24,7 @@ leaves the issue uncurated. The rubric is in `.loom/docs/story-points.md`.
 
 - [The three holds (#11795)](#the-three-holds-11795)
 - [Routing to a human (#10001, #11795)](#routing-to-a-human-10001-11795)
+- [Closing out a decision: file what it names (#10940)](#closing-out-a-decision-file-what-it-names-10940)
 - [Definition](#definition)
 - [Priority labels are not holds (#11103)](#priority-labels-are-not-holds-11103)
 - [Entry points](#entry-points)
@@ -33,6 +34,7 @@ leaves the issue uncurated. The rubric is in `.loom/docs/story-points.md`.
 - [The kind comes from the body (#11795)](#the-kind-comes-from-the-body-11795)
 - [Fact-based de-escalation of a Champion `proposal-escalated` hold (#7650, retired by #11861)](#fact-based-de-escalation-of-a-champion-proposal-escalated-hold-7650-retired-by-11861)
 - [PR verdict-label mutual exclusion: three independent layers (#8112)](#pr-verdict-label-mutual-exclusion-three-independent-layers-8112)
+- [CI-gate recovery (#10178)](#ci-gate-recovery-10178)
 - [Follow-up work](#follow-up-work)
 - [Label registry: the source of truth (#10013)](#label-registry-the-source-of-truth-10013)
 - [No-op hold (#10156)](#no-op-hold-10156)
@@ -97,6 +99,7 @@ structurally cannot.
 | A step needing a human's hands: hardware, a credential or access no fleet host holds | `loom:operator`, plus a comment naming the exact step |
 | A human action that waits on something named first | `loom:operator`, plus a literal `Blocked by #N` line in the body or comment |
 | Waiting on something automation will resolve: an issue, a PR, infrastructure | `loom:blocked` with a park record (`loom-daemon park-record apply`, [`park-record.md`](park-record.md)), or at least a literal `Blocked by #N` / `Depends on #N` / `Requires #N` line in the same comment (the phrasings `detect-dependency-cycle.sh` and `warn-operator-gated.sh` parse; a backtick-quoted reference does not count) |
+| Cross-repo or time-gated leftover (a sweep standing down, not a human ask) | File the child in the other repo and `loom-daemon park-record apply <N> --blocked-by OWNER/REPO#N --by <role> --remove-label loom:building`; the park releases when the child closes. For a time-gated wait, park on the tracking issue or PR whose closing is the signal; with none, file a same-repo tracking issue. If the fleet identity cannot see the other repo (404 on filing), use the capability row below, not `loom:operator`. A reason-only `--reason "wait until <date>: ..."` park is the last resort: **no date release exists today**, so it sits until a human or a fingerprint change moves it, and the reason must say so. Never `loom:operator` just to stop re-dispatch |
 | Waiting on a capability a fleet host may hold (host or admin access, a credential profile) | `loom:blocked` with a reason-only park record and a `<!-- loom:capability=<name> -->` marker naming it, plus a linked capability-request issue: the capability lane (below) proposes it on a host that holds it |
 
 **`loom:operator` needs a stated reason class.** Only these classes qualify:
@@ -139,6 +142,33 @@ repairs it), and the curation and claim labels. An external notifier (the 2am
 turns a human-gated label being added into a notification, and resolves it
 when the label is removed or the item closes or merges. Pinned by
 `label_registry::tests::human_gated_is_exactly_the_human_must_act_labels`.
+
+## Closing out a decision: file what it names (#10940)
+
+A decision comment that names a follow-up ("file X", "handed back to Curator")
+is a commitment, and nobody else will act on it. Applying the decision files
+or sets that follow-up **in the same pass**:
+
+1. **File each concrete, authorized follow-up** in the **owning repo** with
+   `./.loom/scripts/create-issue.sh --repo OWNER/REPO` (never a bare
+   `gh issue create`), after `./.loom/scripts/check-duplicate.sh`. If a
+   duplicate exists, link it instead of filing. The new issue enters at
+   `loom:triage` and links back to the decided issue.
+2. **Park the decided issue on it** with
+   `loom-daemon park-record apply --issue N --blocked-by OWNER/REPO#M --by <role>`
+   (a same-repo ref may be `M`), so the park record is in the body. Never a
+   bare `loom:blocked`.
+3. **"Handed back to Curator" is one state:** relabel the issue `loom:triage`
+   (the queue Curator drains), remove the hold, and say in the comment what
+   Curator is to do. A hand-back with no state change is not a hand-back.
+4. **File nothing for casual suggestions.** Only a follow-up the decision
+   comment states as a commitment, or the operator's ruling authorizes,
+   qualifies. Narrative suggestions ("might be worth...") are not filed, and no
+   new work is invented from them.
+
+If the fleet credential cannot write to the owning repo, say so in the
+decision comment and leave the follow-up named there; do not fall back to
+filing it in the wrong repo or drop it silently.
 
 ## Definition
 
@@ -430,6 +460,17 @@ said. Now the body is the only copy:
 No role acts on any of these (#11861): the kind tells the human what to do.
 A capability marker on a `loom:operator` item is inert; the capability lane
 reads `loom:blocked` only (below).
+
+### Tracker marker (`<!-- loom:tracker -->`, #10886)
+
+A body marker (not a label, not a hold) for a living tracker or governance hub
+that is meant to stay open with no finite deliverable. It must be a line by
+itself outside any code fence; a quoted or inline mention does not count.
+Champion's Priority 2 discovery skips it and `champion-issue-promo.md` treats it
+as `ALREADY_ROUTED`, so no rejection is counted and it never reaches the N=2
+escalation; Curator leaves it as found. Remove the marker to restore normal
+evaluation. It does not suppress a human-filed `loom:operator` decision.
+`loom:needs-capability` waits need no marker: the registry `hold` set covers them.
 
 ### Capability marker (`<!-- loom:capability=<name> -->`, #6885/#6892)
 
@@ -725,6 +766,21 @@ record that removal instead of re-asserting it over you. Procedure and scoping:
 ["Releasing a Champion hold and merging it yourself"](#releasing-a-champion-hold-and-merging-it-yourself-9016)
 above. Nothing about the guard changes for any other blocking label.
 
+## CI-gate recovery (#10178)
+
+A Judge CI-failing verdict leaves `loom:changes-requested` + `loom:ci-failure`.
+Head-move invalidation never fires when the head does not move, and refuses a
+`loom:blocked` PR. A daemon pass (`claim_reconciliation/ci_gate_recovery.rs`,
+behind `LOOM_VERDICT_STALENESS_RECONCILE`) therefore returns such a PR to
+`loom:review-requested` once `wait-checks` reports the **exact head** green, and
+only for a CI-only verdict (`<!-- loom:ci-gate-only -->`). It never touches
+`loom:operator*`, `loom:frozen`, a Champion hold, or a `loom:blocked` that is not
+a park record with no blocker and `reason="ci-gate"`.
+
+A CI-only gate must not add `loom:blocked`; if one is unavoidable, park with
+`loom-daemon park-record apply --issue <PR> --reason ci-gate --by judge` so the
+pass can tell it from a real hold.
+
 ## Follow-up work
 
 - Derive `loom:blocked-unnamed` from "blocked without a park record" instead
@@ -828,16 +884,21 @@ adopts and releases them as above. See
 
 When a PR merges with a non-closing `Part of #N` / `Contributes to #N` reference,
 `merge-pr.sh` returns issue N from `loom:building` to `loom:issue`. If what is left
-needs a human (an operator decision, a deployment-time check, a hardware step), the
+needs a human's hands or a ruling (an operator decision, a hardware step), the
 issue body declares it with an HTML comment marker, added **before** the PR merges:
 
 ```text
-<!-- loom:remainder-hold reason="deployment-time checks need the fleet on a release containing this merge" -->
+<!-- loom:remainder-hold reason="needs the operator to flash the board and read back the result" -->
 ```
 
 With the marker, the reset swaps `loom:building` -> `loom:operator` instead, logs the
 reason, and posts a "Partial Increment Merged (remainder held)" comment. To release,
 a human removes `loom:operator` and the marker, then re-applies `loom:issue`.
+
+A remainder that is only cross-repo or time-gated (for example a deployment-time check
+that waits on a fleet release) is agent work, not a human ask: do not use the marker.
+Park it instead, per the "Cross-repo or time-gated leftover" row in
+[Routing to a human](#routing-to-a-human-10001-11795).
 
 - The marker is honoured from any author: it can only keep an issue out of the
   ready queue. The `reason` is one line and is only quoted, never evaluated.

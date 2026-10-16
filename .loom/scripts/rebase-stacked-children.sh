@@ -58,17 +58,27 @@
 #   - GitHub-only, and only for a <parent-branch> matching feature/issue-<N>.
 #   - Rebases only where `loom-daemon branch-update strategy` says `rebase`
 #     (#10771). In a merge-only repo (the default answer, and the answer when
-#     anything is unknown) a stale child is reported, never rewritten:
-#     merge-based de-stacking is #9808.
+#     anything is unknown) a stale child is NEVER rewritten; it is de-stacked by
+#     a merge instead (#9808), one child at a time, in a throwaway worktree:
+#       - skipped (logged) when its issue is loom:building or its PR carries
+#         loom:treating / loom:reviewing;
+#       - `git merge origin/<parent-branch>`; on conflict the merge is aborted,
+#         nothing is pushed, and ONE comment (files + the local command) is
+#         posted per parent tip;
+#       - a clean merge must pass version-check-gate.sh and the fast-tier
+#         compile check (buildGate.fastCommand, else LOOM_BUILD_GATE_TIER=fast
+#         buildGate.command) before a plain fast-forward push. No force flag of
+#         any kind; a rejected push is reported, never retried.
+#     --dry-run reports would-merge / would-skip per child.
 #
 # Options:
 #   --dry-run   Report the per-child outcome without executing git/gh mutations.
 #   --help,-h   Show this help.
 #
 # Exit codes:
-#   0 = rebased, deferred, skipped (merge-only repo), or no-op (or dry-run)
+#   0 = rebased, merged, deferred, skipped, handed off on a conflict, or no-op (or dry-run)
 #   1 = usage / precondition failure
-#   2 = a git/gh step failed (rebase conflict, rejected force-with-lease push)
+#   2 = a git/gh step failed (rebase conflict, rejected push, red verification on a merge)
 
 set -euo pipefail
 
@@ -86,7 +96,7 @@ info() { echo -e "${BLUE}ℹ $1${NC}" >&2; }
 warn() { echo -e "${YELLOW}⚠ $1${NC}" >&2; }
 
 show_help() {
-    sed -n '2,71p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+    sed -n '2,81p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 DRY_RUN=false
@@ -174,6 +184,139 @@ run() {
     "$@"
 }
 
+# Is this child in flight? Prints the reason and returns 0 when the child ISSUE
+# is loom:building or the child PR carries loom:treating / loom:reviewing: a live
+# agent may be pushing to the branch. Fresh (uncached) `gh api` reads, as above;
+# a read failure counts as "not in flight" (the push below is a plain
+# fast-forward, so a missed claim costs a rejected push, never lost work).
+_stacked_child_in_flight() {
+    local child_pr="$1" child_branch="$2" labels=""
+    if [[ "$child_branch" =~ ^feature/issue-([0-9]+)$ ]]; then
+        labels="$(gh api "repos/$REPO_NWO/issues/${BASH_REMATCH[1]}" 2>/dev/null | jq -r '.labels[]?.name' 2>/dev/null || true)"
+        if printf '%s\n' "$labels" | grep -qx 'loom:building'; then
+            echo "issue #${BASH_REMATCH[1]} is loom:building"; return 0
+        fi
+    fi
+    labels="$(gh api "repos/$REPO_NWO/issues/$child_pr" 2>/dev/null | jq -r '.labels[]?.name' 2>/dev/null || true)"
+    local claim
+    for claim in loom:treating loom:reviewing; do
+        if printf '%s\n' "$labels" | grep -qx "$claim"; then
+            echo "PR #$child_pr carries $claim"; return 0
+        fi
+    done
+    return 1
+}
+
+# Remove a throwaway checkout made by _merge_one_stacked_child.
+_destack_cleanup_checkout() {
+    rm -rf "$1"
+    git worktree prune >/dev/null 2>&1 || true
+}
+
+# Run the repo's fast-tier compile check (#11690) inside checkout $1: buildGate.
+# fastCommand, else buildGate.command with LOOM_BUILD_GATE_TIER=fast. No gate
+# configured (or enabled:false) is a warned pass, not a failure.
+_destack_compile_check() {
+    local checkout="$1" cfg="$1/.loom/config.json" cmd secs
+    [[ -e "$cfg" ]] || { warn "No .loom/config.json in the merge result — no compile check configured"; return 0; }
+    [[ "$(jq -r '.buildGate.enabled // true' "$cfg" 2>/dev/null)" != "false" ]] || { warn "buildGate is disabled — no compile check runs before the push"; return 0; }
+    cmd="$(jq -r '.buildGate.fastCommand // empty' "$cfg" 2>/dev/null)"
+    if [[ -z "$cmd" ]]; then
+        cmd="$(jq -r '.buildGate.command // empty' "$cfg" 2>/dev/null)"
+        [[ -n "$cmd" ]] && cmd="LOOM_BUILD_GATE_TIER=fast $cmd"
+    fi
+    [[ -n "$cmd" ]] || { warn "buildGate names no command — no compile check runs before the push"; return 0; }
+    secs="$(jq -r '.buildGate.timeoutSeconds // 600' "$cfg" 2>/dev/null)"
+    (cd "$checkout" && timeout "$secs" sh -c "$cmd") >&2
+}
+
+# Merge-based de-stacking of ONE stale child (#9808), for a repo whose PR
+# branches are never rewritten. The child gets origin/<parent> merged in and a
+# plain fast-forward push: no history rewrite, no lease, nothing to clobber.
+# Every outcome leaves the child as found or strictly ahead of it. Sets
+# RSC_FAILURE=2 when a verification or the push fails; a conflict is a handoff
+# (one comment), not a failure. Always returns 0.
+_merge_one_stacked_child() {
+    local child_pr="$1" child_branch="$2" parent_branch="$3" why
+    if why="$(_stacked_child_in_flight "$child_pr" "$child_branch")"; then
+        if [[ "$DRY_RUN" == "true" ]]; then
+            info "[dry-run] would-skip child PR #$child_pr ($child_branch): $why"
+        else
+            info "Skipping child PR #$child_pr ($child_branch): $why — a live agent may be pushing to it"
+        fi
+        return 0
+    fi
+    if [[ "$DRY_RUN" == "true" ]]; then
+        info "[dry-run] would-merge origin/$parent_branch into child PR #$child_pr ($child_branch) and push it"
+        return 0
+    fi
+
+    local checkout parent_tip
+    checkout="$(mktemp -d)" || { warn "Could not create a scratch checkout — skipping child PR #$child_pr"; return 0; }
+    if ! git worktree add --detach "$checkout" "origin/$child_branch" >/dev/null 2>&1; then
+        warn "Could not check out '$child_branch' in a scratch worktree — skipping child PR #$child_pr"
+        _destack_cleanup_checkout "$checkout"; return 0
+    fi
+
+    info "Child PR #$child_pr ($child_branch) is stale relative to '$parent_branch' — merging origin/$parent_branch"
+    if ! git -C "$checkout" merge --no-edit -m "Merge origin/$parent_branch into $child_branch (de-stack, #9808)" "origin/$parent_branch" >/dev/null 2>&1; then
+        local files marker comment
+        files="$(git -C "$checkout" diff --name-only --diff-filter=U 2>/dev/null || true)"
+        git -C "$checkout" merge --abort >/dev/null 2>&1 || true
+        _destack_cleanup_checkout "$checkout"
+        parent_tip="$(git rev-parse "origin/$parent_branch" 2>/dev/null || echo unknown)"
+        marker="<!-- loom:destack-conflict parent=$parent_tip -->"
+        warn "Merging origin/$parent_branch into '$child_branch' conflicts — nothing pushed, handing off on PR #$child_pr"
+        if gh pr view "$child_pr" --repo "$REPO_NWO" --json comments --jq '.comments[].body' 2>/dev/null | grep -qF -- "$marker"; then
+            info "PR #$child_pr already carries the conflict comment for parent tip $parent_tip — not re-posting"
+            return 0
+        fi
+        comment="## Stacked parent advanced — automatic merge conflicts
+
+\`$parent_branch\` moved ahead of this PR's base, and merging it in conflicts. Nothing was pushed to \`$child_branch\`.
+
+**Conflicting files:**
+
+$(printf '%s\n' "${files:-(none reported)}" | sed 's/^/- /')
+
+**To finish it by hand**, in this branch's worktree:
+
+\`\`\`
+git fetch origin
+git merge origin/$parent_branch
+# resolve the conflicts, commit, then a plain push (never a rewrite):
+git push origin HEAD:$child_branch
+\`\`\`
+
+---
+*Posted once per parent tip by rebase-stacked-children.sh (#9808)*
+$marker"
+        gh pr comment "$child_pr" --repo "$REPO_NWO" --body "$comment" >/dev/null 2>&1 || warn "Could not post the conflict comment on PR #$child_pr"
+        return 0
+    fi
+
+    # Verify the MERGE RESULT before anything leaves this host: version-bearing
+    # files in sync (#7168), then the fast-tier compile check (#11690).
+    if [[ -x "$SCRIPT_DIR/version-check-gate.sh" ]] && ! (cd "$checkout" && "$SCRIPT_DIR/version-check-gate.sh" --fix-hint "then push."); then
+        err "Version-bearing files are out of sync for '$child_branch' after merging '$parent_branch' — not pushing (see BLOCKER:/Fix: above)."
+        _destack_cleanup_checkout "$checkout"; RSC_FAILURE=2; return 0
+    fi
+    if ! _destack_compile_check "$checkout"; then
+        err "The compile check failed on the merge of '$parent_branch' into '$child_branch' — not pushing; the child is left as found."
+        _destack_cleanup_checkout "$checkout"; RSC_FAILURE=2; return 0
+    fi
+
+    # A plain fast-forward push. A rejection means someone pushed meanwhile:
+    # report it and move on.
+    if ! git -C "$checkout" push origin "HEAD:refs/heads/$child_branch" >/dev/null 2>&1; then
+        err "Push of the merge into '$child_branch' was rejected (a concurrent update?). Fetch and re-run; nothing was rewritten."
+        _destack_cleanup_checkout "$checkout"; RSC_FAILURE=2; return 0
+    fi
+    _destack_cleanup_checkout "$checkout"
+    ok "Merged origin/$parent_branch into child PR #$child_pr ($child_branch) and pushed (fast-forward, base unchanged, still stacked on $parent_branch)"
+    return 0
+}
+
 # Rebase (or defer) one discovered child PR relative to the parent's current
 # tip. Sets RSC_FAILURE=2 on a git/gh step failure but always returns 0 so the
 # caller keeps processing the remaining children.
@@ -205,9 +348,10 @@ _process_one_stacked_child() {
         return 0
     fi
 
-    # #10771: in a merge-only repo, never rewrite the child. Reported, exit 0.
+    # #10771: in a merge-only repo, never rewrite the child. It is brought up to
+    # date by a merge and a plain push instead (#9808).
     if [[ "${BRANCH_UPDATE_STRATEGY:-}" != "rebase" ]]; then
-        warn "Child PR #$child_pr ($child_branch) is stale relative to '$parent_branch', but this repository's PR branches are not rebased (loom-daemon branch-update strategy: merge, #10771) — not rewriting it. Update it with a merge and a plain push in its worktree: git merge origin/$parent_branch && git push origin HEAD:$child_branch (merge-based de-stacking: #9808)."
+        _merge_one_stacked_child "$child_pr" "$child_branch" "$parent_branch"
         return 0
     fi
 
@@ -260,7 +404,7 @@ _process_one_stacked_child() {
         ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
         comment="## Stacked parent advanced — rebase deferred
 
-Parent branch \`$parent_branch\` advanced (amended/pushed) after this child branched off it, so this PR is now **stale** relative to the parent's current tip. But issue #$child_issue is still \`loom:building\` — a Builder likely has this branch checked out. The auto-rebase was **skipped** to avoid racing that in-progress work with an out-of-band \`git rebase\` + \`push --force-with-lease\`.
+Parent branch \`$parent_branch\` advanced (amended/pushed) after this child branched off it, so this PR is now **stale** relative to the parent's current tip. But issue #$child_issue is still \`loom:building\` — a Builder likely has this branch checked out. The auto-rebase was **skipped** to avoid racing that in-progress work with an out-of-band \`git rebase\` and force-push.
 
 **What happens next**: once issue #$child_issue is no longer \`loom:building\`, re-run this script to rebase the child onto the parent's current tip (the child's PR base stays \`$parent_branch\` — it remains stacked):
 

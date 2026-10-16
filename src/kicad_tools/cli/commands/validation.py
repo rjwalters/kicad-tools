@@ -340,6 +340,9 @@ def run_check_command(args) -> int:
     # Issue #4601: forward the sidecar auto-discovery opt-out.
     if getattr(args, "no_net_class_map", False):
         sub_argv.append("--no-net-class-map")
+    # Issue #6044: forward the opt-in missing-routing-policy gate.
+    if getattr(args, "require_routing_policy", False):
+        sub_argv.append("--require-routing-policy")
     # Issue #4980/#5124: forward the declared branch-specific current-path
     # sidecar and its auto-discovery opt-out, mirroring --net-class-map /
     # --no-net-class-map immediately above.

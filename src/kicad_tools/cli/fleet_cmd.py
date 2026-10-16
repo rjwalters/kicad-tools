@@ -37,7 +37,6 @@ decision 2026-05-21):
 from __future__ import annotations
 
 import argparse
-import contextlib
 import datetime as _dt
 import json
 import re
@@ -431,15 +430,84 @@ def _now_iso() -> str:
     return _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds")
 
 
+def _spec_declared_pcb(board_dir: Path) -> Path | None:
+    """Resolve the PCB declared in ``project.kct`` ``artifacts``, if it exists.
+
+    Prefers ``pcb_routed`` and falls back to ``pcb`` (issue #6815), for
+    boards whose PCB is not named ``*_routed.kicad_pcb``.
+    """
+    kct = board_dir / "project.kct"
+    if not kct.is_file():
+        return None
+    try:
+        from kicad_tools.spec.parser import load_spec
+
+        spec = load_spec(kct)
+    except Exception:  # noqa: BLE001 - any malformed spec just means "no hint"
+        return None
+    artifacts = spec.project.artifacts
+    if artifacts is None:
+        return None
+    for rel in (artifacts.pcb_routed, artifacts.pcb):
+        if rel:
+            candidate = board_dir / rel
+            if candidate.is_file():
+                return candidate
+    return None
+
+
 def _discover_routed_pcb(board_dir: Path, pattern: str) -> Path | None:
-    """Find the first routed PCB inside a board's output/ directory."""
+    """Find a board's routed PCB.
+
+    Looks for ``pattern`` inside ``output/`` first, then falls back to
+    the PCB declared in ``project.kct`` ``artifacts`` (issue #6815).
+    """
     output_dir = board_dir / "output"
-    if not output_dir.is_dir():
-        return None
-    matches = sorted(output_dir.glob(pattern))
-    if not matches:
-        return None
-    return matches[0]
+    if output_dir.is_dir():
+        matches = sorted(output_dir.glob(pattern))
+        if matches:
+            return matches[0]
+    return _spec_declared_pcb(board_dir)
+
+
+def _skip_reason(board_dir: Path) -> str:
+    """Explain why a board directory has no routed PCB to survey."""
+    parts: list[str] = []
+    if not (board_dir / "output").is_dir():
+        parts.append("no output/ directory")
+    else:
+        parts.append("no routed PCB found")
+    kct = board_dir / "project.kct"
+    if kct.is_file():
+        try:
+            from kicad_tools.spec.parser import load_spec
+
+            progress = load_spec(kct).progress
+            current = getattr(progress, "phase", None) if progress is not None else None
+            if current is not None:
+                parts.append(f"phase: {getattr(current, 'value', current)}")
+        except Exception:  # noqa: BLE001
+            pass
+    return "; ".join(parts)
+
+
+def _find_skipped_boards(boards_dir: Path, pattern: str) -> list[dict[str, str]]:
+    """List board directories that were not surveyed, with a reason.
+
+    A "board directory" is a non-hidden sub-directory that has either a
+    ``project.kct`` or an ``output/`` directory.  Never affects exit status.
+    """
+    if not boards_dir.is_dir() or _is_single_board_dir(boards_dir):
+        return []
+    skipped: list[dict[str, str]] = []
+    for entry in sorted(boards_dir.iterdir()):
+        if not entry.is_dir() or entry.name.startswith("."):
+            continue
+        if not ((entry / "project.kct").is_file() or (entry / "output").is_dir()):
+            continue
+        if _discover_routed_pcb(entry, pattern) is None:
+            skipped.append({"name": entry.name, "reason": _skip_reason(entry)})
+    return skipped
 
 
 def _detect_manufacturing(board_dir: Path) -> ManufacturingStatus:
@@ -726,11 +794,6 @@ def _detect_erc(board_dir: Path) -> ERCStatus:
 
 _SCH_LABEL_RE = re.compile(r'\(\s*(?:label|global_label|hierarchical_label)\s+"([^"]+)"')
 _SCH_POWER_SYMBOL_RE = re.compile(r'\(\s*lib_id\s+"power:([^"]+)"')
-# Match ``(net NUMBER "NAME")`` -- shared between top-level
-# declarations and pad-nested references.  Pad context is
-# distinguished by the streaming parser in
-# ``_extract_pcb_pad_net_numbers``.
-_PCB_NET_NUMBERED_RE = re.compile(r'\(net\s+(\d+)\s+"([^"]+)"')
 
 
 def _extract_schematic_nets(sch_path: Path) -> set[str] | None:
@@ -784,62 +847,6 @@ def _extract_schematic_nets(sch_path: Path) -> set[str] | None:
     return labels
 
 
-def _extract_pcb_pad_net_numbers(pcb_text: str) -> set[int]:
-    """Return the set of net numbers actually referenced by pads.
-
-    Pads in KiCad PCB files appear as ``(pad "NUM" TYPE SHAPE ...
-    (net N "NAME") ...)`` blocks nested inside ``(footprint ...)``.
-    Top-level ``(net N "NAME")`` declarations exist for *every* known
-    net even when no pad references the net -- routing-only artifacts
-    (segments / vias / zones left over from older sync rounds) keep
-    their declarations after their pads have been reassigned.
-
-    Returning the *number* set rather than the *name* set lets the
-    caller cross-reference with top-level declarations to determine
-    which named nets are pad-referenced and which are routing-only.
-
-    Uses a depth-tracked streaming scan rather than a single regex
-    because pad bodies can span many lines and contain nested forms.
-    """
-    pad_net_numbers: set[int] = set()
-    i = 0
-    n = len(pcb_text)
-    while True:
-        idx = pcb_text.find("(pad ", i)
-        if idx < 0:
-            idx = pcb_text.find("(pad\t", i)
-        if idx < 0:
-            idx = pcb_text.find("(pad\n", i)
-        if idx < 0:
-            break
-        # Find the end of this pad's s-expression by tracking depth.
-        depth = 0
-        j = idx
-        body_start = idx
-        body_end = idx
-        while j < n:
-            c = pcb_text[j]
-            if c == "(":
-                depth += 1
-            elif c == ")":
-                depth -= 1
-                if depth == 0:
-                    body_end = j + 1
-                    break
-            j += 1
-        if body_end <= body_start:
-            i = idx + 5
-            continue
-        body = pcb_text[body_start:body_end]
-        # Match (net N "name") inside the pad body
-        m = _PCB_NET_NUMBERED_RE.search(body)
-        if m:
-            with contextlib.suppress(ValueError):
-                pad_net_numbers.add(int(m.group(1)))
-        i = body_end
-    return pad_net_numbers
-
-
 def _extract_pcb_named_nets(pcb_path: Path) -> set[str] | None:
     """Return the set of non-empty PCB nets that have at least one pad.
 
@@ -869,28 +876,24 @@ def _extract_pcb_named_nets(pcb_path: Path) -> set[str] | None:
     an earlier sync round would surface as drift even though they
     have no pads.
 
-    Returns ``None`` on read failure.
+    Returns ``None`` on read or parse failure.
     """
+    # Read pad nets through the schema parser -- the same source
+    # ``kct validate --sync`` uses -- so both the numbered
+    # ``(net N "name")`` and the KiCad 10 name-only ``(net "name")``
+    # pad dialects work (issue #6815).  Only pads are read, so
+    # routing-only net declarations drop out automatically.
+    from kicad_tools.schema.pcb import PCB, pad_net_names
+
     try:
-        text = pcb_path.read_text()
-    except OSError:
+        pcb = PCB.load(pcb_path)
+    except Exception:  # noqa: BLE001 - unreadable/unparseable PCB means "unknown"
         return None
-    pad_net_numbers = _extract_pcb_pad_net_numbers(text)
-    nets: set[str] = set()
-    for m in _PCB_NET_NUMBERED_RE.finditer(text):
-        try:
-            num = int(m.group(1))
-        except ValueError:
-            continue
-        if num not in pad_net_numbers:
-            continue
-        name = m.group(2)
-        if not name:
-            continue
-        if name.startswith("Net-(") or name.startswith("unconnected-("):
-            continue
-        nets.add(name)
-    return nets
+    return {
+        name
+        for name in pad_net_names(pcb)
+        if not (name.startswith("Net-(") or name.startswith("unconnected-("))
+    }
 
 
 def _find_source_schematic(board_dir: Path) -> Path | None:
@@ -1190,8 +1193,8 @@ def _discover_boards(
     """Survey every board sub-directory of ``boards_dir``.
 
     A board is discovered if it contains a routed PCB matching ``pattern``
-    under ``<board>/output/``. Boards without a routed PCB are silently
-    skipped (they haven't reached the routing stage yet).
+    under ``<board>/output/``. Boards without a routed PCB are skipped
+    (reported separately by :func:`_find_skipped_boards`).
 
     When ``boards_dir`` itself looks like a board directory (see
     :func:`_is_single_board_dir`), it is surveyed directly as a single
@@ -1214,11 +1217,6 @@ def _discover_boards(
             continue
         # Skip dotfiles / hidden dirs and obvious non-board names.
         if entry.name.startswith("."):
-            continue
-        # A directory without an output/ sub-dir is not yet at routing
-        # stage -- skip it silently.
-        output_dir = entry / "output"
-        if not output_dir.is_dir():
             continue
         # Skip directories with no routed PCB matching the pattern.
         if _discover_routed_pcb(entry, pattern) is None:
@@ -1287,9 +1285,6 @@ def _discover_ship_ready(
         if not entry.is_dir():
             continue
         if entry.name.startswith("."):
-            continue
-        output_dir = entry / "output"
-        if not output_dir.is_dir():
             continue
         if _discover_routed_pcb(entry, pattern) is None:
             continue
@@ -1429,6 +1424,7 @@ def _format_table(
     boards_dir: Path,
     *,
     ship_only: bool,
+    skipped: list[dict[str, str]] | None = None,
 ) -> str:
     """Format a fixed-width plain-ASCII table."""
     lines: list[str] = []
@@ -1475,10 +1471,19 @@ def _format_table(
         )
         lines.append(f"boards-dir: {boards_dir}")
 
+    if skipped:
+        lines.append("")
+        for item in skipped:
+            lines.append(f"skipped: {item['name']} ({item['reason']})")
+
     return "\n".join(lines)
 
 
-def _format_json(boards: list[BoardStatus], boards_dir: Path) -> str:
+def _format_json(
+    boards: list[BoardStatus],
+    boards_dir: Path,
+    skipped: list[dict[str, str]] | None = None,
+) -> str:
     summary = {
         "total": len(boards),
         "ship_ready": sum(1 for b in boards if b.ship_ready),
@@ -1495,6 +1500,7 @@ def _format_json(boards: list[BoardStatus], boards_dir: Path) -> str:
         "boards_dir": str(boards_dir),
         "summary": summary,
         "boards": [b.to_dict() for b in boards],
+        "skipped": list(skipped or []),
     }
     return json.dumps(doc, indent=2)
 
@@ -1609,11 +1615,12 @@ def run_status(args: argparse.Namespace) -> int:
     boards_dir = Path(args.boards_dir)
     tolerance_path = Path(getattr(args, "drc_tolerance_file", _DRC_TOLERANCE_PATH))
     boards = _discover_boards(boards_dir, args.pattern, tolerance_path)
+    skipped = _find_skipped_boards(boards_dir, args.pattern)
 
     if args.format == "json":
-        print(_format_json(boards, boards_dir))
+        print(_format_json(boards, boards_dir, skipped))
     else:
-        print(_format_table(boards, boards_dir, ship_only=args.ship_only))
+        print(_format_table(boards, boards_dir, ship_only=args.ship_only, skipped=skipped))
 
     if not boards:
         return 2  # No boards found counts as not-ship-ready.

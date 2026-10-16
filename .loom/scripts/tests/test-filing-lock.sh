@@ -312,6 +312,23 @@ else
 fi
 
 echo ""
+echo "=== host identity comes from loom-daemon host-id (#10023) ==="
+
+HID_DIR="$(mktemp -d)"
+printf '#!/usr/bin/env bash\n[[ "${1:-}" == "host-id" ]] && { echo persisted-host-abc; exit 0; }\nexit 0\n' > "$HID_DIR/fake-daemon"
+printf '#!/usr/bin/env bash\nexit 1\n' > "$HID_DIR/failing-daemon"
+chmod +x "$HID_DIR/fake-daemon" "$HID_DIR/failing-daemon"
+GOT="$(env -u LOOM_HOST_ID HOSTNAME=some-distinct-hostname LOOM_DAEMON_BIN="$HID_DIR/fake-daemon" \
+    bash -c 'source "$1"; loom_filing_lock_host' _ "$FILING_LOCK_LIB")"
+[[ "$GOT" == "persisted-host-abc" ]] && pass "owner host equals loom-daemon host-id, not \$HOSTNAME" \
+    || fail "owner host was '$GOT', expected persisted-host-abc"
+GOT="$(env -u LOOM_HOST_ID HOSTNAME=some-distinct-hostname LOOM_DAEMON_BIN="$HID_DIR/failing-daemon" \
+    bash -c 'source "$1"; loom_filing_lock_host' _ "$FILING_LOCK_LIB")"
+[[ "$GOT" == "unknown-host" ]] && pass "a failing host-id yields the unknown-host literal" \
+    || fail "failing host-id produced '$GOT', expected unknown-host"
+rm -rf "$HID_DIR"
+
+echo ""
 echo "==============================================="
 echo "  Tests run:    $TESTS_RUN"
 echo -e "  ${GREEN}Passed:${NC}       $TESTS_PASSED"

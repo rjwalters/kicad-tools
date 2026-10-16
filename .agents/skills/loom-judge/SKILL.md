@@ -42,6 +42,7 @@ You are a thorough and constructive PR evaluator working in this repository.
 - [Fixing Trivial Code Issues During Evaluation](#fixing-trivial-code-issues-during-evaluation)
 - [Test-First (TDD) Claim Verification](#test-first-tdd-claim-verification)
 - [Scoped Test Execution](#scoped-test-execution)
+- [Environment Gap: Cannot Verify Here](#environment-gap-cannot-verify-here)
 - [Feedback Style](#feedback-style)
 - [Measurable Claims Need Their Measurement (or a Marker, #6380)](#measurable-claims-need-their-measurement-or-a-marker-6380)
 - [Handling Minor Concerns](#handling-minor-concerns)
@@ -455,7 +456,7 @@ Full policy, TTL/invalidation semantics, and the manual verification steps:
 4b. **Check docs-only fast-path eligibility** (see "Docs-Only Fast Path (WORK_LOG / WORK_PLAN / README, #6134)" below) — if the changed-file list is an exact match against the fast-path allowlist, skip steps 5-7b and the "Evaluation Focus Areas" review entirely; go straight to CI Status Check (step 8), the formal-review reconciliation gate (step 8b — **not** skipped: a docs-only diff can still carry an unresolved formal review, #7647) and the fast-path approval write. Otherwise continue normally.
 5. **Check out code**: Use the existing builder worktree, else `./.loom/scripts/pr-worktree.sh <number>` — never a bare `gh pr checkout` in the main checkout (see "PR Branch Isolation" and Worktree-Aware Code Access below). Capture `REVIEW_HEAD_SHA=$(gh pr view <number> --json headRefOid --jq '.headRefOid')` here — step 11's recheck compares against it, and your verdict marker records it.
 6. **Rebase check**: Verify PR has no merge conflicts with main (see Rebase Check section below)
-7. **Targeted checks only**: read the diff and trust the green CI from step 2b. At most run scoped tests for a specific doubt (Scoped Test Execution below); never the full suite or `buildGate.command`
+7. **Targeted checks only**: read the diff and trust the green CI from step 2b. At most run scoped tests for a specific doubt (Scoped Test Execution below); never the full suite or `buildGate.command`. If the *environment* cannot run a command you need for a verdict, see "Environment Gap: Cannot Verify Here" below
 7b. **Execute test plan**: Parse PR description for "## Test Plan" section.
     If found, classify each step as automatable or observation-only.
     Execute automatable steps and document results in evaluation comment.
@@ -576,9 +577,9 @@ reclaim comment:
 
 ```bash
 # The lease first: a live peer lease (exit 4) means stand down, label untouched.
-loom-daemon lease pr claim $N --role judge --watch-pid "${LOOM_AGENT_SESSION_PID:-${CLAUDE_PID:-$PPID}}"; [[ $? =~ ^[02]$ ]] &&
+[[ -n "$CLAIMED_AT" ]] && loom-daemon lease pr claim $N --role judge --watch-pid "${LOOM_AGENT_SESSION_PID:-${CLAUDE_PID:-$PPID}}"; [[ $? =~ ^[02]$ ]] &&
 gh pr edit $N --remove-label "loom:reviewing" &&
-gh pr comment $N --body "Reclaiming loom:reviewing claim: $STANDDOWN_COUNT consecutive stand-down passes have accumulated against claim $CLAIMED_AT (age ≥ ${LOOM_STALE_REVIEWING_MINUTES:-45}m) with no actual review progress (bounded fallback, LOOM_MAX_STANDDOWN_STREAK=${LOOM_MAX_STANDDOWN_STREAK:-3}) — breaking the livelock." &&
+gh pr comment $N --body "Reclaiming loom:reviewing claim: $STANDDOWN_COUNT stand-down passes against claim $CLAIMED_AT (age ≥ ${LOOM_STALE_REVIEWING_MINUTES:-45}m) with no actual review progress (bounded fallback, LOOM_MAX_STANDDOWN_STREAK=${LOOM_MAX_STANDDOWN_STREAK:-3}) — breaking the livelock." &&
 gh pr edit $N --add-label "loom:reviewing"
 # Continue to step 3 (Check merge state) and evaluate normally
 ```
@@ -587,9 +588,9 @@ gh pr edit $N --add-label "loom:reviewing"
 
 ```bash
 # The lease first: a live peer lease (exit 4) means stand down, label untouched.
-loom-daemon lease pr claim $N --role judge --watch-pid "${LOOM_AGENT_SESSION_PID:-${CLAUDE_PID:-$PPID}}"; [[ $? =~ ^[02]$ ]] &&
+[[ -n "$CLAIMED_AT" ]] && loom-daemon lease pr claim $N --role judge --watch-pid "${LOOM_AGENT_SESSION_PID:-${CLAUDE_PID:-$PPID}}"; [[ $? =~ ^[02]$ ]] &&
 gh pr edit $N --remove-label "loom:reviewing" &&
-gh pr comment $N --body "Reclaiming stale loom:reviewing claim (idle ${IDLE_MINUTES}m > ${LOOM_STALE_REVIEWING_MINUTES:-45}m with no claimant activity) — a prior Judge's parent sweep likely died mid-review." &&
+gh pr comment $N --body "Reclaiming stale loom:reviewing claim (idle ${IDLE_MINUTES}m > ${LOOM_STALE_REVIEWING_MINUTES:-45}m with no claimant activity) — the prior Judge likely died mid-review." &&
 gh pr edit $N --add-label "loom:reviewing"
 # Continue to step 3 (Check merge state) and evaluate normally
 ```
@@ -752,6 +753,12 @@ before #5686 the *label* did, because nothing recorded which tree it covered.
 nothing re-queued the PR until an operator cleared the label by hand. The
 inverse is the direction to fear: a `loom:pr` approval that survives a
 force-push lets Champion auto-merge a tree **nobody approved**.
+
+**Canonical spelling**: the marker's `verdict=` token is `approved` or
+`changes-requested`; `post-verdict.sh` accepts and writes only those. Readers
+(the staleness guard, `extract_latest_verdict_sha`) are lenient and also
+tolerate `approve` / `request-changes` in a hand-posted marker (#12104) — never
+emit those spellings yourself.
 
 **The rule**: every verdict-label write in this document is posted through
 
@@ -2325,11 +2332,30 @@ Optional in step 7 (#11690: CI is the test gate): only the tests relevant to the
 |---|---|
 | [`cargo-target-isolation.md`](../loom-cargo-target-isolation/SKILL.md) | Any cargo build: use exported `CARGO_TARGET_DIR` or `<worktree>/target`; never `/tmp`, `~`, `.loom/target-*` (#8370). |
 
+## Environment Gap: Cannot Verify Here
+
+Applies only when **your environment** cannot run a command you need to reach a verdict: a repo test/lint command (no interpreter, a foreign-OS binary such as `Exec format error`, a missing tool) or the verdict poster itself (`post-verdict.sh` exiting non-zero because the installed `loom-daemon` is too old). It does **not** apply when CI is the test gate and is green (steps 2b/7: you run only scoped checks for a specific doubt), or when the command ran and a test really failed (that is `loom:changes-requested`).
+
+Declining to approve is not enough: left alone the PR stays `loom:review-requested` and waits silently for an attended session. Route it:
+
+1. **Comment** on the PR naming the missing tool or failing command and the observed error, quoted verbatim (e.g. `tests/test_sim_batch.py`: "no Python executable"; `ruff`: "Exec format error"; `post-verdict.sh` exit 5).
+2. **Park** it: `loom-daemon park-record apply --pr <N> --reason "<missing tool>" --by judge` (body park record plus `loom:blocked`; `pr-queue` drops parked PRs, so it leaves the Judge queue). Use `--dry-run` first if unsure.
+3. **Release** `loom:reviewing` and the PR lease as on any stand-down (`loom-daemon lease pr release <n> --role judge --watch-pid …`).
+
+**This never relaxes approval.** Write no verdict label, no `loom:pr` and no approval comment on the strength of code inspection alone; approve only after the tests have run. The operator or Guide removes `loom:blocked` once the environment is fixed.
+
+**Idempotent:** if the PR already carries `loom:blocked` with your park record, post nothing new.
+
 ## Feedback Style
 
 - **Be specific**: Reference exact files and line numbers
 - **Be constructive**: Suggest improvements with examples
 - **Be thorough**: Check the whole PR, including tests and docs
+- **Sweep the class before posting**: when a blocking finding is an instance of
+  a pattern (the same mistake in a value, field, call or schema entry), search
+  the rest of the diff for that pattern first. List every instance by path and
+  line, or say plainly that you searched and found no other instances. Limit the
+  search to the PR's changed files and directly affected code
 - **Be respectful**: Assume positive intent, phrase as questions
 - **Be decisive**: Clearly comment with approval or issues
 - **Use clear status indicators**:
