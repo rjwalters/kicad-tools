@@ -16,6 +16,7 @@ from kicad_tools import __version__
 # ``kicad_tools`` -- measured, and well under 1% of CLI startup.
 from kicad_tools.benchmark.cases import Difficulty
 from kicad_tools.cli.copper_weight import add_check_copper_argument
+from kicad_tools.cli.export_cmd import STACKUP_ID_CHOICES, STACKUP_ID_HELP
 from kicad_tools.cli.format_options import add_format_flag
 from kicad_tools.cli.route_exit_codes_help import ROUTE_EXIT_CODES_EPILOG
 from kicad_tools.manufacturers import get_all_manufacturer_names
@@ -10555,6 +10556,14 @@ def _add_export_parser(subparsers) -> None:
         "export_pcb",
         help="Path to .kicad_pcb file",
     )
+    # Issue #6881: choices/help come from export_cmd so the two parsers agree.
+    export_parser.add_argument(
+        "--stackup-id",
+        dest="export_stackup_id",
+        default=None,
+        choices=list(STACKUP_ID_CHOICES),
+        help=STACKUP_ID_HELP,
+    )
     export_parser.add_argument(
         "--mfr",
         "-m",
@@ -10626,6 +10635,18 @@ def _add_export_parser(subparsers) -> None:
         help="Disable LCSC auto-matching",
     )
     export_parser.add_argument(
+        "--no-spec",
+        dest="export_no_spec",
+        action="store_true",
+        help="Disable BOM enrichment from .kct project spec",
+    )
+    export_parser.add_argument(
+        "--no-merge-lcsc",
+        dest="export_no_merge_lcsc",
+        action="store_true",
+        help="Disable merging LCSC part numbers from an existing BOM CSV",
+    )
+    export_parser.add_argument(
         "--skip-preflight",
         dest="export_skip_preflight",
         action="store_true",
@@ -10649,6 +10670,16 @@ def _add_export_parser(subparsers) -> None:
         dest="export_strict_preflight",
         action="store_true",
         help="Block export when preflight checks fail (for CI; default: export proceeds with warnings)",
+    )
+    export_parser.add_argument(
+        "--allow-unbuildable-bom",
+        dest="export_allow_unbuildable_bom",
+        action="store_true",
+        help=(
+            "Allow export to proceed when the BOM contains refs with no PCB "
+            "footprint (default: block, since the package would be unbuildable). "
+            "Use only for partial/debug exports."
+        ),
     )
     export_parser.add_argument(
         "--skip-drc",
@@ -10691,6 +10722,17 @@ def _add_export_parser(subparsers) -> None:
         dest="export_keep_gerber_files",
         action="store_true",
         help="Keep individual gerber/drill files alongside the zip archive",
+    )
+    export_parser.add_argument(
+        "--bom-source",
+        dest="export_bom_source",
+        default="schematic",
+        choices=["schematic", "pcb", "auto"],
+        help=(
+            "Source for BOM data: 'schematic' (default) extracts from .kicad_sch; "
+            "'pcb' extracts from PCB footprints (no schematic needed); "
+            "'auto' uses schematic but falls back to PCB on reference mismatch"
+        ),
     )
     export_parser.add_argument(
         "--vscore-layer",

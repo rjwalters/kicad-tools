@@ -15,6 +15,17 @@ from pathlib import Path
 
 from kicad_tools.manufacturers import get_all_manufacturer_names
 
+# Single source for ``--stackup-id`` (Issue #6881): both this standalone parser
+# and the unified ``kct export`` subparser in ``cli/parser.py`` read these, so
+# the two can no longer drift. Each ID must be accepted by
+# ``Stackup.jlcpcb_named`` (asserted in tests/test_export_cmd.py); kept as
+# literals here because importing ``kicad_tools.physics`` would pull the whole
+# physics package into CLI start-up.
+STACKUP_ID_CHOICES: tuple[str, ...] = ("JLC04161H-3313", "JLC04161H-7628")
+STACKUP_ID_HELP = (
+    "Verify this factory construction against actual PCB layers and bundle ordering metadata"
+)
+
 
 def _find_pcb_for_export(directory: Path) -> Path | None:
     """Find a .kicad_pcb file in the given directory for export.
@@ -45,8 +56,13 @@ def _find_pcb_for_export(directory: Path) -> Path | None:
     return pcb_files[0]
 
 
-def main(argv: list[str] | None = None) -> int:
-    """Entry point for the kct export command."""
+def build_parser() -> argparse.ArgumentParser:
+    """Build the standalone ``kct export`` argument parser.
+
+    The unified ``kct`` parser (``cli/parser.py::_add_export_parser``) mirrors
+    every option defined here; tests/test_export_cmd.py enforces that parity
+    (Issue #6881).
+    """
     parser = argparse.ArgumentParser(
         prog="kct export",
         description="Generate a complete manufacturing package.",
@@ -57,8 +73,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--stackup-id",
-        choices=["JLC04161H-3313", "JLC04161H-7628"],
-        help="Verify this factory construction against actual PCB layers and bundle ordering metadata",
+        choices=list(STACKUP_ID_CHOICES),
+        help=STACKUP_ID_HELP,
     )
     parser.add_argument(
         "--mfr",
@@ -231,7 +247,12 @@ def main(argv: list[str] | None = None) -> int:
         help="Output format (default: text)",
     )
 
-    args = parser.parse_args(argv)
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Entry point for the kct export command."""
+    args = build_parser().parse_args(argv)
     return run_export(args)
 
 

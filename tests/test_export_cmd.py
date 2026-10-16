@@ -992,3 +992,169 @@ class TestExportDRCSafetyFloor:
 
         cli_main(["export", str(pcb), "--skip-drc-floor"])
         assert "--skip-drc-floor" in captured["argv"]
+
+
+class TestExportStackupIdUnifiedParser:
+    """Issue #6881: ``kct export --stackup-id`` via the unified parser."""
+
+    def test_unified_parser_accepts_stackup_id(self):
+        from kicad_tools.cli.parser import create_parser
+
+        parser = create_parser()
+        args = parser.parse_args(["export", "board.kicad_pcb", "--stackup-id", "JLC04161H-3313"])
+        assert args.export_stackup_id == "JLC04161H-3313"
+
+    def test_unified_parser_stackup_id_defaults_to_none(self):
+        from kicad_tools.cli.parser import create_parser
+
+        args = create_parser().parse_args(["export", "board.kicad_pcb"])
+        assert args.export_stackup_id is None
+
+    def test_unified_parser_rejects_unknown_stackup_id(self):
+        import pytest
+
+        from kicad_tools.cli.parser import create_parser
+
+        with pytest.raises(SystemExit):
+            create_parser().parse_args(["export", "board.kicad_pcb", "--stackup-id", "BOGUS"])
+
+    def test_help_lists_stackup_id_with_shared_choices(self):
+        from kicad_tools.cli.export_cmd import STACKUP_ID_CHOICES, STACKUP_ID_HELP
+        from kicad_tools.cli.parser import create_parser
+
+        parser = create_parser()
+        export_sub = _unified_export_subparser(parser)
+        action = _option_actions(export_sub)["--stackup-id"]
+        assert list(action.choices) == list(STACKUP_ID_CHOICES)
+        assert action.help == STACKUP_ID_HELP
+        assert "--stackup-id" in export_sub.format_help()
+
+    def test_stackup_choices_are_real_factory_constructions(self):
+        from kicad_tools.cli.export_cmd import STACKUP_ID_CHOICES
+        from kicad_tools.physics import Stackup
+
+        for identifier in STACKUP_ID_CHOICES:
+            assert Stackup.jlcpcb_named(identifier).construction["factory_id"] == identifier
+
+    def test_dispatch_reaches_stackup_verification(self, tmp_path, monkeypatch):
+        """``kct export --stackup-id`` must reach stackup_ordering_record."""
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text("(kicad_pcb)")
+
+        from kicad_tools.export import stackup as stackup_mod
+
+        seen = {}
+
+        def fake_record(pcb_path, factory_id):
+            seen["factory_id"] = factory_id
+            return {"pcb_sha256": "0" * 64}
+
+        monkeypatch.setattr(stackup_mod, "stackup_ordering_record", fake_record)
+
+        from kicad_tools.cli import main as cli_main
+
+        rc = cli_main(
+            [
+                "export",
+                str(pcb),
+                "--mfr",
+                "jlcpcb",
+                "--stackup-id",
+                "JLC04161H-7628",
+                "--dry-run",
+                "-o",
+                str(tmp_path / "out"),
+            ]
+        )
+        assert rc == 0
+        assert seen["factory_id"] == "JLC04161H-7628"
+
+    def test_dispatch_forwards_previously_missing_flags(self, tmp_path, monkeypatch):
+        """Flags added for parity must also be forwarded to export_cmd."""
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text("(kicad_pcb)")
+
+        captured = {}
+
+        def spy_main(argv=None):
+            captured["argv"] = argv
+            return 0
+
+        monkeypatch.setattr("kicad_tools.cli.export_cmd.main", spy_main)
+
+        from kicad_tools.cli import main as cli_main
+
+        rc = cli_main(
+            [
+                "export",
+                str(pcb),
+                "--stackup-id",
+                "JLC04161H-3313",
+                "--no-spec",
+                "--no-merge-lcsc",
+                "--allow-unbuildable-bom",
+                "--bom-source",
+                "pcb",
+            ]
+        )
+        assert rc == 0
+        argv = captured["argv"]
+        assert argv[argv.index("--stackup-id") + 1] == "JLC04161H-3313"
+        assert "--no-spec" in argv
+        assert "--no-merge-lcsc" in argv
+        assert "--allow-unbuildable-bom" in argv
+        assert argv[argv.index("--bom-source") + 1] == "pcb"
+
+        # And the forwarded argv parses cleanly on the standalone parser.
+        from kicad_tools.cli.export_cmd import build_parser
+
+        ns = build_parser().parse_args(argv)
+        assert ns.stackup_id == "JLC04161H-3313"
+        assert ns.no_spec and ns.no_merge_lcsc and ns.allow_unbuildable_bom
+        assert ns.bom_source == "pcb"
+
+
+class TestExportParserParity:
+    """Issue #6881: the unified ``export`` subparser must expose every option
+    the standalone export_cmd parser defines, with matching choices."""
+
+    def test_every_standalone_option_exists_in_unified_parser(self):
+        from kicad_tools.cli.export_cmd import build_parser
+        from kicad_tools.cli.parser import create_parser
+
+        standalone = _option_actions(build_parser())
+        unified = _option_actions(_unified_export_subparser(create_parser()))
+
+        missing = sorted(set(standalone) - set(unified))
+        assert not missing, f"unified `kct export` is missing options: {missing}"
+
+    def test_choices_match_between_parsers(self):
+        from kicad_tools.cli.export_cmd import build_parser
+        from kicad_tools.cli.parser import create_parser
+
+        standalone = _option_actions(build_parser())
+        unified = _option_actions(_unified_export_subparser(create_parser()))
+
+        for opt, action in standalone.items():
+            if action.choices is None:
+                continue
+            assert list(unified[opt].choices) == list(action.choices), opt
+
+
+def _unified_export_subparser(parser):
+    import argparse
+
+    for action in parser._actions:
+        if isinstance(action, argparse._SubParsersAction):
+            return action.choices["export"]
+    raise AssertionError("no subparsers on unified kct parser")
+
+
+def _option_actions(parser):
+    """Map every option string (e.g. ``--mfr``, ``-m``) to its action."""
+    out = {}
+    for action in parser._actions:
+        if action.option_strings and action.dest != "help":
+            for opt in action.option_strings:
+                out[opt] = action
+    return out
