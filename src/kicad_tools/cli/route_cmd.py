@@ -1749,6 +1749,23 @@ def _write_routed_pcb(
     return output_path
 
 
+def _committed_coupled_skip_nets(router) -> set[int] | None:
+    """Nets the trace optimizer must leave untouched (Issue #6840).
+
+    Every diff pair the coupled pre-pass committed AS COUPLED (recorded by
+    ``DiffPairRouter.route_differential_pair_coupled`` on the autorouter;
+    independent fallbacks are never in it).  ``optimize_routes_grid_synced``
+    already passes ``skip_nets`` through untouched (#3508), but ``kct route``
+    never supplied it, so the optimizer rewrote one rail of a committed pair
+    onto a different row (06rf MIPI_D0: 0.40 mm uncoupled at commit, 20.1 mm
+    in the final board).  ``None`` when there is nothing to skip.
+    """
+    nets = getattr(router, "_committed_coupled_nets", None)
+    if not isinstance(nets, set) or not nets:
+        return None
+    return set(nets)
+
+
 def _connectivity_snapshot(router: "Autorouter"):
     """Capture per-net connectivity + deep-copied routes (issue #2596).
 
@@ -11834,7 +11851,11 @@ def route_with_layer_escalation(
             # Issue #3507: grid-transactional optimize -- each mutated
             # route's old copper is unmarked and the new copper marked so
             # the grid never goes stale across the pass.
-            optimize_routes_grid_synced(final_result.router, optimizer)
+            optimize_routes_grid_synced(
+                final_result.router,
+                optimizer,
+                skip_nets=_committed_coupled_skip_nets(final_result.router),
+            )
 
         _enforce_connectivity_invariant_or_exit(
             final_result.router,
@@ -12915,7 +12936,11 @@ def route_with_rule_relaxation(
         with spinner("Optimizing traces...", quiet=quiet):
             # Issue #3507: grid-transactional optimize (see
             # optimize_routes_grid_synced).
-            optimize_routes_grid_synced(final_result.router, optimizer)
+            optimize_routes_grid_synced(
+                final_result.router,
+                optimizer,
+                skip_nets=_committed_coupled_skip_nets(final_result.router),
+            )
 
         _enforce_connectivity_invariant_or_exit(
             final_result.router,
@@ -15567,7 +15592,11 @@ def route_with_combined_escalation(
         with spinner("Optimizing traces...", quiet=quiet):
             # Issue #3507: grid-transactional optimize (see
             # optimize_routes_grid_synced).
-            optimize_routes_grid_synced(final_result.router, optimizer)
+            optimize_routes_grid_synced(
+                final_result.router,
+                optimizer,
+                skip_nets=_committed_coupled_skip_nets(final_result.router),
+            )
 
         _enforce_connectivity_invariant_or_exit(
             final_result.router,
@@ -22833,7 +22862,9 @@ def _run_main_impl(args, parser, argv) -> int:
         with spinner("Optimizing traces...", quiet=quiet):
             # Issue #3507: grid-transactional optimize (see
             # optimize_routes_grid_synced).
-            optimize_routes_grid_synced(router, optimizer)
+            optimize_routes_grid_synced(
+                router, optimizer, skip_nets=_committed_coupled_skip_nets(router)
+            )
 
         _enforce_connectivity_invariant_or_exit(
             router,

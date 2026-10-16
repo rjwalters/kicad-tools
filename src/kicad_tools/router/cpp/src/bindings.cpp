@@ -786,6 +786,9 @@ NB_MODULE(router_cpp, m) {
 
     nb::class_<CoupledPathfinder>(m, "CoupledPathfinder")
         .def("set_fill_rail_dimensions", &CoupledPathfinder::set_fill_rail_dimensions)
+        // Issue #6840: via-aware partner clearance radii (grid cells).
+        .def("set_partner_via_clearance", &CoupledPathfinder::set_partner_via_clearance,
+             nb::arg("p_trace_vs_n_via"), nb::arg("n_trace_vs_p_via"), nb::arg("via_vs_via"))
         // Issue #5410 (B1): the net-class dimensions the dynamic route-halo
         // refinement re-measures with.  Without these the C++ arm waives
         // clearance the raster enforced whenever a net class is wider than

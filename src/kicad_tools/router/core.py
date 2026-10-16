@@ -2226,6 +2226,9 @@ class Autorouter:
         # Issue #5786: nets a pose-coupled diff pair already committed; the
         # two-phase main pass must not re-route them.
         self._pose_coupled_nets: set[int] = set()
+        # Issue #6840: nets of every diff pair the pre-pass committed AS
+        # COUPLED; ``kct route`` keeps the trace optimizer off them.
+        self._committed_coupled_nets: set[int] = set()
 
         # Issue #4463: set by ``route_all_with_diffpairs`` for the duration of
         # a shadow-ON main strategy.  Tells ``route_all_negotiated`` that the

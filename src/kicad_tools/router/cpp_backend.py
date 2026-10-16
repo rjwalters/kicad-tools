@@ -100,7 +100,10 @@ logger = logging.getLogger(__name__)
 # v58 (Issue #6826): ``CoupledPathfinder.route`` bounds the endpoint zones'
 # spacing tolerance by each end's pad-pitch delta + 1, not the zone radius.  A
 # v57 .so diverges from the Python coupled mirror.
-_REQUIRED_CPP_BUILD_VERSION = 58
+# v59 (Issue #6840): ``CoupledPathfinder.set_partner_via_clearance`` -- the
+# joint search keeps each rail clear of the partner's via barrels on every
+# layer.  A v58 .so lacks the setter and diverges from the Python mirror.
+_REQUIRED_CPP_BUILD_VERSION = 59
 
 
 # Issue #5599: human-readable names for the ``ValidationResult::violation_type``
@@ -172,6 +175,24 @@ _CPP_IMPORT_ERROR: str | None = None
 # can report the numbers the staleness guard actually cares about, even after
 # the version guard below nulls out ``router_cpp``.
 _CPP_BUILD_VERSION: int | None = None
+
+
+def _allow_smd_vias(rules) -> bool:
+    """May a via be drilled into an SMD pad under ``rules.manufacturer``?
+
+    Unknown manufacturer -> unspecified capability is retained (permissive),
+    matching ``pathfinder.Router``'s fallback.  Shared by the single-ended and
+    the coupled (Issue #6840) rules marshalling.
+    """
+    from .mfr_limits import get_mfr_limits
+
+    allow = True
+    if getattr(rules, "manufacturer", None):
+        with contextlib.suppress(ValueError):
+            allow = bool(get_mfr_limits(rules.manufacturer).via_in_pad_supported)
+    return allow
+
+
 _CPP_EXTENSION_PATH: str | None = None
 try:
     if TYPE_CHECKING:
@@ -1389,16 +1410,7 @@ class CppPathfinder:
         cpp_rules = router_cpp.DesignRules()
         cpp_rules.trace_width = rules.trace_width
         cpp_rules.trace_clearance = rules.trace_clearance
-        from .mfr_limits import get_mfr_limits
-
-        cpp_rules.allow_smd_vias = True
-        if rules.manufacturer:
-            # Unknown manufacturer -> unspecified capability is retained
-            # (permissive), matching pathfinder.Router's fallback.
-            with contextlib.suppress(ValueError):
-                cpp_rules.allow_smd_vias = bool(
-                    get_mfr_limits(rules.manufacturer).via_in_pad_supported
-                )
+        cpp_rules.allow_smd_vias = _allow_smd_vias(rules)
         cpp_rules.via_drill = rules.via_drill
         cpp_rules.via_diameter = rules.via_diameter
         cpp_rules.via_clearance = rules.via_clearance
@@ -5413,6 +5425,10 @@ class CppCoupledPathfinder:
         # this issue wires up).  Marshalled here so a future coupled-attractor
         # port needs no additional plumbing.
         cpp_rules.cost_corridor_attractor = float(rules.cost_corridor_attractor)
+        # Issue #6840: the fab's via-in-pad capability, resolved exactly as the
+        # single-ended marshalling does, so the coupled via move can refuse a
+        # barrel drilled into an SMD pad (its endpoint waiver let one through).
+        cpp_rules.allow_smd_vias = _allow_smd_vias(rules)
         self._impl = router_cpp.CoupledPathfinder(
             cpp_grid._impl,
             cpp_rules,
@@ -5435,6 +5451,20 @@ class CppCoupledPathfinder:
     def via_blocked(self, gx: int, gy: int, net: int) -> bool:
         """Probe the coupled via predicate (Issue #5410 parity testing)."""
         return bool(self._impl.via_blocked(gx, gy, net))
+
+    def set_partner_via_clearance(
+        self, p_trace_vs_n_via: float, n_trace_vs_p_via: float, via_vs_via: float
+    ) -> None:
+        """Install the via-aware partner clearance radii (Issue #6840).
+
+        All three are centre-to-centre distances in GRID CELLS (unrounded):
+        P centreline vs an N via, N centreline vs a P via, and P via vs N
+        via.  ``0`` disables a check.  See
+        :meth:`CoupledPathfinder._partner_via_radii_cells`.
+        """
+        self._impl.set_partner_via_clearance(
+            float(p_trace_vs_n_via), float(n_trace_vs_p_via), float(via_vs_via)
+        )
 
     def set_halo_net_dimensions(
         self,
