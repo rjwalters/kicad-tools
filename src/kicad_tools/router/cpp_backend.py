@@ -2076,16 +2076,21 @@ class CppPathfinder:
             return frozenset()
         return net_class.hard_avoided_layer_indices(self._rules.strict_layers)
 
-    def _is_layer_allowed(self, layer_idx: int) -> bool:
+    def _is_layer_allowed(self, layer_idx: int, net_class: NetClassRouting | None = None) -> bool:
         """Check if routing on this layer is allowed by allowed_layers constraint.
+
+        Issue #6876: ``net_class``'s ``allow_plane_layers`` opt-in widens the
+        gate for the named layers (shared :func:`~.rules.layer_permitted`).
 
         Args:
             layer_idx: Grid layer index
+            net_class: The routed net's class, or None (no opt-in).
 
         Returns:
             True if layer is allowed (or no restriction), False if blocked
         """
         from .layers import Layer
+        from .rules import layer_permitted
 
         if self._rules.allowed_layers is None:
             return True  # No restriction
@@ -2093,7 +2098,7 @@ class CppPathfinder:
         # Convert grid index to Layer enum value, then to KiCad name for comparison
         layer_value = self._grid.index_to_layer(layer_idx)
         layer = Layer(layer_value)
-        return layer.kicad_name in self._rules.allowed_layers
+        return layer_permitted(self._rules, net_class, layer_idx, layer.kicad_name)
 
     def _compute_pad_bounds(
         self, pad: Pad, trace_width: float | None = None
@@ -2412,10 +2417,12 @@ class CppPathfinder:
                 else [end_layer]
             )
 
-        # Filter start/end layers by allowed_layers constraint
+        # Filter start/end layers by allowed_layers constraint.  Issue #6876:
+        # per net, so a class's ``allow_plane_layers`` opt-in is honoured.
         if self._rules.allowed_layers is not None:
-            start_layers = [l for l in start_layers if self._is_layer_allowed(l)]
-            end_layers = [l for l in end_layers if self._is_layer_allowed(l)]
+            seed_class = self._net_class_map.get(start.net_name)
+            start_layers = [l for l in start_layers if self._is_layer_allowed(l, seed_class)]
+            end_layers = [l for l in end_layers if self._is_layer_allowed(l, seed_class)]
             # If no valid layers remain, routing is impossible
             if not start_layers or not end_layers:
                 return None
@@ -2555,11 +2562,29 @@ class CppPathfinder:
         # net.  The Python fallback constructs its own Router that re-derives
         # the hard block from the same net_class, so it stays enforced there
         # too regardless of this narrowing.
+        #
+        # Issue #6876: the construction-time ``_apply_allowed_layers_to_routable``
+        # narrowed the shared vector to ``rules.allowed_layers`` for every net.
+        # When this net's class opts in to reserved plane layers
+        # (``allow_plane_layers``), WIDEN the vector for this call by the
+        # opted-in layers (hard-avoided layers still removed -- hard avoid
+        # wins), restored by the same finally.  No C++ source change.
         saved_routable_layers: list[int] | None = None
-        if hard_avoided_layers:
-            narrowed_routable = [
-                idx for idx in self._routable_layers if idx not in hard_avoided_layers
-            ]
+        opted_in_layers: list[int] = []
+        if self._rules.allowed_layers is not None and net_class is not None:
+            if getattr(net_class, "allow_plane_layers", None):
+                opted_in_layers = [
+                    idx
+                    for idx in self._grid.get_routable_indices()
+                    if idx not in self._routable_layers and self._is_layer_allowed(idx, net_class)
+                ]
+        if hard_avoided_layers or opted_in_layers:
+            if opted_in_layers:
+                widened = set(self._routable_layers) | set(opted_in_layers)
+                candidate = [idx for idx in self._grid.get_routable_indices() if idx in widened]
+            else:
+                candidate = list(self._routable_layers)
+            narrowed_routable = [idx for idx in candidate if idx not in hard_avoided_layers]
             if narrowed_routable and narrowed_routable != self._routable_layers:
                 saved_routable_layers = list(self._routable_layers)
                 self.set_routable_layers(narrowed_routable)

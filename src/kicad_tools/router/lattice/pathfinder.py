@@ -56,7 +56,7 @@ from ..pairplan.gateway import Gateway, GatewaySite
 from ..pairplan.gateway import gateway_anchor_point as _gateway_anchor
 from ..primitives import Pad, Route, Segment, Via, pad_half_extents
 from ..quantize import dogleg_points
-from ..rules import DesignRules
+from ..rules import DesignRules, layer_permitted
 from .coupled import CoupledConnection
 from .escape_plan import EscapeChoice, chosen_stub, foreign_reservations, plan_tapered_escapes
 from .geometry import Pt, Rect, dist, pt_in_rect, seg_seg_dist
@@ -879,7 +879,7 @@ class LatticePathfinder:
         preserving byte-identical routing for every connection that does not
         opt in.
         """
-        blocked = self._allowed_layers_blocked()
+        blocked = self._allowed_layers_blocked(net_class)
         if net_class is None:
             return blocked
         hard_avoided = getattr(net_class, "hard_avoided_layer_indices", None)
@@ -887,8 +887,14 @@ class LatticePathfinder:
             return blocked
         return blocked | frozenset(hard_avoided(self.rules.strict_layers))
 
-    def _allowed_layers_blocked(self) -> frozenset[int]:
+    def _allowed_layers_blocked(self, net_class: object | None = None) -> frozenset[int]:
         """Layer indices outside ``rules.allowed_layers`` (issue #6350).
+
+        Issue #6876: a layer ``net_class`` opted in to through
+        ``allow_plane_layers`` is not blocked (shared
+        :func:`~kicad_tools.router.rules.layer_permitted`).  Hard
+        ``avoid_layers`` is applied separately by :meth:`_hard_avoided_layers`
+        and still wins.
 
         ``allowed_layers`` holds KiCad layer names (``["F.Cu", "B.Cu"]`` under
         ``--layers 4`` with plane reservation on); every stack layer whose
@@ -911,8 +917,11 @@ class LatticePathfinder:
         allowed = self.rules.allowed_layers
         if allowed is None:
             return frozenset()
-        allowed_set = set(allowed)
-        return frozenset(ld.index for ld in self.layer_stack.layers if ld.name not in allowed_set)
+        return frozenset(
+            ld.index
+            for ld in self.layer_stack.layers
+            if not layer_permitted(self.rules, net_class, ld.index, ld.name)
+        )
 
     # -- pad stubs ------------------------------------------------------------
 
