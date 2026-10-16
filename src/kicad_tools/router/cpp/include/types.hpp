@@ -326,7 +326,11 @@ namespace router {
 // so the authored gate measures a roundrect with the file's corner ratio (or
 // as a rect when unknown) instead of a hardcoded 0.25.  The Python side passes
 // it on every pad, so a v55 .so must be rejected.
-constexpr int ROUTER_CPP_BUILD_VERSION = 57;
+// v58 (Issue #6826): ``CoupledPathfinder::route`` bounds the relaxed endpoint
+// zones' spacing tolerance by each end's own pad-pitch delta + 1 instead of the
+// zone radius.  A v57 .so searches a much larger joint state space than the
+// Python mirror, so coupled parity (and the Board07 replay) diverge.
+constexpr int ROUTER_CPP_BUILD_VERSION = 58;
 
 
 // Issue #4071: fixed-capacity owner-set size for per-cell corridor

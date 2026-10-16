@@ -366,6 +366,30 @@ CoupledRouteResult CoupledPathfinder::route(
         return corridor_exempt.count(xy_key(x, y)) != 0;
     };
 
+    // Issue #6826: per-end spacing tolerance inside the relaxed endpoint
+    // zones.  The zone RADIUS stays ``2*delta + 4`` (the pair needs that much
+    // room to converge one cell per step), but the TOLERANCE used to be the
+    // radius as well -- so on Board07 TMDS_D1 (pitch 8/10 vs target 3) every
+    // joint midpoint admitted ~900-1,400 near-equal-f P-to-N offsets and the
+    // joint A* flooded them (402k iterations against a 20k budget).  Bound
+    // each end's tolerance by its own pad-pitch delta plus one cell instead:
+    // the pads themselves (spacing == pitch) stay legal, and the converging
+    // path never needs more.  Never looser than the radius-based value it
+    // replaces.  Mirrors ``_endpoint_zone_tolerance`` in diffpair_routing.py
+    // (round-half-up via floor(x + 0.5) on both sides for exact parity).
+    auto endpoint_zone_tolerance = [&](int ax, int ay, int bx, int by, int radius) -> int {
+        double pdx = ax - bx, pdy = ay - by;
+        double pitch = std::sqrt(pdx * pdx + pdy * pdy);
+        int delta = static_cast<int>(
+            std::floor(std::abs(pitch - effective_target_spacing) + 0.5));
+        int tol = std::max(1, delta) + 1;
+        return std::min(tol, radius);
+    };
+    const int departure_tolerance = endpoint_zone_tolerance(
+        p_start_x, p_start_y, n_start_x, n_start_y, effective_departure_radius);
+    const int approach_tolerance = endpoint_zone_tolerance(
+        p_goal_x, p_goal_y, n_goal_x, n_goal_y, effective_approach_radius);
+
     // Node pool (contiguous) + index-based parent chain.
     std::vector<CoupledAStarNode> pool;
     pool.reserve(4096);
@@ -697,8 +721,8 @@ CoupledRouteResult CoupledPathfinder::route(
         }
         bool spacing_relaxed = approach_relaxed || departure_relaxed;
         int relaxed_tolerance = std::max(1, target_spacing);
-        if (approach_relaxed) relaxed_tolerance = std::max(relaxed_tolerance, effective_approach_radius);
-        if (departure_relaxed) relaxed_tolerance = std::max(relaxed_tolerance, effective_departure_radius);
+        if (approach_relaxed) relaxed_tolerance = std::max(relaxed_tolerance, approach_tolerance);
+        if (departure_relaxed) relaxed_tolerance = std::max(relaxed_tolerance, departure_tolerance);
 
         // Collected neighbors: (px,py,pl, nx,ny,nl, dir_dx,dir_dy, cost, is_via).
         struct Cand {

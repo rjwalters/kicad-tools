@@ -491,3 +491,79 @@ def test_cpp_and_python_agree_with_reserved_corridor():
     # Cost-equality with the attractor active on both backends.
     assert _route_length(cpp_p) == pytest.approx(_route_length(py_p), abs=0.2)
     assert _route_length(cpp_n_route) == pytest.approx(_route_length(py_n_route), abs=0.2)
+
+
+# ---------------------------------------------------------------------------
+# Issue #6826: endpoint-zone spacing tolerance bounded by pad pitch
+# ---------------------------------------------------------------------------
+#
+# Board07 TMDS_D1's pads sit in line along the travel axis (P behind N), at a
+# pitch of 8 cells at the start and 10 at the goal, against a 3-cell coupled
+# target.  The relaxed endpoint zones (radius ``2*delta + 4``) used their
+# RADIUS as the spacing tolerance, so every joint midpoint admitted hundreds
+# of near-equal-f P-to-N offsets and the joint A* flooded them.  This is the
+# same geometry at unit scale on a bare grid.
+
+
+def _inline_pitch_pads() -> tuple[Pad, Pad, Pad, Pad]:
+    """In-line pads: pitch 8 cells at the start, 10 at the goal (0.1 mm grid)."""
+
+    def pad(x: float, y: float, net: int, name: str) -> Pad:
+        return Pad(x=x, y=y, width=0.3, height=0.3, net=net, net_name=name, layer=Layer.F_CU)
+
+    p_start = pad(2.0, 4.0, 1, "D+")
+    n_start = pad(2.8, 4.0, 2, "D-")
+    p_end = pad(5.0, 3.0, 1, "D+")
+    n_end = pad(6.0, 3.0, 2, "D-")
+    return p_start, p_end, n_start, n_end
+
+
+def _inline_pf(use_cpp: bool) -> CoupledPathfinder:
+    grid = RoutingGrid(width=13.0, height=10.0, rules=DesignRules())
+    pf = CoupledPathfinder(
+        grid=grid, rules=DesignRules(), target_spacing_cells=3, min_spacing_cells=2
+    )
+    pf._use_cpp_coupled = use_cpp
+    return pf
+
+
+# Measured: 37,645 (C++) / 37,823 (Python) iterations with the radius as the
+# tolerance; 20,110 / 20,297 with the pitch-bounded tolerance.
+_INLINE_ITERATION_BOUND = 28_000
+
+
+def test_inline_pitch_pair_search_is_bounded_and_backends_agree():
+    pads = _inline_pitch_pads()
+
+    cpp_pf = _inline_pf(use_cpp=True)
+    cpp_res = cpp_pf.route_coupled(*pads, max_iterations_budget=500_000)
+    assert cpp_pf.last_coupled_backend == "cpp"
+    assert cpp_res is not None, "C++ must couple the in-line pitch pair"
+    assert cpp_pf.last_iterations < _INLINE_ITERATION_BOUND, cpp_pf.last_iterations
+
+    py_pf = _inline_pf(use_cpp=False)
+    py_res = py_pf.route_coupled(*pads, max_iterations_budget=500_000)
+    assert py_pf.last_coupled_backend == "python"
+    assert py_res is not None, "Python must couple the in-line pitch pair"
+    assert py_pf.last_iterations < _INLINE_ITERATION_BOUND, py_pf.last_iterations
+
+    for cpp_route, py_route in zip(cpp_res, py_res, strict=True):
+        assert _route_length(cpp_route) == pytest.approx(_route_length(py_route), abs=0.2)
+
+
+@pytest.mark.parametrize(
+    ("a", "b", "target", "radius", "expected"),
+    [
+        ((0, 0), (8, 0), 3, 14, 6),  # TMDS_D1 start: |8 - 3| + 1
+        ((0, 0), (10, 0), 3, 18, 8),  # TMDS_D1 goal: |10 - 3| + 1
+        ((0, 0), (2, 0), 3, 6, 2),  # pitch below target: delta clamps to 1
+        ((0, 0), (3, 0), 3, 6, 2),  # pitch == target: delta clamps to 1
+        ((0, 0), (6, 6), 3, 20, 6),  # off-axis: |8.485 - 3| = 5.485 rounds to 5, + 1
+        ((0, 0), (20, 0), 7, 6, 6),  # never looser than the radius it replaces
+    ],
+)
+def test_endpoint_zone_tolerance(a, b, target, radius, expected):
+    from kicad_tools.router.diffpair_routing import GridPos, _endpoint_zone_tolerance
+
+    tol = _endpoint_zone_tolerance(GridPos(*a, 0), GridPos(*b, 0), target, radius)
+    assert tol == expected

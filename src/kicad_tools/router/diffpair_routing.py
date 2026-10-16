@@ -805,6 +805,25 @@ COUPLED_OUTCOME_JOINT_PLATEAU = "joint-A*-plateau"
 COUPLED_OUTCOME_LANDING_STALL = "landing-stall"
 
 
+def _endpoint_zone_tolerance(a: GridPos, b: GridPos, target_spacing_cells: int, radius: int) -> int:
+    """Spacing tolerance inside one end's relaxed zone (Issue #6826).
+
+    The zone *radius* is ``2*delta + 4`` so the pair has room to converge
+    one cell per step, but the *tolerance* used to be that radius too: on
+    Board07 TMDS_D1 (pad pitch 8/10 cells vs a 3-cell target) every joint
+    midpoint then admitted ~900-1,400 near-equal-f P-to-N offsets and the
+    joint A* flooded them.  Bound the tolerance by this end's own pad-pitch
+    delta plus one cell instead -- the pads themselves (spacing == pitch)
+    stay legal -- and never loosen it past the radius-based value it
+    replaces.  ``floor(x + 0.5)`` (round half up, not Python's banker's
+    ``round``) mirrors ``endpoint_zone_tolerance`` in
+    ``coupled_pathfinder.cpp`` exactly.
+    """
+    pitch = math.hypot(a.x - b.x, a.y - b.y)
+    delta = math.floor(abs(pitch - target_spacing_cells) + 0.5)
+    return min(max(1, delta) + 1, radius)
+
+
 def _floored_pair_gap(autorouter: Any, net_class: Any) -> float:
     """A pair class's intra-pair gap, floored as the router lays it (Issue #6443).
 
@@ -2513,14 +2532,25 @@ class CoupledPathfinder:
         # ``max(1, target)`` only worked because the target itself had
         # been widened to the start pitch; with the configured coupled
         # target restored, a 20-cell USB-C pitch against a 7-cell
-        # target needs tolerance >= 13 inside the endpoint zones.  The
-        # phase radii are already sized as ``delta * 2 + 4`` so they
-        # dominate the pitch delta by construction.
+        # target needs tolerance >= 13 inside the endpoint zones.
+        # Issue #6826: that tolerance is the end's own pitch delta + 1,
+        # NOT the (deliberately oversized ``2*delta + 4``) zone radius --
+        # tying it to the radius let the joint A* flood ~900-1,400
+        # equal-f offsets per midpoint.  Short pairs whose zones overlap
+        # still take the max of both ends.
         relaxed_tolerance = max(1, target_spacing_cells)
         if approach_relaxed:
-            relaxed_tolerance = max(relaxed_tolerance, approach_radius)
+            assert p_goal is not None and n_goal is not None
+            relaxed_tolerance = max(
+                relaxed_tolerance,
+                _endpoint_zone_tolerance(p_goal, n_goal, target_spacing_cells, approach_radius),
+            )
         if departure_relaxed:
-            relaxed_tolerance = max(relaxed_tolerance, departure_radius)
+            assert p_start is not None and n_start is not None
+            relaxed_tolerance = max(
+                relaxed_tolerance,
+                _endpoint_zone_tolerance(p_start, n_start, target_spacing_cells, departure_radius),
+            )
 
         # Try moving both traces in the same direction
         for dx, dy in self.directions:
