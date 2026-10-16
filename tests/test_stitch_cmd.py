@@ -6034,13 +6034,15 @@ class TestPourConnectivityFallback:
             fake_calc_via.calls += 1  # type: ignore[attr-defined]
             if fake_calc_via.calls == 1:  # type: ignore[attr-defined]
                 return None
-            return grazing_via
+            return (*grazing_via, None)
 
         fake_calc_via.calls = 0  # type: ignore[attr-defined]
 
         # Dog-leg / extended must also fail on the augmented attempt so the
         # augmented _attempt_placement returns None and the fallback fires.
-        monkeypatch.setattr(stitch_mod, "calculate_via_position", fake_calc_via)
+        # Issue #6823: ``run_stitch`` places through ``calculate_via_stub``
+        # (``(via_x, via_y, corner)``; ``corner=None`` is a straight stub).
+        monkeypatch.setattr(stitch_mod, "calculate_via_stub", fake_calc_via)
         monkeypatch.setattr(stitch_mod, "calculate_dogleg_via_position", lambda *a, **k: None)
         monkeypatch.setattr(stitch_mod, "calculate_extended_escape_position", lambda *a, **k: None)
 
@@ -6185,16 +6187,17 @@ class TestTraceToTrackSegments:
         trace = TraceSegment(
             pad=self._pad(),
             via_x=13.0,
-            via_y=23.0,
+            via_y=22.0,
             width=0.2,
             layer="F.Cu",
-            waypoints=[(11.0, 20.0), (12.0, 22.0)],
+            # 45-legal legs (Issue #6823: an off-angle leg is doglegged).
+            waypoints=[(11.0, 20.0), (12.0, 21.0)],
         )
         segs = trace_to_track_segments(trace)
         # pad -> wp1 -> wp2 -> via == 3 segments
         assert len(segs) == 3
         assert (segs[0].start_x, segs[0].start_y) == (10.0, 20.0)
-        assert (segs[-1].end_x, segs[-1].end_y) == (13.0, 23.0)
+        assert (segs[-1].end_x, segs[-1].end_y) == (13.0, 22.0)
         assert all(s.net_number == 7 for s in segs)
 
 

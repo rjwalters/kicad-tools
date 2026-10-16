@@ -41,7 +41,7 @@ import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from kicad_tools.cli.format_options import (
     FORMAT_JSON,
@@ -51,6 +51,11 @@ from kicad_tools.cli.format_options import (
     stdout_to_stderr_when,
 )
 from kicad_tools.core.sexp_file import load_pcb, save_pcb, verify_pcb_write
+from kicad_tools.router.quantize import (
+    OffAngleSegmentError,
+    dogleg_points,
+    verify_segment_45,
+)
 from kicad_tools.router.track_index import TrackSpatialIndex, build_track_index
 from kicad_tools.router.via_clearance import (
     COORD_WRITE_GUARD_MM,
@@ -59,7 +64,7 @@ from kicad_tools.router.via_clearance import (
 )
 from kicad_tools.schema.pcb import _is_footprint_tag
 from kicad_tools.sexp import SExp
-from kicad_tools.sexp.builders import segment_node, via_node
+from kicad_tools.sexp.builders import fmt, segment_node, via_node
 
 if TYPE_CHECKING:
     from kicad_tools.analysis.net_status import NetStatus
@@ -2220,7 +2225,80 @@ def _stub_layer(pad: PadInfo) -> str | None:
     return pad.layer
 
 
+def _leg_is_45_legal(x1: float, y1: float, x2: float, y2: float) -> bool:
+    """True if leg ``(x1, y1) -> (x2, y2)`` is 45-legal AS WRITTEN (Issue #6823).
+
+    Mirrors :func:`~kicad_tools.router.quantize.verify_segment_45` in strict
+    mode -- the 4-decimal serialized coordinates, one-quantum jitter
+    allowed -- so the placement search and the emission guard agree on
+    which legs need a dogleg.
+    """
+    try:
+        verify_segment_45(x1, y1, x2, y2, strict=True)
+    except OffAngleSegmentError:
+        return False
+    return True
+
+
+def _as_written(point: tuple[float, float]) -> tuple[float, float]:
+    """``point`` as :func:`~kicad_tools.sexp.builders.segment_node` /
+    ``via_node`` serialize it (``fmt``: 2 decimals)."""
+    return (float(fmt(point[0])), float(fmt(point[1])))
+
+
+def legalize_stub_path(
+    points: Sequence[tuple[float, float]], *, axis_first: bool = False
+) -> list[tuple[float, float]]:
+    """The 45-legal polyline a stub through ``points`` is written as (Issue #6823).
+
+    Every vertex is first snapped to the coordinates the writer emits
+    (:func:`~kicad_tools.sexp.builders.fmt` rounds to 0.01 mm, so a pad
+    centre at y = 91.1625 is written at 91.16 -- legality must be decided on
+    the written numbers, not the float ones).  Legal legs are then kept
+    verbatim; an off-angle leg ``a -> b`` is replaced by
+    :func:`~kicad_tools.router.quantize.dogleg_points` (one diagonal plus
+    one axis leg), whose vertex lands back on the 0.01 mm grid.
+    ``axis_first`` selects the dogleg variant.  Consecutive duplicate
+    vertices (a leg that rounds to zero length) are dropped.  The result is
+    the exact polyline :func:`add_trace_to_pcb` writes, so callers that
+    clearance-check a candidate must check THIS geometry.
+    """
+    written = [_as_written(p) for p in points]
+    out: list[tuple[float, float]] = [written[0]]
+    for bx, by in written[1:]:
+        ax, ay = out[-1]
+        if (bx, by) == (ax, ay):
+            continue
+        if _leg_is_45_legal(ax, ay, bx, by):
+            out.append((bx, by))
+        else:
+            for vertex in dogleg_points(ax, ay, bx, by, axis_first=axis_first)[1:]:
+                vertex = _as_written(vertex)
+                if vertex != out[-1]:
+                    out.append(vertex)
+    return out
+
+
 def calculate_via_position(
+    pad: PadInfo,
+    *args: Any,
+    **kwargs: Any,
+) -> tuple[float, float] | None:
+    """Via site for ``pad`` -- see :func:`calculate_via_stub` for the args.
+
+    Back-compat wrapper returning only ``(via_x, via_y)``.  A caller that
+    writes the stub with :func:`add_trace_to_pcb` as a straight
+    :class:`TraceSegment` gets the default dogleg variant
+    (:func:`legalize_stub_path`) for an off-45 site, so this wrapper
+    only accepts the default variant -- the geometry it cleared is the
+    geometry written (Issue #6823).
+    """
+    kwargs.setdefault("dogleg_variants", (False,))
+    stub = calculate_via_stub(pad, *args, **kwargs)
+    return None if stub is None else (stub[0], stub[1])
+
+
+def calculate_via_stub(
     pad: PadInfo,
     offset: float,
     via_size: float,
@@ -2239,8 +2317,13 @@ def calculate_via_position(
     same_net_fill_layer: str | None = None,
     other_net_track_index: TrackSpatialIndex[TrackSegment] | None = None,
     preferred_positions: Sequence[tuple[float, float]] = (),
-) -> tuple[float, float] | None:
+    dogleg_variants: Sequence[bool] = (False, True),
+) -> tuple[float, float, tuple[float, float] | None] | None:
     """Calculate a valid via placement position near the pad.
+
+    Returns ``(via_x, via_y, corner)``: ``corner`` is ``None`` for a
+    straight 45-legal stub, else the dogleg vertex the stub must be written
+    through (Issue #6823).
 
     Tries to place the via offset from the pad center, checking for conflicts
     with both same-net vias and other-net copper (tracks, vias, pads, and
@@ -2308,6 +2391,11 @@ def calculate_via_position(
             short an F.Cu stub, and on board 04 one (NRST) refused U2.23's
             reserved site.  Issue #6428 extends that layer filter to the
             historical offsets too: see :func:`_stub_layer`.
+        dogleg_variants: Issue #6823 -- for a candidate that is not on a
+            45-degree line from the pad (a reserved site a few hundredths
+            of a mm off-axis), the :func:`legalize_stub_path` variants
+            (``axis_first`` values) tried, in order.  The first whose legs
+            clear wins and its vertex is returned as ``corner``.
     """
     if other_net_tracks is None:
         other_net_tracks = []
@@ -2329,6 +2417,22 @@ def calculate_via_position(
     # Issue #4432: same-net fill containment gate, active only when pour
     # geometry exists on the target layer (empty -> no-op / outline fallback).
     same_net_fill_gate = _same_net_fill_on_layer(same_net_filled_polygons, same_net_fill_layer)
+
+    def _stub_path_clear(points: list[tuple[float, float]]) -> bool:
+        # Issue #3433 / #6413 / #6428 / #6683: tracks on the stub's layer,
+        # vias, shape-aware pads and other-net fill, leg by leg.
+        return _check_stub_path_clearance(
+            points,
+            trace_half_width,
+            other_net_tracks,
+            other_net_vias,
+            other_net_pads,
+            clearance,
+            other_net_filled_polygons,
+            other_net_track_index,
+            stub_layer=stub_layer,
+            other_net_pad_bboxes=other_net_pad_bboxes,
+        )
 
     # Try different offsets from pad center
     # Start with the direction away from pad center, try 8 directions
@@ -2480,103 +2584,22 @@ def calculate_via_position(
             ):
                 continue
 
-            # Check connecting trace path (pad center -> via center) for clearance
-            if trace_width > 0:
-                # Check trace path against other-net track segments
-                if other_net_track_index is None:
-                    path_track_candidates: list[TrackSegment] = other_net_tracks
-                else:
-                    path_track_candidates = other_net_track_index.near_segment(
-                        pad.x, pad.y, via_x, via_y, trace_half_width + clearance
-                    )
-                for seg in path_track_candidates:
-                    # Issues #6413/#6428: the stub meets only tracks on its
-                    # own layer (the layer it is emitted on).
-                    if stub_layer is not None and seg.layer != stub_layer:
-                        continue
-                    dist = segment_to_segment_distance(
-                        pad.x,
-                        pad.y,
-                        via_x,
-                        via_y,
-                        seg.start_x,
-                        seg.start_y,
-                        seg.end_x,
-                        seg.end_y,
-                    )
-                    # Clearance from trace edge to track edge
-                    min_dist = trace_half_width + seg.width / 2 + clearance
-                    if dist < min_dist:
-                        conflict = True
-                        break
-
-                if conflict:
+            # Issue #6823: the stub is written 45-degree-legal, in the
+            # 0.01 mm coordinates the writer emits.  A candidate off the
+            # 0/45/90/135 set from the pad (a reserved site a few hundredths
+            # of a mm off-axis) is reached by a dogleg, and the clearance
+            # checks below run on exactly the legs that are written.  An
+            # aligned candidate yields one straight leg for every variant.
+            stub_paths: list[list[tuple[float, float]]] = []
+            for variant in dogleg_variants:
+                path = legalize_stub_path([(pad.x, pad.y), (via_x, via_y)], axis_first=variant)
+                if path not in stub_paths:
+                    stub_paths.append(path)
+            for stub_path in stub_paths:
+                if trace_width > 0 and not _stub_path_clear(stub_path):
                     continue
-
-                # Check trace path against other-net vias
-                for ovx, ovy, ov_size, _onet in other_net_vias:
-                    dist = point_to_segment_distance(
-                        ovx,
-                        ovy,
-                        pad.x,
-                        pad.y,
-                        via_x,
-                        via_y,
-                    )
-                    # Clearance from trace edge to other via edge
-                    min_dist = trace_half_width + ov_size / 2 + clearance
-                    if dist < min_dist:
-                        conflict = True
-                        break
-
-                if conflict:
-                    continue
-
-                # Check trace path against other-net pads (Issue #3433).
-                # The dog-leg (`_check_dogleg_path_clearance`) and
-                # extended-escape (`_check_multileg_path_clearance`)
-                # validators both walk their legs against
-                # ``other_net_pads``, but the straight-line path here
-                # did not -- only the VIA position was pad-checked.  On
-                # board 04 the U2.8 (GND) pad-to-via diagonal passed
-                # every other check and crossed the adjacent U2.9
-                # (+3.3V) pad at -0.100 mm, the lone blocking error in
-                # an otherwise-clean refresh.
-                #
-                # Rect-aware when bboxes are supplied: the bounding-
-                # circle model (``max(w, h) / 2``) would reject every
-                # legitimate escape that runs parallel to the SHORT
-                # axis of an elongated QFP pad (board-04 U2.47 went
-                # from stitched to stranded under the circle check).
-                # Callers that only supply the circle model fall back to it
-                # (back-compat); see :func:`_pad_conflict`.
-                conflict = _pad_conflict(
-                    pad.x,
-                    pad.y,
-                    via_x,
-                    via_y,
-                    trace_half_width + clearance,
-                    other_net_pads,
-                    other_net_pad_bboxes,
-                )
-
-                if conflict:
-                    continue
-
-                # Check trace path against other-net filled polygons
-                if other_net_filled_polygons:
-                    if not _check_segment_filled_polygon_clearance(
-                        pad.x,
-                        pad.y,
-                        via_x,
-                        via_y,
-                        trace_half_width,
-                        other_net_filled_polygons,
-                        clearance,
-                    ):
-                        continue
-
-            return (via_x, via_y)
+                corner = stub_path[1] if len(stub_path) == 3 else None
+                return (via_x, via_y, corner)
 
     return None
 
@@ -2620,15 +2643,45 @@ def _check_dogleg_path_clearance(
 
     Returns True if path is clear, False if there's a conflict.
     """
+    return _check_stub_path_clearance(
+        [(pad_x, pad_y), (intermediate_x, intermediate_y), (via_x, via_y)],
+        trace_half_width,
+        other_net_tracks,
+        other_net_vias,
+        other_net_pads,
+        clearance,
+        other_net_filled_polygons,
+        other_net_track_index,
+        stub_layer=stub_layer,
+        other_net_pad_bboxes=other_net_pad_bboxes,
+    )
+
+
+def _check_stub_path_clearance(
+    points: Sequence[tuple[float, float]],
+    trace_half_width: float,
+    other_net_tracks: list[TrackSegment],
+    other_net_vias: list[tuple[float, float, float, int]],
+    other_net_pads: list[tuple[float, float, float, int]],
+    clearance: float,
+    other_net_filled_polygons: list[FilledPolygon] | None = None,
+    other_net_track_index: TrackSpatialIndex[TrackSegment] | None = None,
+    *,
+    stub_layer: str | None = None,
+    other_net_pad_bboxes: list[PadBBox] | None = None,
+) -> bool:
+    """Clearance of every leg of a pad-to-via stub polyline.
+
+    Generalises :func:`_check_dogleg_path_clearance` to any number of legs
+    (Issue #6823: a straight stub is one leg, a doglegged one two).  Each
+    leg is tested against other-net tracks (layer-filtered by
+    ``stub_layer``), vias, pads (shape-aware when ``other_net_pad_bboxes``
+    is given) and filled polygons.  Returns True if every leg clears.
+    """
     if other_net_filled_polygons is None:
         other_net_filled_polygons = []
 
-    # Define the two path segments
-    legs = [
-        (pad_x, pad_y, intermediate_x, intermediate_y),  # First leg
-        (intermediate_x, intermediate_y, via_x, via_y),  # Second leg
-    ]
-
+    legs = [(sx, sy, ex, ey) for (sx, sy), (ex, ey) in zip(points, points[1:], strict=False)]
     for leg_sx, leg_sy, leg_ex, leg_ey in legs:
         # Check against other-net track segments
         if other_net_track_index is None:
@@ -2852,8 +2905,21 @@ def calculate_dogleg_via_position(
                     continue
 
                 for escape_offset in escape_offsets:
-                    via_x = intermediate_x + escape_dx * escape_offset
-                    via_y = intermediate_y + escape_dy * escape_offset
+                    if escape_dx != 0 and escape_dy != 0:
+                        # Issue #6823: a diagonal escape leg between two
+                        # points the writer rounds to 0.01 mm can land one
+                        # quantum off 45 degrees, and the writer would then
+                        # add a vertex no check saw.  Step the same whole
+                        # number of grid cells on both axes from the
+                        # *written* corner so the leg is exactly 45 degrees
+                        # as written.
+                        corner_x, corner_y = _as_written((intermediate_x, intermediate_y))
+                        step = round(abs(escape_dx) * escape_offset, 2)
+                        via_x = round(corner_x + math.copysign(step, escape_dx), 2)
+                        via_y = round(corner_y + math.copysign(step, escape_dy), 2)
+                    else:
+                        via_x = intermediate_x + escape_dx * escape_offset
+                        via_y = intermediate_y + escape_dy * escape_offset
 
                     # Check via position clearance (same as straight-line)
                     conflict = False
@@ -2959,15 +3025,19 @@ def calculate_dogleg_via_position(
                         ):
                             continue
 
-                    # Check the entire L-shaped path for clearance
+                    # Check the entire L-shaped path for clearance -- the
+                    # path as the writer emits it (Issue #6823), not the
+                    # nominal float legs.  The escape snap above makes both
+                    # the same; a candidate that still gains a vertex in
+                    # the writer is rejected rather than written unchecked.
+                    stub_path = legalize_stub_path(
+                        [(pad.x, pad.y), (intermediate_x, intermediate_y), (via_x, via_y)]
+                    )
+                    if len(stub_path) != 3:
+                        continue
                     if trace_width > 0:
-                        if not _check_dogleg_path_clearance(
-                            pad.x,
-                            pad.y,
-                            intermediate_x,
-                            intermediate_y,
-                            via_x,
-                            via_y,
+                        if not _check_stub_path_clearance(
+                            stub_path,
                             trace_half_width,
                             other_net_tracks,
                             other_net_vias,
@@ -2980,7 +3050,7 @@ def calculate_dogleg_via_position(
                         ):
                             continue
 
-                    return (via_x, via_y, intermediate_x, intermediate_y)
+                    return (via_x, via_y, stub_path[1][0], stub_path[1][1])
 
     return None
 
@@ -3604,21 +3674,26 @@ def calculate_extended_escape_position(
             if not _check_via_position(via_x, via_y):
                 continue
 
-            # Intermediate waypoint at half-radius on the same bearing
-            wp_x = pad.x + (radius * 0.5) * math.cos(theta)
-            wp_y = pad.y + (radius * 0.5) * math.sin(theta)
+            if _leg_is_45_legal(*_as_written((pad.x, pad.y)), *_as_written((via_x, via_y))):
+                # Intermediate waypoint at half-radius on the same bearing
+                wp_x = pad.x + (radius * 0.5) * math.cos(theta)
+                wp_y = pad.y + (radius * 0.5) * math.sin(theta)
+                path_options = [legalize_stub_path([(pad.x, pad.y), (wp_x, wp_y), (via_x, via_y)])]
+            else:
+                # Issue #6823: the 22.5-degree bearings are off the
+                # 0/45/90/135 set; reach those vias through a dogleg (both
+                # variants) instead of a straight off-angle stub.  The
+                # vertex lies inside the pad->via bounding box, no farther
+                # from the pad than the via (#6384 reach bound holds).
+                path_options = [
+                    legalize_stub_path([(pad.x, pad.y), (via_x, via_y)], axis_first=variant)
+                    for variant in (False, True)
+                ]
 
-            path_points = [
-                (pad.x, pad.y),
-                (wp_x, wp_y),
-                (via_x, via_y),
-            ]
-
-            if not _check_path_layer_aware(path_points):
-                continue
-
-            waypoints = [(wp_x, wp_y)]
-            return (via_x, via_y, waypoints)
+            for path_points in path_options:
+                if not _check_path_layer_aware(path_points):
+                    continue
+                return (via_x, via_y, path_points[1:-1])
 
     return None
 
@@ -3691,94 +3766,60 @@ def add_via_to_pcb(sexp: SExp, placement: ViaPlacement) -> None:
     sexp.append(via)
 
 
+def trace_points(trace: TraceSegment) -> list[tuple[float, float]]:
+    """Ordered polyline (pad centre ... via centre) a stitch stub is written as.
+
+    The single source of truth for :func:`add_trace_to_pcb` (what is
+    written) and :func:`trace_to_track_segments` (what later placements
+    clearance-check against).  Straight, dog-leg and extended-escape
+    traces give their nominal vertices; Issue #6823: any leg off the
+    0/45/90/135 set is then expanded into the default dogleg
+    (:func:`legalize_stub_path`), so no caller of :func:`run_stitch` --
+    ``kct stitch`` or the router's pour-link closer -- can write off-angle
+    copper.  Every placement strategy clearance-checks
+    ``legalize_stub_path(...)`` of its own vertices (the dog-leg strategy
+    snaps its diagonal escape to the 0.01 mm grid so that path is exactly
+    its three nominal points), so this is a no-op for them; it only
+    guards a hand-built :class:`TraceSegment`.
+    """
+    points: list[tuple[float, float]] = [(trace.pad.x, trace.pad.y)]
+    if trace.is_extended_escape:
+        points.extend(trace.waypoints or [])
+    elif trace.is_dogleg:
+        # ``is_dogleg`` is True iff both intermediate coords are set (see
+        # ``TraceSegment.is_dogleg``).  Bind + assert so mypy narrows.
+        ix = trace.intermediate_x
+        iy = trace.intermediate_y
+        assert ix is not None and iy is not None  # guaranteed by is_dogleg
+        points.append((ix, iy))
+    points.append((trace.via_x, trace.via_y))
+    return legalize_stub_path(points)
+
+
 def add_trace_to_pcb(sexp: SExp, trace: TraceSegment) -> None:
     """Add trace segment(s) from pad center to via center.
 
-    For straight traces, adds a single segment.
-    For dog-leg (L-shaped) traces, adds two segments: pad -> corner -> via.
-    For extended escape traces, adds multiple segments through waypoints.
+    Writes the legs of :func:`trace_points`: one for a straight trace, two
+    for a dog-leg (L-shaped) trace, one per waypoint hop for an extended
+    escape -- plus a dogleg vertex for any leg that would otherwise be off
+    45 degrees (Issue #6823).  Each leg passes
+    :func:`~kicad_tools.router.quantize.verify_segment_45`.
     """
-    if trace.is_extended_escape:
-        # Extended escape trace: multiple segments through waypoints
-        # Build the full path: pad -> waypoints -> via
-        points = [(trace.pad.x, trace.pad.y)]
-        points.extend(trace.waypoints)
-        points.append((trace.via_x, trace.via_y))
-
-        for i in range(len(points) - 1):
-            seg = segment_node(
-                start_x=points[i][0],
-                start_y=points[i][1],
-                end_x=points[i + 1][0],
-                end_y=points[i + 1][1],
-                width=trace.width,
-                layer=trace.layer,
-                net=trace.pad.net_number,
-                uuid_str=_stitch_uuid(
-                    "seg",
-                    points[i],
-                    points[i + 1],
-                    trace.width,
-                    trace.layer,
-                    trace.pad.net_number,
-                ),
-            )
-            sexp.append(seg)
-    elif trace.is_dogleg:
-        # Dog-leg trace: two segments forming an L-shape
-        # First segment: pad center to intermediate corner point
-        seg1 = segment_node(
-            start_x=trace.pad.x,
-            start_y=trace.pad.y,
-            end_x=trace.intermediate_x,
-            end_y=trace.intermediate_y,
-            width=trace.width,
-            layer=trace.layer,
-            net=trace.pad.net_number,
-            uuid_str=_stitch_uuid(
-                "seg",
-                (trace.pad.x, trace.pad.y),
-                (trace.intermediate_x, trace.intermediate_y),
-                trace.width,
-                trace.layer,
-                trace.pad.net_number,
-            ),
-        )
-        sexp.append(seg1)
-
-        # Second segment: intermediate corner point to via center
-        seg2 = segment_node(
-            start_x=trace.intermediate_x,
-            start_y=trace.intermediate_y,
-            end_x=trace.via_x,
-            end_y=trace.via_y,
-            width=trace.width,
-            layer=trace.layer,
-            net=trace.pad.net_number,
-            uuid_str=_stitch_uuid(
-                "seg",
-                (trace.intermediate_x, trace.intermediate_y),
-                (trace.via_x, trace.via_y),
-                trace.width,
-                trace.layer,
-                trace.pad.net_number,
-            ),
-        )
-        sexp.append(seg2)
-    else:
-        # Straight trace: single segment
+    points = trace_points(trace)
+    for start, end in zip(points, points[1:], strict=False):
+        verify_segment_45(start[0], start[1], end[0], end[1], context="stitch pad-to-via stub")
         seg = segment_node(
-            start_x=trace.pad.x,
-            start_y=trace.pad.y,
-            end_x=trace.via_x,
-            end_y=trace.via_y,
+            start_x=start[0],
+            start_y=start[1],
+            end_x=end[0],
+            end_y=end[1],
             width=trace.width,
             layer=trace.layer,
             net=trace.pad.net_number,
             uuid_str=_stitch_uuid(
                 "seg",
-                (trace.pad.x, trace.pad.y),
-                (trace.via_x, trace.via_y),
+                start,
+                end,
                 trace.width,
                 trace.layer,
                 trace.pad.net_number,
@@ -3808,25 +3849,8 @@ def trace_to_track_segments(trace: TraceSegment) -> list[TrackSegment]:
     width = trace.width
     layer = trace.layer
 
-    # Build the ordered path of points the trace passes through.
-    if trace.is_extended_escape:
-        points: list[tuple[float, float]] = [(trace.pad.x, trace.pad.y)]
-        points.extend(trace.waypoints or [])
-        points.append((trace.via_x, trace.via_y))
-    elif trace.is_dogleg:
-        # ``is_dogleg`` is True iff both intermediate coords are set (see
-        # ``TraceSegment.is_dogleg``), so these locals are never None on this
-        # branch.  Bind + assert so mypy narrows ``float | None`` to ``float``.
-        ix = trace.intermediate_x
-        iy = trace.intermediate_y
-        assert ix is not None and iy is not None  # guaranteed by is_dogleg
-        points = [
-            (trace.pad.x, trace.pad.y),
-            (ix, iy),
-            (trace.via_x, trace.via_y),
-        ]
-    else:
-        points = [(trace.pad.x, trace.pad.y), (trace.via_x, trace.via_y)]
+    # Issue #6823: the exact legs :func:`add_trace_to_pcb` writes.
+    points = trace_points(trace)
 
     segments: list[TrackSegment] = []
     for i in range(len(points) - 1):
@@ -5696,6 +5720,22 @@ def _pads_off_the_plane(net: "NetStatus") -> set[str]:
     return off
 
 
+def _split_via_stub(
+    stub: tuple[float, float, tuple[float, float] | None] | None,
+) -> tuple[tuple[float, float] | None, tuple[float, float, float, float] | None]:
+    """Split a :func:`calculate_via_stub` result into ``(via_pos, dogleg_pos)``.
+
+    Issue #6823: a stub with a corner becomes a dog-leg placement
+    ``(via_x, via_y, corner_x, corner_y)``; a straight one a ``via_pos``.
+    """
+    if stub is None:
+        return None, None
+    via_x, via_y, corner = stub
+    if corner is None:
+        return (via_x, via_y), None
+    return None, (via_x, via_y, corner[0], corner[1])
+
+
 def run_stitch(
     pcb_path: Path,
     net_names: list[str],
@@ -6035,7 +6075,7 @@ def run_stitch(
 
         # Calculate via position with clearance checking against all copper,
         # including the connecting trace path from pad to via
-        via_pos = calculate_via_position(
+        via_stub = calculate_via_stub(
             pad,
             offset=offset,
             via_size=via_size,
@@ -6062,8 +6102,12 @@ def run_stitch(
         # Track if we're using dog-leg or extended escape routing
         dogleg_pos: tuple[float, float, float, float] | None = None
         extended_pos: tuple[float, float, list[tuple[float, float]]] | None = None
+        # Issue #6823: an off-45 site is reached through a dogleg corner;
+        # carry it as a dog-leg placement so the written legs are the
+        # checked legs.
+        via_pos, dogleg_pos = _split_via_stub(via_stub)
 
-        if via_pos is None:
+        if via_pos is None and dogleg_pos is None:
             # Straight-line failed - try dog-leg (L-shaped) routing
             # This is especially useful for fine-pitch components like SSOP
             # where adjacent pads on different nets block straight-line escape
@@ -6115,7 +6159,7 @@ def run_stitch(
                     # All standard-size strategies failed.
                     # If micro-via is enabled, retry with smaller via size.
                     if micro_via:
-                        micro_pos = calculate_via_position(
+                        micro_stub = calculate_via_stub(
                             pad,
                             offset=offset,
                             via_size=micro_via_size,
@@ -6134,6 +6178,9 @@ def run_stitch(
                             same_net_fill_layer=terminus_layer,
                             other_net_track_index=eff_track_index,
                         )
+                        micro_pos, micro_corner_pos = _split_via_stub(micro_stub)
+                        if micro_corner_pos is not None:
+                            return (None, micro_corner_pos, None, True)
                         if micro_pos is None:
                             # Also try dogleg with micro-via size
                             micro_dogleg = calculate_dogleg_via_position(
