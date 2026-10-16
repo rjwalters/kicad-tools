@@ -82,6 +82,7 @@
 #   stale                  Idle >= threshold with no claimant activity -> reclaim.
 #   stale-bounded-fallback Stand-down streak >= cap AND claim age >= threshold
 #                          -> force-reclaim (livelock breaker).
+#   (Either stale state becomes `fresh` while the role's PR lease is live: #11947.)
 #   unknown                Timeline unavailable/unparseable -> FAIL SAFE, treat
 #                          exactly like `fresh`. Never stomp a claim on missing
 #                          data.
@@ -104,8 +105,8 @@ ACTIVITY_PREFIX="<!-- loom:claim-activity claim="
 
 _usage() {
     # Keep this range in sync with the header comment block above
-    # (currently lines 50-96: "Usage:" through the gh-cached caveat).
-    sed -n '50,96p' "$0" | sed 's/^# \{0,1\}//'
+    # (currently lines 50-97: "Usage:" through the gh-cached caveat).
+    sed -n '50,97p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 _die() {
@@ -341,6 +342,15 @@ if [[ -z "$CLAIM_STATE" ]]; then
         CLAIM_STATE="stale"
     else
         CLAIM_STATE="fresh"
+    fi
+
+    # #11947: a live PR lease outranks the idle/streak clocks (a holder waiting on CI
+    # renews it without activity markers). Only held-self/held-peer downgrades.
+    case "$LABEL" in loom:reviewing) LEASE_ROLE=judge ;; loom:treating) LEASE_ROLE=doctor ;; loom:curating) LEASE_ROLE=curator ;; *) LEASE_ROLE="" ;; esac
+    if [[ "$CLAIM_STATE" == stale* && -n "$LEASE_ROLE" ]]; then
+        # requires-daemon: lease optional   Without `lease pr check` (absent or older binary) the output has no PR_LEASE_STATE and the computed state stands.
+        LEASE_OUT="$("${LOOM_DAEMON_BIN:-loom-daemon}" lease pr check "$NUMBER" --role "$LEASE_ROLE" 2>/dev/null || true)"
+        grep -Eq '^PR_LEASE_STATE=held-(self|peer)([[:space:]]|$)' <<<"$LEASE_OUT" && CLAIM_STATE="fresh"
     fi
 fi
 

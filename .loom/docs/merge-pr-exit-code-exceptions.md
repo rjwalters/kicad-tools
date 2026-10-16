@@ -243,9 +243,10 @@ Accepted edge: a `queue` setting (env or config) on a host whose binary has no
 `merge-queue` verb still merges directly. That binary has no queue protocol to
 bypass. It cannot hand off, authorize, or reconcile, so a direct merge is the
 only thing it can do, and it is the merge this host performed before B3. Queue
-execution is also compile-time dormant in every build
-(`QUEUE_EXECUTION_ENABLED=false`). Before enabling it, set a fleet `loom-daemon`
-version floor that includes `step`, and then this row can become a stall.
+execution is compiled on (`QUEUE_EXECUTION_ENABLED=true`, #12323) but only a repo
+that sets `champion.mergeMode=queue` reaches it. Before opting a repo in, set a
+fleet `loom-daemon` version floor that includes `step`, and then this row can
+become a stall.
 
 Regression: `defaults/scripts/tests/test-champion-merge-queue-step-no-fallthrough.sh`
 extracts the shipped Step 3 fence and runs every row above against stubs.

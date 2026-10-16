@@ -816,6 +816,9 @@ pr_state=$(gh pr view "$pr_number" --json state,mergedAt --jq '.state')
   blocked**, regardless of its labels (`has_superseding_block`, #7267) — a PR
   in that state cannot currently land no matter what
 - If issue was blocked for non-dependency reasons → Check comments for context
+- **PR-side (#10937)**: a standing Champion hold (`loom-daemon champion-hold
+  classify` → `state=champion-hold`) is a human evidence gate: never unblock it
+  because a recorded `Blocked by` closed
 - **PR-side (#8925)**: `pr_has_superseding_block` true → keep blocked, even if
   every declared blocker closed; a `loom:blocked` that is a policy hold, not a
   dependency wait (an operator/quarantine call) → leave it, do not write a

@@ -4,9 +4,10 @@
 `loom-daemon/src/forge_merge_queue/authz.rs`; fake-forge tests:
 `authz_tests.rs`.
 
-**Status: design and state machine only. Queue execution stays dormant**
-(`QUEUE_EXECUTION_ENABLED = false`, `champion.mergeMode` defaults to `direct`).
-Nothing calls this module yet, and the direct merge path is unchanged.
+**Status: queue execution is compiled on for the Phase C pilot (#12323)**
+(`QUEUE_EXECUTION_ENABLED = true`; `champion.mergeMode` still defaults to
+`direct`, so the direct merge path is unchanged for repos that do not opt in).
+`INVARIANT_FULLY_DEMONSTRATED` stays `false`: the operator accepted that gap on #10257.
 
 ## Problem
 
@@ -142,18 +143,18 @@ a queue-mode PR merged directly, bypassing the authorization protocol.
 
 The grant store is PR comments. That survives a daemon restart, but it is
 not tamper-proof: a trusted author who deletes or edits a revoke comment
-brings the grant back. There is no `merge_group` check workflow, and the B4
-group protocol is not wired (see above). `judge.md` is not wired either:
+brings the grant back. The `merge_group` check workflow is an optional template
+(`defaults/optional/github-workflows/merge-group-check.yml`); the B4
+group protocol is wired through `group-check`. `judge.md` is not wired either:
 review claims and revocations reach the queue through `forge
 disable-auto-merge`, the claim-reconciliation revoke, and the live
 `loom/merge-authorization` check. The post-check-pass window above is
-narrowed by B4 but still open, so `INVARIANT_FULLY_DEMONSTRATED` and
-`QUEUE_EXECUTION_ENABLED` stay `false`. Production enablement also needs
+narrowed by B4 but still open, so `INVARIANT_FULLY_DEMONSTRATED` stays `false`. Production use needs
 Phase C qualification (`merge-queue-ci.md`).
 
 ## Group-aware revocation wiring (Phase B5)
 
-`group_github` adds the GitHub adapters (queue entries via GraphQL `mergeQueue.entries`, group commit = entry `headCommit`, members = entries `1..=k`; commit-status write for `loom/merge-authorization`). `revoke_for_root` and `forge merge-queue revoke` now call `revoke_for_transition_groups`, which revokes, re-fails every live group containing the PR, then dequeues, and reports an unconfirmed re-fail as the residual window in the transition comment. Still not wired: the `merge_group` workflow running `group_check`, a durable GrantStore, `judge.md`. `QUEUE_EXECUTION_ENABLED` and `INVARIANT_FULLY_DEMONSTRATED` stay false.
+`group_github` adds the GitHub adapters (queue entries via GraphQL `mergeQueue.entries`, group commit = entry `headCommit`, members = entries `1..=k`; commit-status write for `loom/merge-authorization`). `revoke_for_root` and `forge merge-queue revoke` now call `revoke_for_transition_groups`, which revokes, re-fails every live group containing the PR, then dequeues, and reports an unconfirmed re-fail as the residual window in the transition comment. Still not wired: a durable GrantStore, `judge.md`. `INVARIANT_FULLY_DEMONSTRATED` stays false.
 
 ## Check runner (Phase B6)
 
@@ -169,9 +170,10 @@ not a live group posts `failure`; a group-discovery outage posts nothing. The
 daemon tick also evaluates every live group (queue mode only) so a group does
 not wait on a workflow; that pass is an accelerator, not the enforcement.
 Run `group-check` from a `merge_group` workflow with `statuses: write`
-(Phase C, `merge-queue-ci.md`; no workflow is installed by this phase).
+(Phase C, `merge-queue-ci.md`). The installable template is
+`defaults/optional/github-workflows/merge-group-check.yml`.
 
-Still open and why the mode stays disabled: the grant store is PR comments
-(not tamper-proof), the post-pass-to-merge window above, and no live pilot has
-confirmed the fake's model of GitHub's group semantics.
-`QUEUE_EXECUTION_ENABLED` and `INVARIANT_FULLY_DEMONSTRATED` stay `false`.
+Still open: the grant store is PR comments (not tamper-proof), the
+post-pass-to-merge window above, and no live pilot has yet confirmed the fake's
+model of GitHub's group semantics (2AMLogic/loom-ui, #10257).
+`INVARIANT_FULLY_DEMONSTRATED` stays `false`.

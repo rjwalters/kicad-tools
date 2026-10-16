@@ -321,6 +321,40 @@ else
     fail "expected the telemetry record call (line ${RECORD_LINE:-?}) after gh pr create (line ${CREATE_LINE:-?})"
 fi
 
+# --- Test: host_id comes from `loom-daemon host-id`, not the hostname (#10023)
+echo ""
+echo "Test: host_id equals loom-daemon host-id, not \$HOSTNAME"
+
+HID_DIR="$(mktemp -d)"
+cat > "$HID_DIR/fake-daemon" <<'STUB'
+#!/usr/bin/env bash
+[[ "${1:-}" == "host-id" ]] && { echo "persisted-host-abc"; exit 0; }
+exit 0
+STUB
+chmod +x "$HID_DIR/fake-daemon"
+RC=0
+(cd "$SANDBOX_REPO" && env -u LOOM_HOST_ID HOSTNAME="some-distinct-hostname" \
+    LOOM_DAEMON_BIN="$HID_DIR/fake-daemon" LOOM_GUIDE_DOCS_TELEMETRY_LOG="$HID_DIR/out.jsonl" \
+    "$TELEMETRY_SH" record --pr 77 >/dev/null 2>&1) || RC=$?
+if [[ "$RC" == "0" && "$(jq -r '.host_id' "$HID_DIR/out.jsonl" 2>/dev/null)" == "persisted-host-abc" ]]; then
+    pass "host_id is the loom-daemon host-id output, not \$HOSTNAME"
+else
+    fail "host_id was '$(jq -r '.host_id' "$HID_DIR/out.jsonl" 2>/dev/null)' (rc=$RC), expected persisted-host-abc"
+fi
+
+printf '#!/usr/bin/env bash\nexit 1\n' > "$HID_DIR/failing-daemon"
+chmod +x "$HID_DIR/failing-daemon"
+rm -f "$HID_DIR/out.jsonl"
+(cd "$SANDBOX_REPO" && env -u LOOM_HOST_ID HOSTNAME="some-distinct-hostname" \
+    LOOM_DAEMON_BIN="$HID_DIR/failing-daemon" LOOM_GUIDE_DOCS_TELEMETRY_LOG="$HID_DIR/out.jsonl" \
+    "$TELEMETRY_SH" record --pr 77 >/dev/null 2>&1) || true
+if [[ "$(jq -r '.host_id' "$HID_DIR/out.jsonl" 2>/dev/null)" == "unknown-host" ]]; then
+    pass "a failing host-id yields the unknown-host literal, not the hostname"
+else
+    fail "failing host-id produced '$(jq -r '.host_id' "$HID_DIR/out.jsonl" 2>/dev/null)', expected unknown-host"
+fi
+rm -rf "$HID_DIR"
+
 # ---------------------------------------------------------------------------
 echo ""
 echo "================================"

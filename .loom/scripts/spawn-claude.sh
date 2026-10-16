@@ -633,9 +633,11 @@ fi
 # registry — the SAME "sweeps survive by design" property launchd already
 # gives bare-metal sweeps today (see daemon-reference.md), now extended to
 # systemd too, via the container boundary instead of process reparenting.
-# `loom-daemon restart --drain` remains the recommended path on both
-# supervisors — it waits for in-flight sweeps (containerized or not) to
-# finish before the daemon exits, so the orphan case above is a hard-stop
+# `loom-daemon restart --drain` (relaunch) and `restart --pause --then-exit`
+# (host maintenance, #11812) remain the recommended paths on both
+# supervisors — the first waits for in-flight sweeps (containerized or not)
+# to finish before the daemon exits, the second pauses them for the next
+# start's H5 to resume — so the orphan case above is a hard-stop
 # fallback, not the common path. Reconciling a still-running orphaned
 # container after a daemon restart (`SweepRegistry::reconstruct`'s
 # container-recognition extension) remains a real, named Phase 3 obligation

@@ -472,7 +472,15 @@ else
   for token in approved changes-requested; do
     reset_state
     run_pv 200 "$token" 0123456789abcdef0123456789abcdef01234567 --body "cross-check"
-    GUARD_REGEX="${GUARD_MARKER_TEMPLATE//\$VERDICT_TOKEN/$token}"
+    # The guard's reader accepts aliases ($VERDICT_ALT); mirror its mapping so
+    # the canonical writer output is checked against the alias-tolerant reader.
+    case "$token" in
+      approved) token_alt='approved|approve' ;;
+      changes-requested) token_alt='changes-requested|request-changes' ;;
+      *) token_alt="$token" ;;
+    esac
+    GUARD_REGEX="${GUARD_MARKER_TEMPLATE//\$VERDICT_ALT/$token_alt}"
+    GUARD_REGEX="${GUARD_REGEX//\$VERDICT_TOKEN/$token}"
     # -E (POSIX extended), not -P: the guard's own regex uses only portable
     # ERE syntax ([0-9a-f]{7,40}), and BSD grep (macOS) has no -P at all.
     if printf '%s' "$LAST_BODY" | grep -Eq -- "$GUARD_REGEX"; then

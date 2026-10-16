@@ -233,6 +233,27 @@ _POWER_RAIL_DOT_DECIMAL_RE = re.compile(r"^([+\-])(\d+)\.(\d+)V$")
 _POWER_RAIL_WHOLE_RE = re.compile(r"^([+\-])(\d+)V$")
 
 
+def iter_copper_pads(pcb: PCB) -> Iterator[tuple[Footprint, Pad]]:
+    """Yield ``(footprint, pad)`` for every pad that can carry a net.
+
+    Non-plated holes (``np_thru_hole``) have no copper and never sit on a
+    net, so they are skipped.  Shared by ``kct validate --sync`` and
+    ``kct fleet status`` so both read pad nets through the schema parser,
+    which understands the numbered ``(net N "name")`` and the KiCad 10
+    name-only ``(net "name")`` dialects alike (issue #6815).
+    """
+    for fp in pcb.footprints:
+        for pad in fp.pads:
+            if pad.type == "np_thru_hole":
+                continue
+            yield fp, pad
+
+
+def pad_net_names(pcb: PCB) -> set[str]:
+    """Return the set of non-empty net names attached to copper pads."""
+    return {pad.net_name for _fp, pad in iter_copper_pads(pcb) if pad.net_name}
+
+
 def canonicalize_power_net(name: str) -> str:
     """Return the canonical form of a power-rail net name.
 

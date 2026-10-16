@@ -287,6 +287,68 @@ from the board's `build_net_class_map()`. The match-group gate
 in-pipeline DRC while leaving the standalone `kct check` no-op contract
 unchanged.
 
+## CLI: Routing Policies (`routing_policy`)
+
+Issue #6044.  The `routing_policy` category holds a net to the routing limits
+its own net-class-map entry declares.  It reads the same sidecar as the
+diff-pair and match-group rules (auto-discovered or `--net-class-map`); there
+is no separate policy file.  Two `NetClassRouting` fields are policies, for
+single-ended nets as well as pair members:
+
+| Field | Unit | Enforced as |
+|-------|------|-------------|
+| `max_vias_per_net` | integer count | the net's via count must not exceed it |
+| `length_constraint.max_length` | mm | the net's total routed length must not exceed it (+1e-6 mm slack) |
+
+```json
+{
+  "/CLK": {"name": "Clock", "length_critical": true, "max_vias_per_net": 2},
+  "/FB": {
+    "name": "Analog",
+    "noise_sensitive": true,
+    "length_constraint": {"net_id": 0, "max_length": 25.0}
+  }
+}
+```
+
+- **Membership is the map key.**  Each entry is one net, keyed by net name and
+  resolved onto board names the same way as ampacity targets, so a net can
+  never match two policies.  Reports name the entry's class `name` as the
+  group.  `length_constraint` still requires its `net_id` field to load, but
+  `routing_policy` ignores the value: the key identifies the net.
+- **Vias:** every via on the net counts (through, blind/buried, micro).  A
+  KiCad via carries one net, so a via is never charged to two nets.
+- **Length:** the total routed copper of the net as
+  `kicad_tools.router.kicad_length.measure_pcb_net` reports it (the measure the
+  skew checks and tuners use), with every branch of a multi-pin net summed.
+  This is **total** length, not pin-to-pin length.
+- **Track arcs:** that measure reads straight segments only.  A net with a
+  length limit and any track arc gets a `warning`, "length unmeasured (track
+  arcs)", instead of a pass.
+- **Diff pairs:** a pair net whose pair limits carry a via cap is already held
+  to it by `diffpair_uncoupled_length`, so `routing_policy` does not report its
+  vias a second time (unless that category is deselected with `--only`/`--skip`).
+- **Severity:** a limit violation is an `error`.  A malformed value (negative,
+  fractional or non-numeric `max_vias_per_net`; zero, negative or non-numeric
+  `max_length`) is an `error` naming the net, never a crash.  Findings set
+  `items` and `nets` to the net, so a `.kct_waivers.json` entry
+  (`"rule": "routing_policy", "items": ["/CLK"]`) waives one.
+- **Never a silent pass:** a policy whose key matches no board net, or whose
+  net has no copper, or whose category is deselected, prints a stderr warning,
+  as undeclared ampacity targets do.
+
+Limits apply only where an entry declares them, so a map without these fields
+changes nothing.
+
+**Requiring a policy (opt-in).**  `kct check --require-routing-policy` also
+fails every *sensitive* class — an entry with `length_critical`,
+`noise_sensitive`, `length_match_group` or `diffpair_partner` set, and with
+routed copper — that declares neither field.  Pour nets (`is_pour_net`) are
+exempt.  One `error` is reported per class `name`, listing its nets.  The flag
+needs a net-class map: without one (or with `--no-net-class-map`, or with
+`routing_policy` deselected) the command exits 1 with a usage error rather
+than passing.
+
 ## CLI: Waivers, Revision Diffs and Coverage (Issue #5946)
 
 ### Evidence-bound waivers

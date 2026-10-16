@@ -91,6 +91,7 @@ __all__ = [
     "MeshOutline",
     "MeshPad",
     "MeshRegion",
+    "clears_cut",
     "copper_leg",
     "leg",
     "leg_clears",
@@ -309,6 +310,19 @@ def outline_of(outline: Sequence[Pt]) -> MeshOutline | None:
 # ---------------------------------------------------------------------------
 # Predicates
 # ---------------------------------------------------------------------------
+
+
+def clears_cut(copper: KSegment, cut: MeshOutline, required_mm: float) -> bool:
+    """True when ``copper`` keeps ``required_mm`` from an interior ``Edge.Cuts`` loop.
+
+    Issue #6822.  Unlike :meth:`MeshOutline.clears_edge` there is no
+    short-circuit for a non-positive requirement: copper across a routed cut
+    (a board window, cutout or round hole) is never valid output, so even a
+    ``0.0`` requirement is measured -- the exact-geometry form of the grid's
+    #6043 physical floor, and the same ``gap >= margin`` comparison the lattice
+    engine's ``EscapeBoundary`` makes.
+    """
+    return copper_gap(copper, cut.edge) >= required_mm - MESH_CLEARANCE_EPSILON_MM
 
 
 def leg_touches(candidate: KSegment, region: MeshRegion) -> bool:

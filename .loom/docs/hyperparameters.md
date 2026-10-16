@@ -23,9 +23,8 @@ host config → repo config — see `config_resolver.rs`).
       "tickIntervalSecs": 60,
       "maxConcurrent": 3,
       "maxAdmissionsPerTick": 3,
-      "weightBonusRedMainFix": 400,
-      "weightBonusVeryImportant": 100,
-      "weightBonusImportant": 20
+      "backlogExponent": 0,
+      "busyExponent": 0
     },
     "lifecycle": {
       "leaseTtlMinutes": 15,
@@ -47,17 +46,15 @@ below. Types/ranges are strict **on this surface** (see Validation).
 | Group | Key | Default | Range | Governs | Legacy home | Single-knob env |
 |---|---|---|---|---|---|---|
 | `dispatch` | `tickIntervalSecs` | 60 | 5–3600 | Work-finder tick cadence | `autonomous.workFinder.intervalSecs` | `LOOM_WORK_FINDER_INTERVAL_SECS` |
-| `dispatch` | `maxConcurrent` | 3 | 1–256 | Sweep concurrency ceiling (dynamic cap stays bounded by disk/RAM) | `autonomous.workFinder.maxConcurrent` | `LOOM_WORK_FINDER_MAX_CONCURRENT` |
+| `dispatch` | `maxConcurrent` | 3 | 1–256 | Sweep concurrency ceiling (dynamic cap stays bounded by disk headroom) | `autonomous.workFinder.maxConcurrent` | `LOOM_WORK_FINDER_MAX_CONCURRENT` |
 | `dispatch` | `maxAdmissionsPerTick` | 3 | 1–64 | Ramp cap: new sweeps admitted per tick (#4234) | `autonomous.workFinder.maxAdmissionsPerTick` | `LOOM_WORK_FINDER_MAX_ADMISSIONS_PER_TICK` |
-| `dispatch` | `weightBonusRedMainFix` | 400 | 0–1000000 (integer) | Points added to a repo's draw `weight` while it holds a verified red-main fix (#11742; [`priority-model.md`](priority-model.md)). Re-read every tick (hot-applies) | — | — |
-| `dispatch` | `weightBonusVeryImportant` | 100 | 0–1000000 (integer) | Points added while the repo has dispatchable `loom:very-important` work (#11742). Hot-applies | — | — |
-| `dispatch` | `weightBonusImportant` | 20 | 0–1000000 (integer) | Points added while the repo has dispatchable `loom:important` work (#11742). Hot-applies | — | — |
 | `dispatch` | `itemWeightRedMain` | 50 | 1–1000000 (integer) | Step engine item draw (#11896): priority factor of a red-main fix in `weight = actionable × priority × age`. Read per tick by the draw (`step_dispatch/item_draw.rs`) | — | — |
 | `dispatch` | `itemWeightVeryImportant` | 8 | 1–1000000 (integer) | Item-draw priority factor of `loom:very-important`, after the very-important cap (#11896) | — | — |
 | `dispatch` | `itemWeightImportant` | 3 | 1–1000000 (integer) | Item-draw priority factor of `loom:important` (#11896) | — | — |
 | `dispatch` | `itemAgeCapDays` | 90 | 0–3650 (integer) | Most stage-age days the item-draw age term `1 + min(age, cap) / divisor` counts (#11896; 0 turns the term off) | — | — |
 | `dispatch` | `itemAgeDivisorDays` | 30 | 1–3650 (integer) | Divisor of the item-draw age term (#11896) | — | — |
-
+| `dispatch` | `backlogExponent` | 0 | 0–1 (float) | Item draw α (#12185): 0 keeps a repo's share fixed whatever its backlog, 1 makes the pool flat. See [The item draw](#the-item-draw-12185). Hot-applies | — | — |
+| `dispatch` | `busyExponent` | 0 | 0–100 (float) | Item draw β (#12185): a repo's weight is divided by `(1 + in_flight_repo)^β`; 0 is off. Hot-applies | — | — |
 | `lifecycle` | `leaseTtlMinutes` | 15.0 | >0–1440 | Lease-freshness TTL (#6286) | — | `LOOM_LEASE_TTL_MINUTES` |
 | `lifecycle` | `idleExitMinutes` | 60 | 1–10080 | Idle-exit turnaround (#4467) | `autonomous.idleExit.idleMinutes` | `LOOM_AUTONOMOUS_IDLE_EXIT_MINUTES` |
 | `rework` | `buildBackoffHigh` | 40 | 1–100000 | Per-repo PR-debt level that engages a repo's build back-off (#9410, #10624) | `autonomous.workFinder.buildBackoff.high` | — |
@@ -68,7 +65,76 @@ below. Types/ranges are strict **on this surface** (see Validation).
 | `champion` | `tier3Cap` | 1 | 0–100 | Unused since #11512; parsed for config compatibility (old Tier 3 per-pass cap) | — | `LOOM_CHAMPION_TIER3_CAP` |
 | `champion` | `tier3BacklogCap` | 5 | 0–1000 | Unused since #11512; parsed for config compatibility (old Tier 3 backlog gate) | — | `LOOM_CHAMPION_TIER3_BACKLOG_CAP` |
 
-`dispatch.drawTemperature` (the #11684 softmax temperature) is retired by #11742: it is still accepted so an existing config keeps starting, and ignored.
+**Retired draw keys** (accepted, ignored, never a startup error; `loom-daemon hyperparams --validate` and the daemon's startup log warn once per key):
+`dispatch.drawTemperature` (the #11684 softmax temperature, retired by #11742)
+and `dispatch.weightBonusRedMainFix` / `weightBonusVeryImportant` /
+`weightBonusImportant` (the repo-level points, retired by #12185: the step tick
+draws one item from one pool, so a repo no longer earns points for holding
+urgent work; the item priority factors below do that job per item). Their
+values are not range-checked, do not enter the digest and no longer change any
+draw. Delete them from the config.
+
+## The item draw (#12185)
+
+The step tick draws **one item** from a single pool of every actionable item
+across the host's repos (`step_dispatch/item_draw.rs`; design
+[`work-finder-step-dispatch.md`](https://github.com/rjwalters/loom/blob/main/docs/design/work-finder-step-dispatch.md)
+§1 ruling 1, §4.2). There is no separate repo draw. An item's weight is
+
+```
+w_item = w_repo × priority × age × S_r^(α−1) × (1 + in_flight_repo)^(−β)
+```
+
+and the draw picks an item with probability `w_item / Σ w_item` over the pool
+(without replacement within the tick, so `S_r` and the counts are recomputed
+for the items still in the pool at each draw). These are the draw's knobs,
+exactly, and what raising each one does:
+
+| Term | Knob | Home | Raising it |
+|---|---|---|---|
+| `w_repo` | the repo's base weight (default 1; 0 = never drawn) | the fleet roster (`workspaces.json`, set from the fleet store, #11103). **Not** in the hyperparameter block: it is per repo, not per host | draws more from that repo, in proportion |
+| `α` | `dispatch.backlogExponent` (0–1, float, default 0) | hyperparameters | moves the pool from "a repo's share is its `w_repo`, split among its items" (0) toward "every item is as likely as any other, scaled by `w_repo`, so a repo's share grows with its backlog" (1). Spreads draws over more distinct items, which cuts claim collisions on small repos |
+| `priority`, red main | `dispatch.itemWeightRedMain` (1–1000000, default 50) | hyperparameters | draws a verified red-main fix more |
+| `priority`, `loom:very-important` | `dispatch.itemWeightVeryImportant` (default 8) | hyperparameters | draws it more (after the one-per-repo very-important cap) |
+| `priority`, `loom:important` | `dispatch.itemWeightImportant` (default 3) | hyperparameters | draws it more |
+| `age` | `dispatch.itemAgeCapDays` (0–3650, default 90), `dispatch.itemAgeDivisorDays` (1–3650, default 30) | hyperparameters | `age = 1 + min(stage_age_days, cap) / divisor`: a longer cap or a smaller divisor favours old items more; a cap of 0 turns age off |
+| `in_flight_repo`, `β` | `dispatch.busyExponent` (0–100, float, default 0) | hyperparameters | draws a repo less the more of its items are being worked on right now. 0 is off |
+
+`priority` is one factor, not a product: a red-main fix that is also
+very-important weighs the red-main factor. `S_r` is the sum of `priority × age`
+over the repo's items still in the pool. `n_items` (the repo's pooled item
+count) is not a term; it is recorded beside each draw for plotting.
+
+Reading the formula at its ends:
+
+- **α = 0, β = 0** (the defaults) gives `w_repo × priority × age / S_r`: the
+  distribution of the earlier two-stage draw with its repo-level bonuses at 0.
+  A repo's share is `w_repo / Σ w_repo` however many items it holds.
+- **α = 1, β = 0** gives `w_repo × priority × age`: a flat pool.
+
+`in_flight_repo` counts the repo's items this host runs plus the live claims
+peers advertise over the peer-claim view, read at the start of the tick and
+not updated as the tick spawns. It is as fleet-wide as the peers' claim
+adverts reach; a peer that does not advertise is not counted.
+
+**Knobs live in fleet-gitops.** Set the six hyperparameter keys in
+`fleet/defaults.json` or a host overlay like any other `hyperparameters` key
+(they are in the strict validated block, enter `loom.hyperparams.digest`, and
+are re-read every tick, so a fleet-gitops merge applies without a restart).
+`dispatch.backlogExponent` must be in `[0, 1]` and `dispatch.busyExponent`
+in `[0, 100]`; `--validate` rejects a value outside, a non-number, or an
+unknown `dispatch` key. The exponents are read from the primary workspace's
+layer, since the pool is host-wide; the item weights are read per repo.
+
+**Replay.** The draw stays seeded (`loom-draw/v3`, per draw, no workspace in
+the seed). `pick.decision`'s `item_draw` records both exponents, each repo's
+`w_repo`, `in_flight` and `n_items`, the starting pool with every item's
+`priority × age`, the repos a per-repo cap closed mid-tick, and every roll,
+so a tick's picks replay from the record. `loom.dispatch.step` carries the
+drawn item's draw weight, the pool total at that draw, and its repo's
+`n_items` and `in_flight_repo` (`loom.step.weight`, `loom.step.total_weight`,
+`loom.step.repo_items`, `loom.step.in_flight_repo`); `weight / total_weight`
+is the item's selection probability.
 
 The `champion` values enter the run digest. Champion's shell snippets read
 the `LOOM_CHAMPION_*` env vars directly, so the resolver honours them at the
@@ -120,8 +186,8 @@ loop can tune a whole run with one env export.
 
 Notes:
 
-- Tranche-1 fields **hot-apply** (#9768): `maxConcurrent`, the weight
-  bonuses, idle exit, and the backoff pair re-read config every tick,
+- Tranche-1 fields **hot-apply** (#9768): `maxConcurrent`, the item-draw
+  knobs (#12185), idle exit, and the backoff pair re-read config every tick,
   `maxAdmissionsPerTick` does too since #12090, and the lease TTL re-resolves
   from the layer on every lease check — a committed-block edit lands without
   a daemon restart. The exception is `dispatch.tickIntervalSecs`, which still
@@ -229,7 +295,7 @@ cover it.
 | Value | Meaning |
 |---|---|
 | `direct` (default) | `merge-pr.sh` merges the approved PR itself. This is today's behaviour. |
-| `queue` | Put the approved head on the forge's merge queue. This is dormant; see below. |
+| `queue` | Put the approved head on the forge's merge queue. Opt-in; see below. |
 
 Precedence is `$LOOM_MERGE_MODE` (an empty value counts as unset), then the
 tier-merged config (`config_resolver.rs`, with `.loom-local` above
@@ -259,11 +325,11 @@ like a token.
 Exit codes are 0 for ok, 1 for failed or not capable, 2 for an invalid config,
 3 for could-not-determine, and 4 for a refusal before any forge call.
 
-**Dormant.** Queue execution is compiled off (`QUEUE_EXECUTION_ENABLED = false`).
-Under `direct`, `enqueue` and `dequeue` refuse with `NOT_QUEUE_MODE` before any
-forge call. Under `queue`, they refuse with `EXECUTION_DORMANT` until #9978's
-later phases install the lifecycle safety contract and the required
-merge-group checks. No role or script invokes these verbs yet.
+**Opt-in.** Queue execution is compiled on (`QUEUE_EXECUTION_ENABLED = true`,
+#12323). Under `direct` (the default), `enqueue` and `dequeue` refuse with
+`NOT_QUEUE_MODE` before any forge call. Under `queue`, they reach the forge;
+the repo also needs the `merge_group` check workflow
+(`defaults/optional/github-workflows/merge-group-check.yml`).
 
 ## Tranche roadmap
 

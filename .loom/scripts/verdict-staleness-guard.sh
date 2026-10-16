@@ -19,9 +19,11 @@
 #
 # (the same HTML-comment marker convention as `<!-- loom:standdown claim=... -->`
 # and `<!-- loom:fallback-evaluated sha=... -->`), so the verdict records which
-# tree it covers. This script compares that recorded SHA against the PR's
-# CURRENT head SHA and reports FRESH / STALE, optionally performing the
-# clear+re-queue transition itself.
+# tree it covers. `approved` / `changes-requested` are the canonical spellings
+# writers emit; readers also tolerate `approve` / `request-changes`. This
+# script compares that recorded SHA against the PR's CURRENT head SHA and
+# reports FRESH / STALE, optionally performing the clear+re-queue transition
+# itself.
 #
 # Decision, in priority order (first match wins):
 #   1. NOT_OPEN     — the PR is no longer open (merged, or closed unmerged).
@@ -500,8 +502,15 @@ COMMENTS_JSON="$("${LOOM_DAEMON_BIN:-loom-daemon}" forge trusted-comments <<<"$C
 # body is filtered out via `select` rather than raising a per-item jq error.
 # A short (abbreviated) SHA is accepted defensively but never emitted by the
 # roles, which always stamp the full `headRefOid`.
-MARKER_TEST="<!-- loom:verdict-sha sha=[0-9a-f]{7,40} verdict=$VERDICT_TOKEN -->"
-MARKER_CAPTURE="<!-- loom:verdict-sha sha=(?<sha>[0-9a-f]{7,40}) verdict=$VERDICT_TOKEN -->"
+# Readers are lenient about the verdict spelling (a hand-posted or in-session
+# marker may say `approve` / `request-changes`); writers stay canonical.
+case "$VERDICT_TOKEN" in
+  approved) VERDICT_ALT='approved|approve' ;;
+  changes-requested) VERDICT_ALT='changes-requested|request-changes' ;;
+  *) VERDICT_ALT="$VERDICT_TOKEN" ;;
+esac
+MARKER_TEST="<!-- loom:verdict-sha sha=[0-9a-f]{7,40} verdict=($VERDICT_ALT) -->"
+MARKER_CAPTURE="<!-- loom:verdict-sha sha=(?<sha>[0-9a-f]{7,40}) verdict=($VERDICT_ALT) -->"
 MARKER_LINES="$(jq -r --arg t "$MARKER_TEST" --arg c "$MARKER_CAPTURE" '
   .[]
   | select(.body != null and (.body | test($t)))
