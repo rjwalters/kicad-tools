@@ -29,7 +29,8 @@ exit codes:
      (issue #5510-1c, after the plan stage, before any detailed
      routing); --force overrides the latter
   10 UNVERIFIED -- would have been 0, but the post-route DRC and/or
-     stranded-pour check was skipped because --timeout ran out
-     (issue #6273); the board is saved, run 'kct check' on it.
+     stranded-pour check did not complete (--timeout ran out, or
+     kicad-cli crashed/was killed/timed out, issues #6273, #6724);
+     the board is saved, run 'kct check' on it.
      JSON summary.verdict is "unverified"
 """

@@ -166,8 +166,9 @@ to the minimal `{"exit_code", "verdict"}` document, and a run killed by
 
 `summary.verdict` is `"success"` (exit 0), `"unverified"` (exit 10) or
 `"failed"` (any other non-zero exit). `"unverified"` means the post-route DRC
-and/or the stranded-pour check was skipped because `--timeout` ran out: the
-board is saved but not verified, so run `kct check` on it before
+and/or the stranded-pour check did not complete: `--timeout` ran out, or
+kicad-cli crashed, was killed or hit its per-call DRC timeout (Issue #6724).
+The board is saved but not verified, so run `kct check` on it before
 manufacturing. It only ever replaces a would-be exit 0 (Issue #6273; see the
 [`kct route` exit-code ladder](cli.md#kct-route-ladder)).
 

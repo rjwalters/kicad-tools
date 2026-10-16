@@ -23790,8 +23790,9 @@ def _run_main_impl(args, parser, argv) -> int:
     #     not the router.
     # 10 = UNVERIFIED (EXIT_UNVERIFIED, issue #6273): everything that would
     #     have returned 0, except that the post-route DRC and/or the #5785
-    #     stranded-pour check was skipped because the hard --timeout could
-    #     not cover it.  The board is saved; run ``kct check`` on it.  Only
+    #     stranded-pour check did not complete (the hard --timeout ran out,
+    #     or kicad-cli crashed/was killed/timed out, issue #6724).  The
+    #     board is saved; run ``kct check`` on it.  Only
     #     ever replaces 0 -- a known failure keeps its own code.  JSON
     #     ``summary.verdict`` is ``"unverified"``.
     #

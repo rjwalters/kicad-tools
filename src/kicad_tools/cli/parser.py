@@ -3638,9 +3638,9 @@ def _add_route_parser(subparsers) -> None:
         help="Autoroute a PCB",
         epilog=(
             ROUTE_EXIT_CODES_EPILOG
-            + "\nPERFORMANCE: The C++ backend provides 10-100x faster routing. "
-            "Check status with 'kct build-native --check' and build with "
-            "'kct build-native'. The --backend flag defaults to 'auto' which "
+            + "\nPERFORMANCE: The C++ backend provides 10-100x faster routing.\n"
+            "Check status with 'kct build-native --check' and build with\n"
+            "'kct build-native'. The --backend flag defaults to 'auto' which\n"
             "uses C++ when available and falls back to Python otherwise."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
