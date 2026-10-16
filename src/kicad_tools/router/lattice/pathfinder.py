@@ -136,6 +136,10 @@ _MAX_PAD_GROWTH_ROUNDS = 2
 _GUIDE_NEAR_PITCHES = 2.0
 _GUIDE_CAP_MM = 2.0
 _GUIDE_WEIGHT = 1.0
+# Issue #6824: extra cost per mm of planar copper on a layer outside the net
+# class's ``preferred_layers`` (1.0 => non-preferred copper costs 2x, the
+# grid pathfinder's 0.5x preferred discount as an admissible surcharge).
+_NON_PREFERRED_LAYER_SURCHARGE = 1.0
 
 
 # Issue #6703: at most this many fallback pairs per flush get the partner-aware
@@ -817,6 +821,25 @@ class LatticePathfinder:
         authored = self.rules.authored_floor(net) if net is not None else 0.0
         return tw / 2.0, max(
             clr, self.rules.trace_clearance, authored, self._search_clearance_floor
+        )
+
+    def _preferred_layers(self, net_class: object | None) -> frozenset[int]:
+        """Grid-layer indices this net's class prefers (Issue #6824).
+
+        Soft counterpart of :meth:`_hard_avoided_layers`: the class's
+        ``preferred_layers`` restricted to layers that exist on this stack and
+        are not hard-blocked for the net (a preference for an unreachable
+        layer can never be honoured, so it is dropped rather than penalising
+        every reachable layer).  Empty when the class declares none.
+        """
+        raw = getattr(net_class, "preferred_layers", None)
+        if not raw:
+            return frozenset()
+        blocked = self._hard_avoided_layers(net_class)
+        return frozenset(
+            int(i)
+            for i in raw
+            if isinstance(i, int) and 0 <= i < self.num_layers and i not in blocked
         )
 
     def _hard_avoided_layers(self, net_class: object | None) -> frozenset[int]:
@@ -1843,6 +1866,14 @@ class LatticePathfinder:
         # its annulus is real copper on a forbidden layer.
         hard_avoided = self._hard_avoided_layers(net_class)
 
+        # Issue #6824: ``NetClassRouting.preferred_layers`` as a SOFT bias.
+        # Planar copper laid on a layer outside the preferred set pays an
+        # extra ``elen * _NON_PREFERRED_LAYER_SURCHARGE`` (the grid
+        # pathfinder's 0.5x preferred discount expressed as a surcharge, so
+        # the Euclidean heuristic stays admissible).  Empty set -> no
+        # preference -> byte-identical to the pre-#6824 search.
+        preferred_layers = self._preferred_layers(net_class)
+
         fat = extra_clearance > 0.0 or partner_net is not None
         # Issue #4602: per-PAIR HV pad keep-outs for the non-fat search (the
         # fat coupled path is excluded from pairwise widening in this slice).
@@ -2107,6 +2138,8 @@ class LatticePathfinder:
                 if not nok:
                     continue
                 step = elen + present * history.get(("e", edge, layer), 0.0)
+                if preferred_layers and layer not in preferred_layers:
+                    step += elen * _NON_PREFERRED_LAYER_SURCHARGE
                 step += copper_cost(lattice.node_point(key), lattice.node_point(nbr), layer, body_w)
                 if guide is not None:
                     # Issue #6703: soft pull toward the partner leg's corridor.
