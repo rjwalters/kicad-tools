@@ -20,9 +20,61 @@ if TYPE_CHECKING:
 __all__ = [
     "run_route_command",
     "run_route_auto_command",
+    "run_retune_lengths_command",
     "run_zones_command",
     "run_optimize_command",
 ]
+
+
+def run_retune_lengths_command(args) -> int:
+    """Handle ``retune-lengths`` (Issue #6885): exit 0 only when an output was written."""
+    from kicad_tools.router.pcb_retune import RetuneError, retune_pcb
+    from kicad_tools.router.rules import net_class_map_from_path
+
+    as_json = getattr(args, "format", "text") == FORMAT_JSON
+    try:
+        try:
+            net_class_map = net_class_map_from_path(args.net_class_map, pcb_path=args.pcb)
+        except (OSError, ValueError, TypeError) as exc:
+            raise RetuneError("missing_rules", f"cannot load net-class map: {exc}") from exc
+        with stdout_to_stderr_when(as_json):
+            report = retune_pcb(
+                args.pcb,
+                args.output,
+                groups=args.groups,
+                diffpairs=[tuple(pair) for pair in args.diffpairs],
+                net_class_map=net_class_map,
+                provenance_path=args.provenance,
+                timeout_s=args.timeout,
+            )
+    except RetuneError as exc:
+        if as_json:
+            emit_json(
+                {"command": "retune-lengths", "ok": False, "code": exc.code, "error": exc.message}
+            )
+        else:
+            print(f"retune-lengths FAILED ({exc.code}): {exc.message}", file=sys.stderr)
+            print("No output was written; the input board is unchanged.", file=sys.stderr)
+        return 1
+
+    if as_json:
+        emit_json({"command": "retune-lengths", "ok": True, **report.to_dict()})
+        return 0
+    print(f"retune-lengths: {report.status} -> {report.output_path}")
+    for t in report.targets:
+        line = (
+            f"  {t.kind} {t.name}: skew {t.before_skew_mm:.4f} -> {t.after_skew_mm:.4f} mm "
+            f"(limit {t.tolerance_mm:g} mm, {t.tolerance_source}; {t.status})"
+        )
+        if t.stretch_target_mm is not None:
+            line += (
+                f"; stretch target {t.stretch_target_mm:g} mm "
+                f"{'met' if t.stretch_achieved else 'NOT met'}"
+            )
+        print(line)
+    print(f"  changed nets: {', '.join(report.changed_nets) or 'none'}")
+    print(f"  provenance: {report.provenance_path}")
+    return 0
 
 
 def run_zones_command(args) -> int:

@@ -223,6 +223,17 @@ CONTRACT_ARGV: dict[str, list[str]] = {
     # Issue #6093: a valid tiny net (NET1, 3 pads), so the success path's
     # document is checked, not just the missing-``--net`` error (~1.5 s).
     "route-auto": ["{pcb}", "--net", "NET1"],
+    # Issue #6885: the refusal path (no net-class map on disk) is one JSON
+    # document too; the success document is covered by tests/test_pcb_retune.py.
+    "retune-lengths": [
+        "{pcb}",
+        "-o",
+        "{dir}/retuned.kicad_pcb",
+        "--net-class-map",
+        "{dir}/absent_net_class_map.json",
+        "--group",
+        "G",
+    ],
     "reason": ["{pcb}"],
     "optimize-traces": ["{pcb}", "--dry-run"],
     "validate-footprints": ["{pcb}"],
