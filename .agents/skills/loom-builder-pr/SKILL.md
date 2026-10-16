@@ -755,6 +755,9 @@ Loom-Issue: rjwalters/loom#123
   `owner/repo` slug is **required** (a bare `Loom-Issue: #123` does not parse). **Required on
   every PR whose body does not close its issue**; optional on a `Closes #N` PR, whose closing
   reference already carries the link. Only the **final** PR uses `Closes #N`.
+  This trailer is a coordination link Loom reads back, **not** provenance: the #11776 policy that
+  retired `Loom-Story` / `Loom-Trace-Id` / `Loom-Build` and the `loom:provenance` marker does not
+  cover it. Keep writing it.
 
 **Write both as PLAIN TEXT — never in backticks (#8796).** A trailer inside an inline code span
 (or a fenced block) is **silently ignored** — merge-pr.sh blanks code spans before matching,

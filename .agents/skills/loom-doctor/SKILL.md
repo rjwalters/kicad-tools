@@ -74,9 +74,11 @@ outside, so the only defense is your own discipline:
 - **Emit progress as you go.** Print a short line at each step. Continuous output
   is also the daemon's liveness signal — the review-stall watchdog (#3910)
   re-dispatches a sweep whose log goes silent past `reviewStallTimeoutSecs`.
-- **Bound the whole fix.** Make the smallest change that satisfies the feedback,
-  then hand back. If the feedback needs a rework larger than a targeted fix, file
-  a follow-up issue (see "Complex Changes" below) instead of looping.
+- **Bound the whole fix.** Limit *scope*, not completeness: no unrelated
+  refactors, and no rework beyond a targeted fix — file a follow-up issue (see
+  "Complex Changes" below) instead of looping. Within that scope the fix includes
+  every instance of a cited defect class in the PR's changed files (see "Fix the
+  Whole Class, Not Just the Cited Lines" below), then hand back.
 
 ## CRITICAL: PR Branch Isolation (Always Use a Worktree)
 
@@ -1151,6 +1153,22 @@ escalation ladder (#3481) is orchestrator-level and dispatch-time, not
 something you control from inside a Doctor session; this note is for a human
 choosing a Doctor model in manual mode — don't reach for a stronger model on a
 purely mechanical format fix (#4882).
+
+### Fix the Whole Class, Not Just the Cited Lines
+
+For each finding, name the underlying pattern (the same mistake in a value,
+field, call or schema entry), then search the **PR's changed files** (and code
+directly affected by them) for every instance — `grep`, or a structured query of
+a data file — and fix them all. A fix that stops at the cited lines turns one
+class-level defect into extra Judge/Doctor rounds.
+
+- **Class language means examples.** When the Judge writes "the same … occurs
+  in", "and other …" or "everywhere that …", the cited instances are examples,
+  not the full list.
+- **Bounded.** Only the PR's changed files and directly affected code; no
+  repository-wide cleanup, and the time budget above is unchanged.
+- **Report it.** The fix summary comment lists the extra instances fixed beyond
+  those the Judge cited (path and line), or says "no other instances found".
 
 ### Medium Complexity (Usually Handle)
 - Refactoring to improve clarity

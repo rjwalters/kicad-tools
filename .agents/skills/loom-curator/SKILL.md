@@ -132,9 +132,7 @@ If a number is provided (e.g., `/curator 42`):
 
 **Already `loom:curating`?** Run the "Stale `loom:curating` Claim Check" (under "Claiming Work") first.
 
-No number: use "Finding Work" below. The daemon may pass `--backlog-level
-<lenient|normal|strict> [--backlog-open <n>] --backlog-target <n>`; they feed
-only "Admission: keep or close" and are ignored when a number is given.
+No number: use "Finding Work" below.
 
 ## Label Workflow
 
@@ -402,7 +400,7 @@ bounce routed them to you).
 1. **Drain `loom:blocked-unnamed` every pass** (below), whether or not ordinary queues have work.
 2. Priority 0 (priority labels, red-main fixes, then Champion send-backs) first; then Priority 1; if no results, Priority 2
 3. Take the first result (queries return oldest first)
-4. Admission (Priority 2), then enhance and mark `loom:curated`
+4. Enhance and mark `loom:curated`
 5. **Nothing found and the drain yielded nothing?** Say so in the final output ("No curate-able issues found this tick") so fleet health can tell "ran, found nothing" from "died".
 
 ## Claiming Work
@@ -565,24 +563,9 @@ reconciliation & the sweep journal"); only this agent-side check does.
 
 **STOP**: no `loom:curating` label yet? Run the pool gate and claim first ("Claiming Work").
 
-### Admission: keep or close (#11819)
+### Living trackers are left as found (#10886)
 
-Before the premise gate, only for a Priority 2 (`loom:triage`) issue when the dispatch passed `--backlog-level`. Skipped on re-curation, a Champion send-back, `loom:very-important`, `/curator <n>`; `loom:important` and who filed it protect nothing.
-
-- **lenient**: no-op. **normal**: close for any "Issues Are Suggestions" reason, if vague (no concrete problem or observed harm), or a nice-to-have/speculative follow-up.
-- **strict**: close unless the issue carries evidence the harm is on `main` (failing run, log, SigNoz query; check, don't reproduce), has a `loom:operator*` label, or an open PR references it (`loom-daemon forge check-open-pr <N>` exits 0).
-
-**Never closed here**: a `reopened` event in `gh api --paginate repos/{owner}/{repo}/issues/<N>/timeline` (human override); a sibling the consolidation gate would fold; a pending human decision (route it); `loom:building`; the operator-session lane.
-
-**Close** (`<open>` is `?` if not passed), then the next candidate; no `curation-complete`:
-```bash
-./.loom/scripts/post-comment.sh <N> --body "Closed at admission: backlog <open>/<target> (<level>). <reason>. Reopen if this matters."
-gh api -X DELETE repos/{owner}/{repo}/issues/<N>/labels/loom%3Acurating
-gh api -X DELETE repos/{owner}/{repo}/issues/<N>/labels/loom%3Atriage
-gh issue close <N> --reason "not planned"
-```
-
-**Parents/children** (the consolidation gate's parent test): closing a parent closes each open child the same way, its comment naming the parent; if any child is never-closed, keep the parent. Closing a child comments `#<child> closed at admission: <reason>` on its parent. If that was the parent's last open child and the parent is itself in this step's scope (`loom:triage`, not exempt), judge it now at the same level; otherwise leave it.
+An issue whose body has `<!-- loom:tracker -->` alone on a line (outside a code fence) is a living tracker or hub, not a finite deliverable. Do not enrich it into `loom:curated`, remove any hold it carries, or comment on a repeat pass; leave it as found and take the next candidate. Champion skips the same marker, so curating it would only re-enter the escalation loop. Removing the marker returns it to the normal flow.
 
 ### The premise gate runs BEFORE enrichment (#8396)
 
@@ -1626,7 +1609,7 @@ H=$(printf '%s\n%s' "$(jq -r '.title // ""' <<<"$J")" "$(jq -r '.body // ""' <<<
 loom-daemon forge trusted-comments --fetch <N> --gh-shape | jq -r '.[].body' | grep -qE "champion:(revise|proposal-verdict):body-$H" && echo UNANSWERED
 ```
 
-Unanswered: skip Admission and the premise gate. Claim it (`loom:curating`), read that trusted comment (first bullet list = findings), then:
+Unanswered: skip the premise gate. Claim it (`loom:curating`), read that trusted comment (first bullet list = findings), then:
 
 - **Revise** (the normal case). Edit the body, never only comment (an unchanged body is a failed round). Fix each finding
   (verify against `origin/main`) or refute it with evidence, then append a

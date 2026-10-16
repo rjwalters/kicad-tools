@@ -153,6 +153,30 @@ open blocker (`park-record apply --blocked-by --by champion`, #11860; or
 automatically when the blockers close: the daemon's release pass was retired
 (#11301), so a role or a human clears it.
 
+**A hold is a human evidence gate, not a dependency wait (#10937).** When the
+hold's concern names an open issue/PR ("pending real-PDK verification in
+#N"), Champion writes one more record beside the reason-only one so
+`check-stale-blocked` and the pipeline view show what the PR waits on:
+
+```bash
+loom-daemon park-record apply --pr "$PR_NUMBER" --blocked-by "$N" --by champion \
+  --reason "champion merge-risk hold: human evidence gate"
+```
+
+The reason-only record stays (`body_declares_hold` reads it); `apply` refuses a
+closed blocker (#9102), so a hold that names none, or only closed ones, is
+unchanged. The extra record is inert: `check_and_unblock_prs` skips a PR whose
+`loom-daemon champion-hold classify` says `state=champion-hold` before it reads
+a `Blocked by`, so closing #N never lifts the hold. Worked example, PR 8314
+holds with `Blocked by: #8301` recorded, #8301 closes:
+
+```
+check_and_unblock_prs → PR 8314: state=champion-hold → skipped (no unblock, no comment)
+```
+
+Release stays Champion's (a release signal, `champion-pr-merge.md` "Sticky
+holds") or a human's; nothing auto-releases.
+
 ## Who reads one
 
 - `loom-daemon check-stale-blocked` (`defaults/scripts/check-stale-blocked.sh`,
@@ -233,6 +257,13 @@ check_and_unblock_prs() {
     local title=$(printf '%s\n' "$pr_row" | jq -r '.title')
 
     [ "$(has_permanent_block "$number")" = "true" ] && continue  # #8742, guide.md
+
+    # A standing Champion hold is a human evidence gate, not a dependency wait
+    # (#10937): closing a `Blocked by` number it records never releases it.
+    # Unreadable (exit 3) fails safe; foreign-park/clear/exit 2 go on.
+    local hc hrc
+    hc=$(loom-daemon champion-hold classify --pr "$number" 2>/dev/null); hrc=$?
+    case "$hrc $hc" in "0 "*" state=champion-hold "*|"3 "*) continue ;; esac
 
     local deps=$(parse_dependencies "$body")
 
