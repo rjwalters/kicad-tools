@@ -14,8 +14,7 @@
 # Strategy: like test-create-pr-superseded-issue.sh, run create-pr.sh
 # directly as a subprocess with a stub `gh` on PATH and LOOM_FORGE_TYPE
 # forced to github. The daemon side of the guard (`forge check-open-pr`) is
-# stubbed via $LOOM_DAEMON_SELF_BIN -- the same seam
-# test-create-pr-provenance.sh's daemon-ok/daemon-old fixtures use -- so this
+# stubbed via $LOOM_DAEMON_SELF_BIN -- so this
 # suite pins create-pr.sh's OWN logic (parsing, exit code, message, fail-open
 # posture) without depending on a real daemon build or live network calls.
 #
