@@ -241,18 +241,24 @@ class TestMeasureCompletion:
         assert sig2.routed_connections == 1
 
     def test_single_pad_net_has_one_island_and_no_connections(self, routed_board: Path) -> None:
+        """SIG3's arc touches nothing: no pad connection is needed, but the
+        stranded arc is one unconnected item -- kicad-cli 10.0.6 reports
+        ``Pad 2 [SIG3] of R3`` <-> ``Track (arc) [SIG3]`` (Issue #6452)."""
         result = NetStatusAnalyzer(str(routed_board)).analyze()
         sig3 = result.get_net("SIG3")
         assert sig3 is not None
         assert sig3.island_count == 1
+        assert sig3.padless_components == 1
         assert sig3.total_connections == 0
-        assert sig3.open_connections == 0
+        assert sig3.routed_connections == 0
+        assert sig3.open_connections == 1
 
     def test_net_status_result_aggregates(self, routed_board: Path) -> None:
+        # kicad-cli reports 2 unconnected items: SIG2's open and SIG3's arc.
         result = NetStatusAnalyzer(str(routed_board)).analyze()
         assert result.total_connections == 3
         assert result.routed_connections == 2
-        assert result.open_connections == 1
+        assert result.open_connections == 2
         assert result.connection_completion_percentage == pytest.approx(200 / 3, abs=1e-6)
 
     def test_net_status_dicts_expose_connection_fields(self, routed_board: Path) -> None:
@@ -260,7 +266,7 @@ class TestMeasureCompletion:
         data = result.to_dict()
         assert data["total_connections"] == 3
         assert data["routed_connections"] == 2
-        assert data["open_connections"] == 1
+        assert data["open_connections"] == 2
         sig2 = next(n for n in data["nets"] if n["net_name"] == "SIG2")
         assert sig2["island_count"] == 2
         assert sig2["open_connections"] == 1
@@ -1027,3 +1033,146 @@ def test_disposition_preserves_failure_classifications(routed_board, signal, exp
     assert report.route_outcome.outcome == expected
     assert report.timing.measured_phase == expected
     assert report.placement_disposition.completed_nets == frozenset()
+
+
+class TestAllTrackErrors:
+    """``run_geometric_drc(all_track_errors=...)`` is opt-in (Issue #6420)."""
+
+    @staticmethod
+    def _argv(monkeypatch, tmp_path: Path, **kwargs) -> list[str]:
+        import subprocess as sp
+
+        from kicad_tools.drc import geometric
+
+        calls: list[list[str]] = []
+
+        def fake_run(cmd, **_kw):
+            calls.append(list(cmd))
+            return sp.CompletedProcess(cmd, 0, b"", b"")
+
+        monkeypatch.setattr(geometric.subprocess, "run", fake_run)
+        # Issue #6724: model a kicad-cli that supports --refill-zones (10+).
+        monkeypatch.setattr("kicad_tools.cli.runner._kicad_drc_supports_refill", lambda _cli: True)
+        geometric.run_geometric_drc(
+            tmp_path / "b.kicad_pcb", kicad_cli=Path("/fake/kicad-cli"), **kwargs
+        )
+        assert len(calls) == 1
+        return calls[0]
+
+    def test_default_invocation_is_unchanged(self, monkeypatch, tmp_path: Path) -> None:
+        argv = self._argv(monkeypatch, tmp_path)
+        assert "--all-track-errors" not in argv
+        assert argv[1:4] == ["pcb", "drc", "--refill-zones"]
+
+    def test_opt_in_adds_the_flag(self, monkeypatch, tmp_path: Path) -> None:
+        argv = self._argv(monkeypatch, tmp_path, all_track_errors=True)
+        assert argv.count("--all-track-errors") == 1
+        assert argv[-1] == str(tmp_path / "b.kicad_pcb")
+
+    def test_summary_carries_unconnected_count_and_flag(self, monkeypatch, tmp_path: Path) -> None:
+        from types import SimpleNamespace
+
+        from kicad_tools.drc import geometric
+
+        seen: dict = {}
+
+        def fake(_path, **kw):
+            seen.update(kw)
+            return SimpleNamespace(
+                ran=True, error_count=1, by_type={"x": 1}, note=None, unconnected_count=4
+            )
+
+        monkeypatch.setattr(geometric, "run_geometric_drc", fake)
+        summary = run_kicad_cli_drc(tmp_path / "b.kicad_pcb", all_track_errors=True)
+        assert seen["all_track_errors"] is True
+        assert summary.unconnected_count == 4 and summary.all_track_errors is True
+        assert summary.to_dict()["unconnected_count"] == 4
+
+        monkeypatch.setattr(
+            geometric,
+            "run_geometric_drc",
+            lambda _p, **_kw: SimpleNamespace(ran=False, note="absent"),
+        )
+        missing = run_kicad_cli_drc(tmp_path / "b.kicad_pcb")
+        assert missing.unconnected_count is None and missing.violation_count is None
+
+
+class TestExternalScoresBlock:
+    """Additive PCBWorld block (issue #6331): schema stays v1, scores stay separate."""
+
+    def test_absent_block_keeps_report_unchanged(self, routed_board: Path) -> None:
+        data = _report(routed_board).to_dict()
+        assert "external_scores" not in data
+        assert data["schema_version"] == 1
+
+    def test_pcbworld_block_serializes_beside_local_gates(self, routed_board: Path) -> None:
+        import dataclasses
+
+        from kicad_tools.benchmark.external import ExternalScores, PCBWorldScore
+
+        score = PCBWorldScore.from_payload(
+            {
+                "available": True,
+                "comparable": True,
+                "clean_pass": False,
+                "routability": 0.5,
+                "drv_errors_only_count": 3,
+                "potential_gain": 1.25,
+                "rollouts": [{"rollout_idx": 0, "potential_gain": 1.25}],
+                "pcbworld_commit": "b" * 40,
+                "kicad_version": "9.0.3",
+                "unknown_key_is_ignored": 1,
+            }
+        )
+        report = dataclasses.replace(
+            _report(routed_board), external_scores=ExternalScores(pcbworld=score)
+        )
+        data = report.to_dict()
+        assert data["schema_version"] == 1
+        pw = data["external_scores"]["pcbworld"]
+        assert pw["clean_pass"] is False
+        assert pw["rollouts"][0]["potential_gain"] == 1.25
+        assert pw["kicad_version"] == "9.0.3"
+        # The local gates are untouched and distinct from PCBWorld's verdict.
+        assert "kct_check" in data and "kicad_cli_drc" in data
+        json.dumps(data)
+
+    def test_unavailable_score_is_null_never_zero(self) -> None:
+        from kicad_tools.benchmark.external import PCBWorldScore
+
+        score = PCBWorldScore(
+            available=False,
+            comparable=False,
+            clean_pass=True,  # even a stray value must not leak when unavailable
+            routability=1.0,
+            drv_errors_only_count=0,
+            unavailable_reason="router produced no output board",
+        )
+        d = score.to_dict()
+        assert d["clean_pass"] is None
+        assert d["routability"] is None
+        assert d["drv_errors_only_count"] is None
+        assert d["potential_gain"] is None
+        assert d["unavailable_reason"]
+
+    def test_render_has_separate_pcbworld_column(self, routed_board: Path) -> None:
+        import dataclasses
+
+        from kicad_tools.benchmark.external import ExternalScores, PCBWorldScore
+
+        plain = render_markdown([_report(routed_board)])
+        assert "PCBWorld CP" not in plain
+
+        ok = PCBWorldScore(available=True, comparable=True, clean_pass=True)
+        gone = PCBWorldScore(available=False, comparable=False, unavailable_reason="no scorer")
+        reports = [
+            dataclasses.replace(_report(routed_board), external_scores=ExternalScores(ok)),
+            dataclasses.replace(
+                _report(routed_board, board_id="other"), external_scores=ExternalScores(gone)
+            ),
+        ]
+        md = render_markdown(reports)
+        assert "| PCBWorld CP |" in md
+        assert "| PASS |" in md
+        assert "| unavailable |" in md
+        assert "UNKNOWN for this board" in md

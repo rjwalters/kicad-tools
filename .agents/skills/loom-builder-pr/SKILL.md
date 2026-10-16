@@ -173,7 +173,7 @@ Sometimes you need full output for debugging:
 - Understanding test coverage gaps
 
 In these cases, run full output but don't include it all in your response. Instead:
-1. Run the full test suite
+1. Run the targeted tests for what you touched (CI runs the full suite, #11690)
 2. Analyze the output
 3. Report only relevant failures in your response
 4. Include actionable summary, not raw dumps
@@ -281,33 +281,29 @@ Root cause verification (for process/behavior issues):
 - [ ] If documentation-only: justified why docs will change behavior this time
 
 Local verification:
-- [ ] The project's check command passes (see `buildGate.command` in `.loom/config.json`, or the repo's documented CI command, e.g. `pnpm check:ci`)
+- [ ] Fast-tier pre-flight passes (`loom-daemon preflight --issue N`); CI runs the suite
 - [ ] Formatter + linter run on changed files (see "Format and Lint Changed Files" below) — a format-only CI failure is a guaranteed Judge rejection
-- [ ] Commits are signed off if required (`commit.signoff: true` in `.loom/config.json`, or a DCO/`sign-off` requirement — `git commit --signoff`; see "DCO sign-off" above)
+- [ ] Commits are signed off if required (`commit.signoff: true` or a DCO requirement — `git commit --signoff`; see "DCO sign-off" above)
 - [ ] Relevant tests pass
-- [ ] Each criterion has explicit verification (not "I think it works")
-- [ ] Ran the "defaults/ Version-Bearing-Files Gate" command block below (not just read it) — exited 0. It fails if this PR hand-edits any version-bearing file's value (`package.json`, `mcp-loom/package.json`, `Cargo.toml`, `VERSION`) — those are now bumped automatically at merge time (#7743), never by hand in a feature PR.
+- [ ] Diff adds/moves a direct forge caller? Rebase onto the landing base; no `defaults/forge/manifest.toml` there = no inventory command. Else declare it under its `[[operation.callers]]` (`defaults/forge/README.md`; a move must drop the old path, which no command flags), then run `loom-daemon forge-inventory validate --manifest-dir defaults/forge` and `gate --manifest-dir defaults/forge --baseline defaults/forge/call-bypass-baseline.toml` (bare forms read the binary's embedded copy). Nonzero blocks review, even if pre-existing: fix, rerun; never add baseline debt or weaken the gate.
+- [ ] Each criterion has explicit verification
+- [ ] Ran the "defaults/ Version-Bearing-Files Gate" block below (not just read it) — exited 0 (version-bearing files bump at merge, #7743).
 ```
 
-**Run the defaults/ Version-Bearing-Files Gate locally — an actual command, not a checklist bullet to read (#6675, recurring Judge rejection: #6598, #6599, #6610, #6611, #6630, #6668 all hit this in CI because it was never run pre-PR). A single automated workflow (`.github/workflows/version-bump-on-merge.yml`, #7743) now owns bumping `VERSION` and the other version-bearing files, once, right after any merge that touched `defaults/` — a feature PR must not carry its own edit to any of them. `./.loom/scripts/create-pr.sh` also runs a version-bearing-file consistency check (`version-check-gate.sh`, #6730) before creating the PR, so running the block below by hand is defense-in-depth, not the only line of defense; still run it locally to catch a hand-edit before pushing rather than at CI time:**
+**Run the defaults/ Version-Bearing-Files Gate locally — an actual command, not a bullet to read (#6675; #6598, #6599, #6610, #6611, #6630, #6668 hit this in CI). `.github/workflows/version-bump-on-merge.yml` (#7743) owns bumping `VERSION` and the other version-bearing files after any merge touching `defaults/`; a feature PR must not edit them. `create-pr.sh` also runs `version-check-gate.sh` (#6730); this is defense-in-depth before CI:**
 
 ```bash
 # Run from your worktree, AFTER your last commit, BEFORE
 # ./.loom/scripts/create-pr.sh. Mirrors the CI job "PRs Must Not Hand-Edit
 # Version-Bearing Files" (.github/workflows/ci.yml) — no PR exists yet at
 # Builder time, so use the merge-base with origin/main as --base instead of
-# a PR base sha. (`--forbid-bump` also narrows to merge-base(base, head)
-# internally since #7823, so passing one here is idempotent, not redundant
-# belt-and-braces you could drop: it keeps this block correct on an older
-# installed copy of the script too.)
+# a PR base sha (kept for older installed copies of the script; #7823).
 MERGE_BASE="$(git merge-base origin/main HEAD)"
 
 # Exit 0 = no version-bearing file's VALUE changed anywhere in your diff;
 # exit 1 = your PR hand-edits one of package.json/mcp-loom/package.json/
-# Cargo.toml/VERSION. Do NOT "fix" a failure here by running
-# ./scripts/version.sh bump patch -- that command is now exclusively the
-# post-merge workflow's job; a Builder should never run it. Revert the
-# edit(s) to the flagged file(s) instead.
+# Cargo.toml/VERSION. Never "fix" it with ./scripts/version.sh bump (the
+# post-merge workflow's job only); revert the flagged edit(s) instead.
 if ! bash defaults/scripts/check-defaults-version-bump.sh --forbid-bump --base "$MERGE_BASE" --head HEAD; then
   echo "BLOCKER: this PR hand-edits a version-bearing file's value (see the diff above)." >&2
   echo "Fix: revert the change(s) to that file -- version bumps happen automatically at merge (#7743), never in a feature PR." >&2
@@ -317,7 +313,7 @@ fi
 echo "OK: no version-bearing file's value was hand-edited."
 ```
 
-**Treat a non-zero exit above as a hard local blocker** — revert your edit to the flagged file(s) and re-run the block until it prints the final `OK:` line before calling `create-pr.sh`. Do not proceed on the strength of having merely read the checklist bullet.
+**Treat a non-zero exit above as a hard local blocker** — revert your edit to the flagged file(s) and re-run the block until it prints the final `OK:` line before calling `create-pr.sh`.
 
 ### Step 4: Document Verification in PR Description
 
@@ -399,7 +395,7 @@ Local verification:
 - [ ] Linter run on changed files (0 errors)
 ```
 
-**Pre-PR gate (pre-flight, #10476).** With `buildGate` set, run `loom-daemon preflight --issue N` before `create-pr.sh`. Exit 1 = failed: fix the tail, commit, re-run (max `preflightMaxAttempts`). Exit 4 (`preflight_unresolved`) = stop, NO PR (claim released). Exit 5 = timeout, exit 6 = deferred for host load (both keep the claim): re-run later; at the timeout cap, NO PR. Name any `PASS (flaky…)` test in the PR. `create-pr.sh` refuses (exit 7) an ungated HEAD.
+**Pre-PR gate (pre-flight, #10476, #11690).** With `buildGate` set, run `loom-daemon preflight --issue N` before `create-pr.sh`. It runs the **fast tier** (compile + smoke, never the suite) and never defers on load. Exit 1 = failed: fix the tail, commit, re-run (max `preflightMaxAttempts`). Exit 4 (`preflight_unresolved`) = stop, NO PR (claim released). Exit 5 = a hung compile timed out (claim kept): re-run; at the timeout cap, NO PR. `create-pr.sh` refuses (exit 7) an ungated HEAD. Then open the PR without waiting for CI.
 
 ### Language-Specific Verification
 
@@ -423,7 +419,7 @@ cargo fmt --all -- --check
 
 **Why check before commit?** Pre-commit hooks can fail silently in worktrees, and a Doctor cycle costs far more than a local check.
 
-**When modifying Rust**, tick off before the PR: the project check command (`buildGate.command` in `.loom/config.json`), `cargo check`, `cargo clippy`, and `cargo fmt --all -- --check` all return 0.
+**When modifying Rust**, tick off before the PR: pre-flight, `cargo check`, `cargo clippy`, and `cargo fmt --all -- --check` all return 0.
 
 ### Red Flags: Don't Create PR Yet
 
@@ -652,7 +648,7 @@ body. `--signoff` is harmless when not required. See
 
 **When creating a NEW PR:**
 - Pass only `loom:review-requested`: `create-pr.sh` copies the closing issue's
-  priority labels (the star and its levels) itself (#10518); a role never invents one
+  priority labels (`loom:important` / `loom:very-important`) itself (#10518); a role never invents one
 - This is the ONLY time you add labels to a PR
 
 **After PR creation:**
@@ -763,15 +759,16 @@ Loom-Issue: rjwalters/loom#123
 **Write both as PLAIN TEXT — never in backticks (#8796).** A trailer inside an inline code span
 (or a fenced block) is **silently ignored** — merge-pr.sh blanks code spans before matching,
 deliberately (#5234), so the PR looks correct to a reviewer and to Judge while the #3667 reset
-never fires and the issue is stranded at `loom:building` with nothing logged (the
-rjwalters/kicad-tools PR #5686 / #5240 incident).
+never fires and the issue is stranded at `loom:building` with nothing logged.
 
 ```markdown
 Part of #123              <- declaration: parsed, the label reset fires on merge
 `Part of #123`            <- code span: NOT a declaration, reset silently skipped
 ```
 
-**Both the PR body and the commit messages must carry the same reference.** GitHub harvests closing keywords from the PR body and the merge commit's subject (this repo merges with merge commits, #9105) — individual commit bodies are not parsed, but keep the reference consistent in them anyway. When in doubt, prefer `Part of #N`.
+**Both the PR body and the commit messages must carry the same reference.** GitHub harvests closing keywords from the PR body and the merge commit's subject (this repo merges with merge commits, #9105). Prefer `Part of #N`.
+
+If a `Part of #N` remainder needs a human, add `<!-- loom:remainder-hold reason="..." -->` to the issue body before merge (parks it `loom:operator`; see label-state-machine.md).
 
 #### A stray closing keyword ANYWHERE in the body defeats `Part of #N` (#4569)
 
@@ -796,11 +793,10 @@ close #2" closed #2 on merge, and it had to be reopened by hand).
     | grep -inE '\b(close[sd]?|fix(e[sd])?|resolve[sd]?)[[:space:]]+#N\b'
   ```
 
-merge-pr.sh backstops some of this — it warns on a whole-line backticked `Part of` trailer,
-warns naming which source carries a contradicting closing keyword, and reopens the issue if
-GitHub closed it anyway — but every warning reaches only whoever runs the merge, a reopen leaves
-a close/reopen flicker plus notification churn, and **nothing checks the `Loom-Issue:` trailer at
-merge time**. Get it right in the body. Full rationale,
+merge-pr.sh backstops some of this — it warns on a whole-line backticked `Part of` trailer
+or an unparseable `Loom-Issue:` one, warns naming which source carries a contradicting closing
+keyword, and reopens the issue if GitHub closed it anyway — but every warning reaches only
+whoever runs the merge, and a reopen leaves close/reopen churn. Get it right in the body. Full rationale,
 incidents, and the trailer's parser contract: `.loom/docs/issue-pr-linking.md`.
 
 ### PR Creation Checklist
@@ -812,41 +808,39 @@ When creating a PR, verify:
 3. PR description references the issue: `Closes #X` for a full implementation, or `Part of #X` for a declared partial increment (not "Issue #X" or "Addresses #X") — same reference in the commit message
 4. Issue number is correct
 5. PR has `loom:review-requested` label
-6. All CI checks pass locally (the project's check command — `buildGate.command` in `.loom/config.json`, e.g. `pnpm check:ci`) — **including the formatter/linter on changed files** (see "Format and Lint Changed Files" above); a format-only failure is a guaranteed Judge rejection, not a warning
+6. It compiles (pre-flight) and targeted tests pass — **including the formatter/linter on changed files** (see "Format and Lint Changed Files" above); a format-only failure is a guaranteed Judge rejection. CI runs the rest
 7. PR description includes verification table for each criterion
 8. Tests added/updated as needed
 9. Commits carry a `Signed-off-by:` trailer if required (`commit.signoff: true` in `.loom/config.json`, or a DCO/`sign-off` check — see "DCO sign-off")
 10. `## Test Plan` includes a `TDD:` line for any diff touching executing code (see "Test-First Discipline" above) — omit only for docs/config/ADR-only changes
 11. `## Rollout check` section present if the PR is a host-move PR (see "Rollout check" above)
-12. **Rebased onto latest `origin/main` immediately before push** — see "Pre-Push Rebase: Sync with `origin/main`" below
+12. **Synced with latest `origin/main` immediately before push** — "Pre-Push Rebase: Sync with `origin/main`" below
 
 ### Pre-Push Rebase: Sync with `origin/main` (#7668)
 
 **Immediately before `git push` + opening the PR** — after the checklist above
-passes and right before the Lease Fencing check below — sync your branch onto
-the current tip of `main`:
+passes, right before Lease Fencing below — sync with `main`'s tip (a merge
+unless the repo allows rebase, #10771):
 
 ```bash
+BRANCH_UPDATE=$(loom-daemon branch-update strategy) || BRANCH_UPDATE=merge  # unknown = merge
 git fetch origin main
-git rebase origin/main
+if [ "$BRANCH_UPDATE" = rebase ]; then git rebase origin/main; else git merge --no-ff -m "Merge origin/main (Builder: sync before push)" origin/main; fi
 ```
 
-Do this **unconditionally**, not only when your diff happens to touch a file
-you know is contested. A branch cut even a few hours ago against a busy repo
-can be stale by the time you are ready to push, and the cost of skipping this
-is not hypothetical: three consecutive PRs (example-org/tool-repo#164, #165,
-#166) each landed `DIRTY` with CI never run, purely because every branch was
-cut before the previous PR in the sequence merged and each touched the same
-narrow, frequently-updated surface (a README status paragraph). Each one cost
-a full Judge-rejection + Doctor-rebase round-trip that this step is meant to
-absorb up front, before a reviewer ever sees the PR.
+Do this **unconditionally**, not only when your diff touches a file you know
+is contested: a branch cut hours ago against a busy repo can be stale by push
+time. Three consecutive PRs (example-org/tool-repo#164, #165, #166) each landed
+`DIRTY` with CI never run because each was cut before the previous one merged
+and touched the same README paragraph; each cost a Judge-rejection + Doctor
+round-trip this step absorbs up front.
 
-**If the rebase conflicts, resolve it now — this is the moment, not later
-after a review round-trip:**
+**If the update conflicts, resolve it now, not after a review round-trip:**
 
-1. Resolve each conflicted file, `git add` it, `git rebase --continue`
-   (repeat until the rebase completes).
-2. Re-run the project's check command (`buildGate.command`, e.g. `pnpm check:ci`)
+1. Resolve each conflicted file, `git add` it, then `git commit --no-edit`
+   (merge) or `git rebase --continue` (rebase; repeat until it completes).
+   A branch already pushed is pushed plain in merge mode — never forced.
+2. Re-run pre-flight (a new commit voids its receipt) and the targeted tests
    — a rebase can silently change behavior even when it resolves cleanly.
 3. **Version-bearing-file sync gate (#7168; moot after #7743)**: a clean rebase
    lands `origin/main`'s exact version values, so it never fires unless your
@@ -862,10 +856,8 @@ after a review round-trip:**
    than force a resolution — this is the same bar as any other blocked-work
    outcome in `builder.md`.
 
-This is a pure timing/ordering change — it does not weaken any Judge check,
-label invariant, or lifecycle gate; it only moves a rebase that would
-otherwise happen reactively (via Doctor, after a `loom:changes-requested`
-round-trip) to before the PR is ever opened.
+This only moves an update that would otherwise happen reactively (Doctor,
+after `loom:changes-requested`) to before the PR opens; no gate is weakened.
 
 ### Lease Fencing: Confirm You Still Own the Claim (Epic #6165 Phase 3, #6309)
 
@@ -971,7 +963,7 @@ still a transient credential window, never a signal to redo the work.
 ```bash
 # CORRECT way to create PR
 # Title MUST use conventional commit format: "fix:", "feat:", "refactor:", etc.
-# create-pr.sh adds the closing issue's priority labels (the star) itself (#10518)
+# create-pr.sh adds the closing issue's priority labels itself (#10518)
 ./.loom/scripts/create-pr.sh --title "fix: descriptive summary of the change" --label "loom:review-requested" --body "$(cat <<'EOF'
 ## Summary
 Brief description of what this PR does and why.

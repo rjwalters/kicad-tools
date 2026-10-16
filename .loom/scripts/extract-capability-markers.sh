@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # extract-capability-markers.sh - reference parser for the
-# `<!-- loom:capability=<name> -->` convention (#6892), mirroring
-# require-complexity-marker.sh's `<!-- loom:complexity=<tier> -->` anchoring
-# so both sides of the fleet parse the same marker identically.
+# `<!-- loom:capability=<name> -->` convention (#6892), anchored per the #4840
+# rule so both sides of the fleet parse the same marker identically.
 #
-# This marker is meaningful ONLY alongside the `loom:operator-mechanical`
-# sub-kind label (see defaults/docs/label-state-machine.md, "Capability-
-# declaration convention"). This script does not look at labels at all --
+# The marker is what makes a held item a mechanical ask (#11795): on a
+# `loom:operator` item with no decision block it is the capability lane's key;
+# on a `loom:blocked` item it names the capability being waited on (see
+# defaults/docs/label-state-machine.md, "Capability marker"). This script does
+# not look at labels at all --
 # callers decide whether the marker applies to the item they read it from.
 #
 # Reads an issue/PR body from stdin, extracts every
@@ -15,11 +16,10 @@
 # prints the deduplicated, sorted list of VALID capabilities to stdout, one
 # per line. Multiple markers are ANDed by convention (a caller enforcing
 # "does this worker satisfy every declared capability" needs the full set,
-# not just one) -- unlike the complexity marker, which has exactly one valid
-# value per item, this script collects every match rather than taking the
+# not just one) -- so this script collects every match rather than taking the
 # last.
 #
-# Anchoring rationale (identical to require-complexity-marker.sh, #4840): a
+# Anchoring rationale (the #4840 anchoring rule): a
 # bare substring match would also fire on prose that merely *quotes* the
 # marker syntax as literal example text (this convention doc does exactly
 # that). Anchoring to the full `<!-- ... -->` comment form excludes that
@@ -32,7 +32,7 @@
 # Exit codes:
 #   0 - one or more valid capability markers found (printed to stdout)
 #   1 - no capability markers found at all (not an error -- most items,
-#       including most loom:operator-mechanical items, declare none)
+#       including most held items, declare none)
 #   2 - at least one marker was found but failed closed-vocabulary
 #       validation; the offending value(s) are named on stderr. Per the
 #       fail-closed rule, an unrecognized value is a hard signal, not a
@@ -54,7 +54,7 @@ body="$(cat)"
 
 # Value grammar: lowercase alnum, `:`/`_`/`-` separators (the colon supports
 # the `cloud-profile:<name>` family) -- same character-class discipline as
-# the complexity marker's `[a-z]*`, generalized for parameterized values.
+# a plain `[a-z]*` class, generalized for parameterized values.
 # `mapfile` is bash 4+; macOS ships 3.2 (#7751). The `|| true` means a
 # no-match grep yields no output, so empty lines are skipped -- the
 # `${#raw_matches[@]} -eq 0` check below is what distinguishes "no markers".

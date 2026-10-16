@@ -26,6 +26,22 @@ tolerances:
   # Provenance: same historical file lines 1754-1763; #4007 ratcheted 9 -> 8
   # after via-aware ADDR_BUS tuning. Four pair-skew +four continuity errors.
   boards/07-matchgroup-test/regression-fixture/matchgroup_test_routed.kicad_pcb: 8
+  # Issue #6390 declared the router's own net classes (Power, Clock,
+  # HighCurrentSignal, ...) in the routed sidecars, so `kct check` now holds
+  # the committed copper to them.  This release sits below its own
+  # classes; every counted error is
+  # `netclass_clearance_copper` (0 before #6390).  They are real routing
+  # defects, NOT a loosened class -- fix the routing and ratchet each entry
+  # down to removal.  (Pad pairs inside one footprint are not counted: a
+  # router class does not govern a package's own pin gaps.)  Per-board lists
+  # (nets, locations, gaps, both engines):
+  #   board 03: #6394 (13 x Power 0.2 mm; kicad-cli agrees)
+  #   (board 05's 27 were repaired in #6395 and its entry removed.)
+  # Board 07's active release (42 x SDRAM_* / AUX 0.175 mm, #6396) gets NO
+  # entry: active releases never carry an allowance
+  # (tests/test_recipe_artifact_isolation.py), so its strict-0 gate fails
+  # visibly on the next PR that touches that PCB until #6396 lands.
+  boards/03-usb-joystick/output/usb_joystick_routed.kicad_pcb: 13
 
 # Preserve the fabrication processes selected by the reviewed real designs.
 manufacturers:

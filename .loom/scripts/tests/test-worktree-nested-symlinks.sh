@@ -507,6 +507,49 @@ assert_symlink "$REPO/.loom/worktrees/issue-8945/node_modules" \
     "worktree.linkNodeModules=true restores the root symlink on a pnpm workspace"
 cleanup_repo "$REPO"
 
+# --- Test 9: --retire-aliases unlinks a pre-#8944 alias, main tree survives ---
+# A worktree created before #8944 keeps its alias (worktree.sh's reuse path
+# never re-links), so the operator verb must remove it — the link only (#9152).
+echo ""
+echo "Test 9: worktree-link --retire-aliases retires pre-#8944 aliases (#9152)"
+REPO=$(setup_repo)
+(
+    cd "$REPO"
+    echo "lockfileVersion: '9.0'" > pnpm-lock.yaml
+    mkdir -p node_modules apps/web/node_modules
+    echo '{"name":"root"}' > package.json
+    echo '{"name":"web"}' > apps/web/package.json
+    echo "root dep" > node_modules/CANARY.txt
+    echo "web dep" > apps/web/node_modules/CANARY.txt
+    git add apps/web/package.json package.json
+    git commit -q -m "pnpm workspace"
+    git push -q origin main
+    ./.loom/scripts/worktree.sh 9152 >/tmp/wt-retire.$$ 2>&1 || cat /tmp/wt-retire.$$
+    ./.loom/scripts/worktree.sh 9153 >/tmp/wt-retire.$$ 2>&1 || cat /tmp/wt-retire.$$
+)
+WT="$REPO/.loom/worktrees/issue-9152"
+WT_REAL="$REPO/.loom/worktrees/issue-9153"
+# Recreate the pre-#8944 shape by hand, plus a real install that must survive.
+ln -s "$REPO/node_modules" "$WT/node_modules"
+ln -s "$REPO/apps/web/node_modules" "$WT/apps/web/node_modules"
+mkdir -p "$WT_REAL/node_modules" && echo "own install" > "$WT_REAL/node_modules/OWN.txt"
+"$LOOM_DAEMON_SELF_BIN" worktree-link --retire-aliases --repo-root "$REPO" >/tmp/wt-retire.$$ 2>&1 \
+    || { fail "--retire-aliases exited non-zero"; cat /tmp/wt-retire.$$; }
+assert_not_symlink "$WT/node_modules" "--retire-aliases: root alias retired"
+assert_not_symlink "$WT/apps/web/node_modules" "--retire-aliases: nested alias retired"
+if [[ -f "$REPO/node_modules/CANARY.txt" && -f "$REPO/apps/web/node_modules/CANARY.txt" ]]; then
+    pass "--retire-aliases: main workspace node_modules survives (unlink, not delete)"
+else
+    fail "--retire-aliases destroyed the main workspace's node_modules"
+fi
+if [[ -f "$WT_REAL/node_modules/OWN.txt" ]]; then
+    pass "--retire-aliases: a real node_modules directory is left untouched"
+else
+    fail "--retire-aliases removed a real node_modules directory"
+fi
+rm -f /tmp/wt-retire.$$
+cleanup_repo "$REPO"
+
 # --- Summary ---
 echo ""
 echo "Tests run: $TESTS_RUN, Passed: $TESTS_PASSED, Failed: $TESTS_FAILED"

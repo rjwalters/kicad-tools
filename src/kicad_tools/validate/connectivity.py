@@ -20,7 +20,6 @@ Example:
 
 from __future__ import annotations
 
-import math
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -33,12 +32,18 @@ if TYPE_CHECKING:
 
 # Geometry backend.  ``shapely`` is a core dependency (issue #3824), but
 # this module keeps a graceful fallback: when shapely is unavailable (a
-# broken/partial install) the label-free pour extractor
-# (``_connect_pour_pads_label_free`` / step 2d) transparently falls back to
-# the legacy declared-net pour grouping, so importing this module — and
+# broken/partial install) the shared copper-contact graph
+# (:mod:`kicad_tools.validate.copper_contact`) is skipped and the legacy
+# centre-matching extractor with declared-net pour grouping runs instead,
+# so importing this module — and
 # tracing autorouter segment/via copper — never hard-fails.  The boolean
 # probe is delegated to the shared guard in :mod:`kicad_tools._shapely`.
 from kicad_tools._shapely import has_shapely as _has_shapely
+from kicad_tools.geometry.copper import (
+    PAD_FALLBACK_ERODE,
+    pad_copper_outline,
+    segments_copper_touch,
+)
 
 # Shared, checker-agnostic trace-copper geometry (issue #4176).  These are
 # pure analytic helpers with no shapely dependency, so same-layer track
@@ -46,13 +51,15 @@ from kicad_tools._shapely import has_shapely as _has_shapely
 from kicad_tools.geometry.copper import (
     point_segment_distance as _point_segment_distance_impl,
 )
-from kicad_tools.geometry.copper import (
-    segments_copper_touch,
+from kicad_tools.validate.copper_contact import (
+    CopperContactGraph,
+    CopperItem,
+    build_copper_contact_graph,
+    describe_item,
 )
 
 if _has_shapely():  # pragma: no cover - import guard exercised by environment
-    from shapely.geometry import LineString as _ShapelyLineString  # type: ignore[import-untyped]
-    from shapely.geometry import Point as _ShapelyPoint
+    from shapely.geometry import Point as _ShapelyPoint  # type: ignore[import-untyped]
     from shapely.geometry import Polygon as _ShapelyPolygon
 
 
@@ -105,6 +112,23 @@ class ConnectivityIssue:
     def is_warning(self) -> bool:
         """Check if this is a warning (not an error)."""
         return self.severity == "warning"
+
+    @property
+    def counts_as_unconnected(self) -> bool:
+        """True if this issue is an unconnected item (Issue #6495).
+
+        This is the single definition every consumer (``summary()``, the
+        ``kct validate --connectivity`` counts and ``kct fix-drc``'s
+        regressed-net attribution) uses.  Only errors count: a lone fill
+        island is a warning that kicad-cli does not report (#6487), so it is
+        visible but never unconnected.
+        """
+        return self.is_error
+
+    @property
+    def is_lone_fill_island(self) -> bool:
+        """True for a lone fill island warning (a fill nothing else touches)."""
+        return self.issue_type == "zone_island" and self.is_warning
 
     def to_dict(self) -> dict:
         """Convert to dictionary for serialization."""
@@ -188,6 +212,31 @@ class ConnectivityResult:
         return [i for i in self.issues if i.issue_type == "zone_island"]
 
     @property
+    def unconnected(self) -> list[ConnectivityIssue]:
+        """Issues that count as unconnected items (errors only, Issue #6495)."""
+        return [i for i in self.issues if i.counts_as_unconnected]
+
+    @property
+    def unconnected_zone_islands(self) -> list[ConnectivityIssue]:
+        """``zone_island`` issues that count as unconnected items."""
+        return [i for i in self.zone_islands if i.counts_as_unconnected]
+
+    @property
+    def lone_fill_islands(self) -> list[ConnectivityIssue]:
+        """Lone fill island warnings: visible, but never unconnected (#6487)."""
+        return [i for i in self.issues if i.is_lone_fill_island]
+
+    @property
+    def strict_warning_count(self) -> int:
+        """Warnings that fail ``--strict``; lone fill islands are excluded.
+
+        kicad-cli does not report a lone fill island, so the native-reconciled
+        path never sees one.  Excluding them here makes the ``--strict`` exit
+        code identical with and without kicad-cli (Issue #6495).
+        """
+        return sum(1 for i in self.issues if i.is_warning and not i.is_lone_fill_island)
+
+    @property
     def unconnected_pad_count(self) -> int:
         """Total number of unconnected pads."""
         return sum(len(i.unconnected_pads) for i in self.issues)
@@ -239,8 +288,10 @@ class ConnectivityResult:
             parts.append(f"  Partial connections: {len(self.partial)}")
         if self.isolated:
             parts.append(f"  Isolated pads: {len(self.isolated)}")
-        if self.zone_islands:
-            parts.append(f"  Orphaned zone islands: {len(self.zone_islands)}")
+        if self.unconnected_zone_islands:
+            parts.append(f"  Orphaned zone islands: {len(self.unconnected_zone_islands)}")
+        if self.lone_fill_islands:
+            parts.append(f"  Lone fill islands: {len(self.lone_fill_islands)} (warning)")
         parts.append(f"  Total unconnected pads: {self.unconnected_pad_count}")
 
         return "\n".join(parts)
@@ -327,14 +378,6 @@ class ConnectivityValidator:
         self._refresh_pad_identities()
         result = ConnectivityResult()
 
-        # Issue #4498: model every same-net copper item as a graph node on
-        # zone-bearing nets.  The old pad partition collapsed an entire zone
-        # after the first pad touched it, hiding zone↔zone, zone↔pad and
-        # pad↔pad disconnects within the same declared net.
-        item_relationships = self._find_unconnected_item_relationships()
-        for issue in (issue for issues in item_relationships.values() for issue in issues):
-            result.add(issue)
-
         # Get all non-empty nets (skip net 0 which is unconnected)
         nets = {n: net for n, net in self.pcb.nets.items() if n != 0 and net.name}
 
@@ -348,10 +391,25 @@ class ConnectivityValidator:
         # should NOT be counted as connected.
         has_footprints = len(self.pcb.footprints) > 0
 
+        # Issues #6452 / #6453 / #6470: every net runs on the shared
+        # copper-contact graph (exact pad outlines, every fill of every zone,
+        # pad-to-pad overlap, orphan fragments counted).  The legacy
+        # pad-centre graph survives only for core-only installs.
+        use_contact_graph = _has_shapely()
+
         for net_number, net in nets.items():
-            if net_number in item_relationships:
-                if not item_relationships[net_number]:
-                    connected_count += 1
+            if use_contact_graph:
+                verdict = self._contact_graph_net_issues(net_number, net.name, has_footprints)
+                if verdict is None:
+                    continue
+                issues, has_fill = verdict
+                for issue in issues:
+                    result.add(issue)
+                # A lone-fill-island warning does not make the net open.
+                if any(issue.is_error for issue in issues):
+                    continue
+                connected_count += 1
+                if has_fill:
                     zone_connected_count += 1
                 continue
 
@@ -373,7 +431,7 @@ class ConnectivityValidator:
             self._last_zone_connected_pads: set[str] = set()
 
             # Build connectivity graph from copper (segments, vias, zones)
-            graph = self._build_connectivity_graph(net_number)
+            graph = self._build_connectivity_graph_legacy(net_number)
 
             # Check if all pads are connected
             islands = self._find_islands(graph, pads)
@@ -424,13 +482,12 @@ class ConnectivityValidator:
         callers that require native parity opt in with
         ``validate(reconcile_native=True)``.
 
-        Fleet characterization (2026-07-30): the internal graph exactly
-        reproduces board03's 12 relationships and reports 60 on board05 versus
-        KiCad's 57.  The residual three are thermal-spoke associations that are
-        not represented as explicit solid geometry in the persisted board.
-        Refill-time connectivity is therefore authoritative for the opt-in
-        path; it reports board05's exact current 57 without weakening the
-        KiCad-less fail-visible model.
+        Since the shared copper-contact model (Issue #6452) the internal
+        count equals ``kicad-cli pcb drc``'s per net on every committed routed
+        board (``tests/test_copper_contact_parity.py``), e.g. board05's 57.
+        This opt-in path differs in that it **refills** zones first, so it
+        reports what KiCad would see after a refill rather than the copper
+        saved in the file.
 
         Args:
             internal_types: Optional ``net_name -> issue_type`` lookup built
@@ -453,7 +510,6 @@ class ConnectivityValidator:
         if self.pcb_path is None:
             return None
 
-        import subprocess
         import tempfile
 
         from kicad_tools.cli.runner import find_kicad_cli
@@ -476,23 +532,28 @@ class ConnectivityValidator:
                     stacklevel=2,
                 )
             return None
+        from kicad_tools.cli.runner import run_kicad_drc_command
+
+        # Issue #6724: KiCad 8/9 reject --refill-zones (exit 1, no report);
+        # it is passed unless this kicad-cli definitively lacks it, and a
+        # rejected run is retried without it.
         with tempfile.NamedTemporaryFile(suffix=".json") as report_file:
-            proc = subprocess.run(
-                [
+            proc, _refilled = run_kicad_drc_command(
+                lambda refill: [
                     str(kicad_cli),
                     "pcb",
                     "drc",
-                    "--refill-zones",
+                    *(["--refill-zones"] if refill else []),
                     "--format",
                     "json",
                     "-o",
                     report_file.name,
                     str(self.pcb_path),
                 ],
-                capture_output=True,
-                text=True,
+                Path(kicad_cli),
+                refill_zones=True,
                 timeout=120,
-                check=False,
+                text=True,
             )
             if proc.returncode not in (0, 5):
                 import warnings
@@ -552,181 +613,121 @@ class ConnectivityValidator:
             )
         return issues
 
-    def _find_unconnected_item_relationships(self) -> dict[int, list[ConnectivityIssue]]:
-        """Return missing relationships between physical same-net components.
+    def _contact_graph(self, net_number: int | None) -> CopperContactGraph:
+        """The shared copper-contact graph (Issue #6452), net-scoped or label-free."""
+        return build_copper_contact_graph(self, net_number)
 
-        Pads, vias, segments, and each individual ``filled_polygon`` are graph
-        nodes.  Nodes union only when their copper intersects on a shared layer;
-        a via or through-hole pad is one node carrying all bridged layers.  For
-        each zone-bearing net, one issue is emitted for every component beyond
-        the first, matching KiCad's ratsnest relationship granularity instead
-        of emitting one coarse issue per net.
+    def _contact_graph_net_issues(
+        self,
+        net_number: int,
+        net_name: str,
+        has_footprints: bool,
+    ) -> tuple[list[ConnectivityIssue], bool] | None:
+        """Issues for one net from the shared copper-contact graph.
 
-        The label-only fallback cannot distinguish filled islands and retains
-        the pre-#4498 pad model when Shapely is unavailable.
+        Returns ``(issues, has_fill)``, or ``None`` for a named net with no
+        pads on a board that has footprints (stripped pad assignments are not
+        counted as connected).
+
+        Every same-net copper item is a node (:mod:`.copper_contact`).  The
+        number of missing relationships is ``counted components - 1``, where
+        a counted component holds a pad, via or track.  That includes
+        fragments that reach no pad (a detached track or via, or a fill
+        island with only a track or via on it), because ``kicad-cli pcb
+        drc`` reports each as an unconnected item.  A *lone* fill island --
+        a component made only of fill copper -- is not counted: kicad-cli
+        does not report it.
+
+        * A net with fill copper reports one ``zone_island`` error per
+          counted component beyond the first, naming one endpoint of each
+          (Issue #4498).  There is no zone-boundary or nearest-fill bond: a
+          pad is on a fill only when its copper overlaps it (the #479
+          heuristic under-reported opens, Issue #6470).  Each lone fill
+          island is reported as a ``zone_island`` **warning** instead, so
+          the floating copper stays visible without failing the net.
+        * A net without fill reports one ``partial`` issue whose ``islands``
+          are the pad groups (largest first) followed by any pad-less
+          fragments; ``unconnected_pads`` lists only real pads.
         """
-        if not _has_shapely():
-            return {}
+        pads = self._get_net_pads(net_number)
+        graph = self._contact_graph(net_number)
+        has_fill = any(item.kind == "fill" for item in graph.items)
+        if not has_fill and not pads and has_footprints:
+            return None
+        components = graph.components()
+        if len(components) <= 1:
+            return [], has_fill
 
-        from kicad_tools.geometry.copper import segment_copper_polygon
+        def _rank(item: CopperItem) -> tuple[int, str]:
+            order = {"pad": 0, "fill": 1, "via": 2, "track": 3}[item.kind]
+            return (order, describe_item(self, item)[0])
 
-        modeled_nets = {
-            zone.net_number for zone in self.pcb.zones if zone.net_number and zone.filled_polygons
-        }
-        relationships: dict[int, list[ConnectivityIssue]] = {}
-        copper_layers = [layer.name for layer in self.pcb.copper_layers] or ["F.Cu", "B.Cu"]
-
-        for net_number in modeled_nets:
-            # (stable id, human description, {layer: solid geometry}, terminal)
-            items: list[tuple[str, str, dict[str, Any], bool]] = []
-            pad_records: list[tuple[int, list[str], Any]] = []
-            zone_records: list[tuple[Any, str, list[int]]] = []
-            for fp in self.pcb.footprints:
-                for pad in fp.pads:
-                    if pad.net_number != net_number:
-                        continue
-                    geom = self._pad_copper_polygon(fp, pad)
-                    if geom is not None:
-                        layers = [
-                            layer
-                            for layer in copper_layers
-                            if self._pad_layer_matches_zone(pad.layers, layer)
-                        ]
-                        pad_id = f"{fp.reference}.{pad.number}"
-                        items.append(
-                            (
-                                f"pad:{pad_id}",
-                                f"Pad {pad_id}",
-                                dict.fromkeys(layers, geom),
-                                True,
-                            )
-                        )
-                        pad_records.append((len(items) - 1, pad.layers, geom))
-
-            for via_index, via in enumerate(self.pcb.vias):
-                if via.net_number != net_number:
-                    continue
-                radius = max(getattr(via, "size", 0.0) or 0.0, 0.0) / 2.0
-                geom = self._via_copper_geom(via.position, radius)
-                if geom is not None:
-                    items.append(
-                        (
-                            f"via:{via_index}",
-                            f"Via {via_index}",
-                            dict.fromkeys(self._via_bridged_layers(via.layers), geom),
-                            False,
-                        )
-                    )
-
-            for seg_index, seg in enumerate(self.pcb.segments):
-                if seg.net_number != net_number:
-                    continue
-                geom = segment_copper_polygon(seg.start, seg.end, seg.width)
-                if geom is not None:
-                    items.append(
-                        (
-                            f"segment:{seg_index}",
-                            f"Segment {seg_index}",
-                            {seg.layer: geom},
-                            False,
-                        )
-                    )
-
-            for zone_index, zone in enumerate(self.pcb.zones):
-                if zone.net_number != net_number:
-                    continue
-                fill_indices: list[int] = []
-                for fill_index, fill_pts in enumerate(zone.filled_polygons):
-                    region = self._fill_solid_region(fill_pts)
-                    if region is None:
-                        continue
-                    layer = zone.filled_polygon_layer(fill_index)
-                    item_id = f"zone[{zone_index}].fill[{fill_index}]@{layer}"
-                    items.append((item_id, f"Zone island {item_id}", {layer: region}, True))
-                    fill_indices.append(len(items) - 1)
-                boundary = self._fill_solid_region(zone.polygon)
-                if boundary is not None and fill_indices:
-                    zone_records.append((boundary, zone.layer, fill_indices))
-
-            parent = list(range(len(items)))
-
-            def find(index: int) -> int:
-                while parent[index] != index:
-                    parent[index] = parent[parent[index]]
-                    index = parent[index]
-                return index
-
-            def union(left: int, right: int) -> None:
-                left_root, right_root = find(left), find(right)
-                if left_root != right_root:
-                    parent[right_root] = left_root
-
-            for left, (_, _, left_geoms, _) in enumerate(items):
-                for right in range(left + 1, len(items)):
-                    right_geoms = items[right][2]
-                    if any(
-                        left_geoms[layer].intersects(right_geoms[layer])
-                        for layer in left_geoms.keys() & right_geoms.keys()
-                    ):
-                        union(left, right)
-
-            # Persisted fill polygons omit thermal spokes around same-net pads.
-            # Preserve the established #479 boundary behavior without
-            # collapsing every island in the zone: a pad inside the zone
-            # boundary bonds only to the nearest fill island on that layer.
-            for boundary, layer, fill_indices in zone_records:
-                layer_fills = [index for index in fill_indices if layer in items[index][2]]
-                if not layer_fills:
-                    continue
-                for pad_index, pad_layers, pad_geom in pad_records:
-                    if not self._pad_layer_matches_zone(pad_layers, layer):
-                        continue
-                    if not boundary.intersects(pad_geom):
-                        continue
-                    nearest = min(
-                        layer_fills,
-                        key=lambda index: pad_geom.distance(items[index][2][layer]),
-                    )
-                    union(pad_index, nearest)
-
-            components: dict[int, list[int]] = {}
-            for index in range(len(items)):
-                components.setdefault(find(index), []).append(index)
-            # KiCad ratsnest relationships are between electrically meaningful
-            # endpoints (pads and zone islands); track/via-only fragments merely
-            # carry connectivity between them.
-            terminal_components = [
-                component
-                for component in components.values()
-                if any(items[index][3] for index in component)
+        if has_fill:
+            representatives = [
+                min((graph.items[i] for i in members), key=_rank)
+                for members in graph.counted_components()
             ]
-            terminal_components.sort(
-                key=lambda component: min(items[index][0] for index in component)
-            )
-
-            net = self.pcb.nets.get(net_number)
-            net_name = net.name if net is not None else f"net-{net_number}"
+            ordered = sorted(representatives, key=_rank)
             issues: list[ConnectivityIssue] = []
-            if terminal_components:
-                anchor = terminal_components[0]
-                anchor_item = next(index for index in anchor if items[index][3])
-                for component in terminal_components[1:]:
-                    remote_item = next(index for index in component if items[index][3])
-                    left_id, left_desc = items[anchor_item][0:2]
-                    right_id, right_desc = items[remote_item][0:2]
-                    issues.append(
-                        ConnectivityIssue(
-                            severity="error",
-                            issue_type="zone_island",
-                            net_name=net_name,
-                            message=f"Missing connection between {left_desc} and {right_desc}",
-                            suggestion="Connect the same-net copper components",
-                            islands=((left_id,), (right_id,)),
-                        )
+            warnings: list[ConnectivityIssue] = []
+            # kicad-cli does not report a fill island that nothing touches,
+            # so it must not be an error here; keep it visible as a warning.
+            lone_fills = sorted(
+                (
+                    min((graph.items[i] for i in members), key=_rank)
+                    for members in graph.fill_only_components()
+                ),
+                key=_rank,
+            )
+            for item in lone_fills:
+                item_id, item_desc = describe_item(self, item)
+                warnings.append(
+                    ConnectivityIssue(
+                        severity="warning",
+                        issue_type="zone_island",
+                        net_name=net_name,
+                        message=f"{item_desc} touches no other {net_name} copper",
+                        suggestion=(
+                            "Remove the floating island or connect it "
+                            "(kicad-cli does not report a lone fill island)"
+                        ),
+                        islands=((item_id,),),
                     )
-            relationships[net_number] = issues
+                )
+            if not ordered:
+                return warnings, has_fill
+            anchor_id, anchor_desc = describe_item(self, ordered[0])
+            for item in ordered[1:]:
+                item_id, item_desc = describe_item(self, item)
+                issues.append(
+                    ConnectivityIssue(
+                        severity="error",
+                        issue_type="zone_island",
+                        net_name=net_name,
+                        message=f"Missing connection between {anchor_desc} and {item_desc}",
+                        suggestion="Connect the same-net copper components",
+                        islands=((anchor_id,), (item_id,)),
+                    )
+                )
+            return issues + warnings, has_fill
 
-        return relationships
+        pad_node = {(fi, pi): node for (fi, pi), node in self._pad_ids.items()}
+        islands: list[list[str]] = []
+        orphans: list[tuple[str, ...]] = []
+        for members in components:
+            nodes = sorted(
+                pad_node[graph.items[i].key]
+                for i in members
+                if graph.items[i].kind == "pad" and graph.items[i].key in pad_node
+            )
+            if nodes:
+                islands.append(nodes)
+            else:
+                rep = min((graph.items[i] for i in members), key=_rank)
+                orphans.append((describe_item(self, rep)[1],))
+        if len(islands) <= 1 and not orphans:
+            return [], has_fill
+        return [self._create_issue(net_name, pads, islands, orphans=orphans)], has_fill
 
     def extract_pad_partition(self) -> list[frozenset[str]]:
         """Return logical REF.PAD groups, retaining distinct physical islands.
@@ -790,8 +791,38 @@ class ConnectivityValidator:
             non-comment reference appears in exactly one group.  A pad with
             no copper touching it forms a singleton group.  Groups are
             returned sorted by their smallest member for determinism.
+
+        With shapely installed (the normal case) the partition is the
+        label-free copper-contact graph of :mod:`.copper_contact` (Issue
+        #6452): exact pad outlines with no erosion (#6453), pad-to-pad overlap
+        bonds (an exposed pad over its thermal-via pads, #6435), and fills of
+        different zones bridged by any via or track touching both.  Core-only
+        installs keep the legacy centre-matching extractor.
         """
         self._refresh_pad_identities()
+        if not _has_shapely():  # pragma: no cover - exercised only on core-only installs
+            return self._extract_pad_occurrences_legacy()
+        graph = self._contact_graph(None)
+        placed: set[str] = set()
+        partition: list[frozenset[str]] = []
+        for pads in graph.pad_components():
+            nodes = frozenset(self._pad_ids[it.key] for it in pads if it.key in self._pad_ids)
+            if nodes:
+                partition.append(nodes)
+                placed |= nodes
+        partition.extend(frozenset({node}) for node in self._pad_ids.values() if node not in placed)
+        partition.sort(key=lambda comp: min(comp))
+        return partition, dict(self.pad_bindings)
+
+    def _extract_pad_occurrences_legacy(
+        self,
+    ) -> tuple[list[frozenset[str]], dict[str, tuple[str, str]]]:
+        """Core-only (shapely-absent) pad partition: centre/endpoint matching.
+
+        The pre-#6452 extractor minus its shapely-only steps.  Pour copper
+        falls back to declared-net grouping
+        (:meth:`_connect_pour_pads_by_declared_net`).
+        """
         # 1. Collect every pad on the board (label-independent) with its
         #    board-frame position and layer set.
         pad_positions: dict[str, tuple[float, float]] = {}
@@ -915,29 +946,6 @@ class ConnectivityValidator:
                     ):
                         _connect(node_id, pad_id)
 
-        # 2a3. Geometric segment-in-pad-copper bonding (issues #4678, #5060).
-        #      Step 2a only bonds a segment ENDPOINT to a pad whose *center*
-        #      is within ``POSITION_TOLERANCE`` (0.01 mm) of it.  A trace that
-        #      legally terminates inside a pad's copper but away from the pad
-        #      center — routers do this routinely on wide pads — was invisible
-        #      to that test (#4678, the tapeout Gate 1 wedge), and so was a pad
-        #      straddled by the *interior* of a continuous trace running past
-        #      it (#5060, board 09's inline SOIC pins on +3V3 / PMOS_SOURCE).
-        #      Bond a pad to any segment whose swept copper reaches into its
-        #      eroded copper outline on a shared copper layer, measured over
-        #      the segment's whole length so the result is invariant under
-        #      splitting the trace at the pad.  The ``POUR_PAD_ERODE`` inset
-        #      plus the ``> 1 µm`` penetration guard (mirroring steps 2c2 /
-        #      2a2) mean copper across a real clearance moat (≥ 0.1 mm on any
-        #      DRC-clean board) can never fuse: only true galvanic contact is
-        #      added, exactly as kicad-cli and the strict net-status model
-        #      report it.  Bonds are injected via ``segment_extra_nodes`` so
-        #      the chain builder (2b) carries them across the whole chain.
-        #      Requires shapely for the eroded pad outlines; core-only
-        #      installs keep the legacy center-proximity behavior.
-        if _has_shapely():
-            self._connect_segment_in_pad(segments, pad_layers, segment_extra_nodes)
-
         # 2b. Segment chains: pads connected through a chain of segments whose
         #     copper physically touches are galvanically connected even with
         #     no pad at the intermediate junctions.  Reuse the existing chain
@@ -974,28 +982,9 @@ class ConnectivityValidator:
                 for other in via_pads[i + 1 :]:
                     _connect(p, other)
 
-        # 2c2. Raw annulus/pad overlap (#5133). The via centre can lie
-        # outside a pad while its ring overlaps that pad's physical edge.
-        # Supported pad shapes use their actual outline and layer span;
-        # unsupported geometry retains the earlier centre-only behavior.
-        if _has_shapely():
-            self._connect_via_in_pad(pad_positions, pad_layers, synthetic_nodes, _connect)
-
-        # 2d. Label-free physical fill components (#5133). Trace copper and
-        # raw via annuli can bond a terminal into a pour away from its centre.
-        # Each disconnected solid is separate, even within one zone object;
-        # existing pad-to-fill erosion and terminal-contact policies remain.
-        if _has_shapely():
-            self._connect_pour_pads_label_free(
-                pad_positions,
-                pad_layers,
-                _connect,
-                synthetic_nodes,
-                graph=graph,
-                segment_extra_nodes=segment_extra_nodes,
-            )
-        else:  # pragma: no cover - exercised only on core-only installs
-            self._connect_pour_pads_by_declared_net(pad_positions, pad_layers, _connect)
+        # 2d. Pour copper: declared-net grouping (the label-free fill graph
+        #     needs shapely, see :mod:`.copper_contact`).
+        self._connect_pour_pads_by_declared_net(pad_positions, pad_layers, _connect)
 
         # 2e. Coincident pads/via-nodes with no intervening copper still share
         #     metal if they occupy the same point AND share a copper layer.
@@ -1063,7 +1052,36 @@ class ConnectivityValidator:
         self,
         net_number: int,
     ) -> dict[str, set[str]]:
-        """Build graph of copper connectivity for a net.
+        """Pad adjacency graph for one net from the shared copper-contact graph.
+
+        Pads in one copper component are mutually adjacent.  Sets
+        ``_last_zone_connected_pads`` to the pads whose component holds fill
+        copper.  Core-only installs use :meth:`_build_connectivity_graph_legacy`.
+        """
+        if not _has_shapely():  # pragma: no cover - exercised only on core-only installs
+            return self._build_connectivity_graph_legacy(net_number)
+        contact = self._contact_graph(net_number)
+        graph: dict[str, set[str]] = defaultdict(set)
+        zone_pads: set[str] = set()
+        for members in contact.components():
+            items = [contact.items[i] for i in members]
+            nodes = [
+                self._pad_ids[it.key]
+                for it in items
+                if it.kind == "pad" and it.key in self._pad_ids
+            ]
+            for node in nodes:
+                graph[node].update(other for other in nodes if other != node)
+            if any(it.kind == "fill" for it in items):
+                zone_pads.update(nodes)
+        self._last_zone_connected_pads = zone_pads
+        return graph
+
+    def _build_connectivity_graph_legacy(
+        self,
+        net_number: int,
+    ) -> dict[str, set[str]]:
+        """Build graph of copper connectivity for a net (core-only fallback).
 
         Creates a graph where nodes are points (pad positions, track endpoints,
         via positions) and edges connect points that are electrically connected.
@@ -1724,98 +1742,29 @@ class ConnectivityValidator:
                 return True
         return False
 
-    # Erosion (mm) applied to a pad's copper box before the pour-overlap
-    # test.  Sized just above the corner-graze scale and below a real thermal
-    # spoke's penetration so that an oversized through-hole pad poking a
-    # corner across a narrow clearance moat into a foreign pour does NOT bond,
-    # while a genuine spoke/solid tie (which reaches well past the clearance
-    # line) keeps a non-empty eroded overlap.  Verified on boards 00/03/05.
-    POUR_PAD_ERODE: float = 0.1
+    # Erosion (mm) for pad shapes the shared outline primitive does not model
+    # exactly (trapezoid, chamfered roundrect, custom), and for the eroded via
+    # disk legacy net-status still uses.  Exact outlines are never eroded
+    # (Issue #6453); see :data:`kicad_tools.geometry.copper.PAD_FALLBACK_ERODE`.
+    POUR_PAD_ERODE: float = PAD_FALLBACK_ERODE
 
-    def _pad_copper_polygon(self, fp: Any, pad: Any, shape_aware: bool = False) -> Any | None:
-        """Build a board-frame shapely polygon approximating a pad's copper.
+    def _pad_copper_polygon(
+        self,
+        fp: Any,
+        pad: Any,
+        shape_aware: bool = True,
+    ) -> Any | None:
+        """Board-frame shapely geometry of a pad's copper.
 
-        The pad's ``size`` box is rotated by the footprint rotation (KiCad's
-        negated-angle convention, matching :meth:`_transform_pad_position`)
-        and translated to the board frame, then eroded inward by
-        :data:`POUR_PAD_ERODE`.  This rectangular approximation is
-        deliberately coarse — it ignores ``roundrect``/``oval`` corner
-        rounding and per-pad rotation — but it is what lets the pour test see
-        a *thermally-relieved* pad: such a pad's center sits in the antipad
-        moat (a hole in the fill), yet its copper edge reaches the thermal
-        spokes / surrounding solid pour, so the pad *polygon* intersects the
-        solid region while the bare center point does not.  The inward erosion
-        keeps an oversized pad's corner from grazing across a clearance moat
-        into a foreign pour (which would manufacture a false short).  A pad
-        fully moated out (clearance all around, no spoke) stays clear of the
-        solid region and is correctly left untied.
-
-        ``shape_aware=True`` replaces the size box with the pad's actual
-        outline family *before* eroding — ``circle`` → a disk of radius
-        ``min(w, h) / 2``, ``oval`` → a stadium (the centerline of the longer
-        local axis buffered by ``min(w, h) / 2``), everything else
-        (``rect`` / ``roundrect`` / ``custom`` / unknown) → the same box as
-        before.  This matters because the box **over-reaches real copper on
-        the diagonals** of a round pad: for a circle of diameter ``d`` the
-        eroded box corner sits ``(d / 2 − POUR_PAD_ERODE)·√2`` from the
-        center, which exceeds the true copper radius ``d / 2`` by more than
-        the 0.1016 mm minimum clearance once ``d ≳ 1.2 mm`` (0.211 mm of
-        over-reach on a 1.7 mm header pad).  Any *distance-to-copper* test
-        against that phantom corner can bond across a legal clearance moat.
-        See :meth:`_connect_segment_in_pad` for the failure this guards.
-
-        The shape-aware outline is inscribed in the same rotated size box, so
-        it is always a **subset** of the box geometry: enabling it can only
-        make a bond test stricter, never looser.
-
-        Returns ``None`` when shapely is unavailable.  Falls back to a
-        zero-area point geometry when the pad has no positive size.
+        Thin wrapper over :func:`kicad_tools.geometry.copper.pad_copper_outline`
+        (Issues #6452, #6453): the exact rect / roundrect / circle / oval
+        outline oriented by the pad's absolute angle, with no erosion.
+        ``shape_aware`` is accepted for backwards compatibility and ignored --
+        every caller now gets the real outline.  Returns ``None`` when shapely
+        is unavailable.
         """
-        if not _has_shapely():
-            return None
-        import math
-
-        cx, cy = self._transform_pad_position(
-            pad.position, fp.position[0], fp.position[1], fp.rotation
-        )
-        w, h = pad.size
-        if w <= 0 or h <= 0:
-            return _ShapelyPoint((cx, cy))
-        # Negated-angle convention (see rotate_pad_offset): the footprint
-        # rotation maps the pad's local box into the board frame.
-        a = math.radians(-fp.rotation)
-        cos_a, sin_a = math.cos(a), math.sin(a)
-
-        def _to_board(ox: float, oy: float) -> tuple[float, float]:
-            return (cx + ox * cos_a - oy * sin_a, cy + ox * sin_a + oy * cos_a)
-
-        shape = (getattr(pad, "shape", "") or "").lower() if shape_aware else ""
-        base: Any
-        if shape in ("circle", "oval"):
-            radius = min(w, h) / 2.0
-            # Stadium half-length: 0 for a circle (and for a "square" oval,
-            # which KiCad renders as a circle), positive for a true oval.
-            half = abs(w - h) / 2.0
-            if half <= 0.0:
-                base = _ShapelyPoint((cx, cy)).buffer(radius)
-            else:
-                ends = [(-half, 0.0), (half, 0.0)] if w >= h else [(0.0, -half), (0.0, half)]
-                base = _ShapelyLineString([_to_board(*e) for e in ends]).buffer(radius)
-        else:
-            corners = [(-w / 2, -h / 2), (w / 2, -h / 2), (w / 2, h / 2), (-w / 2, h / 2)]
-            base = _ShapelyPolygon([_to_board(*c) for c in corners])
-        if self.POUR_PAD_ERODE > 0:
-            eroded = base.buffer(-self.POUR_PAD_ERODE)
-            # Erosion can empty a very small pad (min dimension <= 0.2 mm);
-            # keep the un-eroded outline so the pad is still testable rather
-            # than silently dropped.  That collapses the erosion margin for
-            # such pads, but the box-vs-true-copper excess is then bounded by
-            # the half-diagonal of a <= 0.2 mm box (< 0.042 mm) — under any
-            # realistic minimum clearance — so no DRC-clean false connect can
-            # slip through the un-eroded fallback either.
-            if not eroded.is_empty:
-                return eroded
-        return base
+        del shape_aware
+        return pad_copper_outline(pad, fp.position, fp.rotation)
 
     @staticmethod
     def _fill_solid_region(points: list[tuple[float, float]]) -> Any | None:
@@ -1865,160 +1814,6 @@ class ConnectivityValidator:
                 return eroded
         return circle
 
-    def _eroded_pad_polygons(self, shape_aware: bool = False) -> dict[str, Any]:
-        """Board-frame eroded copper polygon per physical pad node.
-
-        Build :meth:`_pad_copper_polygon` geometry with the existing
-        ``POUR_PAD_ERODE`` inset, omitting pads without a reference or number.
-        ``None`` geometries are filtered out; degenerate pads may be points.
-
-        ``shape_aware`` is forwarded to :meth:`_pad_copper_polygon`. Trace
-        contact (2a3) and pad-to-fill contact (2d) request shape-aware geometry.
-        Via-to-pad contact (2c2) uses this mapping only as the legacy fallback
-        for unsupported shapes; supported shapes use raw pad outlines and
-        actual via annuli in :meth:`_connect_via_in_pad`.
-        """
-        pad_polygons: dict[str, Any] = {}
-        for fi, fp in enumerate(self.pcb.footprints):
-            if not fp.reference or fp.reference.startswith("#"):
-                continue
-            for pi, pad in enumerate(fp.pads):
-                if pad.number is None or pad.number == "":
-                    continue
-                poly = self._pad_copper_polygon(fp, pad, shape_aware=shape_aware)
-                if poly is not None:
-                    pad_polygons[self._pad_id(fi, pi)] = poly
-        return pad_polygons
-
-    def _connect_segment_in_pad(
-        self,
-        segments: list,
-        pad_layers: dict[str, list[str]],
-        segment_extra_nodes: dict[int, set[str]],
-    ) -> None:
-        """Bond track copper overlapping pad copper (issues #4678, #5060).
-
-        A track *endpoint* that lies inside a pad's copper is galvanic contact
-        with that pad — KiCad's own connectivity, ``kct net-status`` (strict)
-        and ``kct route --complete`` all treat it as connected.  The legacy
-        center-proximity test (step 2a, ``POSITION_TOLERANCE`` = 0.01 mm from
-        the pad *center*) missed it, so the LVS copper leg reported a false
-        ``open`` that blocked tapeout Gate 1 with no override.
-
-        Issue #5060 extends the same test from the two endpoints to the
-        **whole swept segment**.  A pad sitting inline on a continuous trace
-        (a SOIC pin whose copper is straddled by an uninterrupted wide track
-        running past it) touches only that track's *interior*, so the
-        endpoint form left it stranded in its own component — a false
-        ``open`` on board 09's ``+3V3`` / ``PMOS_SOURCE`` that vanished as
-        soon as the very same copper was split at the pad, with a
-        Shapely-verified 0.0 mm² change to the buffered trace union.
-        Measuring the distance from the pad polygon to the entire centerline
-        makes the bond invariant under such splits in both directions: the
-        minimum is attained at some centerline point, which lies on exactly
-        one subsegment, and no subsegment reaches anywhere the whole
-        centerline did not — so inserting a collinear vertex can neither
-        create nor destroy a pad bond.
-
-        Bond condition (conservative by construction):
-
-        * shared copper layer — the pad's copper must exist on the segment's
-          layer (``*.Cu`` through-hole pads match any copper layer), and
-        * the segment centerline enters the pad's **eroded, shape-aware**
-          copper outline (:meth:`_pad_copper_polygon` with
-          ``shape_aware=True``: circle → disk, oval → stadium,
-          rect/roundrect → size box, each inset by ``POUR_PAD_ERODE`` =
-          0.1 mm), or the swept trace copper (KiCad tracks are the
-          centerline buffered by ``width / 2``, with rounded ends)
-          penetrates that eroded outline by **more than 1 µm** (the
-          step-2a2 strictly-positive contact-depth guard).
-
-        Soundness (and why the geometry must be shape-aware).  This step
-        measures a *distance* from arbitrary trace copper to the pad
-        polygon, so the polygon has to be contained in the pad's real copper
-        in **every** direction, not just on axis.  The plain size box is not:
-        for a circle pad of diameter ``d`` its eroded corner sticks out to
-        ``(d / 2 − 0.1)·√2``, over-reaching true copper by more than the
-        0.1016 mm minimum clearance for any ``d ≳ 1.2 mm`` (0.211 mm on a
-        1.7 mm header pad).  Against that phantom corner a 45° endpoint at a
-        DRC-legal 0.13–0.21 mm copper gap measured ``dist == 0`` and bonded —
-        masking a real open on a same-net trace, and minting a phantom short
-        on a foreign one.  Both directions were reproduced on DRC-clean
-        geometry (PR #4710 review) and are now regression-tested.
-
-        With the shape-aware outline the eroded polygon is contained in the
-        true copper with ≥ 0.1 mm of margin **in every direction** (rect and
-        roundrect are exact-or-inside by construction; circle/oval are the
-        true outline inset by 0.1 mm).  DRC clearance keeps a *foreign*
-        trace's copper ≥ 0.1016 mm from that copper, and its centerline sits
-        a further ``width / 2`` beyond its own copper edge, so the measured
-        distance stays above ``width / 2`` and the bond does not fire.  That
-        argument is about a *clearance to copper* and so is unaffected by the
-        #5060 widening from the two endpoints to the whole centerline: DRC
-        holds along the entire trace, not only at its vertices.  The claim is
-        therefore scoped, not absolute:
-        it holds for the pad-shape families modelled here, and a ``custom``
-        (polygon-primitive) pad still falls back to the size box — such a pad
-        can in principle over-reach on a concave outline, which is a known,
-        documented approximation rather than a soundness proof.
-
-        Bonds are recorded in ``segment_extra_nodes`` (segment index → node
-        ids), which :meth:`_build_segment_chains` unions into the segment's
-        chain component — so the pad joins every pad reachable through the
-        chain, exactly like the 2a2 via-barrel bonds.  Requires ``shapely``
-        (guarded by the caller); shapely-absent installs keep the legacy
-        center-proximity behavior.
-        """
-        # Shape-aware geometry (circle -> disk, oval -> stadium, rect /
-        # roundrect -> box): this step measures distance from arbitrary trace
-        # vertices, so the box's diagonal over-reach on round pads would bond
-        # across a legal clearance moat (see the soundness note above).
-        pad_polygons = self._eroded_pad_polygons(shape_aware=True)
-        if not pad_polygons:
-            return
-
-        # Cheap bounding prefilter: skip the shapely test unless the centerline
-        # is within the pad box's half-diagonal plus the trace copper radius
-        # of the pad center.  Uses the *uneroded box* bound — a superset of
-        # every shape-aware outline — so it can only over-admit (the exact
-        # eroded test below decides), never miss.
-        pad_bounds: dict[str, tuple[float, float, float]] = {}
-        for fi, fp in enumerate(self.pcb.footprints):
-            if not fp.reference or fp.reference.startswith("#"):
-                continue
-            for pi, pad in enumerate(fp.pads):
-                if pad.number is None or pad.number == "":
-                    continue
-                pad_id = self._pad_id(fi, pi)
-                if pad_id not in pad_polygons:
-                    continue
-                cx, cy = self._transform_pad_position(
-                    pad.position, fp.position[0], fp.position[1], fp.rotation
-                )
-                w, h = pad.size
-                pad_bounds[pad_id] = (cx, cy, math.hypot(w, h) / 2.0)
-
-        for seg_index, seg in enumerate(segments):
-            cap_radius = max((seg.width or 0.0) / 2.0, 0.0)
-            centerline = (
-                _ShapelyPoint(seg.start)
-                if seg.start == seg.end
-                else _ShapelyLineString([seg.start, seg.end])
-            )
-            for pad_id, (cx, cy, bound) in pad_bounds.items():
-                # The whole segment must pass the broad-phase test, not only
-                # its endpoints: an inline pad can be arbitrarily far from
-                # either vertex of otherwise identical unsplit copper.
-                if self._point_segment_distance((cx, cy), seg.start, seg.end) > bound + cap_radius:
-                    continue
-                if not self._pad_copper_on_layer(pad_layers.get(pad_id, []), seg.layer):
-                    continue
-                dist = pad_polygons[pad_id].distance(centerline)
-                # Retain the existing eroded, shape-aware pad and positive
-                # contact-depth guards while considering the full trace.
-                if dist == 0.0 or dist < cap_radius - 1e-3:
-                    segment_extra_nodes.setdefault(seg_index, set()).add(pad_id)
-
     def _physical_via_annulus(self, via: Any) -> Any:
         """Raw annular copper, without eroding away a narrow plating ring."""
         radius = max(via.size, 0.0) / 2.0
@@ -2028,249 +1823,6 @@ class ConnectivityValidator:
                 _ShapelyPoint(via.position).buffer(via.drill / 2.0, quad_segs=64)
             )
         return outer
-
-    def _connect_via_in_pad(
-        self,
-        pad_positions: dict[str, tuple[float, float]],
-        pad_layers: dict[str, list[str]],
-        synthetic_nodes: set[str],
-        connect: Any,
-    ) -> None:
-        """Bond supported physical pad copper to overlapping via annuli.
-
-        A via centre need not enter a pad: Board06 U1.32 overlaps an off-centre
-        annulus by positive area. The former eroded-pad/centre test missed it.
-        Use raw supported shapes, not a widened box or proximity allowance;
-        unrelated pad/trace and pad/pour erosion policies remain unchanged.
-        """
-        from kicad_tools.validate.rules.clearance import _pad_polygon
-
-        pads = self._eroded_pad_polygons()
-        raw_keys: set[str] = set()
-        for fi, fp in enumerate(self.pcb.footprints):
-            if not fp.reference or fp.reference.startswith("#"):
-                continue
-            for pi, pad in enumerate(fp.pads):
-                if pad.number is None or pad.number == "":
-                    continue
-                if pad.shape not in {"rect", "roundrect", "circle", "oval", "obround"}:
-                    continue  # No new raw bounding-box fallback for custom copper.
-                key = self._pad_id(fi, pi)
-                if key not in pad_positions:
-                    continue
-                geom = _pad_polygon(pad, fp)
-                if geom is not None:
-                    if pad.drill > 0:
-                        geom = geom.difference(
-                            _ShapelyPoint(pad_positions[key]).buffer(pad.drill / 2, quad_segs=64)
-                        )
-                    pads[key] = geom
-                    raw_keys.add(key)
-
-        for index, via in enumerate(self.pcb.vias):
-            node = f"__via{index}"
-            if node not in synthetic_nodes:
-                continue
-            annulus = self._physical_via_annulus(via)
-            for key, geom in pads.items():
-                if not (
-                    self._copper_layers_of(pad_layers.get(key, []))
-                    & self._copper_layers_of(pad_layers.get(node, []))
-                ):
-                    continue
-                # Positive area proves copper overlap without treating a gap
-                # or polygon approximation's tangent as a conductive bridge.
-                if key in raw_keys:
-                    touches = annulus.intersection(geom).area > 0
-                else:
-                    # Unsupported shapes retain their old centre-only policy.
-                    touches = geom.intersects(_ShapelyPoint(via.position))
-                if touches:
-                    connect(node, key)
-
-    def _connect_pour_pads_label_free(
-        self,
-        pad_positions: dict[str, tuple[float, float]],
-        pad_layers: dict[str, list[str]],
-        connect: Any,
-        synthetic_nodes: set[str] | None = None,
-        *,
-        graph: dict[str, set[str]] | None = None,
-        segment_extra_nodes: dict[int, set[str]] | None = None,
-    ) -> None:
-        """Trace actual fill/track/via contacts, never zone ownership.
-
-        Each solid fill component is a distinct node. Full-width trace copper
-        can enter a fill even when neither endpoint/via/pad lies in it (U1.17).
-        Existing terminal bonds and pad/trace tolerances are retained; raw via
-        annuli supply the physical layer bridges. Pad-to-fill geometry keeps
-        its existing erosion policy. No declared net is consulted.
-
-        Two fill fragments **of one zone** are a special case (Issue #5362):
-        whether they are continuous depends on the fill *encoding*, not on
-        whether their stored outlines happen to touch.  When the fill is
-        stroked (:meth:`Zone.is_stroked_fill` -- the token absent or
-        explicitly ``yes`` on a file below KiCad's ``20250210`` version
-        boundary; an explicit ``yes`` is a parser no-op that never overrides
-        that boundary, Issue #5382) each outline is the centre-line of
-        ``min_thickness``-wide copper, so real metal reaches
-        ``min_thickness / 2`` past the stored boundary and fragments within
-        ``min_thickness`` are one piece.  When it is solid -- an explicit
-        ``no`` at any version, or the token absent/``yes`` from ``20250210``
-        onward -- the stored outline *is* the copper and native KiCad bonds
-        no two fill outlines of one zone directly.
-
-        Measured with ``kicad-cli pcb drc`` 10.0.5 on identical saved bytes
-        (no ``--refill-zones``, hash unchanged), a pad on each of two
-        fragments reports ``connected`` for every gap up to and including
-        ``min_thickness`` under the stroked encoding and ``unconnected`` from
-        just past it; under the solid encoding it reports ``unconnected`` at
-        every gap, including fragments meeting at a point, sharing an edge, or
-        overlapping across a 2 mm band.  A bare ``intersects`` test matches
-        neither series, and a version-blind "absent means stroked" reading
-        misses the solid case entirely -- which is what kept the #5362
-        ``(version 20260206)`` witness reporting false-clean.
-
-        The rule is applied to same-zone pairs only, which is exactly what
-        was measured; fills of *different* zone objects keep the existing
-        intersection behaviour.  Conductor-mediated bonds (pad, via, track
-        reaching into both fragments) are unaffected and still merge them.
-        """
-        from shapely.strtree import STRtree  # type: ignore[import-untyped]
-
-        from kicad_tools.geometry.copper import segment_copper_polygon
-
-        # (terminal id or None, kind, copper layers, geometry)
-        items: list[tuple[str | None, str, frozenset[str], Any]] = []
-        terminal_index: dict[str, int] = {}
-        synthetic_nodes = synthetic_nodes or set()
-        for key, geom in self._eroded_pad_polygons(shape_aware=True).items():
-            if key in pad_positions:
-                terminal_index[key] = len(items)
-                items.append((key, "pad", self._copper_layers_of(pad_layers[key]), geom))
-        for index, via in enumerate(self.pcb.vias):
-            key = f"__via{index}"
-            if key in synthetic_nodes:
-                terminal_index[key] = len(items)
-                items.append(
-                    (
-                        key,
-                        "via",
-                        self._via_bridged_layers(via.layers),
-                        self._physical_via_annulus(via),
-                    )
-                )
-        segment_indices: dict[int, int] = {}
-        for index, seg in enumerate(self.pcb.segments):
-            geom = segment_copper_polygon(seg.start, seg.end, seg.width)
-            if geom is not None:
-                segment_indices[index] = len(items)
-                items.append((None, "segment", frozenset({seg.layer}), geom))
-        # Fill items, plus the bookkeeping the same-zone stroke-adjacency pass
-        # below needs: each zone's own fill item indices and its inflation
-        # (Issue #5362).
-        zone_fill_items: list[tuple[float, list[int], list[str]]] = []
-        fill_zone_id: dict[int, int] = {}
-        for zone_id, zone in enumerate(self.pcb.zones):
-            zone_items: list[int] = []
-            zone_item_layers: list[str] = []
-            for index, points in enumerate(zone.filled_polygons):
-                region = self._fill_solid_region(points)
-                if region is None:
-                    continue
-                layer = zone.filled_polygon_layer(index)
-                # A repaired flat contour can itself contain separate solids.
-                solids = region.geoms if region.geom_type == "MultiPolygon" else [region]
-                for solid in solids:
-                    item_index = len(items)
-                    zone_items.append(item_index)
-                    zone_item_layers.append(layer)
-                    fill_zone_id[item_index] = zone_id
-                    items.append((None, "fill", frozenset({layer}), solid))
-            if zone_items:
-                zone_fill_items.append((zone.fill_inflation(), zone_items, zone_item_layers))
-        if not items:
-            return
-        parent = list(range(len(items)))
-
-        def find(index: int) -> int:
-            while parent[index] != index:
-                parent[index] = parent[parent[index]]
-                index = parent[index]
-            return index
-
-        def union(left: int, right: int) -> None:
-            parent[find(right)] = find(left)
-
-        # Carry the already-established pad/trace/via bonds into this graph.
-        for key, neighbors in (graph or {}).items():
-            if key in terminal_index:
-                for neighbor in neighbors:
-                    if neighbor in terminal_index:
-                        union(terminal_index[key], terminal_index[neighbor])
-        for index, seg in enumerate(self.pcb.segments):
-            if index not in segment_indices:
-                continue
-            terminals = set((segment_extra_nodes or {}).get(index, set()))
-            for point in (seg.start, seg.end):
-                terminals.update(
-                    self._find_pads_at_point(
-                        point, pad_positions, pad_layers=pad_layers, layer=seg.layer
-                    )
-                )
-            for terminal in terminals:
-                if terminal in terminal_index:
-                    union(segment_indices[index], terminal_index[terminal])
-
-        tree = STRtree([item[3] for item in items])
-        for left, (_, kind, layers, geom) in enumerate(items):
-            for candidate in tree.query(geom, predicate="intersects"):
-                right = int(candidate)
-                if right <= left or not layers.intersection(items[right][2]):
-                    continue
-                other_kind = items[right][1]
-                if "fill" not in (kind, other_kind) and (kind, other_kind) != (
-                    "segment",
-                    "segment",
-                ):
-                    # Via/trace and pad/conductor bonds came from existing
-                    # steps, including their contact-depth guards. Do not
-                    # bypass those guards with a new raw intersection edge.
-                    continue
-                if (
-                    kind == "fill"
-                    and other_kind == "fill"
-                    and fill_zone_id[left] == fill_zone_id[right]
-                ):
-                    # Two fill fragments of ONE zone are not bonded by their
-                    # stored outlines touching -- that is an artefact of the
-                    # fill encoding, not copper (Issue #5362).  The
-                    # stroke-adjacency pass below decides these pairs.
-                    continue
-                union(left, right)
-
-        # Same-zone fill fragments: continuous iff their REAL copper meets.
-        # ``fill_inflation`` is ``min_thickness / 2`` on a stroked fill and
-        # zero on a solid one, and which of those applies is decided by the
-        # ``filled_areas_thickness`` token when present and by KiCad's
-        # ``20250210`` file-version boundary when absent (Issue #5362,
-        # measured against kicad-cli 10.0.5 on identical saved bytes).  A zero
-        # inflation means no fill-adjacency bond at all.
-        for inflation, zone_items, zone_item_layers in zone_fill_items:
-            if inflation <= 0.0 or len(zone_items) < 2:
-                continue
-            geoms = [items[index][3] for index in zone_items]
-            for a_pos, b_pos in self._adjacent_fill_pairs(geoms, zone_item_layers, 2.0 * inflation):
-                union(zone_items[a_pos], zone_items[b_pos])
-        fill_components = {find(index) for index, item in enumerate(items) if item[1] == "fill"}
-        components: dict[int, list[str]] = defaultdict(list)
-        for key, index in terminal_index.items():
-            root = find(index)
-            if root in fill_components:
-                components[root].append(key)
-        for keys in components.values():
-            for key in keys[1:]:
-                connect(keys[0], key)
 
     @staticmethod
     def _adjacent_fill_pairs(
@@ -2287,7 +1839,7 @@ class ConnectivityValidator:
         pairwise ``distance`` calls.  Returns *positions within the inputs*,
         not board-level indices.
         """
-        from shapely.strtree import STRtree
+        from shapely.strtree import STRtree  # type: ignore[import-untyped]
 
         indices = [i for i, region in enumerate(regions) if region is not None]
         if len(indices) < 2:
@@ -2400,17 +1952,23 @@ class ConnectivityValidator:
         net_name: str,
         pads: list[str],
         islands: list[list[str]],
+        orphans: list[tuple[str, ...]] | None = None,
     ) -> ConnectivityIssue:
         """Create a connectivity issue for a net with multiple islands.
 
         Args:
             net_name: Name of the net
             pads: All pads on this net
-            islands: List of disconnected islands
+            islands: List of disconnected pad islands
+            orphans: Copper fragments that reach no pad (an orphan track or
+                via), one description tuple each.  They follow the pad
+                islands in ``islands`` -- each is a missing relationship
+                kicad-cli reports -- but never enter ``unconnected_pads``.
 
         Returns:
             ConnectivityIssue describing the problem
         """
+        orphans = list(orphans or [])
         # Public diagnostics retain logical pin names; repeated names in
         # separate islands describe physically distinct lands of one pin.
         islands = [[self._pad_display(node) for node in island] for island in islands]
@@ -2424,18 +1982,23 @@ class ConnectivityValidator:
         for island in unconnected_islands:
             unconnected.extend(island)
 
-        if len(islands) == 2:
+        total = len(islands) + len(orphans)
+        issue_type = "partial"
+        if len(islands) <= 1:
+            message = (
+                f"Net '{net_name}' has {len(orphans)} copper fragment(s) not connected to any pad"
+            )
+            suggestion = "Remove or connect the stranded track/via copper"
+        elif total == 2:
             # Two islands - partial connection
-            issue_type = "partial"
             message = f"Net '{net_name}' has 2 disconnected islands"
             suggestion = (
                 f"Connect islands (missing trace between {islands[0][-1]} and {islands[1][0]})"
             )
         else:
             # More than two islands
-            issue_type = "partial"
-            message = f"Net '{net_name}' has {len(islands)} disconnected islands"
-            suggestion = f"Connect {len(islands)} islands to complete routing"
+            message = f"Net '{net_name}' has {total} disconnected islands"
+            suggestion = f"Connect {total} islands to complete routing"
 
         return ConnectivityIssue(
             severity="error",
@@ -2445,7 +2008,7 @@ class ConnectivityValidator:
             suggestion=suggestion,
             connected_pads=tuple(connected),
             unconnected_pads=tuple(unconnected),
-            islands=tuple(tuple(island) for island in islands),
+            islands=tuple(tuple(island) for island in islands) + tuple(orphans),
         )
 
     def __repr__(self) -> str:

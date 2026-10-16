@@ -114,6 +114,16 @@ def create_usb_joystick_pcb(output_dir: Path) -> Path:
     pcb_path = _pcb_gen.write_pcb(output_dir / "usb_joystick.kicad_pcb")
     _pcb_gen.stage_local_footprints(output_dir)
     print(f"   PCB: {pcb_path}")
+
+    # Issue #6025: carry schematic pin types onto the pads right after the
+    # unrouted PCB is written, before routing/packaging consume it.  The replay
+    # keeps pad metadata, so the routed PCB inherits the ``(pintype ...)``
+    # evidence ``kct detect-mistakes`` reads for rails.
+    from kicad_tools.operations.pintype import annotate_pcb_file_pintypes
+
+    annotation = annotate_pcb_file_pintypes(pcb_path, output_dir / "usb_joystick.kicad_sch")
+    assert not annotation.missing_pads, annotation.missing_pads
+    print(f"   Pad pin types annotated: {annotation.annotated}")
     print(f"\n   Board size: {_pcb_gen.BOARD_WIDTH}mm x {_pcb_gen.BOARD_HEIGHT}mm")
     return pcb_path
 
@@ -645,11 +655,18 @@ def route_pcb(input_path: Path, output_path: Path, *, use_saved_plan: bool = Tru
                 net_class_map[net],
                 diffpair_partner=prefix + partner,
                 intra_pair_clearance=0.15,
+                # Issue #6443: the ATmega32U4 is a full-speed (12 Mbit/s)
+                # device, so both pairs take the USB2_FS limits from the
+                # protocol table -- 2.5 mm intra-pair skew (Renesas FS guide,
+                # Table 2) instead of the generic 0.5 mm.  0.5 mm remains the
+                # P5 stretch target (#6447).
+                pair_protocol="USB2_FS",
             )
-    for net in ["USB_D+", "USB_D-"]:
-        # Short USB-C/ESD branches: routing_plan.usb_geometry separately
-        # requires >=4 mm common run, <=16 mm copper, <=0.5 mm skew.
-        net_class_map[net] = _dc_replace(net_class_map[net], coupled_continuity_threshold=0.25)
+    # Issue #6443: no ``coupled_continuity_threshold`` override.  Continuity
+    # is info-only now; the short USB-C/ESD branches are bounded by the
+    # uncoupled-length limit (USB2_FS: 6.35 mm x components on the net) and
+    # by routing_plan.usb_geometry (>=4 mm common run, <=16 mm copper,
+    # <=2.5 mm skew).
     sidecar_path = output_path.parent / "net_class_map.json"
     sidecar_path.write_text(_json.dumps(net_class_map_to_dict(net_class_map), indent=2))
     print(f"   Wrote net-class-map sidecar: {sidecar_path}")

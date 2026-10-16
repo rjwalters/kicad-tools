@@ -30,14 +30,46 @@ Scope is opt-in per net.  Plane nets whose pads sit inside dense arrays
 (e.g. a BGA's GND field) are connected by escape traces, not an adjacent
 via, and reserving a site beside every one of them would block the very
 escape channels those pads need -- so a board lists the nets it wants.
+
+Issue #6401 wires the same reservation into ``kct route`` for the nets it
+auto-skips as pours, on both engines:
+
+* :func:`select_plane_via_pads` applies the #5700 caveat as a geometric
+  rule instead of a per-board net list: only *perimeter* pads of
+  multi-pad footprints are reserved.  A footprint with an area array (more
+  than one pad NUMBER strictly inside its pad bounding box, i.e. a BGA field) is
+  skipped whole, and a lone interior pad (a QFN/QFP exposed pad) is skipped
+  too -- both escape by trace or carry their own via array.  Two-terminal
+  parts are skipped: their pads are open on three sides, and the boxed-in
+  failure (boards 03/04/05, issue #6388) is always an IC pin in a pin row.
+* The grid engine gets the reservation as static grid cells, exactly as
+  board 06 does.
+* The lattice engine has its own obstacle model and never reads the grid's
+  occupancy, so :func:`plane_via_keepout_areas` turns each reserved site
+  and stub into a static :class:`~.lattice.obstacles.KeepoutArea` that
+  blocks tracks and vias.  The lattice keep-out test has zero clearance
+  (copper edge against the area), so each area is the reserved copper
+  grown by the clearance a signal net must keep from it.
+
+Issue #6589: copper clearance alone keeps a reserved site *drillable*, not
+*usable*.  The post-route stitcher only accepts a via whose whole pad sits
+on same-net fill on the plane layer (#4432), and the pour pulls back from
+every foreign through-via -- and every foreign track on that layer -- by
+more than the copper clearance.  A foreign via 0.87 mm from board 03's
+reserved ``U1.7`` site was legal, yet its antipad on ``In2.Cu`` cut into
+the site and the pour link stayed open.  :func:`plane_via_keepout_areas`
+therefore adds, per site, a second disc grown by the plane's fill pullback
+(:func:`plane_fill_pullback`, derived from the pour's own zone clearance
+and ``min_thickness`` via :func:`plane_fills_from_pcb`) that blocks vias
+on every layer and tracks on the plane layer(s) only.
 """
 
 from __future__ import annotations
 
 import math
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
@@ -49,10 +81,19 @@ if TYPE_CHECKING:
     from .grid import RoutingGrid
 
 __all__ = [
+    "AreaArrayLink",
+    "PlaneFill",
     "PlaneViaSite",
     "PlaneViaSiteRules",
     "PlaneViaReservation",
+    "PlaneViaStub",
+    "area_array_link_keepout_areas",
+    "area_array_pour_links",
+    "plane_fill_pullback",
+    "plane_fills_from_pcb",
+    "plane_via_keepout_areas",
     "reserve_plane_via_sites",
+    "select_plane_via_pads",
 ]
 
 
@@ -74,6 +115,21 @@ class PlaneViaSiteRules:
         hole_to_hole: Drill edge-to-edge floor against other holes (mm).
         stub_width: Width of the pad-to-via stub (mm).
         max_reach: Largest pad-centre-to-site distance tried (mm).
+        exact_pads: Issue #6401 -- measure clearance to pads against each
+            pad's axis-aligned box (``pad_half_extents``, which already
+            covers a residual rotation) instead of its circumscribed circle,
+            and test the via/stub copper -- not copper plus halo -- against
+            the grid's blocked cells, which already carry the halo.  The
+            #5700 default (``False``) counts the clearance twice and treats a
+            1.5 x 0.3 mm QFP pin as a 0.76 mm-radius disc, which leaves no
+            site at all beside a 0.5 mm-pitch pin row (board 04's LQFP-48).
+            The marked keep-out is the same in both modes.
+        escape_len: Issue #6413 -- length (mm) of the straight outward
+            escape corridor each same-layer signal SMD pin keeps in front of
+            its tip, from that tip along its long axis away from its
+            footprint's centroid.  ``None`` means ``via_diameter +
+            clearance``: room for a fan-out via or a 45-degree jog.  Only
+            used in ``exact_pads`` mode (the escape-corridor guard).
     """
 
     via_diameter: float = 0.6
@@ -82,6 +138,8 @@ class PlaneViaSiteRules:
     hole_to_hole: float = 0.5
     stub_width: float = 0.2
     max_reach: float = 2.0
+    exact_pads: bool = False
+    escape_len: float | None = None
 
 
 @dataclass(frozen=True)
@@ -94,6 +152,52 @@ class PlaneViaSite:
     pads: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class PlaneViaStub:
+    """The pad-to-site stub one served pad needs (Issue #6401).
+
+    Attributes:
+        pad: ``REF.PIN`` of the served pad.
+        net_name: The pad's (plane) net.
+        layer: The pad's copper layer (:class:`~.layers.Layer`).
+        pad_x, pad_y: Pad centre (mm).
+        site_x, site_y: The pad's final reserved site (mm).
+    """
+
+    pad: str
+    net_name: str
+    layer: object
+    pad_x: float
+    pad_y: float
+    site_x: float
+    site_y: float
+
+
+@dataclass(frozen=True)
+class AreaArrayLink:
+    """Two orthogonally adjacent same-pour pads of an area array (#6673).
+
+    The pour's fill joins the two pads through the channel between them; a
+    foreign track crossing that channel, or a foreign via on an interstitial
+    beside it, cuts the cluster's fill in two.
+
+    Attributes:
+        net_name: The pour net both pads carry.
+        layer: Lattice layer index of the pads and of the pour.
+        a, b: ``REF.PIN`` of the two pads.
+        ax, ay, bx, by: The two pad centres (mm).
+    """
+
+    net_name: str
+    layer: int
+    a: str
+    b: str
+    ax: float
+    ay: float
+    bx: float
+    by: float
+
+
 @dataclass
 class PlaneViaReservation:
     """Result of :func:`reserve_plane_via_sites`.
@@ -104,11 +208,31 @@ class PlaneViaReservation:
             the pre-route board (they fall back to the post-route ladders,
             exactly as before this reservation existed).
         cells_blocked: Grid cells newly marked blocked, summed over layers.
+        stubs: One stub per served pad, resolved to its final site
+            (Issue #6401: the lattice keep-outs are built from these).
+        rules: The site geometry the reservation was planned with.
+        blocked_escapes: Issue #6413 -- ``(signal pin, served pad)`` pairs
+            where the served pad's site or stub blocks the signal pin's
+            straight outward escape from ONE side (the pin can still jog away
+            from it).  A site that would block a pin from both sides is never
+            taken: that pad goes to ``unreserved``.
+        array_links: Issue #6673 -- the protected pad-to-pad links of
+            area-array pour clusters (:func:`area_array_pour_links`), as
+            lattice keep-outs.  Empty unless a pour floods an area array's
+            own pad layer.
+        array_links_released: Issue #6673 -- ``REF.PIN`` of foreign array
+            pads whose every escape the links would have sealed; the links
+            around them were dropped.
     """
 
     sites: list[PlaneViaSite] = field(default_factory=list)
     unreserved: list[str] = field(default_factory=list)
     cells_blocked: int = 0
+    stubs: list[PlaneViaStub] = field(default_factory=list)
+    rules: PlaneViaSiteRules = field(default_factory=PlaneViaSiteRules)
+    blocked_escapes: list[tuple[str, str]] = field(default_factory=list)
+    array_links: list[AreaArrayLink] = field(default_factory=list)
+    array_links_released: list[str] = field(default_factory=list)
 
 
 def _pad_name(pad: Pad) -> str:
@@ -121,6 +245,47 @@ def _circumscribed_radius(pad: Pad) -> float:
     return math.hypot(half_w, half_h)
 
 
+def _point_box_distance(pad: Pad, x: float, y: float) -> float:
+    """Distance from ``(x, y)`` to the pad's axis-aligned copper box."""
+    half_w, half_h = pad_half_extents(pad)
+    dx = max(abs(x - pad.x) - half_w, 0.0)
+    dy = max(abs(y - pad.y) - half_h, 0.0)
+    return math.hypot(dx, dy)
+
+
+def _segment_box_distance(ax: float, ay: float, bx: float, by: float, pad: Pad) -> float:
+    """Distance from segment ``a-b`` to the pad's axis-aligned copper box."""
+    half_w, half_h = pad_half_extents(pad)
+    x0, x1 = pad.x - half_w, pad.x + half_w
+    y0, y1 = pad.y - half_h, pad.y + half_h
+    # Liang-Barsky clip: zero when the segment touches the box.
+    t0, t1 = 0.0, 1.0
+    dx, dy = bx - ax, by - ay
+    inside = True
+    for p, q in ((-dx, ax - x0), (dx, x1 - ax), (-dy, ay - y0), (dy, y1 - ay)):
+        if p == 0.0:
+            if q < 0.0:
+                inside = False
+                break
+        else:
+            t = q / p
+            if p < 0.0:
+                t0 = max(t0, t)
+            else:
+                t1 = min(t1, t)
+            if t0 > t1:
+                inside = False
+                break
+    if inside:
+        return 0.0
+    corners = ((x0, y0), (x0, y1), (x1, y0), (x1, y1))
+    return min(
+        _point_box_distance(pad, ax, ay),
+        _point_box_distance(pad, bx, by),
+        *(_segment_point_distance(ax, ay, bx, by, cx, cy) for cx, cy in corners),
+    )
+
+
 def _segment_point_distance(
     ax: float, ay: float, bx: float, by: float, px: float, py: float
 ) -> float:
@@ -130,6 +295,65 @@ def _segment_point_distance(
         return math.hypot(px - ax, py - ay)
     t = max(0.0, min(1.0, ((px - ax) * dx + (py - ay) * dy) / length_sq))
     return math.hypot(ax + t * dx - px, ay + t * dy - py)
+
+
+def _segments_cross(
+    ax: float, ay: float, bx: float, by: float, cx: float, cy: float, dx: float, dy: float
+) -> bool:
+    def orient(px: float, py: float, qx: float, qy: float, rx: float, ry: float) -> float:
+        return (qx - px) * (ry - py) - (qy - py) * (rx - px)
+
+    d1 = orient(cx, cy, dx, dy, ax, ay)
+    d2 = orient(cx, cy, dx, dy, bx, by)
+    d3 = orient(ax, ay, bx, by, cx, cy)
+    d4 = orient(ax, ay, bx, by, dx, dy)
+    return d1 * d2 < 0 and d3 * d4 < 0
+
+
+def _segment_segment_distance(
+    ax: float, ay: float, bx: float, by: float, cx: float, cy: float, dx: float, dy: float
+) -> float:
+    """Distance between segments ``a-b`` and ``c-d`` (zero when they cross)."""
+    if _segments_cross(ax, ay, bx, by, cx, cy, dx, dy):
+        return 0.0
+    return min(
+        _segment_point_distance(ax, ay, bx, by, cx, cy),
+        _segment_point_distance(ax, ay, bx, by, dx, dy),
+        _segment_point_distance(cx, cy, dx, dy, ax, ay),
+        _segment_point_distance(cx, cy, dx, dy, bx, by),
+    )
+
+
+@dataclass(frozen=True)
+class _EscapeCorridor:
+    """A signal pin's straight outward escape (Issue #6413).
+
+    The centreline runs from the pin's tip ``a`` to ``b``, ``escape_len``
+    further along the pin's long axis, away from its footprint's centroid;
+    ``(ux, uy)`` is the unit direction.
+    """
+
+    pad: str
+    layer: object
+    ax: float
+    ay: float
+    bx: float
+    by: float
+    ux: float
+    uy: float
+    #: Grid net id of the pin (Issue #6428: its own copper never flanks it).
+    net: int = 0
+
+    def sides(self, points: Sequence[tuple[float, float]]) -> frozenset[int]:
+        """Which side(s) of the centreline reserved copper at ``points`` is on.
+
+        ``-1`` / ``+1`` for right / left of the escape direction.  A point on
+        the centreline, or a stub whose ends straddle it, blocks both.
+        """
+        offsets = [self.ux * (py - self.ay) - self.uy * (px - self.ax) for px, py in points]
+        if any(abs(o) <= 1e-9 for o in offsets) or (min(offsets) < 0.0 < max(offsets)):
+            return frozenset((-1, 1))
+        return frozenset((1,) if offsets[0] > 0 else (-1,))
 
 
 def _disc_offsets(radius_cells: float) -> list[tuple[int, int]]:
@@ -165,7 +389,13 @@ def _capsule_cells(
 class _SitePlanner:
     """Finds legal sites against the pre-route grid plus pad geometry."""
 
-    def __init__(self, grid: RoutingGrid, rules: PlaneViaSiteRules) -> None:
+    def __init__(
+        self,
+        grid: RoutingGrid,
+        rules: PlaneViaSiteRules,
+        plane_nets: Iterable[str] = (),
+        targets: Sequence[Pad] = (),
+    ) -> None:
         self.grid = grid
         self.rules = rules
         self.pads: list[Pad] = list(grid._pads)
@@ -183,8 +413,250 @@ class _SitePlanner:
         self.via_r = rules.via_diameter / 2.0
         self.disc_radius = self.via_r + self.halo
         self.disc = _disc_offsets(self.disc_radius / grid.resolution)
+        # Issue #6401: a blocked cell already carries the router's own halo
+        # (``trace_clearance + trace_width / 2`` past the obstacle copper), so
+        # in exact mode the LEGALITY probe for copper of half-width ``h`` that
+        # needs ``rules.clearance`` is a disc of ``h + clearance - halo``
+        # around its centre -- only the part of the clearance the halo does
+        # not already hold.  Pads are measured exactly in ``_pad_gap``; this
+        # probe guards the rest of the grid (edge clearance, keep-outs,
+        # preserved copper).  The marked keep-out stays ``disc``.
+        grid_halo = router_rules.trace_clearance + router_rules.trace_width / 2.0
+        if rules.exact_pads:
+            self.probe_disc = _disc_offsets(
+                max(self.via_r + rules.clearance - grid_halo, 0.0) / grid.resolution
+            )
+            # Floor at half a cell so a diagonal stub still probes the
+            # cells its centreline crosses.
+            self.stub_probe = max(
+                rules.stub_width / 2.0 + rules.clearance - grid_halo, grid.resolution / 2.0
+            )
+        else:
+            self.probe_disc = self.disc
+            self.stub_probe = rules.stub_width / 2.0 + self.halo
         self.all_layers = list(range(grid.num_layers))
         self.sites: list[PlaneViaSite] = []
+
+        # Issue #6413: escape-corridor guard (exact mode only, the
+        # ``kct route`` path).  Reserved copper is clear of a signal pin's
+        # corridor when a trace on its centreline keeps the clearance.
+        self.plane_nets = frozenset(plane_nets)
+        gap = max(router_rules.trace_clearance, rules.clearance)
+        half_trace = router_rules.trace_width / 2.0
+        self.escape_len = (
+            rules.escape_len
+            if rules.escape_len is not None
+            else rules.via_diameter + rules.clearance
+        )
+        self.site_reach = self.via_r + gap + half_trace
+        self.stub_reach = rules.stub_width / 2.0 + gap + half_trace
+        self.corridors: list[_EscapeCorridor] = self._build_corridors() if rules.exact_pads else []
+        self.at_risk = self._corridors_at_risk(targets)
+        self.corridor_sides: dict[int, frozenset[int]] = {}
+        # Issue #6428: sides FIXED obstacles (foreign pads, keep-outs, the
+        # board edge) already block, so a site on the other side flanks the
+        # pin too.  The tip margin keeps the pin's own row neighbours --
+        # whose halos reach ``grid_halo`` past the tip line -- out.
+        tip_margin = grid_halo + grid.resolution
+        self.static_sides: dict[int, frozenset[int]] = {
+            idx: sides
+            for idx, c in enumerate(self.corridors)
+            if (sides := self._static_sides(c, tip_margin))
+        }
+        self.blocked_escapes: list[tuple[str, str]] = []
+        self._near_cache: dict[str, list[int]] = {}
+
+    # -- escape corridors (Issue #6413) ---------------------------------------
+    def _build_corridors(self) -> list[_EscapeCorridor]:
+        """One straight outward corridor per signal SMD pin, every footprint.
+
+        Built across footprints, not just the served pad's own: board 03's
+        crystal ``Y1.2`` site sat in front of ``U1.19``.
+        """
+        by_ref: dict[str, list[Pad]] = {}
+        for p in self.pads:
+            if p.ref and not p.steiner_point:
+                by_ref.setdefault(p.ref, []).append(p)
+        corridors: list[_EscapeCorridor] = []
+        for ref in sorted(by_ref):
+            body = by_ref[ref]
+            if len(body) < 2:
+                continue  # no centroid to escape away from
+            cx = sum(p.x for p in body) / len(body)
+            cy = sum(p.y for p in body) / len(body)
+            for p in body:
+                if not p.net_name or p.net_name in self.plane_nets or p.through_hole:
+                    continue
+                half_w, half_h = pad_half_extents(p)
+                if half_w >= half_h:
+                    ux, uy = (1.0 if p.x >= cx else -1.0), 0.0
+                    ax, ay = p.x + ux * half_w, p.y
+                else:
+                    ux, uy = 0.0, (1.0 if p.y >= cy else -1.0)
+                    ax, ay = p.x, p.y + uy * half_h
+                corridors.append(
+                    _EscapeCorridor(
+                        pad=_pad_name(p),
+                        layer=p.layer,
+                        ax=ax,
+                        ay=ay,
+                        bx=ax + ux * self.escape_len,
+                        by=ay + uy * self.escape_len,
+                        ux=ux,
+                        uy=uy,
+                        net=int(p.net),
+                    )
+                )
+        return corridors
+
+    def _static_sides(self, c: _EscapeCorridor, margin: float) -> frozenset[int]:
+        """Sides of ``c`` a FIXED obstacle already blocks (Issue #6428).
+
+        Probes the pre-route grid on the corridor's layer within
+        ``site_reach`` of its centreline: a cell that is off the grid (the
+        board edge), or blocked and not owned by the pin's own net (a
+        foreign pad's halo, a plane pad -- rewritten to net 0 --, a
+        keep-out, edge clearance), blocks the side it lies on.
+
+        Only cells whose projection on the corridor axis lies more than
+        ``margin`` past the pin tip count: a fine-pitch pin's own row
+        neighbours sit beside the tip, within ``site_reach``, and counting
+        their halos would mark every row pin as blocked on both sides.
+        Cells on the centreline block neither side (the pin must jog
+        anyway), and a corridor fixed obstacles block on BOTH sides gets no
+        static side: its straight escape is already gone, so the guard's
+        model does not describe it.
+        """
+        grid = self.grid
+        try:
+            layer = grid.layer_to_index(c.layer.value)  # type: ignore[attr-defined]
+        except Exception:
+            return frozenset()
+        sides: set[int] = set()
+        for gx, gy in _capsule_cells(grid, c.ax, c.ay, c.bx, c.by, self.site_reach):
+            wx = grid.origin_x + gx * grid.resolution
+            wy = grid.origin_y + gy * grid.resolution
+            t = c.ux * (wx - c.ax) + c.uy * (wy - c.ay)
+            if t <= margin:
+                continue
+            if 0 <= gx < grid.cols and 0 <= gy < grid.rows:
+                if not self.blocked[layer, gy, gx] or int(self.net[layer, gy, gx]) == c.net:
+                    continue
+            offset = c.ux * (wy - c.ay) - c.uy * (wx - c.ax)
+            if abs(offset) <= 1e-9:
+                continue
+            sides.add(1 if offset > 0 else -1)
+            if len(sides) == 2:
+                return frozenset()
+        return frozenset(sides)
+
+    def _corridors_at_risk(self, targets: Sequence[Pad]) -> frozenset[int]:
+        """Corridors a served pad could reach from BOTH sides.
+
+        Only such a pin can end up flanked.  A pin with served pads on one
+        side at most can be blocked from that side only, and it can still jog
+        away; demoting every site in front of it pushed sites out past the
+        whole pin row (on board 04, U2.35's site 0.65 mm further out, off the
+        B.Cu pour, and the pad lost its weld).
+        """
+        reach = self.rules.max_reach + self.site_reach
+        risky: set[int] = set()
+        for idx, c in enumerate(self.corridors):
+            sides: set[int] = set()
+            for p in targets:
+                if _segment_point_distance(c.ax, c.ay, c.bx, c.by, p.x, p.y) <= reach:
+                    sides |= c.sides([(p.x, p.y)])
+            if len(sides) == 2:
+                risky.add(idx)
+        return frozenset(risky)
+
+    def _near_corridors(self, pad: Pad) -> list[int]:
+        """Corridors any site or stub of ``pad`` within ``max_reach`` can touch."""
+        name = _pad_name(pad)
+        cached = self._near_cache.get(name)
+        if cached is None:
+            reach = self.rules.max_reach + max(self.site_reach, self.stub_reach) + 1e-6
+            cached = [
+                i
+                for i, c in enumerate(self.corridors)
+                if _segment_point_distance(c.ax, c.ay, c.bx, c.by, pad.x, pad.y) <= reach
+            ]
+            self._near_cache[name] = cached
+        return cached
+
+    def _escape_hits(
+        self, pad: Pad, x: float, y: float, *, disc: bool = True
+    ) -> dict[int, frozenset[int]]:
+        """Corridors a site at ``(x, y)`` (and ``pad``'s stub to it) enters.
+
+        The via disc spans every layer; the stub only blocks corridors on the
+        pad's own layer.  ``disc=False`` checks the stub alone (a shared site
+        whose disc is already counted).
+        """
+        hits: dict[int, frozenset[int]] = {}
+        for idx in self._near_corridors(pad):
+            c = self.corridors[idx]
+            sides: frozenset[int] = frozenset()
+            if disc and (
+                _segment_point_distance(c.ax, c.ay, c.bx, c.by, x, y) < self.site_reach - 1e-9
+            ):
+                sides |= c.sides([(x, y)])
+            if c.layer == pad.layer and (
+                _segment_segment_distance(c.ax, c.ay, c.bx, c.by, pad.x, pad.y, x, y)
+                < self.stub_reach - 1e-9
+            ):
+                sides |= c.sides([(pad.x, pad.y), (x, y)])
+            if sides:
+                hits[idx] = sides
+        return hits
+
+    def _flanks(self, hits: dict[int, frozenset[int]]) -> bool:
+        """Would these hits leave some signal pin blocked from both sides?
+
+        A side counts as blocked by reserved copper already committed
+        (``corridor_sides``) or, Issue #6428, by a fixed obstacle
+        (``static_sides``).
+        """
+        return any(
+            len(
+                self.corridor_sides.get(idx, frozenset())
+                | self.static_sides.get(idx, frozenset())
+                | sides
+            )
+            == 2
+            for idx, sides in hits.items()
+        )
+
+    def _verdict(self, hits: dict[int, frozenset[int]]) -> str:
+        """``"flank"`` (never taken), ``"risky"`` (a last resort: it blocks a
+        pin that could still be flanked) or ``"ok"`` (no hit, or one-sided
+        blocks on pins that cannot be flanked; recorded)."""
+        if self._flanks(hits):
+            return "flank"
+        if any(idx in self.at_risk for idx in hits):
+            return "risky"
+        return "ok"
+
+    def _commit_hits(self, pad: Pad, hits: dict[int, frozenset[int]]) -> None:
+        served = _pad_name(pad)
+        for idx, sides in sorted(hits.items()):
+            self.corridor_sides[idx] = self.corridor_sides.get(idx, frozenset()) | sides
+            pair = (self.corridors[idx].pad, served)
+            if pair not in self.blocked_escapes:
+                self.blocked_escapes.append(pair)
+
+    def _place(self, pad: Pad, x: float, y: float, hits: dict[int, frozenset[int]]) -> PlaneViaSite:
+        site = PlaneViaSite(pad.net_name, x, y, (_pad_name(pad),))
+        self.sites.append(site)
+        self._commit_hits(pad, hits)
+        return site
+
+    def _share(self, idx: int, pad: Pad, hits: dict[int, frozenset[int]]) -> PlaneViaSite:
+        site = self.sites[idx]
+        shared = PlaneViaSite(site.net_name, site.x, site.y, site.pads + (_pad_name(pad),))
+        self.sites[idx] = shared
+        self._commit_hits(pad, hits)
+        return shared
 
     # -- legality ------------------------------------------------------------
     def _cells_free(self, layer: int, cells: Iterable[tuple[int, int]]) -> bool:
@@ -208,10 +680,15 @@ class _SitePlanner:
         owners = self.net[layer, ya, xa]
         return not bool(np.any(blocked & (owners != 0)))
 
+    def _pad_gap(self, other: Pad, x: float, y: float) -> float:
+        if self.rules.exact_pads:
+            return _point_box_distance(other, x, y)
+        return math.hypot(other.x - x, other.y - y) - _circumscribed_radius(other)
+
     def _via_ok(self, pad: Pad, x: float, y: float) -> bool:
         rules = self.rules
         for other in self.pads:
-            gap = math.hypot(other.x - x, other.y - y) - _circumscribed_radius(other)
+            gap = self._pad_gap(other, x, y)
             if other.net_name == pad.net_name:
                 # Never a via-in-pad (the stitcher runs --avoid-pad-overlap).
                 if gap < self.via_r:
@@ -227,7 +704,7 @@ class _SitePlanner:
             if centre < max(rules.via_drill + rules.hole_to_hole, 2 * self.via_r + rules.clearance):
                 return False
         gx, gy = self.grid.world_to_grid(x, y)
-        disc_cells = [(gx + dx, gy + dy) for dx, dy in self.disc]
+        disc_cells = [(gx + dx, gy + dy) for dx, dy in self.probe_disc]
         return all(self._cells_free(layer, disc_cells) for layer in self.all_layers)
 
     def _stub_ok(self, pad: Pad, x: float, y: float) -> bool:
@@ -238,11 +715,15 @@ class _SitePlanner:
                 continue
             if not (other.through_hole or other.layer == pad.layer):
                 continue
-            dist = _segment_point_distance(pad.x, pad.y, x, y, other.x, other.y)
-            if dist - _circumscribed_radius(other) < half + rules.clearance:
+            if rules.exact_pads:
+                gap = _segment_box_distance(pad.x, pad.y, x, y, other)
+            else:
+                dist = _segment_point_distance(pad.x, pad.y, x, y, other.x, other.y)
+                gap = dist - _circumscribed_radius(other)
+            if gap < half + rules.clearance:
                 return False
         layer = self.grid.layer_to_index(pad.layer.value)
-        cells = _capsule_cells(self.grid, pad.x, pad.y, x, y, half + self.halo)
+        cells = _capsule_cells(self.grid, pad.x, pad.y, x, y, self.stub_probe)
         return self._cells_free(layer, cells)
 
     # -- search --------------------------------------------------------------
@@ -266,22 +747,31 @@ class _SitePlanner:
         rules = self.rules
         res = self.grid.resolution
         # Reuse an existing same-net site within reach before claiming a new
-        # one: two pads sharing a via block half the board area.
+        # one: two pads sharing a via block half the board area.  Issue
+        # #6413: a shared site whose new stub would block a signal pin's
+        # escape is kept only as a fallback behind a clear new site.
+        reuse: tuple[int, dict[int, frozenset[int]]] | None = None
         for idx, site in enumerate(self.sites):
             if site.net_name != pad.net_name:
                 continue
             if math.hypot(site.x - pad.x, site.y - pad.y) > rules.max_reach:
                 continue
             if self._stub_ok(pad, site.x, site.y):
-                shared = PlaneViaSite(site.net_name, site.x, site.y, site.pads + (_pad_name(pad),))
-                self.sites[idx] = shared
-                return shared
+                hits = self._escape_hits(pad, site.x, site.y, disc=False)
+                verdict = self._verdict(hits)
+                if verdict == "ok":
+                    return self._share(idx, pad, hits)
+                if reuse is None and verdict == "risky":
+                    reuse = (idx, hits)
 
         preferred = self._preferred_angle(pad)
         angles = sorted(
             (2 * math.pi * k / 16 for k in range(16)),
             key=lambda a: (abs(math.remainder(a - preferred, 2 * math.pi)), a),
         )
+        if rules.exact_pads:
+            return self._find_exact(pad, angles, preferred, reuse)
+        # Outside exact mode there are no corridors, so ``reuse`` is unset.
         start = _circumscribed_radius(pad) + self.via_r
         seen: set[tuple[int, int]] = set()
         steps = int(math.ceil(max(0.0, rules.max_reach - start) / res))
@@ -303,6 +793,92 @@ class _SitePlanner:
                     return site
         return None
 
+    def _find_exact(
+        self,
+        pad: Pad,
+        angles: list[float],
+        preferred: float,
+        reuse: tuple[int, dict[int, frozenset[int]]] | None = None,
+    ) -> PlaneViaSite | None:
+        """Issue #6401: candidate order for ``exact_pads``.
+
+        Candidates lie on the same 16 rays from the pad centre, out to
+        ``max_reach``, but are tried by the gap between the via copper and
+        the pad's own copper box first (one grid step per bucket) and by
+        deviation from the fan-out direction second.  Walking by centre
+        distance instead would always try the pad's short side first -- the
+        gap between neighbouring pins, where the site costs routing most --
+        before the outward end of the pad at the same clearance.
+
+        Issue #6413 (escape-corridor guard): a candidate that would leave a
+        signal pin's straight outward corridor blocked from BOTH sides,
+        counting the sites already placed, is never taken -- if nothing else
+        is legal the pad stays unreserved and falls back to the post-route
+        ladders.  A candidate entering the corridor of a pin that served pads
+        could still flank (``at_risk``) is tried only after every other
+        candidate (and after sharing an existing site, ``reuse``).  A
+        one-sided block on a pin that cannot be flanked keeps its #6401 rank
+        and is recorded.  Once the guard has skipped a legal candidate,
+        candidates in the inward half-plane (under the body) wait until the
+        outward half is exhausted, so the guard never trades a pin's outward
+        escape for a via under the part.  When the guard skips nothing the
+        order is exactly the #6401 order.
+        """
+        rules = self.rules
+        res = self.grid.resolution
+        rank = {angle: i for i, angle in enumerate(angles)}
+        candidates: dict[tuple[int, int], tuple[int, int]] = {}
+        steps = int(math.ceil(rules.max_reach / res))
+        for angle in angles:
+            for step in range(1, steps + 1):
+                dist = step * res
+                gx, gy = self.grid.world_to_grid(
+                    pad.x + dist * math.cos(angle), pad.y + dist * math.sin(angle)
+                )
+                x, y = self.grid.grid_to_world(gx, gy)
+                if math.hypot(x - pad.x, y - pad.y) > rules.max_reach + 1e-9:
+                    continue
+                gap = _point_box_distance(pad, x, y) - self.via_r
+                if gap < -1e-9:
+                    continue  # the via copper would overlap the pad
+                key = (int(round(gap / res)), rank[angle])
+                if (gx, gy) not in candidates or key < candidates[(gx, gy)]:
+                    candidates[(gx, gy)] = key
+        last_resort: list[tuple[float, float, dict[int, frozenset[int]]]] = []
+        inward: list[tuple[float, float, dict[int, frozenset[int]]]] = []
+        guard_moved = False
+        for (gx, gy), key in sorted(candidates.items(), key=lambda kv: (kv[1], kv[0])):
+            x, y = self.grid.grid_to_world(gx, gy)
+            hits = self._escape_hits(pad, x, y)
+            verdict = self._verdict(hits)
+            if verdict != "ok":
+                # Only a LEGAL candidate the guard skips changes the outcome.
+                if self._via_ok(pad, x, y) and self._stub_ok(pad, x, y):
+                    guard_moved = True
+                    if verdict == "risky":
+                        last_resort.append((x, y, hits))
+                continue
+            if guard_moved and (
+                abs(math.remainder(angles[key[1]] - preferred, 2 * math.pi)) > math.pi / 2 + 1e-9
+            ):
+                # The guard skipped a nearer outward site: do not let that
+                # pull the site under the body (the inward half-plane, where
+                # pins escape and ``via_under_body`` objects).  Outward sites
+                # further out are tried first; these come next.
+                inward.append((x, y, hits))
+                continue
+            if self._via_ok(pad, x, y) and self._stub_ok(pad, x, y):
+                return self._place(pad, x, y, hits)
+        for x, y, hits in inward:
+            if self._via_ok(pad, x, y) and self._stub_ok(pad, x, y):
+                return self._place(pad, x, y, hits)
+        if reuse is not None:
+            return self._share(reuse[0], pad, reuse[1])
+        if last_resort:
+            x, y, hits = last_resort[0]
+            return self._place(pad, x, y, hits)
+        return None
+
 
 def _plane_pads(grid: RoutingGrid, nets: Sequence[str]) -> list[Pad]:
     wanted = set(nets)
@@ -314,10 +890,571 @@ def _plane_pads(grid: RoutingGrid, nets: Sequence[str]) -> list[Pad]:
     return sorted(pads, key=lambda p: (p.net_name, p.ref, p.pin, p.x, p.y))
 
 
+def _interior_test(
+    positions: Iterable[tuple[float, float]], tolerance: float
+) -> Callable[[float, float], bool]:
+    """``(x, y) -> bool``: strictly inside the bounding box of ``positions``."""
+    pts = list(positions)
+    x0 = min(x for x, _ in pts)
+    x1 = max(x for x, _ in pts)
+    y0 = min(y for _, y in pts)
+    y1 = max(y for _, y in pts)
+
+    def interior(x: float, y: float) -> bool:
+        return x0 + tolerance < x < x1 - tolerance and y0 + tolerance < y < y1 - tolerance
+
+    return interior
+
+
+def select_plane_via_pads(
+    pads: Sequence[Pad],
+    nets: Iterable[str],
+    *,
+    min_footprint_pads: int = 3,
+    tolerance: float = 0.05,
+) -> tuple[list[Pad], dict[str, str]]:
+    """Pick the plane-net SMD pads a pre-route reservation should serve (#6401).
+
+    The #5700 caveat as a geometric rule (see the module docstring): a pad
+    is served only when it is an SMD pad of one of ``nets`` on the
+    *perimeter* of a footprint with at least ``min_footprint_pads`` pads,
+    and that footprint is not an area array.
+
+    A pad is on the perimeter when its centre lies within ``tolerance`` of
+    an edge of the bounding box of its footprint's pad centres.  A footprint
+    is an area array when more than one of its pads is strictly inside that
+    box -- counted by pad number, so an exposed pad split into same-numbered
+    sub-pads is still one pad; a single interior pad is an exposed/thermal
+    pad and only that pad is skipped.
+
+    Args:
+        pads: Every pad on the board (all nets: the footprint geometry needs
+            the signal pins too).
+        nets: Plane-net names whose pads may be served.
+        min_footprint_pads: Smallest footprint (pad count) considered.
+        tolerance: Perimeter tolerance in mm.
+
+    Returns:
+        ``(selected, skipped)``: the served pads in deterministic order, and
+        ``REF.PIN -> reason`` for each candidate pad left out.
+    """
+    wanted = set(nets)
+    by_ref: dict[str, list[Pad]] = {}
+    for pad in pads:
+        if pad.ref and not pad.steiner_point:
+            by_ref.setdefault(pad.ref, []).append(pad)
+
+    selected: list[Pad] = []
+    skipped: dict[str, str] = {}
+    for ref in sorted(by_ref):
+        body = by_ref[ref]
+        candidates = [p for p in body if p.net_name in wanted and not p.through_hole]
+        if not candidates:
+            continue
+        # Distinct pad positions: a footprint may repeat a pad number.
+        positions = {(round(p.x, 4), round(p.y, 4)) for p in body}
+        if len(positions) < min_footprint_pads:
+            for p in candidates:
+                skipped[_pad_name(p)] = f"footprint has {len(positions)} pad(s)"
+            continue
+        interior = _interior_test(positions, tolerance)
+        # Count interior pad NUMBERS, not copper pieces: an exposed pad split
+        # into thermal sub-pads repeats one number and its paste apertures
+        # carry none (board 05's U2/U3), while a BGA field numbers every ball.
+        interior_numbers = {p.pin for p in body if p.pin and interior(p.x, p.y)}
+        if len(interior_numbers) > 1:
+            for p in candidates:
+                skipped[_pad_name(p)] = (
+                    f"area-array footprint ({len(interior_numbers)} interior pads)"
+                )
+            continue
+        for p in candidates:
+            if interior(p.x, p.y):
+                skipped[_pad_name(p)] = "interior (exposed) pad"
+            else:
+                selected.append(p)
+    selected.sort(key=lambda p: (p.net_name, p.ref, p.pin, p.x, p.y))
+    return selected, skipped
+
+
+def _array_lattice(body: Sequence[Pad], tolerance: float) -> dict[tuple[int, int], Pad] | None:
+    """Index an area array's pads by integer ``(row, column)`` (#6673).
+
+    The pitch is the smallest centre-to-centre distance between two pad
+    positions and the axes follow that nearest-neighbour vector, so a
+    rotated footprint indexes the same way.  ``None`` when any pad is off
+    the lattice (a staggered or irregular array): the cluster/channel model
+    below assumes a full rectangular grid of balls.
+    """
+    positions = sorted({(round(p.x, 4), round(p.y, 4)) for p in body})
+    if len(positions) < 4:
+        return None
+    pts = np.asarray(positions, dtype=float)
+    diff = pts[:, None, :] - pts[None, :, :]
+    dist = np.hypot(diff[..., 0], diff[..., 1])
+    np.fill_diagonal(dist, np.inf)
+    pitch = float(dist.min())
+    if not math.isfinite(pitch) or pitch <= 2 * tolerance:
+        return None
+    i, j = np.unravel_index(int(np.argmin(dist)), dist.shape)
+    theta = math.atan2(pts[j, 1] - pts[i, 1], pts[j, 0] - pts[i, 0])
+    # Fold onto [0, 90deg): either nearest-neighbour axis names the lattice.
+    theta = math.fmod(theta, math.pi / 2.0)
+    if theta < 0:
+        theta += math.pi / 2.0
+    c, s_ = math.cos(theta), math.sin(theta)
+    x0, y0 = positions[0]
+    snap = tolerance / pitch * 2.0 + 0.05
+    out: dict[tuple[int, int], Pad] = {}
+    for pad in sorted(body, key=lambda p: (p.pin, p.x, p.y)):
+        dx, dy = pad.x - x0, pad.y - y0
+        u = (dx * c + dy * s_) / pitch
+        v = (-dx * s_ + dy * c) / pitch
+        ru, rv = round(u), round(v)
+        if abs(u - ru) > snap or abs(v - rv) > snap:
+            return None
+        out.setdefault((int(rv), int(ru)), pad)
+    return out
+
+
+def area_array_pour_links(
+    pads: Sequence[Pad],
+    plane_layers: Mapping[str, Iterable[int]],
+    layer_index: Callable[[object], int],
+    *,
+    tolerance: float = 0.05,
+) -> tuple[list[AreaArrayLink], list[str]]:
+    """Links that keep an area array's same-pour pad clusters whole (#6673).
+
+    :func:`select_plane_via_pads` skips area arrays on purpose: a BGA field
+    escapes by trace, and a via beside every ball would block those
+    escapes.  That is right when the pour sits on another layer.  When a
+    pour floods the array's *own* pad layer (a 4-layer board's third power
+    net goes on ``F.Cu``, ``zones.generator._assign_layers_for_pour_nets``),
+    the field's balls reach the pour only through that layer's fill
+    between them -- and nothing stopped a foreign track from running down
+    the channel between two of them.  Board 07rf: a lattice ``TMDS_D2_P``
+    leg ran between U4's rows C and D, a ``TMDS`` via took the B/C
+    interstitial, and balls C3/C4 were left on a 0.53 mm2 fill island no
+    stitch could legally reach.
+
+    For each area-array footprint (same rule as :func:`select_plane_via_pads`:
+    more than one interior pad number) whose pads index onto a rectangular
+    lattice (:func:`_array_lattice`), every pair of row- or column-adjacent
+    SMD pads of one pour net, on a layer that net's pour floods, is a link.
+    :func:`area_array_link_keepout_areas` turns each link into a keep-out on
+    that layer, so a foreign track cannot cross between the two pads and a
+    foreign via cannot take an interstitial beside them.  Tracks running
+    *along* a channel at the cluster's edge are not affected.
+
+    Foreign pads must keep an exit.  A foreign SMD pad on the link layer is
+    *sealed* when, walking the array's interstitial faces from its four
+    corners without crossing a foreign link, it reaches neither the array's
+    outside nor an interstitial with no link on any side (where it could
+    drop a via).  Every link on the sides of a sealed pad's corner faces is
+    then dropped, and the pad is reported.
+
+    Args:
+        pads: Every pad on the board.
+        plane_layers: Pour net -> lattice layer indices its pour floods.
+        layer_index: Maps a pad's :class:`~.layers.Layer` to that index.
+        tolerance: Perimeter / lattice-snap tolerance (mm).
+
+    Returns:
+        ``(links, released)``: the links in deterministic order, and the
+        ``REF.PIN`` of each sealed foreign pad whose links were dropped.
+    """
+    layers_of = {name: frozenset(int(x) for x in idx) for name, idx in plane_layers.items() if idx}
+    if not layers_of:
+        return [], []
+    by_ref: dict[str, list[Pad]] = {}
+    for pad in pads:
+        if pad.ref and not pad.steiner_point:
+            by_ref.setdefault(pad.ref, []).append(pad)
+
+    def pad_layer(pad: Pad) -> int | None:
+        try:
+            return int(layer_index(pad.layer))
+        except Exception:
+            return None
+
+    links: list[AreaArrayLink] = []
+    released: list[str] = []
+    for ref in sorted(by_ref):
+        body = by_ref[ref]
+        if not any(p.net_name in layers_of and not p.through_hole for p in body):
+            continue
+        positions = {(round(p.x, 4), round(p.y, 4)) for p in body}
+        if len(positions) < 4:
+            continue
+        interior = _interior_test(positions, tolerance)
+        if len({p.pin for p in body if p.pin and interior(p.x, p.y)}) <= 1:
+            continue
+        cells = _array_lattice(body, tolerance)
+        if cells is None:
+            continue
+
+        def poured_layer(pad: Pad) -> int | None:
+            if pad.through_hole or pad.net_name not in layers_of:
+                return None
+            layer = pad_layer(pad)
+            return layer if layer is not None and layer in layers_of[pad.net_name] else None
+
+        # (layer, cell_a, cell_b) -> link, cell_a < cell_b.
+        found: dict[tuple[int, tuple[int, int], tuple[int, int]], AreaArrayLink] = {}
+        for cell in sorted(cells):
+            pad = cells[cell]
+            layer = poured_layer(pad)
+            if layer is None:
+                continue
+            for nb in ((cell[0] + 1, cell[1]), (cell[0], cell[1] + 1)):
+                other = cells.get(nb)
+                if other is None or other.net_name != pad.net_name:
+                    continue
+                if poured_layer(other) != layer:
+                    continue
+                found[(layer, cell, nb)] = AreaArrayLink(
+                    net_name=pad.net_name,
+                    layer=layer,
+                    a=_pad_name(pad),
+                    b=_pad_name(other),
+                    ax=pad.x,
+                    ay=pad.y,
+                    bx=other.x,
+                    by=other.y,
+                )
+        if not found:
+            continue
+
+        rows = [r for r, _ in cells]
+        cols = [c for _, c in cells]
+        r0, r1, c0, c1 = min(rows), max(rows), min(cols), max(cols)
+
+        def sides(face: tuple[int, int]) -> list[tuple[tuple[int, int], tuple[int, int]]]:
+            # Face (a, b) is the interstitial square with corners (a, b),
+            # (a+1, b), (a, b+1), (a+1, b+1); each side is a cell pair.
+            a, b = face
+            return [
+                ((a, b), (a, b + 1)),
+                ((a + 1, b), (a + 1, b + 1)),
+                ((a, b), (a + 1, b)),
+                ((a, b + 1), (a + 1, b + 1)),
+            ]
+
+        def across(face: tuple[int, int], side_index: int) -> tuple[int, int]:
+            a, b = face
+            return [(a - 1, b), (a + 1, b), (a, b - 1), (a, b + 1)][side_index]
+
+        def outside(face: tuple[int, int]) -> bool:
+            return not (r0 <= face[0] < r1 and c0 <= face[1] < c1)
+
+        for cell in sorted(cells):
+            pad = cells[cell]
+            if pad.through_hole or not pad.net_name:
+                continue
+            layer = pad_layer(pad)
+            if layer is None:
+                continue
+            blocked = {
+                (ca, cb)
+                for (lyr, ca, cb), link in found.items()
+                if lyr == layer and link.net_name != pad.net_name
+            }
+            if not blocked:
+                continue
+            corners = [
+                (cell[0] - 1, cell[1] - 1),
+                (cell[0] - 1, cell[1]),
+                (cell[0], cell[1] - 1),
+                (cell[0], cell[1]),
+            ]
+            seen = set(corners)
+            stack = list(corners)
+            free = False
+            while stack:
+                face = stack.pop()
+                face_sides = sides(face)
+                if outside(face) or not any(sd in blocked for sd in face_sides):
+                    free = True
+                    break
+                for k, sd in enumerate(face_sides):
+                    if sd in blocked:
+                        continue
+                    nxt = across(face, k)
+                    if nxt not in seen:
+                        seen.add(nxt)
+                        stack.append(nxt)
+            if free:
+                continue
+            for face in corners:
+                for ca, cb in sides(face):
+                    if (ca, cb) in blocked:
+                        found.pop((layer, ca, cb), None)
+            released.append(_pad_name(pad))
+        links.extend(found[key] for key in sorted(found))
+    return links, released
+
+
+def area_array_link_keepout_areas(
+    links: Sequence[AreaArrayLink],
+    *,
+    pullback: Mapping[tuple[str, int], float],
+) -> list[Any]:
+    """Project area-array pour links onto lattice keep-outs (Issue #6673).
+
+    Each link becomes a capsule around the segment between the two pad
+    centres, of radius the pour's fill pullback (:func:`plane_fill_pullback`)
+    on the link's layer only, blocking tracks and vias.  A foreign track
+    therefore cannot cross between the two pads, and a foreign via whose
+    pour knockout would reach the segment -- one on an interstitial beside
+    it -- cannot land; a track running along the channel next to the
+    cluster keeps its full width of room.
+
+    Args:
+        links: From :func:`area_array_pour_links`.
+        pullback: ``(net, layer)`` -> fill pullback (mm).  A link with no
+            entry is skipped.
+    """
+    from .lattice.obstacles import KeepoutArea
+
+    areas: list[Any] = []
+    for link in links:
+        radius = pullback.get((link.net_name, link.layer))
+        if not radius or radius <= 0:
+            continue
+        areas.append(
+            KeepoutArea(
+                polygon=_capsule_polygon(link.ax, link.ay, link.bx, link.by, float(radius)),
+                layers=frozenset({link.layer}),
+                blocks_tracks=True,
+                blocks_vias=True,
+                name=f"pour-array-link:{link.net_name}:{link.a}-{link.b}",
+            )
+        )
+    return areas
+
+
+def _regular_polygon(
+    cx: float, cy: float, radius: float, sides: int = 24
+) -> tuple[tuple[float, float], ...]:
+    """A polygon that CONTAINS the circle of ``radius`` (circumscribed)."""
+    r = radius / math.cos(math.pi / sides)
+    return tuple(
+        (cx + r * math.cos(2 * math.pi * k / sides), cy + r * math.sin(2 * math.pi * k / sides))
+        for k in range(sides)
+    )
+
+
+def _capsule_polygon(
+    ax: float, ay: float, bx: float, by: float, radius: float, arc_sides: int = 8
+) -> tuple[tuple[float, float], ...]:
+    """A polygon that CONTAINS the capsule of ``radius`` around ``a-b``."""
+    length = math.hypot(bx - ax, by - ay)
+    if length < 1e-9:
+        return _regular_polygon(ax, ay, radius)
+    theta = math.atan2(by - ay, bx - ax)
+    # Circumscribe each half-disc cap: vertices at radius / cos(step / 2).
+    step = math.pi / arc_sides
+    r = radius / math.cos(step / 2)
+    points: list[tuple[float, float]] = []
+    # Cap around b: from theta - 90deg to theta + 90deg.
+    points.append(
+        (bx + radius * math.cos(theta - math.pi / 2), by + radius * math.sin(theta - math.pi / 2))
+    )
+    for k in range(arc_sides):
+        ang = theta - math.pi / 2 + step * (k + 0.5)
+        points.append((bx + r * math.cos(ang), by + r * math.sin(ang)))
+    points.append(
+        (bx + radius * math.cos(theta + math.pi / 2), by + radius * math.sin(theta + math.pi / 2))
+    )
+    # Cap around a: from theta + 90deg to theta + 270deg.
+    points.append(
+        (ax + radius * math.cos(theta + math.pi / 2), ay + radius * math.sin(theta + math.pi / 2))
+    )
+    for k in range(arc_sides):
+        ang = theta + math.pi / 2 + step * (k + 0.5)
+        points.append((ax + r * math.cos(ang), ay + r * math.sin(ang)))
+    points.append(
+        (
+            ax + radius * math.cos(theta + 3 * math.pi / 2),
+            ay + radius * math.sin(theta + 3 * math.pi / 2),
+        )
+    )
+    return tuple(points)
+
+
+@dataclass(frozen=True)
+class PlaneFill:
+    """One copper pour that carries a reserved net (Issue #6589).
+
+    Attributes:
+        layer: KiCad copper layer name the pour fills (``"In2.Cu"``).
+        clearance: The zone's own clearance to foreign copper (mm), i.e.
+            its ``(connect_pads (clearance ...))``.
+        min_thickness: The zone's ``min_thickness`` (mm).
+    """
+
+    layer: str
+    clearance: float
+    min_thickness: float
+
+
+def plane_fill_pullback(fill: PlaneFill, clearance: float = 0.0) -> float:
+    """Distance a pour's fill retreats from the edge of foreign copper (mm).
+
+    The fill keeps the larger of its zone clearance and the copper
+    ``clearance`` floor from foreign copper, and KiCad's minimum-width pass
+    (fill deflated and re-inflated by ``min_thickness / 2``) pulls a curved
+    knockout's edge back by up to half the minimum thickness more.  Board 03
+    (zone clearance 0.3 mm, ``min_thickness`` 0.25 mm) measured 0.424 mm
+    from a foreign via's barrel edge to the ``VBUS`` fill; this gives 0.425.
+    Never below ``clearance``.
+    """
+    return max(float(fill.clearance), float(clearance)) + max(float(fill.min_thickness), 0.0) / 2.0
+
+
+def plane_fills_from_pcb(pcb: Any, nets: Iterable[str]) -> dict[str, list[PlaneFill]]:
+    """The copper pours of ``nets`` on a parsed board (Issue #6589).
+
+    Args:
+        pcb: The board's root S-expression (``load_pcb``).
+        nets: Net names whose pours are wanted.
+
+    Returns:
+        Net name -> one :class:`PlaneFill` per (zone, copper layer), in file
+        order.  Rule areas (``keepout``) and zones of other nets are skipped;
+        a missing clearance or ``min_thickness`` reads as 0.
+    """
+    wanted = set(nets)
+    fills: dict[str, list[PlaneFill]] = {}
+    if pcb is None:
+        return fills
+    for zone in pcb.iter_children():
+        if zone.tag != "zone" or zone.find_child("keepout") is not None:
+            continue
+        net_name: str | None = None
+        node = zone.find_child("net_name")
+        if node is not None:
+            net_name = node.get_string(0)
+        else:
+            node = zone.find_child("net")
+            if node is not None and node.get_int(0) is None:
+                net_name = node.get_string(0)
+        if not net_name or net_name not in wanted:
+            continue
+        layers: list[str] = []
+        for tag in ("layer", "layers"):
+            node = zone.find_child(tag)
+            if node is not None:
+                layers += [str(v) for v in node.get_atoms() if str(v).endswith(".Cu")]
+        zone_clearance = 0.0
+        connect = zone.find_child("connect_pads")
+        if connect is not None:
+            node = connect.find_child("clearance")
+            if node is not None:
+                zone_clearance = float(node.get_float(0) or 0.0)
+        node = zone.find_child("min_thickness")
+        min_thickness = float(node.get_float(0) or 0.0) if node is not None else 0.0
+        for layer in layers:
+            fills.setdefault(net_name, []).append(PlaneFill(layer, zone_clearance, min_thickness))
+    return fills
+
+
+def plane_via_keepout_areas(
+    reservation: PlaneViaReservation,
+    *,
+    clearance: float,
+    layer_index: Callable[[object], int],
+    num_layers: int,
+    plane_fills: Mapping[str, Sequence[tuple[int, float]]] | None = None,
+) -> list[Any]:
+    """Project a reservation onto the lattice engine's keep-out model (#6401).
+
+    Each reserved site becomes a disc that blocks tracks and vias on every
+    layer (the via barrel spans the stack), and each stub a capsule that
+    blocks tracks and vias on the pad's layer.  The lattice keep-out test is
+    a zero-clearance copper-edge test, so both shapes are the reserved
+    copper grown by ``clearance`` -- signal copper then keeps that clearance
+    from the via and the stub, as it would from placed copper.
+
+    Args:
+        reservation: The planned reservation (sites and stubs).
+        clearance: Copper clearance a signal net keeps from the reserved
+            via and stub (mm).
+        layer_index: Maps a pad's :class:`~.layers.Layer` to the lattice
+            layer index.
+        num_layers: Copper layers in the stack.
+        plane_fills: Issue #6589 -- site net -> ``(lattice layer index,
+            fill pullback)`` for each pour carrying it.  Each site of such a
+            net gets a second disc of radius ``via_diameter / 2 + pullback``
+            (when that exceeds the copper disc) that blocks vias on every
+            layer and tracks on those plane layers only, so the pour still
+            covers the whole reserved via after routing.  Tracks on other
+            layers keep the copper-clearance disc unchanged.
+
+    Returns:
+        ``KeepoutArea`` instances: per site its copper disc (then its fill
+        disc, if any), then the stubs, in reservation order.
+    """
+    from .lattice.obstacles import KeepoutArea
+
+    rules = reservation.rules
+    all_layers = frozenset(range(num_layers))
+    areas: list[Any] = []
+    for site in reservation.sites:
+        areas.append(
+            KeepoutArea(
+                polygon=_regular_polygon(site.x, site.y, rules.via_diameter / 2.0 + clearance),
+                layers=all_layers,
+                blocks_tracks=True,
+                blocks_vias=True,
+                name=f"plane-via-site:{site.net_name}:{'/'.join(site.pads)}",
+            )
+        )
+        fills = (plane_fills or {}).get(site.net_name) or ()
+        plane_layers = frozenset(int(layer) for layer, _p in fills if 0 <= int(layer) < num_layers)
+        pullback = max((float(p) for _l, p in fills), default=0.0)
+        if plane_layers and pullback > clearance:
+            areas.append(
+                KeepoutArea(
+                    polygon=_regular_polygon(site.x, site.y, rules.via_diameter / 2.0 + pullback),
+                    layers=plane_layers,
+                    blocks_tracks=True,
+                    blocks_vias=True,
+                    name=f"plane-via-fill:{site.net_name}:{'/'.join(site.pads)}",
+                )
+            )
+    for stub in reservation.stubs:
+        try:
+            layer = int(layer_index(stub.layer))
+        except Exception:
+            layers = all_layers
+        else:
+            layers = frozenset({layer})
+        areas.append(
+            KeepoutArea(
+                polygon=_capsule_polygon(
+                    stub.pad_x,
+                    stub.pad_y,
+                    stub.site_x,
+                    stub.site_y,
+                    rules.stub_width / 2.0 + clearance,
+                ),
+                layers=layers,
+                blocks_tracks=True,
+                blocks_vias=True,
+                name=f"plane-via-stub:{stub.net_name}:{stub.pad}",
+            )
+        )
+    return areas
+
+
 def reserve_plane_via_sites(
     grid: RoutingGrid,
     nets: Sequence[str],
     rules: PlaneViaSiteRules | None = None,
+    *,
+    pads: Sequence[Pad] | None = None,
 ) -> PlaneViaReservation:
     """Reserve one legal via site (and stub) per plane-net SMD pad.
 
@@ -332,22 +1469,26 @@ def reserve_plane_via_sites(
         grid: The routing grid, pads already added.
         nets: Plane-net names whose SMD pads need a reserved site.
         rules: Site geometry; defaults to :class:`PlaneViaSiteRules`.
+        pads: Issue #6401 -- serve exactly these pads (e.g. the output of
+            :func:`select_plane_via_pads`) instead of every SMD pad of
+            ``nets``.
 
     Returns:
         A :class:`PlaneViaReservation`.
     """
     rules = rules or PlaneViaSiteRules()
-    planner = _SitePlanner(grid, rules)
-    result = PlaneViaReservation()
-    pads = _plane_pads(grid, nets)
+    targets = list(pads) if pads is not None else _plane_pads(grid, nets)
+    planner = _SitePlanner(grid, rules, set(nets) | {p.net_name for p in targets}, targets)
+    result = PlaneViaReservation(rules=rules)
     served: list[tuple[Pad, PlaneViaSite]] = []
-    for pad in pads:
+    for pad in targets:
         site = planner.find(pad)
         if site is None:
             result.unreserved.append(_pad_name(pad))
         else:
             served.append((pad, site))
     result.sites = list(planner.sites)
+    result.blocked_escapes = list(planner.blocked_escapes)
 
     # Resolve each served pad to its FINAL site (a later pad may have been
     # appended to a shared site after this pad was served).
@@ -361,6 +1502,17 @@ def reserve_plane_via_sites(
                 to_block.add((layer, gx + dx, gy + dy))
     for pad, _site in served:
         site = by_pad[_pad_name(pad)]
+        result.stubs.append(
+            PlaneViaStub(
+                pad=_pad_name(pad),
+                net_name=pad.net_name,
+                layer=pad.layer,
+                pad_x=pad.x,
+                pad_y=pad.y,
+                site_x=site.x,
+                site_y=site.y,
+            )
+        )
         layer = grid.layer_to_index(pad.layer.value)
         for gx, gy in _capsule_cells(
             grid, pad.x, pad.y, site.x, site.y, rules.stub_width / 2.0 + planner.halo
@@ -369,3 +1521,139 @@ def reserve_plane_via_sites(
 
     result.cells_blocked = grid.mark_static_keepout_cells(sorted(to_block))
     return result
+
+
+def reserve_router_plane_via_sites(
+    router: Any,
+    nets: Iterable[str],
+    *,
+    via_diameter: float | None = None,
+    via_drill: float | None = None,
+    clearance: float | None = None,
+    stub_width: float | None = None,
+    plane_fills: Mapping[str, Sequence[PlaneFill]] | None = None,
+) -> PlaneViaReservation:
+    """Reserve pour-pad via sites on a loaded ``Autorouter`` (Issue #6401).
+
+    The ``kct route`` entry point, for both engines.  Runs on the pre-route
+    board (pads loaded, nothing routed):
+
+    1. picks the pads with :func:`select_plane_via_pads`;
+    2. plans one legal site plus stub per pad with the #5700 planner on
+       ``router.grid`` and marks those cells as static grid keep-outs (what
+       the grid engine and every grid-based pass reads);
+    3. stores the same sites as lattice keep-out areas on
+       ``router._plane_via_keepout_areas``, which
+       ``Autorouter._negotiate_lattice_netset`` installs next to the board's
+       rule areas (the lattice engine never reads the grid's occupancy);
+    4. Issue #6673: adds :func:`area_array_pour_links` keep-outs (lattice
+       only) for every area array whose same-pour ball clusters sit on a
+       layer their pour floods, so signal copper cannot island part of the
+       cluster's fill.  Needs ``plane_fills`` to know the pour layers.
+
+    The site geometry is the via the post-route oracle places
+    (``via_diameter`` / ``via_drill``, defaulting to the router's rules) at
+    the strongest clearance any reserved net needs: the router clearance,
+    ``clearance`` and each reserved net's class clearance (#6374: pour
+    copper keeps its class clearance).
+
+    Args:
+        router: The loaded :class:`~kicad_tools.router.core.Autorouter`.
+        nets: Pour-net names the router skipped.
+        via_diameter: Via copper diameter the post-route pass places (mm).
+        via_drill: That via's drill (mm).
+        clearance: Copper clearance floor (mm), e.g. ``--clearance``.
+        stub_width: Pad-to-via stub width (mm).
+        plane_fills: Issue #6589 -- each reserved net's pours (e.g.
+            :func:`plane_fills_from_pcb` on the board being routed).  The
+            lattice keep-out of each site then also holds foreign vias, and
+            tracks on the pour's layer, outside the pour's fill pullback, so
+            the pour still covers the reserved via.  ``None``/missing net:
+            copper clearance only (the #6401 behaviour).
+
+    Returns:
+        The reservation (no sites when there are no eligible pads).
+    """
+    grid = router.grid
+    nets = sorted(set(nets))
+    board_pads = list(grid._pads)
+    pads, _skipped = select_plane_via_pads(board_pads, nets)
+
+    drules = router.rules
+    gap = max(float(drules.trace_clearance), float(clearance or 0.0))
+    class_map = getattr(router, "net_class_map", None) or {}
+    for name in nets:
+        net_class = class_map.get(name)
+        class_clearance = getattr(net_class, "clearance", None) if net_class else None
+        if class_clearance:
+            gap = max(gap, float(class_clearance))
+
+    stack = getattr(router, "layer_stack", None)
+
+    def layer_index(layer: object) -> int:
+        if stack is not None:
+            return int(stack.layer_enum_to_index(layer))
+        return int(grid.layer_to_index(layer.value))  # type: ignore[attr-defined]
+
+    def name_index(name: str) -> int | None:
+        if stack is not None:
+            layer_def = stack.get_layer_by_name(name)
+            return None if layer_def is None else int(layer_def.index)
+        from .layers import Layer
+
+        for layer in Layer:
+            if layer.kicad_name == name:
+                try:
+                    return int(grid.layer_to_index(layer.value))
+                except Exception:
+                    return None
+        return None
+
+    fill_layers: dict[str, list[tuple[int, float]]] = {}
+    for name in nets:
+        for fill in (plane_fills or {}).get(name) or ():
+            index = name_index(fill.layer)
+            if index is not None:
+                fill_layers.setdefault(name, []).append((index, plane_fill_pullback(fill, gap)))
+
+    if pads:
+        defaults = PlaneViaSiteRules()
+        rules = PlaneViaSiteRules(
+            via_diameter=max(float(via_diameter or 0.0), float(drules.via_diameter)),
+            via_drill=max(float(via_drill or 0.0), float(drules.via_drill)),
+            clearance=gap,
+            hole_to_hole=defaults.hole_to_hole,
+            stub_width=float(stub_width or drules.trace_width),
+            max_reach=defaults.max_reach,
+            exact_pads=True,
+        )
+        reservation = reserve_plane_via_sites(grid, nets, rules, pads=pads)
+        areas = plane_via_keepout_areas(
+            reservation,
+            clearance=gap,
+            layer_index=layer_index,
+            num_layers=int(grid.num_layers),
+            plane_fills=fill_layers,
+        )
+    else:
+        reservation = PlaneViaReservation()
+        areas = []
+
+    # Issue #6673: a pour that floods an area array's own pad layer keeps
+    # its same-net ball clusters whole (lattice engine only, like the sites).
+    pullback: dict[tuple[str, int], float] = {}
+    for name, entries in fill_layers.items():
+        for index, pb in entries:
+            key = (name, int(index))
+            pullback[key] = max(pullback.get(key, 0.0), float(pb))
+    links, released = area_array_pour_links(
+        board_pads,
+        {name: [index for index, _pb in entries] for name, entries in fill_layers.items()},
+        layer_index,
+    )
+    reservation.array_links = links
+    reservation.array_links_released = released
+    areas = list(areas) + area_array_link_keepout_areas(links, pullback=pullback)
+
+    router._plane_via_keepout_areas = tuple(areas)
+    return reservation

@@ -1283,3 +1283,304 @@ def test_unavailable_placement_preserves_permissive_success(tmp_path):
     assert data["status"] == "unavailable"
     assert data["completed_nets"] == ["SIG1"]
     assert data["clean_success"] is False  # Unknown assurance, not a new route failure.
+
+
+# ---------------------------------------------------------------------------
+# --suite pcbworld (issue #6331): PCBWorld, KiCad and the network are all mocked
+# ---------------------------------------------------------------------------
+
+
+class TestPCBWorldSuiteCli:
+    @pytest.fixture
+    def env(self, tmp_path, monkeypatch):
+        from tests.test_benchmark_pcbworld import _fake_cli
+
+        monkeypatch.setenv("PCBWORLD_PYTHON", "/opt/pcbworld/bin/python")
+        monkeypatch.setenv("KICAD_CLI", _fake_cli(tmp_path))
+        monkeypatch.setenv("PCBNEW_PYTHON", "/usr/bin/python3-kicad")
+
+    def _args(self, tmp_path, *extra):
+        return create_parser().parse_args(
+            [
+                "bench", "external", "--suite", "pcbworld", "--split", "d3a", "--limit", "2",
+                "--cache-dir", str(tmp_path / "cache"), "--output-dir", str(tmp_path / "out"),
+                "--skip-kicad-cli-drc", *extra,
+            ]
+        )  # fmt: skip
+
+    def _stub_guide_route(self, monkeypatch, captured):
+        from kicad_tools.cli import route_cmd
+
+        def route(argv):
+            captured.append(list(argv))
+            out = Path(argv[argv.index("-o") + 1])
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_text(Path(argv[0]).read_text(encoding="utf-8"), encoding="utf-8")
+            return 0
+
+        monkeypatch.setattr(route_cmd, "main_with_result", route)
+
+    def test_parser_flags_default_to_existing_behaviour(self):
+        args = create_parser().parse_args(["bench", "external"])
+        assert args.suite is None and args.split is None and args.limit is None
+
+    def test_end_to_end_keeps_pcbworld_cp_distinct_from_local_gates(
+        self, tmp_path, monkeypatch, env, capsys
+    ):
+        from tests.test_benchmark_pcbworld import NAMES, FakeOpener, make_runner
+
+        captured: list[list[str]] = []
+        self._stub_guide_route(monkeypatch, captured)
+        monkeypatch.setattr("kicad_tools.benchmark.external.probe_backend", lambda: _cpp_backend())
+        # normalize must never run on guide boards.
+        normalize_calls: list = []
+        _, normalize = bench_cmd._load_external_modules()
+        monkeypatch.setattr(normalize, "normalize_board", lambda *a, **k: normalize_calls.append(a))
+
+        def rows(boards):
+            return [
+                {"board_id": b.stem.rsplit("_kct_s", 1)[0], "rollout_idx": 0, "seed": 42,
+                 "eval_status": "ok", "eval_error": "", "clean_pass": "True",
+                 "routability": 1.0, "drv_errors_only_count": 0, "potential_gain": 1.5,
+                 "final_potential": 2.0}
+                for b in boards
+            ]  # fmt: skip
+
+        pcbworld = bench_cmd._load_pcbworld()
+        corpus = pcbworld.load_corpus()
+        rc = bench_cmd._run_bench_pcbworld(
+            self._args(tmp_path),
+            runner=make_runner(eval_rows=rows),
+            opener=FakeOpener(corpus),
+        )
+        assert rc == 0
+        assert normalize_calls == []
+        assert len(captured) == 2  # --limit 2 -> two boards routed
+
+        out = tmp_path / "out"
+        slug = f"pcbworld_d3a_{NAMES[0]}"
+        payload = json.loads((out / f"{slug}.zero-touch.json").read_text())
+        assert payload["schema_version"] == 1
+        assert payload["board_id"] == f"pcbworld/d3a/{NAMES[0]}"
+        pw = payload["external_scores"]["pcbworld"]
+        assert pw["clean_pass"] is True and pw["potential_gain"] == 1.5
+        assert pw["kicad_version"] == "9.0.3"
+        assert pw["pcbworld_commit"] == corpus.pcbworld_commit
+        assert pw["pcbench_commit"] == corpus.pcbench_commit
+        # Local gates are reported separately, not folded into PCBWorld's verdict.
+        assert payload["kicad_cli_drc"]["ran"] is False
+        assert "kct_check" in payload
+        md = (out / "report.pcbworld.d3a.md").read_text()
+        assert "PCBWorld CP" in md and "kicad-cli DRC" in md
+
+    def test_missing_tool_env_fails_actionably(self, tmp_path, monkeypatch, capsys):
+        monkeypatch.delenv("PCBWORLD_PYTHON", raising=False)
+        rc = bench_cmd.run_bench_command(self._args(tmp_path))
+        assert rc == 1
+        assert "PCBWORLD_PYTHON" in capsys.readouterr().err
+
+    def test_kicad_10_fails_instead_of_scoring(self, tmp_path, monkeypatch, env, capsys):
+        from tests.test_benchmark_pcbworld import make_runner
+
+        rc = bench_cmd._run_bench_pcbworld(
+            self._args(tmp_path), runner=make_runner(kicad_version="10.0.1")
+        )
+        assert rc == 1
+        assert "requires KiCad 9" in capsys.readouterr().err
+
+    def test_unscorable_board_is_null_not_zero(self, tmp_path, monkeypatch, env):
+        from tests.test_benchmark_pcbworld import FakeOpener, make_runner
+
+        captured: list[list[str]] = []
+        self._stub_guide_route(monkeypatch, captured)
+        pcbworld = bench_cmd._load_pcbworld()
+        # The scorer produces no per_rollout rows at all.
+        rc = bench_cmd._run_bench_pcbworld(
+            self._args(tmp_path, "--format", "json"),
+            runner=make_runner(eval_rows=lambda boards: []),
+            opener=FakeOpener(pcbworld.load_corpus()),
+        )
+        assert rc == 0
+        payload = json.loads(
+            (next((tmp_path / "out").glob("pcbworld_d3a_*.zero-touch.json"))).read_text()
+        )
+        pw = payload["external_scores"]["pcbworld"]
+        assert pw["available"] is False
+        assert pw["clean_pass"] is None and pw["routability"] is None
+        assert pw["unavailable_reason"]
+
+    def test_suite_rejects_board_and_tuned(self, tmp_path, env, capsys):
+        rc = bench_cmd.run_bench_command(self._args(tmp_path, "--tuned"))
+        assert rc == 1
+        assert "does not support" in capsys.readouterr().err
+
+    def test_default_suite_unchanged_by_suite_flag(self, tmp_path, capsys):
+        """`--suite deeppcb` is the existing path (unknown slug error proves it ran)."""
+        args = create_parser().parse_args(
+            ["bench", "external", "--suite", "deeppcb", "--board", "nope"]
+        )
+        assert bench_cmd.run_bench_command(args) == 1
+        assert "unknown board slug" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# --suite pcbworld D3 runs (issue #6332): rollouts, resume, bounded windows
+# ---------------------------------------------------------------------------
+
+
+class TestPCBWorldD3Run(TestPCBWorldSuiteCli):
+    """Inherits the env / stub fixtures; every external tool remains mocked."""
+
+    @staticmethod
+    def _rows(gain_by_seed=None, clean_seeds=(43,)):
+        def rows(boards):
+            out = []
+            for b in boards:
+                name, rest = b.stem.rsplit("_kct_s", 1)
+                seed = int(rest.split("_r", 1)[0])
+                out.append({
+                    "board_id": name, "rollout_idx": 0, "seed": seed, "eval_status": "ok",
+                    "eval_error": "", "clean_pass": str(seed in clean_seeds),
+                    "routability": 1.0, "drv_errors_only_count": 0 if seed in clean_seeds else 2,
+                    "potential_gain": (gain_by_seed or {}).get(seed, 0.0),
+                    "final_potential": 1.0,
+                })  # fmt: skip
+            return out
+
+        return rows
+
+    def _run(self, tmp_path, *extra, rows=None, runner=None):
+        from tests.test_benchmark_pcbworld import FakeOpener, make_runner
+
+        pcbworld = bench_cmd._load_pcbworld()
+        args = create_parser().parse_args(
+            ["bench", "external", "--suite", "pcbworld", "--split", "d3a", "--full-split",
+             "--cache-dir", str(tmp_path / "cache"), "--output-dir", str(tmp_path / "out"),
+             "--skip-kicad-cli-drc", *extra]
+        )  # fmt: skip
+        return bench_cmd._run_bench_pcbworld(
+            args,
+            runner=runner or make_runner(eval_rows=rows or self._rows()),
+            opener=FakeOpener(pcbworld.load_corpus()),
+        )
+
+    def _results(self, tmp_path):
+        return json.loads((tmp_path / "out" / "results.json").read_text())
+
+    def test_every_board_gets_every_rollout_and_at5_uses_max_gain(self, tmp_path, monkeypatch, env):
+        from tests.test_benchmark_pcbworld import NAMES
+
+        captured: list[list[str]] = []
+        self._stub_guide_route(monkeypatch, captured)
+        monkeypatch.setattr("kicad_tools.benchmark.external.probe_backend", lambda: _cpp_backend())
+        # seed 43 (rollout 1) is the clean one but seed 44 has the larger gain.
+        rows = self._rows(gain_by_seed={43: 1.0, 44: 5.0}, clean_seeds=(43,))
+        rc = self._run(tmp_path, "--rollouts", "3", "--route-timeout", "60", rows=rows)
+        assert rc == 0
+        assert len(captured) == 3 * len(NAMES)
+        assert all(argv[argv.index("--timeout") + 1] == "60" for argv in captured)
+        assert sorted({argv[argv.index("--seed") + 1] for argv in captured}) == ["42", "43", "44"]
+        res = self._results(tmp_path)
+        assert res["board_ids"] == [f"pcbworld/d3a/{n}" for n in NAMES]
+        assert len(res["attempts"]) == 9 and res["run"]["seeds"] == [42, 43, 44]
+        rec = res["attempts"][0]
+        assert rec["identity"]["input_sha256"] and rec["identity"]["tool_commit"]
+        assert rec["identity"]["pcbworld_commit"] == res["provenance"]["pcbworld_commit"]
+        assert res["provenance"]["router_backend"] == "cpp"
+        assert "host_cpu_count" in res["provenance"]
+        assert rec["human_wirelength_mm"] == pytest.approx(10.0)  # routed guide = reference
+        from kicad_tools.benchmark.external import aggregate_d3
+
+        agg = aggregate_d3(res["attempts"], board_ids=res["board_ids"], rollouts=3)
+        assert agg["full"]["at1"]["pcbworld_clean_pass"]["passed"] == 0
+        assert agg["full"]["at5"]["pcbworld_clean_pass"]["passed"] == 0  # max gain = seed 44
+        md = (tmp_path / "out" / "report.d3.md").read_text()
+        assert "PCBWorld Clean Pass" in md and "Freerouting" in md and "TraceMaker" in md
+
+    def test_bounded_run_then_resume_reuses_only_current_attempts(self, tmp_path, monkeypatch, env):
+        from tests.test_benchmark_pcbworld import NAMES
+
+        captured: list[list[str]] = []
+        self._stub_guide_route(monkeypatch, captured)
+        assert self._run(tmp_path, "--max-attempts", "2") == 0
+        assert len(captured) == 2
+        res = self._results(tmp_path)
+        assert len(res["attempts"]) == 2
+        md = (tmp_path / "out" / "report.d3.md").read_text()
+        assert "1 missing" in md and "Complete (every attempt has a known verdict): **no**" in md
+
+        captured.clear()
+        assert self._run(tmp_path, "--resume") == 0
+        assert len(captured) == len(NAMES) - 2  # only the not-yet-attempted board
+        assert len(self._results(tmp_path)["attempts"]) == len(NAMES)
+
+        # A changed tool commit makes every earlier record stale: all re-run.
+        captured.clear()
+        monkeypatch.setattr(
+            "kicad_tools.benchmark.external.metrics._tool_commit", lambda: "deadbeef"
+        )
+        assert self._run(tmp_path, "--resume") == 0
+        assert len(captured) == len(NAMES)
+        assert {r["identity"]["tool_commit"] for r in self._results(tmp_path)["attempts"]} == {
+            "deadbeef"
+        }
+
+    def test_fresh_run_without_resume_never_inherits_records(self, tmp_path, monkeypatch, env):
+        captured: list[list[str]] = []
+        self._stub_guide_route(monkeypatch, captured)
+        assert self._run(tmp_path) == 0
+        n = len(captured)
+        assert self._run(tmp_path) == 0
+        assert len(captured) == 2 * n
+
+    def test_prep_failure_is_a_record_not_a_dropped_board(self, tmp_path, monkeypatch, env):
+        from tests.test_benchmark_pcbworld import NAMES, make_runner
+
+        self._stub_guide_route(monkeypatch, [])
+        runner = make_runner(eval_rows=self._rows(), skip_guide_for=(NAMES[1][5:],))
+        rc = self._run(tmp_path, "--rollouts", "2", runner=runner)
+        assert rc == 1  # a prep failure is surfaced
+        res = self._results(tmp_path)
+        failed = [r for r in res["attempts"] if r["board_id"].endswith(NAMES[1])]
+        assert [r["status"] for r in failed] == ["prep_failed", "prep_failed"]
+        assert len(res["attempts"]) == 2 * len(NAMES)
+
+    def test_route_without_output_is_a_failure_row(self, tmp_path, monkeypatch, env):
+        from kicad_tools.cli import route_cmd
+
+        monkeypatch.setattr(route_cmd, "main_with_result", lambda argv: 1)
+        assert self._run(tmp_path, "--limit", "1") == 0
+        rec = self._results(tmp_path)["attempts"][0]
+        assert rec["status"] == "route_no_output"
+        assert rec["failure_class"].startswith("route_no_output")
+
+    def test_deterministic_baseline_rejects_multiple_rollouts(self, tmp_path, env, capsys):
+        rc = self._run(tmp_path, "--deterministic-baseline", "--rollouts", "5")
+        assert rc == 1 and "deterministic" in capsys.readouterr().err
+
+    def test_render_d3_round_trips_byte_identically(self, tmp_path, monkeypatch, env):
+        self._stub_guide_route(monkeypatch, [])
+        assert self._run(tmp_path, "--rollouts", "2") == 0
+        report = tmp_path / "out" / "report.d3.md"
+        before = report.read_text()
+        report.unlink()
+        args = create_parser().parse_args(
+            ["bench", "external", "--render-d3", str(tmp_path / "out" / "results.json")]
+        )
+        assert bench_cmd.run_bench_command(args) == 0
+        assert report.read_text() == before
+
+
+def test_committed_d3_results_rerender_cleanly():
+    """Every committed PCBWorld results.json re-renders to its committed report."""
+    from kicad_tools.benchmark.external import render_d3_markdown
+
+    root = Path(__file__).resolve().parent.parent / "benchmarks" / "external" / "results"
+    found = sorted(root.glob("*/results.json"))
+    for path in found:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if data.get("schema") != "kct-pcbworld-d3-results/1":
+            continue
+        assert render_d3_markdown(data) == path.with_name("report.d3.md").read_text(
+            encoding="utf-8"
+        ), f"{path}: re-render differs -- run `kct bench external --render-d3 {path}`"

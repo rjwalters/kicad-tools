@@ -337,12 +337,28 @@ def _run_kicad_cli(args: Sequence[str], output: Path) -> EngineRun:
     if binary is None:
         return EngineRun(ok=False, detail="kicad-cli not found on PATH")
     output.parent.mkdir(parents=True, exist_ok=True)
+    # Issue #6724: an artefact left by an earlier run must not pass for this
+    # run's output when kicad-cli fails or is killed.
+    output.unlink(missing_ok=True)
     try:
         completed = subprocess.run(
             [str(binary), *args], capture_output=True, text=True, timeout=600, check=False
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         return EngineRun(ok=False, detail=f"kicad-cli failed: {exc}")
+    if completed.returncode != 0:
+        # None of these invocations passes ``--exit-code-violations``, so a
+        # non-zero status (a load failure, or a signal kill such as the OOM
+        # killer, which may leave a truncated file) means no usable output.
+        from kicad_tools.drc.geometric import describe_returncode
+
+        detail = (completed.stderr or completed.stdout or "").strip().splitlines()
+        return EngineRun(
+            ok=False,
+            detail=describe_returncode(completed.returncode)
+            + (f": {detail[-1]}" if detail else ""),
+            returncode=completed.returncode,
+        )
     if not output.is_file() or output.stat().st_size == 0:
         detail = (completed.stderr or completed.stdout or "").strip().splitlines()
         return EngineRun(
@@ -1150,13 +1166,25 @@ def _gate_kct_check(options: ReadinessOptions, engines: Engines) -> tuple[CheckO
     # Record the checked board board-relative: an absolute path would leak the
     # throw-away candidate directory into hash-bound evidence, so identical
     # inputs would never reproduce identical bytes (Issue #6076).
+    # Since #6532 ``kct check`` itself writes a cwd-relative path (or the bare
+    # filename when the board is outside the cwd), so a relative value is
+    # resolved against the cwd -- or, as a bare name, matched against the PCB
+    # this gate just checked -- before being made board-relative.
     checked = report.get("file")
-    if isinstance(checked, str) and Path(checked).is_absolute():
+    if isinstance(checked, str) and checked:
+        checked_path = Path(checked)
+        if not checked_path.is_absolute():
+            in_cwd = Path.cwd() / checked_path
+            if in_cwd.exists():
+                checked_path = in_cwd
+            elif checked_path.name == options.pcb.name:
+                checked_path = options.pcb
         try:
-            report["file"] = _rel(options, Path(checked))
-        except ValueError:
-            pass
-        else:
+            board_rel = _rel(options, checked_path) if checked_path.is_absolute() else None
+        except (ValueError, OSError):
+            board_rel = None
+        if board_rel is not None and board_rel != checked:
+            report["file"] = board_rel
             report_path.write_text(json.dumps(report, indent=2) + "\n")
     summary = report.get("summary", {}) if isinstance(report.get("summary"), dict) else {}
     errors = int(summary.get("errors", 0) or 0)

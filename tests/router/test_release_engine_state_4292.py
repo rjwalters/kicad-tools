@@ -110,3 +110,26 @@ def test_release_engine_state_is_best_effort():
     # No grid, no lattice attributes -- must be a safe no-op.
     _release_routing_engine_state(router)
     assert router.routes == []
+
+
+def test_every_release_site_primes_the_access_witness_first():
+    """Issue #6391: each ``_release_routing_engine_state`` call is preceded by
+    ``_prime_access_witness`` on the same router, so the sidecars written after
+    the release reuse a witness replayed against the live grid."""
+    import inspect
+    import re
+
+    from kicad_tools.cli import route_cmd
+
+    lines = inspect.getsource(route_cmd).splitlines()
+    calls = [
+        (i, m.group(1))
+        for i, line in enumerate(lines)
+        if (m := re.match(r"\s+_release_routing_engine_state\((.+)\)\s*$", line))
+    ]
+    assert len(calls) == 4, calls
+    for i, target in calls:
+        prev = next(
+            lines[j].strip() for j in range(i - 1, -1, -1) if not lines[j].strip().startswith("#")
+        )
+        assert prev == f"_prime_access_witness({target}, args)", (i + 1, prev)

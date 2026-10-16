@@ -187,9 +187,16 @@ Grid3D::Grid3D(int cols, int rows, int layers, float resolution,
 }
 
 void Grid3D::mark_blocked(int x, int y, int layer, int net, bool is_obstacle,
-                          bool pad_blocked) {
+                          bool pad_blocked, bool pad_source, bool shared_pad_halo) {
     if (!is_valid(x, y, layer)) return;
     auto& cell = at(x, y, layer);
+    // Issue #6315: pad provenance survives only while every static marking
+    // of the cell came from the pad sync.  A cell first blocked by anything
+    // else (board edge, keepout, preserved copper, stitch reservation) is
+    // never handed to the exact pad-geometry test.
+    const bool prior_static_non_pad = cell.static_blocked && !cell.pad_cell;
+    cell.pad_cell = pad_source && !prior_static_non_pad;
+    cell.shared_pad_halo = cell.pad_cell && shared_pad_halo;
     if (cell.congestion_counted) {
         update_congestion(x, y, layer, -1);
         cell.congestion_counted = false;
@@ -616,7 +623,35 @@ void Grid3D::add_pad(float x, float y, float width, float height,
     pads_.push_back({x, y, width, height, net, layer_idx, ref_hash,
                      clearance_override, is_plane_net, rotation, clearance_override, false, is_circular});
     if (authored_index_) authored_index_pad(pads_.size() - 1);  // Issue #6243
+    index_pad_bucket(pads_.size() - 1);  // Issue #6315
 }
+
+// -----------------------------------------------------------------------
+// Issue #6315: exact pad clearance for pad-derived cells
+// -----------------------------------------------------------------------
+
+namespace {
+constexpr float PAD_BUCKET_MM = 1.0f;
+
+inline int64_t pad_bucket_key(int bx, int by) {
+    return (static_cast<int64_t>(bx) << 32) ^ static_cast<int64_t>(static_cast<uint32_t>(by));
+}
+}  // namespace
+
+void Grid3D::index_pad_bucket(size_t index) {
+    const auto& pad = pads_[index];
+    // Rotation-safe bound: half the diagonal covers the pad in any rotation.
+    const float r = 0.5f * std::sqrt(pad.width * pad.width + pad.height * pad.height);
+    const int bx1 = static_cast<int>(std::floor((pad.x - r) / PAD_BUCKET_MM));
+    const int bx2 = static_cast<int>(std::floor((pad.x + r) / PAD_BUCKET_MM));
+    const int by1 = static_cast<int>(std::floor((pad.y - r) / PAD_BUCKET_MM));
+    const int by2 = static_cast<int>(std::floor((pad.y + r) / PAD_BUCKET_MM));
+    for (int by = by1; by <= by2; ++by)
+        for (int bx = bx1; bx <= bx2; ++bx)
+            pad_buckets_[pad_bucket_key(bx, by)].push_back(static_cast<uint32_t>(index));
+    pad_bucket_max_override_ = std::max(pad_bucket_max_override_, pad.clearance_override);
+}
+
 
 // -----------------------------------------------------------------------
 // Issue #6243: authored per-net clearance minima
@@ -688,11 +723,11 @@ double Grid3D::authored_pair_floor(int net_a, int net_b) const {
 
 void Grid3D::set_pad_authored(size_t index, const std::string& shape, double width,
                               double height, double rotation, double x, double y,
-                              double drill, double item_floor) {
+                              double drill, double item_floor, double rratio) {
     if (index >= pads_.size()) return;
     if (authored_pad_specs_.size() < pads_.size()) authored_pad_specs_.resize(pads_.size());
     authored_pad_specs_[index] = {true, shape, width, height, rotation, x, y, drill,
-                                  std::max(0.0, item_floor)};
+                                  std::max(0.0, item_floor), rratio};
     if (item_floor > 0.0) authored_items_ = true;
 }
 
@@ -705,8 +740,8 @@ void Grid3D::authored_index_pad(size_t i) {
     double cx = pad.x, cy = pad.y, w = pad.width, h = pad.height;
     if (i < authored_pad_specs_.size() && authored_pad_specs_[i].set) {
         const auto& spec = authored_pad_specs_[i];
-        item.shape = ck::make_pad(spec.shape, spec.width, spec.height, 0.25, spec.rotation,
-                                  spec.x, spec.y, layer, spec.drill);
+        item.shape = ck::make_pad(spec.shape, spec.width, spec.height, spec.rratio,
+                                  spec.rotation, spec.x, spec.y, layer, spec.drill);
         item.floor = std::max(net_clearance_floor(pad.net), spec.floor);
         cx = spec.x; cy = spec.y; w = spec.width; h = spec.height;
     } else {
@@ -909,6 +944,10 @@ void Grid3D::register_route_mark(int kind, int net, int layer, int x1, int y1,
 void Grid3D::set_cell_static_blocked(int x, int y, int layer, bool value) {
     if (!is_valid(x, y, layer)) return;
     at(x, y, layer).static_blocked = value;
+    // Issue #6315: a static-state change from outside the pad sync (keepout
+    // over a pad halo, route-halo restore) voids pad-only provenance.
+    at(x, y, layer).pad_cell = false;
+    at(x, y, layer).shared_pad_halo = false;
     route_coverage_dirty_ = true;
 }
 
@@ -918,9 +957,19 @@ void Grid3D::set_cells_static_blocked(const std::vector<int>& xs,
     const size_t n = std::min({xs.size(), ys.size(), layers.size()});
     for (size_t i = 0; i < n; ++i) {
         if (!is_valid(xs[i], ys[i], layers[i])) continue;
-        at(xs[i], ys[i], layers[i]).static_blocked = value;
+        auto& cell = at(xs[i], ys[i], layers[i]);
+        cell.static_blocked = value;
+        cell.pad_cell = false;         // Issue #6315 (see above).
+        cell.shared_pad_halo = false;
     }
     route_coverage_dirty_ = true;
+}
+
+int Grid3D::route_coverage_at(int x, int y, int layer) const {
+    if (!is_valid(x, y, layer)) return -1;
+    if (active_route_marks_.empty()) return 0;
+    route_geometry_complete();  // Refresh the coverage map if dirty.
+    return route_geometry_cells_[index(x, y, layer)];
 }
 
 bool Grid3D::route_cell_has_geometry(int x, int y, int layer) const {
@@ -943,23 +992,28 @@ void Grid3D::index_route_geometry(GeometryBins& bins, size_t index,
     }
 }
 
+std::vector<size_t> Grid3D::gather_route_geometry(const GeometryBins& bins,
+                                                  float minx, float miny,
+                                                  float maxx, float maxy) {
+    std::vector<size_t> result;
+    if (bins.empty()) return result;
+    for (int y = static_cast<int>(std::floor(miny / 2.0f));
+         y <= static_cast<int>(std::floor(maxy / 2.0f)); ++y) {
+        for (int x = static_cast<int>(std::floor(minx / 2.0f));
+             x <= static_cast<int>(std::floor(maxx / 2.0f)); ++x) {
+            const auto it = bins.find({x, y});
+            if (it != bins.end()) result.insert(result.end(), it->second.begin(), it->second.end());
+        }
+    }
+    std::sort(result.begin(), result.end());
+    result.erase(std::unique(result.begin(), result.end()), result.end());
+    return result;
+}
+
 std::pair<std::vector<size_t>, std::vector<size_t>> Grid3D::route_geometry_candidates(
     float minx, float miny, float maxx, float maxy) const {
-    auto gather = [&](const GeometryBins& bins) {
-        std::vector<size_t> result;
-        for (int y = static_cast<int>(std::floor(miny / 2.0f));
-             y <= static_cast<int>(std::floor(maxy / 2.0f)); ++y) {
-            for (int x = static_cast<int>(std::floor(minx / 2.0f));
-                 x <= static_cast<int>(std::floor(maxx / 2.0f)); ++x) {
-                const auto it = bins.find({x, y});
-                if (it != bins.end()) result.insert(result.end(), it->second.begin(), it->second.end());
-            }
-        }
-        std::sort(result.begin(), result.end());
-        result.erase(std::unique(result.begin(), result.end()), result.end());
-        return result;
-    };
-    return {gather(route_segment_bins_), gather(route_via_bins_)};
+    return {gather_route_geometry(route_segment_bins_, minx, miny, maxx, maxy),
+            gather_route_geometry(route_via_bins_, minx, miny, maxx, maxy)};
 }
 
 void Grid3D::add_stored_segment(float x1, float y1, float x2, float y2,
@@ -1009,6 +1063,8 @@ void Grid3D::add_stored_via(float x, float y, float drill, float diameter, int n
 
 void Grid3D::clear_validation_data() {
     pads_.clear();
+    pad_buckets_.clear();  // Issue #6315
+    pad_bucket_max_override_ = 0.0f;
     authored_pad_specs_.clear();
     clear_component_holes();
     stored_segments_.clear();
@@ -1256,6 +1312,168 @@ bool Grid3D::edge_foreign_pad_clear(
     return true;
 }
 
+bool Grid3D::pad_geometry_clear(
+    float ax, float ay, float bx, float by, int layer, int net,
+    float half_width, float clearance) const {
+    const float reach = half_width + std::max({clearance, pad_bucket_max_override_,
+                                               max_pairwise_clearance_});
+    const int qx1 = static_cast<int>(std::floor((std::min(ax, bx) - reach) / PAD_BUCKET_MM));
+    const int qx2 = static_cast<int>(std::floor((std::max(ax, bx) + reach) / PAD_BUCKET_MM));
+    const int qy1 = static_cast<int>(std::floor((std::min(ay, by) - reach) / PAD_BUCKET_MM));
+    const int qy2 = static_cast<int>(std::floor((std::max(ay, by) + reach) / PAD_BUCKET_MM));
+    for (int qy = qy1; qy <= qy2; ++qy) {
+        for (int qx = qx1; qx <= qx2; ++qx) {
+            const auto it = pad_buckets_.find(pad_bucket_key(qx, qy));
+            if (it == pad_buckets_.end()) continue;
+            // A pad spanning several buckets is checked more than once;
+            // re-checking cannot change the verdict.
+            for (uint32_t i : it->second) {
+                const auto& pad = pads_[i];
+                if (pad.net == net && net != 0) continue;  // own copper
+                if (pad.layer_idx != -1 && pad.layer_idx != layer) continue;
+                float required = std::max(clearance, pad.clearance_override);
+                const float pair = pairwise_required_clearance(net, pad.net);
+                if (pair > required) required = pair;
+                float center_dist;
+                if (pad.is_circular) {
+                    const float pad_radius = std::max(pad.width, pad.height) / 2.0f;
+                    center_dist = point_to_segment_distance(pad.x, pad.y, ax, ay, bx, by)
+                        - pad_radius;
+                } else {
+                    center_dist = pad_rect_distance(pad, ax, ay, bx, by);
+                }
+                if (center_dist - half_width < required - CLEARANCE_EPSILON_MM) {
+                    return false;
+                }
+            }
+        }
+    }
+    return true;
+}
+
+// -----------------------------------------------------------------------
+// Issue #6375: the validator's segment-vs-pad verdict, shared with the A*
+// -----------------------------------------------------------------------
+
+bool Grid3D::segment_pad_clear(const Segment& seg, const PadInfo& pad, int exclude_net,
+                               const std::vector<uint32_t>& exclude_ref_hashes,
+                               const std::vector<uint32_t>& clamp_ref_hashes,
+                               float* gap_out) const {
+    // Skip same-net pads
+    if (pad.net == exclude_net) return true;
+
+    auto in_list = [](const std::vector<uint32_t>& hashes, uint32_t h) {
+        for (auto v : hashes) {
+            if (v == h) return true;
+        }
+        return false;
+    };
+    const bool clamped = in_list(clamp_ref_hashes, pad.ref_hash);
+
+    // Issue #1764 + #2871 + #2908: the same-component-ref exclusion is
+    // intended to permit signal-pin escape routing through the chip's own
+    // perimeter (Issue #1764 reachability fix).  It must NOT permit signal
+    // traces to clip plane-net pads on the same chip: a same-component pad
+    // is excluded ONLY when it is a SIGNAL pad (``!pad.is_plane_net``).
+    // Plane-net pads -- whether ``net == 0`` (skipped-pour) or ``net > 0``
+    // with a power/ground name (classified in ``cpp_backend.py``) -- are
+    // kept.  Issue #2933 further narrows the signal carve-out to traces
+    // that stay OUTSIDE the neighbour pad's metal (deferred skip below).
+    const bool same_component_signal_carveout =
+        !pad.is_plane_net && (clamped || in_list(exclude_ref_hashes, pad.ref_hash));
+
+    // Skip pads on different layers (unless through-hole: layer_idx == -1)
+    if (pad.layer_idx != -1 && pad.layer_idx != seg.layer) return true;
+
+    // Per-component clearance (Issue #1016)
+    float required_clearance = pad.clearance_override;
+
+    // Issue #5229: Only explicitly circular pads use a disc. Equal
+    // dimensions do not imply a circle: square pad corners are copper.
+    // Oval and roundrect pads retain conservative rectangle bounds.
+    const float seg_half_width = seg.width / 2.0f;
+    float clearance;
+    if (pad.is_circular) {
+        const float pad_radius = std::max(pad.width, pad.height) / 2.0f;
+        const float dist = point_to_segment_distance(
+            pad.x, pad.y, seg.x1, seg.y1, seg.x2, seg.y2);
+        clearance = dist - seg_half_width - pad_radius;
+    } else {
+        // Rect-aware: signed centerline-to-rect distance.  Negative means
+        // the segment centerline lies inside the pad rectangle (a real DRC
+        // defect).
+        const float center_dist = pad_rect_distance(
+            pad, seg.x1, seg.y1, seg.x2, seg.y2);
+        clearance = center_dist - seg_half_width;
+    }
+
+    // Issue #2933: apply the same-component carve-out only when the trace
+    // clears the neighbour pad's metal (clearance >= 0).
+    // Issue #3490: EXCEPTION -- a same-component pad on net 0 (NC) carries
+    // no electrical net, so overlapping its metal is not a short; the
+    // footprint can make reaching the signal pad impossible otherwise.
+    // Issue #5166: a ref in ``clamp_ref_hashes`` reaches the carve-out only
+    // because a configured override resolved smaller than the default, so
+    // the positive-clearance branch ENFORCES that resolved value
+    // (``pad.clearance_override``) instead of skipping.  The net-0 branch
+    // stays an unconditional skip even for a clamped ref.  With an empty
+    // clamp set this is identical to the pre-#5166
+    // ``(clearance >= 0 || net == 0)``.
+    if (same_component_signal_carveout &&
+        (pad.net == 0 || (clearance >= 0.0f && !clamped))) {
+        return true;
+    }
+
+    if (gap_out) *gap_out = clearance;
+
+    // Issue #4510: widen for a cross-domain (HV) pair.  The gap point is the
+    // midpoint between the pad centre and the closest point on the candidate
+    // segment's centreline.  #4507: the attach-zone consult keys on the
+    // PAD's own layer (-1 for a through-hole barrel, which spans every
+    // layer); a same-layer SMD pad has ``pad.layer_idx == seg.layer`` here.
+    if (pairwise_active_) {
+        const float pair = pairwise_required_clearance(exclude_net, pad.net);
+        if (pair > required_clearance) {
+            const auto cp = closest_point_on_segment(
+                pad.x, pad.y, seg.x1, seg.y1, seg.x2, seg.y2);
+            if (!attach_zone_exempts((pad.x + cp.first) / 2.0f, (pad.y + cp.second) / 2.0f,
+                                     exclude_net, pad.net, pad.layer_idx)) {
+                required_clearance = pair;
+            }
+        }
+    }
+
+    return !(clearance < required_clearance - CLEARANCE_EPSILON_MM);
+}
+
+bool Grid3D::segment_pads_clear(const Segment& seg, int exclude_net,
+                                const std::vector<uint32_t>& exclude_ref_hashes,
+                                const std::vector<uint32_t>& clamp_ref_hashes) const {
+    // Reach: every pad whose copper lies within the widest required
+    // clearance (largest override, largest pairwise floor) of the segment's
+    // edge.  The bucket index covers each pad's circumscribed disc.
+    const float reach = seg.width / 2.0f
+        + std::max(pad_bucket_max_override_, max_pairwise_clearance_)
+        + CLEARANCE_EPSILON_MM;
+    const int qx1 = static_cast<int>(std::floor((std::min(seg.x1, seg.x2) - reach) / PAD_BUCKET_MM));
+    const int qx2 = static_cast<int>(std::floor((std::max(seg.x1, seg.x2) + reach) / PAD_BUCKET_MM));
+    const int qy1 = static_cast<int>(std::floor((std::min(seg.y1, seg.y2) - reach) / PAD_BUCKET_MM));
+    const int qy2 = static_cast<int>(std::floor((std::max(seg.y1, seg.y2) + reach) / PAD_BUCKET_MM));
+    for (int qy = qy1; qy <= qy2; ++qy) {
+        for (int qx = qx1; qx <= qx2; ++qx) {
+            const auto it = pad_buckets_.find(pad_bucket_key(qx, qy));
+            if (it == pad_buckets_.end()) continue;
+            for (uint32_t i : it->second) {
+                if (!segment_pad_clear(seg, pads_[i], exclude_net, exclude_ref_hashes,
+                                       clamp_ref_hashes)) {
+                    return false;
+                }
+            }
+        }
+    }
+    return true;
+}
+
 bool Grid3D::trace_stored_vias_clear(const Segment& s, float clearance,
                                     int partner_net, float partner_clearance) const {
     // Issue #5661 (Epic #5509 Phase 3b): the copper verdict is delegated to
@@ -1267,11 +1485,14 @@ bool Grid3D::trace_stored_vias_clear(const Segment& s, float clearance,
     namespace ck = ::router::clearance;
     if (stored_vias_.empty()) return true;
     const float margin = s.width / 2 + std::max({clearance, partner_clearance, max_pairwise_clearance_});
-    const auto candidates = route_geometry_candidates(
+    // Issue #5617: vias only -- this runs on every A* neighbour step, and it
+    // used to gather and sort the stored-segment bins too, then discard them
+    // (docs/diagnostics/issue-5617/phase4-native-astar-profile.md).
+    const auto via_candidates = gather_route_geometry(route_via_bins_,
         std::min(s.x1, s.x2) - margin, std::min(s.y1, s.y2) - margin,
         std::max(s.x1, s.x2) + margin, std::max(s.y1, s.y2) + margin);
     const ck::KSegment candidate{s.x1, s.y1, s.x2, s.y2, s.width, s.layer};
-    for (size_t i : candidates.second) {
+    for (size_t i : via_candidates) {
         const auto& via = stored_vias_[i];
         if (via.net == s.net || s.layer < via.layer_from || s.layer > via.layer_to) continue;
         const auto cp = closest_point_on_segment(via.x, via.y, s.x1, s.y1, s.x2, s.y2);
@@ -1604,156 +1825,17 @@ ValidationResult Grid3D::validate_route(
     for (const auto& seg : segments) {
         float seg_half_width = seg.width / 2.0f;
 
-        // 1a. Segment vs pads
+        // 1a. Segment vs pads.  Issue #6375: the per-pad verdict lives in
+        // ``segment_pad_clear`` so the A* own-pad step gate runs the SAME
+        // code (see that function for the carve-out / widening history).
         for (const auto& pad : pads_) {
-            // Skip same-net pads
-            if (pad.net == exclude_net) continue;
-
-            // Issue #1764 + #2871 + #2908: the same-component-ref exclusion
-            // is intended to permit signal-pin escape routing through the
-            // chip's own perimeter (Issue #1764 reachability fix). It must
-            // NOT permit signal traces to clip plane-net pads on the same
-            // chip.
-            //
-            // PR #2873 narrowed the exclusion to ``pad.net != 0`` so the
-            // SKIPPED-net convention (``skip_nets`` rewriting in
-            // ``cpp_backend.py:596-605``) kept plane pads in the validator.
-            // That convention only covers boards that pass ``--skip-nets``;
-            // board 04 routes ``+3.3V`` / ``GND`` as real nets, so the
-            // U2.1 / U2.8 / U2.23 / U2.24 plane pads retained ``net != 0``
-            // and were silently exempted -- 44 ``clearance_pad_segment``
-            // violations on the west edge cluster (Issue #2908).
-            //
-            // Issue #2908 broadens the carve-out: a same-component pad is
-            // excluded ONLY when it is a SIGNAL pad (``!pad.is_plane_net``).
-            // Plane-net pads -- whether ``net == 0`` (skipped-pour) or
-            // ``net > 0`` with a power/ground name (classified in
-            // ``cpp_backend.py``) -- are kept in the validator.  The
-            // rect-aware geometry below ensures the disc-bound short-axis
-            // over-rejection does not regress legitimate signal-vs-signal
-            // corridor traces (the corridor relaxation in
-            // ``_relax_same_component_clearance`` only operates between
-            // non-plane pads).
-            //
-            // Issue #2933: The same-component signal-pad carve-out is
-            // further narrowed -- it now only suppresses clearance complaints
-            // when the trace stays OUTSIDE the neighbour pad's metal.  On
-            // standard-pitch passives like 0805 resistors (R1 at 2mm pitch
-            // on board 02), the router was emitting traces whose centerline
-            // passed THROUGH the opposite pad's metal because the carve-out
-            // silently exempted them.  This produced 144
-            // ``clearance_pad_segment`` errors on board 02 at jlcpcb tier-1.
-            // The metal-overlap check (clearance < 0) is preserved for all
-            // same-component pads via the deferred-skip pattern below.
-            const bool same_component_signal_carveout =
-                !pad.is_plane_net && is_excluded_ref(pad.ref_hash);
-
-            // Skip pads on different layers (unless through-hole: layer_idx == -1)
-            if (pad.layer_idx != -1 && pad.layer_idx != seg.layer) continue;
-
-            // Per-component clearance (Issue #1016)
-            float required_clearance = pad.clearance_override;
-
-            // Issue #5229: Only explicitly circular pads use a disc. Equal
-            // dimensions do not imply a circle: square pad corners are copper.
-            // Oval and roundrect pads retain conservative rectangle bounds.
-            float clearance;
-            if (pad.is_circular) {
-                const float pad_radius = std::max(pad.width, pad.height) / 2.0f;
-                const float dist = point_to_segment_distance(
-                    pad.x, pad.y, seg.x1, seg.y1, seg.x2, seg.y2);
-                clearance = dist - seg_half_width - pad_radius;
-            } else {
-                // Rect-aware: signed centerline-to-rect distance.  Negative
-                // means the segment centerline lies inside the pad rectangle
-                // (a real DRC defect).
-                const float center_dist = pad_rect_distance(
-                    pad, seg.x1, seg.y1, seg.x2, seg.y2);
-                clearance = center_dist - seg_half_width;
+            float gap = std::numeric_limits<float>::infinity();
+            const bool clear = segment_pad_clear(seg, pad, exclude_net, exclude_ref_hashes,
+                                                 clamp_ref_hashes, &gap);
+            if (gap < result.min_clearance) {
+                result.min_clearance = gap;
             }
-
-            // Issue #2933: Apply the same-component carve-out only when the
-            // trace clears the neighbour pad's metal (clearance >= 0).
-            // Negative clearance means the trace overlaps pad copper -- a
-            // true defect that no carve-out should silence.
-            //
-            // Issue #3490: EXCEPTION -- a same-component pad on net 0
-            // (an unconnected / NC pad) carries no electrical net, so a
-            // trace endpoint that geometrically overlaps its metal is not
-            // a real short.  When such a pad sits within metal-overlap
-            // distance of the signal pad being routed (an LED whose
-            // net=0 pin is 0.2mm from its signal pin -- the #1764
-            // scenario), reaching the signal pad's center is impossible
-            // without entering the net=0 pad's rectangle.  The footprint
-            // guarantees the geometry, so silence the violation for
-            // negative clearance too -- but ONLY for net=0 pads.  Foreign
-            // SIGNAL pads (net != 0) keep the strict >= 0 guard so the
-            // trace-through-pad-copper pathology (#2933) stays caught.
-            //
-            // Issue #5166: a ref in ``clamp_ref_hashes`` reaches the
-            // carve-out only because a configured override resolved smaller
-            // than the default clearance, so the positive-clearance branch
-            // must ENFORCE that resolved value (``pad.clearance_override``,
-            // which is exactly the floor the check below already uses)
-            // instead of skipping.  The net-0 branch stays an unconditional
-            // skip even for a clamped ref: a same-component NC pad carries no
-            // electrical net, and the #3490 / #1764 geometry (a signal pin
-            // 0.2mm from an NC pin) makes reaching the signal pad's centre
-            // impossible without entering the NC pad's rectangle -- clamping
-            // there would make the configured relaxation unroutable rather
-            // than merely enforced.  With an empty clamp set this condition
-            // is identical to the pre-#5166 ``(clearance >= 0 || net == 0)``.
-            if (same_component_signal_carveout &&
-                (pad.net == 0 ||
-                 (clearance >= 0.0f && !is_clamped_ref(pad.ref_hash)))) {
-                continue;
-            }
-
-            if (clearance < result.min_clearance) {
-                result.min_clearance = clearance;
-            }
-
-            // Issue #4510: widen for a cross-domain (HV) pair.  The gap point
-            // is the midpoint between the pad centre and the closest point on
-            // the candidate segment's centreline -- the pad analogue of the
-            // Python validator's closest-approach midpoint.
-            // #4507: the zone consult keys on the PAD's own layer rather than
-            // on ``seg.layer``.  This loop is NOT layer-blind -- the guard at
-            // the top of it (line 768, ``Skip pads on different layers``:
-            // ``if (pad.layer_idx != -1 && pad.layer_idx != seg.layer)
-            // continue;``) already drops mismatched layers, so a cross-layer
-            // seg-vs-SMD-pad pair can never reach this line.  Only two shapes
-            // survive that filter:
-            //
-            //   (i)  a same-layer SMD pad, where ``pad.layer_idx == seg.layer``
-            //        -- the two candidate keys are literally the same value, so
-            //        the choice is a no-op; and
-            //   (ii) a through-hole pad (``layer_idx == -1``), where passing -1
-            //        keeps the consult layer-agnostic because the barrel really
-            //        does span every copper layer.
-            //
-            // So (ii) is the asymmetry's ONLY behavioural effect, and it is the
-            // whole reason for it.  ``tests/router/test_pairwise_cpp_parity.py::
-            // test_pad_branch_keys_the_waiver_on_the_pads_own_layer`` case (c)
-            // is correspondingly the only case that can distinguish the keys.
-            //
-            // One consequence worth naming: in case (ii) the -1 also exempts
-            // the CANDIDATE's net from the layer check, so this branch can
-            // waive on layers where ``AttachZone.exempts`` would not.  That is
-            // unchanged v18 behaviour and has no Python counterpart to disagree
-            // with -- ``route_pairwise_violation`` / ``find_pairwise_violations``
-            // are segment-vs-segment only and never compare a segment against a
-            // pad -- so it cannot produce the search<->gate thrash #4507 exists
-            // to remove.
-            const int pad_zone_layer = pad.layer_idx;
-            required_clearance = widen(required_clearance, pad.net, pad_zone_layer, [&]() {
-                const auto cp = closest_point_on_segment(
-                    pad.x, pad.y, seg.x1, seg.y1, seg.x2, seg.y2);
-                return std::pair<float, float>((pad.x + cp.first) / 2.0f,
-                                               (pad.y + cp.second) / 2.0f);
-            });
-
-            if (clearance < required_clearance - CLEARANCE_EPSILON_MM) {
+            if (!clear) {
                 result.valid = false;
                 result.violation_x = pad.x;
                 result.violation_y = pad.y;
@@ -1968,8 +2050,37 @@ ValidationResult Grid3D::validate_route(
         // ---------------------------------------------------------------
         // 4. Same-net drill spacing (port of grid.py:1253-1317)
         //    Candidate via vs stored vias from SAME net
+        //
+        //    Issue #6464: the floor is the fab hole-to-hole minimum, not the
+        //    0.102 mm same-net via-MERGE threshold -- KiCad's
+        //    ``hole_to_hole`` rule does not exempt a same-net pair (#5673,
+        //    the search-side twin in ``route_via_geometry_clear``).  Raw
+        //    callers that pass no ``min_hole_clearance`` keep the old floor.
         // ---------------------------------------------------------------
+        const float same_net_drill_floor = min_hole_clearance >= 0
+            ? std::max(min_drill_clearance, min_hole_clearance) : min_drill_clearance;
         float drill_radius = via.drill / 2.0f;
+        // Issue #6464: the route's OWN earlier vias are not stored copper
+        // yet, so the loop below never compared a route against itself (two
+        // EN_A vias of one route 0.461 mm apart on board 05).  Coincident
+        // entries are one via projected onto several layer spans.
+        for (const auto& other : vias) {
+            if (&other == &via) break;
+            float odx = via.x - other.x;
+            float ody = via.y - other.y;
+            if (std::abs(odx) < 1e-6f && std::abs(ody) < 1e-6f) continue;
+            float clearance = std::sqrt(odx * odx + ody * ody) - drill_radius - other.drill / 2.0f;
+            if (clearance < result.min_clearance) {
+                result.min_clearance = clearance;
+            }
+            if (clearance < same_net_drill_floor - CLEARANCE_EPSILON_MM) {
+                result.valid = false;
+                result.violation_x = via.x;
+                result.violation_y = via.y;
+                result.violation_type = 6;  // drill spacing
+                return result;
+            }
+        }
         for (const auto& sv : stored_vias_) {
             if (sv.net != exclude_net) continue;
 
@@ -1986,7 +2097,7 @@ ValidationResult Grid3D::validate_route(
                 result.min_clearance = clearance;
             }
 
-            if (clearance < min_drill_clearance - CLEARANCE_EPSILON_MM) {
+            if (clearance < same_net_drill_floor - CLEARANCE_EPSILON_MM) {
                 result.valid = false;
                 result.violation_x = via.x;
                 result.violation_y = via.y;

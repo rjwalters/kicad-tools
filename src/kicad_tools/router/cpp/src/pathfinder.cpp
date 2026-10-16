@@ -187,6 +187,50 @@ void Pathfinder::ensure_search_arrays_sized() {
     ++search_current_gen_;
 }
 
+// Issue #5617: see ``via_verdict_`` in pathfinder.hpp.  Same generation-
+// stamp scheme as ``ensure_search_arrays_sized()``: O(1) invalidation per
+// epoch, full reset only on a grid resize or a uint32 wraparound.
+void Pathfinder::begin_via_verdict_epoch() {
+    const int cols = grid_.cols();
+    const int rows = grid_.rows();
+    if (cols != via_verdict_cols_ || rows != via_verdict_rows_) {
+        const size_t total = static_cast<size_t>(cols) * static_cast<size_t>(rows);
+        via_verdict_gen_.assign(total, 0u);
+        via_verdict_.assign(total, ViaVerdict{});
+        via_verdict_cols_ = cols;
+        via_verdict_rows_ = rows;
+        via_verdict_epoch_ = 0;
+    }
+    if (via_verdict_epoch_ == std::numeric_limits<uint32_t>::max()) {
+        std::fill(via_verdict_gen_.begin(), via_verdict_gen_.end(), 0u);
+        via_verdict_epoch_ = 0;
+    }
+    ++via_verdict_epoch_;
+}
+
+bool Pathfinder::search_via_blocked_cached(int x, int y, int& out_blocking_net,
+                                           float& out_world_x, float& out_world_y) {
+    if (grid_.pairwise_active()) {
+        return is_via_blocked_diag(x, y, search_net_, search_negotiated_mode_,
+                                   search_via_radius_cells_,
+                                   out_blocking_net, out_world_x, out_world_y);
+    }
+    const size_t idx = static_cast<size_t>(y) * static_cast<size_t>(via_verdict_cols_) +
+                       static_cast<size_t>(x);
+    ViaVerdict& v = via_verdict_[idx];
+    if (via_verdict_gen_[idx] != via_verdict_epoch_) {
+        const bool result = is_via_blocked_diag(
+            x, y, search_net_, search_negotiated_mode_, search_via_radius_cells_,
+            v.blocking_net, v.world_x, v.world_y);
+        v.blocked = result ? 1 : 0;
+        via_verdict_gen_[idx] = via_verdict_epoch_;
+    }
+    out_blocking_net = v.blocking_net;
+    out_world_x = v.world_x;
+    out_world_y = v.world_y;
+    return v.blocked != 0;
+}
+
 bool Pathfinder::trace_halo_cell_clear(int cx, int cy, int layer, int x1, int y1,
                                        int x2, int y2, int net, int partner) const {
     if (!grid_.route_cell_has_geometry(cx, cy, layer)) return false;
@@ -203,6 +247,89 @@ bool Pathfinder::trace_halo_cell_clear(int cx, int cy, int layer, int x1, int y1
                                             search_fill_via_clearance_ >= 0 ? search_fill_via_clearance_ : rules_.via_clearance);
 }
 
+// Issue #6315: exact clearance of the swept step (x1,y1)->(x2,y2) of ``net``
+// against every pad of another net on ``layer`` (plus the authored per-net
+// minima of #6243).  Width and clearance are the routing net's own (set per
+// search by the Python backend), the same values the disc radius came from.
+bool Pathfinder::pad_step_clear(int x1, int y1, int x2, int y2, int layer, int net) const {
+    const auto [ax, ay] = grid_.grid_to_world(x1, y1);
+    const auto [bx, by] = grid_.grid_to_world(x2, y2);
+    const float half = search_trace_half_width_mm_ > 0 ? search_trace_half_width_mm_
+                                                       : rules_.trace_width / 2.0f;
+    // The pair rule is max(own class, pad's class); a pad's class is not
+    // known here and defaults to the board clearance, so never go below it
+    // (a net class tighter than the board default stays on the disc path).
+    const float clearance = std::max({search_fill_trace_clearance_ >= 0 ? search_fill_trace_clearance_
+                                                                       : rules_.trace_clearance,
+                                      rules_.trace_clearance, search_pad_clearance_floor_});
+    // Drilled holes carry their own hole-to-copper and (NPTH slot) board-edge
+    // clearances, which the copper-only pad test does not model -- and an NPTH
+    // hole can be registered only as a no-copper pad plus a census hole.  Never
+    // resolve a step that comes anywhere near one; the disc keeps deciding.
+    constexpr float PAD_EXACT_HOLE_GUARD_MM = 0.75f;
+    const float half_len = 0.5f * std::hypot(bx - ax, by - ay);
+    if (!grid_.component_holes_clear(0.5f * (ax + bx), 0.5f * (ay + by),
+                                     2.0f * (half + half_len),
+                                     clearance + PAD_EXACT_HOLE_GUARD_MM)) return false;
+    if (!grid_.pad_geometry_clear(ax, ay, bx, by, layer, net, half, clearance)) return false;
+    if (!grid_.authored_segment_clear(ax, ay, bx, by, 2.0 * half, layer, net)) return false;
+    // Routed copper whose clearance halo overlaps a pad's halo does not
+    // repaint the pad's cells (``mark_segment`` keeps a blocked cell's net),
+    // so the same step must also clear every stored foreign segment / via.
+    Segment segment;
+    segment.x1 = ax; segment.y1 = ay; segment.x2 = bx; segment.y2 = by;
+    segment.width = 2.0f * half;
+    segment.layer = layer; segment.net = net;
+    return grid_.route_trace_geometry_clear(segment, clearance,
+                                            physical_partner_net_, physical_partner_clearance_,
+                                            search_fill_via_clearance_ >= 0 ? search_fill_via_clearance_
+                                                                            : rules_.via_clearance);
+}
+
+// Issue #6315: a cell the exact pad test may resolve -- blocked only by pad
+// copper/clearance (``pad_cell``), not in use by a routed net, not reserved,
+// not a zone, and with no routed-copper halo of unknown geometry over it.
+bool Pathfinder::pad_cell_resolvable(const GridCell& cell, int cx, int cy, int layer) const {
+    if (!cell.pad_cell || cell.usage_count != 0 || cell.reserved_count > 0 || cell.is_zone)
+        return false;
+    return grid_.route_coverage_at(cx, cy, layer) >= 0;
+}
+
+bool Pathfinder::pad_cell_clear(int cx, int cy, int layer, int x1, int y1,
+                                int x2, int y2, int net) const {
+    if (!grid_.is_valid(cx, cy, layer)) return false;
+    const auto& cell = grid_.at(cx, cy, layer);
+    if (!cell.blocked || cell.net == net || !pad_cell_resolvable(cell, cx, cy, layer))
+        return false;
+    return pad_step_clear(x1, y1, x2, y2, layer, net);
+}
+
+// Issue #6375: a cell of the routing net's own STATIC geometry -- its pads'
+// copper and clearance halos (``pad_cell``), plus own-net static cells whose
+// pad provenance was voided (a drilled pad, a pad sharing a keepout; board
+// 03's USB_D- at J1 is one).  Routed copper (``usage_count``) is never static,
+// so the gate below stays local to pad surroundings.
+bool Pathfinder::own_pad_cell(int x, int y, int layer, int net) const {
+    if (!grid_.is_valid(x, y, layer)) return false;
+    const auto& cell = grid_.at(x, y, layer);
+    return cell.blocked && cell.net == net && (cell.pad_cell || cell.static_blocked);
+}
+
+// Issue #6375: the post-route validator's segment-vs-pad verdict on the swept
+// step (x1,y1)->(x2,y2), via the very function ``validate_route`` calls.
+bool Pathfinder::own_pad_step_clear(int x1, int y1, int x2, int y2, int layer, int net,
+                                    float emit_trace_width) const {
+    const auto [ax, ay] = grid_.grid_to_world(x1, y1);
+    const auto [bx, by] = grid_.grid_to_world(x2, y2);
+    Segment segment;
+    segment.x1 = ax; segment.y1 = ay; segment.x2 = bx; segment.y2 = by;
+    segment.width = search_gate_trace_width_ > 0.0f ? search_gate_trace_width_
+                  : (emit_trace_width > 0.0f ? emit_trace_width : rules_.trace_width);
+    segment.layer = layer; segment.net = net;
+    return grid_.segment_pads_clear(segment, net, search_gate_exclude_refs_,
+                                    search_gate_clamp_refs_);
+}
+
 bool Pathfinder::via_route_geometry_clear(int x, int y, int net) const {
     const auto [wx, wy] = grid_.grid_to_world(x, y);
     Via via;
@@ -215,6 +342,35 @@ bool Pathfinder::via_route_geometry_clear(int x, int y, int net) const {
     const float trace_clearance = search_fill_trace_clearance_ >= 0 ? search_fill_trace_clearance_ : rules_.trace_clearance;
     return grid_.route_via_geometry_clear(via, clearance, rules_.min_hole_to_hole, rules_.min_drill_clearance,
                                           trace_clearance);
+}
+
+bool Pathfinder::own_path_vias_clear(const std::vector<AStarNode>& closed, int via_anc,
+                                     int x, int y) const {
+    // Issue #6464: KiCad's ``hole_to_hole`` rule does not exempt two vias of
+    // the same net (see #5673), nor two vias of the same ROUTE.  The stored-
+    // via check in ``Grid3D::route_via_geometry_clear`` only sees committed
+    // copper, so a route could drop a second via 0.461 mm drill-to-drill from
+    // its own first one (board 05, EN_A).  The floor is the same one the
+    // stored-via branch applies: ``max(min_drill_clearance, min_hole_to_hole)``.
+    if (via_anc < 0) return true;
+    const float drill = search_emit_via_drill_ > 0 ? search_emit_via_drill_ : rules_.via_drill;
+    const float floor_mm = std::max(rules_.min_drill_clearance, rules_.min_hole_to_hole);
+    const auto [wx, wy] = grid_.grid_to_world(x, y);
+    const int n = static_cast<int>(closed.size());
+    int idx = via_anc;
+    while (idx >= 0 && idx < n) {
+        const AStarNode& node = closed[idx];
+        // A via stack at the same cell (F -> In1 -> B) is one drill.
+        if (node.x != x || node.y != y) {
+            const auto [vx, vy] = grid_.grid_to_world(node.x, node.y);
+            const float gap = std::hypot(wx - vx, wy - vy) - drill;
+            if (gap < floor_mm - 1e-4f) return false;  // grid.cpp CLEARANCE_EPSILON_MM
+        }
+        const int parent = node.parent_idx;
+        if (parent < 0 || parent >= n) break;
+        idx = closed[parent].via_anc;
+    }
+    return true;
 }
 
 bool Pathfinder::is_trace_blocked(int x, int y, int layer, int net,
@@ -231,6 +387,17 @@ bool Pathfinder::is_trace_blocked(int x, int y, int layer, int net,
                 from_x >= 0 ? from_x : x, from_y >= 0 ? from_y : y,
                 x, y, net, partner_net) ? 1 : 0;
         return physical_clear != 0;
+    };
+    // Issue #6315: a cell blocked only by pad copper/clearance is resolved
+    // with the exact swept-edge vs pad test (computed at most once per
+    // call) instead of being treated as copper.
+    int pad_exact = -1;
+    auto pad_clear = [&](const GridCell& c, int cx, int cy) {
+        if (!pad_cell_resolvable(c, cx, cy, layer)) return false;
+        if (pad_exact < 0)
+            pad_exact = pad_step_clear(from_x >= 0 ? from_x : x, from_y >= 0 ? from_y : y,
+                                       x, y, layer, net) ? 1 : 0;
+        return pad_exact != 0;
     };
 
     // Issue #2559 / Epic #2556 Phase 1C: when the partner branch is active
@@ -293,6 +460,9 @@ bool Pathfinder::is_trace_blocked(int x, int y, int layer, int net,
                 continue;
             }
             if (cell.net != net && halo_clear(cx, cy)) {
+                continue;
+            }
+            if (cell.net != net && pad_clear(cell, cx, cy)) {
                 continue;
             }
 
@@ -387,6 +557,9 @@ bool Pathfinder::is_trace_blocked(int x, int y, int layer, int net,
                 continue;
             }
             if (cell.net != net && halo_clear(cx, cy)) {
+                continue;
+            }
+            if (cell.net != net && pad_clear(cell, cx, cy)) {
                 continue;
             }
 
@@ -557,6 +730,9 @@ bool Pathfinder::is_diagonal_blocked(int x, int y, int dx, int dy, int layer,
         const auto& cell = grid_.at(cx, cy, layer);
         if (cell.blocked) {
             if (cell.net != net && trace_halo_cell_clear(cx, cy, layer, x, y, x + dx, y + dy, net))
+                continue;
+            // Issue #6315: pad-derived corner cell, exact geometry clear.
+            if (cell.net != net && pad_cell_clear(cx, cy, layer, x, y, x + dx, y + dy, net))
                 continue;
             if (allow_sharing) {
                 // Negotiated mode: own-net obstacle cells remain
@@ -893,9 +1069,16 @@ bool Pathfinder::is_via_blocked_diag(int x, int y, int net, bool allow_sharing,
             const float dx = std::max(std::abs(local_x) - pad.width / 2.0f, 0.0f);
             const float dy = std::max(std::abs(local_y) - pad.height / 2.0f, 0.0f);
             if (dx * dx + dy * dy < drill_radius * drill_radius) {
-                out_blocking_net = pad.net;
-                out_world_x = pad.x;
-                out_world_y = pad.y;
+                // Issue #6315: a via inside the routing net's OWN pad is a
+                // disallowed via-in-pad, not a via-via block -- leave the
+                // blocker unset so the search does not count it towards
+                // FAILURE_VIA_VIA_BLOCKED and report "blocked by stored-via
+                // geometry (blocking net <own net>)".
+                if (pad.net != net) {
+                    out_blocking_net = pad.net;
+                    out_world_x = pad.x;
+                    out_world_y = pad.y;
+                }
                 return true;
             }
         }
@@ -1145,6 +1328,16 @@ float Pathfinder::get_pad_channel_cost(int x, int y, int layer) const {
     return it->second;
 }
 
+bool Pathfinder::is_pad_via_fenced(int x, int y) const {
+    // Issue #6761: hard via fence (``PadChannelBudget.layer ==
+    // PAD_VIA_FENCE_LAYER``).  Same empty() fast path as the cost lookup.
+    if (search_pad_budget_cost_lookup_.empty()) {
+        return false;
+    }
+    return search_pad_budget_cost_lookup_.count(
+               std::make_tuple(x, y, PAD_VIA_FENCE_LAYER)) > 0;
+}
+
 // Issue #3143: Helper that materialises a per-cell pad-channel cost lookup
 // from the list of ``PadChannelBudget`` rectangles supplied by the caller.
 // Each cell inside a budget's bbox (intersected with the routing-grid
@@ -1190,6 +1383,11 @@ static void build_pad_channel_cost_lookup(
         if (b.layer == -1) {
             target_layers.reserve(layers);
             for (int l = 0; l < layers; ++l) target_layers.push_back(l);
+        } else if (b.layer == PAD_VIA_FENCE_LAYER) {
+            // Issue #6761: a via fence.  Registered under the pseudo-layer
+            // key so it never prices a trace step; consulted only by the
+            // via-expansion branches through ``is_pad_via_fenced``.
+            target_layers.push_back(PAD_VIA_FENCE_LAYER);
         } else if (b.layer >= 0 && b.layer < layers) {
             target_layers.push_back(b.layer);
         } else {
@@ -1238,6 +1436,60 @@ static void init_pad_bounds(
         ep.approach_gx2 = end_gx + 2;
         ep.approach_gy2 = end_gy + 2;
     }
+}
+
+// Issue #6368: pad centreline landing cost.  Mirror of
+// ``kicad_tools.router.pad_landing.landing_cost`` -- keep the two in step.
+//
+// Seeding every cell of the start pad's metal box and accepting any cell of
+// the end pad's box make every row of the box an equally legal landing, but
+// not an equally priced one: the off-grid tail ``reconstruct_path`` draws
+// between the pad centre and the first/last grid cell is free, so an
+// off-centre row gets its row change as a free dogleg inside the pad while a
+// centred landing pays two turns to change rows outside it.  This charges
+// that skipped jog -- two turns plus one straight step per cell of offset --
+// when a step that leaves the start pad (or reaches the end pad) has a cell
+// more than one grid cell off the pad centreline.  "Leaves"/"reaches" is
+// either of:
+//   * crossing the pad's copper tip line (the long-axis end of its copper)
+//     inside the pad's lane -- this also catches a diagonal that jogs across
+//     the tip and a run that slips out of the box sideways at the tip column;
+//   * crossing the metal box boundary while moving along the long axis --
+//     this catches a diagonal that crosses the centreline inside the pad.
+// A pure side step out of the box is not charged.  Soft cost only: no seed
+// or goal stops being legal.
+static constexpr float kLandingDeadbandCells = 1.0f + 1e-3f;
+
+static float landing_cost(const PadBounds& pb, int ax, int ay, int bx, int by,
+                          bool outward, const DesignRules& rules) {
+    int a_along, b_along;
+    float a_off, b_off;
+    if (pb.long_axis == 0) {
+        a_along = ax; b_along = bx;
+        a_off = std::fabs(static_cast<float>(ay) - pb.centre_gy);
+        b_off = std::fabs(static_cast<float>(by) - pb.centre_gy);
+    } else if (pb.long_axis == 1) {
+        a_along = ay; b_along = by;
+        a_off = std::fabs(static_cast<float>(ax) - pb.centre_gx);
+        b_off = std::fabs(static_cast<float>(bx) - pb.centre_gx);
+    } else {
+        return 0.0f;
+    }
+    const float off = std::max(a_off, b_off);
+    if (off <= kLandingDeadbandCells) return 0.0f;
+    const bool a_tip = (a_along >= pb.tip_lo && a_along <= pb.tip_hi);
+    const bool b_tip = (b_along >= pb.tip_lo && b_along <= pb.tip_hi);
+    bool crosses = (outward ? (a_tip && !b_tip) : (!a_tip && b_tip)) &&
+                   std::min(a_off, b_off) <= pb.lane_half_cells + kLandingDeadbandCells;
+    if (!crosses && a_along != b_along) {
+        const bool a_box = (ax >= pb.metal_gx1 && ax <= pb.metal_gx2 &&
+                            ay >= pb.metal_gy1 && ay <= pb.metal_gy2);
+        const bool b_box = (bx >= pb.metal_gx1 && bx <= pb.metal_gx2 &&
+                            by >= pb.metal_gy1 && by <= pb.metal_gy2);
+        crosses = outward ? (a_box && !b_box) : (!a_box && b_box);
+    }
+    if (!crosses) return 0.0f;
+    return 2.0f * rules.cost_turn + rules.cost_straight * off;
 }
 
 RouteResult Pathfinder::route(
@@ -1400,6 +1652,9 @@ RouteResult Pathfinder::route(
         closed_set.insert(current_key);
 
         int current_idx = static_cast<int>(closed_list.size());
+        // Issue #6464: nearest via on this node's path (self if it is one).
+        current.via_anc = current.via_from_parent ? current_idx
+            : (current.parent_idx >= 0 ? closed_list[current.parent_idx].via_anc : -1);
         closed_list.push_back(current);
         last_nodes_explored_++;
 
@@ -1531,6 +1786,20 @@ RouteResult Pathfinder::route(
                 if (is_in_start_metal || is_in_end_metal) {
                     // Allow entry into own pad's metal area
                 } else if (cell.net == net) {
+                    // Issue #6315: a shared pad halo belongs to neither net
+                    // alone -- its recorded owner must clear it too.
+                    if (cell.shared_pad_halo &&
+                        is_trace_blocked(nx, ny, nlayer, net, negotiated_mode,
+                                         trace_radius_cells, partner_net,
+                                         intra_pair_radius_cells, current.x, current.y)) {
+                        if (astar_trace_enabled()) {
+                            std::fprintf(stderr,
+                                "[A*/one-shot] cur=(%d,%d,L%d) nbr=(%d,%d,L%d) "
+                                "REJECT reason=shared_pad_halo_blocked\n",
+                                current.x, current.y, current.layer, nx, ny, nlayer);
+                        }
+                        continue;
+                    }
                     // Same-net blocked cell - allow -- UNLESS the exact swept
                     // edge fails the validator's segment-vs-pad clearance
                     // (Issue #5599; see the twin comment in the resumable
@@ -1558,6 +1827,12 @@ RouteResult Pathfinder::route(
                         }
                         continue;
                     }
+                } else if (pad_cell_clear(nx, ny, nlayer, current.x, current.y, nx, ny, net) &&
+                           !is_trace_blocked(nx, ny, nlayer, net, negotiated_mode,
+                                             trace_radius_cells, partner_net,
+                                             intra_pair_radius_cells, current.x, current.y)) {
+                    // Issue #6315: a foreign pad's clearance cell whose exact
+                    // swept-edge geometry is legal.
                 } else if (trace_halo_cell_clear(nx, ny, nlayer, current.x, current.y,
                                                    nx, ny, net, partner_net) &&
                            !is_trace_blocked(nx, ny, nlayer, net, negotiated_mode,
@@ -1654,6 +1929,26 @@ RouteResult Pathfinder::route(
                 }
             }
 
+            // Issue #6375: own-pad step gate (see ``set_search_own_pad_gate``).
+            // A planar step touching the routing net's own pad copper/halo
+            // outside the seed/goal metal boxes must pass the validator's own
+            // segment-vs-pad verdict -- the ``cell.net == net`` branch above
+            // admits such cells unchecked, and a net-0 neighbour never marks
+            // the halo shared.
+            if (nlayer == current.layer && !is_in_start_metal && !is_in_end_metal &&
+                (own_pad_cell(nx, ny, nlayer, net) ||
+                 own_pad_cell(current.x, current.y, nlayer, net)) &&
+                !own_pad_step_clear(current.x, current.y, nx, ny, nlayer, net,
+                                    emit_trace_width)) {
+                if (astar_trace_enabled()) {
+                    std::fprintf(stderr,
+                        "[A*/one-shot] cur=(%d,%d,L%d) nbr=(%d,%d,L%d) "
+                        "REJECT reason=own_pad_step_foreign_pad_too_close\n",
+                        current.x, current.y, current.layer, nx, ny, nlayer);
+                }
+                continue;
+            }
+
             if (astar_trace_enabled()) {
                 std::fprintf(stderr,
                     "[A*/one-shot] cur=(%d,%d,L%d) nbr=(%d,%d,L%d) ACCEPT "
@@ -1693,6 +1988,8 @@ RouteResult Pathfinder::route(
             // active, the per-cell penalty accumulates into the A* g_score
             // so the search prefers less-contested escape paths.
             float pad_channel_cost = get_pad_channel_cost(nx, ny, nlayer);
+            // Issue #6761: an infinite budget is a hard escape fence.
+            if (std::isinf(pad_channel_cost)) continue;
 
             // Issue #4071: diff-pair / match-group corridor attractor.
             // Subtract a bonus when this cell is reserved for our net so
@@ -1715,7 +2012,17 @@ RouteResult Pathfinder::route(
                 positive_step_cost =
                     std::max(0.0f, positive_step_cost - attractor_bonus);
             }
-            float new_g = current.g_score + positive_step_cost;
+            // Issue #6368: centreline landing cost on a step leaving the start
+            // pad or reaching the end pad (after the attractor clamp, so a
+            // reservation cannot cancel it).
+            float landing = 0.0f;
+            if (layer_in_end) {
+                landing += landing_cost(ep, current.x, current.y, nx, ny, false, rules_);
+            }
+            if (layer_in_start) {
+                landing += landing_cost(sp, current.x, current.y, nx, ny, true, rules_);
+            }
+            float new_g = current.g_score + positive_step_cost + landing;
 
             auto it = g_scores.find(neighbor_key);
             if (it == g_scores.end() || new_g < it->second) {
@@ -1730,6 +2037,8 @@ RouteResult Pathfinder::route(
         }
 
         // Try layer change (via)
+        int own_vias_clear = -1;  // Issue #6464: lazily evaluated once per node
+        ViaBlockMemo via_memo;    // Issue #5617: once per node, not per layer
         for (int new_layer : routable_layers_) {
             if (new_layer == current.layer) continue;
 
@@ -1738,9 +2047,9 @@ RouteResult Pathfinder::route(
             // rule is what caused the rejection.
             int blocking_net = 0;
             float block_wx = 0.0f, block_wy = 0.0f;
-            if (is_via_blocked_diag(current.x, current.y, net, negotiated_mode,
-                                    via_radius_cells,
-                                    blocking_net, block_wx, block_wy)) {
+            if (via_memo.blocked(*this, current.x, current.y, net, negotiated_mode,
+                                 via_radius_cells,
+                                 blocking_net, block_wx, block_wy)) {
                 if (blocking_net != 0) {
                     ++via_block_count;
                     last_blocking_net = blocking_net;
@@ -1749,6 +2058,11 @@ RouteResult Pathfinder::route(
                 }
                 continue;
             }
+            // Issue #6464: hole-to-hole against this path's own earlier vias.
+            if (own_vias_clear < 0)
+                own_vias_clear = own_path_vias_clear(closed_list, current.via_anc,
+                                                     current.x, current.y) ? 1 : 0;
+            if (!own_vias_clear) continue;
 
             auto neighbor_key = std::make_tuple(current.x, current.y, new_layer);
             if (closed_set.count(neighbor_key)) continue;
@@ -1774,6 +2088,10 @@ RouteResult Pathfinder::route(
             // contested channel.
             float pad_channel_cost =
                 get_pad_channel_cost(current.x, current.y, new_layer);
+            // Issue #6761: hard escape fences -- a via may neither land on a
+            // fenced trace cell nor drop inside a via fence.
+            if (std::isinf(pad_channel_cost) ||
+                is_pad_via_fenced(current.x, current.y)) continue;
 
             // Issue #4071: corridor attractor on the via-drop destination
             // cell -- the reservation is what makes the router prefer to
@@ -2025,6 +2343,9 @@ RouteResult Pathfinder::run_astar_loop() {
 
     constexpr int kTimeoutCheckInterval = 1024;
 
+    // Issue #5617: via-drop verdicts are valid for this call only.
+    begin_via_verdict_epoch();
+
     while (!search_open_set_.empty() && last_iterations_ < search_max_iterations_) {
         last_iterations_++;
 
@@ -2056,6 +2377,9 @@ RouteResult Pathfinder::run_astar_loop() {
         mark_closed(cur_idx);
 
         int current_idx = static_cast<int>(search_closed_list_.size());
+        // Issue #6464: nearest via on this node's path (self if it is one).
+        current.via_anc = current.via_from_parent ? current_idx
+            : (current.parent_idx >= 0 ? search_closed_list_[current.parent_idx].via_anc : -1);
         search_closed_list_.push_back(current);
         last_nodes_explored_++;
 
@@ -2205,6 +2529,23 @@ RouteResult Pathfinder::run_astar_loop() {
                 if (is_in_start_metal || is_in_end_metal) {
                     // Allow entry into own pad's metal area
                 } else if (cell.net == search_net_) {
+                    // Issue #6315: a shared pad halo belongs to neither net
+                    // alone -- its recorded owner must clear it too.
+                    if (cell.shared_pad_halo &&
+                        is_trace_blocked(nx, ny, nlayer, search_net_,
+                                         search_negotiated_mode_,
+                                         search_trace_radius_cells_,
+                                         search_partner_net_,
+                                         search_intra_pair_radius_cells_, current.x, current.y)) {
+                        if (astar_trace_enabled()) {
+                            std::fprintf(stderr,
+                                "[A*] cur=(%d,%d,L%d) nbr=(%d,%d,L%d) REJECT "
+                                "reason=shared_pad_halo_blocked net=%d\n",
+                                current.x, current.y, current.layer, nx, ny, nlayer,
+                                search_net_);
+                        }
+                        continue;
+                    }
                     // Same-net blocked cell - allow -- UNLESS the exact
                     // swept edge fails the validator's own segment-vs-pad
                     // clearance (Issue #5599).  A same-net corridor built
@@ -2251,6 +2592,12 @@ RouteResult Pathfinder::run_astar_loop() {
                         }
                         continue;
                     }
+                } else if (pad_cell_clear(nx, ny, nlayer, current.x, current.y, nx, ny,
+                                          search_net_) &&
+                           !is_trace_blocked(nx, ny, nlayer, search_net_, search_negotiated_mode_,
+                                             search_trace_radius_cells_, search_partner_net_,
+                                             search_intra_pair_radius_cells_, current.x, current.y)) {
+                    // Issue #6315: exact pad geometry, as in the one-shot loop.
                 } else if (trace_halo_cell_clear(nx, ny, nlayer, current.x, current.y,
                                                    nx, ny, search_net_, search_partner_net_) &&
                            !is_trace_blocked(nx, ny, nlayer, search_net_, search_negotiated_mode_,
@@ -2345,6 +2692,22 @@ RouteResult Pathfinder::run_astar_loop() {
                 }
             }
 
+            // Issue #6375: own-pad step gate, as in the one-shot loop.
+            if (nlayer == current.layer && !is_in_start_metal && !is_in_end_metal &&
+                (own_pad_cell(nx, ny, nlayer, search_net_) ||
+                 own_pad_cell(current.x, current.y, nlayer, search_net_)) &&
+                !own_pad_step_clear(current.x, current.y, nx, ny, nlayer, search_net_,
+                                    search_emit_trace_width_)) {
+                if (astar_trace_enabled()) {
+                    std::fprintf(stderr,
+                        "[A*] cur=(%d,%d,L%d) nbr=(%d,%d,L%d) REJECT "
+                        "reason=own_pad_step_foreign_pad_too_close net=%d\n",
+                        current.x, current.y, current.layer, nx, ny, nlayer,
+                        search_net_);
+                }
+                continue;
+            }
+
             if (astar_trace_enabled()) {
                 std::fprintf(stderr,
                     "[A*] cur=(%d,%d,L%d) nbr=(%d,%d,L%d) ACCEPT "
@@ -2384,6 +2747,8 @@ RouteResult Pathfinder::run_astar_loop() {
             // lookup populated at ``route_resumable()`` entry.  Empty
             // budget => returns 0.0 (zero overhead).
             float pad_channel_cost = get_pad_channel_cost(nx, ny, nlayer);
+            // Issue #6761: an infinite budget is a hard escape fence.
+            if (std::isinf(pad_channel_cost)) continue;
 
             // Issue #4071: corridor attractor (resumable / negotiated path).
             // Mirrors the one-shot ``route()`` contribution above using the
@@ -2407,7 +2772,15 @@ RouteResult Pathfinder::run_astar_loop() {
                 positive_step_cost =
                     std::max(0.0f, positive_step_cost - attractor_bonus);
             }
-            float new_g = current.g_score + positive_step_cost;
+            // Issue #6368: centreline landing cost (see the one-shot loop).
+            float landing = 0.0f;
+            if (layer_in_end) {
+                landing += landing_cost(ep, current.x, current.y, nx, ny, false, rules_);
+            }
+            if (layer_in_start) {
+                landing += landing_cost(sp, current.x, current.y, nx, ny, true, rules_);
+            }
+            float new_g = current.g_score + positive_step_cost + landing;
 
             // Issue #3309: flat-array g_score relax.  ``g_score_at`` returns
             // +infinity if the cell has not been touched in this generation,
@@ -2426,17 +2799,18 @@ RouteResult Pathfinder::run_astar_loop() {
         }
 
         // Try layer change (via)
+        int own_vias_clear = -1;  // Issue #6464: lazily evaluated once per node
         for (int new_layer : routable_layers_) {
             if (new_layer == current.layer) continue;
 
             // Issue #2476: Diagnostic-aware via blocking check so we can
             // record which stored-via net rejected our candidate slot.
+            // Issue #5617: one verdict per (x, y) per loop call, replayed
+            // for every other target layer and every other layer's node.
             int blocking_net = 0;
             float block_wx = 0.0f, block_wy = 0.0f;
-            if (is_via_blocked_diag(current.x, current.y, search_net_,
-                                    search_negotiated_mode_,
-                                    search_via_radius_cells_,
-                                    blocking_net, block_wx, block_wy)) {
+            if (search_via_blocked_cached(current.x, current.y,
+                                          blocking_net, block_wx, block_wy)) {
                 if (blocking_net != 0) {
                     ++search_via_block_count_;
                     search_last_blocking_net_ = blocking_net;
@@ -2445,6 +2819,11 @@ RouteResult Pathfinder::run_astar_loop() {
                 }
                 continue;
             }
+            // Issue #6464: hole-to-hole against this path's own earlier vias.
+            if (own_vias_clear < 0)
+                own_vias_clear = own_path_vias_clear(search_closed_list_, current.via_anc,
+                                                     current.x, current.y) ? 1 : 0;
+            if (!own_vias_clear) continue;
 
             // Issue #3309: flat-array closed-set check on via expansion.
             const size_t via_idx = flat_index(current.x, current.y, new_layer);
@@ -2471,6 +2850,10 @@ RouteResult Pathfinder::run_astar_loop() {
             // one-shot route() via path.
             float pad_channel_cost =
                 get_pad_channel_cost(current.x, current.y, new_layer);
+            // Issue #6761: hard escape fences -- a via may neither land on a
+            // fenced trace cell nor drop inside a via fence.
+            if (std::isinf(pad_channel_cost) ||
+                is_pad_via_fenced(current.x, current.y)) continue;
 
             // Issue #4071: corridor attractor on the via-drop destination
             // (resumable / negotiated path), mirroring the one-shot via

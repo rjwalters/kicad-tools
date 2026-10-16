@@ -177,21 +177,20 @@ if [[ "${1:-}" == "api" ]]; then
     esac
   done
 
-  # The free budget probe (#10480): `api rate_limit` (body only) and the
-  # GraphQL `rateLimit` query (`-i`, head + body), both answered from
+  # The free budget probe (#10480): one `api rate_limit` (body only), its
+  # `.resources.core` and `.resources.graphql` both answered from
   # `rate_limit.json` ({"core":N,"graphql":N}) and unhandled without it, so
-  # every case that does not set one sees a probe that did not answer.
+  # every case that does not set one sees a probe that did not answer. Since
+  # #12204 there is no standalone GraphQL `rateLimit` query; one fails loudly.
   RL="$D/rate_limit.json"
   if [[ "$url" == "rate_limit" ]]; then
     [[ -f "$RL" ]] || { echo "stub gh: no rate_limit fixture" >&2; exit 3; }
-    jq -c '{resources: {core: {limit: 5000, used: (5000 - .core), remaining: .core, reset: 4102444800}}}' "$RL"
+    jq -c '{resources: {core: {limit: 5000, used: (5000 - .core), remaining: .core, reset: 4102444800},
+      graphql: {limit: 5000, used: (5000 - .graphql), remaining: .graphql, reset: 4102444800}}}' "$RL"
     exit 0
   fi
   if [[ "$url" == "graphql" && "$query" == *"rateLimit{limit"* ]]; then
-    [[ -f "$RL" ]] || { echo "stub gh: no rate_limit fixture" >&2; exit 3; }
-    http "200 OK" "$(jq -c '{data: {rateLimit: {limit: 5000, used: (5000 - .graphql),
-      remaining: .graphql, resetAt: "2100-01-01T00:00:00Z"}}}' "$RL")"
-    exit 0
+    echo "stub gh: standalone rateLimit query (#12204)" >&2; exit 4
   fi
 
   if [[ "$url" == "graphql" ]]; then
@@ -610,15 +609,26 @@ assert_contains "$LAST_STDERR" "PR #8314" \
 assert_not_contains "$LAST_STDERR" "PROSE-ONLY PARK" \
     "T6d: a park record in the PR body is a declaration, not a prose-only park"
 
-# The same PR, now carrying `loom:operator-only`: the #4634/#7267 superseding
+# The same PR, now carrying `loom:operator`: the #4634/#7267 superseding
 # gate downgrades the unblock to held rather than clearing it.
 pr_fixture 8314 "<!-- loom:park Blocked by: #8322 by=doctor at=2026-09-19T12:09:00Z -->" "OPEN" \
-    '[{"id":"x","name":"loom:operator-only","color":"ABCDEF"}]'
+    '[{"id":"x","name":"loom:operator","color":"ABCDEF"}]'
 run_check
 assert_contains "$LAST_STDERR" "SUPERSEDED BLOCK" \
     "T6e: a PR held by its own label is superseded, not ready to unpark"
 assert_not_contains "$LAST_STDERR" "STALE BLOCK" \
     "T6f: a superseded PR is not also reported as a plain stale block"
+
+# Transition (#11795): an item not yet migrated still carries the retired
+# `loom:operator-only`, which the daemon reads as `loom:operator` until
+# `labels migrate` relabels it, so it supersedes the same way.
+pr_fixture 8314 "<!-- loom:park Blocked by: #8322 by=doctor at=2026-09-19T12:09:00Z -->" "OPEN" \
+    '[{"id":"x","name":"loom:operator-only","color":"ABCDEF"}]'
+run_check
+assert_contains "$LAST_STDERR" "SUPERSEDED BLOCK" \
+    "T6e2: an unmigrated loom:operator-only hold still supersedes (#11795 transition)"
+assert_not_contains "$LAST_STDERR" "STALE BLOCK" \
+    "T6f2: and is not also reported as a plain stale block"
 
 # `loom:changes-requested` is deliberately NOT in the self-block set: it is the
 # ordinary review cycle, not a pending human decision.

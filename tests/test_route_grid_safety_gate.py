@@ -32,6 +32,7 @@ from unittest.mock import patch
 import pytest
 
 from kicad_tools.cli import route_cmd
+from kicad_tools.router.cpp_backend import is_cpp_available
 from kicad_tools.router.io import (
     DesignRules,
     GridAutoSelection,
@@ -50,7 +51,7 @@ class _GateReached(Exception):
     """Sentinel raised just past the gate to prove routing was allowed."""
 
 
-def _unsafe_selection() -> GridAutoSelection:
+def _unsafe_selection(safe_grid_cells: int | None = None) -> GridAutoSelection:
     """A selection matching the board-05 memory-coerced unsafe grid."""
     return GridAutoSelection(
         resolution=0.1,
@@ -65,6 +66,7 @@ def _unsafe_selection() -> GridAutoSelection:
         memory_budget_used=4_000_000,
         lattice_rescued=False,
         memory_forced_unsafe_grid=True,
+        safe_grid_cells=safe_grid_cells,
     )
 
 
@@ -528,6 +530,10 @@ def _route_cli(tmp_path, extra_args, board: str = _OFF_GRID_ROUTABLE_PCB) -> tup
 
     ``--layers 2`` pins the fixed-layer path (``--auto-layers`` diverts to
     ``route_with_layer_escalation``, which never reaches the block under test).
+    ``--no-auto-build-native`` keeps a run without ``router_cpp.*.so`` from
+    compiling the extension into the source tree mid-test (issue #6544); the
+    ``auto`` backend then falls back to Python, so tests whose output depends
+    on the backend must pin ``--backend`` themselves.
     Returns the exit code and the texts of any ``warnings.warn`` emissions.
     """
     pcb_file = tmp_path / "off_grid.kicad_pcb"
@@ -546,19 +552,39 @@ def _route_cli(tmp_path, extra_args, board: str = _OFF_GRID_ROUTABLE_PCB) -> tup
                 "0.2",
                 "--layers",
                 "2",
+                "--no-auto-build-native",
                 *extra_args,
             ]
         )
     return code, [str(w.message) for w in caught]
 
 
-def test_fine_pitch_advisories_fire_for_grid_engine(tmp_path, capsys):
-    """The default grid engine keeps every advisory (#2254 behavior intact)."""
-    _route_cli(tmp_path, [])
+@pytest.mark.skipif(not is_cpp_available(), reason="C++ router backend not built")
+def test_fine_pitch_advisories_fire_for_grid_engine_cpp(tmp_path, capsys):
+    """The default grid engine keeps every advisory (#2254 behavior intact).
+
+    The full report only prints under the C++ backend: the Python pathfinder
+    has waypoint injection and prints a one-line summary instead (#3441), so
+    the backend is pinned rather than left to ``auto`` (issue #6544).
+    """
+    _route_cli(tmp_path, ["--backend", "cpp"])
     captured = capsys.readouterr()
     combined = captured.out + captured.err
     for marker in _GRID_ADVISORY_MARKERS:
         assert marker in combined, f"grid engine lost advisory {marker!r}"
+    assert "skipped for --route-engine" not in combined
+
+
+def test_fine_pitch_advisories_fire_for_grid_engine_python(tmp_path, capsys):
+    """The grid engine still advises on the always-available Python backend.
+
+    Under waypoint injection the advisory is the one-line off-grid summary
+    (#3441), never the non-grid skip line (issue #6544).
+    """
+    _route_cli(tmp_path, ["--backend", "python"])
+    captured = capsys.readouterr()
+    combined = captured.out + captured.err
+    assert "pads off-grid; waypoint injection will handle pad connections" in combined
     assert "skipped for --route-engine" not in combined
 
 
@@ -1008,3 +1034,148 @@ class TestOuterCliForwardsExplicitDefaults:
 
     def test_explicit_default_mfr_alias_is_forwarded(self):
         assert "--manufacturer" in self._sub_argv(["--mfr", "jlcpcb"])
+
+
+# ---------------------------------------------------------------------------
+# Issue #6306: the refusal must name a concrete --max-cells value and must not
+# advise enlarging the board (a fixed cell budget makes bigger boards worse).
+# ---------------------------------------------------------------------------
+
+
+def test_refusal_names_concrete_max_cells_and_not_enlarge(tmp_path, capsys):
+    code, _ = _run_main_to_gate(tmp_path, _unsafe_selection(safe_grid_cells=2_400_000), [])
+    assert code == 1
+    err = capsys.readouterr().err
+    assert "--max-cells 2400000 " in err
+    assert "--max-cells 2,400,000" not in err  # argparse type=int rejects commas
+    assert "enlarge" not in err.lower()
+    assert "ceiling" not in err  # 2.4M is within the auto-bump ceiling
+    assert "--allow-unsafe-grid" in err
+
+
+def test_refusal_flags_value_above_bump_ceiling(tmp_path, capsys):
+    code, _ = _run_main_to_gate(tmp_path, _unsafe_selection(safe_grid_cells=9_000_000), [])
+    assert code == 1
+    err = capsys.readouterr().err
+    assert "--max-cells 9000000 " in err
+    assert "needs ~9,000,000 cells" in err  # separators stay in prose only
+    assert "high memory use" in err
+
+
+def test_refusal_without_safe_cells_has_no_max_cells_option(tmp_path, capsys):
+    code, _ = _run_main_to_gate(tmp_path, _unsafe_selection(), [])
+    assert code == 1
+    err = capsys.readouterr().err
+    assert "--max-cells" not in err
+    assert "enlarge" not in err.lower()
+    assert "  1. Add routing layers" in err
+
+
+def test_grid_safety_error_default_message_6306():
+    from kicad_tools.router.io import GridSafetyError
+
+    msg = str(GridSafetyError(0.1, 0.15, 500_000, safe_grid_cells=2_400_000))
+    assert "--max-cells 2400000 " in msg
+    assert "--max-cells 2,400,000" not in msg
+    assert "enlarge" not in msg.lower()
+    assert "enlarge" not in str(GridSafetyError(0.1, 0.15, 500_000)).lower()
+
+
+def test_safe_grid_cells_round_trip_clears_gate():
+    """Re-running selection with the reported value clears the gate."""
+    result, _ = _select_memory_capped()
+    assert result.memory_forced_unsafe_grid is True
+    n = result.safe_grid_cells
+    assert n is not None and n > 500_000
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        rerun = auto_select_grid_resolution(
+            _memory_capped_fine_pitch_pads(),
+            clearance=0.15,
+            board_width=100.0,
+            board_height=100.0,
+            max_cells=n,
+            candidates=[0.5, 0.25, 0.127, 0.1, 0.065, 0.05, 0.0508],
+        )
+    assert rerun.memory_forced_unsafe_grid is False
+    assert rerun.safe_grid_cells is None
+    assert rerun.resolution <= 0.075
+
+
+_MAX_CELLS_FLAG_RE = re.compile(r"--max-cells (\S+)")
+
+
+def test_printed_max_cells_flag_parses_and_clears_gate(tmp_path, capsys):
+    """The exact ``--max-cells <token>`` text in the refusal is copy-pasteable.
+
+    Judge feedback on PR #6537: the refusal printed ``--max-cells 2,400,000``,
+    which ``type=int`` rejects.  Take the token straight out of the real
+    refusal on stderr, feed it through both real argparse definitions
+    (``kct route`` in ``cli/parser.py`` and ``route_cmd``'s own parser), and
+    confirm that re-running selection with the parsed value clears the gate.
+    """
+    from kicad_tools.cli.parser import create_parser
+
+    result, _ = _select_memory_capped()
+    assert result.memory_forced_unsafe_grid is True
+    n = result.safe_grid_cells
+    assert n is not None
+
+    # 1. The CLI refusal for this selection prints the flag.
+    code, gate_reached = _run_main_to_gate(tmp_path, result, [])
+    assert code == 1 and gate_reached is False
+    err = capsys.readouterr().err
+    match = _MAX_CELLS_FLAG_RE.search(err)
+    assert match is not None, err
+    token = match.group(1)
+    assert token == str(n)
+
+    # 2. The token parses through the top-level ``kct route`` parser.
+    args = create_parser().parse_args(["route", "board.kicad_pcb", "--max-cells", token])
+    assert args.max_cells == n
+    assert isinstance(args.max_cells, int)
+
+    # 3. The token parses through route_cmd's own parser, and the value it
+    #    hands the selector clears the gate end to end.
+    seen: dict[str, int] = {}
+
+    def _real_selection(*_args, **kwargs):
+        seen["max_cells"] = kwargs["max_cells"]
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            return auto_select_grid_resolution(
+                _memory_capped_fine_pitch_pads(),
+                clearance=0.15,
+                board_width=100.0,
+                board_height=100.0,
+                max_cells=kwargs["max_cells"],
+                candidates=[0.5, 0.25, 0.127, 0.1, 0.065, 0.05, 0.0508],
+            )
+
+    # Not _run_main_to_gate: it pins the selector to a fixed return value,
+    # whereas here the selector must run on the max_cells argparse produced.
+    with patch("kicad_tools.router.io.auto_select_grid_resolution", side_effect=_real_selection):
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text("(kicad_pcb)\n")
+        pads = [PadPosition(x=10.0, y=10.0), PadPosition(x=20.0, y=10.0)]
+        reached = {"value": False}
+
+        def _sentinel(*_a, **_k):
+            reached["value"] = True
+            raise _GateReached
+
+        with (
+            patch("kicad_tools.router.io.extract_pad_positions", return_value=pads),
+            patch("kicad_tools.router.io.extract_board_dimensions", return_value=(200.0, 200.0)),
+            patch("kicad_tools.router.io.compute_multi_resolution_plan", return_value=None),
+            patch("kicad_tools.router.io.load_pads_for_analysis", return_value=pads),
+            patch.object(route_cmd, "_resolve_starting_layers", side_effect=_sentinel),
+        ):
+            try:
+                code = route_cmd.main([str(pcb), "--quiet", "--max-cells", token])
+            except _GateReached:
+                code = None
+
+    assert seen["max_cells"] == n
+    assert reached["value"] is True, capsys.readouterr().err
+    assert code is None

@@ -221,6 +221,10 @@ class MSTRouter:
                 if route:
                     mark_route_callback(route)
                     routes.append(route)
+                    if use_steiner and kelvin is None:
+                        from .steiner import pin_steiner_arrival_layers
+
+                        pin_steiner_arrival_layers(pad_objs, (i, j), route)
                 elif failure_callback:
                     failure_callback(source_pad, target_pad)
         else:

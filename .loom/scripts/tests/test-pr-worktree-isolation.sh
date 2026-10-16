@@ -11,7 +11,8 @@
 #      - `release-1`        -> PR-style (clean up pr-<N> worktree)
 #      - `fix/foo-bar`      -> PR-style
 #      - `feature/issue-42-fix` (extra suffix) -> PR-style (strict regex)
-#   4. doctor.md (defaults/) documents the branch-isolation requirement.
+#   4. doctor.md (defaults/) documents the branch-isolation requirement,
+#      including the #9401 occupied-worktree yield (live process, no lease).
 #
 # This is a static / simulation test — we do not exercise the real `gh pr
 # checkout` round-trip because that would require a live forge. The
@@ -94,6 +95,69 @@ assert_grep "pr-worktree\.sh" "$DOCTOR_MD" \
     "doctor.md references pr-worktree.sh helper"
 assert_grep "\^feature/issue-" "$DOCTOR_MD" \
     "doctor.md documents the feature/issue-<N> regex heuristic"
+
+# #9401: a live process in the PR worktree with no PR lease = yield, not reset.
+assert_grep "^### Occupied worktree: yield, never reset \(#9401\)" "$DOCTOR_MD" \
+    "doctor.md has the 'Occupied worktree' yield section (#9401)"
+assert_grep "After \`lease pr claim\` succeeds and \*\*before\*\* \`worktree\.sh\`" "$DOCTOR_MD" \
+    "occupied-worktree check runs after the lease claim, before worktree setup"
+assert_grep "readlink \"/proc/\\\$p/cwd\".*\|\| lsof -a -p" "$DOCTOR_MD" \
+    "occupied-worktree probe reads /proc cwd with an lsof fallback"
+assert_grep "\[ \"\\\$q\" = \"\\\$S\" \] \|\|" "$DOCTOR_MD" \
+    "occupied-worktree probe excludes the Doctor's own session"
+assert_grep "^post \`Doctor yielding: live process in <WT> \(pid <pid>: <command>\) with no PR$" "$DOCTOR_MD" \
+    "yield comment names the worktree, pid and command"
+assert_grep "lease; worktree left untouched\.\` and stop — no snapshot, reset or checkout\." "$DOCTOR_MD" \
+    "yield stops without touching the worktree"
+assert_grep "\*\*Occupied → yield\*\*: \`lease pr release\`, drop any \`loom:treating\` you added" "$DOCTOR_MD" \
+    "yield releases the lease and the doctor's own loom:treating"
+assert_grep "\*\*Cannot probe\*\* \(no \`pgrep\`, or neither \`/proc\` nor \`lsof\`\): treat a dirty" "$DOCTOR_MD" \
+    "documents the no-pgrep/no-lsof fallback (dirty = occupied)"
+occ_line=$(grep -n "^### Occupied worktree" "$DOCTOR_MD" | head -1 | cut -d: -f1)
+pick_line=$(grep -n "^Pick the worktree by branch shape" "$DOCTOR_MD" | head -1 | cut -d: -f1)
+if [[ -n "$occ_line" && -n "$pick_line" && "$occ_line" -lt "$pick_line" ]]; then
+    pass "occupied-worktree check precedes worktree selection/checkout"
+else
+    fail "occupied-worktree check precedes worktree selection/checkout (occ=$occ_line pick=$pick_line)"
+fi
+
+# Behavioral: run the documented probe verbatim. A missing worktree must print
+# nothing (not every process); a reparented process inside one must be reported.
+probe_dir=$(mktemp -d)
+awk -v h="### Occupied worktree" 'index($0,h)==1{f=1} f&&/^```bash$/{g=1;next} g&&/^```$/{exit} g' "$DOCTOR_MD" > "$probe_dir/probe.txt"
+if [[ -s "$probe_dir/probe.txt" ]]; then
+    run_probe() { (cd "$probe_dir" && mkdir -p .loom/worktrees && sed "s#\.loom/worktrees/<issue-N|pr-N>#.loom/worktrees/$1#" probe.txt | bash 2>/dev/null); }
+    if [[ -z "$(run_probe nonexistent-1)" ]]; then
+        pass "occupied-worktree probe prints nothing for a nonexistent worktree"
+    else
+        fail "occupied-worktree probe prints processes for a nonexistent worktree"
+    fi
+    mkdir -p "$probe_dir/.loom/worktrees/pr-1"
+    # `setsid` is util-linux; macOS does not ship it (#12045). The subshell
+    # exiting right after the `&` already reparents the sleeper, which is the
+    # property the probe needs, so fall back to that rather than starting
+    # nothing. The sleeper outlives the probe by a wide margin: the probe runs
+    # `lsof` once per user process on macOS, which on a busy host took >30s
+    # and let the old `sleep 30` exit before the probe reached its pid.
+    sleeper_cmd="sleep 600"
+    launcher=()
+    command -v setsid >/dev/null 2>&1 && launcher=(setsid)
+    (cd "$probe_dir/.loom/worktrees/pr-1" && {
+        ${launcher[@]+"${launcher[@]}"} $sleeper_cmd >/dev/null 2>&1 &
+        echo $! >"$probe_dir/sleeper.pid"
+    })
+    sleep 0.3
+    if run_probe pr-1 | grep -q "$sleeper_cmd"; then
+        pass "occupied-worktree probe reports a live process inside an existing worktree"
+    else
+        fail "occupied-worktree probe misses a live process inside an existing worktree"
+    fi
+    kill "$(cat "$probe_dir/sleeper.pid" 2>/dev/null)" 2>/dev/null || true
+    pkill -u "$(id -u)" -f "^$sleeper_cmd\$" 2>/dev/null || true
+else
+    fail "could not extract the occupied-worktree probe snippet from doctor.md"
+fi
+rm -rf "$probe_dir"
 
 # --- Test 4: branch-to-worktree classification (in-script regex simulation) ---
 echo ""
@@ -357,6 +421,29 @@ else
 fi
 
 cd "$REPO_ROOT"
+
+# --- Test 5 (#11194): Judge guidance and helper --help agree on the fallback ---
+echo ""
+echo "Test 5: judge.md and pr-worktree.sh --help agree (no fabricated judge-* checkout)"
+JUDGE_MD="$REPO_ROOT/defaults/.claude/commands/loom/judge.md"
+[[ -f "$REPO_ROOT/.claude/commands/loom/judge.md" ]] && JUDGE_MD="$REPO_ROOT/.claude/commands/loom/judge.md"
+HELP_OUT=$("$PR_WORKTREE_SH" --help 2>&1)
+assert_grep "pr-worktree\.sh <PR_NUMBER>" "$JUDGE_MD" \
+    "judge.md routes the no-builder-checkout case through pr-worktree.sh"
+assert_grep "Never.*invent a .judge-\*" "$JUDGE_MD" \
+    "judge.md forbids inventing a judge-* checkout after a helper failure"
+if grep -qE "Judge's supported review checkout" <<<"$HELP_OUT" \
+    && grep -qE "names the holder" <<<"$HELP_OUT" \
+    && grep -qE "invent a judge-\* directory" <<<"$HELP_OUT"; then
+    pass "pr-worktree.sh --help states the Judge fallback and its collision failure behavior"
+else
+    fail "pr-worktree.sh --help does not match the Judge fallback guidance"
+fi
+if grep -qE "use worktree\.sh instead" <<<"$HELP_OUT"; then
+    fail "pr-worktree.sh --help still redirects issue PRs to worktree.sh"
+else
+    pass "pr-worktree.sh --help no longer contradicts judge.md"
+fi
 
 # --- Summary ---
 echo ""

@@ -29,6 +29,5 @@ source "$SCRIPT_DIR/lib/script-helper.sh"
 # own "could not run" code (invalid arguments). A version refusal wearing 1
 # would be read as a failed phase contract and trigger recovery/abort on a host
 # whose only real problem is a stale binary. Set as a command prefix rather
-# than a standalone assignment so this `settled` file gains no code line
-# (scripts/check-shell-allowlist.sh: a settled script may shrink, never grow).
+# than a standalone assignment so this file gains no code line.
 LOOM_SCRIPT_HELPER_MISSING_RC=2 loom_exec_script_helper validate-phase "$@"

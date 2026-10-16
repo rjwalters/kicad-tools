@@ -235,6 +235,11 @@ def _export_svg(
             timeout=60,
         )
 
+        if result.returncode != 0:
+            from kicad_tools.drc.geometric import describe_returncode
+
+            return False, f"kicad-cli SVG export failed: {describe_returncode(result.returncode)}"
+
         if svg_path.exists() and svg_path.stat().st_size > 0:
             return True, ""
 
@@ -598,6 +603,22 @@ def screenshot_schematic(
                 text=True,
                 timeout=60,
             )
+
+            if result.returncode != 0:
+                from kicad_tools.drc.geometric import describe_returncode
+
+                return {
+                    "success": False,
+                    "image_base64": None,
+                    "width_px": 0,
+                    "height_px": 0,
+                    "layers_rendered": [],
+                    "output_path": None,
+                    "error_message": (
+                        "kicad-cli schematic SVG export failed: "
+                        f"{describe_returncode(result.returncode)}"
+                    ),
+                }
 
             # Find the generated SVG file(s) in the output directory.
             # For single-sheet schematics there will be one file; for

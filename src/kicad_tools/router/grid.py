@@ -34,7 +34,7 @@ import base64
 import logging
 import math
 import threading
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Sequence
 from contextlib import contextmanager, suppress
 from typing import TYPE_CHECKING, Any, Iterator, Literal, cast
 
@@ -303,6 +303,25 @@ def _pad_rect_segment_centerline_distance(
     )
 
 
+def pad_segment_edge_clearance(
+    pad: Pad, x1: float, y1: float, x2: float, y2: float, half_width: float
+) -> float:
+    """Edge-to-edge gap between a trace centreline ``(x1,y1)-(x2,y2)`` and ``pad``'s copper.
+
+    The single segment-vs-pad distance primitive (Epic #5509): the post-route
+    validator (:meth:`RoutingGrid.validate_segment_clearance`) and the
+    pure-Python A*'s exact pad-cell resolution (Issue #6389, the Python port
+    of #6315) both measure through it, so the search can never accept a gap
+    the validator would measure differently.  Explicitly circular pads use
+    the disc model; every other pad the rotated rectangle (Issue #2908).
+    Negative means the trace overlaps the pad's copper.
+    """
+    if pad.shape == "circle":
+        pad_radius = max(pad.width, pad.height) / 2
+        return _geom_point_to_seg_dist(pad.x, pad.y, x1, y1, x2, y2) - half_width - pad_radius
+    return _pad_rect_segment_centerline_distance(pad, x1, y1, x2, y2) - half_width
+
+
 def _sync_pad_via_policies(py_grid: RoutingGrid, cpp_grid: Any) -> None:
     """Refresh lazily before via acceptance when pad policy inputs change.
 
@@ -424,6 +443,7 @@ def _sync_pad_cells_to_cpp_grid(
     gy1: int,
     gx2: int,
     gy2: int,
+    pad_source: bool = True,
 ) -> None:
     """Push a pad's blocked-cell envelope to the paired C++ grid.
 
@@ -457,6 +477,10 @@ def _sync_pad_cells_to_cpp_grid(
         gx1, gy1, gx2, gy2: Inclusive grid-cell bounding box of the pad's
             blocked envelope.  Already clamped to grid bounds by the
             caller's ``_add_pad_unsafe`` loop.
+        pad_source: Issue #6315 -- whether the envelope may be resolved by
+            the C++ exact segment-vs-pad test.  ``False`` for drilled pads,
+            whose hole and board-edge (NPTH slot) clearances the copper-only
+            pad test does not model; their cells keep the grid semantics.
     """
     try:
         from . import router_cpp  # noqa: F401
@@ -471,6 +495,22 @@ def _sync_pad_cells_to_cpp_grid(
     py_net = py_grid._net
     py_is_obstacle = py_grid._is_obstacle
     py_pad_blocked = py_grid._pad_blocked
+    # Issue #6315: pad-geometry provenance.  Every cell this helper pushes is
+    # pad copper or pad clearance (``pad_source``) unless a non-geometric
+    # reservation claimed it (``_pad_policy_cells``); halo cells reached by
+    # pads of two different nets are ``shared``.  The C++ side keeps the
+    # provenance only while no other static obstacle has touched the cell.
+    policy_cells = py_grid._pad_policy_cells
+    shared_cells = py_grid._shared_pad_halo
+    # Issue #6315: a cell any registry-less blocker covers (board-edge
+    # keepout, keepout, obstacle, region bound -- #5662's raster-only plane)
+    # is never pad-only, whatever order it was marked in.  The exact pad test
+    # does not see that geometry, so the cell must keep the grid semantics
+    # even when the edge keepout reached the Python grid before the native
+    # mirror was attached (and so never cleared the native provenance).
+    raster_only = py_grid._raster_only_blocked
+    rows = py_grid.rows
+    cols = py_grid.cols
 
     # Clamp the envelope defensively -- callers already clamp, but the
     # numpy slice would silently return empty arrays if the caller's
@@ -499,6 +539,7 @@ def _sync_pad_cells_to_cpp_grid(
             for gx in range(gx1, gx2 + 1):
                 if not py_blocked[layer_idx, gy, gx]:
                     continue
+                key = (layer_idx * rows + gy) * cols + gx
                 impl_mark_blocked(
                     int(gx),
                     int(gy),
@@ -506,6 +547,10 @@ def _sync_pad_cells_to_cpp_grid(
                     int(py_net[layer_idx, gy, gx]),
                     bool(py_is_obstacle[layer_idx, gy, gx]),
                     bool(py_pad_blocked[layer_idx, gy, gx]),
+                    pad_source
+                    and key not in policy_cells
+                    and not (raster_only is not None and raster_only[layer_idx, gy, gx]),
+                    key in shared_cells,
                 )
 
 
@@ -1094,6 +1139,13 @@ class RoutingGrid:
 
         # Track placed routes for net assignment
         self.routes: list[Route] = []
+        # Issue #6508: ``max_trace_width`` each committed route was marked
+        # with (via halo radius), and a per-route reach cache, so rip-up can
+        # re-stamp the halos of the routes it leaves behind.
+        self._route_marked_trace_width: dict[int, float | None] = {}
+        self._route_reach_cache: dict[
+            int, tuple[int, int, tuple[float, float, float, float], Route]
+        ] = {}
 
         # Issue #5517 (Epic #5508 Phase 1b): optional commit-journal observer.
         # Set by ``Autorouter`` to
@@ -1201,6 +1253,22 @@ class RoutingGrid:
         # store None entries for pads with no recorded pitch.
         self._pad_pin_pitch: dict[int, float | None] = {}
 
+        # Issue #6315: order-independent ownership of pad clearance-halo cells.
+        # ``_pad_halo_owner_dist`` maps a halo cell (flat ``(layer, y, x)``
+        # index) to the distance from its centre to the metal of the pad
+        # that currently owns it, so a later pad of another net can take the
+        # cell when its own metal is nearer (the nearest pad owns the cell,
+        # whatever order the pads were added in).  ``_shared_pad_halo`` holds
+        # the halo cells reached by pads of two different nets: they belong
+        # to neither net alone, so the C++ A* resolves them with exact
+        # segment-vs-pad geometry instead of trusting ``cell.net``.
+        # ``_pad_policy_cells`` holds cells blocked for a reason other than
+        # pad copper plus clearance (the stitch-via reservation, #2842); they
+        # are never handed to the exact-geometry path.
+        self._pad_halo_owner_dist: dict[int, float] = {}
+        self._shared_pad_halo: set[int] = set()
+        self._pad_policy_cells: set[int] = set()
+
         # R-tree spatial index for segment clearance queries (Issue #1249).
         # Per-layer rtree.index.Index for fast envelope-based candidate pruning
         # in validate_segment_clearance, replacing O(R*S) brute-force iteration.
@@ -1217,6 +1285,10 @@ class RoutingGrid:
         self._seg_rtree_envelopes: dict[int, dict[int, _SegEnvelope]] = {}
         self._seg_rtree_pending: dict[int, dict[int, tuple[Segment, _SegEnvelope]]] = {}
         self._rtree_available = RTREE_AVAILABLE
+        # Issue #6303: nesting depth of ``segment_index_suspended()``.  While
+        # non-zero, ``validate_segment_clearance`` ignores the segment R-tree
+        # and walks ``self.routes`` directly (see that context manager).
+        self._seg_rtree_suspended: int = 0
 
         # Issue #2960: Via R-tree spatial index.
         #
@@ -1405,6 +1477,15 @@ class RoutingGrid:
         # place.  Allocated lazily -- boards with no registry-less geometry
         # pay nothing.
         self._raster_only_blocked: np.ndarray | None = None
+        # Issue #6389: the Python twin of the native ``GridCell::pad_cell``
+        # provenance (#6315).  ``PAD_PROVENANCE_PAD`` marks a blocked cell of an
+        # SMD pad's copper + clearance envelope, which the pure-Python A* may
+        # resolve with the exact segment-vs-pad test; ``PAD_PROVENANCE_VOID``
+        # is sticky and marks a cell some non-SMD static source also blocked
+        # (a drilled pad, stub copper, a plane-via-site / rule-area keep-out),
+        # mirroring ``Grid3D::mark_blocked``'s ``prior_static_non_pad`` rule.
+        # Allocated lazily on the first pad.
+        self._pad_provenance: np.ndarray | None = None
         # Issue #4794: monotonic occupancy generation.  Allocating (or
         # re-allocating) the planes is itself an occupancy change -- the new
         # buffers share none of the old contents -- so bump rather than reset,
@@ -1699,6 +1780,7 @@ class RoutingGrid:
         self._present_cost_ema = None
         self._static_blocked = None
         self._raster_only_blocked = None
+        self._pad_provenance = None
         # Congestion planes + cached clearance stamps.
         self._congestion = xp.zeros((0, 0, 0), dtype=np.int32)
         self._congestion_counted = None
@@ -2498,6 +2580,10 @@ class RoutingGrid:
                 for gx in range(gx1, gx2 + 1):
                     if 0 <= gx < self.cols and 0 <= gy < self.rows:
                         cell = self.cell_at(layer_idx, gy, gx)
+                        # Issue #6315: whether ANOTHER pad's metal (or its
+                        # #3233 outer band) already covers this cell.  Read
+                        # before this pad writes anything to the cell.
+                        prior_pad_blocked = cell.pad_blocked
                         cell.blocked = True
                         cell.original_net = pad.net
 
@@ -2557,8 +2643,18 @@ class RoutingGrid:
                         # cells (``cell.net == routing_net``) are still passable.
                         if is_metal_area:
                             cell.pad_blocked = True
-                            if cell.net == 0:
+                            # Issue #6315: a pad's own metal belongs to that
+                            # pad.  Pre-fix the first pad to touch a cell
+                            # owned it, so a neighbour's clearance halo that
+                            # was stamped first kept this pad's edge row
+                            # (the U2.8 halo owned U2.9's top metal row on
+                            # board 05), and a signal pad's halo claimed the
+                            # metal of a net-0 neighbour.  Only metal that
+                            # overlaps ANOTHER pad's metal keeps its first
+                            # owner -- that is a real short, out of scope.
+                            if cell.net == 0 or not prior_pad_blocked:
                                 cell.net = pad.net
+                                self._forget_pad_halo_owner(layer_idx, gy, gx)
                             # Pad metal is physically copper -- foreign nets must
                             # NEVER traverse it.  Set ``is_obstacle = True``
                             # unconditionally (on first touch as well as on
@@ -2594,6 +2690,12 @@ class RoutingGrid:
                             # fine-pitch escape routing.
                             if is_pad_blocked_band:
                                 cell.pad_blocked = True
+                                # Issue #6315: the outer band overlaps this
+                                # pad's metal, so it belongs to this pad too
+                                # (see the metal branch above).
+                                if not prior_pad_blocked:
+                                    cell.net = pad.net
+                                    self._forget_pad_halo_owner(layer_idx, gy, gx)
                             # Issue #2940: rect-aware full-footprint obstacle
                             # marking for isolated pads.  The pre-fix code only
                             # flipped ``is_obstacle = True`` on clearance-halo
@@ -2634,14 +2736,33 @@ class RoutingGrid:
                             # ``static_blocks`` clause with ``usage_count ==
                             # 0`` and the ``pad_blocked`` short-circuit handle
                             # plane-net halo cells; see #2758).
+                            #
+                            # Issue #6315: a halo cell never claims another
+                            # pad's metal or band (``prior_pad_blocked``), and
+                            # a cell reached by the halos of two different
+                            # signal nets is owned by the NEAREST pad and
+                            # recorded as shared -- see
+                            # ``_claim_pad_halo_cell``.
                             if pad.net == 0:
                                 if cell.net != 0:
                                     cell.is_obstacle = True
-                            elif cell.net == 0:
-                                cell.net = pad.net
+                            elif is_pad_blocked_band:
                                 cell.is_obstacle = True
-                            elif cell.net != pad.net:
-                                cell.is_obstacle = True
+                            elif prior_pad_blocked:
+                                if cell.net != pad.net:
+                                    cell.is_obstacle = True
+                            else:
+                                self._claim_pad_halo_cell(
+                                    cell,
+                                    layer_idx,
+                                    gy,
+                                    gx,
+                                    pad.net,
+                                    metal_x1,
+                                    metal_y1,
+                                    metal_x2,
+                                    metal_y2,
+                                )
 
             # Always mark the center cell with this pad's net
             if 0 <= center_gx < self.cols and 0 <= center_gy < self.rows:
@@ -2755,9 +2876,216 @@ class RoutingGrid:
         # neighbour pad).  The pad-metal protection that closes the
         # foreign-pad-metal A* gap is the standard-envelope zone, which is
         # what we sync here.
+        # Issue #6315: only SMD copper is resolved by the exact pad test;
+        # a drilled pad also carries hole / NPTH-slot clearances.
+        pad_source = not pad.through_hole and pad.drill <= 0
+        # Issue #6389: the pure-Python A* resolves the same envelope the
+        # native grid receives below, with the same provenance.
+        self._record_pad_provenance(layers_to_block, gx1, gy1, gx2, gy2, pad_source)
         cpp_grid = self._cpp_grid
         if cpp_grid is not None:
-            _sync_pad_cells_to_cpp_grid(self, cpp_grid, layers_to_block, gx1, gy1, gx2, gy2)
+            _sync_pad_cells_to_cpp_grid(
+                self,
+                cpp_grid,
+                layers_to_block,
+                gx1,
+                gy1,
+                gx2,
+                gy2,
+                pad_source=pad_source,
+            )
+
+    #: Issue #6389: ``_pad_provenance`` values (see :meth:`_init_arrays`).
+    PAD_PROVENANCE_PAD = 1
+    PAD_PROVENANCE_VOID = 2
+
+    def _record_pad_provenance(
+        self,
+        layers_to_block: list[int],
+        gx1: int,
+        gy1: int,
+        gx2: int,
+        gy2: int,
+        pad_source: bool,
+    ) -> None:
+        """Record a pad envelope's provenance for the Python exact pad test (#6389).
+
+        The Python twin of ``_sync_pad_cells_to_cpp_grid``'s ``pad_source``
+        argument plus ``Grid3D::mark_blocked``'s provenance rule: every
+        blocked cell of the envelope becomes a pad cell when ``pad_source``,
+        unless a non-SMD static source already voided it; a drilled pad
+        voids it for good.  Cells the native sync also refuses at query time
+        (``_pad_policy_cells``, ``_raster_only_blocked``) are filtered in
+        :meth:`pad_cell_resolvable`, so their order relative to the pad does
+        not matter.
+        """
+        ax, ay = max(0, gx1), max(0, gy1)
+        bx, by = min(self.cols - 1, gx2), min(self.rows - 1, gy2)
+        if ax > bx or ay > by:
+            return
+        plane = self._pad_provenance
+        if plane is None:
+            plane = np.zeros((self.num_layers, self.rows, self.cols), dtype=np.int8)
+            self._pad_provenance = plane
+        for layer_idx in layers_to_block:
+            if not (0 <= layer_idx < self.num_layers):
+                continue
+            blocked = to_numpy(self._blocked[layer_idx, ay : by + 1, ax : bx + 1])
+            window = plane[layer_idx, ay : by + 1, ax : bx + 1]
+            if pad_source:
+                window[blocked & (window == 0)] = self.PAD_PROVENANCE_PAD
+            else:
+                window[blocked] = self.PAD_PROVENANCE_VOID
+
+    def _void_pad_provenance(self, layer_idx: int, gy: Any, gx: Any) -> None:
+        """Mark cells as blocked by a non-pad static source (Issue #6389).
+
+        Mirrors the native ``mark_blocked(..., pad_source=False)`` voiding the
+        cell's ``pad_cell`` bit.  ``gy`` / ``gx`` may be scalars or index
+        arrays.  Sticky: a later SMD pad over the cell cannot restore it.
+        """
+        plane = self._pad_provenance
+        if plane is None:
+            plane = np.zeros((self.num_layers, self.rows, self.cols), dtype=np.int8)
+            self._pad_provenance = plane
+        plane[layer_idx, gy, gx] = self.PAD_PROVENANCE_VOID
+
+    def pad_cell_resolvable(self, gx: int, gy: int, layer_idx: int) -> bool:
+        """May the exact segment-vs-pad test decide this blocked cell? (Issue #6389).
+
+        The Python mirror of ``Pathfinder::pad_cell_resolvable``: the cell is
+        blocked only by SMD pad copper or pad clearance (not a drilled pad,
+        not a stitch-via reservation, not any registry-less blocker such as a
+        keep-out, obstacle, region bound or the board edge), is not in use by
+        routed copper, is not reserved and is not a zone.  The routed-copper
+        coverage condition is checked by the caller, which owns the route-halo
+        geometry.
+        """
+        plane = self._pad_provenance
+        if plane is None or plane[layer_idx, gy, gx] != self.PAD_PROVENANCE_PAD:
+            return False
+        if self._pad_cell_key(layer_idx, gy, gx) in self._pad_policy_cells:
+            return False
+        raster_only = self._raster_only_blocked
+        if raster_only is not None and raster_only[layer_idx, gy, gx]:
+            return False
+        if self._usage_count[layer_idx, gy, gx] != 0:
+            return False
+        if self._is_zone[layer_idx, gy, gx]:
+            return False
+        return (layer_idx, gy, gx) not in self._reserved_for_nets
+
+    def pad_step_geometry_clear(
+        self,
+        ax: float,
+        ay: float,
+        bx: float,
+        by: float,
+        layer_idx: int,
+        net: int,
+        half_width: float,
+        clearance: float,
+        pads: Iterable[Pad] | None = None,
+        pad_clearance: Callable[[Pad], float] | None = None,
+    ) -> bool:
+        """Exact clearance of the swept step ``(ax,ay)->(bx,by)`` against foreign pads.
+
+        Issue #6389: the Python twin of ``Grid3D::pad_geometry_clear``.  Every
+        pad of another net on ``layer_idx`` (through-hole pads on every layer)
+        must keep ``max(clearance, the validator's per-component clearance)``
+        to the step's copper, measured with :func:`pad_segment_edge_clearance`
+        -- the validator's own primitive -- so the A* can never accept a gap
+        :meth:`validate_segment_clearance` would reject.  ``pads`` narrows the
+        scan to a pre-filtered candidate set (the router's bucket index); it
+        defaults to every pad.  ``pad_clearance`` returns the pad's own side
+        of the pair rule (its net class clearance), which only ever raises
+        the requirement.
+        """
+        rules = self.rules
+        for pad in self._pads if pads is None else pads:
+            if pad.net == net and net != 0:
+                continue  # own copper
+            if not pad.through_hole and self.layer_to_index(pad.layer.value) != layer_idx:
+                continue
+            required = max(clearance, rules.get_clearance_for_component(pad.ref))
+            if pad_clearance is not None:
+                required = max(required, pad_clearance(pad))
+            # No tolerance: the validator rejects ``gap < required`` exactly.
+            if pad_segment_edge_clearance(pad, ax, ay, bx, by, half_width) < required:
+                return False
+        return True
+
+    def _pad_cell_key(self, layer_idx: int, gy: int, gx: int) -> int:
+        """Flat ``(layer, y, x)`` key for the #6315 pad-halo bookkeeping."""
+        return (layer_idx * self.rows + gy) * self.cols + gx
+
+    def _forget_pad_halo_owner(self, layer_idx: int, gy: int, gx: int) -> None:
+        """Drop halo bookkeeping for a cell that has become pad metal (#6315)."""
+        if self._pad_halo_owner_dist or self._shared_pad_halo:
+            key = self._pad_cell_key(layer_idx, gy, gx)
+            self._pad_halo_owner_dist.pop(key, None)
+            self._shared_pad_halo.discard(key)
+
+    def _claim_pad_halo_cell(
+        self,
+        cell: Any,
+        layer_idx: int,
+        gy: int,
+        gx: int,
+        pad_net: int,
+        metal_x1: float,
+        metal_y1: float,
+        metal_x2: float,
+        metal_y2: float,
+    ) -> None:
+        """Assign a signal pad's clearance-halo cell (Issue #6315).
+
+        Pre-#6315 the first pad to touch a halo cell owned it.  Between two
+        fine-pitch pads of different nets the whole clearance gap therefore
+        went to whichever pad was added first, and the other net could not
+        leave its own pad through it (board 05 U2.8 ``PHASE_B`` / U2.9
+        ``PHASE_C``: ``PHASE_C`` was unroutable whenever ``PHASE_B`` was a
+        routed net, because the gap and U2.9's top row became ``PHASE_B``'s).
+
+        The rule now:
+
+        * an unclaimed cell (``net == 0``) is claimed, as before;
+        * a cell already in the halo of a pad of ANOTHER signal net is
+          recorded in ``_shared_pad_halo`` and owned by the pad whose metal
+          is nearest the cell centre (ties go to the lower net id), so the
+          owner does not depend on the order the pads were added;
+        * every claimed or contested cell is ``is_obstacle`` (#2940).
+
+        Shared cells belong to neither net alone: the C++ A* resolves them
+        (for the owner too) with the exact segment-vs-pad clearance test,
+        so each net may leave its own pad through the gap whenever the real
+        geometry is legal.
+        """
+        wx = self.origin_x + gx * self.resolution
+        wy = self.origin_y + gy * self.resolution
+        ddx = max(metal_x1 - wx, 0.0, wx - metal_x2)
+        ddy = max(metal_y1 - wy, 0.0, wy - metal_y2)
+        dist = math.hypot(ddx, ddy)
+        key = self._pad_cell_key(layer_idx, gy, gx)
+        owner_dist = self._pad_halo_owner_dist.get(key)
+        cell_net = cell.net
+        if cell_net == 0:
+            cell.net = pad_net
+            cell.is_obstacle = True
+            self._pad_halo_owner_dist[key] = dist
+        elif cell_net == pad_net:
+            if owner_dist is not None and dist < owner_dist:
+                self._pad_halo_owner_dist[key] = dist
+        else:
+            cell.is_obstacle = True
+            if owner_dist is None:
+                # Owned by something other than a signal pad's halo (left
+                # as the pre-#6315 behaviour: the cell keeps its owner).
+                return
+            self._shared_pad_halo.add(key)
+            if dist < owner_dist - 1e-9 or (abs(dist - owner_dist) <= 1e-9 and pad_net < cell_net):
+                cell.net = pad_net
+                self._pad_halo_owner_dist[key] = dist
 
     def _apply_stitch_via_halo(
         self,
@@ -2981,6 +3309,11 @@ class RoutingGrid:
 
                     # ``cell_net`` was already read above for the
                     # sibling-envelope check (Issue #2869); reuse it.
+
+                    # Issue #6315: this cell is reserved for a stitch via,
+                    # not by pad copper + clearance, so the C++ A* must never
+                    # resolve it with the exact segment-vs-pad test.
+                    self._pad_policy_cells.add(self._pad_cell_key(layer_idx, gy, gx))
 
                     if cell_net == 0:
                         # Unclaimed cell (or another plane-net halo cell):
@@ -3611,6 +3944,9 @@ class RoutingGrid:
                 blocked_count += 1
                 if self._static_blocked is not None:
                     self._static_blocked[layer_idx, gy, gx] = True
+                # Issue #6389: a non-pad static source (native ``mark_blocked``
+                # without ``pad_source`` voids the provenance the same way).
+                self._void_pad_provenance(layer_idx, gy, gx)
                 if cpp_grid is not None:
                     cpp_grid._impl.mark_blocked(int(gx), int(gy), int(layer_idx), 0, False, False)
             return blocked_count
@@ -3790,6 +4126,9 @@ class RoutingGrid:
             # the own-net pathfinder can traverse and land on it.
             cell.is_obstacle = False
             cell.pad_blocked = False
+            # Issue #6389: stub copper is not pad geometry (mirrors the native
+            # ``mark_blocked`` below voiding ``pad_cell``).
+            self._void_pad_provenance(layer_idx, gy, gx)
 
             cpp_grid = getattr(self, "_cpp_grid", None)
             if cpp_grid is not None:
@@ -4119,8 +4458,11 @@ class RoutingGrid:
 
         # Layer span of the via (indices, inclusive).  SMD pads on layers
         # outside this span never interact with the via barrel/annulus.
-        via_idx_a = self.layer_to_index(via.layers[0].value)
-        via_idx_b = self.layer_to_index(via.layers[1].value)
+        # Issue #6485: the DRILLED span -- a non-micro via is a through
+        # barrel whatever logical layer pair its producer recorded.
+        drilled_a, drilled_b = via.drilled_layers
+        via_idx_a = self.layer_to_index(drilled_a.value)
+        via_idx_b = self.layer_to_index(drilled_b.value)
         via_lo, via_hi = min(via_idx_a, via_idx_b), max(via_idx_a, via_idx_b)
 
         for pad in self._pads:
@@ -4260,8 +4602,10 @@ class RoutingGrid:
 
         # Layer span of the via (indices, inclusive).  A segment on a
         # layer outside this span never touches the via barrel.
-        via_idx_a = self.layer_to_index(via.layers[0].value)
-        via_idx_b = self.layer_to_index(via.layers[1].value)
+        # Issue #6485: the DRILLED span (see ``worst_via_pad_deficit``).
+        drilled_a, drilled_b = via.drilled_layers
+        via_idx_a = self.layer_to_index(drilled_a.value)
+        via_idx_b = self.layer_to_index(drilled_b.value)
         via_lo, via_hi = min(via_idx_a, via_idx_b), max(via_idx_a, via_idx_b)
 
         base_routes = self.routes if foreign_routes is None else foreign_routes
@@ -4306,6 +4650,215 @@ class RoutingGrid:
         if isinstance(item, Via):
             return index.via_violation(item, owner)
         return index.segment_violation(item, owner)
+
+    def segment_pad_clearance(
+        self,
+        x1: float,
+        y1: float,
+        x2: float,
+        y2: float,
+        layer_idx: int,
+        half_width: float,
+        exclude_net: int,
+        min_clearance: float,
+        component_pitches: dict[str, float] | None = None,
+        exclude_refs: set[str] | None = None,
+        pads: Iterable[Pad] | None = None,
+        violation_only: bool = False,
+    ) -> tuple[float, tuple[float, float] | None]:
+        """The pad half of :meth:`validate_segment_clearance` (Issue #6389).
+
+        Returns ``(min_actual_clearance, violation_loc)`` over the pads of
+        other nets for the segment ``(x1,y1)->(x2,y2)`` of ``half_width`` on
+        ``layer_idx``; ``violation_loc`` is ``None`` when no pad is closer
+        than its required clearance.  Factored out so the pure-Python A*'s
+        own-pad step gate (the port of the native #6375
+        ``own_pad_step_clear``) asks exactly the validator's question, with
+        its per-component clearances and same-component carve-outs.  ``pads``
+        narrows the scan to a pre-filtered candidate set; default every pad.
+
+        Issue #5617: ``violation_only=True`` is for callers that read only
+        ``violation_loc`` (the pure-Python A* own-pad step gate).  Pads that
+        provably cannot violate -- their bounding circle, grown by the trace
+        half-width, is still ``required_clearance`` away from the segment's
+        bounding box -- are skipped before the exact rect/disc distance, so
+        the returned ``min_actual`` then ignores them.  ``violation_loc`` is
+        identical: a skipped pad has a gap >= its required clearance and
+        could neither set it nor be carved out into one.
+        """
+        min_actual = float("inf")
+        violation_loc: tuple[float, float] | None = None
+        if violation_only:
+            seg_lo_x, seg_hi_x = (x1, x2) if x1 <= x2 else (x2, x1)
+            seg_lo_y, seg_hi_y = (y1, y2) if y1 <= y2 else (y2, y1)
+        clearance_memo: dict[tuple[str, float | None], float] = {}
+        # Check against all stored pads
+        for pad in self._pads if pads is None else pads:
+            # Skip same-net pads (clearance not required within same net)
+            if pad.net == exclude_net:
+                continue
+
+            # Issue #1764 + #2874 + #2908 + #2933: The same-component-ref
+            # exclusion is intended to permit signal-pin escape routing
+            # through the chip's own perimeter (Issue #1764 reachability fix).
+            # It must NOT permit signal traces to clip plane-net pads on the
+            # same chip, nor to physically overlap pad metal on any pad.
+            #
+            # PR #2873 (C++) / PR #2875 (this file, Python) narrowed the
+            # exclusion to ``pad.net != 0`` so the SKIPPED-net convention
+            # (``skip_nets`` rewriting in ``io.py:2819-2820``) kept plane-net
+            # pads in the validator. That convention only covers boards that
+            # pass ``--skip-nets``; board 04 routes ``+3.3V`` / ``GND`` as
+            # real nets (so the GND zone can stitch up after routing), so
+            # ``U2.1 +3.3V`` retains ``net == 2`` and was being silently
+            # exempted -- producing 44 ``clearance_pad_segment`` violations
+            # against same-component plane pads (Issue #2908, successor to
+            # #2902).
+            #
+            # Issue #2908 broadens the carve-out: a same-component pad is
+            # excluded ONLY when it is a signal net (not a plane net).
+            # Plane-net pads -- whether ``net == 0`` (skipped-pour) or
+            # ``net > 0`` with a power/ground name -- are kept in the
+            # validator. The rect-aware geometry below ensures the disc-bound
+            # over-rejection on the SHORT axis does not regress legitimate
+            # signal-vs-signal corridor traces (the corridor relaxation in
+            # ``_relax_same_component_clearance`` only operates between
+            # signal pads, so this stricter validation for plane pads is
+            # compatible with the existing reachability fix).
+            #
+            # Issue #2933: The same-component signal-pad carve-out is further
+            # narrowed -- it now only suppresses clearance complaints when the
+            # trace stays OUTSIDE the neighbour pad's metal.  On standard-pitch
+            # passives like 0805 resistors (R1 at 2mm pitch on board 02), the
+            # router was emitting traces whose centerline passed THROUGH the
+            # opposite pad's metal because the carve-out silently exempted
+            # them.  This produced 144 ``clearance_pad_segment`` errors on
+            # board 02 with negative actual_clearance (overlapping copper).
+            # The metal-overlap check (clearance < 0) is preserved for all
+            # same-component pads, so the trace-through-pad pathology is now
+            # caught at the validator while the fine-pitch escape exemption
+            # (positive clearance < required_clearance) is unchanged.
+            # Skip pads on different layers (unless PTH)
+            if not pad.through_hole:
+                # Convert layer for comparison
+                pad_layer_idx = self.layer_to_index(pad.layer.value)
+                if pad_layer_idx != layer_idx:
+                    continue
+
+            # Issue #1016: Get per-component clearance if available
+            # When validating against a pad, use the clearance for that component
+            pad_ref = pad.component_key
+            pin_pitch = component_pitches.get(pad_ref) if component_pitches else None
+            memo_key = (pad.ref, pin_pitch)
+            memo_hit = clearance_memo.get(memo_key)
+            if memo_hit is None:
+                memo_hit = self.rules.get_clearance_for_component(pad.ref, pin_pitch)
+                clearance_memo[memo_key] = memo_hit
+            required_clearance = memo_hit
+
+            if violation_only:
+                # Lower bound of the segment-to-pad-centre distance via the
+                # segment's bounding box; the pad's copper (rect of any
+                # rotation, or disc) lies within 0.5*hypot(w, h) of its centre.
+                gap_x = max(seg_lo_x - pad.x, pad.x - seg_hi_x, 0.0)
+                gap_y = max(seg_lo_y - pad.y, pad.y - seg_hi_y, 0.0)
+                reach = 0.5 * math.hypot(pad.width, pad.height) + half_width + required_clearance
+                if gap_x * gap_x + gap_y * gap_y > (reach + 1e-6) ** 2:
+                    continue
+
+            # Issue #3545: NET-AWARE tightening of the same-component
+            # carve-out.  Same-net pads are already skipped at the top of
+            # this loop, so every pad reaching this point is on a FOREIGN
+            # net -- the carve-out was silently exempting foreign-net pads
+            # on the route's own components (routing-diagnostic fixture:
+            # NET3 routed 0.127mm from J1 pad 1 / NET1, masked because
+            # NET3 also connects to J1 pad 2).  The legitimate use of the
+            # carve-out is fine-pitch escape routing (Issue #1764), which
+            # is exactly the case where a per-component clearance
+            # relaxation is in effect (``required_clearance <
+            # min_clearance`` via fine-pitch detection or an explicit
+            # component override).  Standard-pitch components get no
+            # relaxation, so their foreign-net pads now stay in the
+            # validator and sub-clearance copper is rejected.
+            #
+            # The carve-out remains active where the component geometry
+            # legitimately forces sub-clearance proximity: explicit /
+            # fine-pitch clearance relaxations (#1764), relaxed
+            # same-component corridors (#2452), and fine-pitch
+            # components routed without ``fine_pitch_clearance``
+            # configured -- see ``_same_component_carveout_active``.
+            #
+            # Issue #5166: the carve-out is now graded rather than
+            # all-or-nothing.  A ref eligible ONLY because a configured
+            # override resolved smaller than ``min_clearance``
+            # ("clamp") enforces that smaller value as a hard floor; a ref
+            # eligible via the #2452 corridor relief (or the opt-in legacy
+            # pitch-only branch) keeps the full skip ("skip").  See
+            # ``_same_component_carveout_mode``.
+            carveout_mode: CarveoutMode = (
+                self._same_component_carveout_mode(
+                    pad.component_key, required_clearance, min_clearance, component_pitches
+                )
+                if (
+                    exclude_refs
+                    and pad.component_key in exclude_refs
+                    and not _is_plane_net_pad(pad)
+                )
+                else "none"
+            )
+
+            # Issue #2908: Rect-aware geometry for rectangular SMD pads. The
+            # previous disc bound (``radius = max(w, h) / 2``) over-rejected
+            # along the pad's SHORT axis (a 1.475 x 0.3 mm LQFP-48 pad became
+            # a 0.7375 mm-radius disc, 0.587 mm of phantom inflation above /
+            # below the pad metal) and under-detected at long-axis corners
+            # (the disc's rounded corner clips inside the rectangle's sharp
+            # corner). Only explicitly circular pads use the disc model;
+            # square rectangles retain their copper corners (#5229).
+            # This mirrors PR #2787's distance calculation at
+            # ``validate/rules/clearance.py::_segment_circle_clearance``.
+            # Rect-aware: signed centerline-to-rect distance.  Negative means
+            # the segment centerline lies inside the pad rectangle (a real DRC
+            # defect; the magnitude is the deepest signed depth).  Issue
+            # #6389: the arithmetic lives in ``pad_segment_edge_clearance`` so
+            # the pure-Python A*'s exact pad-cell test measures identically.
+            clearance = pad_segment_edge_clearance(pad, x1, y1, x2, y2, half_width)
+
+            # Issue #2933: Apply the same-component carve-out only when the
+            # trace clears the neighbour pad's metal (clearance >= 0).
+            # Negative clearance means the trace overlaps pad copper -- a
+            # true defect that no carve-out should silence.
+            #
+            # Issue #3490: EXCEPTION -- a same-component pad on net 0
+            # (an unconnected / NC pad) carries no electrical net, so a
+            # trace endpoint that geometrically overlaps its metal is not
+            # a real short.  When such a pad sits within metal-overlap
+            # distance of the signal pad being routed (e.g. an LED whose
+            # net=0 pin is 0.2mm from its signal pin -- the exact #1764
+            # scenario), reaching the signal pad's center is impossible
+            # without entering the net=0 pad's rectangle.  The footprint
+            # guarantees the physical geometry, so silence the violation
+            # for negative clearance too -- but ONLY for net=0 pads.
+            # Foreign SIGNAL pads (net != 0) keep the strict >= 0 guard so
+            # the trace-through-pad-copper pathology (#2933) stays caught.
+            #
+            # Issue #5166: a "clamp" ref keeps the net=0 exemption but not
+            # the positive-clearance skip -- ``required_clearance`` below is
+            # the authored floor it must actually meet.
+            if carveout_mode != "none" and (
+                pad.net == 0 or (clearance >= 0 and carveout_mode != "clamp")
+            ):
+                continue
+
+            if clearance < min_actual:
+                min_actual = clearance
+
+            # Issue #1016: Check violation against component-specific clearance
+            # Issue #6509: same 1e-4 mm slack as native segment_pad_clear
+            # (grid.cpp), so float noise at exactly the rule is accepted.
+            if clearance < required_clearance - _KERNEL_EPSILON_MM:
+                violation_loc = (pad.x, pad.y)
+        return min_actual, violation_loc
 
     def validate_segment_clearance(
         self,
@@ -4384,6 +4937,9 @@ class RoutingGrid:
             and partner_net != exclude_net
             and partner_clearance is not None
         )
+        # Non-Optional alias for the comparisons below; only read when
+        # ``partner_active`` (which already implies it is not None).
+        partner_floor: float = partner_clearance if partner_clearance is not None else min_clearance
 
         # Segment half-width for edge-to-edge distance calculation
         seg_half_width = seg.width / 2
@@ -4392,169 +4948,25 @@ class RoutingGrid:
         violation_loc: tuple[float, float] | None = None
         has_violation = False  # Issue #1016: track if any violation was found
 
-        # Check against all stored pads
-        for pad in self._pads:
-            # Skip same-net pads (clearance not required within same net)
-            if pad.net == exclude_net:
-                continue
-
-            # Issue #1764 + #2874 + #2908 + #2933: The same-component-ref
-            # exclusion is intended to permit signal-pin escape routing
-            # through the chip's own perimeter (Issue #1764 reachability fix).
-            # It must NOT permit signal traces to clip plane-net pads on the
-            # same chip, nor to physically overlap pad metal on any pad.
-            #
-            # PR #2873 (C++) / PR #2875 (this file, Python) narrowed the
-            # exclusion to ``pad.net != 0`` so the SKIPPED-net convention
-            # (``skip_nets`` rewriting in ``io.py:2819-2820``) kept plane-net
-            # pads in the validator. That convention only covers boards that
-            # pass ``--skip-nets``; board 04 routes ``+3.3V`` / ``GND`` as
-            # real nets (so the GND zone can stitch up after routing), so
-            # ``U2.1 +3.3V`` retains ``net == 2`` and was being silently
-            # exempted -- producing 44 ``clearance_pad_segment`` violations
-            # against same-component plane pads (Issue #2908, successor to
-            # #2902).
-            #
-            # Issue #2908 broadens the carve-out: a same-component pad is
-            # excluded ONLY when it is a signal net (not a plane net).
-            # Plane-net pads -- whether ``net == 0`` (skipped-pour) or
-            # ``net > 0`` with a power/ground name -- are kept in the
-            # validator. The rect-aware geometry below ensures the disc-bound
-            # over-rejection on the SHORT axis does not regress legitimate
-            # signal-vs-signal corridor traces (the corridor relaxation in
-            # ``_relax_same_component_clearance`` only operates between
-            # signal pads, so this stricter validation for plane pads is
-            # compatible with the existing reachability fix).
-            #
-            # Issue #2933: The same-component signal-pad carve-out is further
-            # narrowed -- it now only suppresses clearance complaints when the
-            # trace stays OUTSIDE the neighbour pad's metal.  On standard-pitch
-            # passives like 0805 resistors (R1 at 2mm pitch on board 02), the
-            # router was emitting traces whose centerline passed THROUGH the
-            # opposite pad's metal because the carve-out silently exempted
-            # them.  This produced 144 ``clearance_pad_segment`` errors on
-            # board 02 with negative actual_clearance (overlapping copper).
-            # The metal-overlap check (clearance < 0) is preserved for all
-            # same-component pads, so the trace-through-pad pathology is now
-            # caught at the validator while the fine-pitch escape exemption
-            # (positive clearance < required_clearance) is unchanged.
-            # Skip pads on different layers (unless PTH)
-            if not pad.through_hole:
-                # Convert layer for comparison
-                pad_layer_idx = self.layer_to_index(pad.layer.value)
-                seg_layer_idx = self.layer_to_index(seg.layer.value)
-                if pad_layer_idx != seg_layer_idx:
-                    continue
-
-            # Issue #1016: Get per-component clearance if available
-            # When validating against a pad, use the clearance for that component
-            pad_ref = pad.component_key
-            pin_pitch = component_pitches.get(pad_ref) if component_pitches else None
-            required_clearance = self.rules.get_clearance_for_component(pad.ref, pin_pitch)
-
-            # Issue #3545: NET-AWARE tightening of the same-component
-            # carve-out.  Same-net pads are already skipped at the top of
-            # this loop, so every pad reaching this point is on a FOREIGN
-            # net -- the carve-out was silently exempting foreign-net pads
-            # on the route's own components (routing-diagnostic fixture:
-            # NET3 routed 0.127mm from J1 pad 1 / NET1, masked because
-            # NET3 also connects to J1 pad 2).  The legitimate use of the
-            # carve-out is fine-pitch escape routing (Issue #1764), which
-            # is exactly the case where a per-component clearance
-            # relaxation is in effect (``required_clearance <
-            # min_clearance`` via fine-pitch detection or an explicit
-            # component override).  Standard-pitch components get no
-            # relaxation, so their foreign-net pads now stay in the
-            # validator and sub-clearance copper is rejected.
-            #
-            # The carve-out remains active where the component geometry
-            # legitimately forces sub-clearance proximity: explicit /
-            # fine-pitch clearance relaxations (#1764), relaxed
-            # same-component corridors (#2452), and fine-pitch
-            # components routed without ``fine_pitch_clearance``
-            # configured -- see ``_same_component_carveout_active``.
-            #
-            # Issue #5166: the carve-out is now graded rather than
-            # all-or-nothing.  A ref eligible ONLY because a configured
-            # override resolved smaller than ``min_clearance``
-            # ("clamp") enforces that smaller value as a hard floor; a ref
-            # eligible via the #2452 corridor relief (or the opt-in legacy
-            # pitch-only branch) keeps the full skip ("skip").  See
-            # ``_same_component_carveout_mode``.
-            carveout_mode: CarveoutMode = (
-                self._same_component_carveout_mode(
-                    pad.component_key, required_clearance, min_clearance, component_pitches
-                )
-                if (
-                    exclude_refs
-                    and pad.component_key in exclude_refs
-                    and not _is_plane_net_pad(pad)
-                )
-                else "none"
-            )
-
-            # Issue #2908: Rect-aware geometry for rectangular SMD pads. The
-            # previous disc bound (``radius = max(w, h) / 2``) over-rejected
-            # along the pad's SHORT axis (a 1.475 x 0.3 mm LQFP-48 pad became
-            # a 0.7375 mm-radius disc, 0.587 mm of phantom inflation above /
-            # below the pad metal) and under-detected at long-axis corners
-            # (the disc's rounded corner clips inside the rectangle's sharp
-            # corner). Only explicitly circular pads use the disc model;
-            # square rectangles retain their copper corners (#5229).
-            # This mirrors PR #2787's distance calculation at
-            # ``validate/rules/clearance.py::_segment_circle_clearance``.
-            is_circular_pad = pad.shape == "circle"
-            if is_circular_pad:
-                pad_radius = max(pad.width, pad.height) / 2
-                dist = self._point_to_segment_distance(pad.x, pad.y, seg.x1, seg.y1, seg.x2, seg.y2)
-                clearance = dist - seg_half_width - pad_radius
-            else:
-                # Rect-aware: signed centerline-to-rect distance.  Negative
-                # means the segment centerline lies inside the pad rectangle
-                # (a real DRC defect; the magnitude is the deepest signed
-                # depth).
-                center_dist = _pad_rect_segment_centerline_distance(
-                    pad,
-                    seg.x1,
-                    seg.y1,
-                    seg.x2,
-                    seg.y2,
-                )
-                clearance = center_dist - seg_half_width
-
-            # Issue #2933: Apply the same-component carve-out only when the
-            # trace clears the neighbour pad's metal (clearance >= 0).
-            # Negative clearance means the trace overlaps pad copper -- a
-            # true defect that no carve-out should silence.
-            #
-            # Issue #3490: EXCEPTION -- a same-component pad on net 0
-            # (an unconnected / NC pad) carries no electrical net, so a
-            # trace endpoint that geometrically overlaps its metal is not
-            # a real short.  When such a pad sits within metal-overlap
-            # distance of the signal pad being routed (e.g. an LED whose
-            # net=0 pin is 0.2mm from its signal pin -- the exact #1764
-            # scenario), reaching the signal pad's center is impossible
-            # without entering the net=0 pad's rectangle.  The footprint
-            # guarantees the physical geometry, so silence the violation
-            # for negative clearance too -- but ONLY for net=0 pads.
-            # Foreign SIGNAL pads (net != 0) keep the strict >= 0 guard so
-            # the trace-through-pad-copper pathology (#2933) stays caught.
-            #
-            # Issue #5166: a "clamp" ref keeps the net=0 exemption but not
-            # the positive-clearance skip -- ``required_clearance`` below is
-            # the authored floor it must actually meet.
-            if carveout_mode != "none" and (
-                pad.net == 0 or (clearance >= 0 and carveout_mode != "clamp")
-            ):
-                continue
-
-            if clearance < min_actual_clearance:
-                min_actual_clearance = clearance
-
-            # Issue #1016: Check violation against component-specific clearance
-            if clearance < required_clearance:
-                has_violation = True
-                violation_loc = (pad.x, pad.y)
+        # Check against all stored pads (Issue #6389: shared with the
+        # pure-Python A*'s own-pad step gate).
+        pad_min, pad_violation_loc = self.segment_pad_clearance(
+            seg.x1,
+            seg.y1,
+            seg.x2,
+            seg.y2,
+            self.layer_to_index(seg.layer.value),
+            seg_half_width,
+            exclude_net,
+            min_clearance,
+            component_pitches=component_pitches,
+            exclude_refs=exclude_refs,
+        )
+        if pad_min < min_actual_clearance:
+            min_actual_clearance = pad_min
+        if pad_violation_loc is not None:
+            has_violation = True
+            violation_loc = pad_violation_loc
 
         # Check against segments from existing routes.
         # Issue #1249: Use R-tree spatial index when available and segment count
@@ -4563,6 +4975,7 @@ class RoutingGrid:
         seg_layer_idx = self.layer_to_index(seg.layer.value)
         use_rtree = (
             self._rtree_available
+            and not self._seg_rtree_suspended
             and self._seg_rtree_count >= RTREE_SEGMENT_THRESHOLD
             and seg_layer_idx in self._seg_rtree
         )
@@ -4625,14 +5038,14 @@ class RoutingGrid:
                     # Issue #2559 / Phase 1C: tighter clearance for the
                     # diff-pair partner only.
                     effective_clearance = (
-                        partner_clearance
+                        partner_floor
                         if partner_active and other_seg.net == partner_net
                         else min_clearance
                     )
 
                     if clearance < best:
                         best = clearance
-                    if clearance < effective_clearance:
+                    if clearance < effective_clearance - _KERNEL_EPSILON_MM:
                         found = True
                         loc = (
                             (seg.x1 + seg.x2 + other_seg.x1 + other_seg.x2) / 4,
@@ -4722,14 +5135,14 @@ class RoutingGrid:
 
                     # Issue #2559 / Phase 1C: tighter clearance for partner.
                     effective_clearance = (
-                        partner_clearance
+                        partner_floor
                         if partner_active and route.net == partner_net
                         else min_clearance
                     )
 
                     if clearance < min_actual_clearance:
                         min_actual_clearance = clearance
-                    if clearance < effective_clearance:
+                    if clearance < effective_clearance - _KERNEL_EPSILON_MM:
                         # Violation location at midpoint
                         has_violation = True
                         violation_loc = (
@@ -4758,7 +5171,7 @@ class RoutingGrid:
 
                 if clearance < min_actual_clearance:
                     min_actual_clearance = clearance
-                if clearance < via_floor:
+                if clearance < via_floor - _KERNEL_EPSILON_MM:
                     has_violation = True
                     violation_loc = (via.x, via.y)
 
@@ -4808,8 +5221,12 @@ class RoutingGrid:
         # declared F.Cu..B.Cu crosses In1/In2), so judge foreign segments on
         # the whole span -- not just on its two endpoint layers, which let an
         # inner-layer trace pass right through a through via's annulus.
+        # Issue #6485: that span is ``via.drilled_layers``.  A non-micro via
+        # is a through barrel whatever logical pair ``via.layers`` records,
+        # so this gate agrees with ``worst_via_segment_deficit`` and with
+        # the span the C++ backend is handed (``cpp_backend.py``).
         endpoints: list[int] = []
-        for layer in via.layers:
+        for layer in via.drilled_layers:
             with suppress(KeyError, ValueError):
                 endpoints.append(self.layer_to_index(layer.value))
         via_layer_indices: set[int] = (
@@ -4853,7 +5270,7 @@ class RoutingGrid:
 
                 if clearance < min_actual_clearance:
                     min_actual_clearance = clearance
-                if clearance < segment_floor:
+                if clearance < segment_floor - _KERNEL_EPSILON_MM:
                     has_violation = True
                     violation_loc = (via.x, via.y)
 
@@ -4910,7 +5327,7 @@ class RoutingGrid:
 
                 if clearance < min_actual_clearance:
                     min_actual_clearance = clearance
-                if clearance < min_clearance:
+                if clearance < min_clearance - _KERNEL_EPSILON_MM:
                     has_violation = True
                     violation_loc = (via.x, via.y)
 
@@ -4922,6 +5339,7 @@ class RoutingGrid:
         via: Via,
         same_net: int,
         min_drill_clearance: float | None = None,
+        route_vias: Sequence[Via] = (),
     ) -> tuple[bool, float, tuple[float, float] | None]:
         """Validate drill-to-drill spacing between same-net vias.
 
@@ -4934,11 +5352,23 @@ class RoutingGrid:
         specified net (opposite logic to validate_via_to_via_clearance which
         *excludes* the same net).
 
+        Issue #6464: the default floor is the fab hole-to-hole minimum,
+        ``max(rules.min_drill_clearance, rules.min_hole_to_hole)``.  KiCad's
+        ``hole_to_hole`` rule does not exempt a same-net pair (#5673), so the
+        0.102 mm same-net via-MERGE threshold on its own let two same-net
+        drills sit below the fab minimum.  ``route_vias`` carries the vias of
+        the route being validated: they are not committed to ``self.routes``
+        yet, so without it a route never saw its OWN vias (board 05 EN_A put
+        two vias of one route 0.461 mm apart against a 0.5 mm floor).
+
         Args:
             via: The via to validate
             same_net: Net ID to check against (only same-net vias are checked)
             min_drill_clearance: Minimum required drill-to-drill spacing
-                (default: rules.min_drill_clearance)
+                (default: ``max(rules.min_drill_clearance,
+                rules.min_hole_to_hole)``)
+            route_vias: Other vias of the not-yet-committed route ``via``
+                belongs to.  ``via`` itself and coincident entries are skipped.
 
         Returns:
             Tuple of (is_valid, actual_clearance, violation_location)
@@ -4949,31 +5379,38 @@ class RoutingGrid:
         import math
 
         if min_drill_clearance is None:
-            min_drill_clearance = self.rules.min_drill_clearance
+            min_drill_clearance = max(
+                self.rules.min_drill_clearance,
+                getattr(self.rules, "min_hole_to_hole", 0.0),
+            )
 
         drill_radius = via.drill / 2
         min_actual_clearance = float("inf")
         violation_loc: tuple[float, float] | None = None
         has_violation = False
 
-        for route in self.routes:
-            if route.net != same_net:
+        same_net_vias = [v for route in self.routes if route.net == same_net for v in route.vias]
+        same_net_vias.extend(v for v in route_vias if v is not via)
+
+        for existing_via in same_net_vias:
+            # Skip checking against self (exact same position and drill)
+            if abs(via.x - existing_via.x) < 1e-6 and abs(via.y - existing_via.y) < 1e-6:
                 continue
 
-            for existing_via in route.vias:
-                # Skip checking against self (exact same position and drill)
-                if abs(via.x - existing_via.x) < 1e-6 and abs(via.y - existing_via.y) < 1e-6:
-                    continue
+            distance = math.sqrt((via.x - existing_via.x) ** 2 + (via.y - existing_via.y) ** 2)
+            existing_drill_radius = existing_via.drill / 2
+            clearance = distance - drill_radius - existing_drill_radius
 
-                distance = math.sqrt((via.x - existing_via.x) ** 2 + (via.y - existing_via.y) ** 2)
-                existing_drill_radius = existing_via.drill / 2
-                clearance = distance - drill_radius - existing_drill_radius
-
-                if clearance < min_actual_clearance:
-                    min_actual_clearance = clearance
-                if clearance < min_drill_clearance:
-                    has_violation = True
-                    violation_loc = (via.x, via.y)
+            if clearance < min_actual_clearance:
+                min_actual_clearance = clearance
+            # Issue #6473: the kernel epsilon, as the native twins use
+            # (``Grid3D::validate_route``, ``Pathfinder::own_path_vias_clear``).
+            # Without it a pair sitting exactly on the floor -- the cheapest
+            # legal pair on a 0.1 mm grid -- measures 0.4999999999999998 and
+            # is rejected here while the C++ side accepts it.
+            if clearance < min_drill_clearance - _KERNEL_EPSILON_MM:
+                has_violation = True
+                violation_loc = (via.x, via.y)
 
         is_valid = not has_violation
         return is_valid, min_actual_clearance, violation_loc
@@ -5394,6 +5831,30 @@ class RoutingGrid:
             for via in route.vias:
                 self._rtree_insert_via(via)
 
+    @contextmanager
+    def segment_index_suspended(self) -> Iterator[None]:
+        """Make ``validate_segment_clearance`` read ``self.routes``, not the R-tree.
+
+        Issue #6303: the segment R-tree is maintained by ``mark_route`` /
+        ``unmark_route`` and therefore describes the copper that was *marked*,
+        not whatever list ``self.routes`` currently points at.  A caller that
+        temporarily rebinds ``self.routes`` to some other copper (the access
+        witness replay steps the board forward through the commit journal this
+        way) would otherwise have every segment-clearance query answered from
+        the finished board once 32+ segments are indexed, while the via checks
+        -- which read ``self.routes`` -- see the rebound copper.
+
+        Inside this context ``validate_segment_clearance`` takes its
+        brute-force branch over ``self.routes``.  The index itself is left
+        untouched (no entries are removed, ``_seg_rtree_count`` is unchanged),
+        so it is exactly as it was on exit, normal or exceptional.  Re-entrant.
+        """
+        self._seg_rtree_suspended += 1
+        try:
+            yield
+        finally:
+            self._seg_rtree_suspended -= 1
+
     def invalidate_spatial_index(self) -> None:
         """Rebuild the R-tree spatial index with current clearance values.
 
@@ -5477,6 +5938,7 @@ class RoutingGrid:
                 self._mark_segment(seg, clearance_cells=clearance_cells)
             for via in route.vias:
                 self._mark_via(via, max_trace_width=max_trace_width)
+            self._route_marked_trace_width[id(route)] = max_trace_width
             self.routes.append(route)
             # Maintain R-tree index for fast clearance queries (Issue #1249)
             self._rtree_insert_route(route)
@@ -5989,6 +6451,9 @@ class RoutingGrid:
                 self._rtree_remove_route_vias(route)
                 self.routes.remove(route)
                 removed = True
+                self._route_marked_trace_width.pop(id(route), None)
+                self._route_reach_cache.pop(id(route), None)
+                self._restamp_surviving_halos(route, max_trace_width)
 
                 # Issue #5517: journal the rip-up.  Only a route that was
                 # actually in ``self.routes`` is journaled -- that list is
@@ -6009,6 +6474,118 @@ class RoutingGrid:
                 invalidate = getattr(cpp_grid, "invalidate_stored_routes", None)
                 if invalidate is not None:
                     invalidate()
+
+    def _segment_halo_reach_mm(self, seg: Segment) -> float:
+        """Distance from a segment's centreline to its marked halo's edge."""
+        cells = int((seg.width / 2 + self.rules.trace_clearance) / self.resolution) + 2
+        return cells * self.resolution
+
+    def _via_halo_reach_mm(self, via: Via, max_trace_width: float | None) -> float:
+        """Distance from a via's centre to its marked halo's edge."""
+        trace_w = max_trace_width if max_trace_width is not None else self.rules.trace_width
+        cells = (
+            int((via.diameter / 2 + self.rules.via_clearance + trace_w / 2) / self.resolution) + 1
+        )
+        return cells * self.resolution
+
+    def _restamp_surviving_halos(self, removed: Route, max_trace_width: float | None) -> None:
+        """Re-stamp the halos of routes that overlap a just-removed route's halo.
+
+        Issue #6508.  A cell has ONE owner: ``_mark_segment`` / ``_mark_via``
+        only claim cells that are not yet blocked, and ``_unmark_*`` frees
+        every cell its net owns.  So when route A's halo was stamped first and
+        route B's (a via's) halo overlapped it, B's share of those cells was
+        recorded as A's -- and ripping A up freed them, leaving B's via with a
+        hole in its halo while B stays committed.  The Python A* then walked
+        through the hole, 0.47 mm from a foreign via centre, and
+        ``validate_segment_clearance`` rejected the candidate.
+
+        Only cells in the removed route's footprint can have been wrongly
+        freed, so only surviving routes whose halo reaches it are re-stamped.
+        Stamping is idempotent on already-blocked cells.
+        """
+        items: list[tuple[float, float, float, float]] = []
+        for seg in removed.segments:
+            r = self._segment_halo_reach_mm(seg)
+            items.append(
+                (
+                    min(seg.x1, seg.x2) - r,
+                    min(seg.y1, seg.y2) - r,
+                    max(seg.x1, seg.x2) + r,
+                    max(seg.y1, seg.y2) + r,
+                )
+            )
+        for via in removed.vias:
+            r = self._via_halo_reach_mm(via, max_trace_width)
+            items.append((via.x - r, via.y - r, via.x + r, via.y + r))
+        if not items or not self.routes:
+            return
+        dx1 = min(i[0] for i in items)
+        dy1 = min(i[1] for i in items)
+        dx2 = max(i[2] for i in items)
+        dy2 = max(i[3] for i in items)
+
+        def hits(b: tuple[float, float, float, float]) -> bool:
+            return b[0] <= dx2 and b[2] >= dx1 and b[1] <= dy2 and b[3] >= dy1
+
+        halo = self._route_halo
+        was_frozen = halo.frozen
+        halo.frozen = True
+        try:
+            for other in self.routes:
+                key = id(other)
+                cached = self._route_reach_cache.get(key)
+                if (
+                    cached is None
+                    or cached[3] is not other
+                    or cached[0] != len(other.segments)
+                    or cached[1] != len(other.vias)
+                ):
+                    xs: list[float] = []
+                    ys: list[float] = []
+                    reach = 0.0
+                    mtw = self._route_marked_trace_width.get(key, max_trace_width)
+                    for seg in other.segments:
+                        xs += (seg.x1, seg.x2)
+                        ys += (seg.y1, seg.y2)
+                        reach = max(reach, self._segment_halo_reach_mm(seg))
+                    for via in other.vias:
+                        xs.append(via.x)
+                        ys.append(via.y)
+                        reach = max(reach, self._via_halo_reach_mm(via, mtw))
+                    if not xs:
+                        cached = (0, 0, (1.0, 1.0, 0.0, 0.0), other)
+                    else:
+                        cached = (
+                            len(other.segments),
+                            len(other.vias),
+                            (min(xs) - reach, min(ys) - reach, max(xs) + reach, max(ys) + reach),
+                            other,
+                        )
+                    self._route_reach_cache[key] = cached
+                if not hits(cached[2]):
+                    continue
+                mtw = self._route_marked_trace_width.get(key, max_trace_width)
+                for seg in other.segments:
+                    r = self._segment_halo_reach_mm(seg)
+                    if hits(
+                        (
+                            min(seg.x1, seg.x2) - r,
+                            min(seg.y1, seg.y2) - r,
+                            max(seg.x1, seg.x2) + r,
+                            max(seg.y1, seg.y2) + r,
+                        )
+                    ):
+                        cells = (
+                            int((seg.width / 2 + self.rules.trace_clearance) / self.resolution) + 2
+                        )
+                        self._mark_segment(seg, clearance_cells=cells)
+                for via in other.vias:
+                    r = self._via_halo_reach_mm(via, mtw)
+                    if hits((via.x - r, via.y - r, via.x + r, via.y + r)):
+                        self._mark_via(via, max_trace_width=mtw)
+        finally:
+            halo.frozen = was_frozen
 
     def _unmark_segment(self, seg: Segment, clearance_cells: int = 1) -> None:
         """Unmark cells along a segment (clear blocked status and net)."""
@@ -6302,6 +6879,73 @@ class RoutingGrid:
         self._deferred_cpp_unmarks = []
         self._cpp_unmark_deferred = False
         return routes
+
+    def pending_cpp_unmark_count(self) -> int:
+        """How many C++ unmarks the open window has queued (0 when closed)."""
+        if not getattr(self, "_cpp_unmark_deferred", False):
+            return 0
+        return len(getattr(self, "_deferred_cpp_unmarks", []))
+
+    def flush_discarded_cpp_unmarks(self, start: int) -> list[Route]:
+        """Apply queued C++ unmarks from index ``start`` on for discarded copper.
+
+        Issue #6363.  A transaction that rolled back inside an open
+        corridor-reservation window leaves two kinds of queued unmark behind:
+
+        * copper it ripped and then *restored* -- still committed (it is back
+          in :attr:`routes`).  That is the deliberate corridor reservation
+          (#3438) and stays queued for :meth:`flush_cpp_unmark_deferral`;
+        * copper it placed and then *discarded* -- its own attempt's partial
+          routes.  They are gone from the Python grid and from
+          :attr:`routes` but still sit on the C++ grid, where every other net
+          sees them as foreign-hard.
+
+        This applies the entries queued at or after ``start`` whose route is
+        no longer committed, drops them from the queue, and (the flush
+        contract: an unmark clears same-net C++ cells indiscriminately)
+        re-marks the committed routes of the affected nets on the C++ grid.
+        Returns the flushed routes.  No-op (``[]``) with no open window.
+        """
+        if not getattr(self, "_cpp_unmark_deferred", False):
+            return []
+        queued = getattr(self, "_deferred_cpp_unmarks", [])
+        committed = {id(route) for route in self.routes}
+        kept = list(queued[:start])
+        flushed: list[Route] = []
+        for route, mtw in queued[start:]:
+            if id(route) in committed:
+                kept.append((route, mtw))
+                continue
+            self._unmark_route_on_cpp_cells(route, max_trace_width=mtw)
+            flushed.append(route)
+        self._deferred_cpp_unmarks = kept
+        nets = {route.net for route in flushed}
+        for route in self.routes:
+            if route.net in nets:
+                self._mark_route_on_cpp_cells(route)
+        return flushed
+
+    @contextmanager
+    def cpp_unmark_immediate(self) -> Iterator[None]:
+        """Temporarily mirror rip-ups to the C++ grid immediately (Issue #6342).
+
+        Suspends an open corridor-reservation window for the duration of the
+        block without flushing it: ``unmark_route`` applies the C++ unmark at
+        once instead of queuing it, and the window (with whatever it already
+        queued) is restored on exit, including on an exception.
+
+        Used by ``NegotiatedRouter.targeted_ripup``'s retry: inside an open
+        window the blockers a targeted rip-up had just ripped stayed
+        phantom-blocked on the C++ grid, so the victim's reroute failed
+        against copper that was no longer there and the transaction rolled
+        back -- the board-05 "rip the blocker, the pin stays sealed" cycle.
+        """
+        previous = getattr(self, "_cpp_unmark_deferred", False)
+        self._cpp_unmark_deferred = False
+        try:
+            yield
+        finally:
+            self._cpp_unmark_deferred = previous
 
     def _unmark_route_on_cpp_cells(
         self, route: Route, max_trace_width: float | None = None

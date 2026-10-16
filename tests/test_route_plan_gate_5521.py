@@ -68,7 +68,7 @@ def no_post_route_kicad_cli(monkeypatch):
     exactly the default-path board.
     """
 
-    def _no_oracle(output_path, *, args, quiet=False):
+    def _no_oracle(output_path, *, args, quiet=False, **_kw):
         args._stranded_pour_links = 0
         return 0
 

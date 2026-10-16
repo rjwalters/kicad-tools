@@ -126,7 +126,10 @@ def isolate_kelvin_branch(
                 )
             )
         for via in route.vias:
-            first, last = sorted(grid.layer_to_index(layer.value) for layer in via.layers)
+            first, last = sorted(
+                grid.layer_to_index(layer.value)
+                for layer in getattr(via, "drilled_layers", via.layers)
+            )
             group = []
             for layer in range(first, last + 1):
                 group.append(len(objects))
@@ -193,7 +196,18 @@ def isolate_kelvin_branch(
         "pad_blocked": True,
         "static_blocked": True,
         "usage_count": 0,
+        # Issue #6315: the cell now blocks for a reason the exact pad test
+        # cannot see (a same-net terminal's metal), so it must not be
+        # resolved as a pad-only cell for the duration of the search.
+        "pad_cell": False,
+        "shared_pad_halo": False,
     }
+    # Issue #6389: the pure-Python twin of the native ``pad_cell`` reset above.
+    # Without it the Python exact pad test measures these cells against no
+    # pad at all (the terminal metal is same-net, which the pad test skips as
+    # own copper) and resolves the isolation away.
+    if getattr(grid, "_pad_provenance", None) is not None:
+        fields["_pad_provenance"] = grid.PAD_PROVENANCE_VOID
     cpp_saved = []
     with grid.locked():
         saved = {field: getattr(grid, field)[indices].copy() for field in fields}

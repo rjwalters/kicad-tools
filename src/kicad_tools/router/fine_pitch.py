@@ -230,7 +230,15 @@ class FinePitchReport:
                     f"    • Use finer grid: --grid 0.025 or --grid {self.grid_resolution / 2}"
                 )
             lines.append("    • Consider enabling sub-grid routing for pad connections")
-            lines.append("    • Review affected nets for manual routing")
+            # Issue #6672: point at automation, never at hand-routing.
+            lines.append(
+                "    • Retry with --fine-pitch-clearance (e.g. 0.08) to open escape "
+                "channels between pins"
+            )
+            lines.append(
+                "    • Diagnose any nets still unrouted with `kct net-status --why`; "
+                "file nets the router cannot complete as router-gap issues"
+            )
 
         # Warn when >50% of pads are off-grid (Issue #2254)
         pct = self.off_grid_percentage
@@ -484,7 +492,11 @@ def _generate_recommendations(
         recommendations.append("Enable sub-grid routing for pad entry/exit")
 
     if severity in (FinePitchSeverity.HIGH, FinePitchSeverity.CRITICAL):
-        recommendations.append("Consider manual routing for affected nets")
+        # Issue #6672: point at automation, never at hand-routing.
+        recommendations.append(
+            "Retry with --fine-pitch-clearance (e.g. 0.08); diagnose unrouted "
+            "nets with `kct net-status --why`"
+        )
 
     return recommendations
 

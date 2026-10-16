@@ -836,6 +836,12 @@ def test_routing_reach_deterministic_across_seeds(unrouted_pcb_path: Path, tmp_p
     )
 
 
+#: Router Power-class violations in the committed board-03 copper, exposed by
+#: #6390 and tracked in #6394 (also the tolerance entry in
+#: ``.github/routed-drc-tolerance.yml``).  Drop to 0 when that lands.
+BOARD03_KNOWN_NETCLASS_VIOLATIONS = 13
+
+
 def test_committed_pcb_drc_state() -> None:
     """The shipped routed PCB does not silently degrade past its June 7 ceiling.
 
@@ -900,6 +906,17 @@ def test_committed_pcb_drc_state() -> None:
         f"stdout (last 2000 chars):\n{stdout[-2000:]}"
     )
     err_count = int(err_match.group(1))
+    # Issue #6390 declared the router's own net classes in the routed
+    # sidecars, exposing the committed copper's Power-class violations.  They
+    # are tracked (nets, locations, gaps) in #6394 and counted separately here
+    # so this ceiling keeps guarding everything else.
+    netclass_match = re.search(r"\bnetclass_clearance_copper:\s+(\d+)", stdout)
+    netclass_count = int(netclass_match.group(1)) if netclass_match else 0
+    assert netclass_count <= BOARD03_KNOWN_NETCLASS_VIOLATIONS, (
+        f"{netclass_count} netclass_clearance_copper errors; #6394 tracks "
+        f"{BOARD03_KNOWN_NETCLASS_VIOLATIONS}"
+    )
+    err_count -= netclass_count
     assert err_count <= MAX_COMMITTED_DRC_ERRORS, (
         f"Committed routed PCB has {err_count} DRC errors on "
         f"jlcpcb-tier1; ceiling is {MAX_COMMITTED_DRC_ERRORS} "
@@ -922,7 +939,7 @@ def test_committed_pcb_drc_state() -> None:
         rules_seen = set(re.findall(r"\b([a-z][a-z_]+):\s+\d+\b", by_rule_match.group(1)))
         # All rules seen must be in our expected set; new rules indicate
         # a new failure mode worth investigating.
-        unexpected = rules_seen - EXPECTED_COMMITTED_DRC_RULES
+        unexpected = rules_seen - EXPECTED_COMMITTED_DRC_RULES - {"netclass_clearance_copper"}
         assert not unexpected, (
             f"Committed routed PCB has NEW DRC rules failing on "
             f"jlcpcb-tier1: {sorted(unexpected)}.  The June 7 2026 "

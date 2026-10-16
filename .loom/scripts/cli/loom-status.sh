@@ -18,16 +18,16 @@
 #   - Shows a work-queue summary (open loom:issue / loom:review-requested /
 #     loom:pr / loom:architect / loom:hermit / loom:curated / loom:auditor
 #     counts) when `gh` is available on a GitHub forge.
-#   - Surfaces PARKED WORK (#5664): a repo holding open loom:operator-only
-#     issues looks IDENTICAL, from this summary alone, to a repo with no work
-#     at all -- zero loom:issue, zero review-requested, zero pr all read as
-#     "nothing pending" whether the backlog is genuinely empty or is sitting
-#     on N proposals a human (or a self-healing Champion pass) has not yet
-#     un-parked. The work-queue summary now always includes an open
-#     loom:operator-only count, split into its #5679 sub-kinds
-#     (loom:operator-blocked / loom:operator-decision) when present, so
-#     "parked but not visibly moving" is distinguishable from "no work" and
-#     from "genuinely needs a human decision" without reading labels by hand.
+#   - Surfaces PARKED WORK (#5664): a repo holding held issues looks
+#     IDENTICAL, from this summary alone, to a repo with no work at all --
+#     zero loom:issue, zero review-requested, zero pr all read as "nothing
+#     pending" whether the backlog is genuinely empty or is sitting on N
+#     items a human (or a self-healing pass) has not yet released. The
+#     work-queue summary always includes open-issue counts for the three
+#     holds (#11795): loom:operator (a human must act), loom:blocked (waiting
+#     on something named), loom:frozen (not now), so "parked but not visibly
+#     moving" is distinguishable from "no work" and from "needs a human"
+#     without reading labels by hand.
 #   - Surfaces OUTSTANDING QUARANTINE STASHES (#5185): when a builder
 #     contaminates the primary clone, `check-main-clean.sh --quarantine`
 #     rescues the dirt into a labelled `git stash` entry. That was recorded
@@ -103,12 +103,10 @@ TMUX_SOCKET="loom"
 # Used only for the human "Config:" display line -- naming every present tier
 # instead of a single legacy path (#4062).
 _loom_status_config_tiers_present() {
-    local dp
+    local dp rel
     dp="$(_loom_config_private_defaults_path)"
     [[ -n "$dp" && -f "$dp" ]] && echo "$dp"
-    [[ -f "$REPO_ROOT/$LOOM_CONFIG_LEGACY_REL" ]] && echo "$REPO_ROOT/$LOOM_CONFIG_LEGACY_REL"
-    [[ -f "$REPO_ROOT/$LOOM_CONFIG_PROJECT_REL" ]] && echo "$REPO_ROOT/$LOOM_CONFIG_PROJECT_REL"
-    [[ -f "$REPO_ROOT/$LOOM_CONFIG_LOCAL_REL" ]] && echo "$REPO_ROOT/$LOOM_CONFIG_LOCAL_REL"
+    for rel in "$LOOM_CONFIG_LEGACY_REL" "$LOOM_CONFIG_PROJECT_REL" .loom-local/fleet-repo.json "$LOOM_CONFIG_LOCAL_REL"; do [[ -f "$REPO_ROOT/$rel" ]] && echo "$REPO_ROOT/$rel"; done
     # Explicit trailing success: under `set -o pipefail`, this function's exit
     # status is whatever its last statement returned. The common case (no
     # local/private-defaults tier present) makes the last `[[ -f ]] && echo`
@@ -176,7 +174,7 @@ ${YELLOW}OUTPUT:${NC}
     ${CYAN}loom:review-requested${NC} / ${CYAN}loom:pr${NC} counts, plus
     pending-proposal counts for ${CYAN}loom:architect${NC} / ${CYAN}loom:hermit${NC} /
     ${CYAN}loom:curated${NC} / ${CYAN}loom:auditor${NC}, plus a ${CYAN}Parked${NC} line for
-    open ${CYAN}loom:operator-only${NC} split into its blocked/decision sub-kinds) is
+    open ${CYAN}loom:operator${NC} / ${CYAN}loom:blocked${NC} / ${CYAN}loom:frozen${NC} issues) is
     shown when 'gh' is available on a GitHub forge -- Parked is always shown,
     even at zero, so a repo holding parked-but-not-moving proposals cannot
     read identically to a repo with no work at all. A ${YELLOW}Quarantined work${NC} section appears when
@@ -246,14 +244,17 @@ format_duration() {
     fi
 }
 
-# Count open issues/PRs carrying a label. Echoes an integer on success;
+# Count open issues/PRs carrying a label, or ANY of several labels (deduplicated
+# by number, #11861: the Parked line counts a hold under every name that folds
+# into it, so it does not undercount while `labels migrate` has not relabelled
+# the retired names yet). Echoes an integer on success;
 # returns non-zero (and echoes nothing) when gh is unavailable, unauthenticated,
 # or the forge is not GitHub — callers omit the work-queue rather than error.
-# $1 = issue|pr, $2 = label
+# $1 = issue|pr, $2.. = label(s)
 count_label() {
-    local kind="$1" label="$2" n
+    local kind="$1" label n
     command -v gh &>/dev/null || return 1
-    n=$(gh "$kind" list --label "$label" --state open --json number --jq 'length' 2>/dev/null) || return 1
+    n=$(for label in "${@:2}"; do gh "$kind" list --label "$label" --state open --limit 1000 --json number --jq '.[].number' 2>/dev/null || exit 1; done | sort -u | wc -l | tr -d ' ') || return 1
     [[ "$n" =~ ^[0-9]+$ ]] || return 1
     echo "$n"
 }
@@ -268,21 +269,23 @@ count_label() {
 # queue, which read as "nothing pending" even when several proposals were
 # awaiting Champion review.
 #
-# Also includes open loom:operator-only, split into its #5679 sub-kinds
-# (#5664): before this, a repo holding several parked proposals rendered
-# EXACTLY like an empty backlog here -- loom:operator-only was not counted at
-# all, so "parked and not moving" and "genuinely nothing pending" were
-# indistinguishable without reading labels by hand. loom:operator-blocked
-# marks a dependency-only park (Champion's own self-healing re-scan,
-# `classify-dependency-block.sh --check-unescalate`, un-parks these on its
-# own once the recorded blocker closes or a startable subset is declared --
-# see champion-issue-promo.md "Pass 0"); loom:operator-decision marks one that
-# genuinely needs a human. A non-zero "blocked" count that stays non-zero
-# across several `loom status` calls is the signal worth noticing: it means
-# the self-heal is not (yet) resolving something it should.
+# Also includes the open-issue counts of the three holds (#5664, #11795):
+# before #5664 a repo holding several parked proposals rendered EXACTLY like
+# an empty backlog here, so "parked and not moving" and "genuinely nothing
+# pending" were indistinguishable without reading labels by hand.
+# loom:operator needs a human; loom:blocked waits on something named and
+# stays blocked until a role or a human clears it (nothing releases it
+# automatically since #11301; `check-stale-blocked` reports cleared blockers);
+# loom:frozen is a human's "not now". A "blocked" count that stays high across
+# several `loom status` calls is the signal worth noticing.
+#
+# JSON (#11795): the keys are "loom:operator", "loom:blocked" and
+# "loom:frozen". The pre-#11795 keys ("loom:operator-only",
+# "loom:operator-blocked", "loom:operator-decision") were dropped with their
+# labels; nothing in loom, loom-ui or 2am read them.
 work_queue_json() {
     command -v jq &>/dev/null || { echo "null"; return 0; }
-    local issue rr pr architect hermit curated auditor operator_only operator_blocked operator_decision
+    local issue rr pr architect hermit curated auditor held_operator held_blocked held_frozen
     issue=$(count_label issue "loom:issue") || { echo "null"; return 0; }
     rr=$(count_label pr "loom:review-requested") || { echo "null"; return 0; }
     pr=$(count_label pr "loom:pr") || { echo "null"; return 0; }
@@ -290,9 +293,14 @@ work_queue_json() {
     hermit=$(count_label issue "loom:hermit") || { echo "null"; return 0; }
     curated=$(count_label issue "loom:curated") || { echo "null"; return 0; }
     auditor=$(count_label issue "loom:auditor") || { echo "null"; return 0; }
-    operator_only=$(count_label issue "loom:operator-only") || { echo "null"; return 0; }
-    operator_blocked=$(count_label issue "loom:operator-blocked") || { echo "null"; return 0; }
-    operator_decision=$(count_label issue "loom:operator-decision") || { echo "null"; return 0; }
+    # A hold's names: the active label plus the retired names that fold into it
+    # (`labels aliases`); the active name alone when no daemon answers.
+    # requires-daemon: labels optional   #11861 — without `labels aliases` the Parked line counts the active label only
+    # shellcheck disable=SC2046  # one label per line, no spaces in label names
+    held_operator=$(count_label issue $("${LOOM_DAEMON_BIN:-loom-daemon}" labels aliases loom:operator 2>/dev/null | grep . || echo loom:operator)) || { echo "null"; return 0; }
+    # shellcheck disable=SC2046
+    held_blocked=$(count_label issue $("${LOOM_DAEMON_BIN:-loom-daemon}" labels aliases loom:blocked 2>/dev/null | grep . || echo loom:blocked)) || { echo "null"; return 0; }
+    held_frozen=$(count_label issue "loom:frozen") || { echo "null"; return 0; }
     jq -nc \
         --argjson issue "$issue" \
         --argjson review_requested "$rr" \
@@ -301,13 +309,13 @@ work_queue_json() {
         --argjson hermit "$hermit" \
         --argjson curated "$curated" \
         --argjson auditor "$auditor" \
-        --argjson operator_only "$operator_only" \
-        --argjson operator_blocked "$operator_blocked" \
-        --argjson operator_decision "$operator_decision" \
+        --argjson held_operator "$held_operator" \
+        --argjson held_blocked "$held_blocked" \
+        --argjson held_frozen "$held_frozen" \
         '{"loom:issue":$issue, "loom:review-requested":$review_requested, "loom:pr":$pr,
           "loom:architect":$architect, "loom:hermit":$hermit, "loom:curated":$curated,
-          "loom:auditor":$auditor, "loom:operator-only":$operator_only,
-          "loom:operator-blocked":$operator_blocked, "loom:operator-decision":$operator_decision}'
+          "loom:auditor":$auditor, "loom:operator":$held_operator,
+          "loom:blocked":$held_blocked, "loom:frozen":$held_frozen}'
 }
 
 # Read the configured terminals as compact JSON array (or "[]"), resolved
@@ -603,7 +611,7 @@ emit_human() {
     if [[ -n "$config_tiers_present" ]]; then
         echo -e "  Config:    ${CYAN}$config_tiers_present${NC}"
     else
-        echo -e "  Config:    ${GRAY}(none found — checked .loom/config.json, .loom-project/project.json, .loom-local/local.json)${NC}"
+        echo -e "  Config:    ${GRAY}(none found — checked .loom/config.json, .loom-project/project.json, .loom-local/fleet-repo.json, .loom-local/local.json)${NC}"
     fi
     echo -e "  Socket:    ${CYAN}tmux -L $TMUX_SOCKET${NC}"
     echo ""
@@ -740,7 +748,7 @@ emit_human() {
     wq=$(work_queue_json)
     if [[ -n "$wq" && "$wq" != "null" ]]; then
         local wq_issue wq_rr wq_pr wq_architect wq_hermit wq_curated wq_auditor
-        local wq_operator_only wq_operator_blocked wq_operator_decision
+        local wq_operator wq_blocked wq_frozen
         wq_issue=$(echo "$wq" | jq -r '."loom:issue"' 2>/dev/null)
         wq_rr=$(echo "$wq" | jq -r '."loom:review-requested"' 2>/dev/null)
         wq_pr=$(echo "$wq" | jq -r '."loom:pr"' 2>/dev/null)
@@ -748,23 +756,20 @@ emit_human() {
         wq_hermit=$(echo "$wq" | jq -r '."loom:hermit"' 2>/dev/null)
         wq_curated=$(echo "$wq" | jq -r '."loom:curated"' 2>/dev/null)
         wq_auditor=$(echo "$wq" | jq -r '."loom:auditor"' 2>/dev/null)
-        wq_operator_only=$(echo "$wq" | jq -r '."loom:operator-only" // 0' 2>/dev/null)
-        wq_operator_blocked=$(echo "$wq" | jq -r '."loom:operator-blocked" // 0' 2>/dev/null)
-        wq_operator_decision=$(echo "$wq" | jq -r '."loom:operator-decision" // 0' 2>/dev/null)
+        wq_operator=$(echo "$wq" | jq -r '."loom:operator" // 0' 2>/dev/null)
+        wq_blocked=$(echo "$wq" | jq -r '."loom:blocked" // 0' 2>/dev/null)
+        wq_frozen=$(echo "$wq" | jq -r '."loom:frozen" // 0' 2>/dev/null)
         echo ""
         echo -e "${BOLD}Work Queue:${NC}"
         echo -e "  ${CYAN}loom:issue${NC} ${wq_issue}   ${CYAN}loom:review-requested${NC} ${wq_rr}   ${CYAN}loom:pr${NC} ${wq_pr}"
         echo -e "  ${BOLD}Pending proposals:${NC} ${CYAN}loom:architect${NC} ${wq_architect}   ${CYAN}loom:hermit${NC} ${wq_hermit}   ${CYAN}loom:curated${NC} ${wq_curated}   ${CYAN}loom:auditor${NC} ${wq_auditor}"
         # Parked work (#5664): always shown, even at zero -- a repo holding
         # parked-but-not-moving proposals must not read identically to an
-        # empty backlog. loom:operator-blocked (dependency-only, #5679) is
-        # expected to self-heal via Champion's Pass 0 re-scan
-        # (classify-dependency-block.sh --check-unescalate); a count that
-        # stays non-zero across repeated checks is the signal worth acting on.
-        # loom:operator-decision genuinely needs a human. Pre-#5679 escalations
-        # carry neither sub-label ("No backfill"), so the two sub-counts can
-        # sum to less than the total.
-        echo -e "  ${BOLD}Parked:${NC} ${CYAN}loom:operator-only${NC} ${wq_operator_only} ${GRAY}(blocked: ${wq_operator_blocked}, decision: ${wq_operator_decision})${NC}"
+        # empty backlog. The three holds (#11795): loom:operator needs a
+        # human; loom:blocked self-releases once its named blocker resolves,
+        # so a count that stays high across repeated checks is the signal
+        # worth acting on; loom:frozen is a human's "not now".
+        echo -e "  ${BOLD}Parked:${NC} ${CYAN}loom:operator${NC} ${wq_operator}   ${CYAN}loom:blocked${NC} ${wq_blocked}   ${CYAN}loom:frozen${NC} ${wq_frozen}"
     fi
 
     # Outstanding quarantine stashes (#5185). Shown ONLY when something is

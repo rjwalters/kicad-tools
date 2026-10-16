@@ -1,12 +1,13 @@
 {
-  "before_sha256": "6ef2df7930ae4d54079454fab0c875877ffdd22b333aaac4bf53b46b6349277b",
-  "after_sha256": "6ef2df7930ae4d54079454fab0c875877ffdd22b333aaac4bf53b46b6349277b",
+  "after_sha256": "046fe0602f78f7dd5b5b89c26f6a6ca87d2a518088928569d5479fda4d3558fe",
+  "before_sha256": "046fe0602f78f7dd5b5b89c26f6a6ca87d2a518088928569d5479fda4d3558fe",
   "byte_identical": true,
-  "native_violations": 0,
-  "native_unconnected_items": 0,
+  "fill_identical": true,
   "native_rule_sha256": {
-    ".kicad_pro": "0302972d3b5268436bf2f69d5a031d7844275a25a159e369299c09992d61d047",
-    ".kicad_dru": "3ded5c188d306230f5f88455a49a38c20d6da72323c9bb5e47e668c323070adb"
+    ".kicad_dru": "4b7ed2eb30f225d6c18d7f4c8275a1cca926c338860d63fe23e39a714efa2cde",
+    ".kicad_pro": "631b225f4cd529c8a2d8ce94d5e40cbedb01139984528a132430dcc3adae63b7"
   },
+  "native_unconnected_items": 0,
+  "native_violations": 0,
   "post_check_rule_sources_identical_to_refill_proof": true
 }

@@ -59,6 +59,7 @@ BLOCKING_CATEGORIES: frozenset[str] = frozenset(
         "diffpair_clearance_intra",
         "diffpair_length_skew",
         "diffpair_routing_continuity",
+        "diffpair_uncoupled_length",
         "dimensions",
         "edge",
         "impedance",
@@ -69,6 +70,7 @@ BLOCKING_CATEGORIES: frozenset[str] = frozenset(
         "solder_mask",
         "mask_to_copper",
         "via_in_pad",
+        "via_type",
         "zones",
     }
 )
@@ -170,7 +172,11 @@ def precheck(
         return skipped(category, "opt_in:--physical-copper-gap")
     if category == "match_group_length_skew" and ncm is None:
         return skipped(category, "no_net_class_map")
-    if category in ("diffpair_length_skew", "diffpair_routing_continuity") and ncm is None:
+    if (
+        category
+        in ("diffpair_length_skew", "diffpair_routing_continuity", "diffpair_uncoupled_length")
+        and ncm is None
+    ):
         pairs = _diff_pair_candidates(checker)
         if pairs:
             return unknown(category, f"needs_input:net_class_map ({pairs} diff-pair net(s))")

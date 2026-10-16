@@ -38,8 +38,10 @@ import argparse
 import math
 import sys
 import uuid
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from kicad_tools.cli.format_options import (
     FORMAT_JSON,
@@ -50,10 +52,17 @@ from kicad_tools.cli.format_options import (
 )
 from kicad_tools.core.sexp_file import load_pcb, save_pcb, verify_pcb_write
 from kicad_tools.router.track_index import TrackSpatialIndex, build_track_index
-from kicad_tools.router.via_clearance import drill_hole_to_hole_clear
+from kicad_tools.router.via_clearance import (
+    COORD_WRITE_GUARD_MM,
+    HOLE_TO_HOLE_TOLERANCE,
+    drill_hole_to_hole_clear,
+)
 from kicad_tools.schema.pcb import _is_footprint_tag
 from kicad_tools.sexp import SExp
 from kicad_tools.sexp.builders import segment_node, via_node
+
+if TYPE_CHECKING:
+    from kicad_tools.analysis.net_status import NetStatus
 
 #: KiCad's board-setup hole-to-copper clearance default, in mm.  Neither the
 #: manufacturer ``DesignRules`` schema nor the generated ``.kicad_pro``
@@ -72,6 +81,38 @@ KICAD_HOLE_TO_COPPER_CLEARANCE = 0.25
 #: stitch paths (Issue #4010) so a stitch via never lands within this floor
 #: of a foreign through-hole pad / via drill.
 MIN_HOLE_TO_HOLE_CLEARANCE = 0.5
+
+#: Issue #6671: drill floor slack for :func:`drill_hole_to_hole_clear`,
+#: which already forgives ``HOLE_TO_HOLE_TOLERANCE``; adding it back keeps
+#: the full :data:`COORD_WRITE_GUARD_MM` of rounding slack.
+DRILL_FLOOR_SLACK_MM = COORD_WRITE_GUARD_MM + HOLE_TO_HOLE_TOLERANCE
+
+
+def _same_net_via_spacing(
+    via_size: float, clearance: float, via_drill: float, min_hole_to_hole: float
+) -> float:
+    """Minimum centre distance between two stitch vias of one net (#3855, #6671).
+
+    Copper clearance or the drill hole-to-hole floor, whichever is larger,
+    plus :data:`COORD_WRITE_GUARD_MM` -- both vias may be new (placed in the
+    same pass) and both are rounded to 0.01 mm when written.
+    """
+    spacing = via_size + clearance
+    if via_drill > 0:
+        spacing = max(spacing, min_hole_to_hole + via_drill)
+    return spacing + COORD_WRITE_GUARD_MM
+
+
+#: A pad from :func:`find_all_pad_bboxes`:
+#: ``(min_x, min_y, max_x, max_y, net_num, shape, bound_r, corner_r)``
+#: (Issue #6683 appended ``shape`` and ``bound_r``, Issue #6671
+#: ``corner_r``; ``[4]`` is still the net).
+#: ``bound_r`` is ``max(w, h) / 2`` of the UNROTATED pad size: the exact
+#: radius of a ``circle`` and the enclosing-circle radius of an ``oval``
+#: (stadium) at any rotation.  ``corner_r`` is a ``roundrect`` pad's
+#: corner radius when the box is exact (cardinal angles, no chamfer), else
+#: 0.0 (the plain box).
+PadBBox = tuple[float, float, float, float, int, str, float, float]
 
 
 def _count_copper_layers(pcb_path: Path) -> int:
@@ -99,7 +140,29 @@ def _count_copper_layers(pcb_path: Path) -> int:
         return 2
 
 
-def _resolve_mfr_via_dimensions(mfr: str, layers: int, copper: float = 1.0) -> tuple[float, float]:
+def _resolve_mfr_rules(mfr: str, layers: int, copper: float = 1.0):
+    """Resolve the manufacturer ``DesignRules`` entry for the stackup.
+
+    Shared by :func:`_resolve_mfr_via_dimensions` and
+    :func:`_resolve_mfr_min_hole_to_hole` so stitching reads the same
+    profile entry that ``kct check --mfr`` does.  Raises
+    ``FileNotFoundError`` when no YAML profile exists for ``mfr``.
+    """
+    return _resolve_mfr_via_dimensions(mfr, layers, copper, _return_rules=True)
+
+
+def _resolve_mfr_min_hole_to_hole(mfr: str, layers: int, copper: float = 1.0) -> float:
+    """Return the fab profile's hole-to-hole minimum (mm, edge-to-edge).
+
+    Issue #6289: the same ``min_hole_to_hole_mm`` the ``hole_to_hole_clearance``
+    rule of ``kct check --mfr`` enforces.
+    """
+    return float(_resolve_mfr_rules(mfr, layers, copper).min_hole_to_hole_mm)
+
+
+def _resolve_mfr_via_dimensions(
+    mfr: str, layers: int, copper: float = 1.0, _return_rules: bool = False
+):
     """Resolve via diameter and drill from a manufacturer YAML profile.
 
     Looks up the manufacturer's design rules for the actual stackup
@@ -163,6 +226,8 @@ def _resolve_mfr_via_dimensions(mfr: str, layers: int, copper: float = 1.0) -> t
             # a usable answer rather than crashing.
             rules = next(iter(rules_dict.values()))
 
+    if _return_rules:
+        return rules
     drill = rules.min_via_drill_mm
     min_annular_ring = rules.min_annular_ring_mm
     mfr_min_diameter = rules.min_via_diameter_mm
@@ -996,9 +1061,7 @@ def find_smd_pad_bboxes_on_nets(
     return bboxes
 
 
-def find_all_pad_bboxes(
-    sexp: SExp, exclude_nets: set[int] | None = None
-) -> list[tuple[float, float, float, float, int]]:
+def find_all_pad_bboxes(sexp: SExp, exclude_nets: set[int] | None = None) -> list[PadBBox]:
     """Return AABBs for ALL pads, optionally excluding specific nets.
 
     Issue #3433: rectangle-aware clearance source for the straight
@@ -1021,11 +1084,22 @@ def find_all_pad_bboxes(
         sexp: PCB S-expression.
         exclude_nets: Net numbers to exclude (e.g., the stitched nets).
 
+    Issue #6683: each entry also carries the pad ``shape`` and its
+    unrotated bounding radius ``max(w, h) / 2`` as sixth and seventh
+    (APPENDED, so ``b[4]`` stays the net) elements, so the via-vs-pad
+    checks can treat a ``circle`` pad exactly and every other shape by its
+    box (see :func:`_pad_copper_gap`).  A circle's box is its exact
+    bounding square (no rotation inflation).  When the pad's own
+    board-absolute ``(at x y ANGLE)`` disagrees with the footprint angle,
+    the box is the union of both orientations' boxes, so a pad-local
+    rotation can only make the model more conservative, never flip a rect
+    pad's long axis the wrong way.
+
     Returns:
-        List of ``(min_x, min_y, max_x, max_y, net_num)`` tuples in
+        List of ``(min_x, min_y, max_x, max_y, net_num, shape, bound_r)`` tuples in
         board coordinates (mm).
     """
-    bboxes: list[tuple[float, float, float, float, int]] = []
+    bboxes: list[PadBBox] = []
     if exclude_nets is None:
         exclude_nets = set()
     name_to_num = get_name_to_net_map(sexp)
@@ -1065,20 +1139,24 @@ def find_all_pad_bboxes(
                 continue
             width = size_node.get_float(0) or 0.0
             height = size_node.get_float(1) or 0.0
+            shape = pad.get_string(2) or "rect"
 
-            total_rotation = fp_rotation_deg % 360
-            if abs(total_rotation - 90) < 0.001 or abs(total_rotation - 270) < 0.001:
-                bbox_w, bbox_h = height, width
-            elif abs(total_rotation) < 0.001 or abs(total_rotation - 180) < 0.001:
-                bbox_w, bbox_h = width, height
+            corner_r = 0.0
+            if shape == "circle":
+                # Exact bounding square; rotation-invariant.
+                half_w = half_h = max(width, height) / 2
             else:
-                abs_cos = abs(cos_r)
-                abs_sin = abs(sin_r)
-                bbox_w = width * abs_cos + height * abs_sin
-                bbox_h = width * abs_sin + height * abs_cos
+                half_w, half_h = _rotated_rect_half_extents(width, height, fp_rotation_deg)
+                pad_angle = pad_at.get_float(2)
+                if pad_angle is not None:
+                    pw, ph = _rotated_rect_half_extents(width, height, pad_angle)
+                    half_w = max(half_w, pw)
+                    half_h = max(half_h, ph)
+                if shape == "roundrect":
+                    corner_r = _roundrect_corner_radius(
+                        pad, width, height, fp_rotation_deg, pad_angle
+                    )
 
-            half_w = bbox_w / 2
-            half_h = bbox_h / 2
             bboxes.append(
                 (
                     board_x - half_w,
@@ -1086,10 +1164,68 @@ def find_all_pad_bboxes(
                     board_x + half_w,
                     board_y + half_h,
                     net_num,
+                    shape,
+                    max(width, height) / 2,
+                    corner_r,
                 )
             )
 
     return bboxes
+
+
+def _is_cardinal(angle_deg: float) -> bool:
+    """Whether ``angle_deg`` is a multiple of 90 degrees (to 0.001)."""
+    rem = angle_deg % 90
+    return rem < 0.001 or rem > 90 - 0.001
+
+
+def _roundrect_corner_radius(
+    pad: SExp,
+    width: float,
+    height: float,
+    fp_rotation_deg: float,
+    pad_angle: float | None,
+) -> float:
+    """Corner radius of a ``roundrect`` pad's box, or 0.0 when unsafe (#6671).
+
+    KiCad's corner radius is ``roundrect_rratio * min(w, h)`` (ratio capped
+    at 0.5).  It is only exact when the box is axis-aligned, i.e. both the
+    footprint angle and the pad's own angle are cardinal; a pad-local 90
+    degree turn widens the box to the union of both orientations
+    (:func:`find_all_pad_bboxes`), and the rounded union still contains the
+    true rounded pad, because both share the radius.  A chamfered pad has
+    square (cut) corners elsewhere, so it keeps the plain box.
+    """
+    if not _is_cardinal(fp_rotation_deg):
+        return 0.0
+    if pad_angle is not None and not _is_cardinal(pad_angle):
+        return 0.0
+    if pad.find_child("chamfer_ratio") is not None or pad.find_child("chamfer") is not None:
+        return 0.0
+    ratio_node = pad.find_child("roundrect_rratio")
+    if ratio_node is None:
+        return 0.0
+    ratio = min(max(ratio_node.get_float(0) or 0.0, 0.0), 0.5)
+    return ratio * min(width, height)
+
+
+def _rotated_rect_half_extents(
+    width: float, height: float, rotation_deg: float
+) -> tuple[float, float]:
+    """Half extents of the AABB of a ``width`` x ``height`` rect rotated by
+    ``rotation_deg`` (cardinal angles swap or keep the dimensions exactly)."""
+    total_rotation = rotation_deg % 360
+    if abs(total_rotation - 90) < 0.001 or abs(total_rotation - 270) < 0.001:
+        return height / 2, width / 2
+    if abs(total_rotation) < 0.001 or abs(total_rotation - 180) < 0.001:
+        return width / 2, height / 2
+    rad = math.radians(rotation_deg)
+    abs_cos = abs(math.cos(rad))
+    abs_sin = abs(math.sin(rad))
+    return (
+        (width * abs_cos + height * abs_sin) / 2,
+        (width * abs_sin + height * abs_cos) / 2,
+    )
 
 
 def _segment_to_rect_distance(
@@ -1123,6 +1259,105 @@ def _segment_to_rect_distance(
         segment_to_segment_distance(x1, y1, x2, y2, max_x, max_y, min_x, max_y),
         segment_to_segment_distance(x1, y1, x2, y2, min_x, max_y, min_x, min_y),
     )
+
+
+def _pad_copper_gap(
+    x1: float,
+    y1: float,
+    x2: float,
+    y2: float,
+    pad_bbox: PadBBox
+    | tuple[float, float, float, float, int, str, float]
+    | tuple[float, float, float, float, int, str]
+    | tuple[float, float, float, float, int],
+) -> float:
+    """Copper-edge distance from a segment (a point when the ends coincide)
+    to a pad from :func:`find_all_pad_bboxes`; 0.0 when they overlap.
+
+    Issue #6683: the circle model of :func:`find_all_pads`
+    (``max(w, h) / 2``) is the INSCRIBED circle of a square pad, so a
+    stitch via at a rect pad's corner was under-checked by up to
+    ``(sqrt(2) - 1) x half-side`` (board 07 U4.E3/E5 vs U4.F3/F5).
+
+    * ``circle``: exact (centre distance minus radius) -- BGA escapes rely
+      on the diagonal room a box would take away.
+    * ``oval``: the larger of the box gap and the enclosing-circle gap.
+      The circle's radius is ``bound_r`` -- ``max(w, h) / 2`` of the
+      UNROTATED size, i.e. the stadium's half-length, which encloses it at
+      every rotation.  Both gaps bound the true stadium gap from below, so
+      the larger is still safe, and it is never smaller than the old
+      ``find_all_pads`` circle-model gap.  (The AABB's half-side is NOT a
+      safe radius off-axis: a 2.0 x 0.5 oval at 45 deg has a 0.884 AABB
+      half-side but a 1.0 tip.)  A 6-tuple without ``bound_r`` falls back
+      to the box's half-diagonal, which always encloses.
+    * ``roundrect`` with a ``corner_r`` (Issue #6671): exact -- the inner
+      box ``corner_r`` in from each side, grown by ``corner_r``.  A plain
+      box over-refuses diagonal sites by ``(sqrt(2) - 1) x corner_r``
+      (0.093 mm beside a 0.9 x 0.95, rratio 0.25 0603 pad: board 03 C5).
+    * everything else (``rect``, ``trapezoid``, ``custom``, a ``roundrect``
+      without a usable radius, or a legacy 5-tuple without a shape): the
+      box, which is exact for a rect and conservative by at most the corner
+      relief otherwise.
+    """
+    min_x, min_y, max_x, max_y = pad_bbox[0], pad_bbox[1], pad_bbox[2], pad_bbox[3]
+    shape = pad_bbox[5] if len(pad_bbox) > 5 else "rect"
+    cx = (min_x + max_x) / 2
+    cy = (min_y + max_y) / 2
+    centre_dist = point_to_segment_distance(cx, cy, x1, y1, x2, y2)
+    if shape == "circle":
+        return max(0.0, centre_dist - (max_x - min_x) / 2)
+    box_gap = _segment_to_rect_distance(x1, y1, x2, y2, min_x, min_y, max_x, max_y)
+    if shape == "oval":
+        if len(pad_bbox) > 6:
+            bound_r = float(pad_bbox[6])
+        else:
+            bound_r = math.hypot(max_x - min_x, max_y - min_y) / 2
+        return max(box_gap, centre_dist - bound_r)
+    corner_r = float(pad_bbox[7]) if len(pad_bbox) > 7 else 0.0
+    if shape == "roundrect" and corner_r > 0.0:
+        r = min(corner_r, (max_x - min_x) / 2, (max_y - min_y) / 2)
+        inner = _segment_to_rect_distance(
+            x1, y1, x2, y2, min_x + r, min_y + r, max_x - r, max_y - r
+        )
+        return max(0.0, inner - r)
+    return box_gap
+
+
+def _pad_conflict(
+    x1: float,
+    y1: float,
+    x2: float,
+    y2: float,
+    required: float,
+    other_net_pads: list[tuple[float, float, float, int]],
+    other_net_pad_bboxes: list[PadBBox] | None,
+) -> bool:
+    """True when a segment (or point) comes within ``required`` of any
+    other-net pad's copper edge.
+
+    Issue #6683: the single via-vs-pad / leg-vs-pad predicate for every
+    stitch placement strategy.  Shape-aware (:func:`_pad_copper_gap`) when
+    ``other_net_pad_bboxes`` is supplied; otherwise the legacy circle model
+    from ``other_net_pads`` (back-compat for direct callers).
+    """
+    if other_net_pad_bboxes is None:
+        for px, py, p_radius, _pnet in other_net_pads:
+            if point_to_segment_distance(px, py, x1, y1, x2, y2) < required + p_radius:
+                return True
+        return False
+    for bbox in other_net_pad_bboxes:
+        # Cheap reject: the pad lies wholly inside its half-diagonal circle.
+        half_diag = math.hypot(bbox[2] - bbox[0], bbox[3] - bbox[1]) / 2
+        cx = (bbox[0] + bbox[2]) / 2
+        cy = (bbox[1] + bbox[3]) / 2
+        if point_to_segment_distance(cx, cy, x1, y1, x2, y2) - half_diag >= required:
+            continue
+        # 1 nm (KiCad's internal unit) of slack: a gap computed as exactly
+        # ``required`` must not be rejected on float noise (a 0.3 mm gap
+        # comes out as 0.29999999999999716).
+        if _pad_copper_gap(x1, y1, x2, y2, bbox) < required - 1e-6:
+            return True
+    return False
 
 
 def _via_drill_overlaps_pad_bbox(
@@ -1667,6 +1902,7 @@ def identify_nearest_obstacle(
     other_net_pads: list[tuple[float, float, float, int]] | None = None,
     other_net_filled_polygons: list[FilledPolygon] | None = None,
     net_map: dict[int, str] | None = None,
+    other_net_pad_bboxes: list[PadBBox] | None = None,
 ) -> SkipDetail:
     """Identify the nearest obstacle preventing via placement near a pad.
 
@@ -1689,6 +1925,11 @@ def identify_nearest_obstacle(
             making it easier to trace stitching failures back to specific
             signal nets.  See issue #3267 (board 04 U2.35) for the
             motivating case.
+        other_net_pad_bboxes: Optional shape-aware pads from
+            :func:`find_all_pad_bboxes`.  When given, a pad's reported
+            ``gap`` is the copper-edge gap (:func:`_pad_copper_gap`) that
+            the placement strategies test, not the circle-model gap
+            (Issue #6683).
 
     Returns:
         SkipDetail with the type, location, and reason of the nearest obstacle
@@ -1762,10 +2003,24 @@ def identify_nearest_obstacle(
                 f"gap={effective:.2f}mm need={clearance:.2f}mm",
             )
 
-    # Check other-net pads
-    for px, py, p_radius, pnet in other_net_pads:
+    # Check other-net pads (Issue #6683: shape-aware gap when bboxes given)
+    pad_obstacles: list[tuple[float, float, int, float]] = []
+    if other_net_pad_bboxes is not None:
+        for bbox in other_net_pad_bboxes:
+            pad_obstacles.append(
+                (
+                    (bbox[0] + bbox[2]) / 2,
+                    (bbox[1] + bbox[3]) / 2,
+                    bbox[4],
+                    _pad_copper_gap(pad.x, pad.y, pad.x, pad.y, bbox) - via_radius,
+                )
+            )
+    else:
+        for px, py, p_radius, pnet in other_net_pads:
+            dist = math.sqrt((px - pad.x) ** 2 + (py - pad.y) ** 2)
+            pad_obstacles.append((px, py, pnet, dist - via_radius - p_radius))
+    for px, py, pnet, effective in pad_obstacles:
         dist = math.sqrt((px - pad.x) ** 2 + (py - pad.y) ** 2)
-        effective = dist - via_radius - p_radius
         if dist < best_dist:
             best_dist = dist
             best = SkipDetail(
@@ -1807,6 +2062,35 @@ def identify_nearest_obstacle(
     return best
 
 
+def _split_fill_pools(
+    net_number: int,
+    same_net_filled_polys: list[FilledPolygon],
+    other_net_filled_polys: list[FilledPolygon],
+    foreign_fills_yield: bool = False,
+) -> tuple[list[FilledPolygon], list[FilledPolygon]]:
+    """Split the fill pools of a multi-net stitch call for one net.
+
+    Issue #6400 / #6410: every stitch entry point builds
+    ``other_net_filled_polys`` excluding ALL stitch-target nets and
+    ``same_net_filled_polys`` holding the fill of EVERY target net.  Used
+    as-is in a multi-net call, a via for net N could pass the same-net fill
+    gate by landing on sibling target net M's fill, and M's fill was not a
+    clearance obstacle either.
+
+    Returns ``(own_fill, other_fill)`` for ``net_number``: ``own_fill`` is
+    the net's own fill (the gate / grid seed), ``other_fill`` is the
+    other-net obstacle pool plus every sibling target net's fill -- unless
+    ``foreign_fills_yield`` is set, in which case sibling fills are left
+    out (they will yield on refill).  Each net is therefore gated exactly as
+    a single-net call for that net would gate it.
+    """
+    own_fill = [fp for fp in same_net_filled_polys if fp.net_number == net_number]
+    if foreign_fills_yield:
+        return own_fill, other_net_filled_polys
+    sibling_fill = [fp for fp in same_net_filled_polys if fp.net_number != net_number]
+    return own_fill, other_net_filled_polys + sibling_fill
+
+
 def _same_net_fill_on_layer(
     same_net_filled_polygons: list[FilledPolygon] | None,
     layer: str | None,
@@ -1846,7 +2130,9 @@ def _point_on_same_net_fill(
     centre) sits on copper rather than overhanging a void or the fill
     boundary.  The even-odd :func:`point_in_polygon` already treats keepout
     voids (holed fill rings KiCad emits as keyholed ``pts`` lists) as
-    outside, so a candidate inside a void hole is correctly rejected.
+    outside, so a candidate inside a void hole is correctly rejected.  The
+    zero-width bridge edges joining such a hole to the outer ring are not
+    a boundary and are ignored by the margin test (Issue #6409).
 
     Layer filtering: only polygons whose ``.layer`` matches ``layer`` are
     considered (``layer=None`` skips the filter).
@@ -1879,6 +2165,61 @@ def _point_on_same_net_fill(
     return False
 
 
+#: Longest axial step :func:`calculate_dogleg_via_position` takes before
+#: turning (the last entry of its ``axial_distances``).
+DOGLEG_MAX_AXIAL_MM = 1.3
+
+
+def max_via_reach_mm(
+    pad_width: float, pad_height: float, offset: float, escape_distance: float
+) -> float:
+    """Farthest a stitch via centre (or trace waypoint) lands from its pad centre.
+
+    Issue #6384: an upper bound over every placement strategy
+    :func:`run_stitch` runs for a pad, with ``R = max(pad_width,
+    pad_height) / 2``:
+
+    * direct (:func:`calculate_via_position`): ``R + 2 * offset``;
+    * dog-leg (:func:`calculate_dogleg_via_position`): an axial step of at
+      most :data:`DOGLEG_MAX_AXIAL_MM`, then an escape (possibly diagonal) of
+      at most ``R + 2 * offset`` -- ``R + 2 * offset + 1.3`` by the triangle
+      inequality;
+    * extended escape (:func:`calculate_extended_escape_position`, including
+      its polar fallback): every candidate's total path length -- and so its
+      distance from the pad centre -- is capped at ``escape_distance``.
+
+    So the reach is ``max(escape_distance, R + 2 * offset + 1.3)``.  Callers
+    that pick a clearance for the weld (the pour completion loop) add the via
+    radius and the class clearance on top.  **Widening any candidate list in
+    the strategies above must update this bound** (``tests/
+    test_stitch_via_reach_6384.py`` fuzzes it).
+    """
+    pad_radius = max(pad_width, pad_height) / 2
+    return max(escape_distance, pad_radius + 2 * offset + DOGLEG_MAX_AXIAL_MM)
+
+
+def _stub_layer(pad: PadInfo) -> str | None:
+    """Layer a stitch stub is track-checked on (Issues #6413, #6428).
+
+    Every stitch stub (straight, dog-leg or multi-leg) is emitted on
+    ``pad.layer``, so only other-net tracks on that layer can short it;
+    ``None`` (every layer) for a through-hole pad, whose copper spans the
+    stack.  Vias, pads, drills and fills are never filtered, and neither is
+    the via-vs-track test (a via spans every layer).
+
+    #6413 applied this to reserved sites only and left the historical offset
+    search all-layer, because on board 04 the stale cross-layer conservatism
+    happened to keep U2.35's GND weld out from under U2's body, where it cut
+    U2.36's +3.3V pour while the oracle's summed-over-nets link gate kept
+    the round (17 GND -> 1 +3.3V).  Issue #6428 made that gate per-net (a
+    round may not raise any net's link count), so the layer-aware test is
+    now applied to every candidate.
+    """
+    if pad.pad_type != "smd" or not pad.layer:
+        return None
+    return pad.layer
+
+
 def calculate_via_position(
     pad: PadInfo,
     offset: float,
@@ -1890,13 +2231,14 @@ def calculate_via_position(
     other_net_pads: list[tuple[float, float, float, int]] | None = None,
     trace_width: float = 0.0,
     other_net_filled_polygons: list[FilledPolygon] | None = None,
-    other_net_pad_bboxes: list[tuple[float, float, float, float, int]] | None = None,
+    other_net_pad_bboxes: list[PadBBox] | None = None,
     other_net_drills: list[tuple[float, float, float, int]] | None = None,
     via_drill: float = 0.0,
     min_hole_to_hole: float = 0.5,
     same_net_filled_polygons: list[FilledPolygon] | None = None,
     same_net_fill_layer: str | None = None,
     other_net_track_index: TrackSpatialIndex[TrackSegment] | None = None,
+    preferred_positions: Sequence[tuple[float, float]] = (),
 ) -> tuple[float, float] | None:
     """Calculate a valid via placement position near the pad.
 
@@ -1951,6 +2293,21 @@ def calculate_via_position(
             once.  Built on demand when omitted, and a pure superset
             pre-filter either way: the exact per-segment distance tests
             below are unchanged, so the accepted position is identical.
+        preferred_positions: Issue #6401 -- via sites ``kct route`` held
+            free for this pad before signal routing.  They are tried before
+            the eight-direction offsets, against every check below; the one
+            difference is that, when ``other_net_pad_bboxes`` is supplied,
+            the via is cleared against each foreign pad's box instead of its
+            bounding circle -- the model the reservation was planned with.
+            (The circle radius of a 1.5 x 0.3 mm QFP pin is 0.76 mm, so the
+            circle test refuses any site beside a fine-pitch pin row.)
+            Empty (default) leaves the search exactly as before.
+            Issue #6413: the stub to a reserved site is also checked only
+            against other-net TRACKS on the pad's own layer (the layer it is
+            emitted on), as the planner checked it -- a B.Cu track cannot
+            short an F.Cu stub, and on board 04 one (NRST) refused U2.23's
+            reserved site.  Issue #6428 extends that layer filter to the
+            historical offsets too: see :func:`_stub_layer`.
     """
     if other_net_tracks is None:
         other_net_tracks = []
@@ -1967,6 +2324,7 @@ def calculate_via_position(
 
     via_radius = via_size / 2
     trace_half_width = trace_width / 2
+    stub_layer = _stub_layer(pad)
 
     # Issue #4432: same-net fill containment gate, active only when pour
     # geometry exists on the target layer (empty -> no-op / outline fallback).
@@ -1989,11 +2347,15 @@ def calculate_via_position(
     pad_radius = max(pad.width, pad.height) / 2
     test_offsets = [pad_radius + offset, pad_radius + offset * 1.5, pad_radius + offset * 2]
 
-    for test_offset in test_offsets:
-        for dx, dy in directions:
-            via_x = pad.x + dx * test_offset
-            via_y = pad.y + dy * test_offset
-
+    # Issue #6401: reserved sites first, then the historical offsets.
+    reserved_candidates = [(float(x), float(y), True) for x, y in preferred_positions]
+    offset_candidates = [
+        (pad.x + dx * test_offset, pad.y + dy * test_offset, False)
+        for test_offset in test_offsets
+        for dx, dy in directions
+    ]
+    for candidates in (reserved_candidates, offset_candidates):
+        for via_x, via_y, box_pads in candidates:
             # Check for conflicts with existing same-net vias
             conflict = False
             # Issue #3855: same-net stitch vias must also clear the fab
@@ -2002,9 +2364,10 @@ def calculate_via_position(
             # center-to-center is ``min_hole_to_hole + via_drill`` (two
             # equal radii).  The copper threshold ``via_size + clearance``
             # may be smaller than this on tight floors, so take the max.
-            same_net_min_dist = via_size + clearance
-            if via_drill > 0:
-                same_net_min_dist = max(same_net_min_dist, min_hole_to_hole + via_drill)
+            # Issue #6671: plus the 0.01 mm write-rounding guard.
+            same_net_min_dist = _same_net_via_spacing(
+                via_size, clearance, via_drill, min_hole_to_hole
+            )
             for vx, vy, _vnet in existing_vias:
                 dist = math.sqrt((vx - via_x) ** 2 + (vy - via_y) ** 2)
                 if dist < same_net_min_dist:
@@ -2060,14 +2423,20 @@ def calculate_via_position(
             if conflict:
                 continue
 
-            # Check for conflicts with other-net pads
-            for px, py, p_radius, _pnet in other_net_pads:
-                dist = math.sqrt((px - via_x) ** 2 + (py - via_y) ** 2)
-                # Clearance is from via edge to pad edge
-                min_dist = via_radius + p_radius + clearance + hole_extra
-                if dist < min_dist:
-                    conflict = True
-                    break
+            # Check for conflicts with other-net pads.  Issue #6683: every
+            # candidate (not only #6401's reserved ``box_pads`` sites) is
+            # cleared against the shape-aware pad model when bboxes are
+            # supplied -- the circle model under-sizes a rect pad's corner.
+            # Clearance is from via edge to pad edge.
+            conflict = _pad_conflict(
+                via_x,
+                via_y,
+                via_x,
+                via_y,
+                via_radius + clearance + hole_extra,
+                other_net_pads,
+                other_net_pad_bboxes,
+            )
 
             if conflict:
                 continue
@@ -2083,7 +2452,8 @@ def calculate_via_position(
                 for dx_, dy_, ddrill, _dnet in other_net_drills:
                     center_dist = math.sqrt((dx_ - via_x) ** 2 + (dy_ - via_y) ** 2)
                     edge_dist = center_dist - cand_drill_radius - ddrill / 2
-                    if edge_dist + 1e-3 < min_hole_to_hole:
+                    # Issue #6671: keep the write-rounding guard.
+                    if edge_dist < min_hole_to_hole + COORD_WRITE_GUARD_MM:
                         conflict = True
                         break
 
@@ -2120,6 +2490,10 @@ def calculate_via_position(
                         pad.x, pad.y, via_x, via_y, trace_half_width + clearance
                     )
                 for seg in path_track_candidates:
+                    # Issues #6413/#6428: the stub meets only tracks on its
+                    # own layer (the layer it is emitted on).
+                    if stub_layer is not None and seg.layer != stub_layer:
+                        continue
                     dist = segment_to_segment_distance(
                         pad.x,
                         pad.y,
@@ -2174,36 +2548,17 @@ def calculate_via_position(
                 # legitimate escape that runs parallel to the SHORT
                 # axis of an elongated QFP pad (board-04 U2.47 went
                 # from stitched to stranded under the circle check).
-                if other_net_pad_bboxes is not None:
-                    for bmin_x, bmin_y, bmax_x, bmax_y, _pnet in other_net_pad_bboxes:
-                        dist = _segment_to_rect_distance(
-                            pad.x,
-                            pad.y,
-                            via_x,
-                            via_y,
-                            bmin_x,
-                            bmin_y,
-                            bmax_x,
-                            bmax_y,
-                        )
-                        if dist < trace_half_width + clearance:
-                            conflict = True
-                            break
-                else:
-                    # Fallback for callers that only supply the circle
-                    # model (back-compat with existing call sites).
-                    for px, py, p_radius, _pnet in other_net_pads:
-                        dist = point_to_segment_distance(
-                            px,
-                            py,
-                            pad.x,
-                            pad.y,
-                            via_x,
-                            via_y,
-                        )
-                        if dist < trace_half_width + p_radius + clearance:
-                            conflict = True
-                            break
+                # Callers that only supply the circle model fall back to it
+                # (back-compat); see :func:`_pad_conflict`.
+                conflict = _pad_conflict(
+                    pad.x,
+                    pad.y,
+                    via_x,
+                    via_y,
+                    trace_half_width + clearance,
+                    other_net_pads,
+                    other_net_pad_bboxes,
+                )
 
                 if conflict:
                     continue
@@ -2240,6 +2595,9 @@ def _check_dogleg_path_clearance(
     clearance: float,
     other_net_filled_polygons: list[FilledPolygon] | None = None,
     other_net_track_index: TrackSpatialIndex[TrackSegment] | None = None,
+    *,
+    stub_layer: str | None = None,
+    other_net_pad_bboxes: list[PadBBox] | None = None,
 ) -> bool:
     """Check if a dog-leg (L-shaped) trace path has adequate clearance.
 
@@ -2251,6 +2609,14 @@ def _check_dogleg_path_clearance(
     :class:`~kicad_tools.router.track_index.TrackSpatialIndex` over
     ``other_net_tracks``; it only narrows which segments reach the exact
     distance test below, so the verdict is unchanged.
+
+    ``stub_layer`` (Issue #6428, see :func:`_stub_layer`): the layer the
+    stub is emitted on.  When set, only other-net tracks on that layer are
+    tested; ``None`` tests tracks on every layer.  Vias, pads and fills are
+    never filtered.
+
+    ``other_net_pad_bboxes`` (Issue #6683): shape-aware pads from
+    :func:`find_all_pad_bboxes`; when given they replace the circle model.
 
     Returns True if path is clear, False if there's a conflict.
     """
@@ -2272,6 +2638,8 @@ def _check_dogleg_path_clearance(
                 leg_sx, leg_sy, leg_ex, leg_ey, trace_half_width + clearance
             )
         for seg in leg_track_candidates:
+            if stub_layer is not None and seg.layer != stub_layer:
+                continue
             dist = segment_to_segment_distance(
                 leg_sx,
                 leg_sy,
@@ -2293,12 +2661,17 @@ def _check_dogleg_path_clearance(
             if dist < min_dist:
                 return False
 
-        # Check against other-net pads
-        for px, py, p_radius, _pnet in other_net_pads:
-            dist = point_to_segment_distance(px, py, leg_sx, leg_sy, leg_ex, leg_ey)
-            min_dist = trace_half_width + p_radius + clearance
-            if dist < min_dist:
-                return False
+        # Check against other-net pads (Issue #6683: shape-aware)
+        if _pad_conflict(
+            leg_sx,
+            leg_sy,
+            leg_ex,
+            leg_ey,
+            trace_half_width + clearance,
+            other_net_pads,
+            other_net_pad_bboxes,
+        ):
+            return False
 
         # Check against other-net filled polygons (zone fill copper)
         if other_net_filled_polygons:
@@ -2333,6 +2706,7 @@ def calculate_dogleg_via_position(
     same_net_filled_polygons: list[FilledPolygon] | None = None,
     same_net_fill_layer: str | None = None,
     other_net_track_index: TrackSpatialIndex[TrackSegment] | None = None,
+    other_net_pad_bboxes: list[PadBBox] | None = None,
 ) -> tuple[float, float, float, float] | None:
     """Calculate a dog-leg (L-shaped) via placement for fine-pitch components.
 
@@ -2369,6 +2743,11 @@ def calculate_dogleg_via_position(
             used only for the ``other_net_drills`` hole-to-hole check.
         min_hole_to_hole: Minimum drill edge-to-edge spacing (mm) for the
             ``other_net_drills`` check (default: the module fab floor).
+        other_net_pad_bboxes: Optional shape-aware pads from
+            :func:`find_all_pad_bboxes` (Issue #6683).  When given, the via
+            point and every leg are cleared against them (rect pads by
+            their box, circle pads exactly) instead of the circle model in
+            ``other_net_pads``, which under-sizes a rect pad's corner.
 
     Returns:
         Tuple of (via_x, via_y, intermediate_x, intermediate_y) for an L-shaped
@@ -2389,6 +2768,7 @@ def calculate_dogleg_via_position(
 
     via_radius = via_size / 2
     trace_half_width = trace_width / 2
+    same_net_spacing = _same_net_via_spacing(via_size, clearance, via_drill, min_hole_to_hole)
 
     pad_radius = max(pad.width, pad.height) / 2
 
@@ -2448,7 +2828,8 @@ def calculate_dogleg_via_position(
         ]
 
     # Axial distances: how far to move along the row before turning
-    axial_distances = [0.3, 0.5, 0.7, 1.0, 1.3]
+    # Issue #6384: the last entry is DOGLEG_MAX_AXIAL_MM (max_via_reach_mm).
+    axial_distances = [0.3, 0.5, 0.7, 1.0, DOGLEG_MAX_AXIAL_MM]
 
     # Escape offsets: how far to move perpendicular after the axial step
     escape_offsets = [
@@ -2477,10 +2858,11 @@ def calculate_dogleg_via_position(
                     # Check via position clearance (same as straight-line)
                     conflict = False
 
-                    # Check same-net via spacing
+                    # Check same-net via spacing (Issue #6671: with the drill
+                    # hole-to-hole floor, as the straight strategy does).
                     for vx, vy, _vnet in existing_vias:
                         dist = math.sqrt((vx - via_x) ** 2 + (vy - via_y) ** 2)
-                        if dist < via_size + clearance:
+                        if dist < same_net_spacing:
                             conflict = True
                             break
                     if conflict:
@@ -2525,13 +2907,15 @@ def calculate_dogleg_via_position(
                         continue
 
                     # Check other-net pad clearance at via position
-                    for px, py, p_radius, _pnet in other_net_pads:
-                        dist = math.sqrt((px - via_x) ** 2 + (py - via_y) ** 2)
-                        min_dist = via_radius + p_radius + clearance + hole_extra
-                        if dist < min_dist:
-                            conflict = True
-                            break
-                    if conflict:
+                    if _pad_conflict(
+                        via_x,
+                        via_y,
+                        via_x,
+                        via_y,
+                        via_radius + clearance + hole_extra,
+                        other_net_pads,
+                        other_net_pad_bboxes,
+                    ):
                         continue
 
                     # Check other-net filled polygon clearance at via position
@@ -2571,7 +2955,7 @@ def calculate_dogleg_via_position(
                             via_y,
                             via_drill,
                             [(dx_, dy_, dd_) for dx_, dy_, dd_, _dn in other_net_drills],
-                            min_hole_to_hole=min_hole_to_hole,
+                            min_hole_to_hole=min_hole_to_hole + DRILL_FLOOR_SLACK_MM,
                         ):
                             continue
 
@@ -2591,6 +2975,8 @@ def calculate_dogleg_via_position(
                             clearance,
                             other_net_filled_polygons,
                             other_net_track_index,
+                            stub_layer=_stub_layer(pad),
+                            other_net_pad_bboxes=other_net_pad_bboxes,
                         ):
                             continue
 
@@ -2607,6 +2993,9 @@ def _check_multileg_path_clearance(
     other_net_pads: list[tuple[float, float, float, int]],
     clearance: float,
     other_net_track_index: TrackSpatialIndex[TrackSegment] | None = None,
+    *,
+    stub_layer: str | None = None,
+    other_net_pad_bboxes: list[PadBBox] | None = None,
 ) -> bool:
     """Check if a multi-segment trace path has adequate clearance.
 
@@ -2616,6 +3005,14 @@ def _check_multileg_path_clearance(
     :class:`~kicad_tools.router.track_index.TrackSpatialIndex` over
     ``other_net_tracks``; it only narrows which segments reach the exact
     distance test below, so the verdict is unchanged.
+
+    ``stub_layer`` (Issue #6428, see :func:`_stub_layer`): the layer the
+    stub is emitted on.  When set, only other-net tracks on that layer are
+    tested; ``None`` tests tracks on every layer.  Vias and pads are never
+    filtered.
+
+    ``other_net_pad_bboxes`` (Issue #6683): shape-aware pads from
+    :func:`find_all_pad_bboxes`; when given they replace the circle model.
 
     Returns True if path is clear, False if there's a conflict.
     """
@@ -2631,6 +3028,8 @@ def _check_multileg_path_clearance(
                 leg_sx, leg_sy, leg_ex, leg_ey, trace_half_width + clearance
             )
         for seg in leg_track_candidates:
+            if stub_layer is not None and seg.layer != stub_layer:
+                continue
             dist = segment_to_segment_distance(
                 leg_sx,
                 leg_sy,
@@ -2652,14 +3051,93 @@ def _check_multileg_path_clearance(
             if dist < min_dist:
                 return False
 
-        # Check against other-net pads
-        for px, py, p_radius, _pnet in other_net_pads:
-            dist = point_to_segment_distance(px, py, leg_sx, leg_sy, leg_ex, leg_ey)
-            min_dist = trace_half_width + p_radius + clearance
-            if dist < min_dist:
-                return False
+        # Check against other-net pads (Issue #6683: shape-aware)
+        if _pad_conflict(
+            leg_sx,
+            leg_sy,
+            leg_ex,
+            leg_ey,
+            trace_half_width + clearance,
+            other_net_pads,
+            other_net_pad_bboxes,
+        ):
+            return False
 
     return True
+
+
+def _escape_row_axis(nearby_pads: list[tuple[float, float]]) -> int | None:
+    """Row axis for :func:`calculate_extended_escape_position`: ``0`` when the
+    nearby other-net pads spread more along X (a horizontal row), ``1`` when
+    they spread more along Y, ``None`` with fewer than two nearby pads."""
+    if len(nearby_pads) < 2:
+        return None
+    xs = [px for px, _ in nearby_pads]
+    ys = [py for _, py in nearby_pads]
+    # Pads spread more horizontally -> row is horizontal
+    return 0 if max(xs) - min(xs) >= max(ys) - min(ys) else 1
+
+
+#: Two pad centres closer than this on one axis share a row / column.
+_SAME_ROW_TOL_MM = 0.1
+
+
+def _extended_escape_axial_distances(
+    pad_x: float,
+    pad_y: float,
+    nearby_pads: list[tuple[float, float]],
+    axial_distances: list[float],
+    escape_distance: float,
+    row_axis: int | None,
+) -> list[float]:
+    """Axial step candidates for :func:`calculate_extended_escape_position`.
+
+    Issue #6683: on a 1.27 mm-pitch BGA the fixed 0.5 / 0.8 / 1.0 mm axial
+    steps put the via 3 um inside clearance of a square neighbour's corner
+    (hidden by the old inscribed-circle pad model), and the next legal step
+    (2.0 mm) steals the NEXT pad's channel, stranding a pad.  Half the grid
+    pitch -- the channel centre -- is the interstitial site with the most
+    room, so it is added to ``axial_distances``.
+
+    The pitch is measured ONLY along ``row_axis`` (the smallest non-zero
+    offset of a nearby pad on that axis), so the perpendicular side rows of
+    a QFP never inject their own spacing and only one value is ever added.
+    Same-row neighbours alone are not enough: on a BGA they are often pads
+    of the net being stitched, which are not in the other-net pool (board
+    07 U4.E6 has none), so pads in adjacent rows supply the pitch too.  It
+    is used only when the pad sits in a square grid (a BGA): the pitch on
+    the other axis must match within 0.02 mm.  A two-column package (SOIC,
+    SOP: 1.27 mm along a column, ~5.4 mm across) never qualifies, whichever
+    way :func:`_escape_row_axis` reads its spread.  The channel centre must
+    also be no shorter than the first existing step and not duplicate one,
+    so fine-pitch rows (QFP: 0.25 mm half pitch) and BGAs at 1.0 mm pitch or
+    finer are unchanged too.
+    """
+    if row_axis is None or not axial_distances:
+        return axial_distances
+    col_axis = 1 - row_axis
+    here = (pad_x, pad_y)
+    row_deltas = [
+        abs(p[row_axis] - here[row_axis])
+        for p in nearby_pads
+        if abs(p[row_axis] - here[row_axis]) > _SAME_ROW_TOL_MM
+    ]
+    col_deltas = [
+        abs(p[col_axis] - here[col_axis])
+        for p in nearby_pads
+        if abs(p[col_axis] - here[col_axis]) > _SAME_ROW_TOL_MM
+    ]
+    if not row_deltas or not col_deltas:
+        return axial_distances
+    row_pitch = min(row_deltas)
+    if abs(row_pitch - min(col_deltas)) > 0.02:
+        return axial_distances
+    half_pitch = row_pitch / 2
+    if axial_distances[0] <= half_pitch <= escape_distance and all(
+        abs(half_pitch - d) > 0.02 for d in axial_distances
+    ):
+        return sorted([*axial_distances, half_pitch])
+    return axial_distances
 
 
 def calculate_extended_escape_position(
@@ -2679,6 +3157,7 @@ def calculate_extended_escape_position(
     same_net_filled_polygons: list[FilledPolygon] | None = None,
     same_net_fill_layer: str | None = None,
     other_net_track_index: TrackSpatialIndex[TrackSegment] | None = None,
+    other_net_pad_bboxes: list[PadBBox] | None = None,
 ) -> tuple[float, float, list[tuple[float, float]]] | None:
     """Calculate an extended escape route for pads in dense IC pin fields.
 
@@ -2720,6 +3199,11 @@ def calculate_extended_escape_position(
             skips the check (back-compat).
         min_hole_to_hole: Minimum drill edge-to-edge spacing (mm) for the
             ``other_net_drills`` check (default: the module fab floor).
+        other_net_pad_bboxes: Optional shape-aware pads from
+            :func:`find_all_pad_bboxes` (Issue #6683).  When given, the via
+            point and every leg are cleared against them (rect pads by
+            their box, circle pads exactly) instead of the circle model in
+            ``other_net_pads``, which under-sizes a rect pad's corner.
 
     Returns:
         Tuple of (via_x, via_y, waypoints) where waypoints is a list of
@@ -2738,6 +3222,7 @@ def calculate_extended_escape_position(
 
     via_radius = via_size / 2
     trace_half_width = trace_width / 2
+    same_net_spacing = _same_net_via_spacing(via_size, clearance, via_drill, min_hole_to_hole)
     pad_radius = max(pad.width, pad.height) / 2
 
     # Issue #4432: same-net fill containment gate (see calculate_via_position).
@@ -2752,22 +3237,15 @@ def calculate_extended_escape_position(
     ]
 
     # Determine primary and secondary axes based on pad row orientation
-    if len(nearby_pads) >= 2:
-        xs = [px for px, _ in nearby_pads]
-        ys = [py for _, py in nearby_pads]
-        x_spread = max(xs) - min(xs)
-        y_spread = max(ys) - min(ys)
-
-        # Pads spread more horizontally -> row is horizontal
-        # Escape perpendicular (vertical) is preferred
-        if x_spread >= y_spread:
-            # Horizontal row: axial along X, escape along Y
-            axial_dirs = [(1, 0), (-1, 0)]
-            escape_dirs = [(0, 1), (0, -1)]
-        else:
-            # Vertical row: axial along Y, escape along X
-            axial_dirs = [(0, 1), (0, -1)]
-            escape_dirs = [(1, 0), (-1, 0)]
+    row_axis = _escape_row_axis(nearby_pads)
+    if row_axis == 0:
+        # Horizontal row: axial along X, escape along Y
+        axial_dirs = [(1, 0), (-1, 0)]
+        escape_dirs = [(0, 1), (0, -1)]
+    elif row_axis == 1:
+        # Vertical row: axial along Y, escape along X
+        axial_dirs = [(0, 1), (0, -1)]
+        escape_dirs = [(1, 0), (-1, 0)]
     else:
         axial_dirs = [(1, 0), (-1, 0), (0, 1), (0, -1)]
         escape_dirs = [(0, 1), (0, -1), (1, 0), (-1, 0)]
@@ -2794,6 +3272,16 @@ def calculate_extended_escape_position(
     ]
     breakout_offsets = [d for d in breakout_offsets if d <= escape_distance]
 
+    # Issue #6683: sample the channel centre of a regular pad grid (see
+    # :func:`_extended_escape_axial_distances`).  The Z-shape strategy keeps
+    # its original first five base steps (plus a channel centre that falls
+    # among them), so an inserted step never pushes a base step out.
+    z_axial_limit = axial_distances[:5][-1] if axial_distances else 0.0
+    axial_distances = _extended_escape_axial_distances(
+        pad.x, pad.y, nearby_pads, axial_distances, escape_distance, row_axis
+    )
+    z_axial_distances = [d for d in axial_distances if d <= z_axial_limit]
+
     # Hole-to-copper guard (see calculate_via_position).
     hole_extra = 0.0
     if via_drill > 0:
@@ -2807,7 +3295,7 @@ def calculate_extended_escape_position(
         # Check same-net via spacing
         for evx, evy, _vnet in existing_vias:
             dist = math.sqrt((evx - vx) ** 2 + (evy - vy) ** 2)
-            if dist < via_size + clearance:
+            if dist < same_net_spacing:
                 return False
 
         # Check other-net track clearance
@@ -2829,11 +3317,18 @@ def calculate_extended_escape_position(
             if dist < via_radius + ov_size / 2 + clearance + hole_extra:
                 return False
 
-        # Check other-net pad clearance
-        for px, py, p_radius, _pnet in other_net_pads:
-            dist = math.sqrt((px - vx) ** 2 + (py - vy) ** 2)
-            if dist < via_radius + p_radius + clearance + hole_extra:
-                return False
+        # Check other-net pad clearance (Issue #6683: shape-aware -- the
+        # board 07 U4.E3/E5 vias sat 0.19 mm from U4.F3/F5's square corners)
+        if _pad_conflict(
+            vx,
+            vy,
+            vx,
+            vy,
+            via_radius + clearance + hole_extra,
+            other_net_pads,
+            other_net_pad_bboxes,
+        ):
+            return False
 
         # Issue #4177: drill hole-to-hole guard.  The checks above use
         # COPPER geometry; a via dropped within ``min_hole_to_hole`` (drill
@@ -2847,7 +3342,7 @@ def calculate_extended_escape_position(
                 vy,
                 via_drill,
                 [(dx_, dy_, dd_) for dx_, dy_, dd_, _dn in other_net_drills],
-                min_hole_to_hole=min_hole_to_hole,
+                min_hole_to_hole=min_hole_to_hole + DRILL_FLOOR_SLACK_MM,
             ):
                 return False
 
@@ -2900,6 +3395,8 @@ def calculate_extended_escape_position(
                             other_net_pads,
                             clearance,
                             other_net_track_index,
+                            stub_layer=_stub_layer(pad),
+                            other_net_pad_bboxes=other_net_pad_bboxes,
                         ):
                             continue
 
@@ -2944,6 +3441,8 @@ def calculate_extended_escape_position(
                             other_net_pads,
                             clearance,
                             other_net_track_index,
+                            stub_layer=_stub_layer(pad),
+                            other_net_pad_bboxes=other_net_pad_bboxes,
                         ):
                             continue
 
@@ -2965,7 +3464,7 @@ def calculate_extended_escape_position(
                 if abs(axial_dx * escape_dx + axial_dy * escape_dy) > 0.1:
                     continue
 
-                for axial_dist in axial_distances[:5]:
+                for axial_dist in z_axial_distances:
                     wp2_x = wp1_x + axial_dx * axial_dist
                     wp2_y = wp1_y + axial_dy * axial_dist
 
@@ -2997,6 +3496,8 @@ def calculate_extended_escape_position(
                                 other_net_pads,
                                 clearance,
                                 other_net_track_index,
+                                stub_layer=_stub_layer(pad),
+                                other_net_pad_bboxes=other_net_pad_bboxes,
                             ):
                                 continue
 
@@ -3067,10 +3568,16 @@ def calculate_extended_escape_position(
                 dist = point_to_segment_distance(ovx, ovy, sx, sy, ex, ey)
                 if dist < trace_half_width + ov_size / 2 + clearance:
                     return False
-            for px, py, p_radius, _pnet in other_net_pads:
-                dist = point_to_segment_distance(px, py, sx, sy, ex, ey)
-                if dist < trace_half_width + p_radius + clearance:
-                    return False
+            if _pad_conflict(
+                sx,
+                sy,
+                ex,
+                ey,
+                trace_half_width + clearance,
+                other_net_pads,
+                other_net_pad_bboxes,
+            ):
+                return False
         return True
 
     angular_steps = 16  # 22.5deg increments — covers diagonals
@@ -3565,7 +4072,7 @@ class _PolygonIndex:
     ring the linear predicates walk.
     """
 
-    __slots__ = ("points", "cell", "_cells", "_big", "_rows", "_big_rows")
+    __slots__ = ("points", "cell", "_cells", "_big", "_rows", "_big_rows", "_bridges")
 
     def __init__(self, points: list[tuple[float, float]]) -> None:
         self.points = points
@@ -3614,6 +4121,14 @@ class _PolygonIndex:
         self._big = big
         self._rows = rows
         self._big_rows = big_rows
+        # Issue #6409: computed lazily -- only the fill-margin query needs it.
+        self._bridges: frozenset[int] | None = None
+
+    def bridge_edges(self) -> frozenset[int]:
+        """Indices of zero-width fracture-bridge edges (see :func:`_bridge_edge_indices`)."""
+        if self._bridges is None:
+            self._bridges = _bridge_edge_indices(self.points)
+        return self._bridges
 
     def edges_in_box(self, min_x: float, min_y: float, max_x: float, max_y: float) -> list[int]:
         """Edge indices whose bounding box may intersect the query box.
@@ -3664,11 +4179,21 @@ class _PolygonIndex:
                     inside = not inside
         return inside
 
-    def has_edge_within_point(self, x: float, y: float, threshold: float) -> bool:
-        """True if some edge is strictly closer than ``threshold`` to ``(x, y)``."""
+    def has_edge_within_point(
+        self, x: float, y: float, threshold: float, *, ignore_bridges: bool = False
+    ) -> bool:
+        """True if some edge is strictly closer than ``threshold`` to ``(x, y)``.
+
+        ``ignore_bridges`` (Issue #6409) skips fracture-bridge edges -- the
+        coincident, opposite-direction pairs KiCad uses to join a fill hole
+        to its outer ring -- which have copper on both sides.
+        """
         points = self.points
         n = len(points)
+        skip = self.bridge_edges() if ignore_bridges else frozenset()
         for i in self.edges_in_box(x - threshold, y - threshold, x + threshold, y + threshold):
+            if i in skip:
+                continue
             xi, yi = points[i]
             xj, yj = points[(i + 1) % n]
             if point_to_segment_distance(x, y, xi, yi, xj, yj) < threshold:
@@ -3692,6 +4217,36 @@ class _PolygonIndex:
             if segment_to_segment_distance(sx, sy, ex, ey, xi, yi, xj, yj) < threshold:
                 return True
         return False
+
+
+def _bridge_edge_indices(points: list[tuple[float, float]]) -> frozenset[int]:
+    """Indices of the fracture-bridge edges in a closed vertex ring.
+
+    Issue #6409: KiCad writes a holed ``filled_polygon`` as one fractured
+    ring -- every hole is joined to the outer outline by a pair of
+    coincident, opposite-direction edges (``a -> b`` and later ``b -> a``).
+    Even-odd parity ignores the pair, but it is *not* a copper boundary:
+    there is fill on both sides.  An edge ``i`` (``points[i] ->
+    points[i+1]``) is a bridge edge when its exact reverse also appears in
+    the ring.  KiCad emits the twins bit-identical, so exact coordinate
+    comparison is used; zero-length edges are never bridges.  Zone outlines
+    have no twins, so this returns an empty set for them.
+    """
+    n = len(points)
+    if n < 2:
+        return frozenset()
+    edges: dict[tuple[tuple[float, float], tuple[float, float]], list[int]] = {}
+    for i in range(n):
+        a = points[i]
+        b = points[(i + 1) % n]
+        if a == b:
+            continue
+        edges.setdefault((a, b), []).append(i)
+    out: set[int] = set()
+    for (a, b), idxs in edges.items():
+        if (b, a) in edges:
+            out.update(idxs)
+    return frozenset(out)
 
 
 def _polygon_index(points: list[tuple[float, float]]) -> "_PolygonIndex | None":
@@ -4065,23 +4620,31 @@ def _point_has_edge_margin(
 ) -> bool:
     """Check if a point has at least `margin` distance from all polygon edges.
 
+    Fracture-bridge edges (Issue #6409, see :func:`_bridge_edge_indices`)
+    are ignored: they join a fill hole to the outer ring with copper on
+    both sides, so they are not a boundary the via pad could overhang.  The
+    hole's and outline's real edges still enforce the margin.
+
     Args:
         x, y: Point to check
         polygon: Polygon vertices
         margin: Required minimum distance from edges
 
     Returns:
-        True if the point is at least `margin` from all edges
+        True if the point is at least `margin` from all non-bridge edges
     """
     # Issue #5617: an existential over the ring -- the index returns a strict
     # superset of the edges that could be within ``margin``, so the negation
     # below is identical to the linear scan's.
     index = _polygon_index(polygon)
     if index is not None:
-        return not index.has_edge_within_point(x, y, margin)
+        return not index.has_edge_within_point(x, y, margin, ignore_bridges=True)
 
+    bridges = _bridge_edge_indices(polygon)
     n = len(polygon)
     for i in range(n):
+        if i in bridges:
+            continue
         j = (i + 1) % n
         dist = point_to_segment_distance(
             x, y, polygon[i][0], polygon[i][1], polygon[j][0], polygon[j][1]
@@ -4468,6 +5031,33 @@ def generate_thermal_via_positions(
     return positions
 
 
+def _per_net_base_pools(
+    sexp: SExp,
+    net_numbers: set[int],
+    other_net_tracks: list[TrackSegment],
+    other_net_vias: list[tuple[float, float, float, int]],
+) -> tuple[
+    dict[int, list[TrackSegment]],
+    dict[int, list[tuple[float, float, float, int]]],
+]:
+    """Per-target-net track/via obstacle pools (Issues #6668, #6685).
+
+    ``other_net_tracks`` / ``other_net_vias`` exclude every stitch-target
+    net.  Each target net's pool here is that base plus every pre-existing
+    track / via of the OTHER target nets -- never its own net's.
+    """
+    target_net_tracks = [t for t in find_all_track_segments(sexp) if t.net_number in net_numbers]
+    target_net_vias = [v for v in find_all_board_vias(sexp) if v[3] in net_numbers]
+    tracks_by_net: dict[int, list[TrackSegment]] = {}
+    vias_by_net: dict[int, list[tuple[float, float, float, int]]] = {}
+    for _net in net_numbers:
+        tracks_by_net[_net] = other_net_tracks + [
+            t for t in target_net_tracks if t.net_number != _net
+        ]
+        vias_by_net[_net] = other_net_vias + [v for v in target_net_vias if v[3] != _net]
+    return tracks_by_net, vias_by_net
+
+
 def run_thermal_stitch(
     pcb_path: Path,
     net_names: list[str],
@@ -4481,6 +5071,7 @@ def run_thermal_stitch(
     reference_prefixes: tuple[str, ...] | None = None,
     target_layer: str | None = None,
     dry_run: bool = False,
+    min_hole_to_hole: float = MIN_HOLE_TO_HOLE_CLEARANCE,
 ) -> StitchResult:
     """Place thermal vias under / around MOSFET heat-sink pads.
 
@@ -4587,6 +5178,14 @@ def run_thermal_stitch(
     # their own thermal escape).
     target_pad_circles = [p for p in find_all_pads(sexp) if p[3] in target_net_nums]
     target_pad_drills = [d for d in find_all_drills(sexp) if d[3] in target_net_nums]
+    target_via_drills = [
+        d for d in find_all_drills(sexp, include_pads=False) if d[3] in target_net_nums
+    ]
+    # Issue #6685: per-target-net track/via pools (sibling nets' pre-existing
+    # copper is an obstacle; own-net copper is not).
+    base_tracks_by_net, base_vias_by_net = _per_net_base_pools(
+        sexp, target_net_nums, other_net_tracks, other_net_vias
+    )
 
     # Per-net same-net via positions (existing + newly placed).  Treated
     # as obstacles to prevent stacking on the same net.  A via placed for
@@ -4685,7 +5284,7 @@ def run_thermal_stitch(
 
         # Cross-net obstacles: starting set + any vias we've placed on
         # other target nets during this run.
-        other_net_vias_with_placed = list(other_net_vias)
+        other_net_vias_with_placed = list(base_vias_by_net.get(pad_net, other_net_vias))
         for cx, cy, cn in cross_net_placed_vias:
             if cn != pad_net:
                 other_net_vias_with_placed.append((cx, cy, via_size, cn))
@@ -4695,9 +5294,23 @@ def run_thermal_stitch(
         other_net_pads_with_siblings = other_net_pads + [
             p for p in target_pad_circles if p[3] != pad_net
         ]
-        other_net_drills_with_siblings = other_net_drills + [
-            d for d in target_pad_drills if d[3] != pad_net
-        ]
+        # Issue #6289: sibling stitch-net VIA drills (pre-existing and placed
+        # earlier in this run) are drilled holes too; the copper-only
+        # ``other_net_vias`` pool let thermal vias land 0.457-0.496 mm from
+        # them, below the fab hole-to-hole floor.
+        other_net_drills_with_siblings = (
+            other_net_drills
+            + [d for d in target_pad_drills if d[3] != pad_net]
+            + [d for d in target_via_drills if d[3] != pad_net]
+            + [(cx, cy, drill, cn) for cx, cy, cn in cross_net_placed_vias if cn != pad_net]
+        )
+
+        # Issue #6410: per-candidate fill pools -- the gate uses only this
+        # pad's OWN net's fill, and sibling target nets' fills become
+        # clearance obstacles (the #6400 fix, applied to thermal stitch).
+        own_fill, other_fill = _split_fill_pools(
+            pad_net, same_net_filled_polys, other_net_filled_polys
+        )
 
         placed_for_pad = 0
         for vx, vy in positions:
@@ -4709,15 +5322,15 @@ def run_thermal_stitch(
                 vy,
                 via_size,
                 clearance,
-                other_net_tracks,
+                base_tracks_by_net.get(pad_net, other_net_tracks),
                 other_net_vias_with_placed,
                 other_net_pads_with_siblings,
                 same_net_vias_for_pad,
-                other_net_filled_polys,
+                other_fill,
                 via_drill=drill,
                 other_net_drills=other_net_drills_with_siblings,
                 hole_to_copper_clearance=KICAD_HOLE_TO_COPPER_CLEARANCE,
-                min_hole_to_hole=MIN_HOLE_TO_HOLE_CLEARANCE,
+                min_hole_to_hole=min_hole_to_hole,
             ):
                 continue
 
@@ -4733,7 +5346,7 @@ def run_thermal_stitch(
             # layer (zones unfilled), fall back to the zone OUTLINE gate so
             # the stitcher stays usable pre-refill.
             _, thermal_terminus = get_via_layers(surface_layer, target_layer_by_net.get(net_name))
-            fill_gate = _same_net_fill_on_layer(same_net_filled_polys, thermal_terminus)
+            fill_gate = _same_net_fill_on_layer(own_fill, thermal_terminus)
             if fill_gate:
                 if not _point_on_same_net_fill(vx, vy, zone_margin, fill_gate, thermal_terminus):
                     continue
@@ -4789,6 +5402,7 @@ def run_blanket_stitch(
     spacing: float = 3.0,
     target_layer: str | None = None,
     dry_run: bool = False,
+    min_hole_to_hole: float = MIN_HOLE_TO_HOLE_CLEARANCE,
 ) -> StitchResult:
     """Run blanket (grid-based) stitching on a PCB.
 
@@ -4855,6 +5469,13 @@ def run_blanket_stitch(
     # target-net pad/drill on a net DIFFERENT than the one being stitched.
     target_pad_circles = [p for p in find_all_pads(sexp) if p[3] in target_net_nums]
     target_pad_drills = [d for d in find_all_drills(sexp) if d[3] in target_net_nums]
+    # Issue #6685: sibling target-net VIA drills + per-net track/via pools.
+    target_via_drills = [
+        d for d in find_all_drills(sexp, include_pads=False) if d[3] in target_net_nums
+    ]
+    base_tracks_by_net, base_vias_by_net = _per_net_base_pools(
+        sexp, target_net_nums, other_net_tracks, other_net_vias
+    )
 
     # Collect all existing same-net vias (to prevent stacking)
     all_same_net_vias = find_existing_vias(sexp, target_net_nums)
@@ -4889,9 +5510,11 @@ def run_blanket_stitch(
         other_net_pads_with_siblings = other_net_pads + [
             p for p in target_pad_circles if p[3] != net_number
         ]
-        other_net_drills_with_siblings = other_net_drills + [
-            d for d in target_pad_drills if d[3] != net_number
-        ]
+        other_net_drills_with_siblings = (
+            other_net_drills
+            + [d for d in target_pad_drills if d[3] != net_number]
+            + [d for d in target_via_drills if d[3] != net_number]
+        )
 
         # Determine target layer
         if target_layer:
@@ -4920,10 +5543,13 @@ def run_blanket_stitch(
         # both the even-odd containment and the edge-margin check reject them).
         # Empty-fill no-op: when no same-net fill exists on the target layer
         # (zones unfilled), fall back to seeding from the zone outline.
-        net_fill_polys = _same_net_fill_on_layer(
-            [fp for fp in same_net_filled_polys if fp.net_number == net_number],
-            net_target_layer,
+        # Issue #6410: per-net fill pools -- own fill seeds the grid, and
+        # sibling target nets' fills (on ANY layer the via crosses) become
+        # clearance obstacles (the #6400 fix, applied to blanket stitch).
+        own_fill, other_fill = _split_fill_pools(
+            net_number, same_net_filled_polys, other_net_filled_polys
         )
+        net_fill_polys = _same_net_fill_on_layer(own_fill, net_target_layer)
         if net_fill_polys:
             seed_polygons = [fp.points for fp in net_fill_polys]
         else:
@@ -4947,15 +5573,15 @@ def run_blanket_stitch(
                     gy,
                     via_size,
                     clearance,
-                    other_net_tracks,
-                    other_net_vias,
+                    base_tracks_by_net.get(net_number, other_net_tracks),
+                    base_vias_by_net.get(net_number, other_net_vias),
                     other_net_pads_with_siblings,
                     same_net_via_positions,
-                    other_net_filled_polys,
+                    other_fill,
                     via_drill=drill,
                     other_net_drills=other_net_drills_with_siblings,
                     hole_to_copper_clearance=KICAD_HOLE_TO_COPPER_CLEARANCE,
-                    min_hole_to_hole=MIN_HOLE_TO_HOLE_CLEARANCE,
+                    min_hole_to_hole=min_hole_to_hole,
                 ):
                     continue
 
@@ -5031,6 +5657,15 @@ def _compute_strict_pad_sets(
     contradict each other on the same file).  The connected sets are returned
     for completeness/diagnostics; they deliberately do NOT suppress stitching
     (see the gate comment in ``run_stitch``).
+
+    Issue #6315: the strict model calls the LARGEST island "connected", which
+    is not the plane when a trace joins two stranded pads into a two-pad
+    island while the fill bonds a single pad (board 04: an oracle-completion
+    trace C3.2 -> C10.2 on F.Cu, the GND plane on B.Cu bonding only J1.6).
+    Stitch then skipped both pads as "connected" and they shipped as an open.
+    So whenever the fill anchors at least one island, every pad of an island
+    the fill does NOT anchor is also reported unconnected.  This only ever adds
+    to the veto set (more stitching, never less).
     """
     from kicad_tools.analysis.net_status import NetStatusAnalyzer
 
@@ -5041,7 +5676,24 @@ def _compute_strict_pad_sets(
     for net in scoped.nets:
         unconnected[net.net_name] = {p.full_name for p in net.unconnected_pads}
         connected[net.net_name] = {p.full_name for p in net.connected_pads}
+        unconnected[net.net_name] |= _pads_off_the_plane(net)
     return unconnected, connected
+
+
+def _pads_off_the_plane(net: "NetStatus") -> set[str]:
+    """``REF.PAD`` names of pads on islands the net's fill does not anchor.
+
+    Empty when the fill anchors no island at all (nothing to compare against
+    -- the largest-island rule stands) -- see :func:`_compute_strict_pad_sets`.
+    """
+    bonded = {p.connectivity_id for p in net.fill_bonded_pads}
+    if not bonded:
+        return set()
+    off: set[str] = set()
+    for island in net.islands:
+        if not any(p.connectivity_id in bonded for p in island):
+            off.update(p.full_name for p in island)
+    return off
 
 
 def run_stitch(
@@ -5063,6 +5715,9 @@ def run_stitch(
     force_pads: frozenset[str] = frozenset(),
     foreign_fills_yield: bool = False,
     strict_drill_overlap: bool = False,
+    preferred_sites: Mapping[str, Sequence[tuple[float, float]]] | None = None,
+    avoid_sites: Mapping[str, Sequence[tuple[float, float]]] | None = None,
+    min_hole_to_hole: float = MIN_HOLE_TO_HOLE_CLEARANCE,
 ) -> StitchResult:
     """Run the stitching operation on a PCB.
 
@@ -5092,9 +5747,22 @@ def run_stitch(
             manufacturability failure.  Dropped pads are recorded in
             ``StitchResult.pads_skipped`` with a ``via_in_pad`` reason and
             counted in ``StitchResult.via_in_pad_filtered``.
+        min_hole_to_hole: Issue #6289 -- fab hole-to-hole minimum (mm,
+            drill edge-to-edge) every stitch via must clear.  The CLI passes
+            the ``--mfr`` profile's ``min_hole_to_hole_mm`` (the value
+            ``kct check --mfr`` enforces); defaults to the 0.5 mm floor.
         strict_drill_overlap: Issue #5785 -- with ``avoid_pad_overlap``, also
             drop a via whose drill merely OVERLAPS a same-net SMD pad (the
             current ``via_in_pad`` DRC rule), not only one fully inside it.
+        preferred_sites: Issue #6401 -- ``"REF.PAD"`` -> via sites ``kct
+            route`` reserved for that pad before signal routing.  Each pad's
+            sites are tried first (see ``calculate_via_position``'s
+            ``preferred_positions``); ``None`` keeps the search unchanged.
+        avoid_sites: Issue #6428 -- ``"REF.PAD"`` -> via sites a previous
+            weld of that pad used and that cut a foreign pour.  Each is held
+            as a foreign via of ``via_size`` while that pad is placed, so
+            neither its via nor its stub lands there again and the cascade
+            moves on to another candidate.  ``None`` changes nothing.
         only_pads: Issue #5785 -- when given, restrict the work list to these
             ``"REF.PAD"`` keys (the pads a KiCad ``unconnected_items`` report
             named), so the oracle completion loop welds exactly the links
@@ -5125,10 +5793,14 @@ def run_stitch(
 
     # Auto-detect target layers per net if not specified
     net_target_layers: dict[str, str | None] = {}
+    # Issue #6701: the real zone layers of each net, kept so the pad loop can
+    # refuse a via whose span reaches no same-net pour off the pad's layer.
+    net_zone_layers: dict[str, list[str]] = {}
     copper_layers = get_copper_layers(sexp)
     if target_layer is None:
         for net_name in net_names:
             zone_layers = find_zones_for_net(sexp, net_name)
+            net_zone_layers[net_name] = zone_layers
             if zone_layers and not _should_use_stackup_fallback(zone_layers, copper_layers):
                 # Zone found on an inner layer -- use it directly
                 net_target_layers[net_name] = zone_layers[0]
@@ -5225,11 +5897,29 @@ def run_stitch(
     target_pad_bboxes = [b for b in find_all_pad_bboxes(sexp) if b[4] in net_numbers]
     target_pad_drills = [d for d in find_all_drills(sexp) if d[3] in net_numbers]
 
+    # Issue #6668: the TRACK/VIA analogue of ``_sibling_pools``.  The
+    # ``other_net_tracks`` / ``other_net_vias`` pools above exclude every
+    # stitch-target net, so in a multi-net call (board 07: ``--net GND --net
+    # +1V2 --net +1V8``) a +1V8 extended escape for U3.12 was drawn straight
+    # through U3.11's PRE-EXISTING GND fanout stub and via -- a real
+    # GND/+1V8 short.  Each target net's pool is every pre-existing track /
+    # via EXCEPT its own (own-net copper must never block its own escape: a
+    # pad's fanout stub starts on the pad, and the placement helpers treat
+    # these pools as flat, unfiltered obstacle lists).  ``run_stitch`` writes
+    # no copper until after the pad loop, so the pools are fixed: build them
+    # -- and their #5240 track index -- once per target NET, never per pad.
+    base_tracks_by_net, base_vias_by_net = _per_net_base_pools(
+        sexp, net_numbers, other_net_tracks, other_net_vias
+    )
+    base_index_by_net: dict[int, TrackSpatialIndex[TrackSegment] | None] = {}
+    for _net in net_numbers:
+        base_index_by_net[_net] = build_track_index(base_tracks_by_net[_net])
+
     def _sibling_pools(
         pad: PadInfo,
     ) -> tuple[
         list[tuple[float, float, float, int]],
-        list[tuple[float, float, float, float, int]],
+        list[PadBBox],
         list[tuple[float, float, float, int]],
     ]:
         """Per-pad obstacle pools = pre-existing other-net copper plus the
@@ -5242,6 +5932,25 @@ def run_stitch(
         drills_pool = other_net_drills + [d for d in target_pad_drills if d[3] != pad.net_number]
         return pads_pool, bboxes_pool, drills_pool
 
+    # Issue #6400: the FILL analogue of ``_sibling_pools``.  The
+    # ``other_net_filled_polys`` pool above excludes every stitch-target net,
+    # and ``same_net_filled_polys`` holds the fill of EVERY target net -- so
+    # in a multi-net call (board 03: ``nets=[VBUS, VCC]``) a VCC via could
+    # pass the same-net fill gate by landing on VBUS's fill, and VBUS's fill
+    # was not an obstacle either.  The via then bonded only to a sliver of
+    # VCC copper inside the VBUS pour.  Per pad, the fill gate is the pad's
+    # OWN net's fill, and sibling target nets' fills join the other-net pool
+    # (unless the caller lets foreign fills yield), so each net is gated
+    # exactly as a single-net call for that net would gate it.
+    def _fill_pools(pad: PadInfo) -> tuple[list[FilledPolygon], list[FilledPolygon]]:
+        """Per-pad ``(own_net_fill, other_net_fill)`` polygon pools."""
+        return _split_fill_pools(
+            pad.net_number,
+            same_net_filled_polys,
+            other_net_filled_polys,
+            foreign_fills_yield=foreign_fills_yield,
+        )
+
     # Net-number -> net-name lookup so skip diagnostics can name the
     # offending signal (e.g. ``net 8 'SWO'``) instead of just a number.
     # See issue #3267 (board 04 U2.35 stitch failure traced to SWO
@@ -5250,9 +5959,9 @@ def run_stitch(
 
     # Issue #3633: cross-net co-check of just-placed stitch geometry.
     #
-    # ``other_net_tracks`` / ``other_net_vias`` above are pre-filtered to
-    # exclude *all* stitch nets, so pre-existing routed copper on a sibling
-    # stitch net does not block placement.  But the stitch step also EMITS
+    # ``base_tracks_by_net`` / ``base_vias_by_net`` above hold the
+    # PRE-EXISTING copper of every other net, sibling stitch nets included
+    # (issue #6668).  But the stitch step also EMITS
     # new copper (a via plus a pad-to-via trace) for every pad it processes.
     # Previously the placed via was appended to ``existing_vias`` (checked
     # only for same-net via-to-via spacing) and the trace was buffered in
@@ -5270,10 +5979,10 @@ def run_stitch(
     # placement helpers treat their ``other_net_*`` arguments as flat
     # obstacle lists (no internal net filtering), so we filter by net here
     # when assembling the per-pad augmented lists.
-    # Issue #5240: the pre-existing foreign-net track pool never changes
-    # during the pad loop, so index it once here; per-pad pools that add
-    # just-placed cross-net stitch geometry get their own index below.
-    base_track_index = build_track_index(other_net_tracks)
+    # Issue #5240: the pre-existing foreign-net track pools never change
+    # during the pad loop, so they are indexed once per target net above
+    # (``base_index_by_net``); per-pad pools that add just-placed cross-net
+    # stitch geometry get their own index below.
 
     placed_stitch_tracks: list[TrackSegment] = []
     placed_stitch_vias: list[tuple[float, float, float, int]] = []
@@ -5311,6 +6020,8 @@ def run_stitch(
         # Per-pad obstacle pools including SIBLING stitch-net pads (see
         # ``_sibling_pools`` above -- board 07 +1V2 via on +1V8 pad short).
         eff_pads, eff_pad_bboxes, eff_drills = _sibling_pools(pad)
+        # Issue #6400: own-net fill gate + sibling fills as foreign copper.
+        own_net_fill, eff_other_fill = _fill_pools(pad)
 
         # Issue #4432: resolve the via's deep terminus layer -- the plane fill
         # the via must bond to lives there.  The same-net FILL gate rejects a
@@ -5320,7 +6031,7 @@ def run_stitch(
         # genuine clearance obstruction.  Empty ``same_net_filled_polys``
         # (unfilled board) makes the gate a no-op regardless.
         _, terminus_layer = get_via_layers(pad.layer, net_target_layers.get(pad.net_name))
-        fill_gate = same_net_filled_polys if enforce_fill_gate else []
+        fill_gate = own_net_fill if enforce_fill_gate else []
 
         # Calculate via position with clearance checking against all copper,
         # including the connecting trace path from pad to via
@@ -5334,13 +6045,18 @@ def run_stitch(
             other_net_vias=eff_other_net_vias,
             other_net_pads=eff_pads,
             trace_width=trace_width,
-            other_net_filled_polygons=other_net_filled_polys,
+            other_net_filled_polygons=eff_other_fill,
             other_net_pad_bboxes=eff_pad_bboxes,
             other_net_drills=eff_drills,
+            min_hole_to_hole=min_hole_to_hole,
             via_drill=drill,
             same_net_filled_polygons=fill_gate,
             same_net_fill_layer=terminus_layer,
             other_net_track_index=eff_track_index,
+            # Issue #6401: the site ``kct route`` reserved for this pad.
+            preferred_positions=(preferred_sites or {}).get(
+                f"{pad.reference}.{pad.pad_number}", ()
+            ),
         )
 
         # Track if we're using dog-leg or extended escape routing
@@ -5360,11 +6076,12 @@ def run_stitch(
                 other_net_tracks=eff_other_net_tracks,
                 other_net_vias=eff_other_net_vias,
                 other_net_pads=eff_pads,
+                other_net_pad_bboxes=eff_pad_bboxes,
                 trace_width=trace_width,
-                other_net_filled_polygons=other_net_filled_polys,
+                other_net_filled_polygons=eff_other_fill,
                 via_drill=drill,
                 other_net_drills=eff_drills,
-                min_hole_to_hole=MIN_HOLE_TO_HOLE_CLEARANCE,
+                min_hole_to_hole=min_hole_to_hole,
                 same_net_filled_polygons=fill_gate,
                 same_net_fill_layer=terminus_layer,
                 other_net_track_index=eff_track_index,
@@ -5384,10 +6101,11 @@ def run_stitch(
                     other_net_tracks=eff_other_net_tracks,
                     other_net_vias=eff_other_net_vias,
                     other_net_pads=eff_pads,
+                    other_net_pad_bboxes=eff_pad_bboxes,
                     trace_width=trace_width,
                     via_drill=drill,
                     other_net_drills=eff_drills,
-                    min_hole_to_hole=MIN_HOLE_TO_HOLE_CLEARANCE,
+                    min_hole_to_hole=min_hole_to_hole,
                     same_net_filled_polygons=fill_gate,
                     same_net_fill_layer=terminus_layer,
                     other_net_track_index=eff_track_index,
@@ -5407,9 +6125,10 @@ def run_stitch(
                             other_net_vias=eff_other_net_vias,
                             other_net_pads=eff_pads,
                             trace_width=trace_width,
-                            other_net_filled_polygons=other_net_filled_polys,
+                            other_net_filled_polygons=eff_other_fill,
                             other_net_pad_bboxes=eff_pad_bboxes,
                             other_net_drills=eff_drills,
+                            min_hole_to_hole=min_hole_to_hole,
                             via_drill=micro_via_drill,
                             same_net_filled_polygons=fill_gate,
                             same_net_fill_layer=terminus_layer,
@@ -5426,11 +6145,12 @@ def run_stitch(
                                 other_net_tracks=eff_other_net_tracks,
                                 other_net_vias=eff_other_net_vias,
                                 other_net_pads=eff_pads,
+                                other_net_pad_bboxes=eff_pad_bboxes,
                                 trace_width=trace_width,
-                                other_net_filled_polygons=other_net_filled_polys,
+                                other_net_filled_polygons=eff_other_fill,
                                 via_drill=micro_via_drill,
                                 other_net_drills=eff_drills,
-                                min_hole_to_hole=MIN_HOLE_TO_HOLE_CLEARANCE,
+                                min_hole_to_hole=min_hole_to_hole,
                                 same_net_filled_polygons=fill_gate,
                                 same_net_fill_layer=terminus_layer,
                                 other_net_track_index=eff_track_index,
@@ -5449,10 +6169,11 @@ def run_stitch(
                                 other_net_tracks=eff_other_net_tracks,
                                 other_net_vias=eff_other_net_vias,
                                 other_net_pads=eff_pads,
+                                other_net_pad_bboxes=eff_pad_bboxes,
                                 trace_width=trace_width,
                                 via_drill=micro_via_drill,
                                 other_net_drills=eff_drills,
-                                min_hole_to_hole=MIN_HOLE_TO_HOLE_CLEARANCE,
+                                min_hole_to_hole=min_hole_to_hole,
                                 same_net_filled_polygons=fill_gate,
                                 same_net_fill_layer=terminus_layer,
                                 other_net_track_index=eff_track_index,
@@ -5469,6 +6190,123 @@ def run_stitch(
             return (via_pos, dogleg_pos, extended_pos, False)
         return (via_pos, dogleg_pos, extended_pos, False)
 
+    # Issue #6684: commit-time drop filters.  The #3271 via_in_pad filter
+    # and the #3855/#4177/#6289 drill hole-to-hole filter used to run AFTER
+    # this loop and drop placements from ``result.vias_added`` -- but by
+    # then each dropped via had already been appended to ``existing_vias``
+    # (so ``is_pad_connected`` credited a later same-net pad as "already
+    # connected" through copper that is never written: board 07's U4.E4 via
+    # U4.D5's filtered via), recorded as a cross-net obstacle, and counted
+    # in ``micro_vias_placed``.  The keep-or-drop decision is now taken
+    # per placement, before any of that bookkeeping.  Neither filter's
+    # inputs depend on placements (``sexp`` is not mutated until the write
+    # pass below), so they are built once here.
+    #
+    # #3271: manufacturers that forbid via-in-pad (e.g. JLCPCB standard
+    # tier).  The placement strategies push the via off the originating pad
+    # but do NOT consider neighbouring same-net SMD pads on the same
+    # footprint, so on dense QFN / BGA parts the via can land on top of a
+    # same-net neighbour -- geometrically clear of other-net copper, but
+    # flagged by ``ViaInPadRule``.  This uses the same SMD-pad-bbox
+    # containment geometry as the DRC rule, so it drops exactly the
+    # placements the rule would flag.  Through-hole pads are excluded: they
+    # already have a plated hole.
+    vip_bboxes_by_net: dict[int, list[tuple[float, float, float, float]]] = {}
+    if avoid_pad_overlap:
+        net_numbers_local = {
+            num for num, name in get_net_map(sexp).items() if name in set(net_names)
+        }
+        for net_num, min_x, min_y, max_x, max_y in find_smd_pad_bboxes_on_nets(
+            sexp, net_numbers_local
+        ):
+            vip_bboxes_by_net.setdefault(net_num, []).append((min_x, min_y, max_x, max_y))
+
+    # #3855: the per-strategy ``calculate_via_position`` guard catches
+    # straight-line placements at candidate selection, but the dog-leg /
+    # extended-escape strategies place vias through separate paths, so this
+    # is the single chokepoint guaranteeing NO committed stitch via sits
+    # within ``min_hole_to_hole`` (drill edge-to-edge) of an existing drilled
+    # hole (any through-hole pad, any other-net via, or another kept stitch
+    # via).  The via is dropped (the pad falls back to the plane pour)
+    # rather than nudged.  The GND-stitch-vs-J1.S2 case (#3855) is a
+    # same-net via-vs-pad pair -- two distinct drilled holes that never
+    # merge -- so same-net PADS are NOT excluded.
+    #
+    # #4177: a stitch via for net A must see EVERY other net's pre-existing
+    # drills, sibling stitch-target net B's included, so the registry is
+    # split and each exclusion policy is honoured per candidate:
+    #   * PAD drills: ALL nets, including the via's own net.  Only the via's
+    #     own TARGET pad is exempted (coincident-with-center check below).
+    #   * VIA drills: exclude ONLY a coincident own-net via (#6289: a
+    #     distinct own-net via is a separate drilled hole).
+    all_pad_drills = find_all_drills(sexp, include_vias=False)
+    all_via_drills = find_all_drills(sexp, include_pads=False)
+    # Drills of the stitch vias KEPT so far, in loop order.
+    kept_stitch_drills: list[tuple[float, float, float]] = []
+
+    def _commit_drop_reason(placement: ViaPlacement) -> str | None:
+        """Return the skip reason if a filter drops ``placement``, else ``None``.
+
+        Issue #6684: also bumps the matching filter counter on a drop.  The
+        caller must record nothing else for a dropped placement.
+        """
+        if avoid_pad_overlap:
+            candidate_bboxes = vip_bboxes_by_net.get(placement.pad.net_number, [])
+            in_pad = any(
+                _via_drill_inside_pad_bbox(placement.via_x, placement.via_y, placement.drill, bbox)
+                or (
+                    strict_drill_overlap
+                    and _via_drill_overlaps_pad_bbox(
+                        placement.via_x, placement.via_y, placement.drill, bbox
+                    )
+                )
+                for bbox in candidate_bboxes
+            )
+            if in_pad:
+                result.via_in_pad_filtered += 1
+                return (
+                    "via_in_pad: standard placement would land drill "
+                    "inside same-net SMD pad (avoid_pad_overlap=True); "
+                    "pad relies on the plane pour for connectivity"
+                )
+
+        cand_r = placement.drill / 2.0
+        via_net = placement.pad.net_number
+        existing_board_drills = all_pad_drills + [
+            d
+            for d in all_via_drills
+            if d[3] != via_net or math.hypot(d[0] - placement.via_x, d[1] - placement.via_y) > 1e-3
+        ]
+        # A via placed right beside its own (through-hole) target pad is the
+        # desired escape geometry: skip any registry entry coincident with
+        # the target pad center.
+        tgt_x, tgt_y = placement.pad.x, placement.pad.y
+        conflict = False
+        for ex, ey, edrill, _enet in existing_board_drills:
+            if abs(ex - tgt_x) < 1e-3 and abs(ey - tgt_y) < 1e-3:
+                continue  # the via's own target through-hole pad
+            edge = math.hypot(ex - placement.via_x, ey - placement.via_y) - cand_r - edrill / 2.0
+            if edge + 1e-3 < min_hole_to_hole:
+                conflict = True
+                break
+        if not conflict:
+            for px, py, pdrill in kept_stitch_drills:
+                edge = (
+                    math.hypot(px - placement.via_x, py - placement.via_y) - cand_r - pdrill / 2.0
+                )
+                if edge + 1e-3 < min_hole_to_hole:
+                    conflict = True
+                    break
+        if conflict:
+            result.hole_to_hole_rejected += 1
+            return (
+                "hole_to_hole: stitch via drill within "
+                f"{min_hole_to_hole:.2f}mm of an existing drilled hole "
+                "(#3855/#4177); pad relies on the plane pour for "
+                "connectivity"
+            )
+        return None
+
     # Process each pad
     for pad in pads:
         # Assemble per-pad obstacle lists augmented with cross-net stitch
@@ -5479,16 +6317,30 @@ def run_stitch(
             seg for seg in placed_stitch_tracks if seg.net_number != pad.net_number
         ]
         cross_net_stitch_vias = [v for v in placed_stitch_vias if v[3] != pad.net_number]
-        eff_other_net_tracks = other_net_tracks + cross_net_stitch_tracks
-        eff_other_net_vias = other_net_vias + cross_net_stitch_vias
+        # Issue #6668: this pad's pre-existing foreign copper -- every other
+        # net, SIBLING stitch nets included, never its own net.
+        pad_base_tracks = base_tracks_by_net[pad.net_number]
+        pad_base_index = base_index_by_net[pad.net_number]
+        eff_other_net_tracks = pad_base_tracks + cross_net_stitch_tracks
+        # Issue #6428: a site this pad's earlier weld cut a foreign pour at
+        # is held as a foreign via for this pad -- in every placement pass,
+        # the pre-existing-copper fallbacks below included.
+        avoided = (avoid_sites or {}).get(f"{pad.reference}.{pad.pad_number}", ())
+        pad_base_vias = base_vias_by_net[pad.net_number] + [
+            (float(x), float(y), via_size, -1) for x, y in avoided
+        ]
+        eff_other_net_vias = pad_base_vias + cross_net_stitch_vias
         # Issue #5240: index the foreign-net track pool once per pad and
         # share it across every placement strategy this pad tries.  When no
         # cross-net stitch geometry has been placed yet the pool's contents
-        # are the pre-existing list, so the pre-built base index is reused
-        # (it yields the same segment objects in the same order).
+        # are this net's pre-existing list, so its pre-built per-net base
+        # index is reused (same segment objects in the same order).
         eff_track_index = (
-            build_track_index(eff_other_net_tracks) if cross_net_stitch_tracks else base_track_index
+            build_track_index(eff_other_net_tracks) if cross_net_stitch_tracks else pad_base_index
         )
+        # Issue #6400: this pad's own-net fill and its foreign fill pool
+        # (pre-existing other-net fill plus sibling target nets' fills).
+        pad_own_fill, pad_other_fill = _fill_pools(pad)
 
         # Check if already connected (legacy proximity heuristic), then let
         # the strict copper-contact model VETO a "connected" skip for filled
@@ -5523,6 +6375,28 @@ def run_stitch(
             result.already_connected += 1
             continue
 
+        # Issue #6701: when every pour of this net sits on the pad's own layer
+        # a stitch via can reach no same-net copper anywhere else -- the
+        # stackup-inferred target (#2044) names an inner layer this net has
+        # no plane on, the fill gate goes no-op, and the through via lands
+        # as a kicad-cli ``via_dangling``.  Skip the pad with an explicit
+        # reason instead.  An explicit ``--target-layer`` is the user's call,
+        # and a net with no zones at all keeps the stackup inference.
+        pad_net_zone_layers = net_zone_layers.get(pad.net_name, [])
+        if (
+            target_layer is None
+            and pad_net_zone_layers
+            and all(layer == pad.layer for layer in pad_net_zone_layers)
+        ):
+            result.pads_skipped.append(
+                (
+                    pad,
+                    "no same-net pour on any layer other than the pad's layer "
+                    f"({pad.layer}); a via would dangle",
+                )
+            )
+            continue
+
         # Attempt placement against the cross-net-augmented obstacle lists
         # (issue #3633): just-placed foreign-net stitch geometry participates
         # so a stitch via on net B clears net A's just-placed stitch trace.
@@ -5545,8 +6419,12 @@ def run_stitch(
             # obstacle pool).  This restores the load-bearing via that existed
             # before the co-check tightened, accepting the marginal cross-net
             # band intrusion rather than leaving the pad disconnected.
+            # Issue #6668: "pre-existing copper" includes SIBLING stitch
+            # nets' existing tracks/vias -- an overlap with copper that was
+            # already on the board is a real short, not a self-inflicted
+            # graze, so only the just-placed stitch geometry is dropped.
             fallback_result = _attempt_placement(
-                pad, other_net_tracks, other_net_vias, eff_track_index=base_track_index
+                pad, pad_base_tracks, pad_base_vias, eff_track_index=pad_base_index
             )
             if fallback_result is None:
                 # Issue #4432: distinguish an OFF-FILL failure from a genuine
@@ -5557,13 +6435,13 @@ def run_stitch(
                 # where a local via would dangle (``via_dangling``).  Report it
                 # as needing a routed fanout to the fill edge instead of
                 # placing (or reporting a bogus clearance conflict for) it.
-                if same_net_filled_polys and (
+                if pad_own_fill and (
                     _attempt_placement(
                         pad,
-                        other_net_tracks,
-                        other_net_vias,
+                        pad_base_tracks,
+                        pad_base_vias,
                         enforce_fill_gate=False,
-                        eff_track_index=base_track_index,
+                        eff_track_index=pad_base_index,
                     )
                     is not None
                 ):
@@ -5580,17 +6458,18 @@ def run_stitch(
                 # Genuinely no placement even against pre-existing copper --
                 # this is a real obstruction, not a self-inflicted cross-net
                 # rejection.  Record the skip diagnostic as before.
-                diag_pads, _diag_bboxes, _diag_drills = _sibling_pools(pad)
+                diag_pads, diag_bboxes, _diag_drills = _sibling_pools(pad)
                 detail = identify_nearest_obstacle(
                     pad,
                     micro_via_size if micro_via else via_size,
                     clearance,
                     existing_vias,
-                    other_net_tracks,
-                    other_net_vias,
+                    pad_base_tracks,
+                    base_vias_by_net[pad.net_number],
                     diag_pads,
-                    other_net_filled_polys,
+                    pad_other_fill,
                     net_map=obstacle_net_map,
+                    other_net_pad_bboxes=diag_bboxes,
                 )
                 result.skip_details.append((pad, detail))
                 strategy_note = (
@@ -5626,19 +6505,20 @@ def run_stitch(
                 extended_pos,
                 fallback_via_size,
                 clearance,
-                other_net_filled_polys,
+                pad_other_fill,
             ):
-                diag_pads, _diag_bboxes, _diag_drills = _sibling_pools(pad)
+                diag_pads, diag_bboxes, _diag_drills = _sibling_pools(pad)
                 detail = identify_nearest_obstacle(
                     pad,
                     fallback_via_size,
                     clearance,
                     existing_vias,
-                    other_net_tracks,
-                    other_net_vias,
+                    pad_base_tracks,
+                    base_vias_by_net[pad.net_number],
                     diag_pads,
-                    other_net_filled_polys,
+                    pad_other_fill,
                     net_map=obstacle_net_map,
+                    other_net_pad_bboxes=diag_bboxes,
                 )
                 result.skip_details.append((pad, detail))
                 result.pads_skipped.append(
@@ -5681,16 +6561,15 @@ def run_stitch(
             # Fallback via clears foreign pour copper: place the
             # least-violating via anyway and log it so the marginal cross-net
             # graze (against sibling stitch geometry only) is auditable.
-            result.connectivity_fallback.append(
-                (
-                    pad,
-                    "cross-net co-check left no clearing placement; placed via "
-                    "against pre-existing copper to preserve pour connectivity "
-                    "(connectivity > marginal cross-net clearance graze)",
-                )
+            # (Issue #6684: logged at commit time, only if the via is kept.)
+            fallback_note = (
+                "cross-net co-check left no clearing placement; placed via "
+                "against pre-existing copper to preserve pour connectivity "
+                "(connectivity > marginal cross-net clearance graze)"
             )
         else:
             via_pos, dogleg_pos, extended_pos, is_micro = placement_result
+            fallback_note = None
 
         # Determine actual via dimensions (micro or standard)
         actual_via_size = micro_via_size if is_micro else via_size
@@ -5727,11 +6606,6 @@ def run_stitch(
                 layers=layers,
                 via_type=via_type_str,
             )
-
-            result.vias_added.append(placement)
-            if is_micro:
-                result.micro_vias_placed += 1
-
             # Create a multi-waypoint trace segment
             trace = TraceSegment(
                 pad=pad,
@@ -5741,13 +6615,6 @@ def run_stitch(
                 layer=pad.layer,
                 waypoints=waypoints,
             )
-            result.traces_added.append(trace)
-
-            # Add to existing vias list
-            existing_vias.append((via_x, via_y, pad.net_number))
-            # Issue #3633: feed this stitch via + trace into the cross-net
-            # obstacle pool so later-placed foreign-net stitches clear it.
-            _record_placed(placement, trace)
         elif dogleg_pos is not None:
             # Dog-leg placement: (via_x, via_y, intermediate_x, intermediate_y)
             via_x, via_y, intermediate_x, intermediate_y = dogleg_pos
@@ -5761,11 +6628,6 @@ def run_stitch(
                 layers=layers,
                 via_type=via_type_str,
             )
-
-            result.vias_added.append(placement)
-            if is_micro:
-                result.micro_vias_placed += 1
-
             # Create an L-shaped trace segment
             trace = TraceSegment(
                 pad=pad,
@@ -5776,13 +6638,6 @@ def run_stitch(
                 intermediate_x=intermediate_x,
                 intermediate_y=intermediate_y,
             )
-            result.traces_added.append(trace)
-
-            # Add to existing vias list
-            existing_vias.append((via_x, via_y, pad.net_number))
-            # Issue #3633: feed this stitch via + trace into the cross-net
-            # obstacle pool so later-placed foreign-net stitches clear it.
-            _record_placed(placement, trace)
         else:
             # Straight-line placement
             placement = ViaPlacement(
@@ -5794,11 +6649,6 @@ def run_stitch(
                 layers=layers,
                 via_type=via_type_str,
             )
-
-            result.vias_added.append(placement)
-            if is_micro:
-                result.micro_vias_placed += 1
-
             # Create a straight trace segment from pad center to via center
             trace = TraceSegment(
                 pad=pad,
@@ -5807,168 +6657,28 @@ def run_stitch(
                 width=trace_width,
                 layer=pad.layer,
             )
-            result.traces_added.append(trace)
 
-            # Add to existing vias list
-            existing_vias.append((via_pos[0], via_pos[1], pad.net_number))
-            # Issue #3633: feed this stitch via + trace into the cross-net
-            # obstacle pool so later-placed foreign-net stitches clear it.
-            _record_placed(placement, trace)
+        # Issue #6684: decide keep-or-drop BEFORE recording anything, so a
+        # dropped via never counts as connectivity for a later same-net pad,
+        # never sits in the cross-net obstacle pool and is never counted.
+        # The dropped pad is skipped and falls back to the pour.
+        drop_reason = _commit_drop_reason(placement)
+        if drop_reason is not None:
+            result.pads_skipped.append((pad, drop_reason))
+            continue
 
-    # Issue #3271: pad-aware post-filter for manufacturers that forbid
-    # via-in-pad (e.g. JLCPCB standard tier).
-    #
-    # The placement strategies above push the via off the originating pad
-    # by ``pad_radius + offset`` but do NOT consider neighbouring same-net
-    # pads on the same footprint.  On dense QFN / BGA components the
-    # standard offset can land the via on top of a neighbour pad on the
-    # same net -- geometrically clear of other-net copper, but rejected by
-    # the JLCPCB tier-1 manufacturability rule because plated-over
-    # via-in-pad processing is not supported.  See ``ViaInPadRule`` and
-    # issue #3271 for the pre-emption rationale.
-    #
-    # We use the same SMD-pad-bbox containment geometry the DRC rule
-    # uses, so this filter drops exactly the placements the rule would
-    # later flag.  Through-hole pads are intentionally excluded: they
-    # already have a plated hole, so a via inside them is not a
-    # manufacturability concern.
-    if avoid_pad_overlap and result.vias_added:
-        net_numbers_local = {
-            num for num, name in get_net_map(sexp).items() if name in set(net_names)
-        }
-        pad_bboxes = find_smd_pad_bboxes_on_nets(sexp, net_numbers_local)
-        # Group bboxes by net for O(N+M) scan rather than O(N*M).
-        bboxes_by_net: dict[int, list[tuple[float, float, float, float]]] = {}
-        for net_num, min_x, min_y, max_x, max_y in pad_bboxes:
-            bboxes_by_net.setdefault(net_num, []).append((min_x, min_y, max_x, max_y))
-
-        kept_vias: list[ViaPlacement] = []
-        kept_traces: list[TraceSegment] = []
-        # Index traces by their pad object identity so we can drop the
-        # trace alongside the via when the placement is filtered out.
-        # Multiple placements per pad are not produced by ``run_stitch``
-        # (one via per skipped pad), so id-keying is sufficient.
-        for placement, trace in zip(result.vias_added, result.traces_added, strict=True):
-            candidate_bboxes = bboxes_by_net.get(placement.pad.net_number, [])
-            in_pad = any(
-                _via_drill_inside_pad_bbox(placement.via_x, placement.via_y, placement.drill, bbox)
-                or (
-                    strict_drill_overlap
-                    and _via_drill_overlaps_pad_bbox(
-                        placement.via_x, placement.via_y, placement.drill, bbox
-                    )
-                )
-                for bbox in candidate_bboxes
-            )
-            if in_pad:
-                result.via_in_pad_filtered += 1
-                if placement.pad.net_number == trace.pad.net_number:
-                    # The pad whose escape we just filtered loses its
-                    # stitch; record so the user-facing summary makes the
-                    # trade-off explicit.  The diagnostic reason mirrors
-                    # the DRC rule's wording.
-                    result.pads_skipped.append(
-                        (
-                            placement.pad,
-                            "via_in_pad: standard placement would land drill "
-                            "inside same-net SMD pad (avoid_pad_overlap=True); "
-                            "pad relies on the plane pour for connectivity",
-                        )
-                    )
-                continue
-            kept_vias.append(placement)
-            kept_traces.append(trace)
-        result.vias_added = kept_vias
-        result.traces_added = kept_traces
-
-    # Issue #3855: drill hole-to-hole drop pass.  The per-strategy
-    # ``calculate_via_position`` guard catches straight-line placements at
-    # the candidate-selection stage, but the dog-leg / extended-escape
-    # strategies place vias through separate paths.  This post-placement
-    # filter is the single chokepoint that guarantees NO committed stitch
-    # via sits within ``min_hole_to_hole`` (drill edge-to-edge) of an
-    # existing drilled hole (any through-hole pad, OR any other-net via,
-    # OR another just-placed stitch via).  Mirrors the #3271
-    # ``--avoid-pad-overlap`` drop shape: the via is dropped (the pad
-    # falls back to the plane pour) rather than nudged.  The GND-stitch-
-    # vs-J1.S2 case (#3855) is a same-net via-vs-pad pair -- two distinct
-    # drilled holes that never merge -- so same-net PADS are NOT excluded.
-    if result.vias_added:
-        MIN_HOLE_TO_HOLE = MIN_HOLE_TO_HOLE_CLEARANCE
-        # Issue #4177: the prior ``find_all_drills(sexp, exclude_nets=
-        # net_numbers)`` excluded EVERY stitch-target net's drills, so on a
-        # ``--net GND --net +3.3V`` run a GND stitch via was never checked
-        # against a pre-existing +3.3V via / through-hole pad drill (and
-        # vice versa) -- the exact -0.000mm coincident-hole, different-net
-        # short reported here.  A stitch via for net A must see EVERY other
-        # net's pre-existing drills, including sibling stitch-target net B's.
-        #
-        # We split the registry so the two exclusion policies (which differ)
-        # are each honoured per-candidate:
-        #   * PAD drills: keep ALL nets, including the via's own net.  A via
-        #     and a same-net plated pad are two distinct drilled holes that
-        #     never "merge" (the #3855 J1-S2 case), so the hole-to-hole
-        #     floor applies regardless of net.  Only the via's own TARGET
-        #     pad is exempted, via the coincident-with-center check below.
-        #   * VIA drills: exclude ONLY the via's own net (same-net via
-        #     stacking is legal and intentional); sibling stitch-target
-        #     nets' pre-existing vias remain hard obstacles.
-        all_pad_drills = find_all_drills(sexp, include_vias=False)
-        all_via_drills = find_all_drills(sexp, include_pads=False)
-
-        h2h_kept_vias: list[ViaPlacement] = []
-        h2h_kept_traces: list[TraceSegment] = []
-        placed_so_far: list[tuple[float, float, float]] = []
-        for placement, trace in zip(result.vias_added, result.traces_added, strict=True):
-            cand_r = placement.drill / 2.0
-            via_net = placement.pad.net_number
-            # Own-net vias are exempt (same-net stacking); every foreign
-            # net's vias and EVERY net's pads remain obstacles.
-            existing_board_drills = all_pad_drills + [d for d in all_via_drills if d[3] != via_net]
-            # The via intentionally connects ``placement.pad``; if that pad
-            # is itself a drilled (through-hole) hole, a via placed right
-            # beside it is the desired escape geometry, not a stray
-            # conflict.  Exclude the target pad's own drill from the check
-            # by skipping any registry entry coincident with the pad
-            # center (within a tight epsilon).
-            tgt_x, tgt_y = placement.pad.x, placement.pad.y
-            conflict = False
-            for ex, ey, edrill, _enet in existing_board_drills:
-                if abs(ex - tgt_x) < 1e-3 and abs(ey - tgt_y) < 1e-3:
-                    continue  # the via's own target through-hole pad
-                edge = (
-                    math.hypot(ex - placement.via_x, ey - placement.via_y) - cand_r - edrill / 2.0
-                )
-                if edge + 1e-3 < MIN_HOLE_TO_HOLE:
-                    conflict = True
-                    break
-            if not conflict:
-                for px, py, pdrill in placed_so_far:
-                    edge = (
-                        math.hypot(px - placement.via_x, py - placement.via_y)
-                        - cand_r
-                        - pdrill / 2.0
-                    )
-                    if edge + 1e-3 < MIN_HOLE_TO_HOLE:
-                        conflict = True
-                        break
-            if conflict:
-                result.hole_to_hole_rejected += 1
-                result.pads_skipped.append(
-                    (
-                        placement.pad,
-                        "hole_to_hole: stitch via drill within "
-                        f"{MIN_HOLE_TO_HOLE:.2f}mm of an existing drilled hole "
-                        "(#3855/#4177); pad relies on the plane pour for "
-                        "connectivity",
-                    )
-                )
-                continue
-            placed_so_far.append((placement.via_x, placement.via_y, placement.drill))
-            h2h_kept_vias.append(placement)
-            h2h_kept_traces.append(trace)
-        result.vias_added = h2h_kept_vias
-        result.traces_added = h2h_kept_traces
+        if fallback_note is not None:
+            result.connectivity_fallback.append((pad, fallback_note))
+        kept_stitch_drills.append((placement.via_x, placement.via_y, placement.drill))
+        result.vias_added.append(placement)
+        if is_micro:
+            result.micro_vias_placed += 1
+        result.traces_added.append(trace)
+        # Add to existing vias list
+        existing_vias.append((placement.via_x, placement.via_y, pad.net_number))
+        # Issue #3633: feed this stitch via + trace into the cross-net
+        # obstacle pool so later-placed foreign-net stitches clear it.
+        _record_placed(placement, trace)
 
     # Apply changes if not dry run
     if not dry_run and result.vias_added:
@@ -6257,7 +6967,9 @@ def output_result(
 
     # Output skipped pads with obstacle diagnostics
     if result.pads_skipped:
-        print("\nSkipped pads (manual placement needed):")
+        print(
+            "\nSkipped pads (re-run with a smaller --via-size/--drill, or file a stitch-gap issue):"
+        )
         for pad, reason in result.pads_skipped[:5]:
             print(f"  {pad.reference}.{pad.pad_number}: {reason}")
         if len(result.pads_skipped) > 5:
@@ -6337,7 +7049,9 @@ def output_result(
         for pad, _reason in result.needs_routed_fanout[:5]:
             print(f"      - {pad.net_name}: {pad.reference}.{pad.pad_number}")
     if result.pads_skipped:
-        print(f"  ! Skipped {len(result.pads_skipped)} pads (manual placement needed)")
+        print(
+            f"  ! Skipped {len(result.pads_skipped)} pads (re-run with a smaller --via-size/--drill, or file a stitch-gap issue)"
+        )
 
     if dry_run:
         print("\n(dry run - no changes made)")
@@ -6744,9 +7458,11 @@ def _run_main(args: argparse.Namespace, as_json: bool) -> tuple[int, dict | None
     via_size = args.via_size
     drill = args.drill
     manufacturer: dict | None = None
+    min_h2h = MIN_HOLE_TO_HOLE_CLEARANCE
     if args.mfr is not None:
         try:
             detected_layers = _count_copper_layers(pcb_path)
+            min_h2h = _resolve_mfr_min_hole_to_hole(args.mfr, detected_layers, args.copper)
             mfr_via_size, mfr_drill = _resolve_mfr_via_dimensions(
                 args.mfr, detected_layers, args.copper
             )
@@ -6847,6 +7563,7 @@ def _run_main(args: argparse.Namespace, as_json: bool) -> tuple[int, dict | None
                 reference_prefixes=ref_prefixes,
                 target_layer=args.target_layer,
                 dry_run=args.dry_run,
+                min_hole_to_hole=min_h2h,
             )
         elif args.blanket:
             result = run_blanket_stitch(
@@ -6858,6 +7575,7 @@ def _run_main(args: argparse.Namespace, as_json: bool) -> tuple[int, dict | None
                 spacing=args.spacing,
                 target_layer=args.target_layer,
                 dry_run=args.dry_run,
+                min_hole_to_hole=min_h2h,
             )
         else:
             result = run_stitch(
@@ -6875,6 +7593,7 @@ def _run_main(args: argparse.Namespace, as_json: bool) -> tuple[int, dict | None
                 micro_via_size=args.micro_via_size,
                 micro_via_drill=args.micro_via_drill,
                 avoid_pad_overlap=args.avoid_pad_overlap,
+                min_hole_to_hole=min_h2h,
             )
 
         if not as_json:

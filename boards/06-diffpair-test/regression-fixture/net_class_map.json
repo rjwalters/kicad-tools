@@ -24,7 +24,8 @@
     "target_single_impedance": null,
     "impedance_tolerance_percent": 15.0,
     "coupled_continuity_threshold": 0.7,
-    "skew_tolerance_mm": 3.0,
+    "skew_tolerance_mm": null,
+    "pair_protocol": "USB2_HS",
     "length_match_group": null,
     "length_match_reference": null,
     "length_match_tolerance_mm": null
@@ -54,7 +55,8 @@
     "target_single_impedance": null,
     "impedance_tolerance_percent": 15.0,
     "coupled_continuity_threshold": 0.7,
-    "skew_tolerance_mm": 3.0,
+    "skew_tolerance_mm": null,
+    "pair_protocol": "USB2_HS",
     "length_match_group": null,
     "length_match_reference": null,
     "length_match_tolerance_mm": null
@@ -85,6 +87,7 @@
     "impedance_tolerance_percent": 10.0,
     "coupled_continuity_threshold": 0.9,
     "skew_tolerance_mm": 0.5,
+    "pair_protocol": "USB3_SS",
     "length_match_group": null,
     "length_match_reference": null,
     "length_match_tolerance_mm": null
@@ -115,6 +118,7 @@
     "impedance_tolerance_percent": 10.0,
     "coupled_continuity_threshold": 0.9,
     "skew_tolerance_mm": 0.5,
+    "pair_protocol": "USB3_SS",
     "length_match_group": null,
     "length_match_reference": null,
     "length_match_tolerance_mm": null
@@ -145,6 +149,7 @@
     "impedance_tolerance_percent": 10.0,
     "coupled_continuity_threshold": 0.9,
     "skew_tolerance_mm": 0.5,
+    "pair_protocol": "USB3_SS",
     "length_match_group": null,
     "length_match_reference": null,
     "length_match_tolerance_mm": null
@@ -175,6 +180,7 @@
     "impedance_tolerance_percent": 10.0,
     "coupled_continuity_threshold": 0.9,
     "skew_tolerance_mm": 0.5,
+    "pair_protocol": "USB3_SS",
     "length_match_group": null,
     "length_match_reference": null,
     "length_match_tolerance_mm": null
@@ -205,6 +211,7 @@
     "impedance_tolerance_percent": 10.0,
     "coupled_continuity_threshold": 0.9,
     "skew_tolerance_mm": 0.5,
+    "pair_protocol": "USB3_SS",
     "length_match_group": null,
     "length_match_reference": null,
     "length_match_tolerance_mm": null
@@ -235,6 +242,7 @@
     "impedance_tolerance_percent": 10.0,
     "coupled_continuity_threshold": 0.9,
     "skew_tolerance_mm": 0.5,
+    "pair_protocol": "USB3_SS",
     "length_match_group": null,
     "length_match_reference": null,
     "length_match_tolerance_mm": null
@@ -265,6 +273,7 @@
     "impedance_tolerance_percent": 10.0,
     "coupled_continuity_threshold": 0.9,
     "skew_tolerance_mm": 0.5,
+    "pair_protocol": "USB3_SS",
     "length_match_group": null,
     "length_match_reference": null,
     "length_match_tolerance_mm": null
@@ -295,6 +304,7 @@
     "impedance_tolerance_percent": 10.0,
     "coupled_continuity_threshold": 0.9,
     "skew_tolerance_mm": 0.5,
+    "pair_protocol": "USB3_SS",
     "length_match_group": null,
     "length_match_reference": null,
     "length_match_tolerance_mm": null
@@ -325,6 +335,7 @@
     "impedance_tolerance_percent": 10.0,
     "coupled_continuity_threshold": 0.85,
     "skew_tolerance_mm": 0.5,
+    "pair_protocol": "PCIE_G1",
     "length_match_group": null,
     "length_match_reference": null,
     "length_match_tolerance_mm": null
@@ -355,6 +366,7 @@
     "impedance_tolerance_percent": 10.0,
     "coupled_continuity_threshold": 0.85,
     "skew_tolerance_mm": 0.5,
+    "pair_protocol": "PCIE_G1",
     "length_match_group": null,
     "length_match_reference": null,
     "length_match_tolerance_mm": null
@@ -385,6 +397,7 @@
     "impedance_tolerance_percent": 10.0,
     "coupled_continuity_threshold": 0.85,
     "skew_tolerance_mm": 0.5,
+    "pair_protocol": "PCIE_G1",
     "length_match_group": null,
     "length_match_reference": null,
     "length_match_tolerance_mm": null
@@ -415,6 +428,7 @@
     "impedance_tolerance_percent": 10.0,
     "coupled_continuity_threshold": 0.85,
     "skew_tolerance_mm": 0.5,
+    "pair_protocol": "PCIE_G1",
     "length_match_group": null,
     "length_match_reference": null,
     "length_match_tolerance_mm": null
@@ -445,6 +459,7 @@
     "impedance_tolerance_percent": 10.0,
     "coupled_continuity_threshold": 0.85,
     "skew_tolerance_mm": 0.3,
+    "pair_protocol": "MIPI_DPHY",
     "length_match_group": null,
     "length_match_reference": null,
     "length_match_tolerance_mm": null
@@ -475,6 +490,7 @@
     "impedance_tolerance_percent": 10.0,
     "coupled_continuity_threshold": 0.85,
     "skew_tolerance_mm": 0.3,
+    "pair_protocol": "MIPI_DPHY",
     "length_match_group": null,
     "length_match_reference": null,
     "length_match_tolerance_mm": null
@@ -505,6 +521,7 @@
     "impedance_tolerance_percent": 10.0,
     "coupled_continuity_threshold": 0.85,
     "skew_tolerance_mm": 0.3,
+    "pair_protocol": "MIPI_DPHY",
     "length_match_group": null,
     "length_match_reference": null,
     "length_match_tolerance_mm": null
@@ -535,6 +552,7 @@
     "impedance_tolerance_percent": 10.0,
     "coupled_continuity_threshold": 0.85,
     "skew_tolerance_mm": 0.3,
+    "pair_protocol": "MIPI_DPHY",
     "length_match_group": null,
     "length_match_reference": null,
     "length_match_tolerance_mm": null

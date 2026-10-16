@@ -41,38 +41,30 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# #9548: this suite's subject vets its write target (`forge may-write`)
-# first; that decision is not what this suite tests (test-write-scope.sh does),
-# and without this the outcome would depend on the host's loom-daemon.
-WS_STUB_DIR="$(mktemp -d)"
-# shellcheck source=lib/write-scope-stub.sh
-source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/write-scope-stub.sh"
-write_scope_allow_all "$WS_STUB_DIR"
+# #9548: create-pr.sh vets its write target (`loom_write_repo`). Every case
+# runs from a scratch checkout registered as owner/repo (the repo the stub gh
+# models) via write_scope_register, so the real gate admits it; none runs from
+# this checkout, whose origin is a real repository.
+# shellcheck source=lib/write-scope-fixture.sh
+source "$SCRIPT_DIR/lib/write-scope-fixture.sh"
 CREATE_PR="$(cd "$SCRIPT_DIR/.." && pwd)/create-pr.sh"
-REAL_VERSION_SCRIPT="$(cd "$SCRIPT_DIR/../../.." && pwd)/scripts/version.sh"
+# T5-T7 need Loom's OWN scripts/version.sh, which lives at the source-tree
+# root and is never shipped into an installing repo. Resolve it only when this
+# suite runs from the source layout (defaults/scripts/tests/): in an installed
+# copy (.loom/scripts/tests/) the same relative path is
+# <repo-root>/scripts/version.sh, which is either absent or the installing
+# repo's own, unrelated script -- copying that into a fixture would test the
+# wrong thing. Empty means "not available": T1-T4 (hermetic, stubbed) still
+# run against the shipped create-pr.sh, and T5-T7 SKIP.
+REAL_VERSION_SCRIPT=""
+if [[ "$(basename "$(dirname "$(dirname "$SCRIPT_DIR")")")" == "defaults" ]]; then
+  REAL_VERSION_SCRIPT="$(cd "$SCRIPT_DIR/../../.." && pwd)/scripts/version.sh"
+fi
 
 # Colors
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-NC='\033[0m'
+# shellcheck source=lib/assert.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/assert.sh"
 
-TESTS_RUN=0
-TESTS_PASSED=0
-TESTS_FAILED=0
-
-assert_eq() {
-  local expected="$1" actual="$2" msg="$3"
-  TESTS_RUN=$((TESTS_RUN + 1))
-  if [[ "$expected" == "$actual" ]]; then
-    TESTS_PASSED=$((TESTS_PASSED + 1))
-    echo -e "  ${GREEN}PASS${NC}: $msg"
-  else
-    TESTS_FAILED=$((TESTS_FAILED + 1))
-    echo -e "  ${RED}FAIL${NC}: $msg"
-    echo "    Expected: '$expected'"
-    echo "    Actual:   '$actual'"
-  fi
-}
 
 assert_contains() {
   local haystack="$1" needle="$2" msg="$3"
@@ -92,7 +84,8 @@ if [[ ! -x "$CREATE_PR" ]]; then
   echo "ERROR: $CREATE_PR is not executable" >&2
   exit 1
 fi
-if [[ ! -f "$REAL_VERSION_SCRIPT" ]]; then
+if [[ -n "$REAL_VERSION_SCRIPT" && ! -f "$REAL_VERSION_SCRIPT" ]]; then
+  # Source layout but no version.sh: the source tree itself is broken.
   echo "ERROR: $REAL_VERSION_SCRIPT not found" >&2
   exit 1
 fi
@@ -123,6 +116,9 @@ exit 3
 STUB
 chmod +x "$STUB_DIR/gh"
 
+# register_fixture <dir>: make <dir> a checkout this installation may write.
+register_fixture() { WRITE_SCOPE_INNER_GH="$STUB_DIR/gh" write_scope_register "$1" owner/repo; }
+
 export LOOM_TEST_STUB_DIR="$STUB_DIR"
 export PATH="$STUB_DIR:$PATH"
 export LOOM_FORGE_TYPE=github
@@ -133,14 +129,6 @@ created_count() {
   else
     echo 0
   fi
-}
-
-run_create_pr() {
-  : > "$STUB_DIR/created.log"
-  set +e
-  OUTPUT=$("$CREATE_PR" "$@" 2>&1)
-  EXIT_CODE=$?
-  set -e
 }
 
 # run_create_pr_in <dir> [create-pr.sh args...] -- same as run_create_pr, but
@@ -173,6 +161,12 @@ echo "Testing create-pr.sh automatic version.sh check gate (#6730)..."
 echo ""
 
 # === T1-T4: create-pr.sh's own gating logic, via a stubbed version script ===
+# T1, T2 and T4 share one registered scratch checkout. It carries a passing
+# scripts/version.sh of its own, so T4 still proves the override wins over a
+# version script that auto-detection WOULD have found.
+GATE_REPO="$(mktemp -d)"
+(cd "$GATE_REPO" && git init -q)
+register_fixture "$GATE_REPO"
 
 # T1: stub reports a MISMATCH (nonzero exit) -> create-pr.sh aborts, BLOCKER
 # message printed, no PR created.
@@ -183,7 +177,7 @@ exit 1
 STUB
 chmod +x "$STUB_DIR/version-mismatch.sh"
 LOOM_VERSION_CHECK_SCRIPT="$STUB_DIR/version-mismatch.sh" \
-  run_create_pr --title "fix: something" --body "Closes #200" --head "feature/issue-200"
+  run_create_pr_in "$GATE_REPO" --title "fix: something" --body "Closes #200" --head "feature/issue-200"
 assert_eq "1" "$EXIT_CODE" "version.sh check reports a mismatch -> non-zero exit"
 assert_contains "$OUTPUT" "BLOCKER" "Abort message uses the BLOCKER: prefix (mirrors builder-pr.md gate)"
 assert_contains "$OUTPUT" "Fix:" "Abort message uses the Fix: prefix (mirrors builder-pr.md gate)"
@@ -198,7 +192,7 @@ exit 0
 STUB
 chmod +x "$STUB_DIR/version-ok.sh"
 LOOM_VERSION_CHECK_SCRIPT="$STUB_DIR/version-ok.sh" \
-  run_create_pr --title "fix: something" --body "Closes #201" --head "feature/issue-201"
+  run_create_pr_in "$GATE_REPO" --title "fix: something" --body "Closes #201" --head "feature/issue-201"
 assert_eq "0" "$EXIT_CODE" "version.sh check reports clean -> exits 0"
 assert_eq "1" "$(created_count)" "Clean version check -> PR IS created (no false block)"
 
@@ -208,6 +202,7 @@ assert_eq "1" "$(created_count)" "Clean version check -> PR IS created (no false
 # the check is skipped outright, not treated as a failure.
 NO_SCRIPT_REPO="$(mktemp -d)"
 (cd "$NO_SCRIPT_REPO" && git init -q)
+register_fixture "$NO_SCRIPT_REPO"
 unset LOOM_VERSION_CHECK_SCRIPT
 run_create_pr_in "$NO_SCRIPT_REPO" --title "fix: something" --body "Closes #202" --head "feature/issue-202"
 assert_eq "0" "$EXIT_CODE" "No scripts/version.sh resolvable (consumer repo) -> not a failure, exits 0"
@@ -215,10 +210,23 @@ assert_eq "1" "$(created_count)" "No scripts/version.sh resolvable -> PR is stil
 rm -rf "$NO_SCRIPT_REPO"
 
 # T4: explicit LOOM_VERSION_CHECK_SCRIPT override takes precedence over
-# auto-detection, even when run from inside this real (dogfooded) checkout.
+# auto-detection, even in a checkout whose own scripts/version.sh passes.
+mkdir -p "$GATE_REPO/scripts"
+cp "$STUB_DIR/version-ok.sh" "$GATE_REPO/scripts/version.sh"
 LOOM_VERSION_CHECK_SCRIPT="$STUB_DIR/version-mismatch.sh" \
-  run_create_pr --title "fix: something" --body "Closes #203" --head "feature/issue-203"
+  run_create_pr_in "$GATE_REPO" --title "fix: something" --body "Closes #203" --head "feature/issue-203"
 assert_eq "1" "$EXIT_CODE" "Explicit LOOM_VERSION_CHECK_SCRIPT override is honored over auto-detection"
+rm -rf "$GATE_REPO"
+
+if [[ -z "$REAL_VERSION_SCRIPT" ]]; then
+  echo ""
+  echo "SKIP: T5-T7 are source-tree-only (scripts/version.sh is not shipped into an installed repo); T1-T4 ran"
+  echo ""
+  echo "────────────────────────────────"
+  echo "Results: $TESTS_PASSED/$TESTS_RUN passed, $TESTS_FAILED failed"
+  [[ $TESTS_FAILED -gt 0 ]] && exit 1
+  exit 0
+fi
 
 # === T5-T7: the REAL scripts/version.sh against a from-scratch fixture repo,
 # proving create-pr.sh + version.sh compose correctly end to end. ===
@@ -283,6 +291,7 @@ EOF
     git add -A
     git commit -q -m "base at $version"
   )
+  register_fixture "$dir"
 }
 
 # T5: package.json says 1.2.3 (the "expected" version); every VERSION_FILES

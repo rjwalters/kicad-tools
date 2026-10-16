@@ -216,7 +216,8 @@ class TestEntryPointRegistryParity:
 
     1. ``kct check`` CLI -- ``cli/check_cmd.py::run_selected_checks``.
     2. :meth:`DRCChecker.check_all` library API (drives entry points 3-5).
-    3. ``kct fix-drc`` -- ``cli/fix_drc_cmd.py::_run_python_drc``.
+    3. ``kct fix-drc`` -- ``cli/fix_drc_cmd.py::_run_python_drc`` (since #6431
+       via ``check_cmd.run_check_rule_set``, i.e. the CLI dispatch).
     4. ``kct reason`` -- ``cli/reason_cmd.py::main`` (DRC bootstrap).
     5. ``kct route`` post-pass DRC -- ``cli/route_cmd.py::run_post_route_drc``.
     6. ``ManufacturingAudit`` (used by ``kct audit`` / ``kct export`` /
@@ -252,12 +253,22 @@ class TestEntryPointRegistryParity:
         return Path(mod.__file__).read_text()
 
     def test_fix_drc_resolves_via_check_all(self) -> None:
-        """``kct fix-drc`` must use ``check_all`` -- not its own list."""
+        """``kct fix-drc`` must use ``kct check``'s own dispatch -- not its own list.
+
+        Issue #6431 moved it from ``check_all()`` to the CLI rule set
+        (``build_check_rule_set`` / ``run_check_rule_set``, which run
+        :func:`run_selected_checks`, a superset of ``check_all``), because
+        ``check_all`` lacks the path-dependent ``netclass_clearance_copper``
+        rule that fix-drc's success gate needs.
+        """
         src = self._read_source("kicad_tools.cli.fix_drc_cmd")
-        assert "checker.check_all()" in src, (
-            "kct fix-drc must invoke checker.check_all() so it inherits "
-            "the unified rule registry.  See Issue #3044."
+        assert "run_check_rule_set(" in src and "build_check_rule_set(" in src, (
+            "kct fix-drc must re-check through kct check's rule set so it "
+            "inherits the unified rule registry.  See Issues #3044 and #6431."
         )
+        check_src = self._read_source("kicad_tools.cli.check_cmd")
+        assert "def run_check_rule_set" in check_src
+        assert "run_selected_checks(" in check_src
 
     def test_reason_resolves_via_check_all(self) -> None:
         """``kct reason`` must use ``check_all`` -- not its own list."""
@@ -419,6 +430,21 @@ class TestRuleCategoryTaxonomy:
             category = DRCChecker.category_for_rule(rule_id)
             assert category in valid, f"{rule_id} -> {category!r} is not a valid category"
 
+    def test_pair_rules_that_block_manufacturable_are_manufacturing(self) -> None:
+        """Issue #6443: a cited or explicit pair limit blocks ``manufacturable``
+        (and reaches kicad-cli as an error), so those rules are fab-blocking in
+        the report.  Continuity is info-only and stays advisory."""
+        for rule_id in (
+            "diffpair_length_skew",
+            "diffpair_uncoupled_length",
+            "diffpair_clearance_intra",
+        ):
+            assert DRCChecker.category_for_rule(rule_id) == DRCChecker.CATEGORY_MANUFACTURING
+        assert (
+            DRCChecker.category_for_rule("diffpair_routing_continuity")
+            == DRCChecker.CATEGORY_ADVISORY
+        )
+
     def test_advisory_quality_rules_classified(self) -> None:
         """The routing-intent / quality rules that inflated the headline
         must land in the advisory bucket."""
@@ -427,9 +453,7 @@ class TestRuleCategoryTaxonomy:
             "ampacity",
             "copper_sliver",
             "impedance",
-            "diffpair_length_skew",
             "diffpair_routing_continuity",
-            "diffpair_clearance_intra",
             "match_group_length_skew",
             "silk_over_copper",
         ):
@@ -489,7 +513,7 @@ class TestRuleCategoryTaxonomy:
         assert DRCChecker.is_advisory_rule("connectivity") is True
         for rule_id in (
             "copper_sliver",
-            "diffpair_length_skew",
+            "diffpair_routing_continuity",
             "ampacity",
             "impedance",
             "silk_over_copper",

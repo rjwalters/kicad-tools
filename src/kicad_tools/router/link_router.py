@@ -41,10 +41,12 @@ from __future__ import annotations
 
 import heapq
 import math
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+
+from kicad_tools.router.via_clearance import COORD_WRITE_GUARD_MM
 
 if TYPE_CHECKING:
     from kicad_tools.schema.pcb import PCB
@@ -80,6 +82,18 @@ class LinkRouteRules:
     via_cost: float = 2.0
     foreign_fill_cost: float = 4.0
     max_cells: int = 1_500_000
+    #: Issue #6374: per-neighbour-net clearance (net number -> mm), the
+    #: ``max(class(link net), class(neighbour))`` rule the grid router applies
+    #: (``io._get_pair_clearance``).  ``clearance`` stays the floor: a net
+    #: mapped below it (or absent) keeps ``clearance``.  ``None`` keeps the
+    #: single-scalar behaviour exactly.
+    clearance_by_net: Mapping[int, float] | None = None
+
+    def clearance_for(self, net_number: int) -> float:
+        """Clearance this link must keep from copper on ``net_number``."""
+        if self.clearance_by_net is None:
+            return self.clearance
+        return max(self.clearance, self.clearance_by_net.get(net_number, self.clearance))
 
 
 @dataclass
@@ -441,8 +455,6 @@ def route_link(
     copper = model.copper
     g = rules.grid
     half_w = rules.trace_width / 2
-    track_keepout = rules.clearance + half_w + 0.005
-    via_keepout = rules.clearance + rules.via_size / 2 + 0.005
 
     (ax, ay), (bx, by) = a.point, b.point
     x0, x1 = min(ax, bx) - rules.margin, max(ax, bx) + rules.margin
@@ -472,22 +484,24 @@ def route_link(
         shapely.prepare(geom)
         return shapely.intersects_xy(geom, flat_x, flat_y).reshape(nx, ny)
 
-    foreign_by_layer: dict[str, Any] = {}
+    # Foreign copper per layer, grouped by the clearance it demands (Issue
+    # #6374: ``rules.clearance_for(net)``).  Without a per-net map there is
+    # exactly one group at ``rules.clearance`` -- the historical behaviour.
+    foreign_by_layer: dict[str, list[tuple[Any, float]]] = {}
     blocked = np.zeros((nl, nx, ny), dtype=bool)
     fill_cost = np.ones((nl, nx, ny), dtype=float)
     inside = None
     if model.outline is not None:
         inside = mask_of(model.outline.buffer(-(rules.edge_clearance + half_w)))
     for li, layer in enumerate(copper):
-        geoms = [
-            it.layers[layer]
-            for it in model.items
-            if it.net != net_number and layer in it.layers and it.layers[layer].intersects(window)
-        ]
-        foreign = unary_union(geoms) if geoms else None
-        foreign_by_layer[layer] = foreign
-        if foreign is not None:
-            blocked[li] = mask_of(foreign.buffer(track_keepout))
+        by_clearance: dict[float, list[Any]] = {}
+        for it in model.items:
+            if it.net != net_number and layer in it.layers and it.layers[layer].intersects(window):
+                by_clearance.setdefault(rules.clearance_for(it.net), []).append(it.layers[layer])
+        groups = [(unary_union(geoms), c) for c, geoms in sorted(by_clearance.items())]
+        foreign_by_layer[layer] = groups
+        for foreign, c in groups:
+            blocked[li] |= mask_of(foreign.buffer(c + half_w + 0.005))
         if inside is not None:
             blocked[li] |= ~inside
         fills = [
@@ -501,14 +515,17 @@ def route_link(
     # Via legality: clear of foreign copper on every layer, of every pad
     # (no via-in-pad), of every drill by the hole-to-hole rule.
     via_bad = np.zeros((nx, ny), dtype=bool)
-    for foreign in foreign_by_layer.values():
-        if foreign is not None:
-            via_bad |= mask_of(foreign.buffer(via_keepout))
+    for groups in foreign_by_layer.values():
+        for foreign, c in groups:
+            via_bad |= mask_of(foreign.buffer(c + rules.via_size / 2 + 0.005))
     pads_here = [p for p in model.pad_geoms if p.intersects(window)]
     if pads_here:
         via_bad |= mask_of(unary_union(pads_here).buffer(rules.via_size / 2 + 0.05))
     drill_disks = [
-        Point(dx, dy).buffer(dd / 2 + rules.via_drill / 2 + rules.hole_to_hole)
+        # Issue #6671: + the slack the board writer's 0.01 mm rounding can eat.
+        Point(dx, dy).buffer(
+            dd / 2 + rules.via_drill / 2 + rules.hole_to_hole + COORD_WRITE_GUARD_MM
+        )
         for dx, dy, dd in model.drills
         if window.distance(Point(dx, dy)) < 2.0
     ]
@@ -620,26 +637,22 @@ def route_link(
     for li, cells in runs:
         pts = _simplify(cells)
         xy = [(float(xs[i]), float(ys[j])) for i, j in pts]
-        xy = _shortcut(xy, foreign_by_layer.get(copper[li]), rules.clearance + half_w, legal_area)
+        xy = _shortcut(xy, foreign_by_layer.get(copper[li], []), half_w, legal_area)
         for (x_a, y_a), (x_b, y_b) in zip(xy, xy[1:], strict=False):
             route.segments.append((x_a, y_a, x_b, y_b, copper[li]))
 
     # Exact check: grid quantisation must never leak a sub-clearance segment.
     for x_a, y_a, x_b, y_b, layer in route.segments:
-        foreign = foreign_by_layer.get(layer)
-        if foreign is None:
-            continue
         line = LineString([(x_a, y_a), (x_b, y_b)])
-        if line.distance(foreign) < rules.clearance + half_w - 1e-4:
-            return None
+        for foreign, c in foreign_by_layer.get(layer, []):
+            if line.distance(foreign) < c + half_w - 1e-4:
+                return None
     for vx, vy in route.vias:
         p = Point(vx, vy)
-        for foreign in foreign_by_layer.values():
-            if (
-                foreign is not None
-                and p.distance(foreign) < rules.clearance + rules.via_size / 2 - 1e-4
-            ):
-                return None
+        for groups in foreign_by_layer.values():
+            for foreign, c in groups:
+                if p.distance(foreign) < c + rules.via_size / 2 - 1e-4:
+                    return None
     return route
 
 
@@ -649,7 +662,10 @@ def _octilinear(p: tuple[float, float], q: tuple[float, float]) -> bool:
 
 
 def _shortcut(
-    pts: list[tuple[float, float]], foreign: Any, keepout: float, legal_area: Any
+    pts: list[tuple[float, float]],
+    foreign: Sequence[tuple[Any, float]],
+    half_width: float,
+    legal_area: Any,
 ) -> list[tuple[float, float]]:
     """Merge staircase corners: jump to the farthest vertex reachable by one
     legal octilinear segment.  Endpoints (and so terminal contact) are kept.
@@ -657,6 +673,8 @@ def _shortcut(
     The A* grid breaks cost ties arbitrarily, so a diagonal run often comes
     out as a zig-zag of grid-step segments.  Each candidate shortcut is
     re-checked exactly against the foreign copper and the board outline.
+    ``foreign`` is ``(geometry, clearance)`` groups: a shortcut must keep
+    ``clearance + half_width`` from each group's copper (Issue #6374).
     """
     from shapely.geometry import LineString
 
@@ -670,7 +688,7 @@ def _shortcut(
             if not _octilinear(pts[k], pts[m]):
                 continue
             line = LineString([pts[k], pts[m]])
-            if foreign is not None and line.distance(foreign) < keepout - 1e-4:
+            if any(line.distance(geom) < c + half_width - 1e-4 for geom, c in foreign):
                 continue
             if legal_area is not None and not legal_area.covers(line):
                 continue

@@ -121,7 +121,7 @@ class TestGoldenNoSidecar:
 
     def test_json_output_is_byte_identical(self, board: Path, capsys):
         main([str(board), "--why", "--format", "json"])
-        got = capsys.readouterr().out.replace(str(board), "INCOMPLETE_PCB")
+        got = capsys.readouterr().out
         assert got == (GOLDEN_DIR / "incomplete.json").read_text()
 
     def test_json_has_no_routing_plan_keys(self, board: Path, capsys):

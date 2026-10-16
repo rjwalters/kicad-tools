@@ -846,6 +846,14 @@ def _u1(pcb):
     return next(fp for fp in pcb.footprints if fp.reference == "U1")
 
 
+def _cosmetic_nodes(fp) -> list[str]:
+    """The serialized silk/fab children of *fp*'s footprint node."""
+    from kicad_tools.recovery.applicator import StrategyApplicator
+
+    tags = StrategyApplicator._COSMETIC_SEXP_TAGS
+    return [c.to_string() for c in fp._sexp_node.iter_children() if c.tag in tags]
+
+
 def _xy(point) -> tuple[float, float]:
     # Round to the serializer's precision so an exact-equality comparison is
     # meaningful across a save/reparse round trip.
@@ -940,6 +948,240 @@ class TestRevertedMirrorLeavesNoCosmeticResidue:
         assert '(layer "B.Fab")' not in text
         assert '(layer "F.SilkS")' in text
         assert "(justify mirror)" not in text
+
+    def test_interrupted_mirror_trial_restores_upright_cosmetics(self, tmp_path: Path):
+        """Issue #6314: a trial cut off mid-route must be fully undoable.
+
+        ``restore_last_accepted`` is what a deadline / Ctrl+C partial save
+        calls instead of the revert this trial never reached.  A mirror is the
+        hard case: the placement snapshot cannot put the silk/fab back, so the
+        restore writes them back from the trial's cosmetic snapshot (#6325).
+        """
+        from kicad_tools.cli.route_deadline import RouteDeadlineExpired
+        from kicad_tools.schema.pcb import PCB
+
+        original = _cosmetic_state(_u1(PCB.load(str(_MIRROR_FRONT))))
+        pcb = PCB.load(str(_MIRROR_FRONT))
+        loop, router = self._loop(pcb)
+        route = router.route_all_negotiated
+
+        def _deadline_in_the_mirror_trial(**kwargs):
+            if router.route_calls == 1:  # call 1 was the baseline
+                router.route_calls += 1
+                raise RouteDeadlineExpired()
+            return route(**kwargs)
+
+        router.route_all_negotiated = _deadline_in_the_mirror_trial
+        with pytest.raises(RouteDeadlineExpired):
+            loop.run_delta(max_adjustments=3)
+
+        # Mid-trial: the footprint really is flipped.
+        assert loop.trial_in_flight is not None and loop.trial_in_flight.kind == "mirror"
+        assert _u1(pcb).layer == "B.Cu"
+        assert router.pads[("U1", "1")].x != pytest.approx(102.0)
+
+        assert loop.restore_last_accepted() is True
+        # A second call must not flip the cosmetics again.
+        assert loop.restore_last_accepted() is False
+
+        fp = _u1(pcb)
+        assert fp.layer == "F.Cu"
+        assert _cosmetic_state(fp) == original
+        assert router.pads[("U1", "1")].x == pytest.approx(102.0)
+        assert len(router.routes) == 1, "the baseline routes are back"
+
+        # Issue #6325: restored from an absolute snapshot, so the silk/fab
+        # S-expression is byte-identical, not merely flipped back.
+        assert _cosmetic_nodes(fp) == _cosmetic_nodes(_u1(PCB.load(str(_MIRROR_FRONT))))
+
+        out = tmp_path / "after_interrupted_mirror.kicad_pcb"
+        pcb.save(str(out))
+        assert _cosmetic_state(_u1(PCB.load(str(out)))) == original
+        text = out.read_text()
+        assert '(layer "B.SilkS")' not in text
+        assert "(justify mirror)" not in text
+
+    @pytest.mark.parametrize("when", ["as-it-starts", "once-it-is-done"])
+    def test_rewind_inside_the_reverts_own_flip_back_leaves_upright_cosmetics(
+        self, tmp_path: Path, when: str
+    ):
+        """Issue #6314: two undos of one mirror at once must converge.
+
+        A Ctrl+C partial save that does not stop the run (#6324) can call
+        ``restore_last_accepted`` in the middle of the loop's own revert --
+        here around its placement restore, just before the silk/fab is put
+        back.  Both undos write absolute snapshot values (#6325: the revert no
+        longer re-applies the mirror), so nesting them must leave the
+        cosmetics exactly as they were, and the mirror applied only once.
+        """
+        from kicad_tools.schema.pcb import PCB
+
+        original = _cosmetic_state(_u1(PCB.load(str(_MIRROR_FRONT))))
+        pcb = PCB.load(str(_MIRROR_FRONT))
+        loop, router = self._loop(pcb)
+        applicator = loop._strategy_applicator
+        apply_strategy = applicator.apply_strategy
+        calls = []
+
+        def _counted_apply(board, strategy):
+            calls.append(strategy)
+            return apply_strategy(board, strategy)
+
+        applicator.apply_strategy = _counted_apply
+        restore_placement = loop._restore_placement
+        fired = []
+
+        def _rewound_restore(snapshot):
+            # The loop's own revert of the mirror trial (still published).
+            trial = loop._trial
+            fire = not fired and trial is not None and trial.delta.kind == "mirror"
+            if fire:
+                fired.append(True)
+            if fire and when == "as-it-starts":
+                assert loop.restore_last_accepted() is True
+            restore_placement(snapshot)
+            if fire and when == "once-it-is-done":
+                assert loop.restore_last_accepted() is True
+
+        loop._restore_placement = _rewound_restore
+        result = loop.run_delta(max_adjustments=3)
+
+        assert [d.kind for d in result.reverted_deltas] == ["mirror"]
+        # The interrupt stops the loop: the translate that would be kept next
+        # is never tried.
+        assert result.applied_deltas == []
+        assert result.exit_reason == "pd_interrupted"
+        assert fired, "the rewind must have landed inside the revert"
+        assert len(calls) == 1, "applied once; the undo restores, never re-applies"
+
+        fp = _u1(pcb)
+        assert fp.layer == "F.Cu"
+        assert _cosmetic_state(fp) == original
+        assert router.pads[("U1", "1")].x == pytest.approx(102.0)
+        out = tmp_path / "after_rewound_revert.kicad_pcb"
+        pcb.save(str(out))
+        assert _cosmetic_state(_u1(PCB.load(str(out)))) == original
+        text = out.read_text()
+        assert '(layer "B.SilkS")' not in text
+        assert "(justify mirror)" not in text
+
+
+def _text_angles(fp) -> list[tuple[str, str, float]]:
+    """(type, layer, board-frame angle) of every footprint text."""
+    return [(t.text_type, t.layer, round(t.rotation, 6)) for t in fp.texts]
+
+
+class TestRevertedRotateLeavesNoCosmeticResidue:
+    """Issue #6557: a reverted rotate must not leave keep-upright text flipped.
+
+    Both rotation kinds go through ``StrategyApplicator._apply_rotate_component``,
+    which ends in ``fp.keep_texts_upright()``: a text the rotate turned upside
+    down gets another 180 degrees and a swapped justification.  The revert puts
+    ``fp.rotation`` back through the setter, which takes back only the rigid
+    turn -- so without a cosmetic snapshot the part's silk/fab text was left
+    rotated 180 degrees.  Same revert-then-keep-then-save shape as the mirror
+    test above.
+    """
+
+    @staticmethod
+    def _rotate(kind: str) -> PlacementDelta:
+        return PlacementDelta(
+            net_name="DQ2",
+            target_ref="U1",
+            kind=kind,
+            # -90 takes the 30-degree texts to 300, which keep-upright flips
+            # (a +90 turn would land them at 120 and never exercise the flip).
+            rotation_delta=180.0 if kind == "rotate_180" else -90.0,
+            source_action="de_reverse_bundle" if kind == "rotate_180" else "endpoint_align",
+        )
+
+    @classmethod
+    def _loop(cls, pcb, kind: str):
+        # U1's anchor is x=100; the router pad starts 2mm to its right.
+        #   rotate_180        -> x = 98             (still failing -> reverted)
+        #   rotate_align -90  -> (100, 102)         (still failing -> reverted)
+        #   translate         -> x = 102 + 1 = 103  (routes -> kept)
+        pad = FakePad(102.0, 100.0, "U1", "1")
+
+        def _needs_the_translate(router: FakeRouter) -> list[int]:
+            return [] if abs(router.pads[("U1", "1")].x - 103.0) < 1e-6 else [2]
+
+        router = FakeRouter([pad], 2, _needs_the_translate)
+        translate = PlacementDelta(
+            net_name="DQ2",
+            target_ref="U1",
+            kind="translate",
+            dx=1.0,
+            source_action="move_component",
+        )
+        loop = PlacementDeltaFeedbackLoop(
+            router=router,
+            pcb=pcb,
+            verbose=False,
+            delta_proposer=lambda _pcb: [cls._rotate(kind), translate],
+        )
+        return loop, router
+
+    @pytest.mark.parametrize("kind", ["rotate_180", "rotate_align"])
+    def test_revert_then_keep_saves_unflipped_text(self, tmp_path: Path, kind: str):
+        from kicad_tools.schema.pcb import PCB
+
+        pristine = _u1(PCB.load(str(_MIRROR_FRONT)))
+        original_nodes = _cosmetic_nodes(pristine)
+        original_angles = _text_angles(pristine)
+        original_state = _cosmetic_state(pristine)
+
+        pcb = PCB.load(str(_MIRROR_FRONT))
+        loop, _router = self._loop(pcb, kind)
+        result = loop.run_delta(max_adjustments=3)
+
+        assert [d.kind for d in result.reverted_deltas] == [kind]
+        assert [d.kind for d in result.applied_deltas] == ["translate"]
+
+        # Live objects: the reverted rotate left nothing behind.
+        fp = _u1(pcb)
+        assert fp.rotation == pytest.approx(30.0, abs=1e-6)
+        assert _text_angles(fp) == original_angles
+        assert _cosmetic_state(fp) == original_state
+        # Byte-identical silk/fab S-expression (angle AND justification).
+        assert _cosmetic_nodes(fp) == original_nodes
+
+        # ...and the SAVED file agrees.
+        out = tmp_path / f"after_reverted_{kind}.kicad_pcb"
+        pcb.save(str(out))
+        reloaded = _u1(PCB.load(str(out)))
+        assert _text_angles(reloaded) == original_angles
+        assert _cosmetic_nodes(reloaded) == original_nodes
+
+    @pytest.mark.parametrize("kind", ["rotate_180", "rotate_align"])
+    def test_interrupted_rotate_trial_restores_unflipped_text(self, kind: str):
+        """``restore_last_accepted`` mid-rotate-trial restores the text too."""
+        from kicad_tools.cli.route_deadline import RouteDeadlineExpired
+        from kicad_tools.schema.pcb import PCB
+
+        original_nodes = _cosmetic_nodes(_u1(PCB.load(str(_MIRROR_FRONT))))
+        pcb = PCB.load(str(_MIRROR_FRONT))
+        loop, router = self._loop(pcb, kind)
+        route = router.route_all_negotiated
+
+        def _deadline_in_the_rotate_trial(**kwargs):
+            if router.route_calls == 1:  # call 1 was the baseline
+                router.route_calls += 1
+                raise RouteDeadlineExpired()
+            return route(**kwargs)
+
+        router.route_all_negotiated = _deadline_in_the_rotate_trial
+        with pytest.raises(RouteDeadlineExpired):
+            loop.run_delta(max_adjustments=3)
+
+        assert loop.trial_in_flight is not None and loop.trial_in_flight.kind == kind
+        assert loop.restore_last_accepted() is True
+        assert loop.restore_last_accepted() is False
+
+        fp = _u1(pcb)
+        assert fp.rotation == pytest.approx(30.0, abs=1e-6)
+        assert _cosmetic_nodes(fp) == original_nodes
+        assert router.pads[("U1", "1")].x == pytest.approx(102.0)
 
 
 # --------------------------------------------------------------------------- #
@@ -1581,6 +1823,51 @@ class TestReorderPinsAtomicRevert:
         assert _ub_bindings(pcb) == {"1": "DQ1", "2": "DQ0"}
         # ...including in the S-expression tree that gets written out.
         out = tmp_path / "reverted.kicad_pcb"
+        pcb.save(str(out))
+        assert _ub_bindings(PCB.load(str(out))) == {"1": "DQ1", "2": "DQ0"}
+        # ...and the router's pads + net membership.
+        ub1 = router.pads[("UB", "1")]
+        ub2 = router.pads[("UB", "2")]
+        assert (ub1.net, ub1.net_name) == (2, "DQ1")
+        assert (ub2.net, ub2.net_name) == (1, "DQ0")
+        assert {net: sorted(keys) for net, keys in router.nets.items()} == before_nets
+
+    def test_interrupted_swap_trial_restores_pcb_and_router_bindings(self, tmp_path):
+        """Issue #6314: a swap trial cut off mid-route must not be saved swapped.
+
+        ``restore_last_accepted`` stands in for the revert the trial never
+        reached.  A ``reorder_pins`` delta moves no pad, so the geometry
+        restores undo nothing of it: only the pad->net restore does.
+        """
+        from kicad_tools.cli.route_deadline import RouteDeadlineExpired
+
+        loop, router, pcb = _make_swap_loop(tmp_path, _crossing_nets_fail, _swap_delta())
+        before_nets = {net: sorted(keys) for net, keys in router.nets.items()}
+        route = router.route_all_negotiated
+
+        def _deadline_in_the_swap_trial(**kwargs):
+            if router.route_calls == 1:  # call 1 was the baseline
+                router.route_calls += 1
+                raise RouteDeadlineExpired()
+            return route(**kwargs)
+
+        router.route_all_negotiated = _deadline_in_the_swap_trial
+        with pytest.raises(RouteDeadlineExpired):
+            loop.run_delta(max_adjustments=1)
+
+        # Mid-trial: the rebinding really is live, on both sides.
+        assert loop.trial_in_flight is not None
+        assert loop.trial_in_flight.kind == "reorder_pins"
+        assert _ub_bindings(pcb) == {"1": "DQ0", "2": "DQ1"}
+        assert router.pads[("UB", "1")].net_name == "DQ0"
+        assert sorted(router.nets[1]) == [("UA", "1"), ("UB", "1")]
+
+        assert loop.restore_last_accepted() is True
+
+        # PCB pads back to the board's original bindings...
+        assert _ub_bindings(pcb) == {"1": "DQ1", "2": "DQ0"}
+        # ...including in the S-expression tree a partial save serializes.
+        out = tmp_path / "interrupted.kicad_pcb"
         pcb.save(str(out))
         assert _ub_bindings(PCB.load(str(out))) == {"1": "DQ1", "2": "DQ0"}
         # ...and the router's pads + net membership.

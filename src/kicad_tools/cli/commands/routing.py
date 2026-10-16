@@ -943,6 +943,10 @@ def run_route_command(args) -> int:
     # tests/test_cli_parser_drift.py.
     if getattr(args, "max_cells", 500_000) != 500_000:
         sub_argv.extend(["--max-cells", str(args.max_cells)])
+    # Issue #6666: forward --grid-strategy only when it differs from the shared
+    # "adaptive" default, keeping flag-off argv byte-identical.
+    if getattr(args, "grid_strategy", "adaptive") != "adaptive":
+        sub_argv.extend(["--grid-strategy", args.grid_strategy])
     # Issue #4700: --trace-width now carries a ``None`` sentinel (unset) so the
     # inner command can raise the default to the manufacturer's own minimum
     # trace width.  Forward it only when the user actually passed a value --
@@ -962,6 +966,9 @@ def run_route_command(args) -> int:
         sub_argv.extend(["--via-diameter", str(args.via_diameter)])
     if args.mc_trials != 10:
         sub_argv.extend(["--mc-trials", str(args.mc_trials)])
+    # Issue #6345: router each multi-start trial runs.
+    if getattr(args, "trial_router", "negotiated") != "negotiated":
+        sub_argv.extend(["--trial-router", args.trial_router])
     # Issue #6267: forward the evolutionary GA size.  The outer parser accepted
     # --pop-size/--generations but never handed them to the inner route
     # command, so every ``kct route --strategy evolutionary`` ran the default
@@ -1022,12 +1029,21 @@ def run_route_command(args) -> int:
     # when the user set it (byte-identical when absent).
     if getattr(args, "escape_corridor_reservation", False):
         sub_argv.append("--escape-corridor-reservation")
+    # Issue #6352 (EXPERIMENTAL): forward the hidden flow-assignment selector
+    # only when it differs from the "greedy" default (argv byte-identical
+    # otherwise).
+    if getattr(args, "escape_corridor_assignment", "greedy") != "greedy":
+        sub_argv.extend(["--escape-corridor-assignment", args.escape_corridor_assignment])
     # Issue #5891 (epic #5508 Phase 2): forward --no-pad-access-invariant.  Both
     # parsers declare it as store_true defaulting to False (the invariant itself
     # is ON by default), so only forward the OPT-OUT when the user set it --
     # argv is byte-identical for a run that did not pass it.
     if getattr(args, "no_pad_access_invariant", False):
         sub_argv.append("--no-pad-access-invariant")
+    # Issue #6401: forward the --no-plane-via-reservation opt-out (store_true,
+    # default False; the reservation itself is ON by default).
+    if getattr(args, "no_plane_via_reservation", False):
+        sub_argv.append("--no-plane-via-reservation")
     max_ripups_val = getattr(args, "max_ripups_per_net", None)
     if max_ripups_val is not None:
         sub_argv.extend(["--max-ripups-per-net", str(max_ripups_val)])
@@ -1070,6 +1086,13 @@ def run_route_command(args) -> int:
         sub_argv.extend(["--lint-gate-waivers", args.lint_gate_waivers])
     if getattr(args, "lint_gate_strict", False):
         sub_argv.append("--lint-gate-strict")
+    # Issue #6353: forward the experimental nogood-cache flags.  Both default
+    # off / "full", so only forward a non-default value.
+    if getattr(args, "nogood_cache", False):
+        sub_argv.append("--nogood-cache")
+    nogood_margin = getattr(args, "nogood_cache_margin_cells", "full")
+    if nogood_margin and str(nogood_margin) != "full":
+        sub_argv.extend(["--nogood-cache-margin-cells", str(nogood_margin)])
     # Issue #2819: forward --max-search-iterations to the inner parser.
     # Both defaults are 0 (= use cols*rows*4 heuristic), so only forward
     # when the user passed a non-default value (matches the per-net-timeout
@@ -1309,6 +1332,10 @@ def run_route_command(args) -> int:
     # False, so only forward when the user set it -- flag-off is byte-identical.
     if getattr(args, "lattice_optimize", False):
         sub_argv.append("--lattice-optimize")
+    # Issue #6362: forward --lattice-iterations only when set (default None =
+    # the built-in cap of 12), so an unset flag is byte-identical.
+    if getattr(args, "lattice_iterations", None) is not None:
+        sub_argv.extend(["--lattice-iterations", str(args.lattice_iterations)])
     # Issue #2589: forward --seed for deterministic runs.  Default is None
     # (router uses os.urandom-derived state, existing behaviour).
     if getattr(args, "seed", None) is not None:

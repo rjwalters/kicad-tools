@@ -810,25 +810,50 @@ class TestBudgetStarved:
         assert data["failure_cause"] == "routing_order"
 
 
-def _pour_discontinuous_board() -> str:
-    """VCC (power net) is incomplete: R1.1/R1.2 connected, U1.1 stranded."""
+def _pour_discontinuous_board(net_name: str = "VCC", *, with_zone: bool = True) -> str:
+    """*net_name* (power net) is incomplete: R1.1/R1.2 connected, U1.1 stranded.
+
+    ``with_zone=True`` (the default) gives the net a copper zone on B.Cu, so it
+    is genuinely pour-carried.  ``with_zone=False`` is the zone-less variant
+    (issue #6327): a power-named net that only routed copper can connect.
+    """
+    zone = (
+        f'  (zone (net 1) (net_name "{net_name}") (layer "B.Cu") (uuid "zone-1") '
+        "(hatch edge 0.5)\n"
+        "    (connect_pads (clearance 0.2))\n"
+        "    (min_thickness 0.2) (filled_areas_thickness no)\n"
+        "    (fill yes (thermal_gap 0.2) (thermal_bridge_width 0.3))\n"
+        "    (polygon (pts (xy 100 100) (xy 140 100) (xy 140 140) (xy 100 140)))\n"
+        "  )\n"
+        if with_zone
+        else ""
+    )
     return _HEADER + (
         '  (net 0 "")\n'
-        '  (net 1 "VCC")\n'
+        f'  (net 1 "{net_name}")\n'
         '  (net 2 "SIG")\n'
         '  (footprint "R_0402" (layer "F.Cu") (at 10 10)\n'
         '    (property "Reference" "R1")\n'
-        '    (pad "1" smd rect (at -0.5 0) (size 0.6 0.6) (layers "F.Cu") (net 1 "VCC"))\n'
-        '    (pad "2" smd rect (at 0.5 0) (size 0.6 0.6) (layers "F.Cu") (net 1 "VCC"))\n'
+        f'    (pad "1" smd rect (at -0.5 0) (size 0.6 0.6) (layers "F.Cu") (net 1 "{net_name}"))\n'
+        f'    (pad "2" smd rect (at 0.5 0) (size 0.6 0.6) (layers "F.Cu") (net 1 "{net_name}"))\n'
         "  )\n"
         '  (footprint "U_SOT" (layer "F.Cu") (at 80 80)\n'
         '    (property "Reference" "U1")\n'
-        '    (pad "1" smd circle (at 0 0) (size 0.2 0.2) (layers "F.Cu") (net 1 "VCC"))\n'
+        f'    (pad "1" smd circle (at 0 0) (size 0.2 0.2) (layers "F.Cu") (net 1 "{net_name}"))\n'
         "  )\n"
-        # connect R1.1-R1.2 so VCC is "incomplete" (not "unrouted")
+        # connect R1.1-R1.2 so the net is "incomplete" (not "unrouted")
         '  (segment (start 9.5 10) (end 10.5 10) (width 0.25) (layer "F.Cu") (net 1))\n'
-        ")\n"
+        + zone
+        + ")\n"
     )
+
+
+_SIGNAL_CLASSES = {
+    StuckClass.ESCAPE_BLOCKED,
+    StuckClass.CONGESTION_SATURATED,
+    StuckClass.PLACEMENT_BOUND,
+    StuckClass.BUDGET_STARVED,
+}
 
 
 class TestPourDiscontinuous:
@@ -842,21 +867,17 @@ class TestPourDiscontinuous:
         assert d.classification is StuckClass.POUR_DISCONTINUOUS
         assert "U1.1" in d.unconnected_pads
         assert "pour-carried" in d.evidence
+        # The zone is reported, not "no zone definition".
+        assert "B.Cu" in d.evidence
 
     def test_pour_discontinuous_not_in_signal_diagnoses(self, tmp_path: Path):
         """VCC must not appear under any signal failure class."""
         p = tmp_path / "pour.kicad_pcb"
         p.write_text(_pour_discontinuous_board())
         result = classify_stuck_nets(p)
-        signal_classes = {
-            StuckClass.ESCAPE_BLOCKED,
-            StuckClass.CONGESTION_SATURATED,
-            StuckClass.PLACEMENT_BOUND,
-            StuckClass.BUDGET_STARVED,
-        }
         for d in result.diagnoses:
             if d.net_name == "VCC":
-                assert d.classification not in signal_classes
+                assert d.classification not in _SIGNAL_CLASSES
 
     def test_counts_include_pour_discontinuous(self, tmp_path: Path):
         p = tmp_path / "pour.kicad_pcb"
@@ -864,6 +885,65 @@ class TestPourDiscontinuous:
         result = classify_stuck_nets(p)
         assert "pour_discontinuous" in result.counts
         assert result.counts["pour_discontinuous"] >= 1
+
+
+class TestZonelessPowerNet:
+    """Issue #6327: a power-named net with no zone is a routing failure."""
+
+    def test_zoneless_power_net_gets_signal_failure_class(self, tmp_path: Path):
+        # ``VM`` (board 05) is power-typed by name but is NOT tagged by the ML
+        # pour classifier and has no zone -- only routed copper can join it.
+        p = tmp_path / "vm.kicad_pcb"
+        p.write_text(_pour_discontinuous_board("VM", with_zone=False))
+        result = classify_stuck_nets(p)
+        vm = [d for d in result.diagnoses if d.net_name == "VM"]
+        # Exactly one diagnosis: neither dropped by the first pass's guards
+        # nor emitted twice.
+        assert len(vm) == 1
+        d = vm[0]
+        assert d.classification is not StuckClass.POUR_DISCONTINUOUS
+        assert d.classification in _SIGNAL_CLASSES
+        assert "U1.1" in d.unconnected_pads
+        assert result.counts["pour_discontinuous"] == 0
+
+    def test_zoned_power_net_is_still_pour_discontinuous(self, tmp_path: Path):
+        # Same net, now with a zone: the zone-existence path (not the ML
+        # set) makes it pour-carried.
+        p = tmp_path / "vm_zone.kicad_pcb"
+        p.write_text(_pour_discontinuous_board("VM", with_zone=True))
+        result = classify_stuck_nets(p)
+        vm = [d for d in result.diagnoses if d.net_name == "VM"]
+        assert len(vm) == 1
+        assert vm[0].classification is StuckClass.POUR_DISCONTINUOUS
+
+    def test_ml_tagged_zoneless_net_is_still_pour_discontinuous(self, tmp_path: Path):
+        # ``VCC`` is in the ML pour classifier's advisory set; that path is
+        # unchanged even with no zone on the board.
+        p = tmp_path / "vcc_nozone.kicad_pcb"
+        p.write_text(_pour_discontinuous_board("VCC", with_zone=False))
+        result = classify_stuck_nets(p)
+        vcc = [d for d in result.diagnoses if d.net_name == "VCC"]
+        assert len(vcc) == 1
+        assert vcc[0].classification is StuckClass.POUR_DISCONTINUOUS
+        assert "no zone definition" in vcc[0].evidence
+
+    def test_pour_count_matches_zone_checked_count(self, tmp_path: Path):
+        """The classifier's pour count equals a zone/ML-checked count."""
+        from kicad_tools.analysis.net_status import NetStatusAnalyzer
+        from kicad_tools.schema.pcb import PCB
+
+        for name, zone in (("VM", False), ("VM", True), ("VCC", False)):
+            p = tmp_path / f"{name}_{zone}.kicad_pcb"
+            p.write_text(_pour_discontinuous_board(name, with_zone=zone))
+            analysis = NetStatusAnalyzer(PCB.load(str(p))).analyze()
+            expected = sum(
+                1
+                for n in analysis.nets
+                if n.status == "incomplete"
+                and (n.is_plane_net or n.net_name in analysis.advisory_incomplete_names)
+            )
+            result = classify_stuck_nets(p)
+            assert result.counts["pour_discontinuous"] == expected, (name, zone)
 
 
 class TestClassifierAggregate:
@@ -915,3 +995,103 @@ class TestReadOnly:
         classify_stuck_nets(congestion_pcb)
         after = congestion_pcb.read_bytes()
         assert before == after
+
+
+class TestSearchFailuresSidecar6369:
+    """Issue #6369: per-net router failure reasons travel via a sidecar."""
+
+    def test_write_and_load_roundtrip(self, tmp_path: Path):
+        from kicad_tools.router.stuck_classifier import (
+            load_search_failures_sidecar,
+            write_search_failures_sidecar,
+        )
+
+        board = tmp_path / "x_routed.kicad_pcb"
+        path = write_search_failures_sidecar(board, {"TGT": 1, "OTHER": 3, "NONE": 0})
+        assert path == tmp_path / "x_routed.search_failures.json"
+        assert load_search_failures_sidecar(board) == {"TGT": "no_path", "OTHER": "timeout"}
+
+    def test_empty_writes_nothing_and_missing_loads_none(self, tmp_path: Path):
+        from kicad_tools.router.stuck_classifier import (
+            load_search_failures_sidecar,
+            write_search_failures_sidecar,
+        )
+
+        board = tmp_path / "x.kicad_pcb"
+        assert write_search_failures_sidecar(board, {}) is None
+        assert load_search_failures_sidecar(board) is None
+        (tmp_path / "x.search_failures.json").write_text("not json")
+        assert load_search_failures_sidecar(board) is None
+
+    def test_sidecar_autodiscovered_by_classifier(self, budget_starved_pcb: Path):
+        from kicad_tools.router.stuck_classifier import write_search_failures_sidecar
+
+        write_search_failures_sidecar(budget_starved_pcb, {"TGT": 1})
+        d = next(
+            x for x in classify_stuck_nets(budget_starved_pcb).diagnoses if x.net_name == "TGT"
+        )
+        assert d.classification is not StuckClass.BUDGET_STARVED
+        assert "no_path" in d.evidence
+
+    def test_budget_reason_in_sidecar_stays_budget_starved(self, budget_starved_pcb: Path):
+        from kicad_tools.router.stuck_classifier import write_search_failures_sidecar
+
+        write_search_failures_sidecar(budget_starved_pcb, {"TGT": 3})
+        d = next(
+            x for x in classify_stuck_nets(budget_starved_pcb).diagnoses if x.net_name == "TGT"
+        )
+        assert d.classification is StuckClass.BUDGET_STARVED
+
+    def test_route_cmd_writer_maps_net_ids_to_names(self, tmp_path: Path):
+        from types import SimpleNamespace
+
+        from kicad_tools.cli.route_cmd import _write_search_failures_sidecar
+        from kicad_tools.router.stuck_classifier import load_search_failures_sidecar
+
+        router = SimpleNamespace(
+            router=SimpleNamespace(search_failures_by_net={4: 5, 9: 1}),
+            net_names={4: "VBUS"},
+        )
+        out = tmp_path / "b.kicad_pcb"
+        assert _write_search_failures_sidecar(out, router) is not None
+        assert load_search_failures_sidecar(out) == {"VBUS": "via_via_blocked"}
+        # No recorded failures -> no sidecar.
+        empty = SimpleNamespace(router=SimpleNamespace(search_failures_by_net={}), net_names={})
+        assert _write_search_failures_sidecar(tmp_path / "c.kicad_pcb", empty) is None
+
+    def test_rewrite_with_no_failures_removes_stale_sidecar(self, tmp_path: Path):
+        """A re-route recording nothing must not inherit the prior run's reasons."""
+        from kicad_tools.router.stuck_classifier import (
+            load_search_failures_sidecar,
+            write_search_failures_sidecar,
+        )
+
+        board = tmp_path / "x_routed.kicad_pcb"
+        assert write_search_failures_sidecar(board, {"VBUS": 1}) is not None
+        assert load_search_failures_sidecar(board) == {"VBUS": "no_path"}
+        assert write_search_failures_sidecar(board, {}) is None
+        assert not (tmp_path / "x_routed.search_failures.json").exists()
+        assert load_search_failures_sidecar(board) is None
+
+    def test_route_cmd_writer_removes_stale_sidecar(self, tmp_path: Path):
+        """The route_cmd early-return path must also clear a stale sidecar."""
+        from types import SimpleNamespace
+
+        from kicad_tools.cli.route_cmd import _write_search_failures_sidecar
+        from kicad_tools.router.stuck_classifier import load_search_failures_sidecar
+
+        out = tmp_path / "b.kicad_pcb"
+        first = SimpleNamespace(
+            router=SimpleNamespace(search_failures_by_net={4: 1}), net_names={4: "VBUS"}
+        )
+        assert _write_search_failures_sidecar(out, first) is not None
+        assert load_search_failures_sidecar(out) == {"VBUS": "no_path"}
+        # Second route: no failures recorded (e.g. Python pathfinder / no attribute).
+        for second in (
+            SimpleNamespace(router=SimpleNamespace(search_failures_by_net={}), net_names={}),
+            SimpleNamespace(router=SimpleNamespace(), net_names={}),
+            None,
+        ):
+            _write_search_failures_sidecar(out, first)
+            assert _write_search_failures_sidecar(out, second) is None
+            assert load_search_failures_sidecar(out) is None

@@ -29,7 +29,9 @@
 #                         exclusive with --body.
 #   --label, -l LABEL     Label to apply at creation. Repeatable. A single
 #                         comma-separated value is also accepted, matching
-#                         `gh issue create --label "a,b"`.
+#                         `gh issue create --label "a,b"`. `loom:issue` and
+#                         `loom:curated` are REFUSED (exit 2, no forge call):
+#                         issues enter at `loom:triage` (#11820).
 #   --repo, -R OWNER/REPO Target repository. Omit for the current repo (the
 #                         preferred form -- the REST path then resolves the
 #                         repo from the git remote with zero API calls).
@@ -50,10 +52,9 @@
 #   --parent N            File the issue as a child of #N (#10012): the body
 #                         gets `<!-- loom:parent #N -->` (and N's red-main
 #                         marker, if it has one); after the create the child
-#                         is linked as a native sub-issue (best effort) and,
-#                         when N carries loom:operator-priority, starred with
-#                         the inherited audit comment. Logic: `loom-daemon
-#                         forge parent`; needs loom-daemon (127 if absent; a bad N exits 2).
+#                         is linked as a native sub-issue (best effort).
+#                         Logic: `loom-daemon forge parent`; needs
+#                         loom-daemon (127 if absent; a bad N exits 2).
 #
 # Output: the new issue's URL on stdout (identical to `gh issue create`).
 #
@@ -151,7 +152,7 @@ source "$SCRIPT_DIR/lib/filing-lock.sh"
 usage() {
   # Line range = the whole leading comment block (keep in sync when the header
   # grows; `--help` silently truncating its own docs is its own small #8289).
-  sed -n '2,143p' "${BASH_SOURCE[0]:-$0}" | sed 's/^# \{0,1\}//'
+  sed -n '2,142p' "${BASH_SOURCE[0]:-$0}" | sed 's/^# \{0,1\}//'
 }
 
 TITLE=""
@@ -206,15 +207,17 @@ while [[ $# -gt 0 ]]; do
         # Trim surrounding whitespace from "a, b".
         _l="${_l#"${_l%%[![:space:]]*}"}"
         _l="${_l%"${_l##*[![:space:]]}"}"
+        # Issues enter at loom:triage (#11820, operator ruling 2026-10-13):
+        # opening one as loom:issue or loom:curated skips Curator admission.
+        # Refused here, before any forge call.
+        [[ "$_l" =~ ^loom:(issue|curated)$ ]] && {
+          echo "create-issue.sh: refusing --label $_l: issues enter at loom:triage and reach $_l through Curator admission. Use --label loom:triage (or no --label: the default)." >&2; exit 2; }
         [[ -n "$_l" ]] && LABELS+=("$_l")
       done
       shift 2
       ;;
     --repo | -R) REPO_NWO="${2:-}"; shift 2 ;;
-    --force | --skip-duplicate-check)
-      SKIP_DUP_CHECK=true
-      shift
-      ;;
+    --force | --skip-duplicate-check) SKIP_DUP_CHECK=true; shift ;;
     --parent) PARENT="${2:-}"; shift 2 ;;
     --duplicate-threshold)
       DUP_THRESHOLD="${2:-}"
@@ -445,10 +448,10 @@ case " ${LABELS[*]-} " in *" loom:"*) ;; *) LABELS+=("loom:triage") ;; esac
 ISSUE_URL="$(forge_gh_create_issue_rl_safe "$REPO_NWO" "$TITLE" "$BODY" "${LABELS[@]+"${LABELS[@]}"}")" || exit 1
 echo "$ISSUE_URL"
 
-# --- #10012: native sub-issue link + inherited star, best effort ------------
+# --- #10012: native sub-issue link, best effort -----------------------------
 [[ -z "${PARENT+x}" ]] \
   || loom-daemon forge parent link --parent "$PARENT" --child "$ISSUE_URL" ${REPO_NWO:+--repo "$REPO_NWO"} >&2 \
-  || echo "create-issue.sh: note: --parent #$PARENT follow-up (star / sub-issue link) incomplete; the issue itself is filed and the loom:parent marker is in its body" >&2
+  || echo "create-issue.sh: note: --parent #$PARENT follow-up (sub-issue link) incomplete; the issue itself is filed and the loom:parent marker is in its body" >&2
 
 # --- #9774: the filed body ends with the dashboard footer -------------------
 # Best-effort, via the daemon's --patch-created (fetch, footer, PATCH — the

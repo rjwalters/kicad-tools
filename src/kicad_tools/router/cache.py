@@ -180,6 +180,16 @@ class CacheKey:
         # Only keyed when present, so every floor-free key is unchanged.
         if getattr(rules, "net_clearance_floors", None):
             rules_data["net_clearance_floors"] = sorted(rules.net_clearance_floors.items())
+        # Issue #6443: the authored board minimum floors the coupled pair gap,
+        # so it changes the emitted copper.  Only keyed when set.
+        authored_min = getattr(rules, "authored_min_clearance", None)
+        if authored_min is not None:
+            rules_data["authored_min_clearance"] = float(authored_min)
+        # Issue #6561: the stackup-aware fab clearance floor also floors the
+        # coupled pair gap.  Only keyed when set.
+        mfr_floor = getattr(rules, "mfr_clearance_floor", None)
+        if mfr_floor is not None:
+            rules_data["mfr_clearance_floor"] = float(mfr_floor)
         if rules.strict_pad_clearance:
             rules_data["strict_pad_clearance"] = True
         # Issue #5004: flips whether the same-component carve-out grants an
@@ -386,6 +396,16 @@ class SubProblemSignature:
         # Only keyed when present, so every floor-free key is unchanged.
         if getattr(rules, "net_clearance_floors", None):
             rules_data["net_clearance_floors"] = sorted(rules.net_clearance_floors.items())
+        # Issue #6443: the authored board minimum floors the coupled pair gap,
+        # so it changes the emitted copper.  Only keyed when set.
+        authored_min = getattr(rules, "authored_min_clearance", None)
+        if authored_min is not None:
+            rules_data["authored_min_clearance"] = float(authored_min)
+        # Issue #6561: the stackup-aware fab clearance floor also floors the
+        # coupled pair gap.  Only keyed when set.
+        mfr_floor = getattr(rules, "mfr_clearance_floor", None)
+        if mfr_floor is not None:
+            rules_data["mfr_clearance_floor"] = float(mfr_floor)
         if rules.strict_pad_clearance:
             rules_data["strict_pad_clearance"] = True
         # Issue #5004: see ``CacheKey.compute`` above -- same reasoning
@@ -507,6 +527,7 @@ def transform_routes(
                     # downstream dimensions DRC exemption to misfire.
                     in_pad=via.in_pad,
                     is_micro=via.is_micro,
+                    span_type=via.span_type,
                 )
             )
         transformed.append(
@@ -590,6 +611,7 @@ def normalize_routes_to_origin(
                     # through normalize <-> transform round-trip.
                     in_pad=via.in_pad,
                     is_micro=via.is_micro,
+                    span_type=via.span_type,
                 )
             )
         normalized.append(
@@ -843,6 +865,7 @@ class RoutingCache:
                         # files still deserialize.
                         "in_pad": via.in_pad,
                         "is_micro": via.is_micro,
+                        "span_type": via.span_type,
                     }
                     for via in route.vias
                 ],
@@ -912,6 +935,7 @@ class RoutingCache:
                     # were serialised before these fields existed).
                     in_pad=via.get("in_pad", False),
                     is_micro=via.get("is_micro", False),
+                    span_type=via.get("span_type"),
                 )
                 for via in route_dict["vias"]
             ]

@@ -87,7 +87,7 @@ echo ""
 echo "Test group 2: the consolidation gate's guardrails"
 expect "gate runs before loom:curated"                "$RS" "Consolidation gate — before \`loom:curated\`"
 expect "only triage/unlabeled siblings"               "$RS" "\`loom:triage\`/unlabeled siblings"
-for label in 'loom:curating' 'loom:building' 'loom:issue' 'loom:blocked' 'loom:operator-only'; do
+for label in 'loom:curating' 'loom:building' 'loom:issue' 'loom:blocked' 'loom:operator'; do
     expect "never absorbs a $label issue"             "$RS" "$label"
 done
 expect "never absorbs a hard-excluded issue"          "$RS" "hard-exclusion label"
@@ -130,7 +130,7 @@ expect "TOC lists the new section"                    "$TOC" "[Backlog Rightsizi
 
 echo ""
 echo "Test group 4: guide.md hands sibling micro-issues to Curator"
-PRIO="$(section "$GUIDE_MD" '^## Tier Labels and Duplicate Checks')"
+PRIO="$(section "$GUIDE_MD" '^## Priority Labels and Duplicate Checks')"
 expect "guide defers sibling micro-issues to Curator" "$PRIO" "sibling micro-issues: leave for Curator"
 expect "guide points at the curator section"          "$PRIO" "\"Backlog Rightsizing\""
 
@@ -142,6 +142,24 @@ echo "Test group 5: generated agent-skill copies carry the same rules"
 SRS="$(section "$CURATOR_SKILL" '^## Backlog Rightsizing')"
 expect "loom-curator skill has the section"           "$SRS" "Consolidation gate — before \`loom:curated\`"
 expect "loom-guide skill has the handoff"             "$(cat "$GUIDE_SKILL")" "sibling micro-issues: leave for Curator"
+
+echo ""
+echo "Test group 6: Curator refuses a PR target before its first claim write (#9929)"
+# Not rightsizing, but the same prompt-lint shape: a trim must not drop the
+# kind probe, and it must precede the `loom:curating` write on the claim path.
+ARGS="$(section "$CURATOR_MD" '^## Argument Handling')"
+# #11863: the probe is one live REST read that answers kind, state and labels.
+expect "kind probe reads pull_request off the REST issue" "$ARGS" "--jq '[(.pull_request != null), .state"
+expect "a PR or a failed read means refuse"         "$ARGS" "\`true\` (a PR) or a failed read means refuse"
+probe_line="$(grep -nF -- "(.pull_request != null)" <<< "$ARGS" | head -1 | cut -d: -f1)"
+claim_line="$(grep -nF -- "labels[]=loom:curating" <<< "$ARGS" | head -1 | cut -d: -f1)"
+if [[ -n "$probe_line" && -n "$claim_line" && "$probe_line" -lt "$claim_line" ]]; then
+    pass "probe precedes the loom:curating claim write"
+else
+    fail "probe precedes the loom:curating claim write (probe=$probe_line claim=$claim_line)"
+fi
+CLAIMING="$(awk '/^## Claiming Work/{f=1;next} /^## /{f=0} f' "$CURATOR_MD")"
+expect "general claim recipe defers to the kind probe" "$CLAIMING" "kind probe (Argument Handling)"
 
 echo ""
 echo "================================"

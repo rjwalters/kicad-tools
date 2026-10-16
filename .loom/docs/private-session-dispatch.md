@@ -139,4 +139,4 @@ operator's one-time TUI step; the real TUI, the real CLI and the real hook
 engine are measured by `docker/session/test-image.sh` §12.
 That transport fixture is not evidence of production mutable-role admission.
 The existing `session_exec_docker` suite remains the process-lifetime regression
-gate for cancellation, killed/stalled owners and missing/hung cleanup.
+check, run daily by `ci-daily.yml` (#11965), for cancellation, killed/stalled owners and missing/hung cleanup.

@@ -51,28 +51,10 @@ loom_test_require_daemon_bin "$HELPERS_DIR" "merge-pr reconcile-plan" \
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/write-scope-fixture.sh"
 
 # Colors
-RED='\033[0;31m'
-GREEN='\033[0;32m'
+# shellcheck source=lib/assert.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/assert.sh"
 YELLOW='\033[0;33m'   # retired() below
-NC='\033[0m'
 
-TESTS_RUN=0
-TESTS_PASSED=0
-TESTS_FAILED=0
-
-assert_eq() {
-    local expected="$1" actual="$2" msg="$3"
-    TESTS_RUN=$((TESTS_RUN + 1))
-    if [[ "$expected" == "$actual" ]]; then
-        TESTS_PASSED=$((TESTS_PASSED + 1))
-        echo -e "  ${GREEN}PASS${NC}: $msg"
-    else
-        TESTS_FAILED=$((TESTS_FAILED + 1))
-        echo -e "  ${RED}FAIL${NC}: $msg"
-        echo "    Expected: '$expected'"
-        echo "    Actual:   '$actual'"
-    fi
-}
 
 assert_contains() {
     local haystack="$1" needle="$2" msg="$3"
@@ -200,14 +182,20 @@ if [[ "$1" == "api" ]]; then
   for _a in "$@"; do
     case "$_a" in repos/*) path="$_a"; break ;; esac
   done
-  # #9774: a POST to the comments endpoint is the daemon chokepoint's shape
-  # (forge comment -> gh api --input -); this suite's subject is the
-  # reconcile flow over the recorded gh ladder, so fail that POST and let
-  # forge_gh_comment_rl_safe fall back to the recorded `issue comment` shape.
+  # #9774/#9865: a POST to the comments endpoint is the daemon chokepoint's
+  # shape (forge comment -> gh api --input FILE) and the only comment path
+  # now; record it in the `issue comment` shape the assertions read.
   # (Reads — the issue-N.json fetches — end at the issue number, not
   # /comments, and are unaffected.)
   case "$path" in
-    */comments) exit 1 ;;
+    */comments)
+      _in=""; _prev=""
+      for _a in "$@"; do [[ "$_prev" == "--input" ]] && _in="$_a"; _prev="$_a"; done
+      _rest="${path#repos/}"; _repo="${_rest%%/issues/*}"
+      _num="${_rest#*/issues/}"; _num="${_num%%/*}"
+      echo "issue comment $_num --repo $_repo --body $(jq -r .body "$_in" 2>/dev/null)" >> "$STUB_DIR_FROM_ENV/gh-calls.log"
+      exit 0
+      ;;
   esac
   num="${path##*/}"
   canned="$STUB_DIR_FROM_ENV/issue-$num.json"

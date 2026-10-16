@@ -24,6 +24,8 @@ REQUIRED_TOPICS = {
     "native backend pitfall": "kct build-native --check",
     "stale kct pitfall": "which -a kct",
     "kicad-cli hang pitfall": "#5877",
+    "image readings are hypotheses": "What you read off an image is a hypothesis",
+    "board images": "kct board-view net",
 }
 
 
@@ -121,7 +123,7 @@ def test_cli_json(harness: str | None, capsys: pytest.CaptureFixture[str]) -> No
     assert payload["harness"] == harness
     titles = [s["title"] for s in payload["sections"]]
     assert titles[0] == "kicad-tools agent guide"
-    assert len(titles) == 6
+    assert len(titles) == 7
     assert all(set(s) == {"title", "body"} and s["body"] for s in payload["sections"])
 
 

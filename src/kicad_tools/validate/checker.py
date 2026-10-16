@@ -21,6 +21,7 @@ from .rules.dangling_copper import DanglingCopperRule
 from .rules.diffpair_clearance_intra import DiffPairClearanceIntraRule
 from .rules.diffpair_length_skew import DiffPairLengthSkewRule
 from .rules.diffpair_routing_continuity import DiffPairRoutingContinuityRule
+from .rules.diffpair_uncoupled_length import DiffPairUncoupledLengthRule
 from .rules.edge import EdgeClearanceRule
 from .rules.impedance import ImpedanceRule
 from .rules.match_group_length_skew import MatchGroupLengthSkewRule
@@ -135,6 +136,7 @@ class DRCChecker:
         current_path_specs: Sequence[CurrentPathSpec] | None = None,
         mask_copper_request: MaskCopperRequest | None = None,
         physical_copper_gap_mm: float | None = None,
+        authored_min_clearance_mm: float | None = None,
     ) -> None:
         """Initialize the DRC checker.
 
@@ -224,9 +226,16 @@ class DRCChecker:
                 degrades to a clean no-op, matching every other
                 sidecar-optional rule in this class.
 
+            authored_min_clearance_mm: The board's own authored minimum
+                clearance (``.kicad_pro`` ``rules.min_clearance``), or
+                ``None``.  Floors the within-pair gap that
+                ``diffpair_clearance_intra`` enforces, matching
+                ``DesignRules.pair_gap()`` in the router (Issue #6575).
+
         Raises:
             ValueError: If manufacturer ID is not recognized
         """
+        self.authored_min_clearance_mm = authored_min_clearance_mm
         self.mask_copper_request = mask_copper_request
         # Opt-in heuristic width-consistency audit: ``None`` keeps it out of
         # check_all(); set to a (possibly empty) dict of
@@ -326,6 +335,7 @@ class DRCChecker:
         "check_diffpair_clearance_intra",
         "check_diffpair_length_skew",
         "check_diffpair_routing_continuity",
+        "check_diffpair_uncoupled_length",
         "check_dimensions",
         "check_edge_clearances",
         "check_impedance",
@@ -340,6 +350,7 @@ class DRCChecker:
         "check_single_pad_nets",
         "check_pad_grid_alignment",
         "check_via_in_pad",
+        "check_via_type_capability",
         "check_via_under_body",
         "check_width_consistency",
         "check_zero_length_segments",
@@ -469,8 +480,6 @@ class DRCChecker:
         "doc_drift_stale_pin": CATEGORY_ADVISORY,
         "doc_drift_unresolvable_pin": CATEGORY_ADVISORY,
         "impedance": CATEGORY_ADVISORY,
-        "diffpair_clearance_intra": CATEGORY_ADVISORY,
-        "diffpair_length_skew": CATEGORY_ADVISORY,
         "diffpair_routing_continuity": CATEGORY_ADVISORY,
         "match_group_length_skew": CATEGORY_ADVISORY,
         # Pin-1 / polarity silkscreen markers: assembly-legibility
@@ -510,6 +519,8 @@ class DRCChecker:
         # fab-blocking manufacturing defects.
         "via_in_pad_process_missing": CATEGORY_MANUFACTURING,
         "via_in_pad_process_ineligible": CATEGORY_MANUFACTURING,
+        # Issue #6518: blind/buried/micro via on a profile that cannot build it.
+        "via_type_unsupported": CATEGORY_MANUFACTURING,
         "min_pad_size": CATEGORY_MANUFACTURING,
         "pth_annular_ring": CATEGORY_MANUFACTURING,
         "pad_grid": CATEGORY_MANUFACTURING,
@@ -538,6 +549,15 @@ class DRCChecker:
         "net_undeclared": CATEGORY_MANUFACTURING,
         "zone_fill": CATEGORY_MANUFACTURING,
         "zone_fill_disabled": CATEGORY_MANUFACTURING,
+        # Pair rules whose findings block ``manufacturable`` when the limit is
+        # cited or explicit (maintainer decision on #6443, 2026-10-13): the
+        # same findings reach kicad-cli as errors through the routed
+        # ``.kicad_dru``, so they are fab-blocking, not advisory.  An
+        # ``uncited`` limit is a warning.  Explicit entries are REQUIRED: the
+        # ``diffpair`` prefix fallback below is advisory.
+        "diffpair_clearance_intra": CATEGORY_MANUFACTURING,
+        "diffpair_length_skew": CATEGORY_MANUFACTURING,
+        "diffpair_uncoupled_length": CATEGORY_MANUFACTURING,
         "zone_no_net": CATEGORY_MANUFACTURING,
         "zone_unfilled": CATEGORY_MANUFACTURING,
     }
@@ -860,18 +880,51 @@ class DRCChecker:
         Single-ended refusal patterns (``USB_CC1``/``USB_CC2``,
         ``SBU1``/``SBU2``) are correctly excluded per #2558.
 
-        See Issue #2560 / Epic #2556 Phase 1D.  When the upstream router
-        gains the per-pair clearance map (#2559), this method may be
-        extended to accept it via constructor injection on
-        :class:`DRCChecker`; today the rule falls back to the manufacturer's
-        ``min_clearance_mm``, which makes it a no-op duplicate of the
-        generic clearance rule for any pair without an explicit threshold.
+        The threshold per pair is the gap the router lays (Issue #6575):
+        ``DesignRules.pair_gap(nc).gap_mm`` =
+        ``max(class intra_pair_clearance, manufacturer min, authored board
+        min)`` when the pair's class is in ``net_class_map``, otherwise
+        ``max(manufacturer min_clearance_mm, authored_min_clearance_mm)``.
+        With neither a class nor an authored minimum this is the
+        manufacturer ``min_clearance_mm``.
+
+        See Issue #2560 / Epic #2556 Phase 1D.
 
         Returns:
             DRCResults containing intra-pair clearance violations.
         """
 
-        rule = DiffPairClearanceIntraRule()
+        probe = DiffPairClearanceIntraRule()
+        authored = self.authored_min_clearance_mm
+        fallback = max(self.design_rules.min_clearance_mm, authored or 0.0)
+        router_rules = None
+        class_map = self.net_class_map
+        if class_map:
+            from kicad_tools.router.rules import DesignRules as RouterDesignRules
+
+            router_rules = RouterDesignRules(
+                manufacturer=self.manufacturer,
+                authored_min_clearance=authored,
+                # Issue #6561: the same stackup-aware fab floor this check
+                # enforces (and the no-class ``fallback`` above uses), not the
+                # layer-agnostic ``MfrLimits.min_clearance``.
+                mfr_clearance_floor=self.design_rules.min_clearance_mm,
+            )
+        names = {net.number: net.name for net in self.pcb.nets.values()}
+        threshold_map: dict[tuple[int, int], float] = {}
+        for key in probe._build_diff_pair_set(self.pcb):
+            nc = None
+            if router_rules is not None and class_map:
+                for nid in key:
+                    nc = class_map.get(names.get(nid, ""))
+                    if nc is not None:
+                        break
+            if nc is not None and router_rules is not None:
+                threshold_map[key] = router_rules.pair_gap(nc).gap_mm
+            else:
+                threshold_map[key] = fallback
+
+        rule = DiffPairClearanceIntraRule(intra_pair_clearance_map=threshold_map)
         return self._absolutize(rule.check(self.pcb, self.design_rules))
 
     def _warn_inactive_skew_rule(self, rule_name: str) -> None:
@@ -944,23 +997,26 @@ class DRCChecker:
             context to supply ``skew_data``).
         """
         from kicad_tools.validate.diffpair_engagement import derive_engagement_state
-        from kicad_tools.validate.diffpair_skew import derive_skew_data
+        from kicad_tools.validate.diffpair_skew import derive_skew_limits
 
         if self.net_class_map is None:
             self._warn_inactive_skew_rule("diffpair_length_skew")
 
-        skew_data, skew_threshold_map = derive_skew_data(
+        # Issue #6443: the limit, its provenance and its severity all come
+        # from the one resolver (class field > protocol default > generic).
+        skew_data, limits = derive_skew_limits(
             self.pcb,
             self.net_class_map,
-            board_thickness_mm=self.design_rules.board_thickness_mm,
             num_copper_layers=self.layers,
         )
         engaged_pairs, _ = derive_engagement_state(self.pcb, self.net_class_map)
         rule = DiffPairLengthSkewRule(
             skew_data=skew_data,
             engaged_pairs=engaged_pairs,
-            threshold_map=skew_threshold_map,
+            threshold_map={key: t.skew_mm for key, t in limits.items()},
             emit_info=self._emit_skew_info,
+            severity_map={key: t.skew_severity for key, t in limits.items()},
+            source_map={key: t.skew_source for key, t in limits.items()},
         )
         return self._absolutize(rule.check(self.pcb, self.design_rules))
 
@@ -1005,6 +1061,51 @@ class DRCChecker:
             engaged_pairs=engaged_pairs,
             threshold_map=threshold_map,
             emit_info=self._emit_skew_info,
+        )
+        return self._absolutize(rule.check(self.pcb, self.design_rules))
+
+    def check_diffpair_uncoupled_length(self) -> DRCResults:
+        """Check uncoupled length and via count for engaged differential pairs.
+
+        Issue #6443 (P1 piece (b) of epic #6441).  For each engaged pair the
+        larger of the two nets' uncoupled lengths (the figure KiCad's
+        ``diff_pair_uncoupled`` checks, see
+        :mod:`~kicad_tools.validate.rules.diffpair_uncoupled_length`) is held
+        to ``max_uncoupled_total_mm`` of the class, or the protocol's
+        per-terminal allowance x the components on the net; each net's via
+        count is held to ``max_vias_per_net``.  Limits and severities come
+        from the same resolver as the skew check
+        (:func:`~kicad_tools.validate.diffpair_engagement.resolve_pair_thresholds`).
+
+        A pair whose names KiCad does not recognise gets one ``info`` line
+        saying its limit is kct-only (KiCad's native check cannot see it).
+
+        Like the other pair rules this is a no-op without a ``net_class_map``.
+        """
+        from kicad_tools.manufacturers.netclass_dru import is_coupled_diff_pair
+        from kicad_tools.validate.diffpair_engagement import (
+            derive_engagement_state,
+            resolve_pair_thresholds,
+        )
+
+        if self.net_class_map is None:
+            self._warn_inactive_skew_rule("diffpair_uncoupled_length")
+        engaged_pairs, _ = derive_engagement_state(self.pcb, self.net_class_map)
+        names = {n.number: n.name for n in self.pcb.nets.values() if n.name}
+        limits = {}
+        kct_only = {}
+        for a, b in engaged_pairs:
+            na, nb = names.get(a), names.get(b)
+            if not na or not nb:
+                continue
+            limits[(a, b)] = resolve_pair_thresholds(self.net_class_map, na, nb)
+            if not (is_coupled_diff_pair(na, nb) or is_coupled_diff_pair(nb, na)):
+                kct_only[(a, b)] = f"KiCad does not recognise {na}/{nb} as a differential pair"
+        rule = DiffPairUncoupledLengthRule(
+            engaged_pairs=engaged_pairs,
+            limits=limits,
+            emit_info=self._emit_skew_info,
+            kct_only=kct_only,
         )
         return self._absolutize(rule.check(self.pcb, self.design_rules))
 
@@ -1230,7 +1331,6 @@ class DRCChecker:
             group_skew_data, tracker_match_groups, threshold_map = derive_group_skew_data(
                 self.pcb,
                 self.net_class_map,
-                board_thickness_mm=self.design_rules.board_thickness_mm,
                 num_copper_layers=self.layers,
             )
             rule = MatchGroupLengthSkewRule(
@@ -1458,6 +1558,23 @@ class DRCChecker:
 
         merged = {**(self.width_consistency_options or {}), **options}
         rule = WidthConsistencyRule(**merged)  # type: ignore[arg-type]
+        return self._absolutize(rule.check(self.pcb, self.design_rules))
+
+    def check_via_type_capability(self) -> DRCResults:
+        """Check blind, buried and micro vias against the profile's capabilities.
+
+        Issue #6518: errors (rule_id ``via_type_unsupported``, manufacturing
+        category) on every ``(via blind|buried ...)`` when the profile's
+        ``blind_buried_vias_supported`` is ``False`` and every
+        ``(via micro ...)`` when ``micro_vias_supported`` is ``False``.
+        Through vias never trigger it.
+
+        Returns:
+            DRCResults with one ``via_type_unsupported`` violation per via.
+        """
+        from .rules.via_type_capability import ViaTypeCapabilityRule
+
+        rule = ViaTypeCapabilityRule()
         return self._absolutize(rule.check(self.pcb, self.design_rules))
 
     def check_via_under_body(self) -> DRCResults:

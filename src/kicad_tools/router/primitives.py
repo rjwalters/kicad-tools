@@ -242,22 +242,93 @@ class Via:
     # output exactly.  The router's in-pad escape (#3118) is the primary
     # producer of micro vias from inside the routing pipeline.
     is_micro: bool = False
+    # Issue #6662: KiCad's ``blind`` / ``buried`` type keyword, or ``None``.
+    # The router never *creates* a blind or buried via (it has no such
+    # process), but it does import them: ``--preserve-existing`` copper, the
+    # lattice's fixed copper and the connectivity verifier all build router
+    # vias from a board file.  KiCad drills a ``(via blind ...)`` /
+    # ``(via buried ...)`` only through its declared ``layers`` span, so the
+    # keyword has to survive into the model -- without it
+    # :attr:`drilled_layers` widened an imported In1/In2 buried via to a full
+    # F.Cu..B.Cu barrel and :meth:`to_sexp` re-wrote it as a through via.
+    span_type: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.span_type not in (None, "blind", "buried"):
+            raise ValueError(
+                f"Via.span_type must be 'blind', 'buried' or None, got {self.span_type!r}"
+            )
+
+    def refresh_span_type(self) -> None:
+        """Re-derive :attr:`span_type` after :attr:`layers` was widened (issue #6677).
+
+        Only an imported blind/buried via carries a keyword to keep honest; a
+        router-created through via (``span_type`` None) is never turned into a
+        blind one.  A span touching both outer layers drops the keyword, one
+        outer layer is ``blind``, none is ``buried``.
+        """
+        if self.span_type is None:
+            return
+        outer = sum(1 for lyr in set(self.layers) if lyr in (Layer.F_CU, Layer.B_CU))
+        self.span_type = None if outer >= 2 else ("blind" if outer == 1 else "buried")
+
+    @property
+    def drilled_layers(self) -> tuple[Layer, Layer]:
+        """The layer pair this via is physically drilled between (issue #6485).
+
+        A micro via (:attr:`is_micro`) is laser-drilled over the span it
+        carries, and an imported KiCad ``blind`` / ``buried`` via
+        (:attr:`span_type`, issue #6662) is drilled only through its declared
+        span, exactly as KiCad builds it.  Every other via is an ordinary
+        mechanically drilled *through* via: the router has no blind or buried
+        process of its own, so its barrel runs from ``F.Cu`` to ``B.Cu``
+        whatever logical layer transition :attr:`layers` happens to record.
+
+        :attr:`layers` already given as the outer pair is returned as held
+        (either order), so a through via serialises byte-for-byte as before.
+        """
+        if (
+            self.is_micro
+            or self.span_type is not None
+            or {self.layers[0], self.layers[1]} == {Layer.F_CU, Layer.B_CU}
+        ):
+            return self.layers
+        return (Layer.F_CU, Layer.B_CU)
 
     def to_sexp(self, name_only: bool = False) -> str:
         """Generate KiCad S-expression.
 
         Emits ``(via micro ...)`` when :attr:`is_micro` is True so the
         micro-via token survives the route -> finalize -> file
-        round-trip (issue #3124).  Otherwise emits a plain ``(via ...)``.
+        round-trip (issue #3124), and ``(via blind ...)`` /
+        ``(via buried ...)`` for an imported :attr:`span_type` via (issue
+        #6662).  Otherwise emits a plain ``(via ...)``.
+
+        Issue #6485: a plain ``(via ...)`` is ALWAYS written on the outer
+        ``F.Cu``/``B.Cu`` pair (see :attr:`drilled_layers`).  KiCad reads a
+        via with no type keyword as a through via whatever its ``layers``
+        say -- it rewrites the pair to ``F.Cu``/``B.Cu`` on save and drills
+        the hole in the through-hole file -- so a keyword-less
+        ``(layers "F.Cu" "In1.Cu")`` told every reader of the file that the
+        barrel stopped at In1 while the fabricated board shorted In2 and
+        B.Cu to it.  This is the single serialisation point for router
+        vias, which makes that node unwritable from the router whatever a
+        producer put in :attr:`layers`.
 
         Issue #4416: when ``name_only`` is True and :attr:`net_name` is
         known, the net reference is emitted as ``(net "name")`` to match a
         KiCad-10 name-based board's dialect; otherwise the numeric
         ``(net N)`` form is used (preserving behavior for numeric boards).
         """
-        layer_start = self.layers[0].kicad_name
-        layer_end = self.layers[1].kicad_name
-        type_token = " micro" if self.is_micro else ""
+        drilled_start, drilled_end = self.drilled_layers
+        layer_start = drilled_start.kicad_name
+        layer_end = drilled_end.kicad_name
+        if self.is_micro:
+            type_token = " micro"
+        elif self.span_type is not None:
+            type_token = f" {self.span_type}"
+        else:
+            type_token = ""
         net_ref = f'"{self.net_name}"' if name_only and self.net_name else str(self.net)
         # Issue #3925: field order matches KiCad's canonical writer
         # (uuid BEFORE net).  Emitting net before uuid caused every via to
@@ -485,6 +556,9 @@ class Pad:
     through_hole: bool = False  # PTH pads block both layers
     drill: float = 0.0  # Drill diameter for PTH pads (0 = use pad size)
     steiner_point: bool = False  # True for virtual Steiner tree branch points
+    layer_agnostic: bool = (
+        False  # Issue #6634: goal on ANY routable layer until first arrival pins it
+    )
     footprint_name: str = ""  # Library footprint name, e.g. "Package_QFP:TQFP-32_7x7mm_P0.8mm"
     rotation: float = 0.0
     """Residual board-space rotation in degrees (issue #4910).
@@ -517,9 +591,24 @@ class Pad:
     shape: str = "rect"
     """Authored shape; absent programmatic metadata uses a conservative rectangle.
 
-    Circles alone use a disc. Oval and roundrect use their enclosing rotated
-    rectangle until exact rounded geometry is supported. Custom/trapezoid
-    nominal dimensions do not bound their copper and are rejected explicitly.
+    The clearance kernel (:func:`~kicad_tools.router.clearance_shapes.pad_shape`)
+    measures circles as discs and ovals as stadiums -- both are fully
+    determined by ``width``/``height``. A roundrect's corner radius is
+    ``roundrect_rratio * min(width, height)``, so it is measured exactly only
+    when :attr:`roundrect_rratio` carries the file's ratio; without one it is
+    measured as its enclosing rotated rectangle (never an assumed ratio, which
+    would over-round a small-ratio pad's corners and hide a real near-miss --
+    issue #6718). Grid/AABB consumers still use the enclosing rectangle.
+    Custom/trapezoid nominal dimensions do not bound their copper and are
+    rejected explicitly.
+    """
+
+    roundrect_rratio: float | None = None
+    """The file's ``(roundrect_rratio X)`` for a ``roundrect`` pad (issue #6718).
+
+    ``None`` means "unknown": the clearance kernel then treats the roundrect as
+    its rectangle, which can only over-report a corner near-miss. Ignored for
+    every other shape.
     """
 
     # Physical drill metadata, independent of the copper's residual rotation.
@@ -539,6 +628,20 @@ class Pad:
     nets all become net ``0``).  The authored minimum belongs to the copper, not
     to the routing target, so it survives the neutralisation.  ``0.0`` -- the
     default -- defers entirely to ``DesignRules.net_clearance_floors``.
+    """
+
+    side: Layer | None = None
+    """Copper layer of the owning footprint's side (issue #6780).
+
+    ``Layer.F_CU`` for a front footprint, ``Layer.B_CU`` for a back one;
+    ``None`` when the constructor did not know (programmatic pads), in which
+    case consumers fall back to :attr:`layer`.  A through-hole pad's
+    :attr:`layer` is always ``F.Cu`` (the loaders do not record per-layer
+    copper for ``*.Cu`` pads), so only this field tells a back-side
+    footprint's through-hole pad apart.  Only the kicad-cli length model
+    (:func:`~kicad_tools.router.kicad_length.router_pad`) reads it: kicad-cli
+    connects a via inside a through-hole pad on the footprint's side only.
+    Routing, clearance and grid code ignore it.
     """
 
     @property

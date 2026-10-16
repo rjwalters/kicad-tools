@@ -238,7 +238,7 @@ def _no_post_route_kicad_cli(monkeypatch: pytest.MonkeyPatch) -> None:
     """
     from kicad_tools.cli import route_cmd
 
-    def _no_oracle(output_path, *, args, quiet=False):
+    def _no_oracle(output_path, *, args, quiet=False, **_kw):
         args._stranded_pour_links = 0
         return 0
 
@@ -269,7 +269,7 @@ def lattice_default_run(tmp_path_factory: pytest.TempPathFactory) -> dict:
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr(route_cmd, "_fill_zones_after_route", lambda *a, **k: None)
 
-        def _no_oracle(output_path, *, args, quiet=False):
+        def _no_oracle(output_path, *, args, quiet=False, **_kw):
             args._stranded_pour_links = 0
             return 0
 

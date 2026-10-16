@@ -40,8 +40,10 @@
 #     --jq-not  a jq boolean expression that is TRUE when an issue carries
 #               none of the labels, for use inside a `gh issue list --jq`
 #               `select(...)`, e.g.
-#                 ([.labels[].name] | contains(["external"]) | not)
-#               Multiple labels are ANDed.
+#                 (any(.labels[].name; . == "external") | not)
+#               Multiple labels are ANDed. Membership is exact (#11366): jq
+#               `contains` on strings is a substring test, so `loom:epic`
+#               would also have hidden `loom:epic-phase`.
 #     --search  gh/forge search qualifiers excluding the labels, e.g.
 #                 -label:"external"
 #
@@ -59,6 +61,7 @@ set -uo pipefail
 # (derived from the registry) by a unit test there.
 # ---------------------------------------------------------------------------
 HARD_EXCLUSION_LABELS=(
+  loom:frozen
   external
 )
 
@@ -106,7 +109,7 @@ case "$MODE" in
     _out=""
     for _l in "${HARD_EXCLUSION_LABELS[@]}"; do
       [[ -n "$_out" ]] && _out+=" and "
-      _out+="([.labels[].name] | contains([\"${_l}\"]) | not)"
+      _out+="(any(.labels[].name; . == \"${_l}\") | not)"
     done
     printf '%s\n' "$_out"
     ;;

@@ -55,6 +55,7 @@ Out of scope for Phase 3I:
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -66,6 +67,8 @@ from .optimizer.serpentine import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from .diffpair_detection import DetectedPair
     from .grid import RoutingGrid
     from .primitives import Route, Segment
@@ -101,6 +104,17 @@ class DiffPairTuneResult:
               segment long enough to host any trombone amplitude.
             * ``"unrouted"`` -- one or both halves were not in
               ``routes_by_net``.
+            * ``"not_length_critical"`` -- the engagement gate declined the
+              pair (``length_critical=False``); no change was made.
+            * ``"skew_limit_not_enforced"`` -- Issue #6664: in the
+              checker-limit engagement mode the pair's skew limit resolves
+              to ``skew_severity="warning"`` (an uncited protocol value
+              ``kct check`` only warns on), so the router declines to
+              tune it; no change was made.
+            * ``"rolled_back_skew_worse"`` -- Issue #6664 backstop in the
+              checker-limit path: the insertions would have left the
+              checker-measured skew larger than before, so they were
+              discarded; no change was made.
         attempts: Number of trombone insertions actually attempted.
         inserts_applied: Number of trombones whose post-insertion check
             passed and were committed.
@@ -108,6 +122,9 @@ class DiffPairTuneResult:
         skew_after_mm: Pair skew after the (possibly empty) sequence of
             successful insertions.
         message: Human-readable summary.
+        tolerance_mm: The skew limit the pair was tuned against (Issue
+            #6664: reported next to the before/after skew).  ``None`` when
+            the caller did not record it.
     """
 
     success: bool = False
@@ -117,6 +134,7 @@ class DiffPairTuneResult:
     skew_before_mm: float = 0.0
     skew_after_mm: float = 0.0
     message: str = ""
+    tolerance_mm: float | None = None
     # The trombone results, kept for diagnostic / test inspection.  An
     # entry is present for every attempt (including rejected ones).
     serpentine_results: list[SerpentineResult] = field(default_factory=list)
@@ -157,6 +175,9 @@ def tune_diff_pair_skew(
     grid: RoutingGrid | None = None,
     prefer_reserved_slack: bool = False,
     fixed_segment_ids: set[int] | None = None,
+    extra_clearance_ok: Callable[[list[Segment], int], bool] | None = None,
+    route_length: Callable[[Route], float] | None = None,
+    max_uncoupled_mm: float | None = None,
 ) -> tuple[Route, Route, DiffPairTuneResult]:
     """Tune the skew of a detected diff pair by serpentining the shorter half.
 
@@ -200,6 +221,30 @@ def tune_diff_pair_skew(
         prefer_reserved_slack: Issue #4085.  Gate for the slack-aware
             segment preference above.  Default ``False`` (inert).  Has no
             effect unless ``grid`` is also supplied.
+        extra_clearance_ok: Issue #6664.  Optional extra post-insertion
+            gate ``(new_segments, shorter_net_id) -> bool`` run after the
+            built-in segment-vs-segment self-check.  ``False`` rolls the
+            insertion back exactly like a built-in violation
+            (``reason="post_insertion_drc_violation"``).  The lattice
+            auto-engage path uses it for foreign pads, vias and net-class
+            clearances; ``None`` (default) keeps the pre-#6664 check.
+        route_length: Issue #6664.  Optional ``Route -> mm`` measure used
+            for every length and skew the tuner compares.  The lattice
+            auto-engage path passes the checker's via-inclusive measure
+            (segments plus drilled via barrel length), so a pair with
+            unequal via counts is tuned on the skew ``kct check`` reports
+            and the *checker's* shorter half gets the bump.  The serpentine
+            only ever adds segment length; via length is constant across
+            insertions.  ``None`` (default) keeps the segment-only measure.
+        max_uncoupled_mm: Issue #6795.  Optional uncoupled-length limit
+            (the one ``kct check`` enforces).  A candidate meander that leaves
+            the pair's figure -- ``max`` of both halves' uncoupled lengths,
+            as the checker measures it -- over this limit AND above its
+            pre-insert value is rejected like a failed placement and the next
+            option is tried; when none fits the pair keeps its pre-insert
+            state.  A pair already over the limit may still be tuned so long
+            as the meander does not grow its uncoupled figure.
+            ``None`` (default) applies no guard.
 
     Returns:
         ``(p_route, n_route, result)`` where ``p_route`` and ``n_route`` are
@@ -256,11 +301,13 @@ def tune_diff_pair_skew(
             result,
         )
 
-    from .length import LengthTracker  # avoid cycle
-    from .primitives import Route
+    from kicad_tools.validate.rules.diffpair_uncoupled_length import UNCOUPLED_EPSILON_MM
 
-    l_p = LengthTracker.calculate_route_length(p_route)
-    l_n = LengthTracker.calculate_route_length(n_route)
+    from .length import LengthTracker  # avoid cycle
+
+    measure = route_length or LengthTracker.calculate_route_length
+    l_p = measure(p_route)
+    l_n = measure(n_route)
     skew = abs(l_p - l_n)
 
     # Already within tolerance -- byte-for-byte unchanged.
@@ -344,88 +391,112 @@ def tune_diff_pair_skew(
         # partner trace at the insertion segment's midpoint.
         hint = _outer_normal_hint(insertion_segment, longer_route)
 
-        # A trombone adds twice its amplitude. For a sub-loop deficit,
-        # using the configured maximum (1 mm by default) needlessly adds
-        # 2 mm and can hit a neighboring lane before the DRC guard rejects
-        # it. Scale that final loop to the actual remaining target instead.
-        length_needed = serpentine_target - LengthTracker.calculate_route_length(current_shorter)
-        amplitude = base_config.amplitude
-        if length_needed > 0:
-            amplitude = min(amplitude, length_needed / 2.0)
-
-        # Build the per-attempt config with side="outer" + the hint.
-        attempt_config = SerpentineConfig(
-            style=base_config.style,
-            amplitude=amplitude,
-            min_spacing=base_config.min_spacing,
-            min_segment_length=base_config.min_segment_length,
-            gap_factor=base_config.gap_factor,
-            max_iterations=base_config.max_iterations,
-            side="outer",
-            outer_normal_hint=hint,
-        )
-        attempt_generator = SerpentineGenerator(attempt_config)
-
-        if fixed_segment_ids:
-            # Generate on the selected mutable host; reranking the full net
-            # could otherwise select a longer fixed escape or a different corridor.
-            serp_result = attempt_generator.generate_trombone(insertion_segment, length_needed)
-            candidate_route = Route(
-                net=current_shorter.net,
-                net_name=current_shorter.net_name,
-                segments=current_shorter.segments[:seg_idx]
-                + serp_result.new_segments
-                + current_shorter.segments[seg_idx + 1 :],
-                vias=current_shorter.vias.copy(),
-                is_escape=current_shorter.is_escape,
-            )
-        else:
-            candidate_route, serp_result = attempt_generator.add_serpentine(
-                current_shorter, serpentine_target
-            )
-        result.serpentine_results.append(serp_result)
-
-        if not serp_result.success:
-            # The trombone generator itself refused (segment too short,
-            # etc.).  Treat the same as no_suitable_segment.
-            result.reason = "no_suitable_segment"
+        # An overshoot (the formerly shorter leg is now the longer one)
+        # leaves nothing to add.  Stop with a distinct reason instead of
+        # committing an empty serpentine that burns an insert (issue #6788).
+        length_needed = serpentine_target - measure(current_shorter)
+        if length_needed <= 0:
+            result.reason = "overshoot"
             result.message = (
-                f"Trombone generation failed on net {shorter_id}: {serp_result.message}"
+                f"Trombone on net {shorter_id} overshot the partner length "
+                f"(skew={current_skew:.4f}mm > tol={tolerance_mm:.4f}mm)"
             )
-            current_shorter = original_shorter_route
+            if current_skew >= skew:
+                current_shorter = original_shorter_route
+                # Reverted to the original route: no insert survives (#6795).
+                result.inserts_applied = 0
             break
 
-        # Post-insertion DRC self-check.  The candidate route's new
-        # segments must not violate intra-pair clearance against the
-        # partner OR collide with any other routed net's segments.
-        # ``serp_result.new_segments`` contains *only* the trombone
-        # segments (entry + loops + exit) -- those are the segments to
-        # check.
-        if not _post_insertion_clearance_ok(
-            new_segments=serp_result.new_segments,
-            shorter_net_id=shorter_id,
-            longer_net_id=longer_id,
-            routes_by_net=routes_by_net,
-            intra_pair_clearance_mm=intra_pair_clearance_mm,
+        candidate_route = None
+        drc_rejected = False
+        generator_failure = ""
+        pre_insert_figure: float | None = None  # computed on first need (#6795)
+        for cand_route, cand_serp in _placement_options(
+            base_config=base_config,
+            current_shorter=current_shorter,
+            first_host=(seg_idx, insertion_segment),
+            first_hint=hint,
+            longer_route=longer_route,
+            length_needed=length_needed,
+            grid=grid,
+            prefer_reserved_slack=prefer_reserved_slack,
+            shorter_id=shorter_id,
+            fixed_segment_ids=fixed_segment_ids,
+            serpentine_target=serpentine_target,
+            measure=measure,
         ):
-            # Rollback: discard the candidate, return the ORIGINAL shorter
-            # route (and the original longer route reference).
-            result.reason = "post_insertion_drc_violation"
-            result.skew_after_mm = current_skew
-            result.message = (
-                f"Post-insertion DRC self-check failed on net {shorter_id} "
-                f"(intra={intra_pair_clearance_mm:.4f}mm); rolled back."
-            )
-            # The drift-prevention contract:
-            current_shorter = original_shorter_route
-            assert current_shorter is original_shorter_route
-            assert current_shorter.segments is original_shorter_segments
+            result.serpentine_results.append(cand_serp)
+            if not cand_serp.success:
+                generator_failure = cand_serp.message
+                continue
+            # An option that adds no copper is not an insert (issue #6788).
+            if measure(cand_route) - measure(current_shorter) <= 1e-9:
+                generator_failure = "serpentine added no length"
+                continue
+            # Uncoupled-length guard (issue #6795): do not trade a skew error
+            # for an uncoupled-length error.  The figure is the one
+            # ``kct check`` judges -- the MAX of both halves' uncoupled
+            # lengths -- so a meander that breaks the longer half's coupling
+            # counts too.  Only a meander that leaves the pair over the limit
+            # AND worse than before this insert is rejected: on a pair already
+            # over the limit (on either half) the skew can still be fixed as
+            # long as the uncoupled figure does not grow.
+            if max_uncoupled_mm is not None:
+                cand_figure = _pair_uncoupled_mm(cand_route, longer_route)
+                if cand_figure > max_uncoupled_mm + UNCOUPLED_EPSILON_MM:
+                    if pre_insert_figure is None:
+                        pre_insert_figure = _pair_uncoupled_mm(current_shorter, longer_route)
+                    if cand_figure > pre_insert_figure + UNCOUPLED_EPSILON_MM:
+                        generator_failure = (
+                            f"uncoupled length exceeds limit ({cand_figure:.3f} mm > "
+                            f"{max_uncoupled_mm:.3f} mm, was {pre_insert_figure:.3f} mm)"
+                        )
+                        continue
+            # Post-insertion DRC self-check.  The candidate route's new
+            # segments must not violate intra-pair clearance against the
+            # partner OR collide with any other routed net's segments.
+            if _post_insertion_clearance_ok(
+                new_segments=cand_serp.new_segments,
+                shorter_net_id=shorter_id,
+                longer_net_id=longer_id,
+                routes_by_net=routes_by_net,
+                intra_pair_clearance_mm=intra_pair_clearance_mm,
+            ) and (
+                extra_clearance_ok is None or extra_clearance_ok(cand_serp.new_segments, shorter_id)
+            ):
+                candidate_route = cand_route
+                break
+            drc_rejected = True
+
+        if candidate_route is None:
+            if drc_rejected:
+                # Rollback: every placement failed.  Discard everything and
+                # return the ORIGINAL shorter route (and the original longer
+                # route reference).
+                result.reason = "post_insertion_drc_violation"
+                result.skew_after_mm = current_skew
+                result.message = (
+                    f"Post-insertion DRC self-check failed on net {shorter_id} "
+                    f"(intra={intra_pair_clearance_mm:.4f}mm); rolled back."
+                )
+            else:
+                result.reason = "no_suitable_segment"
+                result.message = (
+                    f"Trombone generation failed on net {shorter_id}: {generator_failure}"
+                )
+            # The drift-prevention contract.  Inserts committed by earlier
+            # attempts stay (issue #6788); with none committed the original
+            # route is returned by reference.
+            if result.inserts_applied == 0:
+                current_shorter = original_shorter_route
+                assert current_shorter is original_shorter_route
+                assert current_shorter.segments is original_shorter_segments
             break
 
         # Commit this attempt's new route and re-measure skew.
         current_shorter = candidate_route
         result.inserts_applied += 1
-        new_shorter_length = LengthTracker.calculate_route_length(current_shorter)
+        new_shorter_length = measure(current_shorter)
         current_skew = (
             abs(new_shorter_length - target_length)
             if longer_is_p
@@ -450,9 +521,7 @@ def tune_diff_pair_skew(
         )
 
     result.skew_after_mm = (
-        abs(target_length - LengthTracker.calculate_route_length(current_shorter))
-        if result.inserts_applied > 0
-        else skew
+        abs(target_length - measure(current_shorter)) if result.inserts_applied > 0 else skew
     )
 
     # Assemble return values, restoring P/N polarity ordering.  The
@@ -468,6 +537,166 @@ def tune_diff_pair_skew(
         assert longer_route is n_route
         assert longer_route.segments is original_longer_segments
         return current_shorter, n_route, result
+
+
+def _checker_segments(segments: list[Segment]) -> list[tuple[float, float, float, float, str]]:
+    """Segments as the ``(x1, y1, x2, y2, layer)`` tuples the uncoupled-length rule reads."""
+    return [(s.x1, s.y1, s.x2, s.y2, str(s.layer)) for s in segments]
+
+
+def _pair_uncoupled_mm(a: Route, b: Route) -> float:
+    """The pair's uncoupled-length figure as ``kct check`` judges it (issue #6795).
+
+    ``diffpair_uncoupled_length`` fails a pair on ``max(uncoupled(P),
+    uncoupled(N))``, each half measured against the other, so this is
+    symmetric in its arguments.
+    """
+    from kicad_tools.validate.rules.diffpair_uncoupled_length import measure_uncoupled
+
+    sa = _checker_segments(a.segments)
+    sb = _checker_segments(b.segments)
+    return max(measure_uncoupled(sa, sb), measure_uncoupled(sb, sa))
+
+
+# ---------------------------------------------------------------------------
+# Placement search (issue #6788)
+# ---------------------------------------------------------------------------
+
+#: Hosts tried per insert: the best-ranked segment plus the next-best ones.
+MAX_HOST_CANDIDATES: int = 3
+
+#: Amplitude back-off ladder applied to ``SerpentineConfig.amplitude`` when a
+#: placement is rejected (same ladder the match-group tuner uses).
+AMPLITUDE_LADDER: tuple[float, ...] = (1.0, 0.5, 0.25)
+
+
+def exact_fit_amplitude(length_needed: float, max_amplitude: float) -> tuple[int, float]:
+    """Return ``(loops, amplitude)`` adding exactly ``length_needed`` mm.
+
+    A trombone loop adds ``2 * amplitude``.  The loop count is the fewest
+    whose loops at ``max_amplitude`` cover the need, and the amplitude is then
+    shrunk so those loops add the need and no more.  A single loop keeps the
+    pre-#6788 sizing (``need / 2``) bit for bit; multi-loop sizing is nudged
+    up by 1e-9 so ``ceil`` in the generator lands on the same loop count.
+    """
+    loops = max(1, math.ceil(length_needed / (2.0 * max_amplitude)))
+    if loops == 1:
+        return 1, min(max_amplitude, length_needed / 2.0)
+    return loops, length_needed / (2.0 * loops) * (1.0 + 1e-9)
+
+
+def _placement_options(
+    *,
+    base_config: SerpentineConfig,
+    current_shorter: Route,
+    first_host: tuple[int, Segment],
+    first_hint: tuple[float, float],
+    longer_route: Route,
+    length_needed: float,
+    grid: RoutingGrid | None,
+    prefer_reserved_slack: bool,
+    shorter_id: int,
+    fixed_segment_ids: set[int] | None,
+    serpentine_target: float,
+    measure: Callable[[Route], float],
+):
+    """Yield ``(candidate_route, SerpentineResult)`` placements, best first.
+
+    The first option is the pre-#6788 attempt (best host, outer-normal side,
+    start-anchored) with exact-fit amplitude.  Later options are only pulled
+    when the caller rejected the earlier ones: per ranked host, a meander
+    centred on the host, then the opposite side, then the amplitude ladder.
+    """
+    from .length import LengthTracker  # avoid cycle
+    from .match_group_tuning import _centered_sub_host, _rank_candidate_segments
+    from .primitives import Route
+
+    gap_mm = base_config.min_spacing * base_config.gap_factor
+
+    def config_for(amplitude: float, hint: tuple[float, float]) -> SerpentineConfig:
+        return SerpentineConfig(
+            style=base_config.style,
+            amplitude=amplitude,
+            min_spacing=base_config.min_spacing,
+            min_segment_length=base_config.min_segment_length,
+            gap_factor=base_config.gap_factor,
+            max_iterations=base_config.max_iterations,
+            side="outer",
+            outer_normal_hint=hint,
+        )
+
+    # First option: identical to the original attempt apart from sizing.
+    _, amplitude = exact_fit_amplitude(length_needed, base_config.amplitude)
+    generator = SerpentineGenerator(config_for(amplitude, first_hint))
+    seg_idx, host = first_host
+    if fixed_segment_ids:
+        serp = generator.generate_trombone(host, length_needed)
+        yield (
+            Route(
+                net=current_shorter.net,
+                net_name=current_shorter.net_name,
+                segments=current_shorter.segments[:seg_idx]
+                + serp.new_segments
+                + current_shorter.segments[seg_idx + 1 :],
+                vias=current_shorter.vias.copy(),
+                is_escape=current_shorter.is_escape,
+            ),
+            serp,
+        )
+    else:
+        # ``add_serpentine`` targets segment length; offset the
+        # (insertion-invariant) via length out of the target.
+        via_extra = measure(current_shorter) - LengthTracker.calculate_route_length(current_shorter)
+        yield generator.add_serpentine(current_shorter, serpentine_target - via_extra)
+
+    hosts = [first_host]
+    for idx, seg in _rank_candidate_segments(
+        current_shorter,
+        min_segment_length=base_config.min_segment_length,
+        max_candidates=MAX_HOST_CANDIDATES + 1,
+        fixed_segment_ids=fixed_segment_ids,
+    ):
+        if idx != first_host[0] and len(hosts) < MAX_HOST_CANDIDATES:
+            hosts.append((idx, seg))
+
+    for host_no, (idx, host) in enumerate(hosts):
+        base_hint = first_hint if host_no == 0 else _outer_normal_hint(host, longer_route)
+        sides = [base_hint, (-base_hint[0], -base_hint[1])]
+        for centred in (False, True):
+            for hint in sides:
+                for factor in AMPLITUDE_LADDER:
+                    if host_no == 0 and not centred and hint == first_hint and factor == 1.0:
+                        continue  # already yielded as the first option
+                    loops, amp = exact_fit_amplitude(length_needed, base_config.amplitude * factor)
+                    lead_in: list[Segment] = []
+                    lead_out: list[Segment] = []
+                    sub_host = host
+                    if centred:
+                        sub_host, lead_in, lead_out = _centered_sub_host(
+                            host,
+                            loops=loops,
+                            gap_mm=gap_mm,
+                            min_length_mm=base_config.min_segment_length,
+                        )
+                        if sub_host is host:
+                            continue  # no slack: same as start-anchored
+                    serp = SerpentineGenerator(config_for(amp, hint)).generate_trombone(
+                        sub_host, length_needed
+                    )
+                    if serp.success:
+                        serp.new_segments = lead_in + serp.new_segments + lead_out
+                    yield (
+                        Route(
+                            net=current_shorter.net,
+                            net_name=current_shorter.net_name,
+                            segments=current_shorter.segments[:idx]
+                            + serp.new_segments
+                            + current_shorter.segments[idx + 1 :],
+                            vias=current_shorter.vias.copy(),
+                            is_escape=current_shorter.is_escape,
+                        ),
+                        serp,
+                    )
 
 
 # ---------------------------------------------------------------------------

@@ -2,7 +2,7 @@
 title: "usb_joystick_routed"
 subtitle: "Design Report"
 author: "kicad-tools 0.22.0"
-date: "Rev 1 | 2026-10-09 | jlcpcb-tier1"
+date: "Rev 1 | 2026-10-14 | jlcpcb-tier1"
 geometry: "margin=1in"
 fontsize: 11pt
 colorlinks: true
@@ -155,30 +155,30 @@ The following 1 through-hole component is **excluded from the SMT pick-and-place
 
 | Metric | Count |
 |--------|-------|
-| Errors | 0 |
-| Warnings | 16 |
-| Blocking | 0 |
+| Errors | 12 |
+| Warnings | 14 |
+| Blocking | 12 |
 
-**Status**: PASS
+**Status**: FAIL
 ### Violations by Type
 
 | Violation Type | Count |
 |----------------|-------|
 | hole_to_hole_clearance | 14 |
-| silk_edge_clearance | 2 |
+| kicad-cli:clearance | 12 |
 
 
 \newpage
 
 ## Manufacturing Readiness
 
-**Verdict**: WARNING
+**Verdict**: NOT_READY
 
 ### Action Items
 
-- **[OPTIONAL]** Verify zone fill in KiCad: 12 nets appear incomplete but may be connected via zone fills
+- **[CRITICAL]** Fix 12 blocking DRC violations (kicad-cli: clearance (12))
 - **[OPTIONAL]** Verify zone fill in KiCad for 2 zone-connected nets
-- **[OPTIONAL]** Review 16 DRC warnings
+- **[OPTIONAL]** Review 14 DRC warnings
 
 
 \newpage

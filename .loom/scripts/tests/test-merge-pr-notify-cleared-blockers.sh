@@ -3,9 +3,9 @@
 # `loom:blocked` re-check wired into merge-pr.sh (#9102, item 2 of #8927's own
 # deferred "Suggested fix" list).
 #
-# #8927 shipped a fleet-wide, sweep-pre-flight advisory
+# #8927 shipped a per-repository, sweep-pre-flight advisory
 # (`loom-daemon check-stale-blocked`) that re-checks every open `loom:blocked`
-# artifact once per sweep. This closes the highest-value gap #8927 itself
+# artifact in one repository once per sweep. This closes the highest-value gap #8927 itself
 # named: the moment an issue/PR closes, immediately check whether any OTHER
 # open `loom:blocked` artifact cited it as a blocker, rather than waiting for
 # the next sweep. `merge-pr.sh`'s `_notify_cleared_blockers` is a one-line
@@ -38,13 +38,9 @@ source "$SCRIPT_DIR/lib/require-daemon-bin.sh"
 loom_test_require_daemon_bin "$HELPERS_DIR" "notify-cleared-blockers"
 
 # Colors
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-NC='\033[0m'
+# shellcheck source=lib/assert.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/assert.sh"
 
-TESTS_RUN=0
-TESTS_PASSED=0
-TESTS_FAILED=0
 
 assert_contains() {
     local haystack="$1" needle="$2" msg="$3"
@@ -74,19 +70,6 @@ assert_not_contains() {
     fi
 }
 
-assert_eq() {
-    local expected="$1" actual="$2" msg="$3"
-    TESTS_RUN=$((TESTS_RUN + 1))
-    if [[ "$expected" == "$actual" ]]; then
-        TESTS_PASSED=$((TESTS_PASSED + 1))
-        echo -e "  ${GREEN}PASS${NC}: $msg"
-    else
-        TESTS_FAILED=$((TESTS_FAILED + 1))
-        echo -e "  ${RED}FAIL${NC}: $msg"
-        echo "    Expected: '$expected'"
-        echo "    Actual:   '$actual'"
-    fi
-}
 
 # --- Minimal logging shims the extracted function calls ---
 info()    { echo "INFO: $*"; }

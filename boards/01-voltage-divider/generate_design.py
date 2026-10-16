@@ -24,6 +24,7 @@ from kicad_tools.core.project_file import create_minimal_project, save_project
 from kicad_tools.core.schematic_uuids import UuidSequence
 from kicad_tools.dev import warn_if_stale
 from kicad_tools.lvs import write_lvs_report
+from kicad_tools.operations.pintype import annotate_pcb_file_pintypes
 from kicad_tools.pcb.center_sheet import centered_origin
 from kicad_tools.recipes.gate import evaluate_pipeline_gate
 from kicad_tools.recipes.precondition import require_spec
@@ -384,6 +385,17 @@ def create_voltage_divider_pcb(output_dir: Path) -> Path:
     )
     (pad "1" thru_hole rect (at 0 {-pitch:.3f}) (size 1.7 1.7) (drill 1.0) (layers "*.Cu" "*.Mask") (net {pin1_num} "{pin1_net}"))
     (pad "2" thru_hole oval (at 0 {pitch:.3f}) (size 1.7 1.7) (drill 1.0) (layers "*.Cu" "*.Mask") (net {pin2_num} "{pin2_net}"))
+  \t(model "${{KICAD10_3DMODEL_DIR}}/Connector_PinHeader_2.54mm.3dshapes/PinHeader_1x02_P2.54mm_Vertical.step"
+  \t\t(offset
+  \t\t\t(xyz 0 1.27 0)
+  \t\t)
+  \t\t(scale
+  \t\t\t(xyz 1 1 1)
+  \t\t)
+  \t\t(rotate
+  \t\t\t(xyz 0 0 0)
+  \t\t)
+  \t)
   )"""
 
     def generate_resistor(
@@ -409,6 +421,17 @@ def create_voltage_divider_pcb(output_dir: Path) -> Path:
     )
     (pad "1" smd roundrect (at {-pad_offset} 0) (size 1.0 1.3) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net {pin1_num} "{pin1_net}"))
     (pad "2" smd roundrect (at {pad_offset} 0) (size 1.0 1.3) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net {pin2_num} "{pin2_net}"))
+  \t(model "${{KICAD10_3DMODEL_DIR}}/Resistor_SMD.3dshapes/R_0805_2012Metric.step"
+  \t\t(offset
+  \t\t\t(xyz 0 0 0)
+  \t\t)
+  \t\t(scale
+  \t\t\t(xyz 1 1 1)
+  \t\t)
+  \t\t(rotate
+  \t\t\t(xyz 0 0 0)
+  \t\t)
+  \t)
   )"""
 
     # Build the PCB file
@@ -803,6 +826,15 @@ def main() -> int:
 
         # Step 4: Create PCB
         pcb_path = create_voltage_divider_pcb(output_dir)
+
+        # Step 4.1: Copy schematic pin names/electrical types onto the pads
+        # (issues #5985, #6025), as KiCad's "Update PCB from Schematic" does.
+        # ``route_pcb`` builds the routed PCB from this text, so it inherits
+        # the ``(pintype ...)`` evidence ``kct detect-mistakes`` reads for
+        # rails.
+        annotation = annotate_pcb_file_pintypes(pcb_path, sch_path)
+        assert not annotation.missing_pads, annotation.missing_pads
+        print(f"   Pad pin types annotated: {annotation.annotated}")
 
         # Step 5: Route PCB
         routed_path = output_dir / "voltage_divider_routed.kicad_pcb"

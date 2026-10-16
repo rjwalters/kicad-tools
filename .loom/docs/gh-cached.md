@@ -228,8 +228,8 @@ TTL in the front; the TTL stays opt-in via `gh-cached`. Everything else
 (mutations, `api`, `run`, `pr diff`, `repo view`, unknown or
 ambiguous argv, a TTY on stdout, hosts other than GitHub) execs the next `gh`
 with argv, streams and exit status untouched. The next `gh` is `LOOM_GH_BIN`,
-else the next `gh` on `PATH` (the managed launcher, #9987, when installed), so
-its policy and telemetry are composed with, not replaced. Any cache error
+else the next `gh` on `PATH`, so whatever stands there is composed with, not
+replaced. Any cache error
 degrades to that real `gh`.
 
 - **`gh pr checks <N>` (#10516)**: non-TTY text and `--json` over
@@ -257,9 +257,8 @@ degrades to that real `gh`.
   `scripts/install/provision-hooks.sh` with matcher `""`) runs
   `loom-daemon gh-shim session-env`. That appends one guarded `PATH` line to
   `$CLAUDE_ENV_FILE`, in the worker's order (`agent_gh::session_path`):
-  - the managed launcher first when a policy names one;
-  - then the front;
-  - then the session's existing `PATH`, so the 2am telemetry shim stays the front's next `gh`.
+  - the front first;
+  - then the session's existing `PATH`, so whatever `gh` came first stays the front's next `gh`.
 
   Claude Code sources that file before every Bash call, and Task subagents
   inherit it. This was verified on Claude Code 2.1.291. A `SubagentStart` hook
@@ -321,14 +320,13 @@ degrades to that real `gh`.
 
 Standalone `defaults/scripts/*.sh` resolve `$GH_READ` from `$SCRIPT_DIR/gh-cached`
 (same `--version` probe, same fallback to plain `gh`; cwd-independent), on a single
-line per script — no shared lib, since `blame-issue.sh` sources none and
-`resolve-tier-model.sh` sources `forge-helpers.sh` only best-effort.
+line per script — no shared lib, since `blame-issue.sh` sources none.
 
 | Cached (`$GH_READ`) | Plain `gh` (and why) |
 |---|---|
 | `check-duplicate.sh` — the REST-fallback `gh api` branches of the open/closed issue and merged-PR surveys (the primary listing path is unchanged), cross-reference timeline | `check-evaluating-staleness.sh` — label + timeline reads: **claim arbitration** |
 | `blame-issue.sh` — commit-to-PR, closing-issue, body, label-timeline reads (read-only diagnostics) | `sweep-lease-renew.sh` — lease comments: **CAS-style claim** (own-yield/fence) |
-| `resolve-tier-model.sh` — issue body read, plain-`gh` fallback arms only (`forge_gh_repo_safe` stays uncached) | `verdict-staleness-guard.sh` — PR comments: **verdict-time CAS recheck** |
+| | `verdict-staleness-guard.sh` — PR comments: **verdict-time CAS recheck** |
 | `sync-labels.sh` — per-label `label list` existence probe and `--check` label list (one `--clear-cache` after the run's writes; probed only on the GitHub mutating / `--check` paths) | `sync-labels.sh` `github_label_usage` — gates irreversible `label delete` |
 | | `rebase-stacked-children.sh`, `claim-staleness.sh` — **claim arbitration** |
 

@@ -406,6 +406,10 @@ class TestEscalationPlaneAudit:
 
         monkeypatch.setattr(route_cmd_module, "_finalize_routes", finalize)
         rc = route_cmd_module.main(argv)
+        if dry_run:
+            # Issue #6563: --dry-run prints the plan and routes nothing.
+            assert loaded == [] and selected == []
+            return rc
         assert selected == [loaded[0]]
         if earlier_best:
             assert len(attempted_stacks) > 1

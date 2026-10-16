@@ -8,9 +8,12 @@ multi-trial Monte Carlo routing.
 
 from __future__ import annotations
 
+import concurrent.futures
+import contextlib
 import math
 import os
 import random
+import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from typing import TYPE_CHECKING
 
@@ -178,6 +181,203 @@ class MonteCarloRouter:
         )
 
 
+# ---------------------------------------------------------------------------
+# Issue #6343: best-trial publication for interrupted multi-start runs
+# ---------------------------------------------------------------------------
+#
+# Monte Carlo and evolutionary routing keep their best trial in LOCAL variables
+# (and, on the parallel path, the trials themselves run in worker processes),
+# copying it into ``autorouter.routes`` only once the whole run finishes.  A
+# deadline or Ctrl+C that unwinds mid-run therefore found ``router.routes``
+# empty and the partial save wrote a board with no copper after 20 minutes of
+# trials.  Each run now publishes every newly accepted best on the router as
+# it is found; the CLI's partial save (``_save_partial_results``) restores it
+# before serializing.  The attributes are cleared when the run finishes
+# normally (its result is then in ``autorouter.routes``) or fails with an
+# ordinary ``Exception`` (the caller carries on, so a stale best must never be
+# substituted for a later stage's copper).  A ``BaseException`` unwind --
+# ``RouteDeadlineExpired``, ``KeyboardInterrupt`` -- leaves them in place on
+# purpose: that is exactly the case the save needs them for.
+
+
+def clear_best_trial(autorouter) -> None:
+    """Forget any best trial published by a previous multi-start run."""
+    autorouter._best_trial_routes = None
+    autorouter._best_trial_meta = None
+
+
+def publish_best_trial(
+    autorouter,
+    routes: list[Route] | None,
+    *,
+    strategy: str,
+    trial: int,
+    score: float,
+) -> None:
+    """Record a newly accepted best trial on the router (issue #6343).
+
+    Cheap by design: a shallow list copy, no grid replay.  The partial save
+    only needs ``router.routes`` to serialize copper.
+    """
+    autorouter._best_trial_routes = list(routes) if routes else []
+    autorouter._best_trial_meta = {"strategy": strategy, "trial": trial, "score": score}
+
+
+def terminate_executor(executor: ProcessPoolExecutor) -> None:
+    """Stop a process pool without waiting for running trials (issue #6343).
+
+    ``shutdown(wait=True)`` -- what ``with ProcessPoolExecutor()`` does on
+    exit -- joins workers that may each be minutes into a trial.  On a
+    timeout or an interrupt the parent must return (or save) now, so cancel
+    the queued trials and terminate the running ones.
+    """
+    terminate = getattr(executor, "terminate_workers", None)  # Python >= 3.14
+    if terminate is not None:
+        with contextlib.suppress(Exception):
+            terminate()
+        return
+    # Older Pythons: snapshot the worker processes BEFORE ``shutdown``, which
+    # drops the executor's reference to them.  Left running, they would also
+    # be joined by ``concurrent.futures``' interpreter-exit hook.
+    processes = list((getattr(executor, "_processes", None) or {}).values())
+    with contextlib.suppress(Exception):
+        executor.shutdown(wait=False, cancel_futures=True)
+    for process in processes:
+        with contextlib.suppress(Exception):
+            process.terminate()
+
+
+def deadline_from_timeout(timeout: float | None) -> float | None:
+    """Monotonic deadline for an optional wall-clock budget in seconds."""
+    return None if timeout is None else time.monotonic() + max(0.0, float(timeout))
+
+
+def remaining_seconds(deadline: float | None) -> float | None:
+    """Seconds left before ``deadline`` (never negative), or ``None``."""
+    return None if deadline is None else max(0.0, deadline - time.monotonic())
+
+
+# ---------------------------------------------------------------------------
+# Issue #6345: route one multi-start trial in the order it was given
+# ---------------------------------------------------------------------------
+#
+# ``Autorouter.route_all(net_order)`` re-sorts a caller-supplied order by
+# ``_get_net_priority``, whose key is effectively unique per net, so every
+# Monte Carlo shuffle and every evolutionary ``net_order`` gene was undone and
+# all trials routed the same sequence (byte-identical results on board 05).
+# ``route_all_negotiated()`` takes no order at all.  The one seam both entry
+# points honour without the re-sort is ``_forced_net_order`` (#3897), so a
+# trial installs its order there for the duration of the call.
+
+
+def _initial_trial_order(autorouter) -> list[int]:
+    """Base net order for a multi-start run (trial 0 / seed chromosome).
+
+    Honours a user ``--order-method`` order (``_forced_net_order``) when one
+    is installed, else the priority sort -- the same order a single default
+    run would route.  Pour nets and net 0 are filtered out.
+    """
+    forced = getattr(autorouter, "_forced_net_order", None)
+    if forced is not None:
+        base_order = [n for n in forced if n in autorouter.nets]
+    else:
+        base_order = sorted(autorouter.nets.keys(), key=lambda n: autorouter._get_net_priority(n))
+    # Issue #1295: Filter out pour nets before multi-start trials
+    base_order = autorouter._filter_pour_nets(base_order)
+    return [n for n in base_order if n != 0]
+
+
+def route_trial(
+    router,
+    net_order: list[int] | None,
+    *,
+    use_negotiated: bool = False,
+    negotiated_kwargs: dict | None = None,
+    seed: int | None = None,
+    timeout: float | None = None,
+    per_net_timeout: float | None = None,
+) -> list[Route]:
+    """Route every net of ``router`` in exactly ``net_order`` (issue #6345).
+
+    The order is installed as ``router._forced_net_order`` for the call, so
+    neither ``route_all`` nor ``route_all_negotiated`` re-sorts it by priority
+    (matrix layer preferences, match-group interleaving and byte-lane slots
+    still apply, as for ``kct route --order-method``).  The previous forced
+    order is restored afterwards so a parent router is never left forced.
+
+    Args:
+        router: The Autorouter to route on (already reset for this trial).
+        net_order: Order the trial must route in.  ``None`` routes in the
+            router's own default order (exactly what a single default run
+            does, matrix-preference re-sort included) -- used for trial 0
+            so the baseline stays faithful.
+        use_negotiated: Run ``route_all_negotiated`` (rip-up / negotiation)
+            instead of a single ``route_all`` pass.
+        negotiated_kwargs: Extra keyword arguments for
+            ``route_all_negotiated`` (iterations, patience, ...).  Must not
+            contain ``seed``, ``timeout`` or ``per_net_timeout``.
+        seed: Seed for the negotiated router's perturbation.
+        timeout: Wall-clock budget for this trial in seconds, or ``None``.
+        per_net_timeout: Per-net wall-clock cap in seconds, or ``None``.
+    """
+    previous = router._forced_net_order
+    if net_order is not None:
+        router._forced_net_order = list(net_order)
+    try:
+        routes: list[Route]
+        if use_negotiated:
+            routes = router.route_all_negotiated(
+                **(negotiated_kwargs or {}),
+                seed=seed,
+                timeout=timeout,
+                per_net_timeout=per_net_timeout,
+            )
+        else:
+            routes = router.route_all(
+                timeout=timeout,
+                per_net_timeout=per_net_timeout,
+                suppress_no_timeout_warning=True,
+            )
+        return routes
+    finally:
+        router._forced_net_order = previous
+
+
+def baseline_trial_order(autorouter, order: list[int], base_order: list[int]) -> list[int] | None:
+    """The order to force for a trial, or ``None`` for the router default.
+
+    A trial whose order is the unperturbed base order routes with no forced
+    order when the user installed none, so it is byte-identical to a single
+    default run (the default path re-sorts after matrix-preference boosts,
+    which a forced order skips).
+    """
+    if getattr(autorouter, "_forced_net_order", None) is None and list(order) == list(base_order):
+        return None
+    return list(order)
+
+
+def trial_timeout(deadline: float | None, trials_left: int, workers: int = 1) -> float | None:
+    """Per-trial wall-clock budget: the time left over the remaining waves.
+
+    ``trials_left`` trials on ``workers`` processes take
+    ``ceil(trials_left / workers)`` sequential waves; each trial gets an equal
+    share of what is left so the last wave is not starved (#2794, #6345).
+
+    The share keeps headroom (10%, at least 90 s, at most half) for the work a
+    trial does past its routing budget -- the negotiated post-sweep (bounded
+    at 60 s), solution scoring and returning the routes to the parent.  On
+    board 05 four negotiated trials given the full share finished within
+    seconds of the parent's deadline, which would have abandoned all of them.
+    """
+    left = remaining_seconds(deadline)
+    if left is None:
+        return None
+    waves = max(1, math.ceil(max(1, trials_left) / max(1, workers)))
+    share = left / waves
+    headroom = min(0.5 * share, max(0.1 * share, 90.0))
+    return max(1.0, share - headroom)
+
+
 def run_monte_carlo(
     autorouter,
     num_trials: int = 10,
@@ -186,6 +386,9 @@ def run_monte_carlo(
     verbose: bool = True,
     progress_callback: ProgressCallback | None = None,
     num_workers: int | None = None,
+    timeout: float | None = None,
+    negotiated_kwargs: dict | None = None,
+    per_net_timeout: float | None = None,
 ) -> list[Route]:
     """Run Monte Carlo multi-start routing on an Autorouter instance.
 
@@ -201,10 +404,55 @@ def run_monte_carlo(
         progress_callback: Optional callback for progress updates
         num_workers: Number of parallel workers. None or 0 for auto-detection
             based on CPU count. 1 for sequential execution.
+        timeout: Optional wall-clock budget in seconds (issue #6343).  When it
+            runs out no further trial is started, trials still running in
+            worker processes are abandoned, and the best trial completed so
+            far is returned.  ``None`` (default) means no wall-clock limit.
+            Each trial is also given an equal share of what is left (issue
+            #6345) so a negotiated trial cannot eat the whole budget.
+        negotiated_kwargs: Extra ``route_all_negotiated`` keyword arguments
+            for negotiated trials (issue #6345).
+        per_net_timeout: Per-net wall-clock cap forwarded to every trial.
+
+    Each trial routes in its own order (issue #6345): trial 0 in the default
+    order, later trials in a within-tier shuffle with promotions.
 
     Returns:
         List of routes from the best trial
     """
+    clear_best_trial(autorouter)
+    try:
+        return _run_monte_carlo(
+            autorouter,
+            num_trials=num_trials,
+            use_negotiated=use_negotiated,
+            seed=seed,
+            verbose=verbose,
+            progress_callback=progress_callback,
+            num_workers=num_workers,
+            timeout=timeout,
+            negotiated_kwargs=negotiated_kwargs,
+            per_net_timeout=per_net_timeout,
+        )
+    except Exception:
+        clear_best_trial(autorouter)
+        raise
+
+
+def _run_monte_carlo(
+    autorouter,
+    *,
+    num_trials: int,
+    use_negotiated: bool,
+    seed: int | None,
+    verbose: bool,
+    progress_callback: ProgressCallback | None,
+    num_workers: int | None,
+    timeout: float | None,
+    negotiated_kwargs: dict | None = None,
+    per_net_timeout: float | None = None,
+) -> list[Route]:
+    deadline = deadline_from_timeout(timeout)
     base_seed = seed if seed is not None else random.randint(0, 2**31 - 1)
     random.seed(base_seed)
 
@@ -218,11 +466,11 @@ def run_monte_carlo(
         print(f"  Trials: {num_trials}, Negotiated: {use_negotiated}")
         if num_workers > 1:
             print(f"  Parallel workers: {num_workers}")
+        if timeout is not None:
+            print(f"  Timeout: {timeout:.1f}s")
 
-    base_order = sorted(autorouter.nets.keys(), key=lambda n: autorouter._get_net_priority(n))
-    # Issue #1295: Filter out pour nets before Monte Carlo trials
-    base_order = autorouter._filter_pour_nets(base_order)
-    base_order = [n for n in base_order if n != 0]
+    # Issue #6345: honour a user ``--order-method`` order as the base.
+    base_order = _initial_trial_order(autorouter)
 
     best_routes: list[Route] | None = None
     best_score, best_trial = float("-inf"), -1
@@ -239,6 +487,9 @@ def run_monte_carlo(
                 num_workers=num_workers,
                 verbose=verbose,
                 progress_callback=progress_callback,
+                deadline=deadline,
+                negotiated_kwargs=negotiated_kwargs,
+                per_net_timeout=per_net_timeout,
             )
         except Exception as e:
             if verbose:
@@ -250,6 +501,13 @@ def run_monte_carlo(
     # Sequential execution (num_workers == 1 or fallback)
     if num_workers == 1:
         for trial in range(num_trials):
+            if deadline is not None and time.monotonic() >= deadline:
+                if verbose:
+                    print(
+                        f"  Timeout {timeout:.1f}s reached before trial {trial + 1}; "
+                        f"returning best (score={best_score:.2f})"
+                    )
+                break
             if progress_callback is not None:
                 if not progress_callback(
                     trial / num_trials, f"Trial {trial + 1}/{num_trials}", True
@@ -266,10 +524,17 @@ def run_monte_carlo(
                 net_order = autorouter._shuffle_within_tiers(
                     base_order, promotion_rate=promotion_rate
                 )
-            routes = (
-                autorouter.route_all_negotiated()
-                if use_negotiated
-                else autorouter.route_all(net_order)
+            # Issue #6345: route in THIS trial's order (``route_all(order)``
+            # re-sorted it back to the priority order, and the negotiated
+            # call took no order at all, so every trial was identical).
+            routes = route_trial(
+                autorouter,
+                baseline_trial_order(autorouter, net_order, base_order),
+                use_negotiated=use_negotiated,
+                negotiated_kwargs=negotiated_kwargs,
+                seed=base_seed + trial,
+                timeout=trial_timeout(deadline, num_trials - trial),
+                per_net_timeout=per_net_timeout,
             )
             score = autorouter._evaluate_solution(routes)
 
@@ -282,6 +547,9 @@ def run_monte_carlo(
 
             if score > best_score:
                 best_score, best_routes, best_trial = score, routes.copy(), trial
+                publish_best_trial(
+                    autorouter, best_routes, strategy="monte-carlo", trial=trial, score=score
+                )
 
     if verbose:
         print(f"\n  Best: Trial {best_trial + 1} (score={best_score:.2f})")
@@ -300,6 +568,9 @@ def run_monte_carlo(
     autorouter.routes = best_routes if best_routes else []
     for route in autorouter.routes:
         autorouter.grid.mark_route_usage(route)
+    # Issue #6343: the best trial now lives in ``autorouter.routes``; a later
+    # stage owns them from here, so the partial save must not swap them back.
+    clear_best_trial(autorouter)
 
     if progress_callback is not None:
         routed = len({r.net for r in autorouter.routes}) if autorouter.routes else 0
@@ -319,6 +590,9 @@ def _run_parallel(
     num_workers: int,
     verbose: bool,
     progress_callback: ProgressCallback | None,
+    deadline: float | None = None,
+    negotiated_kwargs: dict | None = None,
+    per_net_timeout: float | None = None,
 ) -> tuple[list[Route] | None, float, int]:
     """Run Monte Carlo trials in parallel using ProcessPoolExecutor.
 
@@ -331,6 +605,9 @@ def _run_parallel(
         num_workers: Number of parallel workers
         verbose: Whether to print progress
         progress_callback: Optional progress callback
+        deadline: Optional ``time.monotonic()`` deadline (issue #6343).  When
+            it passes, trials still running are abandoned and the best
+            completed trial is returned.
 
     Returns:
         Tuple of (best_routes, best_score, best_trial)
@@ -340,6 +617,11 @@ def _run_parallel(
 
     # Serialize current state for workers
     base_config = autorouter._serialize_for_parallel()
+    # Issue #6345: every trial gets an equal share of the budget, sized for
+    # ``ceil(num_trials / num_workers)`` waves.
+    per_trial_timeout = trial_timeout(deadline, num_trials, num_workers)
+    # Trial 0 routes in the router's default order unless the user forced one.
+    base_order_forced = getattr(autorouter, "_forced_net_order", None) is not None
 
     # Create configs for each trial
     trial_configs = []
@@ -350,7 +632,11 @@ def _run_parallel(
                 "trial_num": trial,
                 "seed": base_seed + trial,
                 "base_order": base_order,
+                "base_order_forced": base_order_forced,
                 "use_negotiated": use_negotiated,
+                "negotiated_kwargs": dict(negotiated_kwargs or {}),
+                "trial_timeout": per_trial_timeout,
+                "per_net_timeout": per_net_timeout,
             }
         )
         trial_configs.append(config)
@@ -360,49 +646,84 @@ def _run_parallel(
     best_trial = -1
     completed = 0
 
-    with ProcessPoolExecutor(max_workers=num_workers) as executor:
+    executor = ProcessPoolExecutor(max_workers=num_workers)
+    try:
         # Submit all tasks
         futures = {
             executor.submit(_run_monte_carlo_trial, config): config["trial_num"]
             for config in trial_configs
         }
 
-        # Process results as they complete
-        for future in as_completed(futures):
-            trial_num = futures[future]
-            try:
-                routes, score, _ = future.result()
-                completed += 1
+        # Process results as they complete.  Issue #6343: bounded by the
+        # deadline so a timeout returns the best completed trial instead of
+        # waiting minutes on the trials still running.
+        try:
+            for future in as_completed(futures, timeout=remaining_seconds(deadline)):
+                trial_num = futures[future]
+                try:
+                    routes, score, _ = future.result()
+                    completed += 1
 
-                if progress_callback is not None:
-                    if not progress_callback(
+                    # Issue #6364: fold this trial into the best BEFORE the
+                    # progress callback can cancel, so a cancel returns the
+                    # best of every completed trial -- including this one.
+                    is_new_best = score > best_score
+                    if is_new_best:
+                        best_score = score
+                        best_routes = routes
+                        best_trial = trial_num
+                        publish_best_trial(
+                            autorouter,
+                            routes,
+                            strategy="monte-carlo",
+                            trial=trial_num,
+                            score=score,
+                        )
+
+                    if verbose:
+                        status = "NEW BEST" if is_new_best else ""
+                        net_count = len({r.net for r in routes}) if routes else 0
+                        via_count = sum(len(r.vias) for r in routes) if routes else 0
+                        print(
+                            f"  Trial {trial_num + 1}: {net_count}/{len(base_order)} nets, "
+                            f"{via_count} vias, score={score:.2f} {status}"
+                        )
+
+                    if progress_callback is not None and not progress_callback(
                         completed / num_trials,
                         f"Completed {completed}/{num_trials} trials",
                         True,
                     ):
-                        # Cancel remaining futures
-                        for f in futures:
-                            f.cancel()
-                        break
+                        # Issue #6364: a cancel must not join the trials still
+                        # running (``shutdown(wait=True)`` would block until
+                        # each finishes).  Abandon them, as the timeout
+                        # branch below does, and return the best so far.
+                        if verbose:
+                            print(
+                                f"  Cancelled after {completed}/{num_trials} trials; "
+                                f"returning best (score={best_score:.2f})"
+                            )
+                        terminate_executor(executor)
+                        return best_routes, best_score, best_trial
 
-                is_new_best = score > best_score
-                if is_new_best:
-                    best_score = score
-                    best_routes = routes
-                    best_trial = trial_num
+                except Exception as e:
+                    if verbose:
+                        print(f"  Trial {trial_num + 1}: FAILED - {e}")
+                    completed += 1
+        except concurrent.futures.TimeoutError:
+            if verbose:
+                print(
+                    f"  Timeout reached after {completed}/{num_trials} trials; "
+                    f"abandoning the rest, returning best (score={best_score:.2f})"
+                )
+            terminate_executor(executor)
+            return best_routes, best_score, best_trial
+    except BaseException:
+        # A deadline (``RouteDeadlineExpired``) or Ctrl+C unwinding through
+        # here must not wait for the workers to finish their trials: that
+        # join would eat the partial save's grace period.
+        terminate_executor(executor)
+        raise
 
-                if verbose:
-                    status = "NEW BEST" if is_new_best else ""
-                    net_count = len({r.net for r in routes}) if routes else 0
-                    via_count = sum(len(r.vias) for r in routes) if routes else 0
-                    print(
-                        f"  Trial {trial_num + 1}: {net_count}/{len(base_order)} nets, "
-                        f"{via_count} vias, score={score:.2f} {status}"
-                    )
-
-            except Exception as e:
-                if verbose:
-                    print(f"  Trial {trial_num + 1}: FAILED - {e}")
-                completed += 1
-
+    executor.shutdown(wait=True)
     return best_routes, best_score, best_trial

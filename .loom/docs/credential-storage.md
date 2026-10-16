@@ -58,17 +58,6 @@ precedence, so verify effective configuration rather than promising that a
 machine default overrides every project. An ignored repository override may
 reference an external credential, but must never contain the credential itself.
 
-## GitHub credentials on gateway-owned (`required`) hosts (#9986)
-
-When the resolved forge egress policy sets `enforcement.api=required`, Loom
-holds no GitHub credential: it publishes no `oauth_token` into any `hosts.yml`,
-mints no App token and selects no reader pool. The proxy key lives only in the
-managed `gh` launcher process (`principal.credentialRef`), never in a profile.
-`loom-daemon forge egress doctor` flags a token left in an enumerated profile
-(`apiconfig.github-token-present`) and git credentials sourced from the API
-profile (`git.credential-from-api-profile`); git should use SSH or a dedicated
-git credential. See [github-authentication](github-authentication.md).
-
 A second PAT of the same GitHub user is **not** a second rate-limit pool, so
 never export a token globally or `launchctl setenv` it; see
 [Rate-limit pools: what actually splits the bucket](github-authentication.md#rate-limit-pools-what-actually-splits-the-bucket-9872).

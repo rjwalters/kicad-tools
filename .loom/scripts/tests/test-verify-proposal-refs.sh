@@ -24,27 +24,9 @@ TEST_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPTS_DIR="$(cd "$TEST_DIR/.." && pwd)"
 VPR="$SCRIPTS_DIR/verify-proposal-refs.sh"
 
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-NC='\033[0m'
+# shellcheck source=lib/assert.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/assert.sh"
 
-TESTS_RUN=0
-TESTS_PASSED=0
-TESTS_FAILED=0
-
-assert_eq() {
-    local expected="$1" actual="$2" msg="$3"
-    TESTS_RUN=$((TESTS_RUN + 1))
-    if [[ "$expected" == "$actual" ]]; then
-        TESTS_PASSED=$((TESTS_PASSED + 1))
-        echo -e "  ${GREEN}PASS${NC}: $msg"
-    else
-        TESTS_FAILED=$((TESTS_FAILED + 1))
-        echo -e "  ${RED}FAIL${NC}: $msg"
-        echo "    Expected: '$expected'"
-        echo "    Actual:   '$actual'"
-    fi
-}
 
 assert_contains() {
     local haystack="$1" needle="$2" msg="$3"
@@ -150,6 +132,34 @@ RC=$?
 assert_eq "1" "$RC" "missing file exits 1"
 assert_contains "$OUT" "MISSING FILE" "missing-file miss is labeled"
 assert_contains "$OUT" "src/does-not-exist.py" "the specific missing path is named"
+
+echo
+echo "=== Fixture 2b: existing directory citations are not MISSING FILE (#10191) ==="
+mkdir -p "$FIXTURE_REPO/tools/probes"
+(
+    cd "$FIXTURE_REPO" || exit 1
+    printf 'x\n' > tools/probes/p.py
+    git add tools
+    git commit -qm "add tools/probes" >/dev/null
+    git update-ref refs/remotes/origin/main refs/heads/main
+)
+DIR_BODY="$BODY_DIR/dir.md"
+cat > "$DIR_BODY" <<'EOF'
+Scope: tools/probes and `src/foo.py:3`.
+EOF
+OUT="$(run_vpr "$DIR_BODY")"
+RC=$?
+assert_eq "0" "$RC" "an existing directory citation exits 0"
+assert_contains "$OUT" "all references check out" "an existing directory is not reported as a miss"
+
+DIR_MISSING_BODY="$BODY_DIR/dir-missing.md"
+cat > "$DIR_MISSING_BODY" <<'EOF'
+Scope: tools/nonexistent-dir and tools/probes.
+EOF
+OUT="$(run_vpr "$DIR_MISSING_BODY")"
+RC=$?
+assert_eq "1" "$RC" "a nonexistent directory citation still exits 1"
+assert_contains "$OUT" "tools/nonexistent-dir" "the nonexistent directory is named as a miss"
 
 echo
 echo "=== Fixture 3: bad line range ==="

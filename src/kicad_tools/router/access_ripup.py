@@ -73,7 +73,7 @@ Scope and bounds (the honest limits of Phase 3a)
 from __future__ import annotations
 
 import time
-from collections.abc import Collection, Iterable
+from collections.abc import Collection, Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -85,10 +85,13 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     from .rules import DesignRules
 
 __all__ = [
+    "MAX_PAIR_RIPUPS",
     "MAX_TARGETING_EVALUATIONS",
     "RIPPABLE_CLOSING_KINDS",
     "AccessLossTargeter",
     "AccessLossWitness",
+    "RipupCycleGuard",
+    "RipupPlan",
     "format_access_loss_report",
     "rippable_closing_nets",
 ]
@@ -181,12 +184,31 @@ class AccessLossWitness:
         """``ref.pin`` (or ``ref``) labels of the stranded terminals."""
         return tuple(f"{ref}.{pin}" if pin else ref for ref, pin in self.stranded_pads)
 
-    def one_line(self) -> str:
-        """Compact human rendering for CLI / log output."""
+    def one_line(self, held_back: Mapping[int, str] | None = None) -> str:
+        """Compact human rendering for CLI / log output.
+
+        Args:
+            held_back: Issue #6342.  Named blockers the caller will *not* rip,
+                mapped to a short reason (``"rip-up budget spent"``,
+                ``"protected victim"``).  Without it the line used to say
+                "ripping X" for a net the per-net rip-up budget had already
+                filtered out, so the log claimed rips that never happened.
+        """
         pads = ", ".join(self.pad_labels()) or "(no terminal)"
         closing = ", ".join(self.closing_refs) or "(unattributed)"
+        held_back = dict(held_back or {})
         if self.blocking_nets:
-            action = "ripping " + ", ".join(self.blocking_net_names)
+            names = dict(zip(self.blocking_nets, self.blocking_net_names, strict=False))
+            ripping = [names[n] for n in self.blocking_nets if n not in held_back]
+            kept: dict[str, list[str]] = {}
+            for n in self.blocking_nets:
+                if n in held_back:
+                    kept.setdefault(held_back[n], []).append(names[n])
+            notes = [f"not ripping {', '.join(v)} ({k})" for k, v in sorted(kept.items())]
+            if ripping:
+                action = "; ".join(["ripping " + ", ".join(ripping), *notes])
+            else:
+                action = "nothing ripped: " + "; ".join(notes)
         elif self.held_nets:
             action = "nothing rippable (held by non-rippable copper)"
         else:
@@ -422,3 +444,198 @@ def format_access_loss_report(
     if len(items) > len(head):
         lines.append(f"... and {len(items) - len(head)} more sealed net(s)")
     return lines
+
+
+# ---------------------------------------------------------------------------
+# Rip-up cycle guard (issue #6342)
+# ---------------------------------------------------------------------------
+
+#: How many times one run may rip the same ``(victim, blocker set)`` pair.  The
+#: first attempt is the all-or-nothing transaction; the second lets the victim
+#: keep its copper even when a blocker cannot re-land (a *trade*, which hands the
+#: blocker to the ordinary failed-net recovery to route around the victim).  A
+#: third identical rip cannot do anything the first two did not, so it is
+#: refused -- the board-05 log showed the same pair ripped every round until the
+#: no-progress stop.
+MAX_PAIR_RIPUPS = 2
+
+#: :attr:`RipupPlan.mode` values.
+PLAN_RIP = "rip"
+PLAN_TRADE = "trade"
+PLAN_REFUSE = "refuse"
+PLAN_NOTHING = "nothing"
+
+
+@dataclass(frozen=True)
+class RipupPlan:
+    """What :class:`RipupCycleGuard` allows for one ``(victim, blockers)`` request."""
+
+    failed_net: int
+    blockers: frozenset[int]
+    """Blockers left after removing protected victims."""
+
+    mode: str
+    """:data:`PLAN_RIP` (all-or-nothing), :data:`PLAN_TRADE` (victim may keep
+    its copper), :data:`PLAN_REFUSE` (pair already ripped
+    :data:`MAX_PAIR_RIPUPS` times) or :data:`PLAN_NOTHING` (every named blocker
+    is a protected victim)."""
+
+    attempt: int
+    """1-based attempt number for this pair (the count *after* this rip)."""
+
+    held_back: dict[int, str] = field(default_factory=dict)
+    """Named blockers this plan will not rip, with the reason."""
+
+    @property
+    def rips(self) -> bool:
+        return self.mode in (PLAN_RIP, PLAN_TRADE)
+
+
+@dataclass
+class RipupCycleGuard:
+    """Stops the access-loss rip-up cycle: rip blocker, blocker reseals, repeat.
+
+    Issue #6342.  One per negotiated run, shared by every targeted rip-up site.
+    Two rules:
+
+    * **Repeat guard.**  The same ``(victim, frozenset(blockers))`` pair is
+      ripped at most :attr:`max_repeats` times.  The per-net
+      ``ripup_history`` budget cannot express this -- it counts rips of a
+      blocker across *all* victims.
+    * **Victim protection.**  Once a rip-up for ``victim`` *trades* (the
+      victim kept its copper and a blocker was left unrouted to route around
+      it), the victim may no longer be named as a rip-up target *by the
+      blockers it displaced*: otherwise the displaced blocker, now failing in
+      turn, rips the victim straight back and the pair swaps forever.  A
+      plain commit (every blocker re-landed) protects nothing -- if a blocker
+      later fails for some other reason it may still rip the victim, bounded
+      by the repeat guard.
+
+    Issue #6363 adds the relief rescue (``Autorouter._relief_rescue``), which
+    picks its blockers by probe, so the set it rips changes on every call and
+    a set-keyed count never repeats.  Relief is counted per *member* instead:
+    each rolled-back relief for ``victim`` charges every blocker it ripped,
+    and a later relief whose probe needs a blocker charged
+    :attr:`max_repeats` times is refused.  Only a rescue that ripped
+    something and rolled back is charged.  The per-net relief cap
+    (:meth:`admit_relief`) counts nested depth-1 rescues too.  The pair
+    counter, likewise, is charged only when the rip-up ripped something.
+    """
+
+    max_repeats: int = MAX_PAIR_RIPUPS
+    pair_counts: dict[tuple[int, frozenset[int]], int] = field(default_factory=dict)
+    protected: dict[int, set[int]] = field(default_factory=dict)
+    """``victim -> blockers`` it must not be ripped for."""
+
+    refusals: list[tuple[int, frozenset[int]]] = field(default_factory=list)
+    trades: list[tuple[int, tuple[int, ...]]] = field(default_factory=list)
+    outcomes: list[Any] = field(default_factory=list)
+
+    # -- Relief rescue (issue #6363) ----------------------------------------
+    relief_attempts: dict[int, int] = field(default_factory=dict)
+    """``net -> relief rescues started for it``, nested depth-1 rescues
+    included.  The negotiated loop's per-net relief cap reads this dict."""
+
+    max_relief_attempts: int | None = None
+    """Per-net relief cap (``None``: unbounded).  Set by the negotiated loop."""
+
+    relief_member_counts: dict[tuple[int, int], int] = field(default_factory=dict)
+    """``(victim, blocker) -> relief rescues for victim that ripped blocker and
+    then rolled back``.  Keyed per *member*, not per set: relief picks its
+    blockers by probe, so its set differs from call to call (board 05's EN_C
+    ripped three different sets that all held DRIVER_SLEEP, PWM_C, RUN and
+    STATUS_LED)."""
+
+    relief_refusals: list[tuple[int, frozenset[int]]] = field(default_factory=list)
+    relief_capped: list[int] = field(default_factory=list)
+    """Nets whose (nested) relief rescue was skipped by the per-net cap."""
+
+    def admit_relief(self, net: int) -> bool:
+        """Charge one relief attempt for ``net``; ``False`` once the cap is hit.
+
+        Both the top-level relief sites and the depth-1 nested rescues go
+        through here, so a cycle cannot escape the cap through nesting.
+        """
+        count = self.relief_attempts.get(net, 0)
+        if self.max_relief_attempts is not None and count >= self.max_relief_attempts:
+            return False
+        self.relief_attempts[net] = count + 1
+        return True
+
+    def relief_exhausted(self, victim: int, blockers: Collection[int]) -> frozenset[int]:
+        """``blockers`` that rolled-back reliefs for ``victim`` already ripped
+        :attr:`max_repeats` times.  A relief round that needs any of them is
+        refused: the probe treats their copper as soft again, so ripping
+        the rest cannot route around them."""
+        return frozenset(
+            int(b)
+            for b in blockers
+            if self.relief_member_counts.get((int(victim), int(b)), 0) >= self.max_repeats
+        )
+
+    def refuse_relief(self, victim: int, blockers: Collection[int]) -> None:
+        self.relief_refusals.append((int(victim), frozenset(int(b) for b in blockers)))
+
+    def charge_relief_rollback(self, victim: int, ripped: Collection[int]) -> None:
+        """Count a relief for ``victim`` that ripped ``ripped`` and rolled back.
+
+        A relief that ripped nothing (no relief path, blocked only by
+        non-rippable copper) charges nothing; neither does a committed one.
+        """
+        for blocker in ripped:
+            key = (int(victim), int(blocker))
+            self.relief_member_counts[key] = self.relief_member_counts.get(key, 0) + 1
+
+    def protected_from(self, failed_net: int) -> set[int]:
+        """Victims ``failed_net`` may not rip (it was displaced for them)."""
+        return {victim for victim, by in self.protected.items() if failed_net in by}
+
+    def plan(self, failed_net: int, blockers: Collection[int]) -> RipupPlan:
+        """Decide what to do for ``failed_net`` and its named ``blockers``.
+
+        Does not charge the pair; call :meth:`charge` once a rip actually
+        happened (issue #6363: a ``budget_exhausted`` no-op is not charged).
+        """
+        named = {int(b) for b in blockers if int(b) != int(failed_net)}
+        held_back = dict.fromkeys(named & self.protected_from(failed_net), "protected victim")
+        allowed = frozenset(named - set(held_back))
+        if not allowed:
+            return RipupPlan(failed_net, allowed, PLAN_NOTHING, 0, held_back)
+        count = self.pair_counts.get((failed_net, allowed), 0)
+        if count >= self.max_repeats:
+            return RipupPlan(failed_net, allowed, PLAN_REFUSE, count, held_back)
+        mode = PLAN_TRADE if count >= 1 else PLAN_RIP
+        return RipupPlan(failed_net, allowed, mode, count + 1, held_back)
+
+    def charge(self, plan: RipupPlan) -> None:
+        """Count one rip of ``plan``'s pair."""
+        key = (plan.failed_net, plan.blockers)
+        self.pair_counts[key] = self.pair_counts.get(key, 0) + 1
+
+    def refuse(self, plan: RipupPlan) -> None:
+        self.refusals.append((plan.failed_net, plan.blockers))
+
+    def record(self, outcome: Any) -> None:
+        """Feed a ``TargetedRipupOutcome`` back: protect a victim that traded."""
+        if outcome is None:
+            return
+        self.outcomes.append(outcome)
+        traded = tuple(getattr(outcome, "traded", ()) or ())
+        if traded:
+            self.trades.append((int(outcome.failed_net), traded))
+            self.protected.setdefault(int(outcome.failed_net), set()).update(traded)
+
+    def max_pair_count(self) -> int:
+        return max(self.pair_counts.values(), default=0)
+
+    def summary_line(self) -> str:
+        relief_max = max(self.relief_member_counts.values(), default=0)
+        return (
+            f"Rip-up cycle guard: {len(self.pair_counts)} (victim, blocker set) pair(s), "
+            f"max {self.max_pair_count()} rip(s) per pair, {len(self.trades)} trade(s), "
+            f"{len(self.refusals)} repeat(s) refused; relief: "
+            f"{sum(self.relief_attempts.values())} rescue(s), "
+            f"{len(self.relief_member_counts)} (victim, blocker) member(s) rolled back, "
+            f"max {relief_max} per member, {len(self.relief_refusals)} refused, "
+            f"{len(self.relief_capped)} nested capped"
+        )

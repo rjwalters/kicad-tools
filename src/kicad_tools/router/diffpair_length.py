@@ -27,17 +27,14 @@ Design notes
   fields would risk drift between two sources of truth.  A follow-up issue
   can remove the legacy fields once they are confirmed unreferenced.
 * **Via-length policy.**  When a route traverses a via, the via contributes
-  a geometric drilled length equal to::
-
-      board_thickness_mm * |layer_index_delta| / (num_copper_layers - 1)
-
-  where ``layer_index_delta`` is computed from the via's
-  :attr:`~kicad_tools.router.primitives.Via.layers` tuple of two
-  :class:`~kicad_tools.core.types.CopperLayer` enums.  When the caller does
-  not supply ``board_thickness_mm`` the via contributes **0.0 mm** to the
-  length (with a documented caveat) rather than a guessed default -- this
-  policy mirrors the curator's spec on #2647 and ensures Phase 3I sizes
-  serpentines off explicit values.
+  the KiCad stackup height between the layers it connects, and track chains
+  entering pads/vias are clipped to their centres -- exactly what
+  ``kicad-cli`` reports (Issue #6725; see
+  :mod:`kicad_tools.router.kicad_length`, the single shared implementation).
+  The legacy ``board_thickness_mm`` / ``num_copper_layers`` arguments only
+  build KiCad's default stackup when no ``length_model`` is supplied; with
+  neither, vias contribute **0.0 mm** (Phase 3I sizes serpentines off
+  explicit values).
 * **Per-class skew tolerance** lives on
   :attr:`~kicad_tools.router.rules.NetClassRouting.skew_tolerance_mm`
   (added in this issue) with accessor
@@ -48,10 +45,10 @@ Design notes
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+from .kicad_length import KicadLengthModel, measure_pcb_net
 from .length import LengthTracker
 
 if TYPE_CHECKING:
@@ -87,6 +84,7 @@ class DiffPairLengthTracker:
         detected_pairs: list[DetectedPair],
         board_thickness_mm: float | None = None,
         num_copper_layers: int = 2,
+        length_model: KicadLengthModel | None = None,
     ) -> None:
         """Measure and record the routed length of each half of each detected pair.
 
@@ -103,8 +101,12 @@ class DiffPairLengthTracker:
                 When supplied, each via on a recorded route contributes
                 ``board_thickness_mm * |Δlayer_index| / (num_copper_layers - 1)``.
             num_copper_layers: Number of copper layers in the stack (used
-                to compute per-via drilled length when ``board_thickness_mm``
+                to build KiCad's default stackup when ``board_thickness_mm``
                 is supplied).  Defaults to ``2`` (typical 2-layer stack).
+            length_model: Issue #6725 -- the kicad-cli-exact measurement
+                (:class:`~kicad_tools.router.kicad_length.KicadLengthModel`:
+                board stackup plus pad copper).  Takes precedence over
+                ``board_thickness_mm`` / ``num_copper_layers``.
 
         Notes:
             * Routes whose ``net`` is not the P or N of any detected pair
@@ -140,13 +142,13 @@ class DiffPairLengthTracker:
             p_route = routes_by_net.get(p_id)
             if p_route is not None:
                 self.lengths[p_id] = self._measure_route(
-                    p_route, board_thickness_mm, num_copper_layers
+                    p_route, board_thickness_mm, num_copper_layers, length_model=length_model
                 )
 
             n_route = routes_by_net.get(n_id)
             if n_route is not None:
                 self.lengths[n_id] = self._measure_route(
-                    n_route, board_thickness_mm, num_copper_layers
+                    n_route, board_thickness_mm, num_copper_layers, length_model=length_model
                 )
 
             # Populate the name-keyed cache only when BOTH halves are
@@ -165,38 +167,32 @@ class DiffPairLengthTracker:
         board_thickness_mm: float | None,
         num_copper_layers: int,
         blind_buried_supported: bool = True,
+        length_model: KicadLengthModel | None = None,
     ) -> float:
-        """Return the geometric length of a route in mm, including via drill.
+        """Return the kicad-cli length of a route in mm (issue #6725).
 
-        Segment length is computed via
-        :meth:`LengthTracker.calculate_route_length` (single source of truth
-        for segment summation -- see `length.py:138-153`).  Via length is
-        computed from the via's ``layers`` tuple and the supplied
-        ``board_thickness_mm`` / ``num_copper_layers``; when
-        ``board_thickness_mm`` is ``None`` each via contributes ``0.0``.
+        Delegates to :mod:`kicad_tools.router.kicad_length`, the single
+        implementation shared with :meth:`measure_net_from_pcb`: segment
+        lengths, minus the in-copper portion of every track chain that enters
+        a pad/via (replaced by a straight line to its centre), plus each via's
+        KiCad stackup height between the layers it connects.
 
-        ``blind_buried_supported`` (Issue #4007) forwards to
-        :meth:`_via_length`: when ``False`` a standard (non-micro) via is
-        measured as a full through-via, matching KiCad's post-route
-        via promotion on boards without blind/buried drilling.
+        ``length_model`` carries the board stackup and pad copper.  Without
+        one, ``board_thickness_mm`` / ``num_copper_layers`` build KiCad's
+        default stackup (no pad copper, so no pad trim); when
+        ``board_thickness_mm`` is ``None`` each via contributes ``0.0`` and
+        only the segment length is returned.
+
+        ``blind_buried_supported`` is accepted for backward compatibility and
+        ignored: KiCad measures the connected span whatever the barrel (it
+        supersedes the #4007 / #6502 / #6678 promotion model).
         """
-        # Segment portion (reuses the existing primitive -- no duplication).
-        total = LengthTracker.calculate_route_length(route)
-
-        # Via portion.  When the caller did not supply board_thickness_mm
-        # (or the stack has fewer than 2 layers) we cannot compute a
-        # drilled length and document that vias contribute 0.0.
-        if board_thickness_mm is None or num_copper_layers <= 1:
-            return total
-
-        for via in route.vias:
-            total += DiffPairLengthTracker._via_length(
-                via,
-                board_thickness_mm,
-                num_copper_layers,
-                blind_buried_supported=blind_buried_supported,
-            )
-        return total
+        del blind_buried_supported
+        if length_model is None:
+            if board_thickness_mm is None or num_copper_layers <= 1:
+                return LengthTracker.calculate_route_length(route)
+            length_model = KicadLengthModel.default(board_thickness_mm, num_copper_layers)
+        return length_model.route_length(route)
 
     @staticmethod
     def _via_length(
@@ -205,62 +201,21 @@ class DiffPairLengthTracker:
         num_copper_layers: int,
         blind_buried_supported: bool = True,
     ) -> float:
-        """Return the geometric drilled length of ``via`` in mm.
+        """KiCad stackup height of ``via``'s drilled span on the default stackup.
 
-        Computed as ``board_thickness_mm * |stack_index_delta| / (num_copper_layers - 1)``
-        where ``stack_index_delta`` is the difference between the via's
-        two layers' **stack positions** in an ``num_copper_layers``-deep
-        stack (NOT the raw KiCad layer enum values).  The stack positions
-        are the natural ordering of populated copper layers; for example:
-
-        * 2-layer stack populates ``[F.Cu, B.Cu]`` -> stack indices ``[0, 1]``.
-          A F.Cu->B.Cu via gives ``1.6 * 1 / 1 = 1.6`` mm.
-        * 4-layer stack populates ``[F.Cu, In1.Cu, In2.Cu, B.Cu]`` ->
-          stack indices ``[0, 1, 2, 3]``.  A F.Cu->In1.Cu blind via
-          gives ``1.6 * 1 / 3 ≈ 0.533`` mm; a F.Cu->B.Cu through-via
-          gives ``1.6 * 3 / 3 = 1.6`` mm.
-        * 6-layer stack populates ``[F.Cu, In1..In4, B.Cu]`` -> stack
-          indices ``[0, 1, 2, 3, 4, 5]``.
-
-        Using stack positions (rather than the raw 0/1/2/3/4/5 enum
-        values, which always treat F.Cu->B.Cu as a "5-layer span" even
-        on a 2-layer board) is correct because the via's physical
-        drilled length depends on how many dielectric layers it actually
-        crosses, not on KiCad's nominal layer numbering.
-
-        Through-via promotion (Issue #4007)
-        -----------------------------------
-        When ``blind_buried_supported`` is ``False`` (the board's via rules
-        do not allow blind/buried vias -- the ``standard_2layer`` /
-        ``standard_4layer`` / ``standard_6layer`` default), a *standard*
-        (non-micro) via is a plated through-hole that drills the **full**
-        board thickness regardless of which two copper layers it
-        electrically bridges.  This mirrors what KiCad materializes: its
-        post-route zone-fill re-save (``kicad-cli``) promotes every
-        non-micro blind/buried span to a full F.Cu->B.Cu through-via
-        because the board's stackup does not enable blind/buried drilling.
-        Measuring the pre-promotion partial span here made the match-group
-        tuner converge against a via drilled-length (e.g. board 07 ADDR_BUS
-        A4/A6 F.Cu->In1.Cu = 0.533mm) that the shipped board never had
-        (promoted to F.Cu->B.Cu = 1.6mm), so ``kct check`` re-measured a
-        1.069mm skew the tuner reported as 0.000mm.
-
-        Micro vias (``is_micro``) are laser-drilled HDI features that KiCad
-        does **not** promote, so they keep their actual partial span even
-        when ``blind_buried_supported`` is ``False``.
+        Issue #6725: kept as a convenience for callers without a route
+        context.  The authoritative figure is the one
+        :func:`~kicad_tools.router.kicad_length.net_length` produces, which also
+        narrows the span to the layers the via actually connects.
+        ``blind_buried_supported`` is ignored (see :meth:`_measure_route`).
         """
-        # Issue #4007: a standard (non-micro) via on a board that does not
-        # support blind/buried vias drills the full stack -- KiCad promotes
-        # it to a through-via on serialization.  Measure that shipped
-        # geometry so the tuner and the checker agree.
-        if not blind_buried_supported and not getattr(via, "is_micro", False):
-            return board_thickness_mm
+        del blind_buried_supported
+        from .kicad_length import KicadStackup, route_geometry
+        from .primitives import Route as _Route
 
-        layer_start, layer_end = via.layers
-        idx_start = DiffPairLengthTracker._stack_position(layer_start, num_copper_layers)
-        idx_end = DiffPairLengthTracker._stack_position(layer_end, num_copper_layers)
-        delta = abs(idx_start - idx_end)
-        return board_thickness_mm * delta / (num_copper_layers - 1)
+        stackup = KicadStackup.default(board_thickness_mm, num_copper_layers)
+        _segs, vias = route_geometry(_Route(net=0, net_name="", vias=[via]))
+        return stackup.span(*vias[0].layers)
 
     @staticmethod
     def _stack_position(layer, num_copper_layers: int) -> int:
@@ -350,106 +305,37 @@ class DiffPairLengthTracker:
         board_thickness_mm: float | None = None,
         num_copper_layers: int = 2,
         blind_buried_supported: bool = True,
+        length_model: KicadLengthModel | None = None,
     ) -> float:
-        """Return the geometric routed length of a net in mm, read from a routed PCB.
+        """Return the kicad-cli length of a net in mm, read from a routed PCB.
 
-        Sister primitive to :meth:`_measure_route` -- the latter consumes the
-        router-internal :class:`~kicad_tools.router.primitives.Route` shape
-        (``segments[i].x1/y1/x2/y2``), while this method consumes the PCB
-        schema shape exposed by :meth:`~kicad_tools.schema.pcb.PCB.segments_in_net`
-        and :meth:`~kicad_tools.schema.pcb.PCB.vias_in_net` (segments use
-        ``start: tuple[float, float]`` / ``end: tuple[float, float]``, vias
-        use ``layers: list[str]`` of KiCad layer name strings).
+        Issue #6725: this is the PCB form of the one shared measurement in
+        :mod:`kicad_tools.router.kicad_length` (the Route form is
+        :meth:`_measure_route`).  It reproduces what ``kicad-cli`` reports:
+        segment lengths, minus the in-copper portion of each track chain that
+        enters a pad/via (replaced by a straight line to the centre), plus
+        each via's KiCad stackup height between the layers it connects.  The
+        stackup is the board's own (explicit ``(setup (stackup))`` or KiCad's
+        default), so ``board_thickness_mm``, ``num_copper_layers`` and
+        ``blind_buried_supported`` are accepted for compatibility and ignored.
 
         Used by :func:`kicad_tools.validate.diffpair_skew.derive_skew_data`
-        (Phase 2.5c, Epic #2556) to re-derive per-pair skew from a routed
-        PCB without round-tripping through the router-internal Route form.
-        Keeping the formula here (rather than duplicating it in the
-        validate package) preserves single source of truth for diff-pair
-        length-with-vias computation -- if a future change touches one
-        primitive, the byte-for-byte drift-prevention test in
-        ``tests/test_validate_diffpair_skew.py`` fires.
+        and the match-group checker, and by the router's tuners through the
+        same function, so ``kct check`` and the tuners cannot drift.
 
         Args:
             pcb: The routed PCB to measure.
-            net_id: The net number whose segments + vias to sum.
-            board_thickness_mm: Total stackup thickness in mm.  When
-                ``None`` (the default), vias contribute ``0.0`` to the
-                length (documented behavior -- mirrors
-                :meth:`record_routes`).
-            num_copper_layers: Number of copper layers in the stack (used
-                to compute per-via drilled length when
-                ``board_thickness_mm`` is supplied).  Defaults to ``2``.
-            blind_buried_supported: When ``False`` (Issue #4007), a
-                standard (non-micro) via is measured as a full through-via
-                because the board's stackup does not support blind/buried
-                drilling -- KiCad promotes every such via to F.Cu->B.Cu on
-                serialization.  Micro vias (``via_type == "micro"``) keep
-                their actual partial span.  Defaults to ``True``
-                (byte-for-byte legacy partial-span behavior).
+            net_id: The net number whose segments + vias to measure.
+            length_model: Optional pre-built model (avoids re-reading the
+                board's stackup and pads once per net).
 
         Returns:
-            Total geometric length (segments + vias) in mm.
-
-        Notes:
-            * Segment length is computed via the same
-              ``sqrt(dx*dx + dy*dy)`` formula used by
-              :meth:`~kicad_tools.router.length.LengthTracker.calculate_route_length`
-              (router-internal Route form).  The drift-prevention test
-              in ``tests/test_validate_diffpair_skew.py`` confirms the
-              two paths produce identical results for the same physical
-              routing.
-            * Via length uses the same stack-position formula as
-              :meth:`_via_length` -- the via's ``layers: list[str]`` is
-              mapped to :class:`~kicad_tools.core.types.CopperLayer`
-              enums via :meth:`CopperLayer.from_kicad_name` before the
-              delta is computed.
-            * Vias with malformed layer names (not a known KiCad copper
-              layer) contribute ``0.0`` to the length rather than
-              crashing -- defensive against legacy / hand-edited PCBs.
+            Total length (segments + vias) in mm.
         """
-        from kicad_tools.core.types import CopperLayer
-
-        # Segment portion: identical formula to LengthTracker.calculate_route_length
-        # (length.py:139) and DiffPairLengthTracker._measure_route (above).
-        total = 0.0
-        for seg in pcb.segments_in_net(net_id):
-            dx = seg.end[0] - seg.start[0]
-            dy = seg.end[1] - seg.start[1]
-            total += math.sqrt(dx * dx + dy * dy)
-
-        # Via portion: identical formula to _via_length (above) but the
-        # input shape differs (PCB-side Via.layers is list[str] of KiCad
-        # layer name strings, not a tuple of CopperLayer enums).
-        if board_thickness_mm is None or num_copper_layers <= 1:
-            return total
-
-        for via in pcb.vias_in_net(net_id):
-            layers = via.layers
-            if not layers or len(layers) < 2:
-                # Malformed via (no layer span) -- skip rather than crash.
-                continue
-            # Issue #4007: a standard (non-micro) via on a board without
-            # blind/buried support drills the full stack (KiCad promotes it
-            # to a through-via on serialization).  Micro vias keep their
-            # actual partial span.  Mirrors the router-Route path in
-            # :meth:`_via_length`.
-            is_micro = getattr(via, "via_type", None) == "micro"
-            if not blind_buried_supported and not is_micro:
-                total += board_thickness_mm
-                continue
-            try:
-                layer_start = CopperLayer.from_kicad_name(layers[0])
-                layer_end = CopperLayer.from_kicad_name(layers[-1])
-            except ValueError:
-                # Unknown layer name -- conservative skip.
-                continue
-            idx_start = DiffPairLengthTracker._stack_position(layer_start, num_copper_layers)
-            idx_end = DiffPairLengthTracker._stack_position(layer_end, num_copper_layers)
-            delta = abs(idx_start - idx_end)
-            total += board_thickness_mm * delta / (num_copper_layers - 1)
-
-        return total
+        del board_thickness_mm, blind_buried_supported
+        if length_model is not None:
+            return length_model.net_length_pcb(pcb, net_id)
+        return measure_pcb_net(pcb, net_id, num_copper_hint=num_copper_layers)
 
     # =========================================================================
     # Internal name cache (populated by record_routes; used by get_all_skews)

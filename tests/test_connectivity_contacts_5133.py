@@ -106,7 +106,10 @@ def test_edge_via_respects_restricted_span_and_pad_layer(tmp_path, span, pad_lay
         pad("A", 5.2, 5, pad_layer, (0.3, 0.7)) + pad("B", 9, 5, "In1.Cu"),
         [[(4, 4), (10, 4), (10, 6), (4, 6)]],
         "In1.Cu",
-        f'(via (at 5 5.15) (size .45) (drill .25) (layers "{span[0]}" "{span[1]}") (net 1))',
+        # A partial span needs ``blind``: KiCad reads a keyword-less via as
+        # a through via whatever its pair says (Issue #6493).
+        f"(via {'' if span == ('F.Cu', 'B.Cu') else 'blind '}(at 5 5.15) (size .45) "
+        f'(drill .25) (layers "{span[0]}" "{span[1]}") (net 1))',
     )
     assert bonded(partition(tmp_path, text)) is (span[0] == "F.Cu")
 

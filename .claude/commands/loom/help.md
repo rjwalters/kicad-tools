@@ -52,7 +52,6 @@ Present it grouped like this (keep descriptions terse, one line each):
 | `/loom:architect` | Analyze the codebase and file architectural proposals (`loom:architect`). |
 | `/loom:hermit` | Find bloat and file simplification proposals (`loom:hermit`). |
 | `/loom:auditor` | Build and run `main` to verify it actually works; file bugs on failure. |
-| `/loom:concierge` | Opt-in operator persona: room intent to typed daemon verbs. |
 | `/loom:driver` | Plain shell environment with no assumed role, for ad-hoc tasks. |
 
 ### Project / meta
@@ -61,8 +60,7 @@ Present it grouped like this (keep descriptions terse, one line each):
 | `/loom:imagine <idea>` | Bootstrap a new Loom-powered project from a natural-language description. |
 | `/loom:epic <goal>` | Break a large goal into a phased epic with implementation issues. |
 | `/loom:bump <level>` | Bump the version + tag for a generic (non-Loom) project. |
-| `/loom:mail-send` | Send one blocking ask to the operator via loom-ui inbox + Matrix; reports each leg. |
-| `/loom:star <what needs doing>` | File one starred issue; checks for related issues first. |
+| `/loom:star <what needs doing>` | File one `loom:important` issue; checks for related issues first. |
 | `/loom:help [command]` | This command — describe the Loom command surface. |
 
 After the tables, close with a short **where to start**:

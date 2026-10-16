@@ -258,6 +258,54 @@ check "$(grep -q "Per-suite timings" <<<"$OUT4" && echo 1 || echo 0)" \
     "a disabled record is not announced in the report" "$OUT4"
 
 # ==============================================================
+# 6. Diagnostics for a job cut off by its own cap (#11964): every suite gets a
+#    line AS IT FINISHES (the ordered report only prints after the pool
+#    drains, which a cut-off job never reaches), the header names the timeout
+#    wrapper, and CI refuses to run suites with no wrapper at all.
+# ==============================================================
+write_manifest "$PASS_SUITE" "$DEAD_SUITE"
+OUT6="$( run_fixture LOOM_CI_SUITE_TIMINGS='' LOOM_CI_RETRY_LOG="$WORKDIR/retry-6.tsv" )"
+check "$(grep -qE "^\[suite done\] PASS  $PASS_SUITE [0-9]+s" <<<"$OUT6" && echo 0 || echo 1)" \
+    "a passing suite streams a '[suite done] PASS' line" "$OUT6"
+check "$(grep -qE "^\[suite done\] FAIL  $DEAD_SUITE [0-9]+s \(exit 1\) \(retried — first exit 1\)" <<<"$OUT6" && echo 0 || echo 1)" \
+    "a failing suite streams a '[suite done] FAIL' line with its exit and retry" "$OUT6"
+check "$([[ "$(grep -c '^\[suite done\] ' <<<"$OUT6")" == "2" ]] && echo 0 || echo 1)" \
+    "exactly one streamed line per suite" "$OUT6"
+check "$(awk '/^\[suite done\]/{s=NR} /^=== Summary/{r=NR} END{exit !(s && r && s < r)}' <<<"$OUT6" && echo 0 || echo 1)" \
+    "streamed lines precede the end-of-run summary" "$OUT6"
+want_wrapper=NONE
+if command -v timeout >/dev/null 2>&1; then want_wrapper=timeout
+elif command -v gtimeout >/dev/null 2>&1; then want_wrapper=gtimeout; fi
+check "$(grep -qx "Per-suite timeout wrapper: $want_wrapper" <<<"$OUT6" && echo 0 || echo 1)" \
+    "the header names the resolved timeout wrapper ($want_wrapper)" "$OUT6"
+
+# A PATH with every command this host has EXCEPT timeout/gtimeout.
+NOTIMEOUT_BIN="$WORKDIR/notimeout-bin"
+mkdir -p "$NOTIMEOUT_BIN"
+IFS=: read -r -a _path_dirs <<<"$PATH"
+for _d in "${_path_dirs[@]}"; do
+    [[ -d "$_d" ]] || continue
+    for _f in "$_d"/*; do
+        _n="${_f##*/}"
+        case "$_n" in timeout|gtimeout) continue ;; esac
+        [[ -x "$_f" && ! -e "$NOTIMEOUT_BIN/$_n" ]] && ln -s "$_f" "$NOTIMEOUT_BIN/$_n"
+    done
+done
+OUT7="$( run_fixture PATH="$NOTIMEOUT_BIN" GITHUB_ACTIONS=true LOOM_CI_SUITE_TIMINGS='' \
+    LOOM_CI_RETRY_LOG="$WORKDIR/retry-7.tsv" )"
+RC7=$?
+check "$([[ "$RC7" -eq 1 ]] && echo 0 || echo 1)" \
+    "CI with no timeout/gtimeout exits 1 (rc=$RC7)" "$OUT7"
+check "$(grep -q '^::error::.*no .timeout. or .gtimeout. on PATH' <<<"$OUT7" && echo 0 || echo 1)" \
+    "the refusal is an ::error:: naming the missing wrapper" "$OUT7"
+check "$(grep -q '^\[suite done\]' <<<"$OUT7" && echo 1 || echo 0)" \
+    "the refusal runs no suite" "$OUT7"
+OUT8="$( run_fixture PATH="$NOTIMEOUT_BIN" GITHUB_ACTIONS='' LOOM_CI_SUITE_TIMINGS='' \
+    LOOM_CI_RETRY_LOG="$WORKDIR/retry-8.tsv" )"
+check "$(grep -qx 'Per-suite timeout wrapper: NONE' <<<"$OUT8" && echo 0 || echo 1)" \
+    "outside CI a missing wrapper still runs, reported as NONE" "$OUT8"
+
+# ==============================================================
 echo
 echo "=== $TESTS_PASSED/$TESTS_RUN passed ==="
 [[ "$TESTS_FAILED" -eq 0 ]] || exit 1

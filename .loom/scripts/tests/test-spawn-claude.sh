@@ -41,29 +41,9 @@ done
 export LOOM_SWEEP_INFLIGHT_SWEEPS=1
 
 # Colors
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-NC='\033[0m'
+# shellcheck source=lib/assert.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/assert.sh"
 
-TESTS_RUN=0
-TESTS_PASSED=0
-TESTS_FAILED=0
-
-assert_eq() {
-    local expected="$1"
-    local actual="$2"
-    local msg="$3"
-    TESTS_RUN=$((TESTS_RUN + 1))
-    if [[ "$expected" == "$actual" ]]; then
-        TESTS_PASSED=$((TESTS_PASSED + 1))
-        echo -e "  ${GREEN}PASS${NC}: $msg"
-    else
-        TESTS_FAILED=$((TESTS_FAILED + 1))
-        echo -e "  ${RED}FAIL${NC}: $msg"
-        echo "    Expected: '$expected'"
-        echo "    Actual:   '$actual'"
-    fi
-}
 
 assert_contains() {
     local needle="$1"
@@ -1965,7 +1945,7 @@ assert_contains "# LOOM_DISPATCH_MODE mode=bare-metal" "$output" "containment di
 echo '{"runtimes": {"containment": {"enabled": true}}}' > "$CONTAIN_WS/.loom/config.json"
 : > "$DOCKER_LOG"
 output=$(LOOM_WORKSPACE="$CONTAIN_WS" LOOM_DAEMON_BIN="$DAEMON_BIN" PATH="$CONTAIN_STUB_DIR:$PATH" \
-    LOOM_SWEEP_CPU_QUOTA=0 \
+    LOOM_SWEEP_CPU_QUOTA=0 CARGO_PROFILE_DEV_DEBUG=full CARGO_PROFILE_TEST_DEBUG='' LC_ALL=C.UTF-8 LOOM_NONUTF8_PROBE=$'caf\xe9' \
     "$SCRIPTS_DIR/spawn-claude.sh" -p "ping" 2>&1 || true)
 assert_contains "containerized dispatch ENABLED" "$output" \
     "runtimes.containment.enabled=true: spawn-claude logs the containment decision (#7429)"
@@ -1989,7 +1969,27 @@ assert_contains "--memory" "$docker_log" "containerized dispatch: --memory is ap
 # shared-target-dir host it is orphaned disk (213 GB / 6,402 session dirs on
 # one fleet host). The --memory assert above and this one are single-line so
 # the frozen-at-1822-code-lines file stays within the file-size ratchet.
-assert_contains "-e CARGO_INCREMENTAL=0" "$docker_log" "containerized dispatch: the worker env carries CARGO_INCREMENTAL=0 (#8456)"
+# Issue #11190: the debuginfo cap the host-side seam chose (or an operator's
+# own value, here `full`) is forwarded BY NAME — `-e VAR` with no `=value` in
+# argv — so the in-container cargo builds with the value the worker log
+# reports. The names ride the generic env passthrough, so their position
+# follows `env` order: the assert extracts the `-e` flags, sorts them, and
+# compares the exact set (a `NAME=value` form would fail the equality).
+# CARGO_PROFILE_TEST_DEBUG is set but EMPTY in this run and must NOT be
+# forwarded: cargo fails every build on an empty value (`invalid value:
+# string ""`) instead of reading it as unset, so the passthrough drops it.
+# (Both names share one `case` arm; the Rust containment tests cover the
+# two-names-forwarded shape.) Folded into the same single assert line for
+# the same ratchet reason.
+# Issue #11237: the run above also sets LOOM_NONUTF8_PROBE to a value with a
+# non-UTF-8 byte (0xE9) under LC_ALL=C.UTF-8. GNU grep in a UTF-8 locale
+# suppresses such a line unless given `-a`, which silently dropped the
+# variable from the passthrough; the same equality proves it is forwarded,
+# and by name only, and its trailing `0` is the count of lines in the
+# script's output and docker's argv that hold the value. This is RED without
+# `-a` only where `grep` is GNU grep (the Linux CI job); BSD grep on macOS
+# never dropped the line, so there the assert passes either way.
+assert_eq "-e CARGO_INCREMENTAL=0 -e CARGO_PROFILE_DEV_DEBUG -e LOOM_NONUTF8_PROBE 0" "$({ grep -aoE -- '-e (CARGO_(INCREMENTAL|PROFILE_[A-Z]+_DEBUG)|LOOM_NONUTF8_PROBE)(=[^ ]*)?' <<<"$docker_log" | LC_ALL=C sort -u; LC_ALL=C grep -acF $'caf\xe9' <<<"$output$docker_log"; } | paste -sd' ' -)" "containerized dispatch: the worker env carries CARGO_INCREMENTAL=0 (#8456), the debuginfo cap by name, no value in argv, a set-but-empty one dropped (#11190), and a variable whose value has a non-UTF-8 byte, by name (#11237)"
 assert_contains "# LOOM_DISPATCH_MODE mode=container" "$output" \
     "containerized dispatch: the canonical LOOM_DISPATCH_MODE marker names mode=container (#7430)"
 assert_contains "cpus=none" "$output" \

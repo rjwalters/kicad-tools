@@ -29,7 +29,9 @@
 #      uncached `gh api` read — mirrors merge-pr.sh item 1):
 #        - Safe   (child issue NOT loom:building): rebase directly —
 #            git rebase origin/<parent-branch> <child-branch>
-#            git push --force-with-lease
+#            git push --force-with-lease=<child-branch>:<live remote head,
+#                                         pinned before the rebase> origin …
+#            (that argument is `loom-daemon push-lease pin-flag`'s output)
 #          NO PR base retarget: the child's PR base stays <parent-branch>.
 #        - Unsafe (child issue still loom:building): a live Builder likely has
 #          the child branch checked out — skip the rebase (never force-push over
@@ -37,7 +39,16 @@
 #
 # Safety:
 #   - Uses --force-with-lease (NEVER a bare --force) so a concurrent push to the
-#     child branch aborts rather than clobbers.
+#     child branch aborts rather than clobbers, PINNED (#9487) to the child's
+#     live remote head read before the rebase: the bare flag compares against
+#     refs/remotes/origin/<child>, a ref shared by every linked worktree of
+#     this clone that a sibling agent's fetch can advance out from under this
+#     run, which defeats the lease entirely. See
+#     defaults/docs/push-lease-pinning.md.
+#   - Skips a child whose local branch has not incorporated origin's head —
+#     the pin would be accurate and the push would still delete commits.
+#   - Skips a child whose pinned lease cannot be built AT ALL (unreadable
+#     remote, no loom-daemon): there is no bare-lease fallback.
 #   - --dry-run reports the per-child outcome (no-op / would-rebase / would-defer)
 #     without executing any git/gh mutation.
 #   - A rebase conflict on one child does NOT abort the whole run — it is a
@@ -45,13 +56,17 @@
 #     conflicted rebase is aborted so remaining children still process.
 #   - Refuses to run with a dirty working tree (a rebase would fail confusingly).
 #   - GitHub-only, and only for a <parent-branch> matching feature/issue-<N>.
+#   - Rebases only where `loom-daemon branch-update strategy` says `rebase`
+#     (#10771). In a merge-only repo (the default answer, and the answer when
+#     anything is unknown) a stale child is reported, never rewritten:
+#     merge-based de-stacking is #9808.
 #
 # Options:
 #   --dry-run   Report the per-child outcome without executing git/gh mutations.
 #   --help,-h   Show this help.
 #
 # Exit codes:
-#   0 = rebased, deferred, or no-op (or dry-run printed)
+#   0 = rebased, deferred, skipped (merge-only repo), or no-op (or dry-run)
 #   1 = usage / precondition failure
 #   2 = a git/gh step failed (rebase conflict, rejected force-with-lease push)
 
@@ -71,7 +86,7 @@ info() { echo -e "${BLUE}ℹ $1${NC}" >&2; }
 warn() { echo -e "${YELLOW}⚠ $1${NC}" >&2; }
 
 show_help() {
-    sed -n '2,56p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+    sed -n '2,71p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 DRY_RUN=false
@@ -112,12 +127,34 @@ forge_detect
 # shellcheck source=lib/push-lease-verify.sh
 source "$SCRIPT_DIR/lib/push-lease-verify.sh"
 
+# The PINNED --force-with-lease argument every child push below uses is built
+# by `loom-daemon push-lease pin-flag` (loom-daemon/src/cli/push_lease.rs), per
+# .loom/docs/shell-language-policy.md: a bare --force-with-lease compares
+# against refs/remotes/origin/<child>, a ref SHARED by every linked worktree of
+# this clone that a sibling agent's fetch can advance — after which the lease is
+# satisfied by construction and the push silently deletes the sibling's commit
+# (the live PR #9483 incident, #9487). Finding the binary is part of that
+# call-site; an unresolvable one leaves $DAEMON_BIN empty, and the per-child
+# call then fails closed (the child is SKIPPED, never pushed with a bare lease).
+# requires-daemon: push-lease >= 0.19.1080   #9487 — the pinned-lease builder. Declared at this repo's VERSION because the subcommand lands WITH this marker; the first release actually carrying it is the post-merge bump. A binary predating it is refused here with the floor and the roll command rather than degraded to the bare lease
+# shellcheck source=lib/locate-daemon-bin.sh
+source "$SCRIPT_DIR/lib/locate-daemon-bin.sh"
+DAEMON_BIN="$(loom_daemon_self_bin_override || loom_locate_daemon_bin "$SCRIPT_DIR/../.." || true)"
+loom_daemon_version_preflight push-lease "$DAEMON_BIN"
+
 # Ref-operand validator (#9106). REQUIRED, not defensive: every git call in this
 # script takes a branch name as a bare operand, and the child names come
 # straight off the forge (`gh pr list --json headRefName`). A missing validator
 # must stop the run, never degrade it to the unvalidated behaviour.
 # shellcheck source=lib/default-branch.sh
 source "$SCRIPT_DIR/lib/default-branch.sh"
+# #10771: may PR branches here be rebased at all? A rebase + force-push in a
+# repo that bars rebase deletes other agents' merge commits and orphans every
+# head a reviewer signed. Anything but an explicit `rebase` answer from
+# `loom-daemon branch-update strategy` — including a binary predating the
+# subcommand — is merge, which reports every stale child and rewrites none.
+# requires-daemon: branch-update optional   #10771 — a binary without it answers nothing, which is read as merge: children are reported, never rewritten
+BRANCH_UPDATE_STRATEGY="$("$DAEMON_BIN" branch-update strategy 2>/dev/null)" || BRANCH_UPDATE_STRATEGY=merge
 
 REPO_NWO="$(forge_get_repo_nwo "gh" 2>/dev/null || true)"
 # #9548: a real run pushes child branches and comments on child PRs, so it acts
@@ -168,12 +205,36 @@ _process_one_stacked_child() {
         return 0
     fi
 
+    # #10771: in a merge-only repo, never rewrite the child. Reported, exit 0.
+    if [[ "${BRANCH_UPDATE_STRATEGY:-}" != "rebase" ]]; then
+        warn "Child PR #$child_pr ($child_branch) is stale relative to '$parent_branch', but this repository's PR branches are not rebased (loom-daemon branch-update strategy: merge, #10771) — not rewriting it. Update it with a merge and a plain push in its worktree: git merge origin/$parent_branch && git push origin HEAD:$child_branch (merge-based de-stacking: #9808)."
+        return 0
+    fi
+
     # Stale relative to the parent's current tip. Derive the child ISSUE number
     # from its head branch (feature/issue-<N>) for the safe/unsafe split. A
     # non-feature/issue-N child has no loom:building claim to race → treated safe.
     local child_issue=""
     if [[ "$child_branch" =~ ^feature/issue-([0-9]+)$ ]]; then
         child_issue="${BASH_REMATCH[1]}"
+    fi
+    # #9487: build this child's PINNED --force-with-lease argument HERE, before
+    # the rebase rewrites the branch, by reading origin's live head. Left
+    # implicit at push time the bare flag compares against
+    # refs/remotes/origin/<child> — a ref SHARED by every linked worktree of
+    # this clone, which a sibling agent's fetch can fast-forward to a commit
+    # this run never saw; the bare lease is then satisfied by construction and
+    # the push silently deletes that commit (the live PR #9483 incident).
+    # `loom-daemon push-lease pin-flag` (cli/push_lease.rs) owns the query, the
+    # rendering, and the second refusal for a commit published BEFORE the pin
+    # was taken that this clone never incorporated. Any non-zero exit — exit 3
+    # unreadable remote, 4 unincorporated head, 127 no binary at all — SKIPS
+    # this child; there is no bare-lease fallback, because that is the bug.
+    local child_lease_arg="" pin_rc=0
+    child_lease_arg="$("$DAEMON_BIN" push-lease pin-flag --remote origin --branch "$child_branch" --local-ref "refs/heads/$child_branch")" || pin_rc=$?
+    if [[ $pin_rc -ne 0 || -z "$child_lease_arg" ]]; then
+        warn "No pinned force-with-lease value for '$child_branch' (loom-daemon push-lease pin-flag exit $pin_rc — see above, #9487; 'unrecognized subcommand' = this loom-daemon predates #9487: roll it) — skipping child PR #$child_pr rather than pushing with the bare lease."
+        RSC_FAILURE=2; return 0
     fi
 
     # (docs/gh-cached.md policy: claim arbitration stays on plain `gh`, #9953.)
@@ -221,7 +282,7 @@ Parent branch \`$parent_branch\` advanced (amended/pushed) after this child bran
     info "Child PR #$child_pr ($child_branch) is stale relative to '$parent_branch' — rebasing onto origin/$parent_branch"
     if ! run git rebase -- "origin/$parent_branch" "$child_branch"; then
         err "Rebase of '$child_branch' onto 'origin/$parent_branch' hit a conflict."
-        printf '    Resolve it, then finish manually:\n    git rebase origin/%s %s   # then, after resolving each conflict:\n    git rebase --continue\n    git push --force-with-lease\n' "$parent_branch" "$child_branch" >&2
+        printf '    Resolve it, then finish manually:\n    git rebase origin/%s %s   # then, after resolving each conflict:\n    git rebase --continue\n    git push %s origin %s   # pinned, never bare (#9487)\n' "$parent_branch" "$child_branch" "$child_lease_arg" "$child_branch" >&2
         # Abort the conflicted rebase so the remaining children can still process
         # (best-effort; the whole run is not aborted by one child's conflict).
         git rebase --abort >/dev/null 2>&1 || true
@@ -229,15 +290,8 @@ Parent branch \`$parent_branch\` advanced (amended/pushed) after this child bran
         return 0
     fi
 
-    # Version-bearing-file sync gate (#7168): a rebase silently absorbs
-    # whatever version-bearing values origin/$parent_branch already had. A
-    # file the child's own commits never touched (in practice
-    # .loom/install-metadata.json) never raises a git conflict, so it can
-    # end up stale relative to VERSION/the files that WERE part of the
-    # conflict-free merge -- invisible until CI's "Installer Integration
-    # Tests" fails. `git rebase <upstream> <branch>` (used above) checks out
-    # $child_branch first, so the working tree here already reflects the
-    # rebased child -- skipped under --dry-run since no rebase actually ran.
+    # Version-bearing-file sync gate (#7168; why: version-check-gate.sh) on the
+    # rebased child the rebase checked out. Not under --dry-run: nothing ran.
     if [[ "$DRY_RUN" != "true" ]] && [[ -x "$SCRIPT_DIR/version-check-gate.sh" ]]; then
         if ! "$SCRIPT_DIR/version-check-gate.sh" --fix-hint "then push."; then
             err "Version-bearing files are out of sync for '$child_branch' after rebase onto '$parent_branch' (see BLOCKER:/Fix: above)."
@@ -245,8 +299,16 @@ Parent branch \`$parent_branch\` advanced (amended/pushed) after this child bran
             return 0
         fi
     fi
+    # loom-daemon discard guard (#9282): a clean rebase can still empty the child or drop a
+    # hand-made merge resolution. rc 0 = blocked, no push; rc >1 = no answer, warn.
+    # requires-daemon: forge optional   rebase-guard (#9282): with no binary, or one predating the verb, the push proceeds unchecked behind a warning
+    local rg=1
+    [[ "$DRY_RUN" == "true" ]] || { rg=0; "$DAEMON_BIN" forge rebase-guard --base "origin/$parent_branch" --old "origin/$child_branch" --new "$child_branch" || rg=$?; }
+    [[ $rg -ne 0 ]] || { err "Not pushing '$child_branch': its rebase onto '$parent_branch' would discard work (see BLOCKER:/Fix: above)."; RSC_FAILURE=2; return 0; }
+    [[ $rg -eq 1 ]] || warn "rebase-guard gave no answer (rc=$rg) for '$child_branch' — pushing UNCHECKED for a dropped merge resolution or an emptied branch (#9282)."
 
-    if ! run git push --force-with-lease; then
+    # Pinned, never bare (#9487) — see the capture above.
+    if ! run git push "$child_lease_arg" origin "$child_branch"; then
         # A reported rejection is not always a real one (#6695): Git LFS's
         # pre-push hook can race the lease re-check on a branch with pending
         # LFS objects, so the ref update lands while the printed rejection

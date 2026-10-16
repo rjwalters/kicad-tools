@@ -47,7 +47,7 @@ When invoked with `/imagine <description>`, you guide the user through:
 4. [Create]    → Initialize local repo and GitHub
 5. [Install]   → Run Loom installation
 6. [Seed]      → Create README.md, WORK_PLAN.md, WORK_LOG.md
-7. [Issues]    → Create starter GitHub issues with loom:issue labels
+7. [Issues]    → Create starter GitHub issues at loom:triage
 8. [Complete]  → Report success and next steps
 ```
 
@@ -257,7 +257,7 @@ Install Loom into the new repository:
 # Wait for PR to be created
 sleep 2
 
-# Find and merge the installation PR
+# Find and merge the installation PR (new repo: no loom:frozen)
 PR_NUMBER=$(gh pr list --label "loom:review-requested" --limit 500 --json number --jq '.[0].number')
 
 if [ -n "$PR_NUMBER" ]; then
@@ -326,9 +326,15 @@ Prioritized roadmap of upcoming work, maintained by the Guide role.
 
 <!-- Maintained automatically by the Guide triage agent. Manual edits are fine but may be overwritten. -->
 
-## Operator Priority
+## Very Important
 
-Operator-starred issues (`loom:operator-priority`).
+`loom:very-important` (one counts per workspace); every stage takes these first.
+
+*None.*
+
+## Important
+
+`loom:important`; taken before unlabelled work.
 
 *None.*
 
@@ -336,11 +342,7 @@ Operator-starred issues (`loom:operator-priority`).
 
 Human-approved issues ready for implementation (`loom:issue`).
 
-- **#1**: Project scaffolding and build setup
-- **#2**: Core {{CORE_COMPONENT}} implementation
-- **#3**: {{FEATURE_1}}
-- **#4**: {{FEATURE_2}}
-- **#5**: {{FEATURE_3}}
+*None yet.*
 
 ## In Progress
 
@@ -350,9 +352,13 @@ Issues actively being worked (`loom:building`).
 
 ## Proposed
 
-Issues under evaluation (`loom:architect`, `loom:hermit`, `loom:curated`).
+Issues under evaluation (`loom:triage`, `loom:architect`, `loom:hermit`, `loom:curated`).
 
-*No proposed issues.*
+- **#1**: Project scaffolding and build setup
+- **#2**: Core {{CORE_COMPONENT}} implementation
+- **#3**: {{FEATURE_1}}
+- **#4**: {{FEATURE_2}}
+- **#5**: {{FEATURE_3}}
 
 ## Epics
 
@@ -362,11 +368,11 @@ Active epics with progress tracking.
 
 ## Backlog Balance
 
-| Tier | Count |
+| Bucket | Count |
 |------|-------|
-| Tier 1 (goal-advancing) | 3 |
-| Tier 2 (goal-supporting) | 2 |
-| Tier 3 (maintenance) | 0 |
+| Very important | 0 |
+| Important | 0 |
+| Ready (`loom:issue`) | 0 |
 
 **Note:** Initial backlog seeded from project bootstrapping. Issue numbers above are placeholders — update after GitHub issues are created.
 ```
@@ -416,13 +422,12 @@ Create 3-5 GitHub issues from the user's feature list so `/loom:sweep` has work 
 
 ```bash
 # Create issues from the discovery phase features
-# Each issue gets the loom:issue label so builders can claim them
+# Filed loom:triage: the Curator admits them (#11820)
 
 # Issue 1: Project scaffolding (always included)
 ./.loom/scripts/create-issue.sh \
   --title "Project scaffolding and build setup" \
-  --label "loom:issue" \
-  --label "tier:goal-advancing" \
+  --label "loom:triage" \
   --body "$(cat <<'BODY'
 ## Summary
 Set up the project build system, directory structure, and development tooling.
@@ -439,8 +444,7 @@ BODY
 # Issue 2: Core component (always included)
 ./.loom/scripts/create-issue.sh \
   --title "Core {{CORE_COMPONENT}} implementation" \
-  --label "loom:issue" \
-  --label "tier:goal-advancing" \
+  --label "loom:triage" \
   --body "$(cat <<'BODY'
 ## Summary
 Implement the core {{CORE_COMPONENT}} that other features build on.
@@ -455,20 +459,17 @@ BODY
 # Issues 3-5: User-requested features
 ./.loom/scripts/create-issue.sh \
   --title "{{FEATURE_1}}" \
-  --label "loom:issue" \
-  --label "tier:goal-advancing" \
+  --label "loom:triage" \
   --body "## Summary\n\n{{FEATURE_1_DESCRIPTION}}\n\n## Acceptance Criteria\n\n- [ ] Feature implemented\n- [ ] Tests passing"
 
 ./.loom/scripts/create-issue.sh \
   --title "{{FEATURE_2}}" \
-  --label "loom:issue" \
-  --label "tier:goal-supporting" \
+  --label "loom:triage" \
   --body "## Summary\n\n{{FEATURE_2_DESCRIPTION}}\n\n## Acceptance Criteria\n\n- [ ] Feature implemented\n- [ ] Tests passing"
 
 ./.loom/scripts/create-issue.sh \
   --title "{{FEATURE_3}}" \
-  --label "loom:issue" \
-  --label "tier:goal-supporting" \
+  --label "loom:triage" \
   --body "## Summary\n\n{{FEATURE_3_DESCRIPTION}}\n\n## Acceptance Criteria\n\n- [ ] Feature implemented\n- [ ] Tests passing"
 ```
 
@@ -491,7 +492,7 @@ Provide a clear summary and next steps:
 - README.md with project vision and milestone markers
 - WORK_PLAN.md with seeded backlog for Guide
 - WORK_LOG.md with bootstrapping entry
-- {{ISSUE_COUNT}} GitHub issues with `loom:issue` labels, ready to build
+- {{ISSUE_COUNT}} GitHub issues at `loom:triage`
 
 ### Next steps:
 
@@ -617,7 +618,7 @@ Creating project...
 - Installed Loom orchestration
 - Merged Loom PR
 - Created README.md, WORK_PLAN.md, and WORK_LOG.md
-- Created 5 starter issues with loom:issue labels
+- Created 5 starter issues at loom:triage
 - Ready for development!
 
 Open a new Claude Code session to start:

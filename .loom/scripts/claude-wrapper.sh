@@ -138,7 +138,9 @@ _WRAPPER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # defaults/scripts source. If absent (older install), every classifier below
 # takes its DEGRADED path — the same hand-rolled fallback regexes, which since
 # #8037 live in `loom-daemon retry-classify` alongside the library path rather
-# than inline here.
+# than inline here. Since #11208 the library itself delegates to
+# `loom-daemon classify-error` when a binary resolves, so these predicates
+# consume native classifications without any change to this file.
 if [[ -f "${_WRAPPER_DIR}/lib/classify-error.sh" ]]; then
     # shellcheck source=lib/classify-error.sh
     # shellcheck disable=SC1091
@@ -484,6 +486,9 @@ resolve_mcp_workspace() {
 #
 # Args: $1 = path to the MCP server entry point (e.g. dist/index.js)
 #       $2 = node binary to invoke it with
+# Reads MCP_SERVER_ENV (set by _check_mcp_candidate): the server's declared
+# `.mcp.json` `env` as K=V words, merged over the inherited env via `env` the
+# way Claude Code launches it (#10870). Values are never logged.
 # Sets (for the caller to log on failure): MCP_SMOKE_TEST_STDOUT,
 # MCP_SMOKE_TEST_STDERR.
 # Returns: 0 if a valid JSON-RPC initialize response was observed, 1 otherwise.
@@ -497,8 +502,8 @@ _mcp_smoke_test() {
     tmp_stdout=$(mktemp)
     tmp_stderr=$(mktemp)
 
-    printf '%s\n' "${init_request}" | timeout 5 "${node_bin}" "${mcp_entry}" \
-        >"${tmp_stdout}" 2>"${tmp_stderr}" || true
+    printf '%s\n' "${init_request}" | timeout 5 env ${MCP_SERVER_ENV[@]+"${MCP_SERVER_ENV[@]}"} \
+        "${node_bin}" "${mcp_entry}" >"${tmp_stdout}" 2>"${tmp_stderr}" || true
 
     MCP_SMOKE_TEST_STDOUT=$(cat "${tmp_stdout}")
     MCP_SMOKE_TEST_STDERR=$(cat "${tmp_stderr}")
@@ -542,25 +547,27 @@ _check_mcp_candidate() {
     local mcp_workspace="$1"
     local mcp_config="${mcp_workspace}/.mcp.json"
 
-    # Extract the MCP server entry point from .mcp.json
+    # Extract the server name, entry point, and declared `env` (#10870) from
+    # .mcp.json as NUL-delimited fields: name, args[-1], then K=V per env key.
+    # NUL framing keeps values with spaces/quotes/newlines intact — no eval.
     # Use timeout to prevent hanging on resource-contended systems (see issue #2472).
-    local mcp_entry
-    mcp_entry=$(timeout 10 python3 -c "
+    local field mcp_entry mcp_name mcp_fields=()
+    while IFS= read -r -d '' field; do mcp_fields+=("${field}"); done < <(timeout 10 python3 -c "
 import json, sys
-with open('${mcp_config}') as f:
-    cfg = json.load(f)
-servers = cfg.get('mcpServers', {})
-for name, srv in servers.items():
-    args = srv.get('args', [])
-    if args:
-        print(args[-1])
-        sys.exit(0)
-" 2>/dev/null || echo "")
+for name, srv in json.load(open(sys.argv[1])).get('mcpServers', {}).items():
+    if srv.get('args'):
+        env = [k + '=' + (v if isinstance(v, str) else json.dumps(v)) for k, v in (srv.get('env') or {}).items() if k.isidentifier()]
+        sys.stdout.write('\0'.join([name, str(srv['args'][-1])] + env) + '\0')
+        break
+" "${mcp_config}" 2>/dev/null || true)
+    mcp_name="${mcp_fields[0]:-}" mcp_entry="${mcp_fields[1]:-}"
 
     if [[ -z "${mcp_entry}" ]]; then
         log_warn "Could not extract MCP entry point from ${mcp_config} - not a usable pre-flight candidate"
         return 2
     fi
+    MCP_SERVER_ENV=("${mcp_fields[@]:2}")
+    log_info "MCP pre-flight: smoke-testing server '${mcp_name}' (${mcp_entry}) from ${mcp_config}"
 
     # Check if the entry point file exists
     if [[ ! -f "${mcp_entry}" ]]; then
@@ -1526,13 +1533,16 @@ check_api_reachable() {
 # defaults/scripts/tests/test-claude-wrapper-retry.sh (#8032), whose assertions
 # were written against the pre-port shell and run unchanged against the port.
 #
-# What deliberately did NOT move: `classify_error` and
+# What deliberately did NOT move INTO THIS FILE'S LOGIC: `classify_error` and
 # `classification_is_transient`. Those belong to lib/classify-error.sh, which
 # every runtime adapter sources and which is, per #4501, the fleet's single
 # source of truth for whether a category is retryable. A second copy of that
-# deny-list in Rust would recreate the exact defect #4501 fixed — two
+# deny-list here would recreate the exact defect #4501 fixed — two
 # independent verdict systems printing contradictory conclusions about one
-# failure. So the shell still answers WHAT this failure is; the port owns WHAT
+# failure. So the classifier still answers WHAT this failure is (and, since
+# #11208, does so natively via `loom-daemon classify-error` whenever a daemon
+# binary resolves — the library delegates and falls back to its in-file
+# tables; from this file's point of view nothing changed); the port owns WHAT
 # THE WRAPPER DOES about it.
 #
 # #8138 moved a seventh across the same boundary, for the same reason: the
@@ -1787,8 +1797,8 @@ _auth_dead_phrase() {
     # JSON-enveloped 401 of #6614 yields a clean phrase for the `.bad_tokens`
     # reason string instead of falling through to the generic default — grep
     # returns the LEFTMOST match, so the quoted `"type":"` wrapper is never
-    # captured with it.
-    m="$(echo "${output}" | grep -ioE "401[^a-z]*authentication_error|(OAuth )?(access )?token (has been |was )?revoked|authentication_error|invalid bearer token|OAuth token has expired|token has expired" | head -1)"
+    # captured with it. #11205's Claude Code phrasings name themselves too.
+    m="$(echo "${output}" | grep -ioE "401[^a-z]*authentication_error|(OAuth )?(access )?token (has been |was )?revoked|authentication_error|invalid bearer token|OAuth token has expired|token has expired|OAuth access token is invalid|OAuth session expired|401 Invalid API key" | head -1)"
     echo "${m:-401/invalid credential}"
 }
 

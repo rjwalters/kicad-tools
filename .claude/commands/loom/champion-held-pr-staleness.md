@@ -5,7 +5,7 @@ A sub-step of [`champion-pr-merge.md`](champion-pr-merge.md) → "Held-PR Census
 reusing `$HELD_JSON`'s own fields plus local read-only `git` — no second
 `gh pr list`.
 
-**Detection only.** This tick changes no label (never `loom:operator`, never
+**Detection only.** This tick changes no label (never `loom:blocked`, never
 `loom:blocked`), routes nothing to Doctor, rebases nothing, pushes nothing, and
 never touches a working tree. Its entire output is one digest cell per held PR
 and, for a conflicting one, at most one comment per divergence episode per
@@ -17,7 +17,7 @@ A held PR's approval never goes stale — verdict-staleness keys on the PR's own
 head, which does not move while a human decision is outstanding — and its CI
 stays green on the old base. `main` moves anyway. On 2026-09-20/21 three of six
 PRs coming off operator holds needed a rebase: two mechanical append-collisions
-(`ci.yml`, `ci-excluded.txt`, `shell-allowlist.txt`) and one re-integration
+(`ci.yml`, `ci-excluded.txt`, and a since-retired allowlist) and one re-integration
 (#8426 — `main` restructured the same `merge-pr.sh --auto` block via #8048 and
 #8429 while the PR sat held). All three were discovered *at merge time*: the
 worst moment, right after a human had made and announced a merge decision.

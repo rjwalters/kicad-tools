@@ -138,7 +138,7 @@ def _no_post_route_kicad_cli(monkeypatch: pytest.MonkeyPatch) -> None:
     """
     from kicad_tools.cli import route_cmd
 
-    def _no_oracle(output_path, *, args, quiet=False):
+    def _no_oracle(output_path, *, args, quiet=False, **_kw):
         args._stranded_pour_links = 0
         return 0
 
@@ -221,6 +221,12 @@ class TestBlockingCopperReport:
                 "--skip-drc",
                 "--complete-report",
                 str(report_path),
+                # This test pins the report schema, not deadline behaviour
+                # (TestBoundedTermination owns that). A generous per-link
+                # budget keeps a loaded CI runner from hitting the 30s
+                # default backstop (Issue #6468).
+                "--per-net-timeout",
+                "600",
             ]
         )
         assert report_path.exists()

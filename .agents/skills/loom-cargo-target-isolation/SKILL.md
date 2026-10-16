@@ -60,7 +60,8 @@ Decide once, before your first verdict-bearing build:
    `$TMPDIR`, `~`, `~/.cache`, or `<repo>/.loom/target-*`. Nothing owns those
    paths, so a failed or interrupted run leaks the whole build: 85 GB of
    `.loom/target-*` on one fleet host and 45 GB of `/tmp/cargo-target-*` on
-   another (#8370). The daemon's orphan sweep reclaims them only hours later.
+   another (#8370). **Enforced** (#11582): the `loom:cargo-target-dir` guard
+   (`guard-hooks.md`) denies such a build and names the dir to use instead.
 
 A private dir means a full rebuild (3.5-11 GB, several minutes; sccache
 softens it). That is worth it, because a wrong verdict costs more than a

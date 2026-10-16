@@ -167,6 +167,10 @@ def _layer_transition_ok(candidate: EscapeRoute, router: EscapeRouter) -> bool:
     via = candidate.via
     if via is None:
         return False
+    # Deliberately the LOGICAL pair (issue #6630): this asks whether the
+    # escape's intended transition (pad layer -> landing layer) is carried by
+    # the via. The drilled through-barrel always spans every layer, which
+    # would make the check vacuous.
     grid = router.grid
     try:
         span = sorted(grid.layer_to_index(layer.value) for layer in via.layers)

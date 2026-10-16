@@ -4,7 +4,30 @@
     "version": 1,
     "manufacturer": "jlcpcb-tier1",
     "layers": 2,
-    "copper_oz": 1.0
+    "copper_oz": 1.0,
+    "kct_router_netclasses": {
+      "classes": [
+        "Clock",
+        "Debug",
+        "Digital",
+        "Power"
+      ],
+      "assignments": [
+        "+3.3V",
+        "+5V",
+        "BOOT0",
+        "GND",
+        "LED_K",
+        "NRST",
+        "OSC_IN",
+        "OSC_OUT",
+        "SWCLK",
+        "SWDIO",
+        "SWO",
+        "USER_LED"
+      ]
+    },
+    "kct_sidecar_sha256": "c66fbed6eb82c3c8c9559e7a35574b3694d45ee3fa68004f781c0f45eed7c62a"
   },
   "board": {
     "design_settings": {
@@ -53,10 +76,92 @@
         "via_diameter": 0.3,
         "via_drill": 0.15,
         "wire_width": 6
+      },
+      {
+        "bus_width": 12,
+        "clearance": 0.2,
+        "diff_pair_gap": 0.25,
+        "diff_pair_via_gap": 0.25,
+        "diff_pair_width": 0.127,
+        "line_style": 0,
+        "microvia_diameter": 0.2,
+        "microvia_drill": 0.1,
+        "name": "Clock",
+        "pcb_color": "rgba(0, 0, 0, 0.000)",
+        "schematic_color": "rgba(0, 0, 0, 0.000)",
+        "track_width": 0.127,
+        "via_diameter": 0.6,
+        "via_drill": 0.3,
+        "wire_width": 6
+      },
+      {
+        "bus_width": 12,
+        "clearance": 0.15,
+        "diff_pair_gap": 0.25,
+        "diff_pair_via_gap": 0.25,
+        "diff_pair_width": 0.127,
+        "line_style": 0,
+        "microvia_diameter": 0.2,
+        "microvia_drill": 0.1,
+        "name": "Debug",
+        "pcb_color": "rgba(0, 0, 0, 0.000)",
+        "schematic_color": "rgba(0, 0, 0, 0.000)",
+        "track_width": 0.127,
+        "via_diameter": 0.6,
+        "via_drill": 0.3,
+        "wire_width": 6
+      },
+      {
+        "bus_width": 12,
+        "clearance": 0.15,
+        "diff_pair_gap": 0.25,
+        "diff_pair_via_gap": 0.25,
+        "diff_pair_width": 0.127,
+        "line_style": 0,
+        "microvia_diameter": 0.2,
+        "microvia_drill": 0.1,
+        "name": "Digital",
+        "pcb_color": "rgba(0, 0, 0, 0.000)",
+        "schematic_color": "rgba(0, 0, 0, 0.000)",
+        "track_width": 0.127,
+        "via_diameter": 0.6,
+        "via_drill": 0.3,
+        "wire_width": 6
+      },
+      {
+        "bus_width": 12,
+        "clearance": 0.2,
+        "diff_pair_gap": 0.25,
+        "diff_pair_via_gap": 0.25,
+        "diff_pair_width": 0.127,
+        "line_style": 0,
+        "microvia_diameter": 0.2,
+        "microvia_drill": 0.1,
+        "name": "Power",
+        "pcb_color": "rgba(0, 0, 0, 0.000)",
+        "schematic_color": "rgba(0, 0, 0, 0.000)",
+        "track_width": 0.127,
+        "via_diameter": 0.6,
+        "via_drill": 0.3,
+        "wire_width": 6
       }
     ],
     "meta": {
       "version": 3
+    },
+    "netclass_assignments": {
+      "+3.3V": "Power",
+      "+5V": "Power",
+      "BOOT0": "Debug",
+      "GND": "Power",
+      "LED_K": "Digital",
+      "NRST": "Debug",
+      "OSC_IN": "Clock",
+      "OSC_OUT": "Clock",
+      "SWCLK": "Debug",
+      "SWDIO": "Debug",
+      "SWO": "Debug",
+      "USER_LED": "Digital"
     }
   },
   "schematic": {

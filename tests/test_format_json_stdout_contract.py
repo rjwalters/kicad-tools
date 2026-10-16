@@ -32,6 +32,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -174,6 +175,7 @@ CONTRACT_ARGV: dict[str, list[str]] = {
     "pcb snap-rotation": ["{pcb}", "--dry-run"],
     "pcb edit-outline": ["{pcb}", "--list"],
     "pcb net-audit": ["{pcb}"],
+    "pcb diff": ["{pcb}", "{pcb}"],
     "pcb export-dsn": ["{pcb}"],
     "pcb import-ses": ["{pcb}", "{dir}/missing.ses"],
     # -- lib ----------------------------------------------------------------
@@ -327,6 +329,12 @@ CONTRACT_ARGV: dict[str, list[str]] = {
     "create-pcb": ["{sch}", "--dry-run"],
     "build": ["{dir}/missing.kct", "--dry-run"],
     "screenshot": ["{pcb}", "-o", "{dir}/shot.png"],
+    # Issue #6316: matplotlib only, no kicad-cli (``list`` needs neither).
+    "board-view overview": ["{pcb}", "-o", "{dir}/view.png"],
+    "board-view net": ["{pcb}", "NET1", "-o", "{dir}/view.png"],
+    "board-view layers": ["{pcb}", "NET1", "-o", "{dir}/view.png"],
+    "board-view crop": ["{pcb}", "0", "0", "30", "20", "-o", "{dir}/view.png"],
+    "board-view list": ["{pcb}"],
     "report generate": ["{pcb}", "-o", "{dir}/reports", "--skip-erc", "--no-figures"],
     "export": ["{pcb}", "-o", "{dir}/export", "--dry-run"],
     "optim fom-debug": ["{pcb}"],
@@ -427,6 +435,7 @@ NEEDS_KICAD_CLI: frozenset[str] = frozenset(
 )
 
 _SUBPROCESS_TIMEOUT_S = 50
+_MPLCONFIGDIR = Path(tempfile.gettempdir()) / "kct-contract-mplconfig"
 
 
 def _iter_json_leaves(parser: argparse.ArgumentParser, path: tuple[str, ...] = ()):
@@ -464,6 +473,8 @@ def _expand(argv: list[str], scratch: Path) -> list[str]:
 
 def _hermetic_env(scratch: Path) -> dict[str, str]:
     env = dict(os.environ)
+    # `mcp setup` reads $CLAUDE_CONFIG_DIR/.claude.json when it is set (#6418).
+    env.pop("CLAUDE_CONFIG_DIR", None)
     home = scratch / "_home"
     home.mkdir(exist_ok=True)
     env.update(
@@ -474,6 +485,11 @@ def _hermetic_env(scratch: Path) -> dict[str, str]:
             "XDG_DATA_HOME": str(home / ".local" / "share"),
             "NO_COLOR": "1",
             "PYTHONIOENCODING": "utf-8",
+            # matplotlib keeps its font cache under HOME and rebuilds it when
+            # HOME is fresh: ~18 s per ``board-view`` image leaf on macOS
+            # (issue #6316).  One cache outside the user's HOME, shared by
+            # every leaf and xdist worker, keeps the run hermetic and fast.
+            "MPLCONFIGDIR": str(_MPLCONFIGDIR),
         }
     )
     return env
@@ -512,6 +528,12 @@ def test_flag_variants_extend_registered_leaves():
         assert argv[: len(leaf.split())] == leaf.split(), variant
 
 
+# CI runs pytest with ``--timeout=60``, which would preempt the 2 * 50 s inner
+# guard below (a genuine hang then surfaces as a pytest-timeout traceback, not
+# the "did not finish" message, and ``route --lint-gate`` -- 21.4 s idle -- fails
+# under ~3x CI slowdown). The per-test marker overrides the CLI value and leaves
+# headroom so the inner guard, which kills the process group, stays authoritative.
+@pytest.mark.timeout(2 * _SUBPROCESS_TIMEOUT_S + 30)
 @pytest.mark.parametrize("variant", sorted(FLAG_VARIANT_ARGV))
 def test_format_json_flag_variant_stdout_is_a_single_json_document(variant, tmp_path):
     scratch = tmp_path / "proj"

@@ -1944,7 +1944,11 @@ class TestSameNetDrillSpacing:
         assert is_valid is True
 
     def test_same_net_drill_just_below_threshold(self, grid):
-        """Test same-net vias just below min_drill_clearance threshold."""
+        """Test same-net vias just below the hole-to-hole floor.
+
+        Issue #6464: the default floor is ``max(min_drill_clearance,
+        min_hole_to_hole)`` (0.5 mm), not the 0.102 mm via-merge threshold.
+        """
         same_net_route = Route(net=1, net_name="NET1")
         same_net_route.vias.append(
             Via(
@@ -1959,9 +1963,9 @@ class TestSameNetDrillSpacing:
         )
         grid.routes.append(same_net_route)
 
-        # Drill edge-to-edge = 0.45 - 0.175 - 0.175 = 0.1 < 0.102
+        # Drill edge-to-edge = 0.849 - 0.175 - 0.175 = 0.499 < 0.5
         via = Via(
-            x=10.45,
+            x=10.849,
             y=10.0,
             drill=0.35,
             diameter=0.7,
@@ -1973,10 +1977,10 @@ class TestSameNetDrillSpacing:
         is_valid, clearance, location = grid.validate_same_net_drill_spacing(via, same_net=1)
 
         assert is_valid is False
-        assert clearance < grid.rules.min_drill_clearance
+        assert clearance < grid.rules.min_hole_to_hole
 
     def test_same_net_drill_at_threshold(self, grid):
-        """Test same-net vias at exactly min_drill_clearance pass."""
+        """Test same-net vias at the hole-to-hole floor pass (Issue #6464)."""
         same_net_route = Route(net=1, net_name="NET1")
         same_net_route.vias.append(
             Via(
@@ -1991,9 +1995,9 @@ class TestSameNetDrillSpacing:
         )
         grid.routes.append(same_net_route)
 
-        # Drill edge-to-edge = 0.453 - 0.175 - 0.175 = 0.103 > min_drill_clearance
+        # Drill edge-to-edge = 0.853 - 0.175 - 0.175 = 0.503 > min_hole_to_hole
         via = Via(
-            x=10.453,
+            x=10.853,
             y=10.0,
             drill=0.35,
             diameter=0.7,
@@ -2005,7 +2009,7 @@ class TestSameNetDrillSpacing:
         is_valid, clearance, location = grid.validate_same_net_drill_spacing(via, same_net=1)
 
         assert is_valid is True
-        assert clearance >= grid.rules.min_drill_clearance
+        assert clearance >= grid.rules.min_hole_to_hole
 
 
 class TestHeuristics:

@@ -2,8 +2,8 @@
 
 Loom's opt-in OTLP exporter carries completed spans alongside lifecycle logs and
 metrics. Trace IDs and span IDs are native OTLP fields, so a backend can join a
-log to its exact execution span. Enable the `otlp` Cargo feature and configure
-`observability.enabled`, `exporter: "otlp"`, an endpoint, and an ingest key file
+log to its exact execution span. Every build includes the exporter (#10700);
+configure `observability.enabled`, `exporter: "otlp"`, an endpoint, and an ingest key file
 as described in [observability](observability.md).
 
 ## Identity and process boundaries
@@ -13,7 +13,8 @@ carries are policy: [trace identity](trace-identity.md). An issue
 number never identifies an execution: retries and restarts of one issue are
 distinct executions, each with a root span ID derived from its sweep id. An
 issue sweep's trace ID, however, is its issue's **story trace** (#9037), keyed
-per harness-ops D32 v1 (#9068): trace ID and story root span ID are
+per story key v1 (#9068; owner doc: 2AMLogic/2am
+`infra/signoz/docs/story-trace.md`): trace ID and story root span ID are
 SHA-256-derived from `loom-story/v1:github:<repo_id>:<issue>`, where `repo_id`
 is GitHub's numeric id for the checkout's `origin` (resolved once per repo and
 cached), so every sweep of the issue, on any host and across renames, lands in
@@ -37,7 +38,7 @@ it rejects malformed, uppercase, and zero IDs.
 The story's GitHub-shaped **phase spans** are emitted by the 2AMLogic/2am
 storyline reconciler, not by Loom; Loom only derives and accepts their IDs
 (`story_span_id`, `sha256(input:span:<kind>:<source_event_id>)[0..8]`) over
-D32's closed kind list `STORY_SPAN_KINDS`, kept byte-for-byte in parity with
+the story key's closed kind list `STORY_SPAN_KINDS`, kept byte-for-byte in parity with
 2am's `vectors.json` (`loom-daemon/tests/fixtures/story_vectors_d32_v1.json`):
 `story.intake`, `story.queue_dwell`, `story.ci`, `story.ci.queue`,
 `story.ci.run`, `story.review_wait`, `story.rework`, `story.merge`,
@@ -217,8 +218,7 @@ synthetic zero-duration completion, the two `loom.timing_source` values in
 nothing either way, and guessing would publish a measurement that was never
 taken. Any percentile/dwell aggregate over `loom.role_attempt` must filter
 `loom.attempt.worked = "true"` — unconditioned, the `false` population
-dominates and the median collapses to milliseconds (see
-[`eta.md`](eta.md) § "Role-attempt stages: which percentile to read").
+dominates and the median collapses to milliseconds.
 
 Since #9438 the role runner removes most of that population at the source: a
 role-runner tick opens its `loom.role_attempt` root only at the launch (the
@@ -348,6 +348,25 @@ The tick's story copies (`loom.timing_source=tick`) carry the same class,
 code and message. A recovered `process_lost` close carries
 `loom.failure_class=supervisor-lost` — the child and its supervisor both
 exited before either recorded a close — and keeps an unset status.
+A run a planned roll ended (#11263) instead closes as
+`loom.result=interrupted_by_roll`, unset status, no failure class, with
+`loom.roll.disposition` (`paused`|`requeued`|`budget-missed`) and
+`loom.roll.item_id`; recovery keys strictly on pause-manifest membership, so an
+unplanned crash stays `process_lost`. A resumed role run carries
+`loom.resumed_from` = that item id. Failure-rate queries and the role-failures
+watch should exclude `interrupted_by_roll`.
+
+A step's `loom.sweep` root (`loom.sweep_id=step-<role>-<item>-…`, #12253) is
+closed by the step's own end, when the reaper, a cancel or startup sees the
+session exit: `loom.result` is the same `success`/`failure` its
+`role_tick.outcome` reports, with `loom.role`, the step's model and effort,
+`loom.exit_code` when known, and on a failure a `loom.failure_class` of
+`timeout-ceiling`, `cancelled`, `step-outcome-failed` (the session's
+`LOOM_STEP_OUTCOME class=failed`), `exit-<code>` or `exit-unobserved`. A step a
+roll stopped closes as `interrupted_by_roll`. Orphan recovery leaves a step's
+span alone while the step's claim lock still names it and its leader or its
+process group lives, so `process_lost` on a step means the step really died
+unobserved.
 
 ## Journals and recovery
 

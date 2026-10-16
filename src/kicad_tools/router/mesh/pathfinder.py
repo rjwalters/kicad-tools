@@ -304,6 +304,14 @@ class MeshPathfinder:
         if not navmesh.triangles:
             return None
 
+        # Issue #6360: a single-layer route runs on the start pad's layer; it
+        # is declined when that layer is reserved / hard-avoided for this net
+        # (the layered via-injection fallback then handles the net).
+        if (start_li := self._layer_index(start.layer)) is not None and (
+            start_li in self._blocked_layers(net_class)
+        ):
+            return None
+
         trace_w = getattr(net_class, "trace_width", None) or self.rules.trace_width
         clearance = getattr(net_class, "clearance", None) or self.rules.trace_clearance
         # Issue #6243: the net's authored netclass minimum is its own side.
@@ -439,6 +447,10 @@ class MeshPathfinder:
         model is net-AGNOSTIC (plain polygons, no same-net exemption); this is
         safe only because ``fixed_copper`` is pre-filtered to non-listed nets
         by the driver, so a net being routed never self-blocks on its own seed.
+
+        Issue #6566: committed copper is now tracked per net and a connection
+        sees only OTHER nets' copper, so a multi-pad net's later star legs are
+        not blocked by the copper of its earlier legs (shared anchor pad).
         ``fixed_copper=None`` / ``[]`` seeds nothing and is a byte-identical
         no-op relative to the pre-#4364 negotiation.
 
@@ -472,7 +484,14 @@ class MeshPathfinder:
             # it (net-vs-net short avoidance).  Per-layer so an F.Cu net is not
             # blocked by another net's B.Cu cross-under.  Reset each pass so a
             # rip-up genuinely frees the corridor.
-            committed_by_layer: dict[int, list[list[Pt]]] = {}
+            # Issue #6566: kept PER NET (net -> layer -> capsules) so a
+            # connection never treats its own net's committed copper (an
+            # earlier star leg sharing its anchor pad) as an obstacle.
+            committed_by_net: dict[int, dict[int, list[list[Pt]]]] = {}
+            # Issue #6566: via sites each net has committed this pass, so a
+            # later star leg of the same net never stacks a second via on the
+            # same portal midpoint (coincident holes -> hole_to_hole errors).
+            committed_via_sites: dict[int, list[Pt]] = {}
             # Issue #4364: pre-seed the preserved copper of NON-listed nets as
             # an immovable hard obstacle.  The dict is reset every pass (so a
             # rip-up frees listed-net corridors), therefore the fixed seed must
@@ -480,9 +499,17 @@ class MeshPathfinder:
             # inflates and layer-buckets it identically to same-pass committed
             # copper, so both the in-layer fit and ``_route_via_injection``
             # (which reads the whole dict) honor it.
-            self._seed_fixed_copper(committed_by_layer, fixed_copper)
+            for fixed in fixed_copper or []:
+                self._seed_fixed_copper(committed_by_net.setdefault(fixed.net, {}), [fixed])
             for key, start, end, net_class in ordered:
                 start_L = self._layer_index(start.layer) or 0
+                # Issue #6566: only copper of OTHER nets is an obstacle.
+                committed_by_layer: dict[int, list[list[Pt]]] = {}
+                for other_net, by_layer in committed_by_net.items():
+                    if other_net == start.net:
+                        continue
+                    for lidx, polys in by_layer.items():
+                        committed_by_layer.setdefault(lidx, []).extend(polys)
                 # Issue #4274: the net's own-layer committed copper doubles as
                 # the lane-assignment model -- ``_route_with_portals`` narrows
                 # this net's portals by that copper so its funnel produces a
@@ -519,11 +546,30 @@ class MeshPathfinder:
                     failed.append((key, start, end, net_class))
                     continue
                 route, portals = result
+                # Issue #6566: drop a via coinciding with one this net already
+                # committed (the earlier via already joins the same layers).
+                sites = committed_via_sites.setdefault(route.net, [])
+                route.vias = [
+                    v
+                    for v in route.vias
+                    if not any(math.hypot(v.x - sx, v.y - sy) < 1e-3 for sx, sy in sites)
+                ]
+                sites.extend((v.x, v.y) for v in route.vias)
                 routes[key] = route
                 for edge in portals:
                     navmesh.commit_portal(edge)
+                net_committed = committed_by_net.setdefault(route.net, {})
                 for lidx, polys in self._route_obstacles_by_layer(route).items():
-                    committed_by_layer.setdefault(lidx, []).extend(polys)
+                    net_committed.setdefault(lidx, []).extend(polys)
+                # Issue #6566: a placed via is copper on every layer; make it a
+                # keep-out for OTHER nets (own-net copper is exempt above).
+                for via in route.vias:
+                    keepout = _via_keepout(
+                        (via.x, via.y),
+                        via.diameter / 2 + self.rules.trace_width / 2 + self.rules.trace_clearance,
+                    )
+                    for lidx in range(self.layer_stack.num_layers):
+                        net_committed.setdefault(lidx, []).append(keepout)
 
             if len(routes) > best_count:
                 best_count = len(routes)
@@ -631,6 +677,26 @@ class MeshPathfinder:
         except Exception:
             return False
 
+    def _blocked_layers(self, net_class: object | None) -> frozenset[int]:
+        """Routing-graph layer indices no copper may be laid on (issue #6360).
+
+        Union of layers outside ``DesignRules.allowed_layers`` (plane-layer
+        reservation) and the net class's hard-avoided layers (auto-hard with
+        ``target_ampacity`` or ``strict_layers``, as the grid engine does).
+        Empty when neither applies, so unreserved boards are unchanged.
+        """
+        blocked: set[int] = set()
+        allowed = self.rules.allowed_layers
+        if allowed is not None:
+            allowed_names = set(allowed)
+            blocked.update(
+                ld.index for ld in self.layer_stack.layers if ld.name not in allowed_names
+            )
+        hard = getattr(net_class, "hard_avoided_layer_indices", None)
+        if callable(hard):
+            blocked.update(hard(self.rules.strict_layers))
+        return frozenset(blocked)
+
     def _layer_index(self, layer: object) -> int | None:
         """Routing-graph layer index for a KiCad layer enum (None if off-stack)."""
         try:
@@ -710,9 +776,15 @@ class MeshPathfinder:
         # A through-via spans every copper layer, so its body must clear
         # committed cross-net copper on ALL layers -- not just the two the A*
         # hop nominally joins.  Check every layer with committed copper.
+        # Issue #6566: the capsules are sized for a trace CENTRELINE
+        # (``trace_width + clearance``), but a via body is wider -- require the
+        # extra ``via_radius - trace_width / 2`` standoff from every polygon.
+        standoff = max(via_radius - self.rules.trace_width / 2, 0.0)
         for caps in committed_by_layer.values():
             for poly in caps:
                 if point_in_polygon(site, poly):
+                    return False
+                if standoff > 0.0 and _point_polygon_distance(site, poly) < standoff:
                     return False
         return True
 
@@ -807,6 +879,7 @@ class MeshPathfinder:
             present_cost_factor=pcf,
             cost_congestion=self.rules.cost_congestion if pcf else 0.0,
             congestion_threshold=self.rules.congestion_threshold,
+            blocked_layers=self._blocked_layers(net_class),
         )
         if corridor is None:
             return None
@@ -1062,6 +1135,38 @@ def _segment_capsule(a: Pt, b: Pt, half_width: float) -> list[Pt] | None:
         (bx - nx * half_width, by - ny * half_width),
         (ax - nx * half_width, ay - ny * half_width),
     ]
+
+
+def _via_keepout(centre: Pt, radius: float) -> list[Pt]:
+    """Octagon circumscribing the disc of ``radius`` about ``centre`` (#6566)."""
+    vertex_r = radius / math.cos(math.pi / 8)
+    return [
+        (
+            centre[0] + vertex_r * math.cos(math.pi / 8 + k * math.pi / 4),
+            centre[1] + vertex_r * math.sin(math.pi / 8 + k * math.pi / 4),
+        )
+        for k in range(8)
+    ]
+
+
+def _point_polygon_distance(p: Pt, poly: list[Pt]) -> float:
+    """Distance from ``p`` to the polygon boundary (0 when on/inside it)."""
+    if point_in_polygon(p, poly):
+        return 0.0
+    best = math.inf
+    n = len(poly)
+    for i in range(n):
+        ax, ay = poly[i]
+        bx, by = poly[(i + 1) % n]
+        dx, dy = bx - ax, by - ay
+        len2 = dx * dx + dy * dy
+        t = (
+            0.0
+            if len2 < 1e-18
+            else max(0.0, min(1.0, ((p[0] - ax) * dx + (p[1] - ay) * dy) / len2))
+        )
+        best = min(best, math.hypot(p[0] - (ax + t * dx), p[1] - (ay + t * dy)))
+    return best
 
 
 def _inflate_polygon(poly: list[Pt], margin: float) -> list[Pt]:

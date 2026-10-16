@@ -1,11 +1,14 @@
 {
   "all_by_type": {
+    "clearance": 12,
     "silk_overlap": 2
   },
-  "by_type": {},
-  "error_count": 0,
+  "by_type": {
+    "clearance": 12
+  },
+  "error_count": 12,
   "note": null,
-  "pcb_sha256": "bccdda40757a298b0d0f6d909925615a3fcb6697b0f77b9739c66c50030e3b68",
+  "pcb_sha256": "c91ea8525d235ccdf371f2e2417bec62985f0530dc8a20f4b790de03b3b2b189",
   "ran": true,
   "reason": "ok",
   "refill_during_check": false,

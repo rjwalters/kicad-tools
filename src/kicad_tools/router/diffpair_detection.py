@@ -63,6 +63,51 @@ class DetectedPair:
 
 
 # =============================================================================
+# Shared synth-routing construction (Issue #6442)
+# =============================================================================
+
+
+def build_synth_routing(
+    net_class_map: dict[str, NetClassRouting],
+) -> tuple[dict, dict[str, str]]:
+    """Return ``(synth_routing, net_to_class)`` for :func:`detect_diff_pairs`.
+
+    ``synth_routing`` is the net-name-keyed ``net_class_map`` plus a
+    class-name-keyed alias for every class whose member nets all carry
+    the *same* :class:`NetClassRouting` (so the alias cannot misreport
+    any member).
+
+    The previous idiom was ``synth_routing.setdefault(cls.name, cls)``,
+    which let the first net seen win the class-name key.  Board 03's
+    ``HighSpeed`` class has per-net variants (each net names its own
+    ``diffpair_partner``; before #6443 ``USB_D+``/``USB_D-`` also carried
+    ``coupled_continuity_threshold=0.25``), so any
+    lookup that fell through to the class-name key returned an arbitrary
+    variant -- the router and ``kct check`` could then print different
+    thresholds for the same pair.  A class whose variants differ gets no
+    class-name alias: the net-name key is authoritative for each of its
+    members (and ``detect_diff_pairs`` always tries it first).
+    """
+    net_to_class: dict[str, str] = {}
+    first: dict[str, NetClassRouting] = {}
+    ambiguous: set[str] = set()
+    for net_name, nc in net_class_map.items():
+        cls_name = getattr(nc, "name", None)
+        if cls_name is None:
+            continue
+        net_to_class[net_name] = cls_name
+        if cls_name not in first:
+            first[cls_name] = nc
+        elif first[cls_name] != nc:
+            ambiguous.add(cls_name)
+    synth_routing: dict = dict(net_class_map)
+    for cls_name, nc in first.items():
+        if cls_name not in ambiguous:
+            synth_routing.setdefault(cls_name, nc)
+    return synth_routing, net_to_class
+
+
+# =============================================================================
 # Public entry point
 # =============================================================================
 
@@ -173,6 +218,62 @@ def detect_diff_pairs(
     return out
 
 
+def coupled_engaged_pairs(
+    net_names: dict[int, str] | list[str] | set[str],
+    net_class_map: dict[str, NetClassRouting] | None,
+    kicad_groups: list[tuple[str, str]] | None = None,
+) -> list[tuple[str, str]]:
+    """``(P, N)`` net names of every pair the router engages coupled routing on.
+
+    The router's own decision (Issue #6429): :func:`detect_diff_pairs` with
+    the class map and KiCad groups, filtered by
+    :func:`~kicad_tools.router.diffpair.should_engage_coupled` -- the same
+    ``synth_routing`` / ``net_to_class`` wiring (:func:`build_synth_routing`)
+    every engagement site uses (``core.py``'s lattice and grid pre-passes).  A pair listed here is routed
+    P against N at its class's ``intra_pair_clearance``, so both DRC engines
+    must exempt its own P/N gap from the router class's full clearance.
+
+    Args:
+        net_names: ``{net_id: net_name}`` (the autorouter's ``net_names``) or
+            a plain collection of net names.
+        net_class_map: The router's ``{net_name: NetClassRouting}`` map.
+            ``None`` / empty engages nothing.
+        kicad_groups: Optional ``(P, N)`` KiCad-group declarations.
+
+    Returns:
+        Sorted, de-duplicated ``(P, N)`` tuples.  Never raises: detection
+        failing must not break the sidecar write.
+    """
+    if not net_class_map:
+        return []
+    from .diffpair import should_engage_coupled
+
+    if isinstance(net_names, dict):
+        ids = {nid: name for nid, name in net_names.items() if name}
+    else:
+        ids = dict(enumerate(sorted(n for n in net_names if n), start=1))
+    # Must be the exact wiring core.py's engagement sites use (#6442): a
+    # class whose per-net variants differ (e.g. in ``coupled_routing``)
+    # gets no class-name alias, so each member answers from its own
+    # net-name key rather than whichever variant happened to be seen first.
+    synth_routing, net_to_class = build_synth_routing(net_class_map)
+    try:
+        detected = detect_diff_pairs(
+            ids,
+            net_class_routing=synth_routing,
+            net_to_class=net_to_class,
+            kicad_groups=kicad_groups,
+        )
+    except Exception:  # pragma: no cover - defensive, mirrors the router sites
+        return []
+    pairs: set[tuple[str, str]] = set()
+    for d in detected:
+        engaged, _reason = should_engage_coupled(d.pair, synth_routing, net_to_class)
+        if engaged:
+            pairs.add((d.pair.positive.net_name, d.pair.negative.net_name))
+    return sorted(pairs)
+
+
 # =============================================================================
 # Internals
 # =============================================================================
@@ -225,7 +326,7 @@ def _make_pair_from_names(
         positive=p_signal,
         negative=n_signal,
         pair_type=pair_type,
-        rules=DifferentialPairRules.for_type(pair_type),
+        rules=DifferentialPairRules.for_pair_type(pair_type),
     )
 
 

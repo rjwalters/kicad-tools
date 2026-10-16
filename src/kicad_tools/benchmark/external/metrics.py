@@ -58,7 +58,7 @@ from __future__ import annotations
 import math
 import subprocess
 from collections.abc import Iterable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -72,6 +72,8 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 __all__ = [
     "SCHEMA_URL",
     "SCHEMA_VERSION",
+    "ExternalScores",
+    "PCBWorldScore",
     "ARTIFACT_SOURCE_FALLBACK_INPUT",
     "ARTIFACT_SOURCE_ROUTER_OUTPUT",
     "ARTIFACT_SOURCE_UNKNOWN",
@@ -677,9 +679,27 @@ def build_timing(
 # ---------------------------------------------------------------------------
 
 
+#: ``kct check`` rules that are silent no-ops without a net-class map. The CLI
+#: prints them as INACTIVE; :func:`run_kct_check` records them in
+#: :attr:`KctCheckSummary.inactive_rules` instead (issue #6420).
+SIDECAR_GATED_RULES: tuple[str, ...] = (
+    "match_group_length_skew",
+    "diffpair_length_skew",
+    "diffpair_routing_continuity",
+    "diffpair_uncoupled_length",
+)
+
+
 @dataclass(frozen=True)
 class KctCheckSummary:
-    """Summary of the internal ``kct check`` engine's verdict."""
+    """Summary of the internal ``kct check`` engine's verdict.
+
+    ``net_class_map_path`` names the sidecar that engaged the net-class
+    rules (``None`` when no map was supplied, or a map was passed as a
+    dict). ``inactive_rules`` lists the rules that could not engage
+    because no map was supplied -- they report nothing, which is not the
+    same as passing.
+    """
 
     ran: bool
     passed: bool | None = None
@@ -687,6 +707,9 @@ class KctCheckSummary:
     warning_count: int | None = None
     errors_by_rule: dict[str, int] = field(default_factory=dict)
     note: str | None = None
+    manufacturer: str | None = None
+    net_class_map_path: str | None = None
+    inactive_rules: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -696,35 +719,145 @@ class KctCheckSummary:
             "warning_count": self.warning_count,
             "errors_by_rule": dict(sorted(self.errors_by_rule.items())),
             "note": self.note,
+            "manufacturer": self.manufacturer,
+            "net_class_map_path": self.net_class_map_path,
+            "inactive_rules": list(self.inactive_rules),
         }
+
+
+def _load_net_class_map(
+    net_class_map: str | Path | dict[str, Any], pcb: PCB, pcb_path: Path | None
+) -> dict[str, Any]:
+    """Load (if a path) and rekey a net-class map onto *pcb*'s net names.
+
+    Mirrors ``kct check``: the canonical loader resolves layer tokens
+    against the board, then :func:`resolve_net_class_map_keys` maps the
+    user's keys onto the board's actual (possibly hierarchical) net names.
+    """
+    from kicad_tools.cli.check_cmd import resolve_net_class_map_for_board
+    from kicad_tools.router.rules import net_class_map_from_path
+
+    if isinstance(net_class_map, (str, Path)):
+        loaded = net_class_map_from_path(net_class_map, pcb_path=pcb_path)
+    else:
+        loaded = dict(net_class_map)
+    rekeyed, _resolution = resolve_net_class_map_for_board(loaded, pcb)
+    return rekeyed
+
+
+def _run_cli_rule_set(
+    checker: Any, pcb_path: Path | None, *, manufacturer: str, layers: int
+) -> Any:
+    """Run the rule set ``kct check`` runs by default, via its own dispatch.
+
+    Shares :func:`kicad_tools.cli.check_cmd.run_selected_checks` with the CLI
+    instead of calling ``DRCChecker.check_all()``: the CLI-level rules that
+    need the board *path* (``netclass_clearance_copper``, ``netclass_floor``,
+    ``doc_drift``, ``sch_fields``) are not in ``CHECK_ALL_METHODS``, and a
+    copy of the list here would drift the next time the CLI gains one
+    (issue #6420: board 05 lattice graded 0 errors here and 6
+    ``netclass_clearance_copper`` errors under ``kct check``).
+    """
+    from kicad_tools.cli.check_cmd import _resolve_check_schematic, run_selected_checks
+
+    sch_path: Path | None = None
+    if pcb_path is not None:
+        from kicad_tools.manufacturers import resolve_pcb_fabrication_overrides
+
+        # Same order as the CLI: the reviewed per-board floor override lands
+        # on ``design_rules`` before any rule (``netclass_floor`` included)
+        # reads it.
+        checker.design_rules, _ = resolve_pcb_fabrication_overrides(
+            pcb_path, checker.design_rules, manufacturer_id=manufacturer
+        )
+        sch_path = _resolve_check_schematic(None, pcb_path)
+    return run_selected_checks(
+        checker,
+        None,
+        set(),
+        pad_grid_auto_derive=True,
+        sch_path=sch_path,
+        pcb_path=pcb_path,
+        layers=layers,
+    )
 
 
 def run_kct_check(
     board: str | Path | PCB,
     *,
     manufacturer: str = "jlcpcb",
-    layers: int = 4,
+    layers: int | None = 4,
+    net_class_map: str | Path | dict[str, Any] | None = None,
 ) -> KctCheckSummary:
     """Run the ``kct check`` DRC engine in-process and summarize it.
 
-    Uses :class:`kicad_tools.validate.DRCChecker` -- the exact engine
-    behind the ``kct check`` CLI -- rather than shelling out, so the
-    benchmark harness does not depend on an installed console script.
+    Uses :class:`kicad_tools.validate.DRCChecker` and the CLI's own rule
+    dispatch, :func:`kicad_tools.cli.check_cmd.run_selected_checks` --
+    the exact engine behind the ``kct check`` CLI -- rather than shelling
+    out, so the benchmark harness does not depend on an installed console
+    script.
+
+    When *board* is a path, the path-dependent rules ``kct check`` runs
+    outside ``DRCChecker.check_all()`` run too: ``netclass_clearance_copper``
+    and ``netclass_floor`` (which read the sibling ``.kicad_pro``),
+    ``doc_drift`` and ``sch_fields`` (sibling schematic), and the board's
+    reviewed fabrication-floor override sidecar is applied first. The
+    totals and per-rule error counts then equal
+    ``kct check --mfr <manufacturer> --allow-incomplete`` on the same file
+    (issue #6420). Waiver sidecars are not applied: the harness grades raw
+    copper. Given an in-memory :class:`PCB` there is no project file to
+    read, so those rules are silent, exactly as in the CLI without a path.
+
+    Args:
+        board: Routed board (path or loaded :class:`PCB`).
+        manufacturer: Manufacturer profile id, tier included
+            (``jlcpcb-tier1`` is not ``jlcpcb``).
+        layers: Copper-layer count for the design rules; ``None`` detects
+            it from the board, as ``kct check`` does without ``--layers``.
+        net_class_map: Net-class map sidecar (path, or an already-loaded
+            ``{net: NetClassRouting}`` dict). Without it the diff-pair and
+            match-group skew rules cannot engage and net-class clearances
+            are not applied; they are then listed in ``inactive_rules``.
+            With it, the map is rekeyed onto the board's net names and the
+            ampacity copper weights follow the board's declared stackup,
+            matching ``kct check``'s auto-discovered-sidecar path
+            (issue #6420).
 
     Never raises: an engine failure is reported as ``ran=False`` with the
     real error text, so a benchmark run can never silently overstate
     cleanliness.
     """
+    ncm_path = str(net_class_map) if isinstance(net_class_map, (str, Path)) else None
     try:
         from kicad_tools.schema.pcb import PCB as PCBClass
         from kicad_tools.validate import DRCChecker
 
+        pcb_path = Path(board).resolve() if isinstance(board, (str, Path)) else None
         pcb = PCBClass.load(str(board)) if isinstance(board, (str, Path)) else board
-        results = DRCChecker(pcb, manufacturer=manufacturer, layers=layers).check_all(
-            pad_grid_auto_derive=True
-        )
+        if layers is None:
+            detected = len(pcb.copper_layers)
+            layers = detected if detected > 0 else 2
+        extra: dict[str, Any] = {}
+        if net_class_map is not None:
+            extra["net_class_map"] = _load_net_class_map(net_class_map, pcb, pcb_path)
+            extra["warn_on_inactive_skew_rules"] = False
+            try:
+                from kicad_tools.physics.stackup import Stackup
+
+                derived = Stackup.from_pcb(pcb).outer_inner_copper_oz()
+            except Exception:  # noqa: BLE001 - same tolerance as ``kct check``
+                derived = None
+            if derived is not None:
+                extra["copper_oz_outer"], extra["copper_oz_inner"] = derived
+        checker = DRCChecker(pcb, manufacturer=manufacturer, layers=layers, **extra)
+        results = _run_cli_rule_set(checker, pcb_path, manufacturer=manufacturer, layers=layers)
     except Exception as exc:  # pragma: no cover - defensive
-        return KctCheckSummary(ran=False, note=f"kct check failed: {type(exc).__name__}: {exc}")
+        return KctCheckSummary(
+            ran=False,
+            note=f"kct check failed: {type(exc).__name__}: {exc}",
+            manufacturer=manufacturer,
+            net_class_map_path=ncm_path,
+        )
 
     errors_by_rule: dict[str, int] = {}
     for violation in results.errors:
@@ -737,6 +870,9 @@ def run_kct_check(
         error_count=results.error_count,
         warning_count=results.warning_count,
         errors_by_rule=errors_by_rule,
+        manufacturer=manufacturer,
+        net_class_map_path=ncm_path,
+        inactive_rules=() if net_class_map is not None else SIDECAR_GATED_RULES,
     )
 
 
@@ -749,14 +885,18 @@ class KicadCliDrcSummary:
     are re-filled from scratch, so a benchmark report that omits it is not
     evidence of a clean board.
 
-    ``violation_count`` is ``None`` (not ``0``) when kicad-cli could not
-    run -- "we did not check" must never render as "clean".
+    ``violation_count`` and ``unconnected_count`` are ``None`` (not ``0``)
+    when kicad-cli could not run -- "we did not check" must never render
+    as "clean". ``all_track_errors`` records whether every violation on a
+    track was reported or only the first (issue #6420).
     """
 
     ran: bool
     violation_count: int | None = None
     by_type: dict[str, int] = field(default_factory=dict)
     note: str | None = None
+    unconnected_count: int | None = None
+    all_track_errors: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -764,26 +904,33 @@ class KicadCliDrcSummary:
             "violation_count": self.violation_count,
             "by_type": dict(sorted(self.by_type.items())),
             "note": self.note,
+            "unconnected_count": self.unconnected_count,
+            "all_track_errors": self.all_track_errors,
         }
 
 
-def run_kicad_cli_drc(pcb_path: str | Path, *, timeout: int = 300) -> KicadCliDrcSummary:
+def run_kicad_cli_drc(
+    pcb_path: str | Path, *, timeout: int = 300, all_track_errors: bool = False
+) -> KicadCliDrcSummary:
     """Run the ``kicad-cli pcb drc --refill-zones`` cross-gate.
 
     Delegates to :func:`kicad_tools.drc.geometric.run_geometric_drc`, the
     single in-repo implementation of that invocation, so the benchmark and
     the board-recipe pipeline gate reason over identical geometry.
+    ``all_track_errors`` adds ``--all-track-errors`` (off by default).
     """
     from kicad_tools.drc.geometric import run_geometric_drc
 
-    result = run_geometric_drc(pcb_path, timeout=timeout)
+    result = run_geometric_drc(pcb_path, timeout=timeout, all_track_errors=all_track_errors)
     if not result.ran:
-        return KicadCliDrcSummary(ran=False, note=result.note)
+        return KicadCliDrcSummary(ran=False, note=result.note, all_track_errors=all_track_errors)
     return KicadCliDrcSummary(
         ran=True,
         violation_count=result.error_count,
         by_type=dict(result.by_type),
         note=result.note,
+        unconnected_count=getattr(result, "unconnected_count", None),
+        all_track_errors=all_track_errors,
     )
 
 
@@ -893,6 +1040,77 @@ def measure_diff_pairs(
 
 
 @dataclass(frozen=True)
+class PCBWorldScore:
+    """PCBWorld's own Clean Pass verdict for one board (issue #6331).
+
+    Produced by running PCBWorld's scorer as an external subprocess and
+    normalizing its ``per_rollout.csv``; never recomputed locally and never
+    merged with the local gates (``kct_check`` / ``kicad_cli_drc``).
+
+    ``available=False`` means the PCBWorld scorer produced no verdict; every
+    score field is then ``None`` -- an unavailable score is never ``0`` and
+    never a pass. ``comparable=False`` (with ``comparable_reason``) marks a
+    row that must not be read against PCBWorld's published numbers.
+    ``rollouts`` keeps one entry per scored rollout including its
+    ``potential_gain`` so PCBWorld's @5 selection rule (largest potential
+    gain, not "any rollout clean") can be reproduced later.
+    """
+
+    available: bool
+    comparable: bool
+    clean_pass: bool | None = None
+    routability: float | None = None
+    drv_errors_only_count: int | None = None
+    potential_gain: float | None = None
+    rollouts: tuple[dict[str, Any], ...] = ()
+    unavailable_reason: str | None = None
+    comparable_reason: str | None = None
+    pcbworld_commit: str | None = None
+    pcbench_commit: str | None = None
+    kicad_version: str | None = None
+    pcbnew_python: str | None = None
+    input_sha256: str | None = None
+    pcbworld_board_id: str | None = None
+
+    @classmethod
+    def from_payload(cls, payload: dict[str, Any]) -> PCBWorldScore:
+        names = {f.name for f in fields(cls)}
+        kwargs = {k: v for k, v in payload.items() if k in names}
+        kwargs["rollouts"] = tuple(kwargs.get("rollouts") or ())
+        return cls(**kwargs)
+
+    def to_dict(self) -> dict[str, Any]:
+        available = self.available
+        return {
+            "available": available,
+            "comparable": self.comparable,
+            "comparable_reason": self.comparable_reason,
+            "unavailable_reason": self.unavailable_reason,
+            "clean_pass": self.clean_pass if available else None,
+            "routability": self.routability if available else None,
+            "drv_errors_only_count": self.drv_errors_only_count if available else None,
+            "potential_gain": self.potential_gain if available else None,
+            "rollouts": [dict(r) for r in self.rollouts],
+            "pcbworld_commit": self.pcbworld_commit,
+            "pcbench_commit": self.pcbench_commit,
+            "kicad_version": self.kicad_version,
+            "pcbnew_python": self.pcbnew_python,
+            "input_sha256": self.input_sha256,
+            "pcbworld_board_id": self.pcbworld_board_id,
+        }
+
+
+@dataclass(frozen=True)
+class ExternalScores:
+    """Additive block of third-party scorer verdicts (schema stays v1)."""
+
+    pcbworld: PCBWorldScore | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"pcbworld": self.pcbworld.to_dict() if self.pcbworld else None}
+
+
+@dataclass(frozen=True)
 class BenchmarkReport:
     """One board's benchmark result, in the schema v1 contract.
 
@@ -947,6 +1165,7 @@ class BenchmarkReport:
     pre_route_completion: CompletionMetrics | None = None
     notes: list[str] = field(default_factory=list)
     placement_disposition: RoutingPlacementReport | None = None
+    external_scores: ExternalScores | None = None
 
     @property
     def newly_routed_connections(self) -> int | None:
@@ -962,7 +1181,7 @@ class BenchmarkReport:
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to the stable schema-v1 JSON contract."""
-        return {
+        data: dict[str, Any] = {
             "$schema": SCHEMA_URL,
             "schema_version": SCHEMA_VERSION,
             "generated_at": self.generated_at,
@@ -989,6 +1208,11 @@ class BenchmarkReport:
             "diff_pairs": (self.diff_pairs.to_dict() if self.diff_pairs else None),
             "notes": list(self.notes),
         }
+        if self.external_scores is not None:
+            # Additive (issue #6331): only present for third-party-scored
+            # suites, so DeepPCB / SRJ18 reports stay byte-identical.
+            data["external_scores"] = self.external_scores.to_dict()
+        return data
 
     def to_json(self, indent: int = 2) -> str:
         """Render the report as JSON text."""

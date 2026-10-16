@@ -298,7 +298,35 @@ namespace router {
 // ``route_via_geometry_clear`` gained a trailing ``trace_clearance`` argument.
 // A v48 .so would let a trace land inside the via floor of an earlier via,
 // so it must be rejected.
-constexpr int ROUTER_CPP_BUILD_VERSION = 49;
+// v50 (Issue #6315): ``GridCell`` gained ``pad_cell`` / ``shared_pad_halo``,
+// ``Grid3D::mark_blocked`` gained the matching trailing ``pad_source`` /
+// ``shared_pad_halo`` arguments, and ``Grid3D::pad_geometry_clear`` resolves
+// pad-derived cells with the exact segment-vs-pad test.  A v49 .so would
+// reject the new ``mark_blocked`` arguments, so it must be rejected.
+// v51 (Issue #6375): ``Pathfinder::set_search_own_pad_gate`` /
+// ``own_pad_step_clear`` and ``Grid3D::segment_pads_clear`` are bound, and
+// the A* holds steps on the routing net's own pad cells to the validator's
+// seg-vs-pad verdict.  The Python side calls the new setter on every search,
+// so a v50 .so must be rejected.
+// v52 (Issue #6368): ``PadBounds`` gained ``centre_gx`` / ``centre_gy`` /
+// ``long_axis`` / ``lane_half_cells`` / ``tip_lo`` / ``tip_hi`` and both A*
+// loops charge an off-centreline pad landing.  The Python side sets the new fields on every
+// pad bound, so a v51 .so (which lacks them) must be rejected.
+// v53 (Issue #6464): ``AStarNode`` gained ``via_anc``; both A* loops hold a
+// via to the fab hole-to-hole floor against the route's OWN earlier vias, and
+// ``Grid3D::validate_route`` checks the route's vias pairwise and holds the
+// same-net stored-via drill check to ``min_hole_clearance``.  A v52 .so would
+// commit two same-route vias below the fab floor, so it must be rejected.
+// v54 (Issue #6473): ``CoupledPathfinder::route`` holds a layer change to the
+// fab hole-to-hole floor against the pair's OWN earlier vias (both rails) and
+// between the P and N via of the move itself.  A v53 .so returns coupled
+// routes with via pairs below the floor, and diverges from the Python coupled
+// loop, which applies the same check.
+// v56 (Issue #6718): ``Grid3D::set_pad_authored`` gained a trailing ``rratio``
+// so the authored gate measures a roundrect with the file's corner ratio (or
+// as a rect when unknown) instead of a hardcoded 0.25.  The Python side passes
+// it on every pad, so a v55 .so must be rejected.
+constexpr int ROUTER_CPP_BUILD_VERSION = 57;
 
 
 // Issue #4071: fixed-capacity owner-set size for per-cell corridor
@@ -350,6 +378,18 @@ struct GridCell {
     // foreign traces may still cross.  Meaningful only when
     // ``reserved_count > 0``.  See ``ROUTER_CPP_BUILD_VERSION`` note.
     bool reserved_soft = false;
+    // Issue #6315: true while this cell's static blockage comes ONLY from
+    // pad copper plus pad clearance (metal, #3233 band, clearance halo),
+    // as pushed by the Python pad sync (``mark_blocked(..., pad_source)``).
+    // Any other static marking of the cell clears it for good.  The A*
+    // resolves such cells with the exact segment-vs-pad test
+    // (``Grid3D::pad_geometry_clear``) instead of treating a foreign-owned
+    // clearance cell as copper.
+    bool pad_cell = false;
+    // Issue #6315: a ``pad_cell`` in the clearance halo of pads on two
+    // different signal nets.  It belongs to neither net alone, so even its
+    // recorded owner must pass the clearance check to step on it.
+    bool shared_pad_halo = false;
 };
 
 // A* node for priority queue
@@ -376,6 +416,17 @@ struct AStarNode {
     // ``int`` compare per heap operation; negligible vs the
     // surrounding heap reshuffle.
     uint64_t seq = 0;
+
+    // Issue #6464: closed-list index of the nearest ancestor-or-self node
+    // reached by a layer change (i.e. the most recent via on this node's
+    // path), or -1 when the path holds no via yet.  Assigned when the node
+    // is moved to the closed list, so walking ``via_anc`` ->
+    // ``closed[closed[via_anc].parent_idx].via_anc`` visits exactly the
+    // path's earlier vias (a handful) instead of every path node.  Lets the
+    // via expansion hold a new via to the fab hole-to-hole floor against
+    // the vias the SAME route already placed -- those are not stored copper
+    // yet, so ``Grid3D::route_via_geometry_clear`` never sees them.
+    int via_anc = -1;
 
     // Comparison for min-heap.  Issue #3144 / #3199:
     //   Primary:   lower f_score first.
@@ -573,6 +624,20 @@ struct PadBounds {
     int approach_gy1 = 0;
     int approach_gx2 = 0;
     int approach_gy2 = 0;
+    // Issue #6368: pad centre in fractional grid units, the board axis the
+    // pad is long along (0 = x, 1 = y, -1 = none: square, rotated off a
+    // cardinal angle, virtual, or not in a fine-pitch row -- the scope is
+    // decided by ``pad_landing.pad_landing_geometry``), the half-width in cells of the lane a run
+    // off the pad tip occupies (one pad short side) and the cell range along
+    // the long axis whose centres lie on the pad copper (its tip lines are
+    // the range ends).  ``long_axis = -1`` (the default) disables the centreline
+    // landing cost, so callers that never set the fields are unchanged.
+    float centre_gx = 0.0f;
+    float centre_gy = 0.0f;
+    int long_axis = -1;
+    float lane_half_cells = 0.0f;
+    int tip_lo = 0;
+    int tip_hi = 0;
 };
 
 // Per-pad lateral-channel budget (Issue #3143).
@@ -618,12 +683,19 @@ struct PadBounds {
 // Used by:
 //   Pathfinder::run_astar_loop / Pathfinder::route (the per-cell cost
 //   helper ``get_pad_channel_cost`` consults a pre-built lookup table).
+// Issue #6761: ``PadChannelBudget.layer`` value marking a hard *via* fence.
+// A via fence never prices a trace step; the via-expansion branches refuse a
+// layer change at any of its cells.  A budget with an infinite
+// ``overflow_penalty`` on a real layer (>= 0) is a hard *trace* fence: the
+// search never steps onto (or drops a via onto) its cells.
+constexpr int PAD_VIA_FENCE_LAYER = -2;
+
 struct PadChannelBudget {
     int gx1 = 0;
     int gy1 = 0;
     int gx2 = 0;
     int gy2 = 0;
-    int layer = -1;        // -1 = applies to all routing layers
+    int layer = -1;        // -1 = applies to all routing layers; -2 = via fence (#6761)
     int capacity = 0;      // 0 = inert (no penalty enforced)
     float overflow_penalty = 0.0f;
     uint32_t origin_pad_ref_hash = 0;  // Reserved for future per-package use.

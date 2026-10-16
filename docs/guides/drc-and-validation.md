@@ -168,12 +168,15 @@ DRC PASSED - No violations found
 
 ## CLI: Diff-Pair and Match-Group Rules (`--net-class-map`)
 
-Three DRC rule families need per-net routing metadata that a `.kicad_pcb`
+Four DRC rule families need per-net routing metadata that a `.kicad_pcb`
 file does **not** persist on its own (length-match-group membership,
 `coupled_routing` flags, skew tolerances):
 
 - `diffpair_length_skew` — intra-pair length mismatch
-- `diffpair_routing_continuity` — broken / un-coupled diff-pair routing
+- `diffpair_routing_continuity` — coupled fraction of a diff pair (info only
+  since #6443)
+- `diffpair_uncoupled_length` — uncoupled length and via count of a diff pair
+  (guide 08 of `diff-pairs/`)
 - `match_group_length_skew` — length skew across a declared match group
 
 These rules re-derive their working state from a **net-class map** and
@@ -708,6 +711,22 @@ results = rule.check(pcb, design_rules)
 **Fix:** Via annular ring = (via diameter - drill diameter) / 2
 
 Increase via pad size or use larger drill.
+
+### Via Type Not Supported by the Fab
+
+**Error:** `via_type_unsupported` — `Blind via at (105.000, 100.000) on F.Cu-In1.Cu (net 'SIG'): the current manufacturer profile does not support blind/buried vias (blind_buried_vias_supported=False). ...`
+
+KiCad decides what a fab must drill from a via's type keyword: `(via blind ...)`
+and `(via buried ...)` need sequential lamination or controlled-depth drilling,
+and `(via micro ...)` needs laser drilling. A keyword-less via is a through via
+whatever its layer pair says. The `via_type` category errors on every typed via
+whose capability the `--mfr` profile lacks (`blind_buried_vias_supported`,
+`micro_vias_supported`). Both default to `false`, and no shipped profile claims
+either yet, so the check fails closed until a fab's published capability is
+sourced into its profile YAML.
+
+**Fix:** replace the via with a through via, or skip the category
+(`--skip via_type`) when your order includes the HDI process.
 
 ### Via Under Package Body
 

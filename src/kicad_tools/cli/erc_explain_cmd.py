@@ -630,12 +630,16 @@ class ERCExplainer:
 
         explanation.fixes = [
             FixSuggestion(
-                description="Run 'Annotate Schematic' to reassign references",
-                command="kct sch annotate <schematic>",
+                description="Run 'kct sch re-annotate <schematic>' to renumber references uniquely",
+                command="kct sch re-annotate <schematic>",
                 priority=1,
             ),
             FixSuggestion(
-                description="Manually edit one symbol's reference to be unique",
+                description=(
+                    "Renumber only the duplicated prefix with "
+                    "'kct sch re-annotate <schematic> --prefix <PREFIX>'"
+                ),
+                command="kct sch re-annotate <schematic> --prefix <PREFIX>",
                 priority=2,
             ),
             FixSuggestion(
@@ -849,12 +853,16 @@ class ERCExplainer:
 
         explanation.fixes = [
             FixSuggestion(
-                description="Run 'Annotate Schematic' from Tools menu",
-                command="kct sch annotate <schematic>",
+                description=(
+                    "Run 'kct sch re-annotate <schematic> --unannotated-only' "
+                    "to assign the missing reference designators"
+                ),
+                command="kct sch re-annotate <schematic> --unannotated-only",
                 priority=1,
             ),
             FixSuggestion(
-                description="Manually enter reference designator (press E to edit)",
+                description="Preview the assignment first by adding --dry-run to re-annotate",
+                command="kct sch re-annotate <schematic> --unannotated-only --dry-run",
                 priority=2,
             ),
         ]

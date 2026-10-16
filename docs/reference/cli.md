@@ -83,6 +83,7 @@ kct [--help] [--version] <command> [options]
 | | `calibrate` | Calibrate routing performance settings |
 | **Reporting** | `render` | Render per-board 2D SVGs + 3D PNGs |
 | | `screenshot` | Capture a PNG of a KiCad board or schematic |
+| | `board-view` | Board images for a routing question: net highlight, ratsnest, mm axes |
 | | `report` | Generate a Markdown design report |
 | **Utilities** | `config` | View/manage configuration |
 | | `interactive` | Launch interactive REPL mode |
@@ -188,6 +189,7 @@ kct pcb <subcommand> <pcb_file> [options]
 | `modify` | Modify PCB elements |
 | `add-zone` | Add a copper pour zone |
 | `add-3d-models` | Patch missing `(model ...)` refs; `--refresh` rewrites existing refs through the current tier chain (see [LCSC 3D models guide](../guides/lcsc-3d-models.md)) |
+| `diff` | Geometric diff of two boards: which tracks, vias, pads, zones and outline changed (see below) |
 
 **`add-zone` output-path behavior:** `-o`/`--output` is optional and
 **defaults to overwriting the input in place** — consistent with `zones add`,
@@ -208,6 +210,64 @@ kct pcb add-zone board.kicad_pcb --net GND --layer B.Cu     # modifies board.kic
 kct pcb add-zone board.kicad_pcb --net +3.3V --layer In2.Cu # accumulates onto the GND zone
 kct pcb add-zone board.kicad_pcb --net GND --layer B.Cu -o with_zones.kicad_pcb  # side file
 ```
+
+#### `kct pcb diff OLD NEW`
+
+Compares two boards item by item: segments, arcs, vias, footprints, pads
+(keyed `<ref>/<pad>`), zone outlines, zone fills (one item per zone) and
+board graphics. It answers "which nets and layers did this route change?".
+
+```bash
+kct pcb diff origin/main:boards/05-bldc-motor-controller/output/bldc_controller_routed.kicad_pcb \
+    boards/05-bldc-motor-controller/output/bldc_controller_routed.kicad_pcb
+kct pcb diff old.kicad_pcb new.kicad_pcb --net GND --layer B.Cu --format json
+kct pcb diff old.kicad_pcb new.kicad_pcb --svg diff.svg
+```
+
+Footprints and pads pair **by reference** (`R1`, `R1/2`): a reference is
+stable and meaningful, so same-reference items are `changed` when anything
+about them differs, a vanished reference is `removed` and a new one `added`.
+Two identical parts that trade places therefore report both as `changed`
+rather than pairing with each other. A reference that repeats (shield pads
+`J1/SH`, NPTH pads `J1/`, footprints sharing `REF**`) carries no more than
+"one of these", so inside that group equal-content items pair first as
+`unchanged`, the rest pair in file order as `changed`, and the surplus is
+`removed`/`added`: reordering duplicates reports nothing, and deleting one
+reports exactly that one. Copper, zones and graphics carry only
+uuids, and those match in three passes:
+
+1. **Content.** Items with identical normalised content are `unchanged`,
+   whatever their uuids. Nets are compared by name, coordinates are
+   rounded to 1 nm and zone outlines ignore their start vertex and winding
+   direction, so regenerated uuids, re-indentation and float reformatting
+   report nothing. Among identical duplicates, a same-uuid partner is
+   preferred, so deleting one of two duplicate segments names the uuid that
+   actually disappeared.
+2. **Identity.** Leftovers with the same uuid, kind and net are `changed`.
+   The net guard matters because seeded routes number uuids by position.
+3. **Remainder.** The rest is `removed` or `added`. An item that both moved
+   and got a new uuid reports as one removed plus one added.
+
+A moved pad marks only that pad as changed, not its footprint.
+
+| Option | Description |
+|--------|-------------|
+| `OLD`, `NEW` | A `.kicad_pcb` path, or `REV:path` (same loader as `kct check --diff`) |
+| `--format text\|json` | Text summary (default) or key-sorted JSON on stdout |
+| `--net NAME` | Report only this net (repeatable) |
+| `--layer LAYER` | Report only items touching this layer (repeatable; a via matches every layer in its span) |
+| `--svg OUT.svg` | Write an overlay: removed red (old geometry of a changed item dashed), added green, changed amber, everything else dimmed |
+
+Filters apply after matching, so they never change how items pair; `--net`
+and `--layer` combine with AND. The JSON document has `old`, `new`,
+`filters`, `summary`, `by_kind`, `by_net`, `by_layer` (each a
+`{removed, added, changed, unchanged}` count) and `items`: the non-unchanged
+entries with `status`, `kind`, `key`, `net`, `layer`, `before` and `after`
+(`before` is null for added items, `after` for removed ones).
+
+Exit codes: `0` nothing differs (after filters), `2` something does, `1` a side
+could not be resolved or loaded. A CI step can therefore assert "this PR must
+not touch board X's copper".
 
 ---
 
@@ -1754,6 +1814,56 @@ diagnosis. Both are **absent** (not null) without a sidecar. A sidecar built
 for a different board, or older than the PCB, is reported on stderr and
 ignored rather than guessed from. Full reference:
 [`routing-plan.md`](routing-plan.md).
+
+### `board-view`
+
+Draw a routed or partly routed board to answer a routing question. Where
+`kct screenshot` plots layers through `kicad-cli`, this reads the board model
+and draws what that plot lacks: mm axes, reference designators, pad net
+labels, one net outlined in white, and the connections still missing as
+magenta dashed ratsnest lines. Needs matplotlib
+(`pip install 'kicad-tools[visualization]'`), not `kicad-cli`.
+Implemented in [`src/kicad_tools/boardview/`](../../src/kicad_tools/boardview/).
+
+```bash
+kct board-view overview <pcb_file>                    # whole board, every missing link
+kct board-view net <pcb_file> <net>                   # crop round one net, net highlighted
+kct board-view layers <pcb_file> <net>                # that crop, one panel per copper layer
+kct board-view crop <pcb_file> x0 y0 x1 y1 [--net N]  # an explicit window, in mm
+kct board-view list <pcb_file>                        # missing pad pairs as JSON, no image
+```
+
+| Option | Views | Meaning |
+|---|---|---|
+| `-o, --output PATH` | image views | PNG path (default `<pcb>-<view>[-<net>].png` beside the board) |
+| `--absolute` | all | Sheet-absolute coordinates instead of board-relative |
+| `--max-size PX` | image views | Longest image side (default 1568) |
+| `--margin MM` | `net`, `layers` | Margin round the net (default 4) |
+| `--format text\|json` | all | `list` defaults to `json`; the others to `text` |
+
+**Coordinate frame.** Axes are board-relative by default: (0, 0) is the
+`Edge.Cuts` minimum corner. That is the frame of `kct net-status` and
+`kct pcb move-footprint --to`, so a position read off the image can be passed
+straight to them. `kct check` reports violation locations sheet-absolute,
+which is the axis value plus the board origin; `--absolute` draws in that
+frame, so a `crop` window can be taken from a `kct check` location. The image
+title and the JSON both name the frame and give the origin.
+
+**Missing links.** They come from the connectivity model behind `kct check`
+(`NetStatusAnalyzer`, which traces zone fill), one link per open connection,
+drawn between the closest pads of two copper islands. A pour net that
+`kct check` treats as advisory (it owns filled copper that misses a pad) gets
+no link and is listed under `pour_advisory`. Zone pours themselves are not
+drawn, so a pad with no track into it may still be connected.
+
+**Reading the image.** Good for: why a net is stuck, where a via could go,
+whether the placement is sensible, whether one layer carries everything. Not
+for clearances, widths, connectivity or counts, which `kct check`,
+`kct net-status` and `kicad-cli pcb drc` compute exactly. A reading is a
+hypothesis; confirm it with those tools before acting on it.
+
+Pad net labels appear only when the scale reaches 40 px/mm (a window of about
+35 mm or less); the highlighted net's pads are labelled `pad:net`.
 
 ---
 

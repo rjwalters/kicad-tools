@@ -14,7 +14,9 @@ the two endpoint layers KiCad lists in ``(layers "F.Cu" "B.Cu")``).
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterable
+from typing import Any
 
 # Canonical copper layer ordering from top (front) to bottom (back).
 # KiCad supports up to 30 inner layers named In1.Cu .. In30.Cu.
@@ -114,3 +116,180 @@ def via_spans_layer(via_layers: list[str] | tuple[str, ...], target_layer: str) 
 
     # Via spans from min to max index; any layer in between is connected.
     return min(indices) <= target_idx <= max(indices)
+
+
+# Issue #6485: the via-type tokens KiCad writes immediately after ``via``.
+# A through via carries NO token; ``through`` is accepted from callers as an
+# explicit spelling of that and never written.
+VIA_TYPE_KEYWORDS: frozenset[str] = frozenset({"micro", "blind", "buried"})
+
+_OUTER_COPPER_LAYERS: frozenset[str] = frozenset({"F.Cu", "B.Cu"})
+
+
+def resolve_via_type(
+    layers: tuple[str, ...] | list[str],
+    via_type: str | None = None,
+) -> tuple[str | None, tuple[str, ...]]:
+    """Return the ``(keyword, layers)`` a new via node must be written with.
+
+    Issue #6485.  KiCad (measured on kicad-cli 10.0.6) decides a via's drilled
+    span from its type keyword, **not** from its ``(layers ...)`` pair: a
+    ``(via ...)`` node with no ``micro`` / ``blind`` / ``buried`` token is a
+    *through* via whatever the pair says.  KiCad rewrites such a node to
+    ``(layers "F.Cu" "B.Cu")`` on save and puts its hole in the through-hole
+    drill file.  A keyword-less partial-span via therefore says one thing to a
+    reader of ``layers`` and builds another -- the barrel shorts whatever sits
+    on the layers the file claimed it never reached.
+
+    This is the single write-time rule that makes that node unwritable:
+
+    * ``via_type`` of ``"micro"`` / ``"blind"`` / ``"buried"`` is kept, with
+      the layers as given.
+    * ``via_type="through"`` is an explicit through via: no keyword, and the
+      layers are widened to the outer pair so the file states what is drilled.
+    * ``via_type=None`` on the outer ``F.Cu``/``B.Cu`` pair is a through via.
+    * ``via_type=None`` on any *other* pair of copper layers is a caller asking
+      for a partial span, so the keyword is derived: ``blind`` when one end is
+      an outer layer, ``buried`` when neither is.
+
+    Layer pairs that are not two recognised copper layers are returned
+    unchanged (nothing can be inferred from them).
+
+    Args:
+        layers: The via's layer pair, in the order the caller wants written.
+        via_type: The requested via type, or ``None`` to derive it.
+
+    Returns:
+        ``(keyword, layers)`` -- ``keyword`` is ``None`` for a through via.
+
+    Raises:
+        ValueError: If ``via_type`` is not a via type KiCad knows.
+    """
+    layer_pair = tuple(layers)
+    if via_type in VIA_TYPE_KEYWORDS:
+        return via_type, layer_pair
+    if via_type == "through":
+        return None, ("F.Cu", "B.Cu")
+    if via_type is not None:
+        raise ValueError(
+            f"Unknown via type {via_type!r}. Use 'micro', 'blind', 'buried', "
+            f"'through', or None to derive it from the layer pair."
+        )
+    if len(layer_pair) != 2 or any(name not in _COPPER_LAYER_INDEX for name in layer_pair):
+        return None, layer_pair
+    outer_ends = sum(1 for name in layer_pair if name in _OUTER_COPPER_LAYERS)
+    if outer_ends == 2 and layer_pair[0] != layer_pair[1]:
+        return None, layer_pair
+    return ("blind" if outer_ends else "buried"), layer_pair
+
+
+def warn_derived_via_type(
+    log: logging.Logger,
+    writer: str,
+    layers: tuple[str, ...] | list[str],
+    x: float,
+    y: float,
+    keyword: str | None,
+) -> None:
+    """Log that *writer* derived a ``blind`` / ``buried`` keyword (Issue #6485).
+
+    Called by every writer that hands :func:`resolve_via_type` a ``None``
+    type.  A derived keyword changes the fab process the board needs, and
+    neither ``kct check --mfr`` nor kicad-cli DRC reports a blind or buried
+    via on a profile that cannot build one (Issue #6518), so this warning is
+    the only signal.  A no-op when ``keyword`` is ``None`` (a through via).
+    """
+    if keyword is None:
+        return
+    log.warning(
+        "%s: layers %s are a partial span, so the via at (%s, %s) is "
+        "written as (via %s ...). It needs a fab process with %s vias; "
+        "pass via_type='through' for an ordinary through via.",
+        writer,
+        tuple(layers),
+        x,
+        y,
+        keyword,
+        keyword,
+    )
+
+
+def kicad_read_via_layers(
+    layers: tuple[str, ...] | list[str],
+    via_type: str | None,
+) -> tuple[tuple[str, ...], bool]:
+    """Return the layer span KiCad *reads* for a parsed via node (Issue #6493).
+
+    The reader half of :func:`resolve_via_type`.  KiCad (kicad-cli 10.0.6)
+    decides a via's drilled span from its type keyword, not from its
+    ``(layers ...)`` pair: a ``(via ...)`` node with no ``micro`` /
+    ``blind`` / ``buried`` token is a through via whatever the pair says,
+    and ``kicad-cli pcb upgrade --force`` rewrites it to
+    ``(layers "F.Cu" "B.Cu")``.  Taking a keyword-less ``"In1.Cu" "B.Cu"``
+    pair literally made kicad-tools model a blind via that KiCad never
+    builds -- a false open where the barrel really joins F.Cu, and a false
+    clean where it really shorts a track on a layer the pair omits.
+
+    Every via parser (``schema.pcb.Via.from_sexp`` and the router's two
+    regex parsers), and the raw-node readers that take a via's layers
+    straight from the tree (zone-fill clearance, DSN export, the DRC local
+    rerouter, the reasoning state and ``strip_traces``; Issue #6614, with
+    :func:`via_node_type`), route the span through this one rule:
+
+    * a ``micro`` / ``blind`` / ``buried`` via keeps its declared layers;
+    * a keyword-less via whose two layers are recognised copper layers
+      other than the outer ``F.Cu``/``B.Cu`` pair reads as
+      ``("F.Cu", "B.Cu")``;
+    * anything else (already the outer pair, or a layer list that is not
+      two recognised copper names) is returned unchanged -- nothing can be
+      inferred from it.
+
+    Args:
+        layers: The layer names from the node's ``(layers ...)`` child.
+        via_type: The node's type keyword, or ``None`` when it has none.
+
+    Returns:
+        ``(layers, normalised)`` -- ``normalised`` is ``True`` when the span
+        was widened to the outer pair, so callers can report the count.
+    """
+    layer_tuple = tuple(layers)
+    if via_type is not None:
+        return layer_tuple, False
+    if len(layer_tuple) != 2 or any(name not in _COPPER_LAYER_INDEX for name in layer_tuple):
+        return layer_tuple, False
+    if set(layer_tuple) == _OUTER_COPPER_LAYERS:
+        return layer_tuple, False
+    return ("F.Cu", "B.Cu"), True
+
+
+def via_node_type(node: Any) -> str | None:
+    """Return a parsed ``(via ...)`` node's ``micro``/``blind``/``buried`` keyword.
+
+    KiCad writes the type keyword as a bare atom straight after ``via``; a
+    through via carries none.  ``node`` is a :class:`kicad_tools.sexp.SExp`
+    (anything with a ``values`` list).  Returns ``None`` for a keyword-less
+    via -- the ``via_type`` argument :func:`kicad_read_via_layers` expects
+    from a raw-node reader (Issue #6614).
+    """
+    values = getattr(node, "values", None)
+    if values and isinstance(values[0], str) and values[0] in VIA_TYPE_KEYWORDS:
+        return values[0]
+    return None
+
+
+def warn_normalised_vias(log: logging.Logger, source: str, count: int) -> None:
+    """Log ONE warning for *count* keyword-less partial-span vias (Issue #6493).
+
+    A no-op when ``count`` is zero.  Callers aggregate per board instead of
+    warning per via.
+    """
+    if count <= 0:
+        return
+    log.warning(
+        "%s: %d via(s) have a partial (layers ...) span but no "
+        "blind/buried/micro keyword. KiCad reads such a via as a through via "
+        "(F.Cu to B.Cu), so it is read that way here; add the keyword if a "
+        "blind or buried via was meant.",
+        source,
+        count,
+    )

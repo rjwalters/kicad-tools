@@ -136,14 +136,28 @@ assert_ge 1 "$(call_site_count "$REBASE_STACKED_CHILDREN_SH")" \
 echo ""
 echo "New call sites (#7341):"
 # --- New call sites this issue adds ---
-assert_ge 3 "$(call_site_count "$JUDGE_MD")" \
-  "judge.md gates all three of its own direct rebase+push recipes (DIRTY, BEHIND, simple-conflict)"
+# #12063 removed judge.md's BEHIND update recipe (a BEHIND PR is reviewed
+# as-is), leaving two gated rebase+push recipes.
+assert_ge 2 "$(call_site_count "$JUDGE_MD")" \
+  "judge.md gates both of its own direct rebase+push recipes (DIRTY, simple-conflict)"
 assert_ge 1 "$(call_site_count "$BUILDER_WORKTREE_MD")" \
   "builder-worktree.md gates its conflict-resolution rebase+push recipe"
 assert_ge 1 "$(call_site_count "$RECONCILE_STACK_SH")" \
   "reconcile-stack.sh gates its rebase --onto + push recipe"
-assert_ge 3 "$(call_site_count "$DOCTOR_MD")" \
-  "doctor.md ALSO gates its Step 9 pre-push head-moved rebase-recovery path (the two 'rebase, then push --force-with-lease' rows), on top of #7171's two merge-conflict recipes"
+# doctor.md had three gated recipes: "Other PRs Needing Attention"'s inline
+# conflict fix, Step 9's pre-push update, and "PR Has Merge Conflicts". #10771
+# replaced the first with a pointer to the last (one recipe, one gate), so the
+# floor is two gated recipes PLUS a delegating path that never pushes itself.
+assert_ge 2 "$(call_site_count "$DOCTOR_MD")" \
+  "doctor.md gates its Step 9 pre-push update path and its 'PR Has Merge Conflicts' recipe"
+# The unlabeled path's CONFLICTING branch: from its mergeable probe to its `fi`.
+OTHER_PRS_SECTION="$(awk '/UNLABELED_PR" --json mergeable/{on=1} on{print} on && /^    fi$/{exit}' "$DOCTOR_MD")"
+OTHER_PRS_MSG="doctor.md's unlabeled conflict path delegates to the gated 'PR Has Merge Conflicts' recipe and never pushes directly (#10771)"
+if [[ "$OTHER_PRS_SECTION" == *'"PR Has Merge Conflicts"'* && "$OTHER_PRS_SECTION" != *"git push"* ]]; then
+  TESTS_RUN=$((TESTS_RUN + 1)); TESTS_PASSED=$((TESTS_PASSED + 1)); echo -e "  ${GREEN}PASS${NC}: $OTHER_PRS_MSG"
+else
+  TESTS_RUN=$((TESTS_RUN + 1)); TESTS_FAILED=$((TESTS_FAILED + 1)); echo -e "  ${RED}FAIL${NC}: $OTHER_PRS_MSG"
+fi
 
 echo ""
 echo "Fix guidance points at the real script, not a hand-patch:"

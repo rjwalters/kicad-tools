@@ -16,7 +16,8 @@
 # This file tests:
 #   1. is_rate_limit_error() fires on all five documented signatures and
 #      stays silent on unrelated failures (auth, network, 404).
-#   2. forge_gh_comment_rl_safe / forge_gh_reopen_issue_rl_safe /
+#   2. forge_gh_comment_rl_safe is daemon-only (#9865: success, failure with
+#      stderr passthrough, absent binary); forge_gh_reopen_issue_rl_safe /
 #      forge_gh_swap_label_rl_safe: succeed via the primary `gh` mutation
 #      when it works, fall back to the correct REST endpoint/method only on
 #      a rate-limit rejection, and propagate (not swallow) any OTHER
@@ -47,29 +48,9 @@ HELPERS_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 MERGE_PR_SRC="$HELPERS_DIR/merge-pr.sh"
 
 # Colors
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-NC='\033[0m'
+# shellcheck source=lib/assert.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/assert.sh"
 
-TESTS_RUN=0
-TESTS_PASSED=0
-TESTS_FAILED=0
-
-assert_eq() {
-    local expected="$1"
-    local actual="$2"
-    local msg="$3"
-    TESTS_RUN=$((TESTS_RUN + 1))
-    if [[ "$expected" == "$actual" ]]; then
-        TESTS_PASSED=$((TESTS_PASSED + 1))
-        echo -e "  ${GREEN}PASS${NC}: $msg"
-    else
-        TESTS_FAILED=$((TESTS_FAILED + 1))
-        echo -e "  ${RED}FAIL${NC}: $msg"
-        echo "    Expected: '$expected'"
-        echo "    Actual:   '$actual'"
-    fi
-}
 
 # shellcheck source=../lib/forge-helpers.sh
 source "$HELPERS_DIR/lib/forge-helpers.sh"
@@ -141,13 +122,20 @@ source "$SCRIPT_DIR/lib/write-scope-fixture.sh"
 write_scope_register "$STUB_DIR/checkout" owner/repo
 cd "$STUB_DIR/checkout"
 
-# #9774: forge_gh_comment_rl_safe tries the daemon chokepoint before the gh
-# ladder. This suite's subject is the ladder, so pin the SELF daemon to a
-# mock that refuses — the gh stub stays the path under test, deterministically.
+# #9774/#9865: forge_gh_comment_rl_safe posts only through the daemon
+# chokepoint. Pin the SELF daemon to a mock whose behavior is driven by
+# $DAEMON_MODE_FILE ("ok" posts, "fail" refuses with a stderr message).
+DAEMON_MODE_FILE="$STUB_DIR/daemon-mode.txt"
+DAEMON_ARGV_LOG="$STUB_DIR/daemon-argv.log"
+export DAEMON_MODE_FILE DAEMON_ARGV_LOG
 cat > "$STUB_DIR/loom-daemon" <<'MOCK'
 #!/usr/bin/env bash
-echo "mock loom-daemon: forge comment not under test here" >&2
-exit 127
+printf '%s\n' "$*" >> "$DAEMON_ARGV_LOG"
+if [[ "$(cat "$DAEMON_MODE_FILE" 2>/dev/null || echo ok)" == "fail" ]]; then
+  echo "mock loom-daemon: forge refused the comment" >&2
+  exit 3
+fi
+exit 0
 MOCK
 chmod +x "$STUB_DIR/loom-daemon"
 export LOOM_DAEMON_SELF_BIN="$STUB_DIR/loom-daemon"
@@ -236,41 +224,56 @@ _run_stubbed() {
     PATH="$STUB_DIR:$PATH" "$@"
 }
 
-# --- forge_gh_comment_rl_safe ---
-rc=0
-_run_stubbed ok forge_gh_comment_rl_safe "owner/repo" "42" "hello" >/dev/null 2>&1 || rc=$?
-assert_eq "0" "$rc" "forge_gh_comment_rl_safe: primary gh issue comment succeeds -> no REST call"
-TESTS_RUN=$((TESTS_RUN + 1))
-if ! grep -q "^api " "$ARGV_LOG"; then
-    TESTS_PASSED=$((TESTS_PASSED + 1))
-    echo -e "  ${GREEN}PASS${NC}: forge_gh_comment_rl_safe (ok mode) never calls gh api"
-else
-    TESTS_FAILED=$((TESTS_FAILED + 1))
-    echo -e "  ${RED}FAIL${NC}: forge_gh_comment_rl_safe (ok mode) unexpectedly called gh api"
-fi
+# --- forge_gh_comment_rl_safe (#9865: daemon-only, no gh ladder) ---
+_run_daemon() {
+    echo "$1" > "$DAEMON_MODE_FILE"; shift
+    : > "$DAEMON_ARGV_LOG"; : > "$ARGV_LOG"
+    "$@"
+}
 
 rc=0
-_run_stubbed ratelimited forge_gh_comment_rl_safe "owner/repo" "42" "hello" >/dev/null 2>&1 || rc=$?
-assert_eq "0" "$rc" "forge_gh_comment_rl_safe: rate-limited primary call recovers via REST fallback"
-TESTS_RUN=$((TESTS_RUN + 1))
-if grep -q "^api repos/owner/repo/issues/42/comments" "$ARGV_LOG"; then
-    TESTS_PASSED=$((TESTS_PASSED + 1))
-    echo -e "  ${GREEN}PASS${NC}: forge_gh_comment_rl_safe REST fallback hits the correct comments endpoint"
-else
-    TESTS_FAILED=$((TESTS_FAILED + 1))
-    echo -e "  ${RED}FAIL${NC}: forge_gh_comment_rl_safe REST fallback endpoint wrong or missing"
-fi
+_run_daemon ok forge_gh_comment_rl_safe "owner/repo" "42" "hello" >/dev/null 2>&1 || rc=$?
+assert_eq "0" "$rc" "forge_gh_comment_rl_safe: daemon success -> 0"
+assert_eq "forge comment 42 --repo owner/repo --body hello" "$(cat "$DAEMON_ARGV_LOG")" "forge_gh_comment_rl_safe: issue comment daemon argv"
 
 rc=0
-_run_stubbed other-error forge_gh_comment_rl_safe "owner/repo" "42" "hello" >/dev/null 2>&1 || rc=$?
-assert_eq "1" "$rc" "forge_gh_comment_rl_safe: non-rate-limit failure propagates (not swallowed)"
+_run_daemon ok forge_gh_comment_rl_safe "owner/repo" "42" "hello" 1 >/dev/null 2>&1 || rc=$?
+assert_eq "forge comment 42 --repo owner/repo --body hello --pr" "$(cat "$DAEMON_ARGV_LOG")" "forge_gh_comment_rl_safe: PR comment passes --pr"
+
+rc=0
+err="$(_run_daemon fail forge_gh_comment_rl_safe "owner/repo" "42" "hello" 2>&1 >/dev/null)" || rc=$?
+assert_eq "1" "$rc" "forge_gh_comment_rl_safe: daemon failure -> 1"
 TESTS_RUN=$((TESTS_RUN + 1))
-if ! grep -q "UNEXPECTED_REST_CALL" "$ARGV_LOG"; then
+if [[ "$err" == *"forge refused the comment"* ]]; then
     TESTS_PASSED=$((TESTS_PASSED + 1))
-    echo -e "  ${GREEN}PASS${NC}: forge_gh_comment_rl_safe never retries over REST on a non-rate-limit failure"
+    echo -e "  ${GREEN}PASS${NC}: forge_gh_comment_rl_safe passes the daemon's stderr through"
 else
     TESTS_FAILED=$((TESTS_FAILED + 1))
-    echo -e "  ${RED}FAIL${NC}: forge_gh_comment_rl_safe incorrectly retried over REST on a non-rate-limit failure"
+    echo -e "  ${RED}FAIL${NC}: forge_gh_comment_rl_safe swallowed the daemon's stderr ('$err')"
+fi
+TESTS_RUN=$((TESTS_RUN + 1))
+if [[ ! -s "$ARGV_LOG" ]]; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "  ${GREEN}PASS${NC}: forge_gh_comment_rl_safe never falls back to gh on daemon failure"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "  ${RED}FAIL${NC}: forge_gh_comment_rl_safe fell back to gh: $(cat "$ARGV_LOG")"
+fi
+
+# Daemon absent: LOOM_DAEMON_SELF_BIN empty makes the resolver run; point the
+# checkout at no binary by stubbing the resolver.
+rc=0
+err="$( ( loom_resolve_self_daemon_bin() { return 1; }
+          LOOM_DAEMON_SELF_BIN="" ; unset LOOM_DAEMON_SELF_BIN
+          forge_gh_comment_rl_safe "owner/repo" "42" "hello" ) 2>&1 >/dev/null)" || rc=$?
+assert_eq "1" "$rc" "forge_gh_comment_rl_safe: no daemon binary -> 1"
+TESTS_RUN=$((TESTS_RUN + 1))
+if [[ "$err" == *"comment posting requires loom-daemon >= 0.19.598 (#9865)"* ]]; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "  ${GREEN}PASS${NC}: forge_gh_comment_rl_safe no-binary failure names the minimum version"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "  ${RED}FAIL${NC}: forge_gh_comment_rl_safe no-binary message wrong ('$err')"
 fi
 
 # --- forge_gh_reopen_issue_rl_safe ---
@@ -341,7 +344,7 @@ else
 fi
 
 # Exhausted-GraphQL path: falls back to ONE REST POST carrying labels inline.
-out=$(_run_stubbed ratelimited forge_gh_create_issue_rl_safe "owner/repo" "A title" "A body" "loom:triage" "tier:goal-supporting" 2>/dev/null)
+out=$(_run_stubbed ratelimited forge_gh_create_issue_rl_safe "owner/repo" "A title" "A body" "loom:triage" "loom:important" 2>/dev/null)
 assert_eq "https://github.test/o/r/issues/1234" "$out" \
     "forge_gh_create_issue_rl_safe: exhausted GraphQL recovers via REST and returns the URL"
 TESTS_RUN=$((TESTS_RUN + 1))
@@ -358,7 +361,7 @@ assert_eq "A title" "$(jq -r '.title' "$API_STDIN_LOG")" \
     "forge_gh_create_issue_rl_safe REST payload carries the title"
 assert_eq "A body" "$(jq -r '.body' "$API_STDIN_LOG")" \
     "forge_gh_create_issue_rl_safe REST payload carries the body"
-assert_eq "loom:triage,tier:goal-supporting" "$(jq -r '.labels | join(",")' "$API_STDIN_LOG")" \
+assert_eq "loom:triage,loom:important" "$(jq -r '.labels | join(",")' "$API_STDIN_LOG")" \
     "forge_gh_create_issue_rl_safe REST payload applies ALL labels atomically with creation"
 
 # Exactly one REST call -- never create-then-label (that doubles the request
@@ -504,10 +507,10 @@ A body read from a file.
 BODY
 
 out=$(_run_stubbed ratelimited env LOOM_FORGE_TYPE=github "$CREATE_ISSUE_SH" \
-    --title "From CLI" --body-file "$BODY_TMP" --label "loom:triage,tier:goal-supporting" 2>/dev/null)
+    --title "From CLI" --body-file "$BODY_TMP" --label "loom:triage,loom:important" 2>/dev/null)
 assert_eq "https://github.test/o/r/issues/1234" "$out" \
     "create-issue.sh: exhausted GraphQL still files the issue (REST) and prints the URL"
-assert_eq "loom:triage,tier:goal-supporting" "$(jq -r '.labels | join(",")' "$API_STDIN_LOG")" \
+assert_eq "loom:triage,loom:important" "$(jq -r '.labels | join(",")' "$API_STDIN_LOG")" \
     "create-issue.sh: comma-separated --label splits like gh, applied atomically"
 TESTS_RUN=$((TESTS_RUN + 1))
 if [[ "$(jq -r '.body' "$API_STDIN_LOG")" == *"A body read from a file."* ]]; then
@@ -552,7 +555,7 @@ else
 fi
 
 TESTS_RUN=$((TESTS_RUN + 1))
-if grep -q 'forge_gh_swap_label_rl_safe "\$REPO_NWO" "\$issue_num" "loom:building" "loom:issue"' "$MERGE_PR_SRC"; then
+if grep -q 'forge_gh_swap_label_rl_safe "\$REPO_NWO" "\$issue_num" "loom:building" "\${text:-loom:issue}"' "$MERGE_PR_SRC"; then
     TESTS_PASSED=$((TESTS_PASSED + 1))
     echo -e "  ${GREEN}PASS${NC}: merge-pr.sh's partial-increment label reset uses forge_gh_swap_label_rl_safe"
 else

@@ -52,9 +52,21 @@ if TYPE_CHECKING:
     from kicad_tools.progress import ProgressCallback
 
     from .board_clearance_rules import BoardClearanceRules
+    from .clearance_shapes import KPad, KShape
     from .primitives import Pad, Route, Segment
     from .stub_terminals import StubTerminal
 
+from .class_clearance_floors import (
+    class_clearances_by_name,
+    clearance_base,
+    merge_named_floors,
+    remember_authored_floors,
+)
+from .clearance_shapes import NO_INTERACTION as _NO_INTERACTION
+from .clearance_shapes import copper_gap as _copper_gap
+from .clearance_shapes import pad_shape as _kernel_pad_shape
+from .clearance_shapes import segment_shape as _kernel_segment_shape
+from .clearance_shapes import via_shape as _kernel_via_shape
 from .core import Autorouter
 from .fixed_copper import FixedPadCopper, custom_pad_copper, degraded_pad_copper
 from .geometry import (
@@ -64,7 +76,7 @@ from .geometry import (
     segment_to_segment_distance as _geom_seg_to_seg_dist,
 )
 from .layers import Layer, LayerDefinition, LayerStack, LayerType
-from .pad_geometry import pad_local_point, pad_point_distance
+from .pad_geometry import pad_point_distance, pad_segment_distance
 from .rules import DEFAULT_NET_CLASS_MAP, DesignRules, NetClassRouting
 
 # Floating-point tolerance for clearance comparisons in validate_routes
@@ -113,6 +125,37 @@ class GridResolutionError(ValueError):
         super().__init__(message)
 
 
+# Issue #6306: ceiling of the auto-grid budget retry (see
+# ``auto_select_grid_resolution``); a safe grid needing more cells than this
+# cannot be reached by the automatic bump alone.
+GRID_BUMP_CEILING = 4_000_000
+
+
+def _round_up_readable(cells: int) -> int:
+    """Round ``cells`` up to two significant digits (never down)."""
+    if cells <= 0:
+        return cells
+    magnitude = int(10 ** max(len(str(cells)) - 2, 0))
+    return -(-cells // magnitude) * magnitude
+
+
+def format_max_cells_option(safe_grid_cells: int) -> str:
+    """Option text naming the concrete ``--max-cells`` value (issue #6306).
+
+    The flag value is printed as a plain integer (``--max-cells 2400000``):
+    ``--max-cells`` is ``type=int`` and argparse rejects ``2,400,000``, so the
+    printed flag must be copy-pasteable.  Thousands separators appear only in
+    prose.
+    """
+    text = f"Pass --max-cells {safe_grid_cells} so the clearance-safe grid fits the cell budget"
+    if safe_grid_cells > GRID_BUMP_CEILING:
+        text += (
+            f" (needs ~{safe_grid_cells:,} cells, above the {GRID_BUMP_CEILING:,}-cell "
+            "auto-grid ceiling; expect high memory use)"
+        )
+    return text
+
+
 class GridSafetyError(ValueError):
     """Raised when auto-grid selection would route on a DRC-unsafe grid.
 
@@ -144,7 +187,9 @@ class GridSafetyError(ValueError):
         clearance: float,
         memory_budget_used: int | None = None,
         message: str | None = None,
+        safe_grid_cells: int | None = None,
     ):
+        self.safe_grid_cells = safe_grid_cells
         self.grid_resolution = grid_resolution
         self.clearance = clearance
         self.recommended = clearance / 2
@@ -161,8 +206,9 @@ class GridSafetyError(ValueError):
                 f"({self.recommended}mm) because the memory budget cap forced a "
                 f"coarser grid{budget}. The router's own safety rule rejects this "
                 f"grid; routing would produce clearance-violating vias/segments "
-                f"(DRC shorts). Options: enlarge/split the board, loosen the "
-                f"manufacturer clearance, add layers, or pass "
+                f"(DRC shorts). Options: "
+                f"{format_max_cells_option(safe_grid_cells) + ', ' if safe_grid_cells else ''}"
+                f"loosen the manufacturer clearance, add layers, or pass "
                 f"allow_unsafe_grid=True (CLI: --allow-unsafe-grid or --force) to "
                 f"route anyway and accept the DRC risk."
             )
@@ -255,6 +301,15 @@ class PCBDesignRules:
         )
 
 
+#: ``ClearanceViolation.origin`` for copper kept by ``--preserve-existing`` (#6229).
+ORIGIN_INPUT = "input"
+#: ``ClearanceViolation.origin`` for a short against a pad that already
+#: overlaps a pad of the copper's own net in the input board (#6693).
+ORIGIN_INPUT_PAD_OVERLAP = "input_pad_overlap"
+#: Origins whose short already existed in the input board.
+INPUT_DEFECT_ORIGINS = frozenset({ORIGIN_INPUT, ORIGIN_INPUT_PAD_OVERLAP})
+
+
 @dataclass
 class ClearanceViolation:
     """A potential clearance violation detected during post-route validation.
@@ -304,13 +359,28 @@ class ClearanceViolation:
     # produced it; ``"input"`` means it is copper kept verbatim from the
     # input board by ``--preserve-existing`` -- an input defect the router
     # inherited, not one it created.
+    #
+    # Issue #6693: ``"input_pad_overlap"`` means routed copper touches a pad of
+    # its own net that already overlaps the obstacle pad in the input board
+    # (e.g. a stale pad angle makes neighbouring fine-pitch pads overlap).  The
+    # two nets were shorted before routing began; no placement of the routed
+    # copper can clear the obstacle, so the short is an input defect too.
     origin: str = "routing"
     obstacle_pad: str = ""  # "REF.PIN" when ``obstacle_type == "pad"`` (Issue #6229)
+    #: Issue #6693: "REF.PIN" of the own-net pad that overlaps ``obstacle_pad``
+    #: in the input board (set only when ``origin == "input_pad_overlap"``).
+    overlapping_pad: str = ""
 
     @property
     def is_input_defect(self) -> bool:
-        """True when the offending copper was kept from the input board (#6229)."""
-        return self.origin == "input"
+        """True when the short already existed in the input board (#6229, #6693).
+
+        Either the offending copper was kept from the input board by
+        ``--preserve-existing`` (``origin == "input"``), or it touches a pad
+        that already overlaps the obstacle pad in the input
+        (``origin == "input_pad_overlap"``).
+        """
+        return self.origin in INPUT_DEFECT_ORIGINS
 
     @property
     def is_short(self) -> bool:
@@ -349,6 +419,12 @@ def describe_short(v: ClearanceViolation) -> str:
     loc = f" at ({v.location[0]:.3f}, {v.location[1]:.3f})" if v.location else ""
     layer_str = f" on {v.layer.kicad_name}" if v.layer is not None else ""
     overlap = f": overlap {-v.distance:.3f}mm"
+    if v.origin == ORIGIN_INPUT_PAD_OVERLAP:
+        return (
+            f"pre-existing short in input board (pads {v.overlapping_pad} and "
+            f"{v.obstacle_pad} already overlap): "
+            f"{_input_pair_label(v)}{loc}{layer_str}{overlap}"
+        )
     if v.is_input_defect:
         return (
             "pre-existing short in input board (kept by --preserve-existing): "
@@ -420,6 +496,192 @@ def kicad_rule_severity(pcb_path: str | Path | None, rule: str, default: str = "
     if isinstance(value, str) and value.lower() in KICAD_SEVERITY_LEVELS:
         return value.lower()
     return default
+
+
+@dataclass(frozen=True)
+class InputPadOverlap:
+    """Two different-net pads whose copper overlaps in the input board (#6693).
+
+    Found on the router's own pad model (:attr:`Autorouter.pads`), so it
+    agrees with the post-route short check in :func:`validate_routes`.
+    ``kct check`` reports the same pairs as ``clearance_pad_pad`` ``SHORT``
+    findings.
+    """
+
+    pad_a: str  # "REF.PIN"
+    pad_b: str
+    ref_a: str
+    ref_b: str
+    net_a: str
+    net_b: str
+
+
+def _pad_net_key(pad: Pad) -> int | str | None:
+    """Electrical identity of a pad for the overlap scan, ``None`` if unconnected.
+
+    Skipped pour-net pads carry net id ``0`` plus their name (Issue #6225),
+    so they are keyed by name; a pad with neither is truly unconnected.
+    """
+    if pad.net != 0:
+        return pad.net
+    return f"name:{pad.net_name}" if pad.net_name else None
+
+
+def _pad_copper_polygon(pad: Pad):
+    """Shapely polygon of a pad's copper envelope (rotated rect, or a disc)."""
+    from shapely import Point, Polygon  # type: ignore[import-untyped]
+
+    if pad.shape == "circle":
+        return Point(pad.x, pad.y).buffer(min(pad.width, pad.height) / 2.0, 32)
+    hw, hh = pad.width / 2.0, pad.height / 2.0
+    # Inverse of ``pad_local_point``: board = centre + R(-rotation) . local.
+    angle = math.radians(pad.rotation)
+    c, s = math.cos(angle), math.sin(angle)
+    corners = [(-hw, -hh), (hw, -hh), (hw, hh), (-hw, hh)]
+    return Polygon([(pad.x + c * lx + s * ly, pad.y - s * lx + c * ly) for lx, ly in corners])
+
+
+#: Minimum overlap area (mm^2) that counts as overlapping copper: excludes
+#: pads that merely touch along an edge or corner.
+_PAD_OVERLAP_MIN_AREA_MM2 = 1e-6
+
+#: Tolerance (mm) when testing that copper's contact with a foreign pad lies
+#: inside the own-net pad overlapping it (#6693): absorbs float noise from the
+#: polygon intersection without excusing any visible intrusion.
+_INTRUSION_TOLERANCE_MM = 1e-4
+
+
+def _intrusion_inside_partner(
+    obstacle: Pad,
+    partner: Pad,
+    x1: float,
+    y1: float,
+    x2: float,
+    y2: float,
+    half: float,
+) -> bool:
+    """Whether copper's contact with ``obstacle`` lies inside ``partner`` (#6693).
+
+    The copper is the segment ``(x1, y1)-(x2, y2)`` buffered by ``half`` (a
+    disc when the endpoints coincide, i.e. a via).  It is attributed to the
+    input only when ``(copper & obstacle) - partner`` is empty: every point
+    where it meets the foreign pad is already shorted by the input's own pad
+    overlap, so no copper placement could have avoided it.  Uses the same pad
+    polygons as :func:`find_input_pad_overlaps`.  A zero-area contact (copper
+    grazing the obstacle's edge) must also be covered, so a graze outside the
+    overlap stays a routing short.
+    """
+    from shapely import LineString, Point
+
+    if (x1, y1) == (x2, y2):
+        copper = Point(x1, y1).buffer(half, 32)
+    else:
+        copper = LineString([(x1, y1), (x2, y2)]).buffer(half, 32)
+    contact = copper.intersection(_pad_copper_polygon(obstacle))
+    if contact.is_empty:
+        # The shapely envelope disagrees with the validator's distance model
+        # (e.g. a circle pad's disc vs its rect): don't excuse the short.
+        return False
+    covered: bool = _pad_copper_polygon(partner).buffer(_INTRUSION_TOLERANCE_MM).covers(contact)
+    return covered
+
+
+def find_input_pad_overlaps(pads) -> list[InputPadOverlap]:
+    """Different-net pad pairs whose copper overlaps (Issue #6693).
+
+    ``pads`` is a ``{(ref, pin): Pad}`` mapping (``Autorouter.pads``).  Two
+    pads overlap when they share a copper layer (SMD on the same layer, or
+    either is through-hole) and their envelopes intersect with positive area.
+    Unconnected pads and virtual Steiner points are ignored.  Pairs are
+    returned in ``pads`` order.
+    """
+    from shapely import STRtree
+
+    entries: list[tuple[str, str, Pad, int | str]] = []
+    for (ref, pin), pad in pads.items():
+        if getattr(pad, "steiner_point", False):
+            continue
+        key = _pad_net_key(pad)
+        if key is None:
+            continue
+        entries.append((ref, pin, pad, key))
+    if len(entries) < 2:
+        return []
+    polys = [_pad_copper_polygon(e[2]) for e in entries]
+    tree = STRtree(polys)
+    overlaps: list[InputPadOverlap] = []
+    for i, (ref_a, pin_a, pad_a, key_a) in enumerate(entries):
+        for j in sorted(int(k) for k in tree.query(polys[i])):
+            if j <= i:
+                continue
+            ref_b, pin_b, pad_b, key_b = entries[j]
+            if key_a == key_b:
+                continue
+            if not (pad_a.through_hole or pad_b.through_hole or pad_a.layer == pad_b.layer):
+                continue
+            if polys[i].intersection(polys[j]).area <= _PAD_OVERLAP_MIN_AREA_MM2:
+                continue
+            overlaps.append(
+                InputPadOverlap(
+                    pad_a=f"{ref_a}.{pin_a}",
+                    pad_b=f"{ref_b}.{pin_b}",
+                    ref_a=ref_a,
+                    ref_b=ref_b,
+                    net_a=pad_a.net_name or f"Net {pad_a.net}",
+                    net_b=pad_b.net_name or f"Net {pad_b.net}",
+                )
+            )
+    return overlaps
+
+
+def input_pad_overlaps(router: Autorouter) -> list[InputPadOverlap]:
+    """:func:`find_input_pad_overlaps` over ``router.pads``, memoized (#6693).
+
+    Pads are fixed for a routing run, so the scan is cached on the router
+    (keyed by the identity and size of its pad map).
+    """
+    pads = getattr(router, "pads", None) or {}
+    cache_key = (id(pads), len(pads))
+    cached = getattr(router, "_input_pad_overlap_cache", None)
+    if cached is not None and cached[0] == cache_key:
+        hit: list[InputPadOverlap] = cached[1]
+        return hit
+    overlaps = find_input_pad_overlaps(pads)
+    with contextlib.suppress(AttributeError):
+        setattr(router, "_input_pad_overlap_cache", (cache_key, overlaps))  # noqa: B010
+    return overlaps
+
+
+def _input_overlap_partners(router: Autorouter) -> dict[int, list[tuple[str, Pad]]]:
+    """``id(pad) -> [("REF.PIN", overlapping foreign-net pad), ...]`` (#6693)."""
+    overlaps = input_pad_overlaps(router)
+    if not overlaps:
+        return {}
+    by_name = {f"{ref}.{pin}": pad for (ref, pin), pad in router.pads.items()}
+    partners: dict[int, list[tuple[str, Pad]]] = {}
+    for o in overlaps:
+        pad_a, pad_b = by_name.get(o.pad_a), by_name.get(o.pad_b)
+        if pad_a is None or pad_b is None:
+            continue
+        partners.setdefault(id(pad_a), []).append((o.pad_b, pad_b))
+        partners.setdefault(id(pad_b), []).append((o.pad_a, pad_a))
+    return partners
+
+
+def summarize_input_pad_overlaps(overlaps: list[InputPadOverlap]) -> list[str]:
+    """``["U8: 19 overlapping different-net pad pair(s)", ...]`` (#6693).
+
+    Grouped by footprint (``"J2/J4"`` for a pair spanning two footprints),
+    largest group first.
+    """
+    counts: Counter[str] = Counter()
+    for o in overlaps:
+        group = o.ref_a if o.ref_a == o.ref_b else "/".join(sorted((o.ref_a, o.ref_b)))
+        counts[group] += 1
+    return [
+        f"{group}: {n} overlapping different-net pad pair(s)"
+        for group, n in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+    ]
 
 
 def short_origin_summary(shorts: list[ClearanceViolation]) -> str:
@@ -945,6 +1207,11 @@ class GridAutoSelection:
             0.15mm with no memory pressure) and a #3441 lattice rescue are
             intentional pad-alignment trade-offs, not memory-cap coercion, so
             they do NOT set this flag.
+        safe_grid_cells: Issue #6306. Set only when ``memory_forced_unsafe_grid``
+            is True: the ``max_cells`` value (rounded up to two significant
+            digits) at which the coarsest clearance-safe candidate
+            (``<= clearance/2``) fits the memory filter, i.e. passing exactly
+            this as ``max_cells`` / ``--max-cells`` clears the gate.
     """
 
     resolution: float
@@ -959,6 +1226,7 @@ class GridAutoSelection:
     memory_budget_used: int = 0
     lattice_rescued: bool = False
     memory_forced_unsafe_grid: bool = False
+    safe_grid_cells: int | None = None
 
     def summary(self) -> str:
         """Human-readable summary of the selection."""
@@ -1501,7 +1769,7 @@ def auto_select_grid_resolution(
     # nothing is silently lost, plus we emit our own actionable warning
     # naming the memory cap as the cause.
     # ------------------------------------------------------------------
-    BUMP_CEILING = 4_000_000  # Matches compute_multi_resolution_plan ceiling
+    BUMP_CEILING = GRID_BUMP_CEILING  # Matches compute_multi_resolution_plan ceiling
     recommended_max = clearance / 2
     bumped = False
     if (
@@ -1689,6 +1957,11 @@ def auto_select_grid_resolution(
             off_grid_pct = best_off_grid / total_pads * 100 if total_pads else 0.0
             grid_unsafe_by_memory_cap = False
             memory_forced_unsafe_grid = False
+    safe_grid_cells: int | None = None
+    if memory_forced_unsafe_grid and board_width is not None and board_height is not None:
+        coarsest_safe = max(c for c in pre_memory_candidates if c <= recommended_max)
+        needed = math.ceil(board_width * board_height / (coarsest_safe * coarsest_safe))
+        safe_grid_cells = _round_up_readable(needed)
     if grid_unsafe_by_memory_cap:
         if lattice_rescued:
             # Issue #3441: the lattice rescue *chose* this grid because it
@@ -1795,6 +2068,7 @@ def auto_select_grid_resolution(
         memory_budget_used=effective_max_cells,
         lattice_rescued=lattice_rescued,
         memory_forced_unsafe_grid=memory_forced_unsafe_grid,
+        safe_grid_cells=safe_grid_cells,
     )
 
 
@@ -1918,11 +2192,16 @@ def compute_multi_resolution_plan(
     if has_ref and uniform_result.off_grid_pads > 0:
         # Find components with off-grid pads at the chosen resolution+offset
         off_grid_refs: dict[str, list] = {}
+        # All pads of each component, regardless of grid alignment.  The
+        # off-grid subset above decides *whether* a component escalates; the
+        # full set decides the zone's pitch (issue #6328).
+        all_pads_by_ref: dict[str, list] = {}
         offset = uniform_result.origin_offset
         for pad in pad_list:
             ref = getattr(pad, "component_key", getattr(pad, "ref", None))
             if ref is None:
                 continue
+            all_pads_by_ref.setdefault(ref, []).append(pad)
             x_on = _is_on_grid_with_offset(pad.x, coarse_resolution, offset[0])
             y_on = _is_on_grid_with_offset(pad.y, coarse_resolution, offset[1])
             if not (x_on and y_on):
@@ -1956,8 +2235,17 @@ def compute_multi_resolution_plan(
             for ref, ref_pads in off_grid_refs.items():
                 if len(ref_pads) < 2:
                     continue
+                # Solve the pitch from ALL of the component's pads, not just
+                # the off-grid subset (issue #6328).  Which pads fall off the
+                # *global* coarse grid depends on where the part sits on the
+                # board, so solving from that subset made the pitch depend on
+                # placement: board 05's U2 got 0.05 mm at 1x (24/59 pads fed
+                # in) but 0.005 mm at 1.05x (25/59).  The full pad set depends
+                # only on the footprint's internal geometry, so the pitch is
+                # translation-invariant (U2 -> 0.0125 mm at both scales).  The
+                # zone bbox below is already built from all pads.
                 fine_res, x_off, y_off = _compute_zone_resolution_and_offset(
-                    ref_pads,
+                    all_pads_by_ref[ref],
                     coarse_resolution=coarse_resolution,
                     min_fine_resolution=min_escalation_fine_resolution,
                 )
@@ -2403,7 +2691,11 @@ def load_pads_for_analysis(pcb_path_or_text: str | Path) -> list[Pad]:
         for section in re.split(r"(?=\((?:footprint|module)\s)", pcb_text)
         if section.startswith("(footprint") or section.startswith("(module")
     ]
-    for section, component_id in zip(footprint_sections, source_keys, strict=True):
+    for section, component_id, footprint in zip(
+        footprint_sections, source_keys, identity_document.footprints, strict=True
+    ):
+        # Issue #6780: the footprint's copper side, for the length model.
+        fp_side = Layer.B_CU if footprint.layer == "B.Cu" else Layer.F_CU
         # Get footprint library name (e.g. "Package_QFP:TQFP-32_7x7mm_P0.8mm")
         footprint_name_match = re.search(r'\(footprint\s+"([^"]*)"', section)
         footprint_name = footprint_name_match.group(1) if footprint_name_match else ""
@@ -2481,9 +2773,11 @@ def load_pads_for_analysis(pcb_path_or_text: str | Path) -> list[Pad]:
                     pin=pin,
                     layer=layer,
                     through_hole=is_thru,
+                    side=fp_side,
                     footprint_name=footprint_name,
                     rotation=pad_rotation,
                     shape=pad_shape,
+                    roundrect_rratio=_pad_rratio_from_block(pad_block, pad_shape),
                 )
             )
 
@@ -2709,6 +3003,27 @@ def validate_routes(
         for route in router.routes
     ]
 
+    # Issue #6718: pads are measured as their real copper (round, oval,
+    # roundrect, rect) through the shared clearance kernel -- the model
+    # ``kct check``, kicad-cli and the kept-copper audit below already use.
+    # The previous rectangle model held a round pad to its bounding square,
+    # so a trace passing the rounded corner read ~0.145 mm closer than it
+    # was and fed phantom violations to rip-up, the short gate and the
+    # DRC-nudge repair.  Kernel pads are built once per pad.
+    _pad_kshapes: dict[int, KPad] = {}
+
+    def _kpad(pad: Pad) -> KPad:
+        kpad = _pad_kshapes.get(id(pad))
+        if kpad is None:
+            kpad = _kernel_pad_shape(pad)
+            _pad_kshapes[id(pad)] = kpad
+        return kpad
+
+    def _kernel_pad_gap(shape: KShape, pad: Pad) -> float:
+        """Edge-to-edge gap from kernel copper ``shape`` to ``pad``'s real copper."""
+        gap = _copper_gap(shape, _kpad(pad))
+        return math.inf if gap == _NO_INTERACTION else gap
+
     # Memoized per-net-pair clearance.  ``max()`` is symmetric, so
     # ``_get_pair_clearance(a, b, ...) == _get_pair_clearance(b, a, ...)``;
     # keying by the sorted pair lets both call orders share one entry.
@@ -2785,7 +3100,10 @@ def validate_routes(
                 for i, seg in enumerate(route.segments)
             ]
             for via in route.vias:
-                lo, hi = sorted(router.grid.layer_to_index(layer.value) for layer in via.layers)
+                lo, hi = sorted(
+                    router.grid.layer_to_index(layer.value)
+                    for layer in getattr(via, "drilled_layers", via.layers)
+                )
                 candidates.append(
                     (
                         -1,
@@ -2953,6 +3271,57 @@ def validate_routes(
         _existing_seg_obstacles_by_net[route_net] = entries
         return entries
 
+    # Issue #6693: a short against a pad that already overlaps a pad of the
+    # copper's own net in the input board is an input defect -- the nets were
+    # shorted before routing began and no copper placement can clear the
+    # obstacle.  The overlap scan is lazy (it only runs once a pad short is
+    # found) and memoized on the router.
+    _overlap_partners: dict[int, list[tuple[str, Pad]]] | None = None
+
+    def _input_overlap_pad(
+        obstacle: Pad,
+        route_net: int,
+        route_name: str | None,
+        copper_layer: Layer | None,
+        x1: float,
+        y1: float,
+        x2: float,
+        y2: float,
+        half: float,
+    ) -> str:
+        """ "REF.PIN" of the own-net pad overlapping ``obstacle`` that the copper
+        touches, or ``""`` when the short is the routing's own (#6693)."""
+        nonlocal _overlap_partners
+        if _overlap_partners is None:
+            try:
+                _overlap_partners = _input_overlap_partners(router)
+            except Exception:  # pragma: no cover - diagnostic only, never fatal
+                logger.debug("input pad-overlap scan failed", exc_info=True)
+                _overlap_partners = {}
+        for name, partner in _overlap_partners.get(id(obstacle), ()):
+            if not _pad_on_net(partner, route_net, route_name):
+                continue
+            if (
+                copper_layer is not None
+                and not partner.through_hole
+                and partner.layer != copper_layer
+            ):
+                continue
+            if (x1, y1) == (x2, y2):
+                gap = pad_point_distance(partner, x1, y1) - half
+            else:
+                gap = pad_segment_distance(partner, x1, y1, x2, y2) - half
+            if gap > 0.0:
+                continue
+            # The copper touching its own pad is not enough: an escape
+            # segment that starts in A and then cuts through B's body away
+            # from the A/B overlap is a real routing short.  Only the part
+            # of the copper's contact with B that A already covers is
+            # pre-existing, so require ``(copper & B) - A`` to be empty.
+            if _intrusion_inside_partner(obstacle, partner, x1, y1, x2, y2, half):
+                return name
+        return ""
+
     # Check each route segment against pads of different nets
     for route_idx, route in enumerate(router.routes):
         route_net = route.net
@@ -2972,6 +3341,7 @@ def validate_routes(
                 seg_mid_y,
                 seg_half_len,
             ) = seg_geom
+            seg_kshape: KShape | None = None  # kernel copper, built on the first near pad
 
             # --- Segment-to-pad checks ---
             for (
@@ -2999,27 +3369,15 @@ def validate_routes(
                 if gap_lower_bound >= pair_clear - _CLEARANCE_EPSILON_MM:
                     continue
 
-                # Calculate minimum distance from the segment to the
-                # pad's true axis-aligned rectangle.  Issue #3592: the
-                # previous model treated every pad as a circle of radius
-                # ``max(width, height) / 2``, which over-estimated the
-                # extent of long, thin SMD pads (e.g. an LQFP land at
-                # 1.475 x 0.3 mm) along their short axis by ~0.6 mm and
-                # produced false-positive ``[pad]`` clearance violations
-                # for traces that legally clear the rectangular copper.
-                # Transform to the residual-angle local pad frame so the
-                # rectangle represents rotated copper, not its enlarged AABB.
-                effective_dist = (
-                    _segment_to_aabb_distance(
-                        *pad_local_point(pad, segment.x1, segment.y1),
-                        *pad_local_point(pad, segment.x2, segment.y2),
-                        0.0,
-                        0.0,
-                        pad.width / 2,
-                        pad.height / 2,
-                    )
-                    - seg_half_width
-                )
+                # Exact edge-to-edge gap from the trace to the pad's real
+                # copper (Issue #6718): the shared clearance kernel models
+                # circle / oval / roundrect / rect pads at their residual
+                # rotation (Issue #3592's long thin lands included), so a
+                # trace past a round pad's corner is not held to the
+                # pad's bounding square.
+                if seg_kshape is None:
+                    seg_kshape = _kernel_segment_shape(segment)
+                effective_dist = _kernel_pad_gap(seg_kshape, pad)
 
                 if effective_dist < pair_clear - _CLEARANCE_EPSILON_MM:
                     # Detect component-inherent violations: obstacle pad is
@@ -3053,6 +3411,21 @@ def validate_routes(
                         and effective_dist >= 0.0
                         and _same_component_relaxation_active(ref)
                     )
+                    overlap_pad = (
+                        _input_overlap_pad(
+                            pad,
+                            route_net,
+                            route.net_name or net_names.get(route_net),
+                            seg_layer,
+                            segment.x1,
+                            segment.y1,
+                            segment.x2,
+                            segment.y2,
+                            seg_half_width,
+                        )
+                        if effective_dist <= 0.0
+                        else ""
+                    )
 
                     violations.append(
                         ClearanceViolation(
@@ -3076,6 +3449,8 @@ def validate_routes(
                             component_inherent=is_component_inherent,
                             layer=segment.layer,
                             obstacle_pad=f"{ref}.{pad.pin}",
+                            origin=ORIGIN_INPUT_PAD_OVERLAP if overlap_pad else "routing",
+                            overlapping_pad=overlap_pad,
                         )
                     )
 
@@ -3284,6 +3659,7 @@ def validate_routes(
 
         for via in route.vias:
             via_radius = via.diameter / 2
+            via_kshape: KShape | None = None  # kernel copper, built on the first near pad
 
             for (ref, num), pad in router.pads.items():
                 # Issue #6225: a skipped pour-net pad (net id rewritten to
@@ -3297,11 +3673,21 @@ def validate_routes(
                 if pad.net == 0 and not pad.net_name:
                     continue
 
-                # Issue #3592: model the pad as its true axis-aligned
-                # rectangle rather than a bounding circle so anisotropic
-                # SMD lands do not produce false-positive via-clearance
-                # violations along their short axis.
-                effective_dist = pad_point_distance(pad, via.x, via.y) - via_radius
+                # Cheap lower-bound rejection: the pad's half-diagonal
+                # bounds its copper whatever its shape, so a pad whose
+                # bounding circle clears the via cannot violate.
+                if (
+                    math.hypot(pad.x - via.x, pad.y - via.y) - via_radius - _pad_radius(pad)
+                    >= via_clear - _CLEARANCE_EPSILON_MM
+                ):
+                    continue
+
+                # Exact edge-to-edge gap to the pad's real copper through
+                # the shared clearance kernel (Issue #6718; #3592's
+                # anisotropic SMD lands are exact here too).
+                if via_kshape is None:
+                    via_kshape = _kernel_via_shape(via)
+                effective_dist = _kernel_pad_gap(via_kshape, pad)
 
                 if effective_dist < via_clear - _CLEARANCE_EPSILON_MM:
                     # Issue #2757: cross-net pad on the same component is
@@ -3321,6 +3707,21 @@ def validate_routes(
                         and not (pad.net == 0 and pad.net_name)
                         and effective_dist >= 0.0
                         and _same_component_relaxation_active(ref)
+                    )
+                    overlap_pad = (
+                        _input_overlap_pad(
+                            pad,
+                            route_net,
+                            route_name,
+                            None,
+                            via.x,
+                            via.y,
+                            via.x,
+                            via.y,
+                            via_radius,
+                        )
+                        if effective_dist <= 0.0
+                        else ""
                     )
 
                     violations.append(
@@ -3343,8 +3744,9 @@ def validate_routes(
                             ),
                             location=(pad.x, pad.y),
                             component_inherent=is_component_inherent,
-                            origin=via_origin,
+                            origin=ORIGIN_INPUT_PAD_OVERLAP if overlap_pad else via_origin,
                             obstacle_pad=f"{ref}.{num}",
+                            overlapping_pad=overlap_pad,
                         )
                     )
 
@@ -4023,108 +4425,6 @@ def _segment_to_segment_distance(
     return _geom_seg_to_seg_dist(x1, y1, x2, y2, x3, y3, x4, y4)
 
 
-def _point_to_aabb_distance(
-    px: float, py: float, cx: float, cy: float, half_w: float, half_h: float
-) -> float:
-    """Minimum distance from a point to an axis-aligned rectangle.
-
-    The rectangle is centred at ``(cx, cy)`` with half-extents
-    ``half_w`` (X) and ``half_h`` (Y).  Returns 0.0 when the point is
-    inside the rectangle.
-
-    Issue #3592: the segment-to-pad clearance check previously modelled
-    every pad as a CIRCLE of radius ``max(width, height) / 2``.  For a
-    long, thin SMD pad (e.g. an LQFP land at 1.475 x 0.3 mm) that
-    over-estimates the pad extent along the short axis by ~0.6 mm,
-    producing false-positive clearance violations when a trace passes
-    the pad's narrow side at a distance that is legal against the real
-    rectangular copper.  Modelling the pad as its true axis-aligned
-    bounding box (pad dimensions are already rotated into PCB space at
-    load time, see ``load_pcb_for_routing``) removes that bias.
-    """
-    dx = max(abs(px - cx) - half_w, 0.0)
-    dy = max(abs(py - cy) - half_h, 0.0)
-    return math.hypot(dx, dy)
-
-
-def _segment_to_aabb_distance(
-    x1: float,
-    y1: float,
-    x2: float,
-    y2: float,
-    cx: float,
-    cy: float,
-    half_w: float,
-    half_h: float,
-) -> float:
-    """Signed centerline distance from a segment to an axis-aligned rect.
-
-    Sign convention (matches ``validate.rules.clearance.
-    _rect_segment_centerline_distance``):
-
-    - **Positive** -- segment is entirely outside the rectangle.
-    - **Zero**     -- segment touches/crosses the rectangle boundary.
-    - **Negative** -- the segment centerline lies inside the rectangle;
-      the magnitude is the deepest penetration (smallest distance to an
-      escaping edge), so the post-route DRC summary can still flag
-      "trace runs through pad metal" with a meaningful depth.
-
-    Used by the segment-to-pad clearance check so that anisotropic pads
-    are modelled by their true rectangular footprint rather than a
-    bounding circle (issue #3592).
-    """
-    left, right = cx - half_w, cx + half_w
-    bottom, top = cy - half_h, cy + half_h
-
-    def _inside(px: float, py: float) -> bool:
-        return left <= px <= right and bottom <= py <= top
-
-    p1_in = _inside(x1, y1)
-    p2_in = _inside(x2, y2)
-
-    if p1_in and p2_in:
-        # Whole centerline inside the rect -- report the deepest
-        # (most negative) signed penetration along the segment.
-        def _signed_depth(px: float, py: float) -> float:
-            gap_x = max(px - right, left - px)
-            gap_y = max(py - top, bottom - py)
-            return max(gap_x, gap_y)
-
-        deepest = min(_signed_depth(x1, y1), _signed_depth(x2, y2))
-        steps = 32
-        dx, dy = x2 - x1, y2 - y1
-        for i in range(1, steps):
-            t = i / steps
-            d = _signed_depth(x1 + t * dx, y1 + t * dy)
-            if d < deepest:
-                deepest = d
-        return deepest
-
-    if p1_in != p2_in:
-        # One endpoint inside, one outside -- the centerline crosses an
-        # edge, so it touches the boundary.
-        return 0.0
-
-    # Both endpoints outside: the segment either clears the rectangle or
-    # crosses straight through it.  Decompose the rectangle into its four
-    # edges and take the minimum segment-to-edge distance; a crossing
-    # produces distance 0 because the segment intersects an edge.
-    corners = [
-        (left, top),
-        (right, top),
-        (right, bottom),
-        (left, bottom),
-    ]
-    best = math.inf
-    for i in range(4):
-        ax, ay = corners[i]
-        bx, by = corners[(i + 1) % 4]
-        d = _geom_seg_to_seg_dist(x1, y1, x2, y2, ax, ay, bx, by)
-        if d < best:
-            best = d
-    return best
-
-
 def detect_layer_stack(pcb_text: str) -> LayerStack:
     """Auto-detect layer stack configuration from a KiCad PCB file.
 
@@ -4439,6 +4739,7 @@ def route_pcb(
                     "y": cy + ry,
                     "width": pad.get("width", 0.5),
                     "shape": pad.get("shape", "rect"),
+                    "roundrect_rratio": pad.get("roundrect_rratio"),
                     "height": pad.get("height", 0.5),
                     "net": net_num,
                     "net_name": net_name,
@@ -4529,6 +4830,32 @@ def _pad_shape_from_block(pad_block: str, ref: str, pin: str) -> str:
         pin=pin,
         has_padstack=re.search(r"\(padstack(?:\s|\))", pad_block) is not None,
     )
+
+
+def _pad_rratio_from_block(pad_block: str, shape: str) -> float | None:
+    """The file's ``(roundrect_rratio X)`` for a ``roundrect`` pad (issue #6718).
+
+    Returns ``None`` for any other shape, and for a roundrect whose block
+    carries no parseable ratio -- the clearance kernel then measures it as its
+    rectangle (conservative) rather than assuming KiCad's 0.25 default.
+    """
+    if shape != "roundrect":
+        return None
+    match = re.search(r"\(roundrect_rratio\s+([-+\d.eE]+)\s*\)", pad_block)
+    if match is None:
+        return None
+    try:
+        return float(match.group(1))
+    except ValueError:
+        return None
+
+
+def _schema_pad_rratio(pad) -> float | None:
+    """``schema.pcb.Pad.roundrect_rratio`` for a roundrect pad, else ``None``."""
+    if getattr(pad, "shape", None) != "roundrect":
+        return None
+    value = getattr(pad, "roundrect_rratio", None)
+    return float(value) if value is not None else None
 
 
 def _schema_pad_shape(pad, ref: str) -> str:
@@ -4728,6 +5055,7 @@ def _install_fine_pitch_regions_from_components(
                         drill=float(pad_info.get("drill", 0.0)),
                         rotation=float(pad_info.get("rotation", 0.0)),
                         shape=pad_info.get("shape", "rect"),
+                        roundrect_rratio=pad_info.get("roundrect_rratio"),
                     )
                 )
             except (TypeError, ValueError, KeyError):
@@ -4817,6 +5145,7 @@ def load_pcb_for_routing(
     localize_lattice_to_region: bool = False,
     lattice_link_budget_s: float | None = None,
     lattice_deadline: float | None = None,
+    lattice_max_iterations: int | None = None,
     min_trace_width_floor: float | None = None,
     placement_disposition: RoutingPlacementDisposition | None = None,
     project_path: str | Path | None = None,
@@ -4937,6 +5266,10 @@ def load_pcb_for_routing(
                 the total budget the user asked for.  When both this and
                 ``lattice_link_budget_s`` are set the TIGHTER bound wins.
                 ``None`` means "no absolute ceiling".
+        lattice_max_iterations: Issue #6362.  Round cap for the lattice netset
+                negotiation, stamped on ``router._lattice_max_iterations``.
+                Sourced from the CLI ``--lattice-iterations``; ``None`` keeps
+                the built-in default (12).
         min_trace_width_floor: Issue #4700.  Minimum legal trace width (mm)
                 for the target fab tier -- the SAME
                 ``get_design_rules(layers, copper_oz).min_trace_width_mm``
@@ -5060,6 +5393,8 @@ def load_pcb_for_routing(
         fp_rot = float(at_match.group(3)) if at_match.group(3) else 0
 
         ref = _footprint_reference(section)
+        # Issue #6780: the footprint's copper side, for the length model.
+        fp_side = Layer.B_CU if footprint.layer == "B.Cu" else Layer.F_CU
 
         # Parse pads - extract complete (pad ...) blocks
         # KiCad 7+ uses multi-line pad definitions, so we need to extract
@@ -5244,8 +5579,10 @@ def load_pcb_for_routing(
                     "through_hole": pad_type == "thru_hole",
                     "drill": drill_size,
                     "layer": pad_layer,
+                    "side": fp_side,
                     "rotation": pad_rotation,
                     "shape": pad_shape,
+                    "roundrect_rratio": _pad_rratio_from_block(pad_block, pad_shape),
                 }
             )
 
@@ -5317,18 +5654,10 @@ def load_pcb_for_routing(
         for name, value in _authored_net_clearances(pcb_path, project_path, net_map).items()
         if value > base_floor + 1e-9
     }
-    if authored_by_name:
-        floors = dict(rules.net_clearance_floors)
-        for name, value in authored_by_name.items():
-            net_id = net_map.get(name, 0)
-            if net_id:
-                floors[net_id] = max(floors.get(net_id, 0.0), value)
-        for comp in components:
-            for pad in comp["pads"]:
-                pad_floor = authored_by_name.get(pad.get("net_name", ""))
-                if pad_floor is not None and pad["net"] == 0:
-                    pad["authored_clearance"] = pad_floor
-        rules = replace(rules, net_clearance_floors=floors)
+    rules = merge_named_floors(rules, authored_by_name, net_map, components)
+    # Issue #6427: snapshot of the designer-authored floors alone, so a later
+    # class-map edit can re-derive "authored + router class" floors.
+    authored_floors = dict(rules.net_clearance_floors)
 
     # Auto-adjust grid resolution if enabled
     if auto_adjust_grid:
@@ -5464,6 +5793,26 @@ def load_pcb_for_routing(
                     _width_floor,
                 )
 
+    # Issue #6427: the router's own net classes are declared in the routed
+    # sidecars (#6390), so KiCad holds every foreign pair to
+    # max(class(a), class(b)).  Feed each class stricter than the base into
+    # the #6243 per-net floors so the search, the native validator's stored
+    # copper and the trace optimizer enforce the same pair rule -- not just
+    # the routing net's own clearance.
+    rules = merge_named_floors(
+        rules,
+        class_clearances_by_name(net_class_map, clearance_base(rules)),
+        net_map,
+        components,
+    )
+    # Issue #6449: the lattice's static pad masks grow by the designer floors
+    # alone; the router-class pad side is held by #6395's class-pad repair.
+    rules = replace(
+        rules,
+        designer_clearance_floors=dict(authored_floors),
+        designer_clearance_floors_by_name=dict(authored_by_name),
+    )
+
     router = Autorouter(
         width=board_width,
         height=board_height,
@@ -5483,6 +5832,7 @@ def load_pcb_for_routing(
     )
 
     router.placement_disposition = placement_disposition
+    remember_authored_floors(router, authored_floors)
     # Issue #5863: what this board lost to pad geometry the router cannot
     # represent, for reports and callers that need to say so out loud.
     router.unsupported_geometry_nets = frozenset(unsupported_geometry_nets)
@@ -5773,6 +6123,10 @@ def load_pcb_for_routing(
     # preserves "bounded only by the per-link budget (or not at all)".
     if lattice_deadline is not None:
         router._lattice_deadline = lattice_deadline
+
+    # Issue #6362: ``--lattice-iterations`` round cap; ``None`` keeps the default.
+    if lattice_max_iterations is not None:
+        router._lattice_max_iterations = lattice_max_iterations
 
     # Issue #4170 (Phase 2b-1): carve bare boundary stub endpoints open as
     # same-net A* targets and store them for the Autorouter target-merge shim.
@@ -6134,8 +6488,10 @@ def verify_output_connectivity(
     """Verify connectivity of routed nets in written PCB S-expression output.
 
     Re-parses ``(segment ...)`` and ``(via ...)`` S-expressions from the PCB
-    content and runs union-find against known pad positions to check that all
-    pads in each net are connected by the written traces.  This catches bugs
+    content and checks that all pads in each net are joined by the written
+    copper.  Contact is layer-aware (Issue #6371): a pad is reached only by
+    same-net copper on a layer it occupies that actually intersects its
+    outline -- a nearby endpoint, or one on the wrong layer, is not enough.  This catches bugs
     in ``to_sexp()`` serialization, ``_insert_sexp_before_closing()`` merge,
     and any other transformation that occurs between the internal Route objects
     and the final file.
@@ -6146,7 +6502,10 @@ def verify_output_connectivity(
             to that net.  Only nets present here are validated.
         net_names: Optional mapping of net ID to human-readable net name.
             Used only for diagnostic messages in the returned report.
-        tolerance: Coordinate snapping tolerance in mm (default 0.01).
+        tolerance: Retained for API compatibility.  Since Issue #6371 pads
+            are joined by layer-aware copper contact (segment width, via
+            size, pad outline) rather than by snapping endpoints onto a
+            lattice, so no snapping tolerance applies.
 
     Returns:
         Dict mapping net ID to a connectivity report dict with keys:
@@ -6158,8 +6517,6 @@ def verify_output_connectivity(
         - ``disconnected_pads``: list of ``"<ref>:<pin>"`` strings for pads
           not in the main component (empty when ``connected`` is True)
     """
-    from .observability import _pt, _UnionFind
-
     # Issue #4476: scan each ``(segment ...)`` / ``(via ...)`` block FIRST and
     # read its fields inside that block, instead of one mega-pattern whose
     # lazy ``.*?`` gaps span the whole file.
@@ -6174,11 +6531,18 @@ def verify_output_connectivity(
     # completion output: >4 minutes for this one call (the router's post-save
     # tail appeared to hang), and the verification silently saw ZERO copper.
     #
-    # ``[^()]*\([^()]*\)`` matches a segment/via body exactly (these blocks
-    # nest at most one level deep), so the scan is linear and cannot backtrack
-    # across the file.
-    seg_block_re = re.compile(r"\(segment\b(?:[^()]*\([^()]*\))*[^()]*\)")
-    via_block_re = re.compile(r"\(via\b(?:[^()]*\([^()]*\))*[^()]*\)")
+    # Each alternative is delimited by parentheses, so the scan is linear and
+    # cannot backtrack across the file.
+    #
+    # Issue #6371: allow TWO nesting levels.  KiCad 10 writes vias with
+    # ``(tenting (front yes) (back yes))`` / ``(covering ...)`` children, which
+    # the old one-level pattern never matched -- every such via silently
+    # vanished.  The old endpoint-snapping check hid that (it joined an F.Cu
+    # and a B.Cu endpoint at the same XY with or without a via); the
+    # layer-aware contact model needs the via to bridge the layers.
+    _body = r"(?:[^()]*\((?:[^()]*\([^()]*\))*[^()]*\))*[^()]*\)"
+    seg_block_re = re.compile(r"\(segment\b" + _body)
+    via_block_re = re.compile(r"\(via\b" + _body)
     start_re = re.compile(r"\(start\s+([\d.+-]+)\s+([\d.+-]+)\)")
     end_re = re.compile(r"\(end\s+([\d.+-]+)\s+([\d.+-]+)\)")
     at_re = re.compile(r"\(at\s+([\d.+-]+)\s+([\d.+-]+)\)")
@@ -6211,8 +6575,27 @@ def verify_output_connectivity(
             return int(m.group(1))
         return name_to_id.get(m.group(2).replace('\\"', '"'))
 
+    from ..core.layers import kicad_read_via_layers, warn_normalised_vias
+    from .layers import Layer
+    from .optimizer.pcb import via_block_type
+    from .primitives import Segment, Via
+    from .terminal_connectivity import physical_copper_components
+
+    # Issue #6371: keep each conductor's layer and width (and each via's
+    # size and layer span) so pads are joined by real layer-aware copper
+    # contact -- the same model ``kct check`` / kicad-cli use -- instead of
+    # "nearest same-net endpoint within 2 mm, any layer".  That XY radius
+    # accepted board 03's stranded J1.B7 because its sibling J1.A7 sits
+    # 1.59 mm away.
+    layer_by_name = {layer.kicad_name: layer for layer in Layer}
+    width_re = re.compile(r"\(width\s+([\d.eE+-]+)\)")
+    size_re = re.compile(r"\(size\s+([\d.eE+-]+)")
+    drill_re = re.compile(r"\(drill\s+([\d.eE+-]+)")
+    layer_re = re.compile(r'\(layer\s+"?([^"\s()]+)"?')
+    layers_re = re.compile(r'\(layers\s+"?([^"\s()]+)"?\s+"?([^"\s()]+)"?')
+
     # Group parsed segments by net
-    segments_by_net: dict[int, list[tuple[tuple[float, float], tuple[float, float]]]] = {}
+    segments_by_net: dict[int, list[Segment]] = {}
     for block_match in seg_block_re.finditer(pcb_content):
         block = block_match.group(0)
         s_m = start_re.search(block)
@@ -6220,22 +6603,65 @@ def verify_output_connectivity(
         net_id = _block_net_id(block)
         if s_m is None or e_m is None or net_id is None:
             continue
-        x1, y1 = float(s_m.group(1)), float(s_m.group(2))
-        x2, y2 = float(e_m.group(1)), float(e_m.group(2))
+        l_m = layer_re.search(block)
+        layer = layer_by_name.get(l_m.group(1)) if l_m else Layer.F_CU
+        if layer is None:
+            # Non-copper or unknown layer name: it cannot carry the net.
+            continue
+        w_m = width_re.search(block)
         segments_by_net.setdefault(net_id, []).append(
-            (_pt(x1, y1, tolerance), _pt(x2, y2, tolerance))
+            Segment(
+                x1=float(s_m.group(1)),
+                y1=float(s_m.group(2)),
+                x2=float(e_m.group(1)),
+                y2=float(e_m.group(2)),
+                width=float(w_m.group(1)) if w_m else 0.0,
+                layer=layer,
+                net=net_id,
+            )
         )
 
     # Group parsed vias by net
-    vias_by_net: dict[int, list[tuple[float, float]]] = {}
+    vias_by_net: dict[int, list[Via]] = {}
+    vias_read_as_through = 0
     for block_match in via_block_re.finditer(pcb_content):
         block = block_match.group(0)
         at_m = at_re.search(block)
         net_id = _block_net_id(block)
         if at_m is None or net_id is None:
             continue
-        x, y = float(at_m.group(1)), float(at_m.group(2))
-        vias_by_net.setdefault(net_id, []).append(_pt(x, y, tolerance))
+        ls_m = layers_re.search(block)
+        block_type = via_block_type(block)
+        if ls_m:
+            # Issue #6493: a keyword-less partial pair is a through via to
+            # KiCad, so read it as one (one rule shared with the schema).
+            (first_name, last_name), normalised = kicad_read_via_layers(
+                (ls_m.group(1), ls_m.group(2)), block_type
+            )
+            if normalised:
+                vias_read_as_through += 1
+            span = (layer_by_name.get(first_name), layer_by_name.get(last_name))
+        else:
+            span = (Layer.F_CU, Layer.B_CU)
+        first, last = span
+        if first is None or last is None:
+            first, last = Layer.F_CU, Layer.B_CU
+        sz_m = size_re.search(block)
+        dr_m = drill_re.search(block)
+        vias_by_net.setdefault(net_id, []).append(
+            Via(
+                x=float(at_m.group(1)),
+                y=float(at_m.group(2)),
+                drill=float(dr_m.group(1)) if dr_m else 0.0,
+                diameter=float(sz_m.group(1)) if sz_m else 0.0,
+                layers=(first, last),
+                net=net_id,
+                # Issue #6662: micro/blind/buried vias keep their drilled span.
+                is_micro=block_type == "micro",
+                span_type=block_type if block_type in ("blind", "buried") else None,
+            )
+        )
+    warn_normalised_vias(logger, "verify_output_connectivity", vias_read_as_through)
 
     result: dict[int, dict] = {}
     net_names = net_names or {}
@@ -6267,68 +6693,18 @@ def verify_output_connectivity(
             }
             continue
 
-        uf = _UnionFind()
-
-        # Union segment endpoints
-        for p1, p2 in net_segs:
-            uf.union(p1, p2)
-
-        # Ensure via points are in the union-find and union with co-located
-        # segment endpoints
-        for via_pt in net_vias:
-            uf._ensure(via_pt)
-            for p1, p2 in net_segs:
-                if p1 == via_pt:
-                    uf.union(via_pt, p1)
-                if p2 == via_pt:
-                    uf.union(via_pt, p2)
-
-        # Link pads to nearest segment endpoints (same logic as observability)
-        pad_points: list[tuple[tuple[float, float], Pad]] = []
-        for pad in pads:
-            pad_pt = _pt(pad.x, pad.y, tolerance)
-            best_dist = float("inf")
-            best_pt = pad_pt
-            for p1, p2 in net_segs:
-                for sp in (p1, p2):
-                    dx = sp[0] - pad_pt[0]
-                    dy = sp[1] - pad_pt[1]
-                    d = dx * dx + dy * dy
-                    if d < best_dist:
-                        best_dist = d
-                        best_pt = sp
-            # Also check vias
-            for vp in net_vias:
-                dx = vp[0] - pad_pt[0]
-                dy = vp[1] - pad_pt[1]
-                d = dx * dx + dy * dy
-                if d < best_dist:
-                    best_dist = d
-                    best_pt = vp
-
-            if best_dist <= 4.0:  # 2mm squared
-                uf.union(pad_pt, best_pt)
-            else:
-                uf._ensure(pad_pt)
-            pad_points.append((pad_pt, pad))
-
-        # Find largest component
-        component_pads: dict[tuple[float, float], int] = {}
-        for pp, _ in pad_points:
-            root = uf.find(pp)
-            component_pads[root] = component_pads.get(root, 0) + 1
-
-        max_component = max(component_pads.values()) if component_pads else 0
+        components = physical_copper_components(pads, net_segs, net_vias)
+        counts: dict[int, int] = {}
+        for component in components:
+            counts[component] = counts.get(component, 0) + 1
+        main_root = max(counts, key=counts.__getitem__)
+        max_component = counts[main_root]
         total = len(pads)
-
-        # Find the main root (largest component)
-        main_root = max(component_pads, key=component_pads.get) if component_pads else None
-
-        disconnected = []
-        if max_component < total:
-            for pp, pad in pad_points:
-                if main_root is None or uf.find(pp) != main_root:
-                    disconnected.append(f"{pad.ref}:{pad.pin}")
+        disconnected = [
+            f"{pad.ref}:{pad.pin}"
+            for pad, component in zip(pads, components, strict=True)
+            if component != main_root
+        ]
 
         result[net_id] = {
             "net_name": net_name,

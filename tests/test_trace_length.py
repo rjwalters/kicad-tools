@@ -173,9 +173,9 @@ MULTILAYER_PCB = """(kicad_pcb
   )
 
   (segment (start 5 15) (end 15 15) (width 0.2) (layer "F.Cu") (net 1))
-  (via (at 15 15) (size 0.6) (drill 0.3) (layers "F.Cu" "In1.Cu") (net 1))
+  (via blind (at 15 15) (size 0.6) (drill 0.3) (layers "F.Cu" "In1.Cu") (net 1))
   (segment (start 15 15) (end 25 15) (width 0.2) (layer "In1.Cu") (net 1))
-  (via (at 25 15) (size 0.6) (drill 0.3) (layers "In1.Cu" "B.Cu") (net 1))
+  (via blind (at 25 15) (size 0.6) (drill 0.3) (layers "In1.Cu" "B.Cu") (net 1))
   (segment (start 25 15) (end 35 15) (width 0.2) (layer "B.Cu") (net 1))
 )
 """

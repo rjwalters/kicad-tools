@@ -61,7 +61,13 @@ NB_MODULE(router_cpp, m) {
         // Issue #4071: per-cell corridor-reservation owner set count
         // (read-only surface for parity tests; the owner nets are written
         // via ``Grid3D::reserve_cell`` / read via ``is_reserved_for``).
-        .def_ro("reserved_count", &GridCell::reserved_count);
+        .def_ro("reserved_count", &GridCell::reserved_count)
+        // Issue #6315: pad-geometry provenance (normally written through
+        // ``Grid3D::mark_blocked``'s ``pad_source`` / ``shared_pad_halo``;
+        // writable so a caller that temporarily repaints a cell -- the
+        // Kelvin branch isolation -- can void and restore it).
+        .def_rw("pad_cell", &GridCell::pad_cell)
+        .def_rw("shared_pad_halo", &GridCell::shared_pad_halo);
 
     // DesignRules struct
     nb::class_<DesignRules>(m, "DesignRules")
@@ -121,7 +127,13 @@ NB_MODULE(router_cpp, m) {
         .def_rw("approach_gx1", &PadBounds::approach_gx1)
         .def_rw("approach_gy1", &PadBounds::approach_gy1)
         .def_rw("approach_gx2", &PadBounds::approach_gx2)
-        .def_rw("approach_gy2", &PadBounds::approach_gy2);
+        .def_rw("approach_gy2", &PadBounds::approach_gy2)
+        .def_rw("centre_gx", &PadBounds::centre_gx)
+        .def_rw("centre_gy", &PadBounds::centre_gy)
+        .def_rw("long_axis", &PadBounds::long_axis)
+        .def_rw("lane_half_cells", &PadBounds::lane_half_cells)
+        .def_rw("tip_lo", &PadBounds::tip_lo)
+        .def_rw("tip_hi", &PadBounds::tip_hi);
 
     // PadChannelBudget struct (Issue #3143)
     //
@@ -273,7 +285,20 @@ NB_MODULE(router_cpp, m) {
         .def("route_geometry_candidates", &Grid3D::route_geometry_candidates)
         .def("mark_blocked", &Grid3D::mark_blocked,
              "x"_a, "y"_a, "layer"_a, "net"_a, "is_obstacle"_a = false,
-             "pad_blocked"_a = false)
+             "pad_blocked"_a = false, "pad_source"_a = false,
+             "shared_pad_halo"_a = false)
+        // Issue #6315: exact swept-edge vs foreign-pad clearance used to
+        // resolve pad-derived cells in the A*.
+        .def("pad_geometry_clear", &Grid3D::pad_geometry_clear,
+             "ax"_a, "ay"_a, "bx"_a, "by"_a, "layer"_a, "net"_a,
+             "half_width"_a, "clearance"_a)
+        // Issue #6375: validate_route()'s seg-vs-pad verdict over the pads
+        // the bucket index places within reach -- the function the A*
+        // own-pad step gate calls (search/validator parity surface).
+        .def("segment_pads_clear", &Grid3D::segment_pads_clear,
+             "seg"_a, "exclude_net"_a,
+             "exclude_ref_hashes"_a = std::vector<uint32_t>{},
+             "clamp_ref_hashes"_a = std::vector<uint32_t>{})
         .def("mark_rect_blocked", &Grid3D::mark_rect_blocked,
              "x1"_a, "y1"_a, "x2"_a, "y2"_a, "layer"_a, "net"_a, "is_obstacle"_a = false)
         // Route marking
@@ -351,7 +376,7 @@ NB_MODULE(router_cpp, m) {
         .def("authored_pair_floor", &Grid3D::authored_pair_floor, "net_a"_a, "net_b"_a)
         .def("set_pad_authored", &Grid3D::set_pad_authored,
              "index"_a, "shape"_a, "width"_a, "height"_a, "rotation"_a,
-             "x"_a, "y"_a, "drill"_a, "item_floor"_a)
+             "x"_a, "y"_a, "drill"_a, "item_floor"_a, "rratio"_a)
         .def("rebuild_authored_index", &Grid3D::rebuild_authored_index)
         .def("authored_active", &Grid3D::authored_active)
         .def("authored_segment_clear", &Grid3D::authored_segment_clear,
@@ -621,6 +646,16 @@ NB_MODULE(router_cpp, m) {
              "enabled"_a, "cx"_a = -1, "cy"_a = -1, "radius"_a = 0)
         .def_prop_ro("relief_mode", &Pathfinder::relief_mode)
         .def("set_search_fill_clearances", &Pathfinder::set_search_fill_clearances)
+        // Issue #6315: copper clearance a foreign pad may demand (the
+        // largest net-class clearance on the board).
+        .def("set_search_pad_clearance_floor", &Pathfinder::set_search_pad_clearance_floor)
+        // Issue #6375: the own-pad step gate -- validator carve-out sets
+        // and the narrowest emittable width for this search.
+        .def("set_search_own_pad_gate", &Pathfinder::set_search_own_pad_gate,
+             "exclude_ref_hashes"_a, "clamp_ref_hashes"_a, "trace_width"_a)
+        .def("own_pad_step_clear", &Pathfinder::own_pad_step_clear,
+             "x1"_a, "y1"_a, "x2"_a, "y2"_a, "layer"_a, "net"_a,
+             "emit_trace_width"_a = 0.0f)
         .def("set_search_partner_clearance", &Pathfinder::set_search_partner_clearance)
         .def("set_search_pair_widths", &Pathfinder::set_search_pair_widths,
              "trace_half_width_mm"_a, "via_half_diam_mm"_a,
@@ -786,7 +821,8 @@ NB_MODULE(router_cpp, m) {
              "effective_target_spacing"_a, "effective_approach_radius"_a,
              "effective_departure_radius"_a,
              "routable_layers"_a, "corridor_bitset"_a,
-             "max_iterations_budget"_a, "timeout_seconds"_a)
+             "max_iterations_budget"_a, "timeout_seconds"_a,
+             "p_goal_any_layer"_a, "n_goal_any_layer"_a)
         .def("route_centerline", &CoupledPathfinder::route_centerline,
              "starts"_a, "goals"_a, "p_net"_a, "n_net"_a, "half_pitch"_a,
              "p_side"_a, "p_half"_a, "p_gap"_a, "n_half"_a, "n_gap"_a,

@@ -55,6 +55,7 @@ Layer Stack Configuration:
 
 import argparse
 import contextlib
+import functools
 import logging
 import math
 import os
@@ -64,7 +65,7 @@ import shutil
 import signal
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypedDict, cast
 
@@ -329,7 +330,10 @@ def _normalize_deterministic_budget(args, quiet: bool = False) -> None:
             "[deterministic-budget] Iteration-budgeted routing enabled "
             "(Issue #3538): per-net wall-clock cutoff DISABLED, C++ A* "
             f"iteration backstop pinned to {args.max_search_iterations:,} "
-            "node expansions.  Routed output is reproducible across machines."
+            "node expansions.  Routed output is reproducible across machines "
+            "unless a later '[deterministic-budget] per-net wall clock bound' "
+            "or 'stage deadline fired' line says a wall clock bound first "
+            "(Issue #6329)."
         )
         print(
             "[deterministic-budget] Per-net iteration cap "
@@ -347,7 +351,9 @@ def _normalize_deterministic_budget(args, quiet: bool = False) -> None:
                 f"{RELIEF_SUBSEARCH_BUDGET_S:g}s wall clock (Issue #4730), so "
                 "a loaded or slow machine can still land different copper.  "
                 "Pass --deterministic-rescue to bound them by the per-net "
-                "iteration cap instead (Issue #5870)."
+                "iteration cap instead (Issue #5870).  It also switches off "
+                "the 60s oscillation-escape budget and the remaining-budget "
+                "per-iteration per-net cap (Issue #6475)."
             )
         if timeout and timeout > 0:
             print(
@@ -395,6 +401,40 @@ def _deterministic_rescue_kwargs(args) -> _RescueKwargs:
     if getattr(args, "deterministic_rescue", False):
         return {"deterministic_rescue": True}
     return _RescueKwargs()
+
+
+def _multistart_trial_kwargs(args) -> dict:
+    """Per-trial routing kwargs for ``--strategy monte-carlo|evolutionary``.
+
+    Issue #6345: every trial used to be a single basic ``route_all`` pass --
+    the CLI never passed ``use_negotiated`` -- so 8 Monte Carlo trials on
+    board 05 finished worse than one default (negotiated) run.  With
+    ``--trial-router negotiated`` (the default) each trial runs the same
+    negotiated router, with the same iteration / patience / rip-up settings,
+    as ``--strategy negotiated``; ``--trial-router basic`` restores the old
+    single-pass trials.  ``--seed`` now seeds the run too, so trial 0 is the
+    same route as one default run with that seed.
+
+    Region parallelism and the checkpoint callback are not forwarded: trials
+    already run in worker processes and the callback is not picklable.
+    """
+    negotiated_kwargs: dict = {
+        "max_iterations": args.iterations,
+        "batch_routing": getattr(args, "batch_routing", False)
+        or getattr(args, "high_performance", False),
+        "hierarchical": getattr(args, "hierarchical", False),
+        "perturbation": getattr(args, "perturbation", True),
+        "use_targeted_ripup": getattr(args, "targeted_ripup", False),
+        "max_ripups_per_net": _targeted_ripup_budget(args),
+        "best_stall_patience": (getattr(args, "early_stop_patience", 2) or None),
+        **_deterministic_rescue_kwargs(args),
+    }
+    return {
+        "seed": getattr(args, "seed", None),
+        "use_negotiated": getattr(args, "trial_router", "negotiated") == "negotiated",
+        "negotiated_kwargs": negotiated_kwargs,
+        "per_net_timeout": getattr(args, "per_net_timeout", None) or None,
+    }
 
 
 def _auto_fix_budget(args) -> float:
@@ -572,7 +612,14 @@ def _print_unverified_banner(args, output_path, headline: str) -> None:
     """Replace a SUCCESS banner whose verification was skipped (issue #6273)."""
     checks = _unverified_checks(args)
     print(f"UNVERIFIED: {headline}")
-    print(f"  Skipped for --timeout: {', '.join(checks)} -- the board was NOT verified.")
+    failure = getattr(args, "_stranded_pour_failure", None)
+    failure = failure if isinstance(failure, str) and failure else None
+    timed = [c for c in checks if not (failure and c == "stranded-pour check")]
+    if timed:
+        print(f"  Skipped for --timeout: {', '.join(timed)} -- the board was NOT verified.")
+    if failure and len(timed) < len(checks):
+        # Issue #6724: kicad-cli itself failed, not the --timeout budget.
+        print(f"  kicad-cli failed during the stranded-pour check ({failure}) -- NOT verified.")
     print(
         f"  Run 'kct check {output_path} --mfr {getattr(args, 'manufacturer', 'jlcpcb')}' "
         "before manufacturing (exit code "
@@ -1359,6 +1406,200 @@ _COPPER_LOSS_ABORT_FRACTION = 0.10
 _COPPER_LOSS_TRIVIAL_INPUT = 100
 
 
+@dataclass
+class _OutputVerification:
+    """Outcome of :func:`_verify_written_output` (issues #2264, #6371, #6376).
+
+    ``disconnected`` holds every multi-pad net with a disconnected pad in the
+    written file; ``regressed`` is the subset the router's own statistics had
+    counted as connected -- a false completion that exits 6 even without
+    ``--strict``.
+    """
+
+    disconnected: dict[int, dict] = field(default_factory=dict)
+    regressed: dict[int, dict] = field(default_factory=dict)
+
+    @property
+    def has_disconnected(self) -> bool:
+        return bool(self.disconnected)
+
+
+def _verify_written_output(
+    pcb_content: str,
+    router: "Autorouter",
+    multi_pad_net_ids: "set[int]",
+    net_map: "dict[str, int]",
+    stats: dict,
+    nets_to_route: int,
+    *,
+    quiet: bool = False,
+) -> _OutputVerification:
+    """Verify pad-to-pad connectivity of the PCB text just written.
+
+    The single post-save verifier for every ``kct route`` flow (issue #6376):
+    ``main_with_result``'s direct path and the three escalation flows
+    (layer escalation, rule relaxation, combined) all call this after
+    ``_write_routed_pcb``.  It re-parses the written S-expressions with
+    :func:`kicad_tools.router.io.verify_output_connectivity`, classifies each
+    open net as already-partial or counted-connected (issue #6371), reconciles
+    ``stats`` (``nets_routed`` / ``nets_partial`` / ``nets_fully_connected`` /
+    ``connectivity``) in place with the verified result, and prints the
+    ``--- Output Connectivity Verification ---`` section.
+    """
+    result = _OutputVerification()
+    if not (router.pads and router.nets and pcb_content):
+        return result
+
+    # Looked up through the module so tests can monkeypatch it.
+    from kicad_tools.router import io as router_io
+
+    # Build net_pads mapping (same as get_statistics)
+    verify_net_pads: dict[int, list] = {}
+    for net_id, pad_keys in router.nets.items():
+        if net_id not in multi_pad_net_ids:
+            continue
+        pad_list = [router.pads[k] for k in pad_keys if k in router.pads]
+        if len(pad_list) >= 2:
+            verify_net_pads[net_id] = pad_list
+
+    # Build net name lookup
+    reverse_net_map = {v: k for k, v in net_map.items()}
+
+    output_connectivity = router_io.verify_output_connectivity(
+        pcb_content=pcb_content,
+        net_pads=verify_net_pads,
+        net_names=reverse_net_map,
+    )
+
+    disconnected_nets = {
+        nid: info
+        for nid, info in output_connectivity.items()
+        if not info["connected"] and info["total_pads"] >= 2
+    }
+    result.disconnected = disconnected_nets
+    regressed = result.regressed
+
+    if disconnected_nets:
+        _stat_conn = stats.get("connectivity") or {}
+        _nets_with_copper = {r.net for r in router.routes}
+        for nid, info in disconnected_nets.items():
+            counted = (
+                _stat_conn[nid]["connected"]
+                if nid in _stat_conn
+                else (not _stat_conn and nid in _nets_with_copper)
+            )
+            if counted:
+                regressed[nid] = info
+        if regressed:
+            # Reconcile the summary with the verified result so neither
+            # "Nets connected" nor the SUCCESS banner can repeat the
+            # router's pre-write count.
+            stats["nets_routed"] = max(0, stats["nets_routed"] - len(regressed))
+            if "nets_partial" in stats:
+                stats["nets_partial"] += len(regressed)
+            if "nets_fully_connected" in stats:
+                stats["nets_fully_connected"] = max(
+                    0, stats["nets_fully_connected"] - len(regressed)
+                )
+                stats["has_disconnected_islands"] = True
+            for nid in regressed:
+                if nid in _stat_conn:
+                    _stat_conn[nid]["connected"] = False
+        if not quiet:
+            print("\n--- Output Connectivity Verification ---")
+            print(
+                f"  WARNING: {len(disconnected_nets)} net(s) have disconnected "
+                f"pads in written output"
+            )
+            for nid, info in sorted(disconnected_nets.items(), key=lambda x: x[1]["net_name"]):
+                disc_str = ", ".join(info["disconnected_pads"][:5])
+                if len(info["disconnected_pads"]) > 5:
+                    disc_str += f" (+{len(info['disconnected_pads']) - 5} more)"
+                print(
+                    f"  {info['net_name']}: "
+                    f"{info['connected_pads']}/{info['total_pads']} pads connected"
+                    f" -- disconnected: {disc_str}"
+                )
+            if regressed:
+                names = ", ".join(sorted(i["net_name"] for i in regressed.values()))
+                print(
+                    f"  ERROR: {len(regressed)} net(s) counted as "
+                    f"connected before the write are open in the written output: {names}"
+                )
+                print(f"  Nets connected (verified): {stats['nets_routed']}/{nets_to_route}")
+    elif not quiet:
+        print("\n--- Output Connectivity Verification ---")
+        print("  All nets verified connected in written output")
+    return result
+
+
+def _apply_output_verification(
+    final_result, stats: dict, verification: _OutputVerification
+) -> None:
+    """Carry a verified-open regression into an escalation flow's result.
+
+    Issue #6376: ``final_result`` (and therefore ``args._last_layer_result``,
+    which the ``--auto-pcb-size`` wrapper reads) must report the verified
+    count, not the router's pre-write one.  No-op without a regression.
+    """
+    if not verification.regressed:
+        return
+    final_result.nets_routed = stats["nets_routed"]
+    final_result.completion = (
+        final_result.nets_routed / final_result.nets_to_route
+        if final_result.nets_to_route > 0
+        else 1.0
+    )
+    final_result.success = False
+
+
+def _print_output_verification_failure_banner(
+    verification: _OutputVerification,
+    nets_routed: int,
+    nets_to_route: int,
+    output_path,
+) -> None:
+    """Print the issue #6371 ``ROUTING FAILED`` banner body (shared, #6376)."""
+    regressed = verification.regressed
+    print(
+        f"ROUTING FAILED: {len(regressed)} net(s) open in the "
+        "written output (post-save connectivity verification)"
+    )
+    print("=" * 60)
+    print()
+    print("Net Statistics:")
+    print(f"  Multi-pad nets:  {nets_to_route}")
+    print(f"  Nets connected:  {nets_routed} (verified in written output)")
+    for info in sorted(regressed.values(), key=lambda i: i["net_name"]):
+        print(f"  {info['net_name']}: disconnected {', '.join(info['disconnected_pads'][:5])}")
+    print()
+    print(f"  Run 'kct check {output_path}' for the stranded-pad report")
+
+
+def _output_verification_exit(verification: _OutputVerification, args) -> int | None:
+    """Exit 6 for a post-save connectivity failure, else ``None``.
+
+    ``--strict`` makes any disconnected pad fatal (issue #2264); a net the
+    router counted as connected but the written file leaves open is fatal
+    without it (issue #6371).  Shared by every flow (issue #6376).
+    """
+    if getattr(args, "strict", False) and verification.has_disconnected:
+        return 6
+    if verification.regressed:
+        return 6
+    return None
+
+
+# Issue #6351: copper (segments, vias) carried by the user's input board,
+# recorded by ``_stage_input_for_auto_pour`` before it is copied onto the
+# output path (where checkpoints later overwrite it), keyed by output path.
+_INPUT_COPPER_BASELINE: dict[str, tuple[int, int]] = {}
+
+
+def _baseline_key(path: Path) -> str:
+    return str(path.resolve())
+
+
 def _write_routed_pcb(
     pcb_path: Path,
     output_path: Path,
@@ -1450,7 +1691,15 @@ def _write_routed_pcb(
     # touching the output file so silent data loss becomes a loud, safe
     # failure independent of any future parser dialect regression.
     if guard_copper_loss:
-        _, in_segs, in_vias = _strip_route_blocks(original_content)
+        # Issue #6351: when the input was staged onto output_path, the
+        # content read above may include a best-so-far checkpoint written by
+        # this very run.  Prefer the copper count captured from the user's
+        # input before staging.
+        baseline = _INPUT_COPPER_BASELINE.get(_baseline_key(output_path))
+        if baseline is not None:
+            in_segs, in_vias = baseline
+        else:
+            _, in_segs, in_vias = _strip_route_blocks(original_content)
         _, out_segs, out_vias = _strip_route_blocks(output_content)
         in_total = in_segs + in_vias
         out_total = out_segs + out_vias
@@ -1593,11 +1842,21 @@ def _finalize_committed_copper_or_demote(
     """
     demoted = router.revalidate_committed_copper_or_demote()
     if demoted and not quiet:
-        print(
-            f"  ⚠ Post-optimize backstop demoted {len(demoted)} net(s) whose "
-            f"copper became a cross-net short after optimize/nudge: "
-            f"{sorted(demoted)}"
-        )
+        # Issue #6489: an authored/class-floor demotion is not a cross-net short.
+        floor = set(getattr(router, "last_floor_demoted_nets", None) or [])
+        shorts = sorted(set(demoted) - floor)
+        if floor:
+            print(
+                f"  ⚠ Post-optimize backstop demoted {len(floor)} net(s) whose "
+                f"copper is below the authored/class clearance minimum: "
+                f"{sorted(floor)}"
+            )
+        if shorts:
+            print(
+                f"  ⚠ Post-optimize backstop demoted {len(shorts)} net(s) whose "
+                f"copper became a cross-net short after optimize/nudge: "
+                f"{shorts}"
+            )
 
 
 def _make_stage_quality_recorder(args: argparse.Namespace) -> Any:
@@ -1661,6 +1920,28 @@ def _resolve_route_engine(args: argparse.Namespace) -> str:
     return getattr(args, "route_engine", "grid") or "grid"
 
 
+def _match_group_tuning_engage(args: argparse.Namespace, router: Any) -> str | None:
+    """Return the match-group tuning engage policy for this run, or ``None``.
+
+    Issue #6674:
+
+    * ``--length-match-groups`` -> ``"length_critical"`` on every engine
+      (the legacy opt-in behaviour, unchanged).
+    * no flag, ``--route-engine lattice``, and at least one loaded net class
+      declares ``length_match_group`` -> ``"checker_limit"``: tune the
+      groups ``kct check`` would fail, to the checker's own tolerance.
+    * otherwise (including every grid run without the flag) -> ``None``.
+    """
+    if getattr(args, "length_match_groups", False):
+        return "length_critical"
+    if _resolve_route_engine(args) != "lattice":
+        return None
+    net_class_map = getattr(router, "net_class_map", None) or {}
+    if any(nc.effective_length_match_group() for nc in net_class_map.values()):
+        return "checker_limit"
+    return None
+
+
 def _run_consolidation_pass(
     router: Any,
     args: argparse.Namespace,
@@ -1719,6 +2000,130 @@ def _run_consolidation_pass(
     _record_stage_quality(stage_recorder, STAGE_POST_CONSOLIDATE, router)
     if not quiet and stats.runs_merged:
         print(f"  Consolidation: {stats.summary()}")
+
+
+def _diffpair_skew_tuning_mode(args: argparse.Namespace) -> str | None:
+    """Which diff-pair skew tuning (if any) runs after routing.
+
+    * ``"length_critical"`` -- ``--length-match-diffpairs`` (Issue #2648),
+      on every engine: tune ``length_critical`` classes to
+      ``effective_skew_tolerance(0.5)``.  Unchanged by Issue #6664.
+    * ``"checker_skew_limit"`` -- Issue #6664: the resolved engine is
+      ``lattice`` and ``--differential-pairs`` is set.  Tune every pair whose
+      skew ``kct check`` fails as an error, to the checker's own limit.  Grid
+      is frozen for new pair features until #6448, so it never auto-engages.
+    * ``None`` -- no tuning.
+    """
+    if getattr(args, "length_match_diffpairs", False):
+        return "length_critical"
+    if getattr(args, "differential_pairs", False) and _resolve_route_engine(args) == "lattice":
+        return "checker_skew_limit"
+    return None
+
+
+def _run_diffpair_skew_tuning(
+    router: Any,
+    args: argparse.Namespace,
+    *,
+    quiet: bool = False,
+) -> Any:
+    """Run the post-route diff-pair skew tuner when engaged (see
+    :func:`_diffpair_skew_tuning_mode`).  Returns the per-pair results, or
+    ``None`` when the tuner did not run."""
+    mode = _diffpair_skew_tuning_mode(args)
+    if mode is None:
+        return None
+    if mode == "length_critical" and not args.differential_pairs:
+        if not quiet:
+            print(
+                "\n--- Length-Match Diff-Pairs: skipped ---\n"
+                "  --length-match-diffpairs requires --differential-pairs "
+                "(no detection means no pairs to tune)."
+            )
+        return None
+
+    from kicad_tools.router.diffpair_detection import detect_diff_pairs
+
+    if mode == "length_critical":
+        if not quiet:
+            print("\n--- Length-Match Diff-Pairs (Epic #2556 Phase 3I) ---")
+        detected_pairs = detect_diff_pairs(net_names=router.net_names)
+    else:
+        if not quiet:
+            print("\n--- Diff-Pair Skew Tuning (lattice, kct check skew limit; Issue #6664) ---")
+        # Issue #6664 (#6447 item 4): detect with the class map, so
+        # class-declared pairs (diffpair_partner) are found, not only
+        # _P/_N-suffixed ones -- the same synthesis ``kct check`` uses.
+        from kicad_tools.router.diffpair_detection import build_synth_routing
+
+        class_routing, net_to_class = build_synth_routing(
+            getattr(router, "net_class_map", None) or {}
+        )
+        detected_pairs = detect_diff_pairs(
+            net_names=router.net_names,
+            net_class_routing=class_routing or None,
+            net_to_class=net_to_class or None,
+        )
+    if not detected_pairs:
+        if not quiet:
+            print("  No differential pairs detected; nothing to tune.")
+        return None
+
+    # Snapshot connectivity for the pad-to-pad invariant.
+    _ci_snapshot_skew = _connectivity_snapshot(router)
+    if mode == "length_critical":
+        tune_results = router.apply_diffpair_length_tuning(
+            detected_pairs=detected_pairs,
+            verbose=not quiet,
+        )
+    else:
+        tune_results = router.apply_diffpair_length_tuning(
+            detected_pairs=detected_pairs,
+            verbose=not quiet,
+            engage="checker_skew_limit",
+        )
+    _enforce_connectivity_invariant_or_exit(
+        router,
+        _ci_snapshot_skew,
+        phase="length_match_diffpairs",
+        args=args,
+        quiet=quiet,
+    )
+    if not quiet:
+        n_tuned = sum(1 for r in tune_results.values() if r.reason == "tuned")
+        n_clean = sum(1 for r in tune_results.values() if r.reason == "already_within_tolerance")
+        n_rollback = sum(
+            1 for r in tune_results.values() if r.reason == "post_insertion_drc_violation"
+        )
+        n_budget = sum(1 for r in tune_results.values() if r.reason == "exceeded_max_inserts")
+        n_overshoot = sum(1 for r in tune_results.values() if r.reason == "overshoot")
+        if mode == "length_critical":
+            n_skipped = sum(1 for r in tune_results.values() if r.reason == "not_length_critical")
+            print(
+                f"  Summary: {n_tuned} tuned, {n_clean} clean, "
+                f"{n_rollback} rolled back, {n_budget} budget-exhausted, "
+                f"{n_overshoot} overshoot, "
+                f"{n_skipped} skipped (not length-critical)"
+            )
+        else:
+            n_declined = sum(
+                1 for r in tune_results.values() if r.reason == "skew_limit_not_enforced"
+            )
+            n_over = sum(
+                1
+                for r in tune_results.values()
+                if r.tolerance_mm is not None
+                and r.reason != "skew_limit_not_enforced"
+                and r.skew_after_mm > r.tolerance_mm
+            )
+            print(
+                f"  Summary: {n_tuned} tuned, {n_clean} clean, "
+                f"{n_rollback} rolled back, {n_budget} budget-exhausted, "
+                f"{n_overshoot} overshoot, "
+                f"{n_declined} declined (limit is a warning), "
+                f"{n_over} still over the kct check skew limit"
+            )
+    return tune_results
 
 
 def _engine_post_passes_enabled(
@@ -1837,9 +2242,11 @@ def _make_checkpoint_callback(
     quiet: bool = False,
     *,
     preserved_sexp: str = "",
+    preserved_routes: "list[Route] | None" = None,
     router_provider: "Callable[[], Autorouter] | None" = None,
     source_pcb_path: Path | None = None,
     best_checkpoint: "BestCheckpointWriter | None" = None,
+    dry_run: bool = False,
 ):
     """Build a checkpoint callback for ``route_all_negotiated`` (Issue #2808).
 
@@ -1885,13 +2292,29 @@ def _make_checkpoint_callback(
         written, so a layer-escalation attempt that restarts from a worse
         state can never overwrite a better earlier checkpoint.  When it is
         set, a callback is returned even if ``interval <= 0``.
+
+        ``dry_run`` (Issue #6563): a ``--dry-run`` writes no files, so no
+        callback is returned regardless of ``interval``/``best_checkpoint``.
     """
+    if dry_run:
+        return None
     if interval <= 0 and best_checkpoint is None:
         return None
 
     # Issue #4416: detect the source dialect once so every checkpoint write
     # re-emits route copper in the board's own net-reference dialect.
     name_only = _board_uses_name_only_dialect(pcb_path)
+
+    def _checkpoint_preserved(routed) -> str:
+        """Issue #6626: preserved copper minus what ``routed`` re-routes."""
+        router = router_provider() if router_provider is not None else None
+        return _dedupe_preserved_sexp(
+            preserved_sexp,
+            preserved_routes,
+            routed,
+            stub_net_ids=getattr(router, "_stub_terminals", None) or (),
+            name_only=name_only,
+        )
 
     # Mutable container so the closure can write back the timestamp.
     # ``[None]`` sentinel means "no checkpoint written yet"; the first
@@ -1928,8 +2351,9 @@ def _make_checkpoint_callback(
 
         def _write(dest: Path) -> None:
             route_sexp = "\n\t".join(r.to_sexp(name_only=name_only) for r in best_routes)
-            if preserved_sexp:
-                route_sexp = f"{route_sexp}\n\t{preserved_sexp}" if route_sexp else preserved_sexp
+            kept = _checkpoint_preserved(best_routes)
+            if kept:
+                route_sexp = f"{route_sexp}\n\t{kept}" if route_sexp else kept
             _copy_checkpoint_constraint_sidecars(source_pcb_path or pcb_path, dest)
             _write_routed_pcb(
                 pcb_path, dest, route_sexp, is_checkpoint=True, layer_count=layer_count
@@ -1946,6 +2370,16 @@ def _make_checkpoint_callback(
             )
 
     def _checkpoint(best_routes, best_metrics) -> None:
+        # Issue #6475: serialising routes draws UUIDs from the global RNG when
+        # deterministic UUIDs are on.  A checkpoint is an observer, so keep the
+        # stream the router sees independent of how many writes happened.
+        rng_state = random.getstate()
+        try:
+            _checkpoint_inner(best_routes, best_metrics)
+        finally:
+            random.setstate(rng_state)
+
+    def _checkpoint_inner(best_routes, best_metrics) -> None:
         from kicad_tools.cli.progress import flush_print
 
         if best_checkpoint is not None:
@@ -1979,8 +2413,9 @@ def _make_checkpoint_callback(
             # Issue #3155: carry preserved existing copper through every
             # checkpoint so the strip-then-rewrite (#2976) inside
             # _write_routed_pcb does not erase it from the staged input.
-            if preserved_sexp:
-                route_sexp = f"{route_sexp}\n\t{preserved_sexp}" if route_sexp else preserved_sexp
+            kept = _checkpoint_preserved(best_routes)
+            if kept:
+                route_sexp = f"{route_sexp}\n\t{kept}" if route_sexp else kept
             router = router_provider() if router_provider is not None else None
             layer_count = router.grid.num_layers if router is not None else 2
             if (
@@ -2028,6 +2463,13 @@ def _make_checkpoint_callback(
 
     def _checkpoint_completed(routes, metrics) -> None:
         """Retain a completed attempt separately from periodic checkpoints."""
+        rng_state = random.getstate()  # Issue #6475: observer, see _checkpoint
+        try:
+            _checkpoint_completed_inner(routes, metrics)
+        finally:
+            random.setstate(rng_state)
+
+    def _checkpoint_completed_inner(routes, metrics) -> None:
         import tempfile
 
         if best_checkpoint is not None:
@@ -2045,8 +2487,9 @@ def _make_checkpoint_callback(
             router = router_provider() if router_provider is not None else None
             layers = router.grid.num_layers if router is not None else 2
             sexp = "\n\t".join(route.to_sexp(name_only=name_only) for route in routes)
-            if preserved_sexp:
-                sexp = f"{sexp}\n\t{preserved_sexp}" if sexp else preserved_sexp
+            kept = _checkpoint_preserved(routes)
+            if kept:
+                sexp = f"{sexp}\n\t{kept}" if sexp else kept
             fd, name = tempfile.mkstemp(
                 prefix=output_path.stem + "_completed_unverified_",
                 suffix=output_path.suffix,
@@ -2136,6 +2579,48 @@ def _capture_attempt_preserved_copper(pcb_path: Path, args) -> tuple[list["Route
                 blocks.append((offset, block))
     raw = "\n".join(block for _, block in sorted(blocks))
     return routes, "\n\t".join(part for part in (ordinary, raw) if part)
+
+
+def _dedupe_preserved_sexp(
+    preserved_sexp: str,
+    preserved_routes: "list[Route] | None",
+    routed: "list[Route]",
+    *,
+    stub_net_ids=(),
+    name_only: bool = False,
+) -> str:
+    """Drop preserved copper that a re-routed net replaces (issue #6626).
+
+    Applies the rule :func:`_finalize_routes` uses for the final output (a net
+    that is re-routed is emitted from the routed copy only; stub nets keep
+    their preserved copper) to the already-serialized ``preserved_sexp`` that
+    partial saves and checkpoints append.  Verbatim blocks that are not in
+    ``preserved_routes`` (placement-preserved nets) are left untouched.
+    """
+    if not preserved_sexp or not preserved_routes:
+        return preserved_sexp
+    routed_ids = {r.net for r in routed} - set(stub_net_ids)
+    if not routed_ids:
+        return preserved_sexp
+    # ``Route.to_sexp`` mints a fresh uuid per call, so the serialized text
+    # cannot be matched against re-serialized routes: filter it by net instead.
+    drop_ids = {r.net for r in preserved_routes if r.net in routed_ids}
+    drop_names = {r.net_name for r in preserved_routes if r.net in routed_ids and r.net_name}
+    if not drop_ids:
+        return preserved_sexp
+    from kicad_tools.router.optimizer.pcb import _extract_balanced_blocks
+
+    spans = []
+    for kind in ("segment", "via"):
+        for start, end, block in _extract_balanced_blocks(preserved_sexp, kind):
+            num = re.search(r"\(net\s+(\d+)\s*\)", block)
+            name = re.search(r'\(net\s+"((?:\\.|[^"\\])*)"\s*\)', block)
+            if (num and int(num.group(1)) in drop_ids) or (name and name.group(1) in drop_names):
+                spans.append((start, end))
+    result = preserved_sexp
+    for start, end in sorted(spans, reverse=True):
+        result = result[:start] + result[end:]
+    return result.strip()
 
 
 def _serialize_preserved_routes(
@@ -2240,6 +2725,76 @@ def _stash_unrouted_diagnosis(router: "Autorouter", args) -> None:
     if diagnosis is not None:
         router.unrouted_diagnosis = diagnosis
         print(diagnosis.summary_line(), file=sys.stderr)
+
+
+def _prime_access_witness_deadline(args) -> tuple[bool, float | None]:
+    """Whether -- and until when -- the pre-release witness prime may run (#6391).
+
+    Returns ``(run, deadline)``.  Without ``--timeout`` the prime is the same
+    unbounded replay the post-release sidecar writer used to do, only earlier:
+    ``(True, None)``.  Under ``--timeout`` it may spend only what is left
+    beyond BOTH reserves carved out of the routing deadline: the post-route
+    finishing reserve (:func:`_post_route_reserve`, #6273) and the
+    ``--auto-fix`` reserve (:func:`_auto_fix_budget`, #3238) -- auto-fix runs
+    after the release, so time the prime took from it would be gone.  That is
+    ``_finishing_time_left(args) - _post_route_reserve - _auto_fix_reserve``;
+    when that is not in the future the prime is skipped (``(False, None)``) and
+    the sidecars fall back to today's post-release behaviour.
+    """
+    time_left = _finishing_time_left(args)
+    if time_left is None:
+        return True, None
+    reserve = float(getattr(args, "_post_route_reserve", 0.0) or 0.0) + float(
+        getattr(args, "_auto_fix_reserve", 0.0) or 0.0
+    )
+    budget = time_left - reserve
+    if budget <= 0.0:
+        return False, None
+    return True, time.monotonic() + budget
+
+
+def _prime_access_witness(router: "Autorouter", args) -> None:
+    """Replay the commit journal while the routing grid is still live (#6391).
+
+    :func:`_release_routing_engine_state` drops the grid's occupancy planes,
+    and the access-witness sidecars are written after it.  A replay run then
+    still returns the right verdicts and attribution (#6346), but
+    ``pad_access._marking_at`` reads every plane as "no label", so each
+    stranded pad's ``closing_markings`` came out empty.  Running the replay
+    here, immediately before the release, memoizes the complete witness on
+    ``router._access_witness_cache`` (:func:`witness_for_router`); the later
+    sidecar writes reuse it because the journal length is unchanged.
+
+    Segment clearance during the replay is judged against the replayed copper
+    whether or not the R-tree is populated: ``access_witness.replay`` suspends
+    the segment index for its whole run (#6303), so priming before the release
+    changes no verdict.
+
+    Bounded by :func:`_prime_access_witness_deadline` under ``--timeout``.  A
+    skipped or deadline-truncated prime caches nothing, so the post-release
+    path behaves exactly as before.  Skipped after an interrupt (the normal
+    save will not follow) and for a router with no or an empty journal.
+    Never raises a regular exception: a diagnostic must not fail a route.
+    """
+    journal = getattr(router, "commit_journal", None)
+    if journal is None or not len(journal):
+        return
+    if _interrupt_state.get("interrupted"):
+        return
+    run, deadline = _prime_access_witness_deadline(args)
+    if not run:
+        return
+    from kicad_tools.router.access_witness import witness_for_router
+
+    with restore_stage():
+        record_stage("access-witness-prime")
+        try:
+            if deadline is None:
+                witness_for_router(router)
+            else:
+                witness_for_router(router, deadline=deadline)
+        except Exception as exc:  # pragma: no cover - defensive
+            print(f"Warning: access-witness prime failed: {exc}", file=sys.stderr)
 
 
 def _release_routing_engine_state(router: "Autorouter") -> None:
@@ -2558,6 +3113,9 @@ def _finalize_routes(
 # Global state for Ctrl+C handling
 _interrupt_state: dict[str, Any] = {
     "interrupted": False,
+    # Issue #6563: set by ``_main_impl`` from ``--dry-run``; makes
+    # ``_save_partial_results`` a no-op so a dry run never writes a board.
+    "dry_run": False,
     "router": None,
     "output_path": None,
     "pcb_path": None,
@@ -2566,11 +3124,75 @@ _interrupt_state: dict[str, Any] = {
     # #5639: path of the ``.access_witness.json`` the last partial save wrote,
     # so the deadline handler can name it in the ``.timeout.json`` receipt.
     "access_witness_path": None,
+    # Issue #6314 -- the three keys ``_reset_partial_save_state`` owns:
+    #
+    # ``pre_save_hook``: registered by a stage that mutates the router and the
+    # placement IN PLACE while it works (the placement-delta feedback loop).
+    # ``_save_partial_results`` calls it first; it puts the router back in its
+    # last accepted state and returns ``(info, placement_text | None)``.
+    "pre_save_hook": None,
+    # ``placement_text``: the board text the router's copper was routed
+    # against, when that is no longer ``pcb_path``'s (a placement delta was
+    # kept).  Held in memory rather than as a path on purpose: the only file
+    # that carries the moved placement is ``<output>``, which the normal save
+    # path later overwrites with the ROUTED board.
+    "placement_text": None,
+    # ``partial_save_info``: what the last partial save wrote (which state,
+    # which placement), for the ``.timeout.json`` receipt.
+    "partial_save_info": None,
+    # Issue #6322: fixed input copper (``--preserve-existing``) the partial
+    # save must re-insert beside the router's.  The insertion strips every
+    # top-level segment/via from the placement text (#2976 -- which is also
+    # why a checkpoint already sitting on the staged ``<output>`` is never
+    # doubled), and ``router.to_sexp()`` does not emit preserved copper.  The
+    # route flows (layer-escalation, adaptive, combined and main) capture it
+    # once before any checkpoint can overwrite it (#6553).  ``None`` adds
+    # nothing.  ``source_routes`` is the same copper as ``Route`` objects so
+    # the save can drop what the router re-routed (#6626).
+    "source_copper": None,
+    "source_routes": None,
+    # Issue #6324: the exit code ``_handle_interrupt`` decided on (5 = partial
+    # saved, 130 = nothing saved), recorded BEFORE it raises ``SystemExit``.
+    # That raise is discarded when the signal lands inside a ``__del__``, so
+    # the route flows poll this at their stage boundaries
+    # (``_interrupt_requested_exit``) and a repeat interrupt reuses it instead
+    # of overwriting the first ``_partial`` board.
+    "interrupt_exit": None,
 }
 
 
+def _reset_partial_save_state() -> None:
+    """Forget the previous route flow's partial-save overrides (issue #6314).
+
+    Called wherever a flow (re)binds ``_interrupt_state["pcb_path"]``: a
+    moved-placement text or a restore hook belongs to one router and one
+    placement source, and must never be paired with another flow's copper.
+    """
+    _interrupt_state["pre_save_hook"] = None
+    _interrupt_state["placement_text"] = None
+    _interrupt_state["partial_save_info"] = None
+    _interrupt_state["source_copper"] = None
+    _interrupt_state["source_routes"] = None
+
+
+def _pcb_text(pcb: Any) -> str:
+    """The text ``PCB.save`` would write, without writing it (issue #6314)."""
+    from kicad_tools.sexp import serialize_sexp
+
+    return serialize_sexp(pcb._sexp, preserve_source=True)
+
+
 def _handle_interrupt(signum, frame):
-    """Handle Ctrl+C by setting the interrupted flag and saving partial results."""
+    """Handle Ctrl+C by setting the interrupted flag and saving partial results.
+
+    Issue #6324: the ``SystemExit`` raised here is the only thing that stops a
+    long native/A* stage promptly, so it stays -- but Python discards it when
+    the signal is delivered while a ``__del__`` runs.  The outcome is therefore
+    recorded in ``_interrupt_state`` first, and every route flow polls it at
+    its stage boundaries (``_interrupt_requested_exit``).  A repeat interrupt
+    after a completed save exits with the recorded code without saving again,
+    so it can no longer overwrite the first ``_partial`` board.
+    """
     # Adaptive/combined routing also installs this handler for SIGTERM.
     # A supervisor deadline must never promote its best-completed attempt.
     from .route_deadline import CONTROL_ENV, _deadline_signal
@@ -2578,6 +3200,10 @@ def _handle_interrupt(signum, frame):
     if signum == signal.SIGTERM and CONTROL_ENV in os.environ:
         _deadline_signal(signum, frame)
     _interrupt_state["interrupted"] = True
+    recorded = _interrupt_state.get("interrupt_exit")
+    if recorded is not None:
+        # Already saved (or found nothing to save) for this run: stop now.
+        sys.exit(recorded)
     if not _interrupt_state["quiet"]:
         print("\n\n⚠ Interrupt received! Saving partial results...")
     # Save partial results immediately
@@ -2585,7 +3211,68 @@ def _handle_interrupt(signum, frame):
     # Exit with code 5 to indicate SIGINT interruption with saved partial results.
     # This is distinct from code 2 (partial routing below threshold) so scripts can
     # distinguish user-interrupted from router-decided-partial.
-    sys.exit(5 if saved else 130)  # 130 = 128 + SIGINT (2)
+    code = 5 if saved else 130  # 130 = 128 + SIGINT (2)
+    _interrupt_state["interrupt_exit"] = code
+    sys.exit(code)
+
+
+def _reset_interrupt_outcome() -> None:
+    """Forget a previous run's interrupt (issue #6324).
+
+    Called wherever a flow resets ``_interrupt_state["interrupted"]``.
+    """
+    _interrupt_state["interrupted"] = False
+    _interrupt_state["interrupt_exit"] = None
+
+
+def _interrupt_pending() -> bool:
+    """Whether a Ctrl+C / SIGTERM / supervisor deadline has been delivered.
+
+    Cheap enough for a per-iteration check (issue #6324); used where a loop
+    has to unwind before it can act on :func:`_interrupt_requested_exit`.
+    """
+    from .route_deadline import deadline_fired
+
+    return bool(_interrupt_state["interrupted"]) or deadline_fired()
+
+
+def _interrupt_requested_exit() -> int | None:
+    """Stage-boundary poll for an interrupt whose exit was swallowed (#6324).
+
+    Returns ``None`` when no interrupt has been delivered.  Otherwise it ends
+    the run the way the signal handler would have, had its raise survived:
+
+    * a supervisor deadline re-raises ``RouteDeadlineExpired``, so the handler
+      in ``_in_process_main_impl`` writes the ``_partial`` (exactly once --
+      the swallowed raise never reached it) and exits ``TIMEOUT_EXIT``;
+    * a Ctrl+C / SIGTERM returns the exit code ``_handle_interrupt`` recorded
+      (5 when it saved the partial, 130 when it had nothing to save).
+
+    It never saves itself.  Callers return the code straight away, so no later
+    stage runs and the normal save never follows a reported interrupt.
+    """
+    from .route_deadline import RouteDeadlineExpired, deadline_fired
+
+    if deadline_fired():
+        raise RouteDeadlineExpired()
+    if not _interrupt_state["interrupted"]:
+        return None
+    recorded = _interrupt_state.get("interrupt_exit")
+    # Flag set but no recorded outcome: the handler was itself cut short
+    # before its save finished (#6325's window), so nothing is known saved.
+    return recorded if recorded is not None else 130
+
+
+def _stage_boundary(stage: str) -> int | None:
+    """Poll for a swallowed interrupt, then publish ``stage`` (issue #6324).
+
+    Returns the exit code to return when the run must stop; ``None`` means
+    carry on (and ``stage`` has been recorded for the deadline supervisor).
+    """
+    stop = _interrupt_requested_exit()
+    if stop is None:
+        record_stage(stage)
+    return stop
 
 
 # Issue #4559: per-invocation record of whether ``_main_impl`` seeded the
@@ -2660,12 +3347,69 @@ def _process_state_guard() -> "Iterator[None]":
         _interrupt_state["router"] = None
         _interrupt_state["output_path"] = None
         _interrupt_state["pcb_path"] = None
-        _interrupt_state["interrupted"] = False
+        _reset_interrupt_outcome()
         _interrupt_state["access_witness_path"] = None
+        _reset_partial_save_state()
+        # Issue #6324: a deadline delivered to this invocation is spent.
+        from .route_deadline import reset_deadline_state
+
+        reset_deadline_state()
+
+
+def _restore_best_trial(router: Any, info: dict[str, Any]) -> None:
+    """Put a multi-start run's best completed trial back on the router.
+
+    Issue #6343: ``--strategy monte-carlo`` / ``evolutionary`` hold their best
+    trial outside ``router.routes`` until the whole run finishes -- on the
+    default parallel path every trial runs in a worker process, and the
+    sequential path clears ``router.routes`` at the start of each trial.  An
+    interrupt mid-run therefore found nothing (or only the in-flight trial's
+    partial copper) to save.  The algorithms publish each new best on the
+    router as ``_best_trial_routes`` / ``_best_trial_meta`` and clear it when
+    the run ends normally, so a non-empty value means a run was cut short.
+
+    Cheap by design (it runs inside the five-second save grace): a list copy,
+    no grid rebuild -- serializing only needs ``router.routes``.  With no
+    completed best the live routes stay: on the sequential path that is the
+    in-progress trial; on the parallel path it is nothing (the in-progress
+    copper lives in a worker and cannot be reached).
+    """
+    best = getattr(router, "_best_trial_routes", None)
+    if not isinstance(best, list) or not best:
+        return
+    meta = getattr(router, "_best_trial_meta", None)
+    meta = meta if isinstance(meta, dict) else {}
+    router.routes = list(best)
+    # Issue #6364: never downgrade ``"inconsistent"`` (a failed
+    # ``pre_save_hook``) to a clean-looking ``"best-trial"``: the receipt must
+    # still flag a board whose copper and footprints may disagree.  The
+    # strategy/trial keys are recorded either way, so both facts are reported.
+    if info.get("snapshot_state") != "inconsistent":
+        info["snapshot_state"] = "best-trial"
+    info["snapshot_strategy"] = meta.get("strategy")
+    info["snapshot_trial"] = meta.get("trial")
 
 
 def _save_partial_results() -> bool:
     """Save partial routing results if interrupted.
+
+    The saved board is a placement text with the router's copper inserted, so
+    the two have to describe the same placement (issue #6314).  Normally the
+    placement is ``pcb_path`` and the copper is whatever the router holds.  Two
+    things change that, both owned by the placement-delta feedback loop:
+
+    * a ``pre_save_hook`` is registered while the loop runs.  It discards a
+      trial that is in flight -- unaccepted, only partly re-routed copper
+      routed against a moved footprint -- and reports whether the accepted
+      placement is still the source board's;
+    * ``placement_text`` holds the moved board once a delta has been kept.
+
+    What was saved is recorded in ``_interrupt_state["partial_save_info"]``
+    (``snapshot_state`` / ``snapshot_placement`` / ``snapshot_discarded_trial``)
+    for the ``.timeout.json`` receipt.  If the hook fails, the save still
+    happens and ``snapshot_state`` is ``"inconsistent"``: an interrupted run
+    should leave its copper behind, but must not pass a board whose copper and
+    footprints may disagree off as a good one.
 
     Returns:
         True if partial results were saved, False otherwise.
@@ -2677,6 +3421,38 @@ def _save_partial_results() -> bool:
 
     if router is None or output_path is None or pcb_path is None:
         return False
+    # Issue #6563: a --dry-run never writes files, even when interrupted.
+    if _interrupt_state.get("dry_run"):
+        return False
+
+    # Issue #6314: restore BEFORE looking at ``router.routes``.  A trial clears
+    # every route before it re-routes, so an interrupt early in one would
+    # otherwise find nothing to save while the accepted routes sat in the hook.
+    info: dict[str, Any] = {
+        "snapshot_state": "live",
+        "snapshot_placement": "source",
+        "snapshot_discarded_trial": None,
+    }
+    _interrupt_state["partial_save_info"] = info
+    placement_text = _interrupt_state.get("placement_text")
+    hook = _interrupt_state.get("pre_save_hook")
+    if hook is not None:
+        started = time.perf_counter()
+        try:
+            hook_info, hook_text = hook()
+            info.update(hook_info)
+            if hook_text is not None:
+                placement_text = hook_text
+        except Exception as e:
+            info["snapshot_state"] = "inconsistent"
+            info["snapshot_restore_error"] = f"{type(e).__name__}: {e}"
+            if not quiet:
+                print(f"  Warning: could not restore the last accepted routing state ({e})")
+                print("  The saved copper may not match the saved footprint positions.")
+        info["snapshot_restore_seconds"] = round(time.perf_counter() - started, 3)
+    if placement_text is not None:
+        info["snapshot_placement"] = "moved"
+    _restore_best_trial(router, info)
 
     if not router.routes:
         if not quiet:
@@ -2684,14 +3460,28 @@ def _save_partial_results() -> bool:
         return False
 
     try:
-        # Read original PCB content
-        original_content = pcb_path.read_text()
+        # The placement the copper was routed against: the source board, or
+        # the moved one when a placement delta has been kept (issue #6314).
+        original_content = placement_text if placement_text is not None else pcb_path.read_text()
 
         # Get partial route S-expressions.  Issue #4416: match the input
         # dialect so the interrupted save does not flip name-based copper to
         # numeric.  Detect from the content already in hand (avoid re-reading).
         name_only = bool(_NAME_ONLY_NET_RE.search(original_content))
         route_sexp = router.to_sexp(name_only=name_only)
+
+        # Issue #6322: ``_insert_sexp_before_closing`` below drops every
+        # segment/via already in the placement text (a checkpoint's copper,
+        # but also preserved input copper), so put the latter back.
+        source_copper = _dedupe_preserved_sexp(
+            _interrupt_state.get("source_copper") or "",
+            _interrupt_state.get("source_routes"),
+            router.routes,
+            stub_net_ids=getattr(router, "_stub_terminals", None) or (),
+            name_only=name_only,
+        )
+        if source_copper and route_sexp:
+            route_sexp = f"{route_sexp}\n\t{source_copper}"
 
         if route_sexp:
             # When the interrupt state holds a best *completed* attempt from
@@ -2726,6 +3516,32 @@ def _save_partial_results() -> bool:
             from .route_receipt import record_publication
 
             record_publication(save_path)
+
+            # Issue #6330: publish the snapshot facts NOW, before the slow
+            # access-witness sidecar below.  A hard kill during that write
+            # would otherwise leave this board beside a timeout receipt with
+            # ``snapshot_saved: false`` and no ``snapshot_state``.  A no-op
+            # without a supervisor control file.
+            from .route_deadline import record_stage
+
+            record_stage(
+                "partial-save",
+                snapshot_saved=True,
+                snapshot=str(save_path),
+                **info,
+            )
+
+            # Issue #6694: persist the routing plan for the board just saved
+            # (``<stem>_partial.routing_plan.json``), BEFORE the slow witness
+            # write below, so a deadline run keeps its most useful diagnostic
+            # without reaching the canonical save.  Pure JSON dump of an
+            # already-built plan (milliseconds); non-fatal on any failure.
+            with contextlib.suppress(Exception):
+                _write_routing_plan_sidecar(
+                    cast(Path, save_path),
+                    getattr(router, "routing_plan", None),
+                    quiet=True,
+                )
 
             # Issue #5639: the deadline / SIGINT save path is the ONLY save
             # path a deadline-killed run ever reaches -- the normal save path
@@ -3235,6 +4051,26 @@ def _write_routing_plan_sidecar(
         print(f"  {routing_plan.summary_line()}")
 
 
+def _write_search_failures_sidecar(output_path: Path, router: object | None) -> Path | None:
+    """Persist each net's last C++ search-failure reason (issue #6369).
+
+    ``net-status --why`` reads this so a geometric give-up (``no_path``,
+    ``via_via_blocked``, ``pairwise_blocked``) is not mislabelled
+    ``budget_starved``.  Without recorded failures any stale sidecar a
+    previous route left at the same path is removed (the writer unlinks on
+    ``{}``), so the sidecar only ever describes the run that wrote it.
+    """
+    from kicad_tools.router.stuck_classifier import write_search_failures_sidecar
+
+    pathfinder = getattr(router, "router", None)
+    by_id = getattr(pathfinder, "search_failures_by_net", None)
+    if not isinstance(by_id, dict) or not by_id:
+        return write_search_failures_sidecar(output_path, {})
+    names = getattr(router, "net_names", None) or {}
+    named = {names[nid]: code for nid, code in by_id.items() if names.get(nid)}
+    return write_search_failures_sidecar(output_path, named)
+
+
 def _write_access_witness_sidecar(
     output_path: Path,
     router: object | None,
@@ -3305,6 +4141,8 @@ def _write_access_witness_sidecar(
         witness_for_router,
     )
     from kicad_tools.router.pad_access_invariant import format_veto_report
+
+    _write_search_failures_sidecar(output_path, router)
 
     journal = getattr(router, "commit_journal", None)
     if journal is None or not len(journal):
@@ -3620,6 +4458,148 @@ class DRCConstraintPropagationError(ValueError):
     """Authored source constraints could not safely reach the routed output."""
 
 
+def _router_coupled_pairs(
+    output_path: Path, net_class_map: dict | None, router: object | None = None
+) -> list[tuple[str, str]] | None:
+    """The ``(P, N)`` pairs the router coupled-routes (Issue #6429).
+
+    :func:`~kicad_tools.router.diffpair_detection.coupled_engaged_pairs` over
+    the router's nets (or, without a router, the routed board's) and its
+    effective class map.  ``None`` when there is no class map, so the sidecar
+    writer keeps whatever an earlier route recorded -- the same contract as
+    ``net_class_map=None``.
+    """
+    if net_class_map is None:
+        return None
+    from kicad_tools.router.diffpair_detection import coupled_engaged_pairs
+
+    net_names = getattr(router, "net_names", None)
+    if not isinstance(net_names, dict) or not net_names:
+        from kicad_tools.manufacturers.project_generator import board_net_names
+
+        net_names = board_net_names(output_path) if Path(output_path).exists() else None
+    if not net_names:
+        return []
+    return coupled_engaged_pairs(
+        net_names, net_class_map, getattr(router, "kicad_diff_pair_groups", None)
+    )
+
+
+def _router_pair_gaps(
+    pairs: list[tuple[str, str]] | None,
+    net_class_map: dict | None,
+    router: object | None = None,
+) -> list[tuple[str, str, float]] | None:
+    """``(P, N, gap_mm)`` for each coupled pair, as the router laid it (Issue #6443).
+
+    The gap is the router's own :meth:`~kicad_tools.router.core.Autorouter._pair_gap_mm`
+    -- ``max(class intra-pair gap, manufacturer minimum, authored board
+    min_clearance)`` -- so the emitted ``diff_pair_gap`` rule and the routed
+    copper agree by construction.  ``None`` (no pair list) keeps whatever an
+    earlier route wrote.  The class is found by net name, then through the
+    class-name keyed view (:func:`~kicad_tools.router.diffpair_detection.build_synth_routing`),
+    the lookup the lattice uses.
+    """
+    if pairs is None or net_class_map is None:
+        return None
+    from kicad_tools.router.diffpair_detection import build_synth_routing
+    from kicad_tools.router.diffpair_routing import _floored_pair_gap
+
+    synth_routing, net_to_class = build_synth_routing(net_class_map)
+    gaps: list[tuple[str, str, float]] = []
+    for p, n in pairs:
+        nc = net_class_map.get(p) or net_class_map.get(n)
+        if nc is None:
+            nc = synth_routing.get(net_to_class.get(p, "")) or synth_routing.get(
+                net_to_class.get(n, "")
+            )
+        if nc is None or not hasattr(nc, "effective_intra_pair_clearance"):
+            continue
+        gaps.append((p, n, _floored_pair_gap(router, nc)))
+    return gaps
+
+
+def _router_pair_limits(
+    pairs: list[tuple[str, str]] | None,
+    net_class_map: dict | None,
+    board_path: Path,
+) -> list | None:
+    """Native pair limits for each coupled pair (Issue #6443, piece (b)).
+
+    Uncoupled length, skew and via count, resolved by the one resolver
+    ``kct check`` uses
+    (:func:`~kicad_tools.validate.diffpair_engagement.resolve_pair_thresholds`),
+    so the ``.kicad_dru`` rule and the kct finding quote the same limit and
+    severity.  The uncoupled limit needs the number of components on the net,
+    read from the routed board.  A pair whose class declares no uncoupled or
+    via limit gets no such rule; the skew rule is written for every pair (the
+    generic 0.5 mm default is an error in both engines).  ``None`` (no pair
+    list) keeps whatever an earlier route wrote.
+    """
+    if pairs is None or net_class_map is None:
+        return None
+    from kicad_tools.manufacturers.netclass_dru import PairLimits
+    from kicad_tools.validate.diffpair_engagement import resolve_pair_thresholds
+    from kicad_tools.validate.rules.diffpair_uncoupled_length import (
+        net_component_counts,
+        uncoupled_limit,
+    )
+
+    components: dict[str, int] = {}
+    if pairs:
+        try:
+            from kicad_tools.schema.pcb import PCB
+
+            components = net_component_counts(PCB.load(str(board_path)))
+        except Exception:  # limits stay valid without it; the count falls back to 1
+            components = {}
+    limits: list[PairLimits] = []
+    for p, n in pairs:
+        t = resolve_pair_thresholds(net_class_map, p, n)
+        count = max(components.get(p, 0), components.get(n, 0))
+        unc, _how = uncoupled_limit(t, count)
+        limits.append(
+            PairLimits(
+                p,
+                n,
+                uncoupled_mm=unc,
+                uncoupled_severity=t.uncoupled_severity,
+                skew_mm=t.skew_mm,
+                skew_severity=t.skew_severity,
+                max_vias=t.max_vias_per_net,
+                vias_severity=t.vias_severity,
+            )
+        )
+    return limits
+
+
+def _warn_unrecognised_coupled_pairs(pairs: list[tuple[str, str]] | None, quiet: bool) -> None:
+    """One warning per coupled pair KiCad does not recognise by name (#6429).
+
+    The router couples ``X_POS``/``X_NEG``, ``x_p``/``x_n`` and declared
+    pairs whatever their names; KiCad pairs nets only by its
+    ``MatchDpSuffix`` rule.  Their clearance exemption is carried explicitly
+    (``meta.kct_router_diff_pairs``), but KiCad's native diff-pair checks
+    (``diff_pair_gap`` / ``diff_pair_uncoupled``) will not see them.  A
+    warning, never a refusal: coupling stays on.
+    """
+    if quiet or not pairs:
+        return
+    from kicad_tools.manufacturers.netclass_dru import is_coupled_diff_pair
+
+    for p, n in pairs:
+        if is_coupled_diff_pair(p, n) or is_coupled_diff_pair(n, p):
+            continue
+        print(
+            f"  Warning: diff pair {p}/{n} is coupled-routed but KiCad does not "
+            "recognise it as a pair (KiCad pairs nets only by a trailing '+'/'-' "
+            "or uppercase 'P'/'N', ignoring trailing digits and '_'); its "
+            "intra-pair clearance exemption is recorded explicitly, but KiCad's "
+            "native diff_pair_gap / diff_pair_uncoupled checks will not see it. "
+            "A KiCad-recognised name (e.g. X_P/X_N) avoids this (issue #6429)."
+        )
+
+
 def _write_drc_constraint_sidecars(
     output_path: Path,
     manufacturer: str,
@@ -3627,6 +4607,9 @@ def _write_drc_constraint_sidecars(
     copper_oz: float = 1.0,
     quiet: bool = False,
     source_pcb_path: Path | None = None,
+    net_class_map: dict | None = None,
+    coupled_pairs: list[tuple[str, str]] | None = None,
+    pair_gaps: list[tuple[str, str, float]] | None = None,
 ) -> None:
     """Emit ``.kicad_pro`` + ``.kicad_dru`` next to the routed PCB.
 
@@ -3667,6 +4650,22 @@ def _write_drc_constraint_sidecars(
         quiet: If True, suppress the confirmation line.
         source_pcb_path: Original PCB for renamed outputs. Source propagation
             failures are blocking and printed even in quiet mode.
+        net_class_map: The router's effective ``{net: NetClassRouting}``
+            map -- the same map :func:`_write_net_class_map_sidecar`
+            serializes (Issue #6390).  Its classes stricter than ``Default``
+            are declared in the ``.kicad_pro`` with exact-name assignments
+            and matching ``.kicad_dru`` rules, so ``kicad-cli`` and
+            ``kct check`` enforce the clearances the router routed to.
+            ``None`` keeps whatever an earlier route declared.
+        coupled_pairs: The ``(P, N)`` pairs the router coupled-routes
+            (:func:`_router_coupled_pairs`, Issue #6429).  Those KiCad does
+            not recognise by name are recorded in the ``.kicad_pro`` and
+            exempted from the router class's clearance in both engines.
+            ``None`` keeps whatever an earlier route recorded.
+        pair_gaps: ``(P, N, gap_mm)`` per coupled pair, as the router laid
+            it (:func:`_router_pair_gaps`, Issue #6443).  Each pair KiCad
+            recognises by name gets a native ``diff_pair_gap`` rule.
+            ``None`` keeps whatever an earlier route wrote.
     """
     try:
         from kicad_tools.manufacturers import (
@@ -3708,6 +4707,14 @@ def _write_drc_constraint_sidecars(
             layers=layers,
             copper_oz=copper_oz,
             source_pcb_path=source_pcb_path,
+            router_net_classes=net_class_map,
+            router_coupled_pairs=coupled_pairs,
+            router_pair_gaps=pair_gaps,
+            router_pair_limits=(
+                _router_pair_limits(coupled_pairs, net_class_map, Path(output_path))
+                if pair_gaps is not None
+                else None
+            ),
         )
     except (ValueError, OSError, KeyError) as e:
         if source_pcb_path is not None:
@@ -3724,6 +4731,96 @@ def _write_drc_constraint_sidecars(
     record_constraint_publication(output_path, source_pcb_path)
     if not quiet and written:
         print(f"  DRC-constraint sidecars: {', '.join(str(p) for p in written)}")
+
+
+#: Issue #6425: internal ``DRCChecker`` rule id -> the kicad-cli violation
+#: type describing the same defect.  Only checks whose two reports locate the
+#: same item at the same point (a via's centre) are listed; clearance checks
+#: place their marker differently in each engine and are left alone.
+CROSS_ENGINE_TYPE_MAP: dict[str, str] = {
+    "dimension_via_drill": "drill_out_of_range",
+    "dimension_via_diameter": "via_diameter",
+    "dimension_annular_ring": "annular_width",
+}
+
+#: Issue #6425: how far apart (mm) the two engines' positions of one
+#: duplicated violation may be.
+CROSS_ENGINE_MATCH_TOLERANCE_MM = 0.01
+
+
+def count_cross_engine_duplicates(
+    internal_errors: "Sequence[Any]",
+    native_errors: "Sequence[Any]",
+    tolerance: float = CROSS_ENGINE_MATCH_TOLERANCE_MM,
+) -> int:
+    """How many violations the internal engine and kicad-cli BOTH report (Issue #6425).
+
+    An internal error (``rule_id``, ``location``) and a kicad-cli error
+    (``type_str``, located items) are one defect when
+    :data:`CROSS_ENGINE_TYPE_MAP` pairs their types and one of the kicad-cli
+    positions is within ``tolerance`` mm of the internal location.  Matching
+    is one-to-one, so each duplicated pair is subtracted once and every
+    unmatched violation of either engine still counts.
+    """
+    unmatched = list(native_errors)
+    duplicates = 0
+    for v in internal_errors:
+        want = CROSS_ENGINE_TYPE_MAP.get(getattr(v, "rule_id", ""))
+        loc = getattr(v, "location", None)
+        if want is None or loc is None:
+            continue
+        lx, ly = loc
+        for i, n in enumerate(unmatched):
+            if n.type_str != want:
+                continue
+            if any(
+                math.hypot(p.x_mm - lx, p.y_mm - ly) <= tolerance
+                for p in getattr(n, "locations", ())
+            ):
+                del unmatched[i]
+                duplicates += 1
+                break
+    return duplicates
+
+
+def _native_drc_failure_advice(geo) -> list[str]:
+    """Per-cause advice for a native kicad-cli DRC that did not complete (#6724).
+
+    Upgrade KiCad only for an unsupported option or a board kicad-cli could
+    not load; blame memory only for a SIGKILL (the OOM killer's signal); for
+    any other failure point at kicad-cli's own output (already in the note).
+    """
+    import signal
+
+    from kicad_tools.drc.geometric import (
+        REASON_LOAD_FAILED,
+        REASON_UNSUPPORTED,
+    )
+
+    reason = getattr(geo, "reason", None)
+    returncode = getattr(geo, "returncode", None)
+    if reason == REASON_UNSUPPORTED:
+        return [
+            "The board was NOT checked by KiCad: this kicad-cli rejected an option kct passed.",
+            "Upgrade KiCad (kicad-cli) to a version that supports it.",
+        ]
+    if reason == REASON_LOAD_FAILED:
+        return [
+            "The board was NOT checked by KiCad: kicad-cli could not load the board file.",
+            "It is possibly saved in a newer KiCad file format than this kicad-cli reads "
+            "(e.g. a KiCad 10 board on KiCad 8/9); upgrade KiCad (kicad-cli).",
+        ]
+    if isinstance(returncode, int) and returncode == -signal.SIGKILL:
+        return [
+            "The board was NOT checked by KiCad: kicad-cli was killed (SIGKILL), most "
+            "likely by the out-of-memory killer.",
+            "Re-run when kicad-cli has enough memory.",
+        ]
+    return [
+        "The board was NOT checked by KiCad; a failed kicad-cli run is never a clean result.",
+        "kicad-cli's error output is quoted above; run 'kicad-cli pcb drc' on the board to "
+        "reproduce the failure.",
+    ]
 
 
 def run_post_route_drc(
@@ -3909,6 +5006,12 @@ def run_post_route_drc(
     # traces).  Writing here -- the shared post-route DRC entry for every
     # route flow -- makes the verdict deterministic and independent of any
     # sidecars a prior run may have left behind.
+    _effective_class_map = dict(net_class_map or {})
+    _effective_class_map.update(loaded_net_class_map or {})
+    # Issue #6429: the pairs the router coupled, so both engines exempt their
+    # intra-pair gap even when KiCad does not recognise the names.
+    _coupled_pairs = _router_coupled_pairs(output_path, _effective_class_map or None, router)
+    _warn_unrecognised_coupled_pairs(_coupled_pairs, quiet)
     _write_drc_constraint_sidecars(
         output_path,
         manufacturer,
@@ -3916,6 +5019,9 @@ def run_post_route_drc(
         copper_oz=copper_oz,
         quiet=quiet,
         source_pcb_path=source_pcb_path,
+        net_class_map=_effective_class_map or None,
+        coupled_pairs=_coupled_pairs,
+        pair_gaps=_router_pair_gaps(_coupled_pairs, _effective_class_map or None, router),
     )
 
     # Issue #6273: the sidecars above are cheap and always written; the
@@ -3969,10 +5075,14 @@ def run_post_route_drc(
         else:
             geo = run_geometric_drc(output_path)
 
+        duplicates = 0
         if geo.ran and geo.error_count > 0:
             # Native DRC found blocking geometric violations -- fold them into
-            # the verdict so PASS requires BOTH engines clean.
-            error_count += geo.error_count
+            # the verdict so PASS requires BOTH engines clean.  Issue #6425:
+            # a violation BOTH engines report (the same undersized via seen as
+            # ``dimension_via_drill`` and ``drill_out_of_range``) counts once.
+            duplicates = count_cross_engine_duplicates(results.errors, geo.error_violations)
+            error_count += geo.error_count - duplicates
 
         # Issue #4178: under --strict-drc, "kicad-cli DRC did not actually
         # run" is a HARD FAILURE, not a soft NOTE.  A clean internal verdict
@@ -3981,10 +5091,48 @@ def run_post_route_drc(
         # (strict_drc=False) preserves the internal-only PASS for KiCad-less
         # environments.
         strict_drc_failed = strict_drc and not geo.ran
-        if strict_drc_failed:
+        # Issue #6724: kicad-cli was found but crashed, was killed (e.g. by
+        # the OOM killer) or left no usable report.  That is not a
+        # KiCad-less environment, so it fails the gate even without
+        # --strict-drc: the board was meant to be judged and was not.
+        native_drc_failed = getattr(geo, "failed", False) is True and not strict_drc_failed
+        if strict_drc_failed or native_drc_failed:
             error_count += 1
 
-        if not quiet and strict_drc_failed:
+        def _list_findings(shown_error_count: int) -> None:
+            # Show first few violations
+            shown = 0
+            for v in results.errors[:5]:
+                location = f" at ({v.location[0]:.2f}, {v.location[1]:.2f})" if v.location else ""
+                print(f"    - {v.rule_id}: {v.message}{location}")
+                shown += 1
+            if shown_error_count > 5:
+                print(f"    ... and {shown_error_count - 5} more errors")
+
+            if warning_count > 0 and shown < 5:
+                for v in results.warnings[: 5 - shown]:
+                    location = (
+                        f" at ({v.location[0]:.2f}, {v.location[1]:.2f})" if v.location else ""
+                    )
+                    print(f"    - {v.rule_id}: {v.message}{location}")
+                if warning_count > (5 - shown):
+                    print(f"    ... and {warning_count - (5 - shown)} more warnings")
+
+            print(f"\n  Run 'kct check {output_path} --mfr {manufacturer}' for full details")
+            if shown_error_count > 0:
+                print(f"  Run 'kct fix-drc {output_path}' to auto-repair clearance violations")
+
+        if not quiet and native_drc_failed:
+            print("\n--- DRC Validation ---")
+            print(f"  DRC FAILURE: native kicad-cli DRC did not complete ({geo.note}).")
+            for line in _native_drc_failure_advice(geo):
+                print(f"    {line}")
+            if results.error_count > 0 or warning_count > 0:
+                print(f"  Internal errors: {results.error_count}")
+                if warning_count > 0:
+                    print(f"  Internal warnings: {warning_count}")
+                _list_findings(results.error_count)
+        elif not quiet and strict_drc_failed:
             print("\n--- DRC Validation ---")
             reason_text = geo.note or "native geometric DRC did not run"
             print(f"  STRICT DRC FAILURE: native kicad-cli DRC did not run ({reason_text}).")
@@ -4026,32 +5174,15 @@ def run_post_route_drc(
                     print("           PASS withheld -- native KiCad DRC is authoritative.")
                 if error_count > 0:
                     print(f"  Errors:   {error_count}")
+                    if duplicates:
+                        print(
+                            f"    ({duplicates} reported by both the internal engine and "
+                            "kicad-cli, counted once)"
+                        )
                 if warning_count > 0:
                     print(f"  Warnings: {warning_count}")
 
-                # Show first few violations
-                shown = 0
-                for v in results.errors[:5]:
-                    location = (
-                        f" at ({v.location[0]:.2f}, {v.location[1]:.2f})" if v.location else ""
-                    )
-                    print(f"    - {v.rule_id}: {v.message}{location}")
-                    shown += 1
-                if error_count > 5:
-                    print(f"    ... and {error_count - 5} more errors")
-
-                if warning_count > 0 and shown < 5:
-                    for v in results.warnings[: 5 - shown]:
-                        location = (
-                            f" at ({v.location[0]:.2f}, {v.location[1]:.2f})" if v.location else ""
-                        )
-                        print(f"    - {v.rule_id}: {v.message}{location}")
-                    if warning_count > (5 - shown):
-                        print(f"    ... and {warning_count - (5 - shown)} more warnings")
-
-                print(f"\n  Run 'kct check {output_path} --mfr {manufacturer}' for full details")
-                if error_count > 0:
-                    print(f"  Run 'kct fix-drc {output_path}' to auto-repair clearance violations")
+                _list_findings(error_count)
 
         return error_count, warning_count
 
@@ -4436,6 +5567,36 @@ def _run_placement_feedback(
     # still gets telemetry -- just without the noisy per-iteration detail.
     loop_verbose = (not quiet) and bool(getattr(args, "verbose", False))
 
+    # Issue #6321: every iteration clears all routes and re-routes, while the
+    # loop's best result waits in a snapshot.  A deadline or Ctrl+C that saves
+    # mid-iteration must save that best state, not the half-finished re-route,
+    # so register a ``pre_save_hook`` that puts it back -- only for the router
+    # the partial save will serialize (an escalation flow may run this loop on
+    # another one).  This loop never moves the router's pads and never writes
+    # the board, so the copper still belongs to ``pcb_path``: no placement
+    # text.  As in ``_run_placement_delta_feedback`` the hook is NOT cleared in
+    # a ``finally``: a deadline unwinds through here (``RouteDeadlineExpired``
+    # is a ``BaseException``) BEFORE the save runs.
+    # A hook some earlier stage left registered (none does today) is chained,
+    # not dropped, and put back afterwards.
+    owns_partial_save = _interrupt_state.get("router") is router
+    previous_hook = _interrupt_state.get("pre_save_hook") if owns_partial_save else None
+    loops: list[Any] = []
+
+    def _restore_best_for_partial_save() -> tuple[dict[str, Any], str | None]:
+        hook_info, hook_text = previous_hook() if previous_hook is not None else ({}, None)
+        if loops and loops[0].restore_best_for_partial_save():
+            hook_info = {
+                **hook_info,
+                "snapshot_state": "best-trial",
+                "snapshot_strategy": "placement-feedback",
+                "snapshot_trial": loops[0].best_iteration,
+            }
+        return hook_info, hook_text
+
+    if owns_partial_save:
+        _interrupt_state["pre_save_hook"] = _restore_best_for_partial_save
+
     try:
         result = router.route_with_placement_feedback(
             pcb=pcb,
@@ -4448,11 +5609,23 @@ def _run_placement_feedback(
             per_net_timeout=per_net_timeout,
             stagnation_patience=stagnation_patience,
             outer_timeout=outer_timeout,
+            # Issue #6324: stop between iterations once an interrupt landed.
+            stop_requested=_interrupt_pending,
+            # Issue #6321: reach the loop so a partial save can restore its
+            # best routes first.
+            loop_observer=loops.append,
         )
     except Exception as exc:
+        if owns_partial_save:
+            _interrupt_state["pre_save_hook"] = previous_hook
         if not quiet:
             print(f"  Warning: placement feedback failed ({exc}); keeping initial routes")
         return None
+
+    # The loop has returned with its best state restored (grid included), so
+    # nothing is in flight; later stages own ``router.routes`` from here.
+    if owns_partial_save:
+        _interrupt_state["pre_save_hook"] = previous_hook
 
     if not quiet:
         print(f"  Feedback iterations: {result.iterations}")
@@ -4641,6 +5814,27 @@ def _run_placement_delta_feedback(
     placement source.  Without this, the saved artifact would pair moved-pad
     copper with the original footprint positions -- copper to nowhere.
 
+    Interrupted runs (issue #6314): the same hazard applies to the PARTIAL
+    save a deadline or Ctrl+C triggers, in two ways.  While a trial is being
+    probed the router holds unaccepted, partly re-routed copper for a moved
+    footprint; and once a delta is kept, the placement the copper belongs to is
+    no longer ``pcb_path``.  So while the loop runs a ``pre_save_hook`` is
+    registered that restores the last accepted state and hands the save the
+    live board's text, and after a kept delta that text is left in
+    ``_interrupt_state["placement_text"]`` for every later stage's save.  The
+    hook is deliberately NOT removed in a ``finally``: a deadline unwinds
+    through this function (``RouteDeadlineExpired`` is a ``BaseException``)
+    BEFORE the save runs, and Ctrl+C saves inside the signal handler with
+    nothing unwound at all.  Nothing here writes ``output_path`` early --
+    the deadline supervisor would quarantine it as the run's checkpoint.
+
+    The hook rewinds LIVE state, which is only safe if the trial it rewound
+    never resumes.  The Ctrl+C handler cannot promise that (its ``SystemExit``
+    is discarded when the signal lands in a destructor, #6324), so the loop
+    checks for a trial discarded underneath it, finishes the undo with a grid
+    rebuild, keeps nothing from it and stops (``exit_reason``
+    ``pd_interrupted``).
+
     Args:
         router: The ``Autorouter`` whose state the loop mutates in place.
         pcb_path: Path to the PCB the routing pass read (already staged).
@@ -4737,6 +5931,31 @@ def _run_placement_delta_feedback(
     with contextlib.suppress(OSError):
         delta_path.parent.mkdir(parents=True, exist_ok=True)
 
+    # Issue #6314: only speak for the router the partial save will serialize.
+    # (An escalation flow can run this loop on a router that is not the one
+    # pinned in ``_interrupt_state``; that save must be left alone.)
+    owns_partial_save = _interrupt_state.get("router") is router
+    loops: list[Any] = []
+
+    def _restore_for_partial_save(
+        rebuild_grid: bool = False,
+    ) -> tuple[dict[str, Any], str | None]:
+        if not loops:
+            return {}, None
+        loop = loops[0]
+        trial = loop.trial_in_flight
+        restored = loop.restore_last_accepted(rebuild_grid=rebuild_grid)
+        hook_info: dict[str, Any] = {}
+        if restored:
+            hook_info["snapshot_state"] = "last-accepted"
+            hook_info["snapshot_discarded_trial"] = f"{trial.target_ref} {trial.kind}"
+        # With a delta kept, the accepted copper belongs to the live board,
+        # not to ``pcb_path``.  Serialize it here, in memory.
+        return hook_info, (_pcb_text(pcb) if loop.accepted_deltas else None)
+
+    if owns_partial_save:
+        _interrupt_state["pre_save_hook"] = _restore_for_partial_save
+
     try:
         result = router.route_with_placement_delta_feedback(
             pcb=pcb,
@@ -4758,14 +5977,67 @@ def _run_placement_delta_feedback(
             # (--placement-delta-feedback default off), so the default `kct
             # route` path stays byte-identical.
             net_class_map=getattr(args, "_loaded_net_class_map", None),
+            # Issue #6314: reach the loop so an interrupted run can restore
+            # its last accepted state before saving.
+            loop_observer=loops.append,
         )
     except Exception as exc:
+        # The loop died mid-flight and the run carries on, so the state has to
+        # be one the run can stand behind (issue #6314): undo the trial that
+        # was in flight -- routes, pads, placement AND grid, since the stages
+        # after this read it -- and keep whatever was accepted before it.
+        result = None
+        applied = []
+        restore_error: Exception | None = None
+        try:
+            _restore_for_partial_save(rebuild_grid=True)
+            if loops:
+                applied = list(loops[0].accepted_deltas)
+        except Exception as restore_exc:
+            restore_error = restore_exc
         if not quiet:
-            print(f"  Warning: placement-delta feedback failed ({exc}); keeping initial routes")
-        return None
+            kept = f"the {len(applied)} delta(s) kept before it" if applied else "initial routes"
+            print(f"  Warning: placement-delta feedback failed ({exc}); keeping {kept}")
+            if restore_error is not None:
+                print(
+                    f"  Warning: could not restore the last accepted state ({restore_error}); "
+                    "routes may not match the placement"
+                )
 
-    applied = list(getattr(result, "applied_deltas", []))
-    if not quiet:
+    if result is not None:
+        applied = list(getattr(result, "applied_deltas", []))
+
+    # The loop is over, so nothing is in flight and the hook has nothing left
+    # to restore.  (A deadline never gets here -- see the docstring.  A Ctrl+C
+    # normally does not either, but one whose ``SystemExit`` Python discarded
+    # does, #6324: the loop has then already thrown away the trial the save
+    # rewound and stopped, so ``applied`` is still only what was accepted.)
+    # But with a delta kept, the router's copper now belongs to the
+    # MOVED board, and a partial save in ANY later stage (optimize, DRC nudge,
+    # ...) must read its footprints from it.  Hand that over BEFORE retiring
+    # the hook, so no instant exists in which neither covers the save.
+    if owns_partial_save:
+        if applied:
+            try:
+                _interrupt_state["placement_text"] = _pcb_text(pcb)
+                _interrupt_state["pre_save_hook"] = None
+            except Exception as exc:
+                if not quiet:
+                    print(f"  Warning: could not snapshot the moved placement ({exc})")
+
+                # The router's copper belongs to the moved board but no text
+                # for it exists.  Leave a hook that retries the serialization
+                # at save time; if that fails too it raises, and the save
+                # records ``snapshot_state: inconsistent`` rather than
+                # presenting the source placement as a valid pairing.
+                def _retry_moved_placement() -> tuple[dict[str, Any], str | None]:
+                    return {}, _pcb_text(pcb)
+
+                _interrupt_state["pre_save_hook"] = _retry_moved_placement
+        else:
+            _interrupt_state["pre_save_hook"] = None
+
+    if not quiet and result is not None:
         print(f"  Feedback iterations: {result.iterations}")
         print(f"  Exit reason:        {getattr(result, 'exit_reason', 'n/a')}")
         print(f"  Deltas proposed:    {len(getattr(result, 'proposed_deltas', []))}")
@@ -4787,6 +6059,14 @@ def _run_placement_delta_feedback(
             strict=False,
         ):
             print(f"    skipped: {delta.target_ref} {delta.kind} -- {reason}")
+        # Issue #6314: an interrupt saved partial results mid-trial but the
+        # process did not stop (#6324).  The loop discarded that trial.
+        interrupted = getattr(result, "interrupted_delta", None)
+        if interrupted is not None:
+            print(
+                f"    interrupted: {interrupted.target_ref} {interrupted.kind} "
+                f"(net {interrupted.net_name}) -- trial discarded by a partial save; not kept"
+            )
         print(f"  Final failed nets:  {len(result.failed_nets)}")
         print(f"  Placement delta saved to: {delta_path}")
 
@@ -5091,6 +6371,8 @@ def _fill_zones_after_route(
                 return
             # Use the same propagated source/fabrication constraints as DRC,
             # before native filling can bake a weaker default into the output.
+            class_map = _pour_closer_net_class_map(router, args)
+            coupled_pairs = _router_coupled_pairs(output_path, class_map, router)
             _write_drc_constraint_sidecars(
                 output_path,
                 args.manufacturer,
@@ -5098,6 +6380,9 @@ def _fill_zones_after_route(
                 copper_oz=float(getattr(args, "copper_oz", 1.0) or 1.0),
                 quiet=quiet,
                 source_pcb_path=Path(args.pcb),
+                net_class_map=class_map,
+                coupled_pairs=coupled_pairs,
+                pair_gaps=_router_pair_gaps(coupled_pairs, class_map, router),
             )
             fill_around_fixed_copper(output_path, disposition.preserve_copper_nets)
             if not quiet:
@@ -5164,6 +6449,8 @@ def _fill_zones_after_route(
         and getattr(args, "pcb", None)
         and getattr(args, "manufacturer", None)
     ):
+        class_map = _pour_closer_net_class_map(router, args)
+        coupled_pairs = _router_coupled_pairs(output_path, class_map, router)
         _write_drc_constraint_sidecars(
             output_path,
             args.manufacturer,
@@ -5171,6 +6458,9 @@ def _fill_zones_after_route(
             copper_oz=float(getattr(args, "copper_oz", 1.0) or 1.0),
             quiet=True,
             source_pcb_path=Path(args.pcb),
+            net_class_map=class_map,
+            coupled_pairs=coupled_pairs,
+            pair_gaps=_router_pair_gaps(coupled_pairs, class_map, router),
         )
 
     _fill_started = time.monotonic()
@@ -5427,7 +6717,7 @@ def _print_power_stall_suggestions(
     print("Suggestions:")
     print(f'  1. Add copper zones for power nets:  --power-nets "{pour_arg}"')
     print("  2. Increase layer count:              --layers 4 (or --max-layers 6)")
-    print(f"  3. Manual routing in KiCad for the {len(stalled_nets)} remaining net(s)")
+    print(f"  3. Diagnose the {len(stalled_nets)} remaining net(s):       kct net-status --why")
     print()
 
 
@@ -5456,13 +6746,24 @@ def _stage_input_for_auto_pour(pcb_path: Path, output_path: Path) -> Path:
     See: issue #2548 — ``kct route`` should not modify INPUT when output
     differs.  Mirrors the ``shutil.copy2`` pattern in ``runner.py``.
     """
+    # Record the input copper baseline on both branches (issue #6531): an
+    # in-place run must not inherit a stale entry from an earlier run that
+    # targeted the same output path in this process, and it needs a baseline
+    # of its own taken before any checkpoint overwrites the file.
+    try:
+        _, in_segs, in_vias = _strip_route_blocks(pcb_path.read_text())
+        _INPUT_COPPER_BASELINE[_baseline_key(output_path)] = (in_segs, in_vias)
+    except (OSError, UnicodeDecodeError):
+        _INPUT_COPPER_BASELINE.pop(_baseline_key(output_path), None)
     if pcb_path.resolve() == output_path.resolve():
         return pcb_path
     shutil.copy2(pcb_path, output_path)
     return output_path
 
 
-def _cleanup_stale_layer_artifacts(output_path: Path, quiet: bool = False) -> list[Path]:
+def _cleanup_stale_layer_artifacts(
+    output_path: Path, quiet: bool = False, dry_run: bool = False
+) -> list[Path]:
     """Remove any stale ``<stem>_<N>layer.kicad_pcb`` siblings of *output_path*.
 
     The auto-layers escalation paths rename the output to include the layer
@@ -5481,12 +6782,16 @@ def _cleanup_stale_layer_artifacts(output_path: Path, quiet: bool = False) -> li
             the route command was asked to write.  Stale ``_4layer`` and
             ``_6layer`` siblings of this path's stem are removed.
         quiet: Suppress informational output.
+        dry_run: Delete nothing (issue #6563: ``--dry-run`` must not touch
+            the user's files).
 
     Returns:
         List of paths that were actually removed.  Useful for tests
         and verbose logging.
     """
     removed: list[Path] = []
+    if dry_run:
+        return removed
     # Accept str or Path -- the escalation entry points are sometimes
     # passed string paths in tests.
     output_path = Path(output_path)
@@ -5958,6 +7263,12 @@ def _apply_escape_corridor_reservation(router: "Autorouter", args) -> None:
     """
     if getattr(args, "escape_corridor_reservation", False):
         router.enable_escape_corridor_reservation = True
+    # Issue #6352 (EXPERIMENTAL): the hidden --escape-corridor-assignment flow
+    # selects the joint min-cost-flow planner strategy and implies the
+    # reservation itself.  "greedy" (default) leaves the router untouched.
+    if getattr(args, "escape_corridor_assignment", "greedy") == "flow":
+        router.enable_escape_corridor_reservation = True
+        router.escape_corridor_assignment = "flow"
 
 
 def _apply_pad_access_invariant(router: "Autorouter", args) -> None:
@@ -5973,6 +7284,104 @@ def _apply_pad_access_invariant(router: "Autorouter", args) -> None:
     """
     if getattr(args, "no_pad_access_invariant", False):
         router.enable_pad_access_invariant = False
+
+
+def _apply_plane_via_reservation(
+    router: "Autorouter", args, pcb_path: "Path | str", *, quiet: bool = False
+) -> None:
+    """Hold a via site open for each pour-net SMD pad before routing (#6401).
+
+    The nets ``kct route`` auto-skips as pours are connected only after
+    routing, by the zone fill and the KiCad-oracle stitch/link pass.  Nothing
+    reserved room for that connection, so on boards 03/04/05 (issue #6388)
+    signal copper took every legal via site around a fine-pitch IC's pour
+    pin and the oracle could only fail.  This reserves one legal site plus
+    its stub per eligible pad on the pre-route board, for both engines (see
+    :func:`kicad_tools.router.plane_via_sites.reserve_router_plane_via_sites`).
+
+    The served nets are the auto-skipped nets that carry a zone (the same
+    ``find_all_plane_nets`` set the oracle stage closes); ``route_via=
+    "manual"`` nets are not pours and are left alone.  Off with
+    ``--no-plane-via-reservation``, and skipped when a placement disposition
+    preserves copper (the oracle stage does not run there either).  Never
+    raises: a failure is a warning and routing proceeds unreserved.
+    """
+    if getattr(args, "no_plane_via_reservation", False):
+        return
+    names = set(getattr(args, "_auto_skipped_net_names", None) or ())
+    if not names:
+        return
+    disposition = getattr(args, "_placement_disposition", None)
+    if disposition is not None and getattr(disposition, "preserve_copper_nets", None):
+        return
+    try:
+        from kicad_tools.cli.stitch_cmd import find_all_plane_nets
+        from kicad_tools.core.sexp_file import load_pcb
+        from kicad_tools.router.plane_via_sites import (
+            plane_fills_from_pcb,
+            reserve_router_plane_via_sites,
+        )
+
+        pcb = load_pcb(Path(pcb_path))
+        nets = sorted(names & set(find_all_plane_nets(pcb)))
+        if not nets:
+            return
+        reservation = reserve_router_plane_via_sites(
+            router,
+            nets,
+            via_diameter=getattr(args, "via_diameter", None),
+            via_drill=getattr(args, "via_drill", None),
+            clearance=getattr(args, "clearance", None),
+            # Issue #6589: keep foreign vias / plane-layer tracks outside the
+            # pour's fill pullback, so the pour still covers each site.
+            plane_fills=plane_fills_from_pcb(pcb, nets),
+        )
+    except Exception as exc:  # advisory: never fail a route over a reservation
+        logger.warning("Plane-via reservation skipped: %s", exc)
+        return
+    args._plane_via_reservation = reservation
+    links = getattr(reservation, "array_links", None) or []
+    if links and not quiet:
+        # Issue #6673: same-pour ball clusters of an area array on a layer
+        # their pour floods are kept whole on the lattice engine.
+        link_nets = sorted({link.net_name for link in links})
+        print(
+            f"  Area-array pour continuity (#6673): {len(links)} protected link(s) "
+            f"on {', '.join(link_nets)}"
+        )
+        released = getattr(reservation, "array_links_released", None) or []
+        if released:
+            print(f"    links dropped to keep an exit for: {', '.join(released)}")
+    if quiet or not (reservation.sites or reservation.unreserved):
+        return
+    served = sum(len(site.pads) for site in reservation.sites)
+    print(
+        f"  Plane-via reservation (#6401): {len(reservation.sites)} site(s) for "
+        f"{served} pour pad(s) on {', '.join(nets)}"
+    )
+    if reservation.unreserved:
+        print(f"    no legal pre-route site: {', '.join(reservation.unreserved)}")
+    # Issue #6413: one-sided escape blocks the planner took as a last resort.
+    blocked = getattr(reservation, "blocked_escapes", None) or []
+    if blocked:
+        pairs = ", ".join(f"{pin} (by {pad})" for pin, pad in blocked)
+        print(f"    signal escape blocked on one side: {pairs}")
+
+
+def _reserved_plane_via_sites(args) -> "dict[str, list[tuple[float, float]]] | None":
+    """``REF.PAD`` -> reserved via sites from :func:`_apply_plane_via_reservation`.
+
+    Handed to the pour oracle's weld (Issue #6401), which tries these sites
+    before its own offsets.  ``None`` when nothing was reserved.
+    """
+    reservation = getattr(args, "_plane_via_reservation", None)
+    if reservation is None or not getattr(reservation, "sites", None):
+        return None
+    out: dict[str, list[tuple[float, float]]] = {}
+    for site in reservation.sites:
+        for pad in site.pads:
+            out.setdefault(pad, []).append((float(site.x), float(site.y)))
+    return out
 
 
 def _targeted_ripup_budget(args) -> int:
@@ -6154,6 +7563,12 @@ def _apply_net_class_map_sidecar(router: "Autorouter", args, quiet: bool = False
         # ``self.net_class_map.get(net_name)`` finds them at routing time.
         for board_net, user_key in resolution.resolved.items():
             router.net_class_map[board_net] = loaded[user_key]
+        # Issue #6427: a loaded class is declared in the routed sidecars too,
+        # so it must bind foreign copper (max of both classes), not just the
+        # net's own copper.
+        from kicad_tools.router.class_clearance_floors import refresh_router_class_floors
+
+        refresh_router_class_floors(router)
 
         if getattr(router, "placement_disposition", None) is not None:
             from dataclasses import replace
@@ -6977,7 +8392,9 @@ def _make_pour_oracle(args):
     return oracle
 
 
-def _complete_pour_nets_with_oracle(output_path: Path, *, args, quiet: bool = False) -> int:
+def _complete_pour_nets_with_oracle(
+    output_path: Path, *, args, quiet: bool = False, router=None
+) -> int:
     """Run the oracle stage, then re-canonicalize the board's UUIDs (Issue #6052).
 
     Every route flow calls this right after :func:`_fill_zones_after_route`,
@@ -6988,13 +8405,26 @@ def _complete_pour_nets_with_oracle(output_path: Path, *, args, quiet: bool = Fa
     touches UUIDs and the order of top-level copper, never geometry.
     """
     try:
-        return _run_pour_oracle_stage(output_path, args=args, quiet=quiet)
+        return _run_pour_oracle_stage(output_path, args=args, quiet=quiet, router=router)
     finally:
         if not getattr(args, "dry_run", False) and Path(output_path).exists():
             _canonicalize_routed_uuids(output_path, args=args)
 
 
-def _run_pour_oracle_stage(output_path: Path, *, args, quiet: bool = False) -> int:
+def _pour_closer_net_class_map(router, args) -> dict | None:
+    """The router's effective net-class map for the pour closer (Issue #6374).
+
+    ``router.net_class_map`` with the user's loaded ``--net-class-map``
+    (``args._loaded_net_class_map``) merged over it -- the same map
+    :func:`_write_net_class_map_sidecar` serializes, so the sidecar and the
+    closer cannot disagree.  ``None`` when neither carries an entry.
+    """
+    effective = dict(getattr(router, "net_class_map", None) or {})
+    effective.update(getattr(args, "_loaded_net_class_map", None) or {})
+    return effective or None
+
+
+def _run_pour_oracle_stage(output_path: Path, *, args, quiet: bool = False, router=None) -> int:
     """Run the KiCad-oracle completion loop on the pour nets (Issue #5785).
 
     Called right after the zone fill.  Asks ``kicad-cli pcb drc
@@ -7009,12 +8439,18 @@ def _run_pour_oracle_stage(output_path: Path, *, args, quiet: bool = False) -> i
     so the run exits :data:`EXIT_UNVERIFIED` rather than passing the gate.
     """
     from kicad_tools.router.completion_verdict import allow_stranded_pour_pads, oracle_rounds
-    from kicad_tools.router.oracle_completion import DEFAULT_ORACLE_ROUNDS, STOP_DEADLINE
+    from kicad_tools.router.oracle_completion import (
+        DEFAULT_ORACLE_ROUNDS,
+        STOP_DEADLINE,
+        STOP_NOT_RUN,
+    )
 
     args._stranded_pour_links = 0
     # Issue #6273: True when the check was cut by --timeout before KiCad
     # reported anything -- the count above is then unknown, not 0.
     args._stranded_pour_unknown = False
+    # Issue #6724: why the check is unknown when kicad-cli failed (not --timeout).
+    args._stranded_pour_failure = None
     args._allow_stranded_pour_pads = allow_stranded_pour_pads(
         bool(getattr(args, "allow_stranded_pour_pads", False))
     )
@@ -7052,6 +8488,10 @@ def _run_pour_oracle_stage(output_path: Path, *, args, quiet: bool = False) -> i
             clearance=float(getattr(args, "clearance", 0.2)),
             trace_width=float(getattr(args, "trace_width", 0.2)),
             refill=refill,
+            # Issue #6374: new pour copper keeps each net's class clearance.
+            net_class_map=_pour_closer_net_class_map(router, args),
+            # Issue #6401: weld at the via sites reserved before routing.
+            preferred_sites=_reserved_plane_via_sites(args),
         )
         if not quiet:
             print("\n--- KiCad Oracle Completion (pour nets) ---")
@@ -7066,6 +8506,12 @@ def _run_pour_oracle_stage(output_path: Path, *, args, quiet: bool = False) -> i
             # cannot finish (a killed run loses its saved board).
             time_left=lambda: _finishing_time_left(args),
             call_cost_estimate=float(getattr(args, "_zone_fill_seconds", 0.0) or 0.0),
+            # Issue #6428: a round may not open a link on any net; blame the
+            # closer copper that cut the pour whose link count rose.
+            cut_attributor=closer.cut_culprits,
+            # Issue #6425: a closer via at the declared size is not a DRC
+            # regression merely for being below the project's via floors.
+            declared_via=(closer.via_size, closer.via_drill),
         )
     except Exception as exc:  # advisory machinery must never fail a route
         logger.warning("Oracle completion skipped: %s", exc)
@@ -7073,6 +8519,16 @@ def _run_pour_oracle_stage(output_path: Path, *, args, quiet: bool = False) -> i
     if not result.ran:
         if not quiet:
             print(f"  skipped: {result.note or 'kicad-cli DRC did not run'}")
+        if result.stop_reason == STOP_NOT_RUN:
+            # Issue #6724: kicad-cli is installed (checked above) but its
+            # first DRC crashed, was killed or timed out, so the stranded-pad
+            # count was never measured.  Reporting 0 would pass the #5785
+            # gate on a board KiCad may call unconnected (boards 03/04 printed
+            # a false "0 -> 0 (converged)" after an OOM kill).
+            args._stranded_pour_unknown = True
+            args._stranded_pour_failure = result.note or "kicad-cli DRC did not run"
+            if not quiet:
+                print("  stranded-pour status UNKNOWN -- the run is reported unverified")
         if result.stop_reason == STOP_DEADLINE:
             # Issue #6273: the deadline, not KiCad, ended the check, so the
             # stranded-pad count was never measured.  0 would pass the #5785
@@ -7090,7 +8546,49 @@ def _run_pour_oracle_stage(output_path: Path, *, args, quiet: bool = False) -> i
         )
         for lk in result.final_link_details[:5]:
             print(f"    still unconnected: {lk.describe()}")
+            # Issue #6399: why the closer left it open (last attempt's notes).
+            for reason in _closer_reasons_for(lk, result.closer_notes):
+                print(f"      reason: {reason}")
+        # Issue #6374: a link closed below its class clearance is never silent.
+        for line in result.relaxed_links:
+            print(f"    RELAXED: {line}")
     return result.final_links
+
+
+def _closer_reasons_for(link, notes) -> list[str]:
+    """The closer notes (Issue #6399) that name ``link`` or one of its pads.
+
+    A note matches when it names the link (``describe()``, or its exact
+    withdrawn route key) or one of its pads as a whole ``REF.PAD`` token, so
+    ``U2.3`` does not pick up a note about ``U2.36``.
+    """
+    from kicad_tools.router.oracle_completion import ROUTE_VARIANTS, _route_key
+
+    # Issue #6412: one exact prefix per route variant (direct, ``#plane``,
+    # ``#island``).  Never a looser ``startswith(bare key)``: C1's key is a
+    # prefix of C10's, which is the bug #6403 fixed.
+    route_prefixes = tuple(_route_key(link, v) + ":" for v in ROUTE_VARIANTS)
+    pads = [
+        re.compile(rf"(?<![\w.]){re.escape(f'{end.ref}.{end.pad}')}(?![\w.])")
+        for end in (link.a, link.b)
+        if end.ref and end.pad
+    ]
+
+    def names(note: str) -> bool:
+        if link.describe() in note:
+            return True
+        if note.startswith(route_prefixes):
+            return True
+        return any(p.search(note) for p in pads)
+
+    hits = [n for n in notes if names(n)]
+    if hits or "pad" in (link.a.kind, link.b.kind):
+        return hits
+    # A pad-less link (KiCad's ``Zone <-> Zone`` for a floating island) names
+    # no pad, while the closer's notes name the pads it rebuilt the link from
+    # (``_cluster_links``): fall back to every note about the link's net.
+    net = re.compile(rf"(?:^|:){re.escape(link.net)}(?:[ :])")
+    return [n for n in notes if net.search(n)]
 
 
 def _print_stranded_pour_failure_banner(args, output_path) -> None:
@@ -7256,6 +8754,44 @@ def _print_input_clearance_findings(
         print(f"    ... and {len(violations) - 20} more")
 
 
+def _report_input_pad_overlaps(router, args, pcb_path, *, quiet: bool = False) -> None:
+    """Print a pre-route ``INPUT DEFECT`` block for overlapping pads (#6693).
+
+    Different-net pads whose copper already overlaps in the input board short
+    their nets before any routing happens, and any copper the router lands on
+    one of them touches the other.  Surfacing them up front tells the user the
+    post-route shorts against those pads are input defects, not routing
+    failures.  Report-only: exit codes are unchanged.  Printed once per run
+    (the escalation ladders reload the board per attempt).
+    """
+    if quiet or getattr(args, "_input_pad_overlaps_reported", False):
+        return
+    from kicad_tools.router.io import input_pad_overlaps, summarize_input_pad_overlaps
+
+    try:
+        overlaps = input_pad_overlaps(router)
+    except Exception:  # pragma: no cover - diagnostic only, never fatal
+        return
+    with contextlib.suppress(AttributeError):
+        args._input_pad_overlaps_reported = True
+    if not overlaps:
+        return
+    print("\n--- INPUT DEFECT: overlapping different-net pads ---")
+    print(
+        f"  {len(overlaps)} pair(s) of different-net pads already overlap in the input "
+        f"board -- these nets are shorted before routing:"
+    )
+    for line in summarize_input_pad_overlaps(overlaps):
+        print(f"    {line}")
+    for o in overlaps[:5]:
+        print(f"    e.g. {o.pad_a} ({o.net_a}) overlaps {o.pad_b} ({o.net_b})")
+    print(
+        "  Shorts against these pads are counted as pre-existing in the input board "
+        "(input defect), not caused by routing."
+    )
+    print(f"  Inspect: kct check {pcb_path} --only clearance  (clearance_pad_pad SHORT findings)")
+
+
 def _print_short_findings(shorts: "Sequence[ClearanceViolation]") -> None:
     """Report cross-net copper overlap explicitly (Issue #5862)."""
     from kicad_tools.router.io import describe_short, short_origin_summary
@@ -7294,6 +8830,8 @@ def _print_short_failure_banner(shorts: "Sequence[ClearanceViolation]", output_p
     listed in their own section.
     """
     from kicad_tools.router.io import (
+        ORIGIN_INPUT,
+        ORIGIN_INPUT_PAD_OVERLAP,
         describe_input_clearance,
         describe_short,
         short_origin_summary,
@@ -7316,12 +8854,20 @@ def _print_short_failure_banner(shorts: "Sequence[ClearanceViolation]", output_p
         print()
         print("Copper of different nets physically overlaps. KiCad DRC reports this")
         print("class as `shorting_items`; this board is NOT manufacturable as written.")
-        if any(v.is_input_defect for v in real_shorts):
+        if any(v.origin == ORIGIN_INPUT for v in real_shorts):
             # Issue #6229: an inherited short fails the run like a routing short
             # (the output is unmanufacturable either way), but the fix is in the
             # input board, not in the router's settings.
             print("Shorts marked 'pre-existing' were already in the input board and were")
             print("kept by --preserve-existing; fix or remove that copper in the input.")
+        if any(v.origin == ORIGIN_INPUT_PAD_OVERLAP for v in real_shorts):
+            # Issue #6693: the obstacle pad already overlaps a pad of the
+            # routed net in the input, so no copper placement can clear it.
+            print("Shorts marked 'pads ... already overlap' are against a pad whose copper")
+            print("already overlaps a different-net pad in the input board (e.g. a stale")
+            print("pad angle on a rotated footprint); no routing can clear them. Fix the")
+            print("pad geometry in the input; `kct check <pcb> --only clearance` lists the")
+            print("overlapping pads as `clearance_pad_pad` SHORT findings.")
     if near_misses:
         if real_shorts:
             print()
@@ -7714,6 +9260,14 @@ def _resolve_route_copper_oz(
     stackup_inner: float | None = None
     if not probe_stackup or (cli_outer is not None and cli_inner is not None):
         return (cli_outer, cli_inner)
+    # Issue #6561: the clearance floor (``_resolve_route_clearance``) and the
+    # trace-width floor (``_apply_manufacturer_trace_width_floor``) both need
+    # the board's stackup copper weight; parse the board once per run.
+    memo_key = (str(pcb_path), raw)
+    memo = getattr(args, "_route_copper_oz_memo", None)
+    if isinstance(memo, tuple) and len(memo) == 2 and memo[0] == memo_key:
+        cached: tuple[float | None, float | None] = memo[1]
+        return cached
     try:
         from kicad_tools.physics.stackup import Stackup
         from kicad_tools.schema.pcb import PCB
@@ -7724,10 +9278,39 @@ def _resolve_route_copper_oz(
     except Exception:  # noqa: BLE001 - never crash `route` on a stackup quirk
         stackup_outer = stackup_inner = None
 
-    return (
+    result = (
         cli_outer if cli_outer is not None else stackup_outer,
         cli_inner if cli_inner is not None else stackup_inner,
     )
+    with contextlib.suppress(AttributeError):  # read-only args stand-ins
+        args._route_copper_oz_memo = (memo_key, result)
+    return result
+
+
+def _resolve_route_clearance_floor(args, pcb_path) -> float | None:
+    """The stackup-aware fab clearance floor for this run (Issue #6561).
+
+    :func:`kicad_tools.router.mfr_limits.resolve_clearance` with the
+    effective copper layer count (``--layers`` or the board's stack) and
+    outer copper weight (``--copper`` > board stackup > profile default) --
+    the same ``<layers>layer_<oz>oz`` key ``kct check --mfr`` and the
+    emitted ``.kicad_dru`` use, so route's floor matches the fab rules it
+    writes instead of the layer-agnostic ``MfrLimits.min_clearance``.
+
+    A malformed ``--copper`` is ignored here (the profile default applies);
+    :func:`_apply_manufacturer_trace_width_floor` reports it and exits 1.
+    """
+    from kicad_tools.router.mfr_limits import resolve_clearance
+
+    manufacturer = getattr(args, "manufacturer", None)
+    if not manufacturer:
+        return None
+    layers = _effective_layer_count_for_rules(args, pcb_path)
+    try:
+        copper_outer, _ = _resolve_route_copper_oz(args, pcb_path, probe_stackup=True)
+    except ValueError:
+        copper_outer = None
+    return resolve_clearance(manufacturer, layers, copper_outer)
 
 
 def _sub_floor_net_class_widths(net_class_map, floor: float) -> list[tuple[str, float]]:
@@ -8018,6 +9601,7 @@ def _decide_route_clearance(
     manufacturer: str | None,
     explicit_manufacturer: bool,
     declared: "DeclaredClearanceRules | None" = None,
+    fab_floor_mm: float | None = None,
 ) -> tuple[float, str, str | None, str | None]:
     """Precedence core for :func:`_resolve_route_clearance`.
 
@@ -8042,6 +9626,11 @@ def _decide_route_clearance(
             on every invocation, including an explicit ``--clearance`` -- the
             explicit value still wins, but the resolver needs the declared
             rules to say so when it undercuts one.
+        fab_floor_mm: The stackup-aware fab floor
+            (:func:`_resolve_route_clearance_floor`, Issue #6561).  ``None``
+            falls back to the layer-agnostic
+            :func:`~kicad_tools.router.mfr_limits.resolve_clearance` of
+            ``manufacturer``.
 
     Returns:
         ``(value, source, banner, warning)``.  ``banner`` is ``None`` when no
@@ -8051,10 +9640,12 @@ def _decide_route_clearance(
     from kicad_tools.router.clearance_resolver import RuleSource, resolve_base_clearance
     from kicad_tools.router.mfr_limits import resolve_clearance
 
+    if fab_floor_mm is None:
+        fab_floor_mm = resolve_clearance(manufacturer)
     resolved = resolve_base_clearance(
         target_mm=clearance,
         declared=declared,
-        fab_floor_mm=resolve_clearance(manufacturer),
+        fab_floor_mm=fab_floor_mm,
         explicit_target=explicit_clearance,
         explicit_manufacturer=explicit_manufacturer,
         manufacturer=manufacturer,
@@ -8145,16 +9736,32 @@ def _resolve_route_clearance(args, pcb_path, argv=None, *, quiet: bool = False) 
         pcb_path, board_net_classes=_board_declared_net_classes(pcb_path)
     )
 
+    # Issue #6561: the fab floor for the board's actual stackup, stashed for
+    # the via resolver, the pair-gap floor (``DesignRules.mfr_clearance_floor``)
+    # and the relaxation ladder.
+    fab_floor = _resolve_route_clearance_floor(args, pcb_path)
+    args._mfr_clearance_floor = fab_floor
+    if fab_floor is not None and getattr(args, "min_clearance_floor", None) is None:
+        # ``get_relaxation_tiers`` clamps with ``max(min_clearance_floor,
+        # MfrLimits.min_clearance)``, so this can only RAISE the ladder floor
+        # (jlcpcb 2-layer 2oz: 0.127 -> 0.1524mm), never lower it -- the same
+        # contract #4700 gives ``--min-trace``.
+        args.min_clearance_floor = fab_floor
+
     value, source, banner, warning = _decide_route_clearance(
         clearance=float(getattr(args, "clearance", DEFAULT_ROUTE_CLEARANCE_MM)),
         explicit_clearance=explicit_clearance,
         manufacturer=getattr(args, "manufacturer", None),
         explicit_manufacturer=explicit_manufacturer,
         declared=declared,
+        fab_floor_mm=fab_floor,
     )
 
     args.clearance = value
     args._clearance_rule_source = source
+    # Issue #6443: the authored board minimum floors the coupled pair gap
+    # (``DesignRules.authored_min_clearance`` / ``DesignRules.pair_gap``).
+    args._authored_min_clearance = declared.project_min_clearance_mm
     if warning is not None:
         print(warning, file=sys.stderr)
     if banner is not None and not quiet:
@@ -8233,9 +9840,13 @@ def _resolve_route_via_clearance(
     if not hasattr(args, "_via_clearance_explicit"):
         args._via_clearance_explicit = getattr(args, "via_clearance", None)
     explicit = args._via_clearance_explicit
+    # Issue #6561: the stackup-aware floor ``_resolve_route_clearance`` stashed.
+    fab_floor = getattr(args, "_mfr_clearance_floor", None)
+    if fab_floor is None:
+        fab_floor = resolve_clearance(manufacturer)
     resolved = resolve_via_clearance(
         declared=declared,
-        fab_floor_mm=resolve_clearance(manufacturer),
+        fab_floor_mm=fab_floor,
         explicit_via_mm=float(explicit) if explicit is not None else None,
         explicit_manufacturer=explicit_manufacturer,
         manufacturer=manufacturer,
@@ -8535,6 +10146,12 @@ def _apply_analog_net_class(router: "Autorouter", args, quiet: bool = False) -> 
             continue
         router.net_class_map[name] = NET_CLASS_ANALOG
         applied.append(name)
+    if applied:
+        # Issue #6427: keep the per-net foreign-pair floors in step with the
+        # class map the routed sidecars declare.
+        from kicad_tools.router.class_clearance_floors import refresh_router_class_floors
+
+        refresh_router_class_floors(router)
 
     if not quiet and (applied or skipped_pour):
         from kicad_tools.cli.progress import flush_print
@@ -9061,6 +10678,34 @@ def _rung_dedup_fingerprint(
     )
 
 
+def _restores_interrupt_handlers(func: "Callable[..., int]") -> "Callable[..., int]":
+    """Put SIGINT/SIGTERM back as they were when ``func`` returns or raises.
+
+    Issue #6322: :func:`route_with_layer_escalation` installs
+    ``_handle_interrupt`` once its partial-save state is bound, and has dozens
+    of exits.  ``_process_state_guard`` would restore a leaked handler at the
+    outermost boundary, but the flow should not rely on that.
+    """
+
+    @functools.wraps(func)
+    def wrapper(*args: Any, **kwargs: Any) -> int:
+        saved: dict[signal.Signals, Any] = {}
+        for signum in (signal.SIGINT, signal.SIGTERM):
+            with contextlib.suppress(ValueError):  # not on the main thread
+                saved[signum] = signal.getsignal(signum)
+        try:
+            return func(*args, **kwargs)
+        finally:
+            for signum, handler in saved.items():
+                if handler is None:
+                    continue  # installed from C; cannot be reinstalled
+                with contextlib.suppress(ValueError):
+                    signal.signal(signum, handler)
+
+    return wrapper
+
+
+@_restores_interrupt_handlers
 def route_with_layer_escalation(
     pcb_path: Path,
     output_path: Path,
@@ -9070,6 +10715,12 @@ def route_with_layer_escalation(
     """Route a PCB with automatic layer escalation.
 
     Tries routing at 2, 4, and 6 layers until success or max is reached.
+
+    Issue #6322: this is the default ``kct route`` flow (``--auto-layers``), so
+    it binds the partial-save state the way the other escalation flows do --
+    a deadline or Ctrl+C saves ``<stem>_partial.kicad_pcb`` with the copper
+    routed so far.  The SIGINT/SIGTERM handlers it installs are restored on
+    every exit, including a raise (``_restores_interrupt_handlers``).
 
     Args:
         pcb_path: Path to input PCB file
@@ -9119,6 +10770,10 @@ def route_with_layer_escalation(
         # the routing cache so a --copper 2 run is never served a --copper 1
         # route.
         min_trace_width_floor=getattr(args, "_mfr_min_trace_floor", None),
+        # Issue #6443: the authored board minimum floors the pair gap.
+        authored_min_clearance=getattr(args, "_authored_min_clearance", None),
+        # Issue #6561: the stackup-aware fab floor for the pair gap.
+        mfr_clearance_floor=getattr(args, "_mfr_clearance_floor", None),
         # Issue #2891: forward escalation-in-progress flag so the escape
         # router demotes the #2880 ERROR log when an outer wrapper will
         # retry on a tier that supports via-in-pad.
@@ -9127,6 +10782,7 @@ def route_with_layer_escalation(
         # to a HARD constraint for the ampacity-free case (nets with a declared
         # ``target_ampacity`` are hard-blocked regardless of this flag).
         strict_layers=getattr(args, "strict_layers", False),
+        fallback_bidirectional=getattr(args, "fallback_bidirectional", False),
         # Issue #4475 (epic #4465 Phase 3): stage the lattice engine's
         # same-net via-in-pad attach as a LAST RESORT (in-layer / free-space
         # via first) instead of the #4284 opportunistic tier-only gate.
@@ -9143,7 +10799,9 @@ def route_with_layer_escalation(
     # from a previous failed-2L run before routing begins.  Without this,
     # a successful 2L run leaves the prior failed 4L/6L artifact behind
     # and the output directory shows a confusing pair of routed PCBs.
-    _cleanup_stale_layer_artifacts(output_path, quiet=quiet)
+    _cleanup_stale_layer_artifacts(
+        output_path, quiet=quiet, dry_run=getattr(args, "dry_run", False)
+    )
 
     # Auto-create copper pours for power nets (before skip detection).
     # auto_pour_if_missing writes in-place; stage a copy at output_path
@@ -9156,7 +10814,8 @@ def route_with_layer_escalation(
     # Issue #4689: capture the user-supplied path for the banner BEFORE the
     # staging rebind below re-points ``pcb_path`` at the staged output copy.
     display_input_path = pcb_path
-    if getattr(args, "auto_pour", True):
+    # Issue #6563: --dry-run (reachable here via --analyze) must not stage a copy.
+    if getattr(args, "auto_pour", True) and not getattr(args, "dry_run", False):
         from kicad_tools.router.auto_pour import auto_pour_if_missing
 
         pcb_path = _stage_input_for_auto_pour(pcb_path, output_path)
@@ -9174,10 +10833,17 @@ def route_with_layer_escalation(
                 if getattr(args, "_placement_disposition", None) is not None
                 else frozenset()
             ),
+            # Issue #6599: honour --net-class-map routed declarations.
+            net_class_map=getattr(args, "_loaded_net_class_map", None),
         )
 
     # Auto-classify pour nets and extend skip_nets
-    _skipped, _no_zone = _auto_skip_pour_nets(pcb_path, skip_nets, quiet=quiet)
+    _skipped, _no_zone = _auto_skip_pour_nets(
+        pcb_path,
+        skip_nets,
+        quiet=quiet,
+        net_class_map=getattr(args, "_loaded_net_class_map", None),
+    )
     # Issue #4688: stash the auto-skipped names (exact board net names) so the
     # --net-class-map resolver's phase 3 can match sidecar keys naming them —
     # they enter neither router.net_names nor router.existing_routes.
@@ -9196,6 +10862,28 @@ def route_with_layer_escalation(
     # original copper.  Capturing here keeps it stable across all attempts.
     _preserve = bool(getattr(args, "preserve_existing", False))
     _preserved_routes, _preserved_sexp = _capture_attempt_preserved_copper(pcb_path, args)
+
+    # Issue #6322: bind the partial-save state so a deadline or Ctrl+C on this
+    # (default) path saves ``<stem>_partial`` instead of nothing.  ``pcb_path``
+    # is final here (staged).  It is also what checkpoints overwrite with
+    # routed copper, so the save takes the preserved input copper from
+    # ``_preserved_sexp`` (captured above) rather than from disk.  The router is
+    # pinned per attempt below; ``best_completed_attempt`` stays False so the
+    # save always goes to ``_partial`` and never promotes an unverified
+    # attempt to ``<output>``.  The interrupt outcome is deliberately NOT
+    # reset: a nested call (``--auto-mfr-tier`` / size escalation) must still
+    # see an interrupt whose exit an earlier call swallowed (#6324).
+    _interrupt_state["output_path"] = output_path
+    _interrupt_state["pcb_path"] = pcb_path
+    _reset_partial_save_state()
+    _interrupt_state["source_copper"] = _preserved_sexp
+    _interrupt_state["source_routes"] = _preserved_routes
+    _interrupt_state["quiet"] = quiet
+    _interrupt_state["router"] = None
+    _interrupt_state["best_completed_attempt"] = False
+    for _signum in (signal.SIGINT, signal.SIGTERM):
+        with contextlib.suppress(ValueError):  # not on the main thread
+            signal.signal(_signum, _handle_interrupt)
 
     # Layer stacks to try (in escalation order)
     layer_configs = _layer_escalation_base_configs()
@@ -9309,9 +10997,11 @@ def route_with_layer_escalation(
         float(getattr(args, "checkpoint_interval", 30.0) or 0.0),
         quiet=quiet,
         preserved_sexp=_preserved_sexp,
+        preserved_routes=_preserved_routes,
         router_provider=lambda: router,
         source_pcb_path=Path(getattr(args, "pcb", pcb_path)),
         best_checkpoint=getattr(args, "_best_checkpoint", None),
+        dry_run=bool(getattr(args, "dry_run", False)),
     )
 
     # Issue #3923: pre-rung deduplication.  The escalation ladder built by
@@ -9330,6 +11020,9 @@ def route_with_layer_escalation(
     _attempted_rung_fingerprints: set[tuple[int, str, bool, tuple[str, ...]]] = set()
 
     for attempt_num, (layer_count, layer_stack, via_in_pad_fallback) in enumerate(layer_configs, 1):
+        # Issue #6324: an interrupt whose exit was swallowed ends the ladder.
+        if _interrupt_pending():
+            break
         # Issue #5014: recompute the --reserve-plane-layers hard restriction
         # for THIS attempt's stack. ``rules`` is a single mutable object
         # shared across every rung of this ladder (only ``layer_stack``
@@ -9486,6 +11179,7 @@ def route_with_layer_escalation(
                     # single whole-netset ``route_netset`` call can starve every
                     # later escalation attempt.
                     lattice_deadline=_lattice_attempt_deadline(args, _attempt_timeout),
+                    lattice_max_iterations=getattr(args, "lattice_iterations", None),
                     # Issue #4170 (Phase 2b-1): board-relative boundary stub
                     # terminals whose tip cells are carved open as same-net
                     # reconnection targets (None when no --region / no stubs).
@@ -9510,10 +11204,17 @@ def route_with_layer_escalation(
                 print(f"  Error loading PCB: {e}")
             continue
 
+        # Issue #6322: until an attempt completes, the in-flight attempt's
+        # copper is the "routed so far" a partial save should carry.
+        if best_result is None:
+            _interrupt_state["router"] = router
+
         # Issue #2996: merge --net-class-map sidecar onto router's map.
         _apply_net_class_map_sidecar(router, args, quiet=quiet)
         # Issue #4431: attach the --voltage-map HV pairwise-clearance table.
         _apply_pairwise_clearance(router, args, quiet=quiet)
+        # Issue #6693: name overlapping different-net input pads up front.
+        _report_input_pad_overlaps(router, args, display_input_path, quiet=quiet)
         # Issue #5520: --no-routing-plan (report-only plan stage).
         _apply_routing_plan_flag(router, args)
         # Issue #5521: --plan-gate refuses an infeasible plan here --
@@ -9530,6 +11231,8 @@ def route_with_layer_escalation(
         _apply_escape_corridor_reservation(router, args)
         _apply_pad_access_invariant(router, args)
         _apply_ripup_strategy(router, args)
+        # Issue #6401: reserve pour-pad via sites before signal routing.
+        _apply_plane_via_reservation(router, args, pcb_path, quiet=quiet)
         # Issue #5787: --order-method crossing (the single-attempt tail's
         # _apply_order_method is unreachable under the default --auto-layers).
         _apply_crossing_order_escalation(router, args, quiet=quiet)
@@ -9684,12 +11387,15 @@ def route_with_layer_escalation(
             elif args.strategy == "monte-carlo":
                 router.route_all_monte_carlo(
                     num_trials=args.mc_trials,
+                    **_multistart_trial_kwargs(args),
                     verbose=args.verbose and not quiet,
+                    timeout=_attempt_timeout,
                 )
             elif args.strategy == "evolutionary":
                 router.route_all_evolutionary(
                     pop_size=args.pop_size,
                     generations=args.generations,
+                    **_multistart_trial_kwargs(args),
                     verbose=args.verbose and not quiet,
                     timeout=_attempt_timeout,
                 )
@@ -9732,6 +11438,9 @@ def route_with_layer_escalation(
         # Track best result (Issue #2396: absolute nets_routed comparison)
         if best_result is None or _is_better_result(result, best_result):
             best_result = result
+            # Issue #6322: from now on a partial save carries the best
+            # completed attempt (not a later, possibly worse, in-flight one).
+            _interrupt_state["router"] = best_result.router
             if not quiet:
                 flush_print(
                     f"  Best result so far: {best_result.layer_count}L with "
@@ -9970,6 +11679,11 @@ def route_with_layer_escalation(
             successful_result = result
             break
 
+    # Issue #6324: an interrupt swallowed during an attempt stops the run here.
+    _stop_rc = _interrupt_requested_exit()
+    if _stop_rc is not None:
+        return _stop_rc
+
     # Handle results
     if not quiet:
         print("\n" + "=" * 60)
@@ -10028,6 +11742,15 @@ def route_with_layer_escalation(
     #   * only when there are still failed nets to address.
     # The loop mutates ``final_result.router.routes`` in place, so we
     # refresh ``final_result``'s stats afterwards before optimize/save.
+    #
+    # Issue #6322: pin the chosen router for every later stage's partial save.
+    # It also makes ``_run_placement_delta_feedback`` own the save
+    # (``owns_partial_save``), so a kept delta's moved placement reaches it.
+    _interrupt_state["router"] = final_result.router
+
+    _stop_rc = _interrupt_requested_exit()  # issue #6324
+    if _stop_rc is not None:
+        return _stop_rc
     _maybe_run_placement_feedback_escalation(
         final_result,
         successful_result,
@@ -10043,6 +11766,9 @@ def route_with_layer_escalation(
     # feasible board's escalation tail is byte-identical.  Rebinds the
     # placement source when a delta was kept -- the copper below was computed
     # against the MOVED footprints.
+    _stop_rc = _interrupt_requested_exit()  # issue #6324
+    if _stop_rc is not None:
+        return _stop_rc
     pcb_path = _maybe_run_placement_delta_feedback_escalation(
         final_result,
         successful_result,
@@ -10067,7 +11793,9 @@ def route_with_layer_escalation(
     if _post_passes_enabled:
         _mark_nongrid_routes_for_post_pass(final_result.router, args, quiet=quiet)
 
-    record_stage("optimization")
+    _stop_rc = _stage_boundary("optimization")  # issue #6324
+    if _stop_rc is not None:
+        return _stop_rc
     # Optimize traces
     if (
         _post_passes_enabled
@@ -10121,7 +11849,9 @@ def route_with_layer_escalation(
         )
         _record_stage_quality(_stage_quality, STAGE_POST_OPTIMIZE, final_result.router)
 
-    record_stage("drc-nudge")
+    _stop_rc = _stage_boundary("drc-nudge")  # issue #6324
+    if _stop_rc is not None:
+        return _stop_rc
     # Post-optimization DRC nudge pass (#4281: gated like the optimizer --
     # the nudge is NOT covered by --no-optimize, so it needs its own gate).
     # Issue #6273: like the optimizer, it yields to save / fill / DRC when
@@ -10152,7 +11882,9 @@ def route_with_layer_escalation(
         )
         _record_stage_quality(_stage_quality, STAGE_POST_NUDGE, final_result.router)
 
-    record_stage("consolidation")
+    _stop_rc = _stage_boundary("consolidation")  # issue #6324
+    if _stop_rc is not None:
+        return _stop_rc
     # Issue #4732: post-nudge collinear consolidation.  Runs LAST of the
     # geometric passes so it also absorbs fragments the nudge introduced.
     _run_consolidation_pass(
@@ -10163,7 +11895,9 @@ def route_with_layer_escalation(
         quiet=quiet,
     )
 
-    record_stage("finalization")
+    _stop_rc = _stage_boundary("finalization")  # issue #6324
+    if _stop_rc is not None:
+        return _stop_rc
     # Issue #4208 (Unit 3): re-run the Unit-2 seg-seg finalize gate
     # over the post-optimize/post-nudge copper.  An rtree-less
     # optimizer can introduce a cross-net crossing the pre-optimize
@@ -10203,7 +11937,15 @@ def route_with_layer_escalation(
     # Issue #5944: the congested/blocked diagnosis needs the live grid, so it
     # runs (and stashes its result for the JSON report) before the release.
     _stash_unrouted_diagnosis(final_result.router, args)
+    # Issue #6391: replay the access witness while the grid can still label
+    # the closing copper; the post-release sidecar writes reuse it.
+    _prime_access_witness(final_result.router, args)
     _release_routing_engine_state(final_result.router)
+
+    # Issue #6324: never go on to the normal save after an interrupt.
+    _stop_rc = _interrupt_requested_exit()
+    if _stop_rc is not None:
+        return _stop_rc
 
     # Save output
     if args.dry_run:
@@ -10236,13 +11978,30 @@ def route_with_layer_escalation(
         print(f"  Saved to: {output_path}")
         print(f"  Layer count: {final_result.layer_count}")
 
+    # Issue #6376: post-save output connectivity verification.  This flow
+    # returns before main_with_result's tail, so it runs the shared verifier
+    # itself -- before zone fill, matching main (pour nets are not routed).
+    _output_verification = _verify_written_output(
+        # _write_routed_pcb raises on a failed write, so a missing file
+        # here means the save was stubbed out (tests); nothing to verify.
+        output_path.read_text() if output_path.exists() else "",
+        final_result.router,
+        _final_multi_pad_ids,
+        final_result.net_map,
+        final_stats,
+        final_result.nets_to_route,
+        quiet=quiet,
+    )
+
     # Fill copper-pour zones now that traces exist (issue #2516).
     # Must run BEFORE DRC so the DRC sees filled zones rather than bare
     # zone outlines and does not flag zone-to-trace clearance against
     # unfilled polygons.
     if final_result.nets_routed > 0:
         _fill_zones_after_route(output_path, quiet=quiet, router=final_result.router, args=args)
-        _complete_pour_nets_with_oracle(output_path, args=args, quiet=quiet)
+        _complete_pour_nets_with_oracle(
+            output_path, args=args, quiet=quiet, router=final_result.router
+        )
 
     # Run DRC validation unless skipped
     fix_result: int | None = None
@@ -10321,6 +12080,10 @@ def route_with_layer_escalation(
     # selected router's stack, which can differ from the last attempted rung.
     _audit_plane_layer_reservation(final_result.router, final_result.router.layer_stack)
 
+    # Issue #6376: carry a verified-open regression into ``final_result``
+    # before the banner and before ``args._last_layer_result`` is stashed.
+    _apply_output_verification(final_result, final_stats, _output_verification)
+
     # Final summary
     if not quiet:
         print("\n" + "=" * 60)
@@ -10349,6 +12112,15 @@ def route_with_layer_escalation(
             print("PARTIAL: staged auto-fix was not published")
         elif _placement_blocked(args):
             print("PARTIAL: requested placement-invalid nets were not attempted")
+        elif _output_verification.regressed:
+            # Issue #6371 / #6376: the written file leaves open a net the
+            # router counted as connected.  Never SUCCESS.
+            _print_output_verification_failure_banner(
+                _output_verification,
+                final_stats["nets_routed"],
+                final_result.nets_to_route,
+                output_path,
+            )
         elif final_result.success and _unverified_checks(args):
             # Issue #6273: never "SUCCESS" for a board nobody verified.
             _print_unverified_banner(
@@ -10398,6 +12170,11 @@ def route_with_layer_escalation(
         # ``RoutingResultMetrics`` and call ``decide_escalation``.
         args._last_layer_result = final_result
 
+    # Issue #6376: post-save connectivity failure exits 6 in every flow
+    # (any disconnect under --strict; a counted-connected net without it).
+    _verify_rc = _output_verification_exit(_output_verification, args)
+    if _verify_rc is not None:
+        return _verify_rc
     if final_result.success:
         # Issue #3238: propagate auto-fix-skipped-by-deadline so the
         # caller exits with the distinct exit code (7) rather than the
@@ -10488,7 +12265,8 @@ def route_with_rule_relaxation(
     # Issue #4689: capture the user-supplied path for the banner BEFORE the
     # staging rebind below re-points ``pcb_path`` at the staged output copy.
     display_input_path = pcb_path
-    if getattr(args, "auto_pour", True):
+    # Issue #6563: --dry-run (reachable here via --analyze) must not stage a copy.
+    if getattr(args, "auto_pour", True) and not getattr(args, "dry_run", False):
         from kicad_tools.router.auto_pour import auto_pour_if_missing
 
         pcb_path = _stage_input_for_auto_pour(pcb_path, output_path)
@@ -10506,10 +12284,17 @@ def route_with_rule_relaxation(
                 if getattr(args, "_placement_disposition", None) is not None
                 else frozenset()
             ),
+            # Issue #6599: honour --net-class-map routed declarations.
+            net_class_map=getattr(args, "_loaded_net_class_map", None),
         )
 
     # Auto-classify pour nets and extend skip_nets
-    _skipped, _no_zone = _auto_skip_pour_nets(pcb_path, skip_nets, quiet=quiet)
+    _skipped, _no_zone = _auto_skip_pour_nets(
+        pcb_path,
+        skip_nets,
+        quiet=quiet,
+        net_class_map=getattr(args, "_loaded_net_class_map", None),
+    )
     # Issue #4688: stash the auto-skipped names (exact board net names) so the
     # --net-class-map resolver's phase 3 can match sidecar keys naming them —
     # they enter neither router.net_names nor router.existing_routes.
@@ -10576,9 +12361,14 @@ def route_with_rule_relaxation(
     # Register signal handlers so SIGTERM/SIGINT save the best attempt so far
     _interrupt_state["output_path"] = output_path
     _interrupt_state["pcb_path"] = pcb_path
+    _reset_partial_save_state()
+    # Issue #6553: checkpoints overwrite ``pcb_path`` with routed-only copper,
+    # so the partial save takes the preserved input copper from here.
+    _interrupt_state["source_copper"] = _preserved_sexp
+    _interrupt_state["source_routes"] = _preserved_routes
     _interrupt_state["quiet"] = quiet
     _interrupt_state["router"] = None
-    _interrupt_state["interrupted"] = False
+    _reset_interrupt_outcome()
     _interrupt_state["best_completed_attempt"] = False
     prev_sigint = signal.signal(signal.SIGINT, _handle_interrupt)
     prev_sigterm = signal.signal(signal.SIGTERM, _handle_interrupt)
@@ -10593,9 +12383,11 @@ def route_with_rule_relaxation(
         float(getattr(args, "checkpoint_interval", 30.0) or 0.0),
         quiet=quiet,
         preserved_sexp=_preserved_sexp,
+        preserved_routes=_preserved_routes,
         router_provider=lambda: router,
         source_pcb_path=Path(getattr(args, "pcb", pcb_path)),
         best_checkpoint=getattr(args, "_best_checkpoint", None),
+        dry_run=bool(getattr(args, "dry_run", False)),
     )
 
     # Issue #2823: precompute total tier count so per-attempt budget can
@@ -10603,6 +12395,9 @@ def route_with_rule_relaxation(
     # rather than letting tier 0 greedily consume the full ``--timeout``.
     _relaxation_max_attempts = max(1, len(tiers))
     for _tier_idx, tier in enumerate(tiers):
+        # Issue #6324: an interrupt whose exit was swallowed ends the ladder.
+        if _interrupt_pending():
+            break
         # Issue #2802: honor the total wall-clock deadline before starting
         # another rule-relaxation tier.
         if _deadline_expired(args):
@@ -10640,10 +12435,15 @@ def route_with_rule_relaxation(
             # the routing cache so a --copper 2 run is never served a --copper 1
             # route.
             min_trace_width_floor=getattr(args, "_mfr_min_trace_floor", None),
+            # Issue #6443: the authored board minimum floors the pair gap.
+            authored_min_clearance=getattr(args, "_authored_min_clearance", None),
+            # Issue #6561: the stackup-aware fab floor for the pair gap.
+            mfr_clearance_floor=getattr(args, "_mfr_clearance_floor", None),
             # Issue #2891: forward escalation-in-progress flag.
             auto_mfr_tier_in_progress=getattr(args, "_auto_mfr_tier_in_progress", False),
             # Issue #4433: forward --strict-layers (hard per-net avoid_layers).
             strict_layers=getattr(args, "strict_layers", False),
+            fallback_bidirectional=getattr(args, "fallback_bidirectional", False),
             # Issue #4475 (epic #4465 Phase 3): stage via-in-pad as a
             # LAST RESORT on the lattice engine. Default off is
             # bit-for-bit pre-#4475.
@@ -10702,6 +12502,7 @@ def route_with_rule_relaxation(
                     # Issue #4798: bound by THIS tier's fair slice, not the
                     # whole remaining run budget.
                     lattice_deadline=_lattice_attempt_deadline(args, _attempt_timeout),
+                    lattice_max_iterations=getattr(args, "lattice_iterations", None),
                     # Issue #4170 (Phase 2b-1): board-relative boundary stub
                     # terminals whose tip cells are carved open as same-net
                     # reconnection targets (None when no --region / no stubs).
@@ -10712,10 +12513,18 @@ def route_with_rule_relaxation(
                 print(f"  Error loading PCB: {e}")
             continue
 
+        # Issue #6625: pin the first tier's in-flight router so a deadline /
+        # Ctrl+C before any tier completes still saves a _partial.
+        # best_completed_attempt stays False; a completed tier wins.
+        if best_result is None:
+            _interrupt_state["router"] = router
+
         # Issue #2996: merge --net-class-map sidecar onto router's map.
         _apply_net_class_map_sidecar(router, args, quiet=quiet)
         # Issue #4431: attach the --voltage-map HV pairwise-clearance table.
         _apply_pairwise_clearance(router, args, quiet=quiet)
+        # Issue #6693: name overlapping different-net input pads up front.
+        _report_input_pad_overlaps(router, args, display_input_path, quiet=quiet)
         # Issue #5520: --no-routing-plan (report-only plan stage).
         _apply_routing_plan_flag(router, args)
         # Issue #5521: --plan-gate refuses an infeasible plan here --
@@ -10732,6 +12541,8 @@ def route_with_rule_relaxation(
         _apply_escape_corridor_reservation(router, args)
         _apply_pad_access_invariant(router, args)
         _apply_ripup_strategy(router, args)
+        # Issue #6401: reserve pour-pad via sites before signal routing.
+        _apply_plane_via_reservation(router, args, pcb_path, quiet=quiet)
         # Issue #5787: --order-method crossing (see the layer-escalation path).
         _apply_crossing_order_escalation(router, args, quiet=quiet)
 
@@ -10872,12 +12683,15 @@ def route_with_rule_relaxation(
             elif args.strategy == "monte-carlo":
                 router.route_all_monte_carlo(
                     num_trials=args.mc_trials,
+                    **_multistart_trial_kwargs(args),
                     verbose=args.verbose and not quiet,
+                    timeout=_attempt_timeout,
                 )
             elif args.strategy == "evolutionary":
                 router.route_all_evolutionary(
                     pop_size=args.pop_size,
                     generations=args.generations,
+                    **_multistart_trial_kwargs(args),
                     verbose=args.verbose and not quiet,
                     timeout=_attempt_timeout,
                 )
@@ -10954,6 +12768,11 @@ def route_with_rule_relaxation(
     signal.signal(signal.SIGTERM, prev_sigterm)
     _interrupt_state["best_completed_attempt"] = False
 
+    # Issue #6324: an interrupt swallowed during an attempt stops the run here.
+    _stop_rc = _interrupt_requested_exit()
+    if _stop_rc is not None:
+        return _stop_rc
+
     # Handle results
     if not quiet:
         print("\n" + "=" * 60)
@@ -10998,6 +12817,9 @@ def route_with_rule_relaxation(
     # is set and rule relaxation stalled with unrouted nets.  Before this
     # hook, --placement-feedback was silently dropped on the rule-relaxation
     # dispatch path (--adaptive-rules without effective --auto-layers).
+    _stop_rc = _interrupt_requested_exit()  # issue #6324
+    if _stop_rc is not None:
+        return _stop_rc
     _maybe_run_placement_feedback_escalation(
         final_result,
         successful_result,
@@ -11013,6 +12835,9 @@ def route_with_rule_relaxation(
     # feasible board's escalation tail is byte-identical.  Rebinds the
     # placement source when a delta was kept -- the copper below was computed
     # against the MOVED footprints.
+    _stop_rc = _interrupt_requested_exit()  # issue #6324
+    if _stop_rc is not None:
+        return _stop_rc
     pcb_path = _maybe_run_placement_delta_feedback_escalation(
         final_result,
         successful_result,
@@ -11027,9 +12852,12 @@ def route_with_rule_relaxation(
     from kicad_tools.router import get_mfr_limits
 
     mfr = get_mfr_limits(args.manufacturer)
+    # Issue #6561: the ladder bottoms out at the higher of the flat and the
+    # stackup-aware floor (jlcpcb 2-layer 2oz: 0.1524mm).
+    clearance_floor = max(mfr.min_clearance, getattr(args, "_mfr_clearance_floor", None) or 0.0)
     at_minimum = (
         final_result.trace_width <= mfr.min_trace + 0.001
-        and final_result.clearance <= mfr.min_clearance + 0.001
+        and final_result.clearance <= clearance_floor + 0.001
     )
     if at_minimum and not quiet:
         print(f"\nWARNING: Design uses {args.manufacturer.upper()} minimum tolerances.")
@@ -11049,7 +12877,9 @@ def route_with_rule_relaxation(
     if _post_passes_enabled:
         _mark_nongrid_routes_for_post_pass(final_result.router, args, quiet=quiet)
 
-    record_stage("optimization")
+    _stop_rc = _stage_boundary("optimization")  # issue #6324
+    if _stop_rc is not None:
+        return _stop_rc
     # Optimize traces
     if (
         _post_passes_enabled
@@ -11100,7 +12930,9 @@ def route_with_rule_relaxation(
         )
         _record_stage_quality(_stage_quality, STAGE_POST_OPTIMIZE, final_result.router)
 
-    record_stage("drc-nudge")
+    _stop_rc = _stage_boundary("drc-nudge")  # issue #6324
+    if _stop_rc is not None:
+        return _stop_rc
     # Post-optimization DRC nudge pass (#4281: gated like the optimizer --
     # the nudge is NOT covered by --no-optimize, so it needs its own gate).
     # Issue #6273: like the optimizer, it yields to save / fill / DRC when
@@ -11129,7 +12961,9 @@ def route_with_rule_relaxation(
         )
         _record_stage_quality(_stage_quality, STAGE_POST_NUDGE, final_result.router)
 
-    record_stage("consolidation")
+    _stop_rc = _stage_boundary("consolidation")  # issue #6324
+    if _stop_rc is not None:
+        return _stop_rc
     # Issue #4732: post-nudge collinear consolidation.  Runs LAST of the
     # geometric passes so it also absorbs fragments the nudge introduced.
     _run_consolidation_pass(
@@ -11140,7 +12974,9 @@ def route_with_rule_relaxation(
         quiet=quiet,
     )
 
-    record_stage("finalization")
+    _stop_rc = _stage_boundary("finalization")  # issue #6324
+    if _stop_rc is not None:
+        return _stop_rc
     # Issue #4208 (Unit 3): re-run the Unit-2 seg-seg finalize gate
     # over the post-optimize/post-nudge copper.  An rtree-less
     # optimizer can introduce a cross-net crossing the pre-optimize
@@ -11180,7 +13016,15 @@ def route_with_rule_relaxation(
     # Issue #5944: the congested/blocked diagnosis needs the live grid, so it
     # runs (and stashes its result for the JSON report) before the release.
     _stash_unrouted_diagnosis(final_result.router, args)
+    # Issue #6391: replay the access witness while the grid can still label
+    # the closing copper; the post-release sidecar writes reuse it.
+    _prime_access_witness(final_result.router, args)
     _release_routing_engine_state(final_result.router)
+
+    # Issue #6324: never go on to the normal save after an interrupt.
+    _stop_rc = _interrupt_requested_exit()
+    if _stop_rc is not None:
+        return _stop_rc
 
     # Save output
     if args.dry_run:
@@ -11214,10 +13058,27 @@ def route_with_rule_relaxation(
         print(f"  Final trace width: {final_result.trace_width:.3f}mm")
         print(f"  Final clearance: {final_result.clearance:.3f}mm")
 
+    # Issue #6376: post-save output connectivity verification.  This flow
+    # returns before main_with_result's tail, so it runs the shared verifier
+    # itself -- before zone fill, matching main (pour nets are not routed).
+    _output_verification = _verify_written_output(
+        # _write_routed_pcb raises on a failed write, so a missing file
+        # here means the save was stubbed out (tests); nothing to verify.
+        output_path.read_text() if output_path.exists() else "",
+        final_result.router,
+        _final_multi_pad_ids,
+        final_result.net_map,
+        final_stats,
+        final_result.nets_to_route,
+        quiet=quiet,
+    )
+
     # Fill copper-pour zones now that traces exist (issue #2516).
     if final_result.nets_routed > 0:
         _fill_zones_after_route(output_path, quiet=quiet, router=final_result.router, args=args)
-        _complete_pour_nets_with_oracle(output_path, args=args, quiet=quiet)
+        _complete_pour_nets_with_oracle(
+            output_path, args=args, quiet=quiet, router=final_result.router
+        )
 
     # Run DRC validation unless skipped
     fix_result: int | None = None
@@ -11296,6 +13157,10 @@ def route_with_rule_relaxation(
     # selected router's stack, which can differ from the last attempted rung.
     _audit_plane_layer_reservation(final_result.router, final_result.router.layer_stack)
 
+    # Issue #6376: carry a verified-open regression into ``final_result``
+    # before the banner and before ``args._last_layer_result`` is stashed.
+    _apply_output_verification(final_result, final_stats, _output_verification)
+
     # Final summary
     if not quiet:
         print("\n" + "=" * 60)
@@ -11322,6 +13187,15 @@ def route_with_rule_relaxation(
             print("PARTIAL: staged auto-fix was not published")
         elif _placement_blocked(args):
             print("PARTIAL: requested placement-invalid nets were not attempted")
+        elif _output_verification.regressed:
+            # Issue #6371 / #6376: the written file leaves open a net the
+            # router counted as connected.  Never SUCCESS.
+            _print_output_verification_failure_banner(
+                _output_verification,
+                final_stats["nets_routed"],
+                final_result.nets_to_route,
+                output_path,
+            )
         elif final_result.success and _unverified_checks(args):
             # Issue #6273: never "SUCCESS" for a board nobody verified.
             _print_unverified_banner(args, output_path, "Routing complete with adaptive rules")
@@ -11357,6 +13231,11 @@ def route_with_rule_relaxation(
                 # ones already replaced the banner above).
                 _print_layer_intent_addendum(_layer_intent)
 
+    # Issue #6376: post-save connectivity failure exits 6 in every flow
+    # (any disconnect under --strict; a counted-connected net without it).
+    _verify_rc = _output_verification_exit(_output_verification, args)
+    if _verify_rc is not None:
+        return _verify_rc
     if final_result.success:
         # Issue #3238: propagate auto-fix-skipped-by-deadline.
         if getattr(args, "_auto_fix_status", None) == "skipped_deadline":
@@ -11847,6 +13726,10 @@ def route_with_mfr_tier_escalation(
                     args=args,
                     quiet=quiet,
                 )
+                # Issue #6324: an interrupt swallowed in the inner ladder ends this one.
+                _stop_rc = _interrupt_requested_exit()
+                if _stop_rc is not None:
+                    return _stop_rc
 
             last_exit_code = inner_rc
             final_exit_code = inner_rc
@@ -12338,6 +14221,10 @@ def route_with_size_escalation(
             args=args,
             quiet=quiet,
         )
+        # Issue #6324: an interrupt swallowed in the inner ladder ends this one.
+        _stop_rc = _interrupt_requested_exit()
+        if _stop_rc is not None:
+            return _stop_rc
 
         last_exit_code = inner_rc
 
@@ -12445,6 +14332,10 @@ def route_with_size_escalation(
                     args=args,
                     quiet=quiet,
                 )
+                # Issue #6324: an interrupt swallowed in the inner ladder ends this one.
+                _stop_rc = _interrupt_requested_exit()
+                if _stop_rc is not None:
+                    return _stop_rc
                 last_exit_code = inner_rc
                 # Read the final attempt's metrics and decide once more.
                 last_result_final = getattr(args, "_last_layer_result", None)
@@ -12921,7 +14812,9 @@ def route_with_combined_escalation(
     # from a previous failed-2L run before routing begins.  Without this,
     # a successful 2L run leaves the prior failed 4L/6L artifact behind
     # and the output directory shows a confusing pair of routed PCBs.
-    _cleanup_stale_layer_artifacts(output_path, quiet=quiet)
+    _cleanup_stale_layer_artifacts(
+        output_path, quiet=quiet, dry_run=getattr(args, "dry_run", False)
+    )
 
     # Auto-create copper pours for power nets (before skip detection).
     # auto_pour_if_missing writes in-place; stage a copy at output_path
@@ -12931,7 +14824,8 @@ def route_with_combined_escalation(
     # Issue #4689: capture the user-supplied path for the banner BEFORE the
     # staging rebind below re-points ``pcb_path`` at the staged output copy.
     display_input_path = pcb_path
-    if getattr(args, "auto_pour", True):
+    # Issue #6563: --dry-run (reachable here via --analyze) must not stage a copy.
+    if getattr(args, "auto_pour", True) and not getattr(args, "dry_run", False):
         from kicad_tools.router.auto_pour import auto_pour_if_missing
 
         pcb_path = _stage_input_for_auto_pour(pcb_path, output_path)
@@ -12949,10 +14843,17 @@ def route_with_combined_escalation(
                 if getattr(args, "_placement_disposition", None) is not None
                 else frozenset()
             ),
+            # Issue #6599: honour --net-class-map routed declarations.
+            net_class_map=getattr(args, "_loaded_net_class_map", None),
         )
 
     # Auto-classify pour nets and extend skip_nets
-    _skipped, _no_zone = _auto_skip_pour_nets(pcb_path, skip_nets, quiet=quiet)
+    _skipped, _no_zone = _auto_skip_pour_nets(
+        pcb_path,
+        skip_nets,
+        quiet=quiet,
+        net_class_map=getattr(args, "_loaded_net_class_map", None),
+    )
     # Issue #4688: stash the auto-skipped names (exact board net names) so the
     # --net-class-map resolver's phase 3 can match sidecar keys naming them —
     # they enter neither router.net_names nor router.existing_routes.
@@ -13027,9 +14928,14 @@ def route_with_combined_escalation(
     # Register signal handlers so SIGTERM/SIGINT save the best attempt so far
     _interrupt_state["output_path"] = output_path
     _interrupt_state["pcb_path"] = pcb_path
+    _reset_partial_save_state()
+    # Issue #6553: checkpoints overwrite ``pcb_path`` with routed-only copper,
+    # so the partial save takes the preserved input copper from here.
+    _interrupt_state["source_copper"] = _preserved_sexp
+    _interrupt_state["source_routes"] = _preserved_routes
     _interrupt_state["quiet"] = quiet
     _interrupt_state["router"] = None
-    _interrupt_state["interrupted"] = False
+    _reset_interrupt_outcome()
     _interrupt_state["best_completed_attempt"] = False
     prev_sigint = signal.signal(signal.SIGINT, _handle_interrupt)
     prev_sigterm = signal.signal(signal.SIGTERM, _handle_interrupt)
@@ -13044,9 +14950,11 @@ def route_with_combined_escalation(
         float(getattr(args, "checkpoint_interval", 30.0) or 0.0),
         quiet=quiet,
         preserved_sexp=_preserved_sexp,
+        preserved_routes=_preserved_routes,
         router_provider=lambda: router,
         source_pcb_path=Path(getattr(args, "pcb", pcb_path)),
         best_checkpoint=getattr(args, "_best_checkpoint", None),
+        dry_run=bool(getattr(args, "dry_run", False)),
     )
 
     # 2D search: prioritize fewer layers first, then stricter rules.
@@ -13070,6 +14978,9 @@ def route_with_combined_escalation(
     CL_CONSECUTIVE = 2
 
     for _layer_idx, (layer_count, layer_stack) in enumerate(layer_configs):
+        # Issue #6324: an interrupt whose exit was swallowed ends the ladder.
+        if _interrupt_pending():
+            break
         # Issue #2802: honor the total wall-clock deadline before starting
         # another layer-stack column of the 2D search.
         if _deadline_expired(args):
@@ -13086,6 +14997,9 @@ def route_with_combined_escalation(
 
         best_completion_for_layer: float | None = None
         for _tier_idx, tier in enumerate(tiers):
+            # Issue #6324: see the column check above.
+            if _interrupt_pending():
+                break
             # Issue #2802: honor the deadline before each tier within the
             # current layer column.
             if _deadline_expired(args):
@@ -13130,10 +15044,15 @@ def route_with_combined_escalation(
                 # the routing cache so a --copper 2 run is never served a --copper 1
                 # route.
                 min_trace_width_floor=getattr(args, "_mfr_min_trace_floor", None),
+                # Issue #6443: the authored board minimum floors the pair gap.
+                authored_min_clearance=getattr(args, "_authored_min_clearance", None),
+                # Issue #6561: the stackup-aware fab floor for the pair gap.
+                mfr_clearance_floor=getattr(args, "_mfr_clearance_floor", None),
                 # Issue #2891: forward escalation-in-progress flag.
                 auto_mfr_tier_in_progress=getattr(args, "_auto_mfr_tier_in_progress", False),
                 # Issue #4433: forward --strict-layers (hard per-net avoid_layers).
                 strict_layers=getattr(args, "strict_layers", False),
+                fallback_bidirectional=getattr(args, "fallback_bidirectional", False),
                 # Issue #4475 (epic #4465 Phase 3): stage via-in-pad as a
                 # LAST RESORT on the lattice engine. Default off is
                 # bit-for-bit pre-#4475.
@@ -13194,6 +15113,7 @@ def route_with_combined_escalation(
                         # Issue #4798: bound by THIS cell's fair slice, not the
                         # whole remaining run budget.
                         lattice_deadline=_lattice_attempt_deadline(args, _attempt_timeout),
+                        lattice_max_iterations=getattr(args, "lattice_iterations", None),
                         # Issue #4170 (Phase 2b-1): board-relative boundary stub
                         # terminals whose tip cells are carved open as same-net
                         # reconnection targets (None when no --region / no stubs).
@@ -13205,10 +15125,18 @@ def route_with_combined_escalation(
                 results_matrix[(tier.tier, layer_count)] = 0.0
                 continue
 
+            # Issue #6625: pin the first tier's in-flight router so a deadline /
+            # Ctrl+C before any tier completes still saves a _partial.
+            # best_completed_attempt stays False; a completed tier wins.
+            if best_result is None:
+                _interrupt_state["router"] = router
+
             # Issue #2996: merge --net-class-map sidecar onto router's map.
             _apply_net_class_map_sidecar(router, args, quiet=quiet)
             # Issue #4431: attach the --voltage-map HV pairwise-clearance table.
             _apply_pairwise_clearance(router, args, quiet=quiet)
+            # Issue #6693: name overlapping different-net input pads up front.
+            _report_input_pad_overlaps(router, args, display_input_path, quiet=quiet)
             # Issue #5520: --no-routing-plan (report-only plan stage).
             _apply_routing_plan_flag(router, args)
             # Issue #5521: --plan-gate refuses an infeasible plan here --
@@ -13225,6 +15153,8 @@ def route_with_combined_escalation(
             _apply_escape_corridor_reservation(router, args)
             _apply_pad_access_invariant(router, args)
             _apply_ripup_strategy(router, args)
+            # Issue #6401: reserve pour-pad via sites before signal routing.
+            _apply_plane_via_reservation(router, args, pcb_path, quiet=quiet)
             # Issue #5787: --order-method crossing (see layer-escalation path).
             _apply_crossing_order_escalation(router, args, quiet=quiet)
 
@@ -13337,12 +15267,15 @@ def route_with_combined_escalation(
                 elif args.strategy == "monte-carlo":
                     router.route_all_monte_carlo(
                         num_trials=args.mc_trials,
+                        **_multistart_trial_kwargs(args),
                         verbose=args.verbose and not quiet,
+                        timeout=_attempt_timeout,
                     )
                 elif args.strategy == "evolutionary":
                     router.route_all_evolutionary(
                         pop_size=args.pop_size,
                         generations=args.generations,
+                        **_multistart_trial_kwargs(args),
                         verbose=args.verbose and not quiet,
                         timeout=_attempt_timeout,
                     )
@@ -13466,6 +15399,11 @@ def route_with_combined_escalation(
     signal.signal(signal.SIGTERM, prev_sigterm)
     _interrupt_state["best_completed_attempt"] = False
 
+    # Issue #6324: an interrupt swallowed during an attempt stops the run here.
+    _stop_rc = _interrupt_requested_exit()
+    if _stop_rc is not None:
+        return _stop_rc
+
     # Print results matrix
     if not quiet:
         print("\n" + "=" * 60)
@@ -13531,6 +15469,9 @@ def route_with_combined_escalation(
     # nets.  Before this hook, --placement-feedback was silently dropped on
     # the combined-escalation dispatch path (--auto-layers --adaptive-rules
     # together).
+    _stop_rc = _interrupt_requested_exit()  # issue #6324
+    if _stop_rc is not None:
+        return _stop_rc
     _maybe_run_placement_feedback_escalation(
         final_result,
         successful_result,
@@ -13546,6 +15487,9 @@ def route_with_combined_escalation(
     # feasible board's escalation tail is byte-identical.  Rebinds the
     # placement source when a delta was kept -- the copper below was computed
     # against the MOVED footprints.
+    _stop_rc = _interrupt_requested_exit()  # issue #6324
+    if _stop_rc is not None:
+        return _stop_rc
     pcb_path = _maybe_run_placement_delta_feedback_escalation(
         final_result,
         successful_result,
@@ -13560,9 +15504,12 @@ def route_with_combined_escalation(
     from kicad_tools.router import get_mfr_limits
 
     mfr = get_mfr_limits(args.manufacturer)
+    # Issue #6561: the ladder bottoms out at the higher of the flat and the
+    # stackup-aware floor (jlcpcb 2-layer 2oz: 0.1524mm).
+    clearance_floor = max(mfr.min_clearance, getattr(args, "_mfr_clearance_floor", None) or 0.0)
     at_minimum = (
         final_result.trace_width <= mfr.min_trace + 0.001
-        and final_result.clearance <= mfr.min_clearance + 0.001
+        and final_result.clearance <= clearance_floor + 0.001
     )
     if at_minimum and not quiet:
         print(f"\nWARNING: Design uses {args.manufacturer.upper()} minimum tolerances.")
@@ -13582,7 +15529,9 @@ def route_with_combined_escalation(
     if _post_passes_enabled:
         _mark_nongrid_routes_for_post_pass(final_result.router, args, quiet=quiet)
 
-    record_stage("optimization")
+    _stop_rc = _stage_boundary("optimization")  # issue #6324
+    if _stop_rc is not None:
+        return _stop_rc
     # Optimize traces
     if (
         _post_passes_enabled
@@ -13633,7 +15582,9 @@ def route_with_combined_escalation(
         )
         _record_stage_quality(_stage_quality, STAGE_POST_OPTIMIZE, final_result.router)
 
-    record_stage("drc-nudge")
+    _stop_rc = _stage_boundary("drc-nudge")  # issue #6324
+    if _stop_rc is not None:
+        return _stop_rc
     # Post-optimization DRC nudge pass (#4281: gated like the optimizer --
     # the nudge is NOT covered by --no-optimize, so it needs its own gate).
     # Issue #6273: like the optimizer, it yields to save / fill / DRC when
@@ -13662,7 +15613,9 @@ def route_with_combined_escalation(
         )
         _record_stage_quality(_stage_quality, STAGE_POST_NUDGE, final_result.router)
 
-    record_stage("consolidation")
+    _stop_rc = _stage_boundary("consolidation")  # issue #6324
+    if _stop_rc is not None:
+        return _stop_rc
     # Issue #4732: post-nudge collinear consolidation.  Runs LAST of the
     # geometric passes so it also absorbs fragments the nudge introduced.
     _run_consolidation_pass(
@@ -13673,7 +15626,9 @@ def route_with_combined_escalation(
         quiet=quiet,
     )
 
-    record_stage("finalization")
+    _stop_rc = _stage_boundary("finalization")  # issue #6324
+    if _stop_rc is not None:
+        return _stop_rc
     # Issue #4208 (Unit 3): re-run the Unit-2 seg-seg finalize gate
     # over the post-optimize/post-nudge copper.  An rtree-less
     # optimizer can introduce a cross-net crossing the pre-optimize
@@ -13713,7 +15668,15 @@ def route_with_combined_escalation(
     # Issue #5944: the congested/blocked diagnosis needs the live grid, so it
     # runs (and stashes its result for the JSON report) before the release.
     _stash_unrouted_diagnosis(final_result.router, args)
+    # Issue #6391: replay the access witness while the grid can still label
+    # the closing copper; the post-release sidecar writes reuse it.
+    _prime_access_witness(final_result.router, args)
     _release_routing_engine_state(final_result.router)
+
+    # Issue #6324: never go on to the normal save after an interrupt.
+    _stop_rc = _interrupt_requested_exit()
+    if _stop_rc is not None:
+        return _stop_rc
 
     # Save output
     if args.dry_run:
@@ -13746,10 +15709,27 @@ def route_with_combined_escalation(
         print(f"  Final trace width: {final_result.trace_width:.3f}mm")
         print(f"  Final clearance: {final_result.clearance:.3f}mm")
 
+    # Issue #6376: post-save output connectivity verification.  This flow
+    # returns before main_with_result's tail, so it runs the shared verifier
+    # itself -- before zone fill, matching main (pour nets are not routed).
+    _output_verification = _verify_written_output(
+        # _write_routed_pcb raises on a failed write, so a missing file
+        # here means the save was stubbed out (tests); nothing to verify.
+        output_path.read_text() if output_path.exists() else "",
+        final_result.router,
+        _final_multi_pad_ids,
+        final_result.net_map,
+        final_stats,
+        final_result.nets_to_route,
+        quiet=quiet,
+    )
+
     # Fill copper-pour zones now that traces exist (issue #2516).
     if final_result.nets_routed > 0:
         _fill_zones_after_route(output_path, quiet=quiet, router=final_result.router, args=args)
-        _complete_pour_nets_with_oracle(output_path, args=args, quiet=quiet)
+        _complete_pour_nets_with_oracle(
+            output_path, args=args, quiet=quiet, router=final_result.router
+        )
 
     # Run DRC validation unless skipped
     fix_result: int | None = None
@@ -13828,6 +15808,10 @@ def route_with_combined_escalation(
     # selected router's stack, which can differ from the last attempted rung.
     _audit_plane_layer_reservation(final_result.router, final_result.router.layer_stack)
 
+    # Issue #6376: carry a verified-open regression into ``final_result``
+    # before the banner and before ``args._last_layer_result`` is stashed.
+    _apply_output_verification(final_result, final_stats, _output_verification)
+
     # Final summary
     if not quiet:
         print("\n" + "=" * 60)
@@ -13854,6 +15838,15 @@ def route_with_combined_escalation(
             print("PARTIAL: staged auto-fix was not published")
         elif _placement_blocked(args):
             print("PARTIAL: requested placement-invalid nets were not attempted")
+        elif _output_verification.regressed:
+            # Issue #6371 / #6376: the written file leaves open a net the
+            # router counted as connected.  Never SUCCESS.
+            _print_output_verification_failure_banner(
+                _output_verification,
+                final_stats["nets_routed"],
+                final_result.nets_to_route,
+                output_path,
+            )
         elif final_result.success and _unverified_checks(args):
             # Issue #6273: never "SUCCESS" for a board nobody verified.
             _print_unverified_banner(
@@ -13896,6 +15889,11 @@ def route_with_combined_escalation(
                 # ones already replaced the banner above).
                 _print_layer_intent_addendum(_layer_intent)
 
+    # Issue #6376: post-save connectivity failure exits 6 in every flow
+    # (any disconnect under --strict; a counted-connected net without it).
+    _verify_rc = _output_verification_exit(_output_verification, args)
+    if _verify_rc is not None:
+        return _verify_rc
     if final_result.success:
         # Issue #3238: propagate auto-fix-skipped-by-deadline.
         if getattr(args, "_auto_fix_status", None) == "skipped_deadline":
@@ -14016,8 +16014,25 @@ def _validate_route_engine_strategy(args) -> int:
         conflicts.append("--multi-resolution")
     if _resolve_escape_routing_flag(args) is True:
         conflicts.append("--escape-routing")
+    # Issue #6551: the mesh engine has no coupled router, and it owns every
+    # pair net in its whole-netset negotiation (the grid coupled pre-pass is
+    # skipped under it, like the lattice's #6535 fix), so
+    # ``--differential-pairs`` cannot couple anything under mesh.  Reject it
+    # rather than ship uncoupled pairs under a coupled-looking command line.
+    mesh_diffpair_conflict = engine == "mesh" and bool(getattr(args, "differential_pairs", False))
+    if mesh_diffpair_conflict:
+        conflicts.append("--differential-pairs")
 
     if conflicts:
+        diffpair_note = (
+            "The mesh engine has no coupled (differential-pair) router: it "
+            "would route each pair's P and N nets uncoupled (issue #6551). "
+            "For coupled pairs use --route-engine lattice --strategy basic "
+            "--differential-pairs, or --route-engine grid "
+            "--differential-pairs.\n"
+            if mesh_diffpair_conflict
+            else ""
+        )
         print(
             f"Error: --route-engine {engine} is incompatible with "
             f"{', '.join(conflicts)}.\n"
@@ -14027,6 +16042,7 @@ def _validate_route_engine_strategy(args) -> int:
             "--two-phase/--multi-resolution/--escape-routing modifiers "
             "bypass that path, so the engine selection would be silently "
             "ignored and grid copper shipped (issue #4280).\n"
+            f"{diffpair_note}"
             "Supported combination:\n"
             f"    kct route <board> --route-engine {engine} --strategy basic",
             file=sys.stderr,
@@ -14088,21 +16104,30 @@ def _should_use_escape_routing(router, escape_flag: bool | None, quiet: bool) ->
     Returns:
         True if escape routing should be used.
     """
+    use_escape, message = _escape_routing_decision(router, escape_flag)
+    if message is not None and not quiet:
+        print(message)
+    return use_escape
+
+
+def _escape_routing_decision(router, escape_flag: bool | None) -> tuple[bool, str | None]:
+    """Silent core of :func:`_should_use_escape_routing` (Issue #6666).
+
+    Returns ``(use_escape, message)``; ``message`` is the line
+    ``_should_use_escape_routing`` prints, so a caller that needs the decision
+    before it knows whether to announce it can print it later.
+    """
     if escape_flag is True:
-        if not quiet:
-            print("  Escape routing: enabled (--escape-routing)")
-        return True
+        return True, "  Escape routing: enabled (--escape-routing)"
     if escape_flag is False:
-        return False
+        return False, None
 
     # Auto-detect dense packages
     dense_packages = router.detect_dense_packages()
     if dense_packages:
-        if not quiet:
-            refs = [p.ref for p in dense_packages]
-            print(f"  Escape routing: auto-enabled (dense packages: {refs})")
-        return True
-    return False
+        refs = [p.ref for p in dense_packages]
+        return True, f"  Escape routing: auto-enabled (dense packages: {refs})"
+    return False, None
 
 
 def _parse_region_box(
@@ -15017,18 +17042,31 @@ def _net_name_for_lattice_key(router: "Autorouter", key: object) -> str:
     """Resolve a lattice ``failure_reasons``/endpoints key to a net name.
 
     Issue #4477.  Singles are keyed ``(net_id, seq)`` (issue #4278); coupled
-    diff pairs are keyed ``("pair", p_net_id, n_net_id)`` (issue #4270).  Any
-    other shape (defensive) falls back to ``str(key)`` rather than raising --
-    a reporting helper must never break the completion pass it is reporting
-    on.
+    diff pairs are keyed ``("pair", p_net_id, n_net_id)`` (issue #4270), or
+    ``("pair", p, n, seg_idx)`` for one segment of a chained pair, whose
+    in-part hops are ``(net_id, "hop", i)`` (issue #6378).  An
+    uncoupled-fallback leg is ``(pair_key, "P"|"N")`` (issue #6373) and is
+    named by its own net.  Any other shape (defensive) falls back to
+    ``str(key)`` rather than raising -- a reporting helper must never break
+    the completion pass it is reporting on.
     """
-    if isinstance(key, tuple) and len(key) == 3 and key[0] == "pair":
-        _tag, p_id, n_id = key
+    if (
+        isinstance(key, tuple)
+        and len(key) == 2
+        and key[1] in ("P", "N")
+        and isinstance(key[0], tuple)
+        and len(key[0]) >= 3
+        and key[0][0] == "pair"
+    ):
+        leg_net = key[0][1] if key[1] == "P" else key[0][2]
+        return router.net_names.get(leg_net, str(leg_net))
+    if isinstance(key, tuple) and len(key) in (3, 4) and key[0] == "pair":
+        p_id, n_id = key[1], key[2]
         p_name = router.net_names.get(p_id, str(p_id))
         n_name = router.net_names.get(n_id, str(n_id))
         return f"{p_name}/{n_name}"
-    if isinstance(key, tuple) and len(key) == 2:
-        net_id, _seq = key
+    if isinstance(key, tuple) and len(key) in (2, 3) and isinstance(key[0], int):
+        net_id = key[0]
         return router.net_names.get(net_id, str(net_id))
     return str(key)
 
@@ -15118,9 +17156,27 @@ def _build_complete_link_report(router: "Autorouter", pcb_path: Path) -> dict | 
         )
 
     try:
-        from kicad_tools.router.stuck_classifier import classify_stuck_nets
+        from kicad_tools.router.stuck_classifier import (
+            classify_stuck_nets,
+            is_budget_search_failure,
+        )
 
-        diag_by_net = {d.net_name: d for d in classify_stuck_nets(pcb_path).diagnoses}
+        # Issue #6315: hand the classifier the router's own per-net decline
+        # reasons, so a net the search gave up on for a GEOMETRIC reason is
+        # not labelled ``budget_starved``.  A net with several declined links
+        # keeps a geometric reason over a budget one.
+        search_failures: dict[str, str] = {}
+        for _key, _reason in reasons.items():
+            _name = _net_name_for_lattice_key(router, _key)
+            _prev = search_failures.get(_name)
+            if _prev is None or (
+                is_budget_search_failure(_prev) and not is_budget_search_failure(str(_reason))
+            ):
+                search_failures[_name] = str(_reason)
+        diag_by_net = {
+            d.net_name: d
+            for d in classify_stuck_nets(pcb_path, search_failures=search_failures).diagnoses
+        }
     except Exception:
         diag_by_net = {}
 
@@ -15844,17 +17900,30 @@ def _in_process_main_impl(argv: list[str] | None = None) -> int:
             witness_arg = str(witness_sidecar) if witness_sidecar is not None else None
             if witness_arg:
                 print(f"  Access-witness sidecar: {witness_arg}", file=sys.stderr)
+            # Issue #6314: say WHICH state the snapshot holds.  Added keys only:
+            # ``snapshot_state`` is ``live`` (the router's copper as it stood),
+            # ``last-accepted`` (a placement-delta trial was in flight and was
+            # discarded), ``best-trial`` (issue #6343: a Monte Carlo /
+            # evolutionary run was cut short and its best completed trial was
+            # saved -- ``snapshot_strategy`` / ``snapshot_trial`` say which) or
+            # ``inconsistent`` (that restore failed; copper and
+            # footprints may disagree); ``snapshot_placement`` is ``source`` or
+            # ``moved`` (a kept placement delta is in the snapshot's footprints).
+            snapshot_info = (_interrupt_state.get("partial_save_info") or {}) if saved else {}
             record_stage(
                 "partial-save",
                 snapshot_saved=saved,
                 snapshot=snapshot,
                 access_witness=witness_arg,
+                **snapshot_info,
             )
             return TIMEOUT_EXIT
 
 
 def _route_parser() -> argparse.ArgumentParser:
     """Shared parser for supervisor preflight and worker execution."""
+    from kicad_tools.cli.parser import LATTICE_ITERATIONS_HELP, positive_int
+
     parser = argparse.ArgumentParser(
         prog="kicad-tools route",
         description="Autoroute a KiCad PCB file",
@@ -15910,7 +17979,7 @@ def _route_parser() -> argparse.ArgumentParser:
             "KiCad-oracle completion rounds for pour nets (Issue #5785). After "
             "the zone fill, route exactly the links kicad-cli reports as "
             "unconnected_items on GND/VCC-style pours, up to N rounds, stopping "
-            "at zero or when the count stops falling. Default 3; 0 disables the "
+            "at zero or when the count stops falling. Default 12; 0 disables the "
             "loop and the stranded-pad verdict."
         ),
     )
@@ -16084,7 +18153,24 @@ def _route_parser() -> argparse.ArgumentParser:
         "--mc-trials",
         type=int,
         default=10,
-        help="Number of Monte Carlo trials (default: 10)",
+        help=(
+            "Number of Monte Carlo trials (default: 10).  Each trial routes in "
+            "its own net order; with --trial-router negotiated (default) each "
+            "costs about one default negotiated run, so expect roughly "
+            "ceil(trials / cores) x that wall time (bounded by --timeout)."
+        ),
+    )
+    parser.add_argument(
+        "--trial-router",
+        choices=["negotiated", "basic"],
+        default="negotiated",
+        help=(
+            "Router each --strategy monte-carlo / evolutionary trial runs "
+            "(Issue #6345).  'negotiated' (default) runs the same rip-up and "
+            "negotiation as --strategy negotiated, so a restart strategy is at "
+            "least as strong as one default run; 'basic' runs one A* pass per "
+            "trial (the pre-#6345 behaviour, much faster)."
+        ),
     )
     parser.add_argument(
         "--pop-size",
@@ -16105,7 +18191,31 @@ def _route_parser() -> argparse.ArgumentParser:
         help=(
             "Max iterations for negotiated routing (default: 15). "
             "Also applies to two-phase routing when --two-phase-iterations "
-            "is not explicitly set."
+            "is not explicitly set. Does NOT apply to --route-engine lattice; "
+            "use --lattice-iterations for its round cap."
+        ),
+    )
+    parser.add_argument(
+        "--nogood-cache",
+        action="store_true",
+        default=False,
+        help=(
+            "EXPERIMENTAL (Issue #6353, default off): answer a repeated, "
+            "completely-failed negotiated net attempt from a bounded cache. "
+            "Only failures whose search drained its open set are cached "
+            "(never timeouts or iteration-cap give-ups), and a hit requires "
+            "the grid state the search reads to be unchanged."
+        ),
+    )
+    parser.add_argument(
+        "--nogood-cache-margin-cells",
+        default="full",
+        help=(
+            "Failure-window margin in grid cells around the net's terminals, "
+            "or 'full' (default) to fingerprint every grid plane (occupancy, "
+            "usage, history/present cost, obstacle, zone). A numeric margin is "
+            "a heuristic that can serve a stale failure when state outside "
+            "the window changes."
         ),
     )
     parser.add_argument(
@@ -16118,9 +18228,11 @@ def _route_parser() -> argparse.ArgumentParser:
             "(routed_count, clearance_violations, overflow) before the "
             "outer loop breaks early (Issue #3101). Default: 2. The "
             "iteration-0 result is preserved via the existing post-loop "
-            "best-state restore. Use 0 to disable (matches pre-#3101 "
-            "behaviour where the loop ran until --iterations or one of "
-            "the existing should_terminate_early heuristics fired)."
+            "best-state restore. Use 0 to disable every progress-based "
+            "early stop -- this one AND the overflow-stagnation stop "
+            "(Issue #6361) -- so the loop runs its full --iterations / "
+            "--timeout budget (ending early only when no nets are left to "
+            "rip up or on the power-net stall abort)."
         ),
     )
     parser.add_argument(
@@ -16220,6 +18332,30 @@ def _route_parser() -> argparse.ArgumentParser:
             "cluster (e.g. board-05's U3 south sense band) gets a reserved "
             "channel instead of competing greedily.  Default OFF "
             "(byte-identical to prior behaviour when absent)."
+        ),
+    )
+    parser.add_argument(
+        "--escape-corridor-assignment",
+        choices=("greedy", "flow"),
+        default="greedy",
+        # Issue #6352 (EXPERIMENTAL, research-only): joint min-cost-flow
+        # pin -> exit assignment for the escape-corridor planner.  Hidden from
+        # --help -- it exists so scripts/research/escape_flow_experiment.py can
+        # select the treatment arm; ``flow`` implies
+        # --escape-corridor-reservation.  Default ``greedy`` is byte-identical.
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--no-plane-via-reservation",
+        action="store_true",
+        help=(
+            "Disable the pre-route pour-pad via-site reservation (Issue "
+            "#6401).  ON by default for the grid and lattice engines: before "
+            "signal routing, each SMD pad of an auto-skipped pour net on the "
+            "perimeter of a multi-pad footprint gets one legal via site plus "
+            "its stub held free, so the post-route stitch/oracle pass can "
+            "still connect it to its plane.  Pass this flag to restore "
+            "pre-#6401 behaviour."
         ),
     )
     parser.add_argument(
@@ -16422,7 +18558,7 @@ def _route_parser() -> argparse.ArgumentParser:
             "Bound routing work by an ITERATION budget instead of wall-clock "
             "time so the routed output (and its DRC count) is reproducible "
             "across machines regardless of runner speed or load (Issue #3538). "
-            "The per-net A* search is the only wall-clock-coupled stage that "
+            "The per-net A* search is the main wall-clock-coupled stage that "
             "lands different amounts of copper on a slow vs fast machine; this "
             "flag disables the per-net wall-clock cutoff (--per-net-timeout 0) "
             "and pins the C++ A* iteration backstop (--max-search-iterations) "
@@ -16438,8 +18574,20 @@ def _route_parser() -> argparse.ArgumentParser:
             "iteration backstop value can be overridden by passing an explicit "
             "--max-search-iterations N alongside this flag (N is then used "
             "verbatim); see DETERMINISTIC_BUDGET_MAX_SEARCH_ITERATIONS for the "
-            "default. Relief-rescue sub-searches keep a 10 s wall clock unless "
-            "--deterministic-rescue is also passed."
+            "default. "
+            "Relief-rescue sub-searches keep a 10 s wall clock unless "
+            "--deterministic-rescue is also passed. With --deterministic-budget "
+            "alone, each negotiated rip-up iteration also gives every per-net "
+            "search a budget of 10%% of the remaining stage time, and the "
+            "pure-Python A* fallback usually hits it before the iteration cap "
+            "(Issue #6329; logged as '[deterministic-budget] per-net wall clock "
+            "bound net ...'); --deterministic-rescue removes that budget and the "
+            "60 s oscillation-escape budget (Issue #6475). Still wall-clock-bound "
+            "even with both flags: the relief-rescue transaction bound; the "
+            "post-negotiation sweep (60 s, 10 s per net); the trace optimizer / "
+            "DRC nudge, which are skipped when little --timeout is left; and the "
+            "outer --timeout stage deadline (logged as '[deterministic-budget] "
+            "stage deadline fired')."
         ),
     )
     parser.add_argument(
@@ -16450,7 +18598,10 @@ def _route_parser() -> argparse.ArgumentParser:
             "sub-searches by the per-net node-expansion cap instead of their "
             "10 s wall clock (Issue #5870, mechanism #4536). Only takes effect "
             "with an active cap (--deterministic-budget or "
-            "--per-net-iterations). Off by default because it costs board 07 "
+            "--per-net-iterations). Also switches off the 60 s "
+            "oscillation-escape budget and the remaining-budget per-iteration "
+            "per-net cap (Issue #6475), so --timeout no longer changes reach. "
+            "Off by default because it costs board 07 "
             "routed nets (#4730/#4770); use it when the route must be "
             "independent of machine load."
         ),
@@ -16550,7 +18701,18 @@ def _route_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Show what would be done without writing output",
+        help=(
+            "Print the analytical routing plan (grid, cells, memory budget) "
+            "and exit without loading the router, routing, or writing any "
+            "file (including with --complete).  On the escalation flows (--auto-layers, the default; "
+            "--auto-pcb-size; --auto-mfr-tier; --adaptive-rules) the plan is "
+            "printed once per layer count the ladder would try.  With "
+            "--analyze, --dry-run instead prints the complexity and "
+            "routability analysis for the board as loaded (--layers, default "
+            "auto-detect; no escalation ladder) and exits without routing or "
+            "writing any file; it never routes, and exits non-zero if the "
+            "analysis itself fails."
+        ),
     )
     parser.add_argument(
         "--analyze",
@@ -16909,6 +19071,13 @@ def _route_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--lattice-iterations",
+        type=positive_int,
+        default=None,
+        metavar="N",
+        help=LATTICE_ITERATIONS_HELP,
+    )
+    parser.add_argument(
         "--lattice-optimize",
         action="store_true",
         help=(
@@ -16962,6 +19131,17 @@ def _route_parser() -> argparse.ArgumentParser:
     # Issue #4433: opt-in HARD per-net avoid_layers.  Mirror of the outer
     # parser.py flag; both sites must stay in sync per
     # ``tests/test_cli_parser_drift.py``.
+    parser.add_argument(
+        "--fallback-bidirectional",
+        action="store_true",
+        default=False,
+        help=(
+            "Issue #6527 (experimental, default off): let the C++ backend's "
+            "Python fallback use route_auto (bidirectional A* for paths of "
+            ">= bidirectional_threshold cells, one-way retry sharing one "
+            "deadline) instead of the one-way route()."
+        ),
+    )
     parser.add_argument(
         "--strict-layers",
         action="store_true",
@@ -17338,7 +19518,10 @@ def _route_parser() -> argparse.ArgumentParser:
         help=(
             "Automatically create copper pour zones for power-classified "
             "nets (GND, VCC, etc.) when the input PCB has none "
-            "(default: enabled). Use --no-auto-pour to disable."
+            "(default: enabled). A net the --net-class-map declares routed "
+            "(is_pour_net=false and route_via other than 'pour') is never "
+            "auto-poured, whatever its name; --skip-nets still forces a pour. "
+            "Use --no-auto-pour to disable."
         ),
     )
     parser.add_argument(
@@ -17762,7 +19945,7 @@ def _route_parser() -> argparse.ArgumentParser:
         metavar="PATH",
         help=(
             "Export failed nets (fully-unrouted and partial) to a file for "
-            "triage or manual completion in KiCad. A '.json' path emits "
+            "triage and automation (e.g. feed to kct net-status --why). A '.json' path emits "
             "structured per-net detail (status, connected/total pads, and the "
             "stranded pad names for partial nets); any other extension emits "
             "one net name per line. The file is always written when routing "
@@ -17882,6 +20065,10 @@ def _route_parser() -> argparse.ArgumentParser:
 def _main_impl(argv: list[str] | None = None) -> int:
     parser = _route_parser()
     args = parser.parse_args(argv)
+    if getattr(args, "nogood_cache", False):
+        # Issue #6353: experiment-only plumbing; read by Autorouter lazily.
+        os.environ["KCT_NOGOOD_CACHE"] = "1"
+        os.environ["KCT_NOGOOD_CACHE_MARGIN_CELLS"] = str(args.nogood_cache_margin_cells)
     # Issue #6155: resolve --manufacturer against the board's project.kct
     # before anything (the lint gate included) reads it.
     _resolve_route_manufacturer(args, argv)
@@ -17891,6 +20078,9 @@ def _main_impl(argv: list[str] | None = None) -> int:
     from .route_deadline import CONTROL_ENV, TIMEOUT_EXIT, RouteDeadlineExpired
     from .route_placement import finish
 
+    # Issue #6563: defense in depth -- the partial-save writer is a no-op for a
+    # dry run.  The flag is module-global, so it is scoped to this call.
+    _interrupt_state["dry_run"] = bool(getattr(args, "dry_run", False))
     try:
         # Issue #5938: under --format json every progress/diagnostic print
         # from the (very chatty) routing pipeline goes to stderr; only the
@@ -17997,6 +20187,8 @@ def _main_impl(argv: list[str] | None = None) -> int:
                 args._placement_output_before = output.stat() if output.exists() else None
             finish(args, TIMEOUT_EXIT)
         raise
+    finally:
+        _interrupt_state["dry_run"] = False
 
 
 def _lint_gate_unstage_args(args, gate, requested_output) -> None:
@@ -18062,6 +20254,108 @@ def _emit_route_json_fallback(args, exit_code: int) -> None:
         ),
         file=json_stdout(),
     )
+
+
+def _dry_run_layer_counts(pcb_path: Path, args, argv) -> tuple[list[int], bool]:
+    """Layer counts the run would try, and whether layers escalate.
+
+    Issue #6563.  When layers escalate (``--auto-layers``, the default, or
+    ``--auto-pcb-size`` which implies it unless ``--no-auto-layers`` was
+    passed), this is the same filtered ladder
+    (``--starting-layers`` .. ``--max-layers``, declared stackup) the inner
+    ``route_with_layer_escalation`` walks.  Otherwise it is the fixed layer
+    count: ``--layers N`` or the stack auto-detected from the board.
+    """
+    _argv = argv if argv is not None else sys.argv
+    escalates_layers = bool(getattr(args, "auto_layers", False)) or (
+        bool(getattr(args, "auto_pcb_size", False)) and "--no-auto-layers" not in _argv
+    )
+    if escalates_layers:
+        return list(_mfr_tier_reachable_layer_counts(pcb_path, args)), True
+    layers = getattr(args, "layers", "auto")
+    if layers == "auto":
+        from kicad_tools.router.io import detect_layer_stack
+
+        return [detect_layer_stack(pcb_path.read_text()).num_layers], False
+    return [6 if layers == "6" else 4 if str(layers).startswith("4") else 2], False
+
+
+def _print_dry_run_plan(
+    pcb_path: Path,
+    output_path: Path,
+    args,
+    argv,
+    *,
+    grid_explicit: bool,
+) -> int:
+    """Print the analytical ``--dry-run`` plan and return without routing.
+
+    Issue #6563: runs before every route flow dispatch, so a dry run loads no
+    router, routes nothing and writes no file -- on the escalation flows as
+    well as the single attempt.  The plan is the #4263 analytical grid plan,
+    printed once per layer count the run would try (a single plan for a
+    fixed layer count).  ``--auto-pcb-size`` / ``--auto-mfr-tier`` /
+    ``--adaptive-rules`` rungs change the board size or rules per attempt;
+    the plan reports the board and rules as given (the first rung).
+
+    The explicit-grid vs clearance refusal is applied here too, so a dry run
+    reports the same configuration error a real run would.
+    """
+    quiet = args.quiet
+    if grid_explicit and args.grid > args.clearance and not args.force:
+        print(
+            f"Error: Grid resolution {args.grid}mm exceeds clearance {args.clearance}mm.\n"
+            f"This WILL cause DRC violations.\n\n"
+            f"Options:\n"
+            f"  1. Use a finer grid: --grid {args.clearance / 2}\n"
+            f"  2. Use --grid auto for automatic selection\n"
+            f"  3. Use --force to override (not recommended)\n",
+            file=sys.stderr,
+        )
+        return 1
+
+    layer_counts, escalates = _dry_run_layer_counts(pcb_path, args, argv)
+    flows = []
+    if getattr(args, "auto_pcb_size", False):
+        flows.append("--auto-pcb-size")
+    if getattr(args, "auto_mfr_tier", False):
+        flows.append("--auto-mfr-tier")
+    if escalates:
+        flows.append("--auto-layers")
+    if getattr(args, "adaptive_rules", False):
+        flows.append("--adaptive-rules")
+    if not quiet:
+        print("\n--- Dry run: routing plan (no routing, no files written) ---")
+        print(f"Input:          {pcb_path}")
+        print(f"Output:         {output_path} (not written)")
+        print(f"Flow:           {' + '.join(flows) if flows else 'single attempt'}")
+        print(f"Layer counts:   {', '.join(str(n) for n in layer_counts)}")
+        if flows and flows != ["--auto-layers"]:
+            print(
+                "Note:           size/tier/rule rungs are not expanded; the plan "
+                "uses the board and rules as given (first rung)."
+            )
+    for num_layers in layer_counts:
+        plan = compute_dry_run_grid_plan(
+            pcb_path=pcb_path,
+            selected_grid=args.grid,
+            clearance=args.clearance,
+            num_layers=num_layers,
+            max_cells=getattr(args, "max_cells", 500_000),
+            engine=_resolve_route_engine(args),
+        )
+        if plan is None:
+            if not quiet:
+                print(
+                    "Dry run: no detectable board outline; cannot compute the "
+                    "grid plan.  No routing performed."
+                )
+            return 0
+        if not quiet:
+            if len(layer_counts) > 1:
+                print(f"\n[{num_layers}-layer rung]")
+            print(format_dry_run_grid_plan(plan))
+    return 0
 
 
 def _run_main_impl(args, parser, argv) -> int:
@@ -18299,6 +20593,11 @@ def _run_main_impl(args, parser, argv) -> int:
         output_path = (
             Path(args.output) if args.output else pcb_path.with_stem(pcb_path.stem + "_routed")
         )
+        # Issue #6563: --dry-run writes no files, even for the no-op rewrite.
+        if getattr(args, "dry_run", False):
+            if not getattr(args, "quiet", False):
+                print(f"  Would write {output_path} (unchanged)")
+            return 0
         _write_routed_pcb(pcb_path, output_path, "", guard_copper_loss=True)
         if not getattr(args, "quiet", False):
             print(f"  Wrote {output_path} (unchanged)")
@@ -18692,7 +20991,15 @@ def _run_main_impl(args, parser, argv) -> int:
         elif grid_auto_result.memory_forced_unsafe_grid and not (
             args.force or getattr(args, "allow_unsafe_grid", False)
         ):
+            from kicad_tools.router.io import format_max_cells_option
+
             recommended = args.clearance / 2
+            # Issue #6306: name the concrete --max-cells value that clears the gate.
+            _safe_cells = grid_auto_result.safe_grid_cells
+            _n_off = 1 if _safe_cells else 0
+            _safe_cells_opt = (
+                f"  1. {format_max_cells_option(_safe_cells)}\n" if _safe_cells else ""
+            )
             print(
                 f"Error: Auto-grid selected {grid_auto_result.resolution}mm > "
                 f"clearance/2 ({recommended}mm) because the memory budget cap "
@@ -18702,11 +21009,11 @@ def _run_main_impl(args, parser, argv) -> int:
                 f"produce clearance-violating vias/segments (DRC shorts).\n"
                 f"An unrouted net is strictly safer than a short.\n\n"
                 f"Options:\n"
-                f"  1. Enlarge or split the board (fewer cells per mm^2)\n"
-                f"  2. Add routing layers (--auto-layers / --starting-layers)\n"
-                f"  3. Loosen the manufacturer clearance (looser --manufacturer "
+                f"{_safe_cells_opt}"
+                f"  {1 + _n_off}. Add routing layers (--auto-layers / --starting-layers)\n"
+                f"  {2 + _n_off}. Loosen the manufacturer clearance (looser --manufacturer "
                 f"profile or larger --clearance)\n"
-                f"  4. Pass --allow-unsafe-grid (or --force) to route anyway and "
+                f"  {3 + _n_off}. Pass --allow-unsafe-grid (or --force) to route anyway and "
                 f"accept the DRC risk (not recommended)\n",
                 file=sys.stderr,
             )
@@ -18799,13 +21106,33 @@ def _run_main_impl(args, parser, argv) -> int:
         )
         return 2
 
+    # Issue #6563: --dry-run must print the plan and exit BEFORE any
+    # escalation dispatch and before the single-attempt auto-pour staging.
+    # The #4263 analytical short-circuit used to sit after both: the default
+    # --auto-layers flow (and --auto-pcb-size, --auto-mfr-tier,
+    # --adaptive-rules) routed for real and wrote checkpoint/partial/final
+    # files, and even --layers N staged a copy of the board at --output.
+    # ``--analyze --dry-run`` keeps its downstream analysis path: it skips
+    # every escalation dispatch below (``_analyze_dry_run``, issue #6648) and
+    # runs the single-attempt complexity + routability analysis, which
+    # returns before routing.
+    if args.dry_run and not args.analyze:
+        return _print_dry_run_plan(
+            pcb_path,
+            output_path,
+            args,
+            argv,
+            grid_explicit=grid_auto_result is None,
+        )
+
     # Issue #3352 (P_AS3): --auto-pcb-size wraps the layer escalation path
     # with an outer size-escalation loop.  Q5 decision: --auto-pcb-size
     # IMPLIES --auto-layers unless --no-auto-layers was explicit (the
     # layers-first ladder is meaningless when layers can't escalate).
     # Per Q4: auto-load project.kct EscalationPolicy + envelope_hard +
     # mounting_hole_group when a project.kct sits next to the PCB.
-    if getattr(args, "auto_pcb_size", False):
+    _analyze_dry_run = bool(args.dry_run and args.analyze)
+    if getattr(args, "auto_pcb_size", False) and not _analyze_dry_run:
         # Q5 enforcement: --auto-pcb-size implies --auto-layers unless
         # the user explicitly passed --no-auto-layers.
         _argv_for_q5 = argv if argv is not None else sys.argv
@@ -18835,7 +21162,7 @@ def _run_main_impl(args, parser, argv) -> int:
     # iterating over registered manufacturer tiers from cheapest -> tightest.
     # Inside each tier the routing dispatches to the existing layer-escalation
     # path (or the single-layer path when --no-auto-layers is set).
-    if getattr(args, "auto_mfr_tier", False):
+    if getattr(args, "auto_mfr_tier", False) and not _analyze_dry_run:
         return route_with_mfr_tier_escalation(
             pcb_path=pcb_path,
             output_path=output_path,
@@ -18844,7 +21171,13 @@ def _run_main_impl(args, parser, argv) -> int:
         )
 
     # Handle auto-layers mode (separate code path)
-    if args.auto_layers and args.adaptive_rules:
+    if _analyze_dry_run:
+        # Issue #6648: ``--analyze --dry-run`` analyses the board as loaded
+        # (``--layers``, default auto-detect) on the single-attempt path and
+        # exits without routing; the escalation ladders would route for real
+        # and never consult ``--analyze``.
+        pass
+    elif args.auto_layers and args.adaptive_rules:
         # Combined 2D search: layers + rules
         return route_with_combined_escalation(
             pcb_path=pcb_path,
@@ -18882,7 +21215,8 @@ def _run_main_impl(args, parser, argv) -> int:
     # Issue #4689: capture the user-supplied path for the banner BEFORE the
     # staging rebind below re-points ``pcb_path`` at the staged output copy.
     display_input_path = pcb_path
-    if getattr(args, "auto_pour", True):
+    # Issue #6563: --dry-run (reachable here via --analyze) must not stage a copy.
+    if getattr(args, "auto_pour", True) and not getattr(args, "dry_run", False):
         from kicad_tools.router.auto_pour import auto_pour_if_missing
 
         pcb_path = _stage_input_for_auto_pour(pcb_path, output_path)
@@ -18900,10 +21234,17 @@ def _run_main_impl(args, parser, argv) -> int:
                 if getattr(args, "_placement_disposition", None) is not None
                 else frozenset()
             ),
+            # Issue #6599: honour --net-class-map routed declarations.
+            net_class_map=getattr(args, "_loaded_net_class_map", None),
         )
 
     # Auto-classify pour nets and extend skip_nets
-    _skipped, _no_zone = _auto_skip_pour_nets(pcb_path, skip_nets, quiet=args.quiet)
+    _skipped, _no_zone = _auto_skip_pour_nets(
+        pcb_path,
+        skip_nets,
+        quiet=args.quiet,
+        net_class_map=getattr(args, "_loaded_net_class_map", None),
+    )
     # Issue #4688: stash the auto-skipped names (exact board net names) so the
     # --net-class-map resolver's phase 3 can match sidecar keys naming them —
     # they enter neither router.net_names nor router.existing_routes.
@@ -19015,6 +21356,10 @@ def _run_main_impl(args, parser, argv) -> int:
         # the routing cache so a --copper 2 run is never served a --copper 1
         # route.
         min_trace_width_floor=getattr(args, "_mfr_min_trace_floor", None),
+        # Issue #6443: the authored board minimum floors the pair gap.
+        authored_min_clearance=getattr(args, "_authored_min_clearance", None),
+        # Issue #6561: the stackup-aware fab floor for the pair gap.
+        mfr_clearance_floor=getattr(args, "_mfr_clearance_floor", None),
         # Issue #2891: forward escalation-in-progress flag so the escape
         # router demotes the #2880 ERROR log when an outer wrapper will
         # retry on a tier that supports via-in-pad.
@@ -19023,6 +21368,7 @@ def _run_main_impl(args, parser, argv) -> int:
         # to a HARD constraint for the ampacity-free case (nets with a declared
         # ``target_ampacity`` are hard-blocked regardless of this flag).
         strict_layers=getattr(args, "strict_layers", False),
+        fallback_bidirectional=getattr(args, "fallback_bidirectional", False),
         # Issue #4475 (epic #4465 Phase 3): stage the lattice engine's
         # same-net via-in-pad attach as a LAST RESORT (in-layer / free-space
         # via first) instead of the #4284 opportunistic tier-only gate.
@@ -19074,35 +21420,6 @@ def _run_main_impl(args, parser, argv) -> int:
             if plane_layers:
                 print(f"  Plane layers:   {', '.join(plane_layers)}")
 
-    # Issue #4263: analytical --dry-run short-circuit.
-    #
-    # A plain ``--dry-run`` only needs the strategy/grid selection verdict, so
-    # report it analytically and return BEFORE ``load_pcb_for_routing`` (which
-    # allocates the full RoutingGrid at route_cmd's load site and, on a large
-    # board, is the >45s / OOM step).  ``args.grid`` is already a float here
-    # (explicit value, or resolved from ``--grid auto`` above) and
-    # ``layer_stack`` is known, so the plan reuses the allocation-free
-    # selection math without touching the router.
-    #
-    # ``--analyze --dry-run`` is intentionally left to the downstream
-    # complexity/routability path (route_cmd:~10183), which needs a loaded
-    # ``router``; only the plain dry run short-circuits here.
-    if args.dry_run and not args.analyze:
-        dry_run_plan = compute_dry_run_grid_plan(
-            pcb_path=pcb_path,
-            selected_grid=args.grid,
-            clearance=args.clearance,
-            num_layers=layer_stack.num_layers,
-            max_cells=getattr(args, "max_cells", 500_000),
-            engine=_resolve_route_engine(args),
-        )
-        if dry_run_plan is not None:
-            if not quiet:
-                print(format_dry_run_grid_plan(dry_run_plan))
-            return 0
-        # No detectable board outline: fall through to the normal load path
-        # rather than guess dimensions (the pre-#4263 dry-run behavior).
-
     # Load PCB
     if not quiet:
         flush_print("\n--- Loading PCB ---")
@@ -19134,6 +21451,7 @@ def _run_main_impl(args, parser, argv) -> int:
                 localize_lattice_to_region=getattr(args, "_complete_localized", False),
                 lattice_link_budget_s=_resolve_lattice_link_budget(args),
                 lattice_deadline=_lattice_absolute_deadline(args),
+                lattice_max_iterations=getattr(args, "lattice_iterations", None),
                 # Issue #4170 (Phase 2b-1): board-relative boundary stub
                 # terminals whose tip cells are carved open as same-net
                 # reconnection targets (None when no --region / no stubs).
@@ -19158,6 +21476,8 @@ def _run_main_impl(args, parser, argv) -> int:
     _apply_net_class_map_sidecar(router, args, quiet=quiet)
     # Issue #4431: attach the --voltage-map HV pairwise-clearance table.
     _apply_pairwise_clearance(router, args, quiet=quiet)
+    # Issue #6693: name overlapping different-net input pads up front.
+    _report_input_pad_overlaps(router, args, display_input_path, quiet=quiet)
     # Issue #5520: --no-routing-plan (report-only plan stage).
     _apply_routing_plan_flag(router, args)
     # Issue #5521: --plan-gate refuses an infeasible plan here --
@@ -19174,6 +21494,8 @@ def _run_main_impl(args, parser, argv) -> int:
     _apply_escape_corridor_reservation(router, args)
     _apply_pad_access_invariant(router, args)
     _apply_ripup_strategy(router, args)
+    # Issue #6401: reserve pour-pad via sites before signal routing.
+    _apply_plane_via_reservation(router, args, pcb_path, quiet=quiet)
 
     # Issue #3171: inject boosted analog routing class for --analog-nets /
     # --auto-analog selected nets (pour/ground nets are left untouched).
@@ -19216,6 +21538,7 @@ def _run_main_impl(args, parser, argv) -> int:
                 localize_lattice_to_region=getattr(args, "_complete_localized", False),
                 lattice_link_budget_s=_resolve_lattice_link_budget(args),
                 lattice_deadline=_lattice_absolute_deadline(args),
+                lattice_max_iterations=getattr(args, "lattice_iterations", None),
                 # Issue #4170 (Phase 2b-1): board-relative boundary stub
                 # terminals whose tip cells are carved open as same-net
                 # reconnection targets (None when no --region / no stubs).
@@ -19257,8 +21580,14 @@ def _run_main_impl(args, parser, argv) -> int:
     _interrupt_state["router"] = router
     _interrupt_state["output_path"] = output_path
     _interrupt_state["pcb_path"] = pcb_path
+    _reset_partial_save_state()
+    # Issue #6553: checkpoints overwrite ``pcb_path`` with routed-only copper,
+    # so the partial save takes the preserved input copper (captured above,
+    # before routing) from here.
+    _interrupt_state["source_copper"] = _preserved_sexp
+    _interrupt_state["source_routes"] = _preserved_routes
     _interrupt_state["quiet"] = quiet
-    _interrupt_state["interrupted"] = False
+    _reset_interrupt_outcome()
     signal.signal(signal.SIGINT, _handle_interrupt)
 
     record_stage("routing-conflict-fallback-conversion")
@@ -19425,6 +21754,9 @@ def _run_main_impl(args, parser, argv) -> int:
 
     # Analyze routability if requested
     if args.analyze:
+        # Issue #6648: under --dry-run an analysis failure must not fall
+        # through to a real route; record it and exit non-zero below.
+        _analysis_failed = False
         # Run pre-routing complexity analysis first
         if not quiet:
             print("\n--- Pre-Routing Complexity Analysis ---")
@@ -19469,6 +21801,7 @@ def _run_main_impl(args, parser, argv) -> int:
 
             print(f"{'=' * 60}")
         except Exception as e:
+            _analysis_failed = True
             print(f"Warning: Complexity analysis failed: {e}", file=sys.stderr)
 
         if not quiet:
@@ -19521,16 +21854,24 @@ def _run_main_impl(args, parser, argv) -> int:
 
             print(f"{'=' * 60}")
 
-            # If just analyzing, exit here
-            if args.dry_run:
-                return 0
-
         except Exception as e:
+            _analysis_failed = True
             print(f"Warning: Analysis failed: {e}", file=sys.stderr)
             if args.verbose:
                 import traceback
 
                 traceback.print_exc()
+
+        # If just analyzing, exit here -- never route under --dry-run, even
+        # when the analysis raised (issue #6648).
+        if args.dry_run:
+            if _analysis_failed:
+                print(
+                    "Error: --analyze --dry-run: analysis failed; not routing.",
+                    file=sys.stderr,
+                )
+                return 1
+            return 0
 
     # Configure bus routing if enabled
     bus_config = None
@@ -19820,26 +22161,71 @@ def _run_main_impl(args, parser, argv) -> int:
             float(getattr(args, "checkpoint_interval", 30.0) or 0.0),
             quiet=quiet,
             preserved_sexp=_preserved_sexp,
+            preserved_routes=_preserved_routes,
             router_provider=lambda: router,
             source_pcb_path=Path(getattr(args, "pcb", pcb_path)),
             best_checkpoint=getattr(args, "_best_checkpoint", None),
+            dry_run=bool(getattr(args, "dry_run", False)),
         )
 
         # Define routing function for profiling
         def do_routing():
             nonlocal diffpair_warnings, relaxed_nets_report, diffpair_budget_exit_pairs
 
-            # Adaptive multi-resolution routing (when --grid auto selects it)
-            if multi_res_plan is not None and multi_res_plan.is_multi_resolution:
+            # Issue #6666: decide escape routing ONCE, before the adaptive
+            # branch (the decision prints, so it must not be re-evaluated).
+            # The adaptive branch used to return before this decision was
+            # ever made.  That was latent until PR #4877 let
+            # ``compute_multi_resolution_plan`` see KiCad 7+ refs; after it,
+            # a board whose adaptive Phase 1 escapes 0 pads of a fine-pitch
+            # part (chorus-test's U8 once #6646 declined full-stack micro
+            # vias) hard-failed with FinePitchEscapeFailure instead of
+            # reaching the dense-package escape pre-phase that used to route
+            # it (30/51).
+            #
+            # The pre-phase only pre-empts the adaptive branch when the
+            # adaptive Phase 1 WOULD hard-fail (a read-only preview of the
+            # same escape search).  Boards whose Phase 1 succeeds keep the
+            # adaptive branch byte-for-byte: on board 07 the escape pre-phase
+            # routes far worse than adaptive (#3438), so pre-empting on
+            # every dense package regressed it.
+            use_adaptive_grid = multi_res_plan is not None and multi_res_plan.is_multi_resolution
+            use_escape_routing, escape_message = _escape_routing_decision(
+                router, escape_routing_flag
+            )
+            adaptive_router = None
+            if use_adaptive_grid:
                 from kicad_tools.router.adaptive_grid import AdaptiveGridRouter
 
-                if not quiet:
-                    flush_print("  Using adaptive multi-resolution grid strategy")
                 adaptive_router = AdaptiveGridRouter(
                     grid=router.grid,
                     rules=router.rules,  # Issue #6243: carries authored minima
                     router=router,
                 )
+                if use_escape_routing:
+                    phase1_failure = adaptive_router.preview_phase1(router.pads)
+                    if phase1_failure is None:
+                        # Adaptive Phase 1 escapes every fine-pitch part:
+                        # keep the adaptive branch (its own escapes).
+                        use_escape_routing = False
+                        escape_message = None
+                    else:
+                        use_adaptive_grid = False
+                        if not quiet:
+                            flush_print(
+                                "  Adaptive multi-resolution grid skipped: its Phase 1 "
+                                f"would escape 0/{phase1_failure.attempted_pads} pads of "
+                                f"{phase1_failure.component_ref}; falling back to the "
+                                "dense-package escape pre-phase (#6666)"
+                            )
+            if escape_message is not None and not quiet:
+                flush_print(escape_message)
+
+            # Adaptive multi-resolution routing (when --grid auto selects it)
+            if use_adaptive_grid:
+                assert adaptive_router is not None
+                if not quiet:
+                    flush_print("  Using adaptive multi-resolution grid strategy")
 
                 # Build nets dict (filter to routable multi-pad nets)
                 adaptive_nets = {
@@ -19928,13 +22314,16 @@ def _run_main_impl(args, parser, argv) -> int:
                         return router.route_all_evolutionary(
                             pop_size=args.pop_size,
                             generations=args.generations,
+                            **_multistart_trial_kwargs(args),
                             verbose=args.verbose and not quiet,
                             timeout=_budgeted_timeout(args),
                         )
                     elif args.strategy == "monte-carlo":
                         return router.route_all_monte_carlo(
                             num_trials=args.mc_trials,
+                            **_multistart_trial_kwargs(args),
                             verbose=args.verbose and not quiet,
+                            timeout=_budgeted_timeout(args),
                         )
                     elif getattr(args, "two_phase", False) and args.strategy == "negotiated":
                         return router.route_all_two_phase(
@@ -19999,8 +22388,9 @@ def _run_main_impl(args, parser, argv) -> int:
 
                 return adaptive_result.all_routes
 
-            # Check if escape routing should run as a pre-phase
-            if _should_use_escape_routing(router, escape_routing_flag, quiet):
+            # Check if escape routing should run as a pre-phase (decided once
+            # above -- Issue #6666)
+            if use_escape_routing:
                 # Issue #3952: compose the escape pre-phase with the
                 # CoupledPathfinder diff-pair pre-pass when
                 # --differential-pairs is requested so Phase A runs on
@@ -20180,23 +22570,30 @@ def _run_main_impl(args, parser, argv) -> int:
                 if args.strategy == "monte-carlo":
                     return router.route_all_monte_carlo(
                         num_trials=args.mc_trials,
+                        **_multistart_trial_kwargs(args),
                         verbose=args.verbose and not quiet,
+                        timeout=_budgeted_timeout(args),
                     )
                 else:
                     return router.route_all_evolutionary(
                         pop_size=args.pop_size,
                         generations=args.generations,
+                        **_multistart_trial_kwargs(args),
                         verbose=args.verbose and not quiet,
+                        timeout=_budgeted_timeout(args),
                     )
             elif args.strategy == "monte-carlo":
                 return router.route_all_monte_carlo(
                     num_trials=args.mc_trials,
+                    **_multistart_trial_kwargs(args),
                     verbose=args.verbose and not quiet,
+                    timeout=_budgeted_timeout(args),
                 )
             elif args.strategy == "evolutionary":
                 return router.route_all_evolutionary(
                     pop_size=args.pop_size,
                     generations=args.generations,
+                    **_multistart_trial_kwargs(args),
                     verbose=args.verbose and not quiet,
                     timeout=_budgeted_timeout(args),
                 )
@@ -20261,10 +22658,17 @@ def _run_main_impl(args, parser, argv) -> int:
                 _save_partial_results()
             return 1
 
-        # Check if interrupted and save partial results
-        if _interrupt_state["interrupted"]:
+        # Check if interrupted and save partial results.  Only the
+        # ``KeyboardInterrupt`` branch above reaches here unsaved; when the
+        # handler already saved (its ``SystemExit`` swallowed inside a
+        # ``__del__``, issue #6324) its recorded exit code is reused and the
+        # ``_partial`` is not rewritten.
+        if _interrupt_state["interrupted"] and _interrupt_state.get("interrupt_exit") is None:
             _save_partial_results()
-            return 5  # Exit code 5 indicates interruption with partial results saved
+            _interrupt_state["interrupt_exit"] = 5  # interrupted, partial results saved
+        _stop_rc = _interrupt_requested_exit()
+        if _stop_rc is not None:
+            return _stop_rc
 
         # Issue #2595: placement-routing feedback loop.  When the user
         # opted in via --placement-feedback and the initial pass left
@@ -20285,6 +22689,10 @@ def _run_main_impl(args, parser, argv) -> int:
                 args=args,
                 quiet=quiet,
             )
+            # Issue #6324: an interrupt swallowed during the feedback loop.
+            _stop_rc = _interrupt_requested_exit()
+            if _stop_rc is not None:
+                return _stop_rc
 
         # Issue #4468 (epic #3438 Phase 3): classifier-driven placement-DELTA
         # feedback.  Runs after (and independently of) the geometry loop above:
@@ -20314,6 +22722,10 @@ def _run_main_impl(args, parser, argv) -> int:
             )
             if _moved_placement_path is not None:
                 pcb_path = _moved_placement_path
+            # Issue #6324: stop before the cache write and every later stage.
+            _stop_rc = _interrupt_requested_exit()
+            if _stop_rc is not None:
+                return _stop_rc
 
         _rss.mark("post-negotiation")
         # Canonicalize the committed-copper boundary for every strategy,
@@ -20338,7 +22750,7 @@ def _run_main_impl(args, parser, argv) -> int:
                     "component and the cache stores routes without placement "
                     "(issues #4468, #5890)"
                 )
-        if use_cache and cache_key is not None and router.routes:
+        if use_cache and cache_key is not None and router.routes and not args.dry_run:
             import time
 
             try:
@@ -20361,7 +22773,9 @@ def _run_main_impl(args, parser, argv) -> int:
 
         _rss.mark("post-cache-write")
 
-    record_stage("optimization")
+    _stop_rc = _stage_boundary("optimization")  # issue #6324
+    if _stop_rc is not None:
+        return _stop_rc
     # Get pre-optimization statistics (also used in the no-optimize path
     # below so the segment/via summary print does not raise
     # UnboundLocalError when --no-optimize is set).
@@ -20434,7 +22848,9 @@ def _run_main_impl(args, parser, argv) -> int:
         )
         _record_stage_quality(_stage_quality, STAGE_POST_OPTIMIZE, router)
 
-    record_stage("drc-nudge")
+    _stop_rc = _stage_boundary("drc-nudge")  # issue #6324
+    if _stop_rc is not None:
+        return _stop_rc
     # Post-optimization DRC nudge pass (#4281: gated like the optimizer --
     # the nudge is NOT covered by --no-optimize, so it needs its own gate).
     # Issue #6273: like the optimizer, it yields to save / fill / DRC when
@@ -20463,7 +22879,9 @@ def _run_main_impl(args, parser, argv) -> int:
         )
         _record_stage_quality(_stage_quality, STAGE_POST_NUDGE, router)
 
-    record_stage("consolidation")
+    _stop_rc = _stage_boundary("consolidation")  # issue #6324
+    if _stop_rc is not None:
+        return _stop_rc
     # Issue #4732: post-nudge collinear consolidation.  Runs LAST of the
     # geometric passes so it also absorbs fragments the nudge introduced.
     _run_consolidation_pass(
@@ -20474,7 +22892,9 @@ def _run_main_impl(args, parser, argv) -> int:
         quiet=quiet,
     )
 
-    record_stage("finalization")
+    _stop_rc = _stage_boundary("finalization")  # issue #6324
+    if _stop_rc is not None:
+        return _stop_rc
     # Issue #4208 (Unit 3): re-run the Unit-2 seg-seg finalize gate
     # over the post-optimize/post-nudge copper.  An rtree-less
     # optimizer can introduce a cross-net crossing the pre-optimize
@@ -20500,72 +22920,36 @@ def _run_main_impl(args, parser, argv) -> int:
             if pre_vias > 0:
                 print(f"  Vias:     {pre_vias} -> {post_vias} ({-via_reduction:+.1f}%)")
 
-    # Differential-pair length-match (skew) tuning -- Epic #2556 Phase 3I (Issue #2648).
-    # Engaged via --length-match-diffpairs (opt-in).  Requires --differential-pairs;
-    # otherwise emit a warning and short-circuit (no detection means no pairs).
-    if getattr(args, "length_match_diffpairs", False) and router.routes:
-        if not args.differential_pairs:
-            if not quiet:
-                print(
-                    "\n--- Length-Match Diff-Pairs: skipped ---\n"
-                    "  --length-match-diffpairs requires --differential-pairs "
-                    "(no detection means no pairs to tune)."
-                )
-        else:
-            from kicad_tools.router.diffpair_detection import detect_diff_pairs
-
-            if not quiet:
-                print("\n--- Length-Match Diff-Pairs (Epic #2556 Phase 3I) ---")
-            detected_pairs = detect_diff_pairs(net_names=router.net_names)
-            if not detected_pairs:
-                if not quiet:
-                    print("  No differential pairs detected; nothing to tune.")
-            else:
-                # Snapshot connectivity for the pad-to-pad invariant.
-                _ci_snapshot_skew = _connectivity_snapshot(router)
-                tune_results = router.apply_diffpair_length_tuning(
-                    detected_pairs=detected_pairs,
-                    verbose=not quiet,
-                )
-                _enforce_connectivity_invariant_or_exit(
-                    router,
-                    _ci_snapshot_skew,
-                    phase="length_match_diffpairs",
-                    args=args,
-                    quiet=quiet,
-                )
-                if not quiet:
-                    n_tuned = sum(1 for r in tune_results.values() if r.reason == "tuned")
-                    n_clean = sum(
-                        1 for r in tune_results.values() if r.reason == "already_within_tolerance"
-                    )
-                    n_rollback = sum(
-                        1
-                        for r in tune_results.values()
-                        if r.reason == "post_insertion_drc_violation"
-                    )
-                    n_budget = sum(
-                        1 for r in tune_results.values() if r.reason == "exceeded_max_inserts"
-                    )
-                    n_skipped = sum(
-                        1 for r in tune_results.values() if r.reason == "not_length_critical"
-                    )
-                    print(
-                        f"  Summary: {n_tuned} tuned, {n_clean} clean, "
-                        f"{n_rollback} rolled back, {n_budget} budget-exhausted, "
-                        f"{n_skipped} skipped (not length-critical)"
-                    )
+    # Differential-pair length-match (skew) tuning -- Epic #2556 Phase 3I
+    # (Issue #2648) via --length-match-diffpairs, and auto-engaged on lattice
+    # output with --differential-pairs (Issue #6664).
+    if router.routes:
+        _run_diffpair_skew_tuning(router, args, quiet=quiet)
 
     # N-trace match-group length-match (skew) tuning -- Epic #2661 Phase 3H
     # (Issue #2723).  Engaged via --length-match-groups (opt-in).  Runs
     # AFTER --length-match-diffpairs so the within-pair skew invariant is
     # preserved before group tuning perturbs lane lengths.  Graceful
     # short-circuit when no groups are declared / detected.
-    if getattr(args, "length_match_groups", False) and router.routes:
+    #
+    # Issue #6674: on the lattice engine the tuner also runs WITHOUT the
+    # flag, for declared groups whose spread exceeds the limit ``kct check``
+    # enforces (``engage="checker_limit"``).  Grid is not auto-engaged
+    # (frozen for pair-adjacent features until #6448); the explicit flag
+    # keeps its legacy ``length_critical`` gating on every engine.
+    _mg_engage = _match_group_tuning_engage(args, router)
+    _mg_auto = _mg_engage == "checker_limit"
+    if _mg_engage is not None and router.routes:
         from kicad_tools.router.match_group_detection import detect_match_groups
 
         if not quiet:
-            print("\n--- Length-Match Groups (Epic #2661 Phase 3H) ---")
+            if _mg_auto:
+                print(
+                    "\n--- Length-Match Groups (auto: lattice, kct check "
+                    "match_group_length_skew limit; Issue #6674) ---"
+                )
+            else:
+                print("\n--- Length-Match Groups (Epic #2661 Phase 3H) ---")
         # Issue #3440: --length-match-groups silently no-ops without
         # length_match_group declarations (detection consults
         # NetClassRouting declarations exclusively when suffix inference
@@ -20621,6 +23005,7 @@ def _run_main_impl(args, parser, argv) -> int:
             tune_results_groups = router.apply_match_group_tuning(
                 detected_groups=detected_groups,
                 verbose=not quiet,
+                engage=_mg_engage,
             )
             _enforce_connectivity_invariant_or_exit(
                 router,
@@ -20672,6 +23057,9 @@ def _run_main_impl(args, parser, argv) -> int:
     # ``kicad-cli`` DRC/zone-fill child spawned below.
     # Issue #5944: diagnose unrouted connections while the grid is still live.
     _stash_unrouted_diagnosis(router, args)
+    # Issue #6391: replay the access witness while the grid can still label
+    # the closing copper; the post-release sidecar writes reuse it.
+    _prime_access_witness(router, args)
     _release_routing_engine_state(router)
 
     _rss.mark("post-finalize")
@@ -20827,6 +23215,11 @@ def _run_main_impl(args, parser, argv) -> int:
                     )
                 print(f"  {format_clearance_violations(clearance_violations)}")
 
+    # Issue #6324: never go on to the normal save after an interrupt.
+    _stop_rc = _interrupt_requested_exit()
+    if _stop_rc is not None:
+        return _stop_rc
+
     # Save output
     output_content = ""  # Tracks written content for output connectivity verification
     if args.dry_run:
@@ -20874,55 +23267,23 @@ def _run_main_impl(args, parser, argv) -> int:
 
     # Output connectivity verification (Issue #2264)
     # Re-parse written S-expressions and verify pad-to-pad connectivity
-    output_has_disconnected = False
-    if not args.dry_run and router.pads and router.nets and output_content:
-        from kicad_tools.router.io import verify_output_connectivity
-
-        # Build net_pads mapping (same as get_statistics)
-        verify_net_pads: dict[int, list] = {}
-        for net_id, pad_keys in router.nets.items():
-            if net_id not in multi_pad_net_ids:
-                continue
-            pad_list = [router.pads[k] for k in pad_keys if k in router.pads]
-            if len(pad_list) >= 2:
-                verify_net_pads[net_id] = pad_list
-
-        # Build net name lookup
-        reverse_net_map = {v: k for k, v in net_map.items()}
-
-        output_connectivity = verify_output_connectivity(
-            pcb_content=output_content,
-            net_pads=verify_net_pads,
-            net_names=reverse_net_map,
+    # Issue #6371: nets the router's own statistics counted as connected but
+    # the written file leaves open.  Both checks now share one layer-aware
+    # contact model, so a disagreement means copper changed between the
+    # count and the write -- the false "24/24 connected" this guards against.
+    # Issue #6376: the same helper runs in every escalation flow.
+    output_verification = _OutputVerification()
+    if not args.dry_run:
+        output_verification = _verify_written_output(
+            output_content,
+            router,
+            multi_pad_net_ids,
+            net_map,
+            stats,
+            nets_to_route,
+            quiet=quiet,
         )
-
-        disconnected_nets = {
-            nid: info
-            for nid, info in output_connectivity.items()
-            if not info["connected"] and info["total_pads"] >= 2
-        }
-
-        if disconnected_nets:
-            output_has_disconnected = True
-            if not quiet:
-                print("\n--- Output Connectivity Verification ---")
-                print(
-                    f"  WARNING: {len(disconnected_nets)} net(s) have disconnected "
-                    f"pads in written output"
-                )
-                for nid, info in sorted(disconnected_nets.items(), key=lambda x: x[1]["net_name"]):
-                    disc_str = ", ".join(info["disconnected_pads"][:5])
-                    if len(info["disconnected_pads"]) > 5:
-                        disc_str += f" (+{len(info['disconnected_pads']) - 5} more)"
-                    print(
-                        f"  {info['net_name']}: "
-                        f"{info['connected_pads']}/{info['total_pads']} pads connected"
-                        f" -- disconnected: {disc_str}"
-                    )
-        else:
-            if not quiet:
-                print("\n--- Output Connectivity Verification ---")
-                print("  All nets verified connected in written output")
+    output_verification_regressed = output_verification.regressed
 
     # Run power plane stitching if requested
     stitch_result = None
@@ -20966,7 +23327,7 @@ def _run_main_impl(args, parser, argv) -> int:
     # filled zones rather than bare zone outlines.
     if not args.dry_run and stats["nets_routed"] > 0:
         _fill_zones_after_route(output_path, quiet=quiet, router=router, args=args)
-        _complete_pour_nets_with_oracle(output_path, args=args, quiet=quiet)
+        _complete_pour_nets_with_oracle(output_path, args=args, quiet=quiet, router=router)
 
     _rss.mark("post-fill-zones")
 
@@ -21129,6 +23490,7 @@ def _run_main_impl(args, parser, argv) -> int:
             and not getattr(args, "_placement_fill_error", None)
             and not getattr(args, "_placement_repair_error", None)
             and not _placement_blocked(args)
+            and not output_verification_regressed
             and drc_passed
             and (all_nets_routed or meets_threshold)
         )
@@ -21173,6 +23535,12 @@ def _run_main_impl(args, parser, argv) -> int:
             print("PARTIAL: staged auto-fix was not published")
         elif _placement_blocked(args):
             print("PARTIAL: requested placement-invalid nets were not attempted")
+        elif output_verification_regressed:
+            # Issue #6371: the written file leaves open a net the router
+            # counted as connected.  Never SUCCESS; report the verified count.
+            _print_output_verification_failure_banner(
+                output_verification, stats["nets_routed"], nets_to_route, output_path
+            )
         elif _unverified and drc_passed and (all_nets_routed or meets_threshold):
             # Issue #6273: verification was skipped for --timeout, so neither
             # "SUCCESS" nor "DRC passed" may be printed for this board.
@@ -21314,7 +23682,9 @@ def _run_main_impl(args, parser, argv) -> int:
             # source board (see _save_partial_results), not a frozen pre-pass
             # snapshot. Emit exactly one canonical-output line.
             print(f"  Canonical output: {output_path} (full route + optimize + DRC)")
-            print("  Open in KiCad to complete remaining nets manually")
+            print(
+                "  Next: kct net-status --why (diagnose stuck nets), then re-run with --timeout / --layers"
+            )
 
     # Export failed nets to file if requested
     if getattr(args, "export_failed_nets", None) and not all_nets_routed:
@@ -21378,10 +23748,18 @@ def _run_main_impl(args, parser, argv) -> int:
     #     below threshold (Issue #1666, extended by #4588); also the
     #     below-threshold form of the #4979 layer-intent failure above.
     # 5 = Interrupted by SIGINT with partial results saved (handled in _handle_interrupt)
-    # 6 = Connectivity regression detected (--strict mode only): either
-    #     the optimize / DRC nudge phases reduced the number of fully-
-    #     connected nets (issue #2596) or post-save output verification
-    #     reported disconnected pads (issue #2264).
+    # 6 = Connectivity regression detected.  Under --strict: either the
+    #     optimize / DRC nudge phases reduced the number of fully-connected
+    #     nets (issue #2596) or post-save output verification reported
+    #     disconnected pads on any net (issue #2264).  Without --strict
+    #     (issue #6371): post-save verification found a net OPEN in the
+    #     written file that the router's own count had called connected --
+    #     a false completion, never covered by --min-completion.  Nets the
+    #     router already reported as partial/unrouted keep the threshold
+    #     codes below.  Issue #6376: both rules apply to every flow -- the
+    #     direct path here and the layer-escalation (default), rule-
+    #     relaxation and combined escalation flows -- via the shared
+    #     _verify_written_output / _output_verification_exit helpers.
     # 7 = Auto-fix was requested but skipped because the total --timeout
     #     budget was exhausted by routing (issue #3238).  Distinct from
     #     exit 3 ("routing succeeded but DRC is dirty after auto-fix
@@ -21422,9 +23800,12 @@ def _run_main_impl(args, parser, argv) -> int:
     completion_ratio = stats["nets_routed"] / nets_to_route if nets_to_route > 0 else 1.0
     meets_threshold = completion_ratio >= args.min_completion
 
-    # --strict: output connectivity verification failure is fatal
-    if getattr(args, "strict", False) and output_has_disconnected:
-        return 6
+    # --strict: output connectivity verification failure is fatal.
+    # Issue #6371: a verified-open net the router counted as connected is a
+    # false completion; fail it even without --strict.
+    _verify_rc = _output_verification_exit(output_verification, args)
+    if _verify_rc is not None:
+        return _verify_rc
 
     # Issue #3238: distinct exit code when auto-fix was requested but
     # skipped because the total wall-clock budget was exhausted.  This

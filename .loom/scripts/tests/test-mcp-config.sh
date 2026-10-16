@@ -27,28 +27,10 @@ SCRIPTS_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 REPO_ROOT="$(cd "$SCRIPTS_DIR/../.." && pwd)"
 LIB="$SCRIPTS_DIR/lib/mcp-config.sh"
 
-RED='\033[0;31m'
-GREEN='\033[0;32m'
+# shellcheck source=lib/assert.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/assert.sh"
 YELLOW='\033[1;33m'
-NC='\033[0m'
 
-TESTS_RUN=0
-TESTS_PASSED=0
-TESTS_FAILED=0
-
-assert_eq() {
-    local expected="$1" actual="$2" msg="$3"
-    TESTS_RUN=$((TESTS_RUN + 1))
-    if [[ "$expected" == "$actual" ]]; then
-        TESTS_PASSED=$((TESTS_PASSED + 1))
-        echo -e "  ${GREEN}PASS${NC}: $msg"
-    else
-        TESTS_FAILED=$((TESTS_FAILED + 1))
-        echo -e "  ${RED}FAIL${NC}: $msg"
-        echo "    Expected: '$expected'"
-        echo "    Actual:   '$actual'"
-    fi
-}
 
 assert_contains() {
     local needle="$1" haystack="$2" msg="$3"
@@ -756,6 +738,63 @@ if $HAVE_NODE; then
     rm -rf "$_s8e"
 else
     echo -e "  ${YELLOW}SKIP${NC}: stale-bundle rebuild tests (node not installed)"
+fi
+
+# ============================================================
+# 8f. Pre-flight applies the server's declared .mcp.json `env` (#10870)
+# ============================================================
+# Claude Code launches an MCP server with its `.mcp.json` `env` merged over the
+# inherited env; the pre-flight must too, or a server that needs its env
+# (squad's SQUAD_RUNTIME) fails MCP_PREFLIGHT_FAILED while working in a session.
+echo ""
+echo "Testing MCP pre-flight applies the server's declared env (#10870)..."
+
+if $HAVE_NODE; then
+    _s8f="$(mktemp -d)"
+    mkdir -p "$_s8f/ws" "$_s8f/squad/dist" # no package.json: a failed smoke test cannot rebuild
+    # Exits non-zero (no handshake) unless SQUAD_RUNTIME carries the exact
+    # declared value — spaces and quotes included, so word-splitting fails it.
+    cat >"$_s8f/squad/dist/mcp.js" <<'JS'
+if (process.env.SQUAD_RUNTIME !== "rt with 'quotes' \"and\" spaces") process.exit(3);
+process.stdin.once("data", () => {
+    process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: 1, result: {} }) + "\n");
+    process.exit(0);
+});
+JS
+    _run_8f() {
+        env -u SQUAD_RUNTIME LOOM_WORKSPACE="$_s8f/ws" CLAUDE_WRAPPER_SOURCE_ONLY=1 bash -c '
+            source "$1"
+            rc=0
+            _check_mcp_candidate "$2" || rc=$?
+            echo "RC=$rc LEAK=${SQUAD_RUNTIME:-none}"
+        ' _ "$WRAPPER" "$_s8f/ws" 2>&1 || true
+    }
+
+    # Negative: no declared env -> the same fixture still fails pre-flight.
+    cat >"$_s8f/ws/.mcp.json" <<JSON
+{ "mcpServers": { "squad": { "command": "node", "args": ["$_s8f/squad/dist/mcp.js"] } } }
+JSON
+    _out8f_neg="$(_run_8f)"
+    assert_contains "RC=1" "$_out8f_neg" \
+        "8f: fixture needing SQUAD_RUNTIME fails pre-flight when .mcp.json declares no env"
+
+    # Positive: .mcp.json declares it -> pre-flight passes.
+    cat >"$_s8f/ws/.mcp.json" <<JSON
+{ "mcpServers": { "squad": { "command": "node", "args": ["$_s8f/squad/dist/mcp.js"],
+  "env": { "SQUAD_RUNTIME": "rt with 'quotes' \\"and\\" spaces", "SQUAD_PORT": 7 } } } }
+JSON
+    _out8f_pos="$(_run_8f)"
+    assert_contains "RC=0" "$_out8f_pos" \
+        "8f: declared .mcp.json env is merged into the smoke-test launch (#10870)"
+    assert_contains "smoke-testing server 'squad'" "$_out8f_pos" \
+        "8f: pre-flight log names the server it smoke-tested (#10870)"
+    assert_contains "LEAK=none" "$_out8f_pos" \
+        "8f: declared env is confined to the server launch, not the wrapper"
+    assert_not_contains "rt with" "$_out8f_pos" \
+        "8f: declared env values are never logged"
+    rm -rf "$_s8f"
+else
+    echo -e "  ${YELLOW}SKIP${NC}: declared-env pre-flight tests (node not installed)"
 fi
 
 # ============================================================

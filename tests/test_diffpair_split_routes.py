@@ -128,9 +128,10 @@ def test_escape_only_and_via_identity_are_preserved():
 
 def test_earlier_foreign_fragment_rejects_and_retains_original_objects():
     ar, pairs = setup()
-    # The shorter half bulges away from the partner at y=20, toward y<10.
-    ar.routes.extend([fragment(9, 5, 20, 9.5), fragment(9, 2, 3, 35)])
-    for route in ar.routes[-2:]:
+    # The shorter half bulges away from the partner at y=20, toward y<10.  The
+    # placement search (#6788) also tries the reverse side, so block that too.
+    ar.routes.extend([fragment(9, 5, 20, 9.5), fragment(9, 5, 20, 10.5), fragment(9, 2, 3, 35)])
+    for route in ar.routes[-3:]:
         ar._mark_route(route)
     original = list(ar.routes)
     geometry = copy.deepcopy([(r.segments, r.vias) for r in original])

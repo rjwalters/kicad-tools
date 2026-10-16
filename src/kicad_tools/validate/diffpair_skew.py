@@ -52,6 +52,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from kicad_tools.router.rules import NetClassRouting
     from kicad_tools.schema.pcb import PCB
+    from kicad_tools.validate.diffpair_engagement import PairThresholds
 
 
 logger = logging.getLogger(__name__)
@@ -63,7 +64,25 @@ def derive_skew_data(
     board_thickness_mm: float | None = None,
     num_copper_layers: int = 2,
 ) -> tuple[dict[tuple[str, str], float], dict[tuple[int, int], float]]:
-    """Re-derive ``(skew_data, threshold_map)`` from a routed PCB.
+    """``(skew_data, threshold_map)`` of :func:`derive_skew_limits`."""
+    skew_data, limits = derive_skew_limits(
+        pcb, net_class_map, board_thickness_mm, num_copper_layers
+    )
+    return skew_data, {key: t.skew_mm for key, t in limits.items()}
+
+
+def derive_skew_limits(
+    pcb: PCB,
+    net_class_map: dict[str, NetClassRouting] | None,
+    board_thickness_mm: float | None = None,
+    num_copper_layers: int = 2,
+) -> tuple[dict[tuple[str, str], float], dict[tuple[int, int], PairThresholds]]:
+    """Re-derive ``(skew_data, limits)`` from a routed PCB.
+
+    ``limits`` maps ``(min_net_id, max_net_id)`` to the pair's resolved
+    :class:`~kicad_tools.validate.diffpair_engagement.PairThresholds` --
+    limit, provenance and severity (Issue #6443).  :func:`derive_skew_data`
+    flattens it to the ``threshold_map`` described under Returns.
 
     Walks the PCB's net table, runs the layered differential-pair
     detector, and sums per-net length from PCB-side segments + vias for
@@ -119,9 +138,6 @@ def derive_skew_data(
     # primitives.  See module docstring.
     from kicad_tools.router.diffpair_detection import detect_diff_pairs
     from kicad_tools.router.diffpair_length import DiffPairLengthTracker
-    from kicad_tools.validate.rules.diffpair_length_skew import (
-        DEFAULT_SKEW_TOLERANCE_MM,
-    )
 
     # Build the {net_id: net_name} map the detector expects.
     net_names: dict[int, str] = {}
@@ -139,14 +155,9 @@ def derive_skew_data(
     # declarations.  Mirrors the autorouter convention -- see
     # ``DiffPairRouter._resolve_detection_inputs`` (router-side) and the
     # sister :func:`derive_engagement_state` (validate-side).
-    net_to_class: dict[str, str] = {}
-    synth_routing: dict = dict(net_class_map)
-    for net_name, nc in net_class_map.items():
-        cls_name = getattr(nc, "name", None)
-        if cls_name is None:
-            continue
-        net_to_class[net_name] = cls_name
-        synth_routing.setdefault(cls_name, nc)
+    from kicad_tools.router.diffpair_detection import build_synth_routing
+
+    synth_routing, net_to_class = build_synth_routing(net_class_map)
 
     # KiCad-group templates declared in the PCB itself (optional).
     # Mirrors derive_engagement_state.
@@ -167,7 +178,7 @@ def derive_skew_data(
         return {}, {}
 
     skew_data: dict[tuple[str, str], float] = {}
-    threshold_map: dict[tuple[int, int], float] = {}
+    threshold_map: dict[tuple[int, int], PairThresholds] = {}
 
     for detected_pair in detected:
         pair = detected_pair.pair
@@ -203,27 +214,18 @@ def derive_skew_data(
         skew_mm = abs(l_p - l_n)
         skew_data[(p_name, n_name)] = skew_mm
 
-        # Per-pair threshold: prefer the positive side's net class, fall
-        # back to the negative side's, then to the module-level default.
-        # Mirrors the one-sided-declaration policy in
-        # :func:`derive_engagement_state` (diffpair_engagement.py:179-187).
+        # Per-pair threshold: shared resolver (Issue #6442).
+        from kicad_tools.validate.diffpair_engagement import resolve_pair_thresholds
+
         key = (p_id, n_id) if p_id <= n_id else (n_id, p_id)
-        nc_p = net_class_map.get(p_name)
-        nc_n = net_class_map.get(n_name)
-        nc = nc_p if nc_p is not None else nc_n
-        if nc is not None and hasattr(nc, "effective_skew_tolerance"):
-            threshold_map[key] = nc.effective_skew_tolerance(
-                default=DEFAULT_SKEW_TOLERANCE_MM,
-            )
-        else:
-            threshold_map[key] = DEFAULT_SKEW_TOLERANCE_MM
+        threshold_map[key] = resolve_pair_thresholds(net_class_map, p_name, n_name)
 
         logger.info(
             "[diffpair-skew] %s <-> %s skew=%.3f mm (tolerance=%.3f)",
             p_name,
             n_name,
             skew_mm,
-            threshold_map[key],
+            threshold_map[key].skew_mm,
         )
 
     return skew_data, threshold_map

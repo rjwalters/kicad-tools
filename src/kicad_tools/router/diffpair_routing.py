@@ -20,7 +20,7 @@ import os
 import time
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import TYPE_CHECKING, Literal, NamedTuple
+from typing import TYPE_CHECKING, Any, Literal, NamedTuple
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Mapping
@@ -40,6 +40,7 @@ from kicad_tools.core.geometry import (
 )
 
 from . import wall_deadline as _wall_deadline
+from .clearance_kernel import CLEARANCE_EPSILON_MM as _KERNEL_EPSILON_MM
 from .clearance_resolver import trace_via_clearance_mm
 from .clearance_shapes import (
     KShape,
@@ -513,9 +514,21 @@ def _via_spans_layer(via: Via, layer: Layer) -> bool:
     cannot drift.
     """
     # Issue #6099: physical stack order, not enum value.
-    lo = min(via.layers[0].stack_order, via.layers[1].stack_order)
-    hi = max(via.layers[0].stack_order, via.layers[1].stack_order)
+    # Issue #6485: the DRILLED span, not the logical ``via.layers`` pair.  A
+    # non-micro via is a through barrel whatever layer transition its producer
+    # recorded, so a gate that skipped the layers outside ``via.layers`` waved
+    # through copper the fabricated barrel shorts.
+    lo, hi = _via_drilled_stack_span(via)
     return lo <= layer.stack_order <= hi
+
+
+def _via_drilled_stack_span(via: Via) -> tuple[int, int]:
+    """``(lowest, highest)`` stack order the via's barrel occupies (#6485)."""
+    first, second = via.drilled_layers
+    return (
+        min(first.stack_order, second.stack_order),
+        max(first.stack_order, second.stack_order),
+    )
 
 
 # Issue #4574: the constructed crossover's via sites are chosen FIRST-LEGAL out
@@ -792,6 +805,23 @@ COUPLED_OUTCOME_JOINT_PLATEAU = "joint-A*-plateau"
 COUPLED_OUTCOME_LANDING_STALL = "landing-stall"
 
 
+def _floored_pair_gap(autorouter: Any, net_class: Any) -> float:
+    """A pair class's intra-pair gap, floored as the router lays it (Issue #6443).
+
+    :meth:`Autorouter._pair_gap_mm` (class value, manufacturer minimum,
+    authored board minimum, with its one-line notice) when the router has it;
+    otherwise :meth:`DesignRules.pair_gap`, or the bare class value for a
+    duck-typed stand-in router without rules.
+    """
+    resolve = getattr(autorouter, "_pair_gap_mm", None)
+    if callable(resolve):
+        return float(resolve(net_class))
+    rules = getattr(autorouter, "rules", None)
+    if rules is not None and hasattr(rules, "pair_gap"):
+        return float(rules.pair_gap(net_class).gap_mm)
+    return float(net_class.effective_intra_pair_clearance())
+
+
 def dominant_rejection(rejections: Mapping[str, int] | None) -> str | None:
     """Return the single most-frequent rejection reason, or ``None``.
 
@@ -899,7 +929,8 @@ def _via_stack_span(via: Via, num_copper_layers: int) -> int:
     ``diffpair_length_skew`` checker itself uses, so the constructor and the
     checker can never drift apart on what a via's drilled span is.
     """
-    layer_start, layer_end = via.layers
+    # Issue #6502: the drilled span, not the logical layer transition.
+    layer_start, layer_end = via.drilled_layers
     return abs(
         DiffPairLengthTracker._stack_position(layer_start, num_copper_layers)
         - DiffPairLengthTracker._stack_position(layer_end, num_copper_layers)
@@ -921,6 +952,14 @@ def _route_via_signature(route: Route | None, num_copper_layers: int) -> tuple[i
     The count is kept alongside the span sum because the promoted model depends
     only on the count while the un-promoted one depends only on the span sum;
     requiring both to match makes the signature sufficient for either.
+
+    Issue #6725: ``diffpair_length_skew`` now charges each via KiCad's stackup
+    height between the layers it connects (non-uniform on a real stackup).
+    Equal signatures still imply the same via *shapes* on both legs for the
+    router's own vias (every non-micro via is a through barrel on identical
+    layers), so the proxy stays a conservative symmetry gate rather than an
+    exact length; the exact figure comes from
+    :mod:`kicad_tools.router.kicad_length`.
     """
     if route is None:
         return (0, 0)
@@ -2210,6 +2249,41 @@ class CoupledPathfinder:
             return False
         return pos.x == goal.x and pos.y == goal.y
 
+    def _coupled_own_vias_clear(
+        self, state: CoupledState, own_vias: list[tuple[int, int]] | None
+    ) -> bool:
+        """May both rails drop a via where they stand? (Issue #6473).
+
+        KiCad's ``hole_to_hole`` rule exempts neither two vias of one net
+        (#5673) nor the two rails of a differential pair, and the stored-via
+        checks behind ``_is_via_blocked`` only see committed copper.  So the
+        new P and N drills must keep ``max(min_drill_clearance,
+        min_hole_to_hole)`` edge to edge from each other and from every via
+        already on the joint path (``own_vias``, both rails).  A candidate on
+        the cell of an earlier via is that same drill (a via stack).  Same
+        predicate and kernel epsilon as the native
+        ``Pathfinder::own_path_vias_clear`` and the coupled C++ loop.
+        """
+        rules = self.rules
+        floor = max(rules.min_drill_clearance, getattr(rules, "min_hole_to_hole", 0.0))
+        limit = floor - _KERNEL_EPSILON_MM
+        drill = rules.via_drill
+        res = self.grid.resolution
+        px, py = state.p_pos.x, state.p_pos.y
+        nx, ny = state.n_pos.x, state.n_pos.y
+
+        def under(ax: int, ay: int, bx: int, by: int) -> bool:
+            if ax == bx and ay == by:
+                return False
+            return math.hypot(ax - bx, ay - by) * res - drill < limit
+
+        if under(px, py, nx, ny):
+            return False
+        for vx, vy in own_vias or ():
+            if under(px, py, vx, vy) or under(nx, ny, vx, vy):
+                return False
+        return True
+
     def _get_coupled_neighbors(
         self,
         state: CoupledState,
@@ -2226,6 +2300,7 @@ class CoupledPathfinder:
         n_visited: frozenset[tuple[int, int, int]] | None = None,
         p_trail_buckets: dict[tuple[int, int], list[tuple[int, int, int]]] | None = None,
         n_trail_buckets: dict[tuple[int, int], list[tuple[int, int, int]]] | None = None,
+        own_vias: list[tuple[int, int]] | None = None,
     ) -> list[tuple[CoupledState, float, bool]]:
         """Generate valid coupled moves maintaining spacing.
 
@@ -2276,6 +2351,12 @@ class CoupledPathfinder:
                 permissive behaviour).
             n_visited: Issue #3078: companion to ``p_visited`` for the
                 negative trace.  Same encoding and semantics.
+            own_vias: Issue #6473: ``(x, y)`` cells of the vias already on
+                the current A* parent chain, both rails.  A layer change is
+                rejected when either new drill would sit under the fab
+                hole-to-hole floor from one of them (see
+                :meth:`_coupled_own_vias_clear`).  The P-vs-N check of the
+                move itself runs with or without it.
 
         Returns list of (new_state, cost, is_via) tuples.
         """
@@ -2749,10 +2830,22 @@ class CoupledPathfinder:
             state.n_pos, n_start
         )
 
+        # Issue #6473: hole-to-hole floor among the pair's OWN vias.  It is
+        # layer-independent, so it is evaluated once, lazily, and shared with
+        # the swap-via move below (which drills the same two cells).  NOT
+        # waived at endpoint pads: that exemption is about pad metal.
+        own_h2h_clear: bool | None = None
+
         # Try layer change (via) - both traces must change layer together
         routable_layers = self.grid.get_routable_indices()
         for new_layer in routable_layers:
             if new_layer == state.p_pos.layer:
+                continue
+
+            if own_h2h_clear is None:
+                own_h2h_clear = self._coupled_own_vias_clear(state, own_vias)
+            if not own_h2h_clear:
+                self.last_rejections["via_own_h2h"] += 1
                 continue
 
             # Check if vias can be placed at both positions.  Skip the
@@ -2798,6 +2891,14 @@ class CoupledPathfinder:
         if self.allow_swap_via:
             for new_layer in routable_layers:
                 if new_layer == state.p_pos.layer:
+                    continue
+
+                # Issue #6473: the swap drills the same two cells as the
+                # plain layer change, so it takes the same own-via floor.
+                if own_h2h_clear is None:
+                    own_h2h_clear = self._coupled_own_vias_clear(state, own_vias)
+                if not own_h2h_clear:
+                    self.last_rejections["via_own_h2h"] += 1
                     continue
 
                 # Both pads must be able to host a via at their current
@@ -3042,8 +3143,9 @@ class CoupledPathfinder:
 
         Issue #5711 additionally threads the diff-pair intra-pair waiver.
         ``RouteHaloRefiner.trace_clear`` resolves the candidate's
-        ``diffpair_partner`` to a net id and passes
-        ``nc.effective_intra_pair_clearance()`` as that pair's required gap;
+        ``diffpair_partner`` to a net id and passes the pair gap
+        (``DesignRules.pair_gap(nc)``, floored per #6443 / #6560) as that
+        pair's required gap;
         without it the C++ arm demanded the ordinary (wider) class clearance
         against the partner rail's committed copper.  That divergence is in
         the over-blocking direction -- it cannot produce a DRC violation --
@@ -3062,8 +3164,9 @@ class CoupledPathfinder:
             if net_class is None:
                 continue
             partner_net = refiner._resolve_partner_net_id(name)
+            # Issue #6560: the floored pair gap (#6443), as the Python arm.
             partner_clearance = (
-                net_class.effective_intra_pair_clearance() if partner_net is not None else None
+                self.rules.pair_gap(net_class).gap_mm if partner_net is not None else None
             )
             setter(
                 net_id,
@@ -3083,6 +3186,8 @@ class CoupledPathfinder:
         n_goal_pos: GridPos,
         start_layer: int,
         end_layer: int,
+        p_goal_any_layer: bool,
+        n_goal_any_layer: bool,
         p_net: int,
         n_net: int,
         p_net_name: str,
@@ -3159,6 +3264,8 @@ class CoupledPathfinder:
                 if timeout_seconds is not None and timeout_seconds > 0
                 else 0.0
             ),
+            p_goal_any_layer=p_goal_any_layer,
+            n_goal_any_layer=n_goal_any_layer,
         )
 
         # Mirror the diagnostic bookkeeping the Python loop maintains.
@@ -3448,6 +3555,8 @@ class CoupledPathfinder:
             n_goal_pos=n_goal_pos,
             start_layer=start_layer,
             end_layer=end_layer,
+            p_goal_any_layer=bool(p_end.through_hole),
+            n_goal_any_layer=bool(n_end.through_hole),
             p_net=p_start.net,
             n_net=n_start.net,
             p_net_name=p_start.net_name,
@@ -3613,11 +3722,17 @@ class CoupledPathfinder:
                 )
 
             # Goal check - both traces must reach their goals
+            # Issue #6499: an SMD goal pad is only reached on its own layer;
+            # a through-hole goal pad is reached on any layer.
             p_at_goal = (
-                current.state.p_pos.x == p_goal_pos.x and current.state.p_pos.y == p_goal_pos.y
+                current.state.p_pos.x == p_goal_pos.x
+                and current.state.p_pos.y == p_goal_pos.y
+                and (p_end.through_hole or current.state.p_pos.layer == p_goal_pos.layer)
             )
             n_at_goal = (
-                current.state.n_pos.x == n_goal_pos.x and current.state.n_pos.y == n_goal_pos.y
+                current.state.n_pos.x == n_goal_pos.x
+                and current.state.n_pos.y == n_goal_pos.y
+                and (n_end.through_hole or current.state.n_pos.layer == n_goal_pos.layer)
             )
 
             if p_at_goal and n_at_goal:
@@ -3659,10 +3774,15 @@ class CoupledPathfinder:
             p_trail_buckets: dict[tuple[int, int], list[tuple[int, int, int]]] = {}
             n_trail_buckets: dict[tuple[int, int], list[tuple[int, int, int]]] = {}
             bucket = max(1, prox_radius)
+            # Issue #6473: via cells already on this joint path (both rails).
+            own_vias: list[tuple[int, int]] = []
             walker: CoupledNode | None = current
             while walker is not None:
                 p_cell = (walker.state.p_pos.x, walker.state.p_pos.y, walker.state.p_pos.layer)
                 n_cell = (walker.state.n_pos.x, walker.state.n_pos.y, walker.state.n_pos.layer)
+                if walker.via_from_parent:
+                    own_vias.append(p_cell[:2])
+                    own_vias.append(n_cell[:2])
                 p_visited_cells.add(p_cell)
                 n_visited_cells.add(n_cell)
                 if prox_radius > 1:
@@ -3708,6 +3828,7 @@ class CoupledPathfinder:
                 n_visited=n_visited_frozen,
                 p_trail_buckets=p_trail_buckets,
                 n_trail_buckets=n_trail_buckets,
+                own_vias=own_vias,
             ):
                 # Issue #6243: authored netclass minima on both rails, through
                 # the grid's kernel-backed gate.  Dormant without floors.
@@ -3876,18 +3997,31 @@ class CoupledPathfinder:
         current_x, current_y = start_pad.x, start_pad.y
         current_layer_idx = self.grid.layer_to_index(start_pad.layer.value)
 
+        # Issue #6485: ``(current_layer_idx, layer_idx)`` is the path's
+        # LOGICAL layer transition (e.g. F.Cu -> In1.Cu), not the drilled
+        # span.  The coupled search has no blind/buried process: both backends
+        # admit a layer change only where the barrel is clear on EVERY layer
+        # (``_is_via_blocked`` sweeps ``0..num_layers``; C++
+        # ``CoupledPathfinder::via_route_geometry_clear`` sets
+        # ``layer_from = 0`` / ``layer_to = layers - 1``), and
+        # ``RoutingGrid._mark_via`` blocks every layer once it is placed.
+        # Reporting the logical pair verbatim wrote a keyword-less
+        # ``(via ... (layers "F.Cu" "In1.Cu"))`` that KiCad drills as a
+        # through via while every reader of ``via.layers`` missed the barrel
+        # on the remaining layers.  Same normalization as the single-ended
+        # builders (``pathfinder.py`` / ``cpp_backend.py``, Issue #5013/#5174).
+        physical_top_layer = Layer(self.grid.index_to_layer(0))
+        physical_bottom_layer = Layer(self.grid.index_to_layer(self.grid.num_layers - 1))
+
         for wx, wy, layer_idx, is_via in path:
             if is_via:
-                # Add via
+                # Add via - a through barrel over the full stack (see above).
                 via = Via(
                     x=current_x,
                     y=current_y,
                     drill=self.rules.via_drill,
                     diameter=self.rules.via_diameter,
-                    layers=(
-                        Layer(self.grid.index_to_layer(current_layer_idx)),
-                        Layer(self.grid.index_to_layer(layer_idx)),
-                    ),
+                    layers=(physical_top_layer, physical_bottom_layer),
                     net=start_pad.net,
                     net_name=start_pad.net_name,
                 )
@@ -5076,6 +5210,7 @@ class DiffPairRouter:
             # (issue #4910).
             rotation=template.rotation,
             shape=template.shape,
+            roundrect_rratio=template.roundrect_rratio,
         )
 
     def _segment_cells_clear(
@@ -6083,13 +6218,12 @@ class DiffPairRouter:
             deficit = gap_deficit(shape, segment_shape(seg), trace_floor)
             if deficit > worst:
                 worst, worst_loc = deficit, (via.x, via.y)
-        v_lo = min(via.layers[0].stack_order, via.layers[1].stack_order)
-        v_hi = max(via.layers[0].stack_order, via.layers[1].stack_order)
+        # Issue #6485: drilled spans (see ``_via_spans_layer``).
+        v_lo, v_hi = _via_drilled_stack_span(via)
         for other in universe.vias:
             if other.net == via.net:
                 continue
-            o_lo = min(other.layers[0].stack_order, other.layers[1].stack_order)
-            o_hi = max(other.layers[0].stack_order, other.layers[1].stack_order)
+            o_lo, o_hi = _via_drilled_stack_span(other)
             if o_hi < v_lo or o_lo > v_hi:
                 continue  # barrels never share a layer
             deficit = gap_deficit(shape, via_shape(other), clearance)
@@ -7076,8 +7210,9 @@ class DiffPairRouter:
         """
         net_class_map = getattr(self.autorouter, "net_class_map", None) or {}
         nc = net_class_map.get(net_name)
+        # Issue #6560: floored (#6443) -- the gap the coupled router lays.
         intra = (
-            nc.effective_intra_pair_clearance()
+            _floored_pair_gap(self.autorouter, nc)
             if nc is not None
             else self.autorouter.rules.trace_clearance
         )
@@ -9804,7 +9939,8 @@ class DiffPairRouter:
         pair_nc = (getattr(self.autorouter, "net_class_map", None) or {}).get(spec.p_start.net_name)
         if pair_nc is not None:
             nc_trace_width = float(pair_nc.trace_width)
-            intra_floor = float(pair_nc.effective_intra_pair_clearance())
+            # Issue #6443: the floored pair gap (class / fab / authored).
+            intra_floor = _floored_pair_gap(self.autorouter, pair_nc)
             tol_frac = min(
                 _SHADOW_GAP_MAX_TOL_FRAC,
                 max(0.0, float(pair_nc.impedance_tolerance_percent) / 100.0),
@@ -10842,7 +10978,8 @@ class DiffPairRouter:
         pair_net_class = net_class_map.get(pair.positive.net_name)
         if pair_net_class is not None:
             pair_trace_width = float(pair_net_class.trace_width)
-            pair_intra_clearance = float(pair_net_class.effective_intra_pair_clearance())
+            # Issue #6443: the floored pair gap (class / fab / authored).
+            pair_intra_clearance = _floored_pair_gap(self.autorouter, pair_net_class)
         else:
             pair_trace_width = float(self.autorouter.rules.trace_width)
             # Without a per-pair class, fall back to the legacy edge-to-
@@ -11975,7 +12112,8 @@ class DiffPairRouter:
             net_class = net_class_map.get(pair.positive.net_name)
             if net_class is not None:
                 length_critical = bool(net_class.length_critical)
-                intra_clearance = net_class.effective_intra_pair_clearance()
+                # Issue #6560: floored (#6443), not the bare class value.
+                intra_clearance = _floored_pair_gap(self.autorouter, net_class)
             else:
                 length_critical = True
                 intra_clearance = self.autorouter.rules.trace_clearance
@@ -12344,7 +12482,8 @@ class DiffPairRouter:
         pair_net_class = net_class_map.get(pair.positive.net_name)
         if pair_net_class is not None:
             pair_trace_width = float(pair_net_class.trace_width)
-            pair_intra_clearance = float(pair_net_class.effective_intra_pair_clearance())
+            # Issue #6443: same floored gap as the main coupled path.
+            pair_intra_clearance = _floored_pair_gap(self.autorouter, pair_net_class)
         else:
             pair_trace_width = float(self.autorouter.rules.trace_width)
             pair_intra_clearance = float(spacing)
@@ -13605,6 +13744,23 @@ class DiffPairRouter:
         pose_committed_pair_ids: set[int] = set()
 
         refused_diff_nets: set[int] = set()
+        # Issue #6535: under ``--route-engine lattice`` the lattice routes every
+        # engaged pair itself (coupled, in its whole-netset negotiation), and it
+        # never sees copper committed here.  A grid coupled pre-pass for those
+        # pairs would leave TWO copper sets per pair net in ``routes``; the
+        # post-route short check then demoted whole N nets (board 06b: the
+        # baseline's "coupled" LVDS pairs carried 0 mm of N copper).  So the
+        # grid pre-pass is skipped for them and their nets go to the main
+        # strategy (the lattice) like an engagement-refused pair's.
+        # Issue #6551: the mesh engine has the same whole-netset blind spot
+        # (it negotiates every net without seeing ``routes``), so it owns
+        # its pairs too.  The mesh has no coupled router, so under mesh an
+        # engaged pair is routed *uncoupled*; the CLI rejects
+        # ``--route-engine mesh --differential-pairs`` for that reason, and
+        # this guard protects library callers.
+        engine_owned_diff_nets: set[int] = set()
+        pair_engine = getattr(self.autorouter, "_strategy", "grid")
+        engine_owns_pairs = pair_engine in ("lattice", "mesh")
         # Issue #3089: track diff-pair nets whose coupled search hit the
         # ``per_pair_timeout`` budget.  Same handling as refused-engagement
         # nets: drop them from ``diff_net_ids`` so the main strategy picks
@@ -13637,6 +13793,25 @@ class DiffPairRouter:
                 logger.info(msg)
                 refused_diff_nets.add(p_id)
                 refused_diff_nets.add(n_id)
+                continue
+            if engine_owns_pairs:
+                if pair_engine == "mesh":
+                    msg = (
+                        f"[diffpair-engage] {pair}: routed UNCOUPLED by the mesh "
+                        f"engine (it has no coupled router); grid coupled "
+                        f"pre-pass skipped (issue #6551)"
+                    )
+                    print(f"  {msg}")
+                    logger.warning(msg)
+                else:
+                    msg = (
+                        f"[diffpair-engage] {pair}: routed by the lattice engine; grid "
+                        f"coupled pre-pass skipped (issue #6535)"
+                    )
+                    print(f"  {msg}")
+                    logger.info(msg)
+                engine_owned_diff_nets.add(p_id)
+                engine_owned_diff_nets.add(n_id)
                 continue
             # Issue #3439: aggregate budget check + per-pair clamp.
             pair_timeout = effective_per_pair_timeout
@@ -13757,6 +13932,10 @@ class DiffPairRouter:
                 # routes here; drop their nets from ``diff_net_ids`` so the
                 # main strategy routes them normally.
                 diff_net_ids = diff_net_ids - refused_diff_nets
+            if engine_owned_diff_nets:
+                # Issues #6535 / #6551: the lattice or mesh (main strategy)
+                # routes these.
+                diff_net_ids = diff_net_ids - engine_owned_diff_nets
             if budget_exit_diff_nets:
                 # Issue #3089: coupled-routing-budget-exit pairs also
                 # produced no routes; drop their nets from
@@ -14007,6 +14186,11 @@ class DiffPairRouter:
 
         print("\n=== Differential Pair Routing Complete ===")
         print(f"  Total routes: {len(all_routes)}")
+        # Issue #6442: quote the thresholds ``kct check`` will apply, from the
+        # validator's own resolver, so the two reports cannot disagree.
+        report_thresholds = getattr(self.autorouter, "_print_pair_threshold_report", None)
+        if callable(report_thresholds):
+            report_thresholds()
         print(f"  Differential pair nets: {len(diff_net_ids)}")
         print(f"  Other nets: {len(non_diff_nets)}")
         if warnings:

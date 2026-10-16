@@ -20,7 +20,28 @@ from kicad_tools.cli.format_options import add_format_flag
 from kicad_tools.cli.route_exit_codes_help import ROUTE_EXIT_CODES_EPILOG
 from kicad_tools.manufacturers import get_all_manufacturer_names
 
-__all__ = ["create_parser"]
+__all__ = ["LATTICE_ITERATIONS_HELP", "create_parser", "positive_int"]
+
+
+def positive_int(value: str) -> int:
+    """argparse ``type=`` for a strictly positive integer (``N >= 1``)."""
+    try:
+        n = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"invalid int value: {value!r}") from None
+    if n < 1:
+        raise argparse.ArgumentTypeError(f"must be >= 1, got {n}")
+    return n
+
+
+# Issue #6362: shared by ``route_parser`` here and ``route_cmd._route_parser``
+# so the two ``--lattice-iterations`` declarations cannot drift.
+LATTICE_ITERATIONS_HELP = (
+    "Round cap for the lattice engine's whole-netset negotiation (default: 12). "
+    "Applies only to '--route-engine lattice' and to '--complete', which drives "
+    "the lattice; --iterations does not affect the lattice. Raise it when the "
+    "log says 'stopped by: round cap'. Must be >= 1."
+)
 
 # Module docstring used as epilog in help
 CLI_DOCSTRING = """
@@ -213,6 +234,7 @@ def create_parser() -> argparse.ArgumentParser:
     _add_detect_mistakes_parser(subparsers)
     _add_calibrate_parser(subparsers)
     _add_screenshot_parser(subparsers)
+    _add_board_view_parser(subparsers)
     _add_report_parser(subparsers)
     _add_export_parser(subparsers)
     _add_optim_parser(subparsers)
@@ -3010,6 +3032,43 @@ def _add_pcb_parser(subparsers) -> None:
         help="Output file path (default: overwrite input PCB)",
     )
 
+    # pcb diff (issue #6417)
+    pcb_diff = pcb_subparsers.add_parser(
+        "diff",
+        help="Geometric diff of two boards (copper, pads, zones, outline)",
+        description="Compare two boards item by item. Footprints and pads pair "
+        "by reference first (R1, R1/2): same-reference items are 'changed' when "
+        "anything differs, and duplicate references (J1/SH, REF**) pair by "
+        "equal content before file order. Copper, zones and graphics with "
+        "identical normalised content are unchanged whatever their uuids; "
+        "leftovers pair by uuid (same kind and net) as 'changed'. The rest are "
+        "removed/added. OLD and NEW accept a path or a REV:path git spec. "
+        "Exit codes: 0 no differences, 2 differences, 1 a side failed to load.",
+    )
+    pcb_diff.add_argument("old", help="OLD board: .kicad_pcb path or REV:path")
+    pcb_diff.add_argument("new", help="NEW board: .kicad_pcb path or REV:path")
+    pcb_diff.add_argument("--format", choices=["text", "json"], default="text")
+    pcb_diff.add_argument(
+        "--net",
+        action="append",
+        default=[],
+        metavar="NAME",
+        help="Report only items on this net (repeatable; applied after matching)",
+    )
+    pcb_diff.add_argument(
+        "--layer",
+        action="append",
+        default=[],
+        metavar="LAYER",
+        help="Report only items touching this layer (repeatable; a via matches "
+        "every layer in its span)",
+    )
+    pcb_diff.add_argument(
+        "--svg",
+        metavar="OUT.svg",
+        help="Also write an SVG overlay (removed red, added green, changed amber)",
+    )
+
     # pcb export-dsn
     pcb_export_dsn = pcb_subparsers.add_parser(
         "export-dsn",
@@ -3722,6 +3781,19 @@ def _add_route_parser(subparsers) -> None:
             "effect when --grid is an explicit value."
         ),
     )
+    # Issue #6666: previously declared only by ``route_cmd``'s own parser, so
+    # ``kct route ... --grid-strategy uniform`` died with "unrecognized
+    # arguments".  Keep choices/default identical to route_cmd.py.
+    route_parser.add_argument(
+        "--grid-strategy",
+        choices=["adaptive", "uniform"],
+        default="adaptive",
+        help=(
+            "Grid strategy when --grid auto is used. "
+            "'adaptive' (default) uses multi-resolution grids with fine zones "
+            "around fine-pitch components. 'uniform' forces single-resolution grid."
+        ),
+    )
     route_parser.add_argument(
         "--trace-width",
         type=float,
@@ -3765,13 +3837,31 @@ def _add_route_parser(subparsers) -> None:
     route_parser.add_argument("--via-drill", type=float, default=0.3, help="Via drill size in mm")
     route_parser.add_argument("--via-diameter", type=float, default=0.6, help="Via diameter in mm")
     route_parser.add_argument("--mc-trials", type=int, default=10, help="Monte Carlo trials")
+    # Issue #6345: router run by each monte-carlo / evolutionary trial.
+    route_parser.add_argument(
+        "--trial-router",
+        choices=["negotiated", "basic"],
+        default="negotiated",
+        help=(
+            "Router each monte-carlo / evolutionary trial runs: 'negotiated' "
+            "(default, as strong as one default run) or 'basic' (one A* pass)"
+        ),
+    )
     route_parser.add_argument(
         "--pop-size", type=int, default=20, help="Evolutionary optimizer population size"
     )
     route_parser.add_argument(
         "--generations", type=int, default=10, help="Evolutionary optimizer generations"
     )
-    route_parser.add_argument("--iterations", type=int, default=15, help="Max iterations")
+    route_parser.add_argument(
+        "--iterations",
+        type=int,
+        default=15,
+        help=(
+            "Max iterations (default: 15). Does NOT apply to --route-engine "
+            "lattice; use --lattice-iterations for its round cap."
+        ),
+    )
     # Issue #3101: Best-metric early-stop patience.  Mirror of the inner
     # parser flag at route_cmd.py; both sites must stay in sync per
     # ``tests/test_cli_parser_drift.py``.
@@ -3782,8 +3872,10 @@ def _add_route_parser(subparsers) -> None:
         help=(
             "Consecutive non-improving negotiated iterations before the "
             "outer loop breaks early (Issue #3101). Default: 2. Use 0 to "
-            "disable. Iteration-0 result is preserved by the existing "
-            "best-state restore."
+            "disable every progress-based early stop (including the "
+            "overflow-stagnation stop, Issue #6361) so the loop runs its "
+            "full --iterations / --timeout budget. Iteration-0 result is "
+            "preserved by the existing best-state restore."
         ),
     )
     # Issue #3438 / #3414: targeted rip-up.  Mirror of the inner parser flag
@@ -3937,6 +4029,31 @@ def _add_route_parser(subparsers) -> None:
         ),
     )
     route_parser.add_argument(
+        "--escape-corridor-assignment",
+        choices=("greedy", "flow"),
+        default="greedy",
+        # Issue #6352 (EXPERIMENTAL, research-only): joint min-cost-flow
+        # pin -> exit assignment for the escape-corridor planner.  Hidden from
+        # --help -- it exists so scripts/research/escape_flow_experiment.py can
+        # select the treatment arm; ``flow`` implies
+        # --escape-corridor-reservation.  Default ``greedy`` is byte-identical.
+        help=argparse.SUPPRESS,
+    )
+    route_parser.add_argument(
+        "--no-plane-via-reservation",
+        action="store_true",
+        default=False,
+        help=(
+            "Disable the pre-route pour-pad via-site reservation (Issue "
+            "#6401).  ON by default for the grid and lattice engines: before "
+            "signal routing, each SMD pad of an auto-skipped pour net on the "
+            "perimeter of a multi-pad footprint gets one legal via site plus "
+            "its stub held free, so the post-route stitch/oracle pass can "
+            "still connect it to its plane.  Pass this flag to restore "
+            "pre-#6401 behaviour."
+        ),
+    )
+    route_parser.add_argument(
         "--no-pad-access-invariant",
         action="store_true",
         default=False,
@@ -4033,7 +4150,7 @@ def _add_route_parser(subparsers) -> None:
     )
     # Issue #5785: KiCad-oracle completion loop controls.  The inner parser at
     # route_cmd.py declares both (``--oracle-rounds`` defaults to None so the
-    # KCT_ORACLE_COMPLETION env var and the built-in default of 3 still apply
+    # KCT_ORACLE_COMPLETION env var and the built-in default of 12 still apply
     # when unset); both sites must stay in sync, enforced by
     # ``tests/test_cli_parser_drift.py``.
     route_parser.add_argument(
@@ -4045,7 +4162,7 @@ def _add_route_parser(subparsers) -> None:
             "KiCad-oracle completion rounds for pour nets (Issue #5785). After "
             "the zone fill, route exactly the links kicad-cli reports as "
             "unconnected_items on GND/VCC-style pours, up to N rounds, stopping "
-            "at zero or when the count stops falling. Default 3; 0 disables the "
+            "at zero or when the count stops falling. Default 12; 0 disables the "
             "loop and the stranded-pad verdict."
         ),
     )
@@ -4137,6 +4254,29 @@ def _add_route_parser(subparsers) -> None:
         action="store_true",
         help="With --lint-gate, new warning findings also roll the route back.",
     )
+    route_parser.add_argument(
+        "--nogood-cache",
+        action="store_true",
+        default=False,
+        help=(
+            "EXPERIMENTAL (Issue #6353, default off): answer a repeated, "
+            "completely-failed negotiated net attempt from a bounded cache. "
+            "Only failures whose search drained its open set are cached "
+            "(never timeouts or iteration-cap give-ups), and a hit requires "
+            "the grid state the search reads to be unchanged."
+        ),
+    )
+    route_parser.add_argument(
+        "--nogood-cache-margin-cells",
+        default="full",
+        help=(
+            "Failure-window margin in grid cells around the net's terminals, "
+            "or 'full' (default) to fingerprint every grid plane (occupancy, "
+            "usage, history/present cost, obstacle, zone). A numeric margin is "
+            "a heuristic that can serve a stale failure when state outside "
+            "the window changes."
+        ),
+    )
     # Issue #2610: --max-search-iterations override for the C++ A* memory
     # backstop (default 0 = use the historical ``cols * rows * 4`` heuristic).
     # Documented as an escape hatch for dense boards where the cap fires
@@ -4188,7 +4328,18 @@ def _add_route_parser(subparsers) -> None:
             "node-expansion count. --timeout is kept only as a safety "
             "backstop. Combine with --seed for byte-stable re-routes. "
             "Relief-rescue sub-searches keep a 10 s wall clock unless "
-            "--deterministic-rescue is also passed."
+            "--deterministic-rescue is also passed. With --deterministic-budget "
+            "alone, each negotiated rip-up iteration also gives every per-net "
+            "search a budget of 10%% of the remaining stage time, and the "
+            "pure-Python A* fallback usually hits it before the iteration cap "
+            "(Issue #6329; logged as '[deterministic-budget] per-net wall clock "
+            "bound net ...'); --deterministic-rescue removes that budget and the "
+            "60 s oscillation-escape budget (Issue #6475). Still wall-clock-bound "
+            "even with both flags: the relief-rescue transaction bound; the "
+            "post-negotiation sweep (60 s, 10 s per net); the trace optimizer / "
+            "DRC nudge, which are skipped when little --timeout is left; and the "
+            "outer --timeout stage deadline (logged as '[deterministic-budget] "
+            "stage deadline fired')."
         ),
     )
     # Issue #5870: per-run opt-in for the iteration-bounded relief rescue
@@ -4200,7 +4351,9 @@ def _add_route_parser(subparsers) -> None:
             "Bound the stall-relief rescue's probe and victim re-land "
             "sub-searches by the per-net node-expansion cap instead of their "
             "10 s wall clock (Issue #5870). Needs an active cap "
-            "(--deterministic-budget or --per-net-iterations). Off by default "
+            "(--deterministic-budget or --per-net-iterations). Also switches "
+            "off the 60 s oscillation-escape budget and the remaining-budget "
+            "per-iteration per-net cap (Issue #6475). Off by default "
             "(#4730); use it when the route must not depend on machine load."
         ),
     )
@@ -4270,6 +4423,8 @@ def _add_route_parser(subparsers) -> None:
         default=None,
         help=(
             "Automatically add missing power copper zones (enabled by default). "
+            "Nets the --net-class-map declares routed (is_pour_net=false and "
+            "route_via other than 'pour') are not auto-poured. "
             "Use --no-auto-pour to preserve the authored plane configuration."
         ),
     )
@@ -4563,6 +4718,18 @@ def _add_route_parser(subparsers) -> None:
             "actually run and passed."
         ),
     )
+    # Issue #6527: mirror of the inner route_cmd.py flag (parser drift test).
+    route_parser.add_argument(
+        "--fallback-bidirectional",
+        action="store_true",
+        default=False,
+        help=(
+            "Issue #6527 (experimental, default off): let the C++ backend's "
+            "Python fallback use route_auto (bidirectional A* for paths of "
+            ">= bidirectional_threshold cells, one-way retry sharing one "
+            "deadline) instead of the one-way route()."
+        ),
+    )
     # Issue #4433: opt-in HARD per-net avoid_layers.  Mirror of the inner
     # route_cmd.py flag; both sites must stay in sync per
     # ``tests/test_cli_parser_drift.py``.
@@ -4778,7 +4945,7 @@ def _add_route_parser(subparsers) -> None:
         metavar="PATH",
         help=(
             "Export failed nets (fully-unrouted and partial) to a file for "
-            "triage or manual completion in KiCad. A '.json' path emits "
+            "triage and automation (e.g. feed to kct net-status --why). A '.json' path emits "
             "structured per-net detail (status, connected/total pads, and the "
             "stranded pad names for partial nets); any other extension emits "
             "one net name per line. The file is always written when routing "
@@ -4820,6 +4987,15 @@ def _add_route_parser(subparsers) -> None:
             "'strategy' was already taken by the negotiation-algorithm flag "
             "above, so the substrate selector is --route-engine.)"
         ),
+    )
+    # Issue #6362: lattice negotiation round cap.  Forwarded to the inner
+    # route_cmd parser by ``commands/routing.py``.
+    route_parser.add_argument(
+        "--lattice-iterations",
+        type=positive_int,
+        default=None,
+        metavar="N",
+        help=LATTICE_ITERATIONS_HELP,
     )
     route_parser.add_argument(
         "--lattice-optimize",
@@ -5891,11 +6067,10 @@ def _add_fix_drc_parser(subparsers) -> None:
         "--layers",
         "-l",
         type=int,
-        default=2,
+        default=None,
         help=(
             "Number of PCB layers used to derive clearance rules "
-            "(default: 2). Only used when generating a DRC report "
-            "internally; ignored when --drc-report is supplied."
+            "(default: the board's copper-layer count, as in kct check)."
         ),
     )
     fix_drc_parser.add_argument(
@@ -5957,7 +6132,8 @@ def _add_fix_drc_parser(subparsers) -> None:
         "--verify",
         action="store_true",
         help=(
-            "Run pure-Python DRC before and after repair and report a before/after violation delta."
+            "Run kct check's rule set before and after repair and report a "
+            "before/after violation delta."
         ),
     )
     fix_drc_parser.add_argument(
@@ -7646,6 +7822,23 @@ def _add_net_status_parser(subparsers) -> None:
             "(issue #3863)."
         ),
     )
+    net_status_parser.add_argument(
+        "--crossings",
+        dest="net_status_crossings",
+        action="store_true",
+        help=(
+            "Pre-route bundle crossing report (issue #6339): bundle pin "
+            "orders, inversions per entry side, over-sized conflict sets and "
+            "interleaved hub pin columns. Read-only; honours --format json."
+        ),
+    )
+    net_status_parser.add_argument(
+        "--signal-layers",
+        dest="net_status_signal_layers",
+        type=int,
+        default=None,
+        help="Signal-layer count for the --crossings verdict (default: from board)",
+    )
     model_group = net_status_parser.add_mutually_exclusive_group()
     model_group.add_argument(
         "--strict",
@@ -8381,7 +8574,10 @@ def _add_mcp_parser(subparsers) -> None:
         help="Configure MCP client integration",
         description=(
             "Auto-detect the kct binary and register `kct mcp serve` with an MCP "
-            "client: Claude Code (~/.claude/mcp.json), Claude Desktop, Codex CLI "
+            "client: Claude Code (user scope: `claude mcp add-json --scope user`, "
+            "or a direct merge into ~/.claude.json / $CLAUDE_CONFIG_DIR/.claude.json "
+            "when `claude` is not on PATH; ./.mcp.json with --scope project), "
+            "Claude Desktop, Codex CLI "
             "([mcp_servers.kct] in $CODEX_HOME/config.toml, default "
             "~/.codex/config.toml) or opencode (the kct entry in "
             "~/.config/opencode/opencode.json, or ./opencode.json with --project). "
@@ -8404,6 +8600,13 @@ def _add_mcp_parser(subparsers) -> None:
         metavar="DIR",
         help="opencode only: write the project-level opencode.json in DIR "
         "(default: current directory) instead of the user-level config",
+    )
+    setup_parser.add_argument(
+        "--scope",
+        choices=["user", "project"],
+        default=None,
+        help="claude-code only: user (default) registers the server in "
+        "~/.claude.json for every project; project writes ./.mcp.json",
     )
     setup_parser.add_argument(
         "--opencode-schema",
@@ -9596,6 +9799,105 @@ def _add_bench_parser(subparsers) -> None:
         help="Run only this board slug (repeatable); default: every board in the manifest",
     )
     bench_external.add_argument(
+        "--suite",
+        choices=["deeppcb", "pcbworld"],
+        default=None,
+        help=(
+            "Benchmark suite (default: deeppcb, the boards.toml boards). 'pcbworld' "
+            "fetches the pinned PCBWorld/PCBench inputs, prepares the D3 'guide' "
+            "boards with PCBWorld's own (external) prep and scores them with BOTH "
+            "the local gates and PCBWorld's Clean Pass, kept separate. Needs "
+            "PCBWORLD_PYTHON, KICAD_CLI (KiCad 9) and PCBNEW_PYTHON; see "
+            "benchmarks/external/README.md."
+        ),
+    )
+    bench_external.add_argument(
+        "--split",
+        default=None,
+        help="--suite pcbworld: D3 split alias from pcbworld.toml (d3a or d3b; default: d3a)",
+    )
+    bench_external.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help=(
+            "--suite pcbworld: number of boards in the deterministic subset (default: 3; with "
+            "--full-split, the size of this invocation's window, default: the rest of the split)"
+        ),
+    )
+    bench_external.add_argument(
+        "--full-split",
+        dest="full_split",
+        action="store_true",
+        help=(
+            "--suite pcbworld: the denominator is the WHOLE split (d3a = 99 boards); "
+            "--offset/--limit only bound which boards this invocation attempts. Writes "
+            "results.json + report.d3.md with an explicit record for every board x rollout"
+        ),
+    )
+    bench_external.add_argument(
+        "--offset",
+        type=int,
+        default=None,
+        help="--suite pcbworld: skip the first N boards of the split (bounded windows)",
+    )
+    bench_external.add_argument(
+        "--rollouts",
+        type=int,
+        default=None,
+        help=(
+            "--suite pcbworld: declared rollouts per board, seeds --seed .. --seed+N-1 "
+            "(default: 1). @5 keeps the rollout with the largest PCBWorld potential gain"
+        ),
+    )
+    bench_external.add_argument(
+        "--deterministic-baseline",
+        dest="deterministic_baseline",
+        action="store_true",
+        help=(
+            "--suite pcbworld: declare kct route a deterministic baseline (one rollout; "
+            "@5 reported equal to @1, PCBWorld's convention). Back it with "
+            "benchmarks/external/seed_variation.py evidence"
+        ),
+    )
+    bench_external.add_argument(
+        "--resume",
+        action="store_true",
+        help=(
+            "--suite pcbworld: keep earlier attempt records whose identity (board, rollout, "
+            "seed, input hash, tool commit, pins, KiCad version, router options) still "
+            "matches; anything else is discarded and re-attempted. Without it the ledger "
+            "is cleared"
+        ),
+    )
+    bench_external.add_argument(
+        "--max-attempts",
+        dest="max_attempts",
+        type=int,
+        default=None,
+        help="--suite pcbworld: stop after N new routing attempts (resume later with --resume)",
+    )
+    bench_external.add_argument(
+        "--route-timeout",
+        dest="route_timeout",
+        type=int,
+        default=None,
+        help=(
+            "--suite pcbworld: forwarded as `kct route --timeout` (hard per-attempt budget, "
+            "seconds); a timed-out attempt is always a failure"
+        ),
+    )
+    bench_external.add_argument(
+        "--render-d3",
+        dest="render_d3",
+        metavar="RESULTS_JSON",
+        default=None,
+        help=(
+            "Re-render report.d3.md next to a committed PCBWorld results.json (no routing, "
+            "no network) and exit"
+        ),
+    )
+    bench_external.add_argument(
         "--tuned",
         action="store_true",
         help=(
@@ -9613,7 +9915,10 @@ def _add_bench_parser(subparsers) -> None:
     bench_external.add_argument(
         "--manifest",
         default=None,
-        help="Path to boards.toml (default: benchmarks/external/boards.toml)",
+        help=(
+            "Path to boards.toml (default: benchmarks/external/boards.toml); with "
+            "--suite pcbworld, the corpus manifest (default: benchmarks/external/pcbworld.toml)"
+        ),
     )
     bench_external.add_argument(
         "--cache-dir",
@@ -10092,6 +10397,17 @@ def _add_calibrate_parser(subparsers) -> None:
         dest="calibrate_verbose",
         help="Show detailed progress information",
     )
+
+
+def _add_board_view_parser(subparsers) -> None:
+    """Add ``board-view`` (issue #6316).
+
+    Declared in the command module, the only place it is declared, so there
+    is no second parser to drift from this one.
+    """
+    from .commands.board_view import add_board_view_parser
+
+    add_board_view_parser(subparsers)
 
 
 def _add_screenshot_parser(subparsers) -> None:

@@ -21,7 +21,11 @@
 #                         re-authorization): "organization has disabled
 #                         [Claude subscription access]" and "Failed to
 #                         authenticate ... socket connection was closed
-#                         unexpectedly".
+#                         unexpectedly". Issue #11205 adds Claude Code's own
+#                         "Failed to authenticate. API Error: 401 …" opening
+#                         (any 401 message), "Failed to authenticate: OAuth
+#                         session expired …" and "API Error: 401 Invalid API
+#                         key".
 #       TOKEN_EXHAUSTED — quota/weekly/per-model limit hit (rotate). Covers
 #                         both the "hit your … limit" family (#3738) and the
 #                         per-model "reached your <model> limit" ceiling the
@@ -29,7 +33,10 @@
 #                         over-approximation (the account may still have
 #                         headroom on a cheaper model) chosen over a new
 #                         model-dimensioned category so no downstream consumer
-#                         has to learn a new enum value.
+#                         has to learn a new enum value. Issue #11205 adds
+#                         "You've hit your team's shared budget", "Your org is
+#                         out of usage", the legacy "Claude AI usage limit
+#                         reached|<epoch>".
 #       MODEL_CREDITS_EXHAUSTED
 #                       — per-model-TIER usage credits ran out (issue #5687):
 #                         "You're out of usage credits". Distinct from
@@ -143,9 +150,26 @@
 # current documented order, are carried into the `claude` table below.
 #
 # Test vectors: the `claude` table's live in
-# `defaults/scripts/tests/test-spawn-claude.sh`; the `codex` table's (plus the
+# `defaults/scripts/tests/test-spawn-claude.sh` and
+# `defaults/scripts/tests/test-classify-error.sh`; the `codex` table's (plus the
 # cross-provider isolation checks that prove the claude vectors are unchanged)
-# live in `defaults/scripts/tests/test-spawn-codex.sh`.
+# live in `defaults/scripts/tests/test-spawn-codex.sh`. Verbatim CLI messages
+# that contain `|` (which the heredoc tables use as a separator) live in
+# `defaults/scripts/tests/fixtures/classify_error/vectors.tsv`.
+#
+# Native implementation (issue #11208): the engine, both provider tables and
+# the deny-list below now ALSO ship as `loom-daemon classify-error`
+# (loom-daemon/src/classify_error.rs), and the two public functions delegate
+# to it whenever a daemon binary resolves — see `classify_error` below for
+# the exact delegation contract. The shell tables are NOT deleted: they are
+# the fallback a host with no (or an older) loom-daemon still classifies
+# with, byte-identically. That is a deliberate difference from `tokens
+# select`/`mark-bad`, which have no shell fallback: external consumers
+# (miniset's E2B shim) and sourced-library callers must keep working with no
+# daemon at call time, while consumers that pin the daemon stop executing
+# this file's patterns at all. Conformance is enforced, not assumed:
+# `test-classify-error.sh` diffs the shell tables against the subcommand on
+# every row of vectors.tsv, and the Rust suite reads the same fixture.
 
 # shellcheck disable=SC2120  # OK that callers pass the args; we don't default.
 
@@ -247,7 +271,34 @@ _classify_error_claude() {
     # remedy is identical in kind — mark this account bad, rotate, never
     # blind-retry — and `claude-wrapper.sh::is_account_auth_dead` already
     # dispatches on exactly this classification.
-    if echo "$output" | grep -qiE "401[^a-z]*authentication_error|\"type\"[[:space:]]*:[[:space:]]*\"?authentication_error|token (has been |was )?revoked|invalid bearer token|OAuth token has expired|token has expired|organization has disabled|failed to authenticate.*socket connection was closed unexpectedly"; then
+    #
+    # Issue #11205: three more messages Claude Code 2.1.295 really prints fell
+    # through to RECOVERABLE, so the dead credential was retried instead of
+    # marked and rotated:
+    #   Failed to authenticate. API Error: 401 OAuth access token is invalid.
+    #   Failed to authenticate: OAuth session expired and could not be refreshed
+    #   API Error: 401 Invalid API key · Please run /login
+    # Each is anchored on the CLI's own opening, not on its free-text tail.
+    # "Failed to authenticate. API Error: " is what Claude Code prints, for a
+    # subscription login, only from its `authentication_failed` branch, which it
+    # takes only on an HTTP 401 or 403 response from the API. So
+    # `failed to authenticate\. api error: 401` matches every 401 message the
+    # server can put after it, today's and the next one. 403 is NOT widened the
+    # same way: a 403 can also be a policy refusal that is not about this
+    # credential, and a false TOKEN_EXPIRED is the expensive direction (see
+    # above).
+    #
+    # The #6424 403 case ("Failed to authenticate. API Error: 403 The socket
+    # connection was closed unexpectedly") was re-checked for #11205 and stays
+    # TOKEN_EXPIRED, i.e. auth, not transport. The 403 is a real HTTP status:
+    # the server refused the credential, and then the connection closed before
+    # the CLI could read the body, so the socket text replaced the message. A
+    # transport fault with no response has no status and does not take the
+    # `authentication_failed` branch, so it never gets this opening; the bare
+    # socket-closed text still falls through to RECOVERABLE. On the #6424 host
+    # these deaths came beside "organization has disabled" deaths of the same
+    # accounts, which is consistent with that reading.
+    if echo "$output" | grep -qiE "401[^a-z]*authentication_error|\"type\"[[:space:]]*:[[:space:]]*\"?authentication_error|token (has been |was )?revoked|invalid bearer token|OAuth token has expired|token has expired|organization has disabled|failed to authenticate.*socket connection was closed unexpectedly|failed to authenticate\. api error: 401|failed to authenticate: oauth session expired|api error: 401 invalid api key"; then
         echo "TOKEN_EXPIRED"
         return
     fi
@@ -304,7 +355,30 @@ _classify_error_claude() {
     # instead of rotated away from. Widened to the same bounded-filler shape
     # already used for "reached your <model> limit" above, so the next
     # "hit your <N-word> limit" variant is caught without another round trip.
-    if echo "$output" | grep -qiE "hit your ([^[:space:]]+[[:space:]]+){0,3}limit|hit\.your\.limit|monthly usage limit|out of extra usage|reached your ([^[:space:]]+[[:space:]]+){0,3}limit"; then
+    #
+    # Issue #11205 adds four more messages Claude Code really prints, each
+    # anchored on the CLI's own opening:
+    #   * "You've hit your team's shared budget. …" — a team's pooled usage is
+    #     spent. Same "hit your …" family, but it ends in "budget", not
+    #     "limit", so the same bounded-filler shape is repeated for "budget".
+    #   * "Your org is out of usage · add funds to continue" (or "· contact
+    #     your admin") — the org's usage money is spent. TOKEN_EXHAUSTED, not
+    #     MODEL_CREDITS_EXHAUSTED: the CLI does not suggest a cheaper model
+    #     here, because a cheaper model spends the same money, so a
+    #     class-scoped mark would keep a dead account in rotation.
+    #   * "Claude AI usage limit reached|<epoch>" — the older CLI's machine-
+    #     readable limit line (the epoch is the reset time).
+    #
+    # Deliberately NOT matched: Claude Code's "API Error: 429 …" prefix. It names
+    # the reporting client, not the cause: a temporary request/token throttle
+    # ("Too many requests. Please retry after 60 seconds.") looks the same as a
+    # spent allocation, and the CLI's own bounded retries can finish before a
+    # throttle resets. Treating it as TOKEN_EXHAUSTED would mark the account
+    # `exhausted` (6h cooldown) and concurrent throttles could pull healthy
+    # accounts out of rotation. Without positive usage-exhaustion evidence a
+    # 429 stays RECOVERABLE through the generic table; a concurrent-session 429
+    # is SESSION_LIMIT, checked first.
+    if echo "$output" | grep -qiE "hit your ([^[:space:]]+[[:space:]]+){0,3}limit|hit\.your\.limit|monthly usage limit|out of extra usage|reached your ([^[:space:]]+[[:space:]]+){0,3}limit|hit your ([^[:space:]]+[[:space:]]+){0,3}budget|your org is out of usage|claude ai usage limit reached"; then
         echo "TOKEN_EXHAUSTED"
         return
     fi
@@ -541,6 +615,51 @@ _classify_error_generic() {
 
 # --- Shared classification engine ----------------------------------------
 
+# --- Native delegation (issue #11208) -------------------------------------
+#
+# requires-daemon: classify-error optional   #11208 — a missing binary, one predating the subcommand, or any "could not ask" answer (non-0/1 exit, empty stdout) falls back to the in-file tables; never a wrong answer.
+#
+# The resolved `loom-daemon` that IMPLEMENTS classify-error, in
+# $_CLASSIFY_DAEMON_BIN — resolved ONCE, when this file is sourced
+# (classify_error runs in retry loops; a fork per call is fine, a resolution
+# walk — which may itself fork a `--version` probe — per call is not). At
+# source time, not lazily, because callers almost always invoke
+# `classification=$(classify_error …)`: a cache filled inside that command
+# substitution would die with the subshell. Empty means "use the tables".
+#
+# This is `loom_resolve_self_daemon_bin`'s chain — the binary that IMPLEMENTS
+# ported logic, NOT $LOOM_DAEMON_BIN (the install this wrapper DRIVES, which
+# may predate the subcommand — #7977's category error). locate-daemon-bin.sh
+# sits beside this file in every tree that ships the pair, so it is sourced
+# when present; a consumer that vendored ONLY this file (miniset's E2B shim)
+# gets the two-tier inline chain instead: the explicit $LOOM_DAEMON_SELF_BIN
+# seam, then `loom-daemon` on PATH. The variable is assigned straight from
+# the resolver so scripts/check-daemon-subcommand-versions.sh sees the calls
+# below as daemon calls and holds them to the marker above.
+#
+# Then ONE capability probe: RECOVERABLE is retryable, so a binary that
+# implements the subcommand exits 0. An older daemon (clap's exit 2) or
+# anything else that cannot answer is dropped here, once — so it neither
+# costs a doomed fork per call nor has an exit 1 misread as `--transient`'s
+# "terminal" verdict. Nothing here can turn a version skew into a wrong answer.
+_CLASSIFY_ERROR_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f "${_CLASSIFY_ERROR_LIB_DIR}/locate-daemon-bin.sh" ]]; then
+    # shellcheck source=lib/locate-daemon-bin.sh
+    # shellcheck disable=SC1091
+    source "${_CLASSIFY_ERROR_LIB_DIR}/locate-daemon-bin.sh"
+fi
+if declare -F loom_resolve_self_daemon_bin >/dev/null 2>&1; then
+    _CLASSIFY_DAEMON_BIN="$(loom_resolve_self_daemon_bin)"
+elif [[ -x "${LOOM_DAEMON_SELF_BIN:-}" ]]; then
+    _CLASSIFY_DAEMON_BIN="${LOOM_DAEMON_SELF_BIN}"
+else
+    _CLASSIFY_DAEMON_BIN="$(command -v loom-daemon 2>/dev/null || true)"
+fi
+if [[ ! -x "${_CLASSIFY_DAEMON_BIN}" ]] \
+    || ! "${_CLASSIFY_DAEMON_BIN}" classify-error --transient RECOVERABLE </dev/null >/dev/null 2>&1; then
+    _CLASSIFY_DAEMON_BIN=""
+fi
+
 classify_error() {
     local output="$1"
     local exit_code="$2"
@@ -551,6 +670,8 @@ classify_error() {
 
     # 1. Timeout from the `timeout(1)` command — productive cycle, not error.
     #    Provider-independent: a timeout is a timeout regardless of runtime.
+    #    Kept in shell (not delegated): no fork needed for an exit-code answer,
+    #    and these two short-circuits are engine-level, not table-level.
     if [[ "$exit_code" -eq 124 || "$exit_code" -eq 137 ]]; then
         echo "TIMEOUT"
         return
@@ -567,7 +688,25 @@ classify_error() {
 
     # --- Below here, exit_code != 0 (genuine failure). Inspect output. ---
 
-    # 3. Provider-specific table first (e.g. the six Claude categories).
+    # 3. Delegate to `loom-daemon classify-error` (#11208; optional — see the
+    #    requires-daemon marker above): a missing or
+    #    older binary, a failed pipe, or any non-0 exit degrades to the
+    #    in-file tables below, never to a wrong answer. stdout must be one
+    #    uppercase category token: classify mode always prints exactly one,
+    #    so anything else (empty included) means "could not ask".
+    if [[ -n "$_CLASSIFY_DAEMON_BIN" ]]; then
+        local native_result=""
+        if native_result="$(printf '%s' "$output" \
+                | "$_CLASSIFY_DAEMON_BIN" classify-error --exit-code "$exit_code" --provider "$provider" 2>/dev/null)" \
+           && [[ "$native_result" =~ ^[A-Z_]+$ ]]; then
+            printf '%s\n' "$native_result"
+            return
+        fi
+        # Fall through: no binary, one predating the subcommand, or a fault.
+    fi
+
+    # 4. The shell tables — the fallback path, byte-identical to pre-#11208.
+    #    Provider-specific table first (e.g. the six Claude categories).
     local provider_result
     provider_result="$(_classify_error_provider "$output" "$provider")"
     if [[ -n "$provider_result" ]]; then
@@ -575,7 +714,7 @@ classify_error() {
         return
     fi
 
-    # 4. Generic, provider-independent transients (always resolves).
+    # 5. Generic, provider-independent transients (always resolves).
     _classify_error_generic "$output"
 }
 
@@ -615,7 +754,21 @@ is_recoverable_error() {
 # matches the documented contract of the catch-all in
 # `_classify_error_generic` ("unknown non-zero exit, treat as recoverable in
 # daemon mode").
+#
+# Delegates to `loom-daemon classify-error --transient` (#11208) when a
+# binary resolves — the SAME deny-list the native classifier enforces, so
+# there is one policy with two pinned renderings, not two policies. The exit
+# code IS the answer (0 transient, 1 terminal); only a binary that passed
+# the capability probe above is asked at all, and any
+# other code (2 = "could not ask") must NOT travel — it falls back to the
+# in-file case below.
 classification_is_transient() {
+    if [[ -n "$_CLASSIFY_DAEMON_BIN" ]]; then
+        # `loom-daemon classify-error --transient`: 0 retry, 1 terminal.
+        local rc=0
+        "$_CLASSIFY_DAEMON_BIN" classify-error --transient "$1" </dev/null 2>/dev/null || rc=$?
+        [[ "$rc" -gt 1 ]] || return "$rc"
+    fi
     case "$1" in
         # Terminal — retrying the same invocation cannot succeed:
         #   SUCCESS       nothing to retry.
@@ -657,8 +810,10 @@ classification_is_transient() {
 # `retry-classify`, and this is the remedy-shaping half of one of them
 # (is_account_exhaustion decides to rotate and mark; model-class decides how
 # much of the account the mark takes out). The classifier it consults --
-# `classify_error` / `classification_is_transient`, above -- deliberately did
-# NOT move, for the reason in #4501: it is the fleet's single source of truth
-# for what a failure IS, and a second copy of it in Rust could disagree with
-# this one. Shell still says what the failure is; the daemon owns what the
-# wrapper does about it.
+# `classify_error` / `classification_is_transient`, above -- kept its shell
+# body as the no-daemon fallback but now also ships natively as
+# `loom-daemon classify-error` (#11208), which was the one half of the #4501
+# boundary still living only in this file. The #4501 invariant survives the
+# move in a stronger form: there is exactly ONE policy, and the shell tables
+# and the native classifier are pinned byte-equal by
+# test-classify-error.sh's parity section on every vector.

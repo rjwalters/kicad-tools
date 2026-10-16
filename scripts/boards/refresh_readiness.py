@@ -1,6 +1,6 @@
 """Gated readiness refresh for recipe-finalised demo boards (Issue #6076).
 
-Boards 05, 06 and 07 ship readiness evidence that ``kct readiness`` cannot
+Boards 04, 05, 06 and 07 ship readiness evidence that ``kct readiness`` cannot
 regenerate: ``--verify`` never replaces the release report, and ``--generate``
 refuses packages whose manifest it did not produce.  Their ``readiness.json``
 also records board-specific checks (firmware, 45-degree alignment, timing,
@@ -25,7 +25,10 @@ unless every gate passes:
 4. Gates, all run on the staged board:
    * ``kicad-cli pcb drc --refill-zones``: 0 errors, 0 unconnected items;
    * ``kct check --mfr <tier>``: 0 errors, 0 warnings, and the drc, erc,
-     lvs and manifest meta-checks all PASSED;
+     lvs and manifest meta-checks all PASSED.  A board whose fabrication
+     process the generic tier cannot model (board 04's paid 0.15 mm drill)
+     sets ``check_script`` instead; that board-local check must meet the same
+     bar (Issue #6269);
    * ``kct net-status``: every net complete;
    * ``kct validate --sync``: 0 schematic/PCB sync errors.
 5. Refuse if any measured metric (``drc_violations``, ``nets_routed_pct``,
@@ -88,6 +91,14 @@ class BoardConfig:
     tier: str
     erc: tuple[ErcJob, ...]
     manifest_refresher: str | None = None  # "path/to/module.py:function"
+    # Board-local manufacturing check that replaces ``kct check --mfr <tier>``
+    # (Issue #6269).  Run as ``python <check_script> <routed_pcb> <report>``;
+    # it must write a ``kct check``-format JSON report, which is gated exactly
+    # like ``gate_kct_check``'s.
+    check_script: str | None = None
+    # ``(mirror_dir, source_dir)``: every file already in ``mirror_dir`` is
+    # refreshed from ``source_dir`` before the archives are rebuilt.
+    mirrors: tuple[tuple[str, str], ...] = ()
     archives: tuple[tuple[str, tuple[str, ...]], ...] = field(
         default=(
             ("output/manufacturing/kicad_project.zip", ("output", ".")),
@@ -97,6 +108,20 @@ class BoardConfig:
 
 
 BOARDS: dict[str, BoardConfig] = {
+    # Board 04 ships a paid 0.15 mm mechanical-drill process that only its own
+    # check_manufacturing.py / manufacturing_process.py model; the generic
+    # ``kct check --mfr jlcpcb-tier1`` reports its reviewed vias as errors.
+    # The schematic is re-checked by native ERC (no report copies are
+    # rewritten: its committed reports also carry a Linux-container run).
+    "04-stm32-devboard": BoardConfig(
+        routed_pcb="output/stm32_devboard_routed.kicad_pcb",
+        schematic="output/stm32_devboard.kicad_sch",
+        tier="jlcpcb-tier1",
+        erc=(ErcJob("04-native-erc.json", "output", "stm32_devboard.kicad_sch", ()),),
+        check_script="check_manufacturing.py",
+        mirrors=(("output/manufacturing/design-source", "."),),
+        archives=(("output/manufacturing/kicad_project.zip", ("output", ".")),),
+    ),
     "05-bldc-motor-controller": BoardConfig(
         routed_pcb="output/bldc_controller_routed.kicad_pcb",
         schematic="output/bldc_controller.kicad_sch",
@@ -307,6 +332,19 @@ def gate_native_drc(board: Path, cfg: BoardConfig) -> int:
     return len(errors)
 
 
+def check_report_verdict(data: dict, label: str) -> tuple[bool, int]:
+    """Gate a ``kct check``-format report: 0 errors, 0 warnings, meta all PASSED."""
+    summary, meta = data.get("summary", {}), data.get("meta_checks", {})
+    statuses = {k: meta.get(k, {}).get("status") for k in ("drc", "erc", "lvs", "manifest")}
+    lvs = meta.get("lvs", {})
+    mismatches = len(lvs.get("mismatches", [])) + len(lvs.get("copper_mismatches", []))
+    errors, warnings = summary.get("errors"), summary.get("warnings")
+    log(f"  gate {label}: {errors} error(s), {warnings} warning(s), meta {statuses}")
+    if errors != 0 or warnings != 0 or any(s != "PASSED" for s in statuses.values()):
+        raise GateFailure(f"{label} failed")
+    return statuses["lvs"] == "PASSED", mismatches
+
+
 def gate_kct_check(board: Path, cfg: BoardConfig) -> tuple[bool, int]:
     with tempfile.TemporaryDirectory(prefix="refresh-readiness-check-") as tmp:
         report = Path(tmp) / "check.json"
@@ -325,17 +363,34 @@ def gate_kct_check(board: Path, cfg: BoardConfig) -> tuple[bool, int]:
         if not report.is_file():
             raise GateFailure("kct check did not produce a report")
         data = json.loads(report.read_text())
-    summary, meta = data["summary"], data.get("meta_checks", {})
-    statuses = {k: meta.get(k, {}).get("status") for k in ("drc", "erc", "lvs", "manifest")}
-    lvs = meta.get("lvs", {})
-    mismatches = len(lvs.get("mismatches", [])) + len(lvs.get("copper_mismatches", []))
-    log(
-        f"  gate kct check --mfr {cfg.tier}: {summary['errors']} error(s), "
-        f"{summary['warnings']} warning(s), meta {statuses}"
-    )
-    if summary["errors"] or summary["warnings"] or any(s != "PASSED" for s in statuses.values()):
-        raise GateFailure("kct check failed")
-    return statuses["lvs"] == "PASSED", mismatches
+    return check_report_verdict(data, f"kct check --mfr {cfg.tier}")
+
+
+def gate_board_check(board: Path, cfg: BoardConfig) -> tuple[bool, int]:
+    """Run the board's own manufacturing check in place of ``kct check`` (Issue #6269)."""
+    assert cfg.check_script is not None
+    script = board / cfg.check_script
+    with tempfile.TemporaryDirectory(prefix="refresh-readiness-board-check-") as tmp:
+        report = Path(tmp) / "check.json"
+        proc = run(
+            [sys.executable, str(script), str(board / cfg.routed_pcb), str(report)],
+            cwd=board,
+            env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+        )
+        if not report.is_file():
+            raise GateFailure(f"{cfg.check_script} did not produce a report: {proc.stderr[-2000:]}")
+        data = json.loads(report.read_text())
+    verdict = check_report_verdict(data, cfg.check_script)
+    if proc.returncode != 0:
+        raise GateFailure(f"{cfg.check_script} exited {proc.returncode}")
+    return verdict
+
+
+def gate_check(board: Path, cfg: BoardConfig) -> tuple[bool, int]:
+    """The board-local check hook when configured, else ``kct check --mfr <tier>``."""
+    if cfg.check_script is not None:
+        return gate_board_check(board, cfg)
+    return gate_kct_check(board, cfg)
 
 
 def gate_net_status(board: Path, cfg: BoardConfig) -> float:
@@ -405,6 +460,14 @@ def refresh(
                 (staged / target).write_bytes(data)
             log(f"  native ERC {job.schematic}: 0 violations -> {len(job.targets)} report copies")
 
+        for mirror, source in cfg.mirrors:
+            for path in sorted(p for p in (staged / mirror).rglob("*") if p.is_file()):
+                origin = staged / source / path.relative_to(staged / mirror)
+                if not origin.is_file():
+                    raise GateFailure(f"{mirror}: no current file for {path.name}")
+                shutil.copy2(origin, path)
+            log(f"  {mirror}: refreshed from {source}")
+
         for archive, search in cfg.archives:
             changed = rebuild_archive(staged / archive, [staged / s for s in search])
             log(f"  {archive}: rebuilt; members with new content {changed}")
@@ -420,7 +483,7 @@ def refresh(
         log(f"  output/manufacturing.zip: rebuilt; members with new content {changed}")
 
         drc_errors = gate_native_drc(staged, cfg)
-        lvs_clean, lvs_mismatches = gate_kct_check(staged, cfg)
+        lvs_clean, lvs_mismatches = gate_check(staged, cfg)
         routed_pct = gate_net_status(staged, cfg)
         gate_sync(staged, cfg)
 

@@ -5,26 +5,27 @@
 # THE FAILURE MODE THIS GUARDS AGAINST
 #
 # champion-epic.md's "Idempotency Guard for Unrevised Epics" escalates an
-# unrevised, repeatedly-rejected epic to `loom:operator-only` once
+# unrevised, repeatedly-rejected epic to `loom:operator` once
 # LOOM_MAX_UNREVISED_EVALUATIONS is spent. Two incidents showed that ladder
 # re-fighting a ruling a human had already made on the same, unchanged epic:
 #
 #   #7734  The only "a human owns this" signal the guard read was
-#          `loom:operator-only` itself. An epic an operator had parked on
+#          the escalation label itself (then `loom:operator-only`, folded
+#          into `loom:operator` by #11795). An epic an operator had parked on
 #          `loom:blocked` (or held with `loom:operator`) was tallied and
-#          escalated like an untouched one, re-applying `loom:operator-only`
+#          escalated like an untouched one, re-applying the label
 #          within hours of the park -- even though Step 0c's close branch
 #          already refuses to act past exactly those three labels.
-#   #7921  An operator un-parked an epic (removed `loom:operator-only`, added
+#   #7921  An operator un-parked an epic (removed `loom:operator`, added
 #          no `loom:blocked`). Its label state was then byte-identical to
 #          "never escalated", the body hash was unchanged, the tally was at
 #          the cap -- so the very next pass re-escalated. Three times in one
 #          day. No label can distinguish that case, so the fix reads the
-#          issue TIMELINE: an `unlabeled loom:operator-only` event newer than
+#          issue TIMELINE: an `unlabeled loom:operator` event newer than
 #          the current revision's own verdict comment is a ruling on this
 #          exact body, and the guard stands down until the body is revised.
 #   #7965  That un-park read is deliberately actor-blind, which is only safe
-#          while NOTHING automated can remove `loom:operator-only` from an
+#          while NOTHING automated can remove `loom:operator` from an
 #          epic -- a fact owned by a different file
 #          (classify-dependency-block.sh gates every un-escalation on a
 #          `champion:proposal-escalated` comment, which this ladder never
@@ -41,7 +42,7 @@
 #   1. LINT -- the guard's hold check names the SAME label set as Step 0c's
 #      close-branch criterion 3, exercised against pass/fail fixtures so it
 #      can never pass vacuously.
-#   2. LINT -- the guard reads the timeline for `unlabeled loom:operator-only`,
+#   2. LINT -- the guard reads the timeline for `unlabeled loom:operator`,
 #      compares it to the verdict comment's `created_at`, and sets
 #      OPERATOR_RULED -- again with a fixture that lacks it.
 #   3. WIRING -- the OPERATOR_RULED branch sits after the stray-marker check
@@ -78,7 +79,7 @@ GUARD_NOTES="$ROLE_DIR/champion-epic-guard-invariants.md"
 # The three labels Step 0c's close-branch criterion 3 refuses to close past.
 # The guard must key on exactly this set -- one source of truth, checked
 # against the shipped 0c line itself in Test 2 rather than trusted here.
-EXPECTED_HOLD_LABELS=$'loom:blocked\nloom:operator\nloom:operator-only'
+EXPECTED_HOLD_LABELS=$'loom:blocked\nloom:frozen\nloom:operator'
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -121,13 +122,15 @@ guard_block() {
 }
 
 # Every `loom:*` label literally named in the line(s) that derive the guard's
-# hold decision: the HELD_BY assignment and its jq continuation line, or -- on
-# the pre-#7734 form -- the single-label ALREADY_ROUTED assignment. Sorted,
-# unique, one per line.
+# hold decision: the HOLDS assignment (since #11795 a registry query whose
+# literal names are its older-daemon fallback), the HELD_BY assignment and its
+# jq continuation line, or -- on the pre-#7734 form -- the single-label
+# ALREADY_ROUTED assignment. Sorted, unique, one per line.
 hold_labels_of() {
     guard_block "$1" \
         | cut -f2- \
         | awk '
+            /^HOLDS=/ { print }
             /^HELD_BY=/ || /^ALREADY_ROUTED=\$\(printf/ { grab = 2 }
             grab > 0 { print; grab-- }
         ' \
@@ -143,15 +146,15 @@ criterion3_labels_of() {
         | LC_ALL=C sort -u
 }
 
-# 0 if the guard block reads the timeline for an `unlabeled loom:operator-only`
-# event, compares it against a verdict `created_at`, and derives OPERATOR_RULED
+# 0 if the guard block reads the timeline for an `unlabeled` event of any
+# operator-hold name (OP_HOLDS, retired names included since #11795), compares it against a verdict `created_at`, and derives OPERATOR_RULED
 # from that comparison; 1 otherwise.
 has_unpark_check() {
     local block
     block="$(guard_block "$1" | cut -f2-)"
     grep -qE 'issues/\$EPIC_NUMBER/timeline' <<<"$block" \
         && grep -qE '\.event == "unlabeled"' <<<"$block" \
-        && grep -qE '\.label\.name == "loom:operator-only"' <<<"$block" \
+        && grep -qE '\.label\.name \| IN\(\$o\[\]\)' <<<"$block" \
         && grep -qE 'VERDICT_CREATED_AT=.*created_at' <<<"$block" \
         && grep -qE 'UNPARKED_AT.*>.*VERDICT_CREATED_AT' <<<"$block" \
         && grep -qE '^ *OPERATOR_RULED=yes' <<<"$block"
@@ -193,7 +196,7 @@ cat >"$FIXTURE_DIR/pre-fix.md" <<'EOF'
 
 ```bash
 PRIOR_REJECTIONS=$(printf '%s\n' "$EPIC_JSON" | jq '[.comments[]] | length')
-ALREADY_ROUTED=$(printf '%s\n' "$EPIC_JSON" | jq -e '.labels[] | select(.name=="loom:operator-only")' >/dev/null && echo yes || echo no)
+ALREADY_ROUTED=$(printf '%s\n' "$EPIC_JSON" | jq -e '.labels[] | select(.name=="loom:operator")' >/dev/null && echo yes || echo no)
 SKIP_STREAK=0
 if [ "$ALREADY_ROUTED" = "yes" ]; then
   echo "already routed"
@@ -208,7 +211,7 @@ fi
 
 #### 0c. Close, or ask the operator to
 
-3. The epic carries none of `loom:blocked`, `loom:operator-only`, `loom:operator`.
+3. The epic carries none of `loom:blocked`, `loom:operator`, `loom:frozen`.
 EOF
 
 # The same guard in the POST-fix shape.
@@ -217,8 +220,10 @@ cat >"$FIXTURE_DIR/post-fix.md" <<'EOF'
 
 ```bash
 PRIOR_REJECTIONS=$(printf '%s\n' "$EPIC_JSON" | jq '[.comments[]] | length')
+HOLDS=$(loom-daemon labels list --property hold --with-retired 2>/dev/null || printf 'loom:blocked\nloom:operator\nloom:frozen'); export HOLDS
+OP_HOLDS=$(loom-daemon labels list --property operator_gate --with-retired 2>/dev/null || echo loom:operator); export OP_HOLDS
 HELD_BY=$(printf '%s\n' "$EPIC_JSON" | jq -r \
-  '[.labels[].name | select(. == "loom:operator-only" or . == "loom:blocked" or . == "loom:operator")] | join(",")')
+  '($ENV.HOLDS | split("\n")) as $h | [.labels[].name | select(IN($h[]))] | join(",")')
 ALREADY_ROUTED=$([ -n "$HELD_BY" ] && echo yes || echo no)
 OPERATOR_RULED=no
 if [ "$ALREADY_ROUTED" = "yes" ]; then
@@ -226,7 +231,7 @@ if [ "$ALREADY_ROUTED" = "yes" ]; then
 elif true; then
   VERDICT_CREATED_AT=$(printf '%s\n' "$VERDICT_COMMENT" | jq -r '.created_at // ""')
   UNPARKED_AT=$(gh api "repos/{owner}/{repo}/issues/$EPIC_NUMBER/timeline" --paginate \
-    --jq '.[] | select(.event == "unlabeled" and .label.name == "loom:operator-only") | .created_at' \
+    --jq '($ENV.OP_HOLDS | split("\n")) as $o | .[] | select(.event == "unlabeled" and (.label.name | IN($o[]))) | .created_at' \
     | sort | tail -n 1)
   if [ -n "$UNPARKED_AT" ] && [[ "$UNPARKED_AT" > "$VERDICT_CREATED_AT" ]]; then
     OPERATOR_RULED=yes
@@ -245,7 +250,7 @@ fi
 
 #### 0c. Close, or ask the operator to
 
-3. The epic carries none of `loom:blocked`, `loom:operator-only`, `loom:operator`.
+3. The epic carries none of `loom:blocked`, `loom:operator`, `loom:frozen`.
 EOF
 
 # The #7965 shape: the same guard, with both fail-open preconditions added.
@@ -259,7 +264,7 @@ if true; then
   BOT_UNESCALATABLE=$(printf '%s\n' "$EPIC_JSON" | jq -e \
     '.comments[] | select(.body | contains("<!-- champion:proposal-escalated -->"))' >/dev/null && echo yes || echo no)
   UNPARKED_AT=$(gh api "repos/{owner}/{repo}/issues/$EPIC_NUMBER/timeline" --paginate \
-    --jq '.[] | select(.event == "unlabeled" and .label.name == "loom:operator-only") | .created_at' \
+    --jq '($ENV.OP_HOLDS | split("\n")) as $o | .[] | select(.event == "unlabeled" and (.label.name | IN($o[]))) | .created_at' \
     | sort | tail -n 1)
   if [ -n "$UNPARKED_AT" ] && [ -n "$VERDICT_CREATED_AT" ] && [ "$BOT_UNESCALATABLE" = "no" ] \
      && [[ "$UNPARKED_AT" > "$VERDICT_CREATED_AT" ]]; then
@@ -273,10 +278,10 @@ EOF
 echo ""
 echo "Test 1: lints flag the pre-#7734/#7921 guard shape and accept the fixed one"
 PRE_LABELS="$(hold_labels_of "$FIXTURE_DIR/pre-fix.md")"
-if [[ "$PRE_LABELS" == "loom:operator-only" ]]; then
-    pass "a guard keyed on loom:operator-only alone is reported as such"
+if [[ "$PRE_LABELS" == "loom:operator" ]]; then
+    pass "a guard keyed on loom:operator alone is reported as such"
 else
-    fail "pre-fix fixture: expected only loom:operator-only, got:"$'\n'"$PRE_LABELS"
+    fail "pre-fix fixture: expected only loom:operator, got:"$'\n'"$PRE_LABELS"
 fi
 POST_LABELS="$(hold_labels_of "$FIXTURE_DIR/post-fix.md")"
 if [[ "$POST_LABELS" == "$EXPECTED_HOLD_LABELS" ]]; then
@@ -308,7 +313,7 @@ else
     elif [[ "$OC_LABELS" != "$EXPECTED_HOLD_LABELS" ]]; then
         fail "Step 0c criterion 3 no longer names the expected three labels:"$'\n'"$OC_LABELS"
     else
-        pass "Step 0c criterion 3 names loom:blocked, loom:operator, loom:operator-only"
+        pass "Step 0c criterion 3 names loom:blocked, loom:operator, loom:frozen"
     fi
     if [[ "$GUARD_LABELS" == "$OC_LABELS" ]] && [[ -n "$GUARD_LABELS" ]]; then
         pass "the guard's HELD_BY / ALREADY_ROUTED check names the same set as 0c criterion 3"
@@ -327,7 +332,7 @@ echo ""
 echo "Test 3: the guard reads the timeline for an un-park newer than this revision's verdict"
 if [[ -f "$CHAMPION_EPIC" ]]; then
     if has_unpark_check "$CHAMPION_EPIC"; then
-        pass "guard reads unlabeled loom:operator-only from the timeline and compares it to VERDICT_CREATED_AT"
+        pass "guard reads unlabeled loom:operator from the timeline and compares it to VERDICT_CREATED_AT"
     else
         fail "guard is missing the timeline un-park check (timeline read / unlabeled / created_at comparison / OPERATOR_RULED=yes)"
     fi
@@ -405,8 +410,8 @@ if [[ -f "$CHAMPION_EPIC" ]]; then
         fail "outcome table lacks an OPERATOR_RULED=yes row routed through Step 0.5"
     fi
     ROUTED_ROW="$(grep -E '^\| *`ALREADY_ROUTED=yes`' <<<"$GUARD")"
-    if [[ -n "$ROUTED_ROW" ]] && grep -q 'loom:blocked' <<<"$ROUTED_ROW" && grep -q 'loom:operator`' <<<"$ROUTED_ROW"; then
-        pass "outcome table's ALREADY_ROUTED=yes row names loom:blocked and loom:operator alongside loom:operator-only"
+    if [[ -n "$ROUTED_ROW" ]] && grep -q 'loom:blocked' <<<"$ROUTED_ROW" && grep -q 'loom:operator`' <<<"$ROUTED_ROW" && grep -q 'loom:frozen' <<<"$ROUTED_ROW"; then
+        pass "outcome table's ALREADY_ROUTED=yes row names loom:operator, loom:blocked and loom:frozen"
     else
         fail "outcome table's ALREADY_ROUTED=yes row does not name all three hold labels"
     fi

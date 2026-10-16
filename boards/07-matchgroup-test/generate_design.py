@@ -50,6 +50,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -543,6 +544,10 @@ def _audit_pour_nets(pcb_path: Path, net_names: list[str]) -> dict:
         at = re.search(r"\(at ([\d.-]+) ([\d.-]+)\)", via)
         sz = re.search(r"\(size ([\d.]+)\)", via)
         radius = (float(sz.group(1)) if sz else 0.6) / 2.0
+        # Issue #6614: no ``kicad_read_via_layers`` here -- this audit never
+        # reads the ``(layers ...)`` pair; board 07 only emits through vias
+        # and every via is modelled on ``all_layers``, which is already how
+        # KiCad reads a keyword-less via.
         vias[name].append(
             (Point(float(at.group(1)), float(at.group(2))).buffer(radius), all_layers)
         )
@@ -796,10 +801,18 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
        validated trace (vias span all layers, so via-to-via bridges can
        cross on B.Cu where F.Cu/In1.Cu are blocked).
 
-    Every via and trace is validated with shapely against ALL existing
-    copper: foreign pads / segments / vias by >= 0.15 mm on the relevant
-    layers, no overlap with ANY pad (the via-in-pad ban, same-net
-    included), drill-to-drill >= 0.45 mm center distance.  Foreign zone
+    Every via and trace is validated against ALL existing copper: foreign
+    pads / segments / vias by the NET-CLASS clearance ``c(P, N) =
+    max(0.15, class(P).clearance, class(N).clearance)`` on the relevant
+    layers (Issue #6736 -- 0.2 mm for this board's Power-class pour nets,
+    the value KiCad's ``Reviewed clearance - Power`` rule enforces), no
+    overlap with ANY pad (the via-in-pad ban, same-net included),
+    drill-to-drill >= 0.45 mm center distance.  Foreign PADS are measured
+    with their true shape through the shared clearance kernel
+    (``kicad_tools.validate.clearance_shapes.pad_shape``: rect, roundrect
+    with the file's corner ratio, circle, oval), so a diagonal stub or
+    bridge leg is held off a pad's corner exactly as KiCad measures it.
+    Foreign zone
     FILLS are not obstacles -- the re-fill that follows this pass
     recomputes them and carves clearance around the new copper.
 
@@ -811,12 +824,21 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
     """
     import math
     import re
+    import warnings
+    from dataclasses import replace
 
     from shapely.geometry import LineString, Point, Polygon
     from shapely.ops import nearest_points
 
     from kicad_tools.analysis.net_status import NetStatusAnalyzer
     from kicad_tools.core.schematic_uuids import UuidMinter, uuids_in_text
+    from kicad_tools.router.clearance_kernel import (
+        CLEARANCE_EPSILON_MM,
+        KSegment,
+        KVia,
+        copper_gap,
+    )
+    from kicad_tools.validate.clearance_shapes import pad_shape as kernel_pad_shape
     from kicad_tools.zones.pour_bridge import BridgeSide, plan_via_hop_bridge
 
     text = pcb_path.read_text()
@@ -831,7 +853,10 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
     analyzer = NetStatusAnalyzer(pcb_path)
     origin_x, origin_y = analyzer.pcb.board_origin
 
-    # Pads: (geom, net, layers, drill_r, center, name, is_th)
+    # Pads: (geom, net, layers, drill_r, center, name, is_th, inscribed,
+    #        kpad, bound_r) -- ``kpad`` / ``bound_r`` are Issue #6736's true
+    #        pad copper and the radius of the circle (about ``center``) that
+    #        encloses it.
     pad_index: list[tuple] = []
     for fp in analyzer.pcb.footprints:
         theta = math.radians(fp.rotation or 0.0)
@@ -854,6 +879,22 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
             half_diag = math.hypot(pad.size[0], pad.size[1]) / 2.0
             inscribed_r = min(pad.size) / 2.0
             drill_r = float(getattr(pad, "drill", 0.0) or 0.0) / 2.0
+            # Issue #6736: the pad's TRUE copper for clearance, from the
+            # shared kernel adapter (board-relative, so shifted into the
+            # absolute frame the segments / vias above are read in).  The
+            # circumscribed circle stays as the via-in-pad ban's footprint
+            # and as an exact-safe prefilter (it contains the pad).
+            kpad = kernel_pad_shape(pad, fp)
+            kpad = replace(
+                kpad,
+                core=tuple((cx + origin_x, cy + origin_y) for cx, cy in kpad.core),
+                cx=kpad.cx + origin_x,
+                cy=kpad.cy + origin_y,
+            )
+            bound_r = (
+                max((math.hypot(cx - x, cy - y) for cx, cy in kpad.core), default=0.0)
+                + kpad.corner_radius
+            )
             pad_index.append(
                 (
                     Point(x, y).buffer(half_diag),
@@ -864,6 +905,8 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
                     f"{fp.reference}.{pad.number}",
                     is_th,
                     Point(x, y).buffer(inscribed_r),
+                    kpad,
+                    bound_r,
                 )
             )
 
@@ -954,28 +997,61 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
     # shipped two ~0.39 mm violations on the re-routed artifact.
     MIN_HOLE_TO_HOLE = 0.5
 
+    # Issue #6736: the clearance new copper on pour net P keeps from copper
+    # on net N is ``c(P, N) = max(CLEAR, class(P), class(N))`` -- the grid
+    # router's rule (``io._get_pair_clearance``) and the oracle closer's
+    # (``PourLinkCloser.pair_clearance``).  A flat 0.15 mm let a +1V2 bridge
+    # leg ship 0.1913 mm from U1.24 (GND) against KiCad's 0.2 mm Power rule.
+    with warnings.catch_warnings():
+        # The map's signal classes carry deprecated knobs the route step
+        # already warned about; only the clearances are read here.
+        warnings.simplefilter("ignore", DeprecationWarning)
+        net_classes = build_net_class_map()
+    class_clearance: dict[str, float] = {
+        name: max(CLEAR, float(cls.clearance)) for name, cls in net_classes.items()
+    }
+
+    def _pair_clear(net: str, other: str | None) -> float:
+        return max(class_clearance.get(net, CLEAR), class_clearance.get(other or "", CLEAR))
+
+    def _pad_too_close(
+        kshape: KSegment | KVia, entry: tuple, required: float, cheap: float
+    ) -> bool:
+        """Whether ``kshape`` comes within ``required`` of pad ``entry``'s copper.
+
+        ``cheap`` is the copper distance to the circle that encloses the
+        pad (``bound_r``), so ``cheap >= required`` already proves the pair
+        clear; otherwise the shared kernel measures the true pad shape.
+        """
+        if cheap >= required:
+            return False
+        return copper_gap(kshape, entry[8]) < required - CLEARANCE_EPSILON_MM
+
     def _via_ok(net: str, vx: float, vy: float) -> bool:
         if not (min_x <= vx <= max_x and min_y <= vy <= max_y):
             return False
         vpt = Point(vx, vy)
         vgeom = vpt.buffer(VIA_R)
+        kvia = KVia(x=vx, y=vy, diameter=2 * VIA_R, drill=2 * VIA_DRILL_R)
         for entry in pad_index:
             geom, pnet, _layers, drill_r, (px, py) = entry[:5]
             if vgeom.intersects(geom):
                 return False  # via-in-pad ban (same-net included)
-            if pnet != net and vgeom.distance(geom) < CLEAR:
-                return False
+            if pnet != net:
+                cheap = math.hypot(vx - px, vy - py) - VIA_R - entry[9]
+                if _pad_too_close(kvia, entry, _pair_clear(net, pnet), cheap):
+                    return False
             if drill_r > 0 and math.hypot(vx - px, vy - py) < (
                 drill_r + VIA_DRILL_R + MIN_HOLE_TO_HOLE
             ):
                 return False
         for geom, snet, _lay in seg_index:
-            if snet != net and vgeom.distance(geom) < CLEAR:
+            if snet != net and vgeom.distance(geom) < _pair_clear(net, snet):
                 return False
         for pt, vnet, radius, drill_r in via_index:
             if pt.distance(vpt) < MIN_HOLE_TO_HOLE + VIA_DRILL_R + drill_r:
                 return False
-            if vnet != net and vgeom.distance(pt.buffer(radius)) < CLEAR:
+            if vnet != net and vgeom.distance(pt.buffer(radius)) < _pair_clear(net, vnet):
                 return False
         return True
 
@@ -989,16 +1065,20 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
         for x, y in (p0, p1):
             if not (min_x - 0.3 <= x <= max_x + 0.3 and min_y - 0.3 <= y <= max_y + 0.3):
                 return False
-        path = LineString([p0, p1]).buffer(width / 2.0)
+        centreline = LineString([p0, p1])
+        path = centreline.buffer(width / 2.0)
+        kseg = KSegment(x1=p0[0], y1=p0[1], x2=p1[0], y2=p1[1], width=width)
         for entry in pad_index:
-            geom, pnet, layers = entry[:3]
-            if pnet != net and layer in layers and path.distance(geom) < CLEAR:
-                return False
+            geom, pnet, layers, _drill_r, (px, py) = entry[:5]
+            if pnet != net and layer in layers:
+                cheap = centreline.distance(Point(px, py)) - width / 2.0 - entry[9]
+                if _pad_too_close(kseg, entry, _pair_clear(net, pnet), cheap):
+                    return False
         for geom, snet, lay in seg_index:
-            if snet != net and lay == layer and path.distance(geom) < CLEAR:
+            if snet != net and lay == layer and path.distance(geom) < _pair_clear(net, snet):
                 return False
         for pt, vnet, radius, _drill_r in via_index:
-            if vnet != net and path.distance(pt.buffer(radius)) < CLEAR:
+            if vnet != net and path.distance(pt.buffer(radius)) < _pair_clear(net, vnet):
                 return False
         return True
 
@@ -1099,7 +1179,7 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
             if vnet == net:
                 own.append((pt.buffer(radius), all_layers, "via"))
         for entry in pad_index:
-            _obst, pnet, layers, _dr, center, name, is_th, inscribed = entry
+            _obst, pnet, layers, _dr, center, name, is_th, inscribed = entry[:8]
             if pnet == net:
                 # Inscribed-circle copper for own-net union (matches the
                 # audit's conservative connectivity model).
@@ -1622,6 +1702,25 @@ def write_sidecar(net_class_map: dict, output_dir: Path) -> Path:
     return sidecar_path
 
 
+def copy_project_sidecars(source_pcb: Path, frame_pcb: Path) -> list[Path]:
+    """Copy ``source_pcb``'s ``.kicad_pro`` / ``.kicad_dru`` beside ``frame_pcb``.
+
+    ``kct route`` resolves declared clearance rules (board minimum, netclass,
+    DRU via rules) from sidecars sharing the PCB's stem; the translated routing
+    frame has none, so without this the route cannot see the project's rules
+    (Issue #6285).  The files hold no coordinates, so no translation is needed.
+    Missing sidecars are skipped.  Returns the files written.
+    """
+    written: list[Path] = []
+    for suffix in (".kicad_pro", ".kicad_dru"):
+        src = source_pcb.with_suffix(suffix)
+        if src.exists():
+            dst = frame_pcb.with_suffix(suffix)
+            shutil.copy2(src, dst)
+            written.append(dst)
+    return written
+
+
 def route_pcb(input_path: Path, output_path: Path) -> bool:
     """Route the PCB by invoking ``kct route`` with the proven flag recipe.
 
@@ -1824,6 +1923,7 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     if frame_dx != 0.0 or frame_dy != 0.0:
         route_input = output_path.parent / "matchgroup_test_routing_frame.kicad_pcb"
         route_input.write_text(translate_pcb_text(input_text, frame_dx, frame_dy))
+        copy_project_sidecars(input_path, route_input)
         print(
             f"\n   Routing-frame translation: input shifted by "
             f"({frame_dx:+g}, {frame_dy:+g}) mm to the historical "

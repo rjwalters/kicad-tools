@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import logging
 import re
 import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
+from ...core.layers import kicad_read_via_layers, warn_normalised_vias
 from ..layers import Layer
 from ..primitives import Segment, Via
 from .config import OptimizationConfig, OptimizationStats
@@ -14,6 +16,20 @@ from .geometry import count_corners, total_length
 
 if TYPE_CHECKING:
     pass
+
+logger = logging.getLogger(__name__)
+
+
+# Issue #3118 / #6493: the optional via-type token at the head of a
+# ``(via ...)`` block.  Shared by every regex via parser so they agree on
+# which blocks are keyword-less (and so read as through vias by KiCad).
+VIA_TYPE_RE = re.compile(r"^\(via\s+(micro|blind|buried)\b")
+
+
+def via_block_type(block: str) -> str | None:
+    """Return the ``micro`` / ``blind`` / ``buried`` token of a via block, or ``None``."""
+    m = VIA_TYPE_RE.match(block)
+    return m.group(1) if m else None
 
 
 def _decode_net_string(token: str) -> str:
@@ -245,12 +261,13 @@ def parse_vias(pcb_text: str) -> dict[str, list[Via]]:
     # Issue #3118's ``micro``/``blind``/``buried`` token handling is
     # preserved by matching the optional type token at the head of the
     # block body.
-    _re_via_type = re.compile(r"^\(via\s+(micro|blind|buried)\b")
+    _re_via_type = VIA_TYPE_RE
     _re_at = re.compile(r"\(at\s+([\d.eE+-]+)\s+([\d.eE+-]+)\)")
     _re_size = re.compile(r"\(size\s+([\d.eE+-]+)\)")
     _re_drill = re.compile(r"\(drill\s+([\d.eE+-]+)\)")
     _re_layers = re.compile(r'\(layers\s+"([^"]+)"\s+"([^"]+)"\)')
 
+    vias_read_as_through = 0
     for _start, _end, block in _extract_balanced_blocks(pcb_text, "via"):
         m_at = _re_at.search(block)
         m_size = _re_size.search(block)
@@ -271,8 +288,12 @@ def parse_vias(pcb_text: str) -> dict[str, list[Via]]:
         y = float(m_at.group(2))
         diameter = float(m_size.group(1))
         drill = float(m_drill.group(1))
-        layer_start_name = m_layers.group(1)
-        layer_end_name = m_layers.group(2)
+        # Issue #6493: a keyword-less partial pair is a through via to KiCad.
+        (layer_start_name, layer_end_name), normalised = kicad_read_via_layers(
+            (m_layers.group(1), m_layers.group(2)), via_type_token
+        )
+        if normalised:
+            vias_read_as_through += 1
         net, net_name = resolved_net
 
         # Convert layer names to Layer enum
@@ -300,12 +321,16 @@ def parse_vias(pcb_text: str) -> dict[str, list[Via]]:
             net=net,
             net_name=net_name,
             is_micro=is_micro,
+            # Issue #6662: a KiCad blind/buried via is drilled only through
+            # its span; keep the keyword so the model and re-writes agree.
+            span_type=via_type_token if via_type_token in ("blind", "buried") else None,
         )
 
         if net_name not in vias_by_net:
             vias_by_net[net_name] = []
         vias_by_net[net_name].append(via)
 
+    warn_normalised_vias(logger, "parse_vias", vias_read_as_through)
     return vias_by_net
 
 

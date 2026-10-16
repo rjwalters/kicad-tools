@@ -96,6 +96,11 @@ git init -q -b main "$TMP/repo"
 cd "$TMP/repo"
 git config user.email t@t
 git config user.name t
+# On git >= 2.47 every commit spawns a detached `git maintenance run --auto`
+# that keeps this repo as its cwd for a few ms after `git commit` returns. The
+# #7463 liveness probe would then refuse Test 1's reset (#9973).
+git config maintenance.auto false
+git config gc.auto 0
 echo "base content" > tracked.txt
 git add tracked.txt
 git commit -q -m "base"

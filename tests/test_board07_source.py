@@ -93,3 +93,29 @@ def test_reviewed_build_rejects_hash_bound_off_angle_copper(tmp_path, monkeypatc
         )
         with pytest.raises(RuntimeError, match="off-angle copper"):
             module.build(tmp_path / f"output-{bad_source}")
+
+
+def test_class_clearance_repair_is_applied_and_bounded():
+    """#6396: every listed via sits at its repaired position, moved <= 50 um."""
+    import math
+    import re
+
+    root = Path(__file__).resolve().parents[1] / "boards/07-matchgroup-test/real_design"
+    spec = importlib.util.spec_from_file_location(
+        "board07_repair_6396", root / "repair_class_clearance_6396.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    for path in (module.AUTHORED, module.REVIEWED):
+        text = path.read_text()
+        vias = {
+            (net, (float(x), float(y)))
+            for x, y, net in re.findall(
+                r'\(via\s+\(at ([-\d.]+) ([-\d.]+)\).*?\(net "([^"]*)"\)', text, re.S
+            )
+        }
+        for net, old, new, authored in module.VIA_MOVES:
+            if path == module.AUTHORED and not authored:
+                continue
+            assert math.dist(old, new) <= 0.05
+            assert (net, new) in vias and (net, old) not in vias

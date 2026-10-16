@@ -917,3 +917,28 @@ class TestBoardOutlineParsing:
                 name = pad.name  # This should not raise AttributeError
                 assert ":" in name
                 assert name.startswith(ref)
+
+
+class TestViaLayerSpanParsing:
+    """Issue #6614: ``_parse_via`` records the span KiCad reads."""
+
+    @pytest.mark.parametrize(
+        "via_kw,pair,expected",
+        [
+            # A keyword-less partial pair is a through via to KiCad.
+            ("", '"In1.Cu" "F.Cu"', ("F.Cu", "B.Cu")),
+            ("", '"In1.Cu" "B.Cu"', ("F.Cu", "B.Cu")),
+            # Keyworded blind/buried vias keep their declared span.
+            ("blind ", '"F.Cu" "In1.Cu"', ("F.Cu", "In1.Cu")),
+            ("buried ", '"In1.Cu" "In2.Cu"', ("In1.Cu", "In2.Cu")),
+        ],
+    )
+    def test_parse_via_reads_kicad_span(self, via_kw, pair, expected):
+        from kicad_tools.sexp import parse_string
+
+        node = parse_string(
+            f"(via {via_kw}(at 1 2) (size 0.6) (drill 0.3) (layers {pair}) (net 2) (uuid u))"
+        )
+        via = PCBState._parse_via(node, {2: "OTHER"})
+        assert via is not None
+        assert via.layers == expected

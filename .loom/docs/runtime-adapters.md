@@ -31,6 +31,7 @@ roles with no `runtimeRequirements`.
 - [The seven contract points](#the-seven-contract-points)
 - [Phase 1: the `spawn-worker.sh` runtime-dispatch seam](#phase-1-the-spawn-workersh-runtime-dispatch-seam)
 - [Session containers (pointer only)](#session-containers-pointer-only)
+- [Hook settings ownership](#hook-settings-ownership)
 - [Fork mapping table](#fork-mapping-table)
 - [Non-goals](#non-goals)
 - [Related](#related)
@@ -312,7 +313,12 @@ tiering is the seed for how a non-Claude runtime should choose which concrete
 model a tier maps to.
 
 **The Codex adapter deliberately does NOT do this yet (#4468).** It ships
-*model-mapping minimalism*: `LOOM_MODEL` is forwarded verbatim to `codex -m`, an
+*model-mapping minimalism*: `LOOM_MODEL` is forwarded to `codex -m` (split on the first
+`@`: a `model@effort` rung suffix, #8387, is never forwarded; the base becomes `-m` and
+the suffix becomes `-c model_reasoning_effort=<suffix>` at the lowest precedence:
+explicit `-c` > `--effort` > `LOOM_EFFORT` > suffix; an empty base falls through to
+`LOOM_CODEX_MODEL`/no `-m`, an empty suffix is ignored; the same split applies to
+`LOOM_CODEX_MODEL`, and an explicit `-m foo@high` arg is passed through unchanged), an
 explicit `-m`/`--model` wins, `LOOM_CODEX_MODEL` supplies an optional static
 adapter default, and with none of those set **no `-m` flag is emitted at all** so
 the Codex CLI/profile default is preserved (exactly `spawn-claude.sh`'s
@@ -321,36 +327,6 @@ tier names (`opus`, `sonnet`, `fable`) are Claude names and inventing an
 OpenAI-side mapping is precisely the reconciliation flagged below. Reasoning
 effort maps to a config override (`-c model_reasoning_effort=<v>`) because
 `codex exec` has no `--effort` flag. Full tier resolution for Codex is Phase 4.
-
-**Complexity tier map (`sweep.tierModels`, issue #4238).** The higher-level
-`sweep.tierModels[<runtime>][<tier>]` map (Curator marker → logical tier →
-model, `mechanical`/`routine`/`complex`) is exactly this per-runtime table. It is
-resolved **entirely orchestrator-side** — the `/loom:sweep` skill runs
-`./.loom/scripts/resolve-tier-model.sh <issue> <runtime>`, which delegates the
-config lookup to `loom-daemon resolve-model --tier` (`resolve_tier_model` in
-`loom-daemon/src/script_helpers/model_tiers.rs`) and then the alias→ID step to
-`resolve-model.sh`. **The Rust daemon does not
-participate**: it never reads the complexity marker — it dispatches with an
-explicit/inherited `--model` and forwards nothing else — so there is no daemon
-counterpart to keep in lockstep for the tier map, and its `sweep.modelAliases`
-resolution (`read_model_aliases` / `resolve_dispatch_model`) is untouched by
-#4238. The two-language divergence flagged below is therefore **not widened** by
-the tier map; when the adapter contract unifies the alias resolvers, the tier
-map layers cleanly on top of whichever single-source resolver wins.
-
-**Optimization profile (`sweep.optimization`, issue #4238 Phase B).** The
-`cost`/`speed`/`balanced` policy switch that selects a preset over the tier map
-above (see `model-selection.md` "Optimization profile switch") is, for the same
-reason, **also orchestrator-side only**: `resolve_optimization_profile` /
-`optimization_preset` live in `loom-daemon/src/script_helpers/model_tiers.rs`
-alongside `resolve_tier_model`, reached through the same `resolve-tier-model.sh`
-call —
-there is no separate dispatch path to keep in lockstep. It does not touch
-`sweep_registry.rs` for the same reason the tier map does not: the Rust daemon's
-`resolve_dispatch_model` only ever resolves `sweep.modelAliases` for its own
-`--model` forwarding and has no participation in the Builder-only tier-2.5
-resolution chain the profile extends. Verified against `loom-daemon/src/sweep_registry.rs` —
-no `tierModels`/`optimization` schema validation exists there to keep in lockstep.
 
 > **Open reconciliation item — do not resolve here.** `sweep.modelAliases` has a
 > known **Rust/Python divergence**: the Rust dispatch resolver and the Python
@@ -370,7 +346,11 @@ refusal/rejection handling.
 
 **Reference implementation:** `defaults/scripts/lib/classify-error.sh`. It is
 **exit-code-first** (a clean `exit 0` is `SUCCESS` regardless of output content,
-the #3233 fix) and only inspects output on a genuine non-zero exit. Its category
+the #3233 fix) and only inspects output on a genuine non-zero exit. Since
+#11208 the same classifier also ships natively as `loom-daemon classify-error`;
+the shell library delegates when a daemon binary resolves and keeps its tables
+as the no-daemon fallback, with the two renderings pinned equal by
+`test-classify-error.sh`. Its category
 set:
 
 | Category | Meaning | Dispatcher action |
@@ -1083,6 +1063,15 @@ can still opt a single command back in with an inline `CARGO_INCREMENTAL=1
 cargo …` prefix. Full rationale:
 [`build-gate.md` → Worker builds run with `CARGO_INCREMENTAL=0`](build-gate.md).
 
+Beside it, the dispatcher caps dev/test debuginfo (#11190):
+`CARGO_PROFILE_DEV_DEBUG` and `CARGO_PROFILE_TEST_DEBUG` are set to
+`line-tables-only`. These are `${VAR:-default}` defaults. An ambient value, or a
+`debug` key the repo sets in its `dev` or `test` profile table, is kept. The
+per-repo opt-out is `cargo.debuginfo: "full"` or `false` (env
+`LOOM_CARGO_DEBUGINFO`).
+Details:
+[`build-gate.md` → Worker builds cap debuginfo at `line-tables-only`](build-gate.md).
+
 ### Adapter observability markers
 
 Daemon-compatible runners emit a small, secret-free contract on stderr:
@@ -1217,6 +1206,41 @@ The config read tolerates a missing config file, a missing `runtimes` block, and
 a missing `jq` — all of these degrade silently to the built-in `claude` default,
 so a bare install with no `runtimes` config sees no behavior change.
 
+### Per-dispatch runtime override (`runtime` / `modelProfile`, #11284)
+
+`loom-daemon dispatch <N> --runtime opencode --model-profile zai-flash`, the
+MCP `dispatch_sweep` tool (`runtime`, `model_profile`) and the daemon's
+`DispatchSweep` request all accept an optional explicit tap for **one sweep**.
+It is an operator pin: it wins over `rolePreference`/`preference` and
+**disables fall-through**.
+
+- **Scope.** Only the coding phases, **Builder and Doctor**, launch on the
+  tap (`worker run --role builder|doctor`). Curator, Judge and the
+  orchestrator keep their role policy, and `excludedRoles` of a profile
+  still applies.
+- **Refusal, never fallback.** At dispatch the daemon admits the tap for
+  Builder and checks its credential pool. A malformed request (a
+  `modelProfile` without a `runtime`, an invalid identifier), an unadmitted
+  runtime/profile, or one with no spawnable seat right now is refused with
+  the reason (`RuntimeRejected`, selected by `explicit`); no sweep starts and
+  the preference list is not consulted. A Doctor launch re-checks the same
+  tap when it runs and fails the same way if the seat has gone away.
+  PR-set sweeps cannot carry a tap (they have no issue to key it on).
+- **Compatibility.** Both fields are `#[serde(default)]`; a request without
+  them behaves exactly as before.
+- **Persistence.** The accepted tap is recorded in
+  `.loom/sweep-dispatch-tap/issue-<N>.json` (runtime, profile, timestamp; no
+  credentials). The phase runner reads it by issue (`--issue`, or the
+  daemon-exported `LOOM_SWEEP_CLAIM_OWNED` for a Doctor), so a resumed sweep
+  or a Doctor retry keeps the override. A record expires after 7 days, and a
+  later `dispatch` of the same issue without a tap clears it; automatic
+  re-dispatch (work finder, watchdog, crash resume) leaves it in place.
+- **Reporting.** The launch is stamped `source=explicit` with the tap
+  (`opencode:zai-flash`), so `sweep-outcomes summary --group-by tap` groups
+  it with the same taps chosen by preference.
+
+Seat-aware work-finder concurrency and free-seat status are a later slice.
+
 ### The `runtimes` config block
 
 Add to `.loom/config.json`:
@@ -1244,6 +1268,24 @@ sweep, role-runner and epic dispatch surfaces strip them from any child that
 cannot use them. Contract, per-runtime mapping and the red line:
 [`llm-gateway.md`](llm-gateway.md).
 
+### Weighted per-stage, per-attempt draw (`runtimes.roleDraw`, issue #11726)
+
+`runtimes.roleDraw.<role>` replaces the ordered `rolePreference` list for a
+stage with a seeded, weighted draw per attempt, for example
+`"judge": [{"attempt": 1, "draw": {"claude/opus": 80, "claude/fable": 10,
+"codex": 10}}, {"attempt": 2, "draw": {"claude/fable": 100}}]`, plus
+`runtimes.excludeProviders` to drop a runtime from every table on a host. The
+draw orders the candidates by weight and runs the walk below over that order,
+so admission, availability, the launch-failure hold and the ceiling apply
+unchanged, and an unavailable candidate is excluded with the rest
+renormalised. A failed or blocked role tick moves the role to the next
+attempt's table. A role with no table keeps `rolePreference`; an operator pin
+still wins. A candidate key is `<runtime>[:<profile>][/<model-or-profile>]`:
+`claude` ≡ the `"claude"` entry, `opencode:zai-flash` ≡
+`{"runtime":"opencode","modelProfile":"zai-flash"}`, and `claude/opus` adds a
+`--model` pin. The full contract, the per-tier merge, telemetry and `loom-daemon
+roles draw --explain` are in [role-draw.md](role-draw.md).
+
 ### Ordered runtime preference with fall-through (issue #8436)
 
 The precedence chain above is **static**: it picks a runtime without asking
@@ -1263,7 +1305,7 @@ strands the seats already paid for.
 {
   "runtimes": {
     "preference": ["claude", "codex", {"runtime": "opencode", "modelProfile": "zai-metered"}],
-    "rolePreference": { "judge": ["codex", "claude", "opencode"] }
+    "rolePreference": { "judge": ["codex", "claude"] }
   }
 }
 ```
@@ -1306,6 +1348,79 @@ entry is recorded as skipped with reason `not-admitted(worktreeIsolation)`, whic
 is materially different from "Codex had no credential" and should be read that
 way.
 
+**Model-profile resolution and the unknown-profile failure (#11638).** A launch
+resolves its profile name from, in order: an explicit request (`--profile`, or a
+preference tap's `modelProfile`), `LOOM_MODEL_PROFILE`, `runtimes.defaultModelProfile`,
+then the built-in `zai-flash` fallback. The name is then looked up in
+`runtimes.modelProfiles` (which shadows) and the bundled set. A name found in
+neither is a **hard exit 78**, never a fallback to `zai-flash`: the message names
+the profile looked up, where the name came from, and the sorted known profile
+names (names only, never credential values). `loom-daemon worker profile-check
+<name>` reproduces it.
+
+**Model-profile role exclusion (`excludedRoles`, #11400).** A model profile may
+list roles it must never run, e.g. `"excludedRoles": ["judge", "curator"]` on the
+shipped `zai-flash` profile (review and triage stay off GLM). Admission enforces
+it for **every** selection source, judged against the profile the launch will
+actually use — a tap's `modelProfile`, else `LOOM_MODEL_PROFILE`, else
+`runtimes.defaultModelProfile`, else the bundled `zai-flash` default (so a bare
+`opencode` entry or `runtimes.roles.judge: "opencode"` is judged against
+`zai-flash` too):
+
+- a preference entry is skipped as `not-admitted(excludedRole)`, like
+  `not-admitted(worktreeIsolation)` above, and the walk continues;
+- a `runtimes.roles` binding, `LOOM_RUNTIME_<ROLE>` / `LOOM_RUNTIME` with
+  `LOOM_MODEL_PROFILE`, or an explicit per-dispatch runtime is **refused** with
+  the reason (exit 78) — a pin is never re-routed;
+- a native sweep runs Judge and Curator in its own session, so a sweep on an
+  excluding profile is refused through its review phase;
+- `spawn-worker` re-checks the profile it actually selected (an explicit
+  `--profile` included) before launching.
+
+Only native runtimes (`pi`, `opencode`, `kimi`) are checked, and only when the
+profile declares a provider for that harness. `loom-daemon validate` rejects an
+`excludedRoles` entry that is not a known role name.
+
+**GLM-first Builder and Doctor (fleet policy, tier 1).** The routing comes
+from fleet-gitops `config.defaults`, rendered into each host's machine tier
+(`~/.local/share/loom/config/defaults.json`), not from this repo's
+`.loom/config.json`, which carries no fleet keys (#11450, #11441). It sets
+`defaultModelProfile: "zai-flash"`, `rolePreference.builder` to
+`["opencode", "claude"]` and `.doctor` to `["opencode", "codex", "claude"]`
+(a bare `opencode` entry takes the default profile; a sweep's Builder phase
+resolves through `rolePreference.builder` via `worker run`, #11303): the role
+runs on a Z.ai seat while the `zai` api-keys pool has a selectable account, else
+on Claude (Doctor's Codex step is skipped while Codex's `worktreeIsolation` is
+`partial`).
+A host with **no** `zai` pool counts as unavailable, not unobservable: guarded
+launches never reuse OpenCode's own login, so unless an exported key,
+`LOOM_NATIVE_AUTH_FILE`, or a gateway route supplies it, the tap is skipped.
+`rolePreference.judge` is `["codex", "claude"]`; `zai-flash`'s `excludedRoles`
+would skip a GLM Judge entry anyway. A machine-tier pin such as
+`runtimes.roles.doctor = "claude"` still wins outright.
+
+**Launch-failure hold (role ticks, #11453).** The walk falls through only on
+credential availability, so a tap whose launch fails *deterministically* with a
+healthy pool would be relaunched every tick. A role tick that fails with an
+allowlisted class (`launch-failed`, `toolless-launch`, `preflight-auth-failed`,
+`credential-expired`, `preflight-no-cli-start`, `preflight-mcp-failed`,
+`preflight-token-selection-failed`, `exit-78`, `exit-126`, `exit-127`) extends
+a streak keyed on **(workspace root, role, tap)**. Every other class is
+transient and keeps the retry-next-tick behaviour. That includes rate/quota,
+timeouts, session refusals and `sandbox-unavailable` (the sandbox hold owns
+it). After `LOOM_LAUNCH_FAILURE_HOLD_THRESHOLD` (default 2) identical failures
+in a row, that role's ticks in that workspace skip the tap for
+`LOOM_LAUNCH_FAILURE_HOLD_SECS` (default 1800; `0` disables the feature). The
+skip shows in the marker as `unavailable(launch-failure-hold: <class> xN
+armed=… remaining=…s)`, and the walk falls through `rolePreference`. If every
+tap is held, the tick is skipped pre-spawn as usual. The daemon logs one WARN
+when the hold arms and one INFO when it clears. A hold clears on expiry (the next tick re-tests the tap,
+and one more identical failure re-arms it), on a successful tick, on a change
+to the effective `runtimes` block or the tap's model profile, and on daemon
+restart. A success, a transient failure or a different class resets the
+streak. Sweeps (`resolve_for_dispatch`, `pool_preflight`) and operator pins
+never consult it, and the role itself is never benched (#6201).
+
 **Judge independence.** A native sweep runs every phase in **one session with no
 subagents**, so a preference list that lands Builder and Judge on the same
 single-session runtime weakens review independence — the reviewer is the same
@@ -1332,6 +1447,17 @@ crash-signal reader takes the entire rest of that line as the runtime name, so
 appending to it would report a runtime called `"opencode tier=2"`. "How much work
 is going to the backstop" reduces to counting markers whose `tier` is not `0`.
 
+**An uninstalled tier-3 tap is skipped, not launched (#9368).** A tier-3
+generic runtime (`gemini`, `aider`, operator-defined) has no credential pool, so
+the one thing the walk can observe about it is its CLI binary: when the name is
+known (`LOOM_GENERIC_CLI_BIN`, else the manifest's `launch.cliBin`) and it is
+not an executable file on the daemon's `PATH`, the tap is passed over as
+`unavailable(binary: 'gemini' not found in PATH …)` and the walk continues, or
+holds if nothing below qualifies. Without a known name (no `launch.cliBin`) the
+tap stays ungated and `spawn-generic.sh`'s own exit-127 check remains the
+backstop, so declare `cliBin` in any tier-3 manifest you list in a preference.
+`claude`, `codex` and the native harnesses are never `PATH`-checked.
+
 Each dispatch seam emits that marker to the **daemon log** (`loom-daemon logs`),
 which is where all three resolve, and (#8599) the daemon carries it to the child
 in `LOOM_RUNTIME_PREFERENCE_MARKER` so `worker_spawn::launch` writes the same
@@ -1343,6 +1469,93 @@ writes a byte-identical log. A role tick additionally records the decision
 durably in `role_tick.outcome` as `preference_tier` / `preference_tap` (absent,
 never a fabricated `0`, when no list decided it) — so "how much work is going to
 the backstop" is a query over the journal, not a grep of the daemon log.
+
+### Per-phase runtime: `loom-daemon worker run` (issue #11285)
+
+`loom-daemon worker run --role builder|doctor (--issue N [--base BRANCH] | --pr N) [--json] [--timeout SECS]`
+resolves the role through `resolve_for_dispatch` (so `runtimes.rolePreference.<role>`
+applies; a parent dispatch's inherited `LOOM_RUNTIME`+`LOOM_ROLE` pin is dropped
+first, `LOOM_RUNTIME_<ROLE>` still wins), creates a missing worktree via
+`worktree.sh N [--base BRANCH]` / `pr-worktree.sh`, then launches the guarded native worker (`spawn-worker.sh`) in the
+issue worktree with the chosen tap pinned through `launch_env::apply_launch_env`,
+so the launch record shows the real runtime and model profile. A `claude`
+resolution prints `outcome=delegate-to-claude` and exits 0 without launching.
+Exit codes: 0 artifact, 1 no artifact, 2 usage (Judge/Curator refused),
+75 no eligible runtime/seat, 78 config, 124 timeout. The `/loom:sweep`
+orchestrator calls it before Builder/Doctor Task dispatch; see
+`native-sweep.md` and `sweep-execution-model.md`.
+
+Because a phase can outlast the Bash tool cap (120s default / 600s max), the
+orchestrator runs it as a background Bash process writing `exit` and
+`report.json` files and polls in-turn with bounded waits until the exit file
+exists; the recipe is in `native-sweep.md` "Waiting for `worker run`".
+
+#### Usage attribution for `worker run` phases (issue #11360)
+
+A phase launched by `worker run` writes its own log,
+`.loom/logs/worker-run-<role>-<issue>-<unix-ts>.log`, never the sweep log. Its
+first line names the parent sweep, taken from `$LOOM_SWEEP_ID`:
+
+```text
+==== loom-daemon worker run: parent_sweep=<sweep-id> role=<role> issue=<N> ====
+```
+
+The key is `parent_sweep=`, not `sweep_id=`. The parent sweep log is anchored
+by a substring search for `sweep_id=<id>`, so a header carrying that text and
+quoted into the parent's stream (for example, an orchestrator `cat`ing a phase
+log) would move the parent's region past its own launch record.
+
+When the sweep reaches its terminal transition, the outcome journal reads every
+phase log for the issue and keeps only the region after this sweep's header.
+The rules:
+
+- **Kept separate from the parent.** Phase rows go in `phase_tap_usage` on the
+  `sweep-outcomes.jsonl` line, one row per `(role, tap)`. `tap_usage` /
+  `tap_usage_all` still describe only the parent orchestrator's own log. A
+  phase's spend never overwrites the parent's row, and the parent's spend
+  (Curator and Judge, which run in its process) is never charged to a phase tap.
+  The paired `sweep.outcome` telemetry record keeps `config["tap"]` set to the
+  parent and adds a `tap_phase_keys` flag (`builder=<key>,doctor=<key>`). The
+  counters live on the journal line.
+- **Each launch counted once.** Every `# LOOM_LAUNCH` record in a phase log is
+  charged only with the usage events that follow it. A header repeated inside
+  one log counts only its last region. A log that names a different sweep (a
+  resumed sweep's predecessor, or an id that only shares a prefix) adds
+  nothing. Two phase logs for the same sweep (a Builder re-run) are two real
+  launches, and both count.
+- **The tap that actually ran.** A phase whose role resolves to `claude`
+  (including an empty GLM pool falling through to Claude) prints
+  `delegate-to-claude`, writes no phase log, and charges no GLM tap. Its usage
+  is the parent's Claude transcript. A `worker run` with no `$LOOM_SWEEP_ID`
+  stamps `parent_sweep=none`, which no sweep matches.
+- **Escalated Doctor (#11359).** `worker run --role doctor --escalate-claude`
+  prints a `runtime: claude` report with no `log_path`, launches nothing, and
+  writes no phase log. The Doctor then runs as a Claude Task in the parent
+  session, with no `# LOOM_LAUNCH` record, so it charges no tap. Earlier GLM
+  Doctor attempts keep their exact GLM row, and nothing from the Claude
+  attempt lands on it. The escalated model is recorded by the checkpoint's
+  `doctor-done` write, not by tap accounting.
+- **Unmeasured is not zero.** A phase that launched but reported no usage
+  events is a row with `usage_events: 0` and no counters. A truncated final
+  line from an interrupted run is ignored. Cost figures are harness estimates,
+  not charges.
+
+The sweep's total per tap is the fold of the parent rows and the phase rows
+(`RegionAccounting::sweep_totals_by_tap`).
+
+**Operator verification of one live mixed sweep**:
+
+1. `ls .loom/logs/worker-run-*-<N>-*.log`. Each file's first line must name the
+   sweep id as `parent_sweep=<id>`. A phase that ran on Claude (empty-pool
+   fallback or escalation) has no file and no phase row.
+2. `grep '^# LOOM_LAUNCH' <phase log>`. The `tap`/`model`/`profile` must be
+   what actually launched, not just the first preference.
+3. `grep '"issue":<N>' .loom/sweep-outcomes.jsonl`. Check that `tap_usage`
+   names the parent, and that `phase_tap_usage` has one row per phase role and
+   tap, with counters only where the stream reported them.
+4. In the telemetry journal, `config.tap_phase_keys` must list the same keys.
+
+Before attaching evidence, remove account names and host paths.
 
 ### Bounding the metered backstop tier (issue #8555)
 
@@ -1363,8 +1576,7 @@ what the resolver is supposed to do.
     "preference": ["claude", "codex", {"runtime": "opencode", "modelProfile": "zai-metered"}],
     "backstopCeiling": {
       "maxConcurrent": 2,       // most concurrent metered dispatches this HOST may hold
-      "appliesFrom": 2,         // first tier the ceiling governs (default 1)
-      "minComplexity": "complex" // optional: least complexity tier allowed onto the metered tap
+      "appliesFrom": 2          // first tier the ceiling governs (default 1)
     }
   }
 }
@@ -1374,7 +1586,6 @@ what the resolver is supposed to do.
 |---|---|
 | `maxConcurrent` | Most concurrent governed dispatches this host may hold. Absent ⇒ unbounded (no state is read or written). `0` switches the metered tier off without editing the preference list. Overridden by `LOOM_BACKSTOP_MAX_CONCURRENT` (`env > config > default`). |
 | `appliesFrom` | 0-based index of the first tier the ceiling governs; default `1`, i.e. every tap the walk *falls through* to. A fleet whose tier 1 is another flat-rate subscription raises this so the bound starts at the tier that actually costs per token. `0` is rejected — tier 0 is the subscription the fleet already pays for, and bounding it inverts the feature's purpose. |
-| `minComplexity` | `mechanical` \| `routine` \| `complex`. Work below this stratum never reaches a governed tap. An unmarked issue counts as `routine`, the daemon's existing default for a missing `<!-- loom:complexity= -->` marker. Absent ⇒ every tier is eligible. |
 
 | Guarantee | Meaning |
 |---|---|
@@ -1383,7 +1594,7 @@ what the resolver is supposed to do.
 | **A higher tap that recovers still wins** | The ceiling governs only the tiers it is configured for. While tier 0 can serve the work it is chosen without the ceiling being consulted at all, so a pinned backstop never throttles subscription capacity. |
 | **A spend ceiling, not a cooldown** | Deliberately *not* modelled as a bad-mark/cooldown (the shape the token pools use): a cooldown says "temporarily unusable, will heal", which is false of a metered endpoint. This says "this host may hold at most N metered dispatches at once", which is true of one. |
 | **Fails closed on an unknown count** | Unlike `api_keys_pool::inflight`'s degrade-open politeness throttle, an unreadable/unwritable lease store yields `ceiling-unknown` and a skip. An unknown metered-concurrency count must never read as "there is room" — guessing wrong costs real money, while the fallback costs only throughput. |
-| **Malformed config fails closed** | An unknown key, a wrong type, a bad tier name, or `appliesFrom: 0` is an error surfaced by `loom-daemon validate` and by the launch itself — never a silently dropped bound. |
+| **Malformed config fails closed** | An unknown key (including the retired complexity-tier filter key, which no longer exists: delete it), a wrong type, or `appliesFrom: 0` is an error surfaced by `loom-daemon validate` and by the launch itself — never a silently dropped bound. |
 
 **Per-host, so the state is machine-wide.** Leases live at
 `~/.loom/leases/backstop/` (override: `LOOM_BACKSTOP_LEASE_DIR`), not under a
@@ -1743,9 +1954,42 @@ stays env-passthrough even with the flag on.
 - `header` — `authorization-bearer` (Claude Code's `ANTHROPIC_AUTH_TOKEN`
   shape, and most OpenAI-compatible endpoints) or `x-api-key` (Anthropic's
   native API-key header).
-- `baseUrlEnv` — the environment variables set inside the container to the
-  proxy's own base URL. A harness that reads its base URL from injected
-  *configuration* rather than the environment cannot be proxied yet.
+- `baseUrlEnv` — the environment variables set to the proxy's own base URL.
+  Use this when the harness reads its base URL from the environment
+  (`ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL`, …).
+- `baseUrlConfig` — for a harness that reads its base URL from injected
+  *configuration* instead: the provider-config option key that receives the
+  proxy's base URL (OpenCode's `provider.<id>.options.baseURL`, so
+  `"baseUrlConfig": "baseURL"`). The launcher patches that one option into
+  the `OPENCODE_CONFIG_CONTENT` it provisions for the launch. OpenCode is
+  the only harness with a config contract this writes, so the field is
+  **inert on any other runtime** — dropped from the selection at resolution,
+  so a profile may declare it for its OpenCode binding while its other
+  bindings keep launching. It is also refused on an armed **contained**
+  launch: that config is provisioned inside the container, where the
+  host-side launcher cannot patch it, so a contained OpenCode launch is
+  re-pointed with `baseUrlEnv`.
+
+The bundled `zai-flash` profile proxies Z.ai's coding-plan endpoint through
+the OpenCode harness this way (`upstream: https://api.z.ai/api/coding/paas/v4`,
+`authorization-bearer`, `baseUrlConfig: baseURL`), default off until an
+operator turns `credentialProxy` on (issue #11300). That profile also binds
+`pi`, which is intentionally **unproxied** in this slice: its block declares
+no `baseUrlEnv`, so with the flag on a `pi` launch of it fails closed —
+arming a proxy the harness would not follow would send the placeholder to
+the real upstream — and with the flag off it launches unchanged.
+
+**Uncontained native launches.** The same substitution is available without
+containment, on the same switch and the same per-profile opt-in: a native
+(pi/opencode/kimi) launch on the host arms the listener bound to
+**loopback only** — reachable by the harness, and no other address is ever
+needed — and the launcher stays alive as the harness's parent for exactly
+the launch's lifetime (the native path's one no-`exec` shape, mirroring the
+container path below). The credential ladder runs once, and the credential
+the proxy holds is the one handed to the harness command, so pool selection
+cannot land on a different account between the two. A profile routed
+through the LLM gateway and a proxy-declaring profile are refused together:
+both rewrite where the provider is reached, so only one may be active.
 
 **What the proxy enforces.**
 
@@ -1786,7 +2030,9 @@ proxied dispatch masks it with an empty, read-only tmpfs. A shared pool
 listener has to outlive the `docker run`, so the dispatcher stays alive as its
 parent and the placeholder's lifetime is exactly the container's. The child
 keeps the dispatcher's process group, so existing process-group teardown reaps
-both and `--rm` still removes the container.
+both and `--rm` still removes the container. (The uncontained native path
+above shares this shape; it is the native launch path's one no-`exec`
+dispatch.)
 
 **Fails closed, never falls back.** Every error in the substitution path is an
 error. A proxy that quietly degraded to env-passthrough would be
@@ -1913,6 +2159,76 @@ covers the image build, the version-pin assertions, two-worker
 disjointness, and the writable-layer credential scan, but — like #8434's own
 still-open canary item — **not** a credentialed functional run (no Kimi
 account was available either).
+
+#### Observe mode: passive per-request telemetry (issue #11300, slice 1)
+
+The egress proxy can also **read** the responses it already relays and export
+one telemetry record per request, so a flat-rate seat's token spend, latency
+and rate-limit pressure are visible without a second client in the path.
+Default **off**. Both of these must be true for a launch:
+
+| Switch | Where |
+|---|---|
+| Profile opt-in | `credentialProxy.observe: true` in the model profile |
+| Workspace flag | `LOOM_EGRESS_PROXY_OBSERVE` (`1`/`true`/`yes`, env wins) over `runtimes.containment.credentialProxyObserve` |
+
+What it guarantees:
+
+- **Transparent.** The forwarded request is the client's own: every header
+  (`User-Agent` included) arrives byte-identical, only the placeholder is
+  swapped for the credential, `host` / `content-length` are recomputed, and
+  nothing Loom-identifying is added. (One library default: a client that
+  sent no `Accept` gets `Accept: */*`, which RFC 9110 defines an absent
+  `Accept` to mean anyway; a client's own `Accept` is never touched.) `observe_tests.rs` pins this, with
+  observe mode on and off. Whether a given provider's terms allow a
+  pass-through proxy is the operator's call; get it in writing before a fleet
+  rollout.
+- **Passive.** Chunks are relayed as received; the parser sees a copy after the
+  relay decided to forward it, never awaits, and any parse failure only stops
+  parsing. It keeps at most 256 KiB of one partial SSE line (longer lines are
+  skipped) and copies a non-streaming body up to 1 MiB. Measured bound: under
+  1 ms per chunk, asserted in the unit tests.
+- **No bodies, no credentials.** Exported: token counts (input uncached /
+  output / cache read / cache write), model (sanitised), status, latency, time
+  to first byte, and for a non-2xx response a closed error code
+  (`rate_limited`, `exhausted`, `credential`, `http_4xx`, `http_5xx`,
+  `upstream_error`). An error body is classified and dropped.
+
+Emitted through `observability::ops`: metrics `loom.egress.requests`,
+`.tokens` (`kind`), `.latency`, `.ttft` (labels `provider`, `account` = seat,
+`model`, `role`, `outcome`, `reason`), and one `loom.egress.request` span per
+request with `loom.egress.{seat,tap,profile,launch_id,status,latency_ms,
+ttft_ms,error_code,stream}` plus `loom.runtime`, `loom.role`, `loom.issue`,
+`loom.pr_number`, `loom.sweep_id`, `loom.model`, `loom.tokens.*`. Role, issue,
+PR and sweep come from the launching environment (`LOOM_ROLE`,
+`LOOM_ISSUE_NUMBER` or the `sweep-issue-<N>-` sweep id, `LOOM_PR_NUMBER`,
+`LOOM_SWEEP_ID`).
+
+**Delivery from the launcher process.** A proxied launch runs the proxy inside
+the `loom-daemon worker …` launcher, not the daemon, and that process has no
+ops sink, so the metrics above exist only when the proxy runs in-daemon. In the
+launcher each request's `loom.egress.request` span (which carries every metric
+field) is written as the only entry of its own trace journal,
+`.loom/logs/trace-context/egress-<span-id>.jsonl`; the daemon's backfill pass
+drains it to the OTLP queue and retires the file. Journals are written only
+when the workspace exports traces (an `otlp` exporter is configured);
+otherwise observe records are dropped.
+
+**Live seat marking.** A 429 or quota-exhaustion response is classified at the
+proxy and bad-marks the launch's pool account at once (`bad_mark_at_proxy`),
+before the harness's own retry ladder runs out. The mark is model-class-scoped,
+its cooldown comes from the response's reset text or the account's configured
+window, and a per-launch guard only ever escalates (a bare 429, then a quota
+exhaustion), so one launch writes each level once. A launch with no pool
+account (an explicit env credential) is never marked. See
+[`token-pool.md` § "API-key account pool"](token-pool.md#api-key-account-pool-for-native-harnesses-zaiopencode-pi-kimi--84018563).
+
+**Uncontained native launches and OpenCode.** Slice 3 shipped the loopback-only
+proxy for uncontained native launches and the `credentialProxy.baseUrlConfig`
+injection of the proxy URL into the launch's provisioned OpenCode config (see
+the sections above). The remaining #11300 item is operator-run: a 48 h canary on
+one seat, checking the Z.ai Plan Overview page for a risk notice, before any
+fleet rollout.
 
 ### Containerized dispatch mode for Claude sweeps (issue #7429, epic #6896 Phase 3)
 
@@ -2193,6 +2509,16 @@ mounts follow the same [`MOUNT-CONTRACT.md`](https://github.com/rjwalters/loom/b
 mirror the per-sweep `--cpus`/`--memory` shape above. Migrating the
 docker-requiring callers (build-gate, sim/build wrappers) onto the seam is
 issue #7854; elastic executor *placement* stays with #3979.
+
+## Hook settings ownership
+
+Loom does not write a consumer repo's `.claude/settings.json` on resync. Loom
+hooks reach a Claude session through launch-time `--settings` (daemon-dispatched
+sessions, never persisted) and user-scope `~/.claude/settings.json` entries; the
+project file stays repo-owned, and resync only reports hooks it does not wire
+(`report_unwired_hooks`). A hook that no non-mutating surface can carry is not
+delivered. Conflict, uninstall, malformed-file and upgrade behaviour are in
+[ADR-0026](https://github.com/rjwalters/loom/blob/main/docs/adr/0026-consumer-hook-settings-ownership.md).
 
 ## Fork mapping table
 

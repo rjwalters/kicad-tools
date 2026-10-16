@@ -145,7 +145,7 @@ DECIDE:
 
 The precedence is deliberate:
 
-1. **Mode C → subagent** (always, regardless of daemon/pool state). This is a routing choice about *this skill's own* `--prs` invocation, **not** a statement about daemon capability: the daemon's dispatch surface accepts `kind={"PrSet":[<n1>,<n2>,…]}` as well as `kind={"Issue":N}` (#5342 — see `.loom/docs/daemon-reference.md` → `dispatch_sweep`), so PR-set dispatch **is** available on the daemon. (An earlier version of this line claimed PR-set dispatch was an explicit non-goal with no v0.10.0 roadmap slot; #5342 landed it, so that claim is retired.) An operator who typed `--prs` is asking for an in-session PR-set run they can watch, so Mode C still routes to the in-process subagent path, which supports Mode C end-to-end. Daemon-side `PrSet` dispatch is used on the daemon path for a *different* purpose — re-routing an issue candidate the daemon's open-PR guard refuses, see "The daemon-dispatch path" below.
+1. **Mode C → subagent** (always, regardless of daemon/pool state). This is a routing choice about *this skill's own* `--prs` invocation, **not** a statement about daemon capability: the daemon's dispatch surface accepts `kind={"PrSet":[<n1>,<n2>,…]}` as well as `kind={"Issue":N}` (#5342 — see `.loom/docs/daemon-reference.md` → `dispatch_sweep`), so PR-set dispatch **is** available on the daemon. An operator who typed `--prs` is asking for an in-session PR-set run they can watch, so Mode C still routes to the in-process subagent path, which supports Mode C end-to-end. Daemon-side `PrSet` dispatch is used on the daemon path for a *different* purpose — re-routing an issue candidate the daemon's open-PR guard refuses, see "The daemon-dispatch path" below.
 2. **`--no-daemon` → subagent** (operator opt-out, after Mode C but before any probes). When this flag is present, do not even attempt the `PROBE_DAEMON` Ping — saves a 500ms ceiling and produces predictable behaviour for debug/demo/scripted runs.
 3. **`LOOM_SWEEP_CLAIM_OWNED` set (or the equivalent `--claim-owned N` flag, #4111) → subagent** (daemon-owned child self-detection, #3829 — after `--no-daemon`, still **before** any probes). This env var — and, as of #4111, the positional `--claim-owned <N>` flag in this invocation's own `$ARGUMENTS` — is present **only** on a child that `loom-daemon` itself dispatched (`SweepRegistry::dispatch` → `spawn_child`, `sweep_registry.rs`), carrying the issue number the daemon already claimed on this child's behalf (the same marker/flag the "1. Per-issue pre-flight" Step 1a self-claim check consumes one stage later). A daemon-dispatched child is **by construction** running in the exact environment that makes `PROBE_DAEMON ∧ PROBE_POOL` true — a live daemon plus a multi-account pool, since that is *why* it was dispatched there — so without this rule it would always land on `use_daemon` and issue a **circular** MCP round-trip back into the very daemon that spawned it (`mcp__loom__list_sweeps`, or worse a self-re-dispatch of its own issue number). In headless `claude -p` mode there is no operator to interrupt a stuck tool call and Stage -1's "500ms timeout" is LLM-directed prose, not a mechanically-enforced transport guard, so that round-trip can hang the whole session idle before it ever reaches the Builder phase. The child is already the daemon's work — it must run the lifecycle **itself**, in-process, exactly like `--no-daemon`. This short-circuit removes the entire class of hang. Mirrors `--no-daemon`: do not even attempt the `PROBE_DAEMON` Ping.
 4. **`PROBE_DAEMON ∧ PROBE_POOL → daemon`** (the only way to land on the daemon path). **Strict AND**: both probes must succeed. Either missing → fallthrough.
@@ -191,25 +191,25 @@ The `no_such_tool` case covers older Loom installs without Phase A's MCP additio
 A pool exists if **either** of these is true (logical OR, both checked):
 
 1. **Materialized pool**: `.loom/tokens/*.token` contains **two or more** files. The bootstrap step (`loom-daemon tokens bootstrap`) writes one `*.token` file per `ACCOUNT_KEY_*` triple in the merged account set; a count `>= 2` means at least two distinct accounts are available for rotation.
-2. **Configured pool**: **two or more** `ACCOUNT_KEY_*` lines are declared across the **merged account sources** — the claude-monitor master (`${LOOM_CLAUDE_MONITOR_DIR:-$HOME/.claude-monitor}/accounts.env`), the repo-local file (`.loom/accounts.env`, falling back to the legacy `.env`), and — **only when `LOOM_ACCOUNTS_ENV` is set** — the opt-in home master at that path. This catches the case where the operator has configured multiple accounts (in the post-#3695/#3704 claude-monitor-first layout, not just the legacy `.env`) but hasn't yet run `loom-daemon tokens bootstrap` — the daemon's spawn-time selector can still pick a token, and the pool will be materialized on demand.
+2. **Configured pool**: **two or more** `ACCOUNT_KEY_*` lines are declared across the **merged account sources** — the llm-monitor master (`$MONITOR_DIR/accounts.env`, resolved below), the repo-local file (`.loom/accounts.env`, falling back to the legacy `.env`), and — **only when `LOOM_ACCOUNTS_ENV` is set** — the opt-in home master at that path. This catches the case where the operator has configured multiple accounts (in any merged source, not just the legacy `.env`) but hasn't yet run `loom-daemon tokens bootstrap` — the daemon's spawn-time selector can still pick a token, and the pool will be materialized on demand.
 
-Both checks are cheap, local, and side-effect-free. The configured-pool count mirrors `bootstrap.py`'s source precedence but does **not** dedupe by email — a raw sum of `ACCOUNT_KEY_*` lines is an accepted approximation for this boolean `>= 2` gate (worst case a single account declared in two sources double-counts at the `== 1` vs `== 2` boundary, a false-positive toward daemon use that still requires `PROBE_DAEMON` to also be true):
+Both checks are cheap, local, and side-effect-free. The configured-pool count mirrors `bootstrap.py`'s source precedence but does **not** dedupe by email — a raw sum of `ACCOUNT_KEY_*` lines is an accepted approximation for this boolean `>= 2` gate (worst case one account in two sources double-counts — a false positive that still requires `PROBE_DAEMON`):
 
 ```bash
 TOKEN_FILE_COUNT=$(find .loom/tokens -maxdepth 1 -name '*.token' 2>/dev/null | wc -l | tr -d ' ')
 
 # Repo-local (mirrors bootstrap.py: .loom/accounts.env if present, else legacy .env)
-# NOTE: `grep -c` prints `0` AND exits non-zero on an existing-but-empty file, so a
-# `|| echo 0` fallback would emit a two-line "0\n0" and abort the arithmetic below under
-# bash 3.2. Use `|| true` + `${var:-0}` so an existing-empty source yields exactly `0`.
+# NOTE: `grep -c` prints `0` AND exits non-zero on an existing-but-empty file; `|| echo 0` would emit
+# "0\n0" and abort the arithmetic under bash 3.2. `|| true` + `${var:-0}` yields `0`.
 if [[ -f .loom/accounts.env ]]; then
   REPO_KEY_COUNT=$(grep -c '^ACCOUNT_KEY_' .loom/accounts.env 2>/dev/null || true); REPO_KEY_COUNT=${REPO_KEY_COUNT:-0}
 else
   REPO_KEY_COUNT=$(grep -c '^ACCOUNT_KEY_' .env 2>/dev/null || true); REPO_KEY_COUNT=${REPO_KEY_COUNT:-0}
 fi
 
-# claude-monitor master (primary source per CLAUDE.md; LOOM_CLAUDE_MONITOR_DIR override)
-MONITOR_DIR="${LOOM_CLAUDE_MONITOR_DIR:-$HOME/.claude-monitor}"
+# llm-monitor master: monitor_dir.rs rules (first non-blank override, literal ~ expansion, no eval)
+MONITOR_DIR=""; for _md in "${LOOM_LLM_MONITOR_DIR:-}" "${LOOM_CLAUDE_MONITOR_DIR:-}"; do [[ -n "${_md//[[:space:]]/}" ]] && { MONITOR_DIR="$_md"; break; }; done
+case "$MONITOR_DIR" in "~"|"~/"*) [[ -n "${HOME:-}" ]] && MONITOR_DIR="$HOME${MONITOR_DIR:1}";; "") if [[ -d "$HOME/.llm-monitor" ]]; then MONITOR_DIR="$HOME/.llm-monitor"; else MONITOR_DIR="$HOME/.claude-monitor"; fi;; esac
 MONITOR_KEY_COUNT=$(grep -c '^ACCOUNT_KEY_' "$MONITOR_DIR/accounts.env" 2>/dev/null || true); MONITOR_KEY_COUNT=${MONITOR_KEY_COUNT:-0}
 
 # Opt-in home master — only consulted when LOOM_ACCOUNTS_ENV is set and non-empty (per #3704)

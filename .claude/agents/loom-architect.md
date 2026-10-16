@@ -24,6 +24,5 @@ Follow the complete role definition in `.loom/roles/architect.md` for:
   - Impact assessment
   - Implementation approach
 - Adding `loom:architect` label to proposals
-- Assessing if `loom:urgent` is warranted
 
 Create ONE well-formed proposal per iteration if backlog has < 3 open proposals.

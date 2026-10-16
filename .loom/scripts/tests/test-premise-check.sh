@@ -128,7 +128,7 @@ echo "=== premise-check.sh: the gate's exit-code contract ==="
 #    exercised through the real entry point rather than asserted in prose.
 # ---------------------------------------------------------------------------
 cat >"$WORK/ordinary.md" <<'EOF'
-## Problem Statement
+## What happened
 
 `spawn-codex.sh` forwards a `model@effort` suffix verbatim to the Codex CLI's
 `-m` flag, which rejects it.

@@ -43,24 +43,11 @@ instructions)`. The block states three rules:
 | `champion-issue-promo.md` | issue bodies + comments |
 | `champion-pr-merge.md` | PR bodies, review comments, diffs |
 | `champion-epic.md` | epic bodies + comments |
-| `concierge.md` | **safehouse room messages** (+ issue/PR text read while answering) |
 
-All of these ship from `defaults/.claude/commands/loom/`. The six with a
-`defaults/roles/` entry (`curator`, `builder`, `judge`, `doctor`, `guide`,
-`concierge`) are **symlinks** into that same directory, so the role-file and
-slash-command views of a role can never disagree about this block.
-
-`concierge.md` carries the block verbatim **and** adds a room-specific rider
-(#7947), because its threat model is sharper than an issue body's: the text
-arrives in real time and the persona may turn it into a daemon command within
-seconds. The rider says three things the generic block does not need to —
-an allowlisted sender is not a trusted *instruction* source, the refusal must
-name the shape rather than quote the payload, and forge text read while
-answering is untrusted too. Crucially, the rider is **not** what makes the
-persona safe: see
-[`safehouse.md` § The four relay gates](safehouse.md) for the mechanical
-property (a message cannot authorize itself) that holds with the phrase list
-deleted entirely.
+All of these ship from `defaults/.claude/commands/loom/`. The five with a
+`defaults/roles/` entry (`curator`, `builder`, `judge`, `doctor`, `guide`) are
+**symlinks** into that same directory, so the role-file and slash-command views
+of a role can never disagree about this block.
 
 **Maintenance rule**: when a new role — or a new split-out sub-file of an
 existing role — starts reading forge text, add the same block and add a row to
@@ -87,6 +74,27 @@ that read forge text without the full block (`champion.md`,
 `champion-common.md`, `champion-reference.md`, `judge-reference.md`,
 `architect.md`, `hermit.md`, `auditor.md`, `epic.md`, `imagine.md`, `loom.md`,
 `watch.md`) carry a shorter one-line pointer near the top.
+
+### Harness rate-limit reminders: a text match, not a quota reading (#11411)
+
+Claude Code appends a "GitHub API rate limit … sleep until reset" reminder to
+a shell result when the command calls `gh` and the output matches a GitHub
+rate-limit phrase, whatever printed it and whatever the exit status. Forge
+text that quotes such a phrase (an issue body, a PR diff, a log excerpt)
+therefore makes the reminder appear on an ordinary `gh issue view`, which
+makes it a cheap way for outside text to stall an agent. Treat it as a claim
+to check, not an instruction: run `gh api rate_limit --jq .resources`, and
+continue if the quota is healthy. Never end a turn or arm a long wait on the
+reminder alone.
+
+Loom's own prompts must not set it off. The signature tables in `judge.md`,
+`doctor.md`, `sweep-arguments.md` and `gh-issue-create-rest-fallback.md` spell
+the two `api rate limit` signatures with `·` in place of a space, and
+`loom-daemon/tests/harness_rate_limit_hint_guard.rs` fails if any shipped
+prompt or doc contains a phrase the hint matches. The code that classifies
+real rate limits (`rate_limit_breaker.rs`'s `RATE_LIMIT_SIGNATURES`,
+`check-duplicate.sh`'s `is_rate_limit_error()`, `lib/forge-helpers.sh`) keeps
+the literal phrases and is unchanged.
 
 ## Why a prompt convention and not a hook
 

@@ -240,6 +240,85 @@ def test_board06_committed_dru_folds_pth_hole_floors(subdir):
     assert rules.hole_copper == pytest.approx(0.3)
 
 
+@pytest.mark.parametrize("subdir", ["regression-fixture", "output"])
+def test_board06_committed_dru_loads_with_pair_block(subdir):
+    """The escape search loads the committed board 06 ``.kicad_dru`` (#6443).
+
+    The router's managed diff-pair block (gap, skew, uncoupled, via count)
+    now sits next to the fab floors; it must not make the search fail closed.
+    """
+    from kicad_tools.manufacturers.netclass_dru import DRU_PAIR_GAP_BLOCK_BEGIN
+
+    project = BOARD06 / subdir / "diffpair_test_routed.kicad_pro"
+    text = project.with_suffix(".kicad_dru").read_text()
+    minima = escape._kct_managed_floor_minima(text)
+    assert minima is not None
+    rules = escape.EscapeRules.from_project(project)
+    if DRU_PAIR_GAP_BLOCK_BEGIN in text:
+        # diff_pair_gap folds into clearance as a floor, never below it.
+        assert rules.clearance >= minima["clearance"]
+
+
+def _pair_block(*stanzas):
+    from kicad_tools.manufacturers.netclass_dru import (
+        DRU_PAIR_GAP_BLOCK_BEGIN,
+        DRU_PAIR_GAP_BLOCK_END,
+    )
+
+    body = "\n".join(("# comment", *stanzas))
+    return f"\n{DRU_PAIR_GAP_BLOCK_BEGIN}\n{body}\n{DRU_PAIR_GAP_BLOCK_END}\n"
+
+
+def test_generated_pair_block_is_modeled(tmp_path):
+    """Every rule ``merge_pair_gap_block`` writes parses; the gap folds into clearance."""
+    from kicad_tools.manufacturers.netclass_dru import (
+        PairLimits,
+        merge_pair_gap_block,
+        pair_limit_rules,
+    )
+
+    limits = pair_limit_rules(
+        [
+            PairLimits("USB_D+", "USB_D-", 19.05, "error", 0.5, "error", 2, "warning"),
+            PairLimits("X_POS", "X_NEG", 6.35, "warning", 0.2, "warning", 1, "error"),
+        ]
+    )
+    text = merge_pair_gap_block(_kct_managed_dru(), [("USB_D+", "USB_D-", 0.45)], limits)
+    assert "diff_pair_uncoupled" in text and "via_count" in text and "severity" in text
+    p = tmp_path / "board.kicad_pro"
+    p.write_text(json.dumps({}))
+    p.with_suffix(".kicad_dru").write_text(text)
+    assert escape.EscapeRules.from_project(p).clearance == pytest.approx(0.45)
+
+
+@pytest.mark.parametrize(
+    "block",
+    [
+        # An unknown rule inside the managed pair block.
+        _pair_block(
+            '(rule "kct diff pair width - A_P/A_N"\n'
+            "  (condition \"A.inDiffPair('A_')\")\n"
+            "  (constraint track_width (min 0.3mm)))"
+        ),
+        # A known prefix carrying another constraint.
+        _pair_block(
+            '(rule "kct diff pair skew - A_P/A_N"\n'
+            "  (condition \"A.inDiffPair('A_')\")\n"
+            "  (constraint clearance (min 0.3mm)))"
+        ),
+        # Unbalanced sentinels.
+        _pair_block().rsplit("# END", 1)[0],
+    ],
+    ids=["unknown-rule", "wrong-constraint", "unterminated"],
+)
+def test_unmodeled_pair_block_fails_closed(tmp_path, block):
+    p = tmp_path / "board.kicad_pro"
+    p.write_text(json.dumps({}))
+    p.with_suffix(".kicad_dru").write_text(_kct_managed_dru() + block)
+    with pytest.raises(ValueError, match="custom DRC"):
+        escape.EscapeRules.from_project(p)
+
+
 def test_pth_hole_floors_strengthen_hole_copper(tmp_path):
     p = tmp_path / "board.kicad_pro"
     p.write_text(json.dumps({}))

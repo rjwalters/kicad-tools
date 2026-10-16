@@ -1,6 +1,6 @@
-# Post-Builder Quality Gate (`buildGate`)
+# Build Gate (`buildGate`)
 
-The post-builder quality gate is a deterministic, orchestrator-side check that runs **after the builder agent exits but before any PR is opened**. It short-circuits PR creation when the builder's work obviously isn't shippable, releases the issue claim, and lets the next builder re-attempt the issue.
+`buildGate` names the command that proves a change is shippable. Since #11690 **CI is the test gate**: on a host the command runs only as a compile check (the fast tier) before a PR is opened, and the test suites run in CI. See [Where the gate runs](#where-the-gate-runs-11690).
 
 See issue [#3347](https://github.com/rjwalters/loom/issues/3347) for the original proposal.
 
@@ -8,12 +8,12 @@ See issue [#3347](https://github.com/rjwalters/loom/issues/3347) for the origina
 **Contents**
 
 - [Why a gate?](#why-a-gate)
-- [The three checks](#the-three-checks)
+- [Where the gate runs (#11690)](#where-the-gate-runs-11690)
 - [Configuration](#configuration)
 - [In-session pre-PR gate (`loom-daemon preflight`)](#in-session-pre-pr-gate-loom-daemon-preflight)
 - [Examples](#examples)
 - [Failure semantics](#failure-semantics)
-- [Why orchestrator-side?](#why-orchestrator-side)
+- [Why a receipt?](#why-a-receipt)
 <!-- toc:end -->
 
 ## Why a gate?
@@ -26,30 +26,28 @@ Builder agents (Claude Code as well as external engines invoked by parallel swar
 
 Without a gate, the Judge phase has to catch every one of these post-hoc, which wastes review cycles and pollutes the queue. The gate moves that filter ~30s of CPU instead of a multi-minute Judge cycle, and on parallel-sweep fleets the savings compound.
 
-## The three checks
+## Where the gate runs (#11690)
 
-The gate runs three checks in order. Any failure short-circuits PR creation:
+Host-side test runs competed with dispatched work for cores: on a loaded host the in-session pre-flight timed out or deferred for tens of minutes, and Builders then re-ran the suite by hand. The operator direction (#11690) keeps the host to a compile and makes CI the only test gate:
 
-1. **has-commits** — `git rev-list --count origin/main..HEAD > 0` in the worktree.
-   Since #8267 this check has an executable implementation that any caller can
-   reuse — `loom-daemon worktree-state report` (exit `3` = unsaved deliverables)
-   and the turn-end guard built on it, documented under
-   [`guard-hooks.md` → Uncommitted-Work Stop Guard](guard-hooks.md). Ask it
-   rather than writing a second commit-counter: the gate below and the guard
-   must never be able to disagree about whether an agent committed anything.
-2. **has-real-changes** — at least one changed file matches the configured `realChangeGlobs` (or the default scratch-exclusion list when no globs are configured).
-3. **build-passes** — the configured `buildGate.command` exits with code 0 inside the worktree.
+| Runner | Where | What it runs |
+|--------|-------|--------------|
+| Builder pre-flight | `loom-daemon preflight`, in the Builder's session | The **fast tier** (`buildGate.fastCommand`, else `LOOM_BUILD_GATE_TIER=fast <command>`): structural checks, a compile and a startup smoke. No load deferral. See [below](#in-session-pre-pr-gate-loom-daemon-preflight). |
+| PR creation | `create-pr.sh` runs `loom-daemon preflight --check` | Refuses a `HEAD` with no pre-flight receipt (exit `7`) or with a skip-CI marker (exit `8`). Runs nothing. |
+| CI | the PR's workflows | Every test suite. The Builder does not wait for it; the Judge checks it before reviewing, and a red run goes to the Doctor through `loom:changes-requested` + `loom:ci-failure`. |
+| Main-health gate | the daemon, opt-in (`autonomous.mainHealthGate.enabled` / `LOOM_MAIN_HEALTH_GATE`, default off) | The full tier against `main` (fast past `maxDeferSeconds` of load). The one remaining host-side full-suite runner, and only when an operator enables it. Where it is off, the red-main-fix lane reads CI on `main` instead ([daemon-reference](daemon-reference.md)). |
 
-When all three pass the builder phase proceeds normally to PR creation. When any one fails the orchestrator:
+No orchestrator re-runs `buildGate.command` after the Builder exits. The older "three checks" post-builder gate (has-commits, has-real-changes, build-passes) belonged to the retired Python shepherd (epic #4081); has-commits survives as `loom-daemon worktree-state report` (#8267, [`guard-hooks.md`](guard-hooks.md) → Uncommitted-Work Stop Guard).
 
-- Atomically releases the claim: `loom:building` -> `loom:issue`.
-- Logs an `error` milestone with `reason=build_failed_post_builder` and `check=<failed_check>`.
-- Cleans up the stale worktree.
-- Returns a `FAILED` `PhaseResult` so the sweep does not progress to Judge.
+`build-gate.sh` still defaults to the **full** tier when `LOOM_BUILD_GATE_TIER` is unset, so a manual run and the release path's hosted gate (`hosted-build-gate.yml`) are unchanged.
+
+**CI capacity.** When many PRs queue on the plan's concurrent-job cap, their checks sit `queued`. That reads as pending, never red: the Judge skips the PR and re-evaluates later, and nothing is labelled `loom:ci-failure`. The cost is latency, not wrong labels.
+
+**Telemetry.** Every host-side run that executes the command emits one `build_gate.run` span (`loom.build_gate.stage` `preflight` / `main_health`, `tier`, `outcome`, `duration_ms`, `attempt`; [`telemetry-schema.md`](telemetry-schema.md)). Pre-flight is a CLI process, so its span travels through the ambient sweep's trace journal (`LOOM_TRACEPARENT` + `LOOM_TRACE_CONTEXT_FILE`); an attended session with no `LOOM_TRACEPARENT` emits none.
 
 ## Configuration
 
-The gate is **opt-in**. Repos with no `buildGate` block in `.loom/config.json` see zero behavior change — the gate returns immediately.
+The gate is **opt-in**. Repos with no `buildGate` block in `.loom/config.json` see zero behavior change: pre-flight is a no-op and `create-pr.sh` checks only the skip-CI marker.
 
 ```json
 {
@@ -67,14 +65,13 @@ The gate is **opt-in**. Repos with no `buildGate` block in `.loom/config.json` s
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `enabled` | boolean | `true` when block is present | Set to `false` to disable the gate without removing the block. |
-| `command` | string | _(none)_ | Shell-style command run in the worktree (parsed with `shlex.split`). When omitted, the build check is skipped but the has-commits and has-real-changes checks still run. |
-| `realChangeGlobs` | array of strings | _(default exclusions)_ | Positive globs. A changed file must match at least one to count as "real." When omitted, every changed file counts unless it matches one of the default scratch exclusions: `.loom-*`, `*.log`, `.no-changes-needed`. |
+| `command` | string | _(none)_ | Command run via `sh -c` in the worktree (pre-flight) or the workspace (main-health gate). Without it the gate is disabled. |
+| `realChangeGlobs` | array of strings | _(none)_ | Main-health gate only (#3984): a `main` move touching none of these globs does not re-run the gate. |
 | `timeoutSeconds` | integer | `600` | Timeout for the `command` run. |
 | `preflightMaxAttempts` | integer | `3` | Max failed in-session `loom-daemon preflight` runs before the terminal `preflight_unresolved` outcome (#10476). Timed-out runs are counted separately against the same number. |
-| `preflightPathScopes` | array of objects | _(none)_ | In-session `loom-daemon preflight` only (#10860): `[{"env", "suite", "runWhenChanged": [globs]}]`. A suite whose globs match nothing the worktree changes is dropped by exporting `env` empty to `command`. See [Path-scoped suites](#path-scoped-suites). |
 | `loadThreshold` | number | `0.9` | Daemon main-health gate only (#4259): 1-minute load average per logical CPU at/above which the gate DEFERS instead of running the full suite. Env override `LOOM_BUILD_GATE_LOAD_THRESHOLD`. See "Tiered gate + load-aware deferral". |
 | `maxDeferSeconds` | integer | `1800` | Daemon main-health gate only (#4259): after this many seconds of consecutive load-deferred ticks, the FAST tier runs regardless of load so a permanently-loaded host still reaches a verdict. Env override `LOOM_BUILD_GATE_MAX_DEFER_SECS`. |
-| `fastCommand` | string | _(derived)_ | Daemon main-health gate only (#4259): the command run for the fast tier. When omitted, the base `command` is run with `LOOM_BUILD_GATE_TIER=fast` prefixed. |
+| `fastCommand` | string | _(derived)_ | The fast-tier command: what pre-flight always runs (#11690) and what the main-health gate runs past `maxDeferSeconds` (#4259). When omitted, the base `command` is run with `LOOM_BUILD_GATE_TIER=fast` prefixed. |
 
 > **Not a `buildGate` key:** the daemon-side main-health gate's optional forge
 > verification-workflow name (`autonomous.mainHealthGate.ciWorkflow` /
@@ -84,7 +81,7 @@ The gate is **opt-in**. Repos with no `buildGate` block in `.loom/config.json` s
 
 ## In-session pre-PR gate (`loom-daemon preflight`)
 
-The orchestrator-side gate above runs *after* the Builder exits, so the failing output never reaches the Builder that wrote the change (#10476). `loom-daemon preflight --issue N` runs the **same** `buildGate.command` (same `enabled`, `command`, `timeoutSeconds`) **inside the Builder's session, before the PR is opened**, and hands the failure tail back for in-session repair.
+`loom-daemon preflight --issue N` runs the gate **inside the Builder's session, before the PR is opened** (#10476), so the failure tail goes back to the Builder that wrote the change. Since #11690 it runs the **fast tier** only: `buildGate.fastCommand`, else `LOOM_BUILD_GATE_TIER=fast <command>` (for `build-gate.sh`: structural checks, `cargo build --workspace --lib --bins`, a `--version` smoke). It never defers on host load; `build-gate.sh`'s machine-wide build slot already serialises concurrent compiles. The tests run in CI.
 
 | Exit | Meaning |
 |------|---------|
@@ -92,22 +89,17 @@ The orchestrator-side gate above runs *after* the Builder exits, so the failing 
 | `1` | Failed, attempts remain: the output tail is printed; fix, commit, re-run. |
 | `4` | Attempts exhausted: `reason=preflight_unresolved`. The claim is released via the protected restore path (a parked, closed or PR target is not re-queued, and neither is an issue that did not carry `loom:issue` when it was claimed, #10955; a failed release is reported) and the Builder opens **no PR**. |
 | `5` | Timed out at `timeoutSeconds` (#10860). Not a check failure: it does not count toward the failure cap, writes no receipt, and **never releases the claim**. The message names the running `[build-gate]` stage. The gate's whole process tree is ended first, including stages in other process groups or sessions: SIGTERM, 5 s for the gate's EXIT trap, then SIGKILL (#10955). Re-run when the host is less loaded; once timeouts reach `preflightMaxAttempts` it prints `reason=preflight_timeout`, the Builder opens **no PR** (claim kept), and a further run in the same episode exits `5` without running the gate. |
-| `6` | Deferred (#10955): the host's 1-minute load per CPU is above `buildGate.loadThreshold` (default 0.9, the orchestrator gate's threshold), so the gate was **not run**. Not a failure and not a timeout: no counter moves, and the claim is kept. Re-run in a few minutes. Once deferrals in one episode span `buildGate.maxDeferSeconds` (default 1800) the gate runs regardless of load. |
+| `6` | Retired (#11690). It meant "deferred on host load" (#10955); the fast tier never defers. The number is not reused. |
 | `7` | `--check` only: `HEAD` has no passing receipt. |
+| `8` | `--check` only, every repo (no `buildGate` needed): a commit in `origin/<base>..HEAD` carries a GitHub skip-CI marker (the five bracket spellings or a `skip-checks: true` trailer), named by commit and line (#11389). `LOOM_ALLOW_SKIP_CI=1` opts out. |
 
-**Flaky tests (#10955).** `build-gate.sh` runs nextest with `--retries 1` (`LOOM_BUILD_GATE_TEST_RETRIES` overrides; `0` turns it off), so a test that fails once and passes on its retry does not fail the gate or consume an attempt. Pre-flight then prints `preflight: PASS (flaky, passed on retry: <names>)`. CI does not retry (`retries = 0` in `.config/nextest.toml`), so the same flake can still fail CI: file it.
+**Flaky tests (#10955).** A `fastCommand` that runs tests may still report a test that passed only on nextest's retry: pre-flight then prints `preflight: PASS (flaky, passed on retry: <names>)` and charges no attempt. CI does not retry (`retries = 0` in `.config/nextest.toml`): file the flake.
 
-Attempts and the receipt live in the worktree's git dir (never committed); `buildGate.preflightMaxAttempts` (default 3) bounds the loop within one dispatch episode (`LOOM_SWEEP_ID`); a re-dispatch into the same worktree starts a fresh budget. **Enforcement:** `create-pr.sh` runs `loom-daemon preflight --check` and exits `7` for an un-gated `HEAD`; a binary predating the subcommand skips the check (fail-open, like its sibling guards). A new commit invalidates the receipt, so fixes must be re-gated. Repos with no `buildGate` block are unchanged.
+Attempts and the receipt live in the worktree's git dir (never committed); `buildGate.preflightMaxAttempts` (default 3) bounds the loop within one dispatch episode (`LOOM_SWEEP_ID`); a re-dispatch into the same worktree starts a fresh budget. **Enforcement:** `create-pr.sh` runs `loom-daemon preflight --check` and exits `7` for an un-gated `HEAD`; a binary predating the subcommand skips the check (fail-open, like its sibling guards). A new commit invalidates the receipt, so fixes must be re-gated. Repos with no `buildGate` block skip the receipt check (exit `8` still applies).
 
-### Path-scoped suites
+`buildGate.preflightPathScopes` (#10860) is no longer read: the fast tier runs no bash suites, so there is nothing to scope. `build-gate.sh` still honours `LOOM_BUILD_GATE_INSTALLER_SUITE` exported empty (skip `scripts/test-installer.sh`) for a manual full-tier run.
 
-`buildGate.preflightPathScopes` lets pre-flight skip a slow suite that the change cannot affect (#10860). Pre-flight computes the changed set as the union of the commits since `git merge-base HEAD origin/main`, tracked uncommitted changes, and untracked (not ignored) files; renames count at both paths (`--no-renames`). For each scope whose `runWhenChanged` globs match none of those paths, it exports `env` **empty** to the gate command and prints `preflight: skipping <suite> — diff touches none of its inputs (CI still runs it)`. Otherwise it removes `env` so the suite runs. Globs use the `realChangeGlobs` matcher: a pattern with `/` matches the full path and `*` crosses `/` (`defaults/*` covers the whole tree).
-
-It fails safe: if the merge-base or diff cannot be computed, or the changed set is empty, every suite runs. Malformed entries (no `env`, a non-identifier `env`, no globs) are ignored. Pre-flight always sets `LOOM_BUILD_GATE_INSTALLER_SUITE` explicitly (removed unless skipped), so an inherited value cannot skip it. Only pre-flight reads the key; the post-builder and main-health gates run the full command unless that variable is in the daemon's environment.
-
-`build-gate.sh` honours one such variable, `LOOM_BUILD_GATE_INSTALLER_SUITE`: unset, its bash-suite loop runs `scripts/test-installer.sh` as before; exported empty, it skips that suite and runs the other four. Loom's own `.loom/config.json` scopes it to the installer inputs (`install.sh`, `scripts/install*`, `defaults/*`, `loom-daemon/src/init/*`, the `spawn-worker` sources its dispatcher suite runs, `.claude/settings.json`, the scoping code and its config, …). The transitive reach cannot be fully enumerated; CI runs the full suite as the backstop. The key is not set in `defaults/config.json`, so consumer repos are unaffected.
-
-**Measuring first-pass Judge approval (post-merge observation, not a merge gate).** The target (>80%, from ~43%) is the share of PRs whose first Judge verdict is approve, i.e. PRs with exactly one `loom:review-requested` cycle. Query it in SigNoz on the Judge review spans/verdict events grouped by PR (first verdict per PR = approved vs. changes-requested), comparing before/after this lands; a `preflight_unresolved` log line counts sweeps stopped before any PR existed.
+**Measuring first-pass Judge approval (post-merge observation, not a merge gate).** The share of PRs whose first Judge verdict is approve. `sweep.outcome` carries `judge_verdicts[]` with `attempt` and `verdict`; first-pass means the first verdict is a pass at attempt 1. Compare windows before and after a change in SigNoz; a `preflight_unresolved` log line counts sweeps stopped before any PR existed.
 
 ## Examples
 
@@ -244,9 +236,7 @@ stages in order under `set -euo pipefail`, aborting on the first non-zero exit:
    against a disposable scratch repo `CHANGELOG_REPO_ROOT` — no network, no
    dependency on this repo's own history), `scripts/test-daemon-liveness.sh`
    (#5548), `scripts/test-install-local-mode.sh` and
-   `scripts/test-migrate-consumer.sh` (#5276). In-session pre-flight skips
-   `scripts/test-installer.sh` when the diff touches no installer input (see
-   [Path-scoped suites](#path-scoped-suites)).
+   `scripts/test-migrate-consumer.sh` (#5276).
 
 ### The structural phase (#9140)
 
@@ -261,7 +251,8 @@ failures independently confirmed pre-existing and host-environmental — an
 accurate report), then CI failed **five** gates: the markdown-token ratchet, the
 role-prompt-prefix ratchet, `check-dangling-links.sh`, `check-docs-defaults-parity.sh`,
 and the install-surface link check — a ratchet violation plus one missing
-`.loom/docs/` symlink. Every one reproduces locally in about a second. The cost
+`.loom/docs/` symlink. (#12106 later removed both ratchets and the parity
+check from CI.) Every one reproduces locally in about a second. The cost
 of not being able to learn that without pushing was one full
 Builder → CI → Judge → Doctor lap.
 
@@ -288,14 +279,10 @@ and does not call this script:
 
 - each gate is its own named step under `if: ${{ !cancelled() }}`, so one red
   gate never hides another and the step name says which one failed; and
-- each step sits inside a `# component:` marker that `loom-daemon`'s
-  required-check freshness guard pins per component
-  ([`stale_checks/inputs.rs`](https://github.com/rjwalters/loom/blob/main/loom-daemon/src/merge_pr/stale_checks/inputs.rs)
-  `REQUIRED_CHECKS`), whose pin test fails if a component's steps run a script
-  missing from that component's spec.
+- each step sits inside a `# component:` marker naming its gate group.
 
 Having CI invoke the aggregate instead would collapse fifteen named steps into
-one opaque one and break that pin test. Reading the workflow costs CI nothing
+one opaque one. Reading the workflow costs CI nothing
 and changes nothing about it.
 
 #### Ordering, and why it is unconditional
@@ -348,6 +335,146 @@ continue-past-failure, and the measured-nothing failure). The live half is the
 and still names each of PR #9137's four script-level failures, so a workflow
 restructure that stops matching fails loudly here instead of leaving the runner
 quietly reporting zero gates.
+
+### Per-job CI coverage audit: what a green local gate predicts (#9492)
+
+[#9140](https://github.com/rjwalters/loom/issues/9140) made stage 0 derive its
+bash gates from CI's `Structural Checks` job. That is coverage of **one job's
+`bash <script>.sh` lines**, not of the sibling jobs, the non-bash steps, or the
+skipped invocations. PR #9137 is the proof: its installed-tree link failure
+belonged to `Install Surface Checks`, outside the mirrored job. This section is
+the audit that says what the gate does and does not predict.
+
+**Audited at** `9ca463f06afa2864aa58f3adbeb8e1a4d743a2ad` (`main`, workflow
+`.github/workflows/ci.yml`). Re-audit when the jobs below change. Since
+#12106, `Structural Checks`, `Daemon Checks`, `Install Surface Checks` and
+`Repo Hygiene Checks` are one `Lint` job (which `check-structural.sh` now
+mirrors), and the one required context is `CI Result`; the rows below predate
+that merge. The set of required status contexts at the audit, from the `main`
+ruleset (`gh api repos/{owner}/{repo}/rules/branches/main`), was:
+`Structural Checks`, `Shell Syntax (macos-latest)`, `Daemon Checks`, `CI Result`.
+`Install Surface Checks` is **not** itself required; it reaches `main`'s merge
+gate only through `CI Result`.
+
+Since #12106 CI no longer runs the shell budget, the shell allowlist, the
+markdown-token / role-prompt / CLAUDE.md budgets, the pipefail and
+daemon-subcommand ratchets, doc TOC / anchor / docs-parity checks or the
+agent-skills sync; the rows below that time those were measured before it. Do
+not run them as CI gates.
+
+**A local green does not imply any CI context passed.** It means the rows
+marked "mirrored" below passed on this host, nothing more.
+
+#### Coverage table
+
+Costs were measured on a macOS arm64 host with load average 17-27 (many
+concurrent builds), so they are inflated several-fold against an idle host;
+the documented ~30s for the structural phase was **617s** here. Treat them as
+upper bounds. "Not measured" means the prerequisite was unavailable; no timing
+is claimed.
+
+| CI context / job | Local command (exact) | Phase | Covered | Omitted | Needs | Measured cost | Reproducibility |
+|---|---|---|---|---|---|---|---|
+| `Structural Checks` | `bash scripts/check-structural.sh` (derived: 34 invocations, 33 run) | Stage 0, both tiers, before cargo | every `bash <script>.sh [args]` step in the job, in order, including `--self-test` steps | the `check-defaults-version-bump.sh --forbid-bump` step (SKIP: needs `${{ }}` PR SHAs); every non-`bash` step (conflict-marker `git grep`, `jq`/YAML parse of `config.json` and workflow templates, inline `run:` bodies); `actions/checkout` environment | bash, git, standard Unix tools | 33 passed, 1 skipped in 617s (loaded) | Reproduces the derived subset; **partial**, not job equivalence |
+| `Shell Syntax (macos-latest)` | `bash scripts/check-structural.sh --job "Shell Syntax (macos-latest)"` lists 5 commands; **but** stage 0 already runs the same scripts via `Structural Checks` | Stage 0 | the five `bash <script>.sh` steps, on whatever `bash` is first on `PATH` | the bash 3.2 assertion step (inline); the macOS runner image; any bash version other than the host's `PATH` bash | stock macOS `/bin/bash` 3.2.57 | syntax scan 23s, allowlist self-test 16s, pipefail ratchet 26s, subcommand ratchet 25s + 3s self-test (all loaded, under `/bin/bash` 3.2.57) | Syntax component reproduced under 3.2 (below); the runner itself is **not** reproduced |
+| `Daemon Checks` | `bash scripts/check-gitignore-convergence.sh . <daemon>`; `loom-daemon check-guard-wiring --repo-root .`; `loom-daemon secret-scan --range <base>..<head>` | **Not wired.** Needs a built daemon, so post-build if ever wired | all three component gates, each run by hand | `--job "Daemon Checks"` derives only the gitignore line, with a **relative** `target/debug/loom-daemon` path that does not exist under an isolated `CARGO_TARGET_DIR`; the other two are daemon subcommands the parser does not match | a debug `loom-daemon` | about 1s each (daemon build itself 947s, loaded) | Locally reproducible, **not mirrored** |
+| `Install Surface Checks` | `loom-daemon generate-agent-skills --check`; then the fixture recipe below | **Not wired.** Post-build | skills sync: reproduced. Fresh-install link check: reproduced by the recipe, not by `--job` | `--job "Install Surface Checks"` derives `bash .loom/scripts/verify-install.sh check-links` with **no** fixture and **no** `cd`: run from the repo root it checks this repo's own `.loom/`, not a fresh install, and so is a false assurance. The adjacent-release compatibility contract needs published releases and network | debug daemon, git, network for `install-compat` | `generate-agent-skills --check` under 1s; fixture `init` 77-131s, `check-links` 13-20s (loaded). `install-compat check` **not measured** (network/release assets) | Skills sync and link check reproducible; compatibility contract **not reproducible offline** |
+| `CI Result` | none | none | n/a | the aggregate of 25 `needs:` jobs (every job above plus Rust unit tests, OTLP, repo-hygiene, image jobs, installer suites, and others) | the GitHub Actions context | not measured | **Not reproducible**; it is a verdict over other jobs and cannot be run |
+
+Phase vocabulary: the fast tier runs only stage 0 plus a compile and
+`--version` smoke; the full tier adds nextest, doctests and five bash suites
+(see [Tiered gate](#tiered-gate--load-aware-deferral-4259)). Neither tier runs
+any `Daemon Checks` or `Install Surface Checks` command.
+
+`scripts/test-installer.sh`, which the full tier does run, does **not** stand in
+for the installed-tree link check. Its Section 13 builds small synthetic
+fixtures to test the *parser*; it never initializes the current complete
+`defaults/` payload and so cannot see a packaging gap in it.
+
+#### Installed-tree link independence: verdict
+
+**Verdict: independent.** (`check-docs-defaults-parity.sh` was retired with
+its CI step in #12106; the table records the audit as run.) The source-tree checks
+(`scripts/check-dangling-links.sh`, `scripts/check-docs-defaults-parity.sh`) did
+not subsume `loom-daemon init` followed by `verify-install.sh check-links` on a
+fresh fixture. A controlled fixture passes both source checks and fails the
+installed-tree check.
+
+Method: a local clone of the audited commit, one edit committed per case,
+`loom-daemon init --defaults <clone>/defaults <fresh git fixture>` using a
+debug daemon built from that commit in an isolated target dir, then
+`bash .loom/scripts/verify-install.sh check-links` inside the fixture. Exit `6`
+is "dangling link(s) found".
+
+| Edit to `defaults/` | `check-dangling-links.sh` | `check-docs-defaults-parity.sh` | installed `check-links` |
+|---|---|---|---|
+| none (clean) | 0 | 0 | 0 |
+| Markdown link to a missing file in `defaults/docs/` | 1 | 1 | 6 |
+| backtick-only reference to a nonexistent install-rooted doc | **0** | **0** | **6** |
+| backtick-only reference to a doc that exists at repo-root `.loom/docs/` but is not in `defaults/docs/` (omitted payload) | **0** | **0** | **6** |
+| `../../../.loom/docs/…` link in a command file that is also installed as `.loom/roles/<x>.md` through the `defaults/roles/` symlink | **0** | **0** | **6** |
+| link to a missing doc in `defaults/.loom/CLAUDE.md` (install-time path rewrite) | 1 | 0 | 6 |
+| Markdown link to a repo-root-only doc from `defaults/docs/` (omitted payload, link form) | 0 | 1 | 6 |
+
+Reading it:
+
+- **Backtick-only references** are invisible to both source checks, which only
+  parse Markdown inline links. Only the installed checker also extracts
+  `` `.loom/…md` `` style references.
+- **The symlinked-role destination** is invisible to the source checks because
+  they resolve a file at one installed location; the same bytes installed one
+  directory shallower escape the repo root.
+- **Omitted payloads** (a shipped file naming a doc that is deliberately never
+  shipped) are the same backtick gap seen from the other side; in link form the
+  parity check catches them, in backtick form nothing in the source tree does.
+- The rewritten-path case and the plain Markdown-link cases are concordant:
+  a source check catches them too, so those do not justify the install fixture on
+  their own.
+
+Limitations: one host, one daemon build, edits to a single doc and a single
+command file per class; timings are loaded-host figures.
+
+#### Wiring decision: none added
+
+The independence finding is a demonstrated, locally reproducible gap, but no
+wiring is added in this change, for concrete reasons:
+
+- `check-structural.sh --job` cannot reproduce it. The job's setup is an inline
+  multi-line fixture `run:` block plus a `cd "$FIXTURE"` the parser
+  deliberately does not evaluate (no `eval` of workflow text), so selecting
+  the job runs the checker against the wrong tree.
+- `defaults/scripts/build-gate.sh` is `contract`-category shell under the
+  portable-shell ratchet with no growth override
+  ([shell-language-policy](https://github.com/rjwalters/loom/blob/main/.loom/docs/shell-language-policy.md)),
+  and a new executable helper is out of scope. A fixture builder belongs in a
+  `loom-daemon` subcommand, which is new logic beyond this audit.
+- The stage costs a daemon build plus a 77-131s `init` on a loaded host
+  (13-20s `check-links`), against the fast tier's deliberately bounded budget.
+
+Until a daemon-native check exists, a Builder who edits anything under
+`defaults/` that is shipped to consumers, or any file whose links include
+backtick-only `.loom/…` paths, should run by hand after a build:
+
+```bash
+FIXTURE="$(mktemp -d)" && git init -q -b main "$FIXTURE"
+git -C "$FIXTURE" -c user.email=x@example.com -c user.name=x commit -q --allow-empty -m a
+git -C "$FIXTURE" -c user.email=x@example.com -c user.name=x commit -q --allow-empty -m b
+"$CARGO_TARGET_DIR/debug/loom-daemon" init --defaults "$PWD/defaults" "$FIXTURE"
+(cd "$FIXTURE" && bash .loom/scripts/verify-install.sh check-links)
+```
+
+#### Bash 3.2 syntax component
+
+Stock macOS ships `/bin/bash` 3.2.57, and `check-shell-syntax.sh` resolves
+`bash -n` through `PATH`, not its own shebang. With a directory holding a
+`bash` symlink to `/bin/bash` placed first on `PATH`, `bash defaults/scripts/check-shell-syntax.sh --quiet --dir .`
+exited 0 under 3.2.57 on this host. (The allowlist and the two ratchets this
+audit also ran were retired from CI in #12106.) That
+reproduces the syntax *component* of the CI job under a real bash
+3.2; it does not reproduce the macOS runner image, its awk, or the job's inline
+bash-version assertion. On a host whose `PATH` bash is 4.x or 5.x (Homebrew),
+stage 0's derived run of these same scripts exercises that newer bash only.
+Linux's default bash is not a substitute.
 
 ### Why the gate prefers `cargo nextest` (#8326)
 
@@ -406,9 +533,8 @@ which would add unpredictable latency to a gate that also runs once per PR. CI
 600` gives ~2x headroom over the measured ~210s warm-cache total to absorb a
 cold `target/` in a fresh worktree.
 
-Beyond the per-wave step-8 gate, this same command runs after **every** builder
-exit (the "Post-Builder Quality Gate" above), so it is deliberately kept fast
-and free of network/npm dependencies. This is a repo-specific,
+Its fast tier runs in every Builder's pre-flight (#11690), so the command is
+kept free of network/npm dependencies. This is a repo-specific,
 self-hosting-only config; `defaults/config.json` (the generic install template)
 ships with no `buildGate` block. See issue
 [#3749](https://github.com/rjwalters/loom/issues/3749).
@@ -478,6 +604,9 @@ gate reds on a **dispatch worker** while the same commit is green in CI:
   gate deliberately does **not** sanitize the environment wholesale: it needs
   the real `PATH`/`HOME`/credential environment to run at all, and an `env -i`
   wrapper would hide exactly the host-shaped reds this section is about.
+  Since #9851 the Rust step is also hermetic to `LOOM_RUNTIME*` through
+  `.cargo/config.toml` `[env]`, which forces `LOOM_RUNTIME` and every
+  `LOOM_RUNTIME_<ROLE>` empty for cargo-run test binaries.
 
 **The gate runs at a mild throttle relative to sweeps (#4020, revises #3985).**
 `build-gate.sh` now defaults to `nice 5` — a mild positive niceness, a real but
@@ -590,9 +719,9 @@ The structural phase (#9140) sits **above** the tier switch, so both tiers run
 it — see "The structural phase" above for why that is unconditional rather than
 full-tier-only.
 
-The default is unchanged when the variable is absent, so **CI parity, manual
-invocations, and the per-builder post-builder gate all behave exactly as
-before**. The fast tier verifies the compile/startup breakage class (#3647
+The default is unchanged when the variable is absent, so **CI parity and
+manual invocations behave exactly as before**; in-session pre-flight asks for
+the fast tier (#11690). The fast tier verifies the compile/startup breakage class (#3647
 step-8 — a `cargo build --workspace` catch) plus that the binary it just built
 actually starts.
 
@@ -705,7 +834,7 @@ Full rationale, telemetry, and the env-knob table live in
 > **Rule of thumb:** if a check's outcome can differ between an idle host and a
 > busy one — or between a host with tmux and one without — it is
 > **environment-sensitive** and belongs in CI (which controls its
-> environment), not in the local post-builder gate. Keep the gate scoped to
+> environment), not in the local gate. Keep the gate scoped to
 > checks that are deterministic on any host.
 
 ### Per-step toolchain timeout + self-reap (#6192)
@@ -829,22 +958,74 @@ would silently re-enable both failure modes. A worker that genuinely wants
 incremental for one command still can — an inline `CARGO_INCREMENTAL=1 cargo
 build` prefix outranks the ambient value for that invocation only.
 
-## Failure semantics
+### Worker builds cap debuginfo at `line-tables-only` (#11190)
 
-A gate failure is **not** the same as a builder failure: the issue is automatically re-queued (`loom:issue`) and a future builder can take a fresh attempt. The `PhaseResult.data` block carries:
+The same dispatcher seam also sets `CARGO_PROFILE_DEV_DEBUG=line-tables-only`
+and `CARGO_PROFILE_TEST_DEBUG=line-tables-only` for every Loom-spawned worker.
+Cargo's default `dev`/`test` profile emits full DWARF, and in a workspace whose
+`tests/*.rs` files are each a crate linking the whole library, every
+integration-test binary carries its own copy: on loom-worker-1 (2026-10-09) one
+loom sweep's run dir reached 26 GB, and a typical test binary was 438 MB, of
+which 425 MB was `.debug_*` sections. `line-tables-only` keeps `file:line` in
+panic backtraces and drops nearly all of the rest. Loom's own CI has built this
+way since #9065 (`.github/workflows/ci.yml`).
 
-```python
-{
-  "post_builder_gate_failed": True,
-  "gate_check": "has_commits" | "has_real_changes" | "build_passes",
-  "gate_detail": "<human-readable failure reason>",
-  "reason": "build_failed_post_builder",
-  "claim_released": True,
-}
+Unlike `CARGO_INCREMENTAL=0`, this default never overrides a choice that was
+already made, because a `CARGO_PROFILE_*` variable outranks every `[profile]`
+table cargo reads:
+
+- **Ambient env wins.** A `CARGO_PROFILE_DEV_DEBUG` or `CARGO_PROFILE_TEST_DEBUG`
+  already in the spawning environment is left as it is.
+- **The repo's profile wins.** A `debug` key in the `dev` or `test` profile
+  table of the repo's root `Cargo.toml`, or of a cargo config file a
+  build there reads (`.cargo/config.toml` in the repo or an ancestor, then
+  `$CARGO_HOME/config.toml`), suppresses that profile's variable.
+- **`test` inherits from `dev`.** When `dev` was chosen either way, the `test`
+  variable is not set either, so test binaries keep the inherited choice.
+
+The level is configurable per repo, with an opt-out:
+
+```json
+{ "cargo": { "debuginfo": "full" } }
 ```
 
-These fields are available in sweep logs (`.loom/logs/sweep-issue-N.log`) and sweep checkpoints (`.loom/sweep-checkpoint/issue-N.json`) for postmortem analysis.
+`cargo.debuginfo` (env override `LOOM_CARGO_DEBUGINFO`; env > config > default)
+takes `line-tables-only` (the default), `limited`, `line-directives-only`,
+`none`, `0` or `1` to inject that level, and `full`, `inherit` or `false` (the
+JSON bool works too) to inject nothing and leave cargo's own resolution alone. Use the opt-out for a repo whose
+agents need a debugger. An unrecognized value falls back to the default. Each
+spawn writes one `# LOOM_CARGO_DEBUGINFO …` line to the worker log saying what
+it set and what it kept, and why. For example:
+`dev=kept(repo-profile) test=kept(inherits-dev)`.
 
-## Why orchestrator-side?
+Docker boundaries:
 
-The gate intentionally lives in the orchestrator's builder phase (the `/loom:sweep` skill's Builder step), not in the builder *role* prompt. The point is deterministic enforcement independent of agent self-discipline: an agent that crashed, was rate-limited, or simply ignored its prompt should still not produce a PR.
+- **Native containment** (Pi, OpenCode) re-execs `spawn-worker.sh`, which
+  re-enters the seam inside the container. Both variables are in its by-name
+  env passthrough, so a value set on the host is ambient in the container and
+  is kept.
+- **Claude containment** re-execs `spawn-claude.sh`, not `spawn-worker.sh`, so
+  nothing in the container re-runs the seam. `spawn-claude.sh` forwards both
+  variables by name next to `-e CARGO_INCREMENTAL=0`, carrying the values the
+  host-side seam chose or kept.
+- `spawn-codex.sh`'s session-exec forwards both variables by name with the other
+  Loom context variables. The private-workspace Codex transport does not
+  forward them.
+
+A host that shares one `CARGO_TARGET_DIR` between worker and interactive builds
+no longer shares artifacts between the two: cargo does not reuse an artifact
+built with a different debuginfo setting. Set `cargo.debuginfo: "full"`, or the same
+`CARGO_PROFILE_*_DEBUG` in the interactive shell, if that matters more than the
+disk the cap saves.
+
+Not covered: a cargo workspace that is not at the repo root (for example
+`src-tauri/`). Its `[profile]` table is not read, so the cap applies over it.
+Set `cargo.debuginfo: "full"` for such a repo if its profile must win.
+
+## Failure semantics
+
+A pre-flight failure is fixed in the same session: the Builder gets the output tail, fixes, commits and re-runs. Only `preflightMaxAttempts` failures in one episode (exit `4`, `preflight_unresolved`) release the claim back to `loom:issue` so a future Builder can try. A timeout (exit `5`) keeps the claim. Each run is a `build_gate.run` span with its outcome.
+
+## Why a receipt?
+
+`create-pr.sh` enforces the receipt deterministically, independent of agent self-discipline: a Builder that skipped or ignored pre-flight cannot open a PR from an un-gated `HEAD`. What the receipt certifies is cheap (a compile); what it does not certify (the tests) CI decides.

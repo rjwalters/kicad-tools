@@ -429,6 +429,9 @@ def test_external_load_gate_and_report_scope(tmp_path, monkeypatch):
         path.with_suffix(".kicad_dru").write_text("synthetic test rules")
 
     monkeypatch.setattr(validate, "write_drc_constraints", emit_rules)
+    # The synthetic board has no nets or class map; the router classes the
+    # real fill declares (#6404) are covered by test_refresh_bundles_6404.py.
+    monkeypatch.setattr(validate, "router_net_classes", lambda *a: {})
 
     def fake_run(args, **kwargs):
         if args[0] == "kct":

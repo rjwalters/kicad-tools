@@ -41,9 +41,8 @@
 # one source, not two copies.
 #
 # WHY THE PREFLIGHT CALL, not `loom_exec_script_helper`: this file is a
-# Shape-A `stub` in scripts/shell-allowlist.txt, a category machine-checked on
-# the requirement that its LAST code line IS the `exec`. Delegating the exec to
-# the helper would forfeit that category; calling the standalone preflight one
+# Shape-A stub whose LAST code line IS the `exec`. Delegating the exec to
+# the helper would break that shape; calling the standalone preflight one
 # line above the exec keeps both — and needs no second `source`, because the
 # preflight lives in the resolver library this stub already sources.
 #

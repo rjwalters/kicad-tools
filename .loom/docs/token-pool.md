@@ -94,7 +94,8 @@ equivalent credential variable. Raw provider capacity counts enabled inventory
 candidates only. Quota health, cooldown, ranking, and failover are layered on
 later and do not alter this inventory contract.
 
-> **Secrets:** use external `~/.claude-monitor/accounts.env` or an explicitly
+> **Secrets:** use external `~/.llm-monitor/accounts.env` (`~/.claude-monitor` on
+> an llm-monitor 1.x host) or an explicitly
 > selected external source, mode `0600`. Do not create repo-local
 > `.loom/accounts.env`, `.env` or `.loom/tokens/` credentials.
 
@@ -134,7 +135,7 @@ storage policy. Higher-precedence sources override by account email.
 
 | Source | Default location | Override |
 |--------|------------------|----------|
-| **claude-monitor master** (primary) | `~/.claude-monitor/accounts.env` | `LOOM_CLAUDE_MONITOR_DIR` env var (directory) |
+| **llm-monitor master** (primary; formerly claude-monitor) | `<monitor dir>/accounts.env` — see [monitor directory resolution](#monitor-directory-resolution-8849) | `LOOM_LLM_MONITOR_DIR` env var (directory); deprecated `LOOM_CLAUDE_MONITOR_DIR` still honored |
 | **Repo-local** | `<repo>/.loom/accounts.env` if present, else legacy `<repo>/.env` | `--env <path>` on `bootstrap` |
 | **Home master** (opt-in only, #3704) | *no default location* — read **only** when explicitly pointed at | `LOOM_ACCOUNTS_ENV` env var (a path enables it, `""` disables); `--home-env <path>` / `--no-home` on `bootstrap` |
 
@@ -158,11 +159,27 @@ effective merged set (and where each account came from) is printed by `bootstrap
 and `bootstrap --dry-run`. A repo with only a legacy `.env` and no other source
 behaves exactly as before.
 
+### Monitor directory resolution (#8849)
+
+claude-monitor was renamed **llm-monitor** in 2.0 and moved its data directory
+from `~/.claude-monitor` to `~/.llm-monitor`. Loom resolves the one monitor
+directory used for `accounts.env`, `ranking.json`, and `usage.db` in this order:
+
+1. `$LOOM_LLM_MONITOR_DIR` (nonblank; `~` expanded)
+2. `$LOOM_CLAUDE_MONITOR_DIR` (deprecated; nonblank; `~` expanded)
+3. `~/.llm-monitor`, if it exists as a directory
+4. `~/.claude-monitor` (legacy fallback for a host still on llm-monitor 1.x)
+
+An explicit override is authoritative even if the path does not exist. All
+three files come from the selected directory — a file missing there is treated
+as unavailable, never read from the other directory. `import-from-monitor --db`
+still overrides the database path.
+
 ## Importing live tokens from claude-monitor (#4006)
 
 `accounts.env` is a **snapshot** — a file someone wrote by hand at some point.
 claude-monitor keeps the **live** credentials in its SQLite store
-(`~/.claude-monitor/usage.db` → `oauth_credentials`) and refreshes them as
+(`<monitor dir>/usage.db` → `oauth_credentials`, usually `~/.llm-monitor/usage.db`) and refreshes them as
 accounts are re-authenticated. The two drift, and the drift is silent and total:
 
 ```text
@@ -247,6 +264,42 @@ falls back to this CLI's own native probe when one isn't present; `monitor`
 never falls back (an empty report when claude-monitor has nothing fresh);
 `probe` always uses the native probe, ignoring claude-monitor entirely.
 
+**`--source probe` probes bad-marked accounts too; nothing else does (#8972).**
+An account with a standing `auth` or `malformed-timestamp` entry in
+`.bad_tokens` is skipped by `auto`, by `monitor`, and by the overdue-reset
+re-probe — those run periodically, and probing a revoked credential every cycle
+is wasted. An **explicitly resolved** `probe` (the flag, or
+`LOOM_RANKING_SOURCE=probe`) sends the request anyway, because it is the command
+an operator runs to ask "is this mark still true?". A host that sets
+`LOOM_RANKING_SOURCE=probe` for its periodic refresh therefore spends one
+`max_tokens: 1` request per marked account per cycle. This is **reporting
+only**: a healthy answer never edits `.bad_tokens`, and the account stays
+excluded from selection — and `<name>|blocked` in `.ranking` — until
+`loom-daemon tokens unblock <name>`.
+
+Every row says whether it is a measurement or a stored record:
+
+| Field (`--json`) | Meaning |
+|---|---|
+| `probed` | Always present. `true` only when a request was sent for this account in this run; `false` for a monitor-served row and for a row that only reports a stored mark. |
+| `bad_mark` | Present only while a `.bad_tokens` entry stands: `{class, reason, marked_at}`. `marked_at` is the recorded timestamp verbatim — an unparseable one is shown as the raw text, never as an invented instant. |
+| `probe_status` | Present only when a permanent mark stands **and** the account was probed: the live verdict (`available`, `blocked`, …). `status` itself stays `blocked`, because it describes selectability. |
+| `error` | The live probe's error (`auth_401`, `timeout`, …) when `probed` is `true`. On an unprobed marked row it still carries the pre-#8972 `"<class>: <reason>"` text. |
+
+How to read a marked account:
+
+| `probed` | `probe_status` / `error` | Table note | Meaning |
+|---|---|---|---|
+| `true` | `available` (or `rate_limited` / `exhausted`), no `error` | `probed live: available — bad-mark recorded … looks stale; still excluded until …tokens unblock <name>` | The credential authenticates. The mark is stale; clear it with `tokens unblock`. |
+| `true` | `blocked`, `auth_401` | `probed live: blocked, auth_401 — confirms bad-mark recorded …` | Confirmed dead just now. Re-authenticate, then `tokens unblock`. |
+| `true` | `error`, `timeout` / `http_5xx` / … | `probed live: error, … inconclusive — bad-mark recorded … stands` | The request failed; nothing was learned. |
+| `false` | — | `not probed — bad-mark recorded …` | A stored record only. Re-run with `--source probe` to test it. |
+
+A self-clearing `exhaustion` mark was already probed under every source
+(#7522); its `status` is the live one and it now also reports its `bad_mark`.
+The table header reads `probed at <time>` only when at least one request was
+sent, and `ranked at <time>; no account was probed in this run` otherwise.
+
 **Provider-dispatched probing (issue #5608).** `--source probe` resolves each
 account's provider from `index.json` (a `.token` file with no manifest row is
 treated as `claude`) and only ever sends a `claude` credential to Anthropic's
@@ -298,7 +351,10 @@ the first probe of each run.
 Status assignment: `available` (utilizations < 99%), `exhausted`
 (`7d_utilization >= 0.99`), `rate_limited` (current 429), `blocked` (401 auth
 failure or token listed in `.bad_tokens`). Probe failures (network, timeout, 5xx)
-are logged and skipped — one bad account does not abort the run.
+are logged and skipped — one bad account does not abort the run. A `blocked`
+row is a live finding only when its `probed` field is `true`; see the
+`--source probe` table above for telling a confirmed-dead credential from a
+stale stored mark.
 
 OAuth tokens shaped `sk-ant-oat01-*` are sent with `Authorization: Bearer` +
 `anthropic-beta: oauth-2025-04-20`; plain API keys use `x-api-key`.
@@ -348,8 +404,8 @@ For Pro/Max plans, Loom supports rotating between multiple Claude Code OAuth
 tokens. This spreads load across accounts and recovers automatically when a single
 token hits its weekly limit.
 
-1. Declare account credentials in a default source — the shared claude-monitor
-   master `~/.claude-monitor/accounts.env` (primary) or per-repo in
+1. Declare account credentials in a default source — the shared llm-monitor
+   master `~/.llm-monitor/accounts.env` (primary; `~/.claude-monitor` on 1.x) or per-repo in
    `<repo>/.loom/accounts.env` (falls back to legacy `<repo>/.env`). The
    `~/.loom/accounts.env` home master is **opt-in only** since #3704 (no longer
    auto-read); point `LOOM_ACCOUNTS_ENV=~/.loom/accounts.env` (or `--home-env
@@ -590,7 +646,7 @@ reads as "unknown" and a wrong one reads as a fact.
 Both ranking backends populate it:
 
 - The **claude-monitor backend** (`tokens_pool::monitor`) reads
-  `accounts[].resets["5h"]` and `["7d"]` from `~/.claude-monitor/ranking.json`
+  `accounts[].resets["5h"]` and `["7d"]` from `<monitor dir>/ranking.json`
   and normalizes them to the instant format. It previously reported no reset at
   all, which is why the CLI's reset column was empty on every monitor-sourced
   run even though the data was on disk the whole time.
@@ -888,6 +944,19 @@ The `classify_error <output> <exit_code>` function returns one of `SUCCESS`,
 `TIMEOUT`, `CWD_DELETED`, `TOKEN_EXPIRED`, `TOKEN_EXHAUSTED`,
 `MODEL_CREDITS_EXHAUSTED`, `SESSION_LIMIT`, `MODEL_REFUSAL`, `RECOVERABLE`,
 `FATAL`.
+
+Since #11208 the classifier also ships natively as **`loom-daemon
+classify-error`** (`loom-daemon/src/classify_error.rs`): the error text on
+stdin (or `--stdout-tail`/`--stderr-tail` files) plus `--exit-code` and an
+optional `--provider` in, one category line out (`0` classified, `1` terminal
+for `--transient <CATEGORY>`, `2` usage error). The shell library delegates to
+it whenever a daemon binary resolves and keeps its in-file tables as the
+no-daemon fallback, byte-identical; both renderings are pinned equal by
+`test-classify-error.sh` on the shared
+`tests/fixtures/classify_error/vectors.tsv` fixture. Consumers that install
+the signed daemon (rather than vendoring the shell file) get the same
+classification through the binary alone.
+
 Critical fix from #3233: exit code is checked **before** output substring
 matching — clean exits (`exit_code == 0`) always return `SUCCESS` regardless of
 stdout content.
@@ -1558,6 +1627,14 @@ let an operator dispatch onto a still-poisoned pool), `unblock` now **names the
 still-blocked accounts and exits `3`**. Re-run with `--all-reasons` to drop them,
 or wait for the cooldown to expire them automatically.
 
+**Is an `auth` mark still true? (#8972)** Nothing expires an `auth` entry, and
+re-authenticating an account does not clear it. Before unblocking, run
+`loom-daemon tokens check --source probe`: it probes the marked account and
+reports the live result beside the mark (and the mark's recorded timestamp), so
+`probed live: available … looks stale` means `unblock` is safe and `probed
+live: blocked, auth_401 — confirms …` means the credential still needs a
+re-auth first. The check itself never unblocks anything.
+
 ### Permanence: auth vs exhaustion, at read time and on disk
 
 There are **two independent clocks**, and conflating them is what made the
@@ -1750,7 +1827,7 @@ the `.ranking` file is what rules it out, and re-probing is the recovery.
 
 `exhausted`/`blocked` are the #5629 hard exclusions — never readmitted without a
 successful re-probe. Under the default `--source auto`, though, Loom derives the
-ranking from claude-monitor's `~/.claude-monitor/ranking.json` whenever that file
+ranking from llm-monitor's `<monitor dir>/ranking.json` whenever that file
 is fresh, and **returns before the probe loop**. So when a credential is *revoked*
 upstream, claude-monitor's own `usage.db` stops refreshing that account, its
 `ranking.json` row freezes, and Loom copied `exhausted` plus a reset instant days
@@ -2270,6 +2347,15 @@ CLI: [`runtime-model-trials.md` § "API-key account pool"](runtime-model-trials.
 [`tokens import-from-monitor`](#importing-live-tokens-from-claude-monitor-4006): a **pull**-based
 convergence on an operator-maintained source of truth, so an ephemeral or
 autoscaled host that nobody runs `add` on still boots with the fleet's accounts.
+
+**Live marking from the egress proxy (#11300).** When a launch runs behind the
+credential proxy, the proxy sees a 429 or quota response before the harness's
+retry ladder gives up, and bad-marks that launch's account immediately (same
+model-class scoping and reset-aligned cooldown as the log-based marking above;
+escalate-only, once per level per launch). With observe mode on it also exports
+per-request, per-seat usage telemetry (counts and classified error codes only,
+never bodies or credentials). Details:
+[`runtime-adapters.md` § "Observe mode"](runtime-adapters.md#observe-mode-passive-per-request-telemetry-issue-11300-slice-1).
 
 ### Kimi's Moonshot-platform API-key route (#8563)
 

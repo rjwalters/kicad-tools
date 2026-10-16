@@ -47,7 +47,7 @@
 # reclaiming stale loom:building claims, probing loom:blocked issues for a
 # cleared blocker, fanning loom:epic containers out to their phase children,
 # and driving any existing open PR through Judge / Doctor → Merge. Only
-# loom:operator-only and loom:needs-capability issues are hard-skipped.
+# loom:operator and loom:frozen issues are hard-skipped.
 # Displays the resolved plan and awaits confirmation before dispatching.
 /loom:sweep all
 

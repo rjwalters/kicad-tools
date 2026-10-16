@@ -15,7 +15,7 @@
 #   1. `path`, `path:L`, `path:L1-L2` references — backticked or bare — whose
 #      first path segment matches a real top-level entry of `origin/main`
 #      (a "recognized top-level dir/file"). Existence is checked with
-#      `git ls-tree -r origin/main --name-only`; line ranges are checked by
+#      `git ls-tree -r -t origin/main --name-only`; line ranges are checked by
 #      `loom-daemon git-blob-lines --range`, which follows a `120000` (symlink)
 #      tree entry to the document it points at before counting (#8656) — a
 #      dangling link is reported as BROKEN SYMLINK and is NOT a miss, because
@@ -157,6 +157,10 @@ is_recognized_top() {
 # top-level dir" means.
 PATH_RE='[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)+(:[0-9]+(-[0-9]+)?)?'
 
+# `-t` adds the directory (tree) entries alongside the blobs, so a cited
+# directory such as `tools/probes` is a member rather than a false MISSING FILE
+# (#10191); a nonexistent path is still absent.
+#
 # Whole-tree membership, as a newline-delimited SET tested with a bash `case`
 # glob -- deliberately NOT `full_tree | grep -qFx "$path"` (#7736, #7771).
 #
@@ -173,7 +177,7 @@ PATH_RE='[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)+(:[0-9]+(-[0-9]+)?)?'
 FULL_TREE_NL=""
 full_tree_contains() {
     if [[ -z "$FULL_TREE_NL" ]]; then
-        FULL_TREE_NL=$'\n'"$(git -C "$WORKSPACE" ls-tree -r origin/main --name-only)"$'\n'
+        FULL_TREE_NL=$'\n'"$(git -C "$WORKSPACE" ls-tree -r -t origin/main --name-only)"$'\n'
     fi
     case "$FULL_TREE_NL" in
         *$'\n'"$1"$'\n'*) return 0 ;;

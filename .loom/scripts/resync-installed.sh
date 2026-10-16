@@ -12,20 +12,18 @@
 # (check-main-freshness.sh) DETECTS the drift with a warning; this script FIXES
 # it. The intended flow is: "freshness warning says you're stale -> run resync."
 #
-# PRECONDITION (#6202): that flow only works when a defaults/ SOURCE tree can
-# be resolved (see resolve_defaults() below) — this checkout IS the Loom
-# source repo, OR the gitignored `.loom/loom-source-path` sidecar points at a
-# local clone of it. Neither holds on a checkout that never ran the Loom
-# installer locally (a fresh developer clone, a CI checkout, a machine that
-# received the repo rather than installing into it) — the exact population
-# most likely to be running stale surfaces, since they never ran the
-# installer that would have refreshed them. On that population this script
-# fails on first use with "Could not locate a defaults/ source tree to sync
-# from"; check-main-freshness.sh now detects the same gap and says so before
-# you get here (see its own #6202 note), but if you landed on this file
-# directly: clone https://github.com/rjwalters/loom locally, then either
-# re-run its installer against this repo or write the sidecar yourself
-# (`echo /path/to/local/loom-clone > .loom/loom-source-path`).
+# SOURCE (#6202, #8961): the files come from a defaults/ SOURCE tree (see
+# resolve_defaults() below) — this checkout IS the Loom source repo, OR the
+# gitignored `.loom/loom-source-path` sidecar points at a local clone of it.
+# Neither holds on a checkout that never ran the Loom installer locally (a
+# fresh developer clone, a CI checkout, a re-clone): the sidecar is host-local
+# and does not come with the repo. There this script hands off to `loom-daemon
+# resync-payload`, which resyncs from the payload embedded in the installed
+# daemon: same pins and symlink rules, never a downgrade, official release
+# builds only, and without this script's own extra steps (it names them).
+# Only with no source tree AND no daemon able to do that does it fail with
+# "Could not locate a defaults/ source tree to sync from": install or update
+# loom-daemon, or point .loom/loom-source-path at a local Loom source clone.
 #
 # It is idempotent (a no-op when already in sync), reports per-file
 # updated/created/removed/unchanged/skipped, only ever touches files that
@@ -51,6 +49,16 @@
 #   .loom/runtimes/         <- defaults/runtimes/         (recursive; BACKFILLED if absent, #4688)
 #   .loom/bin/              <- defaults/.loom/bin/        (recursive; live consumer CLI)
 #   .claude/commands/loom/  <- defaults/.claude/commands/loom/ (recursive)
+#   .claude/agents/         <- defaults/.claude/agents/        (recursive; only when the
+#                                                              repo has a real directory
+#                                                              there -- a symlinked one,
+#                                                              this repo's dogfood link,
+#                                                              is left alone, #11033)
+#   .loom/hooks/tests/      <- defaults/hooks/tests/           (recursive; only when the
+#                                                              repo already carries the
+#                                                              directory, otherwise an
+#                                                              un-synced-drift line names
+#                                                              the files, #11033)
 #   .agents/skills/         <- defaults/.agents/skills/       (recursive; BACKFILLED if
 #                                                              absent like .loom/runtimes/
 #                                                              above, #8673 — MARKER-GATED,
@@ -79,11 +87,13 @@
 # customized "scripts" block in the stub is preserved. A consumer's OWN
 # package.json (any other "name") is never touched.
 #
-# On a successful non-dry-run it also re-stamps loom_version, loom_commit, and a
-# last_resync date into .loom/install-metadata.json (requires jq or python3;
-# skipped with a warning if neither is present — the file sync still succeeds).
+# On a successful non-dry-run that changed a surface or the version it also
+# re-stamps loom_version, loom_commit, and a last_resync date into
+# .loom/install-metadata.json (requires jq or python3; skipped with a warning
+# if neither is present — the file sync still succeeds). A run that changed
+# nothing leaves the file byte-identical (#11680).
 # It also ensures a `merge=ours` driver is wired up for that same file (#4528)
-# — a machine-local stamp every host re-writes, guaranteeing merge conflicts
+# — a machine-local stamp hosts re-write, guaranteeing merge conflicts
 # between hosts otherwise — via a Loom-managed .gitattributes block plus local
 # git config (never committed; runs every time so a pre-#4528 install
 # self-heals on its next resync).
@@ -166,7 +176,8 @@
 # writes is in neither that table nor its install-time-only list. It covers:
 # every pure-copy surface above, `.agents/skills/` (same marker gate),
 # `.claude/README.md` and `.github/CONFIGURATION.md` (when present),
-# `.claude/biome.jsonc`, the managed `.gitignore` block, the retired-payload
+# `.claude/biome.jsonc`, the managed `.gitignore` block, the Loom-managed
+# block of `.github/labels.yml` (#11033), the retired-payload
 # sweep, and `.loom/CLAUDE.md` / `.loom/AGENTS.md` (re-rendered from the
 # template with the install date the file carries, which this script does not
 # do). It honors `.loom/resync-ignore` in the forms this script reports.
@@ -221,11 +232,14 @@
 #                             managed-section-markers design this comment
 #                             references; the rest of the file's body content is
 #                             left untouched.
-#   .github/labels.yml (the FILE itself), .github/workflows/*
+#   .github/labels.yml (outside its managed block), .github/workflows/*
 #                            - the FILE content is repo-customized (a consumer
 #                              may add their own labels above/below the
 #                              LOOM-MANAGED block, #4187) and is not resynced
-#                              here. Its role as the source of truth for the
+#                              here. Only the block between the BEGIN/END LOOM
+#                              LABELS markers is (#11033, see
+#                              refresh_labels_block() below; it never deletes a
+#                              live label). Its role as the source of truth for the
 #                              LIVE FORGE label set is a different story,
 #                              though (#6716): resync DOES now re-check the
 #                              target repo's live labels against this file
@@ -812,11 +826,12 @@ resolve_defaults() {
     return 1
 }
 
+# requires-daemon: resync-payload optional   #8961 no source tree: resync from the daemon's embedded payload; an absent/older binary (no such verb) or a refusal (exit 1) keeps the failure below.
 if ! resolve_defaults; then
-    err "Could not locate a defaults/ source tree to sync from."
-    err "Looked in: \$REPO_ROOT/defaults, .loom/loom-source-path, .loom/install-metadata.json."
-    err "Re-run the Loom installer, or set .loom/loom-source-path to the Loom source repo."
-    exit 1
+    _rp="${LOOM_DAEMON_BIN:-$(command -v loom-daemon || echo "${LOOM_DAEMON_BIN_DIR:-$HOME/.local/bin}/loom-daemon")}"; _rpa=(--workspace "$REPO_ROOT"); [[ "$DRY_RUN" -eq 1 ]] && _rpa+=(--dry-run); _rpw="found no loom-daemon that has it (looked at $_rp: missing or too old)"; _rpfix=" Install or update loom-daemon, or set .loom/loom-source-path to a local clone of the Loom source repo."
+    if [[ -z "$OUTPUT_DIR" ]] && "$_rp" resync-payload --help >/dev/null 2>&1; then "$_rp" resync-payload "${_rpa[@]}"; _rprc=$?; [[ "$_rprc" -eq 1 ]] || exit "$_rprc"; _rpw="$_rp refused or failed (see above; it also exits 1 when it applied everything but could not refresh a labels block with malformed markers)"; _rpfix=" Its own output above names the cause and the fix."; fi
+    err "Could not locate a defaults/ source tree to sync from: no \$REPO_ROOT/defaults, no usable path in the gitignored .loom/loom-source-path sidecar (missing on a fresh clone), no loom_source in .loom/install-metadata.json."
+    err "Fallback \`loom-daemon resync-payload\` (the daemon's embedded payload, #8961): $_rpw.$_rpfix"; exit 1
 fi
 SOURCE_ROOT="$(dirname "$DEFAULTS_DIR")"
 
@@ -1253,7 +1268,7 @@ record_blocked() {
 # a real anchoring bug: an installed file's genuinely-last commit is normally
 # provided verbatim by `git log`, not hand-typed, but nothing prevented a
 # hand-amended or hand-rebased subject from taking this exact shape.
-RESYNC_COMMIT_SUBJECT_RE='^(chore: install Loom v[0-9][^[:space:]]*( \(#[0-9]+\))?$|chore: resync installed Loom surfaces( \(#[0-9]+\))?$|(\[skip ci\] )?chore\(loom\): Install Loom [^[:space:]]+ orchestration framework( \(#[0-9]+\))?$)'
+RESYNC_COMMIT_SUBJECT_RE='^(chore: install Loom v[0-9][^[:space:]]*( \(#[0-9]+\))?$|chore: resync installed Loom surfaces( \(#[0-9]+\))?$|(\[skip ci\] )?chore\(loom\): Install Loom [^[:space:]]+ orchestration framework( \(#[0-9]+\))?$|chore\(loom\): resync installed Loom to v[0-9]+\.[0-9]+\.[0-9]+( \(#[0-9]+\))?$)'
 
 # removed_line_count <src> <dst>
 #   Count of non-blank lines present in dst but ABSENT from src (a line-SET
@@ -1306,13 +1321,14 @@ removed_line_count() {
 # installed, then every byte of it came from a known upstream release and
 # there is no local fix to protect — whatever the last commit's subject says.
 # The installed version comes from .loom/install-metadata.json (loom_commit,
-# re-stamped by restamp_metadata() on every successful resync, else a
+# re-stamped by restamp_metadata() on every resync that changed something, else a
 # v<loom_version> tag) resolved in SOURCE_ROOT, the source checkout
 # resolve_defaults() already located.
 #
 # That exact-version comparison alone is not enough, because the RECORDED
 # version drifts ahead of the installed bytes: restamp_metadata() rewrites
-# loom_commit to the source HEAD on every non-dry run and runs BEFORE the
+# loom_commit to the source HEAD on every non-dry run that updated any other
+# surface (#11680 skips only the runs that changed nothing) and runs BEFORE the
 # blocked-file exit, so the very run that blocks a file also records a version
 # whose content that file no longer matches. So the content proof accepts any
 # revision of that path reachable from the recorded version, not just the
@@ -1458,7 +1474,8 @@ dst_matches_lineage_ref_exactly() {
 #
 #   Needed because the recorded version DRIFTS AHEAD of the installed bytes.
 #   restamp_metadata() rewrites loom_commit to the source HEAD on every non-dry
-#   run, and it runs BEFORE the blocked-file exit — so the very run that blocks
+#   run that updated any other surface (#11680), and it runs BEFORE the
+#   blocked-file exit — so the very run that blocks
 #   a file also records a version whose content that file no longer matches.
 #   One blocked run is therefore enough to make the exact-ref rung above fail
 #   forever after, which is precisely the state #8676's 23 fleet repos are
@@ -1574,7 +1591,7 @@ dst_matches_installed_version() {
 # it). Every real #9178 subject is untouched by it: "Install Loom v0.19.174 and
 # Repo Skills v0.11.17 (#7)", "tooling: install Repo Skills and Loom into the
 # map repo" and "Upgrade Loom to 0.18.0 (...)" carry none of these prefixes.
-ROUTINE_SUBJECT_PREFIX_RE='^(\[skip ci\] )?(chore: install Loom v|chore: resync installed Loom surfaces|chore\(loom\): Install Loom )'
+ROUTINE_SUBJECT_PREFIX_RE='^(\[skip ci\] )?(chore: install Loom v|chore: resync installed Loom surfaces|chore\(loom\): Install Loom |chore\(loom\): resync installed Loom to v)'
 
 INSTALL_BASELINE_COMMIT=""
 INSTALL_BASELINE_RESOLVED=0
@@ -2253,6 +2270,25 @@ if [[ -d "$DEFAULTS_DIR/hooks" && -d "$INSTALLED_HOOKS" ]]; then
     shopt -u nullglob
 fi
 
+# ---------- walk hooks/tests (#11033) ----------
+#
+# The top-level walk above never reached defaults/hooks/tests/. Synced when the
+# repo already has the directory (not force-populated); otherwise, and for any
+# file a pin or a symlink kept back, the drift is named instead of silent.
+if [[ -d "$DEFAULTS_DIR/hooks/tests" && -d "$INSTALLED_HOOKS" ]]; then
+    if [[ -d "$INSTALLED_HOOKS/tests" && ! -L "$INSTALLED_HOOKS/tests" ]]; then
+        resync_tree "$DEFAULTS_DIR/hooks/tests" "$INSTALLED_HOOKS/tests" "hooks/tests" "hooks/tests"
+    else
+        _unsynced_tests=""
+        for _t in "$DEFAULTS_DIR/hooks/tests/"*.sh; do
+            [[ -f "$_t" ]] && _unsynced_tests+="$(basename "$_t") "
+        done
+        if [[ -n "$_unsynced_tests" ]]; then
+            note "  ${YELLOW}un-synced drift${NC} .loom/hooks/tests/ is not installed here; upstream ships: ${_unsynced_tests% } (create the directory and resync to install them)"
+        fi
+    fi
+fi
+
 # ---------- walk scripts (recursive, matching the installer's verify walk) ----------
 
 if [[ -d "$DEFAULTS_DIR/scripts" && -d "$INSTALLED_SCRIPTS" ]]; then
@@ -2299,6 +2335,14 @@ if [[ -d "$WRITE_ROOT/.loom/bin" ]]; then
 fi
 if [[ -d "$WRITE_ROOT/.claude/commands/loom" ]]; then
     resync_tree "$DEFAULTS_DIR/.claude/commands/loom" "$WRITE_ROOT/.claude/commands/loom" "commands/loom" ".claude/commands/loom"
+fi
+# `.claude/agents/` (#11033): the subagent definitions. A symlinked directory is
+# the dogfood link (loom-daemon/src/init/git.rs) and its target is the source.
+if [[ -L "$WRITE_ROOT/.claude/agents" ]]; then
+    note "  ${YELLOW}skipped${NC}   .claude/agents ${YELLOW}(symlink)${NC}"
+    N_SKIPPED=$((N_SKIPPED + 1))
+elif [[ -d "$WRITE_ROOT/.claude/agents" ]]; then
+    resync_tree "$DEFAULTS_DIR/.claude/agents" "$WRITE_ROOT/.claude/agents" "agents" ".claude/agents"
 fi
 # `.agents/skills/` (#8673): deliberately UNCONDITIONAL, like `.loom/runtimes/`
 # above (#4688) — it is a provisioning gap for any repo installed before this
@@ -2367,6 +2411,175 @@ fi
 if [[ -f "$DEFAULTS_DIR/pricing.json" ]]; then
     sync_one "$DEFAULTS_DIR/pricing.json" "$WRITE_ROOT/.loom/pricing.json" ".loom/pricing.json"
 fi
+
+# ---------- the Loom-managed block of .github/labels.yml (#11033) ----------
+#
+# The file is co-owned (#4187): Loom's labels sit between `# BEGIN LOOM LABELS`
+# and `# END LOOM LABELS`, and a consumer may keep its own labels above or below.
+# The installer splices the block, but no resync ever refreshed it, so a label
+# upstream added (#10753's revise label) never arrived and a label upstream retired
+# (loom:urgent) stayed declared, and the forge drift check below re-created it
+# minutes after `labels migrate --apply` deleted it.
+#
+# The rule, shared with the daemon resync (labels_block.rs; keep the two equal):
+#   * one BEGIN and one END marker, BEGIN first: the bytes from the start of the
+#     BEGIN line to the end of the END line are replaced by the same range of
+#     defaults/.github/labels.yml. Every byte outside that range is kept as is.
+#   * no marker at all: the block is appended after a blank line.
+#   * no file: the shipped file is written.
+#   * anything else (a second BEGIN or END, END before BEGIN, a lone marker, or a
+#     line that looks like a marker but is not exactly one): nothing is written,
+#     a warning names the problem and the run counts it as a failure (exit 1).
+# A marker is a line that is exactly `# BEGIN LOOM LABELS` / `# END LOOM LABELS`
+# (trailing whitespace or CR allowed). A pin of `.github/labels.yml` in
+# .loom/resync-ignore skips the step. Only the FILE changes here: no live forge
+# label is ever deleted (that is `loom-daemon labels migrate --apply`).
+
+LABELS_BEGIN_MARKER='# BEGIN LOOM LABELS'
+LABELS_END_MARKER='# END LOOM LABELS'
+
+# Classify a labels file's markers. Prints `none`, `ok <begin> <end>` (1-based
+# line numbers) or `malformed <reason>`.
+_labels_block_lines() {
+    awk -v B="$LABELS_BEGIN_MARKER" -v E="$LABELS_END_MARKER" '
+        function exact(line, m,   rest) {
+            if (substr(line, 1, length(m)) != m) return 0
+            rest = substr(line, length(m) + 1)
+            return rest ~ /^[ \t\r]*$/
+        }
+        {
+            if (exact($0, B)) { nb++; if (!b) b = NR; next }
+            if (exact($0, E)) { ne++; if (!e) e = NR; next }
+            if ($0 ~ /^[ \t]*#[ \t]*(BEGIN|END)[ \t]+LOOM[ \t]+LABELS/) bad = NR
+        }
+        END {
+            if (bad)              { print "malformed line " bad " looks like a marker but is not exactly one"; exit }
+            if (nb == 0 && ne == 0) { print "none"; exit }
+            if (nb != 1 || ne != 1) { print "malformed " nb " BEGIN and " ne " END marker(s), expected one of each"; exit }
+            if (e < b)            { print "malformed END marker (line " e ") comes before BEGIN (line " b ")"; exit }
+            print "ok " b " " e
+        }' "$1"
+}
+
+# Print the file's lines <from>..<to> with no newline after the last one.
+_labels_line_range() {
+    local text
+    text="$(sed -n "${2},${3}p" "$1"; printf x)"
+    text="${text%x}"
+    printf '%s' "${text%$'\n'}"
+}
+
+refresh_labels_block() {
+    local rel=".github/labels.yml"
+    local src="$DEFAULTS_DIR/.github/labels.yml" dst="$WRITE_ROOT/.github/labels.yml"
+    [[ -f "$src" ]] || return 0
+
+    if is_ignored "$rel"; then
+        note "  ${YELLOW}skipped${NC}   $rel ${YELLOW}(pinned in .loom/resync-ignore)${NC}"
+        N_SKIPPED=$((N_SKIPPED + 1))
+        return 0
+    fi
+    if [[ -L "$dst" || -L "$WRITE_ROOT/.github" ]]; then
+        note "  ${YELLOW}skipped${NC}   $rel ${YELLOW}(symlink)${NC}"
+        N_SKIPPED=$((N_SKIPPED + 1))
+        return 0
+    fi
+    if [[ -e "$dst" && ! -f "$dst" ]]; then
+        warn "$rel is not a regular file; its Loom-managed label block was NOT refreshed"
+        record_failure "$rel"
+        return 1
+    fi
+
+    local src_shape
+    src_shape="$(_labels_block_lines "$src")"
+    if [[ "$src_shape" != ok\ * ]]; then
+        warn "the source $rel has no usable Loom-managed block ($src_shape); $rel was NOT refreshed"
+        record_failure "$rel"
+        return 1
+    fi
+    local sb se block
+    read -r _ sb se <<< "$src_shape"
+    block="$(_labels_line_range "$src" "$sb" "$se"; printf x)"
+    block="${block%x}"
+
+    local verb_pres="create" verb_past="created" new shape="" before after
+    if [[ ! -e "$dst" ]]; then
+        new="$(cat "$src"; printf x)"
+        new="${new%x}"
+    else
+        shape="$(_labels_block_lines "$dst")"
+        case "$shape" in
+            ok\ *)
+                local db de
+                read -r _ db de <<< "$shape"
+                before="$( ((db > 1)) && head -n "$((db - 1))" "$dst"; printf x)"
+                before="${before%x}"
+                # Everything after the END line's own text, starting with its
+                # newline (empty when END is the last line with none).
+                after="$(tail -n +"$de" "$dst"; printf x)"
+                after="${after%x}"
+                if [[ "$after" == *$'\n'* ]]; then
+                    after=$'\n'"${after#*$'\n'}"
+                else
+                    after=""
+                fi
+                new="$before$block$after"
+                ;;
+            none)
+                new="$(cat "$dst"; printf x)"
+                new="${new%x}"
+                if [[ -n "$new" ]]; then
+                    [[ "$new" == *$'\n' ]] || new+=$'\n'
+                    new+=$'\n'
+                fi
+                new+="$block"$'\n'
+                ;;
+            *)
+                warn "$rel: ${shape#malformed }. Its Loom-managed label block was NOT refreshed; fix the BEGIN/END LOOM LABELS markers by hand, then resync again"
+                record_failure "$rel"
+                return 1
+                ;;
+        esac
+        verb_pres="update"
+        verb_past="updated"
+        local cur
+        cur="$(cat "$dst"; printf x)"
+        cur="${cur%x}"
+        if [[ "$cur" == "$new" ]]; then
+            N_UNCHANGED=$((N_UNCHANGED + 1))
+            return 0
+        fi
+    fi
+
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+        printf '%b\n' "  ${BOLD}would ${verb_pres}${NC} $rel (Loom-managed label block)"
+        return 0
+    fi
+    mkdir -p "$(dirname "$dst")" 2>/dev/null
+    STAGED_TMP="$(mktemp "$(dirname "$dst")/.resync-stage.XXXXXX" 2>/dev/null)" || STAGED_TMP=""
+    if [[ -z "$STAGED_TMP" ]] || ! printf '%s' "$new" > "$STAGED_TMP"; then
+        err "failed to stage $rel"
+        cleanup_staged_tmp
+        record_failure "$rel"
+        return 1
+    fi
+    local mode
+    mode="$(file_mode "$dst")"
+    [[ -n "$mode" ]] || mode="$(file_mode "$src")"
+    [[ -z "$mode" ]] || chmod "$mode" "$STAGED_TMP" 2>/dev/null || true
+    if ! mv -f "$STAGED_TMP" "$dst" 2>/dev/null; then
+        err "failed to install $rel (could not rename the staged copy into place)"
+        cleanup_staged_tmp
+        record_failure "$rel"
+        return 1
+    fi
+    STAGED_TMP=""
+    N_UPDATED=$((N_UPDATED + 1))
+    printf '%b\n' "  ${GREEN}${verb_past}${NC}   $rel (Loom-managed label block)"
+    return 0
+}
+
+refresh_labels_block
 
 # ---------- remove retired payload files (#5981) ----------
 #
@@ -2538,6 +2751,58 @@ strip_claude_md_version_header ".loom/CLAUDE.md" "#5559 -> #8147"
 # regenerates the file.
 strip_claude_md_version_header "CLAUDE.md" "#6612 -> #8147"
 
+# normalize_source_remote <url>
+#   Canonical `https://<host>/<owner>/<repo>.git` form of a git remote URL
+#   (#11680). Hosts whose Loom checkout was cloned over SSH stamped
+#   `git@github.com:o/r.git` while the rest stamped `https://github.com/o/r.git`,
+#   so the tracked loom_source_remote flipped whenever consecutive resyncs came
+#   from different hosts -- the same per-host-field churn #9174 removed for
+#   loom_commit. Handles the scp form (`[user@]host:owner/repo[.git]`),
+#   `ssh://[user@]host[:port]/owner/repo[.git]` and `http(s)://` (userinfo is
+#   dropped, so a token embedded in an https remote never reaches the file).
+#   Anything else -- a local path, `file://` -- is returned unchanged, and an
+#   empty remote stays empty.
+normalize_source_remote() {
+    local url="$1" rest hostpart host path
+    case "$url" in
+        "")
+            return 0
+            ;;
+        ssh://*|http://*|https://*)
+            rest="${url#*://}"
+            [[ "$rest" == */* ]] || { printf '%s' "$url"; return 0; }
+            hostpart="${rest%%/*}"
+            path="${rest#*/}"
+            host="${hostpart##*@}"
+            # An ssh:// port is transport detail, not part of the repo identity.
+            [[ "$url" == ssh://* ]] && host="${host%%:*}"
+            ;;
+        *://*)
+            printf '%s' "$url"
+            return 0
+            ;;
+        *:*)
+            hostpart="${url%%:*}"
+            # `./a:b` or `/tmp/x:y` is a path, not scp syntax.
+            [[ "$hostpart" == */* ]] && { printf '%s' "$url"; return 0; }
+            host="${hostpart##*@}"
+            path="${url#*:}"
+            ;;
+        *)
+            printf '%s' "$url"
+            return 0
+            ;;
+    esac
+    path="${path#/}"
+    path="${path%/}"
+    path="${path%.git}"
+    if [[ -z "$host" || -z "$path" ]]; then
+        printf '%s' "$url"
+        return 0
+    fi
+    printf 'https://%s/%s.git' "$host" "$path"
+}
+
 restamp_metadata() {
     local meta="$WRITE_ROOT/.loom/install-metadata.json"
     [[ -f "$meta" ]] || return 0
@@ -2583,7 +2848,7 @@ restamp_metadata() {
     # actually resolved to, so it tracks a repointed sidecar rather than
     # freezing whatever was recorded at install time. Best-effort: empty when
     # SOURCE_ROOT isn't a git checkout or has no `origin` configured.
-    remote="$(git -C "$SOURCE_ROOT" remote get-url origin 2>/dev/null || true)"
+    remote="$(normalize_source_remote "$(git -C "$SOURCE_ROOT" remote get-url origin 2>/dev/null || true)")"
     # #10717: requires_daemon (the compatibility contract, #10716) travels with
     # the files, so it is read from the tree they came from, the same way
     # scripts/install/loom-source-path.sh reads it at install time. A source
@@ -2592,39 +2857,90 @@ restamp_metadata() {
     local req
     req="$(sed -n 's/^pub const REQUIRES_DAEMON: &str = "\([0-9][0-9.]*\)";$/\1/p' \
         "$SOURCE_ROOT/loom-daemon/src/install_compat.rs" 2>/dev/null || true)"
+    # #11680: a run that changed nothing must not touch the stamp. loom_commit
+    # is the source HEAD, and on the dogfood repo (source == destination)
+    # committing the restamp moves HEAD one past the value just stamped -- so
+    # every later run on every host saw a "changed" loom_commit, restamped and
+    # committed again, and every consumer inherited a metadata-only commit per
+    # host per fleet-resync tick. When no surface was written or removed this
+    # run, loom_version is unchanged, and the recorded loom_commit is already a
+    # valid full SHA (a missing/short/"unknown" one is still repaired), the
+    # volatile fields -- loom_commit, last_resync, loom_source_remote -- are
+    # left exactly as they are. loom_commit then names the source commit of
+    # the last sync that actually changed something, which is still an
+    # ancestor of the source HEAD and still matches every installed byte, so
+    # INSTALLED_LINEAGE_REF keeps resolving. This is the shell twin of the
+    # Rust payload path (init/payload.rs apply()), which already writes no
+    # metadata at all when the diff is empty.
+    #
+    # The non-volatile contract edits (legacy loom_source removal,
+    # requires_daemon) still apply; and in every case a result that is
+    # semantically identical to the current file is not written, so a no-op
+    # run leaves the file byte-identical and git sees no diff.
+    local prev_version prev_commit noop=0
+    prev_version="$(sed -n 's/.*"loom_version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$meta" 2>/dev/null | head -1)"
+    prev_commit="$(sed -n 's/.*"loom_commit"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$meta" 2>/dev/null | head -1)"
+    if [[ "$N_UPDATED" -eq 0 && "$N_REMOVED" -eq 0 \
+          && "$prev_version" == "$version" \
+          && "$prev_commit" =~ ^[0-9a-f]{40}$ ]]; then
+        noop=1
+    fi
+
+    local stamped_note="${GREEN}re-stamped${NC} install-metadata.json (loom_version=$version, loom_commit=$commit, last_resync=$today)"
+    local unchanged_note="${GREEN}unchanged${NC} install-metadata.json: nothing to re-stamp (#11680)"
+    if [[ "$noop" -eq 1 ]]; then
+        stamped_note="${GREEN}updated${NC}   install-metadata.json contract fields only (no surface changed, loom_commit kept at $prev_commit, #11680)"
+    fi
+
     tmp="${meta}.tmp.$$"
 
     if command -v jq >/dev/null 2>&1; then
-        if jq --arg v "$version" --arg c "$commit" --arg r "$today" --arg src "$remote" --arg q "$req" \
-              '.loom_version=$v | .loom_commit=$c | .last_resync=$r | .loom_source_remote=$src | del(.loom_source) | if $q == "" then del(.requires_daemon) else .requires_daemon=$q end' \
+        if jq --arg v "$version" --arg c "$commit" --arg r "$today" --arg src "$remote" --arg q "$req" --arg n "$noop" \
+              '(if $n == "1" then . else .loom_version=$v | .loom_commit=$c | .last_resync=$r | .loom_source_remote=$src end) | del(.loom_source) | if $q == "" then del(.requires_daemon) else .requires_daemon=$q end' \
               "$meta" > "$tmp" 2>/dev/null && [[ -s "$tmp" ]]; then
+            if jq -n -e --slurpfile a "$meta" --slurpfile b "$tmp" '$a == $b' >/dev/null 2>&1; then
+                rm -f "$tmp"
+                note "  $unchanged_note"
+                return 0
+            fi
             mv "$tmp" "$meta"
-            note "  ${GREEN}re-stamped${NC} install-metadata.json (loom_version=$version, loom_commit=$commit, last_resync=$today)"
+            note "  $stamped_note"
             return 0
         fi
         rm -f "$tmp"
     fi
 
     if command -v python3 >/dev/null 2>&1; then
-        if META="$meta" VERSION="$version" COMMIT="$commit" TODAY="$today" REMOTE="$remote" REQ="$req" \
-           python3 - "$tmp" <<'PY' 2>/dev/null && [[ -s "$tmp" ]]; then
+        local py_rc=0
+        META="$meta" VERSION="$version" COMMIT="$commit" TODAY="$today" REMOTE="$remote" REQ="$req" NOOP="$noop" \
+           python3 - "$tmp" <<'PY' 2>/dev/null || py_rc=$?
 import json, os, sys
 with open(os.environ["META"]) as f:
     data = json.load(f)
-data["loom_version"] = os.environ["VERSION"]
-data["loom_commit"] = os.environ["COMMIT"]
-data["last_resync"] = os.environ["TODAY"]
-data["loom_source_remote"] = os.environ["REMOTE"]
+orig = json.loads(json.dumps(data))
+if os.environ["NOOP"] != "1":
+    data["loom_version"] = os.environ["VERSION"]
+    data["loom_commit"] = os.environ["COMMIT"]
+    data["last_resync"] = os.environ["TODAY"]
+    data["loom_source_remote"] = os.environ["REMOTE"]
 data.pop("loom_source", None)
 data.pop("requires_daemon", None)
 if os.environ["REQ"]:
     data["requires_daemon"] = os.environ["REQ"]
+if data == orig:
+    sys.exit(10)
 with open(sys.argv[1], "w") as f:
     json.dump(data, f, indent=2)
     f.write("\n")
 PY
+        if [[ "$py_rc" -eq 10 ]]; then
+            rm -f "$tmp"
+            note "  $unchanged_note"
+            return 0
+        fi
+        if [[ "$py_rc" -eq 0 && -s "$tmp" ]]; then
             mv "$tmp" "$meta"
-            note "  ${GREEN}re-stamped${NC} install-metadata.json (loom_version=$version, loom_commit=$commit, last_resync=$today)"
+            note "  $stamped_note"
             return 0
         fi
         rm -f "$tmp"
@@ -2654,7 +2970,8 @@ fi
 # .loom/install-metadata.json is a machine-local install stamp: every host's
 # resync (the restamp_metadata step above) re-writes loom_version,
 # loom_commit, and last_resync (plus loom_source, an absolute host-specific
-# path) on every run. Because the file must stay tracked (it is the
+# path) whenever its surfaces or version change (#11680: a run that changed
+# nothing leaves it byte-identical). Because the file must stay tracked (it is the
 # authoritative ownership manifest consumed by verify-install.sh and
 # uninstall-loom.sh — see is_untracked_runtime_file() in verify-install.sh,
 # which already treats its exact byte content as non-checksum-tracked
@@ -2727,7 +3044,7 @@ _gitignore_source_ephemeral_patterns() {
     local post_init="$SOURCE_ROOT/loom-daemon/src/init/post_init.rs"
     [[ -f "$post_init" ]] || return 0
     awk '/pub const EPHEMERAL_PATTERNS/ { flag=1; next } flag && /^\];/ { exit } flag' "$post_init" \
-        | sed -n -E 's/^[[:space:]]*"([^"]*)",?[[:space:]]*$/\1/p'
+        | sed -n -E 's/^[[:space:]]*"([^"]*)",?[[:space:]]*(\/\/.*)?$/\1/p'
 }
 
 # #5991: rewrite the Loom-managed `.gitignore` block in place from the given
@@ -2782,47 +3099,38 @@ _gitignore_restore_managed_block() {
     return 1
 }
 
-# #5294 / #5991: verify the managed block `$bin update-gitignore` just wrote
-# actually contains every pattern the CURRENT source declares. A `loom-daemon`
+# #5294 / #5991 / #11323: verify the managed block `$bin update-gitignore` just
+# wrote is EXACTLY the pattern list the CURRENT source declares, in order (git
+# is last-match-wins, so the `!` negation's position matters). A `loom-daemon`
 # binary older than the just-pulled source has EPHEMERAL_PATTERNS compiled in
-# from whenever it was built — if that predates a pattern addition (e.g.
-# #5280's `.claude/worktrees/`), `update-gitignore` exits 0 having *silently*
-# dropped that pattern from the regenerated block. That is precisely how
-# 05cf67e8 reintroduced #5267's gitlink hazard 34 minutes after #5280 fixed
-# it, and how 94fa30f2 reintroduced it a THIRD time (#5985) even after this
-# function existed — because it only warned, never fixed. Detection without
-# enforcement has now demonstrably failed once; never trust the exit code
-# alone, and never leave the regression for a human to notice in the warning
-# scroll: restore the dropped pattern(s) directly from source, or (if that
-# isn't possible) revert the whole file, so the regression cannot land.
+# from whenever it was built, and `update-gitignore` exits 0 either way: it
+# silently DROPS a pattern added since (05cf67e8 / 94fa30f2 reintroduced #5267's
+# gitlink hazard that way, #5985) or re-ADDS one removed since (febfc4335
+# re-added `.loom/concierge/`, #11323). Restore the block from source (else
+# revert the file) so neither lands; no source list = cannot verify, no-op.
 _gitignore_warn_if_stale() {
-    local bin="$1" post_init="$SOURCE_ROOT/loom-daemon/src/init/post_init.rs"
-    local -a missing=() source_patterns=()
-    local pattern block
+    local bin="$1" post_init="$SOURCE_ROOT/loom-daemon/src/init/post_init.rs" pattern block current wanted
+    local -a missing=() extra=() source_patterns=()
 
-    [[ -f "$post_init" ]] || return 0
-    [[ -f "$WRITE_ROOT/.gitignore" ]] || return 0
-
+    while IFS= read -r pattern; do [[ -n "$pattern" ]] && source_patterns+=("$pattern"); done < <(_gitignore_source_ephemeral_patterns)
+    [[ "${#source_patterns[@]}" -gt 0 && -f "$WRITE_ROOT/.gitignore" ]] || return 0
     block="$(sed -n '/# >>> loom-managed/,/# <<< loom-managed/p' "$WRITE_ROOT/.gitignore")"
     [[ -n "$block" ]] || return 0
-
-    while IFS= read -r pattern; do
-        [[ -n "$pattern" ]] || continue
-        source_patterns+=("$pattern")
-        grep -qxF -- "$pattern" <<<"$block" || missing+=("$pattern")
-    done < <(_gitignore_source_ephemeral_patterns)
-
-    [[ "${#missing[@]}" -gt 0 ]] || return 0
-
-    warn "The resolved loom-daemon binary ($bin) regenerated .gitignore WITHOUT ${#missing[@]} pattern(s) that $post_init currently declares:"
-    for pattern in "${missing[@]}"; do
-        warn "    $pattern"
-    done
+    current="$(sed '1,2d;$d' <<<"$block")"
+    wanted="$(printf '%s\n' "${source_patterns[@]}")"
+    [[ "$current" != "$wanted" ]] || return 0
+    for pattern in "${source_patterns[@]}"; do grep -qxF -- "$pattern" <<<"$current" || missing+=("$pattern"); done
+    while IFS= read -r pattern; do [[ -z "$pattern" ]] || grep -qxF -- "$pattern" <<<"$wanted" || extra+=("$pattern"); done <<<"$current"
+    [[ "${#missing[@]}" -eq 0 ]] || warn "The resolved loom-daemon binary ($bin) regenerated .gitignore WITHOUT ${#missing[@]} pattern(s) that $post_init currently declares:"
+    for pattern in ${missing[@]+"${missing[@]}"}; do warn "    $pattern"; done
+    [[ "${#extra[@]}" -eq 0 ]] || warn "The resolved loom-daemon binary ($bin) regenerated .gitignore WITH ${#extra[@]} extra pattern(s) that $post_init no longer declares:"
+    for pattern in ${extra[@]+"${extra[@]}"}; do warn "    $pattern"; done
+    [[ "${#missing[@]}${#extra[@]}" != "00" ]] || warn "The resolved loom-daemon binary ($bin) regenerated .gitignore's managed block out of $post_init's order."
     warn "  '$bin' is likely older than the source just synced (#5294) — rebuild loom-daemon"
     warn "  (cargo build --release -p loom-daemon under $SOURCE_ROOT) and re-run resync-installed.sh."
 
     if _gitignore_restore_managed_block "$block" "${source_patterns[@]}"; then
-        warn "  ${GREEN}restored${NC} the missing pattern(s) directly from $post_init so the regression cannot land (#5991)."
+        warn "  ${GREEN}restored${NC} the missing pattern(s) and dropped the extra ones directly from $post_init so the regression cannot land (#5991, #11323)."
     elif git -C "$WRITE_ROOT" checkout -- .gitignore 2>/dev/null; then
         warn "  Could not rewrite the block in place — ${GREEN}reverted${NC} .gitignore to its last-committed state instead (#5991)."
     else
@@ -2859,7 +3167,7 @@ refresh_gitignore_block() {
         warn "  Newer runtime paths (e.g. .loom/sweep-checkpoint/, .loom/worktrees-local/) may stay untracked-and-unignored."
         return 0
     fi
-    EGRESS_BIN="$bin"   # #9996: reused by the forge egress doctor step below
+    EGRESS_BIN="$bin"   # reused by the labels migrate step below
     # `update-gitignore` has no dedicated --dry-run; on a dry run we only probe
     # that the subcommand exists (never writing), so the preview neither mutates
     # nor claims a refresh a pre-#4280 binary cannot perform.
@@ -3084,6 +3392,41 @@ if [[ -x "$GUARD_CHECK_SCRIPT" ]]; then
     esac
 fi
 
+# ---------- settings.json hook-wiring drift (#11033) ----------
+#
+# .claude/settings.json is repo-owned, so a hook upstream wires that the repo does
+# not is only REPORTED, never added (a roll-pause.sh PreToolUse entry shipped this
+# way, and hooks/tests asserts it). The upstream wiring is the (event, matcher,
+# script) table in scripts/install/provision-hooks.sh, read from the source
+# checkout next to DEFAULTS_DIR, else the machine checkout. A hook counts as wired
+# when some command under that event in the repo's settings names the script
+# (user-scope wiring may still cover it). Warn-only: no exit code, no write.
+report_unwired_hooks() {
+    local settings="$WRITE_ROOT/.claude/settings.json" lib
+    [[ -f "$settings" ]] && command -v jq >/dev/null 2>&1 || return 0
+    is_ignored ".claude/settings.json" && return 0
+    for lib in "$(dirname "$DEFAULTS_DIR")/scripts/install/provision-hooks.sh" \
+               "${LOOM_HOME:-$HOME/.local/share/loom}/scripts/install/provision-hooks.sh"; do
+        [[ -r "$lib" ]] && break
+        lib=""
+    done
+    [[ -n "$lib" ]] || return 0
+    local i event matcher name unwired=""
+    # The table is read in a subshell: the library only defines functions and arrays.
+    while IFS=$'\037' read -r event matcher name; do
+        jq -e --arg e "$event" --arg n "$name" \
+            '[.hooks[$e][]?.hooks[]?.command | strings | select(contains($n))] | length > 0' \
+            "$settings" >/dev/null 2>&1 || unwired+="    $event [$matcher] $name"$'\n'
+    done < <( ( source "$lib" 2>/dev/null || exit 0
+                for i in "${!_PHOOK_NAMES[@]}"; do
+                    printf '%s\037%s\037%s\n' "${_PHOOK_TYPES[i]}" "${_PHOOK_MATCHERS[i]}" "${_PHOOK_NAMES[i]}"
+                done ) )
+    [[ -n "$unwired" ]] || return 0
+    warn "upstream wires hook(s) that .claude/settings.json does not (the file is repo-owned and was NOT modified; add them, or run the installer's hook wiring):"
+    printf '%s' "$unwired" >&2
+}
+report_unwired_hooks
+
 # ---------- forge merge-configuration check (#9287) ----------
 #
 # merge-pr.sh can only merge when the repository's allow_* merge flags and
@@ -3205,6 +3548,26 @@ if [[ -f "$WRITE_ROOT/.github/labels.yml" && -x "$LABELS_SYNC_SCRIPT" ]]; then
     esac
 fi
 
+# ---------- retired forge label migration: PREVIEW ONLY (#11511) ----------
+#
+# Labels Loom retires (defaults/labels.json `retired`, #11513) stay on every
+# other repo's forge, on open items too, because the additive step above never
+# deletes or relabels. `loom-daemon labels migrate` is what moves open items
+# onto the replacements and deletes the retired labels -- an irreversible
+# forge write (a deleted label vanishes from closed items too), so resync only
+# ever runs its read-only dry run, never --apply (#10770: resync's forge
+# writes stay opt-in). When anything is pending it prints the report and the
+# exact command the operator runs to apply it. Reuses the daemon resolved for
+# the .gitignore refresh; an older daemon without the verb is skipped quietly.
+if [[ -n "$EGRESS_BIN" && -f "$WRITE_ROOT/.github/labels.yml" ]] && "$EGRESS_BIN" labels migrate --help >/dev/null 2>&1; then
+    migrate_rc=0; migrate_output="$(cd "$REPO_ROOT" && "$EGRESS_BIN" labels migrate 2>&1)" || migrate_rc=$?
+    if [[ "$migrate_rc" -ne 0 ]]; then
+        printf '%b\n' "${YELLOW}[resync] Retired forge labels pending migration (dry run, read-only -- nothing was changed):${NC}"
+        printf '%s\n' "$migrate_output" | sed 's/^/    /'
+        [[ "$migrate_rc" -ne 3 ]] || printf '%b\n' "  apply with: ${BOLD}(cd $REPO_ROOT && loom-daemon labels migrate --apply)${NC}  (or: .loom/scripts/sync-labels.sh --migrate-retired)"
+    fi
+fi
+
 # ---------- shared: classify this run's working-tree dirt (#9141) ----------
 #
 # ONE `git status --porcelain` walk of WRITE_ROOT, classified into three
@@ -3279,8 +3642,9 @@ collect_resync_dirt() {
             # is_resync_surface_path() mirror), so on any repo where a run
             # touched either surface its own output was classified as foreign
             # dirt: the hint below went silent and `land-resync-commit.sh`
-            # refused to land the run it was printed for.
-            .claude/commands/loom/*|.claude/README.md|.github/CONFIGURATION.md|.loom/install-metadata.json|.loom/CLAUDE.md|.gitattributes|.gitignore|.agents/skills/*)
+            # refused to land the run it was printed for. `.github/labels.yml`
+            # is refresh_labels_block()'s output (#11033).
+            .claude/commands/loom/*|.claude/agents/*|.claude/README.md|.github/CONFIGURATION.md|.github/labels.yml|.loom/install-metadata.json|.loom/CLAUDE.md|.gitattributes|.gitignore|.agents/skills/*)
                 RESYNC_DIRT_PATHS+=("$path")
                 ;;
             *)
@@ -3461,6 +3825,27 @@ fi
 # future refactor adds another early-return path between the two)
 clear_resync_marker
 
+# #10238: (re)provision the USER-SCOPE skill/agent links + dispatcher from the
+# source checkout this run synced from. Best-effort and NEVER fatal -- it must
+# not change this script's exit status. Skipped under --dry-run, when the
+# source is not a plain git checkout (e.g. a staging worktree), or with
+# LOOM_RESYNC_SKIP_USER_SCOPE=1.
+if [[ "$DRY_RUN" -eq 0 && "${LOOM_RESYNC_SKIP_USER_SCOPE:-0}" != "1" \
+      && -d "$SOURCE_ROOT/.git" && -r "$SOURCE_ROOT/scripts/install/provision-skills.sh" \
+      && -r "$SOURCE_ROOT/scripts/install/provision-dispatcher.sh" ]]; then
+    (
+        # shellcheck source=/dev/null
+        source "$SOURCE_ROOT/scripts/install/provision-dispatcher.sh"
+        # shellcheck source=/dev/null
+        source "$SOURCE_ROOT/scripts/install/provision-skills.sh"
+        provision_loom_dispatcher "$SOURCE_ROOT" >&2 || true
+        # SOURCE_ROOT is the reference: a machine checkout older than the
+        # tree this run synced from must not supply the user-scope /loom:*
+        # commands, which shadow every repo's own fresher copy.
+        provision_loom_skills "${LOOM_HOME:-$HOME/.local/share/loom}" "" "$SOURCE_ROOT" >&2 || true
+    ) || printf '%b\n' "${YELLOW}[resync] user-scope skill provisioning failed (non-fatal).${NC}" >&2
+fi
+
 # A check that did not run is stated in the summary line, not only in a
 # warning that scrolled past 400 lines ago (#7745).
 CHECK_NOTE=""
@@ -3479,23 +3864,17 @@ else
     printf '%b\n' "${GREEN}[resync] Already in sync (${N_UNCHANGED} unchanged, ${N_SKIPPED} skipped).${NC}${CHECK_NOTE}"
 fi
 
-# #9996: forge egress routing check, delegated to the daemon (the shell never
-# parses the policy). Last step so a failure cannot cut the sync short; the
-# doctor's own exit code is carried to the final exit. --dry-run exits earlier
-# (before this step), so it never runs the doctor and never fails.
-# requires-daemon: forge optional   older daemon without `forge egress`: warn, never fail
-EGRESS_RC=0
-if [[ -n "$EGRESS_BIN" ]]; then
-    if ! "$EGRESS_BIN" forge egress --help >/dev/null 2>&1; then
-        warn "forge egress check unavailable: '$EGRESS_BIN' has no 'forge egress' subcommand (rebuild the daemon)."
-    else
-        egress_output="$(cd "$REPO_ROOT" && "$EGRESS_BIN" forge egress doctor 2>&1)" || EGRESS_RC=$?
-        if [[ -n "$egress_output" ]]; then
-            printf '%b\n' "${YELLOW}[resync] Forge egress (loom-daemon forge egress doctor):${NC}"
-            printf '%s\n' "$egress_output" | sed 's/^/    /'
-        fi
-        [[ "$EGRESS_RC" -eq 0 ]] || warn "forge egress routing check failed (exit $EGRESS_RC); resync itself completed."
-    fi
+# #11713: operator presence wiring. `operatorPresence.enabled` (fleet key in the
+# machine-level defaults.json), LOOM_OPERATOR_PRESENCE=1|0 or the local
+# ~/.loom/operator-presence.optout file decide whether the user-scope presence
+# hooks are merged into (or stripped from) ~/.claude/settings.json. A no-op when
+# none of them is set, when the machine checkout lacks provision-hooks.sh, and
+# in --dry-run. Best-effort: resync never fails on it.
+_PRESENCE_LIB="${LOOM_HOME:-$HOME/.local/share/loom}/scripts/install/provision-hooks.sh"
+if [[ "${DRY_RUN:-0}" != "1" && -r "$_PRESENCE_LIB" ]]; then
+    # shellcheck source=/dev/null
+    ( source "$_PRESENCE_LIB" && provision_operator_presence ) \
+        || warn "operator presence wiring not fully applied (see messages above); resync itself completed."
 fi
 
 # 75 (EX_TEMPFAIL), matching create-issue.sh's DEFERRED convention: the
@@ -3506,4 +3885,4 @@ fi
 if [[ "$LABEL_CHECK_BROKEN" -eq 1 || "$GUARD_CHECK_BROKEN" -eq 1 ]]; then
     exit 75
 fi
-exit "${EGRESS_RC:-0}"
+exit 0

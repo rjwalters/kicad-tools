@@ -150,7 +150,27 @@ def remaining_deadline() -> float | None:
     return float(value) if value is not None else None
 
 
+# Issue #6324: a ``RouteDeadlineExpired`` raised from a signal handler is
+# discarded by the interpreter when the signal lands inside a ``__del__``
+# ("Exception ignored in ...").  Recording that the deadline fired lets the
+# route flows' stage-boundary polls re-raise it, so a swallowed deadline still
+# ends in the partial-save handler instead of routing on until the SIGKILL.
+_deadline_state: dict[str, bool] = {"fired": False}
+
+
+def deadline_fired() -> bool:
+    """Whether the supervisor's deadline signal has been delivered."""
+    return _deadline_state["fired"]
+
+
+def reset_deadline_state() -> None:
+    """Forget a delivered deadline (end of an in-process invocation)."""
+    _deadline_state["fired"] = False
+
+
 def _deadline_signal(signum, frame) -> None:
+    # Record first: everything after this line may itself be interrupted.
+    _deadline_state["fired"] = True
     stage = _read_control(Path(os.environ[CONTROL_ENV])).get("stage", "routing")
     record_stage(
         stage, interrupted_stage=stage, interrupted_function=frame.f_code.co_name if frame else None
@@ -173,11 +193,22 @@ def _signal_group(process: subprocess.Popen, *, kill: bool) -> None:
         process.send_signal(signal.CTRL_BREAK_EVENT)  # type: ignore[attr-defined]
 
 
+def _fresh_partial(partial: Path, launched_at: float) -> bool:
+    """Whether ``partial`` is a complete board written after ``launched_at``."""
+    try:
+        if partial.with_suffix(partial.suffix + ".tmp").exists():
+            return False
+        return partial.stat().st_mtime >= launched_at
+    except OSError:
+        return False
+
+
 def _supervise(
     command: list[str], budget: float, control: Path, *, save_seconds=SAVE_SECONDS
 ) -> int:
     """Run and reap one process group against a single monotonic deadline."""
     deadline = time.monotonic() + budget
+    launched_at = time.time()
     env = dict(os.environ, **{DEADLINE_ENV: str(deadline), CONTROL_ENV: str(control)})
     process = subprocess.Popen(
         command,
@@ -232,6 +263,16 @@ def _supervise(
         output_name = state.get("output")
         if output_name:
             output = Path(output_name)
+            # Issue #6308: the copper-bearing board is ``snapshot`` (the raw
+            # ``<stem>_partial``); ``unverified_output`` is only the quarantined
+            # canonical output and may hold no copper.  A worker hard-killed
+            # after writing the partial but before recording it must still be
+            # named, so recover it here -- only if written by THIS invocation
+            # and not a torn ``.tmp`` leftover.
+            partial = output.with_stem(output.stem + "_partial")
+            if not state.get("snapshot_saved") and _fresh_partial(partial, launched_at):
+                state["snapshot"] = str(partial)
+                state["snapshot_saved"] = True
             # Preserve even a pre-existing successful result, but remove its
             # canonical name so it cannot masquerade as this invocation's result.
             if output.exists():

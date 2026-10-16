@@ -63,6 +63,154 @@ def test_connected_zone_fill_island_stays_clean(tmp_path: Path) -> None:
     assert ConnectivityValidator(pcb_path).validate().zone_islands == []
 
 
+class TestLoneFillIslandIsNotUnconnected6495:
+    """Issue #6495: a lone fill island is a warning, never an unconnected item.
+
+    ``ORPHANED_ZONE_ISLAND_PCB``'s only finding is one lone fill island.
+    """
+
+    @pytest.fixture
+    def lone_fill_pcb(self, tmp_path: Path) -> Path:
+        pytest.importorskip("shapely")
+        pcb_path = tmp_path / "lone_fill.kicad_pcb"
+        pcb_path.write_text(ORPHANED_ZONE_ISLAND_PCB)
+        return pcb_path
+
+    @staticmethod
+    def _no_native(monkeypatch, native):
+        """Mock the kicad-cli path: ``None`` = absent, a list = its findings."""
+        monkeypatch.setattr(
+            ConnectivityValidator,
+            "_native_unconnected_relationships",
+            lambda self, **kwargs: native,
+        )
+
+    def test_fixture_only_finding_is_a_lone_fill(self, lone_fill_pcb: Path) -> None:
+        result = ConnectivityValidator(lone_fill_pcb).validate()
+        assert [(i.severity, i.issue_type) for i in result.issues] == [("warning", "zone_island")]
+        assert result.unconnected == []
+        assert result.unconnected_zone_islands == []
+        assert len(result.lone_fill_islands) == 1
+        assert result.strict_warning_count == 0
+
+    def test_summary_does_not_count_lone_fill(self, lone_fill_pcb: Path) -> None:
+        summary = ConnectivityValidator(lone_fill_pcb).validate().summary()
+        assert "Orphaned zone islands" not in summary
+        assert "Lone fill islands: 1 (warning)" in summary
+        assert "0 errors, 1 warnings" in summary
+
+    def test_json_counts_lone_fill_separately(
+        self, lone_fill_pcb: Path, capsys, monkeypatch
+    ) -> None:
+        import json
+
+        from kicad_tools.cli.validate_connectivity_cmd import main
+
+        self._no_native(monkeypatch, None)
+        assert main([str(lone_fill_pcb), "--format", "json"]) == 0
+        data = json.loads(capsys.readouterr().out)
+        assert data["summary"]["zone_island_count"] == 0
+        assert data["summary"]["lone_fill_island_count"] == 1
+        assert data["summary"]["errors"] == 0
+        # Still visible in issues[] as a warning.
+        assert [(i["severity"], i["issue_type"]) for i in data["issues"]] == [
+            ("warning", "zone_island")
+        ]
+
+    def test_table_keeps_lone_fill_out_of_unconnected_section(
+        self, lone_fill_pcb: Path, capsys, monkeypatch
+    ) -> None:
+        from kicad_tools.cli.validate_connectivity_cmd import main
+
+        self._no_native(monkeypatch, None)
+        assert main([str(lone_fill_pcb)]) == 0
+        out = capsys.readouterr().out
+        assert "UNCONNECTED ZONE/ITEM RELATIONSHIPS" not in out
+        assert "LONE FILL ISLANDS (WARNINGS, NOT UNCONNECTED) (1):" in out
+        assert out.count("[!] WARNING:") == 1
+        assert "[X] ERROR:" not in out
+        assert "CONNECTIVITY OK" in out
+
+    @pytest.mark.parametrize("output_format", ["table", "summary", "json"])
+    def test_strict_exit_is_independent_of_kicad_cli(
+        self, output_format: str, lone_fill_pcb: Path, capsys, monkeypatch
+    ) -> None:
+        from kicad_tools.cli.validate_connectivity_cmd import main
+
+        argv = [str(lone_fill_pcb), "--strict", "--format", output_format]
+        codes = {}
+        # kicad-cli absent (native returns None) vs present (reports nothing,
+        # since kicad-cli does not report a lone fill island).
+        for label, native in (("absent", None), ("present", [])):
+            self._no_native(monkeypatch, native)
+            codes[label] = main(argv)
+            capsys.readouterr()
+        assert codes == {"absent": 0, "present": 0}
+
+    def test_lone_fill_plus_real_open_counts_only_the_open(
+        self, lone_fill_pcb: Path, capsys, monkeypatch
+    ) -> None:
+        import json
+
+        from kicad_tools.cli.validate_connectivity_cmd import main
+
+        result = ConnectivityResult(
+            issues=[
+                ConnectivityIssue(
+                    severity="error",
+                    issue_type="zone_island",
+                    net_name="GND",
+                    message="Missing connection between pad J1.1 and via",
+                    suggestion="Connect",
+                ),
+                ConnectivityIssue(
+                    severity="warning",
+                    issue_type="zone_island",
+                    net_name="GND",
+                    message="fill[1]@F.Cu touches no other GND copper",
+                    suggestion="Remove",
+                ),
+            ],
+            total_nets=1,
+        )
+        assert result.summary().count("Orphaned zone islands: 1") == 1
+        assert "Lone fill islands: 1 (warning)" in result.summary()
+
+        monkeypatch.setattr(ConnectivityValidator, "validate", lambda self, **kwargs: result)
+        pcb = lone_fill_pcb  # loads cleanly; validate() is mocked
+        assert main([str(pcb), "--strict", "--format", "json"]) == 1
+        data = json.loads(capsys.readouterr().out)
+        assert data["summary"]["zone_island_count"] == 1
+        assert data["summary"]["lone_fill_island_count"] == 1
+        assert len(data["issues"]) == 2
+
+        assert main([str(pcb)]) == 1
+        out = capsys.readouterr().out
+        assert "UNCONNECTED ZONE/ITEM RELATIONSHIPS (1):" in out
+        assert "CONNECTIVITY ISSUES FOUND - 1 unconnected item relationships" in out
+
+    def test_strict_still_fails_on_other_warnings(
+        self, lone_fill_pcb: Path, capsys, monkeypatch
+    ) -> None:
+        """Only lone fills are exempt from --strict; other warnings still fail."""
+        from kicad_tools.cli.validate_connectivity_cmd import main
+
+        result = ConnectivityResult(
+            issues=[
+                ConnectivityIssue(
+                    severity="warning",
+                    issue_type="isolated",
+                    net_name="SIG",
+                    message="Isolated pad",
+                    suggestion="Route it",
+                )
+            ]
+        )
+        monkeypatch.setattr(ConnectivityValidator, "validate", lambda self, **kwargs: result)
+        assert main([str(lone_fill_pcb), "--strict"]) == 2
+        capsys.readouterr()
+
+
 #: Board 05 parity (57) needs kicad-cli >= this; 10.0.1 adds a zone_island.
 BOARD05_PARITY_MIN_KICAD = (10, 0, 2)
 
@@ -902,11 +1050,7 @@ class TestPositionTolerance:
             f"NET1 reported as disconnected with 0.009mm displacement: {net1_errors}"
         )
 
-    def test_endpoint_outside_tolerance_detected_as_disconnected(self, tmp_path: Path):
-        """A segment endpoint displaced 0.02 mm (outside 0.01 mm tolerance)
-        should be detected as disconnected.
-        """
-        pcb_text = """(kicad_pcb
+    _OFFSET_BOARD = """(kicad_pcb
   (version 20240108)
   (generator "test")
   (generator_version "8.0")
@@ -935,19 +1079,38 @@ class TestPositionTolerance:
     (pad "1" smd rect (at -0.5 0) (size 0.5 0.5) (layers "F.Cu") (net 1 "NET1"))
     (pad "2" smd rect (at 0.5 0) (size 0.5 0.5) (layers "F.Cu") (net 0 ""))
   )
-  (segment (start 99.52 100) (end 109.5 100) (width 0.2) (layer "F.Cu") (net 1) (uuid "seg-1"))
+  (segment (start {start} 100) (end 109.5 100) (width 0.2) (layer "F.Cu") (net 1) (uuid "seg-1"))
 )
 """
-        pcb_file = tmp_path / "tolerance_test_outside.kicad_pcb"
-        pcb_file.write_text(pcb_text)
 
-        validator = ConnectivityValidator(pcb_file)
-        result = validator.validate()
+    @pytest.mark.parametrize(
+        ("start_x", "connected"),
+        [
+            # 0.02 mm from the pad centre, still deep inside R1.1's copper
+            # (x 99.25-99.75): kicad-cli 10.0.6 reports 0 unconnected.  The
+            # pre-#6470 centre match called this open.
+            (99.52, True),
+            (99.6, True),
+            # Track copper (half width 0.1) ends 0.05 mm short of the pad edge,
+            # and exactly at it: kicad-cli reports 1 unconnected for both.
+            (99.9, False),
+            (99.85, False),
+        ],
+    )
+    def test_endpoint_contact_follows_pad_copper_not_centre(
+        self, tmp_path: Path, start_x: float, connected: bool
+    ):
+        """Trace-to-pad contact is real copper overlap, not centre proximity (#6470)."""
+        pcb_file = tmp_path / "tolerance_test.kicad_pcb"
+        pcb_file.write_text(self._OFFSET_BOARD.format(start=start_x))
 
-        # NET1 should be reported as disconnected -- the 0.02mm displacement
-        # exceeds the 0.01mm tolerance.
+        result = ConnectivityValidator(pcb_file).validate()
+
         net1_errors = [i for i in result.errors if i.net_name == "NET1"]
-        assert len(net1_errors) > 0, "NET1 should be disconnected with 0.02mm displacement"
+        if connected:
+            assert net1_errors == []
+        else:
+            assert [i.issue_type for i in net1_errors] == ["partial"]
 
 
 class TestZoneConnectivity:
@@ -1448,19 +1611,23 @@ class TestZeroFillZoneConnectivity:
         )
         assert result.zone_connected_nets == 0
 
-    def test_partial_fill_zone_provides_connectivity(self, partial_fill_pcb: Path):
-        """A zone with at least one filled polygon retains the boundary
-        heuristic: pads inside the outline (including thermal-relief
-        cutouts) are zone-connected (Issue #479 behavior, no regression).
+    def test_partial_fill_bonds_only_pads_on_its_copper(self, partial_fill_pcb: Path):
+        """A filled zone connects the pads its fill copper reaches -- and only those.
+
+        R1.2 (x 100.5) sits on the fill (x 95-105); R2.2 (x 110.5) is inside
+        the zone *outline* but off its fill.  kicad-cli 10.0.6 reports exactly
+        one unconnected item here, ``Zone [GND]`` <-> ``Pad 2 [GND] of R2``.
+        The pre-#6470 "pad inside the zone boundary bonds to the nearest fill"
+        heuristic (#479) called this net connected, hiding that open.
         """
         validator = ConnectivityValidator(partial_fill_pcb)
         result = validator.validate()
 
         gnd_errors = [i for i in result.errors if i.net_name == "GND"]
-        assert len(gnd_errors) == 0, (
-            f"Partially filled zone should connect pads inside its boundary, got: {gnd_errors}"
-        )
-        assert result.zone_connected_nets >= 1
+        assert len(gnd_errors) == 1, gnd_errors
+        assert gnd_errors[0].issue_type == "zone_island"
+        assert gnd_errors[0].message.endswith("Pad R2.2")
+        assert result.zone_connected_nets == 0
 
     def test_fully_filled_zone_regression(self, tmp_path: Path):
         """Fully filled zone behavior must not regress: a zone with a
@@ -1825,7 +1992,7 @@ def _hdi_blind_via_under_foreign_pad_pcb() -> str:
     (uuid "00000000-0000-0000-0000-0000000000f4"))
   (segment (start 110 110) (end 130 110) (width 0.25) (layer "B.Cu") (net 2)
     (uuid "00000000-0000-0000-0000-0000000000f5"))
-  (via (at 110 110) (size 0.4) (drill 0.2) (layers "In2.Cu" "B.Cu") (net 2)
+  (via blind (at 110 110) (size 0.4) (drill 0.2) (layers "In2.Cu" "B.Cu") (net 2)
     (uuid "00000000-0000-0000-0000-0000000000f6"))
 )
 """

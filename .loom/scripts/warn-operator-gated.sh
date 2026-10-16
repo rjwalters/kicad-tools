@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # Loom Operator-Gate Advisory Scan for /loom:sweep all (#5137)
 #
-# The `all` sentinel's aggressive candidate taxonomy hard-skips two label
-# classes (`loom:operator-only` and, since #5817, `loom:needs-capability`)
-# and treats every other open issue as a buildable candidate. Some issues
+# The `all` sentinel's aggressive candidate taxonomy hard-skips the hold
+# labels (`loom:operator`, `loom:blocked`, `loom:frozen`; #11795 folded the
+# older operator sub-kinds and `loom:needs-capability` into them) and treats
+# every other open issue as a buildable candidate. Some issues
 # declare operator-gating in their BODY TEXT ("the index is login-walled, so
 # acquisition is operator-gated", "Operator decision: send this paired with
-# the paper") without carrying either label — so the sentinel would plan to
+# the paper") without carrying a hold label — so the sentinel would plan to
 # dispatch them as ordinary build candidates. Some declare it in their TITLE
 # instead ("Operator: visit the county archive and photograph the 1850
 # census page") with a body that contains none of the phrase vocabulary
@@ -22,11 +23,13 @@
 #      operator-gate fragment (see PHRASES below). Case-insensitive.
 #   2. Dependency match — the body declares `Depends on #A` / `Requires #A`
 #      (the same restricted vocabulary #3759's --auto-stack and #3747's
-#      warn-out-of-set-deps.sh both reuse) and #A currently carries the
-#      `loom:operator-only` OR `loom:needs-capability` label — the #87 -> #4
-#      shape from the issue: the sweep would skip the prerequisite as
-#      operator-only (or needs-capability), then dispatch the dependent that
-#      needs it.
+#      warn-out-of-set-deps.sh both reuse) and #A currently carries an
+#      operator-gate label — the registry's `operator_gate` property
+#      (`loom-daemon labels list --property operator_gate --with-retired`,
+#      #10013/#11795), with a fallback for a host without a daemon that
+#      answers.
+#      The #87 -> #4 shape from the issue: the sweep would skip the
+#      prerequisite as held, then dispatch the dependent that needs it.
 #   3. Title-prefix match (#6391) — the title itself, after stripping leading
 #      whitespace/markdown decoration, STARTS WITH `Operator:` / `Operator —`
 #      / `Operator-only` (see TITLE_PREFIXES below). Case-insensitive. A
@@ -49,12 +52,11 @@
 #   <N>\t<annotation>
 # where <annotation> is one of:
 #   ⚠ body declares operator-gating: "<matched phrase>"
-#   ⚠ depends on #<A>, which is loom:operator-only
-#   ⚠ depends on #<A>, which is loom:needs-capability
+#   ⚠ depends on #<A>, which is <operator-gate label, e.g. loom:operator>
 #   ⚠ title declares operator-gating: "<matched prefix>"
 # A candidate matching more than one signal prints one line per signal; a
-# dependency carrying BOTH labels prints one dependency line per label
-# (deduplicated by label, in declared order).
+# dependency carrying more than one gate label prints one dependency line per
+# label (deduplicated by label, in registry order).
 #
 # Zero matches across the whole candidate set -> zero lines of output, and the
 # caller's plan/listing is byte-for-byte unchanged from before this tool
@@ -165,6 +167,16 @@ _operator_gate_title_prefix_match() {
     return 1
 }
 
+# ---- operator-gate label set (registry-derived, #11795) ----
+# The source of truth is the label registry's `operator_gate` property
+# (`defaults/labels.json`, #10013), read once per run in
+# _warn_operator_gated. `--with-retired` adds the retired names that fold into
+# a gate label (loom:operator-only and its sub-kinds), so a dependency `labels
+# migrate` has not relabelled yet is still flagged (#11843 drops the flag). The
+# fallback (no daemon, or one too old for the flag) names the canonical label
+# and its retired names; label_literal_guard.rs pins it to the registry's
+# operator_gate set.
+
 # ---- dependency parser (reused vocabulary, restricted to Depends on / Requires) ----
 # Modeled on guide.md's parse_dependencies / #3759's --auto-stack detection —
 # tolerant of markdown emphasis/colon between the phrase and #N (#4508).
@@ -215,21 +227,22 @@ _warn_candidate_operator_gated() {
         MATCH_COUNT=$((MATCH_COUNT + 1))
     fi
 
-    # Signal 2: a declared dependency (#A) that itself carries
-    # loom:operator-only or loom:needs-capability (#5817 — either kind of
-    # hard-skip block means the child cannot itself be completed either).
-    local dep
+    # Signal 2: a declared dependency (#A) that itself carries an
+    # operator-gate label (a held prerequisite means the child cannot itself
+    # be completed either).
+    # requires-daemon: labels optional   a missing or older binary takes the fallback
+    local dep gate_labels; gate_labels="$("${LOOM_DAEMON_BIN:-loom-daemon}" labels list --property operator_gate --with-retired 2>/dev/null)" || gate_labels="loom:operator loom:operator-only loom:operator-decision loom:operator-mechanical loom:operator-blocked"
     for dep in $(parse_operator_gate_deps "$body"); do
         [[ "$dep" == "$candidate" ]] && continue
-        local labels dep_label
+        local labels gate_label
         if [[ -n "$REPO_NWO" ]]; then
             labels="$(gh issue view "$dep" --repo "$REPO_NWO" --json labels -q '[.labels[].name] | join(",")' 2>/dev/null || echo '')"
         else
             labels="$(gh issue view "$dep" --json labels -q '[.labels[].name] | join(",")' 2>/dev/null || echo '')"
         fi
-        for dep_label in loom:operator-only loom:needs-capability; do
-            if printf '%s' ",$labels," | grep -qF ",$dep_label,"; then
-                printf '%s\t⚠ depends on #%s, which is %s\n' "$candidate" "$dep" "$dep_label"
+        for gate_label in $gate_labels; do
+            if printf '%s' ",$labels," | grep -qF ",$gate_label,"; then
+                printf '%s\t⚠ depends on #%s, which is %s\n' "$candidate" "$dep" "$gate_label"
                 MATCH_COUNT=$((MATCH_COUNT + 1))
             fi
         done

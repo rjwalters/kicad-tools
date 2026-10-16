@@ -238,12 +238,12 @@ if [[ "\${1:-}" == "restart" ]]; then
 fi
 # See write_fake_daemon's comment (#4799): no real calibrate implementation,
 # exit fast instead of falling into the daemon-body loop below.
-if [[ "\${1:-}" == "calibrate" ]]; then
-    exit 1
-fi
+if [[ "\${1:-}" == "calibrate" ]]; then exit 1; fi
 # Same catch-all as write_fake_daemon (#4799): an unrecognized NON-FLAG
 # subcommand must never fall into the foreground daemon loop and wedge its
 # caller. Flags still reach the daemon body.
+# Answers the post-build OTLP probe (#10700) like a real daemon.
+[[ "\${1:-}" == "telemetry-capabilities" ]] && { echo '{"otlp":true}'; exit 0; }
 if [[ -n "\${1:-}" && "\${1:-}" != -* ]]; then
     echo "fake loom-daemon: unsupported subcommand: \$*" >&2
     exit 1
@@ -282,9 +282,9 @@ if [[ -n '${status_json}' && "\${1:-}" == "status" ]]; then
     printf '%s\n' '${status_json}'
     exit 0
 fi
-if [[ "\${1:-}" == "calibrate" ]]; then
-    exit 1
-fi
+if [[ "\${1:-}" == "calibrate" ]]; then exit 1; fi
+# Answers the post-build OTLP probe (#10700) like a real daemon.
+[[ "\${1:-}" == "telemetry-capabilities" ]] && { echo '{"otlp":true}'; exit 0; }
 if [[ -n "\${1:-}" && "\${1:-}" != -* ]]; then
     echo "fake loom-daemon: unsupported subcommand: \$*" >&2
     exit 1
@@ -613,6 +613,8 @@ StandardError=append:/tmp/daemon.log
 [Install]
 WantedBy=default.target
 EOF
+    # #11951: the host's drop-in owns autonomy, as the worker spec's does.
+    mkdir -p "$unit_path.d" && printf '%s\n' '[Service]' 'Environment=LOOM_WORK_FINDER=1 LOOM_MAIN_HEALTH_GATE=1' > "$unit_path.d/15-autonomy.conf"
 }
 
 
@@ -2297,10 +2299,10 @@ else
 fi
 
 # ============================================================
-# 32. --relaunch PRESERVES the live unit's autonomy env across the re-render
-#     (mirrors test 22): the four autonomy keys carry through byte-for-byte,
-#     and the stale sentinel PATH is NOT round-tripped (start.sh rebuilds
-#     PATH).
+# 32. --relaunch PRESERVES the live unit's other LOOM_* env across the
+#     re-render (mirrors test 22), PURGES its autonomy lines (#11951: the
+#     host's drop-in owns them), and does NOT round-trip the stale sentinel
+#     PATH (start.sh rebuilds PATH).
 # ============================================================
 W32="$BASE_WORKDIR/w32"
 new_fixture "$W32"
@@ -2323,16 +2325,15 @@ write_fixture_unit_pre4267 "$UNIT_PATH32" "$INSTALLED32"
     LOOM_DAEMON_BIN="$INSTALLED32" NEW_FAKE_BIN_SRC="$NEW_FAKE32" \
     bash "$UPDATE_SCRIPT" --relaunch >/dev/null 2>&1 )
 TESTS_RUN=$((TESTS_RUN + 1))
-if grep -qx 'Environment=LOOM_WORK_FINDER=1' "$UNIT_PATH32" 2>/dev/null \
-    && grep -qx 'Environment=LOOM_MAIN_HEALTH_GATE=1' "$UNIT_PATH32" 2>/dev/null \
-    && grep -qx 'Environment=LOOM_WORK_FINDER_MAX_CONCURRENT=10' "$UNIT_PATH32" 2>/dev/null \
+if ! grep -q '^Environment=LOOM_WORK_FINDER=\|^Environment=LOOM_MAIN_HEALTH_GATE=' "$UNIT_PATH32" 2>/dev/null \
+    && grep -q 'LOOM_DAEMON_SUPERVISOR=systemd' "$UNIT_PATH32" 2>/dev/null && grep -qx 'Environment=LOOM_WORK_FINDER_MAX_CONCURRENT=10' "$UNIT_PATH32" 2>/dev/null \
     && grep -qx 'Environment=LOOM_PER_TOKEN_CONCURRENCY=5' "$UNIT_PATH32" 2>/dev/null \
     && ! grep -q 'sentinel-oldpath-4267' "$UNIT_PATH32" 2>/dev/null; then
     TESTS_PASSED=$((TESTS_PASSED + 1))
-    echo -e "${GREEN}✓${NC} --relaunch preserves all 4 autonomy env keys and does NOT round-trip the stale PATH"
+    echo -e "${GREEN}✓${NC} --relaunch keeps the other LOOM_* keys, purges the autonomy lines (#11951), and does NOT round-trip the stale PATH"
 else
     TESTS_FAILED=$((TESTS_FAILED + 1))
-    echo -e "${RED}✗${NC} --relaunch preserves all 4 autonomy env keys and does NOT round-trip the stale PATH"
+    echo -e "${RED}✗${NC} --relaunch keeps the other LOOM_* keys, purges the autonomy lines (#11951), and does NOT round-trip the stale PATH"
     echo "  unit: $(cat "$UNIT_PATH32" 2>/dev/null)"
 fi
 

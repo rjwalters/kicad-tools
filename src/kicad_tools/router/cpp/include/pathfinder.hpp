@@ -291,6 +291,33 @@ public:
         physical_partner_net_ = net;
         physical_partner_clearance_ = clearance;
     }
+    // Issue #6315: the pair clearance against a pad is max(own class, the
+    // pad's class).  The pad's class is not modelled natively, so the exact
+    // pad test holds every step to at least this floor -- the Python backend
+    // pushes the largest net-class clearance on the board.  0 = unset.
+    void set_search_pad_clearance_floor(float floor) { search_pad_clearance_floor_ = floor; }
+
+    // Issue #6375: the own-pad step gate.  A planar step onto (or off) a
+    // cell of the routing net's OWN static pad copper/halo (``cell.net ==
+    // net`` and ``pad_cell`` or ``static_blocked``) outside the seed/goal
+    // metal boxes is held to the post-route validator's exact segment-vs-pad
+    // verdict
+    // (``Grid3D::segment_pads_clear``).  Such cells used to be admitted with
+    // no check at all; a net-0 (NC) neighbour never marks a halo shared, so
+    // nothing else looked at them.  The Python backend pushes, per search,
+    // the same same-component carve-out sets ``validate_route`` receives and
+    // the NARROWEST width the route conversion can emit (the neck-down
+    // taper only narrows), so the gate can never be stricter than the
+    // validator.  ``trace_width`` <= 0 falls back to the emit width.
+    void set_search_own_pad_gate(const std::vector<uint32_t>& exclude_ref_hashes,
+                                 const std::vector<uint32_t>& clamp_ref_hashes,
+                                 float trace_width) {
+        search_gate_exclude_refs_ = exclude_ref_hashes;
+        search_gate_clamp_refs_ = clamp_ref_hashes;
+        search_gate_trace_width_ = trace_width;
+    }
+    bool own_pad_step_clear(int x1, int y1, int x2, int y2, int layer, int net,
+                            float emit_trace_width) const;
     void set_search_fill_clearances(float trace, float via) {
         search_fill_trace_clearance_ = trace;
         search_fill_via_clearance_ = via;
@@ -405,6 +432,8 @@ private:
     // A* g_score, so its scale is comparable to ``rules_.cost_straight``
     // (typically 1.0) -- a penalty of 5.0 is roughly 5 cells of detour.
     float get_pad_channel_cost(int x, int y, int layer) const;
+    // Issue #6761: True iff a hard via fence covers (x, y) for this search.
+    bool is_pad_via_fenced(int x, int y) const;
 
     // Core A* loop shared by route(), route_resumable(), and resume().
     // Returns RouteResult with success=true if goal reached, or success=false
@@ -460,12 +489,31 @@ private:
     }
     int physical_partner_net_ = -1;
     float physical_partner_clearance_ = -1.0f;
+    // Issue #6315: exact swept-step vs foreign-pad clearance, and the
+    // per-cell gate that applies it to ``GridCell::pad_cell`` cells.
+    bool pad_step_clear(int x1, int y1, int x2, int y2, int layer, int net) const;
+    bool pad_cell_clear(int cx, int cy, int layer, int x1, int y1,
+                        int x2, int y2, int net) const;
+    bool pad_cell_resolvable(const GridCell& cell, int cx, int cy, int layer) const;
     bool trace_halo_cell_clear(int cx, int cy, int layer, int x1, int y1,
                                int x2, int y2, int net, int partner = -1) const;
     bool via_route_geometry_clear(int x, int y, int net) const;
+    // Issue #6464: a via at grid (x, y) against the vias already on the
+    // current path (walked through ``AStarNode::via_anc``), held to the fab
+    // hole-to-hole floor.  Those vias are not stored copper yet, so
+    // ``via_route_geometry_clear`` cannot see them.
+    bool own_path_vias_clear(const std::vector<AStarNode>& closed, int via_anc,
+                             int x, int y) const;
     float search_trace_half_width_mm_ = 0.0f;
     float search_via_half_diam_mm_ = 0.0f;
     float search_fill_trace_clearance_ = -1.0f;
+    float search_pad_clearance_floor_ = 0.0f;  // Issue #6315
+    // Issue #6375: own-pad step gate state (see ``set_search_own_pad_gate``).
+    std::vector<uint32_t> search_gate_exclude_refs_;
+    std::vector<uint32_t> search_gate_clamp_refs_;
+    float search_gate_trace_width_ = 0.0f;
+    // True when (x, y, layer) is pad copper/halo of ``net`` itself.
+    bool own_pad_cell(int x, int y, int layer, int net) const;
     float search_fill_via_clearance_ = -1.0f;
 
     // Issue #3438: per-step relief penalty helper.  Returns
@@ -508,6 +556,95 @@ private:
     // the bounding square rather than a temporary vector allocation
     // (mirrors PR #3232's canonical pattern for ``is_trace_blocked``).
     std::vector<std::pair<int8_t, int8_t>> via_kernel_offsets_;
+
+    // Issue #5617: one ``is_via_blocked_diag`` verdict per expanded node.
+    //
+    // Both A* loops try a via to every other routable layer, and each try
+    // used to call ``is_via_blocked_diag(current.x, current.y, ...)`` afresh.
+    // Nothing that call reads depends on the destination layer: the barrel
+    // spans the whole stack, so the predicate already walks every layer
+    // itself, and the grid it reads does not change inside one expansion.
+    // On a 4-layer board the via-drop phase was asking the same question
+    // three times per node -- 44 % of the Board 06 re-route's phase 4.
+    //
+    // The memo replays the first answer, including its ``out_*`` blocker
+    // diagnostics, so each caller's per-layer bookkeeping (the #2476
+    // ``via_block_count`` increment) runs exactly as before.  It stays off
+    // while a pairwise (cross-domain) matrix is installed: that branch's
+    // ``note_pairwise_block`` counts every refusal into the Python-visible
+    // ``pairwise_block_count``, and replaying the verdict would under-count.
+    //
+    // Only the one-shot ``route()`` loop still uses this per-node memo; the
+    // resumable ``run_astar_loop()`` uses the per-``(x, y)`` ``via_verdict_``
+    // table below, which subsumes it.
+    struct ViaBlockMemo {
+        int state = -1;  // -1 = not evaluated, 0 = clear, 1 = blocked
+        int blocking_net = 0;
+        float world_x = 0.0f;
+        float world_y = 0.0f;
+
+        bool blocked(const Pathfinder& pf, int x, int y, int net, bool allow_sharing,
+                     int radius_override, int& out_blocking_net,
+                     float& out_world_x, float& out_world_y) {
+            if (state < 0) {
+                const bool result = pf.is_via_blocked_diag(
+                    x, y, net, allow_sharing, radius_override,
+                    out_blocking_net, out_world_x, out_world_y);
+                if (pf.grid_.pairwise_active()) return result;
+                state = result ? 1 : 0;
+                blocking_net = out_blocking_net;
+                world_x = out_world_x;
+                world_y = out_world_y;
+                return result;
+            }
+            out_blocking_net = blocking_net;
+            out_world_x = world_x;
+            out_world_y = world_y;
+            return state != 0;
+        }
+    };
+
+    // Issue #5617: one ``is_via_blocked_diag`` verdict per ``(x, y)`` per
+    // ``run_astar_loop()`` call -- the cross-node sibling of ``ViaBlockMemo``.
+    //
+    // The via-drop check's inputs are the cell ``(x, y)`` plus values that
+    // are fixed for the whole resumable search (``search_net_``,
+    // ``search_negotiated_mode_``, ``search_via_radius_cells_``, the emit /
+    // fill overrides, ``relief_mode_``) and the grid, which the loop never
+    // mutates (no ``Grid3D`` mutator is reachable from ``pathfinder.cpp``)
+    // and Python cannot touch mid-call (the bindings hold the GIL).  The
+    // layer the node sits on is NOT an input: a through via spans the stack.
+    // So a node at ``(x, y, L1)`` -- typically the one a via from
+    // ``(x, y, L0)`` just reached -- asks exactly the question ``(x, y, L0)``
+    // already answered.
+    //
+    // The table is epoch-stamped like the #3309 search arrays and the epoch
+    // advances at the top of EVERY ``run_astar_loop()`` call (fresh search
+    // and each ``resume()``), so nothing is carried across a point where
+    // Python could have changed the grid or the search parameters.  The
+    // verdict *and* its ``out_*`` blocker diagnostics are replayed, so the
+    // caller's per-layer ``via_block_count`` bookkeeping is unchanged.  Like
+    // ``ViaBlockMemo`` it is bypassed while a pairwise (cross-domain) matrix
+    // is installed: ``note_pairwise_block`` counts every refusal.
+    struct ViaVerdict {
+        int8_t blocked = 0;
+        int blocking_net = 0;
+        float world_x = 0.0f;
+        float world_y = 0.0f;
+    };
+    std::vector<uint32_t> via_verdict_gen_;
+    std::vector<ViaVerdict> via_verdict_;
+    uint32_t via_verdict_epoch_ = 0;
+    int via_verdict_cols_ = 0;
+    int via_verdict_rows_ = 0;
+
+    // Size the table for the current grid and start a new epoch.
+    void begin_via_verdict_epoch();
+
+    // ``is_via_blocked_diag`` for the active resumable search, memoised on
+    // ``(x, y)`` for the current epoch.
+    bool search_via_blocked_cached(int x, int y, int& out_blocking_net,
+                                   float& out_world_x, float& out_world_y);
 
     // Issue #4848: distance-sorted offsets for the soft pairwise avoidance
     // band, the ring-ordered analogue of ``via_kernel_offsets_``.  Every entry

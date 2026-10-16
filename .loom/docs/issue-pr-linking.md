@@ -88,11 +88,11 @@ pass reclaimed it. `merge-pr.sh` now warns (non-blocking) on a whole-line
 backticked trailer, but that warning reaches only whoever runs the merge.
 
 The `Loom-Issue:` trailer inherits the exclusion, and has its own detector —
-`loom-daemon merge-pr-refs loom-issue-trailer-warnings --pr N` — but that
-detector is **not yet invoked by `merge-pr.sh`**: that script is frozen at the
-file-size ratchet, so the wiring needs a #8831-style net-zero squeeze plus a
-daemon-subcommand version floor, tracked separately. Run the verb yourself (or
-have Judge run it) until then.
+`loom-daemon merge-pr-refs loom-issue-trailer-warnings --pr N` — which
+`merge-pr.sh` runs in the same pre-merge pass (#9502): a backticked or
+slug-less trailer gets the same non-blocking warning (`[dry-run] `-prefixed
+under `--dry-run`), and a daemon too old to know the verb reports a skipped
+advisory check naming the version to roll to — never a refused merge.
 
 ## A stray closing keyword anywhere in the body defeats `Part of #N` (#4569)
 

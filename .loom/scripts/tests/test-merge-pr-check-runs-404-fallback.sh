@@ -53,14 +53,10 @@ MERGE_PR_SRC="$HELPERS_DIR/merge-pr.sh"
 FORGE_HELPERS_SRC="$HELPERS_DIR/lib/forge-helpers.sh"
 
 # Colors
-RED='\033[0;31m'
-GREEN='\033[0;32m'
+# shellcheck source=lib/assert.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/assert.sh"
 YELLOW='\033[0;33m'  # retired() below
-NC='\033[0m'
 
-TESTS_RUN=0
-TESTS_PASSED=0
-TESTS_FAILED=0
 
 # A source-text assertion that cannot survive a port to loom-daemon, recorded
 # per defaults/docs/verification-recipes.md §6 rather than silently deleted.
@@ -74,21 +70,6 @@ retired() { # <what> <property> <why-structural> <successor>
     echo "      successor:  $4"
 }
 
-assert_eq() {
-    local expected="$1"
-    local actual="$2"
-    local msg="$3"
-    TESTS_RUN=$((TESTS_RUN + 1))
-    if [[ "$expected" == "$actual" ]]; then
-        TESTS_PASSED=$((TESTS_PASSED + 1))
-        echo -e "  ${GREEN}PASS${NC}: $msg"
-    else
-        TESTS_FAILED=$((TESTS_FAILED + 1))
-        echo -e "  ${RED}FAIL${NC}: $msg"
-        echo "    Expected: '$expected'"
-        echo "    Actual:   '$actual'"
-    fi
-}
 
 # --- Source helpers (defines FORGE_CHECK_RUNS_RC_NOT_FOUND + forge_get_check_runs) ---
 source "$FORGE_HELPERS_SRC"
@@ -165,7 +146,7 @@ _out=""
 _rc=0
 _out="$(forge_get_check_runs "owner/repo" "sha-success")" || _rc=$?
 assert_eq "0" "$_rc" "success: forge_get_check_runs returns 0"
-assert_eq '{"total_count":0,"check_runs":[]}' "$_out" "success: forge_get_check_runs emits the JSON payload on stdout"
+assert_eq '{"total_count":0,"check_runs":[],"repository":"owner/repo","head_sha":"sha-success"}' "$_out" "success: forge_get_check_runs emits the JSON payload on stdout (naming repo + head, #11097)"
 
 echo "404" > "$STUB_DIR/gh-check-runs-sha-404.mode"
 _rc=0

@@ -61,6 +61,8 @@ def _init_type_category_map() -> None:
             # Phase 3I or manual touch-up) -- the skew is a function of the
             # routed geometry of the two halves, not their footprints.
             ViolationType.DIFFPAIR_LENGTH_SKEW: ViolationCategory.ROUTING,
+            # Differential-pair uncoupled length / via count (Issue #6443).
+            ViolationType.DIFFPAIR_UNCOUPLED_LENGTH: ViolationCategory.ROUTING,
             # Match-group (N-trace) length-skew (Issue #2702, Epic #2661 Phase 2G).
             # N>=3 generalization of DIFFPAIR_LENGTH_SKEW: same routing-
             # fixable nature (serpentine tuning of the shorter members up
@@ -94,6 +96,8 @@ def _init_type_category_map() -> None:
             # plated-over via processing) -- categorize with the other
             # via/fab capabilities.
             ViolationType.VIA_IN_PAD: ViolationCategory.MANUFACTURING,
+            # Issue #6518: blind/buried/micro via the profile cannot build.
+            ViolationType.VIA_TYPE_UNSUPPORTED: ViolationCategory.MANUFACTURING,
             ViolationType.DRILL_HOLE_TOO_SMALL: ViolationCategory.MANUFACTURING,
             ViolationType.DRILL_CLEARANCE: ViolationCategory.MANUFACTURING,
             ViolationType.NPTH_HOLE_TOO_SMALL: ViolationCategory.MANUFACTURING,
@@ -176,6 +180,10 @@ class ViolationType(Enum):
     # geometric topology of the route.  Distinct from CLEARANCE because
     # it checks a length-matching property, not edge-to-edge spacing.
     DIFFPAIR_LENGTH_SKEW = "diffpair_length_skew"
+    # Differential-pair uncoupled length and via count (Issue #6443): the
+    # larger of the two nets' copper that runs beside no partner copper, and
+    # each net's via count, against the protocol or class limit.
+    DIFFPAIR_UNCOUPLED_LENGTH = "diffpair_uncoupled_length"
     # Match-group (N-trace) length-skew (Issue #2702, Epic #2661 Phase 2G).
     # Fires when a declared match group's per-member routed-length skew
     # (``max(L) - min(L)`` across the group) exceeds the per-class
@@ -221,6 +229,10 @@ class ViolationType(Enum):
     # support via-in-pad processing.  See issue #2635 and
     # ``validate/rules/via_in_pad.py``.
     VIA_IN_PAD = "via_in_pad"
+    # Blind, buried or micro via on a manufacturer profile that does not
+    # offer the drilling process.  See issue #6518 and
+    # ``validate/rules/via_type_capability.py``.
+    VIA_TYPE_UNSUPPORTED = "via_type_unsupported"
 
     # Track/trace dimension issues
     TRACK_WIDTH = "track_width"
@@ -365,6 +377,9 @@ class ViolationType(Enum):
             # downstream filter that compares by exact type value.  This
             # entry is the only defense; do NOT delete it as "redundant".
             "diffpair_length_skew": cls.DIFFPAIR_LENGTH_SKEW,
+            # Issue #6443.  Explicit like its siblings: the fuzzy fallback
+            # would otherwise yield UNKNOWN.
+            "diffpair_uncoupled_length": cls.DIFFPAIR_UNCOUPLED_LENGTH,
             # Match-group (N-trace) length-skew (Issue #2702, Epic #2661
             # Phase 2G).  MUST be aliased explicitly even though the
             # rule_id string ``"match_group_length_skew"`` does NOT
@@ -439,6 +454,8 @@ class ViolationType(Enum):
             # MUST be aliased explicitly -- the fuzzy fallback below would
             # otherwise match "via" and miscategorize this rule_id.
             "via_in_pad": cls.VIA_IN_PAD,
+            # Issue #6518 -- explicit for the same reason as via_in_pad.
+            "via_type_unsupported": cls.VIA_TYPE_UNSUPPORTED,
             # Copper sliver rule from validate copper_sliver checker
             # (Issue #3843).  MUST be aliased explicitly -- the fuzzy
             # fallback below has no branch for "copper_sliver" (no
@@ -570,6 +587,10 @@ class DRCViolation:
     locations: list[Location] = field(default_factory=list)
     items: list[str] = field(default_factory=list)
     nets: list[str] = field(default_factory=list)
+    # kicad-cli JSON item uuids, parallel to ``items`` ("" when absent).  The
+    # clearance repairer resolves each side of a violation by uuid first
+    # (Issue #6434).
+    item_uuids: list[str] = field(default_factory=list)
 
     # Extracted numeric values (when available)
     required_value_mm: float | None = None
@@ -802,8 +823,9 @@ def extract_item_refs(items: list[str]) -> set[str]:
     """Normalize kicad-cli DRC item descriptions to a set of component refs.
 
     The kicad-cli JSON report stores each involved item as a free-text
-    description rather than a structured reference (the item ``uuid`` is not
-    retained by the parser), so waiver matching normalizes those strings to
+    description (plus a uuid, which the parser keeps in
+    :attr:`DRCViolation.item_uuids` but which is not stable across routes),
+    so waiver matching normalizes those strings to
     reference designators first (Issue #4691).  Both shapes KiCad emits are
     covered::
 

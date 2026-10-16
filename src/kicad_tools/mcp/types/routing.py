@@ -90,6 +90,8 @@ class RouteNetResult:
         output_path: Path where the result was saved
         error_message: Error message if success is False
         suggestions: Suggestions if routing failed or was incomplete
+        warnings: Non-fatal warnings, e.g. a declared clearance raised to
+            the board's fab floor (Issue #6283)
     """
 
     success: bool
@@ -102,6 +104,7 @@ class RouteNetResult:
     output_path: str | None = None
     error_message: str | None = None
     suggestions: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         """Convert to dictionary for serialization."""
@@ -116,4 +119,5 @@ class RouteNetResult:
             "output_path": self.output_path,
             "error_message": self.error_message,
             "suggestions": self.suggestions,
+            "warnings": self.warnings,
         }

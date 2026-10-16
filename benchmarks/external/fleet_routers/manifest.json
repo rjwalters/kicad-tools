@@ -1,0 +1,401 @@
+{
+  "schema": "kct-fleet-router-protocol/v1",
+  "issue": 6334,
+  "parent": 5943,
+  "pins": {
+    "tracemaker": {
+      "repo_url": "https://github.com/DingoOz/TraceMaker",
+      "commit": "89ff58ca86b2104ac6c55ae8a5dc77e4ab3e8d00",
+      "license_compat": "copyleft-ideas-only",
+      "build": "cmake -S <checkout> -B <checkout>/build/cpu-only -DCMAKE_BUILD_TYPE=RelWithDebInfo -DTM_ENABLE_CUDA=OFF -DTM_BUILD_TESTS=OFF -DTM_WERROR=OFF -DTM_BUILD_PYTHON=OFF && cmake --build <checkout>/build/cpu-only --target tracemaker -j 2",
+      "default_executable": "build/cpu-only/src/app/tracemaker",
+      "command": "tracemaker route <in.kicad_pcb> -o <out.kicad_pcb> --work <tracemaker_work> --seed <seed> --threads <threads> --no-gpu --no-kb --json <summary.json>",
+      "cli_verified_from": "src/app/main.cpp at the pinned commit (route subcommand options)",
+      "learned_state": "--no-kb: the cross-run knowledge base is neither read nor written",
+      "determinism_note": "upstream claims output is identical at any --threads under --work; not verified by this protocol",
+      "build_environment": {
+        "os": "Ubuntu 24.04",
+        "cmake": "3.28",
+        "compiler": "g++ 13 (the presets' g++-15 is not needed)",
+        "system_packages": "Boost, Eigen3, SQLite3 and zstd development packages from the host (versions not recorded)",
+        "scratch_prefix_deps": {
+          "nlohmann_json": "v3.11.3 (-DJSON_BuildTests=OFF)",
+          "CLI11": "v2.4.2 (-DCLI11_BUILD_TESTS=OFF -DCLI11_BUILD_EXAMPLES=OFF)"
+        },
+        "scratch_prefix_recipe": "clone each at the tag, cmake -S <src> -B <src>/b -DCMAKE_INSTALL_PREFIX=/tmp/fleet/prefix && cmake --install <src>/b; then configure TraceMaker with -DCMAKE_PREFIX_PATH=/tmp/fleet/prefix. Nothing is installed on the host."
+      }
+    },
+    "fastroute": {
+      "repo_url": "https://github.com/parisxmas/fastroute",
+      "commit": "e5d52c4544795422b8b28077acc0605fdf11265a",
+      "license_compat": "copyleft-ideas-only",
+      "build": "cargo build --release -p fastroute --locked -j 2",
+      "default_executable": "target/release/fastroute",
+      "command": "fastroute -de <board.dsn> -do <board.ses> --router.autorouter.max_threads=<threads> --router.optimizer.max_threads=<threads> --report=<report.json>",
+      "cli_verified_from": "`fastroute --help` of the pinned build (0.1.7)",
+      "interchange": "DSN from kicad_tools.export.dsn.KiCadToDSNExporter; SES merged back with kicad_tools.export.ses.SESToKiCadImporter into the normalized input",
+      "partial_output_note": "fastroute rewrites the .ses with the best board so far, so a partial session exists at timeout; the row stays `timeout`"
+    },
+    "kct": {
+      "command": "kct route <in.kicad_pcb> -o <out.kicad_pcb> --backend cpp --seed <seed>",
+      "requires": "C++ backend built in the active worktree (`uv run kct build-native`); otherwise the row is tool-failure/native-backend"
+    }
+  },
+  "budgets": {
+    "wall_cap_s": 600,
+    "threads": 1,
+    "seed": 1,
+    "tracemaker_work": 50000000
+  },
+  "stripping_policy": {
+    "name": "strip-tracks-and-vias",
+    "removes": [
+      "segment",
+      "arc",
+      "via"
+    ],
+    "scope": "top-level children of (kicad_pcb ...) only; nested forms such as arcs in zone outlines are untouched",
+    "preserves": [
+      "footprints and pads (placement, rotation, side, pad nets)",
+      "board outline",
+      "zones (keepout and copper; fills are recomputed by the referee)",
+      "rule areas",
+      "layer stack and setup",
+      "net table",
+      "graphics and text"
+    ],
+    "applies_to": "every included board identically; fixed-placement baseline only (preserved-copper, fanout and length-tuning variants are separate, not mixed into baseline rows)"
+  },
+  "referee": {
+    "drc": "kicad-cli pcb drc --refill-zones --severity-all --all-track-errors --format json --units mm --save-board",
+    "manufacturing": "kct check engine (kicad_tools.benchmark.external.metrics.run_kct_check, manufacturer jlcpcb, board's copper layer count)",
+    "sync": "kct validate --sync -s <frozen .kicad_sch> -p <graded .kicad_pcb> --format json",
+    "rules": "every output is graded in a fresh directory beside copies of the frozen .kicad_pro and .kicad_dru; tool-emitted rule files are never used",
+    "unavailable": "a referee that does not run is recorded as ran=false / null, never 0, and blocks clean_pass=true"
+  },
+  "boards": [
+    {
+      "key": "00",
+      "dir": "boards/00-simple-led",
+      "status": "included",
+      "stem": "simple_led",
+      "input": {
+        "path": "boards/00-simple-led/output/simple_led.kicad_pcb",
+        "sha256": "966ea56c48d9093388837d6937586537197a55d57f0c441ac5187f9e42ee807e"
+      },
+      "input_copper": {
+        "segments": 0,
+        "arcs": 0,
+        "vias": 0,
+        "zones": 0
+      },
+      "copper_layers": 2,
+      "project": {
+        "path": "boards/00-simple-led/output/simple_led.kicad_pro",
+        "sha256": "3caf1e78675ae98ed2583327391677b4ce51e4f2fd712c2c155529f81476265a"
+      },
+      "dru": {
+        "path": "boards/00-simple-led/output/simple_led_routed.kicad_dru",
+        "sha256": "b1be95e9fb56ff826f5ca6d9ee9b5c085987f1257ec1cd0e8d41c23e0f396f81",
+        "provenance": "kct-managed fab floors",
+        "note": "sibling of the committed routed reference; manufacturer rules, not router tuning"
+      },
+      "schematic": {
+        "path": "boards/00-simple-led/output/simple_led.kicad_sch",
+        "sha256": "0af2bb15d959931f4c3880569199596aa497fac1fd631594b76739c45327d8d0"
+      },
+      "routing_sidecars": []
+    },
+    {
+      "key": "01",
+      "dir": "boards/01-voltage-divider",
+      "status": "included",
+      "stem": "voltage_divider",
+      "input": {
+        "path": "boards/01-voltage-divider/output/voltage_divider.kicad_pcb",
+        "sha256": "8a64019d0c7e5a57ff164b63b527463f8322d35d2d824372ee28ab6fedb80c68"
+      },
+      "input_copper": {
+        "segments": 0,
+        "arcs": 0,
+        "vias": 0,
+        "zones": 0
+      },
+      "copper_layers": 2,
+      "project": {
+        "path": "boards/01-voltage-divider/output/voltage_divider.kicad_pro",
+        "sha256": "d729bd613d8798b7b1b3acf39d153f8447342e393587afff543b1c21a3e3f5c9"
+      },
+      "dru": {
+        "path": "boards/01-voltage-divider/output/voltage_divider_routed.kicad_dru",
+        "sha256": "d9816b36c04dc038b445b0d44943e1bd879c7a69f00b12a496de346e23ed70e0",
+        "provenance": "kct-managed fab floors",
+        "note": "sibling of the committed routed reference; manufacturer rules, not router tuning"
+      },
+      "schematic": {
+        "path": "boards/01-voltage-divider/output/voltage_divider.kicad_sch",
+        "sha256": "87139fcec70f847f6a343576c95a52501d8bfef7db92468a5f651beb288cdd50"
+      },
+      "routing_sidecars": []
+    },
+    {
+      "key": "02",
+      "dir": "boards/02-charlieplex-led",
+      "status": "included",
+      "stem": "charlieplex_3x3",
+      "input": {
+        "path": "boards/02-charlieplex-led/output/charlieplex_3x3.kicad_pcb",
+        "sha256": "848a242b0b3ba6a623aa7a03969adefa457905610bff49da022e8acdc3432b8d"
+      },
+      "input_copper": {
+        "segments": 0,
+        "arcs": 0,
+        "vias": 0,
+        "zones": 0
+      },
+      "copper_layers": 2,
+      "project": {
+        "path": "boards/02-charlieplex-led/output/charlieplex_3x3.kicad_pro",
+        "sha256": "c151d047aecc35b8dcffb8df692c7be105c4864a8cfe66a899aefcdc7689ae38"
+      },
+      "dru": {
+        "path": "boards/02-charlieplex-led/output/charlieplex_3x3_routed.kicad_dru",
+        "sha256": "605daba617abad8a6dc6da2cadac4c6d565eace926791bcd10204a04b060eb46",
+        "provenance": "kct-managed fab floors",
+        "note": "sibling of the committed routed reference; manufacturer rules, not router tuning"
+      },
+      "schematic": {
+        "path": "boards/02-charlieplex-led/output/charlieplex_3x3.kicad_sch",
+        "sha256": "4321516c5b27778d8b810c0c9ef01f9a74959ac64d114b3338fbdc1e4e0c0451"
+      },
+      "routing_sidecars": [
+        {
+          "path": "boards/02-charlieplex-led/output/net_class_map.json",
+          "sha256": "e865f486a97612a71ad8cc1667a482949ce0ccb4227b96049ba22489b397c9b3"
+        }
+      ]
+    },
+    {
+      "key": "03",
+      "dir": "boards/03-usb-joystick",
+      "status": "included",
+      "stem": "usb_joystick",
+      "input": {
+        "path": "boards/03-usb-joystick/output/usb_joystick.kicad_pcb",
+        "sha256": "3691a5a5775ecde3c7ff28ce35dcaa005837ba16ed6a8ca508a16f1b3382702e"
+      },
+      "input_copper": {
+        "segments": 0,
+        "arcs": 0,
+        "vias": 0,
+        "zones": 4
+      },
+      "copper_layers": 4,
+      "project": {
+        "path": "boards/03-usb-joystick/output/usb_joystick.kicad_pro",
+        "sha256": "09c8746ffab5b0449d13f3b777d87c4786c2abc2cfa2df7eb796e12f83822c05"
+      },
+      "dru": {
+        "path": "boards/03-usb-joystick/output/usb_joystick_routed.kicad_dru",
+        "sha256": "c44d93c7564deb55af71cc3effd698cf79c8d29362f04e0d95268aaab0dd3e93",
+        "provenance": "kct-managed fab floors",
+        "note": "sibling of the committed routed reference; manufacturer rules, not router tuning"
+      },
+      "schematic": {
+        "path": "boards/03-usb-joystick/output/usb_joystick.kicad_sch",
+        "sha256": "f5e844b79f26bad1174a406b5fc51b35303fc44bd2a20806a47d5aeb62ba5e30"
+      },
+      "routing_sidecars": [
+        {
+          "path": "boards/03-usb-joystick/output/net_class_map.json",
+          "sha256": "7cd983fbef924a0a3ed934e129fd7a79dd60830a194ea786fca8e74294f53268"
+        }
+      ]
+    },
+    {
+      "key": "04",
+      "dir": "boards/04-stm32-devboard",
+      "status": "included",
+      "stem": "stm32_devboard",
+      "input": {
+        "path": "boards/04-stm32-devboard/output/stm32_devboard.kicad_pcb",
+        "sha256": "06dd6711d0eebddf65d74f2e4015e3751cd01f0d9e31858ef2a0ea34a6c995dd"
+      },
+      "input_copper": {
+        "segments": 0,
+        "arcs": 0,
+        "vias": 0,
+        "zones": 0
+      },
+      "copper_layers": 2,
+      "project": {
+        "path": "boards/04-stm32-devboard/output/stm32_devboard.kicad_pro",
+        "sha256": "13e8bbe652a672ea673545b4cbb8f0bbf85f3e58999f58d395527833fa665354"
+      },
+      "dru": {
+        "path": "boards/04-stm32-devboard/output/stm32_devboard_routed.kicad_dru",
+        "sha256": "7e654117eb597b5596d55075cd11cc70de9002d7a76d30c53f76230a9583c7a2",
+        "provenance": "kct-managed fab floors",
+        "note": "sibling of the committed routed reference; manufacturer rules, not router tuning"
+      },
+      "schematic": {
+        "path": "boards/04-stm32-devboard/output/stm32_devboard.kicad_sch",
+        "sha256": "189d8345864f18fc4838aa047f664d5859309ef12fe98115654fca2f2d31c0d5"
+      },
+      "routing_sidecars": []
+    },
+    {
+      "key": "05",
+      "dir": "boards/05-bldc-motor-controller",
+      "status": "included",
+      "stem": "bldc_controller",
+      "input": {
+        "path": "boards/05-bldc-motor-controller/output/bldc_controller.kicad_pcb",
+        "sha256": "ab26025538bae070c8090a9080706caab667b463dfadb463291813e2a594cbc1"
+      },
+      "input_copper": {
+        "segments": 0,
+        "arcs": 0,
+        "vias": 0,
+        "zones": 0
+      },
+      "copper_layers": 4,
+      "project": {
+        "path": "boards/05-bldc-motor-controller/output/bldc_controller.kicad_pro",
+        "sha256": "3dc23815199999d4f6d55c47d8e8ab0ec3edd4b6f5a20af9e85d26da5568fbd2"
+      },
+      "dru": {
+        "path": "boards/05-bldc-motor-controller/output/bldc_controller_routed.kicad_dru",
+        "sha256": "8d2a82b2bef304dda540b329fcca1520b1addee2f489bf094e3b678d042b1d76",
+        "provenance": "kct-managed fab floors",
+        "note": "sibling of the committed routed reference; manufacturer rules, not router tuning"
+      },
+      "schematic": {
+        "path": "boards/05-bldc-motor-controller/output/bldc_controller.kicad_sch",
+        "sha256": "e4f91070301fa9977446b0d483fb72bcdb8bc1d37dbc55b5930f5bd0464e3d3e"
+      },
+      "routing_sidecars": []
+    },
+    {
+      "key": "06",
+      "dir": "boards/06-diffpair-test",
+      "status": "included",
+      "stem": "diffpair_test",
+      "input": {
+        "path": "boards/06-diffpair-test/output/diffpair_test.kicad_pcb",
+        "sha256": "ad7d37cfe6241da7c1f826c1bfc72b9c383fad47975668958b201a5655faccc0"
+      },
+      "input_copper": {
+        "segments": 118,
+        "arcs": 0,
+        "vias": 54,
+        "zones": 2
+      },
+      "copper_layers": 4,
+      "project": {
+        "path": "boards/06-diffpair-test/output/diffpair_test.kicad_pro",
+        "sha256": "48e2bf25ed4c9aa03d2bd7b818adedcfad1d524134b3d3e97cfe816ad395567c"
+      },
+      "dru": {
+        "path": "boards/06-diffpair-test/output/diffpair_test_routed.kicad_dru",
+        "sha256": "825b4a72d64154263d5c41685256590510d5358a7b8b3fdac45ac31a3052c466",
+        "provenance": "kct-managed fab floors",
+        "note": "sibling of the committed routed reference; manufacturer rules, not router tuning"
+      },
+      "schematic": {
+        "path": "boards/06-diffpair-test/output/diffpair_test.kicad_sch",
+        "sha256": "ee5a00408ae5906eff4738c24c51b58351771ac02264148fb9da821924ee95e5"
+      },
+      "routing_sidecars": [
+        {
+          "path": "boards/06-diffpair-test/output/net_class_map.json",
+          "sha256": "a90e951b52272de3503cea92f7bec351201694ef0ee1b4e2ff3ed4a8493c2740"
+        }
+      ]
+    },
+    {
+      "key": "07",
+      "dir": "boards/07-matchgroup-test",
+      "status": "included",
+      "stem": "matchgroup_test",
+      "input": {
+        "path": "boards/07-matchgroup-test/output/matchgroup_test.kicad_pcb",
+        "sha256": "d13e663fa64f0d1e6bec05a5fa5fb25cc9201266ac064adf8d93d81d6501b7e0"
+      },
+      "input_copper": {
+        "segments": 3742,
+        "arcs": 0,
+        "vias": 170,
+        "zones": 2
+      },
+      "copper_layers": 6,
+      "project": {
+        "path": "boards/07-matchgroup-test/output/matchgroup_test.kicad_pro",
+        "sha256": "f6ee5e69e9cd153a3ca4b57f8fa9005f8c755774db97a6c5a6ad0c6378b79198"
+      },
+      "dru": {
+        "path": "boards/07-matchgroup-test/output/matchgroup_test_routed.kicad_dru",
+        "sha256": "4b7ed2eb30f225d6c18d7f4c8275a1cca926c338860d63fe23e39a714efa2cde",
+        "provenance": "kct-managed fab floors",
+        "note": "sibling of the committed routed reference; manufacturer rules, not router tuning"
+      },
+      "schematic": {
+        "path": "boards/07-matchgroup-test/output/matchgroup_test.kicad_sch",
+        "sha256": "05f2af8d5651439fb9cb5d491d8a408779ff2f36d4ee9925cc3fccea767c3546"
+      },
+      "routing_sidecars": [
+        {
+          "path": "boards/07-matchgroup-test/output/net_class_map.json",
+          "sha256": "585f0a4f1611d7582fdbe257465fde740d31ad7badec1dd6982bcca9cb4b3c28"
+        },
+        {
+          "path": "boards/07-matchgroup-test/output/sdram_constraints.json",
+          "sha256": "0916629d2f25c3e3a68e233ec05b85c6e578fd6fd54447204d28eb4153e39628"
+        }
+      ]
+    },
+    {
+      "key": "08",
+      "dir": "boards/08-precision-acquisition",
+      "status": "excluded",
+      "exclusion_reason": "no committed .kicad_pcb at this revision"
+    },
+    {
+      "key": "09",
+      "dir": "boards/09-usbc-pd-power",
+      "status": "included",
+      "stem": "usbc_pd_power",
+      "input": {
+        "path": "boards/09-usbc-pd-power/output/usbc_pd_power.kicad_pcb",
+        "sha256": "bb0753f8f98fbd787891589fe3d20b012ff919b154318482f558e46885f6fed3"
+      },
+      "input_copper": {
+        "segments": 318,
+        "arcs": 0,
+        "vias": 92,
+        "zones": 2
+      },
+      "copper_layers": 4,
+      "project": {
+        "path": "boards/09-usbc-pd-power/output/usbc_pd_power.kicad_pro",
+        "sha256": "46e70ad622f62a250039b8ed3a792497b33bf6c7a0d18eb689a5f513a4ae2c22"
+      },
+      "dru": {
+        "path": null,
+        "absent": true,
+        "provenance": "absent",
+        "note": "no .kicad_dru at this revision; graded on .kicad_pro alone"
+      },
+      "schematic": {
+        "path": "boards/09-usbc-pd-power/output/usbc_pd_power.kicad_sch",
+        "sha256": "025ed270feacb0d33557cdfcbb5e14cb8f6b7c814d76579a7ee170ae65b338a7"
+      },
+      "routing_sidecars": [
+        {
+          "path": "boards/09-usbc-pd-power/output/net_class_map.json",
+          "sha256": "52ea7075492770de56fc8f9eff9d405f02a56f3c9bb2f6ba210919cf8123b5b0"
+        }
+      ]
+    }
+  ]
+}

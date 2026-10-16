@@ -20,8 +20,7 @@ below.
 > operator steering has landed as phase 3b (#7947) — the persona that reads
 > intent and drives the typed surface is the `concierge` role, see
 > [Operator-agent persona: the Concierge](#operator-agent-persona-the-concierge-phase-3b-7947),
-> and the *typed* surface it drives is
-> [Inbound steering: ChatOps](#inbound-steering-chatops-phase-3a-7893);
+> and the typed ChatOps surface it drove has been removed (#11112);
 > carrying the judge verdict value in an event
 > payload (needs a frozen-taxonomy amendment) → follow-up; the **atomic
 > cross-host claim authority** (a real CAS behind the soft claim) → Phase 2 of
@@ -47,7 +46,6 @@ below.
 - [Delivery: session-scoped `--mcp-config` at spawn time](#delivery-session-scoped---mcp-config-at-spawn-time)
 - [Degradation contract (unchanged from phase 1)](#degradation-contract-unchanged-from-phase-1)
 - [Implementation (phase 2)](#implementation-phase-2)
-- [Inbound steering: ChatOps (phase 3a, #7893)](#inbound-steering-chatops-phase-3a-7893)
 - [Operator-agent persona: the Concierge (phase 3b, #7947)](#operator-agent-persona-the-concierge-phase-3b-7947)
 - [The daemon speaking first: digests and watch narrations (phase 4, #8762)](#the-daemon-speaking-first-digests-and-watch-narrations-phase-4-8762)
 <!-- toc:end -->
@@ -55,7 +53,7 @@ below.
 ## The degradation contract (read this first)
 
 Safehouse is a **best-effort side-channel with no hard dependency** — it mirrors
-the claude-monitor optional-integration pattern. **Loom never blocks a sweep on
+the llm-monitor (formerly claude-monitor) optional-integration pattern. **Loom never blocks a sweep on
 safehouse.** Concretely:
 
 - `safehouse.enabled` false/absent ⇒ **byte-for-byte no-op**: the daemon does
@@ -78,13 +76,13 @@ default(disabled)**:
   "socket": null,         // default: $SAFEHOUSED_SOCKET
   "room": null,           // omit only if safehoused joined exactly one room
   "persona": "loom_daemon",
-  "operatorMention": null // who an operator-priority escalation pings (#9321)
+  "operatorMention": null // who an operator escalation pings (#9321)
   // "rooms": { … }       // optional attention-class routing — see below (#4225)
 }
 ```
 
 **`operatorMention` is a handle, not a credential.** It is the Matrix display
-name or user id (`"@operator:example.org"`) prepended to an operator-priority
+name or user id (`"@operator:example.org"`) prepended to an operator
 escalation line so the room actually notifies a human (#9321). Nothing about it
 authenticates anything — the `persona` does that — so it belongs beside the room
 ids rather than in an owner-only credential store. Leave it `null` and the
@@ -596,14 +594,14 @@ each one lands in is decided by its envelope `type` — see
 `ack` / `completion` (blockers, crashes, terminal outcomes) go to the signal room.
 With no `rooms` map configured they all go to the one `room`, as before.
 
-### Operator-priority escalations (#9321)
+### Operator escalations (#9321)
 
-`operator_priority.escalation` — a starred (`loom:operator-priority`) issue that
-reached a state only the operator can move — is narrated as a **`handoff`**, so
-it lands in the signal room the operator actually watches rather than a muted
-per-repo firehose. That routing *is* the feature: the escalation already exists
-as a forge comment (#9301), and a forge comment is what nobody read for seven
-hours in #9268.
+`operator_priority.escalation` — something only the operator can move — is
+narrated as a **`handoff`**, so it lands in the signal room the operator
+actually watches rather than a muted per-repo firehose. Its first publisher,
+the star-liveness pass (a starred issue's forge escalation comment), was
+removed by #11104; today the fleet-degraded alert (#10164) publishes it, with
+issue `0` for a host-level condition.
 
 ```
 @operator:example.org: loom#9268 · OPERATOR NEEDED · merge-refused at needs-operator
@@ -613,23 +611,15 @@ https://github.com/rjwalters/loom/issues/9268 · observed by host-a
 
 - **The mention** comes from `safehouse.operatorMention` above; unset ⇒ the same
   line without the ping, never a dropped ask.
-- **Exactly one post per ask, fleet-wide.** The publisher emits only on the pass
-  that actually posts that ask's forge comment, so the comment's
-  `<!-- loom:operator-priority-escalation key=<kind>:<specifics> -->` marker —
-  already the fleet's shared lock — is the *only* dedupe: no repeat across
-  ticks (a per-process ledger), across hosts (a peer finds the marker), or
-  across restarts (the marker is re-read). A non-starred issue produces no
-  liveness row, hence no post.
+- **Dedupe is the publisher's.** The sink is a pure relay; the fleet-alert
+  state machine emits once per condition key (debounced, with reminders).
 - **Recovery.** When the ask clears, one `resolved ✓` line lands in the same
   thread, **without** re-pinging the operator — summoning a human to say
-  "never mind" is noise. Only the host that announced the ask narrates its
-  recovery, and a repo whose pass could not be read resolves nothing (an
-  unreadable repo must not read as "everything cleared").
+  "never mind" is noise.
 - **No `meta`.** Envelope-v1 allows `meta` only on a `completion`, so every fact
   the operator needs is in the body; the structured payload stays on the bus
   event for other consumers.
-- **`safehouse.enabled` false ⇒ unchanged behavior**: the forge comment and the
-  `health`/`status`/`queue` surfaces still carry the ask, nothing reaches Matrix.
+- **`safehouse.enabled` false ⇒ nothing reaches Matrix.**
 
 ### Repo qualification (issue #4201)
 
@@ -732,7 +722,7 @@ safehoused's egress subsystem mirrors well-formed **`completion`** envelopes out
 of allowlisted rooms — redacted and delay-buffered — to a `sink_url`; that is
 what feeds the public fleet feed. Loom is the producer:
 
-- **Emit point (two, since #4583)**:
+- **Emit point (three, since #12152)**:
   1. The narration sink, on `SweepExited`. Exit status alone proves nothing, so
      the sink checks **forge truth** (`gh pr list --head feature/issue-N
      --state merged`, in the event's workspace root, 10s timeout) and emits
@@ -771,6 +761,22 @@ what feeds the public fleet feed. Loom is the producer:
        workspace means narrating months-old PRs as if they just landed. Seven
        days is far beyond any plausible daemon outage, so the daemon-was-down
        case below still recovers.
+     - **Deferred, then caught up from a watermark (#12152)**: while the
+       shared rate-limit breaker cools, a reconciliation tick is *deferred*,
+       not spent: no forge call, the round-robin cursor and the seed-only
+       slot stay, and the pass is counted `deferred`
+       (`loom.feed.reconcile_passes`). Each workspace keeps a watermark, the
+       start of its last pass the forge answered (in memory; a pass whose
+       read failed keeps it). Once a workspace has one, its pass asks for
+       everything merged since then, less one hour of slack for search-index
+       lag: `gh pr list --state merged --search "merged:>=<watermark>"
+       --limit 100`. So a stretch the breaker held the pass out of is read in
+       full on the first tick after it clears, whatever the listing order or
+       the number of PRs merged meanwhile. A full page logs a warning and
+       still advances the watermark. The first pass after a restart has no
+       watermark and is the `--limit 30` query above. Every answered pass logs
+       one `info` line (rows read, completions found, watermark), and the
+       edges of a deferral log one each.
      - **Seed-only first pass per workspace (#4649)**: the lookback window
        alone still allowed a *burst* — up to 30 genuinely-in-window merges
        narrated in one tick — the very first time a workspace was reconciled
@@ -786,6 +792,24 @@ what feeds the public fleet feed. Loom is the producer:
        Trade-off: a merge that landed just before a fresh install is silently
        never narrated, which is acceptable since nothing was watching the feed
        at install time anyway.
+  3. **A Champion merge step's end** (#12152). Since item-first step
+     dispatch (#12009) most work runs as steps, one role session per stage,
+     and a step is not an issue sweep: it never emits `SweepExited`, so path 1
+     stopped firing for it. The step tick publishes `step.item.{N}.ended`
+     (`Event::StepEnded`) once per ended step, after the step ledger has
+     classified it, with the ledger's `class` and `reason`. The sink looks
+     only at a `champion_merge` step whose class is `verdict` and whose reason
+     is not `rejected` (`step_narrates_completion`); a `noop`, `refused` or
+     `failed` step, and every other role's step, narrate nothing and make no
+     forge call. A Builder's opened PR is unfinished work, not a completion,
+     as it was for sweeps. For a qualifying step it reads the PR (`gh pr view
+     <N> --json number,headRefName,url,mergedAt,createdAt,title,additions,
+     deletions`) and narrates only when `mergedAt` is set, with the PR's
+     `createdAt`/`mergedAt` as the clock, the same envelope the
+     reconciliation pass would build. It shares the dedup set (and the peer
+     dedup) with paths 1 and 2, so one merge narrates once whichever path sees
+     it first. While the breaker cools the lookup is skipped and nothing is
+     recorded as narrated, so path 2 picks the merge up.
 - **`meta` (`completion-v1`)**: `{schema, agent, repo, ref, result, started_at,
   completed_at}` required, plus optional `issue`/`tokens`/`tokens_by_model`/
   `title`/`additions`/`deletions`/`visibility` (envelope-v1 preserves unknown
@@ -1719,6 +1743,22 @@ visibility, which #9294 closed:
   fleet-wide outage as ordinary output. A DEGRADED channel now prints a
   `DEGRADED (…)` line with its reason directly under the counters.
 
+### Fleet-wide no-op hold streak (#12024)
+
+The no-op hold (#10156) parks an issue after `holdThreshold` consecutive no-op
+sweeps with an unchanged fingerprint. Its streak used to be per host, so a loop
+spread across six dispatchers never tripped it (ten no-ops in 97 minutes, no
+host above two). Each counted no-op now publishes a `ClaimKind::NoopStreak` ad
+(`noop_streak` on the wire) carrying the sender's **own** count in
+`consecutive` and the fingerprint's digest in a new `fingerprint` field. The
+receiver keeps one entry per host and the counting host adds the peers' counts
+**on the same fingerprint** to its own, so a change to the issue restarts the
+fleet streak without an announcement. Parking or releasing the hold publishes
+a break (`streak_break: true`) that drops every host's entry and resets each
+host's local count. It is a new kind, so an older peer drops it as unknown and
+nothing else on the wire changes. See `peer_claims::noop_streak_tally` and
+[`label-state-machine.md` → No-op hold](label-state-machine.md#no-op-hold-10156).
+
 ### Fleet-wide token-pool exhaustion hold: the third brake lane (#8001)
 
 #7477 above brakes **one issue**. `work_finder::pool_preflight`'s hold (#7708)
@@ -1843,6 +1883,18 @@ One more `ClaimKind` on the same envelope closes it:
   forever. A missing/zero `consecutive` (a pre-#9292 peer) contributes `0`; a
   missing/zero `remaining_secs` reads as an already-elapsed window whose release
   still counts for the streak hour.
+- **Unresolved senders add a window, never a count (#9518).** Every other lane
+  keeps the #5063 carve-out: an `UNKNOWN_HOST` ad is treated as a peer, never as
+  self, because its worst case is a harmless extra backoff. That argument is
+  *window-specific*. This lane sums counts, and an unresolved sender cannot prove
+  its count is disjoint from ours; when the receiver is also `UNKNOWN_HOST` it is
+  very likely our own echoed ad, which would double the tally and trip the hold
+  at about half the threshold. So `observe_prless_release_at` keeps the
+  conservative backoff window for an `UNKNOWN_HOST` ad but stores `0` as its
+  contribution to the peer tally, whatever the receiver's identity. Unidentified
+  senders therefore degrade counting to the exact local count plus any
+  identifiable peers (two unresolved hosts do not count each other). Known self
+  ads are still excluded and known peers still sum.
 - **Degrades to the pre-#9292 tally, loudly.** No publisher/view attached, a
   dropped ad, a pre-#9292 peer, or a poisoned view all reduce the peer term to
   what could be read, leaving this host's own exact count behind. Precondition 1
@@ -1948,207 +2000,6 @@ still resolves the loom entry point.
 > launcher is configurable (`safehouse.mcpCommand`) and a missing command
 > degrades to a logged skip rather than a broken server entry.
 
-## Inbound steering: ChatOps (phase 3a, #7893)
-
-Phase 1 gave the daemon a voice in the room. **Phase 3a gives it an ear** — a
-deliberately tiny one. An allowlisted operator can steer a running
-`loom-daemon` from Element without SSH-ing to the host.
-
-### The boundary (operator ruling, 2026-09-16)
-
-Two layers, not one:
-
-1. **`loom-daemon` keeps a closed, typed command enum.** It never interprets
-   natural language, never builds a shell command from room text, and refuses
-   anything outside the enum with a reply. This layer stays boring and
-   auditable.
-2. **Natural language lives in a separate operator-agent persona** (phase 3b,
-   its own issue) that reads human intent and *uses* this typed surface plus the
-   forge.
-
-### What enabling ChatOps puts in the daemon's TCB
-
-**Read this before turning it on.** Phase 1 was outbound only: safehouse could
-be wrong, absent, or hostile and the worst outcome was a missing room line.
-Inbound steering transfers trust — with `safehouse.chatops` enabled, **your
-homeserver, the room's membership, and `safehoused`'s sender stamping become
-part of the daemon's trusted computing base**:
-
-- **The homeserver** decides which account sent which event. It is the thing
-  that authenticates the operator; the daemon only compares the result against
-  an allowlist.
-- **Room membership** is the perimeter. Anyone who can post to the steering room
-  *as an allowlisted Matrix ID* can steer the daemon — the daemon has no second
-  factor and no separate credential of its own. Room access control is therefore
-  daemon access control.
-- **`safehoused`'s stamping** supplies the identity. The envelope's `from` is
-  stamped by `safehoused` from the local socket identity, never taken from the
-  message body (which is why spoofing is structurally impossible on this side).
-  A `safehoused` that stamps the wrong `from` bypasses the allowlist entirely —
-  the daemon cannot detect it.
-
-What that reach *is*, concretely: the ChatOps path round-trips through the
-daemon's own IPC socket, so an allowlisted sender can do exactly what an
-operator with shell access on that host could already do over IPC, no more —
-but they no longer need the shell access. The mitigations: an explicit allowlist
-(empty ⇒ off), a closed six-verb grammar, and a confirm-nonce on `cancel`. The
-non-mitigations, stated plainly: there is no rate limit, no audit outside the
-daemon's own log and event bus, and no capability the nonce withholds from an
-allowlisted sender.
-
-Treat the steering room as you would an SSH key for the host. A private,
-invite-only room with only operator accounts in it is the intended deployment;
-the signal room (`room`'s default) qualifies only if its membership already
-meets that bar.
-
-### The accepted language, in full
-
-| Command | Maps to | Nonce? |
-|---|---|---|
-| `status` | `Request::DaemonStatus` | no |
-| `dispatch <issue>` | `Request::DispatchSweep` (never `force`) | no |
-| `cancel <sweep-id>` | `Request::CancelSweep` | **yes** |
-| `unblock <issue>` | `Request::ClearQuarantine` | no |
-| `watch <issue>` | `Request::RegisterWatch` | no |
-| `confirm <nonce>` | redeems a pending destructive command | — |
-
-A leading `#` on a number is accepted (`dispatch #7893`). Verbs are
-case-insensitive. Everything else — a sentence, an unknown verb, an extra
-token, a shell metacharacter in an argument — is refused with a reply naming the
-accepted forms. `unblock` deliberately clears the **daemon's insta-crash
-quarantine**, not a forge label: labels remain the coordination substrate.
-
-### The four gates
-
-1. **Addressed to the daemon** — the envelope's `to` equals the persona, or the
-   body opens with an `@loom_daemon` / `loom_daemon:` mention. Anything else in
-   the room is ignored (not refused).
-2. **Sender on the allowlist** — compared against the **`from` safehoused
-   stamps from the socket identity**, never a sender the body claims. A
-   non-allowlisted sender gets a log line and a bus event, and deliberately
-   **no room reply** (replying would make the daemon an echo an unauthorized
-   party can drive).
-3. **Parses to a command** — see above.
-4. **Confirm-nonce for destructive commands** — `cancel` is answered with a
-   single-use nonce; the daemon executes only on `confirm <nonce>` from the
-   **same** sender within the TTL. Expired, replayed, and other-sender
-   confirmations are all refused. The nonce is never logged and never published
-   on the bus.
-
-Every accepted and refused command is logged **and** published on the event bus
-with the stamped sender identity, under `safehouse.chatops.accepted` /
-`.refused` / `.confirm_required`. These ride `Event::Generic`, so the frozen
-event taxonomy is unchanged and the audit trail is never narrated back into the
-room (no feedback loop).
-
-### Why `dispatch` is not nonce-gated (decision, #8021)
-
-`cancel` needs a confirm-nonce and `dispatch` does not, which is the asymmetry
-worth explaining: `dispatch` is the only forge-mutating verb and the only one
-that *spends* — tokens, shared forge API budget, and label churn on a real
-issue. "Gate the money verb too" was reconsidered explicitly and **declined**:
-
-- **The nonce is not a second authentication factor.** It is minted by the
-  daemon and delivered into the same room, to the same sender, over the same
-  channel. Anyone who can send as an allowlisted sender can also read the reply
-  and echo the nonce back. It defends against *accident and replay* — never
-  against a compromised sender — so it cannot be the control that protects
-  spend.
-- **Gating the common verb is what breaks the gate on the dangerous one.**
-  `dispatch` is the routine verb; a confirm round-trip on every one of them
-  trains a reflex, and a reflexive `confirm` is worse than no confirm at all for
-  `cancel`, which is the case the nonce exists for.
-- **A spurious dispatch is bounded and reversible.** It is never `force`, it is
-  subject to the daemon's ordinary concurrency caps / noop cooldown / dispatch
-  backoff, it is narrated into the room, and it can be `cancel`led (with a
-  nonce). A spurious `cancel` destroys in-flight work that re-running cannot
-  restore.
-- **ChatOps grants reach, not capability.** Every verb round-trips the daemon's
-  own IPC socket, where `dispatch` is ungated as well. A second factor at only
-  one of the two surfaces advertises a protection that does not exist.
-
-The accepted cost, stated so it is a choice and not an oversight: **an
-allowlisted sender can make this daemon spend tokens and forge budget with no
-second factor.** The allowlist plus the room's membership is the whole control
-(see the TCB section above).
-
-Revisit this if `dispatch` ever gains `force`, or if a verb arrives whose spend
-is unbounded per message (e.g. a multi-issue dispatch).
-`Command::requires_confirmation` in
-`loom-daemon/src/safehouse_chatops/command.rs` is the single place
-destructiveness is decided — adding a gated verb is one match arm there.
-
-### Configuration — off unless this block is present
-
-```jsonc
-"safehouse": {
-  // …phase 1 keys…
-  "chatops": {
-    "enabled": true,                                  // omit ⇒ on when the block exists
-    "allowedSenders": ["@you:example.org"],           // REQUIRED; empty ⇒ stays off
-    "room": null,                                     // default: the signal room
-    "confirmTtlSecs": 120                             // clamped to [10, 3600]
-  }
-}
-```
-
-| Env var | Overrides |
-|---|---|
-| `LOOM_SAFEHOUSE_CHATOPS_ENABLED` | `enabled` |
-| `LOOM_SAFEHOUSE_CHATOPS_SENDERS` | `allowedSenders`, comma/space separated |
-| `LOOM_SAFEHOUSE_CHATOPS_ROOM` | `room` |
-| `LOOM_SAFEHOUSE_CHATOPS_CONFIRM_TTL_SECS` | `confirmTtlSecs` |
-
-**Fail-closed by construction.** No `safehouse.chatops` block (or
-`safehouse.enabled` false) ⇒ no task, no socket, no subscription — an install
-without safehouse is byte-for-byte unaffected. A block naming no *usable* Matrix
-ID (`@localpart:server`) resolves to off with one `warn`, rather than to an
-enabled-but-accepts-nobody state.
-
-**`enabled` is parsed strictly (#8021).** Omitted ⇒ on (the block's presence is
-the opt-in); the literals `true` / `false` mean what they say; **anything that
-is not a JSON boolean means off, with a `warn`**. `"enabled": "false"` — the
-string, not the literal — is a realistic hand-edit typo, and it must not switch
-an inbound control channel on. `LOOM_SAFEHOUSE_CHATOPS_ENABLED` follows the same
-rule: set but unparseable is `false`, not "unset".
-
-**`room` defaults to the signal room, not `rooms.claims`.** Peer-claim traffic
-may be routed to a dedicated machine-chatter room (#4713) no human is joined to;
-steering must land where the operator actually is.
-
-### Implementation (phase 3a)
-
-- `loom-daemon/src/safehouse_chatops.rs` — config resolution, addressing, the
-  allowlist/parse/nonce router, event publication.
-- `loom-daemon/src/safehouse_chatops/command.rs` — the closed enum + parser.
-- `loom-daemon/src/safehouse_chatops/nonce.rs` — the single-use, TTL-bounded,
-  sender-bound confirmation ledger.
-- `loom-daemon/src/safehouse_chatops/runtime.rs` — the inbound task (one
-  dedicated connection built from phase 1's `SafehouseClient`, same
-  capped-backoff reconnect shape) and the `Command` → `Request` mapping,
-  round-tripped over the daemon's own IPC socket so the ChatOps path can never
-  do more than the operator could already do over IPC.
-- Started from `WorkspacePool::start_peer_coordination`, so inbound steering
-  shares one enablement decision with the rest of the daemon's room presence.
-
-> A sibling module rather than a `safehouse::` submodule because `safehouse.rs`
-> is frozen by the file-size ratchet ([file-size-policy.md](https://github.com/rjwalters/loom/blob/main/.loom/docs/file-size-policy.md)) — new
-> code lands in a new module, which is exactly what the ratchet is for.
-
-**Two structural properties a refactor must not quietly drop** (recorded because
-they are load-bearing and easy to lose, #8021):
-
-1. **Sender spoofing is impossible by construction, not by validation.**
-   `safehouse::Envelope` has no `from` field at all, so a client *cannot* assert
-   an identity; `safehoused` stamps it from the socket identity. Adding a
-   writable `from` to the envelope would turn the allowlist into a
-   self-attestation check.
-2. **The command enum is genuinely closed.** `Command` derives no
-   `Deserialize`, so there is no `#[serde(other)]` arm and no untagged fallback,
-   and `Verb::from_word` returns `Option` with an explicit `_ => None`. Deriving
-   `Deserialize` on it later — for a config file, a test fixture, anything —
-   would reopen it.
-
 ## Operator-agent persona: the Concierge (phase 3b, #7947)
 
 Phase 3a gave the daemon an ear that understands six typed verbs. **Phase 3b is
@@ -2193,8 +2044,7 @@ unrepresentable on **both** out-paths, not just on `relay`.
 
 ### `dispatch` is gated here even though it is not gated at the daemon
 
-3a leaves `dispatch` un-nonced on purpose (see
-[Why `dispatch` is not nonce-gated](#why-dispatch-is-not-nonce-gated-decision-8021)):
+3a leaves `dispatch` un-nonced on purpose (decision #8021):
 gating the routine verb trains a reflexive `confirm` that ruins the gate on the
 dangerous one. **That reasoning is about a human typing `dispatch 42`
 deliberately.** The concierge turns a probabilistic read of prose into the same
@@ -2283,7 +2133,7 @@ accepts-nobody config that still reports as enabled.
 **Two independent opt-ins, because one of them is a chat room.** The
 `concierge` role is excluded from the role runner's "unset `roles` ⇒ all
 defaults" fallback (like `architect`), **and** gated a second time on this block
-resolving (`role_runner::role_is_config_gated`). Naming it in
+resolving (a role-runner config gate, removed in #11112). Naming it in
 `autonomous.roleRunner.roles` is not sufficient. An install without safehouse,
 or with safehouse but without this block, is byte-for-byte unaffected: no role
 tick, no budget file, no socket, no listener.
@@ -2378,9 +2228,7 @@ and gets exactly today's read-only narrator.
 
 ### Implementation (phase 3b)
 
-- `defaults/.claude/commands/loom/concierge.md` — the role prompt (symlinked as
-  `defaults/roles/concierge.md`), with `defaults/roles/concierge.json` for
-  cadence metadata.
+- The concierge role prompt and its cadence metadata (removed in #11112).
 - `loom-daemon/src/concierge.rs` — config resolution, the sender allowlist.
 - `loom-daemon/src/concierge/intent.rs` — `RoomMessage`, the injection scan, the
   five-variant `Verb`, and the conservative prose → `Proposal` map.
@@ -2393,7 +2241,8 @@ and gets exactly today's read-only narrator.
 - `loom-daemon/src/concierge/budget.rs` — the per-tick + per-day ledger.
 - `loom-daemon/src/cli/concierge.rs` — the six subcommands above.
 - `loom-daemon/src/role_runner.rs` — the `concierge` `RoleSpec` (300s listening
-  cadence, `interval_default: false`) and `role_is_config_gated`.
+  cadence, `interval_default: false`) and its config gate (both removed in
+  #11112).
 
 > Out of scope here, as in 3a: any widening of the daemon's typed enum. Phase 4
 > (interface parity, digests, watch-results posted into the room) landed as
@@ -2457,7 +2306,7 @@ digest's suppression makes a listening cadence safe for a summary cadence.
 
 ### What the persona may and may not do with them
 
-The concierge prompt (`.loom/roles/concierge.md`) carries the one-line rule —
+The concierge prompt (removed in #11112) carried the one-line rule —
 "you run them, you never author, re-render, or continue them". The reasoning
 behind each clause lives here, so the always-loaded prompt does not pay for it:
 

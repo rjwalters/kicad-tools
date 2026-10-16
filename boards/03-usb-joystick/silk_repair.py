@@ -546,3 +546,221 @@ def repair_board_silk_pad_clearance(
             "footprint geometry -- do not ship silk the fabricator will clip."
         )
     return result
+
+
+# --- Silk-to-board-edge clip (Issue #6494) ----------------------------------
+#
+# J1 (GCT USB4085 USB-C) is placed overhanging the top board edge by design,
+# and its library body outline has two vertical ``fp_line``s that end 0.2 mm
+# off the edge: with the 0.15 mm stroke of #5762 the ink sits 0.125 mm from
+# Edge.Cuts, under the 0.20 mm ``silk_edge_clearance`` floor.  The fix is the
+# fabricator's: clip the silk back from the edge.
+#
+# The floor is ``SILK_EDGE_CLEARANCE_MM`` -- the very constant the rule
+# measures against -- never a literal or a profile field, so the two cannot
+# drift.  The rule measures ``LineString.buffer(width / 2)`` (round caps)
+# against the outline as a ``MultiLineString``, i.e. distance to the outline
+# LINE on either side, so the clip is against the outline line too: silk that
+# overhangs the board keeps whatever part of it is clear of the edge.
+
+
+@dataclass
+class SilkEdgeTrimResult:
+    """What a :func:`trim_silk_to_edge_clearance` pass did."""
+
+    minimum_mm: float = 0.0
+    lines_examined: int = 0
+    lines_trimmed: int = 0
+    lines_removed: int = 0
+    lines_added: int = 0
+    trimmed_references: list[str] = field(default_factory=list)
+    # ``silk_edge_clearance`` findings still present after the pass,
+    # re-measured with the real rule on the written bytes.
+    residual: list[str] = field(default_factory=list)
+
+    @property
+    def changed(self) -> bool:
+        return bool(self.lines_trimmed or self.lines_removed or self.lines_added)
+
+
+def silk_edge_floor() -> float:
+    """The ``silk_edge_clearance`` rule's own floor (``SILK_EDGE_CLEARANCE_MM``)."""
+    from kicad_tools.silkscreen._silk_defaults import SILK_EDGE_CLEARANCE_MM
+
+    return SILK_EDGE_CLEARANCE_MM
+
+
+def trim_silk_to_edge_clearance(
+    pcb_path: Path,
+    *,
+    minimum_mm: float | None = None,
+    output_path: Path | None = None,
+) -> SilkEdgeTrimResult:
+    """Clip footprint silk lines that crowd the ``Edge.Cuts`` outline.
+
+    Each silkscreen ``fp_line`` whose stroke comes within ``minimum_mm`` of
+    the outline has its centerline clipped against the outline line buffered
+    by ``minimum_mm + stroke_width / 2`` (+ :data:`SAFETY_MM`).  Surviving
+    pieces are written back (several lines if the clip split one); remnants
+    shorter than :data:`MIN_SEGMENT_MM` are dropped, so a line lying wholly
+    inside the edge band disappears while a line crossing the edge keeps both
+    of its clear ends.  Lines already clear are left byte-identical.
+
+    Args:
+        pcb_path: Board to repair (read, and written back unless
+            ``output_path`` is given).
+        minimum_mm: Edge floor; defaults to :func:`silk_edge_floor`.
+        output_path: Optional separate destination.
+
+    Returns:
+        A :class:`SilkEdgeTrimResult`; ``residual`` is non-empty when any
+        ``silk_edge_clearance`` finding survives (callers must fail loud).
+    """
+    from shapely.geometry import LineString, MultiLineString
+
+    if minimum_mm is None:
+        minimum_mm = silk_edge_floor()
+    pcb = PCB.load(pcb_path)
+    result = SilkEdgeTrimResult(minimum_mm=minimum_mm)
+
+    segments = pcb.get_board_outline_segments()
+    if segments:
+        outline = MultiLineString([[start, end] for start, end in segments])
+        for footprint in pcb.footprints:
+            footprint_node = footprint._sexp_node
+            if footprint_node is None:  # pragma: no cover -- linked by PCB.__init__
+                raise ValueError(f"Footprint {footprint.reference} has no linked S-expression node")
+            fp_x, fp_y, cos_rot, sin_rot = _footprint_frame(footprint)
+            reference = footprint.reference
+
+            def to_board(
+                point: tuple[float, float],
+                fp_x: float = fp_x,
+                fp_y: float = fp_y,
+                cos_rot: float = cos_rot,
+                sin_rot: float = sin_rot,
+            ) -> tuple[float, float]:
+                lx, ly = point
+                return (fp_x + lx * cos_rot - ly * sin_rot, fp_y + lx * sin_rot + ly * cos_rot)
+
+            def to_local(
+                point: tuple[float, float],
+                fp_x: float = fp_x,
+                fp_y: float = fp_y,
+                cos_rot: float = cos_rot,
+                sin_rot: float = sin_rot,
+            ) -> tuple[float, float]:
+                dx, dy = point[0] - fp_x, point[1] - fp_y
+                return (dx * cos_rot + dy * sin_rot, -dx * sin_rot + dy * cos_rot)
+
+            replaced: dict[int, list[Any]] = {}
+            for node in list(footprint_node.children):
+                if node.name != "fp_line":
+                    continue
+                layer_node = node.find_child("layer")
+                if layer_node is None or layer_node.get_string(0) not in SILK_LAYERS:
+                    continue
+                width = _stroke_width_of(node)
+                start = to_board(_points_of(node, "start"))
+                end = to_board(_points_of(node, "end"))
+                if start == end:
+                    continue
+                result.lines_examined += 1
+                centerline = LineString([start, end])
+                halo = minimum_mm + width / 2.0
+                if centerline.distance(outline) + DRC_TOLERANCE >= halo:
+                    continue
+
+                keepout = outline.buffer(halo + SAFETY_MM, quad_segs=_BUFFER_QUAD_SEGS)
+                remaining = centerline.difference(keepout)
+                if remaining.is_empty:
+                    pieces: list[Any] = []
+                elif isinstance(remaining, MultiLineString):
+                    pieces = list(remaining.geoms)
+                else:
+                    pieces = [remaining]
+                pieces = [p for p in pieces if p.length >= MIN_SEGMENT_MM]
+                result.trimmed_references.append(reference)
+                if not pieces:
+                    replaced[id(node)] = []
+                    result.lines_removed += 1
+                    continue
+                result.lines_trimmed += 1
+
+                rewritten: list[Any] = []
+                for index, piece in enumerate(pieces):
+                    coords = list(piece.coords)
+                    if index == 0:
+                        clone = node
+                    else:
+                        clone = parse_string(serialize_sexp(node))
+                        clone.remove_child("uuid")
+                        clone.add(
+                            parse_string(
+                                f'(uuid "{_uuid.uuid5(_SPLIT_NAMESPACE, f"edge:{reference}:{coords}")}")'
+                            )
+                        )
+                        result.lines_added += 1
+                    for tag, point in (("start", coords[0]), ("end", coords[-1])):
+                        local = to_local(point)
+                        child = clone.find_child(tag)
+                        child.set_value(0, round(local[0], 6))
+                        child.set_value(1, round(local[1], 6))
+                    rewritten.append(clone)
+                replaced[id(node)] = rewritten
+
+            if replaced:
+                children: list[Any] = []
+                for child in footprint_node.children:
+                    children.extend(replaced.get(id(child), [child]))
+                footprint_node.children = children
+
+    result.trimmed_references = sorted(set(result.trimmed_references))
+    written = Path(output_path) if output_path is not None else Path(pcb_path)
+    if result.changed or output_path is not None:
+        pcb.save(written)
+    result.residual = residual_edge_violations(written)
+    return result
+
+
+def residual_edge_violations(pcb_path: Path) -> list[str]:
+    """Re-measure ``silk_edge_clearance`` with the real rule, on real bytes."""
+    from kicad_tools.manufacturers.base import DesignRules
+    from kicad_tools.validate.rules.silkscreen import check_silk_edge_clearance
+
+    rules = DesignRules(
+        min_trace_width_mm=0.0,
+        min_clearance_mm=0.0,
+        min_via_drill_mm=0.0,
+        min_via_diameter_mm=0.0,
+        min_annular_ring_mm=0.0,
+    )
+    return sorted(
+        " ".join(violation.items)
+        for violation in check_silk_edge_clearance(PCB.load(pcb_path), rules).violations
+    )
+
+
+def repair_board_silk_edge_clearance(pcb_path: Path, *, verbose: bool = True) -> SilkEdgeTrimResult:
+    """Recipe-facing entry point for the edge clip, called from ``write_pcb()``.
+
+    Runs at the placement stage right after
+    :func:`repair_board_silk_pad_clearance` (so it sees final stroke widths),
+    which means the routed replay inherits the same silk.  Raises
+    ``RuntimeError`` if any ``silk_edge_clearance`` finding survives.
+    """
+    result = trim_silk_to_edge_clearance(pcb_path)
+    if verbose:
+        print(
+            f"   silk-to-edge floor {result.minimum_mm}mm: "
+            f"{result.lines_trimmed} line(s) clipped, {result.lines_removed} dropped, "
+            f"{result.lines_added} split out "
+            f"({', '.join(result.trimmed_references) or 'no footprint affected'})"
+        )
+    if result.residual:
+        raise RuntimeError(
+            f"{len(result.residual)} silk_edge_clearance finding(s) survive the "
+            f"edge clip on {pcb_path}: {result.residual}. Fix the footprint "
+            "geometry -- do not ship silk the fabricator will clip."
+        )
+    return result

@@ -65,9 +65,9 @@
 #   --label LABEL            Claim label: loom:reviewing | loom:treating |
 #                            loom:curating (or any loom:* claim label).
 #   --stale-minutes M        Idle/age threshold. Default per label:
-#                            reviewing $LOOM_STALE_REVIEWING_MINUTES (30),
+#                            reviewing $LOOM_STALE_REVIEWING_MINUTES (45),
 #                            treating  $LOOM_STALE_TREATING_MINUTES  (60),
-#                            curating  $LOOM_STALE_CURATING_MINUTES  (30).
+#                            curating  $LOOM_STALE_CURATING_MINUTES  (45).
 #   --max-standdown-streak K Bounded-fallback cap. Default
 #                            $LOOM_MAX_STANDDOWN_STREAK (3).
 #   --role NAME              Role name used in the stand-down comment text
@@ -184,9 +184,9 @@ command -v jq >/dev/null 2>&1 || _die "jq not found on PATH" 3
 
 if [[ -z "$STALE_MINUTES" ]]; then
     case "$LABEL" in
-        loom:reviewing) STALE_MINUTES="${LOOM_STALE_REVIEWING_MINUTES:-30}" ;;
+        loom:reviewing) STALE_MINUTES="${LOOM_STALE_REVIEWING_MINUTES:-45}" ;;
         loom:treating) STALE_MINUTES="${LOOM_STALE_TREATING_MINUTES:-60}" ;;
-        loom:curating) STALE_MINUTES="${LOOM_STALE_CURATING_MINUTES:-30}" ;;
+        loom:curating) STALE_MINUTES="${LOOM_STALE_CURATING_MINUTES:-45}" ;;
         *) STALE_MINUTES="${LOOM_STALE_CLAIM_MINUTES:-30}" ;;
     esac
 fi
@@ -301,8 +301,10 @@ if [[ -z "$CLAIM_STATE" ]]; then
     # Claimant activity: ONLY comments carrying this claim's activity marker.
     ACTIVITY_COUNT="$(jq --arg m "${ACTIVITY_PREFIX}${CLAIMED_AT} -->" \
         '[.[] | select(.body | contains($m))] | length' <<<"$AFTER_JSON")"
+    # requires-daemon: forge optional   Without `claim-liveness` (absent or older binary) only the marker counts: the daemon's Judge-progress / claimant force-push signals (#10235) are then not folded in.
     LAST_ACTIVITY_AT="$(jq -r --arg m "${ACTIVITY_PREFIX}${CLAIMED_AT} -->" --arg c "$CLAIMED_AT" \
-        '([.[] | select(.body | contains($m)) | .created_at] + [$c]) | max' <<<"$AFTER_JSON")"
+        --arg x "$("${LOOM_DAEMON_BIN:-loom-daemon}" forge claim-liveness --number "$NUMBER" --label "$LABEL" --claimed-at "$CLAIMED_AT" ${REPO_ARG:+--repo "$REPO_ARG"} 2>/dev/null || true)" \
+        '([.[] | select(.body | contains($m)) | .created_at] + [$c] + ([$x | select(test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"))])) | max' <<<"$AFTER_JSON")"
 
     # Stand-down comments for THIS claim (prefix match covers both the legacy
     # `claim=<ts> -->` form and the `claim=<ts> seq=N -->` form).

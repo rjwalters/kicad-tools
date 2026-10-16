@@ -433,6 +433,24 @@ if [[ "${LOOM_SWEEP_CPU_QUOTA:-1}" != "0" ]]; then
         # retries while the daemon has already released the sweep as dead. With
         # `continue` only the offending command fails and the agent can react.
         _cpu_quota_props=(-p "CPUQuota=${_cpu_quota_pct}%" -p "OOMPolicy=continue")
+        # MemoryMax from the daemon's observed per-repo peak (issue #11094):
+        # an over-budget build fails inside its own cgroup rather than the
+        # kernel's global OOM killer choosing a victim. The policy and the
+        # systemd probe live in `loom-daemon ram-scope-limit` (exit 0 apply,
+        # 3 rejected by systemd, anything else — incl. an older binary — no limit).
+        # Its stderr is one `ram-scope-limit: …` line naming the source that
+        # decided (env, config tier or default; issue #12246), so it is kept.
+        # requires-daemon: ram-scope-limit optional   #11094 — any non-0/3 exit (incl. an older binary's unknown-subcommand error) means the scope runs with no MemoryMax, exactly the pre-#11094 behaviour.
+        # shellcheck source=lib/locate-daemon-bin.sh
+        source "${_script_dir}/lib/locate-daemon-bin.sh"
+        _mem_bin="$(loom_locate_daemon_bin "$WORKSPACE" 2>/dev/null || true)"
+        _mem_rc=0
+        _mem_max_mb="$([[ -n "$_mem_bin" ]] && "$_mem_bin" ram-scope-limit --workspace "$WORKSPACE" --probe)" || _mem_rc=$?
+        case "$_mem_rc:$_mem_max_mb" in
+            0:[0-9]*) _cpu_quota_props+=(-p "MemoryMax=${_mem_max_mb}M")
+                log_info "spawn-claude: scope MemoryMax=${_mem_max_mb}M (autonomous.agentMemoryMax=off or LOOM_SWEEP_MEMORY_MAX=0 disables; issue #11094)" ;;
+            3:[0-9]*) log_warn "spawn-claude: MemoryMax=${_mem_max_mb}M rejected by systemd (memory controller not delegated?); scope runs without a memory limit (issue #11094)" ;;
+        esac
         if [[ "$_cpu_wallclock" != "0" ]]; then
             _cpu_quota_props+=(-p "RuntimeMaxSec=${_cpu_wallclock}")
         fi
@@ -764,57 +782,24 @@ if [[ "$CONTAINMENT_ENABLED" == "1" ]]; then
     # the env-var form already in this process's environment (forwarded by
     # name); best-effort read-only bind of ~/.config/gh only when neither
     # token env var is present.
-    #
-    # Forge-egress policy (#9987): `loom-daemon forge egress container-args`
-    # makes the whole decision and this block only appends its lines. Line 1
-    # is an explicit `loom-forge-egress: <status>`; a managed host gets 2am's
-    # gh launcher, upstream gh, policy and credential REFERENCE read-only and
-    # neither ~/.config/gh nor GH_TOKEN/GITHUB_TOKEN; an unconfigured (or
-    # observe-unmanaged, findings logged) host gets the legacy credentials
-    # above. Without a capable daemon only a host with no policy or managed
-    # marker keeps them. Anything else — a refusal (unreadable/invalid policy,
-    # missing launcher or image check under `required`), a failed helper,
-    # empty output — has no status line and REFUSES (78): never empty-means-none.
-    # requires-daemon: forge >= 0.19.758   #9987 — `forge egress container-args --image`, declared at this repo's VERSION because it lands WITH this marker (the first release carrying it is the post-merge bump). Hard on a host with a forge-egress policy (this block refuses, exit 78, below the floor); a host with no policy never needs it and keeps today's behaviour.
+    for _containment_var in GH_TOKEN GITHUB_TOKEN; do
+        if [[ -n "${!_containment_var+x}" ]]; then _containment_mounts+=(-e "$_containment_var"); fi
+    done
+    if [[ -z "${GH_TOKEN:-}${GITHUB_TOKEN:-}" && -n "${HOME:-}" && -d "${HOME}/.config/gh" ]]; then
+        _containment_mounts+=(-v "${HOME}/.config/gh:${HOME}/.config/gh:ro")
+    fi
+    # The agent `gh` front's ledger sink (#10607), read-write, so a contained
+    # worker's forge-call rows reach the daemon. Best-effort: no daemon, or one
+    # without the verb, mounts nothing.
+    # requires-daemon: gh-shim optional   `gh-shim container-mount`; an older binary prints usage on stderr and nothing on stdout, so no sink is mounted.
     # shellcheck source=lib/locate-daemon-bin.sh
     source "${_script_dir}/lib/locate-daemon-bin.sh"
-    _containment_gh=()
     _containment_gh_bin="$(loom_locate_daemon_bin "$WORKSPACE" 2>/dev/null || true)"
-    if [[ -n "$_containment_gh_bin" ]] && "$_containment_gh_bin" forge egress container-args --help >/dev/null 2>&1; then
-        # stderr passes through: the named refusal or observe findings reach the log.
-        _containment_gh_out="$("$_containment_gh_bin" forge egress container-args --image "$_containment_image")" || _containment_gh_out=""
+    if [[ -n "$_containment_gh_bin" ]]; then
         while IFS= read -r _containment_gh_line; do # Bash 3.2: no mapfile
-            _containment_gh+=("$_containment_gh_line")
-        done <<<"$_containment_gh_out"
-    else
-        # No capable daemon: only a host with nothing policy-shaped keeps the
-        # legacy credentials. Probe the policy DIRECTORIES, not the files: a
-        # root-owned 0700 dir hides its policy/marker from `-e` (EACCES), and
-        # like the daemon only "not there at all" means absent. The env list
-        # can only ADD directories (tests), never remove the fixed two.
-        _containment_gh_policy="${LOOM_FORGE_EGRESS_POLICY:-}${LOOM_FORGE_EGRESS_MANAGED:-}"
-        # shellcheck disable=SC2086 # word-split the optional extra dirs
-        for _containment_var in /etc/loom/forge-egress /etc/2am/github-egress ${LOOM_FORGE_EGRESS_PROBE_DIRS:-}; do
-            if [[ -e "$_containment_var" || -L "$_containment_var" ]]; then _containment_gh_policy+="$_containment_var"; fi
-        done
-        if [[ -z "$_containment_gh_policy" ]]; then
-            _containment_gh=("loom-forge-egress: unconfigured")
-            for _containment_var in GH_TOKEN GITHUB_TOKEN; do
-                if [[ -n "${!_containment_var+x}" ]]; then _containment_gh+=(-e "$_containment_var"); fi
-            done
-            if [[ -z "${GH_TOKEN:-}${GITHUB_TOKEN:-}" && -n "${HOME:-}" && -d "${HOME}/.config/gh" ]]; then
-                _containment_gh+=(-v "${HOME}/.config/gh:${HOME}/.config/gh:ro")
-            fi
-        fi
+            if [[ -n "$_containment_gh_line" ]]; then _containment_mounts+=("$_containment_gh_line"); fi
+        done < <("$_containment_gh_bin" gh-shim container-mount 2>/dev/null || true)
     fi
-    case "${_containment_gh[0]:-}" in
-        "loom-forge-egress: managed" | "loom-forge-egress: unconfigured" | "loom-forge-egress: observe-unmanaged") ;;
-        *)
-            log_error "spawn-claude: no explicit forge egress answer (a refused policy, a failed helper, or a policy host without a capable loom-daemon) — refusing to mount ~/.config/gh or forward GH_TOKEN/GITHUB_TOKEN (#9987)."
-            exit 78 # EX_CONFIG
-            ;;
-    esac
-    _containment_mounts+=("${_containment_gh[@]:1}")
     # Git commit identity (check-git-identity.sh's global user.name/user.email).
     if [[ -n "${HOME:-}" && -f "${HOME}/.gitconfig" ]]; then
         _containment_mounts+=(-v "${HOME}/.gitconfig:${HOME}/.gitconfig:ro")
@@ -851,11 +836,25 @@ if [[ "$CONTAINMENT_ENABLED" == "1" ]]; then
     # `CARGO_INCREMENTAL=1 cargo …` outranks the ambient value for that
     # invocation only.
     _containment_env+=(-e "CARGO_INCREMENTAL=0")
+    # The debuginfo cap (#11190) rides the same boundary, but by NAME (`-e
+    # VAR`, no value) and only when set: the daemon-side seam already chose
+    # the value — or kept an operator's own — before it spawned this script,
+    # and this re-exec runs spawn-claude.sh, not spawn-worker.sh, so nothing
+    # inside the container re-runs that seam. Without this the worker log
+    # records the cap while the in-container cargo builds full DWARF. The two
+    # names are forwarded by the env-passthrough `case` below (by name, when
+    # present in `env`). "Present" is not "set to something", though: the
+    # passthrough forwards a set-but-EMPTY variable too, and cargo hard-fails
+    # on an empty one (`invalid value: string ""`) instead of reading it as
+    # unset, so the loop's input drops those two empties and the container
+    # sees them as unset. (`grep -v` exiting 1 on no output cannot abort this
+    # script: a process substitution's status is never the shell's.) `-a` is
+    # load-bearing (#11237): GNU grep in a UTF-8 locale otherwise suppresses a
+    # line holding a non-UTF-8 byte, silently un-forwarding that variable.
 
     # --- Env passthrough ---
     # Every LOOM_*/CLAUDE_*/SAFEHOUSE*/CODEX_* var (GH_TOKEN/GITHUB_TOKEN
-    # come from the forge-egress block above, never under a policy, #9987)
-    # already present in THIS process's environment (exported by the daemon
+    # come from the forge auth block above) already present in THIS process's environment (exported by the daemon
     # before it spawned this script — LOOM_SWEEP_CLAIM_OWNED, LOOM_ROLE,
     # LOOM_RUNTIME, LOOM_MODEL/LOOM_EFFORT when set, etc. — or already
     # resolved above, e.g. CLAUDE_CODE_OAUTH_TOKEN when
@@ -873,11 +872,11 @@ if [[ "$CONTAINMENT_ENABLED" == "1" ]]; then
     # same host's bare-metal dispatch worked.
     while IFS='=' read -r _containment_var _; do
         case "$_containment_var" in
-            LOOM_* | CLAUDE_* | SAFEHOUSE* | CODEX_* | TRACEPARENT | OTEL_*)
+            LOOM_* | CLAUDE_* | SAFEHOUSE* | CODEX_* | TRACEPARENT | OTEL_* | CARGO_PROFILE_DEV_DEBUG | CARGO_PROFILE_TEST_DEBUG)
                 _containment_env+=(-e "$_containment_var")
                 ;;
         esac
-    done < <(env)
+    done < <(env | grep -av '^CARGO_PROFILE_[A-Z]*_DEBUG=$')
     _containment_env+=(-e "LOOM_SPAWN_CONTAINERIZED=1" -e "LOOM_WORKSPACE=${WORKSPACE}" -e "HOME=${HOME:-/home/loom}")
 
     # --- Resource-limit docker flags + observability labels (issue #7430) ---
@@ -1384,16 +1383,37 @@ if [[ "$_CONTAINMENT_CRED_PROXY" != "1" && -f "$_mcp_config_lib" ]]; then
             if [[ ! -S "$_sh_socket" && ! -e "$_sh_socket" ]]; then
                 log_warn "spawn-claude: safehouse socket '$_sh_socket' not present at spawn; injecting anyway (best-effort — safehouse-mcp connects lazily and never blocks the worker)."
             fi
-            _mcp_session_config="$(mktemp -t loom-mcp-config.XXXXXX 2>/dev/null || mktemp)"
-            if loom_mcp_emit_config "$WORKSPACE" "$_sh_socket" "$_sh_persona" "$_sh_command" >"$_mcp_session_config" 2>/dev/null; then
+            # #9896: deterministic path keyed by user + workspace + persona so
+            # repeated spawns overwrite one file (the script exec's claude, so
+            # no trap could ever delete a per-spawn mktemp file). Written
+            # atomically: mktemp in the same dir, then mv -f.
+            _mcp_session_config="${TMPDIR:-/tmp}/loom-mcp-config-$(id -u)-$(printf '%s|%s|%s|%s' "$WORKSPACE" "$_sh_persona" "$_sh_socket" "$_sh_command" | cksum | cut -d' ' -f1).json"
+            if loom_mcp_emit_config "$WORKSPACE" "$_sh_socket" "$_sh_persona" "$_sh_command" >"$_mcp_session_config.$$" 2>/dev/null && mv -f "$_mcp_session_config.$$" "$_mcp_session_config"; then
                 PASSTHROUGH_ARGS+=(--mcp-config "$_mcp_session_config")
                 log_info "spawn-claude: injected safehouse MCP server (persona=$_sh_persona, socket=$_sh_socket, config=$_mcp_session_config)"
             else
-                rm -f "$_mcp_session_config"
+                rm -f "$_mcp_session_config.$$"
                 log_warn "spawn-claude: failed to generate safehouse MCP config; skipping injection (loom MCP unaffected)."
             fi
         fi
     fi
+fi
+
+# --- Per-role tool restriction at spawn (#8256) ---
+# Defense in depth for the guard hooks: the role JSON's
+# toolPolicy.allowedCapabilities become
+# --disallowedTools specs, computed by `loom-daemon role-tool-policy
+# deny-specs`. Bypassable on its own (`bash -c 'ssh …'`), which is why the hooks
+# are the backstop. Appended last so no positional follows the variadic flag,
+# and additive to any --disallowedTools the caller passed. No binary or no
+# specs => byte-for-byte no-op; never fails the spawn.
+# requires-daemon: role-tool-policy optional   #8256 — `deny-specs` (since #8322); no binary or no answer injects nothing, and the guard hooks still enforce the role's declaration.
+_rtp_bin="$(loom_locate_daemon_bin "$WORKSPACE" 2>/dev/null || true)"
+_rtp_specs=()
+while IFS= read -r _rtp_spec; do [[ -z "$_rtp_spec" ]] || _rtp_specs+=("$_rtp_spec"); done < <([[ -z "$_rtp_bin" ]] || "$_rtp_bin" role-tool-policy deny-specs --workspace "$WORKSPACE" --roles-dir "$_script_dir/../roles" 2>/dev/null || true)
+if [[ ${#_rtp_specs[@]} -gt 0 ]]; then
+    PASSTHROUGH_ARGS+=(--disallowedTools "${_rtp_specs[@]}")
+    log_info "spawn-claude: per-role tool restriction (#8256): role=${LOOM_ROLE:-unset} gets ${#_rtp_specs[@]} --disallowedTools specs"
 fi
 
 # --- Dispatch ---

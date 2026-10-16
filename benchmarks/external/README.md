@@ -134,6 +134,155 @@ the same `--output-dir`: `<slug>.<protocol>.json` and
 `report.<protocol>.md` (e.g. `strf.tuned.json` / `report.tuned.md` vs.
 `strf.zero-touch.json` / `report.zero-touch.md`).
 
+## PCBWorld suite (`--suite pcbworld`, issue #6331)
+
+PCBWorld's D3 is a *generated* corpus: PCBWorld's own prep code converts
+PCBench source boards to KiCad 9 and writes the scored `guide` variant. The
+suite therefore pins two upstream repositories in [`pcbworld.toml`](pcbworld.toml)
+instead of listing boards in `boards.toml`:
+
+| Input | Pin | License |
+|---|---|---|
+| PCBWorld (`LGAI-Research/PCBWorld`) | `b3d62f5c37e7528670d112e03d9a90029f23f4f3` | BSD-3-Clause; its `engine` submodule is GPL-3.0 and is never fetched or built here |
+| PCBench (`PCBench/PCBench`) | `dec3be75cbdef74787625f9043c7391cd473bb64` | MIT repository, **mixed per-board licenses** -- boards are cache-only |
+
+Nothing third-party is committed: both repos are fetched into the gitignored
+cache (`.cache/kct-benchmarks/external/pcbworld/`), PCBWorld's prep steps
+(`convert_v9`, `drc_fix_v9`, `make_guide`, `sort_prefix`) and scorer
+(`eval.pipeline`) run **only as subprocesses** under PCBWorld's own
+interpreter with its checkout as cwd (PCBWorld ships a `kicad_tools.py` that
+would shadow this package if imported). Split membership comes from PCBWorld's
+own `configs/datasets/d3.json` (`d3a` = easy/test, `d3b` = medium/test).
+
+### One-time setup (manual; not automated)
+
+You need a KiCad **9** toolchain and a Python environment for PCBWorld
+(see PCBWorld's `tools/datagen/pcbench_prep/README.md` and `docs/QUICKSTART.md`).
+**Scoring needs PCBWorld's engine build**: `eval/metrics.py` computes the
+potential (and so `potential_gain`, the @5 selection key) through
+`kicad_rl_router`, the GPL engine PCBWorld builds with
+`tools/setup/setup_all.sh` (conda env + C++ build). kicad-tools never builds
+or links it -- `PCBWORLD_PYTHON` must point at an environment where it is
+already built (`python -c 'import kicad_rl_router'` succeeds with
+PCBWorld's `PYTHONPATH`). Point at existing installs:
+
+```bash
+export PCBWORLD_PYTHON=/path/to/pcbworld-env/bin/python   # PCBWorld's own environment
+export KICAD_CLI=/path/to/kicad9/kicad-cli                # must report 9.x
+export PCBNEW_PYTHON=/path/to/python-with-kicad9-pcbnew
+uv run kct build-native --check                           # timing needs the C++ backend
+```
+
+### Run
+
+```bash
+# Deterministic smoke subset: the first 3 boards of D3-A's test list
+uv run kct bench external --suite pcbworld --split d3a --limit 3
+```
+
+Boards are identified `pcbworld/<split>/<NNNN_name>` (taken from PCBWorld's
+split file). The suite skips `normalize_board` and fails if the routing input
+contains any track or via.
+
+**Which prepared file is routed (issue #6332).** PCBWorld's `board_filename`,
+`processed_v9_guide_v3.kicad_pcb`, is the *routed* guide board -- the human
+copper with per-net guide widths ("the routed guide board is the artifact the
+benchmark loads", `make_guide.md`); PCBWorld deletes its tracks and vias at
+`reset()`. kct therefore routes the bare variant `make_guide` writes next to
+it, `processed_v9_guide_v3_unrouted.kicad_pcb` (tracks, arcs and vias removed,
+zones kept -- the same board `reset()` produces), with the guide's
+`.kicad_pro` design rules. The routed guide is read only as the human
+wirelength / via reference. (#6331 pointed the suite at the routed guide and
+asserted it was unrouted, which would have refused every real board; its
+tests mocked `make_guide` and could not see it.)
+
+### Two scorers, never merged
+
+Each report keeps the existing local gates (`kct_check`, `kicad_cli_drc`,
+completion) **and** an additive `external_scores.pcbworld` block with
+PCBWorld's own Clean Pass, routability, error-only DRC count and *per-rollout*
+`potential_gain` (PCBWorld's @5 rule selects by largest potential gain, not
+"any rollout clean"). The markdown table shows them in separate columns
+(`kicad-cli DRC` vs `PCBWorld CP`).
+
+* An unavailable PCBWorld score (no routed output, scorer failure) is `null`
+  with a reason -- never `0`, never a pass.
+* A non-KiCad-9 `KICAD_CLI` makes the run fail before preparation; a Clean
+  Pass from another major version is never reported.
+* Rebuilt boards are **not** byte-identical to the paper's set (KiCad 9's
+  DRC report caps change `make_guide` widths on some boards; UUIDs are
+  re-minted). Provenance records the PCBWorld/PCBench SHAs, `kicad-cli`
+  version, `pcbnew` Python and a per-board input SHA-256; do not claim
+  byte-identity.
+
+### Publishable D3 runs: rollouts, resume, bounded windows (issue #6332)
+
+```bash
+# Step 0 -- is kct route a deterministic baseline? (sequential, no fan-out)
+uv run python benchmarks/external/seed_variation.py --seeds 1 2 3 4 5 \
+  --timeout 600 -o seed_variation.json <5 prepared d3a *_unrouted.kicad_pcb boards>
+
+# kct route is seed-dependent under the C++ backend (2026-10-15 measurement,
+# results/2026-10-15-pcbworld-d3a/): five declared rollouts, seeds 42..46
+uv run kct bench external --suite pcbworld --split d3a --full-split \
+  --rollouts 5 --route-timeout 600 --output-dir .cache/kct-benchmarks/external/d3a-run
+
+# Bounded sittings on a shared host: N new attempts per invocation, then resume
+uv run kct bench external --suite pcbworld --split d3a --full-split \
+  --rollouts 5 --route-timeout 600 --max-attempts 50 --resume \
+  --output-dir .cache/kct-benchmarks/external/d3a-run   # repeat until complete
+
+# Only if seed_variation.py ever shows NO seed dependence: one rollout, @5 = @1
+#   ... --full-split --deterministic-baseline --route-timeout 600 ...
+
+# Re-render the report from committed compact data (no routing, no network)
+uv run kct bench external --render-d3 benchmarks/external/results/<dir>/results.json
+```
+
+* `--full-split` makes the denominator the whole split (d3a = **99** boards,
+  PCBWorld's `easy.test`; the 100th easy board, `0096_*`, is train-only).
+  `--offset` / `--limit` only bound which boards one invocation attempts.
+* Every board x rollout ends up with a record in `results.json`: a result,
+  or an explicit `prep_failed` / `route_no_output` / `scorer_unavailable` /
+  `harness_error` / `missing` row. A router that wrote nothing, or a
+  timed-out attempt, is a **fail**; a prep or scorer gap is **unknown** and
+  the report then shows `[lower, upper]` bounds instead of a point CP.
+* **@5** keeps the rollout with the largest potential gain (PCBWorld's
+  `final_potential` key: then routability, error-level DRV, wirelength,
+  vias, lowest index) and reads every number off it. With
+  `--deterministic-baseline` (one rollout) @5 is reported equal to @1, as
+  PCBWorld does for deterministic baselines; with one rollout and no such
+  declaration @5 is "not measured".
+* The `fair95` sub-denominator (PCBWorld's RQ2 "PCBench fair-95" list,
+  `pcbworld.toml` `[subsets.fair95]`) is reported next to the full split.
+* `--resume` reuses an attempt record only when its whole identity matches:
+  board, rollout, seed, routing-input SHA-256, kicad-tools commit,
+  PCBWorld/PCBench pins, KiCad version and router options. Anything else is
+  discarded and re-attempted; without `--resume` the ledger is cleared.
+  Unknown-status records inside the current window are always retried.
+* Timing is recorded only under the C++ backend (`probe_backend()`); refused
+  timings are counted, never shown as numbers.
+
+**Expected runtime and storage (d3a).** These are planning figures, not
+measurements -- no D3-A board has been routed yet (see
+[`results/2026-10-15-pcbworld-d3a/`](results/2026-10-15-pcbworld-d3a/)).
+PCBWorld's own prep runs several `kicad-cli` DRC trials per board
+(`make_guide`) at `PREP_WORKERS = 2`; its duration is unmeasured. D3-A
+boards are PCBWorld's *easy* tier (the smallest by pin count), so most
+`kct route` attempts should finish well inside `--route-timeout 600`. As a
+proxy only, the five in-tree boards of the seed-variation run took 4-60 s
+per completed route and ~170 s when budget-limited. The hard ceiling is
+99 x 5 x 600 s = 82.5 h for five rollouts, which is what `--max-attempts` +
+`--resume` are for. Each attempt keeps a routed copy plus a scoring copy of
+the board in the output dir (tens to hundreds of KB per board), plus the
+per-board JSON report -- an estimated well under 1 GB for 5 x 99 attempts.
+The extracted PCBWorld source at the pin measured 23 MB; PCBench is fetched
+only for the selected boards. The separate PCBWorld conda env + engine build
+is not counted. Only `results.json` + `report.d3.md` (+ the
+hand-written verdict) are committed.
+
+The unit/CLI tests mock PCBWorld, KiCad and the network entirely.
+
 ## Committed results (issue #4942, Epic #4932 Phase 2)
 
 `results/` holds the committed JSON + markdown output of zero-touch runs

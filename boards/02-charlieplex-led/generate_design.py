@@ -31,6 +31,7 @@ from design_spec import (
 from kicad_tools.core.project_file import create_minimal_project, save_project
 from kicad_tools.dev import warn_if_stale
 from kicad_tools.lvs import write_lvs_report
+from kicad_tools.operations.pintype import annotate_pcb_file_pintypes
 from kicad_tools.recipes.gate import evaluate_pipeline_gate
 from kicad_tools.recipes.precondition import require_spec
 
@@ -198,23 +199,25 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
 
     result = subprocess.run(cmd, capture_output=False, text=True, env=env)
 
-    # ``kct route`` returns 0 on full success and a non-zero code on
-    # partial / failed routing.  Either way it writes a routed PCB to
-    # ``output_path``; downstream DRC + manufacturing checks decide if
-    # the partial output is acceptable.
-    success = result.returncode == 0
-
     if not output_path.exists():
         print(f"\n   ERROR: ``kct route`` did not produce {output_path}", file=sys.stderr)
         return False
 
-    if success:
-        print("\n   SUCCESS: ``kct route`` reports all signal nets routed!")
-    else:
+    # Issue #6427: exit 0 is the only success.  ``kct route`` exits 3 when
+    # either DRC engine finds a violation in its own copper; finalize's
+    # report-driven via repair used to quietly move that copper until DRC
+    # passed, hiding a router defect behind a board-local edit.  A non-zero
+    # exit now stops the recipe before finalize ever sees the board.
+    if result.returncode != 0:
         print(
-            f"\n   PARTIAL: ``kct route`` exited with code {result.returncode} "
-            "(partial routing; downstream DRC will continue)"
+            f"\n   ERROR: ``kct route`` exited with code {result.returncode}; "
+            "board 02 requires a clean route (exit 0) and does not repair "
+            "router DRC violations after the fact",
+            file=sys.stderr,
         )
+        return False
+
+    print("\n   SUCCESS: ``kct route`` reports all signal nets routed!")
 
     from finalize_routing import finalize_routing
 
@@ -349,6 +352,15 @@ def main() -> int:
 
         # Step 4: Create PCB
         pcb_path = create_charlieplex_pcb(output_dir)
+
+        # Step 4.1: Copy schematic pin names/electrical types onto the pads
+        # (issues #5985, #6025), as KiCad's "Update PCB from Schematic" does.
+        # The router appends its tracks to this text, so the routed PCB
+        # inherits the ``(pintype ...)`` evidence ``kct detect-mistakes``
+        # reads for rails.
+        annotation = annotate_pcb_file_pintypes(pcb_path, sch_path)
+        assert not annotation.missing_pads, annotation.missing_pads
+        print(f"   Pad pin types annotated: {annotation.annotated}")
 
         # Step 5: Route PCB
         routed_path = output_dir / "charlieplex_3x3_routed.kicad_pcb"

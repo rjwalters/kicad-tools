@@ -64,8 +64,8 @@ When a task requires a credential:
 
 A credential that is missing and cannot be provisioned in-session is a
 mechanical blocker, not a judgement call — park it the same way any other
-missing-credential case is parked (`loom:operator-only` +
-`loom:operator-mechanical`, per the builder role prompt's label taxonomy),
+missing-credential case is parked (`loom:operator` + a capability marker,
+per `label-state-machine.md` → "Routing to a human"),
 naming the credential by purpose, not by value.
 
 ## Standard provisioning flow

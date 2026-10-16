@@ -143,6 +143,58 @@ class TestStageInputForAutoPour:
         assert _sha256(input_pcb) == input_hash
 
 
+def _make_pcb_with_copper(n_segments: int, n_vias: int) -> str:
+    """Pour-candidate PCB carrying ``n_segments`` segments and ``n_vias`` vias."""
+    body = _make_pcb_with_pour_candidates()
+    copper = []
+    for i in range(n_segments):
+        copper.append(f'  (segment (start {i} 5) (end {i} 6) (width 0.2) (layer "F.Cu") (net 3))\n')
+    for i in range(n_vias):
+        copper.append(
+            f'  (via (at {i} 20) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 1))\n'
+        )
+    # Insert before the Edge.Cuts outline (top level, inside kicad_pcb).
+    return body.replace(_PCB_FOOTER, "".join(copper) + _PCB_FOOTER)
+
+
+class TestStageInputCopperBaseline:
+    """Issue #6531: the #6351 copper baseline is recorded on in-place runs too."""
+
+    def test_in_place_run_replaces_stale_baseline(self, tmp_path: Path, monkeypatch):
+        """``A -> O`` then ``O -> O`` in one process: baseline is O's own counts."""
+        from kicad_tools.cli import route_cmd
+
+        monkeypatch.setattr(route_cmd, "_INPUT_COPPER_BASELINE", {})
+        a = tmp_path / "a.kicad_pcb"
+        o = tmp_path / "o.kicad_pcb"
+        a.write_text(_make_pcb_with_copper(n_segments=7, n_vias=3))
+
+        route_cmd._stage_input_for_auto_pour(a, o)
+        key = route_cmd._baseline_key(o)
+        assert route_cmd._INPUT_COPPER_BASELINE[key] == (7, 3)
+
+        # O now holds a different board (e.g. the routed result of run 1).
+        o.write_text(_make_pcb_with_copper(n_segments=2, n_vias=1))
+        returned = route_cmd._stage_input_for_auto_pour(o, Path(str(o)))
+
+        assert returned == o
+        assert route_cmd._INPUT_COPPER_BASELINE[key] == (2, 1)
+
+    def test_in_place_unreadable_input_leaves_no_entry(self, tmp_path: Path, monkeypatch):
+        """In-place staging of an undecodable file drops any stale entry."""
+        from kicad_tools.cli import route_cmd
+
+        o = tmp_path / "o.kicad_pcb"
+        o.write_bytes(b"(kicad_pcb \xff\xfe\xfd)")
+        key = route_cmd._baseline_key(o)
+        monkeypatch.setattr(route_cmd, "_INPUT_COPPER_BASELINE", {key: (99, 99)})
+
+        returned = route_cmd._stage_input_for_auto_pour(o, o)
+
+        assert returned == o
+        assert key not in route_cmd._INPUT_COPPER_BASELINE
+
+
 # ---------------------------------------------------------------------------
 # Behavioral test: auto-pour does not mutate INPUT when staged via helper
 # ---------------------------------------------------------------------------
@@ -265,13 +317,12 @@ class TestAutoPourDoesNotModifyInput:
 # captures ``display_input_path`` before the rebind and prints that on
 # ``Input:`` instead.
 #
-# The #4263 analytical ``--dry-run`` short-circuit prints the banner and
-# returns before ``load_pcb_for_routing`` runs (auto-pour staging has
-# already happened by then), so it exercises exactly the bug path
-# cheaply. For the three escalation-mode functions (layer escalation,
-# rule relaxation, combined escalation), ``--dry-run`` only skips the
-# final save -- the full (near-instant, zero-net) routing loop still
-# runs -- but the banner assertion is identical.
+# These run real routes (the zero-net fixture routes near-instantly) into
+# ``tmp_path``.  They used to pass ``--dry-run`` as a cheap stand-in, which
+# only worked because ``--dry-run`` still staged the input at ``--output`` and
+# (on the escalation flows) routed for real.  Issue #6563 made ``--dry-run``
+# print the plan and exit before any staging, so it no longer reaches the
+# banners under test.
 # ---------------------------------------------------------------------------
 
 
@@ -287,7 +338,7 @@ class TestRouteStartupBannerInputLine:
         output_pcb = tmp_path / "step1.kicad_pcb"
         input_pcb.write_text(_make_pcb_with_pour_candidates())
 
-        rc = route_main([str(input_pcb), "-o", str(output_pcb), "--dry-run", "--no-auto-layers"])
+        rc = route_main([str(input_pcb), "-o", str(output_pcb), "--no-auto-layers"])
         assert rc == 0
 
         out = capsys.readouterr().out
@@ -307,7 +358,7 @@ class TestRouteStartupBannerInputLine:
         output_pcb = tmp_path / "step1.kicad_pcb"
         input_pcb.write_text(_make_pcb_with_pour_candidates())
 
-        rc = route_main([str(input_pcb), "-o", str(output_pcb), "--dry-run"])
+        rc = route_main([str(input_pcb), "-o", str(output_pcb)])
         assert rc == 0
 
         out = capsys.readouterr().out
@@ -332,7 +383,6 @@ class TestRouteStartupBannerInputLine:
                 str(input_pcb),
                 "-o",
                 str(output_pcb),
-                "--dry-run",
                 "--no-auto-layers",
                 "--adaptive-rules",
             ]
@@ -356,7 +406,7 @@ class TestRouteStartupBannerInputLine:
         output_pcb = tmp_path / "step1.kicad_pcb"
         input_pcb.write_text(_make_pcb_with_pour_candidates())
 
-        rc = route_main([str(input_pcb), "-o", str(output_pcb), "--dry-run", "--adaptive-rules"])
+        rc = route_main([str(input_pcb), "-o", str(output_pcb), "--adaptive-rules"])
         assert rc == 0
 
         out = capsys.readouterr().out
@@ -376,7 +426,7 @@ class TestRouteStartupBannerInputLine:
         pcb = tmp_path / "board.kicad_pcb"
         pcb.write_text(_make_pcb_with_pour_candidates())
 
-        rc = route_main([str(pcb), "-o", str(pcb), "--dry-run", "--no-auto-layers"])
+        rc = route_main([str(pcb), "-o", str(pcb), "--no-auto-layers"])
         assert rc == 0
 
         out = capsys.readouterr().out
@@ -398,7 +448,7 @@ class TestRouteStartupBannerInputLine:
         board.write_text(_make_pcb_with_pour_candidates())
 
         # Step 1: board -> step1.
-        rc1 = route_main([str(board), "-o", str(step1), "--dry-run", "--no-auto-layers"])
+        rc1 = route_main([str(board), "-o", str(step1), "--no-auto-layers"])
         assert rc1 == 0
         out1 = capsys.readouterr().out
         input_line1 = next(line for line in out1.splitlines() if line.startswith("Input:"))
@@ -410,7 +460,7 @@ class TestRouteStartupBannerInputLine:
         assert step1.exists()
 
         # Step 2: step1 -> step2.
-        rc2 = route_main([str(step1), "-o", str(step2), "--dry-run", "--no-auto-layers"])
+        rc2 = route_main([str(step1), "-o", str(step2), "--no-auto-layers"])
         assert rc2 == 0
         out2 = capsys.readouterr().out
         input_line2 = next(line for line in out2.splitlines() if line.startswith("Input:"))

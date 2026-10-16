@@ -42,4 +42,48 @@
 (rule "Silkscreen Height - jlcpcb"
   (condition "A.Type == 'text' && A.Layer == 'F.Silkscreen'")
   (constraint text_height (min 1.0mm)))
+
+(rule "Reviewed clearance - LVDS"
+  (condition "(A.NetClass == 'LVDS' || B.NetClass == 'LVDS') && !(A.Type == 'Pad' && B.Type == 'Pad' && A.Reference == B.Reference) && !A.isCoupledDiffPair()")
+  (constraint clearance (min 0.15mm)))
+
+(rule "Reviewed clearance - LVTTL"
+  (condition "(A.NetClass == 'LVTTL' || B.NetClass == 'LVTTL') && !(A.Type == 'Pad' && B.Type == 'Pad' && A.Reference == B.Reference) && !A.isCoupledDiffPair()")
+  (constraint clearance (min 0.15mm)))
+
+(rule "Reviewed clearance - Power"
+  (condition "(A.NetClass == 'Power' || B.NetClass == 'Power') && !(A.Type == 'Pad' && B.Type == 'Pad' && A.Reference == B.Reference) && !A.isCoupledDiffPair()")
+  (constraint clearance (min 0.2mm)))
 # END kct fab floors
+
+# BEGIN kct router diff-pair gaps (Issue #6443) -- managed, do not edit
+# The gap the router laid each coupled pair at: max(class intra-pair
+# gap, manufacturer minimum, authored board min_clearance).
+(rule "kct diff pair gap - LVDS1_P/LVDS1_N"
+  (condition "A.NetName == 'LVDS1_P' || A.NetName == 'LVDS1_N'")
+  (constraint diff_pair_gap (min 0.15mm)))
+(rule "kct diff pair gap - LVDS2_P/LVDS2_N"
+  (condition "A.NetName == 'LVDS2_P' || A.NetName == 'LVDS2_N'")
+  (constraint diff_pair_gap (min 0.15mm)))
+(rule "kct diff pair gap - LVDS3_P/LVDS3_N"
+  (condition "A.NetName == 'LVDS3_P' || A.NetName == 'LVDS3_N'")
+  (constraint diff_pair_gap (min 0.15mm)))
+(rule "kct diff pair gap - LVDS4_P/LVDS4_N"
+  (condition "A.NetName == 'LVDS4_P' || A.NetName == 'LVDS4_N'")
+  (constraint diff_pair_gap (min 0.15mm)))
+# Uncoupled length, skew and via count of each coupled pair, at the limit the
+# protocol table or the net class resolves (Issue #6443); a warning where
+# that limit is uncited.
+(rule "kct diff pair skew - LVDS1_P/LVDS1_N"
+  (condition "A.inDiffPair('LVDS1_')")
+  (constraint skew (max 0.1mm) (within_diff_pairs)))
+(rule "kct diff pair skew - LVDS2_P/LVDS2_N"
+  (condition "A.inDiffPair('LVDS2_')")
+  (constraint skew (max 0.1mm) (within_diff_pairs)))
+(rule "kct diff pair skew - LVDS3_P/LVDS3_N"
+  (condition "A.inDiffPair('LVDS3_')")
+  (constraint skew (max 0.1mm) (within_diff_pairs)))
+(rule "kct diff pair skew - LVDS4_P/LVDS4_N"
+  (condition "A.inDiffPair('LVDS4_')")
+  (constraint skew (max 0.1mm) (within_diff_pairs)))
+# END kct router diff-pair gaps

@@ -1,12 +1,105 @@
 # Release cadence vs. `VERSION`
 
-`VERSION` (and the other five `scripts/version.sh`-managed files, #5517) bumps
-after nearly every merge to `main` that touches `defaults/`
-(`version-bump-on-merge.yml`, #7743) — it tracks the tree, not a release. A
-GitHub Release is a **separate event with its own rule**, stated below, and
-not every `VERSION` gets one. This doc states that rule and what it means for
-the signed-artifact `--fetch` path (Epic #4990 Phase 3, #5009/#5018/#5020) and
-for everything that reads the release list.
+`VERSION` (and the other five `scripts/version.sh`-managed files, #5517) is
+bumped by `version-bump-on-merge.yml` (#7743) **at most once per
+`RELEASE_MIN_INTERVAL`** (default 24 h, #11174): `defaults/` merges inside the
+window accumulate, unreleased, and ship together in the next bump. A GitHub
+Release is a **separate event with its own rule**, stated below, and not every
+`VERSION` gets one. This doc states the bump cadence, the release rule, and
+what they mean for the signed-artifact `--fetch` path (Epic #4990 Phase 3,
+#5009/#5018/#5020) and for everything that reads the release list.
+
+## Cadence: at most one bump per release interval (#11174)
+
+Until #11174 every `defaults/` merge cut a version: 52 bump commits in one
+day, each starting its own `main` CI run and then a release, which queued PR
+CI behind it and moved every non-fleet `autoUpdate` host. The operator
+direction (2026-10-09) is **at most one release a day**.
+
+- **The gate.** `scripts/version-bump-gate.sh` runs before any toolchain setup. The
+  last bump is the newest **first-parent** `main` commit that changed
+  `VERSION`, timed by its **committer** time (PRs cannot change `VERSION`, so
+  only bump commits match; tags and Release dates are never read). A run bumps
+  only when `now - last_bump >= RELEASE_MIN_INTERVAL` **and** something under
+  `defaults/` changed since that bump. Otherwise it exits green and changes
+  nothing, with `deferred: last bump <sha> at <UTC>; next bump eligible at
+  <UTC>` (or `nothing to release`) in the job summary. The gate is re-checked
+  after every `git fetch` in the publish-retry loop, so a bump that lands
+  mid-race makes the run defer instead of bumping twice.
+- **How the bump reaches `main` (#12063).** The workflow never pushes. Its
+  `bump-version` job runs the gate and `scripts/version.sh bump patch`; its
+  `publish` job, the only one with `id-token: write` and with no action in
+  it, POSTs the changed version files to the fleet publisher with a GitHub
+  Actions OIDC token. The publisher commits them as `loom-fleet-publisher`
+  only if they are exactly a one-patch-step bump of the `parent` named, and
+  only while `main` is still at that parent. On `409 head_moved` or `503
+  upstream_ambiguous` the job re-reads `main` and re-runs the gate; if `main`
+  moved without touching a version file, the same bump is sent with the new
+  tip as its parent, and if a version file changed, the next run recomputes
+  it (a forced run fails red and has to be dispatched again). Any refusal
+  fails the run red; there is no fallback to a direct push.
+- **The interval.** Repository variable `RELEASE_MIN_INTERVAL`, in seconds;
+  unset means `86400`. A non-integer or negative value fails the run red — it
+  never falls back to "always bump". `0` explicitly disables the limit. A
+  missing bump commit or a shallow checkout also fails red: a gate wrong in
+  the "defer" direction would silently stop releases.
+- **Triggers.** A `defaults/**` push to `main` (as before); an **hourly**
+  `schedule` catch-up, which is what ships a quiet day's merges; and
+  `workflow_dispatch`. Worst-case delay from the first unreleased merge to its
+  bump is `RELEASE_MIN_INTERVAL` + about 1 h, plus GitHub's own schedule delay
+  (cron runs can be late or dropped under load; the next run recovers). A
+  once-a-day cron was rejected: against a window that started at an arbitrary
+  time it can stretch the wait to about 48 h.
+- **Hotfix path.** Dispatch the workflow with `force: true` and a `reason`
+  (required) to bump now. `force` skips only the interval: there must still be
+  an unreleased `defaults/` change, so no no-op version is cut. The commit body
+  records `Forced-by: <actor>` and `Reason: <reason>`; a bot actor is refused.
+  Anyone with `workflow_dispatch` (write) access can force; it is the operator
+  path. A forced bump starts a new window. `force: false` runs the normal gate,
+  which is useful for checking what the next run would do.
+- **Fleet floors wait for the daily release.** A `loom_min_version` floor can
+  only name a published release, so a fix the fleet needs now waits for the
+  next eligible bump unless it is forced. To ship it now: dispatch `force` with
+  a reason, wait for that commit's `CI` to go green and `release.yml` to
+  publish, then raise `loom_min_version` to the released tag.
+
+## Manual escape hatch: a hand-cut bump PR (#12132)
+
+The bump's credential is not one the daemons spend. Before #12063 the workflow
+pushed with a token minted from the fleet dispatch App, the same installation
+the daemons fall back to as writer. During a fleet-wide read drain that
+installation's hourly limit ran out, and three forced bumps for the release
+carrying the drain fix failed with HTTP 403. The fix needed a release, and the
+release needed the drained credential. Now the bump goes through the fleet
+publisher, which commits as its own App (`loom-fleet-publisher`). That App's
+limit is separate from the dispatch App's, and its commit still triggers `CI`.
+A plain `GITHUB_TOKEN` push would not, so the bump would never be released.
+
+If the publisher is unavailable (a refusal, an outage, or its own App
+rate-limited) and a release can't wait for it, cut the bump by hand:
+
+1. On a branch off the current `main`, run `scripts/version.sh bump patch`
+   (it needs `cargo` and `npm` on `PATH`, which regenerate the lockfiles).
+   The diff must touch exactly the files of the last workflow bump commit and
+   nothing else. Check against that commit with
+   `git show --stat $(git log -1 --first-parent --format=%H origin/main -- VERSION)`:
+   `VERSION`, `Cargo.toml`, `Cargo.lock`, `package.json`,
+   `mcp-loom/package.json`, `mcp-loom/package-lock.json`,
+   `.loom/install-metadata.json` (7 files, 9 lines at the time of writing).
+2. Open it as a PR titled `chore: bump version to <X.Y.Z>`. Say in the body why
+   the workflow couldn't publish it and what the release ships.
+3. Its `CI Result` fails at its `Lint` job (the version-bump guard), because the PR gate
+   (`check-defaults-version-bump.sh --forbid-bump`) rejects any PR that changes
+   a version value. That is expected. A person with the repository admin role
+   merges it with a merge commit, using **their own token** and bypassing the
+   required check. No agent or fleet App merges it.
+4. The merge commit's `CI` runs on `main`, where the gate is PR-only, and
+   `release.yml` tags it on green using `GITHUB_TOKEN`, exactly as for a
+   workflow bump. The merge commit changed `VERSION` on the first parent, so
+   the cadence gate counts it as the last bump and starts the next window.
+
+This is how 0.19.1163 shipped (#12131). Use it only when the workflow can't
+publish. A hand bump while the publisher works races the next workflow bump.
 
 ## The decision: a release is a green `main` commit with an unreleased `VERSION` (#10826)
 
@@ -24,8 +117,7 @@ for everything that reads the release list.
   `v<VERSION>` is created at that commit, and every build job checks the tag
   out, so the tag, the binary's `--version` (`Cargo.toml` at that tree) and the
   tested tree are the same thing.
-- **When it publishes** (`scripts/release-decision.sh`, unit-tested by
-  `scripts/test-release-decision.sh`): only if no tag or Release `v<VERSION>`
+- **When it publishes** (`scripts/release-decision.sh`): only if no tag or Release `v<VERSION>`
   exists yet, no **newer** version has already been released (a late re-run of
   an old green CI run never publishes an older version after a newer one), and
   `head_sha` is still reachable from `main` (rewritten history never
@@ -42,12 +134,15 @@ for everything that reads the release list.
   Release (`/repo:release`, the `release` event) and a `workflow_dispatch` dry
   run keep their per-tag groups and are unchanged.
 
-### Versions are assigned at merge; tags may skip versions
+### Versions are assigned by the bump; tags may skip versions
 
-`version-bump-on-merge.yml` is unchanged: a bump commit still assigns the
-next patch version right after the merge. That version is released only if
-the bump commit, or a later `main` commit still carrying the same unreleased
-`VERSION`, finishes green. Examples:
+A bump commit assigns the next patch version to everything merged since the
+previous bump (see Cadence above). That version is released only if the bump
+commit, or a later `main` commit still carrying the same unreleased `VERSION`,
+finishes green. With a 24 h window many merges share one `VERSION`, so
+`v<X>` can also contain a few merges made *after* the bump commit, when the
+bump commit's own CI run was superseded and a later merge went green first.
+That is the #10826 semantics, unchanged. Examples:
 
 - Bump commit B's CI is superseded by merge M2's pending run. M2 goes green
   still carrying B's `VERSION`, so `v<VERSION>` is released **at M2** — the
@@ -104,9 +199,14 @@ resolved release against the **source tree's own `VERSION` file** (not just
 the installed binary's version) and reports the gap on both paths:
 
 - **Resolution time** (any `--check`/plain run, not just `--fetch`): when the
-  newest release is behind the source tree's `VERSION`, a warning is printed:
-  `Artifact path cannot reach current source: newest release ... is behind
-  this source tree's VERSION (...)`.
+  newest release is behind the source tree's `VERSION`, an informational note
+  is printed. When the release IS newer than the installed binary (so this
+  run installs it), the note says so plainly — the target of a release
+  install is the release, not the checkout, and a checkout a few commits ahead
+  is routine (#11070). When it is not, the note says no release artifact can
+  update this host until a release >= the source `VERSION` is cut. Neither
+  note predicts a hard-fail; under a forced `--fetch` the refusal below is
+  the only message, and only when it actually happens.
 - **`--check`**: the same gap is summarized up front —
   `Release gap: installed ..., newest release ..., source ... — the
   artifact-fetch path cannot reach current source until a release >= ... is
@@ -132,8 +232,8 @@ simply never created.
 
 **This is accepted, not treated as a gap to backfill**, for two reasons:
 
-1. **Each bump's tag is unique** (`v<VERSION>`, and `VERSION` moves forward on
-   nearly every merge). A later run resolves a *different*, newer tag, and
+1. **Each bump's tag is unique** (`v<VERSION>`, and `VERSION` moves forward
+   with every bump, at most once per release interval). A later run resolves a *different*, newer tag, and
    once a newer version is released an older one is never published (#10826) — it has
    no way to notice or recreate a specific *earlier* version's missing
    Release without extra state (e.g. diffing the full tag history against
@@ -249,7 +349,7 @@ refusal, never its outcome.
 
 `loom-daemon-update.sh`'s own resolver (the shell twin `--fetch` uses) still
 emits the flat, pre-#8515 wording: it is a `contract`-category script, frozen by
-both the file-size ratchet and the portable shell budget, so the classification
+the portable shell budget, so the classification
 cannot be added there without first porting the resolution behind the daemon.
 Tracked separately in
 [#8654](https://github.com/rjwalters/loom/issues/8654).
@@ -272,7 +372,8 @@ it, never at release time:
   daemon lacks: a new `loom-daemon` subcommand, or a hard
   `# requires-daemon: <sub> >= <version>` floor above the current value. Name
   a published release, or the version this change ships as (`VERSION` + 1
-  patch) when the dependency lands in the same PR. The value is a floor, not
+  patch) when the dependency lands in the same PR — still the next bump, but
+  that bump may now be up to a release interval away (see Cadence above). The value is a floor, not
   a tag: releases skip versions (above), so `v<REQUIRES_DAEMON>` may never be
   published, and CI proves the claim against the oldest published release at
   or above it.
@@ -365,3 +466,5 @@ does not exist, because then nothing can be run against it.
 - Issue [#8290](https://github.com/rjwalters/loom/issues/8290) — the one-off
   `gh release create` HTTP 403 that motivated the retry logic and the
   "accepted gap" decision above.
+- Issue [#12132](https://github.com/rjwalters/loom/issues/12132) — the bump
+  blocked by a drained dispatch-App limit, and the manual escape hatch above.

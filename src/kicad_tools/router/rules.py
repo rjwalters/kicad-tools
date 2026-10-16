@@ -10,12 +10,14 @@ This module provides:
 import logging
 import math
 import re
+import warnings
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Literal
 
 from .layers import Layer, LayerStack
+from .pair_protocols import PairProtocol, ProtocolDefaults, parse_protocol, protocol_defaults
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from pathlib import Path
@@ -70,6 +72,27 @@ class ZoneRules:
     island_min_area: float = 0.5  # Minimum island area (mm²)
 
 
+@dataclass(frozen=True)
+class PairGap:
+    """A coupled pair's resolved gap (Issue #6443): see :meth:`DesignRules.pair_gap`.
+
+    Attributes:
+        gap_mm: The gap the pair is laid at and checked against.
+        class_mm: The class's own ``effective_intra_pair_clearance()``.
+        source: What raised the gap above the class value, or ``None`` when
+            the class value stands.
+    """
+
+    gap_mm: float
+    class_mm: float
+    source: str | None = None
+
+    @property
+    def raised(self) -> bool:
+        """Whether a floor raised the gap above the class value."""
+        return self.source is not None
+
+
 @dataclass
 class DesignRules:
     """Design rules for routing."""
@@ -106,6 +129,26 @@ class DesignRules:
     # router behaves as if the manufacturer does NOT support via-in-pad,
     # preserving pre-#2605 deferred-pin behavior on fine-pitch SSOP/TSSOP.
     manufacturer: str | None = None
+
+    # The board's AUTHORED minimum clearance (Issue #6443, piece (c)):
+    # ``board.design_settings.rules.min_clearance`` of the input ``.kicad_pro``
+    # (falling back to ``defaults.clearance_min``), as
+    # :func:`~kicad_tools.router.clearance_resolver._read_project_clearances`
+    # parses it.  KiCad holds EVERY copper pair to it -- including a diff
+    # pair's own P and N, as ``clearance`` and as ``diff_pair_gap`` -- so it
+    # floors the coupled gap (:meth:`pair_gap`).  ``None`` (default): the
+    # board declares none, and the pair gap is the class / fab value alone.
+    authored_min_clearance: float | None = None
+
+    # The manufacturer clearance floor for the board's actual stackup (Issue
+    # #6561): :func:`~kicad_tools.router.mfr_limits.resolve_clearance` with the
+    # effective copper layer count and copper weight -- the same
+    # ``get_design_rules(layers, copper_oz).min_clearance_mm`` that ``kct check
+    # --mfr`` enforces and the emitted ``.kicad_dru`` ``Clearance`` rule
+    # carries.  :meth:`pair_gap` floors the coupled gap at it.  ``None``
+    # (default): the stackup is unknown, so :meth:`pair_gap` falls back to the
+    # layer-agnostic ``MfrLimits.min_clearance`` of :attr:`manufacturer`.
+    mfr_clearance_floor: float | None = None
 
     # Fab minimum trace width for the effective layers/copper key (Issue #4700)
     # The SAME ``get_design_rules(layers, copper_oz).min_trace_width_mm`` that
@@ -172,6 +215,22 @@ class DesignRules:
     # every board whose project declares only ``Default``) leaves every
     # consumer byte-identical.
     net_clearance_floors: dict[int, float] = field(default_factory=dict)
+
+    # Issue #6449: the DESIGNER-authored subset of ``net_clearance_floors``.
+    # Since #6427 the router's own net-class clearances are merged into
+    # ``net_clearance_floors`` too, so every pair gate (committed copper, the
+    # native validator, the optimizer, the census) holds foreign copper to
+    # ``max(class(a), class(b))``.  The lattice search's STATIC pad masks are
+    # the one consumer that must not grow by a router class: #6395 measured
+    # that growing them reshuffles fine-pitch pin fields (board 05's U2 west
+    # field stranded a net), and enforces the pad side of the class pair on
+    # the negotiated copper instead (``lattice/class_pad_repair.py``).  The
+    # loader records the designer-only floors here -- keyed by net id, plus
+    # by net name for pads it neutralised to net 0 -- so the pad masks keep
+    # exactly their pre-#6427 (#6243) growth.  ``None`` (rules built outside
+    # the loader) means every floor is designer-authored.
+    designer_clearance_floors: dict[int, float] | None = None
+    designer_clearance_floors_by_name: dict[str, float] = field(default_factory=dict)
 
     # Pairwise (net-pair) HV-isolation clearance table (Issue #4431, Phase 1).
     # Scalar clearance cannot express "far from LV copper, near from own
@@ -383,6 +442,11 @@ class DesignRules:
     # see :meth:`NetClassRouting.hard_avoided_layer_indices`.
     strict_layers: bool = False
 
+    # Issue #6527: when True, the C++ backend's Python fallback calls
+    # ``Router.route_auto`` (bidirectional A* for long paths, one-way retry
+    # sharing one deadline) instead of ``Router.route``.  Default off.
+    fallback_bidirectional: bool = False
+
     # Bidirectional A* configuration (Issue #964)
     # Enable parallel frontier exploration for large paths
     bidirectional_search: bool = True  # Enable bidirectional A* by default
@@ -460,6 +524,45 @@ class DesignRules:
             except ValueError:
                 # Unknown manufacturer: keep the conservative 0.5 default.
                 pass
+
+    def pair_gap(self, net_class: "NetClassRouting") -> "PairGap":
+        """The edge-to-edge gap a coupled pair of ``net_class`` is laid at.
+
+        Issue #6443 (piece (c)): ``max(class value, manufacturer minimum,
+        authored board minimum)``.  The class value is
+        :meth:`NetClassRouting.effective_intra_pair_clearance`; the
+        manufacturer minimum is :attr:`mfr_clearance_floor` when the caller
+        resolved it for the board's stackup, else
+        :func:`~kicad_tools.router.mfr_limits.resolve_clearance` of
+        :attr:`manufacturer` with no layer count (the flat
+        ``MfrLimits.min_clearance``; the #4270 lattice clamp, made
+        stackup-aware by #6561); the authored minimum
+        is :attr:`authored_min_clearance`.  A gap below either floor is
+        copper KiCad fails twice per coupled segment pair
+        (``diff_pair_gap_out_of_range`` and ``clearance``), so the class value
+        is honoured only when it already clears both.  The one function every
+        reader of the pair gap goes through, so the router and the emitted
+        ``.kicad_dru`` ``diff_pair_gap`` rule agree by construction.
+        """
+        class_mm = float(net_class.effective_intra_pair_clearance())
+        gap, source = class_mm, None
+        if self.manufacturer:
+            mfr_mm: float | None
+            if self.mfr_clearance_floor is not None:
+                mfr_mm = float(self.mfr_clearance_floor)
+            else:
+                try:
+                    from .mfr_limits import resolve_clearance
+
+                    mfr_mm = resolve_clearance(self.manufacturer)
+                except Exception:
+                    mfr_mm = None
+            if mfr_mm is not None and mfr_mm > gap:
+                gap, source = mfr_mm, f"{self.manufacturer} minimum clearance"
+        authored = self.authored_min_clearance
+        if authored is not None and authored > gap:
+            gap, source = float(authored), "authored board min_clearance"
+        return PairGap(gap_mm=gap, class_mm=class_mm, source=source)
 
     def authored_floor(self, net: int) -> float:
         """The authored electrical minimum of ``net`` (0.0 when it has none)."""
@@ -1139,6 +1242,16 @@ class LengthConstraint:
         )
 
 
+def _normalize_pair_protocol(value: object) -> str | None:
+    """Canonical ``PairProtocol`` name of a sidecar's ``pair_protocol`` value.
+
+    Raises ``ValueError`` on an unknown name: a misspelt protocol must not
+    quietly resolve to the generic limits (Issue #6443).
+    """
+    parsed = parse_protocol(value)  # type: ignore[arg-type]
+    return parsed.name if parsed is not None else None
+
+
 @dataclass
 class NetClassRouting:
     """Routing parameters for a net class."""
@@ -1392,12 +1505,12 @@ class NetClassRouting:
     """Maximum allowed length skew (|L_p - L_n|, in mm) for differential pairs
     in this class.
 
-    ``None`` (the default) means "use the rule's module-level default of
-    0.5 mm" -- a conservative value covering USB 3.0 / PCIe Gen 2+ (~0.5-1 mm),
-    MIPI D-PHY (~1 mm), and DDR4 DQ-strobe (~0.5 mm) headroom while still
-    permitting the looser USB 2.0 HS budget (~3 mm) to be set explicitly.
-    Setting ``0.3`` is appropriate for tight HSDI lanes; setting ``3.0``
-    accommodates USB 2.0 full-/high-speed pairs.
+    ``None`` (the default) means "use the declared :attr:`pair_protocol`'s
+    value from the defaults table, else the generic 0.5 mm" (Issue #6443).
+    An explicit value here always wins, and is reported as an explicit
+    (error-severity) limit.  Prefer declaring the protocol: the table carries
+    2.5 mm for full-speed USB2 and 1.27 mm for high-speed USB2, each with its
+    source (:mod:`kicad_tools.router.pair_protocols`).
 
     The :class:`~kicad_tools.router.diffpair_length.DiffPairLengthTracker`
     measures skew per pair unconditionally (no per-class gate); this field
@@ -1409,6 +1522,44 @@ class NetClassRouting:
     rather than a skew gate (`length_critical=False` pairs still get
     measured).
     """
+
+    # Protocol-aware pair rules (Issue #6443, epic #6441 Phase 1a)
+    pair_protocol: str | None = None
+    """Signalling standard the class's pairs carry, by
+    :class:`~kicad_tools.router.pair_protocols.PairProtocol` name
+    (``"USB2_FS"``, ``"USB2_HS"``, ``"LVDS"``, ...).
+
+    A declared protocol supplies the pair limits the class leaves unset:
+    ``class field > protocol default > generic default``.  ``None`` (the
+    default) keeps the pre-#6443 behaviour exactly -- 0.5 mm skew, no
+    uncoupled-length or via-count limit.  Read it through
+    :meth:`effective_pair_protocol`.
+    """
+
+    max_uncoupled_per_terminal_mm: float | None = None
+    """Uncoupled copper allowed at each pair terminal, in mm.  ``None`` ->
+    the protocol default, if any.  Derives the total limit (#6443) and is
+    checked per terminal, outside :attr:`gather_ignore`, by the kct-only
+    per-terminal figure of ``diffpair_uncoupled_length`` (#6615)."""
+
+    gather_ignore: str | float = "courtyard"
+    """The region around each pair terminal whose uncoupled copper the
+    per-terminal check ignores (Issue #6615, epic #6441).
+
+    ``"courtyard"`` (the default): the footprint's courtyard as drawn.  A
+    number ``r``: the courtyard grown by ``r`` mm.  ``"none"``: nothing is
+    ignored.  A footprint with no usable courtyard falls back to its pads'
+    bounding box plus 0.25 mm (IPC-7351 nominal courtyard excess).  See
+    ``docs/guides/diff-pairs/08-uncoupled-length.md``."""
+
+    max_uncoupled_total_mm: float | None = None
+    """Total uncoupled copper allowed per net, in mm (KiCad's
+    ``diff_pair_uncoupled``).  ``None`` -> derived from the per-terminal
+    limit by piece (b).  Data only in piece (a)."""
+
+    max_vias_per_net: int | None = None
+    """Vias allowed on each net of the pair.  ``None`` -> the protocol
+    default, if any.  Data only in piece (a)."""
 
     # Match-group declaration (Issue #2687, Epic #2661 Phase 1A)
     length_match_group: str | None = None
@@ -1515,6 +1666,37 @@ class NetClassRouting:
     routed-net improvement, and otherwise reverted atomically.
     """
 
+    def __post_init__(self) -> None:
+        """Reject an unknown :attr:`pair_protocol` where the class is declared.
+
+        Without this a typo such as ``pair_protocol="USB9"`` is only caught
+        when something resolves the class's limits, which can be mid-route
+        (Issue #6443).  The stored value is left as given.
+
+        Raises:
+            ValueError: :attr:`pair_protocol` names no known protocol.
+        """
+        parse_protocol(self.pair_protocol)
+        gather = self.gather_ignore
+        if isinstance(gather, bool) or not (
+            gather in ("courtyard", "none")
+            or (isinstance(gather, (int, float)) and math.isfinite(gather) and gather >= 0)
+        ):
+            raise ValueError(
+                f"net class {self.name!r}: gather_ignore must be 'courtyard', 'none' "
+                f"or a non-negative radius in mm, got {gather!r}"
+            )
+        if self.coupled_continuity_threshold is not None:
+            warnings.warn(
+                f"net class {self.name!r}: coupled_continuity_threshold is "
+                "deprecated and no longer gates anything: routing continuity is "
+                "an info-only measurement since Issue #6443. Limit the uncoupled "
+                "length instead (pair_protocol, max_uncoupled_total_mm, "
+                "max_uncoupled_per_terminal_mm).",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+
     def effective_intra_pair_clearance(self) -> float:
         """Return the clearance to apply to within-pair diff-pair edges.
 
@@ -1600,26 +1782,45 @@ class NetClassRouting:
     def effective_skew_tolerance(self, default: float = 0.5) -> float:
         """Return the length-match skew tolerance for diff pairs in this class.
 
-        Backward-compatible accessor (Issue #2647 / Epic #2556 Phase 3H):
-        returns ``default`` when :attr:`skew_tolerance_mm` is unset
-        (``None``).  ``default`` mirrors the (Phase 3J / Issue J) DRC rule's
-        module-level ``DEFAULT_SKEW_TOLERANCE_MM`` so callers can override
-        the floor consistently without re-importing it.
+        Resolution (Issue #6443): :attr:`skew_tolerance_mm` if set, else the
+        declared :attr:`pair_protocol`'s value in the protocol defaults table
+        (2.5 mm full-speed USB2, 1.27 mm high-speed USB2, ...), else
+        ``default``.  ``default`` mirrors the DRC rule's module-level
+        ``DEFAULT_SKEW_TOLERANCE_MM``.
+
+        This returns the number only.  For its provenance and the severity
+        of a breach use
+        :func:`kicad_tools.validate.diffpair_engagement.resolve_pair_thresholds`,
+        which resolves in the same order.
 
         Args:
-            default: Fallback value (in mm) when no per-class skew
-                tolerance is set.  Defaults to ``0.5`` -- a conservative
-                value that covers USB 3.0 / PCIe Gen 2+ (~0.5-1 mm),
-                MIPI D-PHY (~1 mm), and DDR4 DQ-strobe (~0.5 mm) while
-                still permitting the looser USB 2.0 HS budget (~3 mm) to
-                be set explicitly per class.
+            default: Fallback value (in mm) when the class sets no skew
+                tolerance and declares no protocol with one.
 
         Returns:
-            The per-class skew tolerance in mm if set, else ``default``.
+            The skew tolerance in mm.
         """
         if self.skew_tolerance_mm is not None:
             return self.skew_tolerance_mm
+        # Issue #6443: a declared protocol supplies the limit before the
+        # generic default does, so every router-side reader agrees with
+        # ``kct check`` (``resolve_pair_thresholds``).
+        row = self.pair_protocol_defaults()
+        if row is not None and row.max_skew_mm is not None:
+            return float(row.max_skew_mm.value)
         return default
+
+    def effective_pair_protocol(self) -> PairProtocol | None:
+        """Return the declared :class:`PairProtocol`, or ``None``.
+
+        Raises:
+            ValueError: :attr:`pair_protocol` names no known protocol.
+        """
+        return parse_protocol(self.pair_protocol)
+
+    def pair_protocol_defaults(self) -> ProtocolDefaults | None:
+        """Return the defaults-table row of the declared protocol, if any."""
+        return protocol_defaults(self.pair_protocol)
 
     def effective_length_match_group(self) -> str | None:
         """Return the match-group name for this net class.
@@ -1676,6 +1877,9 @@ class NetClassRouting:
         - ``coupled_routing`` (Phase 2E / #2638 -- gates engagement)
         - ``coupled_continuity_threshold`` (Phase 2G / #2640)
         - ``skew_tolerance_mm`` (Phase 3H / #2647)
+        - ``pair_protocol`` / ``max_uncoupled_per_terminal_mm`` /
+          ``max_uncoupled_total_mm`` / ``max_vias_per_net`` (#6443)
+        - ``gather_ignore`` (#6615)
         - ``diffpair_partner`` (Phase 1B / #2558)
         - ``target_diff_impedance`` (Phase 3K / #2650)
         - ``target_single_impedance`` (Phase 3K / #2650)
@@ -1732,6 +1936,11 @@ class NetClassRouting:
             "impedance_tolerance_percent": self.impedance_tolerance_percent,
             "coupled_continuity_threshold": self.coupled_continuity_threshold,
             "skew_tolerance_mm": self.skew_tolerance_mm,
+            "pair_protocol": getattr(self.pair_protocol, "name", self.pair_protocol),
+            "max_uncoupled_per_terminal_mm": self.max_uncoupled_per_terminal_mm,
+            "max_uncoupled_total_mm": self.max_uncoupled_total_mm,
+            "max_vias_per_net": self.max_vias_per_net,
+            "gather_ignore": self.gather_ignore,
             "length_match_group": self.length_match_group,
             "length_match_reference": self.length_match_reference,
             "length_match_tolerance_mm": self.length_match_tolerance_mm,
@@ -1822,6 +2031,11 @@ class NetClassRouting:
             impedance_tolerance_percent=data.get("impedance_tolerance_percent", 10.0),
             coupled_continuity_threshold=data.get("coupled_continuity_threshold"),
             skew_tolerance_mm=data.get("skew_tolerance_mm"),
+            pair_protocol=_normalize_pair_protocol(data.get("pair_protocol")),
+            max_uncoupled_per_terminal_mm=data.get("max_uncoupled_per_terminal_mm"),
+            max_uncoupled_total_mm=data.get("max_uncoupled_total_mm"),
+            max_vias_per_net=data.get("max_vias_per_net"),
+            gather_ignore=data.get("gather_ignore", "courtyard"),
             length_match_group=data.get("length_match_group"),
             length_match_reference=data.get("length_match_reference"),
             length_match_tolerance_mm=data.get("length_match_tolerance_mm"),

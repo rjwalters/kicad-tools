@@ -50,6 +50,25 @@ exactly the false "manufacturable" this category exists to remove.  In mode
 visible rather than mysterious.  A user who truly wants the class ignored
 removes or loosens it in ``.kicad_pro``.
 
+Router-declared classes (Issue #6390)
+-------------------------------------
+``kct route`` declares the router's own stricter classes (``Power``, ``Clock``,
+...) in the routed ``.kicad_pro`` and records them under
+``meta.kct_router_netclasses``.  They are checked like any class, except that
+they do not govern a pad pair inside one footprint: a USB-C connector's pins
+or a QFP's corner pads sit closer than 0.2 mm by vendor design, and no re-route
+can widen them.  The ``.kicad_dru`` rule kct emits for such a class carries the
+same exclusion, so both engines agree.  Nor do they govern the gap between
+the two halves of a coupled differential pair (``USB_D+``/``USB_D-``): the
+router routes P against N at the class's ``intra_pair_clearance`` (``HighSpeed``
+0.075 mm against its 0.15 mm clearance), and the emitted rule carries
+``!A.isCoupledDiffPair()``.  The pair test here is
+:func:`kicad_tools.manufacturers.netclass_dru.is_coupled_diff_pair`, a port of
+KiCad's own name-suffix predicate, so both engines exempt exactly the same
+pairs.  The fab floor (the ``clearance`` family) still applies to the pair, and
+``diffpair_clearance_intra`` owns the intra-pair minimum.  Authored classes are
+unaffected.
+
 Out of scope: copper-to-zone-fill clearance (the zone rules own it) and custom
 ``.kicad_dru`` expressions, which are not evaluated as netclass rules.
 """
@@ -155,6 +174,27 @@ def check_netclass_clearance_copper(
         if opt_out
         else ""
     )
+    # Issue #6390: classes kct declared from the router's map are a routing
+    # intent for the copper the router places.  They do not govern pad pairs
+    # inside one footprint (a connector's or fine-pitch package's own pin
+    # gaps), nor the P/N gap of a coupled diff pair (routed at the class's
+    # intra-pair clearance), exactly like the kicad-cli rule kct emits for
+    # them (``isCoupledDiffPair()``, mirrored name-for-name); an authored
+    # class still governs both.  Issue #6429: the pairs the router coupled
+    # under names KiCad does not recognise (``X_POS``/``X_NEG``) are recorded
+    # in ``meta.kct_router_diff_pairs`` and exempted by the same predicate the
+    # emitted .kicad_dru rule encodes.
+    from kicad_tools.manufacturers.netclass_dru import is_router_coupled_pair
+    from kicad_tools.manufacturers.project_generator import (
+        recorded_router_coupled_pairs,
+        router_netclass_provenance,
+    )
+
+    router_classes = set(router_netclass_provenance(project)[0])
+    recorded_pairs = recorded_router_coupled_pairs(project)
+    package_floors = {
+        num: value for num, value in floors.items() if classes[num] not in router_classes
+    }
     max_floor = max(floors.values())
     rule = ClearanceRule()
     for layer in pcb.copper_layers:
@@ -162,7 +202,15 @@ def check_netclass_clearance_copper(
         bounds = [element.bounds() for element in elements]
         for i, j in candidate_pairs(bounds, max_floor + DRC_TOLERANCE):
             a, b = elements[i], elements[j]
-            required_class = pair_floor(floors, a.net_number, b.net_number)
+            same_package = (
+                a.element_type == "pad"
+                and b.element_type == "pad"
+                and a.source_footprint is not None
+                and a.source_footprint is b.source_footprint
+            )
+            coupled = is_router_coupled_pair(a.net_name, b.net_name, recorded_pairs)
+            governing = package_floors if same_package or coupled else floors
+            required_class = pair_floor(governing, a.net_number, b.net_number)
             if required_class <= fab_floor + DRC_TOLERANCE:
                 continue
             if a.element_type != "segment" and b.element_type != "segment":
@@ -186,7 +234,7 @@ def check_netclass_clearance_copper(
             if clearance + DRC_TOLERANCE >= required_class:
                 continue
             required = max(fab_floor, required_class)
-            owner = max((a, b), key=lambda e: floors.get(e.net_number, 0.0))
+            owner = max((a, b), key=lambda e: governing.get(e.net_number, 0.0))
             cls = classes[owner.net_number]
             results.add(
                 DRCViolation(

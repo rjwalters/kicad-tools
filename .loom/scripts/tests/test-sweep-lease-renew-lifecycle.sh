@@ -28,8 +28,9 @@
 #        renewal continues, loop still ends when the watched pid dies
 #
 # With LEASE_RENEWER_DAEMON=<built loom-daemon> the stub hands `lease renewer`
-# to the real binary and (r1)-(r4) run end to end: closed issue, concurrent
-# identical starts, independent keys, release, dead-owner recovery.
+# to the real binary and (r1)-(r6) run end to end: closed issue, concurrent
+# identical starts, independent keys, release, dead-owner recovery, and an
+# ownership-checked stop that spares look-alike processes (#11086).
 #
 # `gh` is stubbed on PATH; no real credentials or live forge calls.
 
@@ -84,7 +85,9 @@ if [[ "${GH_TOKEN:-}" == ghs_app* && -f "$D/app-fail-$method" ]]; then
   exit 1
 fi
 if [[ "$method" == "GET" && "$path" == repos/*/issues/*/comments* ]]; then
-  echo "$path" >> "$D/list-calls.log"; cat "$D/comments.json"; exit 0
+  echo "$path" >> "$D/list-calls.log"
+  [[ ! -f "$D/comments-fail" ]] || { echo "stub gh: HTTP 502 comments read failed" >&2; exit 1; }
+  cat "$D/comments.json"; exit 0
 fi
 if [[ "$method" == "GET" && "$path" == repos/*/issues/[0-9]* ]]; then
   echo "$path" >> "$D/state-calls.log"
@@ -120,7 +123,7 @@ unset GH_TOKEN GITHUB_TOKEN LOOM_PERSONAL_GH_TOKEN LOOM_TERMINAL_ID LOOM_HOST_ID
 reset_state() {
     rm -f "$STUB_DIR"/comments.json "$STUB_DIR"/issue-state* "$STUB_DIR"/state-calls.log \
         "$STUB_DIR"/list-calls.log "$STUB_DIR"/patch-calls.log "$STUB_DIR"/renewer-* "$STUB_DIR"/r2-out.* \
-        "$STUB_DIR"/cred.log "$STUB_DIR"/app-* "$STUB_DIR"/forge-token-args.log "$STUB_DIR"/z-*.log
+        "$STUB_DIR"/comments-fail "$STUB_DIR"/cred.log "$STUB_DIR"/app-* "$STUB_DIR"/forge-token-args.log "$STUB_DIR"/z-*.log
     rm -rf "$LOOM_LEASE_RENEW_STATE_DIR" 2> /dev/null || true
     echo "[$Y_LEASE]" > "$STUB_DIR/comments.json"
 }
@@ -196,6 +199,17 @@ if [[ -z "${LEASE_RENEWER_DAEMON:-}" ]]; then
     "$SCRIPT" release 10229 --host y-host --sweep-id y-sweep 2> /dev/null
     assert_eq "lease renewer release 10229 --host y-host --sweep-id y-sweep" "$(cat "$STUB_DIR/renewer-args.log" 2> /dev/null)" "(y5) release is the daemon verb"
 
+    # (y5b) stop / stop-issue delegate to the daemon verb; no local kill.
+    reset_state
+    sleep 30 &
+    BYSTANDER=$!
+    "$SCRIPT" stop "$BYSTANDER" 2> /dev/null
+    assert_eq "lease renewer stop $BYSTANDER" "$(cat "$STUB_DIR/renewer-args.log" 2> /dev/null)" "(y5b) stop <PID> is the daemon verb"
+    "$SCRIPT" stop-issue 10229 --host y-host 2> /dev/null
+    assert_eq "lease renewer stop --issue 10229 --host y-host" "$(tail -n1 "$STUB_DIR/renewer-args.log" 2> /dev/null)" "(y5b) stop-issue is stop --issue"
+    assert_eq "true" "$(yb alive "$BYSTANDER")" "(y5b) the script itself signalled nothing"
+    kill "$BYSTANDER" 2> /dev/null
+
     # (y7) a daemon predating the verb (clap exit 2) renews as before.
     reset_state
     gate 2
@@ -256,6 +270,47 @@ else
     REC="$(start_loop 10229 "$WATCH")"
     assert_eq "true" "$([[ -n "$REC" && "$REC" != "$NEW" ]] && yb alive "$REC" || echo false)" "(r4) a killed owner's record is recovered"
     kill "$REC" "$O_ISSUE" "$O_SWEEP" "$O_REPO" "$WATCH" 2> /dev/null
+
+    # (r5) stop is ownership-checked (#11086).
+    reset_state
+    sleep 30 &
+    WATCH=$!
+    sleep 30 &
+    BYSTANDER=$!
+    R5A="$(start_loop 10229 "$WATCH")"
+    R5B="$(start_loop 10230 "$WATCH")"
+    RC=0; "$SCRIPT" stop "$BYSTANDER" > /dev/null 2>&1 || RC=$?
+    assert_eq "true" "$([[ $RC -ne 0 ]] && alive "$BYSTANDER" && echo true || echo false)" "(r5) stop of an unrelated PID is refused and the process survives"
+    RC=0; "$SCRIPT" stop 10229 > /dev/null 2>&1 || RC=$?
+    assert_eq "true" "$([[ $RC -ne 0 ]] && alive "$R5A" && alive "$R5B" && echo true || echo false)" "(r5) an issue number passed as a PID is refused, nothing signalled"
+    RC=0; "$SCRIPT" stop abc > /dev/null 2>&1 || RC=$?
+    assert_eq "true" "$([[ $RC -ne 0 ]] && echo true || echo false)" "(r5) a non-numeric PID is refused"
+    RC=0; "$SCRIPT" stop --issue 10230 > /dev/null 2>&1 || RC=$?
+    sleep 0.5
+    assert_eq "true" "$([[ $RC -eq 0 ]] && ! alive "$R5B" && alive "$R5A" && alive "$WATCH" && echo true || echo false)" "(r5) stop --issue N ends that issue's renewer only"
+    RC=0; "$SCRIPT" stop "$R5A" > /dev/null 2>&1 || RC=$?
+    sleep 0.5
+    assert_eq "true" "$([[ $RC -eq 0 ]] && ! alive "$R5A" && alive "$WATCH" && echo true || echo false)" "(r5) stop <real renewer pid> ends it"
+    kill "$BYSTANDER" "$WATCH" 2> /dev/null
+
+    # (r6) look-alikes whose argv mimics a renewer's survive `stop` (#11086):
+    # a non-shell program, and a shell running a `-c` string. The refusal names
+    # the program only, never the target's (fake) credential argument.
+    mkdir -p "$STUB_DIR/la" && printf 'import time\ntime.sleep(30)\n' > "$STUB_DIR/la/sweep-lease-renew.sh"
+    bash -c 'sleep 30; :' "$STUB_DIR/la/sweep-lease-renew.sh" start &
+    LA_SH=$!
+    RC=0; "$SCRIPT" stop "$LA_SH" > /dev/null 2>&1 || RC=$?; sleep 0.3
+    assert_eq "true" "$([[ $RC -ne 0 ]] && alive "$LA_SH" && echo true || echo false)" "(r6) a 'bash -c' look-alike is refused and survives"
+    kill "$LA_SH" 2> /dev/null
+    if command -v python3 > /dev/null 2>&1; then
+        python3 -I "$STUB_DIR/la/sweep-lease-renew.sh" start --token FAKE-SECRET-SENTINEL-r6 &
+        LA_PY=$!
+        sleep 0.3
+        RC=0; ERR="$("$SCRIPT" stop "$LA_PY" 2>&1 > /dev/null)" || RC=$?; sleep 0.3
+        assert_eq "true" "$([[ $RC -ne 0 ]] && alive "$LA_PY" && echo true || echo false)" "(r6) a python3 look-alike is refused and survives"
+        assert_eq "true" "$([[ "$ERR" == *"program: python3"* && "$ERR" != *FAKE-SECRET-SENTINEL* ]] && echo true || echo false)" "(r6) the refusal names the program, not its arguments"
+        kill "$LA_PY" 2> /dev/null
+    fi
 fi
 
 # (y6) per-cycle budget: steady state is one state read + one list/window read
@@ -382,6 +437,27 @@ N="$(patch_n)"
 "$SCRIPT" renew-once 10229 --host y-host --sweep-id y-sweep --cached-lease 42@2026-10-01T05:00:00Z > /dev/null 2>&1
 assert_eq "4" "$?" "(z5) a yield inside the sliding window still trips the own-yield guard"
 assert_eq "$N" "$(patch_n)" "(z5) ...and nothing is PATCHed"
+
+# (z5b) a transient failure of the CACHED window read is not a cache miss: no
+# --paginate re-list, no PATCH of an unverified target, the cache is kept (exit 1).
+reset_state
+touch "$STUB_DIR/comments-fail"
+OUT="$("$SCRIPT" renew-once 10229 --host y-host --sweep-id y-sweep --cached-lease 42@2026-10-01T05:00:00Z 2>&1)"
+assert_eq "1" "$?" "(z5b) a failed window read fails the cycle (exit 1), it is not a miss"
+assert_eq "1" "$(wc -l < "$STUB_DIR/list-calls.log" | tr -d ' ')" "(z5b) exactly one read, no re-list"
+assert_eq "true" "$(yb grep -q 'comments?since=' "$STUB_DIR/list-calls.log")" "(z5b) and it was the one-page since-window"
+assert_eq "0" "$(patch_n)" "(z5b) nothing was PATCHed"
+assert_eq "false" "$([[ "$OUT" == *"lease-cache="* ]] && echo true || echo false)" "(z5b) no cache token is reported, so the loop keeps its previous one"
+
+# (z2b) an App that cannot READ (404: not installed) falls back to the caller's
+# credential for the read, tagged; the PATCH is not guessed to fail with it.
+reset_state
+echo ghs_app > "$STUB_DIR/app-token"
+echo 404 > "$STUB_DIR/app-fail-GET"
+OUT="$("$SCRIPT" renew-once 10229 --host y-host --sweep-id y-sweep 2>&1)"
+assert_eq "0" "$?" "(z2b) renewal succeeds after the App read attempt fails"
+assert_eq "true" "$([[ "$OUT" == *"lease-credential=ambient-fallback: the read call failed"* ]] && echo true || echo false)" "(z2b) the read fallback is tagged"
+assert_eq "PATCH tok=ghs_app-write cred=app" "$(grep '^PATCH' "$STUB_DIR/cred.log" | sed 's/ repos[^ ]*//')" "(z2b) the PATCH still ran on the writer App"
 
 # (z6) no lease to renew: the loop stops after two consecutive misses instead
 # of paying a --paginate listing every interval forever; the parent lives on.

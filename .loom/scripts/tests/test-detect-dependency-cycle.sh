@@ -54,27 +54,8 @@ CHAMPION_PROMO_MD="$PROMPT_DIR/champion-issue-promo.md"
 source "$TEST_DIR/lib/require-daemon-bin.sh"
 loom_test_require_daemon_bin "$SCRIPTS_DIR" "detect-dependency-cycle"
 
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-NC='\033[0m'
-
-TESTS_RUN=0
-TESTS_PASSED=0
-TESTS_FAILED=0
-
-assert_eq() {
-    local expected="$1" actual="$2" msg="$3"
-    TESTS_RUN=$((TESTS_RUN + 1))
-    if [[ "$expected" == "$actual" ]]; then
-        TESTS_PASSED=$((TESTS_PASSED + 1))
-        echo -e "  ${GREEN}PASS${NC}: $msg"
-    else
-        TESTS_FAILED=$((TESTS_FAILED + 1))
-        echo -e "  ${RED}FAIL${NC}: $msg"
-        echo "    Expected: '$expected'"
-        echo "    Actual:   '$actual'"
-    fi
-}
+# shellcheck source=lib/assert.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/assert.sh"
 
 assert_contains() {
     local haystack="$1" needle="$2" msg="$3"
@@ -356,7 +337,7 @@ assert_eq "0" "$RC" "exit 0 when a referenced issue is not visible to this token
 assert_contains "$OUT" "UNREADABLE: private/repo#9" "unreadable node is surfaced as partial coverage"
 
 echo
-echo "--- --report: surfaces the cycle and routes to loom:operator-only ---"
+echo "--- --report: surfaces the cycle and routes to loom:operator (#11795) ---"
 reset_state
 fixture 'example-org/downstream-repo#101' OPEN 'Blocked by example-org/tool-repo#202'
 fixture 'example-org/tool-repo#202' OPEN 'Depends on example-org/downstream-repo#101'
@@ -369,8 +350,13 @@ assert_contains "$COMMENT" "example-org/downstream-repo#101" "comment names this
 assert_contains "$COMMENT" "example-org/tool-repo#202" "comment names the OTHER side of the cycle"
 assert_contains "$COMMENT" "champion:dep-cycle:" "comment carries the idempotency marker"
 LABELS="$(cat "$STUB_DIR/labels-example-org_downstream-repo_101.log" 2>/dev/null || true)"
-assert_contains "$LABELS" "loom:operator-only" "routes to loom:operator-only"
-assert_contains "$LABELS" "loom:operator-decision" "routes to the loom:operator-decision sub-kind (#5671) — breaking a cycle is a judgement call"
+# Exact-line match: a substring check would also accept the retired names.
+assert_eq "loom:operator" "$(grep -x 'loom:operator' <<<"$LABELS" | head -1)" \
+    "routes to loom:operator — breaking a cycle is a human call (#5671, #11795)"
+# The pre-#11795 names are retired: the cycle route must never apply them
+# (the old operator-only + operator-decision pair folds into loom:operator).
+assert_not_contains "$LABELS" "loom:operator-only" "does not apply the retired loom:operator-only (#11795)"
+assert_not_contains "$LABELS" "loom:operator-decision" "does not apply the retired loom:operator-decision (#11795)"
 # The blocker list is `sort -u`-ordered, so it reads downstream-repo before
 # tool-repo for these fixture names.
 assert_contains "$COMMENT" "Blocked by example-org/downstream-repo#101 example-org/tool-repo#202" "comment names the blocker(s) in machine-readable form (#5671)"
@@ -420,7 +406,7 @@ echo "--- Doc pins: the Champion prose actually calls the detector ---"
     assert_doc_contains "$CHAMPION_MERGE_MD" 'if [ "$ALL_RESOLVED" = false ]; then' \
         "the walk is gated on the 'still blocked' branch, not run on every pass"
     assert_doc_contains "$CHAMPION_MERGE_MD" '"$GH_READ" issue view "$blocked" --json labels' \
-        "an already-surfaced cycle (loom:operator-only) short-circuits the walk with one cached read"
+        "an already-surfaced cycle (loom:operator) short-circuits the walk with one cached read"
     assert_doc_contains "$CHAMPION_PROMO_MD" "detect-dependency-cycle.sh" \
         "champion-issue-promo.md's Technical Feasibility check invokes the detector"
     assert_doc_contains "$CHAMPION_PROMO_MD" 'if [ "$DECLARES_DEP" -gt 0 ]; then' \

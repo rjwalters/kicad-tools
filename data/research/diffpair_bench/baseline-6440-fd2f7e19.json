@@ -1,0 +1,1682 @@
+{
+  "label": "baseline-6440",
+  "git_sha": "fd2f7e19",
+  "timeout_s": 600.0,
+  "rows": [
+    {
+      "board": "03",
+      "engine": "grid",
+      "seed": 42,
+      "rep": 0,
+      "git_sha": "664cd2bc",
+      "input_sha256": "65b1bf9084f0c52b4a7cb41323ad3f53966fb5fcef6e1c85f2210f31cc0930ec",
+      "source": "boards/03-usb-joystick/output/usb_joystick.kicad_pcb",
+      "stripped_items": 0,
+      "pair_nets": [
+        "USB_D+",
+        "USB_D-",
+        "USB_MCU_D+",
+        "USB_MCU_D-"
+      ],
+      "deterministic_rescue": true,
+      "router_src": "/tmp/w6442/src-6440/src",
+      "router_rev": "fd2f7e19",
+      "cmd": "-m kicad_tools.cli route /tmp/w6442/b603/03-grid-s42/r0/usb_joystick.kicad_pcb -o /tmp/w6442/b603/03-grid-s42/r0/usb_joystick_routed.kicad_pcb --timeout 600 --no-cache --route-engine grid --differential-pairs --layers 4 --no-auto-layers --deterministic-budget --per-net-iterations 1000000 --no-placement-delta-feedback --deterministic-rescue --net-class-map /home/ubuntu/GitHub/kicad-tools/.loom/worktrees/issue-6442/boards/03-usb-joystick/output/net_class_map.json --seed 42",
+      "exit_code": 3,
+      "wall_s": 349.9,
+      "killed_by_harness": false,
+      "clearance_mm": 0.15,
+      "coarse_grid_mm": 0.05,
+      "cell_estimate": 4949449,
+      "router_nets": "24/24",
+      "hit_timeout": false,
+      "cache_hit": false,
+      "rescue_wall_clock": false,
+      "routed": "/tmp/w6442/b603/03-grid-s42/r0/usb_joystick_routed.kicad_pcb",
+      "artifact": "final",
+      "nets_complete": 27,
+      "nets_total": 27,
+      "nets_blocking_incomplete": 0,
+      "connections_routed": 115,
+      "connections_total": 115,
+      "via_count": 91,
+      "vias_per_connection": 0.791,
+      "wirelength_mm": 766.3,
+      "kct_check_errors": 3,
+      "kct_check_errors_total": 3,
+      "kct_check_by_rule": {
+        "clearance_via_zone": 1,
+        "diffpair_routing_continuity": 2
+      },
+      "kct_check_mfr": "jlcpcb",
+      "kct_check_net_class_map": "/tmp/w6442/b603/03-grid-s42/r0/net_class_map.json",
+      "kct_check_inactive_rules": [],
+      "kicad_drc_errors": 0,
+      "kicad_drc_unconnected": 0,
+      "kicad_drc_all_track_errors": true,
+      "kicad_drc_by_type": {},
+      "kicad_drc_note": null,
+      "stuck_counts": {
+        "escape_blocked": 0,
+        "congestion_saturated": 0,
+        "placement_bound": 0,
+        "budget_starved": 0,
+        "pour_discontinuous": 0
+      },
+      "signal_nets_unfinished": 0,
+      "stuck_nets": {},
+      "vias_by_net": {
+        "BTN1": 4,
+        "BTN2": 8,
+        "BTN3": 2,
+        "BTN4": 4,
+        "GND": 1,
+        "HWB": 2,
+        "ISP_MISO": 2,
+        "ISP_MOSI": 2,
+        "JOY_BTN": 4,
+        "JOY_X": 4,
+        "JOY_X_RAW": 4,
+        "JOY_Y": 6,
+        "JOY_Y_RAW": 2,
+        "RESET": 4,
+        "UCAP": 2,
+        "USB_CC1": 2,
+        "USB_CC2": 1,
+        "USB_D+": 4,
+        "USB_D-": 4,
+        "VBUS": 5,
+        "VCC": 18,
+        "XTAL1": 4,
+        "XTAL2": 2
+      },
+      "zone_nets": [
+        "GND",
+        "VBUS",
+        "VCC"
+      ],
+      "manufacturable": false,
+      "pairs": [
+        {
+          "pair": "USB_D",
+          "nets": [
+            "USB_D+",
+            "USB_D-"
+          ],
+          "outcome": "uncoupled:landing-stall",
+          "segment_outcomes": null,
+          "routed_mm": [
+            31.98,
+            31.625
+          ],
+          "skew_mm": 0.355,
+          "chain_skew_mm": null,
+          "uncoupled_mm": 59.327,
+          "vias_p": 4,
+          "vias_n": 4,
+          "gap_min_mm": 0.4778,
+          "gap_max_mm": 0.4778,
+          "coupled_trunk_mm": 3.005,
+          "continuity_pct": 6.7,
+          "continuity_threshold_pct": 25.0,
+          "skew_tolerance_mm": 0.5,
+          "log_threshold": null
+        },
+        {
+          "pair": "USB_MCU_D",
+          "nets": [
+            "USB_MCU_D+",
+            "USB_MCU_D-"
+          ],
+          "outcome": "uncoupled:landing-stall",
+          "segment_outcomes": null,
+          "routed_mm": [
+            4.053,
+            4.095
+          ],
+          "skew_mm": 0.041,
+          "chain_skew_mm": null,
+          "uncoupled_mm": 3.918,
+          "vias_p": 0,
+          "vias_n": 0,
+          "gap_min_mm": 0.155,
+          "gap_max_mm": 0.155,
+          "coupled_trunk_mm": 2.14,
+          "continuity_pct": 51.9,
+          "continuity_threshold_pct": 70.0,
+          "skew_tolerance_mm": 0.5,
+          "log_threshold": null
+        }
+      ],
+      "pair_digest": "94872ab4ac84bc95",
+      "nets_routed": "27/27",
+      "kct_errors_by_rule": {
+        "clearance_via_zone": 1,
+        "diffpair_routing_continuity": 2
+      },
+      "kicad_cli_errors_by_type": {},
+      "valid": true,
+      "invalid_reasons": []
+    },
+    {
+      "board": "03",
+      "engine": "lattice",
+      "seed": 42,
+      "rep": 0,
+      "git_sha": "664cd2bc",
+      "input_sha256": "65b1bf9084f0c52b4a7cb41323ad3f53966fb5fcef6e1c85f2210f31cc0930ec",
+      "source": "boards/03-usb-joystick/output/usb_joystick.kicad_pcb",
+      "stripped_items": 0,
+      "pair_nets": [
+        "USB_D+",
+        "USB_D-",
+        "USB_MCU_D+",
+        "USB_MCU_D-"
+      ],
+      "deterministic_rescue": false,
+      "router_src": "/tmp/w6442/src-6440/src",
+      "router_rev": "fd2f7e19",
+      "cmd": "-m kicad_tools.cli route /tmp/w6442/b603/03-lattice-s42/r0/usb_joystick.kicad_pcb -o /tmp/w6442/b603/03-lattice-s42/r0/usb_joystick_routed.kicad_pcb --timeout 600 --no-cache --route-engine lattice --strategy basic --differential-pairs --layers 4 --no-auto-layers --deterministic-budget --per-net-iterations 1000000 --no-placement-delta-feedback --net-class-map /home/ubuntu/GitHub/kicad-tools/.loom/worktrees/issue-6442/boards/03-usb-joystick/output/net_class_map.json --seed 42",
+      "exit_code": 2,
+      "wall_s": 201.1,
+      "killed_by_harness": false,
+      "clearance_mm": 0.15,
+      "coarse_grid_mm": 0.05,
+      "cell_estimate": 4949449,
+      "router_nets": "22/24",
+      "hit_timeout": false,
+      "cache_hit": false,
+      "routed": "/tmp/w6442/b603/03-lattice-s42/r0/usb_joystick_routed.kicad_pcb",
+      "artifact": "final",
+      "nets_complete": 24,
+      "nets_total": 27,
+      "nets_blocking_incomplete": 2,
+      "connections_routed": 112,
+      "connections_total": 115,
+      "via_count": 83,
+      "vias_per_connection": 0.741,
+      "wirelength_mm": 941.5,
+      "kct_check_errors": 4,
+      "kct_check_errors_total": 4,
+      "kct_check_by_rule": {
+        "connectivity": 2,
+        "diffpair_length_skew": 1,
+        "diffpair_routing_continuity": 1
+      },
+      "kct_check_mfr": "jlcpcb",
+      "kct_check_net_class_map": "/tmp/w6442/b603/03-lattice-s42/r0/net_class_map.json",
+      "kct_check_inactive_rules": [],
+      "kicad_drc_errors": 0,
+      "kicad_drc_unconnected": 2,
+      "kicad_drc_all_track_errors": true,
+      "kicad_drc_by_type": {},
+      "kicad_drc_note": null,
+      "stuck_counts": {
+        "escape_blocked": 0,
+        "congestion_saturated": 2,
+        "placement_bound": 0,
+        "budget_starved": 0,
+        "pour_discontinuous": 1
+      },
+      "signal_nets_unfinished": 2,
+      "stuck_nets": {
+        "UCAP": "congestion_saturated",
+        "USB_MCU_D+": "congestion_saturated",
+        "GND": "pour_discontinuous"
+      },
+      "vias_by_net": {
+        "BTN1": 4,
+        "BTN2": 8,
+        "BTN3": 6,
+        "BTN4": 8,
+        "GND": 1,
+        "HWB": 2,
+        "ISP_MISO": 2,
+        "ISP_MOSI": 2,
+        "ISP_SCK": 2,
+        "JOY_BTN": 6,
+        "JOY_X": 4,
+        "JOY_Y": 4,
+        "RESET": 8,
+        "USB_D+": 1,
+        "USB_D-": 2,
+        "VBUS": 5,
+        "VCC": 18
+      },
+      "zone_nets": [
+        "GND",
+        "VBUS",
+        "VCC"
+      ],
+      "manufacturable": false,
+      "pairs": [
+        {
+          "pair": "USB_D",
+          "nets": [
+            "USB_D+",
+            "USB_D-"
+          ],
+          "outcome": "partially-coupled:1/2",
+          "segment_outcomes": [
+            {
+              "segment": 0,
+              "span": "J1.B6->U2.3",
+              "outcome": "uncoupled-fallback:pair-no-path"
+            },
+            {
+              "segment": 1,
+              "span": "U2.4->R4.1",
+              "outcome": "coupled"
+            }
+          ],
+          "routed_mm": [
+            39.42,
+            39.917
+          ],
+          "skew_mm": 2.097,
+          "chain_skew_mm": null,
+          "uncoupled_mm": 64.335,
+          "vias_p": 1,
+          "vias_n": 2,
+          "gap_min_mm": 0.15,
+          "gap_max_mm": 0.4022,
+          "coupled_trunk_mm": 8.049,
+          "continuity_pct": 18.9,
+          "continuity_threshold_pct": 25.0,
+          "skew_tolerance_mm": 0.5,
+          "log_threshold": null
+        },
+        {
+          "pair": "USB_MCU_D",
+          "nets": [
+            "USB_MCU_D+",
+            "USB_MCU_D-"
+          ],
+          "outcome": "coupled",
+          "segment_outcomes": null,
+          "routed_mm": [
+            0,
+            8.522
+          ],
+          "skew_mm": null,
+          "chain_skew_mm": null,
+          "uncoupled_mm": 8.522,
+          "vias_p": 0,
+          "vias_n": 0,
+          "gap_min_mm": null,
+          "gap_max_mm": null,
+          "coupled_trunk_mm": 0.0,
+          "continuity_pct": null,
+          "continuity_threshold_pct": 70.0,
+          "skew_tolerance_mm": 0.5,
+          "log_threshold": null
+        }
+      ],
+      "pair_digest": "981e15a4180f3456",
+      "nets_routed": "24/27",
+      "kct_errors_by_rule": {
+        "connectivity": 2,
+        "diffpair_length_skew": 1,
+        "diffpair_routing_continuity": 1
+      },
+      "kicad_cli_errors_by_type": {},
+      "valid": true,
+      "invalid_reasons": []
+    },
+    {
+      "board": "06b",
+      "engine": "grid",
+      "seed": 42,
+      "rep": 0,
+      "git_sha": "664cd2bc",
+      "input_sha256": "3c56b6300a6faf44cd7428f62266a3e7fb819d3dd32f4b7aa9220f6d4b615cfb",
+      "source": "boards/06-diffpair-test/output/diffpair_test.kicad_pcb",
+      "stripped_items": 64,
+      "pair_nets": [
+        "LVDS1_N",
+        "LVDS1_P",
+        "LVDS2_N",
+        "LVDS2_P",
+        "LVDS3_N",
+        "LVDS3_P",
+        "LVDS4_N",
+        "LVDS4_P"
+      ],
+      "deterministic_rescue": true,
+      "router_src": "/tmp/w6442/src-6440/src",
+      "router_rev": "fd2f7e19",
+      "cmd": "-m kicad_tools.cli route /tmp/w6442/b6b/06b-grid-s42/r0/diffpair_test.kicad_pcb -o /tmp/w6442/b6b/06b-grid-s42/r0/diffpair_test_routed.kicad_pcb --timeout 600 --no-cache --preserve-existing --route-engine grid --differential-pairs --layers 4 --no-auto-layers --deterministic-budget --per-net-iterations 1000000 --no-placement-delta-feedback --deterministic-rescue --net-class-map /home/ubuntu/GitHub/kicad-tools/.loom/worktrees/issue-6442/boards/06-diffpair-test/output/net_class_map.json --seed 42",
+      "exit_code": 1,
+      "wall_s": 380.4,
+      "killed_by_harness": false,
+      "clearance_mm": 0.15,
+      "coarse_grid_mm": 0.064,
+      "cell_estimate": 1817674,
+      "router_nets": "16/16",
+      "hit_timeout": false,
+      "cache_hit": false,
+      "rescue_wall_clock": false,
+      "routed": "/tmp/w6442/b6b/06b-grid-s42/r0/diffpair_test_routed.kicad_pcb",
+      "artifact": "final",
+      "nets_complete": 16,
+      "nets_total": 18,
+      "nets_blocking_incomplete": 0,
+      "connections_routed": 28,
+      "connections_total": 90,
+      "via_count": 61,
+      "vias_per_connection": 2.179,
+      "wirelength_mm": 512.3,
+      "kct_check_errors": 2,
+      "kct_check_errors_total": 2,
+      "kct_check_by_rule": {
+        "connectivity": 2
+      },
+      "kct_check_mfr": "jlcpcb",
+      "kct_check_net_class_map": null,
+      "kct_check_inactive_rules": [
+        "match_group_length_skew",
+        "diffpair_length_skew",
+        "diffpair_routing_continuity"
+      ],
+      "kicad_drc_errors": 0,
+      "kicad_drc_unconnected": 0,
+      "kicad_drc_all_track_errors": true,
+      "kicad_drc_by_type": {},
+      "kicad_drc_note": null,
+      "stuck_counts": {
+        "escape_blocked": 0,
+        "congestion_saturated": 0,
+        "placement_bound": 0,
+        "budget_starved": 0,
+        "pour_discontinuous": 2
+      },
+      "signal_nets_unfinished": 0,
+      "stuck_nets": {
+        "+3V3": "pour_discontinuous",
+        "GND": "pour_discontinuous"
+      },
+      "vias_by_net": {
+        "+3V3": 25,
+        "GND": 29,
+        "IN2": 3,
+        "IN3": 1,
+        "IN4": 3
+      },
+      "zone_nets": [
+        "+3V3",
+        "GND"
+      ],
+      "manufacturable": false,
+      "pairs": [
+        {
+          "pair": "LVDS1",
+          "nets": [
+            "LVDS1_P",
+            "LVDS1_N"
+          ],
+          "outcome": "uncoupled:joint-A*-plateau",
+          "segment_outcomes": null,
+          "routed_mm": [
+            32.013,
+            32.101
+          ],
+          "skew_mm": 0.088,
+          "chain_skew_mm": null,
+          "uncoupled_mm": 10.012,
+          "vias_p": 0,
+          "vias_n": 0,
+          "gap_min_mm": 0.1844,
+          "gap_max_mm": 0.1844,
+          "coupled_trunk_mm": 27.051,
+          "continuity_pct": 84.4,
+          "continuity_threshold_pct": 80.0,
+          "skew_tolerance_mm": 0.1,
+          "log_threshold": null
+        },
+        {
+          "pair": "LVDS2",
+          "nets": [
+            "LVDS2_P",
+            "LVDS2_N"
+          ],
+          "outcome": "uncoupled:joint-A*-plateau",
+          "segment_outcomes": null,
+          "routed_mm": [
+            32.433,
+            31.98
+          ],
+          "skew_mm": 0.453,
+          "chain_skew_mm": null,
+          "uncoupled_mm": 10.31,
+          "vias_p": 0,
+          "vias_n": 0,
+          "gap_min_mm": 0.1845,
+          "gap_max_mm": 0.1845,
+          "coupled_trunk_mm": 27.051,
+          "continuity_pct": 84.0,
+          "continuity_threshold_pct": 80.0,
+          "skew_tolerance_mm": 0.1,
+          "log_threshold": null
+        },
+        {
+          "pair": "LVDS3",
+          "nets": [
+            "LVDS3_P",
+            "LVDS3_N"
+          ],
+          "outcome": "uncoupled:joint-A*-plateau",
+          "segment_outcomes": null,
+          "routed_mm": [
+            32.154,
+            32.207
+          ],
+          "skew_mm": 0.053,
+          "chain_skew_mm": null,
+          "uncoupled_mm": 10.258,
+          "vias_p": 0,
+          "vias_n": 0,
+          "gap_min_mm": 0.1845,
+          "gap_max_mm": 0.1845,
+          "coupled_trunk_mm": 27.051,
+          "continuity_pct": 84.1,
+          "continuity_threshold_pct": 80.0,
+          "skew_tolerance_mm": 0.1,
+          "log_threshold": null
+        },
+        {
+          "pair": "LVDS4",
+          "nets": [
+            "LVDS4_P",
+            "LVDS4_N"
+          ],
+          "outcome": "uncoupled:joint-A*-plateau",
+          "segment_outcomes": null,
+          "routed_mm": [
+            32.009,
+            32.455
+          ],
+          "skew_mm": 0.446,
+          "chain_skew_mm": null,
+          "uncoupled_mm": 10.363,
+          "vias_p": 0,
+          "vias_n": 0,
+          "gap_min_mm": 0.1845,
+          "gap_max_mm": 0.1845,
+          "coupled_trunk_mm": 27.051,
+          "continuity_pct": 83.9,
+          "continuity_threshold_pct": 80.0,
+          "skew_tolerance_mm": 0.1,
+          "log_threshold": null
+        }
+      ],
+      "pair_digest": "24c4e391899bbe5f",
+      "nets_routed": "16/18",
+      "kct_errors_by_rule": {
+        "connectivity": 2
+      },
+      "kicad_cli_errors_by_type": {},
+      "valid": true,
+      "invalid_reasons": []
+    },
+    {
+      "board": "06b",
+      "engine": "lattice",
+      "seed": 42,
+      "rep": 0,
+      "git_sha": "664cd2bc",
+      "input_sha256": "3c56b6300a6faf44cd7428f62266a3e7fb819d3dd32f4b7aa9220f6d4b615cfb",
+      "source": "boards/06-diffpair-test/output/diffpair_test.kicad_pcb",
+      "stripped_items": 64,
+      "pair_nets": [
+        "LVDS1_N",
+        "LVDS1_P",
+        "LVDS2_N",
+        "LVDS2_P",
+        "LVDS3_N",
+        "LVDS3_P",
+        "LVDS4_N",
+        "LVDS4_P"
+      ],
+      "deterministic_rescue": false,
+      "router_src": "/tmp/w6442/src-6440/src",
+      "router_rev": "fd2f7e19",
+      "cmd": "-m kicad_tools.cli route /tmp/w6442/b6b/06b-lattice-s42/r0/diffpair_test.kicad_pcb -o /tmp/w6442/b6b/06b-lattice-s42/r0/diffpair_test_routed.kicad_pcb --timeout 600 --no-cache --preserve-existing --route-engine lattice --strategy basic --differential-pairs --layers 4 --no-auto-layers --deterministic-budget --per-net-iterations 1000000 --no-placement-delta-feedback --net-class-map /home/ubuntu/GitHub/kicad-tools/.loom/worktrees/issue-6442/boards/06-diffpair-test/output/net_class_map.json --seed 42",
+      "exit_code": 2,
+      "wall_s": 95.3,
+      "killed_by_harness": false,
+      "clearance_mm": 0.15,
+      "coarse_grid_mm": 0.064,
+      "cell_estimate": 1817674,
+      "router_nets": "12/16",
+      "hit_timeout": false,
+      "cache_hit": false,
+      "routed": "/tmp/w6442/b6b/06b-lattice-s42/r0/diffpair_test_routed.kicad_pcb",
+      "artifact": "final",
+      "nets_complete": 14,
+      "nets_total": 18,
+      "nets_blocking_incomplete": 4,
+      "connections_routed": 82,
+      "connections_total": 90,
+      "via_count": 54,
+      "vias_per_connection": 0.659,
+      "wirelength_mm": 563.5,
+      "kct_check_errors": 4,
+      "kct_check_errors_total": 4,
+      "kct_check_by_rule": {
+        "connectivity": 4
+      },
+      "kct_check_mfr": "jlcpcb",
+      "kct_check_net_class_map": "/tmp/w6442/b6b/06b-lattice-s42/r0/net_class_map.json",
+      "kct_check_inactive_rules": [],
+      "kicad_drc_errors": 0,
+      "kicad_drc_unconnected": 8,
+      "kicad_drc_all_track_errors": true,
+      "kicad_drc_by_type": {},
+      "kicad_drc_note": null,
+      "stuck_counts": {
+        "escape_blocked": 0,
+        "congestion_saturated": 2,
+        "placement_bound": 2,
+        "budget_starved": 0,
+        "pour_discontinuous": 0
+      },
+      "signal_nets_unfinished": 4,
+      "stuck_nets": {
+        "LVDS1_N": "placement_bound",
+        "LVDS2_N": "congestion_saturated",
+        "LVDS3_N": "congestion_saturated",
+        "LVDS4_N": "placement_bound"
+      },
+      "vias_by_net": {
+        "+3V3": 25,
+        "GND": 29
+      },
+      "zone_nets": [
+        "+3V3",
+        "GND"
+      ],
+      "manufacturable": false,
+      "pairs": [
+        {
+          "pair": "LVDS1",
+          "nets": [
+            "LVDS1_P",
+            "LVDS1_N"
+          ],
+          "outcome": "partially-coupled:1/2",
+          "segment_outcomes": [
+            {
+              "segment": 0,
+              "span": "U1.7->R1.1",
+              "outcome": "uncoupled-fallback:pair-partner-pad"
+            },
+            {
+              "segment": 1,
+              "span": "R1.1->U2.2",
+              "outcome": "coupled"
+            }
+          ],
+          "routed_mm": [
+            62.854,
+            0
+          ],
+          "skew_mm": null,
+          "chain_skew_mm": null,
+          "uncoupled_mm": 62.854,
+          "vias_p": 0,
+          "vias_n": 0,
+          "gap_min_mm": null,
+          "gap_max_mm": null,
+          "coupled_trunk_mm": 0.0,
+          "continuity_pct": null,
+          "continuity_threshold_pct": 80.0,
+          "skew_tolerance_mm": 0.1,
+          "log_threshold": null
+        },
+        {
+          "pair": "LVDS2",
+          "nets": [
+            "LVDS2_P",
+            "LVDS2_N"
+          ],
+          "outcome": "coupled",
+          "segment_outcomes": [
+            {
+              "segment": 0,
+              "span": "U3.7->R2.1",
+              "outcome": "coupled"
+            },
+            {
+              "segment": 1,
+              "span": "R2.1->U4.2",
+              "outcome": "coupled"
+            }
+          ],
+          "routed_mm": [
+            64.481,
+            0
+          ],
+          "skew_mm": null,
+          "chain_skew_mm": null,
+          "uncoupled_mm": 64.481,
+          "vias_p": 0,
+          "vias_n": 0,
+          "gap_min_mm": null,
+          "gap_max_mm": null,
+          "coupled_trunk_mm": 0.0,
+          "continuity_pct": null,
+          "continuity_threshold_pct": 80.0,
+          "skew_tolerance_mm": 0.1,
+          "log_threshold": null
+        },
+        {
+          "pair": "LVDS3",
+          "nets": [
+            "LVDS3_P",
+            "LVDS3_N"
+          ],
+          "outcome": "coupled",
+          "segment_outcomes": [
+            {
+              "segment": 0,
+              "span": "U5.7->R3.1",
+              "outcome": "coupled"
+            },
+            {
+              "segment": 1,
+              "span": "R3.1->U6.2",
+              "outcome": "coupled"
+            }
+          ],
+          "routed_mm": [
+            63.54,
+            0
+          ],
+          "skew_mm": null,
+          "chain_skew_mm": null,
+          "uncoupled_mm": 63.54,
+          "vias_p": 0,
+          "vias_n": 0,
+          "gap_min_mm": null,
+          "gap_max_mm": null,
+          "coupled_trunk_mm": 0.0,
+          "continuity_pct": null,
+          "continuity_threshold_pct": 80.0,
+          "skew_tolerance_mm": 0.1,
+          "log_threshold": null
+        },
+        {
+          "pair": "LVDS4",
+          "nets": [
+            "LVDS4_P",
+            "LVDS4_N"
+          ],
+          "outcome": "coupled",
+          "segment_outcomes": [
+            {
+              "segment": 0,
+              "span": "U7.7->R4.1",
+              "outcome": "coupled"
+            },
+            {
+              "segment": 1,
+              "span": "R4.1->U8.2",
+              "outcome": "coupled"
+            }
+          ],
+          "routed_mm": [
+            63.95,
+            0
+          ],
+          "skew_mm": null,
+          "chain_skew_mm": null,
+          "uncoupled_mm": 63.95,
+          "vias_p": 0,
+          "vias_n": 0,
+          "gap_min_mm": null,
+          "gap_max_mm": null,
+          "coupled_trunk_mm": 0.0,
+          "continuity_pct": null,
+          "continuity_threshold_pct": 80.0,
+          "skew_tolerance_mm": 0.1,
+          "log_threshold": null
+        }
+      ],
+      "pair_digest": "07df6d25f3f9798c",
+      "nets_routed": "14/18",
+      "kct_errors_by_rule": {
+        "connectivity": 4
+      },
+      "kicad_cli_errors_by_type": {},
+      "valid": true,
+      "invalid_reasons": []
+    },
+    {
+      "board": "06b",
+      "engine": "lattice",
+      "seed": 42,
+      "rep": 0,
+      "git_sha": "664cd2bc",
+      "input_sha256": "3c56b6300a6faf44cd7428f62266a3e7fb819d3dd32f4b7aa9220f6d4b615cfb",
+      "source": "boards/06-diffpair-test/output/diffpair_test.kicad_pcb",
+      "stripped_items": 64,
+      "pair_nets": [
+        "LVDS1_N",
+        "LVDS1_P",
+        "LVDS2_N",
+        "LVDS2_P",
+        "LVDS3_N",
+        "LVDS3_P",
+        "LVDS4_N",
+        "LVDS4_P"
+      ],
+      "deterministic_rescue": false,
+      "router_src": "/tmp/w6442/src-6440/src",
+      "router_rev": "fd2f7e19",
+      "cmd": "-m kicad_tools.cli route /tmp/w6442/inf/p/06b-lattice-s42/r0/diffpair_test.kicad_pcb -o /tmp/w6442/inf/p/06b-lattice-s42/r0/diffpair_test_routed.kicad_pcb --timeout 600 --no-cache --preserve-existing --route-engine lattice --strategy basic --differential-pairs --layers 4 --no-auto-layers --deterministic-budget --per-net-iterations 1000000 --no-placement-delta-feedback --seed 42",
+      "exit_code": 4,
+      "wall_s": 149.7,
+      "killed_by_harness": false,
+      "clearance_mm": 0.15,
+      "coarse_grid_mm": 0.064,
+      "cell_estimate": 1817674,
+      "router_nets": "15/16",
+      "hit_timeout": false,
+      "cache_hit": false,
+      "routed": "/tmp/w6442/inf/p/06b-lattice-s42/r0/diffpair_test_routed.kicad_pcb",
+      "artifact": "final",
+      "nets_complete": 17,
+      "nets_total": 18,
+      "nets_blocking_incomplete": 1,
+      "connections_routed": 88,
+      "connections_total": 90,
+      "via_count": 54,
+      "vias_per_connection": 0.614,
+      "wirelength_mm": 750.2,
+      "kct_check_errors": 6,
+      "kct_check_errors_total": 6,
+      "kct_check_by_rule": {
+        "connectivity": 1,
+        "diffpair_length_skew": 2,
+        "diffpair_routing_continuity": 3
+      },
+      "kct_check_mfr": "jlcpcb",
+      "kct_check_net_class_map": "/tmp/w6442/inf/p/06b-lattice-s42/r0/net_class_map.json",
+      "kct_check_inactive_rules": [],
+      "kicad_drc_errors": 48,
+      "kicad_drc_unconnected": 2,
+      "kicad_drc_all_track_errors": true,
+      "kicad_drc_by_type": {
+        "clearance": 39,
+        "diff_pair_gap_out_of_range": 9
+      },
+      "kicad_drc_note": null,
+      "stuck_counts": {
+        "escape_blocked": 0,
+        "congestion_saturated": 0,
+        "placement_bound": 1,
+        "budget_starved": 0,
+        "pour_discontinuous": 0
+      },
+      "signal_nets_unfinished": 1,
+      "stuck_nets": {
+        "LVDS3_N": "placement_bound"
+      },
+      "vias_by_net": {
+        "+3V3": 25,
+        "GND": 29
+      },
+      "zone_nets": [
+        "+3V3",
+        "GND"
+      ],
+      "manufacturable": false,
+      "pairs": [
+        {
+          "pair": "LVDS1",
+          "nets": [
+            "LVDS1_P",
+            "LVDS1_N"
+          ],
+          "outcome": "partially-coupled:1/2",
+          "segment_outcomes": [
+            {
+              "segment": 0,
+              "span": "U1.7->R1.1",
+              "outcome": "uncoupled-fallback:pair-pad-attach"
+            },
+            {
+              "segment": 1,
+              "span": "R1.1->U2.2",
+              "outcome": "coupled"
+            }
+          ],
+          "routed_mm": [
+            62.94,
+            63.15
+          ],
+          "skew_mm": 0.211,
+          "chain_skew_mm": null,
+          "uncoupled_mm": 63.388,
+          "vias_p": 0,
+          "vias_n": 0,
+          "gap_min_mm": 0.12,
+          "gap_max_mm": 0.127,
+          "coupled_trunk_mm": 30.398,
+          "continuity_pct": 49.7,
+          "continuity_threshold_pct": 70.0,
+          "skew_tolerance_mm": 0.5,
+          "log_threshold": null
+        },
+        {
+          "pair": "LVDS2",
+          "nets": [
+            "LVDS2_P",
+            "LVDS2_N"
+          ],
+          "outcome": "partially-coupled:1/2",
+          "segment_outcomes": [
+            {
+              "segment": 0,
+              "span": "U3.7->R2.1",
+              "outcome": "uncoupled-fallback:pair-pad-attach"
+            },
+            {
+              "segment": 1,
+              "span": "R2.1->U4.2",
+              "outcome": "coupled"
+            }
+          ],
+          "routed_mm": [
+            63.601,
+            62.489
+          ],
+          "skew_mm": 1.112,
+          "chain_skew_mm": null,
+          "uncoupled_mm": 63.388,
+          "vias_p": 0,
+          "vias_n": 0,
+          "gap_min_mm": 0.1215,
+          "gap_max_mm": 0.127,
+          "coupled_trunk_mm": 30.398,
+          "continuity_pct": 49.7,
+          "continuity_threshold_pct": 70.0,
+          "skew_tolerance_mm": 0.5,
+          "log_threshold": null
+        },
+        {
+          "pair": "LVDS3",
+          "nets": [
+            "LVDS3_P",
+            "LVDS3_N"
+          ],
+          "outcome": "partially-coupled:1/2",
+          "segment_outcomes": [
+            {
+              "segment": 0,
+              "span": "U5.7->R3.1",
+              "outcome": "uncoupled-fallback:pair-pad-attach"
+            },
+            {
+              "segment": 1,
+              "span": "R3.1->U6.2",
+              "outcome": "coupled"
+            }
+          ],
+          "routed_mm": [
+            63.103,
+            0
+          ],
+          "skew_mm": null,
+          "chain_skew_mm": null,
+          "uncoupled_mm": 63.103,
+          "vias_p": 0,
+          "vias_n": 0,
+          "gap_min_mm": null,
+          "gap_max_mm": null,
+          "coupled_trunk_mm": 0.0,
+          "continuity_pct": null,
+          "continuity_threshold_pct": 70.0,
+          "skew_tolerance_mm": 0.5,
+          "log_threshold": null
+        },
+        {
+          "pair": "LVDS4",
+          "nets": [
+            "LVDS4_P",
+            "LVDS4_N"
+          ],
+          "outcome": "partially-coupled:1/2",
+          "segment_outcomes": [
+            {
+              "segment": 0,
+              "span": "U7.7->R4.1",
+              "outcome": "uncoupled-fallback:pair-pad-attach"
+            },
+            {
+              "segment": 1,
+              "span": "R4.1->U8.2",
+              "outcome": "coupled"
+            }
+          ],
+          "routed_mm": [
+            62.439,
+            63.817
+          ],
+          "skew_mm": 1.378,
+          "chain_skew_mm": null,
+          "uncoupled_mm": 63.553,
+          "vias_p": 0,
+          "vias_n": 0,
+          "gap_min_mm": 0.1245,
+          "gap_max_mm": 0.127,
+          "coupled_trunk_mm": 30.398,
+          "continuity_pct": 49.7,
+          "continuity_threshold_pct": 70.0,
+          "skew_tolerance_mm": 0.5,
+          "log_threshold": null
+        }
+      ],
+      "pair_digest": "c2bafa229f65d07f",
+      "nets_routed": "17/18",
+      "kct_errors_by_rule": {
+        "connectivity": 1,
+        "diffpair_length_skew": 2,
+        "diffpair_routing_continuity": 3
+      },
+      "kicad_cli_errors_by_type": {
+        "clearance": 39,
+        "diff_pair_gap_out_of_range": 9
+      },
+      "valid": true,
+      "invalid_reasons": [],
+      "net_class_map_mode": "inferred"
+    },
+    {
+      "board": "06rf",
+      "engine": "grid",
+      "seed": 42,
+      "rep": 0,
+      "git_sha": "664cd2bc",
+      "input_sha256": "d69b22100589c86892219723a26e4ba7a08954dc583043ff80e334e119f60143",
+      "source": "boards/06-diffpair-test/regression-fixture/diffpair_test.kicad_pcb",
+      "stripped_items": 0,
+      "pair_nets": [
+        "MIPI_CLK+",
+        "MIPI_CLK-",
+        "MIPI_D0+",
+        "MIPI_D0-",
+        "PCIE_RX+",
+        "PCIE_RX-",
+        "PCIE_TX+",
+        "PCIE_TX-",
+        "USB2_D+",
+        "USB2_D-",
+        "USB3_RX1+",
+        "USB3_RX1-",
+        "USB3_RX2+",
+        "USB3_RX2-",
+        "USB3_TX1+",
+        "USB3_TX1-",
+        "USB3_TX2+",
+        "USB3_TX2-"
+      ],
+      "deterministic_rescue": true,
+      "router_src": "/tmp/w6442/src-6440/src",
+      "router_rev": "fd2f7e19",
+      "cmd": "-m kicad_tools.cli route /tmp/w6442/b603/06rf-grid-s42/r0/diffpair_test.kicad_pcb -o /tmp/w6442/b603/06rf-grid-s42/r0/diffpair_test_routed.kicad_pcb --timeout 600 --no-cache --route-engine grid --differential-pairs --layers 4 --no-auto-layers --deterministic-budget --per-net-iterations 1000000 --no-placement-delta-feedback --deterministic-rescue --net-class-map /home/ubuntu/GitHub/kicad-tools/.loom/worktrees/issue-6442/boards/06-diffpair-test/regression-fixture/net_class_map.json --seed 42",
+      "exit_code": 3,
+      "wall_s": 142.3,
+      "killed_by_harness": false,
+      "clearance_mm": 0.15,
+      "coarse_grid_mm": 0.1,
+      "cell_estimate": 1043345,
+      "router_nets": "21/21",
+      "hit_timeout": false,
+      "cache_hit": false,
+      "rescue_wall_clock": false,
+      "routed": "/tmp/w6442/b603/06rf-grid-s42/r0/diffpair_test_routed.kicad_pcb",
+      "artifact": "final",
+      "nets_complete": 23,
+      "nets_total": 26,
+      "nets_blocking_incomplete": 0,
+      "connections_routed": 163,
+      "connections_total": 172,
+      "via_count": 143,
+      "vias_per_connection": 0.877,
+      "wirelength_mm": 805.4,
+      "kct_check_errors": 15,
+      "kct_check_errors_total": 15,
+      "kct_check_by_rule": {
+        "connectivity": 1,
+        "diffpair_length_skew": 8,
+        "diffpair_routing_continuity": 6
+      },
+      "kct_check_mfr": "jlcpcb",
+      "kct_check_net_class_map": "/tmp/w6442/b603/06rf-grid-s42/r0/net_class_map.json",
+      "kct_check_inactive_rules": [],
+      "kicad_drc_errors": 0,
+      "kicad_drc_unconnected": 9,
+      "kicad_drc_all_track_errors": true,
+      "kicad_drc_by_type": {},
+      "kicad_drc_note": null,
+      "stuck_counts": {
+        "escape_blocked": 0,
+        "congestion_saturated": 0,
+        "placement_bound": 0,
+        "budget_starved": 0,
+        "pour_discontinuous": 3
+      },
+      "signal_nets_unfinished": 0,
+      "stuck_nets": {
+        "+3V3": "pour_discontinuous",
+        "GND": "pour_discontinuous",
+        "VBUS_USB": "pour_discontinuous"
+      },
+      "vias_by_net": {
+        "+1V2": 6,
+        "+1V8": 3,
+        "+3V3": 10,
+        "GND": 106,
+        "MIPI_RST": 2,
+        "PCIE_RX+": 2,
+        "PCIE_RX-": 2,
+        "PCIE_TX+": 2,
+        "USB2_D-": 2,
+        "USB3_RX1+": 2,
+        "USB3_RX1-": 2,
+        "USB3_TX1-": 2,
+        "USB_CC1": 2
+      },
+      "zone_nets": [
+        "+1V2",
+        "+1V8",
+        "+3V3",
+        "GND"
+      ],
+      "manufacturable": false,
+      "pairs": [
+        {
+          "pair": "MIPI_CLK",
+          "nets": [
+            "MIPI_CLK+",
+            "MIPI_CLK-"
+          ],
+          "outcome": "uncoupled:joint-A*-plateau",
+          "segment_outcomes": null,
+          "routed_mm": [
+            23.101,
+            22.439
+          ],
+          "skew_mm": 0.663,
+          "chain_skew_mm": null,
+          "uncoupled_mm": 0.849,
+          "vias_p": 0,
+          "vias_n": 0,
+          "gap_min_mm": 0.1749,
+          "gap_max_mm": 0.175,
+          "coupled_trunk_mm": 22.536,
+          "continuity_pct": 98.1,
+          "continuity_threshold_pct": 85.0,
+          "skew_tolerance_mm": 0.3,
+          "log_threshold": null
+        },
+        {
+          "pair": "MIPI_D0",
+          "nets": [
+            "MIPI_D0+",
+            "MIPI_D0-"
+          ],
+          "outcome": "uncoupled:landing-stall",
+          "segment_outcomes": null,
+          "routed_mm": [
+            19.877,
+            19.214
+          ],
+          "skew_mm": 0.663,
+          "chain_skew_mm": null,
+          "uncoupled_mm": 0.566,
+          "vias_p": 0,
+          "vias_n": 0,
+          "gap_min_mm": 0.1749,
+          "gap_max_mm": 0.2855,
+          "coupled_trunk_mm": 19.594,
+          "continuity_pct": 98.6,
+          "continuity_threshold_pct": 85.0,
+          "skew_tolerance_mm": 0.3,
+          "log_threshold": null
+        },
+        {
+          "pair": "PCIE_RX",
+          "nets": [
+            "PCIE_RX+",
+            "PCIE_RX-"
+          ],
+          "outcome": "uncoupled:landing-stall",
+          "segment_outcomes": null,
+          "routed_mm": [
+            20.828,
+            25.041
+          ],
+          "skew_mm": 4.212,
+          "chain_skew_mm": null,
+          "uncoupled_mm": 44.669,
+          "vias_p": 2,
+          "vias_n": 2,
+          "gap_min_mm": 0.4075,
+          "gap_max_mm": 0.4075,
+          "coupled_trunk_mm": 0.9,
+          "continuity_pct": 2.8,
+          "continuity_threshold_pct": 85.0,
+          "skew_tolerance_mm": 0.5,
+          "log_threshold": null
+        },
+        {
+          "pair": "PCIE_TX",
+          "nets": [
+            "PCIE_TX+",
+            "PCIE_TX-"
+          ],
+          "outcome": "uncoupled:landing-stall",
+          "segment_outcomes": null,
+          "routed_mm": [
+            21.325,
+            20.828
+          ],
+          "skew_mm": 3.697,
+          "chain_skew_mm": null,
+          "uncoupled_mm": 38.371,
+          "vias_p": 2,
+          "vias_n": 0,
+          "gap_min_mm": 0.375,
+          "gap_max_mm": 0.4821,
+          "coupled_trunk_mm": 2.841,
+          "continuity_pct": 8.9,
+          "continuity_threshold_pct": 85.0,
+          "skew_tolerance_mm": 0.5,
+          "log_threshold": null
+        },
+        {
+          "pair": "USB2_D",
+          "nets": [
+            "USB2_D+",
+            "USB2_D-"
+          ],
+          "outcome": "uncoupled:joint-A*-plateau",
+          "segment_outcomes": null,
+          "routed_mm": [
+            14.325,
+            14.503
+          ],
+          "skew_mm": 3.378,
+          "chain_skew_mm": null,
+          "uncoupled_mm": 5.26,
+          "vias_p": 0,
+          "vias_n": 2,
+          "gap_min_mm": 0.155,
+          "gap_max_mm": 0.2638,
+          "coupled_trunk_mm": 11.8,
+          "continuity_pct": 81.8,
+          "continuity_threshold_pct": 70.0,
+          "skew_tolerance_mm": 3.0,
+          "log_threshold": null
+        },
+        {
+          "pair": "USB3_RX1",
+          "nets": [
+            "USB3_RX1+",
+            "USB3_RX1-"
+          ],
+          "outcome": "uncoupled:joint-A*-plateau",
+          "segment_outcomes": null,
+          "routed_mm": [
+            49.504,
+            49.925
+          ],
+          "skew_mm": 0.42,
+          "chain_skew_mm": null,
+          "uncoupled_mm": 99.429,
+          "vias_p": 2,
+          "vias_n": 2,
+          "gap_min_mm": null,
+          "gap_max_mm": null,
+          "coupled_trunk_mm": 0.0,
+          "continuity_pct": 0.0,
+          "continuity_threshold_pct": 90.0,
+          "skew_tolerance_mm": 0.5,
+          "log_threshold": null
+        },
+        {
+          "pair": "USB3_RX2",
+          "nets": [
+            "USB3_RX2+",
+            "USB3_RX2-"
+          ],
+          "outcome": "uncoupled:joint-A*-plateau",
+          "segment_outcomes": null,
+          "routed_mm": [
+            44.273,
+            47.818
+          ],
+          "skew_mm": 3.546,
+          "chain_skew_mm": null,
+          "uncoupled_mm": 54.056,
+          "vias_p": 0,
+          "vias_n": 0,
+          "gap_min_mm": 0.425,
+          "gap_max_mm": 0.4321,
+          "coupled_trunk_mm": 18.073,
+          "continuity_pct": 41.3,
+          "continuity_threshold_pct": 90.0,
+          "skew_tolerance_mm": 0.5,
+          "log_threshold": null
+        },
+        {
+          "pair": "USB3_TX1",
+          "nets": [
+            "USB3_TX1+",
+            "USB3_TX1-"
+          ],
+          "outcome": "uncoupled:joint-A*-plateau",
+          "segment_outcomes": null,
+          "routed_mm": [
+            48.008,
+            48.069
+          ],
+          "skew_mm": 3.26,
+          "chain_skew_mm": null,
+          "uncoupled_mm": 90.561,
+          "vias_p": 0,
+          "vias_n": 2,
+          "gap_min_mm": 0.4321,
+          "gap_max_mm": 0.4321,
+          "coupled_trunk_mm": 3.394,
+          "continuity_pct": 5.7,
+          "continuity_threshold_pct": 90.0,
+          "skew_tolerance_mm": 0.5,
+          "log_threshold": null
+        },
+        {
+          "pair": "USB3_TX2",
+          "nets": [
+            "USB3_TX2+",
+            "USB3_TX2-"
+          ],
+          "outcome": "uncoupled:joint-A*-plateau",
+          "segment_outcomes": null,
+          "routed_mm": [
+            38.293,
+            41.303
+          ],
+          "skew_mm": 3.01,
+          "chain_skew_mm": null,
+          "uncoupled_mm": 44.947,
+          "vias_p": 0,
+          "vias_n": 0,
+          "gap_min_mm": 0.3614,
+          "gap_max_mm": 0.3614,
+          "coupled_trunk_mm": 16.688,
+          "continuity_pct": 43.5,
+          "continuity_threshold_pct": 90.0,
+          "skew_tolerance_mm": 0.5,
+          "log_threshold": null
+        }
+      ],
+      "pair_digest": "ad0e0b743ba27470",
+      "nets_routed": "23/26",
+      "kct_errors_by_rule": {
+        "connectivity": 1,
+        "diffpair_length_skew": 8,
+        "diffpair_routing_continuity": 6
+      },
+      "kicad_cli_errors_by_type": {},
+      "valid": true,
+      "invalid_reasons": []
+    },
+    {
+      "board": "06rf",
+      "engine": "lattice",
+      "seed": 42,
+      "rep": 0,
+      "git_sha": "664cd2bc",
+      "input_sha256": "d69b22100589c86892219723a26e4ba7a08954dc583043ff80e334e119f60143",
+      "source": "boards/06-diffpair-test/regression-fixture/diffpair_test.kicad_pcb",
+      "stripped_items": 0,
+      "pair_nets": [
+        "MIPI_CLK+",
+        "MIPI_CLK-",
+        "MIPI_D0+",
+        "MIPI_D0-",
+        "PCIE_RX+",
+        "PCIE_RX-",
+        "PCIE_TX+",
+        "PCIE_TX-",
+        "USB2_D+",
+        "USB2_D-",
+        "USB3_RX1+",
+        "USB3_RX1-",
+        "USB3_RX2+",
+        "USB3_RX2-",
+        "USB3_TX1+",
+        "USB3_TX1-",
+        "USB3_TX2+",
+        "USB3_TX2-"
+      ],
+      "deterministic_rescue": false,
+      "router_src": "/tmp/w6442/src-6440/src",
+      "router_rev": "fd2f7e19",
+      "cmd": "-m kicad_tools.cli route /tmp/w6442/b603/06rf-lattice-s42/r0/diffpair_test.kicad_pcb -o /tmp/w6442/b603/06rf-lattice-s42/r0/diffpair_test_routed.kicad_pcb --timeout 600 --no-cache --route-engine lattice --strategy basic --differential-pairs --layers 4 --no-auto-layers --deterministic-budget --per-net-iterations 1000000 --no-placement-delta-feedback --net-class-map /home/ubuntu/GitHub/kicad-tools/.loom/worktrees/issue-6442/boards/06-diffpair-test/regression-fixture/net_class_map.json --seed 42",
+      "exit_code": 4,
+      "wall_s": 185.7,
+      "killed_by_harness": false,
+      "clearance_mm": 0.15,
+      "coarse_grid_mm": 0.1,
+      "cell_estimate": 1043345,
+      "router_nets": "15/21",
+      "hit_timeout": false,
+      "cache_hit": false,
+      "routed": "/tmp/w6442/b603/06rf-lattice-s42/r0/diffpair_test_routed.kicad_pcb",
+      "artifact": "final",
+      "nets_complete": 16,
+      "nets_total": 26,
+      "nets_blocking_incomplete": 6,
+      "connections_routed": 156,
+      "connections_total": 172,
+      "via_count": 135,
+      "vias_per_connection": 0.865,
+      "wirelength_mm": 766.8,
+      "kct_check_errors": 18,
+      "kct_check_errors_total": 18,
+      "kct_check_by_rule": {
+        "connectivity": 7,
+        "diffpair_length_skew": 5,
+        "diffpair_routing_continuity": 6
+      },
+      "kct_check_mfr": "jlcpcb",
+      "kct_check_net_class_map": "/tmp/w6442/b603/06rf-lattice-s42/r0/net_class_map.json",
+      "kct_check_inactive_rules": [],
+      "kicad_drc_errors": 0,
+      "kicad_drc_unconnected": 14,
+      "kicad_drc_all_track_errors": true,
+      "kicad_drc_by_type": {},
+      "kicad_drc_note": null,
+      "stuck_counts": {
+        "escape_blocked": 0,
+        "congestion_saturated": 3,
+        "placement_bound": 3,
+        "budget_starved": 0,
+        "pour_discontinuous": 4
+      },
+      "signal_nets_unfinished": 6,
+      "stuck_nets": {
+        "MIPI_CLK-": "congestion_saturated",
+        "MIPI_D0+": "congestion_saturated",
+        "MIPI_RST": "congestion_saturated",
+        "USB2_D+": "placement_bound",
+        "USB_CC1": "placement_bound",
+        "USB_CC2": "placement_bound",
+        "+1V2": "pour_discontinuous",
+        "+1V8": "pour_discontinuous",
+        "GND": "pour_discontinuous",
+        "VBUS_USB": "pour_discontinuous"
+      },
+      "vias_by_net": {
+        "+1V2": 2,
+        "+3V3": 11,
+        "GND": 104,
+        "PCIE_RX-": 2,
+        "PCIE_TX+": 2,
+        "PCIE_TX-": 2,
+        "USB2_D-": 4,
+        "USB3_RX1+": 2,
+        "USB3_RX2-": 2,
+        "USB3_TX1+": 2,
+        "USB3_TX1-": 2
+      },
+      "zone_nets": [
+        "+1V2",
+        "+1V8",
+        "+3V3",
+        "GND"
+      ],
+      "manufacturable": false,
+      "pairs": [
+        {
+          "pair": "MIPI_CLK",
+          "nets": [
+            "MIPI_CLK+",
+            "MIPI_CLK-"
+          ],
+          "outcome": "coupled",
+          "segment_outcomes": null,
+          "routed_mm": [
+            46.764,
+            0
+          ],
+          "skew_mm": null,
+          "chain_skew_mm": null,
+          "uncoupled_mm": 46.764,
+          "vias_p": 0,
+          "vias_n": 0,
+          "gap_min_mm": null,
+          "gap_max_mm": null,
+          "coupled_trunk_mm": 0.0,
+          "continuity_pct": null,
+          "continuity_threshold_pct": 85.0,
+          "skew_tolerance_mm": 0.3,
+          "log_threshold": null
+        },
+        {
+          "pair": "MIPI_D0",
+          "nets": [
+            "MIPI_D0+",
+            "MIPI_D0-"
+          ],
+          "outcome": "coupled",
+          "segment_outcomes": null,
+          "routed_mm": [
+            0,
+            19.039
+          ],
+          "skew_mm": null,
+          "chain_skew_mm": null,
+          "uncoupled_mm": 19.039,
+          "vias_p": 0,
+          "vias_n": 0,
+          "gap_min_mm": null,
+          "gap_max_mm": null,
+          "coupled_trunk_mm": 0.0,
+          "continuity_pct": null,
+          "continuity_threshold_pct": 85.0,
+          "skew_tolerance_mm": 0.3,
+          "log_threshold": null
+        },
+        {
+          "pair": "PCIE_RX",
+          "nets": [
+            "PCIE_RX+",
+            "PCIE_RX-"
+          ],
+          "outcome": "uncoupled-fallback:pair-leg-keepout",
+          "segment_outcomes": null,
+          "routed_mm": [
+            20.828,
+            21.325
+          ],
+          "skew_mm": 3.697,
+          "chain_skew_mm": null,
+          "uncoupled_mm": 33.677,
+          "vias_p": 0,
+          "vias_n": 2,
+          "gap_min_mm": 0.175,
+          "gap_max_mm": 0.4075,
+          "coupled_trunk_mm": 3.746,
+          "continuity_pct": 20.1,
+          "continuity_threshold_pct": 85.0,
+          "skew_tolerance_mm": 0.5,
+          "log_threshold": null
+        },
+        {
+          "pair": "PCIE_TX",
+          "nets": [
+            "PCIE_TX+",
+            "PCIE_TX-"
+          ],
+          "outcome": "uncoupled-fallback:pair-leg-keepout",
+          "segment_outcomes": null,
+          "routed_mm": [
+            22.154,
+            22.154
+          ],
+          "skew_mm": 0.0,
+          "chain_skew_mm": null,
+          "uncoupled_mm": 39.479,
+          "vias_p": 2,
+          "vias_n": 2,
+          "gap_min_mm": 0.3407,
+          "gap_max_mm": 0.4075,
+          "coupled_trunk_mm": 2.331,
+          "continuity_pct": 10.9,
+          "continuity_threshold_pct": 85.0,
+          "skew_tolerance_mm": 0.5,
+          "log_threshold": null
+        },
+        {
+          "pair": "USB2_D",
+          "nets": [
+            "USB2_D+",
+            "USB2_D-"
+          ],
+          "outcome": "uncoupled-fallback:pair-leg-keepout",
+          "segment_outcomes": null,
+          "routed_mm": [
+            0,
+            31.594
+          ],
+          "skew_mm": null,
+          "chain_skew_mm": null,
+          "uncoupled_mm": 31.594,
+          "vias_p": 0,
+          "vias_n": 4,
+          "gap_min_mm": null,
+          "gap_max_mm": null,
+          "coupled_trunk_mm": 0.0,
+          "continuity_pct": null,
+          "continuity_threshold_pct": 70.0,
+          "skew_tolerance_mm": 3.0,
+          "log_threshold": null
+        },
+        {
+          "pair": "USB3_RX1",
+          "nets": [
+            "USB3_RX1+",
+            "USB3_RX1-"
+          ],
+          "outcome": "uncoupled-fallback:pair-no-path",
+          "segment_outcomes": null,
+          "routed_mm": [
+            57.14,
+            65.534
+          ],
+          "skew_mm": 5.194,
+          "chain_skew_mm": null,
+          "uncoupled_mm": 118.973,
+          "vias_p": 2,
+          "vias_n": 0,
+          "gap_min_mm": 0.325,
+          "gap_max_mm": 0.325,
+          "coupled_trunk_mm": 0.1,
+          "continuity_pct": 2.8,
+          "continuity_threshold_pct": 90.0,
+          "skew_tolerance_mm": 0.5,
+          "log_threshold": null
+        },
+        {
+          "pair": "USB3_RX2",
+          "nets": [
+            "USB3_RX2+",
+            "USB3_RX2-"
+          ],
+          "outcome": "uncoupled-fallback:pair-no-path",
+          "segment_outcomes": null,
+          "routed_mm": [
+            46.736,
+            45.405
+          ],
+          "skew_mm": 1.869,
+          "chain_skew_mm": null,
+          "uncoupled_mm": 92.141,
+          "vias_p": 0,
+          "vias_n": 2,
+          "gap_min_mm": null,
+          "gap_max_mm": null,
+          "coupled_trunk_mm": 0.0,
+          "continuity_pct": 0.0,
+          "continuity_threshold_pct": 90.0,
+          "skew_tolerance_mm": 0.5,
+          "log_threshold": null
+        },
+        {
+          "pair": "USB3_TX1",
+          "nets": [
+            "USB3_TX1+",
+            "USB3_TX1-"
+          ],
+          "outcome": "uncoupled-fallback:pair-no-path",
+          "segment_outcomes": null,
+          "routed_mm": [
+            48.419,
+            50.327
+          ],
+          "skew_mm": 1.908,
+          "chain_skew_mm": null,
+          "uncoupled_mm": 93.938,
+          "vias_p": 2,
+          "vias_n": 2,
+          "gap_min_mm": 0.2907,
+          "gap_max_mm": 0.3575,
+          "coupled_trunk_mm": 2.546,
+          "continuity_pct": 4.9,
+          "continuity_threshold_pct": 90.0,
+          "skew_tolerance_mm": 0.5,
+          "log_threshold": null
+        },
+        {
+          "pair": "USB3_TX2",
+          "nets": [
+            "USB3_TX2+",
+            "USB3_TX2-"
+          ],
+          "outcome": "uncoupled-fallback:pair-no-path",
+          "segment_outcomes": null,
+          "routed_mm": [
+            39.052,
+            44.301
+          ],
+          "skew_mm": 5.248,
+          "chain_skew_mm": null,
+          "uncoupled_mm": 83.353,
+          "vias_p": 0,
+          "vias_n": 0,
+          "gap_min_mm": null,
+          "gap_max_mm": null,
+          "coupled_trunk_mm": 0.0,
+          "continuity_pct": 0.0,
+          "continuity_threshold_pct": 90.0,
+          "skew_tolerance_mm": 0.5,
+          "log_threshold": null
+        }
+      ],
+      "pair_digest": "e89311ddd59148b6",
+      "nets_routed": "16/26",
+      "kct_errors_by_rule": {
+        "connectivity": 7,
+        "diffpair_length_skew": 5,
+        "diffpair_routing_continuity": 6
+      },
+      "kicad_cli_errors_by_type": {},
+      "valid": true,
+      "invalid_reasons": []
+    }
+  ]
+}

@@ -58,7 +58,6 @@ export GIT_COMMITTER_NAME="test" GIT_COMMITTER_EMAIL="test@example.com"
 FAKE="$WORKDIR/fake-loom-daemon"
 cat > "$FAKE" <<'FAKE_EOF'
 #!/usr/bin/env bash
-[[ "$1 $2" == "forge egress" ]] && exit 0   # #9996: resync's egress doctor is not under test here
 if [[ " $* " == *" --help "* ]]; then
     [[ "${FAKE_NO_SUBCOMMAND:-0}" == "1" ]] && { echo "error: unrecognized subcommand 'merge-config'" >&2; exit 2; }
     exit 0

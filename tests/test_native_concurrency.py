@@ -216,10 +216,14 @@ def test_install_does_not_patch_subprocess_when_unconfigured(tmp_path):
         (["kicad-cli", "pcb", "drc", "--help"], False),
         (["kicad-cli", "pcb", "fill-zones", "--help"], False),
         (["/opt/kicad/bin/kicad-cli", "--version"], False),
-        # "version" (no dashes) is a real subcommand, not the "--version"
-        # flag, and a launch that also names a board must still be gated
-        # even if some other flag happens to be present.
-        (["/opt/kicad/bin/kicad-cli", "version"], True),
+        # "version" (no dashes) is the discovery probe's spelling of
+        # "--version": just as cheap, never loads a board, so it is not gated
+        # either (Issue #6786) -- but only in the subcommand position.
+        (["/opt/kicad/bin/kicad-cli", "version"], False),
+        (["kicad-cli", "version", "--format", "about"], False),
+        (["kicad-cli", "pcb", "drc", "version"], True),
+        # A launch that also names a board must still be gated even if some
+        # other flag happens to be present.
         (
             ["kicad-cli", "pcb", "drc", "--output", "report.json", "board.kicad_pcb"],
             True,
@@ -244,6 +248,8 @@ def test_classification_matches_the_independent_observer():
         ["kicad-cli", "pcb", "drc", "--help"],
         ["kicad-cli", "pcb", "fill-zones", "--help"],
         ["/opt/kicad/bin/kicad-cli", "--version"],
+        ["kicad-cli", "version", "--format", "about"],
+        ["kicad-cli", "pcb", "drc", "version"],
     ]
     for argv in cases:
         expected = observer.category(argv) in ("kicad-cli", "kicad-python-fill")
@@ -263,10 +269,43 @@ def test_capability_probe_category_is_distinct_from_native_categories():
     analyzer = _load_analyzer_module()
     assert observer.category(["kicad-cli", "pcb", "drc", "--help"]) == "kicad-cli-probe"
     assert observer.category(["kicad-cli", "--version"]) == "kicad-cli-probe"
+    assert observer.category(["kicad-cli", "version"]) == "kicad-cli-probe"
     assert "kicad-cli-probe" not in analyzer.NATIVE_CATEGORIES
     # A real launch is unaffected and stays in both places.
     assert observer.category(["kicad-cli", "pcb", "drc", "board.kicad_pcb"]) == "kicad-cli"
     assert "kicad-cli" in analyzer.NATIVE_CATEGORIES
+
+
+def test_kicad_cli_lookups_never_wait_for_a_native_permit(monkeypatch, tmp_path):
+    """Locating kicad-cli / reading its version must not queue (Issue #6786).
+
+    ``kct mfr apply-rules`` only *looks up* kicad-cli (to warn when the SMD pad
+    clearance rule is inert on the installed version), yet with every permit
+    held by real DRC launches its ``kicad-cli version`` probe queued behind
+    them -- a wait no parent subprocess timeout is credited for, which timed
+    out ``test_format_json_stdout_is_a_single_json_document[mfr apply-rules]``
+    in CI. Capture the argv both lookup sites really launch, so a future
+    spelling change cannot silently put them back behind the gate.
+    """
+    from kicad_tools.cli import runner
+    from kicad_tools.export import gerber
+
+    launched: list[list[str]] = []
+
+    def fake_run(args, *_, **__):
+        launched.append(list(args))
+        return subprocess.CompletedProcess(args, 0, "10.0.6\n", "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    fake_cli = tmp_path / "kicad-cli"
+    assert runner._probe_kicad_cli(fake_cli, timeout=1) is True
+    runner.PROBED_KICAD_CLI_VERSIONS.pop(str(fake_cli), None)
+    monkeypatch.setattr(gerber, "_KICAD_CLI_VERSION_CACHE", {})
+    assert gerber.get_kicad_cli_version(fake_cli) == "10.0.6"
+
+    assert len(launched) == 2
+    for argv in launched:
+        assert not native_concurrency.is_native_launch(argv), argv
 
 
 def test_executable_keyword_is_classified(tmp_path):
@@ -550,6 +589,90 @@ def test_slot_wait_is_credited_back_to_the_waiting_tests_deadline(tmp_path, monk
     # is left with (very nearly) the whole budget it started with.
     assert remaining > 10.0 - 0.2
     assert remaining <= 10.0 + permit.waited_s
+
+
+class _TimedOut(Exception):
+    """Stands in for pytest-timeout's ``Failed: Timeout`` raised from SIGALRM."""
+
+
+def _kill_on_alarm(*_):
+    raise _TimedOut
+
+
+def _queue_behind_a_held_slot(tmp_path, monkeypatch, *, owner: str, credit: str | None):
+    slots = tmp_path / "slots"
+    handles = _hold_every_slot(slots, 1)
+    monkeypatch.setenv(native_concurrency.ENV_SLOT_DIR, str(slots))
+    monkeypatch.setenv(native_concurrency.ENV_WAIT_SECONDS, "30")
+    monkeypatch.setenv(native_concurrency.ENV_LOG, str(tmp_path / "records"))
+    if credit is None:
+        monkeypatch.delenv(native_concurrency.ENV_CREDIT_SECONDS, raising=False)
+    else:
+        monkeypatch.setenv(native_concurrency.ENV_CREDIT_SECONDS, credit)
+    monkeypatch.setenv("PYTEST_CURRENT_TEST", f"tests/t.py::{owner} (call)")
+    return handles
+
+
+def test_deadline_is_extended_while_still_queued_for_a_permit(tmp_path, monkeypatch):
+    """Issue #6716: a deadline shorter than the queue wait must not fire in it.
+
+    The waiter's own budget (0.2 s) runs out long before the held slot is
+    released (0.8 s). Crediting only once the permit arrives is too late --
+    SIGALRM fires inside the poll loop's ``time.sleep`` -- so the credit has to
+    keep pushing the armed deadline out while the test is still waiting.
+    """
+    handles = _queue_behind_a_held_slot(
+        tmp_path, monkeypatch, owner="test_queued_6716", credit=None
+    )
+    timer = _release_after(handles, 0.8)
+    permit = None
+    try:
+        with _own_the_alarm(0.2):
+            signal.signal(signal.SIGALRM, _kill_on_alarm)
+            permit = native_concurrency._acquire(1, os.environ)
+            remaining, _ = signal.getitimer(signal.ITIMER_REAL)
+            bounded = permit.bounded
+            signal.setitimer(signal.ITIMER_REAL, 0)
+    finally:
+        timer.cancel()
+        if permit is not None:
+            permit.release()
+        for handle in handles:
+            with contextlib.suppress(Exception):
+                handle.close()
+    assert bounded is True
+    assert permit.waited_s >= 0.7
+    # The whole wait was given back, so (nearly) the original budget is left.
+    assert 0.0 < remaining <= 0.2 + 0.06
+    records = [
+        json.loads(line)
+        for path in (tmp_path / "records").glob("slots-*.jsonl")
+        for line in path.read_text().splitlines()
+    ]
+    acquire = [record for record in records if record["event"] == "acquire"]
+    assert acquire[0]["credited_s"] == pytest.approx(permit.waited_s, abs=0.01)
+
+
+def test_queued_waiter_is_still_killed_once_its_credit_cap_is_spent(tmp_path, monkeypatch):
+    """Hang detection stays bounded: own timeout plus the cap, then SIGALRM."""
+    handles = _queue_behind_a_held_slot(
+        tmp_path, monkeypatch, owner="test_capped_6716", credit="0.3"
+    )
+    timer = _release_after(handles, 3.0)
+    started = time.monotonic()
+    try:
+        with _own_the_alarm(0.2):
+            signal.signal(signal.SIGALRM, _kill_on_alarm)
+            with pytest.raises(_TimedOut):
+                native_concurrency._acquire(1, os.environ)
+            elapsed = time.monotonic() - started
+    finally:
+        timer.cancel()
+        for handle in handles:
+            with contextlib.suppress(Exception):
+                handle.close()
+    # Killed at ~0.2 s + 0.3 s cap -- well before the slot would free up.
+    assert 0.45 <= elapsed < 1.5
 
 
 def test_credit_is_capped_per_test_and_reset_for_the_next_test(monkeypatch):

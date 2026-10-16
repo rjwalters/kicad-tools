@@ -704,6 +704,20 @@ class TestOuterRouteHelpExitCodes:
 class TestSigintExitCode:
     """Verify that SIGINT uses exit code 5, distinct from code 2."""
 
+    @pytest.fixture(autouse=True)
+    def _isolate_interrupt_state(self):
+        """The handler records its outcome in process-global state (#6324).
+
+        A repeat interrupt reuses that outcome, so each test needs a fresh run.
+        """
+        from kicad_tools.cli.route_cmd import _interrupt_state, _reset_interrupt_outcome
+
+        saved = dict(_interrupt_state)
+        _reset_interrupt_outcome()
+        yield
+        _interrupt_state.clear()
+        _interrupt_state.update(saved)
+
     def test_sigint_handler_exits_5_when_results_saved(self):
         """The SIGINT handler exits with code 5 when partial results are saved."""
         import signal

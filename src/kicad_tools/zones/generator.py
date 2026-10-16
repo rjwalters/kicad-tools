@@ -84,7 +84,7 @@ from __future__ import annotations
 import math
 import sys
 import uuid as uuid_module
-from collections.abc import Collection, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -1227,10 +1227,26 @@ def _existing_zone_priority_by_layer(
     return by_layer
 
 
+def _existing_zone_nets_by_layer(
+    pcb: PCB,
+    pour_net_names: set[str] | None = None,
+) -> dict[str, set[str]]:
+    """Map copper layer -> names of nets owning pre-existing pours (#6402)."""
+    by_layer: dict[str, set[str]] = {}
+    for zone in pcb.zones:
+        if not zone.net_name:
+            continue
+        if pour_net_names and zone.net_name in pour_net_names:
+            continue
+        by_layer.setdefault(zone.layer, set()).add(zone.net_name)
+    return by_layer
+
+
 def _assign_layers_for_pour_nets(
     copper_layer_count: int,
     pour_nets: list[tuple[str, NetClass]],
     existing_zone_priority_by_layer: dict[str, int] | None = None,
+    plane_rank: Mapping[str, tuple[float, ...]] | None = None,
 ) -> list[tuple[str, str, int]]:
     """Assign layers and priorities for pour nets based on board stackup.
 
@@ -1240,6 +1256,8 @@ def _assign_layers_for_pour_nets(
       a descending priority scheme so multiple power nets coexist.
     - 4-layer: GROUND -> ``In1.Cu`` priority 1; first POWER -> ``In2.Cu``
       priority 0; additional POWER -> ``F.Cu`` with non-zero priorities.
+      With ``plane_rank`` (Issue #6714) "first" is the power net feeding
+      the most footprints, the first one listed on a tie.
 
     Split-ground designs (mixed-signal boards with multiple distinct
     ``NetClass.GROUND`` nets, e.g. ``GNDA`` + ``GNDD``):
@@ -1282,6 +1300,14 @@ def _assign_layers_for_pour_nets(
             pre-existing zones on the board (see
             :func:`_existing_zone_priority_by_layer`).  ``None``/empty
             preserves the legacy behaviour.
+        plane_rank: Issue #6714 -- per-net sort key (larger = needs the
+            plane more, see :func:`_power_plane_rank`) that picks which
+            POWER net gets the one inner power plane on a 4+ layer
+            single-ground board.  The highest-ranked power net takes
+            ``In2.Cu``; ties keep the ``pour_nets`` order, and every other
+            power net keeps its relative order on ``F.Cu``.  ``None`` (or a
+            net missing from the map, which ranks lowest) keeps the legacy
+            rule: the first power net in ``pour_nets`` takes the plane.
 
     Returns:
         List of (net_name, layer, priority) tuples.  Every ground-class
@@ -1320,6 +1346,20 @@ def _assign_layers_for_pour_nets(
                 # Single power net gets its own inner layer
                 assignments.append((power_nets[0][0], "In2.Cu", 0))
             else:
+                if plane_rank and len(power_nets) > 1:
+                    # Issue #6714: the plane goes to the rail feeding the
+                    # most parts, not to whichever power net the classifier
+                    # listed first (that is net-number order).  On board 06rf the
+                    # 5-pad local VBUS_USB (net 1) took In2.Cu once #6686
+                    # made it a pour, pushing the board-wide +3V3 onto a
+                    # carved F.Cu outline that boxed connector pads in.
+                    plane_idx = max(
+                        range(len(power_nets)),
+                        key=lambda k: (plane_rank.get(power_nets[k][0], ()), -k),
+                    )
+                    power_nets = [power_nets[plane_idx]] + [
+                        pn for k, pn in enumerate(power_nets) if k != plane_idx
+                    ]
                 # Multiple power nets: first gets In2.Cu, rest go on F.Cu
                 # with decreasing priorities so they don't fully override each other.
                 # NOTE: Full-board overlapping zones on the same layer still produce
@@ -1429,6 +1469,31 @@ PAD_SAFE_MARGIN_MM = 0.3
 # single pad (or all its pads coincide).  Slightly larger than the margin
 # alone so single-pad nets still receive a usable copper patch.
 SINGLE_PAD_FALLBACK_SIDE_MM = 4.0
+
+
+def _power_plane_rank(pcb: PCB, net_name: str) -> tuple[float, ...]:
+    """How strongly ``net_name`` needs a full inner plane (Issue #6714).
+
+    ``(distinct footprints carrying a pad of the net,)``: a rail feeding
+    many parts across the board is what a plane is for, while a net local to
+    one or two parts (a connector's ``VBUS``) is served by a carved
+    outer-layer outline.  Footprints with no reference (or a ``#``
+    power-symbol stand-in) are ignored, as in
+    :func:`_net_pad_positions_absolute`.
+
+    Deliberately the footprint count ONLY, so a tie keeps the listed order:
+    on board 07rf ``+1V2`` and ``+1V8`` both feed 5 parts, and breaking that
+    tie by pad spread or pad count moved the plane to ``+1V8`` and stranded
+    a ``+1V2`` BGA ball on the F.Cu pour (0 -> 2 open pour links).
+    """
+    refs = {
+        fp.reference
+        for fp in pcb.footprints
+        if fp.reference
+        and not fp.reference.startswith("#")
+        and any(pad.net_name == net_name for pad in fp.pads)
+    }
+    return (float(len(refs)),)
 
 
 def _net_pad_positions_absolute(
@@ -1598,6 +1663,7 @@ def _compute_pour_outlines(
     margin_mm: float = DEFAULT_POUR_BBOX_MARGIN_MM,
     occupied_layers: Collection[str] | None = None,
     skipped_out: list[ZonePartitionError] | None = None,
+    incumbent_nets_by_layer: dict[str, set[str]] | None = None,
 ) -> dict[str, list[tuple[float, float]] | None]:
     """Compute per-net pour outlines for the given layer assignments.
 
@@ -1654,6 +1720,13 @@ def _compute_pour_outlines(
         occupied_layers: Layers that already host pre-existing zones
             (Issue #5590).  Each such layer is treated as shared even
             when only one new zone lands on it.
+        incumbent_nets_by_layer: Layer -> names of nets owning pre-existing
+            zones on that layer (Issue #6402).  A newly allocated
+            bounding-box outline on such a layer is carved so it does not
+            cover the incumbent nets' pads (see
+            :func:`_carve_incumbent_pads`); otherwise the island cuts those
+            pads off from the incumbent plane (board 03's VBUS island
+            swallowing VCC's U1/C1 on ``In2.Cu``).
         skipped_out: Opt-in degrade-gracefully collector (Issue #5864).
             When a list is supplied, a net whose outline cannot be made
             disjoint is **skipped** instead of aborting the whole
@@ -1929,7 +2002,193 @@ def _compute_pour_outlines(
             winners_union = _union_polygons(winners_union, subtrahend_for_winners)
             winners_so_far.append(net_name)
 
+    # Issue #6402: keep bounding-box islands off the incumbent pours' pads.
+    if incumbent_nets_by_layer:
+        for net_name, layer, _ in assignments:
+            incumbents = incumbent_nets_by_layer.get(layer)
+            outline = outlines.get(net_name)
+            if not incumbents or outline is None:
+                continue
+            incumbent_pads: list[tuple[float, float, float]] = []
+            for inc in sorted(incumbents - {net_name}):
+                incumbent_pads.extend(_net_pad_extents_absolute(pcb, inc))
+            own_pads = _net_pad_positions_absolute(pcb, net_name)
+            outlines[net_name] = _carve_incumbent_pads(outline, own_pads, incumbent_pads)
+
     return outlines
+
+
+def _net_pad_extents_absolute(
+    pcb: PCB,
+    net_name: str,
+) -> list[tuple[float, float, float]]:
+    """Return ``(x, y, half_extent)`` for every pad on ``net_name`` (Issue #6402).
+
+    Positions are sheet-absolute, matching :func:`_net_pad_positions_absolute`
+    (same footprint/pad iteration order).  ``half_extent`` is half the pad's
+    larger dimension: a rotation-agnostic, conservative radius for the pad
+    body, so a square of that half-size centred on the pad always covers it.
+    """
+    positions = _net_pad_positions_absolute(pcb, net_name)
+    halves: list[float] = []
+    for fp in pcb.footprints:
+        if not fp.reference or fp.reference.startswith("#"):
+            continue
+        for pad in fp.pads:
+            if pad.net_name != net_name or not pad.net_name:
+                continue
+            size = getattr(pad, "size", None) or (0.0, 0.0)
+            halves.append(max(float(size[0]), float(size[1])) / 2.0)
+    if len(halves) != len(positions):  # defensive: never misalign
+        halves = [0.0] * len(positions)
+    return [(x, y, h) for (x, y), h in zip(positions, halves, strict=True)]
+
+
+# Issue #6402: copper keep-out beyond an incumbent pour's pad body when
+# carving a newly auto-poured island off it.  The incumbent's fill must reach
+# the pad neighbourhood with room for a stitch via: the higher-priority
+# island's zone clearance (~0.3 mm) plus a via (~0.6 mm) plus a little fill.
+# A carve narrower than ``2 * clearance + min_thickness`` admits no fill at
+# all, which is how a 0.6 mm notch stranded board 03's F1.2 via on a sliver.
+INCUMBENT_PAD_KEEPOUT_MM = 1.0
+
+# Minimum neck width the carved island must keep so its own fill still joins
+# every own pad (2 x the auto-pour zone's 0.25 mm min_thickness, rounded up).
+CARVE_MIN_NECK_MM = 0.6
+
+
+def _carve_incumbent_pads(
+    outline: list[tuple[float, float]],
+    own_pads: list[tuple[float, float]] | list[tuple[float, float, float]],
+    incumbent_pads: list[tuple[float, float]] | list[tuple[float, float, float]],
+    keepout_mm: float = INCUMBENT_PAD_KEEPOUT_MM,
+) -> list[tuple[float, float]]:
+    """Carve *outline* so it does not cover *incumbent_pads* (Issue #6402).
+
+    Each incumbent pad (``(x, y)`` or ``(x, y, half_extent)``) inside the
+    outline becomes a square blocker covering its body plus ``keepout_mm``.
+    KiCad outlines cannot carry holes, so an interior blocker is opened to
+    the outline edge by a straight channel of the blocker's own width --
+    wide enough for the incumbent pour's fill to flow through it to the pad.
+    Each pad's channel takes the shortest direction that keeps every own pad
+    covered.  If no carve is valid, the outline is shrunk to the own pads'
+    tight neighbourhood and carved again; failing that it is returned
+    unchanged (never worse than before).
+
+    A result is valid when it is one hole-free polygon that still contains
+    every own pad and does not split into pieces when eroded by half of
+    :data:`CARVE_MIN_NECK_MM` (so its own fill still joins the own pads).
+    """
+    try:
+        from shapely.geometry import MultiPolygon, Point, Polygon, box
+        from shapely.ops import unary_union
+    except ImportError:
+        return outline
+
+    def _xyh(p) -> tuple[float, float, float]:
+        return (float(p[0]), float(p[1]), float(p[2]) if len(p) > 2 else 0.0)
+
+    own = [_xyh(p) for p in own_pads]
+    base = Polygon(outline)
+    if not base.is_valid or base.is_empty:
+        return outline
+
+    blockers = []
+    for p in incumbent_pads:
+        x, y, h = _xyh(p)
+        r = h + keepout_mm
+        # Stop short of the island's own pads (Chebyshev distance: the
+        # blocker is a square), but always clear the pad body itself.
+        for ox, oy, _ in own:
+            gap = max(abs(ox - x), abs(oy - y)) - PAD_SAFE_MARGIN_MM
+            r = min(r, max(h + PAD_SAFE_MARGIN_MM, gap))
+        blk = box(x - r, y - r, x + r, y + r)
+        if blk.intersects(base):
+            blockers.append((x, y, r, blk))
+    if not blockers:
+        return outline
+
+    def _parts(geom) -> list:
+        if geom is None or geom.is_empty:
+            return []
+        if isinstance(geom, MultiPolygon):
+            return [g for g in geom.geoms if g.area > 1e-9]
+        return [geom] if isinstance(geom, Polygon) else []
+
+    def _own_piece(geom):
+        """The single piece of *geom* holding every own pad, else ``None``.
+
+        Pieces without own pads are orphan copper and are dropped.
+        """
+        for piece in _parts(geom):
+            grown = piece.buffer(1e-6)
+            if all(grown.contains(Point(x, y)) for x, y, _ in own):
+                return piece
+        return None
+
+    def _necks_ok(piece) -> bool:
+        """Own pads stay joined after eroding away necks < CARVE_MIN_NECK_MM."""
+        cores = _parts(piece.buffer(-CARVE_MIN_NECK_MM / 2.0))
+        if not cores:
+            return False
+        homes = set()
+        for x, y, _ in own:
+            pt = Point(x, y)
+            best = min(range(len(cores)), key=lambda i: cores[i].distance(pt))
+            if cores[best].distance(pt) > CARVE_MIN_NECK_MM:
+                return False
+            homes.add(best)
+        return len(homes) <= 1
+
+    def _usable(geom):
+        piece = _own_piece(geom)
+        if piece is None or not piece.is_valid or not _necks_ok(piece):
+            return None
+        return piece
+
+    def _carve(region):
+        cut = unary_union([blk for *_, blk in blockers])
+        minx, miny, maxx, maxy = region.bounds
+        over = 1.0
+        # Open every enclosed blocker to the edge, nearest feasible side first.
+        for _ in range(len(blockers)):
+            piece = _usable(region.difference(cut))
+            if piece is None:
+                return None
+            if not piece.interiors:
+                return piece
+            holes = [Polygon(ring) for ring in piece.interiors]
+            enclosed = [b for b in blockers if any(h.contains(Point(b[0], b[1])) for h in holes)]
+            if not enclosed:
+                return None
+            x, y, r, _blk = enclosed[0]
+            options = [
+                (y - miny, box(x - r, miny - over, x + r, y)),  # toward min y
+                (maxy - y, box(x - r, y, x + r, maxy + over)),  # toward max y
+                (x - minx, box(minx - over, y - r, x, y + r)),  # toward min x
+                (maxx - x, box(x, y - r, maxx + over, y + r)),  # toward max x
+            ]
+            for _dist, channel in sorted(options, key=lambda o: o[0]):
+                trial = unary_union([cut, channel])
+                if _usable(region.difference(trial)) is not None:
+                    cut = trial
+                    break
+            else:
+                return None
+        piece = _usable(region.difference(cut))
+        return piece if piece is not None and not piece.interiors else None
+
+    result = _carve(base)
+    if result is None:
+        own_box = _bbox_polygon([(x, y) for x, y, _ in own], PAD_SAFE_MARGIN_MM)
+        if own_box is not None:
+            shrunk = Polygon(own_box).intersection(base)
+            if isinstance(shrunk, Polygon) and not shrunk.is_empty:
+                result = _carve(shrunk)
+    if result is None:
+        return outline
+    coords = [(float(cx), float(cy)) for cx, cy in result.exterior.coords[:-1]]
+    return coords if len(coords) >= 3 else outline
 
 
 def _polygon_area_simple(polygon: list[tuple[float, float]] | None) -> float:
@@ -2370,7 +2629,12 @@ def auto_create_zones_for_pour_nets(
     # the new zone tied its priority, kept the full-board outline, and
     # KiCad's UUID tie-break decided which zone starved.
     existing_by_layer = _existing_zone_priority_by_layer(gen.pcb, {name for name, _ in pour_nets})
-    assignments = _assign_layers_for_pour_nets(copper_layer_count, pour_nets, existing_by_layer)
+    assignments = _assign_layers_for_pour_nets(
+        copper_layer_count,
+        pour_nets,
+        existing_by_layer,
+        plane_rank={name: _power_plane_rank(gen.pcb, name) for name, _ in pour_nets},
+    )
 
     # Outline allocator (#2771): compute per-net bounding outlines for any
     # layer that hosts more than one zone.  Sole-layer zones (typically
@@ -2385,6 +2649,9 @@ def auto_create_zones_for_pour_nets(
         gen.board_outline,
         occupied_layers=existing_by_layer.keys() if existing_by_layer else None,
         skipped_out=skipped_out,
+        incumbent_nets_by_layer=_existing_zone_nets_by_layer(
+            gen.pcb, {name for name, _ in pour_nets}
+        ),
     )
 
     # Issue #5864: nets the allocator could not satisfy are absent from

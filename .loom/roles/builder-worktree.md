@@ -138,33 +138,27 @@ When your feature branch has conflicts with main, you have two options depending
 For minor conflicts or small divergence from main:
 
 ```bash
-# In the worktree directory (.loom/worktrees/issue-XX)
+# In the worktree. Merge unless the repo allows rebase; unknown = merge (#10771)
+BRANCH=$(git branch --show-current)
+BRANCH_UPDATE=$(loom-daemon branch-update strategy) || BRANCH_UPDATE=merge
+if [ "$BRANCH_UPDATE" = rebase ]; then  # rebase rewrites: pin the lease first (#9487)
+  LEASE=$(loom-daemon push-lease pin-flag --branch "$BRANCH" --local-ref "refs/heads/$BRANCH") || exit 1; fi
 git fetch origin main
-git rebase origin/main
+if [ "$BRANCH_UPDATE" = rebase ]; then git rebase origin/main; else git merge --no-ff -m "Merge origin/main into $BRANCH (Builder: sync with main)" origin/main; fi
 
-# If conflicts occur:
-# 1. Edit conflicting files to resolve
-# 2. Stage resolved files
-git add <resolved-files>
+# If conflicts occur: edit the files, `git add <resolved-files>`, then
+# `git commit --no-edit` (merge) or `git rebase --continue` (rebase)
 
-# 3. Continue the rebase
-git rebase --continue
-
-# Version-bearing-file sync gate (#7168, #7341; moot after #7743): if you push
-# here directly (updating an already-open PR) rather than through create-pr.sh
-# again, gate first. Under #7743 no PR carries a version-bearing edit, so a
-# clean rebase lands exactly origin/main's values; if the gate still fires,
-# your branch carries one (e.g. a pre-#7743 bump commit).
-# Never hand-patch VERSION/CLAUDE.md/etc. and never run `version.sh bump` (the
-# printed Fix: predates #7743) -- restore them to origin/main's values
-# (`git checkout origin/main -- <files>`), commit, re-run the gate, then push.
+# Version-bearing-file sync gate (#7168, #7341, #7743). If it
+# fires your branch carries a version-bearing edit. Never hand-patch VERSION/CLAUDE.md/etc
+# or `version.sh bump` -- `git checkout origin/main -- <files>`, commit, re-gate.
 if [ -x ./.loom/scripts/version-check-gate.sh ] && ! ./.loom/scripts/version-check-gate.sh --fix-hint "then push."; then
-  echo "Version-bearing files out of sync after rebase (see BLOCKER:/Fix: above) - revert, never bump"
+  echo "Version-bearing files out of sync after update (see BLOCKER:/Fix: above) - revert, never bump"
   exit 1
 fi
 
-# 4. Force push (rebase rewrites history)
-git push --force-with-lease
+# Merge: plain push (rejected = fetch + merge again, never force). Rebase: the pinned lease.
+if [ "$BRANCH_UPDATE" = rebase ]; then git push "$LEASE" origin "HEAD:$BRANCH"; else git push origin "HEAD:$BRANCH"; fi
 ```
 
 **When to use this approach:**
@@ -177,27 +171,13 @@ git push --force-with-lease
 If conflicts are too complex or main has changed significantly:
 
 ```bash
-# 1. Save your work (note what you changed)
-git diff HEAD > ~/my-changes.patch  # Optional: save as patch
-
-# 2. Return to main repository (not the worktree)
-cd /path/to/main/repo
-
-# 3. Remove the stale worktree
-git worktree remove .loom/worktrees/issue-XX --force
-
-# 4. Delete the old branch
-git branch -D feature/issue-XX
-
-# 5. Fetch latest main
-git fetch origin main
-
-# 6. Create fresh worktree from updated main
-./.loom/scripts/worktree.sh XX
-
-# 7. Re-implement changes in the fresh worktree
-cd .loom/worktrees/issue-XX
-# Cherry-pick, apply patch, or reimplement manually
+git diff HEAD > ~/my-changes.patch            # 1. optional: save your work as a patch
+cd /path/to/main/repo                         # 2. back to the main repository
+git worktree remove .loom/worktrees/issue-XX --force   # 3. remove the stale worktree
+git branch -D feature/issue-XX                # 4. delete the old branch
+git fetch origin main                         # 5. fetch latest main
+./.loom/scripts/worktree.sh XX                # 6. fresh worktree from updated main
+cd .loom/worktrees/issue-XX                   # 7. re-apply: cherry-pick, patch, or reimplement
 ```
 
 **When to use this approach:**
@@ -223,15 +203,12 @@ cd .loom/worktrees/issue-XX
 - Prevents nested worktree issues
 
 **Don't use `git stash` for ad-hoc WIP handling in a worktree**
-- Stash (`refs/stash`) is **shared repo-wide across every linked worktree** —
-  the opposite of per-worktree isolation. Two parallel builders in different
-  worktrees can `git stash` and `git stash pop` each other's WIP, silently
-  swapping or overwriting uncommitted work (observed in production: kicad-tools
-  PRs #4524/#4526).
-- Use `./.loom/scripts/worktree.sh snapshot <issue-number>` instead — it
-  captures WIP as a patch file under
-  `<worktree-root>/.snapshots/issue-<N>-<timestamp>.patch`, scoped to your own
-  worktree, with no risk of collision with other builders' stashes.
+- Stash (`refs/stash`) is **shared across every linked worktree**: parallel
+  builders can pop each other's WIP, silently swapping or overwriting it
+  (kicad-tools PRs #4524/#4526).
+- Use `./.loom/scripts/worktree.sh snapshot <issue-number>` instead — a patch
+  under `<worktree-root>/.snapshots/issue-<N>-<timestamp>.patch`, scoped to
+  your worktree.
 - For a "clean baseline vs. my diff" comparison — temporarily clearing your
   fix to re-run a lint/test baseline, then restoring it — `snapshot` is *not*
   enough (it captures a patch but does not reset the working tree). Use
@@ -250,28 +227,19 @@ cd .loom/worktrees/issue-XX
 - Long compute → the repo's batch backend, or scoped to fit the session, or
   `loom:blocked` naming the compute gap: `.loom/docs/long-running-compute.md`.
 
-**Don't use `git push --force` without `--force-with-lease`**
-- `--force-with-lease` is safer - it fails if someone else pushed
-- Prevents accidentally overwriting others' work
+**Never `git push --force`, and never a bare `--force-with-lease`**
+- A bare lease trusts `refs/remotes/origin/<branch>`, shared by every worktree: a sibling's fetch makes it silently overwrite their push (#9487). Pin it (`loom-daemon push-lease pin-flag`)
+- Merge mode (`loom-daemon branch-update strategy`, #10771): never force at all
 
 ### Preventing Merge Conflicts
 
 To minimize conflicts in the first place:
 
-1. **Pull frequently**: Before starting significant work
-   ```bash
-   git fetch origin main
-   git rebase origin/main
-   ```
-
-2. **Keep PRs small**: Smaller PRs = fewer conflicts = faster merges
-
-3. **Communicate**: If working on shared areas, coordinate with other builders
-
-4. **Rebase before PR**: this is a required gate, not just an ounce-of-prevention
-   habit — see `builder-pr.md` § "Pre-Push Rebase: Sync with `origin/main`" for
-   the mandatory step (with conflict-handling instructions) that runs
-   immediately before `git push` / opening the PR (#7668).
+1. **Sync frequently**: before significant work, update from `origin/main` as in Option 1
+2. **Keep PRs small**: smaller PRs = fewer conflicts = faster merges
+3. **Communicate**: on shared areas, coordinate with other builders
+4. **Sync before PR** — a required gate (#7668): `builder-pr.md` § "Pre-Push
+   Rebase: Sync with `origin/main`", run immediately before `git push` / opening the PR.
 
 ## Claiming Workflow (Parallel Mode)
 
@@ -350,7 +318,8 @@ while true; do
   fi
 
   # Find available issues
-  ISSUES=$(gh issue list --label="loom:issue" --state=open --limit 500 --json number --jq '.[].number')
+  EXCL="$(./.loom/scripts/skip-labels.sh --jq-not)"
+  ISSUES=$(gh issue list --label="loom:issue" --state=open --limit 500 --json number,labels --jq ".[] | select($EXCL) | .number")
 
   for ISSUE_NUMBER in $ISSUES; do
     # Try atomic claim

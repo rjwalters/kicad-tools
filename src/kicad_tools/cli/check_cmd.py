@@ -100,6 +100,7 @@ _MEASUREMENT_RULE_IDS: frozenset[str] = frozenset(
         "match_group_length_skew",
         "diffpair_length_skew",
         "diffpair_routing_continuity",
+        "diffpair_uncoupled_length",
     }
 )
 
@@ -138,6 +139,20 @@ _NET_RELATIONSHIP_RULE_IDS: frozenset[str] = frozenset(
         "clearance_pad_via",
     }
 )
+
+
+def _authored_min_clearance_mm(pcb_path: str | Path) -> float | None:
+    """The board's authored minimum clearance (``.kicad_pro``), or ``None``.
+
+    Same resolver ``kct route`` records as ``_authored_min_clearance``
+    (Issue #6575).
+    """
+    from kicad_tools.router.clearance_resolver import read_declared_clearance_rules
+
+    try:
+        return read_declared_clearance_rules(pcb_path).project_min_clearance_mm
+    except (OSError, ValueError):
+        return None
 
 
 def _is_floating_net(net: str) -> bool:
@@ -1139,6 +1154,7 @@ CHECK_CATEGORIES = [
     "diffpair_clearance_intra",
     "diffpair_length_skew",
     "diffpair_routing_continuity",
+    "diffpair_uncoupled_length",
     "dimensions",
     "doc_drift",
     "edge",
@@ -1157,6 +1173,7 @@ CHECK_CATEGORIES = [
     "solder_mask",
     "mask_to_copper",
     "via_in_pad",
+    "via_type",
     "via_under_body",
     "width_consistency",
     "zero_length_segment",
@@ -1916,6 +1933,7 @@ def main(argv: list[str] | None = None) -> int:
             "match_group_length_skew",
             "diffpair_length_skew",
             "diffpair_routing_continuity",
+            "diffpair_uncoupled_length",
         )
         _inactive_rules = [
             rule
@@ -2125,18 +2143,11 @@ def main(argv: list[str] | None = None) -> int:
     declared_ampacity_targets: dict[str, float] = {}
     ampacity_resolution = None
     if net_class_map is not None:
-        from kicad_tools.router.net_names import resolve_net_class_map_keys
-
         for key, nc in net_class_map.items():
             target = getattr(nc, "target_ampacity", None)
             if target is not None:
                 declared_ampacity_targets[key] = float(target)
-        board_net_names = [net.name for net in pcb.nets.values() if net.name]
-        ampacity_resolution = resolve_net_class_map_keys(net_class_map.keys(), board_net_names)
-        net_class_map = {
-            board_net: net_class_map[user_key]
-            for board_net, user_key in ampacity_resolution.resolved.items()
-        }
+        net_class_map, ampacity_resolution = resolve_net_class_map_for_board(net_class_map, pcb)
 
     # Issue #4326: resolve the ampacity gate's copper weights (outer / inner
     # oz).  Precedence, per layer class: an EXPLICIT ``--copper`` (keyed >
@@ -2163,16 +2174,7 @@ def main(argv: list[str] | None = None) -> int:
     preset_copper_oz = cli_copper_outer if cli_copper_outer is not None else 1.0
 
     # Tier 1: derive copper weights from the board's declared stackup.
-    stackup_outer: float | None = None
-    stackup_inner: float | None = None
-    try:
-        from kicad_tools.physics.stackup import Stackup
-
-        _derived = Stackup.from_pcb(pcb).outer_inner_copper_oz()
-        if _derived is not None:
-            stackup_outer, stackup_inner = _derived
-    except Exception:  # noqa: BLE001 - never crash `check` on a stackup parse quirk
-        stackup_outer = stackup_inner = None
+    stackup_outer, stackup_inner = stackup_copper_oz(pcb)
 
     # Per-class resolution: explicit --copper wins, else the declared
     # stackup, else None (leave the profile default in place).
@@ -2242,6 +2244,7 @@ def main(argv: list[str] | None = None) -> int:
             copper_oz_inner=resolved_copper_inner,
             suppress_library=args.suppress_library,
             net_class_map=net_class_map,
+            authored_min_clearance_mm=_authored_min_clearance_mm(pcb_path),
             # The CLI already prints its own up-front INACTIVE warning
             # below, so suppress the per-rule checker-level warning here to
             # avoid duplicating it (Issue #3917 Defect 3).
@@ -2758,6 +2761,10 @@ def _emit_drc_sidecars(
             # Issue #6039: per-rule-area keepout rules (kicad-cli 10.0.1 does
             # not enforce rule areas without them).
             merged_dru = apply_keepout_rules(merged_dru, pcb_path) or merged_dru
+            # Issue #6390: router net classes under KCT_PRESERVE_BOARD_RULES=0.
+            from kicad_tools.manufacturers.project_generator import apply_netclass_dru_rules
+
+            merged_dru = apply_netclass_dru_rules(merged_dru, checker.design_rules, project_data)
             dru_path.write_text(merged_dru, encoding="utf-8")
             written = [dru_path]
     except (OSError, json.JSONDecodeError) as e:
@@ -2770,6 +2777,200 @@ def _emit_drc_sidecars(
 
     joined = ", ".join(str(p) for p in written)
     print(f"DRC-constraint sidecars updated: {joined}", file=sys.stderr)
+
+
+def resolve_net_class_map_for_board(net_class_map: dict, pcb: PCB) -> tuple[dict, object]:
+    """Rekey a loaded net-class map onto the board's actual net names.
+
+    Issue #4321: a hand-authored map's bare keys (no hierarchical ``/``
+    prefix) must land on the board's segment net names before
+    :class:`DRCChecker` sees them.  Shared by ``kct check`` and every
+    in-process caller of its rule set (Issue #6431).
+
+    Returns:
+        ``(rekeyed_map, resolution)`` -- the resolution records which user
+        keys matched, for the unevaluated-ampacity warning.
+    """
+    from kicad_tools.router.net_names import resolve_net_class_map_keys
+
+    board_net_names = [net.name for net in pcb.nets.values() if net.name]
+    resolution = resolve_net_class_map_keys(net_class_map.keys(), board_net_names)
+    rekeyed = {
+        board_net: net_class_map[user_key] for board_net, user_key in resolution.resolved.items()
+    }
+    return rekeyed, resolution
+
+
+def stackup_copper_oz(pcb: PCB) -> tuple[float | None, float | None]:
+    """Outer/inner copper weight (oz) from the board's declared stackup, if any."""
+    try:
+        from kicad_tools.physics.stackup import Stackup
+
+        derived = Stackup.from_pcb(pcb).outer_inner_copper_oz()
+    except Exception:  # noqa: BLE001 - never crash `check` on a stackup parse quirk
+        return (None, None)
+    if derived is None:
+        return (None, None)
+    return derived
+
+
+@dataclass
+class CheckRuleSet:
+    """The rule set ``kct check --mfr <mfr>`` applies to a board (Issue #6431).
+
+    Built by :func:`build_check_rule_set` without going through the CLI, so
+    another command (``kct fix-drc``) can re-check a board with exactly the
+    rules ``kct check`` would use: the resolved manufacturer and layer count,
+    the auto-discovered net-class map, current-path and waiver sidecars, the
+    stackup copper weights, the reviewed fabrication-floor override, and the
+    path-dependent rules (``netclass_clearance_copper``, ``netclass_floor``)
+    that read the project file next to ``project_pcb_path``.
+    """
+
+    checker: DRCChecker
+    project_pcb_path: Path
+    manufacturer: str
+    layers: int
+    net_class_map_path: Path | None = None
+    general_waivers: object | None = None
+    notes: list[str] = field(default_factory=list)
+
+
+def build_check_rule_set(
+    project_pcb_path: Path,
+    *,
+    manufacturer: str | None = None,
+    layers: int | None = None,
+    pcb: PCB | None = None,
+) -> CheckRuleSet:
+    """Build ``kct check``'s default rule set for a board.
+
+    Args:
+        project_pcb_path: The board whose sidecars (``.kicad_pro``,
+            ``.kicad_dru``, ``net_class_map.json``, waivers, ...) define the
+            rules.  Every sidecar is discovered from this path.
+        manufacturer: ``--mfr``; ``None`` resolves it exactly like ``kct
+            check`` (``fab_profile.json`` > ``project.kct`` > ``jlcpcb``).
+        layers: ``--layers``; ``None`` uses the board's copper-layer count.
+        pcb: The geometry to check.  Defaults to loading
+            ``project_pcb_path``; pass another board (e.g. a repaired copy
+            written elsewhere) to check *its* copper under the project's
+            rules.
+
+    A sidecar that fails to load is skipped (with a note), as ``kct check``
+    does for auto-discovered sidecars.
+    """
+    from kicad_tools.manufacturers import resolve_pcb_fabrication_overrides
+
+    project_pcb_path = Path(project_pcb_path)
+    if pcb is None:
+        pcb = PCB.load(project_pcb_path)
+    notes: list[str] = []
+    effective_mfr, _mfr_notices, _mfr_source = _resolve_effective_check_mfr(
+        manufacturer, project_pcb_path
+    )
+    if layers is None:
+        detected = len(pcb.copper_layers)
+        layers = detected if detected > 0 else 2
+
+    net_class_map = None
+    ncm_path = _discover_net_class_map_sidecar(project_pcb_path)
+    if ncm_path is not None:
+        from kicad_tools.router.rules import net_class_map_from_path
+
+        try:
+            net_class_map = net_class_map_from_path(ncm_path, pcb_path=project_pcb_path)
+        except (json.JSONDecodeError, TypeError, ValueError) as exc:
+            notes.append(f"ignoring malformed net-class-map sidecar {ncm_path}: {exc}")
+            net_class_map = None
+            ncm_path = None
+    if net_class_map is not None:
+        net_class_map, _resolution = resolve_net_class_map_for_board(net_class_map, pcb)
+
+    from kicad_tools.validate.rules.courtyard_waivers import (
+        discover_courtyard_waivers_sidecar,
+        load_courtyard_waivers,
+    )
+
+    courtyard_waivers = None
+    cw_path = discover_courtyard_waivers_sidecar(project_pcb_path)
+    if cw_path is not None:
+        try:
+            courtyard_waivers = load_courtyard_waivers(cw_path)
+        except ValueError as exc:
+            notes.append(f"ignoring malformed courtyard-waivers sidecar {cw_path}: {exc}")
+
+    current_path_specs: list[CurrentPathSpec] = []
+    cp_path = discover_current_paths_sidecar(project_pcb_path)
+    if cp_path is not None:
+        try:
+            current_path_specs = load_current_path_specs(cp_path)
+        except (OSError, ValueError) as exc:
+            notes.append(f"ignoring malformed current-paths sidecar {cp_path}: {exc}")
+
+    copper_outer, copper_inner = stackup_copper_oz(pcb)
+    checker = DRCChecker(
+        pcb,
+        manufacturer=effective_mfr,
+        layers=layers,
+        copper_oz=1.0,
+        copper_oz_outer=copper_outer,
+        copper_oz_inner=copper_inner,
+        net_class_map=net_class_map,
+        authored_min_clearance_mm=_authored_min_clearance_mm(project_pcb_path),
+        warn_on_inactive_skew_rules=False,
+        courtyard_waivers=courtyard_waivers,
+        strict_connectivity=True,
+        current_path_specs=current_path_specs,
+    )
+    checker.design_rules, override_msg = resolve_pcb_fabrication_overrides(
+        project_pcb_path, checker.design_rules, manufacturer_id=effective_mfr
+    )
+    if override_msg is not None:
+        notes.append(override_msg)
+
+    from kicad_tools.validate.rules.waivers import discover_waivers_sidecar, load_waivers
+
+    general_waivers = None
+    gw_path = discover_waivers_sidecar(project_pcb_path)
+    if gw_path is not None:
+        try:
+            general_waivers = load_waivers(gw_path)
+        except ValueError as exc:
+            notes.append(f"ignoring malformed waivers sidecar {gw_path}: {exc}")
+
+    return CheckRuleSet(
+        checker=checker,
+        project_pcb_path=project_pcb_path,
+        manufacturer=effective_mfr,
+        layers=layers,
+        net_class_map_path=ncm_path,
+        general_waivers=general_waivers,
+        notes=notes,
+    )
+
+
+def run_check_rule_set(rule_set: CheckRuleSet) -> DRCResults:
+    """Run every default ``kct check`` category under ``rule_set``.
+
+    Same dispatch as the CLI (:func:`run_selected_checks`, so the
+    path-dependent rules run), with the board's waivers applied afterwards.
+    """
+    sch_path = _resolve_check_schematic(None, rule_set.project_pcb_path)
+    results = run_selected_checks(
+        rule_set.checker,
+        None,
+        set(),
+        pad_grid_auto_derive=True,
+        sch_path=sch_path,
+        pcb_path=rule_set.project_pcb_path,
+        layers=rule_set.layers,
+    )
+    if rule_set.general_waivers is not None:
+        from kicad_tools.validate.rules.waivers import apply_waivers
+
+        apply_waivers(results, rule_set.general_waivers.for_check())  # type: ignore[attr-defined]
+    return results
 
 
 def run_selected_checks(
@@ -2925,6 +3126,7 @@ def run_selected_checks(
         "diffpair_clearance_intra": checker.check_diffpair_clearance_intra,
         "diffpair_length_skew": checker.check_diffpair_length_skew,
         "diffpair_routing_continuity": checker.check_diffpair_routing_continuity,
+        "diffpair_uncoupled_length": checker.check_diffpair_uncoupled_length,
         "dimensions": checker.check_dimensions,
         "doc_drift": _doc_drift_check,
         "edge": checker.check_edge_clearances,
@@ -2943,6 +3145,7 @@ def run_selected_checks(
         "solder_mask": checker.check_solder_mask_pads,
         "mask_to_copper": checker.check_mask_to_copper,
         "via_in_pad": checker.check_via_in_pad,
+        "via_type": checker.check_via_type_capability,
         "via_under_body": checker.check_via_under_body,
         "width_consistency": checker.check_width_consistency,
         "zero_length_segment": checker.check_zero_length_segments,
@@ -3026,20 +3229,36 @@ def _print_measurement_summary(violations: list[DRCViolation]) -> None:
             return "/".join(n for n in v.nets if n)
         return v.rule_id
 
-    def _metric(rule_id: str) -> str:
+    def _metric(v: DRCViolation) -> str:
+        rule_id = v.rule_id
         # diffpair_routing_continuity measures a coupled *fraction*, not a
         # length skew -- label the column accordingly.
         if rule_id == "diffpair_routing_continuity":
             return "continuity"
+        if rule_id == "diffpair_uncoupled_length":
+            from kicad_tools.validate.rules.diffpair_uncoupled_length import (
+                is_per_terminal_finding,
+                is_via_count_finding,
+            )
+
+            if is_via_count_finding(v):
+                return "vias"
+            return "uncpl/term" if is_per_terminal_finding(v) else "uncoupled"
         return "skew"
 
     rows: list[tuple[str, str, str, str, str]] = []
     for v in sorted(measurements, key=lambda x: (x.rule_id, _subject(x))):
         subject = _subject(v)
-        metric = _metric(v.rule_id)
+        metric = _metric(v)
         measured = f"{v.actual_value:.3f}" if v.actual_value is not None else "-"
         tol = f"{v.required_value:.3f}" if v.required_value is not None else "-"
         status = "FAIL" if v.is_error else "pass"
+        if v.rule_id == "diffpair_routing_continuity":
+            # Info-only since #6443: below the threshold is a measurement,
+            # not a failure.
+            status = "info"
+        elif v.severity == "warning":
+            status = "warn"
         rows.append((subject, metric, measured, tol, status))
 
     subject_w = max(len("Group/Pair"), *(len(r[0]) for r in rows))
@@ -3402,6 +3621,33 @@ def print_coverage_stanza(coverage: dict) -> None:
             print(f"  {tag}UNKNOWN {name}: {c.reason} (zero findings here is not a pass)")
 
 
+def portable_report_path(pcb_path: Path | str, cwd: Path | None = None) -> str:
+    """Return a host-independent form of *pcb_path* for a JSON report.
+
+    Committed board evidence used to echo the absolute host path of the
+    checked PCB (``/home/...``, ``/Users/...``, ``/private/var/...``), which
+    leaked worker layouts into the repo and made hash-bound bytes depend on
+    the machine that produced them (Issue #6532).  The rule is:
+
+    * a relative path is returned unchanged;
+    * an absolute path under the current working directory is returned
+      relative to it (POSIX separators);
+    * any other absolute path is reduced to its bare filename.
+
+    Both sides are resolved before comparing, so a symlinked tmp dir (macOS
+    ``/var`` -> ``/private/var``) still matches.  The result is never
+    absolute.
+    """
+    path = Path(pcb_path)
+    if not path.is_absolute():
+        return str(pcb_path)
+    base = Path.cwd() if cwd is None else Path(cwd)
+    try:
+        return path.resolve().relative_to(base.resolve()).as_posix()
+    except (ValueError, OSError):
+        return path.name
+
+
 def output_json(
     violations: list[DRCViolation],
     results: DRCResults,
@@ -3471,7 +3717,7 @@ def output_json(
         summary_data.update(_coverage_summary(coverage))
 
     data: dict = {
-        "file": str(pcb_path),
+        "file": portable_report_path(pcb_path),
         "manufacturer": mfr,
         "layers": layers,
         "summary": summary_data,
@@ -3578,7 +3824,7 @@ def write_json_report(
         summary_data.update(_coverage_summary(coverage))
 
     data: dict = {
-        "file": str(pcb_path),
+        "file": portable_report_path(pcb_path),
         "manufacturer": mfr,
         "layers": layers,
         "summary": summary_data,

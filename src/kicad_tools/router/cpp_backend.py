@@ -29,6 +29,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal, NamedTuple
 
 from . import wall_deadline as _wall_deadline
+from .pad_landing import pad_landing_geometry
 from .resource_guard import reraise_if_resource_exhaustion
 
 if TYPE_CHECKING:
@@ -77,7 +78,26 @@ logger = logging.getLogger(__name__)
 # diff-pair partner no longer relaxes a barrel, ``route_via_geometry_clear``
 # gained ``trace_clearance`` and ``router_cpp.trace_via_clearance`` is bound.
 # A v48 .so would let a trace land inside an earlier via's floor.
-_REQUIRED_CPP_BUILD_VERSION = 49
+# v51 (Issue #6375): ``Pathfinder.set_search_own_pad_gate`` /
+# ``own_pad_step_clear`` and ``Grid3D.segment_pads_clear`` -- the A* holds
+# steps on the routing net's own pad cells to the validator's seg-vs-pad
+# verdict.  ``route()`` calls the setter on every search; a v50 .so lacks it.
+# v52 (Issue #6368): ``PadBounds.centre_gx`` / ``centre_gy`` / ``long_axis``
+# -- both A* loops charge an off-centreline pad landing.  A v51 .so lacks the
+# fields.
+# v53 (Issue #6464): both A* loops and ``Grid3D.validate_route`` hold a via to
+# the fab hole-to-hole floor against the route's OWN earlier vias.  A v52 .so
+# commits same-route via pairs below the floor.
+# v54 (Issue #6473): ``CoupledPathfinder.route`` holds a layer change to the
+# fab hole-to-hole floor against the pair's own earlier vias and between the
+# P and N via of the move.  A v53 .so returns coupled via pairs below it.
+# v56 (Issue #6718): ``Grid3D.set_pad_authored`` takes a trailing ``rratio``
+# (the file's roundrect corner ratio); a v55 .so rejects the argument.
+# v57 (Issue #6761): both A* loops honour hard escape fences -- a
+# ``PadChannelBudget`` with an infinite penalty refuses the cell, and
+# ``layer == -2`` is a via-only fence.  A v56 .so would price the fences as
+# an ordinary (infinite) cost and read ``layer == -2`` as out of range.
+_REQUIRED_CPP_BUILD_VERSION = 57
 
 
 # Issue #5599: human-readable names for the ``ValidationResult::violation_type``
@@ -1291,6 +1311,20 @@ class CppPathfinder:
     A* routing.
     """
 
+    # Issue #6366: per-net A* heuristic-weight overrides (net id -> weight),
+    # consulted by ``route`` when the caller passes the default weight.
+    # ``Autorouter`` installs its own dict here; the empty class default is
+    # never mutated.
+    net_astar_weights: dict[int, float] = {}
+
+    # Issue #6366: the native A* has NO per-net layer-preference cost -- it
+    # never reads ``NetClassRouting.preferred_layers`` (only hard
+    # ``avoid_layers``, #4433).  The evolutionary optimiser checks this flag
+    # and evolves no ``preferred_layers`` gene on this backend rather than
+    # carrying a gene that silently does nothing.  Flip to True if/when a
+    # layer-preference cost is ported to ``cpp/src/pathfinder.cpp``.
+    supports_layer_preferences: bool = False
+
     # Issue #3441: the C++ pathfinder has NO waypoint-injection support
     # (#2330 was implemented only in the pure-Python ``Router``).  This
     # capability flag keeps ``Autorouter.use_waypoint_injection`` honest:
@@ -1485,6 +1519,11 @@ class CppPathfinder:
         self._python_unreachable: dict[tuple, tuple[tuple, float]] = {}
         self._python_fallback_proven_skips: int = 0
         self._python_fallback_seconds_saved: float = 0.0
+        # Issue #6329: nets whose search was ended by a per-net WALL-CLOCK
+        # deadline while the tuned per-net iteration cap was active (i.e.
+        # under ``--deterministic-budget``).  Net name -> what bound.  Each
+        # entry is a point where the routed result depends on machine load.
+        self._wall_bound_under_cap: dict[str, str] = {}
 
         # Issue #3545: lazy cache for ``compute_component_pitches`` used
         # by the net-aware same-component carve-out gate in
@@ -1510,6 +1549,9 @@ class CppPathfinder:
         #   "failure_y": float,
         # } or ``None`` if no diagnostic was captured.
         self._last_failure_info: dict | None = None
+        # Issue #6369: {net_id: last FAILURE_* code}, filled by the negotiated
+        # router; persisted to ``<stem>.search_failures.json`` by ``kct route``.
+        self.search_failures_by_net: dict[int, int] = {}
 
         # Issue #2587 / Epic #2556 Phase 1C-cont: Reverse map for diff-pair
         # partner resolution.  The autorouter populates this via
@@ -1587,6 +1629,16 @@ class CppPathfinder:
         # default) means no per-pad budget is configured and the C++
         # search uses the pre-#3143 cost function identically.
         self._pad_channel_budgets: list = []  # list[router_cpp.PadChannelBudget]
+        # Issue #6382: fine-pitch neighbour entry-lane budgets, set by
+        # :meth:`set_pad_lane_budgets` from ``Autorouter.route_all_negotiated``.
+        # Kept separate from the #3143 list so neither setter clobbers the
+        # other; :meth:`_filter_pad_channel_budgets_for_net` concatenates.
+        self._pad_lane_budgets: list = []  # list[router_cpp.PadChannelBudget]
+        # Issue #6761: fine-pitch lanes for the hard escape fences, set by
+        # :meth:`set_pad_lane_fences`; turned into per-connection budgets by
+        # :meth:`_escape_fence_budgets`.
+        self._pad_lane_fences: list = []  # list[pad_lanes.FenceLane]
+        self._escape_fence_fallbacks = 0
 
     def set_segment_foreign_context(
         self,
@@ -1644,12 +1696,18 @@ class CppPathfinder:
             short-circuit avoids allocating a copy on the hot path when
             no budget is configured at all).
         """
-        if not self._pad_channel_budgets:
+        if not self._pad_channel_budgets and not self._pad_lane_budgets:
             return self._pad_channel_budgets
-        # Use list comprehension; the budget list is bounded by the
-        # number of dense-package escape pads (typically < 30) so even
-        # the O(N) scan is cheap relative to the surrounding A* cost.
-        return [b for b in self._pad_channel_budgets if getattr(b, "source_net", 0) != net]
+        # Use list comprehension; the budget lists are bounded by the
+        # number of dense-package escape pads / fine-pitch lane pads
+        # (typically < 100) so even the O(N) scan is cheap relative to the
+        # surrounding A* cost.  Issue #6382: the lane budgets are appended
+        # after the #3143 channel budgets under the same own-net filter.
+        return [
+            b
+            for b in (*self._pad_channel_budgets, *self._pad_lane_budgets)
+            if getattr(b, "source_net", 0) != net
+        ]
 
     def set_pad_channel_budgets(self, budgets: list | None) -> None:
         """Inject the per-pad lateral-channel budget list (Issue #3143).
@@ -1678,6 +1736,56 @@ class CppPathfinder:
                 Pass ``None`` or ``[]`` to clear.
         """
         self._pad_channel_budgets = list(budgets) if budgets else []
+
+    def set_pad_lane_budgets(self, budgets: list | None) -> None:
+        """Inject the fine-pitch neighbour entry-lane budgets (Issue #6382).
+
+        Same struct and per-net filter as :meth:`set_pad_channel_budgets`,
+        but stored in a separate list so the lane budgets (installed by
+        ``Autorouter.route_all_negotiated``) and the #3143 escape-channel
+        budgets (installed by the dense-package escape pre-phase) coexist:
+        setting one never drops the other.  Each call replaces only the
+        lane list.  Pass ``None`` or ``[]`` to clear.
+        """
+        self._pad_lane_budgets = list(budgets) if budgets else []
+
+    def set_pad_lane_fences(self, fence_lanes: list | None) -> None:
+        """Install the fine-pitch lanes the escape fences are built from (Issue #6761).
+
+        Pass ``None`` or ``[]`` to clear (no connection is fenced).  See
+        :func:`kicad_tools.router.pad_lanes.escape_fence_rects`.
+        """
+        self._pad_lane_fences = list(fence_lanes) if fence_lanes else []
+
+    def _escape_fence_budgets(
+        self,
+        start: Pad,
+        end: Pad,
+        *,
+        trace_width: float,
+        trace_clearance: float,
+        via_size: float,
+    ) -> list:
+        """Hard escape fences for one connection (Issue #6761).
+
+        Empty unless ``start`` or ``end`` is a pad of a fine-pitch column.
+        The bands leave room for a minimum-width (``rules.trace_width``)
+        straight exit along every other-net lane centreline of that column.
+        """
+        fence_lanes = getattr(self, "_pad_lane_fences", None)
+        if not fence_lanes:
+            return []
+        from .pad_lanes import build_escape_fence_budgets
+
+        foreign_half = float(self._rules.trace_width) / 2.0
+        return build_escape_fence_budgets(
+            fence_lanes,
+            (getattr(start, "key", None), getattr(end, "key", None)),
+            int(start.net),
+            self._grid,
+            trace_band_mm=float(trace_width) / 2.0 + float(trace_clearance) + foreign_half,
+            via_band_mm=float(via_size) / 2.0 + float(self._rules.via_clearance) + foreign_half,
+        )
 
     def invalidate_pad_geometry_cache(self) -> None:
         """Mirror changed physical drills before the next native via query."""
@@ -2079,6 +2187,14 @@ class CppPathfinder:
         bounds.approach_gy1 = int(gy1) - pad_escape_margin
         bounds.approach_gx2 = int(gx2) + pad_escape_margin
         bounds.approach_gy2 = int(gy2) + pad_escape_margin
+        # Issue #6368: centreline landing cost inputs (see ``pad_landing``).
+        landing = pad_landing_geometry(pad, self._grid)
+        bounds.long_axis = int(landing.long_axis)
+        bounds.centre_gx = float(landing.centre_gx)
+        bounds.centre_gy = float(landing.centre_gy)
+        bounds.lane_half_cells = float(landing.lane_half_cells)
+        bounds.tip_lo = int(landing.tip_lo)
+        bounds.tip_hi = int(landing.tip_hi)
         return bounds
 
     def route(
@@ -2134,6 +2250,10 @@ class CppPathfinder:
         # no single search may run past the excursion's wall deadline.
         # Identity when no deadline is installed.
         per_net_timeout = _wall_deadline.clamp_search_timeout(per_net_timeout)
+        # Issue #6366: per-net A* weight override (evolutionary gene).
+        net_weights = getattr(self, "net_astar_weights", None)
+        if weight == 1.0 and net_weights:
+            weight = net_weights.get(start.net, weight)
         if not self._per_call_timing_enabled:
             try:
                 return self._route_impl(
@@ -2264,10 +2384,18 @@ class CppPathfinder:
         routable_layers = self._grid.get_routable_indices()
         if start_layers is None:
             start_layers = (
-                routable_layers if getattr(start, "through_hole", False) else [start_layer]
+                routable_layers
+                if (
+                    getattr(start, "through_hole", False) or getattr(start, "layer_agnostic", False)
+                )
+                else [start_layer]
             )
         if end_layers is None:
-            end_layers = routable_layers if getattr(end, "through_hole", False) else [end_layer]
+            end_layers = (
+                routable_layers
+                if (getattr(end, "through_hole", False) or getattr(end, "layer_agnostic", False))
+                else [end_layer]
+            )
 
         # Filter start/end layers by allowed_layers constraint
         if self._rules.allowed_layers is not None:
@@ -2438,6 +2566,18 @@ class CppPathfinder:
         # accumulated avoidance boosts and remaining budget) instead of only
         # continuing the preserved open set.  Every pushed setter is
         # idempotent, so calling them again before a restart is safe.
+        # Issue #6761: hard escape fences when this connection starts or ends
+        # on a fine-pitch column pad.  ``fence_state`` lets the first failed
+        # search drop them (see the retry below).
+        escape_fences = self._escape_fence_budgets(
+            start,
+            end,
+            trace_width=net_trace_width,
+            trace_clearance=net_trace_clearance,
+            via_size=net_via_size,
+        )
+        fence_state = {"on": bool(escape_fences)}
+
         def _run_fresh_search(timeout_s: float, max_iters: int):
             self._sync_pairwise_domains_to_cpp()
             # Give the C++ search the routing net's copper half-extents so the
@@ -2453,6 +2593,33 @@ class CppPathfinder:
                 self._impl.set_search_fill_clearances(
                     max(net_trace_clearance, own_floor),
                     max(self._rules.via_clearance, own_floor),
+                )
+            if hasattr(self._impl, "set_search_pad_clearance_floor"):
+                # Issue #6315: the exact pad test resolving pad clearance
+                # cells cannot tell a pad's net class, and the pair rule is
+                # max(own class, pad's class) -- hold it to the largest
+                # class clearance on the board (never looser than the disc).
+                self._impl.set_search_pad_clearance_floor(
+                    max(
+                        [self._rules.trace_clearance]
+                        + [
+                            float(getattr(nc, "clearance", 0.0) or 0.0)
+                            for nc in (self._net_class_map or {}).values()
+                        ]
+                    )
+                )
+            if hasattr(self._impl, "set_search_own_pad_gate"):
+                # Issue #6375: steps on this net's own pad copper/halo are
+                # held to the validator's own seg-vs-pad verdict -- with the
+                # validator's carve-outs and the narrowest width the route
+                # conversion can emit, so the gate is never the stricter one.
+                gate_exclude, gate_clamp = self._carveout_ref_hashes(
+                    self._grid._py_grid, start, end
+                )
+                self._impl.set_search_own_pad_gate(
+                    gate_exclude,
+                    gate_clamp,
+                    self._narrowest_emit_width(start, end, net_trace_width),
                 )
 
             if self._grid._py_grid is not None:
@@ -2512,11 +2679,20 @@ class CppPathfinder:
                 # an escape pad is not penalised for routing through its
                 # OWN escape endpoint -- only contention from OTHER nets
                 # is shaped.
-                self._filter_pad_channel_budgets_for_net(start.net),
+                self._filter_pad_channel_budgets_for_net(start.net)
+                + (escape_fences if fence_state["on"] else []),
             )
 
         try:
             result = _run_fresh_search(timeout_seconds, self._effective_search_iterations)
+            if not result.success and fence_state["on"]:
+                # Issue #6761: a fence reshapes an escape, it must never lose
+                # a connection -- when the fenced search finds nothing (e.g.
+                # an obstacle inside the lane forces an early turn), retry
+                # once on the unfenced cost function.
+                fence_state["on"] = False
+                self._escape_fence_fallbacks = getattr(self, "_escape_fence_fallbacks", 0) + 1
+                result = _run_fresh_search(timeout_seconds, self._effective_search_iterations)
 
             if not result.success:
                 # Issue #2476: Capture structured failure diagnostics from
@@ -3493,6 +3669,44 @@ class CppPathfinder:
             return None
         return intra
 
+    def _carveout_ref_hashes(self, py_grid, start: Pad, end: Pad) -> tuple[list[int], list[int]]:
+        """``(exclude_ref_hashes, clamp_ref_hashes)`` for ``validate_route``.
+
+        Issue #6375: shared by :meth:`_validate_route_clearance` and the A*
+        own-pad step gate (``set_search_own_pad_gate``) so the search applies
+        exactly the same-component carve-outs the validator does.  See the
+        Issue #3545 / #5166 notes in :meth:`_validate_route_clearance`.
+        """
+        exclude_ref_hashes: list[int] = []
+        clamp_ref_hashes: list[int] = []
+        for pad in (start, end):
+            if not pad.component_key:
+                continue
+            mode = self._same_component_carveout_mode(py_grid, pad.component_key)
+            if mode == "skip":
+                exclude_ref_hashes.append(router_cpp.fnv1a_hash(pad.component_key))
+            elif mode == "clamp":
+                clamp_ref_hashes.append(router_cpp.fnv1a_hash(pad.component_key))
+        return exclude_ref_hashes, clamp_ref_hashes
+
+    def _narrowest_emit_width(self, start: Pad, end: Pad, base_width: float) -> float:
+        """Narrowest trace width :meth:`_convert_result_to_route` can emit.
+
+        Issue #6375: the Issue #1018 neck-down taper only ever NARROWS a
+        segment near a pad, so a search-side check at this width is never
+        stricter than the post-route validator measuring the emitted copper.
+        """
+        width = float(base_width)
+        pitches = self._get_component_pitches()
+        for pad in (start, end):
+            pitch = pitches.get(pad.ref) if pad.ref else None
+            if self._rules.should_apply_neck_down(pad.ref, pitch):
+                width = min(
+                    width,
+                    float(self._rules.get_neck_down_width(0.0, pitch, base_width=base_width)),
+                )
+        return width
+
     def _validate_route_clearance(
         self,
         route: Route,
@@ -3567,16 +3781,7 @@ class CppPathfinder:
         # enforces that resolved per-pad value as a hard floor there,
         # instead of the pre-#5166 unconditional skip that accepted any
         # positive gap (e.g. 0.02mm against an authored 0.10mm).
-        exclude_ref_hashes: list[int] = []
-        clamp_ref_hashes: list[int] = []
-        for pad in (start, end):
-            if not pad.component_key:
-                continue
-            mode = self._same_component_carveout_mode(py_grid, pad.component_key)
-            if mode == "skip":
-                exclude_ref_hashes.append(router_cpp.fnv1a_hash(pad.component_key))
-            elif mode == "clamp":
-                clamp_ref_hashes.append(router_cpp.fnv1a_hash(pad.component_key))
+        exclude_ref_hashes, clamp_ref_hashes = self._carveout_ref_hashes(py_grid, start, end)
 
         # Build C++ segment/via lists from route
         cpp_segs: list[router_cpp.Segment] = []
@@ -3590,7 +3795,12 @@ class CppPathfinder:
 
         cpp_vias: list[router_cpp.Via] = []
         for via in route.vias:
-            for layer_from, layer_to in self._project_via_spans(via.layers):
+            # Issue #6485: the DRILLED span.  A non-micro via is a through
+            # barrel whatever logical pair ``via.layers`` records, so the
+            # native validator must judge it on every layer -- the same
+            # span ``RoutingGrid.worst_via_pad_deficit`` /
+            # ``validate_via_clearance`` use and ``Via.to_sexp`` writes.
+            for layer_from, layer_to in self._project_via_spans(via.drilled_layers):
                 cv = router_cpp.Via()
                 cv.x, cv.y = via.x, via.y
                 cv.drill = via.drill
@@ -3907,6 +4117,7 @@ class CppPathfinder:
             and router_cpp is not None
             and int(cpp_failure_reason) == int(router_cpp.FAILURE_TIMEOUT)
         ):
+            self._note_wall_bound_under_cap(net_name, "C++ A* hit the per-net wall-clock deadline")
             logger.debug(
                 "Net %s: C++ search hit the per-net wall-clock deadline "
                 "(FAILURE_TIMEOUT); skipping Python fallback so the budget is "
@@ -4157,7 +4368,13 @@ class CppPathfinder:
         t0 = time.monotonic()
         # Python Router.route() does not accept start_layers/end_layers;
         # it derives layer information internally from pad attributes.
-        route = self._py_router.route(
+        # Issue #6527: opt-in bidirectional A* for the fallback (default off).
+        _fallback_route = (
+            self._py_router.route_auto
+            if getattr(self._py_router.rules, "fallback_bidirectional", False) is True
+            else self._py_router.route
+        )
+        route = _fallback_route(
             start,
             end,
             net_class=net_class,
@@ -4168,6 +4385,18 @@ class CppPathfinder:
             extra_goal_cells=extra_goal_cells,
         )
         dt = time.monotonic() - t0
+
+        # Issue #6329: the fallback is iteration-bounded under a tuned cap,
+        # but ``per_net_timeout`` still bounds it by wall clock.  When the
+        # wall clock fires first, the expansions reached (and so whether the
+        # net lands) depend on machine load.
+        if route is None and getattr(self._py_router, "last_route_deadline_hit", False) is True:
+            self._note_wall_bound_under_cap(
+                net_name,
+                "Python fallback A* stopped by the per-net wall-clock deadline after "
+                f"{self._py_router.last_route_deadline_iterations:,} of "
+                f"{self._effective_search_iterations:,} expansions",
+            )
 
         # Issue #5617: aggregate this fallback's wall time by WHY it ran --
         # ``_resume_exhausted`` (computed above) is the exact "case 1"
@@ -4206,6 +4435,34 @@ class CppPathfinder:
             )
 
         return route
+
+    def _note_wall_bound_under_cap(self, net_name: str, detail: str) -> None:
+        """Record a per-net wall-clock bind under the tuned iteration cap.
+
+        Issue #6329: ``--deterministic-budget`` pins every per-net search to
+        a node-expansion cap, but the negotiated loop still hands each
+        search a WALL-CLOCK budget (``derive_iter_per_net_cap``: 10% of the
+        remaining stage budget, issue #3989; the relief rescue's 10 s
+        sub-search clock).  The pure-Python fallback runs ~10-100x slower
+        than the C++ search, so on board 05 that wall clock fires long
+        before the expansion cap (measured: 106,496 of 1,000,000 expansions
+        in a 57 s budget).  Whether such a search lands its net then depends
+        on machine load, which is how two same-seed runs diverge.  This is
+        a no-op without an active tuned cap (the wall clock is then the
+        intended bound, not a determinism loss).  Logged once per net.
+        """
+        if not self._per_net_iteration_cap_active:
+            return
+        if net_name in self._wall_bound_under_cap:
+            return
+        self._wall_bound_under_cap[net_name] = detail
+        logger.warning(
+            "[deterministic-budget] per-net wall clock bound net %s before the "
+            "iteration cap (%s) -- this net's result depends on machine load "
+            "(issue #6329)",
+            net_name,
+            detail,
+        )
 
     def _python_unreachable_key(
         self,
@@ -4446,6 +4703,11 @@ class CppPathfinder:
                 - python_fallback_seconds_saved: Issue #6098.  Summed run time
                   of the proving searches those skips did not repeat -- an
                   estimate of the wall time saved.
+                - wall_bound_under_cap: Issue #6329.  Mapping of net name ->
+                  description of a search that a per-net WALL-CLOCK deadline
+                  ended while the tuned per-net iteration cap was active
+                  (``--deterministic-budget``).  Non-empty means the run's
+                  copper can depend on machine load.
         """
         return {
             "fallback_count": self._fallback_count,
@@ -4462,6 +4724,7 @@ class CppPathfinder:
             "python_fallback_seconds_by_reason": dict(self._python_fallback_seconds_by_reason),
             "python_fallback_proven_skips": self._python_fallback_proven_skips,
             "python_fallback_seconds_saved": self._python_fallback_seconds_saved,
+            "wall_bound_under_cap": dict(self._wall_bound_under_cap),
         }
 
     @property
@@ -4952,10 +5215,14 @@ def sync_authored_floors(cpp_grid: CppGrid, py_grid: RoutingGrid) -> None:
             "Rebuild the native router (`kct build-native`): authored netclass "
             "clearance support (Issue #6243) is required"
         )
+    from .clearance_shapes import pad_kernel_params
+
     for index, pad in enumerate(py_grid._pads):
+        # Issue #6718: the same effective (shape, rratio) ``pad_shape`` uses.
+        shape, rratio = pad_kernel_params(pad)
         impl.set_pad_authored(
             index,
-            pad.shape,
+            shape,
             pad.width,
             pad.height,
             pad.rotation,
@@ -4963,6 +5230,7 @@ def sync_authored_floors(cpp_grid: CppGrid, py_grid: RoutingGrid) -> None:
             pad.y,
             pad.drill if pad.through_hole else 0.0,
             float(pad.authored_clearance),
+            rratio,
         )
     # Installs the floors and rebuilds the native index (or drops it when
     # nothing is active any more).
@@ -5012,7 +5280,10 @@ def sync_stored_routes(cpp_grid: CppGrid, py_grid: RoutingGrid, project=None) ->
                 **extra,
             )
         for via in route.vias:
-            for span in project(via.layers):
+            # Issue #6485: store the DRILLED span (see ``validate_route``'s
+            # via projection) so later candidates are judged against the
+            # barrel that is fabricated, not the logical layer pair.
+            for span in project(via.drilled_layers):
                 cpp_grid._impl.add_stored_via(
                     via.x,
                     via.y,
@@ -5227,6 +5498,8 @@ class CppCoupledPathfinder:
         corridor_bitset: list[int],
         max_iterations_budget: int,
         timeout_seconds: float,
+        p_goal_any_layer: bool = False,
+        n_goal_any_layer: bool = False,
     ) -> tuple[list[tuple[int, int, int, int, int, int, bool]] | None, dict]:
         """Run the coupled C++ search.
 
@@ -5258,6 +5531,8 @@ class CppCoupledPathfinder:
             corridor_bitset,
             int(max_iterations_budget),
             float(timeout_seconds),
+            bool(p_goal_any_layer),
+            bool(n_goal_any_layer),
         )
         diagnostics = {
             "iterations": int(res.iterations),

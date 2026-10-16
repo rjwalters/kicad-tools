@@ -106,14 +106,16 @@ def segments_intersect(
         True if the segments share a proper interior point.
     """
 
-    def _cross(ox: float, oy: float, px: float, py: float, qx: float, qy: float) -> float:
-        """Sign of cross product (OP x OQ)."""
-        return (px - ox) * (qy - oy) - (py - oy) * (qx - ox)
-
-    d1 = _cross(bx1, by1, bx2, by2, ax1, ay1)
-    d2 = _cross(bx1, by1, bx2, by2, ax2, ay2)
-    d3 = _cross(ax1, ay1, ax2, ay2, bx1, by1)
-    d4 = _cross(ax1, ay1, ax2, ay2, bx2, by2)
+    # Cross products inlined (OP x OQ): avoids rebuilding a closure and four
+    # calls per invocation on the router's clearance hot path (Issue #5617).
+    bdx = bx2 - bx1
+    bdy = by2 - by1
+    adx = ax2 - ax1
+    ady = ay2 - ay1
+    d1 = bdx * (ay1 - by1) - bdy * (ax1 - bx1)
+    d2 = bdx * (ay2 - by1) - bdy * (ax2 - bx1)
+    d3 = adx * (by1 - ay1) - ady * (bx1 - ax1)
+    d4 = adx * (by2 - ay1) - ady * (bx2 - ax1)
 
     # Proper intersection: each segment straddles the line of the other
     if ((d1 > 0 and d2 < 0) or (d1 < 0 and d2 > 0)) and (
@@ -151,16 +153,79 @@ def segment_to_segment_distance(
     Returns:
         Minimum distance between the two segments (>= 0).
     """
-    # If segments properly intersect, distance is zero
-    if segments_intersect(x1, y1, x2, y2, x3, y3, x4, y4):
-        return 0.0
+    # Fully inlined (Issue #5617): the intersection test and the four
+    # point-to-segment distances are expanded in place with the exact same
+    # arithmetic as segments_intersect()/point_to_segment_distance(), saving
+    # five calls per invocation.  The t clamp mirrors
+    # ``max(0.0, min(1.0, v))`` (including NaN and -0.0 behaviour).
+    adx = x2 - x1
+    ady = y2 - y1
+    bdx = x4 - x3
+    bdy = y4 - y3
 
-    # Otherwise, the minimum distance is the smallest of the four
-    # endpoint-to-segment distances
-    d1 = point_to_segment_distance(x1, y1, x3, y3, x4, y4)
-    d2 = point_to_segment_distance(x2, y2, x3, y3, x4, y4)
-    d3 = point_to_segment_distance(x3, y3, x1, y1, x2, y2)
-    d4 = point_to_segment_distance(x4, y4, x1, y1, x2, y2)
+    c1 = bdx * (y1 - y3) - bdy * (x1 - x3)
+    c2 = bdx * (y2 - y3) - bdy * (x2 - x3)
+    if (c1 > 0 and c2 < 0) or (c1 < 0 and c2 > 0):
+        c3 = adx * (y3 - y1) - ady * (x3 - x1)
+        c4 = adx * (y4 - y1) - ady * (x4 - x1)
+        if (c3 > 0 and c4 < 0) or (c3 < 0 and c4 > 0):
+            return 0.0
+
+    sqrt = math.sqrt
+    b_len_sq = bdx * bdx + bdy * bdy
+    a_len_sq = adx * adx + ady * ady
+
+    # d1: (x1,y1) -> segment B ; d2: (x2,y2) -> segment B
+    apx = x1 - x3
+    apy = y1 - y3
+    if b_len_sq == 0:
+        d1 = sqrt(apx * apx + apy * apy)
+    else:
+        t = (apx * bdx + apy * bdy) / b_len_sq
+        t = t if t < 1.0 else 1.0
+        if not t > 0.0:
+            t = 0.0
+        rx = apx - t * bdx
+        ry = apy - t * bdy
+        d1 = sqrt(rx * rx + ry * ry)
+    apx = x2 - x3
+    apy = y2 - y3
+    if b_len_sq == 0:
+        d2 = sqrt(apx * apx + apy * apy)
+    else:
+        t = (apx * bdx + apy * bdy) / b_len_sq
+        t = t if t < 1.0 else 1.0
+        if not t > 0.0:
+            t = 0.0
+        rx = apx - t * bdx
+        ry = apy - t * bdy
+        d2 = sqrt(rx * rx + ry * ry)
+
+    # d3: (x3,y3) -> segment A ; d4: (x4,y4) -> segment A
+    apx = x3 - x1
+    apy = y3 - y1
+    if a_len_sq == 0:
+        d3 = sqrt(apx * apx + apy * apy)
+    else:
+        t = (apx * adx + apy * ady) / a_len_sq
+        t = t if t < 1.0 else 1.0
+        if not t > 0.0:
+            t = 0.0
+        rx = apx - t * adx
+        ry = apy - t * ady
+        d3 = sqrt(rx * rx + ry * ry)
+    apx = x4 - x1
+    apy = y4 - y1
+    if a_len_sq == 0:
+        d4 = sqrt(apx * apx + apy * apy)
+    else:
+        t = (apx * adx + apy * ady) / a_len_sq
+        t = t if t < 1.0 else 1.0
+        if not t > 0.0:
+            t = 0.0
+        rx = apx - t * adx
+        ry = apy - t * ady
+        d4 = sqrt(rx * rx + ry * ry)
 
     return min(d1, d2, d3, d4)
 

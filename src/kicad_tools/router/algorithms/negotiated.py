@@ -15,6 +15,8 @@ from __future__ import annotations
 import contextlib
 import random
 import time
+from dataclasses import dataclass
+from dataclasses import replace as dataclass_replace
 from typing import TYPE_CHECKING, Callable
 
 from ..kelvin import detect_kelvin_topology
@@ -30,6 +32,77 @@ if TYPE_CHECKING:
 # Issue #2795: progress callback signature for visibility into long-running
 # rip-up operations.  Callback receives a phase string and a metadata dict.
 ProgressCallback = Callable[[str, dict], None]
+
+
+# Issue #6342: why a ``targeted_ripup`` transaction ended the way it did.  The
+# method used to return a bare ``False`` for every failure mode, so a caller
+# could not tell "the victim has no path even with its blockers removed" from
+# "a displaced blocker could not re-land" or "the per-net rip-up budget left
+# nothing to rip" -- and therefore could not stop repeating the same rip.
+RIPUP_COMMITTED = "committed"
+RIPUP_BUDGET_EXHAUSTED = "budget_exhausted"
+RIPUP_VICTIM_GEOMETRIC = "victim_geometric"
+RIPUP_SIBLING_FAILED = "sibling_failed"
+RIPUP_TRADED = "traded"
+
+
+@dataclass(frozen=True)
+class TargetedRipupOutcome:
+    """Structured result of one :meth:`NegotiatedRouter.targeted_ripup` call.
+
+    Issue #6342.  Truthy exactly when the transaction committed (including a
+    victim-first *trade*, see :data:`RIPUP_TRADED`), so the pre-#6342
+    ``if success:`` callers keep their meaning.
+
+    Attributes:
+        reason: One of the ``RIPUP_*`` constants.
+        failed_net: The victim the rip-up was for.
+        ripped: Blockers that were actually ripped (after the budget filter).
+        dropped: Blockers the caller named that the per-net
+            ``ripup_history`` / ``max_ripups_per_net`` budget filtered out --
+            named, but never touched.
+        failed_sibling: For :data:`RIPUP_SIBLING_FAILED` and
+            :data:`RIPUP_TRADED`, the first displaced blocker that could not
+            re-land with at least its old route count.
+        traded: For :data:`RIPUP_TRADED`, the blockers left unrouted so the
+            victim's copper could be kept.
+        cpp_retry: The first attempt failed with the ripped copper still
+            phantom-blocked on the C++ grid (an open corridor-reservation
+            window) and this is the outcome of the retry with it freed.
+    """
+
+    reason: str
+    failed_net: int
+    ripped: tuple[int, ...] = ()
+    dropped: tuple[int, ...] = ()
+    failed_sibling: int | None = None
+    traded: tuple[int, ...] = ()
+    cpp_retry: bool = False
+
+    def __bool__(self) -> bool:
+        return self.reason in (RIPUP_COMMITTED, RIPUP_TRADED)
+
+    def describe(self, net_names: dict[int, str] | None = None) -> str:
+        """One human line: ``reason`` plus the nets it concerns."""
+        names = net_names or {}
+
+        def _n(net: int) -> str:
+            return str(names.get(net, f"Net_{net}"))
+
+        parts = [self.reason]
+        if self.ripped:
+            parts.append("ripped " + ", ".join(_n(n) for n in self.ripped))
+        if self.dropped:
+            parts.append(
+                "not ripped (rip-up budget spent): " + ", ".join(_n(n) for n in self.dropped)
+            )
+        if self.failed_sibling is not None:
+            parts.append(f"{_n(self.failed_sibling)} could not re-land")
+        if self.traded:
+            parts.append("left for re-route: " + ", ".join(_n(n) for n in self.traded))
+        if self.cpp_retry:
+            parts.append("after a retry with the ripped copper freed on the C++ grid")
+        return "; ".join(parts)
 
 
 # Issue #3452: initial-pass grace-pass bounds, shared by the two
@@ -1065,6 +1138,12 @@ class NegotiatedRouter:
         # (implicit on cache_key change).
         self._seg_seg_violations_cache: tuple[object, list[int]] | None = None
 
+        # Issue #6342: the structured outcome of the most recent
+        # :meth:`targeted_ripup` call (``None`` before the first one).  The
+        # method still returns a plain ``bool`` so existing callers keep their
+        # meaning; callers that need to know *why* a rip-up failed read this.
+        self.last_ripup_outcome: TargetedRipupOutcome | None = None
+
     def route_net_negotiated(
         self,
         pad_objs: list[Pad],
@@ -1301,6 +1380,9 @@ class NegotiatedRouter:
                         committed = route
                 if committed is not None:
                     routes.append(committed)
+                    from .steiner import pin_steiner_arrival_layers
+
+                    pin_steiner_arrival_layers(pad_objs, (i, j), committed)
                     # Collect grid cells from the routed segments so later
                     # edges can terminate early upon reaching this tree.
                     joined_cells = tree_cells.setdefault(target_root, set())
@@ -1456,6 +1538,12 @@ class NegotiatedRouter:
         info = get_info()
         if not info:
             return
+        # Issue #6369: remember each net's last search-failure code on the
+        # shared pathfinder so the saved board's ``net-status --why`` can tell
+        # a geometric give-up from a spent budget.
+        store = getattr(self.router, "search_failures_by_net", None)
+        if isinstance(store, dict) and info.get("failure_reason"):
+            store[int(failed_net)] = int(info["failure_reason"])
         if info.get("failure_reason") not in self._BLOCKER_FAILURE_REASONS:
             return
         blocking_net = int(info.get("blocking_via_net") or 0)
@@ -1530,7 +1618,10 @@ class NegotiatedRouter:
         routable = self.grid.get_routable_indices()
         for via in route.vias:
             gx, gy = self.grid.world_to_grid(via.x, via.y)
-            first, last = sorted(self.grid.layer_to_index(layer.value) for layer in via.layers)
+            # Issue #6502: the drilled barrel, not the logical transition.
+            first, last = sorted(
+                self.grid.layer_to_index(layer.value) for layer in via.drilled_layers
+            )
             for li in routable:
                 if first <= li <= last:
                     cell_set.add((gx, gy, li))
@@ -1868,8 +1959,10 @@ class NegotiatedRouter:
             for route in routes:
                 for via in route.vias:
                     total_vias += 1
-                    v_lo = min(via.layers[0].stack_order, via.layers[1].stack_order)
-                    v_hi = max(via.layers[0].stack_order, via.layers[1].stack_order)
+                    # Issue #6502: the drilled barrel, not the logical transition.
+                    d_lo, d_hi = via.drilled_layers
+                    v_lo = min(d_lo.stack_order, d_hi.stack_order)
+                    v_hi = max(d_lo.stack_order, d_hi.stack_order)
                     for layer_val in range(v_lo, v_hi + 1):
                         vias_on_layer.setdefault(layer_val, []).append((net_id, via))
 
@@ -1885,8 +1978,10 @@ class NegotiatedRouter:
             for route in extra_routes:
                 for via in route.vias:
                     total_vias += 1
-                    v_lo = min(via.layers[0].stack_order, via.layers[1].stack_order)
-                    v_hi = max(via.layers[0].stack_order, via.layers[1].stack_order)
+                    # Issue #6502: the drilled barrel, not the logical transition.
+                    d_lo, d_hi = via.drilled_layers
+                    v_lo = min(d_lo.stack_order, d_hi.stack_order)
+                    v_hi = max(d_lo.stack_order, d_hi.stack_order)
                     for layer_val in range(v_lo, v_hi + 1):
                         vias_on_layer.setdefault(layer_val, []).append((route.net, via))
 
@@ -2119,8 +2214,10 @@ class NegotiatedRouter:
                     # Iterate every layer the via spans -- a through-hole
                     # via on a 4-layer board can clip segments on any of
                     # the four layers it crosses.
-                    v_lo = min(via.layers[0].stack_order, via.layers[1].stack_order)
-                    v_hi = max(via.layers[0].stack_order, via.layers[1].stack_order)
+                    # Issue #6502: the drilled barrel, not the logical transition.
+                    d_lo, d_hi = via.drilled_layers
+                    v_lo = min(d_lo.stack_order, d_hi.stack_order)
+                    v_hi = max(d_lo.stack_order, d_hi.stack_order)
                     via_radius = via.diameter / 2
 
                     for layer_val in range(v_lo, v_hi + 1):
@@ -2559,6 +2656,7 @@ class NegotiatedRouter:
         per_net_timeout: float | None = None,
         progress_callback: ProgressCallback | None = None,
         net_names: dict[int, str] | None = None,
+        allow_trade: bool = False,
     ) -> bool:
         """Perform targeted rip-up of blocking nets and re-route.
 
@@ -2592,6 +2690,25 @@ class NegotiatedRouter:
             net_names: Optional net-id-to-name mapping used to resolve human
                 readable net names for the ``progress_callback`` payload.
                 Falls back to ``Net_<id>`` when missing or absent.
+            allow_trade: Issue #6342.  When ``True`` and the victim
+                (``failed_net``) re-routes fully but a displaced blocker
+                cannot re-land, keep the victim's copper instead of rolling
+                the whole transaction back: the blockers that could not
+                re-land are left unrouted for the caller's ordinary
+                failed-net recovery, which then routes them *around* the
+                victim.  The outcome is :data:`RIPUP_TRADED`.  Only a caller
+                that protects the victim from being ripped again for the same
+                blockers (and that keeps a best-state snapshot, so a losing
+                trade cannot survive to the end of the run) should opt in.
+                Default ``False`` is the pre-#6342 all-or-nothing rule.
+
+            The structured reason for the result is recorded on
+            :attr:`last_ripup_outcome` (a :class:`TargetedRipupOutcome`).
+
+            Issue #6342: when the victim fails while a corridor-reservation
+            window is open (the ripped blockers' C++-grid unmark was only
+            queued), the transaction is retried once with its own rip-ups
+            mirrored to the C++ grid immediately; see the method body.
 
         Returns:
             True if re-routing succeeded for all affected nets, False otherwise.
@@ -2633,18 +2750,135 @@ class NegotiatedRouter:
         """
         if ripup_history is None:
             ripup_history = {}
+        history: dict[int, int] = ripup_history
+
+        def _attempt() -> bool:
+            return self._targeted_ripup_txn(
+                failed_net,
+                blocking_nets,
+                net_routes,
+                routes_list,
+                pads_by_net,
+                present_cost_factor,
+                mark_route_callback,
+                ripup_history=history,
+                max_ripups_per_net=max_ripups_per_net,
+                per_net_timeout=per_net_timeout,
+                progress_callback=progress_callback,
+                net_names=net_names,
+                allow_trade=allow_trade,
+            )
+
+        history_before = {net: ripup_history.get(net) for net in blocking_nets}
+        queue_start = self._pending_cpp_unmarks()
+        success = _attempt()
+        if success or not self._cpp_rip_is_deferred():
+            return success
+        outcome = self.last_ripup_outcome
+        if outcome is None or outcome.reason != RIPUP_VICTIM_GEOMETRIC or not outcome.ripped:
+            return success
+
+        # Issue #6363: the first attempt's rollback discarded the victim's
+        # partial reroute, but inside the window that unmark was only queued,
+        # so the partial copper was still on the C++ grid -- foreign-hard for
+        # every blocker the retry re-lands.  Apply exactly those queued
+        # unmarks now.  The ripped-and-restored copper's queued unmarks (the
+        # #3438 corridor reservation) stay queued.
+        flush = getattr(self.grid, "flush_discarded_cpp_unmarks", None)
+        if callable(flush):
+            flush(queue_start)
+
+        # Issue #6342: inside an open corridor-reservation window
+        # (``RoutingGrid.begin_cpp_unmark_deferral``) a rip-up only QUEUES the
+        # C++-grid unmark, so the blockers this transaction just ripped stayed
+        # phantom-blocked on the grid the C++ A* searches, and the victim was
+        # rerouted against copper that was no longer there.  When that is how
+        # the victim failed, retry the transaction once with its own rip-ups
+        # mirrored to the C++ grid immediately.  The first attempt rolled back
+        # verbatim, so the retry starts from the same state; its rip-up budget
+        # charge replaces the first attempt's rather than adding to it.  A
+        # victim that succeeded the first time keeps exactly the pre-#6342
+        # behaviour (the reservation still protects the blockers' corridors).
+        for net, count in history_before.items():
+            if count is None:
+                ripup_history.pop(net, None)
+            else:
+                ripup_history[net] = count
+        with self.grid.cpp_unmark_immediate():
+            success = _attempt()
+        if self.last_ripup_outcome is not None:
+            self.last_ripup_outcome = dataclass_replace(self.last_ripup_outcome, cpp_retry=True)
+        return success
+
+    def _pending_cpp_unmarks(self) -> int:
+        """Queued C++ unmarks in the open window (0 without one)."""
+        count = getattr(self.grid, "pending_cpp_unmark_count", None)
+        return int(count()) if callable(count) else 0
+
+    def _cpp_rip_is_deferred(self) -> bool:
+        """True when a rip-up's C++-grid unmark would be queued, not applied.
+
+        That is: a paired C++ grid exists, a corridor-reservation window is
+        open, and the grid can suspend it (``cpp_unmark_immediate``).
+        """
+        grid = self.grid
+        return (
+            getattr(grid, "_cpp_grid", None) is not None
+            and bool(getattr(grid, "_cpp_unmark_deferred", False))
+            and callable(getattr(grid, "cpp_unmark_immediate", None))
+        )
+
+    def _targeted_ripup_txn(
+        self,
+        failed_net: int,
+        blocking_nets: set[int],
+        net_routes: dict[int, list[Route]],
+        routes_list: list[Route],
+        pads_by_net: dict[int, list[Pad]],
+        present_cost_factor: float,
+        mark_route_callback: Callable,
+        ripup_history: dict[int, int] | None = None,
+        max_ripups_per_net: int = 3,
+        per_net_timeout: float | None = None,
+        progress_callback: ProgressCallback | None = None,
+        net_names: dict[int, str] | None = None,
+        allow_trade: bool = False,
+    ) -> bool:
+        """The :meth:`targeted_ripup` transaction body (see there)."""
+        if ripup_history is None:
+            ripup_history = {}
 
         # Filter out nets that have been ripped up too many times
         # This prevents infinite loops where nets keep displacing each other
         nets_to_ripup: set[int] = set()
+        dropped: set[int] = set()
         for net in blocking_nets:
             if ripup_history.get(net, 0) < max_ripups_per_net:
                 nets_to_ripup.add(net)
                 ripup_history[net] = ripup_history.get(net, 0) + 1
+            else:
+                dropped.add(net)
+        ripped_t = tuple(sorted(nets_to_ripup))
+        dropped_t = tuple(sorted(dropped))
+
+        def _record(
+            reason: str,
+            failed_sibling: int | None = None,
+            traded: tuple[int, ...] = (),
+        ) -> None:
+            self.last_ripup_outcome = TargetedRipupOutcome(
+                reason=reason,
+                failed_net=failed_net,
+                ripped=ripped_t,
+                dropped=dropped_t,
+                failed_sibling=failed_sibling,
+                traded=traded,
+            )
 
         if not nets_to_ripup:
             # All blocking nets have reached their ripup limit
             # Fall back to normal routing with high congestion cost
+            _record(RIPUP_BUDGET_EXHAUSTED)
             return False
 
         # Issue #3470: snapshot the pre-rip-up state for the failed net and
@@ -2763,10 +2997,15 @@ class NegotiatedRouter:
         # snapshotted pre-rip-up routes: zero A* time, zero collateral.
         if not failed_net_success:
             _rollback_to_snapshot()
+            _record(RIPUP_VICTIM_GEOMETRIC)
             return False  # geometric blocker -- caller should escalate
 
         # Re-route the displaced nets
         success = failed_net_success  # Issue #858: Start with failed net success
+        # Issue #6342: with ``allow_trade`` a blocker that cannot re-land is
+        # left unrouted rather than rolling the victim back.
+        first_failed_sibling: int | None = None
+        traded: list[int] = []
         # Sort for deterministic progress ordering (set iteration is unordered).
         sibling_order = sorted(nets_to_ripup)
         for sibling_index, net in enumerate(sibling_order, start=2):
@@ -2791,6 +3030,20 @@ class NegotiatedRouter:
                     # whole transaction back so the board state is exactly
                     # what it was before this rip-up attempt.  The wall
                     # clock spent is lost but the routing state is not.
+                    if first_failed_sibling is None:
+                        first_failed_sibling = net
+                    if allow_trade:
+                        # Issue #6342: keep the victim.  Whatever partial
+                        # copper the blocker found is discarded (a partial
+                        # route is stranded-stub copper, #3470) and the net
+                        # is left with no routes for the caller's ordinary
+                        # failed-net recovery to route around the victim.
+                        if routes:
+                            for route in routes:
+                                self.grid.unmark_route(route)
+                        net_routes[net] = []
+                        traded.append(net)
+                        continue
                     if routes:
                         # Stage the degraded routes so the rollback removes
                         # them from the grid/routes_list uniformly.
@@ -2799,8 +3052,13 @@ class NegotiatedRouter:
                             self.grid.mark_route_usage(route)
                             routes_list.append(route)
                     _rollback_to_snapshot()
+                    _record(RIPUP_SIBLING_FAILED, failed_sibling=net)
                     return False
 
+        if traded:
+            _record(RIPUP_TRADED, failed_sibling=first_failed_sibling, traded=tuple(traded))
+        else:
+            _record(RIPUP_COMMITTED)
         return success
 
     def find_blocking_nets_for_connection(

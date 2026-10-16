@@ -1,5 +1,5 @@
 {
-  "pcb": "INCOMPLETE_PCB",
+  "pcb": "incomplete.kicad_pcb",
   "connectivity_model": "strict",
   "summary": {
     "stuck_nets": 2,

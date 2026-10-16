@@ -13,12 +13,12 @@
       "size": 1591
     },
     "assembly-back.pdf": {
-      "sha256": "f18a403d7f0e5c6dfca090df59f076789d06b712f1d698f03d0c724531bdc2f3",
-      "size": 110912
+      "sha256": "f6c1d5815cbaf1a05c350590a5ee17e9a8dbf2c9b25d9ebbf77869c0155a7efd",
+      "size": 106643
     },
     "assembly-front.pdf": {
-      "sha256": "d9430611b0e50677ba6b913b7dfd87ed4983191a90b3aeeb3682f9b3fe1dddb9",
-      "size": 167155
+      "sha256": "9dff7451d0e7f5f797adf0071e2fa618f95036bd9bf64d9f29734febf96e14c6",
+      "size": 162153
     },
     "bom_jlcpcb.csv": {
       "sha256": "6e04b5c78e81ebd85f18e72142d21906dda4165d5ca9b7f7d6159729b54c5506",
@@ -33,8 +33,8 @@
       "size": 2559
     },
     "design-source.zip": {
-      "sha256": "4c2c3aafe4ae7af3bb89edc214536f995e79a58b110b094db33fd372feaba0a9",
-      "size": 359126
+      "sha256": "5ac9420db1d3016d76076bee4db364709353ea3415a52fd17bd036bd529e7271",
+      "size": 359573
     },
     "firmware/Makefile": {
       "sha256": "f105bf145347705a625a825aad34614c3e4001c7260793991f68cca37587516c",
@@ -53,8 +53,8 @@
       "size": 3516
     },
     "gerbers/gerbers.zip": {
-      "sha256": "5199cc16a40dac7068ad05aad7afecd9d1854f7f0e25a46b319a68aea1eea996",
-      "size": 294370
+      "sha256": "0fe2464c94f6914f0361cbbba1afea78d65794855e300456cef0c6681cdddc62",
+      "size": 270690
     },
     "images/assembly.png": {
       "sha256": "56e07c74420ae321cbca7dd1e6b55dca323e3f65523ae66c82c27913820a3445",
@@ -97,15 +97,15 @@
       "size": 4103
     },
     "kicad_project.zip": {
-      "sha256": "52e07960800096e7c74cae3c8585b23bf1a5defafe6373bd6bc287432fcb22cd",
-      "size": 546633
+      "sha256": "c1ee19148479d420be6286294521edf52a7af71ad27345f952d5dbfa22025173",
+      "size": 511224
     },
     "lvs.json": {
       "sha256": "52fed944df95bc4d3650b2774ce6b714e731e310d9d9a761553b25055b3e1a25",
       "size": 215
     },
     "native-drc.json": {
-      "sha256": "3ebacdeb5abaecf41f218fd65fb65a5d37857479245838e568d13a5f3f0bb541",
+      "sha256": "604449a31cd023f804af85b1ad66f21f364193aad574acc6e65487c1784a985c",
       "size": 1214
     },
     "native-erc.json": {

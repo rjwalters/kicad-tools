@@ -20,7 +20,7 @@ inside a key use RFC 3339 UTC with nanosecond precision.
 
 | Trace | Trace ID is derived from |
 |-------|--------------------------|
-| Issue story (`loom.story.trace`) | the repo's GitHub numeric `repo_id` and the issue number: `loom-story/v1:github:<repo_id>:<issue>` (key version D32 v1, #9068) — stable across repo renames and transfers; see [`tracing.md`](tracing.md) |
+| Issue story (`loom.story.trace`) | the repo's GitHub numeric `repo_id` and the issue number: `loom-story/v1:github:<repo_id>:<issue>` (story key version v1, #9068) — stable across repo renames and transfers; see [`tracing.md`](tracing.md) |
 | Sweep outside a story (`loom.execution.trace`) | lowercased repo key (`$LOOM_REPO`, else the checkout's GitHub `owner/repo`, else the workspace basename), sweep id — used for PR-set sweeps and checkouts with no GitHub origin. The span's `loom.repo` is that repo spelled as GitHub spells it (#10637); the key is its ASCII lowercase |
 | Role-runner invocation (`loom.execution.trace`) | the same repo key, and the execution id `role-<role>-<start instant>` — carried as `loom.repo` (the key is its ASCII lowercase) and `loom.sweep_id` on the `loom.role_attempt` root. The role is in the key so two roles starting in the same instant differ; the repo key (not a host id) scopes it, because the span carries the repo but no host attribute, and one repo's role runner ticks each role serially |
 | Dispatch tick (`loom.dispatch.tick`) | tick start instant |
@@ -28,6 +28,7 @@ inside a key use RFC 3339 UTC with nanosecond precision.
 | Rate-limit trip (`loom.ratelimit.trip`) | the tripping job (`loom.ratelimit.source`) and the trip instant (#10022) |
 | Reader withdrawal (`forge.reader.withdrawn`) | the reader App (`forge.reader.app`), the owner and resource withdrawn (`forge.reader.owner`, `forge.reader.resource`) and the withdrawal instant (W4-A) |
 | Read-pool spill-latch transition (`forge.reader.spill`) | the repo (`forge.spill.owner_repo`), resource, home reader, mode and the transition instant (W4-B) |
+| Host-side build-gate run (`build_gate.run`) | the stage (`loom.build_gate.stage`), the start instant and the process id; a child of the ambient execution span when pre-flight runs inside a traced sweep, else its own root (#11690) |
 | `gh` invocation with no parent (`loom.github.invoke`, span `invoke github`) | `github.operation`, start instant, and `github.invocation` (`<pid>.<seq>`, so two calls in one clock tick differ); with a parent it is that span's child, keyed by the same facts (#9985) |
 | CI run/job (`loom.ci.*`) | repo, run id, attempt (job: job id) — [`ci-observability.md`](ci-observability.md) |
 
@@ -37,7 +38,7 @@ Its span ID is derived from the story root and the sweep id
 adds a `loom.role_attempt` span to that story (#9168) whose ID is derived from
 the story root, `loom.role_tick`, the tick's execution id (`loom.sweep_id`)
 and the target (`pr:<loom.pr_number>`, else `issue:<loom.issue>`).
-The story's `story.*` phase spans are the 2am reconciler's, with D32 IDs keyed
+The story's `story.*` phase spans are the 2am reconciler's, with story-key IDs keyed
 by a GitHub timeline event (see [`tracing.md`](tracing.md)); Loom mints none.
 
 **`loom.attempt`** has one meaning everywhere: the 1-indexed ordinal of a span
@@ -59,7 +60,7 @@ superseded mid-review, or human-merged with no verdict). So ordinals can have
 gaps, are never reissued, and are never renumbered (a span aged out of
 retention also leaves a gap). Source of truth: 2AMLogic/2am
 `infra/signoz/docs/story-trace.md` §"Review rounds, rework and operator holds
-(v1)" and the D32 amendment of 2026-09-28 in `infra/ops/decisions.md`.
+(v1)", which carries the 2026-09-28 amendment.
 
 A child span's ID is derived from its trace ID, its parent span ID, its span
 name, its `loom.role` (if any), its `loom.tool.name` (if any), and its start

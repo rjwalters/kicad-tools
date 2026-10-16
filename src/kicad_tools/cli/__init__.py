@@ -482,6 +482,10 @@ def _dispatch_command(args) -> int:
             sub_argv.append("--verbose")
         if hasattr(args, "net_status_why") and args.net_status_why:
             sub_argv.append("--why")
+        if getattr(args, "net_status_crossings", False):
+            sub_argv.append("--crossings")
+        if getattr(args, "net_status_signal_layers", None):
+            sub_argv.extend(["--signal-layers", str(args.net_status_signal_layers)])
         if hasattr(args, "net_status_strict") and args.net_status_strict:
             sub_argv.append("--strict")
         if hasattr(args, "net_status_legacy_proximity") and args.net_status_legacy_proximity:
@@ -574,6 +578,11 @@ def _dispatch_command(args) -> int:
 
     elif args.command == "screenshot":
         return _run_screenshot_command(args)
+
+    elif args.command == "board-view":
+        from .commands.board_view import run_board_view_command
+
+        return run_board_view_command(args)
 
     elif args.command == "report":
         return _run_report_command(args)

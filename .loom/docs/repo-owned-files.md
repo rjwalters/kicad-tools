@@ -78,6 +78,46 @@ and for the category toggle.
 Commit `.loom/resync-ignore` — it is repo configuration, and the installer
 never removes it.
 
+### Recording a pin's fork point (`.loom/resync-pin-base`)
+
+A pin says a file is protected, not what upstream revision it forked from, so
+"can this pin be lifted yet?" used to mean replaying upstream history until a
+revision matched the local copy. Create pins with the supported operation
+instead of hand-editing the list (#8726):
+
+```bash
+loom-daemon resync-pin add roles/curator.md            # pin + record fork point
+loom-daemon resync-pin add roles/curator.md --base <rev>   # legacy pin: backfill
+loom-daemon resync-pin status                          # per-pin drift + review diff
+```
+
+`add` appends the path to `.loom/resync-ignore` (canonical label form, written
+**first** so protection never depends on the rest) and records one tab-separated
+line in the **additive sidecar** `.loom/resync-pin-base`: pin label, full
+upstream Loom commit, the source path at that commit (`roles/*` maps to
+`defaults/roles/*`, `commands/loom/*` to `defaults/.claude/commands/loom/*`, …,
+with in-tree symlinks resolved), and how the commit was chosen. Commit the
+sidecar with the pin list. `status` prints `N upstream commit(s), +A/-D lines`
+and the exact `git -C <loom-clone> diff <base> <upstream> -- <path>` to review.
+
+- **Which commit.** `--base <rev>` if given; otherwise, for a *new* pin only,
+  `loom_commit` from `.loom/install-metadata.json` — the upstream revision the
+  installed copy was last synced from. It is the Loom *source* revision, never
+  this repo's HEAD. An already-pinned path needs `--base`: resync skipped it, so
+  install metadata says nothing about its fork point.
+- **Verified or not recorded.** The commit must resolve in a Loom source
+  checkout (`--source`, else `.loom/loom-source-path`, else this repo when it is
+  Loom's own source) and the source path must exist there. Otherwise the pin is
+  still written, nothing is recorded, and the reason is printed. `status` never
+  reports an unknown or unresolvable base as zero drift.
+- **Never replaced implicitly.** Resync does not read or write the sidecar, and
+  a repeated `add` keeps an existing base; pass `--replace-base` after rebasing
+  your local patch onto a newer upstream.
+- **Additive.** The pin syntax and both readers (`is_ignored()` in
+  `resync-installed.sh`, `parse_resync_ignore` in Rust) are unchanged; pins with
+  no recorded base keep working and report `base UNKNOWN`. Without a daemon that
+  has this command, edit `.loom/resync-ignore` by hand as before.
+
 ### When you do and do not need it
 
 - **A file Loom never ships** (`hooks/post-worktree.sh`, a project helper

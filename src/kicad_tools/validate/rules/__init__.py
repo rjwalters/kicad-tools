@@ -17,6 +17,7 @@ if TYPE_CHECKING:
     from .diffpair_clearance_intra import DiffPairClearanceIntraRule
     from .diffpair_length_skew import DiffPairLengthSkewRule
     from .diffpair_routing_continuity import DiffPairRoutingContinuityRule
+    from .diffpair_uncoupled_length import DiffPairUncoupledLengthRule
     from .dimensions import DimensionRules
     from .edge import EdgeClearanceRule
     from .impedance import ImpedanceRule, NetImpedanceSpec
@@ -34,6 +35,7 @@ if TYPE_CHECKING:
     from .single_pad_net import SinglePadNetRule
     from .solder_mask import SolderMaskPadRules
     from .via_in_pad import ViaInPadRule
+    from .via_type_capability import ViaTypeCapabilityRule
     from .via_under_body import ViaUnderBodyRule
     from .width_consistency import WidthConsistencyRule
     from .zone_fill import IsolatedCopperRule, ZoneFillRule
@@ -51,6 +53,7 @@ _EXPORT_MODULES: dict[str, str] = {
     "DiffPairClearanceIntraRule": ".diffpair_clearance_intra",
     "DiffPairLengthSkewRule": ".diffpair_length_skew",
     "DiffPairRoutingContinuityRule": ".diffpair_routing_continuity",
+    "DiffPairUncoupledLengthRule": ".diffpair_uncoupled_length",
     "DimensionRules": ".dimensions",
     "EdgeClearanceRule": ".edge",
     "ImpedanceRule": ".impedance",
@@ -67,6 +70,7 @@ _EXPORT_MODULES: dict[str, str] = {
     "SinglePadNetRule": ".single_pad_net",
     "SolderMaskPadRules": ".solder_mask",
     "ViaInPadRule": ".via_in_pad",
+    "ViaTypeCapabilityRule": ".via_type_capability",
     "ViaUnderBodyRule": ".via_under_body",
     "WidthConsistencyRule": ".width_consistency",
     "IsolatedCopperRule": ".zone_fill",
@@ -84,6 +88,7 @@ __all__ = [
     "DiffPairClearanceIntraRule",
     "DiffPairLengthSkewRule",
     "DiffPairRoutingContinuityRule",
+    "DiffPairUncoupledLengthRule",
     "DimensionRules",
     "EdgeClearanceRule",
     "ImpedanceRule",
@@ -94,6 +99,7 @@ __all__ = [
     "SinglePadNetRule",
     "SolderMaskPadRules",
     "ViaInPadRule",
+    "ViaTypeCapabilityRule",
     "ViaUnderBodyRule",
     "WidthConsistencyRule",
     "check_all_silkscreen",

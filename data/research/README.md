@@ -13,13 +13,15 @@ one:
 | **`data/research/`** (this directory) | The committed artifacts: datasets, caches, fitted models, plots, weight files. |
 | `docs/research/` | The write-ups: method, results, caveats, and the decision each study drove. |
 
-Three independent datasets live here. They share nothing but a parent directory.
+Four independent datasets live here. They share nothing but a parent directory.
 
 | Dataset | Issue | Question | Write-up |
 |---|---|---|---|
 | [`fom_phase0/`](fom_phase0/) | #3187 | Does any learnable signal exist between cheap placement features and binary manufacturability? | [`docs/research/learned_fom_phase0.md`](../../docs/research/learned_fom_phase0.md) |
 | [`fom_weights/`](fom_weights/) | #3188 | What soft-term weights make the FOM rank a committed placement above its perturbations? | [`docs/research/fom_calibration.md`](../../docs/research/fom_calibration.md) |
 | [`placement_score/`](placement_score/) | #5948, #6233 | Do pre-route placement signals (RUDY, HPWL, the `optimize-placement` cost) pick the more routable of two same-board placements? | [`docs/research/placement_score_calibration.md`](../../docs/research/placement_score_calibration.md) |
+| [`expand_route_shrink/`](expand_route_shrink/) | #6310 | Does board 03's rigid 1.5x route survive one shrink back to 1x, keeping `USB_D+`, with repair limited to trace ends at pads? | [`docs/research/expand-route-shrink-experiment.md`](../../docs/research/expand-route-shrink-experiment.md) § "The one shrink" |
+| [`expand_route_shrink/`](expand_route_shrink/) | #6312 | Does spreading board 05's placement, with decoupling held rigid to its IC, let the shipped router finish more nets than at 1x? | [`docs/research/expand-route-shrink-experiment.md`](../../docs/research/expand-route-shrink-experiment.md) § "Rigid mode on the partial boards" |
 
 Interactive companions for both live in [`notebooks/`](../../notebooks/).
 
@@ -204,3 +206,58 @@ perturbation). It carries the pre-route `signals`, the `route` outcome
 (signal-net completion) and `check` (error counts by rule). The `label_pcb`
 paths point at a deleted scratch tree (`--cleanup`) and are kept only as
 provenance.
+
+---
+
+## `expand_route_shrink/` — rigid-cluster placement expansion on board 05
+
+Harness output for issue #6312: board 05 routed at 1x and with its placement
+spread 1.1x to 1.5x, `uniform` and `rigid`, plus the no-route probes that say
+how to read those rows. Every file is written by
+`scripts/research/expand_route_experiment.py` and is committed as the harness
+wrote it:
+
+| File | Written by |
+|---|---|
+| `05_off_s42.json` | `route`, seed 42, placement-delta feedback off: 1x, `uniform` and `rigid` at 1.25x and 1.5x. |
+| `05_off_s42_rep.json` | `route`: the 1x row again at seed 42 (does a row reproduce?). |
+| `05_off_s43.json` | `route`, seed 43: 1x and `rigid` 1.5x (does the seed change the route?). |
+| `05_off_s42_matched.json` | `route`, seed 42: `uniform` 1.1x and `rigid` 1.1x, 1.2x, 1.4x, the scales at which the driver IC's grid zone matches 1x. |
+| `05_off_s42_rep2.json` | `route`: `rigid` 1.25x again at seed 42. |
+| `05_on_s42.json` | `route`, seed 42, feedback at its default: 1x and `uniform` 1.5x. The 1.5x row is a hard-deadline artifact. |
+| `05_grid_plan_scan.json` | `plan` (`kct route --dry-run`): the grid plan, every fine zone, at 1.0x to 1.5x in steps of 0.05, both modes. |
+| `clusters_a6_s2_g3.json`, `clusters_a3_s2_g3.json`, `clusters_a3_s2_g5.json` | `clusters`: rigid-cluster membership on boards 03, 05 and chorus-test under three rules (`anchor_min_pads`, `satellite_max_pads`, `max_gap_mm`). |
+| `renders/*.png` | `kct board-view net` on routed boards of the seed-42 run; the five the write-up cites. |
+
+The write-up's tables are the output of the harness's `summary` subcommand on
+the six `05_*` route files (the exact command is in the write-up). Paths
+inside the JSON (`input`, `routed`, `cmd`) point at a deleted scratch tree and
+are provenance only; the routed boards are not committed. The chorus rows of
+the `clusters_*` files were computed from a fixture that lives in a sibling
+repository. Rows written before the harness recorded `zone_nets` lack that
+key; pass `--zone-nets GND,+5V,V3P3,VIN` to `summary` for those.
+
+One row takes 9 to 20 minutes; the whole set was about four hours of serial
+routing on a shared 8-CPU host. Re-running will not reproduce the copper
+exactly even at the same seed (issue #6329).
+
+### Board 03 shrink probe (issue #6310)
+
+The `03_lattice_*` files are committed as written, under the lattice
+protocol (`--route-engine lattice --strategy basic --layers 4
+--no-auto-layers --deterministic-budget --per-net-iterations 1000000
+--no-placement-delta-feedback`, seed 42, pinned 0.05 mm grid) on
+`origin/main` at `b9041b37d`:
+
+| File | Written by |
+|---|---|
+| `03_lattice_1x_s42.json` | `expand_route_experiment.py route`: the 1x row (`--scales 1.0 --modes rigid`), 900 s. |
+| `03_lattice_uniform15_s42.json` | `route`: `uniform` 1.5x, 900 s. |
+| `03_lattice_rigid15_s42.json` | `route`: `rigid` 1.5x, 900 s. This is the route the shrink starts from. |
+| `03_lattice_rigid15_s42_rep.json` | `route`: `rigid` 1.5x again, 2400 s budget. The copper matched the first run, apart from UUIDs. |
+| `03_lattice_rigid15_s42_rep_t900.json` | `route`: `rigid` 1.5x again, 900 s budget. Hit the wall-clock deadline on a loaded host. |
+| `03_lattice_shrink_s42.json` | `shrink_experiment.py --json`: the inverse-map census (`s0_naive`), snap repair (`s1_snap`) and the rip-and-re-route (`s2_reroute`), each graded. 2400 s repair budget. |
+| `03_lattice_shrink_s42_t900.json` | The same with a 900 s repair budget. The repair hit the deadline, and `s2_reroute` has no grade. |
+
+The exact commands are in the write-up. The grid-engine first run of #6310
+has no committed data; the write-up says so.

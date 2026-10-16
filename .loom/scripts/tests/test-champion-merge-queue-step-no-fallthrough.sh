@@ -79,6 +79,7 @@ run_case() {
 case "\$*" in
   "forge merge-queue step "*) cat "$TMP/step.out"; cat "$TMP/step.err" >&2; exit $3 ;;
   "forge merge-queue mode") cat "$TMP/mode.out"; exit ${5:-0} ;;
+  "champion-hold classify "*) echo "LOOM-CHAMPION-HOLD state=clear pr=42 detail=-"; exit 0 ;; # #11932
 esac
 echo "unexpected loom-daemon \$*" >&2; exit 99
 S

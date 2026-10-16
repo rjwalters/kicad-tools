@@ -21,6 +21,7 @@ approximation with bounded runtime.
 
 from __future__ import annotations
 
+import dataclasses
 import math
 from typing import TYPE_CHECKING, Any, Callable
 
@@ -167,6 +168,39 @@ def make_blocked_cell_predicate(
             return False
 
     return _point_blocked
+
+
+def pin_steiner_arrival_layers(
+    pad_objs: list[Pad],
+    edge: tuple[int, int],
+    route: Any,
+) -> None:
+    """Pin layer-agnostic Steiner pads to the layer a routed edge reached them on.
+
+    Issue #6634: virtual Steiner pads accept arrival on any routable
+    layer.  Once the first incident edge has been routed, the junction
+    exists on that layer, so later edges must start there (any
+    transition is then a genuine, A*-costed via).  Mutates ``pad_objs``
+    in place; unrouted edges and pads without an endpoint match are left
+    agnostic.
+    """
+    segments = getattr(route, "segments", None) or []
+    if not segments:
+        return
+    for k in edge:
+        pad = pad_objs[k]
+        if not getattr(pad, "layer_agnostic", False):
+            continue
+        best_layer = None
+        best_d = float("inf")
+        for seg in segments:
+            for ex, ey in ((seg.x1, seg.y1), (seg.x2, seg.y2)):
+                d = abs(ex - pad.x) + abs(ey - pad.y)
+                if d < best_d:
+                    best_d, best_layer = d, seg.layer
+        # Endpoint must actually be at the pad (snap tolerance).
+        if best_layer is not None and best_d <= 0.5:
+            pad_objs[k] = dataclasses.replace(pad, layer=best_layer, layer_agnostic=False)
 
 
 def _manhattan(x1: float, y1: float, x2: float, y2: float) -> float:
@@ -626,6 +660,7 @@ def build_rsmt(
             through_hole=False,
             drill=0.0,
             steiner_point=True,
+            layer_agnostic=True,
         )
         extended_pads.append(steiner_pad)
 

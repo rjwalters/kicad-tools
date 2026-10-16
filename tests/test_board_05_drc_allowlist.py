@@ -84,8 +84,14 @@ def routed_pcb_path() -> Path:
 
 
 # Issue #5044: the redesigned board landed in d95b6eff with a clean
-# manufacturing check and no tolerance entry. Keep the active board at strict
-# zero; the historical DRV8301 geometry lives in dedicated regression fixtures.
+# manufacturing check and no tolerance entry; the historical DRV8301 geometry
+# lives in dedicated regression fixtures.
+#
+# Issue #6390 declared the router's own net classes in the routed sidecars,
+# exposing 27 ``netclass_clearance_copper`` violations of those classes in the
+# committed copper.  Issue #6395 repaired that copper (smaller fan-out vias,
+# shifted stitch vias, a VM run moved off the C8-1 pad), so the entry is gone
+# and the strict-zero ``None`` is restored.
 BOARD_05_EXPECTED_TOLERANCE: int | None = None
 
 
@@ -275,5 +281,6 @@ class TestBoard05DRCAllowlistGuard:
         )
 
     def test_allowlist_value_matches_documented_floor(self, board_05_allowlist_value: int) -> None:
-        """The redesigned active board must retain its strict-zero gate."""
-        assert board_05_allowlist_value == 0
+        """The redesigned active board keeps its strict-zero gate, except for
+        the #6390-exposed net-class violations tracked in #6395."""
+        assert board_05_allowlist_value == (BOARD_05_EXPECTED_TOLERANCE or 0)

@@ -17,8 +17,7 @@ field-by-field in [`telemetry-schema.md`](telemetry-schema.md) under
 ## Why a merge rule at all
 
 Every host publishes its own plan. A row's `position` is a 1-based index into
-*that host's* shaped pass-2 order, after its repo-slice and per-repo-cap
-shaping — so two hosts' positions are not on one scale. Host A with three
+*that host's* shaped pass-2 order, after its per-repo-cap shaping — so two hosts' positions are not on one scale. Host A with three
 repos and host B with thirty both have a `position: 1`, and they mean
 completely different things.
 
@@ -32,26 +31,60 @@ hosts by whichever happened to see more work.
 
 ## The rule
 
-### 1. Fold by `repo#issue`
+### 1. Fold by `repo#issue` + `step`
 
 Rows are grouped by `owner/repo` plus issue number — not the bare issue
-number, which collides across repos. A row with no repo or issue (a private
-row withheld from the public dashboard view) has nothing to fold on and stays
-one item per row.
+number, which collides across repos — plus the row's **`step`** (#11910).
+A row with no repo or issue (a private row withheld from the public
+dashboard view) has nothing to fold on and stays one item per row.
+
+`step` is the role session that would advance the item: the step-dispatch
+design ([`docs/design/work-finder-step-dispatch.md`](https://github.com/rjwalters/loom/blob/main/docs/design/work-finder-step-dispatch.md)
+§12, #11894) dispatches one step of one item at a time, so the same issue can
+be a Builder row on one host and a Judge row on another. Those are two
+pieces of work and fold to two fleet items; only rows at the same step fold
+together.
+
+- **Values** are the classifier's `Step` names
+  (`loom-daemon/src/work_finder/step_item.rs`): `curator`,
+  `curator_keep_or_close`, `champion_promote`, `champion_reevaluate`,
+  `builder`, `judge`, `doctor`, `champion_merge`,
+  `champion_hold_reevaluate`.
+- **An absent `step` is `builder`.** Every plan published before step
+  dispatch was a Builder plan, so an older host's row folds into the same
+  item as a newer host's explicit `builder` row. A host that does not set
+  the field omits it from the wire (never `null`), so older readers parse
+  newer plans unchanged: the change is additive, with no schema bump.
+- **An unknown step name** (a newer daemon's step this build does not know)
+  is kept verbatim and is its own fold key. It never merges into `builder`
+  or into another step.
+- Each merged item carries its resolved `step`; every observation under it
+  (the primary and `others`) is that host's row unchanged.
+
+The work finder's step tick sets `step` on every row it publishes: each
+row is one drawn `(item, step)` (`step_dispatch/tick.rs`, #11909).
+
+The dashboard port (`mergeFleetQueue`, below) folds by the same
+`repo#issue` + `step` key and breaks the final ordering tie on `step`, as
+the Rust merge does. The fixture's last case pins
+that tie-break: one host, one issue at two steps, the same state and
+position.
 
 ### 2. Pick the primary
 
 The **primary** is the observation that classifies the item for the fleet.
-Among the hosts that list the same issue, in order:
+Among the hosts that list the same issue at the same step, in order:
 
 1. **Most advanced `plan_state`** — `running` > `next` > `queued` >
    `blocked`. An `unknown` state (a newer daemon's state this build does not
    know) ranks last, so it never displaces a state that is understood.
 2. **The shard owner** — the host whose `plan.shard.host_shard` equals the
-   row's `owning_shard`. That is the host whose job the issue actually is
-   (see [`dispatcher-repo-sharding.md`](dispatcher-repo-sharding.md)). An
-   unsharded host owns nothing, so an unsharded fleet falls straight through
-   to the next key.
+   row's `owning_shard`: the host the role-runner ring (#6374) assigns the
+   repo to. Dispatch no longer prefers that host (the repo slice is retired,
+   see [`dispatcher-repo-sharding.md`](dispatcher-repo-sharding.md), #11682),
+   but the ring still gives every repo exactly one owner, so the rule still
+   picks one host deterministically. An unsharded host owns nothing, so an
+   unsharded fleet falls straight through to the next key.
 3. **Lower `position`** — within one state band, the host that has it nearer
    the front of its own plan. A row with no position (outside that host's
    plan this tick) sorts behind every row that has one.
@@ -83,7 +116,7 @@ fleet order:     #600 (a, round 0), #700 (b, round 0), #601 (a, round 1), #602 (
 
 ## What the merge deliberately does not compare
 
-**`workspace_priority` is per-host and unsynced.** It comes from each host's
+**`workspace_weight` is per-host and unsynced.** It comes from each host's
 own `.loom/config.json`, so host A's `priority: 100` and host B's
 `priority: 100` are two unrelated operators numbering their own repos.
 Comparing them across hosts would let one host's local numbering silently
@@ -114,14 +147,20 @@ it:
 - `2AMLogic/loom-ui:web/src/workQueue.ts` — `mergeFleetQueue`, over the per-host
   `queue.snapshot` records the fleet backend stores.
 
-They are pinned to the same JSON fixture,
-`loom-daemon/tests/fixtures/dispatch-plan-merge.json`, which
-`loom-daemon/src/work_finder/dispatch_plan_merge_tests.rs` reads with
-`include_str!` and `loom-ui:web/test/workQueue.test.ts` pins a copy of. Neither
-side owns the fixture: a change to the rule has to change the fixture, and
-that fails the *other* language's test until it is ported too. (The same
-cross-language fixture pattern as
-`loom-daemon/tests/fixtures/sweep-identity.json`.)
+They are pinned to the same JSON fixture, kept as two identical copies:
+
+- `loom-daemon/tests/fixtures/dispatch-plan-merge.json`, which
+  `loom-daemon/src/work_finder/dispatch_plan_merge_tests.rs` reads with
+  `include_str!`;
+- the dashboard's TypeScript twin keeps its own copy beside its
+  `mergeFleetQueue` test. That port carries the full merge rule, `step`
+  included; before it, the port folded by `repo#issue` alone and pinned no
+  fixture.
+
+The two copies must stay byte-identical. Neither side owns the fixture: a
+change to the rule changes it in both repos, and fails the *other*
+language's test until it is ported too. (The same cross-language fixture
+pattern as `loom-daemon/tests/fixtures/sweep-identity.json`.)
 
 **To change the rule**: edit the fixture case that pins the behaviour, then
 make both implementations agree with it, then update this document. Do not

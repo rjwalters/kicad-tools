@@ -32,7 +32,7 @@ body hash H1 and is never revised:
 |---|---|---|---|---|---|---|
 | 1 | no (H1 unseen) | 0 | 0 | 0 | evaluate → reject → post "Epic Needs Revision" carrying `VERDICT_MARKER` + `epic-unrevised-skips:H1:0` | 1 |
 | 2 | yes (H1) | 1 | 0 | 1 < 2 | silent skip; `PATCH` the tally to `1` | 0 |
-| 3 | yes (H1) | 1 | 1 | 2 ≥ 2 | `ESCALATE_UNREVISED=yes` → Step 4 escalation → `loom:operator-only` | 1 (escalation) |
+| 3 | yes (H1) | 1 | 1 | 2 ≥ 2 | `ESCALATE_UNREVISED=yes` → Step 4 escalation → `loom:operator` | 1 (escalation) |
 | 4+ | — | — | — | — | `ALREADY_ROUTED=yes` drops it from every future pass | 0 |
 
 Invariants a future edit must preserve:
@@ -52,23 +52,23 @@ Invariants a future edit must preserve:
   declines to re-apply one a human removed.)
 - **A human hold ends the pass before any tally (#7734).** `ALREADY_ROUTED` is
   computed from the same three labels 0c's close-branch criterion 3 refuses to
-  close past — `loom:operator-only`, `loom:blocked`, `loom:operator` — never from
-  `loom:operator-only` alone. `loom:blocked` and `loom:operator` are an operator's
-  park; the escalation must never re-apply `loom:operator-only` on top of one.
+  close past — `loom:operator`, `loom:blocked`, `loom:frozen` — never from
+  `loom:operator` alone. `loom:blocked` and `loom:frozen` are parks too; the
+  escalation must never re-apply `loom:operator` on top of one.
   Narrowing the set back to a single label reintroduces the incident.
 - **An un-park is a ruling on the current revision (#7921).** When
-  `loom:operator-only` was removed after this revision's own verdict comment was
+  `loom:operator` was removed after this revision's own verdict comment was
   posted, `OPERATOR_RULED=yes` stands the epic down with no tally and no
   escalation. The comparison is against the verdict comment's `created_at` —
   never `updatedAt`, never the escalation comment — so a later revision (new
   hash, new verdict, newer than any old un-park) resumes the ladder on its own
   findings. The `unlabeled` event's actor is not inspected, on purpose: nothing
-  automated removes `loom:operator-only` from an epic, and the incident's own
+  automated removes `loom:operator` from an epic, and the incident's own
   reverts were bot-authored passes carrying out a human ruling. A structured
   "operator ruling" marker was rejected because it depends on the operator
   remembering to post one; the timeline records what they actually did.
 - **That actor-blind read rests on a CROSS-FILE invariant (#7965).** "Nothing
-  automated removes `loom:operator-only`" is not a property of this file. It holds
+  automated removes `loom:operator`" is not a property of this file. It holds
   because `defaults/scripts/classify-dependency-block.sh`'s `check_unescalate()` /
   `check_fact_unescalate()` (and its Rust port) bail `no-escalation-record` unless
   the issue carries a `<!-- champion:proposal-escalated -->` comment — and

@@ -101,10 +101,12 @@ out="$(cd "$WS" && env -u CODEX_HOME -u LOOM_CODEX_PROFILE \
     LOOM_SWEEP_NICE=0 LOOM_CODEX_NO_EXEC=1 LOOM_WORKSPACE="$WS" \
     LOOM_CODEX_HOME="$PROFILE" \
     LOOM_ROLE=curator LOOM_SWEEP_ID=sweep-1 ANTHROPIC_API_KEY=never-forward-me \
+    CARGO_PROFILE_DEV_DEBUG=line-tables-only \
     bash "$SPAWN_CODEX" -p "hi" 2>&1 || true)"
 line="$(printf '%s\n' "$out" | grep '^spawn-codex would-exec:' || true)"
 assert_contains "--env LOOM_ROLE=curator" "$line" "LOOM_ROLE is forwarded into the container"
 assert_contains "--env LOOM_SWEEP_ID=sweep-1" "$line" "LOOM_SWEEP_ID is forwarded into the container"
+assert_contains "--env CARGO_PROFILE_DEV_DEBUG=line-tables-only" "$line" "the #11190 debuginfo cap is forwarded into the container"
 assert_not_contains "never-forward-me" "$line" \
     "an ambient provider credential in the host env is never forwarded"
 

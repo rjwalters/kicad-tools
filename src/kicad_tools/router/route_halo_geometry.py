@@ -46,6 +46,10 @@ class RouteHaloGeometry:
         #: (issue #5617).  See :attr:`state_version`.
         self._version = 0
         self._complete = False
+        #: Issue #6508: while True, :meth:`record` is a no-op.  Set by
+        #: ``RoutingGrid`` while it re-stamps a surviving route's halo after a
+        #: neighbour's rip-up -- that copper is already recorded.
+        self.frozen = False
         self._cells = np.zeros((0, 0, 0), dtype=np.int32)
         self._objects: list[tuple] = []
         # Axis-aligned (minx, miny, maxx, maxy) of each object's centreline,
@@ -64,6 +68,8 @@ class RouteHaloGeometry:
         return (1, via.net, -1, x, y, x, y, via.diameter, via.drill)
 
     def record(self, key: tuple, radius: int, add: bool) -> None:
+        if self.frozen:
+            return
         mark = (key, radius)
         if add:
             self.marks[mark] += 1
@@ -407,10 +413,17 @@ class RouteHaloGeometry:
                 limit = margin + other_radius
                 if gapx * gapx + gapy * gapy >= limit * limit:
                     continue
-            if shape is None:
-                shape = LineString(((cax, cay), (cbx, cby))) if is_trace else Point(cax, cay)
-            distance = shape.distance(other_shape)
             if not is_trace and not other_trace:
+                # Issue #5617: ``distance`` is read ONLY by the via-vs-via
+                # drill-pitch floor below.  It used to be measured with
+                # shapely for every surviving neighbour -- including every
+                # trace-candidate and via-vs-trace pair, where the value was
+                # dead (the trace/via and trace/trace verdicts come from the
+                # clearance kernel).  Same value, same comparison, same
+                # verdict; the shapely call just runs where it is consumed.
+                if shape is None:
+                    shape = Point(cax, cay)
+                distance = shape.distance(other_shape)
                 if (
                     same_net
                     and abs(candidate.x - other.x) < 1e-6
@@ -453,6 +466,10 @@ class RouteHaloGeometry:
             elif table is not None:
                 pair = table.required_clearance(own_name, names.get(other.net, ""))
                 if pair > required:
+                    if shape is None:
+                        shape = (
+                            LineString(((cax, cay), (cbx, cby))) if is_trace else Point(cax, cay)
+                        )
                     a, b = nearest_points(shape, other_shape)
                     shared_layer = layer if is_trace else (other.layer if other_trace else None)
                     if not _attach_zone_exempts(
@@ -628,7 +645,8 @@ class RouteHaloRefiner:
             name,
         )
         partner = self._resolve_partner_net_id(name)
-        gap = nc.effective_intra_pair_clearance() if nc and partner is not None else None
+        # Issue #6560: the floored pair gap (#6443), matching the C++ arm.
+        gap = self.rules.pair_gap(nc).gap_mm if nc and partner is not None else None
         return bool(halo.clear(segment, self, partner_net=partner, partner_clearance=gap))
 
     #: Entry cap for :attr:`_via_memo` (issue #5696).  Purely a memory

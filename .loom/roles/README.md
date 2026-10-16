@@ -30,7 +30,6 @@ To edit a role definition:
 | `auditor` | Main branch build/runtime validation | 10min |
 | `builder` | Feature implementation | Manual |
 | `champion` | Proposal evaluation and PR auto-merge | 10min |
-| `concierge` | Operator-agent persona: room intent → typed daemon ChatOps verbs | 5min, **opt-in twice** |
 | `curator` | Issue enhancement | 5min |
 | `doctor` | Bug fixes and PR feedback | 5min |
 | `driver` | Plain shell environment | Manual |
@@ -38,16 +37,6 @@ To edit a role definition:
 | `hermit` | Code simplification proposals | 15min |
 | `judge` | Code review | 5min |
 | `loom` | Tier 2 daemon-mode operator surface | 1min |
-
-> **`concierge` takes two independent opt-ins**, unlike every other role here.
-> It is excluded from the "unset `autonomous.roleRunner.roles` ⇒ all defaults"
-> fallback (like `architect`), **and** gated a second time on its own config
-> block resolving: naming it in `roles` is not enough — `safehouse.concierge`
-> must also name at least one allowed sender. It is an inbound control channel
-> wired to a chat room, so it must never arrive because a repo forgot to pin
-> `roles`. Run `loom-daemon concierge check` in a workspace to see which of the
-> two gates is closed. Full trust boundary:
-> [`safehouse.md` § Operator-agent persona](../docs/safehouse.md).
 
 > **Note**: the `shepherd` role (Layer 1 issue-lifecycle orchestrator) was
 > removed in v0.10.0. Use `/loom:sweep <issue>` for the same single-issue
@@ -86,18 +75,18 @@ Each role can have an optional JSON metadata file with default settings:
 ### `toolPolicy.allowedCapabilities` — the sensitive-capability allowlist
 
 Optional. Declares which **sensitive capabilities** a role may reach; every
-capability it does not name is to be denied at session spawn (issue #8256).
+capability it does not name is denied (issue #8256): by the guard hooks on
+every tool call, and at session spawn as defense in depth.
 
 `loom-daemon role-tool-policy` is the **only** implementation of the rules below —
-`deny-specs` gives the Claude path its `--disallowedTools` list, `restricted`
-gives the Codex path its predicate — so the spawn scripts call out to it rather
-than re-deriving the answer, and the two runtimes cannot disagree about the same
-role file. No role shipped in `defaults/roles/` declares a `toolPolicy` yet; the
-spawn-side wiring that enforces one lands with #8256.
-
-`deny-specs` also appends the forge-egress bypass specs (#9989) for **every**
-role, whatever its allowlist, when a resolved forge egress policy enforces the
-API route — see `defaults/docs/forge-egress.md`. With no policy it adds nothing.
+`check` gives the guard hooks their verdict, `deny-specs` gives the Claude path
+its `--disallowedTools` list, `restricted` gives the Codex path its predicate —
+so the hooks and spawn scripts call out to it rather than re-deriving the
+answer, and the two runtimes cannot disagree about the same role file. The
+shipped read-only roles (architect, auditor, champion, curator,
+guide, hermit, judge) declare `[]`; builder, doctor, driver and loom declare
+`["*"]`. What `check` matches, and its fail-closed rule, are in
+`defaults/docs/guard-hooks.md` ("Per-role tool restriction").
 
 ```json
 { "toolPolicy": { "allowedCapabilities": [] } }               // reaches none

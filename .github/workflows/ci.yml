@@ -184,7 +184,7 @@ jobs:
 
       - uses: actions/setup-python@v7
         with:
-          python-version: "3.12"
+          python-version: "3.14"
 
       - name: Install dependencies
         run: uv sync --frozen --extra dev
@@ -347,18 +347,35 @@ jobs:
       # latency for a hung test is therefore bounded at 60 s + 120 s, the same
       # ceiling option 2 would have set globally, and the deadline still
       # measures the test's own work. Subprocess timeouts are untouched.
+      # Issue #6716: the credit is applied DURING the wait (before every poll
+      # sleep), not once a permit arrives -- crediting afterwards let SIGALRM
+      # fire inside the queue wait, killing tests that were merely queued.
       # See src/kicad_tools/native_concurrency.py "Timeout credit".
       KCT_NATIVE_MAX_CONCURRENCY: "2"
       # Explicit diagnostic opt-in only; PR body is evaluated, never passed
       # into shell or retained. Pushes/absent markers leave the wrapper inert.
       KCT_NATIVE_DIAGNOSTICS: ${{ github.event_name == 'pull_request' && contains(github.event.pull_request.body, '<!-- kct:native-diagnostics -->') }}
       KCT_OBSERVER_PR_HEAD: ${{ github.event.pull_request.head.sha }}
-    # Issue #5747/#6013: one runner now, so one budget. The projected
-    # hosted job is ~30 min (setup and the native gates ~17, the bulk pool
-    # ~13 after the ci_extended deselection); 60 leaves room for a slow
-    # hosted VM while still catching a hang. pytest's own --timeout=60 per
-    # test bounds a hung test long before the job timeout fires.
-    timeout-minutes: 60
+    # Issue #5747/#6013/#5768: one hosted runner, so one budget. Measured
+    # 2026-10-10 over the 25 most recent successful PR `Test` jobs (workflow
+    # runs 37873727836..38095351857; reproduce with `gh run list --workflow
+    # ci.yml --event pull_request --status success` then `gh run view <run>
+    # --json jobs`): end to end min 31m22s, median 53m37s, p90 55m30s, max
+    # 56m41s (16 of 25 took over 50 min; the fast ones are a bimodal tail,
+    # not a target). Newest five (run/job): 38095351857/114340019801 55m30s,
+    # 38083225866/114304283760 54m56s, 38080252788/114295530259 32m30s,
+    # 38071430743/114269508068 53m52s, 38013132377/114097451692 54m01s.
+    # `Run tests` was 21m13s-38m29s of that across those five. This is a dated snapshot, not a
+    # budget: re-measure before relying on it.
+    #
+    # The old 60 left 3m19s over the observed max, and a run killed by the
+    # timeout is absent from a success-only cohort, so the real tail is
+    # longer than measured. 75 gives ~18 min (~33%) over the observed max
+    # while still sitting below the 90 of `Test (extended)`. A hung test is
+    # bounded by pytest's own --timeout=60 long before this fires; this
+    # ceiling only guards a whole-job stall. Sharding or further cutting the
+    # job is #5240, not a bigger timeout.
+    timeout-minutes: 75
     # Issue #3436: run inside the official KiCad 10 container (same image
     # as the kicad-cli-smoke job; see its comment for why apt+PPA installs
     # are NOT used). The container provides what dozens of tests need and
@@ -928,7 +945,7 @@ jobs:
 
       - uses: actions/setup-python@v7
         with:
-          python-version: "3.12"
+          python-version: "3.14"
 
       - name: Identify modified routed PCBs
         id: changed

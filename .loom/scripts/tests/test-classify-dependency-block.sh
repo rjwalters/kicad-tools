@@ -2,7 +2,7 @@
 # test-classify-dependency-block.sh - Tests for classify-dependency-block.sh
 # (issue #5664), the timing-vs-merits split in Champion's escalation decision.
 #
-# Champion escalated a proposal to `loom:operator-only` after N=2 unrevised
+# Champion escalated a proposal to `loom:operator-only` (now `loom:operator`, #11795) after N=2 unrevised
 # evaluations regardless of WHY it kept failing. For a proposal whose only
 # finding was "hard dependency on #3, which is still open" that turned a
 # self-clearing timing condition into a permanent one: `loom:operator-only`
@@ -74,6 +74,13 @@ assert_eq() {
     fi
 }
 
+# assert_line <haystack> <line> <msg>: an EXACT line match. "loom:operator" is
+# a prefix of every retired operator-hold name (#11795), so a substring check
+# would also accept "REMOVE loom:operator-only".
+assert_line() {
+    if grep -qxF -- "$2" <<<"$1"; then pass "$3"; else fail "$3"; echo "    expected line: $2"; echo "    got: $1"; fi
+}
+
 assert_contains() {
     local haystack="$1" needle="$2" msg="$3"
     if [[ "$haystack" == *"$needle"* ]]; then
@@ -104,6 +111,15 @@ assert_doc_contains() {
         pass "$msg"
     else
         fail "$msg (missing literal in $file: $needle)"
+    fi
+}
+
+assert_doc_lacks() {
+    local file="$1" needle="$2" msg="$3"
+    if grep -qF -- "$needle" "$file"; then
+        fail "$msg (unexpected literal in $file: $needle)"
+    else
+        pass "$msg"
     fi
 }
 
@@ -335,7 +351,7 @@ assert_eq "0" "$RC" "exit 0 - defer applies"
 assert_contains "$OUT" "DEFER" "DEFER marker present"
 assert_contains "$OUT" "OPEN_BLOCKERS: o/r#3" "the open blocker is named"
 assert_contains "$OUT" "BLOCKER_FINGERPRINT: " "a blocker-set fingerprint is emitted for the defer marker"
-assert_not_contains "$(labels_log 5)" "loom:operator-only" "deferring never touches a label"
+assert_not_contains "$(labels_log 5)" "loom:operator" "deferring never touches a label"
 assert_eq "" "$(comments_log 5)" "deferring never posts a comment"
 
 echo
@@ -366,7 +382,7 @@ echo "--- #7877: an explicit 'Blocked by' whose citation is restated further alo
 # The real #7854 bullet. "Blocked by" and the #3 citation are ~84 characters
 # apart -- a parenthetical description plus a restatement sit between them. The
 # original single 60-character window read this as a merits finding and would
-# have escalated a self-clearing timing dependency to loom:operator-only. The
+# have escalated a self-clearing timing dependency to loom:operator. The
 # explicit-phrase family now gets a wider window (see DEP_REF_EXPLICIT_WINDOW in
 # loom-daemon/src/dep_classify/finding.rs).
 reset_state
@@ -500,7 +516,7 @@ assert_contains "$OUT" "OPEN_BLOCKERS: o/r#3" "blocker resolved from the issue b
 echo
 echo "--- --check-unescalate: recorded blocker still OPEN -> leave it alone ---"
 reset_state
-issue_fixture 'o/r#5' OPEN 'A proposal. Blocked by #3.' 'loom:architect,loom:operator-only' \
+issue_fixture 'o/r#5' OPEN 'A proposal. Blocked by #3.' 'loom:architect,loom:operator' \
     "$REJECT_DEP_ONLY" "$ESCALATION_DEP_ONLY"
 issue_fixture 'o/r#3' OPEN 'Still open.' ''
 run_cdb --issue 5 --repo o/r --check-unescalate --apply
@@ -512,7 +528,7 @@ assert_eq "" "$(comments_log 5)" "no re-comment while the blocker is open"
 echo
 echo "--- --check-unescalate: blocker CLOSED -> un-escalate and comment once ---"
 reset_state
-issue_fixture 'o/r#5' OPEN 'A proposal. Blocked by #3.' 'loom:architect,loom:operator-only' \
+issue_fixture 'o/r#5' OPEN 'A proposal. Blocked by #3.' 'loom:architect,loom:operator' \
     "$REJECT_DEP_ONLY" "$ESCALATION_DEP_ONLY"
 issue_fixture 'o/r#3' CLOSED 'Merged.' ''
 run_cdb --issue 5 --repo o/r --check-unescalate --apply
@@ -520,7 +536,7 @@ assert_eq "0" "$RC" "exit 0 - un-escalation applies"
 assert_contains "$OUT" "UNESCALATE" "UNESCALATE marker present"
 assert_contains "$OUT" "CLEARED_BLOCKERS: o/r#3" "the cleared blocker is named"
 assert_contains "$OUT" "UNESCALATED: o/r#5" "--apply reports what it changed"
-assert_contains "$(labels_log 5)" "REMOVE loom:operator-only" "loom:operator-only is removed"
+assert_line "$(labels_log 5)" "REMOVE loom:operator" "loom:operator is removed"
 assert_contains "$(comments_log 5)" "champion:proposal-unescalated:" "one fingerprinted un-escalation comment is posted"
 
 echo
@@ -528,7 +544,7 @@ echo "--- --check-unescalate: idempotent - a re-applied label is not fought ---"
 # The fixture from the previous block already carries the un-escalation comment;
 # simulate a human deliberately re-adding the label.
 tmp="$(mktemp)"
-jq '.labels += [{"name":"loom:operator-only"}]' "$STUB_DIR/issue-o_r_5.json" > "$tmp" && mv "$tmp" "$STUB_DIR/issue-o_r_5.json"
+jq '.labels += [{"name":"loom:operator"}]' "$STUB_DIR/issue-o_r_5.json" > "$tmp" && mv "$tmp" "$STUB_DIR/issue-o_r_5.json"
 rm -f "$STUB_DIR/labels-o_r_5.log" "$STUB_DIR/comments-o_r_5.log"
 run_cdb --issue 5 --repo o/r --check-unescalate --apply
 assert_eq "1" "$RC" "exit 1 - the same blocker set was already un-escalated once"
@@ -540,7 +556,7 @@ echo
 echo "--- --check-unescalate: an outsider's copy of the idempotency marker is prose (#9548) ---"
 PRIOR_UNESC="$(jq -r '[.comments[] | select(.body | contains("champion:proposal-unescalated:"))][-1].body' "$STUB_DIR/issue-o_r_5.json")"
 reset_state
-issue_fixture 'o/r#5' OPEN 'A proposal. Blocked by #3.' 'loom:architect,loom:operator-only' \
+issue_fixture 'o/r#5' OPEN 'A proposal. Blocked by #3.' 'loom:architect,loom:operator' \
     "$REJECT_DEP_ONLY" "$ESCALATION_DEP_ONLY"
 issue_fixture 'o/r#3' CLOSED 'Merged.' ''
 tmp="$(mktemp)"
@@ -548,45 +564,17 @@ jq --arg b "$PRIOR_UNESC" '.comments += [{"body":$b,"user":{"login":"drive-by","
     "$STUB_DIR/issue-o_r_5.json" > "$tmp" && mv "$tmp" "$STUB_DIR/issue-o_r_5.json"
 run_cdb --issue 5 --repo o/r --check-unescalate --apply
 assert_eq "0" "$RC" "an untrusted un-escalation marker does not short-circuit the heal"
-assert_contains "$(labels_log 5)" "REMOVE loom:operator-only" "the label is still removed"
+assert_line "$(labels_log 5)" "REMOVE loom:operator" "the label is still removed"
 
 echo
-echo "--- --check-unescalate: a loom:operator-blocked sub-label (#5671) is removed alongside the base label ---"
+echo "--- --apply write ORDER: loom:operator is removed BEFORE the marker comment (#5688 review) ---"
 reset_state
-issue_fixture 'o/r#8' OPEN 'A proposal. Blocked by #3.' 'loom:architect,loom:operator-only,loom:operator-blocked' \
-    "$REJECT_DEP_ONLY" "$ESCALATION_DEP_ONLY"
-issue_fixture 'o/r#3' CLOSED 'Merged.' ''
-run_cdb --issue 8 --repo o/r --check-unescalate --apply
-assert_eq "0" "$RC" "exit 0 - un-escalation applies"
-assert_contains "$(labels_log 8)" "REMOVE loom:operator-only" "loom:operator-only is removed"
-assert_contains "$(labels_log 8)" "REMOVE loom:operator-blocked" \
-    "loom:operator-blocked never outlives the base label it accompanies (#5671)"
-if jq -e '[.labels[].name] | (contains(["loom:operator-only"]) or contains(["loom:operator-blocked"])) | not' \
-    "$STUB_DIR/issue-o_r_8.json" >/dev/null; then
-    pass "neither label remains on the issue after un-escalation"
-else
-    fail "neither label remains on the issue after un-escalation"
-fi
-
-echo
-echo "--- --check-unescalate: no loom:operator-blocked sub-label -> the best-effort removal is a harmless no-op ---"
-reset_state
-issue_fixture 'o/r#9' OPEN 'A proposal. Blocked by #3.' 'loom:architect,loom:operator-only' \
-    "$REJECT_DEP_ONLY" "$ESCALATION_DEP_ONLY"
-issue_fixture 'o/r#3' CLOSED 'Merged.' ''
-run_cdb --issue 9 --repo o/r --check-unescalate --apply
-assert_eq "0" "$RC" "exit 0 - un-escalation applies even with no sub-label present (pre-#5679 escalation, 'No backfill')"
-assert_contains "$(labels_log 9)" "REMOVE loom:operator-only" "loom:operator-only is removed"
-
-echo
-echo "--- --apply write ORDER: loom:operator-only is removed BEFORE the marker comment (#5688 review) ---"
-reset_state
-issue_fixture 'o/r#10' OPEN 'A proposal. Blocked by #3.' 'loom:architect,loom:operator-only' \
+issue_fixture 'o/r#10' OPEN 'A proposal. Blocked by #3.' 'loom:architect,loom:operator' \
     "$REJECT_DEP_ONLY" "$ESCALATION_DEP_ONLY"
 issue_fixture 'o/r#3' CLOSED 'Merged.' ''
 run_cdb --issue 10 --repo o/r --check-unescalate --apply
 assert_eq "0" "$RC" "exit 0 - un-escalation applies"
-RM_LINE="$(grep -n -- '--remove-label loom:operator-only' "$STUB_DIR/calls.log" | head -1 | cut -d: -f1)"
+RM_LINE="$(grep -nE -- '--remove-label loom:operator( |$)' "$STUB_DIR/calls.log" | head -1 | cut -d: -f1)"
 COMMENT_LINE="$(grep -n '^issue comment 10 ' "$STUB_DIR/calls.log" | head -1 | cut -d: -f1)"
 MSG="the label removal call precedes the marker comment call"
 if [[ -n "$RM_LINE" && -n "$COMMENT_LINE" && "$RM_LINE" -lt "$COMMENT_LINE" ]]; then
@@ -604,16 +592,16 @@ echo "--- PARTIAL WRITE: label removal fails -> NO marker comment, and the next 
 # label would never come off -- exactly the #5664 failure mode, reintroduced
 # through the self-healing path's own partial-failure case.
 reset_state
-issue_fixture 'o/r#11' OPEN 'A proposal. Blocked by #3.' 'loom:architect,loom:operator-only' \
+issue_fixture 'o/r#11' OPEN 'A proposal. Blocked by #3.' 'loom:architect,loom:operator' \
     "$REJECT_DEP_ONLY" "$ESCALATION_DEP_ONLY"
 issue_fixture 'o/r#3' CLOSED 'Merged.' ''
-export GH_STUB_FAIL_REMOVE_LABEL='loom:operator-only'
+export GH_STUB_FAIL_REMOVE_LABEL='loom:operator'
 run_cdb --issue 11 --repo o/r --check-unescalate --apply
 unset GH_STUB_FAIL_REMOVE_LABEL
 assert_eq "1" "$RC" "a failed label removal is surfaced as apply-failed"
 assert_contains "$OUT" "REASON: apply-failed" "the failed apply is named"
 assert_eq "" "$(comments_log 11)" "no un-escalation comment is posted when the label removal failed"
-if jq -e '[.labels[].name] | contains(["loom:operator-only"])' "$STUB_DIR/issue-o_r_11.json" >/dev/null; then
+if jq -e '[.labels[].name] | any(. == "loom:operator")' "$STUB_DIR/issue-o_r_11.json" >/dev/null; then
     pass "the label is (correctly) still present after the failed removal"
 else
     fail "the label is (correctly) still present after the failed removal"
@@ -625,13 +613,13 @@ assert_eq "0" "$RC" "the next re-scan retries the un-escalation"
 assert_not_contains "$OUT" "already-unescalated" \
     "a partial write never makes a later re-scan believe the work is already done"
 assert_contains "$OUT" "UNESCALATED: o/r#11" "the retry completes the un-escalation"
-assert_contains "$(labels_log 11)" "REMOVE loom:operator-only" "the label comes off on the retry"
+assert_line "$(labels_log 11)" "REMOVE loom:operator" "the label comes off on the retry"
 assert_contains "$(comments_log 11)" "champion:proposal-unescalated:" "the marker comment lands on the retry"
 
 echo
 echo "--- PARTIAL WRITE: comment fails AFTER a successful removal -> the un-escalation still stands (#5688 review) ---"
 reset_state
-issue_fixture 'o/r#12' OPEN 'A proposal. Blocked by #3.' 'loom:architect,loom:operator-only' \
+issue_fixture 'o/r#12' OPEN 'A proposal. Blocked by #3.' 'loom:architect,loom:operator' \
     "$REJECT_DEP_ONLY" "$ESCALATION_DEP_ONLY"
 issue_fixture 'o/r#3' CLOSED 'Merged.' ''
 export GH_STUB_FAIL_COMMENT=1
@@ -639,7 +627,7 @@ run_cdb --issue 12 --repo o/r --check-unescalate --apply
 unset GH_STUB_FAIL_COMMENT
 assert_eq "0" "$RC" "the state change that already landed is not misreported as apply-failed"
 assert_contains "$OUT" "UNESCALATED: o/r#12" "the completed un-escalation is reported"
-assert_contains "$(labels_log 12)" "REMOVE loom:operator-only" "the label was removed before the comment was attempted"
+assert_line "$(labels_log 12)" "REMOVE loom:operator" "the label was removed before the comment was attempted"
 assert_eq "" "$(comments_log 12)" "the audit comment genuinely did not land"
 assert_contains "$(cat "$STUB_DIR/stderr.log")" "could not post the un-escalation comment" \
     "the missing audit trail is warned about on stderr"
@@ -652,7 +640,7 @@ assert_contains "$OUT" "REASON: not-operator-only" \
 echo
 echo "--- REGRESSION GUARD: a merits escalation is never un-escalated ---"
 reset_state
-issue_fixture 'o/r#5' OPEN 'A proposal. Blocked by #3.' 'loom:architect,loom:operator-only' \
+issue_fixture 'o/r#5' OPEN 'A proposal. Blocked by #3.' 'loom:architect,loom:operator' \
     "$ESCALATION_MERITS"
 issue_fixture 'o/r#3' CLOSED 'Merged.' ''
 run_cdb --issue 5 --repo o/r --check-unescalate --apply
@@ -667,7 +655,7 @@ echo "--- REGRESSION GUARD (#6112): the #4196 incident shape is never un-escalat
 # heading, with an incidental #3997 mention), never a real dependency wait --
 # so even once #3997 closes, this must stay escalated, not un-escalate.
 reset_state
-issue_fixture 'o/r#5' OPEN 'A proposal.' 'loom:architect,loom:operator-only' \
+issue_fixture 'o/r#5' OPEN 'A proposal.' 'loom:architect,loom:operator' \
     '<!-- champion:proposal-escalated -->
 **Champion: Escalating to Operator — Repeated Rejection Without Revision**
 
@@ -688,7 +676,7 @@ assert_eq "" "$(labels_log 5)" "the label is untouched -- no incorrect un-escala
 echo
 echo "--- REGRESSION GUARD: a dependency-CYCLE escalation is never un-escalated ---"
 reset_state
-issue_fixture 'o/r#5' OPEN 'A proposal. Blocked by #3.' 'loom:architect,loom:operator-only' \
+issue_fixture 'o/r#5' OPEN 'A proposal. Blocked by #3.' 'loom:architect,loom:operator' \
     "$ESCALATION_DEP_ONLY" '<!-- champion:dep-cycle:deadbeefdeadbeef -->
 **Dependency cycle detected**'
 issue_fixture 'o/r#3' CLOSED 'Merged.' ''
@@ -698,9 +686,9 @@ assert_contains "$OUT" "REASON: cycle-escalation" "reason is cycle-escalation"
 assert_eq "" "$(labels_log 5)" "the label is untouched"
 
 echo
-echo "--- REGRESSION GUARD: a human-applied loom:operator-only is never un-escalated ---"
+echo "--- REGRESSION GUARD: a human-applied loom:operator is never un-escalated ---"
 reset_state
-issue_fixture 'o/r#5' OPEN 'A proposal. Blocked by #3.' 'loom:architect,loom:operator-only' \
+issue_fixture 'o/r#5' OPEN 'A proposal. Blocked by #3.' 'loom:architect,loom:operator' \
     'Needs a credential rotation before this can proceed. Blocked by #3.'
 issue_fixture 'o/r#3' CLOSED 'Merged.' ''
 run_cdb --issue 5 --repo o/r --check-unescalate --apply
@@ -711,7 +699,7 @@ assert_eq "" "$(labels_log 5)" "the label is untouched"
 echo
 echo "--- --check-unescalate: an unreadable blocker is not evidence of clearing ---"
 reset_state
-issue_fixture 'o/r#5' OPEN 'A proposal. Blocked by private/repo#77.' 'loom:architect,loom:operator-only' \
+issue_fixture 'o/r#5' OPEN 'A proposal. Blocked by private/repo#77.' 'loom:architect,loom:operator' \
     '<!-- champion:proposal-escalated -->
 **Recurring findings:**
 - Technical Feasibility: hard dependency on private/repo#77, which is still open.
@@ -722,7 +710,7 @@ assert_contains "$OUT" "UNREADABLE: private/repo#77" "the unreadable node is sur
 assert_contains "$OUT" "REASON: unreadable-blocker" "reason is unreadable-blocker"
 
 echo
-echo "--- --check-unescalate: no loom:operator-only label at all ---"
+echo "--- --check-unescalate: no loom:operator label at all ---"
 reset_state
 issue_fixture 'o/r#5' OPEN 'A proposal.' 'loom:architect' "$ESCALATION_DEP_ONLY"
 run_cdb --issue 5 --repo o/r --check-unescalate
@@ -732,7 +720,7 @@ assert_contains "$OUT" "REASON: not-operator-only" "reason is not-operator-only"
 echo
 echo "--- --check-unescalate without --apply is strictly read-only ---"
 reset_state
-issue_fixture 'o/r#5' OPEN 'A proposal. Blocked by #3.' 'loom:architect,loom:operator-only' \
+issue_fixture 'o/r#5' OPEN 'A proposal. Blocked by #3.' 'loom:architect,loom:operator' \
     "$ESCALATION_DEP_ONLY"
 issue_fixture 'o/r#3' CLOSED 'Merged.' ''
 run_cdb --issue 5 --repo o/r --check-unescalate
@@ -795,7 +783,7 @@ echo "--- --check-unescalate: blocker STILL open, but a subset is declared -> UN
 reset_state
 issue_fixture 'o/r#5' OPEN "A proposal. Blocked by #3.
 
-$STARTABLE_SUBSET_TEXT" 'loom:architect,loom:operator-only,loom:operator-blocked' "$ESCALATION_DEP_ONLY"
+$STARTABLE_SUBSET_TEXT" 'loom:architect,loom:operator' "$ESCALATION_DEP_ONLY"
 issue_fixture 'o/r#3' OPEN 'Still open.' ''
 run_cdb --issue 5 --repo o/r --check-unescalate --apply
 assert_eq "0" "$RC" "exit 0 - the subset carve-out un-escalates even though the blocker is open"
@@ -803,14 +791,13 @@ assert_contains "$OUT" "UNESCALATE" "UNESCALATE marker present"
 assert_contains "$OUT" "SUBSET_CARVEOUT: yes" "the carve-out reason is distinguishable from blockers-cleared"
 assert_contains "$OUT" "STILL_OPEN_BLOCKERS: o/r#3" "the still-open blocker is named, not falsely reported as cleared"
 assert_contains "$OUT" "UNESCALATED: o/r#5" "the apply succeeded"
-assert_contains "$(labels_log 5)" "REMOVE loom:operator-only" "loom:operator-only was removed"
-assert_contains "$(labels_log 5)" "REMOVE loom:operator-blocked" "the sub-kind label was removed alongside it"
+assert_line "$(labels_log 5)" "REMOVE loom:operator" "loom:operator was removed"
 assert_contains "$(comments_log 5)" "startable subset" "the un-escalation comment names the subset reason, not blocker closure"
 
 echo
 echo "--- --check-unescalate: blocker still open, NO subset declared -> unchanged NO_UNESCALATE ---"
 reset_state
-issue_fixture 'o/r#5' OPEN 'A proposal. Blocked by #3.' 'loom:architect,loom:operator-only' "$ESCALATION_DEP_ONLY"
+issue_fixture 'o/r#5' OPEN 'A proposal. Blocked by #3.' 'loom:architect,loom:operator' "$ESCALATION_DEP_ONLY"
 issue_fixture 'o/r#3' OPEN 'Still open.' ''
 run_cdb --issue 5 --repo o/r --check-unescalate --apply
 assert_eq "1" "$RC" "exit 1 - unchanged: nothing un-escalates a genuinely still-blocked issue"
@@ -822,15 +809,15 @@ echo "--- --check-unescalate: subset-carveout idempotency (re-applying the label
 reset_state
 issue_fixture 'o/r#5' OPEN "A proposal. Blocked by #3.
 
-$STARTABLE_SUBSET_TEXT" 'loom:architect,loom:operator-only' "$ESCALATION_DEP_ONLY"
+$STARTABLE_SUBSET_TEXT" 'loom:architect,loom:operator' "$ESCALATION_DEP_ONLY"
 issue_fixture 'o/r#3' OPEN 'Still open.' ''
 run_cdb --issue 5 --repo o/r --check-unescalate --apply
 assert_eq "0" "$RC" "first pass un-escalates via the subset carve-out"
-# A human (or another mechanism) re-applies loom:operator-only, with the SAME
+# A human (or another mechanism) re-applies loom:operator, with the SAME
 # un-escalation marker still in the comment history (mirrors the existing
 # already-unescalated fixture shape for the blockers-cleared path).
 tmp="$(mktemp)"
-jq '.labels += [{"name":"loom:operator-only"}]' "$STUB_DIR/issue-o_r_5.json" > "$tmp" && mv "$tmp" "$STUB_DIR/issue-o_r_5.json"
+jq '.labels += [{"name":"loom:operator"}]' "$STUB_DIR/issue-o_r_5.json" > "$tmp" && mv "$tmp" "$STUB_DIR/issue-o_r_5.json"
 run_cdb --issue 5 --repo o/r --check-unescalate --apply
 assert_eq "1" "$RC" "re-applied label after a completed subset un-escalation is NOT fought"
 assert_contains "$OUT" "REASON: already-unescalated" "reason is already-unescalated"
@@ -868,7 +855,7 @@ if [[ "$no_side_effects" -eq 1 ]]; then pass "$MSG"; else fail "$MSG"; fi
 for N in 5 6 7; do
     tmp="$(mktemp)"
     jq --arg b "$ESCALATION_DEP_ONLY" \
-       '.labels += [{"name":"loom:operator-only"}] | .comments += [{"body":$b}]' \
+       '.labels += [{"name":"loom:operator"}] | .comments += [{"body":$b}]' \
        "$STUB_DIR/issue-o_r_$N.json" > "$tmp" && mv "$tmp" "$STUB_DIR/issue-o_r_$N.json"
 done
 issue_fixture 'o/r#3' CLOSED 'Sim harness bootstrap. Merged.' ''
@@ -878,8 +865,8 @@ HEALED=1
 for N in 5 6 7; do
     run_cdb --issue "$N" --repo o/r --check-unescalate --apply
     [[ "$RC" -eq 0 && "$OUT" == *"UNESCALATED: o/r#$N"* ]] || HEALED=0
-    grep -q "REMOVE loom:operator-only" "$STUB_DIR/labels-o_r_$N.log" 2>/dev/null || HEALED=0
-    jq -e '[.labels[].name] | contains(["loom:operator-only"]) | not' \
+    grep -qx "REMOVE loom:operator" "$STUB_DIR/labels-o_r_$N.log" 2>/dev/null || HEALED=0
+    jq -e '[.labels[].name] | any(. == "loom:operator") | not' \
         "$STUB_DIR/issue-o_r_$N.json" >/dev/null || HEALED=0
 done
 MSG="all three un-escalate automatically once #3 closes (the manual workaround, performed by Champion)"
@@ -977,13 +964,13 @@ for N in 3 5; do
 done
 
 # --- Now simulate the historical damage from the reopening comment: #2 has
-# already reached loom:operator-only for the (correct) full-park reason. #3 and
-# #5 were ALSO parked at loom:operator-only, wrongly discarding their stated
+# already reached loom:operator for the (correct) full-park reason. #3 and
+# #5 were ALSO parked at loom:operator, wrongly discarding their stated
 # split -- this is the exact "recurred after closure" bug. #1 is still open. ---
 for N in 2 3 5; do
     tmp="$(mktemp)"
     jq --arg b "$ESCALATION_DEP_ONLY_1" \
-       '.labels += [{"name":"loom:operator-only"}] | .comments += [{"body":$b}]' \
+       '.labels += [{"name":"loom:operator"}] | .comments += [{"body":$b}]' \
        "$STUB_DIR/issue-o_r_$N.json" > "$tmp" && mv "$tmp" "$STUB_DIR/issue-o_r_$N.json"
 done
 
@@ -997,16 +984,16 @@ for N in 3 5; do
     assert_eq "0" "$RC" "#$N un-parks via the subset carve-out even though #1 is still open"
     assert_contains "$OUT" "SUBSET_CARVEOUT: yes" "#$N: carve-out reason recorded"
     assert_contains "$OUT" "UNESCALATED: o/r#$N" "#$N: apply succeeded"
-    if jq -e '[.labels[].name] | contains(["loom:operator-only"]) | not' \
+    if jq -e '[.labels[].name] | any(. == "loom:operator") | not' \
         "$STUB_DIR/issue-o_r_$N.json" >/dev/null; then
-        pass "#$N: loom:operator-only actually removed"
+        pass "#$N: loom:operator actually removed"
     else
-        fail "#$N: loom:operator-only actually removed"
+        fail "#$N: loom:operator actually removed"
     fi
 done
 
 # #2 is still parked at this point -- unaffected by #3/#5 healing.
-if jq -e '[.labels[].name] | contains(["loom:operator-only"])' \
+if jq -e '[.labels[].name] | any(. == "loom:operator")' \
     "$STUB_DIR/issue-o_r_2.json" >/dev/null; then
     pass "#2 remains parked (correctly) while #1 is still open"
 else
@@ -1068,20 +1055,21 @@ echo "--- --check-fact-unescalate: all cited objections resolved -> revise body,
 reset_state
 res_file="$(mktemp)"; printf '%s\n' "$RESOLUTIONS_ALL" > "$res_file"
 issue_fixture 'o/r#5' OPEN 'A proposal with a stale toolchain pin.' \
-    'loom:architect,loom:operator-only,loom:operator-decision' "$ESCALATION_FACTS"
+    'loom:architect,loom:operator' "$ESCALATION_FACTS"
 run_cdb --issue 5 --repo o/r --check-fact-unescalate --resolutions-file "$res_file" --commit deadbeef --apply
 assert_eq "0" "$RC" "exit 0 - fact-unescalation applies"
 assert_contains "$OUT" "FACT_UNESCALATE" "FACT_UNESCALATE marker present"
 assert_contains "$OUT" "VERIFIED_COMMIT: deadbeef" "the verifying commit is echoed"
 assert_contains "$OUT" "RESOLVED_COUNT: 2" "both findings counted as resolved"
 assert_contains "$OUT" "UNESCALATED: o/r#5" "--apply reports what it changed"
-assert_contains "$(labels_log 5)" "REMOVE loom:operator-only" "loom:operator-only is removed"
-assert_contains "$(labels_log 5)" "REMOVE loom:operator-decision" "loom:operator-decision sub-kind is removed alongside the base label"
-if jq -e '[.labels[].name] | (contains(["loom:operator-only"]) or contains(["loom:operator-decision"])) | not' \
+assert_line "$(labels_log 5)" "REMOVE loom:operator" "loom:operator is removed"
+assert_eq "1" "$(grep -c '^REMOVE ' <<<"$(labels_log 5)")" \
+    "only loom:operator is removed: no retired name is present, so none is touched (#11795)"
+if jq -e '[.labels[].name] | any(. == "loom:operator") | not' \
     "$STUB_DIR/issue-o_r_5.json" >/dev/null; then
-    pass "neither label remains on the issue after de-escalation"
+    pass "the hold no longer remains on the issue after de-escalation"
 else
-    fail "neither label remains on the issue after de-escalation"
+    fail "the hold no longer remains on the issue after de-escalation"
 fi
 assert_contains "$(body_edits_log 5)" "## Revision" "a Revision section was appended to the body"
 assert_contains "$(body_edits_log 5)" "deadbeef" "the Revision section names the verifying commit"
@@ -1094,7 +1082,7 @@ echo "--- --check-fact-unescalate: only SOME objections resolved -> leave escala
 reset_state
 res_file="$(mktemp)"; printf '%s\n' "$RESOLUTIONS_PARTIAL" > "$res_file"
 issue_fixture 'o/r#5' OPEN 'A proposal with a stale toolchain pin.' \
-    'loom:architect,loom:operator-only,loom:operator-decision' "$ESCALATION_FACTS"
+    'loom:architect,loom:operator' "$ESCALATION_FACTS"
 run_cdb --issue 5 --repo o/r --check-fact-unescalate --resolutions-file "$res_file" --commit deadbeef --apply
 assert_eq "1" "$RC" "exit 1 - a partial resolution never applies"
 assert_contains "$OUT" "REASON: partial-resolution" "reason names the partial resolution"
@@ -1107,24 +1095,24 @@ echo "--- --check-fact-unescalate: a resolutions file that doesn't address every
 reset_state
 res_file="$(mktemp)"; printf '%s\n' "$RESOLUTIONS_SHORT" > "$res_file"
 issue_fixture 'o/r#5' OPEN 'A proposal with a stale toolchain pin.' \
-    'loom:architect,loom:operator-only,loom:operator-decision' "$ESCALATION_FACTS"
+    'loom:architect,loom:operator' "$ESCALATION_FACTS"
 run_cdb --issue 5 --repo o/r --check-fact-unescalate --resolutions-file "$res_file" --commit deadbeef --apply
 assert_eq "1" "$RC" "exit 1 - a resolutions count mismatch never applies"
 assert_contains "$OUT" "REASON: resolutions-mismatch" "reason names the count mismatch"
 assert_eq "" "$(labels_log 5)" "no label change on a resolutions mismatch"
 
 echo
-echo "--- --check-fact-unescalate: loom:operator-only present but NO champion:proposal-escalated marker -> never touched ---"
+echo "--- --check-fact-unescalate: loom:operator present but NO champion:proposal-escalated marker -> never touched ---"
 reset_state
 res_file="$(mktemp)"; printf '%s\n' "$RESOLUTIONS_ALL" > "$res_file"
-issue_fixture 'o/r#5' OPEN 'A proposal.' 'loom:architect,loom:operator-only,loom:operator-decision'
+issue_fixture 'o/r#5' OPEN 'A proposal.' 'loom:architect,loom:operator'
 run_cdb --issue 5 --repo o/r --check-fact-unescalate --resolutions-file "$res_file" --commit deadbeef --apply
-assert_eq "1" "$RC" "exit 1 - a human-applied (or unmarked) operator-only is never touched"
+assert_eq "1" "$RC" "exit 1 - a human-applied (or unmarked) loom:operator is never touched"
 assert_contains "$OUT" "REASON: no-escalation-record" "reason is no-escalation-record"
 assert_eq "" "$(labels_log 5)" "no label change without the marker"
 
 echo
-echo "--- --check-fact-unescalate: no loom:operator-only label at all -> never touched ---"
+echo "--- --check-fact-unescalate: no loom:operator label at all -> never touched ---"
 reset_state
 res_file="$(mktemp)"; printf '%s\n' "$RESOLUTIONS_ALL" > "$res_file"
 issue_fixture 'o/r#5' OPEN 'A proposal.' 'loom:architect'
@@ -1136,7 +1124,7 @@ echo
 echo "--- --check-fact-unescalate: issue also carries champion:dep-cycle -> permanent escalation, never touched ---"
 reset_state
 res_file="$(mktemp)"; printf '%s\n' "$RESOLUTIONS_ALL" > "$res_file"
-issue_fixture 'o/r#5' OPEN 'A proposal.' 'loom:architect,loom:operator-only,loom:operator-decision' \
+issue_fixture 'o/r#5' OPEN 'A proposal.' 'loom:architect,loom:operator' \
     "$ESCALATION_FACTS" '<!-- champion:dep-cycle:abcdef1234567890 -->
 A genuine dependency cycle.'
 run_cdb --issue 5 --repo o/r --check-fact-unescalate --resolutions-file "$res_file" --commit deadbeef --apply
@@ -1149,12 +1137,12 @@ echo "--- --check-fact-unescalate: idempotent - a re-applied label for the SAME 
 reset_state
 res_file="$(mktemp)"; printf '%s\n' "$RESOLUTIONS_ALL" > "$res_file"
 issue_fixture 'o/r#5' OPEN 'A proposal with a stale toolchain pin.' \
-    'loom:architect,loom:operator-only,loom:operator-decision' "$ESCALATION_FACTS"
+    'loom:architect,loom:operator' "$ESCALATION_FACTS"
 run_cdb --issue 5 --repo o/r --check-fact-unescalate --resolutions-file "$res_file" --commit deadbeef --apply
 assert_eq "0" "$RC" "first de-escalation applies"
 # Simulate a human deliberately re-adding the label.
 tmp="$(mktemp)"
-jq '.labels += [{"name":"loom:operator-only"}]' "$STUB_DIR/issue-o_r_5.json" > "$tmp" && mv "$tmp" "$STUB_DIR/issue-o_r_5.json"
+jq '.labels += [{"name":"loom:operator"}]' "$STUB_DIR/issue-o_r_5.json" > "$tmp" && mv "$tmp" "$STUB_DIR/issue-o_r_5.json"
 rm -f "$STUB_DIR/labels-o_r_5.log" "$STUB_DIR/comments-o_r_5.log" "$STUB_DIR/body-edits-o_r_5.log"
 run_cdb --issue 5 --repo o/r --check-fact-unescalate --resolutions-file "$res_file" --commit deadbeef --apply
 assert_eq "1" "$RC" "exit 1 - the same finding set + commit was already de-escalated once"
@@ -1170,16 +1158,87 @@ res_file="$(mktemp)"; printf '%s\n' "$RESOLUTIONS_ALL" > "$res_file"
 run_cdb --issue 5 --repo o/r --check-fact-unescalate --resolutions-file "$res_file" --commit cafef00d --apply
 assert_eq "0" "$RC" "a later commit produces a different fingerprint, so it is not short-circuited"
 assert_contains "$OUT" "UNESCALATED: o/r#5" "the re-verification against the new commit succeeds"
-assert_contains "$(labels_log 5)" "REMOVE loom:operator-only" "the label comes off again"
+assert_line "$(labels_log 5)" "REMOVE loom:operator" "the label comes off again"
 
 echo
 echo "--- --check-fact-unescalate: --apply without --resolutions-file never applies (fails safe, not a silent no-op) ---"
 reset_state
-issue_fixture 'o/r#5' OPEN 'A proposal.' 'loom:architect,loom:operator-only,loom:operator-decision' "$ESCALATION_FACTS"
+issue_fixture 'o/r#5' OPEN 'A proposal.' 'loom:architect,loom:operator' "$ESCALATION_FACTS"
 run_cdb --issue 5 --repo o/r --check-fact-unescalate --apply
 assert_eq "1" "$RC" "missing --resolutions-file leaves the escalation in place rather than applying blind"
 assert_contains "$OUT" "REASON: missing-resolutions-file" "reason is missing-resolutions-file"
 assert_eq "" "$(labels_log 5)" "no label change without a resolutions file"
+
+# =====================================================================
+# TRANSITION (#11795): the daemon rolls before `labels migrate` relabels
+# open items, so an escalation written before the fold still carries
+# loom:operator-only (+ a sub-kind). It must still self-heal, and an item
+# mid-migration (`--keep-labels`: old AND new name) must lose every name.
+# =====================================================================
+
+echo
+echo "--- TRANSITION (#11795): an unmigrated loom:operator-only + loom:operator-blocked escalation un-escalates, both removed ---"
+reset_state
+issue_fixture 'o/r#8' OPEN 'A proposal. Blocked by #3.' 'loom:architect,loom:operator-only,loom:operator-blocked' \
+    "$REJECT_DEP_ONLY" "$ESCALATION_DEP_ONLY"
+issue_fixture 'o/r#3' CLOSED 'Merged.' ''
+run_cdb --issue 8 --repo o/r --check-unescalate --apply
+assert_eq "0" "$RC" "exit 0 - un-escalation applies"
+assert_line "$(labels_log 8)" "REMOVE loom:operator-only" "loom:operator-only is removed"
+assert_line "$(labels_log 8)" "REMOVE loom:operator-blocked" \
+    "loom:operator-blocked never outlives the base label it accompanies (#5671)"
+if jq -e '[.labels[].name] | any(. == "loom:operator-only" or . == "loom:operator-blocked") | not' \
+    "$STUB_DIR/issue-o_r_8.json" >/dev/null; then
+    pass "neither label remains on the issue after un-escalation"
+else
+    fail "neither label remains on the issue after un-escalation"
+fi
+
+echo
+echo "--- TRANSITION (#11795): an unmigrated loom:operator-only alone un-escalates; nothing absent is removed ---"
+reset_state
+issue_fixture 'o/r#9' OPEN 'A proposal. Blocked by #3.' 'loom:architect,loom:operator-only' \
+    "$REJECT_DEP_ONLY" "$ESCALATION_DEP_ONLY"
+issue_fixture 'o/r#3' CLOSED 'Merged.' ''
+run_cdb --issue 9 --repo o/r --check-unescalate --apply
+assert_eq "0" "$RC" "exit 0 - un-escalation applies even with no sub-label present (pre-#5679 escalation, 'No backfill')"
+assert_line "$(labels_log 9)" "REMOVE loom:operator-only" "loom:operator-only is removed"
+assert_eq "1" "$(grep -c '^REMOVE ' <<<"$(labels_log 9)")" \
+    "only the label present is removed: loom:operator and the sub-kinds are absent, so untouched"
+
+echo "--- TRANSITION (#11795): mid-migration (loom:operator + loom:operator-only) -> every hold name comes off ---"
+reset_state
+issue_fixture 'o/r#13' OPEN 'A proposal. Blocked by #3.' 'loom:architect,loom:operator,loom:operator-only,loom:operator-blocked' \
+    "$REJECT_DEP_ONLY" "$ESCALATION_DEP_ONLY"
+issue_fixture 'o/r#3' CLOSED 'Merged.' ''
+run_cdb --issue 13 --repo o/r --check-unescalate --apply
+assert_eq "0" "$RC" "exit 0 - un-escalation applies"
+assert_line "$(labels_log 13)" "REMOVE loom:operator" "loom:operator (the canonical name) is removed"
+assert_line "$(labels_log 13)" "REMOVE loom:operator-only" "the retired loom:operator-only is removed alongside it"
+assert_line "$(labels_log 13)" "REMOVE loom:operator-blocked" "the retired sub-kind is removed alongside it"
+if jq -e '[.labels[].name] | map(select(startswith("loom:operator"))) | length == 0' \
+    "$STUB_DIR/issue-o_r_13.json" >/dev/null; then
+    pass "no operator-hold name remains after a mid-migration un-escalation"
+else
+    fail "no operator-hold name remains after a mid-migration un-escalation"
+fi
+
+echo
+echo "--- TRANSITION (#11795): an unmigrated loom:operator-only + loom:operator-decision fact escalation de-escalates, both removed ---"
+reset_state
+res_file="$(mktemp)"; printf '%s\n' "$RESOLUTIONS_ALL" > "$res_file"
+issue_fixture 'o/r#5' OPEN 'A proposal with a stale toolchain pin.' \
+    'loom:architect,loom:operator-only,loom:operator-decision' "$ESCALATION_FACTS"
+run_cdb --issue 5 --repo o/r --check-fact-unescalate --resolutions-file "$res_file" --commit deadbeef --apply
+assert_eq "0" "$RC" "exit 0 - fact-unescalation applies to an unmigrated escalation"
+assert_line "$(labels_log 5)" "REMOVE loom:operator-only" "loom:operator-only is removed"
+assert_line "$(labels_log 5)" "REMOVE loom:operator-decision" "loom:operator-decision is removed alongside it"
+if jq -e '[.labels[].name] | any(. == "loom:operator-only" or . == "loom:operator-decision") | not' \
+    "$STUB_DIR/issue-o_r_5.json" >/dev/null; then
+    pass "neither retired label remains after de-escalation"
+else
+    fail "neither retired label remains after de-escalation"
+fi
 
 # =====================================================================
 # Argument validation
@@ -1224,26 +1283,20 @@ echo "--- Doc pins: the Champion prose actually calls the gate ---"
         "champion-issue-promo.md invokes the classifier"
     assert_doc_contains "$CHAMPION_PROMO_MD" "--check-defer" \
         "Step 4's escalation path runs the dependency-timing gate"
-    assert_doc_contains "$CHAMPION_PROMO_MD" "--check-unescalate --apply" \
-        "the self-healing re-scan actually applies the un-escalation"
-    assert_doc_contains "$CHAMPION_PROMO_MD" "Pass 0: Self-Healing Un-Escalation Re-Scan" \
-        "the re-scan has its own named section that runs before evaluation"
-    assert_doc_contains "$CHAMPION_PROMO_MD" 'FORCE_REEVALUATE=no' \
-        "an un-escalated proposal bypasses the body-hash marker instead of re-escalating in the same pass"
-    assert_doc_contains "$CHAMPION_PROMO_MD" 'LOOM_MAX_UNESCALATION_RESCANS' \
-        "the re-scan is bounded per pass"
-    assert_doc_contains "$CHAMPION_MD" "Pass 0" \
-        "champion.md explains why loom:operator-only is excluded from discovery yet still examined"
+    assert_doc_contains "$CHAMPION_PROMO_MD" "loom-daemon park-record apply --issue" \
+        "a DEFER blocks the proposal on loom:blocked with park records (#11860)"
+    assert_doc_contains "$CHAMPION_PROMO_MD" "Pass 0: Self-Healing Un-Escalation Re-Scan (#5664) — retired (#11861)" \
+        "Pass 0 is marked retired, not silently dropped"
+    assert_doc_lacks "$CHAMPION_PROMO_MD" "--check-unescalate --apply" \
+        "no prompt path un-escalates a loom:operator hold any more (#11861)"
+    assert_doc_contains "$CHAMPION_MD" "\`loom:operator\` is excluded and never examined (#11861)" \
+        "champion.md excludes loom:operator from discovery and never examines it"
     assert_doc_contains "$CHAMPION_REF_MD" "classify-dependency-block.sh --check-defer" \
         "champion-reference.md's decision table documents the defer condition"
-    assert_doc_contains "$CURATOR_MD" "classify-dependency-block.sh --issue" \
-        "curator.md invokes the classifier for its fact-based de-escalation procedure (#7650)"
-    assert_doc_contains "$CURATOR_MD" "--check-fact-unescalate" \
-        "curator.md's de-escalation procedure calls the new fact-checkable mode"
-    assert_doc_contains "$CURATOR_MD" "--resolutions-file" \
-        "curator.md's procedure supplies the per-finding resolutions Curator itself verified"
-    assert_doc_contains "$CURATOR_MD" "De-escalating Fact-Based Champion Escalations" \
-        "the de-escalation procedure has its own named section"
+    assert_doc_lacks "$CURATOR_MD" "--check-fact-unescalate" \
+        "curator.md no longer removes loom:operator via the fact de-escalation (#11861)"
+    assert_doc_contains "$CURATOR_MD" "Operator-held issues: no Curator action (#11861)" \
+        "curator.md states the retirement in its own section"
     assert_doc_contains "$CHAMPION_PROMO_MD" "## Revision" \
         "champion-issue-promo.md documents how a Curator-appended Revision section interacts with BODY_HASH (#7650)"
 }

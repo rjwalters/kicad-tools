@@ -116,6 +116,19 @@ says so explicitly — it does **not** present a `jq`-less host as "no config".
 
 ## `update`: mcp-loom bundle refresh + thin daemon delegate
 
+**Daemonless machines (#10238).** Before the steps below, `loom update` fast-forwards
+the machine checkout when it is a clean `main` (dirty, diverged, ahead, non-`main`
+or detached checkouts are left untouched with a warning naming the reason),
+idempotently re-runs `provision_loom_dispatcher` + `provision_loom_skills` (the
+`~/.claude/commands/loom` link, the `/star` alias and the `loom-*` agent links), and
+skips the daemon delegate with a note (exit 0) when no `loom-daemon` binary exists.
+`--check` / `--dry-run` do none of this. `resync-installed.sh` also (re)provisions the
+links best-effort (never changes its exit status; `LOOM_RESYNC_SKIP_USER_SCOPE=1`
+opts out). Any other verb prints a rate-limited (6h, `LOOM_HEALTH_WARN_INTERVAL`)
+stderr warning when the links are missing or the checkout is more than
+`LOOM_STALE_COMMITS` (50) behind `origin/main`, from local state only; silence with
+`LOOM_NO_HEALTH_WARN=1`. `loom status` always lists the same problems.
+
 `loom update` does two things, in order:
 
 1. **Refreshes the user-scoped mcp-loom bundle** (#4230, epic #3835 Phase 3c).
@@ -289,7 +302,7 @@ resolution precedence.
 
 `~/.loom/workspaces.json` is a **machine-level, cross-repo, cross-session**
 file — never scope a test or an ad-hoc verification step at it directly. Both
-the `loom-daemon workspace add|remove|list|set-priority` CLI and the daemon
+the `loom-daemon workspace add|remove|list|set-weight` CLI and the daemon
 itself honor `LOOM_WORKSPACES_PATH` (`loom-daemon/src/workspace_registry.rs`)
 as a redirect: when set, every registry read/write for that process goes to
 the given file instead of the real one. This is the sanctioned seam for
@@ -299,7 +312,7 @@ way, and it is the correct tool for a builder/auditor session manually
 verifying `workspace add`/`status`/priority behavior too:
 
 ```bash
-LOOM_WORKSPACES_PATH=/tmp/scratch-workspaces.json loom-daemon workspace add /tmp/some-dir --priority 3
+LOOM_WORKSPACES_PATH=/tmp/scratch-workspaces.json loom-daemon workspace add /tmp/some-dir --weight 3
 LOOM_WORKSPACES_PATH=/tmp/scratch-workspaces.json loom-daemon workspace list
 ```
 
@@ -449,7 +462,7 @@ Run it from inside the repo:
 ```bash
 loom migrate --dry-run          # full file-by-file plan; makes no changes
 loom migrate                    # apply; prints a per-file report, stages the result
-loom migrate --priority 20      # workspace-registry priority (default 3)
+loom migrate --weight 20        # workspace draw weight (default 1)
 loom migrate --force            # proceed despite an uncommitted working tree
 ```
 
@@ -520,7 +533,7 @@ boundary no matter where it is invoked. What one pass does:
    registration** exists and points at the machine checkout's
    `mcp-loom/dist/index.js`, `claude mcp add --scope user`-ing it if absent or
    mis-pointed (skipped with a clear note when the `claude` CLI is not on PATH).
-7. **Register** the repo via `loom-daemon workspace add … --priority N` (skipped
+7. **Register** the repo via `loom-daemon workspace add … --weight N` (skipped
    with a clear note when `loom-daemon` is not on PATH), **re-stamp**
    `.loom/install-metadata.json` (`loom_version`, `loom_commit`,
    `migrated_to_machine_model`, `install_model`), and **refresh** the CLAUDE.md

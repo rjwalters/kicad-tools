@@ -1,10 +1,11 @@
 {
   "changed_layer_inventory": [],
   "context_sha256": {
+    "sym-lib-table": "05eec8c92281801842dde8ed3dd6ff5192bbc64e25e053a3294f63c50bb0149c",
     "voltage_divider.kicad_pro": "d729bd613d8798b7b1b3acf39d153f8447342e393587afff543b1c21a3e3f5c9",
-    "voltage_divider_routed.kicad_dru": "0714e8b4cb73fde358fa3c1d35adfab2755f47561476f85015a9f03c02e745d8",
-    "voltage_divider_routed.kicad_pcb": "076ae364276c2fa432449239e5af6dc2c72da97079afacc5f400609841df9831",
-    "voltage_divider_routed.kicad_pro": "9e3fc8b018068097e12d10fcbdd183d00b786685ebdac48ad0f42d3cb528b87d"
+    "voltage_divider_routed.kicad_dru": "d9816b36c04dc038b445b0d44943e1bd879c7a69f00b12a496de346e23ed70e0",
+    "voltage_divider_routed.kicad_pcb": "0ea46d485e8eceae68a1fe542a4a895e2faa15a6744a6bcd5e7b1797b93ac031",
+    "voltage_divider_routed.kicad_pro": "ed1b123046a7d2ee89193a0cd0b8ab62575a4b9eca35e555e42f530b1c73f092"
   },
   "deltas_mm2": {
     "B.Cu": 0.0,
@@ -13,16 +14,16 @@
   "engine": "10.0.6",
   "refill_returncode": 0,
   "refilled_areas_mm2": {
-    "B.Cu": 699.983515,
-    "F.Cu": 677.082687
+    "B.Cu": 698.156409,
+    "F.Cu": 673.467326
   },
   "refilled_pcb": "output/readiness/fill-refilled/voltage_divider_routed.kicad_pcb",
-  "refilled_sha256": "076ae364276c2fa432449239e5af6dc2c72da97079afacc5f400609841df9831",
+  "refilled_sha256": "0ea46d485e8eceae68a1fe542a4a895e2faa15a6744a6bcd5e7b1797b93ac031",
   "saved_areas_mm2": {
-    "B.Cu": 699.983515,
-    "F.Cu": 677.082687
+    "B.Cu": 698.156409,
+    "F.Cu": 673.467326
   },
   "saved_pcb": "output/readiness/fill-saved/voltage_divider_routed.kicad_pcb",
-  "saved_sha256": "076ae364276c2fa432449239e5af6dc2c72da97079afacc5f400609841df9831",
+  "saved_sha256": "0ea46d485e8eceae68a1fe542a4a895e2faa15a6744a6bcd5e7b1797b93ac031",
   "tolerance_mm2": 0.01
 }

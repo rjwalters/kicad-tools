@@ -230,11 +230,11 @@ fi
 #
 # None of these exist on a checkout that never ran the Loom installer locally —
 # a fresh developer clone, a CI checkout, or any machine that received the repo
-# rather than installing into it. On exactly that population, `resync-installed.sh`
-# fails on first use with "Could not locate a defaults/ source tree to sync
-# from" — discovered only AFTER following this script's own remediation, not
-# before (#6202). Mirror resolve_defaults()'s resolution order here (read-only,
-# best-effort) so the gap can be surfaced up front instead.
+# rather than installing into it. There `resync-installed.sh` hands off to
+# `loom-daemon resync-payload` (the installed daemon's embedded payload, #8961)
+# and fails with "Could not locate a defaults/ source tree to sync from" only
+# when no daemon has that subcommand (#6202). Mirror resolve_defaults()'s
+# order here (read-only, best-effort) so the reader knows which path is next.
 #
 # A candidate root is only usable if it has SOMETHING under defaults/ to sync
 # from — `-d "$root/defaults"` alone is not sufficient (#6780): a sidecar or
@@ -276,16 +276,16 @@ fi
 # above, only when the precondition is actually missing.
 warn_resync_precondition_gap() {
     [[ "$RESYNC_PRECONDITION_MET" -eq 0 ]] || return 0
-    warn "${YELLOW}  NOTE (#6202): resync-installed.sh has no source tree to sync from on${NC}"
-    warn "${YELLOW}  this checkout — it will fail with 'Could not locate a defaults/ source${NC}"
-    warn "${YELLOW}  tree to sync from' until one of these is true:${NC}"
-    warn "${YELLOW}    - this checkout IS the Loom source repo (has defaults/hooks or${NC}"
-    warn "${YELLOW}      defaults/scripts), or${NC}"
-    warn "${YELLOW}    - .loom/loom-source-path points at a local clone of the Loom source${NC}"
-    warn "${YELLOW}      repo (written by install.sh / install-loom.sh; gitignored by${NC}"
-    warn "${YELLOW}      design, so it never arrives with a plain \`git clone\` of this repo).${NC}"
-    warn "${YELLOW}  Fix: clone https://github.com/rjwalters/loom locally, then either${NC}"
-    warn "${YELLOW}  re-run its installer against this repo, or point the sidecar at it:${NC}"
+    warn "${YELLOW}  NOTE (#6202, #8961): resync-installed.sh has no Loom source tree to${NC}"
+    warn "${YELLOW}  sync from on this checkout: it is not the Loom source repo, and the${NC}"
+    warn "${YELLOW}  gitignored .loom/loom-source-path sidecar (written by the installer,${NC}"
+    warn "${YELLOW}  so it never arrives with a plain \`git clone\`) names no usable clone.${NC}"
+    warn "${YELLOW}  It will resync from the payload embedded in the installed loom-daemon${NC}"
+    warn "${YELLOW}  instead (\`loom-daemon resync-payload\`: official release builds only,${NC}"
+    warn "${YELLOW}  never a downgrade). With no loom-daemon that has that subcommand it${NC}"
+    warn "${YELLOW}  fails with 'Could not locate a defaults/ source tree to sync from'.${NC}"
+    warn "${YELLOW}  Fix for that case: install or update loom-daemon, or clone${NC}"
+    warn "${YELLOW}  https://github.com/rjwalters/loom and point the sidecar at it:${NC}"
     warn "${YELLOW}      echo /path/to/local/loom-clone > .loom/loom-source-path${NC}"
 }
 

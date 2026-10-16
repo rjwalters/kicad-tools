@@ -129,14 +129,14 @@ outage alert — so those three call sites file with `--force`.
 
 ## The five-signature table
 
-A rejection whose text contains one of these (case-insensitive) is a rate
-limit, not a real failure — retry the same creation over REST instead of
-giving up:
+A rejection whose text contains one of these (case-insensitive; `·` is a
+space, #11411) is a rate limit, not a real failure — retry the same creation
+over REST instead of giving up:
 
 | Signature | Seen as |
 |---|---|
-| `api rate limit exceeded` | REST itself throttling (rare on the fallback path) |
-| `api rate limit already exceeded` | GraphQL: `GraphQL: API rate limit already exceeded for user ID …` |
+| `api rate limit·exceeded` | REST itself throttling (rare on the fallback path) |
+| `api rate limit·already exceeded` | GraphQL, as `GraphQL: … for user ID …` |
 | `secondary rate limit` | either transport, burst throttling |
 | `abuse detection mechanism` | either transport, burst throttling |
 | `was submitted too quickly` | either transport, burst throttling |

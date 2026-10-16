@@ -43,7 +43,7 @@ incident citation, and fixes**:
 ### Key Commands
 
 ```bash
-# Check if there are already open proposals (don't spam)
+# Check if there are already open proposals (don't spam; loom:frozen counts)
 gh issue list --label="loom:architect" --state=open --limit 500
 
 # Create new proposal — blue-badge label applied atomically at creation (#5047)
@@ -119,27 +119,17 @@ EOF
 
 ---
 
-## Tier Labeling Reference
+## Proposal Labeling Reference
 
-**IMPORTANT**: Always apply tier labels to new proposals. This enables the Guide to prioritize effectively.
-
-| Tier | Label | When to Apply |
-|------|-------|---------------|
-| Tier 1 | `tier:goal-advancing` | Directly implements milestone deliverable or unblocks goal work |
-| Tier 2 | `tier:goal-supporting` | Infrastructure, testing, or docs for milestone features |
-| Tier 3 | `tier:maintenance` | Cleanup, refactoring, or improvements not tied to goals |
-
-### Applying Tier Labels
-
-Apply `loom:architect` AND the tier label in the SAME `create-issue.sh` call
-that files the proposal (#5047) — never a follow-up `gh issue edit
---add-label`, which doubles the request count and can half-fail into an
-unlabelled issue no queue query finds:
+Apply `loom:architect` in the SAME `create-issue.sh` call that files the
+proposal (#5047) — never a follow-up `gh issue edit --add-label`, which
+doubles the request count and can half-fail into an unlabelled issue no queue
+query finds. Apply no tier or priority label: `tier:*` is retired, and Guide
+and Champion set priority (#11103).
 
 ```bash
 ./.loom/scripts/create-issue.sh --title "..." --body "..." \
-  --label "loom:architect" \
-  --label "tier:goal-advancing"     # or tier:goal-supporting | tier:maintenance
+  --label "loom:architect"
 ```
 
 ---
@@ -212,10 +202,9 @@ When no clear signal is available, use these defaults:
 7. **Prioritize goal-aligned proposals**: If multiple opportunities exist, prefer Tier 1 over Tier 2 over Tier 3
 8. Create proposal with ONE recommended approach
 9. **Include milestone context**: Document how proposal relates to current milestone
-10. **Add tier label**: Apply appropriate `tier:*` label based on goal alignment
-11. Document all assumptions with sources
-12. Add `loom:architect` label
-13. Clear context (`/clear`)
+10. Document all assumptions with sources
+11. Add `loom:architect` label (no priority label)
+12. Clear context (`/clear`)
 
 ---
 
@@ -231,10 +220,10 @@ To avoid overwhelming the backlog:
 
 ## Priority Assessment Details
 
-Architects never apply a priority label. `loom:operator-priority` is the
-operator's human-only star (#9244). If an issue looks critical (a user-facing
-bug NOW, a security hole, a hotfix, or it blocks all other work), say so in the
-body and let the operator decide whether to star it.
+Architects never apply a priority label: Guide and Champion set
+`loom:important` / `loom:very-important` (#11103). If an issue looks critical (a
+user-facing bug NOW, a security hole, a hotfix, or it blocks all other work),
+say so in the body so they can weigh it.
 
 ---
 

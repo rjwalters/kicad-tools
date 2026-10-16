@@ -23,45 +23,8 @@ TEST_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPTS_DIR="$(cd "$TEST_DIR/.." && pwd)"
 SUT="$SCRIPTS_DIR/check-evaluating-staleness.sh"
 
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-NC='\033[0m'
-
-TESTS_RUN=0
-TESTS_PASSED=0
-TESTS_FAILED=0
-
-assert_eq() {
-    local expected="$1" actual="$2" msg="$3"
-    TESTS_RUN=$((TESTS_RUN + 1))
-    if [[ "$expected" == "$actual" ]]; then
-        TESTS_PASSED=$((TESTS_PASSED + 1))
-        echo -e "  ${GREEN}PASS${NC}: $msg"
-    else
-        TESTS_FAILED=$((TESTS_FAILED + 1))
-        echo -e "  ${RED}FAIL${NC}: $msg"
-        echo "    Expected: '$expected'"
-        echo "    Actual:   '$actual'"
-    fi
-}
-
-# assert_contains/assert_not_contains use a pure-bash substring match (no
-# forked printf|grep pipeline) so a transient fork/exec failure under
-# run-ci-suites.sh's parallel suite pool can never masquerade as a genuine
-# content mismatch (#7819, #7874).
-assert_contains() {
-    local haystack="$1" needle="$2" msg="$3"
-    TESTS_RUN=$((TESTS_RUN + 1))
-    if [[ "$haystack" == *"$needle"* ]]; then
-        TESTS_PASSED=$((TESTS_PASSED + 1))
-        echo -e "  ${GREEN}PASS${NC}: $msg"
-    else
-        TESTS_FAILED=$((TESTS_FAILED + 1))
-        echo -e "  ${RED}FAIL${NC}: $msg"
-        echo "    Expected substring: '$needle'"
-        echo "    In: '$haystack'"
-    fi
-}
+# shellcheck source=lib/assert.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/assert.sh"
 
 if [[ ! -x "$SUT" ]]; then
     echo -e "${RED}FATAL${NC}: $SUT not found or not executable" >&2
@@ -182,16 +145,16 @@ assert_eq "FRESH" "$(get_field "$OUT" DECISION)" "(b) DECISION=FRESH"
 FRESH_AGE="$(get_field "$OUT" AGE_MIN)"
 assert_eq "1" "$([[ "$FRESH_AGE" -ge 1 && "$FRESH_AGE" -le 3 ]] && echo 1 || echo 0)" "(b) AGE_MIN is ~2 (got $FRESH_AGE)"
 
-# (c) Label present, labeled 30 minutes ago, default 15m threshold -> STALE, exit 12.
+# (c) Label present, labeled 50 minutes ago, default 45m threshold -> STALE, exit 12.
 reset_state
 labels_json "loom:architect" "loom:evaluating" > "$STUB_DIR/labels-102.json"
-CLAIMED_AT="$(now_minus_minutes 30)"
+CLAIMED_AT="$(now_minus_minutes 50)"
 printf '[%s]' "$(labeled_event "$CLAIMED_AT" "loom:evaluating")" > "$STUB_DIR/timeline-102.json"
 run_sut --issue 102
-assert_eq "12" "$RC" "(c) stale claim (30m old) -> exit 12"
+assert_eq "12" "$RC" "(c) stale claim (50m old) -> exit 12"
 assert_eq "STALE" "$(get_field "$OUT" DECISION)" "(c) DECISION=STALE"
 STALE_AGE="$(get_field "$OUT" AGE_MIN)"
-assert_eq "1" "$([[ "$STALE_AGE" -ge 29 && "$STALE_AGE" -le 31 ]] && echo 1 || echo 0)" "(c) AGE_MIN is ~30 (got $STALE_AGE)"
+assert_eq "1" "$([[ "$STALE_AGE" -ge 49 && "$STALE_AGE" -le 51 ]] && echo 1 || echo 0)" "(c) AGE_MIN is ~50 (got $STALE_AGE)"
 
 # (d) --threshold-minutes overrides the default: a 10m-old claim is STALE at a 5m threshold.
 reset_state
@@ -280,10 +243,10 @@ assert_eq "1" "$RC" "(l) non-numeric --issue -> exit 1"
 # (m) A claim exactly AT the threshold is STALE (>=, not >).
 reset_state
 labels_json "loom:evaluating" > "$STUB_DIR/labels-111.json"
-CLAIMED_AT="$(now_minus_minutes 15)"
+CLAIMED_AT="$(now_minus_minutes 45)"
 printf '[%s]' "$(labeled_event "$CLAIMED_AT" "loom:evaluating")" > "$STUB_DIR/timeline-111.json"
 run_sut --issue 111
-assert_eq "12" "$RC" "(m) exactly 15m old at default 15m threshold -> STALE (>=)"
+assert_eq "12" "$RC" "(m) exactly 45m old at default 45m threshold -> STALE (>=)"
 
 echo ""
 echo "Results: $TESTS_PASSED/$TESTS_RUN passed"

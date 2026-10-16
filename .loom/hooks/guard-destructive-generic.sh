@@ -1906,12 +1906,18 @@ function has_live_subst(str,    i, c, bs) {
 # Do not restate this as "harmless": state the direction.
 #
 # Shared as a single awk source string so the three parsers cannot drift.
+#
+# SEPARATOR SIDE-CHANNEL (#9405): every `\n` emitted for a `;`/`&&`/`&`/`||`/`|`
+# also records that operator in the global qsplit_op[k] (k = 1..qsplit_nops,
+# reset per call), so qsplit_op[k] is the operator BETWEEN output segments k
+# and k+1. Callers that ignore it are unaffected; parse_force_ops() reads it.
 # =============================================================================
 _QSPLIT_AWK="$_HASLIVESUBST_AWK"'
 function qsplit(s,   out, n, i, c, j, qc, ci, inner, SQ, DQ, k, ch, scanfrom, bs, bk) {
     SQ = sprintf("%c", 39)   # single quote
     DQ = sprintf("%c", 34)   # double quote
     out = ""
+    qsplit_nops = 0
     n = length(s)
     i = 1
     while (i <= n) {
@@ -2020,14 +2026,14 @@ function qsplit(s,   out, n, i, c, j, qc, ci, inner, SQ, DQ, k, ch, scanfrom, bs
             k = i + 1
             while (k < ci) {
                 ch = substr(s, k, 1)
-                if (ch == ";") { out = out "\n"; k++; continue }
+                if (ch == ";") { out = out "\n"; qsplit_op[++qsplit_nops] = ";"; k++; continue }
                 if (ch == "&") {
-                    if (substr(s, k + 1, 1) == "&") { out = out "\n"; k += 2; continue }
-                    out = out "\n"; k++; continue
+                    if (substr(s, k + 1, 1) == "&") { out = out "\n"; qsplit_op[++qsplit_nops] = "&&"; k += 2; continue }
+                    out = out "\n"; qsplit_op[++qsplit_nops] = "&"; k++; continue
                 }
                 if (ch == "|") {
-                    if (substr(s, k + 1, 1) == "|") { out = out "\n"; k += 2; continue }
-                    out = out "\n"; k++; continue
+                    if (substr(s, k + 1, 1) == "|") { out = out "\n"; qsplit_op[++qsplit_nops] = "||"; k += 2; continue }
+                    out = out "\n"; qsplit_op[++qsplit_nops] = "|"; k++; continue
                 }
                 out = out ch
                 k++
@@ -2108,14 +2114,14 @@ function qsplit(s,   out, n, i, c, j, qc, ci, inner, SQ, DQ, k, ch, scanfrom, bs
             i += 2
             continue
         }
-        if (c == ";") { out = out "\n"; i++; continue }
+        if (c == ";") { out = out "\n"; qsplit_op[++qsplit_nops] = ";"; i++; continue }
         if (c == "&") {
-            if (i < n && substr(s, i + 1, 1) == "&") { out = out "\n"; i += 2; continue }
-            out = out "\n"; i++; continue
+            if (i < n && substr(s, i + 1, 1) == "&") { out = out "\n"; qsplit_op[++qsplit_nops] = "&&"; i += 2; continue }
+            out = out "\n"; qsplit_op[++qsplit_nops] = "&"; i++; continue
         }
         if (c == "|") {
-            if (i < n && substr(s, i + 1, 1) == "|") { out = out "\n"; i += 2; continue }
-            out = out "\n"; i++; continue
+            if (i < n && substr(s, i + 1, 1) == "|") { out = out "\n"; qsplit_op[++qsplit_nops] = "||"; i += 2; continue }
+            out = out "\n"; qsplit_op[++qsplit_nops] = "|"; i++; continue
         }
         out = out c
         i++
@@ -2671,7 +2677,7 @@ BEGIN {
 # (a masked-away `>` can only DROP a write target, never invent a new deny).
 # =============================================================================
 _MASKGT_AWK='
-function mask_gt(s,   out, n, i, c, mode, SQ, DQ, MASK, adepth, tdepth, esc, btick) {
+function mask_gt(s,   out, n, i, c, mode, SQ, DQ, MASK, adepth, tdepth, esc, btick, bq) {
     SQ = sprintf("%c", 39)    # single quote
     DQ = sprintf("%c", 34)    # double quote
     MASK = sprintf("%c", 1)   # SOH -- placeholder for a quoted/arith-context ">"/"<" (never a real char)
@@ -2683,6 +2689,7 @@ function mask_gt(s,   out, n, i, c, mode, SQ, DQ, MASK, adepth, tdepth, esc, bti
     tdepth = 0   # `[[...]]` test-context nesting depth (unquoted only)
     esc = 0      # previous byte was an unescaped backslash (mode 0/2 only, #6472)
     btick = 0    # inside an unquoted `...` command substitution (#8211)
+    bq = 0       # quote state INSIDE a backtick span, for masking ">" only (#12076): 0 none, 1 single, 2 double
     while (i <= n) {
         c = substr(s, i, 1)
         if (esc) {
@@ -2692,12 +2699,13 @@ function mask_gt(s,   out, n, i, c, mode, SQ, DQ, MASK, adepth, tdepth, esc, bti
             # every ">" is already masked regardless of escaping, so that
             # half of the ternary is a no-op there, not a behavior change.
             esc = 0
-            out = out (mode == 2 && c == ">" ? MASK : c)
+            out = out ((mode == 2 || bq == 2) && c == ">" ? MASK : c)
             i++
             continue
         }
-        if (c == "\\" && mode != 1) {
-            # Single-quoted mode (mode == 1) is handled below and never
+        if (c == "\\" && mode != 1 && bq != 1) {
+            # Single-quoted mode (mode == 1, or bq == 1 inside a backtick
+            # span) is handled below and never
             # reaches here: a backslash has no escaping power inside single
             # quotes in real bash, so it must stay a plain literal byte
             # there and must never suppress the next quote-close check.
@@ -2709,7 +2717,20 @@ function mask_gt(s,   out, n, i, c, mode, SQ, DQ, MASK, adepth, tdepth, esc, bti
         if (mode == 0) {
             # An unquoted backtick span makes the quote characters inside it
             # literal data (#8211 -- lockstep with mask_ws(), see above).
-            if (c == "`") { btick = 1 - btick; out = out c; i++; continue }
+            #
+            # #12076: a quoted ">" inside that span is still data, so track a
+            # SEPARATE quote state (bq) that only masks ">" bytes. It never
+            # touches `mode`, so mask_ws() lockstep and the #8211 span-boundary
+            # handling are unchanged, and a backtick always closes the span
+            # (resetting bq) so a quote can never hide the real close.
+            if (c == "`") { btick = 1 - btick; bq = 0; out = out c; i++; continue }
+            if (btick && bq == 0 && (c == SQ || c == DQ)) { bq = (c == SQ ? 1 : 2); out = out c; i++; continue }
+            if (btick && bq != 0) {
+                if ((bq == 1 && c == SQ) || (bq == 2 && c == DQ)) bq = 0
+                out = out (c == ">" ? MASK : c)
+                i++
+                continue
+            }
             if (c == SQ && !btick) { mode = 1; out = out c; i++; continue }
             if (c == DQ && !btick) { mode = 2; out = out c; i++; continue }
             if (c == "(" && i < n && substr(s, i + 1, 1) == "(") {
@@ -4713,12 +4734,18 @@ parse_force_ops() {
                         if (_cdpwd_rest == "" || _cdpwd_rest == DQ) _cdpwd_closed = 1
                     }
                 }
+                # #9405: only a `&&`/`;` split (or a line break, i == 1) runs
+                # `pwd` in the cd'"'"'d shell. `|`/`&` run each side in its own
+                # subshell and `||` skips `pwd` -- abandon unresolved (ask).
+                if (i > 1 && qsplit_op[i - 1] != "&&" && qsplit_op[i - 1] != ";") _cdpwd_closed = 0
                 if (_cdpwd_closed) {
                     _cdpwd_resolved = resolve_cdpwd_literal(pending_cdpwd_path, curcwd, home)
                     if (_cdpwd_resolved != "") varmap[pending_cdpwd_name] = _cdpwd_resolved
                     pending_cdpwd_name = ""
                     continue
                 }
+                # The shell DID assign NAME even though the close was refused: never keep the stale prior value (ask->allow flip). AMBIG, not delete, so a later conditional reassignment is not trusted.
+                varmap[pending_cdpwd_name] = AMBIG
                 pending_cdpwd_name = ""
             }
             # Record any `NAME=value` assignment(s) leading this segment into
@@ -6216,6 +6243,217 @@ mask_catastrophic_comment_lines() {
     }'
 }
 
+# Extract every `>`/`>>` redirect target that could be the sink of a
+# `cat > file <<'EOF'` block, from lines that at least START like one
+# (`cat …` containing `<<`). Deliberately LOOSE: anything this over-collects
+# only makes the proof below stricter -- a path that gets checked without
+# being a real sink skips masking, it never enables it. Output: one target
+# token per line, drawn from the masker's own TGT charset, so a token can
+# contain neither blanks nor newlines.
+heredoc_filesink_candidate_targets() {
+    printf '%s\n' "$1" | awk '
+    BEGIN { PAT = ">[ \t]*[A-Za-z0-9_./+@%,:-]+" }
+    {
+        line = $0
+        if (line !~ /^[ \t]*cat[ \t]/ || line !~ /<</) next
+        # Dynamic STRING regex (not a /.../ literal): an unescaped "/" inside
+        # a bracket expression ends the literal early on BWK awk (macOS).
+        while (match(line, PAT)) {
+            t = substr(line, RSTART, RLENGTH)
+            sub(/^>[ \t]*/, "", t)
+            print t
+            line = substr(line, RSTART + RLENGTH)
+        }
+    }'
+}
+
+# The filesystem half of the sink proof (#9870 review): see condition (5) of
+# mask_catastrophic_filesink_heredocs()'s header above. Returns 0 only when
+# EVERY candidate target's final component -- resolved against the session
+# cwd from the hook input when the target is relative -- is not a symlink
+# and is either absent or a plain regular file.
+heredoc_filesink_targets_are_inert() {
+    local t p targets
+    # Capture the extractor's output AND status first: a failed extraction
+    # (awk dialect parse error, ...) must fail CLOSED, never read as "no
+    # candidates -> inert". (Judge review, macOS BWK awk.)
+    targets=$(heredoc_filesink_candidate_targets "$1" 2>/dev/null) || return 1
+    while IFS= read -r t; do
+        [ -n "$t" ] || continue
+        case "$t" in
+            /*) p=$t ;;
+            *)
+                # A relative target opens against the session cwd (the hook
+                # input's `cwd`), not against this hook process's own cwd.
+                # No CWD in the input -> the open's directory is unknown ->
+                # fail closed.
+                if [[ -z "$CWD" ]]; then return 1; fi
+                p="$CWD/$t" ;;
+        esac
+        # A symlink is denied whatever it points at (regular file included):
+        # resolution adds nothing but doubt, and a dangling link, a
+        # link-to-FIFO and a link to somewhere off-tree all fail the same
+        # way. Anything that exists but is not a regular file -- FIFO,
+        # socket, device, directory -- is likewise no inert sink.
+        if [ -L "$p" ] || { [ -e "$p" ] && [ ! -f "$p" ]; }; then
+            return 1
+        fi
+    done <<EOF
+$targets
+EOF
+    return 0
+}
+
+# Mask the bodies of direct file-write heredocs (`cat > file <<'EOF' ... EOF`)
+# for the catastrophic scan ONLY (#9870). Without this, a fixture, a doc or a
+# note written with a QUOTED-delimiter heredoc hard-denies whenever its body
+# merely mentions a catastrophic-tier phrase, even though that text is written
+# to a file and never executed. (The SQL-DDL half of #9870 was already fixed:
+# that check reads COMMAND_ASK_SCAN, which has its own heredoc pass.)
+#
+# THIS NARROWS THE UNGATED DENIAL FLOOR, so it is a WHOLE-COMMAND SINK
+# ALLOWLIST and nothing else. It is deliberately NOT a reuse of
+# mask_heredoc_bodies_selective(): that pass is an interpreter DENYLIST (it
+# masks every quoted heredoc except openers it recognises as interpreters), so
+# any sink nobody listed -- `ssh host <<'EOF'`, `psql db <<'EOF'`, `sudo -s`,
+# `xargs` -- would be masked here. Wrong polarity for the floor.
+#
+# Bodies are masked only when the ENTIRE command, line by line, is nothing but
+# blank lines and heredoc blocks that each satisfy ALL of:
+#
+#   1. OPENER LINE, IN FULL, is one bare `cat` with exactly one `>`/`>>`
+#      redirect and exactly one heredoc, in either order:
+#          cat > TARGET <<'DELIM'      cat <<'DELIM' > TARGET
+#      (`>>`, `<<-`, `<<"DELIM"` and optional blanks accepted). Anchored at
+#      both ends, so no other word, flag, argument, second redirect, fd
+#      number, pipe, `;`, `&`, `(`, `{`, `$(`, backtick, assignment prefix,
+#      wrapper (`sudo`, `env`, a path to cat) or line continuation can sit on
+#      the line. `tee` is excluded on purpose: it copies the body to stdout.
+#   2. DELIMITER IS QUOTED (single or double, both quotes present) and is
+#      [A-Za-z0-9_]+ -- so the outer shell performs NO expansion on the body.
+#      An unquoted or backslash-escaped delimiter never qualifies.
+#   3. TARGET IS A LITERAL PATH drawn from [A-Za-z0-9_./+@%,:-] only: no `$`,
+#      backtick, quote, glob, brace, `~`, `=`, `&`, space. It must not have a
+#      `dev`, `proc` or `..` path component (case-insensitively), so it cannot
+#      name /dev/stdout, /dev/fd/N, /dev/tcp/..., /proc/self/fd/N -- and it
+#      must also pass the ON-DISK proof in (5) below.
+#   4. THE BLOCK IS CLOSED by a line that is exactly DELIM, using the real
+#      shell rule (leading TABS stripped only for `<<-`). Terminating earlier
+#      or later than the shell does would misclassify live lines, so there is
+#      no best-effort matching here.
+#   5. THE TARGET PROVES INERT ON DISK (#9870 review). A literal token is a
+#      claim about TEXT, not about the filesystem: `cat > P` does not create
+#      P -- it OPENS whatever P already is. If an earlier command or an
+#      unrelated process left a FIFO at P, the body becomes that FIFO's
+#      reader's input (`bash </tmp/f`, `xargs -a /tmp/f`, a logger), and a
+#      symlink resolves to whichever object really sits at the end -- the
+#      body executes even though the command reads as a plain file write.
+#      heredoc_filesink_targets_are_inert() therefore stats every candidate
+#      target (resolved against the session cwd from the hook input when
+#      relative): the final component must NOT be a symlink, and must be
+#      either ABSENT (a fresh open creates a regular file or fails outright)
+#      or a plain REGULAR FILE (writing truncates bytes; it feeds nobody).
+#      FIFO, socket, device, directory, symlink and dangling link all leave
+#      the buffer unchanged, keeping the whole command visible to the
+#      catastrophic floor. Residual TOCTOU -- an object swapped in between
+#      this stat and the command's own open(2) -- requires a hostile local
+#      process already racing the guard and is accepted; it is unreachable
+#      without one.
+#
+# WHY WHOLE-COMMAND, and not "this one block looks fine" (which is what the
+# curated plan on #9870 proposed, with a "target basename appears nowhere
+# else" read check). Two same-command bypasses of the per-block rule:
+#   * QUOTE CONTEXT. A perfect-looking opener line can sit INSIDE a quoted
+#     string opened on an earlier line; the shell then sees no heredoc at all
+#     and the "body" is live text after the closing quote.
+#   * `cat` REBOUND. An earlier `cat() { bash; }` (or `hash -p`, an alias, a
+#     PATH prefix) makes the opener feed the body to an interpreter.
+# and one of the basename check: a file can be executed without being named
+# (`bash ./*.sh`, `for f in *`, `find -exec`). Requiring that NOTHING else is
+# in the command removes all three at once and needs no heuristics: the first
+# opener is at command position in a fresh shell, nothing can rebind `cat`,
+# and nothing exists that could read or execute what was written. The cost is
+# that `cat > f <<'EOF' ... EOF` followed by any other command keeps today's
+# behaviour (body visible, still denied if it mentions a catastrophic phrase).
+#
+# FAIL CLOSED: any line that is neither blank, a qualifying opener, part of a
+# qualifying closed body, nor its terminator returns the buffer UNCHANGED --
+# no partial masking, so a second heredoc that does not qualify leaves the
+# first one visible too. Line count and every non-body line are preserved, so
+# the two copies derived from COMMAND_NO_LITERAL_TEXT are unaffected.
+mask_catastrophic_filesink_heredocs() {
+    # On-disk sink proof FIRST (#9870 review): the text pass below can only
+    # reason about tokens. If any candidate target is (or may resolve to)
+    # something other than an absent path or a plain regular file, return the
+    # buffer unchanged so the catastrophic floor stays armed.
+    if ! heredoc_filesink_targets_are_inert "$1"; then
+        printf '%s' "$1"
+        return
+    fi
+    printf '%s' "$1" | awk '
+    BEGIN {
+        SQ = sprintf("%c", 39)
+        DQ = sprintf("%c", 34)
+        MASKC = sprintf("%c", 23) # ETB, same placeholder as mask_heredoc_bodies()
+        WS = "[ \t]*"
+        TGT = "[A-Za-z0-9_./+@%,:-]+"
+        DLM = "(" SQ "[A-Za-z0-9_]+" SQ "|" DQ "[A-Za-z0-9_]+" DQ ")"
+        RED = ">>?" WS TGT
+        HD = "<<-?" WS DLM
+        OPENER = "^" WS "cat[ \t]+(" RED WS HD "|" HD WS RED ")" WS "$"
+        buf = ""
+    }
+    { buf = buf (NR > 1 ? "\n" : "") $0 }
+    END {
+        nl = split(buf, lines, "\n")
+        nblocks = 0
+        i = 1
+        while (i <= nl) {
+            line = lines[i]
+            if (line ~ /^[ \t]*$/) { i++; continue }
+            if (line !~ OPENER) { printf "%s", buf; exit }
+            # Target: the word after the one `>`/`>>` on the line.
+            tgt = substr(line, index(line, ">"))
+            sub(/^>>?[ \t]*/, "", tgt)
+            if (!match(tgt, "^" TGT)) { printf "%s", buf; exit }
+            tgt = tolower(substr(tgt, 1, RLENGTH))
+            if (tgt ~ /(^|\/)(dev|proc|\.\.)(\/|$)/) { printf "%s", buf; exit }
+            # Delimiter: the quoted word after the one `<<` on the line.
+            rest = substr(line, index(line, "<<") + 2)
+            dash = 0
+            if (substr(rest, 1, 1) == "-") { dash = 1; rest = substr(rest, 2) }
+            sub(/^[ \t]+/, "", rest)
+            q = substr(rest, 1, 1)
+            rest = substr(rest, 2)
+            e = index(rest, q)
+            if ((q != SQ && q != DQ) || e < 2) { printf "%s", buf; exit }
+            delim = substr(rest, 1, e - 1)
+            closeat = 0
+            for (j = i + 1; j <= nl; j++) {
+                t = lines[j]
+                if (dash) sub(/^\t+/, "", t)
+                if (t == delim) { closeat = j; break }
+            }
+            if (closeat == 0) { printf "%s", buf; exit }
+            nblocks++
+            bfrom[nblocks] = i + 1
+            bto[nblocks] = closeat - 1
+            i = closeat + 1
+        }
+        # Every line was accounted for: only now is anything masked.
+        for (b = 1; b <= nblocks; b++) {
+            for (j = bfrom[b]; j <= bto[b]; j++) {
+                body = lines[j]
+                gsub(/./, MASKC, body)
+                lines[j] = body
+            }
+        }
+        out = lines[1]
+        for (i = 2; i <= nl; i++) out = out "\n" lines[i]
+        printf "%s", out
+    }'
+}
+
 # Toggle hint (issue #10434): one line naming the env var (set under the
 # Claude Code settings.json "env" block -- the hook is a separate process, so an
 # inline `VAR=x cmd` prefix is invisible to it and is never suggested) and the
@@ -6348,7 +6586,20 @@ ALWAYS_BLOCK_PATTERNS=(
     # quoted/nested invocation such as `bash -c 'curl … | sh'` is not caught
     # by the leading-position anchor, because the character immediately
     # before `curl` is a quote, not one of the anchor's separator classes.
-    '(^|[;&|[:space:](])(curl|wget)[^;&]*\|[[:space:]]*(sudo[[:space:]]+(-[^[:space:]]+[[:space:]]+)*)?([^[:space:]|;&]*/)?(ba|da|z|k|c|tc|fi|pw)?sh([[:space:]]|$|[;&|)])'
+    # #11136: the span between curl/wget and the sink is quote-aware (a quoted
+    # run is consumed whole), so a literal `|` or shell name inside a later
+    # stage's quoted argument (`… | rg -n 'a|dash|b'`) is never the sink pipe;
+    # only an unquoted pipe followed by a shell command word matches. Kept as
+    # a regex refinement (not a daemon subcommand) because this is a one-token
+    # change to an existing floor pattern that must stay fail-closed in-hook.
+    # Fail-closed on stray quotes: `\\.` consumes a backslash-escaped char
+    # (`curl a\' | sh`), and the two trailing sink alternatives let an
+    # UNBALANCED quote (no partner later on the line) degrade to the old
+    # `[^;&]*` over-match. A plain lone-quote span alternative is NOT enough:
+    # grep -E accepts any parse, so it would re-split `'a|dash|b'` and restore
+    # the #11136 false positive. Pathological-input cost is polynomial (DFA, no
+    # backrefs), measured ~4ms at 4KB.
+    '(^|[;&|[:space:](])(curl|wget)([^;&|'"'"'"\\]|\\.|'"'"'[^'"'"']*'"'"'|"([^"\\]|\\.)*"|\|)*(\|[[:space:]]*(sudo[[:space:]]+(-[^[:space:]]+[[:space:]]+)*)?([^[:space:]|;&]*/)?(ba|da|z|k|c|tc|fi|pw)?sh([[:space:]]|$|[;&|)])|'"'"'[^'"'"';&]*\|[[:space:]]*(sudo[[:space:]]+(-[^[:space:]]+[[:space:]]+)*)?([^[:space:]|;&]*/)?(ba|da|z|k|c|tc|fi|pw)?sh([[:space:]]|$|[;&|)])[^'"'"']*$|"[^";&]*\|[[:space:]]*(sudo[[:space:]]+(-[^[:space:]]+[[:space:]]+)*)?([^[:space:]|;&]*/)?(ba|da|z|k|c|tc|fi|pw)?sh([[:space:]]|$|[;&|)])[^"]*$)'
 
     # Cloud infrastructure destruction. The aws forms below are specific
     # multi-token phrases, so they stay in this raw substring scan. The az/gcloud
@@ -6452,6 +6703,15 @@ ALWAYS_BLOCK_PATTERNS=(
 # payloads still reach the raw scan; spans carrying `$(` / backtick are left
 # intact so command-substitution smuggling still hard-denies.
 COMMAND_NO_LITERAL_TEXT="$COMMAND"  # scan-contract: COMMAND_NO_LITERAL_TEXT=catastrophic-safe from=COMMAND
+# #9870: mask the bodies of direct file-write heredocs FIRST, while the working
+# copy is still byte-identical to $COMMAND, and only when the WHOLE command is
+# nothing but `cat > <literal file> <<'DELIM' ... DELIM` blocks -- see
+# mask_catastrophic_filesink_heredocs()'s header for the allowlist and why it
+# is whole-command rather than per-block. Anything else returns the buffer
+# unchanged. Cheap substring gate keeps the awk call off the hot path.
+if [[ "$COMMAND" == *"<<"* ]]; then
+    COMMAND_NO_LITERAL_TEXT=$(mask_catastrophic_filesink_heredocs "$COMMAND_NO_LITERAL_TEXT")
+fi
 # #6002: mask a fully-closed `for <var> in "<lit>" ...; do ... done` word
 # list's OWN quoted literals BEFORE every other pass below, so a phrase like
 # `for q in "sql-ddl" "catastrophic:aws s3 rb"; do gh issue list --search
@@ -6565,9 +6825,9 @@ done
 # `--body "@reviewer Could you clarify..."`, the shape doctor.md's own
 # "Can't Understand Feedback" example uses) and must NOT be treated as the
 # `-F body=@path` anti-pattern (#4577).
-GH_COMMENT_BODY_AT_PATTERN="(^|[;&|[:space:]])gh[[:space:]]+(pr|issue)[[:space:]]+comment[^;&]*(-b|--body)[[:space:]]*=?[[:space:]]*[\"']?@[/.~]"
+GH_COMMENT_BODY_AT_PATTERN="(^|[;&|[:space:]])gh[[:space:]]+(pr|issue)[[:space:]]+comment[^;&]*(-b|--body)[[:space:]]*=?[[:space:]]*[\"']?@([/.~]|-([\"'[:space:]]|$))"
 if echo "$COMMAND" | grep -qiE "$GH_COMMENT_BODY_AT_PATTERN"; then
-    deny "BLOCKED: 'gh pr comment'/'gh issue comment --body @path' does NOT expand the file — it posts the literal string '@path' as the comment (lost the PR #4457 review this way). Use --body \"\$(cat <<'EOF' ... EOF)\", -F/--body-file <path>, or 'gh api ... -F body=@<path>' instead." "gh-comment-body-literal-at"  # scan-reads: none
+    deny "BLOCKED: 'gh pr comment'/'gh issue comment --body @path' (or '--body @-') does NOT expand the file or read stdin — it posts the literal string '@path'/'@-' as the comment (lost the PR #4457 review this way; #9258 merged on an approval whose body was '@-'). Use --body \"\$(cat <<'EOF' ... EOF)\", -F/--body-file <path>, or 'gh api ... -F body=@<path>' instead." "gh-comment-body-literal-at"  # scan-reads: none
 fi
 
 # =============================================================================
@@ -6580,9 +6840,9 @@ fi
 # widened GH_COMMENT_BODY_AT_PATTERN (#4577's additive-not-widened precedent),
 # so the two subcommands' patterns can be fixed/tuned independently.
 # =============================================================================
-GH_EDIT_BODY_AT_PATTERN="(^|[;&|[:space:]])gh[[:space:]]+(pr|issue)[[:space:]]+edit[^;&]*(-b|--body)[[:space:]]*=?[[:space:]]*[\"']?@[/.~]"
+GH_EDIT_BODY_AT_PATTERN="(^|[;&|[:space:]])gh[[:space:]]+(pr|issue)[[:space:]]+edit[^;&]*(-b|--body)[[:space:]]*=?[[:space:]]*[\"']?@([/.~]|-([\"'[:space:]]|$))"
 if echo "$COMMAND" | grep -qiE "$GH_EDIT_BODY_AT_PATTERN"; then
-    deny "BLOCKED: 'gh pr edit'/'gh issue edit --body @path' does NOT expand the file — it writes the literal string '@path' as the issue/PR body (corrupted issue #4608's body this way). Use --body \"\$(cat <<'EOF' ... EOF)\", -F/--body-file <path>, or 'gh api ... -F body=@<path>' instead." "gh-edit-body-literal-at"  # scan-reads: none
+    deny "BLOCKED: 'gh pr edit'/'gh issue edit --body @path' (or '--body @-') does NOT expand the file or read stdin — it writes the literal string '@path'/'@-' as the issue/PR body (corrupted issue #4608's body this way). Use --body \"\$(cat <<'EOF' ... EOF)\", -F/--body-file <path>, or 'gh api ... -F body=@<path>' instead." "gh-edit-body-literal-at"  # scan-reads: none
 fi
 
 # =============================================================================
@@ -6629,7 +6889,7 @@ fi
 #      @scratch/review.md
 # Deliberately NOT `@\S+`: that would match `@rjwalters`, `@org/team`, and
 # `@example.com` prose, i.e. exactly the #4577 false-positive family.
-GH_AT_PATHISH="@((/|~/|\.\.?/)[^[:space:]\"';&|]*|[^[:space:]\"';&|]*\.(md|markdown|txt|text|log|json|ya?ml|diff|patch|out))"
+GH_AT_PATHISH="@((/|~/|\.\.?/)[^[:space:]\"';&|]*|[^[:space:]\"';&|]*\.(md|markdown|txt|text|log|json|ya?ml|diff|patch|out)|-([\"'[:space:];&|]|$))"
 
 # Both rules below require a literal `@` somewhere in the command, so this
 # bash-builtin prefilter keeps them entirely off the hot path for the vast
@@ -6766,7 +7026,7 @@ if [[ "$COMMAND" == *"@"* ]]; then
     fi
     GH_API_RAWFIELD_BODY_AT_PATTERN="(^|[;&|[:space:]])gh[[:space:]]+api[^;&]*[[:space:]](-f|--raw-field)[[:space:]]*=?[[:space:]]*[\"']?body=[\"']?$GH_AT_PATHISH"
     if echo "$COMMAND_GH_API_RAWFIELD_SCAN" | grep -qE "$GH_API_RAWFIELD_BODY_AT_PATTERN"; then
-        deny "BLOCKED: 'gh api ... -f/--raw-field body=@<path>' does NOT read the file — only -F/--field gives '@<path>' its read-from-file meaning. As written this posts the literal string '@<path>' as the body (same silent data loss as PR #4457/issue #4608). Use '-F body=@<path>' instead." "gh-api-rawfield-body-literal-at"  # scan-reads: COMMAND_GH_API_RAWFIELD_SCAN
+        deny "BLOCKED: 'gh api ... -f/--raw-field body=@<path>' (or 'body=@-') does NOT read the file or stdin — only -F/--field gives '@<path>'/'@-' its read meaning (#9258). As written this posts the literal string '@<path>' as the body (same silent data loss as PR #4457/issue #4608). Use '-F body=@<path>' instead." "gh-api-rawfield-body-literal-at"  # scan-reads: COMMAND_GH_API_RAWFIELD_SCAN
     fi
 fi
 
@@ -7111,10 +7371,86 @@ fi
 # text-carrying flags, so the real invocations (`psql -c '…'`, `mysql -e '…'`)
 # are untouched and still deny.
 # =============================================================================
-SQL_DDL_PATTERN='DROP DATABASE|DROP TABLE|DROP SCHEMA|TRUNCATE TABLE'
-if echo "$COMMAND_ASK_SCAN" | grep -qiE "$SQL_DDL_PATTERN" && sql_guard_enabled; then
-    matched=$(echo "$COMMAND_ASK_SCAN" | grep -oiE "$SQL_DDL_PATTERN" | head -1)
-    deny "BLOCKED: Command matches dangerous pattern: ${matched:-SQL DDL statement}" "sql-ddl"  # scan-reads: COMMAND_ASK_SCAN
+# WHAT RUNS THE PHRASE, NOT WHERE IT APPEARS (#11007). The phrase is only
+# dangerous when it reaches something that EXECUTES it, so sql_ddl_exec_match()
+# segments the command with qsplit() and matches only a segment whose command
+# word is a DB client (`sqlite3`, `psql`, `mysql`, ...), an interpreter given
+# inline code (`python -c`, `node -e`, `bash -c`, ...), or a wrapper whose
+# payload is a command string (`ssh`, `docker|podman|kubectl exec|run`) -- or a
+# DB client fed the phrase by the pipeline (`echo 'DROP TABLE t;' | sqlite3 db`)
+# or by its own heredoc. Editors, `sed -i`, `git log -S`, search tools, `jq`,
+# `cat` and interpreters reading a script/heredoc no longer match, so no
+# SQL-specific carve-out is needed for them. Accepted trade-off: an
+# interpreter running DDL from a script file or heredoc is not caught (as with
+# `python3 script.py` before).
+sql_ddl_exec_match() {
+    printf '%s' "$1" | awk "$_QSPLIT_AWK"'
+    function phrase(t,   l) {
+        l = tolower(t)
+        if (match(l, /drop database|drop table|drop schema|truncate table/))
+            return toupper(substr(l, RSTART, RLENGTH))
+        return ""
+    }
+    function runs_sql(cmd, toks, m,   j, base) {
+        base = cmd
+        sub(/^.*\//, "", base)
+        if (base ~ /^(sqlite3?|psql|mysql|mariadb|duckdb|clickhouse-client|sqlcmd)$/) return 1
+        if (base ~ /^(python[0-9.]*|node|nodejs|ruby|perl|bash|sh|zsh|dash|ksh)$/) {
+            for (j = 2; j <= m; j++) if (toks[j] ~ /^-[A-Za-z]*[ceE][A-Za-z]*$/) return 1
+            return 0
+        }
+        if (base == "ssh") return 1
+        if (base ~ /^(docker|podman|kubectl)$/) {
+            for (j = 2; j <= m; j++) if (toks[j] == "exec" || toks[j] == "run") return 1
+        }
+        return 0
+    }
+    # Whole-command scan: a heredoc body spans physical lines, so buffer them all.
+    { buf = (NR > 1 ? buf "\n" : "") $0 }
+    END {
+        out = qsplit(buf)   # quote-aware segmentation (#3755)
+        n = split(out, segs, "\n")
+        for (i = 1; i <= n; i++) {
+            seg = segs[i]
+            sub(/^[ \t]+/, "", seg)
+            sub(/^sudo[ \t]+/, "", seg)
+            if (sub(/^env([ \t]+|$)/, "", seg)) {
+                sub(/^[ \t]+/, "", seg)
+                stripped = 1
+                while (stripped) {
+                    stripped = 0
+                    if (sub(/^-u[ \t]+[^ \t]+([ \t]+|$)/, "", seg)) { stripped = 1; continue }
+                    if (sub(/^-i([ \t]+|$)/, "", seg))              { stripped = 1; continue }
+                    if (sub(/^--([ \t]+|$)/, "", seg))              { break }
+                }
+            }
+            while (sub(/^[A-Za-z_][A-Za-z0-9_]*=[^ \t]*[ \t]+/, "", seg)) {}
+            sub(/^[ \t]+/, "", seg)
+            m = split(seg, toks, /[ \t]+/)
+            if (m == 0 || !runs_sql(toks[1], toks, m)) continue
+            ph = phrase(segs[i])
+            if (ph != "") { print ph; exit }
+            # Phrase fed by the pipeline: walk back over `|`-joined segments.
+            for (j = i - 1; j >= 1 && qsplit_op[j] == "|"; j--) {
+                ph = phrase(segs[j])
+                if (ph != "") { print ph; exit }
+            }
+            # Phrase in a later heredoc-body segment of this same command.
+            if (seg ~ /<</ && seg !~ /<<</) {
+                for (j = i + 1; j <= n; j++) {
+                    ph = phrase(segs[j])
+                    if (ph != "") { print ph; exit }
+                }
+            }
+        }
+    }'
+}
+# Cheap grep first so the awk and the config read stay off the hot path.
+if echo "$COMMAND_ASK_SCAN" | grep -qiE 'DROP DATABASE|DROP TABLE|DROP SCHEMA|TRUNCATE TABLE'; then
+    matched=$(sql_ddl_exec_match "$COMMAND_ASK_SCAN")
+    if [[ -n "$matched" ]] && sql_guard_enabled; then
+        deny "BLOCKED: Command matches dangerous pattern: $matched. Editing source that contains this statement? Use the Edit/Write tools." "sql-ddl"  # scan-reads: COMMAND_ASK_SCAN
+    fi
 fi
 
 # =============================================================================
@@ -8725,14 +9061,44 @@ _extract_write_targets_scan() {
                 # every FILE argument after that is still fully scanned, so a
                 # genuine main-checkout target among them still denies.
                 bare_i_pending = 0
+                have_script = 0
+                end_opts = 0
                 sed_skip = 1
                 nf = 0
                 delete nfargs
                 for (j = 2; j <= m; j++) {
                     if (j in stdin_redir) continue
                     if (j in numfd_redir) continue
+                    # `--` ends options (#11074): every later token -- even one
+                    # spelled `-e`/`-f`/`--file=x` -- is an operand, never a
+                    # script option that could swallow the next file.
+                    if (!end_opts && toks[j] == "--") { end_opts = 1; continue }
+                    if (end_opts) {
+                        if (toks[j] == "") continue
+                        if (toks[j] ~ /^<<-?/) {
+                            if (toks[j] == "<<" || toks[j] == "<<-" || toks[j] == "<<<") j++
+                            continue
+                        }
+                        nf++
+                        nfargs[nf] = toks[j]
+                        bare_i_pending = 0
+                        continue
+                    }
                     if (toks[j] == "-i") { has_i = 1; bare_i_pending = 1; continue }
                     if (toks[j] ~ /^-i/) has_i = 1
+                    # Script options (#11074): `-e`/`-f`/`--expression`/`--file`
+                    # (or a short cluster ending in e/f with no `i` before it --
+                    # after `i` the rest is the backup suffix) take the NEXT
+                    # token as script text/file, never a file operand; attached
+                    # forms (`-es/a/b/`, `--file=s.sed`) carry it in-token. Either
+                    # way there is no positional script: every remaining
+                    # non-option token is a file.
+                    if (toks[j] == "--expression" || toks[j] == "--file" || toks[j] ~ /^-[^-eif]*[ef]$/) {
+                        have_script = 1; bare_i_pending = 0; j++; continue
+                    }
+                    if (toks[j] ~ /^--(expression|file)=/ || toks[j] ~ /^-[^-eif]*[ef]./) {
+                        have_script = 1; bare_i_pending = 0; continue
+                    }
                     if (toks[j] ~ /^-/) continue
                     if (toks[j] == "") continue
                     # Same heredoc/herestring exclusion as the `tee` branch
@@ -8751,6 +9117,9 @@ _extract_write_targets_scan() {
                     }
                     bare_i_pending = 0
                 }
+                # With -e/-f there is no positional script: only the BSD `-i ''`
+                # suffix token (sed_skip == 2 -> 1) is left to skip.
+                if (have_script) sed_skip = (sed_skip == 2) ? 1 : 0
                 if (has_i && nf > sed_skip) {
                     for (j = sed_skip + 1; j <= nf; j++) print curcwd SEP resolve_var_q(nfargs[j])
                 }
@@ -9066,8 +9435,24 @@ expand_leading_tilde() {
 #
 # Cheap pre-check keeps awk off the hot path for the ~99% of commands that have
 # no recursive/force rm at all.
-if echo "$COMMAND_ASK_SCAN" | grep -qE 'rm[[:space:]]+-[a-zA-Z]*[rf]'; then
-    RM_TARGETS=$(extract_rm_targets "$COMMAND_ASK_SCAN" | head -20)
+# NON-SHELL INTERPRETER HEREDOC DATA (#10422): COMMAND_ASK_SCAN deliberately
+# leaves bodies fed to python/perl/ruby/node VISIBLE (right for the ask-tier
+# scans). For the rm scan that is a false positive: a python3 stdin heredoc
+# carrying rm-looking TEXT is data the outer shell never executes. Build a
+# rm-scan-only copy that re-runs the selective heredoc masker with
+# shell_only=1, so quoted (or provably expansion-free) bodies of NON-shell
+# interpreters are data, while bash/sh/zsh/dash/ksh/eval/source/. -fed bodies
+# (and `cat <<EOF | bash`, `sh -s`) stay visible and fail closed. The true
+# original $COMMAND is passed so capture-then-reparse shapes still fail closed.
+COMMAND_RM_SCAN="$COMMAND_ASK_SCAN"  # scan-contract: COMMAND_RM_SCAN=deny-safe from=COMMAND_ASK_SCAN
+if [[ "$COMMAND_RM_SCAN" == *"<<"* ]]; then
+    COMMAND_RM_SCAN=$(printf '%s' "$COMMAND_RM_SCAN" | ORIG_COMMAND_FOR_READ_CHECK="$COMMAND" awk "$_MASKHEREDOC_AWK"'
+    BEGIN { origcmd = ENVIRON["ORIG_COMMAND_FOR_READ_CHECK"] }
+    { buf = buf (NR > 1 ? "\n" : "") $0 }
+    END { printf "%s", mask_heredoc_bodies_selective(buf, 1, origcmd) }')
+fi
+if echo "$COMMAND_RM_SCAN" | grep -qE 'rm[[:space:]]+-[a-zA-Z]*[rf]'; then
+    RM_TARGETS=$(extract_rm_targets "$COMMAND_RM_SCAN" | head -20)
 
     for target in $RM_TARGETS; do
         # Strip the #8217 provenance mark (0x1E) the span pass prefixes onto

@@ -28,9 +28,9 @@ the reference workspace's own sweep-outcome journal, read-only.
 | `--reference-workspace DIR` | Workspace whose recorded sweep outcomes supply the reference denominator. Read-only; defaults to the current directory. |
 | `--output PATH` | Also write the report here. It is always printed to stdout. |
 
-The command requires an OTLP-enabled binary. Without the `otlp` feature nothing
-is instrumented, so it refuses rather than reporting a zero that would read as
-"free". Check with `loom-daemon telemetry-capabilities --require-otlp`.
+Every build is OTLP-enabled (#10700). The command still refuses rather than
+reporting a zero that would read as "free" when its instrumented arm is not
+tracing (e.g. an ambient config override disables it).
 
 ## Measure a release build, and say which build you measured
 
@@ -39,7 +39,7 @@ same profile the fleet runs, and record the profile alongside the numbers —
 an overhead figure without its build profile, host and commit is not evidence.
 
 ```console
-cargo build --release -p loom-daemon --features otlp
+cargo build --release -p loom-daemon
 /path/to/target/release/loom-daemon telemetry-overhead --output ./overhead.json
 ```
 
@@ -150,7 +150,7 @@ conditions, but the two are not a clean pair against *each other* — the
 `reference` row differs between them for that reason.
 
 ```console
-cargo build --release -p loom-daemon --features otlp
+cargo build --release -p loom-daemon   # `--features otlp` is a no-op alias since #10700
 ./target/release/loom-daemon telemetry-capabilities --require-otlp   # {"otlp":true,…}
 ./target/release/loom-daemon telemetry-overhead \
     --repetitions 5 --reference-workspace /path/to/loom

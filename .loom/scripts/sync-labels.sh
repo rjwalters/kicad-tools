@@ -20,6 +20,8 @@
 #   .loom/scripts/sync-labels.sh --repo OWNER/NAME [--dry-run] [--] [WORKTREE_PATH]
 #   .loom/scripts/sync-labels.sh --prune-defaults [--force] [--dry-run] [--] [WORKTREE_PATH]
 #   .loom/scripts/sync-labels.sh --check [--repo OWNER/NAME] [--] [WORKTREE_PATH]
+#   .loom/scripts/sync-labels.sh --prune-undeclared [--dry-run] [--repo OWNER/NAME] [--] [WORKTREE_PATH]
+#   .loom/scripts/sync-labels.sh --migrate-retired [--dry-run] [--repo OWNER/NAME] [--] [WORKTREE_PATH]
 #
 #   WORKTREE_PATH  Directory containing .github/labels.yml and a git remote.
 #                  Defaults to the current directory. `--` ends option parsing,
@@ -66,6 +68,39 @@
 # use (a read-only forge query) without deleting anything; a bare --dry-run
 # (no --prune-defaults) stays completely forge-free, as before.
 #
+# --prune-undeclared (#11105) is the same opt-in for Loom's OWN leftovers: a
+# live `loom:*` label that labels.yml does not declare (retired, or never
+# declared). The additive sync never deletes those, so without it they live
+# on in the label picker. A label still on an OPEN issue/PR is kept and
+# reported, never deleted. With --dry-run it is the read-only report of every
+# undeclared loom:* label (the one dry run that reads the forge, like
+# --prune-defaults --dry-run); a bare --dry-run deliberately stays forge-free
+# (#4498) and only points at the flag. GitHub-only; the logic is
+# `loom-daemon labels undeclared` (shell-language policy: this is `contract`
+# shell, so only the call-site lives here).
+#
+# --migrate-retired (#11511) moves OPEN issues/PRs off the labels Loom has
+# retired (defaults/labels.json `retired`, #11513) onto their replacements,
+# then deletes each Loom-owned retired label nothing open still carries. It
+# runs AFTER the additive sync, so the replacement labels exist (the migration
+# never creates one). A label Loom never declared (`owned: false`) is add-only:
+# never removed from an item, never deleted. With --dry-run it is the
+# read-only preview (`labels migrate` without --apply); otherwise it passes
+# --apply. GitHub-only; the logic is `loom-daemon labels migrate`. It does not
+# imply --prune-undeclared (a wider delete); pass both to get both.
+# Exit codes (#11746):
+#   0  success (all label writes applied; --check: live set matches)
+#   1  unexpected failure / forge lookup error (a defect, not absorbed)
+#   2  usage error (bad option or argument)
+#   3  --check found drift
+#   4  --check could not reach the forge (check not run)
+#   5  one or more label writes failed (N of M, printed on stderr). A GitHub
+#      rate limit (secondary rate limit / HTTP 429) is retried with backoff
+#      first, honouring Retry-After; only a write that still fails counts.
+#      The run applies every other label before exiting; re-running is safe.
+#
+# requires-daemon: labels optional  only --prune-undeclared/--migrate-retired need `labels undeclared`/`labels migrate`; an older binary is refused with a clear message there and every other path is unaffected
+#
 # This is the installed-tree counterpart of the source-only
 # scripts/install/sync-labels.sh. It is self-contained apart from the
 # shipped .loom/scripts/lib/forge-helpers.sh helper library.
@@ -80,6 +115,8 @@ Usage: sync-labels.sh [--] [WORKTREE_PATH]
        sync-labels.sh --repo OWNER/NAME [--dry-run] [--] [WORKTREE_PATH]
        sync-labels.sh --prune-defaults [--force] [--dry-run] [--] [WORKTREE_PATH]
        sync-labels.sh --check [--repo OWNER/NAME] [--] [WORKTREE_PATH]
+       sync-labels.sh --prune-undeclared [--dry-run] [--repo OWNER/NAME] [--] [WORKTREE_PATH]
+       sync-labels.sh --migrate-retired [--dry-run] [--repo OWNER/NAME] [--] [WORKTREE_PATH]
 
 Sync Loom workflow labels from .github/labels.yml onto the forge (GitHub or
 Gitea). Creates missing labels and updates existing ones to match
@@ -113,6 +150,15 @@ Options:
       --force       Combined with --prune-defaults, delete an in-use default
                     label anyway (after warning). No effect without
                     --prune-defaults.
+      --prune-undeclared
+                    Delete live loom:* labels labels.yml does not declare,
+                    keeping any still on an open issue/PR. With --dry-run,
+                    only report them. GitHub-only.
+      --migrate-retired
+                    After the sync, move open issues/PRs off Loom's retired
+                    labels onto their replacements and delete the retired
+                    labels nothing open carries (labels Loom never declared
+                    are add-only). With --dry-run, only preview. GitHub-only.
       --dry-run     Print the label operations that would run and exit without
                     calling the forge. Recommended before a --repo run.
       --            End of options: every remaining argument is positional, so
@@ -125,6 +171,8 @@ WORKTREE_PATH="."
 REPO_OVERRIDE=""
 DRY_RUN=0
 PRUNE_DEFAULTS=0
+PRUNE_UNDECLARED=0
+MIGRATE_RETIRED=0
 FORCE_PRUNE=0
 CHECK_MODE=0
 POSITIONAL_SEEN=0
@@ -174,26 +222,16 @@ while [[ $# -gt 0 ]]; do
       fi
       shift
       ;;
-    --dry-run)
-      DRY_RUN=1
-      shift
-      ;;
-    --prune-defaults)
-      PRUNE_DEFAULTS=1
-      shift
-      ;;
-    --force)
-      FORCE_PRUNE=1
-      shift
-      ;;
+    --dry-run) DRY_RUN=1; shift ;;
+    --prune-defaults) PRUNE_DEFAULTS=1; shift ;;
+    --force) FORCE_PRUNE=1; shift ;;
+    --prune-undeclared) PRUNE_UNDECLARED=1; shift ;;
+    --migrate-retired) MIGRATE_RETIRED=1; shift ;;
     --check)
       CHECK_MODE=1
       shift
       ;;
-    --)
-      POSITIONAL_ONLY=1
-      shift
-      ;;
+    --) POSITIONAL_ONLY=1; shift ;;
     -*)
       echo "Unknown option: $1" >&2
       usage >&2
@@ -424,32 +462,43 @@ github_maybe_delete_label() {
   fi
 }
 
-github_sync_label() {
-  local name="$1" description="$2" color="$3"
+# Label-write accounting (#11746). Every create/update the mutating sync
+# attempts counts once in WRITE_ATTEMPTS; one that still fails after the
+# rate-limit retry below counts in WRITE_FAILURES, which turns into exit 5.
+WRITE_ATTEMPTS=0 WRITE_FAILURES=0
 
-  if "$GH_READ" label list -R "$REPO" --json name --jq '.[].name' 2>&1 | grep -q "^${name}$" 2>/dev/null; then
-    if output=$(gh label edit "$name" -R "$REPO" --description "$description" --color "$color" 2>&1); then
-      info "Updated label: $name"
-    else
-      warning "Failed to update label: $name"
-      echo "$output" >&2
-    fi
+# gh_label_write ARGS...: `gh label ARGS...` with a bounded retry for a GitHub
+# rate limit (403/429 "secondary rate limit" / Retry-After): a fleet sync of
+# many repos back to back trips it predictably. Any other error fails at once.
+# Captured output lands in GH_WRITE_OUT. Wait: Retry-After when the output
+# names one, else 5s doubling per attempt, capped at 60s. SYNC_LABELS_RETRY_DELAY
+# (seconds) pins the wait, so a test need not sleep.
+GH_WRITE_OUT=""
+gh_label_write() {
+  local attempt=0 delay
+  while ! GH_WRITE_OUT=$(gh label "$@" 2>&1); do
+    [[ "$attempt" -lt 4 && "${GH_WRITE_OUT,,}" =~ rate.limit|http.429 ]] || return 1
+    delay=$((5 << attempt))
+    [[ "${GH_WRITE_OUT,,}" =~ retry-after:?[[:space:]]*([0-9]+) ]] && delay="${BASH_REMATCH[1]}"
+    delay="${SYNC_LABELS_RETRY_DELAY:-$((delay > 60 ? 60 : delay))}"
+    warning "GitHub rate limit on label write; retrying in ${delay}s ($((++attempt))/4)"
+    sleep "$delay"
+  done
+}
+
+github_sync_label() {
+  local name="$1" description="$2" color="$3" verb=create
+  local args=("$name" -R "$REPO" --description "$description" --color "$color")
+  WRITE_ATTEMPTS=$((WRITE_ATTEMPTS + 1))
+  [[ $'\n'"$("$GH_READ" label list -R "$REPO" --json name --jq '.[].name' 2>&1)"$'\n' != *$'\n'"$name"$'\n'* ]] || verb=edit
+  if gh_label_write "$verb" "${args[@]}" \
+    || { [[ "$verb" == create && "$GH_WRITE_OUT" == *"already exists"* ]] && verb=edit && gh_label_write edit "${args[@]}"; }; then
+    verb=${verb/edit/update}
+    info "${verb^}d label: $name"
   else
-    if output=$(gh label create "$name" -R "$REPO" --description "$description" --color "$color" 2>&1); then
-      info "Created label: $name"
-    else
-      if echo "$output" | grep -q "already exists"; then
-        if update_output=$(gh label edit "$name" -R "$REPO" --description "$description" --color "$color" 2>&1); then
-          info "Updated label: $name"
-        else
-          warning "Failed to update label: $name"
-          echo "$update_output" >&2
-        fi
-      else
-        warning "Failed to create label: $name"
-        echo "$output" >&2
-      fi
-    fi
+    warning "Failed to ${verb/edit/update} label: $name"
+    echo "$GH_WRITE_OUT" >&2
+    WRITE_FAILURES=$((WRITE_FAILURES + 1))
   fi
 }
 
@@ -745,27 +794,16 @@ gitea_maybe_delete_label() {
 }
 
 gitea_sync_label() {
-  local name="$1" description="$2" color="$3"
-  local label_id
+  local name="$1" description="$2" color="$3" verb=create method=POST label_id payload
   label_id=$(gitea_label_id "$name")
-
-  local payload
+  WRITE_ATTEMPTS=$((WRITE_ATTEMPTS + 1))
   payload="{\"name\":$(printf '%s' "$name" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read().strip()))'),\"description\":$(printf '%s' "$description" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read().strip()))'),\"color\":\"#${color}\"}"
-
-  if [[ -n "$label_id" ]]; then
-    # Update existing label
-    if gitea_api PATCH "repos/${FORGE_OWNER}/${FORGE_REPO}/labels/${label_id}" -d "$payload" >/dev/null 2>&1; then
-      info "Updated label: $name"
-    else
-      warning "Failed to update label: $name"
-    fi
+  [[ -z "$label_id" ]] || { verb=update method=PATCH; label_id="/${label_id}"; }
+  if gitea_api "$method" "repos/${FORGE_OWNER}/${FORGE_REPO}/labels${label_id}" -d "$payload" >/dev/null 2>&1; then
+    info "${verb^}d label: $name"
   else
-    # Create new label
-    if gitea_api POST "repos/${FORGE_OWNER}/${FORGE_REPO}/labels" -d "$payload" >/dev/null 2>&1; then
-      info "Created label: $name"
-    else
-      warning "Failed to create label: $name"
-    fi
+    warning "Failed to $verb label: $name"
+    WRITE_FAILURES=$((WRITE_FAILURES + 1))
   fi
 }
 
@@ -908,49 +946,52 @@ if [[ "$PRUNE_DEFAULTS" -eq 1 ]]; then
   done
 else
   if [[ "$DRY_RUN" -eq 1 ]]; then
-    info "[dry-run] would leave default labels untouched (pass --prune-defaults to remove them): ${DEFAULT_LABELS[*]}"
+    info "[dry-run] would leave default labels untouched (pass --prune-defaults to remove them): ${DEFAULT_LABELS[*]}; pass --prune-undeclared to list undeclared loom:* labels"
   else
     info "Leaving default labels untouched (pass --prune-defaults to remove them): ${DEFAULT_LABELS[*]}"
   fi
 fi
 
+# daemon_labels FLAG VERB WRITE_FLAG DONE_MSG LEFT_MSG ARGS...: the call-site
+# for a `loom-daemon labels VERB` (--prune-undeclared: `undeclared`, #11105;
+# --migrate-retired: `migrate`, #11511). The verb prints its own report and
+# exits 0 (nothing remains: DONE_MSG), 3 (something remains: LEFT_MSG) or
+# other (it could not run: fail). WRITE_FLAG is appended unless --dry-run.
+daemon_labels() {
+  local flag="$1" verb="$2" write="$3" done_msg="$4" left_msg="$5"
+  local bin rc=0; shift 5
+  [[ "$FORGE_TYPE" == "github" ]] || error "--$flag is GitHub-only"
+  bin="$(source "${SCRIPT_DIR}/lib/locate-daemon-bin.sh" && loom_resolve_self_daemon_bin)"
+  if [[ -z "$bin" ]] || ! "$bin" labels "$verb" --help >/dev/null 2>&1; then error "--$flag needs a loom-daemon with 'labels $verb'"; fi
+  [[ "$DRY_RUN" -eq 1 ]] || set -- "$@" "$write"
+  "$bin" labels "$verb" "$@" || rc=$?
+  [[ "$rc" -eq 0 || "$rc" -eq 3 ]] || error "loom-daemon labels $verb failed (exit $rc)"
+  if [[ "$rc" -eq 0 ]]; then success "$done_msg"; else warning "$left_msg"; fi
+}
+[[ "$PRUNE_UNDECLARED" -eq 0 ]] || daemon_labels prune-undeclared undeclared --prune "No undeclared loom:* labels remain on $REPO" "Undeclared loom:* labels remain on $REPO (listed above)" --repo "$REPO" --labels-file "$LABELS_FILE"
+
 # Sync Loom workflow labels
 info "Syncing Loom workflow labels..."
 
-label_count=0
-while IFS= read -u 3 -r line; do
-  if [[ "$line" =~ ^-\ name:\ (.+)$ ]]; then
-    name="${BASH_REMATCH[1]}"
-    read -u 3 -r desc_line
-    read -u 3 -r color_line
-
-    description=""
-    color=""
-
-    if [[ "$desc_line" =~ description:\ (.+)$ ]]; then
-      description="${BASH_REMATCH[1]}"
-      description="${description//\"/}"
-    fi
-
-    if [[ "$color_line" =~ color:\ \"?([0-9A-Fa-f]{6})\"?.*$ ]]; then
-      color="${BASH_REMATCH[1]}"
-    fi
-
-    if [[ "$DRY_RUN" -eq 1 ]]; then
-      # Deliberately forge-free: a dry run must be answerable offline (it is the
-      # preview an operator runs before pointing --repo at a repo they are not
-      # standing in), so it reports intent from labels.yml alone and never asks
-      # the forge which labels already exist.
-      info "[dry-run] would create or update label: $name (color=$color)"
-    elif [[ "$FORGE_TYPE" == "github" ]]; then
-      github_sync_label "$name" "$description" "$color"
-    elif [[ "$FORGE_TYPE" == "gitea" ]]; then
-      gitea_sync_label "$name" "$description" "$color"
-    fi
-
-    ((label_count++)) || true
+# The same line-triplet parser --check uses (read_declared_labels), so the
+# sync and the drift check can never see a different label set (#11105 folded
+# the loop's own copy of it into that one).
+read_declared_labels
+label_count=${#DECL_NAMES[@]}
+for ((i = 0; i < label_count; i++)); do
+  name="${DECL_NAMES[$i]}" description="${DECL_DESCS[$i]}" color="${DECL_COLORS[$i]}"
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    # Deliberately forge-free: a dry run must be answerable offline (it is the
+    # preview an operator runs before pointing --repo at a repo they are not
+    # standing in), so it reports intent from labels.yml alone and never asks
+    # the forge which labels already exist.
+    info "[dry-run] would create or update label: $name (color=$color)"
+  elif [[ "$FORGE_TYPE" == "github" ]]; then
+    github_sync_label "$name" "$description" "$color"
+  elif [[ "$FORGE_TYPE" == "gitea" ]]; then
+    gitea_sync_label "$name" "$description" "$color"
   fi
-done 3< "$LABELS_FILE"
+done
 # One --clear-cache after the run's label writes (#9953): it drops EVERY entry,
 # so clearing per write would empty the cache before the next label's list
 # probe. Mid-run staleness is harmless (each label is probed once, and a
@@ -960,9 +1001,21 @@ done 3< "$LABELS_FILE"
 if [ "$label_count" -gt 0 ]; then
   if [[ "$DRY_RUN" -eq 1 ]]; then
     success "Dry run complete: $label_count labels would be synced to $REPO"
+  elif [[ "$WRITE_FAILURES" -gt 0 ]]; then
+    # Exit 5 is deferred to the end of the script so the optional
+    # --prune-undeclared / --migrate-retired steps below still run.
+    echo -e "${RED}✗ ${WRITE_FAILURES} of ${WRITE_ATTEMPTS} label writes failed on $REPO${NC}" >&2
   else
     success "Synced $label_count labels"
   fi
 else
   warning "No labels found in $LABELS_FILE"
 fi
+
+# --migrate-retired (#11511): after the additive sync above, so every
+# replacement label exists before `labels migrate` relabels onto it.
+[[ "$MIGRATE_RETIRED" -eq 0 ]] || daemon_labels migrate-retired migrate --apply "No retired labels left to migrate on $REPO" "Retired-label migration not finished on $REPO (listed above)" --repo "$REPO"
+
+# Any label write that still failed after the rate-limit retry (#11746): exit
+# 5, distinct from 3 (--check drift) and 4 (--check could not reach the forge).
+[[ "$WRITE_FAILURES" -eq 0 ]] || exit 5

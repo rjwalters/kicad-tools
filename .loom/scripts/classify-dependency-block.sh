@@ -10,10 +10,11 @@
 #
 # WHAT IT ANSWERS
 #
-# Champion escalated a proposal to `loom:operator-only` after N=2 unrevised
+# Champion escalated a proposal to an operator hold (`loom:operator` since
+# #11795) after N=2 unrevised
 # evaluations regardless of WHY it kept failing. For a proposal whose only
 # finding was "hard dependency on #3, which is still open" that turned a
-# self-clearing timing condition into a permanent one: `loom:operator-only`
+# self-clearing timing condition into a permanent one: the hold
 # makes Champion skip the issue forever, so the only actor that could notice #3
 # had closed was the one told to ignore it. This gate splits timing findings
 # from merits findings, and reverses the escalation once the timing reason

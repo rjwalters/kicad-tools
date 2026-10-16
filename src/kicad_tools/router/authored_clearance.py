@@ -74,6 +74,7 @@ __all__ = [
     "AuthoredViolation",
     "authored_violations",
     "pad_authored_floor",
+    "pad_label",
     "pair_floor",
 ]
 
@@ -116,6 +117,10 @@ class AuthoredViolation:
     required: float
     actual: float
     kind: str  # "pad" | "segment" | "via"
+    #: Issue #6670: a human name for the foreign copper (``"GND pad U2.G3"``).
+    #: A neutralised pour pad is ``net 0`` in the router, which hides both the
+    #: net whose class sets the floor and which pad it is; empty when unknown.
+    other_label: str = ""
 
 
 @dataclass(frozen=True)
@@ -127,6 +132,19 @@ class _Item:
     x: float
     y: float
     bbox: tuple[float, float, float, float]
+    label: str = ""
+
+
+def pad_label(pad: Pad) -> str:
+    """``"<net name> pad <REF>.<PAD>"`` for log lines (issue #6670).
+
+    Uses the pad's retained ``net_name``, so a pour pad neutralised to net 0
+    is still named by its real net (``GND pad U2.G3``).  Falls back to the
+    net id and omits the designator when the pad carries none.
+    """
+    name = pad.net_name or f"net {pad.net}"
+    ref = f" {pad.ref}.{pad.pin}" if pad.ref and pad.pin else (f" {pad.ref}" if pad.ref else "")
+    return f"{name} pad{ref}"
 
 
 def _seg_bbox(seg: Segment) -> tuple[float, float, float, float]:
@@ -181,8 +199,13 @@ class AuthoredCopperIndex:
                     pad.x,
                     pad.y,
                     _pad_bbox(pad),
+                    pad_label(pad),
                 )
             )
+        self.add_routes(routes)
+
+    def add_routes(self, routes: Iterable[Route]) -> None:
+        """Index more committed routes (Issue #6427: append without a rebuild)."""
         for route in routes:
             floor = max(
                 self.floors.get(route.net, 0.0),
@@ -261,6 +284,7 @@ class AuthoredCopperIndex:
                     required,
                     copper_gap(shape, item.shape),
                     item.kind,
+                    item.label,
                 )
         return None
 
@@ -443,6 +467,24 @@ def grid_authored_index(grid: Any) -> AuthoredCopperIndex | None:
     if cached is not None and cached[0] == key:
         hit: AuthoredCopperIndex | None = cached[1]
         return hit
+    # Issue #6427: committing a route only APPENDS to ``grid.routes``.  With
+    # router net classes feeding the floors, the gate is live on most boards
+    # and a full rebuild per commit dominated its cost, so extend the cached
+    # index when everything else in the key is unchanged and the previous
+    # last route is still where it was (no removal before it).
+    if cached is not None and cached[1] is not None:
+        old = cached[0]
+        old_len = old[3]
+        if (
+            old[:3] == key[:3]
+            and old[5:] == key[5:]
+            and 0 < old_len < len(routes)
+            and id(routes[old_len - 1]) == old[4]
+        ):
+            grown: AuthoredCopperIndex = cached[1]
+            grown.add_routes(routes[old_len:])
+            grid._authored_index_cache = (key, grown)
+            return grown
     index = AuthoredCopperIndex(floors, pads, routes)
     result = index if index.active else None
     grid._authored_index_cache = (key, result)

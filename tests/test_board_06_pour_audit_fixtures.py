@@ -107,15 +107,18 @@ _FIXTURE_TEMPLATE = """(kicad_pcb
       )
     )
   )
-  (via (at 100 100) (size 0.6) (drill 0.3) (layers {via_layers}) (net 1)
+  (via {via_kw}(at 100 100) (size 0.6) (drill 0.3) (layers {via_layers}) (net 1)
     (uuid "via-1"))
 )
 """
 
 
-def _fixture(tmp_path: Path, via_layers: str) -> Path:
+def _fixture(tmp_path: Path, via_layers: str, via_kw: str = "") -> Path:
+    # ``via_kw`` is the via-type keyword (with trailing space).  A partial
+    # span needs ``blind``/``buried``: KiCad reads a keyword-less via as a
+    # through via whatever its pair says (Issue #6493).
     pcb_path = tmp_path / "pour_audit_fixture.kicad_pcb"
-    pcb_path.write_text(_FIXTURE_TEMPLATE.format(via_layers=via_layers))
+    pcb_path.write_text(_FIXTURE_TEMPLATE.format(via_layers=via_layers, via_kw=via_kw))
     return pcb_path
 
 
@@ -136,7 +139,7 @@ class TestViaLayerSpanAwarePourAudit:
         touches) -- the modelling gap this test guards against.
         """
         pytest.importorskip("shapely")
-        pcb_path = _fixture(tmp_path, '"F.Cu" "In1.Cu"')
+        pcb_path = _fixture(tmp_path, '"F.Cu" "In1.Cu"', "blind ")
 
         audit = generate_design_mod._audit_pour_nets(pcb_path, ["GND"])
         info = audit["GND"]
@@ -163,6 +166,27 @@ class TestViaLayerSpanAwarePourAudit:
 
         assert info["connected"] is True, (
             f"through via unexpectedly failed to bridge the pour: pad_groups={info['pad_groups']}"
+        )
+
+    @pytest.mark.parametrize("pair", ['"F.Cu" "In1.Cu"', '"In1.Cu" "F.Cu"'])
+    def test_keywordless_partial_span_via_reads_as_through(
+        self, generate_design_mod, tmp_path: Path, pair: str
+    ) -> None:
+        """Issue #6614: a keyword-less ``F.Cu``/``In1.Cu`` via is a through via.
+
+        KiCad reads a via with no ``blind``/``buried``/``micro`` keyword as
+        a through via whatever its ``(layers ...)`` pair says, so its barrel
+        really reaches the B.Cu pour and R1.1 is connected -- unlike the
+        ``blind`` fixture above with the same pair.
+        """
+        pytest.importorskip("shapely")
+        pcb_path = _fixture(tmp_path, pair)
+
+        audit = generate_design_mod._audit_pour_nets(pcb_path, ["GND"])
+        info = audit["GND"]
+
+        assert info["connected"] is True, (
+            f"keyword-less via not read as through: pad_groups={info['pad_groups']}"
         )
 
     def test_unparseable_via_span_fails_safe_not_all_layers(
@@ -423,6 +447,12 @@ def test_audit_keeps_disconnected_solids_in_one_fill_contour_separate(
     )
     board.write_text(text.replace(fills[0], combined).replace(fills[1], ""))
     assert len(PCB.load(board).zones[0].filled_polygons) == 1
-    assert len(_physical_pad_groups(board)) == 2
+    # One stored ``filled_polygon`` is one KiCad connectivity item, even when
+    # its contour retraces a zero-width edge between two solids: kicad-cli
+    # 10.0.6 reports 0 unconnected on this exact board, and the shared
+    # copper-contact partition agrees (Issue #6452).  The board script's own
+    # audit below still splits the solids -- conservative (it only asks for
+    # more stitching), and outside the shared model.
+    assert len(_physical_pad_groups(board)) == 1
     audit = generate_design_mod._audit_pour_nets(board, ["GND"])["GND"]
     assert not audit["connected"] and len(audit["pad_groups"]) == 2

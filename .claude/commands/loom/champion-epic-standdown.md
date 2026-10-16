@@ -94,7 +94,7 @@ fi
 - **A stand-down is never a rejection.** This step writes
   `champion:epic-tracking-umbrella:body-*` and nothing else. It must never write
   the Step 4 rejection marker, never touch `PRIOR_REJECTIONS` / `SKIP_STREAK`,
-  and never apply `loom:operator-only` — a passing epic waiting on its own
+  and never apply `loom:operator` — a passing epic waiting on its own
   children is not an operator problem.
 - **No escalation ladder, deliberately.** Same reasoning as "Phase
   Progression"'s own idempotency guard: an unchanged, in-progress epic is not
@@ -109,7 +109,7 @@ fi
 
 `defaults/scripts/tests/test-champion-epic-verdict-marker-scope.sh` checks this
 file statically: it must define its own marker, dedupe on `BODY_HASH`, and
-carry no escalation counter and no operator-only label application.
+carry no escalation counter and no `loom:operator` application.
 
 ---
 

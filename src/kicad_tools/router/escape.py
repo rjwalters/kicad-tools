@@ -258,10 +258,10 @@ def escape_endpoint_copper_extent(escape: EscapeRoute) -> float | None:
             # Only the disc contained in the real round end cap is metal.
             extent = max(extent, float(seg.width) - 2 * math.hypot(sx - ex, sy - ey))
     via = getattr(escape, "via", None)
-    if via is not None and (
-        copper_span_contains(via.layers[0], via.layers[1], escape.escape_layer)
-    ):
-        extent = max(extent, float(via.diameter) - 2 * math.hypot(via.x - ex, via.y - ey))
+    if via is not None:
+        via_lo, via_hi = getattr(via, "drilled_layers", via.layers)
+        if copper_span_contains(via_lo, via_hi, escape.escape_layer):
+            extent = max(extent, float(via.diameter) - 2 * math.hypot(via.x - ex, via.y - ey))
     return extent if extent > 0.0 else None
 
 
@@ -353,8 +353,11 @@ def escape_endpoint_pad(
         pin=pad.pin,
         through_hole=pad.through_hole if unchanged and extent is None else False,
         drill=pad.drill if unchanged and extent is None else 0.0,
+        side=pad.side,
         rotation=rotation,
         shape=shape,
+        # Issue #6718: an unchanged terminal keeps its authored roundrect corners.
+        roundrect_rratio=pad.roundrect_rratio if shape == pad.shape else None,
         escape_terminal=not (unchanged and extent is None),
     )
 
@@ -8205,6 +8208,28 @@ class EscapeRouter:
 
         # Select inner escape layer (In1.Cu on 4-layer, B.Cu on 2-layer).
         escape_layer = self._select_inner_escape_layer(pad.layer)
+
+        # Issue #6646: a micro via spans exactly one dielectric.  When the
+        # stack has no inner signal layer the escape layer falls back to the
+        # opposite outer layer, which is non-adjacent on a 4+ layer board;
+        # decline instead of emitting a full-stack micro via.
+        if is_micro_via_used and self.grid.layer_stack is not None:
+            try:
+                adjacent = self.grid.layer_stack.are_layers_adjacent(pad.layer, escape_layer)
+            except Exception:
+                adjacent = True
+            if not adjacent:
+                logger.info(
+                    "In-pad micro-via rescue for pad %s (ref=%s pin=%s) "
+                    "declined: landing layer %s is not stack-adjacent to %s "
+                    "(Issue #6646).",
+                    pad.net_name,
+                    pad.ref,
+                    pad.pin,
+                    escape_layer.value,
+                    pad.layer.value,
+                )
+                return None
 
         # Inner-layer escape point: continue inward toward the package
         # body (same direction the deferred surface escape would have

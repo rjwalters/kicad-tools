@@ -17,7 +17,10 @@ by-construction choke (``primitives.Segment`` 45-degree enforcement).
 **Static substrate invariant (mirrors the mesh's ``triangulation_calls``
 discipline):** the lattice + its per-layer static masks are built **once per
 board** (:meth:`build`, counted by :attr:`lattice_builds`); negotiation only
-mutates committed-copper state and history costs -- never the lattice.
+mutates committed-copper state and history costs -- never the lattice.  The
+one exception (issue #6489): when the class-pad repair leaves a shortfall,
+:meth:`route_netset` grows exactly those pads and rebuilds for a bounded
+re-negotiation; with nothing left it never rebuilds.
 
 **Via model:** via edges join *matching lattice nodes on adjacent layers*
 and every emitted via is a through-via spanning the whole stack.
@@ -43,6 +46,7 @@ from __future__ import annotations
 import heapq
 import math
 import time
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -54,6 +58,7 @@ from ..rules import DesignRules
 from .coupled import CoupledConnection
 from .escape_plan import EscapeChoice, chosen_stub, foreign_reservations, plan_tapered_escapes
 from .geometry import Pt, Rect, dist, pt_in_rect, seg_seg_dist
+from .guide import PartnerGuide
 from .history import PhysicalHistory
 from .obstacles import (
     CommittedCopper,
@@ -64,6 +69,7 @@ from .obstacles import (
 from .quadtree import EdgeKey, NodeKey, OctilinearLattice, RefineRegion
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
+    from .class_pad_repair import ClassPadRepairStats
     from .pairwise import LatticePairwise
 
 # A negotiation connection: (opaque hashable key, start pad, end pad, net_class)
@@ -86,6 +92,87 @@ _GOAL: _State = (("GOAL",), -1)  # type: ignore[assignment]
 # path also avoids).  A search-tuning knob, not a geometric constant -- it only
 # widens the candidate set, never the copper.
 _OVERSIZE_STUB_KMAX = 4096
+
+#: Decline reasons ``_route_impl`` returns when its A* actually RAN and was
+#: exhausted (issues #6373, #4605, #4979).  The plain value and its two
+#: "constrained" refinements differ only in which diagnostic label wins when a
+#: keepout mask or a hard layer set pruned candidates on the way -- every one of
+#: them still means "a search ran and found no path".  Consumers that gate on
+#: exhaustion (the #6535 tap-chain retry, issue #6743) must use this set rather
+#: than compare one literal, so a diagnostic refinement cannot silently disable
+#: them.  ``no-egress-start``/``-end`` are deliberately NOT here: they name a
+#: dead-end escape at an endpoint, not an exhausted corridor search.
+REASON_NO_PATH = "no-path"
+REASON_NO_PATH_KEEPOUT = "no-path-keepout-constrained"
+REASON_NO_PATH_LAYER = "no-path-layer-constrained"
+EXHAUSTED_SEARCH_REASONS: frozenset[str] = frozenset(
+    {REASON_NO_PATH, REASON_NO_PATH_KEEPOUT, REASON_NO_PATH_LAYER}
+)
+
+#: Issue #6489: most re-negotiations with grown pads after a class-pad repair.
+_MAX_PAD_GROWTH_ROUNDS = 2
+
+# Issue #6703: partner-corridor cost for uncoupled diff-pair fallback legs
+# (see :class:`~kicad_tools.router.lattice.guide.PartnerGuide`).  A guided leg
+# routes free within ``_GUIDE_NEAR_PITCHES`` pair pitches of its partner on
+# the same layer, and pays up to ``_GUIDE_WEIGHT * _GUIDE_CAP_MM`` extra per mm
+# of length beyond that.
+_GUIDE_NEAR_PITCHES = 2.0
+_GUIDE_CAP_MM = 2.0
+_GUIDE_WEIGHT = 1.0
+
+
+# Issue #6703: at most this many fallback pairs per flush get the partner-aware
+# candidates and their partner-blind rollout of the later pairs; the rest keep
+# the pre-#6703 partner-blind legs.  Each such pair costs about six leg
+# searches plus two per later pair, so the cap keeps one flush LINEAR in the
+# number of fallback pairs (``2n + K * (6 + 2n)`` searches, against ``2n``
+# before) instead of quadratic, and the flush runs on every negotiation pass.
+_MAX_PARTNER_AWARE_PAIRS = 4
+
+# Issue #6703 (PR #6735 review): a partner-aware leg's clearance to EVERY
+# obstacle is raised to a stricter pad class only when that class is at most
+# this many times the leg's own clearance; stricter (outlier) pad classes are
+# kept clear per pad.  See ``LatticePathfinder._strict_pad_pairwise``.
+_SEARCH_FLOOR_MAX_FACTOR = 2.0
+
+# Issue #6703 (PR #6735 review): least summed-skew reduction (mm) for which a
+# fallback flush keeps a pair's partner-aware legs over its partner-blind
+# ones at the same routed-leg count (and no extra class-pad shortfall).
+_MIN_FLUSH_SKEW_GAIN_MM = 0.25
+
+# One fallback leg pair: ``{"P"|"N": (search result or None, reason)}`` (#6703).
+_FallbackLegs = dict[str, tuple["_RouteResult | None", str]]
+
+# Through-via barrel length assumed when the router supplies no
+# :attr:`LatticePathfinder.pair_length_measure` (a standard 1.6 mm board).
+_DEFAULT_VIA_LENGTH_MM = 1.6
+
+
+def _default_pair_length(route: Route) -> float:
+    """Track length plus one board thickness per (through) via, in mm."""
+    tracks = sum(math.hypot(s.x2 - s.x1, s.y2 - s.y1) for s in route.segments)
+    return tracks + _DEFAULT_VIA_LENGTH_MM * len(route.vias)
+
+
+@dataclass(frozen=True)
+class PadGrowthRound:
+    """One #6489 grown-keep-out re-negotiation attempt, for the log (issue #6670).
+
+    ``grown`` pads were added by this attempt.  ``footprints`` names the parts
+    whose whole class-floored pad set was grown because a shortfall moved to a
+    sibling pad (empty for the targeted growth), see
+    :meth:`LatticePathfinder.route_netset`.  ``kept`` is whether the attempt
+    replaced the previous result; a rejected attempt is rolled back.
+    """
+
+    grown: int
+    footprints: tuple[str, ...]
+    routed_before: int
+    routed_after: int
+    left_before: int
+    left_after: int
+    kept: bool
 
 
 @dataclass(frozen=True)
@@ -230,6 +317,15 @@ class LatticePathfinder:
         self.outline = outline
         self.pads = pads
         self.rules = rules or DesignRules()
+        # Issue #6395: each pad's own net-class clearance, aligned with
+        # ``pads`` and installed by the CALLER from its net-class map through
+        # :meth:`set_pad_class_clearances` (the pathfinder stays geometry-only,
+        # #4597).  It is the PAD side of every track-vs-pad pair,
+        # ``max(class(track), class(pad))``, enforced on the negotiated copper
+        # by :mod:`.class_pad_repair`.  ``None`` (the default) leaves the
+        # routed output byte-identical.
+        self.pad_class_clearances: list[float] | None = None
+        self.class_pad_repair_stats: ClassPadRepairStats | None = None
         # Real copper stack (issue #4278 acceptance 6): the lattice is
         # replicated across the board's actual routing-layer count -- never
         # hardcoded to 2.
@@ -239,6 +335,15 @@ class LatticePathfinder:
         self.margin = margin
         # Per-via-hop layer-change cost (mm-equivalent; spike default 3.0).
         self.via_cost = via_cost
+        # Issue #6703: ``Route -> mm`` used to rank the uncoupled-fallback leg
+        # candidates by skew.  The router sets the skew checker's via-inclusive
+        # measure; ``None`` -> tracks plus a 1.6 mm barrel per through-via.
+        self.pair_length_measure: Callable[[Route], float] | None = None
+        self._shortfall_memo: dict[int, tuple[_RouteResult, int]] = {}
+        # Issue #6703: raised only while a partner-aware fallback leg is
+        # SEARCHED (never while it is committed) -- see
+        # :meth:`_strict_pad_pairwise`.
+        self._search_clearance_floor = 0.0
 
         xs = [p[0] for p in outline]
         ys = [p[1] for p in outline]
@@ -268,6 +373,11 @@ class LatticePathfinder:
         self._lattice: OctilinearLattice | None = None
         self._obstacles: LatticeObstacleModel | None = None
         self.lattice_builds: int = 0
+        # Issue #6489: pad index -> class clearance, for pads whose keep-out
+        # grows because the class-pad repair could not clear them.
+        self._class_pad_growth: dict[int, float] = {}
+        # Issue #6670: what each growth round did (kept or rolled back).
+        self.class_pad_growth_rounds: list[PadGrowthRound] = []
         # Per-connection decline reasons for the best negotiation pass
         # (honest shortfall diagnosis; reset by :meth:`route_netset`).
         self.failure_reasons: dict[object, str] = {}
@@ -330,6 +440,17 @@ class LatticePathfinder:
         pathfinder so it cannot carry a stale projection across runs.
         """
         self._pairwise = pairwise
+
+    def set_pad_class_clearances(self, values: list[float] | None) -> None:
+        """Install (or clear) the per-pad net-class clearances (#6395).
+
+        ``values`` aligns with :attr:`pads`.  The search model does not read
+        them -- see :mod:`.class_pad_repair` for why the pair is enforced on
+        the negotiated copper instead -- so this never rebuilds the lattice.
+        """
+        if values is not None and len(values) != len(self.pads):
+            raise ValueError("pad_class_clearances must align with pads")
+        self.pad_class_clearances = list(values) if values is not None else None
 
     def set_keepouts(self, keepouts: LatticeKeepoutMask | None) -> None:
         """Install (or clear) the keepout rule-area mask (#4605).
@@ -506,14 +627,55 @@ class LatticePathfinder:
         edge masks, free-segment and via checks, the coupled fat agent --
         keeps that pad's own side of the pair.  ``None`` (no floors) leaves
         the model byte-identical.
+
+        Issue #6449: only DESIGNER-authored minima grow a pad mask.  The
+        router's own class clearances also live in ``net_clearance_floors``
+        since #6427, but the pad side of a router-class pair is enforced on
+        the negotiated copper by :mod:`.class_pad_repair` (#6395): growing the
+        masks by it moves tracks by whole lattice rows and stranded board 05's
+        ``GND_SENSE`` at ``U2.6`` (32/33).  The loader records the designer
+        subset as ``rules.designer_clearance_floors``; rules built elsewhere
+        (``None``) treat every floor as designer-authored, as before.
         """
-        floors = self.rules.net_clearance_floors
-        if not floors and not any(p.authored_clearance > 0.0 for p in self.pads):
+        extra = self._grown_pad_extra()
+        if extra is None:
+            return self._designer_pad_extra()
+        designer_extra = self._designer_pad_extra()
+        if designer_extra is None:
+            return extra
+        return [max(a, b) for a, b in zip(extra, designer_extra, strict=True)]
+
+    def _grown_pad_extra(self) -> list[float] | None:
+        """Issue #6489: keep-out growth for pads the repair could not clear."""
+        grown = self._class_pad_growth
+        if not grown:
             return None
+        base = self.rules.trace_clearance
+        return [max(0.0, grown.get(i, 0.0) - base) for i in range(len(self.pads))]
+
+    def _designer_pad_extra(self) -> list[float] | None:
         from ..authored_clearance import pad_authored_floor
 
         base = self.rules.trace_clearance
-        return [max(0.0, pad_authored_floor(p, floors) - base) for p in self.pads]
+        designer = self.rules.designer_clearance_floors
+        if designer is None:
+            floors = self.rules.net_clearance_floors
+            if not floors and not any(p.authored_clearance > 0.0 for p in self.pads):
+                return None
+            return [max(0.0, pad_authored_floor(p, floors) - base) for p in self.pads]
+        by_name = self.rules.designer_clearance_floors_by_name
+        values = [
+            max(
+                designer.get(p.net, 0.0),
+                # A neutralised pad (net 0) keeps its designer minimum by name,
+                # exactly what the #6243 loader stored as ``authored_clearance``.
+                by_name.get(p.net_name or "", 0.0) if p.net == 0 else 0.0,
+            )
+            for p in self.pads
+        ]
+        if not any(v > 0.0 for v in values):
+            return None
+        return [max(0.0, v - base) for v in values]
 
     def _fixed_clearance_for(
         self, net: int, clearances: dict[int, float] | None, item_floor: float = 0.0
@@ -579,7 +741,9 @@ class LatticePathfinder:
                 # A routing stack may select only part of the physical board
                 # (for example F.Cu only). Imported through-via endpoints need
                 # not themselves be present in that selected stack.
-                first, last = sorted(layer.stack_order for layer in via.layers)
+                first, last = sorted(
+                    layer.stack_order for layer in getattr(via, "drilled_layers", via.layers)
+                )
                 occupied_layers = tuple(
                     layer.index
                     for layer in self.layer_stack.layers
@@ -615,7 +779,9 @@ class LatticePathfinder:
         tw = getattr(net_class, "trace_width", None) or self.rules.trace_width
         clr = getattr(net_class, "clearance", None) or 0.0
         authored = self.rules.authored_floor(net) if net is not None else 0.0
-        return tw / 2.0, max(clr, self.rules.trace_clearance, authored)
+        return tw / 2.0, max(
+            clr, self.rules.trace_clearance, authored, self._search_clearance_floor
+        )
 
     def _hard_avoided_layers(self, net_class: object | None) -> frozenset[int]:
         """Grid-layer indices to HARD-block for this connection (issue #4979).
@@ -637,16 +803,53 @@ class LatticePathfinder:
         could (and did) land a hard-current net on an explicitly forbidden
         inner plane with no failure reported.
 
-        Returns an empty set when ``net_class`` is ``None`` or declares no
-        hard-avoided layers, preserving byte-identical routing for every
-        connection that does not opt in.
+        Issue #6350: the board-wide ``DesignRules.allowed_layers`` gate is
+        folded in too (see :meth:`_allowed_layers_blocked`).  That is the
+        field ``--reserve-plane-layers`` (the ``--layers 4`` default) sets to
+        keep signal copper off the reference planes; the grid pathfinder and
+        the C++ backend enforce it at search time, but before #6350 the
+        lattice never read it, so ``--route-engine lattice`` routed signal
+        nets on In1.Cu/In2.Cu and ``--no-reserve-plane-layers`` was a no-op.
+
+        Returns an empty set when ``rules.allowed_layers`` is ``None`` and
+        ``net_class`` is ``None`` or declares no hard-avoided layers,
+        preserving byte-identical routing for every connection that does not
+        opt in.
         """
+        blocked = self._allowed_layers_blocked()
         if net_class is None:
-            return frozenset()
+            return blocked
         hard_avoided = getattr(net_class, "hard_avoided_layer_indices", None)
         if hard_avoided is None:
+            return blocked
+        return blocked | frozenset(hard_avoided(self.rules.strict_layers))
+
+    def _allowed_layers_blocked(self) -> frozenset[int]:
+        """Layer indices outside ``rules.allowed_layers`` (issue #6350).
+
+        ``allowed_layers`` holds KiCad layer names (``["F.Cu", "B.Cu"]`` under
+        ``--layers 4`` with plane reservation on); every stack layer whose
+        name is absent is hard-blocked for every net, exactly as the grid
+        pathfinder's ``_is_layer_allowed`` does.  ``None`` (reservation off,
+        ``--layers 4-all``, 2-layer boards) blocks nothing.
+
+        Read at CALL time, never cached: ``route_with_layer_escalation``
+        mutates the shared ``rules`` in place between rungs, and this
+        pathfinder can outlive a rung.
+
+        Blocked inner planes do not strand F.Cu<->B.Cu nets: the via step-over
+        in :meth:`_route_search` hops across them.  A stack whose reserved
+        plane were an OUTER layer would instead trip the via-span guard there
+        (this engine only emits full-stack through vias) and route planar or
+        decline as layer-constrained -- never ship copper on the plane.  None
+        of the built-in stacks does that (``four_layer_sig_sig_gnd_pwr``'s
+        B.Cu is ``MIXED``, so only its In2.Cu is reserved).
+        """
+        allowed = self.rules.allowed_layers
+        if allowed is None:
             return frozenset()
-        return frozenset(hard_avoided(self.rules.strict_layers))
+        allowed_set = set(allowed)
+        return frozenset(ld.index for ld in self.layer_stack.layers if ld.name not in allowed_set)
 
     # -- pad stubs ------------------------------------------------------------
 
@@ -780,6 +983,14 @@ class LatticePathfinder:
                         committed, point, layer, pair_nets, extra_clearance
                     ):
                         continue
+                    # Issue #6697: the stub's lattice node is where the
+                    # emitted legs start their offset body; keep it a pair
+                    # envelope clear of any keepout (reserved via site) so the
+                    # finish gate does not decline a corridor the search chose.
+                    if self._keepouts is not None and self._keepouts.segment_blocked(
+                        point, point, layer, net, half + math.sqrt(2.0) * extra_clearance
+                    ):
+                        continue
                 else:
                     if obstacles.node_blocked(key, layer, net):
                         continue
@@ -863,6 +1074,8 @@ class LatticePathfinder:
         layers: tuple[int, ...] | None,
         exempt_pads: frozenset[int] | None,
         net_class: object | None,
+        allow_vias: bool = True,
+        via_in_pad_override: bool | None = None,
     ) -> tuple[list[tuple[NodeKey, int, list[Pt], float]], float]:
         """Escape stubs for one pad, with an oversize neck-down fallback.
 
@@ -878,6 +1091,22 @@ class LatticePathfinder:
         width at the first lattice node.  Never-ship-a-short holds absolutely:
         the neck legs are clearance-checked at the neck width, exactly as the
         full-width legs are checked at the full width (#3906).
+
+        Issue #6381: "the full-width scan produced a stub" is not the same as
+        "the full width can escape".  On a fine-pitch row the full-width
+        centreline band between the neighbour pads can be narrower than the
+        lattice row spacing, so the only nodes a full-width stub reaches are
+        cell centres INSIDE the pad's own copper with no legal full-width
+        outgoing edge.  Those dead-end stubs used to count as success and
+        suppress the neck fallback, so the search popped them and declined.
+        A non-fat full-width stub set now counts only when at least one stub
+        has egress (:meth:`_stub_has_egress` -- a legal full-width lattice
+        edge, or a legal via, out of its landing node, judged by the SAME
+        predicates the A* expands with).  When none does, the neck fallback
+        runs; if the neck finds nothing either, the original full-width stubs
+        are returned unchanged, so the outcome is never worse than before.
+        Stub sets with egress (every connection that routed before) are
+        returned byte-identically.
         """
         body_w = getattr(net_class, "trace_width", None) or self.rules.trace_width
         full_half, clr = self._conn_geometry(net_class, net)
@@ -895,16 +1124,38 @@ class LatticePathfinder:
             net_class=net_class,
         )
         # A successful full-width escape, or a fat coupled agent (whose grown
-        # envelope has its own escape discipline), is returned as-is.
-        if stubs or fat:
+        # envelope has its own escape discipline), is returned as-is.  A
+        # full-width stub set none of whose stubs can LEAVE its landing node
+        # at full width is a dead end, not a success (issue #6381): fall
+        # through to the neck scan, keeping the dead-end set as the
+        # never-worse result if the neck cannot escape either.
+        if fat:
             return stubs, body_w
+        if stubs:
+            if any(
+                self._stub_has_egress(
+                    stub,
+                    net,
+                    committed,
+                    full_half,
+                    clr,
+                    net_class=net_class,
+                    allow_vias=allow_vias,
+                    via_in_pad_override=via_in_pad_override,
+                )
+                for stub in stubs
+            ):
+                return stubs, body_w
+            dead_end = stubs
+        else:
+            dead_end = []
 
         neck_w = self._neck_width(net_class)
         neck_half = neck_w / 2.0
         if neck_half >= full_half - 1e-9:
             # Not oversize: the neck would not be narrower than the body, so
             # there is nothing to taper -- the honest decline stands.
-            return stubs, body_w
+            return dead_end, body_w
 
         lattice = self.build()
         base_sr = max(3.0 * lattice.fine + max(pad.width, pad.height), 2.0)
@@ -1005,7 +1256,134 @@ class LatticePathfinder:
                         ]
                         if neck_stubs:
                             break
+        if not neck_stubs and dead_end:
+            # Issue #6381: the neck found nothing either -- keep the pre-#6381
+            # result (the dead-end full-width stubs) rather than turning a
+            # no-path decline into a pad-escape one.
+            return dead_end, body_w
         return neck_stubs, neck_w
+
+    def _body_edge_legal(
+        self,
+        edge: EdgeKey,
+        layer: int,
+        net: int,
+        half: float,
+        clr: float,
+        committed: CommittedCopper,
+        *,
+        extra: float,
+        pw: Any,
+        ko: Any,
+    ) -> tuple[bool, bool]:
+        """Single-ended full-width legality of one lattice edge on ``layer``.
+
+        Returns ``(legal, keepout_hit)``.  This is the exact predicate the
+        A* in :meth:`_route_search` expands with (issue #6381 factored it out
+        so the escape-egress check cannot drift from the search); the
+        Edge.Cuts boundary test is applied by the caller.
+        """
+        lattice = self.build()
+        ea = lattice.node_point(edge[0])
+        eb = lattice.node_point(edge[1])
+        ko_hit = ko is not None and ko.segment_blocked(ea, eb, layer, net, half)
+        obstacles = self.obstacles
+        ok = (
+            not ko_hit
+            and not obstacles.edge_blocked(edge, layer, net)
+            and not (extra > 0.0 and obstacles.segment_blocked(ea, eb, layer, net, extra))
+            and not (
+                pw is not None
+                and obstacles.pairwise_pad_blocked(ea, eb, layer, net, half, extra, pw)
+            )
+            and committed.seg_clear(ea, eb, layer, net, half, clr)
+        )
+        return ok, ko_hit
+
+    def _body_node_legal(
+        self,
+        key: NodeKey,
+        layer: int,
+        net: int,
+        half: float,
+        clr: float,
+        committed: CommittedCopper,
+        *,
+        extra: float,
+        pw: Any,
+        ko: Any,
+    ) -> tuple[bool, bool]:
+        """Single-ended full-width legality of one lattice node (``(ok, ko_hit)``).
+
+        Node counterpart of :meth:`_body_edge_legal` (issue #6381).
+        """
+        npt = self.build().node_point(key)
+        ko_hit = ko is not None and ko.segment_blocked(npt, npt, layer, net, half)
+        obstacles = self.obstacles
+        ok = (
+            not ko_hit
+            and not obstacles.node_blocked(key, layer, net)
+            and not (extra > 0.0 and obstacles.segment_blocked(npt, npt, layer, net, extra))
+            and not (
+                pw is not None
+                and obstacles.pairwise_pad_blocked(npt, npt, layer, net, half, extra, pw)
+            )
+            and committed.node_clear(npt, layer, net, half, clr)
+        )
+        return ok, ko_hit
+
+    def _stub_has_egress(
+        self,
+        stub: tuple[NodeKey, int, list[Pt], float],
+        net: int,
+        committed: CommittedCopper | None,
+        half: float,
+        clr: float,
+        *,
+        net_class: object | None = None,
+        allow_vias: bool = True,
+        via_in_pad_override: bool | None = None,
+    ) -> bool:
+        """Whether a full-width stub's landing node can be LEFT (issue #6381).
+
+        True when at least one lattice edge out of the landing ``(node,
+        layer)`` is legal at the full body width (edge + far node, the same
+        predicates and Edge.Cuts test the A* applies), or -- when vias are
+        allowed -- a through via at the node is legal.  A stub without egress
+        is a dead end the search can only pop and drop.
+        """
+        lattice = self.build()
+        if committed is None:
+            committed = self._fresh_committed()
+        key, layer = stub[0], stub[1]
+        extra = max(0.0, half + clr - self._agent_radius)
+        pw, ko = self._pairwise, self._keepouts
+        boundary = self._escape_boundary
+        for nbr, _elen in lattice.adj.get(key, ()):
+            edge = (min(key, nbr), max(key, nbr))
+            if not self._body_edge_legal(
+                edge, layer, net, half, clr, committed, extra=extra, pw=pw, ko=ko
+            )[0]:
+                continue
+            if not boundary.segment_clear(
+                lattice.node_point(edge[0]), lattice.node_point(edge[1]), half
+            ):
+                continue
+            if self._body_node_legal(
+                nbr, layer, net, half, clr, committed, extra=extra, pw=pw, ko=ko
+            )[0]:
+                return True
+        return bool(
+            allow_vias
+            and self.num_layers > 1
+            and self._via_ok(
+                key,
+                net,
+                committed,
+                via_in_pad_override=via_in_pad_override,
+                clearance=clr if net_class is not None else None,
+            )
+        )
 
     def _keepout_escape_reason(
         self,
@@ -1207,6 +1585,7 @@ class LatticePathfinder:
         stubs_override: tuple[list, list] | None = None,
         exempt_pads: frozenset[int] | None = None,
         escape_plan: dict[int, EscapeChoice] | None = None,
+        guide: PartnerGuide | None = None,
     ) -> tuple[_RouteResult | None, str]:
         """Apply physical Kelvin isolation throughout every search stage."""
         from ..kelvin import detect_kelvin_topology
@@ -1240,6 +1619,7 @@ class LatticePathfinder:
                 stubs_override=stubs_override,
                 exempt_pads=exempt_pads,
                 escape_plan=escape_plan,
+                guide=guide,
             )
         finally:
             committed.kelvin_guard = previous
@@ -1260,6 +1640,7 @@ class LatticePathfinder:
         stubs_override: tuple[list, list] | None = None,
         exempt_pads: frozenset[int] | None = None,
         escape_plan: dict[int, EscapeChoice] | None = None,
+        guide: PartnerGuide | None = None,
     ) -> tuple[_RouteResult | None, str]:
         """Route one connection, staging via-in-pad as a last resort (#4475).
 
@@ -1311,6 +1692,8 @@ class LatticePathfinder:
         }
         if escape_plan and not fat:
             search_kwargs["escape_plan"] = escape_plan
+        if guide is not None and not fat:
+            search_kwargs["guide"] = guide
         if not last_resort:
             return self._route_search(start, end, net_class, **search_kwargs)
 
@@ -1354,6 +1737,7 @@ class LatticePathfinder:
         exempt_pads: frozenset[int] | None = None,
         via_in_pad_override: bool | None = None,
         escape_plan: dict[int, EscapeChoice] | None = None,
+        guide: PartnerGuide | None = None,
     ) -> tuple[_RouteResult | None, str]:
         """A* over the (node, layer) graph; returns ``(result, reason)``.
 
@@ -1413,6 +1797,25 @@ class LatticePathfinder:
         # coupled centerline skips the mask in-search; its emitted legs are
         # re-verified in ``_route_pair_impl``'s finish gate.
         ko = None if fat else self._keepouts
+        # Issue #6697: the fat centerline body ALSO honours the keepout mask,
+        # at the pair ENVELOPE half-width (``trace/2 + pitch/2``): the nearer
+        # emitted leg then clears the area by exactly its own half-width.
+        # Without this, history pressure from a congested pass displaced the
+        # centerline onto a reserved pour-pad via site (board 03 U1.5 GND
+        # reservation) that only the finish gate saw, declining a pair that
+        # had coupled on pass 0.
+        fat_ko = self._keepouts if fat else None
+        fat_ko_half = (
+            (getattr(net_class, "trace_width", None) or self.rules.trace_width) / 2.0
+            + extra_clearance
+            if fat
+            else 0.0
+        )
+        # A node is a possible polyline VERTEX, and the +/- pitch/2 offset
+        # mitres a 90-degree turn out to pitch/2 * sqrt(2) from the
+        # centerline, so vertices are probed at the mitred reach (board 03:
+        # a 0.2 mm V-jog put the offset leg 0.1 mm inside the U1.5 site).
+        fat_ko_node_half = fat_ko_half + (math.sqrt(2.0) - 1.0) * extra_clearance if fat else 0.0
         ko_pruned = False
         # Issue #4979: set when a via-hop was skipped because its target
         # layer is hard-avoided for this net -- lets the final "no-path"
@@ -1470,6 +1873,8 @@ class LatticePathfinder:
                     layers=stub_layers,
                     exempt_pads=exempt_pads,
                     net_class=net_class,
+                    allow_vias=allow_vias,
+                    via_in_pad_override=via_in_pad_override,
                 )
 
             stubs_a, width_a = escape(start)
@@ -1596,26 +2001,19 @@ class LatticePathfinder:
                         ) and committed_seg_clear_grown(
                             committed, pa, pb, layer, pair_nets, extra_clearance
                         )
+                        if (
+                            ok
+                            and fat_ko is not None
+                            and fat_ko.segment_blocked(pa, pb, layer, net, fat_ko_half)
+                        ):
+                            ok = False
+                            ko_pruned = True
                     else:
-                        ea = lattice.node_point(edge[0])
-                        eb = lattice.node_point(edge[1])
-                        ko_hit = ko is not None and ko.segment_blocked(ea, eb, layer, net, half)
+                        ok, ko_hit = self._body_edge_legal(
+                            edge, layer, net, half, clr, committed, extra=extra, pw=pw, ko=ko
+                        )
                         if ko_hit:
                             ko_pruned = True
-                        ok = (
-                            not ko_hit
-                            and not obstacles.edge_blocked(edge, layer, net)
-                            and not (
-                                extra > 0.0 and obstacles.segment_blocked(ea, eb, layer, net, extra)
-                            )
-                            and not (
-                                pw is not None
-                                and obstacles.pairwise_pad_blocked(
-                                    ea, eb, layer, net, half, extra, pw
-                                )
-                            )
-                            and committed.seg_clear(ea, eb, layer, net, half, clr)
-                        )
                     ok = ok and boundary.segment_clear(
                         lattice.node_point(edge[0]),
                         lattice.node_point(edge[1]),
@@ -1634,31 +2032,27 @@ class LatticePathfinder:
                         ) and committed_point_clear_grown(
                             committed, npt, layer, pair_nets, extra_clearance
                         )
+                        if (
+                            nok
+                            and fat_ko is not None
+                            and fat_ko.segment_blocked(npt, npt, layer, net, fat_ko_node_half)
+                        ):
+                            nok = False
+                            ko_pruned = True
                     else:
-                        npt = lattice.node_point(nbr)
-                        ko_hit = ko is not None and ko.segment_blocked(npt, npt, layer, net, half)
+                        nok, ko_hit = self._body_node_legal(
+                            nbr, layer, net, half, clr, committed, extra=extra, pw=pw, ko=ko
+                        )
                         if ko_hit:
                             ko_pruned = True
-                        nok = (
-                            not ko_hit
-                            and not obstacles.node_blocked(nbr, layer, net)
-                            and not (
-                                extra > 0.0
-                                and obstacles.segment_blocked(npt, npt, layer, net, extra)
-                            )
-                            and not (
-                                pw is not None
-                                and obstacles.pairwise_pad_blocked(
-                                    npt, npt, layer, net, half, extra, pw
-                                )
-                            )
-                            and committed.node_clear(npt, layer, net, half, clr)
-                        )
                     node_ok[nstate] = nok
                 if not nok:
                     continue
                 step = elen + present * history.get(("e", edge, layer), 0.0)
                 step += copper_cost(lattice.node_point(key), lattice.node_point(nbr), layer, body_w)
+                if guide is not None:
+                    # Issue #6703: soft pull toward the partner leg's corridor.
+                    step += guide.edge_cost(lattice.node_point(key), lattice.node_point(nbr), layer)
                 tentative = g + step
                 if tentative < g_score.get(nstate, math.inf) - 1e-12:
                     g_score[nstate] = tentative
@@ -1769,7 +2163,36 @@ class LatticePathfinder:
             # pruned candidates), which is honest without claiming it was the
             # sole cause of the shortfall.
             if ko_pruned:
-                return None, "no-path-keepout-constrained"
+                return None, REASON_NO_PATH_KEEPOUT
+            # Issue #6381: when every surviving escape stub of one end is a
+            # dead end (no legal full-width edge or via out of its landing
+            # node), THAT is why the search failed -- regardless of whether
+            # the hard layer set also pruned stubs elsewhere.  Name it, so a
+            # fine-pitch escape failure is not misreported as a layer
+            # constraint (board 05 PHASE_B read ``no-path-layer-constrained``
+            # because J2.2's inner-layer stubs were dropped, while the real
+            # failure was U2.8's in-pad dead-end stubs).
+            if not fat:
+
+                def no_egress(stubs: list) -> bool:
+                    return not any(
+                        self._stub_has_egress(
+                            stub,
+                            net,
+                            committed,
+                            half,
+                            clr,
+                            net_class=net_class,
+                            allow_vias=allow_vias,
+                            via_in_pad_override=via_in_pad_override,
+                        )
+                        for stub in stubs
+                    )
+
+                if no_egress(stubs_a):
+                    return None, "no-egress-start"
+                if no_egress(stubs_b):
+                    return None, "no-egress-end"
             # Issue #4979: same honesty contract for a hard layer constraint.
             # ``layer_pruned`` is set when the net's hard-avoided set actually
             # removed something from this search -- an escape stub, or a
@@ -1779,8 +2202,8 @@ class LatticePathfinder:
             # (the keepout wording above), and it is never a licence to ship
             # the forbidden copper: this branch returns no route at all.
             if layer_pruned:
-                return None, "no-path-layer-constrained"
-            return None, "no-path"
+                return None, REASON_NO_PATH_LAYER
+            return None, REASON_NO_PATH
 
         # -- reconstruct ---------------------------------------------------
         chain: list[_State] = [end_state]
@@ -1924,6 +2347,7 @@ class LatticePathfinder:
         net: int,
         pair_nets: set[int],
         committed: CommittedCopper,
+        half: float = 0.0,
     ) -> list[Pt] | None:
         """Dogleg from the exact pad position to an emitted leg endpoint.
 
@@ -1945,6 +2369,13 @@ class LatticePathfinder:
                     ok = False
                     break
                 if not committed.seg_clear(a, b, layer, net):
+                    ok = False
+                    break
+                # Issue #6697: the other dogleg orientation may clear a
+                # reserved via site / rule area the first one clips.
+                if self._keepouts is not None and self._keepouts.segment_blocked(
+                    a, b, layer, net, half
+                ):
                     ok = False
                     break
             if ok:
@@ -2169,10 +2600,14 @@ class LatticePathfinder:
                 (net_p, pc.pad_p_a, pc.pad_p_b, leg_p),
                 (net_n, pc.pad_n_a, pc.pad_n_b, leg_n),
             ):
-                attach_a = self._pair_attach(pad_a, leg[0], layer, net, pair_nets, committed)
+                attach_a = self._pair_attach(
+                    pad_a, leg[0], layer, net, pair_nets, committed, trace_w / 2.0
+                )
                 if attach_a is None:
                     return None, "pair-pad-attach"
-                attach_b = self._pair_attach(pad_b, leg[-1], layer, net, pair_nets, committed)
+                attach_b = self._pair_attach(
+                    pad_b, leg[-1], layer, net, pair_nets, committed, trace_w / 2.0
+                )
                 if attach_b is None:
                     return None, "pair-pad-attach"
                 full = attach_a[:-1] + leg + list(reversed(attach_b))[1:]
@@ -2266,7 +2701,13 @@ class LatticePathfinder:
         # Attempt each consistent parity through the FULL pipeline: a parity
         # whose shortest path emits degenerate/blocked legs must not doom the
         # pair when the other parity works.
-        reason = "pair-no-path"
+        #
+        # Issue #6373: two different failures used to share the initial
+        # ``pair-no-path`` value and were indistinguishable in the log.
+        # ``pair-no-parity`` now means NO parity had stubs on both ends, so
+        # no search ever ran; ``pair-no-path`` is reserved for an A* that
+        # actually ran and was exhausted.
+        reason = "pair-no-parity"
         for bit in sorted((True, False), key=parity_rank):
             if not by_bit_a[bit] or not by_bit_b[bit]:
                 continue
@@ -2333,7 +2774,595 @@ class LatticePathfinder:
                         return "self-drc-segment-via-coincident"
         return None
 
+    def _search_single(
+        self,
+        item: Connection,
+        *,
+        committed: CommittedCopper,
+        history: dict[Resource, float],
+        present: float,
+        escape_plan: dict[int, EscapeChoice],
+        guide: PartnerGuide | None = None,
+    ) -> tuple[_RouteResult | None, str]:
+        """Search ONE single-ended connection without committing it.
+
+        Returns ``(result, "ok")`` when the route passed the search AND the
+        final self-DRC gate, else ``(None, reason)``.  ``guide`` (issue
+        #6703) is the partner leg's soft corridor cost for a diff-pair
+        fallback leg; ``None`` is the ordinary single-ended search.
+        """
+        _key, start, end, net_class = item
+        options: dict[str, Any] = {"escape_plan": escape_plan} if escape_plan else {}
+        if guide is not None:
+            options["guide"] = guide
+        result, reason = self._route_impl(
+            start,
+            end,
+            net_class,
+            committed=committed,
+            history=history,
+            present=present,
+            **options,
+        )
+        if result is None:
+            return None, reason
+        # Final self-DRC gate (#4318): a route whose own segment body
+        # runs across its own via center is malformed copper the
+        # checker cannot repair -- decline it honestly rather than
+        # ship a 0.000mm segment-to-via coincidence.
+        self_reason = self._self_drc_reason(result)
+        if self_reason is not None:
+            return None, self_reason
+        return result, "ok"
+
+    def _commit_single(
+        self,
+        item: Connection,
+        result: _RouteResult,
+        routes: dict[object, Route],
+        committed: CommittedCopper,
+    ) -> None:
+        """Record ``result`` under ``item``'s key and commit its copper."""
+        key, start, _end, net_class = item
+        routes[key] = result.route
+        # Commit each segment at the width it was EMITTED at (issue
+        # #4293): the widened lattice body is spaced against 2.6 mm
+        # copper as 2.6 mm copper, and a tapered escape neck is spaced
+        # honestly as neck copper -- never the taper cheating the
+        # spacing model.  Clearance stays the class clearance (#4271).
+        _half, clr = self._conn_geometry(net_class, start.net)
+        for layer_idx, points, widths in result.runs:
+            committed.add_run_widths(layer_idx, points, start.net, [w / 2.0 for w in widths], clr)
+        for via_pt in result.via_points:
+            committed.add_via(via_pt, start.net, clr)
+
+    def _route_single_into(
+        self,
+        item: Connection,
+        routes: dict[object, Route],
+        *,
+        committed: CommittedCopper,
+        history: dict[Resource, float],
+        present: float,
+        escape_plan: dict[int, EscapeChoice],
+    ) -> str | None:
+        """Route ONE single-ended connection and commit it (one pass).
+
+        Shared by ordinary singles and the #6373 uncoupled-fallback pair legs
+        so both go through the identical search + self-DRC + commit path.
+        Returns ``None`` on success (``routes[key]`` set and the copper
+        committed), else the decline reason -- nothing is committed then.
+        """
+        result, reason = self._search_single(
+            item, committed=committed, history=history, present=present, escape_plan=escape_plan
+        )
+        if result is None:
+            return reason
+        self._commit_single(item, result, routes, committed)
+        return None
+
+    def _partner_guide(self, result: _RouteResult, pc: CoupledConnection) -> PartnerGuide:
+        """The #6703 corridor cost built from one routed fallback leg."""
+        pitch = max(pc.pitch, 1e-3)
+        return PartnerGuide(
+            result.runs,
+            near=_GUIDE_NEAR_PITCHES * pitch,
+            cap=_GUIDE_CAP_MM,
+            weight=_GUIDE_WEIGHT,
+        )
+
+    def _fallback_items(self, pc: CoupledConnection) -> dict[str, Connection]:
+        """The two single-ended leg connections of a declined pair (#6373)."""
+        return {
+            pol: ((pc.key, pol), pad_a, pad_b, pc.net_class)
+            for pol, pad_a, pad_b in (
+                ("P", pc.pad_p_a, pc.pad_p_b),
+                ("N", pc.pad_n_a, pc.pad_n_b),
+            )
+        }
+
+    def _pair_skew(self, legs: _FallbackLegs) -> float | None:
+        """``|len_P - len_N|`` of a fully routed leg pair, else ``None``."""
+        p_r, n_r = legs["P"][0], legs["N"][0]
+        if p_r is None or n_r is None:
+            return None
+        measure = self.pair_length_measure or _default_pair_length
+        return abs(measure(p_r.route) - measure(n_r.route))
+
+    def _legs_shortfalls(self, pc: CoupledConnection, legs: _FallbackLegs) -> int:
+        """Class-pad shortfalls of a leg pair (see :func:`class_pad_shortfalls`)."""
+        from .class_pad_repair import class_pad_shortfalls
+
+        total = 0
+        for pol in ("P", "N"):
+            res = legs[pol][0]
+            if res is not None:
+                memo = self._shortfall_memo
+                hit = memo.get(id(res))
+                if hit is None or hit[0] is not res:
+                    hit = (res, class_pad_shortfalls(self, res.route, pc.net_class))
+                    memo[id(res)] = hit
+                total += hit[1]
+        return total
+
+    def _partner_blind_legs(
+        self,
+        pc: CoupledConnection,
+        *,
+        committed: CommittedCopper,
+        history: dict[Resource, float],
+        present: float,
+        escape_plan: dict[int, EscapeChoice],
+    ) -> _FallbackLegs:
+        """The pre-#6703 fallback: P, then N, as unrelated nets (committed)."""
+        items = self._fallback_items(pc)
+        legs: _FallbackLegs = {}
+        for pol in ("P", "N"):
+            res, reason = self._search_single(
+                items[pol],
+                committed=committed,
+                history=history,
+                present=present,
+                escape_plan=escape_plan,
+            )
+            if res is not None:
+                self._commit_single(items[pol], res, {}, committed)
+            legs[pol] = (res, reason)
+        return legs
+
+    def _strict_pad_pairwise(
+        self, pc: CoupledConnection, items: dict[str, Connection]
+    ) -> tuple[LatticePairwise | None, float]:
+        """Per-pad class keep-out for a fallback pair's leg search (#6703).
+
+        The lattice search holds every foreign pad only to the connection's
+        own clearance; a pad whose class asks for more is fixed afterwards by
+        the class-pad repair, which may barely move diff-pair copper (#6437).
+        This projects the pads whose own class (:func:`pad_class_requirements`)
+        is stricter than the leg's onto a :class:`LatticePairwise` keyed
+        ``(leg net, pad net)``.  Installed only while a partner-aware leg is
+        SEARCHED, it widens exactly those pads' keep-outs
+        (:meth:`LatticeObstacleModel.pairwise_pad_blocked`); every other
+        obstacle keeps the leg's own clearance.  Committed copper never
+        carries it: the projection is not threaded into
+        :class:`CommittedCopper`.
+
+        Also returns the search clearance FLOOR: the strictest of those pad
+        classes that is at most :data:`_SEARCH_FLOOR_MAX_FACTOR` times the
+        legs' own clearance (``0.0`` when there is none).  The first cut of
+        #6703 raised the floor to the strictest class on the board, so one
+        outlier class (a high-voltage pad) held every obstacle of every
+        candidate at its gap (PR #6735 review); such a pad is now kept clear
+        through the projection only.
+
+        ``(None, 0.0)`` when no pad is stricter than either leg (the searches
+        are then exactly the partner-blind ones), when the router installed
+        no pad classes, or when a real HV pairwise projection is already
+        active (it governs pad clearance itself, and the repair is skipped
+        there).
+        """
+        from .class_pad_repair import pad_class_requirements
+        from .pairwise import LatticePairwise
+
+        if self._pairwise is not None:
+            return None, 0.0
+        pad_req = pad_class_requirements(self)
+        if not pad_req:
+            return None, 0.0
+        by_pad_net: dict[int, float] = {}
+        for pad, req in zip(self.pads, pad_req, strict=False):
+            if pad.net is None:
+                continue
+            if req > by_pad_net.get(pad.net, 0.0):
+                by_pad_net[pad.net] = req
+        required: dict[tuple[int, int], float] = {}
+        max_by_net: dict[int, float] = {}
+        for item in items.values():
+            leg_net = item[1].net
+            own = self._conn_geometry(pc.net_class, leg_net)[1]
+            for pad_net, req in by_pad_net.items():
+                if pad_net == leg_net or req <= own + 1e-9:
+                    continue
+                key = (leg_net, pad_net) if leg_net < pad_net else (pad_net, leg_net)
+                required[key] = max(required.get(key, 0.0), req)
+                max_by_net[leg_net] = max(max_by_net.get(leg_net, 0.0), req)
+        if not required:
+            return None, 0.0
+        own_min = min(self._conn_geometry(pc.net_class, it[1].net)[1] for it in items.values())
+        cap = _SEARCH_FLOOR_MAX_FACTOR * own_min + 1e-9
+        floor = max((req for req in required.values() if req <= cap), default=0.0)
+        return (
+            LatticePairwise(required_by_pair=required, zones=(), max_by_net=max_by_net),
+            floor,
+        )
+
+    def _partner_aware_legs(
+        self,
+        pc: CoupledConnection,
+        *,
+        committed: CommittedCopper,
+        history: dict[Resource, float],
+        present: float,
+        escape_plan: dict[int, EscapeChoice],
+    ) -> tuple[_FallbackLegs, bool]:
+        """Route a declined pair's two legs partner-aware (issue #6703; committed).
+
+        Four candidates are built:
+
+        * P unguided, then N unguided (the pre-#6703 order);
+        * P unguided, then N guided by P's corridor (:class:`PartnerGuide`);
+        * N unguided, then P unguided;
+        * N unguided, then P guided by N's corridor.
+
+        Every leg is searched holding each foreign pad at that pad's own class
+        (see :meth:`_strict_pad_pairwise`).  The second leg of a candidate is searched against committed
+        copper that holds the candidate's first leg (a
+        :meth:`CommittedCopper.begin_trial` that is rolled back), so every
+        candidate is legal exactly as it would be had it been routed alone.
+        The winner has the most routed legs, then the fewest class-pad
+        shortfalls, then the smallest skew (:meth:`_pair_skew`), then the
+        smallest total length; ties keep the earlier candidate, so the
+        selection is deterministic.  Its legs are committed.  Returns
+        ``(legs, is_partner_blind)`` -- the flag is set when the winner is
+        exactly the copper :meth:`_partner_blind_legs` would have produced.
+        """
+        items = self._fallback_items(pc)
+        kw: dict[str, Any] = {
+            "committed": committed,
+            "history": history,
+            "present": present,
+            "escape_plan": escape_plan,
+        }
+
+        # A shortfall against a pad's own class left on a diff-pair net gets
+        # the net demoted (the class-pad repair may barely move pair copper),
+        # so the partner-aware legs keep every foreign pad at that pad's own
+        # class while they are searched: their copper then needs no repair.
+        # Two parts (see :meth:`_strict_pad_pairwise`):
+        #
+        # * every pad stricter than the leg is widened to its own class (a
+        #   per-pad projection, whatever that class is);
+        # * the leg's clearance to EVERY obstacle is raised to the strictest
+        #   pad class that is at most ``_SEARCH_FLOOR_MAX_FACTOR`` times its
+        #   own (board 07rf: 0.2 mm for a 0.1 mm TMDS leg).  The spacing that
+        #   buys is what leaves room for the later TMDS legs there; an
+        #   outlier class (a 1.5 mm HV pad) is held per pad only, so it can
+        #   no longer push every candidate off the board.
+        #
+        # Committed copper keeps the leg's own clearance.
+        strict, floor = self._strict_pad_pairwise(pc, items)
+
+        def search(pol: str, guide: PartnerGuide | None = None) -> tuple[_RouteResult | None, str]:
+            previous = self._pairwise
+            if strict is not None:
+                self._pairwise = strict
+            self._search_clearance_floor = floor
+            try:
+                return self._search_single(items[pol], guide=guide, **kw)
+            finally:
+                self._pairwise = previous
+                self._search_clearance_floor = 0.0
+
+        candidates: list[_FallbackLegs] = []
+        firsts: _FallbackLegs = {}
+        for lead, follow in (("P", "N"), ("N", "P")):
+            first = search(lead)
+            firsts[lead] = first
+            lead_res = first[0]
+            if lead_res is None:
+                continue
+            mark = committed.begin_trial()
+            try:
+                self._commit_single(items[lead], lead_res, {}, committed)
+                plain = search(follow)
+                guided = search(follow, self._partner_guide(lead_res, pc))
+            finally:
+                committed.rollback_trial(mark)
+            # The plain P-led candidate keeps the pre-#6703 order; listed
+            # first so it wins every tie.
+            candidates.append({lead: first, follow: plain})
+            if guided[0] is not None:
+                candidates.append({lead: first, follow: guided})
+        if firsts["P"][0] is None:
+            # P cannot route even alone: the pre-#6703 shape (N routed on
+            # its own) leads, and wins unless an N-led candidate is no worse.
+            candidates.insert(0, {"P": firsts["P"], "N": firsts["N"]})
+
+        measure = self.pair_length_measure or _default_pair_length
+
+        def rank(cand: _FallbackLegs) -> tuple[int, int, float, float]:
+            p_r, n_r = cand["P"][0], cand["N"][0]
+            routed = (p_r is not None) + (n_r is not None)
+            short = self._legs_shortfalls(pc, cand)
+            if p_r is None or n_r is None:
+                return (-routed, short, 0.0, 0.0)
+            lp, ln = measure(p_r.route), measure(n_r.route)
+            # Rounded to 1 um so float noise never flips a tie.
+            return (-routed, short, round(abs(lp - ln), 3), round(lp + ln, 3))
+
+        best = min(candidates, key=rank)  # ``min`` keeps the first on ties
+        for pol in ("P", "N"):
+            res = best[pol][0]
+            if res is not None:
+                self._commit_single(items[pol], res, {}, committed)
+        # ``candidates[0]`` is the partner-blind (pre-#6703) leg pair whenever
+        # no pad needed widening (the searches were then the plain ones).
+        return (
+            {"P": best["P"], "N": best["N"]},
+            best is candidates[0] and strict is None and floor == 0.0,
+        )
+
+    def _route_fallback_pairs_into(
+        self,
+        pairs: list[CoupledConnection],
+        routes: dict[object, Route],
+        *,
+        committed: CommittedCopper,
+        history: dict[Resource, float],
+        present: float,
+        escape_plan: dict[int, EscapeChoice],
+        deadline: float | None = None,
+    ) -> list[dict[str, tuple[Connection, str | None]]]:
+        """Route every deferred fallback pair's legs (#6373), skew-aware (#6703).
+
+        Pre-#6703 each leg was routed as an unrelated net (P, then N), so
+        wherever a wall forced a detour the legs took different ways round
+        it and the pair's skew grew by mm.  Each pair now picks its best
+        partner-aware candidate (:meth:`_partner_aware_legs`).
+
+        Pairs routed one after another compete for the same escape channels,
+        so a pair's best choice can push a LATER pair's legs onto a worse
+        detour, or off the board (07rf: TMDS_D1 matched by sending its N leg
+        over B.Cu, where TMDS_D0's N leg then found no way at all).  So each
+        pair's partner-aware choice is weighed by a rollout: the remaining
+        pairs are routed partner-blind behind it, and the choice is kept only
+        when the whole flush then scores better than with the pair's own
+        partner-blind legs: more routed legs, or the same number with the
+        summed skew at least :data:`_MIN_FLUSH_SKEW_GAIN_MM` smaller and no
+        more class-pad shortfalls (:func:`~.class_pad_repair.class_pad_shortfalls`).
+        Anything else keeps the pre-#6703 copper.  Shortfalls alone never
+        justify the change: skew is what the partner-aware legs are for, and
+        a partner-blind shortfall is still cleared by the #6489 pad-growth
+        round.  On board 06rf (PR #6735 review), keeping legs that only dodged
+        a shortfall, or cut the skew by 0.1 mm, moved a USB3_TX2 via onto
+        B.Cu under J1, pushed USB3_TX1's partner-blind N leg across the spot
+        the pour oracle bridges the two VBUS_USB islands at, and left one
+        kicad-cli unconnected item that main does not have.  The comparison baseline at every step
+        is the flush already secured, so the result never scores worse than
+        the pre-#6703 flush from the same state.
+
+        Bounded cost: only the first :data:`_MAX_PARTNER_AWARE_PAIRS` pairs
+        are weighed this way, and once ``deadline`` (``time.monotonic()``)
+        passes no further pair is -- every remaining pair keeps the
+        partner-blind legs the rollout already computed, so an expired budget
+        costs no new search.
+
+        Commits the kept flush.  Returns, per pair, ``{"P"|"N": (leg_item,
+        decline reason or None)}``.
+        """
+        kw: dict[str, Any] = {
+            "committed": committed,
+            "history": history,
+            "present": present,
+            "escape_plan": escape_plan,
+        }
+
+        def score(flush: list[_FallbackLegs]) -> tuple[int, float, int]:
+            routed = sum(legs[pol][0] is not None for legs in flush for pol in ("P", "N"))
+            short = sum(
+                self._legs_shortfalls(pc, legs) for pc, legs in zip(pairs, flush, strict=True)
+            )
+            skews = [self._pair_skew(legs) for legs in flush]
+            return (-routed, round(sum(sk for sk in skews if sk is not None), 3), short)
+
+        def better(aware: tuple[int, float, int], blind: tuple[int, float, int]) -> bool:
+            # More routed legs always wins.  Otherwise the partner-aware legs
+            # must cut the summed skew by a material margin without adding a
+            # class-pad shortfall: every leg it moves perturbs the rest of
+            # the board, so a marginal gain is not worth the churn.
+            if aware[0] != blind[0]:
+                return aware[0] < blind[0]
+            return aware[1] <= blind[1] - _MIN_FLUSH_SKEW_GAIN_MM and aware[2] <= blind[2]
+
+        def recommit(pc: CoupledConnection, legs: _FallbackLegs) -> None:
+            items = self._fallback_items(pc)
+            for pol in ("P", "N"):
+                res = legs[pol][0]
+                if res is not None:
+                    self._commit_single(items[pol], res, {}, committed)
+
+        self._shortfall_memo = {}
+        # ``rest`` is always the partner-blind routing of the pairs not yet
+        # decided, under the copper committed so far; initially the whole
+        # pre-#6703 flush.
+        mark = committed.begin_trial()
+        rest = [self._partner_blind_legs(pc, **kw) for pc in pairs]
+        committed.rollback_trial(mark)
+        chosen: list[_FallbackLegs] = []
+        for i, pc in enumerate(pairs):
+            if i >= _MAX_PARTNER_AWARE_PAIRS or (
+                deadline is not None and time.monotonic() >= deadline
+            ):
+                # Out of budget: the remaining pairs keep their partner-blind
+                # legs (``rest`` is exactly that routing under ``chosen``).
+                for q, legs in zip(pairs[i:], rest, strict=True):
+                    recommit(q, legs)
+                chosen.extend(rest)
+                break
+            mark = committed.begin_trial()
+            aware, is_blind = self._partner_aware_legs(pc, **kw)
+            if is_blind:
+                # Same copper as the partner-blind leg pair: nothing to weigh.
+                committed.keep_trial(mark)
+                chosen.append(aware)
+                rest = rest[1:]
+                continue
+            inner = committed.begin_trial()
+            aware_rest = [self._partner_blind_legs(q, **kw) for q in pairs[i + 1 :]]
+            committed.rollback_trial(inner)
+            if better(score([*chosen, aware, *aware_rest]), score([*chosen, *rest])):
+                committed.keep_trial(mark)
+                chosen.append(aware)
+                rest = aware_rest
+            else:
+                committed.rollback_trial(mark)
+                recommit(pc, rest[0])
+                chosen.append(rest[0])
+                rest = rest[1:]
+        self._shortfall_memo = {}
+        out: list[dict[str, tuple[Connection, str | None]]] = []
+        for pc, legs in zip(pairs, chosen, strict=True):
+            items = self._fallback_items(pc)
+            per: dict[str, tuple[Connection, str | None]] = {}
+            for pol in ("P", "N"):
+                res, reason = legs[pol]
+                if res is not None:
+                    routes[items[pol][0]] = res.route
+                    per[pol] = (items[pol], None)
+                else:
+                    per[pol] = (items[pol], reason)
+            out.append(per)
+        return out
+
     def route_netset(
+        self,
+        connections: list[Connection],
+        **kwargs: Any,
+    ) -> tuple[dict[object, Route], LatticeNegotiationStats]:
+        """Negotiate, then re-negotiate once with grown pads if needed (#6489).
+
+        :meth:`_route_netset_once` repairs class-pad shortfalls geometrically.
+        A slot narrower than ``width + 2 x class`` has no legal translation, so
+        the repair leaves it and the router's backstop would delete the whole
+        net.  When shortfalls remain, exactly those pads' static keep-out grows
+        to their class and the netset is negotiated again (bounded rounds); the
+        new result is kept only if it routes at least as much with fewer
+        shortfalls.  With nothing left the first result is returned untouched
+        (no rebuild, ``lattice_builds`` unchanged).
+
+        Issue #6670: in a pad array (a BGA's power balls, a connector's GND
+        pins) a track pushed off one grown pad moves a lattice row over and
+        lands just as close to the NEXT ungrown pad of the same part.  Board
+        06rf's USB3 fallback legs walked U2's GND/+1V2 balls that way: two
+        rounds cut 9 shortfalls to 7 to 2 and the backstop then deleted
+        USB3_TX2- and USB3_RX2+.  So when a round's shortfalls land on a part
+        whose pads were already grown, every pad of that part with a class
+        above the base is tried grown at once.  If that attempt is rejected
+        (it routes less, or leaves no fewer shortfalls), the round falls back
+        to growing only the offending pads, as before, so a round is never
+        worse than the pre-#6670 one.  A part seen for the first time grows
+        only its offending pads, so a board that converges in one round is
+        unchanged.  :attr:`class_pad_growth_rounds` records every attempt.
+        """
+        from .class_pad_repair import pad_class_requirements
+
+        deadline = kwargs.get("deadline")
+        self._class_pad_growth = {}
+        self.class_pad_growth_rounds = []
+        best = self._route_netset_once(connections, **kwargs)
+        for _round in range(_MAX_PAD_GROWTH_ROUNDS):
+            rstats = self.class_pad_repair_stats
+            if rstats is None or not rstats.unrepaired_pads or best[1].deadline_hit:
+                break
+            wanted = {
+                i: req
+                for i, req in rstats.unrepaired_pads.items()
+                if req > self._class_pad_growth.get(i, 0.0) + 1e-9
+            }
+            if not wanted:
+                break
+            grown_parts = {self.pads[i].ref for i in self._class_pad_growth if self.pads[i].ref}
+            recurring = tuple(
+                sorted({self.pads[i].ref for i in wanted if self.pads[i].ref in grown_parts})
+            )
+            attempts: list[tuple[dict[int, float], tuple[str, ...]]] = []
+            if recurring:
+                whole = dict(wanted)
+                reqs = pad_class_requirements(self) or []
+                base = self.rules.trace_clearance
+                for j, req in enumerate(reqs):
+                    if (
+                        self.pads[j].ref in recurring
+                        and req > base + 1e-9
+                        and req > max(whole.get(j, 0.0), self._class_pad_growth.get(j, 0.0)) + 1e-9
+                    ):
+                        whole[j] = req
+                if len(whole) > len(wanted):
+                    attempts.append((whole, recurring))
+            # The targeted growth (the pre-#6670 round) is the fallback when a
+            # whole-part growth is rejected, so a round is never worse than it.
+            attempts.append((wanted, ()))
+            kept = False
+            for grow, parts in attempts:
+                if deadline is not None and time.monotonic() >= deadline:
+                    break
+                saved = (
+                    self.failure_reasons,
+                    self.pair_outcomes,
+                    self.class_pad_repair_stats,
+                    dict(self._class_pad_growth),
+                    self._lattice,
+                    self._obstacles,
+                )
+                self._class_pad_growth.update(grow)
+                self._lattice = None
+                self._obstacles = None
+                routes, stats = self._route_netset_once(connections, **kwargs)
+                new_left = (
+                    self.class_pad_repair_stats.total_remaining
+                    if self.class_pad_repair_stats
+                    else 0
+                )
+                old_left = saved[2].total_remaining if saved[2] else 0
+                kept = stats.routed >= best[1].routed and new_left < old_left
+                self.class_pad_growth_rounds.append(
+                    PadGrowthRound(
+                        grown=len(grow),
+                        footprints=parts,
+                        routed_before=best[1].routed,
+                        routed_after=stats.routed,
+                        left_before=old_left,
+                        left_after=new_left,
+                        kept=kept,
+                    )
+                )
+                if kept:
+                    best = (routes, replace(stats, lattice_builds=self.lattice_builds))
+                    break
+                (
+                    self.failure_reasons,
+                    self.pair_outcomes,
+                    self.class_pad_repair_stats,
+                    self._class_pad_growth,
+                    self._lattice,
+                    self._obstacles,
+                ) = saved
+            if not kept:
+                break
+        routes, stats = best
+        return routes, replace(stats, lattice_builds=self.lattice_builds)
+
+    def _route_netset_once(
         self,
         connections: list[Connection],
         *,
@@ -2345,6 +3374,8 @@ class LatticePathfinder:
         present_cost_growth: float = 1.6,
         history_increment_factor: float = 1.0,
         deadline: float | None = None,
+        uncoupled_fallback: bool = False,
+        pair_nets: Mapping[int, int] | None = None,
     ) -> tuple[dict[object, Route], LatticeNegotiationStats]:
         """PathFinder/VPR-style negotiation over capacity-1 lattice resources.
 
@@ -2370,11 +3401,36 @@ class LatticePathfinder:
         outcomes ("coupled" or a decline reason) land in
         :attr:`pair_outcomes` for the best pass.
 
+        Issue #6373: with ``uncoupled_fallback=False`` (the default, the
+        #4270 v1 contract) a declined pair is never split -- it emits nothing
+        and its main run stays open.  With ``uncoupled_fallback=True`` a pair
+        whose coupled search declines has its two main-run legs
+        (``pad_p_a -> pad_p_b`` and ``pad_n_a -> pad_n_b``) routed
+        single-ended *in the same pass*, immediately after the decline (so
+        they keep the pair's corridor priority over the singles).  Each leg
+        goes through the ordinary :meth:`_route_impl` + :meth:`_self_drc_reason`
+        gates, is keyed ``(pc.key, "P")`` / ``(pc.key, "N")`` exactly like a
+        coupled success, and a leg that cannot route lands in
+        :attr:`failure_reasons` under its own key -- nothing partial is ever
+        emitted for a leg.  The pair's outcome is recorded as
+        ``"uncoupled-fallback:<decline reason>"``.  Stats count a fallback
+        pair as its two legs (``routed``/``total`` each gain one extra unit),
+        and between passes a fallback pair whose coupled run is still
+        geometrically possible on an empty board keeps accruing demand
+        history, so negotiation may yet recover it as ``"coupled"`` (a pass
+        with more coupled pairs wins a completion tie).
+
         The lattice is built **once** (:attr:`lattice_builds` == 1 across the
         whole negotiation); rip-up resets only the committed-copper model.
         Returns ``(routes_by_key, stats)`` for the best pass seen;
         :attr:`failure_reasons` carries the per-connection decline diagnosis
         for that pass.
+
+        Issue #6437: ``pair_nets`` maps every detected diff-pair net id,
+        engaged or not, to its partner's.  The post-negotiation pad-class repair
+        (#6395) may move their single-ended copper only within a 0.01 mm skew
+        budget per pair (P5's threshold).  The nets of every ``coupled`` entry are
+        always added, so a direct caller stays safe.
 
         Issue #4355: ``fixed_copper`` is the preserved copper of NON-listed
         nets (``router.existing_routes`` minus the routable set).  It is
@@ -2427,6 +3483,27 @@ class LatticePathfinder:
         best_reasons: dict[object, str] = {}
         best_pair_outcomes: dict[object, str] = {}
         best_count = -1
+        # Issue #6373: best-pass ranking ``(routed_items, coupled_count,
+        # fallback_legs)``.  ``routed_items`` keeps its pre-#6373 meaning
+        # (completed items: a coupled pair and a fully-routed fallback pair
+        # each count once) and leads.  A completion tie then prefers more
+        # COUPLED pairs -- so a later pass that recovers a congested fallback
+        # pair as coupled replaces the earlier uncoupled pass -- and only
+        # then more routed fallback legs (which rewards a partially-routed
+        # fallback pair's lone leg; a full fallback pair is already in
+        # ``routed_items``).  With ``uncoupled_fallback`` off the two
+        # tie-break keys are pinned to 0, so the selection (and escape-plan
+        # release) is exactly the pre-#6373 first-best-pass rule.
+        # Issue #6378: a pair that passes through an interior part arrives as
+        # one ``CoupledConnection`` per chain SEGMENT, so ``coupled_count``
+        # counts coupled segments and ``routed_items`` counts each segment
+        # once.  Both stay monotone in "more coupling is better": a pass that
+        # couples more segments at equal completion still wins, and the
+        # fallback / congested-probe logic below applies per segment.
+        best_score: tuple[int, int, int] = (-1, -1, -1)
+        # Leg-unit accounting of the best pass for the honest stats.
+        best_fallback_pairs = 0
+        best_fallback_legs = 0
         converged = False
         iterations_run = 0
         present = present_cost_initial
@@ -2458,6 +3535,41 @@ class LatticePathfinder:
             pair_outcomes: dict[object, str] = {}
             routed_items = 0
             failed: list[tuple[int, Any]] = []
+            # Issue #6373: per-pass uncoupled-fallback bookkeeping.
+            fallback_pairs: list[Any] = []
+            fallback_legs = 0
+            coupled_count = 0
+            deferred_fallback: list[Any] = []
+
+            def flush_fallbacks() -> None:
+                nonlocal routed_items, fallback_legs
+                if not deferred_fallback:
+                    return
+                # Issue #6703: the legs are routed partner-aware so a pair's
+                # two legs take the same way round an obstacle wall.
+                flushed = self._route_fallback_pairs_into(
+                    list(deferred_fallback),
+                    routes,
+                    committed=committed,
+                    history=history,
+                    present=present,
+                    escape_plan=escape_plan,
+                    deadline=deadline,
+                )
+                for legs in flushed:
+                    legs_ok = 0
+                    for pol in ("P", "N"):
+                        leg_item, leg_reason = legs[pol]
+                        if leg_reason is None:
+                            legs_ok += 1
+                        else:
+                            reasons[leg_item[0]] = leg_reason
+                            failed.append((0, leg_item))
+                    fallback_legs += legs_ok
+                    if legs_ok == 2:
+                        routed_items += 1
+                deferred_fallback.clear()
+
             for _idx, (_length, kind, item) in enumerate(items):
                 # Issue #4472: abort mid-pass on the deadline too, so a single
                 # slow search inside one pass cannot overrun the budget.
@@ -2478,12 +3590,25 @@ class LatticePathfinder:
                     pres, preason = self._route_pair_impl(
                         item, committed=committed, history=history, present=present
                     )
+                    if pres is None and uncoupled_fallback:
+                        # Issue #6373: a declined pair's main run is routed as
+                        # two single-ended legs.  Issue #6697: DEFERRED until
+                        # every pair has had its coupled attempt (see
+                        # ``flush_fallbacks``), so one pair's uncoupled legs
+                        # never pre-block a sibling pair's coupled corridor
+                        # (board 03: USB_D[0]'s fallback USB_D- leg ran
+                        # through USB_D[1]'s corridor).
+                        pair_outcomes[item.key] = f"uncoupled-fallback:{preason}"
+                        fallback_pairs.append(item)
+                        deferred_fallback.append(item)
+                        continue
                     if pres is None:
                         reasons[item.key] = preason
                         pair_outcomes[item.key] = preason
                         failed.append((kind, item))
                         continue
                     pair_outcomes[item.key] = "coupled"
+                    coupled_count += 1
                     routed_items += 1
                     routes[(item.key, "P")] = pres.routes[0]
                     routes[(item.key, "N")] = pres.routes[1]
@@ -2495,55 +3620,42 @@ class LatticePathfinder:
                         half, clr = self._conn_geometry(item.net_class, leg_net)
                         committed.add_run(layer_idx, points, leg_net, half, clr)
                     continue
-                key, start, end, net_class = item
-                plan_options: dict[str, Any] = {"escape_plan": escape_plan} if escape_plan else {}
-                result, reason = self._route_impl(
-                    start,
-                    end,
-                    net_class,
+                flush_fallbacks()
+                key = item[0]
+                reason = self._route_single_into(
+                    item,
+                    routes,
                     committed=committed,
                     history=history,
                     present=present,
-                    **plan_options,
+                    escape_plan=escape_plan,
                 )
-                if result is None:
+                if reason is not None:
                     reasons[key] = reason
                     failed.append((kind, item))
                     continue
-                # Final self-DRC gate (#4318): a route whose own segment body
-                # runs across its own via center is malformed copper the
-                # checker cannot repair -- decline it honestly rather than
-                # ship a 0.000mm segment-to-via coincidence.
-                self_reason = self._self_drc_reason(result)
-                if self_reason is not None:
-                    reasons[key] = self_reason
-                    failed.append((kind, item))
-                    continue
                 routed_items += 1
-                routes[key] = result.route
-                # Commit each segment at the width it was EMITTED at (issue
-                # #4293): the widened lattice body is spaced against 2.6 mm
-                # copper as 2.6 mm copper, and a tapered escape neck is spaced
-                # honestly as neck copper -- never the taper cheating the
-                # spacing model.  Clearance stays the class clearance (#4271).
-                _half, clr = self._conn_geometry(net_class, start.net)
-                for layer_idx, points, widths in result.runs:
-                    committed.add_run_widths(
-                        layer_idx, points, start.net, [w / 2.0 for w in widths], clr
-                    )
-                for via_pt in result.via_points:
-                    committed.add_via(via_pt, start.net, clr)
 
-            if escape_plan and routed_items <= best_count:
+            flush_fallbacks()
+
+            score = (
+                (routed_items, coupled_count, fallback_legs)
+                if uncoupled_fallback
+                else (routed_items, 0, 0)
+            )
+            if escape_plan and score <= best_score:
                 # A local reservation is a proposal, not a permanent lock.
                 # Release it when its full pass fails to improve completion.
                 escape_plan = {}
 
-            if routed_items > best_count:
+            if score > best_score:
+                best_score = score
                 best_count = routed_items
                 best_routes = routes
                 best_reasons = reasons
                 best_pair_outcomes = pair_outcomes
+                best_fallback_pairs = len(fallback_pairs)
+                best_fallback_legs = fallback_legs
 
             # Issue #4472: a deadline-truncated pass is NOT convergence -- some
             # items were never attempted, so ``failed`` is incomplete.  Record
@@ -2551,11 +3663,33 @@ class LatticePathfinder:
             if deadline_hit:
                 break
 
-            if not failed:
+            # Issue #6373: a pair served by the uncoupled fallback is routed,
+            # but not the outcome negotiation is aiming for.  When its coupled
+            # run is geometrically possible on an EMPTY board, the decline was
+            # congestion: keep it in the demand set so history pressures the
+            # occupants and a later pass can couple it.  A structurally blocked
+            # pair (no fresh-board run either) adds no demand and does not
+            # hold convergence back.
+            # The empty-board probe IS the pair's desired corridor, so it is
+            # kept and reused by the demand loop below instead of searching
+            # the same fresh board a second time.
+            congested_fallback: list[Any] = []
+            fallback_probes: dict[object, Any] = {}
+            if fallback_pairs and it < max_iterations - 1:
+                for pc in fallback_pairs:
+                    probe, _r = self._route_pair_impl(
+                        pc, committed=self._fresh_committed(), history=history, present=present
+                    )
+                    if probe is not None:
+                        congested_fallback.append(pc)
+                        fallback_probes[pc.key] = probe
+
+            if not failed and not congested_fallback:
                 converged = True
                 break
             if it == max_iterations - 1:
                 break
+            failed.extend((1, pc) for pc in congested_fallback)
 
             if it == 0:
                 escape_plan = plan_tapered_escapes(self, connections, deadline)
@@ -2566,9 +3700,14 @@ class LatticePathfinder:
             increment = history_increment_factor * self.rules.cost_congestion * present
             for kind, item in failed:
                 if kind == 1:
-                    desired_pair, _r = self._route_pair_impl(
-                        item, committed=self._fresh_committed(), history=history, present=present
-                    )
+                    desired_pair = fallback_probes.get(item.key)
+                    if desired_pair is None:
+                        desired_pair, _r = self._route_pair_impl(
+                            item,
+                            committed=self._fresh_committed(),
+                            history=history,
+                            present=present,
+                        )
                     desired_resources = desired_pair.resources if desired_pair is not None else None
                     if desired_pair is not None:
                         half, clearance = self._conn_geometry(item.net_class)
@@ -2614,16 +3753,55 @@ class LatticePathfinder:
 
         self.failure_reasons = best_reasons
         self.pair_outcomes = best_pair_outcomes
+        # Issue #6395: hold the best pass's single-ended copper to each pad's
+        # own net class (``max(own, pad)``).  Pair legs (coupled and
+        # uncoupled-fallback) stay put and count as foreign copper.  Issue
+        # #6437: the rest of a diff-pair NET's copper (extra-pad stubs, a
+        # declined pair routed on the ordinary star) moves only within a
+        # per-net length budget, so the pair's skew cannot drift.
+        self.class_pad_repair_stats = None
+        if self.pad_class_clearances is not None and best_routes:
+            from .class_pad_repair import repair_class_pad_pairs
+
+            net_classes: dict[object, object | None] = {c[0]: c[3] for c in connections}
+            for pc in pairs:
+                for pol in ("P", "N"):
+                    net_classes[(pc.key, pol)] = pc.net_class
+            pair_ids: dict[int, int] = dict(pair_nets or {})
+            for pc in pairs:
+                pair_ids[pc.pad_p_a.net] = pc.pad_n_a.net
+                pair_ids[pc.pad_n_a.net] = pc.pad_p_a.net
+            self.class_pad_repair_stats = repair_class_pad_pairs(
+                self,
+                best_routes,
+                {key: net_classes.get(key) for key in best_routes},
+                repairable={c[0] for c in connections} & set(best_routes),
+                pair_nets=pair_ids,
+            )
         # Issue #4477: the budget the CALLER granted for this call is the
         # remaining time between the deadline and this call's start -- an
         # honest "elapsed of a Ys budget" figure even when the deadline was
         # never reached.  ``None`` when the negotiation ran unbudgeted.
         budget_s = max(0.0, deadline - start_time) if deadline is not None else None
+        # Issue #6373: a fallback pair is two single-ended legs, so it counts
+        # as two units in both ``routed`` and ``total``.  ``best_count`` counts
+        # a fully-routed fallback pair once; add its second leg, plus every
+        # routed leg of a partially-routed fallback pair.
+        routed_units = best_count if best_count >= 0 else 0
+        if best_fallback_pairs:
+            full_pairs = sum(
+                1
+                for pc in pairs
+                if best_pair_outcomes.get(pc.key, "").startswith("uncoupled-fallback:")
+                and (pc.key, "P") in best_routes
+                and (pc.key, "N") in best_routes
+            )
+            routed_units += best_fallback_legs - full_pairs
         stats = LatticeNegotiationStats(
             iterations=iterations_run,
             converged=converged,
-            routed=best_count if best_count >= 0 else 0,
-            total=len(connections) + len(pairs),
+            routed=routed_units,
+            total=len(connections) + len(pairs) + best_fallback_pairs,
             lattice_builds=self.lattice_builds,
             deadline_hit=deadline_hit,
             elapsed_s=time.monotonic() - start_time,

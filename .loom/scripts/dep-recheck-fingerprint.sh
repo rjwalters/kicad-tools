@@ -30,7 +30,8 @@
 #
 # BLOCK_REASON and ORTHOGONAL (#6516) stay caller-supplied pass-throughs: both
 # are judgement calls made by reading prose, not mechanical PR-state facts.
-# They are echoed back verbatim but CANONICALIZED before hashing (#8254) -
+# They are echoed back verbatim (shell-quoted, so `eval` returns the exact
+# bytes - #9041) but CANONICALIZED before hashing (#8254) -
 # trimmed, internal whitespace collapsed, casefolded - so "doctor cycle
 # exhausted" and "Doctor cycle  exhausted" are one conclusion, not two.
 #
@@ -102,9 +103,12 @@
 #   2  usage error, or no loom-daemon
 #   3  missing dependency
 #
-# `eval`-safe like `claim-staleness.sh`: KEY=VALUE output is built only from a
-# fixed enum, a hex hash and pre-sorted plain-text lines - never raw forge
-# text - so no comment/PR body content can reach your shell via `eval`.
+# `eval`-safe because every value is shell-quoted, not because of where it
+# comes from: KEY=VALUE output is a fixed enum, a hex hash, pre-sorted
+# plain-text lines, and the two caller-supplied FREE-TEXT pass-throughs
+# (BLOCK_REASON/ORTHOGONAL, which may carry forge punctuation from summarized
+# prose). Each value is one line holding one shell word (#9041), so no
+# comment/PR body content can reach your shell via `eval` or forge a later key.
 
 set -uo pipefail
 

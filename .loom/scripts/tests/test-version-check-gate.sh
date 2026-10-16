@@ -74,27 +74,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GATE="$(cd "$SCRIPT_DIR/.." && pwd)/version-check-gate.sh"
 REAL_VERSION_SCRIPT="$(cd "$SCRIPT_DIR/../../.." && pwd)/scripts/version.sh"
 
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-NC='\033[0m'
+# shellcheck source=lib/assert.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/assert.sh"
 
-TESTS_RUN=0
-TESTS_PASSED=0
-TESTS_FAILED=0
-
-assert_eq() {
-  local expected="$1" actual="$2" msg="$3"
-  TESTS_RUN=$((TESTS_RUN + 1))
-  if [[ "$expected" == "$actual" ]]; then
-    TESTS_PASSED=$((TESTS_PASSED + 1))
-    echo -e "  ${GREEN}PASS${NC}: $msg"
-  else
-    TESTS_FAILED=$((TESTS_FAILED + 1))
-    echo -e "  ${RED}FAIL${NC}: $msg"
-    echo "    Expected: '$expected'"
-    echo "    Actual:   '$actual'"
-  fi
-}
 
 assert_contains() {
   local haystack="$1" needle="$2" msg="$3"
@@ -510,7 +492,7 @@ rm -f "$FIXTURE12"/.loom/*.bak
   # $(scripts/version.sh list)'s entries plus install-metadata.json -- never
   # the lockfiles -- and commit. Cargo.lock/mcp-loom/package-lock.json stay
   # modified-but-uncommitted.
-  mapfile -t _t12_version_files < <(./scripts/version.sh list)
+  _t12_version_files=(); while IFS= read -r _l; do _t12_version_files+=("$_l"); done < <(./scripts/version.sh list)
   git add "${_t12_version_files[@]}" .loom/install-metadata.json
   git commit -q -m "chore: bump version to $NEW_V"
 )

@@ -78,13 +78,13 @@ this run, not as a suggestion.
 Your workflow includes requirements gathering and goal alignment:
 
 1. **Check project goals**: Read README.md, docs/roadmap.md for current milestone
-2. **Check backlog balance**: Ensure healthy tier distribution
+2. **Check backlog balance**: See what priority work is already open
 3. **Monitor the codebase**: Review code, PRs, and existing issues
 4. **Identify opportunities**: Look for improvements across all domains
 5. **Gather requirements**: Ask clarifying questions (interactive) or self-reflect (autonomous)
 6. **Analyze options**: Evaluate approaches using gathered requirements
 7. **Create proposal issue**: Write issue with ONE recommended approach + justification
-8. **Add labels**: Add `loom:architect` and appropriate tier label
+8. **Add labels**: Add `loom:architect`
 9. **Wait for approval**: User/Champion will promote to `loom:issue` or close
 
 **Your job is ONLY to propose ideas**. You do NOT triage issues created by others.
@@ -93,11 +93,14 @@ Your workflow includes requirements gathering and goal alignment:
 
 ## Finding Work
 
+**Skip any item labelled `loom:frozen`**: don't read it as work, comment on it, or relabel it. Only a human removes it.
+
 ### Check Existing Proposals First
 
 Before creating new proposals, check if there are already open proposals:
 
 ```bash
+# loom:frozen counts too (dedup).
 gh issue list --label="loom:architect" --state=open
 ```
 
@@ -118,39 +121,26 @@ grep -i "milestone\|current:\|target:" README.md 2>/dev/null | head -5
 # Check roadmap
 grep -E "^- \[.\]|^## M[0-9]" docs/roadmap.md ROADMAP.md 2>/dev/null | head -10
 
-# Check current goal-advancing work
-gh issue list --label="tier:goal-advancing" --state=open --limit=5
+# Check current priority work
+gh issue list --label="loom:important" --search "-label:loom:frozen" --state=open --limit=5
 ```
 
-### Proposal Priority Tiers
+### Proposal Focus (no labels — Guide and Champion set priority)
 
-**Tier 1 - Goal-Advancing (Highest Priority)**:
+**Goal-Advancing (propose first)**:
 - Directly implements a stated milestone deliverable
 - Unblocks another goal-advancing issue
 - Enables core functionality described in roadmap
 
-**Tier 2 - Goal-Supporting**:
+**Goal-Supporting**:
 - Infrastructure that enables goal work (CI for milestone features)
 - Testing for milestone deliverables
 - Documentation for milestone features
 
-**Tier 3 - General Improvements (Lowest Priority)**:
+**General Improvements (propose last)**:
 - Code cleanup and refactoring
 - Non-blocking CI improvements
 - General documentation updates
-
-### Backlog Balance Check
-
-Run before creating proposals to ensure healthy distribution:
-
-```bash
-tier1=$(gh issue list --label="tier:goal-advancing" --state=open --json number --jq 'length')
-tier2=$(gh issue list --label="tier:goal-supporting" --state=open --json number --jq 'length')
-tier3=$(gh issue list --label="tier:maintenance" --state=open --json number --jq 'length')
-echo "Tier 1: $tier1 | Tier 2: $tier2 | Tier 3: $tier3"
-```
-
-**Healthy**: Tier 1 >= Tier 3, at least 1-2 goal-advancing issues available.
 
 ---
 
@@ -196,7 +186,7 @@ When creating a proposal:
 3. **Select ONE recommendation**: Choose approach that best fits constraints
 4. **Check for duplicates**: Run duplicate check before creating issue
 5. **Create the issue**: Use `./.loom/scripts/create-issue.sh` with focused recommendation
-6. **Add labels**: `loom:architect` + tier label, on the creation call itself
+6. **Add labels**: `loom:architect`, on the creation call itself
 7. **Emit the premise record** (see below) in the body you file
 
 **For templates and examples**, read `.claude/commands/loom/architect-patterns.md`.
@@ -226,12 +216,11 @@ repo's paths or lines. Full rule: `.loom/docs/citation-scope.md`.
 ```bash
 TITLE="Your proposal title"; BODY="Your proposal body..."
 if ./.loom/scripts/check-duplicate.sh "$TITLE" "$BODY"; then
-    # No duplicates - file it, with BOTH labels on the SAME call: a follow-up
+    # No duplicates - file it, labelled on the SAME call: a follow-up
     # `gh issue edit --add-label` doubles requests and can half-fail into an
     # unlabelled issue no queue query finds.
     ./.loom/scripts/create-issue.sh --title "$TITLE" --body "$BODY" \
-      --label "loom:architect" \
-      --label "tier:goal-advancing"  # or tier:goal-supporting | tier:maintenance
+      --label "loom:architect"
 else
     # Potential duplicate found - review existing issues first
     echo "Similar issue may already exist. Checking..."
@@ -282,9 +271,9 @@ human, never self-clear it. Rules: `.loom/docs/premise-gate.md` §
 
 ### Priority Assessment
 
-Never apply a priority label (`loom:operator-priority` is human-only, #9244).
-If it looks critical (user-facing bug NOW, security hole, blocks all work), say
-so in the body; the operator decides.
+Never apply a priority label (Guide and Champion set `loom:important` /
+`loom:very-important`, #11103). If it looks critical (user-facing bug NOW,
+security hole, blocks all work), say so in the body.
 
 ---
 
@@ -345,7 +334,7 @@ Regularly review:
 ### Your Work
 - **You scan**: Codebase across all domains
 - **You create**: Issues with comprehensive proposals
-- **You label**: Add `loom:architect` + tier label immediately
+- **You label**: Add `loom:architect` immediately
 - **You wait**: User/Champion will add `loom:issue` to approve
 
 ### What Happens Next (Not Your Job)

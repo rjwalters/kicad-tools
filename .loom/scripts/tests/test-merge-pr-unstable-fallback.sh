@@ -41,10 +41,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HELPERS_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # Colors
-RED='\033[0;31m'
-GREEN='\033[0;32m'
+# shellcheck source=lib/assert.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/assert.sh"
 YELLOW='\033[1;33m'
-NC='\033[0m'
 
 # A source-text assertion that cannot survive a port to loom-daemon, recorded
 # per defaults/docs/verification-recipes.md §6 rather than silently deleted
@@ -57,25 +56,6 @@ retired() { # <what> <property> <why-structural> <successor>
     echo "      successor:  $4"
 }
 
-TESTS_RUN=0
-TESTS_PASSED=0
-TESTS_FAILED=0
-
-assert_eq() {
-    local expected="$1"
-    local actual="$2"
-    local msg="$3"
-    TESTS_RUN=$((TESTS_RUN + 1))
-    if [[ "$expected" == "$actual" ]]; then
-        TESTS_PASSED=$((TESTS_PASSED + 1))
-        echo -e "  ${GREEN}PASS${NC}: $msg"
-    else
-        TESTS_FAILED=$((TESTS_FAILED + 1))
-        echo -e "  ${RED}FAIL${NC}: $msg"
-        echo "    Expected: '$expected'"
-        echo "    Actual:   '$actual'"
-    fi
-}
 
 # --- Source helpers ---
 source "$HELPERS_DIR/lib/forge-helpers.sh"
@@ -129,6 +109,12 @@ cat > "$STUB_DIR/gh" <<'STUB'
 #      line, post-jq). Missing file = absent branchProtectionRule (empty).
 #      A `$STUB_DIR/graphql-fail-<branch>` marker makes the call exit nonzero,
 #      its content (if any) emitted on stderr, same as the ruleset marker.
+#
+#   3. The REST branch summary (#11855), read only after a GraphQL failure:
+#        gh api repos/<o>/<r>/branches/<b> --jq <filter>
+#      Canned response: $STUB_DIR/branch-<branch>.json, run through the
+#      caller's --jq verbatim. No canned file = the read fails (HTTP 404), so
+#      a GraphQL failure with no REST fixture still fails closed.
 STUB_DIR_FROM_ENV="${LOOM_TEST_STUB_DIR:-}"
 if [[ -z "$STUB_DIR_FROM_ENV" ]]; then
   echo "stub gh: LOOM_TEST_STUB_DIR not set" >&2
@@ -139,16 +125,25 @@ fi
 # filter (used verbatim for the REST fixture).
 ref=""
 rules_branch=""
+rest_branch=""
 jq_filter=""
 prev=""
 for a in "$@"; do
   case "$a" in
     ref=refs/heads/*) ref="${a#ref=refs/heads/}" ;;
     repos/*/rules/branches/*) rules_branch="${a##*/rules/branches/}" ;;
+    repos/*/branches/*) rest_branch="${a##*/branches/}" ;;
   esac
   [[ "$prev" == "--jq" ]] && jq_filter="$a"
   prev="$a"
 done
+
+if [[ -n "$rest_branch" ]]; then
+  canned="$STUB_DIR_FROM_ENV/branch-$rest_branch.json"
+  [[ -f "$canned" ]] || { echo "gh: Not Found (HTTP 404)" >&2; exit 1; }
+  jq -r "$jq_filter" "$canned" || exit 1
+  exit 0
+fi
 
 if [[ -n "$rules_branch" ]]; then
   if [[ -f "$STUB_DIR_FROM_ENV/ruleset-fail-$rules_branch" ]]; then
@@ -320,6 +315,39 @@ rc=0
 result=$(forge_get_required_status_check_contexts "owner/repo" "classic-err" "$STUB_DIR/gh" 2>/dev/null | tr '\n' '|' | sed 's/|$//') || rc=$?
 assert_eq "1" "$rc" "#8103: classic source failing -> nonzero exit even though the ruleset answered"
 assert_eq "" "$result" "#8103: classic failure does not report the ruleset's contexts"
+
+# Subtest 1.8b (#11855): GraphQL refused for a read-only App token
+# ("Resource not accessible by integration") -> the REST branch summary
+# answers for the classic source, unioned with the ruleset's contexts.
+echo "HTTP 403: Resource not accessible by integration" > "$STUB_DIR/graphql-fail-app-token"
+echo '[{"type": "required_status_checks", "parameters": {"required_status_checks": [{"context": "Ruleset Check"}]}}]' > "$STUB_DIR/ruleset-rules-app-token.json"
+echo '{"name": "app-token", "protected": true, "protection": {"enabled": true, "required_status_checks": {"enforcement_level": "non_admins", "contexts": ["Classic A", "Classic B"], "checks": [{"context": "Classic B", "app_id": 1}]}}}' > "$STUB_DIR/branch-app-token.json"
+rc=0
+result=$(forge_get_required_status_check_contexts "owner/repo" "app-token" "$STUB_DIR/gh" 2>/dev/null | tr '\n' '|' | sed 's/|$//') || rc=$?
+assert_eq "0" "$rc" "#11855: refused GraphQL classic read falls back to the REST branch summary"
+assert_eq "Ruleset Check|Classic A|Classic B" "$result" "#11855: REST classic contexts unioned with the ruleset's, de-duplicated"
+
+# Subtest 1.8c (#11855): protected, but the REST summary is withheld -> still
+# fails closed (unknown, never "no required checks").
+echo "HTTP 403: Resource not accessible by integration" > "$STUB_DIR/graphql-fail-withheld"
+echo '{"name": "withheld", "protected": true}' > "$STUB_DIR/branch-withheld.json"
+rc=0
+result=$(forge_get_required_status_check_contexts "owner/repo" "withheld" "$STUB_DIR/gh" 2>/dev/null | tr '\n' '|' | sed 's/|$//') || rc=$?
+assert_eq "1" "$rc" "#11855: withheld protection summary keeps failing closed"
+assert_eq "" "$result" "#11855: withheld protection summary -> empty stdout"
+
+# Subtest 1.8d (#11855): no `protected` flag, or a protection summary with no
+# `required_status_checks`, is UNKNOWN -> fail closed (matches Rust).
+for shape in noflag norsc; do
+  echo "HTTP 403: Resource not accessible by integration" > "$STUB_DIR/graphql-fail-$shape"
+done
+echo '{"name": "noflag"}' > "$STUB_DIR/branch-noflag.json"
+echo '{"name": "norsc", "protected": true, "protection": {"enabled": true}}' > "$STUB_DIR/branch-norsc.json"
+for shape in noflag norsc; do
+  rc=0
+  forge_get_required_status_check_contexts "owner/repo" "$shape" "$STUB_DIR/gh" >/dev/null 2>&1 || rc=$?
+  assert_eq "1" "$rc" "#11855: REST summary shape '$shape' is unknown -> fails closed"
+done
 
 # Subtest 1.9: BOTH sources error -> fail closed (nonzero exit, empty stdout),
 # matching the Gitea path and the callers' documented fail-closed contract.

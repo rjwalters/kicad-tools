@@ -255,6 +255,40 @@ class TestReplayOnTheKelvinFixture:
         assert id(router.grid.routes) == before_id
         assert router.grid.routes == before
 
+    def test_replay_leaves_the_segment_index_exactly_as_it_found_it(self):
+        """Issue #6303: suspending the segment R-tree must not disturb it.
+
+        Uses the 40-segment COMP board so the index is past
+        ``RTREE_SEGMENT_THRESHOLD`` and actually populated.
+        """
+        router = _comp_as_n_segments(40)
+        grid = router.grid
+        before = _segment_index_snapshot(grid)
+
+        replay(router.commit_journal, router, pad_keys=[U3])
+
+        assert _segment_index_snapshot(grid) == before
+        assert grid._seg_rtree_suspended == 0
+
+    def test_a_raising_replay_still_restores_routes_and_segment_index(self, monkeypatch):
+        from kicad_tools.router import access_witness
+
+        router = _comp_as_n_segments(40)
+        grid = router.grid
+        before_routes = grid.routes
+        before = _segment_index_snapshot(grid)
+
+        def boom(self):
+            raise RuntimeError("evaluation failed")
+
+        monkeypatch.setattr(access_witness._IncrementalAccess, "full", boom)
+        with pytest.raises(RuntimeError, match="evaluation failed"):
+            replay(router.commit_journal, router, pad_keys=[U3])
+
+        assert grid.routes is before_routes
+        assert _segment_index_snapshot(grid) == before
+        assert grid._seg_rtree_suspended == 0
+
     def test_replay_is_reproducible(self):
         router = _routed_kelvin()
         first = replay(router.commit_journal, router, pad_keys=[U3])
@@ -347,6 +381,82 @@ class TestNegativeControl:
 # ---------------------------------------------------------------------------
 # Rip-ups: a commit-only replay would get this wrong.
 # ---------------------------------------------------------------------------
+
+
+def _comp_as_n_segments(n: int) -> Autorouter:
+    """The Kelvin fixture with COMP's closing track marked as ``n`` collinear pieces.
+
+    The copper is identical for every ``n`` (one straight 0.2 mm track from
+    x = 1 to x = 9 at :data:`COMP_Y`); only the number of indexed segments
+    changes, which decides whether ``validate_segment_clearance`` answers from
+    the grid's segment R-tree (>= ``RTREE_SEGMENT_THRESHOLD``) or by walking
+    ``grid.routes``.
+    """
+    router = _kelvin_fixture()
+    x0, x1 = 1.0, 9.0
+    step = (x1 - x0) / n
+    comp = Route(
+        net=2,
+        net_name="COMP",
+        segments=[
+            Segment(
+                x1=x0 + i * step,
+                y1=COMP_Y,
+                x2=x0 + (i + 1) * step if i < n - 1 else x1,
+                y2=COMP_Y,
+                width=0.2,
+                layer=Layer.F_CU,
+                net=2,
+                net_name="COMP",
+            )
+            for i in range(n)
+        ],
+    )
+    with router.commit_journal.context("initial", 0):
+        router.grid.mark_route(comp)
+    return router
+
+
+def _segment_index_snapshot(grid) -> tuple:
+    """Everything observable about the grid's segment R-tree."""
+    return (
+        grid._seg_rtree_count,
+        {layer: dict(items) for layer, items in grid._seg_rtree_items.items()},
+        {
+            layer: sorted(index.intersection(index.bounds))
+            for layer, index in grid._seg_rtree.items()
+            if len(index)
+        },
+    )
+
+
+class TestSegmentIndexDoesNotLeakIntoTheReplay:
+    """Issue #6303: the replay must judge stubs against the REPLAYED copper.
+
+    ``replay()`` rebinds ``grid.routes`` but the segment R-tree still indexes
+    the finished board.  Before the fix, splitting COMP's track into 40
+    pieces (crossing ``RTREE_SEGMENT_THRESHOLD``) made the replay see COMP
+    already present at the escape-prephase baseline, so U3 read as stranded
+    by placement and no commit was blamed.
+    """
+
+    @pytest.mark.parametrize("n_segments", [1, 40])
+    def test_segment_count_does_not_change_the_witness(self, n_segments):
+        from kicad_tools.router.grid import RTREE_AVAILABLE, RTREE_SEGMENT_THRESHOLD
+
+        router = _comp_as_n_segments(n_segments)
+        if RTREE_AVAILABLE:
+            # The precondition that made the bug observable.
+            assert router.grid._seg_rtree_count == n_segments
+            assert (n_segments >= RTREE_SEGMENT_THRESHOLD) == (n_segments == 40)
+
+        pad = replay(router.commit_journal, router, pad_keys=[U3]).for_pad(*U3)
+
+        assert pad is not None
+        assert pad.access_at_escape_end == ACCESS_NON_EMPTY
+        assert pad.first_closed_at == ("initial", 0)
+        assert "COMP" in pad.closing_nets
+        assert pad.final_access == ACCESS_EMPTY
 
 
 class TestRipUpsReopenAccess:

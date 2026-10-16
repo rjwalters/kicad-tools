@@ -12,7 +12,10 @@ interior arc contact and must not substitute a chord for the curved copper.
 
 Strict graphs retain each physical pad occurrence, including duplicate pad
 numbers. Reports keep logical ``REF.PAD`` names and board positions. Duplicate
-numbers never imply an internal component jumper in this copper model.
+numbers never imply an internal component jumper in this copper model: pads
+bond only through copper. Pads whose copper overlaps on a shared copper layer
+(an exposed-pad rect over its thermal-via pads) are one conductor; disjoint
+same-number pads are not (Issue #6435).
 
 Example:
     >>> from kicad_tools.schema.pcb import PCB
@@ -35,9 +38,35 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from kicad_tools.core.layers import COPPER_LAYER_ORDER, via_spans_layer
+from kicad_tools.geometry.copper import PAD_FALLBACK_ERODE, pad_size_box
 
 if TYPE_CHECKING:
     from kicad_tools.schema.pcb import PCB
+    from kicad_tools.validate.connectivity import ConnectivityValidator
+    from kicad_tools.validate.copper_contact import CopperItem
+
+# Issue #6491: how many stranded items ``NetStatus.suggested_fix`` names.
+_MAX_STRANDED_IN_FIX = 5
+
+
+def _stranded_item_label(pcb: PCB, item: CopperItem) -> str:
+    """Name a stranded track or via the way ``validate()`` does (Issue #6491).
+
+    :func:`~kicad_tools.validate.copper_contact.describe_item` takes a
+    ``ConnectivityValidator`` but reads it (``cv.pcb``) only for a pad, and a
+    stranded component holds none, so a shim carrying ``pcb`` is enough.  A
+    track also gets its layer, which is what finds it on a busy board.
+    """
+    from types import SimpleNamespace
+    from typing import cast
+
+    from kicad_tools.validate.copper_contact import TRACK, describe_item
+
+    shim = cast("ConnectivityValidator", SimpleNamespace(pcb=pcb))
+    label = describe_item(shim, item)[1]
+    if item.kind == TRACK and item.layers:
+        label += f" ({', '.join(sorted(item.layers))})"
+    return label
 
 
 @dataclass
@@ -92,6 +121,33 @@ class NetStatus:
             for the net (``island_count - 1``) rather than over-counting
             them as ``unconnected_count`` (which collapses every non-largest
             island into individual pads).
+        islands: The islands themselves, as lists of :class:`PadInfo`,
+            largest first (issue #6316). ``islands[0]`` holds the same pads
+            as ``connected_pads`` and ``len(islands) == island_count``. A
+            ratsnest needs the groups, which ``unconnected_pads`` flattens
+            together. Not part of :meth:`to_dict`.
+        fill_bonded_pads: The pads whose copper reaches this net's poured
+            fill -- directly, or through a via / trace chain -- i.e. the pads
+            the plane itself anchors (issue #6315). An island holding none of
+            them is not on the plane, however many pads it has. Empty when the
+            net has no fill copper (or shapely is unavailable). Not part of
+            :meth:`to_dict`.
+        padless_components: Copper components of this net that hold no pad
+            but do hold a track or via -- a detached track or via, or a
+            fill island with only a track or via on it (Issue #6452).
+            ``kicad-cli pcb drc`` reports each as an unconnected item, so
+            they count toward :attr:`open_connections` but never toward
+            ``island_count`` / ``islands`` (which stay pad-based).  A lone
+            fill island (a component made only of fill copper) is NOT
+            counted: kicad-cli does not report it.  Always 0 in legacy
+            (``strict=False``) mode.
+        stranded_items: Human descriptions of the tracks and vias in those
+            pad-less components (e.g. ``"Segment 12 (F.Cu)"``, ``"Via 3"``),
+            named as ``ConnectivityValidator.validate()`` names them
+            (Issue #6491).  One component may hold several items, so the
+            length is NOT :attr:`padless_components`.  Fill copper is not
+            listed: a fill island only counts because of the track or via on
+            it, and that item is the one to delete or connect.
     """
 
     net_number: int
@@ -111,19 +167,52 @@ class NetStatus:
     # Defaults to 0 so a hand-constructed NetStatus with no pads reports a
     # consistent "no islands"; ``_analyze_net`` always sets a real value.
     island_count: int = 0
+    # Issue #6316: the pad groups behind ``island_count``, largest first.
+    islands: list[list[PadInfo]] = field(default_factory=list, repr=False)
+    # Issue #6315: pads bonded to the net's poured fill (the plane anchors).
+    fill_bonded_pads: list[PadInfo] = field(default_factory=list, repr=False)
+    # Issue #6452: pad-less components holding a track or via (not lone fills).
+    padless_components: int = 0
+    # Issue #6491: the tracks/vias in those components, for ``suggested_fix``.
+    stranded_items: list[str] = field(default_factory=list)
+
+    @property
+    def is_stranded(self) -> bool:
+        """True when the net carries copper that reaches no pad (Issue #6491).
+
+        Independent of :attr:`status`, which stays pad-based: a net whose pads
+        are all joined is ``complete`` even with a detached track or via, but
+        kicad-cli still reports that fragment as an unconnected item, so the
+        completion gates fail on this signal too.
+
+        A net with no pads is never stranded: kicad-cli 10.0.6 reports no
+        unconnected item for a track on a pad-less net (there is nothing to
+        connect it to), which is also why :attr:`open_connections` is 0 there.
+        Such a net is already ``unrouted``.
+        """
+        return self.padless_components > 0 and self.total_pads > 0
 
     @property
     def open_connections(self) -> int:
         """Remaining ratsnest connections on this net (issue #4934).
 
-        A net whose pads form ``k`` disjoint copper islands still needs
+        A net whose copper forms ``k`` disjoint components still needs
         ``k - 1`` connections to be complete -- exactly the number of
-        ratsnest lines KiCad draws for it, and the quantity DeepPCB
-        reports as remaining "airwires". This is NOT the same as
-        :attr:`unconnected_count`: three pads sitting on one shared,
-        stranded island count as ONE open connection, not two.
+        unconnected items ``kicad-cli pcb drc`` reports for it, and the
+        quantity DeepPCB reports as remaining "airwires". This is NOT the
+        same as :attr:`unconnected_count`: three pads sitting on one shared,
+        stranded island count as ONE open connection, not two.  Track/via
+        fragments holding no pad (:attr:`padless_components`) count too,
+        because KiCad reports them (Issue #6452); a lone fill island does
+        not, because KiCad does not report it.
+
+        :attr:`status` stays pad-based: a net whose pads are all joined is
+        ``complete`` even when a detached fragment makes this 1.  Gate on
+        :attr:`is_stranded` (board-wide: :attr:`NetStatusResult.stranded_count`)
+        for that case -- ``kct net-status`` and
+        ``scripts/ci/check_net_status.py`` both fail on it (Issue #6491).
         """
-        return max(self.island_count - 1, 0)
+        return max(self.island_count + self.padless_components - 1, 0)
 
     @property
     def total_connections(self) -> int:
@@ -136,8 +225,14 @@ class NetStatus:
 
     @property
     def routed_connections(self) -> int:
-        """Connections already made by copper on this net (issue #4934)."""
-        return self.total_connections - self.open_connections
+        """Connections already made by copper on this net (issue #4934).
+
+        Pad-based: ``total_connections`` minus the pad islands still to join.
+        Pad-less fragments (:attr:`padless_components`) are extra unconnected
+        items in :attr:`open_connections`, but they do not undo a connection
+        that copper already made, so they are not subtracted here.
+        """
+        return self.total_connections - max(self.island_count - 1, 0)
 
     @property
     def connected_count(self) -> int:
@@ -232,7 +327,21 @@ class NetStatus:
         Uses the real analyzed filename (:attr:`source_file`) so the printed
         remedy is copy-pasteable; before issue #4679 this hardcoded a literal
         ``board.kicad_pcb`` regardless of the file analyzed.
+
+        A net whose only defect is stranded copper (every pad joined, a track
+        or via reaching no pad) names that copper instead: there is nothing to
+        route, the fix is to delete or connect it (Issue #6491).
         """
+        if self.is_stranded and self.unconnected_count == 0:
+            if not self.stranded_items:
+                return (
+                    f"Delete or connect {self.padless_components} stranded copper "
+                    "fragment(s) (track/via reaching no pad)"
+                )
+            shown = self.stranded_items[:_MAX_STRANDED_IN_FIX]
+            more = len(self.stranded_items) - len(shown)
+            suffix = f" (+{more} more)" if more > 0 else ""
+            return f"Delete or connect stranded copper: {', '.join(shown)}{suffix}"
         if self.is_plane_net:
             layers = self.plane_layers or ([self.plane_layer] if self.plane_layer else [])
             layers_info = ", ".join(layers) if layers else "unknown"
@@ -256,6 +365,8 @@ class NetStatus:
             "total_connections": self.total_connections,
             "routed_connections": self.routed_connections,
             "open_connections": self.open_connections,
+            "padless_components": self.padless_components,
+            "stranded_items": list(self.stranded_items),
             "is_plane_net": self.is_plane_net,
             "has_filled_zone": self.has_filled_zone,
             "is_advisory_incomplete": self.is_advisory_incomplete,
@@ -263,7 +374,9 @@ class NetStatus:
             "plane_layers": list(self.plane_layers),
             "has_routing": self.has_routing,
             "has_vias": self.has_vias,
-            "suggested_fix": self.suggested_fix if self.status != "complete" else "",
+            "suggested_fix": (
+                self.suggested_fix if self.status != "complete" or self.is_stranded else ""
+            ),
             "connected_pads": [
                 {
                     "name": p.full_name,
@@ -337,6 +450,21 @@ class NetStatusResult:
         return [n for n in self.nets if n.status == "unrouted"]
 
     @property
+    def stranded(self) -> list[NetStatus]:
+        """Nets carrying a track or via that reaches no pad (Issue #6491).
+
+        Orthogonal to :attr:`complete` / :attr:`incomplete`: a ``complete``
+        net can be stranded (see :attr:`NetStatus.is_stranded`).  kicad-cli reports each such fragment as an
+        unconnected item, so completion gates must fail on these too.
+        """
+        return [n for n in self.nets if n.is_stranded]
+
+    @property
+    def stranded_count(self) -> int:
+        """Number of nets with stranded copper (Issue #6491)."""
+        return len(self.stranded)
+
+    @property
     def complete_count(self) -> int:
         """Number of complete nets."""
         return len(self.complete)
@@ -385,7 +513,7 @@ class NetStatusResult:
 
         The DeepPCB-comparable numerator (their "98 of 98 airwires").
         """
-        return self.total_connections - self.open_connections
+        return sum(n.routed_connections for n in self.nets)
 
     @property
     def connection_completion_percentage(self) -> float:
@@ -422,6 +550,7 @@ class NetStatusResult:
             "incomplete_count": self.incomplete_count,
             "blocking_incomplete_count": self.blocking_incomplete_count,
             "unrouted_count": self.unrouted_count,
+            "stranded_count": self.stranded_count,
             "total_unconnected_pads": self.total_unconnected_pads,
             "total_connections": self.total_connections,
             "routed_connections": self.routed_connections,
@@ -440,6 +569,8 @@ class NetStatusResult:
             f"  Unrouted:   {self.unrouted_count} (0% connected)",
             f"  Total unconnected pads: {self.total_unconnected_pads}",
         ]
+        if self.stranded_count:
+            lines.append(f"  Stranded:   {self.stranded_count} (track/via reaching no pad)")
         return "\n".join(lines)
 
 
@@ -535,12 +666,15 @@ class NetStatusAnalyzer:
         # Endpoint heuristics cannot represent curved copper or interior contact.
         # Arc-bearing boards therefore require real copper geometry in both modes.
         self.strict = strict or bool(self.pcb.arcs)
+        # Issue #6315: pad ids the current net's poured fill bonds (reset per net).
+        self._fill_bonded_ids: set[str] = set()
+        # Issue #6452: pad-less copper components of the current net.
+        self._padless_components = 0
+        # Issue #6491: descriptions of the tracks/vias in those components.
+        self._stranded_items: list[str] = []
         # Strict-mode geometry caches (Issue #4176), keyed by object id.
         self._segment_poly_cache: dict[int, Any] = {}
         self._via_geom_cache: dict[int, Any] = {}
-        # Per-analyzer pad copper polygon cache (keyed by physical occurrence); ``None``
-        # until first built lazily in :meth:`_pad_polys`.
-        self._pad_poly_cache: dict[str, Any] | None = None
         if self.strict:
             from kicad_tools._shapely import require_shapely
 
@@ -691,15 +825,35 @@ class NetStatusAnalyzer:
         pad_infos = self._get_net_pads_with_positions(net_number)
         status.total_pads = len(pad_infos)
 
+        self._fill_bonded_ids = set()
+        self._padless_components = 0
+        self._stranded_items = []
         if len(pad_infos) < 2:
             # Single-pad nets are always "complete"
             status.connected_pads = pad_infos
             # Issue #4934: one pad is trivially one island; zero pads is none.
             status.island_count = len(pad_infos)
+            status.islands = [list(pad_infos)] if pad_infos else []
+            # Issue #6452: stranded copper on a 0/1-pad net is still an
+            # unconnected item to KiCad.
+            if self.strict and (segments or vias or status.has_filled_zone):
+                self._build_connectivity_graph(net_number, pad_infos)
+                status.padless_components = self._padless_components
+                status.stranded_items = list(self._stranded_items)
+                status.fill_bonded_pads = [
+                    p for p in pad_infos if p.connectivity_id in self._fill_bonded_ids
+                ]
             return status
 
         # Build connectivity graph
         graph = self._build_connectivity_graph(net_number, pad_infos)
+        status.padless_components = self._padless_components
+        status.stranded_items = list(self._stranded_items)
+        # Issue #6315: which pads the poured fill itself bonds (recorded by
+        # ``_apply_zone_connectivity`` while the graph was built).
+        status.fill_bonded_pads = [
+            p for p in pad_infos if p.connectivity_id in self._fill_bonded_ids
+        ]
 
         # Find connected components (islands)
         islands = self._find_islands(graph, [p.connectivity_id for p in pad_infos])
@@ -714,6 +868,17 @@ class NetStatusAnalyzer:
             connected_names = set(islands[0])
         else:
             connected_names = set()
+
+        # Issue #6316: keep the groups (largest first, matching the sort
+        # above).  Legacy mode keys pads by REF.PAD, which duplicate pad
+        # numbers can share, so one id may stand for several pads.
+        pads_by_id: dict[str, list[PadInfo]] = {}
+        for pad_info in pad_infos:
+            pads_by_id.setdefault(pad_info.connectivity_id, []).append(pad_info)
+        status.islands = [
+            [pad for node in dict.fromkeys(island) for pad in pads_by_id.get(node, [])]
+            for island in islands
+        ]
 
         # Classify pads
         for pad_info in pad_infos:
@@ -809,6 +974,11 @@ class NetStatusAnalyzer:
     ) -> dict[str, set[str]]:
         """Build connectivity graph for a net.
 
+        Strict mode (the default) uses the shared copper-contact graph of
+        :mod:`kicad_tools.validate.copper_contact` -- the same model as
+        ``ConnectivityValidator.validate()`` and the LVS partition
+        (Issue #6452).  Legacy mode keeps the endpoint-proximity model.
+
         Args:
             net_number: Net number
             pad_infos: List of pad info objects
@@ -816,6 +986,65 @@ class NetStatusAnalyzer:
         Returns:
             Adjacency list mapping pad names to connected pad names
         """
+        if self.strict:
+            return self._build_contact_graph(net_number, pad_infos)
+        return self._build_connectivity_graph_legacy(net_number, pad_infos)
+
+    def _build_contact_graph(
+        self,
+        net_number: int,
+        pad_infos: list[PadInfo],
+    ) -> dict[str, set[str]]:
+        """Strict pad graph from the shared copper-contact model (Issue #6452).
+
+        Every same-net pad, via, track (segment or arc) and fill is a node,
+        and nodes bond only where their copper meets (exact pad outlines,
+        Issue #6453).  Fills of different zones live in one graph, so a via
+        joining two zones' fills bridges them -- the per-zone union-find this
+        replaces never could.  Pads in one component are mutually adjacent.
+
+        Side effects: ``_fill_bonded_ids`` gets the pads whose component
+        holds fill copper (Issue #6315) and ``_padless_components`` the
+        number of components holding no pad but a track or via, and
+        ``_stranded_items`` those tracks and vias (Issue #6491).  A lone
+        fill island (fill copper only) is skipped: kicad-cli does not
+        report it as an unconnected item.
+        """
+        from kicad_tools.validate.copper_contact import FILL, PAD, build_copper_contact_graph
+
+        contact = build_copper_contact_graph(self._connectivity_geometry(), net_number)
+        wanted = {p.connectivity_id for p in pad_infos}
+        graph: dict[str, set[str]] = defaultdict(set)
+        padless = 0
+        stranded: list[str] = []
+        for members in contact.components():
+            items = [contact.items[i] for i in members]
+            nodes = [
+                node
+                for item in items
+                if item.kind == PAD and (node := f"__pad:{item.key[0]}:{item.key[1]}") in wanted
+            ]
+            if not nodes:
+                if not contact.is_fill_only(members):
+                    padless += 1
+                    stranded.extend(
+                        _stranded_item_label(self.pcb, item) for item in items if item.kind != FILL
+                    )
+                continue
+            for node in nodes:
+                graph[node].update(other for other in nodes if other != node)
+            if any(item.kind == FILL for item in items):
+                self._fill_bonded_ids.update(nodes)
+        self._padless_components = padless
+        self._stranded_items = stranded
+        return graph
+
+    def _build_connectivity_graph_legacy(
+        self,
+        net_number: int,
+        pad_infos: list[PadInfo],
+    ) -> dict[str, set[str]]:
+        """Legacy (``strict=False``) endpoint-proximity connectivity graph."""
         graph: dict[str, set[str]] = defaultdict(set)
         pad_positions = {p.connectivity_id: p.position for p in pad_infos}
         pad_layers = {p.connectivity_id: p.layers for p in pad_infos}
@@ -862,29 +1091,14 @@ class NetStatusAnalyzer:
         # Build segment components for reuse
         segment_components = self._build_segment_components(segments)
 
-        # Connect pads through segment chains.
-        #
-        # Default mode: a pad joins the chain when its center is within
-        # POSITION_TOLERANCE of a segment endpoint.  Strict mode (Issue #4176):
-        # a pad joins the chain when its real copper polygon intersects any
-        # segment's copper polygon in the chain — an endpoint landing merely
-        # *near* a pad's copper edge no longer bonds.
+        # Connect pads through segment chains: a pad joins the chain when its
+        # center is within POSITION_TOLERANCE of a segment endpoint.
         for component in segment_components:
             component_pads: set[str] = set()
             for seg_idx in component:
                 seg = segments[seg_idx]
-                if self.strict:
-                    component_pads.update(
-                        self._find_pads_touching_geom(
-                            self._segment_poly(seg),
-                            pad_positions,
-                            layer=seg.layer,
-                            pad_layers=pad_layers,
-                        )
-                    )
-                else:
-                    component_pads.update(self._find_pads_at_point(seg.start, pad_positions))
-                    component_pads.update(self._find_pads_at_point(seg.end, pad_positions))
+                component_pads.update(self._find_pads_at_point(seg.start, pad_positions))
+                component_pads.update(self._find_pads_at_point(seg.end, pad_positions))
 
             pad_list = list(component_pads)
             for i, pad in enumerate(pad_list):
@@ -892,14 +1106,10 @@ class NetStatusAnalyzer:
                     graph[pad].add(other)
                     graph[other].add(pad)
 
-        # Connect pads through vias (pads whose copper the via barrel pierces).
-        # Default: pad center within POSITION_TOLERANCE of the via center.
-        # Strict (Issue #4176): pad copper polygon intersects the via copper.
+        # Connect pads through vias: pad center within POSITION_TOLERANCE of
+        # the via center.
         for via in vias:
-            if self.strict:
-                via_pads = self._find_pads_touching_geom(self._via_geom(via), pad_positions)
-            else:
-                via_pads = self._find_pads_at_point(via.position, pad_positions)
+            via_pads = self._find_pads_at_point(via.position, pad_positions)
             for pad in via_pads:
                 for other in via_pads:
                     if pad != other:
@@ -932,8 +1142,8 @@ class NetStatusAnalyzer:
         # electrically reach; through-vias span every layer and are unaffected.
         #
         # Shapely-absent (core-only) installs degrade gracefully:
-        # ``_segment_touches_via`` and ``_find_pads_touching_geom`` fall back to
-        # endpoint/centre proximity when the copper geometry is ``None``, so
+        # ``_segment_touches_via`` falls back to endpoint/centre proximity
+        # when the copper geometry is ``None``, so
         # cross-component bridging via coincident via-centre endpoints still
         # works without shapely (only ring landings need the geometry path).
         extended_chains = self._merge_chains_via_vias(
@@ -943,18 +1153,8 @@ class NetStatusAnalyzer:
             chain_pads: set[str] = set()
             for seg_idx in chain:
                 seg = segments[seg_idx]
-                if self.strict:
-                    chain_pads.update(
-                        self._find_pads_touching_geom(
-                            self._segment_poly(seg),
-                            pad_positions,
-                            layer=seg.layer,
-                            pad_layers=pad_layers,
-                        )
-                    )
-                else:
-                    chain_pads.update(self._find_pads_at_point(seg.start, pad_positions))
-                    chain_pads.update(self._find_pads_at_point(seg.end, pad_positions))
+                chain_pads.update(self._find_pads_at_point(seg.start, pad_positions))
+                chain_pads.update(self._find_pads_at_point(seg.end, pad_positions))
 
             # Include pads sitting on any via this chain electrically touches
             # (the via must span the touching segment's layer).
@@ -965,10 +1165,7 @@ class NetStatusAnalyzer:
                     and self._via_spans_layer(via.layers, segments[seg_idx].layer)
                     for seg_idx in chain
                 ):
-                    if self.strict:
-                        chain_pads.update(self._find_pads_touching_geom(via_geom, pad_positions))
-                    else:
-                        chain_pads.update(self._find_pads_at_point(via.position, pad_positions))
+                    chain_pads.update(self._find_pads_at_point(via.position, pad_positions))
 
             # Fully connect every pad reachable through this extended chain.
             chain_list = list(chain_pads)
@@ -1009,38 +1206,19 @@ class NetStatusAnalyzer:
         # caused false-positive incomplete reports on boards with many filled
         # polygons (Issue #2035).
         #
-        # Default: two pads bond when both centers land within
-        # POSITION_TOLERANCE of the same segment endpoint / via center.
-        # Strict (Issue #4176): two pads bond when both copper polygons
-        # intersect the same segment / via copper geometry.
-        if self.strict:
-            # Segment geometry carries its layer (Issue #4557: a 2D copper
-            # polygon must not bond a pad that does not exist on that layer);
-            # via barrels span layers, so they stay layer-unfiltered here.
-            copper_geoms: list[tuple[Any, str | None]] = [
-                (self._segment_poly(seg), seg.layer) for seg in segments
-            ]
-            copper_geoms.extend((self._via_geom(via), None) for via in vias)
-            for geom, geom_layer in copper_geoms:
-                touching = self._find_pads_touching_geom(
-                    geom, pad_positions, layer=geom_layer, pad_layers=pad_layers
-                )
-                for i, pad_id in enumerate(touching):
-                    for other_id in touching[i + 1 :]:
-                        graph[pad_id].add(other_id)
-                        graph[other_id].add(pad_id)
-        else:
-            all_copper = [seg.start for seg in segments] + [seg.end for seg in segments]
-            all_copper.extend([via.position for via in vias])
+        # Two pads bond when both centers land within POSITION_TOLERANCE of
+        # the same segment endpoint / via center.
+        all_copper = [seg.start for seg in segments] + [seg.end for seg in segments]
+        all_copper.extend([via.position for via in vias])
 
-            for pad_id, pad_pos in pad_positions.items():
-                for copper_pos in all_copper:
-                    if self._points_close(pad_pos, copper_pos):
-                        # Find other pads at this copper point
-                        for other_id, other_pos in pad_positions.items():
-                            if other_id != pad_id and self._points_close(copper_pos, other_pos):
-                                graph[pad_id].add(other_id)
-                                graph[other_id].add(pad_id)
+        for pad_id, pad_pos in pad_positions.items():
+            for copper_pos in all_copper:
+                if self._points_close(pad_pos, copper_pos):
+                    # Find other pads at this copper point
+                    for other_id, other_pos in pad_positions.items():
+                        if other_id != pad_id and self._points_close(copper_pos, other_pos):
+                            graph[pad_id].add(other_id)
+                            graph[other_id].add(pad_id)
 
         return graph
 
@@ -1087,6 +1265,11 @@ class NetStatusAnalyzer:
         groups = self._build_fill_island_groups(
             net_number, pad_positions, pad_layers, vias, segments, segment_components
         )
+        if groups is not None:
+            # Issue #6315: remember which pads the fill really bonds, so a
+            # consumer can tell the plane's island from a pad-only island.
+            for group in groups:
+                self._fill_bonded_ids.update(group)
         if groups is None:
             legacy = self._legacy_zone_connected_pads(
                 pad_positions,
@@ -1116,6 +1299,11 @@ class NetStatusAnalyzer:
         segment_components: list[set[int]],
     ) -> list[set[str]] | None:
         """Group this net's pads by the poured copper island they overlap.
+
+        Legacy (``strict=False``) mode only.  Strict mode uses the shared
+        copper-contact graph instead (:meth:`_build_contact_graph`), which
+        also bridges fills of *different* zones (Issue #6452) -- this
+        per-zone union-find cannot.
 
         Each ``filled_polygon`` is a poured copper island.  A pad is bonded to
         a zone's fill iff its copper box overlaps the island's hole-aware solid
@@ -1187,7 +1375,9 @@ class NetStatusAnalyzer:
                 pad_id = self._pad_node_id(fp_index, pad_index, fp, pad)
                 if pad_id not in pad_positions:
                     continue
-                poly = cv._pad_copper_polygon(fp, pad)
+                # Legacy mode keeps its historical eroded size box (its
+                # behaviour is pinned); strict mode uses exact outlines.
+                poly = pad_size_box(pad, fp.position, fp.rotation, erode=PAD_FALLBACK_ERODE)
                 if poly is not None:
                     pad_polys[pad_id] = poly
 
@@ -1227,18 +1417,8 @@ class NetStatusAnalyzer:
             pads_in_chain: set[str] = set()
             for s in chain:
                 segment = segments[s]
-                if self.strict:
-                    pads_in_chain.update(
-                        self._find_pads_touching_geom(
-                            self._segment_poly(segment),
-                            pad_positions,
-                            layer=segment.layer,
-                            pad_layers=pad_layers,
-                        )
-                    )
-                else:
-                    pads_in_chain.update(self._find_pads_at_point(segment.start, pad_positions))
-                    pads_in_chain.update(self._find_pads_at_point(segment.end, pad_positions))
+                pads_in_chain.update(self._find_pads_at_point(segment.start, pad_positions))
+                pads_in_chain.update(self._find_pads_at_point(segment.end, pad_positions))
             chain_pads.append(pads_in_chain)
             chain_seg_indices.append(chain)
 
@@ -1828,64 +2008,6 @@ class NetStatusAnalyzer:
             geom = cv._via_copper_geom(via.position, radius)
             cache[key] = geom
         return geom
-
-    def _pad_polys(self) -> dict[str, Any]:
-        """Board-frame copper polygon per physical pad occurrence (strict).
-
-        Built once per analyzer over every footprint pad, reusing
-        :meth:`ConnectivityValidator._pad_copper_polygon` for shape/rotation
-        parity with the reference partition extractor.  Pads with unbuildable
-        geometry are stored as ``None`` and simply never match.
-        """
-        if self._pad_poly_cache is not None:
-            return self._pad_poly_cache
-        cache: dict[str, Any] = {}
-        cv = self._connectivity_geometry()
-        for fp_index, fp in enumerate(self.pcb.footprints):
-            if not fp.reference or fp.reference.startswith("#"):
-                continue
-            for pad_index, pad in enumerate(fp.pads):
-                if pad.number is None or pad.number == "":
-                    continue
-                cache[self._pad_node_id(fp_index, pad_index, fp, pad)] = cv._pad_copper_polygon(
-                    fp, pad
-                )
-        self._pad_poly_cache = cache
-        return cache
-
-    def _find_pads_touching_geom(
-        self,
-        geom: Any,
-        pad_positions: dict[str, tuple[float, float]],
-        *,
-        layer: str | None = None,
-        pad_layers: dict[str, list[str]] | None = None,
-    ) -> list[str]:
-        """Strict analogue of ``_find_pads_at_point``: pads whose copper touches ``geom``.
-
-        Only pads present in ``pad_positions`` (i.e. on the net being analyzed)
-        are considered, matching the point-based helper's contract.
-
-        When ``layer`` and ``pad_layers`` are both given (segment geometry,
-        Issue #4557), a pad only matches if it exists on that copper layer
-        (``*.Cu`` wildcard aware) — the copper polygons are 2D, so without the
-        gate an inner-layer trace passing UNDER a surface pad would falsely
-        bond it.
-        """
-        if geom is None:
-            return []
-        pad_polys = self._pad_polys()
-        matches: list[str] = []
-        for pad_id in pad_positions:
-            if (
-                layer is not None
-                and pad_layers is not None
-                and not self._pad_layer_matches_zone(pad_layers.get(pad_id, []), layer)
-            ):
-                continue
-            if self._geoms_touch(geom, pad_polys.get(pad_id)):
-                matches.append(pad_id)
-        return matches
 
     # Canonical copper layer ordering from top to bottom.
     # Promoted to ``kicad_tools.core.layers`` in Issue #3487 so the DRC

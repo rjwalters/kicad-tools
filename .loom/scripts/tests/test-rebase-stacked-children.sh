@@ -45,47 +45,11 @@ RSC_SRC="$HELPERS_DIR/rebase-stacked-children.sh"
 SCRIPT_DIR="$HELPERS_DIR"
 
 # Colors (YELLOW/BLUE are referenced by the extracted run()/info shims under set -u).
-RED='\033[0;31m'
-GREEN='\033[0;32m'
+# shellcheck source=lib/assert.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/assert.sh"
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
-NC='\033[0m'
 
-TESTS_RUN=0
-TESTS_PASSED=0
-TESTS_FAILED=0
-
-assert_eq() {
-    local expected="$1" actual="$2" msg="$3"
-    TESTS_RUN=$((TESTS_RUN + 1))
-    if [[ "$expected" == "$actual" ]]; then
-        TESTS_PASSED=$((TESTS_PASSED + 1))
-        echo -e "  ${GREEN}PASS${NC}: $msg"
-    else
-        TESTS_FAILED=$((TESTS_FAILED + 1))
-        echo -e "  ${RED}FAIL${NC}: $msg"
-        echo "    Expected: '$expected'"
-        echo "    Actual:   '$actual'"
-    fi
-}
-
-# assert_contains/assert_not_contains use a pure-bash substring match (no
-# forked printf|grep pipeline) so a transient fork/exec failure under
-# run-ci-suites.sh's parallel suite pool can never masquerade as a genuine
-# content mismatch (#7819, #7874).
-assert_contains() {
-    local haystack="$1" needle="$2" msg="$3"
-    TESTS_RUN=$((TESTS_RUN + 1))
-    if [[ "$haystack" == *"$needle"* ]]; then
-        TESTS_PASSED=$((TESTS_PASSED + 1))
-        echo -e "  ${GREEN}PASS${NC}: $msg"
-    else
-        TESTS_FAILED=$((TESTS_FAILED + 1))
-        echo -e "  ${RED}FAIL${NC}: $msg"
-        echo "    Expected substring: '$needle'"
-        echo "    In: '$haystack'"
-    fi
-}
 
 assert_not_contains() {
     local haystack="$1" needle="$2" msg="$3"
@@ -197,6 +161,7 @@ cat > "$STUB_DIR/git" <<'STUB'
 STUB_DIR_FROM_ENV="${LOOM_TEST_STUB_DIR:?stub git: LOOM_TEST_STUB_DIR not set}"
 LOG="$STUB_DIR_FROM_ENV/git-calls.log"
 echo "git $*" >> "$LOG"
+echo "git $*" >> "$STUB_DIR_FROM_ENV/all-calls.log"
 case "$1" in
   fetch) exit 0 ;;
   merge-base)
@@ -227,6 +192,64 @@ esac
 STUB
 chmod +x "$STUB_DIR/git"
 
+# --- Stub loom-daemon on PATH (#9487, #9282) ---
+# Subcommands rebase-stacked-children.sh calls:
+#   loom-daemon push-lease pin-flag --remote R --branch B --local-ref L
+#   loom-daemon forge rebase-guard ... -> exit $LOOM_TEST_GUARD_EXIT
+#     (default 1 = verified safe; 0 = blocked, with a token; else = no answer).
+# git is a stub here, so the child's "remote head carries a hand-resolved
+# merge" is the verb's ANSWER, not a git shape: the shapes themselves are
+# covered against real git in loom-daemon/src/rebase_guard/tests.rs.
+# Fixtures in $LOOM_TEST_STUB_DIR, keyed on the sanitized branch name:
+#   pin-rc-<safe>   present -> refuse with that exit code (nothing on stdout).
+#                              3 = origin unreadable, 4 = origin's head is not
+#                              incorporated here (cli/push_lease.rs's codes).
+#   pin-oid-<safe>  present -> pin to that oid instead of the default.
+# Stubbing the subcommand (rather than building the real binary) keeps this
+# suite hermetic — the real implementation's equivalence is covered by its own
+# Rust unit tests and by test-reconcile-stack.sh, which runs the real binary.
+cat > "$STUB_DIR/loom-daemon" <<'STUB'
+#!/usr/bin/env bash
+STUB_DIR_FROM_ENV="${LOOM_TEST_STUB_DIR:?stub loom-daemon: LOOM_TEST_STUB_DIR not set}"
+echo "loom-daemon $*" >> "$STUB_DIR_FROM_ENV/daemon-calls.log"
+echo "loom-daemon $*" >> "$STUB_DIR_FROM_ENV/all-calls.log"
+if [[ "$1" == "forge" && "$2" == "rebase-guard" ]]; then
+  rc="${LOOM_TEST_GUARD_EXIT:-1}"
+  if [[ "$rc" == "0" ]]; then
+    echo "RESOLUTION_DISCARDED 0123abc"
+    echo "BLOCKER: rebase-guard (stub)" >&2
+  fi
+  exit "$rc"
+fi
+if [[ "$1" == "push-lease" && "$2" == "pin-flag" ]]; then
+  branch=""
+  shift 2
+  while [[ $# -gt 0 ]]; do
+    if [[ "$1" == "--branch" ]]; then branch="$2"; shift 2; continue; fi
+    shift
+  done
+  safe="${branch//\//_}"
+  rc_file="$STUB_DIR_FROM_ENV/pin-rc-$safe"
+  if [[ -f "$rc_file" ]]; then
+    rc="$(cat "$rc_file")"
+    if [[ "$rc" == "4" ]]; then
+      echo "push-lease: origin/$branch has not incorporated into this checkout (#9487)" >&2
+    else
+      echo "push-lease: could not read origin's live head for '$branch' (#9487)" >&2
+    fi
+    exit "$rc"
+  fi
+  oid_file="$STUB_DIR_FROM_ENV/pin-oid-$safe"
+  oid="sha-origin-head"
+  [[ -f "$oid_file" ]] && oid="$(cat "$oid_file")"
+  printf -- '--force-with-lease=%s:%s\n' "$branch" "$oid"
+  exit 0
+fi
+echo "stub loom-daemon: unhandled args: $*" >&2
+exit 3
+STUB
+chmod +x "$STUB_DIR/loom-daemon"
+
 export LOOM_TEST_STUB_DIR="$STUB_DIR"
 export PATH="$STUB_DIR:$PATH"
 
@@ -235,6 +258,11 @@ REPO_NWO="owner/repo"
 FORGE_TYPE="github"
 DRY_RUN=false
 RSC_FAILURE=0
+# The real script resolves this above the extracted run()..main span (#9487).
+DAEMON_BIN="$STUB_DIR/loom-daemon"
+# Also resolved above the span (#10771). Pinned to `rebase` for the rebase
+# cases: anything else, unset included, is merge and rewrites no child.
+BRANCH_UPDATE_STRATEGY=rebase
 
 # Canned issue fixtures (child issue label state).
 cat > "$STUB_DIR/issue-201.json" <<'EOF'
@@ -253,19 +281,38 @@ set_rev_parse_sha()  { printf '%s' "$1" > "$STUB_DIR/rev-parse-sha"; }
 clear_rev_parse_sha() { rm -f "$STUB_DIR/rev-parse-sha"; }
 set_ls_remote_sha()   { printf '%s' "$1" > "$STUB_DIR/ls-remote-sha"; }
 clear_ls_remote_sha() { rm -f "$STUB_DIR/ls-remote-sha"; }
+# #9487: `loom-daemon push-lease pin-flag` builds the pinned lease argument.
+# refuse_pin <branch> [rc]  -> the subcommand refuses (3 unreadable, 4 not
+#                              incorporated); the script must SKIP the child
+#                              rather than fall back to the bare lease.
+refuse_pin() { echo "${2:-3}" > "$STUB_DIR/pin-rc-${1//\//_}"; }
+allow_pin()  { rm -f "$STUB_DIR/pin-rc-${1//\//_}"; }
+
+# The live-remote head the stub pins to unless a scenario overrides it.
+DEFAULT_ORIGIN_HEAD="sha-origin-head"
 
 reset_state() {
     : > "$STUB_DIR/gh-calls.log"
     : > "$STUB_DIR/git-calls.log"
+    : > "$STUB_DIR/daemon-calls.log"
+    : > "$STUB_DIR/all-calls.log"
     DRY_RUN=false
     RSC_FAILURE=0
     unset LOOM_TEST_REBASE_EXIT
+    unset LOOM_TEST_GUARD_EXIT
     unset LOOM_TEST_PUSH_EXIT
     clear_rev_parse_sha
-    clear_ls_remote_sha
+    set_ls_remote_sha "$DEFAULT_ORIGIN_HEAD"
+    # #9487 default: the pinned lease builds successfully for every child.
+    allow_pin "feature/issue-201"
+    allow_pin "feature/issue-202"
 }
 read_gh()  { cat "$STUB_DIR/gh-calls.log" 2>/dev/null || true; }
 read_git() { cat "$STUB_DIR/git-calls.log" 2>/dev/null || true; }
+read_daemon() { cat "$STUB_DIR/daemon-calls.log" 2>/dev/null || true; }
+# Every stubbed git AND loom-daemon call, in call order — the ordering log the
+# #9487 "pin before the rebase" assertion reads.
+read_all() { cat "$STUB_DIR/all-calls.log" 2>/dev/null || true; }
 
 echo "Testing _rebase_stacked_children behavior..."
 
@@ -293,11 +340,71 @@ clear_uptodate "feature/issue-201"   # stale
 _rebase_stacked_children "feature/issue-100"
 assert_contains "$(read_git)" "git rebase -- origin/feature/issue-100 feature/issue-201" \
   "(c) Safe stale child -> rebased onto origin/feature/issue-100"
-assert_contains "$(read_git)" "git push --force-with-lease" \
-  "(c) Safe stale child -> pushed with --force-with-lease"
+assert_contains "$(read_git)" \
+  "git push --force-with-lease=feature/issue-201:$DEFAULT_ORIGIN_HEAD origin feature/issue-201" \
+  "(c) Safe stale child -> pushed with the lease PINNED to origin's live head (#9487)"
+assert_not_contains "$(read_git)" "git push --force-with-lease origin" \
+  "(c) Safe stale child -> never the bare --force-with-lease (#9487)"
 assert_not_contains "$(read_gh)" "pr edit" "(c) Safe stale child -> PR base NOT retargeted"
 assert_eq "" "$(read_gh)" "(c) Safe stale child -> no deferred comment"
 assert_eq "0" "$RSC_FAILURE" "(c) Safe stale child -> RSC_FAILURE stays 0"
+assert_contains "$(read_daemon)" \
+  "loom-daemon forge rebase-guard --base origin/feature/issue-100 --old origin/feature/issue-201 --new feature/issue-201" \
+  "(c) Safe stale child -> rebase-guard asked about the head the push replaces (#9282)"
+
+# #9487 ordering: the pin must be built BEFORE the rebase rewrites the branch.
+# A pin taken after (or just before the push) would read whatever a sibling had
+# already published and launder the clobber as "fresh".
+ALL_LOG_C="$(read_all)"
+# Pure-bash scan for the two call positions: no `grep | head` pipeline, which
+# under `set -o pipefail` can report SIGPIPE from the producer (#7060 class).
+PIN_LINE=""
+REBASE_LINE=""
+LOG_LINE_NO=0
+while IFS= read -r log_line; do
+    LOG_LINE_NO=$((LOG_LINE_NO + 1))
+    if [[ -z "$PIN_LINE" && "$log_line" == *"push-lease pin-flag"*"--branch feature/issue-201"* ]]; then
+        PIN_LINE="$LOG_LINE_NO"
+    fi
+    if [[ -z "$REBASE_LINE" && "$log_line" == *"git rebase -- origin/feature/issue-100"* ]]; then
+        REBASE_LINE="$LOG_LINE_NO"
+    fi
+done <<< "$ALL_LOG_C"
+TESTS_RUN=$((TESTS_RUN + 1))
+if [[ -n "$PIN_LINE" && -n "$REBASE_LINE" && "$PIN_LINE" -lt "$REBASE_LINE" ]]; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "  ${GREEN}PASS${NC}: (c) the lease pin is built BEFORE the rebase (#9487)"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "  ${RED}FAIL${NC}: (c) the lease pin is built BEFORE the rebase (#9487)"
+    echo "    push-lease at line '$PIN_LINE', rebase at line '$REBASE_LINE' in:"
+    printf '%s\n' "$ALL_LOG_C"
+fi
+assert_contains "$ALL_LOG_C" \
+  "loom-daemon push-lease pin-flag --remote origin --branch feature/issue-201 --local-ref refs/heads/feature/issue-201" \
+  "(c) the pin is built by the loom-daemon subcommand, with the local-ref ancestry check wired (#9487)"
+
+# (c-merge) #10771: same stale, safe child, but this repo's PR branches are
+#     not rebased (loom-daemon branch-update strategy = merge). The child is
+#     reported and left alone: no pin, no rebase, no push, no comment, and not a
+#     failure — rewriting it would delete other agents' merge commits.
+for CM_MODE in merge unset; do
+reset_state
+if [[ "$CM_MODE" == unset ]]; then unset BRANCH_UPDATE_STRATEGY; else BRANCH_UPDATE_STRATEGY=merge; fi
+write_prlist "feature/issue-100" '[{"number":501,"headRefName":"feature/issue-201"}]'
+clear_uptodate "feature/issue-201"   # stale
+OUT_CM_FILE="$(mktemp)"
+_rebase_stacked_children "feature/issue-100" >"$OUT_CM_FILE" 2>&1
+OUT_CM="$(cat "$OUT_CM_FILE")"
+rm -f "$OUT_CM_FILE"
+assert_not_contains "$(read_git)" "rebase" "(c-merge/$CM_MODE) merge-only repo -> no rebase attempted (#10771)"
+assert_not_contains "$(read_git)" "push" "(c-merge/$CM_MODE) merge-only repo -> nothing pushed, let alone forced (#10771)"
+assert_not_contains "$(read_all)" "push-lease pin-flag" "(c-merge/$CM_MODE) merge-only repo -> no lease is even built"
+assert_eq "" "$(read_gh)" "(c-merge/$CM_MODE) merge-only repo -> no comment posted"
+assert_eq "0" "$RSC_FAILURE" "(c-merge/$CM_MODE) merge-only repo -> a policy skip is not a failure"
+assert_contains "$OUT_CM" "git merge origin/feature/issue-100" "(c-merge/$CM_MODE) the skip names the merge-based remedy"
+done
+BRANCH_UPDATE_STRATEGY=rebase
 
 # (c2) Same as (c), but version-check-gate.sh (real script, #7168) reports a
 #      mismatch via LOOM_VERSION_CHECK_SCRIPT -> rebase runs, but the push is
@@ -336,7 +443,47 @@ clear_uptodate "feature/issue-201"   # stale
 _rebase_stacked_children "feature/issue-100"
 assert_eq "0" "$RSC_FAILURE" "(c3) Dry-run -> version-check-gate skipped, RSC_FAILURE stays 0"
 unset LOOM_VERSION_CHECK_SCRIPT
+assert_not_contains "$(read_daemon)" "rebase-guard" "(c3) Dry-run -> rebase-guard not asked either (#9282)"
 DRY_RUN=false
+
+# (c4) #9282: the child's remote head carries a hand-resolved merge the rebase
+#      flattened -> rebase-guard answers BLOCKED (rc 0): the rebase ran, the
+#      push is NEVER attempted, and this child fails with RSC_FAILURE=2.
+reset_state
+export LOOM_TEST_GUARD_EXIT=0
+write_prlist "feature/issue-100" '[{"number":501,"headRefName":"feature/issue-201"}]'
+clear_uptodate "feature/issue-201"   # stale
+OUT_C4_FILE="$(mktemp)"
+_rebase_stacked_children "feature/issue-100" >"$OUT_C4_FILE" 2>&1
+OUT_C4="$(cat "$OUT_C4_FILE")"
+rm -f "$OUT_C4_FILE"
+assert_contains "$(read_git)" "git rebase -- origin/feature/issue-100 feature/issue-201" \
+  "(c4) Discarded resolution -> rebase still ran"
+assert_not_contains "$(read_git)" "git push" \
+  "(c4) Discarded resolution -> push NEVER attempted"
+assert_eq "2" "$RSC_FAILURE" "(c4) Discarded resolution -> RSC_FAILURE=2"
+assert_contains "$OUT_C4" "RESOLUTION_DISCARDED" "(c4) The verb's finding is surfaced"
+assert_contains "$OUT_C4" "Not pushing 'feature/issue-201'" \
+  "(c4) Failure is reported against the child branch"
+
+# (c5) #9282: rebase-guard gives NO answer (a loom-daemon predating the verb
+#      exits 2) -> a loud warning, and the push still happens: a script newer
+#      than the installed binary must not strand every stacked rebase.
+reset_state
+export LOOM_TEST_GUARD_EXIT=2
+write_prlist "feature/issue-100" '[{"number":501,"headRefName":"feature/issue-201"}]'
+clear_uptodate "feature/issue-201"   # stale
+OUT_C5_FILE="$(mktemp)"
+_rebase_stacked_children "feature/issue-100" >"$OUT_C5_FILE" 2>&1
+OUT_C5="$(cat "$OUT_C5_FILE")"
+rm -f "$OUT_C5_FILE"
+assert_contains "$OUT_C5" "rebase-guard gave no answer (rc=2) for 'feature/issue-201'" \
+  "(c5) Unanswered guard -> warned, naming the exit code and the child"
+assert_contains "$OUT_C5" "UNCHECKED" "(c5) Unanswered guard -> the warning says the push is unchecked"
+assert_contains "$(read_git)" "git push --force-with-lease" \
+  "(c5) Unanswered guard -> push still attempted (non-blocking)"
+assert_eq "0" "$RSC_FAILURE" "(c5) Unanswered guard -> RSC_FAILURE stays 0"
+unset LOOM_TEST_GUARD_EXIT
 
 # (d) One stale, unsafe child (issue 202 loom:building) -> deferred comment, no rebase.
 reset_state
@@ -430,6 +577,45 @@ assert_not_contains "$OUT_I" "PUSH-LEASE-RACE-DETECTED" \
   "(i) A real rejection is never mislabeled as the race condition"
 unset LOOM_TEST_PUSH_EXIT
 
+# (j) #9487: origin's live head cannot be read -> the child is SKIPPED rather
+#     than pushed with an unpinned (bare) lease. Nothing is rebased or pushed.
+reset_state
+write_prlist "feature/issue-100" '[{"number":501,"headRefName":"feature/issue-201"}]'
+clear_uptodate "feature/issue-201"   # stale
+refuse_pin "feature/issue-201" 3     # loom-daemon: origin could not be queried
+OUT_J_FILE="$(mktemp)"
+_rebase_stacked_children "feature/issue-100" >"$OUT_J_FILE" 2>&1
+OUT_J="$(cat "$OUT_J_FILE")"
+rm -f "$OUT_J_FILE"
+assert_not_contains "$(read_git)" "git rebase -- origin/feature/issue-100" \
+  "(j) No readable live head -> rebase NOT attempted (#9487)"
+assert_not_contains "$(read_git)" "git push" \
+  "(j) No readable live head -> push NOT attempted with an unpinned lease (#9487)"
+assert_eq "2" "$RSC_FAILURE" "(j) No readable live head -> RSC_FAILURE=2"
+assert_contains "$OUT_J" "#9487" "(j) Refusal cites the pinned-lease requirement"
+assert_contains "$OUT_J" "push-lease pin-flag exit 3" \
+  "(j) Refusal names the subcommand and its exit code"
+
+# (k) #9487: origin's head is NOT an ancestor of this clone's local child
+#     branch -> someone published commits this clone never incorporated. The
+#     pin would be accurate and the push would still delete them, so refuse.
+reset_state
+write_prlist "feature/issue-100" '[{"number":501,"headRefName":"feature/issue-201"}]'
+clear_uptodate "feature/issue-201"   # stale
+refuse_pin "feature/issue-201" 4     # loom-daemon: origin's head is not incorporated here
+OUT_K_FILE="$(mktemp)"
+_rebase_stacked_children "feature/issue-100" >"$OUT_K_FILE" 2>&1
+OUT_K="$(cat "$OUT_K_FILE")"
+rm -f "$OUT_K_FILE"
+assert_not_contains "$(read_git)" "git rebase -- origin/feature/issue-100" \
+  "(k) Unincorporated origin head -> rebase NOT attempted (#9487)"
+assert_not_contains "$(read_git)" "git push" \
+  "(k) Unincorporated origin head -> push NOT attempted (#9487)"
+assert_eq "2" "$RSC_FAILURE" "(k) Unincorporated origin head -> RSC_FAILURE=2"
+assert_contains "$OUT_K" "has not incorporated" \
+  "(k) Refusal names the unincorporated remote head"
+allow_pin "feature/issue-201"
+
 # --- Source-contains guards (fail if a refactor drops the key behavior) ---
 echo ""
 echo "Testing rebase-stacked-children.sh source guards..."
@@ -444,8 +630,14 @@ assert_contains "$src" "grep -qx 'loom:building'" \
 # headRefName beginning with `-` is parsed by `git rebase` as a switch.
 assert_contains "$src" 'run git rebase -- "origin/$parent_branch" "$child_branch"' \
   "safe path rebases the child onto the parent tip, with the -- separator"
-assert_contains "$src" "run git push --force-with-lease" \
-  "safe path publishes with --force-with-lease (never bare --force)"
+assert_contains "$src" 'run git push "$child_lease_arg" origin "$child_branch"' \
+  "safe path publishes with the PINNED --force-with-lease argument (never bare --force, never the bare lease — #9487)"
+assert_not_contains "$src" 'git push --force-with-lease;' \
+  "script never issues a BARE --force-with-lease (#9487)"
+assert_contains "$src" '"$DAEMON_BIN" push-lease pin-flag --remote origin --branch "$child_branch" --local-ref "refs/heads/$child_branch"' \
+  "the pinned lease argument comes from loom-daemon push-lease pin-flag, not from shell logic (#9487)"
+assert_contains "$src" 'loom_daemon_version_preflight push-lease "$DAEMON_BIN"' \
+  "a loom-daemon too old for push-lease is refused with the floor, never degraded to a bare lease (#9487)"
 assert_not_contains "$src" "gh pr edit" \
   "script never retargets the child PR base (stays stacked on the parent)"
 assert_contains "$src" "push_landed_despite_rejection" \
@@ -454,6 +646,10 @@ assert_contains "$src" "PUSH-LEASE-RACE-DETECTED" \
   "script logs a greppable marker when a reported rejection is actually landed"
 assert_contains "$src" 'source "$SCRIPT_DIR/lib/push-lease-verify.sh"' \
   "script sources the shared push-lease-verify helper"
+assert_contains "$src" 'BRANCH_UPDATE_STRATEGY="$("$DAEMON_BIN" branch-update strategy 2>/dev/null)" || BRANCH_UPDATE_STRATEGY=merge' \
+  "script asks loom-daemon branch-update strategy, failing toward merge (#10771)"
+assert_contains "$src" 'if [[ "${BRANCH_UPDATE_STRATEGY:-}" != "rebase" ]]; then' \
+  "any answer but an explicit rebase is merge (#10771)"
 assert_contains "$src" '"$SCRIPT_DIR/version-check-gate.sh"' \
   "safe path runs the shared version-check-gate.sh after rebase, before push (#7168)"
 

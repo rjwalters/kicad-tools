@@ -37,7 +37,6 @@ class TestRoutingChromosome:
             net_order=[1, 2, 3],
             astar_weights={1: 1.0, 2: 1.5},
             preferred_layers={1: 0, 2: 1},
-            strategy_flags={1: True},
             fitness=42.0,
         )
         c2 = c.copy()
@@ -91,20 +90,17 @@ class TestOrderCrossover:
             net_order=nets,
             astar_weights={1: 0.8, 2: 1.0, 3: 1.2},
             preferred_layers={1: 0, 2: 0, 3: 0},
-            strategy_flags={1: False, 2: True, 3: False},
         )
         p2 = RoutingChromosome(
             net_order=[3, 1, 2],
             astar_weights={1: 1.5, 2: 2.0, 3: 0.5},
             preferred_layers={1: 1, 2: 1, 3: 1},
-            strategy_flags={1: True, 2: False, 3: True},
         )
         child = order_crossover(p1, p2)
-        # Every net should have a weight, layer, and flag
+        # Every net should have a weight and a layer
         for net in nets:
             assert net in child.astar_weights
             assert net in child.preferred_layers
-            assert net in child.strategy_flags
 
 
 # ---------------------------------------------------------------------------
@@ -121,7 +117,6 @@ class TestMutation:
             net_order=list(nets),
             astar_weights=dict.fromkeys(nets, 1.0),
             preferred_layers=dict.fromkeys(nets, 0),
-            strategy_flags=dict.fromkeys(nets, False),
         )
         for _ in range(100):
             mutate(c, mutation_rate=0.5)
@@ -147,14 +142,12 @@ class TestMutation:
             net_order=[1, 2, 3],
             astar_weights={1: 1.0, 2: 1.0, 3: 1.0},
             preferred_layers={1: 0, 2: 0, 3: 0},
-            strategy_flags={1: False, 2: False, 3: False},
         )
         original = c.copy()
         mutate(c, mutation_rate=0.0)
         assert c.net_order == original.net_order
         assert c.astar_weights == original.astar_weights
         assert c.preferred_layers == original.preferred_layers
-        assert c.strategy_flags == original.strategy_flags
 
 
 # ---------------------------------------------------------------------------
@@ -250,7 +243,6 @@ class TestEvolutionaryRoutingOptimizer:
                 net_order=list(nets),
                 astar_weights=dict.fromkeys(nets, 1.0),
                 preferred_layers=dict.fromkeys(nets, 0),
-                strategy_flags=dict.fromkeys(nets, False),
                 fitness=float(i),
             )
             pop.append(c)
@@ -269,7 +261,6 @@ class TestEvolutionaryRoutingOptimizer:
                 net_order=list(nets),
                 astar_weights=dict.fromkeys(nets, 1.0),
                 preferred_layers=dict.fromkeys(nets, 0),
-                strategy_flags=dict.fromkeys(nets, False),
                 fitness=float(i * 10),
             )
             pop.append(c)
@@ -327,7 +318,7 @@ class TestEvolutionaryTimeout:
 
         # Each "generation" sleeps ~0.3 s so the second iteration's
         # timeout check fires before evaluation.
-        def slow_eval(autorouter, population, base_seed, gen, total_nets):
+        def slow_eval(autorouter, population, base_seed, gen, total_nets, **_kw):
             time.sleep(0.3)
             return [([], 1.0 + idx) for idx, _ in enumerate(population)]
 
@@ -358,7 +349,7 @@ class TestEvolutionaryTimeout:
         from kicad_tools.router.algorithms import evolutionary as evo_mod
 
         # Even if eval is invoked it should not block forever.
-        def fast_eval(autorouter, population, base_seed, gen, total_nets):
+        def fast_eval(autorouter, population, base_seed, gen, total_nets, **_kw):
             return [([], float(idx)) for idx, _ in enumerate(population)]
 
         monkeypatch.setattr(evo_mod, "_evaluate_sequential", fast_eval)
@@ -387,7 +378,7 @@ class TestEvolutionaryTimeout:
 
         gen_count = {"n": 0}
 
-        def counting_eval(autorouter, population, base_seed, gen, total_nets):
+        def counting_eval(autorouter, population, base_seed, gen, total_nets, **_kw):
             gen_count["n"] += 1
             return [([], float(idx)) for idx, _ in enumerate(population)]
 
@@ -433,7 +424,7 @@ class TestEvolutionaryStdoutFlushing:
             "import sys, time\n"
             "from kicad_tools.router.algorithms import evolutionary as evo\n"
             "from kicad_tools.router.core import Autorouter\n"
-            "def slow_eval(autorouter, population, base_seed, gen, total_nets):\n"
+            "def slow_eval(autorouter, population, base_seed, gen, total_nets, **_kw):\n"
             "    time.sleep(0.4)\n"
             "    return [([], float(i)) for i, _ in enumerate(population)]\n"
             "evo._evaluate_sequential = slow_eval\n"

@@ -1,7 +1,7 @@
 {
   "version": "1.0",
   "kicad_tools_version": "0.22.0",
-  "generated_at": "2026-10-09T04:23:18.455734+00:00",
+  "generated_at": "2026-10-14T11:25:21.440602+00:00",
   "manufacturer": "jlcpcb-tier1",
   "files": {
     "DESIGN_REVIEW.md": {
@@ -29,16 +29,16 @@
       "size": 982
     },
     "check-report.json": {
-      "sha256": "3011c4ae717a0185d674268af8fe958d9657f27c741aa0e5346632735dcf498f",
-      "size": 7077
+      "sha256": "dbd43c2882b75f9c694f1082f9f575b642f220bb40af886bc4a198f3671da7cc",
+      "size": 15406
     },
     "cpl_jlcpcb.csv": {
       "sha256": "8b435e9347774c7f26e3536b35136d1cf2fc0c9ba3c1de5803fcfd2ab6086b5d",
       "size": 2681
     },
     "design-source/DESIGN_REVIEW.md": {
-      "sha256": "2d571857bdd8edcc223c93e8ba8ae5dfd50553599a85ce65fbbdf59e9b7e48c4",
-      "size": 10194
+      "sha256": "9696ae5c33cbe92b09daa2e16817e8b20d7315301d2d7975dcb3b54f212103e3",
+      "size": 10300
     },
     "design-source/README.md": {
       "sha256": "11896207bf8db9666efdf6f990b173d4b3e33a2c3be754cdf89c8d51766c6bd7",
@@ -49,12 +49,12 @@
       "size": 6324
     },
     "design-source/generate_design.py": {
-      "sha256": "7db8238da3cf0afc8f9bcbcfe5f9da06973d2aff604b4e0a20e174973aa851f5",
-      "size": 51818
+      "sha256": "6d7dc4ca80bf0135017ea2767ea9e0eb75c65ff198bc982866466df1c33fbdb6",
+      "size": 52791
     },
     "design-source/generate_pcb.py": {
-      "sha256": "a2d4d8bf7034d20092888e2d42c513c68a715b511dba5d6281e4b6ede3d1e125",
-      "size": 7685
+      "sha256": "36afb9c6a8b81878b88b3cf38b91da058c7a281f706d1a16451622e07cc32104",
+      "size": 7988
     },
     "design-source/generate_schematic.py": {
       "sha256": "f509834c144b688688971cfc0ea7614977457f4f56e402dcc569551fa909c464",
@@ -85,8 +85,8 @@
       "size": 387836
     },
     "design-source/routing_plan.py": {
-      "sha256": "2cf9c44b14df7e990b67c5e2bfa0d23819e83f9095cb9a5b74fbaeaea34f513a",
-      "size": 16167
+      "sha256": "744eca7c1d83cd72351d5500f21e846d9f1f368e800e945834655491e79cf408",
+      "size": 16899
     },
     "firmware/.gitignore": {
       "sha256": "692b1af4436043e2e965c8d563bbf90d648cda3a6afa9bba38e1c38af1d38919",
@@ -173,8 +173,8 @@
       "size": 2192
     },
     "gerbers/gerbers.zip": {
-      "sha256": "cd1d1c1fae85c27d439db6510aa6f1af1699b97bd93952b8ec7a225c32e64fa3",
-      "size": 189740
+      "sha256": "46b04d4fc881f194e2242c98e45fd0c3f7097ed13a27d463ed13f4ea786c3904",
+      "size": 190208
     },
     "images/assembly.png": {
       "sha256": "5116f2d20c6863b59b216a57f7e1e58d88e719b839c7076caa7faf6b5b3e78d6",
@@ -209,12 +209,12 @@
       "size": 497328
     },
     "images/schematic_usb_joystick.png": {
-      "sha256": "4c37ff6a64358801a9cce138450e326a2316180fb885a74de18787530635fceb",
-      "size": 486470
+      "sha256": "c0a3950fda2f26c18ad6359ba1ccd02e953d67c0be8d2b40d3d8553de7445c79",
+      "size": 486466
     },
     "kicad_project.zip": {
-      "sha256": "37b0a7067492f065ac15ef14b40d8d5eeeedac0d75ad7295b26a12bd63c6c468",
-      "size": 282157
+      "sha256": "92bc8e7224678c19abd48b1be925349ca3f47f953dec0df356be925796875c81",
+      "size": 283345
     },
     "manual-assembly-bom.csv": {
       "sha256": "f51fef1b581623d69c00b1b3604f0a1b193c29e29134a3931e0853ab13030ef7",
@@ -317,12 +317,12 @@
       "size": 2354
     },
     "report.md": {
-      "sha256": "1583d29a8ace857894482a46a19a0c8d3a00d626e608351dfffb8b8587d84dc7",
-      "size": 4976
+      "sha256": "912a83cae798faaa0686f9398f387d1c4b20f2f5aa695f93f28292896bba297e",
+      "size": 4951
     },
     "report.pdf": {
-      "sha256": "e18c5a58b7676132dcf7972546daba527cdb6133df2c7a92afc64a42ddf69539",
-      "size": 3717712
+      "sha256": "af0ebb825aa539295dd660f0e2cdf5409471935865db0d9d63360d8d8f80e144",
+      "size": 3750775
     },
     "schematic.pdf": {
       "sha256": "6fe021a9ea56eb056b2fc6dc24e3fee47c4f6555c6141a4ad1ec755b51aa0d98",
@@ -398,8 +398,9 @@
     },
     {
       "name": "drc",
-      "status": "WARN",
-      "message": "DRC passed with 8 warning(s)"
+      "status": "FAIL",
+      "message": "DRC has 13 error(s)",
+      "details": "netclass_clearance_copper: Segment to via clearance 0.175mm < netclass 'Power' minimum 0.200mm; netclass_clearance_copper: Segment to via clearance 0.175mm < netclass 'Power' minimum 0.200mm; netclass_clearance_copper: Segment to via clearance 0.194mm < netclass 'Power' minimum 0.200mm; netclass_clearance_copper: Segment to via clearance 0.195mm < netclass 'Power' minimum 0.200mm; netclass_clearance_copper: Segment to via clearance 0.154mm < netclass 'Power' minimum 0.200mm"
     },
     {
       "name": "erc",

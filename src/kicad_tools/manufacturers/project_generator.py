@@ -38,19 +38,25 @@ Usage::
 
 from __future__ import annotations
 
+import copy
+import hashlib
 import json
 import logging
+import re
 import shutil
+import sys
 import tempfile
 from dataclasses import replace
 from functools import lru_cache
 from pathlib import Path
-from typing import TYPE_CHECKING, Sequence
+from typing import TYPE_CHECKING, Iterable, Mapping, Sequence
 
 from .base import DesignRules
 
 if TYPE_CHECKING:
     from kicad_tools.router.rules import NetClassRouting
+
+    from .netclass_dru import PairLimits
 
 logger = logging.getLogger(__name__)
 
@@ -219,6 +225,32 @@ def build_project_rules(rules: DesignRules) -> dict[str, float]:
         "min_text_thickness": rules.min_silkscreen_width_mm,
         "min_text_height": rules.min_silkscreen_height_mm,
     }
+
+
+#: ``design_settings.rules`` keys :func:`build_project_rules` writes.
+_PROJECT_RULE_KEYS: tuple[str, ...] = (
+    "min_clearance",
+    "min_track_width",
+    "min_via_diameter",
+    "min_microvia_diameter",
+    "min_via_annular_width",
+    "min_through_hole_diameter",
+    "min_via_hole",
+    "min_microvia_drill",
+    "min_hole_to_hole",
+    "min_copper_edge_clearance",
+    "min_silk_clearance",
+    "min_text_thickness",
+    "min_text_height",
+)
+
+#: ``design_settings.defaults`` keys :func:`merge_project_rules` writes.
+_PROJECT_DEFAULT_KEYS: tuple[str, ...] = (
+    "track_min_width",
+    "clearance_min",
+    "via_min_diameter",
+    "via_min_drill",
+)
 
 
 def build_project_data(
@@ -517,6 +549,395 @@ def merge_project_rules(
     return project_data
 
 
+#: ``meta`` key recording which ``net_settings`` classes and
+#: ``netclass_assignments`` entries kct declared from the router's net-class
+#: map (Issue #6390).  Everything *not* listed here is authored and is never
+#: replaced, loosened or removed by :func:`apply_router_netclasses`.
+ROUTER_NETCLASSES_META_KEY = "kct_router_netclasses"
+
+#: ``meta`` key recording the differential pairs the router coupled-routed
+#: whose names KiCad's ``isCoupledDiffPair()`` does not recognise (Issue
+#: #6429): a sorted list of ``[P, N]`` net-name pairs.  The router-class
+#: ``.kicad_dru`` exemption and ``kct check``'s ``netclass_clearance_copper``
+#: both read it, through
+#: :func:`~kicad_tools.manufacturers.netclass_dru.is_router_coupled_pair`.
+#: KiCad-named pairs (``USB_D+``/``USB_D-``, ``TX_P``/``TX_N``) are never
+#: listed, so boards that only have those carry no key at all.
+ROUTER_DIFF_PAIRS_META_KEY = "kct_router_diff_pairs"
+
+#: ``meta`` key holding a digest of the project content kct wrote (Issue
+#: #6390, AC5).  See :func:`stamp_kct_project` / :func:`is_kct_owned_project`.
+SIDECAR_DIGEST_META_KEY = "kct_sidecar_sha256"
+
+_CLEARANCE_EPSILON_MM = 1e-9
+
+
+def _warn(message: str) -> None:
+    print(f"Warning: {message}", file=sys.stderr)
+
+
+def router_netclass_provenance(project_data: dict) -> tuple[list[str], list[str]]:
+    """``(class names, net names)`` kct declared from the router map (#6390)."""
+    meta = project_data.get("meta")
+    record = meta.get(ROUTER_NETCLASSES_META_KEY) if isinstance(meta, dict) else None
+    if not isinstance(record, dict):
+        return [], []
+    classes = [c for c in record.get("classes", []) if isinstance(c, str)]
+    nets = [n for n in record.get("assignments", []) if isinstance(n, str)]
+    return classes, nets
+
+
+def recorded_router_coupled_pairs(project_data: dict) -> list[tuple[str, str]]:
+    """``(P, N)`` pairs recorded under ``meta.kct_router_diff_pairs`` (#6429)."""
+    meta = project_data.get("meta")
+    record = meta.get(ROUTER_DIFF_PAIRS_META_KEY) if isinstance(meta, dict) else None
+    if not isinstance(record, list):
+        return []
+    pairs: list[tuple[str, str]] = []
+    for item in record:
+        if (
+            isinstance(item, (list, tuple))
+            and len(item) == 2
+            and all(isinstance(name, str) and name for name in item)
+            and item[0] != item[1]
+        ):
+            pairs.append((item[0], item[1]))
+    return pairs
+
+
+def apply_router_coupled_pairs(
+    project_data: dict,
+    pairs: Iterable[tuple[str, str]],
+    net_names: Iterable[str] | None = None,
+) -> dict:
+    """Record the router's coupled pairs KiCad does not recognise (Issue #6429).
+
+    Replaces any earlier record (a pair no longer engaged is dropped).  Only
+    pairs for which :func:`~kicad_tools.manufacturers.netclass_dru.is_coupled_diff_pair`
+    is false in both orders are kept -- KiCad already exempts the others by
+    name -- and, when ``net_names`` is given, only pairs whose two nets are
+    on the board.  An empty result removes the key, so a board whose pairs
+    are all KiCad-named stays byte-identical.
+    """
+    from .netclass_dru import is_coupled_diff_pair
+
+    present = None if net_names is None else set(net_names)
+    record = sorted(
+        {
+            (p, n)
+            for p, n in pairs
+            if p
+            and n
+            and p != n
+            and not is_coupled_diff_pair(p, n)
+            and not is_coupled_diff_pair(n, p)
+            and (present is None or (p in present and n in present))
+        }
+    )
+    meta = project_data.get("meta")
+    if isinstance(meta, dict):
+        meta.pop(ROUTER_DIFF_PAIRS_META_KEY, None)
+    if record:
+        project_data.setdefault("meta", {})[ROUTER_DIFF_PAIRS_META_KEY] = [
+            [p, n] for p, n in record
+        ]
+    return project_data
+
+
+def _remove_router_netclasses(project_data: dict) -> None:
+    """Drop the classes / assignments a previous kct pass declared (#6390)."""
+    classes, nets = router_netclass_provenance(project_data)
+    meta = project_data.get("meta")
+    if isinstance(meta, dict):
+        meta.pop(ROUTER_NETCLASSES_META_KEY, None)
+    settings = project_data.get("net_settings")
+    if not isinstance(settings, dict):
+        return
+    if classes and isinstance(settings.get("classes"), list):
+        settings["classes"] = [
+            c for c in settings["classes"] if not (isinstance(c, dict) and c.get("name") in classes)
+        ]
+    assignments = settings.get("netclass_assignments")
+    if nets and isinstance(assignments, dict):
+        for net in nets:
+            assignments.pop(net, None)
+
+
+def _authored_netclass_members(project_data: dict, net_names: list[str]) -> set[str]:
+    """Nets an authored pattern or explicit assignment already classifies.
+
+    Raises :class:`~kicad_tools.core.project_clearance.ProjectClearanceError`
+    when the authored netclasses cannot be evaluated safely (an unsupported
+    pattern, a malformed block): kct must not guess which nets those match.
+    """
+    from kicad_tools.core.netclass_diagnostics import diagnose_netclasses
+    from kicad_tools.core.project_clearance import resolve_project_clearances
+
+    resolve_project_clearances(project_data, net_names)
+    settings = project_data.get("net_settings") or {}
+    members: set[str] = set()
+    assignments = settings.get("netclass_assignments")
+    if isinstance(assignments, dict):
+        members.update(net for net, value in assignments.items() if value)
+    report = diagnose_netclasses(project_data, list(net_names))
+    for row in report["patterns"]:
+        members.update(row.get("matches") or [])
+    return members
+
+
+def apply_router_netclasses(
+    project_data: dict,
+    net_class_map: Mapping[str, NetClassRouting],
+    net_names: Iterable[str] | None = None,
+) -> dict:
+    """Declare the router's stricter net classes in a project (Issue #6390).
+
+    ``kct route`` routes each net at its :class:`NetClassRouting` clearance
+    (``Power`` 0.2 mm, ``Clock`` 0.2 mm, ...), but until #6390 those classes
+    only reached ``net_class_map.json``: the routed ``.kicad_pro`` declared
+    ``Default`` alone, so neither ``kicad-cli pcb drc`` nor ``kct check``'s
+    ``netclass_clearance_copper`` rule held the copper to them.
+
+    This writes every router class whose clearance exceeds the project's
+    ``Default`` clearance into ``net_settings.classes`` (a clone of
+    ``Default`` with ``name`` and ``clearance`` overridden) and assigns its
+    nets by exact name in ``netclass_assignments`` -- never patterns, whose
+    native-verified subset cannot express names like ``+5V`` -- in the shape
+    the block's schema reads (schema 3 strings, otherwise arrays; see
+    :func:`~kicad_tools.core.project_clearance.netclass_assignment_value`).
+
+    Authored intent always wins:
+
+    * the classes / assignments a previous kct pass declared (recorded under
+      ``meta.kct_router_netclasses``) are replaced, everything else is left
+      alone;
+    * a net an authored pattern or assignment already classifies keeps its
+      authored class;
+    * a router class whose name collides with an authored class of a
+      different clearance is skipped;
+    * a project whose authored netclasses cannot be evaluated (e.g. an
+      unsupported pattern) gets no router classes at all.
+
+    Each skip prints a warning on stderr.  Deterministic: the same inputs
+    always produce the same project (classes and nets sorted by name).
+
+    Args:
+        project_data: Parsed ``.kicad_pro`` (mutated in place), normally
+            already merged by :func:`merge_project_rules` so ``Default``
+            carries the fabrication floor.
+        net_class_map: The router's effective ``{net_name: NetClassRouting}``
+            map.  An empty map removes the previously declared classes.
+        net_names: The board's nets; map entries for other nets are ignored.
+            ``None`` uses every map key.
+
+    Returns:
+        The same ``project_data`` dict.
+    """
+    _remove_router_netclasses(project_data)
+    names = set(net_class_map) if net_names is None else set(net_names) & set(net_class_map)
+    names.discard("")
+    settings = project_data.setdefault("net_settings", {})
+    classes = settings.setdefault("classes", [])
+    default_cls = next(
+        (c for c in classes if isinstance(c, dict) and c.get("name") == "Default"), None
+    )
+    floor = default_cls.get("clearance") if isinstance(default_cls, dict) else None
+    if isinstance(floor, bool) or not isinstance(floor, (int, float)):
+        floor = 0.0
+
+    wanted: dict[str, float] = {}
+    members: dict[str, list[str]] = {}
+    for net in sorted(names):
+        routing = net_class_map[net]
+        clearance = float(getattr(routing, "clearance", 0.0) or 0.0)
+        class_name = getattr(routing, "name", "")
+        if not class_name or class_name == "Default" or clearance <= floor + _CLEARANCE_EPSILON_MM:
+            continue
+        # A class name the map gives two clearances keeps the stricter one.
+        wanted[class_name] = max(wanted.get(class_name, 0.0), clearance)
+        members.setdefault(class_name, []).append(net)
+    if not wanted:
+        return project_data
+
+    try:
+        authored = _authored_netclass_members(project_data, sorted(names))
+    except ValueError as exc:
+        _warn(
+            f"router net classes not declared in the project ({', '.join(sorted(wanted))}): "
+            f"its authored netclasses cannot be evaluated safely ({exc})"
+        )
+        return project_data
+
+    authored_classes = {
+        c.get("name"): c for c in classes if isinstance(c, dict) and isinstance(c.get("name"), str)
+    }
+    declared: list[str] = []
+    assigned: list[str] = []
+    assignments = settings.get("netclass_assignments")
+    if not isinstance(assignments, dict):
+        assignments = {}
+    from kicad_tools.core.project_clearance import netclass_assignment_value
+
+    new_classes: list[dict] = []
+    for class_name in sorted(wanted):
+        clearance = wanted[class_name]
+        existing = authored_classes.get(class_name)
+        if existing is not None:
+            value = existing.get("clearance")
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or abs(value - clearance) > _CLEARANCE_EPSILON_MM
+            ):
+                _warn(
+                    f"router net class {class_name!r} ({clearance:g} mm) not declared: the "
+                    f"project already defines {class_name!r} with clearance {value!r}"
+                )
+                continue
+        nets = [n for n in members[class_name] if n not in authored]
+        skipped = [n for n in members[class_name] if n in authored]
+        if skipped:
+            _warn(
+                f"router net class {class_name!r} ({clearance:g} mm) not applied to "
+                f"{', '.join(skipped)}: an authored netclass already covers "
+                f"{'it' if len(skipped) == 1 else 'them'}"
+            )
+        if not nets:
+            continue
+        if existing is None:
+            entry = dict(default_cls) if isinstance(default_cls, dict) else {}
+            entry.pop("priority", None)
+            entry["name"] = class_name
+            entry["clearance"] = clearance
+            new_classes.append(entry)
+            declared.append(class_name)
+        for net in nets:
+            assignments[net] = netclass_assignment_value(settings, class_name)
+            assigned.append(net)
+
+    if not assigned:
+        return project_data
+    classes.extend(new_classes)
+    settings["netclass_assignments"] = dict(sorted(assignments.items()))
+    project_data.setdefault("meta", {})[ROUTER_NETCLASSES_META_KEY] = {
+        "classes": declared,
+        "assignments": sorted(assigned),
+    }
+    return project_data
+
+
+#: ``design_settings`` keys whose values kct's fabrication-floor merge owns.
+#: :func:`_owned_digest` ignores them, so a reviewed script that adjusts a
+#: floor after kct wrote the project (board 04's paid-drill annular ring)
+#: does not turn kct's own artifact into "authored" content.
+def _floor_owned_view(project_data: dict) -> dict:
+    view = copy.deepcopy(project_data)
+    meta = view.get("meta")
+    if isinstance(meta, dict):
+        meta.pop(SIDECAR_DIGEST_META_KEY, None)
+    settings = view.get("board", {}).get("design_settings")
+    if isinstance(settings, dict):
+        for block, keys in (
+            ("rules", _PROJECT_RULE_KEYS),
+            ("defaults", _PROJECT_DEFAULT_KEYS),
+            ("rule_severities", tuple(_NON_BLOCKING_SEVERITIES)),
+        ):
+            section = settings.get(block)
+            if isinstance(section, dict):
+                for key in keys:
+                    section.pop(key, None)
+    classes = view.get("net_settings", {}).get("classes")
+    if isinstance(classes, list):
+        for cls in classes:
+            if isinstance(cls, dict) and cls.get("name") == "Default":
+                for key in _NETCLASS_SIGNATURE_KEYS:
+                    cls.pop(key, None)
+    return view
+
+
+def _owned_digest(project_data: dict) -> str:
+    canonical = json.dumps(_floor_owned_view(project_data), sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def stamp_kct_project(project_data: dict) -> dict:
+    """Record that kct wrote ``project_data`` (Issue #6390, AC5).
+
+    Stores a digest of everything except the fabrication floors kct itself
+    manages under ``meta.kct_sidecar_sha256``.  A later renamed-output route
+    may then replace the file even though it no longer equals its source:
+    :func:`is_kct_owned_project` proves nobody changed anything but kct's own
+    floors since.  A hand edit anywhere else (a netclass, a pattern, a
+    severity of your own) breaks the digest and the conflict check refuses
+    the overwrite exactly as before.
+
+    Behaviour change: an edit confined to the excluded keys -- the
+    ``rules.min_*`` keys of ``_PROJECT_RULE_KEYS``, the ``defaults`` keys of
+    ``_PROJECT_DEFAULT_KEYS``, the two non-blocking ``rule_severities`` and
+    ``Default``'s clearance/track/via signature (``_NETCLASS_SIGNATURE_KEYS``)
+    -- on a renamed output no longer conflicts: it is silently overwritten
+    from the source on the next route, *even when the edit tightened a
+    floor*.  Make such a change in the source project (or the reviewed rules
+    the source carries), not in the renamed output.
+    """
+    meta = project_data.setdefault("meta", {})
+    # Re-insert last so the key order (and so the bytes) never depends on
+    # whether an earlier pass already stamped the file.
+    meta.pop(SIDECAR_DIGEST_META_KEY, None)
+    meta[SIDECAR_DIGEST_META_KEY] = _owned_digest(project_data)
+    return project_data
+
+
+def is_kct_owned_project(project_data: object) -> bool:
+    """True when ``project_data`` carries a valid :func:`stamp_kct_project` digest."""
+    if not isinstance(project_data, dict):
+        return False
+    meta = project_data.get("meta")
+    digest = meta.get(SIDECAR_DIGEST_META_KEY) if isinstance(meta, dict) else None
+    return isinstance(digest, str) and digest == _owned_digest(project_data)
+
+
+def _strip_managed_dru_blocks(text: str) -> str:
+    """``.kicad_dru`` content outside every kct-managed block, whitespace-normalised."""
+    from .dru_generator import DRU_FLOORS_BLOCK_BEGIN, DRU_FLOORS_BLOCK_END
+    from .keepout_dru import DRU_KEEPOUT_BLOCK_BEGIN, DRU_KEEPOUT_BLOCK_END
+    from .netclass_dru import (
+        DRU_NETCLASS_BLOCK_BEGIN,
+        DRU_NETCLASS_BLOCK_END,
+        DRU_PAIR_GAP_BLOCK_BEGIN,
+        DRU_PAIR_GAP_BLOCK_END,
+    )
+
+    for begin, end in (
+        (DRU_FLOORS_BLOCK_BEGIN, DRU_FLOORS_BLOCK_END),
+        (DRU_KEEPOUT_BLOCK_BEGIN, DRU_KEEPOUT_BLOCK_END),
+        (DRU_NETCLASS_BLOCK_BEGIN, DRU_NETCLASS_BLOCK_END),
+        (DRU_PAIR_GAP_BLOCK_BEGIN, DRU_PAIR_GAP_BLOCK_END),
+    ):
+        text = re.sub(re.escape(begin) + r".*?" + re.escape(end), "", text, flags=re.DOTALL)
+    lines = [line.strip() for line in text.splitlines()]
+    return "\n".join(line for line in lines if line and line != "(version 1)")
+
+
+_NET_NAME_RE = re.compile(r'\(net\s+(?:\d+\s+)?"((?:[^"\\]|\\.)*)"')
+
+
+def board_net_names(pcb_path: str | Path) -> set[str] | None:
+    """Net names declared or referenced in a ``.kicad_pcb`` (``None`` if unreadable).
+
+    A text scan, not a parse: it covers both the legacy ``(net N "name")``
+    and the KiCad 10 ``(net "name")`` spellings and is cheap on large boards.
+    """
+    try:
+        text = Path(pcb_path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    return {
+        match.group(1).replace('\\"', '"').replace("\\\\", "\\")
+        for match in _NET_NAME_RE.finditer(text)
+    }
+
+
 def generate_project_dru(
     rules: DesignRules,
     project_data: dict,
@@ -589,13 +1010,21 @@ def generate_project_dru(
         )
         # Later matching rules win in KiCad. Ascending order preserves
         # the stricter class when two differently classified nets meet.
+        from .netclass_dru import netclass_condition
+
+        router_classes = set(router_netclass_provenance(project_data)[0])
+        coupled_pairs = recorded_router_coupled_pairs(project_data)
         classes = project_data.get("net_settings", {}).get("classes", [])
         for cls in sorted(classes, key=lambda c: c.get("clearance", 0)):
             clearance = max(dru_rules.min_clearance_mm, cls.get("clearance", 0))
             if mode == PRESERVE_MODE_STRICTER and clearance <= dru_rules.min_clearance_mm:
                 continue
-            name = cls["name"].replace("\\", "\\\\").replace("'", "\\'")
-            condition = f"A.NetClass == '{name}' || B.NetClass == '{name}'"
+            # Issue #6390: a router-declared class does not govern pad pairs
+            # inside one footprint (see ``netclass_dru.netclass_condition``).
+            # Issue #6429: plus the router's recorded coupled pairs.
+            condition = netclass_condition(
+                cls["name"], router=cls["name"] in router_classes, extra_pairs=coupled_pairs
+            )
             preserved_clearances += (
                 f"\n(rule {json.dumps('Reviewed clearance - ' + cls['name'])}\n"
                 f"  (condition {json.dumps(condition)})\n"
@@ -605,6 +1034,32 @@ def generate_project_dru(
     return (
         generate_dru(dru_rules, manufacturer_name=manufacturer_id, net_classes=net_classes)
         + preserved_clearances
+    )
+
+
+def apply_netclass_dru_rules(
+    dru_text: str,
+    rules: DesignRules,
+    project_data: dict,
+    *,
+    preserve_board_rules: str | None = None,
+) -> str:
+    """Merge the router net-class managed block into ``.kicad_dru`` text (#6390).
+
+    The block carries rules only under ``KCT_PRESERVE_BOARD_RULES=0``; in the
+    other modes :func:`generate_project_dru`'s reviewed rules already cover
+    the router's classes and a stale block is removed.  See
+    :mod:`kicad_tools.manufacturers.netclass_dru`.
+    """
+    from .netclass_dru import merge_netclass_block, netclass_block_rules
+
+    mode = preserve_board_rules_mode(project_data, preserve_board_rules)
+    block_rules = netclass_block_rules(
+        project_data, rules.min_clearance_mm, mode_off=mode == PRESERVE_MODE_OFF
+    )
+    return (
+        merge_netclass_block(dru_text, block_rules, recorded_router_coupled_pairs(project_data))
+        or dru_text
     )
 
 
@@ -675,6 +1130,10 @@ def write_drc_constraints(
     net_classes: Sequence[NetClassRouting] | None = None,
     source_pcb_path: str | Path | None = None,
     preserve_board_rules: str | None = None,
+    router_net_classes: Mapping[str, NetClassRouting] | None = None,
+    router_coupled_pairs: Iterable[tuple[str, str]] | None = None,
+    router_pair_gaps: Iterable[tuple[str, str, float]] | None = None,
+    router_pair_limits: Iterable[PairLimits] | None = None,
     _board_path: str | Path | None = None,
 ) -> list[Path]:
     """Emit DRC-constraint sources next to a routed ``.kicad_pcb``.
@@ -711,8 +1170,57 @@ def write_drc_constraints(
     (Issue #6039): ``kicad-cli`` 10.0.1 does not enforce rule areas on its
     own.  See :mod:`kicad_tools.manufacturers.keepout_dru`.
 
+    Router net classes (Issue #6390): when ``router_net_classes`` is given,
+    the router's classes stricter than ``Default`` are declared in the
+    ``.kicad_pro`` with exact-name ``netclass_assignments`` (see
+    :func:`apply_router_netclasses`), so both DRC engines enforce them.  The
+    ``.kicad_dru`` gets the matching ``NetClass`` clearance rules -- through
+    the reviewed rules of :func:`generate_project_dru`, or under
+    ``KCT_PRESERVE_BOARD_RULES=0`` through their own managed block (see
+    :mod:`kicad_tools.manufacturers.netclass_dru`).  ``None`` keeps whatever
+    a previous route declared.
+
+    Router coupled pairs (Issue #6429): ``router_coupled_pairs`` lists the
+    ``(P, N)`` pairs the router coupled-routed.  Those KiCad's
+    ``isCoupledDiffPair()`` does not recognise by name are recorded under
+    ``meta.kct_router_diff_pairs`` (:func:`apply_router_coupled_pairs`) and
+    added, by exact net name, to the router-class clearance exemption, so
+    both engines skip their intra-pair gap.  ``None`` keeps whatever a
+    previous route recorded.
+
+    Router pair gaps (Issue #6443): ``router_pair_gaps`` lists ``(P, N,
+    gap_mm)`` for the pairs the router coupled, each gap resolved by
+    :meth:`~kicad_tools.router.rules.DesignRules.pair_gap` -- the value the
+    router laid the pair at.  Each pair KiCad recognises by name gets one
+    native ``diff_pair_gap (min ..)`` rule in its own managed block (see
+    :func:`~kicad_tools.manufacturers.netclass_dru.pair_gap_block_rules`);
+    an empty list removes a stale block, and ``None`` leaves whatever a
+    previous route wrote.
+
+    Router pair limits (Issue #6443): ``router_pair_limits`` are the
+    :class:`~kicad_tools.manufacturers.netclass_dru.PairLimits` of those pairs
+    -- uncoupled length, skew and via count, resolved by
+    :func:`~kicad_tools.validate.diffpair_engagement.resolve_pair_thresholds`.
+    They are written as native ``diff_pair_uncoupled`` / ``skew`` /
+    ``via_count`` rules in the same block as the gaps; see
+    :func:`~kicad_tools.manufacturers.netclass_dru.render_pair_limit_rules`
+    for the pairs KiCad does not recognise by name.
+
+    The written ``.kicad_pro`` is stamped (:func:`stamp_kct_project`).  On a
+    renamed output an existing destination is replaced only when it equals
+    the source, equals the merged result, or still carries a valid kct stamp
+    (nothing but kct's own floors changed since kct wrote it); an existing
+    ``.kicad_dru`` only when it differs from the source in kct-managed blocks
+    alone.  Anything else is a ``DRC sidecar conflict``.
+
     Args:
         pcb_path: Path to the routed board.
+        router_net_classes: The router's effective ``{net: NetClassRouting}``
+            map (Issue #6390); see above.
+        router_coupled_pairs: The router's coupled-routed ``(P, N)`` pairs
+            (Issue #6429); see above.
+        router_pair_gaps: The router's ``(P, N, gap_mm)`` coupled-pair gaps
+            (Issue #6443); see above.
         preserve_board_rules: Caller override for the project's
             ``KCT_PRESERVE_BOARD_RULES`` text variable (same spellings),
             applied to both sidecars without being written into the project;
@@ -772,6 +1280,10 @@ def write_drc_constraints(
                 write_dru=write_dru,
                 net_classes=net_classes,
                 preserve_board_rules=preserve_board_rules,
+                router_net_classes=router_net_classes,
+                router_coupled_pairs=router_coupled_pairs,
+                router_pair_gaps=router_pair_gaps,
+                router_pair_limits=router_pair_limits,
                 _board_path=pcb_path,
             )
             for result in rendered:
@@ -783,10 +1295,25 @@ def write_drc_constraints(
                         if result.suffix == ".kicad_pro"
                         else (lambda p: p.read_bytes())
                     )
-                    if read(destination) not in (read(authored), read(result)):
-                        raise ValueError(
-                            f"DRC sidecar conflict: {destination} differs from source {authored} and its merged rules"
-                        )
+                    current = read(destination)
+                    if current in (read(authored), read(result)):
+                        continue
+                    # Issue #6390 (AC5): a destination kct itself wrote may be
+                    # regenerated even when an earlier route derived it from a
+                    # different source -- but only when nothing outside kct's
+                    # own floors / managed blocks was edited since.
+                    if result.suffix == ".kicad_pro":
+                        if is_kct_owned_project(current):
+                            continue
+                    elif _strip_managed_dru_blocks(
+                        destination.read_text(encoding="utf-8", errors="replace")
+                    ) == _strip_managed_dru_blocks(
+                        authored.read_text(encoding="utf-8", errors="replace")
+                    ):
+                        continue
+                    raise ValueError(
+                        f"DRC sidecar conflict: {destination} differs from source {authored} and its merged rules"
+                    )
             for result in rendered:
                 shutil.copyfile(result, pcb_path.with_suffix(result.suffix))
             return [pcb_path.with_suffix(result.suffix) for result in rendered]
@@ -818,6 +1345,20 @@ def write_drc_constraints(
             copper_oz=copper_oz,
         )
 
+    board = Path(_board_path) if _board_path is not None else pcb_path
+    if router_net_classes is not None:
+        apply_router_netclasses(
+            project_data,
+            router_net_classes,
+            board_net_names(board) if board.exists() else None,
+        )
+    if router_coupled_pairs is not None:
+        apply_router_coupled_pairs(
+            project_data,
+            router_coupled_pairs,
+            board_net_names(board) if board.exists() else None,
+        )
+    stamp_kct_project(project_data)
     pro_path.write_text(json.dumps(project_data, indent=2), encoding="utf-8")
     written.append(pro_path)
 
@@ -848,9 +1389,21 @@ def write_drc_constraints(
         )
         # Issue #6039: explicit per-rule-area keepout rules, since headless
         # kicad-cli does not enforce rule areas on its own.
-        board = Path(_board_path) if _board_path is not None else pcb_path
         if board.exists():
             merged_dru = apply_keepout_rules(merged_dru, board) or merged_dru
+        # Issue #6390: the router's classes under KCT_PRESERVE_BOARD_RULES=0.
+        merged_dru = apply_netclass_dru_rules(
+            merged_dru, rules, project_data, preserve_board_rules=preserve_board_rules
+        )
+        # Issue #6443: one native diff_pair_gap rule per router-coupled pair.
+        if router_pair_gaps is not None or router_pair_limits is not None:
+            from .netclass_dru import merge_pair_gap_block, pair_gap_block_rules, pair_limit_rules
+
+            on_board = board_net_names(board) if board.exists() else None
+            gap_rules = pair_gap_block_rules(router_pair_gaps or [], on_board)
+            limit_rules = pair_limit_rules(router_pair_limits or [], on_board)
+            merged = merge_pair_gap_block(merged_dru, gap_rules, limit_rules)
+            merged_dru = merged if merged is not None else merged_dru
         dru_path.write_text(merged_dru, encoding="utf-8")
         written.append(dru_path)
         # The sidecar is on disk now; tell the user if the engine they have

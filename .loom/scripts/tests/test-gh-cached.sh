@@ -29,27 +29,8 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GH_CACHED="$(cd "$SCRIPT_DIR/.." && pwd)/gh-cached"
 
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-NC='\033[0m'
-
-TESTS_RUN=0
-TESTS_PASSED=0
-TESTS_FAILED=0
-
-assert_eq() {
-    local expected="$1" actual="$2" msg="$3"
-    TESTS_RUN=$((TESTS_RUN + 1))
-    if [[ "$expected" == "$actual" ]]; then
-        TESTS_PASSED=$((TESTS_PASSED + 1))
-        echo -e "  ${GREEN}PASS${NC}: $msg"
-    else
-        TESTS_FAILED=$((TESTS_FAILED + 1))
-        echo -e "  ${RED}FAIL${NC}: $msg"
-        echo "    Expected: '$expected'"
-        echo "    Actual:   '$actual'"
-    fi
-}
+# shellcheck source=lib/assert.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/assert.sh"
 
 if [[ ! -x "$GH_CACHED" ]]; then
     echo "FAIL: gh-cached not found or not executable at $GH_CACHED" >&2
@@ -510,7 +491,7 @@ reset_cache
 # Static contract: observation scripts route reads through $GH_READ and keep
 # the probe/fallback; arbitration scripts stay on literal plain `gh`.
 S_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-for sc in check-duplicate blame-issue resolve-tier-model sync-labels; do
+for sc in check-duplicate blame-issue sync-labels; do
     grep -q 'GH_READ="gh"' "$S_DIR/$sc.sh" && grep -q '"$_ghc" --version' "$S_DIR/$sc.sh"
     assert_eq "0" "$?" "$sc.sh resolves \$GH_READ with the --version probe + plain-gh fallback"
     grep -q '"$GH_READ" ' "$S_DIR/$sc.sh"
@@ -532,7 +513,7 @@ broken_out="$(SCRIPT_DIR="$BROKEN_DIR" bash -c 'set -euo pipefail; GH_READ="gh";
 assert_eq "gh" "$broken_out" "broken wrapper -> GH_READ falls back to plain gh (set -euo pipefail safe)"
 rm -rf "$BROKEN_DIR"
 # Each routed script resolves the probe on ONE code line (shell budget, #7810).
-for sc in check-duplicate blame-issue resolve-tier-model sync-labels; do
+for sc in check-duplicate blame-issue sync-labels; do
     grep -qE '^GH_READ="gh"; _ghc=.*"\$_ghc" --version >/dev/null 2>&1; then GH_READ="\$_ghc"; fi$' "$S_DIR/$sc.sh"
     assert_eq "0" "$?" "$sc.sh resolves \$GH_READ on a single probe line"
 done

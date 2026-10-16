@@ -76,12 +76,15 @@ client: the helper fetches canonical JSON at one immutable GitHub commit.
    reconciliation, `ignorePaths` for installer-owned roots, and security-PR
    ownership). The same closing line appears on a no-op apply, saying no
    organization PR is pending.
-6. Every `plan` and `apply` invocation also prints a Renovate GitHub App
-   installation line (see "Renovate App installation check" below) — include
-   it verbatim in the final report. A published/merged policy proves nothing
-   about whether the App that reads it is actually installed on the target
-   organization/user; treat "policy published" and "policy published, app
-   NOT installed" as distinct outcomes, not the same success.
+6. When the provider is the opt-in `renovate` (not the Dependabot default;
+   see #655), every `plan` and `apply` invocation also prints a Renovate
+   GitHub App installation line (see "Renovate App installation check"
+   below) — include it verbatim in the final report. A Dependabot policy
+   needs no App, so no such line is printed. For Renovate, a
+   published/merged policy proves nothing about whether the App that reads
+   it is actually installed on the target organization/user; treat "policy
+   published" and "policy published, app NOT installed" as distinct
+   outcomes, not the same success.
 
 ```bash
 # Run from the client repository. Use a new directory so plan.json is absent.
@@ -126,6 +129,38 @@ Only the first verdict is evidence for creating the repository. For the other
 two, establish access before passing `--create-repository`; the message names
 the specific gap it could not close.
 
+## Provider: Dependabot
+
+`dependencies.provider` is `dependabot` (the default since 2026-10-13, #638)
+or `renovate` (opt-in; hosted Renovate is a Mend-hosted App and
+Silent-by-default, #636). The default policy already sets Dependabot with a
+14-day version-update cooldown. An owner override switches back to Renovate by
+setting `provider: "renovate"` with a `renovate` block, or states Dependabot
+explicitly with:
+
+```json
+{"dependencies": {"provider": "dependabot", "dependabotSecurityUpdates": true,
+                  "renovate": null, "policySource": "<where the org keeps its Dependabot policy>"}}
+```
+
+- `renovate: null` replaces the default's Renovate block; a leftover block is
+  refused rather than kept as a second, unused policy.
+- `dependabotAlerts` and `dependabotSecurityUpdates` must both be `true`: with
+  no Renovate, Dependabot is the only thing that raises security PRs. They are
+  not delayed by a version-update cooldown.
+- `policySource` (optional, Dependabot only) names where the organization
+  keeps its Dependabot policy, e.g. a renderer that writes every client's
+  `dependabot.yml`. Dependabot has no shared preset, so this command does not
+  write client files; [[deps]] reads `policySource` and defers to it.
+
+The organization PR then carries only `repo-policy.json` and **removes**
+`renovate-config.json` (only if it exists). No GitHub App is needed, so the
+plan skips the Renovate App check. Switching an organization from Renovate to
+Dependabot is one such PR (clients migrate in two PRs: `dependabot.yml` first,
+then `renovate.json` removed separately); each client's `renovate.json` is then removed by
+[[deps]] or the organization's own tooling, once that client's `dependabot.yml`
+is in place.
+
 ## Renovate App installation check
 
 Config presence proves nothing about whether Renovate ever runs: a policy PR
@@ -150,15 +185,41 @@ python3 .claude/skills/repo/scripts/repo-org-policy.py check-app \
   --owner OWNER   # or: --repo OWNER/PROJECT to derive the owner from origin
 ```
 
-`UNKNOWN` means this token cannot see the installations endpoint for that
-account — a non-admin org member, or any personal account other than the
-caller's own (`user/installations` only lists installations for whoever is
-authenticated) — not that the App is confirmed present. Report `UNKNOWN`
-as-is rather than treating it as either outcome.
+For an organization, the answer comes from `orgs/OWNER/installations` and is
+authoritative; `UNKNOWN` there means this token cannot see that endpoint (a
+non-admin org member) — not that the App is confirmed present. Report it as-is
+rather than treating it as either outcome.
+
+A personal account almost never has an authoritative answer: `user/installations`
+only accepts a token issued by a GitHub App (a classic or `gh` OAuth token gets
+a `403` whatever its scopes), and no endpoint lists another user's Apps. So
+for a `User` account whose installations cannot be read, `check-app` falls
+back to behavioral evidence — a REST search for issues/PRs authored by
+`app/renovate` active in the last 30 days in OWNER's repositories — and, when
+a client `OWNER/REPO` is known (`plan`/`apply`, or `check-app --repo`; not an
+unrelated `--owner`), in that repository too:
+
+```text
+Renovate GitHub App: installed (evidence: 42 renovate[bot] issues/PRs active in
+OWNER's repositories in the last 30 days, most recent 2026-10-12). Coverage of
+OWNER/REPO confirmed: 3 renovate[bot] issues/PRs active there, most recent
+2026-10-11.
+```
+
+When there is account-level activity but none in the repository (or no
+repository was given), the line says coverage of that repository is **not
+verified** — it may be outside the App's repository selection — and points at
+`https://github.com/settings/installations`. With no activity at all, or when
+the search itself fails, the line stays `UNKNOWN` (never `NOT installed`:
+a fresh install, or one with onboarding turned off, leaves no footprint yet)
+and also names that settings URL. Report an evidence-backed line as evidence,
+not proof, and relay any "not verified" coverage caveat.
 
 ## Installed files and client adoption
 
-The organization PR manages exactly two root files in `OWNER/.github`:
+The organization PR manages exactly two root files in `OWNER/.github` (with
+provider `dependabot`, only the first, and `renovate-config.json` is removed;
+see §Provider: Dependabot):
 
 - `renovate-config.json`: resolved native Renovate configuration.
 - `repo-policy.json`: provider/settings preferences, the preset reference, and

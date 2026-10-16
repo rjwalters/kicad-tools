@@ -1,6 +1,6 @@
 ---
 name: "optimize-ci"
-description: "Audit GitHub Actions for wasted CI minutes — change-relevance path filtering (required-check safe), cache keys, superseded runs; ranked by measured savings, report-only unless --apply"
+description: "Audit GitHub Actions for wasted CI minutes — change-relevance path filtering (required-check safe), cache keys, superseded runs, default-branch queueing and heavy main suites; ranked by measured savings, report-only unless --apply"
 domain: repo
 type: command
 user-invocable: true
@@ -8,7 +8,7 @@ user-invocable: true
 
 # /repo:optimize-ci — Stop CI Doing Work That Cannot Matter
 
-Find the three ways CI routinely wastes runner minutes, prove how much each one
+Find the four ways CI routinely wastes runner minutes, prove how much each one
 costs from real run history, and propose the fix:
 
 1. **No change-relevance filtering** — full suites on documentation-only PRs,
@@ -21,6 +21,9 @@ costs from real run history, and propose the fix:
 3. **Superseded runs** — no `concurrency:` / `cancel-in-progress`, so every push
    to a PR leaves the previous run burning minutes; or duplicate `push` +
    `pull_request` triggers running the same commit twice.
+4. **Default-branch cost** — push-only workflows (deploys, main-only suites)
+   with no ref-scoped group or an unconditional `cancel-in-progress: true`, and
+   heavy suites that re-run on every merge although the PR already ran them.
 
 Modeled on [[deps]]: a report-first audit of repo configuration that proposes
 changes and gates writes. The default mode and `--check` never write. `--apply`
@@ -94,6 +97,11 @@ python3 .claude/skills/repo/scripts/repo-optimize-ci.py report --json
   unreadable or empty, `history.state` is `not measured` and every finding
   still appears, just unranked by minutes — this never fails the command.
 
+Default-branch evidence (`history.defaultBranchRuns`, per workflow) and the
+`heavy-default-branch-suite` threshold are defined in "Default-branch
+measurement" below. `--heavy-main-minutes-per-day N` overrides the threshold
+(default 300 runner-minutes/day); `--runs` raises the sample cap.
+
 Human-readable output (drop `--json`) is the report skeleton in step 4. Use
 `scan --root . [--required CONTEXT]... [--required-unknown]` for a fully
 offline run.
@@ -117,6 +125,13 @@ Check each finding against the repo before it goes in the report:
   workflow the jobs call. It does not see monorepo sub-package lockfiles or
   shared directories like `lib/` that the build reads implicitly — read the
   job's commands and add those yourself.
+- **Cache false positives.** `cache-key-no-lockfile-hash` is suppressed when
+  the key embeds a resolved tool version (`steps.*.outputs.*version*` or a
+  literal like `1.2.3`); if it still fires, confirm the key really tracks the
+  inputs. `cache-matrix-key-collision` is `medium` only when other steps in the
+  job reference `matrix.*` (so cached content can differ per leg); otherwise it
+  is `info` — check whether the legs truly install identical content before
+  recommending a per-leg key.
 - **Required-check matching.** A job's check context is its `name:` (or job id),
   with ` (matrix values)` appended for matrix legs and `caller / callee` for
   reusable workflows. Confirm the helper's match by eye when names contain
@@ -211,6 +226,92 @@ intermediate default-branch runs, so some merged commits never get a completed
 run. For duplicate `push` + `pull_request` triggers, restrict `on.push.branches`
 to the default branch.
 
+### Default-branch workflows
+
+Push-only workflows are audited too, separately from the PR checks. A workflow
+is "default-branch" when a push to the repo's resolved default branch can
+trigger it: `on.push.branches` / `branches-ignore` patterns (negations
+included) are evaluated against the default branch, tag-only, schedule-only,
+dispatch-only and other-branch-only workflows are never asked to adopt
+anything. Both workflow-level and job-level `concurrency:` (mapping or scalar)
+are read.
+
+- `missing-default-branch-concurrency` — a push-only workflow with no group
+  queues one full run per merge. Offer `group: ${{ github.workflow }}-${{ github.ref }}`
+  with `cancel-in-progress: false`: GitHub keeps one running and one pending
+  run per group, and a newer arrival replaces the pending one. Nothing started
+  is cancelled. (PR + push workflows get the standard stanza above.)
+- `cancel-on-default-branch` — a literal `true` (or `'true'`, `${{ true }}`) is
+  unconditional. A `cancelled` default-branch run is no verdict.
+- `uncertain-default-branch-cancel` / `uncertain-default-branch-group` — an
+  expression the helper cannot evaluate (`${{ inputs.x }}`) is reported as
+  uncertain, never assumed to be PR-scoped or isolated. Only `github.event_name`
+  and `github.ref` / `ref_name` comparisons against literals are evaluated.
+- `unsafe-default-branch-group` — a group with a per-run value (`github.sha`,
+  run id) never queues; a group that is only `${{ github.ref }}` is shared by
+  every workflow on the ref. A ref-scoped group must also distinguish the
+  workflow (`github.workflow` or a literal prefix).
+
+### Heavy default-branch suites (a decision, never an `--apply` edit)
+
+`heavy-default-branch-suite` is report-only. It fires when a workflow runs on
+PRs AND on default-branch pushes and its default-branch job-minutes reach the
+threshold. The stanza only saves work when a merge lands while the previous
+main run is still going; on most repos that is rare, and the lever that saves
+is running the suite on the newest default-branch commit on a schedule.
+
+Offer it as an explicit operator decision: add `schedule:` +
+`workflow_dispatch:`, skip when the newest default-branch commit already has a
+success for THIS workflow and commit, keep the concurrency stanza, the PR
+trigger and every required check. State the trade-offs: a post-merge break is
+found up to one window later, the bisect range spans every merge in the window,
+and PR and post-merge runs may not be equivalent (different trigger or path
+filters). This is guidance, not a generated scheduling engine.
+
+**Deploys.** A deploy that waited in the queue still carries the commit that
+queued it, which can be older than the default branch. Distinguish the
+triggering SHA from the newest verified candidate: the deploy should resolve
+the newest verified commit when it starts and refuse a rollback. Candidate
+selection and rollback prevention are deployment-specific — the operator
+checks them; never advise deploying an unverified branch tip.
+
+### Default-branch measurement
+
+Population: `event == push`, `head_branch ==` the resolved default branch,
+original attempt only (`run_attempt` 1/absent; reruns counted and excluded),
+per normalized workflow path. Runs without `created_at`/`updated_at` are
+excluded and counted (`missingTimestamps`). Cancelled runs stay in the arrival
+timeline but not in the cost population.
+
+- **Observed overlap** (diagnostic): runs whose start (`run_started_at`, else
+  `created_at`) precedes the `updated_at` of an earlier run. Touching timestamps
+  are not overlap. It is NOT runs avoided.
+- **Replay estimate**: arrivals (`created_at`, ordered by time then id) are fed
+  through GitHub's contract — one running, one pending per group, a newer
+  arrival replaces the pending run — using each run's measured wall time. A lone
+  arrival during an active run still executes later and saves nothing. Estimated
+  minutes = superseded runs x per-run cost. Existing cancellations are reported
+  separately (`cancelledRuns`).
+- **Per-run cost**: mean job-minutes of up to 10 sampled eligible default-branch
+  runs (not the all-event average). With no readable job data it falls back to
+  wall time and is labeled `wall-time`, never relabeled job-minutes; with no
+  eligible runs it is `not measured`.
+- **Window**: a sample capped by `--runs` is flagged (`sampleCapped`) and daily
+  figures use the span the sample actually covers, never the requested window.
+- **Batching counterfactual** (`alternatives.hourly`, `alternatives.threeHourly`):
+  fixed UTC buckets, occupied buckets x per-run cost vs. baseline eligible runs
+  x per-run cost. A counterfactual estimate, not observed savings. Cancelled,
+  skipped, rerun, and missing-timestamp runs are excluded.
+- **Threshold**: `--heavy-main-minutes-per-day`, runner-minutes per day,
+  default 300, inclusive.
+
+**Ranking.** The hourly and three-hour alternatives are exclusive and are never
+added. The canonical `estMinutesSaved` of a heavy finding is the hourly figure.
+The queue replay and batching avoid the same default-branch runs, so each
+workflow counts its single largest default-branch figure once
+(`estDefaultBranchMinutes`); `summary.estMinutesSavedTotal` applies this and is
+the number the fan-out survey ranks on. Critical findings always come first.
+
 ## 4. Report
 
 Findings ranked by estimated minutes saved over the sampled window, critical
@@ -241,7 +342,10 @@ worth fixing.
 ## 5. `--apply` — write the edits on a branch and open a PR (confirm first)
 
 1. Pick the findings to fix (default: every verified finding with a concrete
-   YAML fix). Make one branch off the up-to-date default branch
+   YAML fix). **Never include `heavy-default-branch-suite`** (adding `schedule:`
+   or removing/narrowing a `push` or required PR trigger) unless the operator
+   explicitly asked for that decision in this invocation; `--apply` never does it
+   by default, and never weakens a required PR check. Make one branch off the up-to-date default branch
    (`ci/optimize-<short-topic>`), never the default branch itself. In a
    Loom-managed repo, use a worktree rather than switching the main checkout.
 2. Edit the workflow files — minimal, surgical YAML edits that preserve
@@ -298,7 +402,10 @@ CI OPTIMIZATION SURVEY — OWNER (14 repos, 1 archived excluded)
 | OWNER/epsilon | —                     | —        | could not check (403 reading contents) |
 ```
 
-Rank by the sum of `estMinutesSaved`; repos with any `critical` finding are
+Rank by each repo's `summary.estMinutesSavedTotal`, not by summing
+`estMinutesSaved` yourself: it counts one default-branch figure per workflow and
+never adds the exclusive hourly / three-hour batching alternatives. A
+`heavy-default-branch-suite` is a decision to surface, not to apply. Repos with any `critical` finding are
 flagged regardless of minutes, because a blocked-forever PR costs more than any
 runner time.
 
@@ -308,7 +415,9 @@ runner time.
    containing a required status check, or when required checks are unknown.**
    Job-level filter + always-running gate, every time.
 2. **Never recommend cancelling default-branch runs.** Cancellation is always
-   `${{ github.event_name == 'pull_request' }}`.
+   `${{ github.event_name == 'pull_request' }}` (or `false` on push-only workflows).
+   Scheduling a heavy default-branch suite is an operator decision, never an
+   automatic edit, and never replaces required PR checks.
 3. **Never narrow a filter past a real input.** Lockfiles, manifests, the
    workflow file, local actions/reusable workflows, and shared directories the
    job reads are inputs.

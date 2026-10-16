@@ -14,8 +14,9 @@ failures: they clear on their own, or on the next push, so they use the shared
 "Transient failures" template in that file's "PR Rejection Workflow". A
 critical-file FAIL is not like them. It is a **one-way terminal state** —
 nothing about a diff's critical-file-ness changes without a human decision or a
-later push that narrows the diff — so it gets a durable `loom:operator` hold on
-criterion #2's pattern instead.
+later push that narrows the diff — so it gets a durable hold on criterion #2's
+pattern instead: `loom:blocked` with a reason-only park record (#11861; it was
+`loom:operator` before that label became a no-op for every role).
 
 It does **not** need criterion #2's sticky-hold judgment-call machinery (#4742).
 That machinery exists because #2 is a judgment call that a later re-read might
@@ -29,10 +30,11 @@ The hold's whole purpose is "a human merges this one by hand". Until #9016 that
 path did not work, for a reason that is worth recording because the fix had two
 plausible shapes and only one was safe:
 
-The hold keeps `loom:pr` (Judge really did approve) and adds `loom:operator`.
+The hold keeps `loom:pr` (Judge really did approve) and adds the hold label
+(`loom:operator` until #11861, `loom:blocked` since).
 `merge-pr.sh` refuses any PR carrying both at once — the verdict-contradiction
 guard #8112, which has **no** override flag by design. So the operator's only
-route was to remove `loom:operator` and merge; but the next Champion tick
+route was to remove the label and merge; but the next Champion tick
 re-added it, because the criterion-#3 verdict is deterministic and nothing on the
 PR recorded that a human had already decided. On merge train #8996 (2026-09-26)
 the label came back 1m42s after the operator's release comment; the PR merged
@@ -41,14 +43,14 @@ only by removing the label and running `merge-pr.sh` in the *same* shell command
 The tempting fix — relax #8112 — was rejected: that guard is the thing standing
 between the fleet and a merge of a PR whose verdict state contradicts itself.
 #9016 left it exactly as strict and made the **release** durable instead: a
-hand-removed `loom:operator`, while the episode is open and the change the PR
+hand-removed hold label, while the episode is open and the change the PR
 makes has not moved, *is* the release signal. Champion records it, stands down on
 the label, and says so once.
 
-That inference is sound because `loom:operator` is the only label Champion ever
-removes and re-adds outside a merge, so "an open episode + the label absent" can
-only mean a human removed it. #7048 already makes the same inference for
-criterion #2's hold.
+That inference is sound because Champion never removes the hold label while
+an episode is open: since #11861 the label is `loom:blocked` and it stays on
+through a Doctor round-trip too, so "an open episode + the label absent" can
+only mean a human removed it.
 
 ### Two other shapes that were rejected
 
@@ -62,7 +64,8 @@ criterion #2's hold.
 ## Why the release survives an equivalent head move (#9416)
 
 #9016 scoped the release to a head SHA. That was one step too literal: it made
-every tree-identical re-date push (#8248's freshness remedy, #8508) re-arm a hold
+every tree-identical re-date push (#8248's freshness remedy, #8508, retired by
+#12063) re-arm a hold
 the operator had already released on a byte-identical diff. #9348 paid that tax
 four times to land one PR on 2026-09-28.
 
@@ -87,15 +90,36 @@ Three properties are not negotiable, and the prompt restates each one:
    An absent binary, a daemon predating the verb, a `gh` outage, a shallow clone,
    a missing object, a `merge-tree` conflict, or either kill switch re-arms the
    hold — the pre-#9416 behavior, which costs one extra operator removal and
-   never an unreviewed merge.
+   never an unreviewed merge. The re-arm notice quotes the verb's one-line
+   reason (#10875), so "could not compare" is never mistaken for a real change.
 3. **The hold is what is exempted, never a check.** CI re-runs against the new
-   head regardless of which equivalence carried the release; the base really did
-   move, which is the whole point of the re-date remedy.
+   head regardless of which equivalence carried the release.
 
 The conservative arm is still needed for what evidence cannot settle: a push that
 really did change the diff between the operator's removal and the next tick.
 Re-arming costs one more removal; reading it as a release for an unseen diff
 would cost a critical-file change merged with nobody having looked at it.
+
+## Re-dates around a merge, and untrusted reads (#10875)
+
+On #10857 (2026-10-08) a released hold re-armed twice. The trace from the
+trusted comments, the label timeline and the recorded vs live heads showed both
+re-arms were fail-closed on real evidence: one span carried a Doctor commit that
+edited `ci.yml`, the other a merge of `main` with a hand-resolved conflict. Each
+re-arm landed minutes after a re-date push, so it looked like the re-date
+re-armed it. The trace also showed a real gap. That history (no-op, no-op,
+merge, no-op, no-op) could never be proven even when the merge was clean,
+because `clean-merge` accepted only `head = merge(recorded, base)`. That kind
+now peels tree-identical single-parent commits on either side of each merge,
+and through earlier clean merges, using git objects only. A real commit, a
+hand edit or a conflict anywhere in the chain still refutes.
+
+When `forge trusted-comments` cannot run, the tick reads the raw comments. Those
+may hold but never release: a `none`/`respect` decision on an unfiltered read
+becomes `defer` (no write), so a forged release marker can neither suppress a
+hold durably nor be re-recorded as one. Coverage:
+`defaults/scripts/tests/test-critical-file-hold-tick.sh` executes the shipped
+tick, and `verdict_equivalence/noop_chain_tests.rs` covers the proof.
 
 ## The audit trail
 

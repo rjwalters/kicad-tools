@@ -96,6 +96,8 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HELPERS_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 SCRIPT="$HELPERS_DIR/land-resync-commit.sh"
+# shellcheck source=lib/write-scope-fixture.sh
+source "$SCRIPT_DIR/lib/write-scope-fixture.sh"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -202,6 +204,20 @@ make_primary() {
     git -C "$WORKDIR/$clone_name" add -A
     git -C "$WORKDIR/$clone_name" commit -q -m init
     git -C "$WORKDIR/$clone_name" push -q -u origin main
+    register_fixture "$origin_name" "$clone_name"
+}
+
+# register_fixture <origin-name> <clone-name> -> makes the checkout a repository
+# the real #9548 write-scope gate admits (create-pr.sh asks it, and on a host
+# with an installed loom-daemon a local-path origin is refused), then routes
+# git traffic for that GitHub URL back to the local bare origin so the suite
+# still fetches and pushes for real. Nothing is stubbed: the gate decides.
+register_fixture() {
+    local origin_name="$1" clone_name="$2"
+    write_scope_register "$WORKDIR/$clone_name" example/land-resync-fixture
+    git -C "$WORKDIR/$clone_name" config \
+        "url.$WORKDIR/$origin_name.git.insteadOf" \
+        "https://github.com/example/land-resync-fixture.git"
 }
 
 # advance_origin <origin-name> <clone-name> -> a third party lands an
@@ -344,13 +360,16 @@ else
     fail "no local chore/resync-installed branch is left behind in the primary checkout"
 fi
 # The documented forensic signature (troubleshooting.md): the fallback writes
-# exactly `commit: chore: resync…` immediately followed by `reset: moving to
-# origin/main` on the default branch's reflog -- and never a `rebase`.
+# exactly `loom:resync: chore: resync…` immediately followed by the reset,
+# `loom:resync: updating HEAD`, on the default branch's reflog -- and
+# never a `rebase`. Both are `loom:`-tagged (GIT_REFLOG_ACTION, #11566) so the
+# daemon's out-of-band checkout detector does not report Loom's own landing
+# as a `checkout.external_change`.
 REFLOG="$(git -C "$WORKDIR/primary-d" reflog show --format='%gs' main)"
-if [[ "$(sed -n '1p' <<< "$REFLOG")" == "reset: moving to origin/main" ]] && \
-   [[ "$(sed -n '2p' <<< "$REFLOG")" == "commit: chore: resync installed Loom surfaces" ]] && \
+if [[ "$(sed -n '1p' <<< "$REFLOG")" == "loom:resync: updating HEAD" ]] && \
+   [[ "$(sed -n '2p' <<< "$REFLOG")" == "loom:resync: chore: resync installed Loom surfaces" ]] && \
    ! grep -q "rebase" <<< "$REFLOG"; then
-    pass "the default branch's reflog shows the documented fallback signature (commit, then reset to origin) and no rebase"
+    pass "the default branch's reflog shows the documented loom:-tagged fallback signature (commit, then reset to origin) and no rebase"
 else
     fail "the default branch's reflog shows the documented fallback signature (got: $(tr '\n' '|' <<< "$REFLOG"))"
 fi
@@ -582,7 +601,7 @@ else
     fail "a fetch failure after the commit exits 1 with the resync commit left local (rc=$RC, out=$OUT)"
 fi
 STRANDED_SHA="$(git -C "$WORKDIR/primary-l" rev-parse HEAD)"
-git -C "$WORKDIR/primary-l" remote set-url origin "$WORKDIR/origin-l.git"
+git -C "$WORKDIR/primary-l" remote set-url origin "https://github.com/example/land-resync-fixture.git"
 OUT="$(cd "$WORKDIR/primary-l" && "$SCRIPT" 2>&1)"; RC=$?
 ORIGIN_LOG="$(git --git-dir="$WORKDIR/origin-l.git" log --format='%H %s' main)"
 if [[ $RC -eq 0 ]] && grep -q "from an earlier run" <<< "$OUT" && grep -q "pushed" <<< "$OUT" && \

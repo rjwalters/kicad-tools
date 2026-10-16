@@ -13,29 +13,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HELPERS_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # Colors
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-NC='\033[0m'
+# shellcheck source=lib/assert.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/assert.sh"
 
-TESTS_RUN=0
-TESTS_PASSED=0
-TESTS_FAILED=0
-
-assert_eq() {
-    local expected="$1"
-    local actual="$2"
-    local msg="$3"
-    TESTS_RUN=$((TESTS_RUN + 1))
-    if [[ "$expected" == "$actual" ]]; then
-        TESTS_PASSED=$((TESTS_PASSED + 1))
-        echo -e "  ${GREEN}PASS${NC}: $msg"
-    else
-        TESTS_FAILED=$((TESTS_FAILED + 1))
-        echo -e "  ${RED}FAIL${NC}: $msg"
-        echo "    Expected: '$expected'"
-        echo "    Actual:   '$actual'"
-    fi
-}
 
 # --- Test _extract_host ---
 echo "Testing _extract_host..."
@@ -398,13 +378,19 @@ echo "Testing gitea_api auth mode selection (Basic vs token)..."
 
 SHIM_DIR=$(mktemp -d)
 CURL_ARGS_FILE=$(mktemp)
-export CURL_ARGS_FILE
+CURL_CFG_FILE=$(mktemp)
+export CURL_ARGS_FILE CURL_CFG_FILE
 cat > "$SHIM_DIR/curl" <<'SHIM'
 #!/usr/bin/env bash
 # Record argv (one per line) and emit a fake 200 OK response.
-: > "$CURL_ARGS_FILE"
+: > "$CURL_ARGS_FILE"; : > "$CURL_CFG_FILE"
+prev=""
 for a in "$@"; do
   printf '%s\n' "$a" >> "$CURL_ARGS_FILE"
+  # Credentials travel via `--config <(...)` (#10463): capture the config
+  # contents separately; they must NOT appear in argv.
+  if [[ "$prev" == "--config" ]]; then cat "$a" >> "$CURL_CFG_FILE"; fi
+  prev="$a"
 done
 # gitea_api expects body lines followed by a final-line HTTP status code.
 printf '{"ok":true}\n200\n'
@@ -417,7 +403,7 @@ _GITEA_TOKEN="tok-abc"
 _GITEA_USERNAME=""
 PATH="$SHIM_DIR:$PATH" gitea_api GET "user" >/dev/null 2>&1 || true
 
-if grep -q "^Authorization: token tok-abc$" "$CURL_ARGS_FILE"; then
+if grep -qx 'header = "Authorization: token tok-abc"' "$CURL_CFG_FILE"; then
     TESTS_RUN=$((TESTS_RUN + 1)); TESTS_PASSED=$((TESTS_PASSED + 1))
     echo -e "  ${GREEN}PASS${NC}: token mode sends 'Authorization: token …' header"
 else
@@ -434,21 +420,29 @@ else
     echo -e "  ${GREEN}PASS${NC}: token mode does NOT use '-u'"
 fi
 
+if grep -q 'tok-abc\|Authorization:' "$CURL_ARGS_FILE"; then
+    TESTS_RUN=$((TESTS_RUN + 1)); TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "  ${RED}FAIL${NC}: token mode leaked the credential onto curl argv (#10463)"
+else
+    TESTS_RUN=$((TESTS_RUN + 1)); TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "  ${GREEN}PASS${NC}: token mode keeps the credential off curl argv"
+fi
+
 # --- Subtest 2: Basic mode sends -u user:pass and NOT Authorization: token ---
 _GITEA_USERNAME="alice"
 _GITEA_BASE_URL="https://gitea.example.com"
 PATH="$SHIM_DIR:$PATH" gitea_api GET "user" >/dev/null 2>&1 || true
 
-if grep -qx -- "-u" "$CURL_ARGS_FILE" && grep -qx -- "alice:tok-abc" "$CURL_ARGS_FILE"; then
+if grep -qx 'user = "alice:tok-abc"' "$CURL_CFG_FILE"; then
     TESTS_RUN=$((TESTS_RUN + 1)); TESTS_PASSED=$((TESTS_PASSED + 1))
-    echo -e "  ${GREEN}PASS${NC}: Basic mode sends '-u user:pass'"
+    echo -e "  ${GREEN}PASS${NC}: Basic mode sends user:pass via curl config"
 else
     TESTS_RUN=$((TESTS_RUN + 1)); TESTS_FAILED=$((TESTS_FAILED + 1))
-    echo -e "  ${RED}FAIL${NC}: Basic mode missing '-u user:pass'"
+    echo -e "  ${RED}FAIL${NC}: Basic mode missing user:pass curl config"
     echo "    curl argv:"; sed 's/^/      /' "$CURL_ARGS_FILE"
 fi
 
-if grep -q "^Authorization: token" "$CURL_ARGS_FILE"; then
+if grep -q "Authorization: token" "$CURL_CFG_FILE"; then
     TESTS_RUN=$((TESTS_RUN + 1)); TESTS_FAILED=$((TESTS_FAILED + 1))
     echo -e "  ${RED}FAIL${NC}: Basic mode unexpectedly sent 'Authorization: token …'"
 else
@@ -904,6 +898,34 @@ else
     echo -e "  ${RED}FAIL${NC}: close-targets GitHub branch changed: $RESULT"
 fi
 rm -rf "$CT_DIR" "$CT_BODY_FILE"
+
+# --- forge_fetch_error_cause / forge_get_pr_nocache stderr (#9192) ---
+echo ""
+echo "Testing forge_fetch_error_cause (#9192)..."
+fec() { forge_fetch_error_cause "$@" | cut -d: -f1; }
+assert_eq "HTTP 401 auth failure -- the credential is invalid or expired; re-authenticate" \
+  "$(fec 'gh: Bad credentials (HTTP 401)' '{"message":"Bad credentials","status":"401"}')" "401 -> auth failure"
+assert_eq "HTTP 403 rate limit -- the credential DID authenticate (do not re-authenticate); wait for the reset" \
+  "$(fec 'gh: API rate limit exceeded for user ID 4242. (HTTP 403)' '{"message":"API rate limit exceeded for user ID 4242.","status":"403"}')" \
+  "rate-limit 403 -> rate limit, NOT auth"
+assert_eq "HTTP 403 rate limit -- the credential DID authenticate (do not re-authenticate); wait for the reset" \
+  "$(fec '' '{"message":"You have exceeded a secondary rate limit","status":"403"}')" "secondary rate limit from the body alone (status read from .status)"
+assert_eq "HTTP 403 forbidden (not a rate limit) -- the credential lacks access to this repository" \
+  "$(fec 'gh: Resource not accessible by integration (HTTP 403)' '')" "non-rate-limit 403 -> forbidden"
+assert_eq "HTTP 404 not found -- the PR does not exist in this repository, or the credential cannot see the repository" \
+  "$(fec 'gh: Not Found (HTTP 404)' '{"message":"Not Found","status":"404"}')" "404 -> not found"
+assert_eq "transient forge/network failure (HTTP 502) -- retry" "$(fec 'gh: Server Error (HTTP 502)' '')" "5xx -> transient"
+assert_eq "HTTP status unknown" "$(fec '' '')" "no signal at all -> says so, never empty"
+_fec_full="$(forge_fetch_error_cause 'gh: API rate limit exceeded for user ID 4242. (HTTP 403)' '{"message":"API rate limit exceeded for user ID 4242."}')"
+assert_eq "yes" "$([[ "$_fec_full" == *": API rate limit exceeded for user ID 4242." ]] && echo yes || echo no)" "the forge's own message (naming the user ID) is carried verbatim"
+_fec_tok="$(forge_fetch_error_cause '{"message":"bad token ghp_SECRET123abc and github_pat_XYZ_9"}' '')"
+assert_eq "no" "$([[ "$_fec_tok" == *SECRET123abc* || "$_fec_tok" == *XYZ_9* ]] && echo yes || echo no)" "token-shaped strings are redacted"
+_FEC_SHIM="$(mktemp -d)"; printf '#!/usr/bin/env bash\necho "{\\"message\\":\\"Not Found\\"}"; echo "gh: Not Found (HTTP 404)" >&2; exit 1\n' > "$_FEC_SHIM/gh"; chmod +x "$_FEC_SHIM/gh"
+_fec_err="$( (FORGE_TYPE=github; forge_get_pr_nocache o/r 1 "$_FEC_SHIM/gh" 2>&1 >/dev/null) || true)"
+assert_eq "gh: Not Found (HTTP 404)" "$_fec_err" "forge_get_pr_nocache passes gh's stderr through instead of discarding it"
+_fec_err="$( (FORGE_TYPE=github; forge_get_pr o/r 1 "$_FEC_SHIM/gh" 2>&1 >/dev/null) || true)"
+assert_eq "gh: Not Found (HTTP 404)" "$_fec_err" "forge_get_pr passes gh's stderr through instead of discarding it"
+rm -rf "$_FEC_SHIM"
 
 # --- Summary ---
 echo ""

@@ -259,6 +259,20 @@ themselves ([#5985]):
   output carries `pintype` ([#5998]). A buck converter's switch-node pin
   (`SW`, `LX`, `PH`) is typed `power_out`, but `kct detect-mistakes` does not
   treat the switch node as a rail.
+- **Boards 00 and 01** call it right after they write the unrouted PCB, and
+  their committed unrouted and routed outputs carry `pintype` ([#6025]).
+  Every pin on these boards is `passive`, so no new rails appear.
+- **Board 02** calls it right after it writes the unrouted PCB. Its
+  committed unrouted and routed outputs carry `pintype`, annotated in place
+  so the committed copper is unchanged, and `package_release.py` rewrote its
+  readiness package ([#6025]).
+- **Board 03** calls it from `generate_design.py` right after it writes the
+  unrouted PCB (`write_pcb`). The reviewed routing plan is replayed onto that
+  PCB, so the routed PCB inherits the annotation. Its committed unrouted and
+  routed PCBs and the `readiness-verification/fill-*` copies carry `pintype`,
+  regenerated through `scripts/boards/regenerate_boards_03_04_6076.py`; copper
+  is byte-identical in count and position. The two joystick mounting pads
+  `J2.MP` have no schematic pin and carry none ([#6025]).
 - **Other boards** are not wired yet, and their committed outputs carry no
   `pintype` ([#6025]). To annotate a board by hand, run this on its unrouted
   and routed PCBs. It edits only the pads' `pinfunction`/`pintype` children

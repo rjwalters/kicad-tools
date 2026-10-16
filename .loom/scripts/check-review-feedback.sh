@@ -152,7 +152,10 @@ if [[ -n "$HEAD_SHA" && ! "$HEAD_SHA" =~ ^[0-9a-f]{7,40}$ ]]; then
 fi
 
 if [[ -z "$FINDINGS_FILE" ]]; then
-    FINDINGS_FILE="$(mktemp "${TMPDIR:-/tmp}/loom-review-feedback-${NUMBER}.XXXXXX")"
+    # #9896: deterministic per-PR path (repeat runs overwrite it, so the
+    # caller-read file cannot accumulate); a trap-rm would delete it before
+    # the caller reads it.
+    FINDINGS_FILE="${TMPDIR:-/tmp}/loom-review-feedback-${NUMBER}.txt"
 fi
 : > "$FINDINGS_FILE"
 

@@ -42,6 +42,30 @@
 (rule "Silkscreen Height - jlcpcb-tier1"
   (condition "A.Type == 'text' && A.Layer == 'F.Silkscreen'")
   (constraint text_height (min 1.0mm)))
+
+(rule "Reviewed clearance - Debug"
+  (condition "(A.NetClass == 'Debug' || B.NetClass == 'Debug') && !(A.Type == 'Pad' && B.Type == 'Pad' && A.Reference == B.Reference) && !A.isCoupledDiffPair()")
+  (constraint clearance (min 0.15mm)))
+
+(rule "Reviewed clearance - Differential"
+  (condition "(A.NetClass == 'Differential' || B.NetClass == 'Differential') && !(A.Type == 'Pad' && B.Type == 'Pad' && A.Reference == B.Reference) && !A.isCoupledDiffPair()")
+  (constraint clearance (min 0.15mm)))
+
+(rule "Reviewed clearance - Digital"
+  (condition "(A.NetClass == 'Digital' || B.NetClass == 'Digital') && !(A.Type == 'Pad' && B.Type == 'Pad' && A.Reference == B.Reference) && !A.isCoupledDiffPair()")
+  (constraint clearance (min 0.15mm)))
+
+(rule "Reviewed clearance - HighSpeed"
+  (condition "(A.NetClass == 'HighSpeed' || B.NetClass == 'HighSpeed') && !(A.Type == 'Pad' && B.Type == 'Pad' && A.Reference == B.Reference) && !A.isCoupledDiffPair()")
+  (constraint clearance (min 0.15mm)))
+
+(rule "Reviewed clearance - Clock"
+  (condition "(A.NetClass == 'Clock' || B.NetClass == 'Clock') && !(A.Type == 'Pad' && B.Type == 'Pad' && A.Reference == B.Reference) && !A.isCoupledDiffPair()")
+  (constraint clearance (min 0.2mm)))
+
+(rule "Reviewed clearance - Power"
+  (condition "(A.NetClass == 'Power' || B.NetClass == 'Power') && !(A.Type == 'Pad' && B.Type == 'Pad' && A.Reference == B.Reference) && !A.isCoupledDiffPair()")
+  (constraint clearance (min 0.2mm)))
 # END kct fab floors
 
 # BEGIN kct native zone clearance
@@ -62,3 +86,35 @@
   (condition "(A.Type == 'Zone' && A.NetName == 'VCC') || (B.Type == 'Zone' && B.NetName == 'VCC')")
   (constraint clearance (min 0.3mm)))
 # END kct native zone clearance
+
+# BEGIN kct router diff-pair gaps (Issue #6443) -- managed, do not edit
+# The gap the router laid each coupled pair at: max(class intra-pair
+# gap, manufacturer minimum, authored board min_clearance).
+(rule "kct diff pair gap - USB_D+/USB_D-"
+  (condition "A.NetName == 'USB_D+' || A.NetName == 'USB_D-'")
+  (constraint diff_pair_gap (min 0.15mm)))
+(rule "kct diff pair gap - USB_MCU_D+/USB_MCU_D-"
+  (condition "A.NetName == 'USB_MCU_D+' || A.NetName == 'USB_MCU_D-'")
+  (constraint diff_pair_gap (min 0.15mm)))
+# Uncoupled length, skew and via count of each coupled pair, at the limit the
+# protocol table or the net class resolves (Issue #6443); a warning where
+# that limit is uncited.
+(rule "kct diff pair uncoupled - USB_D+/USB_D-"
+  (condition "A.inDiffPair('USB_D')")
+  (constraint diff_pair_uncoupled (max 19.05mm)))
+(rule "kct diff pair skew - USB_D+/USB_D-"
+  (condition "A.inDiffPair('USB_D')")
+  (constraint skew (max 2.5mm) (within_diff_pairs)))
+(rule "kct diff pair vias - USB_D+/USB_D-"
+  (condition "A.inDiffPair('USB_D')")
+  (constraint via_count (max 4)))
+(rule "kct diff pair uncoupled - USB_MCU_D+/USB_MCU_D-"
+  (condition "A.inDiffPair('USB_MCU_D')")
+  (constraint diff_pair_uncoupled (max 12.7mm)))
+(rule "kct diff pair skew - USB_MCU_D+/USB_MCU_D-"
+  (condition "A.inDiffPair('USB_MCU_D')")
+  (constraint skew (max 2.5mm) (within_diff_pairs)))
+(rule "kct diff pair vias - USB_MCU_D+/USB_MCU_D-"
+  (condition "A.inDiffPair('USB_MCU_D')")
+  (constraint via_count (max 4)))
+# END kct router diff-pair gaps

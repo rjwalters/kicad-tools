@@ -211,10 +211,15 @@ def pad_of(pad: Pad) -> MeshPad | None:
     """
     if pad.width <= 0.0 or pad.height <= 0.0:
         return None
+    # Issue #6718: the file's roundrect ratio (rect when unknown), never 0.25.
+    from kicad_tools.router.clearance_shapes import pad_kernel_params
+
+    shape, rratio = pad_kernel_params(pad)
     return make_pad(
-        pad.shape,
+        shape,
         pad.width,
         pad.height,
+        rratio,
         rotation_deg=pad.rotation,
         cx=pad.x,
         cy=pad.y,

@@ -211,6 +211,9 @@ class TestViaClearsForeignSegment:
             diameter=0.6,
             layers=(Layer.F_CU, Layer.F_CU),
             net=2,
+            # Issue #6502: only a micro via keeps a partial barrel; a
+            # standard via is drilled through whatever ``layers`` says.
+            is_micro=True,
         )
         assert via_clears_foreign_segment(via, seg, trace_clearance=0.15) is True
 
@@ -632,6 +635,9 @@ class TestFindNetsWithViaSegmentViolationsPerformance:
             diameter=0.6,
             layers=(Layer.F_CU, Layer.F_CU),
             net=2,
+            # Issue #6502: only a micro via keeps a partial barrel; a
+            # standard via is drilled through whatever ``layers`` says.
+            is_micro=True,
         )
         f_cu_stub = Segment(
             x1=5.0,

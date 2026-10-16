@@ -62,13 +62,19 @@ def no_time_for_drc(monkeypatch):
         "_post_route_drc_budget",
         lambda args: {"time_left": 0.0, "drc_cost_estimate": 0.0},
     )
+    # Issue #6644: the post-route zone fill discovers kicad-cli by launching
+    # ``kicad-cli version``, which takes a native-concurrency permit. Under CI
+    # load the wait for that permit (not the code under test) pushed this test
+    # past its 60s cap. These tests exercise the verdict when DRC is skipped,
+    # not kicad-cli discovery, so report it as absent instead of queueing.
+    monkeypatch.setattr("kicad_tools.cli.runner.find_kicad_cli", lambda *a, **k: None)
 
 
 @pytest.fixture
 def stranded_pour_unknown(monkeypatch):
     """The pour-oracle stage ran out of time before its first KiCad DRC."""
 
-    def _stage(output_path, *, args, quiet=False):
+    def _stage(output_path, *, args, quiet=False, **_kw):
         args._stranded_pour_links = 0
         args._allow_stranded_pour_pads = bool(getattr(args, "allow_stranded_pour_pads", False))
         args._stranded_pour_unknown = True
@@ -175,15 +181,17 @@ def test_deadline_before_first_drc_marks_status_unknown(monkeypatch, tmp_path, c
     assert "UNKNOWN" in capsys.readouterr().out
 
 
-def test_kicad_cli_not_run_is_not_a_deadline_skip(monkeypatch, tmp_path):
-    """Only the deadline makes the status unknown; other skips keep #5785's behaviour."""
+def test_kicad_cli_failed_first_drc_marks_status_unknown(monkeypatch, tmp_path):
+    """Issue #6724: an installed kicad-cli whose first DRC did not run (crash,
+    OOM kill, no report) leaves the stranded-pad count unknown, never 0."""
     _stub_pour_stage(
         monkeypatch, OracleCompletionResult(ran=False, stop_reason=STOP_NOT_RUN, note="x")
     )
     args = _stage_args()
     route_cmd._run_pour_oracle_stage(tmp_path / "b.kicad_pcb", args=args, quiet=True)
-    assert args._stranded_pour_unknown is False
-    assert route_cmd._unverified_checks(args) == []
+    assert args._stranded_pour_unknown is True
+    assert args._stranded_pour_failure == "x"
+    assert route_cmd._unverified_checks(args) == ["stranded-pour check"]
 
 
 # =============================================================================

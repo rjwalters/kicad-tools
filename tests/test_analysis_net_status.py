@@ -628,6 +628,52 @@ class TestNetStatusAnalyzer:
             # Just verify sorting doesn't crash
             pass
 
+    def test_islands_partition_pads_of_partially_routed_net(self, partially_routed_pcb: Path):
+        """The per-island pad groups are kept, not just their count (#6316).
+
+        SIG1 has four pads; one segment joins R1.1 to R1.2 and nothing reaches
+        R2.1 or R2.2, so the pads fall into three copper islands.  A ratsnest
+        needs the groups themselves: ``unconnected_pads`` flattens every
+        non-largest island together.
+        """
+        sig1 = NetStatusAnalyzer(partially_routed_pcb).analyze().get_net("SIG1")
+        assert sig1 is not None
+
+        groups = [sorted(p.full_name for p in island) for island in sig1.islands]
+        assert groups[0] == ["R1.1", "R1.2"], "largest island comes first"
+        assert sorted(groups[1:]) == [["R2.1"], ["R2.2"]]
+
+        # The groups partition the net's pads ...
+        flat = [p for island in sig1.islands for p in island]
+        assert len(flat) == sig1.total_pads == 4
+        assert len({id(p) for p in flat}) == 4
+        # ... agree with the existing count, and with the largest-island split.
+        assert len(sig1.islands) == sig1.island_count
+        assert len(sig1.islands) - 1 == sig1.open_connections == 2
+        assert sig1.islands[0] == sig1.connected_pads
+
+    def test_islands_of_complete_and_single_pad_nets(self, fully_routed_pcb: Path, tmp_path: Path):
+        """A complete net is one island; a one-pad net is one one-pad island."""
+        vcc = NetStatusAnalyzer(fully_routed_pcb).analyze().get_net("VCC")
+        assert vcc is not None
+        assert [sorted(p.full_name for p in i) for i in vcc.islands] == [["R1.1", "R2.1"]]
+
+        single = tmp_path / "single.kicad_pcb"
+        # Take R2.2 off GND, leaving R1.2 as the net's only pad.
+        r2_pad2 = '(net 2 "GND"))\n  )\n\n  (segment'
+        assert r2_pad2 in FULLY_ROUTED_PCB
+        single.write_text(FULLY_ROUTED_PCB.replace(r2_pad2, ")\n  )\n\n  (segment"))
+        gnd = NetStatusAnalyzer(single).analyze().get_net("GND")
+        assert gnd is not None
+        assert gnd.total_pads == 1
+        assert [[p.full_name for p in i] for i in gnd.islands] == [["R1.2"]]
+
+    def test_islands_are_not_serialized(self, partially_routed_pcb: Path):
+        """``to_dict`` is the ``kct net-status --format json`` document; unchanged."""
+        sig1 = NetStatusAnalyzer(partially_routed_pcb).analyze().get_net("SIG1")
+        assert sig1 is not None
+        assert "islands" not in sig1.to_dict()
+
     def test_position_tolerance(self, fully_routed_pcb: Path):
         """Test position tolerance constant."""
         analyzer = NetStatusAnalyzer(fully_routed_pcb)
@@ -747,8 +793,8 @@ STITCH_VIA_PCB = """(kicad_pcb
   (segment (start 15 15.25) (end 15 17) (width 0.25) (layer "F.Cu") (net 1))
   (segment (start 25 15.25) (end 25 17) (width 0.25) (layer "F.Cu") (net 1))
 
-  (via (at 15 17) (size 0.6) (drill 0.3) (layers "F.Cu" "In1.Cu") (net 1))
-  (via (at 25 17) (size 0.6) (drill 0.3) (layers "F.Cu" "In1.Cu") (net 1))
+  (via blind (at 15 17) (size 0.6) (drill 0.3) (layers "F.Cu" "In1.Cu") (net 1))
+  (via blind (at 25 17) (size 0.6) (drill 0.3) (layers "F.Cu" "In1.Cu") (net 1))
 
   (zone
     (net 1)
@@ -2137,8 +2183,11 @@ class TestDisjointZoneIslandConnectivity:
   (via (at 17 17) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 1))
 """
         if bridge_present:
+            # A partial span needs the ``blind`` keyword: KiCad reads a
+            # keyword-less via as through whatever its pair says (#6493).
+            via_kw = "" if right_via_end == "B.Cu" else "blind "
             copper += f"""
-  (via (at 23 17) (size 0.6) (drill 0.3) (layers "F.Cu" "{right_via_end}") (net 1))
+  (via {via_kw}(at 23 17) (size 0.6) (drill 0.3) (layers "F.Cu" "{right_via_end}") (net 1))
 """
         board = DISJOINT_ISLANDS_BOTH_PADS_OPEN_PCB.replace(
             '(0 "F.Cu" signal)',
@@ -2373,8 +2422,8 @@ BLIND_VIA_INNER_SEGMENT_PCB = """(kicad_pcb
     (pad "3" smd rect (at 0 0) (size 0.6 0.6) (layers "F.Cu") (net 1 "OC_TRIP_N"))
   )
 
-  (via (at 20 15) (size 0.6) (drill 0.3) (layers "F.Cu" "In1.Cu") (net 1))
-  (via (at 30 15) (size 0.6) (drill 0.3) (layers "F.Cu" "In1.Cu") (net 1))
+  (via blind (at 20 15) (size 0.6) (drill 0.3) (layers "F.Cu" "In1.Cu") (net 1))
+  (via blind (at 30 15) (size 0.6) (drill 0.3) (layers "F.Cu" "In1.Cu") (net 1))
 
   (segment (start 20.15 15) (end 29.85 15) (width 0.25) (layer "In2.Cu") (net 1))
   (segment (start 30 15) (end 35 15) (width 0.25) (layer "F.Cu") (net 1))

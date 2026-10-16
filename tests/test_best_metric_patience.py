@@ -416,6 +416,58 @@ class TestNetsFullyConnectedLexKey:
         assert better_connected_state.is_better_than(fragment_state)
 
 
+class TestPatienceZeroDisablesEveryEarlyStop:
+    """Issue #6361: ``best_stall_patience`` of ``None``/``0`` (the CLI's
+    ``--early-stop-patience 0``) must disable the ``should_terminate_early``
+    overflow-stagnation stop too, not just the #3101 best-metric check --
+    otherwise no user-facing setting lets the negotiated loop spend its full
+    iteration budget.
+
+    ``should_terminate_early`` is monkeypatched to always fire so the test does
+    not depend on a particular overflow trajectory; the boxed-in fixture keeps
+    ``N1`` unroutable so the rip-up loop always has work to do.
+    """
+
+    MAX_ITERATIONS = 3
+
+    @staticmethod
+    def _run(monkeypatch, capsys, patience):
+        import re
+
+        import kicad_tools.router.core as core_mod
+        from tests.router.test_access_ripup_5913 import _boxed_in_router
+
+        monkeypatch.setattr(core_mod, "should_terminate_early", lambda *a, **k: True)
+        router = _boxed_in_router()
+        router.route_all_negotiated(
+            max_iterations=TestPatienceZeroDisablesEveryEarlyStop.MAX_ITERATIONS,
+            timeout=120,
+            per_net_timeout=15,
+            adaptive=True,
+            perturbation=False,
+            best_stall_patience=patience,
+        )
+        out = capsys.readouterr().out
+        iterations = [int(n) for n in re.findall(r"--- Iteration (\d+): Rip-up and reroute", out)]
+        return out, iterations
+
+    @pytest.mark.parametrize("patience", [None, 0])
+    def test_opt_out_runs_full_iteration_budget(self, monkeypatch, capsys, patience):
+        out, iterations = self._run(monkeypatch, capsys, patience)
+        assert "Early termination: no progress detected" not in out
+        assert "Best-metric early-stop" not in out
+        assert iterations and max(iterations) == self.MAX_ITERATIONS, out
+
+    def test_default_patience_still_stops_early(self, monkeypatch, capsys):
+        out, iterations = self._run(monkeypatch, capsys, 2)
+        assert "Early termination: no progress detected" in out
+        assert not iterations or max(iterations) < self.MAX_ITERATIONS
+        # The early-stop line reports the budget it leaves unused: the stop
+        # fires at the top of iteration 1, so all 3 iterations go unspent.
+        assert "unused budget: 3 of 3 rip-up iteration(s) left" in out
+        assert "s of 120s timeout left" in out
+
+
 class TestCLIFlagWiredThrough:
     """The ``--early-stop-patience`` flag must exist on both the outer
     ``parser.py`` route subparser and the inner ``route_cmd.py`` parser

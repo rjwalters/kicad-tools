@@ -54,21 +54,27 @@ def normalize_zip(path: Path) -> None:
     write_zip(path, members)
 
 
-def board_content(data: bytes) -> str:
+#: Pad metadata copied from the schematic (Issue #6025).  It is netlist
+#: evidence for ``kct detect-mistakes``; it draws nothing, so it cannot change
+#: a render.
+PIN_ANNOTATION_NODES = ("pinfunction", "pintype")
+
+
+def board_content(data: bytes, *, ignore: tuple[str, ...] = ()) -> str:
     """Canonical content of a KiCad board, independent of item UUIDs, of
     KiCad's UUID-ordered save and of child-node order within an item.
 
     Every ``(uuid ...)``/``(tstamp ...)`` node is dropped; each node keeps its
     atoms in order and its sub-lists sorted.  Two boards with equal content
-    have identical copper, footprints, pads and graphics.
+    have identical copper, footprints, pads and graphics.  Nodes named in
+    *ignore* (e.g. :data:`PIN_ANNOTATION_NODES`) are dropped too.
     """
+    skipped = ("uuid", "tstamp", *ignore)
     from kicad_tools.sexp import parse_string
 
     def canon(node) -> str:  # type: ignore[no-untyped-def]
         atoms = [repr(c.value) for c in node.children if c.is_atom]
-        lists = sorted(
-            canon(c) for c in node.children if not c.is_atom and c.name not in ("uuid", "tstamp")
-        )
+        lists = sorted(canon(c) for c in node.children if not c.is_atom and c.name not in skipped)
         return "(" + " ".join([str(node.name), *atoms, *lists]) + ")"
 
     return canon(parse_string(data.decode()))

@@ -17,9 +17,10 @@
 #
 # The load-bearing assertions:
 #   1. --repo resolves the target WITHOUT consulting the forge/git for the NWO
-#      (no *bare* `gh repo view --json nameWithOwner` in the log) and works
-#      from a directory that is not a git repo at all — the short-circuit,
-#      proven rather than asserted.
+#      (no *bare* `gh repo view --json nameWithOwner` in the log), and a
+#      --dry-run resolves it from a directory that is not a git repo at all —
+#      the short-circuit, proven rather than asserted. (A real sync writes, so
+#      since #9548 it runs from its target's registered checkout; see run_sls.)
 #   2. Every mutating gh call carries `-R <override>`, never the invoking repo.
 #   3. labels.yml is still read from WORKTREE_PATH (the source stays local;
 #      only the target moves).
@@ -50,38 +51,17 @@
 set -uo pipefail
 
 TEST_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# #9548: this suite's subject vets its write target (`forge may-write`)
-# first; that decision is not what this suite tests (test-write-scope.sh does),
-# and without this the outcome would depend on the host's loom-daemon.
-WS_STUB_DIR="$(mktemp -d)"
-# shellcheck source=lib/write-scope-stub.sh
-source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/write-scope-stub.sh"
-write_scope_allow_all "$WS_STUB_DIR"
+# #9548: a real sync vets its write target (`loom_write_repo`); the targets'
+# checkouts are registered below (write-scope-fixture.sh).
+# shellcheck source=lib/write-scope-fixture.sh
+source "$TEST_DIR/lib/write-scope-fixture.sh"
 SCRIPTS_DIR="$(cd "$TEST_DIR/.." && pwd)"
 REPO_ROOT="$(cd "$SCRIPTS_DIR/../.." && pwd)"
 SLS="$SCRIPTS_DIR/sync-labels.sh"
 
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-NC='\033[0m'
+# shellcheck source=lib/assert.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/assert.sh"
 
-TESTS_RUN=0
-TESTS_PASSED=0
-TESTS_FAILED=0
-
-assert_eq() {
-    local expected="$1" actual="$2" msg="$3"
-    TESTS_RUN=$((TESTS_RUN + 1))
-    if [[ "$expected" == "$actual" ]]; then
-        TESTS_PASSED=$((TESTS_PASSED + 1))
-        echo -e "  ${GREEN}PASS${NC}: $msg"
-    else
-        TESTS_FAILED=$((TESTS_FAILED + 1))
-        echo -e "  ${RED}FAIL${NC}: $msg"
-        echo "    Expected: '$expected'"
-        echo "    Actual:   '$actual'"
-    fi
-}
 
 # _byte_len: true BYTE count of $1, independent of the ambient locale.
 # `${#var}` counts CHARACTERS under a multibyte (e.g. UTF-8) locale, which
@@ -278,9 +258,52 @@ CFG_GITHUB="$TMP/cfg-github"
 mkdir -p "$CFG_GITHUB/.loom"
 echo '{"forge":{"type":"github"}}' > "$CFG_GITHUB/.loom/config.json"
 
+# #9548 write-scope fixtures: one registered checkout per distinct write
+# target, registered once. Each is a copy of $SRC (labels.yml and -alt/), so a
+# run from it reads the same sources. Without --repo the target is the
+# checkout's own origin; with --repo the real gate admits a target only from a
+# checkout whose origin it is (or, with a daemon, a registered workspace's), so
+# a real sync runs from its target's checkout. Each registration chains onto
+# the previous one, so the final LOOM_GH_BIN answers the permission probe for
+# all three and hands every other call to the stub gh.
+FIX_HELLO="$TMP/ws-hello-world"
+FIX_TYPO="$TMP/ws-typo-repo"
+FIX_REMOTE="$TMP/ws-from-remote"
+for fix in "$FIX_HELLO" "$FIX_TYPO" "$FIX_REMOTE"; do
+    mkdir -p "$fix" && cp -R "$SRC/." "$fix/"
+done
+WRITE_SCOPE_INNER_GH="$STUB_DIR/gh" write_scope_register "$FIX_HELLO" octocat/hello-world
+write_scope_register "$FIX_TYPO" octocat/typo-repo
+write_scope_register "$FIX_REMOTE" owner/from-remote
+
+# sls_cwd <nwo> <script args...>: where run_sls runs. A real sync runs from
+# its target's registered checkout: --repo X's, else (no --repo) the one whose
+# origin is the stubbed NWO. A --dry-run, a target with no checkout, and an
+# argument error stay in $SRC, which is not a git repo at all.
+sls_cwd() {
+    local nwo="$1" repo="" dry=0 a
+    shift
+    while [[ $# -gt 0 ]]; do
+        a="$1"; shift
+        case "$a" in
+            --) break ;;
+            --dry-run) dry=1 ;;
+            --repo) repo="${1:-}"; [[ $# -eq 0 ]] || shift ;;
+            --repo=*) repo="${a#--repo=}" ;;
+        esac
+    done
+    [[ "$dry" -eq 0 ]] || repo="-"
+    case "${repo:-$nwo}" in
+        octocat/hello-world) echo "$FIX_HELLO" ;;
+        octocat/typo-repo) echo "$FIX_TYPO" ;;
+        owner/from-remote) echo "$FIX_REMOTE" ;;
+        *) echo "$SRC" ;;
+    esac
+}
+
 GH_LOG="$TMP/gh.log"
 
-# Run the real script with the stub gh first on PATH, from $SRC.
+# Run the real script with the stub gh first on PATH, from sls_cwd's choice.
 #   run_sls [--nwo NWO] [--repo-view ANSWER] [--repo-root DIR] -- <script args...>
 #
 #   --repo-view   what the stub's targeted `gh repo view <NWO>` answers
@@ -306,12 +329,13 @@ run_sls() {
         esac
     done
     : > "$GH_LOG"
+    local cwd
+    cwd="$(sls_cwd "$nwo" "$@")"
     OUT="$(
-        cd "$SRC" || exit 99
+        cd "$cwd" || exit 99
         PATH="$STUB_DIR:$PATH" \
         LOOM_TEST_GH_LOG="$GH_LOG" \
         LOOM_TEST_GH_NWO="$nwo" \
-        WRITE_SCOPE_STUB_REPO="$nwo" \
         LOOM_TEST_GH_REPO_VIEW="$repo_view" \
         LOOM_CONFIG_DEFAULTS_FILE="" \
         REPO_ROOT="$repo_root" \
@@ -327,10 +351,12 @@ run_sls() {
 echo ""
 echo "=== --repo short-circuits NWO resolution (no git remote needed) ==="
 
-# The scratch dir has no git remote and the stub `gh repo view` fails, so the
-# legacy resolution path cannot produce an NWO. --repo must still succeed.
+# The stub's targetless `gh repo view` fails, so the legacy resolution path
+# cannot produce an NWO. --repo must still succeed. (This real sync runs from
+# its target's registered checkout; the --dry-run below runs from $SRC, which
+# has no git remote at all.)
 run_sls -- --repo octocat/hello-world
-assert_eq "0" "$RC" "--repo succeeds in a directory with no resolvable remote"
+assert_eq "0" "$RC" "--repo succeeds where the forge resolves no repository"
 assert_contains "$OUT" "Target repository: octocat/hello-world (github)" \
     "--repo resolves REPO to the flag value"
 # The short-circuit proof, kept precise after #4524 added a preflight: what
@@ -368,8 +394,10 @@ assert_eq "0" "$RC" "--repo=OWNER/NAME form accepted"
 assert_contains "$OUT" "Target repository: octocat/hello-world (github)" \
     "--repo= form resolves the same target"
 
-# The flag order relative to the positional path must not matter.
-run_sls -- --repo octocat/hello-world "$SRC"
+# The flag order relative to the positional path must not matter. (The script
+# runs from WORKTREE_PATH, so the positional is the target's registered
+# checkout, #9548.)
+run_sls -- --repo octocat/hello-world "$FIX_HELLO"
 assert_eq "0" "$RC" "--repo composes with an explicit WORKTREE_PATH positional"
 assert_contains "$OUT" "Target repository: octocat/hello-world (github)" \
     "--repo plus positional still targets the override"

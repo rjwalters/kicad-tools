@@ -23,6 +23,21 @@ from kicad_tools.router.output import (
 # ---------------------------------------------------------------------------
 
 
+def _contact_pad(x: float, y: float):
+    """A real SMD ``Pad`` (the contact model needs its outline and layer)."""
+    from kicad_tools.router.layers import Layer
+    from kicad_tools.router.primitives import Pad
+
+    return Pad(x=x, y=y, width=0.5, height=0.5, net=0, net_name="", layer=Layer.F_CU)
+
+
+def _contact_seg(x1: float, y1: float, x2: float, y2: float, net: int):
+    from kicad_tools.router.layers import Layer
+    from kicad_tools.router.primitives import Segment
+
+    return Segment(x1=x1, y1=y1, x2=x2, y2=y2, width=0.2, layer=Layer.F_CU, net=net)
+
+
 class _FailureCause(Enum):
     UNKNOWN = "unknown"
     ROUTING_ORDER = "routing_order"
@@ -802,18 +817,14 @@ class TestPartialRouteHeadline:
         connected must be counted as 'partial', not strict-connect."""
 
         # Build a Pad-like object so connectivity validation runs.
-        @dataclass
-        class _Pad:
-            x: float
-            y: float
-            terminal_id: str = ""
+        # Issue #6371: connectivity is judged by layer-aware copper contact,
+        # so the pads/segments need real geometry (size, layer, width).
+        _Pad = _contact_pad
 
         # Net 1: 2 pads at (0,0) and (10,0).  A route segment at
         # (0,0)-(2,0) covers only pad 1 — pad 2 is far away, so the
         # net is "partial".
-        seg = MagicMock()
-        seg.x1, seg.y1, seg.x2, seg.y2 = 0.0, 0.0, 2.0, 0.0
-        seg.layer.value = 0
+        seg = _contact_seg(0.0, 0.0, 2.0, 0.0, 1)
         route = MagicMock()
         route.net = 1
         route.segments = [seg]
@@ -870,17 +881,11 @@ class TestPartialRouteHeadline:
         the 2 partials that the strict number hides.
         """
 
-        @dataclass
-        class _Pad:
-            x: float
-            y: float
-            terminal_id: str = ""
+        # Issue #6371: connectivity is judged by layer-aware copper contact,
+        # so the pads/segments need real geometry (size, layer, width).
+        _Pad = _contact_pad
 
-        def _seg(x1, y1, x2, y2, net):
-            seg = MagicMock()
-            seg.x1, seg.y1, seg.x2, seg.y2 = x1, y1, x2, y2
-            seg.layer.value = 0
-            return seg
+        _seg = _contact_seg
 
         def _route(net, segments):
             r = MagicMock()
