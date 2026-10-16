@@ -40,6 +40,7 @@ path can fail loud rather than silently degrade.
 from __future__ import annotations
 
 import math
+from functools import lru_cache
 from typing import Any
 
 from kicad_tools._shapely import has_shapely as _has_shapely
@@ -379,3 +380,37 @@ def segments_copper_touch(
         ):
             return False
     return segment_centerline_distance(a_start, a_end, b_start, b_end) <= reach
+
+
+@lru_cache(maxsize=4096)
+def pad_waiver_polygon(x: float, y: float, w: float, h: float, shape: str, rotation: float):
+    """Cache static pad copper, using the same primitives as the audit.
+
+    Returns the shapely polygon of a rect / circle / oval pad at board
+    position ``(x, y)`` rotated by ``rotation`` degrees, or ``None`` for a
+    shape it does not model (``roundrect``, custom) or a degenerate size.
+    Moved here from ``router/lattice/obstacles.py`` (``_pad_waiver_polygon``)
+    by issue #6837 so engine-free pair planning (``router.pairplan``) can
+    measure exact pad copper without importing the lattice engine; the lattice
+    imports it back under its old name, so there is one cache, not two.
+    """
+    from shapely.affinity import rotate, translate  # type: ignore[import-untyped]
+    from shapely.geometry import Point, box
+
+    if w <= 0 or h <= 0 or shape == "roundrect":
+        return None
+    if shape == "circle" or (shape == "oval" and abs(w - h) < 1e-6):
+        return Point(x, y).buffer(min(w, h) / 2)
+    if shape == "rect":
+        polygon = box(-w / 2, -h / 2, w / 2, h / 2)
+    elif shape == "oval":
+        radius = min(w, h) / 2
+        core = (
+            box(-(w / 2 - radius), 0, w / 2 - radius, 0)
+            if w >= h
+            else box(0, -(h / 2 - radius), 0, h / 2 - radius)
+        )
+        polygon = core.buffer(radius)
+    else:
+        return None
+    return translate(rotate(polygon, -rotation, origin=(0, 0)), x, y)

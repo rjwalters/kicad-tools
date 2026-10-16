@@ -34,8 +34,9 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass, field
-from functools import lru_cache
 from typing import TYPE_CHECKING
+
+from kicad_tools.geometry.copper import pad_waiver_polygon as _pad_waiver_polygon
 
 from ..primitives import Pad, pad_half_extents
 from . import kernel_adapter as ka
@@ -102,31 +103,6 @@ def pad_waiver_probe_point(a: Pt, b: Pt, pad: Pad, own_half: float) -> Pt | None
         return None
     _, x, y = _shapely_gap_and_midpoint(copper, polygon)
     return x, y
-
-
-@lru_cache(maxsize=4096)
-def _pad_waiver_polygon(x: float, y: float, w: float, h: float, shape: str, rotation: float):
-    """Cache static pad copper, using the same primitives as the audit."""
-    from shapely.affinity import rotate, translate  # type: ignore[import-untyped]
-    from shapely.geometry import Point, box  # type: ignore[import-untyped]
-
-    if w <= 0 or h <= 0 or shape == "roundrect":
-        return None
-    if shape == "circle" or (shape == "oval" and abs(w - h) < 1e-6):
-        return Point(x, y).buffer(min(w, h) / 2)
-    if shape == "rect":
-        polygon = box(-w / 2, -h / 2, w / 2, h / 2)
-    elif shape == "oval":
-        radius = min(w, h) / 2
-        core = (
-            box(-(w / 2 - radius), 0, w / 2 - radius, 0)
-            if w >= h
-            else box(0, -(h / 2 - radius), 0, h / 2 - radius)
-        )
-        polygon = core.buffer(radius)
-    else:
-        return None
-    return translate(rotate(polygon, -rotation, origin=(0, 0)), x, y)
 
 
 def _pad_midpoint_envelope_exempt(
