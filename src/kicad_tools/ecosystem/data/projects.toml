@@ -202,18 +202,19 @@ than the board file. Copyleft, so ideas only.\
 """
 research_docs = ["benchmarks/external/fleet_routers/verdict.md"]
 reeval_trigger = """
-Issue #6335 ran it on our fleet (boards 00-07, 09): every row is \
-`non-comparable`, so its routing quality is not established; DRC errors \
-appeared on 02, 03, 05, 06, 07 and 09. The fab-only DRU rules were already \
-excluded (#6768); the losses are exemption-scoped net-class clearances \
-(all boards but 09; reclassified as not-representable by PR #6770 for \
-#6765), the 0.3 mm copper-to-edge clearance on 05/06/07/09 and \
-`diff_pair_gap` on 03/06 (both DSN-expressible, #6784), native zone \
-clearances on 03 and `SMD Pad Clearance` on 05 (fill/placement-enforced, \
-classification asked in #6784), and diff-pair skew/uncoupled/via-count \
-rules on 03/06 (no DSN construct; those boards stay non-comparable unless \
-#6784 classifies them). Re-run with a re-frozen manifest after #6770 and \
-#6784. If our benchmarks ever need a DSN-based baseline, \
+Issue #6335 ran it on our fleet (boards 00-07, 09) at kct 9a1fb50494be: \
+every row is `non-comparable`, so its routing quality is not established; \
+DRC errors appeared on 02, 03, 05, 06, 07 and 09. Re-auditing on main \
+847666c8 (2026-10-15): #6768 excludes the fab-only DRU rules, and #6784 \
+carries edge clearance and `diff_pair_gap` and moves zone and SMD-pad \
+clearances to not-routing. Two loss groups remain. The 22 exemption-scoped \
+net-class clearances on 00-07 are an artifact of the manifest pairing the \
+pre-route .kicad_pro (Default class only) with the routed .kicad_dru; this \
+is not an exporter gap, and PR #6770 / #6765 do not change it (#6800). \
+The diff-pair skew/uncoupled/via-count rules on 03/06 are kept as losses \
+on purpose by #6784, so those boards stay non-comparable. Re-run with a \
+re-frozen manifest once #6800 is decided. \
+If our benchmarks ever need a DSN-based baseline, \
 measure fastroute in place of freerouting -- same algorithms, a fraction of \
 the runtime -- and record whether its plugin's export fixes close the DSN \
 round-trip gaps that keep us on the board file.\

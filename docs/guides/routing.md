@@ -79,8 +79,40 @@ and net-class targets still apply.
 Recognized nets use separate branches from the shunt pad. Previously routed
 branches and other terminals become temporary physical obstacles during each
 search. This applies to Python and C++ grid routing, including negotiated
-routing, and avoids joining nearby pins of the same IC before routing the star.
-An existing shunt escape does not move the tap to its outer endpoint.
+routing. The general same-IC shortcut that non-Kelvin nets get (which ties
+pins up to a few millimetres apart and can wrap around the package) is not
+used on Kelvin nets. An existing shunt escape does not move the tap to its
+outer endpoint.
+
+**Neighbouring duplicate pins are tied first (issue #6799).** Before the star
+is built, the router ties some same-net pins pad-to-pad. Two pads are tied
+when all of the following hold:
+
+- they belong to the same package, and that package is not a resistor (no
+  `R<n>` reference and no resistor/shunt footprint), so a four-terminal
+  shunt's force and sense pads are never tied;
+- the copper gap between them is smaller than one trace width plus two
+  clearances (`gap < trace_width + 2 * clearance` for the net's class), so no
+  copper of any net could pass between them;
+- a straight pad-to-pad tie is legal against the package's other pads and
+  existing copper. No perimeter wrap is tried.
+
+The tied pair then counts as one terminal and gets one branch to the shunt.
+Pins with room for a trace between them keep their own branches. On board 05
+this ties the DRV8313's PGND1/PGND2 pins (0.65 mm pitch on `GND_SENSE`), so
+the two branches no longer block each other's exits.
+
+The router assumes such pins are joined inside the package. It does not
+check this: the rule looks only at geometry and the reference designator. It
+cannot tell a force pin from a high-impedance sense input. On 0.5 mm and
+0.65 mm pitch packages, every adjacent same-net pair meets the gap condition.
+If a package puts a force pin next to a sense input on the same sense-named
+net, the two are tied. Examples are a remote-sense regulator's adjacent `OUT`
+and `SENSE` pins on a `VOUT_SENSE` net, or a fine-pitch connector with `F+`
+and `S+` on one net. The sense pin then loses its own branch and reads the
+shunt voltage plus the force path's IR drop, which defeats the Kelvin
+connection. To keep a sense input separate, give it its own net, or join it
+to the force net with a net tie at the shunt.
 
 This standalone example constructs an adversarial four-terminal net: the force
 terminal lies directly between the shunt and a sense terminal.

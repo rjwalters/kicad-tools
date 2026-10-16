@@ -1206,20 +1206,17 @@ Do **not** work around it by reverting the pull or by hand-editing the refusal
 out. The guard is the only thing standing between a stale binary and a silently
 mis-closed issue.
 
-**Preventing the next one**: `scripts/check-daemon-subcommand-versions.sh`
-fails CI when a shell script gains a NEW `loom-daemon <subcommand>` dependency
-without declaring its floor:
+**Preventing the next one**: declare the floor when a shell script gains a NEW
+`loom-daemon <subcommand>` dependency:
 
 ```
 # requires-daemon: <subcommand> >= <version>   <which PR added it>
 # requires-daemon: <subcommand> optional       <how it degrades>
 ```
 
-It is a one-way ratchet over `scripts/daemon-subcommand-baseline.txt` — every
-dependency that predates the convention is grandfathered, so the gate fires
-only at the moment someone moves the floor. Run
-`scripts/check-daemon-subcommand-versions.sh --help` for the full convention,
-and `--list` to see every daemon dependency in the tree.
+In the Loom source tree, `scripts/check-daemon-subcommand-versions.sh --help`
+documents the convention and `--list` shows every daemon dependency (the
+`install-compat check` CI step reads that list).
 
 #### The same refusal, from any stub (#8385)
 
@@ -1239,9 +1236,8 @@ found, exactly like the `tokens select --model` capability probe next to it.
 The behaviour is identical whether the stub delegates its exec to
 `loom_exec_script_helper` (`lib/script-helper.sh`, which execs through
 `loom_daemon_exec_checked`) or calls `loom_daemon_version_preflight <sub>
-"$BIN"` itself one line above its own `exec` (which is what a Shape-A `stub`
-in `scripts/shell-allowlist.txt` must do to keep that category — the cap
-requires the last code line to *be* the `exec`).
+"$BIN"` itself one line above its own `exec` (the Shape-A stub pattern, whose
+last code line *is* the `exec`).
 
 Two properties are worth knowing when you meet one:
 

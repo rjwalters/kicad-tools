@@ -69,7 +69,7 @@ the next person to add one will have an equally good argument.
    A push to `main` runs every job with no path filter, with **one
    operator-approved exception** (#10825, 2026-10-07): the image jobs
    (`worker-base-image` and the three `*-image-smoke` jobs). On push they run
-   only when `changes-push` finds an image input in the diff, as defined by
+   only when `Detect Changes` finds an image input in the diff, as defined by
    `scripts/ci-image-inputs.sh`, the one definition the PR filter shares.
    Image inputs are every path `.dockerignore` re-includes, `.dockerignore`
    itself, `ci.yml`, the run-job seam and the script. The diff base is the
@@ -78,7 +78,7 @@ the next person to add one will have an equally good argument.
    superseded (rule 2), and after a red smoke the next clean diff would go
    green over it (rule 6). The filter fails **closed**: no green base, a base
    that is not an ancestor, a failed or truncated file list, or a failed or
-   cancelled `changes-push` all run the image jobs, and the last two also
+   cancelled `Detect Changes` all run the image jobs, and the last two also
    turn `CI Result` red. The loom-daemon **source** is deliberately not an
    image input, though the images ship it. That observation is owed to
    `ci-daily.yml`'s `docker-smokes`, which builds the daemon from the commit

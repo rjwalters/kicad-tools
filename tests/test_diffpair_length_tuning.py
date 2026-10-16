@@ -991,3 +991,163 @@ class TestExactFitAndPlacementSearch:
         assert exact_fit_amplitude(5.0, 1.0)[0] == 3
         loops, amp = exact_fit_amplitude(5.0, 1.0)
         assert 2 * loops * amp == pytest.approx(5.0, abs=1e-6)
+
+
+# =============================================================================
+# Issue #6795: uncoupled-length guard and overshoot revert accounting
+# =============================================================================
+
+
+class TestUncoupledGuardAndOvershootRevert:
+    @staticmethod
+    def _figures(p: Route, n: Route) -> tuple[float, float]:
+        """``(uncoupled(P), uncoupled(N))`` exactly as ``kct check`` measures them."""
+        from kicad_tools.router.diffpair_length_tuning import _checker_segments
+        from kicad_tools.validate.rules.diffpair_uncoupled_length import measure_uncoupled
+
+        sp, sn = _checker_segments(p.segments), _checker_segments(n.segments)
+        return measure_uncoupled(sp, sn), measure_uncoupled(sn, sp)
+
+    @staticmethod
+    def _folded_route(net_id: int, name: str, y: float, legs: int, leg_mm: float) -> Route:
+        """Horizontal legs stacked 0.3 mm apart over ``x in [0, leg_mm]``.
+
+        Every leg runs beside a straight partner over the same span, so the
+        route is long yet almost fully coupled (only the 0.3 mm risers are not).
+        """
+        segs: list[Segment] = []
+        for i in range(legs):
+            yy = y + 0.3 * i
+            x1, x2 = (0.0, leg_mm) if i % 2 == 0 else (leg_mm, 0.0)
+            segs.append(Segment(x1, yy, x2, yy, 0.2, Layer.F_CU, net=net_id, net_name=name))
+            if i < legs - 1:
+                segs.append(
+                    Segment(x2, yy, x2, yy + 0.3, 0.2, Layer.F_CU, net=net_id, net_name=name)
+                )
+        return Route(net=net_id, net_name=name, segments=segs)
+
+    def test_pair_already_over_by_long_half_is_still_tuned(self):
+        """Judge repro: the meander leaves the checker's figure unchanged, so it is allowed.
+
+        P 20 mm / N 25 mm: the pair is already 5.0 mm uncoupled (all on N)
+        against a 4.0 mm limit.  The meander takes P to ~4.55 mm, under N's
+        5.0, so ``max(P, N)`` -- the uncoupled verdict -- does not move.  The
+        skew error gets fixed instead of being kept for nothing.
+        """
+        p = _straight_route(1, "USB_D+", 20.0, y=0.0)
+        n = _straight_route(2, "USB_D-", 25.0, y=5.0)
+        before = max(self._figures(p, n))
+        assert before == pytest.approx(5.0)
+        p_out, n_out, result = tune_diff_pair_skew(
+            _make_pair(),
+            {1: p, 2: n},
+            tolerance_mm=0.5,
+            intra_pair_clearance_mm=0.1,
+            max_uncoupled_mm=4.0,
+        )
+        assert result.reason == "tuned"
+        assert result.skew_after_mm <= 0.5
+        assert n_out is n
+        after = self._figures(p_out, n_out)
+        assert after[0] > 4.0  # P alone is over: a P-only guard would have refused
+        assert max(after) == pytest.approx(before)  # verdict unchanged
+
+    def test_meander_pushing_pair_over_limit_is_rejected(self):
+        """A meander that takes the pair figure over the limit, and up, is refused."""
+        p = _straight_route(1, "USB_D+", 20.0, y=0.0)
+        n = self._folded_route(2, "USB_D-", y=1.0, legs=2, leg_mm=20.0)  # 40.3 mm, ~0.3 uncoupled
+        before = max(self._figures(p, n))
+        assert before < 4.0
+        p_out, n_out, result = tune_diff_pair_skew(
+            _make_pair(),
+            {1: p, 2: n},
+            tolerance_mm=0.5,
+            intra_pair_clearance_mm=0.1,
+            max_uncoupled_mm=4.0,
+        )
+        assert result.success is False
+        assert result.inserts_applied == 0
+        assert p_out is p and p_out.segments is p.segments
+        assert n_out is n
+        assert "uncoupled length exceeds limit" in result.message
+
+    def test_meander_raising_longer_half_uncoupled_is_rejected(self):
+        """The guard measures the partner side too (Judge point 2).
+
+        The candidate folds P into five 5 mm legs over ``x in [0, 5]``: P
+        itself stays almost fully coupled (well under the limit) but N, 25 mm
+        long, now only runs beside P for 5 mm -- the checker's figure jumps
+        to ~20 mm.  A guard that only measured the meandered half accepted it.
+        """
+        from kicad_tools.router.optimizer.serpentine import SerpentineResult
+
+        p = _straight_route(1, "USB_D+", 20.0, y=0.0)
+        n = _straight_route(2, "USB_D-", 25.0, y=-1.0)
+        folded = self._folded_route(1, "USB_D+", y=0.0, legs=5, leg_mm=4.88)
+
+        def fold(self, route, _target):
+            return folded, SerpentineResult(success=True, new_segments=list(folded.segments))
+
+        def run(limit):
+            with patch.object(SerpentineGenerator, "add_serpentine", fold):
+                return tune_diff_pair_skew(
+                    _make_pair(),
+                    {1: p, 2: n},
+                    tolerance_mm=1.0,
+                    intra_pair_clearance_mm=0.1,
+                    max_uncoupled_mm=limit,
+                )
+
+        cand = self._figures(folded, n)
+        assert cand[0] < 10.0 < cand[1]  # only the partner side breaks the limit
+        assert max(self._figures(p, n)) < 10.0  # pair was within the limit before
+
+        p_out, _n, unguarded = run(None)
+        assert unguarded.reason == "tuned" and p_out is folded  # the candidate is otherwise fine
+
+        # Guarded: the fold is refused and a later placement (the regular
+        # trombone, which keeps N coupled) is used instead.
+        p_out, n_out, result = run(10.0)
+        assert p_out is not folded
+        assert n_out is n
+        assert max(self._figures(p_out, n_out)) <= 10.0
+
+    def test_none_or_generous_limit_matches_unguarded_result(self):
+        def run(**kw):
+            p = _straight_route(1, "USB_D+", 20.0, y=0.0)
+            n = _straight_route(2, "USB_D-", 25.0, y=5.0)
+            p_out, _n, result = tune_diff_pair_skew(
+                _make_pair(),
+                {1: p, 2: n},
+                tolerance_mm=0.5,
+                intra_pair_clearance_mm=0.1,
+                **kw,
+            )
+            return [(s.x1, s.y1, s.x2, s.y2) for s in p_out.segments], result.reason
+
+        base = run()
+        assert base[1] == "tuned"
+        assert run(max_uncoupled_mm=None) == base
+        assert run(max_uncoupled_mm=1000.0) == base
+
+    def test_overshoot_revert_resets_inserts_applied(self):
+        from kicad_tools.router.optimizer.serpentine import SerpentineResult
+
+        p = _straight_route(1, "USB_D+", 20.0, y=0.0)
+        n = _straight_route(2, "USB_D-", 25.0, y=5.0)
+
+        def too_long(self, route, _target):
+            extra = Segment(0.0, -1.0, 40.0, -1.0, 0.2, Layer.F_CU, net=1, net_name="USB_D+")
+            segs = [*route.segments, extra]
+            return (
+                Route(net=route.net, net_name=route.net_name, segments=segs),
+                SerpentineResult(success=True, new_segments=[extra]),
+            )
+
+        with patch.object(SerpentineGenerator, "add_serpentine", too_long):
+            p_out, _n, result = tune_diff_pair_skew(
+                _make_pair(), {1: p, 2: n}, tolerance_mm=0.5, intra_pair_clearance_mm=0.1
+            )
+        assert result.reason == "overshoot"
+        assert p_out is p
+        assert result.inserts_applied == 0

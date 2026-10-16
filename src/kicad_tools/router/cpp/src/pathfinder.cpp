@@ -1328,6 +1328,16 @@ float Pathfinder::get_pad_channel_cost(int x, int y, int layer) const {
     return it->second;
 }
 
+bool Pathfinder::is_pad_via_fenced(int x, int y) const {
+    // Issue #6761: hard via fence (``PadChannelBudget.layer ==
+    // PAD_VIA_FENCE_LAYER``).  Same empty() fast path as the cost lookup.
+    if (search_pad_budget_cost_lookup_.empty()) {
+        return false;
+    }
+    return search_pad_budget_cost_lookup_.count(
+               std::make_tuple(x, y, PAD_VIA_FENCE_LAYER)) > 0;
+}
+
 // Issue #3143: Helper that materialises a per-cell pad-channel cost lookup
 // from the list of ``PadChannelBudget`` rectangles supplied by the caller.
 // Each cell inside a budget's bbox (intersected with the routing-grid
@@ -1373,6 +1383,11 @@ static void build_pad_channel_cost_lookup(
         if (b.layer == -1) {
             target_layers.reserve(layers);
             for (int l = 0; l < layers; ++l) target_layers.push_back(l);
+        } else if (b.layer == PAD_VIA_FENCE_LAYER) {
+            // Issue #6761: a via fence.  Registered under the pseudo-layer
+            // key so it never prices a trace step; consulted only by the
+            // via-expansion branches through ``is_pad_via_fenced``.
+            target_layers.push_back(PAD_VIA_FENCE_LAYER);
         } else if (b.layer >= 0 && b.layer < layers) {
             target_layers.push_back(b.layer);
         } else {
@@ -1973,6 +1988,8 @@ RouteResult Pathfinder::route(
             // active, the per-cell penalty accumulates into the A* g_score
             // so the search prefers less-contested escape paths.
             float pad_channel_cost = get_pad_channel_cost(nx, ny, nlayer);
+            // Issue #6761: an infinite budget is a hard escape fence.
+            if (std::isinf(pad_channel_cost)) continue;
 
             // Issue #4071: diff-pair / match-group corridor attractor.
             // Subtract a bonus when this cell is reserved for our net so
@@ -2071,6 +2088,10 @@ RouteResult Pathfinder::route(
             // contested channel.
             float pad_channel_cost =
                 get_pad_channel_cost(current.x, current.y, new_layer);
+            // Issue #6761: hard escape fences -- a via may neither land on a
+            // fenced trace cell nor drop inside a via fence.
+            if (std::isinf(pad_channel_cost) ||
+                is_pad_via_fenced(current.x, current.y)) continue;
 
             // Issue #4071: corridor attractor on the via-drop destination
             // cell -- the reservation is what makes the router prefer to
@@ -2726,6 +2747,8 @@ RouteResult Pathfinder::run_astar_loop() {
             // lookup populated at ``route_resumable()`` entry.  Empty
             // budget => returns 0.0 (zero overhead).
             float pad_channel_cost = get_pad_channel_cost(nx, ny, nlayer);
+            // Issue #6761: an infinite budget is a hard escape fence.
+            if (std::isinf(pad_channel_cost)) continue;
 
             // Issue #4071: corridor attractor (resumable / negotiated path).
             // Mirrors the one-shot ``route()`` contribution above using the
@@ -2827,6 +2850,10 @@ RouteResult Pathfinder::run_astar_loop() {
             // one-shot route() via path.
             float pad_channel_cost =
                 get_pad_channel_cost(current.x, current.y, new_layer);
+            // Issue #6761: hard escape fences -- a via may neither land on a
+            // fenced trace cell nor drop inside a via fence.
+            if (std::isinf(pad_channel_cost) ||
+                is_pad_via_fenced(current.x, current.y)) continue;
 
             // Issue #4071: corridor attractor on the via-drop destination
             // (resumable / negotiated path), mirroring the one-shot via

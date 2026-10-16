@@ -71,9 +71,9 @@ authority": it is Champion's own block verdict, re-evaluated once lifted
 (#11860, #11301). Also exclude `loom:issue` and
 `loom:building` (why: the note below the query, #5285). Every evaluation ends in
 a verdict (promote, revise to `loom:triage`, block, escalate), so nothing
-evaluated is re-discovered here. `title`/`body` feed `champion-issue-promo.md`'s
-body-hash idempotency check (the issue's aggregate `updatedAt` is deliberately
-NOT used for it, #4966):
+evaluated is re-discovered here. The listing is one REST read (see "Discovery
+reads are REST" below); `champion-issue-promo.md`'s body-hash idempotency check
+reads the issue's own title and body (never its aggregate `updatedAt`, #4966):
 
 > **`loom:operator` is excluded and never examined (#11861).** It is a no-op
 > for every role; only a human removes it. A dependency-only finding never
@@ -101,14 +101,19 @@ NOT used for it, #4966):
 ```bash
 # Level, then oldest first (#11103); holds: champion-common.md "Hold set"
 HOLDS=$(loom-daemon labels list --property hold --with-retired 2>/dev/null || printf 'loom:blocked\nloom:operator\nloom:frozen'); export HOLDS
-gh issue list \
-  --label="loom:curated" \
-  --state=open \
-  --limit=500 \
-  --json number,title,body,labels,comments,createdAt \
-  --jq '($ENV.HOLDS | split("\n")) as $h | sort_by([([.labels[].name] | if index("loom:very-important") then 0 elif index("loom:important") then 1 else 2 end), .createdAt]) | .[] | select([.labels[].name] | any(IN("loom:evaluating","loom:issue","loom:building") or IN($h[])) | not) |
+gh api --paginate "repos/{owner}/{repo}/issues?labels=loom:curated&state=open&per_page=100" \
+  | jq -rs '($ENV.HOLDS | split("\n")) as $h | add | map(select(.pull_request | not)) | sort_by([([.labels[].name] | if index("loom:very-important") then 0 elif index("loom:important") then 1 else 2 end), .created_at]) | .[] | select([.labels[].name] | any(IN("loom:evaluating","loom:issue","loom:building") or IN($h[])) | not) |
   "#\(.number) \(.title)"'
 ```
+
+> **Discovery reads are REST (#12242).** Every listing in "Finding Work" is
+> one `gh api --paginate` read of the REST `issues?labels=` endpoint (100 rows
+> a page), never `gh issue list` / `gh pr list` and never with comments: those
+> are GraphQL, and one listing per queue per pass made Champion the largest
+> GraphQL spender outside the daemon. The endpoint returns issues and PRs
+> alike, so an issue listing drops `.pull_request` rows and a PR listing keeps
+> only them. Per-item reads (comments, body, CI) belong to the item's own
+> evaluation, never to discovery.
 
 > **Why the `loom:issue`/`loom:building` exclusion is required**: promotion
 > adds `loom:issue` (later `loom:building`) but never removes the proposal
@@ -121,7 +126,7 @@ If found, **read and follow instructions in `.claude/commands/loom/champion-issu
 
 If no curated issues need promotion, check for well-formed proposals, with
 Priority 2's exclusions (see its note on why `loom:issue`/`loom:building` are
-required) and `title`/`body` fetch. Also exclude `loom:curated`: a curated
+required) and its REST listing. Also exclude `loom:curated`: a curated
 proposal is Priority 2's (a `--issue` step's under step dispatch), and the
 `--non-item` pass, which runs this query, must never evaluate one (#11922):
 
@@ -129,13 +134,9 @@ proposal is Priority 2's (a `--issue` step's under step dispatch), and the
 # Architect proposals, Hermit proposals, Auditor bug reports
 HOLDS=$(loom-daemon labels list --property hold --with-retired 2>/dev/null || printf 'loom:blocked\nloom:operator\nloom:frozen'); export HOLDS
 for P in architect hermit auditor; do
-gh issue list \
-  --label="loom:$P" \
-  --state=open \
-  --limit=500 \
-  --json number,title,body,labels,comments,createdAt \
-  --jq '($ENV.HOLDS | split("\n")) as $h | sort_by([([.labels[].name] | if index("loom:very-important") then 0 elif index("loom:important") then 1 else 2 end), .createdAt]) | .[] | select([.labels[].name] | any(IN("loom:evaluating","loom:issue","loom:building","loom:curated") or IN($h[])) | not) |
-  "#\(.number) \(.title) ['"$P"']"'
+gh api --paginate "repos/{owner}/{repo}/issues?labels=loom:$P&state=open&per_page=100" \
+  | jq -rs --arg p "$P" '($ENV.HOLDS | split("\n")) as $h | add | map(select(.pull_request | not)) | sort_by([([.labels[].name] | if index("loom:very-important") then 0 elif index("loom:important") then 1 else 2 end), .created_at]) | .[] | select([.labels[].name] | any(IN("loom:evaluating","loom:issue","loom:building","loom:curated") or IN($h[])) | not) |
+  "#\(.number) \(.title) [\($p)]"'
 done
 ```
 
@@ -151,12 +152,8 @@ for `--issue`, so under `--non-item` this is its only owner, #11922):
 
 ```bash
 # Epic proposals, highest priority level first (#11103)
-gh issue list \
-  --label="loom:epic" \
-  --state=open \
-  --limit=500 \
-  --json number,title,body,labels,comments \
-  --jq 'sort_by([.labels[].name] | if index("loom:very-important") then 0 elif index("loom:important") then 1 else 2 end) | .[] | select(any(.labels[]?.name; . == "loom:frozen") | not) | "#\(.number) \(.title) [epic]"'
+gh api --paginate "repos/{owner}/{repo}/issues?labels=loom:epic&state=open&per_page=100" \
+  | jq -rs 'add | map(select(.pull_request | not)) | sort_by([.labels[].name] | if index("loom:very-important") then 0 elif index("loom:important") then 1 else 2 end) | .[] | select(any(.labels[]?.name; . == "loom:frozen") | not) | "#\(.number) \(.title) [epic]"'
 ```
 
 If found, **read and follow instructions in `.claude/commands/loom/champion-epic.md`**. Epics have their own evaluation criteria focused on structure and phase decomposition.
@@ -166,14 +163,9 @@ If found, **read and follow instructions in `.claude/commands/loom/champion-epic
 If no epics need evaluation, check for PRs parked at the Doctor-cycle cap (`sweep.max_doctor_cycles` exhausted — `loom:blocked` **and** `loom:changes-requested`). Nothing else in the pipeline ever reconsiders this state, so without this pass it is terminal for automation:
 
 ```bash
-# gh ANDs repeated --label values, so this returns exactly the parked set.
-gh pr list \
-  --label="loom:blocked" \
-  --label="loom:changes-requested" \
-  --state=open \
-  --limit=500 \
-  --json number,title,updatedAt,labels \
-  --jq '.[] | select(any(.labels[]?.name; . == "loom:frozen") | not) | "#\(.number) \(.title)"'
+# REST ANDs comma-joined labels, so this returns exactly the parked set (PR rows only).
+gh api --paginate "repos/{owner}/{repo}/issues?labels=loom:blocked,loom:changes-requested&state=open&per_page=100" \
+  | jq -rs 'add | .[] | select(.pull_request) | select(any(.labels[]?.name; . == "loom:frozen") | not) | "#\(.number) \(.title)"'
 ```
 
 Ignore any that also carry `loom:operator` (already routed to a human). If found, **read and follow instructions in `.claude/commands/loom/champion-pr-merge.md` → "Capped-PR Recovery Pass"**: read the full rejection history, apply the forward-progress test, and either grant one more Doctor→Judge cycle (remove `loom:blocked` only), keep the PR parked, or recommend closure to the operator — always with a rationale comment. This pass never merges or closes (Champion's only close authority is the proposal "premise-false close gate", `champion-issue-promo.md` Step 4, #7657 — never a PR).

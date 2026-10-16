@@ -24,7 +24,7 @@
 #       "sweep exits -> renewal naturally stops" contract, entirely via a
 #       real background process against the real script (no `gh` needed
 #       for the termination half; the PATCH stub records call count too)
-#   (h) stop kills a given PID
+#   (h) stop refuses a non-renewer PID (fail closed)
 #   (i) renew-once's own-yield guard (#6485): a candidate lease whose own
 #       (host, sweep) has a matching `loom:lease-yield` comment is NOT
 #       PATCHed and exits 4 — both the miss (no matching yield) and hit
@@ -453,14 +453,18 @@ fi
 # Defensive cleanup in case the assertion above failed the self-termination.
 kill "$LOOP_PID" 2>/dev/null || true
 
-# --- (h) stop kills a given PID -------------------------------------------
+# --- (h) stop refuses a non-renewer PID, failing closed (#11086) ------------
+# Non-zero exits are asserted only with a real binary (LEASE_RENEWER_DAEMON);
+# the default stub daemon answers every `lease renewer` verb with 0. Positive
+# stop cases live in test-sweep-lease-renew-lifecycle.sh.
 sleep 30 &
 BG_PID=$!
-"$SCRIPT" stop "$BG_PID" > /dev/null 2>&1
+H_RC=0
+"$SCRIPT" stop "$BG_PID" > /dev/null 2>&1 || H_RC=$?
+LOOM_DAEMON_BIN=/nonexistent/loom-daemon "$SCRIPT" stop "$BG_PID" > /dev/null 2>&1 || true
 sleep 0.3
-STILL_ALIVE="false"
-kill -0 "$BG_PID" 2>/dev/null && STILL_ALIVE="true"
-assert_true "$([[ "$STILL_ALIVE" == "false" ]] && echo true || echo false)" "(h) stop kills the given PID"
+assert_true "$(kill -0 "$BG_PID" 2>/dev/null && echo true || echo false)" "(h) stop leaves an unrelated PID alive (also with no loom-daemon)"
+[[ -z "${LEASE_RENEWER_DAEMON:-}" ]] || assert_true "$([[ "$H_RC" -ne 0 ]] && echo true || echo false)" "(h) stop of an unrelated PID exits non-zero"
 kill "$BG_PID" 2>/dev/null || true
 
 # --- (i) own-yield guard (#6485) -------------------------------------------

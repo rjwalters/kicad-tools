@@ -1284,8 +1284,8 @@ assert_doc_lacks "$CHAMPION_MD" \
     "criterion #5 no longer derives staleness from the bot-comment-bumped updatedAt field (#6843)"
 
 assert_doc_contains "$CHAMPION_MD" \
-    'PR_DATA=$(gh pr view <number> --json createdAt,commits,comments)' \
-    "criterion #5 reads commits + comments (+ createdAt floor) instead of updatedAt (#6843)"
+    'PR_DATA=$(cat "$(git rev-parse --git-common-dir)/loom-champion-facts-pr-<number>.json")' \
+    "criterion #5 reads the PR facts' commits + comments (+ createdAt floor) instead of updatedAt (#6843, #12242)"
 
 assert_doc_contains "$CHAMPION_MD" \
     'select((.body | test("champion:|Automated by Champion role")) | not) | .createdAt)' \

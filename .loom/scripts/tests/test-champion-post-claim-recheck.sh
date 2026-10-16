@@ -105,12 +105,17 @@ run_case "already building" OPEN "loom:building,loom:evaluating" release
 run_case "escalated to the operator" OPEN "loom:architect,loom:operator,loom:evaluating" release
 run_case "sent back to Curator" OPEN "loom:triage,loom:evaluating" release
 run_case "closed" CLOSED "loom:architect,loom:evaluating" release
+run_case "blocked since discovery" OPEN "loom:blocked,loom:evaluating" release
+run_case "blocked, proposal label still on" OPEN "loom:curated,loom:blocked,loom:evaluating" release
+run_case "frozen since discovery" OPEN "loom:frozen,loom:evaluating" release
+run_case "frozen, proposal label still on" OPEN "loom:architect,loom:frozen,loom:evaluating" release
 run_case "curated proposal awaiting a verdict" OPEN "loom:curated,loom:evaluating" keep
 run_case "architect proposal awaiting a verdict" OPEN "loom:architect,loom:evaluating,priority:p2" keep
 run_case "a lookalike label is not a verdict" OPEN "loom:hermit,loom:issue-template,loom:evaluating" keep
+run_case "a blocked/frozen lookalike is not a hold" OPEN "loom:hermit,loom:blocked-unnamed,loom:frozen-ish,loom:evaluating" keep
 
 VERDICT=$(awk '/^### Verdict-time recheck/,/^## Promotion Workflow/' "$PROMO_MD")
-if [[ "$VERDICT" == *'`loom:issue`, `loom:building` or `loom:operator`'* ]]; then
+if [[ "$VERDICT" == *'`loom:issue`, `loom:building`, `loom:operator`, `loom:blocked` or `loom:frozen`'* ]]; then
   pass "the verdict-time recheck also aborts on a verdict already written"
 else
   fail "the verdict-time recheck also aborts on a verdict already written"

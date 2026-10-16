@@ -729,6 +729,24 @@ the same lease semantics, **keyed by role**:
   exits 0, and only then does the role add its label. The label is a
   projection of the lease, never the evidence. After its own lease is posted,
   an unverifiable ordering proceeds, as on the issue path.
+- **Doctor activity guard (#12105).** The role key means a Doctor's `claim`
+  sees only other Doctors. So before it posts, a Doctor also stands down
+  (exit 7, nothing written) when another actor is working the PR: a live
+  `loom:pr-lease` of another role on the PR; a live `loom:lease host=` record
+  on the PR or on its single closing issue that is not its own `(host,
+  sweep)` (an attended builder's lease lives there); or a push to the head
+  branch by a login other than the workspace's writer identity within
+  `LOOM_DOCTOR_PUSH_WINDOW_MINUTES` (default 15, `0` off), read from the
+  repository activity API. A push here is a `push`, `force_push` or
+  `branch_creation` activity record, so a rebase or amend counts. An attended
+  Doctor that pushes under a person's login (not the writer App) sees its own
+  pushes as foreign; it runs with `LOOM_DOCTOR_PUSH_WINDOW_MINUTES=0`.
+  These are evidence beyond the PR's own lease list,
+  so an unreadable closing-issue list or activity read proceeds. A fork head
+  is not checked. A re-attach to the claimant's own live lease skips the
+  guard. On the step path exit 7 is the refusal `peer_active`, which the
+  outcome ledger cools down like `claimed`. Code:
+  `loom-daemon/src/cli/pr_lease/activity.rs`.
 - **Renewal** is a detached `lease pr renew-loop`, one per
   `(repo, host, sweep#pr-<role>, pr)` through the issue renewer's ownership
   store (#10229). Every 300 s (`SWEEP_LEASE_RENEW_INTERVAL_SECS`) it makes one

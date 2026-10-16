@@ -71,7 +71,6 @@ test-check-host-sleep.sh
 test-check-defaults-version-bump.sh
 test-check-ingest-key-file.sh
 test-check-main-freshness.sh
-test-check-pipefail-early-exit.sh
 test-check-promotion-landed.sh
 test-check-quarantine-stashes.sh
 test-check-runtime-capabilities.sh
@@ -229,6 +228,7 @@ test-sync-labels-migrate-retired.sh
 test-token-cache-affinity.sh
 test-claude-wrapper-proxy-rotation.sh
 test-sync-labels-repo-flag.sh
+test-sync-labels-write-failures.sh
 test-verdict-staleness-guard.sh
 test-verify-install-scope.sh
 test-version-bump-workflow-identity.sh
@@ -316,10 +316,6 @@ tests/hermit/test-stateless-ceremony.sh
 # scripts/ — repo-root tooling suites. Hermetic: builds a disposable git
 # repo under mktemp -d with its own identity, no network, no gh.
 scripts/test-changelog.sh
-
-# #11991: check-guard-destructive-drift.sh keeps GH_TOKEN off curl argv.
-# Hermetic: recording curl stub on PATH under mktemp -d; no network or forge.
-scripts/test-check-guard-destructive-drift-argv.sh
 
 # #11790: spawn-claude.sh's container gh credentials and
 # `gh-shim container-mount` sink mount. Hermetic: stub docker + stub daemon

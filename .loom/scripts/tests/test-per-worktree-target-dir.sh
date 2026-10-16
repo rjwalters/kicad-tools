@@ -71,6 +71,11 @@ LIB_SH="$SCRIPTS_DIR/lib/cargo-target-dir.sh"
 source "$SCRIPT_DIR/lib/require-daemon-bin.sh"
 loom_test_require_daemon_bin "$SCRIPTS_DIR" "cargo-target-dir"
 
+# An ambient CARGO_TARGET_DIR overrides the fixtures' own target-dir redirects
+# (.cargo/config.toml, fake build output); cases that test the ambient variable
+# set it inline per command (#10703).
+unset CARGO_TARGET_DIR
+
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'

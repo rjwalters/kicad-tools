@@ -360,3 +360,274 @@ def build_pad_lane_budgets(
         budget.source_net = int(lane.net)
         budgets.append(budget)
     return budgets
+
+
+# ---------------------------------------------------------------------------
+# Escape fences (Issue #6761)
+# ---------------------------------------------------------------------------
+#
+# The soft lane cost above shapes *where* a net crosses a neighbour's lane,
+# but it is one more term in a sum: on board 05 PHASE_C still left U2.9 with
+# a 45-degree F.Cu diagonal across U2.10's and U2.11's lanes and dropped its
+# 0.8 mm via at their far end, leaving one exit pocket for two pads (GND_SENSE
+# U2.10 or VM U2.11 stranded, run to run).  Pricing the via harder only moved
+# the blocking via (#6422, #6426, #6415).
+#
+# An escape fence is the hard form of the same lane, scoped to the one place it
+# is unambiguous: on a column whose pitch is below a via footprint of its nets
+# (:func:`tight_fence_lanes`), a connection that *starts or ends on a pad of
+# that column* may not put its trace centreline inside another-net lane of that
+# same column (dilated by its own half width + clearance + the narrowest
+# foreign trace's half width), and may not drop a via whose disc would reach
+# such a lane's centreline -- within the lane band, and for vias also within
+# one via footprint past the lane end.  The net therefore leaves its own pad
+# straight out of the column (or changes layer inside its own lane) before it
+# turns, and every neighbour keeps its own straight exit.
+#
+# Nets that do not terminate on the column are untouched, and so is a search
+# the fences make impossible: :class:`~kicad_tools.router.cpp_backend.CppPathfinder`
+# retries once without fences, so a fence can reshape a route but never lose a
+# connection the unfenced search would find.  ``KCT_DISABLE_ESCAPE_FENCES=1``
+# restores the pre-#6761 search byte-for-byte.
+
+ESCAPE_FENCE_DISABLE_ENV = "KCT_DISABLE_ESCAPE_FENCES"
+
+#: ``PadChannelBudget.layer`` value of a via-only fence (mirrors the C++
+#: ``PAD_VIA_FENCE_LAYER``).
+PAD_VIA_FENCE_LAYER = -2
+
+#: Two pads share a column when their long-axis centre coordinates agree to
+#: within this many mm (rounded to this many decimals in the column key).
+_COLUMN_KEY_DECIMALS = 2
+
+
+def escape_fences_disabled() -> bool:
+    """True when ``KCT_DISABLE_ESCAPE_FENCES`` is set to a non-empty, non-zero value."""
+    value = os.environ.get(ESCAPE_FENCE_DISABLE_ENV, "")
+    return value.strip() not in ("", "0")
+
+
+@dataclass(frozen=True)
+class FenceLane:
+    """One fine-pitch lane as the escape fences see it.
+
+    ``column`` identifies the pad column (package, axis, outward direction
+    and the pads' shared long-axis centre coordinate); ``layer`` is the grid
+    layer index of the pad's copper.
+    """
+
+    column: tuple[str, str, int, float]
+    lane: PadLane
+    layer: int
+
+
+def lane_column(lane: PadLane, pad: Pad) -> tuple[str, str, int, float]:
+    """The column key of ``lane`` (``pad`` is the lane's own pad)."""
+    coord = pad.x if lane.axis == "x" else pad.y
+    return (
+        str(lane.pad_key[0]),
+        lane.axis,
+        int(lane.direction),
+        round(coord, _COLUMN_KEY_DECIMALS),
+    )
+
+
+def collect_fence_lanes(
+    pads: Iterable[Pad],
+    regions: Iterable[Any],
+    layer_index: Any,
+    length: float = LANE_LENGTH_MM,
+) -> list[FenceLane]:
+    """Every fine-pitch lane with its column key and pad layer index.
+
+    ``layer_index`` maps a pad to its grid layer index (the autorouter passes
+    ``grid.layer_to_index(pad.layer.value)``).
+    """
+    pad_list = list(pads)
+    by_key = {p.key: p for p in pad_list}
+    out: list[FenceLane] = []
+    for lane in collect_fine_pitch_lanes(pad_list, regions, length):
+        pad = by_key.get(lane.pad_key)
+        if pad is None:
+            continue
+        out.append(FenceLane(lane_column(lane, pad), lane, int(layer_index(pad))))
+    return out
+
+
+def column_pitch(fence_lanes: Iterable[FenceLane]) -> float | None:
+    """Smallest centre-to-centre spacing of the lanes of one column, or ``None``."""
+    centres = sorted(
+        ((fl.lane.y1 + fl.lane.y2) if fl.lane.axis == "x" else (fl.lane.x1 + fl.lane.x2)) * 0.5
+        for fl in fence_lanes
+    )
+    gaps = [b - a for a, b in zip(centres, centres[1:], strict=False) if b - a > 1e-6]
+    return min(gaps) if gaps else None
+
+
+def tight_fence_lanes(
+    fence_lanes: Iterable[FenceLane],
+    via_diameter: Any,
+    via_clearance: float,
+) -> list[FenceLane]:
+    """Keep the lanes of columns too tight for a via of their own nets.
+
+    A column qualifies when its pitch is below the largest ``via_diameter(net)
+    + via_clearance`` among its lanes' nets -- a lane narrower than a via
+    footprint, so a layer change or a turn inside the band takes room a
+    neighbour needs for its own exit.  Board 05: U2 (0.65 mm pitch, 0.6/0.8 mm
+    vias) is fenced, U1 (0.8 mm pitch, 0.6 mm vias) is not.  Single-pad
+    columns never qualify.
+    """
+    by_column: dict[tuple[str, str, int, float], list[FenceLane]] = {}
+    for fl in fence_lanes:
+        by_column.setdefault(fl.column, []).append(fl)
+    kept: list[FenceLane] = []
+    for lanes in by_column.values():
+        pitch = column_pitch(lanes)
+        if pitch is None:
+            continue
+        footprint = max(float(via_diameter(fl.lane.net)) for fl in lanes) + float(via_clearance)
+        if pitch < footprint - 1e-9:
+            kept.extend(lanes)
+    return kept
+
+
+def _cells_within(center: float, band: float, origin: float, res: float) -> tuple[int, int]:
+    """Inclusive index range of cells whose centre is strictly within ``band`` of ``center``.
+
+    Cell ``k``'s centre is ``origin + k * res`` (the grid convention
+    :func:`lane_grid_rect` uses).  The range is empty (``lo > hi``) when no
+    centre qualifies.
+    """
+    eps = 1e-9
+    lo = math.floor((center - band - origin) / res + eps) + 1
+    hi = math.ceil((center + band - origin) / res - eps) - 1
+    return lo, hi
+
+
+def escape_fence_rects(
+    fence_lanes: Iterable[FenceLane],
+    terminal_keys: Iterable[Any],
+    net: int,
+    grid: Any,
+    *,
+    trace_band_mm: float,
+    via_band_mm: float,
+) -> list[tuple[tuple[int, int, int, int], int, int]]:
+    """Fence rectangles for one connection, as ``(rect, layer, source_net)``.
+
+    ``terminal_keys`` are the connection's start and end pad keys.  For every
+    column one of them belongs to, each lane of that column owned by another
+    net yields:
+
+    * a **trace fence** on the lane's pad layer -- the lane's along-axis cells
+      by the cells whose centre lies strictly within ``trace_band_mm`` of the
+      lane centreline -- and
+    * a **via fence** (``layer == PAD_VIA_FENCE_LAYER``) -- the cells strictly
+      within ``via_band_mm`` of the centreline, along the lane and one
+      ``via_band_mm`` past its far end.
+
+    ``trace_band_mm`` should be the routing net's half width + clearance + the
+    narrowest foreign half width, ``via_band_mm`` its via radius + via
+    clearance + the same foreign half width: then a cell outside the fence
+    leaves a minimum-width straight exit along the neighbour's centreline.
+    Lanes of ``net`` itself (including same-net neighbours) are never fenced.
+    Rect bounds are inclusive grid indices, clipped to the grid.
+    """
+    lanes = list(fence_lanes)
+    by_pad = {fl.lane.pad_key: fl.column for fl in lanes}
+    columns = {by_pad[k] for k in terminal_keys if k in by_pad}
+    if not columns:
+        return []
+    res = float(grid.resolution)
+    ox = float(grid.origin_x)
+    oy = float(grid.origin_y)
+    cols = int(grid.cols)
+    rows = int(grid.rows)
+
+    def clip(gx1: int, gy1: int, gx2: int, gy2: int) -> tuple[int, int, int, int] | None:
+        gx1, gy1 = max(0, gx1), max(0, gy1)
+        gx2, gy2 = min(cols - 1, gx2), min(rows - 1, gy2)
+        if gx1 > gx2 or gy1 > gy2:
+            return None
+        return gx1, gy1, gx2, gy2
+
+    out: list[tuple[tuple[int, int, int, int], int, int]] = []
+    for fl in lanes:
+        lane = fl.lane
+        if fl.column not in columns or lane.net == net:
+            continue
+        rect = lane_grid_rect(lane, grid)
+        if rect is None:
+            continue
+        gx1, gy1, gx2, gy2 = rect
+        if lane.axis == "x":
+            centre = (lane.y1 + lane.y2) * 0.5
+            t_lo, t_hi = _cells_within(centre, trace_band_mm, oy, res)
+            v_lo, v_hi = _cells_within(centre, via_band_mm, oy, res)
+            if lane.direction > 0:
+                far = _cells_within(lane.x2, via_band_mm, ox, res)[1]
+                v_along = (gx1, max(gx2, far))
+            else:
+                far = _cells_within(lane.x1, via_band_mm, ox, res)[0]
+                v_along = (min(gx1, far), gx2)
+            trace = clip(gx1, t_lo, gx2, t_hi)
+            via = clip(v_along[0], v_lo, v_along[1], v_hi)
+        else:
+            centre = (lane.x1 + lane.x2) * 0.5
+            t_lo, t_hi = _cells_within(centre, trace_band_mm, ox, res)
+            v_lo, v_hi = _cells_within(centre, via_band_mm, ox, res)
+            if lane.direction > 0:
+                far = _cells_within(lane.y2, via_band_mm, oy, res)[1]
+                v_along = (gy1, max(gy2, far))
+            else:
+                far = _cells_within(lane.y1, via_band_mm, oy, res)[0]
+                v_along = (min(gy1, far), gy2)
+            trace = clip(t_lo, gy1, t_hi, gy2)
+            via = clip(v_lo, v_along[0], v_hi, v_along[1])
+        if trace is not None:
+            out.append((trace, fl.layer, int(lane.net)))
+        if via is not None:
+            out.append((via, PAD_VIA_FENCE_LAYER, int(lane.net)))
+    return out
+
+
+def build_escape_fence_budgets(
+    fence_lanes: Iterable[FenceLane],
+    terminal_keys: Iterable[Any],
+    net: int,
+    grid: Any,
+    *,
+    trace_band_mm: float,
+    via_band_mm: float,
+) -> list:
+    """:func:`escape_fence_rects` as hard ``router_cpp.PadChannelBudget`` values.
+
+    A trace fence carries an infinite ``overflow_penalty`` on its layer (the
+    C++ A* refuses an infinitely priced cell); a via fence uses
+    ``layer == PAD_VIA_FENCE_LAYER``.  Empty when the C++ backend is missing.
+    """
+    try:
+        from .cpp_backend import router_cpp as _router_cpp
+    except ImportError:
+        return []
+    if _router_cpp is None:
+        return []
+    budgets: list = []
+    for rect, layer, source_net in escape_fence_rects(
+        fence_lanes,
+        terminal_keys,
+        net,
+        grid,
+        trace_band_mm=trace_band_mm,
+        via_band_mm=via_band_mm,
+    ):
+        budget = _router_cpp.PadChannelBudget()
+        budget.gx1, budget.gy1, budget.gx2, budget.gy2 = rect
+        budget.layer = int(layer)
+        budget.capacity = 0
+        budget.overflow_penalty = math.inf
+        budget.origin_pad_ref_hash = 0
+        budget.source_net = int(source_net)
+        budgets.append(budget)
+    return budgets

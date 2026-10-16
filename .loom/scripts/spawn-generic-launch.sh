@@ -38,9 +38,7 @@
 #
 # `LOOM_GENERIC_EXTRA_ARGS` / `LOOM_GENERIC_MODEL_ENV` /
 # `LOOM_GENERIC_EFFORT_FLAG` / `LOOM_GENERIC_EFFORT_VALUE_PREFIX` have no
-# reader inside the frozen spawn-generic.sh (`settled` in
-# scripts/shell-allowlist.txt -- zero fixes in six months, may shrink, never
-# grow), so this script performs their mapping itself: extra args become
+# reader inside spawn-generic.sh (kept stable on purpose), so this script performs their mapping itself: extra args become
 # ordinary argv tokens spawn-generic.sh's own passthrough-args loop already
 # forwards verbatim, and the effort flag+value do the same. modelFlag needs
 # no such translation -- LOOM_GENERIC_MODEL_FLAG is already spawn-generic.sh's

@@ -160,10 +160,8 @@ remove_run_artifacts() {
 # and `defaults/scripts/sweep-run-registry.sh` and MUST stay byte-identical in
 # both: `defaults/scripts/tests/test-sweep-lease-renew.sh` case (q) diffs the
 # two copies and fails the suite on any drift. It is deliberately NOT extracted
-# into `defaults/scripts/lib/`: ADR-0018 / `scripts/shell-allowlist.txt` admits
-# no category for a NEW shared shell library (`contract` is BASELINE-ONLY, and
-# a library is not bootstrap/hook-entry/vendored/stub/test), so a new lib file
-# would fail `scripts/check-shell-allowlist.sh`. The machine-checked
+# into `defaults/scripts/lib/`: ADR-0018 rules out a NEW shared shell library
+# (.loom/docs/shell-language-policy.md). The machine-checked
 # byte-identity is the substitute for `source`. Edit one copy, then run
 # `diff` — or just let case (q) tell you.
 #

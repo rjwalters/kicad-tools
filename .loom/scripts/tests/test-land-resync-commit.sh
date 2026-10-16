@@ -96,6 +96,8 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HELPERS_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 SCRIPT="$HELPERS_DIR/land-resync-commit.sh"
+# shellcheck source=lib/write-scope-fixture.sh
+source "$SCRIPT_DIR/lib/write-scope-fixture.sh"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -202,6 +204,20 @@ make_primary() {
     git -C "$WORKDIR/$clone_name" add -A
     git -C "$WORKDIR/$clone_name" commit -q -m init
     git -C "$WORKDIR/$clone_name" push -q -u origin main
+    register_fixture "$origin_name" "$clone_name"
+}
+
+# register_fixture <origin-name> <clone-name> -> makes the checkout a repository
+# the real #9548 write-scope gate admits (create-pr.sh asks it, and on a host
+# with an installed loom-daemon a local-path origin is refused), then routes
+# git traffic for that GitHub URL back to the local bare origin so the suite
+# still fetches and pushes for real. Nothing is stubbed: the gate decides.
+register_fixture() {
+    local origin_name="$1" clone_name="$2"
+    write_scope_register "$WORKDIR/$clone_name" example/land-resync-fixture
+    git -C "$WORKDIR/$clone_name" config \
+        "url.$WORKDIR/$origin_name.git.insteadOf" \
+        "https://github.com/example/land-resync-fixture.git"
 }
 
 # advance_origin <origin-name> <clone-name> -> a third party lands an
@@ -585,7 +601,7 @@ else
     fail "a fetch failure after the commit exits 1 with the resync commit left local (rc=$RC, out=$OUT)"
 fi
 STRANDED_SHA="$(git -C "$WORKDIR/primary-l" rev-parse HEAD)"
-git -C "$WORKDIR/primary-l" remote set-url origin "$WORKDIR/origin-l.git"
+git -C "$WORKDIR/primary-l" remote set-url origin "https://github.com/example/land-resync-fixture.git"
 OUT="$(cd "$WORKDIR/primary-l" && "$SCRIPT" 2>&1)"; RC=$?
 ORIGIN_LOG="$(git --git-dir="$WORKDIR/origin-l.git" log --format='%H %s' main)"
 if [[ $RC -eq 0 ]] && grep -q "from an earlier run" <<< "$OUT" && grep -q "pushed" <<< "$OUT" && \

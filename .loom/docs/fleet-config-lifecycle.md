@@ -168,6 +168,17 @@ alone. Do not edit the file by hand: it belongs to the sync, which will
 rewrite or remove it on the next write pass. A host-only override goes in
 `.loom-local/local.json`.
 
+**A repo that leaves the desired set keeps its file.** The sync only visits
+desired, cloned repos, so when a repo moves to `fleet: false`, becomes
+`firewall: true`, or is removed from the roster, its last
+`.loom-local/fleet-repo.json` stays in place and keeps feeding the resolver.
+That is deliberate: the sync never touches a `firewall` repo, and it stops
+managing the others the moment they leave the set. To drop the stale tier,
+delete `<repo>/.loom-local/fleet-repo.json` by hand. Removals the sync does
+make are journaled (`config.rendered`, `event: removed`) when the config
+journal is enabled, and when several repos fail in one pass the status error
+names the first and counts the rest.
+
 `loom-daemon status` reports it in the `Fleet store:` block, one
 `per-repo fleet tier:` line per repo that has a config or a file (`applied`,
 `rendered`, `removed` or `DRIFT`, with the top-level keys the fleet sets), and

@@ -1023,6 +1023,9 @@ def create_bldc_controller(output_dir: Path) -> Path:
         ref_start=1,
         ref_prefix="Q",
         mosfet_value="IRLZ44N",
+        # Issue #6290: G=1/D=2/S=3 pin numbers match the TO-220-3_Vertical
+        # pads; Device:Q_NMOS numbers them D/G/S and fails LVS.
+        mosfet_symbol="board05_custom:Q_NMOS_GDS",
         phase_labels=["C", "B", "A"],
         phase_spacing=75,
         hs_ls_spacing=40,

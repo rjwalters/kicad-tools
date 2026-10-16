@@ -284,7 +284,7 @@ Local verification:
 - [ ] Fast-tier pre-flight passes (`loom-daemon preflight --issue N`); CI runs the suite
 - [ ] Formatter + linter run on changed files (see "Format and Lint Changed Files" below) — a format-only CI failure is a guaranteed Judge rejection
 - [ ] Commits are signed off if required (`commit.signoff: true` or a DCO requirement — `git commit --signoff`; see "DCO sign-off" above)
-- [ ] Relevant tests pass. Production shell changed and CI runs `shell-budget --check`? After the final commit, `loom-daemon shell-budget --check --base <PR base, default origin/main>`: nonzero = this branch's own growth (never pre-existing); no review until counted shell is cut or moved to the daemon and a rerun exits 0. Comments, follow-up issues or arbitrary trailers are not permission
+- [ ] Relevant tests pass
 - [ ] Diff adds/moves a direct forge caller? Rebase onto the landing base; no `defaults/forge/manifest.toml` there = no inventory command. Else declare it under its `[[operation.callers]]` (`defaults/forge/README.md`; a move must drop the old path, which no command flags), then run `loom-daemon forge-inventory validate --manifest-dir defaults/forge` and `gate --manifest-dir defaults/forge --baseline defaults/forge/call-bypass-baseline.toml` (bare forms read the binary's embedded copy). Nonzero blocks review, even if pre-existing: fix, rerun; never add baseline debt or weaken the gate.
 - [ ] Each criterion has explicit verification
 - [ ] Ran the "defaults/ Version-Bearing-Files Gate" block below (not just read it) — exited 0 (version-bearing files bump at merge, #7743).

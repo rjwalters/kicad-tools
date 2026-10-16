@@ -134,6 +134,34 @@ assert_contains "$OUT" "MISSING FILE" "missing-file miss is labeled"
 assert_contains "$OUT" "src/does-not-exist.py" "the specific missing path is named"
 
 echo
+echo "=== Fixture 2b: existing directory citations are not MISSING FILE (#10191) ==="
+mkdir -p "$FIXTURE_REPO/tools/probes"
+(
+    cd "$FIXTURE_REPO" || exit 1
+    printf 'x\n' > tools/probes/p.py
+    git add tools
+    git commit -qm "add tools/probes" >/dev/null
+    git update-ref refs/remotes/origin/main refs/heads/main
+)
+DIR_BODY="$BODY_DIR/dir.md"
+cat > "$DIR_BODY" <<'EOF'
+Scope: tools/probes and `src/foo.py:3`.
+EOF
+OUT="$(run_vpr "$DIR_BODY")"
+RC=$?
+assert_eq "0" "$RC" "an existing directory citation exits 0"
+assert_contains "$OUT" "all references check out" "an existing directory is not reported as a miss"
+
+DIR_MISSING_BODY="$BODY_DIR/dir-missing.md"
+cat > "$DIR_MISSING_BODY" <<'EOF'
+Scope: tools/nonexistent-dir and tools/probes.
+EOF
+OUT="$(run_vpr "$DIR_MISSING_BODY")"
+RC=$?
+assert_eq "1" "$RC" "a nonexistent directory citation still exits 1"
+assert_contains "$OUT" "tools/nonexistent-dir" "the nonexistent directory is named as a miss"
+
+echo
 echo "=== Fixture 3: bad line range ==="
 BADRANGE_BODY="$BODY_DIR/badrange.md"
 cat > "$BADRANGE_BODY" <<'EOF'

@@ -1,6 +1,6 @@
 {
-  "loom_version": "0.19.1166",
-  "loom_commit": "8a9aad12e32504cea9a7c7d2ed774749c487f875",
+  "loom_version": "0.19.1167",
+  "loom_commit": "485f7d1deeb27051ebafb710f0b0cda276b49399",
   "install_date": "2026-08-10",
   "installed_files": [
     ".claude/agents/loom-architect.md",
@@ -433,9 +433,7 @@
     ".loom/scripts/tests/test-merge-pr-head-mismatch.sh",
     ".claude/commands/loom/sweep-arguments.md",
     ".loom/scripts/tests/fixtures/config_resolver/.loom-local/fleet-repo.json",
-    ".loom/scripts/check-dependabot-labels.sh",
     ".loom/scripts/tests/lib/assert.sh",
-    ".loom/scripts/tests/test-check-dependabot-labels.sh",
     ".loom/scripts/tests/test-ci-suite-manifest-installed-layout.sh",
     ".loom/scripts/tests/test-claude-wrapper-proxy-rotation.sh",
     ".loom/scripts/tests/test-create-pr-rate-limit-fallback.sh",
@@ -516,9 +514,27 @@
     ".loom/scripts/tests/test-check-stale-blocked.sh",
     ".loom/scripts/tests/test-merge-pr-expected-head.sh",
     ".loom/scripts/tests/test-version-bump-workflow-identity.sh",
-    ".loom/scripts/tests/test-write-scope.sh"
+    ".loom/scripts/tests/test-write-scope.sh",
+    ".loom/scripts/tests/test-sync-labels-write-failures.sh",
+    ".agents/skills/loom-curator-estimate/SKILL.md",
+    ".claude/commands/loom/curator-estimate.md",
+    ".loom/docs/cpu-budget.md",
+    ".loom/docs/lease-renewal.md",
+    ".loom/docs/session-mode.md",
+    ".loom/hooks/guard-destructive-generic.sh",
+    ".loom/hooks/guard-loom-workflow.sh",
+    ".loom/roles/curator-estimate.md",
+    ".loom/scripts/skip-labels.sh",
+    ".loom/scripts/spawn-generic-launch.sh",
+    ".loom/scripts/sweep-lease-renew.sh",
+    ".loom/scripts/tests/test-cargo-target-dir-reclaim.sh",
+    ".loom/scripts/tests/test-daemon-update-fixture-containment.sh",
+    ".loom/scripts/tests/test-land-resync-commit.sh",
+    ".loom/scripts/tests/test-per-worktree-target-dir.sh",
+    ".loom/scripts/tests/test-spawn-claude-memory-max.sh",
+    ".loom/scripts/verify-proposal-refs.sh"
   ],
-  "last_resync": "2026-10-15",
+  "last_resync": "2026-10-16",
   "loom_source_remote": "https://github.com/rjwalters/loom.git",
   "requires_daemon": "0.19.1081"
 }

@@ -58,7 +58,7 @@ git clone --depth 1 -b v2.4.2  https://github.com/CLIUtils/CLI11 && cmake -S CLI
 
 The fastroute row is `non-comparable` because 11 constraints are lost, none of them caused by #6593 or #6594 (both closed on 2026-10-14, before this run's base):
 
-- **10 `dru` entries:** JLCPCB fab-floor rules the DSN exporter does not represent (silk clearance, `hole_clearance` x2, `annular_width` x2, `edge_clearance`, `physical_hole_clearance`, text thickness, text height, and the `Reviewed clearance - Power` clearance). Tracked in #6765.
+- **10 `dru` entries:** JLCPCB fab-floor rules the DSN exporter does not represent (silk clearance, `hole_clearance` x2, `annular_width` x2, `edge_clearance`, `physical_hole_clearance`, text thickness, text height, and the `Reviewed clearance - Power` clearance). Since #6768 the nine fab-floor rules go to `not_routing_rules` and are no longer losses. `Reviewed clearance - Power` is still counted on main (`847666c8`). This is not an exporter gap: the frozen pre-route `.kicad_pro` puts no net in `Power` (see #6800 and the current-main note in [`verdict.md`](verdict.md)).
 - **1 `ses_import` entry** ("SES resolution um 10: importer assumes 1 unit = 1 um"). This was a false loss: since #6593 the importer honours `(resolution um 10)` and the imported 30.17 mm agrees with TraceMaker's 29.66 mm. `run.py:ses_import` now reports a loss only when the resolution the importer applied differs from the one the session declares.
 
 This is a single run on one simple board, so it says nothing about router quality. The full matrix is in [`verdict.md`](verdict.md) (#6335).
@@ -155,4 +155,4 @@ Findings at the build revision (issues filed separately; out of scope here):
 
 - **#6593 (closed):** the SES importer dropped every wire from a standard Freerouting/fastroute session, because nets nest the wires under `network_out`. It also ignored `(resolution um 10)`.
 - **#6594 (closed):** the DSN exporter read neither the `.kicad_pro` net classes nor the `.kicad_dru`, and emitted no zones or keepouts. On board 09, whose pad nets use the KiCad-10 name-only `(net "X")` form, it exported **no nets or pads at all**.
-- **#6765 (open):** the DSN exporter still does not represent the JLCPCB fab-floor `.kicad_dru` rules. Until it does, a fastroute row stays `non-comparable` on any board whose `.kicad_dru` carries them (10 losses on board 00).
+- **#6765 (code superseded by #6768 and #6784; PR #6770 is empty):** the fab-floor `.kicad_dru` rules are no longer losses. The class-scoped `Reviewed clearance - <Class>` rules (22 across 00–07) are still counted on main (`847666c8`). The cause is that the manifest pairs the pre-route `.kicad_pro`, which defines only `Default`, with the routed `.kicad_dru`. It is not the exporter, which writes class clearances when the project defines the classes. Tracked in **#6800**.

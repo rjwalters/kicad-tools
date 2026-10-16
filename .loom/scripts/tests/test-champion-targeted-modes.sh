@@ -204,8 +204,10 @@ check "--issue: the four terminal verdicts plus closed and not-eligible, no defe
   eval '[[ "$VERDICTS" == "promoted revise blocked operator closed not-eligible " ]]'
 check "--issue: revise sends the issue to Curator as loom:triage without loom:curated (#11860)" \
   doc_has "$TARGETED_MD" '`loom:curated` and the claim removed, `loom:triage` added'
-check "--issue: a blocked issue is re-evaluated only once its blocker has closed (#11860)" \
-  doc_has "$TARGETED_MD" 'or a merged PR, remove `loom:blocked` and go on; else outcome `blocked`'
+check "--issue: a blocked issue is lifted only once its blocker has closed (#11860)" \
+  doc_has "$TARGETED_MD" 'body is a closed issue or a merged PR, remove `loom:blocked` and go on.'
+check "--issue: a still-blocked issue is left untouched, outcome blocked (#12078)" \
+  doc_has "$TARGETED_MD" 'Otherwise leave the issue exactly as it is (no comment, no label change,'
 # --non-item
 NONITEM="$(awk '/^## `--non-item`/{on=1} on' "$TARGETED_MD")"
 out="$NONITEM"
