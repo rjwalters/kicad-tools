@@ -1,8 +1,10 @@
 # Copper-safety DRC floor for the freshly regenerated Board 07 (#6738).
-# Checked by scripts/ci/check_copper_safety_drc.py in the `board-07-end-to-end`
-# CI job.  Counts kicad-cli violations of type clearance, shorting_items,
+# Checked by scripts/ci/check_copper_safety_drc.py in the scheduled
+# `board-07-copper-safety-drc` job of .github/workflows/slow-tests.yml.
+# Counts kicad-cli violations of type clearance, shorting_items,
 # tracks_crossing, hole_clearance and copper_edge_clearance.  Ratchet only:
-# the number may go down, never up.
+# the number may go down, never up (the job fails if this file's last change
+# on main raised it).
 floors:
   # Provenance: #6736 (open at 2026-10-15) -- the +1V2 stub 0.1913 mm from
   # U1.24 GND added by PR #6713 is a clearance error.  The PR that fixes
