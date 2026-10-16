@@ -3531,7 +3531,12 @@ class TestLoadPcbEdgeClearance:
         assert router.grid.grid[layer_idx][gy][gx].blocked is True
 
     def test_no_edge_clearance_by_default(self, tmp_path):
-        """Test that no edge clearance is applied by default."""
+        """No copper-to-edge clearance is applied by default.
+
+        Issue #6043: only the narrow physical floor (copper may not cross
+        the cut) is installed, kept out of ``_edge_clearance``; a cell
+        0.5 mm in from the corner stays open.
+        """
         pcb_file = tmp_path / "test.kicad_pcb"
         pcb_file.write_text("""(kicad_pcb
   (version 20240108)
@@ -3547,7 +3552,7 @@ class TestLoadPcbEdgeClearance:
             validate_drc=False,
         )
 
-        # Edge cells should NOT be blocked (no components yet)
+        assert router._edge_clearance is None
         layer_idx = router.grid.get_routable_indices()[0]
         gx, gy = router.grid.world_to_grid(0.5, 0.5)
         assert router.grid.grid[layer_idx][gy][gx].blocked is False
@@ -3656,7 +3661,12 @@ class TestEdgeClearanceAutoResolution:
         assert router_osh._edge_clearance == pytest.approx(0.381)
 
     def test_explicit_zero_disables_auto_keepout(self, tmp_path):
-        """edge_clearance=0 is the documented opt-out, even with a manufacturer."""
+        """edge_clearance=0 skips the manufacturer floor, even with a manufacturer.
+
+        Issue #6043: it no longer removes the keepout altogether.  The grid
+        still gets the physical floor (copper may not cross the cut), stored
+        apart from ``_edge_clearance`` so no copper-to-edge rule is implied.
+        """
         pcb_file = _write_edge_pcb(tmp_path)
 
         rules = DesignRules(manufacturer="jlcpcb", grid_resolution=0.1)
@@ -3665,9 +3675,7 @@ class TestEdgeClearanceAutoResolution:
         )
 
         assert not getattr(router, "_edge_clearance", None)
-        layer_idx = router.grid.get_routable_indices()[0]
-        gx, gy = router.grid.world_to_grid(0.15, 10)
-        assert router.grid.grid[layer_idx][gy][gx].blocked is False
+        self._assert_physical_floor_only(router)
 
     def test_explicit_value_overrides_manufacturer(self, tmp_path):
         """An explicit edge_clearance wins over the manufacturer floor."""
@@ -3693,9 +3701,7 @@ class TestEdgeClearanceAutoResolution:
         router, _ = load_pcb_for_routing(str(pcb_file), rules=rules, validate_drc=False)
 
         assert not getattr(router, "_edge_clearance", None)
-        layer_idx = router.grid.get_routable_indices()[0]
-        gx, gy = router.grid.world_to_grid(0.15, 10)
-        assert router.grid.grid[layer_idx][gy][gx].blocked is False
+        self._assert_physical_floor_only(router)
 
     def test_no_manufacturer_no_keepout(self, tmp_path):
         """Explicit rules without a manufacturer keep the pre-#4568 behavior."""
@@ -3706,8 +3712,23 @@ class TestEdgeClearanceAutoResolution:
         )
 
         assert not getattr(router, "_edge_clearance", None)
+        self._assert_physical_floor_only(router)
+
+    @staticmethod
+    def _assert_physical_floor_only(router):
+        """Issue #6043: no clearance resolved -> only the physical floor.
+
+        The floor (widest copper half-extent + half a diagonal cell) blocks
+        the cell 0.15 mm from the edge, stays out of ``_edge_clearance``,
+        and leaves the board centre open.
+        """
+        from kicad_tools.router.edge_keepout import compute_edge_keepout_floor
+
+        assert router._edge_keepout_floor == pytest.approx(compute_edge_keepout_floor(router))
         layer_idx = router.grid.get_routable_indices()[0]
         gx, gy = router.grid.world_to_grid(0.15, 10)
+        assert router.grid.grid[layer_idx][gy][gx].blocked is True
+        gx, gy = router.grid.world_to_grid(10, 10)
         assert router.grid.grid[layer_idx][gy][gx].blocked is False
 
     def test_router_factory_rules_passthrough_gets_keepout(self, tmp_path):
@@ -3754,7 +3775,7 @@ class TestEdgeClearanceAutoResolution:
                     min_dist = min(min_dist, d)
         return min_dist
 
-    def test_routed_net_stays_clear_of_edge(self, tmp_path):
+    def test_routed_net_stays_clear_of_edge(self, tmp_path, monkeypatch):
         """Regression fixture: the auto keepout prevents edge-hugging routes.
 
         A wall of obstacle cells between the two SIG pads leaves only a thin
@@ -3779,8 +3800,13 @@ class TestEdgeClearanceAutoResolution:
         # the halo minimum and becomes untraversable.
         wall = (4.8, 5.2, 2.0, 9.3)
 
-        # --- Hazard demonstration: keepout explicitly disabled -> the
-        # shortest path hugs the outline closer than the 0.3mm floor.
+        # --- Hazard demonstration: keepout disabled -> the shortest path
+        # hugs the outline closer than the 0.3mm floor.  Since #6043 there is
+        # no public way to drop the keepout (``edge_clearance=0`` still
+        # installs the physical floor), so the baseline stubs the installer.
+        import kicad_tools.router.io as router_io
+
+        monkeypatch.setattr(router_io, "install_edge_keepout", lambda router, grid: 0)
         # force_python: the wall below is injected by mutating Python-side
         # grid cells AFTER load, which the C++ grid snapshot (taken at
         # construction) would not see.  The keepout itself is applied at
@@ -3801,6 +3827,7 @@ class TestEdgeClearanceAutoResolution:
             "fixture no longer exercises edge-hugging: without the keepout "
             "the route was expected to pass through the bottom-edge gap"
         )
+        monkeypatch.undo()
 
         # --- With auto-resolved keepout (no edge_clearance arg): the route
         # completes AND keeps >= 0.3mm copper-to-edge everywhere.
