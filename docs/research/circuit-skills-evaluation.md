@@ -179,7 +179,7 @@ use). "Not traced" means we did not look.
 | Finisher "OK" that connected nothing | handled | Connectivity check (above). |
 | Hard-coded-coordinate patches | n/a | Workflow hygiene; our repairs are rule-driven. |
 | GND-pad vias shorting against stubs | handled | Clearance and `via_under_body` checks; not traced further. |
-| Unconnected pin in congested cap cluster | gap | Diagnosis side is #5944; the fix-side rip-up/re-route already exists (`kct fix-drc --local-reroute`, see U3; #6045 closed). |
+| Unconnected pin in congested cap cluster | handled | Diagnosis: congested-vs-blocked (#5944, closed). Fix: `kct fix-drc --local-reroute` rips up and re-routes (see U3; #6045 closed). Whole-connection or via rip-up remains unproven, as noted in U3. |
 | One net cannot cross a corridor | handled | Zero-ohm jumper / local pour idea is a design choice; `kct zones` plus `pour_bridge.py` cover the local-pour half. |
 
 ### 6. Verification gates that lied
