@@ -425,7 +425,7 @@ def test_coupled_backends_agree_on_the_walled_fixtures(fixture):
     assert cpp_pf.last_rejections["via_own_h2h"] == py_pf.last_rejections["via_own_h2h"]
 
 
-def _open_pathfinder(allow_swap_via: bool = False) -> CoupledPathfinder:
+def _open_pathfinder() -> CoupledPathfinder:
     rules = _small_rules()
     grid = RoutingGrid(width=6.0, height=6.0, rules=rules, layer_stack=LayerStack.two_layer())
     return CoupledPathfinder(
@@ -433,7 +433,6 @@ def _open_pathfinder(allow_swap_via: bool = False) -> CoupledPathfinder:
         rules=rules,
         target_spacing_cells=8,
         min_spacing_cells=6,
-        allow_swap_via=allow_swap_via,
     )
 
 
@@ -445,16 +444,13 @@ def _via_moves(pf: CoupledPathfinder, pitch_cells: int, own_vias=None) -> int:
     return sum(1 for _state, _cost, is_via in moves if is_via)
 
 
-@pytest.mark.parametrize("swap", [False, True], ids=["plain", "swap-via"])
-def test_coupled_via_move_predicate(swap):
+def test_coupled_via_move_predicate():
     """The via move itself, with nothing else in the way (Python loop).
 
-    Centres must be >= 0.7 mm (7 cells) apart.  ``allow_swap_via`` adds a
-    second, Python-only via move per layer that drills the same two cells;
-    it takes the same check.
+    Centres must be >= 0.7 mm (7 cells) apart.
     """
-    pf = _open_pathfinder(allow_swap_via=swap)
-    per_layer = 2 if swap else 1
+    pf = _open_pathfinder()
+    per_layer = 1
     # P-vs-N of the move itself.
     assert _via_moves(pf, pitch_cells=6) == 0
     assert pf.last_rejections["via_own_h2h"] == per_layer

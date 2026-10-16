@@ -1619,8 +1619,7 @@ class CoupledSegmentSpec:
     n_end: Pad
     # ``True`` when the orientation of (p_start, n_start) is the
     # mirror of (p_end, n_end) — i.e., the pair must perform a
-    # coordinated layer-swap crossover during routing.  The
-    # CoupledPathfinder consumes this hint to enable swap-via moves.
+    # coordinated layer-swap crossover during routing.
     polarity_swap: bool = False
 
 
@@ -1881,7 +1880,6 @@ class CoupledPathfinder:
         rules: DesignRules,
         target_spacing_cells: int,
         net_class_map: dict[str, NetClassRouting] | None = None,
-        allow_swap_via: bool = False,
         min_spacing_cells: int = 0,
         heuristic_mode: Literal["manhattan_sum", "partner_aware"] = "partner_aware",
         spacing_penalty_factor: float = 0.25,
@@ -1894,11 +1892,6 @@ class CoupledPathfinder:
             rules: Design rules for routing
             target_spacing_cells: Target spacing between P/N in grid cells
             net_class_map: Optional net class map for per-net trace widths
-            allow_swap_via: Issue #2473: When True, the pathfinder may
-                place a paired layer-swap that exchanges the P/N grid
-                positions across an inner layer.  Used when source and
-                sink polarity orientations are mirrored (USB-C-shaped
-                pads).
             min_spacing_cells: Issue #3012: Hard floor on the center-to-
                 center spacing (in grid cells) the search will tolerate
                 between P and N positions.  Derived in
@@ -1953,7 +1946,6 @@ class CoupledPathfinder:
         self.rules = rules
         self.target_spacing_cells = target_spacing_cells
         self.net_class_map = net_class_map or {}
-        self.allow_swap_via = allow_swap_via
         # Issue #3012: store the within-pair spacing floor.  ``0`` means
         # no floor (legacy behaviour).
         self.min_spacing_cells = max(0, int(min_spacing_cells))
@@ -2096,8 +2088,8 @@ class CoupledPathfinder:
 
         # Issue #4065: opt-in flag for the C++ coupled joint-state A*.
         # Default ON when a C++ backend is present; the search still falls
-        # back to pure Python for the v1-deferred features
-        # (``allow_swap_via``, ``manhattan_sum``) and whenever construction
+        # back to pure Python for the v1-deferred feature
+        # (``manhattan_sum``) and whenever construction
         # of the C++ pathfinder raises.  Env-overridable
         # (KCT_COUPLED_CPP=0) so measurement / parity tests can force the
         # Python path without monkeypatching.
@@ -3066,12 +3058,12 @@ class CoupledPathfinder:
         )
 
         # Issue #6473: hole-to-hole floor among the pair's OWN vias.  It is
-        # layer-independent, so it is evaluated once, lazily, and shared with
-        # the swap-via move below (which drills the same two cells).  NOT
-        # waived at endpoint pads: that exemption is about pad metal.
+        # layer-independent, so it is evaluated once, lazily, and shared
+        # across the candidate layers.  NOT waived at endpoint pads: that
+        # exemption is about pad metal.
         own_h2h_clear: bool | None = None
         # Issue #6840: partner-copper clearance of the two new barrels; also
-        # layer-independent, evaluated once and shared with the swap move.
+        # layer-independent, evaluated once and shared across layers.
         partner_via_ok: bool | None = None
         smd_vias_ok: bool | None = None
 
@@ -3139,71 +3131,14 @@ class CoupledPathfinder:
             new_state = CoupledState(new_p, new_n, state.direction)
             neighbors.append((new_state, cost, True))
 
-        # Issue #2473: Swap-via move for polarity-swap crossover.  Both
-        # traces drop a via at their current location, then re-emerge on
-        # an inner layer with their grid positions exchanged.  This
-        # supports USB-C-shaped pad layouts where the connector inverts
-        # the differential polarity (D+/D- swap rows between A and B).
-        if self.allow_swap_via:
-            for new_layer in routable_layers:
-                if new_layer == state.p_pos.layer:
-                    continue
-
-                # Issue #6473: the swap drills the same two cells as the
-                # plain layer change, so it takes the same own-via floor.
-                if own_h2h_clear is None:
-                    own_h2h_clear = self._coupled_own_vias_clear(state, own_vias)
-                if not own_h2h_clear:
-                    self.last_rejections["via_own_h2h"] += 1
-                    continue
-                if partner_via_ok is None:
-                    partner_via_ok = self._coupled_partner_vias_clear(
-                        state, p_visited_set, n_visited_set, p_vias_list, n_vias_list
-                    )
-                if not partner_via_ok:
-                    self.last_rejections["via_partner_clear"] += 1
-                    continue
-                # Issue #6847: the swap drills the same two cells too, so it
-                # takes the same via-in-pad gate as the plain layer change
-                # (at the endpoint pads as well, where ``_is_via_blocked`` is
-                # waived below).
-                if smd_vias_ok is None:
-                    smd_vias_ok = self._allow_smd_vias or not (
-                        self._via_drill_in_smd_pad(state.p_pos.x, state.p_pos.y)
-                        or self._via_drill_in_smd_pad(state.n_pos.x, state.n_pos.y)
-                    )
-                if not smd_vias_ok:
-                    self.last_rejections["via_in_pad"] += 1
-                    continue
-
-                # Both pads must be able to host a via at their current
-                # position on every layer (the via spans through-hole).
-                # Issue #2490: Endpoint pads are exempt — the pad
-                # footprint already occupies the cells the via would
-                # span.
-                if not p_at_endpoint and self._is_via_blocked(state.p_pos.x, state.p_pos.y, p_net):
-                    continue
-                if not n_at_endpoint and self._is_via_blocked(state.n_pos.x, state.n_pos.y, n_net):
-                    continue
-
-                # After the swap, the P-trace continues from where N was,
-                # and vice versa, on the new layer.
-                swapped_p = GridPos(state.n_pos.x, state.n_pos.y, new_layer)
-                swapped_n = GridPos(state.p_pos.x, state.p_pos.y, new_layer)
-
-                if self._is_trace_blocked(swapped_p.x, swapped_p.y, swapped_p.layer, p_net):
-                    continue
-                if self._is_trace_blocked(swapped_n.x, swapped_n.y, swapped_n.layer, n_net):
-                    continue
-
-                # Higher cost than a normal via to discourage gratuitous
-                # swaps when a straight path would suffice.
-                cost = self.rules.cost_via * 3
-
-                # Reset direction after the swap — the orientation has
-                # inverted, so any prior straight-line streak is broken.
-                new_state = CoupledState(swapped_p, swapped_n, (0, 0))
-                neighbors.append((new_state, cost, True))
+        # Issue #6853: the Issue #2473 "swap-via" move (both traces drop a
+        # via and re-emerge on ONE shared layer with their grid cells
+        # exchanged) was removed.  Reconstruction emitted the same A->B
+        # segment for both rails, so every swap-containing route was
+        # rejected as a P/N short (see #3508).  A sound swap needs the two
+        # rails on DIFFERENT layers with staggered vias, never both rails
+        # on one shared layer at exchanged cells.  Polarity swaps are
+        # handled without vias by the asymmetric-arc move (#3508).
 
         return neighbors
 
@@ -3278,13 +3213,10 @@ class CoupledPathfinder:
         """Whether the C++ coupled search may handle THIS pathfinder.
 
         v1 scope (Issue #4065): the C++ port covers the ``partner_aware``
-        heuristic with ``allow_swap_via`` off.  The legacy ``manhattan_sum``
-        heuristic and the USB-C polarity-swap ``allow_swap_via`` move are
-        deferred and stay on the pure-Python search.
+        heuristic.  The legacy ``manhattan_sum`` heuristic is deferred and
+        stays on the pure-Python search.
         """
         if not self._use_cpp_coupled:
-            return False
-        if self.allow_swap_via:
             return False
         if self.heuristic_mode != "partner_aware":
             return False
@@ -3831,8 +3763,8 @@ class CoupledPathfinder:
         # produce byte-identical Routes for the same joint path.  Preserved
         # as an optional accelerator: the pure-Python A* below is the
         # fallback, exercised when the backend is absent/stale, when the
-        # v1-deferred features are requested (``allow_swap_via`` /
-        # ``manhattan_sum``), or when ``_use_cpp_coupled`` is disabled.
+        # v1-deferred feature is requested (the
+        # ``manhattan_sum`` heuristic), or when ``_use_cpp_coupled`` is disabled.
         cpp_path = self._try_cpp_route_coupled(
             p_start_pos=p_start_pos,
             n_start_pos=n_start_pos,
@@ -11387,26 +11319,16 @@ class DiffPairRouter:
             min_spacing_cells += extra_spacing_cells
             spacing_cells += extra_spacing_cells
 
-        # If any segment requires polarity-swap, enable swap-via moves.
-        #
-        # Issue #3508: swap-via moves are DISABLED.  The swap move
-        # exchanges the two heads' exact grid positions onto one shared
-        # new layer, so reconstruction emits the SAME A->B segment for
-        # both nets (P: A->B, N: B->A) -- coincident copper, i.e. a
-        # short.  Every swap-containing result was therefore rejected
-        # by the #3320 severe-overlap gate at exactly
-        # ``-trace_width`` (board 06 PCIE/USB3, board 07 DQS -- the
-        # "swap-overlap gate" rejection documented in #3473).  With
-        # mid-route asymmetric moves now enabled (this issue), a
-        # polarity swap is achievable WITHOUT vias: the advancing
-        # trace walks a discrete arc around its holding partner
+        # Issue #3508/#6853: there is no swap-via move.  It exchanged the
+        # two heads' exact grid positions onto one shared new layer, so
+        # reconstruction emitted the SAME A->B segment for both nets
+        # (P: A->B, N: B->A) -- coincident copper, i.e. a short -- and the
+        # #3320 severe-overlap gate rejected every swap-containing result
+        # (board 06 PCIE/USB3, board 07 DQS).  A polarity swap is instead
+        # achieved WITHOUT vias by mid-route asymmetric moves: the
+        # advancing trace walks a discrete arc around its holding partner
         # (offset-vector rotation through 180 degrees), which the
-        # trail-proximity guard keeps clearance-legal.  Re-enable only
-        # after the swap reconstruction emits a genuine two-layer
-        # crossover (staggered vias, partner segments on different
-        # layers).
-        any_polarity_swap = any(s.polarity_swap for s in coupled_specs)
-        del any_polarity_swap  # documented above; swap moves disabled
+        # trail-proximity guard keeps clearance-legal.
 
         # Create coupled pathfinder.
         # Issue #3508: heuristic_weight > 1 (weighted A*) -- without it
@@ -11475,7 +11397,6 @@ class DiffPairRouter:
             self.autorouter.rules,
             spacing_cells,
             net_class_map=self.autorouter.net_class_map,
-            allow_swap_via=False,  # Issue #3508: see rationale above
             min_spacing_cells=min_spacing_cells,
             heuristic_weight=coupled_heuristic_weight,
         )
@@ -12866,7 +12787,6 @@ class DiffPairRouter:
             fine_rules,
             spacing_cells,
             net_class_map=self.autorouter.net_class_map,
-            allow_swap_via=False,  # synthetic asymmetric-pad case rarely needs it
             min_spacing_cells=min_spacing_cells,
         )
 
