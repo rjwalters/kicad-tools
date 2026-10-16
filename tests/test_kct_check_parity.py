@@ -33,8 +33,9 @@ It also exercises the CI gate's net-class-map resolver
 preference, in-process fallback for boards (like 06) that don't commit one,
 and ``None`` for boards that declare no net classes.
 
-The real-``kct check`` parity checks are marked ``integration`` + ``slow``
-(they run the full DRC engine on a routed BGA board, ~30s each).  The
+The real-``kct check`` parity checks are marked ``integration`` +
+``pr_required``, not ``slow``, so they run in the PR "Test" job (Issue
+#6805; the whole module takes ~10s with ``--no-cov``).  The
 resolver unit tests are fast (temp dirs + a tiny derived map) and always
 run.
 
@@ -289,19 +290,21 @@ class TestNetClassMapResolver:
 
 
 # ---------------------------------------------------------------------------
-# Real kct check parity (integration / slow)
+# Real kct check parity (integration / pr_required)
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.integration
-@pytest.mark.slow
+# Issue #6805: not `slow`, so the PR "Test" job runs it; `pr_required` keeps
+# update_ci_extended.py from moving it to "Test (extended)" (Issue #6102).
+@pytest.mark.pr_required
 @pytest.mark.xdist_group("board07_kct_check_parity")
 class TestBoard07KctCheckParity:
     """End-to-end parity on board 07's committed routed PCB (Issue #3151).
 
-    Runs the real ``kct check`` engine both ways.  Slow (~30s/invocation) so
-    it is gated behind ``integration``/``slow``; deselect with
-    ``-m 'not slow'``.
+    Runs the real ``kct check`` engine both ways.  Not marked ``slow``: the
+    PR "Test" job must catch a change that moves board-07 counts (Issue
+    #6805).
     """
 
     @pytest.fixture(scope="class")
@@ -398,7 +401,9 @@ class TestBoard07KctCheckParity:
 
 
 @pytest.mark.integration
-@pytest.mark.slow
+# Issue #6805: not `slow`, so the PR "Test" job runs it; `pr_required` keeps
+# update_ci_extended.py from moving it to "Test (extended)" (Issue #6102).
+@pytest.mark.pr_required
 class TestCiGateCountsGatedFamilies:
     """The strict CI gate now counts the gated families (Issue #3151 AC #1)."""
 
