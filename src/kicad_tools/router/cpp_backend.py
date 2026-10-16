@@ -100,7 +100,10 @@ logger = logging.getLogger(__name__)
 # v58 (Issue #6826): ``CoupledPathfinder.route`` bounds the endpoint zones'
 # spacing tolerance by each end's pad-pitch delta + 1, not the zone radius.  A
 # v57 .so diverges from the Python coupled mirror.
-_REQUIRED_CPP_BUILD_VERSION = 58
+# v59 (Issue #6840): ``CoupledPathfinder.set_partner_via_clearance`` -- the
+# joint search keeps each rail clear of the partner's via barrels on every
+# layer.  A v58 .so lacks the setter and diverges from the Python mirror.
+_REQUIRED_CPP_BUILD_VERSION = 59
 
 
 # Issue #5599: human-readable names for the ``ValidationResult::violation_type``
@@ -5435,6 +5438,20 @@ class CppCoupledPathfinder:
     def via_blocked(self, gx: int, gy: int, net: int) -> bool:
         """Probe the coupled via predicate (Issue #5410 parity testing)."""
         return bool(self._impl.via_blocked(gx, gy, net))
+
+    def set_partner_via_clearance(
+        self, p_trace_vs_n_via: float, n_trace_vs_p_via: float, via_vs_via: float
+    ) -> None:
+        """Install the via-aware partner clearance radii (Issue #6840).
+
+        All three are centre-to-centre distances in GRID CELLS (unrounded):
+        P centreline vs an N via, N centreline vs a P via, and P via vs N
+        via.  ``0`` disables a check.  See
+        :meth:`CoupledPathfinder._partner_via_radii_cells`.
+        """
+        self._impl.set_partner_via_clearance(
+            float(p_trace_vs_n_via), float(n_trace_vs_p_via), float(via_vs_via)
+        )
 
     def set_halo_net_dimensions(
         self,

@@ -23,7 +23,7 @@ from enum import Enum
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator, Mapping
+    from collections.abc import Callable, Iterable, Iterator, Mapping
 
     from .core import Autorouter
     from .cpp_backend import CppCoupledPathfinder
@@ -597,6 +597,24 @@ def _channel_seal_penalty(
             continue  # the direct escape still fits past this barrel
         penalty += keepout - lateral
     return penalty
+
+
+class PairPhysicalOverlap(NamedTuple):
+    """The worst P/N copper intersection of a coupled pair (Issue #6840).
+
+    ``gap_mm`` is the kernel copper gap (negative: the metals overlap by that
+    much); ``description`` names the two elements, e.g. ``"N via vs P
+    segment on B.Cu"``.
+    """
+
+    gap_mm: float
+    description: str
+
+
+def _layer_label(layer: Any) -> str:
+    """KiCad name of a router layer for log lines (Issue #6840)."""
+    name = getattr(layer, "kicad_name", None)
+    return name if isinstance(name, str) else str(layer)
 
 
 class _ShadowForeignCopper(NamedTuple):
@@ -1994,6 +2012,12 @@ class CoupledPathfinder:
         # stalled search reports WHAT is pruning its frontier.
         self.last_rejections: dict[str, int] = collections.defaultdict(int)
 
+        # Issue #6840: via-aware partner clearance radii, in grid cells
+        # (unrounded): P centreline vs an N via, N centreline vs a P via, and
+        # P via vs N via.  Installed per ``route_coupled`` call from the pair's
+        # widths (see :meth:`_partner_via_radii_cells`); ``0`` is "off".
+        self._partner_via_radii: tuple[float, float, float] = (0.0, 0.0, 0.0)
+
         # Pre-calculate trace clearance radius
         self._trace_half_width_cells = max(
             1,
@@ -2269,6 +2293,97 @@ class CoupledPathfinder:
             return False
         return pos.x == goal.x and pos.y == goal.y
 
+    def _partner_via_radii_cells(
+        self, p_net_name: str, n_net_name: str
+    ) -> tuple[float, float, float]:
+        """Centre-to-centre partner-via clearance radii in grid cells (#6840).
+
+        A partner via is copper on every layer and wider than a trace, so the
+        trail proximity guard's trace-to-trace ``min_spacing_cells`` lets a
+        rail run past (or head-on into) the partner's barrel with overlapping
+        copper -- which ``_pair_has_physical_overlap`` then rejects, throwing
+        the whole coupled route away.  ``ClearanceRule`` exempts P/N only for
+        segment-segment pairs (#4575), so a P/N segment-vs-via is held to the
+        full trace/via floor, :func:`trace_via_clearance_mm`.  Returns:
+
+        * P centreline vs N via: ``via_diameter/2 + w_P/2 + floor``;
+        * N centreline vs P via: ``via_diameter/2 + w_N/2 + floor``;
+        * P via vs N via: ``via_diameter + floor``;
+
+        each divided by the grid resolution and NOT rounded -- the guard
+        compares squared cell distances against the squared radius, so a
+        lattice cell is admitted exactly when its copper gap meets the floor
+        (``ceil`` of the trace radius is 5 cells on Board07 and 7 on 06rf).
+        The coupled search lays its vias at ``rules.via_diameter``
+        (``_build_route_from_path``), so that is the barrel measured here.
+        Mirrors the C++ ``set_partner_via_clearance`` inputs exactly.
+        """
+        rules = self.rules
+        res = self.grid.resolution
+        floor = trace_via_clearance_mm(rules.trace_clearance, rules.via_clearance)
+        via_r = rules.via_diameter / 2
+        p_half = self._get_trace_width_for_net(p_net_name) / 2
+        n_half = self._get_trace_width_for_net(n_net_name) / 2
+        return (
+            (via_r + p_half + floor) / res,
+            (via_r + n_half + floor) / res,
+            (rules.via_diameter + floor) / res,
+        )
+
+    @staticmethod
+    def _near_cells(
+        cx: int, cy: int, cells: Iterable[tuple[int, ...]], radius_cells: float
+    ) -> bool:
+        """Is ``(cx, cy)`` under ``radius_cells`` of any cell? (Issue #6840).
+
+        Layer-blind -- a via barrel is copper on every layer.  ``cells`` may
+        be ``(x, y)`` via cells or ``(x, y, layer)`` trail cells.  Same
+        squared comparison and epsilon as the C++ ``near_cells`` /
+        ``near_trail`` lambdas.
+        """
+        if radius_cells <= 0.0:
+            return False
+        r_sq = radius_cells * radius_cells
+        for cell in cells:
+            dx = cell[0] - cx
+            dy = cell[1] - cy
+            if float(dx * dx + dy * dy) < r_sq - 1e-9:
+                return True
+        return False
+
+    def _coupled_partner_vias_clear(
+        self,
+        state: CoupledState,
+        p_visited: frozenset[tuple[int, int, int]],
+        n_visited: frozenset[tuple[int, int, int]],
+        p_vias: list[tuple[int, int]],
+        n_vias: list[tuple[int, int]],
+    ) -> bool:
+        """May both rails drop a via without crowding partner copper? (#6840).
+
+        The new P barrel must keep the trace/via floor from every cell of N's
+        trail (on every layer, N's width) and the via/via floor from every N
+        via -- including the N via of this same move -- and the reverse.
+        ``*_visited`` are the endpoint-stripped trail sets, so the partner's
+        pad cells (pad metal, which ``_is_via_blocked`` already measures) are
+        not counted.  Mirror of the C++ ``partner_vias_clear`` lambda.
+        """
+        if self.min_spacing_cells <= 0:
+            return True
+        r_p, r_n, r_vv = self._partner_via_radii
+        px, py = state.p_pos.x, state.p_pos.y
+        nx, ny = state.n_pos.x, state.n_pos.y
+        if r_vv > 0.0:
+            if self._near_cells(px, py, ((nx, ny),), r_vv):
+                return False
+            if self._near_cells(px, py, n_vias, r_vv):
+                return False
+            if self._near_cells(nx, ny, p_vias, r_vv):
+                return False
+        if self._near_cells(px, py, n_visited, r_n):
+            return False
+        return not self._near_cells(nx, ny, p_visited, r_p)
+
     def _coupled_own_vias_clear(
         self, state: CoupledState, own_vias: list[tuple[int, int]] | None
     ) -> bool:
@@ -2321,6 +2436,8 @@ class CoupledPathfinder:
         p_trail_buckets: dict[tuple[int, int], list[tuple[int, int, int]]] | None = None,
         n_trail_buckets: dict[tuple[int, int], list[tuple[int, int, int]]] | None = None,
         own_vias: list[tuple[int, int]] | None = None,
+        p_vias: list[tuple[int, int]] | None = None,
+        n_vias: list[tuple[int, int]] | None = None,
     ) -> list[tuple[CoupledState, float, bool]]:
         """Generate valid coupled moves maintaining spacing.
 
@@ -2377,6 +2494,11 @@ class CoupledPathfinder:
                 hole-to-hole floor from one of them (see
                 :meth:`_coupled_own_vias_clear`).  The P-vs-N check of the
                 move itself runs with or without it.
+            p_vias: Issue #6840: the P rail's via cells on the parent chain
+                (``own_vias`` split per rail).  An advancing N cell is held
+                off them by the via-aware partner clearance radius, on every
+                layer (see :meth:`_partner_via_radii_cells`).
+            n_vias: Issue #6840: the N rail's via cells, likewise.
 
         Returns list of (new_state, cost, is_via) tuples.
         """
@@ -2407,6 +2529,15 @@ class CoupledPathfinder:
         prox_r = self.min_spacing_cells
         prox_bucket = max(1, prox_r)
         prox_r_sq = float(prox_r * prox_r)
+
+        # Issue #6840: via-aware partner clearance.  The proximity guard
+        # above measures a partner VIA as a trace cell (same layer, trace
+        # spacing); a barrel spans every layer and is wider, so an advancing
+        # rail is also held off each partner via by the trace/via radius.
+        pv_guard = self.min_spacing_cells > 0
+        pv_r_p, pv_r_n, _pv_r_vv = self._partner_via_radii
+        p_vias_list = p_vias or []
+        n_vias_list = n_vias or []
 
         def _too_close_to_trail(
             cell: tuple[int, int, int],
@@ -2468,6 +2599,21 @@ class CoupledPathfinder:
                 and _too_close_to_trail(n_key, p_trail_buckets)
             ):
                 return True
+            # Issue #6840: an advancing rail keeps via clearance from every
+            # partner via, on every layer.
+            if pv_guard:
+                if (
+                    p_advances
+                    and not p_is_endpoint_cell
+                    and self._near_cells(new_p_pos.x, new_p_pos.y, n_vias_list, pv_r_p)
+                ):
+                    return True
+                if (
+                    n_advances
+                    and not n_is_endpoint_cell
+                    and self._near_cells(new_n_pos.x, new_n_pos.y, p_vias_list, pv_r_n)
+                ):
+                    return True
             # Self-loop: the advancing trace re-enters a cell it has
             # already occupied on its own trail.  This is the
             # mechanism behind the 7-vs-1061 segment asymmetry on
@@ -2866,6 +3012,9 @@ class CoupledPathfinder:
         # the swap-via move below (which drills the same two cells).  NOT
         # waived at endpoint pads: that exemption is about pad metal.
         own_h2h_clear: bool | None = None
+        # Issue #6840: partner-copper clearance of the two new barrels; also
+        # layer-independent, evaluated once and shared with the swap move.
+        partner_via_ok: bool | None = None
 
         # Try layer change (via) - both traces must change layer together
         routable_layers = self.grid.get_routable_indices()
@@ -2877,6 +3026,13 @@ class CoupledPathfinder:
                 own_h2h_clear = self._coupled_own_vias_clear(state, own_vias)
             if not own_h2h_clear:
                 self.last_rejections["via_own_h2h"] += 1
+                continue
+            if partner_via_ok is None:
+                partner_via_ok = self._coupled_partner_vias_clear(
+                    state, p_visited_set, n_visited_set, p_vias_list, n_vias_list
+                )
+            if not partner_via_ok:
+                self.last_rejections["via_partner_clear"] += 1
                 continue
 
             # Check if vias can be placed at both positions.  Skip the
@@ -2930,6 +3086,13 @@ class CoupledPathfinder:
                     own_h2h_clear = self._coupled_own_vias_clear(state, own_vias)
                 if not own_h2h_clear:
                     self.last_rejections["via_own_h2h"] += 1
+                    continue
+                if partner_via_ok is None:
+                    partner_via_ok = self._coupled_partner_vias_clear(
+                        state, p_visited_set, n_visited_set, p_vias_list, n_vias_list
+                    )
+                if not partner_via_ok:
+                    self.last_rejections["via_partner_clear"] += 1
                     continue
 
                 # Both pads must be able to host a via at their current
@@ -3245,6 +3408,11 @@ class CoupledPathfinder:
         if impl is None:
             return None
 
+        # Issue #6840: the pair's via-aware partner clearance radii, set by
+        # ``route_coupled`` (the C++ guard applies them only with a
+        # ``min_spacing_cells`` floor, as the Python mirror does).
+        impl.set_partner_via_clearance(*self._partner_via_radii)
+
         if self.grid.fixed_fills:
             dimensions: list[float] = []
             for name in (p_net_name, n_net_name):
@@ -3496,6 +3664,11 @@ class CoupledPathfinder:
         # (it recovers width/net/name from the same Pad objects the Python
         # reconstruction uses, so routes are byte-identical).
         self._cpp_reconstruct_pads = (p_start, p_end, n_start, n_end)
+
+        # Issue #6840: this pair's via-aware partner clearance radii (both
+        # backends read them; the C++ arm gets them in
+        # ``_try_cpp_route_coupled``).
+        self._partner_via_radii = self._partner_via_radii_cells(p_start.net_name, n_start.net_name)
 
         # Convert to grid coordinates
         p_start_gx, p_start_gy = self.grid.world_to_grid(p_start.x, p_start.y)
@@ -3807,6 +3980,9 @@ class CoupledPathfinder:
             bucket = max(1, prox_radius)
             # Issue #6473: via cells already on this joint path (both rails).
             own_vias: list[tuple[int, int]] = []
+            # Issue #6840: the same via cells split per rail.
+            p_vias: list[tuple[int, int]] = []
+            n_vias: list[tuple[int, int]] = []
             walker: CoupledNode | None = current
             while walker is not None:
                 p_cell = (walker.state.p_pos.x, walker.state.p_pos.y, walker.state.p_pos.layer)
@@ -3814,6 +3990,8 @@ class CoupledPathfinder:
                 if walker.via_from_parent:
                     own_vias.append(p_cell[:2])
                     own_vias.append(n_cell[:2])
+                    p_vias.append(p_cell[:2])
+                    n_vias.append(n_cell[:2])
                 p_visited_cells.add(p_cell)
                 n_visited_cells.add(n_cell)
                 if prox_radius > 1:
@@ -3860,6 +4038,8 @@ class CoupledPathfinder:
                 p_trail_buckets=p_trail_buckets,
                 n_trail_buckets=n_trail_buckets,
                 own_vias=own_vias,
+                p_vias=p_vias,
+                n_vias=n_vias,
             ):
                 # Issue #6243: authored netclass minima on both rails, through
                 # the grid's kernel-backed gate.  Dormant without floors.
@@ -5676,6 +5856,22 @@ class DiffPairRouter:
                 worst, worst_loc = deficit, loc
         return worst, worst_loc
 
+    def _committed_coupled_claims(self) -> set[int]:
+        """Net ids of every pair this run committed AS COUPLED (Issue #6840).
+
+        ``kct route`` hands this set to ``optimize_routes_grid_synced`` as
+        ``skip_nets`` so the trace optimizer cannot rewrite one rail of a
+        committed coupled pair onto a different row (06rf MIPI_D0: 0.40 mm
+        uncoupled at commit, 20.1 mm after the optimizer).  Independent
+        fallbacks are never added.  Lives on the autorouter, created on first
+        use so a test double needs no extra field.
+        """
+        claims = getattr(self.autorouter, "_committed_coupled_nets", None)
+        if not isinstance(claims, set):
+            claims = set()
+            self.autorouter._committed_coupled_nets = claims
+        return claims
+
     def _pose_claims(self) -> set[int]:
         """The autorouter's set of nets a pose-coupled pair committed (#5786).
 
@@ -7295,6 +7491,15 @@ class DiffPairRouter:
     def _pair_has_physical_overlap(self, p_route: Route, n_route: Route) -> bool:
         """True when P/N copper PHYSICALLY intersects (issue #3508).
 
+        The ``bool`` form of :meth:`_pair_physical_overlap_report`, kept for
+        callers that only need the verdict.
+        """
+        return self._pair_physical_overlap_report(p_route, n_route) is not None
+
+    @staticmethod
+    def _pair_physical_overlap_report(p_route: Route, n_route: Route) -> PairPhysicalOverlap | None:
+        """The worst P/N copper intersection, or ``None`` (issues #3508, #6840).
+
         Mirrors the recipe-side shapely detector
         (``_repair_pair_overlap_solo``'s ``_sides_overlap``) that rips
         pairs in board 06's 6b repair: same-layer seg/seg overlap,
@@ -7305,14 +7510,27 @@ class DiffPairRouter:
         construction time keeps the committed pre-phase output
         rip-proof.
 
-        Epic #5509 Phase 3c: all three overlap questions now go through the
-        shared clearance kernel's :func:`clearance_shapes.overlaps` (gap
-        strictly below zero) instead of three hand-rolled radius sums.  This
-        is a pure short-detection question -- no clearance term, no rule
-        value -- so the threshold is unchanged; the geometry is now the same
-        model every other migrated consumer reads.
+        Epic #5509 Phase 3c: all three overlap questions go through the
+        shared clearance kernel (gap strictly below zero) instead of three
+        hand-rolled radius sums.  This is a pure short-detection question --
+        no clearance term, no rule value.
+
+        Issue #6840: the check used to return a bare ``bool``, so the
+        rejection log had no gap to print (it printed the #3320 centreline
+        message with ``worst=+nan``).  It now reports the most negative
+        copper gap and which two elements produced it.
         """
-        for a, b in ((p_route, n_route), (n_route, p_route)):
+        worst: PairPhysicalOverlap | None = None
+
+        def _note(gap: float, first: str, second: str, layer: Any = None) -> None:
+            # The description is only built for a new worst, so the common
+            # clean pair formats nothing.
+            nonlocal worst
+            if gap < 0.0 and (worst is None or gap < worst.gap_mm):
+                where = f" on {_layer_label(layer)}" if layer is not None else ""
+                worst = PairPhysicalOverlap(gap, f"{first} vs {second}{where}")
+
+        for a, b, a_rail, b_rail in ((p_route, n_route, "P", "N"), (n_route, p_route, "N", "P")):
             for via in a.vias:
                 shape = via_shape(via)
                 # A barrel is copper on every layer, which the kernel models
@@ -7320,19 +7538,23 @@ class DiffPairRouter:
                 # keeps the #3508 "via-barrel vs any-layer segments" reading
                 # without a special case.
                 for seg in b.segments:
-                    if overlaps(shape, segment_shape(seg)):
-                        return True
-                for w in b.vias:
-                    if overlaps(shape, via_shape(w)):
-                        return True
+                    _note(
+                        copper_gap(shape, segment_shape(seg)),
+                        f"{a_rail} via",
+                        f"{b_rail} segment",
+                        seg.layer,
+                    )
+                if a is p_route:
+                    # via-vs-via is symmetric: measure each pair once.
+                    for w in b.vias:
+                        _note(copper_gap(shape, via_shape(w)), "P via", "N via")
         for ps in p_route.segments:
             p_shape = segment_shape(ps)
             for ns in n_route.segments:
                 if ps.layer != ns.layer:
                     continue
-                if overlaps(p_shape, segment_shape(ns)):
-                    return True
-        return False
+                _note(copper_gap(p_shape, segment_shape(ns)), "P segment", "N segment", ps.layer)
+        return worst
 
     def _synthesize_crossing_tail(
         self,
@@ -11174,6 +11396,9 @@ class DiffPairRouter:
         routes: list[Route] = []
         p_routes: list[Route] = []
         n_routes: list[Route] = []
+        # Issue #6840: set when a coupled body passes every gate and is
+        # committed; read before returning to claim the pair's nets.
+        committed_coupled = False
 
         for spec in coupled_specs:
             polarity_marker = " (polarity-swap)" if spec.polarity_swap else ""
@@ -11891,28 +12116,37 @@ class DiffPairRouter:
             # copper).  Treat those as severe too -- the recipe's 6b
             # repair would otherwise rip one side and de-couple the
             # pair downstream.
-            if not severe_violation and self._pair_has_physical_overlap(p_route, n_route):
+            # Issue #6840: the physical-overlap arm reports its own worst gap
+            # and element kinds.  It used to fall into the centreline message
+            # below with ``violation=None`` and print ``worst=+nanmm`` --
+            # naming a check that had not fired.
+            physical_overlap = (
+                None if severe_violation else self._pair_physical_overlap_report(p_route, n_route)
+            )
+            if physical_overlap is not None:
                 print(
-                    "    WARNING: Coupled route has via-aware physical "
-                    "P/N overlap; rejecting coupled route."
+                    "    WARNING: Coupled route has via-aware P/N overlap: "
+                    f"{physical_overlap.description}, "
+                    f"gap {physical_overlap.gap_mm:+.4f}mm; rejecting coupled "
+                    "route and falling back to independent routing."
+                )
+                logger.warning(
+                    "diffpair coupled-route REJECTED due to via-aware P/N overlap: "
+                    "pair=%r %s gap=%.4fmm",
+                    pair.name,
+                    physical_overlap.description,
+                    physical_overlap.gap_mm,
                 )
                 severe_violation = True
-                if violation is None:
-                    # Synthesize nothing -- the handler below only needs
-                    # the flag; guard its violation-specific logging.
-                    pass
             if severe_violation:
-                # Issue #3508: ``violation`` may be ``None`` when the
-                # rejection came from the via-aware physical-overlap
-                # check (no same-layer segment pair under threshold).
-                worst = violation.actual_clearance_mm if violation is not None else float("nan")
-                print(
-                    f"    WARNING: Coupled route produced centerline overlap "
-                    f"(worst={worst:+.3f}mm < 0); "
-                    "rejecting coupled route and falling back to independent "
-                    "routing."
-                )
-                if violation is not None:
+                if violation is not None and physical_overlap is None:
+                    print(
+                        f"    WARNING: Coupled route produced centerline overlap "
+                        f"(worst={violation.actual_clearance_mm:+.3f}mm < 0); "
+                        "rejecting coupled route and falling back to independent "
+                        "routing."
+                    )
+                if violation is not None and physical_overlap is None:
                     logger.warning(
                         "diffpair coupled-route REJECTED due to centerline overlap: "
                         "pair=%r p_net=%r n_net=%r worst_clearance=%.4fmm "
@@ -11924,7 +12158,7 @@ class DiffPairRouter:
                         violation.expected_clearance_mm,
                         len(violation.segment_violations),
                     )
-                if _COUPLED_TRACE and violation is not None:
+                if _COUPLED_TRACE and violation is not None and physical_overlap is None:
                     print(
                         f"      [overlap-debug] layer={violation.layer} "
                         f"p_seg=({violation.p_segment.x1:.2f},"
@@ -11953,7 +12187,7 @@ class DiffPairRouter:
                 if coupled_only:
                     print(
                         "    Skipping diff-pair pre-pass: coupled route "
-                        "rejected (centerline overlap) and ``coupled_only`` "
+                        "rejected (P/N overlap) and ``coupled_only`` "
                         "is set."
                     )
                     return [], None
@@ -11974,6 +12208,7 @@ class DiffPairRouter:
             p_routes.append(p_route)
             n_routes.append(n_route)
             routes.extend([p_route, n_route])
+            committed_coupled = True
 
             # Issue #3023 Phase A: per-spec intra-pair clearance audit.
             # The CoupledPathfinder's ``min_spacing_cells`` floor is a
@@ -12108,6 +12343,12 @@ class DiffPairRouter:
                     )
                     return [], None
                 return self.route_differential_pair_independent(pair, spacing)
+
+        # Issue #6840: every gate (and the #3540 transactional rollback) has
+        # passed, so this pair's coupled copper is committed -- keep the trace
+        # optimizer off it.
+        if committed_coupled:
+            self._committed_coupled_claims().update((pair.positive.net_id, pair.negative.net_id))
 
         # Calculate lengths
         p_length = calculate_route_length(p_routes)
@@ -13024,6 +13265,7 @@ class DiffPairRouter:
         warnings: list[LengthMismatchWarning] = []
         routed_net_ids: set[int] = set()
         self.autorouter._pose_coupled_nets = set()  # Issue #5786: reset per run
+        self.autorouter._committed_coupled_nets = set()  # Issue #6840: reset per run
 
         for pair in diff_pairs:
             p_id, n_id = pair.get_net_ids()
@@ -13765,6 +14007,7 @@ class DiffPairRouter:
         # caller can decide which nets to leave for the main strategy.
         coupled_routed_nets: set[int] = set()
         self.autorouter._pose_coupled_nets = set()  # Issue #5786: reset per run
+        self.autorouter._committed_coupled_nets = set()  # Issue #6840: reset per run
         # Issue #4463: (pair, routes) for every pair whose copper this
         # pre-phase committed -- the yield candidates for the
         # corridor-yield recovery that runs after the main strategy.
@@ -14167,6 +14410,9 @@ class DiffPairRouter:
             if kept:
                 diff_net_ids = diff_net_ids - released_nets
                 coupled_routed_nets -= released_nets
+                # Issue #6840: a yielded pair's copper is gone, so it is no
+                # longer a committed coupled pair the optimizer must skip.
+                self._committed_coupled_claims().difference_update(released_nets)
                 removed_ids = {id(r) for r in removed_routes}
                 all_routes = [r for r in all_routes if id(r) not in removed_ids]
                 all_routes.extend(added_routes)

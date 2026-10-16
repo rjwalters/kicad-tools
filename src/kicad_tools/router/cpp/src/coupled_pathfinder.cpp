@@ -475,6 +475,12 @@ CoupledRouteResult CoupledPathfinder::route(
     // Issue #6473: via cells of the popped node's joint path, rebuilt on
     // every pop by the parent-chain walk below.
     std::vector<std::pair<int, int>> own_vias;
+    // Issue #6840: the same via cells split per rail, for the via-aware
+    // partner clearance guard (``set_partner_via_clearance``).
+    std::vector<std::pair<int, int>> p_vias, n_vias;
+    const bool partner_via_guard =
+        min_spacing_cells_ > 0 &&
+        (pv_p_trace_sq_ > 0.0 || pv_n_trace_sq_ > 0.0 || pv_via_via_sq_ > 0.0);
 
     // Endpoint (x,y,layer) cells stripped from the trail sets, mirroring the
     // Python discard at diffpair_routing.py:1829-1838.
@@ -595,6 +601,8 @@ CoupledRouteResult CoupledPathfinder::route(
         // a via move is taken in place, so a ``via_from_parent`` node sits on
         // its own two drills).  Mirror of the Python ``own_vias`` list.
         own_vias.clear();
+        p_vias.clear();
+        n_vias.clear();
         {
             int walk = current_idx;
             while (walk >= 0) {
@@ -602,6 +610,8 @@ CoupledRouteResult CoupledPathfinder::route(
                 if (nd.via_from_parent) {
                     own_vias.emplace_back(nd.p_x, nd.p_y);
                     own_vias.emplace_back(nd.n_x, nd.n_y);
+                    p_vias.emplace_back(nd.p_x, nd.p_y);
+                    n_vias.emplace_back(nd.n_x, nd.n_y);
                 }
                 uint64_t pc = xyl_key(nd.p_x, nd.p_y, nd.p_layer);
                 uint64_t nc = xyl_key(nd.n_x, nd.n_y, nd.n_layer);
@@ -675,6 +685,54 @@ CoupledRouteResult CoupledPathfinder::route(
             return true;
         };
 
+        // Issue #6840: is (cx, cy) closer than ``sqrt(r_sq)`` cells to any of
+        // ``pts`` (layer-blind: a via barrel is copper on every layer)?  Same
+        // epsilon as ``too_close``.  Mirror of Python ``_near_cells``.
+        auto near_cells = [](int cx, int cy, const std::vector<std::pair<int, int>>& pts,
+                             double r_sq) -> bool {
+            if (r_sq <= 0.0) return false;
+            for (const auto& v : pts) {
+                const double dx = static_cast<double>(v.first - cx);
+                const double dy = static_cast<double>(v.second - cy);
+                if (dx * dx + dy * dy < r_sq - 1e-9) return true;
+            }
+            return false;
+        };
+        // Issue #6840: the same question against a rail's whole trail, on
+        // every layer (the candidate is a new via).  ``trail`` is the
+        // endpoint-stripped visited set, so the partner's own pad cells --
+        // pad metal the via gate already measures -- are not counted twice.
+        auto near_trail = [](int cx, int cy, const std::unordered_set<uint64_t>& trail,
+                             double r_sq) -> bool {
+            if (r_sq <= 0.0) return false;
+            for (uint64_t packed : trail) {
+                const int tx = static_cast<int>((packed >> 36) & 0xFFFFFFF);
+                const int ty = static_cast<int>((packed >> 8) & 0xFFFFFFF);
+                const double dx = static_cast<double>(tx - cx);
+                const double dy = static_cast<double>(ty - cy);
+                if (dx * dx + dy * dy < r_sq - 1e-9) return true;
+            }
+            return false;
+        };
+        // Issue #6840: may both rails drop a via where they stand without
+        // their barrels crowding the partner's copper?  New P via vs N's
+        // trail (N's width) and vs N's vias -- including the N via of this
+        // same move -- and the reverse.  Mirror of Python
+        // ``_coupled_partner_vias_clear``.
+        auto partner_vias_clear = [&](int px, int py, int nx, int ny) -> bool {
+            if (!partner_via_guard) return true;
+            if (pv_via_via_sq_ > 0.0) {
+                const double dx = static_cast<double>(px - nx);
+                const double dy = static_cast<double>(py - ny);
+                if (dx * dx + dy * dy < pv_via_via_sq_ - 1e-9) return false;
+                if (near_cells(px, py, n_vias, pv_via_via_sq_)) return false;
+                if (near_cells(nx, ny, p_vias, pv_via_via_sq_)) return false;
+            }
+            if (near_trail(px, py, n_visited, pv_n_trace_sq_)) return false;
+            if (near_trail(nx, ny, p_visited, pv_p_trace_sq_)) return false;
+            return true;
+        };
+
         // Self-intersection guard, mirror of ``_self_intersects``
         // (diffpair_routing.py:956-1005).
         auto self_intersects = [&](int np_x, int np_y, int np_l,
@@ -688,6 +746,12 @@ CoupledRouteResult CoupledPathfinder::route(
             if (n_adv && !n_ep && p_visited.count(nk)) return true;
             if (p_adv && !p_ep && too_close(np_x, np_y, np_l, n_prox)) return true;
             if (n_adv && !n_ep && too_close(nn_x, nn_y, nn_l, p_prox)) return true;
+            // Issue #6840: an advancing rail keeps via clearance from every
+            // partner via, on every layer.
+            if (partner_via_guard) {
+                if (p_adv && !p_ep && near_cells(np_x, np_y, n_vias, pv_p_trace_sq_)) return true;
+                if (n_adv && !n_ep && near_cells(nn_x, nn_y, p_vias, pv_n_trace_sq_)) return true;
+            }
             if (p_adv && !p_ep && p_visited.count(pk)) return true;
             if (n_adv && !n_ep && n_visited.count(nk)) return true;
             return false;
@@ -900,6 +964,9 @@ CoupledRouteResult CoupledPathfinder::route(
             // pad metal, not drills.  Layer-independent, so evaluated once
             // (and only when there is a layer to change to).
             int own_h2h_clear = -1;
+            // Issue #6840: partner-copper clearance of the two new barrels;
+            // layer-independent too, so evaluated once.
+            int partner_via_ok = -1;
             for (int new_layer : routable_layers) {
                 if (new_layer == current.p_layer) continue;
                 if (own_h2h_clear < 0) {
@@ -907,6 +974,11 @@ CoupledRouteResult CoupledPathfinder::route(
                                                    current.n_x, current.n_y) ? 1 : 0;
                 }
                 if (own_h2h_clear == 0) { rej("via_own_h2h"); continue; }
+                if (partner_via_ok < 0) {
+                    partner_via_ok = partner_vias_clear(current.p_x, current.p_y,
+                                                        current.n_x, current.n_y) ? 1 : 0;
+                }
+                if (partner_via_ok == 0) { rej("via_partner_clear"); continue; }
                 if (!p_at_ep && is_via_blocked(current.p_x, current.p_y, p_net)) { rej("via_blocked_p"); continue; }
                 if (!n_at_ep && is_via_blocked(current.n_x, current.n_y, n_net)) { rej("via_blocked_n"); continue; }
                 if (!p_at_ep && is_trace_blocked(current.p_x, current.p_y, new_layer, p_net)) { rej("via_trace_blocked_p"); continue; }

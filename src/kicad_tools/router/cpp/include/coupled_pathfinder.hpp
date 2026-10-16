@@ -169,6 +169,36 @@ public:
         p_fill_half_ = ph; p_fill_gap_ = pg; n_fill_half_ = nh; n_fill_gap_ = ng;
     }
 
+    // Issue #6840: via-aware partner clearance for the joint search.
+    //
+    // The trail proximity guard (``too_close``) measures a partner VIA as an
+    // ordinary trace cell at ``min_spacing_cells`` -- a trace-to-trace bound,
+    // same layer only.  A via is copper on every layer and much wider than a
+    // trace, so a rail could run past (or head-on into) its partner's barrel
+    // at trace spacing and the only thing that noticed was the post-search
+    // ``_pair_has_physical_overlap`` gate, which then threw the whole pair
+    // away (Board07 MIPI_DAT0/1, TMDS_D0/1/2; 06rf MIPI_CLK).
+    //
+    // The three radii are in GRID CELLS (not rounded), already divided by the
+    // grid resolution on the Python side so both backends compare the same
+    // double:
+    //
+    //  * ``p_trace_vs_n_via``: P centreline vs an N via centre --
+    //    ``via_diameter/2 + P_width/2 + trace_via_clearance``;
+    //  * ``n_trace_vs_p_via``: the same with N's width;
+    //  * ``via_vs_via``: P via centre vs N via centre --
+    //    ``via_diameter + trace_via_clearance``.
+    //
+    // ``0`` (the default) disables the guard, so a caller that installs
+    // nothing keeps the pre-#6840 behaviour.  Set per ``route`` call because
+    // the widths are per pair.
+    void set_partner_via_clearance(double p_trace_vs_n_via, double n_trace_vs_p_via,
+                                   double via_vs_via) {
+        pv_p_trace_sq_ = p_trace_vs_n_via > 0 ? p_trace_vs_n_via * p_trace_vs_n_via : 0.0;
+        pv_n_trace_sq_ = n_trace_vs_p_via > 0 ? n_trace_vs_p_via * n_trace_vs_p_via : 0.0;
+        pv_via_via_sq_ = via_vs_via > 0 ? via_vs_via * via_vs_via : 0.0;
+    }
+
     // Issue #5410 (B1): per-net-class dimensions for the dynamic route-halo
     // refinement, mirroring what ``RouteHaloRefiner`` reads off the net class
     // on the Python side (``nc.trace_width``, ``nc.clearance``,
@@ -317,6 +347,8 @@ private:
     }
 
     double p_fill_half_ = -1, p_fill_gap_ = -1, n_fill_half_ = -1, n_fill_gap_ = -1;
+    // Issue #6840: squared partner-via radii in cells (0 = guard off).
+    double pv_p_trace_sq_ = 0.0, pv_n_trace_sq_ = 0.0, pv_via_via_sq_ = 0.0;
     Grid3D& grid_;
     DesignRules rules_;
     int target_spacing_cells_;

@@ -330,7 +330,12 @@ namespace router {
 // zones' spacing tolerance by each end's own pad-pitch delta + 1 instead of the
 // zone radius.  A v57 .so searches a much larger joint state space than the
 // Python mirror, so coupled parity (and the Board07 replay) diverge.
-constexpr int ROUTER_CPP_BUILD_VERSION = 58;
+// v59 (Issue #6840): ``CoupledPathfinder::set_partner_via_clearance`` -- the
+// joint search keeps each rail via-clearance from the partner's vias on every
+// layer, and a layer change keeps both new barrels clear of the partner's
+// trail and vias.  The Python side calls the new setter, so a v58 .so must be
+// rejected.
+constexpr int ROUTER_CPP_BUILD_VERSION = 59;
 
 
 // Issue #4071: fixed-capacity owner-set size for per-cell corridor

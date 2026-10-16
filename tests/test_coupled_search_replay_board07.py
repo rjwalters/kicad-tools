@@ -43,17 +43,26 @@ pad-pitch delta + 1 (6 at the start, 8 at the goal) instead of the zone radius
 NOT re-captured -- they are byte-identical, so before and after compare
 directly -- but the replayed outcome is re-pinned to the post-fix values:
 
-=====================================  ==============  ==============
-Control                                before (#6816)  after (#6826)
-=====================================  ==============  ==============
-Open phase, budget lifted              402,163         213,996
-Empty grid, budget lifted              89,057          48,031
-Captured budget: best progress         48              44
-Empty grid at budget: best progress    13              3
-=====================================  ==============  ==============
+=====================================  ==============  =============  =============
+Control                                before (#6816)  after (#6826)  after (#6840)
+=====================================  ==============  =============  =============
+Open phase, budget lifted              402,163         213,996        132,899
+Empty grid, budget lifted              89,057          48,031         48,031
+Captured budget: best progress         48              44             44
+Empty grid at budget: best progress    13              3              3
+=====================================  ==============  =============  =============
+
+Issue #6840 (native ``BUILD_VERSION`` 59) adds the via-aware partner
+clearance guard, installed through ``set_partner_via_clearance``.  The capture
+predates that setter, so :func:`_with_partner_via_clearance` re-derives the
+radii from the captured ``DesignRules`` and net-class widths and inserts the
+call before each search; the recorded inputs are again NOT re-captured.  The
+guard only refuses layer changes here (``via_partner_clear``: 5,004 per phase,
+taken out of ``via_blocked_*``), so the budgeted outcome is unchanged, while
+the lifted open phase converges in 132,899 iterations instead of 213,996.
 
 TMDS_D1 still does not couple within the 20,000-iteration phase budget; it
-needs ~214k.  The recorded manifest diagnostics stay the pre-fix baseline, so
+needs ~133k.  The recorded manifest diagnostics stay the pre-fix baseline, so
 the exact-replay test now pins that the replay *differs* from the recording
 only through the search (identical inputs), and pins the post-fix diagnostics.
 """
@@ -130,7 +139,54 @@ def searches(fixture):
     would only slow the replay.
     """
     last = max(i for i, c in enumerate(fixture.calls) if _is_route(c))
-    return fixture.calls[: last + 1]
+    return _with_partner_via_clearance(fixture.calls[: last + 1])
+
+
+def _with_partner_via_clearance(calls: list[dict]) -> list[dict]:
+    """Insert the #6840 ``set_partner_via_clearance`` call before each search.
+
+    The capture predates the setter, so the recorded call list never installs
+    it and a plain replay runs with the guard off.  Production calls it before
+    every ``route`` with the radii :meth:`CoupledPathfinder.
+    _partner_via_radii_cells` derives; this rebuilds them from the captured
+    inputs alone -- the ``DesignRules`` struct the pathfinder was built with
+    and each rail's net-class width from ``set_halo_net_dimensions`` -- so the
+    fixture itself stays as recorded.
+    """
+    from kicad_tools.router.clearance_resolver import trace_via_clearance_mm
+
+    ctor = next(c for c in calls if c["op"] == "new" and c["type"] == "CoupledPathfinder")
+    rules = ctor["args"][1].fields
+    widths = {
+        c["args"][0]: c["args"][1]
+        for c in calls
+        if c["op"] == "call" and c["method"] == "set_halo_net_dimensions"
+    }
+    res = rules["grid_resolution"]
+    floor = trace_via_clearance_mm(rules["trace_clearance"], rules["via_clearance"])
+    via_r = rules["via_diameter"] / 2
+    out: list[dict] = []
+    for call in calls:
+        if _is_route(call):
+            p_net = call["args"][ROUTE_ARGS.index("p_net")]
+            n_net = call["args"][ROUTE_ARGS.index("n_net")]
+            p_w = widths.get(p_net, rules["trace_width"])
+            n_w = widths.get(n_net, rules["trace_width"])
+            out.append(
+                {
+                    "op": "call",
+                    "obj": call["obj"],
+                    "method": "set_partner_via_clearance",
+                    "args": [
+                        (via_r + p_w / 2 + floor) / res,
+                        (via_r + n_w / 2 + floor) / res,
+                        (rules["via_diameter"] + floor) / res,
+                    ],
+                    "kwargs": {},
+                }
+            )
+        out.append(call)
+    return out
 
 
 def _is_route(call: dict) -> bool:
@@ -239,11 +295,15 @@ def test_capture_shows_the_measured_exhaustion(fixture):
     assert [c["class"] for c in fixture.manifest["classification"]] == ["landing-stall"]
 
 
-# Post-#6826 diagnostics of the unmodified replay (corridor phase, open phase).
+# Post-#6840 diagnostics of the unmodified replay (corridor phase, open phase).
 # The pre-#6826 values are the recording itself (``recorded_routes`` / the
 # manifest): both phases at 20,000 iterations, best progress 48,
-# ``via_blocked_p`` dominant.
-POST_6826_PHASES = [
+# ``via_blocked_p`` dominant.  #6826 kept the budget exit (best progress 44);
+# #6840 moves 5,004 via candidates per phase from ``via_blocked_*`` to the new
+# ``via_partner_clear`` key (a layer change whose barrel would crowd the
+# partner rail is now refused before the stored-copper via gate is asked) and
+# leaves every other counter, the iteration count and best progress unchanged.
+POST_6840_PHASES = [
     {
         "best_progress": 44.0,
         "iteration_limited": True,
@@ -263,9 +323,10 @@ POST_6826_PHASES = [
             "sym_blocked_p": 2312,
             "sym_spacing": 5769,
             "sym_trail": 28652,
-            "via_blocked_n": 4605,
-            "via_blocked_p": 15501,
+            "via_blocked_n": 2856,
+            "via_blocked_p": 12717,
             "via_own_h2h": 25599,
+            "via_partner_clear": 5004,
         },
         "success": False,
         "timeout_exceeded": True,
@@ -288,9 +349,10 @@ POST_6826_PHASES = [
             "sym_blocked_p": 2314,
             "sym_spacing": 5769,
             "sym_trail": 28605,
-            "via_blocked_n": 4605,
-            "via_blocked_p": 15501,
+            "via_blocked_n": 2856,
+            "via_blocked_p": 12717,
             "via_own_h2h": 25599,
+            "via_partner_clear": 5004,
         },
         "success": False,
         "timeout_exceeded": True,
@@ -299,7 +361,7 @@ POST_6826_PHASES = [
 
 
 def test_replay_reproduces_both_phases_exactly(fixture, searches):
-    """The replay is exact against the post-#6826 search.
+    """The replay is exact against the post-#6840 search.
 
     Before #6826 this asserted ``replayed == recorded_routes(...)``.  The
     endpoint-zone tolerance change alters the search deliberately, so the
@@ -312,7 +374,7 @@ def test_replay_reproduces_both_phases_exactly(fixture, searches):
     start = time.monotonic()
     replayed = _replay(searches)
     elapsed = time.monotonic() - start
-    assert replayed == POST_6826_PHASES
+    assert replayed == POST_6840_PHASES
     manifest_diags = [p["native_diagnostics"] for p in fixture.manifest["phases"]]
     assert recorded_routes(fixture.calls) == manifest_diags
     assert replayed != manifest_diags
@@ -334,9 +396,9 @@ def test_replay_is_sensitive_to_one_landing_cell(searches):
     target = int(np.argmin(dist))
 
     tampered = _filter_raster(searches, lambda *cols: np.arange(len(cols[0])) != target)
-    # Compared against the post-#6826 pinned replay, not the pre-fix
+    # Compared against the post-#6840 pinned replay, not the pre-fix
     # recording (which every replay now differs from).
-    assert _replay(tampered) != POST_6826_PHASES
+    assert _replay(tampered) != POST_6840_PHASES
 
 
 # ---------------------------------------------------------------------------
@@ -349,13 +411,15 @@ def test_passing_control_budget_alone_lets_the_captured_pair_couple(searches):
 
     So the board does not make TMDS_D1 unroutable.  Before #6826 it needed
     402,163 iterations (about 20x the 20,000-iteration phase budget); bounding
-    the endpoint-zone tolerance by pad pitch roughly halves that.
+    the endpoint-zone tolerance by pad pitch roughly halves that (213,996), and
+    #6840's partner-via guard prunes the via moves that could only lead to a
+    rejected P/N overlap, down to 132,899.
     """
     [_, open_phase] = _replay(
         _with_route_args(searches, OPEN, max_iterations_budget=1_000_000, timeout_seconds=0.0)
     )
     assert open_phase["success"] is True
-    assert open_phase["iterations"] == 213_996  # 402,163 before #6826
+    assert open_phase["iterations"] == 132_899  # 213,996 before #6840; 402,163 before #6826
     assert open_phase["iteration_limited"] is False
 
 
