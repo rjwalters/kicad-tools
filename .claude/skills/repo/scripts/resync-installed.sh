@@ -344,6 +344,8 @@ fi
 
 VERSION="$(cat "$SOURCE_ROOT/VERSION" 2>/dev/null || echo unknown)"
 COMMIT="$(git -C "$SOURCE_ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+# The release tag HEAD sits exactly on, if any (repo#669); empty otherwise.
+TAG="$(git -C "$SOURCE_ROOT" describe --tags --exact-match --match 'v[0-9]*' HEAD 2>/dev/null || true)"
 # The install-date token is stamped once, at install time. Re-deriving it as
 # "today" would make every rendered file differ on every calendar day, turning a
 # no-op resync into permanent phantom drift — so reuse the recorded install date
@@ -766,7 +768,7 @@ policy_kept() {
 stamp_metadata() {
   local tmp
   tmp="$(mktemp "$SKILL_ROOT/.install-metadata.XXXXXX")" || { warn "Could not stage install-metadata.json — version stamp skipped"; return; }
-  metadata_tracked_json "$VERSION" "$COMMIT" "${DEV_INSTALL:-false}" "${FILTERED:-false}" "$COMMANDS" "$GUARD_HOOK_INSTALLED" "$GUARD_POLICY" >"$tmp"
+  metadata_tracked_json "$VERSION" "$COMMIT" "${DEV_INSTALL:-false}" "${FILTERED:-false}" "$COMMANDS" "$GUARD_HOOK_INSTALLED" "$GUARD_POLICY" "$TAG" >"$tmp"
   if ! policy_kept "$tmp"; then
     rm -f "$tmp"
     warn "$SOURCE_ROOT/lib/metadata.sh cannot record \"guardHook\": \"disabled\" — metadata left as is so the"
@@ -780,7 +782,7 @@ stamp_metadata() {
   # keep claiming the version it was installed at.
   [[ -n "$CODEX_ROOT" && -f "$CODEX_ROOT/install-metadata.json" ]] || return 0
   tmp="$(mktemp "$CODEX_ROOT/.install-metadata.XXXXXX")" || { warn "Could not stage $CODEX_SKILL_REL/install-metadata.json — version stamp skipped"; return; }
-  metadata_tracked_json "$VERSION" "$COMMIT" "${DEV_INSTALL:-false}" "${FILTERED:-false}" "$COMMANDS" "$GUARD_HOOK_INSTALLED" "$GUARD_POLICY" >"$tmp"
+  metadata_tracked_json "$VERSION" "$COMMIT" "${DEV_INSTALL:-false}" "${FILTERED:-false}" "$COMMANDS" "$GUARD_HOOK_INSTALLED" "$GUARD_POLICY" "$TAG" >"$tmp"
   policy_kept "$tmp" || { rm -f "$tmp"; return 0; }
   mv -f "$tmp" "$CODEX_ROOT/install-metadata.json" 2>/dev/null \
     || { rm -f "$tmp"; warn "Could not update $CODEX_SKILL_REL/install-metadata.json — version stamp skipped"; }
