@@ -805,9 +805,8 @@ shells to join.
 **Read the middle column precisely.** The breaker and the ETag cache bound the
 daemon's *own* polling loops; they do **not** govern the `gh` calls a spawned
 Claude session makes while it works an issue. What bounds those is admission
-control — `autonomous.workFinder.maxConcurrent` and the token / disk terms
-folded into the same `min(...)` ceiling (the fourth cpu/load term was deleted in
-#4512 — see [`daemon-reference.md`](daemon-reference.md)) — which caps how many
+control — `autonomous.workFinder.maxConcurrent`, the only admission cap since
+#12406 (see [`daemon-reference.md`](daemon-reference.md)) — which caps how many
 sessions exist at once on a host. A hand-rolled loop has no equivalent: N
 shells started by hand are N unbounded `gh` consumers, and nothing
 coordinates them across the other projects sharing the same machine and the

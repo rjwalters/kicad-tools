@@ -22,7 +22,6 @@ host config → repo config — see `config_resolver.rs`).
     "dispatch": {
       "tickIntervalSecs": 60,
       "maxConcurrent": 3,
-      "maxAdmissionsPerTick": 3,
       "backlogExponent": 0,
       "busyExponent": 0
     },
@@ -46,8 +45,7 @@ below. Types/ranges are strict **on this surface** (see Validation).
 | Group | Key | Default | Range | Governs | Legacy home | Single-knob env |
 |---|---|---|---|---|---|---|
 | `dispatch` | `tickIntervalSecs` | 60 | 5–3600 | Work-finder tick cadence | `autonomous.workFinder.intervalSecs` | `LOOM_WORK_FINDER_INTERVAL_SECS` |
-| `dispatch` | `maxConcurrent` | 3 | 1–256 | Sweep concurrency ceiling (dynamic cap stays bounded by disk headroom) | `autonomous.workFinder.maxConcurrent` | `LOOM_WORK_FINDER_MAX_CONCURRENT` |
-| `dispatch` | `maxAdmissionsPerTick` | 3 | 1–64 | Ramp cap: new sweeps admitted per tick (#4234) | `autonomous.workFinder.maxAdmissionsPerTick` | `LOOM_WORK_FINDER_MAX_ADMISSIONS_PER_TICK` |
+| `dispatch` | `maxConcurrent` | 3 | 1–256 | Sweep concurrency cap: the only admission cap, nothing lowers it (#12406). Hot-applies | `autonomous.workFinder.maxConcurrent` | `LOOM_WORK_FINDER_MAX_CONCURRENT` |
 | `dispatch` | `itemWeightRedMain` | 50 | 1–1000000 (integer) | Step engine item draw (#11896): priority factor of a red-main fix in `weight = actionable × priority × age`. Read per tick by the draw (`step_dispatch/item_draw.rs`) | — | — |
 | `dispatch` | `itemWeightVeryImportant` | 8 | 1–1000000 (integer) | Item-draw priority factor of `loom:very-important`, after the very-important cap (#11896) | — | — |
 | `dispatch` | `itemWeightImportant` | 3 | 1–1000000 (integer) | Item-draw priority factor of `loom:important` (#11896) | — | — |
@@ -66,8 +64,9 @@ below. Types/ranges are strict **on this surface** (see Validation).
 | `champion` | `tier3BacklogCap` | 5 | 0–1000 | Unused since #11512; parsed for config compatibility (old Tier 3 backlog gate) | — | `LOOM_CHAMPION_TIER3_BACKLOG_CAP` |
 
 **Retired draw keys** (accepted, ignored, never a startup error; `loom-daemon hyperparams --validate` and the daemon's startup log warn once per key):
-`dispatch.drawTemperature` (the #11684 softmax temperature, retired by #11742)
-and `dispatch.weightBonusRedMainFix` / `weightBonusVeryImportant` /
+`dispatch.drawTemperature` (the #11684 softmax temperature, retired by #11742),
+`dispatch.maxAdmissionsPerTick` (the per-tick ramp cap, retired by #12406: a
+tick may admit into every free slot) and `dispatch.weightBonusRedMainFix` / `weightBonusVeryImportant` /
 `weightBonusImportant` (the repo-level points, retired by #12185: the step tick
 draws one item from one pool, so a repo no longer earns points for holding
 urgent work; the item priority factors below do that job per item). Their
@@ -129,7 +128,7 @@ layer, since the pool is host-wide; the item weights are read per repo.
 **Replay.** The draw stays seeded (`loom-draw/v3`, per draw, no workspace in
 the seed). `pick.decision`'s `item_draw` records both exponents, each repo's
 `w_repo`, `in_flight` and `n_items`, the starting pool with every item's
-`priority × age`, the repos a per-repo cap closed mid-tick, and every roll,
+`priority × age`, the repos closed mid-tick, and every roll,
 so a tick's picks replay from the record. `loom.dispatch.step` carries the
 drawn item's draw weight, the pool total at that draw, and its repo's
 `n_items` and `in_flight_repo` (`loom.step.weight`, `loom.step.total_weight`,
@@ -188,7 +187,7 @@ Notes:
 
 - Tranche-1 fields **hot-apply** (#9768): `maxConcurrent`, the item-draw
   knobs (#12185), idle exit, and the backoff pair re-read config every tick,
-  `maxAdmissionsPerTick` does too since #12090, and the lease TTL re-resolves
+  and the lease TTL re-resolves
   from the layer on every lease check — a committed-block edit lands without
   a daemon restart. The exception is `dispatch.tickIntervalSecs`, which still
   needs a restart (#12090). (The single-knob env vars are process
@@ -334,7 +333,6 @@ the repo also needs the `merge_group` check workflow
 ## Tranche roadmap
 
 Tranche 1 (this issue) consolidates the seven fields above. Later tranches
-migrate the remaining tunables — host-breaker thresholds, admission-brake
-load, merge-train bounds, role execution budgets — onto the same surface.
+migrate the remaining tunables — merge-train bounds, role execution budgets — onto the same surface.
 Adding a field is: one struct entry + range check in `hyperparams.rs`, one
 consumer overlay, one row in the table above.

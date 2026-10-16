@@ -2632,9 +2632,9 @@ Crucially, the **state files** (`.bad_tokens`, `.failure_counts`, `.ranking`,
 consumer repo dispatching against the shared pool shares one `.bad_tokens` /
 `.ranking` truth with every other repo. Pool state is **never forked per repo**,
 which is what keeps the token-capacity backpressure accounting (#3907/#3930)
-consistent. The Rust `token_pool_size` (the dynamic-cap input) applies the same
-per-repo→shared resolution, so the daemon's concurrency ceiling matches what the
-spawn path can actually pick.
+consistent. The Rust `token_pool_size` applies the same per-repo→shared
+resolution, so the daemon's reported pool matches what the spawn path can
+actually pick.
 
 **Provisioning a managed-repo pool.** Bootstrap the shared pool once per machine:
 
@@ -2677,7 +2677,7 @@ disables/redirects the shared fallback; otherwise per-repo
 `~/.loom/tokens/`). Before #4292, `loom-daemon status` computed its per-token usage
 table **client-side** from the invoking process's own `cwd`
 (`resolve_tokens_workspace(".")`), independently of the pool directory the
-*daemon* itself resolved for `token_pool_size` / the dynamic-cap accounting.
+*daemon* itself resolved for `token_pool_size`.
 Running `status` from a different repo checkout than the daemon's own primary
 workspace could therefore report a false token picture (e.g. `0/0 healthy`) even
 though the daemon's own pool was perfectly healthy.
@@ -2737,11 +2737,8 @@ own registry from the `WorkspacePool` (`get_or_provision`). It returns:
 
 `loom-daemon status` prints a **Managed repos** section (root, in-flight count,
 gate state); `loom-daemon status --json` adds the `per_repo` array. The
-dynamic-cap inputs (disk headroom, configured ceiling; the RAM term was
-removed in #12330) remain
-computed once from the daemon's primary workspace —
-they are *machine-level* resources, so
-they stay a single global figure, not per-repo. `resolve_registry` (the
+sweep cap (`autonomous.workFinder.maxConcurrent`) is read from the daemon's
+primary workspace and is a single machine-level figure, not per-repo. `resolve_registry` (the
 per-request `workspace_root` targeting used by `dispatch_sweep` / `list_sweeps` /
 etc.) is unchanged: the cross-repo aggregation is a read-only snapshot for
 `DaemonStatus`. `list_sweeps` gained its own opt-in fleet-wide fan-out
@@ -3212,7 +3209,7 @@ On a green `main` the marker grants nothing.
 #11508). There is no priority side listing: a `loom:important` /
 `loom:very-important` issue is dispatched only once it is `loom:issue`, like
 everything else. No priority label exempts a candidate from any gate: the
-concurrency and per-repo caps, the build back-off and the file-overlap gate
+concurrency cap, the build back-off and the file-overlap gate
 defer it exactly like plain work. The per-host overflow slot
 (#9244) is inert: nothing is admitted over the cap, and `plan.slots.overflow_free`
 only reports whether an overflow sweep an older daemon started is still live
@@ -3226,7 +3223,7 @@ set, never a prefix match).
 verified red still admits its `<!-- loom:main-red-fix -->` candidates, and only
 those; every other ready issue in it, priority or not, keeps `workspace_halted`.
 `report.halted` is unchanged. A hold that is not a verified-red `main` (a gate
-run in flight, a drain, the host-distress breaker, a pre-flight or token-pool
+run in flight, a drain, a pre-flight or token-pool
 hold) admits nothing, fixes included. With the main-health gate loop off for a
 repo (no enabled `buildGate`, or `autonomous.mainHealthGate` off, #11690),
 there is no verified-red signal, so the latest `main` CI conclusion stands in
@@ -3324,7 +3321,6 @@ conditions, each keyed and alerted independently:
 | `tokens-zero-healthy` | zero healthy token accounts | `auth_401` (blocked by an auth-class `.bad_tokens` entry such as `auth-dead: 401`, or with no `.bad_tokens` history; never self-heals): re-auth / `tokens import-from-monitor` / `tokens unblock`; exhausted: wait or add accounts; empty pool: `tokens bootstrap` |
 | `dispatch-halted` | main-health gate halted, or the last tick halted while tokens are still available | read `health`'s dispatch section |
 | `roles-persistent` | one or more roles with PERSISTENT tick failures | a launch refused for a missing guarded-canary receipt (exit 78) is named as a runtime/version mismatch (`runtimes.default`, opencode version) |
-| `capacity-limited` | disk headroom holds the effective cap below the configured `maxConcurrent` (#10214; even with nothing waiting) | the effective vs. configured cap, how many ready issues wait; free disk or add capacity |
 
 The `star-backlog` ask (#10214) was retired with the operator star (#11510):
 priority only orders the queue, and `loom:very-important` is capped at one
@@ -3378,17 +3374,18 @@ by `candidate_cmp`, with what the tick did with it:
 
 - **running**: `dispatched` (detail `overflow` only from an older daemon's
   over-limit sweep, #9244; the slot is inert since #11508), `in_flight`
-- **ready** (waiting on a limit): `deferred_capacity`, `deferred_ramp_cap`,
-  `deferred_saturation`, `deferred_build_backoff` (#9410), `deferred_repo_cap`.
-  (`deferred_out_of_slice` is retired with the dispatch slice, #11682, and
-  never emitted.)
+- **ready** (waiting on a limit): `deferred_capacity`, `deferred_build_backoff`
+  (#9410), `deferred_file_overlap` (#9781). (`deferred_out_of_slice` is retired
+  with the dispatch slice, #11682, and never emitted. `deferred_ramp_cap`,
+  `deferred_saturation` and `deferred_repo_cap` are retired with their caps,
+  #12406; an old payload decodes as `unknown`.)
 - **blocked** (held by something specific to the issue or repo): `parked` (with
   the label), `open_pr` (with the PR number), `dispatch_backoff`,
   `open_pr_backoff`, `quarantined`, `noop_cooldown`, `declined`,
   `prless_retry`, `peer_claim`, `recheck_interval`, `hard_exclusion`,
   `host_constraint`, `workspace_halted` (the whole repo's dispatch is held: red
-  `main`, a gate in flight, a pre-flight or token-pool hold, a drain, or the
-  host-distress breaker; the row does not say which), `workspace_commands_missing`,
+  `main`, a gate in flight, a pre-flight or token-pool hold, or a drain;
+  the row does not say which), `workspace_commands_missing`,
   `dispatch_error` (with the error text), `already_landed` (#11429: the issue
   is closed, or this host recorded a `landed` sweep for it in the last 30
   minutes; detail `forge_closed` or `journal_landed`), `already_closed`
@@ -3419,14 +3416,13 @@ observability export on, the queue also reaches SigNoz as
 The fleet dashboard view is phase 3.
 
 **Dispatch plan (#9288).** Each row also carries `position`, `plan_state`
-(`running` / `next` / `queued` / `blocked`), `gate`, `keys`, `hot`,
-`owning_shard` and `repo_cap` (`in_slice` is retired and absent since #11682). The tick summary carries a `plan` block:
-`slots` (`max_concurrent`, `occupancy`, `free`, `max_admissions_per_tick`,
-`saturation_held`, `any_halted`, `overflow_free`), `tick_interval_secs`, `shard`, `scope` and
-`ordering`. `position` is the order pass 2 actually offered candidates in,
-after the per-repo-cap shaping. `rank` is still the bare
-comparator rank, so the two differ whenever
-`maxConcurrentPerRepo` reshapes the list. `loom-daemon queue` shows
+(`running` / `next` / `queued` / `blocked`), `gate`, `keys` and
+`owning_shard` (`in_slice` is retired and absent since #11682; `hot` and
+`repo_cap` since #12406). The tick summary carries a `plan` block:
+`slots` (`max_concurrent`, `occupancy`, `free`, `any_halted`,
+`overflow_free`), `tick_interval_secs`, `shard`, `scope` and
+`ordering`. `position` is the order pass 2 actually offered candidates in;
+`rank` is the bare comparator rank. `loom-daemon queue` shows
 `#<position> <plan_state>[/<gate>]` per row plus a `Plan:` slot line.
 `--json` adds `plan`, and its `ordering` is the daemon's own key list rather
 than a hard-coded string. `loom:curated` / `loom:triage` are unordered and never
@@ -3438,7 +3434,7 @@ separate rule: [`dispatch-plan.md`](dispatch-plan.md).
 ## Forge-side pipeline snapshot (`status --pipeline`, #3977)
 
 `loom-daemon status` shows the *dispatch*-side picture (in-flight sweeps, the
-dynamic cap, token health, per-repo priority/gate state — see the two sections
+sweep cap, token health, per-repo priority/gate state — see the two sections
 above), but none of that answers "how is the work actually progressing?" —
 that requires forge queries the daemon's IPC handler deliberately does not
 make (the `DaemonStatus` round-trip stays a fast, network-free read). The
@@ -3608,7 +3604,7 @@ such repo at startup:
 | section | what it reports | source |
 |---------|-----------------|--------|
 | `liveness` | trusted liveness verdict | `daemon_install_state::probe()` + `pgrep_daemon_pids()` + the IPC round-trip |
-| `dispatch` | in-flight vs dynamic cap, plus the last work-finder tick's dispatch/skip-reason summary | `DaemonStatusReport` + `work_finder::last_tick_summary()` |
+| `dispatch` | in-flight vs the sweep cap, plus the last work-finder tick's dispatch/skip-reason summary | `DaemonStatusReport` + `work_finder::last_tick_summary()` |
 | `tokens` | healthy/total, exhausted count, `.ranking` staleness | `CapacityReport` + the resolved pool's `.ranking` mtime |
 | `roles` | **persistent** role-tick failures (transient ones are a count only) | `role_runner::role_tick_records()` |
 | `role_liveness` | roles configured to tick that have gone **silent** — no tick at all in `>= 4x` their own interval (#6201) | `role_runner::last_role_tick_snapshot()` + each root's `role_runner_enabled`/`role_runner_roles` |
@@ -4711,41 +4707,44 @@ Each tick:
    not a park: an explicit `dispatch_sweep` on an epic still runs, and the
    epic supervisor is unaffected.
 3. Dispatches the remainder through the existing `SweepRegistry::dispatch()`
-   path — up to a **work-driven dynamic cap** (Phase B, #3811) recomputed every
-   tick and counted against the current live sweep occupancy. `dispatch()`
+   path — up to the configured cap (`maxConcurrent`, re-read every tick) and
+   counted against the current live sweep occupancy. `dispatch()`
    already flips `loom:issue → loom:building`, acquires the per-issue
    `mkdir`-atomic claim lock, and spawns the rotated-token child, so the finder
    reimplements none of the race guard. Each dispatch uses a
    `workfinder-<issue>` idempotency key, making a re-dispatch of an
    already-running issue a no-op.
 
-### Dynamic concurrency scaling (Phase B, #3811; CPU/load term #3978; token axis removed / RAM added #5270)
+### Sweep concurrency cap (#3811; operator setting only since #12406)
 
-The concurrency cap is **not** a fixed value resolved once at startup. Every
-tick the finder recomputes
+The sweep cap is `autonomous.workFinder.maxConcurrent` (env
+`LOOM_WORK_FINDER_MAX_CONCURRENT`, hyperparameter home
+`hyperparameters.dispatch.maxConcurrent`) and nothing else. There is no disk,
+RAM, CPU, load or per-repo term, no per-tick ramp, no saturation brake and no
+host-distress breaker (operator ruling on #12406: "remove all of these cap
+mechanisms and rely on the operator setting"). A tick may admit into every
+free slot.
 
-```
-dynamic_cap = min(disk headroom, configured maxConcurrent)
-```
+The loop re-reads `maxConcurrent` from the primary workspace's effective config
+every tick, so an edit (committed `.loom/config.json`, host-local
+`.loom-local/local.json`, or fleet config) takes effect on the next tick with
+no restart and no effect on in-flight sweeps (#9060). **The
+`LOOM_WORK_FINDER_MAX_CONCURRENT` env override is the exception**: it lives in
+the daemon's process environment, fixed at launch, so while it is set it
+shadows config until a restart (the daemon logs `maxConcurrent=N is IGNORED`
+when a config edit is shadowed). See the `autonomous.workFinder.maxConcurrent`
+row in the config reference table (below, under "Config surface").
 
-from live inputs, so disk/backlog changes are honored without a daemon
-restart. Since #9060 that includes **`configured maxConcurrent`**: the loop
-re-reads `autonomous.workFinder.maxConcurrent` from the primary workspace's
-effective config every tick, so an edit (committed `.loom/config.json`, or
-host-local `.loom-local/local.json`) takes effect on the next tick with no
-restart and no effect on in-flight sweeps. **The `LOOM_WORK_FINDER_MAX_CONCURRENT`
-env override is the exception**: it lives in the daemon's process environment,
-fixed at launch, so while it is set it shadows config until a restart (the
-daemon logs `maxConcurrent=N is IGNORED` when a config edit is shadowed). See
-the `autonomous.workFinder.maxConcurrent` row in the config reference table
-(below, under "Config surface").
+Operators steer the cap from fleet config and watch host pressure from
+outside, through the exported `loom.host.*` disk, RAM and load metrics. If a
+host runs short of disk or memory, lower its `maxConcurrent`.
 
 The other work-finder tuning keys ride the same per-tick read (#12090), so
 fleet-gitops can retune a live daemon without a restart:
 
 | Live (re-read every tick) | Restart required |
 |---------------------------|------------------|
-| `maxConcurrent`, `maxConcurrentPerRepo`, `maxAdmissionsPerTick` (and their `hyperparameters.dispatch` homes), `extraSkipLabels`, `redFixEscalateAfterSecs`, `landedPrefilter`, `saturationBrake.*`, `autonomous.hostBreaker.*` | `enabled`, `intervalSecs` / `hyperparameters.dispatch.tickIntervalSecs`, every `LOOM_*` env override |
+| `maxConcurrent` (and its `hyperparameters.dispatch` home), `extraSkipLabels`, `redFixEscalateAfterSecs`, `landedPrefilter` | `enabled`, `intervalSecs` / `hyperparameters.dispatch.tickIntervalSecs`, every `LOOM_*` env override |
 
 `loom-daemon fleet-config render` classifies a changed path from the same
 table in code (`fleet_store::reload`).
@@ -4753,195 +4752,33 @@ table in code (`fleet_store::reload`).
 > **This cap bounds SWEEP dispatch only (#6102).** Role-runner agents
 > (Curator / Judge / Doctor / Champion / Guide / …) are spawned by the role
 > runner's own interval and idle-edge loops and **never pass through this
-> admission path**, so none of the three terms above — including
-> `maxConcurrent` — has ever bounded them. Since #6102 they have their own
-> ceiling, `autonomous.roleRunner.maxConcurrent` (default: the number of
-> interval-cadence default roles); this host's worst-case agent count is
-> `dynamic_cap + roleRunner.maxConcurrent`. See
-> [The other half of the agent budget](#the-other-half-of-the-agent-budget-role-runner-agents-6102). **#5270 removed the token axis from this formula entirely**, on any
-auth path (API key or subscription pool, overage-enabled or not) — operator
-direction: "we should only ever limit parallelism based on the machine
-disk/RAM/CPU." A metered `ANTHROPIC_API_KEY` has no 5h/7d subscription window,
-and overage means a subscription pool no longer hard-stops at one either, so
-counting *healthy accounts* was never a proxy for this host's actual capacity
-to run more sweeps. `.ranking` health is **not** deleted — it still drives
-spawn-time **selection** (`tokens_pool::select`: prefer fresher/healthier
-accounts, skip revoked/blocked ones) and the account-health figures remain on
-the status/calibrate surface as informational fields — it just no longer
-gates *how many* sweeps may run concurrently. A fourth **cpu/load headroom**
-term also sat in this `min(...)` from #3978 until **#4512 deleted it** — see
-[Why there is no CPU term in admission](#why-there-is-no-cpu-term-in-admission-4512)
-below. There is still no CPU *term* in the numeric cap; instead, since #4903
-(and retuned by #5270 into the primary "dumb mode" CPU gate — default
-threshold `0.95` load/core, down from the original `4.0` generous backstop)
-the [saturation admission brake](#saturation-admission-brake-4903) *holds* new
-admissions when the host is measurably saturated, without resizing the cap or
-touching running work.
+> admission path**, so `maxConcurrent` has never bounded them. Since #6102
+> they have their own ceiling, `autonomous.roleRunner.maxConcurrent`
+> (default: the number of interval-cadence default roles); this host's
+> worst-case agent count is `maxConcurrent + roleRunner.maxConcurrent`. See
+> [The other half of the agent budget](#the-other-half-of-the-agent-budget-role-runner-agents-6102).
 
-| Input | Source | Bound it enforces |
-|-------|--------|-------------------|
-| **disk headroom** | since #11191, `sweeps in flight + floor((free - floor - reserved) / smallest repo charge)` on the worktree-root volume, with each repo charged its own measured footprint — see [Disk admission](#disk-admission-11191) (`disk_admission::tick`). With `LOOM_DISK_ADMISSION=0`, or when free space is unmeasurable, the legacy `floor(free_gb / LOOM_PER_WORKTREE_GB)` (default 8 GB, #8370; `disk_headroom::disk_headroom_limit`, a Rust port of `disk-headroom.sh` that shells to `df -Pk`) | never provision more worktrees than the scratch volume can hold, counting the growth the running sweeps have still to write |
-| **configured maxConcurrent** | `LOOM_WORK_FINDER_MAX_CONCURRENT` / `autonomous.workFinder.maxConcurrent` (repurposed from Phase A's fixed target into an operator ceiling) | the per-machine **sweep-dispatch** admission knob (#4512) — tuned empirically by the operator, the only *policy* term in the `min(...)` (the other two meter exhaustible resources: bytes of disk and bytes of RAM). **Not the whole host's agent budget**: role-runner agents are admitted outside this formula entirely (#6102) |
+**Token health does not size the cap** (#5270): "we should only ever limit
+parallelism based on the machine." `.ranking` health still drives spawn-time
+account **selection** (`tokens_pool::select`: prefer fresher/healthier
+accounts, skip revoked/blocked ones), and the account-health figures stay on
+the status/calibrate surface as informational fields.
 
-Retired as cap inputs (informational-only now — see `capacity::token_axis_limit` / `tokens_pool::select`):
+**Per-token concurrency** (`LOOM_PER_TOKEN_CONCURRENCY` / `autonomous.perTokenConcurrency`, #3947) was retired from the cap by #5270 and then removed entirely by #5743. A config file that still sets `autonomous.perTokenConcurrency` parses fine (unknown keys are ignored, not an error) but the key does nothing.
 
-| Input | Source | What it still does |
-|-------|--------|-------------------|
-| **healthy-token count** (retired from the cap, #5270) | `available` accounts in `.ranking` in the pool directory `tokens_pool::paths::resolve_tokens_dir` resolves for the workspace — per-repo `{workspace}/.loom/tokens/` when it holds `*.token` files, else the shared machine-level pool (#3938) (`capacity::read_ranking` / `token_axis_limit`, unified with the writer in #4344) | drives spawn-time account **selection** (prefer fresher/healthier accounts, skip exhausted/blocked ones, #3902) and is reported on `status`/`calibrate` for observability — no longer bounds `dynamic_cap` |
-
-**Per-token concurrency** (`LOOM_PER_TOKEN_CONCURRENCY` / `autonomous.perTokenConcurrency`, #3947) was retired from the cap by #5270 and then removed entirely by #5743 — it fed only a disclaimed `healthy × per-token` status/calibrate figure with no admission effect, which caused mis-diagnosis on the fleet more than once. The knob, its env var, and the status line are gone; a config file that still sets `autonomous.perTokenConcurrency` parses fine (unknown keys are ignored, not an error) but the key does nothing.
-
-#### Disk admission (#11191)
-
-A flat 8 GB per sweep, checked against free space *now*, let a host keep
-dispatching while two in-flight loom builds were still going to write 50 GB
-(loom-worker-1, 2026-10-09: about 50 GB free at 15:59, 0 GB at 16:19). Disk
-admission charges each repo what its sweeps actually use and reserves the
-growth the running ones have not written yet. A sweep of repo R is admitted
-only when
-
-```text
-free - floor - reserved >= charge(R)
-reserved = sum over in-flight units u of max(0, charge(u.repo) - written(u))
-```
-
-| Term | Meaning |
-|---|---|
-| `free` | free GB on the worktree-root volume (`df -Pk`, as before) |
-| `floor` | the disk-full halt floor (`LOOM_DISK_FULL_HALT_GB`, default 3), so admission stops before the terminal halt |
-| `charge(R)` | R's **observed** sweep high-water mark + 10%, whole GB rounded up, minimum 1 (a repo that builds nothing measures well under 1 GB and is charged 1). R's `autonomous.workFinder.diskChargeGb` (**config**, per repo) is a **floor** under it: the charge is `max(observed, configured)`, so a configured value always raises an under-measured repo. With no history: the config, else `LOOM_PER_WORKTREE_GB` (**default**, 8) |
-| `charge(u)` for a role run | a role-runner tick (curator, champion, judge, guide, …) is reserved against **its own role's** mark in that repo + 10%, never the repo's sweep charge, and not at all before that role has a mark |
-| `written(u)` | what an in-flight unit has on disk now; already gone from `free`, so it is not charged twice |
-
-**Measurement.** A `disk-footprint` sampler thread (every
-`LOOM_DISK_SAMPLE_SECS`, default 60) measures every live unit of every
-managed repo:
-
-- an **issue sweep** is its worktree (`issue-N`), plus the per-worktree cargo
-  target dir its `.loom-cargo-target-dir` marker names (#8458,
-  `cargo.perWorktreeTargetDir`, which lives outside the worktree), plus every
-  live `.loom/targets/` run dir (#8370) owned by the claim lock's pid or
-  process group;
-- a **PR-set sweep** is the run dirs held by the owner of its `pr-N` locks;
-- any **other live run dir** is a unit of its own. Its role comes from the dir
-  name: a sweep role (`sweep-lifecycle`, `builder`) is a sweep; anything else
-  is a **role run**.
-
-When a sweep ends, its peak is folded into the repo's history (the last 20
-sweeps); when a role run ends, into a separate per-repo, per-role history, so
-a stream of curator or guide ticks never ages a heavy build out of the repo's
-window. A unit that peaked under 1 MiB never built (a role run's dir holding
-only its owner file) and is not folded at all. Both histories live in
-`~/.loom/disk-footprints.json` (`LOOM_DISK_FOOTPRINT_PATH`); a repo's charge
-is the max of its sweep history. Sizes are apparent file lengths with
-hard-linked files (cargo's uplifted binaries) counted once per link, so the
-measurement errs toward over-charging.
-
-**Unmeasurable build output.** A sweep in a Cargo repo whose build output no
-probe finds (an operator `CARGO_TARGET_DIR` in the daemon's environment, a
-containerized run) is **not** folded into history, and the daemon logs a
-WARN naming the repo once per process. Such a repo keeps its configured or
-default charge: set `diskChargeGb` to its real per-sweep footprint.
-
-**Where it applies.**
-
-- The work finder: a repo whose charge does not fit at the top of a tick is
-  held with the `disk_reservation` halt cause (its `workspace_halted` rows say
-  so); pass 2 debits each admission and defers whatever stops fitting as
-  `deferred_capacity` with a `disk: <repo> charge NGB (source) exceeds
-  remaining MGB (free … - floor … - reserved …)` detail. A heavy repo's
-  charge never blocks a light sibling.
-- Every other dispatch route: the check also runs inside
-  `begin_prepared_issue_dispatch`, after the other guards and before any
-  claim, label or spawn — so the review-stall watchdog's re-dispatch
-  (#3910), its PR-set conversion (#7649), the reaper's resume (#4256),
-  IPC/CLI dispatch and the epic supervisor are gated by the same rule. A
-  refusal is a typed `DiskAdmissionRefused` error naming every figure, logged
-  at WARN. An admitted dispatch is recorded as a *pending* unit, so the next
-  admission reserves for it before any sample has seen it (dropped after 180 s
-  if no sample adopts it).
-
-**Visibility.** `disk_admission: free 50GB - floor 3GB - reserved 30GB =
-17GB; charges [loom:29GB(observed),docs:1GB(observed)]; sweeps_in_flight=2
-cap_term=2 refusing=[loom]` is logged at INFO on change and at WARN on the
-edge into refusing a repo; the `work_finder: tick` line carries the same
-figures in `disk=N [...]`.
-
-**Fail-open cases.** An unmeasurable `df` keeps the legacy term and skips the
-seam check (#4164). A store whose last sample is older than 10 minutes
-reserves nothing for its sampled units (live free space and the per-repo
-charges still apply); the daemon logs a WARN on the edge into stale and an
-INFO when it recovers. A sampler iteration that panics is caught and logged,
-and a sampler thread that has died is restarted on the next tick. A corrupt
-store file is moved aside to `<path>.corrupt-<unix secs>` with a WARN and
-replaced by an empty store, so every repo falls back to its configured or
-default charge until its history rebuilds. `LOOM_DISK_ADMISSION=0` turns the
-whole mechanism off.
-
-The single-workspace work-finder loop uses the same budget's cap term (its
-one repo's charge, net of the reservation); the per-repo hold and the
-`disk_reservation` halt cause belong to the multi-workspace loop.
-
-| Knob | Default | Meaning |
-|---|---|---|
-| `LOOM_DISK_ADMISSION` | on | `0`/`false`/`off` restores the legacy flat disk term |
-| `autonomous.workFinder.diskChargeGb` (repo config) | unset | a floor under the repo's charge (`max(observed, configured)`), and the charge itself while it has no history |
-| `LOOM_PER_WORKTREE_GB` | 8 | the global fallback charge (and the legacy term's divisor) |
-| `LOOM_DISK_FULL_HALT_GB` | 3 | the floor admission keeps clear |
-| `LOOM_DISK_SAMPLE_SECS` | 60 | sampler interval |
-| `LOOM_DISK_FOOTPRINT_PATH` | `~/.loom/disk-footprints.json` | history and in-flight store |
-
-#### Per-repo dispatch cap + track affinity (#9090)
-
-`min(disk, ram, maxConcurrent)` is **one global budget**, filled in one
-globally-sorted order ([per-workspace draw weights](#per-workspace-draw-weights-3946-11742)),
-so nothing stops the whole budget landing in a single repo: N sweeps in one repo
-rebase against each other's merges while sibling repos sit idle behind them.
-`autonomous.workFinder.maxConcurrentPerRepo` bounds one repo's share of it.
-
-| | |
-|---|---|
-| Config | `autonomous.workFinder.maxConcurrentPerRepo` |
-| Env | `LOOM_WORK_FINDER_MAX_CONCURRENT_PER_REPO` |
-| Default | **absent = uncapped** — opt-in, so an upgrade changes nothing |
-| Precedence | env > config > uncapped, **re-read every tick** (hot-applies, on the same #9060 path as `maxConcurrent`) |
-| Zero | treated as *absent*, never as a cap of `0` (which would deadlock every repo) |
-
-Two mechanisms, one knob (setting it enables both):
-
-1. **The cap is an admission bound.** A candidate whose own repo already holds
-   `maxConcurrentPerRepo` slots is **deferred** — counted as
-   `TickReport::deferred_repo_cap`, shown as the `deferred_repo_cap` queue
-   disposition and the `repo_cap` dispatch-decision reason — and the tick
-   continues to the next candidate in order, which by construction is another
-   repo's work. Deferral is never a drop: the issue stays ready and is
-   re-evaluated next tick. The per-repo counter is seeded from each dispatcher's
-   own occupancy — the same per-repo numbers the global seed already sums — so
-   it costs no extra forge reads, and a repo that is *already* at its cap admits
-   nothing new this tick.
-2. **Track affinity is an ordering preference.** A repo that already has a live
-   sweep sorts ahead of a cold repo (a *stable* partition of the already-sorted
-   list, so `candidate_cmp` is untouched and still decides order within each
-   group), so a repo's own backlog drains in sequence instead of
-   one-issue-per-repo round-robin. Affinity is strictly **subordinate** to the
-   cap: it decides order, the cap decides admission. A floated hot repo still
-   cannot exceed its cap.
-
-**Work conservation is structural.** A cap deferral consumes no slot and the
-tick moves straight on, so the slot is available to another repo — including the
-cold, lower-priority repo affinity had floated to the back — *in the same tick*.
-The one case where a free global slot is deliberately left unused is when every
-remaining candidate's repo is at its own cap; that is the cap doing its job, the
-same shape as `occupancy >= maxConcurrent` idling a tick.
-
-**Cross-repo interleaving while a repo waits on CI needs no mechanism** and has
-none: the #4123 open-PR dispatch guard already makes an
-issue whose linked PR is in flight a non-candidate (`open_pr`), so the tick's
-next dispatch goes to another repo, and re-engagement when the PR merges is
-automatic. Affinity reorders the drawn list and the cap gates admission last.
-No priority is exempt (#11508). (The [repo-sharding slice
-(#6243)](dispatcher-repo-sharding.md) that used to run first is retired from
-dispatch, #11682.)
+**Removed by #12406.** These no longer exist: the disk headroom term and
+per-repo disk admission (`diskChargeGb`, the `disk-footprint` sampler and its
+store, the `disk_reservation` halt cause, the disk figures on the tick line;
+the daemon no longer reads `LOOM_PER_WORKTREE_GB`), the per-repo cap
+`maxConcurrentPerRepo` and track affinity, the per-tick ramp cap
+`maxAdmissionsPerTick`, the saturation admission brake
+(`autonomous.workFinder.saturationBrake.*`), the host-distress breaker
+(`autonomous.hostBreaker.*`) and the disk-full dispatch halt it drove
+(`LOOM_DISK_FULL_HALT_GB` / `LOOM_DISK_FULL_RESUME_GB`). The
+`hyperparameters.dispatch.maxAdmissionsPerTick` key is still accepted and
+ignored by the validator. The `/loom:sweep` skill's own wave sizing
+(`defaults/scripts/lib/disk-headroom.sh`) still reads `LOOM_PER_WORKTREE_GB`;
+that is a separate, script-side reader.
 
 #### Same-repo file-overlap deferral (#9781)
 
@@ -4950,7 +4787,7 @@ Doctor rebase cycle as soon as the first PR merges. Pass 2 therefore defers a
 candidate whose Curator `## Affected Files` paths intersect the surface already
 **occupied** in its repo: candidates admitted earlier this tick, plus in-flight
 items the tick's own `loom:issue` listing still carries a body for. It runs
-after the capacity, ramp, RAM and per-repo-cap gates, so it is work-conserving
+after the capacity gate, so it is work-conserving
 — the slot goes to the next candidate in order. Always on; no config.
 
 - **Disposition** `deferred_file_overlap` (state `ready`, plan gate
@@ -4996,13 +4833,11 @@ actually is**:
 
 1. **Sweep admission is one per-machine knob.** `autonomous.workFinder.maxConcurrent`
    is the whole *sweep* policy, tuned empirically by the operator (expect 10+ on an
-   8-core API-bound worker). The one remaining term — disk headroom — stays
-   because it meters a genuinely *exhaustible* resource (bytes), not an
-   estimate. RAM headroom (#5270, #11094) was removed in #12330: it reserved
-   every in-flight sweep's worst observed build peak at once and capped idle
-   hosts near 1; RAM is watched from outside instead (host memory pressure),
-   by adjusting `maxConcurrent`. (The token axis sat here too until
-   #5270 removed it — see the section above.) **It is not the whole *host*
+   8-core API-bound worker). RAM headroom (#5270, #11094) was removed in #12330:
+   it reserved every in-flight sweep's worst observed build peak at once and
+   capped idle hosts near 1. The disk term went in #12406. Disk and RAM are
+   watched from outside instead (the `loom.host.*` metrics), by adjusting
+   `maxConcurrent`. **It is not the whole *host*
    policy**: role-runner agents are admitted outside this formula entirely and
    carry their own ceiling since #6102 — see
    [The other half of the agent budget](#the-other-half-of-the-agent-budget-role-runner-agents-6102).
@@ -5012,18 +4847,15 @@ actually is**:
    `cargo build`/`test` or the build gate; the rest of a sweep's lifecycle never
    queues.
 
-The **host-distress circuit breaker** (#4235) is unchanged and is what makes a
-hand-tuned knob safe to raise: a mis-set `maxConcurrent` trips a **measured**
-breaker (load-per-core), instead of melting the host on the strength of a
-mis-estimated constant. #4903 added a third guard on the same measured signal —
-the point-in-time [saturation admission brake](#saturation-admission-brake-4903)
-— after a CPU-heavy (analog-simulation) workload reached 12× overcommit on a
-host whose `maxConcurrent` was never set.
+The load-based guards that later sat beside this knob (the host-distress
+breaker #4235 and the saturation admission brake #4903) were removed in
+#12406. A mis-set `maxConcurrent` is corrected by the operator, from the
+exported host metrics.
 
 `cpu_headroom.rs` survives as a pure **measurement** module — logical core
 count, load average, measured idle fraction, and the `is_host_saturated`
-predicate — consumed by the host breaker (#4235), the build gate's load-aware
-deferral (#4259), and the `status` / `calibrate` reports. Nothing it produces
+predicate — consumed by the build gate's load-aware deferral (#4259) and the
+`status` / `calibrate` reports. Nothing it produces
 feeds the cap.
 
 **Retired knobs are accepted-but-ignored, never a config error.**
@@ -5072,188 +4904,9 @@ Every read here is **fail-open**: an unreadable idle signal (missing
 `/proc/stat` or `iostat`, unsupported platform, or no delta sampled yet) is
 `None`, and every consumer must fail *safe* on `None` rather than assume "host
 fully loaded" — `is_host_saturated` returns `None` so the build gate runs
-instead of deferring, and the host breaker treats a missing sample as a
-non-observation. This mirrors `capacity::token_axis_limit`'s policy of falling
+instead of deferring. This mirrors `capacity::token_axis_limit`'s policy of falling
 back to the optimistic basis when no ranking data exists: the absence of a
 signal is not evidence of unhealthiness.
-
-**`LOOM_PER_WORKTREE_GB` deliberately stays env-only (#4032 decision).**
-`disk_headroom`'s `LOOM_PER_WORKTREE_GB` was *not* migrated to the
-`autonomous.*` config pattern. It has a second, independent
-Bash-side reader (`defaults/scripts/lib/disk-headroom.sh`, consumed by
-`/loom:sweep` Stage -1 wave sizing) alongside the Rust
-`disk_headroom::per_worktree_gb`. Migrating only the Rust side would create a
-live divergence where the same env var honors `.loom/config.json` on the
-daemon path while silently ignoring it on the sweep path — worse than today's
-consistent env-only behavior. Wiring the Bash `config-resolver.sh` into
-`disk-headroom.sh` too is a separate, larger change; file a follow-up if that
-cost is judged worth paying.
-
-**There is no RAM headroom term** (removed in #12330). The dynamic cap is
-`min(disk headroom, maxConcurrent)`; `LOOM_PER_WORKTREE_RAM_GB` is no longer read.
-
-#### Saturation admission brake (#4903)
-
-Deleting the CPU term left admission with **no term that reads the host at
-all**. That is correct for the workload #4512 measured, and wrong for a workload
-it did not anticipate. `loom-worker-1` (8 vCPU) was observed at **load average
-95** — `11.9` load/core, `0.07%` idle — from only **three** in-flight sweeps,
-because all three were analog-simulation repos (`analog-*`) that had spawned 16
-`ngspice` processes between them. SPICE simulation is sustained CPU for tens of
-minutes, not API-wait, so for those repos a sweep is closer to a build than to a
-conversation. The daemon *measured* the saturation (`loadavg_1m` and
-`cpu_idle_fraction` are both in the dispatch headroom report) and did not act on
-it: `capacity_bound: false`, cap `12`, nine more slots nominally free.
-
-The fix is a **brake on admission, not a return to CPU-based sizing**. Once per
-work-finder tick the daemon asks `cpu_headroom::is_host_saturated` — the same
-predicate the build gate's load-aware deferral uses — whether load-per-core is
-at/over a hold threshold, and if so it **holds new admissions** for that tick
-and re-checks on the next one. It does not resize the cap, does not estimate
-per-sweep cores, and **never** touches work that is already running.
-
-| | Value |
-|---|---|
-| Config | `autonomous.workFinder.saturationBrake.enabled` / `.loadPerCoreHold` / `.cpuBusyHold` / `.sustainTicks` |
-| Env | `LOOM_ADMISSION_BRAKE` / `LOOM_ADMISSION_BRAKE_LOAD_PER_CORE` / `LOOM_ADMISSION_BRAKE_CPU_BUSY` / `LOOM_ADMISSION_BRAKE_SUSTAIN_TICKS` |
-| Default | **on**, hold at **0.95** load/core (retuned from `4.0` by #5270) **and** **90%** measured CPU busy, sustained for **3** consecutive ticks (#11709) |
-| Precedence | env > config > default, resolved once at daemon startup |
-
-**Load average alone never holds (#11709).** Load average counts runnable
-threads — and on macOS threads blocked on I/O — so a host full of short
-`gh`/`git` processes waiting on the network reads "saturated" while its CPUs
-idle. On 2026-10-13 robb-pro (18 cores) sat at 1.66 load/core with **0** sweeps
-in flight and `top` at **62% idle**, and the brake held every admission. The
-brake now holds only when **both** load-per-core ≥ `loadPerCoreHold` **and**
-measured CPU busy (`1 − cpu_idle_fraction`, the same memoized sample shown as
-`observed_idle=` / `host cpu` in `status`) ≥ `cpuBusyHold`, for `sustainTicks`
-consecutive work-finder ticks. A missing utilisation sample never holds.
-Release is still immediate on the first tick back under either bar. The #4903
-incident (`0.07%` idle) is still caught. The `engaged` log line names both
-readings, both bars and the in-flight sweep count. `loom-daemon calibrate`
-reports the point-in-time verdict (no sustain window).
-
-**Retuned by #5270 from a generous backstop to the primary CPU admission
-gate.** Until #5270 the token axis and disk headroom were the two hard
-admission floors, with this brake acting only as a rarely-tripped safety net
-well above them (`4.0` load/core — four runnable threads per logical core).
-#5270 removed the token axis from admission entirely, which promotes this
-brake to **the** CPU term in "dumb mode": its default now matches the
-operator's literal ask — hold new admissions once the host's few-minute load
-average reaches ~95% of its logical core count (`0.95` load/core), resume
-below it.
-
-Properties that are load-bearing (and are pinned by tests):
-
-- **In-flight sweeps are never killed or preempted.** The brake is applied only
-  where *new* candidates are admitted, immediately before the concurrency-cap
-  check; it has no path to the reaper or to any running child. A held tick
-  dispatches nothing and returns, and the running sweeps drain normally — which
-  is precisely how the host recovers.
-- **A healthy host is unchanged.** Below the threshold the admission path is
-  byte-for-byte the pre-#4903 one, so an idle 8-core host still reaches its
-  configured cap. `0.95` holds a notch below full saturation (`1.0` = as many
-  runnable/uninterruptible threads as logical cores), mirroring the build
-  gate's own `0.9` deferral point rather than the pre-#5270 `4.0`, which would
-  have let a host run at 4× overcommit before this brake ever engaged — the
-  incident that originally motivated the brake was at `11.9`.
-- **Fail-safe on missing data.** No load-average source (or a zero CPU count)
-  ⇒ no hold. Absent evidence is never treated as load.
-- **Nothing latches.** The hold is re-evaluated every tick and releases the
-  moment load drops back under the threshold.
-
-**How this differs from the host-distress circuit breaker (#4235)** — the two
-read the same normalized ratio and are complements, not duplicates:
-
-| | Admission brake (#4903) | Host breaker (#4235) |
-|---|---|---|
-| Nature | point-in-time: one reading, one decision | stateful: trips only after N consecutive over-threshold ticks |
-| Default threshold | `0.95` load/core (`4.0` before #5270) | `2.5` load/core |
-| Release | immediate, first tick under the line | after a 5-minute cool-down |
-| Explicit `dispatch_sweep` | never blocks it | hard-blocks unless `force` |
-| Purpose | stop *adding* to a full host | remember a *meltdown* so a load dip cannot re-admit a whole wave |
-
-**Since #5270 the brake's default threshold sits *below* the breaker's** — the
-reverse of the pre-#5270 ordering. Pre-#5270 the brake decided from a single
-reading at a generous `4.0` and had to "be sure" before firing; post-#5270 it
-is the fast, cheap, per-tick hold that engages first (a single over-threshold
-reading, `0.95`), with the breaker remaining the slower, stickier trip for
-genuine sustained distress (several consecutive over-threshold ticks, `2.5`)
-well past the point the brake has already held new admissions.
-
-**Visibility.** `loom-daemon status` prints an `Admission brake:` line
-(`HOLDING …` / `OK …` / `disabled`), `--json` carries an `admission_brake`
-object, and while the brake is holding the capacity block's
-"not capacity-bound … the limiter is work availability" line is **replaced** by
-an `⚠ ADMISSION BRAKE HOLDING` line naming the host as the limiter. Per-tick
-deferrals are counted as `deferred (host saturated)` in the work-finder tick log
-and as `deferred-saturation` in `loom-daemon health`. A host holding back says
-so; it no longer reads as idle.
-
-##### Starvation escape hatch (#5715)
-
-The brake's release condition — "the very next reading drops back under
-threshold" — assumes something *the brake itself is blocking* is what is
-holding the load up, so simply waiting eventually relieves it. That
-assumption breaks when the load is generated entirely by work the brake has
-**no authority over** — most notably the role runner's own
-champion/curator/judge/doctor/guide ticks (which are *not* gated by this
-brake). On `studio-host` that livelocked sweep admission for **33 hours**:
-held forever, load never dropped (because it was all role-runner load), zero
-sweeps in flight the entire time, and the per-tick `deferred (host
-saturated)` INFO counter looked identical to one healthy backpressure tick.
-
-The daemon now folds the current in-flight sweep count into every
-observation (`crate::ipc::count_in_flight_sweeps` in the production
-multi-workspace loop) so it can tell "held, sweeps genuinely draining"
-(healthy backpressure) apart from "held, **zero** sweeps in flight,
-continuously" (starvation — nothing running can ever relieve the load). Two
-bounded reactions follow, purely from that one signal:
-
-| | Config | Env | Default | Effect |
-|---|---|---|---|---|
-| Escalating log | `autonomous.workFinder.saturationBrake.starvationWarnSecs` | `LOOM_ADMISSION_BRAKE_STARVATION_WARN_SECS` | `300` (5m) | After this many seconds of continuous held+0-in-flight, a `WARN`-level `admission_brake: STARVING …` line fires once per streak, naming the elapsed duration |
-| Escape hatch | `autonomous.workFinder.saturationBrake.starvationEscapeSecs` | `LOOM_ADMISSION_BRAKE_STARVATION_ESCAPE_SECS` | `900` (15m) | After this many seconds, the brake yields for **exactly one tick** — held reports `false` even though the raw load reading is still over threshold — logged at `ERROR` as `admission_brake: STARVATION ESCAPE HATCH …` |
-
-The escape hatch does not disable the brake or bypass #5270's "dumb mode"
-gate: it is a periodic, bounded safety valve. The starvation streak resets
-immediately after an escape (a fresh full window is required before the next
-one), and any tick with even one sweep in flight resets it too — so genuine
-backpressure, however long it holds, never trips either reaction. Both
-counters (`starving_ticks`, `escape_hatch_grants`) and `starving_since` are on
-the `admission_brake` status/JSON block, and `loom-daemon status`'s
-`Admission brake: HOLDING …` line appends a `⚠ STARVING` clause once the
-current hold has zero sweeps in flight.
-
-**#5715 is about starvation, not about bounding role-runner load.** The escape
-hatch stops role-driven load from *permanently blocking sweep admission*; it
-does nothing to bound or surface role-agent concurrency itself. That gap is
-closed separately, by the ceiling described next (#6102), and the two
-compose: the ceiling caps how much role-driven load can accumulate, the escape
-hatch guarantees that whatever load does accumulate cannot livelock sweeps.
-
-##### What the brake can and cannot hold back (#6102)
-
-The brake's guarantee is narrower than "it protects the host from overload",
-and stating it precisely matters because an operator reads this line when
-deciding what to tune:
-
-| | |
-|---|---|
-| **It samples** | host-wide load-per-core. A role agent's CPU absolutely counts toward the hold threshold |
-| **It can hold back** | a **new sweep admission**, and nothing else |
-| **It cannot hold back** | a role-runner agent — those are admitted by the role runner's own loops, bounded only by `autonomous.roleRunner.maxConcurrent` (#6102) |
-| **It cannot shed** | anything already running. In-flight sweeps and in-flight role agents both run to completion; the brake is an *admission* gate, never a preemption mechanism |
-
-Two practical consequences:
-
-- **"Held with 0 sweeps in flight" does not mean an idle host.** The starvation
-  log lines now say so explicitly, naming the live role-agent count when there
-  is one (`… — NOTE: 3 role-runner agent(s) ARE running; the brake cannot hold
-  those back …`). Before #6102 they asserted "nothing is running to relieve
-  it", which was false in exactly the case that matters.
-- **If load is high while few sweeps are in flight, lowering `maxConcurrent`
-  will not reach that load.** Lower the role-agent ceiling instead.
 
 #### The other half of the agent budget: role-runner agents (#6102)
 
@@ -5273,10 +4926,10 @@ $ pgrep -f "claude-wrapper.sh" | wc -l
 11
 ```
 
-1.15 load-per-core — above the `0.95` brake threshold — with a *single* sweep
-in flight against a cap of 8. The other ten agents were role-runner ticks
-(25 registered workspaces × 7 interval roles = up to 175 potentially
-concurrent), admitted entirely outside `min(disk, ram, maxConcurrent)`.
+1.15 load-per-core with a *single* sweep in flight against a cap of 8. The
+other ten agents were role-runner ticks (25 registered workspaces × 7
+interval roles = up to 175 potentially concurrent), admitted entirely outside
+the sweep cap.
 
 **The fix is a distinct ceiling for the distinct population.**
 
@@ -5308,8 +4961,8 @@ Design notes:
   refusal still logs per root. The per-`(root, role)` overlap skip (#4364) stays
   at `debug!` — it is routine cadence overlap, not a resource limit, and
   conflating the two is what made role-agent load invisible.
-- **Not folded into `dynamic_cap`.** Sweeps and role agents are admitted by
-  different subsystems against different queues; one `min(...)` over both would
+- **Not folded into the sweep cap.** Sweeps and role agents are admitted by
+  different subsystems against different queues; one cap over both would
   misreport which is actually binding. They are reported as two ceilings whose
   sum is the host's worst-case agent count.
 
@@ -5630,7 +5283,7 @@ is re-checked, and the trigger decides whether an agent launches:
 
 #### Sizing `maxConcurrent`: per-machine **and** per-workload (#4512, #4903)
 
-`autonomous.workFinder.maxConcurrent` is the only *policy* term in the cap, and
+`autonomous.workFinder.maxConcurrent` is the whole sweep cap, and
 it is **not** a fleet-wide constant. It is a property of one machine **running
 one kind of work**. Two hosts with identical core counts want very different
 values, and the same host wants a different value if you move a different repo
@@ -5659,13 +5312,13 @@ Consequences worth internalizing:
   — that is exactly the pair
   [`loom-daemon calibrate`](#sizing-a-host-loom-daemon-calibrate-4390-measurement-only-since-4512)
   reports.
-- **The brake is a backstop, not a substitute.** A correctly-tuned
-  `maxConcurrent` should mean the saturation brake never engages. If it *is*
-  engaging, that is the signal to lower the knob for this machine's workload —
-  **unless few sweeps are in flight**, in which case the load is not coming
-  from the population this knob bounds. Check `loom-daemon status`'s
-  role-agent line before touching `maxConcurrent`: lowering it cannot reach
-  role-driven load (#6102).
+- **Nothing else holds the host back (#12406).** No brake or breaker sits
+  behind this knob. Watch the exported `loom.host.*` disk, RAM and load
+  metrics; sustained pressure is the signal to lower the knob for this
+  machine's workload — **unless few sweeps are in flight**, in which case the
+  load is not coming from the population this knob bounds. Check
+  `loom-daemon status`'s role-agent line before touching `maxConcurrent`:
+  lowering it cannot reach role-driven load (#6102).
 
 #### Machine-wide build slot (#4512)
 
@@ -5721,8 +5374,7 @@ slot and the wait), on the first wait of a round (so a queue is visible), on
 release (with the hold duration), and on degrade-open (naming *why*).
 `loom-daemon calibrate` reports the resolved slot count.
 
-**Knobs are env-only**, following the `LOOM_PER_WORKTREE_GB` precedent above for
-exactly the same reason: an independent Bash-side reader must resolve identical
+**Knobs are env-only** because an independent Bash-side reader must resolve identical
 values, and honoring `.loom/config.json` on one path while silently ignoring it
 on the other is worse than consistent env-only behavior. Export them from the
 daemon's start environment.
@@ -5747,9 +5399,8 @@ fan-out admits 6 sweeps (the knob, not an estimate, decides that) but only **one
 of them compiles at a time** — the other five block in `build-gate.sh`'s slot
 acquire, so peak demand is one build's worth of parallel `cargo`, not six. The
 formula that mis-estimated the fan-out is gone; the thing it was estimating is
-now directly bounded. If the knob is nonetheless set too high for the machine,
-the #4235 host breaker trips on **measured** load-per-core and suppresses
-dispatch — a measurement, not a constant, is the last line of defence.
+now directly bounded. If the knob is nonetheless set too high for the machine, the operator lowers
+it from the exported host metrics.
 
 #### Sizing a host (`loom-daemon calibrate`, #4390; measurement-only since #4512)
 
@@ -5762,7 +5413,7 @@ the one per-machine knob, **tuned empirically by the operator**.
 Calibrate is therefore strictly a **measurement report**. It measures the host
 with the **same** primitives dispatch uses (`cpu_headroom::logical_cpu_count` /
 `cached_cpu_idle_fraction` / `read_loadavg_1m`,
-`disk_headroom::disk_headroom_limit`, `capacity::read_ranking` falling back to
+`capacity::read_ranking` falling back to
 `tokens::token_pool_size`, `build_slot::resolve_slots`), so it can never
 disagree with what dispatch actually does:
 
@@ -5777,19 +5428,17 @@ loom-daemon calibrate --write         # DEPRECATED, ignored (prints a notice)
   failing. The JSON payload keeps a `"write": {"applied": false, "config_path":
   null}` object for machine consumers that keyed off it.
 - **What it prints**: host measurements (logical cpus, observed idle fraction +
-  1m loadavg, disk headroom, healthy/total accounts — informational
-  only, build slots), the currently resolved knobs, the `min(disk,
-  maxConcurrent)` breakdown (#5270 — no token term; #12330 — no RAM term),
-  which term binds (`disk` / `ceiling`), the **role-agent ceiling** and this host's worst-case
-  agent count (#6102), and one line of advice.
+  1m loadavg, healthy/total accounts — informational only, build slots), the
+  currently resolved knobs, the cap (`cap` in the JSON; it is the configured
+  `maxConcurrent`, #12406), the **role-agent ceiling** and this host's
+  worst-case agent count (#6102), and one line of advice. It no longer reports
+  disk headroom, per-worktree GB, a binding term, an admission axis or the CPU
+  brake.
 - **How to read it** (this is the tuning loop that replaces the old
   recommendation):
-  - binds on `ceiling` **while the host sits idle** ⇒ raise `maxConcurrent`;
-  - binds on `ceiling` **while the host is saturated** (low idle fraction, or
-    the host breaker tripping) ⇒ the knob is already at/above what this machine
-    sustains — leave it or lower it;
-  - binds on `disk` / `ram` ⇒ raising `maxConcurrent` changes nothing; free
-    scratch space or memory.
+  - the cap is full **while the host sits idle** ⇒ raise `maxConcurrent`;
+  - the cap is full **while the host is saturated** (low idle fraction) ⇒ the
+    knob is already at/above what this machine sustains — leave it or lower it.
 - **`maxConcurrent` is only half the budget (#6102).** Every reading above
   concerns **sweep** dispatch. When the role runner is enabled, the advice line
   appends the role-agent ceiling and the worst-case sum
@@ -5801,8 +5450,6 @@ loom-daemon calibrate --write         # DEPRECATED, ignored (prints a notice)
   **stderr** — an operator running it to size a host is exactly who needs to hear
   that a stale `estCoresPerSweep` is doing nothing (see the previous
   subsection for why stderr, not the log, on this path).
-- **Disk has no config key** — `LOOM_PER_WORKTREE_GB` is deliberately env-only
-  (previous subsection) — so calibrate names the env-var alternative instead.
 - **Env overrides win**: when `LOOM_WORK_FINDER_MAX_CONCURRENT` is set, the
   report says so explicitly — editing `.loom/config.json` has no effect until
   the env var is unset or updated (env > config > default).
@@ -5820,60 +5467,24 @@ loom-daemon calibrate --write         # DEPRECATED, ignored (prints a notice)
   put it in the machine tier — `~/.local/share/loom/config/defaults.json`, or
   `LOOM_WORK_FINDER_MAX_CONCURRENT` in the daemon's start environment — rather
   than in each repo's `.loom/config.json`.
-- **Fleet-safety**: a generous committed `maxConcurrent` is still safe fleet-wide
-  because the exhaustible-resource term remains in the `min(...)` (each host
-  binds on its **own** disk), the build slot bounds concurrent heavy
-  builds per machine, and the host breaker is the measured backstop.
+- **Fleet-safety**: nothing in the daemon caps a host below its configured
+  `maxConcurrent` (#12406), so set the value per host in fleet config rather
+  than relying on a generous committed default. The build slot still bounds
+  concurrent heavy builds per machine.
 - **Startup hint**: `loom-daemon-start.sh` prints one advisory line at start
   time — `"maxConcurrent N binds while the host is M% idle — consider raising
-  autonomous.workFinder.maxConcurrent"` — only when the ceiling is *currently*
-  the binding term **and** the measured idle fraction is at or above 50%
+  autonomous.workFinder.maxConcurrent"` — only when the cap is *currently*
+  full **and** the measured idle fraction is at or above 50%
   (`calibrate::IDLE_HEADROOM_FRACTION`). Never fatal: a missing `jq`, a
   calibrate error, or an unparseable payload all fall through silently,
   mirroring the advisory-only safehouse status line.
-- **Restart required**: like every other dynamic-cap knob, `maxConcurrent` is
-  captured once at daemon **startup**, not re-read per tick — a config edit takes
-  effect on the *next* restart
-  (`./.loom/scripts/cli/loom-daemon-stop.sh && ./.loom/scripts/cli/loom-daemon-start.sh`),
-  not live.
-
-#### Per-tick admission (ramp) cap (#4234)
-
-`resolve_dynamic_max_concurrent` is a **live** ceiling, recomputed every tick,
-so it can *jump* tick-to-tick — e.g. several exhausted token accounts resetting
-at once raises the token axis from ~2 to ~14, or an operator raises
-`maxConcurrent` on a live host. Before #4234, a jump like that let a **single
-tick** admit every newly-eligible candidate up to the new, larger cap in one
-shot. Host load is a **lagging** signal: a burst admitted together all ramp
-their work minutes later, well after the tick that "safely" admitted them
-observed a still-quiet host. This is the exact failure mode of the #4231
-incident's second wave — the host re-spiked at 01:41 after load had already
-dropped to 8, because the admission decision had already been made by the time
-load caught up. (Since #4512 the heavy stages additionally serialize on the
-[build slot](#machine-wide-build-slot-4512), so a burst's *builds* queue even
-when its admissions do not; the ramp cap remains the smoother for everything
-else a burst does.)
-
-`autonomous.workFinder.maxAdmissionsPerTick` (`LOOM_WORK_FINDER_MAX_ADMISSIONS_PER_TICK`,
-default **3**, mirroring `maxConcurrent`'s default) bounds how many **new**
-sweeps a single tick may admit, **independent of** `max_concurrent` — the two
-caps are separate and both apply (`tick_report.deferred_capacity` counts
-candidates deferred by the concurrency ceiling, `tick_report.deferred_ramp_cap`
-counts candidates deferred by this ramp cap; either alone can defer a
-candidate, and both fire in the same tick when both bind). A large cap jump
-therefore ramps up over several ticks instead of bursting in one — each
-subsequent tick re-samples CPU/disk/token headroom fresh, so a ramp that turns
-out to be too aggressive self-corrects within one interval (default 60s)
-rather than in one uncontrolled burst. Resolved with the standard precedence
-**env > config > default**, single-root, at daemon startup — a
-startup-capture pattern `maxConcurrent` no longer shares (it hot-applies
-since #9060). The ramp cap's whole purpose is to smooth admission *within*
-the live per-tick re-computation of `max_concurrent`, so the knob itself does
-not need to be live; retuning it takes effect on the next daemon restart.
+- **No restart needed**: `maxConcurrent` is re-read every tick (#9060), so a
+  config edit takes effect on the next tick. Only the
+  `LOOM_WORK_FINDER_MAX_CONCURRENT` env override needs a restart.
 
 #### `dispatch_sweep` headroom advisory (#4234)
 
-Before #4234, the dynamic cap above only gated the autonomous work finder's
+Before #4234, the sweep cap above only gated the autonomous work finder's
 **own** dispatches — the `dispatch_sweep` IPC/MCP handler (the entry point for
 `mcp__loom__dispatch_sweep`, `loom-daemon dispatch`, and any other
 operator-driven fan-out) dispatched directly with **no** headroom consult at
@@ -5884,10 +5495,10 @@ exactly this handler.
 The fix is **advisory-first**, matching `capacity.rs`'s token-backpressure
 "never a halt" precedent (#3902) rather than adding a hard-defer/`force`
 protocol change: `dispatch_sweep` **always dispatches** — an explicit
-operator/MCP request is a deliberate act, and the work finder's own dynamic
-cap remains the hard backstop for *its own* autonomous dispatches — but now
-computes the same `resolve_dynamic_max_concurrent` headroom the work finder
-uses (token/disk/configured-max, scoped to the target repo) and, on a
+operator/MCP request is a deliberate act, and the work finder's own cap
+remains the hard backstop for *its own* autonomous dispatches — but now
+compares occupancy against the same configured cap the work finder uses
+(scoped to the target repo) and, on a
 **state change** into/out of "occupancy at or over that headroom" for that
 repo, logs a warning and publishes a `daemon.dispatch.headroom_advisory`
 event-bus event (state-change-deduped — never a per-call stream, keyed
@@ -5895,17 +5506,13 @@ per-repo so a multi-workspace daemon's repos don't cross-suppress each
 other's advisories). This required **zero protocol change**: no new
 `Request::DispatchSweep` field, no new `Response` variant — the advisory is a
 side channel exactly like the token-capacity advisory. Every `dispatch_sweep`
-call's log line additionally always names the current occupancy/dynamic-cap
-axes (not just on the deduped transition), so `RUST_LOG=loom_daemon=info`
-shows the same headroom picture the work finder's own tick log shows, without
-duplicating the `disk_headroom_limit` plumbing `loom-daemon status`
-(`build_daemon_status`) already exposes.
+call's log line additionally always names the current occupancy and cap
+(not just on the deduped transition), so `RUST_LOG=loom_daemon=info`
+shows the same headroom picture the work finder's own tick log shows.
 
 Nothing in this handler may block, because it holds the sweep-registry mutex
-from the assessment through the dispatch call. Since #5270 the headroom is
-`min(disk, configured max)` — cheap filesystem/config reads, no CPU sampling
-at all (the RAM term and its `/proc/meminfo` / `vm_stat` read were removed in
-#12330). (Before #4512 this had to carefully avoid
+from the assessment through the dispatch call. The headroom is the configured
+cap — a config read, no host sampling at all (#12406). (Before #4512 this had to carefully avoid
 the **refreshing** CPU probe, whose macOS `iostat` refresh sleeps ~1s and
 would have stalled every other IPC request on the same registry for that
 second; removing the CPU term removed that hazard outright.)
@@ -5919,9 +5526,8 @@ default (2)**. Since #5270 the token axis no longer participated in
 the retirement by deleting the knob, its env var, and the derived `healthy N ×
 per-token M = P` line from `loom-daemon status` / `calibrate` entirely — that
 line disclaimed itself as "informational only" but was still misread as a live
-cap term more than once. `= min(...)` is now simply `= min(disk headroom 120,
-configured max 3)`, with no token term at all (and, since #12330, no RAM
-term). A config file
+cap term more than once. The cap is now the configured max alone (#12406).
+A config file
 that still sets `autonomous.perTokenConcurrency` parses fine (unknown keys are
 ignored, not an error) — the key just does nothing. A separate line reports the
 live host CPU **observation** — explicitly labelled as not a cap term, e.g.
@@ -5929,21 +5535,18 @@ live host CPU **observation** — explicitly labelled as not a cap term, e.g.
 measured (≈4.2 cores consumed), 1m loadavg 6.10`, degrading to a `1m loadavg …
 (no idle sample yet)` or `no CPU signal on this platform` line when the
 measurement is unavailable (#3978 AC4; measured-idle signal #4031; demoted to
-observation in #4512) — and, since #5270, the `admission_brake` block reports
-whether that same load reading is currently *holding* new admissions (the
-brake, not this observation line, is what gates CPU today).
+observation in #4512). Nothing gates admission on CPU since #12406.
 
-**"Currently binding" vs "smallest ceiling" (#4031).** The dynamic cap is the
-*minimum* of several ceilings, but a ceiling only *binds* once in-flight
-occupancy reaches it. Below the cap the limiter is simply how much ready work
-exists, not any resource term — so the status view gates its bottleneck
-diagnosis on real occupancy (`in_flight.len() >= dynamic_cap`, surfaced as the
-`capacity_bound` field, `#[serde(default)]`). With in-flight below the cap it
-prints `not capacity-bound (N in flight, cap M — the limiter is work
-availability, not disk/RAM/CPU)`; at or above the cap it names the binding
-term as before. The `= min(…)` breakdown line is untouched — those genuinely
-are ceilings. The JSON status carries the same `capacity_bound` boolean so
-scripted consumers aren't misled at low occupancy either.
+**Capacity-bound only at the cap (#4031).** The cap only *binds* once
+in-flight occupancy reaches it. Below the cap the limiter is simply how much
+ready work exists, so the status view gates its bottleneck diagnosis on real
+occupancy (`in_flight.len() >= dynamic_cap`, surfaced as the `capacity_bound`
+field, `#[serde(default)]`). With in-flight below the cap it prints `not
+capacity-bound (N in flight, cap M — the limiter is work availability …)`.
+The JSON status carries the same `capacity_bound` boolean so scripted
+consumers aren't misled at low occupancy either. The status JSON field
+`dynamic_cap` is kept and equals `configured_max` (#12406); the
+`disk_headroom` field is removed.
 
 **Token-axis probe/daemon disagreement can no longer skew the cap (#4344,
 superseded by #5270; re-scoped, not deleted, by #5305).** `resolve_capacity`
@@ -6127,14 +5730,13 @@ output instead of the opaque `bad_token_listed` — telling an operator whether
 an account needs `claude login` + `tokens unblock` or will simply clear on
 its own cooldown.
 
-The **effective** per-tick concurrency is then `min(dynamic_cap, backlog_depth)`:
+The **effective** per-tick concurrency is then `min(maxConcurrent, backlog_depth)`:
 `tick()` iterates the ready `loom:issue` rows and stops at the cap, so
 concurrency **scales up** as the backlog grows and drains to **zero** dispatches
 when the queue is empty (no capacity is pre-reserved and no idle workers are
 spawned). A token pool of 0 (rotation not bootstrapped) yields a cap of 0 —
 the finder dispatches nothing, matching `spawn-claude.sh`'s `EX_CONFIG`
-hard-fail on a missing pool. The `df` probe runs once per tick and is negligible
-on the 60s default interval. Bad-token-aware pool counting (subtracting
+hard-fail on a missing pool. Bad-token-aware pool counting (subtracting
 `.bad_tokens` entries) is a tracked follow-up; the first pass counts `*.token`
 files.
 
@@ -6149,11 +5751,9 @@ Enable it with `LOOM_WORK_FINDER=1` (unset/false-y = OFF) **or** from committed
 config (`autonomous.workFinder.enabled`, see "Operability" below). Tunables:
 `LOOM_WORK_FINDER_INTERVAL_SECS` (default 60 — tighter than the epic
 supervisor's 300s so the `loom:issue` backlog drains promptly),
-`LOOM_WORK_FINDER_MAX_CONCURRENT` (default 3 — the operator **ceiling** in the
-dynamic policy above, not a fixed target), and `LOOM_PER_WORKTREE_GB` (default
-8 since #8370, calibrated from measured cargo target dirs — the per-worktree
-disk estimate the disk-headroom bound divides by). A zero
-or unparseable value for any of these falls back to its default.
+and `LOOM_WORK_FINDER_MAX_CONCURRENT` (default 3 — the sweep cap above, a
+ceiling, not a fixed target). A zero or unparseable value for either falls
+back to its default.
 
 > **Scope note**: the work finder dispatches **already-approved** `loom:issue`
 > items; it does **not** generate new work itself — it only closes the gap
@@ -6214,11 +5814,11 @@ At scale, rotation accounts used to hit their 5h/7d rate limits and go
 `exhausted`, and dispatching to an exhausted account produces startup hangs /
 mid-build deaths, so the finder treats a genuine token limit as a **capacity
 signal** — alert, recover — non-blocking (the "slow down" half below is
-historical: #5270 removed the token axis from the dynamic cap itself, so
+historical: #5270 removed the token axis from the cap itself, so
 account health can no longer *slow dispatch down*, only warn about it):
 
 1. **Slow down (backpressure) — historical, superseded by #5270.** The token
-   axis used to be a term in `dynamic_cap`: the count of **healthy**
+   axis used to be a term in the cap: the count of **healthy**
    (`available`) accounts read from `.loom/tokens/.ranking`
    (`capacity::token_axis_limit`), not the flat `*.token` count — when
    accounts went exhausted the cap backed off toward the healthy count, down
@@ -6227,15 +5827,14 @@ account health can no longer *slow dispatch down*, only warn about it):
    removed this backoff entirely: `.ranking` health now drives spawn-time
    **selection** only (prefer fresher/healthier accounts, skip
    `blocked`/revoked ones), never admission. `capacity::token_axis_limit`
-   still exists and is still reported (see the "retired" input table in the
-   dynamic-cap section above), but its output no longer bounds anything.
+   still exists and is still reported, but its output no longer bounds
+   anything.
 2. **Alert (advisory only, unchanged posture).** The pressure advisory
    (`capacity::assess_pressure`) still runs every tick. Its `token_bound`
-   predicate is **not** a cross-axis "is tokens the (co-)minimum of
-   disk/RAM/ceiling" comparison — PR #5304 briefly left it as one
-   (`token_limit <= disk.min(ram) && token_limit <= configured_max`), which
-   false-positived the advisory whenever *any other* axis deferred work while
-   the pool still had healthy accounts left (a #5305 fix). It is now a pure
+   predicate is **not** a cross-axis comparison — PR #5304 briefly left it
+   as one, which false-positived the advisory whenever *any other* axis
+   deferred work while the pool still had healthy accounts left (a #5305
+   fix). It is now a pure
    starvation check: `deferred > 0 && token_limit == 0` — zero healthy
    accounts, full stop, regardless of which axis actually deferred the tick's
    work. It still exists purely to prompt an operator to add capacity when
@@ -6259,7 +5858,7 @@ account health can no longer *slow dispatch down*, only warn about it):
 3. **Recover.** The finder re-reads the ranking every tick (bounded cadence =
    the tick interval), so as accounts reset to `available` the advisory
    clears and the queued `loom:issue` backlog continues to drain at whatever
-   rate `min(disk, ram, configured_max)` allows — no manual intervention. A
+   rate the configured cap allows — no manual intervention. A
    symmetric recovery line/event fires on the way out of the pressured state.
 
 The `estimated_drain_minutes` figure is a coarse `ceil(queued / healthy) ×
@@ -6319,7 +5918,6 @@ concurrency ceiling 5" and share it with the team:
       "enabled": true,
       "intervalSecs": 60,
       "maxConcurrent": 5,
-      "maxAdmissionsPerTick": 3,
       "quarantine": {
         "enabled": true,
         "threshold": 3,
@@ -6348,12 +5946,6 @@ concurrency ceiling 5" and share it with the team:
         "maxBackoffSecs": 3600
       },
       "extraSkipLabels": ["blocked-upstream"]
-    },
-    "hostBreaker": {
-      "enabled": true,
-      "loadPerCoreTrip": 2.5,
-      "sustainTicks": 3,
-      "cooldownSecs": 300
     },
     "rateLimitBreaker": {
       "enabled": true,
@@ -6440,15 +6032,7 @@ knobs not yet audited here.
 | `autonomous.model` | *(per-dispatch `dispatch_sweep` `model` param)* | `sonnet` | Model pinned on **every** daemon-dispatched child (work-finder, epic supervisor, and `dispatch_sweep` when its `model` param is absent). See below (#3944) |
 | `autonomous.workFinder.enabled` | `LOOM_WORK_FINDER` | `false` | Master on/off for the finder loop. **Restart required** — read once, before the loop is spawned; flipping it in config alone does not start/stop an already-running daemon's loop (#5963) |
 | `autonomous.workFinder.intervalSecs` | `LOOM_WORK_FINDER_INTERVAL_SECS` | `60` | Zero/invalid → default. **Restart required** — it also seeds the forge-event poll gate's base cadence and the armed early-tick registration, which a ticker-only re-arm would leave stale (#12090 follow-up) |
-| `autonomous.workFinder.maxConcurrent` | `LOOM_WORK_FINDER_MAX_CONCURRENT` | `3` | The per-machine **sweep-dispatch** admission knob since #4512 — **it bounds sweeps only; role-runner agents are admitted outside it and carry their own `autonomous.roleRunner.maxConcurrent` ceiling (#6102)** — an operator ceiling, not a fixed target, tuned empirically from `loom-daemon calibrate` / `status`. Per-machine **and workload-dependent** (#4903): ~10+ on an 8-core API-bound (software) worker, but **2–3** on the same 8 cores running analog/simulation sweeps. **Hot-applies (#9060)** — re-read every multi-workspace tick, so a config edit takes effect on the next tick without a restart; the transition is logged once (`work_finder: configured_max A -> B (source=config)`). The **env override is restart-only** (process environment is fixed at launch) and, while set, shadows config — the daemon logs `maxConcurrent=N is IGNORED` when that happens. The startup log line names the resolved value and its layer, `source=env`/`config`/`default` (#6203). See [Sizing `maxConcurrent`](#sizing-maxconcurrent-per-machine-and-per-workload-4512-4903) below |
-| `autonomous.workFinder.maxAdmissionsPerTick` | `LOOM_WORK_FINDER_MAX_ADMISSIONS_PER_TICK` | `3` | Per-tick **ramp** cap (#4234) — bounds how many *new* sweeps one tick may admit, independent of `maxConcurrent`/the dynamic cap. Zero/invalid → default. **Live** since #12090 — re-read every tick on the same path as `maxConcurrent` (#9060); a change logs `maxAdmissionsPerTick OLD -> NEW (source=…)` once at INFO. The env override is read only at daemon start |
-| `autonomous.workFinder.maxConcurrentPerRepo` | `LOOM_WORK_FINDER_MAX_CONCURRENT_PER_REPO` | *(absent = uncapped)* | How many of the shared `maxConcurrent` budget's slots ONE repo may hold (#9090). **Absent is uncapped, not a number**: this is opt-in, so an upgrade throttles nothing. Setting it also turns on **track affinity** (a repo with a live sweep sorts ahead of a cold repo — ordering only, always subordinate to the cap). A candidate whose repo is at the cap is *deferred*, never dropped (`deferred_repo_cap` / the `repo_cap` decision reason), and the slot goes to another repo's candidate in the same tick. Zero/invalid → absent (a literal cap of `0` would deadlock every repo). A value above `maxConcurrent` is harmless. **Hot-applies (#9090)** — re-read every multi-workspace tick on the same path as `maxConcurrent`, transition logged once. See [Per-repo dispatch cap + track affinity](#per-repo-dispatch-cap--track-affinity-9090) |
-| `autonomous.workFinder.saturationBrake.enabled` | `LOOM_ADMISSION_BRAKE` | `true` | Saturation admission brake on/off (#4903). A safety backstop — **defaults on**. Holds *new* admissions while the host is already saturated; never preempts a running sweep. Env truthy (`1`/`true`/`yes`/`on`) enables, any other value disables; wins over config. **Live** since #12090 — every `saturationBrake.*` key is re-resolved each tick and pushed into the process-global handle (a change logs once at INFO as `admission_brake: saturationBrake … -> …`); env overrides are read only at daemon start. See [Saturation admission brake](#saturation-admission-brake-4903) below |
-| `autonomous.workFinder.saturationBrake.loadPerCoreHold` | `LOOM_ADMISSION_BRAKE_LOAD_PER_CORE` | `0.95` (`4.0` before #5270) | Load-per-core at/over which new admissions are held for that tick. `<= 0`/invalid → default. Since #5270 sits deliberately *below* the host breaker's `2.5` trip: the brake is now the primary "dumb mode" CPU gate and engages first (since #11709: `sustainTicks` readings over both the load and `cpuBusyHold` bars), the breaker remains the slower sustained-distress trip. **Live** (#12090), like `enabled` above |
-| `autonomous.workFinder.saturationBrake.cpuBusyHold` | `LOOM_ADMISSION_BRAKE_CPU_BUSY` | `0.90` | Measured CPU-busy fraction (`1 − idle`) that must **also** be reached before the brake holds (#11709) — load-per-core alone never holds. Outside `(0, 1]`/invalid → default. **Live** (#12090) |
-| `autonomous.workFinder.saturationBrake.sustainTicks` | `LOOM_ADMISSION_BRAKE_SUSTAIN_TICKS` | `3` | Consecutive over-threshold work-finder ticks required before the brake holds (#11709); any tick under either bar resets the count. `0`/invalid → default. **Live** (#12090) |
-| `autonomous.workFinder.saturationBrake.starvationWarnSecs` | `LOOM_ADMISSION_BRAKE_STARVATION_WARN_SECS` | `300` | Seconds of continuous held+0-in-flight before the `WARN`-level `STARVING` log fires once per streak (#5715). `<= 0`/invalid → default. See [Starvation escape hatch](#starvation-escape-hatch-5715) |
-| `autonomous.workFinder.saturationBrake.starvationEscapeSecs` | `LOOM_ADMISSION_BRAKE_STARVATION_ESCAPE_SECS` | `900` | Seconds of continuous held+0-in-flight before the escape hatch yields one tick despite the raw load still being over threshold, logged at `ERROR` (#5715). `<= 0`/invalid → default |
+| `autonomous.workFinder.maxConcurrent` | `LOOM_WORK_FINDER_MAX_CONCURRENT` | `3` | The per-machine **sweep-dispatch** admission knob since #4512, and the only sweep cap since #12406 — **it bounds sweeps only; role-runner agents are admitted outside it and carry their own `autonomous.roleRunner.maxConcurrent` ceiling (#6102)** — an operator ceiling, not a fixed target, tuned empirically from `loom-daemon calibrate` / `status`. Per-machine **and workload-dependent** (#4903): ~10+ on an 8-core API-bound (software) worker, but **2–3** on the same 8 cores running analog/simulation sweeps. **Hot-applies (#9060)** — re-read every multi-workspace tick, so a config edit takes effect on the next tick without a restart; the transition is logged once (`work_finder: configured_max A -> B (source=config)`). The **env override is restart-only** (process environment is fixed at launch) and, while set, shadows config — the daemon logs `maxConcurrent=N is IGNORED` when that happens. The startup log line names the resolved value and its layer, `source=env`/`config`/`default` (#6203). See [Sizing `maxConcurrent`](#sizing-maxconcurrent-per-machine-and-per-workload-4512-4903) below |
 | `autonomous.workFinder.buildBackoff.enabled` | *(config only)* | `true` | Build back-off on review + merge debt (#9410), per repo (#10624). While a repo's is engaged, no new issue build is admitted in that repo whatever its priority; only a verified red-main fix bypasses it. Reads the role runner's demand ledger, so it is inert with the role runner off. `false` → pre-#9410 admission. Non-bool → default. **Live**. See [Build back-off on review and merge debt](#build-back-off-on-review-and-merge-debt-9410) |
 | `autonomous.workFinder.buildBackoff.high` | *(config only)* | `40` | Engage a repo's back-off when **its own** `review + changes + merge` debt is **strictly above** this (#10624). Zero, negative or non-integer → default. **Live** |
 | `autonomous.workFinder.buildBackoff.low` | *(config only)* | `25` | Release a repo's back-off when its debt is **strictly below** this. Zero, negative or non-integer → default; `low >= high` rejects the pair (both fall back to `40`/`25`, one `WARN`). **Live** |
@@ -6478,17 +6062,13 @@ knobs not yet audited here.
 | `autonomous.workFinder.redFixEscalateAfterSecs` | — | `1800` | How long a `<!-- loom:main-red-fix -->` candidate may wait unclaimed on a red `main` before the daemon files one `loom:operator` alert issue for it (#10118). Positive integer seconds; anything else uses the default. **Hot-applies** (read when a fix is waiting). See "Unpromoted red-main fixes (#10118)" above |
 | `autonomous.workFinder.tickDeadlineSecs` | — | `90` | The wall-clock deadline of one work-finder tick body (#12074). Every forge read from the pre-dispatch holds through the step gather gets only the time left (its own timeout is clamped), a read past the deadline is not sent (a shed: the gather uses its last good listing, a fact keeps the value that passes the item), and once it passes no further repo is gathered: the tick draws from what it gathered, reports `loom.dispatch.gather_truncated`, and the next tick starts at the first repo skipped. The deadline clock starts after the tick's local pre-dispatch work (eager reclaim, CPU sample). At least one repo is gathered every tick, and its reads get at least 20 s even past the deadline. Inside the tick, a read whose readers are out of budget (a rate-limit back-off) is shed rather than moved to the writer App, whatever its class; any other cause (a failing gateway, a coverage miss) still reaches the writer. A repo whose gather was starved (failed, last-good only, or no open-PR listing) for 3 ticks in a row gets one tick on the writer: every budget shed is lifted for that tick, deferrable listings included. Three consecutive gateway attempts that time out or fail with an unmarked 5xx withdraw the gateway for the default window; any gateway answer, on any read path, resets the count. The step tick's open-PR listing stays a Gate read, with its last good copy standing in when it fails. The draw's own claim reads run outside the deadline. Positive integer seconds; anything else uses the default. **Hot-applies** (read at the start of each tick) |
 | `autonomous.workFinder.gatherConcurrency` | — | `8` | How many repos the step gather lists at once (#12256). The forge half of each repo's gather (the item and open-PR listings, hold markers, blocker states, the landed pre-filter, CI at a Judge head) runs on up to this many threads; each keeps the tick's read deadline (`tickDeadlineSecs`) and its starvation rules, and repos are taken in walk order, so a deadline still skips from the end. Stage-entry lookups, weighing and the draw stay serial and run in walk order, so the draw does not depend on which listing answered first. `1` restores the serial gather. Positive integer, at most 32; anything else uses the default. **Direct backend only (#12307):** with `forge.mirror.discovery = "worklist"` the gather reads the tick's one in-memory snapshot, so the key is ignored (the gather is serial) and a one-time warning says so. **Hot-applies** (read at each tick) |
-| `autonomous.workFinder.spawnConcurrency` | — | `4` | How many step spawns the work finder's draw runs at once, each in a different repo (#12298). The draw fills its slots in rounds: each round draws one candidate for up to this many open slots, never two in one repo, runs the per-repo cap, disk and one-merge-per-repo gates for them in draw order (the round's earlier candidates count as admitted, so a round cannot overrun a shared budget), then spawns them together, so their resolvers, pre-claims and account-selection polls overlap. The child launches themselves stay serialised host-wide, at least `dispatchStaggerMs` apart across all repos (the #3887 startup-race gap, which is otherwise kept per repo), so a round never starts several children within milliseconds. Results are applied in draw order, and a refused slot draws again in the next round. Within one repo, claims and step-ledger writes stay one at a time and in order; `workFinder.maxConcurrent`, the free slots and `maxAdmissionsPerTick` bound the tick as before. Before each round the shared GitHub rate-limit breaker is checked: when it has tripped since the tick started, the round is not spawned, its drawn candidates wait for a later tick (`deferred_capacity`, detail `rate_limit_breaker`), and the tick span records `loom.dispatch.spawn_hold`. `1` restores the serial spawns. Positive integer, at most 16; anything else uses the default. **Hot-applies** (read at each tick) |
+| `autonomous.workFinder.spawnConcurrency` | — | `4` | How many step spawns the work finder's draw runs at once, each in a different repo (#12298). The draw fills its slots in rounds: each round draws one candidate for up to this many open slots, never two in one repo, runs the one-merge-per-repo gate for them in draw order, then spawns them together, so their resolvers, pre-claims and account-selection polls overlap. The child launches themselves stay serialised host-wide, at least `dispatchStaggerMs` apart across all repos (the #3887 startup-race gap, which is otherwise kept per repo), so a round never starts several children within milliseconds. Results are applied in draw order, and a refused slot draws again in the next round. Within one repo, claims and step-ledger writes stay one at a time and in order; `workFinder.maxConcurrent` and the free slots bound the tick. Before each round the shared GitHub rate-limit breaker is checked: when it has tripped since the tick started, the round is not spawned, its drawn candidates wait for a later tick (`deferred_capacity`, detail `rate_limit_breaker`), and the tick span records `loom.dispatch.spawn_hold`. `1` restores the serial spawns. Positive integer, at most 16; anything else uses the default. **Hot-applies** (read at each tick) |
 | `forge.mirror.discovery` | — | `"direct"` | The discovery chain a daemon walks each step tick (#12311). **No `forge.mirror` block: the chain is `gh` only** (today's behaviour with the installation's own credential; nothing to set). With a `forge.mirror` block: `"direct"` (the default, and what the retired `"per_call"` now reads as, #12307) lists per repo and never asks the mirror; `"worklist"` is mirror, then gateway, then `gh`: one `GET /v1/mirror/worklist` per tick, conditional on the last `ETag` (a `304` reuses the one in-memory `(etag, body)`, which is replaced every tick, dropped on restart and never persisted or merged with change events); `"direct"` is also the break-glass for a mirror that is wrong rather than down: gateway, then `gh`, never the mirror. On `"worklist"`, a failed request (transport, 5xx, auth, malformed body) sends every repo to the gateway tier, and a repo whose `status` is not `ok` (`unknown`, `backfilling`, `error`, or omitted) goes alone. The fallback tiers are outage modes and **capped**: a repo is listed at most once per work-finder interval (the backstop pace; between listings the tick draws from that repo's last listing, held in memory only), and a gateway reserve `429` ends the tick's discovery with `loom.discovery.fallback_reason = reserve`, draws from the last listing and leaves `rate_limit_breaker` alone. A repo no tier answers for is tier `none`: nothing is drawn from it that tick, and running sessions are unaffected. There is never a writer tier. Which tier answered is on the `loom.dispatch.tick` span (`loom.discovery.tier`; see `telemetry-schema.md`). Claim, lease, label-transition and merge reads never read the snapshot. Replaces #12306's `autonomous.workFinder.discovery`, still read as an alias when this key is unset (`"mirror"` is `"worklist"`). **Hot-applies** (read at each tick) |
 | `autonomous.workFinder.landedPrefilter` | — | `false` | The landed pre-filter (#11853): before a `loom:issue` candidate without an open PR is dispatched, one batched GraphQL closes-graph query per workspace asks whether a PR that closes it has merged while it stays open, and routes such an issue to Curator (`loom:triage`) instead of a Builder. **Off by default since #12205** (it cost about 1.5k dispatch-App GraphQL calls an hour fleet-wide). Off, it makes no forge call and every candidate is dispatched as before #11853: a landed-but-open issue can reach a Builder again, bounded by the #11429 journal check, the 2.5 closed-issue guard and the no-op cooldown. On, the query asks only candidates without an open linked PR, at most once per half `LANDED_RECHECK` (15 min) per workspace, backs off 5 min after an unanswered query, and is a repo-targeted Hygiene read (reader pool or gateway; shed, never moved to the writer, when the readers are out of budget). `true` turns it on; anything else is off. **Hot-applies** (read on every call) |
 | *(env only)* | `LOOM_OPEN_PR_MEMO` | `true` | Verified-open-PR memo for the #4123 open-PR dispatch guard (#6788). Falsy (`0`/`false`/`no`/`off`) disables; anything else (including unset) enables. When on, the guard (a) reuses a verified "issue #N has open linked PR #M" answer for 15 minutes instead of re-running the closes-graph query on every work-finder tick, and (b) when **both** the GraphQL probe and its #5911 REST fallback fail, re-verifies that one known PR over a single `GET repos/{owner}/{repo}/pulls/{M}` before conceding. The documented fail-open contract is unchanged: with no memo, or if that recheck also cannot answer, the guard still proceeds. In-memory only — a daemon restart clears it. Disable only to restore the exact pre-#6788 probe |
 | *(env only)* | `LOOM_GUARD_ISSUE_SNAPSHOT` | `true` | Conditional (ETag) issue reads for the 2.5 closed-issue and 2.7 park-label dispatch guards (W9). Falsy (`0`/`false`/`no`/`off`) restores the unconditional `guard.issue_state` / `guard.issue_labels` reads. When on, 2.5 reads `repos/{owner}/{repo}/issues/{N}` reader-first (`guard.issue_view`) and 2.7 reads it on the writer (`guard.issue_labels_view`), each with `If-None-Match` from its own store entry, so a re-attempted, unchanged candidate costs a free `304`. The verdict is always taken from the body the read serves. For 10 minutes after this daemon writes issue N of the repo (keyed by repo and number; a write whose repo is unknown, including a `{owner}/{repo}` placeholder path with no explicit target, is a wildcard that pins N in every repo; the parse is deliberately loose, so any numeric argument of a `gh issue|pr` write may be pinned, and a mis-parse can only add a pin, never drop one), both reads of N are sent without an ETag and keep their identity: 2.5 stays reader-first, 2.7 stays on the writer. Any failure falls back to the unconditional read |
 | *(env only)* | `LOOM_EMPTY_POOL_BREAKER_THRESHOLD` | `3` | How many **distinct** sources must hit an unsatisfiable token selection (exit 78) inside the window below before new dispatch to that workspace is paused (#6614). A source is an issue dispatch, or — since #7607 — a `(workspace, role)` role tick whose pre-spawn pool preflight found zero spawnable accounts. Distinct *sources*, not raw failures: one issue cycling through its own `dispatchBackoff`, or one role looping on one workspace, can never trip it. Crossing it trips the existing pre-flight advisory (#4386) + half-open dispatch gate (#5030) — one loud `ERROR` plus a `daemon.preflight.advisory` event — and the first dispatch that gets past token selection clears it. Zero/invalid → default |
 | *(env only)* | `LOOM_EMPTY_POOL_BREAKER_WINDOW_SECS` | `1800` | Trailing window over which those distinct sources are counted (#6614) — twice the old 900 s `dispatchBackoff.maxSecs` plateau, so a systemic fault always accumulates while isolated failures spaced further apart never do. Zero/invalid → default |
-| `autonomous.hostBreaker.enabled` | `LOOM_HOST_BREAKER` | `true` | Host-distress circuit breaker on/off (#4235). A safety backstop — **defaults on**. Env truthy (`1`/`true`/`yes`/`on`) enables, any other value disables; wins over config. **Live** since #12090 — every `hostBreaker.*` key is re-resolved each work-finder tick and pushed into the process-global handle (a change logs once at INFO as `host_breaker: hostBreaker … -> …`); env overrides are read only at daemon start. See [Host-distress circuit breaker](#host-distress-circuit-breaker-4235) below |
-| `autonomous.hostBreaker.loadPerCoreTrip` | `LOOM_HOST_BREAKER_LOAD_PER_CORE` | `2.5` | Load-per-core at/over which a tick counts toward tripping. `<= 0`/invalid → default |
-| `autonomous.hostBreaker.sustainTicks` | `LOOM_HOST_BREAKER_SUSTAIN_TICKS` | `3` | Consecutive over-threshold work-finder ticks required to trip (a single spike never trips). Zero/invalid → default |
-| `autonomous.hostBreaker.cooldownSecs` | `LOOM_HOST_BREAKER_COOLDOWN_SECS` | `300` | Cool-down window held after distress subsides before dispatch resumes. Zero/invalid → default |
 | `autonomous.rateLimitBreaker.enabled` | `LOOM_RATE_LIMIT_BREAKER` | `true` | GitHub rate-limit circuit breaker on/off (#4429). A safety backstop — **defaults on**. Env truthy enables, any other value disables; wins over config. **Restart required** — resolved once at startup, before any loop is spawned (#5963). See [GitHub rate-limit circuit breaker](#github-rate-limit-circuit-breaker-4429) below |
 | `autonomous.rateLimitBreaker.fallbackCooldownSecs` | `LOOM_RATE_LIMIT_BREAKER_FALLBACK_COOLDOWN_SECS` | `900` | Cooldown length when the `gh api rate_limit` reset probe fails. Zero/invalid → default; every computed cooldown is clamped to `[60, 3600]`s |
 | `autonomous.perTokenConcurrency` | `LOOM_PER_TOKEN_CONCURRENCY` | *(none)* | **RETIRED — removed entirely (#5743, previously retired-from-the-cap-only by #5270).** Used to feed a `healthy × per-token` figure into the dynamic cap (#3947); since #5270 it fed only a disclaimed, informational `status`/`calibrate` line with no admission effect. Unlike the CPU knobs below, there is no ongoing deprecation warning for it — the key and env var are simply unread; a config file that still sets it parses fine (unknown keys are ignored, not an error) |
@@ -7624,92 +7204,15 @@ feature exists to make rare is unchanged and stays the backstop for a
 mislabelled issue — this is a `work_finder`/`dispatch`-level *filter*, not a
 replacement for the sweep's own toolchain check.
 
-### Host-distress circuit breaker (#4235)
-
-The insta-crash quarantine above protects the shared **queue** from one broken
-issue; the host circuit breaker protects the **host itself** from a sustained
-overload. It was added after the 2026-07-27→28 meltdown (#4231): a 6-way sweep
-fan-out drove load to 118 on 28 cores, the window server was watchdog-killed five
-times, and the daemon itself crashed — and then a *second* wave re-spiked the host
-two hours later because nothing remembered the first incident. The point-in-time
-admission checks (the CPU headroom term #3978 — since removed in #4512 — and the
-per-tick load-admission ramp cap #4234) each make a *fresh* decision every tick,
-so the instant load dipped they re-admitted a full wave.
-
-Since #4512 removed the CPU estimate from admission, this **measured** breaker is
-also what makes a hand-tuned per-machine `maxConcurrent` safe to raise: a mis-set
-knob trips the breaker — on observed load-per-core, not on a constant — instead
-of melting the host, while the [machine-wide build slot](#machine-wide-build-slot-4512)
-keeps the heavy stages serialized in the first place.
-
-The breaker is the **stateful** layer those checks lack. It samples
-**load-per-core** (`loadavg_1m / logical_cpus`) once per work-finder tick and runs
-a three-phase state machine:
-
-- **Closed** (normal) → **Open** once load-per-core has been at/over
-  `loadPerCoreTrip` for `sustainTicks` *consecutive* ticks. A single spike resets
-  the counter, so a transient burst never trips.
-- **Open** (tripped) — new dispatch is **suppressed** in every repo while running
-  sweeps **drain untouched** (the breaker never kills a running sweep). Stays Open
-  while the host is still hot.
-- **CoolDown** — once load drops back below the threshold, dispatch stays
-  suppressed for a further `cooldownSecs` so a transient dip can't re-admit a full
-  wave (exactly the #4231 01:41 re-spike). A re-spike over the threshold during
-  cool-down sends it straight back to Open; otherwise the cool-down elapses and it
-  returns to Closed.
-
-The breaker's suppression composes with the existing dispatch suppressors at the
-same choke point — it is OR'd onto the main-health-gate halt and the scheduled
-drain, and works alongside (never bypassing) the `maxAdmissionsPerTick` ramp cap.
-
-**Default-ON rationale.** Unlike the work-finder loop itself (opt-in,
-default-off), the breaker **defaults on** — the same call the insta-crash
-quarantine made. It only ever acts under genuinely severe *sustained* load, it
-never aborts running work, and it is only ever *sampled* from inside the
-work-finder loop, so a daemon that never enables the work-finder sees zero
-behavior change. A backstop that defaulted off would not have prevented #4231's
-second wave, which is the whole point.
-
-**Explicit `dispatch_sweep` is hard-blocked by default (with a `force`
-override).** This differs deliberately from the sibling headroom advisory (#4234),
-which only *advises* an explicit dispatch that would exceed the point-in-time
-dynamic cap and never blocks it. A *tripped* breaker represents **sustained,
-already-observed** distress — a materially stronger signal than a single-tick
-headroom reading — so `dispatch_sweep` (CLI `loom-daemon dispatch <N>` / the
-`mcp__loom__dispatch_sweep` tool) is **refused** while the breaker is Open or
-CoolDown. An operator who knows the host is distressed and wants to dispatch anyway
-passes `--force` (CLI) / `force: true` (IPC / `mcp__loom__dispatch_sweep`).
-
-**Observability.** The breaker is surfaced three ways: a log line on every phase
-change; a state-change-deduped `daemon.host_breaker.state` event-bus event
-(payload: `transition`, `state`, `reason`, `tripped_at`, `releases_at`); and
-`loom-daemon status`, which prints `Host breaker: OK/OPEN/COOLING DOWN` with the
-reason, the tripped-at time, and the cool-down release time (also in
-`--json → host_breaker`).
-
-**Clearing it manually.** The breaker auto-clears when the cool-down elapses on a
-recovered host — no operator action is needed in the normal case. To clear it
-sooner, either resolve the load (it releases on the next below-threshold tick plus
-the cool-down) or restart the daemon (the state is in-memory, like the
-quarantine). To disable it entirely, set `LOOM_HOST_BREAKER=0` or
-`autonomous.hostBreaker.enabled = false`.
-
-**Follow-ups deliberately deferred** (kept out of the first version to stay
-minimal, per #4235): macOS-only trip signals (`.ips` crash reports, `syspolicyd`
-CPU-ratio amplification, daemon self-restart detection) and durable trip/release
-telemetry (coordinate with #4137 rather than building a parallel store).
-
 ### GitHub rate-limit circuit breaker (#4429)
 
-The host breaker above protects the **host**; this breaker protects the
-**shared forge API budget**. Every fleet host authenticates as the same
+This breaker protects the **shared forge API budget**, not dispatch slots. Every fleet host authenticates as the same
 identity, so the REST/GraphQL rate limits are one fixed pool — and when it
 exhausted on 2026-07-29, every polling loop on every host kept firing its full
 per-tick call pattern for ~25 minutes (all failing), while role sessions were
 spawned straight into the same wall.
 
-The machine is simpler than the host breaker's — **Closed ⇄ Cooldown**, no
-sustain counter, because a rate-limit rejection is unambiguous:
+The machine is **Closed ⇄ Cooldown**, with no sustain counter, because a rate-limit rejection is unambiguous:
 
 - Any gh polling failure whose stderr carries a rate-limit signature
   (GraphQL primary, REST 403, secondary-limit phrasings) **trips** the
@@ -8053,7 +7556,7 @@ ticks in between. Its skip line is logged when the block starts, not every tick.
 The pre-filter only removes candidates and fails open: with the listing
 unreadable every candidate goes to `dispatch()` and the step 2.6 guard above,
 which is unchanged and still the authority for every route. A tick in which
-nothing reaches the dispatch point (at capacity, saturated, halted) makes no
+nothing reaches the dispatch point (at capacity, halted) makes no
 read. Each read that succeeds also feeds the #6788 memo, which the 2.6 probe no
 longer writes for these candidates: a verified open PR records or refreshes the
 issue's entry, a verified absence removes it (a closed PR frees its issue that
@@ -8063,18 +7566,15 @@ if every other leg fails. An open-PR refusal that `dispatch()` still makes arms 
 before, but as its own streak, logged as a guard refusal rather than as
 `consecutive failed dispatch(es)`.
 
-**A large held-PR backlog can masquerade as work starvation here — a distinct
-mechanism from #5715.** Because the guard keys on openness only, a PR that
+**A large held-PR backlog can masquerade as work starvation here.** Because the guard keys on openness only, a PR that
 Champion has put on a merge-risk hold (`loom:pr` + `loom:operator`) is still an
 "open linked PR" as far as `pr-open-skip` is concerned, so its issue keeps
 getting correctly declined every tick. When many PRs accumulate in that held
 state, the ready queue can look starved from the outside — few or no fresh
 dispatches, a string of `pr-open-skip` counts — even though the work behind
 those issues is already done and merely stuck awaiting a human decision. This
-is **not** the [Starvation escape hatch (#5715)](#starvation-escape-hatch-5715)
-condition above: that mechanism detects host-load starvation (admission held,
-zero sweeps in flight) and has a bounded escape hatch; this one has no escape
-hatch, because bypassing it would re-dispatch and redo already-finished work.
+has no escape hatch, because bypassing it would re-dispatch and redo
+already-finished work.
 The only fix for a held-PR-backlog read of "starvation" is clearing the
 operator holds (merge or close the held PRs) — see `champion-pr-merge.md`'s
 "Held-PR Census" for the operator-facing view of that backlog.
@@ -9639,7 +9139,7 @@ path](troubleshooting.md#never-launch-a-service-from-a-build-output-path-6127).
 | `LOOM_DEEP_CLEAN_MIN_INTERVAL_SECS` | `autonomous.worktreeReaper.deepClean.minIntervalSecs` | env > config > default | `21600` (6h) |
 
 **Observability.** `loom-daemon status` prints an `artifact reclaim (deep, per
-repo)` block beside the dynamic-cap disk term — when a pass last fired, what it
+repo)` block — when a pass last fired, what it
 reclaimed, and (the common case) why the last evaluation declined, e.g.
 `118G free >= 20G floor — no disk pressure`. The same records are on
 `status --json` under `deep_clean[]`, so a watch loop can assert reclamation is
@@ -9881,7 +9381,7 @@ OOM-kill count, the single most diagnostic number in the #8512 incident.
 **The work finder emits a bounded, non-spammy `WARN`** when `shmem / total`
 crosses a configured fraction (default 15%), naming the largest offending
 mount and the `tmpfs-scratch-gc --dry-run` recipe. **Warning only — it never
-gates dispatch**, unlike the disk headroom axis above: a host with a
+gates dispatch**: a host with a
 legitimately large tmpfs (a shared-memory-heavy workload) must not be starved
 of work, and the reclaim pass already removes the Loom-caused case on its own.
 A process-global cooldown (`LOOM_TMPFS_VISIBILITY_WARN_INTERVAL_SECS`, default
@@ -10009,22 +9509,19 @@ Each pass logs
 
 **The gap this closes.** Every reclaim pass above runs on the **worktree
 reaper's** ticker (`DEFAULT_WORKTREE_REAPER_INTERVAL_SECS = 900`, 15 min). The
-**dispatch-cap** loop that actually reads disk headroom and clamps the
-concurrency cap is a different `tokio::time::interval`
-(`DEFAULT_WORK_FINDER_INTERVAL_SECS = 60`). Nothing coupled the two, so the
-dispatch loop could watch free space cross the floor and finalize a cap of `0`
-— dispatching nothing — for up to ~14 minutes before reclaim was even
-attempted. Observed on `loom-worker-1` (2026-09-11): `disk=0` → cap 0 with a
-healthy token pool, while the host held a merged-PR worktree, stale agent
-scratch, and superseded Docker images it owned outright and could have
-reclaimed immediately.
+dispatch loop is a different `tokio::time::interval`
+(`DEFAULT_WORK_FINDER_INTERVAL_SECS = 60`). Nothing coupled the two, so free
+space could sit below the floor for up to ~14 minutes before reclaim was even
+attempted, while the host held a merged-PR worktree, stale agent scratch, and
+superseded Docker images it owned outright and could have reclaimed
+immediately.
 
-**What it does.** When the disk term is about to **bind the cap down** — i.e.
-`disk < min(ram, configured_max)`, so reclaiming disk would buy back real
-dispatch slots — the dispatch loop runs the *existing* reclaim passes for that
-root right then, on the blocking pool, then **re-probes free space** before
-finalizing the tick's cap. No new removal code exists in this path — only a
-decision about *when* to ask, and how far to escalate.
+**What it does.** When free space is below the floor (`diskWarnFreeGb`), the
+dispatch loop runs the *existing* reclaim passes for that root right then, on
+the blocking pool, and re-probes free space after each tier. No new removal
+code exists in this path — only a decision about *when* to ask, and how far to
+escalate. Since #12406 free space does not limit dispatch, so the pass never
+changes the tick's cap.
 
 **Tiers, safest first (#11192).** The pass escalates through three tiers and
 re-probes free space between them, moving on only while free space is still
@@ -10036,31 +9533,21 @@ below the floor (`diskWarnFreeGb`) or cannot be measured:
 3. the primary checkout's own build cache (`deep_clean`) and
    `docker_image_clean`.
 
-A pass that starts above the floor runs tier 1 only; the scheduled reaper
-still runs `docker_image_clean` on its own cadence.
+The scheduled reaper still runs `docker_image_clean` on its own cadence.
 
 **It cannot bypass a cooldown.** Each sub-pass consults its own cooldown
 (`deep_clean` 6h, `docker_image_clean` 30 min, `scratchReclaim` 30 min), which
 this trigger neither reads nor resets. Triggering eagerly only makes an
 *already-due* pass run promptly instead of up to 15 minutes late.
 
-**Edge and level, plus its own cooldown (#11192).** The pass fires on the
-`false → true` transition of the binding condition, and also on level:
-
-- on every tick while free space is below the floor (`diskWarnFreeGb`);
-- while the disk term keeps binding, each time free space has fallen
-  `fallStepGb` (default 10) below the last pass's reading, or below the
-  highest reading since.
-
-Edge-only triggering could not re-arm on a host whose disk term binds on every
-tick: with `configured_max = 12` it binds whenever free space is under 96 GB,
-and on loom-worker-1 (2026-10-09) no pass ran for 7.5 hours while free space
-fell from 79 GB to 0. Whatever the trigger, a pass runs at most once per
+**One trigger, plus its own cooldown (#11192, #12406).** The pass is due on
+every tick while free space is below the floor (`diskWarnFreeGb`). The older
+triggers (the disk term binding the cap, and the `fallStepGb` level step) went
+with the disk term in #12406. A pass runs at most once per
 `minIntervalSecs` (default 10 min) per root, which protects the one sub-pass
 with no cooldown of its own: the merged-PR worktree reap, which makes a forge
 REST call per candidate worktree. An **unmeasurable** disk probe (`usize::MAX`,
-the "unknown != zero" contract of #4164) never triggers it, just as it never
-triggers a clamp.
+the "unknown != zero" contract of #4164) never triggers it.
 
 **Empty passes alert and back off (#11192).** A pass that removed nothing logs
 an `eager_reclaim: ALERT … pass reclaimed nothing (N in a row …)` line at
@@ -10070,9 +9557,9 @@ back empty, the merged-PR worktree reap backs off to 2x, 4x, then at most 8x
 `minIntervalSecs` between runs. The local sub-passes keep their once-per-window
 cadence.
 
-**Scope.** The dispatch loop's disk term is one machine-level probe against one
-root (`fallback_root` in the production multi-workspace loop), so the eager pass
-reclaims from that same root, except for the tier-2 idle-cache pass, which walks
+**Scope.** The dispatch loop's free-space check is one machine-level probe
+against one root (`fallback_root` in the production multi-workspace loop), so
+the eager pass reclaims from that same root, except for the tier-2 idle-cache pass, which walks
 every registered root. The scheduled reaper still walks every registered root on
 its own cadence — eager reclaim is strictly additive. Since #11192 the scheduled
 reaper also runs the cross-root idle-cache pass whenever a root it visits is
@@ -10097,8 +9584,7 @@ scratch 1.8G, cargo-target orphans nothing, idle worktree targets 1 dir(s)
     "worktreeReaper": {
       "eagerReclaim": {
         "enabled": true,
-        "minIntervalSecs": 600,
-        "fallStepGb": 10
+        "minIntervalSecs": 600
       }
     }
   }
@@ -10109,10 +9595,9 @@ scratch 1.8G, cargo-target orphans nothing, idle worktree targets 1 dir(s)
 |---------|-----------|------------|---------|
 | `LOOM_EAGER_RECLAIM` | `autonomous.worktreeReaper.eagerReclaim.enabled` | env > config > default | `true` (on) |
 | `LOOM_EAGER_RECLAIM_MIN_INTERVAL_SECS` | `autonomous.worktreeReaper.eagerReclaim.minIntervalSecs` | env > config > default | `600` (10 min) |
-| `LOOM_EAGER_RECLAIM_FALL_STEP_GB` | `autonomous.worktreeReaper.eagerReclaim.fallStepGb` | env > config > default | `10` (GB) |
 
-Setting `enabled: false` restores exactly the pre-#7512 behavior: the dispatch
-loop clamps immediately and only the 15-minute reaper cadence reclaims. See
+Setting `enabled: false` restores the pre-#7512 behavior: only the 15-minute
+reaper cadence reclaims. See
 `loom-daemon/src/eager_reclaim.rs`.
 
 #### Agent scratch reclaim (#7512)
@@ -10343,7 +9828,7 @@ The reaper now runs a second, parallel pass over `pr-<N>` directories:
   are the correct default and stay that way.
 
 **Worktree footprint in `loom-daemon status`.** The same issue added a
-`Worktree footprint:` section under the dynamic-cap breakdown, reporting each
+`Worktree footprint:` section under the capacity block, reporting each
 managed repo's worktree count split by naming class plus its total on-disk
 size (and the matching `worktrees[]` array in `--json`). Before it, a host
 carrying 39 GB of merged-PR worktrees rendered identically to one that was
@@ -11278,7 +10763,7 @@ interval-cadence pass, e.g.:
   `RoleRunGuard::admit(...)` call an ordinary interval role uses in
   `decide_root_tick()`, so it is refused exactly like any other tick once
   `maxConcurrent` (or any other admission ceiling) is saturated — promotion
-  is never a bypass of the disk axis or `maxConcurrent`.
+  is never a bypass of `maxConcurrent`.
 - **`loom-daemon status`** (both human-readable and `--json`) surfaces, for
   every role that is both `onIdle` and has a configured `onIdleMaxWait`
   entry, the age since its last completed tick and whether it is currently

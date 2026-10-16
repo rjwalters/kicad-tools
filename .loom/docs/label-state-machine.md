@@ -99,6 +99,7 @@ structurally cannot.
 | A step needing a human's hands: hardware, a credential or access no fleet host holds | `loom:operator`, plus a comment naming the exact step |
 | A human action that waits on something named first | `loom:operator`, plus a literal `Blocked by #N` line in the body or comment |
 | Waiting on something automation will resolve: an issue, a PR, infrastructure | `loom:blocked` with a park record (`loom-daemon park-record apply`, [`park-record.md`](park-record.md)), or at least a literal `Blocked by #N` / `Depends on #N` / `Requires #N` line in the same comment (the phrasings `detect-dependency-cycle.sh` and `warn-operator-gated.sh` parse; a backtick-quoted reference does not count) |
+| Cross-repo or time-gated leftover (a sweep standing down, not a human ask) | File the child in the other repo and `loom-daemon park-record apply <N> --blocked-by OWNER/REPO#N --by <role> --remove-label loom:building`; the park releases when the child closes. For a time-gated wait, park on the tracking issue or PR whose closing is the signal; with none, file a same-repo tracking issue. If the fleet identity cannot see the other repo (404 on filing), use the capability row below, not `loom:operator`. A reason-only `--reason "wait until <date>: ..."` park is the last resort: **no date release exists today**, so it sits until a human or a fingerprint change moves it, and the reason must say so. Never `loom:operator` just to stop re-dispatch |
 | Waiting on a capability a fleet host may hold (host or admin access, a credential profile) | `loom:blocked` with a reason-only park record and a `<!-- loom:capability=<name> -->` marker naming it, plus a linked capability-request issue: the capability lane (below) proposes it on a host that holds it |
 
 **`loom:operator` needs a stated reason class.** Only these classes qualify:
@@ -883,16 +884,21 @@ adopts and releases them as above. See
 
 When a PR merges with a non-closing `Part of #N` / `Contributes to #N` reference,
 `merge-pr.sh` returns issue N from `loom:building` to `loom:issue`. If what is left
-needs a human (an operator decision, a deployment-time check, a hardware step), the
+needs a human's hands or a ruling (an operator decision, a hardware step), the
 issue body declares it with an HTML comment marker, added **before** the PR merges:
 
 ```text
-<!-- loom:remainder-hold reason="deployment-time checks need the fleet on a release containing this merge" -->
+<!-- loom:remainder-hold reason="needs the operator to flash the board and read back the result" -->
 ```
 
 With the marker, the reset swaps `loom:building` -> `loom:operator` instead, logs the
 reason, and posts a "Partial Increment Merged (remainder held)" comment. To release,
 a human removes `loom:operator` and the marker, then re-applies `loom:issue`.
+
+A remainder that is only cross-repo or time-gated (for example a deployment-time check
+that waits on a fleet release) is agent work, not a human ask: do not use the marker.
+Park it instead, per the "Cross-repo or time-gated leftover" row in
+[Routing to a human](#routing-to-a-human-10001-11795).
 
 - The marker is honoured from any author: it can only keep an issue out of the
   ready queue. The `reason` is one line and is only quoted, never evaluated.

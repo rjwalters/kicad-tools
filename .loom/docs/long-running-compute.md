@@ -36,7 +36,8 @@ hours later:
 
 25 `ngspice` processes on 18 cores → load average 58. The owning sweep had ended
 long before (the issue was back to `loom:issue`, no process in the worktree), so
-nothing was ever going to stop it. `loom-daemon`'s `admission_brake` held every
+nothing was ever going to stop it. `loom-daemon`'s admission brake (removed
+since by #12406) held every
 admission on that host for the full twelve hours (`187 deferred (host
 saturated)`), `gh` calls hit their 10 s timeout, and `build_daemon_status` ran
 over budget under the same load.
@@ -138,21 +139,12 @@ registered just triggers the next KeepAlive rerun.
 
 ## Diagnosing it from the daemon side
 
-Since #8478 the daemon names the culprit instead of only reporting saturation:
-
-- **In the log.** `admission_brake: STARVING …` and `STARVATION ESCAPE HATCH …`
-  lines carry a best-effort `ps` attribution of the top host-wide CPU consumers
-  by command, instance count, and parent process — e.g. `ngspice ×25 (1843%
-  cpu, parent launchd[1], reparented to pid 1)`. **A compute process whose
-  parent is pid 1 has been reparented to `launchd`/`init`: no live Loom session
-  owns it.** That is the escape signature.
-- **Off-host.** `host.health` telemetry carries an `admission_brake` object with
-  the starvation duration and a `dispatch_suppressed_by_foreign_load` flag, and
-  such a host also reports `dispatch_halted: true` — so a fleet-level view shows
-  it as *dispatch suppressed by foreign load* rather than as a quiet host. See
-  [`telemetry-schema.md`](telemetry-schema.md) → `host.health`.
-- **Host-locally.** `loom-daemon status --json` → `admission_brake` carries
-  `starving_secs` alongside the pre-existing `starving_since`/`starving_ticks`.
+The daemon no longer gates admission on host load (#12406 removed the
+admission brake and its foreign-load attribution). A saturated host shows up
+in the exported `loom.host.*` load, RAM and disk metrics. Find the culprit on
+the host itself: list the top CPU consumers by command and parent. **A compute
+process whose parent is pid 1 has been reparented to `launchd`/`init`: no live
+Loom session owns it.** That is the escape signature.
 
 ## Related
 
@@ -164,5 +156,3 @@ Since #8478 the daemon names the culprit instead of only reporting saturation:
 - [`macos-agent-qos-band.md`](macos-agent-qos-band.md) — the QoS confinement
   that created the pressure to escape in the first place, and why the daemon's
   own launchd job sets `ProcessType = Background`.
-- `loom-daemon/src/admission_brake.rs` / `loom-daemon/src/foreign_load.rs` — the
-  hold, the starvation escape hatch (#5715), and the attribution probe.

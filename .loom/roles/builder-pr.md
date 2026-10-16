@@ -756,7 +756,7 @@ Part of #123              <- declaration: parsed, the label reset fires on merge
 
 **Both the PR body and the commit messages must carry the same reference.** GitHub harvests closing keywords from the PR body and the merge commit's subject (this repo merges with merge commits, #9105). Prefer `Part of #N`.
 
-If a `Part of #N` remainder needs a human, add `<!-- loom:remainder-hold reason="..." -->` to the issue body before merge (parks it `loom:operator`; see label-state-machine.md).
+If a `Part of #N` remainder needs a human's hands or a ruling (not merely a cross-repo or time-gated wait), add `<!-- loom:remainder-hold reason="..." -->` to the issue body before merge (parks it `loom:operator`; see label-state-machine.md). A cross-repo or time-gated remainder gets a park record instead: see the "Cross-repo or time-gated leftover" row in label-state-machine.md "Routing to a human".
 
 #### A stray closing keyword ANYWHERE in the body defeats `Part of #N` (#4569)
 

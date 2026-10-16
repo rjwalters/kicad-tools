@@ -1,6 +1,6 @@
 {
-  "loom_version": "0.19.1170",
-  "loom_commit": "1a64cc928a7e488c762211ef1f5e665b2182f7d9",
+  "loom_version": "0.19.1171",
+  "loom_commit": "c707f2d09917f74d34a9cbc5f568acec042c7a93",
   "install_date": "2026-08-10",
   "installed_files": [
     ".claude/agents/loom-architect.md",
@@ -549,7 +549,10 @@
     ".loom/scripts/tests/test-guide-docs-telemetry.sh",
     ".loom/scripts/tests/test-merge-admission-telemetry.sh",
     ".loom/scripts/tests/test-verdict-staleness-guard.sh",
-    ".loom/scripts/verdict-staleness-guard.sh"
+    ".loom/scripts/verdict-staleness-guard.sh",
+    ".loom/docs/dispatcher-repo-sharding.md",
+    ".loom/docs/issue-filing-lock.md",
+    ".loom/docs/long-running-compute.md"
   ],
   "last_resync": "2026-10-16",
   "loom_source_remote": "https://github.com/rjwalters/loom.git",
