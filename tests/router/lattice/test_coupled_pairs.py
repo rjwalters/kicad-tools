@@ -1896,12 +1896,12 @@ def _todays_connections(router, monkeypatch) -> list:
 
 
 def test_core_without_a_tie_keeps_todays_connections(monkeypatch) -> None:
-    import kicad_tools.router.lattice.coupled as coupled_mod
+    import kicad_tools.router.pairplan.tie as tie_mod
 
     router = _usbc_autorouter()
     router._ensure_lattice_pathfinder()
     today = _todays_connections(router, monkeypatch)
-    monkeypatch.setattr(coupled_mod, "plan_equivalent_pin_tie", lambda *a, **k: None)
+    monkeypatch.setattr(tie_mod, "plan_equivalent_pin_tie", lambda *a, **k: None)
     _c, declined = router._lattice_netset_connections()
     assert router._lattice_pair_ties == []
     assert declined == today
