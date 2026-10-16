@@ -377,10 +377,16 @@ def _remove_zones_for_nets(pcb_path: Path, net_names: set[str]) -> None:
     # Iterate every ``(zone`` opener in the file and decide whether to
     # remove that span.  We walk forward across the text rebuilding it
     # rather than relying on per-line state.
+    #
+    # Issue #6873: only openers outside quoted strings count.  A zone name or
+    # footprint descr such as ``"pour (zone keepout, see note"`` used to be
+    # taken for a zone whose span never closed, and the bail-out below then
+    # left every real zone after it in place.
+    from kicad_tools.sexp.scan import iter_unquoted
+
     out_parts: list[str] = []
     cursor = 0
-    zone_start_pattern = re.compile(r"\(zone\b")
-    for m in zone_start_pattern.finditer(pcb_text):
+    for m in iter_unquoted(pcb_text, r"\(zone\b"):
         start = m.start()
         if start < cursor:
             # This opener lies inside a span we already removed (e.g. a
