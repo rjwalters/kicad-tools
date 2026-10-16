@@ -137,9 +137,11 @@ _GUIDE_NEAR_PITCHES = 2.0
 _GUIDE_CAP_MM = 2.0
 _GUIDE_WEIGHT = 1.0
 # Issue #6824: extra cost per mm of planar copper on a layer outside the net
-# class's ``preferred_layers`` (1.0 => non-preferred copper costs 2x, the
+# class's ``preferred_layers`` (3.0 => non-preferred copper costs 4x, the
 # grid pathfinder's 0.5x preferred discount as an admissible surcharge).
-_NON_PREFERRED_LAYER_SURCHARGE = 1.0
+# Board 03's USB_D leg is ~15 mm and an F->In2->F excursion pays four via
+# hops, so 1.0 never outweighed the vias; 3.0 moves USB_D+ onto In2.Cu.
+_NON_PREFERRED_LAYER_SURCHARGE = 3.0
 
 
 # Issue #6703: at most this many fallback pairs per flush get the partner-aware
@@ -882,6 +884,15 @@ class LatticePathfinder:
         blocked = self._allowed_layers_blocked()
         if net_class is None:
             return blocked
+        # Issue #6824: a class that names a plane-reserved layer in its
+        # ``preferred_layers`` opts its nets into that layer (board 03 routes
+        # the USB_D pair on the In2.Cu plane layer).  Only the board-wide
+        # reservation is lifted; the class's own ``avoid_layers`` below still
+        # hard-blocks.
+        if blocked:
+            prefs = getattr(net_class, "preferred_layers", None)
+            if prefs:
+                blocked = blocked - frozenset(i for i in prefs if isinstance(i, int))
         hard_avoided = getattr(net_class, "hard_avoided_layer_indices", None)
         if hard_avoided is None:
             return blocked

@@ -198,7 +198,9 @@
     "zone_connection": "thermal",
     "is_pour_net": false,
     "route_via": "pathfinder",
-    "preferred_layers": null,
+    "preferred_layers": [
+      "In2.Cu"
+    ],
     "avoid_layers": null,
     "layer_cost_multiplier": 2.0,
     "length_constraint": null,
@@ -235,7 +237,9 @@
     "zone_connection": "thermal",
     "is_pour_net": false,
     "route_via": "pathfinder",
-    "preferred_layers": null,
+    "preferred_layers": [
+      "In2.Cu"
+    ],
     "avoid_layers": null,
     "layer_cost_multiplier": 2.0,
     "length_constraint": null,
