@@ -413,17 +413,80 @@ def test_no_committed_pairs_means_no_skip_set():
     assert _committed_coupled_skip_nets(router) is None
 
 
-def test_optimizer_call_sites_pass_the_committed_pairs():
-    """All four ``optimize_routes_grid_synced`` calls in ``kct route``."""
-    import inspect
+def _split_rail(net: int, name: str, y: float) -> Route:
+    """A straight 5 -> 25 mm rail in three collinear pieces.
 
-    from kicad_tools.cli import route_cmd
+    ``merge_collinear`` always rewrites it into one segment, so an untouched
+    rail after the optimizer can only mean the optimizer skipped the net.
+    """
+    route = Route(net=net, net_name=name)
+    for x1, x2 in ((5.0, 10.0), (10.0, 15.0), (15.0, 25.0)):
+        route.segments.append(
+            Segment(x1=x1, y1=y, x2=x2, y2=y, width=0.2, layer=Layer.F_CU, net=net, net_name=name)
+        )
+    return route
 
-    source = inspect.getsource(route_cmd)
-    calls = source.split("optimize_routes_grid_synced(")[1:]
-    # The first split chunk after each import line is the import itself.
-    real = [c for c in calls if not c.lstrip().startswith(")")]
-    assert len(real) == 4
-    for chunk in real:
-        head = chunk[: chunk.index(")")]
-        assert "skip_nets=_committed_coupled_skip_nets(" in head, head
+
+def _optimizer_fixture(committed: set[int]) -> Autorouter:
+    """Pair 1/2 plus an unrelated net 3, all routed as split straight rails."""
+    router = _two_pad_router()
+    router.add_component(
+        "R1",
+        [
+            {"number": "1", "x": 5.0, "y": 8.0, "width": 0.4, "height": 0.4, "net": 3,
+             "net_name": "SIG"},
+            {"number": "2", "x": 25.0, "y": 8.0, "width": 0.4, "height": 0.4, "net": 3,
+             "net_name": "SIG"},
+        ],
+    )  # fmt: skip
+    for route in (
+        _split_rail(1, "USB_D+", 4.6),
+        _split_rail(2, "USB_D-", 5.4),
+        _split_rail(3, "SIG", 8.0),
+    ):
+        router.routes.append(route)
+        router.grid.mark_route(route)
+    router._committed_coupled_nets = set(committed)
+    return router
+
+
+def _copper(router: Autorouter, net: int) -> list[tuple]:
+    return [
+        (s.x1, s.y1, s.x2, s.y2, s.width, s.layer)
+        for r in router.routes
+        if r.net == net
+        for s in r.segments
+    ]
+
+
+def test_optimizer_pass_leaves_a_committed_coupled_pairs_copper_unchanged():
+    """``kct route``'s optimizer pass skips the committed pair, not the rest.
+
+    Drives ``_optimize_traces`` -- the one optimizer pass every ``kct route``
+    pipeline calls (#6847) -- on real routes: the committed pair's copper is
+    exactly what the coupled pre-pass laid, while an ordinary net in the same
+    pass is still optimized.
+    """
+    import argparse
+
+    from kicad_tools.cli.route_cmd import _optimize_traces
+
+    router = _optimizer_fixture({1, 2})
+    before = {net: _copper(router, net) for net in (1, 2, 3)}
+    _optimize_traces(router, argparse.Namespace(strict=False, verbose=False), quiet=True)
+
+    assert _copper(router, 1) == before[1]
+    assert _copper(router, 2) == before[2]
+    assert len(_copper(router, 3)) == 1, "control: the optimizer ran on the other net"
+
+
+def test_optimizer_pass_rewrites_the_same_rails_when_nothing_is_committed():
+    """Control: the pair's split rails are optimizable, so the skip is real."""
+    import argparse
+
+    from kicad_tools.cli.route_cmd import _optimize_traces
+
+    router = _optimizer_fixture(set())
+    _optimize_traces(router, argparse.Namespace(strict=False, verbose=False), quiet=True)
+    assert len(_copper(router, 1)) == 1
+    assert len(_copper(router, 2)) == 1
