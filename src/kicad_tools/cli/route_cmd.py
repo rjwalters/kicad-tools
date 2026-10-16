@@ -4881,7 +4881,8 @@ def _native_drc_failure_advice(geo) -> list[str]:
             "It is possibly saved in a newer KiCad file format than this kicad-cli reads "
             "(e.g. a KiCad 10 board on KiCad 8/9); upgrade KiCad (kicad-cli).",
         ]
-    if isinstance(returncode, int) and returncode == -signal.SIGKILL:
+    sigkill = getattr(signal, "SIGKILL", None)  # absent on Windows (#6739)
+    if sigkill is not None and isinstance(returncode, int) and returncode == -sigkill:
         return [
             "The board was NOT checked by KiCad: kicad-cli was killed (SIGKILL), most "
             "likely by the out-of-memory killer.",

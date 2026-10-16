@@ -30,14 +30,25 @@ the cache write / internal DRC Python code.
 Enable it by setting the ``KCT_RSS_TRACE`` environment variable to any
 non-empty value; output goes to stderr so it never contaminates the routed
 board or JSON on stdout.  When disabled every method is a cheap no-op.
+
+The stdlib ``resource`` module is Unix-only.  On platforms without it
+(Windows) the module still imports cleanly and every RSS reading is ``0``,
+so ``kct route`` never crashes on the tracer (issue #6739).
 """
 
 from __future__ import annotations
 
 import os
-import resource
 import sys
+from types import ModuleType
 from typing import TextIO
+
+resource: ModuleType | None
+try:
+    import resource
+except ImportError:  # pragma: no cover - exercised via test monkeypatch
+    # Windows has no ``resource`` module; RSS readings degrade to 0 (#6739).
+    resource = None
 
 __all__ = ["RSSTracer", "peak_rss_bytes", "child_peak_rss_bytes"]
 
@@ -55,7 +66,12 @@ def _maxrss_to_bytes(ru_maxrss: int) -> int:
 
 
 def peak_rss_bytes() -> int:
-    """Return this (Python) process's peak RSS high-water mark in bytes."""
+    """Return this (Python) process's peak RSS high-water mark in bytes.
+
+    Returns ``0`` on platforms without the ``resource`` module (Windows).
+    """
+    if resource is None:
+        return 0
     return _maxrss_to_bytes(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
 
 
@@ -66,7 +82,11 @@ def child_peak_rss_bytes() -> int:
     largest child the process has ``wait()``-ed for.  This is where the
     ``kicad-cli`` DRC / zone-fill footprint shows up -- it is invisible to
     ``RUSAGE_SELF`` because the child is a separate process.
+
+    Returns ``0`` on platforms without the ``resource`` module (Windows).
     """
+    if resource is None:
+        return 0
     return _maxrss_to_bytes(resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss)
 
 

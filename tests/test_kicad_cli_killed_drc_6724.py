@@ -883,6 +883,23 @@ class TestLoadFailureAndRouteAdvice:
         for needle in must_not:
             assert needle not in text, (needle, text)
 
+    @pytest.mark.parametrize("returncode", [-9, -11, 1, None])
+    def test_route_advice_without_sigkill_attribute(self, monkeypatch, returncode):
+        """Windows has no ``signal.SIGKILL``; the advice must not raise (#6739)."""
+        from kicad_tools.cli.route_cmd import _native_drc_failure_advice
+
+        monkeypatch.delattr(signal, "SIGKILL")
+        geo = geometric.GeometricDRCResult(ran=False, reason=REASON_CRASH, returncode=returncode)
+        text = " ".join(_native_drc_failure_advice(geo))
+
+        assert "error output is quoted above" in text
+        assert "SIGKILL" not in text and "memory" not in text
+
+    def test_describe_returncode_without_sigkill_attribute(self, monkeypatch):
+        """``describe_returncode`` must not raise without ``signal.SIGKILL`` (#6739)."""
+        monkeypatch.delattr(signal, "SIGKILL")
+        assert geometric.describe_returncode(-11).startswith("kicad-cli was killed by")
+
 
 # ---------------------------------------------------------------------------
 # The kct route pour oracle and its stranded-pour gate
