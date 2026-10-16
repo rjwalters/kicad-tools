@@ -21,6 +21,9 @@ Track runs
     track ends at that point (counting every layer) and share a layer.  Where
     three or more ends meet, the run grown first (input order) stops there and
     the remaining ends may still pair up.  A run never closes on itself.
+    So input order matters at such a junction: the PCB form takes file order,
+    and the Route form sorts a ``Route`` into the order ``kct route`` puts it
+    in the file (Issue #6778, :func:`route_geometry`).
 
 Run-end trimming
     Only a run's two ends are trimmed; a run passing *through* a pad or via is
@@ -61,6 +64,8 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from itertools import pairwise
 from typing import TYPE_CHECKING, Any
+
+from kicad_tools.core.canonical_uuids import segment_order_key, via_order_key
 
 if TYPE_CHECKING:
     from kicad_tools.schema.pcb import PCB
@@ -525,7 +530,9 @@ def net_length(
     ``partial_net`` marks geometry that may be only part of its net (a router
     ``Route``): a via connected on fewer than two layers then keeps its
     declared span instead of counting as a zero-height stub.  Junction
-    resolution follows input order, which is file order for the PCB form.
+    resolution follows input order, which is file order for the PCB form
+    and the routed file's order for the Route form (:func:`route_geometry`,
+    Issue #6778).
     """
     seg_list = list(segs)
     via_list = list(vias)
@@ -629,8 +636,24 @@ def _lname(layer: Any) -> str:
     return getattr(layer, "kicad_name", None) or str(layer)
 
 
+def _w(value: float) -> float:
+    """``value`` as the router writes it to the board file (4 decimals)."""
+    return round(value, 4)
+
+
 def route_geometry(route: Route) -> tuple[list[LSeg], list[LVia]]:
-    """Neutral segments and vias of a router :class:`Route`.
+    """Neutral segments and vias of a router :class:`Route`, in file order.
+
+    Issue #6778: junction resolution follows input order (see
+    :func:`net_length`), so a ``Route`` is measured in the order its copper
+    will have in the board file, not in ``Route.segments`` order.  ``kct
+    route`` re-keys router copper before KiCad first loads the board
+    (:func:`~kicad_tools.core.canonical_uuids.canonicalize_board_uuids`),
+    handing each net its UUIDs in
+    :func:`~kicad_tools.core.canonical_uuids.segment_order_key` order and
+    putting copper in UUID order -- the order KiCad's own saves keep.  Coordinates
+    are taken as written (4 decimals), so a meander's off-grid points do not
+    leave the tuner a fraction of a micron per segment off the file.
 
     Issue #6792: a via listed more than once (same position, diameter and
     span) is one physical via and is returned once.  The tuners measure a net
@@ -639,17 +662,22 @@ def route_geometry(route: Route) -> tuple[list[LSeg], list[LVia]]:
     the net (by ~1.05 mm for In1.Cu + In2.Cu fragments sharing a via in a
     through-hole pad on a 1.6 mm 4-layer board).
     """
-    segs = [LSeg(s.x1, s.y1, s.x2, s.y2, _lname(s.layer)) for s in route.segments]
+    segs = sorted(
+        (LSeg(_w(s.x1), _w(s.y1), _w(s.x2), _w(s.y2), _lname(s.layer)) for s in route.segments),
+        key=lambda s: segment_order_key(s.x1, s.y1, s.x2, s.y2, s.layer),
+    )
     vias: list[LVia] = []
     seen: set[tuple[float, float, float, str, str]] = set()
     for v in route.vias:
         a, b = getattr(v, "drilled_layers", v.layers)
         la, lb = _lname(a), _lname(b)
-        key = (round(v.x, 6), round(v.y, 6), round(v.diameter, 6), la, lb)
+        x, y, d = _w(v.x), _w(v.y), _w(v.diameter)
+        key = (x, y, d, la, lb)
         if key in seen:
             continue
         seen.add(key)
-        vias.append(LVia(v.x, v.y, v.diameter, (la, lb)))
+        vias.append(LVia(x, y, d, (la, lb)))
+    vias.sort(key=lambda v: via_order_key(v.x, v.y, v.layers))
     return segs, vias
 
 
