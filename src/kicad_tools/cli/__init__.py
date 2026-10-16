@@ -933,6 +933,10 @@ def _run_export_command(args) -> int:
 
     sub_argv = [args.export_pcb]
 
+    # Issue #6881: --stackup-id was defined by export_cmd but never forwarded.
+    if getattr(args, "export_stackup_id", None):
+        sub_argv.extend(["--stackup-id", args.export_stackup_id])
+
     # Issue #6169: an unflagged --mfr defaults from project.kct target_fab
     # (looked up next to the board, or in the project directory when given).
     from kicad_tools.manufacturers.resolve import resolve_cli_manufacturer
@@ -958,12 +962,18 @@ def _run_export_command(args) -> int:
         sub_argv.append("--no-project-zip")
     if getattr(args, "export_no_auto_lcsc", False):
         sub_argv.append("--no-auto-lcsc")
+    if getattr(args, "export_no_spec", False):
+        sub_argv.append("--no-spec")
+    if getattr(args, "export_no_merge_lcsc", False):
+        sub_argv.append("--no-merge-lcsc")
     if getattr(args, "export_skip_preflight", False):
         sub_argv.append("--skip-preflight")
     if getattr(args, "export_skip_drc_floor", False):
         sub_argv.append("--skip-drc-floor")
     if getattr(args, "export_strict_preflight", False):
         sub_argv.append("--strict-preflight")
+    if getattr(args, "export_allow_unbuildable_bom", False):
+        sub_argv.append("--allow-unbuildable-bom")
     if getattr(args, "export_skip_drc", False):
         sub_argv.append("--skip-drc")
     if getattr(args, "export_skip_erc", False):
@@ -978,6 +988,9 @@ def _run_export_command(args) -> int:
         sub_argv.append("--keep-build-artifacts")
     if getattr(args, "export_keep_gerber_files", False):
         sub_argv.append("--keep-gerber-files")
+    bom_source = getattr(args, "export_bom_source", "schematic")
+    if bom_source and bom_source != "schematic":
+        sub_argv.extend(["--bom-source", bom_source])
     for layer in getattr(args, "export_vscore_layer", None) or []:
         sub_argv.extend(["--vscore-layer", layer])
     if getattr(args, "export_include_tht", False):
