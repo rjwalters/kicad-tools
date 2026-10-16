@@ -17,8 +17,9 @@ from __future__ import annotations
 
 import pytest
 
+from kicad_tools.router.core import Autorouter
 from kicad_tools.router.cpp_backend import is_cpp_available
-from kicad_tools.router.diffpair_routing import CoupledPathfinder
+from kicad_tools.router.diffpair_routing import CoupledPathfinder, DiffPairRouter
 from kicad_tools.router.grid import RoutingGrid
 from kicad_tools.router.layers import Layer, LayerStack
 from kicad_tools.router.primitives import Pad, Route
@@ -193,8 +194,8 @@ def test_hard_avoid_layers_pair_routes_on_remaining_layer(use_cpp: bool) -> None
     assert Layer.IN1_CU in segs
 
 
-def test_helper_never_returns_empty() -> None:
-    """Filtering everything away falls back to the pad layer."""
+def test_helper_returns_filtered_set() -> None:
+    """Filtering everything away yields ``[]`` (Issue #6860: caller declines)."""
     rules = _rules(allowed_layers=["F.Cu"], strict_layers=True)
     grid = RoutingGrid(
         width=5.0, height=5.0, rules=rules, layer_stack=LayerStack.four_layer_sig_gnd_pwr_sig()
@@ -205,7 +206,7 @@ def test_helper_never_returns_empty() -> None:
         target_spacing_cells=2,
         net_class_map={"D+": NetClassRouting(name="HS", avoid_layers=[0])},
     )
-    assert pf._coupled_routable_layers("D+", "D-", 0) == [0]
+    assert pf._coupled_routable_layers("D+", "D-", 0) == []
     rules.allowed_layers = ["F.Cu", "B.Cu"]
     assert pf._coupled_routable_layers("D+", "D-", 0) == [3]
     rules.allowed_layers = None
@@ -247,3 +248,146 @@ def test_through_hole_start_leaves_on_a_permitted_layer(use_cpp: bool) -> None:
     assert result is not None
     segs = _segment_layers(result)
     assert segs and Layer.F_CU not in segs, segs
+
+
+# ---------------------------------------------------------------------------
+# Issue #6860: decline like the single-ended router
+# ---------------------------------------------------------------------------
+
+
+def _smd_pads(end_layer: Layer = Layer.F_CU) -> tuple[Pad, Pad, Pad, Pad]:
+    """SMD sources on F.Cu, SMD sinks on ``end_layer``."""
+
+    def pad(x: float, y: float, net: int, name: str, ref: str, layer: Layer) -> Pad:
+        return Pad(
+            x=x, y=y, width=0.2, height=0.2, net=net, net_name=name, layer=layer,
+            ref=ref, pin="1",
+        )  # fmt: skip
+
+    return (
+        pad(1.0, 1.2, 1, "D+", "A", Layer.F_CU),
+        pad(5.0, 1.2, 1, "D+", "B", end_layer),
+        pad(1.0, 1.8, 2, "D-", "C", Layer.F_CU),
+        pad(5.0, 1.8, 2, "D-", "D", end_layer),
+    )
+
+
+def _route_smd(
+    use_cpp: bool,
+    pads: tuple[Pad, Pad, Pad, Pad],
+    *,
+    allowed_layers: list[str] | None = None,
+    net_class_map: dict[str, NetClassRouting] | None = None,
+) -> tuple[CoupledPathfinder, tuple[Route, Route] | None]:
+    """Route an open-field SMD pair (no walls) under the given restriction."""
+    rules = _rules(allowed_layers=allowed_layers, strict_layers=True)
+    grid = RoutingGrid(
+        width=6.0, height=3.0, rules=rules, layer_stack=LayerStack.four_layer_sig_gnd_pwr_sig()
+    )
+    for item in pads:
+        grid.add_pad(item)
+    pf = CoupledPathfinder(
+        grid=grid,
+        rules=rules,
+        target_spacing_cells=6,
+        min_spacing_cells=6,
+        net_class_map=net_class_map,
+    )
+    pf._use_cpp_coupled = use_cpp
+    return pf, pf.route_coupled(*pads, max_iterations_budget=200_000)
+
+
+@pytest.mark.parametrize("use_cpp", BACKENDS)
+def test_control_unrestricted_smd_pair_routes_on_f_cu(use_cpp: bool) -> None:
+    """Control: the same SMD pair routes on F.Cu with no restriction."""
+    pf, result = _route_smd(use_cpp, _smd_pads())
+    assert result is not None
+    assert Layer.F_CU in _segment_layers(result)
+    assert pf.last_decline_reason is None
+
+
+@pytest.mark.parametrize("use_cpp", BACKENDS)
+def test_hard_avoid_f_cu_with_f_cu_smd_pads_declines(use_cpp: bool) -> None:
+    """Hard-avoid F.Cu class, F.Cu SMD pads: never commit copper on F.Cu."""
+    net_class = NetClassRouting(name="PWR", avoid_layers=[0])
+    pf, result = _route_smd(use_cpp, _smd_pads(), net_class_map={"D+": net_class})
+    if result is not None:
+        segs = _segment_layers(result)
+        assert Layer.F_CU not in segs, f"hard-avoided F.Cu used: {segs}"
+    assert result is None
+    assert pf.last_decline_reason is not None
+    assert "SMD pad" in pf.last_decline_reason and "F.Cu" in pf.last_decline_reason
+
+
+@pytest.mark.parametrize("use_cpp", BACKENDS)
+def test_smd_end_pad_on_forbidden_layer_declines(use_cpp: bool) -> None:
+    """An SMD END pad on a non-permitted layer declines the pair too."""
+    pf, result = _route_smd(
+        use_cpp, _smd_pads(end_layer=Layer.B_CU), allowed_layers=["F.Cu", "In1.Cu"]
+    )
+    assert result is None
+    assert pf.last_decline_reason is not None
+    assert "end" in pf.last_decline_reason and "B.Cu" in pf.last_decline_reason
+
+
+@pytest.mark.parametrize("use_cpp", BACKENDS)
+def test_empty_filtered_layer_set_declines(use_cpp: bool) -> None:
+    """No permitted layer at all: decline instead of routing on the pad layer."""
+    net_class = NetClassRouting(name="PWR", avoid_layers=[0])
+    pf, result = _route_smd(
+        use_cpp, _smd_pads(), allowed_layers=["F.Cu"], net_class_map={"D-": net_class}
+    )
+    if result is not None:
+        segs = _segment_layers(result)
+        assert Layer.F_CU not in segs, f"forbidden F.Cu used: {segs}"
+    assert result is None
+    assert pf.last_decline_reason is not None
+    assert "no permitted" in pf.last_decline_reason
+
+
+def _hard_avoid_f_cu_router() -> Autorouter:
+    """Two-component pair whose class hard-avoids F.Cu; all pads SMD on F.Cu."""
+    rules = DesignRules(
+        trace_width=0.2, trace_clearance=0.15, grid_resolution=0.1, strict_layers=True
+    )
+    nc = NetClassRouting(name="HS", coupled_routing=True, avoid_layers=[0])
+    router = Autorouter(
+        width=30.0, height=10.0, rules=rules, net_class_map={"USB_D+": nc, "USB_D-": nc}
+    )
+    for ref, x in (("U1", 5.0), ("J1", 25.0)):
+        router.add_component(
+            ref,
+            [
+                {"number": "1", "x": x, "y": 4.6, "width": 0.4, "height": 0.4,
+                 "net": 1, "net_name": "USB_D+"},
+                {"number": "2", "x": x, "y": 5.4, "width": 0.4, "height": 0.4,
+                 "net": 2, "net_name": "USB_D-"},
+            ],
+        )  # fmt: skip
+    return router
+
+
+@pytest.mark.parametrize("use_cpp", BACKENDS)
+def test_declined_pair_takes_the_fallback_without_f_cu_copper(
+    use_cpp: bool, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """End to end: the declined pair falls back and still never lands on F.Cu."""
+    monkeypatch.setattr(DiffPairRouter, "_shadow_route_pair", lambda self, *a, **k: None)
+    real_init = CoupledPathfinder.__init__
+
+    def init(self, *args, **kwargs):  # force the backend under test
+        real_init(self, *args, **kwargs)
+        self._use_cpp_coupled = use_cpp
+
+    monkeypatch.setattr(CoupledPathfinder, "__init__", init)
+    router = _hard_avoid_f_cu_router()
+    router._diffpair.enable_pose_centerline = False
+    [pair] = router._diffpair.detect_differential_pairs()
+    routes, _ = router._diffpair.route_differential_pair_coupled(
+        pair, per_pair_timeout=30.0, per_pair_max_iterations=20_000
+    )
+    out = capsys.readouterr().out
+    segs = _segment_layers(routes)
+    assert Layer.F_CU not in segs, f"hard-avoided F.Cu used: {segs}"
+    assert not router._committed_coupled_nets
+    assert "[coupled-declined]" in out and "F.Cu" in out, out
