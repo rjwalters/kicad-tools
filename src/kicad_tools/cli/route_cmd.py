@@ -4502,18 +4502,14 @@ def _router_pair_gaps(
     """
     if pairs is None or net_class_map is None:
         return None
-    from kicad_tools.router.diffpair_detection import build_synth_routing
+    from kicad_tools.router.diffpair_detection import build_synth_routing, coupled_pair_net_class
     from kicad_tools.router.diffpair_routing import _floored_pair_gap
 
-    synth_routing, net_to_class = build_synth_routing(net_class_map)
+    synth = build_synth_routing(net_class_map)
     gaps: list[tuple[str, str, float]] = []
     for p, n in pairs:
-        nc = net_class_map.get(p) or net_class_map.get(n)
+        nc = coupled_pair_net_class(p, n, net_class_map, synth)
         if nc is None:
-            nc = synth_routing.get(net_to_class.get(p, "")) or synth_routing.get(
-                net_to_class.get(n, "")
-            )
-        if nc is None or not hasattr(nc, "effective_intra_pair_clearance"):
             continue
         gaps.append((p, n, _floored_pair_gap(router, nc)))
     return gaps
