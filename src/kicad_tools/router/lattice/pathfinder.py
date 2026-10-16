@@ -3030,6 +3030,7 @@ class LatticePathfinder:
         history: dict[Resource, float],
         present: float,
         deadline: float | None = None,
+        vias_used: int = 0,
     ) -> tuple[_PairResult | None, str]:
         """Couple a declined segment on another layer through fan vias (#6444).
 
@@ -3046,7 +3047,10 @@ class LatticePathfinder:
 
         P and N get the same via count by construction (one per gatewayed
         end each); a count above the protocol's ``max_vias_per_net``
-        (:attr:`pair_gateway_limits`) declines before any search.  The fans
+        (:attr:`pair_gateway_limits`) declines before any search.  Issue #6834:
+        the limit is per NET, so ``vias_used`` (the most vias either net of
+        this pair already carries on its other chain segments this pass)
+        counts against it too.  The fans
         are pruned to the protocol's per-terminal uncoupled budget.
         Diagnostics (layer, gateway per end, via counts, candidates per
         terminal) land in :attr:`pair_gateway_log` either way.
@@ -3124,9 +3128,13 @@ class LatticePathfinder:
             notes.append(f"{lname}: candidates A={counts[0]} B={counts[1]}")
             if gated == 0:
                 continue
-            if max_vias is not None and gated > max_vias:
+            if max_vias is not None and gated + vias_used > max_vias:
                 reason = "pair-gateway-via-limit"
-                notes[-1] += f" (needs {gated} via(s)/net > limit {max_vias})"
+                notes[-1] += (
+                    f" (needs {gated} via(s)/net"
+                    f"{f' + {vias_used} on other segments' if vias_used else ''}"
+                    f" > limit {max_vias})"
+                )
                 continue
             if not per_end[0] or not per_end[1]:
                 continue
@@ -4006,6 +4014,7 @@ class LatticePathfinder:
                     self.failure_reasons,
                     self.pair_outcomes,
                     self.pair_gateways,
+                    dict(self.pair_gateway_log),  # issue #6834
                     self.class_pad_repair_stats,
                     dict(self._class_pad_growth),
                     self._lattice,
@@ -4020,7 +4029,7 @@ class LatticePathfinder:
                     if self.class_pad_repair_stats
                     else 0
                 )
-                old_left = saved[3].total_remaining if saved[3] else 0
+                old_left = saved[4].total_remaining if saved[4] else 0
                 kept = stats.routed >= best[1].routed and new_left < old_left
                 self.class_pad_growth_rounds.append(
                     PadGrowthRound(
@@ -4040,6 +4049,7 @@ class LatticePathfinder:
                     self.failure_reasons,
                     self.pair_outcomes,
                     self.pair_gateways,
+                    self.pair_gateway_log,
                     self.class_pad_repair_stats,
                     self._class_pad_growth,
                     self._lattice,
@@ -4260,6 +4270,21 @@ class LatticePathfinder:
                     _half, clr = self._conn_geometry(item.net_class, via_net)
                     committed.add_via(site, via_net, clr)
 
+            def pair_vias_used(item: Any) -> int:
+                # Issue #6834: vias per net already committed on the other
+                # chain segments of ``item``'s pair this pass (gateway fans
+                # and fallback-leg vias alike); the checker's limit is per net.
+                sibling_keys = {
+                    pc.key
+                    for pc in (coupled or ())
+                    if pc.pair_name == item.pair_name and pc.key != item.key
+                }
+                used = {"P": 0, "N": 0}
+                for rkey, route in routes.items():
+                    if isinstance(rkey, tuple) and len(rkey) == 2 and rkey[0] in sibling_keys:
+                        used[rkey[1]] += len(route.vias)
+                return max(used.values())
+
             def flush_gateways() -> None:
                 nonlocal routed_items, coupled_count
                 pending = list(deferred_gateway)
@@ -4274,6 +4299,7 @@ class LatticePathfinder:
                             history=history,
                             present=present,
                             deadline=deadline,
+                            vias_used=pair_vias_used(item),
                         )
                     if gres is None:
                         if not uncoupled_fallback:
