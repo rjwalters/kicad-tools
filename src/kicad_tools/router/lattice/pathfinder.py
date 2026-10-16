@@ -54,6 +54,15 @@ from typing import TYPE_CHECKING, Any
 from ..layers import LayerStack
 from ..pairplan.gateway import Gateway, GatewaySite
 from ..pairplan.gateway import gateway_anchor_point as _gateway_anchor
+from ..pairplan.outcome import (
+    EXHAUSTED_SEARCH_REASONS,  # noqa: F401 -- re-exported (core, tests)
+    GATEWAY_RETRY_REASONS,
+    REASON_NO_PATH,
+    REASON_NO_PATH_KEEPOUT,
+    REASON_NO_PATH_LAYER,
+    SegmentOutcome,
+    SegmentOutcomes,
+)
 from ..primitives import Pad, Route, Segment, Via, pad_half_extents
 from ..quantize import dogleg_points
 from ..rules import DesignRules
@@ -95,31 +104,14 @@ _GOAL: _State = (("GOAL",), -1)  # type: ignore[assignment]
 # widens the candidate set, never the copper.
 _OVERSIZE_STUB_KMAX = 4096
 
-#: Decline reasons ``_route_impl`` returns when its A* actually RAN and was
-#: exhausted (issues #6373, #4605, #4979).  The plain value and its two
-#: "constrained" refinements differ only in which diagnostic label wins when a
-#: keepout mask or a hard layer set pruned candidates on the way -- every one of
-#: them still means "a search ran and found no path".  Consumers that gate on
-#: exhaustion (the #6535 tap-chain retry, issue #6743) must use this set rather
-#: than compare one literal, so a diagnostic refinement cannot silently disable
-#: them.  ``no-egress-start``/``-end`` are deliberately NOT here: they name a
-#: dead-end escape at an endpoint, not an exhausted corridor search.
-REASON_NO_PATH = "no-path"
-REASON_NO_PATH_KEEPOUT = "no-path-keepout-constrained"
-REASON_NO_PATH_LAYER = "no-path-layer-constrained"
-EXHAUSTED_SEARCH_REASONS: frozenset[str] = frozenset(
-    {REASON_NO_PATH, REASON_NO_PATH_KEEPOUT, REASON_NO_PATH_LAYER}
-)
-
-#: Issue #6444: pair-segment decline reasons that earn ONE fan-via gateway
-#: retry (``route_netset(..., pair_gateways=True)``): an exhausted planar
-#: search (every :data:`EXHAUSTED_SEARCH_REASONS` refinement, as
-#: ``_route_pair_impl`` prefixes it) or emitted legs clipping a keepout.  A
-#: named set, like the #6535 tap-retry gate, so a diagnostic refinement of a
-#: reason cannot silently disable the retry.
-GATEWAY_RETRY_REASONS: frozenset[str] = frozenset(
-    {f"pair-{r}" for r in EXHAUSTED_SEARCH_REASONS} | {"pair-leg-keepout"}
-)
+# Decline reasons ``_route_impl`` returns when its A* actually RAN and was
+# exhausted (issues #6373, #4605, #4979), and the pair-segment reasons that
+# earn one fan-via gateway retry (issue #6444).  Both now live with the rest
+# of the engine-free outcome vocabulary in
+# :mod:`kicad_tools.router.pairplan.outcome` (issue #6837) and are imported
+# above, so their old names here keep working.  Tests monkeypatch
+# ``GATEWAY_RETRY_REASONS`` on THIS module, which works because this module
+# reads its own global.
 
 #: Issue #6444: net id the fat pair search sees a gateway's own vias under
 #: (``_route_pair_impl(keep_clear=...)``) -- never a real net.
@@ -411,8 +403,10 @@ class LatticePathfinder:
         # (honest shortfall diagnosis; reset by :meth:`route_netset`).
         self.failure_reasons: dict[object, str] = {}
         # Per-diff-pair outcome for the best pass: "coupled" or a decline
-        # reason, keyed by ``CoupledConnection.key`` (issue #4270).
-        self.pair_outcomes: dict[object, str] = {}
+        # reason, keyed by ``CoupledConnection.key`` (issue #4270).  A
+        # ``dict`` of those strings that also keeps the structured
+        # :class:`SegmentOutcome` behind each one (issue #6837).
+        self.pair_outcomes: dict[object, str] = SegmentOutcomes()
         # Issue #6444: fan-via gateway retry state.  ``pair_gateway_limits``
         # maps a ``CoupledConnection.key`` to the protocol's
         # ``(max uncoupled mm per terminal, max vias per net)`` (either may be
@@ -4322,7 +4316,7 @@ class LatticePathfinder:
         escape_plan: dict[int, EscapeChoice] = {}
         best_routes: dict[object, Route] = {}
         best_reasons: dict[object, str] = {}
-        best_pair_outcomes: dict[object, str] = {}
+        best_pair_outcomes = SegmentOutcomes()
         best_pair_gateways: dict[object, str] = {}
         best_count = -1
         # Issue #6373: best-pass ranking ``(routed_items, coupled_count,
@@ -4368,13 +4362,13 @@ class LatticePathfinder:
                         key = item.key if kind == 1 else item[0]
                         best_reasons[key] = "deadline-exceeded"
                         if kind == 1:
-                            best_pair_outcomes[key] = "deadline-exceeded"
+                            best_pair_outcomes[key] = SegmentOutcome("deadline-exceeded")
                 break
             iterations_run = it + 1
             committed = self._fresh_committed()
             routes: dict[object, Route] = {}
             reasons: dict[object, str] = {}
-            pair_outcomes: dict[object, str] = {}
+            pair_outcomes = SegmentOutcomes()
             routed_items = 0
             failed: list[tuple[int, Any]] = []
             # Issue #6373: per-pass uncoupled-fallback bookkeeping.
@@ -4437,8 +4431,8 @@ class LatticePathfinder:
                             reasons[item.key] = preason
                             failed.append((1, item))
                         continue
-                    pair_outcomes[item.key] = "coupled"
                     pass_gateways[item.key] = gres.gateway or "gateway"
+                    pair_outcomes[item.key] = SegmentOutcome.coupled(pass_gateways[item.key])
                     coupled_count += 1
                     routed_items += 1
                     reasons.pop(item.key, None)
@@ -4492,7 +4486,7 @@ class LatticePathfinder:
                         key2 = item2.key if kind2 == 1 else item2[0]
                         reasons[key2] = "deadline-exceeded"
                         if kind2 == 1:
-                            pair_outcomes[key2] = "deadline-exceeded"
+                            pair_outcomes[key2] = SegmentOutcome("deadline-exceeded")
                     break
                 if kind == 1:
                     pres, preason = self._route_pair_impl(
@@ -4514,18 +4508,18 @@ class LatticePathfinder:
                         # never pre-block a sibling pair's coupled corridor
                         # (board 03: USB_D[0]'s fallback USB_D- leg ran
                         # through USB_D[1]'s corridor).
-                        pair_outcomes[item.key] = f"uncoupled-fallback:{preason}"
+                        pair_outcomes[item.key] = SegmentOutcome.fallback(preason)
                         fallback_pairs.append(item)
                         deferred_fallback.append(item)
                         continue
                     if pres is None:
-                        pair_outcomes[item.key] = preason
+                        pair_outcomes[item.key] = SegmentOutcome.declined(preason)
                         if gateway_retry:
                             continue  # reason/failed recorded by flush_gateways
                         reasons[item.key] = preason
                         failed.append((kind, item))
                         continue
-                    pair_outcomes[item.key] = "coupled"
+                    pair_outcomes[item.key] = SegmentOutcome.coupled()
                     coupled_count += 1
                     routed_items += 1
                     commit_pair(item, pres)
