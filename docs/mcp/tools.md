@@ -568,6 +568,12 @@ Route a specific net with configurable strategy.
 }
 ```
 
+The response also carries `grid` -- the routing grid actually used
+(`requested_mm`, `used_mm`, `cols`, `rows`, `layers`, `cells`, `selection`,
+`coarsened`, `coarsened_reason`). On a large board the adaptive cell cap can
+route on a coarser pitch than the board's rules ask for; `grid.coarsened` is
+then true and `warnings` says so (Issue #6875).
+
 ---
 
 ### get_unrouted_nets

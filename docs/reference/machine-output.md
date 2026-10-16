@@ -164,6 +164,24 @@ Only runs that never built a router (dry runs, early validation exits) fall back
 to the minimal `{"exit_code", "verdict"}` document, and a run killed by
 `--timeout` prints no document.
 
+The document also carries a `grid` object -- the routing grid the run
+actually built (Issue #6875):
+
+| Key | Meaning |
+|-----|---------|
+| `requested_mm` | Pitch asked for: the explicit `--grid` value, or the `--grid auto` selection |
+| `used_mm` | Pitch actually routed on |
+| `cols`, `rows`, `layers`, `cells` | Grid dimensions; `cells = cols * rows * layers` |
+| `selection` | `"explicit"` (`--grid 0.1`) or `"auto"` (`--grid auto`) |
+| `coarsened` | `true` only when the adaptive cell cap replaced the requested pitch (never for `kct route` since #6741) |
+| `coarsened_reason` | Why it was coarsened, else `null` |
+
+The text output's `Grid:` line names the same pitch and selection
+(`Grid: 0.1mm pitch (explicit), 501x401x2 = 401,802 cells`). An explicit grid
+whose cell count would pass the backend's ceiling (20,000,000 cells on Python,
+100,000,000 on C++, counted at the largest layer count the run would try) stops
+with an error before routing; `--force` routes at the requested pitch anyway.
+
 `summary.verdict` is `"success"` (exit 0), `"unverified"` (exit 10) or
 `"failed"` (any other non-zero exit). `"unverified"` means the post-route DRC
 and/or the stranded-pour check did not complete: `--timeout` ran out, or

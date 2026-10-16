@@ -1668,6 +1668,10 @@ class Autorouter:
         """
         self.rules = rules or DesignRules()
         self._adaptive_grid = bool(adaptive_grid)
+        # Issue #6875: set by ``_create_grid_and_routers`` when the #972
+        # adaptive cap replaced the requested pitch -- ``{"requested_mm",
+        # "used_mm", "reason"}`` -- else None.  Read via :meth:`grid_report`.
+        self.grid_coarsening: dict[str, Any] | None = None
         # Issue #3524: copy the default map instead of aliasing it.  The
         # autorouter writes per-net overrides into ``self.net_class_map``
         # (impedance synthesis, diff-pair partner wiring, matrix layer
@@ -2494,6 +2498,18 @@ class Autorouter:
                 width, height, self.rules, origin_x, origin_y, layer_stack=self.layer_stack
             )
             if abs(grid.resolution - self.rules.grid_resolution) > 1e-9:
+                # Issue #6875: record it so callers can report it (JSON
+                # ``grid`` block, ``route_pcb`` stats, the MCP tool).
+                self.grid_coarsening = {
+                    "requested_mm": float(self.rules.grid_resolution),
+                    "used_mm": float(grid.resolution),
+                    "reason": (
+                        f"adaptive cell cap (Issue #972): the requested pitch needs "
+                        f"~{int(estimated_cells):,} cells, above the "
+                        f"{adaptive_threshold:,}-cell threshold of the "
+                        f"{'Python' if adaptive_threshold == 500_000 else 'C++'} backend"
+                    ),
+                }
                 logger.warning(
                     "Adaptive grid (Issue #972): requested %.4gmm pitch would need "
                     "~%s cells (threshold %s); routing on %.4gmm instead. Pass "
@@ -2503,7 +2519,10 @@ class Autorouter:
                     f"{adaptive_threshold:,}",
                     grid.resolution,
                 )
+            else:
+                self.grid_coarsening = None
         else:
+            self.grid_coarsening = None
             grid = RoutingGrid(
                 width, height, self.rules, origin_x, origin_y, layer_stack=self.layer_stack
             )
@@ -3044,6 +3063,35 @@ class Autorouter:
                 self.router.add_routed_segments(route.segments)
         if hasattr(self.router, "update_layer_fill_ratios"):
             self.router.update_layer_fill_ratios()
+
+    def grid_report(self, selection: str | None = None) -> dict[str, Any]:
+        """The routing grid actually built, for machine output (Issue #6875).
+
+        Args:
+            selection: How the requested pitch was chosen -- ``"explicit"``
+                (``--grid 0.1``), ``"auto"`` (``--grid auto``) -- or None for
+                a library caller that set ``rules.grid_resolution`` itself.
+
+        Returns:
+            ``{"requested_mm", "used_mm", "cols", "rows", "layers", "cells",
+            "selection", "coarsened", "coarsened_reason"}``.  ``coarsened`` is
+            True only when the #972 adaptive cap replaced the requested pitch;
+            ``coarsened_reason`` then says why (else None).
+        """
+        grid = self.grid
+        coarsening = getattr(self, "grid_coarsening", None)
+        requested = coarsening["requested_mm"] if coarsening else float(self.rules.grid_resolution)
+        return {
+            "requested_mm": round(float(requested), 6),
+            "used_mm": round(float(grid.resolution), 6),
+            "cols": int(grid.cols),
+            "rows": int(grid.rows),
+            "layers": int(grid.num_layers),
+            "cells": int(grid.cols) * int(grid.rows) * int(grid.num_layers),
+            "selection": selection,
+            "coarsened": coarsening is not None,
+            "coarsened_reason": coarsening["reason"] if coarsening else None,
+        }
 
     @property
     def physics_available(self) -> bool:

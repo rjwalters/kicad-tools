@@ -4753,6 +4753,7 @@ def route_pcb(
     origin_y: float = 0,
     skip_nets: list[str] | None = None,
     progress_callback: ProgressCallback | None = None,
+    adaptive_grid: bool = True,
 ) -> tuple[str, dict]:
     """
     Route a PCB given component placements and net assignments.
@@ -4776,9 +4777,15 @@ def route_pcb(
         progress_callback: Optional callback for progress reporting.
             Signature: (progress: float, message: str, cancelable: bool) -> bool
             Returns False to cancel, True to continue.
+        adaptive_grid: Issue #6875.  True (default) keeps the #972 adaptive
+            cell cap, which may route a large board on a coarser pitch than
+            ``rules.grid_resolution``; False routes on exactly that pitch.
 
     Returns:
-        Tuple of (sexp_string, statistics_dict)
+        Tuple of (sexp_string, statistics_dict).  ``statistics_dict["grid"]``
+        is :meth:`Autorouter.grid_report` -- the pitch actually used, and
+        ``coarsened`` / ``coarsened_reason`` when the adaptive cap replaced
+        the requested one (Issue #6875).
     """
     if rules is None:
         rules = DesignRules()
@@ -4791,7 +4798,15 @@ def route_pcb(
         origin_x=origin_x,
         origin_y=origin_y,
         rules=rules,
+        adaptive_grid=adaptive_grid,
     )
+    grid_report = router.grid_report()
+    if grid_report["coarsened"]:
+        print(
+            f"  Grid: routing on {grid_report['used_mm']:.4g}mm, not the requested "
+            f"{grid_report['requested_mm']:.4g}mm ({grid_report['coarsened_reason']}); "
+            "pass adaptive_grid=False to keep the requested pitch"
+        )
 
     from kicad_tools.schema.physical_identity import component_keys
 
@@ -4869,6 +4884,7 @@ def route_pcb(
     router.cleanup_artifacts()
     sexp = router.to_sexp(skip_cleanup=True)
     stats = router.get_statistics()
+    stats["grid"] = grid_report
     print(
         f"  Completed: {stats['routes']} routes, {stats['segments']} segments, {stats['vias']} vias"
     )

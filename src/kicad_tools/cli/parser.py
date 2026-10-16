@@ -4399,7 +4399,10 @@ def _add_route_parser(subparsers) -> None:
     route_parser.add_argument(
         "--force",
         action="store_true",
-        help="Force routing even when grid > clearance (may cause DRC violations)",
+        help=(
+            "Force routing even when grid > clearance (may cause DRC violations), "
+            "or when an explicit --grid exceeds the backend cell ceiling (issue #6875)"
+        ),
     )
     route_parser.add_argument(
         "--allow-unsafe-grid",
