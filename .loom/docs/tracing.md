@@ -356,6 +356,18 @@ unplanned crash stays `process_lost`. A resumed role run carries
 `loom.resumed_from` = that item id. Failure-rate queries and the role-failures
 watch should exclude `interrupted_by_roll`.
 
+A step's `loom.sweep` root (`loom.sweep_id=step-<role>-<item>-…`, #12253) is
+closed by the step's own end, when the reaper, a cancel or startup sees the
+session exit: `loom.result` is the same `success`/`failure` its
+`role_tick.outcome` reports, with `loom.role`, the step's model and effort,
+`loom.exit_code` when known, and on a failure a `loom.failure_class` of
+`timeout-ceiling`, `cancelled`, `step-outcome-failed` (the session's
+`LOOM_STEP_OUTCOME class=failed`), `exit-<code>` or `exit-unobserved`. A step a
+roll stopped closes as `interrupted_by_roll`. Orphan recovery leaves a step's
+span alone while the step's claim lock still names it and its leader or its
+process group lives, so `process_lost` on a step means the step really died
+unobserved.
+
 ## Journals and recovery
 
 Workers append bounded records to per-execution journals under

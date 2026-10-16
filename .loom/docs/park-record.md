@@ -28,7 +28,10 @@ sit on top of.
   rendered issue/PR, and a **sentinel** that distinguishes a declaration from
   prose that merely *mentions* a blocker elsewhere in the body. Same pattern,
   same reason, as the lease record (`<!-- loom:lease host=… sweep=… -->`,
-  `lease-record.md`) and the verdict-SHA / `loom:ac-verified` markers.
+  `lease-record.md`) and the verdict-SHA / `loom:ac-verified` markers. A
+  marker quoted inside a fenced code block or an inline code span renders as
+  visible text, so it is **not** a record: the parser ignores it and a re-park
+  never edits it (#10837, where quoted evidence released an unrecorded hold).
 - `Blocked by: #N` — **deliberately the existing vocabulary**, not a new one.
   `guide.md`'s `parse_dependencies`, `dep_recheck::extract`'s
   `DEPENDENCY_PHRASES`, `warn-operator-gated.sh` and

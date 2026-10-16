@@ -820,6 +820,16 @@ assert_not_contains "spawn-codex: session=" "$mock_stderr" \
 assert_contains "session id: $MOCK_SESSION" "$mock_stderr" \
     "LOOM_CODEX_NO_CAPTURE=1 still passes the child's stderr through"
 
+# A prompt run on the plain exec path must not inherit an open, never-written
+# stdin (the mock blocks on `cat` if it does). Bounded so a regression fails
+# fast instead of hanging the suite.
+nocap_rc=0
+nocap_stderr="$(sleep 30 | { timeout 20 bash -c "$(declare -f run_mock); SPAWN_CODEX='$SPAWN_CODEX' MOCK_BIN='$MOCK_BIN' MOCK_ARGV_FILE='$MOCK_ARGV_FILE' run_mock LOOM_CODEX_NO_CAPTURE=1 -- -p hi >/dev/null"; } 2>&1)" || nocap_rc=$?
+assert_eq "0" "$nocap_rc" \
+    "LOOM_CODEX_NO_CAPTURE=1 prompt run finishes with an open stdin (no hang)"
+assert_not_contains "MOCK-SAW-STDIN" "$nocap_stderr" \
+    "LOOM_CODEX_NO_CAPTURE=1 prompt run gives the child /dev/null, not the caller's stdin"
+
 # ============================================================
 # Section 9: LOOM_RUNTIME=codex resolves through spawn-worker.sh
 # ============================================================

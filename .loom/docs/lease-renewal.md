@@ -114,8 +114,18 @@ startup" — because that is precisely what a restart would drop.
   whose lookups find no lease on two consecutive cycles stops (#10229). Each
   call runs on the host's GitHub App credential when one is configured; see
   [`lease-record.md`](lease-record.md#renewer-ownership-completion-and-request-budget-issue-10229).
-- **`stop <PID>`** — best-effort kill of a loop PID. Not required for
-  correctness; the loop already self-terminates.
+- **`stop <PID>`** / **`stop --issue <N>`** (alias `stop-issue <N>`) —
+  best-effort teardown, delegated to `loom-daemon lease renewer stop`
+  (#11086). `<PID>` is signalled only after native argv proves it is a
+  lease renewer (a shell — bash/sh/zsh/dash — running `sweep-lease-renew.sh
+  start ...` as a file, never a `-c` string, or `loom-daemon lease renewer
+  ...`) and its start identity is stable; an issue number passed by mistake,
+  an unrelated process (even one whose arguments look like a renewer's) or a
+  non-number is refused (non-zero, nothing signalled; the refusal names only
+  the pid and program basename, never the target's arguments). `--issue N` ends every recorded renewer of that issue in this
+  repo (any sweep unless `--sweep-id`), never a peer issue's. It fails closed:
+  unreadable argv or an old daemon refuses. Linux uses NUL-delimited procfs;
+  macOS uses `KERN_PROCARGS2`, never whitespace-split `ps` output.
 
 ### The loop's four exits (#7825)
 
@@ -204,9 +214,8 @@ runs multi-day sweeps.
 `defaults/scripts/sweep-run-registry.sh`**, between
 `# --- BEGIN shared pid-liveness block` / `# --- END …` delimiters.
 `sweep-run-registry.sh` calls `main "$@"` unguarded at the bottom of the
-file, so sourcing it would also run its CLI dispatch; and ADR-0018 /
-`scripts/shell-allowlist.txt` admits no category for a *new* shared shell
-library (`contract` is baseline-only). Test case `(q)` in
+file, so sourcing it would also run its CLI dispatch; and ADR-0018 rules
+out a *new* shared shell library. Test case `(q)` in
 `defaults/scripts/tests/test-sweep-lease-renew.sh` diffs the two copies and
 fails the suite on any drift — that machine check is what stands in for
 `source`.

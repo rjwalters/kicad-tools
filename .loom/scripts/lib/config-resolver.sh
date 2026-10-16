@@ -79,6 +79,38 @@ _loom_config_soft_read() {
     echo "$parsed"
 }
 
+# _loom_config_tracked_read <repo_root> <rel> -> like _loom_config_soft_read
+# for a tracked tier, but reads the file from origin/HEAD (#10352) when
+# repo_root is a git toplevel whose HEAD is a strict ancestor of origin/HEAD
+# and <rel> has no local modification against HEAD -- a stale main checkout
+# must not silently govern config. Any other case (non-git, no origin/HEAD,
+# diverged, local edit) reads the working copy exactly as before. Mirrors
+# default_branch_tier_text in loom-daemon/src/config_resolver.rs.
+_loom_config_tracked_read() {
+    local root="$1" rel="$2" top head remote text parsed
+    if ! command -v jq >/dev/null 2>&1; then
+        echo '{}'
+        return 0
+    fi
+    if top=$(git -C "$root" rev-parse --show-toplevel 2>/dev/null) \
+        && [[ "$(cd "$top" && pwd -P)" == "$(cd "$root" && pwd -P)" ]] \
+        && head=$(git -C "$root" rev-parse --verify -q HEAD 2>/dev/null) \
+        && remote=$(git -C "$root" rev-parse --verify -q origin/HEAD 2>/dev/null) \
+        && [[ "$head" != "$remote" ]] \
+        && git -C "$root" merge-base --is-ancestor HEAD origin/HEAD 2>/dev/null \
+        && git -C "$root" diff --quiet HEAD -- "$rel" 2>/dev/null \
+        && { [[ ! -e "$root/$rel" ]] || git -C "$root" cat-file -e "HEAD:$rel" 2>/dev/null; }; then
+        text=$(git -C "$root" show "origin/HEAD:$rel" 2>/dev/null || true)
+        if [[ -n "$text" ]] && parsed=$(printf '%s' "$text" | jq -c 'if type == "object" then . else {} end' 2>/dev/null); then
+            echo "$parsed"
+        else
+            echo '{}'
+        fi
+        return 0
+    fi
+    _loom_config_soft_read "$root/$rel"
+}
+
 # loom_resolve_config <repo_root>
 #
 # Echoes the merged effective config JSON (compact, one line) by
@@ -96,8 +128,8 @@ loom_resolve_config() {
 
     local tier_defaults tier_legacy tier_project tier_local
     tier_defaults=$(_loom_config_soft_read "$defaults_path")
-    tier_legacy=$(_loom_config_soft_read "$repo_root/$LOOM_CONFIG_LEGACY_REL")
-    tier_project=$(_loom_config_soft_read "$repo_root/$LOOM_CONFIG_PROJECT_REL")
+    tier_legacy=$(_loom_config_tracked_read "$repo_root" "$LOOM_CONFIG_LEGACY_REL")
+    tier_project=$(_loom_config_tracked_read "$repo_root" "$LOOM_CONFIG_PROJECT_REL")
     tier_local=$(_loom_config_soft_read "$repo_root/$LOOM_CONFIG_LOCAL_REL")
 
     jq -c -n \

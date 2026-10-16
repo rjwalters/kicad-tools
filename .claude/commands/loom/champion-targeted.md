@@ -30,18 +30,19 @@ outcome vocabulary for each mode is the table in its section. Never invent one.
 
 ## `--pr N`: one merge decision
 
-1. **Kind probe, eligibility and the pin file.** One plain (uncached) read:
+1. **Kind probe, eligibility and the pin file.** One plain (uncached) REST
+   read (#12242: `pulls/N` 404s for an issue number, so it is the kind probe too):
 
    ```bash
    PR_NUMBER=N
-   PR_JSON=$(gh pr view "$PR_NUMBER" --json url,state,headRefOid,labels) || PR_JSON=""
-   EVALUATED_SHA=$(printf '%s' "$PR_JSON" | jq -r 'select((.url | test("/pull/")) and .state == "OPEN" and any(.labels[]; .name == "loom:pr") and (any(.labels[]; .name | startswith("loom:operator")) | not)) | .headRefOid // empty')
+   PR_JSON=$(gh api "repos/{owner}/{repo}/pulls/$PR_NUMBER") || PR_JSON=""
+   EVALUATED_SHA=$(printf '%s' "$PR_JSON" | jq -r 'select(.state == "open" and any(.labels[]; .name == "loom:pr") and (any(.labels[]; .name | startswith("loom:operator")) | not)) | .head.sha // empty')
    PIN_FILE="$(git rev-parse --git-common-dir)/loom-champion-pin-pr-$PR_NUMBER"; rm -f "$PIN_FILE"
    [ -n "$EVALUATED_SHA" ] && printf '%s %s\n' "$EVALUATED_SHA" "$PPID" > "$PIN_FILE"
    echo "EVALUATED_SHA=${EVALUATED_SHA:-none}"
    ```
 
-   `none` (not a `/pull/` URL, not `OPEN`, no `loom:pr`, or `loom:operator`,
+   `none` (not a PR, not open, no `loom:pr`, or `loom:operator`,
    #11861): outcome `not-eligible`, no writes. `loom:pr` + `loom:blocked`
    (Champion's own hold) is eligible. (A Doctor-capped PR is the non-item pass's
    Priority 5, not a merge.)
@@ -55,8 +56,10 @@ outcome vocabulary for each mode is the table in its section. Never invent one.
    that `EXPECTED_HEAD` prints `CHAMPION-PIN-MISSING` and merges nothing.
    **Last action, whatever the outcome:**
    `rm -f "$(git rev-parse --git-common-dir)/loom-champion-pin-pr-N"`
+   (and the PR facts file, `loom-champion-facts-pr-N.json`, beside it)
 3. **Run `champion-pr-merge.md` for this one PR, as one batch row.** The
-   Verdict-State Janitor (Parts 1 and 2), all 6 Safety Criteria with the merge-risk
+   Verdict-State Janitor (Parts 1 and 2), "0. PR facts" (one read for every
+   criterion, #12242), all 6 Safety Criteria with the merge-risk
    axes and sticky holds, the critical-file hold and, when a hold binds, the
    Held-PR Health Pass for this PR only. Then Steps 2, 3, 4, 5 and 5.5
    (pre-merge comment, merge, issue close, dependents, follow-on issues). A
@@ -82,9 +85,14 @@ the next step, after a fresh evaluation.
    `/pull/` URL, a failed read, or a closed issue: outcome `not-eligible`. It
    must carry a proposal label (`loom:curated`, `loom:architect`, `loom:hermit`
    or `loom:auditor`) and neither `loom:issue` nor `loom:building`; otherwise
-   `not-eligible`; so is `loom:operator`. `loom:blocked` (#11860): when every
-   blocker `loom-daemon park-record parse` reads from the body is a closed issue
-   or a merged PR, remove `loom:blocked` and go on; else outcome `blocked`.
+   `not-eligible`; so is `loom:operator`. `loom:blocked` (#11860, #12078): the
+   work finder draws a curated, dependency-parked issue every time it comes up,
+   without checking the blockers first, so this check is the only one. Re-read
+   them now: when every blocker `loom-daemon park-record parse` reads from the
+   body is a closed issue or a merged PR, remove `loom:blocked` and go on.
+   Otherwise leave the issue exactly as it is (no comment, no label change,
+   no park-record edit) and end with outcome `blocked`; the daemon spaces the
+   next draw.
 2. **Run `champion-issue-promo.md`'s per-issue order for this issue only**
    ("Issue Promotion Batch Processing" → "Per-issue order in the loop"): the
    Dependency-Defer Fast Path, the Idempotency check, the Claim with `loom:evaluating`

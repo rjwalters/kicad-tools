@@ -548,10 +548,8 @@ _loom_daemon_version_preflight() {
 # loom_daemon_version_preflight <subcommand> <resolved-bin>
 #
 # The PUBLIC, standalone form, for a stub that does its own resolution and its
-# own `exec`. `skip-labels.sh` is the first: it is a Shape-A `stub` in
-# scripts/shell-allowlist.txt, a category machine-checked on the requirement
-# that its LAST code line IS the `exec` (scripts/check-shell-allowlist.sh), so
-# it cannot hand the exec to a helper without forfeiting that category. One
+# own `exec`. `skip-labels.sh` is the first: it is a Shape-A stub whose LAST
+# code line IS the `exec`, so it cannot hand the exec to a helper. One
 # call one line above its own exec gets it the identical guard.
 #
 # ${BASH_SOURCE[1]} is the calling stub -- which is what lets the marker live

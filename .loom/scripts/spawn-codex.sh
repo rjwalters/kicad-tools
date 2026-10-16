@@ -1176,9 +1176,10 @@ fi
 # --- Dispatch ---
 # Interactive runs (no prompt) and an explicit LOOM_CODEX_NO_CAPTURE keep a
 # plain pid-preserving `exec`. Note stdin is NOT redirected in the interactive
-# case — an operator at the keyboard needs it.
+# case — an operator at the keyboard needs it. A prompt run with
+# LOOM_CODEX_NO_CAPTURE is headless, so it gets /dev/null like the capture path.
 if [[ "$HAS_PROMPT" != "true" || -n "${LOOM_CODEX_NO_CAPTURE:-}" ]]; then
-    echo "# LOOM_CLI_START runtime=codex" >&2
+    echo "# LOOM_CLI_START runtime=codex" >&2; [[ "$HAS_PROMPT" == "true" ]] && exec </dev/null
     exec "${CODEX_INVOKE[@]}"
 fi
 

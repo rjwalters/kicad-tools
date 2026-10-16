@@ -2677,7 +2677,7 @@ BEGIN {
 # (a masked-away `>` can only DROP a write target, never invent a new deny).
 # =============================================================================
 _MASKGT_AWK='
-function mask_gt(s,   out, n, i, c, mode, SQ, DQ, MASK, adepth, tdepth, esc, btick) {
+function mask_gt(s,   out, n, i, c, mode, SQ, DQ, MASK, adepth, tdepth, esc, btick, bq) {
     SQ = sprintf("%c", 39)    # single quote
     DQ = sprintf("%c", 34)    # double quote
     MASK = sprintf("%c", 1)   # SOH -- placeholder for a quoted/arith-context ">"/"<" (never a real char)
@@ -2689,6 +2689,7 @@ function mask_gt(s,   out, n, i, c, mode, SQ, DQ, MASK, adepth, tdepth, esc, bti
     tdepth = 0   # `[[...]]` test-context nesting depth (unquoted only)
     esc = 0      # previous byte was an unescaped backslash (mode 0/2 only, #6472)
     btick = 0    # inside an unquoted `...` command substitution (#8211)
+    bq = 0       # quote state INSIDE a backtick span, for masking ">" only (#12076): 0 none, 1 single, 2 double
     while (i <= n) {
         c = substr(s, i, 1)
         if (esc) {
@@ -2698,12 +2699,13 @@ function mask_gt(s,   out, n, i, c, mode, SQ, DQ, MASK, adepth, tdepth, esc, bti
             # every ">" is already masked regardless of escaping, so that
             # half of the ternary is a no-op there, not a behavior change.
             esc = 0
-            out = out (mode == 2 && c == ">" ? MASK : c)
+            out = out ((mode == 2 || bq == 2) && c == ">" ? MASK : c)
             i++
             continue
         }
-        if (c == "\\" && mode != 1) {
-            # Single-quoted mode (mode == 1) is handled below and never
+        if (c == "\\" && mode != 1 && bq != 1) {
+            # Single-quoted mode (mode == 1, or bq == 1 inside a backtick
+            # span) is handled below and never
             # reaches here: a backslash has no escaping power inside single
             # quotes in real bash, so it must stay a plain literal byte
             # there and must never suppress the next quote-close check.
@@ -2715,7 +2717,20 @@ function mask_gt(s,   out, n, i, c, mode, SQ, DQ, MASK, adepth, tdepth, esc, bti
         if (mode == 0) {
             # An unquoted backtick span makes the quote characters inside it
             # literal data (#8211 -- lockstep with mask_ws(), see above).
-            if (c == "`") { btick = 1 - btick; out = out c; i++; continue }
+            #
+            # #12076: a quoted ">" inside that span is still data, so track a
+            # SEPARATE quote state (bq) that only masks ">" bytes. It never
+            # touches `mode`, so mask_ws() lockstep and the #8211 span-boundary
+            # handling are unchanged, and a backtick always closes the span
+            # (resetting bq) so a quote can never hide the real close.
+            if (c == "`") { btick = 1 - btick; bq = 0; out = out c; i++; continue }
+            if (btick && bq == 0 && (c == SQ || c == DQ)) { bq = (c == SQ ? 1 : 2); out = out c; i++; continue }
+            if (btick && bq != 0) {
+                if ((bq == 1 && c == SQ) || (bq == 2 && c == DQ)) bq = 0
+                out = out (c == ">" ? MASK : c)
+                i++
+                continue
+            }
             if (c == SQ && !btick) { mode = 1; out = out c; i++; continue }
             if (c == DQ && !btick) { mode = 2; out = out c; i++; continue }
             if (c == "(" && i < n && substr(s, i + 1, 1) == "(") {
@@ -7356,10 +7371,86 @@ fi
 # text-carrying flags, so the real invocations (`psql -c '…'`, `mysql -e '…'`)
 # are untouched and still deny.
 # =============================================================================
-SQL_DDL_PATTERN='DROP DATABASE|DROP TABLE|DROP SCHEMA|TRUNCATE TABLE'
-if echo "$COMMAND_ASK_SCAN" | grep -qiE "$SQL_DDL_PATTERN" && sql_guard_enabled; then
-    matched=$(echo "$COMMAND_ASK_SCAN" | grep -oiE "$SQL_DDL_PATTERN" | head -1)
-    deny "BLOCKED: Command matches dangerous pattern: ${matched:-SQL DDL statement}" "sql-ddl"  # scan-reads: COMMAND_ASK_SCAN
+# WHAT RUNS THE PHRASE, NOT WHERE IT APPEARS (#11007). The phrase is only
+# dangerous when it reaches something that EXECUTES it, so sql_ddl_exec_match()
+# segments the command with qsplit() and matches only a segment whose command
+# word is a DB client (`sqlite3`, `psql`, `mysql`, ...), an interpreter given
+# inline code (`python -c`, `node -e`, `bash -c`, ...), or a wrapper whose
+# payload is a command string (`ssh`, `docker|podman|kubectl exec|run`) -- or a
+# DB client fed the phrase by the pipeline (`echo 'DROP TABLE t;' | sqlite3 db`)
+# or by its own heredoc. Editors, `sed -i`, `git log -S`, search tools, `jq`,
+# `cat` and interpreters reading a script/heredoc no longer match, so no
+# SQL-specific carve-out is needed for them. Accepted trade-off: an
+# interpreter running DDL from a script file or heredoc is not caught (as with
+# `python3 script.py` before).
+sql_ddl_exec_match() {
+    printf '%s' "$1" | awk "$_QSPLIT_AWK"'
+    function phrase(t,   l) {
+        l = tolower(t)
+        if (match(l, /drop database|drop table|drop schema|truncate table/))
+            return toupper(substr(l, RSTART, RLENGTH))
+        return ""
+    }
+    function runs_sql(cmd, toks, m,   j, base) {
+        base = cmd
+        sub(/^.*\//, "", base)
+        if (base ~ /^(sqlite3?|psql|mysql|mariadb|duckdb|clickhouse-client|sqlcmd)$/) return 1
+        if (base ~ /^(python[0-9.]*|node|nodejs|ruby|perl|bash|sh|zsh|dash|ksh)$/) {
+            for (j = 2; j <= m; j++) if (toks[j] ~ /^-[A-Za-z]*[ceE][A-Za-z]*$/) return 1
+            return 0
+        }
+        if (base == "ssh") return 1
+        if (base ~ /^(docker|podman|kubectl)$/) {
+            for (j = 2; j <= m; j++) if (toks[j] == "exec" || toks[j] == "run") return 1
+        }
+        return 0
+    }
+    # Whole-command scan: a heredoc body spans physical lines, so buffer them all.
+    { buf = (NR > 1 ? buf "\n" : "") $0 }
+    END {
+        out = qsplit(buf)   # quote-aware segmentation (#3755)
+        n = split(out, segs, "\n")
+        for (i = 1; i <= n; i++) {
+            seg = segs[i]
+            sub(/^[ \t]+/, "", seg)
+            sub(/^sudo[ \t]+/, "", seg)
+            if (sub(/^env([ \t]+|$)/, "", seg)) {
+                sub(/^[ \t]+/, "", seg)
+                stripped = 1
+                while (stripped) {
+                    stripped = 0
+                    if (sub(/^-u[ \t]+[^ \t]+([ \t]+|$)/, "", seg)) { stripped = 1; continue }
+                    if (sub(/^-i([ \t]+|$)/, "", seg))              { stripped = 1; continue }
+                    if (sub(/^--([ \t]+|$)/, "", seg))              { break }
+                }
+            }
+            while (sub(/^[A-Za-z_][A-Za-z0-9_]*=[^ \t]*[ \t]+/, "", seg)) {}
+            sub(/^[ \t]+/, "", seg)
+            m = split(seg, toks, /[ \t]+/)
+            if (m == 0 || !runs_sql(toks[1], toks, m)) continue
+            ph = phrase(segs[i])
+            if (ph != "") { print ph; exit }
+            # Phrase fed by the pipeline: walk back over `|`-joined segments.
+            for (j = i - 1; j >= 1 && qsplit_op[j] == "|"; j--) {
+                ph = phrase(segs[j])
+                if (ph != "") { print ph; exit }
+            }
+            # Phrase in a later heredoc-body segment of this same command.
+            if (seg ~ /<</ && seg !~ /<<</) {
+                for (j = i + 1; j <= n; j++) {
+                    ph = phrase(segs[j])
+                    if (ph != "") { print ph; exit }
+                }
+            }
+        }
+    }'
+}
+# Cheap grep first so the awk and the config read stay off the hot path.
+if echo "$COMMAND_ASK_SCAN" | grep -qiE 'DROP DATABASE|DROP TABLE|DROP SCHEMA|TRUNCATE TABLE'; then
+    matched=$(sql_ddl_exec_match "$COMMAND_ASK_SCAN")
+    if [[ -n "$matched" ]] && sql_guard_enabled; then
+        deny "BLOCKED: Command matches dangerous pattern: $matched. Editing source that contains this statement? Use the Edit/Write tools." "sql-ddl"  # scan-reads: COMMAND_ASK_SCAN
+    fi
 fi
 
 # =============================================================================

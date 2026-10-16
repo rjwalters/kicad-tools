@@ -339,7 +339,7 @@ workflow) that require maintainer approval before being worked on.
 
 - **Find work**: Use the three-tier priority order in "Finding Work: Priority System" below (urgent → curated → approved-only); FIFO (oldest-first) is only the tiebreak **within** a tier.
 - **Check dependencies**: all task-list items checked before claiming
-- **Guard, then claim**: `loom-daemon forge check-claim <number>` must not exit 0 (exit 0 = blocked — open PR, claim label, fresh lease, or remote branch; take another issue), then `gh issue edit <number> --remove-label "loom:issue" --add-label "loom:building"`, then lease it: `loom-daemon lease ensure <number> --watch-pid "${LOOM_AGENT_SESSION_PID:-${CLAUDE_PID:-$PPID}}"`. `worktree.sh` (below) runs this itself; a lane NOT using it MUST call `lease ensure` directly — a leaseless claim is invisible to other lanes and reclaimable (#9453)
+- **Guard, then claim**: `loom-daemon forge check-claim <number>` must not exit 0 (exit 0 = blocked — open PR, claim label, fresh lease, or remote branch; take another issue; your own `$LOOM_SWEEP_ID` lease is not a blocker), then `gh issue edit <number> --remove-label "loom:issue" --add-label "loom:building"`, then lease it: `loom-daemon lease ensure <number> --watch-pid "${LOOM_AGENT_SESSION_PID:-${CLAUDE_PID:-$PPID}}"`. `worktree.sh` (below) runs this itself; a lane NOT using it MUST call `lease ensure` directly — a leaseless claim is invisible to other lanes and reclaimable (#9453)
 - **Do the work**: Implement, test, commit, create PR
 - **Mark PR for review**: `./.loom/scripts/create-pr.sh --label "loom:review-requested"` (copies the priority label, #10518) — never a bare `gh pr create` (#6074); body template: builder-pr.md § "Creating the PR"
 - **Complete**: Issue auto-closes when PR merges, or mark `loom:blocked` if stuck
@@ -545,8 +545,7 @@ stop. `--output` does not help either: it stages a copy of the *primary's*
 `defaults/`, not your unmerged edits.
 
 In `rjwalters/loom` the installed mirrors are tracked and CI requires them current
-before merge (`check-hooks-defaults-parity.sh`, `check-docs-defaults-parity.sh`,
-`check-dangling-links.sh`). So when your diff touches one, update it by hand
+before merge (`check-hooks-defaults-parity.sh`, `check-dangling-links.sh`). So when your diff touches one, update it by hand
 **inside your worktree** (paths via `$WORKTREE_ABS`):
 
 - `defaults/hooks/X.sh` -> `cp -p defaults/hooks/X.sh .loom/hooks/X.sh`

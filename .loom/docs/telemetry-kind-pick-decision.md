@@ -25,8 +25,8 @@ A role record of a tick that launched carries that tick's trace and span id
 
 **No forge calls are added.** The work-finder record reads the
 `WorkFinderTickSummary` the tick already published. A role record reads the
-pick journal its agent wrote (rows `pr-queue` and the agent `gh` front had
-already fetched, and the argv of writes the agent was already issuing) and the
+pick journal (the PR queue the daemon fetched at dispatch, rows the agent `gh`
+front had already fetched, and the argv of writes the agent was already issuing) and the
 queue listing the role's own gate probe already fetched. Nothing is emitted, and
 no journal is created, when no OTLP exporter runs.
 
@@ -41,7 +41,7 @@ no journal is created, when no OTLP exporter runs.
 | `started_at` / `ended_at` | RFC 3339 | tick bounds. Present on **empty ticks too**, so cadence per host and gaps (stalls) are measurable |
 | `repo` | string, optional | role records only (#11858): the repo the tick ran for, forge slug or `repo_unresolved`; present with an empty queue too, so empty-queue repos are a `loom.repo` filter. Absent on work-finder records and older daemons; additive, so `schema_version` stays `2` |
 | `outcome` | string | role: the `role_tick.outcome` result (`success`, `skipped_queue_empty`, ...); work finder: `dispatched`, `halted`, `idle`, `none_dispatched` |
-| `dispatch_result` | string, optional | work finder only (#11840): the completed tick's canonical `loom.dispatch.result`, the same token the tick's `loom.dispatch.tick` span carries, classified once from the tick's own report by `observability::ops::dispatch::tick_result` (first match wins): `dispatched`; a whole hold as `halted_<cause>` (one `work_finder::halt_cause` token, e.g. `halted_main_red`, `halted_drain`), `halted_ci_billing` (also a cause-less hold while billing-blocked) or `halted` (several causes, or none named); `saturation_held`; `error`; `build_backoff_held`; `no_eligible_work`; `capacity_full`; `all_skipped`. A partial hold falls through to the rows below it. It repeats on every chunk. `outcome` is unchanged beside it. Absent on role ticks and older daemons: absence means *unavailable*, never idle or ready (free slots alone do not establish readiness). Additive, so `schema_version` stays `2` |
+| `dispatch_result` | string, optional | work finder only (#11840): the completed tick's canonical `loom.dispatch.result`, the same token the tick's `loom.dispatch.tick` span carries, classified once from the tick's own report by `observability::ops::dispatch::tick_result` (first match wins): `dispatched`; a whole hold as `halted_<cause>` (one `work_finder::halt_cause` token, e.g. `halted_main_red`, `halted_drain`), `halted_ci_billing` (also a cause-less hold while billing-blocked) or `halted` (several causes, or none named); `saturation_held`; `error`; `build_backoff_held`; `no_eligible_work`; `capacity_full`; `all_skipped`. A tick skipped whole by the GitHub rate-limit breaker (#12083) is an empty record (`outcome` `skipped`, no candidates, `decisions_observed` false) with `dispatch_result` `rate_limit_held`. A partial hold falls through to the rows below it. It repeats on every chunk. `outcome` is unchanged beside it. Absent on role ticks and older daemons: absence means *unavailable*, never idle or ready (free slots alone do not establish readiness). Additive, so `schema_version` stays `2` |
 | `candidates_total` | integer | candidates considered (the full count; `candidates[]` lists every one, across chunks) |
 | `candidates[]` | array | in the ranker's order, **every candidate, uncapped** (#11567): `rank` (1-based), `repo` (forge slug, or `repo_unresolved`; never a local path), `number`, `stage`, `sort_key` (`name`, `value`) |
 | `acted[]` | array | `repo`, `number`, `action`, uncapped. Work finder: `dispatched`. Roles: one entry per distinct observed write, from the closed set below; may name an item outside `candidates` |
@@ -62,8 +62,8 @@ no journal is created, when no OTLP exporter runs.
   with a reason mapped from its `QueueDisposition`, and carries that
   disposition itself (`skipped[].disposition`, #11811).
 - **Judge, Doctor, Champion** (`candidate_source = serving_queue`). The rows of
-  the **latest** `loom-daemon pr-queue --role <role>` call the agent made during
-  the tick, in `pr_planning::ordered_queue` order (priority level,
+  the queue the daemon journaled when it launched the tick (#12119; the agent's
+  own `pr-queue` calls are not journaled), in `pr_planning::ordered_queue` order (priority level,
   interactive preference, fallback admission and each role's tie-breaks
   applied), so a fallback-only Judge queue is recorded even though the gate
   listing was empty. Earlier snapshots are not merged in: a refresh that
@@ -103,7 +103,7 @@ are no-ops:
 
 | Writer | Line | What it records |
 |---|---|---|
-| `loom-daemon pr-queue` (live mode) | `queue` | the ordered rows it prints, with labels and sort key; whether the agent's `gh` resolves to the agent `gh` front |
+| the daemon, at Judge/Doctor/Champion dispatch | `queue` | the ordered rows `pr-queue` would print, with labels and sort key; whether the agent's `gh` resolves to the agent `gh` front |
 | agent `gh` front, served `issue\|pr list` | `listing` | the rows served, after the caller's `--jq` |
 | agent `gh` front, every call | `act` | the forge writes in the argv: `issue\|pr edit --add-label`, `pr merge`, `pr review --approve\|--request-changes`, `gh api` label POSTs and merge PUTs |
 
@@ -113,13 +113,13 @@ record does not confirm the forge accepted them.
 
 A `queue` line keeps at most 200 rows but also records the queue's uncapped
 size, which becomes `candidates_total`. If the file is missing or unreadable
-(an agent that never ran `pr-queue` or the `gh` front writes none) nothing was
+(a tick whose launch journaled no queue and whose agent never used the `gh` front writes none) nothing was
 observed: `decisions_observed` is `false` and unexplained candidates stay
 undecided. A file that exists but is empty is an observed tick with no acts.
 
 A `queue` line keeps at most 200 rows but also records the queue's uncapped
 size, which becomes `candidates_total`. If the file is missing or unreadable
-(an agent that never ran `pr-queue` or the `gh` front writes none) nothing was
+(a tick whose launch journaled no queue and whose agent never used the `gh` front writes none) nothing was
 observed: `decisions_observed` is `false` and unexplained candidates stay
 undecided. A file that exists but is empty is an observed tick with no acts.
 
@@ -174,7 +174,7 @@ there. The step engine's weight-0 exclusions map through the parallel total matc
 ## Rank of an item in each role's latest candidate list
 
 For a record with `candidate_source = serving_queue` this is the item's rank in
-the role's own `pr-queue` order; for `listing`, in the order the role read it;
+the role's serving-queue order; for `listing`, in the order the role read it;
 for `gate_listing`, only the forge listing order (select
 `JSONExtractString(body, 'candidate_source')` to tell them apart).
 

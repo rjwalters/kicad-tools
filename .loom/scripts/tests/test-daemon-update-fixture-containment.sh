@@ -41,6 +41,11 @@ START_SCRIPT="$CLI_DIR/loom-daemon-start.sh"
 # shellcheck source=lib/daemon-update-fixtures.sh
 source "$SCRIPT_DIR/lib/daemon-update-fixtures.sh"
 
+# An ambient CARGO_TARGET_DIR overrides the fixtures' own target-dir redirects
+# (.cargo/config.toml, fake build output); cases that test the ambient variable
+# set it inline per command (#10703).
+unset CARGO_TARGET_DIR
+
 # shellcheck source=lib/assert.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/assert.sh"
 

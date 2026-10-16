@@ -75,8 +75,8 @@ if [[ -x "$_ghc" ]] && "$_ghc" --version >/dev/null 2>&1; then GH_READ="$_ghc"; 
 | Call site | Why it must be live |
 |---|---|
 | Verdict-State Janitor's label read | Decides whether the PR is eligible to merge at all |
-| All 6 safety criteria (labels, `mergeable`, `updatedAt`, `gh pr checks`) | **Merge gating** — the last reads before an irreversible merge; a cached green can predate the push that broke the build |
-| Criterion #2's **sticky-hold precheck** (`--json comments,commits,labels,headRefOid`) | **Merge gating** — it decides whether a prior hold still binds; a cached read could miss the very override comment / push that releases it, or (worse) miss the hold itself and let a green re-read merge over it (#4742) |
+| "0. PR facts" (labels, `mergeable`, commits, head, trusted comments; one REST read set feeding all 6 criteria, #12242) and `gh pr checks` | **Merge gating** — the last reads before an irreversible merge; a cached green can predate the push that broke the build |
+| Criterion #2's **sticky-hold precheck** (reads the PR facts' comments, commits, labels, head) | **Merge gating** — it decides whether a prior hold still binds; a cached read could miss the very override comment / push that releases it, or (worse) miss the hold itself and let a green re-read merge over it (#4742) |
 | Criterion #3's paginated changed-file list (`gh api …/files --paginate`) | #4613 requires this loop to run fresh against the full list in *this* pass — a cached answer is exactly the "asserted from a stale read" failure that incident was |
 | Step 2's pre-merge comment data gathering | Every bullet is a claim about a criterion's result in this pass; restating from a cached read reintroduces #4613 |
 
@@ -241,16 +241,52 @@ Full convention and rationale: `.loom/docs/untrusted-external-content.md`. A mar
 
 For each `loom:pr` PR, verify ALL 6 safety criteria. If ANY criterion fails, do NOT merge.
 
+### 0. PR facts: one read for every criterion (#12242)
+
+Run this once per PR, after the Verdict-State Janitor and before criterion 1.
+Criteria #1, #2, #4 and #5, the Held-PR Health Pass and Step 2 read this file
+rather than each issuing their own `gh pr view`. Those per-criterion reads were
+GraphQL, and they made Champion the largest GraphQL spender outside the daemon.
+This is two plain REST reads plus the trusted-comment read, taken live in
+this pass. It is not a cache: it is rewritten for every PR evaluation, and
+criterion #1 refuses a file older than 30 minutes. The merge itself
+re-checks with single targeted reads (Step 3's hold classify and
+`--expected-head`, and `gh pr checks`).
+
+```bash
+PR_NUMBER=<number>
+PR_FACTS="$(git rev-parse --git-common-dir)/loom-champion-facts-pr-$PR_NUMBER.json"; rm -f "$PR_FACTS"
+# gh's `--json` shape, so every reader below is unchanged. Comments: TRUSTED
+# authors only (#9548). Any failed read -> skip the PR this pass.
+P=$(gh api "repos/{owner}/{repo}/pulls/$PR_NUMBER") &&
+K=$(gh api --paginate "repos/{owner}/{repo}/pulls/$PR_NUMBER/commits?per_page=100") &&
+C=$(loom-daemon forge trusted-comments --fetch "$PR_NUMBER" --gh-shape) &&
+printf '%s\n' "$P" "$K" "$C" | jq -s '.[0] as $p | {labels: [$p.labels[] | {name}], headRefOid: $p.head.sha,
+  mergeable: (if $p.mergeable == true then "MERGEABLE" elif $p.mergeable == false then "CONFLICTING" else "UNKNOWN" end),
+  createdAt: $p.created_at, updatedAt: $p.updated_at, additions: $p.additions, deletions: $p.deletions,
+  commits: [.[1:-1][][] | {oid: .sha, committedDate: .commit.committer.date}], comments: .[-1]}' > "$PR_FACTS" \
+  || { rm -f "$PR_FACTS"; echo "SKIP #$PR_NUMBER: PR facts unread (or comments unauthenticated) — no merge, no comment"; continue; }
+```
+
+The other blocks re-derive the path with the same `PR_FACTS=` line, because
+shell variables do not survive between tool calls. After the PR's last step
+(merged, held, rejected or skipped), remove it with
+`rm -f "$(git rev-parse --git-common-dir)/loom-champion-facts-pr-<number>.json"`.
+
 ### 1. Label Check
 - [ ] PR has `loom:pr` label (Judge approval)
 - [ ] That approval is **not stale** — the Verdict-State Janitor's Part 2 above returned `0` (FRESH), never `11` (UNVERIFIABLE: an approval with no confirmed marker bypassed `post-verdict.sh`, #9258) or `12` (STALE). A `loom:pr` label rendered against a head SHA that has since moved is not an approval of the tree you are about to merge (#5686).
 
 **Verification command**:
 ```bash
-# Get all labels for the PR. Plain `gh` — NOT "$GH_READ": all 6 safety
-# criteria are merge-gating and must observe current state (see "Cached
-# forge reads").
-LABELS=$(gh pr view <number> --json labels --jq '.labels[].name' | tr '\n' ' ')
+# Labels from "0. PR facts" (this pass's live read, never "$GH_READ"): all 6
+# safety criteria are merge-gating (see "Cached forge reads").
+PR_FACTS="$(git rev-parse --git-common-dir)/loom-champion-facts-pr-<number>.json"
+if [ -z "$(find "$PR_FACTS" -mmin -30 2>/dev/null)" ]; then
+  echo "FAIL: no PR facts from this pass — run \"0. PR facts\" first"
+  exit 1
+fi
+LABELS=$(jq -r '.labels[].name' "$PR_FACTS" | tr '\n' ' ')
 
 # Check for loom:pr label
 if ! echo "$LABELS" | grep -q "loom:pr"; then
@@ -298,8 +334,8 @@ gh api "repos/{owner}/{repo}/pulls/$PR_NUMBER/files" --paginate --jq '.[] | "\(.
 # The actual diff (read it — the load-bearing hunks are what you are judging)
 gh pr diff "$PR_NUMBER"
 
-# The Judge's verdict comment (how deeply was this verified?)
-gh pr view "$PR_NUMBER" --json comments --jq '.comments[] | select(.body | test("Judge"; "i")) | .body'
+# The Judge's verdict comment (how deeply was this verified?), from "0. PR facts"
+jq -r '.comments[] | select(.body | test("Judge"; "i")) | .body' "$(git rev-parse --git-common-dir)/loom-champion-facts-pr-$PR_NUMBER.json"
 ```
 
 **Docs-only fast path (#6134)** — run this check immediately after the
@@ -620,11 +656,11 @@ HOLD_MARKER="<!-- champion:merge-risk-hold -->"
 # leaked from the previous PR would mis-route this one.
 MERGE_BLOCKED_BY_HOLD=false
 
-# Plain `gh` — NOT "$GH_READ": this read gates the merge. Comments are TRUSTED
-# authors only (#9548, `.loom/docs/comment-trust.md`): an outsider's marker,
-# release phrase or ✅ is prose. Unauthenticated -> skip the PR this pass.
-PR_JSON=$(gh pr view "$PR_NUMBER" --json commits,labels,headRefOid | jq --argjson c "$(loom-daemon forge trusted-comments --fetch "$PR_NUMBER" --gh-shape)" '.comments = $c') \
-  || { echo "SKIP #$PR_NUMBER: comments unauthenticated — no merge, no comment"; MERGE_BLOCKED_BY_HOLD=true; continue; }
+# "0. PR facts" — this pass's live read, NOT "$GH_READ": it gates the merge.
+# Comments are TRUSTED authors only (#9548, `.loom/docs/comment-trust.md`): an
+# outsider's marker, release phrase or ✅ is prose. No facts -> skip the PR.
+PR_JSON=$(cat "$(git rev-parse --git-common-dir)/loom-champion-facts-pr-$PR_NUMBER.json") \
+  || { echo "SKIP #$PR_NUMBER: no PR facts — no merge, no comment"; MERGE_BLOCKED_BY_HOLD=true; continue; }
 
 # `startswith`, not `contains`: a later comment may quote the marker in prose;
 # selecting it would lose HOLD_HEAD (#5371).
@@ -927,7 +963,7 @@ The concern must be **specific and falsifiable**. Good: *"touches `merge-pr.sh`'
 **`loom:auto-merge-ok` override**: this label is an explicit human/Judge statement that the PR is safe to auto-merge. It **overrides a merge-risk hold on this criterion only** — it does **not** waive criterion #3 (critical file exclusion), nor any of criteria #1, #4, #5, #6. A human who wants a critical-file PR merged should merge it themselves.
 
 ```bash
-HAS_AUTO_MERGE_OK=$(gh pr view <number> --json labels --jq '[.labels[].name] | any(. == "loom:auto-merge-ok")')
+HAS_AUTO_MERGE_OK=$(jq '[.labels[].name] | any(. == "loom:auto-merge-ok")' "$(git rev-parse --git-common-dir)/loom-champion-facts-pr-<number>.json")
 if [ "$HAS_AUTO_MERGE_OK" = "true" ]; then
   echo "PASS: Merge-risk hold overridden by loom:auto-merge-ok label"
 fi
@@ -1075,9 +1111,9 @@ A FAIL skips Steps 2-3 for this PR this pass in **every** one of those states, i
 
 **Verification command**:
 ```bash
-# Check merge status. Plain `gh` — NOT "$GH_READ": merge-gating (see
-# "Cached forge reads").
-MERGEABLE=$(gh pr view <number> --json mergeable --jq '.mergeable')
+# Check merge status, from "0. PR facts" (live this pass, NOT "$GH_READ":
+# merge-gating, see "Cached forge reads").
+MERGEABLE=$(jq -r '.mergeable' "$(git rev-parse --git-common-dir)/loom-champion-facts-pr-<number>.json")
 
 # Verify mergeable state
 if [ "$MERGEABLE" != "MERGEABLE" ]; then
@@ -1105,7 +1141,7 @@ produce. Never let a hold be the reason a conflict goes unreported.
 
 **Verification command**:
 ```bash
-# Get PR activity data. Plain `gh` — NOT "$GH_READ": merge-gating.
+# Get PR activity data from "0. PR facts" (live, NOT "$GH_READ": merge-gating).
 #
 # #6843: do NOT use `updatedAt` here. GitHub bumps it on ANY write, and the
 # Held-PR Health Pass below comments on a held PR every tick, so Champion's
@@ -1120,10 +1156,8 @@ produce. Never let a hold be the reason a conflict goes unreported.
 # a human/Judge comment counts as activity but Champion's own notices never do.
 # `createdAt` is the floor, so a PR with no commits and no non-Champion
 # comments still ages from when it was opened rather than reading as
-# eternally fresh.
-# Unauthenticated -> the raw read: it can only read as MORE active.
-PR_DATA=$(gh pr view <number> --json createdAt,commits,comments)
-T=$(loom-daemon forge trusted-comments --fetch <number> --gh-shape) && PR_DATA=$(jq --argjson c "$T" '.comments = $c' <<<"$PR_DATA")
+# eternally fresh. The facts' comments are already the trusted set.
+PR_DATA=$(cat "$(git rev-parse --git-common-dir)/loom-champion-facts-pr-<number>.json")
 
 LAST_ACTIVITY=$(jq -r '
   [
@@ -1315,8 +1349,8 @@ from a hold-plus-feedback one before it acts on either.
 
 ```bash
 PR_NUMBER=<number>
-# Plain `gh` — the same live read criterion #4 already performs.
-MERGEABLE=$(gh pr view "$PR_NUMBER" --json mergeable --jq '.mergeable')
+# The same "0. PR facts" value criterion #4 already read.
+MERGEABLE=$(jq -r '.mergeable' "$(git rev-parse --git-common-dir)/loom-champion-facts-pr-$PR_NUMBER.json")
 
 if [ "$MERGEABLE" = "CONFLICTING" ] && [ "${MERGE_BLOCKED_BY_HOLD:-false}" = true ]; then
   CONFLICT_MARKER="<!-- champion:held-pr-conflict-notice -->"
@@ -1768,9 +1802,9 @@ list.
 ```bash
 PR_NUMBER=$1
 
-# Plain `gh` here, NOT "$GH_READ": each bullet below claims a result from THIS
+# "0. PR facts", NOT "$GH_READ": each bullet below claims a result from THIS
 # pass; a cached answer is restating from memory (#4613, "Cached forge reads").
-PR_DATA=$(gh pr view "$PR_NUMBER" --json additions,deletions,updatedAt)
+PR_DATA=$(cat "$(git rev-parse --git-common-dir)/loom-champion-facts-pr-$PR_NUMBER.json")
 ADDITIONS=$(printf '%s\n' "$PR_DATA" | jq -r '.additions')
 DELETIONS=$(printf '%s\n' "$PR_DATA" | jq -r '.deletions')
 TOTAL_LINES=$((ADDITIONS + DELETIONS))
@@ -1933,13 +1967,13 @@ if [ -z "$LINKED_ISSUES" ]; then
   exit 0
 fi
 
-# The head SHA this merge landed. `headRefOid` survives the merge, so this is
-# still readable here — it is the tree any `loom:ac-verified` marker must name.
-HEAD_SHA=$(gh pr view "$PR_NUMBER" --json headRefOid --jq '.headRefOid')
+# One REST read (#12242): the head SHA this merge landed (it survives the
+# merge; it is the tree any `loom:ac-verified` marker must name) and the merge
+# commit, empty unless merged.
+read -r HEAD_SHA M < <(gh api "repos/{owner}/{repo}/pulls/$PR_NUMBER" --jq '"\(.head.sha) \(if .merged then .merge_commit_sha else "" end)"' 2>/dev/null)
 
 # #1057 negation-check input: PR body + (GitHub) merge-commit message.
 NEG_SRC=$(forge_get_pr_body "$(forge_get_repo_nwo)" "$PR_NUMBER" 2>/dev/null)
-M=$(gh pr view "$PR_NUMBER" --json mergeCommit --jq '.mergeCommit.oid // empty' 2>/dev/null)
 [ -n "$NEG_SRC" ] && [ -n "$M" ] && NEG_SRC+=$'\n'$(gh api "repos/{owner}/{repo}/commits/$M" --jq .commit.message 2>/dev/null)
 
 # Per linked issue. Plain `gh` — NOT "$GH_READ": this runs right after your own

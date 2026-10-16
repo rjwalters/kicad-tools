@@ -146,8 +146,17 @@ EOF
 # `gh issue list --label X ... --jq EXPR`: filter the fixture by label, then
 # apply the caller's OWN --jq expression. `--search` is the forge's shortlist
 # and is ignored here: the jq filter is what this suite pins.
+# `gh api --paginate ".../issues?labels=A,B&..."` (Champion's REST discovery,
+# #12242): the fixture rows carrying every label, in REST shape (`created_at`),
+# as one page; the caller's own `| jq` does the rest.
 cat >"$FIXTURE_DIR/bin/gh" <<'STUB'
 #!/usr/bin/env bash
+if [ "$1" = api ]; then
+  url=""; for a in "$@"; do case "$a" in repos/*) url="$a" ;; esac; done
+  labels=$(printf '%s' "$url" | sed -n 's/.*[?&]labels=\([^&]*\).*/\1/p')
+  jq -c --arg l "$labels" '($l | split(",")) as $want | [.[] | select([.labels[].name] as $have | all($want[]; . as $w | $have | index($w))) | . + {created_at: .createdAt} | del(.createdAt)]' "$LOOM_TEST_ISSUES"
+  exit 0
+fi
 label=""; expr="."; limit=30
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -173,7 +182,7 @@ numbers_of() { grep -oE '^#[0-9]+' | tr '\n' ' ' | sed 's/ $//'; }
 echo ""
 echo "Test 1: Champion discovery hands only unheld, unclaimed proposals to evaluation"
 section_body "Priority 2: Quality Issues Ready to Promote" <"$CHAMPION_MD" \
-    | bash_block_with '--label="loom:curated"' >"$FIXTURE_DIR/p2.sh"
+    | bash_block_with 'labels=loom:curated&' >"$FIXTURE_DIR/p2.sh"
 section_body "Priority 3:" <"$CHAMPION_MD" \
     | bash_block_with 'for P in architect hermit auditor' >"$FIXTURE_DIR/p3.sh"
 if [[ ! -s "$FIXTURE_DIR/p2.sh" || ! -s "$FIXTURE_DIR/p3.sh" ]]; then
@@ -221,7 +230,7 @@ cat >"$FIXTURE_DIR/curated-proposals.json" <<'EOF2'
 ]
 EOF2
 section_body "Priority 4: Epic Proposals" <"$CHAMPION_MD" \
-    | bash_block_with '--label="loom:epic"' >"$FIXTURE_DIR/p4.sh"
+    | bash_block_with 'labels=loom:epic&' >"$FIXTURE_DIR/p4.sh"
 NONITEM_RUNS="$(awk '/^## `--non-item`/{on=1;next} on&&/^## /{exit} on' "$TARGETED_MD")"
 if [[ ! -s "$FIXTURE_DIR/p3.sh" || ! -s "$FIXTURE_DIR/p4.sh" ]]; then
     fail "could not extract champion.md's Priority 3 loop and Priority 4 query"

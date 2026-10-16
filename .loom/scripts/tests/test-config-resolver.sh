@@ -202,6 +202,28 @@ else
     fail "conformance fixture directory not found at $FIXTURE_DIR"
 fi
 
+# --- Test 12: behind checkout reads tracked tiers from origin/HEAD (#10352) ---
+echo "Test 12: strictly-behind clean checkout resolves tracked tier from origin/HEAD"
+repo=$(mktemp -d)
+g() { git -C "$repo" -c user.name=t -c user.email=t@t "$@"; }
+g init -q -b main
+mkdir -p "$repo/.loom"
+echo '{"a": 1}' > "$repo/.loom/config.json"
+g add -A; g commit -q -m one
+echo '{"a": 1, "forge": {"trustedCommenters": ["turian"]}}' > "$repo/.loom/config.json"
+g commit -q -am two
+g update-ref refs/remotes/origin/main HEAD
+g symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main
+g reset -q --hard HEAD~1
+assert_eq "$(loom_resolve_config "$repo" | jq -c .forge.trustedCommenters)" '["turian"]' "behind clean checkout sees origin/HEAD value"
+echo '{"a": 9}' > "$repo/.loom/config.json"
+assert_eq "$(loom_resolve_config "$repo")" '{"a":9}' "local uncommitted edit wins (working copy read)"
+g checkout -q --detach HEAD
+g commit -q --allow-empty -m diverge
+git -C "$repo" checkout -q -- .loom/config.json
+assert_eq "$(loom_resolve_config "$repo")" '{"a":1}' "diverged HEAD reads the working copy"
+rm -rf "$repo"
+
 # --- Summary ---
 echo ""
 echo "────────────────────────────────"

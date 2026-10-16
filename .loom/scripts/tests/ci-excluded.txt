@@ -14,7 +14,6 @@
 
 test-install-reinstall-safety.sh  Already wired in the "Installer Integration Tests" job (#4188); excluded here to avoid double-running it.
 test-check-labels-drift.sh  Needs a built loom-daemon with `labels` (#10013); wired in the "Installer Integration Tests" job beside check-labels-drift.sh itself, which downloads the shared build first. It calls `loom_test_require_daemon_bin`, so it must FAIL, never SKIP, without a binary.
-test-check-dependabot-labels.sh  Needs a built loom-daemon since #11828 made check-dependabot-labels.sh a thin wrapper over `loom-daemon check-dependabot-labels`; wired in the "Installer Integration Tests" job beside the check itself, which downloads the shared build first. It calls `loom_test_require_daemon_bin`, so it must FAIL, never SKIP, without a binary.
 test-spawn-codex.sh  Already wired in the "Codex Adapter Smoke (mocked)" job (#4468), which adds adapter-specific hermeticity guards; excluded here to avoid double-running it.
 
 # epic #7810 PR 3: each of these drives a thin stub that execs a `loom-daemon`
@@ -94,11 +93,6 @@ test-worktree-lease-co-occupancy.sh  Needs a built loom-daemon: worktree.sh's sh
 # scripts/ (repo root, top-level only) — since #5278. Each of these already
 # runs as its own direct step in ci.yml and/or build-gate.sh; excluded here
 # (rather than wired) to avoid double-running it via run-ci-suites.sh.
-scripts/test-ci-result-gate.sh  Already wired directly in ci.yml's always-run Structural Checks job ("Test the CI Result aggregate gate", #10444); excluded here to avoid double-running it behind the path filter.
-scripts/test-ci-daily-classify.sh  Already wired directly in ci.yml's always-run Structural Checks job ("Test the ci-daily timeout classifier and report wiring", #11964); excluded here to avoid double-running it behind the path filter.
-scripts/test-ci-image-inputs.sh  Already wired directly in ci.yml's always-run Structural Checks job ("Test the image-input detection and the image gate wiring", #10825); excluded here to avoid double-running it behind the path filter.
-scripts/test-release-decision.sh  Already wired directly in ci.yml's always-run Structural Checks job ("Test the release decision and release.yml wiring", #10826); excluded here to avoid double-running it behind the path filter.
-scripts/test-version-bump-gate.sh  Already wired directly in ci.yml's always-run Structural Checks job (the version-bump cadence gate test, #11174); excluded here to avoid double-running it behind the path filter.
 scripts/test-install-local-mode.sh  Already wired directly in ci.yml's "Installer local/gitignore mode" step and build-gate.sh; excluded here to avoid double-running it.
 scripts/test-installer.sh  Already wired directly in ci.yml's "Installer Integration Tests" job and build-gate.sh; excluded here to avoid double-running it.
 scripts/test-migrate-consumer.sh  Already wired directly in ci.yml's "migrate-consumer" step and build-gate.sh; excluded here to avoid double-running it.

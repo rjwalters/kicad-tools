@@ -716,9 +716,8 @@ minutes plus at most 8 per-item reads per sample, never per tick. With
 dispatchers stand down while its published data is fresh
 (`loom.captain.gauge_age_seconds`, `loom.captain.gauge_fallback`; see
 [`daemon-reference.md`](daemon-reference.md#fleet-gauges-produced-by-the-captain-w12)).
-The same heartbeat can carry two forge facts (`starFacts`, `queueBlocked`), so
-the liveness pass's idle operator-label listings and the snapshot's
-`loom:blocked` listing are made by the captain alone.
+The same heartbeat can carry a forge fact (`queueBlocked`), so the snapshot's
+`loom:blocked` listing is made by the captain alone.
 Details are in [`telemetry-schema.md`](telemetry-schema.md#metricpoints).
 
 **Merge-chain re-date pressure (#10163).** Three gauges track the #8508
