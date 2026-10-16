@@ -2488,6 +2488,7 @@ class CoupledPathfinder:
         own_vias: list[tuple[int, int]] | None = None,
         p_vias: list[tuple[int, int]] | None = None,
         n_vias: list[tuple[int, int]] | None = None,
+        routable_layers: list[int] | None = None,
     ) -> list[tuple[CoupledState, float, bool]]:
         """Generate valid coupled moves maintaining spacing.
 
@@ -3068,7 +3069,10 @@ class CoupledPathfinder:
         smd_vias_ok: bool | None = None
 
         # Try layer change (via) - both traces must change layer together
-        routable_layers = self.grid.get_routable_indices()
+        # Issue #6857: ``route_coupled`` passes the pair's filtered layer set
+        # (``_coupled_routable_layers``); the swap-via move below reuses it.
+        if routable_layers is None:
+            routable_layers = self.grid.get_routable_indices()
         for new_layer in routable_layers:
             if new_layer == state.p_pos.layer:
                 continue
@@ -3384,6 +3388,44 @@ class CoupledPathfinder:
                 partner_clearance,
             )
 
+    def _coupled_routable_layers(
+        self, p_net_name: str, n_net_name: str, pad_layer: int
+    ) -> list[int]:
+        """Grid layers the coupled search may change layer onto (Issue #6857).
+
+        The single-ended router (Python ``Pathfinder._is_layer_allowed`` and
+        C++ ``_apply_allowed_layers_to_routable`` / ``_hard_avoided_layers``)
+        removes two kinds of layer from a net's routable set; the coupled
+        search used the bare ``grid.get_routable_indices()`` and so could
+        commit pair copper on a reserved reference plane:
+
+        * layers whose KiCad name is not in ``rules.allowed_layers`` (set by
+          ``--reserve-plane-layers``, on by default, #5014 / #5789);
+        * the union of the P and N net classes' HARD ``avoid_layers``
+          (``hard_avoided_layer_indices(rules.strict_layers)``: ampacity
+          classes, or ``--strict-layers``).
+
+        Never returns an empty list: when filtering would empty it the pad
+        layer alone is returned (no layer change possible), mirroring the
+        defensive non-empty rule in ``_apply_allowed_layers_to_routable``.
+        """
+        base = list(self.grid.get_routable_indices())
+        allowed = self.rules.allowed_layers
+        hard_avoided: set[int] = set()
+        for name in (p_net_name, n_net_name):
+            net_class = self.net_class_map.get(name)
+            if net_class is not None:
+                hard_avoided |= net_class.hard_avoided_layer_indices(self.rules.strict_layers)
+        if allowed is None and not hard_avoided:
+            return base
+        permitted = [
+            idx
+            for idx in base
+            if idx not in hard_avoided
+            and (allowed is None or Layer(self.grid.index_to_layer(idx)).kicad_name in allowed)
+        ]
+        return permitted or [pad_layer]
+
     def _try_cpp_route_coupled(
         self,
         *,
@@ -3405,6 +3447,7 @@ class CoupledPathfinder:
         corridor: frozenset[tuple[int, int]] | None,
         timeout_seconds: float | None,
         max_iterations_budget: int | None,
+        routable_layers: list[int] | None = None,
     ) -> tuple[bool, tuple[Route, Route] | None] | None:
         """Attempt the coupled search via the C++ backend (Issue #4065).
 
@@ -3450,7 +3493,10 @@ class CoupledPathfinder:
                     bitset[cy * cols + cx] = 1
             corridor_bitset = list(bitset)
 
-        routable_layers = list(self.grid.get_routable_indices())
+        # Issue #6857: the pair's filtered layer set (allowed_layers + hard
+        # avoid_layers), not the bare grid list.
+        if routable_layers is None:
+            routable_layers = list(self.grid.get_routable_indices())
 
         path, diagnostics = impl.route(
             p_start_xy=(p_start_pos.x, p_start_pos.y),
@@ -3693,6 +3739,17 @@ class CoupledPathfinder:
         start_layer = self.grid.layer_to_index(p_start.layer.value)
         end_layer = self.grid.layer_to_index(p_end.layer.value)
 
+        # Issue #6857: honour ``rules.allowed_layers`` (plane-layer
+        # reservation) and per-net HARD ``avoid_layers`` in BOTH backends,
+        # exactly as the single-ended router does.
+        coupled_layers = self._coupled_routable_layers(
+            p_start.net_name, n_start.net_name, start_layer
+        )
+        # A through-hole start pad has copper on every layer, so the pair may
+        # leave it on any permitted one; move off a disallowed pad layer.
+        if start_layer not in coupled_layers and p_start.through_hole and n_start.through_hole:
+            start_layer = coupled_layers[0]
+
         # Create start and goal states
         p_start_pos = GridPos(p_start_gx, p_start_gy, start_layer)
         n_start_pos = GridPos(n_start_gx, n_start_gy, start_layer)
@@ -3784,6 +3841,7 @@ class CoupledPathfinder:
             corridor=corridor,
             timeout_seconds=timeout_seconds,
             max_iterations_budget=max_iterations_budget,
+            routable_layers=coupled_layers,
         )
         if cpp_path is not None:
             handled, cpp_result = cpp_path
@@ -4064,6 +4122,7 @@ class CoupledPathfinder:
                 own_vias=own_vias,
                 p_vias=p_vias,
                 n_vias=n_vias,
+                routable_layers=coupled_layers,
             ):
                 # Issue #6243: authored netclass minima on both rails, through
                 # the grid's kernel-backed gate.  Dormant without floors.
