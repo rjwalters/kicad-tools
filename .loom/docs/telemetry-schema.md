@@ -2042,6 +2042,13 @@ spawn attempts:
 | `loom.dispatch.draws` | Item draws the tick took, across repos (count) |
 | `loom.dispatch.draws_unspawned` | Draws that never reached the spawner: a second merge in a repo (`merge_in_flight`) (count) |
 | `loom.dispatch.passes` | Passes by reason as comma-joined `reason=count` pairs in reason order (`claim_lost=3,merge_in_flight=1`). The reasons are an open set, so they share one value; absent when nothing passed |
+| `loom.dispatch.budget` | The slots the tick could fill: its free slots (count) |
+| `loom.dispatch.stop` | Why the draw loop stopped, a closed set: `filled` (every free slot was filled), `no_slots`, `pool_drained` (nothing left to draw), `pass_limit` (the tick's 32 passes were spent), `slot_draws` (a slot gave up after 8 draws), `spawn_hold` (see `loom.dispatch.spawn_hold`), `weight_overflow` |
+
+A `claim_lost` refusal (a peer claimed the item first) is still counted in
+`loom.dispatch.passes`, but the first 16 in a tick spend neither the tick's
+32 passes nor the slot's 8 draws: the item has already left the tick's pool
+and the slot draws again at once.
 
 Since #12306 and #12311 the tick also records what its discovery snapshot
 cost, covered and which tier answered (the worklist rows are absent when the
