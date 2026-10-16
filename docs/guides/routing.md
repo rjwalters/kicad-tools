@@ -24,10 +24,10 @@ kicad-tools includes an A* pathfinding-based autorouter that supports:
 kct route board.kicad_pcb -o routed.kicad_pcb
 
 # Route specific net
-kct route board.kicad_pcb --net CLK -o routed.kicad_pcb
+kct route board.kicad_pcb --nets CLK -o routed.kicad_pcb
 
 # With custom trace width
-kct route board.kicad_pcb --width 0.25 -o routed.kicad_pcb
+kct route board.kicad_pcb --trace-width 0.25 -o routed.kicad_pcb
 ```
 
 ### Design Rules
@@ -37,7 +37,7 @@ kct route board.kicad_pcb --width 0.25 -o routed.kicad_pcb
 kct route board.kicad_pcb --mfr jlcpcb
 
 # Custom clearance
-kct route board.kicad_pcb --clearance 0.15 --via-size 0.6
+kct route board.kicad_pcb --clearance 0.15 --via-diameter 0.6
 ```
 
 ---
@@ -694,7 +694,6 @@ kct route board.kicad_pcb -o routed.kicad_pcb
 
 # Opt out (byte-identical to pre-#5891 behaviour).
 kct route board.kicad_pcb -o routed.kicad_pcb --no-pad-access-invariant
-kct route-auto board.kicad_pcb --no-pad-access-invariant
 ```
 
 Each refusal is retained as a witness, so a run can say *which* pad it

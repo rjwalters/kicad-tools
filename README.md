@@ -73,12 +73,12 @@ kct bom project.kicad_sch --format csv --group
 
 # Run ERC (requires kicad-cli)
 kct erc project.kicad_sch
-kct erc project.kicad_sch --strict
+kct erc project.kicad_sch --errors-only
 
 # Run DRC with manufacturer rules
 kct drc board.kicad_pcb
 kct drc board.kicad_pcb --mfr jlcpcb
-kct drc --compare  # Compare manufacturer rules
+kct mfr compare  # Compare manufacturer rules
 ```
 
 ### Python API
@@ -366,8 +366,8 @@ Run design rule checks without requiring kicad-cli:
 # Check against manufacturer rules
 kct check board.kicad_pcb --mfr jlcpcb --format json
 
-# Check with custom rules
-kct check board.kicad_pcb --clearance 0.15 --trace-width 0.2
+# Check against a 4-layer, 2 oz manufacturer rule set
+kct check board.kicad_pcb --mfr jlcpcb --layers 4 --copper 2
 ```
 
 Python API:
@@ -415,7 +415,7 @@ pcb.save("optimized.kicad_pcb")
 
 CLI usage:
 ```bash
-kct placement board.kicad_pcb --optimize --iterations 1000
+kct placement optimize board.kicad_pcb --iterations 1000
 ```
 
 ### Trace Optimization
@@ -450,9 +450,6 @@ kct datasheet download STM32F103C8T6 -o datasheets/
 
 # Convert PDF to markdown
 kct datasheet convert datasheet.pdf -o datasheet.md
-
-# Extract pin tables
-kct datasheet extract-pins datasheet.pdf
 
 # Extract images and tables
 kct datasheet extract-images datasheet.pdf -o images/

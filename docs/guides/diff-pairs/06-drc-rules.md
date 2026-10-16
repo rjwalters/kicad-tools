@@ -1,7 +1,7 @@
 # 06 — Differential-Pair DRC Rules
 
 Five `rule_id`s in `kicad_tools.validate.rules.*` validate the routed result
-(`kct check --rules=<rule_id>`). They match the `ViolationType.from_string`
+(`kct check --only <rule_id>`). They match the `ViolationType.from_string`
 alias table in `src/kicad_tools/drc/violation.py`.
 
 ## `diffpair_clearance_intra`
@@ -14,7 +14,7 @@ Validates the within-pair gap against
 manufacturer's inter-net floor.
 
 ```bash
-kct check board.kicad_pcb --rules=diffpair_clearance_intra
+kct check board.kicad_pcb --only diffpair_clearance_intra
 ```
 
 Remediate: raise the routed gap to `effective_intra_pair_clearance()`, or
@@ -55,7 +55,7 @@ in brackets. It is an **error** when the limit is cited or explicit, and a
 **warning** when the limit is an `uncited` table value.
 
 ```bash
-kct check board.kicad_pcb --rules=diffpair_length_skew
+kct check board.kicad_pcb --only diffpair_length_skew
 ```
 
 Remediate: insert serpentine on the shorter half (manual today; #2648 will
@@ -71,7 +71,7 @@ on the class, allowing `impedance_tolerance_percent` (default 10 %)
 deviation.
 
 ```bash
-kct check board.kicad_pcb --rules=impedance
+kct check board.kicad_pcb --only impedance
 ```
 
 Remediate: re-route with `apply_impedance_driven_sizing` (set
@@ -80,7 +80,7 @@ stackup, or relax `impedance_tolerance_percent` (see guide 03).
 
 ## Running all five together
 
-`--rules=diffpair_clearance_intra,diffpair_routing_continuity,diffpair_length_skew,diffpair_uncoupled_length,impedance`,
+`--only diffpair_clearance_intra,diffpair_routing_continuity,diffpair_length_skew,diffpair_uncoupled_length,impedance`,
 or `kct check --mfr jlcpcb`, which enables all five plus the manufacturer's
 inter-net floors.
 
