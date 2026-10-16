@@ -528,6 +528,17 @@ def test_core_stays_single_ended_without_coupled_routing_opt_in() -> None:
 # ---------------------------------------------------------------------------
 
 
+def _no_gateway_retry(monkeypatch) -> None:
+    """Disable the #6444 fan-via gateway retry for a fallback-contract test.
+
+    The slot walls block F.Cu only, so on these 2-layer fixtures the gateway
+    retry would couple the pair on B.Cu; these tests pin the #6373 fallback.
+    """
+    from kicad_tools.router.lattice import pathfinder as pathfinder_mod
+
+    monkeypatch.setattr(pathfinder_mod, "GATEWAY_RETRY_REASONS", frozenset())
+
+
 def _slot_walls() -> list[Pad]:
     """Two wall pads leaving a 0.8 mm slot: single-trace OK, fat pair not."""
     return [
@@ -727,10 +738,11 @@ def test_uncoupled_fallback_extras_land_on_connected_copper() -> None:
         assert _net_connected([r for r in routes.values() if r.net == net], pads), net
 
 
-def test_core_uses_uncoupled_fallback_for_blocked_pair(capsys) -> None:
+def test_core_uses_uncoupled_fallback_for_blocked_pair(capsys, monkeypatch) -> None:
     # Through the Autorouter (core.py): the lattice engine always enables
     # the fallback, so a blocked pair is reported as a diff-pair WARNING and
     # both nets still get copper (issue #6373).
+    _no_gateway_retry(monkeypatch)
     router = _autorouter({"D+": _HS, "D-": _HS})
     for i, wall in enumerate(_slot_walls()):
         # One single-pad net per wall: an obstacle, never itself routed.
@@ -978,9 +990,10 @@ def test_core_chains_pair_through_pass_through_part(capsys) -> None:
     assert "D[0] J1.1->U2.3: coupled" in out and "D[1] U2.4->U1.1: coupled" in out
 
 
-def test_core_reports_partially_coupled_pair(capsys) -> None:
+def test_core_reports_partially_coupled_pair(capsys, monkeypatch) -> None:
     # A slot wall in the J1 -> U2 segment: that segment falls back
     # single-ended (#6373, per segment) while U2 -> U1 still couples.
+    _no_gateway_retry(monkeypatch)
     walls = [
         Pad(
             x=8.0,
