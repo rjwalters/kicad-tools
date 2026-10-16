@@ -653,3 +653,187 @@ class TestBackendAgreement:
             assert not router.grid.grid[layer][y][open_x].blocked
             assert cpp_grid.is_blocked(blocked_x, y, layer)
             assert not cpp_grid.is_blocked(open_x, y, layer)
+
+
+class TestNoClearanceFloorPersists:
+    """Issue #6043: the physical keepout floor used when no clearance is set.
+
+    ``_edge_clearance`` stays ``None`` (or ``0``) so post-route checks see no
+    phantom requirement; the floor lives in ``_edge_keepout_floor`` and must
+    reach every grid the router builds, exactly like a positive clearance.
+    """
+
+    # Above what the default rules/classes compute, so the #6043
+    # ``refresh_edge_keepout_floor`` hook in ``_prepare_routing`` keeps it.
+    FLOOR = 1.0
+
+    def _router(self, edge_clearance=None, **kwargs) -> Autorouter:
+        kwargs.setdefault("rules", DesignRules(grid_resolution=0.5))
+        kwargs.setdefault("force_python", True)
+        router = Autorouter(10, 10, **kwargs)
+        router.add_component(
+            "R1",
+            [
+                {"number": "1", "x": 4.0, "y": 5.0, "net": 1, "net_name": "NET1"},
+                {"number": "2", "x": 6.0, "y": 5.0, "net": 1, "net_name": "NET1"},
+            ],
+        )
+        router._edge_segments = RECT_EDGE_SEGMENTS
+        router._edge_clearance = edge_clearance
+        router._edge_keepout_floor = self.FLOOR
+        return router
+
+    @staticmethod
+    def _spy():
+        seen: list[tuple[RoutingGrid, float]] = []
+        original = RoutingGrid.add_edge_keepout
+
+        def observe(grid, segments, clearance):
+            seen.append((grid, clearance))
+            return original(grid, segments, clearance)
+
+        return seen, patch.object(RoutingGrid, "add_edge_keepout", observe)
+
+    @pytest.mark.parametrize("edge_clearance", [None, 0.0])
+    @pytest.mark.parametrize("force_python", [True, False])
+    def test_reset_reinstalls_the_floor(self, edge_clearance, force_python):
+        if not force_python and not is_cpp_available():
+            pytest.skip("Native routing backend not built in this worktree (kct build-native)")
+        router = self._router(edge_clearance, force_python=force_python)
+        reference = RoutingGrid(10, 10, DesignRules(grid_resolution=0.5))
+        reference.add_edge_keepout(RECT_EDGE_SEGMENTS, self.FLOOR)
+        expected = int(reference._blocked.sum())
+
+        router._reset_for_new_trial()
+
+        assert _blocked_count(router) >= expected > 0
+        x, y = router.grid.world_to_grid(0.2, 5.0)
+        for layer in router.grid.get_routable_indices():
+            assert router.grid.grid[layer][y][x].blocked
+        assert router._edge_clearance == edge_clearance
+        assert router._edge_keepout_floor == self.FLOOR
+
+    def test_serialize_carries_the_floor(self):
+        config = self._router()._serialize_for_parallel()
+        assert config["edge_clearance"] is None
+        assert config["edge_keepout_floor"] == self.FLOOR
+
+    @pytest.mark.parametrize("worker", ["monte_carlo", "evolutionary"])
+    def test_worker_rebuild_installs_the_floor(self, worker):
+        config = pickle.loads(pickle.dumps(self._router()._serialize_for_parallel()))
+        config.update(
+            trial_num=0, chrom_idx=0, seed=42, base_order=[1], net_order=[1], use_negotiated=False
+        )
+        captured: dict = {}
+        real_autorouter_cls = core_module.Autorouter
+
+        class _CapturingAutorouter(real_autorouter_cls):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                captured["router"] = self
+
+        seen, spy = self._spy()
+        with patch.object(core_module, "Autorouter", _CapturingAutorouter), spy:
+            if worker == "monte_carlo":
+                _run_monte_carlo_trial(config)
+            else:
+                evolutionary_module._run_evolutionary_trial(config)
+
+        worker_router = captured["router"]
+        assert worker_router._edge_clearance is None
+        assert worker_router._edge_keepout_floor == self.FLOOR
+        assert any(g is worker_router.grid and c == self.FLOOR for g, c in seen)
+
+    def test_scalar_fine_grid_installs_the_floor(self):
+        router = self._router()
+        failure = RoutingFailure(
+            net=1, net_name="NET1", source_pad=("R1", "1"), target_pad=("R1", "2")
+        )
+
+        def _fake_route_all(*_args, **_kwargs):
+            router.routing_failures = [failure]
+            return []
+
+        router.route_all = _fake_route_all  # force Pass 2 (fine-grid retry)
+        seen, spy = self._spy()
+        with spy:
+            router.route_all_multi_resolution(use_negotiated=False, pin_order_trials=["default"])
+
+        fine = [(g, c) for g, c in seen if g is not router.grid]
+        assert fine, "the fine-grid retry never installed an edge keepout"
+        assert all(c == self.FLOOR for _g, c in fine)
+        fine_grid = fine[-1][0]
+        x, y = fine_grid.world_to_grid(0.2, 5.0)
+        for layer in fine_grid.get_routable_indices():
+            assert fine_grid.grid[layer][y][x].blocked
+
+    def test_coupled_fine_grid_installs_the_floor(self):
+        from kicad_tools.router.diffpair import (
+            DifferentialPair,
+            DifferentialPairRules,
+            DifferentialPairType,
+            DifferentialSignal,
+        )
+
+        router = Autorouter(width=10.0, height=10.0, rules=DesignRules())
+        router._edge_segments = [((10.0, 0.0), (10.0, 10.0))]
+        router._edge_clearance = None
+        router._edge_keepout_floor = 0.3
+        dpr = router._diffpair
+        pair = DifferentialPair(
+            name="USB_D",
+            positive=DifferentialSignal(
+                net_name="USB_D+", net_id=1, base_name="USB_D", polarity="P", notation="plus_minus"
+            ),
+            negative=DifferentialSignal(
+                net_name="USB_D-", net_id=2, base_name="USB_D", polarity="N", notation="plus_minus"
+            ),
+            pair_type=DifferentialPairType.USB2,
+            rules=DifferentialPairRules.for_pair_type(DifferentialPairType.USB2),
+        )
+
+        def _pads(net: int, name: str, y: float, pin: str) -> list[Pad]:
+            return [
+                Pad(
+                    x=x,
+                    y=y,
+                    width=0.35,
+                    height=0.35,
+                    net=net,
+                    net_name=name,
+                    layer=Layer.F_CU,
+                    ref=ref,
+                    pin=pin,
+                )
+                for x, ref in ((2.0, "J1"), (8.5, "U1"))
+            ]
+
+        dpr._get_pair_pads = lambda _pair: (  # type: ignore[assignment]
+            _pads(1, "USB_D+", 5.0, "1"),
+            _pads(2, "USB_D-", 5.3, "2"),
+        )
+        captured: list = []
+        real_pathfinder = diffpair_routing.CoupledPathfinder
+
+        def _capture(grid, *args, **kwargs):
+            pf = real_pathfinder(grid, *args, **kwargs)
+            captured.append(pf)
+            pf.route_coupled = lambda *a, **k: None  # only test construction
+            return pf
+
+        with patch.object(diffpair_routing, "CoupledPathfinder", side_effect=_capture):
+            dpr._route_pair_on_fine_grid(
+                pair,
+                spacing_override=None,
+                extra_spacing_cells=1,
+                per_pair_timeout=None,
+                resolution_factor=0.5,
+            )
+
+        fine_grid = captured[0].grid
+        assert fine_grid is not router.grid
+        blocked_x, y = fine_grid.world_to_grid(9.85, 5.0)
+        open_x, _ = fine_grid.world_to_grid(5.0, 5.0)
+        for layer in fine_grid.get_routable_indices():
+            assert fine_grid.grid[layer][y][blocked_x].blocked
+            assert not fine_grid.grid[layer][y][open_x].blocked

@@ -141,6 +141,16 @@ if [[ "$1 $2" == "forge claim-liveness" ]]; then
   [[ -z "${LOOM_TEST_EXTRA_LIVENESS_REPO:-}" || "$want" == "$LOOM_TEST_EXTRA_LIVENESS_REPO" ]] && printf '%s' "${LOOM_TEST_EXTRA_LIVENESS:-}"
   exit 0
 fi
+# #11947: `lease pr check` stub. $LOOM_TEST_LEASE_STATE is the PR_LEASE_STATE
+# to print (unset => binary without the verb); the role asked for is recorded.
+if [[ "$1 $2 $3" == "lease pr check" ]]; then
+  prev=""; for a in "$@"; do [[ "$prev" == "--role" ]] && printf '%s\n' "$a" >"$LOOM_TEST_STUB_DIR/lease-role"; prev="$a"; done
+  [[ -z "${LOOM_TEST_LEASE_STATE:-}" ]] && exit 64
+  echo "PR_LEASE_STATE=$LOOM_TEST_LEASE_STATE"
+  [[ "$LOOM_TEST_LEASE_STATE" == "held-peer" ]] && exit 4
+  [[ "$LOOM_TEST_LEASE_STATE" == "unknown" ]] && exit 5
+  exit 0
+fi
 [[ "$1 $2" == "forge trusted-comments" ]] || { echo "stub loom-daemon: $*" >&2; exit 64; }
 [[ "${LOOM_TEST_NO_TRUST_VERB:-}" == "1" ]] && exit 2
 exec jq -c '[.[] | select(((.author_association // "") | IN("OWNER","MEMBER","COLLABORATOR"))
@@ -188,7 +198,7 @@ set_comments() { # reads a JSON array on stdin; an item without `user` is the fl
 
 reset() {
     : >"$STUB_DIR/gh-calls.log"
-    unset LOOM_TEST_MUTATION_FAILS LOOM_TEST_ISSUE_READ_FAILS LOOM_TEST_NO_TRUST_VERB LOOM_TEST_EXTRA_LIVENESS
+    unset LOOM_TEST_MUTATION_FAILS LOOM_TEST_ISSUE_READ_FAILS LOOM_TEST_NO_TRUST_VERB LOOM_TEST_EXTRA_LIVENESS LOOM_TEST_LEASE_STATE
     set_labels "loom:reviewing"
     echo '[]' >"$STUB_DIR/comments.json"
 }
@@ -515,6 +525,40 @@ assert_eq "target/other" "$(cat "$STUB_DIR/liveness-repo")" "T22a: claim-livenes
 assert_eq "fresh" "$(field "$out" CLAIM_STATE)" "T22b: target-repo activity keeps the claim fresh"
 out="$(LOOM_TEST_EXTRA_LIVENESS_REPO=checkout/repo LOOM_TEST_EXTRA_LIVENESS="$(ago 5)" "$TARGET_SCRIPT" check --repo target/other --number 6513 --label loom:reviewing)"
 assert_eq "stale" "$(field "$out" CLAIM_STATE)" "T22c: the checkout repo's activity is not borrowed"
+
+# --- T23: a live PR lease outranks the stale clocks (#11947) ----------------
+# Streak at the cap and claim older than the floor: the bounded fallback fires
+# unless the holder's lease is live.
+reset
+CLAIM_TS="$(ago 40)"
+set_claim loom:reviewing "$CLAIM_TS"
+jq -n --arg s "$(ago 2)" --arg sm "<!-- loom:standdown claim=$CLAIM_TS seq=3 -->" \
+    '[{id:701,created_at:$s,body:("Judge pass: standing down.\n" + $sm)}]' | set_comments
+for st in held-peer held-self; do
+    out="$(LOOM_TEST_LEASE_STATE=$st "$TARGET_SCRIPT" check --repo owner/repo --number 6513 --label loom:reviewing)"
+    assert_eq "fresh" "$(field "$out" CLAIM_STATE)" "T23a: a $st lease downgrades stale-bounded-fallback to fresh"
+done
+assert_eq "judge" "$(cat "$STUB_DIR/lease-role")" "T23b: loom:reviewing maps to --role judge"
+for st in free unknown; do
+    out="$(LOOM_TEST_LEASE_STATE=$st "$TARGET_SCRIPT" check --repo owner/repo --number 6513 --label loom:reviewing)"
+    assert_eq "stale-bounded-fallback" "$(field "$out" CLAIM_STATE)" "T23c: a $st lease leaves the bounded fallback unchanged"
+done
+out="$("$TARGET_SCRIPT" check --repo owner/repo --number 6513 --label loom:reviewing)"
+assert_eq "stale-bounded-fallback" "$(field "$out" CLAIM_STATE)" "T23d: a binary without lease pr check leaves the state unchanged"
+# The plain idle-clock `stale` path is downgraded too, and the other lanes map.
+reset
+set_claim loom:reviewing "$(ago 40)"
+out="$(LOOM_TEST_LEASE_STATE=held-peer "$TARGET_SCRIPT" check --repo owner/repo --number 6513 --label loom:reviewing)"
+assert_eq "fresh" "$(field "$out" CLAIM_STATE)" "T23e: a live lease downgrades plain stale to fresh"
+set_labels "loom:treating"; set_claim loom:treating "$(ago 90)"
+out="$(LOOM_TEST_LEASE_STATE=held-peer "$TARGET_SCRIPT" check --repo owner/repo --number 6513 --label loom:treating)"
+assert_eq "fresh" "$(field "$out" CLAIM_STATE)" "T23f: a live doctor lease downgrades a stale loom:treating claim"
+assert_eq "doctor" "$(cat "$STUB_DIR/lease-role")" "T23g: loom:treating maps to --role doctor"
+set_labels "loom:custom"; set_claim loom:custom "$(ago 90)"
+rm -f "$STUB_DIR/lease-role"
+out="$(LOOM_TEST_LEASE_STATE=held-peer "$TARGET_SCRIPT" check --repo owner/repo --number 6513 --label loom:custom)"
+assert_eq "stale" "$(field "$out" CLAIM_STATE)" "T23h: a label with no role mapping is never downgraded"
+assert_eq "false" "$([[ -e "$STUB_DIR/lease-role" ]] && echo true || echo false)" "T23i: no lease lookup for an unmapped label"
 
 # --- Summary ---
 echo ""

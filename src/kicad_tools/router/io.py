@@ -68,6 +68,7 @@ from .clearance_shapes import pad_shape as _kernel_pad_shape
 from .clearance_shapes import segment_shape as _kernel_segment_shape
 from .clearance_shapes import via_shape as _kernel_via_shape
 from .core import Autorouter
+from .edge_keepout import compute_edge_keepout_floor, install_edge_keepout
 from .fixed_copper import FixedPadCopper, custom_pad_copper, degraded_pad_copper
 from .geometry import (
     point_to_segment_distance as _geom_point_to_seg_dist,
@@ -3988,7 +3989,12 @@ def validate_routes(
     # This is geometry error, deliberately kept separate from
     # ``_CLEARANCE_EPSILON_MM`` (a floating-point comparison tolerance).
     edge_outline_error = float(getattr(edge_segments, "max_error_mm", 0.0) or 0.0)
-    if edge_clearance is not None and edge_clearance > 0 and edge_segments:
+    # Issue #6043: with no clearance resolved (``None``/``0``) the check
+    # still runs at ``required = 0.0`` so copper that overlaps a cut
+    # (``actual_clearance < 0``) is reported rather than silently passed.
+    if edge_clearance is None or edge_clearance <= 0:
+        edge_clearance = 0.0
+    if edge_segments:
         for route in router.routes:
             route_net = route.net
             for seg_idx, segment in enumerate(route.segments):
@@ -6003,9 +6009,10 @@ def load_pcb_for_routing(
     # whose ``kct check --mfr`` would then fail the result with
     # ``edge_clearance_trace`` errors.  Resolve the same per-tier
     # ``MfrLimits.min_edge_clearance`` floor here so route-time keepout ==
-    # check-time floor.  An explicit ``edge_clearance`` (including ``0`` as
-    # the documented opt-out) always wins; unknown/absent manufacturers
-    # resolve to None (no keepout, pre-#4568 behavior).
+    # check-time floor.  An explicit ``edge_clearance`` always wins;
+    # unknown/absent manufacturers resolve to None.  Since #6043 neither
+    # ``None`` nor an explicit ``0`` disables the keepout any more: both get
+    # the physical floor below, which only stops copper crossing the cut.
     if edge_clearance is None:
         from .mfr_limits import resolve_edge_clearance
 
@@ -6016,9 +6023,25 @@ def load_pcb_for_routing(
         # Store on router so EscapeRouter can clamp escape points (Issue #2136)
         router._edge_clearance = edge_clearance
         if edge_segments:
-            blocked_cells = router.grid.add_edge_keepout(edge_segments, edge_clearance)
+            blocked_cells = install_edge_keepout(router, router.grid)
             if blocked_cells > 0:
                 print(f"  Edge clearance: {edge_clearance}mm, {blocked_cells} cells blocked")
+    elif edge_segments:
+        # Issue #6043: no clearance resolved (or an explicit 0).  Copper
+        # across a routed Edge.Cuts cut -- outer outline or an interior
+        # window/cutout/hole -- is never valid output, so the grid still
+        # gets a physical floor: the widest copper half-extent plus a
+        # half-diagonal-cell quantisation margin.  It is stored apart from
+        # ``_edge_clearance`` (which validate_routes / drc_nudge read as a
+        # copper-to-edge clearance) so post-route checks see no phantom
+        # requirement.
+        router._edge_keepout_floor = compute_edge_keepout_floor(router)
+        blocked_cells = install_edge_keepout(router, router.grid)
+        if blocked_cells > 0:
+            print(
+                f"  Edge keepout floor: {router._edge_keepout_floor:.3f}mm "
+                f"(no edge clearance set), {blocked_cells} cells blocked"
+            )
 
     # Load existing routes as obstacles for multi-pass routing
     if load_existing_routes or preserve_placement or placement_fixed_pads:

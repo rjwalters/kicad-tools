@@ -1334,6 +1334,20 @@ directory. Everything else still fails closed — a third assignment, the
 reverse order, `${NAME}` inside the `realpath` call, a canonicalization of a
 *different* variable, or any prefix/suffix around the admitted form.
 
+**`/tmp` scratch loops (#12285)**: `wt_write_tmp_cwd_loop_var_safe()` allows
+`cd /tmp/probe && for name in a b; do echo x > "$name.gds"; done`, i.e. a write
+target `$var`/`${var}` plus a literal suffix, when ALL hold: the tracked cwd is a
+literal `/tmp/<dir>` outside every managed worktree and the main checkout, set by
+an earlier `cd /tmp/<literal>` in the same command; the suffix has no `/`, `..`
+or expansion; every binding of `var` is a literal `for var in <words>` or
+`var=<word>` (non-absolute, `/`-free, `..`-free) and the first one precedes the
+write; and the command has no `ln` command word. Anything else (a variable
+directory component, `read`/`+=`/`eval` rebinding, no assignment, a `$`/`..` in the
+`cd` target, a write before the `cd`) still denies. **Residual gap**: a symlink
+that already exists in `/tmp/<dir>` from an *earlier* command is not seen — the
+guard is lexical and never resolves paths. No new toggle; it narrows an existing
+`worktreeIsolation` deny.
+
 **`$(cd "$NAME" && pwd -P)` is deliberately NOT admitted**, even though it
 looks like an equally safe canonicalization of the same shape: `cd ""` is a
 documented no-op *success* on bash 3.2 (macOS stock `/bin/bash`), zsh, and

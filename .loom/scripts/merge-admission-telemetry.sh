@@ -114,7 +114,15 @@ GIT_COMMON_DIR=$(git rev-parse --git-common-dir 2>/dev/null) || {
 REPO_ROOT=$(cd "$(dirname "$GIT_COMMON_DIR")" && pwd -P)
 LOG_FILE="${LOOM_MERGE_ADMISSION_TELEMETRY_LOG:-$REPO_ROOT/.loom/logs/merge-admission-telemetry.jsonl}"
 
-HOST_ID="${LOOM_HOST_ID:-${HOSTNAME:-$(hostname 2>/dev/null || echo unknown-host)}}"
+# Host id comes from `loom-daemon host-id` (#10023) so these records land under
+# the same SigNoz host.id as the daemon's. A daemon that is not installed keeps
+# the prior chain; a daemon that finds no identity yields the unknown-host literal.
+if command -v "${LOOM_DAEMON_BIN:-loom-daemon}" >/dev/null 2>&1; then
+    HOST_ID="$("${LOOM_DAEMON_BIN:-loom-daemon}" host-id 2>/dev/null)" || HOST_ID=""
+    HOST_ID="${HOST_ID:-unknown-host}"
+else
+    HOST_ID="${LOOM_HOST_ID:-${HOSTNAME:-$(hostname 2>/dev/null || echo unknown-host)}}"
+fi
 
 # --- Portable duration-string -> seconds -------------------------------------
 # Accepts a bare integer (seconds) or an integer with a single trailing unit

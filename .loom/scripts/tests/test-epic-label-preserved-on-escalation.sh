@@ -12,8 +12,8 @@
 # nothing would ever re-apply the label.
 #
 # Curator investigation for #6715 found the hypothesis does NOT reproduce
-# against this repo's current `defaults/`: the escalation `gh issue edit` is
-# add-only (`--add-label "loom:operator"`, no
+# against this repo's current `defaults/`: the escalation is add-only (since
+# #10098 a `loom-daemon operator-decision apply` call that passes no
 # `--remove-label` at all). This suite is the anti-regression mechanism that
 # keeps it that way, modeled directly on
 # defaults/scripts/tests/test-operator-hold-routing.sh's pattern:
@@ -22,7 +22,7 @@
 #      `loom:epic` (a static grep, exercised against pass/fail fixtures so it
 #      can never pass vacuously).
 #   2. WIRING -- champion-epic.md states the preservation requirement in
-#      prose near the escalation block (Step 4's `gh issue edit`), so a
+#      prose near the escalation block (Step 4's `operator-decision apply`), so a
 #      future edit to that block cannot silently reintroduce the bug without
 #      also having to touch documentation that contradicts the change.
 #

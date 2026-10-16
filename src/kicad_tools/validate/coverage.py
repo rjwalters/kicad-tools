@@ -67,6 +67,7 @@ BLOCKING_CATEGORIES: frozenset[str] = frozenset(
         "netclass_clearance_copper",
         "netclass_floor",
         "netlist",
+        "routing_policy",
         "solder_mask",
         "mask_to_copper",
         "via_in_pad",
@@ -170,6 +171,11 @@ def precheck(
         and getattr(checker, "physical_copper_gap_mm", None) is None
     ):
         return skipped(category, "opt_in:--physical-copper-gap")
+    if category == "routing_policy" and not getattr(checker, "require_routing_policy", False):
+        from kicad_tools.validate.rules.routing_policy import declares_routing_policy
+
+        if not ncm or not any(declares_routing_policy(nc) for nc in ncm.values()):
+            return skipped(category, "no_declared_policies")
     if category == "match_group_length_skew" and ncm is None:
         return skipped(category, "no_net_class_map")
     if (

@@ -627,8 +627,8 @@ The writer's read share is `route = direct_read` on the writer's `account`
 over all reads. A rise means a classifier gap, not an outage.
 
 Discovery listings can also skip GitHub, and the gateway, entirely: with a
-state mirror configured (`forge.mirror`), the work finder and the stage-dwell
-sampler read fresh listings from it and fall back to the paths above. See
+state mirror configured (`forge.mirror`), the work finder
+reads fresh listings from it and fall back to the paths above. See
 [`forge-events.md` §8](forge-events.md#8-the-state-mirror-forgemirror-discovery-reads-and-wakes).
 
 ### The cached-permission window: `403 … not accessible by integration` (#6074)
