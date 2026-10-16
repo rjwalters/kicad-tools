@@ -134,6 +134,12 @@ if [[ "$1" == "pr" && "$2" == "list" ]]; then
   exit 0
 fi
 
+if [[ "$1" == "pr" && "$2" == "view" ]]; then
+  f="$STUB_DIR_FROM_ENV/pr-comments-$3.txt"
+  if [[ -f "$f" ]]; then cat "$f"; fi
+  exit 0
+fi
+
 if [[ "$1" == "pr" && "$2" == "comment" ]]; then
   echo "$*" >> "$LOG"
   exit 0
@@ -148,6 +154,9 @@ chmod +x "$STUB_DIR/gh"
 #   git fetch ...                          -> record + exit 0
 #   git merge-base --is-ancestor A <child> -> exit code from $STUB_DIR/ancestor-<safe child>
 #                                             (file present -> its value; absent -> 1 = stale)
+#   git [-C dir] worktree add ...          -> exit $LOOM_TEST_WORKTREE_EXIT (default 0)
+#   git [-C dir] merge ...                 -> exit $LOOM_TEST_MERGE_EXIT (default 0; --abort 0)
+#   git [-C dir] diff ...                  -> cat $STUB_DIR/conflicts.txt (the conflicting files)
 #   git rebase --abort                     -> record + exit 0
 #   git rebase A B                         -> record + exit $LOOM_TEST_REBASE_EXIT (default 0)
 #   git push ...                           -> record + exit $LOOM_TEST_PUSH_EXIT (default 0)
@@ -162,8 +171,22 @@ STUB_DIR_FROM_ENV="${LOOM_TEST_STUB_DIR:?stub git: LOOM_TEST_STUB_DIR not set}"
 LOG="$STUB_DIR_FROM_ENV/git-calls.log"
 echo "git $*" >> "$LOG"
 echo "git $*" >> "$STUB_DIR_FROM_ENV/all-calls.log"
+[[ "$1" == "-C" ]] && shift 2
 case "$1" in
   fetch) exit 0 ;;
+  worktree)
+    # `worktree add --detach <path> <ref>`: <path> is a real empty dir; seed an
+    # optional .loom/config.json fixture into it (the compile-check input).
+    if [[ "$2" == "add" && -f "$STUB_DIR_FROM_ENV/checkout-config.json" ]]; then
+      mkdir -p "$4/.loom" && cp "$STUB_DIR_FROM_ENV/checkout-config.json" "$4/.loom/config.json"
+    fi
+    exit "${LOOM_TEST_WORKTREE_EXIT:-0}"
+    ;;
+  merge)
+    if [[ "$2" == "--abort" ]]; then exit 0; fi
+    exit "${LOOM_TEST_MERGE_EXIT:-0}"
+    ;;
+  diff) [[ -f "$STUB_DIR_FROM_ENV/conflicts.txt" ]] && cat "$STUB_DIR_FROM_ENV/conflicts.txt"; exit 0 ;;
   merge-base)
     # merge-base --is-ancestor origin/<parent> origin/<child>; last arg = child ref.
     child="${!#}"
@@ -301,6 +324,10 @@ reset_state() {
     unset LOOM_TEST_REBASE_EXIT
     unset LOOM_TEST_GUARD_EXIT
     unset LOOM_TEST_PUSH_EXIT
+    unset LOOM_TEST_MERGE_EXIT
+    unset LOOM_TEST_WORKTREE_EXIT
+    unset LOOM_VERSION_CHECK_SCRIPT
+    rm -f "$STUB_DIR"/pr-comments-*.txt "$STUB_DIR/conflicts.txt" "$STUB_DIR/checkout-config.json"
     clear_rev_parse_sha
     set_ls_remote_sha "$DEFAULT_ORIGIN_HEAD"
     # #9487 default: the pinned lease builds successfully for every child.
@@ -384,12 +411,19 @@ assert_contains "$ALL_LOG_C" \
   "loom-daemon push-lease pin-flag --remote origin --branch feature/issue-201 --local-ref refs/heads/feature/issue-201" \
   "(c) the pin is built by the loom-daemon subcommand, with the local-ref ancestry check wired (#9487)"
 
-# (c-merge) #10771: same stale, safe child, but this repo's PR branches are
-#     not rebased (loom-daemon branch-update strategy = merge). The child is
-#     reported and left alone: no pin, no rebase, no push, no comment, and not a
-#     failure — rewriting it would delete other agents' merge commits.
+# (c-merge) #10771 / #9808: same stale, safe child, but this repo's PR branches
+#     are not rebased (loom-daemon branch-update strategy = merge, or no answer).
+#     The child is never rewritten: no pin, no rebase, no lease. It is merged and
+#     pushed with a PLAIN push (the clean-merge case, version gate green, no
+#     compile gate configured), and nothing is posted.
+cat > "$STUB_DIR/version-ok.sh" <<'STUB'
+#!/usr/bin/env bash
+exit 0
+STUB
+chmod +x "$STUB_DIR/version-ok.sh"
 for CM_MODE in merge unset; do
 reset_state
+export LOOM_VERSION_CHECK_SCRIPT="$STUB_DIR/version-ok.sh"
 if [[ "$CM_MODE" == unset ]]; then unset BRANCH_UPDATE_STRATEGY; else BRANCH_UPDATE_STRATEGY=merge; fi
 write_prlist "feature/issue-100" '[{"number":501,"headRefName":"feature/issue-201"}]'
 clear_uptodate "feature/issue-201"   # stale
@@ -398,13 +432,148 @@ _rebase_stacked_children "feature/issue-100" >"$OUT_CM_FILE" 2>&1
 OUT_CM="$(cat "$OUT_CM_FILE")"
 rm -f "$OUT_CM_FILE"
 assert_not_contains "$(read_git)" "rebase" "(c-merge/$CM_MODE) merge-only repo -> no rebase attempted (#10771)"
-assert_not_contains "$(read_git)" "push" "(c-merge/$CM_MODE) merge-only repo -> nothing pushed, let alone forced (#10771)"
 assert_not_contains "$(read_all)" "push-lease pin-flag" "(c-merge/$CM_MODE) merge-only repo -> no lease is even built"
-assert_eq "" "$(read_gh)" "(c-merge/$CM_MODE) merge-only repo -> no comment posted"
-assert_eq "0" "$RSC_FAILURE" "(c-merge/$CM_MODE) merge-only repo -> a policy skip is not a failure"
-assert_contains "$OUT_CM" "git merge origin/feature/issue-100" "(c-merge/$CM_MODE) the skip names the merge-based remedy"
+assert_contains "$(read_git)" "merge --no-edit -m" "(c-merge/$CM_MODE) stale child -> origin/<parent> merged in (#9808)"
+assert_contains "$(read_git)" "push origin HEAD:refs/heads/feature/issue-201" "(c-merge/$CM_MODE) clean merge -> plain push of the child (#9808)"
+assert_not_contains "$(read_git)" "force" "(c-merge/$CM_MODE) no force flag of any kind on any git call"
+assert_not_contains "$(read_git)" "--force-with-lease" "(c-merge/$CM_MODE) no lease on any git call"
+assert_eq "" "$(read_gh)" "(c-merge/$CM_MODE) clean merge -> no comment posted"
+assert_eq "0" "$RSC_FAILURE" "(c-merge/$CM_MODE) clean merge -> not a failure"
 done
 BRANCH_UPDATE_STRATEGY=rebase
+
+# (m2) #9808: the merge conflicts -> aborted, nothing pushed, exactly one comment
+#      naming the files and the command; a second run does not re-post it.
+reset_state
+BRANCH_UPDATE_STRATEGY=merge
+export LOOM_TEST_MERGE_EXIT=1
+printf 'src/a.rs\nsrc/b.rs\n' > "$STUB_DIR/conflicts.txt"
+write_prlist "feature/issue-100" '[{"number":501,"headRefName":"feature/issue-201"}]'
+clear_uptodate "feature/issue-201"   # stale
+_rebase_stacked_children "feature/issue-100" >/dev/null 2>&1
+assert_contains "$(read_git)" "merge --abort" "(m2) Conflict -> the merge is aborted"
+assert_not_contains "$(read_git)" "push" "(m2) Conflict -> nothing pushed"
+assert_contains "$(read_gh)" "pr comment 501 --repo owner/repo" "(m2) Conflict -> one comment on the child PR"
+assert_contains "$(read_gh)" "- src/a.rs" "(m2) Comment names the first conflicting file"
+assert_contains "$(read_gh)" "- src/b.rs" "(m2) Comment names the second conflicting file"
+assert_contains "$(read_gh)" "git fetch origin"$'\n'"git merge origin/feature/issue-100" "(m2) Comment carries the exact local command"
+assert_contains "$(read_gh)" "loom:destack-conflict parent=localsha123" "(m2) Comment carries the per-parent-tip marker"
+assert_eq "1" "$(read_gh | grep -c 'pr comment 501' || true)" "(m2) Exactly one comment posted"
+assert_eq "0" "$RSC_FAILURE" "(m2) A conflict handoff is not a failure"
+# Second run: the PR already carries the marker for this parent tip.
+printf 'earlier\n<!-- loom:destack-conflict parent=localsha123 -->\n' > "$STUB_DIR/pr-comments-501.txt"
+: > "$STUB_DIR/gh-calls.log"
+_rebase_stacked_children "feature/issue-100" >/dev/null 2>&1
+assert_eq "" "$(read_gh)" "(m2) Re-run on the same parent tip -> no duplicate comment"
+# The parent moved: a new tip earns a new comment.
+set_rev_parse_sha "newtip456"
+_rebase_stacked_children "feature/issue-100" >/dev/null 2>&1
+assert_contains "$(read_gh)" "parent=newtip456" "(m2) A new parent tip -> a fresh comment"
+BRANCH_UPDATE_STRATEGY=rebase
+
+# (m3) #9808: a red version gate or a red compile check on the merge result ->
+#      nothing pushed, RSC_FAILURE=2.
+reset_state
+BRANCH_UPDATE_STRATEGY=merge
+export LOOM_VERSION_CHECK_SCRIPT="$STUB_DIR/version-mismatch.sh"
+write_prlist "feature/issue-100" '[{"number":501,"headRefName":"feature/issue-201"}]'
+clear_uptodate "feature/issue-201"   # stale
+OUT_M3_FILE="$(mktemp)"
+_rebase_stacked_children "feature/issue-100" >"$OUT_M3_FILE" 2>&1
+OUT_M3="$(cat "$OUT_M3_FILE")"; rm -f "$OUT_M3_FILE"
+assert_contains "$(read_git)" "merge --no-edit -m" "(m3) Red version gate -> the merge did run"
+assert_not_contains "$(read_git)" "push" "(m3) Red version gate -> nothing pushed"
+assert_eq "2" "$RSC_FAILURE" "(m3) Red version gate -> RSC_FAILURE=2"
+assert_contains "$OUT_M3" "MISMATCH" "(m3) Red version gate -> the gate's finding is surfaced"
+reset_state
+BRANCH_UPDATE_STRATEGY=merge
+export LOOM_VERSION_CHECK_SCRIPT="$STUB_DIR/version-ok.sh"
+echo '{"buildGate":{"enabled":true,"command":"echo should-not-run","fastCommand":"echo compile-broke; exit 1"}}' > "$STUB_DIR/checkout-config.json"
+write_prlist "feature/issue-100" '[{"number":501,"headRefName":"feature/issue-201"}]'
+clear_uptodate "feature/issue-201"   # stale
+OUT_M3B_FILE="$(mktemp)"
+_rebase_stacked_children "feature/issue-100" >"$OUT_M3B_FILE" 2>&1
+OUT_M3B="$(cat "$OUT_M3B_FILE")"; rm -f "$OUT_M3B_FILE"
+assert_not_contains "$(read_git)" "push" "(m3) Red compile check -> nothing pushed"
+assert_eq "2" "$RSC_FAILURE" "(m3) Red compile check -> RSC_FAILURE=2"
+assert_contains "$OUT_M3B" "compile-broke" "(m3) The fastCommand ran (not the full command) and its output is surfaced"
+assert_not_contains "$OUT_M3B" "should-not-run" "(m3) fastCommand wins over command"
+# Green compile check via the derived fast tier: command run with LOOM_BUILD_GATE_TIER=fast.
+reset_state
+BRANCH_UPDATE_STRATEGY=merge
+export LOOM_VERSION_CHECK_SCRIPT="$STUB_DIR/version-ok.sh"
+echo '{"buildGate":{"enabled":true,"command":"env | grep -qx LOOM_BUILD_GATE_TIER=fast"}}' > "$STUB_DIR/checkout-config.json"
+write_prlist "feature/issue-100" '[{"number":501,"headRefName":"feature/issue-201"}]'
+clear_uptodate "feature/issue-201"   # stale
+_rebase_stacked_children "feature/issue-100" >/dev/null 2>&1
+assert_contains "$(read_git)" "push origin HEAD:refs/heads/feature/issue-201" "(m3) Derived fast-tier command green -> pushed"
+assert_eq "0" "$RSC_FAILURE" "(m3) Derived fast-tier command green -> RSC_FAILURE stays 0"
+
+# (m4) #9808: a rejected push is reported, never retried; no failure path forces.
+reset_state
+BRANCH_UPDATE_STRATEGY=merge
+export LOOM_VERSION_CHECK_SCRIPT="$STUB_DIR/version-ok.sh"
+export LOOM_TEST_PUSH_EXIT=1
+write_prlist "feature/issue-100" '[{"number":501,"headRefName":"feature/issue-201"}]'
+clear_uptodate "feature/issue-201"   # stale
+_rebase_stacked_children "feature/issue-100" >/dev/null 2>&1
+assert_eq "1" "$(read_git | grep -c ' push ' || true)" "(m4) Rejected push -> attempted once, not retried"
+assert_not_contains "$(read_git)" "force" "(m4) Rejected push -> never escalated to a force"
+assert_eq "2" "$RSC_FAILURE" "(m4) Rejected push -> RSC_FAILURE=2"
+
+# (m5) #9808: in-flight children are skipped with a log line: child ISSUE
+#      loom:building, or child PR loom:treating / loom:reviewing. Nothing runs.
+cat > "$STUB_DIR/issue-501.json" <<'EOF'
+{"state":"open","labels":[{"name":"loom:treating"}]}
+EOF
+cat > "$STUB_DIR/issue-503.json" <<'EOF'
+{"state":"open","labels":[{"name":"loom:reviewing"}]}
+EOF
+for CASE in "502 feature/issue-202 loom:building" "501 feature/issue-201 loom:treating" "503 feature/issue-201 loom:reviewing"; do
+read -r M5_PR M5_BR M5_WHY <<< "$CASE"
+reset_state
+BRANCH_UPDATE_STRATEGY=merge
+write_prlist "feature/issue-100" "[{\"number\":$M5_PR,\"headRefName\":\"$M5_BR\"}]"
+clear_uptodate "$M5_BR"   # stale
+OUT_M5_FILE="$(mktemp)"
+_rebase_stacked_children "feature/issue-100" >"$OUT_M5_FILE" 2>&1
+OUT_M5="$(cat "$OUT_M5_FILE")"; rm -f "$OUT_M5_FILE"
+assert_not_contains "$(read_git)" "merge --no-edit" "(m5/$M5_WHY) in-flight child -> not merged"
+assert_not_contains "$(read_git)" "push" "(m5/$M5_WHY) in-flight child -> not pushed"
+assert_eq "" "$(read_gh)" "(m5/$M5_WHY) in-flight child -> no comment"
+assert_contains "$OUT_M5" "$M5_WHY" "(m5/$M5_WHY) the skip is logged with its reason"
+assert_eq "0" "$RSC_FAILURE" "(m5/$M5_WHY) in-flight skip is not a failure"
+done
+rm -f "$STUB_DIR/issue-501.json" "$STUB_DIR/issue-503.json"
+
+# (m6) #9808: --dry-run reports would-merge / would-skip and mutates nothing.
+reset_state
+BRANCH_UPDATE_STRATEGY=merge
+DRY_RUN=true
+write_prlist "feature/issue-100" '[{"number":501,"headRefName":"feature/issue-201"},{"number":502,"headRefName":"feature/issue-202"}]'
+clear_uptodate "feature/issue-201"; clear_uptodate "feature/issue-202"
+OUT_M6_FILE="$(mktemp)"
+_rebase_stacked_children "feature/issue-100" >"$OUT_M6_FILE" 2>&1
+OUT_M6="$(cat "$OUT_M6_FILE")"; rm -f "$OUT_M6_FILE"
+assert_contains "$OUT_M6" "would-merge origin/feature/issue-100 into child PR #501" "(m6) Dry run -> would-merge reported"
+assert_contains "$OUT_M6" "would-skip child PR #502" "(m6) Dry run -> would-skip reported for the in-flight child"
+assert_not_contains "$(read_git)" "worktree" "(m6) Dry run -> no checkout made"
+assert_not_contains "$(read_git)" "merge --no-edit" "(m6) Dry run -> nothing merged"
+assert_not_contains "$(read_git)" "push" "(m6) Dry run -> nothing pushed"
+assert_eq "" "$(read_gh)" "(m6) Dry run -> nothing posted"
+DRY_RUN=false
+
+# (m7) #9808: a checkout that cannot be made skips the child, touching nothing.
+reset_state
+BRANCH_UPDATE_STRATEGY=merge
+export LOOM_TEST_WORKTREE_EXIT=1
+write_prlist "feature/issue-100" '[{"number":501,"headRefName":"feature/issue-201"}]'
+clear_uptodate "feature/issue-201"   # stale
+_rebase_stacked_children "feature/issue-100" >/dev/null 2>&1
+assert_not_contains "$(read_git)" "merge --no-edit" "(m7) No scratch checkout -> no merge"
+assert_not_contains "$(read_git)" "push" "(m7) No scratch checkout -> no push"
+BRANCH_UPDATE_STRATEGY=rebase
+reset_state
 
 # (c2) Same as (c), but version-check-gate.sh (real script, #7168) reports a
 #      mismatch via LOOM_VERSION_CHECK_SCRIPT -> rebase runs, but the push is
@@ -652,6 +821,23 @@ assert_contains "$src" 'if [[ "${BRANCH_UPDATE_STRATEGY:-}" != "rebase" ]]; then
   "any answer but an explicit rebase is merge (#10771)"
 assert_contains "$src" '"$SCRIPT_DIR/version-check-gate.sh"' \
   "safe path runs the shared version-check-gate.sh after rebase, before push (#7168)"
+
+# #9808: the merge path is plain by construction: no force flag of any kind inside
+# _merge_one_stacked_child (nor its checkout helper), and discovery is the one
+# shared _rebase_stacked_children loop (no second discovery query).
+MERGE_BODY="$(awk '/^_stacked_child_in_flight\(\) \{/{c=1} /^# Rebase \(or defer\) one discovered child PR/{c=0} c{print}' "$RSC_SRC")"
+assert_contains "$MERGE_BODY" "_merge_one_stacked_child() {" "merge path body extracted for the no-force assertion"
+TESTS_RUN=$((TESTS_RUN + 1))
+if printf '%s\n' "$MERGE_BODY" | grep -nE -- '--force|[[:space:]]-f[[:space:]]|\+refs|force-with-lease'; then
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "  ${RED}FAIL${NC}: merge path contains a force flag (matches above)"
+else
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "  ${GREEN}PASS${NC}: merge path contains no --force / -f / +refs / lease"
+fi
+assert_eq "1" "$(grep -c 'children_json="$(gh pr list --repo' "$RSC_SRC")" "discovery query exists exactly once (shared by both remedies)"
+assert_contains "$src" '_merge_one_stacked_child "$child_pr" "$child_branch" "$parent_branch"' \
+  "the merge-only branch of _process_one_stacked_child calls the merge remedy (#9808)"
 
 # --- Summary ---
 echo ""

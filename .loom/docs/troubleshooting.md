@@ -8,7 +8,7 @@
 - [Stuck Agent Detection](#stuck-agent-detection)
 - [Sweep Dispatch Troubleshooting](#sweep-dispatch-troubleshooting)
 - [Overnight / long-running orchestration](#overnight--long-running-orchestration)
-- [Worker disk full: dispatch halted `disk_full` (#10973)](#worker-disk-full-dispatch-halted-disk_full-10973)
+- [Worker disk full (#10973)](#worker-disk-full-10973)
 <!-- toc:end -->
 
 ## Common Issues
@@ -639,9 +639,7 @@ failed, cancelled or watchdog-cancelled); a manual spawn's, or one kept at run
 end, is collected by the orphan sweep about 10 minutes after its owner
 exits. Agents must use it (or
 their worktree's `target/`) and never create one under `/tmp`, `~`, `~/.cache`
-or `.loom/target-*`; see `cargo-target-isolation.md`. The disk-headroom
-estimate per worktree (`LOOM_PER_WORKTREE_GB`) defaults to 8 GB, measured
-from full builds of this workspace.
+or `.loom/target-*`; see `cargo-target-isolation.md`.
 
 ### Building into a private target dir you can actually delete afterwards (#8460)
 
@@ -3384,23 +3382,20 @@ legitimately changed for some other reason, `git diff <old-sha> <new-sha>`
 being empty confirms the content is identical (the #6646 incident's actual
 outcome) even though the identity changed.
 
-## Worker disk full: dispatch halted `disk_full` (#10973)
+## Worker disk full (#10973)
 
-**Symptom.** `host.health` shows `dispatch_halted: true` with a `halt_reason`
-starting `disk_full: <n> GB free`, `loom-daemon status` reports the host
-breaker `open` with the same reason, and `dispatch_sweep` is refused. On the
-2026-10-08 incident a worker's worktree volume reached 0 GB and, because that
-host was the ETA authority, fleet ETAs went `stale_inputs` for hours (ETA has since been removed from Loom, #11098).
+**Symptom.** A worker's worktree volume runs out of space. Builds and clones
+fail, and sweeps on that host error out. On the 2026-10-08 incident a worker's
+worktree volume reached 0 GB.
 
-**What the daemon does by itself.** Each work-finder tick samples free GB on
-the worktree-root volume. Two consecutive readings below the floor
-(`LOOM_DISK_FULL_HALT_GB`, default 3; `0` disables) halt new dispatch. The
-eager reclaim pass (#7512) gets the first low tick to free space, so a pass
-that frees space never halts. The halt clears only at `LOOM_DISK_FULL_RESUME_GB`
-(default twice the floor). An unmeasurable probe (`df` failure) never halts and
-clears an existing halt. Running sweeps drain; nothing is killed. Grep the
-daemon log for `disk_full_halt:` (edges) and `eager_reclaim:` (what each
-reclaim step freed).
+**What the daemon does by itself.** The daemon does not halt dispatch on low
+disk; the old disk-full halt and the host-distress breaker were removed by
+#12406. Admission is capped only by `autonomous.workFinder.maxConcurrent`.
+When free space on the worktree-root volume falls below the floor
+(`autonomous.worktreeReaper.diskWarnFreeGb`), the eager reclaim pass (#7512)
+runs and frees Loom-managed space. Grep the daemon log for `eager_reclaim:`
+(what each reclaim step freed). If a host keeps filling, lower its
+`maxConcurrent` in fleet config.
 
 **Alerts.** SigNoz pages before this point (`signoz/alerts/`): `host-disk-low`
 (warning: under 30 GB or 10%, or full within 6 h at the last hour's rate) and
@@ -3417,4 +3412,5 @@ heartbeats but its work finder has not ticked for 2x its own interval.
    manual run is the way past it.
 4. Reclaim only touches Loom-managed paths. Space held by anything else (logs,
    caches, another tenant) must be freed by hand.
-5. The halt lifts within a tick or two of free space reaching the resume level.
+5. If the host keeps filling, lower its `autonomous.workFinder.maxConcurrent`
+   in fleet config.

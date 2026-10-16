@@ -484,27 +484,26 @@ class NetlistValidator:
         "not connected" and normalize to ``None``.  Non-plated holes are
         skipped: they carry no copper and can never be on a net.
         """
+        from kicad_tools.schema.pcb import iter_copper_pads
+
         pcb_pad_nets: dict[tuple[str, str], str | None] = {}
-        for fp in self.pcb.footprints:
+        for fp, pad in iter_copper_pads(self.pcb):
             ref = fp.reference
-            if not ref or ref.startswith("#"):
+            if not ref or ref.startswith("#") or not pad.number:
                 continue
-            for pad in fp.pads:
-                if pad.type == "np_thru_hole" or not pad.number:
-                    continue
-                name: str | None = pad.net_name or None
-                if (
-                    name is not None
-                    and name.startswith(f"unconnected-({ref}-")
-                    and name.endswith(f"-Pad{pad.number})")
-                ):
-                    name = None
-                key = (ref, pad.number)
-                # A footprint may repeat a pad number (e.g. a thermal pad
-                # split into several copper shapes).  Keep any real binding
-                # rather than letting an unbound duplicate erase it.
-                if name is not None or key not in pcb_pad_nets:
-                    pcb_pad_nets[key] = name
+            name: str | None = pad.net_name or None
+            if (
+                name is not None
+                and name.startswith(f"unconnected-({ref}-")
+                and name.endswith(f"-Pad{pad.number})")
+            ):
+                name = None
+            key = (ref, pad.number)
+            # A footprint may repeat a pad number (e.g. a thermal pad
+            # split into several copper shapes).  Keep any real binding
+            # rather than letting an unbound duplicate erase it.
+            if name is not None or key not in pcb_pad_nets:
+                pcb_pad_nets[key] = name
         return pcb_pad_nets
 
     def _schematic_pin_nets(self) -> dict[tuple[str, str], str | None] | None:

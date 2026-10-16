@@ -83,6 +83,10 @@ class MeshPathfinder:
         rules: DesignRules | None = None,
         pours: list[list[Pt]] | None = None,
         layer_stack: LayerStack | None = None,
+        *,
+        cutouts: list[list[Pt]] | None = None,
+        cutout_margin: float = 0.0,
+        cutout_floor: float = 0.0,
     ) -> None:
         from ..fixed_copper import FixedFillObstacles
 
@@ -118,6 +122,19 @@ class MeshPathfinder:
         # was before that phase: inventing a rule value here is exactly what
         # the epic's scope guard #1 forbids.
         self.edge_clearance: float = 0.0
+        # Interior Edge.Cuts loops -- board windows, cutouts, round holes
+        # (issue #6822).  ``outline`` is only the outer bounding box, so
+        # without these the mesh happily routed straight across a cut.  Each
+        # enters the navmesh as a hole and every emitted leg and via is
+        # measured against it at ``edge_clearance + cutout_margin``, or -- when
+        # no clearance was resolved -- the #6043 physical floor
+        # ``cutout_floor`` (a centreline radius, ``_edge_keepout_floor``).
+        # ``cutout_margin`` is the certified chord error of a curved loop
+        # (``OutlineSegments.max_error_mm``), as the lattice's
+        # ``EscapeBoundary`` adds it.
+        self.cutouts: list[list[Pt]] = [list(c) for c in (cutouts or []) if len(c) >= 3]
+        self.cutout_margin: float = max(float(cutout_margin), 0.0)
+        self.cutout_floor: float = max(float(cutout_floor), 0.0)
         # Static navmesh + triangulation-call counter (built lazily, once).
         self._navmesh: NavMesh | None = None
         self.triangulation_calls: int = 0
@@ -154,7 +171,7 @@ class MeshPathfinder:
                 "use the grid router to preserve the curved boundary"
             )
         outline = _outline_from_edges(segments)
-        return cls(outline, pads, rules, pours, layer_stack)
+        return cls(outline, pads, rules, pours, layer_stack, cutouts=interior_edge_loops(segments))
 
     # -- static mesh ------------------------------------------------------
 
@@ -199,6 +216,8 @@ class MeshPathfinder:
                         )
             steiner = list(dict.fromkeys(steiner))
         holes = self._pour_holes()
+        if self.cutouts:
+            holes, steiner = self._merge_cutout_holes(holes, steiner)
         self.triangulation_calls += 1
         verts, tris = router_cpp.constrained_delaunay(self.outline, holes, steiner)
         if not verts or not tris:
@@ -241,6 +260,70 @@ class MeshPathfinder:
             ):
                 holes.append(inflated)
         return holes
+
+    @property
+    def cutout_clearance(self) -> float:
+        """Copper-to-cut clearance for :attr:`cutouts` in mm (issue #6822).
+
+        The router's resolved ``edge_clearance`` plus the curved-loop chord
+        error.  When no clearance was resolved this is just the chord error
+        and :attr:`cutout_floor` (applied per copper width by the obstacle
+        model and :meth:`_via_clears_cutouts`) carries the requirement.
+        Either way the cut is measured: copper never overlaps it.
+        """
+        return max(self.edge_clearance, 0.0) + self.cutout_margin
+
+    def _cutout_requirement(self, half: float) -> float:
+        """Copper gap a copper shape of half-extent ``half`` must keep from a cut."""
+        return max(self.cutout_clearance, self.cutout_floor + self.cutout_margin - half, 0.0)
+
+    def _merge_cutout_holes(
+        self, pour_holes: list[list[Pt]], steiner: list[Pt]
+    ) -> tuple[list[list[Pt]], list[Pt]]:
+        """Navmesh holes with the interior Edge.Cuts loops added (issue #6822).
+
+        Each loop is grown by the trace half-width plus :attr:`cutout_clearance`
+        so the corridor (a centreline heuristic) keeps off the cut, exactly as
+        :meth:`_pour_holes` grows pours.  A grown loop that would swallow a pad
+        centre falls back to the bare loop so the pad stays a locatable
+        endpoint; the obstacle model still enforces the real requirement on
+        every emitted leg.  Overlapping holes are unioned and the result is
+        clipped to the slightly-inset outline so poly2tri never sees touching,
+        crossing or out-of-bounds holes.  Steiner points inside a hole are
+        dropped.  Only called when the board has cutouts, so a board without
+        one triangulates byte-identically.
+        """
+        from shapely.geometry import MultiPoint, Point, Polygon, box
+        from shapely.ops import unary_union  # type: ignore[import-untyped]
+
+        bx0, by0, bx1, by1 = self._bbox
+        margin = 1e-3
+        inner = box(bx0 + margin, by0 + margin, bx1 - margin, by1 - margin)
+        half = self.rules.trace_width / 2.0
+        grow = half + self._cutout_requirement(half)
+        pad_points = MultiPoint([(p.x, p.y) for p in self.pads]) if self.pads else None
+        shapes = [Polygon(h) for h in pour_holes]
+        for ring in self.cutouts:
+            bare = Polygon(ring).buffer(0)
+            if bare.is_empty:
+                continue
+            grown = bare.buffer(grow, join_style=2, mitre_limit=2.0)
+            if pad_points is not None and grown.intersects(pad_points):
+                grown = bare
+            # Curved loops arrive as dense chord chains; thin them for the CDT
+            # (the heuristic corridor only -- legs are measured exactly).
+            shapes.append(grown.simplify(min(0.01, grow / 4.0), preserve_topology=True))
+        merged = unary_union(shapes).intersection(inner)
+        polys = [g for g in getattr(merged, "geoms", [merged]) if g.geom_type == "Polygon"]
+        holes = [
+            [(float(x), float(y)) for x, y in poly.exterior.coords[:-1]]
+            for poly in polys
+            if not poly.is_empty and poly.area > 0
+        ]
+        guard = unary_union([Polygon(h) for h in holes]).buffer(1e-6) if holes else None
+        if guard is not None:
+            steiner = [pt for pt in steiner if not guard.contains(Point(pt))]
+        return holes, steiner
 
     # -- the route contract -----------------------------------------------
 
@@ -339,6 +422,8 @@ class MeshPathfinder:
             pads=self._foreign_pads(net),
             edge_clearance=self.edge_clearance,
             pad_floors=self.rules.net_clearance_floors,
+            cutouts=self.cutouts,
+            cutout_clearance=self._cutout_requirement(trace_w / 2),
         )
 
         cost_congestion = self.rules.cost_congestion if negotiated_mode else 0.0
@@ -766,6 +851,8 @@ class MeshPathfinder:
                         return False
                 else:
                     return False
+        if self.cutouts and not self._via_clears_cutouts(site):
+            return False
         if not self.fixed_fills.via_clear(
             site,
             tuple(range(self.layer_stack.num_layers)),
@@ -786,6 +873,25 @@ class MeshPathfinder:
                     return False
                 if standoff > 0.0 and _point_polygon_distance(site, poly) < standoff:
                     return False
+        return True
+
+    def _via_clears_cutouts(self, site: Pt) -> bool:
+        """True when a via body at ``site`` keeps off every cutout (issue #6822).
+
+        A through-via drills every layer, so its pad copper must sit outside
+        each interior Edge.Cuts loop and keep :attr:`cutout_clearance` from it.
+        """
+        from .kernel_adapter import clears_cut, copper_leg, outline_of
+
+        radius = self.rules.via_diameter / 2.0
+        body = copper_leg(site, site, radius)
+        required = self._cutout_requirement(radius)
+        for ring in self.cutouts:
+            cut = outline_of(ring)
+            if cut is None:
+                continue
+            if cut.contains(site) or not clears_cut(body, cut, required):
+                return False
         return True
 
     def _route_via_injection(
@@ -841,6 +947,8 @@ class MeshPathfinder:
                 pads=self._foreign_pads_layer(net, lidx),
                 edge_clearance=self.edge_clearance,
                 pad_floors=self.rules.net_clearance_floors,
+                cutouts=self.cutouts,
+                cutout_clearance=self._cutout_requirement(trace_w / 2),
             )
 
         # Per-layer portal blocking (issue #4276 section 3): a portal is blocked
@@ -1247,3 +1355,38 @@ def _outline_from_edges(
     xmin, xmax = min(xs), max(xs)
     ymin, ymax = min(ys), max(ys)
     return [(xmin, ymin), (xmax, ymin), (xmax, ymax), (xmin, ymax)]
+
+
+def interior_edge_loops(
+    segments: list[tuple[tuple[float, float], tuple[float, float]]],
+) -> list[list[Pt]]:
+    """The interior closed loops of an Edge.Cuts segment set (issue #6822).
+
+    Board windows, cutouts and round holes: every closed ring the segments
+    polygonize into, other than the outer outline, that sits at an odd
+    nesting depth (inside the board, not an island inside a window).  The
+    outer outline is the ring with the largest enclosed area.  Rings are
+    returned WITHOUT a repeated final vertex.  Open or degenerate geometry
+    yields ``[]``, i.e. no cutouts -- the pre-#6822 behaviour.
+    """
+    if not segments:
+        return []
+    from shapely.geometry import MultiLineString, Polygon
+    from shapely.ops import polygonize
+
+    try:
+        lines = MultiLineString([[tuple(a), tuple(b)] for a, b in segments if a != b])
+        faces = list(polygonize(lines.union(lines)))
+    except Exception:  # pragma: no cover - malformed geometry: no cutouts
+        return []
+    rings = [Polygon(face.exterior) for face in faces if face.area > 0]
+    if len(rings) < 2:
+        return []
+    rings.sort(key=lambda ring: ring.area, reverse=True)
+    loops: list[list[Pt]] = []
+    for idx, ring in enumerate(rings[1:], start=1):
+        probe = ring.representative_point()
+        depth = sum(1 for other in rings[:idx] if other.contains(probe))
+        if depth % 2 == 1:
+            loops.append([(float(x), float(y)) for x, y in ring.exterior.coords[:-1]])
+    return loops

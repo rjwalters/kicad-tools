@@ -277,8 +277,6 @@ fi
 WORKFLOW="$(section_body "Priority 2: Triage queue" <"$CURATOR_MD")"
 assert_contains "$WORKFLOW" "then Champion send-backs) first" \
     "Curator's workflow takes send-backs before Priority 1"
-assert_contains "$(section_body "Admission: keep or close" <"$CURATOR_MD")" "a Champion send-back" \
-    "a send-back skips the admission keep-or-close"
 
 # ---------------------------------------------------------------------------
 echo ""
@@ -427,7 +425,7 @@ else
         OUT="$(run_guard "$F4")"
         assert_eq "0" "$(result_of "$OUT" PRIOR_REJECTIONS)" "an outsider's NEEDS REVISION text is not counted in PRIOR_REJECTIONS"
         assert_eq "no" "$(result_of "$OUT" UNREVISED)" "an outsider's verdict marker does not send the proposal to Step 4 (UNREVISED=no)"
-        assert_eq "" "$(run_check "$F4")" "an outsider's revise marker does not make a send-back unanswered (Admission still runs)"
+        assert_eq "" "$(run_check "$F4")" "an outsider's revise marker does not make a send-back unanswered"
         MIXED="$(jq -c '.[0] |= (.authorAssociation = "NONE") | .[3] |= (.authorAssociation = "NONE")' <<<"$COMMENTS")"
         F5="$FIXTURE_DIR/fix/mixed"
         make_fixture "$F5" "$TITLE" "$BODY" "$MIXED" "$(to_rest <<<"$MIXED")"

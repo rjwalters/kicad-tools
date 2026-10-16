@@ -9,8 +9,10 @@ matter on it. This document covers the read-only tooling that proves a
 repository's workflows are qualified, the prerequisites for enabling queue mode,
 and how to roll back.
 
-**Status:** this is preparation only. Nothing in Loom enqueues yet: Phases A
-and B, #10255 and #10256, provide the queue controls and the Champion handoff.
+**Status:** queue execution is compiled on (#12323) but opt-in via
+`champion.mergeMode=queue`. Phases A and B, #10255 and #10256, provide the queue
+controls and the Champion handoff; the `merge_group` check workflow is the
+optional template `defaults/optional/github-workflows/merge-group-check.yml`.
 `rjwalters/loom` is user-owned, and GitHub documents merge queues for
 organization-owned repositories, so this repository is **not eligible** for the
 live pilot. Its `ci.yml` carries a `merge_group` trigger anyway. The trigger is

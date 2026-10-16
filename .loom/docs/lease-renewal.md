@@ -150,6 +150,15 @@ In every case the lease comment is **left in place** to age out. A
 terminating loop never deletes it — the epic requires positive evidence on
 the reclaim side, and the renew side simply stops broadcasting.
 
+**Handing a lease back (#12103).** `loom-daemon lease release <issue>` stops this
+host's renewer(s) for the issue whatever their sweep id (an attended session
+never knows its own, `session_sweep_id`) and posts a `loom:lease-yield` per live
+lease, so `forge check-claim` stops counting it at once. The comment is kept for
+the audit trail. Idempotent; it exits 1, touching nothing, when a live lease
+belongs to another host. `--watch-pid` on `lease ensure` must be the process
+doing the work, never an inherited `$PPID` in a subagent: that is the parent
+session, which outlives the subagent and keeps the lease live.
+
 **Before a loop exists: the deferred publisher (#10570).** When an attended
 `loom-daemon lease ensure` is declined (publish exit 4, a peer lease still in
 its TTL, or exit 2, a failed `gh` write), there is no lease to renew yet. A

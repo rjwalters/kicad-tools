@@ -117,9 +117,19 @@ Run <run_id> (attempt <N>) finished red:
 Not routed as a flake because: <the test is in code this PR changes / attempt <N> of this head is red again / rerun refused: LOOM-RERUN-DENIED …>.
 
 Please fix these issues before the PR can be approved. I'll evaluate again once CI passes.
+
+<!-- loom:ci-gate-only -->
 EOF
 )" && \
   gh pr edit <number> --remove-label "loom:review-requested" --remove-label "loom:reviewing" --add-label "loom:changes-requested" --add-label "loom:ci-failure"
 ```
 
 Every failing check gets a line, and every line names a test or a step.
+
+**Do not add `loom:blocked` for a CI-only gate** (#10178). The labels above are
+the whole gate; the daemon returns the PR to review when the exact head goes
+green, but only for a verdict carrying `<!-- loom:ci-gate-only -->` (put it in
+the body only when CI is the **sole** finding) and no `loom:blocked` other than
+a park record with no blocker and `reason="ci-gate"`. If you must park it:
+`loom-daemon park-record apply --issue <number> --reason ci-gate --by judge`.
+

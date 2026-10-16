@@ -9,7 +9,7 @@ itself is not retired: role runners still use it
 
 Each host's work finder preferred a disjoint *slice* of the fleet's repos: the
 repos whose key hashed to this host's `shardIndex` on the `role_shard` ring
-(#6374). After the workspace draw, `repo_cap::apply_slice` deferred every
+(#6374). After the workspace draw, the slice filter deferred every
 out-of-slice candidate (`deferred_out_of_slice`, gate `out_of_slice`) whenever
 the slice had at least one candidate at the top of the tick, and fell back to
 the whole queue only when the slice was empty. The aim was to make two hosts
@@ -20,7 +20,7 @@ picking the same issue in the same tick rarer.
 1. **It starved hosts that had free slots.** The slice decided "my slice is
    non-empty" before pass 2 ran. Pass 2 could then reject every in-slice
    candidate without dispatching any: an open linked PR (#8865, moved into pass
-   2 on 2026-10-11), the per-repo cap (#9090), or the build back-off (#9410).
+   2 on 2026-10-11), the per-repo cap (#9090, itself removed by #12406), or the build back-off (#9410).
    The host then dispatched nothing while out-of-slice work waited. On
    2026-10-13 around 00:40Z, three workers with 7–12 free slots each had
    152–234 out-of-slice candidates deferred and dispatched 0–2 per tick. Per-

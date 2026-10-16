@@ -1167,6 +1167,7 @@ CHECK_CATEGORIES = [
     "pad_grid",
     "pin1_marker",
     "placement",
+    "routing_policy",
     "sch_fields",
     "silkscreen",
     "single_pad_net",
@@ -1247,6 +1248,58 @@ def _warn_unevaluated_ampacity(
         "was excluded via --skip/--only).",
         file=sys.stderr,
     )
+
+
+def _warn_unevaluated_routing_policy(
+    declared_keys: set[str],
+    resolution: object,
+    pcb: PCB,
+    only_set: set[str] | None,
+    skip_set: set[str],
+) -> None:
+    """Warn when a declared routing policy was never evaluated (Issue #6044).
+
+    Mirrors :func:`_warn_unevaluated_ampacity`: a net-class-map entry that
+    declares ``max_vias_per_net`` or ``length_constraint.max_length`` but
+    whose key resolves to no board net, whose net has no routed copper, or
+    whose ``routing_policy`` category was deselected produces no finding --
+    which would otherwise read the same as a compliant net.
+    """
+    active = (only_set is None or "routing_policy" in only_set) and "routing_policy" not in skip_set
+    resolved = getattr(resolution, "resolved", {}) or {}
+    key_to_board = {user_key: board_net for board_net, user_key in resolved.items()}
+    names = {n.number: n.name for n in getattr(pcb, "nets", {}).values()}
+    copper_nets: set[str] = set()
+    for item in [
+        *getattr(pcb, "segments", []),
+        *getattr(pcb, "arcs", []),
+        *getattr(pcb, "vias", []),
+    ]:
+        copper_nets.add(getattr(item, "net_name", "") or "")
+        copper_nets.add(names.get(getattr(item, "net_number", None), "") or "")
+    unresolved: list[str] = []
+    unevaluated: list[str] = []
+    for user_key in sorted(declared_keys):
+        board_net = key_to_board.get(user_key)
+        if board_net is None:
+            unresolved.append(user_key)
+        elif not active or board_net not in copper_nets:
+            unevaluated.append(board_net)
+    if unresolved:
+        print(
+            "WARNING: routing policy declared for net-class-map key(s) that match "
+            f"no board net: {', '.join(unresolved)}. Their max_vias_per_net / "
+            "max_length limits were NOT checked.",
+            file=sys.stderr,
+        )
+    unevaluated = list(dict.fromkeys(unevaluated))
+    if unevaluated:
+        print(
+            "WARNING: routing policy declared but not evaluated for net(s): "
+            f"{', '.join(unevaluated)} (unrouted net, or the routing_policy "
+            "category was excluded via --skip/--only).",
+            file=sys.stderr,
+        )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1542,6 +1595,19 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
+        "--require-routing-policy",
+        dest="require_routing_policy",
+        action="store_true",
+        help=(
+            "Make the routing_policy check fail every sensitive net class "
+            "(length_critical, noise_sensitive, length_match_group or "
+            "diffpair_partner set in the net-class map) whose routed nets "
+            "declare neither max_vias_per_net nor length_constraint.max_length "
+            "(Issue #6044). Pour nets are exempt. Requires a net-class map; "
+            "without one the command exits with a usage error. Off by default."
+        ),
+    )
+    parser.add_argument(
         "--no-net-class-map",
         dest="no_net_class_map",
         action="store_true",
@@ -1779,6 +1845,27 @@ def main(argv: list[str] | None = None) -> int:
                 return 1
             skip_set.add(cat)
 
+    # Issue #6044: --require-routing-policy is a gate on the routing_policy
+    # category; deselecting that category would leave it silently inert.
+    if getattr(args, "require_routing_policy", False):
+        if "routing_policy" in skip_set or (
+            only_set is not None and "routing_policy" not in only_set
+        ):
+            print(
+                "Error: --require-routing-policy needs the routing_policy check "
+                "category, which --only/--skip deselected",
+                file=sys.stderr,
+            )
+            return 1
+        if getattr(args, "no_net_class_map", False):
+            print(
+                "Error: --require-routing-policy cannot be combined with "
+                "--no-net-class-map: the policies it requires live in the "
+                "net-class map",
+                file=sys.stderr,
+            )
+            return 1
+
     if only_set and "physical_copper_gap" in only_set and args.physical_copper_gap is None:
         print("Error: physical_copper_gap requires --physical-copper-gap MM", file=sys.stderr)
         return 1
@@ -1971,6 +2058,17 @@ def main(argv: list[str] | None = None) -> int:
                 )
             print(_head + _tail, file=sys.stderr)
 
+    # Issue #6044: the routing-policy gate cannot pass without the map that
+    # declares the policies -- a usage error, not a silent pass.
+    if getattr(args, "require_routing_policy", False) and net_class_map is None:
+        print(
+            "Error: --require-routing-policy needs a net-class map, but none "
+            "was loaded. Pass one with --net-class-map or place "
+            "net_class_map.json next to the board.",
+            file=sys.stderr,
+        )
+        return 1
+
     # Load optional courtyard-waivers sidecar (Issue #4137).  An explicit
     # --courtyard-waivers path always wins and a malformed explicit file is a
     # hard error; an auto-discovered sidecar that fails to parse degrades
@@ -2141,12 +2239,17 @@ def main(argv: list[str] | None = None) -> int:
     # ``--net-class-map`` path and the auto-discovered route sidecar (whose
     # keys are already board-resolved, so re-resolution is idempotent).
     declared_ampacity_targets: dict[str, float] = {}
+    declared_routing_policies: set[str] = set()
     ampacity_resolution = None
     if net_class_map is not None:
+        from kicad_tools.validate.rules.routing_policy import declares_routing_policy
+
         for key, nc in net_class_map.items():
             target = getattr(nc, "target_ampacity", None)
             if target is not None:
                 declared_ampacity_targets[key] = float(target)
+            if declares_routing_policy(nc):
+                declared_routing_policies.add(key)
         net_class_map, ampacity_resolution = resolve_net_class_map_for_board(net_class_map, pcb)
 
     # Issue #4326: resolve the ampacity gate's copper weights (outer / inner
@@ -2267,6 +2370,13 @@ def main(argv: list[str] | None = None) -> int:
             # intent (--current-paths sidecar, auto-discovered).
             current_path_specs=current_path_specs,
             mask_copper_request=mask_copper_request,
+            # Issue #6044: routing_policy options.  Pair-net via caps are
+            # left to diffpair_uncoupled_length only when that category runs.
+            require_routing_policy=bool(getattr(args, "require_routing_policy", False)),
+            routing_policy_defer_pair_vias=(
+                (only_set is None or "diffpair_uncoupled_length" in only_set)
+                and "diffpair_uncoupled_length" not in skip_set
+            ),
         )
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
@@ -2408,6 +2518,18 @@ def main(argv: list[str] | None = None) -> int:
     if declared_ampacity_targets and ampacity_resolution is not None:
         _warn_unevaluated_ampacity(
             declared_ampacity_targets,
+            ampacity_resolution,
+            pcb,
+            only_set,
+            skip_set,
+        )
+
+    # Issue #6044: same contract for declared routing policies -- a policy
+    # whose key matched no board net, whose net has no copper, or whose
+    # category was deselected must not read as a pass.
+    if declared_routing_policies and ampacity_resolution is not None:
+        _warn_unevaluated_routing_policy(
+            declared_routing_policies,
             ampacity_resolution,
             pcb,
             only_set,
@@ -3133,6 +3255,7 @@ def run_selected_checks(
         "impedance": checker.check_impedance,
         "isolated_copper": checker.check_isolated_copper,
         "match_group_length_skew": checker.check_match_group_length_skew,
+        "routing_policy": checker.check_routing_policy,
         "netclass_clearance_copper": _netclass_clearance_copper_check,
         "netclass_floor": _netclass_floor_check,
         "netlist": checker.check_netlist,
