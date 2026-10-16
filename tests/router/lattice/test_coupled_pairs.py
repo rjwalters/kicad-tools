@@ -1358,8 +1358,10 @@ def test_declined_trunk_is_retried_as_a_tap_chain(capsys, monkeypatch) -> None:
 
     pads = _tap_pads() + _tap_walls()
 
-    # Control: with the retry removed the trunk falls back uncoupled.
+    # Control: with the retry removed the trunk falls back uncoupled (the
+    # #6842 gateway offer would couple it through a fan-via gateway instead).
     monkeypatch.setattr(core, "_lattice_tap_chain_retry_pairs", lambda *a: frozenset())
+    monkeypatch.setattr(core, "_lattice_gateway_offer_keys", lambda *a: frozenset())
     router = _trunk_autorouter(pads)
     router.route_net(1)
     assert router._lattice_pair_outcomes == {"D": "uncoupled-fallback:pair-no-path"}
@@ -1650,11 +1652,13 @@ def test_discarded_tap_chain_retry_equals_a_run_without_retry(capsys, monkeypatc
         return router, routes
 
     monkeypatch.setattr(core, "_lattice_tap_chain_retry_pairs", lambda *a: frozenset())
+    monkeypatch.setattr(core, "_lattice_gateway_offer_keys", lambda *a: frozenset())
     base, base_routes = run()
     assert "tap-chain retry" not in capsys.readouterr().out
     monkeypatch.undo()
 
     monkeypatch.setattr(core, "_lattice_tap_chain_retry_keeps", lambda *a: (False, []))
+    monkeypatch.setattr(core, "_lattice_gateway_offer_keys", lambda *a: frozenset())
     forced, forced_routes = run()
     out = capsys.readouterr().out
     assert "tap-chain retry for 1 pair(s) whose trunk declined pair-no-path (D): discarded (" in out

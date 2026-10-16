@@ -331,3 +331,140 @@ def test_clean_gateway_run_is_not_renegotiated(monkeypatch) -> None:
     assert calls == [True]
     assert routes == {"run": True}
     assert pf.pair_gateway_rollback is None
+
+
+# ---------------------------------------------------------------------------
+# Issue #6842: a trunk skipped for a tap chain that never served it is offered
+# the gateway retry
+# ---------------------------------------------------------------------------
+
+
+def test_gateway_offer_keys_cover_unserved_skipped_trunks() -> None:
+    from types import SimpleNamespace
+
+    from kicad_tools.router.core import _lattice_gateway_offer_keys
+
+    def pc(key, name):
+        return SimpleNamespace(key=key, pair_name=name)
+
+    coupled = [
+        pc(("pair", 1, 2), "A"),  # skipped, declined pair-no-path (tap retry discarded)
+        pc(("pair", 3, 4), "B"),  # skipped, declined pair-leg-keepout (tap retry never runs)
+        pc(("pair", 5, 6), "C"),  # skipped but coupled: nothing to offer
+        pc(("pair", 7, 8), "D"),  # not skipped (no tap alternative): never gated
+        pc(("pair", 9, 10, 0), "E"),  # tap chain kept: chain key, no trunk left
+        pc(("pair", 11, 12), "F"),  # skipped, declined for a non-gateway reason
+    ]
+    outcomes = {
+        ("pair", 1, 2): "uncoupled-fallback:pair-no-path",
+        ("pair", 3, 4): "uncoupled-fallback:pair-leg-keepout",
+        ("pair", 5, 6): "coupled",
+        ("pair", 7, 8): "uncoupled-fallback:pair-no-path",
+        ("pair", 9, 10, 0): "coupled",
+        ("pair", 11, 12): "uncoupled-fallback:pair-no-parity",
+    }
+    got = _lattice_gateway_offer_keys(coupled, outcomes, {"A", "B", "C", "E", "F"})
+    assert got == {("pair", 1, 2), ("pair", 3, 4)}
+
+
+def _spy_negotiations(monkeypatch, *, deadline_first: bool = False) -> list[frozenset]:
+    """Record ``pair_gateway_skip`` as each lattice negotiation starts."""
+    import dataclasses
+
+    skips: list[frozenset] = []
+    real = LatticePathfinder.route_netset
+
+    def spy(self, connections, **kwargs):
+        skips.append(self.pair_gateway_skip)
+        routes, stats = real(self, connections, **kwargs)
+        if deadline_first and len(skips) == 1:
+            stats = dataclasses.replace(stats, deadline_hit=True)
+        return routes, stats
+
+    monkeypatch.setattr(LatticePathfinder, "route_netset", spy)
+    return skips
+
+
+def _tap_router():
+    from tests.router.lattice.test_coupled_pairs import _tap_pads, _tap_walls, _trunk_autorouter
+
+    return _trunk_autorouter(_tap_pads() + _tap_walls())
+
+
+def test_gateway_offered_when_the_tap_retry_does_not_run(monkeypatch, capsys) -> None:
+    import kicad_tools.router.core as core
+
+    monkeypatch.setattr(core, "_lattice_tap_chain_retry_pairs", lambda *a: frozenset())
+    skips = _spy_negotiations(monkeypatch)
+    router = _tap_router()
+    router.route_net(1)
+    out = capsys.readouterr().out
+    assert "tap-chain retry" not in out
+    assert "gateway offer for 1 pair(s)" in out
+    assert len(skips) == 2
+    assert skips[0] == {("pair", 1, 2)}  # first run: held back for the tap chain
+    assert skips[1] == frozenset()  # offer run: lifted
+
+
+def test_gateway_offered_when_the_tap_retry_is_discarded(monkeypatch, capsys) -> None:
+    import kicad_tools.router.core as core
+
+    monkeypatch.setattr(core, "_lattice_tap_chain_retry_keeps", lambda *a: (False, []))
+    skips = _spy_negotiations(monkeypatch)
+    router = _tap_router()
+    router.route_net(1)
+    out = capsys.readouterr().out
+    assert "tap-chain retry for 1 pair(s)" in out and "discarded" in out
+    assert "gateway offer for 1 pair(s)" in out
+    assert [bool(s) for s in skips] == [True, False, False]  # first, tap retry, offer
+
+
+def test_gateway_not_offered_when_the_tap_retry_is_kept(monkeypatch, capsys) -> None:
+    skips = _spy_negotiations(monkeypatch)
+    router = _tap_router()
+    router.route_net(1)
+    out = capsys.readouterr().out
+    assert "tap-chain retry for 1 pair(s)" in out and ": kept" in out
+    assert "gateway offer" not in out
+    assert len(skips) == 2  # first run + tap retry, nothing more
+
+
+def test_gateway_not_offered_after_the_deadline(monkeypatch, capsys) -> None:
+    import kicad_tools.router.core as core
+
+    monkeypatch.setattr(core, "_lattice_tap_chain_retry_pairs", lambda *a: frozenset())
+    skips = _spy_negotiations(monkeypatch, deadline_first=True)
+    router = _tap_router()
+    router.route_net(1)
+    assert "gateway offer" not in capsys.readouterr().out
+    assert len(skips) == 1  # the first result is returned as is
+
+
+def test_discarded_gateway_offer_restores_the_first_result(monkeypatch, capsys) -> None:
+    """A gateway that buys no coupling leaves exactly today's copper."""
+    import kicad_tools.router.core as core
+
+    def run():
+        router = _tap_router()
+        routes = {
+            net: [
+                [(s.x1, s.y1, s.x2, s.y2, s.layer) for s in r.segments]
+                for r in router.route_net(net)
+            ]
+            for net in (1, 2)
+        }
+        return router, routes
+
+    monkeypatch.setattr(core, "_lattice_tap_chain_retry_pairs", lambda *a: frozenset())
+    monkeypatch.setattr(core, "_lattice_gateway_offer_keys", lambda *a: frozenset())
+    base, base_routes = run()
+    capsys.readouterr()
+    monkeypatch.undo()
+
+    monkeypatch.setattr(core, "_lattice_tap_chain_retry_pairs", lambda *a: frozenset())
+    monkeypatch.setattr(core, "_lattice_tap_chain_retry_keeps", lambda *a: (False, []))
+    forced, forced_routes = run()
+    out = capsys.readouterr().out
+    assert "gateway offer" in out and "discarded" in out
+    assert forced_routes == base_routes
+    assert forced._lattice_failure_reasons == base._lattice_failure_reasons

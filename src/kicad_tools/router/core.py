@@ -776,6 +776,30 @@ def _lattice_tap_chain_retry_pairs(
     )
 
 
+def _lattice_gateway_offer_keys(
+    coupled: list[Any], outcomes: dict[object, str], available: set[str]
+) -> frozenset[object]:
+    """Skipped single trunks that still deserve a gateway retry (issue #6842).
+
+    The #6444 gateway retry is withheld from every single trunk with a #6535
+    tap-chain alternative (``available``), on the assumption the tap retry
+    serves it first.  That retry only runs for the
+    :func:`_lattice_tap_retry_outcomes` declines, and may be discarded, so a
+    trunk that still sits in ``coupled`` (a kept tap retry replaces its key
+    with chain segments) and declined for a gateway-eligible reason
+    (``GATEWAY_RETRY_REASONS``, including ``pair-leg-keepout``) got neither.
+    """
+    from .lattice.pathfinder import GATEWAY_RETRY_REASONS
+
+    return frozenset(
+        pc.key
+        for pc in coupled
+        if len(pc.key) == 3
+        and pc.pair_name in available
+        and outcomes.get(pc.key, "").removeprefix("uncoupled-fallback:") in GATEWAY_RETRY_REASONS
+    )
+
+
 def _lattice_pair_coupling(
     coupled: list[Any], outcomes: dict[object, str]
 ) -> dict[str, tuple[int, int]]:
@@ -5130,7 +5154,14 @@ class Autorouter:
                 else min(deadline, self._lattice_deadline)
             )
 
-        def _negotiate(conns: list[Any], pairs: list[Any]) -> Any:
+        ran: dict[int, list[Any]] = {}
+
+        def _negotiate(
+            conns: list[Any], pairs: list[Any], gateway_offer: frozenset[object] = frozenset()
+        ) -> Any:
+            # Issue #6842: remember which connections each pair list ran with,
+            # so the post-tap-retry gateway offer can re-run the surviving one.
+            ran[id(pairs)] = conns
             # Issue #6698: the generated equivalent-pin ties of THIS connection
             # set (the tap-chain retry rebuilds them) are fixed copper seeded
             # at their class clearance: every other net routes around them,
@@ -5151,8 +5182,11 @@ class Autorouter:
                 # first: the chain couples on the pad layer without vias,
                 # which is exactly today's copper for LVDS-style pairs.
                 taps: set[str] = set(getattr(self, "_lattice_tap_chain_pairs", set()) or ())
-                pf.pair_gateway_skip = frozenset(
-                    pc.key for pc in pairs if len(pc.key) == 3 and pc.pair_name in taps
+                # Issue #6842: ``gateway_offer`` lifts the skip for trunks the
+                # tap retry did not serve (see ``_lattice_gateway_offer_retry``).
+                pf.pair_gateway_skip = (
+                    frozenset(pc.key for pc in pairs if len(pc.key) == 3 and pc.pair_name in taps)
+                    - gateway_offer
                 )
             routes, stats_ = pf.route_netset(
                 conns,
@@ -5190,6 +5224,17 @@ class Autorouter:
         if retry_pairs and not stats.deadline_hit:
             routes_by_key, stats, coupled = self._lattice_tap_chain_retry(
                 pf, _negotiate, retry_pairs, (routes_by_key, stats, coupled)
+            )
+        # Issue #6842: a trunk held back from its gateway retry for a tap
+        # chain that never ran, or was discarded, still gets the gateway.
+        offer = _lattice_gateway_offer_keys(
+            coupled,
+            getattr(pf, "pair_outcomes", {}),
+            getattr(self, "_lattice_tap_chain_pairs", set()),
+        )
+        if offer and hasattr(pf, "pair_gateway_limits") and not stats.deadline_hit:
+            routes_by_key, stats = self._lattice_gateway_offer_retry(
+                pf, _negotiate, ran[id(coupled)], coupled, offer, (routes_by_key, stats)
             )
         self._lattice_negotiation_stats = stats
         self._warn_lattice_pair_nets_routed_twice()
@@ -5785,6 +5830,81 @@ class Autorouter:
             pf._obstacles,
         ) = saved
         return first_routes, first_stats, first_coupled
+
+    def _lattice_gateway_offer_retry(
+        self,
+        pf: Any,
+        negotiate: Any,
+        connections: list[Any],
+        coupled: list[Any],
+        offer: frozenset[object],
+        first: tuple[dict[object, Route], Any],
+    ) -> tuple[dict[object, Route], Any]:
+        """Re-negotiate once with the gateway skip lifted for ``offer`` (issue #6842).
+
+        The skipped trunks keep their key (the tap retry was not kept for
+        them), so the same ``connections``/``coupled`` run again.  The result
+        is kept only when the offered pairs couple strictly more, no other
+        pair loses a coupled segment, no more connections are unrouted
+        (:func:`_lattice_tap_chain_retry_keeps`) and no more class-pad
+        shortfalls remain -- a gateway that buys no coupling must not change
+        today's copper.  Otherwise the pathfinder's state is restored.
+        """
+        first_routes, first_stats = first
+        saved = (
+            pf.failure_reasons,
+            pf.pair_outcomes,
+            pf.class_pad_repair_stats,
+            dict(pf._class_pad_growth),
+            list(getattr(pf, "class_pad_growth_rounds", [])),
+            getattr(pf, "pair_gateways", {}),
+            dict(getattr(pf, "pair_gateway_log", {})),
+            getattr(pf, "pair_gateway_rollback", None),
+            pf._lattice,
+            pf._obstacles,
+        )
+        first_failed = len(pf.failure_reasons)
+        first_left = pf.class_pad_repair_stats.total_remaining if pf.class_pad_repair_stats else 0
+        first_coupling = _lattice_pair_coupling(coupled, pf.pair_outcomes)
+        pairs = frozenset(pc.pair_name for pc in coupled if pc.key in offer)
+        if pf._class_pad_growth:
+            # Start from an ungrown substrate, as the tap-chain retry does.
+            pf._lattice = None
+            pf._obstacles = None
+        routes_by_key, stats = negotiate(connections, coupled, offer)
+        coupling = _lattice_pair_coupling(coupled, pf.pair_outcomes)
+        failed = len(pf.failure_reasons)
+        left = pf.class_pad_repair_stats.total_remaining if pf.class_pad_repair_stats else 0
+        kept, regressed = _lattice_tap_chain_retry_keeps(
+            first_coupling, coupling, pairs, first_failed, failed, stats.deadline_hit
+        )
+        kept = kept and left <= first_left
+        first_score = sum(k / n for name, (k, n) in first_coupling.items() if name in pairs)
+        score = sum(k / n for name, (k, n) in coupling.items() if name in pairs)
+        print(
+            f"  Diff pairs (lattice): gateway offer for {len(pairs)} pair(s) skipped "
+            f"for a tap chain that did not serve them ({', '.join(sorted(pairs))}): "
+            f"{'kept' if kept else 'discarded'} (coupled segments {first_score:g} -> "
+            f"{score:g}, unrouted connections {first_failed} -> {failed}, class-pad "
+            f"shortfalls {first_left} -> {left}"
+            f"{', deadline hit' if stats.deadline_hit else ''}"
+            f"{', regressed: ' + ', '.join(regressed) if regressed else ''}; issue #6842)"
+        )
+        if kept:
+            return routes_by_key, stats
+        (
+            pf.failure_reasons,
+            pf.pair_outcomes,
+            pf.class_pad_repair_stats,
+            pf._class_pad_growth,
+            pf.class_pad_growth_rounds,
+            pf.pair_gateways,
+            pf.pair_gateway_log,
+            pf.pair_gateway_rollback,
+            pf._lattice,
+            pf._obstacles,
+        ) = saved
+        return first_routes, first_stats
 
     def _warn_lattice_pair_nets_routed_twice(self) -> None:
         """Name any diff-pair net that already carries another engine's copper.
