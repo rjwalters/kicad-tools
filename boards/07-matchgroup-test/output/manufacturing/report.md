@@ -1,8 +1,8 @@
 ---
 title: "matchgroup_test_routed"
 subtitle: "Design Report"
-author: "kicad-tools 0.22.0"
-date: "Rev 1 | 2026-10-13 | jlcpcb"
+author: "kicad-tools 0.23.0"
+date: "Rev 1 | 2026-10-16 | jlcpcb"
 geometry: "margin=1in"
 fontsize: 11pt
 colorlinks: true

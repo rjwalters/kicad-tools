@@ -10,7 +10,7 @@ on the project's own boards.
 from __future__ import annotations
 
 import json
-import shutil
+import re
 from pathlib import Path
 
 import pytest
@@ -640,6 +640,17 @@ def test_cli_annotate_pintypes(design: tuple[Path, Path], capsys) -> None:
 
 _BOARD04 = REPO_ROOT / "boards" / "04-stm32-devboard" / "output"
 
+_PIN_CHILD = re.compile(r'\s*\(pin(?:function|type) "(?:[^"\\]|\\.)*"\)')
+
+
+def _copy_unannotated(src: Path, dst: Path) -> None:
+    """Copy ``src`` with its pads' ``pinfunction``/``pintype`` children removed.
+
+    Board 04's committed outputs are annotated since issue #6025, so the
+    entry points are exercised on the pre-annotation form of the board.
+    """
+    dst.write_text(_PIN_CHILD.sub("", src.read_text()))
+
 
 @pytest.mark.parametrize(
     "pcb_name", ["stm32_devboard.kicad_pcb", "stm32_devboard_routed.kicad_pcb"]
@@ -647,20 +658,21 @@ _BOARD04 = REPO_ROOT / "boards" / "04-stm32-devboard" / "output"
 def test_fleet_board04_power_pin_nets(tmp_path: Path, pcb_name: str) -> None:
     """Annotating board 04 from its own schematic yields its real rails.
 
-    Runs on a copy: the committed outputs are hash-pinned by
-    ``readiness.json`` and are refreshed by regenerating the board
-    (``generate_design.py`` now calls ``annotate_pcb_file_pintypes``).
+    Runs on an unannotated copy: the committed outputs are hash-pinned by
+    ``readiness.json`` and already carry the annotation (issue #6025).
     """
     sch = _BOARD04 / "stm32_devboard.kicad_sch"
     src = _BOARD04 / pcb_name
     if not (sch.exists() and src.exists()):
         pytest.skip("board 04 outputs not present")
     pcb = tmp_path / pcb_name
-    shutil.copy(src, pcb)
+    _copy_unannotated(src, pcb)
 
     result = annotate_pcb_file_pintypes(pcb, sch)
     assert result.missing_pads == []
     assert result.updated > 0
+    # The committed board is the annotation's fixed point (issue #6025).
+    assert pcb.read_bytes() == src.read_bytes()
 
     loaded = PCB.load(pcb)
     # MCP1825S (U1): VI power_in on +5V, VO power_out on +3.3V; the STM32's
@@ -688,8 +700,8 @@ def test_fleet_board04_sync_netlist_matches_file_path(tmp_path: Path) -> None:
         pytest.skip("board 04 outputs not present")
     file_pcb = tmp_path / "file.kicad_pcb"
     sync_pcb = tmp_path / "sync.kicad_pcb"
-    shutil.copy(src, file_pcb)
-    shutil.copy(src, sync_pcb)
+    _copy_unannotated(src, file_pcb)
+    _copy_unannotated(src, sync_pcb)
 
     annotate_pcb_file_pintypes(file_pcb, sch)
     result = sync_netlist(sch, sync_pcb)

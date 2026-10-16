@@ -9,11 +9,11 @@
       "size": 2460
     },
     "assembly-back.pdf": {
-      "sha256": "97fd8166692164d6f838e151b9d94bc8405debb85da74a29d661ee75a2ae0425",
+      "sha256": "b3a43089cfb999381a2b0504a140e23f49068fd0e9a854adcc85d8b00a48b85a",
       "size": 83540
     },
     "assembly-front.pdf": {
-      "sha256": "7011ba62b72997d41fc0d6cde07ca1d81259957756339e415904d9c5f42ae796",
+      "sha256": "e5473b85d83d8ea7573cfc5a1ebfc51d74121ba5290c7525427af010d3fc52e3",
       "size": 127448
     },
     "bom_jlcpcb.csv": {
@@ -21,16 +21,16 @@
       "size": 860
     },
     "check-report.json": {
-      "sha256": "1d68a05e61c888a1bb4a57d1cbfe1e958d74052a8f9f12dee2c474d36c8b86bf",
-      "size": 9284
+      "sha256": "42c42a57248e14ac1aad1cab4e061ab60db9ee3f03e0b3e25a67bbc6498db89d",
+      "size": 9446
     },
     "cpl_jlcpcb.csv": {
       "sha256": "fcfd09f56fedca12282e66a638d6ea80b9ebf06e83d99b06911239e7bef5324a",
       "size": 2404
     },
     "design-source.zip": {
-      "sha256": "cdef50ff1ccefe9224632922cc8fc3d9f2ec6813a846998954414ae9da562e1a",
-      "size": 1089811
+      "sha256": "0a213ca9edff368d87e1374d12fdc39406e52a8a56316915c52111cb8a550667",
+      "size": 1090246
     },
     "engineering/README.md": {
       "sha256": "539341a88badbaaebf417c584ca02b0405d7f9bd26f89bbddc6ae1f2c2d15dd0",
@@ -169,8 +169,8 @@
       "size": 2237
     },
     "gerbers/gerbers.zip": {
-      "sha256": "e5dddd8052e7e27cb236dea18995e01f17f9195185bbf540b1ba91832e0e6fde",
-      "size": 184033
+      "sha256": "08acdd57fd9975a8cb6152b07a0cf2712d4830be73019566344a6c5d24dc29eb",
+      "size": 184635
     },
     "images/assembly.png": {
       "sha256": "97df1e693cfd26c2800f05b82315500a477cc6a73c0e7c1bd35d755f1f2dd853",
@@ -213,12 +213,12 @@
       "size": 442308
     },
     "images/schematic_matchgroup_test.png": {
-      "sha256": "e62143c088823fe1e3aa6b38ecd173b25cd166b56ecb82cd6e6ab672c57f2a97",
-      "size": 396496
+      "sha256": "371fa9718dfa2c553f35a73d2b1eefb4e46c3bb92af18e835170edd07866f49b",
+      "size": 396479
     },
     "kicad_project.zip": {
-      "sha256": "490303553542ecdaa02c39319f9f589a790208c743eb8da5aa32b9061c8b5a79",
-      "size": 452922
+      "sha256": "6960e1c60cfe93b6be2722df93bc40df15b60370d544561a5bb976b857e4b8d0",
+      "size": 453885
     },
     "lvs.json": {
       "sha256": "590e87395d997669151b91020f3a030c33cd470fb216132160e7144ff711fc4d",
@@ -229,11 +229,11 @@
       "size": 518
     },
     "native-drc.json": {
-      "sha256": "ff4ee93bab1e7b8df467d23d1662a430c8cee7859dd3baca371af90fca4929c9",
+      "sha256": "9faf57fd42516ff327583b52a6003286d4395a34d9fdbfd0192dfb73e6ffb7dc",
       "size": 1235
     },
     "native-erc.json": {
-      "sha256": "560cf0c9f22b12661aea0097805bb8855397b9f14c79733cb1d27ad3167fdc79",
+      "sha256": "76855d5137b9e77b0d05d11dc24595078efd6ca490a92240f012a41afafcfe85",
       "size": 988
     },
     "procurement-review.md": {
@@ -245,12 +245,12 @@
       "size": 5172
     },
     "report.md": {
-      "sha256": "c9b5c6a7e1e020db15c58e430cf867658b1ee005de0569c3f49580fb27ee9d88",
+      "sha256": "7b3b20fadeac5feafefd556d24b5c495efa92bd65fbea30702f5eb6f7f554174",
       "size": 4957
     },
     "report.pdf": {
-      "sha256": "1412dafd3eac5b798b011adf4b5ab0b085ab5a56e9640d621c1408f7fa7068de",
-      "size": 3956384
+      "sha256": "9137ee45c43cf63f17ec60ad500f7d25b0dd3709692f081ffc8928abb3c0e932",
+      "size": 4006363
     },
     "schematic.pdf": {
       "sha256": "d54cce8a55e920e82c95a44efe3a6b4829a90d1cb4f392a8fc0f3b2df87e50e9",

@@ -56,7 +56,7 @@
       {
         "layer": "In3.Cu",
         "width_mm": 0.18,
-        "impedance_ohm": 48.087672137930916
+        "impedance_ohm": 48.08767213793093
       }
     ],
     "A1": [
@@ -73,7 +73,7 @@
       {
         "layer": "In3.Cu",
         "width_mm": 0.18,
-        "impedance_ohm": 48.087672137930916
+        "impedance_ohm": 48.08767213793093
       }
     ],
     "A10": [
@@ -90,7 +90,7 @@
       {
         "layer": "In3.Cu",
         "width_mm": 0.18,
-        "impedance_ohm": 48.087672137930916
+        "impedance_ohm": 48.08767213793093
       }
     ],
     "A11": [
@@ -107,7 +107,7 @@
       {
         "layer": "In3.Cu",
         "width_mm": 0.18,
-        "impedance_ohm": 48.087672137930916
+        "impedance_ohm": 48.08767213793093
       }
     ],
     "A2": [
@@ -124,7 +124,7 @@
       {
         "layer": "In3.Cu",
         "width_mm": 0.18,
-        "impedance_ohm": 48.087672137930916
+        "impedance_ohm": 48.08767213793093
       }
     ],
     "A3": [
@@ -141,7 +141,7 @@
       {
         "layer": "In3.Cu",
         "width_mm": 0.18,
-        "impedance_ohm": 48.087672137930916
+        "impedance_ohm": 48.08767213793093
       }
     ],
     "A4": [
@@ -158,7 +158,7 @@
       {
         "layer": "In3.Cu",
         "width_mm": 0.18,
-        "impedance_ohm": 48.087672137930916
+        "impedance_ohm": 48.08767213793093
       }
     ],
     "A5": [
@@ -175,7 +175,7 @@
       {
         "layer": "In3.Cu",
         "width_mm": 0.18,
-        "impedance_ohm": 48.087672137930916
+        "impedance_ohm": 48.08767213793093
       }
     ],
     "A6": [
@@ -204,7 +204,7 @@
       {
         "layer": "In3.Cu",
         "width_mm": 0.18,
-        "impedance_ohm": 48.087672137930916
+        "impedance_ohm": 48.08767213793093
       }
     ],
     "A8": [
@@ -221,7 +221,7 @@
       {
         "layer": "In3.Cu",
         "width_mm": 0.18,
-        "impedance_ohm": 48.087672137930916
+        "impedance_ohm": 48.08767213793093
       }
     ],
     "A9": [
@@ -238,7 +238,7 @@
       {
         "layer": "In3.Cu",
         "width_mm": 0.18,
-        "impedance_ohm": 48.087672137930916
+        "impedance_ohm": 48.08767213793093
       }
     ],
     "BA0": [
@@ -250,7 +250,7 @@
       {
         "layer": "In3.Cu",
         "width_mm": 0.18,
-        "impedance_ohm": 48.087672137930916
+        "impedance_ohm": 48.08767213793093
       }
     ],
     "BA1": [
@@ -262,7 +262,7 @@
       {
         "layer": "In3.Cu",
         "width_mm": 0.18,
-        "impedance_ohm": 48.087672137930916
+        "impedance_ohm": 48.08767213793093
       }
     ],
     "DQ0": [
@@ -274,7 +274,7 @@
       {
         "layer": "In2.Cu",
         "width_mm": 0.18,
-        "impedance_ohm": 48.087672137930916
+        "impedance_ohm": 48.08767213793093
       }
     ],
     "DQ1": [
@@ -286,7 +286,7 @@
       {
         "layer": "In2.Cu",
         "width_mm": 0.18,
-        "impedance_ohm": 48.087672137930916
+        "impedance_ohm": 48.08767213793093
       }
     ],
     "DQ10": [
@@ -298,7 +298,7 @@
       {
         "layer": "In2.Cu",
         "width_mm": 0.18,
-        "impedance_ohm": 48.087672137930916
+        "impedance_ohm": 48.08767213793093
       }
     ],
     "DQ11": [
@@ -310,7 +310,7 @@
       {
         "layer": "In2.Cu",
         "width_mm": 0.18,
-        "impedance_ohm": 48.087672137930916
+        "impedance_ohm": 48.08767213793093
       }
     ],
     "DQ12": [
@@ -322,7 +322,7 @@
       {
         "layer": "In2.Cu",
         "width_mm": 0.18,
-        "impedance_ohm": 48.087672137930916
+        "impedance_ohm": 48.08767213793093
       }
     ],
     "DQ13": [
@@ -334,7 +334,7 @@
       {
         "layer": "In2.Cu",
         "width_mm": 0.18,
-        "impedance_ohm": 48.087672137930916
+        "impedance_ohm": 48.08767213793093
       }
     ],
     "DQ14": [
@@ -346,7 +346,7 @@
       {
         "layer": "In2.Cu",
         "width_mm": 0.18,
-        "impedance_ohm": 48.087672137930916
+        "impedance_ohm": 48.08767213793093
       }
     ],
     "DQ15": [
@@ -358,7 +358,7 @@
       {
         "layer": "In2.Cu",
         "width_mm": 0.18,
-        "impedance_ohm": 48.087672137930916
+        "impedance_ohm": 48.08767213793093
       }
     ],
     "DQ2": [
@@ -377,7 +377,7 @@
       {
         "layer": "In2.Cu",
         "width_mm": 0.18,
-        "impedance_ohm": 48.087672137930916
+        "impedance_ohm": 48.08767213793093
       }
     ],
     "DQ4": [
@@ -389,7 +389,7 @@
       {
         "layer": "In2.Cu",
         "width_mm": 0.18,
-        "impedance_ohm": 48.087672137930916
+        "impedance_ohm": 48.08767213793093
       }
     ],
     "DQ5": [
@@ -401,7 +401,7 @@
       {
         "layer": "In2.Cu",
         "width_mm": 0.18,
-        "impedance_ohm": 48.087672137930916
+        "impedance_ohm": 48.08767213793093
       }
     ],
     "DQ6": [
@@ -413,7 +413,7 @@
       {
         "layer": "In2.Cu",
         "width_mm": 0.18,
-        "impedance_ohm": 48.087672137930916
+        "impedance_ohm": 48.08767213793093
       }
     ],
     "DQ7": [
@@ -425,7 +425,7 @@
       {
         "layer": "In2.Cu",
         "width_mm": 0.18,
-        "impedance_ohm": 48.087672137930916
+        "impedance_ohm": 48.08767213793093
       }
     ],
     "DQ8": [
@@ -437,7 +437,7 @@
       {
         "layer": "In2.Cu",
         "width_mm": 0.18,
-        "impedance_ohm": 48.087672137930916
+        "impedance_ohm": 48.08767213793093
       }
     ],
     "DQ9": [
@@ -449,7 +449,7 @@
       {
         "layer": "In2.Cu",
         "width_mm": 0.18,
-        "impedance_ohm": 48.087672137930916
+        "impedance_ohm": 48.08767213793093
       }
     ],
     "LDQM": [
@@ -468,7 +468,7 @@
       {
         "layer": "In3.Cu",
         "width_mm": 0.18,
-        "impedance_ohm": 48.087672137930916
+        "impedance_ohm": 48.08767213793093
       }
     ],
     "SDCLK": [
@@ -521,7 +521,7 @@
       {
         "layer": "In3.Cu",
         "width_mm": 0.18,
-        "impedance_ohm": 48.087672137930916
+        "impedance_ohm": 48.08767213793093
       }
     ],
     "SDNWE": [
@@ -538,7 +538,7 @@
       {
         "layer": "In3.Cu",
         "width_mm": 0.18,
-        "impedance_ohm": 48.087672137930916
+        "impedance_ohm": 48.08767213793093
       }
     ],
     "UDQM": [
@@ -550,53 +550,53 @@
       {
         "layer": "In2.Cu",
         "width_mm": 0.18,
-        "impedance_ohm": 48.087672137930916
+        "impedance_ohm": 48.08767213793093
       }
     ]
   },
   "trace_capacitance_pf": {
-    "A0": 10.288702414380214,
+    "A0": 10.288702414380213,
     "A1": 9.13909428574557,
-    "A10": 9.813795005132226,
-    "A11": 10.156441252790497,
+    "A10": 9.813795005132224,
+    "A11": 10.156441252790495,
     "A2": 9.712006067384475,
     "A3": 9.113891710564838,
     "A4": 9.674488529668164,
-    "A5": 10.341825176326699,
+    "A5": 10.341825176326697,
     "A6": 8.735755742350738,
-    "A7": 10.036978343119316,
-    "A8": 10.381944012667457,
-    "A9": 9.1226689719921,
-    "BA0": 10.892925837548884,
-    "BA1": 10.886822841686698,
-    "DQ0": 8.970951479422522,
-    "DQ1": 8.942011969743936,
-    "DQ10": 10.445103810157859,
-    "DQ11": 10.479255364516492,
-    "DQ12": 9.236585253949064,
-    "DQ13": 9.969792595267572,
-    "DQ14": 9.34464593866786,
+    "A7": 10.036978343119314,
+    "A8": 10.381944012667454,
+    "A9": 9.122668971992098,
+    "BA0": 10.89292583754888,
+    "BA1": 10.886822841686696,
+    "DQ0": 8.97095147942252,
+    "DQ1": 8.942011969743934,
+    "DQ10": 10.445103810157855,
+    "DQ11": 10.47925536451649,
+    "DQ12": 9.236585253949062,
+    "DQ13": 9.96979259526757,
+    "DQ14": 9.344645938667858,
     "DQ15": 8.806643707786488,
     "DQ2": 7.367549395797235,
-    "DQ3": 9.026567607360157,
-    "DQ4": 8.48272151287029,
-    "DQ5": 8.564005802798992,
-    "DQ6": 8.537906417485077,
-    "DQ7": 7.6341145368856465,
-    "DQ8": 10.40463396144892,
-    "DQ9": 10.445071348102259,
+    "DQ3": 9.026567607360155,
+    "DQ4": 8.482721512870288,
+    "DQ5": 8.564005802798988,
+    "DQ6": 8.537906417485075,
+    "DQ7": 7.634114536885646,
+    "DQ8": 10.404633961448916,
+    "DQ9": 10.445071348102255,
     "LDQM": 7.360554631307557,
-    "SDCKE1": 9.922231568523275,
+    "SDCKE1": 9.922231568523273,
     "SDCLK": 8.048114831170828,
     "SDNCAS": 7.940570905290955,
     "SDNE1": 7.94436959419399,
-    "SDNRAS": 9.543895902676061,
-    "SDNWE": 9.61466795079076,
-    "UDQM": 9.971390548199336
+    "SDNRAS": 9.54389590267606,
+    "SDNWE": 9.614667950790759,
+    "UDQM": 9.971390548199334
   },
   "external_load_estimates": {
     "A0": {
-      "trace_pf": 10.288702414380214,
+      "trace_pf": 10.288702414380213,
       "full_through_via_count": 5,
       "via_allowance_pf": 5.0,
       "via_basis": "1 pF/via allowance (geometry unavailable)",
@@ -604,20 +604,20 @@
         "MCU drives, SDRAM receives": {
           "receiver_allowance_pf": 3.8,
           "receiver_basis": "ISSI maximum",
-          "estimated_external_load_pf": 19.088702414380215,
+          "estimated_external_load_pf": 19.08870241438021,
           "external_limit_pf": 30.0,
           "limit_basis": "ST DS9405 tables 103/105 characterization load",
-          "margin_pf": 10.911297585619785,
+          "margin_pf": 10.911297585619788,
           "passes": true
         }
       },
       "worst_direction": "MCU drives, SDRAM receives",
       "receiver_allowance_pf": 3.8,
       "receiver_basis": "ISSI maximum",
-      "estimated_external_load_pf": 19.088702414380215,
+      "estimated_external_load_pf": 19.08870241438021,
       "external_limit_pf": 30.0,
       "limit_basis": "ST DS9405 tables 103/105 characterization load",
-      "margin_pf": 10.911297585619785,
+      "margin_pf": 10.911297585619788,
       "passes": true
     },
     "A1": {
@@ -646,7 +646,7 @@
       "passes": true
     },
     "A10": {
-      "trace_pf": 9.813795005132226,
+      "trace_pf": 9.813795005132224,
       "full_through_via_count": 4,
       "via_allowance_pf": 2.2220268674261714,
       "via_basis": "TI SLYT335 geometry (measured pad/antipad/stackup)",
@@ -654,24 +654,24 @@
         "MCU drives, SDRAM receives": {
           "receiver_allowance_pf": 3.8,
           "receiver_basis": "ISSI maximum",
-          "estimated_external_load_pf": 15.835821872558398,
+          "estimated_external_load_pf": 15.835821872558395,
           "external_limit_pf": 30.0,
           "limit_basis": "ST DS9405 tables 103/105 characterization load",
-          "margin_pf": 14.164178127441602,
+          "margin_pf": 14.164178127441605,
           "passes": true
         }
       },
       "worst_direction": "MCU drives, SDRAM receives",
       "receiver_allowance_pf": 3.8,
       "receiver_basis": "ISSI maximum",
-      "estimated_external_load_pf": 15.835821872558398,
+      "estimated_external_load_pf": 15.835821872558395,
       "external_limit_pf": 30.0,
       "limit_basis": "ST DS9405 tables 103/105 characterization load",
-      "margin_pf": 14.164178127441602,
+      "margin_pf": 14.164178127441605,
       "passes": true
     },
     "A11": {
-      "trace_pf": 10.156441252790497,
+      "trace_pf": 10.156441252790495,
       "full_through_via_count": 4,
       "via_allowance_pf": 2.222025514113163,
       "via_basis": "TI SLYT335 geometry (measured pad/antipad/stackup)",
@@ -679,20 +679,20 @@
         "MCU drives, SDRAM receives": {
           "receiver_allowance_pf": 3.8,
           "receiver_basis": "ISSI maximum",
-          "estimated_external_load_pf": 16.17846676690366,
+          "estimated_external_load_pf": 16.178466766903657,
           "external_limit_pf": 30.0,
           "limit_basis": "ST DS9405 tables 103/105 characterization load",
-          "margin_pf": 13.82153323309634,
+          "margin_pf": 13.821533233096343,
           "passes": true
         }
       },
       "worst_direction": "MCU drives, SDRAM receives",
       "receiver_allowance_pf": 3.8,
       "receiver_basis": "ISSI maximum",
-      "estimated_external_load_pf": 16.17846676690366,
+      "estimated_external_load_pf": 16.178466766903657,
       "external_limit_pf": 30.0,
       "limit_basis": "ST DS9405 tables 103/105 characterization load",
-      "margin_pf": 13.82153323309634,
+      "margin_pf": 13.821533233096343,
       "passes": true
     },
     "A2": {
@@ -771,7 +771,7 @@
       "passes": true
     },
     "A5": {
-      "trace_pf": 10.341825176326699,
+      "trace_pf": 10.341825176326697,
       "full_through_via_count": 4,
       "via_allowance_pf": 4.0,
       "via_basis": "1 pF/via allowance (geometry unavailable)",
@@ -821,7 +821,7 @@
       "passes": true
     },
     "A7": {
-      "trace_pf": 10.036978343119316,
+      "trace_pf": 10.036978343119314,
       "full_through_via_count": 3,
       "via_allowance_pf": 1.6665182921558412,
       "via_basis": "TI SLYT335 geometry (measured pad/antipad/stackup)",
@@ -846,7 +846,7 @@
       "passes": true
     },
     "A8": {
-      "trace_pf": 10.381944012667457,
+      "trace_pf": 10.381944012667454,
       "full_through_via_count": 3,
       "via_allowance_pf": 1.6665199668566744,
       "via_basis": "TI SLYT335 geometry (measured pad/antipad/stackup)",
@@ -854,24 +854,24 @@
         "MCU drives, SDRAM receives": {
           "receiver_allowance_pf": 3.8,
           "receiver_basis": "ISSI maximum",
-          "estimated_external_load_pf": 15.84846397952413,
+          "estimated_external_load_pf": 15.848463979524126,
           "external_limit_pf": 30.0,
           "limit_basis": "ST DS9405 tables 103/105 characterization load",
-          "margin_pf": 14.15153602047587,
+          "margin_pf": 14.151536020475874,
           "passes": true
         }
       },
       "worst_direction": "MCU drives, SDRAM receives",
       "receiver_allowance_pf": 3.8,
       "receiver_basis": "ISSI maximum",
-      "estimated_external_load_pf": 15.84846397952413,
+      "estimated_external_load_pf": 15.848463979524126,
       "external_limit_pf": 30.0,
       "limit_basis": "ST DS9405 tables 103/105 characterization load",
-      "margin_pf": 14.15153602047587,
+      "margin_pf": 14.151536020475874,
       "passes": true
     },
     "A9": {
-      "trace_pf": 9.1226689719921,
+      "trace_pf": 9.122668971992098,
       "full_through_via_count": 4,
       "via_allowance_pf": 2.2220259653311625,
       "via_basis": "TI SLYT335 geometry (measured pad/antipad/stackup)",
@@ -896,7 +896,7 @@
       "passes": true
     },
     "BA0": {
-      "trace_pf": 10.892925837548884,
+      "trace_pf": 10.89292583754888,
       "full_through_via_count": 2,
       "via_allowance_pf": 2.0,
       "via_basis": "1 pF/via allowance (geometry unavailable)",
@@ -904,24 +904,24 @@
         "MCU drives, SDRAM receives": {
           "receiver_allowance_pf": 3.8,
           "receiver_basis": "ISSI maximum",
-          "estimated_external_load_pf": 16.692925837548884,
+          "estimated_external_load_pf": 16.69292583754888,
           "external_limit_pf": 30.0,
           "limit_basis": "ST DS9405 tables 103/105 characterization load",
-          "margin_pf": 13.307074162451116,
+          "margin_pf": 13.30707416245112,
           "passes": true
         }
       },
       "worst_direction": "MCU drives, SDRAM receives",
       "receiver_allowance_pf": 3.8,
       "receiver_basis": "ISSI maximum",
-      "estimated_external_load_pf": 16.692925837548884,
+      "estimated_external_load_pf": 16.69292583754888,
       "external_limit_pf": 30.0,
       "limit_basis": "ST DS9405 tables 103/105 characterization load",
-      "margin_pf": 13.307074162451116,
+      "margin_pf": 13.30707416245112,
       "passes": true
     },
     "BA1": {
-      "trace_pf": 10.886822841686698,
+      "trace_pf": 10.886822841686696,
       "full_through_via_count": 2,
       "via_allowance_pf": 1.1110139147299818,
       "via_basis": "TI SLYT335 geometry (measured pad/antipad/stackup)",
@@ -946,7 +946,7 @@
       "passes": true
     },
     "DQ0": {
-      "trace_pf": 8.970951479422522,
+      "trace_pf": 8.97095147942252,
       "full_through_via_count": 2,
       "via_allowance_pf": 1.1110133617056084,
       "via_basis": "TI SLYT335 geometry (measured pad/antipad/stackup)",
@@ -980,7 +980,7 @@
       "passes": true
     },
     "DQ1": {
-      "trace_pf": 8.942011969743936,
+      "trace_pf": 8.942011969743934,
       "full_through_via_count": 2,
       "via_allowance_pf": 1.1110139997422745,
       "via_basis": "TI SLYT335 geometry (measured pad/antipad/stackup)",
@@ -988,33 +988,33 @@
         "SDRAM drives, MCU receives": {
           "receiver_allowance_pf": 10.0,
           "receiver_basis": "engineering reserve",
-          "estimated_external_load_pf": 20.05302596948621,
+          "estimated_external_load_pf": 20.053025969486207,
           "external_limit_pf": 30.0,
           "limit_basis": "engineering screening budget; ISSI driver limit unconfirmed",
-          "margin_pf": 9.94697403051379,
+          "margin_pf": 9.946974030513793,
           "passes": true
         },
         "MCU drives, SDRAM receives": {
           "receiver_allowance_pf": 6.5,
           "receiver_basis": "ISSI maximum",
-          "estimated_external_load_pf": 16.55302596948621,
+          "estimated_external_load_pf": 16.553025969486207,
           "external_limit_pf": 30.0,
           "limit_basis": "ST DS9405 tables 103/105 characterization load",
-          "margin_pf": 13.44697403051379,
+          "margin_pf": 13.446974030513793,
           "passes": true
         }
       },
       "worst_direction": "SDRAM drives, MCU receives",
       "receiver_allowance_pf": 10.0,
       "receiver_basis": "engineering reserve",
-      "estimated_external_load_pf": 20.05302596948621,
+      "estimated_external_load_pf": 20.053025969486207,
       "external_limit_pf": 30.0,
       "limit_basis": "engineering screening budget; ISSI driver limit unconfirmed",
-      "margin_pf": 9.94697403051379,
+      "margin_pf": 9.946974030513793,
       "passes": true
     },
     "DQ10": {
-      "trace_pf": 10.445103810157859,
+      "trace_pf": 10.445103810157855,
       "full_through_via_count": 2,
       "via_allowance_pf": 1.1110139209927432,
       "via_basis": "TI SLYT335 geometry (measured pad/antipad/stackup)",
@@ -1048,7 +1048,7 @@
       "passes": true
     },
     "DQ11": {
-      "trace_pf": 10.479255364516492,
+      "trace_pf": 10.47925536451649,
       "full_through_via_count": 2,
       "via_allowance_pf": 1.1110129198669814,
       "via_basis": "TI SLYT335 geometry (measured pad/antipad/stackup)",
@@ -1056,33 +1056,33 @@
         "SDRAM drives, MCU receives": {
           "receiver_allowance_pf": 10.0,
           "receiver_basis": "engineering reserve",
-          "estimated_external_load_pf": 21.590268284383473,
+          "estimated_external_load_pf": 21.59026828438347,
           "external_limit_pf": 30.0,
           "limit_basis": "engineering screening budget; ISSI driver limit unconfirmed",
-          "margin_pf": 8.409731715616527,
+          "margin_pf": 8.40973171561653,
           "passes": true
         },
         "MCU drives, SDRAM receives": {
           "receiver_allowance_pf": 6.5,
           "receiver_basis": "ISSI maximum",
-          "estimated_external_load_pf": 18.090268284383473,
+          "estimated_external_load_pf": 18.09026828438347,
           "external_limit_pf": 30.0,
           "limit_basis": "ST DS9405 tables 103/105 characterization load",
-          "margin_pf": 11.909731715616527,
+          "margin_pf": 11.90973171561653,
           "passes": true
         }
       },
       "worst_direction": "SDRAM drives, MCU receives",
       "receiver_allowance_pf": 10.0,
       "receiver_basis": "engineering reserve",
-      "estimated_external_load_pf": 21.590268284383473,
+      "estimated_external_load_pf": 21.59026828438347,
       "external_limit_pf": 30.0,
       "limit_basis": "engineering screening budget; ISSI driver limit unconfirmed",
-      "margin_pf": 8.409731715616527,
+      "margin_pf": 8.40973171561653,
       "passes": true
     },
     "DQ12": {
-      "trace_pf": 9.236585253949064,
+      "trace_pf": 9.236585253949062,
       "full_through_via_count": 2,
       "via_allowance_pf": 1.1110136369427344,
       "via_basis": "TI SLYT335 geometry (measured pad/antipad/stackup)",
@@ -1090,33 +1090,33 @@
         "SDRAM drives, MCU receives": {
           "receiver_allowance_pf": 10.0,
           "receiver_basis": "engineering reserve",
-          "estimated_external_load_pf": 20.3475988908918,
+          "estimated_external_load_pf": 20.347598890891796,
           "external_limit_pf": 30.0,
           "limit_basis": "engineering screening budget; ISSI driver limit unconfirmed",
-          "margin_pf": 9.652401109108201,
+          "margin_pf": 9.652401109108204,
           "passes": true
         },
         "MCU drives, SDRAM receives": {
           "receiver_allowance_pf": 6.5,
           "receiver_basis": "ISSI maximum",
-          "estimated_external_load_pf": 16.8475988908918,
+          "estimated_external_load_pf": 16.847598890891796,
           "external_limit_pf": 30.0,
           "limit_basis": "ST DS9405 tables 103/105 characterization load",
-          "margin_pf": 13.152401109108201,
+          "margin_pf": 13.152401109108204,
           "passes": true
         }
       },
       "worst_direction": "SDRAM drives, MCU receives",
       "receiver_allowance_pf": 10.0,
       "receiver_basis": "engineering reserve",
-      "estimated_external_load_pf": 20.3475988908918,
+      "estimated_external_load_pf": 20.347598890891796,
       "external_limit_pf": 30.0,
       "limit_basis": "engineering screening budget; ISSI driver limit unconfirmed",
-      "margin_pf": 9.652401109108201,
+      "margin_pf": 9.652401109108204,
       "passes": true
     },
     "DQ13": {
-      "trace_pf": 9.969792595267572,
+      "trace_pf": 9.96979259526757,
       "full_through_via_count": 2,
       "via_allowance_pf": 2.0,
       "via_basis": "1 pF/via allowance (geometry unavailable)",
@@ -1150,7 +1150,7 @@
       "passes": true
     },
     "DQ14": {
-      "trace_pf": 9.34464593866786,
+      "trace_pf": 9.344645938667858,
       "full_through_via_count": 2,
       "via_allowance_pf": 1.1110139997422892,
       "via_basis": "TI SLYT335 geometry (measured pad/antipad/stackup)",
@@ -1158,29 +1158,29 @@
         "SDRAM drives, MCU receives": {
           "receiver_allowance_pf": 10.0,
           "receiver_basis": "engineering reserve",
-          "estimated_external_load_pf": 20.45565993841015,
+          "estimated_external_load_pf": 20.455659938410147,
           "external_limit_pf": 30.0,
           "limit_basis": "engineering screening budget; ISSI driver limit unconfirmed",
-          "margin_pf": 9.54434006158985,
+          "margin_pf": 9.544340061589853,
           "passes": true
         },
         "MCU drives, SDRAM receives": {
           "receiver_allowance_pf": 6.5,
           "receiver_basis": "ISSI maximum",
-          "estimated_external_load_pf": 16.95565993841015,
+          "estimated_external_load_pf": 16.955659938410147,
           "external_limit_pf": 30.0,
           "limit_basis": "ST DS9405 tables 103/105 characterization load",
-          "margin_pf": 13.04434006158985,
+          "margin_pf": 13.044340061589853,
           "passes": true
         }
       },
       "worst_direction": "SDRAM drives, MCU receives",
       "receiver_allowance_pf": 10.0,
       "receiver_basis": "engineering reserve",
-      "estimated_external_load_pf": 20.45565993841015,
+      "estimated_external_load_pf": 20.455659938410147,
       "external_limit_pf": 30.0,
       "limit_basis": "engineering screening budget; ISSI driver limit unconfirmed",
-      "margin_pf": 9.54434006158985,
+      "margin_pf": 9.544340061589853,
       "passes": true
     },
     "DQ15": {
@@ -1252,7 +1252,7 @@
       "passes": true
     },
     "DQ3": {
-      "trace_pf": 9.026567607360157,
+      "trace_pf": 9.026567607360155,
       "full_through_via_count": 2,
       "via_allowance_pf": 1.111013801139069,
       "via_basis": "TI SLYT335 geometry (measured pad/antipad/stackup)",
@@ -1260,33 +1260,33 @@
         "SDRAM drives, MCU receives": {
           "receiver_allowance_pf": 10.0,
           "receiver_basis": "engineering reserve",
-          "estimated_external_load_pf": 20.137581408499226,
+          "estimated_external_load_pf": 20.137581408499223,
           "external_limit_pf": 30.0,
           "limit_basis": "engineering screening budget; ISSI driver limit unconfirmed",
-          "margin_pf": 9.862418591500774,
+          "margin_pf": 9.862418591500777,
           "passes": true
         },
         "MCU drives, SDRAM receives": {
           "receiver_allowance_pf": 6.5,
           "receiver_basis": "ISSI maximum",
-          "estimated_external_load_pf": 16.637581408499226,
+          "estimated_external_load_pf": 16.637581408499223,
           "external_limit_pf": 30.0,
           "limit_basis": "ST DS9405 tables 103/105 characterization load",
-          "margin_pf": 13.362418591500774,
+          "margin_pf": 13.362418591500777,
           "passes": true
         }
       },
       "worst_direction": "SDRAM drives, MCU receives",
       "receiver_allowance_pf": 10.0,
       "receiver_basis": "engineering reserve",
-      "estimated_external_load_pf": 20.137581408499226,
+      "estimated_external_load_pf": 20.137581408499223,
       "external_limit_pf": 30.0,
       "limit_basis": "engineering screening budget; ISSI driver limit unconfirmed",
-      "margin_pf": 9.862418591500774,
+      "margin_pf": 9.862418591500777,
       "passes": true
     },
     "DQ4": {
-      "trace_pf": 8.48272151287029,
+      "trace_pf": 8.482721512870288,
       "full_through_via_count": 2,
       "via_allowance_pf": 1.1110134381830767,
       "via_basis": "TI SLYT335 geometry (measured pad/antipad/stackup)",
@@ -1294,33 +1294,33 @@
         "SDRAM drives, MCU receives": {
           "receiver_allowance_pf": 10.0,
           "receiver_basis": "engineering reserve",
-          "estimated_external_load_pf": 19.593734951053367,
+          "estimated_external_load_pf": 19.593734951053364,
           "external_limit_pf": 30.0,
           "limit_basis": "engineering screening budget; ISSI driver limit unconfirmed",
-          "margin_pf": 10.406265048946633,
+          "margin_pf": 10.406265048946636,
           "passes": true
         },
         "MCU drives, SDRAM receives": {
           "receiver_allowance_pf": 6.5,
           "receiver_basis": "ISSI maximum",
-          "estimated_external_load_pf": 16.093734951053367,
+          "estimated_external_load_pf": 16.093734951053364,
           "external_limit_pf": 30.0,
           "limit_basis": "ST DS9405 tables 103/105 characterization load",
-          "margin_pf": 13.906265048946633,
+          "margin_pf": 13.906265048946636,
           "passes": true
         }
       },
       "worst_direction": "SDRAM drives, MCU receives",
       "receiver_allowance_pf": 10.0,
       "receiver_basis": "engineering reserve",
-      "estimated_external_load_pf": 19.593734951053367,
+      "estimated_external_load_pf": 19.593734951053364,
       "external_limit_pf": 30.0,
       "limit_basis": "engineering screening budget; ISSI driver limit unconfirmed",
-      "margin_pf": 10.406265048946633,
+      "margin_pf": 10.406265048946636,
       "passes": true
     },
     "DQ5": {
-      "trace_pf": 8.564005802798992,
+      "trace_pf": 8.564005802798988,
       "full_through_via_count": 2,
       "via_allowance_pf": 2.0,
       "via_basis": "1 pF/via allowance (geometry unavailable)",
@@ -1328,33 +1328,33 @@
         "SDRAM drives, MCU receives": {
           "receiver_allowance_pf": 10.0,
           "receiver_basis": "engineering reserve",
-          "estimated_external_load_pf": 20.56400580279899,
+          "estimated_external_load_pf": 20.564005802798988,
           "external_limit_pf": 30.0,
           "limit_basis": "engineering screening budget; ISSI driver limit unconfirmed",
-          "margin_pf": 9.435994197201008,
+          "margin_pf": 9.435994197201012,
           "passes": true
         },
         "MCU drives, SDRAM receives": {
           "receiver_allowance_pf": 6.5,
           "receiver_basis": "ISSI maximum",
-          "estimated_external_load_pf": 17.06400580279899,
+          "estimated_external_load_pf": 17.064005802798988,
           "external_limit_pf": 30.0,
           "limit_basis": "ST DS9405 tables 103/105 characterization load",
-          "margin_pf": 12.935994197201008,
+          "margin_pf": 12.935994197201012,
           "passes": true
         }
       },
       "worst_direction": "SDRAM drives, MCU receives",
       "receiver_allowance_pf": 10.0,
       "receiver_basis": "engineering reserve",
-      "estimated_external_load_pf": 20.56400580279899,
+      "estimated_external_load_pf": 20.564005802798988,
       "external_limit_pf": 30.0,
       "limit_basis": "engineering screening budget; ISSI driver limit unconfirmed",
-      "margin_pf": 9.435994197201008,
+      "margin_pf": 9.435994197201012,
       "passes": true
     },
     "DQ6": {
-      "trace_pf": 8.537906417485077,
+      "trace_pf": 8.537906417485075,
       "full_through_via_count": 2,
       "via_allowance_pf": 2.0,
       "via_basis": "1 pF/via allowance (geometry unavailable)",
@@ -1388,7 +1388,7 @@
       "passes": true
     },
     "DQ7": {
-      "trace_pf": 7.6341145368856465,
+      "trace_pf": 7.634114536885646,
       "full_through_via_count": 2,
       "via_allowance_pf": 2.0,
       "via_basis": "1 pF/via allowance (geometry unavailable)",
@@ -1422,7 +1422,7 @@
       "passes": true
     },
     "DQ8": {
-      "trace_pf": 10.40463396144892,
+      "trace_pf": 10.404633961448916,
       "full_through_via_count": 2,
       "via_allowance_pf": 1.11101380113908,
       "via_basis": "TI SLYT335 geometry (measured pad/antipad/stackup)",
@@ -1430,33 +1430,33 @@
         "SDRAM drives, MCU receives": {
           "receiver_allowance_pf": 10.0,
           "receiver_basis": "engineering reserve",
-          "estimated_external_load_pf": 21.515647762588,
+          "estimated_external_load_pf": 21.515647762587996,
           "external_limit_pf": 30.0,
           "limit_basis": "engineering screening budget; ISSI driver limit unconfirmed",
-          "margin_pf": 8.484352237412,
+          "margin_pf": 8.484352237412004,
           "passes": true
         },
         "MCU drives, SDRAM receives": {
           "receiver_allowance_pf": 6.5,
           "receiver_basis": "ISSI maximum",
-          "estimated_external_load_pf": 18.015647762588,
+          "estimated_external_load_pf": 18.015647762587996,
           "external_limit_pf": 30.0,
           "limit_basis": "ST DS9405 tables 103/105 characterization load",
-          "margin_pf": 11.984352237412,
+          "margin_pf": 11.984352237412004,
           "passes": true
         }
       },
       "worst_direction": "SDRAM drives, MCU receives",
       "receiver_allowance_pf": 10.0,
       "receiver_basis": "engineering reserve",
-      "estimated_external_load_pf": 21.515647762588,
+      "estimated_external_load_pf": 21.515647762587996,
       "external_limit_pf": 30.0,
       "limit_basis": "engineering screening budget; ISSI driver limit unconfirmed",
-      "margin_pf": 8.484352237412,
+      "margin_pf": 8.484352237412004,
       "passes": true
     },
     "DQ9": {
-      "trace_pf": 10.445071348102259,
+      "trace_pf": 10.445071348102255,
       "full_through_via_count": 2,
       "via_allowance_pf": 1.1110121641920805,
       "via_basis": "TI SLYT335 geometry (measured pad/antipad/stackup)",
@@ -1464,29 +1464,29 @@
         "SDRAM drives, MCU receives": {
           "receiver_allowance_pf": 10.0,
           "receiver_basis": "engineering reserve",
-          "estimated_external_load_pf": 21.55608351229434,
+          "estimated_external_load_pf": 21.556083512294336,
           "external_limit_pf": 30.0,
           "limit_basis": "engineering screening budget; ISSI driver limit unconfirmed",
-          "margin_pf": 8.44391648770566,
+          "margin_pf": 8.443916487705664,
           "passes": true
         },
         "MCU drives, SDRAM receives": {
           "receiver_allowance_pf": 6.5,
           "receiver_basis": "ISSI maximum",
-          "estimated_external_load_pf": 18.05608351229434,
+          "estimated_external_load_pf": 18.056083512294336,
           "external_limit_pf": 30.0,
           "limit_basis": "ST DS9405 tables 103/105 characterization load",
-          "margin_pf": 11.94391648770566,
+          "margin_pf": 11.943916487705664,
           "passes": true
         }
       },
       "worst_direction": "SDRAM drives, MCU receives",
       "receiver_allowance_pf": 10.0,
       "receiver_basis": "engineering reserve",
-      "estimated_external_load_pf": 21.55608351229434,
+      "estimated_external_load_pf": 21.556083512294336,
       "external_limit_pf": 30.0,
       "limit_basis": "engineering screening budget; ISSI driver limit unconfirmed",
-      "margin_pf": 8.44391648770566,
+      "margin_pf": 8.443916487705664,
       "passes": true
     },
     "LDQM": {
@@ -1515,7 +1515,7 @@
       "passes": true
     },
     "SDCKE1": {
-      "trace_pf": 9.922231568523275,
+      "trace_pf": 9.922231568523273,
       "full_through_via_count": 2,
       "via_allowance_pf": 1.11101380113908,
       "via_basis": "TI SLYT335 geometry (measured pad/antipad/stackup)",
@@ -1615,7 +1615,7 @@
       "passes": true
     },
     "SDNRAS": {
-      "trace_pf": 9.543895902676061,
+      "trace_pf": 9.54389590267606,
       "full_through_via_count": 4,
       "via_allowance_pf": 4.0,
       "via_basis": "1 pF/via allowance (geometry unavailable)",
@@ -1640,7 +1640,7 @@
       "passes": true
     },
     "SDNWE": {
-      "trace_pf": 9.61466795079076,
+      "trace_pf": 9.614667950790759,
       "full_through_via_count": 3,
       "via_allowance_pf": 1.6665198204364917,
       "via_basis": "TI SLYT335 geometry (measured pad/antipad/stackup)",
@@ -1648,24 +1648,24 @@
         "MCU drives, SDRAM receives": {
           "receiver_allowance_pf": 3.8,
           "receiver_basis": "ISSI maximum",
-          "estimated_external_load_pf": 15.081187771227253,
+          "estimated_external_load_pf": 15.081187771227249,
           "external_limit_pf": 30.0,
           "limit_basis": "ST DS9405 tables 103/105 characterization load",
-          "margin_pf": 14.918812228772747,
+          "margin_pf": 14.918812228772751,
           "passes": true
         }
       },
       "worst_direction": "MCU drives, SDRAM receives",
       "receiver_allowance_pf": 3.8,
       "receiver_basis": "ISSI maximum",
-      "estimated_external_load_pf": 15.081187771227253,
+      "estimated_external_load_pf": 15.081187771227249,
       "external_limit_pf": 30.0,
       "limit_basis": "ST DS9405 tables 103/105 characterization load",
-      "margin_pf": 14.918812228772747,
+      "margin_pf": 14.918812228772751,
       "passes": true
     },
     "UDQM": {
-      "trace_pf": 9.971390548199336,
+      "trace_pf": 9.971390548199334,
       "full_through_via_count": 2,
       "via_allowance_pf": 2.0,
       "via_basis": "1 pF/via allowance (geometry unavailable)",

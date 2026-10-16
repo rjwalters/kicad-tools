@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from math import cos, radians, sin
 from pathlib import Path
 
+from kicad_tools.operations.pintype import annotate_pcb_file_pintypes
 from kicad_tools.schema.pcb import PCB
 from kicad_tools.schematic.models.schematic import Schematic
 from kicad_tools.sexp import parse_file, parse_string, serialize_sexp
@@ -516,6 +517,15 @@ def generate(output):
                 )
     (output / "bldc_controller.kicad_sch").write_text(serialize_sexp(schematic))
     build_pcb().save(output / "bldc_controller.kicad_pcb")
+    # Issue #6025: carry schematic pin names/types onto the pads right after
+    # the unrouted PCB is written.  build.py copies this board before
+    # replaying routing.json, so the routed PCB inherits the ``(pintype ...)``
+    # evidence ``kct detect-mistakes`` reads for rails.
+    annotation = annotate_pcb_file_pintypes(
+        output / "bldc_controller.kicad_pcb", output / "bldc_controller.kicad_sch"
+    )
+    if annotation.missing_pads:
+        raise RuntimeError(f"pads without a schematic pin: {annotation.missing_pads}")
     shutil.copy2(ROOT / "board05_revB.kicad_sym", output / "board05_revB.kicad_sym")
     shutil.copytree(
         ROOT / "board05_revB.pretty", output / "board05_revB.pretty", dirs_exist_ok=True

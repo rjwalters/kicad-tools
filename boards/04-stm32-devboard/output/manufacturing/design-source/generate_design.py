@@ -1288,14 +1288,6 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
         "0.15",
         "--via-diameter",
         "0.30",
-        # Issue #6280: ``kct route`` now resolves via clearance from the
-        # board's own rules (0.15mm netclass here) instead of the old 0.20mm
-        # default.  This board's reviewed escape repair
-        # (``manufacturing_process.MOVES``) moves vias at fixed coordinates of
-        # the route it was reviewed against, so pin the 0.20mm the review was
-        # made at until the escapes are re-reviewed at the declared rule.
-        "--via-clearance",
-        "0.2",
         # Issue #6401 / #6425: ``kct route`` reserves a via site per pour-net
         # IC pin before signal routing (on by default; this recipe used to opt
         # out with ``--no-plane-via-reservation``).  Since #6425 the oracle's
@@ -1774,6 +1766,22 @@ def _pad_has_offpad_bond(pcb, x: float, y: float, net: str) -> str | None:
             box = pad_absolute_bbox(pad, fp)
             if not inside((x, y), box):
                 continue
+            # Issue #6683: the weld may be a multi-leg escape (pad -> dog-leg
+            # or extended-escape waypoints -> via), not one straight track.
+            # Follow same-net track endpoints out of the pad and accept any
+            # through via that copper reaches outside the pad.
+            segments = [(seg.start, seg.end) for seg in pcb.segments if seg.net_number in numbers]
+            reached = [p for a, b in segments for p in (a, b) if inside(p, box)]
+            frontier = list(reached)
+            while frontier:
+                point = frontier.pop()
+                for a, b in segments:
+                    for here, there in ((a, b), (b, a)):
+                        if math.dist(here, point) < 1e-3 and not any(
+                            math.dist(there, r) < 1e-3 for r in reached
+                        ):
+                            reached.append(there)
+                            frontier.append(there)
             for via in pcb.vias:
                 if (
                     via.net_number not in numbers
@@ -1781,12 +1789,8 @@ def _pad_has_offpad_bond(pcb, x: float, y: float, net: str) -> str | None:
                     or inside(via.position, box)
                 ):
                     continue
-                for seg in pcb.segments:
-                    if seg.net_number not in numbers:
-                        continue
-                    for a, b in ((seg.start, seg.end), (seg.end, seg.start)):
-                        if inside(a, box) and math.dist(b, via.position) < 1e-3:
-                            return f"{fp.reference}.{pad.number}"
+                if any(math.dist(via.position, r) < 1e-3 for r in reached):
+                    return f"{fp.reference}.{pad.number}"
             return None
     return None
 
@@ -2211,6 +2215,8 @@ def main() -> int:
         # router merges tracks into this text, so the routed PCB inherits the
         # ``(pintype ...)`` evidence ``kct detect-mistakes`` reads for rails.
         annotation = annotate_pcb_file_pintypes(pcb_path, sch_path)
+        if annotation.missing_pads:  # Issue #6025: every pad maps to a pin
+            raise RuntimeError(f"pads without a schematic pin: {annotation.missing_pads}")
         print(f"   Pad pin types annotated: {annotation.annotated}")
 
         # Step 5: Route PCB

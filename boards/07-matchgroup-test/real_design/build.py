@@ -15,6 +15,7 @@ import json
 import shutil
 from pathlib import Path
 
+from kicad_tools.operations.pintype import annotate_pcb_file_pintypes
 from kicad_tools.router.quantize import segment_angle_census
 
 ROOT = Path(__file__).resolve().parent
@@ -52,6 +53,11 @@ def build(output: Path) -> dict:
     for pcb in (output / "sdram_demo.kicad_pcb", candidate):
         if segment_angle_census(pcb)[1]:
             raise RuntimeError(f"Reviewed source contains off-angle copper: {pcb}")
+    # Issue #6025: the reviewed copper is hash-bound, so the fresh schematic's
+    # pin names/types are carried onto the candidate's pads, as on the source.
+    annotation = annotate_pcb_file_pintypes(candidate, output / "sdram_demo.kicad_sch")
+    if annotation.missing_pads:
+        raise ValueError(f"Pads without a schematic pin: {annotation.missing_pads}")
     evidence = output / "validation"
     if not validator.check(candidate, output, evidence):
         raise RuntimeError(f"Reviewed routing failed fresh validation; inspect {evidence}")
