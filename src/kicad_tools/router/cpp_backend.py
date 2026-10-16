@@ -5385,8 +5385,8 @@ class CppCoupledPathfinder:
     path (Issue #4065 curator guidance: do NOT port ``_reconstruct``).
 
     v1 scope (deferred features stay on the Python fallback): this wrapper is
-    only used for the ``partner_aware`` heuristic with ``allow_swap_via`` off;
-    the Python caller checks those preconditions before dispatching here.
+    only used for the ``partner_aware`` heuristic; the Python caller checks
+    that precondition before dispatching here.
     """
 
     def __init__(

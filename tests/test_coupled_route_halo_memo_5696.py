@@ -5,7 +5,7 @@ Background
 PR #5695 extended the dynamic route-halo physical refinement to the coupled
 differential-pair search.  On the **pure-Python coupled fallback** (reached when
 ``KCT_COUPLED_CPP=0``, when ``CppCoupledPathfinder`` construction raises, and
-for the v1-deferred ``allow_swap_via`` / ``manhattan_sum`` cases) the new check
+for the v1-deferred ``manhattan_sum`` case) the new check
 cost ~14x on the via predicate for every refinable cell probed, because
 ``RouteHaloRefiner.via_clear`` re-ran the shapely distance sweep inside
 ``RouteHaloGeometry.clear`` on every call.
