@@ -3926,7 +3926,7 @@ class Autorouter:
 
     def _ensure_mesh_pathfinder(self) -> Any:
         """Lazily construct the per-board :class:`MeshPathfinder` (built once)."""
-        from .mesh.pathfinder import MeshPathfinder
+        from .mesh.pathfinder import MeshPathfinder, interior_edge_loops
 
         if self._mesh_pathfinder is None:
             # ``_board_bbox`` is only populated from Edge.Cuts (io.py) when the
@@ -3946,12 +3946,28 @@ class Autorouter:
             # Issue #4276: hand the mesh the board's real copper stack so the
             # 2.5D via injection replicates the mesh across the actual routing
             # layer count instead of assuming 2.
+            # Issue #6822: ``outline`` is only the outer bounding box, so the
+            # interior Edge.Cuts loops (windows, cutouts, round holes) are
+            # handed over separately and become navmesh holes plus measured
+            # obstacles.  Without them the mesh routed straight across a cut.
+            edge_segments = self._edge_segments or []
             self._mesh_pathfinder = MeshPathfinder(
                 outline,
                 list(self.pads.values()),
                 self.rules,
                 layer_stack=self.layer_stack,
+                cutouts=interior_edge_loops(edge_segments),
+                cutout_margin=float(getattr(edge_segments, "max_error_mm", 0.0) or 0.0),
             )
+        # Issue #6822: when no positive clearance was resolved the cutouts
+        # keep the #6043 physical floor (a centreline radius), re-read every
+        # call so a floor grown by ``refresh_edge_keepout_floor`` is honoured.
+        # Only the interior cutouts use it -- see the outer-outline note below.
+        self._mesh_pathfinder.cutout_floor = (
+            0.0
+            if (self._edge_clearance or 0.0) > 0
+            else float(getattr(self, "_edge_keepout_floor", None) or 0.0)
+        )
         self._mesh_pathfinder.fixed_fills = self.grid.fixed_fills
         # Epic #5509 Phase 3e: hand the mesh fit the SAME already-resolved
         # copper-to-board-edge floor the grid's ``add_edge_keepout`` and the
@@ -3962,7 +3978,9 @@ class Autorouter:
         # Issue #6043: ``_edge_keepout_floor`` is deliberately NOT used here.
         # It is a grid-quantisation radius (half-extent + half a diagonal
         # cell); the mesh and lattice measure exact copper gaps, where "no
-        # clearance" correctly means a requirement of 0.0.
+        # clearance" correctly means a requirement of 0.0.  The interior
+        # cutouts (issue #6822) are the exception, set above: copper across a
+        # routed cut is never valid, so they keep the floor.
         self._mesh_pathfinder.edge_clearance = self._edge_clearance or 0.0
         return self._mesh_pathfinder
 
