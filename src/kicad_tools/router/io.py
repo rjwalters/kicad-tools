@@ -5022,10 +5022,26 @@ def _extract_pad_blocks(section: str) -> list[str]:
     """
     pad_blocks: list[str] = []
 
-    # Find all positions where "(pad " starts
+    # Find all positions where "(pad " starts *outside* a quoted string.
+    # A plain ``str.find`` would also match text such as
+    # ``(descr "Heatsink pins (pad 4, net HS) ...")`` (Issue #6740), so scan
+    # with the same string/escape rules as the paren matcher below. Each scan
+    # resumes just past a completed block, which is always outside a string.
     start_pos = 0
     while True:
         pad_start = section.find("(pad ", start_pos)
+        quote = section.find('"', start_pos)
+        while pad_start != -1 and quote != -1 and quote < pad_start:
+            # Skip the quoted string opened at ``quote`` (honouring escapes).
+            j = quote + 1
+            while j < len(section) and section[j] != '"':
+                j += 2 if section[j] == "\\" else 1
+            if j >= len(section):
+                pad_start = -1  # unterminated string: nothing more to find
+                break
+            if pad_start < j:
+                pad_start = section.find("(pad ", j + 1)
+            quote = section.find('"', j + 1)
         if pad_start == -1:
             break
 
