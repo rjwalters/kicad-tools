@@ -5939,6 +5939,9 @@ def load_pcb_for_routing(
         per_net_iterations=per_net_iterations,
         # Issue #4268: mesh-router strategy selector (default "grid").
         strategy=strategy,
+        # Issue #6741: honour the pitch validated above; the #972 adaptive
+        # cell cap silently coarsened an explicit ``--grid``.
+        adaptive_grid=False,
     )
 
     router.placement_disposition = placement_disposition
