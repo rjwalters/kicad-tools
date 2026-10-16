@@ -14,7 +14,9 @@ from __future__ import annotations
 
 import importlib.util
 import io
+import subprocess
 import sys
+import textwrap
 from types import ModuleType
 
 import pytest
@@ -70,3 +72,32 @@ def test_real_module_still_has_resource() -> None:
     """The monkeypatched loads above must not leak into the real module."""
     assert real_rss_trace.resource is not None
     assert real_rss_trace.peak_rss_bytes() > 0
+
+
+def test_cli_imports_with_resource_blocked_in_subprocess() -> None:
+    """Mirror the Windows failure: ``resource`` cannot be imported at all."""
+    script = textwrap.dedent(
+        """
+        import sys
+
+        class _BlockResource:
+            def find_spec(self, name, path=None, target=None):
+                if name == "resource":
+                    raise ModuleNotFoundError("No module named 'resource'", name=name)
+                return None
+
+        sys.modules.pop("resource", None)
+        sys.meta_path.insert(0, _BlockResource())
+
+        import kicad_tools.cli.route_cmd  # noqa: F401
+        import kicad_tools.router.rss_trace as rss_trace
+        from kicad_tools.router.rss_trace import RSSTracer
+
+        assert rss_trace.resource is None
+        RSSTracer().mark("route-start")
+        """
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", script], capture_output=True, text=True, timeout=300
+    )
+    assert result.returncode == 0, result.stderr
