@@ -1766,6 +1766,64 @@ def _committed_coupled_skip_nets(router) -> set[int] | None:
     return set(nets)
 
 
+def _optimize_traces(router: "Autorouter", args: argparse.Namespace, *, quiet: bool) -> None:
+    """The ``kct route`` trace-optimization pass, shared by every pipeline.
+
+    Builds the standard :class:`TraceOptimizer`, snapshots connectivity
+    (#2596), runs the grid-transactional optimize (#3507) and enforces the
+    connectivity invariant.  Committed coupled diff pairs are passed as
+    ``skip_nets`` (#6840) so the optimizer never rewrites one rail of a pair
+    the coupled pre-pass committed.  Issue #6847: one helper instead of four
+    copies, so the skip set cannot drift out of a single pipeline and the
+    behaviour is testable without driving a whole route.
+    """
+    from kicad_tools.cli.progress import spinner
+    from kicad_tools.router.optimizer import (
+        OptimizationConfig,
+        TraceOptimizer,
+        make_collision_checker,
+        optimize_routes_grid_synced,
+    )
+
+    if not quiet:
+        print("\n--- Optimizing traces ---")
+
+    opt_config = OptimizationConfig(
+        merge_collinear=True,
+        eliminate_zigzags=True,
+        compress_staircase=True,
+        convert_45_corners=True,
+        corner_chamfer_size=0.5,
+        minimize_vias=True,
+    )
+    # Issue #2303: Use overflow-tolerant collision checking when the router
+    # finished with residual overflow.  This prevents the optimizer from
+    # fragmenting routes through overused cells.
+    has_overflow = router.grid.get_total_overflow() > 0
+    collision_checker = make_collision_checker(router.grid, ignore_overflow=has_overflow)
+    optimizer = TraceOptimizer(config=opt_config, collision_checker=collision_checker)
+
+    # Issue #2596: snapshot per-net connectivity before optimize so any net
+    # whose pad-to-pad connectivity regresses can be reverted.
+    _ci_snapshot = _connectivity_snapshot(router)
+
+    with spinner("Optimizing traces...", quiet=quiet):
+        # Issue #3507: grid-transactional optimize -- each mutated route's old
+        # copper is unmarked and the new copper marked so the grid never goes
+        # stale across the pass.
+        optimize_routes_grid_synced(
+            router, optimizer, skip_nets=_committed_coupled_skip_nets(router)
+        )
+
+    _enforce_connectivity_invariant_or_exit(
+        router,
+        _ci_snapshot,
+        phase="optimize",
+        args=args,
+        quiet=quiet,
+    )
+
+
 def _connectivity_snapshot(router: "Autorouter"):
     """Capture per-net connectivity + deep-copied routes (issue #2596).
 
@@ -11816,54 +11874,7 @@ def route_with_layer_escalation(
         and final_result.router.routes
         and _optimization_fits_budget(args, quiet=quiet)
     ):
-        from kicad_tools.router.optimizer import (
-            OptimizationConfig,
-            TraceOptimizer,
-            make_collision_checker,
-            optimize_routes_grid_synced,
-        )
-
-        if not quiet:
-            print("\n--- Optimizing traces ---")
-
-        opt_config = OptimizationConfig(
-            merge_collinear=True,
-            eliminate_zigzags=True,
-            compress_staircase=True,
-            convert_45_corners=True,
-            corner_chamfer_size=0.5,
-            minimize_vias=True,
-        )
-        # Issue #2303: Use overflow-tolerant collision checking when
-        # the router finished with residual overflow.  This prevents the
-        # optimizer from fragmenting routes through overused cells.
-        has_overflow = final_result.router.grid.get_total_overflow() > 0
-        collision_checker = make_collision_checker(
-            final_result.router.grid, ignore_overflow=has_overflow
-        )
-        optimizer = TraceOptimizer(config=opt_config, collision_checker=collision_checker)
-
-        # Issue #2596: snapshot per-net connectivity before optimize so
-        # we can revert any net whose pad-to-pad connectivity regresses.
-        _ci_snapshot = _connectivity_snapshot(final_result.router)
-
-        with spinner("Optimizing traces...", quiet=quiet):
-            # Issue #3507: grid-transactional optimize -- each mutated
-            # route's old copper is unmarked and the new copper marked so
-            # the grid never goes stale across the pass.
-            optimize_routes_grid_synced(
-                final_result.router,
-                optimizer,
-                skip_nets=_committed_coupled_skip_nets(final_result.router),
-            )
-
-        _enforce_connectivity_invariant_or_exit(
-            final_result.router,
-            _ci_snapshot,
-            phase="optimize",
-            args=args,
-            quiet=quiet,
-        )
+        _optimize_traces(final_result.router, args, quiet=quiet)
         _record_stage_quality(_stage_quality, STAGE_POST_OPTIMIZE, final_result.router)
 
     _stop_rc = _stage_boundary("drc-nudge")  # issue #6324
@@ -12904,51 +12915,7 @@ def route_with_rule_relaxation(
         and final_result.router.routes
         and _optimization_fits_budget(args, quiet=quiet)
     ):
-        from kicad_tools.router.optimizer import (
-            OptimizationConfig,
-            TraceOptimizer,
-            make_collision_checker,
-            optimize_routes_grid_synced,
-        )
-
-        if not quiet:
-            print("\n--- Optimizing traces ---")
-
-        opt_config = OptimizationConfig(
-            merge_collinear=True,
-            eliminate_zigzags=True,
-            compress_staircase=True,
-            convert_45_corners=True,
-            corner_chamfer_size=0.5,
-            minimize_vias=True,
-        )
-        # Issue #2303: Use overflow-tolerant collision checking when
-        # the router finished with residual overflow.
-        has_overflow = final_result.router.grid.get_total_overflow() > 0
-        collision_checker = make_collision_checker(
-            final_result.router.grid, ignore_overflow=has_overflow
-        )
-        optimizer = TraceOptimizer(config=opt_config, collision_checker=collision_checker)
-
-        # Issue #2596: snapshot per-net connectivity before optimize.
-        _ci_snapshot = _connectivity_snapshot(final_result.router)
-
-        with spinner("Optimizing traces...", quiet=quiet):
-            # Issue #3507: grid-transactional optimize (see
-            # optimize_routes_grid_synced).
-            optimize_routes_grid_synced(
-                final_result.router,
-                optimizer,
-                skip_nets=_committed_coupled_skip_nets(final_result.router),
-            )
-
-        _enforce_connectivity_invariant_or_exit(
-            final_result.router,
-            _ci_snapshot,
-            phase="optimize",
-            args=args,
-            quiet=quiet,
-        )
+        _optimize_traces(final_result.router, args, quiet=quiet)
         _record_stage_quality(_stage_quality, STAGE_POST_OPTIMIZE, final_result.router)
 
     _stop_rc = _stage_boundary("drc-nudge")  # issue #6324
@@ -15560,51 +15527,7 @@ def route_with_combined_escalation(
         and final_result.router.routes
         and _optimization_fits_budget(args, quiet=quiet)
     ):
-        from kicad_tools.router.optimizer import (
-            OptimizationConfig,
-            TraceOptimizer,
-            make_collision_checker,
-            optimize_routes_grid_synced,
-        )
-
-        if not quiet:
-            print("\n--- Optimizing traces ---")
-
-        opt_config = OptimizationConfig(
-            merge_collinear=True,
-            eliminate_zigzags=True,
-            compress_staircase=True,
-            convert_45_corners=True,
-            corner_chamfer_size=0.5,
-            minimize_vias=True,
-        )
-        # Issue #2303: Use overflow-tolerant collision checking when
-        # the router finished with residual overflow.
-        has_overflow = final_result.router.grid.get_total_overflow() > 0
-        collision_checker = make_collision_checker(
-            final_result.router.grid, ignore_overflow=has_overflow
-        )
-        optimizer = TraceOptimizer(config=opt_config, collision_checker=collision_checker)
-
-        # Issue #2596: snapshot per-net connectivity before optimize.
-        _ci_snapshot = _connectivity_snapshot(final_result.router)
-
-        with spinner("Optimizing traces...", quiet=quiet):
-            # Issue #3507: grid-transactional optimize (see
-            # optimize_routes_grid_synced).
-            optimize_routes_grid_synced(
-                final_result.router,
-                optimizer,
-                skip_nets=_committed_coupled_skip_nets(final_result.router),
-            )
-
-        _enforce_connectivity_invariant_or_exit(
-            final_result.router,
-            _ci_snapshot,
-            phase="optimize",
-            args=args,
-            quiet=quiet,
-        )
+        _optimize_traces(final_result.router, args, quiet=quiet)
         _record_stage_quality(_stage_quality, STAGE_POST_OPTIMIZE, final_result.router)
 
     _stop_rc = _stage_boundary("drc-nudge")  # issue #6324
@@ -22830,49 +22753,7 @@ def _run_main_impl(args, parser, argv) -> int:
         and router.routes
         and _optimization_fits_budget(args, quiet=quiet)
     ):
-        from kicad_tools.router.optimizer import (
-            OptimizationConfig,
-            TraceOptimizer,
-            make_collision_checker,
-            optimize_routes_grid_synced,
-        )
-
-        if not quiet:
-            print("\n--- Optimizing traces ---")
-
-        # Configure and run optimizer
-        opt_config = OptimizationConfig(
-            merge_collinear=True,
-            eliminate_zigzags=True,
-            compress_staircase=True,
-            convert_45_corners=True,
-            corner_chamfer_size=0.5,
-            minimize_vias=True,
-        )
-        # Issue #2303: Use overflow-tolerant collision checking when
-        # the router finished with residual overflow.
-        has_overflow = router.grid.get_total_overflow() > 0
-        collision_checker = make_collision_checker(router.grid, ignore_overflow=has_overflow)
-        optimizer = TraceOptimizer(config=opt_config, collision_checker=collision_checker)
-
-        # Issue #2596: snapshot per-net connectivity before optimize so
-        # any net whose pad-to-pad connectivity regresses can be reverted.
-        _ci_snapshot = _connectivity_snapshot(router)
-
-        with spinner("Optimizing traces...", quiet=quiet):
-            # Issue #3507: grid-transactional optimize (see
-            # optimize_routes_grid_synced).
-            optimize_routes_grid_synced(
-                router, optimizer, skip_nets=_committed_coupled_skip_nets(router)
-            )
-
-        _enforce_connectivity_invariant_or_exit(
-            router,
-            _ci_snapshot,
-            phase="optimize",
-            args=args,
-            quiet=quiet,
-        )
+        _optimize_traces(router, args, quiet=quiet)
         _record_stage_quality(_stage_quality, STAGE_POST_OPTIMIZE, router)
 
     _stop_rc = _stage_boundary("drc-nudge")  # issue #6324
