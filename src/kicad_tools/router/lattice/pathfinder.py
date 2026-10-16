@@ -242,6 +242,10 @@ class _PairResult:
     gateway: str | None = None
 
 
+#: Bounded retries of a pair search after a ``pair-partner-pad`` decline (#6839).
+_PARTNER_PAD_RETRIES = 4
+
+
 def _diverse_pair_stubs(
     stubs: list[tuple[NodeKey, int, list[Pt], float]],
     mid: Pt,
@@ -2669,8 +2673,13 @@ class LatticePathfinder:
         trace_w = getattr(pc.net_class, "trace_width", None) or self.rules.trace_width
         intra_clearance = pc.pitch - trace_w
 
+        # Issue #6839: ``(partner pad is at end A, first centerline turn
+        # next to that end)`` of the last ``pair-partner-pad`` decline.
+        partner_fail: list[tuple[bool, Pt]] = []
+
         def finish(result: _RouteResult) -> tuple[_PairResult | None, str]:
             """Offset emission + verification of one fat centerline."""
+            partner_fail.clear()
             if len(result.runs) != 1 or result.via_points:
                 return None, "pair-not-planar"  # defensive: vias are off
 
@@ -2779,6 +2788,17 @@ class LatticePathfinder:
                         if dist(a, b) <= 1e-9:
                             continue
                         if seg_rect_dist(a, b, rect) < need:
+                            # Issue #6839: remember WHICH end's first turn
+                            # broke the floor so the caller can retry with
+                            # the stubs through that turn removed.
+                            partner_fail[:] = [
+                                (
+                                    pad.key in (pc.pad_p_a.key, pc.pad_n_a.key),
+                                    center[1]
+                                    if pad.key in (pc.pad_p_a.key, pc.pad_n_a.key)
+                                    else center[-2],
+                                )
+                            ]
                             return None, "pair-partner-pad"
 
             routes: list[Route] = []
@@ -2803,37 +2823,53 @@ class LatticePathfinder:
         for bit in sorted((True, False), key=parity_rank):
             if not by_bit_a[bit] or not by_bit_b[bit]:
                 continue
-            guard = guard_open()
-            try:
-                result, search_reason = self._route_impl(
-                    v_a,
-                    v_b,
-                    pc.net_class,
-                    committed=committed,
-                    history=history,
-                    present=present,
-                    allow_vias=False,
-                    extra_clearance=half_pitch,
-                    partner_net=net_n,
-                    stubs_override=(by_bit_a[bit], by_bit_b[bit]),
-                    # The exemption is for the perpendicular-gated stub
-                    # doglegs ONLY: the A* body sees every pad -- including
-                    # the pair's own -- as an obstacle, else the shortest fat
-                    # path hugs an endpoint pad row and the emitted legs land
-                    # on the partner's copper (board-06 MIPI lesson).
-                    exempt_pads=frozenset(),
-                )
-            finally:
-                guard_close(guard)
-            if result is None:
-                reason = (
-                    search_reason if search_reason.startswith("pair-") else f"pair-{search_reason}"
-                )
-                continue
-            pres, finish_reason = finish(result)
-            if pres is not None:
-                return pres, "ok"
-            reason = finish_reason
+            stubs_a_bit, stubs_b_bit = list(by_bit_a[bit]), list(by_bit_b[bit])
+            # Issue #6839: a centerline whose first turn sits inside a pad
+            # row breaks the partner-pad floor only after emission.  Retry
+            # the search without the stubs through that turn (bounded) instead
+            # of declining the pair outright.
+            for _attempt in range(_PARTNER_PAD_RETRIES + 1):
+                guard = guard_open()
+                try:
+                    result, search_reason = self._route_impl(
+                        v_a,
+                        v_b,
+                        pc.net_class,
+                        committed=committed,
+                        history=history,
+                        present=present,
+                        allow_vias=False,
+                        extra_clearance=half_pitch,
+                        partner_net=net_n,
+                        stubs_override=(stubs_a_bit, stubs_b_bit),
+                        # The exemption is for the perpendicular-gated stub
+                        # doglegs ONLY: the A* body sees every pad -- including
+                        # the pair's own -- as an obstacle, else the shortest fat
+                        # path hugs an endpoint pad row and the emitted legs land
+                        # on the partner's copper (board-06 MIPI lesson).
+                        exempt_pads=frozenset(),
+                    )
+                finally:
+                    guard_close(guard)
+                if result is None:
+                    reason = (
+                        search_reason
+                        if search_reason.startswith("pair-")
+                        else f"pair-{search_reason}"
+                    )
+                    break
+                pres, finish_reason = finish(result)
+                if pres is not None:
+                    return pres, "ok"
+                reason = finish_reason
+                if finish_reason != "pair-partner-pad" or not partner_fail:
+                    break
+                at_a, turn = partner_fail[0]
+                pool = stubs_a_bit if at_a else stubs_b_bit
+                kept = [s for s in pool if all(dist(v, turn) > 1e-6 for v in s[2])]
+                if len(kept) == len(pool) or not kept:
+                    break  # the turn is not on any stub: nothing to retry
+                pool[:] = kept
         return None, reason
 
     # -- fan-via terminal gateways (issue #6444) --------------------------------
