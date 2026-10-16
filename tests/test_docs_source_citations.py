@@ -93,7 +93,7 @@ CITED_SYMBOLS: tuple[tuple[str, str, str], ...] = (
     ("docs/reference/api.md", "_attr_unknown_tokens", "src/kicad_tools/schema/pcb.py"),
     # docs/reference/cli.md — exit-code ladders
     ("docs/reference/cli.md", "_main_impl", "src/kicad_tools/cli/route_cmd.py"),
-    ("docs/reference/cli.md", "exit codes:", "src/kicad_tools/cli/route_cmd.py"),
+    ("docs/reference/cli.md", "exit codes:", "src/kicad_tools/cli/route_exit_codes_help.py"),
     ("docs/reference/cli.md", "Exit Codes:", "src/kicad_tools/cli/fleet_cmd.py"),
     # Board 03's revision-B README documents reviewed copper replay, not
     # the old generic-router entry points. It remains in GUARDED_DOC_GLOBS.
