@@ -137,11 +137,9 @@ _GUIDE_NEAR_PITCHES = 2.0
 _GUIDE_CAP_MM = 2.0
 _GUIDE_WEIGHT = 1.0
 # Issue #6824: extra cost per mm of planar copper on a layer outside the net
-# class's ``preferred_layers`` (3.0 => non-preferred copper costs 4x, the
+# class's ``preferred_layers`` (1.0 => non-preferred copper costs 2x, the
 # grid pathfinder's 0.5x preferred discount as an admissible surcharge).
-# Board 03's USB_D leg is ~15 mm and an F->In2->F excursion pays four via
-# hops, so 1.0 never outweighed the vias; 3.0 moves USB_D+ onto In2.Cu.
-_NON_PREFERRED_LAYER_SURCHARGE = 3.0
+_NON_PREFERRED_LAYER_SURCHARGE = 1.0
 
 
 # Issue #6703: at most this many fallback pairs per flush get the partner-aware
@@ -884,15 +882,6 @@ class LatticePathfinder:
         blocked = self._allowed_layers_blocked()
         if net_class is None:
             return blocked
-        # Issue #6824: a class that names a plane-reserved layer in its
-        # ``preferred_layers`` opts its nets into that layer (board 03 routes
-        # the USB_D pair on the In2.Cu plane layer).  Only the board-wide
-        # reservation is lifted; the class's own ``avoid_layers`` below still
-        # hard-blocks.
-        if blocked:
-            prefs = getattr(net_class, "preferred_layers", None)
-            if prefs:
-                blocked = blocked - frozenset(i for i in prefs if isinstance(i, int))
         hard_avoided = getattr(net_class, "hard_avoided_layer_indices", None)
         if hard_avoided is None:
             return blocked
@@ -3135,7 +3124,11 @@ class LatticePathfinder:
         Diagnostics (layer, gateway per end, via counts, candidates per
         terminal) land in :attr:`pair_gateway_log` either way.
         """
-        from ..pairplan.gateway import enumerate_gateways, rank_gateway_combos
+        from ..pairplan.gateway import (
+            enumerate_gateways,
+            rank_gateway_combos,
+            rank_through_combos,
+        )
 
         net_p, net_n = pc.pad_p_a.net, pc.pad_n_a.net
         trace_w = getattr(pc.net_class, "trace_width", None) or self.rules.trace_width
@@ -3166,6 +3159,9 @@ class LatticePathfinder:
         )
         notes: list[str] = []
         reason = "pair-gateway-no-candidates"
+        # Issue #6836: layers that reached the combination stage, kept for the
+        # pass-under group walked after EVERY layer's ``against`` group.
+        staged: list[tuple[int, str, list[list[Gateway | None]], int]] = []
         for layer in layers:
             lname = self._layer_name(layer)
             per_end: list[list[Gateway | None]] = []
@@ -3219,6 +3215,7 @@ class LatticePathfinder:
             if not per_end[0] or not per_end[1]:
                 continue
             reason = "pair-gateway-no-path"
+            staged.append((layer, lname, per_end, gated))
             for ga, gb in rank_gateway_combos(per_end[0], per_end[1]):
                 if deadline is not None and time.monotonic() >= deadline:
                     self.pair_gateway_log[pc.key] = "gateway: " + "; ".join(notes + ["deadline"])
@@ -3247,6 +3244,44 @@ class LatticePathfinder:
                 )
                 self.pair_gateway_log[pc.key] = pres.gateway
                 return pres, "ok"
+        # Issue #6836: the pass-under group.  Tried only after every
+        # combination above (on every layer) declined, so a segment that
+        # couples through an ``against`` combination keeps it -- and its
+        # copper -- exactly.  A ``through`` end's body reaches its via pair
+        # from the pad side, under pads that do not own the gateway layer
+        # (06rf J1: from U1 under the B and A rows on B.Cu).
+        for layer, lname, per_end, gated in staged:
+            for combo in rank_through_combos(per_end[0], per_end[1]):
+                if deadline is not None and time.monotonic() >= deadline:
+                    self.pair_gateway_log[pc.key] = "gateway: " + "; ".join(notes + ["deadline"])
+                    return None, "pair-gateway-deadline"
+                ga, gb = combo.ga, combo.gb
+                pres, why = self._try_gateway_combo(
+                    pc,
+                    layer,
+                    (ga, gb),
+                    committed=committed,
+                    history=history,
+                    present=present,
+                    half=half,
+                    clr=clr,
+                    via_r=via_r,
+                    reqs=reqs,
+                    through=(combo.through_a, combo.through_b),
+                )
+                if pres is None:
+                    reason = f"pair-gateway-pass-under-{why.removeprefix('pair-')}"
+                    continue
+                desc = []
+                for tag, g, thr in (("A", ga, combo.through_a), ("B", gb, combo.through_b)):
+                    text = "pad layer" if g is None else g.describe()
+                    desc.append(f"{tag}: {text}{' pass-under' if thr else ''}")
+                pres.gateway = (
+                    f"gateway {lname} ({'; '.join(desc)}); vias P/N={gated}/{gated}; "
+                    + "; ".join(notes)
+                )
+                self.pair_gateway_log[pc.key] = pres.gateway
+                return pres, "ok"
         self.pair_gateway_log[pc.key] = f"gateway declined ({reason}): " + "; ".join(notes)
         return None, reason
 
@@ -3263,8 +3298,14 @@ class LatticePathfinder:
         clr: float,
         via_r: float,
         reqs: list[float] | None,
+        through: tuple[bool, bool] = (False, False),
     ) -> tuple[_PairResult | None, str]:
-        """Route one (gateway A, gateway B) combination; see the caller."""
+        """Route one (gateway A, gateway B) combination; see the caller.
+
+        ``through`` (issue #6836) marks the ends whose body reaches the via
+        pair from the pad side (pass-under): their anchor sits between the
+        vias and the pads instead of beyond the vias.
+        """
         ga, gb = combo
         ends = ((ga, pc.pad_p_a, pc.pad_n_a), (gb, pc.pad_p_b, pc.pad_n_b))
         mark = committed.begin_trial()
@@ -3296,7 +3337,10 @@ class LatticePathfinder:
             # gateway heading, where its whole envelope clears both vias; the
             # unchanged ``_pair_attach`` doglegs join each via to its leg.
             reach = pc.pitch / 2.0 + half + clr + via_r + 1e-3
-            anchors = [None if g is None else self._gateway_anchor(g.site, reach) for g in (ga, gb)]
+            anchors = [
+                None if g is None else self._gateway_anchor(g.site, reach, through=thr)
+                for g, thr in zip((ga, gb), through, strict=True)
+            ]
             if any(g is not None and a is None for g, a in zip((ga, gb), anchors, strict=True)):
                 return None, "pair-gateway-anchor"
             vpc = replace(
@@ -3387,7 +3431,9 @@ class LatticePathfinder:
             return None, "pair-gateway-via-count"
         return _PairResult(routes=routes, runs=runs, resources=pres.resources, vias=vias), "ok"
 
-    def _gateway_anchor(self, site: GatewaySite, reach: float) -> Pt | None:
+    def _gateway_anchor(
+        self, site: GatewaySite, reach: float, *, through: bool = False
+    ) -> Pt | None:
         """Start point of a gateway's coupled body (issue #6444).
 
         The ideal start is :func:`_gateway_anchor` (just past the via pair
@@ -3397,13 +3443,18 @@ class LatticePathfinder:
         whose ``+/- pitch/2`` offset collapses (``pair-offset-degenerate``),
         while a node start leaves straight octilinear stubs.  Falls back to
         the ideal point when no node qualifies within 1 mm of it.
+
+        ``through`` (issue #6836, pass-under) mirrors all of it onto the
+        reverse heading: the start sits on the pad side of the via pair.
         """
         from ..pairplan.gateway import HEADINGS
 
-        ideal = _gateway_anchor(site, reach)
+        ideal = _gateway_anchor(site, reach, through=through)
         if ideal is None:
             return None
         h = HEADINGS[site.heading]
+        if through:
+            h = (-h[0], -h[1])
         g = ((site.via_p[0] + site.via_n[0]) / 2.0, (site.via_p[1] + site.via_n[1]) / 2.0)
         best: tuple[float, Pt] | None = None
         for point in self.build().nodes.values():

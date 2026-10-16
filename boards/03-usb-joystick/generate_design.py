@@ -662,11 +662,6 @@ def route_pcb(input_path: Path, output_path: Path, *, use_saved_plan: bool = Tru
                 # P5 stretch target (#6447).
                 pair_protocol="USB2_FS",
             )
-            if prefix == "USB_D":
-                # Issue #6824: routing_plan.usb_geometry() requires the
-                # USB_D common run on In2.Cu; the lattice engine reads this
-                # as a soft per-layer cost.
-                net_class_map[net] = _dc_replace(net_class_map[net], preferred_layers=["In2.Cu"])
     # Issue #6443: no ``coupled_continuity_threshold`` override.  Continuity
     # is info-only now; the short USB-C/ESD branches are bounded by the
     # uncoupled-length limit (USB2_FS: 6.35 mm x components on the net) and
