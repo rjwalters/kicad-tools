@@ -391,3 +391,53 @@ def test_declined_pair_takes_the_fallback_without_f_cu_copper(
     assert Layer.F_CU not in segs, f"hard-avoided F.Cu used: {segs}"
     assert not router._committed_coupled_nets
     assert "[coupled-declined]" in out and "F.Cu" in out, out
+
+
+_CPP_ONLY = pytest.mark.skipif(not is_cpp_available(), reason="router_cpp not built")
+
+
+@_CPP_ONLY
+def test_declined_pair_is_not_rebuilt_by_the_pose_stage(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Pose centreline ON (the default): a declined pair still gets no F.Cu trunk."""
+    monkeypatch.setattr(DiffPairRouter, "_shadow_route_pair", lambda self, *a, **k: None)
+    router = _hard_avoid_f_cu_router()
+    assert router._diffpair.enable_pose_centerline
+    [pair] = router._diffpair.detect_differential_pairs()
+    routes, _ = router._diffpair.route_differential_pair_coupled(
+        pair, per_pair_timeout=30.0, per_pair_max_iterations=20_000
+    )
+    out = capsys.readouterr().out
+    segs = _segment_layers(routes)
+    assert Layer.F_CU not in segs, f"hard-avoided F.Cu used: {segs}"
+    assert "centerline trunk" not in out, out
+    assert "[coupled-pose] skipped: pair declined on layer grounds" in out, out
+
+
+@_CPP_ONLY
+def test_route_centerline_pose_refuses_a_forbidden_pad_layer() -> None:
+    """Called directly, the pose trunk refuses a hard-avoided pad layer."""
+    from kicad_tools.router.diffpair_pose import route_centerline_pose
+
+    router = _hard_avoid_f_cu_router()
+    [pair] = router._diffpair.detect_differential_pairs()
+    p_pads = router.nets[pair.positive.net_id]
+    n_pads = router.nets[pair.negative.net_id]
+    p_start, p_end = (router.pads[k] for k in p_pads)
+    n_start, n_end = (router.pads[k] for k in n_pads)
+    rules = router.rules
+    pf = CoupledPathfinder(
+        grid=router.grid,
+        rules=rules,
+        target_spacing_cells=4,
+        min_spacing_cells=3,
+        net_class_map=router.net_class_map,
+    )
+    assert pf._cpp_coupled_available()
+    assert route_centerline_pose(pf, p_start, p_end, n_start, n_end, timeout_seconds=10.0) is None
+    assert pf.last_pose_report["reason"] == "layer-not-permitted"
+    # Control: without the hard avoid the same call is not refused on layer.
+    rules.strict_layers = False
+    route_centerline_pose(pf, p_start, p_end, n_start, n_end, timeout_seconds=10.0)
+    assert pf.last_pose_report.get("reason") != "layer-not-permitted"

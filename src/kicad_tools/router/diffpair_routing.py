@@ -12055,10 +12055,22 @@ class DiffPairRouter:
                     if pose_remaining >= _POSE_CENTERLINE_MIN_BUDGET_S
                     else None
                 )
+            # Issue #6860: a pair the coupled search declined on layer grounds
+            # must not be rebuilt by the pose trunk either (it is single-layer
+            # on the pad layer, i.e. on the forbidden layer).
+            pose_layer_declined = getattr(pathfinder, "last_decline_reason", None) is not None
             if (
                 result is None
                 and self.enable_pose_centerline
                 and not spec.polarity_swap
+                and pose_layer_declined
+            ):
+                print("    [coupled-pose] skipped: pair declined on layer grounds")
+            if (
+                result is None
+                and self.enable_pose_centerline
+                and not spec.polarity_swap
+                and not pose_layer_declined
                 and pose_timeout is None
             ):
                 print("    [coupled-pose] skipped: per-pair wall-clock budget spent")
@@ -12066,6 +12078,7 @@ class DiffPairRouter:
                 result is None
                 and self.enable_pose_centerline
                 and not spec.polarity_swap
+                and not pose_layer_declined
                 and pose_timeout is not None
             ):
                 from .diffpair_pose import route_centerline_pose
