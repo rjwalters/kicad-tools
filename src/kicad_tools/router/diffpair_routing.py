@@ -824,6 +824,33 @@ COUPLED_OUTCOME_JOINT_PLATEAU = "joint-A*-plateau"
 COUPLED_OUTCOME_LANDING_STALL = "landing-stall"
 
 
+def partner_via_radii_cells(
+    *,
+    trace_clearance: float,
+    via_clearance: float,
+    via_diameter: float,
+    resolution: float,
+    p_width: float,
+    n_width: float,
+) -> tuple[float, float, float]:
+    """Partner-via clearance radii in grid cells (Issues #6840, #6847).
+
+    ``(P centreline vs N via, N centreline vs P via, P via vs N via)``,
+    unrounded.  The formula behind
+    :meth:`CoupledPathfinder._partner_via_radii_cells`, taking plain numbers
+    so a caller holding only captured inputs (the Board07 replay fixture's
+    recorded ``DesignRules`` struct and net-class widths) derives exactly the
+    radii production installs through ``set_partner_via_clearance``.
+    """
+    floor = trace_via_clearance_mm(trace_clearance, via_clearance)
+    via_r = via_diameter / 2
+    return (
+        (via_r + p_width / 2 + floor) / resolution,
+        (via_r + n_width / 2 + floor) / resolution,
+        (via_diameter + floor) / resolution,
+    )
+
+
 def _endpoint_zone_tolerance(a: GridPos, b: GridPos, target_spacing_cells: int, radius: int) -> int:
     """Spacing tolerance inside one end's relaxed zone (Issue #6826).
 
@@ -2329,15 +2356,13 @@ class CoupledPathfinder:
         Mirrors the C++ ``set_partner_via_clearance`` inputs exactly.
         """
         rules = self.rules
-        res = self.grid.resolution
-        floor = trace_via_clearance_mm(rules.trace_clearance, rules.via_clearance)
-        via_r = rules.via_diameter / 2
-        p_half = self._get_trace_width_for_net(p_net_name) / 2
-        n_half = self._get_trace_width_for_net(n_net_name) / 2
-        return (
-            (via_r + p_half + floor) / res,
-            (via_r + n_half + floor) / res,
-            (rules.via_diameter + floor) / res,
+        return partner_via_radii_cells(
+            trace_clearance=rules.trace_clearance,
+            via_clearance=rules.via_clearance,
+            via_diameter=rules.via_diameter,
+            resolution=self.grid.resolution,
+            p_width=self._get_trace_width_for_net(p_net_name),
+            n_width=self._get_trace_width_for_net(n_net_name),
         )
 
     @staticmethod
@@ -3137,6 +3162,18 @@ class CoupledPathfinder:
                     )
                 if not partner_via_ok:
                     self.last_rejections["via_partner_clear"] += 1
+                    continue
+                # Issue #6847: the swap drills the same two cells too, so it
+                # takes the same via-in-pad gate as the plain layer change
+                # (at the endpoint pads as well, where ``_is_via_blocked`` is
+                # waived below).
+                if smd_vias_ok is None:
+                    smd_vias_ok = self._allow_smd_vias or not (
+                        self._via_drill_in_smd_pad(state.p_pos.x, state.p_pos.y)
+                        or self._via_drill_in_smd_pad(state.n_pos.x, state.n_pos.y)
+                    )
+                if not smd_vias_ok:
+                    self.last_rejections["via_in_pad"] += 1
                     continue
 
                 # Both pads must be able to host a via at their current
@@ -4031,11 +4068,22 @@ class CoupledPathfinder:
             while walker is not None:
                 p_cell = (walker.state.p_pos.x, walker.state.p_pos.y, walker.state.p_pos.layer)
                 n_cell = (walker.state.n_pos.x, walker.state.n_pos.y, walker.state.n_pos.layer)
-                if walker.via_from_parent:
-                    own_vias.append(p_cell[:2])
-                    own_vias.append(n_cell[:2])
-                    p_vias.append(p_cell[:2])
-                    n_vias.append(n_cell[:2])
+                if walker.via_from_parent and walker.parent is not None:
+                    # Issue #6847: each rail drills at the PARENT state's
+                    # cell -- where ``_build_route_from_path`` places the
+                    # ``Via`` (the rail's position before the move).  For a
+                    # plain layer change that is the child's (x, y) too, but
+                    # the polarity-swap move exchanges the rails' cells, so
+                    # reading the child would file P's via at N's drill (and
+                    # vice versa): the per-rail partner-via guards would then
+                    # measure each rail against its OWN barrel and miss the
+                    # partner's.
+                    p_drill = (walker.parent.state.p_pos.x, walker.parent.state.p_pos.y)
+                    n_drill = (walker.parent.state.n_pos.x, walker.parent.state.n_pos.y)
+                    own_vias.append(p_drill)
+                    own_vias.append(n_drill)
+                    p_vias.append(p_drill)
+                    n_vias.append(n_drill)
                 p_visited_cells.add(p_cell)
                 n_visited_cells.add(n_cell)
                 if prox_radius > 1:
