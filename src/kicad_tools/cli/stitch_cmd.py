@@ -2905,8 +2905,21 @@ def calculate_dogleg_via_position(
                     continue
 
                 for escape_offset in escape_offsets:
-                    via_x = intermediate_x + escape_dx * escape_offset
-                    via_y = intermediate_y + escape_dy * escape_offset
+                    if escape_dx != 0 and escape_dy != 0:
+                        # Issue #6823: a diagonal escape leg between two
+                        # points the writer rounds to 0.01 mm can land one
+                        # quantum off 45 degrees, and the writer would then
+                        # add a vertex no check saw.  Step the same whole
+                        # number of grid cells on both axes from the
+                        # *written* corner so the leg is exactly 45 degrees
+                        # as written.
+                        corner_x, corner_y = _as_written((intermediate_x, intermediate_y))
+                        step = round(abs(escape_dx) * escape_offset, 2)
+                        via_x = round(corner_x + math.copysign(step, escape_dx), 2)
+                        via_y = round(corner_y + math.copysign(step, escape_dy), 2)
+                    else:
+                        via_x = intermediate_x + escape_dx * escape_offset
+                        via_y = intermediate_y + escape_dy * escape_offset
 
                     # Check via position clearance (same as straight-line)
                     conflict = False
@@ -3012,15 +3025,19 @@ def calculate_dogleg_via_position(
                         ):
                             continue
 
-                    # Check the entire L-shaped path for clearance
+                    # Check the entire L-shaped path for clearance -- the
+                    # path as the writer emits it (Issue #6823), not the
+                    # nominal float legs.  The escape snap above makes both
+                    # the same; a candidate that still gains a vertex in
+                    # the writer is rejected rather than written unchecked.
+                    stub_path = legalize_stub_path(
+                        [(pad.x, pad.y), (intermediate_x, intermediate_y), (via_x, via_y)]
+                    )
+                    if len(stub_path) != 3:
+                        continue
                     if trace_width > 0:
-                        if not _check_dogleg_path_clearance(
-                            pad.x,
-                            pad.y,
-                            intermediate_x,
-                            intermediate_y,
-                            via_x,
-                            via_y,
+                        if not _check_stub_path_clearance(
+                            stub_path,
                             trace_half_width,
                             other_net_tracks,
                             other_net_vias,
@@ -3033,7 +3050,7 @@ def calculate_dogleg_via_position(
                         ):
                             continue
 
-                    return (via_x, via_y, intermediate_x, intermediate_y)
+                    return (via_x, via_y, stub_path[1][0], stub_path[1][1])
 
     return None
 
@@ -3759,8 +3776,11 @@ def trace_points(trace: TraceSegment) -> list[tuple[float, float]]:
     0/45/90/135 set is then expanded into the default dogleg
     (:func:`legalize_stub_path`), so no caller of :func:`run_stitch` --
     ``kct stitch`` or the router's pour-link closer -- can write off-angle
-    copper.  The placement strategies already return legal legs, so this
-    is a no-op for them; it only guards a hand-built :class:`TraceSegment`.
+    copper.  Every placement strategy clearance-checks
+    ``legalize_stub_path(...)`` of its own vertices (the dog-leg strategy
+    snaps its diagonal escape to the 0.01 mm grid so that path is exactly
+    its three nominal points), so this is a no-op for them; it only
+    guards a hand-built :class:`TraceSegment`.
     """
     points: list[tuple[float, float]] = [(trace.pad.x, trace.pad.y)]
     if trace.is_extended_escape:

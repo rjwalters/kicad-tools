@@ -17,10 +17,13 @@ from pathlib import Path
 import pytest
 
 from kicad_tools.cli.stitch_cmd import (
+    DOGLEG_MAX_AXIAL_MM,
     PadInfo,
     TraceSegment,
     add_trace_to_pcb,
+    calculate_dogleg_via_position,
     run_stitch,
+    trace_points,
     trace_to_track_segments,
 )
 from kicad_tools.router.quantize import verify_segment_45
@@ -162,3 +165,72 @@ def test_add_trace_to_pcb_legalizes_hand_built_straight_stub() -> None:
         verify_segment_45(x1, y1, x2, y2, strict=True)
     written = [(s.start_x, s.start_y, s.end_x, s.end_y) for s in trace_to_track_segments(trace)]
     assert written == [pytest.approx(s) for s in segments]
+
+
+def _block_axis_escapes(pad: PadInfo, offset: float) -> list[tuple[float, float, float, int]]:
+    """Tiny other-net vias on every perpendicular (axis) dog-leg escape site,
+    so :func:`calculate_dogleg_via_position` falls through to a diagonal
+    escape.  (Off the axial legs themselves, which must stay clear.)"""
+    radius = max(pad.width, pad.height) / 2
+    blockers = []
+    for adx, ady in [(1, 0), (-1, 0), (0, 1), (0, -1)]:
+        for dist in (0.3, 0.5, 0.7, 1.0, DOGLEG_MAX_AXIAL_MM):
+            cx, cy = pad.x + adx * dist, pad.y + ady * dist
+            for edx, edy in [(1, 0), (-1, 0), (0, 1), (0, -1)]:
+                if edx * adx + edy * ady != 0:
+                    continue
+                for k in (0.75, 1, 1.5, 2):
+                    blockers.append(
+                        (
+                            cx + edx * (radius + offset * k),
+                            cy + edy * (radius + offset * k),
+                            0.01,
+                            99,
+                        )
+                    )
+    return blockers
+
+
+@pytest.mark.parametrize(
+    ("x", "y"),
+    [(143.3, 91.1625), (143.3, 91.1675), (100.003, 50.0049), (10.0, 10.0)],
+    ids=["board03-U1.24", "off-grid-y-up", "off-grid-xy", "on-grid"],
+)
+def test_dogleg_diagonal_escape_is_written_as_checked(x: float, y: float) -> None:
+    """The dog-leg strategy's legs are legal as written, not just nominally.
+
+    A diagonal escape between two points the writer rounds to 0.01 mm used
+    to land one quantum off 45 degrees; ``trace_points`` then added a vertex
+    (``... -> (143.95, 91.51) -> (143.95, 91.52)``) that no clearance check
+    saw.  The placement's own three points must be exactly what is written.
+    """
+    pad = PadInfo("U1", "1", 1, "GND", x, y, "F.Cu", 0.54, 0.64)
+    placement = calculate_dogleg_via_position(
+        pad,
+        offset=0.3,
+        via_size=0.6,
+        existing_vias=[],
+        clearance=0.05,
+        other_net_vias=_block_axis_escapes(pad, 0.3),
+        trace_width=0.2,
+    )
+    assert placement is not None
+    via_x, via_y, corner_x, corner_y = placement
+    # A genuinely diagonal escape leg (the case that used to gain a vertex).
+    assert abs(via_x - corner_x) > 0.1 and abs(via_y - corner_y) > 0.1
+
+    trace = TraceSegment(
+        pad=pad,
+        via_x=via_x,
+        via_y=via_y,
+        width=0.2,
+        layer="F.Cu",
+        intermediate_x=corner_x,
+        intermediate_y=corner_y,
+    )
+    written = trace_points(trace)
+    assert len(written) == 3, f"writer added a vertex no check saw: {written}"
+    assert written[1] == pytest.approx((corner_x, corner_y))
+    assert written[2] == pytest.approx((via_x, via_y))
+    for (x1, y1), (x2, y2) in zip(written, written[1:], strict=False):
+        verify_segment_45(x1, y1, x2, y2, strict=True, context="#6823 dogleg test")
