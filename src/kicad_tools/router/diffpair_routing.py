@@ -70,6 +70,7 @@ from .diffpair_length import DiffPairLengthTracker
 from .edge_keepout import install_edge_keepout
 from .layers import Layer
 from .observability import validate_net_connectivity
+from .pair_layer_filter import pair_permitted_layers
 from .path import calculate_route_length
 from .primitives import Pad, Route, Segment, Via
 from .quantize import (
@@ -3415,22 +3416,14 @@ class CoupledPathfinder:
         ``pad_layer`` is kept for call-site compatibility and is unused.
         """
         del pad_layer
-        base = list(self.grid.get_routable_indices())
-        allowed = self.rules.allowed_layers
-        hard_avoided: set[int] = set()
-        for name in (p_net_name, n_net_name):
-            net_class = self.net_class_map.get(name)
-            if net_class is not None:
-                hard_avoided |= net_class.hard_avoided_layer_indices(self.rules.strict_layers)
-        if allowed is None and not hard_avoided:
-            return base
-        permitted = [
-            idx
-            for idx in base
-            if idx not in hard_avoided
-            and (allowed is None or Layer(self.grid.index_to_layer(idx)).kicad_name in allowed)
-        ]
-        return permitted
+        # Issue #6866: the filter lives in ``pair_permitted_layers`` so the
+        # lattice diff-pair tie step applies exactly the same rule.
+        return pair_permitted_layers(
+            self.grid.get_routable_indices(),
+            lambda idx: Layer(self.grid.index_to_layer(idx)).kicad_name,
+            self.rules,
+            (self.net_class_map.get(name) for name in (p_net_name, n_net_name)),
+        )
 
     def _coupled_layer_decline_reason(
         self,
