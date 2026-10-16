@@ -5549,7 +5549,11 @@ class Autorouter:
         single-ended connection for those.  An extra is *eligible* when its
         nearest reserved anchor (the same pick the connection loop makes) is
         on the same footprint within :data:`MAX_TIE_STUB_MM` and both pads
-        share a routing layer.  It is tied with :func:`plan_equivalent_pin_tie`
+        share a routing layer.  The tie is planned only on shared layers the
+        pair may use (:func:`~kicad_tools.router.pair_layer_filter.pair_permitted_layers`,
+        the coupled search's filter: ``rules.allowed_layers`` and both nets'
+        hard ``avoid_layers``, #6866); an extra with none declines the pair's
+        ties below.  It is tied with :func:`plan_equivalent_pin_tie`
         (exact pad copper; the class width from ``self.net_class_map`` --
         after impedance synthesis -- necked down to
         ``rules.min_trace_width_floor`` at the least).
@@ -5567,6 +5571,7 @@ class Autorouter:
         self._lattice_pair_ties = []
         if not reserved:
             return set()
+        from .pair_layer_filter import pair_permitted_layers
         from .pairplan.tie import MAX_TIE_STUB_MM, PlannedTie, plan_equivalent_pin_tie
         from .primitives import Segment
 
@@ -5621,8 +5626,32 @@ class Autorouter:
                 for idx in range(lo, hi + 1):
                     fixed_runs.append((idx, pt, pt, via.diameter / 2.0, via.net))
 
+        # Issue #6866: tie copper honours the same layer filter as the coupled
+        # search -- ``rules.allowed_layers`` (``--reserve-plane-layers``) and
+        # the union of BOTH nets' hard ``avoid_layers``.  Before #6866 a tie
+        # between two through-hole pads could land on a reserved plane (board
+        # 03 USB_D- on the In1.Cu GND plane).
+        partners = getattr(self, "_lattice_pair_net_ids", None) or {}
+        layer_names = {ld.index: ld.name for ld in getattr(layer_stack, "layers", ())}
+
+        def class_of(net: int | None) -> Any:
+            if net is None:
+                return None
+            name = self.net_names.get(net)
+            return self.net_class_map.get(name) if name else None
+
+        def permitted(net: int, layers: list[int]) -> list[int]:
+            return pair_permitted_layers(
+                layers,
+                lambda idx: layer_names.get(idx, ""),
+                self.rules,
+                (class_of(net), class_of(partners.get(net))),
+            )
+
         # Eligible extras per pair net, keyed and anchored exactly as the
-        # connection loop keys and anchors them.
+        # connection loop keys and anchors them.  ``layers`` is the PERMITTED
+        # subset of the layers both pads share; it may be empty, in which case
+        # the pair declines its ties below (#6866).
         eligible: dict[int, list[tuple[int, Pad, Pad, Any, list[int]]]] = {}
         for net, pad_keys in self.nets.items():
             res_keys = reserved.get(net)
@@ -5643,7 +5672,9 @@ class Autorouter:
                     continue
                 layers = sorted(set(pad_layers(anchor)) & set(pad_layers(other)) & routable)
                 if layers:
-                    eligible.setdefault(net, []).append((seq, anchor, other, net_class, layers))
+                    eligible.setdefault(net, []).append(
+                        (seq, anchor, other, net_class, permitted(net, layers))
+                    )
 
         def plan(net: int, item: Any, accepted: list[PlannedTie]) -> PlannedTie | None:
             _seq, anchor, extra, net_class, layers = item
@@ -5678,7 +5709,6 @@ class Autorouter:
             except Exception:
                 return None
 
-        partners = getattr(self, "_lattice_pair_net_ids", None) or {}
         accepted: list[PlannedTie] = []
         tied: set[tuple[int, int]] = set()
         done: set[int] = set()
@@ -5709,9 +5739,16 @@ class Autorouter:
             declined: str | None = None
             for g in group:
                 for item in eligible[g]:
+                    pair_ends = f"{item[2].ref}.{item[2].pin}->{item[1].ref}.{item[1].pin}"
+                    if not item[4]:
+                        declined = (
+                            f"{pair_ends} has no permitted tie layer "
+                            "(allowed_layers / hard avoid_layers, issue #6866)"
+                        )
+                        break
                     tie = plan(g, item, local)
                     if tie is None:
-                        declined = f"{item[2].ref}.{item[2].pin}->{item[1].ref}.{item[1].pin}"
+                        declined = f"{pair_ends} has no clearing tie"
                         break
                     local.append(tie)
                     planned.append((g, item, tie))
@@ -5720,7 +5757,7 @@ class Autorouter:
             names = "/".join(self.net_names.get(g, str(g)) for g in group)
             if declined:
                 print(
-                    f"  Diff-pair ties {names}: not used ({declined} has no clearing tie); "
+                    f"  Diff-pair ties {names}: not used ({declined}); "
                     "extras routed as before (issue #6698)"
                 )
                 continue
