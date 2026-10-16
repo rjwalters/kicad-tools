@@ -261,6 +261,16 @@ def route_net(
         origin_y=min_y,
         rules=design_rules,
     )
+    # Issue #6875: the #972 adaptive cap may route a large board on a coarser
+    # pitch than the board's rules ask for.  Report the grid actually used
+    # (``grid``) and say so in ``warnings`` rather than only in a log line.
+    grid_report = router.grid_report()
+    if grid_report["coarsened"]:
+        clearance_warnings.append(
+            f"Routed on a {grid_report['used_mm']:.4g}mm grid, not the requested "
+            f"{grid_report['requested_mm']:.4g}mm: {grid_report['coarsened_reason']} "
+            "(Issue #6875)"
+        )
 
     # Collect pads for the specific net, grouped by component
     from kicad_tools.router.layers import Layer
@@ -326,6 +336,7 @@ def route_net(
     if len(net_pads) < 2:
         return RouteNetResult(
             warnings=clearance_warnings,
+            grid=grid_report,
             success=True,
             net_name=net_name,
             routed_connections=0,
@@ -344,6 +355,7 @@ def route_net(
     except Exception as e:
         return RouteNetResult(
             warnings=clearance_warnings,
+            grid=grid_report,
             success=False,
             net_name=net_name,
             error_message=f"Routing failed: {e}",
@@ -383,6 +395,7 @@ def route_net(
 
             return RouteNetResult(
                 warnings=clearance_warnings,
+                grid=grid_report,
                 success=True,
                 net_name=net_name,
                 routed_connections=len(routes),
@@ -395,6 +408,7 @@ def route_net(
         except Exception as e:
             return RouteNetResult(
                 warnings=clearance_warnings,
+                grid=grid_report,
                 success=False,
                 net_name=net_name,
                 routed_connections=len(routes),
@@ -406,6 +420,7 @@ def route_net(
         # Routing failed
         return RouteNetResult(
             warnings=clearance_warnings,
+            grid=grid_report,
             success=False,
             net_name=net_name,
             total_connections=max(0, len(net_pads) - 1),

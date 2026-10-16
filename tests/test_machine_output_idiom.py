@@ -300,3 +300,54 @@ class TestCanonicalIdiomGuard:
         for key, opts in found.items():
             assert "--json" in opts, key
             assert "--format" in opts, key
+
+
+# ---------------------------------------------------------------------------
+# kct route --format json: the ``grid`` block (Issue #6875)
+# ---------------------------------------------------------------------------
+
+
+class TestRouteGridBlock:
+    """The routing-diagnostics document reports the grid actually routed on."""
+
+    KEYS = {
+        "requested_mm",
+        "used_mm",
+        "cols",
+        "rows",
+        "layers",
+        "cells",
+        "selection",
+        "coarsened",
+        "coarsened_reason",
+    }
+
+    def test_document_carries_the_documented_grid_keys(self):
+        from kicad_tools.router.core import Autorouter
+        from kicad_tools.router.output import get_routing_diagnostics_json
+        from kicad_tools.router.rules import DesignRules
+
+        router = Autorouter(
+            20,
+            15,
+            rules=DesignRules(grid_resolution=0.1, trace_clearance=0.2),
+            force_python=True,
+            adaptive_grid=False,
+        )
+        doc = json.loads(
+            json.dumps(get_routing_diagnostics_json(router, {}, 0, grid_selection="explicit"))
+        )
+
+        assert set(doc["grid"]) == self.KEYS
+        assert doc["grid"]["selection"] == "explicit"
+        assert doc["grid"]["requested_mm"] == doc["grid"]["used_mm"] == 0.1
+        assert doc["grid"]["coarsened"] is False
+
+    def test_machine_output_doc_lists_every_grid_key(self):
+        from pathlib import Path
+
+        doc = (
+            Path(__file__).resolve().parents[1] / "docs" / "reference" / "machine-output.md"
+        ).read_text()
+        for key in self.KEYS:
+            assert f"`{key}`" in doc, key

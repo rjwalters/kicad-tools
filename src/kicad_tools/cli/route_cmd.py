@@ -18953,7 +18953,9 @@ def _route_parser() -> argparse.ArgumentParser:
         "--force",
         action="store_true",
         help=(
-            "Force routing even when grid resolution exceeds clearance. "
+            "Force routing even when grid resolution exceeds clearance, or "
+            "when an explicit --grid exceeds the backend's cell ceiling "
+            "(20M cells Python, 100M C++; issue #6875). "
             "Without this flag, routing will fail if grid > clearance to "
             "prevent DRC violations. Use with caution."
         ),
@@ -20192,6 +20194,7 @@ def _emit_route_json_fallback(args, exit_code: int) -> None:
                 single_pad_count=getattr(last, "single_pad_count", 0),
                 # Issue #6239: the exit code is the run's single final verdict.
                 verdict=_verdict_for_exit(exit_code),
+                grid_selection=getattr(args, "_grid_selection", None),
             )
             return
         except Exception as exc:  # pragma: no cover - defensive
@@ -20227,6 +20230,41 @@ def _dry_run_layer_counts(pcb_path: Path, args, argv) -> tuple[list[int], bool]:
 
         return [detect_layer_stack(pcb_path.read_text()).num_layers], False
     return [6 if layers == "6" else 4 if str(layers).startswith("4") else 2], False
+
+
+def _check_explicit_grid_ceiling(pcb_path: Path, args, argv) -> int | None:
+    """Refuse an explicit ``--grid`` past the backend's cell ceiling (Issue #6875).
+
+    The cell count is taken at the largest layer count the run would try
+    (the ``--auto-layers`` ladder, else the fixed stack), so a later rung
+    cannot allocate past the ceiling either.  Returns 1 after printing the
+    error, or None to proceed.  ``--force`` skips the check (caller).
+    """
+    from kicad_tools.router.grid_limits import (
+        explicit_grid_ceiling_error,
+        resolve_limit_backend,
+    )
+    from kicad_tools.router.io import extract_board_dimensions
+
+    try:
+        dims = extract_board_dimensions(pcb_path)
+        layer_counts, _ = _dry_run_layer_counts(pcb_path, args, argv)
+    except Exception:
+        # Outline/stack problems are reported by the loader with better text.
+        return None
+    if not dims or not layer_counts:
+        return None
+    message = explicit_grid_ceiling_error(
+        width=dims[0],
+        height=dims[1],
+        resolution=float(args.grid),
+        num_layers=max(layer_counts),
+        backend=resolve_limit_backend(getattr(args, "backend", "auto")),
+    )
+    if message is None:
+        return None
+    print(message, file=sys.stderr)
+    return 1
 
 
 def _print_dry_run_plan(
@@ -20976,6 +21014,9 @@ def _run_main_impl(args, parser, argv) -> int:
                 file=sys.stderr,
             )
             return 1
+    # Issue #6875: reported as ``grid.selection`` in --format json and on the
+    # text ``Grid:`` line.
+    args._grid_selection = "explicit" if grid_auto_result is None else "auto"
 
     # Handle cache-related commands early
     if args.cache_stats:
@@ -21065,6 +21106,14 @@ def _run_main_impl(args, parser, argv) -> int:
     # every escalation dispatch below (``_analyze_dry_run``, issue #6648) and
     # runs the single-attempt complexity + routability analysis, which
     # returns before routing.
+    # Issue #6875: an explicit grid is no longer coarsened (#6741), so refuse
+    # one that would allocate past the backend's cell ceiling -- before any
+    # flow dispatch (and before --dry-run, which reports the same error).
+    if grid_auto_result is None and not args.force:
+        _ceiling_rc = _check_explicit_grid_ceiling(pcb_path, args, argv)
+        if _ceiling_rc is not None:
+            return _ceiling_rc
+
     if args.dry_run and not args.analyze:
         return _print_dry_run_plan(
             pcb_path,
@@ -21570,8 +21619,12 @@ def _run_main_impl(args, parser, argv) -> int:
 
         backend_status = format_backend_status(backend_info, grid_cells)
         flush_print(f"  Backend:    {backend_status}")
+        # Issue #6875: name the pitch actually routed on (and any coarsening).
+        from kicad_tools.router.grid_limits import format_grid_line
+
         flush_print(
-            f"  Grid:       {router.grid.cols}x{router.grid.rows}x{router.grid.num_layers} = {grid_cells:,} cells"
+            "  Grid:       "
+            + format_grid_line(router.grid_report(getattr(args, "_grid_selection", None)))
         )
         flush_print(f"  Total nets: {len(net_map)}")
         flush_print(f"  Nets to route: {nets_to_route} (multi-pad signal nets)")
@@ -23579,6 +23632,7 @@ def _run_main_impl(args, parser, argv) -> int:
             single_pad_count=len(single_pad_nets),
             routing_plan=_routing_plan_json,
             verdict=_final_verdict,
+            grid_selection=getattr(args, "_grid_selection", None),
         )
 
     # Save partial results on clean partial exit (not just SIGINT)

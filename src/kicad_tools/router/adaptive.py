@@ -37,6 +37,20 @@ class RoutingResult:
     routing_failures: list[RoutingFailure] = field(default_factory=list)
     single_pad_count: int = 0
     placement_report: RoutingPlacementReport | None = None
+    # Issue #6875: ``Autorouter.grid_report()`` of the attempt -- the pitch
+    # actually routed on, with ``coarsened`` / ``coarsened_reason`` when the
+    # #972 adaptive cap replaced ``rules.grid_resolution``.
+    grid: dict | None = None
+
+    @property
+    def grid_warning(self) -> str | None:
+        """A one-line warning when the routing pitch was coarsened, else None."""
+        if not self.grid or not self.grid.get("coarsened"):
+            return None
+        return (
+            f"Routed on a {self.grid['used_mm']:.4g}mm grid, not the requested "
+            f"{self.grid['requested_mm']:.4g}mm: {self.grid['coarsened_reason']} (Issue #6875)"
+        )
 
     def __post_init__(self) -> None:
         if self.placement_report is not None:
@@ -112,6 +126,7 @@ class AdaptiveAutorouter:
         verbose: bool = True,
         rule_area_specs: Sequence[RuleAreaSpec] | None = None,
         board_layer_stack: LayerStack | None = None,
+        adaptive_grid: bool = True,
     ):
         """Initialize adaptive autorouter.
 
@@ -137,6 +152,12 @@ class AdaptiveAutorouter:
                 last rung, so an 8-layer board can escalate to all 8 layers
                 instead of stopping at the 6-layer preset.  Ignored for 2-,
                 4- and 6-layer boards, whose ladder is unchanged.
+            adaptive_grid: Issue #6875.  Forwarded to each inner
+                :class:`Autorouter`.  True (default) keeps the #972 adaptive
+                cell cap, which may coarsen ``rules.grid_resolution`` on a
+                large board -- reported in :attr:`RoutingResult.grid` and
+                :attr:`RoutingResult.grid_warning`; False routes on exactly
+                the requested pitch.
         """
         self.width = width
         self.height = height
@@ -155,6 +176,7 @@ class AdaptiveAutorouter:
         self.verbose = verbose
         self.rule_area_specs = list(rule_area_specs) if rule_area_specs else None
         self.board_layer_stack = board_layer_stack
+        self.adaptive_grid = bool(adaptive_grid)
 
         # Result after routing
         self.result: RoutingResult | None = None
@@ -181,6 +203,7 @@ class AdaptiveAutorouter:
             rules=self.rules,
             layer_stack=layer_stack,
             physics_enabled=False,
+            adaptive_grid=self.adaptive_grid,
         )
 
         # Issue #6059: this Autorouter has no source board file, so its own
@@ -364,6 +387,7 @@ class AdaptiveAutorouter:
                 routing_failures=getattr(router, "routing_failures", []),
                 single_pad_count=single_pad_count,
                 placement_report=placement_report,
+                grid=router.grid_report(),
             )
             self._autorouter = router
 
