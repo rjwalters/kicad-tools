@@ -25,6 +25,7 @@ from .chain import (
 from .gateway import (
     HEADINGS,
     Gateway,
+    GatewayCombo,
     GatewaySite,
     enumerate_gateways,
     gateway_anchor_point,
@@ -32,6 +33,7 @@ from .gateway import (
     handedness_consistent,
     propose_gateway_sites,
     rank_gateway_combos,
+    rank_through_combos,
 )
 from .tie import MAX_TIE_STUB_MM, PlannedTie, plan_equivalent_pin_tie
 
@@ -40,6 +42,7 @@ __all__ = [
     "MAX_TIE_STUB_MM",
     "Couple",
     "Gateway",
+    "GatewayCombo",
     "GatewaySite",
     "PairChain",
     "PlannedTie",
@@ -53,4 +56,5 @@ __all__ = [
     "plan_equivalent_pin_tie",
     "propose_gateway_sites",
     "rank_gateway_combos",
+    "rank_through_combos",
 ]

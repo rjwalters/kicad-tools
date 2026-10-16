@@ -2040,8 +2040,9 @@ spawn attempts:
 | Attribute | Meaning |
 |---|---|
 | `loom.dispatch.draws` | Item draws the tick took, across repos (count) |
-| `loom.dispatch.draws_unspawned` | Draws that never reached the spawner: a second merge in a repo (`merge_in_flight`) (count) |
-| `loom.dispatch.passes` | Passes by reason as comma-joined `reason=count` pairs in reason order (`claim_lost=3,merge_in_flight=1`). The reasons are an open set, so they share one value; absent when nothing passed |
+| `loom.dispatch.draws_unspawned` | Draws that never reached the spawner: a merge step drawn in a repo before the round that spawned the repo's merge applied it (count) |
+| `loom.dispatch.merge_deferred` | Merge steps (`champion_merge`, `champion_hold_reevaluate`) held back because their repo had a Champion merge in flight, this host's, a peer's, or one this tick spawned (#12494). They leave the pool before the draw, so they cost no draw and no pass; before #12494 they were `merge_in_flight` passes (count) |
+| `loom.dispatch.passes` | Passes by reason as comma-joined `reason=count` pairs in reason order (`claim_lost=3,backstop_hold=1`). The reasons are an open set, so they share one value; absent when nothing passed |
 | `loom.dispatch.budget` | The slots the tick could fill: its free slots (count) |
 | `loom.dispatch.stop` | Why the draw loop stopped, a closed set: `filled` (every free slot was filled), `no_slots`, `pool_drained` (nothing left to draw), `pass_limit` (the tick's 32 passes were spent), `slot_draws` (a slot gave up after 8 draws), `spawn_hold` (see `loom.dispatch.spawn_hold`), `captain_cap` (the fleet-dispatch captain refused a claim with `cap`, so every repo left the draw, #12450), `weight_overflow` |
 

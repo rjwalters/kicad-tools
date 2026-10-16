@@ -346,6 +346,17 @@ def route_centerline_pose(
     if len(layers) != 1:
         pf.last_pose_report = {"applied": False, "reason": "multi-layer"}
         return None
+    # Issue #6860: the trunk is single-layer on the pad layer, so refuse it
+    # when ``allowed_layers`` / the pair's hard ``avoid_layers`` forbid that
+    # layer -- exactly where the joint search declines the pair.  ``getattr``:
+    # pathfinder doubles may not implement the layer filter.
+    (layer,) = layers
+    permitted_fn = getattr(pf, "_coupled_routable_layers", None)
+    if permitted_fn is not None and layer not in permitted_fn(
+        p_start.net_name, n_start.net_name, layer
+    ):
+        pf.last_pose_report = {"applied": False, "reason": "layer-not-permitted"}
+        return None
 
     ctx = _Ctx(pf, cpp, p_start, p_end, n_start, n_end, span_check)
     starts = _scan_endpoints(ctx, (p_start.x, p_start.y), (n_start.x, n_start.y), arriving=False)
