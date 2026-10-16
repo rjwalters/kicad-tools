@@ -67,6 +67,7 @@ from .diffpair_detection import (
     detect_diff_pairs as _layered_detect_diff_pairs,
 )
 from .diffpair_length import DiffPairLengthTracker
+from .edge_keepout import install_edge_keepout
 from .layers import Layer
 from .observability import validate_net_connectivity
 from .path import calculate_route_length
@@ -12434,10 +12435,9 @@ class DiffPairRouter:
         # covers the pair's local bounding box.  Without this, a coupled
         # route computed near the board edge could cross the copper
         # keepout the main grid would have refused.
-        main_edge_segments = getattr(self.autorouter, "_edge_segments", None)
-        main_edge_clearance = getattr(self.autorouter, "_edge_clearance", None)
-        if main_edge_segments and main_edge_clearance:
-            fine_grid.add_edge_keepout(main_edge_segments, main_edge_clearance)
+        # Issue #6043: the shared helper also reinstalls the no-clearance
+        # physical floor, so a coupled fine grid cannot cross a cut either.
+        install_edge_keepout(self.autorouter, fine_grid)
 
         # Mirror autorouter pads onto the fine grid so the coupled
         # search sees the same obstacle field.  This includes BOTH the

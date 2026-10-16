@@ -98,6 +98,7 @@ from .diffpair import DifferentialPair, DifferentialPairConfig, LengthMismatchWa
 from .diffpair_length import DiffPairLengthTracker
 from .diffpair_length_tuning import DiffPairTuneResult
 from .diffpair_routing import DiffPairRouter, IntraPairClearanceViolation
+from .edge_keepout import install_edge_keepout, refresh_edge_keepout_floor
 from .escape import (
     EscapeRoute,
     EscapeRouter,
@@ -1097,13 +1098,16 @@ def build_worker_router(config: dict) -> Autorouter:
     # "edge_clearance" keys.  Store them back on the router too so
     # ``validate_routes`` can still flag edge violations, matching
     # parent-process behaviour.
+    # Issue #6043: the physical keepout floor used when no clearance is set
+    # travels the same way ("edge_keepout_floor"), and the shared helper
+    # picks clearance-or-floor so the worker blocks what the parent did.
     edge_segments = config.get("edge_segments")
     edge_clearance = config.get("edge_clearance")
     if edge_segments is not None:
         router._edge_segments = edge_segments
         router._edge_clearance = edge_clearance
-        if edge_segments and edge_clearance:
-            router.grid.add_edge_keepout(edge_segments, edge_clearance)
+        router._edge_keepout_floor = config.get("edge_keepout_floor")
+        install_edge_keepout(router, router.grid)
 
     # Issue #5555: same treatment for ``add_obstacle`` keepouts -- they only
     # reach this worker via the "obstacles" key of the serialized config.
@@ -2140,6 +2144,14 @@ class Autorouter:
         # so the post-route nudge pass can repair traces that violate the
         # edge keepout (Issue #2743).
         self._edge_segments: list[tuple[tuple[float, float], tuple[float, float]]] | None = None
+
+        # Issue #6043: physical board-edge keepout radius used when no
+        # positive ``_edge_clearance`` is set (``None`` or ``0``), so copper
+        # can never be laid across an Edge.Cuts cut.  Deliberately separate
+        # from ``_edge_clearance``: validate_routes / drc_nudge read that as
+        # a copper-to-edge clearance and must not see this grid radius.
+        # Every keepout install goes through ``edge_keepout.install_edge_keepout``.
+        self._edge_keepout_floor: float | None = None
 
         # Keepouts registered through :meth:`add_obstacle` (Issue #5555).
         # Sibling of ``_edge_segments`` / ``_edge_clearance`` above: the
@@ -3947,6 +3959,10 @@ class Autorouter:
         # cannot disagree about it.  No new rule value is introduced here -- an
         # unset ``_edge_clearance`` stays 0.0, which leaves the mesh outline
         # branch the pure containment test it was before that phase.
+        # Issue #6043: ``_edge_keepout_floor`` is deliberately NOT used here.
+        # It is a grid-quantisation radius (half-extent + half a diagonal
+        # cell); the mesh and lattice measure exact copper gaps, where "no
+        # clearance" correctly means a requirement of 0.0.
         self._mesh_pathfinder.edge_clearance = self._edge_clearance or 0.0
         return self._mesh_pathfinder
 
@@ -7832,6 +7848,11 @@ class Autorouter:
         # grid (static cells + net-aware masks, mirrored to the C++ grid)
         # before the first search.  Idempotent per grid.
         self._install_grid_rule_area_keepouts()
+
+        # Issue #6043: net classes may have widened since the loader set
+        # the no-clearance edge keepout floor; grow it (additively) so the
+        # widest copper still cannot reach an Edge.Cuts cut.
+        refresh_edge_keepout_floor(self)
 
         # 1. Build name -> id reverse map from self.net_names.  First
         #    occurrence wins (matches diffpair_detection._name_to_id_map
@@ -18496,8 +18517,8 @@ class Autorouter:
         # persisted ``_edge_segments`` / ``_edge_clearance`` so a Monte
         # Carlo / evolutionary trial reset does not silently reopen the
         # board-edge exclusion zone for the next search.
-        if self._edge_segments and self._edge_clearance:
-            self.grid.add_edge_keepout(self._edge_segments, self._edge_clearance)
+        # Issue #6043: the helper also reinstalls the no-clearance floor.
+        install_edge_keepout(self, self.grid)
 
         # Issue #5555: same reasoning for keepouts registered through
         # ``add_obstacle`` (component bodies, mechanical exclusions,
@@ -18640,6 +18661,8 @@ class Autorouter:
             if self._edge_segments is not None
             else [],
             "edge_clearance": self._edge_clearance,
+            # Issue #6043: the no-clearance physical keepout floor.
+            "edge_keepout_floor": self._edge_keepout_floor,
             # Issue #5555: keepouts registered through ``add_obstacle``.
             # Same rationale as the edge geometry above -- a worker process
             # builds its own Autorouter from this dict and would otherwise
@@ -23932,8 +23955,8 @@ class Autorouter:
         # so the same board-frame ``_edge_segments`` correctly re-project
         # onto this cropped, shifted-origin, finer-resolution grid --
         # cells outside the fine grid's bounding box are simply skipped.
-        if self._edge_segments and self._edge_clearance:
-            fine_grid.add_edge_keepout(self._edge_segments, self._edge_clearance)
+        # Issue #6043: the helper also reinstalls the no-clearance floor.
+        install_edge_keepout(self, fine_grid)
         # Mark already-routed and preserved copper as obstacles on fine grid
         for route in [*self.existing_routes, *self.routes]:
             fine_grid.mark_route(route)
