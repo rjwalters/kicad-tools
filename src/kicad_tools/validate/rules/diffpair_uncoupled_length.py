@@ -534,6 +534,24 @@ def net_component_counts(pcb: PCB) -> dict[str, int]:
     return {name: len(r) for name, r in refs.items()}
 
 
+def net_track_mm(pcb: PCB, net_id: int) -> float:
+    """Straight-track copper (mm) on ``net_id`` -- the figure ``routed`` reads.
+
+    A pair is measured (``PairMeasure.routed``) only when this is positive
+    for both nets.  Issue #6820: ``routing_policy`` uses it to defer a pair's
+    via cap to this rule only when this rule will actually evaluate the pair.
+    """
+    return sum(
+        math.hypot(s.end[0] - s.start[0], s.end[1] - s.start[1])
+        for s in pcb.segments_in_net(net_id)
+    )
+
+
+def pair_is_measured(pcb: PCB, p_id: int, n_id: int) -> bool:
+    """True when :meth:`DiffPairUncoupledLengthRule.check` evaluates the pair."""
+    return net_track_mm(pcb, p_id) > 0.0 and net_track_mm(pcb, n_id) > 0.0
+
+
 def measure_pair(
     pcb: PCB,
     p_id: int,

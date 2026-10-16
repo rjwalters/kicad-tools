@@ -1370,6 +1370,11 @@ class DRCChecker:
         ``max_vias_per_net`` (from the class or the protocol default) is
         held to it by the pair rule, so ``routing_policy`` skips the via
         check of both its nets.
+
+        Issue #6820: only a pair the pair rule actually measures (straight
+        track on BOTH nets, :func:`pair_is_measured`) is deferred.  The pair
+        rule skips a half-routed pair outright, so deferring it silently
+        dropped the cap -- ``routing_policy`` now evaluates it itself.
         """
         if self.net_class_map is None or not self.routing_policy_defer_pair_vias:
             return set()
@@ -1377,6 +1382,7 @@ class DRCChecker:
             derive_engagement_state,
             resolve_pair_thresholds,
         )
+        from kicad_tools.validate.rules.diffpair_uncoupled_length import pair_is_measured
 
         engaged_pairs, _ = derive_engagement_state(self.pcb, self.net_class_map)
         names = {n.number: n.name for n in self.pcb.nets.values() if n.name}
@@ -1385,8 +1391,11 @@ class DRCChecker:
             na, nb = names.get(a), names.get(b)
             if not na or not nb:
                 continue
-            if resolve_pair_thresholds(self.net_class_map, na, nb).max_vias_per_net is not None:
-                deferred.update((na, nb))
+            if resolve_pair_thresholds(self.net_class_map, na, nb).max_vias_per_net is None:
+                continue
+            if not pair_is_measured(self.pcb, a, b):
+                continue  # the pair rule skips it: routing_policy must check it
+            deferred.update((na, nb))
         return deferred
 
     def check_routing_policy(self) -> DRCResults:

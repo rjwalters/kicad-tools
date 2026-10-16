@@ -1232,7 +1232,20 @@ class LengthConstraint:
 
         Unknown keys are ignored (forward compatibility); missing keys
         fall back to dataclass defaults where applicable.
+
+        Raises:
+            TypeError: ``data`` is not a dict.
+            ValueError: The required ``net_id`` field is missing.  Issue
+                #6820: this used to escape as a bare ``KeyError``, which no
+                net-class-map consumer catches, so ``kct check`` printed a
+                traceback for a hand-written ``length_constraint``.
         """
+        if not isinstance(data, dict):
+            raise TypeError(f"length_constraint must be a dict, got {type(data).__name__}")
+        if "net_id" not in data:
+            raise ValueError(
+                f"length_constraint requires a 'net_id' field; got keys: {sorted(data.keys())}"
+            )
         return cls(
             net_id=data["net_id"],
             min_length=data.get("min_length"),
@@ -2282,6 +2295,11 @@ def net_class_map_from_dict(
             # Re-raise with the owning sidecar key so the CLI preload message
             # names both the bad token and the net it belongs to (#4587).
             raise LayerResolutionError(f"net-class entry {net_name!r}: {e}") from e
+        except (TypeError, ValueError) as e:
+            # Issue #6820: name the owning entry for every malformed-entry
+            # error (e.g. a ``length_constraint`` without ``net_id``), not just
+            # layer-resolution ones, so the user can find it in the sidecar.
+            raise type(e)(f"net-class entry {net_name!r}: {e}") from e
     return result
 
 
@@ -2366,7 +2384,13 @@ def net_class_map_from_path(
             except (KeyError, OSError, ValueError):
                 stack = None
 
-    return net_class_map_from_dict(data, layer_stack=stack)
+    try:
+        return net_class_map_from_dict(data, layer_stack=stack)
+    except (TypeError, ValueError) as e:
+        # Issue #6820: prefix the sidecar path so a CLI error names the file
+        # as well as the entry.  ``type(e)`` keeps ``LayerResolutionError``
+        # (a ``ValueError``) distinguishable for callers that care.
+        raise type(e)(f"{sidecar_path}: {e}") from e
 
 
 # Threshold for classifying a 2-pin signal net as "simple" (short) vs "complex" (long).
