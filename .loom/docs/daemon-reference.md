@@ -8121,13 +8121,12 @@ captain that dispatches nothing still runs it:
   consistency check compares each page's issue numbers, not whole rows, so a
   comment on an open issue does not abort it; an issue opened or closed
   across a page boundary mid-walk does.
-- **Shed when out of budget**: a rate-limited or refused reader is withdrawn
-  and the next reader asked. When every reader that can see the repo is out
-  of budget the walk is shed (no request, an `o=shed` row, the facade event
-  `intake.listing_shed`) and the repo waits for the next pass. Only with no
-  reader pool at all, or readers out for a reason that is not budget (a
-  coverage miss, a stale token), does the writer serve the listing, as for any
-  W4-C deferrable read. `LOOM_READ_SHED=0` turns shedding off.
+- **Shed when no reader can serve it**: a rate-limited or refused reader is
+  withdrawn and the next reader asked. When no reader can serve the repo the
+  walk is shed (no request, an `o=shed` row, the facade event
+  `intake.listing_shed`) and the repo waits for the next pass. The writer
+  never serves a listing (#12394); only a host with no reader pool at all
+  reads on it.
 - **Re-read**: before each label, one unconditional read of that issue (its
   body is not cached). An issue labelled, closed or deleted since the listing
   is left alone. This is a `Gate` read: a rate-limited reader is withdrawn and
@@ -8684,14 +8683,62 @@ env token, never the token.
 | `LOOM_INSTALLATION_SNAPSHOT` | on | `0` restores every per-repo read (so does `LOOM_REPO_FACTS=0`). |
 | `LOOM_INSTALLATION_SNAPSHOT_TTL_SECS` | `3600` | How long a verified snapshot answers before one conditional revalidation, capped at `3600`. It also bounds how long a public/private flip goes unseen by visibility and identity. |
 
-### Untargeted reads route to readers; deferrable reads shed (`LOOM_FACADE_CWD_ROUTING`, `LOOM_READ_SHED`)
+### The writer is never used for reads (`LOOM_FACADE_CWD_ROUTING`)
+
+**The rule (#12394, operator ruling 2026-10-16).** The writer App
+installation has a fixed hourly budget the fleet's claims, merges and label
+flips spend. A read never goes to it, whatever its class or cause:
+
+- **Shed when no reader is free.** When no reader or gateway path can serve a
+  read (budget, withdrawal, a coverage miss, a stale token directory), the
+  read is shed (`GhCompletion::Shed`, `Unavailable::Shed`; the ETag store's
+  `ReadShed`; the agent `gh` front's exit `75`). The caller defers it, skips
+  the pass or serves from cache. The reader-to-writer fallback is deleted:
+  there is no `writer-fallback` role and no kill switch.
+- **A 403/404 is an answer only from a reader shown to cover the repo.**
+  The writer is never asked to confirm it, so the reader's own evidence
+  decides (`forge_identity::served::judge_coverage`): an item-scoped read
+  (`repos/<o>/<r>/<family>/<item>`) answered `404` by a reader that served a
+  `200`/`304` for the same repo and endpoint family within the last hour is
+  the item's answer (`forge.item_scoped_404`). A `403`, "Resource not
+  accessible by integration", "Could not resolve to a repository", or any
+  refusal from a reader with no evidence for the repo means the reader is
+  blind to it: it is withdrawn for that repo only, the next reader is tried,
+  and the read is shed when none is left. A plain `404` from a reader that
+  served another family of the repo is shed without a withdrawal, so one
+  missing item cannot take a covering reader off the repo. A refusal is
+  never returned to the caller as "absent" on its own say-so.
+- **A pool with no reader for the owner is not "no pool".** When readers are
+  configured but every one's `owners` excludes the read's owner, the router
+  answers an `unavailable` exhaustion (shed, with an `error` log per owner at
+  most every five minutes), not the no-pool writer path. The agent `gh`
+  front's exit-`75` message then says retrying will not help until a reader
+  for that owner is configured.
+- **Only writes use the writer**: POST, PATCH, PUT, DELETE, GraphQL
+  mutations and the minimal read a write needs in the same operation (a
+  lease read back right after posting it, merge settings hidden from a reader
+  App). Each such read is pinned with `GhInvocation::writer_identity()` and
+  its file is listed with a reason in `loom-daemon/tests/writer_read_guard.rs`
+  (`READ_ON_WRITER`); an asker-dependent probe (`/user`, a write-scope
+  probe) is listed the same way.
+- **Exception, no pool at all.** A host with no reader pool (no readers
+  configured, another forge, a target with no repo) has no reader to be out of
+  budget; its reads run on the only credential it has, pinned the same way.
+- **Guard.** `tests/writer_read_guard.rs` fails the build if a retired fallback
+  name reappears or a new file pins a read to the writer without being listed.
+  At runtime a read that reaches the writer unmarked logs an `error`
+  (`gh_invocation: read on the writer credential: <op>`).
+- **Telemetry.** Writer-bucket spend by operation is the `forge.calls`
+  metric and ledger rows with `role=writer`, grouped by `op` (`loom-daemon
+  forge calls --by role`); every shed is an `o=shed` row and a
+  `forge.read.shed` span.
 
 Most daemon reads are built with no typed repository (`GhTarget::None`) and
-a working directory: `gh` itself works out the repo. Before W4-C such a read
-never reached a reader App, so it spent the writer's bucket. The `gh` choke
-point (`gh_invocation/cwd_route.rs`) now derives the repository for the
-**reader attempt only**. The authority is explicit repo, then
+a working directory: `gh` itself works out the repo. The `gh` choke point
+(`gh_invocation/cwd_route.rs`) derives the repository for the **reader
+attempt only**. The authority is explicit repo, then
 `LOOM_REPO`/`GH_REPO`, then the sole local resolution:
+
 
 1. an explicit `-R`/`--repo` on `issue|pr view|list` (or
    `gh repo view OWNER/REPO`). The subcommand allowlist is checked first,
@@ -8731,8 +8778,8 @@ the outcome write-back dedupe probe (`outcome.writeback_probe`),
 asks. The
 invocation's target is never changed: the reader attempt gets
 `GH_REPO=<derived>`, and the accounting row books `rp=<derived>`,
-`ro=derived`. The writer attempt (no reader, or the writer fallback) keeps
-exactly its pre-W4-C `GH_CONFIG_DIR` and `GH_REPO`.
+`ro=derived`. A pinned writer read keeps exactly its pre-W4-C
+`GH_CONFIG_DIR` and `GH_REPO`.
 
 **Read classes.** `GhInvocation::read_class` tags a read `Gate` (the
 default), `Hygiene` or `Observability`. When the reader fails with a rate
@@ -8741,16 +8788,10 @@ serves the read. A `Gate` read takes any usable reader. A deferrable one
 needs headroom: on the first reader that could serve it, a projection below
 `shedPct` (the **headroom reserve**, default 80); on any later reader, below
 `targetMaxPct` (or no reading). When no reader is left (or the router
-reports it up front), a `Gate` read goes to the writer as before. A
-`Hygiene`/`Observability` read is **shed** only when the readers are out of
-**budget**: every reader that can see the repo is under a live rate-limit
-withdrawal or short of headroom, and none is out for another reason.
-Readers out for any other reason — the repo outside their installation (a
-coverage withdrawal), a stale or never-published token directory, a refused
-credential, an App-wide withdrawal — send a deferrable read to the writer
-like a `Gate` read, so reaping and intake never stop on a repo no reader can
-see. When shed, no request is sent, and the
-caller sees `Unavailable::Shed` ("deferred: reader budget low until
+reports it up front), **every class** is shed (#12394): the class no longer
+decides whether the writer serves it, only how much headroom the router
+demands. When shed, no request is sent, and the
+caller sees `Unavailable::Shed` ("deferred: no reader can serve it until
 <rfc3339> (loom-shed)"), which every such site maps to `UNKNOWN`,
 `PrStatus::Unknown`, `None` or a skipped pass, and which matches no
 rate-limit signature, so it never trips the breaker. A shed books an
@@ -8772,7 +8813,8 @@ shed, but mostly free `304`s. Nothing under `sweep_registry/`,
 `claim_reconciliation`, `merge_*`, verdict, quarantine or reclaim, nor
 `forge_check_claim`, `cli/lease_co_occupancy`, `role_runner/roster`,
 `worktree_reaper` or `primary_checkout_reaper`, is ever anything but `Gate`
-(a test enforces it).
+(a test enforces it); a `Gate` read that no reader can serve is shed like any
+other, and its caller leaves the decision for the next pass.
 
 **Rollout precondition.** The shed protects the writer only if the readers
 have the capacity to absorb what moves onto them. Before enabling W4-C on a
@@ -8782,16 +8824,10 @@ pool rather than draining one home reader, and check that the readers' per
 owner `core` buckets (`forge calls --by bucket`) have room for the
 untargeted reads that will move to them.
 
-**Gone memo.** A reader 404 followed by a writer 404 for the same
-`(owner/repo, request)` is remembered for 3600 s: inside that window a
-`Hygiene`/`Observability` read returns the reader's 404 with no writer retry.
-A `Gate` read always confirms on the writer, and the reader is not withdrawn.
-
 | Variable | Default | Effect |
 |---|---|---|
 | `LOOM_FACADE_CWD_ROUTING` | on | `0` disables the derivation: every untargeted read stays on the writer. Typed reads keep the class-aware chain, so a typed `Observability` read (`telemetry.repo_identity`) can still be shed. Read on every call. |
-| `LOOM_READ_SHED` | on | `0` treats every read as `Gate`: no shed and no gone-memo shortcut, so `Hygiene`/`Observability` reads fall back to the writer. Derivation stays on. Read on every call. |
-| `LOOM_READ_ROUTING` | `v2` | `legacy` is the only exact revert: the pre-W4 path (no derivation, no classes, no reserve, the unconditional reader → writer fallback), and it reverts W4-A's scoped withdrawal and W4-B's split and spill with it. `LOOM_FACADE_CWD_ROUTING=0` plus `LOOM_READ_SHED=0` together restore W4-C's load placement only (untargeted reads on the writer, nothing shed), keeping W4-A/W4-B, the retry on the next reader and the writer pins. Read on every call. |
+| `LOOM_READ_ROUTING` | `v2` | `legacy` reverts W4-A's scoped withdrawal and W4-B's split and spill, and the router's class-aware derivation. It no longer restores a reader → writer fallback (#12394): that path, and the former `LOOM_READ_SHED=0` kill switch, are gone. `LOOM_FACADE_CWD_ROUTING=0` keeps untargeted reads off the readers (a pinned `writer_identity()` read, not a fallback). Read on every call. |
 
 ### Hygiene read path: the checkout's own repo, conditional and fresh (`LOOM_HYGIENE_CONDITIONAL`)
 
@@ -8846,7 +8882,9 @@ name gh's own target and are not conditional.
   item's answer (no writer retry, no withdrawal, `forge.item_scoped_404`)
   only when the same reader answered a `200`/`304` for the same repo and the
   same endpoint family (`issues` vs `pulls`) within the last hour. Otherwise
-  it is a coverage failure, retried on the writer as before.
+  it is no answer: a reader with no evidence for the repo is withdrawn from
+  it and the next reader is tried; with none left the read is shed (see "The
+  writer is never used for reads").
 - **Trust boundary.** A `304` serves the body stored next to the `ETag` in
   the `0700` per-user store. Any process of the same uid (agents included)
   can write it; that is accepted, as the same uid can already edit the

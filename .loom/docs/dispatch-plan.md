@@ -49,7 +49,7 @@ together.
   (`loom-daemon/src/work_finder/step_item.rs`): `curator`,
   `curator_keep_or_close`, `champion_promote`, `champion_reevaluate`,
   `builder`, `judge`, `doctor`, `champion_merge`,
-  `champion_hold_reevaluate`.
+  `champion_hold_reevaluate`, `champion_triage`.
 - **An absent `step` is `builder`.** Every plan published before step
   dispatch was a Builder plan, so an older host's row folds into the same
   item as a newer host's explicit `builder` row. A host that does not set

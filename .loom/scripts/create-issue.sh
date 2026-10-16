@@ -445,7 +445,21 @@ trap 'loom_filing_lock_release' EXIT INT TERM
 
 # Single intake state (#10041): no loom:* label from the caller -> loom:triage.
 case " ${LABELS[*]-} " in *" loom:"*) ;; *) LABELS+=("loom:triage") ;; esac
-ISSUE_URL="$(forge_gh_create_issue_rl_safe "$REPO_NWO" "$TITLE" "$BODY" "${LABELS[@]+"${LABELS[@]}"}")" || exit 1
+# The create step is `loom-daemon forge create-issue` (#12504): same transport
+# and label guard as forge_gh_create_issue_rl_safe, with a reliable exit code.
+# requires-daemon: forge optional   A binary predating the subcommand (exit 2, "unrecognized subcommand") falls back to the shell create step below.
+_create_args=(); _create_args+=(--title "$TITLE" --body-file -)
+[[ -z "$REPO_NWO" ]] || _create_args+=(--repo "$REPO_NWO")
+for _l in "${LABELS[@]+"${LABELS[@]}"}"; do _create_args+=(--label "$_l"); done
+_create_rc=0; _create_err="$(mktemp)"
+ISSUE_URL="$(printf '%s' "$BODY" | "${LOOM_DAEMON_BIN:-loom-daemon}" forge create-issue "${_create_args[@]}" 2>"$_create_err")" || _create_rc=$?
+if [[ "$_create_rc" -ne 0 ]] && grep -qi "unrecognized subcommand" "$_create_err"; then
+  rm -f "$_create_err"
+  ISSUE_URL="$(forge_gh_create_issue_rl_safe "$REPO_NWO" "$TITLE" "$BODY" "${LABELS[@]+"${LABELS[@]}"}")" || exit 1
+else
+  cat "$_create_err" >&2; rm -f "$_create_err"
+  [[ "$_create_rc" -eq 0 && -n "$ISSUE_URL" ]] || exit 1
+fi
 echo "$ISSUE_URL"
 
 # --- #10012: native sub-issue link, best effort -----------------------------

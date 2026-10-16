@@ -131,6 +131,12 @@ export DAEMON_MODE_FILE DAEMON_ARGV_LOG
 cat > "$STUB_DIR/loom-daemon" <<'MOCK'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$DAEMON_ARGV_LOG"
+# A daemon predating `forge create-issue` (#12504): create-issue.sh must fall
+# back to the shell ladder these tests exercise.
+if [[ "${1:-} ${2:-}" == "forge create-issue" ]]; then
+  echo "error: unrecognized subcommand 'create-issue'" >&2
+  exit 2
+fi
 if [[ "$(cat "$DAEMON_MODE_FILE" 2>/dev/null || echo ok)" == "fail" ]]; then
   echo "mock loom-daemon: forge refused the comment" >&2
   exit 3
