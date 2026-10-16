@@ -5723,6 +5723,12 @@ class Autorouter:
             getattr(self, "_lattice_pair_ties", []),
             pf.failure_reasons,
             pf.pair_outcomes,
+            # Issue #6834: a discarded retry must not leave its gateway
+            # diagnostics describing a run whose copper was thrown away.
+            # ``getattr``: duck-typed routers in tests predate gateways.
+            getattr(pf, "pair_gateways", {}),
+            dict(getattr(pf, "pair_gateway_log", {})),
+            getattr(pf, "pair_gateway_rollback", None),
             pf.class_pad_repair_stats,
             dict(pf._class_pad_growth),
             list(getattr(pf, "class_pad_growth_rounds", [])),
@@ -5778,6 +5784,9 @@ class Autorouter:
             self._lattice_pair_ties,
             pf.failure_reasons,
             pf.pair_outcomes,
+            pf.pair_gateways,
+            pf.pair_gateway_log,
+            pf.pair_gateway_rollback,
             pf.class_pad_repair_stats,
             pf._class_pad_growth,
             pf.class_pad_growth_rounds,

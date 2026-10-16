@@ -331,3 +331,107 @@ def test_clean_gateway_run_is_not_renegotiated(monkeypatch) -> None:
     assert calls == [True]
     assert routes == {"run": True}
     assert pf.pair_gateway_rollback is None
+
+
+# -- issue #6834: review follow-ups ------------------------------------------
+
+
+def test_discarded_tap_chain_retry_restores_gateway_state() -> None:
+    from types import SimpleNamespace
+
+    from kicad_tools.router.core import Autorouter
+
+    pf, _pc = _board()
+    pf.pair_gateways = {("pair", 1, 2): "first gateway"}
+    pf.pair_gateway_log = {("pair", 1, 2): "first log"}
+    pf.pair_gateway_rollback = "first rollback"
+    router = SimpleNamespace(
+        _lattice_pair_outcomes={},
+        _lattice_pair_hops={},
+        _lattice_tap_chain_pairs=set(),
+        _lattice_connection_endpoints={},
+        _lattice_pair_ties=[],
+        _lattice_netset_connections=lambda retry_pairs: ([], []),
+    )
+
+    def negotiate(connections, coupled):
+        pf.pair_gateways = {("pair", 1, 2): "retry gateway"}
+        pf.pair_gateway_log = {("pair", 1, 2): "retry log"}
+        pf.pair_gateway_rollback = "retry rollback"
+        return {}, SimpleNamespace(deadline_hit=True)
+
+    first = ({"first": 1}, SimpleNamespace(deadline_hit=False), [])
+    out = Autorouter._lattice_tap_chain_retry(router, pf, negotiate, frozenset(), first)
+    assert out[0] == {"first": 1}
+    assert pf.pair_gateways == {("pair", 1, 2): "first gateway"}
+    assert pf.pair_gateway_log == {("pair", 1, 2): "first log"}
+    assert pf.pair_gateway_rollback == "first rollback"
+
+
+def test_rejected_growth_attempt_restores_gateway_log(monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    from kicad_tools.router.lattice.pathfinder import LatticeNegotiationStats
+
+    pf, _pc = _board()
+    key = ("pair", 1, 2)
+    calls: list[int] = []
+
+    def fake_once(connections, **kwargs):
+        calls.append(1)
+        if len(calls) == 1:
+            pf.pair_gateway_log = {key: "first run"}
+            pf.class_pad_repair_stats = SimpleNamespace(total_remaining=1, unrepaired_pads={0: 0.5})
+        else:
+            pf.pair_gateway_log = {key: "rejected growth run"}
+            pf.class_pad_repair_stats = SimpleNamespace(total_remaining=1, unrepaired_pads={})
+        stats = LatticeNegotiationStats(
+            iterations=1, converged=True, routed=1, total=1, lattice_builds=1
+        )
+        return {}, stats
+
+    monkeypatch.setattr(pf, "_route_netset_once", fake_once)
+    pf._route_netset_grown([])
+    assert len(calls) >= 2  # a growth attempt ran and was rejected
+    assert pf.pair_gateway_log == {key: "first run"}
+
+
+def test_gateway_via_limit_counts_other_chain_segments(monkeypatch) -> None:
+    pf, pc = _board([_f_wall()])
+    sibling = CoupledConnection(
+        key=("pair", 1, 2, 1),
+        pair_name=pc.pair_name,
+        pad_p_a=pc.pad_p_a,
+        pad_n_a=pc.pad_n_a,
+        pad_p_b=pc.pad_p_b,
+        pad_n_b=pc.pad_n_b,
+        net_class=_HS,
+        pitch=_PITCH,
+    )
+    pf.pair_gateway_limits = {pc.key: (None, 2)}  # this segment alone fits (2 vias/net)
+    committed = pf._fresh_committed()
+    kw = {"committed": committed, "history": {}, "present": 1.0}
+    res, why = pf._route_pair_gateway(pc, vias_used=1, **kw)
+    assert res is None and why == "pair-gateway-via-limit"
+    assert "other segments" in pf.pair_gateway_log[pc.key]
+    res, _why = pf._route_pair_gateway(pc, vias_used=0, **kw)
+    assert res is not None
+    assert sibling.pair_name == pc.pair_name
+
+
+def test_setback_plus_attach_dogleg_stays_under_tightest_protocol_budget() -> None:
+    from kicad_tools.router.lattice.gateway import MAX_GATEWAY_SETBACK_MM
+    from kicad_tools.router.pair_protocols import PROTOCOL_DEFAULTS
+
+    budgets = [
+        row.max_uncoupled_per_terminal_mm.value
+        for row in PROTOCOL_DEFAULTS.values()
+        if row.max_uncoupled_per_terminal_mm is not None
+    ]
+    tightest = min(budgets)
+    # The attach dogleg runs from the via to the body anchor: at most the
+    # anchor ``reach`` plus the 1 mm lattice-node snap of ``_gateway_anchor``.
+    # Generous geometry (0.8 mm via, 0.3 mm trace, 0.5 mm pitch, 0.2 clearance).
+    reach = 0.5 / 2.0 + 0.3 / 2.0 + 0.2 + 0.8 / 2.0
+    attach = reach + 1.0
+    assert MAX_GATEWAY_SETBACK_MM + attach < tightest
