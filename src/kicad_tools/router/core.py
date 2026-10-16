@@ -1001,6 +1001,8 @@ def worker_router_kwargs(config: dict) -> dict[str, Any]:
             kwargs[key] = int(config[key])
     if config.get("force_python"):
         kwargs["force_python"] = True
+    if config.get("adaptive_grid") is False:
+        kwargs["adaptive_grid"] = False
     return kwargs
 
 
@@ -1625,6 +1627,7 @@ class Autorouter:
         max_search_iterations: int = 0,
         per_net_iterations: int = 0,
         strategy: str = "grid",
+        adaptive_grid: bool = True,
     ):
         """Initialize the autorouter.
 
@@ -1656,8 +1659,15 @@ class Autorouter:
                 ``"grid"`` (default, uniform-grid A*), ``"mesh"`` (navmesh,
                 #4268/#4269), or ``"lattice"`` (adaptive octilinear lattice,
                 #4278).
+            adaptive_grid: Issue #972 -- when True (default), a board whose
+                ``rules.grid_resolution`` would exceed the backend's cell
+                threshold is routed on a coarser adaptive pitch (logged as a
+                warning).  Issue #6741: callers whose pitch was already
+                chosen and clearance-checked (``load_pcb_for_routing``, i.e.
+                ``kct route --grid``) pass False so that pitch is honoured.
         """
         self.rules = rules or DesignRules()
+        self._adaptive_grid = bool(adaptive_grid)
         # Issue #3524: copy the default map instead of aliasing it.  The
         # autorouter writes per-net overrides into ``self.net_class_map``
         # (impedance synthesis, diff-pair partner wiring, matrix layer
@@ -2475,11 +2485,24 @@ class Autorouter:
             if is_cpp_available():
                 adaptive_threshold = 50_000_000
 
-        if estimated_cells > adaptive_threshold:
+        # Issue #6741: never coarsen a pitch the caller pinned (an explicit
+        # ``--grid`` or the budget-aware auto-grid selection) -- that pitch
+        # was the one checked against clearance.
+        if getattr(self, "_adaptive_grid", True) and estimated_cells > adaptive_threshold:
             # Use adaptive resolution for better performance on large boards
             grid = RoutingGrid.create_adaptive(
                 width, height, self.rules, origin_x, origin_y, layer_stack=self.layer_stack
             )
+            if abs(grid.resolution - self.rules.grid_resolution) > 1e-9:
+                logger.warning(
+                    "Adaptive grid (Issue #972): requested %.4gmm pitch would need "
+                    "~%s cells (threshold %s); routing on %.4gmm instead. Pass "
+                    "adaptive_grid=False to honour the requested pitch.",
+                    self.rules.grid_resolution,
+                    f"{int(estimated_cells):,}",
+                    f"{adaptive_threshold:,}",
+                    grid.resolution,
+                )
         else:
             grid = RoutingGrid(
                 width, height, self.rules, origin_x, origin_y, layer_stack=self.layer_stack
@@ -18906,6 +18929,8 @@ class Autorouter:
             "per_net_iterations": getattr(self, "_per_net_iterations", 0),
             "max_search_iterations": getattr(self, "_max_search_iterations", 0),
             "force_python": bool(getattr(self, "_force_python", False)),
+            # Issue #6741: a worker must route on the parent's pitch.
+            "adaptive_grid": bool(getattr(self, "_adaptive_grid", True)),
         }
 
     def route_all_monte_carlo(
