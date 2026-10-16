@@ -97,7 +97,10 @@ logger = logging.getLogger(__name__)
 # ``PadChannelBudget`` with an infinite penalty refuses the cell, and
 # ``layer == -2`` is a via-only fence.  A v56 .so would price the fences as
 # an ordinary (infinite) cost and read ``layer == -2`` as out of range.
-_REQUIRED_CPP_BUILD_VERSION = 57
+# v58 (Issue #6826): ``CoupledPathfinder.route`` bounds the endpoint zones'
+# spacing tolerance by each end's pad-pitch delta + 1, not the zone radius.  A
+# v57 .so diverges from the Python coupled mirror.
+_REQUIRED_CPP_BUILD_VERSION = 58
 
 
 # Issue #5599: human-readable names for the ``ValidationResult::violation_type``

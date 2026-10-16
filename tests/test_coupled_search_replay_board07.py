@@ -11,7 +11,8 @@ The exact-replay tests are the fidelity check: a replay that does not match
 the recorded diagnostics exactly is a capture bug.  The control tests then
 perturb ONE input of the captured search and pin how the outcome moves.  They
 are diagnostics for #5333, not fixes -- nothing here changes production
-routing.  What they show (measured on the capture at ``e6c493aec``):
+routing.  What they showed (measured on the capture at ``e6c493aec``, native
+``BUILD_VERSION`` 57 -- the PRE-#6826 BASELINE, kept here on purpose):
 
 * The pair is not structurally unroutable.  The unmodified inputs succeed
   once the open phase may run 402,163 iterations; the per-phase budget is
@@ -34,6 +35,27 @@ So "landing-stall, ``via_blocked_p``" in the board report misreads a budget
 exhaustion: the cause is the joint search's iteration cost on these pad
 geometries (pad pitch 8 and 10 cells along the travel axis against a 3-cell
 target spacing), not foreign copper at the landing.
+
+Issue #6826 (native ``BUILD_VERSION`` 58) changed the search on purpose: inside
+the relaxed endpoint zones the spacing tolerance is now each end's own
+pad-pitch delta + 1 (6 at the start, 8 at the goal) instead of the zone radius
+(14 / 18).  The fixture inputs (``grid.npz``, the call list, the manifest) are
+NOT re-captured -- they are byte-identical, so before and after compare
+directly -- but the replayed outcome is re-pinned to the post-fix values:
+
+=====================================  ==============  ==============
+Control                                before (#6816)  after (#6826)
+=====================================  ==============  ==============
+Open phase, budget lifted              402,163         213,996
+Empty grid, budget lifted              89,057          48,031
+Captured budget: best progress         48              44
+Empty grid at budget: best progress    13              3
+=====================================  ==============  ==============
+
+TMDS_D1 still does not couple within the 20,000-iteration phase budget; it
+needs ~214k.  The recorded manifest diagnostics stay the pre-fix baseline, so
+the exact-replay test now pins that the replay *differs* from the recording
+only through the search (identical inputs), and pins the post-fix diagnostics.
 """
 
 from __future__ import annotations
@@ -217,15 +239,83 @@ def test_capture_shows_the_measured_exhaustion(fixture):
     assert [c["class"] for c in fixture.manifest["classification"]] == ["landing-stall"]
 
 
+# Post-#6826 diagnostics of the unmodified replay (corridor phase, open phase).
+# The pre-#6826 values are the recording itself (``recorded_routes`` / the
+# manifest): both phases at 20,000 iterations, best progress 48,
+# ``via_blocked_p`` dominant.
+POST_6826_PHASES = [
+    {
+        "best_progress": 44.0,
+        "iteration_limited": True,
+        "iterations": 20000,
+        "path_len": 0,
+        "rejections": {
+            "asym_blocked_n": 2319,
+            "asym_blocked_p": 2312,
+            "asym_floor_n": 3719,
+            "asym_floor_p": 3686,
+            "asym_spacing_n": 15135,
+            "asym_spacing_p": 15301,
+            "asym_trail_n": 14114,
+            "asym_trail_p": 13908,
+            "corridor": 17,
+            "sym_blocked_n": 2088,
+            "sym_blocked_p": 2312,
+            "sym_spacing": 5769,
+            "sym_trail": 28652,
+            "via_blocked_n": 4605,
+            "via_blocked_p": 15501,
+            "via_own_h2h": 25599,
+        },
+        "success": False,
+        "timeout_exceeded": True,
+    },
+    {
+        "best_progress": 44.0,
+        "iteration_limited": True,
+        "iterations": 20000,
+        "path_len": 0,
+        "rejections": {
+            "asym_blocked_n": 2372,
+            "asym_blocked_p": 2314,
+            "asym_floor_n": 3720,
+            "asym_floor_p": 3686,
+            "asym_spacing_n": 15110,
+            "asym_spacing_p": 15318,
+            "asym_trail_n": 14105,
+            "asym_trail_p": 13887,
+            "sym_blocked_n": 2139,
+            "sym_blocked_p": 2314,
+            "sym_spacing": 5769,
+            "sym_trail": 28605,
+            "via_blocked_n": 4605,
+            "via_blocked_p": 15501,
+            "via_own_h2h": 25599,
+        },
+        "success": False,
+        "timeout_exceeded": True,
+    },
+]
+
+
 def test_replay_reproduces_both_phases_exactly(fixture, searches):
+    """The replay is exact against the post-#6826 search.
+
+    Before #6826 this asserted ``replayed == recorded_routes(...)``.  The
+    endpoint-zone tolerance change alters the search deliberately, so the
+    replay now differs from the (unchanged, pre-fix) recording and matches the
+    pinned post-fix diagnostics instead.  Re-capturing would hide the
+    before/after comparison, so the fixture is left as recorded.
+    """
     from kicad_tools.router.coupled_capture import recorded_routes
 
     start = time.monotonic()
     replayed = _replay(searches)
     elapsed = time.monotonic() - start
-    assert replayed == recorded_routes(fixture.calls)
+    assert replayed == POST_6826_PHASES
     manifest_diags = [p["native_diagnostics"] for p in fixture.manifest["phases"]]
-    assert replayed == manifest_diags
+    assert recorded_routes(fixture.calls) == manifest_diags
+    assert replayed != manifest_diags
     assert elapsed < 10.0
 
 
@@ -235,8 +325,6 @@ def test_replay_is_deterministic(searches):
 
 def test_replay_is_sensitive_to_one_landing_cell(searches):
     """Tamper check: drop the foreign raster cell nearest a pad and the match breaks."""
-    from kicad_tools.router.coupled_capture import recorded_routes
-
     p_net, n_net = _pair_nets(searches)
     (px, py) = _pad_cells(searches)[0]
     batch = next(c for c in searches if c["op"] == "batch" and c["method"] == "mark_blocked")
@@ -246,7 +334,9 @@ def test_replay_is_sensitive_to_one_landing_cell(searches):
     target = int(np.argmin(dist))
 
     tampered = _filter_raster(searches, lambda *cols: np.arange(len(cols[0])) != target)
-    assert _replay(tampered) != recorded_routes(searches)
+    # Compared against the post-#6826 pinned replay, not the pre-fix
+    # recording (which every replay now differs from).
+    assert _replay(tampered) != POST_6826_PHASES
 
 
 # ---------------------------------------------------------------------------
@@ -257,35 +347,37 @@ def test_replay_is_sensitive_to_one_landing_cell(searches):
 def test_passing_control_budget_alone_lets_the_captured_pair_couple(searches):
     """Same inputs, bigger open-phase budget: the search succeeds.
 
-    So the board does not make TMDS_D1 unroutable; the 20,000-iteration phase
-    budget is about 20x short of what this search needs.
+    So the board does not make TMDS_D1 unroutable.  Before #6826 it needed
+    402,163 iterations (about 20x the 20,000-iteration phase budget); bounding
+    the endpoint-zone tolerance by pad pitch roughly halves that.
     """
     [_, open_phase] = _replay(
         _with_route_args(searches, OPEN, max_iterations_budget=1_000_000, timeout_seconds=0.0)
     )
     assert open_phase["success"] is True
-    assert open_phase["iterations"] == 402_163
+    assert open_phase["iterations"] == 213_996  # 402,163 before #6826
     assert open_phase["iteration_limited"] is False
 
 
 def test_control_free_space_needs_more_than_the_budget(searches):
     """An empty grid (no raster, no pads, no routes) still misses at 20,000.
 
-    With the budget lifted it succeeds at 89,057 iterations: even in free space
-    the joint search needs ~4.5x the per-phase budget for these endpoints.
+    With the budget lifted it succeeds at 48,031 iterations (89,057 before
+    #6826, best progress at the budget 13 -> 3): even in free space the joint
+    search needs ~2.4x the per-phase budget for these endpoints.
     """
     bare = _bare(searches)
     [_, at_budget] = _replay(bare)
     assert at_budget["success"] is False
     assert at_budget["iteration_limited"] is True
-    assert at_budget["best_progress"] == 13.0
+    assert at_budget["best_progress"] == 3.0  # 13 before #6826
     assert _dominant(at_budget) == "sym_trail"
 
     [_, lifted] = _replay(
         _with_route_args(bare, OPEN, max_iterations_budget=400_000, timeout_seconds=0.0)
     )
     assert lifted["success"] is True
-    assert lifted["iterations"] == 89_057
+    assert lifted["iterations"] == 48_031  # 89,057 before #6826
 
 
 def test_failing_control_no_layer_changes_leaves_progress_unchanged(searches):
@@ -293,12 +385,13 @@ def test_failing_control_no_layer_changes_leaves_progress_unchanged(searches):
     [_, open_phase] = _replay(_with_route_args(searches, OPEN, routable_layers=[0]))
     assert open_phase["success"] is False
     assert open_phase["iteration_limited"] is True
-    assert open_phase["best_progress"] == 48.0
+    assert open_phase["best_progress"] == 44.0  # 48 before #6826, as unmodified
     assert not any(k.startswith("via_") for k in open_phase["rejections"])
     assert _dominant(open_phase) == "sym_trail"
 
 
-@pytest.mark.parametrize(("radius", "best_progress"), [(10, 48.0), (40, 47.0)])
+# 48 / 47 before #6826; 44 (the unmodified replay's value) after.
+@pytest.mark.parametrize(("radius", "best_progress"), [(10, 44.0), (40, 44.0)])
 def test_failing_control_clearing_landing_copper_does_not_help(searches, radius, best_progress):
     """Remove every foreign raster cell within ``radius`` of the four pads."""
     p_net, n_net = _pair_nets(searches)
