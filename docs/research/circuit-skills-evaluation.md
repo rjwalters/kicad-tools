@@ -20,13 +20,13 @@ the routing tail by hand in KiCad. Our bar is the opposite (a fully automated, 0
 What it is good for is the 169-line problem catalog in `docs/history/problems.md`. About two thirds of it
 is tscircuit export defects, Freerouting quirks, Blender and SWIG crashes, fab-bundle bookkeeping and shell
 hygiene that do not touch our pipeline. Of the rest, almost everything is **already caught by a `kct check`
-rule or already handled in the router**. Three real gaps came out of it, each now an issue:
+rule or already handled in the router**. Three candidate gaps came out of it, each filed as an issue; two were real:
 
 | Gap | Issue |
 |---|---|
 | Router crosses interior board windows when no edge clearance resolves | #6043 |
 | No per-net-group routing policy gate (max vias, max length, missing policy fails) | #6044 |
-| `fix-drc` has no rip-up-and-reroute fallback once nudging fails | #6045 |
+| ~~`fix-drc` has no rip-up-and-reroute fallback once nudging fails~~ (already existed: `--local-reroute`; closed not planned) | #6045 |
 
 Its self-reported PCBWorld D3 result (0.98 Clean Pass for the experimental `srj-legal` backend) is
 **unverified by us**. Benchmarking it belongs to #5942; nothing here confirms or disputes the number.
@@ -70,7 +70,7 @@ verify.
 
 | # | Candidate | Verdict | Evidence pointer |
 |---|---|---|---|
-| 1 | `problems.md` gotchas | **adopt (partial)**: triaged below, 3 gaps filed | Table below; #6043, #6044, #6045 |
+| 1 | `problems.md` gotchas | **adopt (partial)**: triaged below, 2 real gaps filed (#6045 closed: already have) | Table below; #6043, #6044, #6045 |
 | 2 | Auto-keepouts around interior holes | **adopt (partial)** | Check above; `router/io.py` edge-keepout block, `router/grid.py::add_edge_keepout`; #6043 |
 | 3 | Net-fragment reconciliation for per-subcircuit nets | **not applicable** | We do not ingest tscircuit routing. Cross-file net-name mismatches from tscircuit are already analysed in `docs/research/tscircuit-evaluation.md` (Interop gate, #5847; failure caught by LVS, `kct check`/`lvs`). Repairing them belongs upstream. |
 | 4 | Enclosure-fit gating from a mechanical model | **not applicable (for now)** | Closest analogue: `optim/keepout.py` (mechanical keepouts, auto-detect from mounting holes/connectors) and `optim/edge_placement.py` (connector edge constraints). No STEP/enclosure datum import exists; not traced for demand. No issue filed; revisit if a board needs a shell. |
@@ -175,11 +175,11 @@ use). "Not traced" means we did not look.
 
 | Gotcha | Status | Note |
 |---|---|---|
-| Blind finishers add shorts | handled | Our repair loops re-run DRC; adopted-in-spirit rule for #6045: accept only non-regressing passes. |
+| Blind finishers add shorts | handled | Our repair loops re-run DRC; `kct fix-drc` already rolls back fixes that break connectivity (#2851/#2862) and offers `--transactional` (#6045 closed: already have). |
 | Finisher "OK" that connected nothing | handled | Connectivity check (above). |
 | Hard-coded-coordinate patches | n/a | Workflow hygiene; our repairs are rule-driven. |
 | GND-pad vias shorting against stubs | handled | Clearance and `via_under_body` checks; not traced further. |
-| Unconnected pin in congested cap cluster | gap | Diagnosis side is #5944; fix side is #6045. |
+| Unconnected pin in congested cap cluster | gap | Diagnosis side is #5944; the fix-side rip-up/re-route already exists (`kct fix-drc --local-reroute`, see U3; #6045 closed). |
 | One net cannot cross a corridor | handled | Zero-ohm jumper / local pour idea is a design choice; `kct zones` plus `pour_bridge.py` cover the local-pour half. |
 
 ### 6. Verification gates that lied
@@ -245,7 +245,7 @@ check" lessons are the useful part.
 
 - #6043: route: block copper across interior `Edge.Cuts` loops even when no edge clearance resolves
 - #6044: check: per-net-group routing policy gate
-- #6045: fix-drc: rip-up-and-reroute fallback
+- #6045: fix-drc: rip-up-and-reroute fallback (closed not planned: `--local-reroute` already does this; see U3)
 - Already covered elsewhere, not re-filed: #5944 (congested vs blocked), #5945 (checkpoint and rollback),
   #5948 (placement score calibration), #5947 (portfolio and TraceMaker techniques), #5942 (D3 benchmark,
   including the 0.98 claim).
