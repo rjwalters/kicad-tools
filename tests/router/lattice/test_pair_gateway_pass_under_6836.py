@@ -156,7 +156,8 @@ def _dual_row_board() -> tuple[LatticePathfinder, CoupledConnection]:
     J1's B row (x=24.0) faces U1 with D- (B7) in front of D+ (A6) and D+
     (B6) in front of D- (A7); the A row (x=25.2) has U1's handedness.  The
     rows are too close for the pair to enter between them, foreign pads fill
-    both rows above and below, and the board edge sits right behind the A
+    both rows above and below, a wall of foreign F.Cu pads blocks the planar
+    route between the ends, and the board edge sits right behind the A
     row, so the A row's gateway vias have no room for a body beyond them.
     The only twist-free coupled route is U1 -> under both rows on B.Cu.
     """
@@ -169,6 +170,11 @@ def _dual_row_board() -> tuple[LatticePathfinder, CoupledConnection]:
         for x, row in ((24.0, "B"), (25.2, "A")):
             pads.append(_pad(x, y, net, f"N{net}", "J1", f"{row}{int(y)}", w=0.6))
             net += 1
+    # A wall of foreign F.Cu pads between the ends: the pair cannot couple
+    # planar on F.Cu, so it must take a gateway to B.Cu.
+    for i in range(11):
+        pads.append(_pad(14.0, 0.5 + i, net, f"N{net}", "W1", str(i), w=0.6))
+        net += 1
     p_b = _pad(25.2, 5.0, 1, "D+", "J1", "A6", w=0.6)
     n_b = _pad(25.2, 6.0, 2, "D-", "J1", "A7", w=0.6)
     pads += [
@@ -195,7 +201,7 @@ def test_dual_row_end_couples_through_pass_under() -> None:
     pf, pc = _dual_row_board()
     routes, stats = pf.route_netset([], coupled=[pc], uncoupled_fallback=True, pair_gateways=True)
     assert pf.pair_outcomes[pc.key] == "coupled", pf.pair_gateway_log
-    log = pf.pair_gateways[pc.key]
+    log = pf.pair_gateway_log[pc.key]
     assert "gateway B.Cu" in log
     assert "B: heading=0deg" in log and log.count("pass-under") == 1, log
     assert "vias P/N=2/2" in log
