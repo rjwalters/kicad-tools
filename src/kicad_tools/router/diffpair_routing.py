@@ -4773,6 +4773,48 @@ def _snap_route_ends_to_pads(route: Route, start: Pad, end: Pad, tol: float = 0.
         last.x2, last.y2 = end.x, end.y
 
 
+#: Skew tie band (mm) for :func:`_select_coupled_candidate` (issue #6858).
+_COUPLED_SELECT_SKEW_TOL_MM = 0.01
+
+
+def _coupled_candidate_metrics(p_route: Route, n_route: Route) -> tuple[float, float, int]:
+    """``(uncoupled mm, skew mm, via count)`` of one coupled candidate (#6858)."""
+    from .diffpair_length_tuning import _pair_uncoupled_mm
+
+    uncoupled = _pair_uncoupled_mm(p_route, n_route)
+    skew = abs(calculate_route_length([p_route]) - calculate_route_length([n_route]))
+    return uncoupled, skew, len(p_route.vias) + len(n_route.vias)
+
+
+def _select_coupled_candidate(
+    joint: tuple[Route, Route, Any] | None,
+    pose: tuple[Route, Route, Any] | None,
+    resolution: float,
+) -> str | None:
+    """Pick ``"joint"`` or ``"pose"`` among gate-surviving candidates (#6858).
+
+    Lexicographic: lower uncoupled length (ties within ``resolution``), then
+    lower skew (ties within 0.01 mm), then fewer vias; a full tie keeps the
+    joint result, today's committed choice.  Returns ``None`` when neither
+    candidate survived.
+    """
+    if joint is None and pose is None:
+        return None
+    if pose is None:
+        return "joint"
+    if joint is None:
+        return "pose"
+    j_unc, j_skew, j_vias = _coupled_candidate_metrics(joint[0], joint[1])
+    t_unc, t_skew, t_vias = _coupled_candidate_metrics(pose[0], pose[1])
+    if abs(j_unc - t_unc) > resolution:
+        return "pose" if t_unc < j_unc else "joint"
+    if abs(j_skew - t_skew) > _COUPLED_SELECT_SKEW_TOL_MM:
+        return "pose" if t_skew < j_skew else "joint"
+    if j_vias != t_vias:
+        return "pose" if t_vias < j_vias else "joint"
+    return "joint"
+
+
 class DiffPairRouter:
     """Differential pair routing coordinator for the autorouter.
 
@@ -6026,6 +6068,105 @@ class DiffPairRouter:
             claims = set()
             self.autorouter._pose_coupled_nets = claims
         return claims
+
+    def _coupled_candidate_rejection(
+        self,
+        p_route: Route,
+        n_route: Route,
+        pair_intra_clearance: float,
+        pair: DifferentialPair,
+    ) -> tuple[str | None, Any]:
+        """Run the pre-commit copper gates on one coupled candidate (#6858).
+
+        Returns ``(reason, violation)``.  ``reason`` is ``None`` when the
+        candidate may be committed, else a short description; ``violation`` is
+        the (possibly mild) #3320 intra-pair clearance finding, which the
+        committed candidate buffers for Phase B.  The gates are the #3320
+        severe centreline overlap and the #6840 via-aware physical overlap,
+        applied identically to the joint and the pose-centreline candidate.
+        """
+        violation = find_intra_pair_clearance_violations(
+            p_route,
+            n_route,
+            threshold_mm=pair_intra_clearance,
+            pair_name=pair.name,
+        )
+        severe_violation = violation is not None and violation.actual_clearance_mm < 0.0
+        physical_overlap = (
+            None if severe_violation else self._pair_physical_overlap_report(p_route, n_route)
+        )
+        if physical_overlap is not None:
+            print(
+                "    WARNING: Coupled route has via-aware P/N overlap: "
+                f"{physical_overlap.description}, "
+                f"gap {physical_overlap.gap_mm:+.4f}mm; rejecting coupled "
+                "candidate."
+            )
+            logger.warning(
+                "diffpair coupled-route REJECTED due to via-aware P/N overlap: "
+                "pair=%r %s gap=%.4fmm",
+                pair.name,
+                physical_overlap.description,
+                physical_overlap.gap_mm,
+            )
+            return f"via-overlap:{physical_overlap.gap_mm:+.4f}mm", violation
+        if severe_violation:
+            assert violation is not None
+            print(
+                f"    WARNING: Coupled route produced centerline overlap "
+                f"(worst={violation.actual_clearance_mm:+.3f}mm < 0); "
+                "rejecting coupled candidate."
+            )
+            logger.warning(
+                "diffpair coupled-route REJECTED due to centerline overlap: "
+                "pair=%r p_net=%r n_net=%r worst_clearance=%.4fmm "
+                "threshold=%.4fmm offending_segments=%d",
+                violation.pair_name,
+                violation.positive_net_name,
+                violation.negative_net_name,
+                violation.actual_clearance_mm,
+                violation.expected_clearance_mm,
+                len(violation.segment_violations),
+            )
+            if _COUPLED_TRACE:
+                print(
+                    f"      [overlap-debug] layer={violation.layer} "
+                    f"p_seg=({violation.p_segment.x1:.2f},"
+                    f"{violation.p_segment.y1:.2f})->"
+                    f"({violation.p_segment.x2:.2f},{violation.p_segment.y2:.2f}) "
+                    f"n_seg=({violation.n_segment.x1:.2f},"
+                    f"{violation.n_segment.y1:.2f})->"
+                    f"({violation.n_segment.x2:.2f},{violation.n_segment.y2:.2f})"
+                )
+            return f"centerline-overlap:{violation.actual_clearance_mm:+.3f}mm", violation
+        return None, violation
+
+    @staticmethod
+    def _coupled_select_line(
+        kept: str | None,
+        gated: dict[str, tuple[Route, Route, Any]],
+        rejections: dict[str, str],
+        joint_result: tuple[Route, Route] | None,
+        pose_candidate: tuple[Route, Route] | None,
+        pose_decline: str | None,
+        pose_elapsed: float,
+    ) -> str:
+        """The one-line ``[coupled-select]`` log for a compared spec (#6858)."""
+
+        def fmt(kind: str, declined: str | None) -> str:
+            if kind in gated:
+                unc, skew, vias = _coupled_candidate_metrics(*gated[kind][:2])
+                return f"({unc:.3f}, {skew:.3f}, {vias})"
+            if kind in rejections:
+                return f"rejected:{rejections[kind]}"
+            return f"declined:{declined or 'n/a'}" if kind == "pose" else "<none>"
+
+        return (
+            f"    [coupled-select] kept={kept or 'none'} "
+            f"joint={fmt('joint', None)} "
+            f"pose={fmt('pose', pose_decline)} "
+            f"pose_s={pose_elapsed:.2f}"
+        )
 
     def _pose_copper_rejection(
         self,
@@ -12074,9 +12215,16 @@ class DiffPairRouter:
                 and pose_timeout is None
             ):
                 print("    [coupled-pose] skipped: per-pair wall-clock budget spent")
+            # Issue #6858: the pose search now also runs when the joint search
+            # SUCCEEDED, so the two candidates can be compared before either
+            # touches the grid (see the selection below).
+            joint_result = result
+            joint_phase = coupled_phase
+            pose_candidate: tuple[Route, Route] | None = None
+            pose_decline: str | None = None
+            pose_elapsed = 0.0
             if (
-                result is None
-                and self.enable_pose_centerline
+                self.enable_pose_centerline
                 and not spec.polarity_swap
                 and not pose_layer_declined
                 and pose_timeout is not None
@@ -12114,9 +12262,9 @@ class DiffPairRouter:
                         else pose_timeout - (time.monotonic() - pose_t0),
                     )
                 report_pose = pathfinder.last_pose_report
+                pose_elapsed = time.monotonic() - pose_t0
                 if pose_result is not None:
-                    result = pose_result
-                    coupled_phase += "+pose"
+                    pose_candidate = pose_result
                     print(
                         "    [coupled-pose] pair constructed as a centerline trunk "
                         f"({report_pose.get('centerline_poses')} poses, "
@@ -12124,13 +12272,14 @@ class DiffPairRouter:
                         f"{time.monotonic() - pose_t0:.2f}s)"
                     )
                 else:
+                    pose_decline = str(report_pose.get("reason", "n/a"))
                     print(
                         "    [coupled-pose] declined: "
                         f"{report_pose.get('reason', 'n/a')} "
                         f"({time.monotonic() - pose_t0:.2f}s)"
                     )
 
-            if result is None:
+            if result is None and pose_candidate is None:
                 # Issue #3089: ``None`` may indicate (a) no path found,
                 # (b) max-iterations exhausted, or (c) the new per-pair
                 # wall-clock budget was exceeded.  CoupledPathfinder.
@@ -12226,98 +12375,47 @@ class DiffPairRouter:
                 print("    WARNING: Coupled routing failed, falling back to independent routing")
                 return self.route_differential_pair_independent(pair, spacing)
 
-            p_route, n_route = result
+            # Issue #6858: compare-and-keep.  Both candidates (joint ``J``,
+            # pose-centreline ``T``) go through the SAME copper gates; nothing
+            # has been marked on the grid yet, so the loser leaves no trace.
+            gated: dict[str, tuple[Route, Route, Any]] = {}
+            gate_rejections: dict[str, str] = {}
+            for cand_kind, cand in (("joint", joint_result), ("pose", pose_candidate)):
+                if cand is None:
+                    continue
+                cand_reason, cand_violation = self._coupled_candidate_rejection(
+                    cand[0], cand[1], pair_intra_clearance, pair
+                )
+                if cand_reason is None:
+                    gated[cand_kind] = (cand[0], cand[1], cand_violation)
+                else:
+                    gate_rejections[cand_kind] = cand_reason
 
-            # Issue #3320: Pre-mark intra-pair clearance audit.  Before
-            # we commit the coupled-route to the grid and the route list,
-            # check whether the reconstructed geometry actually meets the
-            # per-pair clearance threshold.  A SEVERE violation
-            # (centerlines overlap by more than ``trace_width / 2`` --
-            # i.e., the partner trace's centerline lies on or inside our
-            # trace's body) means the coupled search produced an
-            # unrouteable swap-via / crossover geometry that the
-            # ``min_spacing_cells`` floor (PR #3022) could not prevent.
-            # The canonical failure mode is the board-07 DQS_N/DQS_P
-            # pair: the polarity-swap-via at the U1 vias places both
-            # traces with swapped y-coordinates on the same inner layer,
-            # producing a long diagonal that crosses the partner's start
-            # cell with -0.150 mm edge-to-edge clearance (the full trace
-            # width).  When this happens we reject the coupled route,
-            # do NOT commit it to the grid, and fall back to the
-            # independent router which routes P and N as separate
-            # single-ended nets -- a worse outcome for skew but a
-            # routable one that doesn't produce shorting overlaps.
-            violation = find_intra_pair_clearance_violations(
-                p_route,
-                n_route,
-                threshold_mm=pair_intra_clearance,
-                pair_name=pair.name,
-            )
-            # Severity gate: any actual centerline overlap (negative
-            # edge-to-edge clearance) is "severe" -- the partner trace's
-            # body literally intersects ours.  Pure quantization slack
-            # (clearance in ``[0, threshold)``) is logged but kept
-            # because the trace-optimizer / serpentine shim can still
-            # nudge it into compliance.
-            severe_violation = violation is not None and violation.actual_clearance_mm < 0.0
-            # Issue #3508 (second pass): the segments-only check above
-            # cannot see via-vs-segment / via-vs-via physical overlap
-            # (e.g. a crossing-tail via on the partner's inner-layer
-            # copper).  Treat those as severe too -- the recipe's 6b
-            # repair would otherwise rip one side and de-couple the
-            # pair downstream.
-            # Issue #6840: the physical-overlap arm reports its own worst gap
-            # and element kinds.  It used to fall into the centreline message
-            # below with ``violation=None`` and print ``worst=+nanmm`` --
-            # naming a check that had not fired.
-            physical_overlap = (
-                None if severe_violation else self._pair_physical_overlap_report(p_route, n_route)
-            )
-            if physical_overlap is not None:
+            kept_kind: str | None = None
+            if gated:
+                kept_kind = _select_coupled_candidate(
+                    gated.get("joint"),
+                    gated.get("pose"),
+                    float(self.autorouter.grid.resolution),
+                )
+            if pose_candidate is not None or joint_result is not None:
                 print(
-                    "    WARNING: Coupled route has via-aware P/N overlap: "
-                    f"{physical_overlap.description}, "
-                    f"gap {physical_overlap.gap_mm:+.4f}mm; rejecting coupled "
-                    "route and falling back to independent routing."
+                    self._coupled_select_line(
+                        kept_kind,
+                        gated,
+                        gate_rejections,
+                        joint_result,
+                        pose_candidate,
+                        pose_decline,
+                        pose_elapsed,
+                    )
                 )
-                logger.warning(
-                    "diffpair coupled-route REJECTED due to via-aware P/N overlap: "
-                    "pair=%r %s gap=%.4fmm",
-                    pair.name,
-                    physical_overlap.description,
-                    physical_overlap.gap_mm,
-                )
-                severe_violation = True
+            severe_violation = kept_kind is None
+            violation = None
+            if kept_kind is not None:
+                p_route, n_route, violation = gated[kept_kind]
+                coupled_phase = joint_phase + ("+pose" if kept_kind == "pose" else "")
             if severe_violation:
-                if violation is not None and physical_overlap is None:
-                    print(
-                        f"    WARNING: Coupled route produced centerline overlap "
-                        f"(worst={violation.actual_clearance_mm:+.3f}mm < 0); "
-                        "rejecting coupled route and falling back to independent "
-                        "routing."
-                    )
-                if violation is not None and physical_overlap is None:
-                    logger.warning(
-                        "diffpair coupled-route REJECTED due to centerline overlap: "
-                        "pair=%r p_net=%r n_net=%r worst_clearance=%.4fmm "
-                        "threshold=%.4fmm offending_segments=%d",
-                        violation.pair_name,
-                        violation.positive_net_name,
-                        violation.negative_net_name,
-                        violation.actual_clearance_mm,
-                        violation.expected_clearance_mm,
-                        len(violation.segment_violations),
-                    )
-                if _COUPLED_TRACE and violation is not None and physical_overlap is None:
-                    print(
-                        f"      [overlap-debug] layer={violation.layer} "
-                        f"p_seg=({violation.p_segment.x1:.2f},"
-                        f"{violation.p_segment.y1:.2f})->"
-                        f"({violation.p_segment.x2:.2f},{violation.p_segment.y2:.2f}) "
-                        f"n_seg=({violation.n_segment.x1:.2f},"
-                        f"{violation.n_segment.y1:.2f})->"
-                        f"({violation.n_segment.x2:.2f},{violation.n_segment.y2:.2f})"
-                    )
                 # Do NOT commit p_route/n_route to grid or
                 # ``autorouter.routes``.  Fall back to independent
                 # routing for the whole pair (single source of truth
