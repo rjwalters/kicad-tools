@@ -410,6 +410,49 @@ class TestRollbackGuard:
         assert spread is not None and spread <= 0.1
 
 
+class TestImprovedStillOverLimit:
+    """Issue #6969: an improved-but-over-limit group keeps its meanders."""
+
+    @staticmethod
+    def _run(monkeypatch, spreads):
+        routes = [
+            _route(1, [(0.0, 0.0), (22.0, 0.0)]),
+            _route(2, [(0.0, 10.0), (20.0, 10.0)]),
+            _route(3, [(0.0, 20.0), (18.0, 20.0)]),
+        ]
+        ar = _autorouter(routes, {1: "A0", 2: "A1", 3: "A2"}, tolerance=0.1)
+        group = MatchGroup(
+            name="BUS", net_ids=[1, 2, 3], tolerance=0.1, source=MatchGroupSource.LEGACY_API
+        )
+        before = list(ar.routes)
+        seq = iter(spreads)
+        monkeypatch.setattr(
+            Autorouter, "_checker_group_spread_mm", staticmethod(lambda *a, **k: next(seq))
+        )
+        results = ar.apply_match_group_tuning(
+            detected_groups=[group], verbose=False, engage="checker_limit"
+        )
+        return ar, before, results
+
+    def test_improved_group_keeps_meanders(self, monkeypatch):
+        ar, before, results = self._run(monkeypatch, [10.0, 4.0])
+        reasons = {res.reason for (_r, res) in results["BUS"].values()}
+        assert "improved_still_over_limit" in reasons
+        assert "rolled_back_still_over_limit" not in reasons
+        assert any(a is not b for a, b in zip(ar.routes, before, strict=True))
+        assert all(
+            not res.success
+            for (_r, res) in results["BUS"].values()
+            if res.reason == "improved_still_over_limit"
+        )
+
+    def test_non_improving_group_is_still_rolled_back(self, monkeypatch):
+        ar, before, results = self._run(monkeypatch, [10.0, 12.0])
+        reasons = {res.reason for (_r, res) in results["BUS"].values()}
+        assert "rolled_back_still_over_limit" in reasons
+        assert all(a is b for a, b in zip(ar.routes, before, strict=True))
+
+
 class TestBlindBuriedConsistency:
     """The engagement gate, rollback guard and tuner share one via model.
 
