@@ -489,8 +489,12 @@ resolve_mcp_workspace() {
 # Reads MCP_SERVER_ENV (set by _check_mcp_candidate): the server's declared
 # `.mcp.json` `env` as K=V words, merged over the inherited env via `env` the
 # way Claude Code launches it (#10870). Values are never logged.
+# The handshake bound is LOOM_MCP_PREFLIGHT_TIMEOUT seconds (default 15; a
+# non-numeric or non-positive value falls back to the default) — a healthy
+# server can take ~4 s on a loaded host, so a 5 s cap failed it spuriously.
 # Sets (for the caller to log on failure): MCP_SMOKE_TEST_STDOUT,
-# MCP_SMOKE_TEST_STDERR.
+# MCP_SMOKE_TEST_STDERR, MCP_SMOKE_TEST_TIMED_OUT (1 if `timeout` fired, else 0),
+# MCP_SMOKE_TEST_TIMEOUT_SECS (the bound that was applied).
 # Returns: 0 if a valid JSON-RPC initialize response was observed, 1 otherwise.
 _mcp_smoke_test() {
     local mcp_entry="$1"
@@ -498,12 +502,25 @@ _mcp_smoke_test() {
 
     local init_request='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"loom-mcp-preflight","version":"1.0.0"}}}'
 
+    local smoke_timeout="${LOOM_MCP_PREFLIGHT_TIMEOUT:-15}"
+    if ! [[ "${smoke_timeout}" =~ ^[0-9]+$ ]] || [[ "${smoke_timeout}" -le 0 ]]; then
+        smoke_timeout=15
+    fi
+    MCP_SMOKE_TEST_TIMEOUT_SECS="${smoke_timeout}"
+    MCP_SMOKE_TEST_TIMED_OUT=0
+
     local tmp_stdout tmp_stderr
     tmp_stdout=$(mktemp)
     tmp_stderr=$(mktemp)
 
-    printf '%s\n' "${init_request}" | timeout 5 env ${MCP_SERVER_ENV[@]+"${MCP_SERVER_ENV[@]}"} \
-        "${node_bin}" "${mcp_entry}" >"${tmp_stdout}" 2>"${tmp_stderr}" || true
+    # PIPESTATUS[1] is `timeout`'s exit status (124 = the bound fired). Capture
+    # it instead of discarding it with `|| true`.
+    local smoke_rc=0
+    printf '%s\n' "${init_request}" | timeout "${smoke_timeout}" env ${MCP_SERVER_ENV[@]+"${MCP_SERVER_ENV[@]}"} \
+        "${node_bin}" "${mcp_entry}" >"${tmp_stdout}" 2>"${tmp_stderr}" || smoke_rc=${PIPESTATUS[1]}
+    if [[ "${smoke_rc}" -eq 124 ]]; then
+        MCP_SMOKE_TEST_TIMED_OUT=1
+    fi
 
     MCP_SMOKE_TEST_STDOUT=$(cat "${tmp_stdout}")
     MCP_SMOKE_TEST_STDERR=$(cat "${tmp_stderr}")
@@ -629,6 +646,14 @@ for name, srv in json.load(open(sys.argv[1])).get('mcpServers', {}).items():
     fi
     if [[ -n "${MCP_SMOKE_TEST_STDOUT}" ]]; then
         log_warn "MCP stdout: ${MCP_SMOKE_TEST_STDOUT}"
+    fi
+
+    # A pure handshake timeout on an entry point that exists and is not stale
+    # is a slow start, not a broken bundle: a rebuild cannot fix it, and its
+    # "cannot rebuild" error would hide the real cause.
+    if [[ "${MCP_SMOKE_TEST_TIMED_OUT}" -eq 1 ]]; then
+        log_error "MCP smoke test timed out after ${MCP_SMOKE_TEST_TIMEOUT_SECS}s (${mcp_config}) - skipping rebuild; raise LOOM_MCP_PREFLIGHT_TIMEOUT if the host is loaded"
+        return 1
     fi
 
     # Attempt rebuild and retry
