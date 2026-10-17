@@ -195,6 +195,73 @@ def halo_offsets(radius_cells: int) -> tuple[tuple[int, int], ...]:
     return offsets
 
 
+def routed_halo_radius_cells(
+    item: Segment | Via,
+    rules: DesignRules,
+    resolution: float,
+    *,
+    cpp: bool = False,
+    max_trace_width: float | None = None,
+) -> int:
+    """Grid-cell halo radius stamped around committed routed copper (Issue #5858).
+
+    Single source for the PY / CPP / PYV / CPPV variants. The mark and unmark
+    sites for both grids call this function, so their radii cannot drift apart.
+
+    Variants (the float expressions are evaluated in exactly the order the
+    pre-#5858 call sites used, so the results are bit-identical):
+
+    * **PY** -- segment, Python grid:
+      ``int((width / 2 + trace_clearance) / resolution) + 2``.  Issue #1674
+      uses the segment's own width (not ``rules.trace_width``) so wide
+      net-class traces block the right number of cells; the extra cell over
+      CPP is the Issue #1666 grid-quantisation safety margin between
+      parallel traces.
+    * **CPP** -- segment, C++ grid mirror:
+      ``int((width / 2 + trace_clearance) / resolution) + 1``.
+    * **PYV** -- via, Python grid:
+      ``int((diameter / 2 + via_clearance + tw / 2) / resolution) + 1`` with
+      ``tw = max_trace_width`` when given, else ``rules.trace_width``
+      (Issue #1692: the widest net-class trace routed later must still clear
+      the via).  The ``+ 1`` is the Issue #1797 safety margin.
+    * **CPPV** -- via, C++ grid mirror:
+      ``ceil((diameter / 2 + via_clearance + rules.trace_width / 2) / resolution) + 1``.
+      Issue #2466 rounds *up* so the C++ grid's blocking matches the
+      validator's geometric keepout; this variant always uses
+      ``rules.trace_width`` and never ``max_trace_width``.
+
+    The PY/CPP ``+2`` vs ``+1`` and PYV/CPPV ``int`` vs ``ceil`` asymmetries
+    are deliberate pre-existing behaviour; this helper preserves them.
+
+    Args:
+        item: The committed segment or via.
+        rules: The design rules the call site uses (``RoutingCore.rules`` is
+            a separate object from ``RoutingGrid.rules``; each caller passes
+            its own).
+        resolution: Grid resolution in mm.
+        cpp: Select the C++-grid mirror variant (CPP / CPPV).
+        max_trace_width: PYV trace-width override.  Must be ``None`` when
+            ``cpp`` is set.
+
+    Raises:
+        ValueError: If ``cpp`` is set together with ``max_trace_width``.
+    """
+    if cpp and max_trace_width is not None:
+        raise ValueError("routed_halo_radius_cells: the C++ via variant ignores max_trace_width")
+    if isinstance(item, Segment):
+        cells = int((item.width / 2 + rules.trace_clearance) / resolution)
+        return cells + 1 if cpp else cells + 2
+    if cpp:
+        return (
+            math.ceil(
+                (item.diameter / 2 + rules.via_clearance + rules.trace_width / 2) / resolution
+            )
+            + 1
+        )
+    tw = max_trace_width if max_trace_width is not None else rules.trace_width
+    return int((item.diameter / 2 + rules.via_clearance + tw / 2) / resolution) + 1
+
+
 def halo_mask(radius_cells: int) -> np.ndarray:
     """The :func:`halo_offsets` set as a ``(2r+1, 2r+1)`` boolean mask.
 
@@ -5930,11 +5997,7 @@ class RoutingGrid:
             for seg in route.segments:
                 # Issue #1674: Use seg.width instead of rules.trace_width
                 # so wider net-class traces block the correct number of cells.
-                total_clearance = seg.width / 2 + self.rules.trace_clearance
-                clearance_cells = int(total_clearance / self.resolution) + 1
-                # Issue #1666: Add safety margin to prevent grid-quantization
-                # clearance violations between parallel traces.
-                clearance_cells += 1
+                clearance_cells = routed_halo_radius_cells(seg, self.rules, self.resolution)
                 self._mark_segment(seg, clearance_cells=clearance_cells)
             for via in route.vias:
                 self._mark_via(via, max_trace_width=max_trace_width)
@@ -6128,15 +6191,9 @@ class RoutingGrid:
                 (Issue #1692).  Falls back to ``rules.trace_width``.
         """
         gx, gy = self.world_to_grid(via.x, via.y)
-        # Include trace half-width so trace edges maintain via_clearance from via edge
-        # Issue #1692: Use the maximum trace width (across all net classes)
-        # so that wide-trace nets routed later still clear this via.
-        trace_w = max_trace_width if max_trace_width is not None else self.rules.trace_width
-        radius = int((via.diameter / 2 + self.rules.via_clearance + trace_w / 2) / self.resolution)
-        # Issue #1797: Add safety margin to prevent grid-quantization
-        # clearance violations between traces and vias (mirrors the +1
-        # applied in mark_route() for segments, see Issue #1666).
-        radius += 1
+        radius = routed_halo_radius_cells(
+            via, self.rules, self.resolution, max_trace_width=max_trace_width
+        )
         self._route_halo.record(self._route_halo.via_key(via), radius, True)
 
         # Issue #2677: Fast-path when no reservations exist (preserves
@@ -6423,10 +6480,7 @@ class RoutingGrid:
         removed = False
         with self._acquire_lock():
             for seg in route.segments:
-                total_clearance = seg.width / 2 + self.rules.trace_clearance
-                clearance_cells = int(total_clearance / self.resolution) + 1
-                # Issue #1666: Must match mark_route() safety margin
-                clearance_cells += 1
+                clearance_cells = routed_halo_radius_cells(seg, self.rules, self.resolution)
                 self._unmark_segment(seg, clearance_cells=clearance_cells)
             for via in route.vias:
                 self._unmark_via(via, max_trace_width=max_trace_width)
@@ -6477,14 +6531,12 @@ class RoutingGrid:
 
     def _segment_halo_reach_mm(self, seg: Segment) -> float:
         """Distance from a segment's centreline to its marked halo's edge."""
-        cells = int((seg.width / 2 + self.rules.trace_clearance) / self.resolution) + 2
-        return cells * self.resolution
+        return routed_halo_radius_cells(seg, self.rules, self.resolution) * self.resolution
 
     def _via_halo_reach_mm(self, via: Via, max_trace_width: float | None) -> float:
         """Distance from a via's centre to its marked halo's edge."""
-        trace_w = max_trace_width if max_trace_width is not None else self.rules.trace_width
-        cells = (
-            int((via.diameter / 2 + self.rules.via_clearance + trace_w / 2) / self.resolution) + 1
+        cells = routed_halo_radius_cells(
+            via, self.rules, self.resolution, max_trace_width=max_trace_width
         )
         return cells * self.resolution
 
@@ -6576,9 +6628,7 @@ class RoutingGrid:
                             max(seg.y1, seg.y2) + r,
                         )
                     ):
-                        cells = (
-                            int((seg.width / 2 + self.rules.trace_clearance) / self.resolution) + 2
-                        )
+                        cells = routed_halo_radius_cells(seg, self.rules, self.resolution)
                         self._mark_segment(seg, clearance_cells=cells)
                 for via in other.vias:
                     r = self._via_halo_reach_mm(via, mtw)
@@ -6725,13 +6775,10 @@ class RoutingGrid:
                 so the same cells are cleared (Issue #1692).
         """
         gx, gy = self.world_to_grid(via.x, via.y)
-        # Include trace half-width to match _mark_via calculation
-        # Issue #1692: Use the same max_trace_width as _mark_via
-        trace_w = max_trace_width if max_trace_width is not None else self.rules.trace_width
-        radius = int((via.diameter / 2 + self.rules.via_clearance + trace_w / 2) / self.resolution)
-        # Issue #1797: Must match _mark_via safety margin so the same
-        # cells are cleared during rip-up.
-        radius += 1
+        # Same helper as _mark_via, so the same cells are cleared on rip-up.
+        radius = routed_halo_radius_cells(
+            via, self.rules, self.resolution, max_trace_width=max_trace_width
+        )
         self._route_halo.record(self._route_halo.via_key(via), radius, False)
 
         static_blocked = self._static_blocked
@@ -6807,19 +6854,12 @@ class RoutingGrid:
         for seg in route.segments:
             # Same radius math as mark_route() so the conflict set matches
             # the cells the committed route would actually contest.
-            total_clearance = seg.width / 2 + self.rules.trace_clearance
-            radius = int(total_clearance / self.resolution) + 2
+            radius = routed_halo_radius_cells(seg, self.rules, self.resolution)
             for gx, gy, layer_idx in self._get_segment_cells(seg):
                 _scan_window(gx, gy, layer_idx, radius)
 
         for via in route.vias:
-            radius = (
-                int(
-                    (via.diameter / 2 + self.rules.via_clearance + self.rules.trace_width / 2)
-                    / self.resolution
-                )
-                + 1
-            )
+            radius = routed_halo_radius_cells(via, self.rules, self.resolution)
             gx, gy = self.world_to_grid(via.x, via.y)
             for layer_idx in range(self.num_layers):
                 _scan_window(gx, gy, layer_idx, radius)
@@ -6970,8 +7010,7 @@ class RoutingGrid:
 
         for seg in route.segments:
             # Must match RoutingCore._mark_route_on_cpp_grid (segments).
-            total_clearance = seg.width / 2 + self.rules.trace_clearance
-            clearance_cells = int(total_clearance / self.resolution) + 1
+            clearance_cells = routed_halo_radius_cells(seg, self.rules, self.resolution, cpp=True)
             gx1, gy1 = self.world_to_grid(seg.x1, seg.y1)
             gx2, gy2 = self.world_to_grid(seg.x2, seg.y2)
             layer_idx = self.layer_to_index(seg.layer.value)
@@ -6983,13 +7022,7 @@ class RoutingGrid:
             # always uses the global ``rules.trace_width`` (NOT the
             # per-call ``max_trace_width`` the Python ``_mark_via`` takes).
             gx, gy = self.world_to_grid(via.x, via.y)
-            radius_cells = (
-                math.ceil(
-                    (via.diameter / 2 + self.rules.via_clearance + self.rules.trace_width / 2)
-                    / self.resolution
-                )
-                + 1
-            )
+            radius_cells = routed_halo_radius_cells(via, self.rules, self.resolution, cpp=True)
             impl.unmark_via(gx, gy, via.net, radius_cells)
 
     def _mark_route_on_cpp_cells(self, route: Route, max_trace_width: float | None = None) -> None:
@@ -7010,8 +7043,7 @@ class RoutingGrid:
 
         for seg in route.segments:
             # Must match RoutingCore._mark_route_on_cpp_grid (segments).
-            total_clearance = seg.width / 2 + self.rules.trace_clearance
-            clearance_cells = int(total_clearance / self.resolution) + 1
+            clearance_cells = routed_halo_radius_cells(seg, self.rules, self.resolution, cpp=True)
             gx1, gy1 = self.world_to_grid(seg.x1, seg.y1)
             gx2, gy2 = self.world_to_grid(seg.x2, seg.y2)
             layer_idx = self.layer_to_index(seg.layer.value)
@@ -7021,13 +7053,7 @@ class RoutingGrid:
         for via in route.vias:
             # Must match RoutingCore._mark_route_on_cpp_grid (vias).
             gx, gy = self.world_to_grid(via.x, via.y)
-            radius_cells = (
-                math.ceil(
-                    (via.diameter / 2 + self.rules.via_clearance + self.rules.trace_width / 2)
-                    / self.resolution
-                )
-                + 1
-            )
+            radius_cells = routed_halo_radius_cells(via, self.rules, self.resolution, cpp=True)
             cpp_grid.mark_via(gx, gy, via.net, radius_cells)
 
     def _rebuild_segment_index(self) -> None:
@@ -7137,10 +7163,7 @@ class RoutingGrid:
                 if stale is None:
                     continue
                 for seg in stale.segments:
-                    total_clearance = seg.width / 2 + self.rules.trace_clearance
-                    clearance_cells = int(total_clearance / self.resolution) + 1
-                    # Issue #1666: must match mark_route() safety margin.
-                    clearance_cells += 1
+                    clearance_cells = routed_halo_radius_cells(seg, self.rules, self.resolution)
                     self._unmark_segment(seg, clearance_cells=clearance_cells)
                 for via in stale.vias:
                     self._unmark_via(via, max_trace_width=max_trace_width)
@@ -7192,10 +7215,7 @@ class RoutingGrid:
                 if route.net not in affected_nets:
                     continue
                 for seg in route.segments:
-                    total_clearance = seg.width / 2 + self.rules.trace_clearance
-                    clearance_cells = int(total_clearance / self.resolution) + 1
-                    # Issue #1666: must match mark_route() safety margin.
-                    clearance_cells += 1
+                    clearance_cells = routed_halo_radius_cells(seg, self.rules, self.resolution)
                     self._mark_segment(seg, clearance_cells=clearance_cells)
                 for via in route.vias:
                     self._mark_via(via, max_trace_width=max_trace_width)
