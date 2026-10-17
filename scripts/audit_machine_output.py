@@ -2,7 +2,9 @@
 """Audit the kct machine-output idiom across every CLI leaf subcommand.
 
 Walks the real argparse tree built by ``create_parser()`` (recursive walk of
-``_SubParsersAction`` leaves) and classifies each leaf subcommand:
+``_SubParsersAction`` leaves, with passthrough stubs such as ``route``
+resolved to their real parsers by ``resolve_passthrough``, issue #7017) and
+classifies each leaf subcommand:
 
 * ``format-json``   -- has ``--format`` with a ``json`` choice (canonical)
 * ``both``          -- has ``--format json`` AND a legacy ``--json`` alias
@@ -29,7 +31,7 @@ import subprocess
 import sys
 from collections.abc import Iterator
 
-from kicad_tools.cli.parser import create_parser
+from kicad_tools.cli.parser import create_parser, resolve_passthrough
 
 BUCKET_ORDER = ("format-json", "both", "json-bool", "format-nojson", "prose-only")
 
@@ -93,7 +95,7 @@ def main(argv: list[str] | None = None) -> int:
     opts = ap.parse_args(argv)
 
     buckets: dict[str, list[tuple[str, list[str] | None]]] = {k: [] for k in BUCKET_ORDER}
-    for path, leaf in iter_leaves(create_parser()):
+    for path, leaf in iter_leaves(resolve_passthrough(create_parser())):
         bucket, choices = classify(leaf)
         buckets[bucket].append((" ".join(path), choices))
     for cmds in buckets.values():
