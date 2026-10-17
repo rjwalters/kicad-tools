@@ -668,13 +668,24 @@ def test_guide_route_probe_receives_deadline(monkeypatch):
     pairs = router._diffpair.detect_differential_pairs()
 
     probe_timeouts: list[float | None] = []
-    original_route = router.router.route
 
+    # Issue #6908: the test asserts only on the deadlines handed to the
+    # probe, so stub the real routing (probe, coupled attempts, shadow and
+    # rescue) to return immediately. Left real, the call took ~77s with the
+    # C++ backend and tripped the 60s pytest-timeout on CI.
     def spying_route(start, end, *args, per_net_timeout=None, **kwargs):
         probe_timeouts.append(per_net_timeout)
-        return original_route(start, end, *args, per_net_timeout=per_net_timeout, **kwargs)
+        return None
+
+    def fake_route_coupled(self, *args, **kwargs):
+        self.last_timeout_exceeded = False
+        self.last_iterations = 0
+        return None
 
     monkeypatch.setattr(router.router, "route", spying_route)
+    monkeypatch.setattr(CoupledPathfinder, "route_coupled", fake_route_coupled)
+    monkeypatch.setattr(DiffPairRouter, "_shadow_route_pair", lambda self, *a, **k: None)
+    monkeypatch.setattr(DiffPairRouter, "_rescue_near_miss_coupled", lambda self, *a, **k: None)
 
     routes, _warning = router._diffpair.route_differential_pair_coupled(
         pairs[0],
