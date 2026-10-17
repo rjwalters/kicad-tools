@@ -48,6 +48,9 @@ def _load(name: str, path: Path):
 
 
 regen = _load("regenerate_boards_03_04_6076", HERE / "regenerate_boards_03_04_6076.py")
+
+from kicad_tools.cli.kicad_toolchain import finalize_native_drc_report  # noqa: E402
+
 refresh_tools = regen.refresh_tools
 refresh_copper_gerbers = _load(
     "refresh_copper_gerbers_6404", HERE / "refresh_copper_gerbers_6404.py"
@@ -67,6 +70,7 @@ def main() -> int:
          "-o", str(readiness / "native-drc.json"), str(routed)],
         capture_output=True, check=False,
     )  # fmt: skip
+    finalize_native_drc_report(readiness / "native-drc.json")  # Issue #6962
     delta = regen.fill_consistency(routed)
     (readiness / "fill-consistency.json").write_text(json.dumps(delta, indent=2) + "\n")
     regen.log(f"  fill consistency (saved vs independent refill): {delta}")
@@ -105,4 +109,6 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    from kicad_tools.cli.kicad_toolchain import run_on_evidence_toolchain
+
+    sys.exit(run_on_evidence_toolchain(main, [REPO_ROOT]))

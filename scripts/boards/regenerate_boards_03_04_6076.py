@@ -43,7 +43,18 @@ the identity.
 usage (repository root, KiCad 10 ``kicad-cli`` and docker available)::
 
     uv run --with shapely python scripts/boards/regenerate_boards_03_04_6076.py \\
-        [--board 03] [--board 04] [--base-commit SHA]
+        [--board 03] [--board 04] [--base-commit SHA] [--checked-at ISO]
+
+Every kicad-cli call runs on the pinned evidence toolchain (Issue #6962):
+an isolated ``KICAD_CONFIG_HOME`` holding the pinned library tables, and a
+refusal unless ``kicad-cli`` is the qualified version.  On a host whose KiCad
+is another release, set ``KCT_KICAD_DOCKER=1`` to route kicad-cli through
+CI's pinned image.
+
+``--board 03 --receipt-only`` re-issues only board 03's readiness receipt
+(``kct readiness --verify`` plus the promotion to ``output/readiness.json``),
+for a board whose design files are already current.  With a fixed
+``--checked-at`` two runs produce byte-identical evidence.
 """
 
 from __future__ import annotations
@@ -78,6 +89,7 @@ uuid_tools = _load("regenerate_uuids_6076", HERE / "regenerate_uuids_6076.py")
 refresh_tools = _load("refresh_readiness", HERE / "refresh_readiness.py")
 bundle_links = _load("_bundle_links", HERE / "_bundle_links.py")
 
+from kicad_tools.cli.kicad_toolchain import finalize_native_drc_report  # noqa: E402
 from kicad_tools.core.canonical_uuids import canonicalize_board_uuids  # noqa: E402
 from kicad_tools.core.sexp_file import load_pcb  # noqa: E402
 from kicad_tools.sexp import parse_file, serialize_sexp  # noqa: E402
@@ -261,6 +273,7 @@ def board04() -> None:
                     "--severity-warning", "--schematic-parity", "--units", "mm",
                     "-o", str(readiness / "native-drc.json"), str(routed)],
                    capture_output=True, check=False)  # fmt: skip
+    finalize_native_drc_report(readiness / "native-drc.json")
     delta = fill_consistency(routed)
     (readiness / "fill-consistency.json").write_text(json.dumps(delta, indent=2) + "\n")
     log(f"  fill consistency (saved vs independent refill): {delta}")
@@ -310,7 +323,7 @@ SUPPLEMENTAL_BINDINGS = (
 )
 
 
-def board03(base_commit: str) -> None:
+def board03(base_commit: str, checked_at: str | None = None) -> None:
     log("== board 03")
     board = BOARDS / "03-usb-joystick"
     out, mfg = board / "output", board / "output/manufacturing"
@@ -330,10 +343,31 @@ def board03(base_commit: str) -> None:
     run([py, str(board / "generate_design.py"), str(out)])  # manifest now covers check-report
     drop_bytecode(board)
     refresh_tools.rebuild_archive(out / "manufacturing.zip", [mfg])
+    board03_receipt(base_commit, checked_at)
 
-    shutil.rmtree(out / "readiness-verification", ignore_errors=True)
-    subprocess.run([py, "-m", "kicad_tools.cli", "readiness", str(board), "--verify",
-                    "--format", "json"], capture_output=True, text=True)  # fmt: skip
+
+def board03_receipt(base_commit: str, checked_at: str | None) -> None:
+    """``kct readiness --verify`` board 03 and promote the receipt."""
+    board = BOARDS / "03-usb-joystick"
+    out = board / "output"
+    py = sys.executable
+    drop_bytecode(board)
+    cmd = [py, "-m", "kicad_tools.cli", "readiness", str(board), "--verify", "--format", "json"]
+    if checked_at:
+        cmd += ["--checked-at", checked_at]
+    verification = out / "readiness-verification"
+    with tempfile.TemporaryDirectory(prefix="regen-03-receipt-") as tmp:
+        previous = Path(tmp) / "previous"
+        if verification.exists():
+            shutil.move(str(verification), previous)
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+        if proc.returncode == 2:
+            # Environment refusal (#6962): nothing was written, so put the
+            # committed receipt back rather than leaving it deleted.
+            shutil.rmtree(verification, ignore_errors=True)
+            if previous.exists():
+                shutil.move(str(previous), verification)
+            raise RuntimeError(f"kct readiness refused board 03:\n{proc.stderr[-2000:]}")
     receipt = json.loads((out / "readiness-verification/readiness.json").read_text())
     for rel in SUPPLEMENTAL_BINDINGS:
         receipt["inputs"][rel] = sha256(board / rel)
@@ -358,14 +392,32 @@ def main() -> int:
         default="63813f418c55b68f53a31aaa6c80037563c6d5bf",
         help="commit recorded as board 03's supplemental source_commit",
     )
+    parser.add_argument("--checked-at", help="ISO timestamp for board 03's receipt (default: now)")
+    parser.add_argument(
+        "--receipt-only",
+        action="store_true",
+        help="board 03: only re-issue the readiness receipt (design files already current)",
+    )
     parser.add_argument("--log", help=argparse.SUPPRESS)  # consumed by regenerate_uuids_6076
     args = parser.parse_args()
     os.chdir(REPO_ROOT)
     boards = args.board or ["04", "03"]
-    if "04" in boards:
-        board04()
-    if "03" in boards:
-        board03(args.base_commit)
+    if args.receipt_only and boards != ["03"]:
+        parser.error("--receipt-only applies to --board 03 alone")
+    from kicad_tools.cli.kicad_toolchain import KiCadEnvironmentError, evidence_toolchain
+
+    try:
+        with evidence_toolchain(mounts=[REPO_ROOT]):
+            if args.receipt_only:
+                board03_receipt(args.base_commit, args.checked_at)
+                return 0
+            if "04" in boards:
+                board04()
+            if "03" in boards:
+                board03(args.base_commit, args.checked_at)
+    except KiCadEnvironmentError as exc:
+        log(f"REFUSED: {exc}")
+        return 2
     return 0
 
 

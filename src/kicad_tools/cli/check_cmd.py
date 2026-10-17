@@ -665,8 +665,9 @@ def _erc_subcheck(sch_path: Path | None, strict: bool) -> SubCheckResult:
                     f"{detail} (strict) -- KiCad global library tables not initialized: "
                     f"{len(uninitialized)} of these warning(s) reference library table "
                     f"entries missing from this host ({libs_str}), not necessarily a real "
-                    "schematic defect. Run `scripts/ci/init_kicad_libraries.py` once per "
-                    "host, then re-run this check (see README 'Fresh worktree checklist')."
+                    "schematic defect. Point kicad-cli at the pinned tables with "
+                    '`eval "$(python3 scripts/ci/init_kicad_libraries.py --shell)"` in this '
+                    "shell, then re-run this check (see README 'Fresh worktree checklist')."
                 ),
             )
         return SubCheckResult(status="FAILED", detail=detail + " (strict)")
