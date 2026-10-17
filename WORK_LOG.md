@@ -5,6 +5,29 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 ---
 ### 2026-10-17
 
+- **PR #6920**: test: guard MCP schemas against unread params and reject unknown arguments
+- **PR #6919**: fix: stop MCP export/validation tools reporting success on empty results
+- **PR #6916**: docs: classify Konnect v0.8-v0.13 ideas and refresh its registry entry
+- **PR #6909**: test: stub real routing in guide-route probe deadline test
+- **PR #6906**: docs: refresh README What's New, --format json claim and docs index
+- **PR #6904**: fix: build kct check --only/--skip help from CHECK_CATEGORIES
+- **PR #6903**: fix: accept run-DRC options on kct drc and deprecate kicad-drc --rules/--compare
+- **PR #6902**: test: assert every standalone export flag is forwarded by kct export
+- **PR #6890**: refactor(router): structured PairOutcome records in router/pairplan (#6837 slice 2c-ii)
+- **PR #6888**: fix(router): keep the trace optimizer from joining Kelvin branches (#5398)
+- **PR #6884**: feat(router): per-net-class allow_plane_layers opt-in honoured by every layer path
+- **Issue #6914** (closed): test: CI guard that MCP tool schemas advertise only parameters that are used
+- **Issue #6913** (closed): chore: audit kct mcp and kct check responses against a truth contract
+- **Issue #6911** (closed): Re-explore Konnect v0.8–v0.13 (mixelpixx): placement scoring, visual baselines, Specctra round-trip, truth contract
+- **Issue #6908** (closed): test flake: test_guide_route_probe_receives_deadline timeout and test_escape_strategy_without_install_would_intrude on CI Test job
+- **Issue #6898** (closed): cli: kct drc lacks the standalone kicad-drc's --compare / --rules
+- **Issue #6897** (closed): docs: stale README What's New (v0.21.1), unverified --format json claim, drc/ vs validate/ disagreement, 8 unindexed docs
+- **Issue #6896** (closed): cli: kct check --only help lists 4 categories but the code accepts ~39
+- **Issue #6895** (closed): test: assert every kct export flag reaches export_cmd (pass-through, not just parser parity; follow-up #6881)
+- **Issue #6876** (closed): router: per-net-class allow_plane_layers opt-in honoured by grid, C++, lattice and coupled paths (board 03 USB_D on In2.Cu)
+- **Issue #5943** (closed): Benchmark TraceMaker and fastroute vs kct route on the demo fleet under one kicad-cli referee
+- **Issue #5942** (closed): Benchmark kct route on PCBWorld D3-A/B (Clean Pass vs Freerouting 0.80/0.78, KiCadRoutingTools 0.74/0.20)
+- **Issue #5398** (closed): [Epic #4410] Complete stranded Kelvin sense nets through generic routing and batch rescue
 - **PR #6892**: chore: restore the board renders .gitignore rule dropped in #6879
 - **PR #6886**: fix(router): find S-expression tokens outside quoted strings (#6873)
 - **Issue #6873** (closed): router: (footprint/(module/(zone inside quoted strings crash load_pcb_for_routing or skip zone removal (follow-up #6740)
@@ -16,6 +39,13 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-16
 
+- **Issue #6694** (closed): kct route: no routing-plan sidecar for the board saved on the deadline/partial-save exit
+- **Issue #6471** (closed): ci: assert-no-bot-external red daily since 10-09 -- Renovate's Dependency Dashboard (#6275) auto-labeled 'external'
+- **Issue #6333** (closed): [Parent #5942] PCBWorld Phase 3: run D3-B and publish the final comparative verdict
+- **Issue #6332** (closed): [Parent #5942] PCBWorld Phase 2: run and publish reproducible D3-A CP@1/CP@5 baseline
+- **Issue #6275** (closed): Dependency Dashboard
+- **Issue #5877** (closed): kicad-cli hangs forever on a macOS host (TCC-blocked ~/Documents scan in LoadGlobalTables), silently disabling the second DRC engine
+- **Issue #5650** (closed): Champion auto-merge fully blocked: GitHub App missing Administration permission for branch-protection GraphQL query (#8248 guard)
 - **PR #6887**: docs(research): record the measured chorus-test plan fleet-table row (#6694)
 - **PR #6882**: fix(cli): accept --stackup-id and other missing flags in unified kct export parser
 - **Issue #6881** (closed): kct export rejects --stackup-id: unified parser omits a flag export_cmd.py defines and docs document
