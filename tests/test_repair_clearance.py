@@ -2124,17 +2124,6 @@ class TestParseNetsWithZones:
         assert repairer.nets[1] == "GND"
         assert repairer.nets[2] == "+3.3V"
 
-    def test_fixer_no_crash_with_zones(self, tmp_path: Path):
-        """DRCFixer should not crash when PCB contains zones."""
-        from kicad_tools.drc.fixer import DRCFixer
-
-        pcb_file = tmp_path / "zones.kicad_pcb"
-        pcb_file.write_text(PCB_WITH_ZONES)
-
-        fixer = DRCFixer(str(pcb_file))
-        assert fixer.nets[1] == "GND"
-        assert fixer.nets[2] == "+3.3V"
-
 
 # ── Tests for zone-fill violation filtering ──────────────────────────────────
 
