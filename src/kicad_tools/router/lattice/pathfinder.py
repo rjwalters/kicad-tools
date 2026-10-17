@@ -4498,12 +4498,46 @@ class LatticePathfinder:
                             pair_outcomes[key2] = SegmentOutcome("deadline-exceeded")
                     break
                 if kind == 1:
+                    # Issue #6883: a class that prefers a layer none of the
+                    # pads share (opted in via ``allow_plane_layers``) gets
+                    # its gateway attempt BEFORE a planar pad-layer run
+                    # commits; a soft cost bias cannot beat a successful
+                    # planar run.  A decline falls through to the planar
+                    # attempt and the usual fallback, unchanged.
+                    gateway_first = (
+                        pair_gateways
+                        and item.key not in self.pair_gateway_skip
+                        and bool(
+                            self._preferred_layers(item.net_class) & set(self._gateway_layers(item))
+                        )
+                    )
+                    if gateway_first and not (
+                        deadline is not None and time.monotonic() >= deadline
+                    ):
+                        gres, _greason = self._route_pair_gateway(
+                            item,
+                            committed=committed,
+                            history=history,
+                            present=present,
+                            deadline=deadline,
+                            vias_used=pair_vias_used(item),
+                        )
+                        if gres is not None:
+                            pass_gateways[item.key] = gres.gateway or "gateway"
+                            pair_outcomes[item.key] = SegmentOutcome.coupled(
+                                pass_gateways[item.key]
+                            )
+                            coupled_count += 1
+                            routed_items += 1
+                            commit_pair(item, gres)
+                            continue
                     pres, preason = self._route_pair_impl(
                         item, committed=committed, history=history, present=present
                     )
                     gateway_retry = (
                         pres is None
                         and pair_gateways
+                        and not gateway_first
                         and preason in GATEWAY_RETRY_REASONS
                         and item.key not in self.pair_gateway_skip
                     )
