@@ -1955,7 +1955,11 @@ def _run_import_ses_command(args, pcb_path: Path) -> int:
     try:
         importer = SESToKiCadImporter(str(ses_path))
         importer.parse()
-        importer.merge_into(str(pcb_path), str(output) if output else None)
+        importer.merge_into(
+            str(pcb_path),
+            str(output) if output else None,
+            allow_stale=bool(getattr(args, "allow_stale", False)),
+        )
     except Exception as e:
         return fail(f"Error importing SES: {e}")
 
@@ -1982,6 +1986,7 @@ def _run_import_ses_command(args, pcb_path: Path) -> int:
             "ses_wires": len(importer.wires),
             "ses_vias": len(importer.vias),
             "skipped": skipped,
+            "revision": getattr(importer, "revision_status", "unverified"),
             "success": success,
         }
         if problems:

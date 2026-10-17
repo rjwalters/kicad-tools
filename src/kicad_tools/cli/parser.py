@@ -3149,6 +3149,11 @@ def _add_pcb_parser(subparsers) -> None:
         dest="output",
         help="Output PCB file path (default: overwrite input PCB)",
     )
+    pcb_import_ses.add_argument(
+        "--allow-stale",
+        action="store_true",
+        help="Merge even if the board changed since the DSN was exported",
+    )
     add_format_flag(pcb_import_ses)
 
 
