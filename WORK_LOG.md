@@ -3,7 +3,32 @@
 Chronological record of merged PRs and closed issues. Maintained by the Guide triage agent.
 
 ---
+### 2026-10-17
+
+- **PR #6892**: chore: restore the board renders .gitignore rule dropped in #6879
+- **PR #6886**: fix(router): find S-expression tokens outside quoted strings (#6873)
+- **Issue #6873** (closed): router: (footprint/(module/(zone inside quoted strings crash load_pcb_for_routing or skip zone removal (follow-up #6740)
+- **PR #6880**: test(router): give the sub-grid keepout tests an off-grid pitch (#6878)
+- **Issue #6878** (closed): test_escape_strategy_without_install_would_intrude fails on main: subgrid route now emits no copper (control test, #6059)
+- **PR #6877**: fix(route): report the grid pitch used, cap explicit grids, surface coarsening (#6875)
+- **Issue #6875** (closed): route: record grid pitch used, add explicit-grid cell ceiling, stop silent coarsening in route-auto/route_pcb/MCP (follow-up #6741)
+- **PR #6865**: fix(router): --matrix layer hints never overwrite an authored preferred_layers
+
 ### 2026-10-16
+
+- **PR #6887**: docs(research): record the measured chorus-test plan fleet-table row (#6694)
+- **PR #6882**: fix(cli): accept --stackup-id and other missing flags in unified kct export parser
+- **Issue #6881** (closed): kct export rejects --stackup-id: unified parser omits a flag export_cmd.py defines and docs document
+- **PR #6879**: docs: fix CLI examples that drifted from the kct parser; reconcile .gitignore with committed files
+- **PR #6872**: fix(router): make rss_trace import cleanly without the Unix-only resource module
+- **Issue #6739** (closed): kct route crashes on Windows: ModuleNotFoundError: No module named 'resource' (rss_trace imported unconditionally)
+- **PR #6871**: fix(route): honour an explicit --grid instead of silently coarsening it on large boards
+- **Issue #6741** (closed): kct route: explicit --grid is silently coarsened by the --max-cells budget on large boards
+- **PR #6870**: fix(router): skip quoted strings when extracting pad blocks (#6740)
+- **Issue #6740** (closed): kct route: '(pad ' inside a footprint descr string is parsed as a pad -> 'Unsupported routing geometry'
+- **PR #6868**: fix(router): diff-pair tie step honours allowed_layers and hard avoid_layers
+- **Issue #6866** (closed): router: diff-pair tie step ignores allowed_layers / plane reservation (USB_D- on In1.Cu GND plane on board 03)
+- **PR #6867**: docs: record live Board07 --differential-pairs measurement in recipe notes
 
 - **PR #6864**: fix(router): keep the better of joint and pose-centreline coupled candidates
 - **Issue #6738** (closed): ci: Board 07 End-to-End: add a dormant copper-safety (clearance/short) DRC ratchet (live once BOARD_07_CI_ENABLED returns)
