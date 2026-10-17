@@ -15,7 +15,7 @@ from kicad_tools import __version__
 # TYPE_CHECKING), so this costs ~2.5 ms on top of an already-imported
 # ``kicad_tools`` -- measured, and well under 1% of CLI startup.
 from kicad_tools.benchmark.cases import Difficulty
-from kicad_tools.cli.check_cmd import CHECK_CATEGORIES
+from kicad_tools.cli.check_categories import CHECK_CATEGORIES
 from kicad_tools.cli.copper_weight import add_check_copper_argument
 from kicad_tools.cli.export_cmd import STACKUP_ID_CHOICES, STACKUP_ID_HELP
 from kicad_tools.cli.format_options import add_format_flag
