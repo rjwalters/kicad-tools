@@ -20532,7 +20532,43 @@ class Autorouter:
             cache[1], (p for p in self.pads.values() if not p.steiner_point)
         )
 
-    def _net_routes_merged(self) -> dict[int, Route]:
+    def _preserved_fragments(self, net_ids: set[int]) -> list[Route]:
+        """Preserved-copper fragments of ``net_ids`` not already in ``self.routes``.
+
+        Issue #6968: under ``--preserve-existing`` the input board's copper
+        (board 07's 7-9 mm SDRAM escape stubs) lives in ``existing_routes``,
+        not ``self.routes``, so a tuner measuring ``self.routes`` alone saw
+        only the newly routed part of each net.  Fragments already present in
+        ``self.routes`` (by identity) are skipped so nothing is counted twice.
+
+        Only copper the writer will actually re-emit is returned, mirroring
+        ``route_cmd._finalize_routes``: a net that was freshly routed drops
+        its preserved copper (the fresh route wins) unless it is a stub net
+        (``_stub_terminals``, #4170), and the placement disposition's
+        ``preserve_copper_nets`` / neutral routes are excluded.
+        """
+        in_routes = {id(r) for r in self.routes}
+        routed_net_ids = {r.net for r in self.routes} - set(
+            getattr(self, "_stub_terminals", None) or {}
+        )
+        disposition = getattr(self, "placement_disposition", None)
+        dropped_names: set[str] = set()
+        neutral_ids: set[int] = set()
+        if disposition is not None:
+            dropped_names = set(getattr(disposition, "preserve_copper_nets", ()) or ())
+            neutral_ids = {id(r) for r in getattr(self, "placement_neutral_routes", ()) or ()}
+        return [
+            r
+            for r in (getattr(self, "existing_routes", None) or ())
+            if r.net in net_ids
+            and r.net not in routed_net_ids
+            and id(r) not in in_routes
+            and id(r) not in neutral_ids
+            and r.net_name not in dropped_names
+            and (r.segments or r.vias)
+        ]
+
+    def _net_routes_merged(self, preserved: Iterable[Route] = ()) -> dict[int, Route]:
         """One complete-net :class:`Route` per net, for the length tuners.
 
         A net can be held as several Route fragments (fixed escapes plus
@@ -20542,19 +20578,29 @@ class Autorouter:
         counts such a via once, so the merged Route measures as the whole net
         (Issue #6792).  A single-fragment net keeps its Route object, so the
         tuners can still edit it in place.
+
+        ``preserved`` (Issue #6968) adds preserved-copper fragments (from
+        :meth:`_preserved_fragments`) to their nets' merged Route, so the
+        measured length is the whole net as written.  Callers must treat
+        those fragments' segments and vias as fixed.
         """
+        preserved = list(preserved)
+        preserved_ids = {id(r) for r in preserved}
         fragments_by_net: dict[int, list[Route]] = {}
-        for route in self.routes:
+        for route in [*self.routes, *preserved]:
             fragments_by_net.setdefault(route.net, []).append(route)
+        # A preserved fragment is never handed out by identity: the tuners
+        # may edit a single-fragment Route in place, and preserved copper
+        # must stay byte-identical.
         return {
             net: fragments[0]
-            if len(fragments) == 1
+            if len(fragments) == 1 and id(fragments[0]) not in preserved_ids
             else Route(
                 net=net,
                 net_name=fragments[0].net_name,
                 segments=[s for r in fragments for s in r.segments],
                 vias=[v for r in fragments for v in r.vias],
-                is_escape=all(r.is_escape for r in fragments),
+                is_escape=all(r.is_escape or id(r) in preserved_ids for r in fragments),
             )
             for net, fragments in fragments_by_net.items()
         }
@@ -20682,8 +20728,24 @@ class Autorouter:
 
         # A net can contain separate escape and channel Route objects. The
         # tuner needs their complete geometry for lengths and foreign clearance.
-        routes_by_net = self._net_routes_merged()
+        #
+        # Issue #6968: a group member's preserved copper (``existing_routes``
+        # under --preserve-existing, e.g. board 07's input escape stubs) is
+        # part of the net's length too.  It is merged in for measurement and
+        # held FIXED: its segments are never edited and never re-published
+        # into ``self.routes`` (the writer already emits it from the input).
+        member_net_ids: set[int] = set()
+        for _grp in detected_groups:
+            member_net_ids.update(_grp.net_ids)
+            for _pair in _grp.pair_ids:
+                member_net_ids.update(_pair)
+        preserved = self._preserved_fragments(member_net_ids)
+        preserved_segment_ids = {id(s) for r in preserved for s in r.segments}
+        preserved_via_ids = {id(v) for r in preserved for v in r.vias}
+        preserved_nets = {r.net for r in preserved}
+        routes_by_net = self._net_routes_merged(preserved)
         fixed_segment_ids = {id(s) for r in self.routes if r.is_escape for s in r.segments}
+        fixed_segment_ids |= preserved_segment_ids
 
         # Update the match-group skew tracker so the post-tuning results are
         # queryable.  Use the layer-stack count when available, else default
@@ -20713,7 +20775,7 @@ class Autorouter:
             )
 
         self._match_group_tracker.record_routes(
-            routes=self.routes,
+            routes=list(self._net_routes_merged(preserved).values()),
             groups=detected_groups,
             num_copper_layers=num_layers,
             board_thickness_mm=board_thickness_mm,
@@ -20932,6 +20994,9 @@ class Autorouter:
                 for net, route in changed.items():
                     escapes = [r for r in previous_routes if r.net == net and r.is_escape]
                     escape_via_ids = {id(v) for r in escapes for v in r.vias}
+                    # Issue #6968: preserved copper is fixed and stays out of
+                    # ``self.routes``; strip it like an escape fragment.
+                    escape_via_ids |= preserved_via_ids
                     replacements[net] = (
                         Route(
                             net=route.net,
@@ -20939,7 +21004,7 @@ class Autorouter:
                             segments=[s for s in route.segments if id(s) not in fixed_segment_ids],
                             vias=[v for v in route.vias if id(v) not in escape_via_ids],
                         )
-                        if escapes
+                        if escapes or net in preserved_nets
                         else route
                     )
                 published: list[Route] = []
@@ -20983,6 +21048,32 @@ class Autorouter:
                 elif _skew is not None:
                     _skew_before, _skew_after = _skew
                     print(f"    skew: {_skew_before:.3f}mm -> {_skew_after:.3f}mm")
+                else:
+                    # Issue #6968: a group the tuner declined (e.g. gated off
+                    # by ``length_critical=False``) carries no per-member
+                    # lengths, so report its measured spread -- preserved
+                    # copper included -- the way ``kct check`` measures it.
+                    _spread_before = self._checker_group_spread_mm(
+                        group,
+                        before_by_net,
+                        board_thickness_mm,
+                        num_layers,
+                        length_model,
+                        blind_buried_supported=blind_buried_supported,
+                    )
+                    _spread_after = self._checker_group_spread_mm(
+                        group,
+                        routes_by_net,
+                        board_thickness_mm,
+                        num_layers,
+                        length_model,
+                        blind_buried_supported=blind_buried_supported,
+                    )
+                    if _spread_before is not None and _spread_after is not None:
+                        print(
+                            f"    skew: {_spread_before:.3f}mm -> {_spread_after:.3f}mm "
+                            f"(limit {tolerance_mm:.3f}mm)"
+                        )
                 # Issue #3440 addendum: rollbacks / budget exhaustion /
                 # missing segments must say WHY (which DRC rule the
                 # candidate meander violated, requested-vs-achieved mm)
@@ -21006,7 +21097,7 @@ class Autorouter:
         # the DRC rule) so the post-tuning skew query reflects drilled
         # length, not planar-only copper.
         self._match_group_tracker.record_routes(
-            routes=self.routes,
+            routes=list(self._net_routes_merged(preserved).values()),
             groups=detected_groups,
             num_copper_layers=num_layers,
             board_thickness_mm=board_thickness_mm,

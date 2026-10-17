@@ -287,3 +287,114 @@ class TestMissingNetClassMapWarning:
             "the --length-match-groups inactivity warning must print to "
             "sys.stderr so --quiet runs still surface it"
         )
+
+
+# =============================================================================
+# Issue #6968: the default (--auto-layers) path runs the tuner
+# =============================================================================
+
+
+def _two_net_bus_board(tmp_path, *, length_critical: bool):
+    """U1 -> U2 with D0 short and D1 long: a 2-member group with ~5mm skew."""
+    import json
+
+    from tests.test_auto_pour import _PCB_FOOTER, _PCB_HEADER
+
+    def fp(ref: str, x: float, y: float, pads: list[tuple[float, float, int, str]]) -> str:
+        out = (
+            f'  (footprint "TestLib:TestPkg" (layer "F.Cu") (at {x} {y})\n'
+            f'    (property "Reference" "{ref}" (at 0 -2) (layer "F.SilkS"))\n'
+        )
+        for i, (dx, dy, nid, name) in enumerate(pads):
+            out += (
+                f'    (pad "{i + 1}" smd roundrect (at {dx} {dy}) (size 1.0 1.0) '
+                f'(layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) '
+                f'(net {nid} "{name}"))\n'
+            )
+        return out + "  )\n"
+
+    pcb = _PCB_HEADER + '  (net 0 "")\n  (net 1 "D0")\n  (net 2 "D1")\n'
+    pcb += fp("U1", 10, 10, [(0, 0, 1, "D0"), (0, 3, 2, "D1")])
+    pcb += fp("U2", 35, 10, [(0, 0, 1, "D0"), (0, 15, 2, "D1")])
+    pcb += _PCB_FOOTER
+    pcb_path = tmp_path / "bus.kicad_pcb"
+    pcb_path.write_text(pcb)
+    nc = {
+        "name": "BUS",
+        "length_critical": length_critical,
+        "length_match_group": "BUS",
+        "length_match_tolerance_mm": 0.5,
+    }
+    ncm_path = tmp_path / "ncm.json"
+    ncm_path.write_text(json.dumps({"D0": nc, "D1": nc}))
+    return pcb_path, ncm_path
+
+
+def _route(tmp_path, pcb_path, ncm_path, *extra: str) -> int:
+    from kicad_tools.cli.route_cmd import main as route_main
+
+    return route_main(
+        [
+            str(pcb_path),
+            "-o",
+            str(tmp_path / "out.kicad_pcb"),
+            "--length-match-groups",
+            "--net-class-map",
+            str(ncm_path),
+            "--skip-drc",
+            *extra,
+        ]
+    )
+
+
+class TestDefaultPathTunes:
+    """``kct route --length-match-groups`` with no layer flags goes through
+    ``route_with_layer_escalation``; before #6968 that path never called the
+    tuner and printed no ``Length-Match Groups`` section."""
+
+    def test_default_auto_layers_path_runs_tuner(self, tmp_path, capsys):
+        pcb_path, ncm_path = _two_net_bus_board(tmp_path, length_critical=True)
+        # Drive the real default path (no --no-auto-layers).
+        assert _route(tmp_path, pcb_path, ncm_path) == 0
+        out = capsys.readouterr().out
+        assert "LAYER ESCALATION SUMMARY" in out, "default path must be layer escalation"
+        assert out.count("--- Length-Match Groups") == 1
+        assert "BUS: 2 members" in out
+        assert "1 tuned" in out
+
+    def test_single_attempt_path_tunes_exactly_once(self, tmp_path, capsys):
+        pcb_path, ncm_path = _two_net_bus_board(tmp_path, length_critical=True)
+        assert _route(tmp_path, pcb_path, ncm_path, "--no-auto-layers") == 0
+        out = capsys.readouterr().out
+        assert out.count("--- Length-Match Groups") == 1
+        assert "1 tuned" in out
+
+
+class TestAllGroupsGatedOffWarning:
+    """Groups declared but every class ``length_critical=False``: warn on
+    stderr (like #3440), do not engage -- the flag does not override an
+    explicit per-class ``length_critical=False``."""
+
+    def test_warns_on_stderr_even_when_quiet(self, tmp_path, capsys):
+        pcb_path, ncm_path = _two_net_bus_board(tmp_path, length_critical=False)
+        assert _route(tmp_path, pcb_path, ncm_path, "--quiet") == 0
+        err = capsys.readouterr().err
+        assert "--length-match-groups is INACTIVE" in err
+        assert "length_critical=false" in err
+        assert "BUS" in err
+
+    def test_reports_measured_skew_but_does_not_tune(self, tmp_path, capsys):
+        pcb_path, ncm_path = _two_net_bus_board(tmp_path, length_critical=False)
+        assert _route(tmp_path, pcb_path, ncm_path) == 0
+        out = capsys.readouterr().out
+        assert "BUS: 2 members (0 tuned" in out
+        line = next(ln for ln in out.splitlines() if ln.strip().startswith("skew:"))
+        before, after = (
+            float(v.strip().rstrip("m")) for v in line.split(":")[1].split("(")[0].split("->")
+        )
+        assert before == after > 0.5
+
+    def test_no_warning_when_a_group_is_length_critical(self, tmp_path, capsys):
+        pcb_path, ncm_path = _two_net_bus_board(tmp_path, length_critical=True)
+        assert _route(tmp_path, pcb_path, ncm_path, "--quiet") == 0
+        assert "INACTIVE" not in capsys.readouterr().err
