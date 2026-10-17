@@ -699,28 +699,12 @@ def _format_pad_ref(pad: Pad) -> str:
 def _aggregate_pair_outcome(segment_outcomes: list[str]) -> str:
     """One lattice diff-pair outcome from its chain segments (issue #6378).
 
-    * a single segment (every pair without an interior part): its outcome,
-      unchanged;
-    * every segment ``coupled``: ``"coupled"``;
-    * every segment in the #6373 fallback: ``"uncoupled-fallback:<reason>"``
-      (the first segment's reason);
-    * some segments coupled: ``"partially-coupled:<k>/<n>"``;
-    * otherwise (no segment coupled, not all in fallback): the first
-      non-coupled segment's outcome.
+    Kept at this path for its callers and tests; the rule itself is
+    :func:`kicad_tools.router.pairplan.outcome.aggregate_label` (issue #6837).
     """
-    if not segment_outcomes:
-        return "not-attempted"
-    if len(segment_outcomes) == 1:
-        return segment_outcomes[0]
-    n = len(segment_outcomes)
-    k = sum(1 for o in segment_outcomes if o == "coupled")
-    if k == n:
-        return "coupled"
-    if k > 0:
-        return f"partially-coupled:{k}/{n}"
-    if all(o.startswith("uncoupled-fallback:") for o in segment_outcomes):
-        return segment_outcomes[0]
-    return next(o for o in segment_outcomes if not o.startswith("uncoupled-fallback:"))
+    from .pairplan.outcome import aggregate_label
+
+    return aggregate_label(segment_outcomes)
 
 
 @functools.cache
@@ -1924,6 +1908,9 @@ class Autorouter:
         # Issue #4270: per-diff-pair coupled-routing outcomes for the lattice
         # engine ("coupled" or a decline reason), keyed by pair base name.
         self._lattice_pair_outcomes: dict[str, str] = {}
+        # Issue #6837: the structured record behind each of those strings
+        # (``PairOutcome.label`` is the string), rebuilt with them.
+        self._lattice_pair_outcome_records: dict[str, Any] = {}
         # Issue #6378: a pair that passes through an interior part (board 03
         # USB_D through the ESD part U2) is routed as a chain -- one coupled
         # connection per segment plus single-ended P/N hops inside the part.
@@ -5409,25 +5396,33 @@ class Autorouter:
         # Honest per-pair reporting (issue #4270 acceptance): engaged /
         # coupled / declined-with-reason, mirroring failure_reasons.
         if coupled or self._lattice_pair_outcomes:
+            from .pairplan.outcome import PairOutcome, SegmentOutcome, segment_record
+
             outcomes = getattr(pf, "pair_outcomes", {})
             # Issue #6378: a chained pair has several segments sharing one
             # ``pair_name``; aggregate them instead of letting the last
             # segment overwrite the others.
-            seg_outcomes: dict[str, list[tuple[str, str]]] = {}
+            seg_outcomes: dict[str, list[tuple[str, SegmentOutcome]]] = {}
             for pc in coupled:
                 label = f"{pc.pad_p_a.ref}.{pc.pad_p_a.pin}->{pc.pad_p_b.ref}.{pc.pad_p_b.pin}"
                 seg_outcomes.setdefault(pc.pair_name, []).append(
-                    (label, outcomes.get(pc.key, "not-attempted"))
+                    (label, segment_record(outcomes, pc.key))
                 )
+            # Issue #6837: the structured record of every pair; the printed
+            # strings below are derived from it (``PairOutcome.label``).
+            records: dict[str, PairOutcome] = {
+                name: PairOutcome(name, pre_chain=outcome)
+                for name, outcome in self._lattice_pair_outcomes.items()
+            }
             self._lattice_pair_segment_outcomes = []
             for name, segs in seg_outcomes.items():
-                self._lattice_pair_outcomes[name] = _aggregate_pair_outcome(
-                    [o for _label, o in segs]
-                )
+                records[name] = PairOutcome(name, tuple(segs))
+                self._lattice_pair_outcomes[name] = records[name].label
                 if len(segs) > 1:
                     self._lattice_pair_segment_outcomes.extend(
-                        (name, label, o) for label, o in segs
+                        (name, label, o.label) for label, o in segs
                     )
+            self._lattice_pair_outcome_records = records
             n_coupled = sum(1 for v in self._lattice_pair_outcomes.values() if v == "coupled")
             print(f"  Diff pairs (lattice): {n_coupled}/{len(self._lattice_pair_outcomes)} coupled")
             for name, outcome in sorted(self._lattice_pair_outcomes.items()):
