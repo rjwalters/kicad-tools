@@ -2,8 +2,8 @@
 
 `WORK_LOG.md` is an active document, kept short by moving older whole-day
 sections into dated archives with nothing lost. `loom-daemon work-docs` is the
-content-preserving move primitive. Wiring it into Guide is slice 2; WORK_PLAN
-rotation is slice 3.
+content-preserving move primitive. Wiring it into Guide is slice 2; `--plan`
+(marker-driven WORK_PLAN archival, slice 3) is described under "WORK_PLAN".
 
 ## Layout
 
@@ -27,14 +27,16 @@ In the real file each entry is a markdown link (`[YYYY-MM]` text, target
 `work_log/WORK_LOG_YYYY-MM.md`); the example is plain text because the install
 link checker resolves link syntax even inside fences.
 
-**WORK_PLAN (implemented in slice 3)** follows the same shape: `work_plan/WORK_PLAN_YYYY-MM.md`
-and a `## Archives` index in `WORK_PLAN.md`.
+`WORK_PLAN.md` follows the same shape (`work_plan/WORK_PLAN_YYYY-MM.md` plus a
+`## Archives` index); its rules are under "WORK_PLAN" below.
 
 ## Verbs
 
 ```bash
 loom-daemon work-docs archive [--root <dir>] [--older-than-days N] [--dry-run]
 loom-daemon work-docs check   [--root <dir>]
+loom-daemon work-docs archive --plan [--root <dir>] [--dry-run]
+loom-daemon work-docs check   --plan [--root <dir>]
 ```
 
 `archive` moves every `### YYYY-MM-DD` section whose date is strictly older
@@ -86,9 +88,43 @@ Archives are plain Markdown. To undo a rotation, concatenate the archives'
 sections back into `WORK_LOG.md` in date order (newest first) below the
 preamble and drop the `## Archives` index.
 
+## WORK_PLAN (`--plan`, #12635)
+
+`WORK_PLAN.md` has no dated sections, so there is **no date logic**: an old
+date alone never moves anything. A section moves only when it is explicitly
+marked completed or superseded, by putting this marker on its own line directly
+above its heading:
+
+```markdown
+<!-- loom:plan-archive -->
+## Phase 1 (done)
+```
+
+- The section runs from the marker to the next heading of the same or higher
+  level (or to the generated region, whichever comes first), and moves
+  byte-for-byte, marker line included, into `work_plan/WORK_PLAN_YYYY-MM.md`
+  for the month of the run. The `## Archives` index in `WORK_PLAN.md` is
+  regenerated in place (newest first), or created where the first moved
+  section was.
+- **Never moved**: everything unmarked, whatever its age or whether it holds
+  open `- [ ]` items; the `<!-- guide:plan-body:start -->` ..
+  `<!-- guide:plan-body:end -->` generated region (Guide overwrites it, so it
+  is not history); the `## Archives` index (marking it is an error).
+- A marker inside the generated region or a fenced code block, or one not
+  directly above a heading, is ignored (the last case with a warning).
+- A marked section that still contains an open `- [ ]` item moves anyway,
+  because a human marked it, with a warning in the report.
+- Before writing, the move verifies the generated region is byte-identical and
+  that every line outside the index is either still active or inside a moved
+  section. An archive that already holds an identical section is a conflict
+  (nothing written). With no marked sections the run is a byte-identical
+  no-op; a rerun after a move is one too.
+- `check --plan` verifies the generated-region markers are balanced, every
+  index link resolves, and every archive consists only of marker-introduced
+  sections (no unmarked section ever left the plan).
+
 ## Limitations
 
-- Only `WORK_LOG.md`-shaped files are handled here; WORK_PLAN is slice 3.
 - A final section lacking a trailing newline gains one when something follows
   it in an archive (the only non-byte-identical case; line counts are unchanged).
 - Pre-existing duplicate entries make `archive` refuse until they are resolved.

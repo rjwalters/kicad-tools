@@ -1689,6 +1689,8 @@ The generated region of `WORK_PLAN.md` is delimited by
 between those markers is machine-generated and is overwritten wholesale; nothing
 else in the file is touched.**
 
+The generated region is never archived (`defaults/docs/work-docs-archive.md`, "WORK_PLAN").
+
 **#5930, DO NOT put a hand-written narrative section outside the markers.**
 The "Operator Attention: Merge-Risk-Hold Pileup" call-out used to live above
 the markers as hand-written prose, updated by *appending* a fresh

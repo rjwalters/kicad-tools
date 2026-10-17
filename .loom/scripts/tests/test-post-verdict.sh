@@ -36,20 +36,6 @@ GUARD="$SCRIPTS_DIR/verdict-staleness-guard.sh"
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/assert.sh"
 
 
-assert_not_contains() {
-  local haystack="$1" needle="$2" msg="$3"
-  TESTS_RUN=$((TESTS_RUN + 1))
-  if [[ "$haystack" != *"$needle"* ]]; then
-    TESTS_PASSED=$((TESTS_PASSED + 1))
-    echo -e "  ${GREEN}PASS${NC}: $msg"
-  else
-    TESTS_FAILED=$((TESTS_FAILED + 1))
-    echo -e "  ${RED}FAIL${NC}: $msg"
-    echo "    Unexpected substring: '$needle'"
-    echo "    In: '$haystack'"
-  fi
-}
-
 
 if [[ ! -x "$POST_VERDICT" ]]; then
   echo -e "${RED}FATAL${NC}: $POST_VERDICT not found or not executable" >&2

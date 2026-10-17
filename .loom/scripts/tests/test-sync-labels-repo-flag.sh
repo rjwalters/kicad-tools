@@ -101,33 +101,6 @@ _byte_len() {
 # count makes `printf | grep` throw spurious "no match" results under that
 # pressure, while this bash-builtin form never does, in the same loop, on the
 # same inputs.
-assert_contains() {
-    local haystack="$1" needle="$2" msg="$3"
-    TESTS_RUN=$((TESTS_RUN + 1))
-    if [[ "$haystack" == *"$needle"* ]]; then
-        TESTS_PASSED=$((TESTS_PASSED + 1))
-        echo -e "  ${GREEN}PASS${NC}: $msg"
-    else
-        TESTS_FAILED=$((TESTS_FAILED + 1))
-        echo -e "  ${RED}FAIL${NC}: $msg"
-        echo "    Expected substring: '$needle' ($(_byte_len "$needle") bytes)"
-        echo "    In ($(_byte_len "$haystack") bytes): '$haystack'"
-    fi
-}
-
-assert_not_contains() {
-    local haystack="$1" needle="$2" msg="$3"
-    TESTS_RUN=$((TESTS_RUN + 1))
-    if [[ "$haystack" != *"$needle"* ]]; then
-        TESTS_PASSED=$((TESTS_PASSED + 1))
-        echo -e "  ${GREEN}PASS${NC}: $msg"
-    else
-        TESTS_FAILED=$((TESTS_FAILED + 1))
-        echo -e "  ${RED}FAIL${NC}: $msg"
-        echo "    Unexpected substring: '$needle' ($(_byte_len "$needle") bytes)"
-        echo "    In ($(_byte_len "$haystack") bytes): '$haystack'"
-    fi
-}
 
 if [[ ! -x "$SLS" ]]; then
     echo -e "${RED}FATAL${NC}: $SLS not found or not executable" >&2

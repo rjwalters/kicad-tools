@@ -59,34 +59,6 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/assert.sh"
 YELLOW=''
 
 
-assert_contains() {
-    local haystack="$1" needle="$2" msg="$3"
-    TESTS_RUN=$((TESTS_RUN + 1))
-    if grep -qF -- "$needle" <<<"$haystack"; then
-        TESTS_PASSED=$((TESTS_PASSED + 1))
-        echo -e "  ${GREEN}PASS${NC}: $msg"
-    else
-        TESTS_FAILED=$((TESTS_FAILED + 1))
-        echo -e "  ${RED}FAIL${NC}: $msg"
-        echo "    Expected substring: '$needle'"
-        echo "    In: '$haystack'"
-    fi
-}
-
-assert_not_contains() {
-    local haystack="$1" needle="$2" msg="$3"
-    TESTS_RUN=$((TESTS_RUN + 1))
-    if grep -qF -- "$needle" <<<"$haystack"; then
-        TESTS_FAILED=$((TESTS_FAILED + 1))
-        echo -e "  ${RED}FAIL${NC}: $msg"
-        echo "    Unexpected substring: '$needle'"
-        echo "    In: '$haystack'"
-    else
-        TESTS_PASSED=$((TESTS_PASSED + 1))
-        echo -e "  ${GREEN}PASS${NC}: $msg"
-    fi
-}
-
 # --- Running a function IN THIS SHELL while capturing its output ---
 #
 # A command substitution is a subshell, so `out="$(fn)"` discards exactly the
