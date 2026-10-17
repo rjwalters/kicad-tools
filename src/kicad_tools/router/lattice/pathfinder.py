@@ -3064,6 +3064,29 @@ class LatticePathfinder:
         cache[ref] = box
         return box
 
+    def _preferred_gateway_layers(self, pc: CoupledConnection) -> list[int]:
+        """Gateway layers a pair's class PREFERS and its pads cannot reach planar.
+
+        Issue #6824: the planar attempt only searches the layers all four
+        endpoint pads share, so a class whose ``preferred_layers`` name a
+        different layer (board 03's USB_D on In2.Cu under SMD pads) is never
+        offered that layer unless the planar attempt declines.  Empty when the
+        class declares no preference, or when a preferred layer is already
+        planar-reachable (the single-net surcharge then steers the search).
+        """
+        preferred = self._preferred_layers(pc.net_class)
+        if not preferred:
+            return []
+        planar = set.intersection(
+            *(
+                set(self._pad_layer_indices(p))
+                for p in (pc.pad_p_a, pc.pad_n_a, pc.pad_p_b, pc.pad_n_b)
+            )
+        )
+        if preferred & planar:
+            return []
+        return [layer for layer in self._gateway_layers(pc) if layer in preferred]
+
     def _gateway_layers(self, pc: CoupledConnection) -> list[int]:
         """Candidate gateway layers of a segment, in index order.
 
@@ -3103,6 +3126,7 @@ class LatticePathfinder:
         present: float,
         deadline: float | None = None,
         vias_used: int = 0,
+        only_layers: list[int] | None = None,
     ) -> tuple[_PairResult | None, str]:
         """Couple a declined segment on another layer through fan vias (#6444).
 
@@ -3152,6 +3176,8 @@ class LatticePathfinder:
             reqs = pad_class_requirements(self)
 
         layers = self._gateway_layers(pc)
+        if only_layers is not None:
+            layers = [layer for layer in layers if layer in only_layers]
         if not layers:
             self.pair_gateway_log[pc.key] = "gateway: no other routable layer"
             return None, "pair-gateway-no-layer"
@@ -4498,6 +4524,36 @@ class LatticePathfinder:
                             pair_outcomes[key2] = SegmentOutcome("deadline-exceeded")
                     break
                 if kind == 1:
+                    # Issue #6824: a pair whose class prefers a layer its pads
+                    # cannot reach planar tries the gateway on that layer
+                    # BEFORE the planar attempt, which would otherwise
+                    # succeed on the pad layer and never consult the
+                    # preference.  A decline falls through to the planar
+                    # attempt unchanged; classes with no preference skip this.
+                    pref_layers = (
+                        self._preferred_gateway_layers(item)
+                        if pair_gateways and item.key not in self.pair_gateway_skip
+                        else []
+                    )
+                    if pref_layers and not (deadline is not None and time.monotonic() >= deadline):
+                        pgres, _pgreason = self._route_pair_gateway(
+                            item,
+                            committed=committed,
+                            history=history,
+                            present=present,
+                            deadline=deadline,
+                            vias_used=pair_vias_used(item),
+                            only_layers=pref_layers,
+                        )
+                        if pgres is not None:
+                            pass_gateways[item.key] = pgres.gateway or "gateway"
+                            pair_outcomes[item.key] = SegmentOutcome.coupled(
+                                pass_gateways[item.key]
+                            )
+                            coupled_count += 1
+                            routed_items += 1
+                            commit_pair(item, pgres)
+                            continue
                     pres, preason = self._route_pair_impl(
                         item, committed=committed, history=history, present=present
                     )
