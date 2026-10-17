@@ -656,7 +656,7 @@ class TestPcbExchangeEmission:
             def parse(self):
                 return None
 
-            def merge_into(self, pcb, output=None):
+            def merge_into(self, pcb, output=None, allow_stale=False):
                 Path(output or pcb).write_text("stub")
 
         with patch("kicad_tools.export.ses.SESToKiCadImporter", _StubImporter):
