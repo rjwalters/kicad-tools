@@ -382,14 +382,6 @@ class Router:
             ),
         )
 
-        # Pre-compute neighbor arrays for batch cost computation (Issue #963)
-        # Store offsets and cost multipliers as NumPy arrays for vectorized operations
-        self._neighbor_dx = np.array([dx for dx, _, _, _ in self.neighbors_2d], dtype=np.int32)
-        self._neighbor_dy = np.array([dy for _, dy, _, _ in self.neighbors_2d], dtype=np.int32)
-        self._neighbor_cost_mult = np.array(
-            [cost_mult for _, _, _, cost_mult in self.neighbors_2d], dtype=np.float64
-        )
-
         # Pre-compute via checking offsets for vectorized blocking check (Issue #966)
         # Issue #3234: Filter to the Euclidean disc (``dx*dx + dy*dy <= r*r``)
         # rather than the full Chebyshev square.  Sibling to PR #3232 (#3229)
@@ -440,7 +432,6 @@ class Router:
         # Key: (gx, gy, net), Value: True if valid, False if blocked
         # Cache is cleared when routes are modified (invalidates blocking state)
         self._via_cache: dict[tuple[int, int, int, int], bool] = {}
-        self._via_cache_enabled: bool = True
 
         # Issue #5617: memo for the route-halo via probe that opens
         # ``_is_via_blocked`` (``_via_halo_clear([], layer, gx, gy, net,
@@ -3720,9 +3711,8 @@ class Router:
         Issue #3438: in relief-probe mode, foreign usage-0 non-obstacle
         cells (passable only in relief mode) charge an additional
         ``_RELIEF_CONFLICT_PENALTY`` so the probe is a min-conflict
-        search.  Note: ``_batch_negotiated_costs`` does NOT apply the
-        relief penalty -- the relief probe always runs through the
-        scalar ``route()`` path, which uses this method.
+        search.  The relief probe always runs through the scalar
+        ``route()`` path, which uses this method.
         """
         cost = self.grid.get_negotiated_cost(gx, gy, layer, present_factor, net=net)
         if self.relief_mode and net is not None:
@@ -3960,7 +3950,7 @@ class Router:
         # Issue #1692: Include radius in cache key so different net classes
         # don't collide in the cache.
         effective_radius = radius if radius is not None else self._via_half_cells
-        if self._via_cache_enabled and not allow_sharing:
+        if not allow_sharing:
             cache_key = (gx, gy, net, effective_radius)
             if cache_key in self._via_cache:
                 return self._via_cache[cache_key]
@@ -3991,7 +3981,7 @@ class Router:
                 continue
             if self._is_via_blocked(gx, gy, check_layer, net, allow_sharing, radius=radius):
                 # Cache the negative result
-                if self._via_cache_enabled and not allow_sharing:
+                if not allow_sharing:
                     self._via_cache[(gx, gy, net, effective_radius)] = False
                 return False
 
@@ -4028,12 +4018,12 @@ class Router:
                 other_net_tracks=self._foreign_track_adapters,
                 other_net_pads=other_pads,
             ):
-                if self._via_cache_enabled and not allow_sharing:
+                if not allow_sharing:
                     self._via_cache[(gx, gy, net, effective_radius)] = False
                 return False
 
         # Via is valid on all layers - cache positive result
-        if self._via_cache_enabled and not allow_sharing:
+        if not allow_sharing:
             self._via_cache[(gx, gy, net, effective_radius)] = True
         return True
 
@@ -4092,16 +4082,6 @@ class Router:
         self._pad_drill_site_cache.clear()
         self._pad_drill_cache_token = None
         self.grid.refresh_component_holes()
-
-    def set_via_cache_enabled(self, enabled: bool) -> None:
-        """Enable or disable via caching.
-
-        Args:
-            enabled: True to enable caching, False to disable.
-        """
-        self._via_cache_enabled = enabled
-        if not enabled:
-            self._via_cache.clear()
 
     def _get_congestion_cost(self, gx: int, gy: int, layer: int) -> float:
         """Get additional cost based on congestion at this location."""
@@ -4198,67 +4178,6 @@ class Router:
             0.0 if (dx == dx0 and dy == dy0) else cost_turn
             for dx, dy, _dlayer, _cost_mult in self.neighbors_2d
         ]
-
-    def _batch_negotiated_costs(
-        self,
-        current_x: int,
-        current_y: int,
-        layer: int,
-        present_cost_factor: float,
-        skip_mask: np.ndarray,
-    ) -> np.ndarray:
-        """Batch compute negotiated costs for all 2D neighbors using vectorized NumPy.
-
-        Issue #963: Pre-compute negotiated costs for all neighbors in a single
-        batch operation.
-
-        Args:
-            current_x: Current grid x coordinate
-            current_y: Current grid y coordinate
-            layer: Current layer index
-            present_cost_factor: Multiplier for current sharing penalty
-            skip_mask: Boolean array indicating neighbors to skip (e.g., near pads)
-
-        Returns:
-            Array of negotiated costs indexed by neighbor offset index.
-        """
-        # Compute neighbor coordinates
-        nx_arr = current_x + self._neighbor_dx
-        ny_arr = current_y + self._neighbor_dy
-
-        # Bounds mask combined with skip mask
-        valid = (
-            (nx_arr >= 0)
-            & (nx_arr < self.grid.cols)
-            & (ny_arr >= 0)
-            & (ny_arr < self.grid.rows)
-            & ~skip_mask
-        )
-
-        # Initialize costs array
-        costs = np.zeros(len(self.neighbors_2d), dtype=np.float64)
-
-        # Get valid indices
-        valid_indices = np.where(valid)[0]
-        if len(valid_indices) == 0:
-            return costs
-
-        # Batch lookup usage counts and history costs using fancy indexing
-        usage_counts = self.grid._usage_count[layer, ny_arr[valid_indices], nx_arr[valid_indices]]
-        history_costs = self.grid._history_cost[layer, ny_arr[valid_indices], nx_arr[valid_indices]]
-
-        # Compute present cost + history cost
-        # Issue #2333: When EMA smoothing is active, use the smoothed
-        # per-cell present cost instead of the raw usage * factor.
-        if self.grid._present_cost_ema is not None:
-            present_costs = self.grid._present_cost_ema[
-                layer, ny_arr[valid_indices], nx_arr[valid_indices]
-            ]
-        else:
-            present_costs = present_cost_factor * usage_counts
-        costs[valid_indices] = present_costs + history_costs
-
-        return costs
 
     def _is_zone_cell(self, gx: int, gy: int, layer: int) -> bool:
         """Check if a cell is part of a zone (copper pour)."""
