@@ -227,6 +227,17 @@ than its own length mode on every group by the length yardstick, which is the
 only yardstick we have; its via-barrel accounting remains the feature we do
 not obviously have, and is still untested directly.
 
+**Update (#5798):** the confound is now measured. The 07m kct row never
+reached the matcher, for three separate reasons:
+
+- the default layer-escalation path never calls it;
+- board 07 declares `length_critical: false`;
+- preserved stub copper is invisible to it.
+
+Handed kct's own *finished* routes, the matcher still closes no group. It is
+limited by meander DRC room and by an all-or-nothing rollback. See "Length
+matching, deconfounded" under "Reading the table honestly".
+
 ### 5. BGA/QFN fanout
 
 **KRT.** The `py_router/bga_fanout/` package handles fanout.
@@ -719,10 +730,114 @@ What this supports, and what it does not:
   16.46 / 44.34 / 17.02), 4 shared-referee errors dearer and 5 s slower. We
   have no delay-domain referee, so this row measures time matching by the
   length yardstick and nothing more.
-- **Our matcher is not the weak part.** Board 07's committed artifact reaches
-  0.63–2.92 mm on all four groups at 0 DRC errors, using
-  `match_group_tuning`/`SerpentineGenerator` in that board's tuned pipeline.
-  What fails on 07m is `kct route`'s default reaching a routed board to tune.
+- ~~**Our matcher is not the weak part.**~~ *Withdrawn by #5798, below.*
+  Board 07's committed artifact does reach 0.63–2.92 mm at 0 DRC errors, but
+  it is reviewed routing (`real_design/reviewed-routing/README.md`: "not a
+  promise of fresh autorouter equivalence"). Nothing ties its matched lengths
+  to `match_group_tuning`, so it cannot vouch for the matcher.
+
+**Length matching, deconfounded (Issue #5798).** The 07m numbers above were
+re-measured on 2026-10-17, against `main` at `9adf2b76b`, on a local 8-core
+host with the C++ backend built. KRT was not re-run: there is no KRT checkout
+on that host, and nothing on KRT's side changed. The answer to "how much of
+the gap is the 20-minute cap?" is **none of it, because the 07m kct row never
+measured a matcher.**
+
+1. **The `kct route --length-match-groups` row tunes nothing on board 07.**
+   Three independent causes, each enough on its own:
+   - The default `kct route` path is layer escalation (`--auto-layers`, on by
+     default). `route_with_layer_escalation` never calls
+     `apply_match_group_tuning`; the only `kct route` call site is the
+     single-attempt path in `_run_main_impl`. Both 07m logs (pass 2's and this
+     re-run's) contain no `Length-Match Groups` section at all.
+   - The explicit flag gates on the class's `length_critical`. Board 07's
+     `net_class_map.json` sets `length_critical: false` on all 38 group nets,
+     so every member would come back `not_length_critical`. No warning says
+     so.
+   - The route-time tuner reads `router.routes` only. The input's 7–9 mm
+     escape stubs on every SDRAM net are preserved copper in
+     `router.existing_routes`, which the tuner cannot see.
+
+   So the pass-2 difference between 07a and 07m (spreads, and 127 → 123
+   connections) is not a matching effect. 07m also passes `--net-class-map`
+   and 07a does not, which changes the routing itself. The rest is run-to-run
+   variance under a cap.
+2. **The cap no longer binds, and the input finishes no group member.** Every
+   group member in `output/matchgroup_test.kicad_pcb` is a 1-of-2-pads stub,
+   with 0/38 finished. Re-run uncapped by the same harness:
+
+   | Run | Nets | Connections | Runtime s | Shared-referee errors |
+   |---|---|---|---|---|
+   | 07a kct (pass 2) | 21/55 | 127/161 | 1200 (TIMEOUT) | — |
+   | 07m kct (pass 2) | 17/55 | 123/161 | 1200 (TIMEOUT) | — |
+   | 07a kct (re-run) | 52/55 | 158/161 | 528.89 | 16 (clearance 15, shorting 1) |
+   | 07m kct (re-run) | 54/55 | 160/161 | 386.58 | 0 |
+
+   The 07m re-run exits 3. The cause is the kept-input-copper clearance check:
+   the board's own 0.175 mm class flags 14 gaps in the preserved input copper.
+   Matching did not cause it.
+
+   Per-group 2-D spread in mm. Each cell is all members with copper / finished
+   members only, with the finished count (`measure_group_spread`'s new
+   `spread_complete_mm` field):
+
+   | Run | SDRAM_BYTE0 | SDRAM_BYTE1 | SDRAM_ADDRESS | SDRAM_COMMAND |
+   |---|---|---|---|---|
+   | 07a kct (re-run) | 25.92 / 25.92 (9/9) | 20.08 / 20.08 (9/9) | 76.73 / 53.95 (11/14) | 29.3 / 29.3 (6/6) |
+   | 07m kct (re-run) | 18.33 / 18.33 (9/9) | 57.62 / 19.9 (8/9) | 50.68 / 50.68 (14/14) | 19.49 / 19.49 (6/6) |
+   | 07a ref | 0.63 / 0.63 (9/9) | 2.82 / 2.82 (9/9) | 2.92 / 2.92 (14/14) | 0.94 / 0.94 (6/6) |
+
+   Finished groups are still 18–54 mm apart, so the spread is real routing
+   mismatch, not unfinished nets.
+3. **Handed kct's finished routes, the matcher still closes no group.** These
+   runs use `kct retune-lengths`, the same `tune_match_group_v2` in its
+   `checker_limit` mode, with every loaded track adopted and the board's own
+   5.0 mm budget. Spread is the checker's via-inclusive metric, in mm: before
+   → best reached → committed.
+
+   | Input | SDRAM_BYTE0 | SDRAM_BYTE1 | SDRAM_ADDRESS | SDRAM_COMMAND |
+   |---|---|---|---|---|
+   | 07a kct output | 31.48 → 31.48 → 31.48 | 19.97 → 16.34 → 19.97 | 81.12 → 81.12 → 81.12 ¹ | 31.80 → 12.77 → 31.80 |
+   | 07m kct output | 20.21 → 8.62 → 20.21 | 61.89 → 61.89 → 61.89 ¹ | 52.44 → 52.44 → 52.44 | 20.69 → 5.86 → 20.69 |
+
+   ¹ The group still has an unfinished member, so the number is not a matching
+   result.
+
+   Two mechanisms account for every cell.
+   - **DRC room.** Candidate meanders on kct's dense copper have amplitudes of
+     about 0.12 mm. They are rejected by the tuner's own post-insertion check,
+     usually segment-vs-via, 0.13–0.198 mm against a 0.200 mm floor. On 07a
+     BYTE0, 6 of 9 members got no meander at all.
+   - **All-or-nothing rollback.** The #6675 guard rolls back every serpentine
+     in a group that is still over the limit. 07m COMMAND reached 5.86 mm with
+     no DRC rejection, and 07m BYTE0 reached 8.62 mm. Both were discarded, and
+     the committed spread is unchanged. KRT keeps partial progress, such as its
+     6.34 mm BYTE0 and 39.29 mm ADDRESS.
+
+   The best reached spreads are in KRT's range on two groups. The committed
+   ones are not.
+4. **On already finished, already matched copper the matcher works.**
+   `retune-lengths` on the committed artifact, with the budget tightened from
+   5.0 to 0.5 mm in a scratch copy of the net-class map, changes the
+   via-inclusive spread as follows:
+   - SDRAM_ADDRESS: 2.45 → 0.15 mm.
+   - SDRAM_COMMAND: 0.95 → 0.01 mm.
+   - SDRAM_BYTE0: already 0.10 mm.
+   - SDRAM_BYTE1: stays at 2.84 mm, with every meander DRC-rejected.
+
+   Both tuned boards score 0 errors and 0 unconnected under kicad-cli 10.0.6
+   `pcb drc --refill-zones` against the board's own `.kicad_pro` and
+   `.kicad_dru`. This measurement needed a fix first. The routing loader filed
+   KiCad-10 name-only copper (`(net "DQ0")`) under net 0, so `retune-lengths`
+   on this board reported every group as "not tuned (a member is unrouted)"
+   and changed nothing. That is fixed in `pcb_retune._rekey_name_only_routes`.
+
+**Verdict.** The gap survives deconfounding. It is not the routing cap. It is
+the three wiring gaps in (1), then DRC-limited meander room and the
+all-or-nothing rollback in (3). Enabling `--length-match-groups` no longer
+costs connections (160/161 vs 158/161), but only because it runs no code on
+this path. Follow-ups: #6968 (the flag's three gaps), #6969 (meander room and
+rollback policy), and #6970 (the loader's net-0 keying, for `kct route`).
 
 **Reference planes.** On board 06, kct put 22.8 mm of OUT4 on the In1.Cu GND
 plane. It warned about this, and the fix is the opt-in
@@ -806,6 +921,21 @@ reproduce command are therefore the same edit.
 Budget about **80 minutes** of wall clock for a full run, almost all of it the
 three `kct route` runs that hit the 20-minute cap (05, 07a, 07m). Narrow it
 with `--boards` while iterating; re-grade without re-routing with `--rescore`.
+Since #5798, 07a and 07m no longer hit the cap: 529 s and 387 s on an 8-core
+host.
+
+`kicad-cli` must be on `PATH`. The script calls it by bare name and the
+scoring step crashes without it. On macOS add
+`/Applications/KiCad/KiCad.app/Contents/MacOS`.
+
+The kct and ref rows alone need no KRT checkout. Add `--tools kct,ref` to the
+command above and narrow it with `--boards`. KRT never runs then, though
+`--krt-dir` is still required and any path will do. That is how the #5798
+re-run was measured.
+
+The script then prints a second table. It gives the per-group spread over all
+members and over finished members only, so a capped run's spread can no
+longer pass for a matching result (#5798).
 
 ## Recommended follow-ups
 
@@ -898,6 +1028,11 @@ board.
      mechanism — the candidate differences being KRT's trombone meander
      generator, its via-barrel-inclusive length metric (`pair_leg_metric`), and
      its choice to run matching between MST phases on multi-point nets.
+   - **Step 1 done (#5798):** the gap survives deconfounding. On kct's own
+     finished routes `tune_match_group_v2` reaches 5.86 / 8.62 mm on two groups
+     and then discards both, and the 07m flag never runs at all. Step 2 now
+     starts from the named mechanisms in "Length matching, deconfounded", not
+     from a port.
    - **Port or reimplement:** undecided, deliberately. This starts as a
      measurement task, like follow-up 3.
 

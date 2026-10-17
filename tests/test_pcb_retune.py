@@ -162,6 +162,36 @@ class TestTune:
         assert report.changed_nets == []
         assert digest(src.parent / "out.kicad_pcb") == digest(src)
 
+    def test_name_only_board_is_tuned(self, tmp_path):
+        """KiCad 10 boards reference nets by NAME on copper (Issue #5798).
+
+        The routing loader files name-only copper under net 0, which hid every
+        selected member from the tuner: board 07's committed routed artifact
+        (KiCad 10, name-only) came back ``unattainable`` with every group
+        reported "not tuned (a member is unrouted)" and zero copper changed.
+        """
+        nets = ADDR | {"OTHER": (30, 5, 40)}
+        ids = {n: i + 1 for i, n in enumerate(nets)}
+        text = board(nets).replace(ZONE.rstrip("\n") + "\n", "")
+        # KiCad 10 ``--save-board`` shape: no header net table at all.
+        text = text.replace("(version 20240108)", "(version 20260206)")
+        text = text.replace('  (net 0 "")\n', "")
+        for name, i in ids.items():
+            text = text.replace(f'  (net {i} "{name}")\n', "")
+            text = text.replace(f'(net {i} "{name}")', f'(net "{name}")')
+            text = text.replace(f"(net {i}) (uuid", f'(net "{name}") (uuid')
+        assert not any(f"(net {i}" in text for i in ids.values()), "fixture must be name-only"
+        path = tmp_path / "in.kicad_pcb"
+        path.write_text(text)
+        report = run(path)
+        (target,) = report.targets
+        assert target.before_skew_mm == pytest.approx(7.0)
+        assert target.achieved and target.after_skew_mm <= 0.5
+        assert report.changed_nets == ["A1", "A2", "A3"]
+        out = (tmp_path / "out.kicad_pcb").read_text()
+        # New copper keeps the board's own dialect: no numeric net references.
+        assert not any(f"(net {i})" in out for i in ids.values())
+
     def test_diffpair_reports_gate_and_stretch_separately(self, tmp_path):
         nets = {"USB_D+": (10, 5, 45), "USB_D-": (11, 5, 41.5)}
         path = tmp_path / "usb.kicad_pcb"
