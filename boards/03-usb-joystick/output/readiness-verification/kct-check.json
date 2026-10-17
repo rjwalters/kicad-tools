@@ -5,9 +5,9 @@
   "summary": {
     "errors": 13,
     "warnings": 0,
-    "infos": 6,
+    "infos": 10,
     "waived": 0,
-    "rules_checked": 64,
+    "rules_checked": 67,
     "rules_checked_by_rule": {
       "connectivity": 1,
       "copper_sliver": 1,
@@ -16,6 +16,7 @@
       "diffpair_clearance_intra": 2,
       "diffpair_length_skew": 2,
       "diffpair_routing_continuity": 2,
+      "diffpair_uncoupled_length": 2,
       "doc_drift_stale_pin": 1,
       "doc_drift_unresolvable_pin": 1,
       "isolated_copper": 1,
@@ -31,8 +32,8 @@
     },
     "passed": false,
     "stale_waivers": 0,
-    "coverage_checked": 31,
-    "coverage_skipped": 5,
+    "coverage_checked": 33,
+    "coverage_skipped": 6,
     "coverage_unknown": [],
     "coverage_blocking_unknown": []
   },
@@ -83,10 +84,10 @@
       "rule_id": "diffpair_length_skew",
       "type": "diffpair_length_skew",
       "severity": "info",
-      "message": "Engaged differential pair USB_D+/USB_D- length-skew 0.166 mm within tolerance 2.500 mm [protocol:USB2_FS (Renesas, Guidelines for Full-Speed USB2.0 Board Design, Table 2)]",
+      "message": "Engaged differential pair USB_D+/USB_D- length-skew 1.246 mm within tolerance 2.500 mm [protocol:USB2_FS (Renesas, Guidelines for Full-Speed USB2.0 Board Design, Table 2)]",
       "location": null,
       "layer": null,
-      "actual_value": 0.1657,
+      "actual_value": 1.2459,
       "required_value": 2.5,
       "items": [],
       "nets": [
@@ -96,7 +97,7 @@
       "status": "info",
       "waived": false,
       "key": "diffpair_length_skew||USB_D+,USB_D-|",
-      "evidence_hash": "ev2:281fad48fed2514d"
+      "evidence_hash": "ev2:fb4f7c2e3c935bea"
     },
     {
       "rule_id": "diffpair_length_skew",
@@ -121,20 +122,23 @@
       "rule_id": "diffpair_routing_continuity",
       "type": "diffpair_routing_continuity",
       "severity": "info",
-      "message": "Engaged differential pair USB_D+/USB_D- coupled 34.2% of its length (>= 25.0% required)",
+      "message": "Engaged differential pair USB_D+/USB_D- routing continuity 34.2% below threshold 70.0% (info only; see diffpair_uncoupled_length)",
       "location": null,
       "layer": null,
       "actual_value": 0.3425,
-      "required_value": 0.25,
-      "items": [],
+      "required_value": 0.7,
+      "items": [
+        "USB_D+",
+        "USB_D-"
+      ],
       "nets": [
         "USB_D+",
         "USB_D-"
       ],
       "status": "info",
       "waived": false,
-      "key": "diffpair_routing_continuity||USB_D+,USB_D-|",
-      "evidence_hash": "ev2:5f20584cda9d4e8e"
+      "key": "diffpair_routing_continuity|USB_D+,USB_D-|USB_D+,USB_D-|",
+      "evidence_hash": "ev2:f11039239c46a6f9"
     },
     {
       "rule_id": "diffpair_routing_continuity",
@@ -154,6 +158,82 @@
       "waived": false,
       "key": "diffpair_routing_continuity||USB_MCU_D+,USB_MCU_D-|",
       "evidence_hash": "ev2:663b5622fb7835dd"
+    },
+    {
+      "rule_id": "diffpair_uncoupled_length",
+      "type": "diffpair_uncoupled_length",
+      "severity": "info",
+      "message": "Differential pair USB_D+/USB_D- uncoupled length 8.130 mm (P 7.965, N 8.130) within limit 19.050 mm = 6.35 mm x 3 components [protocol:USB2_FS (TI SPRAAR7J \u00a73.3 (breakout within 0.25 in of the package); high-speed guidance, applied to full speed)]",
+      "location": null,
+      "layer": null,
+      "actual_value": 8.1302,
+      "required_value": 19.05,
+      "items": [],
+      "nets": [
+        "USB_D+",
+        "USB_D-"
+      ],
+      "status": "info",
+      "waived": false,
+      "key": "diffpair_uncoupled_length||USB_D+,USB_D-|",
+      "evidence_hash": "ev2:afac3d21da539bb9"
+    },
+    {
+      "rule_id": "diffpair_uncoupled_length",
+      "type": "diffpair_uncoupled_length",
+      "severity": "info",
+      "message": "Differential pair USB_D+/USB_D- worst per-terminal uncoupled length 1.959 mm within limit 6.350 mm [protocol:USB2_FS (TI SPRAAR7J \u00a73.3 (breakout within 0.25 in of the package); high-speed guidance, applied to full speed)] (kct-only: KiCad has no per-terminal uncoupled check)",
+      "location": null,
+      "layer": null,
+      "actual_value": 1.9592,
+      "required_value": 6.35,
+      "items": [],
+      "nets": [
+        "USB_D+",
+        "USB_D-"
+      ],
+      "status": "info",
+      "waived": false,
+      "key": "diffpair_uncoupled_length||USB_D+,USB_D-|",
+      "evidence_hash": "ev2:e2f153d44c3aaf8e"
+    },
+    {
+      "rule_id": "diffpair_uncoupled_length",
+      "type": "diffpair_uncoupled_length",
+      "severity": "info",
+      "message": "Differential pair USB_MCU_D+/USB_MCU_D- uncoupled length 0.849 mm (P 0.849, N 0.849) within limit 12.700 mm = 6.35 mm x 2 components [protocol:USB2_FS (TI SPRAAR7J \u00a73.3 (breakout within 0.25 in of the package); high-speed guidance, applied to full speed)]",
+      "location": null,
+      "layer": null,
+      "actual_value": 0.8485,
+      "required_value": 12.7,
+      "items": [],
+      "nets": [
+        "USB_MCU_D+",
+        "USB_MCU_D-"
+      ],
+      "status": "info",
+      "waived": false,
+      "key": "diffpair_uncoupled_length||USB_MCU_D+,USB_MCU_D-|",
+      "evidence_hash": "ev2:02ac7df07ca07014"
+    },
+    {
+      "rule_id": "diffpair_uncoupled_length",
+      "type": "diffpair_uncoupled_length",
+      "severity": "info",
+      "message": "Differential pair USB_MCU_D+/USB_MCU_D- worst per-terminal uncoupled length 0.099 mm within limit 6.350 mm [protocol:USB2_FS (TI SPRAAR7J \u00a73.3 (breakout within 0.25 in of the package); high-speed guidance, applied to full speed)] (kct-only: KiCad has no per-terminal uncoupled check)",
+      "location": null,
+      "layer": null,
+      "actual_value": 0.099,
+      "required_value": 6.35,
+      "items": [],
+      "nets": [
+        "USB_MCU_D+",
+        "USB_MCU_D-"
+      ],
+      "status": "info",
+      "waived": false,
+      "key": "diffpair_uncoupled_length||USB_MCU_D+,USB_MCU_D-|",
+      "evidence_hash": "ev2:ab39e050982661cc"
     },
     {
       "rule_id": "netclass_clearance_copper",
@@ -485,11 +565,11 @@
   "meta_checks": {
     "drc": {
       "status": "FAILED",
-      "detail": "64 rules checked, 13 error(s), 0 warning(s)"
+      "detail": "67 rules checked, 13 error(s), 0 warning(s)"
     },
     "erc": {
       "status": "PASSED",
-      "detail": "0 error(s), 0 warning(s)"
+      "detail": "0 error(s), 78 warning(s)"
     },
     "lvs": {
       "status": "PASSED",
@@ -594,6 +674,12 @@
       "reason": null,
       "blocking": true
     },
+    "diffpair_uncoupled_length": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    },
     "dimensions": {
       "status": "checked",
       "state": "checked",
@@ -684,6 +770,12 @@
       "reason": null,
       "blocking": false
     },
+    "routing_policy": {
+      "status": "skipped:no_declared_policies",
+      "state": "skipped",
+      "reason": "no_declared_policies",
+      "blocking": true
+    },
     "sch_fields": {
       "status": "checked",
       "state": "checked",
@@ -715,6 +807,12 @@
       "blocking": true
     },
     "via_in_pad": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    },
+    "via_type": {
       "status": "checked",
       "state": "checked",
       "reason": null,
