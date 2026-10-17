@@ -1682,6 +1682,14 @@ class NetFormatReport:
     """Count of vias with empty ``(net "")`` format."""
     empty_net_pads: int = 0
     """Count of pads with empty ``(net "")`` format."""
+    name_only_dialect: bool = False
+    """True when the board has no numeric net id anywhere (issue #6989).
+
+    A KiCad-10 board can be written entirely in the name-only dialect --
+    ``(net "NAME")`` on every pad, segment and via, with no header net
+    table.  Such a board is not corrupt, so its name-only references are
+    not counted.  Empty ``(net "")`` references are still reported.
+    """
 
     @property
     def total_corrupt(self) -> int:
@@ -1722,6 +1730,17 @@ def validate_net_format(pcb_path: Path) -> NetFormatReport:
 
     report = NetFormatReport(valid=True)
 
+    # Issue #6989: name-only references are corruption only on a board that
+    # also uses numeric ids (a header table or numbered references).  A board
+    # with no numeric id anywhere is name-only by design (KiCad 10).
+    def _has_numeric_id(node) -> bool:
+        if node.name == "net" and node.get_int(0) is not None:
+            return True
+        return any(_has_numeric_id(c) for c in node.children if c.children)
+
+    name_only_dialect = not _has_numeric_id(sexp)
+    report.name_only_dialect = name_only_dialect
+
     def _check_net_node(net_node, element_kind: str) -> None:
         """Classify a ``(net ...)`` node and update *report* counters."""
         if net_node is None:
@@ -1732,6 +1751,9 @@ def validate_net_format(pcb_path: Path) -> NetFormatReport:
             return
         # Name-only or empty-string format
         net_name = net_node.get_string(0)
+        if net_name and name_only_dialect:
+            # Name-only is the board's own dialect, not corruption (#6989).
+            return
         if net_name:
             # Name-only corruption: (net "SYNC_R")
             if element_kind == "segment":

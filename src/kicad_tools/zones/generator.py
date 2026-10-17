@@ -318,6 +318,9 @@ class GeneratedZone:
     # :func:`_content_zone_uuid`.  Callers may still pass an explicit UUID
     # (e.g. to preserve an existing zone's identity).
     uuid: str = ""
+    # Issue #6989: write ``(net "NAME")`` on a KiCad-10 name-only board, so a
+    # generated pour does not mix numeric ids into a board that has none.
+    name_only: bool = False
 
     def __post_init__(self) -> None:
         if not self.uuid:
@@ -357,6 +360,7 @@ class GeneratedZone:
             self.config.thermal_gap,
             self.config.thermal_bridge_width,
             self.config.pad_connection,
+            name_only=self.name_only,
         )
 
 
@@ -952,6 +956,7 @@ class ZoneGenerator:
             config=config,
             net_number=net_number,
             boundary=actual_boundary,
+            name_only=bool(getattr(self._pcb, "_net_name_only_dialect", False)),
         )
         # Issue #5578: content-addressed UUIDs are deterministic, so two
         # genuinely identical zones queued on one generator would collide.
