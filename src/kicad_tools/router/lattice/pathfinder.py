@@ -312,6 +312,31 @@ def _diverse_pair_stubs(
     return out
 
 
+def _gateway_decline_summary(
+    tally: dict[str, dict[str, int]], blockers: dict[str, int], *, top: int = 3
+) -> str:
+    """Per-group decline counts for a gateway decline line (issue #6956).
+
+    ``tally`` maps a combination group (``against``, ``pass-under``) to
+    ``{reason: count}``; ``blockers`` counts each ``pad-attach`` blocker.
+    Board 03's line used to name only the LAST combination's blocker (the
+    GND U2.2 site) while 28 of its attaches had hit the VBUS U2.5 escape
+    site.  Returns ``"tried: against pad-attach x16, ...; attach blockers:
+    ..."`` (most frequent first), or ``""`` when nothing was tried.
+    """
+    parts: list[str] = []
+    for group, reasons in tally.items():
+        ranked = sorted(reasons.items(), key=lambda kv: (-kv[1], kv[0]))
+        parts.append(f"{group} " + ", ".join(f"{why} x{n}" for why, n in ranked))
+    if not parts:
+        return ""
+    text = "tried: " + "; ".join(parts)
+    if blockers:
+        ranked_b = sorted(blockers.items(), key=lambda kv: (-kv[1], kv[0]))[:top]
+        text += "; attach blockers: " + ", ".join(f"{b} x{n}" for b, n in ranked_b)
+    return text
+
+
 class LatticePathfinder:
     """Adaptive octilinear lattice pathfinder returning ``Route`` objects.
 
@@ -3188,6 +3213,19 @@ class LatticePathfinder:
         # pass-under group walked after EVERY layer's ``against`` group.
         staged: list[tuple[int, str, list[list[Gateway | None]], int]] = []
         legal_ends: list[int | None] = [0, 0]
+        # Issue #6956: every combination's decline, per group, so the line
+        # names each blocker -- not only the last combination's.
+        tally: dict[str, dict[str, int]] = {}
+        blockers: dict[str, int] = {}
+
+        def record(group: str, why: str) -> None:
+            reasons = tally.setdefault(group, {})
+            key = why.removeprefix("pair-")
+            reasons[key] = reasons.get(key, 0) + 1
+            if key == "pad-attach" and self._attach_blocker:
+                blocker = self._attach_blocker
+                blockers[blocker] = blockers.get(blocker, 0) + 1
+
         for layer in layers:
             lname = self._layer_name(layer)
             per_end: list[list[Gateway | None]] = []
@@ -3265,6 +3303,7 @@ class LatticePathfinder:
                 )
                 if pres is None:
                     reason = f"pair-gateway-{why.removeprefix('pair-')}"
+                    record("against", why)
                     continue
                 desc = []
                 for tag, g in (("A", ga), ("B", gb)):
@@ -3302,6 +3341,7 @@ class LatticePathfinder:
                 )
                 if pres is None:
                     reason = f"pair-gateway-pass-under-{why.removeprefix('pair-')}"
+                    record("pass-under", why)
                     continue
                 desc = []
                 for tag, g, thr in (("A", ga, combo.through_a), ("B", gb, combo.through_b)):
@@ -3316,6 +3356,9 @@ class LatticePathfinder:
         declined = f"gateway declined ({reason}): " + "; ".join(notes)
         if reason.endswith("pad-attach") and self._attach_blocker:
             declined += f"; pad-attach blocked at {self._attach_blocker}"
+        summary = _gateway_decline_summary(tally, blockers)
+        if summary:
+            declined += f"; {summary}"
         self.pair_gateway_log[pc.key] = declined
         return None, reason
 

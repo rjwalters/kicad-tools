@@ -4922,8 +4922,13 @@ class Autorouter:
             # anchor below slides past it instead of capping it.
             self._lattice_reserve_pair_escape_sites(pf, obstacles, pc, pair_nets)
             # The rule-area mask (+ #6401 pour-pad via reservations) installed
-            # by ``_negotiate_lattice_netset`` before this call.
-            keepouts = getattr(pf, "_keepouts", None)
+            # by ``_negotiate_lattice_netset`` before this call.  Issue #6956:
+            # without the pair-net exemptions -- the planar anchor still
+            # slides past the reservations exactly as before; only the
+            # search (fat body, gateway fans and attaches) may use them.
+            keepouts = self._lattice_keepouts_without_pair_exemptions(
+                getattr(pf, "_keepouts", None)
+            )
             trace_half = (getattr(pc.net_class, "trace_width", None) or self.rules.trace_width) / 2
             anchor_a = relocate_pair_anchor(
                 obstacles,
@@ -5007,6 +5012,15 @@ class Autorouter:
             ):
                 name_net = self.net_names.get(pad.net) or pad.net_name or str(pad.net)
                 name = f"pair-escape-via:{name_net}:{pad.ref}.{pad.pin}"
+                # Issue #6956: the pair this site exists for (its nets are
+                # exempted by ``_lattice_exempt_pair_reservations``).
+                owners: dict[str, frozenset[int]] | None = getattr(
+                    self, "_lattice_pair_escape_owner", None
+                )
+                if owners is None:
+                    owners = {}
+                    self._lattice_pair_escape_owner = owners
+                owners.setdefault(name, frozenset(pair_nets))
                 if name in have:
                     continue
                 # The sealed net's class clearance, floored at the pair's and
@@ -5035,6 +5049,81 @@ class Autorouter:
                 )
         if new:
             pf.set_keepouts(LatticeKeepoutMask(tuple(mask.areas if mask else ()) + tuple(new)))
+
+    def _lattice_exempt_pair_reservations(self, coupled: list[Any]) -> None:
+        """Exempt each declared pair's nets from its own reservations (#6956).
+
+        Board 03: ``USB_D[1]``'s In2.Cu gateway at U2 is closed by two static
+        keep-outs that block every net, the pair's own included -- the #6697
+        escape site for VBUS U2.5 (reserved between the pair's own pads,
+        on the only south route of the fans) and the #6401 pour-pad via site
+        for GND U2.2 (under U2's body, on the pass-under route).  Both exist
+        for a pair that stays on the pad layer and know nothing about its
+        gateway.
+
+        The policy: a reservation inside a declared pair's gateway envelope
+        at that pair's own footprint (:func:`~.plane_via_sites.
+        pair_gateway_envelope_contains`, grown by the largest gateway
+        setback) exempts the pair's two nets -- every #6697 escape site the
+        pair caused always does -- and stays a hard keep-out for every other
+        net.  The pour link / sealed net still has to close afterwards (the
+        post-route oracle and stitcher re-verify it).  The added exemptions
+        are recorded on :attr:`_lattice_pair_exempt_added` so the planar
+        anchor relocation can keep seeing the un-exempted reservations.
+        """
+        from dataclasses import replace
+
+        from .lattice.obstacles import LatticeKeepoutMask
+        from .pairplan.gateway import MAX_GATEWAY_SETBACK_MM
+        from .plane_via_sites import exempt_pair_in_gateway_envelope
+
+        pf = getattr(self, "_lattice_pathfinder", None)
+        mask = getattr(pf, "_keepouts", None)
+        if pf is None or not mask or not coupled:
+            return
+        added: dict[str, frozenset[int]] = getattr(self, "_lattice_pair_exempt_added", None) or {}
+        escape_owner: dict[str, frozenset[int]] = (
+            getattr(self, "_lattice_pair_escape_owner", None) or {}
+        )
+        areas = list(mask.areas)
+        changed = False
+        for pc in coupled:
+            nets = frozenset({pc.pad_p_a.net, pc.pad_n_a.net})
+            names: list[str] = []
+            for pad_p, pad_n in ((pc.pad_p_a, pc.pad_n_a), (pc.pad_p_b, pc.pad_n_b)):
+                areas, hit = exempt_pair_in_gateway_envelope(
+                    areas, pad_p, pad_n, nets, setback=MAX_GATEWAY_SETBACK_MM
+                )
+                names.extend(hit)
+            for idx, area in enumerate(areas):
+                if escape_owner.get(area.name) == nets and not nets <= area.exempt:
+                    areas[idx] = replace(area, exempt=area.exempt | nets)
+                    names.append(area.name)
+            for name in dict.fromkeys(names):
+                added[name] = added.get(name, frozenset()) | nets
+                changed = True
+                print(
+                    f"  Pair reservation exemption (#6956): {name} lies in "
+                    f"{pc.pair_name}'s gateway envelope; exempts the pair's nets"
+                )
+        self._lattice_pair_exempt_added = added
+        if changed:
+            pf.set_keepouts(LatticeKeepoutMask(tuple(areas)))
+
+    def _lattice_keepouts_without_pair_exemptions(self, mask: Any) -> Any:
+        """``mask`` with the #6956 pair-net exemptions taken back out."""
+        added = getattr(self, "_lattice_pair_exempt_added", None)
+        if not mask or not added:
+            return mask
+        from dataclasses import replace
+
+        from .lattice.obstacles import LatticeKeepoutMask
+
+        areas = tuple(
+            replace(a, exempt=a.exempt - added[a.name]) if a.name in added else a
+            for a in mask.areas
+        )
+        return LatticeKeepoutMask(areas)
 
     def _lattice_escape_via_node(
         self, pf: Any, net: int, site: tuple[float, float], clearance: float
@@ -5160,6 +5249,8 @@ class Autorouter:
         # (byte-identical no-constraint path).
         if hasattr(pf, "set_keepouts"):
             pf.set_keepouts(self._lattice_keepouts_with_plane_via_sites())
+            # Issue #6956: a fresh mask carries no pair-net exemptions.
+            self._lattice_pair_exempt_added = {}
 
         coupled, connections = self._lattice_netset_connections()
 
@@ -5540,6 +5631,9 @@ class Autorouter:
             if tap_chain_pairs
             else self._lattice_coupled_connections()
         )
+        # Issue #6956: a reservation in a declared pair's gateway envelope
+        # (and every #6697 escape site) exempts that pair's two nets.
+        self._lattice_exempt_pair_reservations(coupled)
 
         connections: list[tuple[object, Pad, Pad, object]] = []
         # Issue #6698: generated same-part equivalent-pin ties (rebuilt on
