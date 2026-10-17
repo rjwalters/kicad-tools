@@ -12,10 +12,8 @@ import pytest
 
 from kicad_tools.cli.sch_add_component import (
     _is_power_symbol,
-    _point_on_wire_midpoint,
     _point_on_wire_segment,
     _round_pos,
-    _snap,
     parse_connect,
 )
 from kicad_tools.cli.sch_add_component import (
@@ -23,8 +21,12 @@ from kicad_tools.cli.sch_add_component import (
 )
 from kicad_tools.cli.sch_add_junction import main as add_junction_main
 from kicad_tools.cli.sch_add_wire import main as add_wire_main
+from kicad_tools.cli.sch_wire_common import (
+    _point_on_wire_midpoint,
+)
 from kicad_tools.schema import Schematic
 from kicad_tools.schema.library import LibrarySymbol
+from kicad_tools.schematic.grid import snap_to_grid
 
 # ---------------------------------------------------------------------------
 # Minimal schematic content for testing
@@ -131,9 +133,9 @@ class TestUtilityFunctions:
 
     def test_snap(self):
         # round(100/1.27) = round(78.74) = 79, 79 * 1.27 = 100.33
-        assert _snap(100.0) == pytest.approx(100.33, abs=0.01)
-        assert _snap(100.33) == pytest.approx(100.33, abs=0.01)
-        assert _snap(2.54) == pytest.approx(2.54, abs=0.01)
+        assert snap_to_grid(100.0) == pytest.approx(100.33, abs=0.01)
+        assert snap_to_grid(100.33) == pytest.approx(100.33, abs=0.01)
+        assert snap_to_grid(2.54) == pytest.approx(2.54, abs=0.01)
 
     def test_point_on_wire_midpoint(self):
         # Point at midpoint of horizontal wire
@@ -327,7 +329,7 @@ class TestConnect:
         (pin_pos == connect target), a junction must still be created
         even though no wire is added.  Regression test for #2119."""
         # Use grid-aligned coordinates (multiples of 1.27) so that
-        # _snap() doesn't shift the placement away from the target.
+        # snap_to_grid() doesn't shift the placement away from the target.
         # Wire from (100.33, 49.53) to (149.86, 49.53) -- y=49.53 is
         # 39*1.27.  Midpoint x=124.46 is 98*1.27.
         sch_content = SCHEMATIC_WITH_LIB.replace(
@@ -1093,7 +1095,7 @@ class TestJunctionAtEndpoint:
 class TestWireEndpointAlignment:
     """Verify that wire start points exactly match computed pin positions.
 
-    This is the core regression test for issue #2047: _snap() applied to pin
+    This is the core regression test for issue #2047: snap_to_grid() applied to pin
     positions that were already derived from a grid-snapped symbol origin can
     shift coordinates to the wrong grid point, producing dangling micro-stubs.
     """
@@ -1331,7 +1333,7 @@ class TestTargetSnapsToExistingConnections:
         ]
         assert len(new_wires) >= 1
         # The wire target (end) should be at exactly (100, 50), not
-        # whatever _snap(100.05) would produce
+        # whatever snap_to_grid(100.05) would produce
         target_wire = new_wires[0]
         assert target_wire.end[0] == pytest.approx(100.0, abs=0.01)
         assert target_wire.end[1] == pytest.approx(50.0, abs=0.01)
@@ -1364,7 +1366,7 @@ class TestTargetSnapsToExistingConnections:
         new_wires = [
             w
             for w in sch.wires
-            if abs(w.end[0] - _snap(200)) < 0.5 and abs(w.end[1] - _snap(200)) < 0.5
+            if abs(w.end[0] - snap_to_grid(200)) < 0.5 and abs(w.end[1] - snap_to_grid(200)) < 0.5
         ]
         assert len(new_wires) >= 1
 

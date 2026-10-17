@@ -20,7 +20,6 @@ Usage:
 """
 
 import json
-import re
 import sys
 from pathlib import Path
 
@@ -31,6 +30,9 @@ from kicad_tools.cli.modify_schematic import (
     set_footprint_text,
 )
 from kicad_tools.cli.sch_json import add_format_flag, record, run_with_json_summary
+from kicad_tools.cli.sch_wire_common import (
+    _collect_schematic_files,
+)
 from kicad_tools.core.sexp_file import load_footprint
 from kicad_tools.footprints.library_path import (
     LibraryPaths,
@@ -38,47 +40,6 @@ from kicad_tools.footprints.library_path import (
     parse_library_id,
 )
 from kicad_tools.schema import Schematic
-
-
-def _find_subsheet_files(text: str, schematic_dir: Path) -> list[Path]:
-    """Extract sub-sheet file paths from schematic text.
-
-    Looks for (sheet ... (property "Sheetfile" "filename.kicad_sch" ...)) blocks.
-    """
-    subsheets = []
-    pattern = re.compile(r'\(property "Sheetfile" "([^"]+)"')
-    for match in pattern.finditer(text):
-        subsheet_path = schematic_dir / match.group(1)
-        if subsheet_path.exists():
-            subsheets.append(subsheet_path)
-    return subsheets
-
-
-def _collect_schematic_files(root_path: Path) -> list[Path]:
-    """Recursively collect all schematic files in the hierarchy.
-
-    Returns list starting with root, followed by sub-sheets (depth-first).
-    """
-    visited: set[Path] = set()
-    result: list[Path] = []
-
-    def _walk(sch_path: Path) -> None:
-        resolved = sch_path.resolve()
-        if resolved in visited:
-            return
-        visited.add(resolved)
-        result.append(sch_path)
-
-        try:
-            text = sch_path.read_text(encoding="utf-8")
-        except OSError:
-            return
-
-        for sub in _find_subsheet_files(text, sch_path.parent):
-            _walk(sub)
-
-    _walk(root_path)
-    return result
 
 
 def _load_mapping(map_path: Path) -> dict[str, str]:

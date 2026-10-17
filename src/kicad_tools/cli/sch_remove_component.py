@@ -31,6 +31,13 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
+from kicad_tools.cli.sch_wire_common import (
+    _find_symbol_sexp,
+    _find_wires_at_point,
+    _wire_endpoint_counts,
+    _wire_start_end,
+    truncating_bucket,
+)
 from kicad_tools.schema import LibraryManager, Schematic
 from kicad_tools.sexp import SExp
 
@@ -47,71 +54,6 @@ class RemoveComponentResult:
     junctions_removed: int
     lib_symbol_removed: bool
     instance_path_removed: bool
-
-
-def _find_wires_at_point(
-    schematic: Schematic,
-    point: tuple[float, float],
-    tolerance: float = POINT_TOLERANCE,
-) -> list[SExp]:
-    """Find all wire S-expression nodes with an endpoint at or near a point."""
-    target_key = (int(point[0] * 10), int(point[1] * 10))
-    matching = []
-
-    for wire_sexp in schematic.sexp.find_all("wire"):
-        pts_node = wire_sexp.find("pts")
-        if not pts_node:
-            continue
-
-        xy_nodes = pts_node.find_all("xy")
-        if len(xy_nodes) < 2:
-            continue
-
-        for xy in xy_nodes:
-            x = xy.get_float(0) or 0.0
-            y = xy.get_float(1) or 0.0
-            key = (int(x * 10), int(y * 10))
-
-            tol_units = int(tolerance * 10)
-            if (
-                abs(key[0] - target_key[0]) <= tol_units
-                and abs(key[1] - target_key[1]) <= tol_units
-            ):
-                matching.append(wire_sexp)
-                break  # Don't add same wire twice
-
-    return matching
-
-
-def _wire_start_end(wire_sexp: SExp) -> tuple[tuple[float, float], tuple[float, float]]:
-    """Extract start and end points from a wire S-expression node."""
-    pts_node = wire_sexp.find("pts")
-    if not pts_node:
-        return (0.0, 0.0), (0.0, 0.0)
-
-    xy_nodes = pts_node.find_all("xy")
-    if len(xy_nodes) < 2:
-        return (0.0, 0.0), (0.0, 0.0)
-
-    x1 = xy_nodes[0].get_float(0) or 0.0
-    y1 = xy_nodes[0].get_float(1) or 0.0
-    x2 = xy_nodes[1].get_float(0) or 0.0
-    y2 = xy_nodes[1].get_float(1) or 0.0
-
-    return (x1, y1), (x2, y2)
-
-
-def _wire_endpoint_counts(
-    wire_sexps: list[SExp],
-) -> dict[tuple[int, int], int]:
-    """Count how many wires touch each endpoint."""
-    counts: dict[tuple[int, int], int] = {}
-    for ws in wire_sexps:
-        start, end = _wire_start_end(ws)
-        for pt in [start, end]:
-            key = (int(pt[0] * 10), int(pt[1] * 10))
-            counts[key] = counts.get(key, 0) + 1
-    return counts
 
 
 def _collect_all_connectable_points(
@@ -213,18 +155,6 @@ def _is_wire_exclusive(
         # connectable point, the wire endpoint is dangling and exclusive
 
     return True
-
-
-def _find_symbol_sexp(schematic: Schematic, reference: str) -> SExp | None:
-    """Find the top-level symbol S-expression node by reference designator."""
-    for sym_sexp in schematic.sexp.find_all("symbol"):
-        for prop in sym_sexp.find_all("property"):
-            prop_name = prop.get_string(0)
-            if prop_name == "Reference":
-                prop_value = prop.get_string(1)
-                if prop_value == reference:
-                    return sym_sexp
-    return None
 
 
 def _get_symbol_uuid(sym_sexp: SExp) -> str | None:
@@ -364,7 +294,7 @@ def remove_component(
     # Clean up orphaned junctions at former wire endpoints
     if wire_endpoints:
         remaining_wires = list(schematic.sexp.find_all("wire"))
-        endpoint_counts = _wire_endpoint_counts(remaining_wires)
+        endpoint_counts = _wire_endpoint_counts(remaining_wires, key=truncating_bucket)
 
         checked_keys: set[tuple[int, int]] = set()
         for pt in wire_endpoints:

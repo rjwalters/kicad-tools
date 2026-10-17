@@ -24,7 +24,7 @@ from kicad_tools.cli.modify_schematic import (
     set_symbol_flag_text,
 )
 from kicad_tools.cli.sch_json import add_format_flag, record, run_with_json_summary
-from kicad_tools.cli.sch_set_footprint import _collect_schematic_files
+from kicad_tools.cli.sch_wire_common import _collect_schematic_files
 
 # Recognized symbol-level boolean flags
 RECOGNIZED_FLAGS = frozenset({"on_board", "in_bom", "dnp", "exclude_from_sim"})

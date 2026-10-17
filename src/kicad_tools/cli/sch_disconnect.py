@@ -22,14 +22,16 @@ from __future__ import annotations
 import argparse
 import shutil
 import sys
-import uuid as uuid_mod
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
 from kicad_tools.cli.sch_json import add_format_flag, record, run_with_json_summary
+from kicad_tools.cli.sch_wire_common import (
+    _build_no_connect_sexp,
+    _find_wires_at_point,
+)
 from kicad_tools.schema import LibraryManager, Schematic
-from kicad_tools.sexp import SExp
 
 POINT_TOLERANCE = 1.27  # mm - standard KiCad grid
 
@@ -41,50 +43,6 @@ class DisconnectResult:
     pin_position: tuple[float, float]
     wires_removed: int
     no_connect_added: bool
-
-
-def _find_wires_at_point(
-    schematic: Schematic,
-    point: tuple[float, float],
-    tolerance: float = POINT_TOLERANCE,
-) -> list[SExp]:
-    """Find all wire S-expression nodes with an endpoint at or near a point."""
-    target_key = (int(point[0] * 10), int(point[1] * 10))
-    matching = []
-
-    for wire_sexp in schematic.sexp.find_all("wire"):
-        pts_node = wire_sexp.find("pts")
-        if not pts_node:
-            continue
-
-        xy_nodes = pts_node.find_all("xy")
-        if len(xy_nodes) < 2:
-            continue
-
-        for xy in xy_nodes:
-            x = xy.get_float(0) or 0.0
-            y = xy.get_float(1) or 0.0
-            key = (int(x * 10), int(y * 10))
-
-            # Check within tolerance (grid-snapped neighbor check)
-            tol_units = int(tolerance * 10)
-            if (
-                abs(key[0] - target_key[0]) <= tol_units
-                and abs(key[1] - target_key[1]) <= tol_units
-            ):
-                matching.append(wire_sexp)
-                break  # Don't add same wire twice
-
-    return matching
-
-
-def _build_no_connect_sexp(x: float, y: float) -> SExp:
-    """Build an S-expression node for a no_connect marker."""
-    return SExp.list(
-        "no_connect",
-        SExp.list("at", x, y),
-        SExp.list("uuid", str(uuid_mod.uuid4())),
-    )
 
 
 def resolve_pin_position(

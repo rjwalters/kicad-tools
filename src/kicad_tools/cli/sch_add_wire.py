@@ -29,8 +29,12 @@ from datetime import datetime
 from pathlib import Path
 
 from kicad_tools.cli.sch_json import add_format_flag, record, run_with_json_summary
+from kicad_tools.cli.sch_wire_common import (
+    _point_on_wire_midpoint,
+)
 from kicad_tools.exceptions import FileNotFoundError as KiCadFileNotFoundError
 from kicad_tools.schema import Schematic
+from kicad_tools.schematic.grid import snap_to_grid
 
 
 @dataclass
@@ -39,44 +43,6 @@ class PlannedAction:
 
     kind: str  # "wire", "junction"
     description: str
-
-
-def _snap(value: float, grid: float = 1.27) -> float:
-    """Snap a coordinate to the nearest grid point."""
-    return round(value / grid) * grid
-
-
-def _point_on_wire_midpoint(
-    point: tuple[float, float],
-    wire_start: tuple[float, float],
-    wire_end: tuple[float, float],
-    tolerance: float = 0.1,
-) -> bool:
-    """Check if a point lies on a wire segment but not at its endpoints."""
-    x, y = point
-
-    # Check if point is at either endpoint
-    for ep in (wire_start, wire_end):
-        if abs(x - ep[0]) < tolerance and abs(y - ep[1]) < tolerance:
-            return False
-
-    # Check if point is on the segment
-    x1, y1 = wire_start
-    x2, y2 = wire_end
-
-    # Bounding box check
-    if not (min(x1, x2) - tolerance <= x <= max(x1, x2) + tolerance):
-        return False
-    if not (min(y1, y2) - tolerance <= y <= max(y1, y2) + tolerance):
-        return False
-
-    # Perpendicular distance check
-    length = ((x2 - x1) ** 2 + (y2 - y1) ** 2) ** 0.5
-    if length < tolerance:
-        return False
-
-    dist = abs((y2 - y1) * x - (x2 - x1) * y + x2 * y1 - y2 * x1) / length
-    return dist < tolerance
 
 
 def run_add_wire(args) -> int:
@@ -90,11 +56,11 @@ def run_add_wire(args) -> int:
         return 1
 
     # Snap all coordinates to grid
-    from_point = (_snap(args.start[0]), _snap(args.start[1]))
+    from_point = (snap_to_grid(args.start[0]), snap_to_grid(args.start[1]))
 
     to_points: list[tuple[float, float]] = []
     for tp in args.to:
-        to_points.append((_snap(tp[0]), _snap(tp[1])))
+        to_points.append((snap_to_grid(tp[0]), snap_to_grid(tp[1])))
 
     if not to_points:
         print("Error: At least one --to coordinate is required", file=sys.stderr)
