@@ -2,7 +2,7 @@
 """
 Repair clearance violations by nudging traces and vias.
 
-Unlike the destructive fix_clearance_violations in DRCFixer (which deletes traces),
+Unlike a destructive fixer that deletes traces,
 this tool computes minimal displacements to achieve the required clearance.
 
 Usage:
