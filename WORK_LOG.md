@@ -5,6 +5,8 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 ---
 ### 2026-10-17
 
+- **PR #6944**: fix: scope fleet bench drift check to selected boards
+- **Issue #6941** (closed): fleet bench: run.py drift check blocks single-board runs; README board 00 row stale (follow-up #6765)
 - **Issue #6850** (closed): Live-verify #6842 gateway offer on boards 03/06b/06rf/07rf
 - **Issue #6765** (closed): DSN exporter does not represent JLCPCB fab-floor .kicad_dru rules (fastroute stays non-comparable on board 00)
 - **PR #6937**: feat(router): name the blocker in gateway pair-pad-attach declines
