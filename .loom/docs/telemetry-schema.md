@@ -216,8 +216,10 @@ cycle) is added only when loom-ui's error tracking shows it is needed.
 | [`host.export`](#hostexport) | log, OTLP only | `observability/collector.rs` |
 | [`host.status`](#hoststatus) | gauges, OTLP only | `host_status.rs` (sampler), `observability/collector.rs`, `observability/otlp/mapping/host_status.rs` |
 | [`operator.presence`](#operatorpresence) | log, OTLP only (journal-buffered) | `loom-daemon presence beat` (opt-in operator hook) → `observability/otlp/mapping/operator_presence.rs` |
+| [`checkout.freshness`](#checkoutfreshness) | log, OTLP only | `fleet_sync/checkout_ff` pass → `observability/otlp/mapping/checkout_freshness.rs` |
 | [`checkout.external_change`](#checkoutexternal_change) | log, OTLP only | `fleet_sync/checkout_ff/external_change.rs` |
 | [`roster.change`](#rosterchange) | log, OTLP only | `fleet_sync/roster_clone.rs` |
+| [`daemon.run_state_request`](#daemonrun_state_request--who-asked-the-daemon-to-pause-drain-stop-or-restart) | log, OTLP only | `ipc.rs` (`handle_client` run-state verbs), `observability/run_state_request.rs` |
 | [`write_scope.refused`](#write_scoperefused--a-daemon-pass-write-the-9548-gate-refused) | log, OTLP only | `write_scope.rs` (`gate()` Deny branch) |
 | [`eta.stage_outcome`](#etastage_outcome) (kept, non-ETA owner since #11126) | log, OTLP only | none since #11301 (was `observability/fleet_state/outcomes.rs`, a diff of two `fleet.state` views) |
 | [`pr.resolved`](#prresolved) (kept, non-ETA owner since #11126) | log, OTLP only | none since #11301 (was `observability/fleet_state/outcomes.rs`, a PR that left the review listings) |
@@ -1351,7 +1353,7 @@ gradeable by a model or prompt experiment.
 | `tokens_by_model` | array | no | Same grouped, raw (not cost-weighted) shape as `sweep.outcome`'s `tokens_by_model`, summed from the tick's own transcripts. |
 | `models_used` | string array | no | The distinct model ids in `tokens_by_model`, sorted and deduped — "did this tick's session escalate past the model it was launched with?" |
 | `actions` | object | no | Forge-mutating work observed in the transcripts: `issues_labeled`, `prs_merged`, `comments_posted`. |
-| `prompt` | object | no | The checkout the session read its `/loom:<role>` prompt from, as it stood immediately before the spawn (#11989): `commit` (HEAD, full SHA), `loom_version` (the working tree's `.loom/install-metadata.json`), `commits_behind` (HEAD's distance behind the clone's `origin/<default>`) and `on_branch` (`false` for a detached HEAD); each inner key is absent when it cannot be read. Absent on a tick that never resolved a launch. OTLP: `loom.prompt.commit`, `loom.prompt.loom_version`, `loom.prompt.commits_behind`, `loom.prompt.on_branch`, so a role running stale prompts is `loom.prompt.commits_behind > 0`. Additive, no `schema_version` bump. |
+| `prompt` | object | no | The checkout the session read its `/loom:<role>` prompt from, as it stood immediately before the spawn (#11989): `commit` (HEAD, full SHA), `loom_version` (the working tree's `.loom/install-metadata.json`), `commits_behind` (HEAD's distance behind the clone's `origin/<default>`), `on_branch` (`false` for a detached HEAD) and the remote fields of [`checkout.freshness`](#checkoutfreshness) (`remote_tip`, `commits_behind_remote`, `origin_ref_stale`, `remote_repo`, `remote_foreign`); each inner key is absent when it cannot be read. Absent on a tick that never resolved a launch. OTLP: `loom.prompt.commit`, `loom.prompt.loom_version`, `loom.prompt.commits_behind`, `loom.prompt.on_branch` and the remote fields' `loom.prompt.*` keys, so a role running stale prompts is `loom.prompt.commits_behind > 0`. Here `commits_behind` is against the local `origin/<default>` ref; `commits_behind_remote` measures against GitHub's tip from the head the daemon last heard (#12509). Additive, no `schema_version` bump. |
 | `source` | string | no | `step` when a step-engine step ran, not a role-runner tick (#11906). Mapped to `loom.role_tick.source`; absent on a role tick. Additive. |
 | `sweep_id` | string | no | The step's sweep id (`step-<role>-<item>-<ts>`), with `source`. Mapped to `loom.sweep_id`. |
 
@@ -2195,7 +2197,7 @@ GitHub rate limit (Issue #10022):
 | `loom.feed.reconcile_passes` | delta `Sum` | `{pass}`; label `outcome` | merge-reconciliation ticks of the narration sink that had a workspace to visit (#12152), by `outcome`: `ran` (the forge answered; the workspace's watermark advanced), `deferred` (the rate-limit breaker was cooling; the tick is not spent and the workspace catches up from its watermark later) or `failed` (the forge read failed; the watermark holds). Accumulated only while an ops sink is registered |
 | `loom.ci.queue_depth` | `Gauge` | `{run}`; label `repo` | workflow runs with `status == "queued"` in the page the CI telemetry poll fetched for the repo (#11993), one point per repo per cycle (`0` when none), counted from the run listing `poll_repo` already reads, so it adds no GitHub request. A run older than the rescan floor that is still queued is not counted. Fleet CI contention at that instant, beside the per-run `loom.ci.queued_ms` on `ci.run` / `ci.job` |
 | `loom.fleet_dispatch.fallback_ticks` | `DeltaCounter` | `{tick}`; label `reason` | step ticks a fleet-dispatch worker ran in fallback (Issue #12450), `reason` the failed call's token that entered it (`transport`, `status_5xx`, `status_4xx`, `malformed`). Fallback ticks draw one round with no free `claim_lost`. Host-level: the resource names the host |
-| `loom.fleet_dispatch.refusals` | `Sum` (delta) | `{claim}`; labels `kind` (`claim` / `refuse`), `reason` | claims the captain refused, by reason (`held` / `grace` / `not_eligible` / `cap`), and workers' `refuse` calls, by token (#12449) |
+| `loom.fleet_dispatch.refusals` | `Sum` (delta) | `{claim}`; labels `kind` (`claim` / `refuse`), `reason` | claims the captain refused, by reason (`held` / `grace` / `not_eligible` / `cap`, and `no_progress_cooldown` for a `held` refusal by a no-progress hold, #12541), and workers' `refuse` calls, by token (#12449) |
 | `loom.fleet_dispatch.expired` | `Sum` (delta) | `{assignment}`; label `kind` (`assignment` / `hold`) | captain rows that reached their TTL: a granted or live row nobody renewed, released or refused, or a `claim_lost` hold that ran out (#12449) |
 | `loom.fleet_dispatch.claim_lost_after_grant` | `Sum` (delta) | `{claim}` | grants whose worker then lost the forge order (`refuse` with `claim_lost`): the split-brain and attended-claim measure (#12449) |
 
@@ -3582,6 +3584,51 @@ additive (serde-defaulted), so records from before #11527 still parse and no
 [`defaults/observability/signoz/host-export-queries.sql`](https://github.com/rjwalters/loom/blob/main/defaults/observability/signoz/host-export-queries.sql):
 hosts with drops, or with no `host.export` at all, in the last 2 h. Query 3 compares a rendered `hosts.yml` roster against `host.export` to find silent hosts by absence (#11198). Query 5 combines `daemon.start`, `daemon.exit` and `host.export` into one `running` / `stopped` / `silent` row per roster host (#10023); `stopped` needs a `daemon.exit`, so a crash, kill or power loss reads as `silent`.
 
+### `checkout.freshness`
+
+How far one managed checkout is behind GitHub's tip (Issue #12509). Daemon role
+ticks already record the prompt tree they launch from (`prompt` on
+`role_tick.outcome`, #11989), but a checkout with no role tick (an AWS-box
+daemon workspace, a sweep worker's clone) reported nothing, so "how often does a
+daemon host run from a stale or divergent checkout" had no answer. The checkout
+fast-forward pass visits every managed checkout, and emits **one record per
+checkout per pass**. **OTLP only** (`otlp: Logs`, `native: false`), and only when
+the exporter is configured; `observability/otlp/mapping/checkout_freshness.rs`
+maps it, with the record's JSON as the body and `host` on the Resource.
+
+Hosts with no daemon (dev boxes, Macs running hand-driven sessions) are out of
+scope by operator ruling: no hook and no CLI command emits this.
+
+| Field | Type | Notes |
+|---|---|---|
+| `captured_at` | RFC3339 | when the checkout was read; the record time |
+| `repo` | string? | the workspace's `owner/repo` (`loom.repo`); absent when `origin` is foreign or unparseable |
+| `pass_skipped_reason` | string? | why the pass could not measure against GitHub's tip: `budget` (the pass ran out of time before this checkout; no `prompt`), `low-disk`, `breaker-open`, `backing-off`, `network-off`, `unreachable-stop` or `no-head`. Absent when a tip was known. A stale count never looks fresh |
+| `prompt` | object? | `commit`, `loom_version`, `commits_behind`, `on_branch` as on `role_tick.outcome`, plus the five remote fields below; each inner key is absent when it cannot be read |
+
+The remote fields (all optional, additive, no `schema_version` bump) also ride
+on `role_tick.outcome`'s `prompt`:
+
+| Field | Attribute | Notes |
+|---|---|---|
+| `remote_tip` | `loom.prompt.remote_tip` | full SHA of the default branch's tip, from the head the daemon's checkout pass last heard (`checkout_ff::heard`); absent if none was heard in the last 15 minutes |
+| `commits_behind_remote` | `loom.prompt.commits_behind_remote` | `git rev-list --count HEAD..remote_tip`; absent when `remote_tip` is unknown or not yet in the object store (the fast-forward fetches it whenever it moves, so it is normally present) |
+| `origin_ref_stale` | `loom.prompt.origin_ref_stale` | the local `refs/remotes/origin/<default>` differs from `remote_tip` (or does not exist); absent when `remote_tip` is |
+| `remote_repo` | `loom.prompt.remote_repo` | `owner/repo` of `origin` only; never a URL, userinfo or credential |
+| `remote_foreign` | `loom.prompt.remote_foreign` | `origin` is a local path, `file://`, another host (`$GH_HOST`, default `github.com`) or another repo than the workspace's registered one. Absent on a Gitea workspace. No remote comparison is made for a foreign origin |
+
+`commits_behind` keeps its meaning (HEAD behind the clone's own
+`origin/<default>`); `commits_behind_remote` is the count against GitHub.
+
+**Measures, never fixes, and asks nothing.** The record adds no network call and
+writes nothing to `.git`: the tip is the one the pass already learned, and the
+only git children are local reads (`rev-parse`, `rev-list`, `remote get-url`,
+`cat-file -e`). Unknown values are absent, never 0.
+
+SigNoz: `attributes_string['loom.kind'] = 'checkout.freshness'`, grouped by
+`host.name` and `loom.repo`, with `max(loom.prompt.commits_behind_remote)` and
+`countIf(loom.prompt.origin_ref_stale)`.
+
 ### `operator.presence`
 
 Whether a person is at the keyboard of an operator session (Issue #11563).
@@ -3968,9 +4015,20 @@ not validate is not exported. Both OTLP timestamps are `observed_at`.
 **OTLP.** Severity is WARN for `requested_by=unknown`, INFO otherwise.
 Attributes: `loom.daemon_exit.signal` / `exit_code` / `requested_by` /
 `relaunch_expected` / `supervisor` / `in_flight_count` / `in_flight_sweeps`
-(comma-joined) / `in_flight_fate` / `uptime_s`
+(comma-joined) / `in_flight_fate` / `uptime_s` / `request_id` / `request_verb`
+/ `caused_by_request_id`
 (`DAEMON_EXIT_LOG_ATTRIBUTE_KEYS`, kept by the collector's `transform/privacy`
 `keep_keys`, contract-tested).
+
+**Request link (#12546).** `request_id` and `request_verb` name the
+[`daemon.run_state_request`](#daemonrun_state_request--who-asked-the-daemon-to-pause-drain-stop-or-restart)
+that caused an IPC exit (`ipc-restart`, `ipc-shutdown`, a drain). A SIGTERM
+that arrives within 15 minutes of an *accepted* stop or drain request is
+explained by the daemon's own state: `requested_by` stays `unknown` (the signal
+names no sender) but `caused_by_request_id` and `request_verb` are set. An
+`abort-drain` clears the pending request, and a SIGTERM outside the window
+carries none of the three fields. All three are absent when no request is
+linked.
 
 **Exits that cannot emit.** SIGKILL, the OOM killer, a crash and power loss run
 no code. A host whose `daemon.start` is not preceded by a `daemon.exit` was
@@ -3979,6 +4037,40 @@ and the synchronous `Request::Shutdown` arm in `ipc.rs`, which is unreachable
 because `shutdown::intercept` handles the request first. An exit while the
 exporter is unreachable still completes within the funnel's 2 s flush budget;
 the record then stays queued for the next start.
+
+
+### `daemon.run_state_request` — who asked the daemon to pause, drain, stop, or restart
+
+One OTLP log per run-state IPC request (Issue #12546), emitted when the daemon
+**receives** it: `drain` (`DrainAndRestartDaemon`), `abort-drain`,
+`pause-then-exit` (`restart --pause --then-exit`), `restart` and `shutdown`.
+Envelopes carry `schema_version: 12`. **OTLP-only** (`native: false`), always
+on when OTLP export is on. Exempt from the per-kind silence check: a quiet
+host runs no such verb.
+
+The JSON body contains `request_id` (what `daemon.exit` quotes), `verb`,
+`flags` (`name=value`, e.g. `then_exit=true`; empty for verbs without any),
+`caller_pid` / `caller_uid` (the IPC socket's peer credentials, where the
+platform exposes them), `caller_comm` (the caller's process name),
+`caller_chain` (parent process names, nearest first, at most 8),
+`caller_internal` (true when the caller is the daemon itself, its parent, pid
+1 or a `systemd` / `launchd` process: the supervisor or auto-update path, not an
+operator), `host_id`, `observed_at` and standard `loom` build provenance; a
+record whose provenance does not validate is not exported.
+
+**Names only.** The caller is identified by `/proc/<pid>/comm`; **argv and the
+environment are never read**, because argv can hold secrets. Capture is best
+effort and never fails the request: where peer credentials or `/proc` are
+unavailable (macOS has no `/proc`) the fields are absent and the verb proceeds.
+The caller's own `systemctl` is not resolved for a later SIGTERM; that exit is
+linked through `daemon.exit` instead.
+
+**OTLP.** Severity is INFO. Attributes: `loom.run_state.request_id` / `verb` /
+`flags` (comma-joined) / `caller_pid` / `caller_uid` / `caller_comm` /
+`caller_chain` (`>`-joined) / `caller_internal` / `host_id`
+(`RUN_STATE_REQUEST_LOG_ATTRIBUTE_KEYS`, kept by the collector's
+`transform/privacy` `keep_keys`, contract-tested). Both OTLP timestamps are
+`observed_at`.
 
 
 ### `write_scope.refused` — a daemon-pass write the #9548 gate refused

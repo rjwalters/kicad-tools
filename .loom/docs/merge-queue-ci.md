@@ -154,6 +154,18 @@ A missing or `null` field means "unknown".
    re-reviews, CI runs and runner-minutes per merged PR, and red-main
    incidents.
 
+## The authorization context is excluded from the CI verdict gate (#12526)
+
+`loom/merge-authorization` is a required context on the queue repo, but
+Champion posts it only AFTER the Judge approves. `forge wait-checks` (and so
+`post-verdict.sh` and the CI-gate recovery) therefore ignores it when deciding
+`GREEN`: absent or `pending` it does not hold the wait, or the Judge would
+wait for a status that only its own approval can cause and time out. A posted
+`failure` (a revocation) still counts as failing in both default and
+`--required-only` modes. `merge-pr.sh`'s zero-row settle
+(`merge_pr/zero_checks.rs`) is unchanged: it runs post-authorization and does
+not use the verdict path.
+
 ## Rollback to direct mode
 
 Direct mode is always available. To roll back:
