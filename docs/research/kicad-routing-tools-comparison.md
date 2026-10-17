@@ -830,7 +830,8 @@ measured a matcher.**
    `.kicad_dru`. This measurement needed a fix first. The routing loader filed
    KiCad-10 name-only copper (`(net "DQ0")`) under net 0, so `retune-lengths`
    on this board reported every group as "not tuned (a member is unrouted)"
-   and changed nothing. That is fixed in `pcb_retune._rekey_name_only_routes`.
+   and changed nothing. The loader now resolves such copper to its real net id
+   (Issue #6970).
 
 **Verdict.** The gap survives deconfounding. It is not the routing cap. It is
 the three wiring gaps in (1), then DRC-limited meander room and the
