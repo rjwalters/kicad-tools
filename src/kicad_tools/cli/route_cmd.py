@@ -70,6 +70,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypedDict, cast
 
 from kicad_tools.core.kicad_lock import check_kicad_lock
+from kicad_tools.sexp.scan import has_unquoted
 
 from .route_deadline import record_stage, restore_stage
 from .route_exit_codes_help import ROUTE_EXIT_CODES_EPILOG
@@ -6439,7 +6440,7 @@ def _fill_zones_after_route(
         args._placement_fill_error = None
         try:
             text = output_path.read_text()
-            if not re.search(r"\(zone\s", text):
+            if not has_unquoted(text, r"\(zone\s"):  # Issue #6873
                 return
             # Use the same propagated source/fabrication constraints as DRC,
             # before native filling can bake a weaker default into the output.
@@ -6495,7 +6496,8 @@ def _fill_zones_after_route(
     except OSError as exc:
         logger.warning("Zone fill: could not read %s: %s", output_path, exc)
         return
-    if "(zone " not in text and "(zone\n" not in text and "(zone\t" not in text:
+    # Issue #6873: a ``(zone`` inside a quoted string is not a zone.
+    if not has_unquoted(text, r"\(zone[ \n\t]"):
         # Nothing to fill -- skip silently to avoid log noise on the
         # majority of boards that have no copper pours.
         return

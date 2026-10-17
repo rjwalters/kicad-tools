@@ -76,6 +76,13 @@ class SExp:
         "_originally_bare",
         "_line",
         "_column",
+        # ``(start, end)`` offsets of this node in the parsed source text.
+        # Set only on the direct children of a parsed document's root (a
+        # board's footprints, zones, segments, ...); ``None`` elsewhere.  Read
+        # it with :func:`source_span`.  Lets text-level consumers slice a
+        # top-level item exactly where the parser found it (Issue #6873)
+        # instead of re-finding it with a regex that cannot see strings.
+        "_source_span",
     )
 
     def __init__(
@@ -118,6 +125,7 @@ class SExp:
         self._originally_bare = _originally_bare
         self._line = _line
         self._column = _column
+        self._source_span: tuple[int, int] | None = None
 
     @property
     def line(self) -> int:
@@ -1207,11 +1215,14 @@ class Parser:
         information for error reporting and source mapping.
     """
 
-    __slots__ = ("text", "pos", "length", "_track_positions", "_line_starts")
+    __slots__ = ("text", "pos", "length", "_track_positions", "_line_starts", "_depth")
 
     def __init__(self, text: str, track_positions: bool = False):
         self.text = text
         self.pos = 0
+        # Lists currently open in the recursive parser; the document root's
+        # direct children are parsed at depth 1 (see ``_source_span``).
+        self._depth = 0
         self.length = len(text)
         self._track_positions = track_positions
         # Pre-compute line start positions for efficient line/column lookup
@@ -1322,6 +1333,8 @@ class Parser:
                 start = starts.pop()
                 if child.name == "arc":
                     _retain_arc_source(child, text, start, m.end())
+                if len(nodes) == 1:
+                    child._source_span = (start, m.end())
                 if not nodes:
                     if _TRAILING_RE.match(text, m.end()) is None:
                         return None
@@ -1376,6 +1389,8 @@ class Parser:
             node = self._parse_atom()
 
         _retain_arc_source(node, text, start_pos, self.pos)
+        if self._depth == 1 and char == "(":
+            node._source_span = (start_pos, self.pos)
 
         # Set position if tracking is enabled
         if self._track_positions:
@@ -1387,6 +1402,9 @@ class Parser:
 
     def _parse_list(self) -> SExp:
         """Parse a list (name children...)."""
+        # A ParseError abandons the parser, so the error paths need not
+        # restore ``_depth``.
+        self._depth += 1
         text = self.text
         length = self.length
         self.pos += 1  # Skip opening paren
@@ -1408,6 +1426,7 @@ class Parser:
         char = text[pos]
         if char == ")":
             self.pos = pos + 1
+            self._depth -= 1
             return SExp()  # Empty list
 
         # Optimization: Try to parse first element as simple name directly
@@ -1457,6 +1476,7 @@ class Parser:
 
             children.append(self._parse_expr())
 
+        self._depth -= 1
         return node
 
     def _parse_string_node(self) -> SExp:
@@ -1608,6 +1628,18 @@ def _looks_like_file_path(text: str) -> bool:
         return False
     # Check for common KiCad file extensions
     return any(stripped.endswith(ext) for ext in _KICAD_FILE_EXTENSIONS)
+
+
+def source_span(node: SExp) -> tuple[int, int] | None:
+    """Return ``(start, end)`` of *node* in the text it was parsed from.
+
+    Available for the direct children of a parsed document's root only
+    (Issue #6873); ``None`` for any other node, including programmatically
+    built ones.  ``text[start:end]`` is the node's exact source, from its
+    ``(`` to its matching ``)``.  The offsets refer to the string handed to
+    the parser, so slice that same string.
+    """
+    return node._source_span
 
 
 def parse_string(text: str, track_positions: bool = False) -> SExp:
