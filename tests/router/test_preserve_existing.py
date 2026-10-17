@@ -992,3 +992,47 @@ class TestPreservedNetClassMapResolution:
         for net in ("LINE_B", "LINE_C", "LINE_D", "NODE_A", "NODE_B", "NODE_C", "NODE_D"):
             assert net in out
             assert _geom_set(out[net]) == _geom_set(orig[net])
+
+
+class TestLoadExistingRoutesNameOnlyNetIds:
+    """Issue #6970: name-only copper must load under its real net id, not 0."""
+
+    @staticmethod
+    def _name_only_board(board_text: str) -> str:
+        """Drop the top-level ``(net N "name")`` table and name-key all copper.
+
+        Mirrors ``kicad-cli --save-board`` on KiCad 10: segments and vias carry
+        ``(net "NAME")`` with no numeric header to resolve them against.
+        """
+        names = parse_net_names(board_text)
+
+        def repl(m: re.Match) -> str:
+            name = names.get(int(m.group(1)))
+            return f'(net "{name}")' if name else m.group(0)
+
+        text = re.sub(r"\(net (\d+)\)", repl, board_text)
+        return re.sub(r'^[ \t]*\(net \d+ "[^"]*"\)[ \t]*\n', "", text, flags=re.MULTILINE)
+
+    @staticmethod
+    def _load(tmp_path, name: str, text: str):
+        path = tmp_path / name
+        path.write_text(text)
+        router, _ = load_pcb_for_routing(
+            str(path), load_existing_routes=True, validate_drc=False, strict_drc=False
+        )
+        return router
+
+    def test_name_only_routes_carry_real_net_ids(self, tmp_path, board_text):
+        name_only = self._name_only_board(board_text)
+        assert '(net "LINE_A")' in name_only
+
+        numeric = self._load(tmp_path, "numeric.kicad_pcb", board_text)
+        named = self._load(tmp_path, "named.kicad_pcb", name_only)
+
+        by_name = {r.net_name: r for r in named.existing_routes}
+        expected = {r.net_name: r.net for r in numeric.existing_routes}
+        assert set(by_name) == set(expected)
+        for net_name, route in by_name.items():
+            assert route.net == expected[net_name] != 0, net_name
+            assert {s.net for s in route.segments} <= {route.net}
+            assert {v.net for v in route.vias} <= {route.net}
