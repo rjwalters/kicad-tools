@@ -208,7 +208,10 @@ def test_crossed_polarity_with_no_swap_resolves_in_the_legs() -> None:
         ends = {(round(s.x1, 3), round(s.y1, 3)) for s in routes[(pc.key, pol)].segments} | {
             (round(s.x2, 3), round(s.y2, 3)) for s in routes[(pc.key, pol)].segments
         }
-        assert (ax, ay) in ends and (bx, by) in ends
+        # The J1 leg ends where it enters the 0.3 mm pad, inside its copper
+        # (issue #6959); the U1 end is a via-site pad.
+        assert any(abs(x - ax) <= 0.15 + 1e-3 and abs(y - ay) <= 0.15 + 1e-3 for x, y in ends)
+        assert (bx, by) in ends
 
 
 def test_both_ends_hard_keeps_the_fallback_and_says_so() -> None:

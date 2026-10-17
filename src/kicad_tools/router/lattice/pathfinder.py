@@ -2722,7 +2722,7 @@ class LatticePathfinder:
             sb = min((s[3] for s in by_bit_b[bit]), default=math.inf)
             return sa + sb
 
-        from .coupled import pads_block_segment_grown
+        from .coupled import clip_to_pad_entry, pads_block_segment_grown
 
         trace_w = getattr(pc.net_class, "trace_width", None) or self.rules.trace_width
         intra_clearance = pc.pitch - trace_w
@@ -2766,6 +2766,10 @@ class LatticePathfinder:
                 if attach_b is None:
                     return None, "pair-pad-attach"
                 full = attach_a[:-1] + leg + list(reversed(attach_b))[1:]
+                # Issue #6959: end each leg where it enters its own pad's
+                # copper instead of running on to the pad centre.
+                full = clip_to_pad_entry(full[::-1], pad_a, trace_w)[::-1]
+                full = clip_to_pad_entry(full, pad_b, trace_w)
 
                 # Never-ship-a-short re-verification of the emitted leg:
                 # static masks (pair pads are "self") + committed copper at
