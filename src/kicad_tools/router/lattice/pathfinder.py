@@ -3725,7 +3725,7 @@ class LatticePathfinder:
                 f"hard terminal {terminal}: the easy end's pads share no usable layer",
             )
 
-        items = {
+        items: dict[str, Connection] = {
             pol: ((key, pol), real, real, pc.net_class)
             for pol, real in (("P", hard_p), ("N", hard_n))
         }
