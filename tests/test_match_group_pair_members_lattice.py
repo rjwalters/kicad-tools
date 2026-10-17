@@ -35,7 +35,7 @@ from kicad_tools.router.pair_centerline_meander import (
     centerline_meander,
     find_coupled_spans,
 )
-from kicad_tools.router.primitives import Route, Segment, Via
+from kicad_tools.router.primitives import Pad, Route, Segment, Via
 from kicad_tools.router.rules import NetClassRouting
 
 THICKNESS = 1.6
@@ -457,7 +457,14 @@ class TestClassClearanceFloor:
     """Issue #6969 (AC2): the tuner's clearance floor follows net classes."""
 
     @staticmethod
-    def _captured_kwargs(*, group_clearance, foreign_clearance=None, mfr=None, authored=None):
+    def _captured_kwargs(
+        *,
+        group_clearance,
+        foreign_clearance=None,
+        mfr=None,
+        authored=None,
+        unrouted_pad_clearance=None,
+    ):
         routes = [
             _route(1, [(0.0, 0.0), (22.0, 0.0)]),
             _route(2, [(0.0, 10.0), (20.0, 10.0)]),
@@ -475,6 +482,16 @@ class TestClassClearanceFloor:
             ar.net_class_map[name].clearance = group_clearance
         if foreign_clearance is not None:
             ar.net_class_map["OTHER"] = NetClassRouting(name="Default", clearance=foreign_clearance)
+        if unrouted_pad_clearance is not None:
+            # A pad on a stricter-class net that has NO route: the tuner's
+            # pad pass still checks it, so it must raise the floor too.
+            ar.net_names[4] = "HV"
+            ar.net_class_map["HV"] = NetClassRouting(name="HV", clearance=unrouted_pad_clearance)
+            ar.pads = {
+                ("J1", "1"): Pad(
+                    x=10.0, y=20.0, width=0.3, height=0.3, net=4, net_name="HV", ref="J1", pin="1"
+                )
+            }
         group = MatchGroup(
             name="BUS", net_ids=[1, 2], tolerance=0.1, source=MatchGroupSource.LEGACY_API
         )
@@ -505,6 +522,12 @@ class TestClassClearanceFloor:
 
     def test_stricter_foreign_class_keeps_its_clearance(self):
         kw = self._captured_kwargs(group_clearance=0.15, foreign_clearance=0.2)
+        assert kw["intra_group_clearance_mm"] == pytest.approx(0.2)
+        assert kw["via_clearance_mm"] == pytest.approx(0.2)
+        assert kw["pad_clearance_mm"] == pytest.approx(0.2)
+
+    def test_stricter_class_pad_on_unrouted_net_keeps_its_clearance(self):
+        kw = self._captured_kwargs(group_clearance=0.15, unrouted_pad_clearance=0.2)
         assert kw["intra_group_clearance_mm"] == pytest.approx(0.2)
         assert kw["via_clearance_mm"] == pytest.approx(0.2)
         assert kw["pad_clearance_mm"] == pytest.approx(0.2)

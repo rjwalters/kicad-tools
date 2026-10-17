@@ -21143,13 +21143,15 @@ class Autorouter:
                 # KiCad's pairwise clearance is the larger of the two items'
                 # class values, and the tuner applies one number to every
                 # foreign item, so clamp to the strictest class clearance
-                # among the routed foreign nets.
+                # among the foreign nets -- routed or not.  The tuner's pad
+                # pass checks every pad in ``pads_by_net``, so a pad on an
+                # unrouted, stricter-class net must also raise the floor.
                 group_nets = set(group.net_ids)
                 for p_id, n_id in group.pair_ids:
                     group_nets.update((p_id, n_id))
                 class_lookup = getattr(self, "net_class_map", None) or {}
                 foreign_floor_mm = 0.0
-                for foreign_id in set(routes_by_net) - group_nets:
+                for foreign_id in (set(routes_by_net) | set(pads_by_net)) - group_nets:
                     foreign_class = class_lookup.get(self.net_names.get(foreign_id, ""))
                     if foreign_class is not None:
                         foreign_floor_mm = max(foreign_floor_mm, float(foreign_class.clearance))
