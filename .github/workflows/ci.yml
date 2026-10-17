@@ -134,11 +134,6 @@ jobs:
     outputs:
       code: ${{ steps.filter.outputs.code }}
       board00: ${{ steps.shared.outputs.shared == 'true' || (steps.filter.outputs.code == 'true' && steps.boards.outputs.board00 == 'true') }}
-      board01: ${{ steps.shared.outputs.shared == 'true' || (steps.filter.outputs.code == 'true' && steps.boards.outputs.board01 == 'true') }}
-      board02: ${{ steps.shared.outputs.shared == 'true' || (steps.filter.outputs.code == 'true' && steps.boards.outputs.board02 == 'true') }}
-      board03: ${{ steps.shared.outputs.shared == 'true' || (steps.filter.outputs.code == 'true' && steps.boards.outputs.board03 == 'true') }}
-      board04: ${{ steps.shared.outputs.shared == 'true' || (steps.filter.outputs.code == 'true' && steps.boards.outputs.board04 == 'true') }}
-      board05: ${{ steps.shared.outputs.shared == 'true' || (steps.filter.outputs.code == 'true' && steps.boards.outputs.board05 == 'true') }}
       board06: ${{ steps.shared.outputs.shared == 'true' || (steps.filter.outputs.code == 'true' && steps.boards.outputs.board06 == 'true') }}
       board07: ${{ steps.shared.outputs.shared == 'true' || (steps.filter.outputs.code == 'true' && steps.boards.outputs.board07 == 'true') }}
     steps:
@@ -176,22 +171,17 @@ jobs:
       # count and every board still runs -- no coverage loss), or (b) that
       # board's own directory changed. Default `some` quantifier here, so
       # these are separate steps from the `every` step above.
+      # Issue #5743 item 4 (operator ruling 2026-10-17): boards 01-05 no
+      # longer run on pull requests at all (main verification runs only),
+      # so only board 00/06/07 need a per-board output. Their directories
+      # stay excluded from `shared` so a board-01-only PR still does not
+      # trigger boards 00/06.
       - uses: dorny/paths-filter@v4
         id: boards
         with:
           filters: |
             board00:
               - 'boards/00-simple-led/**'
-            board01:
-              - 'boards/01-voltage-divider/**'
-            board02:
-              - 'boards/02-charlieplex-led/**'
-            board03:
-              - 'boards/03-usb-joystick/**'
-            board04:
-              - 'boards/04-stm32-devboard/**'
-            board05:
-              - 'boards/05-bldc-motor-controller/**'
             board06:
               - 'boards/06-diffpair-test/**'
             board07:
@@ -1828,7 +1818,10 @@ jobs:
     # branch-protection setting.
     name: Board 01 End-to-End
     needs: [changes, kicad_pin]
-    if: ${{ !cancelled() && ((github.event_name != 'pull_request' && needs.kicad_pin.outputs.skip != 'true') || needs.changes.outputs.board01 == 'true' || needs.changes.result == 'failure') }}
+    # Issue #5743 item 4 (operator ruling 2026-10-17): main verification
+    # runs only -- boards 01-05 do not run on pull requests; boards 00
+    # and 06 are the PR-side representatives. See the `changes` job.
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' && needs.kicad_pin.outputs.skip != 'true') }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     container:
@@ -1922,7 +1915,10 @@ jobs:
     # until a repo admin flips the branch-protection setting.
     name: Board 02 End-to-End
     needs: [changes, kicad_pin]
-    if: ${{ !cancelled() && ((github.event_name != 'pull_request' && needs.kicad_pin.outputs.skip != 'true') || needs.changes.outputs.board02 == 'true' || needs.changes.result == 'failure') }}
+    # Issue #5743 item 4 (operator ruling 2026-10-17): main verification
+    # runs only -- boards 01-05 do not run on pull requests; boards 00
+    # and 06 are the PR-side representatives. See the `changes` job.
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' && needs.kicad_pin.outputs.skip != 'true') }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     container:
@@ -2036,7 +2032,10 @@ jobs:
     # board 00/01/02/06/07 e2e jobs).
     name: Board 03 End-to-End (LVS-only)
     needs: [changes, kicad_pin]
-    if: ${{ !cancelled() && ((github.event_name != 'pull_request' && needs.kicad_pin.outputs.skip != 'true') || needs.changes.outputs.board03 == 'true' || needs.changes.result == 'failure') }}
+    # Issue #5743 item 4 (operator ruling 2026-10-17): main verification
+    # runs only -- boards 01-05 do not run on pull requests; boards 00
+    # and 06 are the PR-side representatives. See the `changes` job.
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' && needs.kicad_pin.outputs.skip != 'true') }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     container:
@@ -2686,7 +2685,10 @@ jobs:
     # Test job) because no other job runs the board-05 rescue loop from clean.
     name: Board 05 Routing Regression (blocking <= 7)
     needs: [changes, kicad_pin]
-    if: ${{ !cancelled() && ((github.event_name != 'pull_request' && needs.kicad_pin.outputs.skip != 'true') || needs.changes.outputs.board05 == 'true' || needs.changes.result == 'failure') }}
+    # Issue #5743 item 4 (operator ruling 2026-10-17): main verification
+    # runs only -- boards 01-05 do not run on pull requests; boards 00
+    # and 06 are the PR-side representatives. See the `changes` job.
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' && needs.kicad_pin.outputs.skip != 'true') }}
     runs-on: ubuntu-latest
     timeout-minutes: 90
     container:
@@ -2806,7 +2808,10 @@ jobs:
     # 30 min for the LQFP-48 escape work.
     name: Board 04 End-to-End (LVS-only + DRC allowlist)
     needs: [changes, kicad_pin]
-    if: ${{ !cancelled() && ((github.event_name != 'pull_request' && needs.kicad_pin.outputs.skip != 'true') || needs.changes.outputs.board04 == 'true' || needs.changes.result == 'failure') }}
+    # Issue #5743 item 4 (operator ruling 2026-10-17): main verification
+    # runs only -- boards 01-05 do not run on pull requests; boards 00
+    # and 06 are the PR-side representatives. See the `changes` job.
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' && needs.kicad_pin.outputs.skip != 'true') }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
     container:
