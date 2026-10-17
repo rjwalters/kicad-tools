@@ -481,48 +481,12 @@ def _adopt_existing_routes(router: Any, selected: set[str]) -> None:
     Non-selected nets are flagged ``is_escape`` so every tuner treats them as
     fixed -- they stay in the foreign-clearance view but are never edited.
     """
-    _rekey_name_only_routes(router)
     adopted = list(router.existing_routes)
     for route in adopted:
         if route.net_name not in selected:
             route.is_escape = True
     router.existing_routes[:] = []
     router.routes[:] = adopted
-
-
-def _rekey_name_only_routes(router: Any) -> None:
-    """Give KiCad-10 name-only copper its real net id (Issue #5798).
-
-    The routing loader reads ``(segment ... (net "DQ0"))`` copper with
-    ``net=0`` -- the optimizer parser only knows numeric references -- so on a
-    board saved by KiCad 10 every loaded route arrives under net 0 and the
-    tuners, which look members up by net id, see each one as unrouted.  Board
-    07's committed routed artifact is such a board: every group came back
-    "not tuned (a member is unrouted)" and nothing was written.
-
-    The route keeps its geometry; only its owner changes, so the grid is
-    unmarked under the old owner and re-marked under the new one.
-    """
-    from dataclasses import replace
-
-    ids = {name: nid for nid, name in router.net_names.items() if name}
-    rekeyed = []
-    for route in router.existing_routes:
-        nid = ids.get(route.net_name)
-        if route.net != 0 or nid is None:
-            rekeyed.append(route)
-            continue
-        router.grid.unmark_route(route)
-        route = replace(
-            route,
-            net=nid,
-            segments=[replace(seg, net=nid) for seg in route.segments],
-            vias=[replace(via, net=nid) for via in route.vias],
-        )
-        router.grid.mark_route(route)
-        router.grid._mark_route_on_cpp_cells(route)
-        rekeyed.append(route)
-    router.existing_routes[:] = rekeyed
 
 
 def _geometry_signature(routes: Sequence[Any]) -> dict[str, tuple]:
