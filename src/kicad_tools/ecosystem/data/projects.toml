@@ -578,23 +578,24 @@ verdict = "ideas-adopted"
 license = "AGPL-3.0"
 license_compat = "copyleft-ideas-only"
 language = "Rust"
-stars = 841
-last_push = "2026-09-29"
-last_verified = "2026-09-30"
+stars = 1200
+last_push = "2026-10-02"
+last_verified = "2026-10-17"
 research_docs = [
   "docs/research/konnect-connectivity-audit.md",
   "docs/konnect-item1-toolset-economy-audit.md",
   "docs/konnect-item8-design-rules-audit.md",
+  "docs/research/konnect-v013-delta.md",
 ]
 summary = """
 a single-binary native KiCad 10 plugin exposing a very large LLM tool \
-surface (217 tools) across schematic, layout, routing, placement, review \
+surface (228 tools in 21 toolsets) across schematic, layout, routing, placement, review \
 and manufacturing. AGPL means no code can move between it and this MIT \
 repo in either direction, so our engagement is capability-level only: we \
 audited its connectivity primitives, its tool-economy design and its \
 design-rule handling against our own surface. Five of its six connectivity \
 primitives we already had; the sixth (near-miss auto-snap repair) was a \
-real gap.\
+real gap. Re-checked at v0.13: four new ideas adopted as follow-ups (visual baselines, truth-contract audit, honest-schema CI guard, SES provenance).\
 """
 
 [projects.copperhead]
