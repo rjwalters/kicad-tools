@@ -5,6 +5,15 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 ---
 ### 2026-10-17
 
+- **PR #6921**: fix(router): try lattice pair gateway before planar run for non-pad preferred layers
+- **PR #6918**: feat: refuse SES import when board changed since DSN export
+- **PR #6917**: feat: add screenshot baseline save/compare with renderer-identity check
+- **PR #6907**: fix(router): gate kct optimize-traces against joining Kelvin branches (#6889)
+- **PR #6891**: feat(router): add kct retune-lengths for selected groups on a routed PCB
+- **Issue #6915** (closed): feat: bind SES import to the DSN revision it was routed from
+- **Issue #6912** (closed): feat: visual baseline record/compare for rendered schematics and boards
+- **Issue #6889** (closed): router: kct optimize-traces can merge Kelvin sense branches (gate only covers kct route's optimizer; follow-up #5398)
+- **Issue #6885** (closed): Retune selected diffpair/match groups on an existing routed PCB while preserving reviewed copper
 - **PR #6922**: feat(router): one-ended hybrid trunk + legs for declined lattice diff pairs
 - **PR #6905**: fix: rewrite relative markdown links when copying board docs into bundles
 - **Issue #6899** (closed): packaging: design-source README copies in manufacturing bundles keep relative links that break (boards 03/04/07)
