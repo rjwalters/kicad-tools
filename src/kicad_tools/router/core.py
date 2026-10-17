@@ -20474,6 +20474,20 @@ class Autorouter:
         )
         return results
 
+    def _net_class_clearance_mm(self, net: int, name: str = "") -> float:
+        """Net-class clearance (mm) declared for ``net``, or 0.0 when none.
+
+        Looked up by the net's name in ``net_class_map`` (``name`` is the
+        fallback for pads whose net id has no registered name).  Shared by
+        the skew-tune foreign-copper gate (Issue #6664) and the match-group
+        tuner's pairwise ``max(class(a), class(b))`` floor (Issue #6969).
+        """
+        class_map = getattr(self, "net_class_map", None) or {}
+        net_names = getattr(self, "net_names", None) or {}
+        key = (net_names.get(net, "") if net else "") or name
+        nc = class_map.get(key) if key else None
+        return float(getattr(nc, "clearance", 0.0) or 0.0) if nc is not None else 0.0
+
     def _skew_tune_foreign_clearance_ok(
         self,
         routes_by_net: dict[int, Route],
@@ -20499,16 +20513,10 @@ class Autorouter:
 
         from .grid import pad_segment_edge_clearance
 
-        class_map = getattr(self, "net_class_map", None) or {}
-        net_names = getattr(self, "net_names", None) or {}
         base = float(self.rules.trace_clearance)
         pads = list(getattr(self.grid, "_pads", None) or self.pads.values())
         pitches = self.component_pitches
-
-        def class_clearance(net: int, name: str = "") -> float:
-            key = (net_names.get(net, "") if net else "") or name
-            nc = class_map.get(key) if key else None
-            return float(getattr(nc, "clearance", 0.0) or 0.0) if nc is not None else 0.0
+        class_clearance = self._net_class_clearance_mm
 
         def ok(new_segments: list[Any], net: int) -> bool:
             own = max(base, class_clearance(net))
@@ -20913,6 +20921,27 @@ class Autorouter:
             pads_by_net.setdefault(pad.net, []).append(pad)
         pad_clearance_mm = self.rules.trace_clearance
 
+        # Issues #6969/#6979: per-net class clearances, so a group whose
+        # floor is relaxed to its own class holds every neighbour to the
+        # pairwise KiCad rule max(group class, neighbour class).  Pads
+        # contribute their net names as a fallback for ids without a
+        # registered name.  KiCad puts every net without a class -- and
+        # net-0 (no-net) copper -- in the Default class, so those neighbours
+        # get the Default class clearance, or ``rules.trace_clearance`` when
+        # no Default class is declared.  Every routed net and every pad's
+        # net (unrouted ones included) gets an entry.
+        net_clearance_mm: dict[int, float] = {}
+        _clearance_names: dict[int, str] = {}
+        for _pad in self.pads.values():
+            _clearance_names.setdefault(_pad.net, getattr(_pad, "net_name", "") or "")
+        _default_class = (getattr(self, "net_class_map", None) or {}).get("Default")
+        _default_class_mm = float(getattr(_default_class, "clearance", 0.0) or 0.0)
+        if _default_class_mm <= 0.0:
+            _default_class_mm = float(self.rules.trace_clearance)
+        for _nid in set(self.net_names) | set(routes_by_net) | set(_clearance_names):
+            _c = self._net_class_clearance_mm(_nid, _clearance_names.get(_nid, ""))
+            net_clearance_mm[_nid] = _c if _c > 0.0 else _default_class_mm
+
         if engage not in ("length_critical", "checker_limit"):
             raise ValueError(f"unknown match-group engage policy: {engage!r}")
 
@@ -20928,6 +20957,7 @@ class Autorouter:
 
             group_via_clearance_mm = via_clearance_mm
             group_pad_clearance_mm = pad_clearance_mm
+            group_net_clearance_mm: dict[int, float] | None = None
 
             net_class = self._resolve_net_class_for_group(group)
             if net_class is not None:
@@ -20938,30 +20968,22 @@ class Autorouter:
                 # below the manufacturer / authored floors, and never above
                 # the global rule (this only relaxes, it cannot tighten).
                 # KiCad's pairwise clearance is the larger of the two items'
-                # class values, and the tuner applies one number to every
-                # foreign item, so clamp to the strictest class clearance
-                # among the foreign nets -- routed or not.  The tuner's pad
-                # pass checks every pad in ``pads_by_net``, so a pad on an
-                # unrouted, stricter-class net must also raise the floor.
-                group_nets = set(group.net_ids)
-                for p_id, n_id in group.pair_ids:
-                    group_nets.update((p_id, n_id))
-                class_lookup = getattr(self, "net_class_map", None) or {}
-                foreign_floor_mm = 0.0
-                for foreign_id in (set(routes_by_net) | set(pads_by_net)) - group_nets:
-                    foreign_class = class_lookup.get(self.net_names.get(foreign_id, ""))
-                    if foreign_class is not None:
-                        foreign_floor_mm = max(foreign_floor_mm, float(foreign_class.clearance))
+                # class values; ``class_floor_mm`` is only this group's half.
+                # Each neighbour is held to max(floor, its class) through
+                # ``net_clearance_mm`` below (Issue #6979), which replaces
+                # #6972's board-wide strictest-class clamp.
                 class_floor_mm = max(
                     float(net_class.clearance),
                     self.rules.mfr_clearance_floor or 0.0,
                     self.rules.authored_min_clearance or 0.0,
-                    foreign_floor_mm,
                 )
                 if class_floor_mm < intra_group_clearance_mm:
                     intra_group_clearance_mm = class_floor_mm
                 group_via_clearance_mm = min(via_clearance_mm, max(class_floor_mm, 0.0))
                 group_pad_clearance_mm = min(pad_clearance_mm, max(class_floor_mm, 0.0))
+                # The relaxed floor is this group's half of the rule only;
+                # KiCad holds each neighbour to max(own, neighbour class).
+                group_net_clearance_mm = net_clearance_mm
                 tolerance_mm = net_class.effective_length_match_tolerance(0.5)
                 # Issue #6443: floored like the routed gap.
                 intra_pair_clearance_mm = self._pair_gap_mm(net_class)
@@ -21063,6 +21085,7 @@ class Autorouter:
                     diff_pair_partners=diff_pair_partners_by_id,
                     pads_by_net=pads_by_net,
                     pad_clearance_mm=group_pad_clearance_mm,
+                    net_clearance_mm=group_net_clearance_mm,
                     board_thickness_mm=board_thickness_mm,
                     num_copper_layers=num_layers,
                     blind_buried_supported=blind_buried_supported,

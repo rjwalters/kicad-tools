@@ -504,6 +504,7 @@ def tune_match_group_v2(
     diff_pair_partners: dict[int, int] | None = None,
     pads_by_net: dict[int, list[Pad]] | None = None,
     pad_clearance_mm: float | None = None,
+    net_clearance_mm: dict[int, float] | None = None,
     board_thickness_mm: float | None = None,
     num_copper_layers: int = 4,
     blind_buried_supported: bool = True,
@@ -745,6 +746,7 @@ def tune_match_group_v2(
             diff_pair_partners=diff_pair_partners,
             pads_by_net=pads_by_net,
             pad_clearance_mm=pad_clearance_mm,
+            net_clearance_mm=net_clearance_mm,
             board_thickness_mm=board_thickness_mm,
             num_copper_layers=num_copper_layers,
             blind_buried_supported=blind_buried_supported,
@@ -766,6 +768,7 @@ def tune_match_group_v2(
         intra_pair_clearance_mm=intra_pair_clearance_mm,
         pads_by_net=pads_by_net,
         pad_clearance_mm=pad_clearance_mm,
+        net_clearance_mm=net_clearance_mm,
         board_thickness_mm=board_thickness_mm,
         num_copper_layers=num_copper_layers,
         blind_buried_supported=blind_buried_supported,
@@ -788,6 +791,7 @@ def _tune_match_group_single_ended(
     intra_pair_clearance_mm: float | None = None,
     pads_by_net: dict[int, list[Pad]] | None = None,
     pad_clearance_mm: float | None = None,
+    net_clearance_mm: dict[int, float] | None = None,
     board_thickness_mm: float | None = None,
     num_copper_layers: int = 4,
     blind_buried_supported: bool = True,
@@ -1326,6 +1330,7 @@ def _tune_match_group_single_ended(
                         intra_pair_clearance_mm=intra_pair_clearance_mm,
                         foreign_pads=foreign_pads,
                         pad_clearance_mm=pad_clearance_mm,
+                        net_clearance_mm=net_clearance_mm,
                     )
                     if drc_detail is not None:
                         last_failure_reason = "post_insertion_drc_violation"
@@ -1702,6 +1707,7 @@ def _post_insertion_clearance_ok_group(
     intra_pair_clearance_mm: float | None = None,
     foreign_pads: list[Pad] | None = None,
     pad_clearance_mm: float | None = None,
+    net_clearance_mm: dict[int, float] | None = None,
 ) -> bool:
     """Boolean wrapper around :func:`_post_insertion_clearance_detail_group`.
 
@@ -1720,6 +1726,7 @@ def _post_insertion_clearance_ok_group(
             intra_pair_clearance_mm=intra_pair_clearance_mm,
             foreign_pads=foreign_pads,
             pad_clearance_mm=pad_clearance_mm,
+            net_clearance_mm=net_clearance_mm,
         )
         is None
     )
@@ -1737,6 +1744,7 @@ def _post_insertion_clearance_detail_group(
     intra_pair_clearance_mm: float | None = None,
     foreign_pads: list[Pad] | None = None,
     pad_clearance_mm: float | None = None,
+    net_clearance_mm: dict[int, float] | None = None,
 ) -> str | None:
     """Return ``None`` if the proposed serpentine segments are DRC-safe,
     else a human-readable description of the FIRST violation found.
@@ -1856,6 +1864,15 @@ def _post_insertion_clearance_detail_group(
         pad_clearance_mm: Optional segment-to-pad edge clearance
             floor in mm.  Required when ``foreign_pads`` is non-empty.
             Typical value: ``DesignRules.trace_clearance`` (0.2 mm).
+        net_clearance_mm: Optional ``{net_id: class_clearance_mm}`` map
+            (Issue #6969).  When supplied, every foreign item in passes
+            1, 2, 3 and 5 is held to the pairwise KiCad rule
+            ``max(pass floor, neighbour's class clearance)`` instead of the
+            pass floor alone, so a group whose own class is looser than a
+            neighbour's class cannot place copper inside the neighbour's
+            clearance.  The candidate's diff-pair partner is exempt (it is
+            held to ``intra_pair_clearance_mm`` by pass 4).  ``None`` keeps
+            the single-threshold behaviour.
 
     Returns:
         ``None`` if no clearance violation is introduced; otherwise a
@@ -1864,6 +1881,15 @@ def _post_insertion_clearance_detail_group(
     """
     from .clearance_shapes import copper_gap, pad_shape, segment_shape, via_shape
 
+    partner_net_id = (diff_pair_partners or {}).get(candidate_net_id)
+
+    def _floor(base_mm: float, other_net_id: int | None) -> float:
+        # Issue #6969: KiCad holds two items to the larger of their two
+        # class clearances; ``base_mm`` is already this group's floor.
+        if not net_clearance_mm or other_net_id is None or other_net_id == partner_net_id:
+            return base_mm
+        return max(base_mm, net_clearance_mm.get(other_net_id, 0.0))
+
     # Pass 1: intra-group.  Every other group member.
     for other_id in group_net_ids:
         if other_id == candidate_net_id:
@@ -1871,6 +1897,7 @@ def _post_insertion_clearance_detail_group(
         other_route = routes_by_net.get(other_id)
         if other_route is None:
             continue
+        member_floor = _floor(intra_group_clearance_mm, other_id)
         for new_seg in new_segments:
             for pseg in other_route.segments:
                 if pseg.layer != new_seg.layer:
@@ -1879,15 +1906,15 @@ def _post_insertion_clearance_detail_group(
                 if not _segments_within(
                     new_seg,
                     pseg,
-                    intra_group_clearance_mm + new_seg.width / 2 + pseg.width / 2 + 1e-9,
+                    member_floor + new_seg.width / 2 + pseg.width / 2 + 1e-9,
                 ):
                     continue
                 clearance = copper_gap(segment_shape(new_seg), segment_shape(pseg))
-                if clearance + 1e-9 < intra_group_clearance_mm:
+                if clearance + 1e-9 < member_floor:
                     return (
                         f"intra-group clearance vs group member "
                         f"{other_route.net_name!r} on {new_seg.layer}: "
-                        f"{clearance:.3f}mm < {intra_group_clearance_mm:.3f}mm"
+                        f"{clearance:.3f}mm < {member_floor:.3f}mm"
                     )
 
     # Pass 2: inter-net.  Every non-group routed net.
@@ -1896,6 +1923,7 @@ def _post_insertion_clearance_detail_group(
             continue
         if other_net_id in group_net_ids:
             continue
+        neighbor_floor = _floor(intra_group_clearance_mm, other_net_id)
         for new_seg in new_segments:
             for oseg in other_route.segments:
                 if oseg.layer != new_seg.layer:
@@ -1904,15 +1932,15 @@ def _post_insertion_clearance_detail_group(
                 if not _segments_within(
                     new_seg,
                     oseg,
-                    intra_group_clearance_mm + new_seg.width / 2 + oseg.width / 2 + 1e-9,
+                    neighbor_floor + new_seg.width / 2 + oseg.width / 2 + 1e-9,
                 ):
                     continue
                 clearance = copper_gap(segment_shape(new_seg), segment_shape(oseg))
-                if clearance + 1e-9 < intra_group_clearance_mm:
+                if clearance + 1e-9 < neighbor_floor:
                     return (
                         f"inter-net clearance vs neighbor net "
                         f"{other_route.net_name!r} on {new_seg.layer}: "
-                        f"{clearance:.3f}mm < {intra_group_clearance_mm:.3f}mm"
+                        f"{clearance:.3f}mm < {neighbor_floor:.3f}mm"
                     )
 
     # Pass 3 (Issue #3317 follow-up): segment-vs-via clearance.
@@ -1924,6 +1952,7 @@ def _post_insertion_clearance_detail_group(
         for other_net_id, other_route in routes_by_net.items():
             if other_net_id == candidate_net_id:
                 continue
+            via_floor = _floor(via_clearance_mm, other_net_id)
             for via in other_route.vias:
                 # Ordinary vias serialize as through-hole barrels even when
                 # their routing endpoints name only part of the stack. Only
@@ -1935,12 +1964,12 @@ def _post_insertion_clearance_detail_group(
                     if via.is_micro and not first_layer <= new_seg.layer.stack_order <= last_layer:
                         continue
                     edge_clearance = copper_gap(segment_shape(new_seg), via_shape_)
-                    if edge_clearance + 1e-9 < via_clearance_mm:
+                    if edge_clearance + 1e-9 < via_floor:
                         return (
                             f"segment-vs-via clearance vs net "
                             f"{other_route.net_name!r} via at "
                             f"({via.x:.2f}, {via.y:.2f}) on {new_seg.layer}: "
-                            f"{edge_clearance:.3f}mm < {via_clearance_mm:.3f}mm"
+                            f"{edge_clearance:.3f}mm < {via_floor:.3f}mm"
                         )
 
     # Pass 4 (Issue #3317 follow-up): diff-pair intra-pair clearance.
@@ -1987,15 +2016,16 @@ def _post_insertion_clearance_detail_group(
             # specific.
             pad_through_hole = getattr(pad, "through_hole", False)
             pad_shape_ = pad_shape(pad)
+            pad_floor = _floor(pad_clearance_mm, getattr(pad, "net", None))
             for new_seg in new_segments:
                 if not pad_through_hole and pad.layer != new_seg.layer:
                     continue
                 edge_clearance = copper_gap(segment_shape(new_seg), pad_shape_)
-                if edge_clearance + 1e-9 < pad_clearance_mm:
+                if edge_clearance + 1e-9 < pad_floor:
                     return (
                         f"segment-vs-pad clearance vs foreign pad at "
                         f"({pad.x:.2f}, {pad.y:.2f}) on {new_seg.layer}: "
-                        f"{edge_clearance:.3f}mm < {pad_clearance_mm:.3f}mm"
+                        f"{edge_clearance:.3f}mm < {pad_floor:.3f}mm"
                     )
 
     return None
@@ -2478,6 +2508,7 @@ def _post_insertion_clearance_detail_pair_group(
     via_clearance_mm: float | None = None,
     pads_by_net: dict[int, list[Pad]] | None = None,
     pad_clearance_mm: float | None = None,
+    net_clearance_mm: dict[int, float] | None = None,
     candidate_p_route: Route | None = None,
     candidate_n_route: Route | None = None,
 ) -> str | None:
@@ -2568,6 +2599,7 @@ def _post_insertion_clearance_detail_pair_group(
             via_clearance_mm=via_clearance_mm,
             foreign_pads=foreign_pads,
             pad_clearance_mm=pad_clearance_mm,
+            net_clearance_mm=net_clearance_mm,
         )
         if detail is not None:
             return detail
@@ -2673,6 +2705,7 @@ def _tune_pair_lane_with_fallbacks(
     diff_pair_partners: dict[int, int] | None,
     pads_by_net: dict[int, list[Pad]] | None,
     pad_clearance_mm: float | None,
+    net_clearance_mm: dict[int, float] | None = None,
     board_thickness_mm: float | None,
     num_copper_layers: int,
     blind_buried_supported: bool,
@@ -2749,6 +2782,7 @@ def _tune_pair_lane_with_fallbacks(
             via_clearance_mm=via_clearance_mm,
             pads_by_net=pads_by_net,
             pad_clearance_mm=pad_clearance_mm,
+            net_clearance_mm=net_clearance_mm,
             candidate_p_route=cand_p,
             candidate_n_route=cand_n,
         )
@@ -2970,6 +3004,7 @@ def _tune_pair_lane_with_fallbacks(
             diff_pair_partners=diff_pair_partners,
             pads_by_net=pads_by_net,
             pad_clearance_mm=pad_clearance_mm,
+            net_clearance_mm=net_clearance_mm,
             board_thickness_mm=board_thickness_mm,
             num_copper_layers=num_copper_layers,
             blind_buried_supported=blind_buried_supported,
@@ -3035,6 +3070,7 @@ def _tune_pair_legs_single_ended(
     diff_pair_partners: dict[int, int] | None,
     pads_by_net: dict[int, list[Pad]] | None,
     pad_clearance_mm: float | None,
+    net_clearance_mm: dict[int, float] | None = None,
     board_thickness_mm: float | None,
     num_copper_layers: int,
     blind_buried_supported: bool,
@@ -3109,6 +3145,7 @@ def _tune_pair_legs_single_ended(
             intra_pair_clearance_mm=intra_pair_clearance_mm,
             pads_by_net=pads_by_net,
             pad_clearance_mm=pad_clearance_mm,
+            net_clearance_mm=net_clearance_mm,
             board_thickness_mm=board_thickness_mm,
             num_copper_layers=num_copper_layers,
             blind_buried_supported=blind_buried_supported,
@@ -3156,6 +3193,7 @@ def _tune_match_group_of_pairs(
     diff_pair_partners: dict[int, int] | None = None,
     pads_by_net: dict[int, list[Pad]] | None = None,
     pad_clearance_mm: float | None = None,
+    net_clearance_mm: dict[int, float] | None = None,
     board_thickness_mm: float | None = None,
     num_copper_layers: int = 4,
     blind_buried_supported: bool = True,
@@ -3457,6 +3495,7 @@ def _tune_match_group_of_pairs(
                 diff_pair_partners=diff_pair_partners,
                 pads_by_net=pads_by_net,
                 pad_clearance_mm=pad_clearance_mm,
+                net_clearance_mm=net_clearance_mm,
                 board_thickness_mm=board_thickness_mm,
                 num_copper_layers=num_copper_layers,
                 blind_buried_supported=blind_buried_supported,
@@ -3660,6 +3699,7 @@ def _tune_match_group_of_pairs(
                 via_clearance_mm=via_clearance_mm,
                 pads_by_net=pads_by_net,
                 pad_clearance_mm=pad_clearance_mm,
+                net_clearance_mm=net_clearance_mm,
                 candidate_p_route=candidate_p_route,
                 candidate_n_route=candidate_n_route,
             )
@@ -3772,6 +3812,7 @@ def _tune_match_group_of_pairs(
             diff_pair_partners=diff_pair_partners,
             pads_by_net=pads_by_net,
             pad_clearance_mm=pad_clearance_mm,
+            net_clearance_mm=net_clearance_mm,
             board_thickness_mm=board_thickness_mm,
             num_copper_layers=num_copper_layers,
             blind_buried_supported=blind_buried_supported,
