@@ -220,6 +220,19 @@ dropped rather than rejecting the sidecar — silently for `avoid_layers`,
 with a one-line warning for `preferred_layers` (#4685, #4709). Malformed
 tokens (`Bogus.Cu`) remain fatal.
 
+**Plane-layer opt-in (`allow_plane_layers`).** `kct route
+--reserve-plane-layers` (on by default) keeps every class off the stack's
+PLANE layers. A class can opt in to named reserved planes with
+`"allow_plane_layers": ["In2.Cu"]` (names or grid indices, normalized and
+dropped-when-absent exactly like `avoid_layers`). The opt-in is honoured by
+every engine (grid, C++, lattice, mesh) and by the diff-pair coupled search
+and tie step, where **both** nets of the pair must opt in. Other classes stay
+off the plane. Hard `avoid_layers` still wins, and naming a layer that is not
+reserved does nothing. The post-route "signal copper on a reference plane"
+warning skips the opted-in `(net, layer)` pairs only. Pair it with
+`preferred_layers` when you also want to steer the route there: board 03's
+`USB_D+`/`USB_D-` set both to In2.Cu (#6876).
+
 **Auto-discovery.** When `--net-class-map` is omitted, `kct check` probes for a
 sidecar next to the board. Two filename conventions are accepted — the
 stem-keyed `<board-stem>.net_class_map.json` (hand-maintained trees that keep

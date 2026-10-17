@@ -3,7 +3,8 @@
 The pieces of coupled diff-pair routing that do not depend on any routing
 engine: which pad couples a pair's coupled runs join (:mod:`.chain`), the
 generated equivalent-pin ties (:mod:`.tie`) and the fan-via terminal gateway
-generator (:mod:`.gateway`).  They were written for the lattice engine and
+generator (:mod:`.gateway`), and the structured pair outcome record
+(:mod:`.outcome`).  They were written for the lattice engine and
 moved here unchanged so the grid engine can consume them too (P6, #6448).
 
 **Dependency direction.**  ``pairplan`` imports nothing from
@@ -35,9 +36,19 @@ from .gateway import (
     rank_gateway_combos,
     rank_through_combos,
 )
+from .outcome import (
+    EXHAUSTED_SEARCH_REASONS,
+    GATEWAY_RETRY_REASONS,
+    PairOutcome,
+    SegmentOutcome,
+    SegmentOutcomes,
+    aggregate_label,
+)
 from .tie import MAX_TIE_STUB_MM, PlannedTie, plan_equivalent_pin_tie
 
 __all__ = [
+    "EXHAUSTED_SEARCH_REASONS",
+    "GATEWAY_RETRY_REASONS",
     "HEADINGS",
     "MAX_TIE_STUB_MM",
     "Couple",
@@ -45,7 +56,11 @@ __all__ = [
     "GatewayCombo",
     "GatewaySite",
     "PairChain",
+    "PairOutcome",
     "PlannedTie",
+    "SegmentOutcome",
+    "SegmentOutcomes",
+    "aggregate_label",
     "choose_pair_chain",
     "choose_pair_endpoints",
     "choose_pair_tap_chain",

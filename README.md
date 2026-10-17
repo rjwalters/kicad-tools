@@ -606,7 +606,12 @@ full list (every command and subcommand) lives in
 | `kct build-native` | Build the C++ router backend for 10-100x faster routing |
 | `kct mcp serve` | Start MCP server for AI agent integration |
 
-All commands support `--format json` for machine-readable output.
+Every `kct` subcommand that produces a result accepts `--format json` for
+machine-readable output (some older commands also keep `--json` as a legacy
+alias). A few commands are deliberately exempt -- e.g. `interactive`,
+`mcp serve` and `run` -- see
+[Machine Output](docs/reference/machine-output.md) for the inventory,
+exemptions and per-command JSON shapes.
 
 ### PCB Tools
 
@@ -647,117 +652,13 @@ All commands support `--format json` for machine-readable output.
 | `mcp` | MCP server for AI agent integration |
 | `pcb.layout` | Layout preservation for PCB regeneration |
 
-## What's New (v0.21.1, September 2026)
+## What's New
 
-Recent additions an agent reading these docs cold should know about. Older
-entries live in [CHANGELOG.md](CHANGELOG.md).
-
-- **Routing, validation and CLI hot-path performance sweep** (v0.21.0) —
-  measured removal of overhead across the router, validator, placement and
-  CLI: `import kicad_tools` 1.46 s → 0.34 s user CPU, the A\* neighbor-batch
-  cost ~3.9× faster with identical routes, the placement C++ path ~64 s →
-  0.55 s, board-05 LVS pin resolution ~20× faster. Local measurements; the
-  hosted-CI median comparison remains open on #5240.
-- **MCP server requires the mcp 2.x SDK** (v0.21.0, breaking for `[mcp]`
-  extra users) — `FastMCP` was renamed to `mcp.server.mcpserver.MCPServer`
-  and the `fastmcp` pin is now `>=4,<5`. In-process API callers using the
-  stdio `MCPServer` dataclass are unaffected.
-- **Copper-LVS and `kct net-status` decide on physical copper contact**
-  (v0.21.0) — a net owning a zone somewhere no longer suppresses its `open`
-  findings, copper contact is decided over a segment's full length, dangling
-  tracks are detected by copper-cap contact, and `kct check` gains a
-  geometry-based copper-slit detector.
-- **Pour bridges terminate on existing same-net copper** (v0.21.0) — pour
-  repair reuses an existing same-net via barrel or through-hole pad as the
-  bridge terminus instead of adding a new via; board07 pour repair is now
-  frame-independent with native-refill stability.
-- **Legacy `(module …)` footprints and rotated pads are honored everywhere**
-  (v0.21.0) — KiCad-4-era boards are recognized by every router/zones/DRC/LVS/
-  panel tree-walk, and non-cardinal pad rotation is applied in every obstacle,
-  clearance and thermal consumer so a rotated pad is priced identically
-  everywhere.
-- **Slimmer sdist and honest failure modes** (v0.21.1) — the sdist drops from
-  127 MB to 18 MB (board artifacts and evidence trees excluded; the wheel is
-  unchanged), `kct route` on board06 refuses a foreign input PCB with a named
-  error instead of emitting misleading `UNREPAIRED` lines, and the
-  access-witness sidecar is written even on a wall-clock deadline kill.
-- **Search-time HV pairwise clearance in the lattice engine** (v0.20.0) — with
-  `--voltage-map`, the lattice router now *avoids* HV↔LV proximity during
-  search instead of merely failing the post-route gate; KiCad keepout rule
-  areas are honored too, with a per-net-class `spatial_keepouts` sidecar
-  filter for declared HV-domain segregation.
-- **`kct sch tidy`** (v0.20.0) — headless autoplace of Reference/Value fields
-  (bbox-relative, rotation/mirror-aware) with `--refs`, `--threshold`,
-  `--dry-run`, and a strict cosmetic-only guarantee (netlist/BOM/ERC provably
-  unchanged). Pairs with the new `sch_fields` advisory lint in `kct check`
-  (`sch_field_offset` / `sch_field_overlap`).
-- **`kct net-status` strict by default** (v0.20.0) — connectivity now uses
-  real copper geometry (kicad-cli semantics) instead of endpoint proximity,
-  eliminating false opens on poured nets; `--legacy-proximity` restores the
-  old model, and `--strict --why` now compose.
-- **`kct pcb add-3d-models --refresh`** (v0.20.0) — re-resolve and rewrite
-  existing `(model ...)` refs in place through the current tier chain
-  (library → variant → substitution → LCSC sidecar); default remains
-  byte-identical insert-only.
-- **Board-edge keepout auto-resolution** (v0.20.0) — in-process routing via
-  `load_pcb_for_routing` now derives the board-edge keepout from the
-  manufacturer's `min_edge_clearance` automatically (explicit `0` opts out),
-  matching what the CLI already did.
-- **HV-isolation design loop** (v0.19.0) — `kct creepage --voltage-map` derives
-  each conductor pair's required creepage from its own `|ΔV|` instead of one
-  group working voltage; `kct zones hv-keepout` generates plane voids so inner
-  pours clear HV nets; `kct optimize-placement --voltage-map` / `--hv-domains`
-  place HV parts with a hard creepage-keepout feasibility term. The
-  `/kct:hv-isolation-loop` skill sequences the whole loop.
-- **`kct creepage-export-rules`** (since v0.19.0) — export voltage-domain
-  netclasses plus pairwise HV clearance `(rule ...)` clauses into the project so
-  `kicad-cli pcb drc` enforces creepage too, not just `kct creepage`.
-- **`kct check --emit-dru` / `--emit-drc-constraints`** (v0.19.0) — emit
-  `.kicad_dru` / `.kicad_pro` sidecars from the checker's already-resolved
-  `--mfr` floors, so `kicad-cli pcb drc` and `kct check` reason over identical
-  rules by construction.
-- **`kct analyze component-stress`** (v0.20.0) — operating-state MOSFET
-  VDS/VGS gate: evaluates `V(D)-V(S)` / `V(G)-V(S)` per state of an explicit
-  `--states` manifest against sourced `Vds_max`/`Vgs_max` symbol fields. No
-  circuit-state inference — an undeclared state, unresolved D/G/S pin role,
-  unbound terminal or uncited rating is reported `UNRESOLVED` (a release
-  blocker), never a silent pass, and a creepage waiver can never suppress it.
-  Exact MPN and distinct, valid terminal-pin assignments are required;
-  conflicting rating or identity fields remain unresolved. The
-  census includes identifiable MOSFETs in child sheets; reused sheets, duplicate
-  references, and repeated local labels without proven global connections remain
-  unresolved. State/net aliases and duplicate JSON/YAML
-  keys cannot overwrite operating data. A project-specific coverage checklist
-  must be nonempty, and structured states cannot mix `nets:` with shorthand
-  potentials. These checks do not infer circuit states or qualify hardware.
-- **`kct analyze electrical-rating`** (v0.19.0) — deterministic, advisory
-  LED-overcurrent and capacitor voltage-derating checks sourced from schematic
-  fields; parts missing ratings are skipped, never failed.
-- **`kct fix-vias` off-pad relocation** (v0.19.0) — relocate via-in-pad and
-  plane-stitch vias off-pad while preserving connectivity, with THT
-  hole-to-hole clearance checking and multi-branch relocation.
-- **`kct doctor`** (v0.19.0) — diagnose an installation's version-record drift
-  (dependency pin, `.kct/install-metadata.json`, CLAUDE.md marker block).
-  Advisory by default; `--strict` exits non-zero so it can gate CI.
-- **`kct route --complete`** (since v0.19.0) — targeted completion pass: detect
-  the still-unconnected links and route only those, treating every other net's
-  copper as a fixed obstacle. Implies `--preserve-existing` and never deletes
-  copper; skip pour-carried nets with `--complete-exclude-nets`. See
-  [CLI Reference → route](docs/reference/cli.md#route).
-- **`kct creepage` HV audit + `kct analyze current-sense`** (v0.18.0) — per-pair
-  creepage census against IEC 60664-1 / 62368-1 tables (slot-aware, clearance
-  and creepage reported as distinct values), and an analog lint for
-  sense↔high-current parallel runs, sense-loop area, and Kelvin-tap integrity.
-  A below-standard HV pair fails the `kct audit` gate.
-- **Real `--nets NET[,NET...]` on `route` / `route-auto`** (v0.18.0) — route
-  only the listed nets (inverse of `--skip-nets`); non-listed copper is treated
-  as a fixed obstacle.
-- **Experimental routing substrates** (v0.17.0) — `--route-engine lattice`
-  (adaptive octilinear; 45°-legal copper by construction) and `--route-engine mesh` (constrained-Delaunay navmesh), both default **off**. `--route-engine grid` remains the default and is unchanged. See
-  [Routing Guide](docs/guides/routing.md).
-- **`kct net-status --why`** (v0.17.0) — ranked fix recommendations explaining
-  why each incomplete net is stuck, with pin-order-verified reversed-bundle
-  detection.
+Release notes live in [CHANGELOG.md](CHANGELOG.md) (one section per release,
+newest first) and on the
+[GitHub Releases page](https://github.com/rjwalters/kicad-tools/releases).
+Changes merged since the last release are collected as fragments under
+[`changelog.d/`](changelog.d/) until the next release assembles them.
 
 ## Features
 

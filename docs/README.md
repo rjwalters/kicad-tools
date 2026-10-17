@@ -90,6 +90,14 @@ Point-in-time working documents — dated entries describe the tree as of their 
 | [Placement GA Routability A/B](benchmarks/placement_ga_routability_ab.md) | Inner-loop routing quality vs spacing proxy in the placement GA (#2720) |
 | [Board 05 U10-17 Investigation (2026-06)](investigations/2026-06-board05-u10-17.md) | Negative-clearance pair root-cause investigation (#3236) |
 | [Placement Optimizer Agent Prompt](PLACEMENT-OPTIMIZER-AGENT-PROMPT.md) | Continuation prompt for the physics-based placement optimizer |
+| [Konnect Item 1 Audit: MCP Toolsets (2026-09)](konnect-item1-toolset-economy-audit.md) | On-demand MCP toolsets for context economy (#4896, item 1 of the #4880 Konnect audit) |
+| [Konnect Item 8 Audit: Design-Rule Store (2026-09)](konnect-item8-design-rules-audit.md) | Natural-language design-rule store (#4902, item 8 of the #4880 Konnect audit) |
+| [Demo Manufacturing Readiness (2026-09-09)](demo-readiness-2026-09-09.md) | Per-board manufacturing-readiness audit of the demo boards, with hash-bound `output/readiness.json` evidence |
+| [HV Keepout Clearance Proof](hv-keepout-clearance-proof.md) | Geometry contract for `zones hv-keepout --clearance` minimum-clearance preservation (#5399) |
+| [JLCPCB Upload Protocol](jlc-upload-protocol.md) | Gerber upload/preview transport contract: explicit credentials, persisted ledger, no automatic retry on uncertain uploads |
+| [Parts Lookup Coverage](parts-lookup-coverage.md) | How `LCSCClient.lookup()` distinguishes a live no-match from a supplier outage (`LCSCUnavailableError`, `lookup_result()`) |
+| [Placement Scoring](placement-scoring.md) | The four placement-score surfaces, the three metrics behind them, and which to trust for what (#3940) |
+| [Placement-Excluded Fixed Copper](routing-fixed-copper.md) | How routing retains copper of placement-excluded nets as fixed obstacles (`placement_disposition`, `FixedFillObstacles`) |
 
 ---
 
@@ -104,7 +112,8 @@ kicad_tools/
 ├── pcb/           # PCB operations
 ├── router/        # A* autorouter with diff pairs
 ├── optim/         # Placement optimization
-├── drc/           # Pure Python design rule checking
+├── drc/           # DRC report parsing (kicad-cli output), fix suggestions
+├── validate/      # Pure Python DRC checker, netlist sync (no kicad-cli)
 ├── erc/           # Electrical rule checking
 ├── manufacturers/ # Manufacturer design rules
 ├── parts/         # LCSC parts database

@@ -43,6 +43,7 @@ from kicad_tools.analysis.routing_quality import (
     evaluate_routing_quality_thresholds,
     routing_quality_gate_dict,
 )
+from kicad_tools.cli.check_categories import CHECK_CATEGORIES  # noqa: F401  (re-exported, #6896)
 from kicad_tools.cli.copper_weight import add_check_copper_argument, parse_copper_weight_arg
 from kicad_tools.manufacturers import (
     get_manufacturer_ids,
@@ -1137,49 +1138,6 @@ def print_routing_quality_stanza(metrics: RoutingQualityMetrics) -> None:
         f"{metrics.staircase_step_count} ({pct(metrics.staircase_step_count)})"
     )
     print(f"  Zero-length:  {metrics.zero_length_count}")
-
-
-CHECK_CATEGORIES = [
-    "physical_copper_gap",
-    "ampacity",
-    "path_ampacity",
-    "clearance",
-    "connectivity",
-    "connector_access",
-    "segment_zone",
-    "via_zone",
-    "copper_sliver",
-    "courtyard_overlap",
-    "dangling_copper",
-    "diffpair_clearance_intra",
-    "diffpair_length_skew",
-    "diffpair_routing_continuity",
-    "diffpair_uncoupled_length",
-    "dimensions",
-    "doc_drift",
-    "edge",
-    "impedance",
-    "isolated_copper",
-    "match_group_length_skew",
-    "netclass_clearance_copper",
-    "netclass_floor",
-    "netlist",
-    "pad_grid",
-    "pin1_marker",
-    "placement",
-    "routing_policy",
-    "sch_fields",
-    "silkscreen",
-    "single_pad_net",
-    "solder_mask",
-    "mask_to_copper",
-    "via_in_pad",
-    "via_type",
-    "via_under_body",
-    "width_consistency",
-    "zero_length_segment",
-    "zones",
-]
 
 
 def _warn_unevaluated_ampacity(

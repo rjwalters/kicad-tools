@@ -38,6 +38,7 @@ from .geometry import (
     shorten_segment_start,
     total_length,
 )
+from .kelvin_gate import kelvin_branch_gate
 from .pcb import optimize_pcb, parse_net_names, parse_segments, replace_segments
 from .via_optimizer import ViaOptimizationConfig, ViaOptimizer
 
@@ -231,14 +232,30 @@ def optimize_routes_grid_synced(
         The new ``router.routes`` list (also assigned on the router).
     """
     gate = pairwise_route_gate(router)
+    # Issue #5398: the optimizer's collision checker ignores same-net copper,
+    # so without this gate a rewrite can join two branches of a Kelvin star
+    # away from the shunt pad.  ``None`` (no Kelvin net) costs nothing.
+    kelvin = kelvin_branch_gate(router)
+    accept: Callable[[Route, Route], bool] | None
+    if gate is not None and kelvin is not None:
+        pairwise, branches = gate, kelvin
+
+        def accept(original: Route, optimized: Route) -> bool:
+            return branches(original, optimized) and pairwise(original, optimized)
+
+    else:
+        accept = gate if gate is not None else kelvin
     routes = apply_route_transform_grid_synced(
-        router, optimizer.optimize_route, skip_nets=skip_nets, accept=gate
+        router, optimizer.optimize_route, skip_nets=skip_nets, accept=accept
     )
     if gate is not None:
         # Issue #4766 AC8: record the coarse-veto cost on the router (for
         # tests / callers) and surface it once per pass.
         router._pairwise_optimize_vetoes = gate.vetoes
         gate.report()
+    if kelvin is not None:
+        router._kelvin_optimize_vetoes = kelvin.vetoes
+        kelvin.report()
     return routes
 
 
