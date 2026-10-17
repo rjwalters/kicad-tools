@@ -41,7 +41,7 @@ def renderer_identity() -> dict[str, str | None]:
     kicad_cli = find_kicad_cli()
     kicad_version = get_kicad_cli_version(kicad_cli) if kicad_cli is not None else None
     try:
-        import cairosvg
+        import cairosvg  # type: ignore[import-untyped]
 
         cairosvg_version: str | None = str(cairosvg.__version__)
     except Exception:  # missing or broken native cairo
