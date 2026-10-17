@@ -4672,6 +4672,28 @@ class Autorouter:
             hi_y = min(by1, lo_y + coarse)
         return (lo_x, lo_y, hi_x, hi_y)
 
+    @staticmethod
+    def _print_pair_gateway_lines(coupled: list, gateways: dict, gateway_log: dict) -> None:
+        """Print one gateway line per pair: the gateway it took, else why it declined.
+
+        Issue #6932: a decline is printed even when the pair then routed
+        planar (``coupled``) -- a gateway-first decline followed by a planar
+        success is exactly the case whose reason was previously suppressed.
+        A pair with no ``gateway_log`` entry (gateway-first gate never
+        entered) prints nothing.
+        """
+        for pc in coupled:
+            label = f"{pc.pad_p_a.ref}.{pc.pad_p_a.pin}->{pc.pad_p_b.ref}.{pc.pad_p_b.pin}"
+            if pc.key in gateways:
+                print(
+                    f"  Diff-pair gateway (lattice) {pc.pair_name} {label}: "
+                    f"coupled through {gateways[pc.key]}"
+                )
+            elif pc.key in gateway_log:
+                print(
+                    f"  Diff-pair gateway (lattice) {pc.pair_name} {label}: {gateway_log[pc.key]}"
+                )
+
     def _print_pair_threshold_report(self) -> None:
         """Print the continuity / skew thresholds ``kct check`` applies per pair (#6442)."""
         from kicad_tools.validate.diffpair_engagement import pair_threshold_report
@@ -5451,18 +5473,7 @@ class Autorouter:
             rollback = getattr(pf, "pair_gateway_rollback", None)
             if isinstance(rollback, str):
                 print(f"  Diff-pair gateway (lattice): {rollback}")
-            for pc in coupled:
-                label = f"{pc.pad_p_a.ref}.{pc.pad_p_a.pin}->{pc.pad_p_b.ref}.{pc.pad_p_b.pin}"
-                if pc.key in gateways:
-                    print(
-                        f"  Diff-pair gateway (lattice) {pc.pair_name} {label}: "
-                        f"coupled through {gateways[pc.key]}"
-                    )
-                elif pc.key in gateway_log and outcomes.get(pc.key, "") != "coupled":
-                    print(
-                        f"  Diff-pair gateway (lattice) {pc.pair_name} {label}: "
-                        f"{gateway_log[pc.key]}"
-                    )
+            self._print_pair_gateway_lines(coupled, gateways, gateway_log)
             # Issue #6446: one line per segment the one-ended hybrid retry was
             # offered to -- the coupled trunk and its legs on success, or the
             # hard terminal and the shortest legs found against the cap.
