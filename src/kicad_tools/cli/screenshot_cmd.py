@@ -129,9 +129,7 @@ def _baseline_options(args: argparse.Namespace, input_path: Path) -> dict[str, o
     }
 
 
-def _baseline_step(
-    args: argparse.Namespace, input_path: Path, result: dict, as_json: bool
-) -> int:
+def _baseline_step(args: argparse.Namespace, input_path: Path, result: dict, as_json: bool) -> int:
     """Save or compare a baseline. Returns the process exit code."""
     from . import screenshot_baseline as sb
 
