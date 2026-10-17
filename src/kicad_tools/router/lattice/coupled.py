@@ -521,6 +521,86 @@ def seg_rect_dist(a: Pt, b: Pt, rect: Rect) -> float:
     )
 
 
+def _seg_rect_entry(a: Pt, b: Pt, rect: Rect) -> float | None:
+    """Smallest ``t`` in ``[0, 1]`` where ``a + t (b - a)`` is inside ``rect``."""
+    x0, y0, x1, y1 = rect
+    t0, t1 = 0.0, 1.0
+    for p, q, lo, hi in ((a[0], b[0], x0, x1), (a[1], b[1], y0, y1)):
+        d = q - p
+        if abs(d) <= _EPS:
+            if p < lo - _EPS or p > hi + _EPS:
+                return None
+            continue
+        ta, tb = (lo - p) / d, (hi - p) / d
+        if ta > tb:
+            ta, tb = tb, ta
+        t0, t1 = max(t0, ta), min(t1, tb)
+        if t0 > t1:
+            return None
+    return t0
+
+
+def _entry_in_copper(entry: Pt, pad: Pad, half_w: float, half_h: float) -> bool:
+    """True when ``entry`` lies inside the pad's real copper outline.
+
+    The AABB is exact for rect/roundrect pads at a cardinal rotation; round
+    and oval pads leave the AABB corners empty, so test their true outline.
+    """
+    dx, dy = entry[0] - pad.x, entry[1] - pad.y
+    if pad.shape in ("circle", "oval") and half_w > _EPS and half_h > _EPS:
+        return (dx / half_w) ** 2 + (dy / half_h) ** 2 <= 1.0 + _EPS
+    return True
+
+
+def clip_to_pad_entry(points: list[Pt], pad: Pad, trace_w: float) -> list[Pt]:
+    """Trim the pad-end tail of ``points`` where the track enters ``pad``.
+
+    ``points`` ends at the pad (its last point is the pad position).  The
+    polyline is cut at the first point, walking from the far end, that lies
+    inside the pad rectangle inset by ``trace_w / 2`` along its travel axis --
+    the track end is then inside the pad copper and the in-pad tail (and any dogleg
+    within it) is dropped (issue #6959).  An axis no wider than the trace
+    keeps the pad's full extent.  Returned unchanged when neither axis can
+    inset (``vpad`` gateway pads have zero size), when the far end is
+    already inside the pad, or when no entry exists.
+    """
+    from ..primitives import pad_half_extents
+
+    # A non-cardinal residual rotation makes the AABB far larger than the
+    # copper, so a cut on it can land off the pad (an open circuit): keep
+    # the unclipped leg to the pad centre.
+    if pad.rotation % 90.0 > _EPS and 90.0 - pad.rotation % 90.0 > _EPS:
+        return points
+    half_w, half_h = pad_half_extents(pad)
+    inset = trace_w / 2.0
+    # The track end is inset only along the segment's travel axis: a leg
+    # running alongside the pad's edge region (inside the copper, outside the
+    # all-round inset) must still be cut at the pad's far edge.
+    ix = inset if half_w - inset > _EPS else 0.0
+    iy = inset if half_h - inset > _EPS else 0.0
+    if (ix == 0.0 and iy == 0.0) or len(points) < 2:
+        return points
+    x0, y0, x1, y1 = pad.x - half_w, pad.y - half_h, pad.x + half_w, pad.y + half_h
+    if pt_in_rect(points[0], (x0 + ix, y0 + iy, x1 - ix, y1 - iy)):
+        return points
+    for i, (a, b) in enumerate(zip(points, points[1:], strict=False)):
+        if abs(b[0] - a[0]) >= abs(b[1] - a[1]):
+            rect = (x0 + ix, y0, x1 - ix, y1)
+        else:
+            rect = (x0, y0 + iy, x1, y1 - iy)
+        t = _seg_rect_entry(a, b, rect)
+        if t is None:
+            continue
+        entry = (a[0] + t * (b[0] - a[0]), a[1] + t * (b[1] - a[1]))
+        if not _entry_in_copper(entry, pad, half_w, half_h):
+            return points
+        clipped = [*points[: i + 1], entry]
+        if sum(dist(u, v) for u, v in zip(clipped, clipped[1:], strict=False)) <= _EPS:
+            return points
+        return clipped
+    return points
+
+
 def relocate_pair_anchor(
     obstacles: LatticeObstacleModel,
     pad_p: Pad,
