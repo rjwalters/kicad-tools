@@ -49,6 +49,23 @@ def test_clip_leaves_tiny_and_gateway_pads_unchanged() -> None:
     assert clip_to_pad_entry(pts, _pad(width=0.0, height=0.0), _TW) == pts
 
 
+def test_clip_skips_non_cardinal_rotated_pad() -> None:
+    # The AABB of a 45-degree 0.3 x 1.5 pad is far larger than its copper; a
+    # cut on it would land off the pad (open circuit), so the leg is kept.
+    pts = [(5.0, 5.0), (10.0, 5.0)]
+    pad = _pad(width=0.3, height=1.5, rotation=45.0)
+    assert clip_to_pad_entry(pts, pad, 0.2) == pts
+
+
+def test_clip_off_axis_circle_entry_stays_in_copper() -> None:
+    # Off-axis entry into a 0.6 mm circle pad: the AABB cut lies outside the
+    # round copper, so the polyline is left unchanged.
+    pts = [(5.0, 4.75), (10.0, 4.75)]
+    pad = _pad(width=0.6, height=0.6, shape="circle")
+    out = clip_to_pad_entry(pts, pad, 0.2)
+    assert out == pts
+
+
 def test_clip_leaves_leg_that_starts_inside_pad() -> None:
     pts = [(9.95, 5.0), (10.0, 5.0)]
     assert clip_to_pad_entry(pts, _pad(), _TW) == pts

@@ -505,6 +505,18 @@ def _seg_rect_entry(a: Pt, b: Pt, rect: Rect) -> float | None:
     return t0
 
 
+def _entry_in_copper(entry: Pt, pad: Pad, half_w: float, half_h: float) -> bool:
+    """True when ``entry`` lies inside the pad's real copper outline.
+
+    The AABB is exact for rect/roundrect pads at a cardinal rotation; round
+    and oval pads leave the AABB corners empty, so test their true outline.
+    """
+    dx, dy = entry[0] - pad.x, entry[1] - pad.y
+    if pad.shape in ("circle", "oval") and half_w > _EPS and half_h > _EPS:
+        return (dx / half_w) ** 2 + (dy / half_h) ** 2 <= 1.0 + _EPS
+    return True
+
+
 def clip_to_pad_entry(points: list[Pt], pad: Pad, trace_w: float) -> list[Pt]:
     """Trim the pad-end tail of ``points`` where the track enters ``pad``.
 
@@ -519,6 +531,11 @@ def clip_to_pad_entry(points: list[Pt], pad: Pad, trace_w: float) -> list[Pt]:
     """
     from ..primitives import pad_half_extents
 
+    # A non-cardinal residual rotation makes the AABB far larger than the
+    # copper, so a cut on it can land off the pad (an open circuit): keep
+    # the unclipped leg to the pad centre.
+    if pad.rotation % 90.0 > _EPS and 90.0 - pad.rotation % 90.0 > _EPS:
+        return points
     half_w, half_h = pad_half_extents(pad)
     inset = trace_w / 2.0
     # The track end is inset only along the segment's travel axis: a leg
@@ -540,6 +557,8 @@ def clip_to_pad_entry(points: list[Pt], pad: Pad, trace_w: float) -> list[Pt]:
         if t is None:
             continue
         entry = (a[0] + t * (b[0] - a[0]), a[1] + t * (b[1] - a[1]))
+        if not _entry_in_copper(entry, pad, half_w, half_h):
+            return points
         clipped = [*points[: i + 1], entry]
         if sum(dist(u, v) for u, v in zip(clipped, clipped[1:], strict=False)) <= _EPS:
             return points
