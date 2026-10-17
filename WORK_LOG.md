@@ -5,6 +5,9 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 ---
 ### 2026-10-17
 
+- **PR #6922**: feat(router): one-ended hybrid trunk + legs for declined lattice diff pairs
+- **PR #6905**: fix: rewrite relative markdown links when copying board docs into bundles
+- **Issue #6899** (closed): packaging: design-source README copies in manufacturing bundles keep relative links that break (boards 03/04/07)
 - **PR #6920**: test: guard MCP schemas against unread params and reject unknown arguments
 - **PR #6919**: fix: stop MCP export/validation tools reporting success on empty results
 - **PR #6916**: docs: classify Konnect v0.8-v0.13 ideas and refresh its registry entry
