@@ -68,6 +68,7 @@ from .diffpair_detection import (
 )
 from .diffpair_length import DiffPairLengthTracker
 from .edge_keepout import install_edge_keepout
+from .grid import routed_halo_radius_cells
 from .layers import Layer
 from .observability import validate_net_connectivity
 from .pair_layer_filter import pair_permitted_layers
@@ -5570,11 +5571,8 @@ class DiffPairRouter:
         """
         grid = self.autorouter.grid
         for seg in route.segments:
-            total_clearance = seg.width / 2 + grid.rules.trace_clearance
-            clearance_cells = int(total_clearance / grid.resolution) + 1
-            # Mirror the #1666 grid-quantization safety margin used by
-            # ``RoutingGrid.mark_route``.
-            clearance_cells += 1
+            # Same PY halo radius as ``RoutingGrid.mark_route`` (#5858/#6982).
+            clearance_cells = routed_halo_radius_cells(seg, grid.rules, grid.resolution)
             grid._mark_segment(seg, clearance_cells=clearance_cells)
         self.autorouter._mark_route_on_cpp_grid(route)
 
