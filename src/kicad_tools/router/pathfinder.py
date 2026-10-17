@@ -44,7 +44,7 @@ from .layers import Layer
 from .pad_landing import landing_cost, pad_landing_geometry
 from .primitives import Pad, Route, Segment, Via
 from .quantize import dogleg_points, is_45_aligned
-from .rules import DEFAULT_NET_CLASS_MAP, DesignRules, NetClassRouting
+from .rules import DEFAULT_NET_CLASS_MAP, DesignRules, NetClassRouting, layer_permitted
 from .via_clearance import point_clear_of_copper, segment_clears_foreign_via
 
 # Issue #3135: env-gated A* neighbor-expansion trace.  Set
@@ -4378,15 +4378,20 @@ class Router:
             return frozenset()
         return net_class.hard_avoided_layer_indices(self.rules.strict_layers)
 
-    def _is_layer_allowed(self, layer_idx: int) -> bool:
+    def _is_layer_allowed(self, layer_idx: int, net_class: NetClassRouting | None = None) -> bool:
         """Check if routing on this layer is allowed (Issue #715).
 
         When allowed_layers is set in DesignRules, only those layers
         can be used for routing. This provides a hard constraint for
         single-layer or restricted-layer routing.
 
+        Issue #6876: ``net_class``'s ``allow_plane_layers`` opt-in widens the
+        gate for the named layers only (via the shared
+        :func:`~kicad_tools.router.rules.layer_permitted` predicate).
+
         Args:
             layer_idx: Grid layer index
+            net_class: The routed net's class, or None (no opt-in).
 
         Returns:
             True if layer is allowed (or no restriction), False if blocked
@@ -4397,7 +4402,7 @@ class Router:
         # Convert grid index to Layer enum value, then to KiCad name for comparison
         layer_value = self.grid.index_to_layer(layer_idx)
         layer = Layer(layer_value)
-        return layer.kicad_name in self.rules.allowed_layers
+        return layer_permitted(self.rules, net_class, layer_idx, layer.kicad_name)
 
     def _can_place_via_in_zones(self, gx: int, gy: int, net: int) -> bool:
         """Check if via placement is legal considering zones on all layers.
@@ -4680,8 +4685,8 @@ class Router:
 
         # Filter start/end layers by allowed_layers constraint (Issue #715)
         if self.rules.allowed_layers is not None:
-            start_layers = [l for l in start_layers if self._is_layer_allowed(l)]
-            end_layers = [l for l in end_layers if self._is_layer_allowed(l)]
+            start_layers = [l for l in start_layers if self._is_layer_allowed(l, net_class)]
+            end_layers = [l for l in end_layers if self._is_layer_allowed(l, net_class)]
             # If no valid layers remain, routing is impossible
             if not start_layers or not end_layers:
                 return None
@@ -5446,8 +5451,8 @@ class Router:
                 if new_layer == current.layer:
                     continue
 
-                # Check layer constraint (Issue #715)
-                if not self._is_layer_allowed(new_layer):
+                # Check layer constraint (Issue #715; #6876 per-class opt-in)
+                if not self._is_layer_allowed(new_layer, net_class):
                     continue
 
                 # Issue #4433: hard per-net avoid_layers -- refuse to via onto
@@ -6512,8 +6517,8 @@ class Router:
 
         # Apply layer constraints
         if self.rules.allowed_layers is not None:
-            start_layers = [l for l in start_layers if self._is_layer_allowed(l)]
-            end_layers = [l for l in end_layers if self._is_layer_allowed(l)]
+            start_layers = [l for l in start_layers if self._is_layer_allowed(l, net_class)]
+            end_layers = [l for l in end_layers if self._is_layer_allowed(l, net_class)]
             if not start_layers or not end_layers:
                 return None
 
@@ -7181,14 +7186,15 @@ class Router:
         # Issue #4433: hard per-net avoid_layers -- resolved once for this
         # expansion so the via loop below refuses to change onto an avoided
         # inner plane.  Empty set => no-op (soft default preserved).
-        bidi_hard_avoided = self._hard_avoided_layers(self._get_net_class(source_pad.net_name))
+        bidi_net_class = self._get_net_class(source_pad.net_name)
+        bidi_hard_avoided = self._hard_avoided_layers(bidi_net_class)
 
         # Try layer changes (vias)
         for new_layer in self.grid.get_routable_indices():
             if new_layer == current.layer:
                 continue
 
-            if not self._is_layer_allowed(new_layer):
+            if not self._is_layer_allowed(new_layer, bidi_net_class):
                 continue
 
             # Issue #4433: refuse a via onto a hard-avoided layer for this net.

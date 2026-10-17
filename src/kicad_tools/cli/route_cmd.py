@@ -10108,7 +10108,11 @@ def _audit_plane_layer_reservation(router: "Autorouter", layer_stack) -> "list":
     """
     from kicad_tools.router.layer_advisories import plane_layer_signal_violations
 
-    violations = plane_layer_signal_violations(router.routes, layer_stack)
+    # Issue #6876: (net, layer) pairs the net's class opted in to via
+    # ``allow_plane_layers`` are deliberate, not violations.
+    violations = plane_layer_signal_violations(
+        router.routes, layer_stack, getattr(router, "net_class_map", None)
+    )
     if violations:
         print(
             "\n".join(v.message for v in violations),
@@ -19131,7 +19135,9 @@ def _route_parser() -> argparse.ArgumentParser:
             "PLANE layers (--layers 2, 4-all, or an all-signal "
             "auto-detected board). Pass --no-reserve-plane-layers to allow "
             "signal routing across declared plane layers (pre-#5789 "
-            "behavior)."
+            "behavior). A net class can opt in to named reserved planes "
+            "with allow_plane_layers in its net-class map; every other "
+            "class stays off them (Issue #6876)."
         ),
     )
     # Issue #3154: advisory schematic/PCB drift banner.  When a schematic is
