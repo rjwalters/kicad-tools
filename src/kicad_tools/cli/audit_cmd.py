@@ -26,7 +26,7 @@ import sys
 from pathlib import Path
 
 from kicad_tools.audit import AuditResult, AuditVerdict, ManufacturingAudit
-from kicad_tools.manufacturers import get_manufacturer_ids
+from kicad_tools.manufacturers import get_all_manufacturer_names, get_profile
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -50,7 +50,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--mfr",
         "-m",
-        choices=get_manufacturer_ids(),
+        choices=get_all_manufacturer_names(),
         default="jlcpcb",
         help="Target manufacturer (default: jlcpcb)",
     )
@@ -169,6 +169,7 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     args = parser.parse_args(argv)
+    args.mfr = get_profile(args.mfr).id
 
     # Validate input file - resolve to absolute path for reliable file access
     path = Path(args.project_or_pcb).resolve()

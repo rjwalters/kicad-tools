@@ -27,7 +27,7 @@ from kicad_tools.cli.format_options import (
     emit_json,
     stdout_to_stderr_when,
 )
-from kicad_tools.manufacturers import get_manufacturer_ids
+from kicad_tools.manufacturers import get_all_manufacturer_names, get_profile
 
 
 def _fail(
@@ -106,7 +106,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--mfr",
         "-m",
-        choices=get_manufacturer_ids(),
+        choices=get_all_manufacturer_names(),
         default="jlcpcb",
         help="Target manufacturer for DRC rules (default: jlcpcb)",
     )
@@ -136,6 +136,7 @@ def main(argv: list[str] | None = None) -> int:
     add_format_flag(parser)
 
     args = parser.parse_args(argv)
+    args.mfr = get_profile(args.mfr).id
     as_json = args.format == FORMAT_JSON
 
     # Validate input
