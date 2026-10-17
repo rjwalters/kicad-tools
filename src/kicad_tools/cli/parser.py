@@ -186,6 +186,7 @@ def create_parser() -> argparse.ArgumentParser:
     _add_stitch_parser(subparsers)
     _add_route_parser(subparsers)
     _add_route_auto_parser(subparsers)
+    _add_retune_lengths_parser(subparsers)
     _add_reason_parser(subparsers)
     _add_optimize_parser(subparsers)
     _add_validate_footprints_parser(subparsers)
@@ -5459,6 +5460,65 @@ def _add_route_parser(subparsers) -> None:
             "(default: 30.0). Mirrors optimize-placement / kct creepage."
         ),
     )
+
+
+def _add_retune_lengths_parser(subparsers) -> None:
+    """Add retune-lengths subcommand parser (Issue #6885)."""
+    p = subparsers.add_parser(
+        "retune-lengths",
+        help="Length-tune selected match groups / diff pairs on an already-routed PCB",
+        description=(
+            "Apply the existing match-group and diff-pair skew tuners to the "
+            "SELECTED groups of a routed board, writing a distinct output board "
+            "and a provenance record. The input is never modified; nothing is "
+            "written unless every selected target reaches the limit kct check "
+            "enforces. Unselected copper is preserved."
+        ),
+    )
+    p.add_argument("pcb", help="Path to the routed .kicad_pcb (read-only)")
+    p.add_argument(
+        "-o",
+        "--output",
+        required=True,
+        help="Output .kicad_pcb path (must differ from the input and not exist)",
+    )
+    p.add_argument(
+        "--net-class-map",
+        dest="net_class_map",
+        required=True,
+        help="Net-class sidecar JSON declaring the groups/pairs and tolerances (as for kct check)",
+    )
+    p.add_argument(
+        "--group",
+        dest="groups",
+        action="append",
+        default=[],
+        metavar="NAME",
+        help="Match group to tune (declared length_match_group); repeatable",
+    )
+    p.add_argument(
+        "--diffpair",
+        dest="diffpairs",
+        action="append",
+        default=[],
+        nargs=2,
+        metavar=("POS_NET", "NEG_NET"),
+        help="Differential pair to skew-tune, as its two net names; repeatable",
+    )
+    p.add_argument(
+        "--timeout",
+        dest="timeout",
+        type=float,
+        default=300.0,
+        help="Wall-clock budget for the tuning step in seconds (default: 300)",
+    )
+    p.add_argument(
+        "--provenance",
+        dest="provenance",
+        default=None,
+        help="Provenance JSON path (default: <output>.retune.json)",
+    )
+    add_format_flag(p)
 
 
 def _add_route_auto_parser(subparsers) -> None:

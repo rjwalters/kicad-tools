@@ -70,6 +70,7 @@ kct [--help] [--version] [--verbose] [-q] [--units {mm,mils}] <command> [options
 | | `datasheet` | Datasheet search and PDF parsing |
 | **PCB Operations** | `route` | Autoroute a PCB |
 | | `route-auto` | Route a net with smart strategy selection |
+| | `retune-lengths` | Length-tune selected match groups / diff pairs on an already-routed PCB |
 | | `zones` | Add copper pour zones |
 | | `placement` | Detect and fix placement conflicts |
 | | `optimize-placement` | CMA-ES placement optimizer (anchor-aware) |
@@ -1369,6 +1370,68 @@ kct route board.kicad_pcb --lint-gate --seed 7 -o routed.kicad_pcb
 ```
 
 ---
+
+### `retune-lengths`
+
+Apply the existing match-group and diff-pair skew tuners to **named** groups of
+a board that is already routed, keeping the reviewed and hand-made copper
+around them (Issue #6885). It is an adapter over `tune_match_group_v2` /
+`tune_diff_pair_skew`, not a router: the board is never rerouted.
+
+```bash
+kct retune-lengths board.kicad_pcb -o board.retuned.kicad_pcb \
+    --net-class-map output/net_class_map.json \
+    --group ADDR_BUS --diffpair USB_D+ USB_D- [--timeout 300] [--provenance p.json]
+```
+
+| Flag | Meaning |
+|------|---------|
+| `-o, --output` | Required. Must differ from the input and must not exist (it is never overwritten) |
+| `--net-class-map` | Required. The sidecar `kct check` reads; groups, pairs and tolerances come only from here |
+| `--group NAME` | Declared `length_match_group` to tune; repeatable |
+| `--diffpair POS NEG` | Detected diff pair, as its two net names; repeatable |
+| `--timeout SEC` | Wall-clock budget for the tuning step (default 300) |
+| `--provenance PATH` | Provenance JSON (default `<output>.retune.json`); must not exist |
+
+At least one `--group` or `--diffpair` is required; there is no whole-board
+fallback.
+
+**Supported input.** A routed `.kicad_pcb` with copper layers, a
+`(general (thickness ..))` or `(setup (stackup ..))`, straight `(segment ..)`
+copper on the selected nets (a selected net carrying `(arc ..)` copper is
+refused), and a net-class map that declares the selected groups or pairs.
+
+**Limits.** Each target is tuned to exactly the limit `kct check` enforces
+(`resolve_group_tolerance_mm` for groups, `resolve_pair_thresholds` for pairs);
+nothing is inferred or loosened. A diff pair reports its gate (`tolerance_mm`)
+and its tighter stretch target (`stretch_target_mm`) as two separate numbers.
+
+**Guarantees.**
+
+- The input is only read. The output is written atomically, and only after
+  every selected target is **re-measured on the written board** with the
+  checker's own functions and found within its limit; tuner success alone is
+  never trusted.
+- Only `(segment ..)`/`(via ..)` blocks of the selected nets change. Unchanged
+  selected blocks keep their original text (uuid, `locked`). Unselected nets are
+  fixed obstacles the meanders must clear. With the selected nets' copper
+  removed, the output must equal the input byte for byte, otherwise the run
+  fails with `scope_violation`.
+- New copper uses seeded uuids, so the same input and settings give identical
+  output bytes.
+- A provenance record holds input/output SHA-256, selected groups, tool
+  version, settings, per-net before/after lengths and the changed-net list.
+
+**Failure modes** (exit 1, no output file, input unchanged; `--format json` adds
+a `code`): `no_selection`, `unknown_group`, `unknown_diffpair`,
+`ambiguous_group`, `missing_rules`, `missing_stackup`, `unsupported_pcb`,
+`no_geometry`, `unmeasurable`, `output_is_input`, `output_exists`, `timeout`,
+`unattainable` (a target stayed outside its limit), `scope_violation`. A
+selection already within its limits succeeds as `already_satisfied` with an
+output identical to the input.
+
+A successful run is **not** a board sign-off: still run `kct check`,
+`kicad-cli pcb drc --refill-zones` and the LVS/manufacturing gates on the output.
 
 ### `zones`
 

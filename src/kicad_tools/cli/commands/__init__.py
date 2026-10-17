@@ -79,6 +79,7 @@ _HANDLER_MODULES: dict[str, str] = {
     "run_readiness_command": ".readiness",
     "run_reason_command": ".reasoning",
     "run_optimize_command": ".routing",
+    "run_retune_lengths_command": ".routing",
     "run_route_auto_command": ".routing",
     "run_route_command": ".routing",
     "run_zones_command": ".routing",

@@ -343,6 +343,11 @@ def _dispatch_command(args) -> int:
 
         return run_route_auto_command(args)
 
+    elif args.command == "retune-lengths":
+        from .commands.routing import run_retune_lengths_command
+
+        return run_retune_lengths_command(args)
+
     elif args.command == "reason":
         from .commands.reasoning import run_reason_command
 
