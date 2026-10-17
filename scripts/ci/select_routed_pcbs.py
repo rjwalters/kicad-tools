@@ -36,6 +36,15 @@ Correct provenance instead:
   a push to that same ref already IS ``head`` -- a self-diff that always
   yields an empty, falsely-reassuring result.
 
+* ``schedule`` / ``workflow_dispatch`` events (issue #5986) -- the main
+  verification runs. Main is no longer verified on every merge: a scheduled
+  run checks the newest main and covers every merge since the previous run,
+  and GitHub supplies no before/after pair for either event. So these diff
+  against the **empty tree**, i.e. every routed PCB in the tree is checked,
+  for the same reason as a zero-``before`` push: any cheaper base (the
+  previous commit, ``origin/main``) could silently skip a board changed
+  earlier in the batch.
+
 Git failures (unresolvable revision, non-zero ``git diff`` exit code) are
 distinct from a genuinely empty match: the former raises and the CLI exits
 non-zero; the latter returns an empty result and the CLI exits 0. The caller
@@ -92,6 +101,10 @@ INFRA_TRIGGER_PATHS = frozenset(
 )
 
 ZERO_SHA = "0" * 40
+
+# Events that run CI against main itself rather than a PR (issue #5986). They
+# carry no before/after pair, so selection scans the whole tree.
+FULL_SCAN_EVENTS = frozenset({"schedule", "workflow_dispatch"})
 
 
 class SelectionError(RuntimeError):
@@ -187,6 +200,21 @@ def resolve_push_base(repo_root: Path, head_sha: str, before: str | None) -> str
     return resolve_empty_tree(repo_root)
 
 
+def resolve_full_scan_base(repo_root: Path, head_sha: str) -> str:
+    """Resolve the diff base for a ``schedule`` / ``workflow_dispatch`` run.
+
+    Returns the empty tree, so every routed PCB in ``head_sha``'s tree is
+    selected. A scheduled main run verifies a batch of merges with no event
+    payload describing where the batch starts; over-selection is the only
+    choice that cannot hide a changed board (see :func:`resolve_push_base`).
+    """
+    if not _revision_exists(repo_root, head_sha):
+        raise GitCommandError(
+            f"checked-out commit {head_sha!r} does not resolve; cannot compute a diff base."
+        )
+    return resolve_empty_tree(repo_root)
+
+
 def resolve_pr_base(repo_root: Path, head_sha: str, pr_head_sha: str | None) -> str:
     """Resolve the diff base for a ``pull_request`` event.
 
@@ -266,11 +294,14 @@ def select_routed_pcbs(
         base = resolve_push_base(repo_root, head_sha, push_before)
     elif event_name == "pull_request":
         base = resolve_pr_base(repo_root, head_sha, pr_head_sha)
+    elif event_name in FULL_SCAN_EVENTS:
+        base = resolve_full_scan_base(repo_root, head_sha)
     else:
-        # This job only triggers on push/pull_request today (see the `on:`
-        # block in ci.yml). Handled explicitly (rather than left to error
-        # out deep inside git) so an unexpected future trigger fails with an
-        # attributable message instead of a confusing git error.
+        # ci.yml triggers on pull_request, schedule and workflow_dispatch
+        # (push kept above for a manual/legacy push trigger). Handled
+        # explicitly (rather than left to error out deep inside git) so an
+        # unexpected future trigger fails with an attributable message
+        # instead of a confusing git error.
         base = fallback_ref
 
     files = run_git_diff(repo_root, base, head_sha)
@@ -312,7 +343,8 @@ def main(argv: list[str] | None = None) -> int:
         "--sha",
         required=True,
         help="The checked-out commit (`github.sha`) -- the PR merge commit "
-        "for pull_request events, or the pushed commit for push events.",
+        "for pull_request events, the pushed commit for push events, or the "
+        "newest main commit for schedule/workflow_dispatch events.",
     )
     parser.add_argument(
         "--push-before",
@@ -333,7 +365,8 @@ def main(argv: list[str] | None = None) -> int:
         "--fallback-ref",
         default="origin/main",
         help="Ref used as the diff base for event types other than "
-        "push/pull_request (default: origin/main). Push events with a "
+        "push/pull_request/schedule/workflow_dispatch (default: origin/main). "
+        "schedule/workflow_dispatch scan the whole tree. Push events with a "
         "missing/zero 'before' deliberately do NOT use this -- they diff "
         "against the empty tree instead; see the module docstring.",
     )

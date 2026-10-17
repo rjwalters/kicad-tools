@@ -6,12 +6,15 @@
 Every test whose measured time is at least --threshold seconds is written to
 tests/ci_extended.txt, slowest first. tests/conftest.py gives those tests the
 `ci_extended` marker: the "Test" job deselects them so it fits a GitHub-hosted
-runner on every PR, and the "Test (extended)" job runs them on main pushes and
-the nightly schedule.
+runner on every PR, and the "Test (extended)" job runs them on main
+verification runs (the hourly/nightly schedule and workflow_dispatch; main is
+no longer verified on every push since Issue #5986).
 
 Inputs are JUnit XML files from `pytest --junitxml`. In CI, the "Retain test
 timings" steps upload them (artifacts junit-bulk-* and junit-extended-*);
-download both from one main run so the list covers the whole bulk pool. A test
+download both from one main (scheduled or dispatched) run so the list covers
+the whole bulk pool -- a skipped hourly run (newest main already verified)
+uploads neither. A test
 measured in several files keeps its largest time.
 """
 
