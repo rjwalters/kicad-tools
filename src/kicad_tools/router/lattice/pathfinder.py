@@ -3926,21 +3926,34 @@ class LatticePathfinder:
                     ):
                         return None, "pair-hybrid-leg-pad-class", lens, trunk_mm
 
-        # Junction: each leg against the PARTNER's trunk (the search above
-        # already held it to the class clearance; this re-verifies the
-        # emitted geometry the way ``finish`` does for a coupled pair).
-        trunk_segs: dict[int, list[tuple[Pt, Pt, int]]] = {}
+        # Junction: each leg against everything of the PARTNER's -- its trunk
+        # and its leg.  The searches above held the legs to the class
+        # clearance, but a hybrid leg that skims the partner is "within the
+        # pair" to the checker, which wants the pair's own intra-pair gap
+        # (``pitch - trace``, raised to the fab minimum), so that is the floor
+        # here, with a micron of margin over the checker's rounding.
+        need = 2.0 * half + max(clr, pc.pitch - 2.0 * half) + 1e-3
+        partner: dict[int, list[tuple[Pt, Pt, int]]] = {}
         for net, run_layer, pts in trunk.runs:
-            trunk_segs.setdefault(net, []).extend(
+            partner.setdefault(net, []).extend(
                 (a, b, run_layer) for a, b in zip(pts, pts[1:], strict=False) if dist(a, b) > 1e-9
             )
-        for pol, other in (("P", pc.pad_n_a.net), ("N", pc.pad_p_a.net)):
+        for pol, other_pol, other in (
+            ("P", "N", pc.pad_n_a.net),
+            ("N", "P", pc.pad_p_a.net),
+        ):
+            other_segs = list(partner[other])
+            if pol == "P":  # N's leg is checked against P's once, here
+                for run_layer, pts, _w in legs[other_pol].runs:
+                    other_segs.extend(
+                        (a, b, run_layer)
+                        for a, b in zip(pts, pts[1:], strict=False)
+                        if dist(a, b) > 1e-9
+                    )
             for run_layer, pts, _w in legs[pol].runs:
                 for a, b in zip(pts, pts[1:], strict=False):
-                    for c, d, trunk_layer in trunk_segs[other]:
-                        if trunk_layer == run_layer and seg_seg_dist(a, b, c, d) < (
-                            2.0 * half + clr - 1e-4
-                        ):
+                    for c, d, other_layer in other_segs:
+                        if other_layer == run_layer and seg_seg_dist(a, b, c, d) < need:
                             return None, "pair-hybrid-junction", lens, trunk_mm
 
         routes: list[Route] = []
