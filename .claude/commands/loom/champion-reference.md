@@ -549,6 +549,21 @@ roll) is never satisfiable by a class. Revertability is red only for a one-way
 effect that happens on merge or roll, not for one an operator later triggers
 by hand. Absent `coversCriticalFiles`, nothing changes.
 
+**Critical files only (#12648)**: `"criticalFilesOnly": true` narrows a class
+to the critical-file hits. Its `filePatterns`, `excludeFilePatterns` and
+`forbiddenDiffPatterns` are applied to the files criterion #3 flags (and each
+one's `previous_filename`) and nothing else; the kept set still covers every
+changed file. It waives criterion #3 only and is never eligible for criterion
+#2. Class `ci-only` = `ci-steps` above with `criticalFilesOnly: true`:
+
+| PR | Result |
+|---|---|
+| `.github/workflows/ci.yml` plus `docs/guide.md`, Judge-approved, CI green | #3 **PASS** under `ci-only`, naming `ci.yml`; criterion #2 still judges the whole PR on the four axes and may hold it |
+| same PR, `ci.yml` adds a `permissions:` block | forbidden line in a critical file: #3 **FAIL**, hold |
+| `ci.yml` plus `defaults/scripts/install-loom.sh` | kept set: #3 **FAIL**, hold |
+| `src/ci.yml` renamed to `.github/workflows/ci.yml` | the previous name is outside the class: #3 **FAIL**, hold |
+| `docs/guide.md` alone | no critical-file hit: the class does not apply, #3 passes on its own |
+
 **Action** (single authoritative policy — implemented in
 `champion-pr-merge.md` → "Safety Criteria → 2. Merge-Risk Judgment →
 Standing operator authorization (#6850)"): see that section for the config
