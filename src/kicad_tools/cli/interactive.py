@@ -8,11 +8,15 @@ file path completion, and command history.
 import cmd
 import contextlib
 import os
-import readline
 import shlex
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
+
+try:
+    import readline
+except ImportError:  # Windows CPython ships no readline (Issue #6894)
+    readline = None  # type: ignore[assignment]
 
 
 @dataclass
@@ -51,11 +55,12 @@ Type 'help' for available commands, 'quit' to exit.
 
         # Set up readline history
         self.histfile = Path.home() / ".kicad_tools_history"
-        with contextlib.suppress(FileNotFoundError, PermissionError, OSError):
-            readline.read_history_file(self.histfile)
+        if readline is not None:
+            with contextlib.suppress(FileNotFoundError, PermissionError, OSError):
+                readline.read_history_file(self.histfile)
 
-        # Configure readline for file path completion
-        readline.set_completer_delims(" \t\n;")
+            # Configure readline for file path completion
+            readline.set_completer_delims(" \t\n;")
 
         # Auto-load project if specified
         if project:
@@ -63,6 +68,8 @@ Type 'help' for available commands, 'quit' to exit.
 
     def _save_history(self) -> None:
         """Save command history."""
+        if readline is None:
+            return
         with contextlib.suppress(OSError):
             readline.write_history_file(self.histfile)
 
