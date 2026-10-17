@@ -2487,7 +2487,7 @@ PR_BODY=$(gh pr view "$PR_NUMBER" --json body --jq '.body // ""')
 
 # Extract follow-on sections (case-insensitive matching)
 FOLLOWON_SECTION=""
-for section_name in "Follow-on Work" "Follow-on" "Out of Scope" "Future Work" "Deferred" "Phase 2" "Phase II"; do
+for section_name in "Follow-on Work" "Follow-on" "Future Work" "Deferred" "Phase 2" "Phase II"; do
   # Match section header and capture content until next ## or end
   extracted=$(echo "$PR_BODY" | sed -n "/^## *${section_name}/I,/^## /p" | sed '1d;$d' | head -20)
   if [ -n "$extracted" ]; then

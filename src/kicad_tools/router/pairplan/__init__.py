@@ -36,21 +36,34 @@ from .gateway import (
     rank_gateway_combos,
     rank_through_combos,
 )
+from .hybrid import (
+    HYBRID_MAX_LEG_MM,
+    MAX_TRUNK_STARTS,
+    MIN_TRUNK_PITCHES,
+    TrunkStart,
+    propose_trunk_starts,
+)
 from .outcome import (
     EXHAUSTED_SEARCH_REASONS,
     GATEWAY_RETRY_REASONS,
+    HYBRID_SKIP_REASONS,
     PairOutcome,
     SegmentOutcome,
     SegmentOutcomes,
     aggregate_label,
+    hybrid_retry_reason,
 )
 from .tie import MAX_TIE_STUB_MM, PlannedTie, plan_equivalent_pin_tie
 
 __all__ = [
     "EXHAUSTED_SEARCH_REASONS",
     "GATEWAY_RETRY_REASONS",
+    "HYBRID_SKIP_REASONS",
     "HEADINGS",
+    "HYBRID_MAX_LEG_MM",
     "MAX_TIE_STUB_MM",
+    "MAX_TRUNK_STARTS",
+    "MIN_TRUNK_PITCHES",
     "Couple",
     "Gateway",
     "GatewayCombo",
@@ -60,6 +73,7 @@ __all__ = [
     "PlannedTie",
     "SegmentOutcome",
     "SegmentOutcomes",
+    "TrunkStart",
     "aggregate_label",
     "choose_pair_chain",
     "choose_pair_endpoints",
@@ -68,8 +82,10 @@ __all__ = [
     "gateway_anchor_point",
     "gateway_side",
     "handedness_consistent",
+    "hybrid_retry_reason",
     "plan_equivalent_pin_tie",
     "propose_gateway_sites",
+    "propose_trunk_starts",
     "rank_gateway_combos",
     "rank_through_combos",
 ]

@@ -2,6 +2,8 @@
 
 from pathlib import Path
 
+import pytest
+
 from kicad_tools.cli.export_cmd import _find_pcb_for_export
 from kicad_tools.cli.export_cmd import main as export_main
 
@@ -1158,3 +1160,101 @@ def _option_actions(parser):
             for opt in action.option_strings:
                 out[opt] = action
     return out
+
+
+# Issue #6895: parity only proves a flag is *declared* on both parsers. These
+# cases prove ``_run_export_command`` actually forwards each parsed value into
+# the argv ``export_cmd.main`` consumes.  dest -> (CLI args, expected value).
+_EXPORT_PASS_THROUGH_CASES = {
+    "stackup_id": (["--stackup-id", "JLC04161H-3313"], "JLC04161H-3313"),
+    "mfr": (["--mfr", "pcbway"], "pcbway"),
+    "output": (["-o", "build/out"], "build/out"),
+    "sch": (["--sch", "board.kicad_sch"], "board.kicad_sch"),
+    "dry_run": (["--dry-run"], True),
+    "no_report": (["--no-report"], True),
+    "no_gerbers": (["--no-gerbers"], True),
+    "no_bom": (["--no-bom"], True),
+    "no_cpl": (["--no-cpl"], True),
+    "no_project_zip": (["--no-project-zip"], True),
+    "keep_versions": (["--keep-versions"], True),
+    "keep_build_artifacts": (["--keep-build-artifacts"], True),
+    "keep_gerber_files": (["--keep-gerber-files"], True),
+    "no_auto_lcsc": (["--no-auto-lcsc"], True),
+    "no_spec": (["--no-spec"], True),
+    "no_merge_lcsc": (["--no-merge-lcsc"], True),
+    "skip_preflight": (["--skip-preflight"], True),
+    "skip_drc_floor": (["--skip-drc-floor"], True),
+    "strict_preflight": (["--strict-preflight"], True),
+    "allow_unbuildable_bom": (["--allow-unbuildable-bom"], True),
+    "skip_drc": (["--skip-drc"], True),
+    "skip_erc": (["--skip-erc"], True),
+    "drc_report": (["--drc-report", "drc.json"], "drc.json"),
+    "erc_report": (["--erc-report", "erc.json"], "erc.json"),
+    "bom_source": (["--bom-source", "pcb"], "pcb"),
+    "vscore_layer": (
+        ["--vscore-layer", "F.Cu", "--vscore-layer", "B.Cu"],
+        ["F.Cu", "B.Cu"],
+    ),
+    "include_tht": (["--include-tht"], True),
+    "output_format": (["--format", "json"], "json"),
+}
+
+# Dests with no non-default value reachable from the CLI.  ``--auto-lcsc`` is a
+# store_true with default=True, so it cannot be switched by itself; its off
+# direction is covered by ``no_auto_lcsc`` above.
+_EXPORT_PASS_THROUGH_EXEMPT = {"auto_lcsc"}
+
+
+class TestExportFlagPassThrough:
+    """Issue #6895: every standalone export flag survives ``kct export``."""
+
+    @staticmethod
+    def _forwarded_namespace(tmp_path, monkeypatch, cli_args):
+        from kicad_tools.cli import main as cli_main
+        from kicad_tools.cli.export_cmd import build_parser
+
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text("(kicad_pcb)")
+        captured = {}
+
+        def spy_main(argv=None):
+            captured["argv"] = argv
+            return 0
+
+        monkeypatch.setattr("kicad_tools.cli.export_cmd.main", spy_main)
+        assert cli_main(["export", str(pcb), *cli_args]) == 0
+        return build_parser().parse_args(captured["argv"])
+
+    def test_completeness_guard(self):
+        """A new standalone flag must get a pass-through case (or an exemption)."""
+        from kicad_tools.cli.export_cmd import build_parser
+
+        dests = {a.dest for a in build_parser()._actions if a.option_strings and a.dest != "help"}
+        covered = set(_EXPORT_PASS_THROUGH_CASES) | _EXPORT_PASS_THROUGH_EXEMPT
+        assert dests == covered, (
+            f"uncovered standalone export flags: {sorted(dests - covered)}; "
+            f"stale cases: {sorted(covered - dests)}"
+        )
+
+    @pytest.mark.parametrize("dest", sorted(_EXPORT_PASS_THROUGH_CASES))
+    def test_flag_is_forwarded(self, dest, tmp_path, monkeypatch):
+        from kicad_tools.cli.export_cmd import build_parser
+
+        cli_args, expected = _EXPORT_PASS_THROUGH_CASES[dest]
+        default = build_parser().get_default(dest)
+        assert expected != default, f"{dest}: test value must differ from the default"
+
+        ns = self._forwarded_namespace(tmp_path, monkeypatch, cli_args)
+        assert getattr(ns, dest) == expected
+
+    def test_defaults_when_no_flags_given(self, tmp_path, monkeypatch):
+        """The 'off' direction: with no flags every forwarded dest keeps its default."""
+        from kicad_tools.cli.export_cmd import build_parser
+
+        ns = self._forwarded_namespace(tmp_path, monkeypatch, [])
+        parser = build_parser()
+        for dest in _EXPORT_PASS_THROUGH_CASES:
+            if dest == "mfr":
+                continue  # always forwarded; resolved from project.kct (#6169)
+            assert getattr(ns, dest) == parser.get_default(dest), dest
+        assert ns.auto_lcsc is True

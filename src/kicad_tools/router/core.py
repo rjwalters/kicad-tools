@@ -5434,6 +5434,14 @@ class Autorouter:
                     (label, o) for n, label, o in self._lattice_pair_segment_outcomes if n == name
                 ):
                     print(f"      {name}[{idx}] {label}: {seg_outcome}")
+            # Issue #6446: a hybrid pair (coupled trunk + single-ended legs at
+            # one terminal) is counted apart so the ``coupled`` line above
+            # keeps its meaning.
+            n_hybrid = sum(
+                1 for v in self._lattice_pair_outcomes.values() if v.startswith("hybrid:")
+            )
+            if n_hybrid:
+                print(f"  Diff pairs (lattice) hybrid: {n_hybrid}")
             # Issue #6444: name every fan-via gateway, and why a retried
             # segment's gateway declined (layer, setback, vias, candidates per
             # terminal).  Printed AFTER the outcome list, whose layout the
@@ -5455,6 +5463,16 @@ class Autorouter:
                         f"  Diff-pair gateway (lattice) {pc.pair_name} {label}: "
                         f"{gateway_log[pc.key]}"
                     )
+            # Issue #6446: one line per segment the one-ended hybrid retry was
+            # offered to -- the coupled trunk and its legs on success, or the
+            # hard terminal and the shortest legs found against the cap.
+            hybrid_log = getattr(pf, "pair_hybrid_log", {}) or {}
+            for pc in coupled:
+                if pc.key in hybrid_log and outcomes.get(pc.key, "") != "coupled":
+                    label = f"{pc.pad_p_a.ref}.{pc.pad_p_a.pin}->{pc.pad_p_b.ref}.{pc.pad_p_b.pin}"
+                    print(
+                        f"  Diff-pair hybrid (lattice) {pc.pair_name} {label}: {hybrid_log[pc.key]}"
+                    )
             self._print_pair_threshold_report()
             # Issue #6373: a pair routed by the uncoupled fallback is a
             # diff-pair WARNING (coupling / skew not guaranteed), not an open
@@ -5465,6 +5483,12 @@ class Autorouter:
                         f"  WARNING: diff pair {name} routed uncoupled "
                         f"(coupled run declined: {outcome.split(':', 1)[1]}); "
                         "intra-pair gap and length matching are not guaranteed"
+                    )
+                elif outcome.startswith("hybrid:"):
+                    print(
+                        f"  NOTE: diff pair {name} is hybrid (coupled trunk, single-ended "
+                        f"legs at {outcome.split(':', 1)[1]}); intra-pair gap holds on the "
+                        "trunk only"
                     )
                 elif outcome.startswith("partially-coupled:"):
                     # Issue #6378: name the segments that did not couple.
