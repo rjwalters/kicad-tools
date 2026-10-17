@@ -40,18 +40,14 @@ Issues currently being built (`loom:building`).
 - **#6554**: diffpair: reproduce KiCad's diff_pair_uncoupled primitive pairing exactly (kct is a lower bound)
 - **#6824**: board 03: fresh lattice routes fail routing_plan.usb_geometry (USB_D common run not on In2.Cu, MCU launch > 4 mm) — blocks #6394
 - **#6837**: [Epic #6441] Phase 2c: extract engine-free router/pairplan/ package + structured PairOutcome (prereq for P6 #6448)
-- **#6883**: Lattice coupled pairs never leave the pad layer for a preferred, opted-in plane (board 03 USB_D common run stays on F.Cu)
-- **#6885**: Retune selected diffpair/match groups on an existing routed PCB while preserving reviewed copper
 - **#6894**: ci: add a Windows smoke job; skip test_peak_rss_bytes_positive where resource is unavailable (follow-up #6739)
-- **#6912**: feat: visual baseline record/compare for rendered schematics and boards
 
 ## PRs Awaiting Review
 
 PRs waiting on Judge (`loom:review-requested`).
 
-- **#6891**: feat(router): add kct retune-lengths for selected groups on a routed PCB
-- **#6917**: feat: add screenshot baseline save/compare with renderer-identity check
-- **#6921**: fix(router): try lattice pair gateway before planar run for non-pad preferred layers
+- **#6910**: feat(router): lattice pairs try the gateway on a preferred layer before planar
+- **#6926**: refactor(router): pairplan attach and anchor-shift candidate generators (#6837 slice 2c-iii)
 
 ## Approved (Awaiting Merge)
 
@@ -87,9 +83,7 @@ Issues carrying `loom:curated`.
 - **#6850**: Live-verify #6842 gateway offer on boards 03/06b/06rf/07rf *(curated)*
 - **#6858**: router: coupled pre-pass should keep the better of the joint-search and pose-centreline candidates (compare-and-keep; unblocks #6835) *(curated)*
 - **#6883**: Lattice coupled pairs never leave the pad layer for a preferred, opted-in plane (board 03 USB_D common run stays on F.Cu) *(curated)*
-- **#6885**: Retune selected diffpair/match groups on an existing routed PCB while preserving reviewed copper *(curated)*
 - **#6894**: ci: add a Windows smoke job; skip test_peak_rss_bytes_positive where resource is unavailable (follow-up #6739) *(curated)*
-- **#6912**: feat: visual baseline record/compare for rendered schematics and boards *(curated)*
 
 ## Proposed (Architect / Hermit)
 
@@ -121,10 +115,10 @@ Issues carrying `loom:curated`.
 | Very important | 0 |
 | Important | 0 |
 | Ready (`loom:issue`) | 2 |
-| In Progress (`loom:building`) | 7 |
-| PRs awaiting review | 3 |
+| In Progress (`loom:building`) | 4 |
+| PRs awaiting review | 2 |
 | Approved PRs awaiting merge | 2 |
-| Curated | 26 |
+| Curated | 24 |
 | Architect / Hermit proposals | 8 |
 | Active epics | 8 |
 <!-- guide:plan-body:end -->
