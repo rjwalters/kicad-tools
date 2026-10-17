@@ -12,6 +12,8 @@ from io import StringIO
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+from tests.route_cli import kct_route, route_args
+
 
 def _make_mock_route(net_id: int, net_name: str = ""):
     """Create a minimal mock Route object."""
@@ -505,103 +507,22 @@ class TestExportFailedNets:
         help_text = help_output.getvalue()
         assert "--export-failed-nets" in help_text
 
-    def test_export_failed_nets_forwarded_by_run_route_command(self):
-        """run_route_command forwards --export-failed-nets to route_cmd.main."""
-        from kicad_tools.cli.commands.routing import run_route_command
+    def test_export_failed_nets_forwarded_by_kct_route(self):
+        """``kct route`` hands --export-failed-nets to route_cmd.main (#7017)."""
+        forwarded, args = kct_route(["test.kicad_pcb", "--export-failed-nets", "failed.txt"])
+        assert forwarded[forwarded.index("--export-failed-nets") + 1] == "failed.txt"
+        assert args.export_failed_nets == "failed.txt"
 
-        args = SimpleNamespace(
-            pcb="test.kicad_pcb",
-            output=None,
-            strategy="negotiated",
-            skip_nets=None,
-            grid="0.25",
-            trace_width=0.2,
-            clearance=0.15,
-            via_drill=0.3,
-            via_diameter=0.6,
-            mc_trials=10,
-            iterations=15,
-            verbose=False,
-            dry_run=True,
-            quiet=True,
-            power_nets=None,
-            layers="auto",
-            force=False,
-            no_optimize=False,
-            auto_layers=False,
-            max_layers=6,
-            min_completion=0.95,
-            adaptive_rules=False,
-            min_trace=None,
-            min_clearance_floor=None,
-            manufacturer="jlcpcb",
-            high_performance=False,
-            skip_drc=False,
-            auto_fix=False,
-            auto_fix_passes=None,
-            export_failed_nets="failed.txt",
-        )
-
-        with patch("kicad_tools.cli.route_cmd.main") as mock_main:
-            mock_main.return_value = 0
-            run_route_command(args)
-
-            call_args = mock_main.call_args[0][0]
-            assert "--export-failed-nets" in call_args
-            idx = call_args.index("--export-failed-nets")
-            assert call_args[idx + 1] == "failed.txt"
-
-    def test_export_failed_nets_not_forwarded_when_none(self):
-        """run_route_command does NOT forward --export-failed-nets when not set."""
-        from kicad_tools.cli.commands.routing import run_route_command
-
-        args = SimpleNamespace(
-            pcb="test.kicad_pcb",
-            output=None,
-            strategy="negotiated",
-            skip_nets=None,
-            grid="0.25",
-            trace_width=0.2,
-            clearance=0.15,
-            via_drill=0.3,
-            via_diameter=0.6,
-            mc_trials=10,
-            iterations=15,
-            verbose=False,
-            dry_run=True,
-            quiet=True,
-            power_nets=None,
-            layers="auto",
-            force=False,
-            no_optimize=False,
-            auto_layers=False,
-            max_layers=6,
-            min_completion=0.95,
-            adaptive_rules=False,
-            min_trace=None,
-            min_clearance_floor=None,
-            manufacturer="jlcpcb",
-            high_performance=False,
-            skip_drc=False,
-            auto_fix=False,
-            auto_fix_passes=None,
-            export_failed_nets=None,
-        )
-
-        with patch("kicad_tools.cli.route_cmd.main") as mock_main:
-            mock_main.return_value = 0
-            run_route_command(args)
-
-            call_args = mock_main.call_args[0][0]
-            assert "--export-failed-nets" not in call_args
+    def test_export_failed_nets_not_forwarded_when_unset(self):
+        forwarded, args = kct_route(["test.kicad_pcb"])
+        assert "--export-failed-nets" not in forwarded
+        assert args.export_failed_nets is None
 
     def test_export_failed_nets_in_parser(self):
         """--export-failed-nets is in the route subparser."""
-        from kicad_tools.cli.parser import create_parser
 
-        parser = create_parser()
         # Parse with route subcommand
-        args = parser.parse_args(["route", "test.kicad_pcb", "--export-failed-nets", "out.txt"])
+        args = route_args(["test.kicad_pcb", "--export-failed-nets", "out.txt"])
         assert args.export_failed_nets == "out.txt"
 
 

@@ -5,13 +5,13 @@ This wires the previously-orphaned
 ``kct route`` via a new ``--order-method`` flag with choices
 ``{greedy, critical_first, congestion, hybrid}``.
 
-The tests pin all three plumbing layers (mirroring the drift-test pattern
-from ``tests/test_cli_region_parallel.py``):
+The tests pin the plumbing (mirroring ``tests/test_cli_region_parallel.py``):
 
-1. Outer parser (``cli/parser.py``) declares ``--order-method``.
-2. Inner parser (``cli/route_cmd.py``) declares ``--order-method``.
-3. Forwarding shim (``cli/commands/routing.py :: run_route_command``)
-   forwards it only when set (byte-identical default path otherwise).
+1. The ``kct route`` parser declares ``--order-method``.
+2. ``route_cmd._route_parser`` declares ``--order-method`` (since issue #7017
+   these are the same parser: ``kct route`` passes its argv straight through).
+3. ``kct route`` hands the flag to ``route_cmd.main`` only when given
+   (byte-identical default path otherwise).
 
 Plus behavioural tests for ``_apply_order_method`` (the helper that calls
 ``optimize_net_order`` and stashes the result on ``router._forced_net_order``)
@@ -61,49 +61,51 @@ def _inner_route_parser_flags() -> set[str]:
     return _flags_from_parser(captured["parser"])
 
 
-def _outer_route_subparser() -> argparse.ArgumentParser:
-    from kicad_tools.cli.parser import create_parser
+def _kct_route_subparser() -> argparse.ArgumentParser:
+    from kicad_tools.cli.parser import create_parser, resolve_passthrough
 
-    main_parser = create_parser()
+    # ``route`` is a passthrough stub on create_parser() (issue #7017);
+    # resolve it to the parser ``kct route`` actually runs.
+    main_parser = resolve_passthrough(create_parser())
     for action in main_parser._actions:
         choices = getattr(action, "choices", None)
         if choices and "route" in choices:
             return choices["route"]
-    raise AssertionError("could not find 'route' subparser on outer parser")
+    raise AssertionError("could not find 'route' subparser on the kct parser")
 
 
-def _outer_route_parser_flags() -> set[str]:
-    return _flags_from_parser(_outer_route_subparser())
+def _kct_route_parser_flags() -> set[str]:
+    return _flags_from_parser(_kct_route_subparser())
 
 
 # ---------------------------------------------------------------------------
-# Layer 1 — outer parser declares --order-method with expected default/choices
+# Layer 1 — the ``kct route`` parser declares --order-method with expected default/choices
 # ---------------------------------------------------------------------------
 
 
-def test_outer_parser_declares_order_method():
-    outer = _outer_route_parser_flags()
+def test_kct_route_parser_declares_order_method():
+    outer = _kct_route_parser_flags()
     assert "--order-method" in outer, (
-        "--order-method missing from outer parser (would regress #3897)"
+        "--order-method missing from the kct route parser (would regress #3897)"
     )
 
 
-def test_outer_parser_order_method_default_none():
+def test_kct_route_parser_order_method_default_none():
     """Default is None so ordering is byte-identical to legacy behaviour."""
-    route_parser = _outer_route_subparser()
+    route_parser = _kct_route_subparser()
     args = route_parser.parse_args(["dummy.kicad_pcb"])
     assert args.order_method is None
 
 
 @pytest.mark.parametrize("method", ["greedy", "critical_first", "congestion", "hybrid"])
-def test_outer_parser_accepts_each_order_method(method):
-    route_parser = _outer_route_subparser()
+def test_kct_route_parser_accepts_each_order_method(method):
+    route_parser = _kct_route_subparser()
     args = route_parser.parse_args(["dummy.kicad_pcb", "--order-method", method])
     assert args.order_method == method
 
 
-def test_outer_parser_rejects_unknown_order_method():
-    route_parser = _outer_route_subparser()
+def test_kct_route_parser_rejects_unknown_order_method():
+    route_parser = _kct_route_subparser()
     with pytest.raises(SystemExit):
         route_parser.parse_args(["dummy.kicad_pcb", "--order-method", "annealing"])
 
@@ -116,51 +118,39 @@ def test_outer_parser_rejects_unknown_order_method():
 def test_inner_parser_declares_order_method():
     inner = _inner_route_parser_flags()
     assert "--order-method" in inner, (
-        "--order-method missing from inner route_cmd.py parser "
-        "(would regress #3897 -- shim cannot forward to a non-existent flag)"
+        "--order-method missing from inner route_cmd.py parser (would regress #3897)"
     )
 
 
 # ---------------------------------------------------------------------------
-# Layer 3 — shim forwards --order-method only when set
+# Layer 3 — ``kct route`` passes --order-method through only when given
 # ---------------------------------------------------------------------------
 
 
-def _run_shim_capture_argv(extra_argv: list[str]) -> list[str]:
-    from kicad_tools.cli.commands.routing import run_route_command
-    from kicad_tools.cli.parser import create_parser
+def _run_kct_route_capture_argv(extra_argv: list[str]) -> list[str]:
+    """Run ``kct route dummy.kicad_pcb <extra_argv>`` in-process and return the
+    argv ``route_cmd.main`` receives (the router itself is stubbed out)."""
+    from tests.route_cli import kct_route
 
-    main_parser = create_parser()
-    args = main_parser.parse_args(["route", "dummy.kicad_pcb", *extra_argv])
-
-    captured: dict[str, list[str]] = {}
-
-    def fake_route_main(sub_argv):
-        captured["argv"] = list(sub_argv)
-        return 0
-
-    with patch("kicad_tools.cli.route_cmd.main", fake_route_main):
-        run_route_command(args)
-
-    assert "argv" in captured, "shim did not call inner route_main"
-    return captured["argv"]
+    forwarded, _ = kct_route(["dummy.kicad_pcb", *extra_argv])
+    return forwarded
 
 
-def test_shim_omits_order_method_by_default():
+def test_kct_route_omits_order_method_by_default():
     """Default path must not add --order-method (byte-identity guard)."""
-    argv = _run_shim_capture_argv([])
+    argv = _run_kct_route_capture_argv([])
     assert "--order-method" not in argv
 
 
-def test_shim_forwards_order_method_when_set():
-    argv = _run_shim_capture_argv(["--order-method", "greedy"])
+def test_kct_route_forwards_order_method_when_set():
+    argv = _run_kct_route_capture_argv(["--order-method", "greedy"])
     idx = argv.index("--order-method")
     assert argv[idx + 1] == "greedy"
 
 
 @pytest.mark.parametrize("method", ["greedy", "critical_first", "congestion", "hybrid"])
-def test_shim_forwards_each_order_method(method):
-    argv = _run_shim_capture_argv(["--order-method", method])
+def test_kct_route_forwards_each_order_method(method):
+    argv = _run_kct_route_capture_argv(["--order-method", method])
     idx = argv.index("--order-method")
     assert argv[idx + 1] == method
 

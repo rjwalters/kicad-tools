@@ -11,11 +11,10 @@ Issue #2723.  This module covers the CLI surface around
   graceful short-circuit is exercised inline (the actual end-to-end
   invocation lives in unit tests for :meth:`apply_match_group_tuning`
   to keep the CI matrix fast).
-- **AC5 ordering**: ``run_route_command`` forwards the flag AFTER
-  ``--length-match-diffpairs`` so ordering is preserved end-to-end.
-- **Forwarding**: ``run_route_command`` forwards / does NOT forward the
-  flag based on the args namespace value (mirrors the
-  ``--length-match-diffpairs`` plumbing).
+- **Forwarding**: ``kct route`` hands the flag to ``route_cmd.main``
+  verbatim (issue #7017) and never invents it.  (AC5's ordering check went
+  with the old forwarding shim: pair tuning runs before group tuning by
+  ``route_cmd``'s own code order, not by argv order.)
 """
 
 from __future__ import annotations
@@ -23,8 +22,9 @@ from __future__ import annotations
 import contextlib
 import sys
 from io import StringIO
-from types import SimpleNamespace
 from unittest.mock import patch
+
+from tests.route_cli import kct_route, route_args
 
 # =============================================================================
 # AC2 + AC3: CLI flag is defined in both parsers
@@ -54,134 +54,49 @@ class TestFlagDefinedInBothParsers:
 
     def test_length_match_groups_in_unified_parser(self):
         """``kct route --length-match-groups`` is parseable via the unified parser."""
-        from kicad_tools.cli.parser import create_parser
 
-        parser = create_parser()
-        args = parser.parse_args(["route", "test.kicad_pcb", "--length-match-groups"])
+        args = route_args(["test.kicad_pcb", "--length-match-groups"])
         assert args.length_match_groups is True
 
     def test_length_match_groups_default_false(self):
         """When omitted, ``length_match_groups`` defaults to False."""
-        from kicad_tools.cli.parser import create_parser
 
-        parser = create_parser()
-        args = parser.parse_args(["route", "test.kicad_pcb"])
+        args = route_args(["test.kicad_pcb"])
         assert args.length_match_groups is False
 
 
 # =============================================================================
-# Forwarding: run_route_command -> route_cmd.main
+# Forwarding: kct route -> route_cmd.main
 # =============================================================================
 
 
-def _base_args(**overrides) -> SimpleNamespace:
-    """Build a minimal args namespace mirroring run_route_command's needs."""
-    base: dict[str, object] = {
-        "pcb": "test.kicad_pcb",
-        "output": None,
-        "strategy": "negotiated",
-        "skip_nets": None,
-        "grid": "auto",
-        "trace_width": 0.2,
-        "clearance": 0.15,
-        "via_drill": 0.3,
-        "via_diameter": 0.6,
-        "mc_trials": 10,
-        "iterations": 15,
-        "verbose": False,
-        "dry_run": True,
-        "quiet": True,
-        "power_nets": None,
-        "layers": "auto",
-        "force": False,
-        "no_optimize": False,
-        "auto_layers": False,
-        "max_layers": 6,
-        "min_completion": 0.95,
-        "adaptive_rules": False,
-        "min_trace": None,
-        "min_clearance_floor": None,
-        "manufacturer": "jlcpcb",
-        "high_performance": False,
-        "skip_drc": False,
-        "auto_fix": False,
-        "auto_fix_passes": None,
-        "export_failed_nets": None,
-        "differential_pairs": False,
-        "diffpair_spacing": None,
-        "diffpair_max_delta": None,
-        "length_match_diffpairs": False,
-        "length_match_groups": False,
-        "strict": False,
-    }
-    base.update(overrides)
-    return SimpleNamespace(**base)
-
-
 class TestForwarding:
-    """``run_route_command`` forwards the new flag when set, omits it otherwise."""
+    """``kct route`` hands the flag to the router verbatim (issue #7017)."""
 
-    def test_length_match_groups_forwarded_when_true(self):
-        from kicad_tools.cli.commands.routing import run_route_command
+    def test_length_match_groups_forwarded_when_set(self):
+        forwarded, args = kct_route(["test.kicad_pcb", "--length-match-groups"])
+        assert "--length-match-groups" in forwarded
+        assert args.length_match_groups is True
 
-        args = _base_args(length_match_groups=True)
-        with patch("kicad_tools.cli.route_cmd.main") as mock_main:
-            mock_main.return_value = 0
-            run_route_command(args)
-            call_args = mock_main.call_args[0][0]
-            assert "--length-match-groups" in call_args
-
-    def test_length_match_groups_not_forwarded_when_false(self):
-        from kicad_tools.cli.commands.routing import run_route_command
-
-        args = _base_args(length_match_groups=False)
-        with patch("kicad_tools.cli.route_cmd.main") as mock_main:
-            mock_main.return_value = 0
-            run_route_command(args)
-            call_args = mock_main.call_args[0][0]
-            assert "--length-match-groups" not in call_args
+    def test_length_match_groups_absent_when_unset(self):
+        forwarded, args = kct_route(["test.kicad_pcb"])
+        assert "--length-match-groups" not in forwarded
+        assert args.length_match_groups is False
 
     def test_compatible_with_length_match_diffpairs(self):
-        """Both flags can be set together; both are forwarded."""
-        from kicad_tools.cli.commands.routing import run_route_command
-
-        args = _base_args(
-            differential_pairs=True,
-            length_match_diffpairs=True,
-            length_match_groups=True,
+        """Both flags can be set together; both reach the router."""
+        forwarded, args = kct_route(
+            [
+                "test.kicad_pcb",
+                "--differential-pairs",
+                "--length-match-diffpairs",
+                "--length-match-groups",
+            ]
         )
-        with patch("kicad_tools.cli.route_cmd.main") as mock_main:
-            mock_main.return_value = 0
-            run_route_command(args)
-            call_args = mock_main.call_args[0][0]
-            assert "--length-match-diffpairs" in call_args
-            assert "--length-match-groups" in call_args
-
-    def test_forwarding_preserves_ordering(self):
-        """AC5: ``--length-match-groups`` is forwarded AFTER
-        ``--length-match-diffpairs`` so the post-routing dispatch in
-        route_cmd.py runs pair tuning first, group tuning second."""
-        from kicad_tools.cli.commands.routing import run_route_command
-
-        args = _base_args(
-            differential_pairs=True,
-            length_match_diffpairs=True,
-            length_match_groups=True,
-        )
-        with patch("kicad_tools.cli.route_cmd.main") as mock_main:
-            mock_main.return_value = 0
-            run_route_command(args)
-            call_args = mock_main.call_args[0][0]
-            pair_idx = call_args.index("--length-match-diffpairs")
-            group_idx = call_args.index("--length-match-groups")
-            # The forwarder appends groups AFTER diffpairs; the route_cmd
-            # post-routing dispatch then runs them in the order they appear.
-            assert pair_idx < group_idx, (
-                "Forwarding order must place --length-match-diffpairs before "
-                "--length-match-groups so pair tuning runs first (preserves "
-                "the within-pair skew invariant before group tuning perturbs "
-                "lane lengths)."
-            )
+        assert "--length-match-diffpairs" in forwarded
+        assert "--length-match-groups" in forwarded
+        assert args.length_match_diffpairs is True
+        assert args.length_match_groups is True
 
 
 # =============================================================================

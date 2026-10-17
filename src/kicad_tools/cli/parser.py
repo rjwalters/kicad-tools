@@ -6,7 +6,9 @@ The parser is organized into subparsers for each major command category.
 """
 
 import argparse
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 from kicad_tools import __version__
 
@@ -44,7 +46,7 @@ PASSTHROUGH_SUBCOMMANDS: dict[str, tuple[str, str, str]] = {
 }
 
 
-def _passthrough_attr(name: str, index: int):
+def _passthrough_attr(name: str, index: int) -> Any:
     import importlib
 
     entry = PASSTHROUGH_SUBCOMMANDS[name]
@@ -53,12 +55,15 @@ def _passthrough_attr(name: str, index: int):
 
 def passthrough_parser(name: str) -> argparse.ArgumentParser:
     """Return the real parser behind passthrough subcommand *name*."""
-    return _passthrough_attr(name, 2)()
+    parser = _passthrough_attr(name, 2)()
+    assert isinstance(parser, argparse.ArgumentParser)
+    return parser
 
 
-def passthrough_main(name: str):
+def passthrough_main(name: str) -> Callable[[list[str]], int]:
     """Return the ``main(argv) -> int`` that owns passthrough subcommand *name*."""
-    return _passthrough_attr(name, 1)
+    main: Callable[[list[str]], int] = _passthrough_attr(name, 1)
+    return main
 
 
 def resolve_passthrough(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:

@@ -25,12 +25,14 @@ import random
 
 import pytest
 
+from kicad_tools.cli import main as cli_main
 from kicad_tools.router.algorithms import evolutionary as evo_mod
 from kicad_tools.router.algorithms import monte_carlo as mc_mod
 from kicad_tools.router.algorithms.evolutionary import RoutingChromosome
 from kicad_tools.router.core import Autorouter, _run_monte_carlo_trial
 from kicad_tools.router.layers import Layer
 from kicad_tools.router.primitives import Route, Segment
+from tests.route_cli import route_args
 
 NUM_NETS = 6
 
@@ -354,16 +356,14 @@ def test_cli_trial_router_defaults_to_negotiated():
 def test_cli_trial_router_is_forwarded_by_outer_parser(tmp_path):
     from unittest.mock import patch
 
-    from kicad_tools.cli.commands.routing import run_route_command
-    from kicad_tools.cli.parser import create_parser
     from kicad_tools.cli.route_cmd import _route_parser
 
     pcb = tmp_path / "board.kicad_pcb"
     pcb.write_text("(kicad_pcb (version 20221018) (generator pcbnew))")
-    args = create_parser().parse_args(["route", str(pcb), "--trial-router", "basic", "--quiet"])
+    route_args([str(pcb), "--trial-router", "basic", "--quiet"])
     with patch("kicad_tools.cli.route_cmd.main") as mock_main:
         mock_main.return_value = 0
-        run_route_command(args)
+        cli_main(["route", str(pcb), "--trial-router", "basic", "--quiet"])
         sub_argv = mock_main.call_args[0][0]
     assert _route_parser().parse_args(sub_argv).trial_router == "basic"
 

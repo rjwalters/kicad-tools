@@ -24,7 +24,6 @@ from unittest import mock
 
 import pytest
 
-from kicad_tools.cli.parser import create_parser
 from kicad_tools.cli.route_cmd import _normalize_deterministic_budget, _route_parser
 from kicad_tools.placement.route_check import deadline_fired
 from kicad_tools.router.algorithms.two_phase import TwoPhaseRouter
@@ -162,7 +161,7 @@ def test_negotiated_stage_deadline_line_matches_two_phase() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Help text names the stages (both parser sites)
+# Help text names the stages (``kct route`` is ``route_cmd._route_parser``, #7017)
 # ---------------------------------------------------------------------------
 
 
@@ -170,16 +169,11 @@ def _help(parser, flag: str) -> str:
     for action in parser._actions:
         if flag in action.option_strings:
             return action.help % {}
-        if hasattr(action, "choices") and isinstance(action.choices, dict):
-            sub = action.choices.get("route")
-            if sub is not None:
-                return _help(sub, flag)
     raise AssertionError(f"{flag} not found")
 
 
-@pytest.mark.parametrize("parser_factory", [create_parser, _route_parser])
-def test_help_names_the_remaining_wall_clock_stages(parser_factory) -> None:
-    text = _help(parser_factory(), "--deterministic-budget")
+def test_help_names_the_remaining_wall_clock_stages() -> None:
+    text = _help(_route_parser(), "--deterministic-budget")
     assert "Issue #6329" in text
     assert "10% of the" in text
     assert "per-net wall clock bound" in text
