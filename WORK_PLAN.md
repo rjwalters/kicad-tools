@@ -13,7 +13,6 @@ Judge-approved PRs under a hold (`loom:blocked` or `loom:operator`) — only a h
 
 - **#6874**: ci(board-07): move copper-safety DRC ratchet to scheduled slow-tests
 - **#6900**: ci: add Windows smoke job and skip RSS positivity test without resource
-- **#6929**: chore(loom): resync installed Loom to v0.19.1180
 
 ## Very Important
 
@@ -31,24 +30,32 @@ _None._
 
 Human-approved issues ready for implementation (`loom:issue`).
 
-- **#5798**: [Epic #5784] Phase 4: deconfound kct's match-group length tuning on board 07 (measure first)
+_None._
 
 ## In Progress
 
 Issues currently being built (`loom:building`).
 
+- **#5798**: [Epic #5784] Phase 4: deconfound kct's match-group length tuning on board 07 (measure first)
 - **#6394**: board 03: 13 copper violations of the router's own Power class (0.2 mm) exposed by #6390
 - **#6554**: diffpair: reproduce KiCad's diff_pair_uncoupled primitive pairing exactly (kct is a lower bound)
 - **#6894**: ci: add a Windows smoke job; skip test_peak_rss_bytes_positive where resource is unavailable (follow-up #6739)
-- **#6946**: kct drc --mfr advertises aliases (jlc, osh, ...) that the inner kicad-drc parser rejects
-- **#6947**: docs: index subfolder docs (research/, mcp/, diagnostics/) from docs/README.md and guard against drift
-- **#6948**: cleanup: Judge follow-ups from #6877/#6886/#6890 (grid_limits memory+hint, iter_unquoted docstring, PairOutcome edge cases)
+- **#6969**: match-group tuner: meanders find no DRC room on dense kct copper, and all-or-nothing rollback discards partial progress (board 07)
+- **#6994**: [Epic #5509] Phase 4e slice 4: one search-radius rounding rule (guarded) for Python and C++ A*, rip-up and CoupledPathfinder
+- **#7003**: router cache: a cache hit on board 06b returns different copper (230 vs 254 items) than the fresh route
+- **#7008**: Consolidate copy-pasted wire/grid helpers across kct sch CLI modules (9x _snap, 4x _point_on_wire_midpoint, 4x _find_wires_at_point)
+- **#7011**: Consolidate 11 copy-pasted S-expression builder helpers across test_sch_validate_* tests (~700 LOC)
+- **#7012**: Resolve 10 tests that can never run: 9 skipped since #3133 closed (May), 1 self-skipping (~325 LOC delete, 3 fixtures to repair)
+- **#7014**: router cache key omits native BUILD_VERSION and PYTHONHASHSEED (stale copper after a C++ rebuild; follow-up #7003)
 
 ## PRs Awaiting Review
 
 PRs waiting on Judge (`loom:review-requested`).
 
-- **#6949**: docs: index research and diagnostics notes, add docs reachability test
+- **#7007**: fix: replay committed coupled diff pairs on routing-cache hit
+- **#7010**: refactor: consolidate copy-pasted sch wire helpers into sch_wire_common
+- **#7013**: test: consolidate sch_validate S-expression builder helpers
+- **#7015**: test: resolve 10 never-running tests left behind by #3133
 
 ## Approved (Awaiting Merge)
 
@@ -56,7 +63,7 @@ PRs that passed review and are queued for Champion auto-merge (`loom:pr`).
 
 - **#6874**: ci(board-07): move copper-safety DRC ratchet to scheduled slow-tests
 - **#6900**: ci: add Windows smoke job and skip RSS positivity test without resource
-- **#6929**: chore(loom): resync installed Loom to v0.19.1180
+- **#7016**: fix(router): key the routing cache on the native router build (#7014)
 
 ## Proposed
 
@@ -70,7 +77,6 @@ Issues carrying `loom:curated`.
 - **#5508**: Epic: pad-access invariant — no committed route may strand an unrouted pad *(curated)*
 - **#5509**: Epic: one clearance kernel — search, commit, and final validation must agree with kicad-cli DRC *(curated)*
 - **#5550**: Reconcile 4 outstanding loom-quarantine stashes left by the worktree reaper (issues 5201, 4982, 5216, 5004) *(curated)*
-- **#5743**: ci: 54% of CI time is board jobs with zero failures — one duplicated routing pass, one binary path filter, and an inverted cadence *(curated)*
 - **#5878**: File the 6 tscircuit upstream defects found by the interop gate (needs a credential with issue-write outside rjwalters/*) *(curated)*
 - **#6394**: board 03: 13 copper violations of the router's own Power class (0.2 mm) exposed by #6390 *(curated)*
 - **#6404**: boards 00-07: refill saved zones and refresh hash-bound bundles/readiness after #6390's sidecar update *(curated)*
@@ -82,21 +88,24 @@ Issues carrying `loom:curated`.
 - **#6835**: router: raise flag-off coupled iteration budget to 350k/phase (700k total) so Board07 couples 6/7 pairs; soften endpoint-tolerance comment (#6826 follow-up) *(curated)*
 - **#6858**: router: coupled pre-pass should keep the better of the joint-search and pose-centreline candidates (compare-and-keep; unblocks #6835) *(curated)*
 - **#6894**: ci: add a Windows smoke job; skip test_peak_rss_bytes_positive where resource is unavailable (follow-up #6739) *(curated)*
-- **#6945**: board 03: readiness.json hashes stale for net_class_map.json and routed .kicad_dru since #6876 *(curated)*
-- **#6946**: kct drc --mfr advertises aliases (jlc, osh, ...) that the inner kicad-drc parser rejects *(curated)*
-- **#6947**: docs: index subfolder docs (research/, mcp/, diagnostics/) from docs/README.md and guard against drift *(curated)*
-- **#6948**: cleanup: Judge follow-ups from #6877/#6886/#6890 (grid_limits memory+hint, iter_unquoted docstring, PairOutcome edge cases) *(curated)*
+- **#6969**: match-group tuner: meanders find no DRC room on dense kct copper, and all-or-nothing rollback discards partial progress (board 07) *(curated)*
+- **#6994**: [Epic #5509] Phase 4e slice 4: one search-radius rounding rule (guarded) for Python and C++ A*, rip-up and CoupledPathfinder *(curated)*
+- **#7003**: router cache: a cache hit on board 06b returns different copper (230 vs 254 items) than the fresh route *(curated)*
+- **#7008**: Consolidate copy-pasted wire/grid helpers across kct sch CLI modules (9x _snap, 4x _point_on_wire_midpoint, 4x _find_wires_at_point) *(curated)*
+- **#7011**: Consolidate 11 copy-pasted S-expression builder helpers across test_sch_validate_* tests (~700 LOC) *(curated)*
+- **#7012**: Resolve 10 tests that can never run: 9 skipped since #3133 closed (May), 1 self-skipping (~325 LOC delete, 3 fixtures to repair) *(curated)*
+- **#7014**: router cache key omits native BUILD_VERSION and PYTHONHASHSEED (stale copper after a C++ rebuild; follow-up #7003) *(curated)*
 
 ## Proposed (Architect / Hermit)
 
-- **#5858**: [Epic #5509] Phase 4e: hermit pass — delete duplicate clearance arithmetic *(architect)*
-- **#5914**: [Epic #5508] Phase 3b: coupled first-leg/departure selection against the access map *(architect)*
 - **#6441**: Epic: diff-pair routing redesign — gateways, via pairs, uncoupled budget, per-segment rules *(architect)*
 - **#6445**: [Epic #6441] Phase 3: via pairs as a single move in the lattice coupled centreline *(architect)*
 - **#6446**: [Epic #6441] Phase 4: budget-driven hybrid fallback — longest coupled trunk plus single-ended terminal legs *(architect)*
 - **#6447**: [Epic #6441] Phase 5: coupling-preserving skew tuning from a skew ledger, and pair invariants for post-passes *(architect)*
 - **#6448**: [Epic #6441] Phase 6: unify diff-pair engines — grid consumes PairPlan or grid coupled pre-pass retired *(architect)*
-- **#5802**: router/core.py: Autorouter god-class has regrown to 20,764 lines (216 methods), 4.6x since last extraction closed *(hermit)*
+- **#7008**: Consolidate copy-pasted wire/grid helpers across kct sch CLI modules (9x _snap, 4x _point_on_wire_midpoint, 4x _find_wires_at_point) *(hermit)*
+- **#7011**: Consolidate 11 copy-pasted S-expression builder helpers across test_sch_validate_* tests (~700 LOC) *(hermit)*
+- **#7017**: Collapse the kct route three-hop parser: pass argv straight to route_cmd (delete ~1,775-line outer parser + ~605-line forwarding shim) *(hermit)*
 
 ## Epics
 
@@ -113,14 +122,14 @@ Issues carrying `loom:curated`.
 
 | Bucket | Count |
 |------|-------|
-| Operator merge-risk holds | 3 |
+| Operator merge-risk holds | 2 |
 | Very important | 0 |
 | Important | 0 |
-| Ready (`loom:issue`) | 1 |
-| In Progress (`loom:building`) | 6 |
-| PRs awaiting review | 1 |
+| Ready (`loom:issue`) | 0 |
+| In Progress (`loom:building`) | 11 |
+| PRs awaiting review | 4 |
 | Approved PRs awaiting merge | 3 |
-| Curated | 24 |
+| Curated | 26 |
 | Architect / Hermit proposals | 8 |
 | Active epics | 8 |
 <!-- guide:plan-body:end -->
