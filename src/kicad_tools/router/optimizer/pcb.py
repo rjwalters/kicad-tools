@@ -560,12 +560,27 @@ def optimize_pcb(
         )
         stats.drc_errors_before = baseline_counts["__total__"]
 
+    # Issue #6889: the rewrites below ignore same-net copper, so on a Kelvin
+    # net they can join two branches of the star away from the shunt pad --
+    # the #5398 defect, reached through ``kct optimize-traces``.  The board
+    # gate optimizes a Kelvin net branch by branch and keeps any rewrite
+    # that would touch a sibling.  ``None`` (no Kelvin net) leaves every net
+    # on the path below, unchanged.
+    from .kelvin_gate import KelvinBoardGate
+
+    kelvin = KelvinBoardGate.from_pcb_text(pcb_text)
+
     # Optimize each net
     optimized_segments: dict[str, list[Segment]] = {}
     for net, segs in segments_by_net.items():
-        optimized = optimize_fn(segs)
+        optimized = kelvin.optimize_net(net, segs, optimize_fn) if kelvin else None
+        if optimized is None:
+            optimized = optimize_fn(segs)
         optimized_segments[net] = optimized
         stats.nets_optimized += 1
+    if kelvin is not None:
+        stats.kelvin_vetoes = kelvin.gate.vetoes
+        kelvin.gate.report()
 
     # DRC-aware per-net rollback
     if config.drc_aware and config.drc_manufacturer:
