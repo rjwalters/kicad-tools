@@ -1183,29 +1183,41 @@ class TestCppPathfinderPythonFallback:
         assert stats["fallback_count"] == 0
         assert stats["fallback_nets"] == []
 
-    @pytest.mark.skip(
-        reason=(
-            "nanobind disallows attribute replacement on bound C++ objects "
-            "(pf._impl.route = MagicMock(...) raises 'route is read-only'). "
-            "The mock strategy here was authored under pybind11 and needs a "
-            "wrapper-layer rewrite (e.g. patch CppPathfinder._route_impl). "
-            "Tracked in #3133."
-        )
-    )
     def test_fallback_invoked_when_cpp_fails(self):
-        """Test Python fallback is called when C++ route returns failure."""
-        if not is_cpp_available():
-            import pytest
+        """``route()`` hands a failed C++ search to the Python fallback.
 
+        Issue #7012 port of the pybind11-era test (skipped since #3133):
+        nanobind makes ``pf._impl.route`` read-only, so the whole ``_impl`` is
+        swapped for a fake whose search entry point (``route_resumable``)
+        reports failure.  The real ``_try_python_fallback`` then runs with only
+        the Python ``Router.route`` stubbed, so the dispatch AND its stats
+        bookkeeping are exercised end-to-end.
+        """
+        if not is_cpp_available():
             pytest.skip("C++ backend not available")
 
-        from unittest.mock import MagicMock, patch
+        from unittest import mock
 
-        from kicad_tools.router.cpp_backend import CppGrid, CppPathfinder
+        from kicad_tools.router.cpp_backend import CppGrid, CppPathfinder, router_cpp
         from kicad_tools.router.grid import RoutingGrid
         from kicad_tools.router.layers import Layer, LayerStack
         from kicad_tools.router.primitives import Pad, Route
         from kicad_tools.router.rules import DesignRules
+        from tests.router.test_resume_clearance_strategy_5599 import _FakeImpl
+
+        class _FailedResult:
+            success = False
+            net = 1
+            segments: list = []
+            vias: list = []
+            goal_gx = goal_gy = goal_layer = -1
+            blocking_via_net = 0
+            failure_reason = int(router_cpp.FAILURE_NO_PATH)
+
+        class _FailingImpl(_FakeImpl):
+            def route_resumable(self, *args, **kwargs):
+                self.route_resumable_calls.append((float(args[18]), int(args[19])))
+                return _FailedResult()
 
         rules = DesignRules()
         rules.grid_resolution = 0.127
@@ -1221,69 +1233,21 @@ class TestCppPathfinderPythonFallback:
         start = Pad(x=1.0, y=1.0, width=0.5, height=0.5, layer=Layer.F_CU, net=1, net_name="N1")
         end = Pad(x=8.0, y=8.0, width=0.5, height=0.5, layer=Layer.F_CU, net=1, net_name="N1")
 
-        # Mock the C++ impl.route to return failure
-        mock_result = MagicMock()
-        mock_result.success = False
-        pf._impl.route = MagicMock(return_value=mock_result)
-
-        # Mock the Python Router to return a successful route
-        mock_route = Route(net=1, net_name="N1")
-        with patch("kicad_tools.router.pathfinder.Router.route", return_value=mock_route):
+        fake = _FailingImpl(net=1)
+        fallback_route = Route(net=1, net_name="N1")
+        with (
+            mock.patch.object(pf, "_impl", fake),
+            mock.patch(
+                "kicad_tools.router.pathfinder.Router.route", return_value=fallback_route
+            ) as py_route,
+        ):
             result = pf.route(start, end)
 
-        assert result is not None
-        assert result.net_name == "N1"
+        assert fake.route_resumable_calls, "the (fake) C++ search was never invoked"
+        py_route.assert_called_once()
+        assert result is fallback_route
         assert pf.fallback_stats["fallback_count"] == 1
         assert pf.fallback_stats["fallback_nets"] == ["N1"]
-
-    @pytest.mark.skip(
-        reason=(
-            "nanobind disallows attribute replacement on bound C++ objects "
-            "(pf._impl.route = MagicMock(...) raises 'route is read-only'). "
-            "Needs wrapper-layer mock rewrite. Tracked in #3133."
-        )
-    )
-    def test_fallback_returns_none_when_python_also_fails(self):
-        """Test that None is returned when both C++ and Python fail."""
-        if not is_cpp_available():
-            import pytest
-
-            pytest.skip("C++ backend not available")
-
-        from unittest.mock import MagicMock, patch
-
-        from kicad_tools.router.cpp_backend import CppGrid, CppPathfinder
-        from kicad_tools.router.grid import RoutingGrid
-        from kicad_tools.router.layers import Layer, LayerStack
-        from kicad_tools.router.primitives import Pad
-        from kicad_tools.router.rules import DesignRules
-
-        rules = DesignRules()
-        rules.grid_resolution = 0.127
-        grid = RoutingGrid(
-            width=10.0,
-            height=10.0,
-            rules=rules,
-            layer_stack=LayerStack.two_layer(),
-        )
-        cpp_grid = CppGrid.from_routing_grid(grid)
-        pf = CppPathfinder(cpp_grid, rules)
-
-        start = Pad(x=1.0, y=1.0, width=0.5, height=0.5, layer=Layer.F_CU, net=1, net_name="N1")
-        end = Pad(x=8.0, y=8.0, width=0.5, height=0.5, layer=Layer.F_CU, net=1, net_name="N1")
-
-        # Mock C++ to fail
-        mock_result = MagicMock()
-        mock_result.success = False
-        pf._impl.route = MagicMock(return_value=mock_result)
-
-        # Mock Python Router to also fail
-        with patch("kicad_tools.router.pathfinder.Router.route", return_value=None):
-            result = pf.route(start, end)
-
-        assert result is None
-        # Fallback was attempted but failed, so count should NOT increment
-        assert pf.fallback_stats["fallback_count"] == 0
 
     def test_fallback_not_invoked_when_cpp_succeeds(self):
         """Test Python fallback is NOT constructed when C++ succeeds."""
@@ -1319,152 +1283,6 @@ class TestCppPathfinderPythonFallback:
         if result is not None:
             assert pf._py_router is None
             assert pf.fallback_stats["fallback_count"] == 0
-
-    @pytest.mark.skip(
-        reason=(
-            "nanobind disallows attribute replacement on bound C++ objects "
-            "(pf._impl.route = MagicMock(...) raises 'route is read-only'). "
-            "Needs wrapper-layer mock rewrite. Tracked in #3133."
-        )
-    )
-    def test_fallback_skipped_when_no_py_grid(self):
-        """Test that fallback is skipped when _py_grid is None."""
-        if not is_cpp_available():
-            import pytest
-
-            pytest.skip("C++ backend not available")
-
-        from unittest.mock import MagicMock
-
-        from kicad_tools.router.cpp_backend import CppGrid, CppPathfinder
-        from kicad_tools.router.layers import Layer
-        from kicad_tools.router.primitives import Pad
-        from kicad_tools.router.rules import DesignRules
-
-        rules = DesignRules()
-        rules.grid_resolution = 0.127
-        # Create a CppGrid WITHOUT from_routing_grid (no _py_grid)
-        cpp_grid = CppGrid(cols=80, rows=80, layers=2, resolution=0.127)
-        assert cpp_grid._py_grid is None
-
-        pf = CppPathfinder(cpp_grid, rules)
-
-        start = Pad(x=1.0, y=1.0, width=0.5, height=0.5, layer=Layer.F_CU, net=1, net_name="N1")
-        end = Pad(x=8.0, y=8.0, width=0.5, height=0.5, layer=Layer.F_CU, net=1, net_name="N1")
-
-        # Mock C++ to fail
-        mock_result = MagicMock()
-        mock_result.success = False
-        pf._impl.route = MagicMock(return_value=mock_result)
-
-        result = pf.route(start, end)
-        assert result is None
-        assert pf._py_router is None
-        assert pf.fallback_stats["fallback_count"] == 0
-
-    @pytest.mark.skip(
-        reason=(
-            "nanobind disallows attribute replacement on bound C++ objects "
-            "(pf._impl.route = MagicMock(...) raises 'route is read-only'). "
-            "Needs wrapper-layer mock rewrite. Tracked in #3133."
-        )
-    )
-    def test_fallback_stats_accumulate(self):
-        """Test that multiple fallbacks accumulate in stats."""
-        if not is_cpp_available():
-            import pytest
-
-            pytest.skip("C++ backend not available")
-
-        from unittest.mock import MagicMock, patch
-
-        from kicad_tools.router.cpp_backend import CppGrid, CppPathfinder
-        from kicad_tools.router.grid import RoutingGrid
-        from kicad_tools.router.layers import Layer, LayerStack
-        from kicad_tools.router.primitives import Pad, Route
-        from kicad_tools.router.rules import DesignRules
-
-        rules = DesignRules()
-        rules.grid_resolution = 0.127
-        grid = RoutingGrid(
-            width=10.0,
-            height=10.0,
-            rules=rules,
-            layer_stack=LayerStack.two_layer(),
-        )
-        cpp_grid = CppGrid.from_routing_grid(grid)
-        pf = CppPathfinder(cpp_grid, rules)
-
-        # Mock C++ to always fail
-        mock_result = MagicMock()
-        mock_result.success = False
-        pf._impl.route = MagicMock(return_value=mock_result)
-
-        # Route two different nets via fallback
-        for i, net_name in enumerate(["NET_A", "NET_B", "NET_C"], start=1):
-            start = Pad(
-                x=1.0, y=1.0, width=0.5, height=0.5, layer=Layer.F_CU, net=i, net_name=net_name
-            )
-            end = Pad(
-                x=8.0, y=8.0, width=0.5, height=0.5, layer=Layer.F_CU, net=i, net_name=net_name
-            )
-            mock_route = Route(net=i, net_name=net_name)
-            with patch("kicad_tools.router.pathfinder.Router.route", return_value=mock_route):
-                result = pf.route(start, end)
-            assert result is not None
-
-        assert pf.fallback_stats["fallback_count"] == 3
-        assert pf.fallback_stats["fallback_nets"] == ["NET_A", "NET_B", "NET_C"]
-
-    @pytest.mark.skip(
-        reason=(
-            "nanobind disallows attribute replacement on bound C++ objects "
-            "(pf._impl.route = MagicMock(...) raises 'route is read-only'). "
-            "Needs wrapper-layer mock rewrite. Tracked in #3133."
-        )
-    )
-    def test_py_router_reused_across_fallbacks(self):
-        """Test that the Python Router is constructed once and reused."""
-        if not is_cpp_available():
-            import pytest
-
-            pytest.skip("C++ backend not available")
-
-        from unittest.mock import MagicMock, patch
-
-        from kicad_tools.router.cpp_backend import CppGrid, CppPathfinder
-        from kicad_tools.router.grid import RoutingGrid
-        from kicad_tools.router.layers import Layer, LayerStack
-        from kicad_tools.router.primitives import Pad, Route
-        from kicad_tools.router.rules import DesignRules
-
-        rules = DesignRules()
-        rules.grid_resolution = 0.127
-        grid = RoutingGrid(
-            width=10.0,
-            height=10.0,
-            rules=rules,
-            layer_stack=LayerStack.two_layer(),
-        )
-        cpp_grid = CppGrid.from_routing_grid(grid)
-        pf = CppPathfinder(cpp_grid, rules)
-
-        mock_result = MagicMock()
-        mock_result.success = False
-        pf._impl.route = MagicMock(return_value=mock_result)
-
-        start = Pad(x=1.0, y=1.0, width=0.5, height=0.5, layer=Layer.F_CU, net=1, net_name="N1")
-        end = Pad(x=8.0, y=8.0, width=0.5, height=0.5, layer=Layer.F_CU, net=1, net_name="N1")
-
-        mock_route = Route(net=1, net_name="N1")
-        with patch("kicad_tools.router.pathfinder.Router.route", return_value=mock_route):
-            pf.route(start, end)
-            first_router = pf._py_router
-            assert first_router is not None
-
-            pf.route(start, end)
-            # Same Router instance should be reused
-            assert pf._py_router is first_router
 
 
 class TestCppBuildVersionGuard:

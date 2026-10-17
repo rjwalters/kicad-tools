@@ -195,57 +195,6 @@ class TestCppPerformance:
         assert python_result.nets_routed > 0
         assert cpp_result.nets_routed > 0
 
-    @pytest.mark.skip(
-        reason=(
-            "Benchmark fixture is broken: the 50x40mm 8-net board routes "
-            "only 2 of 8 nets; the remaining 6 deterministically hit "
-            "BLOCKED_BY_COMPONENT after exhausting A*. Both backends then "
-            "spend most of their time on failed searches with identical "
-            "bounds, so the wall-clock difference converges to ~1.1x and "
-            "fails the 1.5x threshold. The threshold is correct in "
-            "principle but the fixture doesn't exercise the C++ A* hot "
-            "path. Needs a routable board geometry or conversion to a "
-            "non-asserting benchmark. Tracked in #3133."
-        )
-    )
-    @pytest.mark.skipif(not is_cpp_available(), reason="C++ backend not available")
-    def test_cpp_faster_than_python(self):
-        """Verify C++ backend is faster than Python on medium-sized board."""
-        # Medium-sized board to show meaningful speedup
-        board_size = (50.0, 40.0)
-        num_nets = 8
-
-        # Run Python backend
-        python_result = run_routing_benchmark(
-            width=board_size[0],
-            height=board_size[1],
-            num_nets=num_nets,
-            force_python=True,
-            resolution=0.5,
-        )
-
-        # Run C++ backend
-        cpp_result = run_routing_benchmark(
-            width=board_size[0],
-            height=board_size[1],
-            num_nets=num_nets,
-            force_python=False,
-            resolution=0.5,
-        )
-
-        assert python_result.backend == "python"
-        assert cpp_result.backend == "cpp"
-
-        # C++ should be faster (at least 2x improvement expected)
-        # Note: actual speedup is 10-100x but we use conservative threshold
-        speedup = python_result.time_seconds / max(cpp_result.time_seconds, 0.001)
-        print(f"\nSpeedup: {speedup:.1f}x")
-        print(f"Python: {python_result.time_seconds:.3f}s")
-        print(f"C++: {cpp_result.time_seconds:.3f}s")
-
-        # Allow some slack for system variability
-        assert speedup > 1.5 or cpp_result.time_seconds < 0.5
-
     @pytest.mark.skipif(not is_cpp_available(), reason="C++ backend not available")
     @pytest.mark.slow
     def test_large_board_issue_947(self):
