@@ -58,6 +58,9 @@ def _load(name: str, path: Path):
 
 
 regen = _load("regenerate_boards_03_04_6076", HERE / "regenerate_boards_03_04_6076.py")
+
+from kicad_tools.cli.kicad_toolchain import finalize_native_drc_report  # noqa: E402
+
 refresh_tools = regen.refresh_tools
 refresh_gerbers = _load(
     "refresh_copper_gerbers_6404", HERE / "refresh_copper_gerbers_6404.py"
@@ -79,7 +82,7 @@ def main() -> int:
              "-o", str(report), str(routed)],
             capture_output=True, check=False,
         )  # fmt: skip
-        data = json.loads(report.read_text())
+        data = finalize_native_drc_report(report)  # Issue #6962
         findings = [v["type"] for v in data["violations"]]
         unconnected = len(data.get("unconnected_items", []))
         parity = len(data.get("schematic_parity", []))
@@ -123,4 +126,6 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    from kicad_tools.cli.kicad_toolchain import run_on_evidence_toolchain
+
+    sys.exit(run_on_evidence_toolchain(main, [REPO_ROOT]))

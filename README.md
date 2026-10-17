@@ -755,20 +755,44 @@ uv run ruff format .
    already immune (it runs `--no-incremental`); see
    [`docs/contributing/development.md`](docs/contributing/development.md#the-stale-mypy_cache-trap).
 
-4. **Initialize KiCad's global library tables before trusting native ERC/DRC
-   results.** `kct check`'s native ERC leg (and the board 03/04 reviewed
-   paid-drill gates, which run `kct check` with `--strict`) shell out to
-   `kicad-cli`, which reads the host's `fp-lib-table`/`sym-lib-table` under
-   `~/.config/kicad/<version>/` (GUI-provisioned on first launch — a fresh
-   worktree or CI container has neither). Without them, kicad-cli raises
-   ordinary `lib_symbol_issues`/`footprint_link_issues` strict-mode ERC
-   warnings that read identically to a genuine footprint/symbol-link defect
-   in the schematic (issue #5860). CI always runs this first, so the
-   committed `boards/*/output/check-report.json` files are unaffected; run
-   it yourself once per host before relying on `kct check` locally:
+4. **Know where kicad-cli's library tables come from before trusting native
+   ERC/DRC results.** kicad-cli resolves stock nicknames (`Resistor_SMD:`)
+   through the *global* `fp-lib-table`/`sym-lib-table` in its config home,
+   which the GUI writes on first launch -- or never, on a fresh host, CI
+   container or `docker run --user 0:0`. Without them every stock footprint
+   becomes a `lib_footprint_issues` DRC warning and every stock symbol an ERC
+   warning that reads like a real defect (issues #5860, #6962; board 03 once
+   gained 37 of them). The library configuration is part of the pinned
+   toolchain, not of the host:
+
+   - **Where it comes from.** `src/kicad_tools/data/kicad-config/10.0/` holds
+     flat copies of the stock tables shipped in CI's pinned image (CI's
+     `KICAD_IMAGE` digest in `.github/workflows/ci.yml`).
+   - **How producers isolate it.** Every evidence producer (`kct readiness`,
+     `scripts/boards/refresh_readiness.py`, the `scripts/boards/regenerate_*`
+     scripts) and every KiCad CI job runs kicad-cli with a scratch
+     `KICAD_CONFIG_HOME` holding exactly those tables, and never reads or
+     writes your GUI config. kct's Docker fallback (`KCT_KICAD_DOCKER=1`)
+     runs the same pinned digest, not the floating `kicad/kicad:10.0` tag.
+   - **Native evidence needs the pinned toolchain.** Producers refuse (exit 2,
+     nothing written) a kicad-cli other than the image's release (10.0.6), and
+     refuse any DRC report with `lib_footprint_issues`. On a host with another
+     KiCad release, route kicad-cli through the image:
+     `KCT_KICAD_DOCKER=1 uv run kct readiness boards/<board> --verify --checked-at <ISO>`.
+     A fixed `--checked-at` makes two runs byte-identical.
+   - **How to check it.**
+
+     ```bash
+     uv run python -m kicad_tools.cli.kicad_toolchain --check            # host kicad-cli
+     KCT_KICAD_DOCKER=1 uv run python -m kicad_tools.cli.kicad_toolchain --check
+     ```
+
+   For ad-hoc `kct check` runs outside a producer, point the current shell
+   at the pinned tables (CI's container jobs do this in their "Initialize
+   stock KiCad libraries" step):
 
    ```bash
-   uv run python scripts/ci/init_kicad_libraries.py
+   eval "$(python3 scripts/ci/init_kicad_libraries.py --shell)"
    ```
 
 The build's `nanobind` dependency is composed into the default dev
