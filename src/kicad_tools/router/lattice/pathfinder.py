@@ -246,6 +246,28 @@ class _PairResult:
 #: Bounded retries of a pair search after a ``pair-partner-pad`` decline (#6839).
 _PARTNER_PAD_RETRIES = 4
 
+#: Issue #6975: in a parity-filtered pair search, a lattice step and the end
+#: stub it joins "reverse" when the cosine of their angle is below this --
+#: i.e. the path doubles back along (nearly) the same line.  Only a straight
+#: 180-degree reversal is caught; a 90- or 135-degree turn keeps the stub's
+#: travel direction (and therefore its parity) and is left to the offset.
+_END_REVERSAL_COS = -1.0 + 1e-6
+
+
+def _unit_step(a: Pt, b: Pt) -> Pt | None:
+    """Unit vector ``a -> b``, or ``None`` for a zero-length step."""
+    length = dist(a, b)
+    if length <= 1e-9:
+        return None
+    return ((b[0] - a[0]) / length, (b[1] - a[1]) / length)
+
+
+def _reverses(d_in: Pt | None, d_out: Pt | None) -> bool:
+    """True when travelling ``d_in`` then ``d_out`` doubles back (#6975)."""
+    if d_in is None or d_out is None:
+        return False
+    return d_in[0] * d_out[0] + d_in[1] * d_out[1] < _END_REVERSAL_COS
+
 
 def _diverse_pair_stubs(
     stubs: list[tuple[NodeKey, int, list[Pt], float]],
@@ -2073,6 +2095,25 @@ class LatticePathfinder:
                 )
             return 0.0
 
+        # Issue #6975: a parity-filtered pair search (``_route_pair_impl``)
+        # chose each stub for the polarity its travel direction serves -- the
+        # start stub is left ALONG it, the goal stub is entered against its
+        # polyline.  A heading-less A* could instead overshoot an end anchor
+        # and come straight back along the stub; the trimmed centreline then
+        # travels the other way at that end and the pair fails polarity.  So
+        # in that search a goal is only arrived at along a step that does not
+        # reverse onto its stub, and a start node is never left back along
+        # its stub.
+        parity_ends = fat and stubs_override is not None
+
+        def stub_tail_dir(poly: list[Pt]) -> Pt | None:
+            """Direction of the stub's last non-degenerate step (pad -> node)."""
+            for a, b in zip(reversed(poly[:-1]), reversed(poly[1:]), strict=False):
+                d = _unit_step(a, b)
+                if d is not None:
+                    return d
+            return None
+
         goal: dict[_State, tuple[float, list[Pt]]] = {}
         for key, layer, poly, length in stubs_b:
             length += sum(
@@ -2081,6 +2122,13 @@ class LatticePathfinder:
             state = (key, layer)
             if state not in goal or length < goal[state][0]:
                 goal[state] = (length, poly)
+        # Issue #6975: the travel direction the goal stub is entered with
+        # (node -> pad, the reverse of its polyline's last step).
+        goal_out: dict[_State, Pt | None] = {}
+        if parity_ends:
+            for state, (_len, poly) in goal.items():
+                last = stub_tail_dir(poly)
+                goal_out[state] = None if last is None else (-last[0], -last[1])
         end_pt = (end.x, end.y)
 
         def h(key: NodeKey) -> float:
@@ -2107,21 +2155,57 @@ class LatticePathfinder:
                 heapq.heappush(heap, (length + h(key), counter, state))
                 counter += 1
 
+        # Issue #6975: the travel direction each start node is reached with.
+        start_in: dict[_State, Pt | None] = (
+            {state: stub_tail_dir(poly) for state, poly in start_stub.items()}
+            if parity_ends
+            else {}
+        )
+
         edge_ok: dict[tuple[EdgeKey, int], bool] = {}
         node_ok: dict[_State, bool] = {}
         via_ok: dict[NodeKey, bool] = {}
         end_state: _State | None = None
+        # Issue #6975: under ``parity_ends`` a goal is registered per arriving
+        # EDGE (``"arrive-edge"``): the goal node's own best arrival may be the
+        # reversing one, so its ``came`` entry cannot name the predecessor of
+        # a non-reversing arrival.  ``arrive_node`` is that goal node.
+        arrive_node: _State | None = None
+        end_pred: _State | None = None
+
+        def passes_through(tip: _State, node: _State) -> bool:
+            """True when ``node`` is on ``tip``'s settled path (#6975).
+
+            An ``arrive-edge`` goal must not loop back to a goal node its
+            path already crossed: that micro-hook is the same overshoot with
+            an extra spur, and offsetting it fails just the same.
+            """
+            cur: _State | None = tip
+            while cur is not None:
+                if cur == node:
+                    return True
+                cur = came[cur][0] if cur in came else None
+            return False
 
         while heap:
             f, _c, state = heapq.heappop(heap)
             if state == _GOAL:
-                end_state = came[_GOAL][0]
+                if came[_GOAL][1] == "arrive-edge":
+                    end_state, end_pred = arrive_node, came[_GOAL][0]
+                else:
+                    end_state = came[_GOAL][0]
                 break
             key, layer = state
             g = g_score.get(state, math.inf)
             if f > g + h(key) + 1e-9:
                 continue  # stale heap entry
-            if state in goal:
+            is_start = parity_ends and state not in came
+            if state in goal and (
+                not parity_ends
+                # A start node that is itself a goal: the two stubs meet here.
+                or (is_start and not _reverses(start_in.get(state), goal_out.get(state)))
+                or (not is_start and came[state][1] == "via")
+            ):
                 total = g + goal[state][0]
                 if total < g_score.get(_GOAL, math.inf) - 1e-12:
                     g_score[_GOAL] = total
@@ -2129,6 +2213,11 @@ class LatticePathfinder:
                     heapq.heappush(heap, (total, counter, _GOAL))
                     counter += 1
             for nbr, elen in lattice.adj.get(key, ()):
+                step_dir: Pt | None = None
+                if parity_ends:
+                    step_dir = _unit_step(lattice.node_point(key), lattice.node_point(nbr))
+                    if is_start and _reverses(start_in.get(state), step_dir):
+                        continue  # would double back along the start stub
                 edge = (min(key, nbr), max(key, nbr))
                 ek = (edge, layer)
                 ok = edge_ok.get(ek)
@@ -2196,6 +2285,19 @@ class LatticePathfinder:
                     # Issue #6703: soft pull toward the partner leg's corridor.
                     step += guide.edge_cost(lattice.node_point(key), lattice.node_point(nbr), layer)
                 tentative = g + step
+                if (
+                    parity_ends
+                    and nstate in goal
+                    and not _reverses(step_dir, goal_out.get(nstate))
+                    and not passes_through(state, nstate)
+                ):
+                    total = tentative + goal[nstate][0]
+                    if total < g_score.get(_GOAL, math.inf) - 1e-12:
+                        g_score[_GOAL] = total
+                        came[_GOAL] = (state, "arrive-edge")
+                        arrive_node = nstate
+                        heapq.heappush(heap, (total, counter, _GOAL))
+                        counter += 1
                 if tentative < g_score.get(nstate, math.inf) - 1e-12:
                     g_score[nstate] = tentative
                     came[nstate] = (state, "move")
@@ -2359,6 +2461,13 @@ class LatticePathfinder:
         chain: list[_State] = [end_state]
         moves: list[str] = []
         cur = end_state
+        if end_pred is not None:
+            # Issue #6975: an ``arrive-edge`` goal -- the last step is the
+            # registered edge, not the goal node's own (possibly reversing)
+            # best arrival.
+            chain.append(end_pred)
+            moves.append("move")
+            cur = end_pred
         while cur in came:
             prev, move = came[cur]
             chain.append(prev)
