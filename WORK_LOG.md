@@ -5,6 +5,12 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 ---
 ### 2026-10-17
 
+- **PR #6931**: test(board05): pin committed fully-routed, zero-short, manufacturer-check evidence
+- **PR #6910**: feat(router): lattice pairs try the gateway on a preferred layer before planar
+- **PR #6926**: refactor(router): pairplan attach and anchor-shift candidate generators (#6837 slice)
+- **Issue #6930** (closed): [Epic #4410] Phase 4: route PWM_BH/PWM_CH through the DRV8301 QFN stage and prove board-05 regen is manufacturable
+- **Issue #6883** (closed): Lattice coupled pairs never leave the pad layer for a preferred, opted-in plane layer
+- **Issue #6837** (closed): [Epic #6441] Phase 2c: extract engine-free router/pairplan/ package + structured outcomes
 - **PR #6921**: fix(router): try lattice pair gateway before planar run for non-pad preferred layers
 - **PR #6918**: feat: refuse SES import when board changed since DSN export
 - **PR #6917**: feat: add screenshot baseline save/compare with renderer-identity check
