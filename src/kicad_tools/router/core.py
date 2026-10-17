@@ -25,6 +25,7 @@ if TYPE_CHECKING:
 
     from .io import FineZone
     from .kicad_length import KicadLengthModel
+    from .pairplan.outcome import PairOutcome
     from .pathfinder import Router
     from .region_graph import RegionGraph
     from .routing_plan import RoutingPlan
@@ -1910,7 +1911,7 @@ class Autorouter:
         self._lattice_pair_outcomes: dict[str, str] = {}
         # Issue #6837: the structured record behind each of those strings
         # (``PairOutcome.label`` is the string), rebuilt with them.
-        self._lattice_pair_outcome_records: dict[str, Any] = {}
+        self._lattice_pair_outcome_records: dict[str, PairOutcome] = {}
         # Issue #6378: a pair that passes through an interior part (board 03
         # USB_D through the ESD part U2) is routed as a chain -- one coupled
         # connection per segment plus single-ended P/N hops inside the part.

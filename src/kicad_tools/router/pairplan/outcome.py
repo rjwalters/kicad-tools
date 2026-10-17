@@ -84,6 +84,15 @@ SegmentStatus = Literal[
 _BARE_STATUSES: frozenset[str] = frozenset({"coupled", "deadline-exceeded", "not-attempted"})
 
 
+def _label_is_ambiguous(reason: str | None) -> bool:
+    """Whether a declined ``reason`` would parse back as another status."""
+    return reason is not None and (
+        reason in _BARE_STATUSES
+        or reason.startswith(FALLBACK_PREFIX)
+        or reason.startswith(HYBRID_PREFIX)
+    )
+
+
 @dataclass(frozen=True)
 class SegmentOutcome:
     """One coupled segment's result.
@@ -114,6 +123,15 @@ class SegmentOutcome:
             raise ValueError(f"a {self.status!r} segment outcome takes no reason")
         if self.gateway is not None and self.status != "coupled":
             raise ValueError("only a coupled segment outcome names a gateway")
+        if self.status == "declined" and _label_is_ambiguous(self.reason):
+            # A declined label is its bare reason, so a reason that reads as
+            # another status's label would parse back as that status
+            # (Issue #6948).
+            raise ValueError(
+                f"declined reason {self.reason!r} would read back as a different "
+                "status; use a reason that is not a bare status and does not start "
+                f"with {FALLBACK_PREFIX!r} or {HYBRID_PREFIX!r}"
+            )
 
     @classmethod
     def coupled(cls, gateway: str | None = None) -> SegmentOutcome:
@@ -233,6 +251,13 @@ class SegmentOutcomes(dict[Any, str]):
             self[key] = value
 
     def __setitem__(self, key: Any, value: str | SegmentOutcome) -> None:
+        if not isinstance(value, (str, SegmentOutcome)):
+            # ``setdefault(key)`` / ``fromkeys(keys)`` default to None, which
+            # has no label (Issue #6948).
+            raise TypeError(
+                "SegmentOutcomes values must be a SegmentOutcome or an outcome "
+                f"label string, not {type(value).__name__}"
+            )
         rec = value if isinstance(value, SegmentOutcome) else SegmentOutcome.from_label(value)
         self._records[key] = rec
         super().__setitem__(key, rec.label)
