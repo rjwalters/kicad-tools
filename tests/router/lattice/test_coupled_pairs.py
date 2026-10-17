@@ -219,10 +219,12 @@ def test_pair_routes_coupled_at_exact_pitch_with_correct_polarity() -> None:
     route_n = routes[(pc.key, "N")]
     assert route_p.net == 1 and route_n.net == 2
     assert not route_p.vias and not route_n.vias  # planar v1
-    # Legs terminate on their exact pads (polarity-correct attach).
+    # Legs terminate inside their own pads' copper (polarity-correct attach),
+    # at the pad-entry point rather than the pad centre (issue #6959).
     ends_p = {(s.x1, s.y1) for s in route_p.segments} | {(s.x2, s.y2) for s in route_p.segments}
-    assert (pc.pad_p_a.x, pc.pad_p_a.y) in ends_p
-    assert (pc.pad_p_b.x, pc.pad_p_b.y) in ends_p
+    for pad in (pc.pad_p_a, pc.pad_p_b):
+        reach = pad.width / 2.0 - _HS.trace_width / 2.0 + 1e-6
+        assert any(abs(x - pad.x) <= reach and abs(y - pad.y) <= reach for x, y in ends_p)
     # The coupled body sits at exactly the pitch: the straight mid-corridor
     # segments of the two legs are pitch apart.
     min_sep = min(
@@ -438,8 +440,10 @@ def test_polarity_twist_resolves_via_hook_when_room_exists() -> None:
     if pf.pair_outcomes[pc.key] == "coupled":
         route_p = routes[(pc.key, "P")]
         ends_p = {(s.x1, s.y1) for s in route_p.segments} | {(s.x2, s.y2) for s in route_p.segments}
-        assert (pc.pad_p_a.x, pc.pad_p_a.y) in ends_p
-        assert (pc.pad_p_b.x, pc.pad_p_b.y) in ends_p
+        # Inside the pad copper, not at its centre (issue #6959).
+        for pad in (pc.pad_p_a, pc.pad_p_b):
+            reach = pad.width / 2.0 - _HS.trace_width / 2.0 + 1e-6
+            assert any(abs(x - pad.x) <= reach and abs(y - pad.y) <= reach for x, y in ends_p)
         from kicad_tools.router.diffpair_routing import find_intra_pair_clearance_violations
 
         violation = find_intra_pair_clearance_violations(
