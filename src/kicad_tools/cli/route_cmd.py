@@ -2078,6 +2078,162 @@ def _run_consolidation_pass(
         print(f"  Consolidation: {stats.summary()}")
 
 
+def _warn_match_groups_gated_off(router: Any, detected_groups: list) -> None:
+    """Warn on stderr when ``length_critical=False`` gates every group off (#6968).
+
+    ``--length-match-groups`` keeps its legacy ``length_critical`` gate, so a
+    class map that declares ``length_match_group`` but leaves
+    ``length_critical: false`` (board 07's sidecar) tunes nothing: every
+    member comes back ``not_length_critical``.  Like #3440's no-declaration
+    warning this goes to stderr regardless of ``--quiet``.  The flag does NOT
+    override the per-class ``length_critical=False``: that is the class map
+    owner's explicit decision.
+    """
+    resolve = getattr(router, "_resolve_net_class_for_group", None)
+    if resolve is None:
+        return
+    gated: list[str] = []
+    for group in detected_groups:
+        try:
+            net_class = resolve(group)
+        except Exception:  # noqa: BLE001 - a warning must never break routing
+            net_class = None
+        if net_class is not None and not net_class.length_critical:
+            gated.append(group.name)
+    if not gated or len(gated) != len(detected_groups):
+        return
+    print(
+        "WARNING: --length-match-groups is INACTIVE: every detected match "
+        f"group ({', '.join(sorted(gated))}) belongs to a net class with "
+        "length_critical=false, so no skew tuning will run.  Set "
+        '"length_critical": true on those classes in the --net-class-map '
+        "sidecar to tune them.",
+        file=sys.stderr,
+    )
+
+
+def _run_match_group_tuning_phase(router: Any, args: argparse.Namespace, *, quiet: bool) -> None:
+    """Run the N-trace match-group length tuner on ``router``'s final copper.
+
+    Shared by the single-attempt tail of ``_run_main_impl`` and the escalation
+    flows (Issue #6968: the default ``--auto-layers`` path used to skip it, so
+    ``--length-match-groups`` silently tuned nothing on a plain ``kct route``).
+    Call it once, after the geometric post-passes and the finalize gate and
+    before ``_finalize_routes``.
+    """
+    _mg_engage = _match_group_tuning_engage(args, router)
+    _mg_auto = _mg_engage == "checker_limit"
+    if _mg_engage is None:
+        return
+    if not router.routes:
+        if _mg_engage == "length_critical":
+            # Issue #6968: never skip an explicit request silently.
+            print(
+                "WARNING: --length-match-groups did not run: the router "
+                "committed no routes, so there is no copper to tune.",
+                file=sys.stderr,
+            )
+        return
+    from kicad_tools.router.match_group_detection import detect_match_groups
+
+    if not quiet:
+        if _mg_auto:
+            print(
+                "\n--- Length-Match Groups (auto: lattice, kct check "
+                "match_group_length_skew limit; Issue #6674) ---"
+            )
+        else:
+            print("\n--- Length-Match Groups (Epic #2661 Phase 3H) ---")
+    # Issue #3440: --length-match-groups silently no-ops without
+    # length_match_group declarations (detection consults
+    # NetClassRouting declarations exclusively when suffix inference
+    # is off; the built-in DEFAULT_NET_CLASS_MAP declares none).
+    # Warn LOUDLY -- on stderr, regardless of --quiet -- so a recipe
+    # that forgot --net-class-map doesn't sail through with untuned
+    # skew.
+    _has_group_declarations = any(
+        nc.effective_length_match_group() for nc in router.net_class_map.values()
+    )
+    if not _has_group_declarations:
+        print(
+            "WARNING: --length-match-groups is INACTIVE: no loaded net "
+            "class declares length_match_group, so no match groups can "
+            "be detected and no skew tuning will run.  Pass "
+            "--net-class-map <sidecar.json> (e.g. the board's "
+            "output/net_class_map.json) with length_match_group "
+            "declarations.",
+            file=sys.stderr,
+        )
+    # Build net_to_class + a class-name-keyed routing map so the
+    # explicit-declaration consultation in ``_gather_explicit_groups``
+    # can find each net's NetClassRouting.  ``router.net_class_map`` is
+    # keyed by NET NAME (e.g. "DQ0"), but ``detect_match_groups`` looks
+    # up by CLASS NAME (e.g. "DDR_DATA_BYTE_0").  Mirrors the
+    # synth_routing idiom in ``validate/match_group_skew.py:174-181``
+    # (Issue #3098 -- without this the detector returned an empty
+    # group list and the orchestrator silently no-op'd).
+    net_to_class: dict[str, str] = {}
+    synth_routing: dict = dict(router.net_class_map)
+    for net_name, net_class in router.net_class_map.items():
+        net_to_class[net_name] = net_class.name
+        synth_routing.setdefault(net_class.name, net_class)
+    try:
+        detected_groups = detect_match_groups(
+            net_names=router.net_names,
+            net_class_routing=synth_routing,
+            net_to_class=net_to_class,
+            length_tracker=router.length_tracker,
+            enable_suffix_inference=False,
+        )
+    except Exception as exc:
+        if not quiet:
+            print(f"  Match-group detection failed: {exc}; skipping.")
+        detected_groups = []
+
+    if detected_groups and _mg_engage == "length_critical":
+        _warn_match_groups_gated_off(router, detected_groups)
+
+    if not detected_groups:
+        if not quiet:
+            print("  No match groups detected; nothing to tune.")
+    else:
+        # Snapshot connectivity for the pad-to-pad invariant.
+        _ci_snapshot_groups = _connectivity_snapshot(router)
+        tune_results_groups = router.apply_match_group_tuning(
+            detected_groups=detected_groups,
+            verbose=not quiet,
+            engage=_mg_engage,
+        )
+        _enforce_connectivity_invariant_or_exit(
+            router,
+            _ci_snapshot_groups,
+            phase="length_match_groups",
+            args=args,
+            quiet=quiet,
+        )
+        if not quiet:
+            # Aggregate per-member counters across all groups for a
+            # single end-of-phase summary line.  Issue #3440: the
+            # shared formatter counts EVERY TuneResult.reason value
+            # (the legacy five-bucket line silently dropped
+            # ``reference`` / ``longer_than_reference`` / ``unrouted``
+            # members, producing the all-zeros line for a
+            # 15.4mm-skew group).
+            from kicad_tools.router.match_group_tuning import (
+                format_reason_counts,
+            )
+
+            all_results = [
+                res
+                for member_dict in tune_results_groups.values()
+                for (_route, res) in member_dict.values()
+            ]
+            print(
+                f"  Summary: {len(tune_results_groups)} groups, "
+                f"{format_reason_counts(r.reason for r in all_results)}"
+            )
+
+
 def _diffpair_skew_tuning_mode(args: argparse.Namespace) -> str | None:
     """Which diff-pair skew tuning (if any) runs after routing.
 
@@ -11944,6 +12100,12 @@ def route_with_layer_escalation(
     _record_stage_quality(_stage_quality, STAGE_POST_FINALIZE, final_result.router)
     _print_stage_quality_report(_stage_quality)
 
+    # Issue #6968: match-group length tuning on the escalation result.  This
+    # is the default ``kct route`` flow; before #6968 only the single-attempt
+    # tail of ``_run_main_impl`` ran the tuner, so --length-match-groups
+    # silently tuned nothing here.
+    _run_match_group_tuning_phase(final_result.router, args, quiet=quiet)
+
     # Finalize: cleanup -> sexp -> stats (canonical ordering)
     _final_multi_pad_ids = {n for n, p in final_result.router.nets.items() if n > 0 and len(p) >= 2}
     route_sexp, final_stats, _cleanup_stats = _finalize_routes(
@@ -12982,6 +13144,12 @@ def route_with_rule_relaxation(
         _finalize_committed_copper_or_demote(final_result.router, quiet=quiet)
     _record_stage_quality(_stage_quality, STAGE_POST_FINALIZE, final_result.router)
     _print_stage_quality_report(_stage_quality)
+
+    # Issue #6968: match-group length tuning on the escalation result.  This
+    # is the default ``kct route`` flow; before #6968 only the single-attempt
+    # tail of ``_run_main_impl`` ran the tuner, so --length-match-groups
+    # silently tuned nothing here.
+    _run_match_group_tuning_phase(final_result.router, args, quiet=quiet)
 
     # Finalize: cleanup -> sexp -> stats (canonical ordering)
     _final_multi_pad_ids = {n for n, p in final_result.router.nets.items() if n > 0 and len(p) >= 2}
@@ -15594,6 +15762,12 @@ def route_with_combined_escalation(
         _finalize_committed_copper_or_demote(final_result.router, quiet=quiet)
     _record_stage_quality(_stage_quality, STAGE_POST_FINALIZE, final_result.router)
     _print_stage_quality_report(_stage_quality)
+
+    # Issue #6968: match-group length tuning on the escalation result.  This
+    # is the default ``kct route`` flow; before #6968 only the single-attempt
+    # tail of ``_run_main_impl`` ran the tuner, so --length-match-groups
+    # silently tuned nothing here.
+    _run_match_group_tuning_phase(final_result.router, args, quiet=quiet)
 
     # Finalize: cleanup -> sexp -> stats (canonical ordering)
     _final_multi_pad_ids = {n for n, p in final_result.router.nets.items() if n > 0 and len(p) >= 2}
@@ -22909,104 +23083,7 @@ def _run_main_impl(args, parser, argv) -> int:
     # enforces (``engage="checker_limit"``).  Grid is not auto-engaged
     # (frozen for pair-adjacent features until #6448); the explicit flag
     # keeps its legacy ``length_critical`` gating on every engine.
-    _mg_engage = _match_group_tuning_engage(args, router)
-    _mg_auto = _mg_engage == "checker_limit"
-    if _mg_engage is not None and router.routes:
-        from kicad_tools.router.match_group_detection import detect_match_groups
-
-        if not quiet:
-            if _mg_auto:
-                print(
-                    "\n--- Length-Match Groups (auto: lattice, kct check "
-                    "match_group_length_skew limit; Issue #6674) ---"
-                )
-            else:
-                print("\n--- Length-Match Groups (Epic #2661 Phase 3H) ---")
-        # Issue #3440: --length-match-groups silently no-ops without
-        # length_match_group declarations (detection consults
-        # NetClassRouting declarations exclusively when suffix inference
-        # is off; the built-in DEFAULT_NET_CLASS_MAP declares none).
-        # Warn LOUDLY -- on stderr, regardless of --quiet -- so a recipe
-        # that forgot --net-class-map doesn't sail through with untuned
-        # skew.
-        _has_group_declarations = any(
-            nc.effective_length_match_group() for nc in router.net_class_map.values()
-        )
-        if not _has_group_declarations:
-            print(
-                "WARNING: --length-match-groups is INACTIVE: no loaded net "
-                "class declares length_match_group, so no match groups can "
-                "be detected and no skew tuning will run.  Pass "
-                "--net-class-map <sidecar.json> (e.g. the board's "
-                "output/net_class_map.json) with length_match_group "
-                "declarations.",
-                file=sys.stderr,
-            )
-        # Build net_to_class + a class-name-keyed routing map so the
-        # explicit-declaration consultation in ``_gather_explicit_groups``
-        # can find each net's NetClassRouting.  ``router.net_class_map`` is
-        # keyed by NET NAME (e.g. "DQ0"), but ``detect_match_groups`` looks
-        # up by CLASS NAME (e.g. "DDR_DATA_BYTE_0").  Mirrors the
-        # synth_routing idiom in ``validate/match_group_skew.py:174-181``
-        # (Issue #3098 -- without this the detector returned an empty
-        # group list and the orchestrator silently no-op'd).
-        net_to_class: dict[str, str] = {}
-        synth_routing: dict = dict(router.net_class_map)
-        for net_name, net_class in router.net_class_map.items():
-            net_to_class[net_name] = net_class.name
-            synth_routing.setdefault(net_class.name, net_class)
-        try:
-            detected_groups = detect_match_groups(
-                net_names=router.net_names,
-                net_class_routing=synth_routing,
-                net_to_class=net_to_class,
-                length_tracker=router.length_tracker,
-                enable_suffix_inference=False,
-            )
-        except Exception as exc:
-            if not quiet:
-                print(f"  Match-group detection failed: {exc}; skipping.")
-            detected_groups = []
-
-        if not detected_groups:
-            if not quiet:
-                print("  No match groups detected; nothing to tune.")
-        else:
-            # Snapshot connectivity for the pad-to-pad invariant.
-            _ci_snapshot_groups = _connectivity_snapshot(router)
-            tune_results_groups = router.apply_match_group_tuning(
-                detected_groups=detected_groups,
-                verbose=not quiet,
-                engage=_mg_engage,
-            )
-            _enforce_connectivity_invariant_or_exit(
-                router,
-                _ci_snapshot_groups,
-                phase="length_match_groups",
-                args=args,
-                quiet=quiet,
-            )
-            if not quiet:
-                # Aggregate per-member counters across all groups for a
-                # single end-of-phase summary line.  Issue #3440: the
-                # shared formatter counts EVERY TuneResult.reason value
-                # (the legacy five-bucket line silently dropped
-                # ``reference`` / ``longer_than_reference`` / ``unrouted``
-                # members, producing the all-zeros line for a
-                # 15.4mm-skew group).
-                from kicad_tools.router.match_group_tuning import (
-                    format_reason_counts,
-                )
-
-                all_results = [
-                    res
-                    for member_dict in tune_results_groups.values()
-                    for (_route, res) in member_dict.values()
-                ]
-                print(
-                    f"  Summary: {len(tune_results_groups)} groups, "
-                    f"{format_reason_counts(r.reason for r in all_results)}"
-                )
+    _run_match_group_tuning_phase(router, args, quiet=quiet)
 
     # Finalize: cleanup -> sexp -> stats (canonical ordering)
     multi_pad_net_ids = set(multi_pad_nets)
