@@ -20,6 +20,9 @@
 #         caller supplies evidence citing it
 #     T5  a read failure / incomplete pagination fails CLOSED (never "clean")
 #     T6  a clean, fully-reconciled review state approves normally
+#     T11 changes-requested verdicts posted as PR COMMENTS (#12475) are read:
+#         older head -> exit 11, current head -> exit 10, untrusted author
+#         ignored, superseded only by a later reconciled approval
 #
 # Black-box: both subjects are full CLI scripts, so `gh` is stubbed on PATH and
 # the real scripts run as subprocesses (same pattern as test-post-verdict.sh).
@@ -155,6 +158,13 @@ case "$endpoint" in
     cat "$FIX/graphql-threads.json"
     exit 0
     ;;
+  */issues/*/comments*)
+    [[ -f "$FIX/fail-comments" ]] && {
+      echo "stub gh: simulated issue-comment read failure" >&2
+      exit 1
+    }
+    emit_pages 'comments-page-*.json'
+    ;;
   */pulls/*/reviews*)
     [[ -f "$FIX/fail-reviews" ]] && {
       echo "stub gh: simulated reviews read failure" >&2
@@ -202,6 +212,14 @@ if [[ "${1:-} ${2:-}" == "forge wait-checks" ]]; then
   echo "LOOM-CHECKS-GREEN ${LOOM_TEST_HEAD_SHA:?}"
   exit 0
 fi
+# #12475: comment verdicts are read through the trust filter. The mock keeps
+# every comment except those a fixture marks author_association NONE (an
+# outside commenter), and `fail-trust` simulates a daemon without the verb.
+if [[ "${1:-} ${2:-}" == "forge trusted-comments" ]]; then
+  [[ -f "${LOOM_TEST_FIXTURE_DIR:?}/fail-trust" ]] && exit 1
+  jq -c 'if type == "array" then map(select(.author_association != "NONE")) else . end'
+  exit $?
+fi
 [[ "${1:-} ${2:-}" == "forge verdict-gate" ]] && { echo "LOOM-VERDICT-GATE PROCEED ok"; exit 0; }
 [[ "${1:-} ${2:-}" == "forge verdict-labels" ]] && { echo "LOOM-VERDICT-LABELS OK"; exit 0; }
 [[ "${1:-} ${2:-}" == "forge verdict-lock" ]] && exit 0
@@ -231,6 +249,7 @@ printf '{"head":{"sha":"%s"}}\n' "$HEAD_SHA" > "$FIX_DIR/pr.json"
 
 reset_fixtures() {
   rm -f "$FIX_DIR"/reviews-page-*.json "$FIX_DIR"/inline-page-*.json \
+    "$FIX_DIR"/comments-page-*.json \
     "$FIX_DIR/graphql-threads.json" "$FIX_DIR"/fail-* \
     "$FIX_DIR/last-pr.txt" "$FIX_DIR/last-body.txt"
   # Default: no inline threads at all (GraphQL answers with an empty node list).
@@ -516,6 +535,84 @@ assert_eq "3" "$PV_RC" "id '42' embedded only inside longer numbers (4242, 4200)
 run_pv 5369 approved "$HEAD_SHA" --body "Approved." \
   --reviews-reconciled "Review 42 (needs a fix) was addressed in commit 23a0289: the fix landed and is covered by a new test."
 assert_eq "0" "$PV_RC" "id '42' cited as its own token satisfies citation"
+
+# --- T11: comment-posted changes-requested verdicts (#12475) ----------------
+# The fleet's Judges post verdicts as PR comments carrying a loom:verdict-sha
+# marker. #12465 was approved with blocking_older=0 over two such verdicts
+# because the gate read formal reviews and inline threads only.
+echo ""
+echo "T11: comment-posted changes-requested verdicts"
+cr_comment() { # id login assoc sha
+  printf '{"id":%s,"user":{"login":"%s"},"author_association":"%s","body":"**Judge: changes requested**\\nre-grant bypass\\n<!-- loom:verdict-sha sha=%s verdict=changes-requested -->"}' "$1" "$2" "$3" "$4"
+}
+ap_comment() { # id reconciled sha
+  printf '{"id":%s,"user":{"login":"judge"},"author_association":"MEMBER","body":"Approved\\n<!-- loom:review-reconciliation state=clear reviews=0 blocking_current=0 blocking_older=0 inline_unresolved=0 source=graphql reconciled=%s -->\\n<!-- loom:verdict-sha sha=%s verdict=approved -->"}' "$1" "$2" "$3"
+}
+
+# Two verdicts by ONE identity at an older head, then a push: both count.
+reset_fixtures
+printf '[%s,%s]\n' "$(cr_comment 9001 judge MEMBER "$OLD_SHA")" "$(cr_comment 9002 judge MEMBER "$OLD_SHA")" \
+  > "$FIX_DIR/comments-page-1.json"
+run_gate --number 12465 --head-sha "$HEAD_SHA"
+assert_eq "11" "$GATE_RC" "older-head comment verdicts -> exit 11 (NEEDS_RECONCILIATION)"
+assert_contains "$GATE_OUT" "REVIEWS_BLOCKING_OLDER_HEAD=2" "both verdicts from the same author count individually"
+assert_contains "$GATE_OUT" "REVIEW_BLOCKING_IDS=\"9001 9002\"" "comment ids are reported for citation"
+
+run_pv 12465 approved "$HEAD_SHA" --body "Approved."
+assert_eq "3" "$PV_RC" "approval refused without --reviews-reconciled"
+assert_contains "$PV_OUT" "9001" "refusal names the comment verdict"
+run_pv 12465 approved "$HEAD_SHA" --body "Approved." \
+  --reviews-reconciled "Verdict 9001 (re-grant bypass) is fixed at lib.rs:10; verdict 9002 (node-map shape) is fixed at map.rs:20."
+assert_eq "0" "$PV_RC" "approval citing every comment id posts"
+
+# Same verdict at the current head blocks outright; abbreviated sha tolerated.
+reset_fixtures
+printf '[%s]\n' "$(cr_comment 9003 judge MEMBER "${HEAD_SHA:0:7}")" > "$FIX_DIR/comments-page-1.json"
+run_gate --number 12465 --head-sha "$HEAD_SHA"
+assert_eq "10" "$GATE_RC" "current-head comment verdict -> exit 10 (BLOCKING)"
+assert_contains "$GATE_OUT" "REVIEWS_BLOCKING_CURRENT_HEAD=1" "counted at the current head"
+
+# A verdict on page 2 of the comment listing is found.
+reset_fixtures
+printf '[%s]\n' "$(ap_comment 8000 yes "$OLD_SHA")" > "$FIX_DIR/comments-page-1.json"
+printf '[%s]\n' "$(cr_comment 9004 judge MEMBER "$OLD_SHA")" > "$FIX_DIR/comments-page-2.json"
+run_gate --number 12465 --head-sha "$HEAD_SHA"
+assert_eq "11" "$GATE_RC" "verdict on comment page 2 is found"
+
+# Untrusted author: a marker typed by an outside commenter is prose.
+reset_fixtures
+printf '[%s]\n' "$(cr_comment 9005 mallory NONE "$HEAD_SHA")" > "$FIX_DIR/comments-page-1.json"
+run_gate --number 12465 --head-sha "$HEAD_SHA"
+assert_eq "0" "$GATE_RC" "untrusted-author marker is ignored"
+
+# Supersession: only a LATER approval whose marker says reconciled=yes.
+reset_fixtures
+printf '[%s,%s]\n' "$(cr_comment 9006 judge MEMBER "$OLD_SHA")" "$(ap_comment 9007 yes "$HEAD_SHA")" \
+  > "$FIX_DIR/comments-page-1.json"
+run_gate --number 12465 --head-sha "$HEAD_SHA"
+assert_eq "0" "$GATE_RC" "later reconciled=yes approval supersedes the earlier verdict"
+
+reset_fixtures
+printf '[%s,%s]\n' "$(cr_comment 9008 judge MEMBER "$OLD_SHA")" "$(ap_comment 9009 n/a "$HEAD_SHA")" \
+  > "$FIX_DIR/comments-page-1.json"
+run_gate --number 12465 --head-sha "$HEAD_SHA"
+assert_eq "11" "$GATE_RC" "a later approval WITHOUT reconciled=yes does not supersede"
+
+reset_fixtures
+printf '[%s,%s]\n' "$(ap_comment 9010 yes "$OLD_SHA")" "$(cr_comment 9011 judge MEMBER "$HEAD_SHA")" \
+  > "$FIX_DIR/comments-page-1.json"
+run_gate --number 12465 --head-sha "$HEAD_SHA"
+assert_eq "10" "$GATE_RC" "an EARLIER reconciled approval does not supersede a later verdict"
+
+# Fail closed: failed comment read, or a daemon without the trusted-comments verb.
+reset_fixtures
+touch "$FIX_DIR/fail-comments"
+run_gate --number 12465 --head-sha "$HEAD_SHA"
+assert_eq "12" "$GATE_RC" "failed comment read -> exit 12 (UNKNOWN)"
+reset_fixtures
+touch "$FIX_DIR/fail-trust"
+run_gate --number 12465 --head-sha "$HEAD_SHA"
+assert_eq "12" "$GATE_RC" "trusted-comments unavailable -> exit 12 (UNKNOWN), never clean"
 
 # --- Summary ---
 echo ""

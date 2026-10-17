@@ -353,6 +353,7 @@ If a number is provided (e.g., `/doctor 123`):
    `lease pr claim` re-attaches (exit 0) — continue and add `loom:treating`
    yourself, the same override `LEASE_ALREADY_HELD` has in `builder.md`
 4. Proceed directly to fixing that PR
+5. End with the outcome line from `.loom/docs/targeted-role-invocation.md`: `LOOM_STEP_OUTCOME role=doctor target=<pr> class=<verdict|noop|refused|failed> reason=<token>`. `verdict` / `fixed` when you pushed a fix; `noop` / `no_fix_needed` when the PR needed none. Without it the captain reads the step as `failed` and holds the PR fleet-wide (#12551)
 
 **How judge feedback reaches you.** When `/loom:sweep` dispatches a Doctor after a
 Judge rejection, the feedback lives in the PR itself — the Judge's review comments

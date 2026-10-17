@@ -197,11 +197,9 @@ above stays required: synthetic completions, and pre-#9438 data, are still
 `loom.role_attempt` spans have distinct IDs for retries. Explicit checkpoint
 attempt numbers are retained. Unknown usage remains absent; measured zero stays
 zero. Each attempt's token usage is a set of per-model `loom.runtime.usage`
-children with `loom.usage.scope=attempt` (#9303): `loom-daemon usage-record`,
-run after each checkpoint write, reads the role subagent's transcript and
-journals them under the role's newest attempt, or, in an operator session with
-no inherited context, under a `loom.role_attempt` it creates in the issue's
-story trace (`loom.timing_source=transcript_window`). The whole execution's
+children with `loom.usage.scope=attempt` (#9303), written by the daemon for
+its own role-runner ticks. No CLI an attended or outside session can call
+emits usage telemetry (#12536): only daemon work is recorded. The whole execution's
 usage is the `scope=execution` set; see `telemetry-schema.md` for how to total
 the two without double counting. Outcome logs include existing grouped usage, failure classification, ordered
 Judge verdicts and Doctor counts. Grouped usage inherits the source journal's

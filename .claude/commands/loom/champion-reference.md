@@ -503,8 +503,10 @@ per-repo class instead of a hardcoded, always-safe one.
   entries in the array. No config, or an empty array, is a full no-op.
 - **Criteria #1/#3/#4/#5/#6 still run independently.** A standing
   authorization only ever waives criterion #2's four-axis judgment for a
-  matching PR — nothing else. A PR that matches a class but fails, say, the
-  critical-file check (#3) or CI (#6) still does not merge.
+  matching PR — nothing else, **except** criterion #3 for a class that
+  opts in with `"coversCriticalFiles": true` (#12528, below). A PR that
+  matches a class but fails, say, the critical-file check (#3) on a class
+  without that flag, or CI (#6), still does not merge.
 
 **Decision**:
 - Full changed-file list matches an authorized class's patterns and every
@@ -520,6 +522,32 @@ that does not cleanly match an authorized class. It gives an operator a way
 to retire a whole class of recurring, already-decided merge-risk judgments
 without weakening review for anything outside that class, addressing the
 monotonically-growing held-PR backlog documented in #6848.
+
+**Covering critical files (#12528)**: a class may add
+`"coversCriticalFiles": true`, `"excludeFilePatterns": [...]` (globs) and
+`"forbiddenDiffPatterns": [...]` (jq `test()` regexes over every added/removed line). Criterion
+#3 then runs the class check before it emits FAIL. Worked examples, class
+`ci-steps` = `filePatterns: [".github/workflows/*.yml"]`, `coversCriticalFiles: true`,
+`excludeFilePatterns: [".github/workflows/*publish*", "*release*", "*deploy*"]`,
+`forbiddenDiffPatterns: ["^\\s*permissions:", "id-token", "secrets\\.", "pull_request_target"]`,
+`conditions: ["judgeApproval", "greenCi"]`:
+
+| PR | Result |
+|---|---|
+| `.github/workflows/ci.yml`, one added `run:` step, Judge-approved, CI green | #3 **PASS**, rationale names `ci-steps`; no hold |
+| `ci.yml` plus `Cargo.toml` | `Cargo.toml` is outside the class: **FAIL**, today's hold |
+| `.github/workflows/publish.yml` | excluded file: **FAIL**, hold |
+| `ci.yml` adding a `permissions:` block | forbidden diff line: **FAIL**, hold |
+| `ci.yml`, but the files API returns no patch for it | unreadable diff: **FAIL**, hold |
+| `ci.yml`, CI red or pending | `greenCi` does not hold: **FAIL**, hold |
+| same class without `coversCriticalFiles` | #3 unchanged: **FAIL**, hold |
+| `defaults/hooks/guard-x.sh` under a class that lists it with the flag | kept set: **FAIL**, hold |
+
+The kept set (irreversible migrations, the merge gate itself, credential/token
+selection, guard hooks, installers/updaters that rewrite installed files on
+roll) is never satisfiable by a class. Revertability is red only for a one-way
+effect that happens on merge or roll, not for one an operator later triggers
+by hand. Absent `coversCriticalFiles`, nothing changes.
 
 **Action** (single authoritative policy — implemented in
 `champion-pr-merge.md` → "Safety Criteria → 2. Merge-Risk Judgment →

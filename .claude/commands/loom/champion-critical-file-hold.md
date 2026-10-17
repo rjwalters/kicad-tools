@@ -23,6 +23,21 @@ Rationale: `.loom/docs/critical-file-hold.md`.
 - The release is scoped to a **diff, not a commit id** (#9416): this verdict is a
   pure function of the file list, so the operator decided about that change.
 
+## A covering standing authorization means no hold (#12528)
+
+The FAIL above is "one-way terminal" only for a PR no operator pre-authorized.
+`champion-pr-merge.md` criterion #3 runs `standing_auth_eval critical` first: a
+`champion.standingAuthorizations` class with `"coversCriticalFiles": true` that
+matches the whole diff (`filePatterns` exact subset; no `excludeFilePatterns`
+file; no `forbiddenDiffPatterns` line in any added/removed line; no kept-set
+path; `judgeApproval` and `greenCi` holding) passes #3, so this tick receives
+`$CRITERION3_RESULT="PASS"` and writes no hold. Any open episode closes through
+the ordinary PASS row (cleared notice + remove `loom:blocked`), naming the class
+id. One file outside the class, an excluded file, a forbidden line or an
+unreadable diff restores the FAIL and this whole machine. The kept set (the
+merge gate, guard hooks, credential selection, installers/updaters,
+migrations) is never satisfiable by a class.
+
 ## The state machine
 
 The state is whichever of these three markers is the **latest** trusted comment

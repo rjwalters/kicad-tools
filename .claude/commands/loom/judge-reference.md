@@ -161,6 +161,39 @@ The run command is the Step 3 scoped one narrowed to that path (`run-tests.sh <p
 
 ---
 
+## Spec Reconciliation (linked-issue requirements at review time)
+
+`judge.md` step 4: the verdict must name the issue requirements it was reviewed against, so a body rewrite or operator comment that landed after the Builder's claim cannot slip through on the PR's own description (2AMLogic/2am, 2026-10-08). Pipe the **trusted** listing for each `Closes`/`Fixes`/`Resolves`/`Part of`/`Contributes to` reference through the helper below and paste its output lines into the verdict body.
+
+```bash
+# spec_reconcile [prior-spec-line]   (#10862)
+# stdin: `loom-daemon forge trusted-comments --fetch <N> --with-body` (REST listing;
+# the issue itself is the one item without `issue_url`, and survives only if trusted).
+# Prints `spec=<16 hex of whitespace-normalized body> comments=<id>@<updated_at>,...`
+# then a `baseline:` line. Pass a `spec=... comments=...` line from an earlier
+# verdict to compare; with none, it says so rather than reconstructing a diff.
+spec_reconcile() {
+    local prior="${1:-}" listing body ids cur
+    listing=$(cat)
+    body=$(printf '%s' "$listing" | jq -r '[.[] | select(has("issue_url") | not)][0].body // "<untrusted-or-absent>"' |
+        tr -s '[:space:]' ' ' | sed 's/^ //; s/ $//')
+    ids=$(printf '%s' "$listing" | jq -r '[.[] | select(has("issue_url")) | "\(.id)@\(.updated_at)"] | sort | join(",")')
+    cur="spec=$(printf '%s' "$body" | sha256sum | cut -c1-16) comments=$ids"
+    echo "$cur"
+    if [ -z "$prior" ]; then
+        echo "baseline: none - no earlier spec baseline available; reviewed against current requirements"
+    elif [ "$prior" = "$cur" ]; then
+        echo "baseline: unchanged since $prior"
+    else
+        echo "baseline: CHANGED since [$prior] - reconcile the differences with the PR scope before approving"
+    fi
+}
+```
+
+**Reading the result.** `baseline: CHANGED` is a prompt to read the current requirements and name every material difference from the PR's scope, resolved or not; formatting-only edits do not change `spec=` (whitespace is normalized) and need no restart. `baseline: none` is a stated limitation, never a licence to claim a historical diff. A `Part of #N` PR is judged against the part it declares, and that partial scope is recorded as intentional. A changed comment counts as a new revision (`updated_at`). The helper is additive: exact-head CI, `check-review-feedback.sh` and the merge-script gates still apply.
+
+---
+
 ## Rollout check
 
 **Applies only to host-move PRs** (#10917): the diff moves work between hosts or changes who emits a fleet signal (authority, captain, singleton jobs, gating, capability routing; #10498 is the model case). Docs-only, single-host refactor, and ordinary PRs are NOT flagged.

@@ -1308,8 +1308,8 @@ _work_log_search_total_count() {
   # `predicate` (#6144) generalizes this beyond the issue-side-only original:
   # it takes the search predicate as a second, optional argument — defaults
   # to `is:issue is:closed` (the original, issue-side behavior, unchanged for
-  # every existing caller) so `fetch_closed_issues_complete()` below needs no
-  # changes. `fetch_merged_prs_complete()` passes `is:pr is:merged` instead —
+  # every existing caller) so `fetch_closed_issues_complete()` needs no
+  # changes. `_fetch_complete pr` passes `is:pr is:merged` instead —
   # GitHub's search API unifies issues and PRs under the same `search/issues`
   # endpoint, so no separate endpoint or `_pr` companion function is needed,
   # only a different predicate string.
@@ -1327,21 +1327,51 @@ _work_log_search_total_count() {
     --jq '.total_count' 2>/dev/null || echo "-1"
 }
 
-fetch_closed_issues_complete() {
-  # Fetch EVERY closed issue in [start, end) — end empty means open-ended,
+_fetch_complete() {
+  # Fetch EVERY item of <kind> in [start, end) — end empty means open-ended,
   # ">=start" — without truncation, no matter how large the window's true
   # volume is. `depth` only guards a degenerate/malformed window from
   # recursing forever; it is never expected to bind in normal operation.
-  local start="$1" end="$2" depth="${3:-0}" safety_cap=1000
+  #
+  # One mechanism, two kinds (#6097 issue side, #6144 PR side — the PR side
+  # was first written as a line-for-line copy). `fetch_closed_issues_complete`
+  # and `fetch_merged_prs_complete` below are thin wrappers; a fix to the
+  # bisection, the BSD/GNU `date` fallbacks or the depth cap is made here once.
+  #
+  #   kind=issue: closed:<range>, predicate `is:issue is:closed`,
+  #               `gh issue list --state closed`, fields number,title,closedAt
+  #   kind=pr:    merged:<range>, predicate `is:pr is:merged`,
+  #               `gh pr list --state merged`, fields
+  #               number,title,mergedAt,headRefName
+  #
+  # `headRefName` MUST stay in the PR field list — jq cannot filter on a field
+  # gh was not asked to return, and `.headRefName` would silently be null
+  # (update_work_log()'s `$GUIDE_DOCS_PR_EXCLUDE` filter depends on it).
+  local kind="$1" start="$2" end="$3" depth="${4:-0}" safety_cap=1000
+  local date_field predicate gh_noun gh_state json_fields label issue_ref
+  case "$kind" in
+    issue)
+      date_field="closed"; predicate="is:issue is:closed"; gh_noun="issue"
+      gh_state="closed"; json_fields="number,title,closedAt"
+      label="closed-issue"; issue_ref="#6097" ;;
+    pr)
+      date_field="merged"; predicate="is:pr is:merged"; gh_noun="pr"
+      gh_state="merged"; json_fields="number,title,mergedAt,headRefName"
+      label="merged-PR"; issue_ref="#6144" ;;
+    *)
+      echo "_fetch_complete: unknown kind '$kind' (expected issue|pr)" >&2
+      return 1 ;;
+  esac
+
   local search_range
   if [ -n "$end" ]; then
-    search_range="closed:${start}..${end}"
+    search_range="${date_field}:${start}..${end}"
   else
-    search_range="closed:>=${start}"
+    search_range="${date_field}:>=${start}"
   fi
 
   local true_count
-  true_count=$(_work_log_search_total_count "$search_range")
+  true_count=$(_work_log_search_total_count "$search_range" "$predicate")
 
   if [ "$true_count" -gt "$safety_cap" ] 2>/dev/null && [ "$depth" -lt 10 ]; then
     # This window alone would truncate a single bounded fetch no matter how
@@ -1355,8 +1385,8 @@ fetch_closed_issues_complete() {
       local mid_epoch mid_date left right
       mid_epoch=$(( (start_epoch + end_epoch) / 2 ))
       mid_date=$(date -u -d "@$mid_epoch" +%Y-%m-%d 2>/dev/null || date -u -r "$mid_epoch" +%Y-%m-%d)
-      left=$(fetch_closed_issues_complete "$start" "$mid_date" $((depth + 1)))
-      right=$(fetch_closed_issues_complete "$mid_date" "$end" $((depth + 1)))
+      left=$(_fetch_complete "$kind" "$start" "$mid_date" $((depth + 1)))
+      right=$(_fetch_complete "$kind" "$mid_date" "$end" $((depth + 1)))
       # Merge via process substitution, NOT `--argjson` — a wide window's
       # halves can each be hundreds of KB of JSON, and passing that through
       # `--argjson`'s command-line argument blows past the OS `ARG_MAX` and
@@ -1368,13 +1398,13 @@ fetch_closed_issues_complete() {
     fi
     # Already down to a single day and still over the cap (or the depth cap
     # was hit first): fall through to the plain fetch below and let the
-    # self-check warn — a >1000-closed-in-one-day volume is implausible but
-    # must not fail silently if it ever happens.
+    # self-check warn — a >1000-in-one-day volume is implausible but must not
+    # fail silently if it ever happens.
   fi
 
   local batch fetched_count
-  batch=$("$GH_READ" issue list --state closed --search "$search_range" --limit "$safety_cap" \
-    --json number,title,closedAt)
+  batch=$("$GH_READ" "$gh_noun" list --state "$gh_state" --search "$search_range" --limit "$safety_cap" \
+    --json "$json_fields")
   fetched_count=$(printf '%s\n' "$batch" | jq 'length')
 
   # #6097 AC2 self-check: compare the fetch against the search API's own
@@ -1382,10 +1412,14 @@ fetch_closed_issues_complete() {
   # unambiguous evidence of truncation. Silent when total_count itself was
   # unavailable (-1) — that is "unknown", not "confirmed truncated".
   if [ "$true_count" -ge 0 ] 2>/dev/null && [ "$fetched_count" -ne "$true_count" ]; then
-    echo "WARNING: closed-issue fetch for window [$start, ${end:-now}) returned $fetched_count of $true_count (search API total_count) -- possible truncation, see #6097." >&2
+    echo "WARNING: $label fetch for window [$start, ${end:-now}) returned $fetched_count of $true_count (search API total_count) -- possible truncation, see $issue_ref." >&2
   fi
 
   printf '%s\n' "$batch"
+}
+
+fetch_closed_issues_complete() {
+  _fetch_complete issue "$@"
 }
 
 # #6144 BUG, DO NOT REINTRODUCE: the PR-side candidate fetch used to end with
@@ -1395,73 +1429,10 @@ fetch_closed_issues_complete() {
 # from "the window legitimately merged exactly 1000 PRs". This repo's actual
 # 30-day merged-PR count (1348, verified 2026-08-13 via `gh api search/issues`
 # total_count) exceeded the cap for real, silently dropping 348 PRs the exact
-# same way #6097 hit on the issue side. `fetch_merged_prs_complete()` below is
-# the same bisection mechanism as `fetch_closed_issues_complete()` above,
-# parameterized for `merged:`/`mergedAt` instead of `closed:`/`closedAt` (and
-# `is:pr is:merged` instead of `is:issue is:closed` for the total_count
-# predicate) — see that function's header comment for the full rationale.
+# same way #6097 hit on the issue side. This wrapper routes through the same
+# `_fetch_complete` bisection as `fetch_closed_issues_complete()`.
 fetch_merged_prs_complete() {
-  # Fetch EVERY merged PR in [start, end) — end empty means open-ended,
-  # ">=start" — without truncation, no matter how large the window's true
-  # volume is. `depth` only guards a degenerate/malformed window from
-  # recursing forever; it is never expected to bind in normal operation.
-  local start="$1" end="$2" depth="${3:-0}" safety_cap=1000
-  local search_range
-  if [ -n "$end" ]; then
-    search_range="merged:${start}..${end}"
-  else
-    search_range="merged:>=${start}"
-  fi
-
-  local true_count
-  true_count=$(_work_log_search_total_count "$search_range" "is:pr is:merged")
-
-  if [ "$true_count" -gt "$safety_cap" ] 2>/dev/null && [ "$depth" -lt 10 ]; then
-    # This window alone would truncate a single bounded fetch no matter how
-    # large `--limit` is set — bisect by date and recurse on each half.
-    local end_resolved start_epoch end_epoch
-    end_resolved="${end:-$(date -u +%Y-%m-%d)}"
-    start_epoch=$(date -u -d "$start" +%s 2>/dev/null || date -u -j -f %Y-%m-%d "$start" +%s)
-    end_epoch=$(date -u -d "$end_resolved" +%s 2>/dev/null || date -u -j -f %Y-%m-%d "$end_resolved" +%s)
-
-    if [ $(( (end_epoch - start_epoch) / 86400 )) -ge 2 ]; then
-      local mid_epoch mid_date left right
-      mid_epoch=$(( (start_epoch + end_epoch) / 2 ))
-      mid_date=$(date -u -d "@$mid_epoch" +%Y-%m-%d 2>/dev/null || date -u -r "$mid_epoch" +%Y-%m-%d)
-      left=$(fetch_merged_prs_complete "$start" "$mid_date" $((depth + 1)))
-      right=$(fetch_merged_prs_complete "$mid_date" "$end" $((depth + 1)))
-      # Merge via process substitution, NOT `--argjson` — a wide window's
-      # halves can each be hundreds of KB of JSON, and passing that through
-      # `--argjson`'s command-line argument blows past the OS `ARG_MAX` and
-      # fails with "Argument list too long" (#6097).
-      jq -c -s '.[0] + .[1] | unique_by(.number)' \
-        <(printf '%s\n' "$left") <(printf '%s\n' "$right")
-      return 0
-    fi
-    # Already down to a single day and still over the cap (or the depth cap
-    # was hit first): fall through to the plain fetch below and let the
-    # self-check warn — a >1000-merged-in-one-day volume is implausible but
-    # must not fail silently if it ever happens.
-  fi
-
-  local batch fetched_count
-  # `headRefName` MUST stay in the --json field list — jq cannot filter on a
-  # field gh was not asked to return, and `.headRefName` would silently be
-  # null (update_work_log()'s `$GUIDE_DOCS_PR_EXCLUDE` filter depends on it).
-  batch=$("$GH_READ" pr list --state merged --search "$search_range" --limit "$safety_cap" \
-    --json number,title,mergedAt,headRefName)
-  fetched_count=$(printf '%s\n' "$batch" | jq 'length')
-
-  # #6144 self-check (mirrors the #6097 AC2 self-check): compare the fetch
-  # against the search API's own total_count for this EXACT window, not
-  # against `--limit`/a hardcoded count. A mismatch is unambiguous evidence of
-  # truncation. Silent when total_count itself was unavailable (-1) — that is
-  # "unknown", not "confirmed truncated".
-  if [ "$true_count" -ge 0 ] 2>/dev/null && [ "$fetched_count" -ne "$true_count" ]; then
-    echo "WARNING: merged-PR fetch for window [$start, ${end:-now}) returned $fetched_count of $true_count (search API total_count) -- possible truncation, see #6144." >&2
-  fi
-
-  printf '%s\n' "$batch"
+  _fetch_complete pr "$@"
 }
 
 update_work_log() {

@@ -103,12 +103,13 @@ assert_grep 'if ! work_log_has_issue' "$GUIDE_MD" \
     "update_work_log() gates new issue candidates through work_log_has_issue()"
 # #6097 updated this assertion: the date-bounded window is no longer a
 # literal `--search "closed:>=$since"` inlined at the call site — it is
-# built inside `fetch_closed_issues_complete()` (see
+# built inside the shared `_fetch_complete()` (see
 # test-guide-work-log-issue-pagination.sh for that mechanism's own
-# regression coverage) as `closed:>=${start}`, called from
+# regression coverage) as `${date_field}:>=${start}`, called via
+# `fetch_closed_issues_complete()` from
 # `update_work_log()` with `$since` as the start argument. Either form is
 # still "bounded by date, not just a fixed --limit" in substance.
-assert_grep 'search_range="closed:>=\$\{start\}"' "$GUIDE_MD" \
+assert_grep 'search_range="\$\{date_field\}:>=\$\{start\}"' "$GUIDE_MD" \
     "the closed-issue query is bounded by date, not just a fixed --limit"
 assert_grep '\^- \\\*\\\*Issue #\$\{1\}\\\*\\\* ' "$GUIDE_MD" \
     "work_log_has_issue() is anchored to the bullet lead-in, not a bare substring scan (#6087)"

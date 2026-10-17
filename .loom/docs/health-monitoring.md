@@ -1,118 +1,52 @@
 # Health Monitoring
 
-Proactive health monitoring for extended unattended autonomous operation — health
-score, CLI, alert types, files, configuration, MCP tools, and the UI dashboard.
+A short guide to checking that an unattended Loom fleet is healthy, using the
+supported `loom-daemon health` and `loom-daemon status` commands. The canonical
+reference for every section these commands report is
+[`daemon-reference.md`](daemon-reference.md) → "One-shot fleet vitals
+(`loom-daemon health`, #4761)".
 
-## Health Monitoring
-
-Loom provides proactive health monitoring for extended unattended autonomous operation. The health system tracks throughput, latency, error rates, and resource usage to detect degradation patterns before they become critical.
-
-### Health Score
-
-The health score (0-100) is computed from multiple factors:
-- **Throughput trend** - Declining throughput reduces score
-- **Queue depth trend** - Growing queues reduce score
-- **Error rate** - Increasing errors reduce score
-- **Resource availability** - Near capacity limits reduce score
-- **Stuck agents** - Agents without heartbeats reduce score
-
-Score ranges:
-| Range | Status | Description |
-|-------|--------|-------------|
-| 90-100 | Excellent | System operating optimally |
-| 70-89 | Good | Normal operation, minor issues |
-| 50-69 | Fair | Some degradation detected |
-| 30-49 | Warning | Significant issues, attention needed |
-| 0-29 | Critical | Immediate intervention required |
-
-### Health Monitoring CLI
+## `loom-daemon health`
 
 ```bash
-# View current health status
-./.loom/scripts/health-check.sh
-
-# JSON output for automation
-./.loom/scripts/health-check.sh --json
-
-# Collect and store metrics (called by daemon)
-./.loom/scripts/health-check.sh --collect
-
-# View alerts
-./.loom/scripts/health-check.sh --alerts
-
-# Acknowledge an alert
-./.loom/scripts/health-check.sh --acknowledge <alert-id>
-
-# View metric history (last 4 hours)
-./.loom/scripts/health-check.sh --history 4
+loom-daemon health                 # one line per section, last 30 minutes
+loom-daemon health --since 2h      # widen the role-tick / throughput window
+loom-daemon health --json          # machine-readable report
 ```
 
-### Alert Types
+`--since` accepts `30m` (default), `2h`, `90s`, `1d`, or a bare number of seconds.
 
-| Alert Type | Description | Severity |
-|------------|-------------|----------|
-| `stuck_agents` | Agents without recent heartbeats | warning/critical |
-| `high_error_rate` | Consecutive iteration failures | warning/critical |
-| `resource_exhaustion` | Session budget near limits | warning/critical |
-| `queue_growth` | Ready queue growing without progress | warning |
-| `throughput_decline` | Significant throughput drop | warning |
+The exit code lets a watch loop (cron, a dashboard, the `loom:watch` skill)
+branch without parsing the output:
 
-### Health Files
-
-| File | Purpose |
+| exit | meaning |
 |------|---------|
-| `.loom/health-metrics.json` | Historical health metrics (24-hour retention) |
-| `.loom/alerts.json` | Active and acknowledged alerts |
+| `0` | every section green |
+| `1` | degraded: at least one section is non-green, including "could not determine" |
+| `2` | the daemon is genuinely dead |
+| `3` | busy, not confirmed unhealthy (see "Busy vs degraded" in the daemon reference) |
 
-### Configuration
+Sections cover trusted liveness, dispatch, the token pool, role-tick health,
+queue depth (including a review-stall verdict), merge throughput, and
+`operator_attention` (always green: held work is normal, not a fault). What each
+one means, and what turns it non-green, is documented in the daemon reference.
 
-Health monitoring thresholds can be configured via environment variables:
+## `loom-daemon status`
 
 ```bash
-LOOM_HEALTH_RETENTION_HOURS=24       # Metric retention period
-LOOM_THROUGHPUT_DECLINE_THRESHOLD=50 # % decline to trigger alert
-LOOM_QUEUE_GROWTH_THRESHOLD=5        # Queue growth count threshold
-LOOM_STUCK_AGENT_THRESHOLD=10        # Minutes without heartbeat
-LOOM_ERROR_RATE_THRESHOLD=20         # % error rate threshold
+loom-daemon status                       # in-flight sweeps, dynamic cap, token usage
+loom-daemon status --pipeline            # plus the forge-side queue snapshot per repo
+loom-daemon status --json --section dynamic_cap,in_flight
 ```
 
-Or via `.loom/config.json`:
+`status` shows the running daemon's autonomous-mode state. `--section` (with
+`--json`) returns only the named top-level sections; `loom-daemon status --help`
+lists them. `--pipeline` makes several `gh` calls per managed repo, so it is
+opt-in.
 
-```json
-{
-  "health_monitoring": {
-    "enabled": true,
-    "collect_interval_minutes": 5,
-    "retention_hours": 24,
-    "thresholds": {
-      "throughput_decline_percent": 50,
-      "queue_growth_count": 5,
-      "stuck_agent_minutes": 10,
-      "error_rate_percent": 20
-    }
-  }
-}
-```
+## Where else to look
 
-### MCP Health Tools
-
-The following MCP tools are available for health monitoring:
-
-| Tool | Description |
-|------|-------------|
-| `get_health_metrics` | Get current health score and latest metrics |
-| `get_health_history` | Get historical metrics for trend analysis |
-| `get_active_alerts` | Get unacknowledged alerts |
-| `acknowledge_alert` | Acknowledge an alert by ID |
-
-### UI Health Dashboard
-
-Access the Health Dashboard via:
-- Menu: View > Health Dashboard
-- Keyboard: Cmd+H (macOS) / Ctrl+H (Windows/Linux)
-
-The dashboard displays:
-- Health score gauge with status indicator
-- Current metrics grid (throughput, queues, errors, resources)
-- Active alerts with acknowledge button
-- Historical trends with sparkline visualizations
+- Stuck workers, stale worktrees and orphaned claims:
+  [`troubleshooting.md`](troubleshooting.md).
+- Metrics, traces and the fleet dashboard: [`observability.md`](observability.md)
+  and the "Fleet dashboard" section of the daemon reference.
