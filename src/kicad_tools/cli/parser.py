@@ -10510,6 +10510,19 @@ def _add_screenshot_parser(subparsers) -> None:
         default=None,
         help="KiCad color theme name",
     )
+    screenshot_baseline = screenshot_parser.add_mutually_exclusive_group()
+    screenshot_baseline.add_argument(
+        "--baseline-save",
+        dest="screenshot_baseline_save",
+        metavar="DIR",
+        help="Also save the render and a renderer-identity sidecar as a baseline in DIR",
+    )
+    screenshot_baseline.add_argument(
+        "--baseline-compare",
+        dest="screenshot_baseline_compare",
+        metavar="DIR",
+        help="Render the current state and report drift against the baseline in DIR",
+    )
     add_format_flag(screenshot_parser)
 
 
