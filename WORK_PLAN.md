@@ -40,13 +40,13 @@ Issues currently being built (`loom:building`).
 
 - **#6554**: diffpair: reproduce KiCad's diff_pair_uncoupled primitive pairing exactly (kct is a lower bound)
 - **#6894**: ci: add a Windows smoke job; skip test_peak_rss_bytes_positive where resource is unavailable (follow-up #6739)
-- **#6932**: Lattice pair gateway-first decline reason is discarded; board 03 USB_D common run still on F.Cu
+- **#6935**: router: gateway pass-under pad-attach declines for board 03 USB_D[1] U2.4->R4.1
 
 ## PRs Awaiting Review
 
 PRs waiting on Judge (`loom:review-requested`).
 
-- **#6933**: fix(router): print gateway-first decline reason when pair routes planar
+- **#6937**: feat(router): name the blocker in gateway pair-pad-attach declines
 
 ## Approved (Awaiting Merge)
 
@@ -77,12 +77,11 @@ Issues carrying `loom:curated`.
 - **#6527**: router: Router.route_bidirectional has no production caller; wire it into the Python fallback and measure, or remove it *(curated)*
 - **#6554**: diffpair: reproduce KiCad's diff_pair_uncoupled primitive pairing exactly (kct is a lower bound) *(curated)*
 - **#6765**: DSN exporter does not represent JLCPCB fab-floor .kicad_dru rules (fastroute stays non-comparable on board 00) *(curated)*
-- **#6824**: board 03: fresh lattice routes fail routing_plan.usb_geometry (USB_D common run not on In2.Cu, MCU launch > 4 mm) — blocks #6394 *(curated)*
 - **#6835**: router: raise flag-off coupled iteration budget to 350k/phase (700k total) so Board07 couples 6/7 pairs; soften endpoint-tolerance comment (#6826 follow-up) *(curated)*
 - **#6850**: Live-verify #6842 gateway offer on boards 03/06b/06rf/07rf *(curated)*
 - **#6858**: router: coupled pre-pass should keep the better of the joint-search and pose-centreline candidates (compare-and-keep; unblocks #6835) *(curated)*
 - **#6894**: ci: add a Windows smoke job; skip test_peak_rss_bytes_positive where resource is unavailable (follow-up #6739) *(curated)*
-- **#6932**: Lattice pair gateway-first decline reason is discarded; board 03 USB_D common run still on F.Cu *(curated)*
+- **#6935**: router: gateway pass-under pad-attach declines for board 03 USB_D[1] U2.4->R4.1 *(curated)*
 
 ## Proposed (Architect / Hermit)
 
@@ -117,7 +116,7 @@ Issues carrying `loom:curated`.
 | In Progress (`loom:building`) | 3 |
 | PRs awaiting review | 1 |
 | Approved PRs awaiting merge | 3 |
-| Curated | 23 |
+| Curated | 22 |
 | Architect / Hermit proposals | 8 |
 | Active epics | 8 |
 <!-- guide:plan-body:end -->
