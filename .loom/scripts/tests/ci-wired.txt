@@ -41,6 +41,7 @@ test-build-slot.sh
 test-cargo-test-daemon-guard.sh
 test-champion-capped-hold-routing.sh
 test-champion-ci-checks-no-checks-signal.sh
+test-champion-ci-workflow-blast.sh
 test-champion-critical-file-check.sh
 test-champion-evaluating-reclaim-trust.sh
 test-champion-epic-child-discovery.sh
@@ -250,6 +251,7 @@ test-worktree-sentinel.sh
 
 # tests/hooks/ (repo root) — Claude-path guard suites, wired since #4769.
 tests/hooks/test-guard-destructive-dispatcher.sh
+tests/hooks/test-guard-install-matrix.sh
 tests/hooks/test-guard-destructive-cargo-and-perf.sh
 tests/hooks/test-guard-destructive-category-opt-ins.sh
 tests/hooks/test-guard-destructive-core.sh
