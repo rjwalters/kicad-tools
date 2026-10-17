@@ -1,6 +1,7 @@
 {
   "all_by_type": {
     "clearance": 12,
+    "lib_footprint_issues": 37,
     "silk_overlap": 2
   },
   "by_type": {

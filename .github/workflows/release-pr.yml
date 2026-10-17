@@ -7,8 +7,10 @@ name: Release PR
 # App token and calls it. One run:
 #   - exits quietly when no PR merged since the latest v* tag (or nothing
 #     user-visible is waiting in changelog.d/ / [Unreleased]);
-#   - gates on the exact origin/main SHA: the newest CI push run's release-topic
+#   - gates on the exact origin/main SHA: the newest CI main run's release-topic
 #     jobs green or skipped, an empty changelog gap report, `uv lock --check`;
+#     main CI runs on a schedule (#5986), so when the SHA has no main run the
+#     script dispatches ci.yml once (GITHUB_TOKEN, actions: write) and waits;
 #   - in `on` mode opens/updates ONE release/vX.Y.Z PR, waits (bounded) for its
 #     own checks, and merges it through the API. A red gate or red PR checks
 #     are reported on the "Automated release status" issue; nothing releases.
@@ -36,11 +38,13 @@ on:
         type: boolean
         default: false
 
-# GITHUB_TOKEN is read-only: CI status (actions), the gap report's PR lookups
-# (pull-requests), the tracking-issue search (issues). Writes use the App token.
+# GITHUB_TOKEN: CI status plus one workflow_dispatch of ci.yml when the gated
+# SHA has no main run yet (actions: write, #5986 -- the App token has no
+# `actions` permission), the gap report's PR lookups (pull-requests), the
+# tracking-issue search (issues). Every other write uses the App token.
 permissions:
   contents: read
-  actions: read
+  actions: write
   pull-requests: read
   issues: read
 
