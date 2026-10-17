@@ -8,8 +8,8 @@ Usage:
     kicad-drc design.kicad_pcb              # Run DRC on PCB
     kicad-drc design-drc.json               # Parse existing report
     kicad-drc design.kicad_pcb --mfr jlcpcb # Check manufacturer rules
-    kicad-drc --rules --mfr seeed           # Show manufacturer rules
-    kicad-drc --compare                     # Compare all manufacturers
+    kicad-drc --rules --mfr seeed           # Show manufacturer rules (deprecated: kct mfr rules)
+    kicad-drc --compare                     # Compare manufacturers (deprecated: kct mfr compare)
 
 Exit Codes:
     0 - No errors (warnings may be present)
@@ -41,8 +41,21 @@ if TYPE_CHECKING:
 DEFAULT_HINT_MANUFACTURER = "jlcpcb"
 
 
-def main(argv: list[str] | None = None) -> int:
-    """Main entry point for kicad-drc command."""
+def _warn_deprecated_flag(flag: str, replacement: str) -> None:
+    """Print a one-line stderr pointer to the ``kct mfr`` equivalent (Issue #6898)."""
+    print(
+        f"[DEPRECATED] kicad-drc {flag} is superseded by `{replacement}`; "
+        "the flag still works but is not available on `kct drc`.",
+        file=sys.stderr,
+    )
+
+
+def build_parser() -> argparse.ArgumentParser:
+    """Build the ``kicad-drc`` argument parser.
+
+    Factored out of :func:`main` so the parity test can compare it against the
+    unified ``kct drc`` subparser (Issue #6898).
+    """
     parser = argparse.ArgumentParser(
         prog="kicad-drc",
         description="Run DRC on PCBs or parse DRC reports",
@@ -153,16 +166,23 @@ def main(argv: list[str] | None = None) -> int:
         type=Path,
         help="Save DRC report to this path",
     )
+    return parser
 
+
+def main(argv: list[str] | None = None) -> int:
+    """Main entry point for kicad-drc command."""
+    parser = build_parser()
     args = parser.parse_args(argv)
 
     # Mode: Compare manufacturers
     if args.compare:
+        _warn_deprecated_flag("--compare", "kct mfr compare")
         print_comparison(args.layers)
         return 0
 
     # Mode: Show manufacturer rules
     if args.rules:
+        _warn_deprecated_flag("--rules", "kct mfr rules")
         mfr = args.mfr or "jlcpcb"
         print_manufacturer_rules(mfr, args.layers)
         return 0

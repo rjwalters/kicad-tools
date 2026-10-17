@@ -233,6 +233,21 @@ def _dispatch_command(args) -> int:
             sub_argv.extend(["--mfr", args.mfr])
         if args.layers != 2:
             sub_argv.extend(["--layers", str(args.layers)])
+        # Issue #6898: forward the run-DRC options the standalone kicad-drc has.
+        if args.strict:
+            sub_argv.append("--strict")
+        if args.category:
+            sub_argv.extend(["--category", args.category])
+        if args.verbose:
+            sub_argv.append("--verbose")
+        if args.suggest:
+            sub_argv.append("--suggest")
+        if args.filter_config:
+            sub_argv.extend(["--filter-config", str(args.filter_config)])
+        if args.keep_report:
+            sub_argv.append("--keep-report")
+        if args.output:
+            sub_argv.extend(["--output", str(args.output)])
         # Issue #4691: forward --waivers to the inner parser (a flag added only
         # to the outer parser never reaches drc_cmd -- the #3159 drift trap).
         if getattr(args, "waivers", None):
