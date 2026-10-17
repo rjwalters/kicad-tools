@@ -79,6 +79,7 @@ from .quantize import (
     verify_segment_45,
 )
 from .route_halo_geometry import RouteHaloRefiner
+from .search_radius import search_radius_cells
 
 logger = logging.getLogger(__name__)
 
@@ -2052,20 +2053,23 @@ class CoupledPathfinder:
                 self._allow_smd_vias = bool(get_mfr_limits(rules.manufacturer).via_in_pad_supported)
         self._smd_pad_drill_memo: dict[tuple[int, int], bool] = {}
 
-        # Pre-calculate trace clearance radius
-        self._trace_half_width_cells = max(
-            1,
-            math.ceil(
-                (self.rules.trace_width / 2 + self.rules.trace_clearance) / self.grid.resolution
-            ),
+        # Pre-calculate trace clearance radius.  Rounding: bare "ceil" (no
+        # Issue #864 guard) -- preserved as-is; see search_radius_cells.
+        # Unifying with the Python Router's "guarded" radius is a
+        # behaviour-changing follow-up under Epic #5509.
+        self._trace_half_width_cells = search_radius_cells(
+            self.rules.trace_width / 2,
+            self.rules.trace_clearance,
+            self.grid.resolution,
+            rounding="ceil",
         )
 
         # Pre-calculate via blocking radius
-        self._via_half_cells = max(
-            1,
-            math.ceil(
-                (self.rules.via_diameter / 2 + self.rules.via_clearance) / self.grid.resolution
-            ),
+        self._via_half_cells = search_radius_cells(
+            self.rules.via_diameter / 2,
+            self.rules.via_clearance,
+            self.grid.resolution,
+            rounding="ceil",
         )
 
         # Issue #3508: extra radial slack a via needs BEYOND the trace

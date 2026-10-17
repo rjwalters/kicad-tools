@@ -45,6 +45,7 @@ from .pad_landing import landing_cost, pad_landing_geometry
 from .primitives import Pad, Route, Segment, Via
 from .quantize import dogleg_points, is_45_aligned
 from .rules import DEFAULT_NET_CLASS_MAP, DesignRules, NetClassRouting, layer_permitted
+from .search_radius import search_radius_cells
 from .via_clearance import point_clear_of_copper, segment_clears_foreign_via
 
 # Issue #3135: env-gated A* neighbor-expansion trace.  Set
@@ -355,31 +356,21 @@ class Router:
         # This enforces clearance as a hard constraint during routing.
         # Issue #553: Previously only checked trace_width/2, causing DRC violations
         # when traces were placed too close to obstacles.
-        # Issue #864: Use round() before ceil() to avoid floating point errors
-        # causing an extra cell of clearance (e.g., 0.30000000000000004 -> 4 cells
-        # instead of 3 cells).
-        self._trace_half_width_cells = max(
-            1,
-            math.ceil(
-                round(
-                    (self.rules.trace_width / 2 + self.rules.trace_clearance)
-                    / self.grid.resolution,
-                    6,
-                )
-            ),
+        # Rounding: "guarded" (Issue #864), see search_radius_cells.
+        self._trace_half_width_cells = search_radius_cells(
+            self.rules.trace_width / 2,
+            self.rules.trace_clearance,
+            self.grid.resolution,
+            rounding="guarded",
         )
 
         # Pre-calculate via blocking radius in grid cells
         # Via needs diameter/2 + clearance from other objects (pads, traces, vias)
-        # Issue #864: Use round() before ceil() to avoid floating point errors.
-        self._via_half_cells = max(
-            1,
-            math.ceil(
-                round(
-                    (self.rules.via_diameter / 2 + self.rules.via_clearance) / self.grid.resolution,
-                    6,
-                )
-            ),
+        self._via_half_cells = search_radius_cells(
+            self.rules.via_diameter / 2,
+            self.rules.via_clearance,
+            self.grid.resolution,
+            rounding="guarded",
         )
 
         # Pre-compute neighbor arrays for batch cost computation (Issue #963)
@@ -1445,14 +1436,8 @@ class Router:
         # Compute grid cell radius for each (trace_width, clearance) pair
         for tw in trace_widths:
             for clearance in clearances:
-                radius = max(
-                    1,
-                    math.ceil(
-                        round(
-                            (tw / 2 + clearance) / self.grid.resolution,
-                            6,
-                        )
-                    ),
+                radius = search_radius_cells(
+                    tw / 2, clearance, self.grid.resolution, rounding="guarded"
                 )
                 self._clearance_radii[(tw, clearance)] = radius
 
@@ -1479,15 +1464,7 @@ class Router:
             return self._clearance_radii[cache_key]
 
         # Compute and cache
-        radius = max(
-            1,
-            math.ceil(
-                round(
-                    (tw / 2 + clearance_mm) / self.grid.resolution,
-                    6,
-                )
-            ),
-        )
+        radius = search_radius_cells(tw / 2, clearance_mm, self.grid.resolution, rounding="guarded")
         self._clearance_radii[cache_key] = radius
         return radius
 
@@ -3195,7 +3172,7 @@ class Router:
         res = self.grid.resolution
         # Issue #864 rounding idiom: round before ceil so FP noise cannot
         # add a phantom cell of widening.
-        wide_r = max(1, math.ceil(round((half_mm + state.max_widen) / res, 6)))
+        wide_r = search_radius_cells(half_mm, state.max_widen, res, rounding="guarded")
         if wide_r <= scalar_radius:
             return False  # the matrix never widens beyond the scalar kernel
 
@@ -3243,7 +3220,7 @@ class Router:
                 continue  # same domain / no widening for this pair
             # Widened radius for THIS specific pair (<= wide_r).  A cell in
             # the annulus but outside this pair's requirement is fine.
-            pair_r = max(1, math.ceil(round((half_mm + required) / res, 6)))
+            pair_r = search_radius_cells(half_mm, required, res, rounding="guarded")
             if int(dist_sq[row, col]) > pair_r * pair_r:
                 continue
             if zones:
@@ -3333,7 +3310,7 @@ class Router:
         for foreign_dom, required in enumerate(state.matrix[dom]):
             if foreign_dom == dom or required <= 0.0:
                 continue
-            pair_r = max(1, math.ceil(round((half_mm + required) / res, 6)))
+            pair_r = search_radius_cells(half_mm, required, res, rounding="guarded")
             if pair_r <= scalar_radius:
                 continue  # the scalar dilation already covers this pair
             foreign_ids = net_ids_by_domain.get(foreign_dom)
@@ -3566,7 +3543,7 @@ class Router:
         own_name = state.id_to_name.get(net, "")
         half_mm = self._get_trace_width_for_net(own_name) / 2.0
         # Issue #864 rounding idiom (round before ceil), as in the hard kernels.
-        hard_r = max(1, math.ceil(round((half_mm + state.max_widen) / res, 6)))
+        hard_r = search_radius_cells(half_mm, state.max_widen, res, rounding="guarded")
         band = max(1, math.ceil(round(state.max_widen * 0.5 / res, 6)))
         return state, hard_r, band
 
@@ -4563,14 +4540,11 @@ class Router:
         # reserve space during pathfinding, not just at segment creation.
         net_trace_width = net_class.trace_width if net_class else self.rules.trace_width
         net_trace_clearance = net_class.clearance if net_class else self.rules.trace_clearance
-        net_trace_half_width_cells = max(
-            1,
-            math.ceil(
-                round(
-                    (net_trace_width / 2 + net_trace_clearance) / self.grid.resolution,
-                    6,
-                )
-            ),
+        net_trace_half_width_cells = search_radius_cells(
+            net_trace_width / 2,
+            net_trace_clearance,
+            self.grid.resolution,
+            rounding="guarded",
         )
 
         # Issue #2559 / Epic #2556 Phase 1C: Resolve diff-pair partner and
@@ -4583,14 +4557,11 @@ class Router:
         partner_net_id = self._resolve_partner_net_id(start.net_name)
         if partner_net_id is not None and net_class is not None:
             net_intra_pair_clearance = net_class.effective_intra_pair_clearance()
-            net_partner_half_width_cells = max(
-                1,
-                math.ceil(
-                    round(
-                        (net_trace_width / 2 + net_intra_pair_clearance) / self.grid.resolution,
-                        6,
-                    )
-                ),
+            net_partner_half_width_cells = search_radius_cells(
+                net_trace_width / 2,
+                net_intra_pair_clearance,
+                self.grid.resolution,
+                rounding="guarded",
             )
         else:
             net_partner_half_width_cells = net_trace_half_width_cells
@@ -4608,14 +4579,11 @@ class Router:
         # Issue #1692: Compute per-net via clearance radius.  Net classes
         # may specify larger via_size which requires a wider blocking check.
         net_via_size = net_class.via_size if net_class else self.rules.via_diameter
-        net_via_half_cells = max(
-            1,
-            math.ceil(
-                round(
-                    (net_via_size / 2 + self.rules.via_clearance) / self.grid.resolution,
-                    6,
-                )
-            ),
+        net_via_half_cells = search_radius_cells(
+            net_via_size / 2,
+            self.rules.via_clearance,
+            self.grid.resolution,
+            rounding="guarded",
         )
 
         # In negotiated mode, allow resource sharing
@@ -6449,14 +6417,11 @@ class Router:
         # which under-reserves space for wider net classes (e.g. POWER).
         net_trace_width = net_class.trace_width if net_class else self.rules.trace_width
         net_trace_clearance = net_class.clearance if net_class else self.rules.trace_clearance
-        net_trace_half_width_cells = max(
-            1,
-            math.ceil(
-                round(
-                    (net_trace_width / 2 + net_trace_clearance) / self.grid.resolution,
-                    6,
-                )
-            ),
+        net_trace_half_width_cells = search_radius_cells(
+            net_trace_width / 2,
+            net_trace_clearance,
+            self.grid.resolution,
+            rounding="guarded",
         )
 
         # Issue #2559 / Epic #2556 Phase 1C: Resolve diff-pair partner for
@@ -6468,14 +6433,11 @@ class Router:
         partner_net_id = self._resolve_partner_net_id(start.net_name)
         if partner_net_id is not None and net_class is not None:
             net_intra_pair_clearance = net_class.effective_intra_pair_clearance()
-            net_partner_half_width_cells = max(
-                1,
-                math.ceil(
-                    round(
-                        (net_trace_width / 2 + net_intra_pair_clearance) / self.grid.resolution,
-                        6,
-                    )
-                ),
+            net_partner_half_width_cells = search_radius_cells(
+                net_trace_width / 2,
+                net_intra_pair_clearance,
+                self.grid.resolution,
+                rounding="guarded",
             )
         else:
             net_partner_half_width_cells = net_trace_half_width_cells
@@ -6492,14 +6454,11 @@ class Router:
 
         # Issue #1692: Compute per-net via clearance radius.
         net_via_size = net_class.via_size if net_class else self.rules.via_diameter
-        net_via_half_cells = max(
-            1,
-            math.ceil(
-                round(
-                    (net_via_size / 2 + self.rules.via_clearance) / self.grid.resolution,
-                    6,
-                )
-            ),
+        net_via_half_cells = search_radius_cells(
+            net_via_size / 2,
+            self.rules.via_clearance,
+            self.grid.resolution,
+            rounding="guarded",
         )
 
         # Convert to grid coordinates
