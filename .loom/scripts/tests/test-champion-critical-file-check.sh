@@ -479,20 +479,6 @@ assert_doc_contains "$CHAMPION_MD" \
 # tick IS the release signal — "last marker wins" is enough state to track.
 # =====================================================================
 
-assert_contains() {
-    local haystack="$1" needle="$2" msg="$3"
-    TESTS_RUN=$((TESTS_RUN + 1))
-    if grep -qF -- "$needle" <<<"$haystack"; then
-        TESTS_PASSED=$((TESTS_PASSED + 1))
-        echo -e "  ${GREEN}PASS${NC}: $msg"
-    else
-        TESTS_FAILED=$((TESTS_FAILED + 1))
-        echo -e "  ${RED}FAIL${NC}: $msg"
-        echo "    Missing '$needle' in:"
-        sed 's/^/      /' <<<"$haystack"
-    fi
-}
-
 assert_lacks() {
     local haystack="$1" needle="$2" msg="$3"
     TESTS_RUN=$((TESTS_RUN + 1))
