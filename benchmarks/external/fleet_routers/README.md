@@ -54,12 +54,12 @@ git clone --depth 1 -b v2.4.2  https://github.com/CLIUtils/CLI11 && cmake -S CLI
 | input | reference | 0/3 | 0 | 3 | 0 | 0 | |
 | kct | success | 3/3 | 0 | 0 | 0 | 8.71 | 9.41 |
 | tracemaker | success | 3/3 | 0 | 0 | 0 | 29.66 | 0.16 |
-| fastroute | non-comparable (11 constraints lost at the DSN/SES boundary) | 3/3 | 0 | 0 | 0 | 30.17 | 0.01 |
+| fastroute | success | 3/3 | 0 | 0 | 0 | 30.17 | 0.19 |
 
-The fastroute row is `non-comparable` because 11 constraints are lost, none of them caused by #6593 or #6594 (both closed on 2026-10-14, before this run's base):
+The table above is the 2026-10-15 run, except the fastroute row, which is the live re-run on kct `a6baaf81c` from #6765 (kct 8.71 mm, 5.91 s; fastroute binary sha256 prefix `11208b09...`, a macOS arm64 build). That run had `lost_constraints: []` and 12 `not_routing_rules` entries. At the 2026-10-15 run the row was `non-comparable` with 11 lost constraints, all since fixed on main:
 
-- **10 `dru` entries:** JLCPCB fab-floor rules the DSN exporter does not represent (silk clearance, `hole_clearance` x2, `annular_width` x2, `edge_clearance`, `physical_hole_clearance`, text thickness, text height, and the `Reviewed clearance - Power` clearance). Since #6768 the nine fab-floor rules go to `not_routing_rules` and are no longer losses. `Reviewed clearance - Power` is still counted on main (`847666c8`). This is not an exporter gap: the frozen pre-route `.kicad_pro` puts no net in `Power` (see #6800 and the current-main note in [`verdict.md`](verdict.md)).
-- **1 `ses_import` entry** ("SES resolution um 10: importer assumes 1 unit = 1 um"). This was a false loss: since #6593 the importer honours `(resolution um 10)` and the imported 30.17 mm agrees with TraceMaker's 29.66 mm. `run.py:ses_import` now reports a loss only when the resolution the importer applied differs from the one the session declares.
+- **10 `dru` entries:** the nine JLCPCB fab-floor rules (#6768) are now classified `not_routing`. The tenth, `Reviewed clearance - Power`, is `not_routing` too (#6800): the frozen pre-route `.kicad_pro` puts no net in that class, so the rule applies to nothing.
+- **1 `ses_import` entry**, a false loss. Since #6593 the importer honours `(resolution um 10)`, and `run.py:ses_import` reports a loss only when the resolution it applied differs from the one the session declares.
 
 This is a single run on one simple board, so it says nothing about router quality. The full matrix is in [`verdict.md`](verdict.md) (#6335).
 
