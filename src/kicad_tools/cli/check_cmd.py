@@ -46,6 +46,7 @@ from kicad_tools.analysis.routing_quality import (
 from kicad_tools.cli.check_categories import CHECK_CATEGORIES  # noqa: F401  (re-exported, #6896)
 from kicad_tools.cli.copper_weight import add_check_copper_argument, parse_copper_weight_arg
 from kicad_tools.manufacturers import (
+    get_all_manufacturer_names,
     get_manufacturer_ids,
     get_profile,
     resolve_pcb_fabrication_overrides,
@@ -1402,7 +1403,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--mfr",
         "-m",
-        choices=get_manufacturer_ids(),
+        choices=get_all_manufacturer_names(),
         default=None,
         help=(
             "Target manufacturer profile for design rules. When omitted, the "
@@ -1712,6 +1713,8 @@ def main(argv: list[str] | None = None) -> int:
 
     raw_argv = list(sys.argv[1:] if argv is None else argv)
     args = parser.parse_args(argv)
+    if args.mfr:
+        args.mfr = get_profile(args.mfr).id
 
     # Issue #5946: ``--diff OLD NEW`` checks both revisions with the remaining
     # flags and reports the difference instead of a single-board report.
