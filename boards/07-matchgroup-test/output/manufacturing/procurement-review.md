@@ -115,7 +115,7 @@ review. Routing completion alone does not establish manufacturing readiness.
 The schematic passes native ERC with zero violations. Label LVS verifies 216
 bound component pins with zero mismatches. The firmware compiles with warnings
 as errors and tests byte masks, all 8 MiB with four patterns, and refresh
-retention; see [firmware instructions](firmware/README.md). These checks do not
+retention; see firmware instructions (firmware/README.md, not included in this bundle). These checks do not
 prove routed connectivity or operation on hardware. The independent validator
 rejects incomplete routing.
 

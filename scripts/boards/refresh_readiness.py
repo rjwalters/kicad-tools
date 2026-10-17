@@ -74,6 +74,17 @@ ZIP_EXTERNAL_ATTR = 0o100644 << 16
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
+def _load_bundle_links():
+    path = Path(__file__).resolve().with_name("_bundle_links.py")
+    spec = importlib.util.spec_from_file_location("_bundle_links", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+bundle_links = _load_bundle_links()
+
+
 @dataclass(frozen=True)
 class ErcJob:
     """One native ERC run and every committed copy of its report."""
@@ -465,7 +476,7 @@ def refresh(
                 origin = staged / source / path.relative_to(staged / mirror)
                 if not origin.is_file():
                     raise GateFailure(f"{mirror}: no current file for {path.name}")
-                shutil.copy2(origin, path)
+                bundle_links.copy_into_bundle(origin, path, mfg)
             log(f"  {mirror}: refreshed from {source}")
 
         for archive, search in cfg.archives:
