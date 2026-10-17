@@ -6,6 +6,7 @@
 #pragma once
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <limits>
 #include <vector>
@@ -335,7 +336,13 @@ namespace router {
 // layer, and a layer change keeps both new barrels clear of the partner's
 // trail and vias.  The Python side calls the new setter, so a v58 .so must be
 // rejected.
-constexpr int ROUTER_CPP_BUILD_VERSION = 59;
+// v60 (Issue #6994): every native A* search radius (constructor trace / via
+// radii, pairwise widening, coupled rule-area via radius) goes through
+// ``search_radius_cells`` -- the guarded exact ceiling shared with Python --
+// instead of a bare float32 ``ceil`` that added a phantom cell on float-noise
+// inputs.  Routing output changes, and the Python parity test calls the new
+// ``router_cpp.search_radius_cells`` binding, so a v59 .so must be rejected.
+constexpr int ROUTER_CPP_BUILD_VERSION = 60;
 
 
 // Issue #4071: fixed-capacity owner-set size for per-cell corridor
@@ -754,6 +761,24 @@ struct DesignRules {
 // by which object it happens to be validating.
 inline float trace_via_clearance(float trace_clearance, float via_clearance) {
     return std::max(trace_clearance, via_clearance);
+}
+
+// Epic #5509 / Issue #6994: A* search radius in cells -- the native mirror of
+// Python ``search_radius.search_radius_cells`` (the Issue #864 guarded rule):
+// the exact ceiling of ``x = (half_mm + clearance_mm) / resolution``, at
+// least 1.  Computes in double; snaps ``x`` to the nearest integer when within
+// 1e-4 cells, because float32 rule/resolution inputs carry ~1e-7 relative
+// noise that Python's ``round(x, 6)`` is too tight to absorb (e.g. trace
+// 0.8/0.3 @ 0.025 mm: x32 = 28.0000x, and via 0.6/0.2 @ 0.1 mm:
+// x32 = 5.0000000745).  With rule values quantized to 0.001 mm on the
+// supported grids a non-integer ``x`` is never closer than ~1/127 to an
+// integer, so the snap never swallows a real fractional cell
+// (``tests/router/test_search_radius_cells.py`` pins Python/C++ parity).
+inline int search_radius_cells(double half_mm, double clearance_mm, double resolution) {
+    const double x = (half_mm + clearance_mm) / resolution;
+    const double nearest = std::round(x);
+    const double cells = (std::abs(x - nearest) <= 1e-4) ? nearest : std::ceil(x);
+    return std::max(1, static_cast<int>(cells));
 }
 
 // Pad info for geometric validation (Issue #2439)

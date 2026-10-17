@@ -168,8 +168,8 @@ bool CoupledPathfinder::is_via_blocked(int gx, int gy, int net) const {
     // Issue #6008: via-blocking keepout rule areas (Python
     // ``DiffPairRouter._is_via_blocked`` mirror).
     if (grid_.has_rule_area_keepouts()) {
-        const int via_half_cells = std::max(1, static_cast<int>(std::ceil(
-            (rules_.via_diameter / 2.0 + rules_.via_clearance) / grid_.resolution())));
+        const int via_half_cells = search_radius_cells(
+            rules_.via_diameter / 2.0, rules_.via_clearance, grid_.resolution());
         if (grid_.rule_area_via_blocked(gx, gy, net, via_half_cells)) return true;
     }
     // Issue #5410: the physical verdict for a THROUGH via is identical on

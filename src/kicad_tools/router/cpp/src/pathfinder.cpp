@@ -56,14 +56,13 @@ Pathfinder::Pathfinder(Grid3D& grid, const DesignRules& rules, bool diagonal_rou
     // This enforces clearance as a hard constraint during routing.
     // Issue #553: Previously only checked trace_width/2, causing DRC violations
     // when traces were placed too close to obstacles.
-    trace_half_width_cells_ = std::max(
-        1, static_cast<int>(std::ceil(
-            (rules.trace_width / 2 + rules.trace_clearance) / grid.resolution())));
+    // Issue #6994: guarded rounding shared with Python (search_radius_cells).
+    trace_half_width_cells_ = search_radius_cells(
+        rules.trace_width / 2, rules.trace_clearance, grid.resolution());
 
     // Pre-compute via blocking radius in grid cells
-    via_half_cells_ = std::max(
-        1, static_cast<int>(std::ceil(
-            (rules.via_diameter / 2 + rules.via_clearance) / grid.resolution())));
+    via_half_cells_ = search_radius_cells(
+        rules.via_diameter / 2, rules.via_clearance, grid.resolution());
 
     // Issue #3229: Pre-compute the circular (Euclidean) kernel offsets at
     // ``trace_half_width_cells_``.  The legacy implementation scanned a
@@ -809,8 +808,7 @@ float Pathfinder::relief_conflict_cost(int x, int y, int layer, int net) const {
 int Pathfinder::pairwise_wide_radius_cells(float half_mm) const {
     const float cmax = grid_.max_pairwise_clearance();
     if (cmax <= 0.0f) return 0;
-    return std::max(
-        1, static_cast<int>(std::ceil((half_mm + cmax) / grid_.resolution())));
+    return search_radius_cells(half_mm, cmax, grid_.resolution());
 }
 
 bool Pathfinder::cross_domain_trace_blocked(int x, int y, int layer, int net,
@@ -845,8 +843,7 @@ bool Pathfinder::cross_domain_trace_blocked(int x, int y, int layer, int net,
             if (required <= 0.0f) continue;  // same domain / no widening
             // Widened radius for THIS specific pair (<= wide_radius).  A cell
             // inside the annulus but outside this pair's requirement is fine.
-            const int pair_r = std::max(
-                1, static_cast<int>(std::ceil((half_mm + required) / res)));
+            const int pair_r = search_radius_cells(half_mm, required, res);
             if (dist_sq > pair_r * pair_r) continue;
             // Attach-zone exemption (#4506) at the approximate gap midpoint:
             // a rated domain-bridging footprint may neck the pair down to the
@@ -896,8 +893,7 @@ bool Pathfinder::cross_domain_via_blocked(int x, int y, int net) const {
                 const float required =
                     grid_.pairwise_required_clearance(net, cell.net);
                 if (required <= 0.0f) continue;
-                const int pair_r = std::max(
-                    1, static_cast<int>(std::ceil((half_mm + required) / res)));
+                const int pair_r = search_radius_cells(half_mm, required, res);
                 if (dist_sq > pair_r * pair_r) continue;
                 const auto fw = grid_.grid_to_world(cx, cy);
                 const float mx = (cw.first + fw.first) * 0.5f;
