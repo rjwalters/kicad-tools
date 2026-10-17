@@ -15,6 +15,7 @@ from kicad_tools import __version__
 # TYPE_CHECKING), so this costs ~2.5 ms on top of an already-imported
 # ``kicad_tools`` -- measured, and well under 1% of CLI startup.
 from kicad_tools.benchmark.cases import Difficulty
+from kicad_tools.cli.check_cmd import CHECK_CATEGORIES
 from kicad_tools.cli.copper_weight import add_check_copper_argument
 from kicad_tools.cli.export_cmd import STACKUP_ID_CHOICES, STACKUP_ID_HELP
 from kicad_tools.cli.format_options import add_format_flag
@@ -810,12 +811,12 @@ def _add_check_parser(subparsers) -> None:
     check_parser.add_argument(
         "--only",
         dest="only_checks",
-        help="Run only specific checks (comma-separated: clearance, dimensions, edge, silkscreen)",
+        help=f"Run only specific checks (comma-separated: {', '.join(CHECK_CATEGORIES)})",
     )
     check_parser.add_argument(
         "--skip",
         dest="skip_checks",
-        help="Skip specific checks (comma-separated)",
+        help=f"Skip specific checks (comma-separated: {', '.join(CHECK_CATEGORIES)})",
     )
     check_parser.add_argument(
         "--emit-dru",
