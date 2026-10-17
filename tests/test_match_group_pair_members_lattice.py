@@ -453,6 +453,67 @@ class TestImprovedStillOverLimit:
         assert all(a is b for a, b in zip(ar.routes, before, strict=True))
 
 
+class TestClassClearanceFloor:
+    """Issue #6969 (AC2): the tuner's clearance floor follows net classes."""
+
+    @staticmethod
+    def _captured_kwargs(*, group_clearance, foreign_clearance=None, mfr=None, authored=None):
+        routes = [
+            _route(1, [(0.0, 0.0), (22.0, 0.0)]),
+            _route(2, [(0.0, 10.0), (20.0, 10.0)]),
+        ]
+        names = {1: "A0", 2: "A1"}
+        if foreign_clearance is not None:
+            routes.append(_route(3, [(0.0, 30.0), (20.0, 30.0)]))
+            names[3] = "OTHER"
+        ar = _autorouter(routes, names, tolerance=0.1)
+        ar.rules.trace_clearance = 0.2
+        ar.rules.via_clearance = 0.2
+        ar.rules.mfr_clearance_floor = mfr
+        ar.rules.authored_min_clearance = authored
+        for name in ("A0", "A1"):
+            ar.net_class_map[name].clearance = group_clearance
+        if foreign_clearance is not None:
+            ar.net_class_map["OTHER"] = NetClassRouting(name="Default", clearance=foreign_clearance)
+        group = MatchGroup(
+            name="BUS", net_ids=[1, 2], tolerance=0.1, source=MatchGroupSource.LEGACY_API
+        )
+        captured: dict = {}
+
+        def fake_tune(*a, **kw):
+            captured.update(kw)
+            return {}
+
+        with patch("kicad_tools.router.match_group_tuning.tune_match_group_v2", fake_tune):
+            ar.apply_match_group_tuning(
+                detected_groups=[group], verbose=False, engage="length_critical"
+            )
+        return captured
+
+    def test_group_class_below_global_gets_class_floor(self):
+        kw = self._captured_kwargs(group_clearance=0.175)
+        assert kw["intra_group_clearance_mm"] == pytest.approx(0.175)
+        assert kw["via_clearance_mm"] == pytest.approx(0.175)
+        assert kw["pad_clearance_mm"] == pytest.approx(0.175)
+
+    def test_mfr_and_authored_floors_clamp_from_below(self):
+        kw = self._captured_kwargs(group_clearance=0.1, mfr=0.15)
+        assert kw["intra_group_clearance_mm"] == pytest.approx(0.15)
+        kw = self._captured_kwargs(group_clearance=0.1, mfr=0.12, authored=0.17)
+        assert kw["intra_group_clearance_mm"] == pytest.approx(0.17)
+        assert kw["via_clearance_mm"] == pytest.approx(0.17)
+
+    def test_stricter_foreign_class_keeps_its_clearance(self):
+        kw = self._captured_kwargs(group_clearance=0.15, foreign_clearance=0.2)
+        assert kw["intra_group_clearance_mm"] == pytest.approx(0.2)
+        assert kw["via_clearance_mm"] == pytest.approx(0.2)
+        assert kw["pad_clearance_mm"] == pytest.approx(0.2)
+
+    def test_looser_foreign_class_does_not_raise_floor(self):
+        kw = self._captured_kwargs(group_clearance=0.175, foreign_clearance=0.15)
+        assert kw["intra_group_clearance_mm"] == pytest.approx(0.175)
+
+
 class TestBlindBuriedConsistency:
     """The engagement gate, rollback guard and tuner share one via model.
 

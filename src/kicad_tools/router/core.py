@@ -21140,10 +21140,24 @@ class Autorouter:
                 # the board's own rules allow.  Honour the class value, never
                 # below the manufacturer / authored floors, and never above
                 # the global rule (this only relaxes, it cannot tighten).
+                # KiCad's pairwise clearance is the larger of the two items'
+                # class values, and the tuner applies one number to every
+                # foreign item, so clamp to the strictest class clearance
+                # among the routed foreign nets.
+                group_nets = set(group.net_ids)
+                for p_id, n_id in group.pair_ids:
+                    group_nets.update((p_id, n_id))
+                class_lookup = getattr(self, "net_class_map", None) or {}
+                foreign_floor_mm = 0.0
+                for foreign_id in set(routes_by_net) - group_nets:
+                    foreign_class = class_lookup.get(self.net_names.get(foreign_id, ""))
+                    if foreign_class is not None:
+                        foreign_floor_mm = max(foreign_floor_mm, float(foreign_class.clearance))
                 class_floor_mm = max(
                     float(net_class.clearance),
                     self.rules.mfr_clearance_floor or 0.0,
                     self.rules.authored_min_clearance or 0.0,
+                    foreign_floor_mm,
                 )
                 if class_floor_mm < intra_group_clearance_mm:
                     intra_group_clearance_mm = class_floor_mm
