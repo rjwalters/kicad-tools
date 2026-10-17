@@ -5,6 +5,8 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 ---
 ### 2026-10-17
 
+- **PR #6937**: feat(router): name the blocker in gateway pair-pad-attach declines
+- **Issue #6935** (closed): router: gateway pass-under pad-attach declines for board 03 USB_D[1] U2.4->R4.1
 - **Issue #6932** (closed): Lattice pair gateway-first decline reason is discarded; board 03 USB_D common run still on F.Cu
 - **PR #6933**: fix(router): print gateway-first decline reason when pair routes planar
 - **PR #6931**: test(board05): pin committed fully-routed, zero-short, manufacturer-check evidence
