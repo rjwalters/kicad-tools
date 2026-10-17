@@ -67,3 +67,52 @@ def test_pad_layer_or_absent_preference_is_unchanged() -> None:
         routes, _ = _run(pf, _prefer(pc, pref))
         assert pf.pair_gateways == {}
         assert _signature(routes) == _signature(base_routes)
+
+
+def _gateway_lines(pf, pc, capsys) -> list[str]:
+    from kicad_tools.router.core import Autorouter
+
+    capsys.readouterr()
+    Autorouter._print_pair_gateway_lines([pc], pf.pair_gateways, pf.pair_gateway_log)
+    return capsys.readouterr().out.splitlines()
+
+
+def test_gateway_first_decline_then_planar_success_prints_the_decline_line(capsys) -> None:
+    """Issue #6932: the decline reason survives a successful planar fallback."""
+    no_vias = LatticeKeepoutMask(
+        [
+            KeepoutArea(
+                polygon=tuple(_OUTLINE),
+                layers=frozenset({0, 1}),
+                blocks_tracks=False,
+                blocks_vias=True,
+            )
+        ]
+    )
+    pf, pc = _board()
+    pf.set_keepouts(no_vias)
+    pc = _prefer(pc, [1])
+    _run(pf, pc)
+    assert pf.pair_outcomes[pc.key] == "coupled"
+    lines = _gateway_lines(pf, pc, capsys)
+    assert len(lines) == 1
+    assert "Diff-pair gateway (lattice)" in lines[0]
+    assert "gateway declined" in lines[0] or "gateway:" in lines[0]
+    assert pf.pair_gateway_log[pc.key] in lines[0]
+
+
+def test_gateway_taken_still_prints_the_coupled_through_line(capsys) -> None:
+    pf, pc = _board()
+    pc = _prefer(pc, [1])
+    _run(pf, pc)
+    lines = _gateway_lines(pf, pc, capsys)
+    assert len(lines) == 1
+    assert "coupled through" in lines[0]
+
+
+def test_gate_not_entered_prints_no_gateway_line(capsys) -> None:
+    pf, pc = _board()
+    pc = _prefer(pc, None)
+    _run(pf, pc)
+    assert pc.key not in pf.pair_gateway_log
+    assert _gateway_lines(pf, pc, capsys) == []
