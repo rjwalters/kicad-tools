@@ -5,6 +5,8 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 ---
 ### 2026-10-17
 
+- **Issue #6932** (closed): Lattice pair gateway-first decline reason is discarded; board 03 USB_D common run still on F.Cu
+- **PR #6933**: fix(router): print gateway-first decline reason when pair routes planar
 - **PR #6931**: test(board05): pin committed fully-routed, zero-short, manufacturer-check evidence
 - **PR #6910**: feat(router): lattice pairs try the gateway on a preferred layer before planar
 - **PR #6926**: refactor(router): pairplan attach and anchor-shift candidate generators (#6837 slice)
