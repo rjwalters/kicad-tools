@@ -189,7 +189,7 @@ If no queues have work, report "No work for Champion" and stop.
 
 ## Follow-on Issue Creation
 
-After a merge, `champion-pr-merge.md` Step 5.5 turns added `TODO:`/`FIXME:`/`HACK:`/`XXX:`/`FUTURE:` lines, deferred-scope sections ("Follow-on Work", "Out of Scope", "Deferred", "Phase 2") and "not blocking" review notes into one `loom:triage` issue (Curator admission first, #11820): always for a critical pattern or a follow-on section, else at 3+ TODOs. It skips a duplicate "Follow-on from PR #N". Edge cases: `champion-reference.md` Edge Case 14.
+After a merge, `champion-pr-merge.md` Step 5.5 turns added `TODO:`/`FIXME:`/`HACK:`/`XXX:`/`FUTURE:` lines, deferred-scope sections ("Follow-on Work", "Deferred", "Phase 2"; not "Out of Scope", a deliberate exclusion) and "not blocking" review notes into one `loom:triage` issue (Curator admission first, #11820): always for a critical pattern or a follow-on section, else at 3+ TODOs. It skips a duplicate "Follow-on from PR #N". Edge cases: `champion-reference.md` Edge Case 14.
 
 ---
 

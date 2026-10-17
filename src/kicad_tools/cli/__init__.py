@@ -886,6 +886,10 @@ def _run_screenshot_command(args) -> int:
         sub_argv.append("--bw")
     if hasattr(args, "screenshot_theme") and args.screenshot_theme:
         sub_argv.extend(["--theme", args.screenshot_theme])
+    if getattr(args, "screenshot_baseline_save", None):
+        sub_argv.extend(["--baseline-save", args.screenshot_baseline_save])
+    if getattr(args, "screenshot_baseline_compare", None):
+        sub_argv.extend(["--baseline-compare", args.screenshot_baseline_compare])
     # Machine output (#4674): forward the canonical flag to the inner parser.
     if getattr(args, "format", "text") != "text":
         sub_argv.extend(["--format", args.format])

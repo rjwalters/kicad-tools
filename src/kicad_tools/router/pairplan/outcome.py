@@ -53,12 +53,31 @@ GATEWAY_RETRY_REASONS: frozenset[str] = frozenset(
     {f"pair-{r}" for r in EXHAUSTED_SEARCH_REASONS} | {"pair-leg-keepout"}
 )
 
+#: Issue #6446: gateway-retry declines that do NOT earn the one-ended hybrid
+#: retry -- no other layer to couple on, the via budget, or the deadline.  Every
+#: other ``pair-gateway-*`` decline (no candidate site, no path, a pass-under
+#: body that could not attach ...) means the gateway search ran and the
+#: segment still has no coupled body, which is when a hybrid may still help.
+HYBRID_SKIP_REASONS: frozenset[str] = frozenset(
+    {"pair-gateway-no-layer", "pair-gateway-via-limit", "pair-gateway-deadline"}
+)
+
+
+def hybrid_retry_reason(reason: str) -> bool:
+    """Whether a gateway-retry decline ``reason`` earns the hybrid retry (#6446)."""
+    return reason.startswith("pair-gateway-") and reason not in HYBRID_SKIP_REASONS
+
+
 #: Prefix of a segment routed as two single-ended legs after its coupled run
 #: declined (issue #6373).
 FALLBACK_PREFIX = "uncoupled-fallback:"
 
+#: Prefix of a segment routed as a coupled trunk plus single-ended legs at its
+#: hard terminal (issue #6446): ``hybrid:<ref>.<pin>``.
+HYBRID_PREFIX = "hybrid:"
+
 SegmentStatus = Literal[
-    "coupled", "uncoupled-fallback", "declined", "deadline-exceeded", "not-attempted"
+    "coupled", "uncoupled-fallback", "hybrid", "declined", "deadline-exceeded", "not-attempted"
 ]
 
 #: Statuses whose label is the status itself.
@@ -75,6 +94,9 @@ class SegmentOutcome:
       the fan-via gateway when it coupled through one, issue #6444);
     * ``"uncoupled-fallback"`` -- the coupled run declined for ``reason`` and
       the segment was routed as two single-ended legs (issue #6373);
+    * ``"hybrid"`` -- a coupled trunk from one end to a trunk start outside
+      the other (``reason`` names that hard terminal, ``"U4.B1"``), joined to
+      the pads by two single-ended legs (issue #6446);
     * ``"declined"`` -- the coupled run declined for ``reason`` and nothing
       was emitted;
     * ``"deadline-exceeded"`` / ``"not-attempted"`` -- no attempt finished.
@@ -85,7 +107,7 @@ class SegmentOutcome:
     gateway: str | None = None
 
     def __post_init__(self) -> None:
-        needs_reason = self.status in ("uncoupled-fallback", "declined")
+        needs_reason = self.status in ("uncoupled-fallback", "hybrid", "declined")
         if needs_reason and self.reason is None:
             raise ValueError(f"a {self.status!r} segment outcome needs a reason")
         if not needs_reason and self.reason is not None:
@@ -102,6 +124,10 @@ class SegmentOutcome:
         return cls("uncoupled-fallback", reason)
 
     @classmethod
+    def hybrid(cls, terminal: str) -> SegmentOutcome:
+        return cls("hybrid", terminal)
+
+    @classmethod
     def declined(cls, reason: str) -> SegmentOutcome:
         return cls("declined", reason)
 
@@ -112,6 +138,8 @@ class SegmentOutcome:
             return self.status
         if self.status == "uncoupled-fallback":
             return f"{FALLBACK_PREFIX}{self.reason}"
+        if self.status == "hybrid":
+            return f"{HYBRID_PREFIX}{self.reason}"
         assert self.reason is not None  # __post_init__
         return self.reason
 
@@ -125,6 +153,8 @@ class SegmentOutcome:
             return cls(label)  # type: ignore[arg-type]
         if label.startswith(FALLBACK_PREFIX):
             return cls.fallback(label[len(FALLBACK_PREFIX) :])
+        if label.startswith(HYBRID_PREFIX):
+            return cls.hybrid(label[len(HYBRID_PREFIX) :])
         return cls.declined(label)
 
 
@@ -137,7 +167,9 @@ def aggregate_label(segment_labels: list[str]) -> str:
     * every segment ``coupled``: ``"coupled"``;
     * every segment in the #6373 fallback: ``"uncoupled-fallback:<reason>"``
       (the first segment's reason);
-    * some segments coupled: ``"partially-coupled:<k>/<n>"``;
+    * some segments coupled: ``"partially-coupled:<k>/<n>"`` (a ``hybrid:``
+      segment (issue #6446) counts as not coupled here -- v1 does not give a
+      chain its own hybrid label);
     * otherwise (no segment coupled, not all in fallback): the first
       non-coupled segment's outcome.
     """

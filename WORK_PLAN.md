@@ -2,20 +2,27 @@
 
 Prioritized roadmap generated from current GitHub label state. Maintained by the Guide triage agent.
 
-*Last updated: 2026-09-29*
+*Last updated: 2026-10-17*
 
 ---
 
 <!-- guide:plan-body:start -->
 ## Operator Attention: Merge-Risk-Hold Pileup
 
-Judge-approved PRs stuck under a `loom:operator` merge-risk hold — implementation work is done, only a human merge decision is missing.
+Judge-approved PRs under a hold (`loom:blocked` or `loom:operator`) — only a human merge decision is missing.
+
+- **#6874**: ci(board-07): move copper-safety DRC ratchet to scheduled slow-tests
+- **#6900**: ci: add Windows smoke job and skip RSS positivity test without resource
+
+## Very Important
+
+`loom:very-important` (one counts per workspace); every stage takes these first.
 
 _None._
 
-## Operator Priority
+## Important
 
-Issues the operator starred (`loom:operator-priority`); land these first.
+`loom:important`; taken before unlabelled work.
 
 _None._
 
@@ -23,26 +30,35 @@ _None._
 
 Human-approved issues ready for implementation (`loom:issue`).
 
-- **#5398**: [Epic #4410] Complete stranded Kelvin sense nets through generic routing and batch rescue
-- **#5660**: [Epic #5509] Phase 3a: switch halo marking (grid.py + grid.cpp) to the clearance kernel
+- **#5798**: [Epic #5784] Phase 4: deconfound kct's match-group length tuning on board 07 (measure first)
+- **#6765**: DSN exporter does not represent JLCPCB fab-floor .kicad_dru rules (fastroute stays non-comparable on board 00)
 
 ## In Progress
 
 Issues currently being built (`loom:building`).
 
-_None._
+- **#6554**: diffpair: reproduce KiCad's diff_pair_uncoupled primitive pairing exactly (kct is a lower bound)
+- **#6824**: board 03: fresh lattice routes fail routing_plan.usb_geometry (USB_D common run not on In2.Cu, MCU launch > 4 mm) — blocks #6394
+- **#6837**: [Epic #6441] Phase 2c: extract engine-free router/pairplan/ package + structured PairOutcome (prereq for P6 #6448)
+- **#6883**: Lattice coupled pairs never leave the pad layer for a preferred, opted-in plane (board 03 USB_D common run stays on F.Cu)
+- **#6885**: Retune selected diffpair/match groups on an existing routed PCB while preserving reviewed copper
+- **#6894**: ci: add a Windows smoke job; skip test_peak_rss_bytes_positive where resource is unavailable (follow-up #6739)
+- **#6912**: feat: visual baseline record/compare for rendered schematics and boards
 
 ## PRs Awaiting Review
 
 PRs waiting on Judge (`loom:review-requested`).
 
-_None._
+- **#6891**: feat(router): add kct retune-lengths for selected groups on a routed PCB
+- **#6917**: feat: add screenshot baseline save/compare with renderer-identity check
+- **#6921**: fix(router): try lattice pair gateway before planar run for non-pad preferred layers
 
 ## Approved (Awaiting Merge)
 
 PRs that passed review and are queued for Champion auto-merge (`loom:pr`).
 
-_None._
+- **#6874**: ci(board-07): move copper-safety DRC ratchet to scheduled slow-tests
+- **#6900**: ci: add Windows smoke job and skip RSS positivity test without resource
 
 ## Proposed
 
@@ -52,27 +68,39 @@ Issues carrying `loom:curated`.
 - **#5240**: CI runtime: reduce measured Test, Board06 E2E and diff-pair regression job medians *(curated)*
 - **#5286**: Board07 full recipe exports seven unexpected signal opens and clearance failures after stage-budget integration *(curated)*
 - **#5333**: Board07 coupled pre-pass exhausts all seven pair searches despite valid corridor guides *(curated)*
-- **#5398**: [Epic #4410] Complete stranded Kelvin sense nets through generic routing and batch rescue *(curated)*
 - **#5410**: router: refine dynamic route halo rejection with physical clearance checks *(curated)*
-- **#5506**: router(HV): attribute and resolve the /FUSED_LINE J2.1→Q2B.2 no-path-layer-constrained leg on softstart rev-C (#4507 T4) *(curated)*
 - **#5508**: Epic: pad-access invariant — no committed route may strand an unrouted pad *(curated)*
 - **#5509**: Epic: one clearance kernel — search, commit, and final validation must agree with kicad-cli DRC *(curated)*
-- **#5511**: Epic: netlist degrees of freedom — swappable-pin groups and acting placement feedback *(curated)*
 - **#5550**: Reconcile 4 outstanding loom-quarantine stashes left by the worktree reaper (issues 5201, 4982, 5216, 5004) *(curated)*
-- **#5607**: boards: committed board06 output/ artifact is stale relative to the recipe (needs a KiCad-capable refresh) *(curated)*
-- **#5617**: perf(router): profile and reduce the Diff-Pair regression job's re-route step (17.55 min = 96% of the job, unchanged across #5403/#5433/#5488/#5500) *(curated)*
-- **#5660**: [Epic #5509] Phase 3a: switch halo marking (grid.py + grid.cpp) to the clearance kernel *(curated)*
-- **#5673**: Halo-shape switch (#5660/PR #5668) under-blocks via drill-to-drill spacing — board02/06 DRC regressions *(curated)*
-- **#5693**: Upstream the #5690 backticked-trailer fix to rjwalters/loom and retire the resync-ignore pin *(curated)*
-- **#5701**: ci: stacked PRs (base = a feature branch) get no CI at all — 'CLEAN' means 'never ran', not 'passed' *(curated)*
-- **#5704**: Manufacturing profiles: project min_silk_clearance is mapped from the solder-mask clearance, not the silkscreen floor *(curated)*
-- **#5712**: champion-epic.md: 'Epic Passes Evaluation' comments reuse the rejection-only champion:epic-verdict marker, corrupting the unrevised-eval skip/escalate ladder *(curated)*
+- **#5743**: ci: 54% of CI time is board jobs with zero failures — one duplicated routing pass, one binary path filter, and an inverted cadence *(curated)*
+- **#5878**: File the 6 tscircuit upstream defects found by the interop gate (needs a credential with issue-write outside rjwalters/*) *(curated)*
+- **#6394**: board 03: 13 copper violations of the router's own Power class (0.2 mm) exposed by #6390 *(curated)*
+- **#6404**: boards 00-07: refill saved zones and refresh hash-bound bundles/readiness after #6390's sidecar update *(curated)*
+- **#6445**: [Epic #6441] Phase 3: via pairs as a single move in the lattice coupled centreline *(curated)*
+- **#6446**: [Epic #6441] Phase 4: budget-driven hybrid fallback — longest coupled trunk plus single-ended terminal legs *(curated)*
+- **#6527**: router: Router.route_bidirectional has no production caller; wire it into the Python fallback and measure, or remove it *(curated)*
+- **#6554**: diffpair: reproduce KiCad's diff_pair_uncoupled primitive pairing exactly (kct is a lower bound) *(curated)*
+- **#6765**: DSN exporter does not represent JLCPCB fab-floor .kicad_dru rules (fastroute stays non-comparable on board 00) *(curated)*
+- **#6824**: board 03: fresh lattice routes fail routing_plan.usb_geometry (USB_D common run not on In2.Cu, MCU launch > 4 mm) — blocks #6394 *(curated)*
+- **#6835**: router: raise flag-off coupled iteration budget to 350k/phase (700k total) so Board07 couples 6/7 pairs; soften endpoint-tolerance comment (#6826 follow-up) *(curated)*
+- **#6837**: [Epic #6441] Phase 2c: extract engine-free router/pairplan/ package + structured PairOutcome (prereq for P6 #6448) *(curated)*
+- **#6850**: Live-verify #6842 gateway offer on boards 03/06b/06rf/07rf *(curated)*
+- **#6858**: router: coupled pre-pass should keep the better of the joint-search and pose-centreline candidates (compare-and-keep; unblocks #6835) *(curated)*
+- **#6883**: Lattice coupled pairs never leave the pad layer for a preferred, opted-in plane (board 03 USB_D common run stays on F.Cu) *(curated)*
+- **#6885**: Retune selected diffpair/match groups on an existing routed PCB while preserving reviewed copper *(curated)*
+- **#6894**: ci: add a Windows smoke job; skip test_peak_rss_bytes_positive where resource is unavailable (follow-up #6739) *(curated)*
+- **#6912**: feat: visual baseline record/compare for rendered schematics and boards *(curated)*
 
 ## Proposed (Architect / Hermit)
 
-- **#5801**: Wire up orphaned BayesianOptStrategy behind --strategy bayesian (CLI + MCP), nightly CI lane for the `bayesian` extra *(hermit)*
+- **#5858**: [Epic #5509] Phase 4e: hermit pass — delete duplicate clearance arithmetic *(architect)*
+- **#5914**: [Epic #5508] Phase 3b: coupled first-leg/departure selection against the access map *(architect)*
+- **#6441**: Epic: diff-pair routing redesign — gateways, via pairs, uncoupled budget, per-segment rules *(architect)*
+- **#6445**: [Epic #6441] Phase 3: via pairs as a single move in the lattice coupled centreline *(architect)*
+- **#6446**: [Epic #6441] Phase 4: budget-driven hybrid fallback — longest coupled trunk plus single-ended terminal legs *(architect)*
+- **#6447**: [Epic #6441] Phase 5: coupling-preserving skew tuning from a skew ledger, and pair invariants for post-passes *(architect)*
+- **#6448**: [Epic #6441] Phase 6: unify diff-pair engines — grid consumes PairPlan or grid coupled pre-pass retired *(architect)*
 - **#5802**: router/core.py: Autorouter god-class has regrown to 20,764 lines (216 methods), 4.6x since last extraction closed *(hermit)*
-- **#5804**: Move jsonschema from core to mcp extra: only used by MCP server *(hermit)*
 
 ## Epics
 
@@ -81,22 +109,24 @@ Issues carrying `loom:curated`.
 - **#4431**: route: per-net scalar clearance cannot express HV isolation — need class-pair (net-class × net-class) clearance rules in the router; both workarounds proven inadequate on a mains board
 - **#5508**: Epic: pad-access invariant — no committed route may strand an unrouted pad
 - **#5509**: Epic: one clearance kernel — search, commit, and final validation must agree with kicad-cli DRC
-- **#5511**: Epic: netlist degrees of freedom — swappable-pin groups and acting placement feedback
 - **#5784**: Epic: adopt measured KiCadRoutingTools techniques (oracle completion, pose diff-pair search, N+1 rip-up)
+- **#5952**: Epic: Harness-neutral kicad-tools (Claude Code, Codex CLI, opencode)
+- **#6441**: Epic: diff-pair routing redesign — gateways, via pairs, uncoupled budget, per-segment rules
 
 ## Backlog Balance
 
-| Tier | Count |
+| Bucket | Count |
 |------|-------|
-| Operator merge-risk holds | 0 |
-| Operator priority | 0 |
+| Operator merge-risk holds | 2 |
+| Very important | 0 |
+| Important | 0 |
 | Ready (`loom:issue`) | 2 |
-| In Progress (`loom:building`) | 0 |
-| PRs awaiting review | 0 |
-| Approved PRs awaiting merge | 0 |
-| Curated | 19 |
-| Architect / Hermit proposals | 3 |
-| Active epics | 7 |
+| In Progress (`loom:building`) | 7 |
+| PRs awaiting review | 3 |
+| Approved PRs awaiting merge | 2 |
+| Curated | 26 |
+| Architect / Hermit proposals | 8 |
+| Active epics | 8 |
 <!-- guide:plan-body:end -->
 
 ## Release History (static archive)

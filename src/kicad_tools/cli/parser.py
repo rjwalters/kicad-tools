@@ -16,6 +16,7 @@ from kicad_tools import __version__
 # TYPE_CHECKING), so this costs ~2.5 ms on top of an already-imported
 # ``kicad_tools`` -- measured, and well under 1% of CLI startup.
 from kicad_tools.benchmark.cases import Difficulty
+from kicad_tools.cli.check_categories import CHECK_CATEGORIES
 from kicad_tools.cli.copper_weight import add_check_copper_argument
 from kicad_tools.cli.export_cmd import STACKUP_ID_CHOICES, STACKUP_ID_HELP
 from kicad_tools.cli.format_options import add_format_flag
@@ -845,12 +846,12 @@ def _add_check_parser(subparsers) -> None:
     check_parser.add_argument(
         "--only",
         dest="only_checks",
-        help="Run only specific checks (comma-separated: clearance, dimensions, edge, silkscreen)",
+        help=f"Run only specific checks (comma-separated: {', '.join(CHECK_CATEGORIES)})",
     )
     check_parser.add_argument(
         "--skip",
         dest="skip_checks",
-        help="Skip specific checks (comma-separated)",
+        help=f"Skip specific checks (comma-separated: {', '.join(CHECK_CATEGORIES)})",
     )
     check_parser.add_argument(
         "--emit-dru",
@@ -3148,6 +3149,11 @@ def _add_pcb_parser(subparsers) -> None:
         "--output",
         dest="output",
         help="Output PCB file path (default: overwrite input PCB)",
+    )
+    pcb_import_ses.add_argument(
+        "--allow-stale",
+        action="store_true",
+        help="Merge even if the board changed since the DSN was exported",
     )
     add_format_flag(pcb_import_ses)
 
@@ -10568,6 +10574,19 @@ def _add_screenshot_parser(subparsers) -> None:
         dest="screenshot_theme",
         default=None,
         help="KiCad color theme name",
+    )
+    screenshot_baseline = screenshot_parser.add_mutually_exclusive_group()
+    screenshot_baseline.add_argument(
+        "--baseline-save",
+        dest="screenshot_baseline_save",
+        metavar="DIR",
+        help="Also save the render and a renderer-identity sidecar as a baseline in DIR",
+    )
+    screenshot_baseline.add_argument(
+        "--baseline-compare",
+        dest="screenshot_baseline_compare",
+        metavar="DIR",
+        help="Render the current state and report drift against the baseline in DIR",
     )
     add_format_flag(screenshot_parser)
 
