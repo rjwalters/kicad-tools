@@ -662,6 +662,19 @@ def route_pcb(input_path: Path, output_path: Path, *, use_saved_plan: bool = Tru
                 # P5 stretch target (#6447).
                 pair_protocol="USB2_FS",
             )
+    # Issue #6876 (operator ruling on #6824): the USB-C-side pair may run on
+    # the reserved In2.Cu plane.  ``--reserve-plane-layers`` keeps every other
+    # class off it; ``allow_plane_layers`` makes In2.Cu legal for these two
+    # nets only, and ``preferred_layers`` (#6854's lattice surcharge) steers
+    # the common run there.  USB_MCU_D+/- (the <=4 mm MCU launches) keep
+    # their default layers.
+    from kicad_tools.router.rules import resolve_layer_index
+
+    in2 = resolve_layer_index("In2.Cu")
+    for net in ["USB_D+", "USB_D-"]:
+        net_class_map[net] = _dc_replace(
+            net_class_map[net], allow_plane_layers=[in2], preferred_layers=[in2]
+        )
     # Issue #6443: no ``coupled_continuity_threshold`` override.  Continuity
     # is info-only now; the short USB-C/ESD branches are bounded by the
     # uncoupled-length limit (USB2_FS: 6.35 mm x components on the net) and

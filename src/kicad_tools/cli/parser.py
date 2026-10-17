@@ -4786,7 +4786,9 @@ def _add_route_parser(subparsers) -> None:
             "PLANE layers (--layers 2, 4-all, or an all-signal "
             "auto-detected board). Pass --no-reserve-plane-layers to allow "
             "signal routing across declared plane layers (pre-#5789 "
-            "behavior)."
+            "behavior). A net class can opt in to named reserved planes "
+            "with allow_plane_layers in its net-class map; every other "
+            "class stays off them (Issue #6876)."
         ),
     )
     route_parser.add_argument(

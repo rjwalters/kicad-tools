@@ -4792,6 +4792,9 @@ class Autorouter:
             if nc is None:
                 self._lattice_pair_outcomes[pair_name] = "no-net-class"
                 continue
+            nc = self._pair_plane_opt_in_class(
+                nc, self.net_class_map.get(p_name), self.net_class_map.get(n_name)
+            )
             trace_w = nc.trace_width or self.rules.trace_width
             # Fab floor (issue #4270) and authored board floor (issue #6443):
             # an intra-pair air gap below the manufacturer's minimum copper
@@ -5581,6 +5584,34 @@ class Autorouter:
             endpoints[tie_key] = tie_ends
         self._lattice_connection_endpoints = endpoints
         return coupled, connections
+
+    @staticmethod
+    def _pair_plane_opt_in_class(nc: Any, p_class: Any, n_class: Any) -> Any:
+        """The coupled pair's class with BOTH nets' plane opt-in (Issue #6876).
+
+        A lattice :class:`CoupledConnection` carries ONE class (the P net's,
+        or N's when P has none), and every coupled layer gate reads it.  Pair
+        copper belongs to both nets, so a reserved plane layer is legal for
+        the pair only when both classes opt in via ``allow_plane_layers``:
+        return a copy of ``nc`` whose ``allow_plane_layers`` is the
+        intersection (a class-less net contributes no opt-in).  ``nc`` itself
+        is returned unchanged when that already holds (always, for classes
+        without the field), so routing is byte-identical without an opt-in.
+        """
+        from dataclasses import replace as _dc_replace
+
+        from .rules import allowed_plane_layer_indices
+
+        own = allowed_plane_layer_indices(nc)
+        if not own:
+            return nc
+        both = allowed_plane_layer_indices(p_class) & allowed_plane_layer_indices(n_class)
+        if own == both:
+            return nc
+        try:
+            return _dc_replace(nc, allow_plane_layers=sorted(both) or None)
+        except TypeError:
+            return nc
 
     def _lattice_plan_pair_ties(
         self, reserved: dict[int, list[tuple[str, str]]]
