@@ -2453,12 +2453,12 @@ class LatticePathfinder:
         nets as "self" -- the attach necessarily runs between the pair's own
         pads.  Returns the accepted polyline (pad first) or ``None``.
         """
+        from ..pairplan.attach import dogleg_attach_candidates
         from .coupled import pads_block_segment_grown
 
         if dist((pad.x, pad.y), target) <= 1e-9:
             return [(pad.x, pad.y)]
-        for axis_first in (False, True):
-            poly = dogleg_points(pad.x, pad.y, target[0], target[1], axis_first=axis_first)
+        for poly in dogleg_attach_candidates((pad.x, pad.y), target):
             ok = True
             for a, b in zip(poly, poly[1:], strict=False):
                 if dist(a, b) <= 1e-9:
