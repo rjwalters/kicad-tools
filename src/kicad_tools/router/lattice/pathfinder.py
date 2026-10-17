@@ -3111,6 +3111,7 @@ class LatticePathfinder:
         present: float,
         deadline: float | None = None,
         vias_used: int = 0,
+        only_layers: list[int] | None = None,
     ) -> tuple[_PairResult | None, str]:
         """Couple a declined segment on another layer through fan vias (#6444).
 
@@ -3161,6 +3162,8 @@ class LatticePathfinder:
 
         self.pair_gateway_ends.pop(pc.key, None)
         layers = self._gateway_layers(pc)
+        if only_layers is not None:
+            layers = [layer for layer in layers if layer in only_layers]
         if not layers:
             self.pair_gateway_log[pc.key] = "gateway: no other routable layer"
             return None, "pair-gateway-no-layer"
@@ -5093,13 +5096,17 @@ class LatticePathfinder:
                     # commits; a soft cost bias cannot beat a successful
                     # planar run.  A decline falls through to the planar
                     # attempt and the usual fallback, unchanged.
-                    gateway_first = (
-                        pair_gateways
-                        and item.key not in self.pair_gateway_skip
-                        and bool(
+                    # Issue #6824: the attempt is confined to the preferred
+                    # layers, else the gateway search may land on a
+                    # non-preferred layer (In1.Cu when In2.Cu is preferred).
+                    pref_layers = (
+                        sorted(
                             self._preferred_layers(item.net_class) & set(self._gateway_layers(item))
                         )
+                        if pair_gateways and item.key not in self.pair_gateway_skip
+                        else []
                     )
+                    gateway_first = bool(pref_layers)
                     if gateway_first and not (
                         deadline is not None and time.monotonic() >= deadline
                     ):
@@ -5110,6 +5117,7 @@ class LatticePathfinder:
                             present=present,
                             deadline=deadline,
                             vias_used=pair_vias_used(item),
+                            only_layers=pref_layers,
                         )
                         if gres is not None:
                             pass_gateways[item.key] = gres.gateway or "gateway"
