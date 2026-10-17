@@ -282,6 +282,7 @@ TUNE_RESULT_REASONS: tuple[str, ...] = (
     "not_length_critical",
     "rolled_back_pair_skew",
     "rolled_back_still_over_limit",
+    "improved_still_over_limit",
 )
 
 
@@ -301,6 +302,7 @@ REASON_SUMMARY_LABELS: dict[str, str] = {
     "no_suitable_segment": "no-segment",
     "rolled_back_pair_skew": "pair-skew rollback",
     "rolled_back_still_over_limit": "over-limit rollback",
+    "improved_still_over_limit": "improved, still over limit",
 }
 
 #: Buckets that are ALWAYS printed (the legacy five) in canonical order.
@@ -3820,6 +3822,42 @@ def mark_group_rolled_back(
     return restored
 
 
+def mark_group_improved_still_over_limit(
+    group_results: dict[int, tuple[Route, TuneResult]],
+    *,
+    spread_before_mm: float,
+    spread_mm: float,
+    tolerance_mm: float,
+) -> dict[int, tuple[Route, TuneResult]]:
+    """Keep a group's meanders when it improved but is still over its limit (Issue #6969).
+
+    Routes are left as the tuner committed them (every one is DRC-clean by
+    the tuner's own post-insertion check).  Members that committed an
+    insertion are re-labelled ``"improved_still_over_limit"`` with
+    ``success=False`` so the group is never counted as achieved.
+    """
+    kept: dict[int, tuple[Route, TuneResult]] = {}
+    for net_id, (route, result) in group_results.items():
+        if result.inserts_applied > 0:
+            result = TuneResult(
+                success=False,
+                reason="improved_still_over_limit",
+                attempts=result.attempts,
+                inserts_applied=result.inserts_applied,
+                length_before_mm=result.length_before_mm,
+                length_after_mm=result.length_after_mm,
+                message=(
+                    f"Group improved (spread {spread_before_mm:.3f}mm -> "
+                    f"{spread_mm:.3f}mm) but is still over its limit "
+                    f"({tolerance_mm:.3f}mm); DRC-clean meanders kept "
+                    f"(tuner outcome was {result.reason!r})."
+                ),
+                serpentine_results=result.serpentine_results,
+            )
+        kept[net_id] = (route, result)
+    return kept
+
+
 # ---------------------------------------------------------------------------
 # Small helpers
 # ---------------------------------------------------------------------------
@@ -3849,6 +3887,7 @@ __all__ = [
     "TUNE_RESULT_REASONS",
     "TuneResult",
     "format_reason_counts",
+    "mark_group_improved_still_over_limit",
     "mark_group_rolled_back",
     "tune_match_group_v2",
 ]
