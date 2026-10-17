@@ -1324,3 +1324,15 @@ class TestThermalShutdown:
         """Test that invalid sensor type raises ValueError."""
         with pytest.raises(ValueError, match="Invalid sensor_type"):
             ThermalShutdown(sensor_type="rtd")
+
+
+def test_decoupling_with_no_capacitors_is_not_a_pass():
+    """Empty capacitor list validated nothing; must not report passed (issue #6913)."""
+    from unittest.mock import MagicMock
+
+    from kicad_tools.patterns.validation import PatternValidator
+
+    pcb = MagicMock()
+    result = PatternValidator().validate_decoupling_pattern(pcb, ic="U1", capacitors=[])
+    assert result.passed is False
+    assert [v.rule for v in result.violations] == ["no_capacitors"]
