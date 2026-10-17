@@ -8714,10 +8714,46 @@ flips spend. A read never goes to it, whatever its class or cause:
   most every five minutes), not the no-pool writer path. The agent `gh`
   front's exit-`75` message then says retrying will not help until a reader
   for that owner is configured.
+- **In-process daemon reads are reader-only (#12555).** Every read built by
+  `claim_reconciliation::gh_call::read` (and `read_within` / `inv(.., Read)`)
+  or `SweepRegistry::gh_inv(.., AccessIntent::Read, ..)` (and `gh_read`) is
+  `GhInvocation::reader_only()`: `writer_identity()` cannot pin it, and when
+  the facade cannot derive a reader route for it (no derivable repo, a
+  checkout whose sources disagree, a shape the derivation does not route) it
+  is shed with the usual `o=shed` row and `forge.read.shed` span instead of
+  running on the writer. The host with no reader pool at all is the one
+  exception, as below. A GraphQL read that names its repo in the query says
+  so with `GhInvocation::reader_repo(slug)` so the reader route serves it.
+- **Read-your-write rides the readers too (#12555).** The read-back helpers
+  that pinned the writer (`gh_call::read_own_write`,
+  `SweepRegistry::gh_read_own_write`) are removed. The writer bought a read
+  only one thing: possibly fresher state for the credential that made the
+  write. It cost that writer's hourly bucket for every lease, label and
+  timeline read-back (the largest writer-read operations measured
+  after #12394). Every former read-back site is safe under a reader that lags
+  the write: the read is sent unconditionally (no `If-None-Match` from the
+  daemon), the read gateway's ETag cache revalidates every hit upstream, and
+  each caller keeps a freshness guard of its own:
+  - the claim-then-verify lease tie-break (`guard.lease_comments`) trusts a
+    read only once it shows this daemon's own just-written lease, retrying
+    then reporting unverified otherwise; a peer's earlier lease is the
+    confirmation re-reads' job, and the writer reads a peer's write no
+    fresher;
+  - the claim timeline (`guard.claim_timeline`) guards against a peer's
+    re-claim (again no fresher on the writer), and the own-flip attribution
+    acts only on an event it attributes to its own flip, so a lagging read
+    fails closed;
+  - the reclaim label read-backs (`claim.issue_labels`, `claim.pr_labels`)
+    cost at most one idempotent retry of the edit, or read labels the write
+    did not touch; the claim check (`claim.labels`, `claim.lease_comments`)
+    can only miss its own lease (it is about to claim anyway) or a peer's;
+    the outcome write-back probe looks for a comment from an earlier pass;
+    the park-hold body read is a read-modify-write whose concurrent edits
+    are another actor's.
 - **Only writes use the writer**: POST, PATCH, PUT, DELETE, GraphQL
   mutations and the minimal read a write needs in the same operation (a
-  lease read back right after posting it, merge settings hidden from a reader
-  App). Each such read is pinned with `GhInvocation::writer_identity()` and
+  lease read back right after a CLI command posts it, merge settings hidden
+  from a reader App). Each such read is pinned with `GhInvocation::writer_identity()` and
   its file is listed with a reason in `loom-daemon/tests/writer_read_guard.rs`
   (`READ_ON_WRITER`); an asker-dependent probe (`/user`, a write-scope
   probe) is listed the same way.
@@ -8725,7 +8761,9 @@ flips spend. A read never goes to it, whatever its class or cause:
   configured, another forge, a target with no repo) has no reader to be out of
   budget; its reads run on the only credential it has, pinned the same way.
 - **Guard.** `tests/writer_read_guard.rs` fails the build if a retired fallback
-  name reappears or a new file pins a read to the writer without being listed.
+  name reappears, a new file pins a read to the writer without being listed,
+  a daemon read builder stops marking its reads `reader_only()`, or a
+  writer-pinned read-own-write helper returns (#12555).
   At runtime a read that reaches the writer unmarked logs an `error`
   (`gh_invocation: read on the writer credential: <op>`).
 - **Telemetry.** Writer-bucket spend by operation is the `forge.calls`
