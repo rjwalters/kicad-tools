@@ -952,8 +952,13 @@ class PlacementFixer:
             rf'(?:property\s+"Reference"\s+"{re.escape(ref)}"|fp_text\s+reference\s+"{re.escape(ref)}")'
         )
 
-        # Find start of each footprint block
-        fp_starts = [m.start() for m in re.finditer(r'\(footprint\s+"[^"]+"', content)]
+        # Find start of each footprint block, ignoring ``(footprint`` inside
+        # quoted strings such as a descr (Issue #6873).
+        from kicad_tools.sexp.scan import iter_unquoted
+
+        # The lookahead keeps the match (a non-empty library id) ending
+        # outside the id string, as ``iter_unquoted`` requires.
+        fp_starts = [m.start() for m in iter_unquoted(content, r'\(footprint\s+(?="[^"])')]
 
         for i, fp_start in enumerate(fp_starts):
             # Determine the end of this footprint block

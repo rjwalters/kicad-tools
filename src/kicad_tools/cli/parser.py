@@ -6,6 +6,7 @@ The parser is organized into subparsers for each major command category.
 """
 
 import argparse
+from pathlib import Path
 
 from kicad_tools import __version__
 
@@ -432,18 +433,51 @@ def _add_erc_parser(subparsers) -> None:
 
 def _add_drc_parser(subparsers) -> None:
     """Add DRC subcommand parser."""
-    drc_parser = subparsers.add_parser("drc", help="Parse DRC report")
-    drc_parser.add_argument("report", help="Path to DRC report (.json or .rpt)")
+    from kicad_tools.drc.violation import ViolationCategory
+
+    drc_parser = subparsers.add_parser("drc", help="Run DRC or parse a DRC report")
+    drc_parser.add_argument(
+        "report", help="PCB (.kicad_pcb) to check or DRC report (.json/.rpt) to parse"
+    )
     drc_parser.add_argument("--format", choices=["table", "json", "summary"], default="table")
     drc_parser.add_argument("--errors-only", action="store_true")
-    drc_parser.add_argument("--type", dest="filter_type", help="Filter by violation type")
+    drc_parser.add_argument(
+        "--strict", action="store_true", help="Exit with error code on warnings"
+    )
+    drc_parser.add_argument(
+        "--type", "-t", dest="filter_type", help="Filter by violation type (partial match)"
+    )
     drc_parser.add_argument("--net", help="Filter by net name")
     drc_parser.add_argument(
+        "--category",
+        "-c",
+        choices=[c.value for c in ViolationCategory],
+        help="Filter by root-cause category (placement, routing, manufacturing, connectivity, cosmetic)",
+    )
+    drc_parser.add_argument(
         "--mfr",
+        "-m",
         choices=get_all_manufacturer_names(),
         help="Check against manufacturer design rules",
     )
-    drc_parser.add_argument("--layers", type=int, default=2, help="Number of copper layers")
+    drc_parser.add_argument(
+        "--layers", "-l", type=int, default=2, help="Number of copper layers (default: 2)"
+    )
+    drc_parser.add_argument(
+        "--verbose", "-v", action="store_true", help="Show detailed violation information"
+    )
+    drc_parser.add_argument(
+        "--suggest", "-s", action="store_true", help="Show fix suggestions for each violation"
+    )
+    drc_parser.add_argument(
+        "--filter-config",
+        type=Path,
+        help="TOML file with [[drc.filters]] rules to suppress or reclassify violations",
+    )
+    drc_parser.add_argument(
+        "--keep-report", action="store_true", help="Keep the DRC report file after running"
+    )
+    drc_parser.add_argument("--output", "-o", type=Path, help="Save DRC report to this path")
     drc_parser.add_argument(
         "--waivers",
         dest="waivers",
@@ -4400,7 +4434,10 @@ def _add_route_parser(subparsers) -> None:
     route_parser.add_argument(
         "--force",
         action="store_true",
-        help="Force routing even when grid > clearance (may cause DRC violations)",
+        help=(
+            "Force routing even when grid > clearance (may cause DRC violations), "
+            "or when an explicit --grid exceeds the backend cell ceiling (issue #6875)"
+        ),
     )
     route_parser.add_argument(
         "--allow-unsafe-grid",
@@ -4784,7 +4821,9 @@ def _add_route_parser(subparsers) -> None:
             "PLANE layers (--layers 2, 4-all, or an all-signal "
             "auto-detected board). Pass --no-reserve-plane-layers to allow "
             "signal routing across declared plane layers (pre-#5789 "
-            "behavior)."
+            "behavior). A net class can opt in to named reserved planes "
+            "with allow_plane_layers in its net-class map; every other "
+            "class stays off them (Issue #6876)."
         ),
     )
     route_parser.add_argument(

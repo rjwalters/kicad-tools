@@ -304,21 +304,32 @@ kct erc project.erc --type "unconnected"
 
 ### `drc`
 
-Parse DRC reports with optional manufacturer rule comparison.
+Run DRC on a PCB or parse a DRC report, with optional manufacturer rule comparison.
 
 ```bash
-kct drc <report> [options]
+kct drc <report|board.kicad_pcb> [options]
 ```
 
 | Option | Description |
 |--------|-------------|
 | `--format {table,json,summary}` | Output format (default: table) |
 | `--errors-only` | Show only errors |
-| `--type TYPE` | Filter by violation type |
+| `--strict` | Exit 2 when warnings are present (exit-code contract, #6898) |
+| `--type TYPE`, `-t` | Filter by violation type (partial match) |
 | `--net NET` | Filter by net name |
-| `--mfr {jlcpcb,oshpark,pcbway,seeed}` | Apply manufacturer rules |
-| `--layers N` | Number of layers (default: 2) |
+| `--category`, `-c {placement,routing,manufacturing,connectivity,cosmetic}` | Filter by root-cause category |
+| `--mfr`, `-m {jlcpcb,oshpark,pcbway,seeed}` | Apply manufacturer rules |
+| `--layers N`, `-l` | Number of layers (default: 2) |
+| `--verbose`, `-v` | Show detailed violation information |
+| `--suggest`, `-s` | Show fix suggestions for each violation |
+| `--filter-config PATH` | TOML file with `[[drc.filters]]` rules to suppress or reclassify violations |
+| `--keep-report` | Keep the DRC report file after running a PCB |
+| `--output PATH`, `-o` | Save the DRC report to this path |
 | `--waivers PATH` | Path to a `.kct_waivers.json` sidecar (schema v2 — the same file `kct check --waivers` reads) waiving cross-gate findings by KiCad rule type + component-ref set (#4691). Auto-discovered next to the input when omitted. Not applied in `--mfr` mode |
+
+The standalone `kicad-drc` also has `--rules` and `--compare`; they are
+deprecated (a stderr pointer is printed) in favour of `kct mfr rules` and
+`kct mfr compare`, and are intentionally not on `kct drc` (#6898).
 
 **Waivers (`--waivers`, #4691)**
 

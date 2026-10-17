@@ -39,10 +39,12 @@ import math
 import re
 import warnings
 from collections import Counter
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
+
+from kicad_tools.sexp.scan import find_unquoted, iter_unquoted
 
 logger = logging.getLogger(__name__)
 
@@ -2456,6 +2458,29 @@ def extract_board_origin(pcb_path_or_text: str | Path) -> tuple[float, float] | 
     return bounds[:2] if bounds is not None else None
 
 
+def _footprint_source_sections(pcb_text: str, footprints: Sequence[Any]) -> list[str]:
+    """Return each footprint's exact source text, in *footprints* order.
+
+    *footprints* must be the ``Footprint`` objects of a ``PCB`` built from a
+    tree parsed from *pcb_text* (each carries its ``_sexp_node``).  The slices
+    come from the parser's own offsets, so they can never get out of step
+    with the parsed footprints the way a ``re.split`` on ``(footprint `` did
+    when a ``descr`` or tag string contained that text (Issue #6873).
+    """
+    from kicad_tools.sexp import source_span
+
+    sections: list[str] = []
+    for footprint in footprints:
+        node = footprint._sexp_node
+        span = source_span(node) if node is not None else None
+        if span is None:
+            raise ValueError(
+                "Cannot read footprint source: it was not parsed as a top-level board item"
+            )
+        sections.append(pcb_text[span[0] : span[1]])
+    return sections
+
+
 def extract_pad_positions(pcb_path_or_text: str | Path) -> list[PadPosition]:
     """Extract pad positions from a KiCad PCB file for grid analysis.
 
@@ -2483,13 +2508,15 @@ def extract_pad_positions(pcb_path_or_text: str | Path) -> list[PadPosition]:
 
     positions: list[PadPosition] = []
 
-    # Split by footprint for easier parsing
-    footprint_sections = re.split(r"(?=\((?:footprint|module)\s)", pcb_text)
-
-    for section in footprint_sections:
-        if not section.startswith("(footprint") and not section.startswith("(module"):
-            continue
-
+    # Split by footprint for easier parsing.  Only openers outside quoted
+    # strings start a section, so a descr or tag mentioning ``(footprint X)``
+    # cannot add one (Issue #6873).  Unlike the full loaders, nothing here is
+    # paired with parsed footprints, so this string-aware scan (~7x cheaper
+    # than parsing a large board) is enough; it keeps the lightweight path
+    # lightweight.
+    starts = [m.start() for m in iter_unquoted(pcb_text, r"\((?:footprint|module)\s")]
+    for start, end in itertools.pairwise([*starts, len(pcb_text)]):
+        section = pcb_text[start:end]
         # Get footprint position and rotation
         at_match = re.search(r"\(at\s+([-\d.]+)\s+([-\d.]+)(?:\s+([-\d.]+))?\)", section)
         if not at_match:
@@ -2687,11 +2714,7 @@ def load_pads_for_analysis(pcb_path_or_text: str | Path) -> list[Pad]:
 
     identity_document = IdentityPCB(parse_identity_document(pcb_text))
     source_keys = footprint_keys(identity_document.footprints)
-    footprint_sections = [
-        section
-        for section in re.split(r"(?=\((?:footprint|module)\s)", pcb_text)
-        if section.startswith("(footprint") or section.startswith("(module")
-    ]
+    footprint_sections = _footprint_source_sections(pcb_text, identity_document.footprints)
     for section, component_id, footprint in zip(
         footprint_sections, source_keys, identity_document.footprints, strict=True
     ):
@@ -4753,6 +4776,7 @@ def route_pcb(
     origin_y: float = 0,
     skip_nets: list[str] | None = None,
     progress_callback: ProgressCallback | None = None,
+    adaptive_grid: bool = True,
 ) -> tuple[str, dict]:
     """
     Route a PCB given component placements and net assignments.
@@ -4776,9 +4800,15 @@ def route_pcb(
         progress_callback: Optional callback for progress reporting.
             Signature: (progress: float, message: str, cancelable: bool) -> bool
             Returns False to cancel, True to continue.
+        adaptive_grid: Issue #6875.  True (default) keeps the #972 adaptive
+            cell cap, which may route a large board on a coarser pitch than
+            ``rules.grid_resolution``; False routes on exactly that pitch.
 
     Returns:
-        Tuple of (sexp_string, statistics_dict)
+        Tuple of (sexp_string, statistics_dict).  ``statistics_dict["grid"]``
+        is :meth:`Autorouter.grid_report` -- the pitch actually used, and
+        ``coarsened`` / ``coarsened_reason`` when the adaptive cap replaced
+        the requested one (Issue #6875).
     """
     if rules is None:
         rules = DesignRules()
@@ -4791,7 +4821,15 @@ def route_pcb(
         origin_x=origin_x,
         origin_y=origin_y,
         rules=rules,
+        adaptive_grid=adaptive_grid,
     )
+    grid_report = router.grid_report()
+    if grid_report["coarsened"]:
+        print(
+            f"  Grid: routing on {grid_report['used_mm']:.4g}mm, not the requested "
+            f"{grid_report['requested_mm']:.4g}mm ({grid_report['coarsened_reason']}); "
+            "pass adaptive_grid=False to keep the requested pitch"
+        )
 
     from kicad_tools.schema.physical_identity import component_keys
 
@@ -4869,6 +4907,7 @@ def route_pcb(
     router.cleanup_artifacts()
     sexp = router.to_sexp(skip_cleanup=True)
     stats = router.get_statistics()
+    stats["grid"] = grid_report
     print(
         f"  Completed: {stats['routes']} routes, {stats['segments']} segments, {stats['vias']} vias"
     )
@@ -5024,24 +5063,12 @@ def _extract_pad_blocks(section: str) -> list[str]:
 
     # Find all positions where "(pad " starts *outside* a quoted string.
     # A plain ``str.find`` would also match text such as
-    # ``(descr "Heatsink pins (pad 4, net HS) ...")`` (Issue #6740), so scan
-    # with the same string/escape rules as the paren matcher below. Each scan
-    # resumes just past a completed block, which is always outside a string.
+    # ``(descr "Heatsink pins (pad 4, net HS) ...")`` (Issues #6740, #6873).
+    # Each scan resumes just past a completed block, which is always outside
+    # a string, as :func:`find_unquoted` requires.
     start_pos = 0
     while True:
-        pad_start = section.find("(pad ", start_pos)
-        quote = section.find('"', start_pos)
-        while pad_start != -1 and quote != -1 and quote < pad_start:
-            # Skip the quoted string opened at ``quote`` (honouring escapes).
-            j = quote + 1
-            while j < len(section) and section[j] != '"':
-                j += 2 if section[j] == "\\" else 1
-            if j >= len(section):
-                pad_start = -1  # unterminated string: nothing more to find
-                break
-            if pad_start < j:
-                pad_start = section.find("(pad ", j + 1)
-            quote = section.find('"', j + 1)
+        pad_start = find_unquoted(section, "(pad ", start_pos)
         if pad_start == -1:
             break
 
@@ -5473,11 +5500,7 @@ def load_pcb_for_routing(
     identity_document = IdentityPCB(parse_identity_document(pcb_text))
     source_keys = footprint_keys(identity_document.footprints)
     validate_netlist_selectors(identity_document.footprints, netlist or {})
-    footprint_sections = [
-        section
-        for section in re.split(r"(?=\((?:footprint|module)\s)", pcb_text)
-        if section.startswith("(footprint") or section.startswith("(module")
-    ]
+    footprint_sections = _footprint_source_sections(pcb_text, identity_document.footprints)
     for section, component_id, footprint in zip(
         footprint_sections, source_keys, identity_document.footprints, strict=True
     ):
@@ -6670,9 +6693,15 @@ def verify_output_connectivity(
     # vanished.  The old endpoint-snapping check hid that (it joined an F.Cu
     # and a B.Cu endpoint at the same XY with or without a via); the
     # layer-aware contact model needs the via to bridge the layers.
-    _body = r"(?:[^()]*\((?:[^()]*\([^()]*\))*[^()]*\))*[^()]*\)"
-    seg_block_re = re.compile(r"\(segment\b" + _body)
-    via_block_re = re.compile(r"\(via\b" + _body)
+    #
+    # Issue #6873: blocks are found outside quoted strings only (a descr can
+    # spell out a whole ``(segment ...)``), and the body skips whole strings
+    # so a ``)`` inside one cannot end a block -- or leave the scan inside a
+    # string.
+    _atoms = r'[^()"]*(?:"[^"\\]*(?:\\[\s\S][^"\\]*)*"[^()"]*)*'
+    _body = rf"(?:{_atoms}\((?:{_atoms}\({_atoms}\))*{_atoms}\))*{_atoms}\)"
+    seg_block_pattern = r"\(segment\b" + _body
+    via_block_pattern = r"\(via\b" + _body
     start_re = re.compile(r"\(start\s+([\d.+-]+)\s+([\d.+-]+)\)")
     end_re = re.compile(r"\(end\s+([\d.+-]+)\s+([\d.+-]+)\)")
     at_re = re.compile(r"\(at\s+([\d.+-]+)\s+([\d.+-]+)\)")
@@ -6726,7 +6755,7 @@ def verify_output_connectivity(
 
     # Group parsed segments by net
     segments_by_net: dict[int, list[Segment]] = {}
-    for block_match in seg_block_re.finditer(pcb_content):
+    for block_match in iter_unquoted(pcb_content, seg_block_pattern):
         block = block_match.group(0)
         s_m = start_re.search(block)
         e_m = end_re.search(block)
@@ -6754,7 +6783,7 @@ def verify_output_connectivity(
     # Group parsed vias by net
     vias_by_net: dict[int, list[Via]] = {}
     vias_read_as_through = 0
-    for block_match in via_block_re.finditer(pcb_content):
+    for block_match in iter_unquoted(pcb_content, via_block_pattern):
         block = block_match.group(0)
         at_m = at_re.search(block)
         net_id = _block_net_id(block)

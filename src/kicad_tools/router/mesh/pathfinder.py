@@ -31,7 +31,7 @@ from pathlib import Path
 
 from ..layers import LayerStack
 from ..primitives import Pad, Route, Segment, Via, pad_half_extents
-from ..rules import DesignRules
+from ..rules import DesignRules, layer_permitted
 from .geometry import (
     Pt,
     merge_intervals,
@@ -769,13 +769,18 @@ class MeshPathfinder:
         reservation) and the net class's hard-avoided layers (auto-hard with
         ``target_ampacity`` or ``strict_layers``, as the grid engine does).
         Empty when neither applies, so unreserved boards are unchanged.
+
+        Issue #6876: a layer the class opted in to via ``allow_plane_layers``
+        is not reservation-blocked (shared ``layer_permitted``); hard
+        ``avoid_layers`` still wins.
         """
         blocked: set[int] = set()
         allowed = self.rules.allowed_layers
         if allowed is not None:
-            allowed_names = set(allowed)
             blocked.update(
-                ld.index for ld in self.layer_stack.layers if ld.name not in allowed_names
+                ld.index
+                for ld in self.layer_stack.layers
+                if not layer_permitted(self.rules, net_class, ld.index, ld.name)
             )
         hard = getattr(net_class, "hard_avoided_layer_indices", None)
         if callable(hard):

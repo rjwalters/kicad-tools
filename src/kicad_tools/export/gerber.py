@@ -48,12 +48,15 @@ def _pcb_has_unfilled_zones(pcb_path: Path) -> bool:
         text = pcb_path.read_text()
     except OSError:
         return False
-    has_zone = "(zone " in text or "(zone\n" in text or "(zone\t" in text
-    if not has_zone:
+    # Issue #6873: a ``(zone`` inside a quoted string (a descr, a tag) is
+    # not a zone, so match tokens outside strings only.
+    from kicad_tools.sexp.scan import has_unquoted
+
+    if not has_unquoted(text, r"\(zone[ \n\t]"):
         return False
     # If we have zones but no filled_polygon, the zones are unfilled and
     # the resulting Gerbers would lack G36..G37 polygon-fill regions.
-    return "filled_polygon" not in text
+    return not has_unquoted(text, r"\(filled_polygon\b")
 
 
 def _pcb_has_filled_zones(pcb_path: Path) -> bool:

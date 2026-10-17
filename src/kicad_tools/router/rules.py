@@ -1333,6 +1333,22 @@ class NetClassRouting:
     avoid_layers: list[int] | None = None  # Layer indices to avoid (higher cost)
     layer_cost_multiplier: float = 2.0  # Cost penalty for non-preferred layers
 
+    # Per-class plane-layer opt-in (Issue #6876, ruling on #6824)
+    allow_plane_layers: list[int] | None = None
+    """Reserved plane layers this class may route signal copper on.
+
+    ``--reserve-plane-layers`` (on by default, #5014/#5789) removes every
+    PLANE layer from :attr:`DesignRules.allowed_layers` board-wide.  A class
+    that lists a layer here (KiCad name or grid index; normalized to grid
+    indices by :meth:`from_dict`, exactly like :attr:`avoid_layers`) is
+    exempted from that gate for the named layers only -- every other class
+    stays off the plane.  The check is :func:`layer_permitted`, shared by the
+    grid, C++, lattice, mesh and coupled paths.  Naming a layer that is not
+    reserved is a no-op; a layer that is both opted in and hard-avoided stays
+    blocked (hard avoid wins).  ``None`` (the default) routes exactly as
+    before.
+    """
+
     # Length constraint parameters (Issue #630)
     length_constraint: LengthConstraint | None = None  # Length constraint for this net class
 
@@ -1935,6 +1951,9 @@ class NetClassRouting:
                 list(self.preferred_layers) if self.preferred_layers is not None else None
             ),
             "avoid_layers": (list(self.avoid_layers) if self.avoid_layers is not None else None),
+            "allow_plane_layers": (
+                list(self.allow_plane_layers) if self.allow_plane_layers is not None else None
+            ),
             "layer_cost_multiplier": self.layer_cost_multiplier,
             "length_constraint": (
                 self.length_constraint.to_dict() if self.length_constraint is not None else None
@@ -2030,6 +2049,12 @@ class NetClassRouting:
                 data.get("avoid_layers"),
                 layer_stack,
                 f"net class {data['name']!r} avoid_layers",
+                on_absent="drop",
+            ),
+            allow_plane_layers=_resolve_layer_index_list(
+                data.get("allow_plane_layers"),
+                layer_stack,
+                f"net class {data['name']!r} allow_plane_layers",
                 on_absent="drop",
             ),
             layer_cost_multiplier=data.get("layer_cost_multiplier", 2.0),
@@ -2177,6 +2202,68 @@ NET_CLASS_DEFAULT = NetClassRouting(
     clearance=0.2,
     cost_multiplier=1.0,
 )
+
+
+def allowed_plane_layer_indices(net_class: object) -> frozenset[int]:
+    """Grid indices a net class opted in to via ``allow_plane_layers`` (#6876).
+
+    Entries are normally ints (``NetClassRouting.from_dict`` normalizes them).
+    A residual layer *name* from an in-process construction is resolved the
+    stack-less way (``"F.Cu"`` -> 0, ``"In<k>.Cu"`` -> k); one that cannot be
+    resolved without a stack (``"B.Cu"``) is left to :func:`layer_permitted`,
+    which also matches by name.  ``None`` / a class without the field / an
+    empty list -> empty set (the pre-#6876 behaviour).
+    """
+    opted = getattr(net_class, "allow_plane_layers", None)
+    if not opted:
+        return frozenset()
+    out: set[int] = set()
+    for entry in opted:
+        try:
+            out.add(resolve_layer_index(entry, None))
+        except LayerResolutionError:
+            continue
+    return frozenset(out)
+
+
+def layer_permitted(
+    rules: object,
+    net_class: object,
+    layer_idx: int,
+    layer_name: str,
+) -> bool:
+    """The ``rules.allowed_layers`` gate, widened by the class's opt-in (#6876).
+
+    ``DesignRules.allowed_layers`` is the board-wide hard layer gate
+    (``--reserve-plane-layers`` populates it with every non-PLANE layer).  A
+    net class may exempt itself, for the named layers only, through
+    :attr:`NetClassRouting.allow_plane_layers`.  This is the ONE predicate
+    every layer-permission path consults (grid pathfinder, C++ seed filter
+    and per-call routable widening, lattice, mesh, and the coupled pair
+    filter), so the opt-in cannot be honoured by one engine and ignored by
+    another (the #6865 gap).
+
+    Hard ``avoid_layers`` filtering is NOT folded in here: callers keep
+    applying it separately, so a layer that is both opted in and hard-avoided
+    stays blocked.
+
+    Args:
+        rules: The active :class:`DesignRules` (or anything exposing
+            ``allowed_layers``; ``None`` / missing -> no gate).
+        net_class: The net's :class:`NetClassRouting`, or ``None``.
+        layer_idx: Grid-layer index being tested.
+        layer_name: KiCad name of that layer (``"In2.Cu"``).
+
+    Returns:
+        True when the layer may carry this net's copper.
+    """
+    allowed = getattr(rules, "allowed_layers", None)
+    if allowed is None or layer_name in allowed:
+        return True
+    opted = getattr(net_class, "allow_plane_layers", None)
+    if not opted:
+        return False
+    return layer_idx in allowed_plane_layer_indices(net_class) or layer_name in opted
 
 
 def create_net_class_map(
