@@ -261,22 +261,22 @@ def example_cli_commands() -> None:
 Manufacturing export is also available via the command line:
 
 # Generate complete assembly package
-kct export --manufacturer jlcpcb design.kicad_pcb design.kicad_sch -o output/
+kct export design.kicad_pcb --mfr jlcpcb --sch design.kicad_sch -o output/
 
 # Export Gerbers only
-kct export gerbers design.kicad_pcb --manufacturer jlcpcb -o gerbers/
+kct export design.kicad_pcb --mfr jlcpcb --no-bom --no-cpl --no-report -o gerbers/
 
 # Export BOM in specific format
-kct bom design.kicad_sch --format jlcpcb -o bom_jlcpcb.csv
+kct bom design.kicad_sch --format jlcpcb > bom_jlcpcb.csv
 
 # Export pick-and-place file
-kct export pnp design.kicad_pcb --manufacturer jlcpcb -o positions.csv
+kct export design.kicad_pcb --mfr jlcpcb --no-gerbers --no-bom --no-report -o positions/
 
 # Compare manufacturer capabilities
 kct mfr compare --layers 4
 
 # Check design against manufacturer rules
-kct mfr check design.kicad_pcb --manufacturer jlcpcb
+kct mfr validate design.kicad_pcb jlcpcb
 
 # Show manufacturer info
 kct mfr info jlcpcb
