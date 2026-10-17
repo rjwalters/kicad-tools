@@ -520,17 +520,20 @@ class TestClassClearanceFloor:
         assert kw["intra_group_clearance_mm"] == pytest.approx(0.17)
         assert kw["via_clearance_mm"] == pytest.approx(0.17)
 
+    # Issue #6979: #6972 clamped the whole floor up to the strictest foreign
+    # class.  The group floor now stays at its own class and each neighbour
+    # is held to max(floor, its class) through ``net_clearance_mm``.
     def test_stricter_foreign_class_keeps_its_clearance(self):
         kw = self._captured_kwargs(group_clearance=0.15, foreign_clearance=0.2)
-        assert kw["intra_group_clearance_mm"] == pytest.approx(0.2)
-        assert kw["via_clearance_mm"] == pytest.approx(0.2)
-        assert kw["pad_clearance_mm"] == pytest.approx(0.2)
+        assert kw["intra_group_clearance_mm"] == pytest.approx(0.15)
+        assert kw["via_clearance_mm"] == pytest.approx(0.15)
+        assert kw["pad_clearance_mm"] == pytest.approx(0.15)
+        assert kw["net_clearance_mm"][3] == pytest.approx(0.2)
 
     def test_stricter_class_pad_on_unrouted_net_keeps_its_clearance(self):
         kw = self._captured_kwargs(group_clearance=0.15, unrouted_pad_clearance=0.2)
-        assert kw["intra_group_clearance_mm"] == pytest.approx(0.2)
-        assert kw["via_clearance_mm"] == pytest.approx(0.2)
-        assert kw["pad_clearance_mm"] == pytest.approx(0.2)
+        assert kw["pad_clearance_mm"] == pytest.approx(0.15)
+        assert kw["net_clearance_mm"][4] == pytest.approx(0.2)
 
     def test_looser_foreign_class_does_not_raise_floor(self):
         kw = self._captured_kwargs(group_clearance=0.175, foreign_clearance=0.15)
