@@ -540,16 +540,49 @@ def _seg_rect_entry(a: Pt, b: Pt, rect: Rect) -> float | None:
     return t0
 
 
-def _entry_in_copper(entry: Pt, pad: Pad, half_w: float, half_h: float) -> bool:
-    """True when ``entry`` lies inside the pad's real copper outline.
+#: Shapes whose copper the kernel's pad builder models exactly.
+_CLIP_SHAPES = frozenset({"rect", "roundrect", "circle", "oval", "obround"})
 
-    The AABB is exact for rect/roundrect pads at a cardinal rotation; round
-    and oval pads leave the AABB corners empty, so test their true outline.
+#: How far inside the copper a clipped leg end must sit (mm).  A cut landing
+#: on the outline itself (a box corner that happens to touch a circle) is
+#: refused, so a float round-off can never turn it into an open circuit.
+_MIN_END_DEPTH = 0.01
+
+
+def _entry_in_copper(entry: Pt, pad: Pad) -> bool:
+    """True when ``entry`` lies inside ``pad``'s real copper (issue #6959).
+
+    "Inside" means at least :data:`_MIN_END_DEPTH` in from the outline.
+
+    The cut is computed on the pad's axis-aligned bounding box, which holds
+    area with no copper for a circle, an oval or a rounded corner.  This test
+    uses the clearance kernel's pad builder, which models the real outline:
+    a rotated rectangle, a disc, a stadium, or a roundrect whose corner radius
+    is ``roundrect_rratio * min(width, height)``.  One difference from
+    :func:`~kicad_tools.router.clearance_shapes.pad_shape`: a roundrect with
+    no file ratio is measured here at KiCad's largest ratio (0.5), not as its
+    full rectangle.  The full rectangle is the safe choice for a clearance
+    test and the unsafe one for a containment test, because it would accept
+    a point in a corner that may hold no copper.  Shapes the builder does not
+    model exactly (``custom``, ``trapezoid``, ...) never contain the point.
     """
-    dx, dy = entry[0] - pad.x, entry[1] - pad.y
-    if pad.shape in ("circle", "oval") and half_w > _EPS and half_h > _EPS:
-        return (dx / half_w) ** 2 + (dy / half_h) ** 2 <= 1.0 + _EPS
-    return True
+    from ..clearance_kernel import KVia, copper_gap, make_pad
+    from ..clearance_shapes import pad_kernel_params
+
+    if pad.shape not in _CLIP_SHAPES:
+        return False
+    if pad.shape == "roundrect" and getattr(pad, "roundrect_rratio", None) is None:
+        shape, rratio = "roundrect", 0.5
+    else:
+        shape, rratio = pad_kernel_params(pad)
+    # Shrink the pad by the margin on every side and test plain membership
+    # (the kernel's point distance is 0 anywhere inside, so it has no depth
+    # to compare).  For a roundrect the shrunk pad keeps the same ratio, so
+    # its corners come out slightly rounder than a true inset: it stays
+    # inside the true inset, which is the safe direction.
+    m = 2.0 * _MIN_END_DEPTH
+    kpad = make_pad(shape, pad.width - m, pad.height - m, rratio, pad.rotation, pad.x, pad.y)
+    return copper_gap(kpad, KVia(x=entry[0], y=entry[1], diameter=0.0)) <= 1e-9
 
 
 def clip_to_pad_entry(points: list[Pt], pad: Pad, trace_w: float) -> list[Pt]:
@@ -592,7 +625,7 @@ def clip_to_pad_entry(points: list[Pt], pad: Pad, trace_w: float) -> list[Pt]:
         if t is None:
             continue
         entry = (a[0] + t * (b[0] - a[0]), a[1] + t * (b[1] - a[1]))
-        if not _entry_in_copper(entry, pad, half_w, half_h):
+        if not _entry_in_copper(entry, pad):
             return points
         clipped = [*points[: i + 1], entry]
         if sum(dist(u, v) for u, v in zip(clipped, clipped[1:], strict=False)) <= _EPS:
