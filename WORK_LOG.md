@@ -5,6 +5,25 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 ---
 ### 2026-10-17
 
+- **PR #6966**: refactor(router): single routed_halo_radius_cells helper for routed-copper halos (#5858)
+- **PR #6965**: fix(lattice): space a route's own vias at the hole-to-hole floor
+- **PR #6964**: fix(lattice): trim end overshoot reversal before pair offsetting
+- **PR #6961**: ci: verify main on an hourly schedule instead of every merge
+- **PR #6955**: chore(loom): record baseline hyperparameters block in config.json
+- **PR #6953**: fix(boards): refresh board 03 readiness evidence and guard all boards' recorded hashes
+- **PR #6952**: fix: Judge follow-ups for grid_limits hint, iter_unquoted docstring, PairOutcome edge cases (#6948)
+- **PR #6951**: fix: accept manufacturer aliases in standalone --mfr parsers
+- **PR #6949**: docs: index research and diagnostics notes, add docs reachability test
+- **Issue #6958** (closed): lattice: pair-offset-degenerate fires when the fat centreline doubles back on its last edge (board 03 USB_D[0])
+- **Issue #6957** (closed): lattice: A* never checks a via against its own path's earlier vias (board 03 VBUS same-net hole_to_hole 0.266 mm)
+- **Issue #6948** (closed): cleanup: Judge follow-ups from #6877/#6886/#6890 (grid_limits memory+hint, iter_unquoted docstring, PairOutcome edge cases)
+- **Issue #6947** (closed): docs: index subfolder docs (research/, mcp/, diagnostics/) from docs/README.md and guard against drift
+- **Issue #6946** (closed): kct drc --mfr advertises aliases (jlc, osh, ...) that the inner kicad-drc parser rejects
+- **Issue #6945** (closed): board 03: readiness.json hashes stale for net_class_map.json and routed .kicad_dru since #6876
+- **Issue #5986** (closed): CI: run the main-branch suite on the newest main on a schedule instead of every merge (~935 job-min/day on main)
+- **Issue #5914** (closed): [Epic #5508] Phase 3b: coupled first-leg/departure selection against the access map
+- **Issue #5858** (closed): [Epic #5509] Phase 4e: hermit pass — delete duplicate clearance arithmetic
+- **Issue #5845** (closed): chore(loom): adopt + baseline the hyperparameters config block (loom#9698)
 - **PR #6944**: fix: scope fleet bench drift check to selected boards
 - **Issue #6941** (closed): fleet bench: run.py drift check blocks single-board runs; README board 00 row stale (follow-up #6765)
 - **Issue #6850** (closed): Live-verify #6842 gateway offer on boards 03/06b/06rf/07rf

@@ -569,7 +569,7 @@
     },
     "erc": {
       "status": "PASSED",
-      "detail": "0 error(s), 78 warning(s)"
+      "detail": "0 error(s), 0 warning(s)"
     },
     "lvs": {
       "status": "PASSED",

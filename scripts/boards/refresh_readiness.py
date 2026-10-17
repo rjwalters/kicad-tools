@@ -38,6 +38,12 @@ unless every gate passes:
    the staged report with ``read_readiness()``.  Only then copy the changed
    files back into the board.
 
+Every kicad-cli call runs on the pinned evidence toolchain (Issue #6962): an
+isolated ``KICAD_CONFIG_HOME`` with the pinned library tables, and a refusal
+(exit 2, nothing published) unless kicad-cli is the qualified version or
+``KCT_KICAD_DOCKER=1`` routes it through CI's pinned image.  A native DRC
+``lib_footprint_issues`` finding is refused the same way.
+
 Usage (from the repository root, KiCad 10 ``kicad-cli`` on PATH)::
 
     uv run --with shapely python scripts/boards/refresh_readiness.py \\
@@ -83,6 +89,12 @@ def _load_bundle_links():
 
 
 bundle_links = _load_bundle_links()
+
+from kicad_tools.cli.kicad_toolchain import (  # noqa: E402
+    KiCadEnvironmentError,
+    evidence_toolchain,
+    require_library_environment,
+)
 
 
 @dataclass(frozen=True)
@@ -332,6 +344,9 @@ def gate_native_drc(board: Path, cfg: BoardConfig) -> int:
         if not report.is_file():
             raise GateFailure(f"kicad-cli DRC did not run: {proc.stderr}")
         data = json.loads(report.read_text())
+    # Issue #6962: a library-table finding means the environment, not the
+    # board, was checked.
+    require_library_environment(data, source=f"native DRC of {cfg.routed_pcb}")
     errors = [v for v in data["violations"] if v.get("severity") == "error"]
     unconnected = data.get("unconnected_items", [])
     log(
@@ -547,6 +562,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--save-erc", type=Path, help="keep the native ERC reports here")
     parser.add_argument("--dry-run", action="store_true", help="run every gate, publish nothing")
     args = parser.parse_args(argv)
+    try:
+        with evidence_toolchain(mounts=[REPO_ROOT, *(b.resolve() for b in args.boards)]):
+            return _refresh_all(parser, args)
+    except KiCadEnvironmentError as exc:
+        log(f"REFUSED: {exc} -- nothing published")
+        return 2
+
+
+def _refresh_all(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
     status = 0
     for board in args.boards:
         board = board.resolve()

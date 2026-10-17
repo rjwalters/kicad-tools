@@ -8213,6 +8213,16 @@ def _add_readiness_parser(subparsers) -> None:
             "saved-vs-refilled equivalence check"
         ),
     )
+    rd_parser.add_argument(
+        "--checked-at",
+        dest="readiness_checked_at",
+        metavar="ISO",
+        default=None,
+        help=(
+            "Timestamp to record as checked_at and as each native DRC report's date "
+            "(default: now). Fix it to reproduce evidence byte-for-byte."
+        ),
+    )
     add_format_flag(rd_parser)
 
 

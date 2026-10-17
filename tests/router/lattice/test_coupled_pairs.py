@@ -1119,7 +1119,10 @@ def test_core_pair_leaves_a_sealed_routed_pad_its_escape_via(capsys) -> None:
     assert "Pair escape via site (#6697): VBUS U2.5 sits between D's pads" in out
     mask = router._ensure_lattice_pathfinder()._keepouts
     (site,) = [a for a in mask.areas if a.name == "pair-escape-via:VBUS:U2.5"]
-    assert site.exempt == frozenset({10})
+    # Issue #6956: the pair the site exists for is exempt too (its gateway
+    # fans may need the corridor); every other net is still kept out.
+    assert site.exempt == frozenset({10, 1, 2})
+    assert site.applies_to(30)
     vias = [v for r in routes[10] for v in r.vias]
     assert any(
         site.bbox[0] <= v.x <= site.bbox[2] and site.bbox[1] <= v.y <= site.bbox[3] for v in vias

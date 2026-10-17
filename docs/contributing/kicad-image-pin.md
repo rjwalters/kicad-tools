@@ -29,6 +29,12 @@ How the value reaches each consumer:
 - `scripts/ci/run_observed.py` records `configured_image` from the same env
   var, so the observer's identity metadata cannot drift from the workflow.
 
+- kct's own Docker fallback (`KCT_KICAD_DOCKER=1`, issue #6962) defaults to
+  the same digest: `kicad_tools.cli.kicad_toolchain.pinned_kicad_image()`
+  reads `KICAD_IMAGE` from `ci.yml` when run from a checkout. Its packaged
+  mirror `PINNED_KICAD_IMAGE` (used from an installed wheel) is held equal to
+  the workflow value by `tests/test_kicad_toolchain_6962.py`.
+
 Note: `scripts/check_fill_fragment_bonding_vs_native.py` carries its own
 independent `KICAD_IMAGE` digest pin. That is deliberate (it predates this
 one and is the pattern's precedent); it is NOT governed by the workflow value
@@ -60,9 +66,24 @@ same change:
    `src/kicad_tools/validate/mask_copper_geometry.py` so the new KiCad
    version is admitted by the native mask-to-copper gate. The constant is a
    tuple of `kicad-cli` version strings (e.g. `("10.0.5", "10.0.6")`); add
-   the new version only after step 4's gates pass against the new image.
+   the new version only after step 5's gates pass against the new image.
 
-4. **Re-run the native gates against the new image** — this is what the PR's
+4. **Update the evidence toolchain** in
+   `src/kicad_tools/cli/kicad_toolchain.py`: `PINNED_KICAD_IMAGE` (the
+   wheel mirror of the digest) and `PINNED_KICAD_VERSION` (the image's
+   `kicad-cli --version`; evidence producers refuse any other release). If the
+   image's stock tables changed, refresh the pinned copies and commit them:
+
+   ```bash
+   docker run --rm --platform linux/amd64 -v "$PWD/src/kicad_tools/data/kicad-config/10.0:/out" \
+     --entrypoint sh kicad/kicad@sha256:<digest> \
+     -c 'cp /usr/share/kicad/template/fp-lib-table /usr/share/kicad/template/sym-lib-table /out/'
+   ```
+
+   Then regenerate any committed native evidence whose `kicad_version`
+   changed, through the new image.
+
+5. **Re-run the native gates against the new image** — this is what the PR's
    own CI run provides as reviewable evidence, so push the branch and let it
    go green before requesting review:
 
@@ -74,7 +95,7 @@ same change:
      — its oracle must be re-measured under the new image before its own pin
      moves; file a separate PR for that if the measurements differ).
 
-5. **Link the evidence** in the PR body: the digest resolution output, the
+6. **Link the evidence** in the PR body: the digest resolution output, the
    `kicad-cli --version` output, and the green native-gate jobs.
 
 Treat any gate failure under the new image as a behaviour change to
