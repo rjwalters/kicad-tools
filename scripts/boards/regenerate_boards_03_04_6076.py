@@ -76,6 +76,7 @@ def _load(name: str, path: Path):
 
 uuid_tools = _load("regenerate_uuids_6076", HERE / "regenerate_uuids_6076.py")
 refresh_tools = _load("refresh_readiness", HERE / "refresh_readiness.py")
+bundle_links = _load("_bundle_links", HERE / "_bundle_links.py")
 
 from kicad_tools.core.canonical_uuids import canonicalize_board_uuids  # noqa: E402
 from kicad_tools.core.sexp_file import load_pcb  # noqa: E402
@@ -117,7 +118,7 @@ def drop_bytecode(board: Path) -> None:
 def refresh_design_source(board: Path) -> None:
     source = board / "output/manufacturing/design-source"
     for path in sorted(source.iterdir()):
-        shutil.copy2(board / path.name, path)
+        bundle_links.copy_into_bundle(board / path.name, path, board / "output/manufacturing")
 
 
 # --------------------------------------------------------------------------- board 04 remap

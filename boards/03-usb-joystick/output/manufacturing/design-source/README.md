@@ -31,7 +31,7 @@ The required fabrication options are four-layer JLC7628, ENIG, and **Epoxy-fille
 & Capped (POFV)** vias. Do not order standard tented vias.
 
 Runnable USB HID firmware, binary build artifacts and ISP/fuse instructions
-are in [firmware/README.md](firmware/README.md). Hardware ERC or DRC passing
+are in [firmware/README.md](../firmware/README.md). Hardware ERC or DRC passing
 does not claim successful first-article USB enumeration or suspend-current tests.
 Readiness must come from a fresh `output/readiness.json` tied to the generated
 revision-B design and its manufacturing files.

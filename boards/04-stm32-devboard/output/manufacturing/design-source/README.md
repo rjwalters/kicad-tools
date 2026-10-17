@@ -293,7 +293,7 @@ Schematic-to-PCB synchronization still uses the CLI workflow above;
 
 ## Related Examples
 
-- [examples/01-schematic-analysis](../../examples/01-schematic-analysis/) - Parse existing schematics
-- [examples/02-bom-generation](../../examples/02-bom-generation/) - Extract BOM from designs
-- [examples/03-drc-checking](../../examples/03-drc-checking/) - Validate against manufacturer rules
-- [examples/04-autorouter](../../examples/04-autorouter/) - PCB autorouting strategies
+- examples/01-schematic-analysis (../../examples/01-schematic-analysis/, not included in this bundle) - Parse existing schematics
+- examples/02-bom-generation (../../examples/02-bom-generation/, not included in this bundle) - Extract BOM from designs
+- examples/03-drc-checking (../../examples/03-drc-checking/, not included in this bundle) - Validate against manufacturer rules
+- examples/04-autorouter (../../examples/04-autorouter/, not included in this bundle) - PCB autorouting strategies
