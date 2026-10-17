@@ -4,7 +4,8 @@ The pieces of coupled diff-pair routing that do not depend on any routing
 engine: which pad couples a pair's coupled runs join (:mod:`.chain`), the
 generated equivalent-pin ties (:mod:`.tie`) and the fan-via terminal gateway
 generator (:mod:`.gateway`), and the structured pair outcome record
-(:mod:`.outcome`).  They were written for the lattice engine and
+(:mod:`.outcome`), and the attach / anchor-shift candidate generators
+(:mod:`.attach`).  They were written for the lattice engine and
 moved here unchanged so the grid engine can consume them too (P6, #6448).
 
 **Dependency direction.**  ``pairplan`` imports nothing from
@@ -16,6 +17,7 @@ reverse.  Engine-specific legality reaches this package only as callbacks.
 
 from __future__ import annotations
 
+from .attach import anchor_shift_candidates, dogleg_attach_candidates, sandwich_via_site
 from .chain import (
     Couple,
     PairChain,
@@ -75,9 +77,11 @@ __all__ = [
     "SegmentOutcomes",
     "TrunkStart",
     "aggregate_label",
+    "anchor_shift_candidates",
     "choose_pair_chain",
     "choose_pair_endpoints",
     "choose_pair_tap_chain",
+    "dogleg_attach_candidates",
     "enumerate_gateways",
     "gateway_anchor_point",
     "gateway_side",
@@ -88,4 +92,5 @@ __all__ = [
     "propose_trunk_starts",
     "rank_gateway_combos",
     "rank_through_combos",
+    "sandwich_via_site",
 ]

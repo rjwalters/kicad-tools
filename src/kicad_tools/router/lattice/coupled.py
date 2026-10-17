@@ -530,7 +530,7 @@ def relocate_pair_anchor(
     ``max_shift`` (the caller keeps the midpoint and the pair declines or
     falls back exactly as before).
     """
-    from ..quantize import dogleg_points
+    from ..pairplan.attach import anchor_shift_candidates, dogleg_attach_candidates
 
     mid = ((pad_p.x + pad_n.x) / 2.0, (pad_p.y + pad_n.y) / 2.0)
     if any(
@@ -538,14 +538,6 @@ def relocate_pair_anchor(
         for layer in layers
     ):
         return None
-    ux, uy = pad_p.x - pad_n.x, pad_p.y - pad_n.y
-    axis_len = (ux * ux + uy * uy) ** 0.5
-    if axis_len <= _EPS:
-        return None
-    ux, uy = ux / axis_len, uy / axis_len
-    nx, ny = -uy, ux  # perpendicular to the P-N axis
-    if (toward[0] - mid[0]) * nx + (toward[1] - mid[1]) * ny < 0:
-        nx, ny = -nx, -ny
 
     def seg_ok(pad: Pad, a: Pt, b: Pt, layer: int) -> bool:
         if dist(a, b) <= _EPS:
@@ -555,18 +547,14 @@ def relocate_pair_anchor(
         return not (keepouts and keepouts.segment_blocked(a, b, layer, pad.net, trace_half))
 
     def attach_clear(pad: Pad, target: Pt, layer: int) -> bool:
-        for axis_first in (False, True):
-            poly = dogleg_points(pad.x, pad.y, target[0], target[1], axis_first=axis_first)
+        for poly in dogleg_attach_candidates((pad.x, pad.y), target):
             if all(seg_ok(pad, a, b, layer) for a, b in zip(poly, poly[1:], strict=False)):
                 return True
         return False
 
-    steps = int(max_shift / step + 0.5)
-    for k in range(1, steps + 1):
-        shift = k * step
-        anchor = (mid[0] + nx * shift, mid[1] + ny * shift)
-        end_p = (anchor[0] + ux * half_pitch, anchor[1] + uy * half_pitch)
-        end_n = (anchor[0] - ux * half_pitch, anchor[1] - uy * half_pitch)
+    for anchor, end_p, end_n in anchor_shift_candidates(
+        pad_p, pad_n, toward, half_pitch=half_pitch, step=step, max_shift=max_shift
+    ):
         for layer in layers:
             if pads_block_point_grown(
                 obstacles, anchor, layer, pair_nets, half_pitch, exempt=exempt
@@ -619,6 +607,7 @@ def sandwiched_pad_escape_sites(
     nx, ny = -uy / axis_len, ux / axis_len
     if (toward[0] - mid[0]) * nx + (toward[1] - mid[1]) * ny < 0:
         nx, ny = -nx, -ny
+    from ..pairplan.attach import sandwich_via_site
     from ..primitives import pad_half_extents
 
     def box_gap(other: Pad, pt: Pt) -> float:
@@ -637,7 +626,7 @@ def sandwiched_pad_escape_sites(
         hw, hh = pad_half_extents(pad)
         # Support distance of the pad box along the outward normal.
         reach = abs(nx) * hw + abs(ny) * hh
-        site = (pad.x + nx * (reach + via_radius), pad.y + ny * (reach + via_radius))
+        site = sandwich_via_site(pad, (nx, ny), via_radius, reach)
         need = via_radius + clearance_for(pad.net)
         span = need + 3.0
         if any(
