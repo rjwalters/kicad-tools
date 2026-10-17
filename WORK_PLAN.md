@@ -32,20 +32,23 @@ _None._
 Human-approved issues ready for implementation (`loom:issue`).
 
 - **#5798**: [Epic #5784] Phase 4: deconfound kct's match-group length tuning on board 07 (measure first)
-- **#6765**: DSN exporter does not represent JLCPCB fab-floor .kicad_dru rules (fastroute stays non-comparable on board 00)
 
 ## In Progress
 
 Issues currently being built (`loom:building`).
 
+- **#6394**: board 03: 13 copper violations of the router's own Power class (0.2 mm) exposed by #6390
 - **#6554**: diffpair: reproduce KiCad's diff_pair_uncoupled primitive pairing exactly (kct is a lower bound)
 - **#6894**: ci: add a Windows smoke job; skip test_peak_rss_bytes_positive where resource is unavailable (follow-up #6739)
+- **#6946**: kct drc --mfr advertises aliases (jlc, osh, ...) that the inner kicad-drc parser rejects
+- **#6947**: docs: index subfolder docs (research/, mcp/, diagnostics/) from docs/README.md and guard against drift
+- **#6948**: cleanup: Judge follow-ups from #6877/#6886/#6890 (grid_limits memory+hint, iter_unquoted docstring, PairOutcome edge cases)
 
 ## PRs Awaiting Review
 
 PRs waiting on Judge (`loom:review-requested`).
 
-_None._
+- **#6949**: docs: index research and diagnostics notes, add docs reachability test
 
 ## Approved (Awaiting Merge)
 
@@ -75,12 +78,14 @@ Issues carrying `loom:curated`.
 - **#6446**: [Epic #6441] Phase 4: budget-driven hybrid fallback — longest coupled trunk plus single-ended terminal legs *(curated)*
 - **#6527**: router: Router.route_bidirectional has no production caller; wire it into the Python fallback and measure, or remove it *(curated)*
 - **#6554**: diffpair: reproduce KiCad's diff_pair_uncoupled primitive pairing exactly (kct is a lower bound) *(curated)*
-- **#6765**: DSN exporter does not represent JLCPCB fab-floor .kicad_dru rules (fastroute stays non-comparable on board 00) *(curated)*
 - **#6824**: board 03: fresh lattice routes fail routing_plan.usb_geometry (USB_D common run not on In2.Cu, MCU launch > 4 mm) — blocks #6394 *(curated)*
 - **#6835**: router: raise flag-off coupled iteration budget to 350k/phase (700k total) so Board07 couples 6/7 pairs; soften endpoint-tolerance comment (#6826 follow-up) *(curated)*
-- **#6850**: Live-verify #6842 gateway offer on boards 03/06b/06rf/07rf *(curated)*
 - **#6858**: router: coupled pre-pass should keep the better of the joint-search and pose-centreline candidates (compare-and-keep; unblocks #6835) *(curated)*
 - **#6894**: ci: add a Windows smoke job; skip test_peak_rss_bytes_positive where resource is unavailable (follow-up #6739) *(curated)*
+- **#6945**: board 03: readiness.json hashes stale for net_class_map.json and routed .kicad_dru since #6876 *(curated)*
+- **#6946**: kct drc --mfr advertises aliases (jlc, osh, ...) that the inner kicad-drc parser rejects *(curated)*
+- **#6947**: docs: index subfolder docs (research/, mcp/, diagnostics/) from docs/README.md and guard against drift *(curated)*
+- **#6948**: cleanup: Judge follow-ups from #6877/#6886/#6890 (grid_limits memory+hint, iter_unquoted docstring, PairOutcome edge cases) *(curated)*
 
 ## Proposed (Architect / Hermit)
 
@@ -111,11 +116,11 @@ Issues carrying `loom:curated`.
 | Operator merge-risk holds | 3 |
 | Very important | 0 |
 | Important | 0 |
-| Ready (`loom:issue`) | 2 |
-| In Progress (`loom:building`) | 2 |
-| PRs awaiting review | 0 |
+| Ready (`loom:issue`) | 1 |
+| In Progress (`loom:building`) | 6 |
+| PRs awaiting review | 1 |
 | Approved PRs awaiting merge | 3 |
-| Curated | 22 |
+| Curated | 24 |
 | Architect / Hermit proposals | 8 |
 | Active epics | 8 |
 <!-- guide:plan-body:end -->
