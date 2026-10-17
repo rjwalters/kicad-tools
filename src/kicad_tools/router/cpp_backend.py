@@ -31,6 +31,7 @@ from typing import TYPE_CHECKING, Literal, NamedTuple
 from . import wall_deadline as _wall_deadline
 from .pad_landing import pad_landing_geometry
 from .resource_guard import reraise_if_resource_exhaustion
+from .search_radius import search_radius_cells
 
 if TYPE_CHECKING:
     import numpy as np
@@ -2469,15 +2470,22 @@ class CppPathfinder:
         net_class = self._net_class_map.get(start.net_name)
         net_trace_width = net_class.trace_width if net_class else self._rules.trace_width
         net_trace_clearance = net_class.clearance if net_class else self._rules.trace_clearance
-        trace_radius_cells = max(
-            1,
-            math.ceil((net_trace_width / 2 + net_trace_clearance) / self._grid.resolution),
+        # Rounding: bare "ceil" (no Issue #864 guard) -- preserved as-is; see
+        # search_radius_cells.  Unifying with the Python Router's "guarded"
+        # radius is a behaviour-changing follow-up under Epic #5509.
+        trace_radius_cells = search_radius_cells(
+            net_trace_width / 2,
+            net_trace_clearance,
+            self._grid.resolution,
+            rounding="ceil",
         )
 
         net_via_size = net_class.via_size if net_class else self._rules.via_diameter
-        via_radius_cells = max(
-            1,
-            math.ceil((net_via_size / 2 + self._rules.via_clearance) / self._grid.resolution),
+        via_radius_cells = search_radius_cells(
+            net_via_size / 2,
+            self._rules.via_clearance,
+            self._grid.resolution,
+            rounding="ceil",
         )
 
         # Issue #4433: hard per-net avoid_layers for the NATIVE backend (the
@@ -2535,11 +2543,11 @@ class CppPathfinder:
                 if intra_pair_clearance is not None:
                     partner_net_id = int(partner_id)
                     search_intra_pair_clearance = intra_pair_clearance
-                    intra_pair_radius_cells = max(
-                        1,
-                        math.ceil(
-                            (net_trace_width / 2 + intra_pair_clearance) / self._grid.resolution
-                        ),
+                    intra_pair_radius_cells = search_radius_cells(
+                        net_trace_width / 2,
+                        intra_pair_clearance,
+                        self._grid.resolution,
+                        rounding="ceil",
                     )
 
         # Issue #2427: Compute pad metal bounds and approach zones.
@@ -4921,9 +4929,13 @@ class CppPathfinder:
         # falling back to the global rules.trace_width.
         net_trace_width = net_class.trace_width if net_class else self._rules.trace_width
         net_trace_clearance = net_class.clearance if net_class else self._rules.trace_clearance
-        trace_half_width_cells = max(
-            1,
-            int((net_trace_width / 2 + net_trace_clearance) / self._grid.resolution + 0.5),
+        # Rounding: "nearest" (round half up) -- preserved as-is; see
+        # search_radius_cells (Epic #5509 follow-up).
+        trace_half_width_cells = search_radius_cells(
+            net_trace_width / 2,
+            net_trace_clearance,
+            self._grid.resolution,
+            rounding="nearest",
         )
 
         while True:
@@ -5008,15 +5020,11 @@ class CppPathfinder:
         # Compute trace half-width in cells (mirrors pathfinder.py:117).
         # CppPathfinder doesn't currently cache _trace_half_width_cells,
         # so compute it here on demand.
-        trace_half_width_cells = max(
-            1,
-            math.ceil(
-                round(
-                    (self._rules.trace_width / 2 + self._rules.trace_clearance)
-                    / self._grid.resolution,
-                    6,
-                )
-            ),
+        trace_half_width_cells = search_radius_cells(
+            self._rules.trace_width / 2,
+            self._rules.trace_clearance,
+            self._grid.resolution,
+            rounding="guarded",
         )
 
         # _pad_blocked lookup requires the original Python RoutingGrid.
