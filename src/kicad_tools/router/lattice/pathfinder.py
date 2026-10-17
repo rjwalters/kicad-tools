@@ -465,6 +465,8 @@ class LatticePathfinder:
         # rule areas) keeps every predicate on its pre-#4605 path
         # byte-for-byte.
         self._keepouts: LatticeKeepoutMask | None = None
+        # Issue #6935: why the last ``_pair_attach`` found no dogleg.
+        self._attach_blocker = ""
         from ..fixed_copper import FixedFillObstacles
 
         self.fixed_fills = FixedFillObstacles()
@@ -2466,15 +2468,18 @@ class LatticePathfinder:
 
         if dist((pad.x, pad.y), target) <= 1e-9:
             return [(pad.x, pad.y)]
+        blocker = ""
         for poly in dogleg_attach_candidates((pad.x, pad.y), target):
             ok = True
             for a, b in zip(poly, poly[1:], strict=False):
                 if dist(a, b) <= 1e-9:
                     continue
                 if pads_block_segment_grown(self.obstacles, a, b, layer, pair_nets, 0.0):
+                    blocker = "pad"
                     ok = False
                     break
                 if not committed.seg_clear(a, b, layer, net):
+                    blocker = "committed-copper"
                     ok = False
                     break
                 # Issue #6697: the other dogleg orientation may clear a
@@ -2482,10 +2487,15 @@ class LatticePathfinder:
                 if self._keepouts is not None and self._keepouts.segment_blocked(
                     a, b, layer, net, half
                 ):
+                    names = self._keepouts.blocking_names(a, b, layer, net, half)
+                    blocker = "keepout " + ",".join(names)
                     ok = False
                     break
             if ok:
                 return poly
+        # Issue #6935: name what rejected the last candidate so a
+        # ``pair-pad-attach`` decline says which check fired, and on what.
+        self._attach_blocker = f"{pad.ref}.{pad.pin} on layer {layer}: {blocker}"
         return None
 
     def _emit_leg(
@@ -3303,7 +3313,10 @@ class LatticePathfinder:
                 )
                 self.pair_gateway_log[pc.key] = pres.gateway
                 return pres, "ok"
-        self.pair_gateway_log[pc.key] = f"gateway declined ({reason}): " + "; ".join(notes)
+        declined = f"gateway declined ({reason}): " + "; ".join(notes)
+        if reason.endswith("pad-attach") and self._attach_blocker:
+            declined += f"; pad-attach blocked at {self._attach_blocker}"
+        self.pair_gateway_log[pc.key] = declined
         return None, reason
 
     def _try_gateway_combo(
