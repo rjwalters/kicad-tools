@@ -35,7 +35,7 @@ from kicad_tools.router.pair_centerline_meander import (
     centerline_meander,
     find_coupled_spans,
 )
-from kicad_tools.router.primitives import Route, Segment, Via
+from kicad_tools.router.primitives import Pad, Route, Segment, Via
 from kicad_tools.router.rules import NetClassRouting
 
 THICKNESS = 1.6
@@ -408,6 +408,133 @@ class TestRollbackGuard:
         assert any(a is not b for a, b in zip(ar.routes, before, strict=True))
         spread = Autorouter._checker_group_spread_mm(group, {r.net: r for r in ar.routes}, None, 2)
         assert spread is not None and spread <= 0.1
+
+
+class TestImprovedStillOverLimit:
+    """Issue #6969: an improved-but-over-limit group keeps its meanders."""
+
+    @staticmethod
+    def _run(monkeypatch, spreads):
+        routes = [
+            _route(1, [(0.0, 0.0), (22.0, 0.0)]),
+            _route(2, [(0.0, 10.0), (20.0, 10.0)]),
+            _route(3, [(0.0, 20.0), (18.0, 20.0)]),
+        ]
+        ar = _autorouter(routes, {1: "A0", 2: "A1", 3: "A2"}, tolerance=0.1)
+        group = MatchGroup(
+            name="BUS", net_ids=[1, 2, 3], tolerance=0.1, source=MatchGroupSource.LEGACY_API
+        )
+        before = list(ar.routes)
+        seq = iter(spreads)
+        monkeypatch.setattr(
+            Autorouter, "_checker_group_spread_mm", staticmethod(lambda *a, **k: next(seq))
+        )
+        results = ar.apply_match_group_tuning(
+            detected_groups=[group], verbose=False, engage="checker_limit"
+        )
+        return ar, before, results
+
+    def test_improved_group_keeps_meanders(self, monkeypatch):
+        ar, before, results = self._run(monkeypatch, [10.0, 4.0])
+        reasons = {res.reason for (_r, res) in results["BUS"].values()}
+        assert "improved_still_over_limit" in reasons
+        assert "rolled_back_still_over_limit" not in reasons
+        assert any(a is not b for a, b in zip(ar.routes, before, strict=True))
+        assert all(
+            not res.success
+            for (_r, res) in results["BUS"].values()
+            if res.reason == "improved_still_over_limit"
+        )
+
+    def test_non_improving_group_is_still_rolled_back(self, monkeypatch):
+        ar, before, results = self._run(monkeypatch, [10.0, 12.0])
+        reasons = {res.reason for (_r, res) in results["BUS"].values()}
+        assert "rolled_back_still_over_limit" in reasons
+        assert all(a is b for a, b in zip(ar.routes, before, strict=True))
+
+
+class TestClassClearanceFloor:
+    """Issue #6969 (AC2): the tuner's clearance floor follows net classes."""
+
+    @staticmethod
+    def _captured_kwargs(
+        *,
+        group_clearance,
+        foreign_clearance=None,
+        mfr=None,
+        authored=None,
+        unrouted_pad_clearance=None,
+    ):
+        routes = [
+            _route(1, [(0.0, 0.0), (22.0, 0.0)]),
+            _route(2, [(0.0, 10.0), (20.0, 10.0)]),
+        ]
+        names = {1: "A0", 2: "A1"}
+        if foreign_clearance is not None:
+            routes.append(_route(3, [(0.0, 30.0), (20.0, 30.0)]))
+            names[3] = "OTHER"
+        ar = _autorouter(routes, names, tolerance=0.1)
+        ar.rules.trace_clearance = 0.2
+        ar.rules.via_clearance = 0.2
+        ar.rules.mfr_clearance_floor = mfr
+        ar.rules.authored_min_clearance = authored
+        for name in ("A0", "A1"):
+            ar.net_class_map[name].clearance = group_clearance
+        if foreign_clearance is not None:
+            ar.net_class_map["OTHER"] = NetClassRouting(name="Default", clearance=foreign_clearance)
+        if unrouted_pad_clearance is not None:
+            # A pad on a stricter-class net that has NO route: the tuner's
+            # pad pass still checks it, so it must raise the floor too.
+            ar.net_names[4] = "HV"
+            ar.net_class_map["HV"] = NetClassRouting(name="HV", clearance=unrouted_pad_clearance)
+            ar.pads = {
+                ("J1", "1"): Pad(
+                    x=10.0, y=20.0, width=0.3, height=0.3, net=4, net_name="HV", ref="J1", pin="1"
+                )
+            }
+        group = MatchGroup(
+            name="BUS", net_ids=[1, 2], tolerance=0.1, source=MatchGroupSource.LEGACY_API
+        )
+        captured: dict = {}
+
+        def fake_tune(*a, **kw):
+            captured.update(kw)
+            return {}
+
+        with patch("kicad_tools.router.match_group_tuning.tune_match_group_v2", fake_tune):
+            ar.apply_match_group_tuning(
+                detected_groups=[group], verbose=False, engage="length_critical"
+            )
+        return captured
+
+    def test_group_class_below_global_gets_class_floor(self):
+        kw = self._captured_kwargs(group_clearance=0.175)
+        assert kw["intra_group_clearance_mm"] == pytest.approx(0.175)
+        assert kw["via_clearance_mm"] == pytest.approx(0.175)
+        assert kw["pad_clearance_mm"] == pytest.approx(0.175)
+
+    def test_mfr_and_authored_floors_clamp_from_below(self):
+        kw = self._captured_kwargs(group_clearance=0.1, mfr=0.15)
+        assert kw["intra_group_clearance_mm"] == pytest.approx(0.15)
+        kw = self._captured_kwargs(group_clearance=0.1, mfr=0.12, authored=0.17)
+        assert kw["intra_group_clearance_mm"] == pytest.approx(0.17)
+        assert kw["via_clearance_mm"] == pytest.approx(0.17)
+
+    def test_stricter_foreign_class_keeps_its_clearance(self):
+        kw = self._captured_kwargs(group_clearance=0.15, foreign_clearance=0.2)
+        assert kw["intra_group_clearance_mm"] == pytest.approx(0.2)
+        assert kw["via_clearance_mm"] == pytest.approx(0.2)
+        assert kw["pad_clearance_mm"] == pytest.approx(0.2)
+
+    def test_stricter_class_pad_on_unrouted_net_keeps_its_clearance(self):
+        kw = self._captured_kwargs(group_clearance=0.15, unrouted_pad_clearance=0.2)
+        assert kw["intra_group_clearance_mm"] == pytest.approx(0.2)
+        assert kw["via_clearance_mm"] == pytest.approx(0.2)
+        assert kw["pad_clearance_mm"] == pytest.approx(0.2)
+
+    def test_looser_foreign_class_does_not_raise_floor(self):
+        kw = self._captured_kwargs(group_clearance=0.175, foreign_clearance=0.15)
+        assert kw["intra_group_clearance_mm"] == pytest.approx(0.175)
 
 
 class TestBlindBuriedConsistency:

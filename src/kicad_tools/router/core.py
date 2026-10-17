@@ -20926,8 +20926,42 @@ class Autorouter:
             intra_pair_clearance_mm = self.rules.trace_clearance
             length_critical = True
 
+            group_via_clearance_mm = via_clearance_mm
+            group_pad_clearance_mm = pad_clearance_mm
+
             net_class = self._resolve_net_class_for_group(group)
             if net_class is not None:
+                # Issue #6969: the post-insertion DRC self-check used the
+                # router-global clearance (0.200mm) even where the group's
+                # class declares less (SDRAM: 0.175mm), rejecting meanders
+                # the board's own rules allow.  Honour the class value, never
+                # below the manufacturer / authored floors, and never above
+                # the global rule (this only relaxes, it cannot tighten).
+                # KiCad's pairwise clearance is the larger of the two items'
+                # class values, and the tuner applies one number to every
+                # foreign item, so clamp to the strictest class clearance
+                # among the foreign nets -- routed or not.  The tuner's pad
+                # pass checks every pad in ``pads_by_net``, so a pad on an
+                # unrouted, stricter-class net must also raise the floor.
+                group_nets = set(group.net_ids)
+                for p_id, n_id in group.pair_ids:
+                    group_nets.update((p_id, n_id))
+                class_lookup = getattr(self, "net_class_map", None) or {}
+                foreign_floor_mm = 0.0
+                for foreign_id in (set(routes_by_net) | set(pads_by_net)) - group_nets:
+                    foreign_class = class_lookup.get(self.net_names.get(foreign_id, ""))
+                    if foreign_class is not None:
+                        foreign_floor_mm = max(foreign_floor_mm, float(foreign_class.clearance))
+                class_floor_mm = max(
+                    float(net_class.clearance),
+                    self.rules.mfr_clearance_floor or 0.0,
+                    self.rules.authored_min_clearance or 0.0,
+                    foreign_floor_mm,
+                )
+                if class_floor_mm < intra_group_clearance_mm:
+                    intra_group_clearance_mm = class_floor_mm
+                group_via_clearance_mm = min(via_clearance_mm, max(class_floor_mm, 0.0))
+                group_pad_clearance_mm = min(pad_clearance_mm, max(class_floor_mm, 0.0))
                 tolerance_mm = net_class.effective_length_match_tolerance(0.5)
                 # Issue #6443: floored like the routed gap.
                 intra_pair_clearance_mm = self._pair_gap_mm(net_class)
@@ -21025,10 +21059,10 @@ class Autorouter:
                     intra_group_clearance_mm=intra_group_clearance_mm,
                     intra_pair_clearance_mm=intra_pair_clearance_mm,
                     length_critical=length_critical,
-                    via_clearance_mm=via_clearance_mm,
+                    via_clearance_mm=group_via_clearance_mm,
                     diff_pair_partners=diff_pair_partners_by_id,
                     pads_by_net=pads_by_net,
-                    pad_clearance_mm=pad_clearance_mm,
+                    pad_clearance_mm=group_pad_clearance_mm,
                     board_thickness_mm=board_thickness_mm,
                     num_copper_layers=num_layers,
                     blind_buried_supported=blind_buried_supported,
@@ -21051,6 +21085,7 @@ class Autorouter:
             # Committing meanders that do not clear the error only adds copper
             # (07rf DDR_DATA_BYTE_0: "8 tuned" next to an unchanged 18.171mm).
             still_over_limit: tuple[float, float] | None = None
+            improved_still_over = False
             if engage == "checker_limit":
                 spread_after = self._checker_group_spread_mm(
                     group,
@@ -21062,17 +21097,32 @@ class Autorouter:
                 )
                 if spread_after is not None and spread_after > tolerance_mm:
                     still_over_limit = (spread_after, tolerance_mm)
-                    from .match_group_tuning import mark_group_rolled_back
-
-                    group_results = mark_group_rolled_back(
-                        group_results,
-                        before_by_net,
-                        spread_mm=spread_after,
-                        tolerance_mm=tolerance_mm,
+                    from .match_group_tuning import (
+                        mark_group_improved_still_over_limit,
+                        mark_group_rolled_back,
                     )
-                    for net in group_results:
-                        if net in before_by_net:
-                            routes_by_net[net] = before_by_net[net]
+
+                    # Issue #6969: keep the DRC-clean meanders when the spread
+                    # strictly improved; roll back only when it did not.  The
+                    # group is still reported as NOT achieved.
+                    if spread_mm is not None and spread_after < spread_mm:
+                        group_results = mark_group_improved_still_over_limit(
+                            group_results,
+                            spread_before_mm=spread_mm,
+                            spread_mm=spread_after,
+                            tolerance_mm=tolerance_mm,
+                        )
+                        improved_still_over = True
+                    else:
+                        group_results = mark_group_rolled_back(
+                            group_results,
+                            before_by_net,
+                            spread_mm=spread_after,
+                            tolerance_mm=tolerance_mm,
+                        )
+                        for net in group_results:
+                            if net in before_by_net:
+                                routes_by_net[net] = before_by_net[net]
 
             # The tuner mutates its lookup as members commit. Compare against
             # the pre-call view, preserving original fragments on no-op/rollback.
@@ -21137,7 +21187,11 @@ class Autorouter:
                     print(
                         f"    STILL OVER LIMIT: spread {still_over_limit[0]:.3f}mm > "
                         f"limit {still_over_limit[1]:.3f}mm after tuning; "
-                        "rolled back every serpentine in the group"
+                        + (
+                            "kept the DRC-clean serpentines (improved, not achieved)"
+                            if improved_still_over
+                            else "rolled back every serpentine in the group"
+                        )
                     )
                 elif _skew is not None:
                     _skew_before, _skew_after = _skew
