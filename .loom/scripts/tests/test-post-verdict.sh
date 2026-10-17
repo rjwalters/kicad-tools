@@ -210,6 +210,9 @@ if [[ "${1:-}" == forge && "${2:-}" == verdict-* && "${3:-}" == --help ]]; then
   exit 0
 fi
 if [[ "${1:-}" == --version ]]; then echo "loom-daemon 0.19.870 (mock)"; exit 0; fi
+# #12475: the reconciliation gate reads comment verdicts through the trust
+# filter; this suite posts none, so the filter just echoes its (empty) stdin.
+if [[ "${1:-} ${2:-}" == "forge trusted-comments" ]]; then cat; exit 0; fi
 if [[ "${1:-} ${2:-}" == "forge verdict-gate" ]]; then
   printf '%s\n' "$*" >> "$D/daemon-calls.log"
   [[ -f "$D/gate-answer" ]] || { echo "LOOM-VERDICT-GATE PROCEED ok"; exit 0; }

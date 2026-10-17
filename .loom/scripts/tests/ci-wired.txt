@@ -149,6 +149,7 @@ test-jq-reserved-word-args.sh
 test-judge-fallback-cap.sh
 test-judge-fanout-experiment.sh
 test-judge-payload-drop-guard.sh
+test-judge-spec-reconcile.sh
 test-judge-tdd-merge-base.sh
 test-land-resync-commit.sh
 test-live-state-sandbox.sh
@@ -164,6 +165,7 @@ test-merge-pr-app-permission-fallback.sh
 test-merge-pr-auto-merge-disabled-fallback.sh
 test-merge-pr-auto-queued-stacked-children.sh
 test-merge-pr-expected-head.sh
+test-merge-pr-feature-branch-close.sh
 test-merge-pr-pr-state.sh
 test-merge-pr-check-runs-404-fallback.sh
 test-merge-pr-daemon-version-floor.sh

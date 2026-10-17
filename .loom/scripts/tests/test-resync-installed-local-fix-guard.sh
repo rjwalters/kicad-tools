@@ -825,6 +825,129 @@ else
     fail "(#8676) long-history lineage proof was lost -- phantom block (rc=$RC); out=$OUT"
 fi
 
+# --- /repo:update-tools subject and symlinked sources (#12618) ----------------
+#
+# Repo Skills' /repo:update-tools commits Loom updates as
+# `chore(tooling): update loom <old>→<new>`, which matches none of
+# RESYNC_COMMIT_SUBJECT_RE's alternatives (widening it was deliberately
+# declined, #8098/#8676). The content rung is what keeps such files from being
+# read as local fixes; these groups pin that for the two shapes the original
+# report named: that subject, and a symlinked source (defaults/roles/*.md link
+# into .claude/commands/loom/, #5222).
+UPDATE_TOOLS_SUBJECT='chore(tooling): update loom 0.19.1→0.19.2'
+
+echo "Test group 13: a pristine file last committed by /repo:update-tools is not a local fix (#12618)"
+REPO13="$(make_lineage_fixture repo-update-tools "$UPDATE_TOOLS_SUBJECT")"
+bump_upstream "$REPO13"
+if [[ "$(git -C "$REPO13" log -1 --format='%s' -- .loom/hooks/guard.sh)" == "$UPDATE_TOOLS_SUBJECT" ]]; then
+    pass "(#12618) fixture precondition: guard.sh's last subject is the /repo:update-tools subject"
+else
+    fail "(#12618) fixture precondition unmet: last subject is not the /repo:update-tools subject"
+fi
+OUT="$(cd "$REPO13" && bash "$SCRIPT" --dry-run 2>&1)"
+RC=$?
+if [[ $RC -eq 2 ]] && grep -q "would update hooks/guard.sh" <<<"$OUT" \
+    && ! grep -qE 'blocked[[:space:]]+hooks/guard\.sh' <<<"$OUT"; then
+    pass "(#12618) --dry-run previews 'would update', not 'blocked', for the update-tools subject"
+else
+    fail "(#12618) --dry-run blocked a pristine file with the update-tools subject (rc=$RC); out=$OUT"
+fi
+OUT="$(cd "$REPO13" && bash "$SCRIPT" 2>&1)"
+RC=$?
+if [[ $RC -eq 0 ]] && ! grep -q "BLOCKED" <<<"$OUT" \
+    && [[ "$(cat "$REPO13/.loom/hooks/guard.sh")" == $'line-one\nline-three' ]]; then
+    pass "(#12618) the upstream removal applies without --force for the update-tools subject"
+else
+    fail "(#12618) a pristine update-tools file was blocked (rc=$RC); out=$OUT"
+fi
+
+echo "Test group 13b: the same subject on a hand-edited file is still blocked (#12618, #7864)"
+REPO13H="$(make_lineage_fixture repo-update-tools-handedit 'tooling: install Repo Skills and Loom into the map repo')"
+printf 'line-one\nline-two\nline-three\nLOCAL-HOTFIX\n' > "$REPO13H/.loom/hooks/guard.sh"
+git -C "$REPO13H" add .loom/hooks/guard.sh >/dev/null 2>&1
+git -C "$REPO13H" commit -qm "$UPDATE_TOOLS_SUBJECT" >/dev/null 2>&1
+bump_upstream "$REPO13H"
+OUT="$(cd "$REPO13H" && bash "$SCRIPT" 2>&1)"
+RC=$?
+if [[ $RC -eq 1 ]] && grep -q "BLOCKED" <<<"$OUT" \
+    && [[ "$(cat "$REPO13H/.loom/hooks/guard.sh")" == $'line-one\nline-two\nline-three\nLOCAL-HOTFIX' ]]; then
+    pass "(#12618) a hand-edited file under the update-tools subject keeps its protection"
+else
+    fail "(#12618) a hand-edited file under the update-tools subject was overwritten (rc=$RC); out=$OUT"
+fi
+
+# make_symlink_source_fixture <dirname> [handedit]
+#   Like make_lineage_fixture, but the SOURCE file is a symlink, as every
+#   defaults/roles/*.md is: defaults/roles/guard.md -> ../.claude/commands/loom/guard.md.
+#   The installed .loom/roles/guard.md is a real file, pristine at the recorded
+#   loom_commit, last committed under the /repo:update-tools subject (or, with
+#   "handedit", carrying an extra local line committed under that subject).
+make_symlink_source_fixture() {
+    local repo="$WORKDIR/$1" edit="${2:-}"
+    rm -rf "$repo"
+    mkdir -p "$repo/defaults/roles" "$repo/defaults/scripts" "$repo/.claude/commands/loom" \
+             "$repo/.loom/roles" "$repo/.loom/scripts"
+    git -C "$repo" init -q
+    printf 'line-one\nline-two\nline-three\n' > "$repo/.claude/commands/loom/guard.md"
+    ln -s ../../.claude/commands/loom/guard.md "$repo/defaults/roles/guard.md"
+    printf 'line-one\nline-two\nline-three\n' > "$repo/.loom/roles/guard.md"
+    printf '{\n  "version": "9.9.9"\n}\n' > "$repo/package.json"
+    printf '{\n  "loom_version": "0.0.0",\n  "loom_commit": "unknown",\n  "install_date": "2020-01-01",\n  "loom_source": "%s",\n  "installed_files": []\n}\n' \
+        "$repo" > "$repo/.loom/install-metadata.json"
+    git -C "$repo" add -A >/dev/null 2>&1
+    git -C "$repo" commit -qm "$UPDATE_TOOLS_SUBJECT" >/dev/null 2>&1
+    printf '{\n  "loom_version": "0.0.0",\n  "loom_commit": "%s",\n  "install_date": "2020-01-01",\n  "loom_source": "%s",\n  "installed_files": []\n}\n' \
+        "$(git -C "$repo" rev-parse --short HEAD)" "$repo" > "$repo/.loom/install-metadata.json"
+    git -C "$repo" add .loom/install-metadata.json >/dev/null 2>&1
+    git -C "$repo" commit -qm "chore: record install metadata" >/dev/null 2>&1
+    if [[ -n "$edit" ]]; then
+        printf 'line-one\nline-two\nline-three\nLOCAL-HOTFIX\n' > "$repo/.loom/roles/guard.md"
+        git -C "$repo" add .loom/roles/guard.md >/dev/null 2>&1
+        git -C "$repo" commit -qm "$UPDATE_TOOLS_SUBJECT" >/dev/null 2>&1
+    fi
+    # Upstream drops a line from the symlink's TARGET.
+    printf 'line-one\nline-three\n' > "$repo/.claude/commands/loom/guard.md"
+    git -C "$repo" add .claude/commands/loom/guard.md >/dev/null 2>&1
+    git -C "$repo" commit -qm "fix(guard): drop line-two" >/dev/null 2>&1
+    echo "$repo"
+}
+
+echo "Test group 13c: a pristine installed copy of a symlinked source is not a local fix (#12618)"
+REPO13S="$(make_symlink_source_fixture repo-symlink-source)"
+if [[ -L "$REPO13S/defaults/roles/guard.md" ]] \
+    && [[ "$(git -C "$REPO13S" log -1 --format='%s' -- .loom/roles/guard.md)" == "$UPDATE_TOOLS_SUBJECT" ]]; then
+    pass "(#12618) fixture precondition: source is a symlink and the installed copy carries the update-tools subject"
+else
+    fail "(#12618) symlink fixture precondition unmet"
+fi
+OUT="$(cd "$REPO13S" && bash "$SCRIPT" --dry-run 2>&1)"
+RC=$?
+if [[ $RC -eq 2 ]] && grep -q "would update roles/guard.md" <<<"$OUT" \
+    && ! grep -qE 'blocked[[:space:]]+roles/guard\.md' <<<"$OUT"; then
+    pass "(#12618) --dry-run previews 'would update' for a symlinked source"
+else
+    fail "(#12618) --dry-run blocked a pristine symlinked-source file (rc=$RC); out=$OUT"
+fi
+OUT="$(cd "$REPO13S" && bash "$SCRIPT" 2>&1)"
+RC=$?
+if [[ $RC -eq 0 ]] && ! grep -q "BLOCKED" <<<"$OUT" \
+    && [[ "$(cat "$REPO13S/.loom/roles/guard.md")" == $'line-one\nline-three' ]]; then
+    pass "(#12618) the upstream removal applies without --force for a symlinked source"
+else
+    fail "(#12618) a pristine symlinked-source file was blocked (rc=$RC); out=$OUT"
+fi
+
+echo "Test group 13d: a hand-edited installed copy of a symlinked source is still blocked (#12618)"
+REPO13SH="$(make_symlink_source_fixture repo-symlink-source-handedit handedit)"
+OUT="$(cd "$REPO13SH" && bash "$SCRIPT" 2>&1)"
+RC=$?
+if [[ $RC -eq 1 ]] && grep -q "BLOCKED" <<<"$OUT" \
+    && grep -q "LOCAL-HOTFIX" "$REPO13SH/.loom/roles/guard.md"; then
+    pass "(#12618) a hand-edited symlinked-source file keeps its protection"
+else
+    fail "(#12618) a hand-edited symlinked-source file was overwritten (rc=$RC); out=$OUT"
+fi
+
 # --- the daemon's own resync commit is routine lineage (#8920) ---------------
 #
 # loom-daemon's workspace resync commits its refresh as

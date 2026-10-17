@@ -1185,8 +1185,8 @@ loom-daemon --version
 ./.loom/scripts/merge-pr.sh <PR> --dry-run
 ```
 
-**If no artifact carries the floor yet** — releases are cut at fleet-rollable
-boundaries, not on every `VERSION` bump (see
+**If no artifact carries the floor yet** — only a green `main` commit is released and
+not every `VERSION` bump gets a tag (see
 [`release-cadence.md`](release-cadence.md)), so `main` routinely runs ahead of
 the newest published release — you have two options, both of which keep the
 fail-closed guarantee:

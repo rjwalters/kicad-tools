@@ -27,6 +27,9 @@ stop, with no comment and no label change.
 **Every mode ends with one line, last:**
 `CHAMPION-STEP mode=<pr|issue|non-item> item=<N|-> outcome=<outcome>`. The
 outcome vocabulary for each mode is the table in its section. Never invent one.
+When the step held a PR lease, release it with the same word before that line:
+`loom-daemon lease pr release N --role champion --step champion_merge --watch-pid "${LOOM_AGENT_SESSION_PID:-${CLAUDE_PID:-$PPID}}" --outcome <outcome>`
+(#12616: the released lease records it, `outcome=none` if you pass none).
 
 ## `--pr N`: one merge decision
 

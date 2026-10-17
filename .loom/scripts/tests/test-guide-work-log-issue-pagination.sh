@@ -41,7 +41,7 @@
 #   4. A window whose true volume is already <= the safety cap is fetched in
 #      a single call — no unnecessary bisection.
 #
-# Hermetic: pure jq/grep against a temp dir, with `gh` replaced by a local
+# The shipped functions are sourced from guide.md (not mirrored). Hermetic: pure jq/grep against a temp dir, with `gh` replaced by a local
 # stub function so no forge, network, or real `gh` calls are made.
 
 set -uo pipefail
@@ -117,13 +117,22 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Reconstruct the fixed pagination pipeline hermetically: a stub search API
-# (total_count keyed by window) and a stub `gh issue list` (capped fetch,
-# newest-first within each window, same shape the real `--limit 1000` fetch
-# has) stand in for the real ones. The algorithm mirrored here matches
-# fetch_closed_issues_complete()'s: check total_count, bisect only if it
-# exceeds the cap, merge+dedupe by number.
+# Load the SHIPPED functions out of guide.md (no mirrored copy of the
+# algorithm) and drive them against a stubbed `gh`: a stub search API
+# (total_count keyed by window) and a stub `gh issue list` (capped fetch, same
+# shape the real `--limit 1000` fetch has) stand in for the real ones.
 # ---------------------------------------------------------------------------
+
+FUNCS_SRC="$SANDBOX/funcs.sh"
+sed -n '/^_work_log_search_total_count() {/,/^update_work_log() {/p' "$GUIDE_MD" \
+    | sed '$d' > "$FUNCS_SRC"
+if [[ -s "$FUNCS_SRC" ]] && bash -n "$FUNCS_SRC"; then
+    pass "pagination functions extracted from guide.md and parse cleanly"
+else
+    fail "could not extract the pagination functions from guide.md"
+fi
+# shellcheck disable=SC1090
+source "$FUNCS_SRC"
 
 SAFETY_CAP=1000
 
@@ -152,65 +161,58 @@ TOTAL_FIXTURE_COUNT=$(jq 'length' "$FIXTURE_JSON")
 assert_eq "$TOTAL_FIXTURE_COUNT" "2400" \
     "fixture models 2400 closed issues, > 2x the 1000 safety cap"
 
-# Stub "total_count for a [start,end) window": count fixture rows whose date
-# falls in range (date-only comparison, mirroring the real closed:start..end
-# semantics at day granularity).
-stub_total_count() {
-    local start="$1" end="$2"
-    if [[ -n "$end" ]]; then
-        jq --arg start "$start" --arg range_end "$end" \
-            '[.[] | select((.closedAt | .[0:10]) >= $start and (.closedAt | .[0:10]) < $range_end)] | length' \
-            "$FIXTURE_JSON"
+CALL_COUNT_FILE="$SANDBOX/calls.count"
+: > "$CALL_COUNT_FILE"
+# Per-test knob for the self-check test: "" = honest total_count, a number =
+# override, "fail" = the search API call fails (total_count unknown).
+STUB_TOTAL_OVERRIDE=""
+
+# The pagination functions call `git remote get-url origin`; give them a repo.
+STUB_REPO="$SANDBOX/repo"
+git init -q "$STUB_REPO"
+git -C "$STUB_REPO" remote add origin git@github.com:example/stub.git
+cd "$STUB_REPO" || exit 1
+
+# Window filter shared by the stub search API and the stub list: parses the
+# `<field>:<start>..<end>` / `<field>:>=<start>` token the real code builds.
+stub_window_filter() {
+    local range="$1" cap="$2" fields="$3" mode="$4" spec start end
+    spec="${range#*:}"
+    if [[ "$spec" == '>='* ]]; then start="${spec#>=}"; end=""; else start="${spec%%..*}"; end="${spec##*..}"; fi
+    jq -c --arg start "$start" --arg range_end "$end" --argjson cap "$cap" \
+        --arg fields "$fields" --arg mode "$mode" '
+        [.[] | select((.closedAt | .[0:10]) >= $start and ($range_end == "" or (.closedAt | .[0:10]) < $range_end))] as $hits
+        | if $mode == "count" then ($hits | length)
+          else ($hits | .[0:$cap]
+                | map(with_entries(select(.key as $k | ($fields | split(",") | index($k)))))) end' \
+        "$FIXTURE_JSON"
+}
+
+# Stub `gh`: `api -X GET search/issues -f q=... --jq .total_count` and
+# `issue list --state S --search RANGE --limit N --json FIELDS`.
+stub_gh() {
+    local sub="$1"; shift
+    if [[ "$sub" == "api" ]]; then
+        [[ "$STUB_TOTAL_OVERRIDE" == "fail" ]] && return 1
+        local q="" prev=""
+        for a in "$@"; do [[ "$prev" == "-f" ]] && q="${a#q=}"; prev="$a"; done
+        if [[ -n "$STUB_TOTAL_OVERRIDE" ]]; then echo "$STUB_TOTAL_OVERRIDE"; return 0; fi
+        stub_window_filter "${q##* }" 0 "" count
     else
-        jq --arg start "$start" \
-            '[.[] | select((.closedAt | .[0:10]) >= $start)] | length' \
-            "$FIXTURE_JSON"
+        echo "x" >> "$CALL_COUNT_FILE"
+        local search="" limit="" fields="" prev=""
+        for a in "$@"; do
+            case "$prev" in
+                --search) search="$a" ;;
+                --limit) limit="$a" ;;
+                --json) fields="$a" ;;
+            esac
+            prev="$a"
+        done
+        stub_window_filter "$search" "$limit" "$fields" list
     fi
 }
-
-# Stub "gh issue list --search ... --limit $SAFETY_CAP": same window filter,
-# truncated at SAFETY_CAP entries — this is what the REAL bounded fetch
-# would silently do without the pagination fix.
-stub_bounded_fetch() {
-    local start="$1" end="$2"
-    if [[ -n "$end" ]]; then
-        jq -c --arg start "$start" --arg range_end "$end" --argjson cap "$SAFETY_CAP" \
-            '[.[] | select((.closedAt | .[0:10]) >= $start and (.closedAt | .[0:10]) < $range_end)] | .[0:$cap]' \
-            "$FIXTURE_JSON"
-    else
-        jq -c --arg start "$start" --argjson cap "$SAFETY_CAP" \
-            '[.[] | select((.closedAt | .[0:10]) >= $start)] | .[0:$cap]' \
-            "$FIXTURE_JSON"
-    fi
-}
-
-# Mirror of fetch_closed_issues_complete(): total_count check, bisect only
-# if over cap, merge+dedupe by number. Uses day-epoch bisection like the
-# real function.
-fixture_fetch_complete() {
-    local start="$1" end="$2" depth="${3:-0}"
-    local true_count
-    true_count=$(stub_total_count "$start" "$end")
-
-    if [[ "$true_count" -gt "$SAFETY_CAP" && "$depth" -lt 10 ]]; then
-        local end_resolved="${end:-2026-08-13}"
-        local start_epoch end_epoch
-        start_epoch=$(date -u -d "$start" +%s 2>/dev/null || date -u -j -f %Y-%m-%d "$start" +%s)
-        end_epoch=$(date -u -d "$end_resolved" +%s 2>/dev/null || date -u -j -f %Y-%m-%d "$end_resolved" +%s)
-        if (( (end_epoch - start_epoch) / 86400 >= 2 )); then
-            local mid_epoch mid_date left right
-            mid_epoch=$(( (start_epoch + end_epoch) / 2 ))
-            mid_date=$(date -u -d "@$mid_epoch" +%Y-%m-%d 2>/dev/null || date -u -r "$mid_epoch" +%Y-%m-%d)
-            left=$(fixture_fetch_complete "$start" "$mid_date" $((depth + 1)))
-            right=$(fixture_fetch_complete "$mid_date" "$end" $((depth + 1)))
-            jq -c -s '.[0] + .[1] | unique_by(.number)' \
-                <(printf '%s\n' "$left") <(printf '%s\n' "$right")
-            return 0
-        fi
-    fi
-
-    stub_bounded_fetch "$start" "$end"
-}
+export GH_READ=stub_gh  # read by the sourced pagination functions
 
 # ---------------------------------------------------------------------------
 # Test 2: THE REGRESSION — a 2400-issue window is fetched WITHOUT truncation.
@@ -218,18 +220,18 @@ fixture_fetch_complete() {
 echo ""
 echo "Test 2: a 2400-issue window (> 2x the safety cap) is fetched completely"
 
-RESULT="$(fixture_fetch_complete "2026-07-14" "")"
+RESULT="$(fetch_closed_issues_complete "2026-07-14" "")"
 FETCHED_COUNT=$(printf '%s\n' "$RESULT" | jq 'length')
 assert_eq "$FETCHED_COUNT" "2400" \
     "all 2400 closed issues are recovered, none silently dropped"
 
 DEDUPE_COUNT=$(printf '%s\n' "$RESULT" | jq '[.[].number] | unique | length')
 assert_eq "$DEDUPE_COUNT" "2400" \
-    "no duplicate issues after merging bisected sub-windows"
+    "no duplicate items after merging bisected sub-windows (boundary date not double-counted)"
 
 # Sanity: the OLD single-shot `--limit 1000` behavior really would have
 # truncated this fixture, which is exactly the bug #6097 fixes.
-OLD_BEHAVIOR_COUNT=$(stub_bounded_fetch "2026-07-14" "" | jq 'length')
+OLD_BEHAVIOR_COUNT=$(stub_window_filter "closed:>=2026-07-14" "$SAFETY_CAP" "number" list | jq 'length')
 assert_eq "$OLD_BEHAVIOR_COUNT" "1000" \
     "sanity check: a single flat --limit 1000 fetch over this fixture WOULD have truncated to 1000"
 
@@ -240,48 +242,37 @@ assert_eq "$OLD_BEHAVIOR_COUNT" "1000" \
 echo ""
 echo "Test 3: a small window (under the cap) is fetched in a single call"
 
-CALL_COUNT_FILE="$SANDBOX/calls.count"
 : > "$CALL_COUNT_FILE"
-counting_bounded_fetch() {
-    echo "x" >> "$CALL_COUNT_FILE"
-    stub_bounded_fetch "$1" "$2"
-}
-# Redefine fixture_fetch_complete's leaf call to use the counting wrapper by
-# calling it directly on a single-day window (well under 80/day < cap).
-SMALL_RESULT=$(counting_bounded_fetch "2026-07-14" "2026-07-15")
+SMALL_RESULT=$(fetch_closed_issues_complete "2026-07-14" "2026-07-15")
 SMALL_COUNT=$(printf '%s\n' "$SMALL_RESULT" | jq 'length')
 assert_eq "$SMALL_COUNT" "80" \
-    "single-day window (80 issues, under cap) returns all of them"
+    "single-day window (80 items, under cap) returns all of them"
 assert_eq "$(wc -l < "$CALL_COUNT_FILE" | tr -d ' ')" "1" \
     "a window under the cap makes exactly one bounded fetch call, no bisection"
 
 # ---------------------------------------------------------------------------
-# Test 4: self-check warns on a mismatch between fetched count and
+# Test 4: the real self-check warns on a mismatch between fetched count and
 # total_count, and stays silent when total_count is unknown (-1) or the
 # fetch is genuinely complete.
 # ---------------------------------------------------------------------------
 echo ""
 echo "Test 4: self-check warns on mismatch, silent when unknown/complete"
 
-self_check() {
-    local true_count="$1" fetched_count="$2"
-    if [[ "$true_count" -ge 0 ]] 2>/dev/null && [[ "$fetched_count" -ne "$true_count" ]]; then
-        echo "WARNING: closed-issue fetch returned $fetched_count of $true_count (search API total_count) -- possible truncation, see #6097." >&2
-    fi
-}
-
-WARN_OUT="$(self_check 1500 1000 2>&1 1>/dev/null)"
-if [[ -n "$WARN_OUT" ]]; then
-    pass "self-check warns when fetched count (1000) diverges from total_count (1500)"
+STUB_TOTAL_OVERRIDE=90   # API claims 90; the stub list only has 80
+WARN_OUT="$(fetch_closed_issues_complete "2026-07-14" "2026-07-15" 2>&1 1>/dev/null)"
+if [[ "$WARN_OUT" == *"closed-issue fetch"*"returned 80 of 90"*"#6097"* ]]; then
+    pass "self-check warns when fetched count (80) diverges from total_count (90)"
 else
-    fail "self-check did not warn on a mismatch"
+    fail "self-check did not warn on a mismatch (got: '$WARN_OUT')"
 fi
 
-SILENT_OUT="$(self_check -1 1000 2>&1 1>/dev/null)"
+STUB_TOTAL_OVERRIDE=fail
+SILENT_OUT="$(fetch_closed_issues_complete "2026-07-14" "2026-07-15" 2>&1 1>/dev/null)"
 assert_eq "$SILENT_OUT" "" \
     "self-check stays silent when total_count is unavailable (-1, unknown)"
 
-COMPLETE_OUT="$(self_check 140 140 2>&1 1>/dev/null)"
+STUB_TOTAL_OVERRIDE=""
+COMPLETE_OUT="$(fetch_closed_issues_complete "2026-07-14" "2026-07-15" 2>&1 1>/dev/null)"
 assert_eq "$COMPLETE_OUT" "" \
     "self-check stays silent when the fetch is genuinely complete (counts match)"
 

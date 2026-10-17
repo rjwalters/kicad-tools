@@ -9,6 +9,29 @@ the label, re-evaluates them every tick, and removes the label when the
 recorded predecessor lands, closes, or the ordering no longer applies.
 Read-only inspection: `loom-daemon merge-pr sequence-plan`.
 
+## Tick cadence: "the next tick" is minutes, not seconds (#12595)
+
+The pass runs inside the daemon's claim-reconciliation pass, so a "tick" is
+`LOOM_CLAIM_RECONCILE_INTERVAL_SECS`: **600s by default, 1800s when
+`safehouse.enabled`** (see `daemon-reference.md`). When a predecessor gains
+`loom:blocked`, `loom:operator`, `loom:changes-requested` or `loom:ci-failure`,
+its soft followers are released on the first tick that reads the new label, so a
+follower can legitimately stay `loom:sequenced` for up to one interval (30 min on
+a safehouse fleet) after that. Longer than one interval is a defect: run
+`loom-daemon merge-pr sequence-plan`, whose `held #F (after #P): <why>` lines name
+the first `with_readiness` condition keeping each hold (human hold, predecessor
+outside the listing or moved off the recorded head, stacked base, or
+"predecessor is ready"). It writes nothing.
+
+## A `CHANGELOG.md`-only conflict creates no landing order (#12595)
+
+Two PRs that both add an entry at the same spot of `CHANGELOG.md` do conflict
+textually, but the Doctor resolves that on the rebase; ordering their merges
+saves nothing. The pair check (`git merge-tree --write-tree --name-only`) treats
+a conflict whose **only** conflicted path is `CHANGELOG.md` as a clean merge. Any
+other conflicted path, or an unavailable path list, keeps the edge (fail closed).
+Stacked-base edges are unaffected.
+
 ## One landing-order comment per PR (#10634)
 
 The "Landing order recorded" comment is upserted, not appended. It carries a

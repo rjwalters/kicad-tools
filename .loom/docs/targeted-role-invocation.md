@@ -139,6 +139,8 @@ A missing line on an unchanged item is `failed` with reason `unclassified`.
 | `verdict` | `pr_opened`, `parked`, `closed` | Builder | `create-pr.sh`; `park-record apply`; "Issues Are Suggestions" |
 | `verdict` | `curated`, `parked`, `closed` | Curator | Decision Tree; Routing to a human; Admission keep-or-close |
 | `noop` | `already_judged`, `ci_pending`, `fallback_skip` | Judge | gate 2; Primary Queue step 2b; `judge-fallback-guard.sh` exit 10/11/12 |
+| `verdict` | `fixed` | Doctor | a pushed fix; the PR returns to review |
+| `noop` | `no_fix_needed` | Doctor | the PR needed no change |
 | `noop` | `no_changes_needed` | Builder | the `.no-changes-needed` marker |
 | `noop` | `nothing_to_add` | Curator | the issue already meets the Quality Checklist and was curated before |
 | `refused` | `target_is_pr`, `target_is_issue` | issue roles, PR roles | gate 2 |
