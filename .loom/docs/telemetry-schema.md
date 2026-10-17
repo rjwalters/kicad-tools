@@ -228,6 +228,7 @@ cycle) is added only when loom-ui's error tracking shows it is needed.
 | [`roster.change`](#rosterchange) | log, OTLP only | `fleet_sync/roster_clone.rs` |
 | [`daemon.run_state_request`](#daemonrun_state_request--who-asked-the-daemon-to-pause-drain-stop-or-restart) | log, OTLP only | `ipc.rs` (`handle_client` run-state verbs), `observability/run_state_request.rs` |
 | [`write_scope.refused`](#write_scoperefused--a-daemon-pass-write-the-9548-gate-refused) | log, OTLP only | `write_scope.rs` (`gate()` and the per-call checks, `emit_refused`) |
+| [`merge_queue.event`](#merge_queueevent--a-merge-queue-record-exported-to-otlp) | log, OTLP only | `forge_merge_queue/events.rs` (`FileEventSink::record`, after the JSONL append) |
 | [`eta.stage_outcome`](#etastage_outcome) (kept, non-ETA owner since #11126) | log, OTLP only | none since #11301 (was `observability/fleet_state/outcomes.rs`, a diff of two `fleet.state` views) |
 | [`pr.resolved`](#prresolved) (kept, non-ETA owner since #11126) | log, OTLP only | none since #11301 (was `observability/fleet_state/outcomes.rs`, a PR that left the review listings) |
 
@@ -4024,6 +4025,27 @@ linked through `daemon.exit` instead.
 (`RUN_STATE_REQUEST_LOG_ATTRIBUTE_KEYS`, kept by the collector's
 `transform/privacy` `keep_keys`, contract-tested). Both OTLP timestamps are
 `observed_at`.
+
+
+### `merge_queue.event` — a merge-queue record exported to OTLP
+
+One OTLP log (INFO) per `merge_queue.{enqueued,merged,removed}` record the
+sink appended (Issue #12653, F3). Emitted from `FileEventSink::record` only
+after the `seen/` marker and the JSONL append succeed, so the JSONL and its
+dedupe stay authoritative and a duplicate, a second reconcile pass or a restart
+emits nothing. No forge read is added. **OTLP-only** (`native: false`); the
+short-lived CLI processes have no sink and export nothing.
+
+The JSON body holds `event` (`enqueued` / `merged` / `removed`), `pr`, `nonce`
+(grant generation), `head`, `reason` (removal: the classified token or
+`revoked-<why>`), `enqueued_at`, `at`, `enqueue_to_event_secs`,
+`merged_after_revocation` and `loom` build provenance; a record whose
+provenance does not validate is not exported. Attributes: `loom.pr_number` and
+`loom.merge_queue.event` / `reason` (when present) / `nonce` /
+`enqueue_to_event_secs` (when both times parsed) / `merged_after_revocation` /
+`version` / `revision` / `provenance_complete`
+(`MERGE_QUEUE_EVENT_LOG_ATTRIBUTE_KEYS`, kept by the collector's
+`transform/privacy` `keep_keys`, contract-tested). Both timestamps are `at`.
 
 
 ### `write_scope.refused` — a daemon-pass write the #9548 gate refused

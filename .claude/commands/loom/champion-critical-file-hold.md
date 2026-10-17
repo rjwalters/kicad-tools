@@ -38,6 +38,15 @@ unreadable diff restores the FAIL and this whole machine. The kept set (the
 merge gate, guard hooks, credential selection, installers/updaters,
 migrations) is never satisfiable by a class.
 
+A `"criticalFilesOnly": true` class (#12648) passes #3 the same way, but is
+matched against the critical-file hits alone (the files #3 flags, and each
+one's `previous_filename`): every hit must match its `filePatterns`, none its
+`excludeFilePatterns`, no forbidden line in the hits' patches, no kept-set path
+anywhere in the PR, conditions holding. The other changed files are left to
+criterion #2, which this class never satisfies. A PASS under it closes an open
+episode through the same ordinary PASS row; if criterion #2 then holds the PR,
+that is criterion #2's own hold, not this machine's.
+
 ## The state machine
 
 The state is whichever of these three markers is the **latest** trusted comment

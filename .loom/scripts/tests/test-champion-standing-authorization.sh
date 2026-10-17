@@ -27,6 +27,9 @@
 #      vocabulary, the fail-safe-on-malformed-entry behavior, and documents
 #      this mechanism as orthogonal to `loom:auto-merge-ok`.
 #   5. champion-reference.md documents the new mechanism too.
+#   6. (#12648) a `criticalFilesOnly` class, run through the shipped
+#      standing_auth_eval and criterion #3 block: matched against the
+#      critical-file hits only, never eligible for criterion #2.
 #
 # Usage:
 #   ./.loom/scripts/tests/test-champion-standing-authorization.sh
@@ -234,9 +237,13 @@ echo "--- #12528: the shipped standing_auth_eval, executed with stubbed forge re
 EVAL_SRC="$(mktemp)"
 CFG_DIR="$(mktemp -d)"
 LOADER_SRC="$(mktemp)"
-trap 'rm -f "$EVAL_SRC" "$LOADER_SRC" "${BLOCK_SRC:-}"; rm -rf "$CFG_DIR"' EXIT
+CRIT_SRC="$(mktemp)"
+trap 'rm -f "$EVAL_SRC" "$LOADER_SRC" "$CRIT_SRC" "${BLOCK_SRC:-}"; rm -rf "$CFG_DIR"' EXIT
 awk '/^standing_auth_load_config\(\) \{/{f=1} f{print} f&&/^}/{exit}' "$CHAMPION_MD" >"$LOADER_SRC"
 awk '/^KEPT_SET_PATTERNS=\(/{p=1} p{print} /^standing_auth_eval any$/{exit}' "$CHAMPION_MD" | sed '$d' >"$EVAL_SRC"
+# Criterion #3's own CRITICAL_PATTERNS (#12648): a criticalFilesOnly class reads
+# the critical-file hits through it, so run_eval defines it as the block does.
+awk '/^CRITICAL_PATTERNS=\(/{p=1} p{print} p&&/^\)/{exit}' "$CHAMPION_MD" >"$CRIT_SRC"
 
 # run_eval <mode> <config-json> <files> <api> <ci: green|red> <labels>
 # <files> is criterion #3's own $FILES (critical) / FAST_PATH_FILES (any).
@@ -263,6 +270,8 @@ run_eval() {
         }
         # shellcheck disable=SC1090
         source "$EVAL_SRC"
+        # shellcheck disable=SC1090
+        [ -n "${NO_CRIT_PATTERNS:-}" ] || source "$CRIT_SRC"
         if [ -n "${FETCH_FAILS_AFTER_FILL:-}" ]; then
             # The read fills DIFF_JSON and still reports failure: only the
             # caller's own status check can reject it.
@@ -270,7 +279,11 @@ run_eval() {
             standing_auth_fetch_diff() { orig_standing_auth_fetch_diff; return 1; }
         fi
         standing_auth_eval "$mode" "$files"
-        echo "$STANDING_AUTH_RESULT:$STANDING_AUTH_ID"
+        if [ -n "${SHOW_SCOPE:-}" ]; then
+            echo "$STANDING_AUTH_RESULT:$STANDING_AUTH_ID:$STANDING_AUTH_SCOPE:$(printf '%s' "$STANDING_AUTH_COVERED" | tr '\n' ',')"
+        else
+            echo "$STANDING_AUTH_RESULT:$STANDING_AUTH_ID"
+        fi
     )
 }
 
@@ -541,6 +554,120 @@ out="$(run_eval any "$ALL_CFG" "defaults/hooks/guard-x.sh" "" green "loom:pr")"
 assert_eq "ELIGIBLE:all" "$out" "kept-set floor is critical-mode only: criterion #2 class behavior is unchanged"
 
 echo
+echo "--- #12648: criticalFilesOnly class (critical-file hits only, never criterion #2) ---"
+
+CFO_CLASS='{"champion":{"standingAuthorizations":[{"id":"ci-only","filePatterns":[".github/workflows/*.yml"],"conditions":["judgeApproval","greenCi"],"criticalFilesOnly":true,"excludeFilePatterns":[".github/workflows/*publish*"],"forbiddenDiffPatterns":["^\\s*permissions:","secrets\\."]}]}}'
+CFO_ALL='{"champion":{"standingAuthorizations":[{"id":"crit-all","filePatterns":["*"],"conditions":["judgeApproval"],"criticalFilesOnly":true}]}}'
+DOC="docs/guide.md"
+WF_DOC="$(printf '%s\n%s' "$WF" "$DOC")"
+mixed() { # mixed <workflow-patch-line> <doc-patch-line>
+    jq -n -c --arg w "$1" --arg d "$2" --arg wf "$WF" --arg doc "$DOC" \
+        '[{filename:$wf, patch:("@@ -1 +1,2 @@\n name: ci\n" + $w)}, {filename:$doc, patch:("@@ -1 +1,2 @@\n # Guide\n" + $d)}]'
+}
+MIX_OK="$(mixed '+# a comment' '+more prose')"
+
+out="$(SHOW_SCOPE=1 run_eval critical "$CFO_CLASS" "$WF_DOC" "$MIX_OK" green "loom:pr")"
+assert_eq "ELIGIBLE:ci-only:critical:$WF" "$out" \
+    "workflow + docs PR: criterion #3 passes under the criticalFilesOnly class, covering only the workflow"
+
+out="$(run_eval any "$CFO_CLASS" "$WF_DOC" "" green "loom:pr")"
+assert_eq "NOT ELIGIBLE:" "$out" "the same PR is not eligible in criterion #2: it still gets the four-axis judgment"
+
+out="$(run_eval any "$CFO_CLASS" "$WF" "" green "loom:pr")"
+assert_eq "NOT ELIGIBLE:" "$out" "a workflow-only PR inside the class's patterns is still not eligible in criterion #2"
+
+out="$(run_eval any "$CFO_ALL" "$DOC" "" green "loom:pr")"
+assert_eq "NOT ELIGIBLE:" "$out" "a criticalFilesOnly class matching '*' never satisfies criterion #2"
+
+TWO_CLASSES='{"champion":{"standingAuthorizations":[{"id":"crit-all","filePatterns":["*"],"conditions":["judgeApproval"],"criticalFilesOnly":true},{"id":"docs","filePatterns":["docs/*"],"conditions":["judgeApproval"]}]}}'
+out="$(run_eval any "$TWO_CLASSES" "$DOC" "" green "loom:pr")"
+assert_eq "ELIGIBLE:docs" "$out" "criterion #2 skips the criticalFilesOnly class and still reaches the ordinary class after it"
+
+out="$(run_eval critical "$CFO_CLASS" "$WF_DOC" "$(mixed '+permissions: write-all' '+more prose')" green "loom:pr")"
+assert_eq "NOT ELIGIBLE:" "$out" "a forbidden line in the workflow patch fails criterion #3"
+
+out="$(run_eval critical "$CFO_CLASS" "$WF_DOC" "$(mixed '-  run: echo ${{ secrets.TOKEN }}' '+more prose')" green "loom:pr")"
+assert_eq "NOT ELIGIBLE:" "$out" "a removed line matching the 2nd forbidden pattern in the workflow patch fails criterion #3"
+
+out="$(run_eval critical "$CFO_CLASS" "$WF_DOC" "$(mixed '+# a comment' '+permissions: are explained here')" green "loom:pr")"
+assert_eq "ELIGIBLE:ci-only" "$out" "a forbidden-looking line in a NON-critical file is not the class's to judge (criterion #2 reads it)"
+
+NOPATCH_WF="$(jq -n -c --arg wf "$WF" --arg doc "$DOC" '[{filename:$wf}, {filename:$doc, patch:"@@\n+x"}]')"
+out="$(run_eval critical "$CFO_CLASS" "$WF_DOC" "$NOPATCH_WF" green "loom:pr")"
+assert_eq "NOT ELIGIBLE:" "$out" "a critical-file hit with no patch fails closed"
+
+NOPATCH_DOC="$(jq -n -c --arg wf "$WF" --arg doc "$DOC" '[{filename:$wf, patch:"@@\n+# c"}, {filename:$doc}]')"
+out="$(run_eval critical "$CFO_CLASS" "$WF_DOC" "$NOPATCH_DOC" green "loom:pr")"
+assert_eq "ELIGIBLE:ci-only" "$out" "a non-critical file with no patch does not block the class"
+
+out="$(run_eval critical "$CFO_CLASS" "$(printf '.github/workflows/publish.yml\n%s' "$DOC")" AUTO green "loom:pr")"
+assert_eq "NOT ELIGIBLE:" "$out" "an excluded workflow fails criterion #3"
+
+out="$(run_eval critical "$CFO_CLASS" "$(printf '%s\nCargo.toml\n%s' "$WF" "$DOC")" AUTO green "loom:pr")"
+assert_eq "NOT ELIGIBLE:" "$out" "a second critical-file hit outside the class's patterns fails criterion #3"
+
+out="$(run_eval critical "$CFO_CLASS" "$(printf '.github/workflows/loom-champion.yml\n%s' "$DOC")" AUTO green "loom:pr")"
+assert_eq "NOT ELIGIBLE:" "$out" "a kept-set critical-file hit fails criterion #3 even though it matches the class"
+
+out="$(run_eval critical "$CFO_CLASS" "$(printf '%s\ndefaults/scripts/install-loom.sh' "$WF")" AUTO green "loom:pr")"
+assert_eq "NOT ELIGIBLE:" "$out" "a kept-set path among the NON-critical files still fails criterion #3 (the floor covers every changed file)"
+
+RENAME_KEPT_IN="$(jq -n -c --arg doc "$DOC" '[{filename:".github/workflows/x.yml", previous_filename:".github/labels.yml", status:"renamed", patch:"@@\n+# c"}, {filename:$doc, patch:"@@\n+x"}]')"
+out="$(run_eval critical "$CFO_CLASS" "$(printf '.github/workflows/x.yml\n%s' "$DOC")" "$RENAME_KEPT_IN" green "loom:pr")"
+assert_eq "NOT ELIGIBLE:" "$out" "a rename of a kept-set file into the class's pattern fails criterion #3"
+
+RENAME_OUT_IN="$(jq -n -c --arg doc "$DOC" --arg wf "$WF" '[{filename:$wf, previous_filename:"src/ci.yml", status:"renamed", patch:"@@\n+# c"}, {filename:$doc, patch:"@@\n+x"}]')"
+out="$(run_eval critical "$CFO_CLASS" "$WF_DOC" "$RENAME_OUT_IN" green "loom:pr")"
+assert_eq "NOT ELIGIBLE:" "$out" "a rename from a path outside the class into the pattern fails criterion #3"
+
+out="$(run_eval critical "$CFO_CLASS" "$DOC" AUTO green "loom:pr")"
+assert_eq "NOT ELIGIBLE:" "$out" "no critical-file hit at all: the class does not apply (criterion #3 passes on its own)"
+
+out="$(NO_CRIT_PATTERNS=1 run_eval critical "$CFO_CLASS" "$WF_DOC" "$MIX_OK" green "loom:pr")"
+assert_eq "NOT ELIGIBLE:" "$out" "CRITICAL_PATTERNS not in scope: fails closed"
+
+out="$(NO_CRIT_PATTERNS=1 run_eval critical "$CFO_ALL" "$WF_DOC" "$MIX_OK" green "loom:pr")"
+assert_eq "NOT ELIGIBLE:" "$out" "no CRITICAL_PATTERNS, class without forbiddenDiffPatterns: fails closed (empty-hits guard)"
+
+out="$(run_eval critical "$CFO_ALL" "$DOC" AUTO green "loom:pr")"
+assert_eq "NOT ELIGIBLE:" "$out" "no hits, class without forbiddenDiffPatterns: not applied (empty-hits guard)"
+
+# A diff over 128 KiB (Linux MAX_ARG_STRLEN) must still reach the class: the diff goes to jq on stdin, never as an argument.
+BIG_MIX="$(head -c 200000 /dev/zero | tr '\0' 'x' | jq -R -s -c --arg wf "$WF" --arg doc "$DOC" \
+    '[{filename:$wf, patch:"@@ -1 +1,2 @@\n name: ci\n+# a comment"}, {filename:$doc, patch:("@@ -1 +1,2 @@\n+" + .)}]')"
+out="$(run_eval critical "$CFO_CLASS" "$WF_DOC" "$BIG_MIX" green "loom:pr")"
+assert_eq "ELIGIBLE:ci-only" "$out" "a >128 KiB files-API diff does not disable the class (no argv-limit failure)"
+
+out="$(run_eval critical "$CFO_CLASS" "$WF_DOC" "$MIX_OK" red "loom:pr")"
+assert_eq "NOT ELIGIBLE:" "$out" "red CI: greenCi does not hold"
+
+out="$(run_eval critical "$CFO_CLASS" "$WF_DOC" "$MIX_OK" green "loom:review-requested")"
+assert_eq "NOT ELIGIBLE:" "$out" "no Judge approval: judgeApproval does not hold"
+
+out="$(run_eval critical "$CFO_CLASS" "$WF_DOC" "$(jq -c '.[0:1]' <<<"$MIX_OK")" green "loom:pr")"
+assert_eq "NOT ELIGIBLE:" "$out" "the files read names fewer files than criterion #3 listed: fails closed"
+
+CFO_STR="${CFO_CLASS/\"criticalFilesOnly\":true/\"criticalFilesOnly\":\"true\"}"
+out="$(run_eval critical "$CFO_STR" "$WF_DOC" "$MIX_OK" green "loom:pr")"
+assert_eq "NOT ELIGIBLE:" "$out" "a non-boolean criticalFilesOnly is malformed in criterion #3"
+CFO_ALL_STR="${CFO_ALL/\"criticalFilesOnly\":true/\"criticalFilesOnly\":\"true\"}"
+out="$(run_eval any "$CFO_ALL_STR" "$DOC" "" green "loom:pr")"
+assert_eq "NOT ELIGIBLE:" "$out" "a non-boolean criticalFilesOnly is malformed in criterion #2 too (never widened to an ordinary class)"
+
+# Non-flag classes are unchanged.
+out="$(run_eval critical "$CI_CLASS" "$WF_DOC" "$MIX_OK" green "loom:pr")"
+assert_eq "NOT ELIGIBLE:" "$out" "a coversCriticalFiles class without the flag still needs every changed file in the class"
+out="$(SHOW_SCOPE=1 run_eval critical "$CI_CLASS" "$WF" "$OKPATCH" green "loom:pr")"
+assert_eq "ELIGIBLE:ci-steps:all:$WF" "$out" "a coversCriticalFiles class without the flag passes a whole-PR match with scope 'all'"
+CFO_FALSE="${CI_CLASS/\"coversCriticalFiles\":true/\"coversCriticalFiles\":true,\"criticalFilesOnly\":false}"
+out="$(run_eval critical "$CFO_FALSE" "$WF_DOC" "$MIX_OK" green "loom:pr")"
+assert_eq "NOT ELIGIBLE:" "$out" "criticalFilesOnly: false is today's class (whole-PR match required)"
+out="$(run_eval critical "$CFO_FALSE" "$WF" "$OKPATCH" green "loom:pr")"
+assert_eq "ELIGIBLE:ci-steps" "$out" "criticalFilesOnly: false still passes a whole-PR match"
+out="$(run_eval any "$ALL_CFG" "$DOC" "" green "loom:pr")"
+assert_eq "ELIGIBLE:all" "$out" "criterion #2 still accepts an ordinary class"
+
+echo
 echo "--- #12528: criterion #3's shipped block, executed end to end ---"
 
 # Extract the REAL criterion #3 verification block (FILES fetch ... final PASS
@@ -589,6 +716,18 @@ out="$(run_block "$CI_CLASS" "$WF" "$OKPATCH" "loom:review-requested")"
 case "$out" in *"FAIL: Critical file modified: $WF"*) r=FAIL ;; *) r="got: $out" ;; esac
 assert_eq "FAIL" "$r" "criterion #3 block: a stale ELIGIBLE from criterion #2 is not inherited"
 
+out="$(run_block "$CFO_CLASS" "$WF_DOC" "$MIX_OK" "loom:pr")"
+case "$out" in *"PASS (standing authorization 'ci-only', #12648): criterion #3 satisfied by a criticalFilesOnly class — critical files: $WF"*) r=PASS ;; *) r="got: $out" ;; esac
+assert_eq "PASS" "$r" "criterion #3 block: a criticalFilesOnly class passes a workflow + docs PR and names the class and the critical files"
+
+out="$(run_block "$CFO_CLASS" "$WF_DOC" "$(mixed '+permissions: write-all' '+x')" "loom:pr")"
+case "$out" in *"FAIL: Critical file modified: $WF"*) r=FAIL ;; *) r="got: $out" ;; esac
+assert_eq "FAIL" "$r" "criterion #3 block: a forbidden line in the workflow restores the FAIL"
+
+out="$(run_block "$CFO_CLASS" "$(printf '.github/workflows/loom-judge.yml\n%s' "$DOC")" AUTO "loom:pr")"
+case "$out" in *"FAIL: Critical file modified: .github/workflows/loom-judge.yml"*) r=FAIL ;; *) r="got: $out" ;; esac
+assert_eq "FAIL" "$r" "criterion #3 block: a kept-set workflow restores the FAIL"
+
 echo
 echo "--- Doc pins: #12528 ---"
 assert_doc_contains "$CHAMPION_MD" '`coversCriticalFiles` (#12528' "champion-pr-merge.md documents coversCriticalFiles"
@@ -598,6 +737,9 @@ assert_doc_contains "$CHAMPION_MD" "standing_auth_eval critical" "criterion #3 r
 assert_doc_contains "$CHAMPION_MD" "Revertability counts only what happens on merge or roll (#12528)" "revertability-axis sentence is present"
 assert_doc_contains "$CHAMPION_MD" "No standing authorization satisfies the kept set (#12528)" "kept set restated as never satisfiable"
 assert_doc_contains "$PROMPT_DIR/champion-critical-file-hold.md" "A covering standing authorization means no hold (#12528)" "champion-critical-file-hold.md documents the covering class"
+assert_doc_contains "$CHAMPION_MD" '`criticalFilesOnly` (#12648' "champion-pr-merge.md documents criticalFilesOnly"
+assert_doc_contains "$PROMPT_DIR/champion-critical-file-hold.md" '"criticalFilesOnly": true' "champion-critical-file-hold.md documents the criticalFilesOnly class"
+assert_doc_contains "$CHAMPION_REF_MD" "Critical files only (#12648)" "champion-reference.md documents the criticalFilesOnly class"
 
 echo
 echo "--- Doc pins: champion-reference.md documents the new mechanism ---"
