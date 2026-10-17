@@ -82,6 +82,12 @@ def normalize_argv(argv: list[str]) -> list[str]:
 
 def main(argv: list[str] | None = None) -> int:
     """Main entry point for kicad-tools CLI."""
+    # Windows consoles/pipes default to cp1252, which cannot encode characters
+    # such as the "Δ" in help text; degrade instead of crashing (Issue #6894).
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(errors="replace")
+
     parser = create_parser()
 
     # Handle footprint generate specially - it has its own subcommand parser
