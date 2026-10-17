@@ -549,6 +549,18 @@ trigger for that input instead of leaving the consumer untested. Ordinary
 content-only PRs still skip the unrelated native board jobs; main pushes and
 change-detection failures run the full gate.
 
+### Which board jobs run on a pull request
+
+Only **Board 00 End-to-End** and **Board 06 End-to-End (LVS)** run on pull
+requests, gated by the per-board path filters in the `changes` job (Issue #5743
+item 4, operator ruling 2026-10-17). Boards 01-04 End-to-End and Board 05 Routing
+Regression run only on main verification runs (the hourly/nightly schedule and
+`workflow_dispatch`), which run all six boards. A regression specific to boards
+01-05 is therefore caught on `main` within one schedule window, not on the PR.
+If your change targets one of those boards, reproduce its job locally before
+opening the PR, or dispatch the workflow on your branch. None of these jobs is a
+required status check.
+
 ## Keeping a slow test in the PR "Test" job: `pr_required`
 
 The PR `Test` job runs `-m "not slow and not ci_extended"`. `tests/ci_extended.txt`
