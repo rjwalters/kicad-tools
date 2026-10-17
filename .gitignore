@@ -198,3 +198,6 @@ node_modules/
 .squad/
 .claude/skills/squad/.install-local.json
 .mcp.json
+
+# DSN export revision sidecars written beside fixture boards (issue #6915)
+tests/fixtures/*.dsn-revision.json
