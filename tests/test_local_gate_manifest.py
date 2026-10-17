@@ -42,7 +42,10 @@ LOCAL_GATE = REPO_ROOT / "scripts" / "ci" / "local-gate.sh"
 # The kicad_pin bridge republishes the workflow-level KICAD_IMAGE env value
 # into the `needs` context for the container jobs (#5682); locally there is
 # no `needs` context to feed, so the pin is read straight from the env.
-CI_ONLY_JOBS: set[str] = {"changes", "kicad_pin"}
+# The windows-smoke job runs on a `windows-latest` GitHub-hosted runner to
+# catch Windows-only import/encoding breakage (#6894); a local (Linux/macOS)
+# gate cannot reproduce that OS, so there is nothing to mirror.
+CI_ONLY_JOBS: set[str] = {"changes", "kicad_pin", "windows-smoke"}
 
 
 def _ci_job_ids() -> set[str]:
