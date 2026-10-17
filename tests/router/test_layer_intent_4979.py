@@ -236,7 +236,7 @@ def _autorouter_with_net(net_name: str, net_class: NetClassRouting | None, *, st
 
 def test_matrix_preference_never_selects_a_hard_avoided_layer() -> None:
     """A matrix assignment onto a forbidden layer is filtered, not applied."""
-    ar = _autorouter_with_net("/PGND", _hv_class(), strict=True)
+    ar = _autorouter_with_net("/PGND", _hv_class(preferred_layers=None), strict=True)
 
     ar._inject_matrix_layer_preferences({1: [_IN2_CU, _B_CU]})
 
@@ -247,7 +247,7 @@ def test_matrix_preference_never_selects_a_hard_avoided_layer() -> None:
 
 def test_matrix_preference_of_only_forbidden_layers_leaves_the_class_authored() -> None:
     """Nothing legal to prefer -> the user's class is left exactly as written."""
-    authored = _hv_class()
+    authored = _hv_class(preferred_layers=None)
     ar = _autorouter_with_net("/PGND", authored, strict=True)
 
     ar._inject_matrix_layer_preferences({1: [_IN1_CU, _IN2_CU]})
@@ -257,8 +257,19 @@ def test_matrix_preference_of_only_forbidden_layers_leaves_the_class_authored() 
 
 def test_matrix_preference_unchanged_without_a_hard_constraint() -> None:
     """Soft ``avoid_layers`` (no ``--strict-layers``, no ampacity) is untouched."""
-    ar = _autorouter_with_net("/PGND", _hv_class(), strict=False)
+    ar = _autorouter_with_net("/PGND", _hv_class(preferred_layers=None), strict=False)
 
     ar._inject_matrix_layer_preferences({1: [_IN2_CU]})
 
     assert ar.net_class_map["/PGND"].preferred_layers == [_IN2_CU]
+
+
+def test_matrix_preference_never_overwrites_an_authored_preference() -> None:
+    """Issue #6824: authored ``preferred_layers`` beat the automatic matrix hint."""
+    authored = _hv_class(preferred_layers=[_IN2_CU], avoid_layers=None)
+    ar = _autorouter_with_net("/PGND", authored, strict=False)
+
+    ar._inject_matrix_layer_preferences({1: [_F_CU]})
+
+    assert ar.net_class_map["/PGND"] is authored
+    assert authored.preferred_layers == [_IN2_CU]

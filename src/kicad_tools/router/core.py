@@ -8672,7 +8672,8 @@ class Autorouter:
         Creates per-net NetClassRouting entries with ``preferred_layers``
         set, so the pathfinder's ``_get_layer_preference_cost()`` biases
         A* toward the assigned layer.  If the net already has a net class
-        entry, a copy is created with the layer preference added.
+        entry, a copy is created with the layer preference added; a class
+        that already authors ``preferred_layers`` is left untouched (#6824).
 
         Issue #2432.
 
@@ -8701,6 +8702,12 @@ class Autorouter:
                 continue
             existing = self.net_class_map.get(net_name)
             if existing is not None:
+                if existing.preferred_layers:
+                    # Issue #6824: an authored ``preferred_layers`` is a
+                    # deliberate layer intent (board 03 puts USB_D on
+                    # In2.Cu); the matrix assignment is only an automatic
+                    # hint and must not overwrite it.
+                    continue
                 # Issue #4979: never prefer a layer this class hard-blocks.
                 hard_avoided = existing.hard_avoided_layer_indices(self.rules.strict_layers)
                 allowed = [x for x in layers if x not in hard_avoided] if hard_avoided else layers
