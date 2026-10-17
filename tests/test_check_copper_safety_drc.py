@@ -68,3 +68,38 @@ def test_bad_floor_is_tool_failure(tmp_path, capsys):
     bad = tmp_path / "floor.yml"
     bad.write_text("floors: {}\n")
     assert mod.main([str(path), "--floor-file", str(bad)]) == 1
+
+
+def _floor_file(tmp_path: Path, name: str, floor: int) -> Path:
+    path = tmp_path / name
+    path.write_text(f"floors:\n  board-07-fresh-regen: {floor}\n")
+    return path
+
+
+@pytest.mark.parametrize(("previous", "current", "expected"), [(1, 1, 0), (1, 0, 0), (0, 1, 3)])
+def test_floor_may_only_shrink(tmp_path, capsys, previous, current, expected):
+    report = tmp_path / "drc.json"
+    report.write_text(json.dumps({"violations": []}))
+    argv = [
+        str(report),
+        "--floor-file",
+        str(_floor_file(tmp_path, "floor.yml", current)),
+        "--previous-floor-file",
+        str(_floor_file(tmp_path, "prev.yml", previous)),
+    ]
+    assert mod.main(argv) == expected
+    if expected == 3:
+        assert "may only go down" in capsys.readouterr().out
+
+
+def test_unreadable_previous_floor_is_tool_failure(tmp_path, capsys):
+    report = tmp_path / "drc.json"
+    report.write_text(json.dumps({"violations": []}))
+    argv = [
+        str(report),
+        "--floor-file",
+        str(_floor_file(tmp_path, "floor.yml", 1)),
+        "--previous-floor-file",
+        str(tmp_path / "missing.yml"),
+    ]
+    assert mod.main(argv) == 1

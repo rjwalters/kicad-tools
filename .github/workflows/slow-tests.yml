@@ -23,6 +23,10 @@ on:
       - "pyproject.toml"
       - "uv.lock"
       - ".github/workflows/slow-tests.yml"
+      # Board 07 copper-safety DRC ratchet inputs (#6738).
+      - "boards/07-matchgroup-test/**"
+      - "scripts/ci/check_copper_safety_drc.py"
+      - ".github/copper-safety-drc-floor.yml"
   workflow_dispatch: {}
 
 concurrency:
@@ -179,3 +183,120 @@ jobs:
         env:
           KCT_LATTICE_BOARD_GUARD: ${{ github.event.schedule == '0 9 * * 0' && '1' || '' }}
         run: uv run pytest -n auto --dist loadgroup -o addopts= --benchmark-disable --timeout=1200 --durations=25 -m slow
+
+  # Issue #6738 (operator ruling 2026-10-16): the board 07 copper-safety DRC
+  # ratchet runs here, on the schedule, instead of in ci.yml. ci.yml's
+  # board-07-end-to-end job is suspended (#5097, BOARD_07_CI_ENABLED unset),
+  # so a step there never ran, and putting it in PR CI would add ~30 min to
+  # every PR. This job regenerates board 07 from its recipe the same way that
+  # job does (same pinned container, same --seed 42), runs kicad-cli DRC on
+  # the fresh routed PCB, and fails when clearance / shorting_items /
+  # tracks_crossing / hole_clearance / copper_edge_clearance errors exceed
+  # .github/copper-safety-drc-floor.yml. The floor is a ratchet: the job also
+  # fails if the floor file's last change on this ref raised it.
+  board-07-copper-safety-drc:
+    name: Board 07 copper-safety DRC ratchet
+    needs: [kicad_pin]
+    runs-on: ubuntu-latest
+    # The board 07 regen takes ~27 min locally solo (three negotiated
+    # passes, #4468). 90 min matches ci.yml's board-07-end-to-end job.
+    timeout-minutes: 90
+    container:
+      image: ${{ needs.kicad_pin.outputs.image }}
+      options: --user 0:0
+    defaults:
+      run:
+        shell: bash
+    env:
+      PYTHONHASHSEED: "42"
+      PYTHONUNBUFFERED: "1"
+    steps:
+      - name: Ensure container has prerequisites
+        run: |
+          set -euo pipefail
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates curl git cmake build-essential
+          kicad-cli --version
+
+      - uses: actions/checkout@v7
+        with:
+          # Full history: the floor ratchet reads the floor file as it was
+          # before its last change.
+          fetch-depth: 0
+
+      - name: Trust the workspace for git
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Initialize stock KiCad libraries
+        run: python3 scripts/ci/init_kicad_libraries.py
+
+      - name: Install uv
+        run: |
+          set -euo pipefail
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Install dependencies
+        run: uv sync --frozen --extra dev --python 3.12
+
+      - name: Build native router extension
+        run: |
+          uv run kct build-native
+          uv run kct build-native --check
+
+      - name: Regenerate board 07 from recipe (--step all, clean tmp directory)
+        # Same invocation as ci.yml's board-07-end-to-end. PARTIAL routing is
+        # expected (5 unroutable nets, #3438), so the recipe exits non-zero;
+        # its status is tolerated and the routed PCB's existence is the gate.
+        run: |
+          set -uo pipefail
+          rm -rf /tmp/board07-ci
+          mkdir -p /tmp/board07-ci
+          uv run python boards/07-matchgroup-test/generate_design.py \
+            /tmp/board07-ci --step all --seed 42 || true
+          test -f /tmp/board07-ci/matchgroup_test_routed.kicad_pcb
+
+      - name: Read the floor before its last change (ratchet)
+        # Parent of the last first-parent commit on this ref that touched the
+        # floor file. When that commit introduced the file there is nothing
+        # to compare against, so the shrink-only check is skipped.
+        id: prev_floor
+        run: |
+          set -euo pipefail
+          floor=.github/copper-safety-drc-floor.yml
+          last=$(git log --first-parent -n1 --format=%H -- "$floor")
+          if [ -n "$last" ] && git cat-file -e "${last}^1:${floor}" 2>/dev/null; then
+            git show "${last}^1:${floor}" > /tmp/copper-safety-prev-floor.yml
+            echo "args=--previous-floor-file /tmp/copper-safety-prev-floor.yml" >> "$GITHUB_OUTPUT"
+            echo "comparing against ${floor} at ${last}^1"
+          else
+            echo "args=" >> "$GITHUB_OUTPUT"
+            echo "no earlier ${floor} on this ref; shrink-only check skipped"
+          fi
+
+      - name: Copper-safety DRC ratchet (kicad-cli, #6738)
+        # kicad-cli exits non-zero when it finds violations, so its status is
+        # ignored (|| true) and the checker is the gate: it fails on a
+        # missing, empty or truncated report, so a killed kicad-cli never
+        # reads as 0 errors (#6724).
+        env:
+          PREV_FLOOR_ARGS: ${{ steps.prev_floor.outputs.args }}
+        run: |
+          set -uo pipefail
+          rm -f /tmp/board07-ci/drc.json
+          kicad-cli pcb drc --format json --severity-all --refill-zones \
+            -o /tmp/board07-ci/drc.json \
+            /tmp/board07-ci/matchgroup_test_routed.kicad_pcb || true
+          # PREV_FLOOR_ARGS is empty or one flag plus a path: split on purpose.
+          # shellcheck disable=SC2086
+          uv run python scripts/ci/check_copper_safety_drc.py \
+            $PREV_FLOOR_ARGS /tmp/board07-ci/drc.json
+
+      - name: Upload DRC report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: board-07-copper-safety-drc
+          path: /tmp/board07-ci/drc.json
+          if-no-files-found: ignore
