@@ -62,6 +62,7 @@ from ..pairplan.outcome import (
     REASON_NO_PATH_LAYER,
     SegmentOutcome,
     SegmentOutcomes,
+    hybrid_retry_reason,
 )
 from ..primitives import Pad, Route, Segment, Via, pad_half_extents
 from ..quantize import dogleg_points
@@ -422,6 +423,13 @@ class LatticePathfinder:
         self.pair_gateway_skip: frozenset[object] = frozenset()
         # Log line when :meth:`route_netset` re-negotiated without gateways.
         self.pair_gateway_rollback: str | None = None
+        # Issue #6446: per-end gateway verdict of the latest gateway retry,
+        # ``key -> (legal_a, legal_b)``.  ``None`` = a pad of that end owns a
+        # gateway layer (no gateway needed); an int is the most legal gateway
+        # sites found at that end on any layer tried.  ``pair_hybrid_log``
+        # holds the latest hybrid-retry diagnostic per key.
+        self.pair_gateway_ends: dict[object, tuple[int | None, int | None]] = {}
+        self.pair_hybrid_log: dict[object, str] = {}
         # Issue #4355: immovable copper from NON-listed nets (the preserved
         # ``router.existing_routes``), pre-processed into per-segment seed
         # tuples ``(layer_idx, a, b, net, half_width, clearance)`` plus via
@@ -3151,6 +3159,7 @@ class LatticePathfinder:
 
             reqs = pad_class_requirements(self)
 
+        self.pair_gateway_ends.pop(pc.key, None)
         layers = self._gateway_layers(pc)
         if not layers:
             self.pair_gateway_log[pc.key] = "gateway: no other routable layer"
@@ -3165,15 +3174,17 @@ class LatticePathfinder:
         # Issue #6836: layers that reached the combination stage, kept for the
         # pass-under group walked after EVERY layer's ``against`` group.
         staged: list[tuple[int, str, list[list[Gateway | None]], int]] = []
+        legal_ends: list[int | None] = [0, 0]
         for layer in layers:
             lname = self._layer_name(layer)
             per_end: list[list[Gateway | None]] = []
             counts: list[str] = []
-            for pad_p, pad_n, toward in ends:
+            for end_idx, (pad_p, pad_n, toward) in enumerate(ends):
                 own = set(self._pad_layer_indices(pad_p)) & set(self._pad_layer_indices(pad_n))
                 if layer in own:
                     per_end.append([None])
                     counts.append("pad")
+                    legal_ends[end_idx] = None
                     continue
                 if not own:
                     per_end.append([])
@@ -3203,6 +3214,10 @@ class LatticePathfinder:
                 )
                 per_end.append(list(found))
                 counts.append(f"{len(found)}/{legal}")
+                have = legal_ends[end_idx]
+                if have is not None:
+                    legal_ends[end_idx] = max(have, legal)
+            self.pair_gateway_ends[pc.key] = (legal_ends[0], legal_ends[1])
             gated = sum(1 for e in per_end if e and e[0] is not None)
             notes.append(f"{lname}: candidates A={counts[0]} B={counts[1]}")
             if gated == 0:
@@ -3470,6 +3485,524 @@ class LatticePathfinder:
                 continue
             best = (d, point)
         return ideal if best is None else best[1]
+
+    # -- one-ended hybrid trunk + legs (issue #6446) ----------------------------
+
+    def _pad_field_box(self, ref: str | None) -> Rect | None:
+        """Box spanning every pad (extents included) of part ``ref``, or ``None``."""
+        if not ref:
+            return None
+        cache: dict[str, Rect | None] = self.__dict__.setdefault("_pad_field_cache", {})
+        if ref not in cache:
+            boxes = []
+            for pad in self.pads:
+                if pad.ref == ref:
+                    hw, hh = pad_half_extents(pad)
+                    boxes.append((pad.x - hw, pad.y - hh, pad.x + hw, pad.y + hh))
+            cache[ref] = (
+                (
+                    min(b[0] for b in boxes),
+                    min(b[1] for b in boxes),
+                    max(b[2] for b in boxes),
+                    max(b[3] for b in boxes),
+                )
+                if boxes
+                else None
+            )
+        return cache[ref]
+
+    def _search_hybrid_leg(
+        self,
+        item: Connection,
+        strict: LatticePairwise | None,
+        floor: float,
+        *,
+        committed: CommittedCopper,
+        history: dict[Resource, float],
+        present: float,
+        escape_plan: dict[int, EscapeChoice],
+    ) -> tuple[_RouteResult | None, str]:
+        """One single-ended hybrid leg, held to every pad's own class.
+
+        The same search a partner-aware fallback leg gets (see
+        :meth:`_partner_aware_legs`): ``strict`` / ``floor`` come from
+        :meth:`_strict_pad_pairwise`.
+        """
+        previous = self._pairwise
+        if strict is not None:
+            self._pairwise = strict
+        self._search_clearance_floor = floor
+        try:
+            return self._search_single(
+                item,
+                committed=committed,
+                history=history,
+                present=present,
+                escape_plan=escape_plan,
+            )
+        finally:
+            self._pairwise = previous
+            self._search_clearance_floor = 0.0
+
+    def _route_pair_hybrid(
+        self,
+        pc: CoupledConnection,
+        *,
+        committed: CommittedCopper,
+        history: dict[Resource, float],
+        present: float,
+        escape_plan: dict[int, EscapeChoice],
+        deadline: float | None = None,
+        vias_used: int = 0,
+    ) -> tuple[_PairResult | None, str]:
+        """Couple what can couple of a declined segment: trunk + legs (#6446).
+
+        Runs after the planar attempt AND the 2a gateway retry declined.  The
+        coupled **trunk** runs from the *easy end* (planar on its pad layer)
+        to a **trunk start** outside the *hard end*'s pad field
+        (:func:`~..pairplan.hybrid.propose_trunk_starts`), and each net
+        reaches the start through its own single-ended leg (vias allowed),
+        searched like a partner-aware fallback leg.
+
+        The hard end comes from the gateway retry's per-end verdict
+        (:attr:`pair_gateway_ends`): the end with no legal fan-via site on any
+        layer tried.  When BOTH ends are hard the segment is left to the
+        fallback (v1 hybrids one end only).  When neither is -- the gateway
+        retry found sites at both ends but no body joined them (a BGA ring
+        that only a single trace crosses) -- each end is tried as the hard one,
+        the part with more pads (the area array) first.
+
+        Per (trunk layer, start, P/N ordering), in a rolled-back trial: the
+        trunk is routed by the unchanged pair agent between virtual site pads
+        (:meth:`_try_hybrid_start`), then P's leg, then N's leg against the
+        committed trunk.  The first candidate whose trunk is at least
+        :data:`MIN_TRUNK_PITCHES` pitches long, whose legs each stay within the
+        per-terminal cap (the declared ``max_uncoupled_per_terminal_mm``, else
+        the :data:`HYBRID_MAX_LEG_MM` search bound) and whose vias fit the
+        protocol's per-net limit wins; **an over-budget hybrid is never
+        emitted**.  The caller commits the result, all or nothing (#3906).
+        The outcome text for the log lands in :attr:`pair_hybrid_log` either
+        way.  On success the second return value is the hard terminal
+        (``"U4.B1"``, the outcome label's tail), else the decline reason.
+        """
+        key = pc.key
+        verdict = self.pair_gateway_ends.get(key)
+        if verdict is None:
+            self.pair_hybrid_log[key] = (
+                "hybrid declined (hybrid-no-verdict): the gateway retry recorded no per-end verdict"
+            )
+            return None, "pair-hybrid-no-verdict"
+        zero = [legal == 0 for legal in verdict]
+        if all(zero):
+            self.pair_hybrid_log[key] = (
+                f"hybrid declined (hybrid-both-ends-hard): both ends hard "
+                f"({pc.pad_p_a.ref}.{pc.pad_p_a.pin} / {pc.pad_p_b.ref}.{pc.pad_p_b.pin}); "
+                "v1 hybrids one end only"
+            )
+            return None, "pair-hybrid-both-ends-hard"
+        if any(zero):
+            order = [zero[0]]  # the end with no legal site is the hard one
+        else:
+            counts = [
+                sum(1 for p in self.pads if p.ref == pad.ref) for pad in (pc.pad_p_a, pc.pad_p_b)
+            ]
+            order = [True, False] if counts[0] >= counts[1] else [False, True]
+        notes: list[str] = []
+        reason = "pair-hybrid-no-path"
+        for hard_a in order:
+            pres, why, note = self._route_pair_hybrid_end(
+                pc,
+                hard_a=hard_a,
+                committed=committed,
+                history=history,
+                present=present,
+                escape_plan=escape_plan,
+                deadline=deadline,
+                vias_used=vias_used,
+            )
+            if pres is not None:
+                return pres, why
+            notes.append(note)
+            if reason == "pair-hybrid-no-path" or why == "pair-hybrid-leg-budget":
+                reason = why
+            if why == "pair-hybrid-deadline":
+                break
+        self.pair_hybrid_log[key] = (
+            f"hybrid declined ({reason.removeprefix('pair-')}): " + "; ".join(notes)
+        )
+        return None, reason
+
+    def _route_pair_hybrid_end(
+        self,
+        pc: CoupledConnection,
+        *,
+        hard_a: bool,
+        committed: CommittedCopper,
+        history: dict[Resource, float],
+        present: float,
+        escape_plan: dict[int, EscapeChoice],
+        deadline: float | None,
+        vias_used: int,
+    ) -> tuple[_PairResult | None, str, str]:
+        """One hybrid attempt with end A (``hard_a``) or end B as the hard one.
+
+        Returns ``(result, hard terminal | reason, log note)``; the log line
+        of a success is written here.  See :meth:`_route_pair_hybrid`.
+        """
+        from ..pairplan.hybrid import (
+            HYBRID_MAX_LEG_MM,
+            MAX_CONSECUTIVE_TRUNK_MISSES,
+            MAX_TRUNK_SEARCHES,
+            propose_trunk_starts,
+        )
+
+        key = pc.key
+        if hard_a:
+            hard_p, hard_n, easy_p, easy_n, easy_mid = (
+                pc.pad_p_a,
+                pc.pad_n_a,
+                pc.pad_p_b,
+                pc.pad_n_b,
+                pc.mid_b,
+            )
+        else:
+            hard_p, hard_n, easy_p, easy_n, easy_mid = (
+                pc.pad_p_b,
+                pc.pad_n_b,
+                pc.pad_p_a,
+                pc.pad_n_a,
+                pc.mid_a,
+            )
+        terminal = f"{hard_p.ref}.{hard_p.pin}"
+        field_box = self._pad_field_box(hard_p.ref)
+        if field_box is None:
+            return None, "pair-hybrid-no-pad-field", f"hard terminal {terminal} has no part"
+
+        net_p, net_n = pc.pad_p_a.net, pc.pad_n_a.net
+        trace_w = getattr(pc.net_class, "trace_width", None) or self.rules.trace_width
+        half = trace_w / 2.0
+        clr = max(
+            self._conn_geometry(pc.net_class, net_p)[1],
+            self._conn_geometry(pc.net_class, net_n)[1],
+        )
+        max_fan, max_vias = self.pair_gateway_limits.get(key, (None, None))
+        cap = max_fan if max_fan is not None else HYBRID_MAX_LEG_MM
+        cap_text = f"{cap:.1f} mm, {'declared' if max_fan is not None else 'engine bound'}"
+        # The legs end ``site_gap`` apart; each site must clear the PARTNER's
+        # trunk body (``pitch`` apart, so ``site_gap / 2 + pitch / 2`` from
+        # it) by a full trace + clearance, or its leg could not reach it.
+        site_gap = 2.0 * (trace_w + clr) - pc.pitch + 0.02
+        starts = propose_trunk_starts(
+            (hard_p.x, hard_p.y),
+            (hard_n.x, hard_n.y),
+            easy_mid,
+            field_box,
+            site_gap=site_gap,
+            max_leg_mm=cap,
+        )
+        if not starts:
+            return (
+                None,
+                "pair-hybrid-no-trunk-start",
+                f"hard terminal {terminal}: no trunk start within {cap_text} of the pads",
+            )
+
+        blocked = self._hard_avoided_layers(pc.net_class)
+        hard_layers = set(self._pad_layer_indices(hard_p)) & set(self._pad_layer_indices(hard_n))
+        trunk_layers = sorted(
+            (
+                set(self._pad_layer_indices(easy_p))
+                & set(self._pad_layer_indices(easy_n))
+                & set(range(self.num_layers))
+            )
+            - blocked,
+            key=lambda layer: (layer not in hard_layers, layer),
+        )
+        if not trunk_layers:
+            return (
+                None,
+                "pair-hybrid-no-trunk-layer",
+                f"hard terminal {terminal}: the easy end's pads share no usable layer",
+            )
+
+        items = {
+            pol: ((key, pol), real, real, pc.net_class)
+            for pol, real in (("P", hard_p), ("N", hard_n))
+        }
+        strict, floor = self._strict_pad_pairwise(pc, items)
+        reqs = None
+        if self.pad_class_clearances is not None:
+            from .class_pad_repair import pad_class_requirements
+
+            reqs = pad_class_requirements(self)
+        shortest: tuple[float, float] | None = None
+        reason = "pair-hybrid-no-path"
+        searches = 0
+        for layer in trunk_layers:
+            misses = 0
+            for start in starts:
+                if deadline is not None and time.monotonic() >= deadline:
+                    return None, "pair-hybrid-deadline", f"hard terminal {terminal}: deadline"
+                # Bounded: one fat A* per trial, and a trunk that finds no
+                # way several starts running will not find one farther out.
+                if searches >= MAX_TRUNK_SEARCHES or misses >= MAX_CONSECUTIVE_TRUNK_MISSES:
+                    break
+                searches += 1
+                pres, why, legs, trunk_mm = self._try_hybrid_start(
+                    pc,
+                    hard_a=hard_a,
+                    layer=layer,
+                    start=start,
+                    committed=committed,
+                    history=history,
+                    present=present,
+                    escape_plan=escape_plan,
+                    strict=strict,
+                    floor=floor,
+                    reqs=reqs,
+                    cap=cap,
+                    max_vias=max_vias,
+                    vias_used=vias_used,
+                    half=half,
+                    clr=clr,
+                )
+                # Only a failure of the trunk body counts (an exhausted A*, or a
+                # body through a pad's class floor): the easy end itself is then
+                # the probable blocker.  A site-local failure (pad attach,
+                # intra-pair clearance) says nothing about a farther start.
+                misses = (
+                    misses + 1
+                    if why.startswith(("pair-hybrid-trunk-no-path", "pair-hybrid-trunk-pad-class"))
+                    else 0
+                )
+
+                if legs is not None and (shortest is None or max(legs) < max(shortest)):
+                    shortest = legs
+                if pres is None:
+                    # An over-budget leg is the informative decline.
+                    if why == "pair-hybrid-leg-budget" or reason == "pair-hybrid-no-path":
+                        reason = why
+                    continue
+                lens = legs or (0.0, 0.0)
+                self.pair_hybrid_log[key] = (
+                    f"hybrid {self._layer_name(layer)} trunk from {terminal}: "
+                    f"trunk {trunk_mm:.1f} mm, {start.describe()}; "
+                    f"legs P/N={lens[0]:.1f}/{lens[1]:.1f} mm (cap {cap_text}); "
+                    f"vias P/N={sum(1 for v, _s in pres.vias if v == net_p)}/"
+                    f"{sum(1 for v, _s in pres.vias if v == net_n)}"
+                )
+                return pres, terminal, ""
+        if shortest is not None:
+            note = (
+                f"hard terminal {terminal}: shortest legs found P/N="
+                f"{shortest[0]:.1f}/{shortest[1]:.1f} mm vs cap {cap_text}"
+            )
+        else:
+            note = (
+                f"hard terminal {terminal}: no leg routed from {searches} trunk search(es) "
+                f"({reason.removeprefix('pair-hybrid-')})"
+            )
+        return None, reason, note
+
+    def _try_hybrid_start(
+        self,
+        pc: CoupledConnection,
+        *,
+        hard_a: bool,
+        layer: int,
+        start: Any,
+        committed: CommittedCopper,
+        history: dict[Resource, float],
+        present: float,
+        escape_plan: dict[int, EscapeChoice],
+        strict: LatticePairwise | None,
+        floor: float,
+        reqs: list[float] | None,
+        cap: float,
+        max_vias: int | None,
+        vias_used: int,
+        half: float,
+        clr: float,
+    ) -> tuple[_PairResult | None, str, tuple[float, float] | None, float]:
+        """One (trunk layer, trunk start, ordering) candidate; see the caller.
+
+        Returns ``(result, reason, leg lengths, trunk length)``; the leg
+        lengths are set once both legs routed (also on a budget decline, for
+        the log).  Everything is rolled back; the caller commits the winner.
+        """
+        from ..pairplan.hybrid import MIN_TRUNK_PITCHES
+
+        hard_p, hard_n = (pc.pad_p_a, pc.pad_n_a) if hard_a else (pc.pad_p_b, pc.pad_n_b)
+        measure = self.pair_length_measure or _default_pair_length
+        layer_enum = self.layer_stack.index_to_layer_enum(layer)
+
+        def vsite(real: Pad, pt: Pt) -> Pad:
+            return replace(
+                real,
+                x=pt[0],
+                y=pt[1],
+                width=0.0,
+                height=0.0,
+                layer=layer_enum,
+                through_hole=False,
+                drill=0.0,
+            )
+
+        # The coupled body starts at a lattice node beyond the sites along the
+        # trunk heading (where its envelope clears both), joined to them by
+        # the unchanged ``_pair_attach`` doglegs (a gateway's anchor, #6444).
+        reach = dist(start.site_p, start.site_n) + pc.pitch / 2.0 + half
+        placed = self._hybrid_anchor(start, reach)
+        if placed is None:
+            return None, "pair-hybrid-anchor", None, 0.0
+        anchor, site_p, site_n = placed
+        v_p, v_n = vsite(hard_p, site_p), vsite(hard_n, site_n)
+        vpc = (
+            replace(pc, pad_p_a=v_p, pad_n_a=v_n, anchor_a=anchor)
+            if hard_a
+            else replace(pc, pad_p_b=v_p, pad_n_b=v_n, anchor_b=anchor)
+        )
+        mark = committed.begin_trial()
+        try:
+            trunk, why = self._route_pair_impl(
+                vpc, committed=committed, history=history, present=present, layers=(layer,)
+            )
+            if trunk is None:
+                return None, f"pair-hybrid-trunk-{why.removeprefix('pair-')}", None, 0.0
+            trunk_mm = min(
+                sum(dist(a, b) for a, b in zip(pts, pts[1:], strict=False))
+                for _n, _l, pts in trunk.runs
+            )
+            if trunk_mm < MIN_TRUNK_PITCHES * pc.pitch:
+                return None, "pair-hybrid-trunk-short", None, trunk_mm
+            # Pair-owned copper is never moved by the class-pad repair (and the
+            # #6489 growth rounds cannot steer a fat trunk), so the trunk is
+            # held to every pad's own class here, exactly as a gateway's body
+            # is: a trunk that would leave a shortfall behind is declined by
+            # name instead of coupling and being demoted after the fact.
+            for net, run_layer, pts in trunk.runs:
+                for a, b in zip(pts, pts[1:], strict=False):
+                    if not self._gateway_pad_class_clear(a, b, run_layer, net, half, reqs):
+                        return None, "pair-hybrid-trunk-pad-class", None, trunk_mm
+            for net, run_layer, pts in trunk.runs:
+                committed.add_run(run_layer, pts, net, half, clr)
+            legs: dict[str, _RouteResult] = {}
+            for pol, real, virt in (("P", hard_p, v_p), ("N", hard_n, v_n)):
+                item: Connection = ((pc.key, pol), real, virt, pc.net_class)
+                res, why = self._search_hybrid_leg(
+                    item,
+                    strict,
+                    floor,
+                    committed=committed,
+                    history=history,
+                    present=present,
+                    escape_plan=escape_plan,
+                )
+                if res is None:
+                    return None, f"pair-hybrid-leg-{why.removeprefix('pair-')}", None, trunk_mm
+                end = res.runs[-1][1][-1] if res.runs and res.runs[-1][1] else None
+                if end is None or dist(end, (virt.x, virt.y)) > 1e-6:
+                    return None, "pair-hybrid-leg-end", None, trunk_mm
+                legs[pol] = res
+                self._commit_single(item, res, {}, committed)
+        finally:
+            committed.rollback_trial(mark)
+
+        lens = (measure(legs["P"].route), measure(legs["N"].route))
+        if max(lens) > cap + 1e-9:
+            return None, "pair-hybrid-leg-budget", lens, trunk_mm
+        vias_p, vias_n = len(legs["P"].route.vias), len(legs["N"].route.vias)
+        if max_vias is not None and max(vias_p, vias_n) + vias_used > max_vias:
+            return None, "pair-hybrid-via-limit", lens, trunk_mm
+
+        # The legs too: the search held them to the pad classes, but a leg is
+        # pair-owned from here on and no later repair may move it.
+        for pol in ("P", "N"):
+            leg_net = hard_p.net if pol == "P" else hard_n.net
+            for run_layer, pts, widths in legs[pol].runs:
+                for (a, b), w in zip(zip(pts, pts[1:], strict=False), widths, strict=False):
+                    if dist(a, b) > 1e-9 and not self._gateway_pad_class_clear(
+                        a, b, run_layer, leg_net, w / 2.0, reqs
+                    ):
+                        return None, "pair-hybrid-leg-pad-class", lens, trunk_mm
+
+        # Junction: each leg against the PARTNER's trunk (the search above
+        # already held it to the class clearance; this re-verifies the
+        # emitted geometry the way ``finish`` does for a coupled pair).
+        trunk_segs: dict[int, list[tuple[Pt, Pt, int]]] = {}
+        for net, run_layer, pts in trunk.runs:
+            trunk_segs.setdefault(net, []).extend(
+                (a, b, run_layer) for a, b in zip(pts, pts[1:], strict=False) if dist(a, b) > 1e-9
+            )
+        for pol, other in (("P", pc.pad_n_a.net), ("N", pc.pad_p_a.net)):
+            for run_layer, pts, _w in legs[pol].runs:
+                for a, b in zip(pts, pts[1:], strict=False):
+                    for c, d, trunk_layer in trunk_segs[other]:
+                        if trunk_layer == run_layer and seg_seg_dist(a, b, c, d) < (
+                            2.0 * half + clr - 1e-4
+                        ):
+                            return None, "pair-hybrid-junction", lens, trunk_mm
+
+        routes: list[Route] = []
+        runs: list[tuple[int, int, list[Pt]]] = []
+        vias: list[tuple[int, Pt]] = []
+        resources = set(trunk.resources)
+        for idx, pol in enumerate(("P", "N")):
+            leg = legs[pol]
+            net = trunk.routes[idx].net
+            route = Route(net=net, net_name=trunk.routes[idx].net_name)
+            route.segments.extend(leg.route.segments)
+            route.vias.extend(leg.route.vias)
+            route.segments.extend(trunk.routes[idx].segments)
+            routes.append(route)
+            for run_layer, pts, _w in leg.runs:
+                runs.append((net, run_layer, list(pts)))
+            vias.extend((net, pt) for pt in leg.via_points)
+            resources |= leg.resources
+        runs.extend(trunk.runs)
+        pres = _PairResult(routes=routes, runs=runs, resources=resources, vias=vias)
+        return pres, "ok", lens, trunk_mm
+
+    def _hybrid_anchor(self, start: Any, reach: float) -> tuple[Pt, Pt, Pt] | None:
+        """``(anchor, site P, site N)`` of a hybrid trunk start (issue #6446).
+
+        The coupled body must start at a lattice node (an off-node start makes
+        the fat stub a dogleg whose ``+/- pitch/2`` offset collapses), and its
+        centreline must leave the sites' midpoint exactly ALONG the heading so
+        the two attach doglegs mirror each other and never dip under the pair
+        pitch.  So the anchor is the lattice node nearest the ideal point
+        ``reach`` ahead of the sites, and the sites then slide sideways with
+        it (at most half a lattice cell) instead of the anchor sliding off the
+        axis the way :meth:`_gateway_anchor` lets it.  ``None`` when no node
+        within 1 mm lies at least ``reach`` ahead.
+        """
+        from ..pairplan.gateway import HEADINGS
+
+        h = HEADINGS[start.heading]
+        mid = (
+            (start.site_p[0] + start.site_n[0]) / 2.0,
+            (start.site_p[1] + start.site_n[1]) / 2.0,
+        )
+        ideal = (mid[0] + h[0] * reach, mid[1] + h[1] * reach)
+        best: tuple[float, Pt] | None = None
+        for point in self.build().nodes.values():
+            d = dist(point, ideal)
+            if d > 1.0 or (best is not None and d >= best[0]):
+                continue
+            if (point[0] - mid[0]) * h[0] + (point[1] - mid[1]) * h[1] < reach - 1e-9:
+                continue
+            best = (d, point)
+        if best is None:
+            return None
+        node = best[1]
+        ahead = (node[0] - mid[0]) * h[0] + (node[1] - mid[1]) * h[1]
+        centre = (node[0] - h[0] * ahead, node[1] - h[1] * ahead)
+        shift = (centre[0] - mid[0], centre[1] - mid[1])
+        return (
+            node,
+            (start.site_p[0] + shift[0], start.site_p[1] + shift[1]),
+            (start.site_n[0] + shift[0], start.site_n[1] + shift[1]),
+        )
 
     def _layer_name(self, layer: int) -> str:
         try:
@@ -4023,6 +4556,7 @@ class LatticePathfinder:
             self._lattice,
             self._obstacles,
         )
+        saved_hybrid = dict(self.pair_hybrid_log)
         if self._class_pad_growth:
             self._lattice = None  # rebuild without the gateway run's growth
             self._obstacles = None
@@ -4037,6 +4571,7 @@ class LatticePathfinder:
                 f"re-negotiated without gateways ({alt_left} left): kept"
             )
             self.pair_gateway_log = {}  # the kept run attempted no gateway
+            self.pair_hybrid_log = {}  # ... and so no hybrid (it follows the gateway)
             return alt
         (
             self.failure_reasons,
@@ -4049,6 +4584,7 @@ class LatticePathfinder:
             self._lattice,
             self._obstacles,
         ) = saved
+        self.pair_hybrid_log = saved_hybrid
         self.pair_gateway_rollback = (
             f"gateway run left {left} class-pad shortfall(s); a run without gateways "
             f"was no better ({alt_left} left): gateways kept"
@@ -4154,6 +4690,7 @@ class LatticePathfinder:
                     self._lattice,
                     self._obstacles,
                 )
+                saved_hybrid = dict(self.pair_hybrid_log)
                 self._class_pad_growth.update(grow)
                 self._lattice = None
                 self._obstacles = None
@@ -4189,6 +4726,7 @@ class LatticePathfinder:
                     self._lattice,
                     self._obstacles,
                 ) = saved
+                self.pair_hybrid_log = saved_hybrid
             if not kept:
                 break
         routes, stats = best
@@ -4345,10 +4883,11 @@ class LatticePathfinder:
         # once.  Both stay monotone in "more coupling is better": a pass that
         # couples more segments at equal completion still wins, and the
         # fallback / congested-probe logic below applies per segment.
-        best_score: tuple[int, int, int] = (-1, -1, -1)
+        best_score: tuple[int, int, int, int] = (-1, -1, -1, -1)
         # Leg-unit accounting of the best pass for the honest stats.
         best_fallback_pairs = 0
         best_fallback_legs = 0
+        best_hybrid_pairs = 0
         converged = False
         iterations_run = 0
         present = present_cost_initial
@@ -4384,9 +4923,14 @@ class LatticePathfinder:
             fallback_pairs: list[Any] = []
             fallback_legs = 0
             coupled_count = 0
+            hybrid_count = 0
             deferred_fallback: list[Any] = []
             # Issue #6444: declined segments awaiting their gateway retry.
             deferred_gateway: list[tuple[Any, str]] = []
+            # Issue #6446: segments whose gateway retry declined, awaiting
+            # their one-ended hybrid retry; and the ones that got one.
+            deferred_hybrid: list[Any] = []
+            hybrid_pairs: list[Any] = []
             pass_gateways: dict[object, str] = {}
 
             def commit_pair(item: Any, pres: _PairResult) -> None:
@@ -4425,7 +4969,7 @@ class LatticePathfinder:
                 deferred_gateway.clear()
                 for item, preason in pending:
                     if deadline is not None and time.monotonic() >= deadline:
-                        gres = None
+                        gres, _greason = None, "pair-gateway-deadline"
                     else:
                         gres, _greason = self._route_pair_gateway(
                             item,
@@ -4439,6 +4983,8 @@ class LatticePathfinder:
                         if not uncoupled_fallback:
                             reasons[item.key] = preason
                             failed.append((1, item))
+                        elif hybrid_retry_reason(_greason):
+                            deferred_hybrid.append(item)
                         continue
                     pass_gateways[item.key] = gres.gateway or "gateway"
                     pair_outcomes[item.key] = SegmentOutcome.coupled(pass_gateways[item.key])
@@ -4451,9 +4997,39 @@ class LatticePathfinder:
                         fallback_pairs.remove(item)
                     commit_pair(item, gres)
 
+            def flush_hybrids() -> None:
+                nonlocal routed_items, hybrid_count
+                pending = list(deferred_hybrid)
+                deferred_hybrid.clear()
+                for item in pending:
+                    if deadline is not None and time.monotonic() >= deadline:
+                        break
+                    hres, terminal = self._route_pair_hybrid(
+                        item,
+                        committed=committed,
+                        history=history,
+                        present=present,
+                        escape_plan=escape_plan,
+                        deadline=deadline,
+                        vias_used=pair_vias_used(item),
+                    )
+                    if hres is None:
+                        continue  # keeps its uncoupled fallback
+                    pair_outcomes[item.key] = SegmentOutcome.hybrid(terminal)
+                    hybrid_count += 1
+                    routed_items += 1
+                    reasons.pop(item.key, None)
+                    if item in deferred_fallback:
+                        deferred_fallback.remove(item)
+                    if item in fallback_pairs:
+                        fallback_pairs.remove(item)
+                    hybrid_pairs.append(item)
+                    commit_pair(item, hres)
+
             def flush_fallbacks() -> None:
                 nonlocal routed_items, fallback_legs
                 flush_gateways()
+                flush_hybrids()
                 if not deferred_fallback:
                     return
                 # Issue #6703: the legs are routed partner-aware so a pair's
@@ -4552,9 +5128,9 @@ class LatticePathfinder:
             flush_fallbacks()
 
             score = (
-                (routed_items, coupled_count, fallback_legs)
+                (routed_items, coupled_count, hybrid_count, fallback_legs)
                 if uncoupled_fallback
-                else (routed_items, 0, 0)
+                else (routed_items, 0, 0, 0)
             )
             if escape_plan and score <= best_score:
                 # A local reservation is a proposal, not a permanent lock.
@@ -4570,6 +5146,7 @@ class LatticePathfinder:
                 best_pair_gateways = pass_gateways
                 best_fallback_pairs = len(fallback_pairs)
                 best_fallback_legs = fallback_legs
+                best_hybrid_pairs = hybrid_count
 
             # Issue #4472: a deadline-truncated pass is NOT convergence -- some
             # items were never attempted, so ``failed`` is incomplete.  Record
@@ -4589,8 +5166,11 @@ class LatticePathfinder:
             # the same fresh board a second time.
             congested_fallback: list[Any] = []
             fallback_probes: dict[object, Any] = {}
-            if fallback_pairs and it < max_iterations - 1:
-                for pc in fallback_pairs:
+            if (fallback_pairs or hybrid_pairs) and it < max_iterations - 1:
+                # Issue #6446: a hybrid is better than the fallback but still
+                # not the coupled outcome negotiation aims for, so it stays in
+                # the probe set and may be recovered as fully ``coupled``.
+                for pc in [*fallback_pairs, *hybrid_pairs]:
                     probe, _r = self._route_pair_impl(
                         pc, committed=self._fresh_committed(), history=history, present=present
                     )
@@ -4712,11 +5292,16 @@ class LatticePathfinder:
                 and (pc.key, "N") in best_routes
             )
             routed_units += best_fallback_legs - full_pairs
+        # Issue #6446: a hybrid pair is a trunk plus two single-ended legs, so
+        # like a fallback pair it counts as two units -- swapping a fallback
+        # for a hybrid must not read as a lost connection to the callers that
+        # compare ``routed`` (the #6489 pad-growth rounds, the gateway rollback).
+        routed_units += best_hybrid_pairs
         stats = LatticeNegotiationStats(
             iterations=iterations_run,
             converged=converged,
             routed=routed_units,
-            total=len(connections) + len(pairs) + best_fallback_pairs,
+            total=len(connections) + len(pairs) + best_fallback_pairs + best_hybrid_pairs,
             lattice_builds=self.lattice_builds,
             deadline_hit=deadline_hit,
             elapsed_s=time.monotonic() - start_time,
