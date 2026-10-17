@@ -20262,12 +20262,14 @@ def _check_explicit_grid_ceiling(pcb_path: Path, args, argv) -> int | None:
         return None
     if not dims or not layer_counts:
         return None
+    clearance = getattr(args, "clearance", None)
     message = explicit_grid_ceiling_error(
         width=dims[0],
         height=dims[1],
         resolution=float(args.grid),
         num_layers=max(layer_counts),
         backend=resolve_limit_backend(getattr(args, "backend", "auto")),
+        clearance=clearance if isinstance(clearance, (int, float)) else None,
     )
     if message is None:
         return None

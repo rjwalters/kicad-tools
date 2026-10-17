@@ -337,6 +337,41 @@ def merge_collinear_points(points: list[Pt]) -> list[Pt]:
     return out
 
 
+def trim_end_reversals(points: list[Pt]) -> list[Pt]:
+    """Trim a collinear overshoot-and-return at either end of a polyline.
+
+    The lattice search can reach a node beyond the goal anchor and append a
+    goal stub that returns along the same line, leaving a 180-degree
+    reversal on the last (or first) edge.  :func:`offset_polyline` cannot
+    offset that, so replace the two reversing steps ``a -> b -> p`` with the
+    single step ``a -> p`` (``p`` lies on segment ``a``-``b``).  When ``p``
+    coincides with ``a`` the whole out-and-back spur is dropped.
+
+    Only the first and last two steps are considered: a reversal in the
+    middle of the path is a genuine defect and must still decline.  The
+    caller re-verifies the trimmed centerline like any other.
+    """
+    pts = merge_collinear_points(points)
+
+    def trim_tail(seq: list[Pt]) -> list[Pt]:
+        while len(seq) >= 3:
+            a, b, p = seq[-3], seq[-2], seq[-1]
+            d1 = (b[0] - a[0], b[1] - a[1])
+            d2 = (p[0] - b[0], p[1] - b[1])
+            cross = d1[0] * d2[1] - d1[1] * d2[0]
+            dot = d1[0] * d2[0] + d1[1] * d2[1]
+            if abs(cross) > _EPS or dot >= 0.0 or dist(b, p) > dist(a, b) + _EPS:
+                break
+            # p is on segment a-b: drop the overshoot vertex b (and p too
+            # when it lands back on a, so the spur vanishes entirely).
+            seq = seq[:-2] if dist(a, p) <= _EPS else [*seq[:-2], p]
+        return seq
+
+    pts = trim_tail(pts)
+    pts = trim_tail(pts[::-1])[::-1]
+    return merge_collinear_points(pts)
+
+
 def offset_polyline(points: list[Pt], offset: float) -> list[Pt] | None:
     """Offset ``points`` perpendicular by ``offset`` (left of travel > 0).
 

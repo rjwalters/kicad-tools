@@ -1,15 +1,30 @@
 name: CI
 
+# Main-branch runs (Issue #5986; 2AMLogic/2am docs/ci.md "Default-branch
+# runs"): main is NOT verified on every merge any more. A PR already ran the
+# suite on its own head, so main runs on a schedule against the NEWEST main
+# commit and skips the merges in between (~20 merges/day x ~47 job-min each
+# was ~935 job-min/day on main, most of it on the self-hosted `kicad` slots).
+#   - hourly (minute 17 of every hour except 04): the full main verification,
+#     skipped (every job, via the `kicad_pin` job's `skip` output) when the
+#     newest main commit already has a successful non-PR CI run;
+#   - nightly ("17 4 * * *", Issue #5743): the same full verification, never
+#     skipped, so the from-scratch routing regressions run at least daily even
+#     on a day with no merges;
+#   - workflow_dispatch: an on-demand full verification, never skipped (the
+#     daily release gate in scripts/release_plan.py dispatches one when the
+#     SHA it gates has no main run yet).
+# Every non-`pull_request` event is therefore a "main verification run", and
+# the job gates below test `github.event_name != 'pull_request'` (never
+# `== 'push'`, which would now silently skip them). A break that only appears
+# after merging is found up to one window later and may span several merges.
 on:
-  push:
-    branches: [main]
   pull_request:
     branches: [main]
-  # Nightly run (Issue #5743): only jobs that opt in via
-  # `github.event_name == 'schedule'` (currently the Diff-Pair Routing
-  # Regression job) run on this trigger; everything else is skipped.
   schedule:
+    - cron: "17 0-3,5-23 * * *"
     - cron: "17 4 * * *"
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -38,10 +53,11 @@ env:
 # cancels the run it supersedes -- a third of the ~370 daily runs were
 # superseded and still ran all 18 jobs to completion. main: a running
 # verification is never cancelled, but GitHub keeps only the newest PENDING
-# run per group, so the ~80 merges a day collapse to "one running, one
-# waiting" instead of the 13-deep queue of stale main runs that, together with
-# the superseded PR runs, held every job 70-100 min in queue against this
-# account's 40-job GitHub-hosted concurrency cap.
+# run per group, so main runs collapse to "one running, one waiting" (the
+# waiting one replaced by a newer one) instead of a deep queue of stale main
+# runs. Scheduled runs (hourly and nightly) share the `nightly` key; a
+# workflow_dispatch run on main lands in the `ci` key. Since Issue #5986 main
+# runs come from the schedule above, not from every merge.
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}-${{ github.event_name == 'schedule' && 'nightly' || 'ci' }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
@@ -50,26 +66,65 @@ jobs:
   # Bridge job (#5682): republishes the workflow-level KICAD_IMAGE env value
   # (the single digest source of truth above) into the `needs` context, since
   # `container.image` cannot reference the `env` context directly. Runs on
-  # every event with no `if:` gate -- including main pushes, where the
-  # PR-only `changes` job below is skipped -- so the 12 container jobs always
-  # resolve a non-empty image.
+  # every event with no `if:` gate -- including main verification runs, where
+  # the PR-only `changes` job below is skipped -- so the 12 container jobs
+  # always resolve a non-empty image.
+  #
+  # It also publishes `skip` (Issue #5986): 'true' only on the HOURLY
+  # schedule when the commit being verified (the newest main) already has a
+  # successful non-PR CI run, so the hour exits after this job and the
+  # cheap, unconditional `lint`. Every other job gates on
+  # `needs.kicad_pin.outputs.skip != 'true'`. Never set on
+  # pull_request, the nightly cron or workflow_dispatch. Fail-open: if the
+  # lookup itself errors, `skip` stays 'false' and the full run proceeds.
   kicad_pin:
     name: KiCad image pin (env -> needs bridge)
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
     outputs:
       image: ${{ steps.pin.outputs.image }}
+      skip: ${{ steps.green.outputs.skip || 'false' }}
     steps:
       - name: Publish KICAD_IMAGE into the needs context
         id: pin
         run: echo "image=${KICAD_IMAGE}" >> "$GITHUB_OUTPUT"
+
+      - name: Skip the hourly run if newest main is already verified
+        id: green
+        if: github.event_name == 'schedule' && github.event.schedule != '17 4 * * *'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          # A successful run of any non-pull_request event (an earlier hourly
+          # run, the nightly, a dispatch) on this exact SHA already verified
+          # it. PR runs never count: their head is not the merge commit and
+          # they skip jobs through the `changes` filter.
+          if n="$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?head_sha=${GITHUB_SHA}&status=success&per_page=100" \
+                --jq "[.workflow_runs[] | select(.event != \"pull_request\" and .id != ${GITHUB_RUN_ID})] | length")"; then
+            :
+          else
+            echo "::warning::could not query earlier CI runs; running the full suite (fail-open)"
+            n=0
+          fi
+          if [ "${n:-0}" -gt 0 ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "Newest main ${GITHUB_SHA} already has ${n} successful CI run(s); skipping this hourly run." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
   # Detect whether a PR touches anything CI can act on. 55 of the last 60 PRs
   # touched src/ or tests/ (measured 2026-09-11, 2AMLogic/2am#29), and every
   # board job legitimately depends on the router source, so this is NOT a
   # per-job path map -- it is a single "docs/site/agent-config only?" gate
   # that spares the ~8% of PRs which change only content the full
-  # ~115 job-minutes. main pushes always run everything. If detection itself
-  # fails, every job runs (fail-open), so a broken filter can only cost
-  # minutes, never a false green. Content contracts still run in lint.
+  # ~115 job-minutes. Main verification runs (schedule / workflow_dispatch)
+  # always run everything. If detection itself fails, every job runs
+  # (fail-open), so a broken filter can only cost minutes, never a false
+  # green. Content contracts still run in lint.
   changes:
     name: Detect Changes
     runs-on: ubuntu-latest
@@ -167,6 +222,9 @@ jobs:
               - '!boards/07-matchgroup-test/**'
 
   lint:
+    # Deliberately unconditional (no `needs`/`if`): the content contracts must
+    # run on every event, so even an hourly run that skips everything else
+    # (#5986) still runs this cheap job (tests/test_content_contract_gate.py).
     name: Lint & Format
     runs-on: ubuntu-latest
     steps:
@@ -222,8 +280,9 @@ jobs:
         run: node scripts/ci/verify_changes_filter.mjs
 
   typecheck:
-    if: github.event_name != 'schedule'
     name: Type Check
+    needs: kicad_pin
+    if: needs.kicad_pin.outputs.skip != 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -258,7 +317,7 @@ jobs:
   test:
     name: Test
     needs: [changes, kicad_pin]
-    if: ${{ !cancelled() && (github.event_name == 'push' || needs.changes.outputs.code == 'true' || needs.changes.result == 'failure') }}
+    if: ${{ !cancelled() && ((github.event_name != 'pull_request' && needs.kicad_pin.outputs.skip != 'true') || needs.changes.outputs.code == 'true' || needs.changes.result == 'failure') }}
     # GitHub-hosted for every event (Issue #6013). It used to run on a
     # self-hosted runner for main pushes and same-repo PRs, where it took
     # ~30 min; on ubuntu-latest every step runs ~2.2x slower (#5747), so the
@@ -266,7 +325,8 @@ jobs:
     # it on bigger hardware: tests listed in tests/ci_extended.txt (>= 3 s
     # each in a measured run, ~72% of the bulk pool's test-time) carry the
     # `ci_extended` marker, are deselected below, and run in the
-    # "Test (extended)" job on main pushes and the nightly schedule.
+    # "Test (extended)" job on main verification runs (hourly/nightly
+    # schedule and workflow_dispatch, #5986).
     runs-on: ubuntu-latest
     env:
       # Pin -n auto's worker count at GitHub-hosted parity (4 vCPU) so memory
@@ -599,7 +659,7 @@ jobs:
 
       - name: Retain test timings
         # Input for scripts/ci/update_ci_extended.py (Issue #6013).
-        if: ${{ always() && github.event_name == 'push' }}
+        if: ${{ always() && github.event_name != 'pull_request' }}
         uses: actions/upload-artifact@v7
         with:
           name: junit-bulk-${{ github.run_id }}-${{ github.run_attempt }}
@@ -636,11 +696,12 @@ jobs:
     # listed in tests/ci_extended.txt so it fits a GitHub-hosted runner on
     # every PR; this job runs exactly those tests, in the same KiCad
     # container with the same native-concurrency bound and per-test timeout,
-    # on main pushes and the nightly schedule. Never on pull requests: a PR
-    # gets the fast subset, and main keeps full coverage on every merge.
+    # on main verification runs (hourly/nightly schedule and dispatch, #5986).
+    # Never on pull requests: a PR gets the fast subset, and the newest main
+    # gets full coverage on every scheduled run.
     name: Test (extended)
     needs: [changes, kicad_pin]
-    if: ${{ !cancelled() && (github.event_name == 'push' || github.event_name == 'schedule') }}
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' && needs.kicad_pin.outputs.skip != 'true') }}
     runs-on: ubuntu-latest
     env:
       PYTEST_XDIST_AUTO_NUM_WORKERS: "4"
@@ -714,8 +775,8 @@ jobs:
     # ROUTER_CPP_BUILD_VERSION (or vice versa) the import-time guard will
     # fall back to Python and fail this check with an actionable message.
     name: C++ Build Check
-    needs: changes
-    if: ${{ !cancelled() && (github.event_name == 'push' || needs.changes.outputs.code == 'true' || needs.changes.result == 'failure') }}
+    needs: [changes, kicad_pin]
+    if: ${{ !cancelled() && ((github.event_name != 'pull_request' && needs.kicad_pin.outputs.skip != 'true') || needs.changes.outputs.code == 'true' || needs.changes.result == 'failure') }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -798,7 +859,7 @@ jobs:
   kicad-cli-smoke:
     name: kicad-cli Round-trip Smoke
     needs: [changes, kicad_pin]
-    if: ${{ !cancelled() && (github.event_name == 'push' || needs.changes.outputs.code == 'true' || needs.changes.result == 'failure') }}
+    if: ${{ !cancelled() && ((github.event_name != 'pull_request' && needs.kicad_pin.outputs.skip != 'true') || needs.changes.outputs.code == 'true' || needs.changes.result == 'failure') }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     # Separate job: a regression gate that PCB files emitted by kicad-tools'
@@ -912,7 +973,7 @@ jobs:
     # derives the base from the checked-out merge commit's own first parent
     # (verified against its second parent matching the actual PR head) --
     # see that module's docstring for the full provenance argument, including
-    # the push-event before/current handling and the git-failure-vs-empty-
+    # the main-run full-scan handling and the git-failure-vs-empty-
     # match distinction (a `git diff` failure must fail the job, never
     # masquerade as a green "no files" result).
     #
@@ -921,8 +982,8 @@ jobs:
     # error counts. The gate is "allowed minus epsilon" -- regressions still
     # fail, but the gate can land before every board reaches 0 errors.
     name: Routed PCB DRC Check
-    needs: changes
-    if: ${{ !cancelled() && (github.event_name == 'push' || needs.changes.outputs.code == 'true' || needs.changes.result == 'failure') }}
+    needs: [changes, kicad_pin]
+    if: ${{ !cancelled() && ((github.event_name != 'pull_request' && needs.kicad_pin.outputs.skip != 'true') || needs.changes.outputs.code == 'true' || needs.changes.result == 'failure') }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -956,9 +1017,11 @@ jobs:
         run: |
           set -euo pipefail
           args=(--event-name "${{ github.event_name }}" --sha "${{ github.sha }}")
-          if [ "${{ github.event_name }}" = "push" ]; then
-            args+=(--push-before "${{ github.event.before }}")
-          else
+          # pull_request: diff against the merge commit's first parent.
+          # schedule / workflow_dispatch (main verification runs, #5986): no
+          # before/after pair exists and the run covers a batch of merges, so
+          # the selector scans every routed PCB in the tree (no extra args).
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
             args+=(--pr-head-sha "${{ github.event.pull_request.head.sha }}")
           fi
           python3 scripts/ci/select_routed_pcbs.py "${args[@]}" --github-output "$GITHUB_OUTPUT"
@@ -1009,13 +1072,14 @@ jobs:
             bash scripts/ci/run_native_routed_drc.sh "${args[@]}"
 
   diffpair-routing-regression:
-    # Issue #5743 (operator ruling 2026-10-02): this job now runs on main
-    # pushes and the nightly schedule only, NOT on pull requests. It was
+    # Issue #5743 (operator ruling 2026-10-02): this job runs on main
+    # verification runs only (since #5986: the hourly/nightly schedule and
+    # workflow_dispatch), NOT on pull requests. It was
     # measured at ~10.5 min median / 0 failures in 35 PR runs and board-06-
     # end-to-end already re-routes board 06 from scratch with the same seed and
     # the same check_diffpair_coverage.py gate, so the per-PR copy was ~22% of
     # self-hosted slot time. The job and its assertions are unchanged; a
-    # routing-algorithm regression is still caught within minutes of landing.
+    # routing-algorithm regression is still caught within one schedule window.
     # Nothing `needs:` this job, so skipping it on PRs gates nothing.
     #
     # Original rationale (Issue #2660 / Epic #2556 Phase 4N): re-route board 06
@@ -1064,7 +1128,7 @@ jobs:
     # the merge button.
     name: Diff-Pair Routing Regression
     needs: [changes, kicad_pin]
-    if: ${{ !cancelled() && (github.event_name == 'push' || github.event_name == 'schedule') }}
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' && needs.kicad_pin.outputs.skip != 'true') }}
     # Runs on the fleet's dedicated CI runner (2AMLogic/2am#29; ten slots for
     # this repo since the 2026-09-11 resize) for main pushes AND same-repo PRs;
     # fork PRs route back to GitHub-hosted instead of being skipped, so no
@@ -1324,7 +1388,7 @@ jobs:
     # Temporarily suspended at user request (#5097) to unblock unrelated PRs.
     # Set BOARD_07_CI_ENABLED=true after #5068/#5069 integration safeguards pass.
     needs: [changes, kicad_pin]
-    if: ${{ (vars.BOARD_07_CI_ENABLED == 'true') && !cancelled() && (github.event_name == 'push' || needs.changes.outputs.board07 == 'true' || needs.changes.result == 'failure') }}
+    if: ${{ (vars.BOARD_07_CI_ENABLED == 'true') && !cancelled() && ((github.event_name != 'pull_request' && needs.kicad_pin.outputs.skip != 'true') || needs.changes.outputs.board07 == 'true' || needs.changes.result == 'failure') }}
     # Issue #2726 / Epic #2661 Phase 3N: re-route board 07 (the
     # N-trace match-group testbench, #2724 Phase 3L) from scratch on
     # every PR and verify that
@@ -1619,7 +1683,7 @@ jobs:
     # ``diffpair-routing-regression`` and ``matchgroup-routing-regression``.
     name: Board 00 End-to-End
     needs: [changes, kicad_pin]
-    if: ${{ !cancelled() && (github.event_name == 'push' || needs.changes.outputs.board00 == 'true' || needs.changes.result == 'failure') }}
+    if: ${{ !cancelled() && ((github.event_name != 'pull_request' && needs.kicad_pin.outputs.skip != 'true') || needs.changes.outputs.board00 == 'true' || needs.changes.result == 'failure') }}
     runs-on: ubuntu-latest
     # The recipe is ~30 seconds locally (1 signal net + 2 pour nets),
     # the C++ backend build is ~2 min, ``kct export`` + ``kct check`` +
@@ -1764,7 +1828,7 @@ jobs:
     # branch-protection setting.
     name: Board 01 End-to-End
     needs: [changes, kicad_pin]
-    if: ${{ !cancelled() && (github.event_name == 'push' || needs.changes.outputs.board01 == 'true' || needs.changes.result == 'failure') }}
+    if: ${{ !cancelled() && ((github.event_name != 'pull_request' && needs.kicad_pin.outputs.skip != 'true') || needs.changes.outputs.board01 == 'true' || needs.changes.result == 'failure') }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     container:
@@ -1858,7 +1922,7 @@ jobs:
     # until a repo admin flips the branch-protection setting.
     name: Board 02 End-to-End
     needs: [changes, kicad_pin]
-    if: ${{ !cancelled() && (github.event_name == 'push' || needs.changes.outputs.board02 == 'true' || needs.changes.result == 'failure') }}
+    if: ${{ !cancelled() && ((github.event_name != 'pull_request' && needs.kicad_pin.outputs.skip != 'true') || needs.changes.outputs.board02 == 'true' || needs.changes.result == 'failure') }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     container:
@@ -1972,7 +2036,7 @@ jobs:
     # board 00/01/02/06/07 e2e jobs).
     name: Board 03 End-to-End (LVS-only)
     needs: [changes, kicad_pin]
-    if: ${{ !cancelled() && (github.event_name == 'push' || needs.changes.outputs.board03 == 'true' || needs.changes.result == 'failure') }}
+    if: ${{ !cancelled() && ((github.event_name != 'pull_request' && needs.kicad_pin.outputs.skip != 'true') || needs.changes.outputs.board03 == 'true' || needs.changes.result == 'failure') }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     container:
@@ -2152,7 +2216,7 @@ jobs:
     # board 00/01 e2e jobs).
     name: Board 06 End-to-End (LVS)
     needs: [changes, kicad_pin]
-    if: ${{ !cancelled() && (github.event_name == 'push' || needs.changes.outputs.board06 == 'true' || needs.changes.result == 'failure') }}
+    if: ${{ !cancelled() && ((github.event_name != 'pull_request' && needs.kicad_pin.outputs.skip != 'true') || needs.changes.outputs.board06 == 'true' || needs.changes.result == 'failure') }}
     # Runs on the fleet's dedicated CI runner (2AMLogic/2am#29; ten slots for
     # this repo since the 2026-09-11 resize) for main pushes AND same-repo PRs;
     # fork PRs route back to GitHub-hosted instead of being skipped, so no
@@ -2319,7 +2383,7 @@ jobs:
     # Temporarily suspended at user request (#5097) to unblock unrelated PRs.
     # Set BOARD_07_CI_ENABLED=true after #5068/#5069 integration safeguards pass.
     needs: [changes, kicad_pin]
-    if: ${{ (vars.BOARD_07_CI_ENABLED == 'true') && !cancelled() && (github.event_name == 'push' || needs.changes.outputs.board07 == 'true' || needs.changes.result == 'failure') }}
+    if: ${{ (vars.BOARD_07_CI_ENABLED == 'true') && !cancelled() && ((github.event_name != 'pull_request' && needs.kicad_pin.outputs.skip != 'true') || needs.changes.outputs.board07 == 'true' || needs.changes.result == 'failure') }}
     # Issue #3779 (LVS honestly dirty per #4012): end-to-end gate for
     # board 07 ("matchgroup-test").  The fixture schematic is now FULLY
     # WIRED (#4012: 244/244 pads bound), so the copper comparator carries
@@ -2622,7 +2686,7 @@ jobs:
     # Test job) because no other job runs the board-05 rescue loop from clean.
     name: Board 05 Routing Regression (blocking <= 7)
     needs: [changes, kicad_pin]
-    if: ${{ !cancelled() && (github.event_name == 'push' || needs.changes.outputs.board05 == 'true' || needs.changes.result == 'failure') }}
+    if: ${{ !cancelled() && ((github.event_name != 'pull_request' && needs.kicad_pin.outputs.skip != 'true') || needs.changes.outputs.board05 == 'true' || needs.changes.result == 'failure') }}
     runs-on: ubuntu-latest
     timeout-minutes: 90
     container:
@@ -2742,7 +2806,7 @@ jobs:
     # 30 min for the LQFP-48 escape work.
     name: Board 04 End-to-End (LVS-only + DRC allowlist)
     needs: [changes, kicad_pin]
-    if: ${{ !cancelled() && (github.event_name == 'push' || needs.changes.outputs.board04 == 'true' || needs.changes.result == 'failure') }}
+    if: ${{ !cancelled() && ((github.event_name != 'pull_request' && needs.kicad_pin.outputs.skip != 'true') || needs.changes.outputs.board04 == 'true' || needs.changes.result == 'failure') }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
     container:

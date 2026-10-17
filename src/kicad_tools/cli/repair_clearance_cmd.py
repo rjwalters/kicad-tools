@@ -43,7 +43,7 @@ from kicad_tools.drc.repair_clearance import (
     RepairResult,
 )
 from kicad_tools.drc.report import DRCReport
-from kicad_tools.manufacturers import get_manufacturer_ids
+from kicad_tools.manufacturers import get_all_manufacturer_names, get_profile
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -75,7 +75,7 @@ Examples:
     parser.add_argument(
         "--mfr",
         "-m",
-        choices=get_manufacturer_ids(),
+        choices=get_all_manufacturer_names(),
         help="Target manufacturer (for clearance rules context)",
     )
     parser.add_argument(
@@ -125,6 +125,8 @@ Examples:
     )
 
     args = parser.parse_args(argv)
+    if args.mfr:
+        args.mfr = get_profile(args.mfr).id
 
     # Validate input file
     pcb_path = Path(args.pcb)

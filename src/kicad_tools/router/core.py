@@ -25,6 +25,7 @@ if TYPE_CHECKING:
 
     from .io import FineZone
     from .kicad_length import KicadLengthModel
+    from .pairplan.outcome import PairOutcome
     from .pathfinder import Router
     from .region_graph import RegionGraph
     from .routing_plan import RoutingPlan
@@ -112,7 +113,7 @@ from .failure_analysis import (
     FailureCause,
     RootCauseAnalyzer,
 )
-from .grid import RoutingGrid
+from .grid import RoutingGrid, routed_halo_radius_cells
 from .kelvin import detect_kelvin_topology
 from .layers import Layer, LayerStack
 from .length import LengthTracker, LengthViolation
@@ -1910,7 +1911,7 @@ class Autorouter:
         self._lattice_pair_outcomes: dict[str, str] = {}
         # Issue #6837: the structured record behind each of those strings
         # (``PairOutcome.label`` is the string), rebuilt with them.
-        self._lattice_pair_outcome_records: dict[str, Any] = {}
+        self._lattice_pair_outcome_records: dict[str, PairOutcome] = {}
         # Issue #6378: a pair that passes through an interior part (board 03
         # USB_D through the ESD part U2) is routed as a chain -- one coupled
         # connection per segment plus single-ended P/N hops inside the part.
@@ -2592,8 +2593,9 @@ class Autorouter:
         # instead of the global rules.trace_width, matching the Python
         # grid's mark_route() behaviour for per-net-class trace widths.
         for seg in route.segments:
-            total_clearance = seg.width / 2 + self.rules.trace_clearance
-            clearance_cells = int(total_clearance / self.grid.resolution) + 1
+            clearance_cells = routed_halo_radius_cells(
+                seg, self.rules, self.grid.resolution, cpp=True
+            )
             gx1, gy1 = self.grid.world_to_grid(seg.x1, seg.y1)
             gx2, gy2 = self.grid.world_to_grid(seg.x2, seg.y2)
             layer_idx = self.grid.layer_to_index(seg.layer.value)
@@ -2602,20 +2604,9 @@ class Autorouter:
         # Mark all vias on C++ grid
         for via in route.vias:
             gx, gy = self.grid.world_to_grid(via.x, via.y)
-            # Issue #2466: Use ``ceil`` (not ``int``) for the via blocking
-            # radius so that grid-cell blocking matches the validator's
-            # geometric ``via_diameter/2 + via_clearance`` keepout.  The
-            # previous ``int(...)`` truncation under-blocked by up to one
-            # grid cell, allowing the search to place a via that the post-
-            # route validator would later flag.  Mirrors the +1 safety
-            # margin in ``RoutingGrid._mark_via`` (Issue #1797).
-            radius_cells = (
-                math.ceil(
-                    (via.diameter / 2 + self.rules.via_clearance + self.rules.trace_width / 2)
-                    / self.grid.resolution
-                )
-                + 1
-            )
+            # Issue #2466: the CPPV variant rounds up (see
+            # ``routed_halo_radius_cells``).
+            radius_cells = routed_halo_radius_cells(via, self.rules, self.grid.resolution, cpp=True)
             cpp_grid.mark_via(gx, gy, via.net, radius_cells)
 
     # ------------------------------------------------------------------

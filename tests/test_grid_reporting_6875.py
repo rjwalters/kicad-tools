@@ -181,7 +181,6 @@ def test_ceiling_limits_are_per_backend():
     assert msg is not None
     assert "120,054,006" in msg
     assert f"{PYTHON_EXPLICIT_GRID_CELL_LIMIT:,}" in msg
-    assert "kct build-native" in msg
     assert "--grid auto" in msg
     assert "--force" in msg
 
@@ -191,6 +190,49 @@ def test_ceiling_limits_are_per_backend():
     assert cpp_msg is not None
     assert f"{CPP_EXPLICIT_GRID_CELL_LIMIT:,}" in cpp_msg
     assert "kct build-native" not in cpp_msg
+
+
+def test_build_native_hint_only_when_the_cpp_limit_fits():
+    # Issue #6948: 0.03 mm -> 3334 x 2667 x 6 = 53.4M cells, over the Python
+    # limit but under the C++ one, so building the C++ backend is the fix.
+    msg = explicit_grid_ceiling_error(
+        width=100, height=80, resolution=0.03, num_layers=6, backend="python"
+    )
+    assert msg is not None
+    assert "kct build-native" in msg
+    # 0.02 mm -> 120M cells, over the C++ limit too: building alone can't help.
+    msg = explicit_grid_ceiling_error(
+        width=100, height=80, resolution=0.02, num_layers=6, backend="python"
+    )
+    assert msg is not None
+    assert "kct build-native" not in msg
+    assert "--grid auto" in msg
+
+
+def test_coarser_suggestion_respects_the_clearance_refusal():
+    # Issue #6948: the finest pitch under the Python limit here is coarser
+    # than the clearance, which route_cmd refuses separately -- so don't
+    # suggest it.
+    kwargs: dict = {
+        "width": 195,
+        "height": 155,
+        "resolution": 0.01,
+        "num_layers": 6,
+        "backend": "python",
+    }
+    fits = finest_pitch_within(195, 155, 6, PYTHON_EXPLICIT_GRID_CELL_LIMIT)
+    msg = explicit_grid_ceiling_error(**kwargs, clearance=fits - 0.01)
+    assert msg is not None
+    assert "Use a coarser grid" not in msg
+    assert "--grid auto" in msg
+    # A clearance at or above the suggestion keeps it.
+    msg = explicit_grid_ceiling_error(**kwargs, clearance=fits)
+    assert msg is not None
+    assert f"--grid {fits:g} (the finest that fits)" in msg
+    # Unknown clearance: unchanged behaviour.
+    msg = explicit_grid_ceiling_error(**kwargs)
+    assert msg is not None
+    assert f"--grid {fits:g}" in msg
 
 
 def test_suggested_coarser_pitch_fits():

@@ -72,6 +72,7 @@ from .escape_plan import EscapeChoice, chosen_stub, foreign_reservations, plan_t
 from .geometry import Pt, Rect, dist, pt_in_rect, seg_seg_dist
 from .guide import PartnerGuide
 from .history import PhysicalHistory
+from .kernel_adapter import LATTICE_CLEARANCE_EPSILON_MM
 from .obstacles import (
     CommittedCopper,
     LatticeKeepoutMask,
@@ -94,6 +95,9 @@ Resource = tuple[object, ...]
 # A* state: (node_key, layer_index).
 _State = tuple[NodeKey, int]
 _GOAL: _State = (("GOAL",), -1)  # type: ignore[assignment]
+
+# Issue #6957: a path's via sites as a persistent linked list, newest first.
+_ViaChain = tuple[Pt, Any] | None
 
 # Escape-fan size for the oversize neck-down retry (issue #4293): a thin neck
 # escapes the pad, but the WIDENED body must then egress at full width, so the
@@ -2059,6 +2063,11 @@ class LatticePathfinder:
 
         g_score: dict[_State, float] = {}
         came: dict[_State, tuple[_State, str]] = {}
+        # Issue #6957: the via sites already on each state's best path, as a
+        # persistent linked list ``(site, rest)`` (newest first).  Kept in step
+        # with ``came`` so a via expansion can be checked against its OWN
+        # path's earlier drills -- ``via_ok`` only sees committed copper.
+        path_vias: dict[_State, _ViaChain] = {}
         start_stub: dict[_State, list[Pt]] = {}
         heap: list[tuple[float, int, _State]] = []
         counter = 0
@@ -2165,6 +2174,7 @@ class LatticePathfinder:
                 if tentative < g_score.get(nstate, math.inf) - 1e-12:
                     g_score[nstate] = tentative
                     came[nstate] = (state, "move")
+                    path_vias[nstate] = path_vias.get(state)
                     heapq.heappush(heap, (tentative + h(nbr), counter, nstate))
                     counter += 1
             if allow_vias and self.num_layers > 1:
@@ -2178,6 +2188,12 @@ class LatticePathfinder:
                         clearance=clr if net_class is not None else None,
                     )
                     via_ok[key] = vok
+                if vok:
+                    # Issue #6957: ``via_ok`` is memoised per node against
+                    # COMMITTED copper only; this route's own earlier vias are
+                    # path-dependent, so check them here, uncached (the
+                    # lattice twin of the grid engines' #6464 / #6473 check).
+                    vok = self._own_path_vias_clear(lattice.node_point(key), path_vias.get(state))
                 if vok:
                     # Via edges join matching nodes on ADJACENT layers only
                     # (issue #4278 acceptance 6).  The emitted via is still a
@@ -2262,6 +2278,7 @@ class LatticePathfinder:
                         if tentative < g_score.get(nstate, math.inf) - 1e-12:
                             g_score[nstate] = tentative
                             came[nstate] = (state, "via")
+                            path_vias[nstate] = (lattice.node_point(key), path_vias.get(state))
                             heapq.heappush(heap, (tentative + h(key), counter, nstate))
                             counter += 1
 
@@ -2361,6 +2378,36 @@ class LatticePathfinder:
         if route is None:
             return None, "empty-route"
         return _RouteResult(route, runs, via_points, resources), "ok"
+
+    def _own_via_floor(self) -> float:
+        """Centre-to-centre floor between two of ONE route's vias (issue #6957).
+
+        A drill diameter plus the fab hole-to-hole minimum -- the same
+        ``same_net_via_gap`` :class:`CommittedCopper` enforces against
+        committed same-net vias -- floored by ``min_drill_clearance`` like the
+        grid engines' ``_own_path_vias_clear`` (#6473).
+        """
+        rules = self.rules
+        return rules.via_drill + max(
+            rules.min_hole_to_hole, getattr(rules, "min_drill_clearance", 0.0)
+        )
+
+    def _own_path_vias_clear(self, site: Pt, chain: _ViaChain) -> bool:
+        """May a via at ``site`` join the vias already on its path? (Issue #6957).
+
+        ``chain`` is the path's earlier via sites (see ``path_vias`` in
+        :meth:`_route_search`).  A via stack at one node (F -> In1 -> B) is
+        one drill, so a site equal to ``site`` is skipped.  The comparison
+        carries the lattice's usual :data:`LATTICE_CLEARANCE_EPSILON_MM`
+        slack, so a pair exactly on the floor is legal.
+        """
+        floor = self._own_via_floor() - LATTICE_CLEARANCE_EPSILON_MM
+        while chain is not None:
+            other, chain = chain
+            d = dist(site, other)
+            if d > 1e-9 and d < floor:
+                return False
+        return True
 
     # -- emission ---------------------------------------------------------------
 
@@ -2567,10 +2614,10 @@ class LatticePathfinder:
         """
         from .coupled import (
             assign_polarity,
-            merge_collinear_points,
             offset_polyline,
             seg_rect_dist,
             side_bit,
+            trim_end_reversals,
         )
 
         net_p = pc.pad_p_a.net
@@ -2738,7 +2785,7 @@ class LatticePathfinder:
                 return None, "pair-not-planar"  # defensive: vias are off
 
             layer, raw_pts, _widths = result.runs[0]
-            center = merge_collinear_points(raw_pts)
+            center = trim_end_reversals(raw_pts)
             if len(center) < 2:
                 return None, "pair-degenerate-centerline"
             plus = offset_polyline(center, +half_pitch)
@@ -4069,6 +4116,17 @@ class LatticePathfinder:
         """
         if not result.via_points:
             return None
+        # Issue #6957: the route's own vias must be pairwise at or above the
+        # hole-to-hole floor.  The search already refuses such a via; this
+        # gate makes any regression decline loudly instead of shipping.
+        sites = result.via_points
+        if len(sites) > 1:
+            floor = self._own_via_floor() - LATTICE_CLEARANCE_EPSILON_MM
+            for i, a in enumerate(sites):
+                for b in sites[i + 1 :]:
+                    d = dist(a, b)
+                    if d > 1e-9 and d < floor:
+                        return "self-drc-own-via-hole-to-hole"
         for _layer_idx, points, _widths in result.runs:
             for a, b in zip(points, points[1:], strict=False):
                 if dist(a, b) <= 1e-9:

@@ -384,6 +384,57 @@ class TestSelectRoutedPcbs:
         assert result.base != "main"
         assert result.base != c1
 
+    @pytest.mark.parametrize("event_name", ["schedule", "workflow_dispatch"])
+    def test_main_run_events_scan_every_routed_pcb(
+        self, srp, repo: GitRepo, event_name: str
+    ) -> None:
+        """Issue #5986: main is verified by scheduled / dispatched runs that
+        cover a batch of merges and carry no before/after pair. Every routed
+        PCB in the tree is selected -- including one added several commits
+        before the verified head, and the native Board04 one."""
+        repo.write("boards/03-x/output/x_routed.kicad_pcb")
+        repo.commit("c1: board 03")
+        repo.write(srp.NATIVE_BOARD_RELATIVE_PATH)
+        repo.commit("c2: board 04")
+        repo.write("docs/notes.md")
+        head = repo.commit("c3: docs only")
+        # origin/main-style fallback pointing at head would self-diff to [].
+        result = srp.select_routed_pcbs(repo.root, event_name, head, fallback_ref="main")
+
+        assert result.base == srp.resolve_empty_tree(repo.root)
+        assert result.ordinary_files == ["boards/03-x/output/x_routed.kicad_pcb"]
+        assert result.native_files == [srp.NATIVE_BOARD_RELATIVE_PATH]
+
+    @pytest.mark.parametrize("event_name", ["schedule", "workflow_dispatch"])
+    def test_main_run_events_ignore_push_and_pr_args(
+        self, srp, repo: GitRepo, event_name: str
+    ) -> None:
+        c1 = repo.commit("c1")
+        repo.write("boards/05-y/output/y_routed.kicad_pcb")
+        c2 = repo.commit("c2")
+        result = srp.select_routed_pcbs(repo.root, event_name, c2, push_before=c2, pr_head_sha=c1)
+        assert result.ordinary_files == ["boards/05-y/output/y_routed.kicad_pcb"]
+
+    @pytest.mark.parametrize("event_name", ["schedule", "workflow_dispatch"])
+    def test_main_run_events_unresolvable_head_raises(
+        self, srp, repo: GitRepo, event_name: str
+    ) -> None:
+        repo.commit("c1")
+        with pytest.raises(srp.GitCommandError):
+            srp.select_routed_pcbs(repo.root, event_name, "f" * 40)
+
+    def test_main_run_events_are_the_ci_yml_non_pr_triggers(self, srp) -> None:
+        """Every non-PR trigger of ci.yml must be a full-scan event, so a new
+        main trigger cannot silently fall through to the self-diffing
+        ``fallback_ref`` branch."""
+        import yaml
+
+        workflow = yaml.safe_load(
+            (REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+        )
+        triggers = set(workflow[True])  # PyYAML parses the bare `on:` key as True
+        assert triggers - {"pull_request"} == set(srp.FULL_SCAN_EVENTS)
+
     def test_unresolvable_topology_propagates_as_selection_error(self, srp, repo: GitRepo) -> None:
         base_sha = repo.commit("base")
         repo.checkout(base_sha, new_branch="feature")
@@ -456,6 +507,31 @@ class TestMainCli:
         assert "boards/05-y/output/y_routed.kicad_pcb" in content
         assert "native_files<<SELECT_ROUTED_PCBS_EOF" in content
         assert "ordinary_files<<SELECT_ROUTED_PCBS_EOF" in content
+
+    def test_schedule_event_cli_needs_no_event_specific_args(
+        self, srp, repo: GitRepo, tmp_path: Path
+    ) -> None:
+        """The workflow passes only --event-name/--sha on schedule and
+        workflow_dispatch (Issue #5986); that must succeed and select the
+        routed boards in the tree."""
+        repo.write("boards/05-y/output/y_routed.kicad_pcb")
+        repo.commit("board 05")
+        head = repo.commit("unrelated")
+        output_path = tmp_path / "github_output"
+        rc = srp.main(
+            [
+                "--event-name",
+                "schedule",
+                "--sha",
+                head,
+                "--repo-root",
+                str(repo.root),
+                "--github-output",
+                str(output_path),
+            ]
+        )
+        assert rc == 0
+        assert "boards/05-y/output/y_routed.kicad_pcb" in output_path.read_text()
 
     def test_no_op_on_empty_selection_exits_zero(self, srp, repo: GitRepo) -> None:
         c1 = repo.commit("c1")

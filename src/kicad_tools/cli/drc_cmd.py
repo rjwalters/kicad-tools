@@ -30,7 +30,7 @@ from ..drc import (
     check_manufacturer_rules,
     generate_fix_suggestions,
 )
-from ..manufacturers import compare_design_rules, get_manufacturer_ids, get_profile
+from ..manufacturers import compare_design_rules, get_all_manufacturer_names, get_profile
 from .runner import find_kicad_cli, run_drc
 
 if TYPE_CHECKING:
@@ -102,7 +102,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--mfr",
         "-m",
-        choices=get_manufacturer_ids(),
+        choices=get_all_manufacturer_names(),
         help="Target manufacturer for rules check",
     )
     parser.add_argument(
@@ -173,6 +173,8 @@ def main(argv: list[str] | None = None) -> int:
     """Main entry point for kicad-drc command."""
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.mfr:
+        args.mfr = get_profile(args.mfr).id
 
     # Mode: Compare manufacturers
     if args.compare:
