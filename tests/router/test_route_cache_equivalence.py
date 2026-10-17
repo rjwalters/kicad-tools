@@ -90,3 +90,80 @@ def test_board02_cache_replays_complete_copper(tmp_path):
         copper.append(_copper(output.read_text()))
     assert copper[0]
     assert copper[0] == copper[1], f"Cache changed copper; artifacts at {tmp_path}"
+
+
+def _strip_lvds_copper(text: str) -> str:
+    """Drop every LVDS segment/via/arc so the coupled pre-pass has pairs to commit."""
+    pcb = parse_string(text)
+    lvds = {
+        net.get_int(0)
+        for net in pcb.find_all("net")
+        if str(net.get_string(1) or "").startswith("LVDS")
+    }
+    for node in list(pcb.children):
+        if node.name in {"segment", "via", "arc"}:
+            net = node.find_child("net")
+            if net is not None and net.get_int(0) in lvds:
+                pcb.remove(node)
+    return pcb.to_string()
+
+
+@pytest.mark.timeout(2100)
+def test_board06b_cache_replays_coupled_pair_copper(tmp_path):
+    """Issue #7003: a hit must write the copper a fresh route writes.
+
+    The optimizer skips the diff pairs the coupled pre-pass committed; that set
+    is filled by the routing dispatch a cache hit bypasses, so the hit used to
+    rewrite pair rails (board 06b: 242 items on a hit vs 279 on the miss).
+    Board 02 has no coupled pairs, so it cannot catch this.
+    """
+    if find_kicad_cli() is None:
+        pytest.skip("Native KiCad is required for the final copper comparison")
+    root = Path(__file__).resolve().parents[2]
+    board = root / "boards/06-diffpair-test/output"
+    source = tmp_path / "diffpair_test_lvds_stripped.kicad_pcb"
+    source.write_text(_strip_lvds_copper((board / "diffpair_test.kicad_pcb").read_text()))
+    env = {**os.environ, "PYTHONHASHSEED": "42", "XDG_CACHE_HOME": str(tmp_path / "cache")}
+    copper = []
+    for run in (1, 2):
+        output = tmp_path / f"run-{run}.kicad_pcb"
+        log = tmp_path / f"run-{run}.log"
+        cmd = [
+            sys.executable,
+            "-m",
+            "kicad_tools.cli",
+            "route",
+            str(source),
+            "--output",
+            str(output),
+            "--backend",
+            "cpp",
+            "--layers",
+            "4",
+            "--preserve-existing",
+            "--differential-pairs",
+            "--net-class-map",
+            str(board / "net_class_map.json"),
+            "--deterministic-budget",
+            "--seed",
+            "42",
+        ]
+        with log.open("w") as stream:
+            subprocess.run(
+                cmd,
+                cwd=root,
+                env=env,
+                stdout=stream,
+                stderr=subprocess.STDOUT,
+                timeout=960,
+                check=False,
+            )
+        evidence = log.read_text()
+        assert ("Cache MISS" if run == 1 else "Cache HIT") in evidence, evidence[-2000:]
+        assert output.exists(), evidence[-2000:]
+        copper.append(_copper(output.read_text()))
+    assert copper[0]
+    assert copper[0] == copper[1], (
+        f"Cache hit changed copper ({len(copper[0])} vs {len(copper[1])} items); "
+        f"artifacts at {tmp_path}"
+    )
