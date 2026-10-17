@@ -35,41 +35,15 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+from kicad_tools.cli.sch_wire_common import (
+    _wire_endpoint_counts,
+    _wire_start_end,
+    truncating_bucket,
+)
 from kicad_tools.schema import Schematic
 from kicad_tools.sexp import SExp
 
 POINT_TOLERANCE = 1.27  # mm - standard KiCad grid
-
-
-def _wire_start_end(wire_sexp: SExp) -> tuple[tuple[float, float], tuple[float, float]]:
-    """Extract start and end points from a wire S-expression node."""
-    pts_node = wire_sexp.find("pts")
-    if not pts_node:
-        return (0.0, 0.0), (0.0, 0.0)
-
-    xy_nodes = pts_node.find_all("xy")
-    if len(xy_nodes) < 2:
-        return (0.0, 0.0), (0.0, 0.0)
-
-    x1 = xy_nodes[0].get_float(0) or 0.0
-    y1 = xy_nodes[0].get_float(1) or 0.0
-    x2 = xy_nodes[1].get_float(0) or 0.0
-    y2 = xy_nodes[1].get_float(1) or 0.0
-
-    return (x1, y1), (x2, y2)
-
-
-def _wire_endpoint_counts(
-    wire_sexps: list[SExp],
-) -> dict[tuple[int, int], int]:
-    """Count how many wires touch each endpoint."""
-    counts: dict[tuple[int, int], int] = {}
-    for ws in wire_sexps:
-        start, end = _wire_start_end(ws)
-        for pt in [start, end]:
-            key = (int(pt[0] * 10), int(pt[1] * 10))
-            counts[key] = counts.get(key, 0) + 1
-    return counts
 
 
 def find_wire_by_endpoints(
@@ -153,7 +127,7 @@ def remove_wire_and_orphan_junctions(
 
     # Check for orphaned junctions at the wire's former endpoints
     remaining_wires = list(schematic.sexp.find_all("wire"))
-    endpoint_counts = _wire_endpoint_counts(remaining_wires)
+    endpoint_counts = _wire_endpoint_counts(remaining_wires, key=truncating_bucket)
 
     junctions_removed = 0
     for pt in [start, end]:

@@ -42,6 +42,7 @@ from kicad_tools.exceptions import FileNotFoundError as KiCadFileNotFoundError
 from kicad_tools.schema import LibraryManager, Schematic
 from kicad_tools.schema.instances import build_instance_path, find_project_name
 from kicad_tools.schema.library import LibrarySymbol
+from kicad_tools.schematic.grid import snap_to_grid
 
 
 @dataclass
@@ -106,11 +107,6 @@ def _is_power_symbol(lib_id: str) -> bool:
     return lib_id.startswith("power:")
 
 
-def _snap(value: float, grid: float = 1.27) -> float:
-    """Snap a coordinate to the nearest grid point."""
-    return round(value / grid) * grid
-
-
 def _round_pos(pos: tuple[float, float], decimals: int = 4) -> tuple[float, float]:
     """Round a position to *decimals* decimal places.
 
@@ -121,39 +117,6 @@ def _round_pos(pos: tuple[float, float], decimals: int = 4) -> tuple[float, floa
     ``1.2699999999999998``.
     """
     return (round(pos[0], decimals), round(pos[1], decimals))
-
-
-def _point_on_wire_midpoint(
-    point: tuple[float, float],
-    wire_start: tuple[float, float],
-    wire_end: tuple[float, float],
-    tolerance: float = 0.1,
-) -> bool:
-    """Check if a point lies on a wire segment but not at its endpoints."""
-    x, y = point
-
-    # Check if point is at either endpoint
-    for ep in (wire_start, wire_end):
-        if abs(x - ep[0]) < tolerance and abs(y - ep[1]) < tolerance:
-            return False
-
-    # Check if point is on the segment
-    x1, y1 = wire_start
-    x2, y2 = wire_end
-
-    # Bounding box check
-    if not (min(x1, x2) - tolerance <= x <= max(x1, x2) + tolerance):
-        return False
-    if not (min(y1, y2) - tolerance <= y <= max(y1, y2) + tolerance):
-        return False
-
-    # Perpendicular distance check
-    length = ((x2 - x1) ** 2 + (y2 - y1) ** 2) ** 0.5
-    if length < tolerance:
-        return False
-
-    dist = abs((y2 - y1) * x - (x2 - x1) * y + x2 * y1 - y2 * x1) / length
-    return dist < tolerance
 
 
 def _point_on_wire_segment(
@@ -286,8 +249,8 @@ def run_add_component(args) -> int:
         return 1
 
     # Snap placement coordinates to grid
-    at_x = _snap(args.at[0])
-    at_y = _snap(args.at[1])
+    at_x = snap_to_grid(args.at[0])
+    at_y = snap_to_grid(args.at[1])
     position = (at_x, at_y)
 
     rotation = getattr(args, "rotation", 0) or 0
@@ -386,7 +349,7 @@ def run_add_component(args) -> int:
             if nearby is not None:
                 target = nearby
             else:
-                target = (_snap(cs.target[0]), _snap(cs.target[1]))
+                target = (snap_to_grid(cs.target[0]), snap_to_grid(cs.target[1]))
             cs = ConnectSpec(
                 pin_number=cs.pin_number,
                 target=target,
@@ -427,9 +390,9 @@ def run_add_component(args) -> int:
 
             pin_pos = pin_positions[cs.pin_number]
             # Round to eliminate floating-point drift from rotation
-            # transforms.  Do NOT use _snap() here -- the position is
+            # transforms.  Do NOT use snap_to_grid() here -- the position is
             # already derived from a grid-snapped origin and applying
-            # _snap() again can shift to the wrong grid point.
+            # snap_to_grid() again can shift to the wrong grid point.
             pin_pos = _round_pos(pin_pos)
 
             # Only plan a wire when start != end (mirrors execution phase).

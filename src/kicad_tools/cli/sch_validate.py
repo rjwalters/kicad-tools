@@ -816,7 +816,7 @@ def check_missing_project_instances(schematic_path: str) -> list[ValidationIssue
     from kicad_tools.cli.sch_repair_instances import (
         _extract_symbols_with_instance_info,
     )
-    from kicad_tools.cli.sch_set_footprint import _collect_schematic_files
+    from kicad_tools.cli.sch_wire_common import _collect_schematic_files
 
     issues: list[ValidationIssue] = []
 

@@ -11,9 +11,11 @@ import pytest
 
 from kicad_tools.cli.modify_schematic import find_symbol_text_range, set_footprint_text
 from kicad_tools.cli.sch_set_footprint import (
-    _collect_schematic_files,
     _load_mapping,
     run_set_footprint,
+)
+from kicad_tools.cli.sch_wire_common import (
+    _collect_schematic_files,
 )
 
 # ---------------------------------------------------------------------------

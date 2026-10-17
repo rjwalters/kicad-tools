@@ -11,16 +11,18 @@ from pathlib import Path
 import pytest
 
 from kicad_tools.cli.sch_add_bypass_cap import (
-    _auto_reference,
     _compute_cap_offset,
     _effective_pin_rotation,
     _make_default_cap_lib_sym,
-    _snap,
 )
 from kicad_tools.cli.sch_add_bypass_cap import (
     main as add_bypass_main,
 )
+from kicad_tools.cli.sch_wire_common import (
+    _auto_reference,
+)
 from kicad_tools.schema import Schematic
+from kicad_tools.schematic.grid import snap_to_grid
 
 # ---------------------------------------------------------------------------
 # Minimal schematic content for testing -- includes a symbol U1 with a
@@ -526,8 +528,8 @@ class TestPinOrientations:
 
         # Resolve IC pin position (pin 5 at library (5.08, 0), instance at (100, 80))
         # pin schematic pos ≈ (105.08, 80) snapped
-        ic_pin_x = _snap(100 + 5.08)
-        ic_pin_y = _snap(80 + 0)
+        ic_pin_x = snap_to_grid(100 + 5.08)
+        ic_pin_y = snap_to_grid(80 + 0)
         ic_pin_pos = (ic_pin_x, ic_pin_y)
 
         # No single wire should bridge IC pin directly to GND
@@ -571,8 +573,8 @@ class TestPinOrientations:
 
         # Pin 6 at library (0, 5.08) with rotation=90 (points up), instance at (100, 80)
         # Library Y-up -> schematic Y-down: negate Y offset -> (0, -5.08) -> (100, 74.92)
-        ic_pin_x = _snap(100 + 0)
-        ic_pin_y = _snap(80 - 5.08)
+        ic_pin_x = snap_to_grid(100 + 0)
+        ic_pin_y = snap_to_grid(80 - 5.08)
         ic_pin_pos = (ic_pin_x, ic_pin_y)
 
         _check_no_short(sch, ic_pin_pos, gnd_pos)
