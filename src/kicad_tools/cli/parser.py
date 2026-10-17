@@ -3149,6 +3149,11 @@ def _add_pcb_parser(subparsers) -> None:
         dest="output",
         help="Output PCB file path (default: overwrite input PCB)",
     )
+    pcb_import_ses.add_argument(
+        "--allow-stale",
+        action="store_true",
+        help="Merge even if the board changed since the DSN was exported",
+    )
     add_format_flag(pcb_import_ses)
 
 
@@ -10509,6 +10514,19 @@ def _add_screenshot_parser(subparsers) -> None:
         dest="screenshot_theme",
         default=None,
         help="KiCad color theme name",
+    )
+    screenshot_baseline = screenshot_parser.add_mutually_exclusive_group()
+    screenshot_baseline.add_argument(
+        "--baseline-save",
+        dest="screenshot_baseline_save",
+        metavar="DIR",
+        help="Also save the render and a renderer-identity sidecar as a baseline in DIR",
+    )
+    screenshot_baseline.add_argument(
+        "--baseline-compare",
+        dest="screenshot_baseline_compare",
+        metavar="DIR",
+        help="Render the current state and report drift against the baseline in DIR",
     )
     add_format_flag(screenshot_parser)
 

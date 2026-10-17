@@ -3072,29 +3072,6 @@ class LatticePathfinder:
         cache[ref] = box
         return box
 
-    def _preferred_gateway_layers(self, pc: CoupledConnection) -> list[int]:
-        """Gateway layers a pair's class PREFERS and its pads cannot reach planar.
-
-        Issue #6824: the planar attempt only searches the layers all four
-        endpoint pads share, so a class whose ``preferred_layers`` name a
-        different layer (board 03's USB_D on In2.Cu under SMD pads) is never
-        offered that layer unless the planar attempt declines.  Empty when the
-        class declares no preference, or when a preferred layer is already
-        planar-reachable (the single-net surcharge then steers the search).
-        """
-        preferred = self._preferred_layers(pc.net_class)
-        if not preferred:
-            return []
-        planar = set.intersection(
-            *(
-                set(self._pad_layer_indices(p))
-                for p in (pc.pad_p_a, pc.pad_n_a, pc.pad_p_b, pc.pad_n_b)
-            )
-        )
-        if preferred & planar:
-            return []
-        return [layer for layer in self._gateway_layers(pc) if layer in preferred]
-
     def _gateway_layers(self, pc: CoupledConnection) -> list[int]:
         """Candidate gateway layers of a segment, in index order.
 
@@ -5113,19 +5090,27 @@ class LatticePathfinder:
                             pair_outcomes[key2] = SegmentOutcome("deadline-exceeded")
                     break
                 if kind == 1:
-                    # Issue #6824: a pair whose class prefers a layer its pads
-                    # cannot reach planar tries the gateway on that layer
-                    # BEFORE the planar attempt, which would otherwise
-                    # succeed on the pad layer and never consult the
-                    # preference.  A decline falls through to the planar
-                    # attempt unchanged; classes with no preference skip this.
+                    # Issue #6883: a class that prefers a layer none of the
+                    # pads share (opted in via ``allow_plane_layers``) gets
+                    # its gateway attempt BEFORE a planar pad-layer run
+                    # commits; a soft cost bias cannot beat a successful
+                    # planar run.  A decline falls through to the planar
+                    # attempt and the usual fallback, unchanged.
+                    # Issue #6824: the attempt is confined to the preferred
+                    # layers, else the gateway search may land on a
+                    # non-preferred layer (In1.Cu when In2.Cu is preferred).
                     pref_layers = (
-                        self._preferred_gateway_layers(item)
+                        sorted(
+                            self._preferred_layers(item.net_class) & set(self._gateway_layers(item))
+                        )
                         if pair_gateways and item.key not in self.pair_gateway_skip
                         else []
                     )
-                    if pref_layers and not (deadline is not None and time.monotonic() >= deadline):
-                        pgres, _pgreason = self._route_pair_gateway(
+                    gateway_first = bool(pref_layers)
+                    if gateway_first and not (
+                        deadline is not None and time.monotonic() >= deadline
+                    ):
+                        gres, _greason = self._route_pair_gateway(
                             item,
                             committed=committed,
                             history=history,
@@ -5134,14 +5119,14 @@ class LatticePathfinder:
                             vias_used=pair_vias_used(item),
                             only_layers=pref_layers,
                         )
-                        if pgres is not None:
-                            pass_gateways[item.key] = pgres.gateway or "gateway"
+                        if gres is not None:
+                            pass_gateways[item.key] = gres.gateway or "gateway"
                             pair_outcomes[item.key] = SegmentOutcome.coupled(
                                 pass_gateways[item.key]
                             )
                             coupled_count += 1
                             routed_items += 1
-                            commit_pair(item, pgres)
+                            commit_pair(item, gres)
                             continue
                     pres, preason = self._route_pair_impl(
                         item, committed=committed, history=history, present=present
@@ -5149,6 +5134,7 @@ class LatticePathfinder:
                     gateway_retry = (
                         pres is None
                         and pair_gateways
+                        and not gateway_first
                         and preason in GATEWAY_RETRY_REASONS
                         and item.key not in self.pair_gateway_skip
                     )

@@ -78,6 +78,8 @@ class OptimizationStats:
     nets_rolled_back: int = 0
     drc_errors_before: int = 0
     drc_errors_after: int = 0
+    # Issue #6889: Kelvin-branch rewrites kept at their original geometry.
+    kelvin_vetoes: int = 0
 
     @property
     def segment_reduction(self) -> float:

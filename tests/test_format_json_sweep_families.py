@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 from pathlib import Path
 from unittest.mock import patch
 
@@ -554,7 +555,11 @@ def _run_pcb(argv, capsys):
 
 
 class TestPcbExchangeEmission:
-    BOARD = FIXTURES / "routing-diagnostic.kicad_pcb"
+    @pytest.fixture(autouse=True)
+    def _board_copy(self, tmp_path):
+        """Run against a tmp copy: export-dsn writes a revision sidecar beside the board."""
+        self.BOARD = tmp_path / "routing-diagnostic.kicad_pcb"
+        shutil.copy(FIXTURES / "routing-diagnostic.kicad_pcb", self.BOARD)
 
     def test_export_dsn_document(self, tmp_path, capsys):
         out_file = tmp_path / "board.dsn"
@@ -656,7 +661,7 @@ class TestPcbExchangeEmission:
             def parse(self):
                 return None
 
-            def merge_into(self, pcb, output=None):
+            def merge_into(self, pcb, output=None, allow_stale=False):
                 Path(output or pcb).write_text("stub")
 
         with patch("kicad_tools.export.ses.SESToKiCadImporter", _StubImporter):
