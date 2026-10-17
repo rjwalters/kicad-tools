@@ -2567,10 +2567,10 @@ class LatticePathfinder:
         """
         from .coupled import (
             assign_polarity,
-            merge_collinear_points,
             offset_polyline,
             seg_rect_dist,
             side_bit,
+            trim_end_reversals,
         )
 
         net_p = pc.pad_p_a.net
@@ -2738,7 +2738,7 @@ class LatticePathfinder:
                 return None, "pair-not-planar"  # defensive: vias are off
 
             layer, raw_pts, _widths = result.runs[0]
-            center = merge_collinear_points(raw_pts)
+            center = trim_end_reversals(raw_pts)
             if len(center) < 2:
                 return None, "pair-degenerate-centerline"
             plus = offset_polyline(center, +half_pitch)
