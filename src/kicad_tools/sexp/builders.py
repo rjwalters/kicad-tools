@@ -621,6 +621,7 @@ def zone_node(
     thermal_gap: float = 0.3,
     thermal_bridge_width: float = 0.3,
     pad_connection: str = "",
+    name_only: bool = False,
 ) -> SExp:
     """Build a PCB copper zone (pour) S-expression.
 
@@ -659,6 +660,9 @@ def zone_node(
               SMD ``starved_thermal`` errors but leaves single-spoke THT
               power pads unaddressed.
             * ``"no"`` -- no copper connection (pads isolated from the pour).
+        name_only: Write the KiCad-10 name-only net reference ``(net "NAME")``
+            instead of ``(net N) (net_name "NAME")``, for a board that has
+            no numeric net ids (issue #6989).
 
     Example output:
         (zone
@@ -678,10 +682,14 @@ def zone_node(
     pts_children = [xy(x, y) for x, y in points]
     polygon = SExp.list("polygon", SExp.list("pts", *pts_children))
 
+    net_refs = (
+        [SExp.list("net", net_name)]
+        if name_only
+        else [SExp.list("net", net), SExp.list("net_name", net_name)]
+    )
     zone = SExp.list(
         "zone",
-        SExp.list("net", net),
-        SExp.list("net_name", net_name),
+        *net_refs,
         SExp.list("layer", layer),
         uuid_node(uuid_str),
         SExp.list("hatch", "edge", 0.5),

@@ -2,8 +2,8 @@
 
 The pure-Python DRC checker (``validate.checker.DRCChecker``) produces
 ``validate.violations.DRCResults`` containing ``validate.violations.DRCViolation``
-objects with flat fields.  The DRC repair tools (``drc.repair_clearance``,
-``drc.fixer``) consume ``drc.report.DRCReport`` containing
+objects with flat fields.  The DRC repair tools (``drc.repair_clearance``)
+consume ``drc.report.DRCReport`` containing
 ``drc.violation.DRCViolation`` objects with richer structure.
 
 This module provides a conversion function so that any code path that has

@@ -7,30 +7,22 @@ from pathlib import Path
 import pytest
 
 
-class TestSchListSymbols:
-    """Tests for sch_list_symbols.py CLI."""
+class TestSymbolsMain:
+    """Tests for the ``kct symbols`` CLI (``kicad_tools.cli.symbols.main``)."""
 
     def test_file_not_found(self, capsys):
         """Test handling of missing file."""
-        import sys
+        from kicad_tools.cli.symbols import main
 
-        from kicad_tools.cli.sch_list_symbols import main
-
-        # Capture the sys.exit
-        with pytest.raises(SystemExit) as exc_info:
-            sys.argv = ["sch-list-symbols", "nonexistent.kicad_sch"]
-            main()
-
-        assert exc_info.value.code == 1
+        assert main(["nonexistent.kicad_sch"]) == 1
         captured = capsys.readouterr()
         assert "Error" in captured.err
 
-    def test_table_output(self, simple_rc_schematic: Path, capsys, monkeypatch):
+    def test_table_output(self, simple_rc_schematic: Path, capsys):
         """Test table format output."""
-        from kicad_tools.cli.sch_list_symbols import main
+        from kicad_tools.cli.symbols import main
 
-        monkeypatch.setattr("sys.argv", ["sch-list-symbols", str(simple_rc_schematic)])
-        main()
+        assert main([str(simple_rc_schematic)]) == 0
 
         captured = capsys.readouterr()
         # Should have some output
@@ -38,28 +30,22 @@ class TestSchListSymbols:
         # Should show symbol table or "No symbols found"
         assert "Ref" in captured.out or "No symbols" in captured.out
 
-    def test_json_output(self, simple_rc_schematic: Path, capsys, monkeypatch):
+    def test_json_output(self, simple_rc_schematic: Path, capsys):
         """Test JSON format output."""
-        from kicad_tools.cli.sch_list_symbols import main
+        from kicad_tools.cli.symbols import main
 
-        monkeypatch.setattr(
-            "sys.argv", ["sch-list-symbols", str(simple_rc_schematic), "--format", "json"]
-        )
-        main()
+        assert main([str(simple_rc_schematic), "--format", "json"]) == 0
 
         captured = capsys.readouterr()
         # Should be valid JSON
         data = json.loads(captured.out)
         assert isinstance(data, list)
 
-    def test_csv_output(self, simple_rc_schematic: Path, capsys, monkeypatch):
+    def test_csv_output(self, simple_rc_schematic: Path, capsys):
         """Test CSV format output."""
-        from kicad_tools.cli.sch_list_symbols import main
+        from kicad_tools.cli.symbols import main
 
-        monkeypatch.setattr(
-            "sys.argv", ["sch-list-symbols", str(simple_rc_schematic), "--format", "csv"]
-        )
-        main()
+        assert main([str(simple_rc_schematic), "--format", "csv"]) == 0
 
         captured = capsys.readouterr()
         # Should have CSV header
@@ -67,25 +53,20 @@ class TestSchListSymbols:
         assert len(lines) >= 1
         assert "Reference" in lines[0]
 
-    def test_filter_option(self, simple_rc_schematic: Path, capsys, monkeypatch):
+    def test_filter_option(self, simple_rc_schematic: Path, capsys):
         """Test filtering by reference pattern."""
-        from kicad_tools.cli.sch_list_symbols import main
+        from kicad_tools.cli.symbols import main
 
-        monkeypatch.setattr(
-            "sys.argv", ["sch-list-symbols", str(simple_rc_schematic), "--filter", "R*"]
-        )
-        main()
+        assert main([str(simple_rc_schematic), "--filter", "R*"]) == 0
 
         captured = capsys.readouterr()
-        # Should work without error
-        assert captured.err == "" or "Error" not in captured.err
+        assert "Error" not in captured.err
 
-    def test_verbose_output(self, simple_rc_schematic: Path, capsys, monkeypatch):
+    def test_verbose_output(self, simple_rc_schematic: Path, capsys):
         """Test verbose output."""
-        from kicad_tools.cli.sch_list_symbols import main
+        from kicad_tools.cli.symbols import main
 
-        monkeypatch.setattr("sys.argv", ["sch-list-symbols", str(simple_rc_schematic), "--verbose"])
-        main()
+        assert main([str(simple_rc_schematic), "--verbose"]) == 0
 
         captured = capsys.readouterr()
         # Verbose should include additional columns like Footprint or Position
