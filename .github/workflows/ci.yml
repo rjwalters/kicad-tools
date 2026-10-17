@@ -795,6 +795,83 @@ jobs:
         run: |
           uv run pytest tests/test_router_cpp_backend.py::TestCppBuildVersionGuard -v --no-cov
 
+  windows-smoke:
+    # Issue #6894: nothing else in CI runs on Windows, so an unguarded
+    # Unix-only import (resource, fcntl, signal.SIGKILL, os.fork, ...) at
+    # module level would break `kct` there unnoticed, as #6739 did. This job
+    # only installs, runs the CLI help, and imports every router/cli module;
+    # it does not run the test suite. Advisory: not a required check.
+    name: Windows Smoke
+    needs: changes
+    if: ${{ !cancelled() && (github.event_name == 'push' || needs.changes.outputs.code == 'true' || needs.changes.result == 'failure') }}
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      # setup-uv publishes only immutable full-version tags since v8 (no
+      # @v8/@v9 major tags exist), hence the exact pin.
+      - uses: astral-sh/setup-uv@v10.2.0
+        with:
+          version: "latest"
+          # setup-uv >=5 auto-enables the Actions cache on hosted runners
+          # (and >=9 no longer prunes it before upload); keep the pre-v5
+          # no-cache behavior these jobs were written against.
+          enable-cache: false
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.14"
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: CLI help
+        shell: bash
+        run: |
+          uv run kct --help
+          uv run kct route --help
+
+      - name: Import every router and cli module
+        shell: bash
+        run: |
+          uv run python - <<'PY'
+          import importlib
+          import pkgutil
+          import sys
+          import traceback
+
+          import kicad_tools.cli
+          import kicad_tools.router
+
+          # Modules excluded because they need a real Windows port, never
+          # silently: map module name -> tracking issue.
+          EXCLUDED = {}
+
+          failures = []
+          count = 0
+          for pkg in (kicad_tools.router, kicad_tools.cli):
+              names = [pkg.__name__] + [
+                  m.name
+                  for m in pkgutil.walk_packages(pkg.__path__, pkg.__name__ + ".")
+              ]
+              for name in names:
+                  if name in EXCLUDED:
+                      print(f"SKIP {name}: {EXCLUDED[name]}")
+                      continue
+                  count += 1
+                  try:
+                      importlib.import_module(name)
+                  except BaseException:
+                      failures.append((name, traceback.format_exc()))
+
+          print(f"imported {count - len(failures)}/{count} modules")
+          for name, tb in failures:
+              print(f"::error::import failed: {name}")
+              print(tb)
+          sys.exit(1 if failures else 0)
+          PY
+
   kicad-cli-smoke:
     name: kicad-cli Round-trip Smoke
     needs: [changes, kicad_pin]
