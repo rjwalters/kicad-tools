@@ -3,13 +3,14 @@
 Covers:
 
 * Hand-verified creepage data points across PD1/PD2/PD3 and material groups
-  I/II/IIIa (exact expected mm per the encoded IEC 60664-1 Table F.4 /
+  I/II/IIIa (exact expected mm per the encoded IEC 60664-1 Table F.5 /
   IEC 62368-1 Table 17).
 * Boundary / step-up behaviour: exactly-on-row returns that row; between rows
   steps UP (never interpolated); above the highest row fails loud.
 * Undocumented (voltage, PD, material-group) combinations raise the loud
   ``StandardLookupError`` -- never a silent guessed number.
-* Clearance derivation: peak-voltage keying + pollution-degree floor +
+* Clearance derivation (issue #7057): Table F.1 rated impulse voltage ->
+  Table F.2, Table F.8 steady-state peak, pollution-degree floor, and
   structured provenance.
 * Internal consistency (monotonic in voltage, across material groups, and
   across pollution degrees) as a transcription self-check.
@@ -34,7 +35,7 @@ STDS = ("iec60664", "iec62368")
 
 
 # ---------------------------------------------------------------------------
-# Hand-verified creepage data points (IEC 60664-1 Table F.4 / 62368-1 Table 17)
+# Hand-verified creepage data points (IEC 60664-1 Table F.5 / 62368-1 Table 17)
 # ---------------------------------------------------------------------------
 
 # (working_voltage_rms, pollution_degree, material_group) -> expected mm
@@ -233,8 +234,8 @@ def test_softstart_revc_envelope(standard_id):
 
 def test_clearance_floored_by_pollution_degree():
     std = get_standard("iec60664")
-    # 170 Vpk is below the lowest peak row -> the PD floor governs.
-    value, prov = std.required_clearance(170 * RMS_TO_PEAK, 2)
+    # 48 V, OVC II -> 500 V impulse -> 0.04 mm; the PD2 floor governs.
+    value, prov = std.required_clearance(48, 2)
     assert value == pytest.approx(0.2)  # PD2 floor
     assert prov["governing_component"] == "pollution-degree floor"
     assert prov["altitude_assumption"] == "<= 2000 m"
@@ -243,21 +244,126 @@ def test_clearance_floored_by_pollution_degree():
 
 def test_clearance_pd3_floor_is_higher():
     std = get_standard("iec60664")
-    value, _ = std.required_clearance(200 * RMS_TO_PEAK, 3)
+    value, prov = std.required_clearance(48, 3)
     assert value == pytest.approx(0.8)  # PD3 floor
+    assert prov["governing_component"] == "pollution-degree floor"
 
 
-def test_clearance_high_voltage_uses_table_row():
+def test_clearance_high_voltage_uses_impulse_row():
     std = get_standard("iec60664")
-    value, prov = std.required_clearance(5000, 1)
-    assert prov["governing_component"] == "peak-voltage table row"
-    assert value >= 0.8
+    value, prov = std.required_clearance(1000, 1)
+    assert prov["governing_component"] == "impulse"
+    assert value == pytest.approx(5.5)
 
 
-def test_clearance_above_highest_peak_row_fails_loud():
+def test_clearance_above_highest_rated_voltage_fails_loud():
     std = get_standard("iec60664")
     with pytest.raises(StandardLookupError):
+        std.required_clearance(1000.1, 2)
+    with pytest.raises(StandardLookupError):
         std.required_clearance(20000, 2)
+
+
+# ---------------------------------------------------------------------------
+# Issue #7057: clearance is keyed on the rated impulse withstand voltage
+# (Table F.1 -> Table F.2) and the steady-state peak (Table F.8); the larger
+# governs.  Every value below is cited in the curator's AC on #7057.
+# ---------------------------------------------------------------------------
+
+# (working_voltage_rms, pollution_degree, ovc) -> (mm, U_imp V, governing)
+_CLEARANCE_REGRESSION = {
+    # 230 V mains, OVC sweep, PD2.
+    (230, 2, "I"): (0.5, 1500.0, "impulse"),
+    (230, 2, "II"): (1.5, 2500.0, "impulse"),
+    (230, 2, "III"): (3.0, 4000.0, "impulse"),
+    (230, 2, "IV"): (5.5, 6000.0, "impulse"),
+    # 120 V -> 150 V row; 48 V -> 50 V row (floor unchanged from pre-#7057).
+    (120, 2, "II"): (0.5, 1500.0, "impulse"),
+    (48, 2, "II"): (0.2, 500.0, "pollution-degree floor"),
+    # Exactly on an F.1 row uses that row, not the next one.
+    (300, 2, "II"): (1.5, 2500.0, "impulse"),
+    # PD3 at 48 V: the 0.8 mm floor still governs.
+    (48, 3, "II"): (0.8, 500.0, "pollution-degree floor"),
+    # 1000 V rms: steady 1414 V pk -> 0.76 mm (F.8); impulse 6000 V -> 5.5 mm.
+    (1000, 2, "II"): (5.5, 6000.0, "impulse"),
+}
+
+
+@pytest.mark.parametrize("standard_id", STDS)
+@pytest.mark.parametrize(("key", "expected"), list(_CLEARANCE_REGRESSION.items()))
+def test_clearance_regression_values(standard_id, key, expected):
+    voltage, pd, ovc = key
+    mm, u_imp, governing = expected
+    value, prov = get_standard(standard_id).required_clearance(voltage, pd, ovc)
+    assert value == pytest.approx(mm)
+    assert prov["impulse_withstand_voltage_v"] == u_imp
+    assert prov["overvoltage_category"] == ovc
+    assert prov["governing_component"] == governing
+    assert prov["insulation"] == "basic"
+
+
+def test_clearance_default_ovc_is_ii_and_230v_is_1p5mm():
+    value, prov = get_standard("iec60664").required_clearance(230, 2)
+    assert value == pytest.approx(1.5)
+    assert prov["overvoltage_category"] == "II"
+    assert prov["impulse_withstand_voltage_v"] == 2500.0
+    assert prov["governing_component"] == "impulse"
+    assert prov["table_id"] == "Table F.2"
+    assert prov["impulse_table_id"] == "Table F.1"
+    assert prov["steady_state_table_id"] == "Table F.8"
+
+
+def test_clearance_1000v_records_both_routes():
+    _, prov = get_standard("iec60664").required_clearance(1000, 2, "II")
+    assert prov["peak_voltage_v"] == pytest.approx(1000 * RMS_TO_PEAK)
+    assert prov["steady_state_row_used_v"] == 1500.0
+    assert prov["steady_state_clearance_mm"] == pytest.approx(0.76)
+    assert prov["impulse_clearance_mm"] == pytest.approx(5.5)
+
+
+@pytest.mark.parametrize(
+    ("impulse_v", "row", "mm"),
+    [
+        (2500.0, 2500.0, 1.5),
+        (3100.0, 4000.0, 3.0),  # no 3200 V row; steps up to 4000 V
+        (6100.0, 8000.0, 8.0),  # no 6300 V row; steps up to 8000 V
+    ],
+)
+def test_table_f2_impulse_lookup(impulse_v, row, mm):
+    value, row_used = get_standard("iec60664").impulse_clearance(impulse_v)
+    assert row_used == row
+    assert value == pytest.approx(mm)
+
+
+def test_table_f2_has_only_preferred_series_rows():
+    rows = get_standard("iec60664").clearance_impulse_rows
+    assert 3200.0 not in rows
+    assert 6300.0 not in rows
+    assert 3000.0 in rows and 6000.0 in rows
+
+
+@pytest.mark.parametrize(("peak_v", "mm"), [(1000.0, 0.26), (2000.0, 1.27), (5000.0, 5.7)])
+def test_table_f8_steady_state_lookup(peak_v, mm):
+    value, row_used = get_standard("iec60664").steady_state_clearance(peak_v)
+    assert row_used == peak_v
+    assert value == pytest.approx(mm)
+
+
+def test_unknown_overvoltage_category_fails_loud():
+    with pytest.raises(StandardLookupError):
+        get_standard("iec60664").required_clearance(230, 2, "V")
+
+
+def test_iec62368_carries_unverified_harmonisation_note():
+    _, prov = get_standard("iec62368").required_clearance(230, 2)
+    assert "UNVERIFIED" in prov["harmonisation_note"]
+
+
+def test_creepage_pd2_group_ii_80v_is_0p95():
+    value, prov = get_standard("iec60664").required_creepage(75, 2, "II")
+    assert value == pytest.approx(0.95)
+    assert prov["voltage_row_used_v"] == 80.0
+    assert prov["table_id"] == "Table F.5"
 
 
 def test_clearance_provenance_carries_full_citation():
@@ -370,3 +476,24 @@ def test_passed_gates_on_both_creepage_and_clearance():
     # Both clear -> PASS.
     ok = _pair(required=2.0, creepage=3.0, clearance=0.5, req_clearance=0.2)
     assert ok.passed
+
+
+def test_clearance_tables_are_monotone():
+    """Transcription self-check for Tables F.1 / F.2 / F.8 (issue #7057)."""
+    std = get_standard("iec60664")
+    for rows in (
+        std.clearance_impulse_rows,
+        std.clearance_impulse_values,
+        std.clearance_steady_rows,
+        std.clearance_steady_values,
+        std.impulse_rated_voltage_rows,
+    ):
+        assert list(rows) == sorted(rows)
+        assert len(set(rows)) == len(rows)
+    columns = [std.impulse_withstand_values[c] for c in ("I", "II", "III", "IV")]
+    for col in columns:
+        assert list(col) == sorted(col)
+        # Every U_imp value must be a Table F.2 row (no step-up between tables).
+        assert all(v in std.clearance_impulse_rows for v in col)
+    for lower, higher in zip(columns, columns[1:], strict=False):
+        assert all(lo < hi for lo, hi in zip(lower, higher, strict=True))

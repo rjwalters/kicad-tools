@@ -610,10 +610,13 @@ def _add_creepage_parser(subparsers) -> None:
         default=None,
         help=(
             "Derive the required creepage (and clearance) from an IEC "
-            "standard table instead of --min: iec60664 (IEC 60664-1 Table F.4 "
-            "creepage / Table F.2 clearance) or iec62368 (IEC 62368-1 Table 17 "
-            "/ Table 14).  Requires --working-voltage and --pollution-degree.  "
-            "Engineering aid, NOT a certification."
+            "standard table instead of --min: iec60664 (IEC 60664-1 Table F.5 "
+            "creepage; clearance = max of Table F.2 at the Table F.1 rated "
+            "impulse voltage and Table F.8 at the steady-state peak) or "
+            "iec62368 (IEC 62368-1 Table 17 / Table 14, same clearance "
+            "derivation).  Requires --working-voltage and --pollution-degree.  "
+            "Basic insulation, altitude <= 2000 m.  Engineering aid, NOT a "
+            "certification."
         ),
     )
     creepage_parser.add_argument(
@@ -635,9 +638,25 @@ def _add_creepage_parser(subparsers) -> None:
         help=(
             "RMS working voltage in volts.  Creepage keys on this RMS value "
             "directly (step-up to the next-higher tabulated row, never "
-            "interpolated); clearance keys on its peak (RMS x sqrt(2), "
-            "sinusoidal assumption).  Required with --standard unless "
+            "interpolated).  Clearance treats it as the line-to-neutral rated "
+            "voltage: with --overvoltage-category it selects the rated impulse "
+            "withstand voltage (Table F.1) that keys Table F.2, and its peak "
+            "(RMS x sqrt(2), sinusoidal assumption) keys the steady-state "
+            "Table F.8; the larger governs.  Required with --standard unless "
             "--voltage-map is supplied."
+        ),
+    )
+    creepage_parser.add_argument(
+        "--overvoltage-category",
+        dest="overvoltage_category",
+        choices=["I", "II", "III", "IV"],
+        default="II",
+        help=(
+            "IEC 60664-1 overvoltage category for the clearance derivation "
+            "(Table F.1 rated impulse voltage).  Default II -- equipment "
+            "energised from the fixed mains installation.  Use I for circuits "
+            "with transient protection / not directly mains-connected, III/IV "
+            "for fixed-installation / origin-of-installation equipment."
         ),
     )
     # Per-net voltage model (#4371): derive the requirement per pair from |ΔV|.
@@ -6118,6 +6137,16 @@ def _add_audit_parser(subparsers) -> None:
         choices=["I", "II", "IIIa", "IIIb"],
         default="IIIa",
         help="Insulation material group by CTI (default: IIIa, conservative for FR-4).",
+    )
+    audit_parser.add_argument(
+        "--hv-overvoltage-category",
+        dest="audit_hv_overvoltage_category",
+        choices=["I", "II", "III", "IV"],
+        default="II",
+        help=(
+            "IEC 60664-1 overvoltage category for the derived clearance "
+            "(Table F.1 rated impulse voltage).  Default II (mains appliance)."
+        ),
     )
 
 
