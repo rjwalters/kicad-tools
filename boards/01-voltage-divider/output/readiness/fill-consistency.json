@@ -1,6 +1,7 @@
 {
   "changed_layer_inventory": [],
   "context_sha256": {
+    "sym-lib-table": "05eec8c92281801842dde8ed3dd6ff5192bbc64e25e053a3294f63c50bb0149c",
     "voltage_divider.kicad_pro": "d729bd613d8798b7b1b3acf39d153f8447342e393587afff543b1c21a3e3f5c9",
     "voltage_divider_routed.kicad_dru": "d9816b36c04dc038b445b0d44943e1bd879c7a69f00b12a496de346e23ed70e0",
     "voltage_divider_routed.kicad_pcb": "0ea46d485e8eceae68a1fe542a4a895e2faa15a6744a6bcd5e7b1797b93ac031",
