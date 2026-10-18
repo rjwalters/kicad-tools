@@ -34,6 +34,7 @@ from __future__ import annotations
 import math
 from typing import Any, Protocol
 
+from kicad_tools.core.geometry import point_in_polygon as _core_point_in_polygon
 from kicad_tools.core.geometry import point_to_segment_distance
 
 # ---------------------------------------------------------------------------
@@ -172,22 +173,8 @@ def drill_hole_to_hole_clear(
 
 
 def _point_in_polygon(x: float, y: float, polygon: list[tuple[float, float]]) -> bool:
-    """Ray-casting point-in-polygon test.
-
-    A duplicate of :func:`kicad_tools.cli.stitch_cmd.point_in_polygon` kept
-    private to this module so the shared helper has no circular
-    dependency on the stitch CLI.
-    """
-    n = len(polygon)
-    inside = False
-    j = n - 1
-    for i in range(n):
-        xi, yi = polygon[i]
-        xj, yj = polygon[j]
-        if ((yi > y) != (yj > y)) and (x < (xj - xi) * (y - yi) / (yj - yi) + xi):
-            inside = not inside
-        j = i
-    return inside
+    """Half-open ray-casting point-in-polygon test (see core.geometry)."""
+    return _core_point_in_polygon(x, y, polygon, boundary_inside=False)
 
 
 def _point_clear_of_filled_polygons(

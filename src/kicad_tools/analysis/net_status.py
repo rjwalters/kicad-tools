@@ -37,6 +37,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from kicad_tools.core.geometry import point_in_polygon as _core_point_in_polygon
 from kicad_tools.core.layers import COPPER_LAYER_ORDER, via_spans_layer
 from kicad_tools.geometry.copper import PAD_FALLBACK_ERODE, pad_size_box
 
@@ -2135,23 +2136,7 @@ class NetStatusAnalyzer:
         Returns:
             True if point is inside polygon
         """
-        n = len(polygon)
-        if n < 3:
-            return False
-
-        x, y = point
-        inside = False
-        j = n - 1
-
-        for i in range(n):
-            xi, yi = polygon[i]
-            xj, yj = polygon[j]
-
-            if ((yi > y) != (yj > y)) and (x < (xj - xi) * (y - yi) / (yj - yi) + xi):
-                inside = not inside
-            j = i
-
-        return inside
+        return _core_point_in_polygon(point[0], point[1], polygon, boundary_inside=False)
 
     def _find_islands(
         self,
