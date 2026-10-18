@@ -182,7 +182,7 @@ jobs:
         # board-05 case on another worker.
         env:
           KCT_LATTICE_BOARD_GUARD: ${{ github.event.schedule == '0 9 * * 0' && '1' || '' }}
-        run: uv run pytest -n auto --dist loadgroup -o addopts= --benchmark-disable --timeout=1200 --durations=25 -m slow
+        run: uv run pytest -n auto --dist loadgroup -o addopts= --benchmark-disable --timeout=1200 --durations=25 -rs -m slow
 
   # Issue #6738 (operator ruling 2026-10-16): the board 07 copper-safety DRC
   # ratchet runs here, on the schedule, instead of in ci.yml. ci.yml's
