@@ -529,6 +529,8 @@ class DRCChecker:
         "silkscreen_line_width": CATEGORY_ADVISORY,
         "silkscreen_over_pad": CATEGORY_ADVISORY,
         "silkscreen_text_height": CATEGORY_ADVISORY,
+        "silkscreen_text_thickness": CATEGORY_ADVISORY,
+        "silk_ref_obscured": CATEGORY_ADVISORY,
         # ---- Manufacturing DRC: fab-blocking copper/clearance/hole/
         #      edge/mask/drill/geometry. -----------------------------
         "clearance": CATEGORY_MANUFACTURING,
@@ -572,6 +574,13 @@ class DRCChecker:
         "netclass_via_diameter": CATEGORY_MANUFACTURING,
         "netclass_via_drill": CATEGORY_MANUFACTURING,
         "netclass_annular_ring": CATEGORY_MANUFACTURING,
+        # Issue #7292: project.kct requirements vs the routed board.
+        "spec_conformance_dimensions": CATEGORY_MANUFACTURING,
+        "spec_conformance_layers": CATEGORY_MANUFACTURING,
+        "spec_conformance_min_trace": CATEGORY_MANUFACTURING,
+        "spec_conformance_min_via": CATEGORY_MANUFACTURING,
+        "spec_conformance_min_drill": CATEGORY_MANUFACTURING,
+        "spec_conformance_target_fab": CATEGORY_MANUFACTURING,
         # Issue #6249: authored netclass clearance on routed copper -- the
         # same defect class kicad-cli reports as a netclass clearance error.
         "netclass_clearance_copper": CATEGORY_MANUFACTURING,

@@ -538,15 +538,15 @@ class TestExportPnPWithAuxOrigin:
         row = _cpl_rows(output)["R1"]
         assert (row["Mid X"], row["Mid Y"]) == ("15.0000mm", "-23.0000mm")
 
-    def test_aux_origin_config_none_jlcpcb_excludes_tht(self, tmp_path):
+    def test_aux_origin_config_none_jlcpcb_includes_tht(self, tmp_path):
         """Aux-origin branch + config=None must honor JLCPCB's exclude_tht default.
 
         Regression test for issue #3618: the aux-origin branch used to
         synthesize a bare PnPExportConfig when config was None, silently
-        dropping the JLCPCB formatter's exclude_tht=True default.  The CPL
-        would then include THT rows while the hand-solder set (computed from
-        the formatter's effective config) listed the same parts as excluded —
-        a CPL/exclusion divergence.
+        dropping the formatter's default.  The CPL and the hand-solder set
+        (computed from the formatter's effective config) could then diverge.
+        JLCPCB now assembles THT (issue #7239), so the default includes THT
+        and the hand-solder set is empty.
         """
         # Build a PCB with a NONZERO aux origin so the branch actually fires.
         fixture = Path(__file__).parent / "fixtures" / "projects" / "multilayer_zones.kicad_pcb"
@@ -571,18 +571,17 @@ class TestExportPnPWithAuxOrigin:
 
         output = export_pnp(footprints, "jlcpcb", config=None, pcb_path=pcb_path)
 
-        # THT component excluded from the CPL (JLCPCB default)...
-        assert "J1" not in output
-        # ...while the SMD part remains in the aux-origin, Y-up frame:
-        # x = 110 - 100 = 10, y = 50 - 70 = -20.
-        row = _cpl_rows(output)["R1"]
-        assert (row["Mid X"], row["Mid Y"]) == ("10.0000mm", "-20.0000mm")
+        # THT component kept in the CPL (JLCPCB default, issue #7239),
+        # in the aux-origin, Y-up frame: x = 110 - 100 = 10, y = 50 - 70 = -20
+        # for R1 and x = 50, y = -10 for J1.
+        rows = _cpl_rows(output)
+        assert (rows["R1"]["Mid X"], rows["R1"]["Mid Y"]) == ("10.0000mm", "-20.0000mm")
+        assert (rows["J1"]["Mid X"], rows["J1"]["Mid Y"]) == ("50.0000mm", "-10.0000mm")
 
         # The hand-solder set computed from the formatter's effective config
-        # (the assembly.py pattern) must AGREE with the CPL: J1 is listed.
+        # (the assembly.py pattern) must AGREE with the CPL: nothing excluded.
         effective = get_pnp_formatter("jlcpcb", None).config
-        excluded = extract_tht_exclusions(footprints, effective)
-        assert [p.reference for p in excluded] == ["J1"]
+        assert extract_tht_exclusions(footprints, effective) == []
 
     def test_aux_origin_explicit_config_fields_preserved(self, tmp_path):
         """dataclasses.replace path keeps all caller-set fields intact."""
@@ -813,16 +812,16 @@ class TestExtractPlacementsDNPFiltering:
 class TestJLCPCBPnPFormatterDefaults:
     """Tests for JLCPCB formatter default THT exclusion."""
 
-    def test_jlcpcb_defaults_exclude_tht(self):
-        """JLCPCB formatter should default to exclude_tht=True."""
+    def test_jlcpcb_defaults_include_tht(self):
+        """JLCPCB formatter should default to exclude_tht=False (issue #7239)."""
         formatter = JLCPCBPnPFormatter()
-        assert formatter.config.exclude_tht is True
-
-    def test_jlcpcb_explicit_include_tht(self):
-        """Passing exclude_tht=False should override JLCPCB default."""
-        config = PnPExportConfig(exclude_tht=False)
-        formatter = JLCPCBPnPFormatter(config)
         assert formatter.config.exclude_tht is False
+
+    def test_jlcpcb_explicit_exclude_tht(self):
+        """Passing exclude_tht=True should override JLCPCB default."""
+        config = PnPExportConfig(exclude_tht=True)
+        formatter = JLCPCBPnPFormatter(config)
+        assert formatter.config.exclude_tht is True
 
     def test_generic_does_not_exclude_tht(self):
         """Generic formatter should include THT by default."""
@@ -847,18 +846,18 @@ class TestExportPnPTHTIntegration:
             ),
         ]
 
-    def test_jlcpcb_excludes_tht(self, mixed_footprints):
-        """JLCPCB export should exclude THT components by default."""
+    def test_jlcpcb_includes_tht(self, mixed_footprints):
+        """JLCPCB export should include THT components by default (issue #7239)."""
         output = export_pnp(mixed_footprints, "jlcpcb")
         assert "R1" in output
-        assert "J1" not in output
+        assert "J1" in output
 
-    def test_jlcpcb_include_tht_override(self, mixed_footprints):
-        """JLCPCB export with exclude_tht=False should include THT."""
-        config = PnPExportConfig(exclude_tht=False)
+    def test_jlcpcb_exclude_tht_override(self, mixed_footprints):
+        """JLCPCB export with exclude_tht=True should drop THT."""
+        config = PnPExportConfig(exclude_tht=True)
         output = export_pnp(mixed_footprints, "jlcpcb", config=config)
         assert "R1" in output
-        assert "J1" in output
+        assert "J1" not in output
 
     def test_generic_includes_tht(self, mixed_footprints):
         """Generic export should include THT components by default."""
@@ -874,15 +873,15 @@ class TestExportPnPTHTIntegration:
 
 
 class TestAssemblyPackageJLCPCBTHTIntegration:
-    """Integration test: AssemblyPackage JLCPCB path excludes THT components."""
+    """Integration test: AssemblyPackage JLCPCB path keeps THT components."""
 
-    def test_jlcpcb_assembly_package_excludes_tht(self, tmp_path):
+    def test_jlcpcb_assembly_package_includes_tht(self, tmp_path):
         """AssemblyPackage with manufacturer='jlcpcb' and no explicit pnp_config
-        should produce a CPL file that excludes through-hole components.
+        should produce a CPL file that includes through-hole components
+        (JLCPCB assembles THT, issue #7239).
 
-        This guards against a regression where AssemblyPackage._generate_pnp()
-        created a bare PnPExportConfig (exclude_tht=False) instead of letting
-        the JLCPCB formatter supply its own default (exclude_tht=True).
+        This guards against AssemblyPackage._generate_pnp() overriding the
+        JLCPCB formatter's own default with a bare PnPExportConfig.
         """
         from unittest.mock import MagicMock, patch
 
@@ -929,8 +928,8 @@ class TestAssemblyPackageJLCPCBTHTIntegration:
         # SMD components must be present
         assert "R1" in cpl_content
         assert "C1" in cpl_content
-        # THT connector must be excluded
-        assert "J1" not in cpl_content
+        # THT connector must be present
+        assert "J1" in cpl_content
 
 
 class TestAssemblyPackageExplicitSourcingIntegration:
@@ -1154,8 +1153,8 @@ class TestAssemblyPackageTHTExcludedSurfacing:
             return pkg.export(output_dir=tmp_path / "out")
 
     def test_jlcpcb_records_tht_excluded(self, tmp_path):
-        """JLCPCB default (exclude_tht=True) surfaces the excluded refs."""
-        pkg = self._make_package(tmp_path)
+        """An explicit exclude_tht=True on JLCPCB surfaces the excluded refs."""
+        pkg = self._make_package(tmp_path, pnp_config=PnPExportConfig(exclude_tht=True))
         result = self._export_with_footprints(
             pkg,
             tmp_path,
@@ -1182,6 +1181,22 @@ class TestAssemblyPackageTHTExcludedSurfacing:
         assert "J1" not in cpl_content
         assert "SW1" not in cpl_content
         assert "R1" in cpl_content
+
+    def test_jlcpcb_default_has_no_tht_excluded(self, tmp_path):
+        """JLCPCB assembles THT (issue #7239): default leaves nothing to hand-solder."""
+        pkg = self._make_package(tmp_path)
+        result = self._export_with_footprints(
+            pkg,
+            tmp_path,
+            [
+                MockFootprint("R1", "10k", "0402", (10.0, 20.0), 0.0, "F.Cu", attr="smd"),
+                MockFootprint(
+                    "J1", "Conn", "PinHeader_1x04", (50.0, 10.0), 0.0, "F.Cu", attr="through_hole"
+                ),
+            ],
+        )
+        assert result.tht_excluded == []
+        assert "J1" in result.pnp_path.read_text()
 
     def test_smd_only_board_has_empty_tht_excluded(self, tmp_path):
         pkg = self._make_package(tmp_path)
