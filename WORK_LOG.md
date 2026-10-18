@@ -15,6 +15,39 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-18
 
+- **PR #7090**: fix(drc): report when kicad-cli could not run schematic parity (#7077)
+- **PR #7100**: fix(export): safety floor and DRC preflight count opens and reject other-board reports
+- **PR #7095**: feat(creepage): add insulation-type input (basic/supplementary/reinforced), default basic
+- **PR #7102**: fix(optim): query_move before-state snapshot gives real score_delta and violations
+- **Issue #7077** (closed): kct drc reports a clean result when kicad-cli could not run the schematic parity checks
+- **Issue #7091** (closed): kct export safety floor and DRC preflight pass unrouted boards: unconnected items never read since #4498, and a report for a different PCB is trusted
+- **Issue #7082** (closed): kct creepage/audit: add an insulation-type input (basic vs reinforced, IEC 60664-1 5.2.5) to the derived clearance/creepage
+- **Issue #7099** (closed): Fix PlacementSession.query_move before-state snapshot: score_delta always 0 and violations always empty in MCP query_move/apply_move
+- **PR #7098**: fix: validators no longer read clean when they didn't check (#7094)
+- **PR #7092**: docs: measure board 07 match-group spread after per-bump meander placement
+- **PR #7089**: fix(audit): un-run ERC or crashed sync check caps verdict at WARNING
+- **PR #7055**: fix!: deprecate --batch-routing (no-op that claimed GPU acceleration) and remove the unwired GPU batch-routing kernel
+- **Issue #7094** (closed): Three validators read clean when they didn't check: kct validate --lvs --min-confidence, kct erc --sheet/--type filters, kct sch validate with ERC not run
+- **Issue #7083** (closed): kct audit reports READY FOR MANUFACTURING when ERC never ran (kicad-cli off PATH on macOS, ERC timeout) or the sync check crashed
+- **Issue #7051** (closed): Remove no-op `kct route --batch-routing` and the orphaned 1,111-line BatchPathfinder GPU kernel (flag only prints 'GPU-accelerated')
+- **PR #7087**: fix(route): warn when --region-parallel is ignored; drop speedup claims
+- **PR #7085**: fix(cost): price unlisted layer counts at next tier and charge finish fee once
+- **PR #7068**: fix(board04): use global labels for power nets to clear same_local_global_label
+- **PR #7052**: fix(pcb): rotate PCBBlock in KiCad's footprint convention at 90/270
+- **PR #7050**: feat(pcb): apply PCBLayout to a real board through the PCB model
+- **Issue #7080** (closed): Cost estimator prices unlisted layer counts as 2-layer and multiplies the per-order finish fee by quantity
+- **Issue #7072** (closed): kct route --region-parallel is a silent no-op on the escape/two-phase/other paths: warn when ignored, drop the speedup claims
+- **Issue #7063** (closed): board 04: KiCad 10.0.7 ERC reports 3 same_local_global_label warnings (power symbol vs local label)
+- **Issue #7046** (closed): PCBBlock rotation at 90/270 deg disagrees with KiCad's footprint rotation: block traces miss their pads
+- **Issue #7022** (closed): Finish pcb/exporter.py: working PCBLayout → real .kicad_pcb bridge on the PCB model
+- **PR #7054**: chore(board-03): refresh readiness evidence after #7036 (main CI red, #7042)
+- **PR #7074**: fix(creepage): key IEC 60664-1 clearance on rated impulse voltage, not working-voltage peak
+- **PR #7061**: fix(placement): honour align --tolerance, count real moves, reject bad axis/reference
+- **PR #7069**: fix: make four documented-but-dead CLI flags real or honest
+- **Issue #7042** (closed): main red: #7036 changed board-03 routing_plan.py without refreshing readiness.json
+- **Issue #7057** (closed): kct creepage --standard iec60664: required clearance is looked up in Table F.2 by peak working voltage, so mains clearance comes out 0.2 mm instead of 1.5 mm
+- **Issue #7056** (closed): kct placement align --tolerance is a no-op: align_components ignores tolerance_mm, overcounts moves, silently centres on mismatched --reference
+- **Issue #7065** (closed): Finish or make honest four CLI flags whose documented behaviour is never implemented
 - **PR #7049**: fix: Project.create builds .kicad_pcb via PCB.create (KiCad 10 failed to load the old board, #7047)
 - **PR #7066**: docs: GPU/batched routing design note (profile-first)
 - **PR #7015**: test: resolve 10 never-running tests left behind by #3133

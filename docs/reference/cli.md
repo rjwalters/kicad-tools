@@ -329,6 +329,7 @@ kct drc <report|board.kicad_pcb> [options]
 | `--format {table,json,summary}` | Output format (default: table) |
 | `--errors-only` | Show only errors |
 | `--strict` | Exit 2 when warnings are present (exit-code contract, #6898) |
+| `--allow-incomplete` | Exit 0 instead of 2 when schematic parity did NOT RUN (#7077); same meaning as `kct check --allow-incomplete` |
 | `--type TYPE`, `-t` | Filter by violation type (partial match) |
 | `--net NET` | Filter by net name |
 | `--category`, `-c {placement,routing,manufacturing,connectivity,cosmetic}` | Filter by root-cause category |
@@ -344,6 +345,28 @@ kct drc <report|board.kicad_pcb> [options]
 The standalone `kicad-drc` also has `--rules` and `--compare`; they are
 deprecated (a stderr pointer is printed) in favour of `kct mfr rules` and
 `kct mfr compare`, and are intentionally not on `kct drc` (#6898).
+
+**Schematic parity (#7077)**
+
+`kct drc board.kicad_pcb` runs kicad-cli with `--schematic-parity` and prints
+one status line, also in `summary`, `--mfr` and `kicad-drc-summary` output:
+
+- `Schematic parity: PASSED` — parity ran and found nothing unwaived.
+- `Schematic parity: FAILED (N issue(s))` — findings listed in a
+  `SCHEMATIC PARITY` section, kept out of the geometric violation counts.
+- `Schematic parity: NOT RUN (<reason>)` — kicad-cli could not fetch the
+  schematic netlist (no schematic next to the board, or one that is not fully
+  annotated), or a `.json`/`.rpt` report has no parity findings: an empty
+  `schematic_parity` array cannot tell "clean" from "never ran".
+
+Exit codes: error-severity parity findings exit 1; warning-severity ones exit
+2 under `--strict`; NOT RUN exits 2 (the verdict reads `DRC INCOMPLETE`, never
+`DRC PASSED`) unless `--allow-incomplete` is given. Errors take precedence.
+`--mfr` keeps its manufacturer-compatibility exit code. `--format json` adds a
+`schematic_parity` object (`status`, `checked`, `reason`, `error_count`,
+`warning_count`, `issues`), a derived `schematic_parity_checked` alias, and
+`parity_errors`/`parity_warnings` in `summary`. Waiver entries match parity
+findings the same way they match DRC findings.
 
 **Waivers (`--waivers`, #4691)**
 
@@ -388,7 +411,7 @@ The `kicad-cli pcb drc` cross-gate reads the same schema-v2 sidecar as
 ```bash
 kct drc board.drc
 kct drc board.kicad_pcb --mfr jlcpcb
-kct drc board-drc.json --waivers .kct_waivers.json   # 0 unwaived errors gate
+kct drc board-drc.json --waivers .kct_waivers.json --allow-incomplete   # 0 unwaived errors gate
 kct mfr compare  # Show all manufacturer rules side by side
 ```
 
@@ -616,9 +639,23 @@ row) and the overvoltage category, set with
 `kct creepage --overvoltage-category {I,II,III,IV}` or
 `kct audit --hv-overvoltage-category {I,II,III,IV}` (default `II`, equipment
 fed from the fixed mains installation). For example 230 V at OVC II gives
-`U_imp` = 2500 V and 1.5 mm; OVC I 0.5 mm, III 3.0 mm, IV 5.5 mm. The
-`kct readiness` HV gate always uses the default `II`. Creepage is IEC
-60664-1:2020 Table F.5 (Table F.4 in the 2007 edition).
+`U_imp` = 2500 V and 1.5 mm with basic insulation; OVC I 0.5 mm, III 3.0 mm,
+IV 5.5 mm. The `kct readiness` HV gate always uses the default `II`. Creepage
+is IEC 60664-1:2020 Table F.5 (Table F.4 in the 2007 edition).
+
+**Insulation type (issue #7082).** `kct creepage --insulation
+{basic,supplementary,reinforced}` / `kct audit --hv-insulation ...` select the
+insulation the barrier must provide; the **default is `basic`** (unchanged
+behaviour); reinforced is an explicit opt-in for the mains-to-SELV case.
+Reinforced clearance steps `U_imp` up one value of the
+Table F.1 preferred series (330, 500, 800, 1500, 2500, 4000, 6000, 8000,
+12000 V) before the Table F.2 lookup (clause 5.2.5), so 230 V at OVC II needs
+`U_imp` = 4000 V and **3.0 mm**; reinforced creepage is twice the basic
+Table F.5 value (clause 6.2). Supplementary insulation uses the basic values.
+A `U_imp` already at 12000 V has no next step and fails loud. Both CLIs print
+the insulation type they assumed, and provenance records it with the rule
+applied (the reinforced rules are marked UNVERIFIED against a controlled copy
+of the standard). The `kct readiness` HV gate uses the default `basic`.
 
 **Examples:**
 ```bash

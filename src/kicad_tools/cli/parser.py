@@ -502,6 +502,16 @@ def _add_drc_parser(subparsers) -> None:
         "--strict", action="store_true", help="Exit with error code on warnings"
     )
     drc_parser.add_argument(
+        "--allow-incomplete",
+        action="store_true",
+        help=(
+            "Exit 0 instead of 2 when schematic parity did NOT RUN (no or "
+            "unannotated schematic next to the board, or a report that does "
+            "not record whether parity ran). Same name and meaning as "
+            "kct check --allow-incomplete (Issue #7077)"
+        ),
+    )
+    drc_parser.add_argument(
         "--type", "-t", dest="filter_type", help="Filter by violation type (partial match)"
     )
     drc_parser.add_argument("--net", help="Filter by net name")
@@ -615,8 +625,8 @@ def _add_creepage_parser(subparsers) -> None:
             "impulse voltage and Table F.8 at the steady-state peak) or "
             "iec62368 (IEC 62368-1 Table 17 / Table 14, same clearance "
             "derivation).  Requires --working-voltage and --pollution-degree.  "
-            "Basic insulation, altitude <= 2000 m.  Engineering aid, NOT a "
-            "certification."
+            "Insulation type per --insulation (default basic), altitude "
+            "<= 2000 m.  Engineering aid, NOT a certification."
         ),
     )
     creepage_parser.add_argument(
@@ -657,6 +667,20 @@ def _add_creepage_parser(subparsers) -> None:
             "energised from the fixed mains installation.  Use I for circuits "
             "with transient protection / not directly mains-connected, III/IV "
             "for fixed-installation / origin-of-installation equipment."
+        ),
+    )
+    creepage_parser.add_argument(
+        "--insulation",
+        dest="insulation",
+        choices=["basic", "supplementary", "reinforced"],
+        default="basic",
+        help=(
+            "Insulation type the derived creepage/clearance must provide "
+            "(IEC 60664-1 clause 5.2.5 / 6.2).  Default basic (230 V OVC II: "
+            "1.5 mm); supplementary uses the same table values.  Opt in to "
+            "reinforced for mains-to-SELV barriers: the Table F.1 rated impulse "
+            "voltage steps up one preferred-series value before Table F.2 "
+            "(230 V OVC II: 4000 V -> 3.0 mm) and creepage doubles."
         ),
     )
     # Per-net voltage model (#4371): derive the requirement per pair from |ΔV|.
@@ -5546,7 +5570,10 @@ def _add_validate_parser(subparsers) -> None:
         dest="validate_min_confidence",
         type=float,
         default=0.0,
-        help="Minimum match confidence to include in LVS results (0.0-1.0, default: 0.0)",
+        help=(
+            "Minimum LVS match confidence to display (0.0-1.0, default: 0.0). "
+            "Display only: hidden matches still count toward the verdict and exit code."
+        ),
     )
     validate_parser.add_argument(
         "--schematic",
@@ -6205,6 +6232,18 @@ def _add_audit_parser(subparsers) -> None:
         help=(
             "IEC 60664-1 overvoltage category for the derived clearance "
             "(Table F.1 rated impulse voltage).  Default II (mains appliance)."
+        ),
+    )
+    audit_parser.add_argument(
+        "--hv-insulation",
+        dest="audit_hv_insulation",
+        choices=["basic", "supplementary", "reinforced"],
+        default="basic",
+        help=(
+            "Insulation type the derived creepage/clearance must provide "
+            "(IEC 60664-1 clause 5.2.5 / 6.2).  Default basic; opt in to "
+            "reinforced for mains-to-SELV barriers (Table F.1 impulse voltage "
+            "one step higher, 2x creepage).  supplementary uses the basic values."
         ),
     )
 
@@ -9148,7 +9187,7 @@ def _add_export_parser(subparsers) -> None:
         action="store_true",
         help=(
             "Skip BOM/ERC/LCSC/cosmetic pre-flight validation checks. Does NOT "
-            "suppress the hard connectivity safety floor (net shorts). Use "
+            "suppress the hard connectivity safety floor (net shorts/opens). Use "
             "--skip-drc-floor to override that too."
         ),
     )
@@ -9158,7 +9197,8 @@ def _add_export_parser(subparsers) -> None:
         action="store_true",
         help=(
             "Disable the connectivity safety floor that blocks export on net "
-            "shorts in a pre-existing DRC report. Only for known-safe workarounds."
+            "shorts or unconnected items in a pre-existing DRC report. Only for "
+            "known-safe workarounds."
         ),
     )
     export_parser.add_argument(

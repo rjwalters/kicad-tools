@@ -19,7 +19,6 @@ from .assembly import (
     BOMExportResult,
     BOMGenerationResult,
     BOMItemResult,
-    CostEstimate,
     PnPExportResult,
 )
 
@@ -153,7 +152,6 @@ __all__ = [
     "BOMItemResult",
     "BOMGenerationResult",
     "PnPExportResult",
-    "CostEstimate",
     "AssemblyExportResult",
     # Placement Analysis Types
     "PlacementScores",

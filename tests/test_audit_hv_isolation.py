@@ -131,8 +131,8 @@ def _gap_audit(tmp_path, **hv):
 
 
 def test_230v_mains_requires_1p5mm_clearance(tmp_path):
-    """Reporter's repro via ``kct audit``: 1.3 mm < 1.5 mm (OVC II) -> FAIL."""
-    result = _gap_audit(tmp_path)
+    """Reporter's repro via ``kct audit``: 1.3 mm < 1.5 mm (OVC II, basic) -> FAIL."""
+    result = _gap_audit(tmp_path, hv_insulation="basic")
     iso = result.isolation
     assert iso.checked is True
     assert iso.required_clearance_mm == pytest.approx(1.5)
@@ -141,7 +141,7 @@ def test_230v_mains_requires_1p5mm_clearance(tmp_path):
 
 
 def test_230v_mains_ovc_i_clears_1p3mm(tmp_path):
-    result = _gap_audit(tmp_path, hv_overvoltage_category="I")
+    result = _gap_audit(tmp_path, hv_overvoltage_category="I", hv_insulation="basic")
     iso = result.isolation
     assert iso.required_clearance_mm == pytest.approx(0.5)
     assert iso.passed is True
@@ -162,6 +162,8 @@ def test_audit_cli_230v_reports_1p5mm(tmp_path, capsys):
             "230",
             "--hv-pollution-degree",
             "2",
+            "--hv-insulation",
+            "basic",
             "--format",
             "json",
         ]
@@ -169,6 +171,65 @@ def test_audit_cli_230v_reports_1p5mm(tmp_path, capsys):
     payload = json.loads(capsys.readouterr().out)
     assert rc == 2
     assert payload["isolation"]["required_clearance_mm"] == pytest.approx(1.5)
+    assert payload["isolation"]["insulation"] == "basic"
+
+
+# --------------------------------------------------------------------------
+# Issue #7082: insulation type (default basic)
+# --------------------------------------------------------------------------
+
+
+def test_230v_audit_default_is_basic_1p5mm(tmp_path):
+    """Default ``hv_insulation`` is basic: 230 V OVC II -> 1.5 mm (pre-#7082 values)."""
+    result = _gap_audit(tmp_path)
+    iso = result.isolation
+    assert iso.insulation == "basic"
+    assert iso.required_clearance_mm == pytest.approx(1.5)
+    assert iso.required_creepage_mm == pytest.approx(1.25)  # F.5, 250 V, PD2 group I
+    clp = iso.report["clearance_provenance"]
+    assert clp["insulation"] == "basic"
+    assert clp["required_impulse_voltage_v"] == 2500.0
+    assert iso.report["insulation"] == "basic"
+
+
+def test_230v_audit_reinforced_opt_in_3mm(tmp_path):
+    """Explicit ``hv_insulation="reinforced"``: 3.0 mm, 2x creepage."""
+    result = _gap_audit(tmp_path, hv_insulation="reinforced")
+    iso = result.isolation
+    assert iso.insulation == "reinforced"
+    assert iso.required_clearance_mm == pytest.approx(3.0)
+    assert iso.required_creepage_mm == pytest.approx(2.5)
+    assert iso.report["clearance_provenance"]["required_impulse_voltage_v"] == 4000.0
+
+
+def test_audit_cli_hv_insulation_reaches_engine(tmp_path, capsys):
+    pcb = _write(tmp_path, board_two_pad_gap_source(1.3))
+    ncm = tmp_path / "net_class_map.json"
+    ncm.write_text(json.dumps({"HV_LINE": {"name": "HV"}}))
+    rc = audit_cmd.main(
+        [
+            str(pcb),
+            "--net-class-map",
+            str(ncm),
+            "--hv-standard",
+            "iec62368",
+            "--hv-working-voltage",
+            "230",
+            "--hv-pollution-degree",
+            "2",
+            "--hv-insulation",
+            "reinforced",
+        ]
+    )
+    out = capsys.readouterr().out
+    assert rc == 2
+    assert "Insulation: reinforced" in out
+    assert "required: 3.000mm" in out
+
+
+def test_audit_cli_rejects_invalid_hv_insulation(capsys):
+    with pytest.raises(SystemExit):
+        audit_cmd.main(["x.kicad_pcb", "--hv-insulation", "double"])
 
 
 # --------------------------------------------------------------------------
@@ -598,6 +659,8 @@ class TestKctAuditForwardsHvFlags:
                 "MAINS",
                 "--hv-overvoltage-category",
                 "III",
+                "--hv-insulation",
+                "reinforced",
             ],
         )
         assert sub_argv == [
@@ -618,6 +681,8 @@ class TestKctAuditForwardsHvFlags:
             "II",
             "--hv-overvoltage-category",
             "III",
+            "--hv-insulation",
+            "reinforced",
         ]
 
     def test_defaults_forward_nothing(self, monkeypatch):

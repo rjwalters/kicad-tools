@@ -371,6 +371,8 @@ def test_router_table_matches_the_creepage_census_on_a_bipolar_map(tmp_path) -> 
         standard_obj=get_standard("iec60664"),
         pollution_degree=2,
         material_group="IIIa",
+        # The router pins basic creepage (issue #7082); compare like with like.
+        insulation="basic",
     )
     census_required = {
         tuple(sorted((p.net_a, p.net_b))): p.required_creepage_mm

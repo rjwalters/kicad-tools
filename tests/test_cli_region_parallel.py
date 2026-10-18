@@ -334,3 +334,65 @@ def test_router_route_all_negotiated_signature_matches_cli_defaults():
     assert sig.parameters["partition_rows"].default == 2
     assert sig.parameters["partition_cols"].default == 2
     assert sig.parameters["max_parallel_workers"].default == 4
+
+
+# ---------------------------------------------------------------------------
+# Issue #7072: warn once when --region-parallel is ignored by the taken path.
+# ---------------------------------------------------------------------------
+
+
+def test_warn_region_parallel_ignored_once_on_stderr(capsys) -> None:
+    from kicad_tools.cli.route_cmd import _warn_region_parallel_ignored
+
+    args = argparse.Namespace(region_parallel=True)
+    _warn_region_parallel_ignored(args, "escape pre-phase")
+    _warn_region_parallel_ignored(args, "two-phase")  # ladder retry: silent
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    lines = [ln for ln in captured.err.splitlines() if ln]
+    assert lines == [
+        "warning: --region-parallel ignored: the escape pre-phase path "
+        "does not support region parallelism"
+    ]
+
+
+def test_warn_region_parallel_ignored_silent_without_flag(capsys) -> None:
+    from kicad_tools.cli.route_cmd import _warn_region_parallel_ignored
+
+    _warn_region_parallel_ignored(argparse.Namespace(region_parallel=False), "basic strategy")
+    _warn_region_parallel_ignored(argparse.Namespace(), "basic strategy")
+    captured = capsys.readouterr()
+    assert captured.out == "" and captured.err == ""
+
+
+def test_every_non_forwarding_branch_has_warning_call() -> None:
+    """Each of the four dispatch chains warns in every non-forwarding branch."""
+    import inspect
+
+    from kicad_tools.cli import route_cmd
+
+    source = inspect.getsource(route_cmd)
+    for label in (
+        "escape pre-phase",
+        "multi-resolution",
+        "two-phase",
+        "basic strategy",
+        "monte-carlo strategy",
+        "evolutionary strategy",
+    ):
+        # do_routing + three escalation ladders
+        assert source.count(f'_warn_region_parallel_ignored(args, "{label}")') >= 4, label
+    assert '_warn_region_parallel_ignored(args, "progressive-clearance")' in source
+
+
+def test_region_parallel_help_makes_no_speedup_claim() -> None:
+    import re
+    from pathlib import Path
+
+    from kicad_tools.cli import route_cmd
+
+    src = Path(route_cmd.__file__).read_text()
+    assert not re.search(r"\d-\dx speedup", src)
+    for mod in ("core.py", "parallel.py"):
+        text = (Path(route_cmd.__file__).parents[1] / "router" / mod).read_text()
+        assert not re.search(r"\d-\dx speedup", text), mod

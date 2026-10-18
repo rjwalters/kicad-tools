@@ -23,11 +23,15 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from .pnp import is_through_hole_footprint
+
+if TYPE_CHECKING:
+    from ..drc.violation import DRCViolation
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +57,63 @@ class PreflightResult:
         return d
 
 
+def _describe_drc_finding(v: DRCViolation) -> str:
+    """One-line description of a DRC finding for preflight ``details``.
+
+    KiCad's ``unconnected_items`` description is a generic "Missing
+    connection between items", so opens also name the items they join.
+    """
+    from ..drc.violation import ViolationType
+
+    text = f"{v.type_str}: {v.message}"
+    if v.type == ViolationType.UNCONNECTED_ITEMS and v.items:
+        text += f" ({' / '.join(v.items[:2])})"
+    return text
+
+
+def report_source_mismatch(
+    recorded_source: str | None,
+    target: Path | str | None,
+    *,
+    require_suffix: str | None = None,
+) -> str | None:
+    """Return the report's recorded source basename when it names another file.
+
+    A DRC/ERC report records which board/schematic it was generated for
+    (kicad-cli ``source``, kct-check ``file``, the text-report header).  A
+    report generated for a *different* file -- e.g. the ``*_routed.kicad_pcb``
+    sibling's ``drc_report.json`` sitting next to the unrouted board -- is no
+    evidence about the file being exported (issue #7091).
+
+    Only basenames are compared: recorded sources may be absolute paths from
+    another host or cwd-relative (#6532), and may use either path separator.
+
+    Args:
+        recorded_source: The source path recorded inside the report.
+        target: The file the caller is checking (PCB or schematic).
+        require_suffix: When given, only compare if the recorded source ends
+            with this suffix (case-insensitive).  ``ERCReport.source_file``
+            falls back to the report's *own* path when the JSON has no
+            ``source``, so the ERC caller passes ``".kicad_sch"`` to avoid
+            mistaking that fallback for a recorded source.
+
+    Returns:
+        The recorded source's basename when it differs from ``target``'s,
+        else ``None`` (match, no recorded source, or nothing to compare).
+    """
+    if not recorded_source or target is None:
+        return None
+    recorded_name = re.split(r"[\\/]", recorded_source.strip())[-1]
+    if not recorded_name:
+        return None
+    if require_suffix is not None and not recorded_name.lower().endswith(require_suffix.lower()):
+        return None
+    target_name = Path(target).name
+    if recorded_name == target_name:
+        return None
+    return recorded_name
+
+
 @dataclass
 class PreflightConfig:
     """Configuration for which pre-flight checks to run."""
@@ -72,6 +133,12 @@ class PreflightConfig:
     # Paths to pre-existing report files (avoids re-running kicad-cli)
     drc_report_path: str | Path | None = None
     erc_report_path: str | Path | None = None
+
+    # When True, a DRC/ERC report recorded for a different PCB/schematic is a
+    # FAIL instead of a WARN (issue #7091).  ``ManufacturingPackage`` sets this
+    # from ``strict_preflight`` so strict exports never ship on a verdict that
+    # was computed for another board.
+    strict_report_source: bool = False
 
 
 class PreflightChecker:
@@ -997,16 +1064,48 @@ class PreflightChecker:
             from ..drc.report import DRCReport
 
             report = DRCReport.load(report_path)
+
+            # Issue #7091: a report generated for a different PCB (e.g. the
+            # ``*_routed`` sibling's report auto-discovered next to the
+            # unrouted board) is not evidence for this board -- treat it like
+            # a missing report.
+            other = report_source_mismatch(report.pcb_name, self.pcb_path)
+            if other is not None:
+                return PreflightResult(
+                    name="drc",
+                    status="FAIL" if self.config.strict_report_source else "WARN",
+                    message=f"DRC report is for {other}, not {self.pcb_path.name}",
+                    details=(
+                        f"{report_path} was generated for another board; re-run DRC "
+                        "on this PCB or pass --drc-report"
+                    ),
+                )
+
             error_count = report.error_count
             warning_count = report.warning_count
+            # Issue #7091: since #4498 KiCad's ``unconnected_items`` (opens)
+            # live outside ``violations``/``error_count``; count the
+            # error-severity ones explicitly so an unrouted board FAILs.
+            open_errors = [v for v in report.connectivity_items() if v.is_error]
 
-            if error_count > 0:
+            if error_count > 0 or open_errors:
                 errors = report.errors
+                if open_errors:
+                    message = (
+                        f"DRC has {error_count} error(s), {len(open_errors)} unconnected item(s)"
+                    )
+                else:
+                    message = f"DRC has {error_count} error(s)"
+                # List the first few findings from both collections.
+                if errors and open_errors:
+                    shown = [*errors[:3], *open_errors[:3]]
+                else:
+                    shown = [*errors, *open_errors][:5]
                 return PreflightResult(
                     name="drc",
                     status="FAIL",
-                    message=f"DRC has {error_count} error(s)",
-                    details="; ".join(f"{v.type_str}: {v.message}" for v in errors[:5]),
+                    message=message,
+                    details="; ".join(_describe_drc_finding(v) for v in shown),
                 )
 
             if warning_count > 0:
@@ -1070,6 +1169,24 @@ class PreflightChecker:
             from ..erc.report import ERCReport
 
             report = ERCReport.load(report_path)
+
+            # Issue #7091: a report recorded for a different schematic is not
+            # evidence for this one.  ``require_suffix`` skips the fallback
+            # where ``source_file`` is the report's own path (no ``source``).
+            other = report_source_mismatch(
+                report.source_file, self.schematic_path, require_suffix=".kicad_sch"
+            )
+            if other is not None and self.schematic_path is not None:
+                return PreflightResult(
+                    name="erc",
+                    status="FAIL" if self.config.strict_report_source else "WARN",
+                    message=f"ERC report is for {other}, not {self.schematic_path.name}",
+                    details=(
+                        f"{report_path} was generated for another schematic; re-run "
+                        "ERC on this schematic or pass --erc-report"
+                    ),
+                )
+
             error_count = report.error_count
             warning_count = report.warning_count
 

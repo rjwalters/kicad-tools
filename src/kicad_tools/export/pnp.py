@@ -587,3 +587,26 @@ def export_pnp(
 
     placements = extract_placements(footprints, formatter.config)
     return formatter.format(placements)
+
+
+def count_rotation_corrections(
+    footprints: list[Footprint],
+    manufacturer: str = "generic",
+    config: PnPExportConfig | None = None,
+    rotation_corrections: dict[str, float] | None = None,
+) -> int:
+    """Count CPL placements whose rotation is shifted by a per-footprint correction.
+
+    Uses the same effective config and placement filters as :func:`export_pnp`
+    (THT/DNP/layer filtering), so the count covers exactly the rows written to
+    the CPL where ``match_rotation_correction`` is non-zero.
+    """
+    from kicad_tools.manufacturers.base import match_rotation_correction
+
+    if not rotation_corrections:
+        return 0
+    formatter = get_pnp_formatter(manufacturer, config, rotation_corrections)
+    placements = formatter.filter_placements(extract_placements(footprints, formatter.config))
+    return sum(
+        1 for p in placements if match_rotation_correction(p.footprint, rotation_corrections) != 0
+    )

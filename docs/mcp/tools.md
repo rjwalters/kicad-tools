@@ -120,12 +120,15 @@ Generate complete assembly package for manufacturing.
   "pnp": {
     "output_path": "/path/to/cpl.csv",
     "component_count": 127,
-    "layers": ["top", "bottom"]
+    "layers": ["top", "bottom"],
+    "rotation_corrections": 2
   },
   "zip_file": "/path/to/board-jlcpcb-assembly.zip",
   "warnings": ["3 parts missing LCSC part numbers"]
 }
 ```
+
+`pnp.rotation_corrections` is the number of CPL rows whose rotation was shifted by the manufacturer's per-footprint correction table (e.g. SOIC-8, SOT-23 on JLCPCB); it is `0` for manufacturers without corrections.
 
 ---
 
@@ -376,6 +379,8 @@ Query the impact of a hypothetical component move without applying it.
   "warnings": []
 }
 ```
+
+`routing_impact.estimated_length_change_mm` is the change in total Euclidean pin-MST length over the nets of the moved component (positive = longer). `routing_impact.crossing_changes` is the signed change in inter-net crossings (`crossing_count`, star topology) between the board before and after the move.
 
 ---
 

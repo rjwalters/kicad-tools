@@ -167,6 +167,18 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
+        "--hv-insulation",
+        dest="hv_insulation",
+        choices=["basic", "supplementary", "reinforced"],
+        default="basic",
+        help=(
+            "Insulation type the derived creepage/clearance must provide "
+            "(IEC 60664-1 clause 5.2.5 / 6.2).  Default basic; opt in to "
+            "reinforced for mains-to-SELV barriers (Table F.1 impulse voltage "
+            "one step higher, 2x creepage).  supplementary uses the basic values."
+        ),
+    )
+    parser.add_argument(
         "--strict",
         action="store_true",
         help="Exit with code 2 on warnings",
@@ -213,6 +225,7 @@ def main(argv: list[str] | None = None) -> int:
             hv_pollution_degree=args.hv_pollution_degree,
             hv_material_group=args.hv_material_group,
             hv_overvoltage_category=args.hv_overvoltage_category,
+            hv_insulation=args.hv_insulation,
         )
         result = audit.run()
     except ValueError as e:
@@ -271,15 +284,22 @@ def output_table(result: AuditResult, verbose: bool = False) -> None:
 
     # ERC
     erc = result.erc
-    erc_status = "PASS" if erc.passed else "FAIL"
-    erc_icon = "OK" if erc.passed else "X"
-    print(f"\n[{erc_icon}] ERC (Electrical Rules Check): {erc_status}")
-    if erc.error_count > 0 or erc.warning_count > 0:
-        print(f"    Errors: {erc.error_count}, Warnings: {erc.warning_count}")
+    if erc.could_not_verify:
+        # Issue #7083: kicad-cli missing / ERC timed out -- the schematic was
+        # never checked, so this is neither PASS nor FAIL.
+        print("\n[!!] ERC (Electrical Rules Check): NOT RUN")
         if erc.details:
-            print(f"    Details: {erc.details}")
-    elif erc.details:
-        print(f"    Note: {erc.details}")
+            print(f"    Note: {erc.details}")
+    else:
+        erc_status = "PASS" if erc.passed else "FAIL"
+        erc_icon = "OK" if erc.passed else "X"
+        print(f"\n[{erc_icon}] ERC (Electrical Rules Check): {erc_status}")
+        if erc.error_count > 0 or erc.warning_count > 0:
+            print(f"    Errors: {erc.error_count}, Warnings: {erc.warning_count}")
+            if erc.details:
+                print(f"    Details: {erc.details}")
+        elif erc.details:
+            print(f"    Note: {erc.details}")
 
     # DRC
     drc = result.drc
@@ -318,7 +338,12 @@ def output_table(result: AuditResult, verbose: bool = False) -> None:
 
     # Sync drift (schematic <-> PCB)
     sync = result.sync
-    if sync.skipped:
+    if sync.could_not_verify:
+        # Issue #7083: the sync check crashed, so drift was never measured.
+        print("\n[!!] Sync (Schematic <-> PCB): NOT RUN")
+        if sync.details:
+            print(f"    Note: {sync.details}")
+    elif sync.skipped:
         print("\n[--] Sync (Schematic <-> PCB): SKIPPED")
         if sync.details:
             print(f"    Note: {sync.details}")
@@ -503,6 +528,8 @@ def _output_isolation_section(iso) -> None:
     if iso.standard:
         edition = f" {iso.standard_edition}" if iso.standard_edition else ""
         print(f"    Standard: {iso.standard}{edition}")
+        if iso.insulation:
+            print(f"    Insulation: {iso.insulation} (assumed for the derived requirement)")
 
     # Creepage (surface path) -- always thresholded.
     if iso.min_creepage_mm is not None and iso.required_creepage_mm is not None:

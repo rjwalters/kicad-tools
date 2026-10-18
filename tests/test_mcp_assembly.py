@@ -18,7 +18,6 @@ from kicad_tools.mcp.tools.export import (
 from kicad_tools.mcp.types import (
     AssemblyExportResult,
     BOMExportResult,
-    CostEstimate,
     PnPExportResult,
 )
 
@@ -91,46 +90,6 @@ class TestPnPExportResult:
         assert d["rotation_corrections"] == 2
 
 
-class TestCostEstimate:
-    """Tests for CostEstimate dataclass."""
-
-    def test_creation(self):
-        estimate = CostEstimate(
-            pcb_cost_usd=12.00,
-            assembly_cost_usd=28.50,
-            parts_cost_usd=45.20,
-            total_usd=85.70,
-            notes=["5 boards", "Standard shipping"],
-        )
-        assert estimate.pcb_cost_usd == 12.00
-        assert estimate.assembly_cost_usd == 28.50
-        assert estimate.parts_cost_usd == 45.20
-        assert estimate.total_usd == 85.70
-        assert len(estimate.notes) == 2
-
-    def test_default_values(self):
-        estimate = CostEstimate()
-        assert estimate.pcb_cost_usd is None
-        assert estimate.assembly_cost_usd is None
-        assert estimate.parts_cost_usd is None
-        assert estimate.total_usd is None
-        assert estimate.notes == []
-
-    def test_to_dict(self):
-        estimate = CostEstimate(
-            pcb_cost_usd=12.00,
-            total_usd=12.00,
-            notes=["PCB only"],
-        )
-        d = estimate.to_dict()
-
-        assert d["pcb_cost_usd"] == 12.00
-        assert d["assembly_cost_usd"] is None
-        assert d["parts_cost_usd"] is None
-        assert d["total_usd"] == 12.00
-        assert d["notes"] == ["PCB only"]
-
-
 class TestAssemblyExportResult:
     """Tests for AssemblyExportResult dataclass."""
 
@@ -180,18 +139,6 @@ class TestAssemblyExportResult:
         assert d["pnp"] is None
         assert d["gerbers"] is None
         assert d["warnings"] == ["Test warning"]
-
-    def test_to_dict_with_cost_estimate(self):
-        estimate = CostEstimate(total_usd=100.00)
-        result = AssemblyExportResult(
-            success=True,
-            output_dir="/tmp/assembly",
-            manufacturer="jlcpcb",
-            cost_estimate=estimate,
-        )
-        d = result.to_dict()
-
-        assert d["cost_estimate"]["total_usd"] == 100.00
 
 
 class TestExportAssembly:
@@ -358,3 +305,80 @@ class TestMCPServerAssembly:
         manufacturer_prop = assembly_tool["inputSchema"]["properties"]["manufacturer"]
 
         assert manufacturer_prop.get("default") == "jlcpcb"
+
+
+ROTATION_PCB = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (general (thickness 1.6))
+  (layers (0 "F.Cu" signal) (31 "B.Cu" signal))
+  (net 0 "")
+  (footprint "Package_SO:SOIC-8_3.9x4.9mm_P1.27mm"
+    (layer "F.Cu")
+    (at 150 150)
+    (property "Reference" "U1" (at 0 0 0) (layer "F.SilkS"))
+    (property "Value" "IC" (at 0 0 0) (layer "F.Fab"))
+    (pad "1" smd rect (at -2.7 0) (size 1.5 0.6) (layers "F.Cu" "F.Paste" "F.Mask"))
+  )
+  (footprint "Package_TO_SOT_SMD:SOT-23"
+    (layer "F.Cu")
+    (at 160 150)
+    (property "Reference" "Q1" (at 0 0 0) (layer "F.SilkS"))
+    (property "Value" "NPN" (at 0 0 0) (layer "F.Fab"))
+    (pad "1" smd rect (at -1 0) (size 0.8 0.9) (layers "F.Cu" "F.Paste" "F.Mask"))
+  )
+  (footprint "Capacitor_SMD:C_0402_1005Metric"
+    (layer "F.Cu")
+    (at 170 150)
+    (property "Reference" "C1" (at 0 0 0) (layer "F.SilkS"))
+    (property "Value" "100nF" (at 0 0 0) (layer "F.Fab"))
+    (pad "1" smd rect (at -0.5 0) (size 0.5 0.6) (layers "F.Cu" "F.Paste" "F.Mask"))
+  )
+)
+"""
+
+
+class TestRotationCorrectionCount:
+    """rotation_corrections reports real counts, not a hardcoded 0 (#7107)."""
+
+    @staticmethod
+    def _count(tmp_path: Path, manufacturer: str):
+        from kicad_tools.export.assembly import AssemblyPackage, AssemblyPackageResult
+
+        pcb = tmp_path / "rot.kicad_pcb"
+        pcb.write_text(ROTATION_PCB)
+        sch = tmp_path / "rot.kicad_sch"
+        sch.write_text("(kicad_sch (version 20231014))")
+        out = tmp_path / "out"
+        out.mkdir()
+        package = AssemblyPackage(pcb, sch, manufacturer=manufacturer)
+        result = AssemblyPackageResult(output_dir=out)
+        package._generate_pnp(out, result)
+        return result.rotation_corrections_applied
+
+    def test_jlcpcb_counts_soic_and_sot23(self, tmp_path: Path):
+        assert self._count(tmp_path, "jlcpcb") == 2
+
+    def test_manufacturer_without_corrections_reports_zero(self, tmp_path: Path):
+        assert self._count(tmp_path, "generic") == 0
+
+    def test_mcp_export_surfaces_count(self, tmp_path: Path):
+        from unittest.mock import patch
+
+        from kicad_tools.export.assembly import AssemblyPackage, AssemblyPackageResult
+
+        pcb = tmp_path / "rot.kicad_pcb"
+        pcb.write_text(ROTATION_PCB)
+        sch = tmp_path / "rot.kicad_sch"
+        sch.write_text("(kicad_sch (version 20231014))")
+        out = tmp_path / "out"
+        out.mkdir()
+        pnp = out / "cpl.csv"
+        pnp.write_text("Designator,Layer\nU1,top\n")
+
+        fake = AssemblyPackageResult(output_dir=out, pnp_path=pnp, rotation_corrections_applied=2)
+        with patch.object(AssemblyPackage, "export", return_value=fake):
+            result = export_assembly(str(pcb), str(sch), str(out), manufacturer="jlcpcb")
+        assert result.pnp is not None
+        assert result.pnp.rotation_corrections == 2
+        assert "cost_estimate" not in result.to_dict()
