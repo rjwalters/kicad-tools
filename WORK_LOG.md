@@ -15,6 +15,13 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-18
 
+- **PR #7143**: fix(drc): tolerate reports lacking schematic_parity in apply_waivers_to_report
+- **PR #7140**: fix(project): merge collinear grid-step segments in Project.route()
+- **PR #7134**: fix(placement): shift hierarchical fallback outline into origin-relative frame
+- **PR #7103**: fix: rank lattice fallback pair legs by P/N via-count parity
+- **Issue #7141** (closed): main red: test_check_evidence_waivers_5946 AttributeError schematic_parity after #7077
+- **Issue #7138** (closed): Project.route() saves one segment per grid step (no collinear merge)
+- **Issue #7124** (closed): Two more placement outline fallbacks miss the board-origin shift (bottom_up_placement.py, optimize_placement_cmd.py) — latent #7106 off-board write
 - **PR #7130**: fix(cli): skip leading global options in footprint-generate and erc argv shims
 - **PR #7128**: feat: warn when a placement move clusters heat sources
 - **PR #7122**: fix(mcp): merge collinear segments in route_net before saving
