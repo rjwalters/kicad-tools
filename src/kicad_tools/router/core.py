@@ -10544,7 +10544,8 @@ class Autorouter:
             progress_callback: Optional callback for progress updates
             parallel: If True, route independent nets in parallel using
                 bounding box analysis to find non-overlapping net groups.
-                Can provide 3-4x speedup for boards with many independent nets.
+                Net searches take the grid lock, so no speedup should be
+                expected (see docs/research/gpu-routing-design.md section 3).
             max_workers: Maximum number of parallel workers (default: 4).
                 Only used when parallel=True.
             interleaved: If True, use interleaved ordering for N-port nets.
@@ -11635,8 +11636,9 @@ class Autorouter:
         """Route all nets using parallel execution where possible.
 
         Groups nets by bounding box independence and routes independent
-        nets concurrently using ThreadPoolExecutor. This can provide
-        3-4x speedup for boards with many independent nets.
+        nets concurrently using ThreadPoolExecutor. Net searches take the
+        grid lock, so no speedup should be expected (see
+        docs/research/gpu-routing-design.md section 3).
 
         Args:
             net_order: Optional explicit net ordering (by priority)
@@ -12052,7 +12054,9 @@ class Autorouter:
                 This improves convergence for difficult routing scenarios.
             region_parallel: If True, use region-based parallelism (Issue #965).
                 Partitions the grid into regions and routes non-adjacent regions
-                in parallel during each iteration, providing 2-3x speedup.
+                in parallel during each iteration. Worker searches currently
+                serialize on the grid lock and the GIL, so no speedup should be
+                expected (docs/research/gpu-routing-design.md section 3).
             partition_rows: Number of region rows for partitioning (default 2)
             partition_cols: Number of region columns for partitioning (default 2)
             max_parallel_workers: Maximum parallel workers per region group (default 4)
@@ -12559,7 +12563,7 @@ class Autorouter:
 
         # Issue #3100: Auto-gate ``region_parallel`` on small / dense workloads.
         # PR #3068 wired ``--region-parallel`` through ``route_all_negotiated``
-        # but the docstring's "2-3x speedup" only materializes when each region
+        # but any benefit only materializes when each region
         # has enough independent nets to amortize the worker startup, grid
         # thread-safety conversion, and inter-iteration handoff costs.  The
         # board-07 re-benchmark on #3045 showed +55% wall-clock with 31 nets
