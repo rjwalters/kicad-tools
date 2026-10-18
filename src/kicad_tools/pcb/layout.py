@@ -7,9 +7,16 @@ routing between them.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+from pathlib import Path
+from typing import TYPE_CHECKING
+
 from .blocks.base import PCBBlock
 from .geometry import Layer
 from .primitives import TraceSegment, Via
+
+if TYPE_CHECKING:
+    from .exporter import LayoutApplyReport
 
 
 class PCBLayout:
@@ -82,6 +89,73 @@ class PCBLayout:
             )
 
         return result
+
+    def export_vias(self) -> list[dict]:
+        """Export all vias (block-internal + inter-block), sheet-absolute.
+
+        Each dict has ``x``, ``y``, ``size``, ``drill``, ``layers`` (a pair of
+        layer-name strings), ``net`` and ``block_id`` (``None`` for
+        inter-block vias).  Block vias get the same rotate-then-translate
+        transform as block traces.
+        """
+        result = []
+        for block in self.blocks.values():
+            for via in block.vias:
+                pos = via.position
+                if block.rotation != 0:
+                    pos = pos.rotate(block.rotation)
+                pos = pos + block.origin
+                result.append(self._via_dict(via, pos.x, pos.y, block.block_id))
+
+        for via in self.inter_block_vias:
+            result.append(self._via_dict(via, via.position.x, via.position.y, None))
+
+        return result
+
+    @staticmethod
+    def _via_dict(via: Via, x: float, y: float, block_id: str | None) -> dict:
+        return {
+            "x": x,
+            "y": y,
+            "size": via.size,
+            "drill": via.drill,
+            "layers": (via.layers[0].value, via.layers[1].value),
+            "net": via.net,
+            "block_id": block_id,
+        }
+
+    def apply_to_pcb(
+        self,
+        source: str | Path,
+        output: str | Path,
+        *,
+        net_map: Mapping[str, str] | None = None,
+        strict: bool = True,
+        traces: bool = True,
+        vias: bool = True,
+    ) -> LayoutApplyReport:
+        """Apply this layout to an existing board and save the result.
+
+        Moves the block footprints already on ``source`` to their layout
+        placements and writes the block and inter-block traces and vias on
+        the board's existing nets (``net_map`` maps block net names such as
+        ``VOUT`` to board net names such as ``+3V3``).  The board must already
+        contain every block footprint; nothing is created.  See
+        :class:`~kicad_tools.pcb.exporter.KiCadPCBExporter` for the strict /
+        lenient error policy.
+
+        Returns:
+            A :class:`~kicad_tools.pcb.exporter.LayoutApplyReport`.
+
+        Raises:
+            LayoutApplyError: In strict mode, listing every problem; ``output``
+                is not written.
+        """
+        # Lazy: exporter imports this module.
+        from .exporter import KiCadPCBExporter
+
+        exporter = KiCadPCBExporter(self, net_map=net_map, strict=strict)
+        return exporter.apply(source, output, traces=traces, vias=vias)
 
     def to_block_groups(self) -> list:
         """Extract :class:`BlockGroupDef` instances from registered blocks.

@@ -361,20 +361,64 @@ from kicad_tools.pcb.blocks import LDOBlock, MCUBlock
 
 layout = PCBLayout("power_system")
 
-# Add blocks
-layout.add_block(LDOBlock(part="AMS1117-3.3"), name="ldo")
-layout.add_block(MCUBlock(part="STM32F103"), name="mcu")
+# Add blocks. Block refs are the board refs, so give every block distinct
+# ones (both blocks would otherwise default to U1).
+layout.add_block(LDOBlock(ldo_ref="U1", input_cap="C1", output_caps=["C2"]), name="ldo")
+layout.add_block(MCUBlock(mcu_ref="U2", bypass_caps=["C3", "C4"]), name="mcu")
 
-# Position blocks
-layout.blocks["ldo"].place(10, 10)
-layout.blocks["mcu"].place(30, 10)
+# Position blocks (sheet-absolute mm, like a footprint's (at ...))
+layout.blocks["ldo"].place(110, 80)
+layout.blocks["mcu"].place(130, 80)
 
-# Route between blocks
-layout.route("ldo", "VOUT", "mcu", "VDD")
+# Route between blocks; name the net so the copper lands on a real one
+layout.route("ldo", "VOUT", "mcu", "VDD", net="VOUT")
 
 # Export placements
 placements = layout.export_placements()
 ```
+
+#### Apply to a real board
+
+`apply_to_pcb` moves the block footprints on an existing board to their
+layout positions and writes the block traces, the inter-block traces and any
+vias as copper on the board's **existing** nets. The board must already
+contain every block footprint, with netted pads, from Step 3. The bridge never
+creates footprints or nets. Blocks use generic net names (`VIN`, `VOUT`,
+`VDD`, `GND`), so `net_map` maps them to the board's names; a name that is
+not in `net_map` is looked up unchanged.
+
+```python
+report = layout.apply_to_pcb(
+    "board.kicad_pcb",
+    "board_placed.kicad_pcb",
+    net_map={"VOUT": "+3V3", "VDD": "+3V3", "VIN": "/VIN"},
+    strict=False,  # skip (and report) copper that cannot be applied
+)
+print(f"moved {len(report.moved)} footprints, added {report.segments_added} segments")
+for problem in report.skipped:
+    print("skipped:", problem)
+```
+
+By default (`strict=True`) the bridge raises one `LayoutApplyError` that
+lists every problem, and nothing is written. These are the problems it
+checks for:
+
+- a ref missing from the board, or a ref used by two blocks;
+- a route without a `net=`, or a net the board does not have;
+- a layer that is not one of the board's copper layers;
+- copper that would short or dangle. The check measures every new trace and
+  via against the board's real pad shapes, at their new positions. Each trace
+  end must land in a pad, or on a track or via, of its own net. Nothing may
+  come closer than the board's clearance rule to a pad, track or via on
+  another net. The rule comes from the `.kicad_pro` / `.kicad_dru` beside the
+  board, or KiCad's 0.2 mm default when there is none.
+
+With `strict=False` each offending item is skipped instead, logged as a
+warning and listed in `report.skipped`. That is why the snippet above uses
+it. The stock `LDOBlock` / `MCUBlock` internal routing and `route()`'s
+straight port-to-port line still cross foreign pads (#7062, #7064), so in
+strict mode this layout is refused. Applying the same layout again adds no
+duplicate copper.
 
 ### Schematic Reading vs Writing
 
