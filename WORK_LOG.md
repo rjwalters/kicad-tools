@@ -15,6 +15,20 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-18
 
+- **PR #7183**: test(dru): model post-#4600 Max Hole Size rule in legacy sidecar fixture
+- **PR #7182**: fix(preflight): check .kct-assigned parts and SO lead pitch in LCSC guard
+- **PR #7177**: test: narrow route --lint-gate contract variant and return it to required tier
+- **PR #7174**: fix(drc): fail kct drc on error-severity unconnected items
+- **PR #7172**: fix(parts): look up LCSC parts via list endpoint with exact-code match
+- **PR #7162**: fix(router): match-group tuner clears foreign preserved copper
+- **PR #7142**: test(mcp): smoke test calling every registered tool
+- **Issue #7180** (closed): Part/footprint check misses .kct-assigned parts (boards 00/01/02/06) and SOIC vs TSSOP pitch (#7166 follow-up)
+- **Issue #7178** (closed): test: TestDruManagedBlockMerge legacy sidecar tests fail on main after Max Hole Size rule
+- **Issue #7169** (closed): kct parts lookup: JLCPCB selectSmtComponentDetail returns 404; migrate anonymous detail lookup
+- **Issue #7159** (closed): Route-time match-group tuner meanders through preserved foreign-net vias (board 07: 16 kicad-cli errors with --length-match-groups)
+- **Issue #7129** (closed): test flake: format_json_stdout_contract[route --lint-gate] still times out at 100s under CI load (follow-up to #6744)
+- **Issue #7123** (closed): MCP: parametrized smoke test calling every registered tool through MCPServer.call_tool (#7115 Part 3)
+- **Issue #7096** (closed): kct drc reports DRC PASSED / exit 0 on an unrouted board: unconnected items (opens) are never counted
 - **PR #7181**: fix(drc,erc): kct drc --mfr never drops a violation; delete dead phantom wire filter
 - **PR #7176**: fix(readiness,preflight): stop calling unchecked LCSC parts verified
 - **PR #7160**: fix(router): keep a match-group member's commits when a later attempt fails
