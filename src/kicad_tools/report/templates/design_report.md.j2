@@ -279,6 +279,7 @@ hand (DNP for fab assembly).
 
 | Metric | Count |
 |--------|-------|
+| Errors | {{ drc.error_count | default(0) }} |
 {% if drc.native_error_count is defined and drc.native_error_count is not none %}
 | Errors: kct (`--mfr {{ drc.manufacturer | default("?", true) }}` rules) | {{ drc.native_error_count }} |
 {% if drc.geometric_error_count is defined and drc.geometric_error_count is not none %}
@@ -286,8 +287,6 @@ hand (DNP for fab assembly).
 {% else %}
 | Errors: kicad-cli (geometric) | not run |
 {% endif %}
-{% else %}
-| Errors | {{ drc.error_count | default(0) }} |
 {% endif %}
 | Warnings | {{ drc.warning_count | default(0) }} |
 | Blocking | {{ drc.blocking_count | default(0) }} |

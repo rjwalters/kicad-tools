@@ -262,6 +262,13 @@ def test_collect_drc_splits_counts_per_engine():
     assert "| Errors: kicad-cli (geometric) | 21 |" in section
     assert "| Blocking | 42 |" in section
     assert "reported by both" in section
+    # The total row must survive: ``kct board-metrics`` parses ``| Errors | N |``.
+    assert "| Errors | 42 |" in section
+
+    from kicad_tools.cli.board_metrics_cmd import _parse_report_md
+
+    parsed = _parse_report_md(rendered, "board")
+    assert parsed["drc_violations"] == 42 == data["error_count"]
 
 
 def test_collect_drc_geometric_not_run():
@@ -277,6 +284,10 @@ def test_collect_drc_geometric_not_run():
     )
     assert "| Errors: kicad-cli (geometric) | not run |" in rendered
     assert "reported by both" not in rendered
+
+    from kicad_tools.cli.board_metrics_cmd import _parse_report_md
+
+    assert _parse_report_md(rendered, "board")["drc_violations"] == 3
 
 
 # ---------------------------------------------------------------------------
