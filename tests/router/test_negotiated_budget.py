@@ -156,3 +156,15 @@ def test_delegators_keep_original_signatures() -> None:
     }
     for name, sig in expected.items():
         assert str(inspect.signature(getattr(Autorouter, name))) == sig, name
+
+
+def test_escape_reroute_cap_scales_with_median_iteration() -> None:
+    from kicad_tools.router.negotiated_budget import escape_reroute_cap
+
+    assert escape_reroute_cap([]) is None
+    assert escape_reroute_cap([0, 0]) is None
+    assert escape_reroute_cap([6, 4, 8], k=2) == 12
+    assert escape_reroute_cap([6, 4], k=1) == 5
+    assert escape_reroute_cap([1], k=1) == 1
+    # Deterministic: independent of input order.
+    assert escape_reroute_cap([8, 4, 6]) == escape_reroute_cap([4, 6, 8])

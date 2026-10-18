@@ -12428,6 +12428,8 @@ class Autorouter:
         # Track overflow history for adaptive mode (Issue #633)
         overflow_history: list[int] = []
         escape_strategy_index = 0
+        # Issue #7071: nets rerouted per rip-up iteration; sizes the escape cap.
+        iteration_reroute_counts: list[int] = []
 
         # Issue #3942 (Bug A): buffer oscillation/escape diagnostics printed
         # mid-loop and only surface them if the router ends with stranded nets
@@ -12448,6 +12450,24 @@ class Autorouter:
             100%%-routed board produces no failure-flavored wording.
             """
             deferred_oscillation_msgs.append(message)
+
+        def _print_escape_summary(router: NegotiatedRouter) -> None:
+            """One unbuffered line per escape (Issue #7071).
+
+            Unlike ``_emit_oscillation_msg`` this survives #3942: the time an
+            escape costs must stay visible on a 100%%-routed board.  The
+            wording avoids the failure phrases that gate pins.
+            """
+            info = router.last_escape_summary
+            if info is None:
+                return
+            cap = "" if info.reroute_cap is None else f" of {info.reroute_cap}"
+            flush_print(
+                f"  Escape: {info.strategies_tried} strategies, {info.seconds:.1f}s, "
+                f"{info.reroutes}{cap} reroutes, overflow "
+                f"{info.overflow_before} to {info.overflow_after}, "
+                f"{'kept' if info.kept else 'rolled back'}"
+            )
 
         # Issue #2334: Stochastic perturbation state tracking.
         # perturbation_stagnation_count tracks how many iterations the
@@ -14255,6 +14275,7 @@ class Autorouter:
 
                     if stalled_nets:
                         nets_to_reroute = [n for n in nets_to_reroute if n not in stalled_nets]
+                    iteration_reroute_counts.append(len(nets_to_reroute))
 
                     # Issue #2396: When overflow is 0 but nets remain unrouted,
                     # the rip-up loop has no overflow signal to act on.  Force
@@ -14815,8 +14836,13 @@ class Autorouter:
                                 strategy_index=escape_strategy_index,
                                 per_net_timeout=iter_per_net_cap,
                                 escape_budget=escape_budget,
+                                reroute_cap=_negotiated_budget.escape_reroute_cap(
+                                    iteration_reroute_counts
+                                ),
                             )
                             escape_strategy_index += tried
+                            _print_escape_summary(neg_router)
+                            overflow = new_overflow if not success else overflow
 
                             if success:
                                 _emit_oscillation_msg(
@@ -15526,8 +15552,13 @@ class Autorouter:
                             strategy_index=escape_strategy_index,
                             per_net_timeout=iter_per_net_cap,
                             escape_budget=escape_budget,
+                            reroute_cap=_negotiated_budget.escape_reroute_cap(
+                                iteration_reroute_counts
+                            ),
                         )
                         escape_strategy_index += tried
+                        _print_escape_summary(neg_router)
+                        overflow = new_overflow if not success else overflow
 
                         if success:
                             _emit_oscillation_msg(
