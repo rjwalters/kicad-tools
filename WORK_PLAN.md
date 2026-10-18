@@ -18,7 +18,7 @@ Judge-approved PRs under a hold (`loom:blocked` or `loom:operator`) — only a h
 
 `loom:very-important` (one counts per workspace); every stage takes these first.
 
-_None._
+- **#7082**: kct creepage/audit: add an insulation-type input (basic vs reinforced, IEC 60664-1 5.2.5) to the derived clearance/creepage
 
 ## Important
 
@@ -30,7 +30,8 @@ _None._
 
 Human-approved issues ready for implementation (`loom:issue`).
 
-_None._
+- **#6835**: router: raise flag-off coupled iteration budget to 350k/phase (700k total) so Board07 couples 6/7 pairs; soften endpoint-tolerance comment (#6826 follow-up)
+- **#7077**: kct drc reports a clean result when kicad-cli could not run the schematic parity checks
 
 ## In Progress
 
@@ -39,25 +40,40 @@ Issues currently being built (`loom:building`).
 - **#5798**: [Epic #5784] Phase 4: deconfound kct's match-group length tuning on board 07 (measure first)
 - **#6554**: diffpair: reproduce KiCad's diff_pair_uncoupled primitive pairing exactly (kct is a lower bound)
 - **#6894**: ci: add a Windows smoke job; skip test_peak_rss_bytes_positive where resource is unavailable (follow-up #6739)
-- **#7022**: Finish pcb/exporter.py: working PCBLayout → real .kicad_pcb bridge (placements + inter-block traces) on the PCB model
 - **#7026**: board 03: fresh class-clean lattice route is not complete under the recipe's tier-1 zone fill (3 GND opens)
-- **#7042**: main red: #7036 changed board-03 routing_plan.py without refreshing readiness.json (test_committed_readiness_inputs_match_tree[03-usb-joystick])
 - **#7045**: Finish PredictiveAnalyzer._check_thermal: wire analysis/thermal.py into per-move predictive warnings
-- **#7046**: PCBBlock rotation at 90/270 deg disagrees with KiCad's footprint rotation: block traces miss their pads
-- **#7051**: Remove no-op `kct route --batch-routing` and the orphaned 1,111-line BatchPathfinder GPU kernel (flag only prints 'GPU-accelerated')
-- **#7056**: kct placement align --tolerance is a no-op: align_components ignores tolerance_mm, overcounts moves, silently centres on mismatched --reference
-- **#7057**: kct creepage --standard iec60664: required clearance is looked up in Table F.2 by peak working voltage, so mains clearance comes out 0.2 mm instead of 1.5 mm
 - **#7058**: kct creepage overstates creepage around a slot: the detour is computed between the straight-line nearest points, and narrow gaps are not bridged
 - **#7059**: kct export CPL coordinates are relative to the Edge.Cuts top-left with Y down, while the gerbers use the drill/place origin with Y up
-- **#7063**: board 04: KiCad 10.0.7 ERC reports 3 same_local_global_label warnings (power symbol vs local label); test_committed_pcb_within_gate_at_declared_tier[04] fails on 10.0.7 hosts
+- **#7060**: CoupledLines overstates differential impedance of tightly coupled pairs (+17 % microstrip, +12 % stripline)
+- **#7062**: LDOBlock internal routing shorts foreign pads and crosses itself on real SOT-23-5 geometry
+- **#7064**: PCBLayout.route() draws a straight port-to-port line that crosses foreign pads and never reaches a pad
+- **#7070**: docs: CLI reference gaps after #7069 (parts import, optimize-traces -v/--length-match, sch validate options, stats.per_net)
+- **#7071**: router: negotiated oscillation escape burns ~27 s (≈40% of board-02 wall) on four non-transactional strategies, then is rolled back (P1 of #7053 note, mislabelled 'perturbation pass')
+- **#7075**: transmission_line.py: CPWG impedance reads 53-233 % high, and microstrip/CPWG dielectric loss is too large by a factor of eps_eff
+- **#7076**: Microstrip Z0 with copper thickness reads 1.6-3.7 % low (docstring claims 0.2 %)
+- **#7078**: Generated .kicad_dru silkscreen width/height rules apply to F.Silkscreen only
+- **#7079**: ImpedanceRule judges every detected differential pair at a 0.15 mm gap, whatever the routed spacing
+- **#7082**: kct creepage/audit: add an insulation-type input (basic vs reinforced, IEC 60664-1 5.2.5) to the derived clearance/creepage
+- **#7084**: router: routing board 03 under jlcpcb-tier1 collapses the USB_D In2.Cu common run to 1.4 mm (arm C under jlcpcb keeps 4.1 mm)
+- **#7091**: kct export safety floor and DRC preflight pass unrouted boards: unconnected items never read since #4498, and a report for a different PCB is trusted
+- **#7093**: router: differential pair gets unequal via counts when a leg falls back to uncoupled routing (board 03 USB_D 2 vs 3; blocks #6394)
+- **#7096**: kct drc reports DRC PASSED / exit 0 on an unrouted board: unconnected items (opens) are never counted
+- **#7099**: Fix PlacementSession.query_move before-state snapshot: score_delta always 0 and violations always empty in MCP query_move/apply_move
 
 ## PRs Awaiting Review
 
 PRs waiting on Judge (`loom:review-requested`).
 
-- **#7050**: feat(pcb): apply PCBLayout to a real board through the PCB model
-- **#7052**: fix(pcb): rotate PCBBlock in KiCad's footprint convention at 90/270
-- **#7055**: refactor: remove unwired GPU batch-routing kernel; deprecate --batch-routing
+- **#6838**: perf(router): raise flag-off coupled iteration budget to 1.4M (700k/phase) with PCIE_TX/LVDS exceptions
+- **#7081**: fix(cli): wire parts import and sch validate flags; sync cli.md with parser
+- **#7086**: fix(drc): match B.Silkscreen in silkscreen width/height rules
+- **#7090**: fix(drc): report when kicad-cli could not run schematic parity (#7077)
+- **#7095**: feat(creepage): add insulation-type input (basic/supplementary/reinforced), default basic
+- **#7100**: fix(export): safety floor and DRC preflight count opens and reject other-board reports
+- **#7101**: test(router): pin board 03 tier-1 USB_D In2.Cu coupled run
+- **#7102**: fix(optim): query_move before-state snapshot gives real score_delta and violations
+- **#7103**: fix: rank lattice fallback pair legs by P/N via-count parity
+- **#7104**: docs: record tscircuit upstream defect outcomes (#5878)
 
 ## Approved (Awaiting Merge)
 
@@ -65,10 +81,6 @@ PRs that passed review and are queued for Champion auto-merge (`loom:pr`).
 
 - **#6874**: ci(board-07): move copper-safety DRC ratchet to scheduled slow-tests
 - **#6900**: ci: add Windows smoke job and skip RSS positivity test without resource
-- **#7054**: chore(board-03): refresh readiness evidence after #7036 (main CI red, #7042)
-- **#7061**: fix(placement): honour align --tolerance, count real moves, reject bad axis/reference
-- **#7068**: fix(board04): use global labels for power nets to clear same_local_global_label
-- **#7069**: fix: make four documented-but-dead CLI flags real or honest
 
 ## Proposed
 
@@ -82,6 +94,7 @@ Issues carrying `loom:curated`.
 - **#5508**: Epic: pad-access invariant — no committed route may strand an unrouted pad *(curated)*
 - **#5509**: Epic: one clearance kernel — search, commit, and final validation must agree with kicad-cli DRC *(curated)*
 - **#5550**: Reconcile 4 outstanding loom-quarantine stashes left by the worktree reaper (issues 5201, 4982, 5216, 5004) *(curated)*
+- **#5798**: [Epic #5784] Phase 4: deconfound kct's match-group length tuning on board 07 (measure first) *(curated)*
 - **#5878**: File the 6 tscircuit upstream defects found by the interop gate (needs a credential with issue-write outside rjwalters/*) *(curated)*
 - **#6394**: board 03: 13 copper violations of the router's own Power class (0.2 mm) exposed by #6390 *(curated)*
 - **#6404**: boards 00-07: refill saved zones and refresh hash-bound bundles/readiness after #6390's sidecar update *(curated)*
@@ -93,20 +106,26 @@ Issues carrying `loom:curated`.
 - **#6835**: router: raise flag-off coupled iteration budget to 350k/phase (700k total) so Board07 couples 6/7 pairs; soften endpoint-tolerance comment (#6826 follow-up) *(curated)*
 - **#6858**: router: coupled pre-pass should keep the better of the joint-search and pose-centreline candidates (compare-and-keep; unblocks #6835) *(curated)*
 - **#6894**: ci: add a Windows smoke job; skip test_peak_rss_bytes_positive where resource is unavailable (follow-up #6739) *(curated)*
-- **#7022**: Finish pcb/exporter.py: working PCBLayout → real .kicad_pcb bridge (placements + inter-block traces) on the PCB model *(curated)*
 - **#7026**: board 03: fresh class-clean lattice route is not complete under the recipe's tier-1 zone fill (3 GND opens) *(curated)*
 - **#7045**: Finish PredictiveAnalyzer._check_thermal: wire analysis/thermal.py into per-move predictive warnings *(curated)*
-- **#7046**: PCBBlock rotation at 90/270 deg disagrees with KiCad's footprint rotation: block traces miss their pads *(curated)*
-- **#7051**: Remove no-op `kct route --batch-routing` and the orphaned 1,111-line BatchPathfinder GPU kernel (flag only prints 'GPU-accelerated') *(curated)*
-- **#7056**: kct placement align --tolerance is a no-op: align_components ignores tolerance_mm, overcounts moves, silently centres on mismatched --reference *(curated)*
-- **#7057**: kct creepage --standard iec60664: required clearance is looked up in Table F.2 by peak working voltage, so mains clearance comes out 0.2 mm instead of 1.5 mm *(curated)*
 - **#7058**: kct creepage overstates creepage around a slot: the detour is computed between the straight-line nearest points, and narrow gaps are not bridged *(curated)*
 - **#7059**: kct export CPL coordinates are relative to the Edge.Cuts top-left with Y down, while the gerbers use the drill/place origin with Y up *(curated)*
 - **#7060**: CoupledLines overstates differential impedance of tightly coupled pairs (+17 % microstrip, +12 % stripline) *(curated)*
-- **#7063**: board 04: KiCad 10.0.7 ERC reports 3 same_local_global_label warnings (power symbol vs local label); test_committed_pcb_within_gate_at_declared_tier[04] fails on 10.0.7 hosts *(curated)*
-- **#7065**: Finish or make honest four CLI flags whose documented behaviour is never implemented (parts import -i, sch validate --lib-path, fom manufacturer, optimize-traces -v) *(curated)*
+- **#7062**: LDOBlock internal routing shorts foreign pads and crosses itself on real SOT-23-5 geometry *(curated)*
+- **#7064**: PCBLayout.route() draws a straight port-to-port line that crosses foreign pads and never reaches a pad *(curated)*
 - **#7070**: docs: CLI reference gaps after #7069 (parts import, optimize-traces -v/--length-match, sch validate options, stats.per_net) *(curated)*
 - **#7071**: router: negotiated oscillation escape burns ~27 s (≈40% of board-02 wall) on four non-transactional strategies, then is rolled back (P1 of #7053 note, mislabelled 'perturbation pass') *(curated)*
+- **#7075**: transmission_line.py: CPWG impedance reads 53-233 % high, and microstrip/CPWG dielectric loss is too large by a factor of eps_eff *(curated)*
+- **#7076**: Microstrip Z0 with copper thickness reads 1.6-3.7 % low (docstring claims 0.2 %) *(curated)*
+- **#7077**: kct drc reports a clean result when kicad-cli could not run the schematic parity checks *(curated)*
+- **#7078**: Generated .kicad_dru silkscreen width/height rules apply to F.Silkscreen only *(curated)*
+- **#7079**: ImpedanceRule judges every detected differential pair at a 0.15 mm gap, whatever the routed spacing *(curated)*
+- **#7082**: kct creepage/audit: add an insulation-type input (basic vs reinforced, IEC 60664-1 5.2.5) to the derived clearance/creepage *(curated)*
+- **#7084**: router: routing board 03 under jlcpcb-tier1 collapses the USB_D In2.Cu common run to 1.4 mm (arm C under jlcpcb keeps 4.1 mm) *(curated)*
+- **#7091**: kct export safety floor and DRC preflight pass unrouted boards: unconnected items never read since #4498, and a report for a different PCB is trusted *(curated)*
+- **#7093**: router: differential pair gets unequal via counts when a leg falls back to uncoupled routing (board 03 USB_D 2 vs 3; blocks #6394) *(curated)*
+- **#7096**: kct drc reports DRC PASSED / exit 0 on an unrouted board: unconnected items (opens) are never counted *(curated)*
+- **#7099**: Fix PlacementSession.query_move before-state snapshot: score_delta always 0 and violations always empty in MCP query_move/apply_move *(curated)*
 
 ## Proposed (Architect / Hermit)
 
@@ -115,9 +134,8 @@ Issues carrying `loom:curated`.
 - **#6446**: [Epic #6441] Phase 4: budget-driven hybrid fallback — longest coupled trunk plus single-ended terminal legs *(architect)*
 - **#6447**: [Epic #6441] Phase 5: coupling-preserving skew tuning from a skew ledger, and pair invariants for post-passes *(architect)*
 - **#6448**: [Epic #6441] Phase 6: unify diff-pair engines — grid consumes PairPlan or grid coupled pre-pass retired *(architect)*
-- **#7051**: Remove no-op `kct route --batch-routing` and the orphaned 1,111-line BatchPathfinder GPU kernel (flag only prints 'GPU-accelerated') *(hermit)*
-- **#7071**: router: negotiated oscillation escape burns ~27 s (≈40% of board-02 wall) on four non-transactional strategies, then is rolled back (P1 of #7053 note, mislabelled 'perturbation pass') *(hermit)*
-- **#7072**: kct route --region-parallel is a silent no-op on the escape/two-phase/other paths and cannot overlap work where it engages (grid lock + GIL): warn when ignored, drop the 2-3x/3-4x speedup claims *(hermit)*
+- **#7091**: kct export safety floor and DRC preflight pass unrouted boards: unconnected items never read since #4498, and a report for a different PCB is trusted *(hermit)*
+- **#7099**: Fix PlacementSession.query_move before-state snapshot: score_delta always 0 and violations always empty in MCP query_move/apply_move *(hermit)*
 
 ## Epics
 
@@ -135,14 +153,14 @@ Issues carrying `loom:curated`.
 | Bucket | Count |
 |------|-------|
 | Operator merge-risk holds | 2 |
-| Very important | 0 |
+| Very important | 1 |
 | Important | 0 |
-| Ready (`loom:issue`) | 0 |
-| In Progress (`loom:building`) | 14 |
-| PRs awaiting review | 3 |
-| Approved PRs awaiting merge | 6 |
-| Curated | 33 |
-| Architect / Hermit proposals | 8 |
+| Ready (`loom:issue`) | 2 |
+| In Progress (`loom:building`) | 22 |
+| PRs awaiting review | 10 |
+| Approved PRs awaiting merge | 2 |
+| Curated | 40 |
+| Architect / Hermit proposals | 7 |
 | Active epics | 8 |
 <!-- guide:plan-body:end -->
 
