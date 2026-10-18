@@ -901,7 +901,7 @@ kct parts availability project.kicad_sch --quantity 100
 kct parts import STM32F103C8T6 --library my.kicad_sym --dry-run
 ```
 
-**`parts import` options:**
+#### `parts import`
 
 | Option | Description |
 |--------|-------------|

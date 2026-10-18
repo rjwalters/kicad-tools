@@ -4095,7 +4095,12 @@ def _add_optimize_parser(subparsers) -> None:
         default=0.5,
         help="45-degree chamfer size in mm (default: 0.5)",
     )
-    optimize_parser.add_argument("-v", "--verbose", action="store_true")
+    optimize_parser.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="Print a per-net table (segments and length before/after) after the summary",
+    )
     optimize_parser.add_argument(
         "--dry-run", action="store_true", help="Show results without writing"
     )

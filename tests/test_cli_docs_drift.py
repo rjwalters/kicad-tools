@@ -75,6 +75,7 @@ def _section(heading: str) -> str:
 SECTIONS = [
     pytest.param("optimize-traces", ("optimize-traces",), False, id="optimize-traces"),
     pytest.param("parts", ("parts",), True, id="parts-subcommands"),
+    pytest.param("parts import", ("parts", "import"), False, id="parts-import"),
     pytest.param("sch validate", ("sch", "validate"), False, id="sch-validate"),
 ]
 
