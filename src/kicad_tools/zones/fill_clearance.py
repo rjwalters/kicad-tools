@@ -773,9 +773,9 @@ def _apply_selective_pad_connection(
         # Symmetric 2-pad passive: one shared rung for both terminals.
         shared: tuple[float, float] | None = None
         if len(pads) == 2 and len(candidates) == 2:
-            for rung in candidates[0][1]:
-                if all(_pad_can_host_two_spokes(p, *rung) for p, _ in candidates):
-                    shared = rung
+            for cand in candidates[0][1]:
+                if all(_pad_can_host_two_spokes(p, *cand) for p, _ in candidates):
+                    shared = cand
                     break
 
         for pad, ladder in candidates:
@@ -1005,11 +1005,12 @@ def force_solid_on_pads_by_uuid(
                 and _net_key(other.find("net"), name_map) in net_params
             ):
                 targets.append(other)
-        rungs = [_next_rung(p) for p in targets]
-        if targets and all(r is not None for r in rungs):
-            rung = min(rungs, key=lambda r: (r[0], r[1]))  # type: ignore[index,return-value]
+        next_rungs = [_next_rung(p) for p in targets]
+        narrower = [r for r in next_rungs if r is not None]
+        if targets and len(narrower) == len(next_rungs):
+            rung = min(narrower)
             for pad in targets:
-                if _pad_thermal_override(pad) != rung and _narrow(pad, rung):  # type: ignore[arg-type]
+                if _pad_thermal_override(pad) != rung and _narrow(pad, rung):
                     changed += 1
             continue
         for pad in flagged:
