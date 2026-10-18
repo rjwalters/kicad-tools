@@ -503,7 +503,7 @@ def export_assembly(
         return AssemblyExportResult(
             success=False,
             output_dir=str(out_dir),
-            manufacturer=manufacturer,
+            manufacturer=manufacturer or "",
             error=f"PCB file not found: {pcb_path}",
         )
 
@@ -515,7 +515,7 @@ def export_assembly(
         return AssemblyExportResult(
             success=False,
             output_dir=str(out_dir),
-            manufacturer=manufacturer,
+            manufacturer=manufacturer or "",
             error=f"Schematic file not found: {schematic_path}",
             warnings=warnings,
         )
