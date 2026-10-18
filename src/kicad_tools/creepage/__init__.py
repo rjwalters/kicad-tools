@@ -26,7 +26,9 @@ from .engine import (
     voltage_map_from_dict,
 )
 from .standards import (
+    DEFAULT_OVERVOLTAGE_CATEGORY,
     DISCLAIMER,
+    OVERVOLTAGE_CATEGORIES,
     STANDARDS,
     CreepageStandard,
     StandardLookupError,
@@ -34,7 +36,9 @@ from .standards import (
 )
 
 __all__ = [
+    "DEFAULT_OVERVOLTAGE_CATEGORY",
     "DISCLAIMER",
+    "OVERVOLTAGE_CATEGORIES",
     "STANDARDS",
     "CreepagePair",
     "CreepageReport",

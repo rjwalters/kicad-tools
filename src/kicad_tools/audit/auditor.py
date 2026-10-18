@@ -322,6 +322,7 @@ def check_isolation(
     hv_working_voltage: float | None = None,
     hv_pollution_degree: int | None = None,
     hv_material_group: str = "IIIa",
+    hv_overvoltage_category: str = "II",
 ) -> IsolationStatus:
     """Standalone HV creepage/clearance isolation check (issue #4333, phase 3).
 
@@ -440,7 +441,6 @@ def check_isolation(
     clearance_prov: dict | None = None
     if hv_standard is not None:
         from kicad_tools.creepage.standards import (
-            RMS_TO_PEAK,
             StandardLookupError,
             get_standard,
         )
@@ -459,9 +459,12 @@ def check_isolation(
                 int(hv_pollution_degree),
                 hv_material_group,
             )
-            peak_voltage = float(hv_working_voltage) * RMS_TO_PEAK
+            # Clearance = max(F.2 at the F.1 rated impulse voltage, F.8 at the
+            # steady-state peak, PD floor) -- issue #7057.
             required_clearance_mm, clearance_prov = std.required_clearance(
-                peak_voltage, int(hv_pollution_degree)
+                float(hv_working_voltage),
+                int(hv_pollution_degree),
+                hv_overvoltage_category,
             )
             status.standard_edition = std.edition
         except StandardLookupError as e:
@@ -782,6 +785,7 @@ class ManufacturingAudit:
         hv_working_voltage: float | None = None,
         hv_pollution_degree: int | None = None,
         hv_material_group: str = "IIIa",
+        hv_overvoltage_category: str = "II",
     ):
         """Initialize the audit.
 
@@ -810,6 +814,9 @@ class ManufacturingAudit:
             hv_working_voltage: RMS working voltage (V) for standard derivation.
             hv_pollution_degree: IEC pollution degree (1/2/3) for derivation.
             hv_material_group: Insulation material group (default ``IIIa``).
+            hv_overvoltage_category: IEC 60664-1 overvoltage category
+                (``I``-``IV``, default ``II``) selecting the Table F.1 rated
+                impulse voltage for the derived clearance (issue #7057).
         """
         self.path = Path(project_or_pcb)
         self.manufacturer = manufacturer
@@ -828,6 +835,7 @@ class ManufacturingAudit:
         self.hv_working_voltage = hv_working_voltage
         self.hv_pollution_degree = hv_pollution_degree
         self.hv_material_group = hv_material_group
+        self.hv_overvoltage_category = hv_overvoltage_category
 
         # Resolve paths
         if self.path.suffix == ".kicad_pro":
@@ -1482,6 +1490,7 @@ class ManufacturingAudit:
             hv_working_voltage=self.hv_working_voltage,
             hv_pollution_degree=self.hv_pollution_degree,
             hv_material_group=self.hv_material_group,
+            hv_overvoltage_category=self.hv_overvoltage_category,
         )
 
     def _check_compatibility(self, pcb: PCB) -> ManufacturerCompatibility:
