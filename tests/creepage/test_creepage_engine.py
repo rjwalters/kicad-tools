@@ -155,6 +155,52 @@ def test_multipolygon_source_and_multilinestring_target():
     assert c == pytest.approx(expected, abs=1e-3)
 
 
+def _far_part_geometries():
+    from shapely.geometry import MultiPolygon
+    from shapely.ops import unary_union
+
+    near = _box(-1.0, -1.0, 1.0, 0.2)  # behind the slot
+    far = _box(5.0, -0.5, 6.0, 0.0)  # clear straight view of B
+    multi = MultiPolygon([near, far])
+    # Same pads joined by a trace: one irregular (non-convex) polygon.
+    irregular = unary_union([near, far, _box(0.0, -1.0, 6.0, -0.8)])
+    return multi, irregular
+
+
+@pytest.mark.parametrize("which", [0, 1])
+@pytest.mark.parametrize("x", [0.0, 1.0])
+def test_best_path_from_non_nearest_part_is_not_overstated(which, x):
+    # The shortest path is the straight drop from the far pad's corner (5, 0)
+    # onto an EDGE of B -- a vertex-to-edge foot, not a vertex pair and not the
+    # global nearest pair (#7058 review: was 3.091 / 3.000 mm).
+    src = _far_part_geometries()[which]
+    b = _box(-10.0, 2.2, 10.0, 3.0)
+    slot = _box(-3.0, 0.6, 3.0, 1.8)
+    _, creepage = surface_path_length(src, b, obstacles=[slot], dimension_x_mm=x)
+    assert creepage == pytest.approx(2.2, abs=1e-6)
+
+
+@pytest.mark.parametrize("which", [0, 1])
+def test_board_edge_target_uses_edge_foot(which):
+    from shapely.geometry import MultiLineString
+
+    src = _far_part_geometries()[which]
+    edge = MultiLineString([[(-10.0, 2.2), (10.0, 2.2)], [(10.0, 2.2), (10.0, -5.0)]])
+    slot = _box(-3.0, 0.6, 3.0, 1.8)
+    _, creepage = surface_path_length(src, edge, obstacles=[slot])
+    assert creepage == pytest.approx(2.2, abs=1e-6)
+
+
+def test_obstacle_vertex_seeds_onto_far_edge_foot():
+    # Path must wrap a slot corner and then drop perpendicular onto a long
+    # edge of B whose vertices are all far away.
+    a = _box(-0.1, 0.0, 0.1, 0.2)
+    b = _box(-50.0, 2.2, 50.0, 2.4)
+    slot = _box(-2.0, 0.6, 2.0, 1.8)
+    _, creepage = surface_path_length(a, b, obstacles=[slot], dimension_x_mm=0)
+    assert creepage == pytest.approx(math.hypot(1.9, 0.4) + 1.2 + 0.4, abs=1e-6)
+
+
 def test_census_records_dimension_x(tmp_path):
     pcb = _load(tmp_path, board_source(with_slot=True))
     report = compute_creepage_census(pcb, resolve_hv_nets(pcb, "HV"), min_mm=1.0)

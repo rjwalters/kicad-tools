@@ -906,26 +906,150 @@ def _bridge_narrow_cutouts(obstacles: list[Any], dimension_x_mm: float) -> list[
     return _flatten_polygons(opened)
 
 
-def _seed_length(geom: Any, node: tuple[float, float], obstacles: list[Any]) -> float:
+def _boundary_segments(geom: Any) -> Any:
+    """Every boundary segment of ``geom`` as an ``(S, 2, 2)`` float array.
+
+    Walks multi-part geometries and collections; a polygon contributes its
+    exterior and hole rings, a line its own segments, and a point one
+    zero-length segment (so it still acts as a candidate endpoint).
+    """
+    import numpy as np
+
+    rings: list[Any] = []
+
+    def _walk(g: Any) -> None:
+        if g is None or g.is_empty:
+            return
+        gt = g.geom_type
+        if gt == "Polygon":
+            rings.append(np.asarray(g.exterior.coords, dtype=float)[:, :2])
+            for hole in g.interiors:
+                rings.append(np.asarray(hole.coords, dtype=float)[:, :2])
+        elif gt in ("LineString", "LinearRing"):
+            rings.append(np.asarray(g.coords, dtype=float)[:, :2])
+        elif gt == "Point":
+            pt = np.asarray(g.coords, dtype=float)[:, :2]
+            rings.append(np.vstack([pt, pt]))
+        elif hasattr(g, "geoms"):
+            for part in g.geoms:
+                _walk(part)
+
+    _walk(geom)
+    segs = [np.stack([r[:-1], r[1:]], axis=1) for r in rings if len(r) >= 2]
+    if not segs:
+        return np.zeros((0, 2, 2), dtype=float)
+    return np.concatenate(segs, axis=0)
+
+
+def _feet_on_segments(points: Any, segs: Any) -> Any:
+    """Closest point on each segment for each point: ``(P, S, 2)`` array."""
+    import numpy as np
+
+    a = segs[None, :, 0, :]
+    ab = segs[None, :, 1, :] - a
+    ap = points[:, None, :] - a
+    len2 = (ab * ab).sum(-1)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        t = np.where(len2 > 0.0, (ap * ab).sum(-1) / np.where(len2 > 0.0, len2, 1.0), 0.0)
+    t = np.clip(t, 0.0, 1.0)
+    return a + t[..., None] * ab
+
+
+def _obstacle_interiors(obstacles: list[Any]) -> list[Any]:
+    """Slightly shrunk obstacle interiors used by the admissibility test."""
+    out = []
+    for obs in obstacles:
+        interior = obs.buffer(-_INTERIOR_SHRINK)
+        if not interior.is_empty:
+            out.append(interior)
+    return out
+
+
+def _first_admissible(
+    lengths: Any, starts: Any, ends: Any, interiors: list[Any], bound: float
+) -> float:
+    """Shortest candidate segment (``< bound``) not crossing any obstacle interior.
+
+    Candidates are tested in ascending length order, in vectorised batches, so
+    the typical case (the shortest candidate is visible) costs one batch.
+    Returns ``inf`` when no candidate under ``bound`` is admissible.
+    """
+    import numpy as np
+    import shapely  # type: ignore[import-untyped]
+
+    keep = np.nonzero(lengths < bound)[0]
+    if keep.size == 0:
+        return math.inf
+    order = keep[np.argsort(lengths[keep], kind="stable")]
+    if not interiors:
+        return float(lengths[order[0]])
+    batch = 64
+    for lo in range(0, order.size, batch):
+        idx = order[lo : lo + batch]
+        lines = shapely.linestrings(np.stack([starts[idx], ends[idx]], axis=1))
+        ok = np.ones(idx.size, dtype=bool)
+        for interior in interiors:
+            crossing = shapely.intersection(lines, interior)
+            ok &= ~(shapely.length(crossing) > _EPS)
+        if ok.any():
+            return float(lengths[idx[int(np.argmax(ok))]])
+    return math.inf
+
+
+def _seed_length(
+    geom: Any,
+    segs: Any,
+    node: tuple[float, float],
+    interiors: list[Any],
+) -> float:
     """Shortest admissible straight segment from ``geom`` to ``node`` (inf if none).
 
-    Tries the nearest point first; when that segment is occluded, falls back to
-    each vertex of ``geom``.
+    Exact for polygonal shapes: the candidates are the perpendicular foot of
+    ``node`` on *every* boundary segment of every part of ``geom`` plus every
+    vertex.  The minimum over the visible part of a segment is attained at the
+    foot, a segment end, or where the sight line grazes an obstacle vertex --
+    and that last case is the path through that obstacle-vertex graph node, so
+    the search loses nothing by skipping it (#7058 review).
     """
-    import shapely
-    from shapely.geometry import LineString, Point
-    from shapely.ops import nearest_points
+    import numpy as np
+    from shapely.geometry import Point
 
-    pt = nearest_points(geom, Point(node))[0]
-    start = (pt.x, pt.y)
-    if not _crosses_any_obstacle(LineString([start, node]), obstacles):
-        return math.dist(start, node)
+    if geom.distance(Point(node)) <= 0.0:
+        return 0.0
+    p = np.asarray([node], dtype=float)
+    if segs.shape[0] == 0:
+        return math.inf
+    feet = _feet_on_segments(p, segs)[0]
+    starts = np.concatenate([feet, segs[:, 0, :], segs[:, 1, :]], axis=0)
+    lengths = np.hypot(starts[:, 0] - node[0], starts[:, 1] - node[1])
+    ends = np.broadcast_to(p, starts.shape)
+    return _first_admissible(lengths, starts, ends, interiors, math.inf)
+
+
+def _best_direct_hop(segs_a: Any, segs_b: Any, interiors: list[Any]) -> float:
+    """Shortest admissible straight segment from shape A to shape B.
+
+    Candidates are every vertex of A dropped onto every segment of B (its
+    perpendicular foot, clamped to the segment) and vice versa; segment-to-
+    segment distance is always attained at such a vertex/foot pair.
+    """
+    import numpy as np
+
     best = math.inf
-    for c in shapely.get_coordinates(geom):
-        cand = (float(c[0]), float(c[1]))
-        d = math.dist(cand, node)
-        if d < best and not _crosses_any_obstacle(LineString([cand, node]), obstacles):
-            best = d
+    for src, dst in ((segs_a, segs_b), (segs_b, segs_a)):
+        if src.shape[0] == 0 or dst.shape[0] == 0:
+            continue
+        verts = np.unique(src.reshape(-1, 2), axis=0)
+        chunk = max(1, 200_000 // dst.shape[0])
+        for lo in range(0, verts.shape[0], chunk):
+            vs = verts[lo : lo + chunk]
+            feet = _feet_on_segments(vs, dst)  # (P, S, 2)
+            starts = np.broadcast_to(vs[:, None, :], feet.shape).reshape(-1, 2)
+            ends = feet.reshape(-1, 2)
+            lengths = np.hypot(ends[:, 0] - starts[:, 0], ends[:, 1] - starts[:, 1])
+            d = _first_admissible(lengths, starts, ends, interiors, best)
+            if d < best:
+                best = d
     return best
 
 
@@ -934,21 +1058,26 @@ def _shortest_detour(geom_a: Any, geom_b: Any, obstacles: list[Any]) -> float:
 
     Nodes are a super-source (``geom_a``), a super-sink (``geom_b``) and every
     obstacle-polygon exterior vertex.  Source/sink edges use the shortest
-    admissible segment from the whole shape (not one fixed nearest-point
-    pair), so the path may leave and enter each shape wherever is shortest.
-    An edge between two nodes is admissible when the connecting segment does
-    not pass through the interior of any obstacle (segments that merely run
-    along a slot boundary are allowed -- that is the surface path hugging the
-    milled edge).  Returns ``inf`` when no path is found.
+    admissible segment from the whole shape -- any point of any part, not one
+    fixed nearest-point pair or only its vertices -- so the path may leave and
+    enter each shape wherever is shortest.  The direct source -> sink edge
+    likewise considers every vertex-to-edge foot of both shapes.  An edge
+    between two nodes is admissible when the connecting segment does not pass
+    through the interior of any obstacle (segments that merely run along a
+    slot boundary are allowed -- that is the surface path hugging the milled
+    edge).  Returns ``inf`` when no path is found.
     """
-    import shapely
     from shapely.geometry import LineString
 
     obstacles = _flatten_polygons(obstacles)
+    interiors = _obstacle_interiors(obstacles)
     verts: list[tuple[float, float]] = []
     for obs in obstacles:
         for x, y in list(obs.exterior.coords)[:-1]:
             verts.append((x, y))
+
+    segs_a = _boundary_segments(geom_a)
+    segs_b = _boundary_segments(geom_b)
 
     n = len(verts) + 2  # node 0 = source, node 1 = sink
     adj: list[list[tuple[int, float]]] = [[] for _ in range(n)]
@@ -963,24 +1092,15 @@ def _shortest_detour(geom_a: Any, geom_b: Any, obstacles: list[Any]) -> float:
             seg = LineString([verts[i], verts[j]])
             if not _crosses_any_obstacle(seg, obstacles):
                 _add(i + 2, j + 2, math.dist(verts[i], verts[j]))
-    for i, v in enumerate(verts):
-        wa = _seed_length(geom_a, v, obstacles)
+    for i, vert in enumerate(verts):
+        wa = _seed_length(geom_a, segs_a, vert, interiors)
         if wa != math.inf:
             _add(0, i + 2, wa)
-        wb = _seed_length(geom_b, v, obstacles)
+        wb = _seed_length(geom_b, segs_b, vert, interiors)
         if wb != math.inf:
             _add(1, i + 2, wb)
 
-    # Direct source -> sink hop from any vertex pair (straight nearest pair is
-    # handled by the caller's short-circuit).
-    best_direct = math.inf
-    for ca in shapely.get_coordinates(geom_a):
-        for cb in shapely.get_coordinates(geom_b):
-            d = math.dist(ca, cb)
-            if d < best_direct and not _crosses_any_obstacle(
-                LineString([tuple(ca), tuple(cb)]), obstacles
-            ):
-                best_direct = d
+    best_direct = _best_direct_hop(segs_a, segs_b, interiors)
     if best_direct != math.inf:
         _add(0, 1, best_direct)
 
@@ -993,11 +1113,11 @@ def _shortest_detour(geom_a: Any, geom_b: Any, obstacles: list[Any]) -> float:
             continue
         if u == 1:
             return d
-        for v, w in adj[u]:
+        for nbr, w in adj[u]:
             nd = d + w
-            if nd < dist[v]:
-                dist[v] = nd
-                heapq.heappush(pq, (nd, v))
+            if nd < dist[nbr]:
+                dist[nbr] = nd
+                heapq.heappush(pq, (nd, nbr))
     return dist[1]
 
 
