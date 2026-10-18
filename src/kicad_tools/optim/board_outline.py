@@ -41,7 +41,8 @@ def extract_board_outline(pcb: PCB) -> Polygon | None:
     """Extract board outline from Edge.Cuts layer.
 
     Handles ``gr_rect``, ``gr_poly``, ``gr_line`` and ``gr_arc`` elements
-    (issue #7148).  ``gr_line``/``gr_arc`` outlines are chained into a closed
+    (issue #7148).  When several contours exist (e.g. an internal cutout),
+    the one with the largest area is returned (issue #7155).  ``gr_line``/``gr_arc`` outlines are chained into a closed
     polygon (arcs are sampled into short segments); falls back to bounding
     box if chaining fails.  Coordinates are absolute (raw sexp); use
     :func:`to_origin_relative` for the optimizer frame.
@@ -55,7 +56,12 @@ def extract_board_outline(pcb: PCB) -> Polygon | None:
     """
     sexp = pcb._sexp
 
-    # Look for gr_rect on Edge.Cuts (simple rectangular boards)
+    # Gather every closed contour, then return the largest: internal cutouts
+    # drawn as gr_rect/gr_poly must not shadow a gr_line/gr_arc outer outline
+    # (issue #7155).
+    candidates: list[Polygon] = []
+
+    # gr_rect on Edge.Cuts (simple rectangular boards)
     for child in sexp.iter_children():
         if child.tag == "gr_rect":
             layer = child.find("layer")
@@ -67,13 +73,15 @@ def extract_board_outline(pcb: PCB) -> Polygon | None:
                     y1 = start.get_float(1) or 0.0
                     x2 = end.get_float(0) or 0.0
                     y2 = end.get_float(1) or 0.0
-                    return Polygon(
-                        vertices=[
-                            Vector2D(x1, y1),
-                            Vector2D(x2, y1),
-                            Vector2D(x2, y2),
-                            Vector2D(x1, y2),
-                        ]
+                    candidates.append(
+                        Polygon(
+                            vertices=[
+                                Vector2D(x1, y1),
+                                Vector2D(x2, y1),
+                                Vector2D(x2, y2),
+                                Vector2D(x1, y2),
+                            ]
+                        )
                     )
 
     # gr_poly on Edge.Cuts (explicit vertex list)
@@ -89,7 +97,7 @@ def extract_board_outline(pcb: PCB) -> Polygon | None:
                         if x is not None and y is not None:
                             verts.append(Vector2D(x, y))
                 if len(verts) >= 3:
-                    return Polygon(vertices=verts)
+                    candidates.append(Polygon(vertices=verts))
 
     # Collect gr_line / gr_arc elements on Edge.Cuts
     edge_lines: list[tuple[tuple[float, float], tuple[float, float]]] = []
@@ -124,22 +132,32 @@ def extract_board_outline(pcb: PCB) -> Polygon | None:
         # Try to chain the lines into a closed polygon
         vertices = _chain_lines_to_polygon(edge_lines)
         if vertices:
-            return Polygon(vertices=[Vector2D(x, y) for x, y in vertices])
+            candidates.append(Polygon(vertices=[Vector2D(x, y) for x, y in vertices]))
+        elif len(edge_lines) >= 4:
+            # Fallback: bounding box
+            all_x = [p[0] for line in edge_lines for p in line]
+            all_y = [p[1] for line in edge_lines for p in line]
+            candidates.append(
+                Polygon(
+                    vertices=[
+                        Vector2D(min(all_x), min(all_y)),
+                        Vector2D(max(all_x), min(all_y)),
+                        Vector2D(max(all_x), max(all_y)),
+                        Vector2D(min(all_x), max(all_y)),
+                    ]
+                )
+            )
 
-    if len(edge_lines) >= 4:
-        # Fallback: return bounding box
-        all_x = [p[0] for line in edge_lines for p in line]
-        all_y = [p[1] for line in edge_lines for p in line]
-        return Polygon(
-            vertices=[
-                Vector2D(min(all_x), min(all_y)),
-                Vector2D(max(all_x), min(all_y)),
-                Vector2D(max(all_x), max(all_y)),
-                Vector2D(min(all_x), max(all_y)),
-            ]
-        )
+    if not candidates:
+        return None
+    return max(candidates, key=_abs_area)
 
-    return None
+
+def _abs_area(poly: Polygon) -> float:
+    """Absolute shoelace area of *poly*."""
+    v = poly.vertices
+    n = len(v)
+    return abs(sum(v[i].x * v[(i + 1) % n].y - v[(i + 1) % n].x * v[i].y for i in range(n))) / 2.0
 
 
 def _arc_segments(
