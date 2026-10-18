@@ -8140,17 +8140,6 @@ class RoutingGrid:
             if penalty is not None:
                 self._corridor_penalty = penalty
 
-    def clear_corridor_preference(self, net: int) -> None:
-        """Remove corridor preference for a net.
-
-        Thread-safe when thread_safe=True.
-
-        Args:
-            net: Net ID whose corridor preference to remove
-        """
-        with self._acquire_lock():
-            self._corridor_preferences.pop(net, None)
-
     def clear_all_corridor_preferences(self) -> None:
         """Remove all corridor preferences.
 
@@ -8187,29 +8176,6 @@ class RoutingGrid:
 
         # Outside corridor - apply penalty
         return self._corridor_penalty
-
-    def has_corridor_preference(self, net: int) -> bool:
-        """Check if a net has an assigned corridor.
-
-        Args:
-            net: Net ID to check
-
-        Returns:
-            True if net has a corridor preference set
-        """
-        return net in self._corridor_preferences
-
-    def get_corridor_statistics(self) -> dict:
-        """Get statistics about corridor preferences.
-
-        Returns:
-            Dictionary with corridor stats
-        """
-        return {
-            "corridors_assigned": len(self._corridor_preferences),
-            "corridor_penalty": self._corridor_penalty,
-            "nets_with_corridors": list(self._corridor_preferences.keys()),
-        }
 
     # =========================================================================
     # BOARD EDGE CLEARANCE SUPPORT

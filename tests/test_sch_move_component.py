@@ -152,7 +152,7 @@ class TestMoveComponent:
         assert result.properties_shifted >= 2
 
         # Verify by re-parsing the symbol
-        from kicad_tools.cli.sch_move_component import _find_symbol_sexp
+        from kicad_tools.cli.sch_wire_common import _find_symbol_sexp
 
         sym_sexp = _find_symbol_sexp(sch, "R2")
         assert sym_sexp is not None

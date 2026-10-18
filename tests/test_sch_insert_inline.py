@@ -16,7 +16,6 @@ from kicad_tools.cli.sch_insert_inline import (
     _compute_pin_span,
     _is_axis_aligned,
     _is_horizontal,
-    _snap,
     _wire_length,
 )
 from kicad_tools.cli.sch_insert_inline import (
@@ -24,6 +23,7 @@ from kicad_tools.cli.sch_insert_inline import (
 )
 from kicad_tools.schema import Schematic
 from kicad_tools.schema.library import LibraryPin, LibrarySymbol
+from kicad_tools.schematic.grid import snap_to_grid
 
 # ---------------------------------------------------------------------------
 # Minimal schematic with a Device:D library symbol and a horizontal wire
@@ -173,8 +173,8 @@ def _write_sch(tmp_path: Path, content: str) -> Path:
 
 class TestHelpers:
     def test_snap(self):
-        assert _snap(10.0) == pytest.approx(10.16, abs=0.01)
-        assert _snap(1.27) == pytest.approx(1.27, abs=0.001)
+        assert snap_to_grid(10.0) == pytest.approx(10.16, abs=0.01)
+        assert snap_to_grid(1.27) == pytest.approx(1.27, abs=0.001)
 
     def test_is_axis_aligned(self):
         assert _is_axis_aligned((0, 0), (10, 0)) is True

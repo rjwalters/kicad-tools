@@ -27,6 +27,10 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
+from kicad_tools.cli.sch_wire_common import (
+    _wire_endpoint_counts,
+    _wire_start_end,
+)
 from kicad_tools.schema import Schematic
 from kicad_tools.schema.library import LibrarySymbol
 from kicad_tools.sexp import SExp
@@ -65,24 +69,6 @@ class WireIssue:
 def _quantize(coord: float) -> int:
     """Quantize a coordinate to an integer bucket at micron resolution."""
     return int(round(coord * _QUANT))
-
-
-def _wire_start_end(wire_sexp: SExp) -> tuple[tuple[float, float], tuple[float, float]]:
-    """Extract start and end points from a wire S-expression node."""
-    pts_node = wire_sexp.find("pts")
-    if not pts_node:
-        return (0.0, 0.0), (0.0, 0.0)
-
-    xy_nodes = pts_node.find_all("xy")
-    if len(xy_nodes) < 2:
-        return (0.0, 0.0), (0.0, 0.0)
-
-    x1 = xy_nodes[0].get_float(0) or 0.0
-    y1 = xy_nodes[0].get_float(1) or 0.0
-    x2 = xy_nodes[1].get_float(0) or 0.0
-    y2 = xy_nodes[1].get_float(1) or 0.0
-
-    return (x1, y1), (x2, y2)
 
 
 def _point_on_segment(
@@ -283,19 +269,6 @@ def _endpoint_at_strong_anchor(
     return any(abs(px - ax) <= tolerance and abs(py - ay) <= tolerance for ax, ay in strong_anchors)
 
 
-def _wire_endpoint_counts(
-    wire_sexps: list[SExp],
-) -> dict[tuple[int, int], int]:
-    """Count how many wires touch each endpoint."""
-    counts: dict[tuple[int, int], int] = {}
-    for ws in wire_sexps:
-        start, end = _wire_start_end(ws)
-        for pt in [start, end]:
-            key = (_quantize(pt[0]), _quantize(pt[1]))
-            counts[key] = counts.get(key, 0) + 1
-    return counts
-
-
 def _endpoint_touches_other_wire_body(
     point: tuple[float, float],
     wire_sexp: SExp,
@@ -468,7 +441,9 @@ def find_cleanup_candidates(
     # Phase 3: dangling wires (endpoints not connected to anything else)
     connection_points = _build_connection_map(schematic, unique_wires)
     strong_anchors = _collect_strong_anchors(schematic)
-    endpoint_counts = _wire_endpoint_counts(unique_wires)
+    endpoint_counts = _wire_endpoint_counts(
+        unique_wires, key=lambda x, y: (_quantize(x), _quantize(y))
+    )
 
     for ws in unique_wires:
         start, end = _wire_start_end(ws)
