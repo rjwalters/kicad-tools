@@ -116,3 +116,22 @@ def test_registered_tools_are_documented() -> None:
 def test_analyze_board_not_a_tool_name(doc: str) -> None:
     text = (ROOT / doc).read_text()
     assert "analyze_board" not in text, f"{doc} still names the renamed tool analyze_board"
+
+
+def test_allowlist_has_no_stale_entries() -> None:
+    """Allowlisted tools that are now documented must leave the debt list."""
+    stale = {t for t in UNDOCUMENTED_ALLOWLIST if t in DOC}
+    assert not stale, f"documented tools still allowlisted, remove them: {sorted(stale)}"
+    unknown = {t for t in UNDOCUMENTED_ALLOWLIST if t not in TOOL_REGISTRY}
+    assert not unknown, f"allowlisted tools not registered, remove them: {sorted(unknown)}"
+
+
+def test_output_path_descriptions_match_real_default() -> None:
+    """Only route_net defaults to a non-overwriting <stem>_routed output."""
+    for tool in ("placement_place_unplaced", "commit_session", "route_net"):
+        desc = TOOL_REGISTRY[tool]["input_schema"]["properties"]["output_path"]["description"]
+        if tool == "route_net":
+            assert "_routed" in desc
+        else:
+            assert "_routed" not in desc, f"{tool}: still overwrites, description must say so"
+            assert "overwrites" in desc

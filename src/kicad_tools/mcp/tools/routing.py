@@ -214,7 +214,7 @@ def route_net(
             trace_length_mm=_measure_existing_trace_length(pcb, net_number),
             vias_used=_count_vias_on_net(pcb, net_number),
             layers_used=_get_layers_used(pcb, net_number),
-            output_path=_resolve_output_path(pcb_path, output_path),
+            output_path=None,  # nothing written on this early return
             suggestions=["Net is already fully routed"],
         )
 
@@ -352,7 +352,7 @@ def route_net(
             net_name=net_name,
             routed_connections=0,
             total_connections=0,
-            output_path=_resolve_output_path(pcb_path, output_path),
+            output_path=None,  # nothing written on this early return
             suggestions=["Net has fewer than 2 pads, no routing needed"],
         )
 

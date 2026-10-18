@@ -439,7 +439,7 @@ register_tool(
             },
             "output_path": {
                 "type": "string",
-                "description": "Output file path (optional). Defaults to <stem>_routed.kicad_pcb next to the input; the input is overwritten only if output_path equals pcb_path",
+                "description": "Output file path (optional, overwrites original if not specified)",
             },
         },
         required=["pcb_path"],
@@ -697,7 +697,7 @@ register_tool(
             },
             "output_path": {
                 "type": "string",
-                "description": "Output file path (optional). Defaults to <stem>_routed.kicad_pcb next to the input; the input is overwritten only if output_path equals pcb_path",
+                "description": "Output file path (optional, overwrites original if not specified)",
             },
         },
         required=["session_id"],

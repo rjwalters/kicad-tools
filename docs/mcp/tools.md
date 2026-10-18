@@ -596,7 +596,7 @@ Route a specific net with configurable strategy.
 |-----------|------|----------|---------|-------------|
 | `pcb_path` | string | Yes | - | Path to .kicad_pcb file |
 | `net_name` | string | Yes | - | Name of the net to route (e.g. `"GND"`, `"SPI_CLK"`) |
-| `output_path` | string | No | `<stem>_routed.kicad_pcb` | Output file. Set equal to `pcb_path` to overwrite the input |
+| `output_path` | string | No | `<stem>_routed.kicad_pcb` | Output file. Set equal to `pcb_path` to overwrite the input. The result's `output_path` is `null` when nothing was written (net already routed, or fewer than 2 pads) |
 | `strategy` | string | No | `"auto"` | `"auto"`, `"shortest"` or `"avoid_vias"` |
 | `layer_preference` | string | No | - | Preferred layer (e.g. `"F.Cu"`, `"B.Cu"`) |
 
