@@ -15,6 +15,12 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-18
 
+- **PR #7352**: fix(boards): unpack gate_native_drc tuple in refresh_bundles_6404
+- **Issue #7348** (closed): refresh_bundles_6404.py: gate_native_drc now returns (errors, raw) since #7341; drc_violations metric becomes a tuple
+- **PR #7347**: fix: cap known impedance findings on board-07 Match-Group baseline
+- **Issue #7332** (closed): Board 07 re-route: ImpedanceRule flags MIPI_DAT1 and TMDS_D1 at 122-125 ohm on unchanged copper
+- **PR #7345**: docs: correct seven stale doc/comment claims
+- **Issue #7342** (closed): Correct 7 stale doc and comment claims left by the 2026-10-18 THT-in-CPL, assembly-tier, spec-repair, thermal-ladder and known-issue merges
 - **Issue #7323** (closed): known_issues follow-ups: refresher resolve flags, orphaned known-issues.json detection, re-pin board 03 after #7306 (#7316 follow-up)
 - **PR #7324**: fix(board03): re-size USB diff pair to 90 ohm and declare target_diff_impedance
 - **Issue #7250** (closed): kct check never compares project.kct requirements to the routed board, and records diff-pair impedance as checked without evaluating it
