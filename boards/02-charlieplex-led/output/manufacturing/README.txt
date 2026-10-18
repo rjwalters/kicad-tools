@@ -2,7 +2,7 @@ Manufacturing package for charlieplex_3x3_routed.kicad_pcb
 
 Fabrication tier : jlcpcb
 Mode             : assembly
-Generated        : 2026-10-14T03:13:51.133203+00:00
+Generated        : 2026-10-18T15:17:50.280608+00:00
 
 Assembly package: BOM and CPL are included.
 
@@ -49,7 +49,7 @@ Hand-solder / through-hole items
 
 Warning review (per rule)
 -------------------------
-  no warnings reported
+  via_at_pad_edge: 2
   All assembly-affecting warning counts are zero.
 
 Accepted-risk waivers

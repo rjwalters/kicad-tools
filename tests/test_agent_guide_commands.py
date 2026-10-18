@@ -43,6 +43,7 @@ from kicad_tools.cli.parser import create_parser, passthrough_parser
 PLACEHOLDERS = {
     "<sch>": "board.kicad_sch",
     "<pcb>": "board.kicad_pcb",
+    "<pcb-dir>": "out",
     "<pro>": "board.kicad_pro",
     "<fab>": "jlcpcb",
     "<tier>": "jlcpcb",
@@ -166,10 +167,30 @@ def _substitute(cmd: str) -> str:
     return cmd
 
 
+def _split_command(cmd: str) -> list[str]:
+    """``shlex.split`` that also splits shell operators into their own tokens."""
+    lexer = shlex.shlex(cmd, posix=True, punctuation_chars=True)
+    lexer.whitespace_split = True
+    return list(lexer)
+
+
+def _truncate_at_shell_operator(tokens: list[str]) -> list[str]:
+    """Cut *tokens* at the first shell operator (``&&``, ``||``, ``|``, ``;``, ``>``, ``>>``).
+
+    The skills chain ``kct`` into gates (``kct check ... && jq ...``); only the
+    ``kct`` part is the CLI's to parse. With ``punctuation_chars`` an operator is
+    a token made purely of shell punctuation, and quoted text stays intact.
+    """
+    for i, tok in enumerate(tokens):
+        if tok and all(c in "();<>|&" for c in tok):
+            return tokens[:i]
+    return tokens
+
+
 def check_invocation(cmd: str) -> str | None:
     """Parse *cmd* with the real CLI parser; return an error message or ``None``."""
     # Drop the leading "kct", then apply the same shorthands main() does.
-    argv = shlex.split(_substitute(cmd))[1:]
+    argv = _truncate_at_shell_operator(_split_command(_substitute(cmd)))[1:]
     # Passthrough subcommands (``kct route``, issue #7017) are a stub on the
     # top-level parser; main() hands their argv to the real parser, so check
     # it there -- the same split main() uses decides which lines those are.
