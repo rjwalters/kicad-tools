@@ -2288,6 +2288,53 @@ def _gate_bom(options: ReadinessOptions, engines: Engines, tht_refs: Sequence[st
             ],
         )
 
+    # The bundle's own preflight recorded whether each assigned LCSC part
+    # matches its row's value/package (issue #7166).  Export runs with
+    # strict_preflight off, so a FAIL there only became an export warning;
+    # this gate is where it must block.  Reading the recorded result keeps
+    # the blocker named and works the same in attempt and --verify modes.
+    part_check = next(
+        (
+            entry
+            for entry in _read_json(options.output_dir / "manifest.json").get("preflight") or []
+            if isinstance(entry, dict) and entry.get("name") == "bom_lcsc_values"
+        ),
+        None,
+    )
+    if part_check is None:
+        return CheckOutcome(
+            name="bom",
+            status=NOT_RUN,
+            detail="The bundle manifest records no bom_lcsc_values preflight result.",
+            blockers=[
+                "LCSC part/package check did not run; refusing to call procurement "
+                "identities verified"
+            ],
+        )
+    part_status = str(part_check.get("status", "")).upper()
+    part_message = str(part_check.get("message", "")).strip()
+    part_details = str(part_check.get("details", "") or "").strip()
+    if part_status == "FAIL":
+        return CheckOutcome(
+            name="bom",
+            status=FAILED,
+            detail=f"LCSC part check FAIL: {part_message}",
+            blockers=[
+                "Assigned LCSC part does not match the BOM row's value/package: "
+                f"{part_details or part_message}"
+            ],
+        )
+    if part_status not in ("OK", "WARN"):
+        return CheckOutcome(
+            name="bom",
+            status=NOT_RUN,
+            detail=f"LCSC part check reported unexpected status {part_status or '(none)'}.",
+            blockers=[
+                "LCSC part/package check did not run; refusing to call procurement "
+                "identities verified"
+            ],
+        )
+
     tht_note = (
         f"SMT CPL excludes {len(tht_refs)} manual through-hole component(s)."
         if tht_refs
@@ -2296,7 +2343,10 @@ def _gate_bom(options: ReadinessOptions, engines: Engines, tht_refs: Sequence[st
     return CheckOutcome(
         name="bom",
         status=PASSED,
-        detail=(f"{len(rows)} BOM line(s) carry verified procurement identities; {tht_note}"),
+        detail=(
+            f"{len(rows)} BOM line(s) carry procurement identifiers; part check "
+            f"{part_status}: {part_message}; {tht_note}"
+        ),
     )
 
 
