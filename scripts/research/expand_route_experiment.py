@@ -190,6 +190,11 @@ BOARDS: dict[str, Board] = {
         "03",
         "boards/03-usb-joystick/output/usb_joystick.kicad_pcb",
         layers=4,
+        # Route under the same tier-1 sidecars the recipe fills with, so the
+        # plan's pour links hold under the recipe's 0.3 mm native zone
+        # clearance and not just under a plain ``jlcpcb`` fill (Issue #7026).
+        kct_args=("--manufacturer", "jlcpcb-tier1"),
+        manufacturer="jlcpcb-tier1",
         # USB_D carries a 25 % continuity threshold here that the classifier's
         # own map does not, and a map-less route holds it to the generic
         # 0.5 mm skew default instead of USB2_FS (Issue #6829).
