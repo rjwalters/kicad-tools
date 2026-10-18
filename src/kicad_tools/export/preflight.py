@@ -1651,7 +1651,7 @@ class PreflightChecker:
             # Issue #7091: since #4498 KiCad's ``unconnected_items`` (opens)
             # live outside ``violations``/``error_count``; count the
             # error-severity ones explicitly so an unrouted board FAILs.
-            open_errors = [v for v in report.connectivity_items() if v.is_error]
+            open_errors = report.connectivity_errors()
 
             if error_count > 0 or open_errors:
                 errors = report.errors
