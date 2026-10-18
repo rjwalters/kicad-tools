@@ -48,7 +48,7 @@ class TestValidatorRegexBridge:
         keeps the NET_CLASS_DEBUG literal width (0.2 mm).  After the
         fix, the synthesizer writes ``target_single_impedance=50`` onto
         a cloned class and the resolver rewrites trace_width to the
-        physics-driven value (~0.375 mm on JLCPCB 4L F.Cu).
+        physics-driven value (~0.40 mm on JLCPCB 4L F.Cu).
         """
         rules = DesignRules(manufacturer="jlcpcb")
         stackup = Stackup.jlcpcb_4layer()
@@ -99,7 +99,7 @@ class TestValidatorRegexBridge:
     def test_swclk_on_4l_gets_impedance_driven_width(self):
         """After the bridge fires, the resolver rewrites SWCLK's
         trace_width from the 0.2 mm literal to the impedance-driven
-        ~0.375 mm value.  This is the load-bearing user-visible effect.
+        ~0.40 mm value.  This is the load-bearing user-visible effect.
         """
         ar = self._make_autorouter_4l_with_swclk()
 
@@ -114,7 +114,7 @@ class TestValidatorRegexBridge:
             f"Bridge FAILED: SWCLK trace_width={resolved_width:.3f}mm is "
             f"still near the 0.2mm literal.  The resolver should have "
             f"rewritten it to the 50Ω impedance-driven width "
-            f"(~0.375mm on JLCPCB 4L F.Cu).  See Issue #2964."
+            f"(~0.40mm on JLCPCB 4L F.Cu).  See Issue #2964."
         )
 
     def test_swclk_synthesis_logs_at_info_level(self, caplog):
@@ -513,10 +513,13 @@ class TestBoard06DormancyOptOut:
         # rather than the generic 4L width (0.325 mm).  Both are within
         # the 10% DRC tolerance for 50Ω SWCLK on JLCPCB, but only the
         # JLCPCB value keeps router and validator in lockstep.
+        # Issue #7076: the microstrip model gained the Hammerstad-Jensen 1980
+        # thickness terms, which raise the 50 ohm width from 0.375 to ~0.40 mm
+        # (the old model read Z0 ~2% low).
         resolved_width = ar.net_class_map["SWCLK"].trace_width
-        assert resolved_width == pytest.approx(0.375, abs=0.02), (
+        assert resolved_width == pytest.approx(0.40, abs=0.02), (
             f"PR #2966 Judge Q2 regression: SWCLK width={resolved_width:.3f}mm "
-            f"-- expected ~0.375mm (JLCPCB 4L er=4.05).  The router's "
+            f"-- expected ~0.40mm (JLCPCB 4L er=4.05).  The router's "
             f"auto-derived stackup must match Stackup._create_default_stackup "
             f"so the router and validator compute the same impedance widths."
         )

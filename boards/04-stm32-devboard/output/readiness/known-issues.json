@@ -1,0 +1,19 @@
+{
+  "known_issues": [
+    {
+      "issue": 6269,
+      "kind": "exception",
+      "summary": "Paid 0.15 mm mechanical-drill via process (ruling #7147); the generic jlcpcb-tier1 kct check reports the reviewed vias as errors, the board's own check_manufacturing.py models the process",
+      "recorded": "2026-10-18"
+    },
+    {
+      "issue": 7220,
+      "kind": "advisory",
+      "summary": "One-sided thermal connection on nine 0805 passives (C1, C2, C3, C12-C16, R1: +3.3V/+5V pad solid to the F.Cu pour, other pad on a 0.20 mm trace): tombstoning risk; narrower-spoke repair tracked in #7295",
+      "recorded": "2026-10-18",
+      "warnings": {
+        "thermal_asymmetry": 9
+      }
+    }
+  ]
+}

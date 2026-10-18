@@ -323,7 +323,7 @@ SUPPLEMENTAL_BINDINGS = (
 )
 
 
-def board03(base_commit: str, checked_at: str | None = None) -> None:
+def board03(base_commit: str, checked_at: str | None = None, known: tuple[str, ...] = ()) -> None:
     log("== board 03")
     board = BOARDS / "03-usb-joystick"
     out, mfg = board / "output", board / "output/manufacturing"
@@ -343,11 +343,16 @@ def board03(base_commit: str, checked_at: str | None = None) -> None:
     run([py, str(board / "generate_design.py"), str(out)])  # manifest now covers check-report
     drop_bytecode(board)
     refresh_tools.rebuild_archive(out / "manufacturing.zip", [mfg])
-    board03_receipt(base_commit, checked_at)
+    board03_receipt(base_commit, checked_at, known)
 
 
-def board03_receipt(base_commit: str, checked_at: str | None) -> None:
-    """``kct readiness --verify`` board 03 and promote the receipt."""
+def board03_receipt(base_commit: str, checked_at: str | None, known: tuple[str, ...] = ()) -> None:
+    """``kct readiness --verify`` board 03 and promote the receipt.
+
+    *known* is forwarded to ``kct readiness`` (``--known-issue`` /
+    ``--resolve-known-issue`` pairs, Issue #7261).  Issues already recorded in
+    ``output/readiness.json`` carry forward without it.
+    """
     board = BOARDS / "03-usb-joystick"
     out = board / "output"
     py = sys.executable
@@ -355,6 +360,7 @@ def board03_receipt(base_commit: str, checked_at: str | None) -> None:
     cmd = [py, "-m", "kicad_tools.cli", "readiness", str(board), "--verify", "--format", "json"]
     if checked_at:
         cmd += ["--checked-at", checked_at]
+    cmd += list(known)
     verification = out / "readiness-verification"
     with tempfile.TemporaryDirectory(prefix="regen-03-receipt-") as tmp:
         previous = Path(tmp) / "previous"
@@ -398,6 +404,20 @@ def main() -> int:
         action="store_true",
         help="board 03: only re-issue the readiness receipt (design files already current)",
     )
+    parser.add_argument(
+        "--known-issue",
+        action="append",
+        default=[],
+        metavar="N:SUMMARY:KIND",
+        help="board 03: record a known issue in the receipt (forwarded to kct readiness, #7261)",
+    )
+    parser.add_argument(
+        "--resolve-known-issue",
+        action="append",
+        default=[],
+        metavar="N",
+        help="board 03: drop a recorded known issue from the receipt (#7261)",
+    )
     parser.add_argument("--log", help=argparse.SUPPRESS)  # consumed by regenerate_uuids_6076
     args = parser.parse_args()
     os.chdir(REPO_ROOT)
@@ -406,15 +426,20 @@ def main() -> int:
         parser.error("--receipt-only applies to --board 03 alone")
     from kicad_tools.cli.kicad_toolchain import KiCadEnvironmentError, evidence_toolchain
 
+    known: tuple[str, ...] = (
+        *(arg for spec in args.known_issue for arg in ("--known-issue", spec)),
+        *(arg for n in args.resolve_known_issue for arg in ("--resolve-known-issue", n)),
+    )
+
     try:
         with evidence_toolchain(mounts=[REPO_ROOT]):
             if args.receipt_only:
-                board03_receipt(args.base_commit, args.checked_at)
+                board03_receipt(args.base_commit, args.checked_at, known)
                 return 0
             if "04" in boards:
                 board04()
             if "03" in boards:
-                board03(args.base_commit, args.checked_at)
+                board03(args.base_commit, args.checked_at, known)
     except KiCadEnvironmentError as exc:
         log(f"REFUSED: {exc}")
         return 2

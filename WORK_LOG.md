@@ -15,6 +15,16 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-18
 
+- **PR #7315**: feat(cli): one sign-off exit gate with JSON verdict/exit_code (Part B of #7230)
+- **Issue #7230** (closed): One sign-off exit-code contract: kct drc --net/--type/--category exits 0 on DRC errors, kct check JSON says passed while exiting 2, exit 2 means four things
+- **PR #7287**: feat(pcb): add waypoints and internal_pad stubs to PCBLayout.route
+- **Issue #7064** (closed): PCBLayout.route() draws a straight port-to-port line that crosses foreign pads and never reaches a pad
+- **PR #7306**: fix: judge differential-pair impedance on coupled segments
+- **Issue #7293** (closed): kct check: evaluate differential-pair impedance targets on coupled segments instead of recording impedance checked (#7250 PR-C)
+- **PR #7310**: fix(boards): accept only exact known #7220 warnings on board 04/05 gates (main CI red, #7298)
+- **Issue #7298** (closed): main CI red: #7232 thermal_asymmetry/via_at_pad_edge warnings fail board 04 gates (3 jobs + extended test) and Board 05 Routing Regression
+- **PR #7311**: fix(zones): read KiCad-saved thermal_bridge_width in starved-pad ladder
+- **Issue #7309** (closed): Regression (#7302): starved-pad repair loops forever after KiCad re-saves thermal_width as thermal_bridge_width — pads never go solid, starved_thermal ships
 - **Issue #7239** (closed): Include THT parts in JLCPCB assembly output (operator decision; JLCPCB now offers THT PCBA)
 - **PR #7242**: feat: include through-hole parts in JLCPCB CPL and BOM
 - **PR #7302**: feat: try narrower per-pad thermal spokes before forcing solid pad connections

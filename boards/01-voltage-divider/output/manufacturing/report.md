@@ -45,8 +45,7 @@ Simple 2-resistor voltage divider
 | Errors | 0 |
 | Warnings | 0 |
 
-**Status**: SKIPPED -- ERC skipped by user request
-
+**Status**: PASS
 
 \newpage
 

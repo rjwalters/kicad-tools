@@ -19,6 +19,7 @@ def recipe_output_dir(board_dir: Path, *, prepare: bool = False) -> Path:
                 ".kicad_sch",
                 ".kicad_sym",
                 ".json",
+                ".kct",
             }:
                 shutil.copy2(source, output / source.name)
     return output if output.is_dir() else fixture
