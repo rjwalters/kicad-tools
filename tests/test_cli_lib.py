@@ -4,6 +4,8 @@ import json
 
 import pytest
 
+from kicad_tools.schema import SymbolLibrary
+
 
 def _kicad_installed() -> bool:
     """Check if KiCad standard libraries are available."""
@@ -163,42 +165,217 @@ class TestLibFootprintInfoCommand:
         assert "Pads:" in captured.out
 
 
-class TestLibPlaceholderCommands:
-    """Tests for placeholder commands (not yet implemented)."""
+KICAD_CLI = "/Applications/KiCad/KiCad.app/Contents/MacOS/kicad-cli"
 
-    def test_create_symbol_lib_not_implemented(self, capsys):
-        """Test create-symbol-lib returns exit code 2."""
+
+def _kicad_cli() -> str | None:
+    import os
+    import shutil
+
+    return shutil.which("kicad-cli") or (KICAD_CLI if os.path.exists(KICAD_CLI) else None)
+
+
+def _run(argv, capsys):
+    from kicad_tools.cli import main
+
+    rc = main(argv)
+    cap = capsys.readouterr()
+    return rc, cap.out, cap.err
+
+
+class TestCreateSymbolLib:
+    def test_create_and_load(self, tmp_path, capsys):
+        target = tmp_path / "sub" / "mine.kicad_sym"
+        rc, out, _ = _run(["lib", "create-symbol-lib", str(target)], capsys)
+        assert rc == 0
+        assert "not yet implemented" not in out.lower()
+        assert len(SymbolLibrary.load(str(target)).symbols) == 0
+
+    def test_suffix_appended_and_json(self, tmp_path, capsys):
+        rc, out, _ = _run(
+            ["lib", "create-symbol-lib", str(tmp_path / "x"), "--format", "json"], capsys
+        )
+        assert rc == 0
+        doc = json.loads(out)
+        assert doc["implemented"] is True and doc["success"] is True
+        assert doc["symbol_count"] == 0
+        assert doc["path"].endswith("x.kicad_sym")
+        assert (tmp_path / "x.kicad_sym").exists()
+
+    def test_exists_requires_force(self, tmp_path, capsys):
+        target = tmp_path / "a.kicad_sym"
+        target.write_text("keep me")
+        rc, out, err = _run(["lib", "create-symbol-lib", str(target)], capsys)
+        assert rc == 1
+        assert "--force" in err
+        assert target.read_text() == "keep me"
+        rc, _, _ = _run(["lib", "create-symbol-lib", str(target), "--force"], capsys)
+        assert rc == 0
+        SymbolLibrary.load(str(target))
+
+    def test_exists_json_error(self, tmp_path, capsys):
+        target = tmp_path / "a.kicad_sym"
+        target.write_text("x")
+        rc, out, _ = _run(["lib", "create-symbol-lib", str(target), "--format", "json"], capsys)
+        assert rc == 1
+        doc = json.loads(out)
+        assert doc["success"] is False and "error" in doc
+
+    def test_kicad_cli_accepts(self, tmp_path, capsys):
+        import subprocess
+
+        cli = _kicad_cli()
+        if cli is None:
+            pytest.skip("kicad-cli not available")
+        target = tmp_path / "a.kicad_sym"
+        assert _run(["lib", "create-symbol-lib", str(target)], capsys)[0] == 0
+        res = subprocess.run(
+            [cli, "sym", "export", "svg", "-o", str(tmp_path / "svg"), str(target)],
+            capture_output=True,
+            text=True,
+        )
+        assert res.returncode == 0, res.stderr
+
+
+class TestCreateFootprintLib:
+    def test_create_and_load(self, tmp_path, capsys):
+        from kicad_tools.pcb.footprints import FootprintLibrary
+
+        rc, out, _ = _run(["lib", "create-footprint-lib", str(tmp_path / "My")], capsys)
+        assert rc == 0
+        assert (tmp_path / "My.pretty").is_dir()
+        assert FootprintLibrary.load(tmp_path / "My.pretty").footprints == []
+
+    def test_idempotent_on_empty_dir_json(self, tmp_path, capsys):
+        (tmp_path / "E.pretty").mkdir()
+        rc, out, _ = _run(
+            ["lib", "create-footprint-lib", str(tmp_path / "E.pretty"), "--format", "json"], capsys
+        )
+        assert rc == 0
+        doc = json.loads(out)
+        assert doc["footprint_count"] == 0 and doc["success"] is True
+
+    def test_nonempty_dir_refused_and_preserved(self, tmp_path, capsys):
+        d = tmp_path / "N.pretty"
+        d.mkdir()
+        (d / "notes.txt").write_text("keep")
+        for extra in ([], ["--force"]):
+            rc, _, err = _run(["lib", "create-footprint-lib", str(d), *extra], capsys)
+            assert rc == 1
+            assert (d / "notes.txt").read_text() == "keep"
+
+    def test_force_reuses_dir_with_footprints(self, tmp_path, capsys):
+        lib = tmp_path / "F.pretty"
+        assert (
+            _run(["lib", "generate-footprint", str(lib), "chip", "--size", "0402"], capsys)[0] == 0
+        )
+        assert _run(["lib", "create-footprint-lib", str(lib)], capsys)[0] == 1
+        rc, out, _ = _run(
+            ["lib", "create-footprint-lib", str(lib), "--force", "--format", "json"], capsys
+        )
+        assert rc == 0
+        assert json.loads(out)["footprint_count"] == 1
+
+    def test_existing_file_refused(self, tmp_path, capsys):
+        f = tmp_path / "F.pretty"
+        f.write_text("x")
+        rc, _, _ = _run(["lib", "create-footprint-lib", str(f)], capsys)
+        assert rc == 1
+
+
+class TestGenerateFootprint:
+    def test_generate_roundtrip(self, tmp_path, capsys):
+        from kicad_tools.pcb.footprints import FootprintLibrary
+
+        lib = tmp_path / "G.pretty"
+        rc, out, _ = _run(
+            ["lib", "generate-footprint", str(lib), "soic", "--pins", "8", "--format", "json"],
+            capsys,
+        )
+        assert rc == 0
+        doc = json.loads(out)
+        assert doc["pad_count"] == 8 and doc["type"] == "soic" and doc["success"] is True
+        loaded = FootprintLibrary.load(lib)
+        assert len(loaded.footprints) == 1
+        assert loaded.footprints[0].name == doc["name"]
+        assert len(loaded.footprints[0].pads) == 8
+
+    @pytest.mark.parametrize(
+        "argv,pads",
+        [
+            (["qfp", "--pins", "32"], 32),
+            (["qfn", "--pins", "16", "--body-size", "3.0", "--exposed-pad", "1.7"], 17),
+            (["chip", "--size", "0603", "--prefix", "R"], 2),
+            (["sot", "--variant", "SOT-23"], 3),
+        ],
+    )
+    def test_other_types(self, tmp_path, capsys, argv, pads):
+        from kicad_tools.pcb.footprints import FootprintLibrary
+
+        lib = tmp_path / "T.pretty"
+        rc, _, err = _run(["lib", "generate-footprint", str(lib), *argv], capsys)
+        assert rc == 0, err
+        (fp,) = FootprintLibrary.load(lib).footprints
+        assert len(fp.pads) == pads
+
+    def test_dfn_not_offered(self, tmp_path):
         from kicad_tools.cli import main
 
-        result = main(["lib", "create-symbol-lib", "test.kicad_sym"])
-        assert result == 2
+        with pytest.raises(SystemExit) as e:
+            main(["lib", "generate-footprint", str(tmp_path / "x.pretty"), "dfn"])
+        assert e.value.code == 2
 
-        captured = capsys.readouterr()
-        assert "not yet implemented" in captured.err.lower()
-        # Issue reference is printed to stdout
-        assert "#85" in captured.out or "issues/85" in captured.out
+    def test_missing_pins_exit_1(self, tmp_path, capsys):
+        rc, _, err = _run(["lib", "generate-footprint", str(tmp_path / "x.pretty"), "soic"], capsys)
+        assert rc == 1
+        assert "--pins" in err
+        assert not (tmp_path / "x.pretty").exists()
 
-    def test_create_footprint_lib_not_implemented(self, capsys):
-        """Test create-footprint-lib returns exit code 2."""
-        from kicad_tools.cli import main
+    def test_missing_pins_json(self, tmp_path, capsys):
+        rc, out, _ = _run(
+            ["lib", "generate-footprint", str(tmp_path / "x.pretty"), "qfp", "--format", "json"],
+            capsys,
+        )
+        assert rc == 1
+        doc = json.loads(out)
+        assert doc["success"] is False and "--pins" in doc["error"]
 
-        result = main(["lib", "create-footprint-lib", "Test.pretty"])
-        assert result == 2
+    def test_overwrite_requires_force(self, tmp_path, capsys):
+        lib = tmp_path / "O.pretty"
+        argv = ["lib", "generate-footprint", str(lib), "chip", "--size", "0402"]
+        assert _run(argv, capsys)[0] == 0
+        (path,) = lib.glob("*.kicad_mod")
+        path.write_text("sentinel")
+        rc, _, err = _run(argv, capsys)
+        assert rc == 1 and "--force" in err
+        assert path.read_text() == "sentinel"
+        assert _run([*argv, "--force"], capsys)[0] == 0
+        assert path.read_text() != "sentinel"
 
-        captured = capsys.readouterr()
-        assert "not yet implemented" in captured.err.lower()
-        assert "#87" in captured.out or "issues/87" in captured.out
+    def test_parity_with_footprint_generate(self, tmp_path, capsys):
+        from kicad_tools.cli.footprint_generate import main as fp_main
 
-    def test_generate_footprint_not_implemented(self, capsys):
-        """Test generate-footprint returns exit code 2."""
-        from kicad_tools.cli import main
+        lib = tmp_path / "P.pretty"
+        assert _run(["lib", "generate-footprint", str(lib), "soic", "--pins", "8"], capsys)[0] == 0
+        (path,) = lib.glob("*.kicad_mod")
+        assert fp_main(["soic", "--pins", "8"]) == 0
+        assert capsys.readouterr().out.strip() == path.read_text().strip()
 
-        result = main(["lib", "generate-footprint", "Test.pretty", "soic", "--pins", "8"])
-        assert result == 2
+    def test_kicad_cli_accepts(self, tmp_path, capsys):
+        import subprocess
 
-        captured = capsys.readouterr()
-        assert "not yet implemented" in captured.err.lower()
-        assert "#88" in captured.out or "issues/88" in captured.out
+        cli = _kicad_cli()
+        if cli is None:
+            pytest.skip("kicad-cli not available")
+        lib = tmp_path / "K.pretty"
+        assert _run(["lib", "generate-footprint", str(lib), "soic", "--pins", "8"], capsys)[0] == 0
+        out = tmp_path / "svg"
+        out.mkdir()
+        res = subprocess.run(
+            [cli, "fp", "export", "svg", "-o", str(out), str(lib)], capture_output=True, text=True
+        )
+        assert res.returncode == 0, res.stderr
+        assert list(out.glob("*.svg"))
 
 
 class TestLibExportCommand:

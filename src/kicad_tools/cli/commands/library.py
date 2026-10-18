@@ -83,21 +83,31 @@ def run_lib_command(args) -> int:
         )
 
     elif args.lib_command == "create-symbol-lib":
-        return create_symbol_library(args.path, getattr(args, "format", "text"))
+        return create_symbol_library(
+            args.path, getattr(args, "format", "text"), getattr(args, "force", False)
+        )
 
     elif args.lib_command == "create-footprint-lib":
-        return create_footprint_library(args.path, getattr(args, "format", "text"))
+        return create_footprint_library(
+            args.path, getattr(args, "format", "text"), getattr(args, "force", False)
+        )
 
     elif args.lib_command == "generate-footprint":
         return generate_footprint(
             args.library,
             args.type,
             getattr(args, "format", "text"),
+            getattr(args, "force", False),
             pins=getattr(args, "pins", None),
             pitch=getattr(args, "pitch", None),
             body_width=getattr(args, "body_width", None),
+            body_length=getattr(args, "body_length", None),
             body_size=getattr(args, "body_size", None),
+            exposed_pad=getattr(args, "exposed_pad", None),
+            size=getattr(args, "size", None),
+            variant=getattr(args, "variant", None),
             prefix=getattr(args, "prefix", None),
+            name=getattr(args, "name", None),
         )
 
     elif args.lib_command == "export":

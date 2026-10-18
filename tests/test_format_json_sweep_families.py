@@ -10,9 +10,8 @@ but which each still had prose-only holdouts** -- ten surfaces:
 
 * ``datasheet`` -- ``cache``, ``convert``, ``download``
 * ``lib``       -- ``create-symbol-lib``, ``create-footprint-lib``,
-                   ``generate-footprint`` (the three "not yet implemented"
-                   placeholders: under JSON the *non-implementation* is the
-                   payload, with the exit code unchanged at 2)
+                   ``generate-footprint`` (implemented in #7175; under JSON the
+                   result is the payload)
 * ``parts``     -- ``cache``, ``sync-catalog``
 * ``pcb``       -- ``export-dsn``, ``import-ses``
 
@@ -186,38 +185,37 @@ class TestShimForwarding:
 
 
 # ---------------------------------------------------------------------------
-# lib placeholders: the non-implementation is the payload
+# lib authoring commands (implemented in #7175): one JSON document each
 # ---------------------------------------------------------------------------
 
 
-class TestLibPlaceholderEmission:
+class TestLibAuthoringEmission:
     def _run(self, argv, capsys):
         from kicad_tools.cli.commands.library import run_lib_command
 
         rc = run_lib_command(create_parser().parse_args(argv))
         return rc, capsys.readouterr().out
 
-    @pytest.mark.parametrize(
-        "command",
-        [c for c in sorted(SWEPT_SURFACES) if c.startswith("lib ")],
-    )
-    def test_json_document_and_exit_code(self, command, capsys):
-        argv = [*command.split(), *SWEPT_SURFACES[command], "--format", "json"]
-        rc, out = self._run(argv, capsys)
-        assert rc == 2, "the 'not implemented' exit code must not change"
-        payload = json.loads(out)
-        assert payload["command"] == command.split()[1]
-        assert payload["implemented"] is False
-        assert payload["success"] is False
-        assert "not yet implemented" in payload["error"]
-        assert payload["tracking_issue"].startswith("https://github.com/")
+    def test_json_documents(self, tmp_path, capsys):
+        cases = {
+            "create-symbol-lib": [str(tmp_path / "out.kicad_sym")],
+            "create-footprint-lib": [str(tmp_path / "out.pretty")],
+            "generate-footprint": [str(tmp_path / "gen.pretty"), "soic", "--pins", "8"],
+        }
+        for name, extra in cases.items():
+            rc, out = self._run(["lib", name, *extra, "--format", "json"], capsys)
+            assert rc == 0, name
+            payload = json.loads(out)
+            assert payload["command"] == name
+            assert payload["implemented"] is True
+            assert payload["success"] is True
 
-    def test_generate_footprint_reports_its_parameters(self, capsys):
+    def test_generate_footprint_reports_its_parameters(self, tmp_path, capsys):
         rc, out = self._run(
             [
                 "lib",
                 "generate-footprint",
-                "out.pretty",
+                str(tmp_path / "out.pretty"),
                 "soic",
                 "--pins",
                 "8",
@@ -228,22 +226,15 @@ class TestLibPlaceholderEmission:
             ],
             capsys,
         )
-        assert rc == 2
+        assert rc == 0
         payload = json.loads(out)
-        assert payload["library"] == "out.pretty"
         assert payload["type"] == "soic"
         # Unset options are omitted rather than emitted as nulls.
         assert payload["parameters"] == {"pins": 8, "pitch": 1.27}
 
-    def test_json_is_deterministic(self, capsys):
-        argv = ["lib", "create-symbol-lib", "out.kicad_sym", "--format", "json"]
-        _, first = self._run(argv, capsys)
-        _, second = self._run(argv, capsys)
-        assert first == second
-
-    def test_text_default_unchanged(self, capsys):
-        rc, out = self._run(["lib", "create-symbol-lib", "out.kicad_sym"], capsys)
-        assert rc == 2
+    def test_text_default_is_not_json(self, tmp_path, capsys):
+        rc, out = self._run(["lib", "create-symbol-lib", str(tmp_path / "o.kicad_sym")], capsys)
+        assert rc == 0
         with pytest.raises(json.JSONDecodeError):
             json.loads(out)
 
