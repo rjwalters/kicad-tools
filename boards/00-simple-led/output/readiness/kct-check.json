@@ -4,7 +4,7 @@
   "layers": 2,
   "summary": {
     "errors": 0,
-    "warnings": 1,
+    "warnings": 0,
     "infos": 1,
     "waived": 0,
     "rules_checked": 57,
@@ -54,34 +54,13 @@
       "waived": false,
       "key": "connector_edge_distance|J1||F.Cu",
       "evidence_hash": "ev2:e474f9a88cdb95e5"
-    },
-    {
-      "rule_id": "pin1_marker_obscured",
-      "type": "unknown",
-      "severity": "warning",
-      "message": "D1 (LED_THT:LED_D5.0mm) has pin-1 silkscreen marks only under the package body or on pad copper, so none is visible after assembly -- add a dot, triangle or bar next to pad 1 outside the body, or waive via .kct_waivers.json",
-      "location": [
-        154.73,
-        87.5
-      ],
-      "layer": "F.Cu",
-      "actual_value": null,
-      "required_value": 2.5,
-      "items": [
-        "D1"
-      ],
-      "nets": [],
-      "status": "warning",
-      "waived": false,
-      "key": "pin1_marker_obscured|D1||F.Cu",
-      "evidence_hash": "ev2:c20a7165f51a675c"
     }
   ],
   "mask_copper_assessments": [],
   "meta_checks": {
     "drc": {
       "status": "PASSED",
-      "detail": "57 rules checked, 0 error(s), 1 warning(s)"
+      "detail": "57 rules checked, 0 error(s), 0 warning(s)"
     },
     "erc": {
       "status": "PASSED",
