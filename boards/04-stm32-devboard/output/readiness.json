@@ -8,7 +8,7 @@
     {
       "name": "kct_check",
       "status": "passed",
-      "detail": "Reviewed paid-drill process: zero errors/warnings, no suppressed findings; ERC/LVS/manifest all pass."
+      "detail": "Reviewed paid-drill process: zero errors, 9 reviewed warnings (thermal_asymmetry: 9; accepted interim, narrower-spoke fill repair tracked in #7295, #7298); no suppressed findings; ERC/LVS/manifest all pass."
     },
     {
       "name": "native_drc",
@@ -103,5 +103,11 @@
     "native_drc": "output/readiness/native-drc.json",
     "native_erc_linux": "output/readiness/native-erc-linux.json",
     "native_erc": "output/readiness/native-erc.json"
+  },
+  "acknowledged_warning_rules": [
+    "thermal_asymmetry"
+  ],
+  "warning_counts_by_rule": {
+    "thermal_asymmetry": 9
   }
 }

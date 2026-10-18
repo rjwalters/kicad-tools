@@ -128,6 +128,12 @@ class BoardConfig:
     # rule than its count, still refuses; so does every error.  Empty means no
     # warning is tolerated.  Delete an entry when the tracked fix lands.
     known_warnings: dict[str, int] = field(default_factory=dict)
+    # Directories searched (relative to the board) when rebuilding
+    # ``output/manufacturing.zip``.  Its member names are relative to the first
+    # entry that holds them: boards 04-09 ship bare names (``README.txt``), the
+    # ``kct readiness`` packages 00-02 prefix them with ``manufacturing/``, so
+    # those search ``output`` instead (Issue #7273).
+    bundle_search: tuple[str, ...] = ("output/manufacturing",)
     archives: tuple[tuple[str, tuple[str, ...]], ...] = field(
         default=(
             ("output/manufacturing/kicad_project.zip", ("output", ".")),
@@ -162,6 +168,7 @@ BOARDS: dict[str, BoardConfig] = {
         tier="jlcpcb",
         erc=(),
         archives=(("output/manufacturing/kicad_project.zip", ("output", ".")),),
+        bundle_search=("output",),
     ),
     "01-voltage-divider": BoardConfig(
         routed_pcb="output/voltage_divider_routed.kicad_pcb",
@@ -169,6 +176,7 @@ BOARDS: dict[str, BoardConfig] = {
         tier="jlcpcb",
         erc=(),
         archives=(("output/manufacturing/kicad_project.zip", ("output", ".")),),
+        bundle_search=("output",),
     ),
     "02-charlieplex-led": BoardConfig(
         routed_pcb="output/charlieplex_3x3_routed.kicad_pcb",
@@ -185,6 +193,7 @@ BOARDS: dict[str, BoardConfig] = {
                 ),
             ),
         ),
+        bundle_search=("output",),
     ),
     "05-bldc-motor-controller": BoardConfig(
         routed_pcb="output/bldc_controller_routed.kicad_pcb",
@@ -433,13 +442,18 @@ def unaccepted_warnings(
 
 
 def check_report_verdict(
-    data: dict, label: str, known_warnings: dict[str, int] | None = None
+    data: dict,
+    label: str,
+    known_warnings: dict[str, int] | None = None,
+    observed: dict[str, int] | None = None,
 ) -> tuple[bool, int]:
     """Gate a ``kct check``-format report.
 
     0 errors, meta all PASSED, and no warning outside ``known_warnings``
     (Issue #7273): the same semantics as ``kct readiness``, where listed
-    warnings are reviewed rather than blocking.
+    warnings are reviewed rather than blocking.  ``observed``, when given, is
+    filled with the measured per-rule warning counts so the caller can record
+    them in the published report.
     """
     summary, meta = data.get("summary", {}), data.get("meta_checks", {})
     statuses = {k: meta.get(k, {}).get("status") for k in ("drc", "erc", "lvs", "manifest")}
@@ -447,6 +461,8 @@ def check_report_verdict(
     mismatches = len(lvs.get("mismatches", [])) + len(lvs.get("copper_mismatches", []))
     errors, warnings = summary.get("errors"), summary.get("warnings")
     log(f"  gate {label}: {errors} error(s), {warnings} warning(s), meta {statuses}")
+    if observed is not None:
+        observed.update(warning_counts_by_rule(data))
     if warnings:
         log(f"    warnings by rule: {warning_counts_by_rule(data)}; allowed {known_warnings or {}}")
     if errors != 0 or warnings is None or any(s != "PASSED" for s in statuses.values()):
@@ -459,7 +475,9 @@ def check_report_verdict(
     return statuses["lvs"] == "PASSED", mismatches
 
 
-def gate_kct_check(board: Path, cfg: BoardConfig) -> tuple[bool, int]:
+def gate_kct_check(
+    board: Path, cfg: BoardConfig, observed: dict[str, int] | None = None
+) -> tuple[bool, int]:
     with tempfile.TemporaryDirectory(prefix="refresh-readiness-check-") as tmp:
         report = Path(tmp) / "check.json"
         run(
@@ -477,10 +495,12 @@ def gate_kct_check(board: Path, cfg: BoardConfig) -> tuple[bool, int]:
         if not report.is_file():
             raise GateFailure("kct check did not produce a report")
         data = json.loads(report.read_text())
-    return check_report_verdict(data, f"kct check --mfr {cfg.tier}", cfg.known_warnings)
+    return check_report_verdict(data, f"kct check --mfr {cfg.tier}", cfg.known_warnings, observed)
 
 
-def gate_board_check(board: Path, cfg: BoardConfig) -> tuple[bool, int]:
+def gate_board_check(
+    board: Path, cfg: BoardConfig, observed: dict[str, int] | None = None
+) -> tuple[bool, int]:
     """Run the board's own manufacturing check in place of ``kct check`` (Issue #6269)."""
     assert cfg.check_script is not None
     script = board / cfg.check_script
@@ -499,17 +519,43 @@ def gate_board_check(board: Path, cfg: BoardConfig) -> tuple[bool, int]:
         if not report.is_file():
             raise GateFailure(f"{cfg.check_script} did not produce a report: {proc.stderr[-2000:]}")
         data = json.loads(report.read_text())
-    verdict = check_report_verdict(data, cfg.check_script, cfg.known_warnings)
+    verdict = check_report_verdict(data, cfg.check_script, cfg.known_warnings, observed)
     if proc.returncode != 0:
         raise GateFailure(f"{cfg.check_script} exited {proc.returncode}")
     return verdict
 
 
-def gate_check(board: Path, cfg: BoardConfig) -> tuple[bool, int]:
+def gate_check(
+    board: Path, cfg: BoardConfig, observed: dict[str, int] | None = None
+) -> tuple[bool, int]:
     """The board-local check hook when configured, else ``kct check --mfr <tier>``."""
     if cfg.check_script is not None:
-        return gate_board_check(board, cfg)
-    return gate_kct_check(board, cfg)
+        return gate_board_check(board, cfg, observed)
+    return gate_kct_check(board, cfg, observed)
+
+
+def record_accepted_warnings(report: dict, observed: dict[str, int]) -> None:
+    """Publish the measured, accepted warnings in ``report`` (Issue #7273).
+
+    ``kct readiness`` lists reviewed warnings in its report; a refresh that only
+    re-dated a ``kct_check`` detail claiming zero warnings would restate a
+    clean-board attestation the measurement contradicts.  So the stored detail
+    must already name every measured rule and count as ``rule: N``, and the
+    per-rule counts are recorded as ``kct readiness`` does.
+    """
+    if not observed:
+        return
+    details = " ".join(
+        str(c.get("detail", "")) for c in report.get("checks", []) if c.get("name") == "kct_check"
+    )
+    missing = [f"{rule}: {n}" for rule, n in observed.items() if f"{rule}: {n}" not in details]
+    if missing:
+        raise GateFailure(
+            f"readiness.json kct_check detail does not list the measured warnings {missing}; "
+            "refusing to re-date a report whose stored detail contradicts the measurement"
+        )
+    report["acknowledged_warning_rules"] = sorted(observed)
+    report["warning_counts_by_rule"] = dict(sorted(observed.items()))
 
 
 def gate_net_status(board: Path, cfg: BoardConfig) -> float:
@@ -598,11 +644,14 @@ def refresh(
             k: v for k, v in after.items() if k != "files"
         }:
             raise GateFailure("manifest refresh changed fields other than 'files'")
-        changed = rebuild_archive(out / "manufacturing.zip", [mfg])
+        changed = rebuild_archive(
+            out / "manufacturing.zip", [staged / s for s in cfg.bundle_search]
+        )
         log(f"  output/manufacturing.zip: rebuilt; members with new content {changed}")
 
         drc_errors = gate_native_drc(staged, cfg)
-        lvs_clean, lvs_mismatches = gate_check(staged, cfg)
+        observed_warnings: dict[str, int] = {}
+        lvs_clean, lvs_mismatches = gate_check(staged, cfg, observed_warnings)
         routed_pct = gate_net_status(staged, cfg)
         gate_sync(staged, cfg)
 
@@ -623,6 +672,7 @@ def refresh(
         if report.get("status") != "ready" or report.get("blockers"):
             raise GateFailure("readiness.json is not a ready report; refusing to re-pin")
 
+        record_accepted_warnings(report, observed_warnings)
         for name in report["inputs"]:
             report["inputs"][name] = sha256(staged / name)
         report["checked_at"] = checked_at

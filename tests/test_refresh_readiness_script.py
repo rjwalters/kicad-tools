@@ -290,3 +290,63 @@ def test_every_demo_board_has_a_refresh_config(mod):
             assert (board / archive).is_file(), (name, archive)
         for job in cfg.erc:
             assert (board / job.directory / job.schematic).is_file(), (name, job.key)
+
+
+def test_outer_archive_members_resolve_against_committed_tree(mod, tmp_path):
+    """Rebuilding ``output/manufacturing.zip`` finds every member (needs no KiCad).
+
+    Boards 00-02 prefix members with ``manufacturing/``; a search root that
+    ignores that refused them all (Issue #7273 review).
+    """
+    import shutil
+
+    for name, cfg in mod.BOARDS.items():
+        board = mod.REPO_ROOT / "boards" / name
+        if not (board / "output" / "manufacturing.zip").is_file():
+            continue
+        staged = tmp_path / name
+        shutil.copytree(board / "output", staged / "output")
+        mod.rebuild_archive(
+            staged / "output" / "manufacturing.zip", [staged / s for s in cfg.bundle_search]
+        )
+
+
+def _readiness(detail: str) -> dict:
+    return {"checks": [{"name": "kct_check", "status": "passed", "detail": detail}]}
+
+
+def test_accepted_warnings_are_recorded_in_the_report(mod):
+    report = _readiness("0 errors, 3 reviewed warnings (via_at_pad_edge: 3)")
+    mod.record_accepted_warnings(report, {"via_at_pad_edge": 3})
+    assert report["acknowledged_warning_rules"] == ["via_at_pad_edge"]
+    assert report["warning_counts_by_rule"] == {"via_at_pad_edge": 3}
+
+
+def test_stale_zero_warning_detail_refuses_to_be_redated(mod):
+    report = _readiness("0 errors/0 warnings")
+    with pytest.raises(mod.GateFailure, match="via_at_pad_edge: 3"):
+        mod.record_accepted_warnings(report, {"via_at_pad_edge": 3})
+    assert "acknowledged_warning_rules" not in report
+
+
+def test_changed_warning_count_refuses_until_detail_is_updated(mod):
+    report = _readiness("reviewed warnings (via_at_pad_edge: 3)")
+    with pytest.raises(mod.GateFailure):
+        mod.record_accepted_warnings(report, {"via_at_pad_edge": 2})
+
+
+def test_no_warnings_leaves_the_report_untouched(mod):
+    report = _readiness("0 errors/0 warnings")
+    mod.record_accepted_warnings(report, {})
+    assert report == _readiness("0 errors/0 warnings")
+
+
+def test_committed_reports_list_their_known_warnings(mod):
+    """Boards with a ``known_warnings`` list already state it in ``readiness.json``."""
+    for name, cfg in mod.BOARDS.items():
+        if not cfg.known_warnings:
+            continue
+        report = json.loads(
+            (mod.REPO_ROOT / "boards" / name / "output" / "readiness.json").read_text()
+        )
+        mod.record_accepted_warnings(report, dict(cfg.known_warnings))

@@ -13,7 +13,7 @@
     {
       "name": "kct_check",
       "status": "passed",
-      "detail": "0 errors/0warnings; all49 rules and ERC/LVS/manifest meta-checks passed;149 bound pads."
+      "detail": "0 errors, 3 reviewed warnings (via_at_pad_edge: 3; accepted interim, pad-edge via fix tracked in #7296, #7298); all 49 rules and ERC/LVS/manifest meta-checks passed; 149 bound pads."
     },
     {
       "name": "native_drc",
@@ -152,5 +152,11 @@
     "drill_replay": "output/readiness/drill-replay.txt",
     "45_alignment": "output/readiness/45-alignment.json",
     "footprint_identity": "output/readiness/footprint-identity-comparison.json"
+  },
+  "acknowledged_warning_rules": [
+    "via_at_pad_edge"
+  ],
+  "warning_counts_by_rule": {
+    "via_at_pad_edge": 3
   }
 }
