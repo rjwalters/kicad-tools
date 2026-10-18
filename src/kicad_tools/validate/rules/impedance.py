@@ -28,6 +28,7 @@ from typing import TYPE_CHECKING
 
 from ..violations import DRCResults, DRCViolation
 from .base import DRCRule
+from .diffpair_routing_continuity import DEFAULT_COUPLING_WINDOW_MM
 
 if TYPE_CHECKING:
     from kicad_tools.manufacturers import DesignRules
@@ -46,6 +47,9 @@ class NetImpedanceSpec:
         target_zdiff: Target differential impedance (for diff pairs)
         tolerance_percent: Allowed deviation from target (default 10%)
         exclude_current_sense: Suppress polarity-only heuristics on confirmed sense nets.
+        advisory: Built-in name-pattern default rather than a declared target;
+            findings are capped at ``warning`` and the spec only applies on
+            boards that opt into controlled impedance (Issue #7293).
     """
 
     net_pattern: str
@@ -53,6 +57,7 @@ class NetImpedanceSpec:
     target_zdiff: float | None = None
     tolerance_percent: float = 10.0
     exclude_current_sense: bool = False
+    advisory: bool = False
 
     def matches(self, net_name: str, *, has_kelvin_root: bool = False) -> bool:
         """Match a name, excluding sense nets only with resistor-pad evidence."""
@@ -182,16 +187,20 @@ class ImpedanceRule(DRCRule):
         """
         return [
             # USB differential pairs - 90Ω differential (covers + / - / P / M / D+/D-)
-            NetImpedanceSpec(r"USB.*D[PM\+\-]?", target_zdiff=90.0),
+            NetImpedanceSpec(r"USB.*D[PM\+\-]?", target_zdiff=90.0, advisory=True),
             # LVDS/high-speed diff pairs - 100Ω differential.
-            NetImpedanceSpec(r".*LVDS.*", target_zdiff=100.0),
+            NetImpedanceSpec(r".*LVDS.*", target_zdiff=100.0, advisory=True),
             # Generic diff-pair suffix conventions - 100Ω differential.
             # NOTE: these must come BEFORE the single-ended ``.*CLK$``
             # spec so e.g. ``MIPI_CLK+`` resolves to diff, not 50Ω SE.
             # A shunt's polarity labels do not imply controlled impedance.
             # Explicit specs keep their default exclusion=False.
-            NetImpedanceSpec(r".*_[PN]$", target_zdiff=100.0, exclude_current_sense=True),
-            NetImpedanceSpec(r".*[+\-]$", target_zdiff=100.0, exclude_current_sense=True),
+            NetImpedanceSpec(
+                r".*_[PN]$", target_zdiff=100.0, exclude_current_sense=True, advisory=True
+            ),
+            NetImpedanceSpec(
+                r".*[+\-]$", target_zdiff=100.0, exclude_current_sense=True, advisory=True
+            ),
             # High-speed single-ended - 50Ω.  ``.*CLK$`` (anchored) so
             # ``MIPI_CLK+`` does NOT mis-match as single-ended.  These
             # are SUPPRESSED in check() by default (Issue #3157).
@@ -241,6 +250,10 @@ class ImpedanceRule(DRCRule):
         self._tl: TransmissionLine | None = None
         self._cl: CoupledLines | None = None
         self._detected_pairs = detected_pairs or []
+        # Detected pairs that matched a differential spec but had no
+        # judged segment on either net; populated by :meth:`check`
+        # (Issue #7293).
+        self.unmeasured_pairs: list[tuple[str, str]] = []
         # Map net name -> partner net name for fast diff-pair lookup.
         self._partner_map: dict[str, str] = {}
         for pair in self._detected_pairs:
@@ -332,6 +345,7 @@ class ImpedanceRule(DRCRule):
             DRCResults containing any impedance violations
         """
         results = DRCResults(rules_checked=1)
+        self.unmeasured_pairs = []
 
         # Initialize physics module
         if not self._init_physics(pcb):
@@ -360,6 +374,10 @@ class ImpedanceRule(DRCRule):
         trace_data = self._collect_traces(pcb)
 
         current_sense_nets = self._collect_current_sense_nets(pcb)
+        # Advisory (built-in default) specs honour the same opt-in gate as
+        # the default spec list, even when appended to explicit specs.
+        advisory_allowed = self._board_has_controlled_impedance()
+        judged_diff_nets: set[str] = set()
 
         # Check each net against matching specs
         for net_name, traces in trace_data.items():
@@ -367,6 +385,8 @@ class ImpedanceRule(DRCRule):
                 net_name, has_kelvin_root=net_name in current_sense_nets
             )
             if spec is None:
+                continue
+            if spec.advisory and not advisory_allowed:
                 continue
 
             # Issue #2973 follow-up: skip differential-only specs (those
@@ -424,10 +444,45 @@ class ImpedanceRule(DRCRule):
                 if self._segment_length_mm(trace) < self.NECK_DOWN_EXEMPT_LENGTH_MM:
                     continue
                 check_result = self._check_trace_impedance(trace, spec)
-                if check_result is not None and not check_result.compliant:
+                if check_result is None:
+                    continue
+                if spec.target_zdiff is not None and net_name in self._partner_map:
+                    judged_diff_nets.add(net_name)
+                if not check_result.compliant:
                     results.add(self._create_violation(check_result, spec))
 
+        self.unmeasured_pairs = self._find_unmeasured_pairs(
+            judged_diff_nets, advisory_allowed, current_sense_nets
+        )
         return results
+
+    def _find_unmeasured_pairs(
+        self,
+        judged_nets: set[str],
+        advisory_allowed: bool,
+        current_sense_nets: set[str],
+    ) -> list[tuple[str, str]]:
+        """Detected pairs matching a differential spec with nothing judged.
+
+        A pair whose partner is unrouted, or whose runs are all outside the
+        coupling window, was never measured, so the check says nothing
+        about it (Issue #7293).
+        """
+        unmeasured: list[tuple[str, str]] = []
+        for pair in self._detected_pairs:
+            p_name = pair.positive.net_name
+            n_name = pair.negative.net_name
+            if p_name in judged_nets or n_name in judged_nets:
+                continue
+            for name in (p_name, n_name):
+                spec = self._find_matching_spec(name, has_kelvin_root=name in current_sense_nets)
+                if spec is None or spec.target_zdiff is None:
+                    continue
+                if spec.advisory and not advisory_allowed:
+                    continue
+                unmeasured.append((p_name, n_name))
+                break
+        return unmeasured
 
     @staticmethod
     def _segment_length_mm(trace: dict) -> float:
@@ -498,8 +553,9 @@ class ImpedanceRule(DRCRule):
         The gap is the smallest perpendicular distance between this
         segment's centreline and any parallel, longitudinally overlapping
         same-layer segment of the partner net, minus both half-widths.  It
-        is stored as ``intra_pair_clearance_mm``; segments with no
-        measurable partner run are left without the key so the check can
+        is stored as ``intra_pair_clearance_mm`` when it is within
+        :data:`DEFAULT_COUPLING_WINDOW_MM`; segments with no measurable
+        partner run, or one farther away, are left without the key so the check can
         decline to judge them rather than assume a spacing (Issue #7079).
         """
         import math
@@ -539,7 +595,9 @@ class ImpedanceRule(DRCRule):
                     gap = centre - trace["width_mm"] / 2 - other["width_mm"] / 2
                     if gap > 0 and (best is None or gap < best):
                         best = gap
-                if best is not None:
+                # Beyond the coupling window the run is a breakout, not a
+                # coupled segment: leave it unjudged (Issue #7293).
+                if best is not None and best <= DEFAULT_COUPLING_WINDOW_MM:
                     trace["intra_pair_clearance_mm"] = best
 
     @staticmethod
@@ -697,7 +755,9 @@ class ImpedanceRule(DRCRule):
 
         return DRCViolation(
             rule_id=self.rule_id,
-            severity="error" if result.deviation_percent > 20 else "warning",
+            severity=(
+                "error" if result.deviation_percent > 20 and not spec.advisory else "warning"
+            ),
             message=(
                 f"Trace impedance mismatch on {result.layer}: "
                 f"width {result.width_mm:.3f}mm gives {result.calculated_z0:.1f}Ω, "

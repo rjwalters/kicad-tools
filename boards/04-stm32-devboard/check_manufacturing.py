@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import json
-import os
 import sys
 from pathlib import Path
 
@@ -16,11 +15,39 @@ from kicad_tools.cli.check_cmd import (
     run_selected_checks,
     write_json_report,
 )
+from kicad_tools.validate.known_warnings import known_warning_count, unaccepted_warnings
 from kicad_tools.validate.rules.waivers import (
     apply_waivers,
     discover_waivers_sidecar,
     load_waivers,
 )
+
+#: Issue #7298: the nine 0805s whose +3.3V/+5V pad 1 the starved-thermal repair
+#: forced solid into the F.Cu pour while pad 2 sits on a trace (#7220's
+#: ``thermal_asymmetry`` advisory).  #7295 (#7220 PR2, narrower spokes before
+#: solid) removes them at the source; until then ONLY these exact
+#: ``(rule, ref, pad)`` findings may pass the DRC leg.  Any other warning, ref
+#: or pad, or a repeat, still fails; errors are never allowed.  Delete the
+#: entries when #7295 lands.
+BOARD04_KNOWN_WARNINGS: dict[tuple[str, str, str], str] = {
+    ("thermal_asymmetry", ref, f"{ref}-1"): "#7295"
+    for ref in ("C1", "C2", "C3", "C12", "C13", "C14", "C15", "C16", "R1")
+}
+
+
+def drc_verdict(violations) -> SubCheckResult:
+    """The DRC meta-check leg: 0 errors and no warning outside the known list."""
+    violations = list(violations)
+    errors = sum(v.is_error for v in violations)
+    warnings = sum(v.is_warning for v in violations)
+    extra = unaccepted_warnings(violations, BOARD04_KNOWN_WARNINGS)
+    detail = f"{errors} errors, {warnings} warnings"
+    known = known_warning_count(violations, BOARD04_KNOWN_WARNINGS)
+    if known:
+        detail += f" ({known} known, #7295)"
+    if extra:
+        detail += f"; unaccepted: {'; '.join(extra)}"
+    return SubCheckResult("PASSED" if not errors and not extra else "FAILED", detail)
 
 
 def check(pcb_path, report_path):
@@ -34,16 +61,7 @@ def check(pcb_path, report_path):
     waivers_path = discover_waivers_sidecar(pcb_path)
     if waivers_path is not None:
         apply_waivers(results, load_waivers(waivers_path))
-    errors = sum(v.is_error for v in results.violations)
-    warnings = sum(v.is_warning for v in results.violations)
-    # Issue #7273: ``scripts/boards/refresh_readiness.py`` sets this and gates
-    # the listed warnings by rule against its own allowlist; standalone runs
-    # stay strict.
-    report_warnings = os.environ.get("KCT_BOARD_CHECK_REPORT_WARNINGS") == "1"
-    drc = SubCheckResult(
-        "PASSED" if not errors and (report_warnings or not warnings) else "FAILED",
-        f"{errors} errors, {warnings} warnings",
-    )
+    drc = drc_verdict(results.violations)
     meta = run_meta_checks(pcb_path, drc, schematic=str(sch), strict=True)
     write_json_report(
         results.violations, results, pcb_path, "jlcpcb-tier1", 0, report_path, meta=meta

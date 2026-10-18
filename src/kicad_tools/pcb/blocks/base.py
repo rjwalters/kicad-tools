@@ -187,6 +187,16 @@ class PCBBlock:
 
         return self.to_board(self.ports[name].position)
 
+    def pad_board_position(self, pad_ref: str) -> Point:
+        """Get absolute (board) position of a pad given as ``"REF.PAD"``."""
+        ref, _, pad_name = pad_ref.partition(".")
+        if ref not in self.components:
+            raise KeyError(f"Component '{ref}' not found in block")
+        comp = self.components[ref]
+        if pad_name not in comp.pads:
+            raise KeyError(f"Pad '{pad_name}' not found on {ref} (from '{pad_ref}')")
+        return self.to_board(comp.pad_position(pad_name))
+
     def component_position(self, ref: str) -> Point:
         """Get absolute position of a component after placement."""
         if ref not in self.components:

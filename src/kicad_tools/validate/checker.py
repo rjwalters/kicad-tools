@@ -259,6 +259,8 @@ class DRCChecker:
         self.copper_oz = copper_oz
         self.suppress_library = suppress_library
         self.net_class_map = net_class_map
+        # Set by :meth:`check_impedance`; read by ``kct check`` coverage.
+        self.impedance_unmeasured_pairs: list[tuple[str, str]] = []
         # Issue #6044: ``routing_policy`` options.  ``require_routing_policy``
         # makes a sensitive net class with no declared policy an error
         # (``kct check --require-routing-policy``).  With
@@ -527,6 +529,8 @@ class DRCChecker:
         "silkscreen_line_width": CATEGORY_ADVISORY,
         "silkscreen_over_pad": CATEGORY_ADVISORY,
         "silkscreen_text_height": CATEGORY_ADVISORY,
+        "silkscreen_text_thickness": CATEGORY_ADVISORY,
+        "silk_ref_obscured": CATEGORY_ADVISORY,
         # ---- Manufacturing DRC: fab-blocking copper/clearance/hole/
         #      edge/mask/drill/geometry. -----------------------------
         "clearance": CATEGORY_MANUFACTURING,
@@ -570,6 +574,13 @@ class DRCChecker:
         "netclass_via_diameter": CATEGORY_MANUFACTURING,
         "netclass_via_drill": CATEGORY_MANUFACTURING,
         "netclass_annular_ring": CATEGORY_MANUFACTURING,
+        # Issue #7292: project.kct requirements vs the routed board.
+        "spec_conformance_dimensions": CATEGORY_MANUFACTURING,
+        "spec_conformance_layers": CATEGORY_MANUFACTURING,
+        "spec_conformance_min_trace": CATEGORY_MANUFACTURING,
+        "spec_conformance_min_via": CATEGORY_MANUFACTURING,
+        "spec_conformance_min_drill": CATEGORY_MANUFACTURING,
+        "spec_conformance_target_fab": CATEGORY_MANUFACTURING,
         # Issue #6249: authored netclass clearance on routed copper -- the
         # same defect class kicad-cli reports as a netclass clearance error.
         "netclass_clearance_copper": CATEGORY_MANUFACTURING,
@@ -1277,33 +1288,70 @@ class DRCChecker:
         its width is wrong.  This mirrors the producer-side wiring already
         used by :meth:`check_match_group_length_skew` (Issue #2710).
 
-        Diff-pair impedance (``target_diff_impedance`` / ``detected_pairs``,
-        board 06) is **unaffected** -- this method only governs the
-        single-ended path.
+        Diff-pair impedance (Issue #7293) is evaluated on coupled segments
+        only: declared ``target_diff_impedance`` (errors above 20 %) and the
+        built-in diff name-pattern defaults (capped at warning).  A matched
+        pair with nothing judged is recorded in
+        :attr:`impedance_unmeasured_pairs` for ``kct check`` coverage.
 
         Returns:
             DRCResults containing impedance violations.  Empty when no
             traces match any spec (the standalone-CLI common case for
             boards without declared controlled-impedance nets).
         """
+        detected_pairs = self._impedance_detected_pairs()
         if self.net_class_map is None:
             # No router context -> no declared single-ended impedance.
             # The rule's SE name-pattern heuristics stay suppressed
-            # (Issue #3157); diff-pair defaults still resolve internally.
-            rule = ImpedanceRule()
+            # (Issue #3157); diff-pair defaults resolve internally.
+            rule = ImpedanceRule(detected_pairs=detected_pairs)
         else:
             from kicad_tools.validate.impedance_specs import (
+                default_diff_impedance_specs,
+                derive_diff_impedance_specs,
                 derive_single_ended_impedance_specs,
             )
 
-            specs = derive_single_ended_impedance_specs(self.net_class_map)
-            # Pass explicit ``specs=`` so they always evaluate (explicit
-            # specs set ``_using_default_specs=False`` and bypass the
-            # heuristic-suppression gate).  When no class declared a
-            # single-ended impedance, ``specs`` is empty -> conservative
-            # no-op (no single-ended impedance errors).
-            rule = ImpedanceRule(specs=specs)
-        return self._absolutize(rule.check(self.pcb, self.design_rules))
+            # Order matters: ``_find_matching_spec`` returns the first match.
+            # Declared single-ended, declared differential, then the
+            # advisory diff-only defaults (a map replaces the default list,
+            # so board 03's USB pair would otherwise never be judged).
+            # Explicit specs bypass the single-ended heuristic gate; the
+            # SE heuristics are deliberately not appended.
+            specs = [
+                *derive_single_ended_impedance_specs(self.net_class_map),
+                *derive_diff_impedance_specs(self.net_class_map),
+                *default_diff_impedance_specs(),
+            ]
+            rule = ImpedanceRule(specs=specs, detected_pairs=detected_pairs)
+        results = self._absolutize(rule.check(self.pcb, self.design_rules))
+        # Post-run signal for coverage: pairs that matched a differential
+        # spec but had no judged segment (Issue #7293).
+        self.impedance_unmeasured_pairs = list(rule.unmeasured_pairs)
+        return results
+
+    def _impedance_detected_pairs(self) -> list:
+        """Differential pairs for the impedance rule (Issue #7293).
+
+        Declared ``diffpair_partner`` entries win; otherwise the layered
+        detector falls back to net-name suffix inference.
+        """
+        from kicad_tools.router.diffpair_detection import (
+            build_synth_routing,
+            detect_diff_pairs,
+        )
+
+        net_names = {num: net.name for num, net in self.pcb.nets.items() if net.name}
+        if not net_names:
+            return []
+        synth_routing, net_to_class = build_synth_routing(self.net_class_map or {})
+        detected = detect_diff_pairs(
+            net_names,
+            net_class_routing=synth_routing,
+            net_to_class=net_to_class,
+            kicad_groups=getattr(self.pcb, "kicad_diff_pair_groups", None),
+        )
+        return [d.pair for d in detected]
 
     def check_match_group_length_skew(self) -> DRCResults:
         """Check routed-length skew for declared N-trace match groups.

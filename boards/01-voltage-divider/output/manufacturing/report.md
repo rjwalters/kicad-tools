@@ -38,15 +38,6 @@ Simple 2-resistor voltage divider
 
 **Power Rails**: GND, VIN
 
-## Hand-Solder (THT) Components
-
-The following 2 through-hole components are **excluded from the SMT pick-and-place file** and must be hand-soldered (or wave/selective-soldered) after SMT assembly. They appear in the BOM for sourcing.
-
-| Value | Package | Qty | References |
-|-------|---------|-----|------------|
-| IN | PinHeader_1x02_P2.54mm_Vertical | 1 | J1 |
-| OUT | PinHeader_1x02_P2.54mm_Vertical | 1 | J2 |
-
 ## ERC Status
 
 | Metric | Count |
@@ -109,26 +100,35 @@ The following 2 through-hole components are **excluded from the SMT pick-and-pla
 
 \newpage
 
-## DRC Status
+## DRC Status (`--mfr jlcpcb` rules)
 
 | Metric | Count |
 |--------|-------|
 | Errors | 0 |
-| Warnings | 0 |
+| Errors: kct (`--mfr jlcpcb` rules) | 0 |
+| Errors: kicad-cli (geometric) | 0 |
+| Warnings | 1 |
 | Blocking | 0 |
 
 **Status**: PASS
+
+### Violations by Type
+
+| Violation Type | Count |
+|----------------|-------|
+| thermal_asymmetry | 1 |
 
 
 \newpage
 
 ## Manufacturing Readiness
 
-**Verdict**: READY
+**Verdict**: WARNING
 
 ### Action Items
 
 - **[OPTIONAL]** Refill zones to verify 1 zone-connected nets, then re-run kct audit
+- **[OPTIONAL]** Review 1 DRC warnings
 
 
 \newpage

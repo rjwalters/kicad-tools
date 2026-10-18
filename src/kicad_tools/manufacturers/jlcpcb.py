@@ -35,10 +35,8 @@ _ROTATION_CORRECTIONS = load_rotation_corrections("jlcpcb")
 #   Minimum BGA spacing      0.5 mm (c-c)             0.3 mm (c-c)
 #   Build time               1 - 3 days               >= 4 days
 #
-# TODO(#7204): the same page lists *both* tiers as "(SMT/Thru-hole)", which
-# contradicts ``PreflightChecker._SMT_ONLY_MANUFACTURERS = {"jlcpcb"}`` (THT
-# auto-excluded from the CPL).  Changing that policy changes CPL contents
-# fleet-wide and is an operator decision -- deliberately left unchanged here.
+# The same page lists *both* tiers as "(SMT/Thru-hole)"; kct therefore includes
+# THT parts in the JLCPCB CPL/BOM (operator decision, issue #7239).
 _STANDARD_PACKAGES = [
     "01005",
     "0201",

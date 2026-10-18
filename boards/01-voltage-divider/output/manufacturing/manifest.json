@@ -6,15 +6,15 @@
   },
   "files": {
     "README.txt": {
-      "sha256": "d90ef3973eb7ac182b324ad2f2bc0b71de629d960614260a458c54da0cfafd8c",
-      "size": 1208
+      "sha256": "5c5197e1a621c0884a9e3d9411b576ba4d665e748e6a09828df3cfc332ea27cc",
+      "size": 1244
     },
     "assembly-back.pdf": {
-      "sha256": "e5853df7a19a3d6f023e266d8ac5ec1b2515bb7e9f56664cf79e612ae5ca7d0f",
+      "sha256": "6a885f8ad2c2321246892e58ed97bd54d64495755bfe630963efa5a91f7caba7",
       "size": 7123
     },
     "assembly-front.pdf": {
-      "sha256": "41b8a74839194e77855e0f6aebfed2b0e04075d80d1724cda21f98f60f94c748",
+      "sha256": "becf49d14b3400a86ca8bc1c477d8c5e52fb0d0495f3fbb6df836619f87c4562",
       "size": 11088
     },
     "bom_jlcpcb.csv": {
@@ -22,16 +22,16 @@
       "size": 240
     },
     "check-report.json": {
-      "sha256": "b6a7e20d939dba0f5b973ced9f8cbb795d2d920edf1872377480164879655c04",
-      "size": 8628
+      "sha256": "f430f83ebbda39578f193a632e1da0949b3c9ee50c98760404577b1f2ba61e77",
+      "size": 9574
     },
     "cpl_jlcpcb.csv": {
-      "sha256": "1cf0ddf9759ff7227f38750d0c80a7a2e6c2c0ea3a6aee4e2ee565f841165bf4",
-      "size": 186
+      "sha256": "847457252c291c9086804931f5016de06f78dc1aa1020d4a0068bc98ddd89c36",
+      "size": 377
     },
     "gerbers/gerbers.zip": {
-      "sha256": "bd43121e3fae82274e6c6720fcabb925692ddccd29ee6e8112d746feeb41b7ab",
-      "size": 11611
+      "sha256": "19ca94138010e90f90e57cecfa931da81ddd966cd66a58e52d7a3b8521410ea1",
+      "size": 12869
     },
     "images/assembly.png": {
       "sha256": "1cadbdcde2169e08438f00dc4faeddd06cc7f1d39447fa15710e93afda7308ea",
@@ -70,26 +70,46 @@
       "size": 252
     },
     "procurement-review.md": {
-      "sha256": "73773d18a402ca09d0f30334d5784f31fa19bdb3496ce389988b80cd11a8a7e9",
-      "size": 11041
+      "sha256": "7bf87f6f618aed07a81f2e01bb00cb72a6c32c853ce2f1f3f8bee5ed1e848ebd",
+      "size": 12003
     },
     "report.md": {
-      "sha256": "5f482f50216a699ed6b9e84e8bac39470794257a97d34c3b5c855ed42ade0ad7",
-      "size": 2810
+      "sha256": "a42e8e96443d8685a6ad4d9d869d766d5d0ff5029a073c12d15849b1bceb7048",
+      "size": 2644
     },
     "report.pdf": {
-      "sha256": "53a86b8eb389401740e112d9a21ee8e40eeabfb7ff742d1935da7d34d798b732",
-      "size": 749772
+      "sha256": "4322af8543c069826e9bc1096e7aae6b9f9d3eb3efc75fb853b36e1bd235db99",
+      "size": 753389
     },
     "schematic.pdf": {
-      "sha256": "d85d2f226362c324702d307941dc57a9ac1ea54fd75a4ef64924d3a687ec4978",
+      "sha256": "e8ce4135215aa0b8762be908c911d774e101ade06e08c7127d32c2872282be68",
       "size": 47876
     }
   },
-  "generated_at": "2026-10-18T11:41:07.299590+00:00",
+  "generated_at": "2026-10-18T16:12:29.798463+00:00",
   "kicad_tools_version": "0.23.0",
   "manufacturer": "jlcpcb",
   "mode": "assembly",
+  "ordered_copper": {
+    "layers": 2,
+    "ordered_inner_oz": 0.0,
+    "ordered_outer_oz": 1.0,
+    "profile_options": [
+      [
+        1.0,
+        0.0
+      ],
+      [
+        2.0,
+        0.0
+      ]
+    ],
+    "source": "https://jlcpcb.com/help/article/jlcpcb-copper-weight",
+    "source_verified": "2026-10-18",
+    "stackup_inner_oz": null,
+    "stackup_outer_oz": null,
+    "status": "undeclared"
+  },
   "preflight": [
     {
       "details": "Footprints: 4",
@@ -128,9 +148,25 @@
       "status": "OK"
     },
     {
+      "message": "No usable stackup copper to reconcile; profile default copper applies",
+      "name": "stackup_copper",
+      "status": "OK"
+    },
+    {
       "details": "THT references: J1, J2",
-      "message": "2 through-hole component(s) excluded from CPL",
+      "message": "2 through-hole component(s) included in CPL",
       "name": "tht_in_cpl",
+      "status": "OK"
+    },
+    {
+      "message": "No bottom-side components in CPL (single-sided assembly)",
+      "name": "bottom_side_in_cpl",
+      "status": "OK"
+    },
+    {
+      "details": "2 package/pitch requirement(s) checked",
+      "message": "All placed packages fit JLCPCB Economic PCBA (min package 0402, IC pitch 0.4 mm, BGA pitch 0.5 mm)",
+      "name": "assembly_package_limits",
       "status": "OK"
     },
     {
@@ -150,7 +186,7 @@
       "status": "OK"
     },
     {
-      "message": "BOM and CPL references match (2 components, 2 THT excluded)",
+      "message": "BOM and CPL references match (4 components)",
       "name": "bom_cpl_match",
       "status": "OK"
     },
@@ -169,5 +205,7 @@
   ],
   "producer": "kct readiness",
   "version": "1.0",
-  "warning_counts_by_rule": {}
+  "warning_counts_by_rule": {
+    "thermal_asymmetry": 1
+  }
 }
