@@ -293,3 +293,52 @@ class TestRouteFillWiring:
             f"expected >= 5 occurrences of _fill_zones_after_route( "
             f"(1 def + 4 callers), found {call_count}"
         )
+
+
+class TestNativeZoneClearanceFlag:
+    """Issue #7026: ``--native-zone-clearance`` writes the DRU block pre-fill."""
+
+    def _run(self, pcb, args):
+        from types import SimpleNamespace
+
+        from kicad_tools.cli.route_cmd import _fill_zones_after_route
+        from kicad_tools.cli.runner import KiCadCLIResult, NetFormatReport
+
+        seen: dict = {}
+
+        def fake_fill(path, **kwargs):
+            dru = path.with_suffix(".kicad_dru")
+            seen["dru"] = dru.read_text() if dru.exists() else None
+            return KiCadCLIResult(success=True, return_code=0)
+
+        with (
+            patch(_FIND_CLI, return_value=Path("/usr/bin/kicad-cli")),
+            patch(_RUN_FILL, side_effect=fake_fill),
+            patch(_VALIDATE_NET, return_value=NetFormatReport(valid=True)),
+        ):
+            _fill_zones_after_route(pcb, quiet=True, args=SimpleNamespace(**args))
+        return seen["dru"]
+
+    @staticmethod
+    def _project(pcb):
+        import json
+
+        pcb.with_suffix(".kicad_pro").write_text(
+            json.dumps({"net_settings": {"classes": [{"name": "Default", "clearance": 0.2}]}})
+        )
+
+    def test_block_present_at_fill_time_when_flag_set(self, pcb_with_zone):
+        self._project(pcb_with_zone)
+        dru = self._run(pcb_with_zone, {"native_zone_clearance": True})
+        assert dru is not None
+        assert "# BEGIN kct native zone clearance" in dru
+
+    def test_no_block_and_no_sidecar_without_flag(self, pcb_with_zone):
+        self._project(pcb_with_zone)
+        assert self._run(pcb_with_zone, {}) is None
+        assert not pcb_with_zone.with_suffix(".kicad_dru").exists()
+
+    def test_refusal_fails_the_route_loudly(self, pcb_with_zone):
+        # No saved project: write_native_zone_clearance_rules refuses.
+        with pytest.raises(ValueError):
+            self._run(pcb_with_zone, {"native_zone_clearance": True})

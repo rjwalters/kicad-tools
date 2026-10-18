@@ -6693,6 +6693,17 @@ def _fill_zones_after_route(
             pair_gaps=_router_pair_gaps(coupled_pairs, class_map, router),
         )
 
+    # Issue #7026: a recipe that fills under ``native_clearance=True`` ships a
+    # ``clearance + min_thickness / 2`` carve the router cannot otherwise see,
+    # so pour-link closure was proven under a narrower carve than the one
+    # shipped.  Write the same block here so the fill, the oracle's
+    # ``--refill-zones`` DRC and the closer's refill all read it.  A refusal
+    # (e.g. a stronger existing clearance contract) fails the route loudly.
+    if getattr(args, "native_zone_clearance", False):
+        from kicad_tools.zones.native_clearance import write_native_zone_clearance_rules
+
+        write_native_zone_clearance_rules(output_path)
+
     _fill_started = time.monotonic()
     # Issue #6273: on a --timeout run the fill (and its starved-thermal
     # remediation passes) never starts kicad-cli work the hard deadline
@@ -19425,6 +19436,18 @@ def _route_parser() -> argparse.ArgumentParser:
             "board's project.kct target_fab (next to the input board, or one "
             "directory up), else jlcpcb -- the same resolution `kct check` "
             "uses (Issue #6155). An explicit flag always wins."
+        ),
+    )
+    parser.add_argument(
+        "--native-zone-clearance",
+        action="store_true",
+        default=False,
+        help=(
+            "Write the native zone-clearance DRU block (zone clearance + "
+            "min_thickness / 2, as run_fill_zones(native_clearance=True) does) "
+            "before the post-route zone fill, so the fill and the pour-link "
+            "oracle judge the carve the board ships with (Issue #7026). "
+            "Fails the route if the block cannot be written."
         ),
     )
     parser.add_argument(

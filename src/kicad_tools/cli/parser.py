@@ -4624,6 +4624,17 @@ def _add_route_parser(subparsers) -> None:
         ),
     )
     route_parser.add_argument(
+        "--native-zone-clearance",
+        action="store_true",
+        default=False,
+        help=(
+            "Write the native zone-clearance DRU block before the post-route "
+            "zone fill, so the fill and pour-link oracle judge the carve a "
+            "recipe using run_fill_zones(native_clearance=True) ships "
+            "(Issue #7026)"
+        ),
+    )
+    route_parser.add_argument(
         "--copper",
         default=None,
         metavar="OZ",

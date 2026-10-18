@@ -1242,6 +1242,8 @@ def run_route_command(args) -> int:
         sub_argv.extend(["--min-clearance-floor", str(args.min_clearance_floor)])
     if getattr(args, "manufacturer", "jlcpcb") != "jlcpcb" or _explicit_manufacturer:
         sub_argv.extend(["--manufacturer", args.manufacturer])
+    if getattr(args, "native_zone_clearance", False):
+        sub_argv.append("--native-zone-clearance")
     # Issue #4700: the copper weight selects the manufacturer design-rule row
     # (``<layers>layer_<oz>oz``) the trace-width floor is resolved from, so it
     # must reach the inner command verbatim.

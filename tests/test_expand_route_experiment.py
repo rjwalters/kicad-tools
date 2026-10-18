@@ -485,9 +485,12 @@ def test_board_03_routes_and_grades_under_the_recipes_tier1_sidecars():
     board = ere.BOARDS["03"]
     assert board.manufacturer == "jlcpcb-tier1"
     assert board.kct_args[:2] == ("--manufacturer", "jlcpcb-tier1")
+    # The tier alone changes nothing; the native block is what the oracle needs.
+    assert "--native-zone-clearance" in board.kct_args
     # Other in-tree rows keep the default manufacturer.
     for key in ("00", "01", "02"):
         assert ere.BOARDS[key].manufacturer == "jlcpcb"
+        assert "--native-zone-clearance" not in ere.BOARDS[key].kct_args
 
 
 def test_fleet_boards_scale_without_error():
