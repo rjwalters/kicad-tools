@@ -902,3 +902,122 @@ class TestAudioLayoutRules:
         assert result["length_diff_mm"] == pytest.approx(10.0)
         assert result["shorter_path"] == "dest1"
         assert result["serpentine_needed"] is True
+
+
+# =============================================================================
+# Block rotation follows KiCad's footprint rotation (Issue #7046)
+# =============================================================================
+
+
+def _kicad_pad_world(placed: dict, local: Point) -> tuple[float, float]:
+    """Pad world position the way KiCad draws it for an exported footprint.
+
+    Uses only the exported footprint position/angle and the canonical
+    ``core.geometry.rotate_pad_offset`` -- not the block's own transform.
+    """
+    from kicad_tools.core.geometry import rotate_pad_offset
+
+    dx, dy = rotate_pad_offset(local.x, local.y, placed["rotation"])
+    return placed["x"] + dx, placed["y"] + dy
+
+
+_BLOCK_FACTORIES = {
+    "LEDBlock": lambda: LEDBlock(led_ref="D1", res_ref="R1"),
+    "LDOBlock": lambda: LDOBlock(ldo_ref="U1", input_cap="C1", output_caps=["C2", "C3"]),
+    "MCUBlock": lambda: MCUBlock(mcu_ref="U1", bypass_caps=["C1", "C2"]),
+    "OscillatorBlock": lambda: OscillatorBlock(osc_ref="Y1", cap_ref="C1"),
+}
+
+
+@pytest.mark.parametrize("rotation", [0, 90, 180, 270])
+@pytest.mark.parametrize("kind", sorted(_BLOCK_FACTORIES))
+def test_block_traces_end_on_kicad_pads(kind, rotation):
+    block = _BLOCK_FACTORIES[kind]()
+    block.place(12.5, -7.0, rotation=rotation)
+    placed = {c["ref"]: c for c in block.get_placed_components()}
+
+    # Every pad, in block-relative coordinates (what the block's traces use)
+    # and in KiCad board coordinates (what the exported footprint draws).
+    pads = []
+    for ref, comp in block.components.items():
+        for name, local in comp.pads.items():
+            pads.append((comp.pad_position(name), _kicad_pad_world(placed[ref], local)))
+
+    matched = 0
+    for rel_trace, board_trace in zip(block.traces, block.get_placed_traces(), strict=True):
+        for rel_end, board_end in (
+            (rel_trace.start, board_trace["start"]),
+            (rel_trace.end, board_trace["end"]),
+        ):
+            for rel_pad, kicad_pad in pads:
+                if abs(rel_end.x - rel_pad.x) < 1e-9 and abs(rel_end.y - rel_pad.y) < 1e-9:
+                    assert board_end == pytest.approx(kicad_pad, abs=1e-6), (kind, rotation)
+                    matched += 1
+    assert matched > 0, f"{kind} has no pad-ended internal traces"
+
+    # pad_position(block_origin, block_rotation) agrees with the footprint too.
+    for ref, comp in block.components.items():
+        for name, local in comp.pads.items():
+            got = comp.pad_position(name, block.origin, block.rotation)
+            assert got.tuple() == pytest.approx(_kicad_pad_world(placed[ref], local), abs=1e-6)
+
+    # Ports and trace ends at ports go through the same transform.
+    for name, port in block.ports.items():
+        board = block.port(name)
+        for rel_trace, board_trace in zip(block.traces, block.get_placed_traces(), strict=True):
+            for rel_end, board_end in (
+                (rel_trace.start, board_trace["start"]),
+                (rel_trace.end, board_trace["end"]),
+            ):
+                if rel_end == port.position:
+                    assert board_end == pytest.approx(board.tuple(), abs=1e-9)
+
+
+@pytest.mark.parametrize(
+    "rotation, trace_end, r1_pad1, r1_pos",
+    [
+        (0, (2.2, 0.0), (2.2, 0.0), (3.0, 0.0)),
+        (90, (0.0, -2.2), (0.0, -2.2), (0.0, -3.0)),
+        (180, (-2.2, 0.0), (-2.2, 0.0), (-3.0, 0.0)),
+        (270, (0.0, 2.2), (0.0, 2.2), (0.0, 3.0)),
+    ],
+)
+def test_led_block_rotation_regression(rotation, trace_end, r1_pad1, r1_pos):
+    """The issue #7046 table: at 90/270 the LED_MID trace missed R1.1 by 1.6 mm."""
+    block = LEDBlock(led_ref="D1", res_ref="R1")
+    block.place(0, 0, rotation=rotation)
+    (trace,) = [t for t in block.get_placed_traces() if t["net"] == "LED_MID"]
+    placed = {c["ref"]: c for c in block.get_placed_components()}
+    r1_local = block.components["R1"].pads["1"]
+
+    assert trace["end"] == pytest.approx(trace_end, abs=1e-9)
+    assert _kicad_pad_world(placed["R1"], r1_local) == pytest.approx(r1_pad1, abs=1e-9)
+    assert block.component_position("R1").tuple() == pytest.approx(r1_pos, abs=1e-9)
+
+
+@pytest.mark.parametrize("rotation", [90, 270])
+def test_block_via_transform_matches_kicad(rotation):
+    """A block via placed on a pad stays on that pad at 90/270 (export_vias)."""
+    block = PCBBlock("B1")
+    comp = block.add_component("U1", "Test:FP", 2, 1, rotation=90, pads={"1": (1.5, 0.5)})
+    rel_pad = comp.pad_position("1")
+    block.add_via(rel_pad.x, rel_pad.y, net="GND")
+    block.place(20, 10, rotation=rotation)
+    layout = PCBLayout("vias")
+    layout.add_block(block)
+
+    (via,) = layout.export_vias()
+    (placed,) = block.get_placed_components()
+    assert (via["x"], via["y"]) == pytest.approx(
+        _kicad_pad_world(placed, Point(1.5, 0.5)), abs=1e-6
+    )
+
+
+def test_pad_position_block_rotation_90():
+    """``pad_position(..., block_rotation=90)`` uses KiCad's sign, like the component step."""
+    comp = ComponentPlacement(
+        ref="R1", footprint="Test", position=Point(3, 0), pads={"1": Point(-0.8, 0)}
+    )
+    # Block-relative pad (2.2, 0); a KiCad +90 rotation maps (x, y) -> (y, -x).
+    got = comp.pad_position("1", block_origin=Point(10, 10), block_rotation=90)
+    assert got.tuple() == pytest.approx((10.0, 7.8), abs=1e-9)

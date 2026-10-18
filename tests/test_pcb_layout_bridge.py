@@ -14,8 +14,8 @@ port-to-port lines still short foreign pads (#7062, #7064), so the happy path
 uses a hand-routed LDO block and explicit inter-block segments; the stock
 layout is kept as the fixture the copper check must *reject*.
 
-Blocks sit at rotations 0 and 180 only: 90/270 use the opposite sign to KiCad's
-footprint rotation (#7046), which this bridge deliberately does not correct.
+The main layout places blocks at 0 and 180 degrees; the 90/270 cases at the
+end check that block traces and vias land on the pads KiCad draws (#7046).
 """
 
 from __future__ import annotations
@@ -304,6 +304,56 @@ def test_traces_and_vias_switches(source, origin, tmp_path):
     assert report.moved and report.segments_added == 0 and report.vias_added == 0
     pcb = PCB.load(str(out))
     assert pcb.segments == [] and pcb.vias == []
+
+
+# ---------------------------------------------------------------------------
+# Blocks at 90/270 degrees: copper lands on the real pads (#7046)
+# ---------------------------------------------------------------------------
+
+# KiCad 10 R_0603_1608Metric (tests/fixtures/KiCad10_Library.pretty): pads at x = -/+0.825.
+_R0603_PADS = {"1": (-0.825, 0.0), "2": (0.825, 0.0)}
+
+
+def _rotated_layout(origin: tuple[float, float], rotation: float) -> PCBLayout:
+    """A two-resistor block with the library's real pad offsets, at ``rotation``.
+
+    R1 is itself rotated 90 degrees inside the block, so the board pad is the
+    composition of the block and the footprint rotations.  R1 sits on D1's
+    -x side, next to D1.1, so the D1.1 -> R1.1 trace crosses no foreign pad
+    (D1.2 is on the far side) and the strict copper check passes.
+    """
+    ox, oy = origin
+    block = PCBBlock("pair", block_id="PAIR")
+    d1 = block.add_component("D1", "R_0603_1608Metric", 0, 0, pads=_R0603_PADS)
+    r1 = block.add_component("R1", "R_0603_1608Metric", -3, 0, rotation=90, pads=_R0603_PADS)
+    block.add_trace(d1.pad_position("1"), r1.pad_position("1"), net="LED_MID")
+    gnd = r1.pad_position("2")
+    block.add_via(gnd.x, gnd.y, net="GND")
+    block.place(ox + 15, oy + 12, rotation=rotation)
+    layout = PCBLayout("rotated")
+    layout.add_block(block, name="pair")
+    return layout
+
+
+@pytest.mark.parametrize("rotation", [90, 270])
+def test_rotated_block_copper_lands_on_kicad_pads(tmp_path, rotation):
+    source = _build_board(
+        tmp_path / "source.kicad_pcb",
+        {"D1": "R_0603_1608Metric", "R1": "R_0603_1608Metric"},
+        [("D1", "1", "Net-(D1-K)"), ("R1", "1", "Net-(D1-K)"), ("R1", "2", "GND")],
+    )
+    origin = PCB.load(str(source)).board_origin
+    out = tmp_path / "output.kicad_pcb"
+    report = _rotated_layout(origin, rotation).apply_to_pcb(source, out, net_map=NET_MAP)
+    assert report.segments_added == 1 and report.vias_added == 1
+
+    # PCB.get_pad_position is the board model's own footprint pad transform.
+    pcb = PCB.load(str(out))
+    (seg,) = pcb.segments
+    (via,) = pcb.vias
+    assert seg.start == pytest.approx(pcb.get_pad_position("D1", "1"), abs=1e-4)
+    assert seg.end == pytest.approx(pcb.get_pad_position("R1", "1"), abs=1e-4)
+    assert via.position == pytest.approx(pcb.get_pad_position("R1", "2"), abs=1e-4)
 
 
 # ---------------------------------------------------------------------------
