@@ -3384,31 +3384,47 @@ def _add_lib_parser(subparsers) -> None:
 
     # lib create-symbol-lib
     lib_create_sym = lib_subparsers.add_parser(
-        "create-symbol-lib", help="Create new symbol library (not yet implemented)"
+        "create-symbol-lib", help="Create a new empty symbol library (.kicad_sym)"
     )
     lib_create_sym.add_argument("path", help="Path for new .kicad_sym file")
+    lib_create_sym.add_argument("--force", action="store_true", help="Overwrite an existing file")
     add_format_flag(lib_create_sym)
 
     # lib create-footprint-lib
     lib_create_fp = lib_subparsers.add_parser(
-        "create-footprint-lib", help="Create new footprint library (not yet implemented)"
+        "create-footprint-lib", help="Create a new empty footprint library (.pretty directory)"
     )
     lib_create_fp.add_argument("path", help="Path for new .pretty directory")
+    lib_create_fp.add_argument(
+        "--force",
+        action="store_true",
+        help="Reuse a non-empty directory that already holds .kicad_mod files (never deletes)",
+    )
     add_format_flag(lib_create_fp)
 
     # lib generate-footprint
     lib_generate = lib_subparsers.add_parser(
-        "generate-footprint", help="Generate parametric footprint (not yet implemented)"
+        "generate-footprint",
+        help="Generate a parametric footprint into a .pretty library "
+        "(same generators as 'kct footprint generate')",
     )
-    lib_generate.add_argument("library", help="Target library path")
+    lib_generate.add_argument("library", help="Target .pretty directory (created if missing)")
     lib_generate.add_argument(
-        "type", choices=["soic", "qfp", "qfn", "dfn", "chip", "sot"], help="Footprint type"
+        "type", choices=["soic", "qfp", "qfn", "chip", "sot"], help="Footprint type"
     )
-    lib_generate.add_argument("--pins", type=int, help="Number of pins")
+    lib_generate.add_argument("--pins", type=int, help="Number of pins (soic/qfp/qfn)")
     lib_generate.add_argument("--pitch", type=float, help="Pin pitch in mm")
-    lib_generate.add_argument("--body-width", type=float, help="Body width in mm")
-    lib_generate.add_argument("--body-size", type=float, help="Body size (square) in mm")
-    lib_generate.add_argument("--prefix", help="Footprint name prefix")
+    lib_generate.add_argument("--body-width", type=float, help="Body width in mm (soic)")
+    lib_generate.add_argument("--body-length", type=float, help="Body length in mm (soic)")
+    lib_generate.add_argument("--body-size", type=float, help="Body size (square) in mm (qfp/qfn)")
+    lib_generate.add_argument("--exposed-pad", type=float, help="Exposed pad size in mm (qfn)")
+    lib_generate.add_argument("--size", help="Imperial size code, e.g. 0402 (chip)")
+    lib_generate.add_argument("--variant", help="Package variant, e.g. SOT-23 (sot)")
+    lib_generate.add_argument("--prefix", help="Component prefix, e.g. R (chip)")
+    lib_generate.add_argument("--name", help="Custom footprint name")
+    lib_generate.add_argument(
+        "--force", action="store_true", help="Overwrite an existing footprint of the same name"
+    )
     add_format_flag(lib_generate)
 
     # lib export
