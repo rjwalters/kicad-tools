@@ -375,11 +375,41 @@ one status line, also in `summary`, `--mfr` and `kicad-drc-summary` output:
 Exit codes: error-severity parity findings exit 1; warning-severity ones exit
 2 under `--strict`; NOT RUN exits 2 (the verdict reads `DRC INCOMPLETE`, never
 `DRC PASSED`) unless `--allow-incomplete` is given. Errors take precedence.
-`--mfr` keeps its manufacturer-compatibility exit code. `--format json` adds a
+`--mfr` uses the same exit gate (#7170, see below). `--format json` adds a
 `schematic_parity` object (`status`, `checked`, `reason`, `error_count`,
 `warning_count`, `issues`), a derived `schematic_parity_checked` alias, and
 `parity_errors`/`parity_warnings` in `summary`. Waiver entries match parity
 findings the same way they match DRC findings.
+
+**Manufacturer check (`--mfr`, #7170)**
+
+`--mfr <fab>` gives every kicad-cli violation exactly one verdict:
+
+- **compatible** — the fab's limit is met (e.g. a board rule stricter than the
+  fab's); the kicad-cli finding is cleared.
+- **incompatible** — the measured value breaches the fab's limit
+  (`clearance`, `track_width`, `copper_edge_clearance`, `annular_width`,
+  `via_diameter`, `hole_to_hole`, `drill_out_of_range` min *and* max,
+  `solder_mask_bridge`; `shorting_items` always fails). Blocking whatever
+  kicad-cli's severity was.
+- **not checked** — kct has no fab-limit check for the type (`hole_clearance`,
+  `via_dangling`, `courtyards_overlap`, `silk_*`, …). Listed in a
+  `NOT CHECKED against <fab> limits: N (errors E, warnings W)` section with a
+  per-type breakdown; kicad-cli's severity stands.
+
+The summary line reads `Compatible: a, Incompatible: b, Not checked: c`
+(`a + b + c` = every violation). Exit codes are the plain-mode ones: 1 when any
+incompatible or not-checked error (or parity error) remains; 2 for warnings
+under `--strict`, or when schematic parity did NOT RUN without
+`--allow-incomplete` (so `kct drc report.json --mfr X` exits 2 unless
+`--allow-incomplete`, like plain `kct drc report.json`); else 0.
+`--mfr --format json` prints `{manufacturer, layers, source, summary: {total,
+checked, compatible, incompatible, not_checked, not_checked_errors,
+not_checked_warnings, not_checked_by_type, parity_errors, parity_warnings},
+checks: [{type_str, severity, result, rule_name, message, violation_message,
+manufacturer_limit, actual_value}], schematic_parity, schematic_parity_checked,
+exit_code}`; `checked + not_checked == total`. Other `--format` values print
+the table.
 
 **Waivers (`--waivers`, #4691)**
 
@@ -423,7 +453,8 @@ The `kicad-cli pcb drc` cross-gate reads the same schema-v2 sidecar as
 **Examples:**
 ```bash
 kct drc board.drc
-kct drc board.kicad_pcb --mfr jlcpcb
+kct drc board.kicad_pcb --mfr jlcpcb              # exit 1 on any fab breach or not-checked error
+kct drc board-drc.json --mfr jlcpcb --format json --allow-incomplete
 kct drc board-drc.json --waivers .kct_waivers.json --allow-incomplete   # 0 unwaived errors gate
 kct mfr compare  # Show all manufacturer rules side by side
 ```
@@ -874,8 +905,12 @@ kct lib <subcommand> [options]
 | `list` | List available KiCad libraries |
 | `symbols` | List symbols in a `.kicad_sym` library |
 | `footprints` | List footprints in a `.pretty` library directory |
+| `footprint` | Show details of a footprint file (`.kicad_mod`) |
 | `symbol-info` | Show details of a symbol by name |
 | `footprint-info` | Show details of a footprint by name |
+| `create-symbol-lib` | Create a new empty `.kicad_sym` library |
+| `create-footprint-lib` | Create a new empty `.pretty` library directory |
+| `generate-footprint` | Generate a parametric footprint into a `.pretty` library |
 | `export` | Export library to JSON |
 | `purge` | List unused symbols/footprints in project-local libraries |
 
@@ -883,7 +918,25 @@ kct lib <subcommand> [options]
 ```bash
 kct lib symbols Device.kicad_sym
 kct lib symbol-info Device.kicad_sym R
+
+kct lib create-symbol-lib MyParts.kicad_sym
+kct lib create-footprint-lib MyParts.pretty
+kct lib generate-footprint MyParts.pretty soic --pins 8
+kct lib generate-footprint MyParts.pretty chip --size 0402 --prefix R --format json
 ```
+
+**Authoring commands** (`create-symbol-lib`, `create-footprint-lib`,
+`generate-footprint`) all accept `--format text|json` (JSON: one document with
+`command`, `implemented`, `success` plus `path` and either `symbol_count`,
+`footprint_count`, or `name`/`pad_count`/`parameters`). Exit codes: `0`
+success, `1` runtime/validation failure (target exists without `--force`,
+unwritable path, missing/invalid parameters), `2` usage error.
+
+| Subcommand | Behaviour |
+|------------|-----------|
+| `create-symbol-lib <path> [--force]` | Appends `.kicad_sym` if no suffix; refuses an existing file without `--force`. |
+| `create-footprint-lib <path> [--force]` | Appends `.pretty`; an empty existing directory is fine; a non-empty one is refused. `--force` only permits reusing a directory that already holds `.kicad_mod` files and never deletes anything. |
+| `generate-footprint <lib> <type> [options] [--name N] [--force]` | `type` is `soic`, `qfp`, `qfn`, `chip` or `sot`; creates the `.pretty` directory if missing and writes `<lib>/<name>.kicad_mod`. Options: `--pins`, `--pitch`, `--body-width`, `--body-length`, `--body-size`, `--exposed-pad`, `--size`, `--variant`, `--prefix`. Uses the same generator function as `kct footprint generate`. Refuses to overwrite a footprint of the same name without `--force`. |
 
 ---
 
@@ -2079,6 +2132,7 @@ kct estimate cost <pcb_file> [options]
 | `--format {table,json}` | Output format |
 | `--mfr {jlcpcb,pcbway,oshpark,seeed}` | Manufacturer |
 | `--quantity N` | Board quantity |
+| `--bom FILE` | Component BOM: a `.csv` (columns such as `Reference`/`Designator`, `Value`/`Comment`, `Footprint`/`Package`, `LCSC`, `MPN`) or a `.kicad_sch` schematic. An unreadable or empty CSV exits 1; notices go to stderr so `--format json` stdout stays one document. |
 
 ---
 

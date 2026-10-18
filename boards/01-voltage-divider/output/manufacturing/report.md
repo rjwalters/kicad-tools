@@ -1,8 +1,8 @@
 ---
 title: "voltage_divider_routed"
 subtitle: "Design Report"
-author: "kicad-tools 0.22.0"
-date: "Rev 1 | 2026-10-14 | jlcpcb"
+author: "kicad-tools 0.23.0"
+date: "Rev 1 | 2026-10-18 | jlcpcb"
 geometry: "margin=1in"
 fontsize: 11pt
 colorlinks: true
@@ -128,7 +128,7 @@ The following 2 through-hole components are **excluded from the SMT pick-and-pla
 
 ### Action Items
 
-- **[OPTIONAL]** Verify zone fill in KiCad for 1 zone-connected nets
+- **[OPTIONAL]** Refill zones to verify 1 zone-connected nets, then re-run kct audit
 
 
 \newpage

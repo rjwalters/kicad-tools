@@ -6,6 +6,9 @@ and related MCP tools for context persistence.
 
 from __future__ import annotations
 
+import shutil
+from pathlib import Path
+
 import pytest
 
 pytest.importorskip("pydantic")
@@ -20,22 +23,43 @@ from kicad_tools.mcp.preference_learner import PreferenceLearner
 from kicad_tools.mcp.tools.context import (
     annotate_decision,
     create_checkpoint,
-    get_context_manager,
     get_decision_history,
     get_session_context,
     get_session_summary,
     record_decision,
-    reset_context_manager,
     restore_checkpoint,
 )
+from kicad_tools.mcp.tools.session import (
+    get_session_manager,
+    reset_session_manager,
+    start_session,
+)
+
+FIXTURE_PCB = Path(__file__).parent / "fixtures" / "projects" / "test_project.kicad_pcb"
 
 
 @pytest.fixture(autouse=True)
-def reset_context():
-    """Reset the context manager before each test."""
-    reset_context_manager()
+def reset_sessions():
+    """Reset the session manager before each test."""
+    reset_session_manager()
     yield
-    reset_context_manager()
+    reset_session_manager()
+
+
+@pytest.fixture
+def pcb_copy(tmp_path):
+    """A scratch copy of the fixture board."""
+    dest = tmp_path / "board.kicad_pcb"
+    shutil.copy(FIXTURE_PCB, dest)
+    return dest
+
+
+@pytest.fixture
+def sid(pcb_copy):
+    """A live session ID from start_session."""
+    result = start_session(str(pcb_copy))
+    assert result.success
+    return result.session_id
 
 
 class TestDecision:
@@ -362,13 +386,12 @@ class TestPreferenceLearner:
 class TestContextTools:
     """Tests for MCP context tools."""
 
-    def test_record_decision(self):
+    def test_record_decision(self, sid):
         """Test recording a decision."""
         # First create a context
-        get_context_manager().get_or_create("test_session", "/test.kicad_pcb")
 
         result = record_decision(
-            session_id="test_session",
+            session_id=sid,
             action="move",
             target="C1",
             rationale="Test decision",
@@ -378,33 +401,26 @@ class TestContextTools:
         assert result.success
         assert result.decision_id.startswith("dec_")
 
-    def test_record_decision_creates_context(self):
-        """Test that record_decision creates context if needed."""
-        result = record_decision(
-            session_id="new_session",
-            action="move",
-            target="C1",
-        )
+    def test_record_decision_unknown_session_rejected(self, sid):
+        """record_decision must not auto-create a context for unknown IDs."""
+        result = record_decision(session_id="nope", action="move", target="C1")
 
-        assert result.success
-        context = get_context_manager().get("new_session")
-        assert context is not None
-        assert len(context.decisions) == 1
+        assert not result.success
+        assert "Session not found: nope" in result.error_message
 
-    def test_get_decision_history(self):
+    def test_get_decision_history(self, sid):
         """Test getting decision history."""
-        get_context_manager().get_or_create("test_session", "/test.kicad_pcb")
 
         # Record some decisions
         for i in range(5):
             record_decision(
-                session_id="test_session",
+                session_id=sid,
                 action="move",
                 target=f"C{i}",
             )
 
         result = get_decision_history(
-            session_id="test_session",
+            session_id=sid,
             limit=3,
         )
 
@@ -412,43 +428,41 @@ class TestContextTools:
         assert len(result.decisions) == 3
         assert result.total == 5
 
-    def test_get_decision_history_with_filter(self):
+    def test_get_decision_history_with_filter(self, sid):
         """Test filtering decision history by action."""
-        get_context_manager().get_or_create("test_session", "/test.kicad_pcb")
 
-        record_decision(session_id="test_session", action="move", target="C1")
-        record_decision(session_id="test_session", action="route", target="VDD")
-        record_decision(session_id="test_session", action="move", target="C2")
+        record_decision(session_id=sid, action="move", target="C1")
+        record_decision(session_id=sid, action="route", target="VDD")
+        record_decision(session_id=sid, action="move", target="C2")
 
         result = get_decision_history(
-            session_id="test_session",
+            session_id=sid,
             filter_action="move",
         )
 
         assert result.success
         assert len(result.decisions) == 2
 
-    def test_get_decision_history_session_not_found(self):
+    def test_get_decision_history_session_not_found(self, sid):
         """Test getting history for non-existent session."""
         result = get_decision_history(session_id="nonexistent")
 
         assert not result.success
         assert "not found" in result.error_message.lower()
 
-    def test_annotate_decision(self):
+    def test_annotate_decision(self, sid):
         """Test annotating a decision."""
-        get_context_manager().get_or_create("test_session", "/test.kicad_pcb")
 
         # Record a decision
         record_result = record_decision(
-            session_id="test_session",
+            session_id=sid,
             action="move",
             target="C1",
         )
 
         # Annotate it
         result = annotate_decision(
-            session_id="test_session",
+            session_id=sid,
             decision_id=record_result.decision_id,
             feedback="This improved signal integrity",
             outcome="success",
@@ -457,17 +471,15 @@ class TestContextTools:
         assert result.success
 
         # Verify the annotation
-        context = get_context_manager().get("test_session")
-        decision = context.decisions[0]
+        decision = get_session_manager().get(sid).context.decisions[0]
         assert decision.feedback == "This improved signal integrity"
         assert decision.outcome == "success"
 
-    def test_annotate_decision_not_found(self):
+    def test_annotate_decision_not_found(self, sid):
         """Test annotating non-existent decision."""
-        get_context_manager().get_or_create("test_session", "/test.kicad_pcb")
 
         result = annotate_decision(
-            session_id="test_session",
+            session_id=sid,
             decision_id="nonexistent",
             feedback="test",
         )
@@ -475,18 +487,17 @@ class TestContextTools:
         assert not result.success
         assert "not found" in result.error_message.lower()
 
-    def test_annotate_decision_invalid_outcome(self):
+    def test_annotate_decision_invalid_outcome(self, sid):
         """Test annotating with invalid outcome."""
-        get_context_manager().get_or_create("test_session", "/test.kicad_pcb")
 
         record_result = record_decision(
-            session_id="test_session",
+            session_id=sid,
             action="move",
             target="C1",
         )
 
         result = annotate_decision(
-            session_id="test_session",
+            session_id=sid,
             decision_id=record_result.decision_id,
             feedback="test",
             outcome="invalid_outcome",
@@ -495,84 +506,76 @@ class TestContextTools:
         assert not result.success
         assert "invalid outcome" in result.error_message.lower()
 
-    def test_get_session_context_summary(self):
+    def test_get_session_context_summary(self, sid):
         """Test getting session context at summary level."""
-        get_context_manager().get_or_create("test_session", "/test.kicad_pcb")
 
-        record_decision(session_id="test_session", action="move", target="C1")
+        record_decision(session_id=sid, action="move", target="C1")
 
         result = get_session_context(
-            session_id="test_session",
+            session_id=sid,
             detail_level="summary",
         )
 
         assert result.success
-        assert result.context["session_id"] == "test_session"
+        assert result.context["session_id"] == sid
         assert result.context["decision_count"] == 1
 
-    def test_get_session_context_detailed(self):
+    def test_get_session_context_detailed(self, sid):
         """Test getting session context at detailed level."""
-        get_context_manager().get_or_create("test_session", "/test.kicad_pcb")
 
-        record_decision(session_id="test_session", action="move", target="C1")
+        record_decision(session_id=sid, action="move", target="C1")
 
         result = get_session_context(
-            session_id="test_session",
+            session_id=sid,
             detail_level="detailed",
         )
 
         assert result.success
         assert "recent_decisions" in result.context
 
-    def test_get_session_context_invalid_level(self):
+    def test_get_session_context_invalid_level(self, sid):
         """Test getting context with invalid detail level."""
-        get_context_manager().get_or_create("test_session", "/test.kicad_pcb")
 
         result = get_session_context(
-            session_id="test_session",
+            session_id=sid,
             detail_level="invalid",
         )
 
         assert not result.success
         assert "invalid" in result.error_message.lower()
 
-    def test_create_checkpoint(self):
+    def test_create_checkpoint(self, sid):
         """Test creating a checkpoint."""
-        get_context_manager().get_or_create("test_session", "/test.kicad_pcb")
 
         result = create_checkpoint(
-            session_id="test_session",
+            session_id=sid,
             name="before_routing",
-            drc_violation_count=5,
-            score=100.0,
         )
 
         assert result.success
         assert result.checkpoint_id.startswith("cp_")
         assert result.name == "before_routing"
 
-    def test_create_checkpoint_without_name(self):
+    def test_create_checkpoint_without_name(self, sid):
         """Test creating an unnamed checkpoint."""
-        get_context_manager().get_or_create("test_session", "/test.kicad_pcb")
 
-        result = create_checkpoint(session_id="test_session")
+        result = create_checkpoint(session_id=sid)
 
         assert result.success
         assert result.checkpoint_id.startswith("cp_")
 
-    def test_restore_checkpoint(self):
+    def test_restore_checkpoint(self, sid):
         """Test restoring a checkpoint."""
-        get_context_manager().get_or_create("test_session", "/test.kicad_pcb")
 
         # Create checkpoint
         create_result = create_checkpoint(
-            session_id="test_session",
+            session_id=sid,
             name="test_checkpoint",
         )
 
         # Restore checkpoint
         result = restore_checkpoint(
-            session_id="test_session",
+            session_id=sid,
             checkpoint_id=create_result.checkpoint_id,
         )
 
@@ -580,68 +583,31 @@ class TestContextTools:
         assert result.checkpoint_id == create_result.checkpoint_id
         assert result.name == "test_checkpoint"
 
-    def test_restore_checkpoint_not_found(self):
+    def test_restore_checkpoint_not_found(self, sid):
         """Test restoring non-existent checkpoint."""
-        get_context_manager().get_or_create("test_session", "/test.kicad_pcb")
 
         result = restore_checkpoint(
-            session_id="test_session",
+            session_id=sid,
             checkpoint_id="nonexistent",
         )
 
         assert not result.success
         assert "not found" in result.error_message.lower()
 
-    def test_get_session_summary(self):
+    def test_get_session_summary(self, sid):
         """Test getting token-efficient session summary."""
-        get_context_manager().get_or_create("test_session", "/test.kicad_pcb")
 
-        record_decision(session_id="test_session", action="move", target="C1")
+        record_decision(session_id=sid, action="move", target="C1")
 
-        result = get_session_summary(session_id="test_session")
+        result = get_session_summary(session_id=sid)
 
         assert result.success
-        assert "test_session" in result.summary
+        assert sid in result.summary
         assert result.token_estimate > 0
 
-    def test_get_session_summary_session_not_found(self):
+    def test_get_session_summary_session_not_found(self, sid):
         """Test getting summary for non-existent session."""
         result = get_session_summary(session_id="nonexistent")
 
         assert not result.success
         assert "not found" in result.error_message.lower()
-
-
-class TestContextManager:
-    """Tests for ContextManager."""
-
-    def test_get_or_create(self):
-        """Test get_or_create method."""
-        manager = get_context_manager()
-
-        context = manager.get_or_create("test", "/test.kicad_pcb")
-        assert context is not None
-        assert context.session_id == "test"
-
-        # Getting again should return same context
-        context2 = manager.get_or_create("test", "/other.kicad_pcb")
-        assert context2 is context
-
-    def test_close_session(self):
-        """Test closing a session."""
-        manager = get_context_manager()
-
-        manager.get_or_create("test", "/test.kicad_pcb")
-        assert manager.close("test")
-        assert manager.get("test") is None
-
-    def test_list_sessions(self):
-        """Test listing sessions."""
-        manager = get_context_manager()
-
-        manager.get_or_create("session1", "/test1.kicad_pcb")
-        manager.get_or_create("session2", "/test2.kicad_pcb")
-
-        sessions = manager.list_sessions()
-        assert "session1" in sessions
-        assert "session2" in sessions

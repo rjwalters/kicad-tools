@@ -29,6 +29,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
+from typing import Any
 
 from kicad_tools.cli.format_options import add_format_flag, normalize_format_alias
 from kicad_tools.library.generators import (
@@ -119,139 +120,142 @@ def list_generators(output_format: str = "text") -> int:
     return 0
 
 
-def generate_soic(args) -> int:
-    """Generate SOIC footprint."""
-    if args.pins is None:
-        print("Error: --pins is required for SOIC", file=sys.stderr)
-        return 1
+def build_footprint(footprint_type: str, params: dict[str, Any]):
+    """Build a :class:`~kicad_tools.library.footprint.Footprint` from CLI-style params.
 
-    try:
-        fp = create_soic(
-            pins=args.pins,
-            pitch=args.pitch,
-            body_width=args.body_width,
-            body_length=args.body_length,
-            name=args.name,
+    This is the single implementation behind both ``kct footprint generate``
+    and ``kct lib generate-footprint`` (Issue #7175).  *params* uses the
+    generator keyword names (``pins``, ``pitch``, ``body_width``, ...); keys
+    whose value is ``None`` fall back to the generator defaults.
+
+    Raises:
+        ValueError: unknown type, a required parameter is missing (the message
+            names the flag), or the generator rejects the values.
+    """
+    if footprint_type not in GENERATORS:
+        raise ValueError(
+            f"Unknown footprint type '{footprint_type}' (valid: {', '.join(GENERATORS)})"
         )
-        return _output_footprint(fp, args)
+
+    def p(key: str) -> Any:
+        return params.get(key)
+
+    def require(key: str, flag: str, label: str) -> None:
+        if p(key) is None:
+            raise ValueError(f"{flag} is required for {label}")
+
+    name = p("name")
+    if footprint_type == "soic":
+        require("pins", "--pins", "SOIC")
+        return create_soic(
+            pins=p("pins"),
+            pitch=p("pitch"),
+            body_width=p("body_width"),
+            body_length=p("body_length"),
+            name=name,
+        )
+    if footprint_type == "qfp":
+        require("pins", "--pins", "QFP")
+        return create_qfp(pins=p("pins"), pitch=p("pitch"), body_size=p("body_size"), name=name)
+    if footprint_type == "qfn":
+        require("pins", "--pins", "QFN")
+        return create_qfn(
+            pins=p("pins"),
+            pitch=p("pitch"),
+            body_size=p("body_size"),
+            exposed_pad=p("exposed_pad"),
+            name=name,
+        )
+    if footprint_type == "chip":
+        if p("size") is None:
+            raise ValueError(
+                "--size is required for chip footprints "
+                f"(valid sizes: {', '.join(CHIP_SIZES.keys())})"
+            )
+        return create_chip(
+            size=p("size"),
+            prefix=p("prefix") or "",
+            metric=bool(p("metric")),
+            name=name,
+        )
+    if footprint_type == "sot":
+        if p("variant") is None:
+            raise ValueError(
+                "--variant is required for SOT footprints "
+                f"(valid variants: {', '.join(SOT_STANDARDS.keys())})"
+            )
+        return create_sot(variant=p("variant"), name=name)
+    if footprint_type == "dip":
+        require("pins", "--pins", "DIP")
+        return create_dip(pins=p("pins"), pitch=p("pitch"), row_spacing=p("row_spacing"), name=name)
+    # pin-header
+    require("pins", "--pins", "pin-header")
+    return create_pin_header(
+        pins=p("pins"), rows=p("rows") or 1, pitch=p("pitch") or 2.54, name=name
+    )
+
+
+def _generate_from_args(footprint_type: str, args) -> int:
+    """Shared body of the per-type ``generate_*`` handlers."""
+    params = {
+        key: getattr(args, key, None)
+        for key in (
+            "pins",
+            "pitch",
+            "body_width",
+            "body_length",
+            "body_size",
+            "exposed_pad",
+            "size",
+            "prefix",
+            "metric",
+            "variant",
+            "row_spacing",
+            "rows",
+            "name",
+        )
+    }
+    try:
+        fp = build_footprint(footprint_type, params)
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
         return 1
+    return _output_footprint(fp, args)
+
+
+def generate_soic(args) -> int:
+    """Generate SOIC footprint."""
+    return _generate_from_args("soic", args)
 
 
 def generate_qfp(args) -> int:
     """Generate QFP/LQFP footprint."""
-    if args.pins is None:
-        print("Error: --pins is required for QFP", file=sys.stderr)
-        return 1
-
-    try:
-        fp = create_qfp(
-            pins=args.pins,
-            pitch=args.pitch,
-            body_size=args.body_size,
-            name=args.name,
-        )
-        return _output_footprint(fp, args)
-    except ValueError as e:
-        print(f"Error: {e}", file=sys.stderr)
-        return 1
+    return _generate_from_args("qfp", args)
 
 
 def generate_qfn(args) -> int:
     """Generate QFN footprint."""
-    if args.pins is None:
-        print("Error: --pins is required for QFN", file=sys.stderr)
-        return 1
-
-    try:
-        fp = create_qfn(
-            pins=args.pins,
-            pitch=args.pitch,
-            body_size=args.body_size,
-            exposed_pad=args.exposed_pad,
-            name=args.name,
-        )
-        return _output_footprint(fp, args)
-    except ValueError as e:
-        print(f"Error: {e}", file=sys.stderr)
-        return 1
+    return _generate_from_args("qfn", args)
 
 
 def generate_chip(args) -> int:
     """Generate chip passive footprint."""
-    if args.size is None:
-        print("Error: --size is required for chip footprints", file=sys.stderr)
-        print(f"Valid sizes: {', '.join(CHIP_SIZES.keys())}", file=sys.stderr)
-        return 1
-
-    try:
-        fp = create_chip(
-            size=args.size,
-            prefix=args.prefix or "",
-            metric=args.metric,
-            name=args.name,
-        )
-        return _output_footprint(fp, args)
-    except ValueError as e:
-        print(f"Error: {e}", file=sys.stderr)
-        return 1
+    return _generate_from_args("chip", args)
 
 
 def generate_sot(args) -> int:
     """Generate SOT footprint."""
-    if args.variant is None:
-        print("Error: --variant is required for SOT footprints", file=sys.stderr)
-        print(f"Valid variants: {', '.join(SOT_STANDARDS.keys())}", file=sys.stderr)
-        return 1
-
-    try:
-        fp = create_sot(
-            variant=args.variant,
-            name=args.name,
-        )
-        return _output_footprint(fp, args)
-    except ValueError as e:
-        print(f"Error: {e}", file=sys.stderr)
-        return 1
+    return _generate_from_args("sot", args)
 
 
 def generate_dip(args) -> int:
     """Generate DIP footprint."""
-    if args.pins is None:
-        print("Error: --pins is required for DIP", file=sys.stderr)
-        return 1
-
-    try:
-        fp = create_dip(
-            pins=args.pins,
-            pitch=args.pitch,
-            row_spacing=args.row_spacing,
-            name=args.name,
-        )
-        return _output_footprint(fp, args)
-    except ValueError as e:
-        print(f"Error: {e}", file=sys.stderr)
-        return 1
+    return _generate_from_args("dip", args)
 
 
 def generate_pin_header(args) -> int:
     """Generate pin header footprint."""
-    if args.pins is None:
-        print("Error: --pins is required for pin-header", file=sys.stderr)
-        return 1
-
-    try:
-        fp = create_pin_header(
-            pins=args.pins,
-            rows=args.rows or 1,
-            pitch=args.pitch or 2.54,
-            name=args.name,
-        )
-        return _output_footprint(fp, args)
-    except ValueError as e:
-        print(f"Error: {e}", file=sys.stderr)
-        return 1
+    return _generate_from_args("pin-header", args)
 
 
 def _output_footprint(fp, args) -> int:

@@ -7,7 +7,7 @@
     "warnings": 0,
     "infos": 1,
     "waived": 0,
-    "rules_checked": 56,
+    "rules_checked": 57,
     "rules_checked_by_rule": {
       "connectivity": 1,
       "copper_sliver": 1,
@@ -28,8 +28,8 @@
     },
     "passed": true,
     "stale_waivers": 0,
-    "coverage_checked": 28,
-    "coverage_skipped": 8,
+    "coverage_checked": 29,
+    "coverage_skipped": 10,
     "coverage_unknown": [],
     "coverage_blocking_unknown": []
   },
@@ -38,13 +38,13 @@
       "rule_id": "connector_edge_distance",
       "type": "unknown",
       "severity": "info",
-      "message": "J1 (Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical): 4.15mm from nearest board edge",
+      "message": "J1 (Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical): 3.23mm from nearest board edge",
       "location": [
         141.0,
         87.5
       ],
       "layer": "F.Cu",
-      "actual_value": 4.1499999999999995,
+      "actual_value": 3.2299999999999995,
       "required_value": null,
       "items": [
         "J1"
@@ -53,14 +53,14 @@
       "status": "info",
       "waived": false,
       "key": "connector_edge_distance|J1||F.Cu",
-      "evidence_hash": "ev2:815eda166847ba19"
+      "evidence_hash": "ev2:e474f9a88cdb95e5"
     }
   ],
   "mask_copper_assessments": [],
   "meta_checks": {
     "drc": {
       "status": "PASSED",
-      "detail": "56 rules checked, 0 error(s), 0 warning(s)"
+      "detail": "57 rules checked, 0 error(s), 0 warning(s)"
     },
     "erc": {
       "status": "PASSED",
@@ -157,6 +157,12 @@
       "reason": "no_diff_pairs_detected",
       "blocking": true
     },
+    "diffpair_uncoupled_length": {
+      "status": "skipped:no_diff_pairs_detected",
+      "state": "skipped",
+      "reason": "no_diff_pairs_detected",
+      "blocking": true
+    },
     "dimensions": {
       "status": "checked",
       "state": "checked",
@@ -247,6 +253,12 @@
       "reason": null,
       "blocking": false
     },
+    "routing_policy": {
+      "status": "skipped:no_declared_policies",
+      "state": "skipped",
+      "reason": "no_declared_policies",
+      "blocking": true
+    },
     "sch_fields": {
       "status": "checked",
       "state": "checked",
@@ -278,6 +290,12 @@
       "blocking": true
     },
     "via_in_pad": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    },
+    "via_type": {
       "status": "checked",
       "state": "checked",
       "reason": null,

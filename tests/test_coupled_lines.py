@@ -542,3 +542,157 @@ class TestAccuracyValidation:
             assert result.zdiff == pytest.approx(target_zdiff, rel=0.05), (
                 f"Target {target_zdiff}Ω, got {result.zdiff:.1f}Ω at gap={gap:.3f}mm"
             )
+
+
+# ---------------------------------------------------------------------------
+# Independent-oracle tests for the coupled-conductor field solve (#7060)
+# ---------------------------------------------------------------------------
+
+
+def _agm(a: float, b: float) -> float:
+    for _ in range(40):
+        a, b = (a + b) / 2, math.sqrt(a * b)
+    return a
+
+
+def _ellip_k(k: float) -> float:
+    """Complete elliptic integral of the first kind via the AGM (no scipy)."""
+    return math.pi / 2 / _agm(1.0, math.sqrt(1 - k * k))
+
+
+def _cohn_zdiff(w: float, s: float, b: float, er: float) -> float:
+    """Cohn 1955 exact Zdiff of a centred, zero-thickness edge-coupled stripline.
+
+    S. B. Cohn, "Shielded Coupled-Strip Transmission Line", IRE Trans. MTT-3(5),
+    1955, pp. 29-38: Z0o = 30*pi/sqrt(er) * K(k') / K(k), with
+    k = tanh(pi*w/2b) / tanh(pi*(w+s)/2b) for the odd mode.
+    """
+    k = math.tanh(math.pi * w / (2 * b)) / math.tanh(math.pi * (w + s) / (2 * b))
+    return 2 * 30 * math.pi / math.sqrt(er) * _ellip_k(math.sqrt(1 - k * k)) / _ellip_k(k)
+
+
+class TestFieldSolveOracles:
+    """Edge-coupled results against references independent of the solver."""
+
+    # Zero-thickness static Zdiff (2*Z0o) from Kirschning & Jansen, IEEE Trans.
+    # MTT-32(1), 1984, pp. 83-90 (h = 0.2104 mm, er = 4.4). The table was
+    # produced from a transcription of the paper's static odd-mode equations
+    # (issue #7060) and cross-checked against an independent finite-difference
+    # Laplace solver, which agrees with it to +-0.2 %.
+    KJ_ZERO_THICKNESS = [
+        (0.127, 0.127, 134.7),
+        (0.200, 0.150, 116.5),
+        (0.250, 0.150, 105.5),
+        (0.300, 0.600, 114.0),
+    ]
+
+    @pytest.fixture
+    def cl(self):
+        return CoupledLines(Stackup.jlcpcb_4layer())
+
+    @pytest.mark.parametrize(("w", "s", "expected"), KJ_ZERO_THICKNESS)
+    def test_microstrip_zero_thickness_matches_kirschning_jansen(self, cl, w, s, expected):
+        zdiff = cl._edge_coupled_microstrip_calc(w, s, 0.2104, 4.4, 0.0).zdiff
+        assert zdiff == pytest.approx(expected, rel=0.01)
+
+    @pytest.mark.parametrize(("w", "s"), [(0.10, 0.10), (0.15, 0.15), (0.15, 0.60)])
+    def test_stripline_zero_thickness_matches_cohn(self, cl, w, s):
+        zdiff = cl._edge_coupled_stripline_calc(w, s, 0.2, 0.2, 4.4, 0.0).zdiff
+        assert zdiff == pytest.approx(_cohn_zdiff(w, s, 0.4, 4.4), rel=0.01)
+
+    def test_cohn_oracle_reproduces_published_values(self):
+        # Guards the in-test oracle itself against transcription drift.
+        assert _cohn_zdiff(0.10, 0.10, 0.4, 4.4) == pytest.approx(106.07, abs=0.05)
+        assert _cohn_zdiff(0.15, 0.15, 0.4, 4.4) == pytest.approx(97.67, abs=0.05)
+
+    # Finite-thickness anchors (t = 0.035 mm): zero-gap-extrapolated 2-D
+    # finite-difference Laplace solutions, independent of this code base
+    # (issue #7060, curator verification). None includes solder mask.
+    @pytest.mark.parametrize(
+        ("w", "s", "h", "er", "expected"),
+        [
+            (0.2275, 0.077, 0.21, 4.6, 81.1),  # M1: board 06 USB2
+            (0.126, 0.126, 0.21, 4.4, 115.3),  # M2
+            (0.301, 0.602, 0.21, 4.4, 106.6),  # M3
+        ],
+    )
+    def test_microstrip_finite_thickness_matches_finite_difference(self, cl, w, s, h, er, expected):
+        zdiff = cl._edge_coupled_microstrip_calc(w, s, h, er, 0.035).zdiff
+        assert zdiff == pytest.approx(expected, rel=0.02)
+
+    @pytest.mark.parametrize(("w", "s", "expected"), [(0.10, 0.10, 81.1), (0.15, 0.15, 80.4)])
+    def test_stripline_finite_thickness_matches_finite_difference(self, cl, w, s, expected):
+        zdiff = cl._edge_coupled_stripline_calc(w, s, 0.2, 0.2, 4.4, 0.035).zdiff
+        assert zdiff == pytest.approx(expected, rel=0.02)
+
+    def test_microstrip_far_gap_limit_is_twice_single_ended_at_zero_thickness(self, cl):
+        h, er = 0.2104, 4.4
+        for w in (0.15, 0.3):
+            single = cl._tl._microstrip_calc(w, h, er, 0.0, 0.02, 1.0).z0
+            pair = cl._edge_coupled_microstrip_calc(w, 10 * h, h, er, 0.0)
+            assert pair.zdiff == pytest.approx(2 * single, rel=0.01)
+
+    def test_stripline_far_gap_limit_is_twice_single_ended(self, cl):
+        from kicad_tools.physics.stripline import stripline_impedance
+
+        for h1, h2, t in ((0.2, 0.2, 0.035), (0.1, 0.3, 0.035)):
+            single = stripline_impedance(0.15, h1, h2, t, 4.4)
+            pair = cl._edge_coupled_stripline_calc(0.15, 10 * (h1 + h2), h1, h2, 4.4, t)
+            assert pair.zdiff == pytest.approx(2 * single, rel=0.01)
+            assert pair.z0_even == pytest.approx(single, rel=0.01)
+
+    @pytest.mark.parametrize("t", [0.0, 0.035])
+    def test_mode_ordering_and_coupling_range(self, cl, t):
+        for pair in (
+            cl._edge_coupled_microstrip_calc(0.15, 0.1, 0.2104, 4.4, t),
+            cl._edge_coupled_stripline_calc(0.15, 0.1, 0.2, 0.2, 4.4, t),
+            cl._edge_coupled_stripline_calc(0.15, 0.1, 0.1, 0.3, 4.4, t),  # offset
+        ):
+            assert pair.z0_even > pair.z0_odd > 0
+            assert 0 < pair.coupling_coefficient < 1
+            assert pair.epsilon_eff_even > 1 and pair.epsilon_eff_odd > 1
+
+    def test_microstrip_zdiff_increases_with_gap_and_eps_eff_is_bounded(self, cl):
+        previous = 0.0
+        for s in (0.05, 0.1, 0.2, 0.4, 0.8, 1.6):
+            pair = cl._edge_coupled_microstrip_calc(0.2, s, 0.2104, 4.4, 0.035)
+            assert pair.zdiff > previous
+            previous = pair.zdiff
+            assert 1.0 < pair.epsilon_eff_odd <= 4.4
+            assert 1.0 < pair.epsilon_eff_even <= 4.4
+
+    def test_edge_coupled_models_have_no_empirical_coupling_or_clamps(self):
+        import inspect
+
+        for fn in (
+            CoupledLines._edge_coupled_microstrip_calc,
+            CoupledLines._edge_coupled_stripline_calc,
+        ):
+            source = inspect.getsource(fn)
+            assert "kc" not in source
+            assert "max(" not in source and "min(" not in source
+        # No clamp survives anywhere in the module either.
+        module_source = inspect.getsource(inspect.getmodule(CoupledLines))
+        assert "max(20" not in module_source and "min(z0_" not in module_source
+
+    def test_width_and_gap_solvers_round_trip(self, cl):
+        width = cl.width_for_differential_impedance(90.0, 0.1, "F.Cu")
+        assert cl.edge_coupled_microstrip(width, 0.1, "F.Cu").zdiff == pytest.approx(90, rel=0.002)
+        gap = cl.gap_for_differential_impedance(90.0, 0.25, "F.Cu", tolerance=0.002)
+        assert cl.edge_coupled_microstrip(0.25, gap, "F.Cu").zdiff == pytest.approx(90, rel=0.005)
+        gap = cl.gap_for_differential_impedance(
+            85.0, 0.12, "In1.Cu", mode="edge_stripline", tolerance=0.002
+        )
+        assert cl.edge_coupled_stripline(0.12, gap, "In1.Cu").zdiff == pytest.approx(85, rel=0.005)
+
+    def test_gap_solver_is_fast_and_cached(self, cl):
+        import time
+
+        start = time.perf_counter()
+        gap = cl.gap_for_differential_impedance(90.0, 0.2713, "F.Cu")  # unseen geometry
+        cold = time.perf_counter() - start
+        start = time.perf_counter()
+        assert cl.gap_for_differential_impedance(90.0, 0.2713, "F.Cu") == gap
+        warm = time.perf_counter() - start
+        assert cold < 3.0  # < 1 s on a laptop; slack for a shared CI runner
+        assert warm < cold / 5

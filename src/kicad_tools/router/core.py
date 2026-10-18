@@ -12428,6 +12428,8 @@ class Autorouter:
         # Track overflow history for adaptive mode (Issue #633)
         overflow_history: list[int] = []
         escape_strategy_index = 0
+        # Issue #7071: nets rerouted per rip-up iteration; sizes the escape cap.
+        iteration_reroute_counts: list[int] = []
 
         # Issue #3942 (Bug A): buffer oscillation/escape diagnostics printed
         # mid-loop and only surface them if the router ends with stranded nets
@@ -12448,6 +12450,24 @@ class Autorouter:
             100%%-routed board produces no failure-flavored wording.
             """
             deferred_oscillation_msgs.append(message)
+
+        def _print_escape_summary(router: NegotiatedRouter) -> None:
+            """One unbuffered line per escape (Issue #7071).
+
+            Unlike ``_emit_oscillation_msg`` this survives #3942: the time an
+            escape costs must stay visible on a 100%%-routed board.  The
+            wording avoids the failure phrases that gate pins.
+            """
+            info = router.last_escape_summary
+            if info is None:
+                return
+            cap = "" if info.reroute_cap is None else f" of {info.reroute_cap}"
+            flush_print(
+                f"  Escape: {info.strategies_tried} strategies, {info.seconds:.1f}s, "
+                f"{info.reroutes}{cap} reroutes, overflow "
+                f"{info.overflow_before} to {info.overflow_after}, "
+                f"{'kept' if info.kept else 'rolled back'}"
+            )
 
         # Issue #2334: Stochastic perturbation state tracking.
         # perturbation_stagnation_count tracks how many iterations the
@@ -14255,6 +14275,7 @@ class Autorouter:
 
                     if stalled_nets:
                         nets_to_reroute = [n for n in nets_to_reroute if n not in stalled_nets]
+                    iteration_reroute_counts.append(len(nets_to_reroute))
 
                     # Issue #2396: When overflow is 0 but nets remain unrouted,
                     # the rip-up loop has no overflow signal to act on.  Force
@@ -14815,8 +14836,13 @@ class Autorouter:
                                 strategy_index=escape_strategy_index,
                                 per_net_timeout=iter_per_net_cap,
                                 escape_budget=escape_budget,
+                                reroute_cap=_negotiated_budget.escape_reroute_cap(
+                                    iteration_reroute_counts
+                                ),
                             )
                             escape_strategy_index += tried
+                            _print_escape_summary(neg_router)
+                            overflow = new_overflow if not success else overflow
 
                             if success:
                                 _emit_oscillation_msg(
@@ -15526,8 +15552,13 @@ class Autorouter:
                             strategy_index=escape_strategy_index,
                             per_net_timeout=iter_per_net_cap,
                             escape_budget=escape_budget,
+                            reroute_cap=_negotiated_budget.escape_reroute_cap(
+                                iteration_reroute_counts
+                            ),
                         )
                         escape_strategy_index += tried
+                        _print_escape_summary(neg_router)
+                        overflow = new_overflow if not success else overflow
 
                         if success:
                             _emit_oscillation_msg(
@@ -20685,8 +20716,12 @@ class Autorouter:
             cache[1], (p for p in self.pads.values() if not p.steiner_point)
         )
 
-    def _preserved_fragments(self, net_ids: set[int]) -> list[Route]:
+    def _preserved_fragments(self, net_ids: set[int], *, invert: bool = False) -> list[Route]:
         """Preserved-copper fragments of ``net_ids`` not already in ``self.routes``.
+
+        ``invert=True`` returns the fragments of every net *outside*
+        ``net_ids`` instead (Issue #7159): foreign preserved copper the
+        length tuner must clear but never measure or edit.
 
         Issue #6968: under ``--preserve-existing`` the input board's copper
         (board 07's 7-9 mm SDRAM escape stubs) lives in ``existing_routes``,
@@ -20713,7 +20748,7 @@ class Autorouter:
         return [
             r
             for r in (getattr(self, "existing_routes", None) or ())
-            if r.net in net_ids
+            if (r.net in net_ids) != invert
             and r.net not in routed_net_ids
             and id(r) not in in_routes
             and id(r) not in neutral_ids
@@ -20896,7 +20931,14 @@ class Autorouter:
         preserved_segment_ids = {id(s) for r in preserved for s in r.segments}
         preserved_via_ids = {id(v) for r in preserved for v in r.vias}
         preserved_nets = {r.net for r in preserved}
-        routes_by_net = self._net_routes_merged(preserved)
+        # Issue #7159: preserved copper of nets OUTSIDE the groups (board 07's
+        # input vias/tracks) is invisible to the tuner's clearance passes
+        # unless it is in ``routes_by_net``.  Merge it in for clearance only:
+        # it stays out of ``preserved_*`` (so it is never stripped/published)
+        # and out of the skew tracker below.  Groups never name these nets,
+        # so the tuner neither measures nor edits them.
+        foreign_preserved = self._preserved_fragments(member_net_ids, invert=True)
+        routes_by_net = self._net_routes_merged([*preserved, *foreign_preserved])
         fixed_segment_ids = {id(s) for r in self.routes if r.is_escape for s in r.segments}
         fixed_segment_ids |= preserved_segment_ids
 

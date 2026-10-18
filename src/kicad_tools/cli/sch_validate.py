@@ -30,7 +30,6 @@ from pathlib import Path
 from kicad_tools.cli.runner import find_kicad_cli
 from kicad_tools.cli.sch_footprint_common import iter_missing_footprint_symbols
 from kicad_tools.erc.cross_sheet import (
-    filter_phantom_wire_violations,
     reattribute_symbol_violations,
     reattribute_wire_dangling_violations,
 )
@@ -196,12 +195,10 @@ def run_erc(schematic_path: str) -> list[ValidationIssue]:
                             raw_violations, schematic_path
                         )
 
-                        # Filter phantom wire_dangling violations whose
-                        # coordinates do not correspond to any wire,
-                        # junction, or label in the schematic files.
-                        raw_violations = filter_phantom_wire_violations(
-                            raw_violations, schematic_path
-                        )
+                        # No phantom wire_dangling filter: the one added for
+                        # #2205 keyed on a top-level ``pos`` KiCad 10 never
+                        # emits, so it was dead, and wiring it to the per-item
+                        # ``pos`` would drop real floating wires (Issue #7170).
 
                         for violation in raw_violations:
                             item_descs = [

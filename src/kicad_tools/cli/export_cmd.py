@@ -186,6 +186,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="Block export when preflight checks fail (for CI; default: export proceeds with warnings)",
     )
     parser.add_argument(
+        "--assembly-tier",
+        default="auto",
+        choices=["auto", "economic", "standard"],
+        help=(
+            "PCBA service tier preflight judges package/pitch limits against "
+            "(Issue #7204): 'auto' (default) reports the cheapest tier the board "
+            "fits; 'economic'/'standard' select a JLCPCB tier. Ignored by fabs "
+            "with a single assembly service"
+        ),
+    )
+    parser.add_argument(
         "--allow-unbuildable-bom",
         action="store_true",
         help=(
@@ -304,6 +315,7 @@ def run_export(args: argparse.Namespace) -> int:
         skip_drc_floor=getattr(args, "skip_drc_floor", False),
         drc_report_path=getattr(args, "drc_report", None),
         erc_report_path=getattr(args, "erc_report", None),
+        assembly_tier=getattr(args, "assembly_tier", "auto") or "auto",
     )
 
     # Build PnP configuration when --include-tht is specified

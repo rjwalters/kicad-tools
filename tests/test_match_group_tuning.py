@@ -1815,6 +1815,101 @@ class TestPerBumpPlacement:
 # =============================================================================
 
 
+class TestPartialProgressKeptOnLaterAttemptFailure:
+    """Issue #5798: a member's committed inserts survive a later attempt failing.
+
+    Board 07's SDRAM_ADDRESS: the two shortest members committed one meander
+    each, then found no host for a second one (``no_suitable_segment``), and
+    a later member hit the group ceiling mid-cascade
+    (``cascade_budget_exhausted``).  Both paths reset the member to its
+    original route, discarding DRC-clean commits that had already been
+    charged to the group budget.  The shortest member therefore never grew,
+    the group spread never moved (52.44 -> 52.44 mm) and the whole group was
+    rolled back.  The post-insertion-DRC path already kept partial progress.
+    """
+
+    @staticmethod
+    def _group_and_routes():
+        group = _ddr_group(net_ids=[1, 2], tolerance=0.01)
+        routes = {
+            1: _straight_route(1, "SHORT", 20.0, y=0.0),
+            2: _straight_route(2, "LONG", 200.0, y=30.0),
+        }
+        cfg = SerpentineConfig(amplitude=0.5, min_spacing=0.2, gap_factor=2.0)
+        return group, routes, cfg
+
+    def test_no_suitable_segment_after_a_commit_keeps_the_commit(self):
+        from kicad_tools.router import match_group_tuning as mgt
+
+        group, routes, cfg = self._group_and_routes()
+        original = routes[1]
+        real_rank = mgt._rank_candidate_segments
+        calls = {"n": 0}
+
+        def rank_once(route, **kw):
+            # First ranking call finds the host; every later one (the second
+            # attempt, including its fallback re-rank) finds none.
+            calls["n"] += 1
+            return real_rank(route, **kw) if calls["n"] == 1 else []
+
+        with patch.object(mgt, "_rank_candidate_segments", rank_once):
+            results = tune_match_group_v2(
+                group,
+                routes,
+                tolerance_mm=0.01,
+                intra_group_clearance_mm=0.2,
+                config=cfg,
+                max_inserts_per_member=2,
+            )
+
+        route, result = results[1]
+        assert result.reason == "no_suitable_segment"
+        assert result.inserts_applied == 1
+        assert route is not original, "the committed meander was discarded"
+        assert result.length_after_mm > result.length_before_mm + 1.0
+        assert routes[1] is route  # published for later members' DRC checks
+
+    def test_group_ceiling_mid_cascade_keeps_the_commit(self):
+        from kicad_tools.router import match_group_tuning as mgt
+
+        group, routes, cfg = self._group_and_routes()
+        original = routes[1]
+        with patch.object(mgt, "MAX_TOTAL_INSERTS_PER_GROUP", 1):
+            results = tune_match_group_v2(
+                group,
+                routes,
+                tolerance_mm=0.01,
+                intra_group_clearance_mm=0.2,
+                config=cfg,
+                max_inserts_per_member=2,
+            )
+
+        route, result = results[1]
+        assert result.reason == "cascade_budget_exhausted"
+        assert result.inserts_applied == 1
+        assert route is not original, "the committed meander was discarded"
+        assert result.length_after_mm > result.length_before_mm + 1.0
+
+    def test_no_commit_still_returns_the_original_route(self):
+        """Drift guard: with nothing committed the original reference is returned."""
+        from kicad_tools.router import match_group_tuning as mgt
+
+        group, routes, cfg = self._group_and_routes()
+        original = routes[1]
+        with patch.object(mgt, "_rank_candidate_segments", lambda route, **kw: []):
+            results = tune_match_group_v2(
+                group,
+                routes,
+                tolerance_mm=0.01,
+                intra_group_clearance_mm=0.2,
+                config=cfg,
+            )
+        route, result = results[1]
+        assert result.reason == "no_suitable_segment"
+        assert result.inserts_applied == 0
+        assert route is original
+
+
 class TestModuleInvariants:
     """Constants must stay aligned with the pair tuner and with each other."""
 

@@ -20,10 +20,17 @@ Example::
     gap = cl.gap_for_differential_impedance(zdiff_target=90, width_mm=0.127, layer="F.Cu")
     print(f"90Ω differential requires {gap:.3f}mm gap")
 
-References:
-    Kirschning & Jansen, "Accurate Wide-Range Design Equations for
-    Parallel Coupled Microstrip Lines", IEEE Trans. MTT, 1984.
-    IPC-2141A Section 4.3
+Edge-coupled geometries are solved as coupled-conductor quasi-static field
+problems (boundary-element method, see ``stripline.py`` and
+``coupled_microstrip.py``), including copper thickness and offset stripline.
+The result is checked in the test suite against independent references:
+
+    Kirschning & Jansen, "Accurate Wide-Range Design Equations for the
+    Frequency-Dependent Characteristic of Parallel Coupled Microstrip
+    Lines", IEEE Trans. MTT-32(1), 1984, pp. 83-90 (zero-thickness static
+    microstrip oracle).
+    Cohn, "Shielded Coupled-Strip Transmission Line", IRE Trans. MTT-3(5),
+    1955, pp. 29-38 (zero-thickness centred stripline oracle).
 """
 
 from __future__ import annotations
@@ -32,8 +39,9 @@ import math
 from dataclasses import dataclass
 
 from .constants import SPEED_OF_LIGHT
+from .coupled_microstrip import coupled_microstrip_modes
 from .stackup import Stackup
-from .stripline import stripline_impedance
+from .stripline import coupled_stripline_impedances
 from .transmission_line import TransmissionLine
 
 
@@ -117,8 +125,10 @@ class CoupledLines:
               gap   width
             ────────────────  ← Ground plane
 
-        Uses the Kirschning & Jansen equations for accurate results
-        across a wide range of geometries.
+        Solved as a two-conductor quasi-static field problem (boundary
+        elements with a ground-plane image and a dielectric-interface
+        polarisation layer), so finite copper thickness is part of the
+        solution rather than a correction.
 
         Args:
             width_mm: Width of each trace in mm
@@ -155,13 +165,11 @@ class CoupledLines:
     ) -> DifferentialPairResult:
         """Edge-coupled microstrip calculation.
 
-        Uses validated empirical equations for even and odd mode
-        impedances based on coupled transmission line theory.
-
-        Physical relationships:
-        - Even mode: Both traces at same potential, Z0e > Z0_single
-        - Odd mode: Traces at opposite potentials, Z0o < Z0_single
-        - Coupling factor k = (Z0e - Z0o)/(Z0e + Z0o) is always positive
+        Even and odd mode impedances come from
+        :func:`~kicad_tools.physics.coupled_microstrip.coupled_microstrip_modes`
+        (#7060): ``Z0m = 1 / (c * sqrt(C_m * C_m,air))`` and
+        ``eps_eff_m = C_m / C_m,air``. There is no empirical coupling factor
+        and no clamping; callers' solvers bound their own search ranges.
 
         Args:
             w: Trace width in mm
@@ -173,50 +181,20 @@ class CoupledLines:
         Returns:
             DifferentialPairResult
         """
-        # Normalized dimensions
-        u = w / h  # width/height ratio
-        g = s / h  # gap/height ratio
+        z0_even, z0_odd, eps_eff_even, eps_eff_odd = coupled_microstrip_modes(w, s, h, er, t)
+        return self._pair_result(z0_even, z0_odd, eps_eff_even, eps_eff_odd)
 
-        # Get single-ended parameters for reference
-        single = self._tl._microstrip_calc(w, h, er, t, 0.02, 1.0)
-        z0_single = single.z0
-        eps_eff_single = single.epsilon_eff
-
-        # Calculate coupling factor based on geometry
-        # This empirical formula gives k ≈ 0.3-0.5 for tight coupling (s ≈ w)
-        # and k → 0 as spacing increases
-        # Based on Pozar and Wadell coupled line theory
-        kc = math.exp(-1.9 * g) * (1 - math.exp(-0.8 * u))
-
-        # Clamp coupling to physical range [0, 0.7]
-        # Very tight coupling (k > 0.7) is rare in practical PCB designs
-        kc = max(0.01, min(kc, 0.7))
-
-        # Even-mode and odd-mode impedances from coupling coefficient
-        # Standard coupled line relationships:
-        # Z0e = Z0 * sqrt((1+k)/(1-k))
-        # Z0o = Z0 * sqrt((1-k)/(1+k))
-        # This ensures Z0e > Z0 > Z0o for all k > 0
-        z0_even = z0_single * math.sqrt((1 + kc) / (1 - kc))
-        z0_odd = z0_single * math.sqrt((1 - kc) / (1 + kc))
-
-        # Effective dielectric constants
-        # Even mode: less field between traces → closer to single-ended
-        # Odd mode: more field between traces → slightly lower eps_eff
-        eps_eff_even = eps_eff_single * (1 + 0.1 * kc)
-        eps_eff_odd = eps_eff_single * (1 - 0.15 * kc)
-
-        # Derived quantities
-        zdiff = 2 * z0_odd
-        zcommon = z0_even / 2
-        k = (z0_even - z0_odd) / (z0_even + z0_odd)
-
+    @staticmethod
+    def _pair_result(
+        z0_even: float, z0_odd: float, eps_eff_even: float, eps_eff_odd: float
+    ) -> DifferentialPairResult:
+        """Derive Zdiff, Zcommon and k from the even and odd mode impedances."""
         return DifferentialPairResult(
-            zdiff=zdiff,
-            zcommon=zcommon,
+            zdiff=2 * z0_odd,
+            zcommon=z0_even / 2,
             z0_even=z0_even,
             z0_odd=z0_odd,
-            coupling_coefficient=k,
+            coupling_coefficient=(z0_even - z0_odd) / (z0_even + z0_odd),
             epsilon_eff_even=eps_eff_even,
             epsilon_eff_odd=eps_eff_odd,
         )
@@ -280,9 +258,11 @@ class CoupledLines:
     ) -> DifferentialPairResult:
         """Edge-coupled stripline calculation.
 
-        Uses empirical equations for stripline differential pairs.
-        Stripline coupling is generally stronger than microstrip for
-        the same s/h ratio because fields are entirely in dielectric.
+        Even and odd mode impedances come from a two-strip boundary-element
+        solve in a homogeneous dielectric (see
+        :func:`~kicad_tools.physics.stripline.coupled_stripline_impedances`),
+        so finite copper thickness and offset (``h1 != h2``) geometries are
+        part of the solution. No empirical coupling factor or clamp (#7060).
 
         Args:
             w: Trace width in mm
@@ -295,48 +275,8 @@ class CoupledLines:
         Returns:
             DifferentialPairResult
         """
-        eps_eff = er
-        # Use the same finite-thickness, offset-aware single-line geometry
-        # as TransmissionLine. The coupling coefficient below remains an
-        # empirical approximation, not a coupled-conductor field solution.
-        z0_single = stripline_impedance(w, h1, h2, t, er)
-
-        # Normalized dimensions for coupling calculation
-        # Use effective height (smaller of h1, h2) for coupling
-        h_eff = min(h1, h2)
-        g = s / h_eff if h_eff > 0 else 1.0
-        u = w / h_eff if h_eff > 0 else 0.5
-
-        # Calculate coupling factor
-        # Stripline has stronger coupling than microstrip due to full dielectric
-        # embedding, so use similar formula but with stronger coupling
-        kc = math.exp(-1.6 * g) * (1 - math.exp(-0.6 * u))
-
-        # Clamp coupling to physical range
-        kc = max(0.01, min(kc, 0.7))
-
-        # Even-mode and odd-mode impedances from coupling coefficient
-        z0_even = z0_single * math.sqrt((1 + kc) / (1 - kc))
-        z0_odd = z0_single * math.sqrt((1 - kc) / (1 + kc))
-
-        # Clamp to reasonable ranges
-        z0_even = max(20, min(z0_even, 200))
-        z0_odd = max(15, min(z0_odd, 180))
-
-        # Derived quantities
-        zdiff = 2 * z0_odd
-        zcommon = z0_even / 2
-        k = (z0_even - z0_odd) / (z0_even + z0_odd)
-
-        return DifferentialPairResult(
-            zdiff=zdiff,
-            zcommon=zcommon,
-            z0_even=z0_even,
-            z0_odd=z0_odd,
-            coupling_coefficient=k,
-            epsilon_eff_even=eps_eff,
-            epsilon_eff_odd=eps_eff,
-        )
+        z0_even, z0_odd = coupled_stripline_impedances(w, s, h1, h2, t, er)
+        return self._pair_result(z0_even, z0_odd, er, er)
 
     def broadside_coupled_stripline(
         self,
@@ -474,10 +414,6 @@ class CoupledLines:
             # Very tight coupling
             z0_even = z0_single * 2.0
             z0_odd = z0_single * 0.5
-
-        # Clamp to reasonable ranges
-        z0_even = max(20, min(z0_even, 300))
-        z0_odd = max(10, min(z0_odd, 200))
 
         # Derived quantities
         zdiff = 2 * z0_odd
