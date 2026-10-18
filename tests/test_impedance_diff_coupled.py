@@ -95,14 +95,31 @@ def test_derive_diff_specs_uses_declared_targets():
     assert all(s.target_z0 is None and s.advisory for s in default_diff_impedance_specs())
 
 
+def _board_03_checker(with_map, usb_width=None):
+    pcb = PCB.load(str(BOARD_03))
+    if usb_width is not None:
+        # Synthetic off-target copy (in memory only): re-width the In2.Cu USB pair.
+        for seg in pcb.segments:
+            if seg.layer == "In2.Cu" and pcb.get_net(seg.net_number).name.startswith("USB_D"):
+                seg.width = usb_width
+    # (f) name-based fallback detection; the map branch keeps the defaults.
+    return DRCChecker(pcb, net_class_map={} if with_map else None)
+
+
 @pytest.mark.skipif(not BOARD_03.exists(), reason="board 03 artifact missing")
 @pytest.mark.parametrize("with_map", [False, True])
 def test_checker_judges_board_03_usb_pair_on_both_branches(with_map):
-    # (f) name-based fallback detection; the map branch keeps the defaults.
-    checker = DRCChecker(PCB.load(str(BOARD_03)), net_class_map={} if with_map else None)
-    found = checker.check_impedance().violations
-    nets = {i for v in found for i in v.items}
-    assert nets == {"USB_D+", "USB_D-"}
+    # Since #7324 board 03's In2.Cu USB pair is 0.22 mm with a declared 90 ohm
+    # target (~89 ohm), i.e. in band: judged (not unmeasured) with no findings.
+    checker = _board_03_checker(with_map)
+    assert checker.check_impedance().violations == []
+    assert checker.impedance_unmeasured_pairs == []
+
+    # Off-target witness so the in-band result is not vacuous: the same board
+    # with a much wider pair must be judged and flagged on both branches.
+    off = _board_03_checker(with_map, usb_width=0.40)
+    found = off.check_impedance().violations
+    assert {i for v in found for i in v.items} == {"USB_D+", "USB_D-"}
     assert {v.severity for v in found} == {"warning"}
     assert {v.layer for v in found} == {"In2.Cu"}
-    assert checker.impedance_unmeasured_pairs == []
+    assert off.impedance_unmeasured_pairs == []
