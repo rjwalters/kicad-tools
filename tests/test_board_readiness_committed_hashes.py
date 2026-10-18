@@ -19,9 +19,7 @@ BOARDS_DIR = Path(__file__).resolve().parent.parent / "boards"
 # Boards whose committed readiness evidence is known to be stale, keyed by board
 # directory name.  Each entry cites the issue that owns the refresh; remove the
 # entry when that lands (strict xfail turns an unexpected pass into a failure).
-EXPECTED_STALE = {
-    "01-voltage-divider": "#6404: readiness inputs reference files absent from the tree",
-}
+EXPECTED_STALE: dict[str, str] = {}
 
 BOARDS = sorted(p.parent.parent for p in BOARDS_DIR.glob("*/output/readiness.json"))
 
