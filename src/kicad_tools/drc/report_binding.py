@@ -11,12 +11,19 @@ A report is **bound** to its source file when either:
   key (``pcb_sha256`` for DRC, ``schematic_sha256`` for ERC) and that hash
   equals the current file's hash -- ``kct check --output`` and ``kct
   build``'s ERC step write it; or
-* (readiness co-binding fallback) the board's ``output/readiness.json``
+* (readiness provenance fallback) the board's ``output/readiness.json``
   ``inputs`` pin *both* the report's current hash and the source file's
-  current hash.  Readiness hashes its inputs together, so a report pinned
-  alongside the exact PCB bytes was produced for those bytes.  This keeps
-  kicad-cli-native reports (which cannot carry our key) bound without
-  restamping them.
+  current hash, **and** its ``report_sources`` map records that the
+  report was produced from the source bytes now on disk
+  (``report_sources[<report>] == <source hash>``).  Co-pinning alone proves
+  only that the two files sat side by side when readiness hashed them, not
+  that the report describes that source (issue #7277), so it no longer
+  suffices.  This keeps kicad-cli-native reports (which cannot carry our
+  key) bound when the producer records their provenance.
+
+An ERC source is the whole schematic hierarchy: its "hash" is
+:func:`schematic_digest`, which equals the plain file hash for a flat
+schematic and a combined digest over every sheet otherwise.
 
 Consumers apply one rule: *an auto-discovered report that is not bound to
 the current file's content can fail a board, but can never pass it.*
@@ -24,6 +31,7 @@ the current file's content can fail a board, but can never pass it.*
 
 from __future__ import annotations
 
+import hashlib
 import json
 from enum import Enum
 from pathlib import Path
@@ -34,6 +42,7 @@ __all__ = [
     "BindingStatus",
     "binding_status",
     "sha256_file",
+    "schematic_digest",
     "stamp_report_hash",
 ]
 
@@ -67,6 +76,34 @@ def sha256_file(path: Path | str) -> str:
     return _sha256_file(Path(path))
 
 
+def schematic_digest(path: Path | str) -> str:
+    """Digest of a schematic and every sub-sheet it references (issue #7277).
+
+    A flat schematic digests to its own :func:`sha256_file`, so hashes
+    recorded before hierarchy support stay valid.  A hierarchical one digests
+    the sorted ``<relpath>\\0<sha256>`` lines of all its sheets, so an edit to
+    any sheet changes the value.  Raises ``OSError`` when a referenced sheet is
+    missing or lies outside the top sheet's directory.
+    """
+    from kicad_tools.cli.readiness_cmd import _schematic_hierarchy
+
+    top = Path(path).resolve()
+    try:
+        sheets = _schematic_hierarchy(top, top.parent)
+    except ValueError as exc:
+        raise OSError(str(exc)) from exc
+    if sheets == [top]:
+        return sha256_file(top)
+    lines = [
+        f"{sheet.relative_to(top.parent).as_posix()}\0{sha256_file(sheet)}" for sheet in sheets
+    ]
+    return hashlib.sha256("\n".join(lines).encode()).hexdigest()
+
+
+def _source_hash(path: Path, key: str | None) -> str:
+    return schematic_digest(path) if key == ERC_HASH_KEY else sha256_file(path)
+
+
 def _recorded(value: object) -> str | None:
     if isinstance(value, str) and value.strip():
         return value.strip().lower()
@@ -80,8 +117,14 @@ def _readiness_input_hash(inputs: dict, rel: str) -> str | None:
     return _recorded(value)
 
 
-def _readiness_co_bound(report_path: Path, source_path: Path, source_hash: str) -> bool:
-    """True when a board ``readiness.json`` pins both files' current hashes.
+def _readiness_co_bound(
+    report_path: Path, source_path: Path, file_hash: str, source_hash: str
+) -> bool:
+    """True when a board ``readiness.json`` pins both files and records provenance.
+
+    ``inputs`` must pin the report's and the source file's (*file_hash*)
+    current bytes, and ``report_sources`` must record that the report was
+    produced from the source's current *source_hash* (issue #7277).
 
     The readiness record lives at ``<board>/output/readiness.json`` and its
     ``inputs`` keys are relative to ``<board>``.  Both the report's and the
@@ -115,7 +158,11 @@ def _readiness_co_bound(report_path: Path, source_path: Path, source_hash: str) 
             pinned_source = _readiness_input_hash(inputs, source_rel)
             if pinned_report is None or pinned_source is None:
                 continue
-            if pinned_source != source_hash:
+            if pinned_source != file_hash:
+                continue
+            sources = data.get("report_sources")
+            produced_from = sources.get(report_rel) if isinstance(sources, dict) else None
+            if _recorded(produced_from) != source_hash:
                 continue
             try:
                 report_hash = sha256_file(report_path)
@@ -130,6 +177,8 @@ def binding_status(
     report_path: Path | str,
     source_path: Path | str | None,
     recorded_hash: str | None,
+    *,
+    hierarchical: bool = False,
 ) -> BindingStatus:
     """Classify how *report_path* is bound to *source_path*'s current bytes.
 
@@ -140,17 +189,20 @@ def binding_status(
             bind to).
         recorded_hash: The report's top-level ``pcb_sha256`` /
             ``schematic_sha256`` value, or ``None`` when absent.
+        hierarchical: Bind to the whole schematic hierarchy
+            (:func:`schematic_digest`) instead of the single file.
 
     Returns:
         ``BOUND`` when the recorded hash matches (or, with no recorded
-        hash, readiness co-binds both files), ``MISMATCH`` when a recorded
+        hash, readiness records its provenance), ``MISMATCH`` when a recorded
         hash differs, else ``UNHASHED``.
     """
     if source_path is None:
         return BindingStatus.UNHASHED
     source = Path(source_path)
     try:
-        current = sha256_file(source)
+        file_hash = sha256_file(source)
+        current = _source_hash(source, ERC_HASH_KEY if hierarchical else None)
     except OSError:
         return BindingStatus.UNHASHED
 
@@ -158,7 +210,7 @@ def binding_status(
     if recorded is not None:
         return BindingStatus.BOUND if recorded == current else BindingStatus.MISMATCH
 
-    if _readiness_co_bound(Path(report_path), source, current):
+    if _readiness_co_bound(Path(report_path), source, file_hash, current):
         return BindingStatus.BOUND
     return BindingStatus.UNHASHED
 
@@ -176,7 +228,7 @@ def stamp_report_hash(report_path: Path | str, source_path: Path | str, key: str
         data = json.loads(report_path.read_text())
         if not isinstance(data, dict):
             return False
-        data[key] = sha256_file(source_path)
+        data[key] = _source_hash(Path(source_path), key)
         report_path.write_text(json.dumps(data, indent=2) + "\n")
     except (OSError, ValueError):
         return False

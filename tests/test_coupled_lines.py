@@ -696,3 +696,41 @@ class TestFieldSolveOracles:
         warm = time.perf_counter() - start
         assert cold < 3.0  # < 1 s on a laptop; slack for a shared CI runner
         assert warm < cold / 5
+
+
+class TestFiniteThicknessSingleEndedLimit:
+    """BEM finite-thickness accuracy against independent 2-D FD solves (#7164).
+
+    The expected values are single-ended Z0 from a graded finite-difference
+    solve (Richardson-extrapolated in mesh and box size) reported on PR #7286.
+    ``sqrt(Z0e * Z0o)`` at a gap of 60h is the single-ended limit.
+    """
+
+    # (w, h, er, t) in mm and FD Z0 in ohms.
+    FD_ANCHORS = [
+        (0.15, 0.2104, 4.4, 0.035, 76.32),
+        (0.3477, 0.2104, 4.4, 0.035, 51.93),
+        (0.30, 0.20, 4.3, 0.105, 51.94),
+        (0.15, 1.2, 4.5, 0.035, 136.24),
+    ]
+
+    @pytest.mark.parametrize(("w", "h", "er", "t", "fd"), FD_ANCHORS)
+    def test_single_ended_limit_matches_fd(self, w, h, er, t, fd):
+        from kicad_tools.physics.coupled_microstrip import coupled_microstrip_modes
+
+        z0e, z0o, _, _ = coupled_microstrip_modes(w, 60 * h, h, er, t)
+        assert math.sqrt(z0e * z0o) == pytest.approx(fd, rel=0.005)
+
+    def test_zero_thickness_still_agrees(self):
+        from kicad_tools.physics.coupled_microstrip import coupled_microstrip_modes
+
+        z0e, z0o, _, _ = coupled_microstrip_modes(0.3477, 60 * 0.2104, 0.2104, 4.4, 0.0)
+        assert math.sqrt(z0e * z0o) == pytest.approx(54.43, rel=0.005)
+
+    def test_even_mode_converged_in_gap_for_narrow_strip(self):
+        from kicad_tools.physics.coupled_microstrip import coupled_microstrip_modes
+
+        h = 1.2
+        z0e_20, *_ = coupled_microstrip_modes(0.15, 20 * h, h, 4.5, 0.035)
+        z0e_60, *_ = coupled_microstrip_modes(0.15, 60 * h, h, 4.5, 0.035)
+        assert abs(z0e_60 - z0e_20) / z0e_60 < 0.001

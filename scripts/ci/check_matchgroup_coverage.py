@@ -39,7 +39,9 @@ Exit codes (mirror ``check_routed_drc.py`` / ``check_diffpair_coverage.py``):
     0 -- Gate passed (errors within tolerance AND the rule was exercised).
     1 -- Tool failure (board dir missing, route step crashed, allowlist
          parse error, etc.).
-    2 -- Gate failed: errors exceed allowlist OR the rule did not run.
+    2 -- Gate failed: errors exceed allowlist OR the rule did not run OR
+         fewer signal nets complete than the recipe's
+         ``REQUIRED_SIGNAL_REACH`` (Issue #7319).
 
 GitHub-Actions ``::error file=...::`` annotations are emitted on failure
 so the PR Files-changed view surfaces the failure inline.
@@ -108,7 +110,11 @@ from pathlib import Path
 import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from board_recipe_artifacts import recipe_baseline_key, recipe_output_dir  # noqa: E402
+from board_recipe_artifacts import (  # noqa: E402
+    measure_signal_reach,
+    recipe_baseline_key,
+    recipe_output_dir,
+)
 
 # Issue #4634: the sidecar filename rules are shared with ``kct check``, the
 # routed-DRC gate and the ``kct export`` report surface via the stdlib-only
@@ -685,6 +691,46 @@ def check_rule_coverage(
     return missing
 
 
+def check_signal_reach(
+    board_dir: Path,
+    routed_pcb: Path,
+    required_reach: int | None,
+    pour_nets: set[str],
+) -> int:
+    """Assert the board's ``REQUIRED_SIGNAL_REACH`` contract (Issue #7319).
+
+    Counts complete signal nets (pour nets excluded) with the same
+    :func:`board_recipe_artifacts.measure_signal_reach` board 06's gate
+    uses.  Returns an exit code: 0 (met, or the board declares no
+    contract), 2 (gate failure: reach below the contract, incomplete nets
+    named), or 1 (tool failure: the measurement could not run -- a skipped
+    reach check must never pass silently).
+    """
+    if required_reach is None:
+        return 0
+    try:
+        complete, signal_total, incomplete_names = measure_signal_reach(routed_pcb, pour_nets)
+    except Exception as e:
+        annotate_error(str(routed_pcb), f"Reach measurement failed: {e}")
+        return 1
+    print(
+        f"[matchgroup-coverage] Signal reach: {complete}/{signal_total} "
+        f"(required: {required_reach}); incomplete: {incomplete_names or 'none'}"
+    )
+    if complete < required_reach:
+        annotate_error(
+            str(routed_pcb),
+            f"Reach regression on re-routed {routed_pcb}: only "
+            f"{complete}/{signal_total} signal nets complete "
+            f"(required {required_reach}).  Incomplete: "
+            f"{', '.join(incomplete_names)}.  See "
+            f"{board_dir.name}/generate_design.py REQUIRED_SIGNAL_REACH.",
+        )
+        return 2
+    print(f"[matchgroup-coverage] OK: reach {complete}/{signal_total} >= {required_reach}.")
+    return 0
+
+
 def check_board(
     board_dir: Path,
     allowlist: dict[str, int],
@@ -759,12 +805,16 @@ def check_board(
     # Issue #3617: read the board's pour-connectivity contract.  Boards
     # that declare ``REQUIRE_POUR_CONNECTIVITY = True`` get a hard
     # copper-union pour audit; boards without it skip the term.
+    # Issue #7319: the same module's ``REQUIRED_SIGNAL_REACH`` (board 06's
+    # #3413 phase 5 contract) gets a hard reach assertion.
     pour_nets: set[str] = set()
     require_pour_connectivity = False
+    required_reach: int | None = None
     recipe_mod = None
     try:
         recipe_mod = load_board_recipe_module(board_dir)
         if recipe_mod is not None:
+            required_reach = getattr(recipe_mod, "REQUIRED_SIGNAL_REACH", None)
             pour_nets = set(getattr(recipe_mod, "POUR_NETS", ()) or ())
             require_pour_connectivity = bool(
                 getattr(recipe_mod, "REQUIRE_POUR_CONNECTIVITY", False)
@@ -818,6 +868,15 @@ def check_board(
     )
 
     failed = False
+
+    # Issue #7319: reach assertion.  Before it, the seed-42 re-route
+    # dropped DQ0 (30/31 -> 29/31) after #7163 and the gate stayed silent;
+    # the only symptom was a tripled wall time.
+    reach_rc = check_signal_reach(board_dir, routed_pcb, required_reach, pour_nets)
+    if reach_rc == 1:
+        return 1
+    if reach_rc:
+        failed = True
 
     # AC #4: the match_group_length_skew rule must have been exercised.
     missing = check_rule_coverage(rules_by_rule)
