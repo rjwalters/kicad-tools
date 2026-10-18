@@ -736,6 +736,28 @@ class TestMfrCLICommands:
         findings = _fab_setting_findings(sexp, rules)
         assert [f[0] for f in findings] == ["ZONE_CLEARANCE"]
 
+    def test_fab_setting_findings_zone_clearance_masked_by_larger_rule(self):
+        """A low raw zone setting is not an error when a larger rule applies (#7246)."""
+        from kicad_tools.cli.mfr import _fab_setting_findings
+        from kicad_tools.manufacturers import get_profile
+        from kicad_tools.sexp import SExp
+
+        rules = get_profile("jlcpcb").get_design_rules(layers=2)
+        sexp = SExp.list(
+            "kicad_pcb",
+            SExp.list(
+                "zone",
+                SExp.list("net_name", "GND"),
+                SExp.list("connect_pads", SExp.list("clearance", 0.1)),
+            ),
+        )
+        floor = rules.min_clearance_mm
+        assert _fab_setting_findings(sexp, rules, declared_clearance_mm=floor) == []
+        # A declared rule that is itself below the floor does not mask it.
+        low = _fab_setting_findings(sexp, rules, declared_clearance_mm=0.05)
+        assert [f[0] for f in low] == ["ZONE_CLEARANCE"]
+        assert [f[0] for f in _fab_setting_findings(sexp, rules)] == ["ZONE_CLEARANCE"]
+
     def test_fab_setting_findings_no_footprints_of_either_spelling(self):
         """No footprint/module nodes at all should not raise and yield no HOLE_SIZE."""
         from kicad_tools.cli.mfr import _fab_setting_findings
