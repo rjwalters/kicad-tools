@@ -60,6 +60,8 @@ def _profile_payload(profile) -> dict:
             "min_bga_pitch_mm": profile.assembly.min_bga_pitch_mm,
             "supports_double_sided": profile.assembly.supports_double_sided,
         }
+        if profile.assembly_tiers:
+            payload["assembly"]["tiers"] = [t.to_dict() for t in profile.assembly_tiers]
     else:
         payload["assembly"] = None
     if profile.parts_library:
@@ -141,6 +143,17 @@ def cmd_info(args):
             print(f"  Min component pitch: {profile.assembly.min_component_pitch_mm} mm")
             print(f"  Min BGA pitch: {profile.assembly.min_bga_pitch_mm} mm")
             print(f"  Double-sided: {'Yes' if profile.assembly.supports_double_sided else 'No'}")
+        for svc in profile.assembly_tiers:
+            extras = []
+            if svc.min_package:
+                extras.append(f"min package {svc.min_package}")
+            extras.append(f"IC pitch {svc.min_component_pitch_mm:g} mm")
+            extras.append(f"BGA pitch {svc.min_bga_pitch_mm:g} mm")
+            extras.append("double-sided" if svc.supports_double_sided else "single-sided")
+            if svc.min_board_size_mm:
+                w, h = svc.min_board_size_mm
+                extras.append(f"min board {w:g}x{h:g} mm")
+            print(f"  Tier {svc.display_name}: {', '.join(extras)}")
     else:
         print("\nAssembly: Not available")
 

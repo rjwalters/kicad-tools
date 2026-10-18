@@ -511,7 +511,13 @@ def test_explicit_gap_survives_impedance_sizing(gap, jlcpcb_4layer_stackup, jlcp
     actual = resolved["TMDS_D2_N"]
     assert actual.intra_pair_clearance == max(gap, jlcpcb_4layer_rules.min_clearance_mm)
     if gap <= jlcpcb_4layer_rules.min_clearance_mm:
-        assert actual.trace_width == 0.225
+        # The width is the fixed-gap field-solve answer, snapped to the grid.
+        # (Pre-#7060 this pinned 0.225, a value of the empirical coupling
+        # model, which overstated Zdiff of tight pairs by ~10 %.)
+        solved = CoupledLines(jlcpcb_4layer_stackup).width_for_differential_impedance(
+            100.0, jlcpcb_4layer_rules.min_clearance_mm, "F.Cu"
+        )
+        assert actual.trace_width == pytest.approx(solved, abs=0.0125)
     impedance = (
         CoupledLines(jlcpcb_4layer_stackup)
         .edge_coupled_microstrip(actual.trace_width, actual.intra_pair_clearance, "F.Cu")

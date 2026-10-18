@@ -1097,6 +1097,9 @@ def _run_export_command(args) -> int:
         sub_argv.append("--skip-drc-floor")
     if getattr(args, "export_strict_preflight", False):
         sub_argv.append("--strict-preflight")
+    export_assembly_tier = getattr(args, "export_assembly_tier", "auto")
+    if export_assembly_tier and export_assembly_tier != "auto":
+        sub_argv.extend(["--assembly-tier", export_assembly_tier])
     if getattr(args, "export_allow_unbuildable_bom", False):
         sub_argv.append("--allow-unbuildable-bom")
     if getattr(args, "export_skip_drc", False):
