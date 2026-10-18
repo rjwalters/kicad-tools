@@ -136,6 +136,8 @@ def test_existing_workflow_command_and_failure_propagation(tmp_path, group, boar
             "--timeout=60",
             "-m",
             "not slow and not ci_extended",
+            # Issue #7327: slowest-test visibility for the time-budget step.
+            "--durations=30",
             "--junitxml",
             str(tmp_path / "junit/bulk.xml"),
             *[
