@@ -85,6 +85,10 @@ def run_sch_command(args) -> int:
             sub_argv.append("--strict")
         if args.quiet:
             sub_argv.append("--quiet")
+        for lib_path in args.lib_paths or []:
+            sub_argv.extend(["--lib-path", lib_path])
+        for check in args.skip_checks or []:
+            sub_argv.extend(["--skip", check])
         return validate_main(sub_argv) or 0
 
     elif args.sch_command == "preflight":

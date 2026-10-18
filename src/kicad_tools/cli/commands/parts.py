@@ -13,7 +13,7 @@ def run_parts_command(args) -> int:
     """Handle parts subcommands."""
     if not args.parts_command:
         print("Usage: kicad-tools parts <command> [options]")
-        print("Commands: lookup, search, availability, cache, suggest, sync-catalog")
+        print("Commands: lookup, search, import, availability, cache, suggest, sync-catalog")
         return 1
 
     from ..parts_cmd import main as parts_main
@@ -36,6 +36,26 @@ def run_parts_command(args) -> int:
             sub_argv.append("--in-stock")
         if args.basic:
             sub_argv.append("--basic")
+        return parts_main(sub_argv) or 0
+
+    elif args.parts_command == "import":
+        sub_argv = ["import", *args.parts, "--library", args.library]
+        if args.symbol_library:
+            sub_argv.extend(["--symbol-lib", args.symbol_library])
+        if args.footprint_lib:
+            sub_argv.extend(["--footprint-lib", args.footprint_lib])
+        if args.package:
+            sub_argv.extend(["--package", args.package])
+        if args.layout != "functional":
+            sub_argv.extend(["--layout", args.layout])
+        if args.dry_run:
+            sub_argv.append("--dry-run")
+        if args.interactive:
+            sub_argv.append("--interactive")
+        if args.overwrite:
+            sub_argv.append("--overwrite")
+        if args.format != "text":
+            sub_argv.extend(["--format", args.format])
         return parts_main(sub_argv) or 0
 
     elif args.parts_command == "availability":
