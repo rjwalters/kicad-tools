@@ -953,6 +953,60 @@ measured a matcher.**
    calls the tuner here, because board 07's classes are `length_critical:
    false`.
 
+7. **Budget counters on ADDRESS and BYTE0: the group ceiling is not the
+   limiter (Issue #5798).** Measured on 2026-10-18 at `main` `65b41559d`,
+   same local host (load average 6-30 from other sweeps), KRT not run. No
+   limit in `match_group_tuning.py` was changed, because the counters do not
+   implicate one.
+
+   **Input caveat.** The 07m route did not complete. Two `krt_compare.py
+   --boards 07m --tools kct` runs hit their caps (1200 s: 153/161
+   connections; 3600 s: 154/161), against item 6's 340 s on a quieter host.
+   The 3600 s output has BYTE0 (9/9) and COMMAND (6/6) finished, BYTE1 6/9 and
+   ADDRESS 11/14. So the ADDRESS rows below are **not** the 14/14 case item 6
+   describes, and one ADDRESS member (net 34) is a 0.70 mm stub that no tuner
+   can lengthen.
+
+   `kct retune-lengths` per group on that output, with `tune_match_group_v2`
+   wrapped to print each member's `reason`, `attempts` and `inserts_applied`:
+
+   | Group | Spread mm | Budget counters | Outcome |
+   |---|---|---|---|
+   | SDRAM_BYTE0 (9 members) | 20.21 → 4.75 | 10 of 16 inserts used; no member hit its per-member cap of 2 | tuned, inside 5.0, written |
+   | SDRAM_ADDRESS (14 members) | 67.61 → 67.61 | 16 of 16 used; 6 members `exceeded_max_inserts`, 1 `post_insertion_drc_violation`, net 34 `cascade_budget_exhausted` | rolled back |
+
+   BYTE0 reaches 4.75 mm here, where item 6's route gave 5.80 mm. The two
+   routes differ, so that is route variance, not a matcher change. Neither
+   BYTE0 result touches any budget.
+
+   **Single-limit probes on ADDRESS** (constants patched in the probe only):
+
+   | Ceiling | Per-member cap | Inserts used | What blocks the unfinished members |
+   |---|---|---|---|
+   | 16 (current) | 2 | 16 | `cascade_budget_exhausted` on net 34, `exceeded_max_inserts` on 5 members |
+   | 40 | 2 | 16 | `exceeded_max_inserts` on 5 members; the ceiling is no longer reached |
+   | 80 | 6 | 25 | DRC rejection on nets 23, 25, 27; `no_suitable_segment` on nets 22 and 34; `exceeded_max_inserts` on net 21 only |
+
+   Raising the ceiling alone moves the failure to the per-member cap. Raising
+   both moves it to DRC room and host availability. Each insert adds 3-8 mm
+   on these members, against 20-40 mm needed. Net 32 is the only member the
+   larger budget fixes, and it is not enough to bring the group inside 5.0 mm.
+   On this input the hypothesis "`MAX_TOTAL_INSERTS_PER_GROUP = 16` produces
+   `cascade_budget_exhausted`" is refuted as a sufficient explanation, since the
+   ceiling only trips once, on a stub. Whether it also holds with 14/14
+   finished members is **not measured**.
+
+   **Connection cost of `--length-match-groups`: not demonstrated.** With a
+   scratch copy of board 07's net-class map (`length_critical: true` on all
+   38 SDRAM group nets, committed map untouched), `kct route
+   --preserve-existing --net-class-map <scratch>` was run with and without
+   `--length-match-groups`, in parallel, under a 2700 s cap. Both runs hit the
+   cap in the same place (iteration 1 of rip-up and reroute, after 23/42 nets
+   in the first pass) and left the same board: 151/161 connections, 45/55 nets
+   complete. Neither reached the post-route tuner, so the two counts are
+   identical for a reason unrelated to the flag. The "on >= off" criterion
+   stays open until a complete route is available.
+
 **Verdict.** The gap survives deconfounding. It is not the routing cap. It is
 the three wiring gaps in (1), then DRC-limited meander room and the
 all-or-nothing rollback in (3). Item 6 shows #7043 (PR #7048) closes
