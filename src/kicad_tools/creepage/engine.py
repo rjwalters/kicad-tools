@@ -899,8 +899,14 @@ def _bridge_narrow_cutouts(obstacles: list[Any], dimension_x_mm: float) -> list[
     from shapely.geometry import JOIN_STYLE
 
     r = dimension_x_mm / 2.0 - 1e-4
+    # The mitre dilation re-squares rounded slot ends, so the raw opening can
+    # poke past the real milled outline.  Clipping back to the source obstacle
+    # makes the opening anti-extensive (it can only remove parts, never grow
+    # a slot), which keeps creepage from being overstated.
     opened = [
-        obs.buffer(-r, join_style=JOIN_STYLE.mitre).buffer(r, join_style=JOIN_STYLE.mitre)
+        obs.buffer(-r, join_style=JOIN_STYLE.mitre)
+        .buffer(r, join_style=JOIN_STYLE.mitre)
+        .intersection(obs)
         for obs in obstacles
     ]
     return _flatten_polygons(opened)
@@ -956,11 +962,14 @@ def _feet_on_segments(points: Any, segs: Any) -> Any:
 
 
 def _obstacle_interiors(obstacles: list[Any]) -> list[Any]:
-    """Slightly shrunk obstacle interiors used by the admissibility test."""
+    """Slightly shrunk, prepared obstacle interiors used by the admissibility test."""
+    import shapely  # type: ignore[import-untyped]
+
     out = []
     for obs in obstacles:
         interior = obs.buffer(-_INTERIOR_SHRINK)
         if not interior.is_empty:
+            shapely.prepare(interior)  # in-place; speeds the batched intersects
             out.append(interior)
     return out
 
@@ -983,14 +992,20 @@ def _first_admissible(
     order = keep[np.argsort(lengths[keep], kind="stable")]
     if not interiors:
         return float(lengths[order[0]])
-    batch = 64
-    for lo in range(0, order.size, batch):
+    # Small first batch keeps the common "shortest candidate is visible" case
+    # cheap; the batch then grows so a fully occluded pair (slot past both
+    # copper ends) stays linear in the candidate count.  The interiors are
+    # already shrunk by _INTERIOR_SHRINK, so a line running along a slot
+    # boundary does not intersect them and a plain predicate is enough.
+    lo, batch = 0, 64
+    while lo < order.size:
         idx = order[lo : lo + batch]
+        lo += batch
+        batch = min(batch * 8, 65536)
         lines = shapely.linestrings(np.stack([starts[idx], ends[idx]], axis=1))
         ok = np.ones(idx.size, dtype=bool)
         for interior in interiors:
-            crossing = shapely.intersection(lines, interior)
-            ok &= ~(shapely.length(crossing) > _EPS)
+            ok &= ~shapely.intersects(lines, interior)
         if ok.any():
             return float(lengths[idx[int(np.argmax(ok))]])
     return math.inf
@@ -1026,8 +1041,10 @@ def _seed_length(
     return _first_admissible(lengths, starts, ends, interiors, math.inf)
 
 
-def _best_direct_hop(segs_a: Any, segs_b: Any, interiors: list[Any]) -> float:
-    """Shortest admissible straight segment from shape A to shape B.
+def _best_direct_hop(
+    segs_a: Any, segs_b: Any, interiors: list[Any], bound: float = math.inf
+) -> float:
+    """Shortest admissible straight segment from shape A to shape B (``< bound``).
 
     Candidates are every vertex of A dropped onto every segment of B (its
     perpendicular foot, clamped to the segment) and vice versa; segment-to-
@@ -1035,7 +1052,7 @@ def _best_direct_hop(segs_a: Any, segs_b: Any, interiors: list[Any]) -> float:
     """
     import numpy as np
 
-    best = math.inf
+    best = bound
     for src, dst in ((segs_a, segs_b), (segs_b, segs_a)):
         if src.shape[0] == 0 or dst.shape[0] == 0:
             continue
@@ -1100,10 +1117,9 @@ def _shortest_detour(geom_a: Any, geom_b: Any, obstacles: list[Any]) -> float:
         if wb != math.inf:
             _add(1, i + 2, wb)
 
-    best_direct = _best_direct_hop(segs_a, segs_b, interiors)
-    if best_direct != math.inf:
-        _add(0, 1, best_direct)
-
+    # Detour through the slot vertices first; the direct A -> B hop is the
+    # expensive search (it is quadratic when a slot occludes every straight
+    # line), so it only has to beat this bound.
     dist = [math.inf] * n
     dist[0] = 0.0
     pq: list[tuple[float, int]] = [(0.0, 0)]
@@ -1112,13 +1128,13 @@ def _shortest_detour(geom_a: Any, geom_b: Any, obstacles: list[Any]) -> float:
         if d > dist[u]:
             continue
         if u == 1:
-            return d
+            break
         for nbr, w in adj[u]:
             nd = d + w
             if nd < dist[nbr]:
                 dist[nbr] = nd
                 heapq.heappush(pq, (nd, nbr))
-    return dist[1]
+    return min(dist[1], _best_direct_hop(segs_a, segs_b, interiors, dist[1]))
 
 
 def surface_path_length(

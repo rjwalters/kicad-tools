@@ -201,6 +201,47 @@ def test_obstacle_vertex_seeds_onto_far_edge_foot():
     assert creepage == pytest.approx(math.hypot(1.9, 0.4) + 1.2 + 0.4, abs=1e-6)
 
 
+def test_rounded_slot_wider_than_x_is_untouched_by_bridging():
+    # A router-milled 1.2 mm slot with r=0.3 ends is wider than X=1.0, so the
+    # dimension-X opening must not grow it (mitre re-squaring overstated
+    # creepage by up to ~10%).
+    from shapely.geometry import box
+
+    slot = box(-3, -0.6, 3, 0.6).buffer(-0.3).buffer(0.3, quad_segs=8)
+    pairs = [
+        (box(1, -2, 2.5, -1), box(1, 1, 2.5, 2)),
+        (box(-2.5, -1.2, 2.5, -0.8), box(-2.5, 0.8, 2.5, 1.2)),
+    ]
+    for a, b in pairs:
+        _, c0 = surface_path_length(a, b, obstacles=[slot], dimension_x_mm=0)
+        _, c1 = surface_path_length(a, b, obstacles=[slot], dimension_x_mm=1.0)
+        assert c1 == pytest.approx(c0, abs=1e-6)
+
+
+def test_fully_occluded_dense_pair_is_fast():
+    # A slot running past both copper ends blocks every direct line, so the
+    # direct-hop search must not test every vertex/foot candidate one batch
+    # at a time (quadratic; hours on a real census).
+    import time
+
+    from shapely.geometry import LineString, Polygon, box
+
+    def pour(y0, y1, n=500):
+        ring = [(-20 + 40 * i / n, y0) for i in range(n + 1)]
+        ring += [(20, y1), (-20, y1)]
+        return Polygon(ring)
+
+    a, b = pour(-3.0, -2.0), pour(2.0, 3.0)
+    slot = box(-30, -0.5, 30, 0.5)
+    assert LineString([(0, -2), (0, 2)]).intersects(slot)
+    t0 = time.perf_counter()
+    _, creepage = surface_path_length(a, b, obstacles=[slot], dimension_x_mm=0)
+    elapsed = time.perf_counter() - t0
+    # Around the slot end: foot -> corner, across the end, corner -> foot.
+    assert creepage == pytest.approx(2 * math.hypot(10.0, 1.5) + 1.0, abs=1e-6)
+    assert elapsed < 5.0
+
+
 def test_census_records_dimension_x(tmp_path):
     pcb = _load(tmp_path, board_source(with_slot=True))
     report = compute_creepage_census(pcb, resolve_hv_nets(pcb, "HV"), min_mm=1.0)
