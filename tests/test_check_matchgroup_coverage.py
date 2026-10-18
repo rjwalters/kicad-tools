@@ -86,23 +86,62 @@ class TestCheckZeroViolations:
         mod = _load_helper_module()
         assert mod.check_zero_violations({"match_group_length_skew": 4}, baseline=4) == []
 
-    def test_one_above_baseline_fails(self):
-        mod = _load_helper_module()
-        assert mod.check_zero_violations({"match_group_length_skew": 3}, baseline=2)
+    def test_board_07_allowance_is_keyed_to_named_groups(self):
+        """Board 07's allowance names its groups (Issue #7339, #7270 Q3).
 
-    def test_board_07_documented_via_skew_baseline(self):
-        """Board 07's documented match-group baseline is 2 (Issue #7339).
-
-        Reroute path: 1x MIPI_CSI_LANES pair-only skew (#3916) plus
-        1x DDR_DATA_BYTE_0 (16.717 mm vs 0.100 mm tol, seed 42), which fires
-        now that DQ0 is routed (#7331).  ADDR_BUS is compensated by the #3931
-        via-aware tuner and HDMI_TMDS_LANES is excluded by the unrouted-leg
-        gate.  The ``--skip-route`` committed artifact counts 1 and so passes
-        under the same value.  Drop to 1 once the tuner fixes DDR_DATA_BYTE_0
-        (#5798 / #6447)."""
+        Reroute path: MIPI_CSI_LANES pair-only skew (#3916) plus
+        DDR_DATA_BYTE_0 (16.717 mm vs 0.100 mm tol, seed 42), which fires now
+        that DQ0 is routed (#7331).  A count would let another group be
+        absorbed in place of a known one.  Delete the DDR entry once the
+        tuner fixes it (#5798 / #6447).
+        """
         mod = _load_helper_module()
         key = "boards/07-matchgroup-test/regression-fixture/matchgroup_test_routed.kicad_pcb"
-        assert mod.MATCHGROUP_VIOLATION_BASELINE.get(key, 0) == 2
+        assert set(mod.MATCHGROUP_ALLOWED_GROUPS[key]) == {"MIPI_CSI_LANES", "DDR_DATA_BYTE_0"}
+        assert not hasattr(mod, "MATCHGROUP_VIOLATION_BASELINE")
+
+    def test_fixture_rule_caps_kept(self):
+        """#7347's impedance cap survives the allowance rework."""
+        mod = _load_helper_module()
+        assert mod.MATCHGROUP_FIXTURE_RULE_CAPS == {"impedance": 4}
+
+
+class TestCheckGroupAllowances:
+    ALLOWED = {"MIPI_CSI_LANES": "#3916", "DDR_DATA_BYTE_0": "#7339"}
+
+    def test_exactly_the_allowed_groups_pass(self):
+        mod = _load_helper_module()
+        fired = {"MIPI_CSI_LANES", "DDR_DATA_BYTE_0"}
+        assert mod.check_group_allowances(fired, self.ALLOWED, enforce_stale=True) == []
+
+    def test_different_group_failing_fails_even_at_same_count(self):
+        """ADDR_BUS regressing must not be absorbed in place of DDR."""
+        mod = _load_helper_module()
+        fired = {"MIPI_CSI_LANES", "ADDR_BUS"}
+        failures = mod.check_group_allowances(fired, self.ALLOWED, enforce_stale=False)
+        assert any("ADDR_BUS" in f for f in failures)
+
+    def test_extra_group_on_top_of_allowed_fails(self):
+        mod = _load_helper_module()
+        fired = {"MIPI_CSI_LANES", "DDR_DATA_BYTE_0", "ADDR_BUS"}
+        assert mod.check_group_allowances(fired, self.ALLOWED, enforce_stale=True)
+
+    def test_allowed_group_disappearing_is_stale(self):
+        mod = _load_helper_module()
+        failures = mod.check_group_allowances({"MIPI_CSI_LANES"}, self.ALLOWED, enforce_stale=True)
+        assert len(failures) == 1
+        assert "STALE" in failures[0] and "DDR_DATA_BYTE_0" in failures[0]
+
+    def test_committed_artifact_path_does_not_enforce_stale(self):
+        """``--skip-route``: DDR is gated out as partially routed, so it does
+        not fire there; that must not trip the staleness check."""
+        mod = _load_helper_module()
+        assert mod.check_group_allowances(set(), self.ALLOWED, enforce_stale=False) == []
+
+    def test_no_allowance_is_strict(self):
+        mod = _load_helper_module()
+        assert mod.check_group_allowances({"X"}, {}, enforce_stale=True)
+        assert mod.check_group_allowances(set(), {}, enforce_stale=True) == []
 
 
 # ---------------------------------------------------------------------------
