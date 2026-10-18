@@ -5,8 +5,8 @@ honest answers, and they must never collapse into one:
 
 * **PASSED**  -- parity ran and found nothing (unwaived);
 * **FAILED**  -- parity ran and found board/schematic mismatches;
-* **NOT RUN** -- kicad-cli could not run parity (no schematic, or one that is
-  not fully annotated), or a pre-existing report does not record whether it
+* **NOT RUN** -- kicad-cli could not run parity (no schematic resolved, several
+  candidates, or one kicad-cli cannot netlist), or a pre-existing report does not record whether it
   ran.  kicad-cli writes ``"schematic_parity": []`` in that case too, so an
   empty array alone never means "clean".
 
@@ -27,11 +27,31 @@ PARITY_PASSED = "PASSED"
 PARITY_FAILED = "FAILED"
 PARITY_NOT_RUN = "NOT RUN"
 
-#: Reason shown when kicad-cli said it could not fetch the schematic netlist.
-PARITY_REASON_KICAD_CLI_SKIPPED = (
-    "kicad-cli could not fetch the schematic netlist; parity needs a fully "
-    "annotated schematic next to the board"
-)
+#: Generic reason shown when kicad-cli said it could not fetch the schematic
+#: netlist and the caller did not say why (Issue #7077).  ``run_drc`` now
+#: reports one of the cause-specific reasons below instead (Issue #7147).
+PARITY_REASON_KICAD_CLI_SKIPPED = "kicad-cli could not fetch the schematic netlist"
+
+
+def parity_reason_no_schematic(pcb_name: str) -> str:
+    """NOT RUN reason: no schematic could be resolved for the board (Issue #7147)."""
+    stem = pcb_name.rsplit(".", 1)[0]
+    return (
+        f"no schematic found for {pcb_name} (kicad-cli only reads {stem}.kicad_sch; "
+        "looked for project.kct artifacts.schematic, <stripped-stem>.kicad_sch, "
+        "a .kicad_pro-paired or sole .kicad_sch); pass --schematic PATH"
+    )
+
+
+def parity_reason_ambiguous(pcb_name: str) -> str:
+    """NOT RUN reason: several candidate root schematics (Issue #7147)."""
+    return f"several candidate schematics next to {pcb_name}; pass --schematic PATH"
+
+
+def parity_reason_netlist_failed(schematic: str) -> str:
+    """NOT RUN reason: a schematic was found but kicad-cli could not netlist it."""
+    return f"kicad-cli could not build a netlist from {schematic} (is it fully annotated?)"
+
 
 #: Reason shown for report input (``kct drc report.json``): kicad-cli writes
 #: ``"schematic_parity": []`` both when parity was clean and when it never
@@ -49,6 +69,9 @@ class SchematicParityStatus:
     issues: tuple[DRCViolation, ...] = field(default_factory=tuple)
     #: Parity findings matched by a ``.kct_waivers.json`` entry.
     waived_count: int = 0
+    #: The schematic parity was run against (or attempted with), when known
+    #: (Issue #7147).
+    schematic: str | None = None
 
     @property
     def checked(self) -> bool:
@@ -89,13 +112,14 @@ class SchematicParityStatus:
         return lines
 
     def to_dict(self, *, include_issues: bool = True) -> dict[str, Any]:
-        """JSON shape: ``{status, checked, reason, error_count, warning_count, issues}``."""
+        """JSON shape: ``{status, checked, reason, error_count, warning_count, schematic, issues}``."""
         data: dict[str, Any] = {
             "status": self.status,
             "checked": self.checked,
             "reason": self.reason,
             "error_count": self.error_count,
             "warning_count": self.warning_count,
+            "schematic": self.schematic,
         }
         if self.waived_count:
             data["waived_count"] = self.waived_count
@@ -108,6 +132,7 @@ def schematic_parity_status(
     findings: list[DRCViolation],
     ran: bool | None,
     reason: str | None = None,
+    schematic: str | None = None,
 ) -> SchematicParityStatus:
     """Derive the parity status from parsed findings and the run signal.
 
@@ -117,6 +142,7 @@ def schematic_parity_status(
             ``False`` when kicad-cli said it could not, ``None`` when unknown
             (a pre-existing report).
         reason: Override for the NOT RUN reason text.
+        schematic: The schematic parity used or attempted (Issue #7147).
 
     Any finding proves parity ran, whatever ``ran`` says.  An empty finding
     list is PASSED only when the run signal affirmatively says parity ran.
@@ -124,9 +150,13 @@ def schematic_parity_status(
     unwaived = tuple(v for v in findings if not v.is_waived)
     waived = len(findings) - len(unwaived)
     if unwaived:
-        return SchematicParityStatus(PARITY_FAILED, None, unwaived, waived)
+        return SchematicParityStatus(PARITY_FAILED, None, unwaived, waived, schematic)
     if findings or ran is True:
-        return SchematicParityStatus(PARITY_PASSED, None, (), waived)
+        return SchematicParityStatus(PARITY_PASSED, None, (), waived, schematic)
     if ran is False:
-        return SchematicParityStatus(PARITY_NOT_RUN, reason or PARITY_REASON_KICAD_CLI_SKIPPED)
-    return SchematicParityStatus(PARITY_NOT_RUN, reason or PARITY_REASON_REPORT_UNKNOWN)
+        return SchematicParityStatus(
+            PARITY_NOT_RUN, reason or PARITY_REASON_KICAD_CLI_SKIPPED, schematic=schematic
+        )
+    return SchematicParityStatus(
+        PARITY_NOT_RUN, reason or PARITY_REASON_REPORT_UNKNOWN, schematic=schematic
+    )

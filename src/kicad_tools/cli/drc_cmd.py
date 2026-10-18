@@ -91,10 +91,23 @@ def build_parser() -> argparse.ArgumentParser:
         "--allow-incomplete",
         action="store_true",
         help=(
-            "Exit 0 instead of 2 when schematic parity did NOT RUN (no or "
-            "unannotated schematic next to the board, or a report that does "
-            "not record whether parity ran). Same name and meaning as "
-            "kct check --allow-incomplete (Issue #7077)"
+            "Exit 0 instead of 2 when schematic parity did NOT RUN (no "
+            "schematic resolved, several candidates, one kicad-cli cannot "
+            "netlist, or a report that does not record whether parity ran). "
+            "Same name and meaning as kct check --allow-incomplete (Issue #7077)"
+        ),
+    )
+    parser.add_argument(
+        "--schematic",
+        type=Path,
+        default=None,
+        help=(
+            "Schematic for the parity check (default: resolved from the board "
+            "-- project.kct, then <base>.kicad_sch with _routed/_optimized/... "
+            "stripped).  kicad-cli only reads <pcb-stem>.kicad_sch, so kct "
+            "runs it on a temporary copy of the board folder with this "
+            "schematic under the board's name (Issue #7147).  Ignored for "
+            ".json/.rpt report input"
         ),
     )
     parser.add_argument(
@@ -228,11 +241,21 @@ def main(argv: list[str] | None = None) -> int:
     # whether kicad-cli actually ran schematic parity on the report (Issue
     # #7077); a loaded .json/.rpt report leaves it unknown.
     if input_path.suffix == ".kicad_pcb":
+        # Issue #7147: an explicit --schematic must exist.
+        if args.schematic is not None and not args.schematic.is_file():
+            print(f"Error: schematic not found: {args.schematic}", file=sys.stderr)
+            return 1
         # Run DRC on PCB
-        report = run_drc_on_pcb(input_path, args.output, args.keep_report)
+        report = run_drc_on_pcb(input_path, args.output, args.keep_report, schematic=args.schematic)
         if report is None:
             return 1
     elif input_path.suffix in (".json", ".rpt"):
+        if args.schematic is not None:
+            print(
+                "[INFO] --schematic is ignored for report input (it only applies "
+                "when kct drc runs kicad-cli on a .kicad_pcb).",
+                file=sys.stderr,
+            )
         # Parse existing report
         try:
             report = DRCReport.load(input_path)
@@ -269,6 +292,8 @@ def main(argv: list[str] | None = None) -> int:
                     # geometric violations; carry them through untouched.
                     schematic_parity=report.schematic_parity,
                     schematic_parity_ran=report.schematic_parity_ran,
+                    schematic_parity_reason=report.schematic_parity_reason,
+                    schematic_parity_schematic=report.schematic_parity_schematic,
                 )
                 filter_ignored_count = filter_result.ignored_count
         except FileNotFoundError as e:
@@ -504,12 +529,15 @@ def run_drc_on_pcb(
     pcb_path: Path,
     output_path: Path | None,
     keep_report: bool,
+    schematic: Path | None = None,
 ) -> DRCReport | None:
     """Run DRC on a PCB and return the parsed report.
 
     The report's ``schematic_parity_ran`` is set from kicad-cli's output:
     ``False`` when it said it could not fetch the schematic netlist, so the
     ``--schematic-parity`` checks it was asked for never ran (Issue #7077).
+    ``schematic`` overrides the resolved parity schematic; the report records
+    the schematic used and the cause of a NOT RUN (Issue #7147).
     """
     if not pcb_path.exists():
         print(f"Error: PCB not found: {pcb_path}", file=sys.stderr)
@@ -525,7 +553,7 @@ def run_drc_on_pcb(
 
     print(f"Running DRC on: {pcb_path.name}", file=sys.stderr)
 
-    result = run_drc(pcb_path, output_path, kicad_cli=kicad_cli)
+    result = run_drc(pcb_path, output_path, kicad_cli=kicad_cli, schematic=schematic)
 
     if not result.success:
         print(f"Error running DRC: {result.stderr}", file=sys.stderr)
@@ -543,6 +571,9 @@ def run_drc_on_pcb(
         result.output_path.unlink(missing_ok=True)
 
     report.schematic_parity_ran = not result.parity_skipped
+    report.schematic_parity_reason = result.parity_skip_reason
+    if result.parity_schematic is not None:
+        report.schematic_parity_schematic = str(result.parity_schematic)
     return report
 
 
