@@ -17,7 +17,7 @@
 import { join, resolve } from "node:path";
 import { existsSync } from "node:fs";
 import { loadBoards, boardsDir, discoverBoardDirs } from "../data/loadBoards.ts";
-import { displayStatus, displayStatusLabel } from "../data/boardStatus.ts";
+import { displayStatus, displayStatusLabel, knownIssueHref } from "../data/boardStatus.ts";
 import type { Board } from "../data/types.ts";
 import RenderGallery from "../components/RenderGallery.astro";
 import ReadinessProgress from "../components/ReadinessProgress.astro";
@@ -218,7 +218,19 @@ if (board.manifest_generated_at !== undefined) {
         {board.readiness?.checked_at && <p>Checked <time datetime={board.readiness.checked_at}>{board.readiness.checked_at}</time>.</p>}
         {board.readiness?.mode === "pcb_only" && <p>Scope: bare PCB fabrication. Component procurement and assembly are not included.</p>}
         {board.readiness?.mode === "assembly" && <p>Scope: PCB fabrication and assembly files.</p>}
+        {board.readiness?.manufacturer && <p>Fabrication tier: <code>{board.readiness.manufacturer}</code>.</p>}
         {board.readiness?.blockers.length ? <ul>{board.readiness.blockers.map(reason => <li>{reason}</li>)}</ul> : null}
+        {board.readiness?.known_issues?.length ? (
+          <>
+            <h3>Known issues</h3>
+            <p>Open issues recorded with this evidence. A defect keeps the board from ready; exceptions and advisories are disclosed but do not.</p>
+            <ul aria-label="Known issues">
+              {board.readiness.known_issues.map(entry => (
+                <li><a href={knownIssueHref(entry.issue)}>#{entry.issue}</a> <strong>{entry.kind}</strong>: {entry.summary} (recorded {entry.recorded})</li>
+              ))}
+            </ul>
+          </>
+        ) : null}
         <ReadinessProgress board={board} />
         {statusVariant !== "ready" && <p>Downloads are design artifacts and are not verified for ordering.</p>}
       </section>

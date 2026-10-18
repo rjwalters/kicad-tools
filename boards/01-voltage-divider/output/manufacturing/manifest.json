@@ -6,15 +6,15 @@
   },
   "files": {
     "README.txt": {
-      "sha256": "dc2b98159d5c131e676f999adfaf34a2912b52cfeafb8a5c25653cbef3d14df3",
-      "size": 1244
+      "sha256": "b3c8cce1e8086a38c45bbac0ba105a2ee01d15555e1963b237d1c5fe7282d1c3",
+      "size": 1237
     },
     "assembly-back.pdf": {
-      "sha256": "32e9814fe859f5f5c1ec82796182afd89e4204da4e95d4b4cb77f3f863e94734",
+      "sha256": "10106887e448f25b8f3dfc141ce915707e9fe07d22e8ce7f5af1dc0684de6c87",
       "size": 7123
     },
     "assembly-front.pdf": {
-      "sha256": "640ebf62b2cc5f6fdcca89d0d3ed3f8a38266e433c8c9836838b070a412fa20a",
+      "sha256": "35e58edebf8117f044b86f89e37431bdc834ad467a3e2fb1650648a8ac956777",
       "size": 11356
     },
     "bom_jlcpcb.csv": {
@@ -30,8 +30,8 @@
       "size": 377
     },
     "gerbers/gerbers.zip": {
-      "sha256": "930f66c4c5bc2bb83cc693f884a8eea95736daa556e3f77b912eb11ca29a2c92",
-      "size": 13148
+      "sha256": "34f94ba8b02ee49390f1150a8d5b1df3cc789d23f742655b7d8c3e1b6b32c001",
+      "size": 13144
     },
     "images/assembly.png": {
       "sha256": "1cadbdcde2169e08438f00dc4faeddd06cc7f1d39447fa15710e93afda7308ea",
@@ -58,8 +58,8 @@
       "size": 114660
     },
     "images/schematic_voltage_divider.png": {
-      "sha256": "27f0d0565c634d8f676c0d0b5e2edc214da86fdaa29c5f495a58dde423e213bf",
-      "size": 118129
+      "sha256": "02421af6d6d8fcfc31b5d5d4ddbb02bba24ae16635caccd9e9c90b4acb05e10b",
+      "size": 118121
     },
     "kicad_project.zip": {
       "sha256": "ea4856e580f093e47d5d3eea5d2db07ec9119cf3a7e1762bd2120bf6b3a8d63b",
@@ -78,15 +78,15 @@
       "size": 2464
     },
     "report.pdf": {
-      "sha256": "da8024f06ef31b69e8370f20fd1d4fa8cfde3b0156223ef18200cb9ad97b3459",
-      "size": 764447
+      "sha256": "be3ff7f0745f7ea2f42dbe2c6ed882321a0650139dfcfc3851664d7cecf74b6b",
+      "size": 745107
     },
     "schematic.pdf": {
-      "sha256": "28f84f71de49123bda271d6060e21b785717b68ffb557103c48f55864ddb3b79",
+      "sha256": "750f942a4aaf20e10db2f1d72fe43b548b1f31ea979b933b10ab6f9c635091be",
       "size": 47876
     }
   },
-  "generated_at": "2026-10-18T20:56:53.795355+00:00",
+  "generated_at": "2026-10-18T22:00:00+00:00",
   "kicad_tools_version": "0.23.0",
   "manufacturer": "jlcpcb",
   "mode": "assembly",
@@ -176,10 +176,9 @@
       "status": "OK"
     },
     {
-      "details": "unverified: J1 -> C7501260, R1 -> C17414, R2 -> C17414, J2 -> C7501260",
-      "message": "0 of 4 assigned item(s) verified (no source); 4 unverifiable (not in parts cache or offline catalog)",
+      "message": "4 of 4 assigned item(s) verified against offline catalog and parts cache; no LCSC value/package mismatches",
       "name": "bom_lcsc_values",
-      "status": "WARN"
+      "status": "OK"
     },
     {
       "message": "BOM and PCB references match (4 components)",

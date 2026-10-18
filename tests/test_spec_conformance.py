@@ -107,3 +107,35 @@ def test_category_is_not_blocking() -> None:
 
     assert "spec_conformance" not in BLOCKING_CATEGORIES
     assert coverage_for("spec_conformance", None).blocking is False
+
+
+def test_fixture_dir_never_adopts_parent_board_spec(board: Path, tmp_path: Path) -> None:
+    """Issue #7320: a regression fixture nested under a board folder with a
+    different spec must not inherit the parent's project.kct."""
+    # Parent spec demands a layer count the fixture does not have.
+    _edit(board, ("preferred: 2", "preferred: 6"))
+    assert _ids(_run(board, "jlcpcb"), "error") == ["spec_conformance_layers"]
+    out = tmp_path / "regression-output"
+    out.mkdir()
+    pcb = out / PCB_NAME
+    shutil.copy(board, pcb)
+    assert coverage_for("spec_conformance", pcb).state == "skipped"
+    assert _run(pcb, "jlcpcb").violations == []
+    # With the fixture's own spec beside the PCB it is used.
+    shutil.copy(tmp_path / "project.kct", out / "project.kct")
+    assert coverage_for("spec_conformance", pcb).state != "skipped"
+    assert _ids(_run(pcb, "jlcpcb"), "error") == ["spec_conformance_layers"]
+
+
+def test_recipe_prepare_copies_fixture_spec(tmp_path: Path) -> None:
+    import importlib.util
+
+    helper_path = REPO / "scripts/ci/board_recipe_artifacts.py"
+    spec = importlib.util.spec_from_file_location("board_recipe_artifacts", helper_path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    fx = tmp_path / "regression-fixture"
+    fx.mkdir()
+    (fx / "project.kct").write_text("x")
+    out = mod.recipe_output_dir(tmp_path, prepare=True)
+    assert (out / "project.kct").read_text() == "x"

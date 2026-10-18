@@ -207,3 +207,44 @@ def test_board04_uses_its_own_manufacturing_check(mod):
     board = mod.REPO_ROOT / "boards" / "04-stm32-devboard"
     assert (board / cfg.check_script).is_file()
     assert (board / cfg.routed_pcb).is_file() and (board / cfg.schematic).is_file()
+
+
+# --------------------------------------------------------------------------- Issue #7261
+def _warned_report(**counts: int) -> dict:
+    meta = {k: {"status": "PASSED"} for k in ("drc", "erc", "lvs", "manifest")}
+    violations = [
+        {"rule_id": rule, "severity": "warning"} for rule, n in counts.items() for _ in range(n)
+    ]
+    summary = {"errors": 0, "warnings": len(violations)}
+    return {"summary": summary, "meta_checks": meta, "violations": violations}
+
+
+def test_known_issue_allowance_tolerates_exactly_the_recorded_warnings(mod):
+    allowance = {"thermal_asymmetry": 9}
+    assert mod.check_report_verdict(_warned_report(thermal_asymmetry=9), "x", allowance)
+    for report in (
+        _warned_report(thermal_asymmetry=10),  # more than recorded
+        _warned_report(thermal_asymmetry=1, via_at_pad_edge=1),  # unlisted rule
+    ):
+        with pytest.raises(mod.GateFailure):
+            mod.check_report_verdict(report, "x", allowance)
+    mismatched = _warned_report(thermal_asymmetry=1)
+    mismatched["summary"]["warnings"] = 2  # summary disagrees with findings
+    with pytest.raises(mod.GateFailure):
+        mod.check_report_verdict(mismatched, "x", {"thermal_asymmetry": 5})
+
+
+def test_allowance_comes_from_the_boards_recorded_known_issues(mod, tmp_path):
+    board = tmp_path / "board"
+    (board / "output").mkdir(parents=True)
+    entry = {
+        "issue": 7220,
+        "kind": "advisory",
+        "summary": "s",
+        "recorded": "2026-10-18",
+        "warnings": {"thermal_asymmetry": 9},
+    }
+    (board / "output" / "readiness.json").write_text(json.dumps({"known_issues": [entry]}))
+    assert mod.known_issue_allowance(board) == {"thermal_asymmetry": 9}
+    (board / "output" / "readiness.json").write_text(json.dumps({}))
+    assert mod.known_issue_allowance(board) == {}

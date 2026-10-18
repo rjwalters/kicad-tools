@@ -211,7 +211,14 @@ class Release:
 
     # -- entry point -------------------------------------------------------
 
-    def main(self) -> int:
+    def main(self, argv: list[str] | None = None) -> int:
+        """Run the release; *argv* (default ``sys.argv[1:]``) is forwarded to ``kct readiness``.
+
+        Pass ``--checked-at ISO`` for reproducible evidence and
+        ``--known-issue N:summary:kind`` / ``--resolve-known-issue N`` to record
+        or drop a known issue (Issue #7261); recorded issues carry forward.
+        """
+        extra = list(sys.argv[1:] if argv is None else argv)
         self._snapshot()
         manifest = self.package_dir / "manifest.json"
         # --generate refuses a recipe-finalised package; this script IS its recipe.
@@ -228,7 +235,7 @@ class Release:
             # enter it here (Issue #6962); otherwise the host's KiCad config is used.
             return run_on_evidence_toolchain(
                 lambda: readiness_cmd.main(
-                    [str(self.board_dir), "--generate", "--mfr", self.manufacturer],
+                    [str(self.board_dir), "--generate", "--mfr", self.manufacturer, *extra],
                     engines=engines,
                 ),
                 mounts=[self.board_dir.parent],

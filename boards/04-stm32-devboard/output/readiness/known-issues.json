@@ -1,0 +1,10 @@
+{
+  "known_issues": [
+    {
+      "issue": 6269,
+      "kind": "exception",
+      "summary": "Paid 0.15 mm mechanical-drill via process (ruling #7147); the generic jlcpcb-tier1 kct check reports the reviewed vias as errors, the board's own check_manufacturing.py models the process",
+      "recorded": "2026-10-18"
+    }
+  ]
+}

@@ -6,15 +6,15 @@
   },
   "files": {
     "README.txt": {
-      "sha256": "b68505952057eefaa9a04c7272428b68e44a04e9fa8a34d00c86e0892586d1f5",
-      "size": 1234
+      "sha256": "83f916fcbab8ffd0cc3453760417e67b8727995aa655cdc0fe4f3c1f888427b8",
+      "size": 1227
     },
     "assembly-back.pdf": {
-      "sha256": "12450fbfa76693a487f4f5f428fcbd636483f3f688fbca3fabdc03faf5b8a6fa",
+      "sha256": "a0d4693a6d88d29559c05f20d7b19ef14c04e05dd1d8dd4245a08c57a5d8ebcb",
       "size": 5983
     },
     "assembly-front.pdf": {
-      "sha256": "b74b729344287674e4b2eb904aab08f8b65005a5c0aee78bc3e05571c1de178a",
+      "sha256": "51d78fc423fc5d83e3712b32d1e05d89bc69ca321359366d1ed1cb12f561b50b",
       "size": 9563
     },
     "bom_jlcpcb.csv": {
@@ -30,8 +30,8 @@
       "size": 270
     },
     "gerbers/gerbers.zip": {
-      "sha256": "1b50715b752e1212a2e272d7febb8e5ce37ae264423e4afe04726099d27e0cf4",
-      "size": 12038
+      "sha256": "5632022fc2e18552d66c8f8e450a19258c15f19ffedd86b754876b403f432bbf",
+      "size": 12036
     },
     "images/assembly.png": {
       "sha256": "ca6a436bfa2f87e0a14faa2f9fecb9d608594f11a504aee0e92beb39cd1fea31",
@@ -58,8 +58,8 @@
       "size": 124957
     },
     "images/schematic_simple_led.png": {
-      "sha256": "ee6225e17a3ea7f6f4c076639be1465b2ae3537911bd0eeccf3ff708e42a306f",
-      "size": 117856
+      "sha256": "c90b07e37b51eb037d80cf8bcac2ab4392d8eca7868d0f6409ff154e62b7727a",
+      "size": 117853
     },
     "kicad_project.zip": {
       "sha256": "df7c85fa087f85a233f03b825ef4cd38dff8de42e21c2e3fb751e8a4fec00837",
@@ -78,15 +78,15 @@
       "size": 2528
     },
     "report.pdf": {
-      "sha256": "12a4d69c9dbb911f0dcd5d34d51245c94660446fd1c32a9acfec93c9e5a1f7fd",
-      "size": 756453
+      "sha256": "bdacfb129af236f2d8291a3b1703b9df5ec21cbb90b4e40bac9fab42cc6a4f35",
+      "size": 736503
     },
     "schematic.pdf": {
-      "sha256": "78af13827f8485435d890bca7a67fa3488a987a193e32f8ae3426f7a98c9ec44",
+      "sha256": "c60cb1259ea550d08443a8f815712dbe5954006c88c41363ebf68a2302b579db",
       "size": 47252
     }
   },
-  "generated_at": "2026-10-18T20:56:15.046973+00:00",
+  "generated_at": "2026-10-18T22:00:00+00:00",
   "kicad_tools_version": "0.23.0",
   "manufacturer": "jlcpcb",
   "mode": "assembly",
@@ -176,8 +176,8 @@
       "status": "OK"
     },
     {
-      "details": "unverified: J1 -> C7501260, R1 -> C17630, D1 -> C87271",
-      "message": "0 of 3 assigned item(s) verified (no source); 3 unverifiable (not in parts cache or offline catalog)",
+      "details": "unverified: R1 -> C17630, D1 -> C87271",
+      "message": "1 of 3 assigned item(s) verified (offline catalog); 2 unverifiable (not in parts cache or offline catalog)",
       "name": "bom_lcsc_values",
       "status": "WARN"
     },

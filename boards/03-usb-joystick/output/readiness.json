@@ -1,9 +1,11 @@
 {
   "schema_version": 1,
-  "checked_at": "2026-10-18T20:00:00+00:00",
+  "checked_at": "2026-10-18T20:30:00+00:00",
   "mode": "assembly",
-  "status": "ready",
-  "blockers": [],
+  "status": "blocked",
+  "blockers": [
+    "known defect #7250: USB D+/D- pair on In2.Cu (the VCC plane layer) measures 71.6 ohm differential against the 90 ohm spec in project.kct; not ready until #7250 is fixed"
+  ],
   "checks": [
     {
       "name": "zone_fill",
@@ -50,11 +52,29 @@
     "kicad_tools_version": "0.23.0",
     "dirty": true,
     "manufacturer": "jlcpcb-tier1",
-    "commit": "383a0db0d588e05dfa51a760f936539c7b044d59",
-    "source_digest": "be84e7ce2203a3e1b8f9653378247da68b34dc1f04bd76cf123c215ef528bce4",
+    "commit": "c6c01121ecafe89bfec12a4cff41477938842826",
+    "source_digest": "c813d7db0bad098374b8008a8880a8d8c15e13bf33e00345875abecc26166049",
     "kicad_cli_version": "10.0.6",
     "rules_digest": "d1b527ee874c527a17ca89d94b893759cb3b19fd9b074ac2e95e011d958ccaae"
   },
+  "manufacturer": "jlcpcb-tier1",
+  "known_issues": [
+    {
+      "issue": 7220,
+      "kind": "advisory",
+      "summary": "One-sided thermal connection on C10/C11 (GND pad solid to the F.Cu pour, JOY_X/JOY_Y pad on a 0.20 mm trace) and on the four J1 GND through-hole pins (solid on three copper layers): tombstoning and barrel-fill risk; narrower-spoke repair tracked in #7295",
+      "recorded": "2026-10-18",
+      "warnings": {
+        "thermal_asymmetry": 6
+      }
+    },
+    {
+      "issue": 7250,
+      "kind": "defect",
+      "summary": "USB D+/D- pair on In2.Cu (the VCC plane layer) measures 71.6 ohm differential against the 90 ohm spec in project.kct; not ready until #7250 is fixed",
+      "recorded": "2026-10-18"
+    }
+  ],
   "evidence": {
     "zone_fill": "output/readiness-verification/fill-consistency.json",
     "kct_check": "output/readiness-verification/kct-check.json",
@@ -166,10 +186,11 @@
     "output/readiness-verification/fill-saved/usb_joystick_routed.kicad_dru": "874cc0b7c8160aef48b42e06ad4825ea168f5a27fce24a0047cd8b47de42963e",
     "output/readiness-verification/fill-saved/usb_joystick_routed.kicad_pcb": "a07693a2dbc33114cd3ae5eeea68f940151af5adc566c5b6303225b727d02b98",
     "output/readiness-verification/fill-saved/usb_joystick_routed.kicad_pro": "e1b779bc9454f7e182c9f507a78162bc3e5b96e7cb9fc9231fb9bbabc046db00",
-    "output/readiness-verification/kct-check.json": "412e34e9e8f42798ad292e75ca2f97169c1c0be2c3b62c2f84e49ce8131d9013",
-    "output/readiness-verification/native-drc-raw.json": "f868cd99eb9a293d024e90b21044093e27b089d5bd37c23e9148929684f7e425",
+    "output/readiness-verification/kct-check.json": "f30687aff9bc564084d08d46ae2d57a39082c66586c9794135adaf7e3ab930ee",
+    "output/readiness-verification/known-issues.json": "ca3cc146145b7e2cb0bd13138e035b15048452a5f45dcaaee13d3c75fa49b567",
+    "output/readiness-verification/native-drc-raw.json": "dc22f089596d77980c6fc0ade0f438ad86f152c457c9a286052a4153328cd382",
     "output/readiness-verification/native-drc.json": "c8f979c830dc98747901e8423c4b4ff52cad1fe98e1e3ab7c7bb3bf9a16c2c1d",
-    "output/readiness-verification/refilled-native/native-drc-raw.json": "f868cd99eb9a293d024e90b21044093e27b089d5bd37c23e9148929684f7e425",
+    "output/readiness-verification/refilled-native/native-drc-raw.json": "dc22f089596d77980c6fc0ade0f438ad86f152c457c9a286052a4153328cd382",
     "output/readiness-verification/refilled-native/native-drc.json": "5864ca284738cebdc8b4bdded0ed4fa976f8dfdb473d1619e2838eb0e52bda36",
     "output/usb_joystick.kicad_pro": "09c8746ffab5b0449d13f3b777d87c4786c2abc2cfa2df7eb796e12f83822c05",
     "output/usb_joystick.kicad_sch": "f5e844b79f26bad1174a406b5fc51b35303fc44bd2a20806a47d5aeb62ba5e30",

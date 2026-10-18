@@ -201,6 +201,55 @@ separate from that gallery report. `ready` requires all applicable gates to
 pass; other results are `blocked` or `unverified` with named blockers and a
 nonzero exit. There is no flag that declares a partial run ready.
 
+### Known issues and fabrication tier (Issue #7261)
+
+A report can only vouch for the checks it ran. Open issues a person has found
+and filed are recorded in two optional, additive fields:
+
+```json
+{
+  "manufacturer": "jlcpcb-tier1",
+  "known_issues": [
+    {"issue": 7220, "kind": "advisory", "summary": "One-sided thermal connection on C10/C11 ...",
+     "recorded": "2026-10-18", "warnings": {"thermal_asymmetry": 6}},
+    {"issue": 7250, "kind": "defect", "summary": "USB pair 71.6 ohm vs the 90 ohm spec ...",
+     "recorded": "2026-10-18"}
+  ]
+}
+```
+
+* `manufacturer` is the fabrication tier the evidence was produced for.
+* `known_issues` entries have `issue` (positive integer), `kind`, `summary`
+  (non-empty, trimmed), `recorded` (ISO date) and an optional `warnings`
+  object (`kct check` rule id to the maximum count the issue accounts for).
+  Entries are unique and sorted by `issue`; no other keys are allowed.
+* `kind` is `defect` (the board fails its own spec), `exception` (an approved
+  deviation) or `advisory` (a disclosed risk or ordering requirement). **Any
+  `defect` makes `status` `blocked`**, with a `known defect #N: summary`
+  blocker. A `ready` report that lists a defect is invalid. Exceptions and
+  advisories keep `ready`.
+* The list is hash-bound: the producer writes the same list to
+  `known-issues.json` in its evidence directory (`output/readiness/` or
+  `output/readiness-verification/`) and hashes that file into `inputs`. A list
+  that is unbound, or that differs from that file, makes the report
+  `unverified`.
+
+`kct readiness --known-issue N:summary:kind[:rule=count,...]` (repeatable)
+records an entry; the summary may contain `:`. Recorded entries carry forward
+on later runs, keeping their `recorded` date, until
+`--resolve-known-issue N` drops them. Validation is format-only and offline.
+`--generate` writes each entry into the bundle README's "Accepted-risk
+waivers" section as `#N [kind] summary`. `kct fleet status` shows `YES*` and a
+`known: #N,#M` cell for exceptions and advisories, and `NO (known defect #N)`
+for a defect. The site labels a ready board "Assembly ready · 2 known issues"
+and lists the issues with links.
+
+Board scripts that tolerate known `kct check` warnings should read the
+allowance from these entries (`kicad_tools.cli.known_issues.known_warning_allowance`)
+rather than keep their own list; `scripts/boards/refresh_readiness.py` gates
+`kct check` warnings against exactly that allowance and carries the list
+forward when it re-pins a board.
+
 ### Engine fingerprint
 
 `engine` is an additive optional object in schema v1 (no `schema_version` bump,

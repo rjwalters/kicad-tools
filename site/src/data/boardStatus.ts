@@ -32,8 +32,11 @@ export function displayStatusLabel(board: Board): string {
   switch (variant) {
     case "development":
       return "In development";
-    case "ready":
-      return board.readiness?.mode === "pcb_only" ? "PCB fabrication ready" : "Assembly ready";
+    case "ready": {
+      const base = board.readiness?.mode === "pcb_only" ? "PCB fabrication ready" : "Assembly ready";
+      const n = board.readiness?.known_issues?.length ?? 0;
+      return n ? `${base} · ${n} known issue${n === 1 ? "" : "s"}` : base;
+    }
     case "blocked":
       return "Needs work";
     case "drc": {
@@ -70,4 +73,9 @@ export function displayStatusExplanation(board: Board): string {
     case "partial": return "Only part of the design artifact set is available.";
     case "no_artifacts": return "No usable design artifact summary is available.";
   }
+}
+
+/** Issue tracker link for a recorded known issue (#7261). */
+export function knownIssueHref(issue: number): string {
+  return `https://github.com/rjwalters/kicad-tools/issues/${issue}`;
 }
