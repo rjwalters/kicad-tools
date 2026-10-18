@@ -51,7 +51,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from ..clearance_kernel import ALL_LAYERS, KEdge, KSegment, KShape, KVia, copper_gap
+from ..clearance_kernel import ALL_LAYERS, KEdge, KPad, KSegment, KShape, KVia, copper_gap, make_pad
 from .geometry import Pt
 
 __all__ = [
@@ -116,6 +116,24 @@ def site(point: Pt, radius: float) -> KVia:
         drill diameter, so there is nothing for :func:`hole_gap` to read.
     """
     return KVia(point[0], point[1], 2.0 * radius)
+
+
+def pad_outline(
+    shape: str,
+    width: float,
+    height: float,
+    rratio: float,
+    rotation_deg: float,
+    center: Pt,
+) -> KPad:
+    """A pad's real copper outline, as the kernel's pad shape (Issue #7024).
+
+    A thin delegation to :func:`kicad_tools.router.clearance_kernel.make_pad`
+    so the pair-leg pad-entry containment test in :mod:`.coupled` (#6959)
+    reaches the kernel through this adapter -- the lattice package's single
+    kernel import site -- rather than importing it directly.
+    """
+    return make_pad(shape, width, height, rratio, rotation_deg, center[0], center[1])
 
 
 def outline_edge(c: Pt, d: Pt) -> KEdge:

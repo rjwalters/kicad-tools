@@ -566,8 +566,8 @@ def _entry_in_copper(entry: Pt, pad: Pad) -> bool:
     a point in a corner that may hold no copper.  Shapes the builder does not
     model exactly (``custom``, ``trapezoid``, ...) never contain the point.
     """
-    from ..clearance_kernel import KVia, copper_gap, make_pad
     from ..clearance_shapes import pad_kernel_params
+    from .kernel_adapter import gap, pad_outline, site
 
     if pad.shape not in _CLIP_SHAPES:
         return False
@@ -581,8 +581,8 @@ def _entry_in_copper(entry: Pt, pad: Pad) -> bool:
     # its corners come out slightly rounder than a true inset: it stays
     # inside the true inset, which is the safe direction.
     m = 2.0 * _MIN_END_DEPTH
-    kpad = make_pad(shape, pad.width - m, pad.height - m, rratio, pad.rotation, pad.x, pad.y)
-    return copper_gap(kpad, KVia(x=entry[0], y=entry[1], diameter=0.0)) <= 1e-9
+    kpad = pad_outline(shape, pad.width - m, pad.height - m, rratio, pad.rotation, (pad.x, pad.y))
+    return gap(kpad, site(entry, 0.0)) <= 1e-9
 
 
 def clip_to_pad_entry(points: list[Pt], pad: Pad, trace_w: float) -> list[Pt]:
