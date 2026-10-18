@@ -1932,6 +1932,11 @@ class PreflightChecker:
             return None
 
         label = name.upper()
+        # Issue #6532: the details land in committed manifests; never record
+        # an absolute host path there.
+        from ..cli.check_cmd import portable_report_path
+
+        shown = portable_report_path(report_path)
         if name == "drc":
             target, key, rerun = (
                 "PCB",
@@ -1954,7 +1959,7 @@ class PreflightChecker:
                     "(stale: content changed since it was generated)"
                 ),
                 details=(
-                    f"{report_path} records a {key} that differs from the current "
+                    f"{shown} records a {key} that differs from the current "
                     f"{target}'s; its verdict describes an older version -- {rerun}"
                 ),
             )
@@ -1963,7 +1968,7 @@ class PreflightChecker:
             status="WARN",
             message=f"{label} report is not bound to this {target} (unhashed); {rerun}",
             details=(
-                f"{report_path} records no {key} and no output/readiness.json pins it "
+                f"{shown} records no {key} and no output/readiness.json pins it "
                 f"together with this {target}, so its verdict is not evidence for the "
                 f"current {target}"
             ),
