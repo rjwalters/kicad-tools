@@ -36,8 +36,9 @@ gate passes.  Stages, in order:
    report; ``kicad-cli`` re-plots the assembly PDFs; ``kct render`` the
    board renders.  Also re-written: the saved-fill native DRC report,
    ``fill-consistency.json``, ``refill-stability.json`` and the ``kct check``
-   report.  The fresh export's CPL must equal the committed one: placement
-   is not this driver's business.
+   report.  The fresh export's CPL must equal the committed one, or differ only in
+   ``Mid X``/``Mid Y`` by matching the routed PCB's Gerber/drill frame (#7059,
+   #7199): placement is not this driver's business.
 5. ``refresh_readiness.py``'s pipeline: native ERC, deterministic archive
    rebuilds, manifest re-hash (only ``files`` may change), its gates
    (refilled native DRC, ``kct check``, ``net-status``, ``validate --sync``),
@@ -73,6 +74,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import cpl_frame  # noqa: E402
 import declare_router_netclasses_6390 as netclasses  # noqa: E402
 import refresh_readiness as rr  # noqa: E402
 
@@ -422,6 +424,26 @@ def bundle_is_stale(staged: Path, cfg: rr.BoardConfig) -> bool:
     return not archive_is_current(staged / archive, [staged / s for s in search])
 
 
+def check_fresh_cpl(committed: bytes, fresh: bytes, routed_pcb: Path) -> None:
+    """Refuse a fresh CPL that moves a part; accept a pure coordinate-frame refresh (#7199).
+
+    Byte-identical is always fine.  A change is accepted only when every column
+    but ``Mid X``/``Mid Y`` is unchanged *and* the fresh coordinates equal the
+    routed PCB's own Gerber/drill frame, i.e. the placement did not move.
+    """
+    if fresh == committed:
+        return
+    if not cpl_frame.only_coordinates_differ(committed, fresh):
+        raise GateFailure("fresh CPL differs from the committed one: placement changed")
+    problems = cpl_frame.coordinate_mismatches(cpl_frame.read_cpl(fresh), routed_pcb)
+    if problems:
+        raise GateFailure(
+            "fresh CPL differs from the committed one and does not match the routed PCB's "
+            "drill frame: placement changed: " + "; ".join(problems[:3])
+        )
+    log("  CPL: coordinate-frame refresh only (columns other than Mid X/Mid Y unchanged)")
+
+
 def stage_replot(staged: Path, cfg: rr.BoardConfig, bundle: BundleConfig) -> list[str]:
     """Re-plot every artifact drawn from the routed PCB's copper."""
     from kicad_tools.cli.readiness_cmd import _export_assembly_pdf
@@ -454,8 +476,11 @@ def stage_replot(staged: Path, cfg: rr.BoardConfig, bundle: BundleConfig) -> lis
         if (project / routed.name).read_bytes() != routed.read_bytes():
             raise GateFailure("kct export modified the routed PCB it plotted")
         if (export / "cpl_jlcpcb.csv").is_file() and (mfg / "cpl_jlcpcb.csv").is_file():
-            if (export / "cpl_jlcpcb.csv").read_bytes() != (mfg / "cpl_jlcpcb.csv").read_bytes():
-                raise GateFailure("fresh CPL differs from the committed one: placement changed")
+            check_fresh_cpl(
+                (mfg / "cpl_jlcpcb.csv").read_bytes(),
+                (export / "cpl_jlcpcb.csv").read_bytes(),
+                routed,
+            )
         for pattern in bundle.export_members:
             committed = sorted(p.relative_to(mfg).as_posix() for p in mfg.glob(pattern))
             fresh = sorted(p.relative_to(export).as_posix() for p in export.glob(pattern))

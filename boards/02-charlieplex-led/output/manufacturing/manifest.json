@@ -10,15 +10,15 @@
       "size": 4290
     },
     "README.txt": {
-      "sha256": "06dd296272c4d07512c0c95831c8ebd2ea038014ec9dc7c590d26e2423f0af61",
-      "size": 2714
+      "sha256": "93d150a8fa1615110eac4afdefc048bc77bb83f8f5a3af00cb6a088729b88456",
+      "size": 2712
     },
     "assembly-back.pdf": {
-      "sha256": "097e5a41974f15b0c0558f18b99ffbb1791580fd2baca2dc622179bbe1aec063",
+      "sha256": "13419431f23705d3efad46acf2914bb292629c4d29e1ff901da29e623818b334",
       "size": 20879
     },
     "assembly-front.pdf": {
-      "sha256": "1ac7062996678979106ccf493621ae326c870cc4ab623dda2f1a8732fe11d722",
+      "sha256": "461d9eed211730897b0d1e742e0b7ac1224b491245fd942149fff16c596c311a",
       "size": 31029
     },
     "bom_jlcpcb.csv": {
@@ -26,12 +26,12 @@
       "size": 512
     },
     "check-report.json": {
-      "sha256": "634868703bf0ffd58976dca7aab6dac45a8a002b7c9c91f35c674ad44d0341c5",
-      "size": 8879
+      "sha256": "357d0065c804839529e0d0d68c4309b70c3c94bdb25776307f29803b1b3ec2cc",
+      "size": 11342
     },
     "cpl_jlcpcb.csv": {
-      "sha256": "796feb25658dc35a02c8e5468caaa9eec252a8a66d62c4dc2bc1eb581238ddd5",
-      "size": 1103
+      "sha256": "dadef108b6fbf8f7df9af587b16a7db23982396778713d7c88443217ad94215e",
+      "size": 1149
     },
     "design-source.zip": {
       "sha256": "d94b0260df415a8a112458bac04fbd92b231febb2230a5e3e1529cdb39940ba1",
@@ -54,8 +54,8 @@
       "size": 1064
     },
     "gerbers/gerbers.zip": {
-      "sha256": "023e8b27ac6805329b11ce1ecea524fc90007c491deeed8700d280a798288e79",
-      "size": 15692
+      "sha256": "1e58c951da0f5ef39bee6d0cb8665d830437fbdad17246e97b88390d87e5e65a",
+      "size": 15700
     },
     "images/assembly.png": {
       "sha256": "40fee37f26278a7010579b755959f1667ce65f5b80ff17cd4e95ef60a35fd519",
@@ -86,8 +86,8 @@
       "size": 277629
     },
     "kct-check.json": {
-      "sha256": "634868703bf0ffd58976dca7aab6dac45a8a002b7c9c91f35c674ad44d0341c5",
-      "size": 8879
+      "sha256": "357d0065c804839529e0d0d68c4309b70c3c94bdb25776307f29803b1b3ec2cc",
+      "size": 11342
     },
     "kicad_project.zip": {
       "sha256": "96246e233a5a05717634e8158df9ea4f26433d7a07147d0d5d340f1e15701626",
@@ -102,7 +102,7 @@
       "size": 252
     },
     "native-erc.json": {
-      "sha256": "281b300cf73bfeead21e69ac87107d785ee834675f345c9511d57b6776613399",
+      "sha256": "e7e5cbc2295a59e02f7faf1a33d96c09535c53dc7ed914f5c9cafb3b73c6294a",
       "size": 988
     },
     "project.kct": {
@@ -126,22 +126,42 @@
       "size": 125204
     },
     "report.md": {
-      "sha256": "4e11cffcd082d39c9c562eda7481df3fb9b220a21e67b08c440fa7a1435703fa",
-      "size": 3480
+      "sha256": "0368651e1367c8ca8dd9a4e6e11499bd29d48ed279e264ff94ac34618c37eae4",
+      "size": 3545
     },
     "report.pdf": {
-      "sha256": "9564295040485f6fc1942505205f25c30e6b4c990eb4665f426dd03b93a316f0",
-      "size": 1725004
+      "sha256": "c4e78d9f248ad05a4e324089406b9b1d0bee46b002afb73e35432f325206458a",
+      "size": 1725078
     },
     "schematic.pdf": {
-      "sha256": "19668a0dd48aa4694efa95595a4d2e11196e8358dbd92044dabeddc3cc015c82",
+      "sha256": "4174a00d2584d5eaa69da91d04ac23e92fc2e66f02a2a8475c511b33744513c4",
       "size": 85899
     }
   },
-  "generated_at": "2026-10-14T03:13:51.145502+00:00",
-  "kicad_tools_version": "0.22.0",
+  "generated_at": "2026-10-18T15:17:50.280608+00:00",
+  "kicad_tools_version": "0.23.0",
   "manufacturer": "jlcpcb",
   "mode": "assembly",
+  "ordered_copper": {
+    "layers": 2,
+    "ordered_inner_oz": 0.0,
+    "ordered_outer_oz": 1.0,
+    "profile_options": [
+      [
+        1.0,
+        0.0
+      ],
+      [
+        2.0,
+        0.0
+      ]
+    ],
+    "source": "https://jlcpcb.com/help/article/jlcpcb-copper-weight",
+    "source_verified": "2026-10-18",
+    "stackup_inner_oz": null,
+    "stackup_outer_oz": null,
+    "status": "undeclared"
+  },
   "preflight": [
     {
       "details": "Footprints: 19",
@@ -180,9 +200,25 @@
       "status": "OK"
     },
     {
+      "message": "No usable stackup copper to reconcile; profile default copper applies",
+      "name": "stackup_copper",
+      "status": "OK"
+    },
+    {
       "details": "THT references: J1, J2, U1",
       "message": "3 through-hole component(s) excluded from CPL",
       "name": "tht_in_cpl",
+      "status": "OK"
+    },
+    {
+      "message": "No bottom-side components in CPL (single-sided assembly)",
+      "name": "bottom_side_in_cpl",
+      "status": "OK"
+    },
+    {
+      "details": "16 package/pitch requirement(s) checked",
+      "message": "All placed packages fit JLCPCB Economic PCBA (min package 0402, IC pitch 0.4 mm, BGA pitch 0.5 mm)",
+      "name": "assembly_package_limits",
       "status": "OK"
     },
     {
@@ -192,9 +228,10 @@
       "status": "OK"
     },
     {
-      "message": "No LCSC value/package mismatches detected (0 assigned item(s) checked against local parts cache)",
+      "details": "unverified: U1 -> C965497, J1 -> C7501260, J2 -> C65114, C1 -> C49678, C2 -> C1779, R5 -> C17414, R1 -> C17630, R2 -> C17630 (and 11 more)",
+      "message": "0 of 19 assigned item(s) verified (no source); 19 unverifiable (not in parts cache or offline catalog)",
       "name": "bom_lcsc_values",
-      "status": "OK"
+      "status": "WARN"
     },
     {
       "message": "BOM and PCB references match (19 components)",
@@ -219,5 +256,7 @@
   ],
   "producer": "kct readiness",
   "version": "1.0",
-  "warning_counts_by_rule": {}
+  "warning_counts_by_rule": {
+    "via_at_pad_edge": 2
+  }
 }

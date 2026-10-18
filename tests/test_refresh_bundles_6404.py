@@ -267,3 +267,32 @@ def test_board07_validate_fills_under_the_published_router_classes(mod):
     theirs = mod.netclasses.router_net_class_map(pcb)
     assert {k: v.name for k, v in ours.items()} == {k: v.name for k, v in theirs.items()}
     assert ours == theirs
+
+
+CPL_HEADER = "Designator,Val,Package,Mid X,Mid Y,Rotation,Layer\n"
+
+
+def _cpl(x, y, rotation="0.0", ref="R1"):
+    return f"{CPL_HEADER}{ref},10k,R_0805,{x}mm,{y}mm,{rotation},Top\n".encode()
+
+
+def _pcb(tmp_path):
+    pcb = tmp_path / "b.kicad_pcb"
+    pcb.write_text('(kicad_pcb (footprint "R" (at 110 60) (property "Reference" "R1")))')
+    return pcb
+
+
+def test_cpl_gate_accepts_frame_only_refresh(mod, tmp_path):
+    mod.check_fresh_cpl(_cpl(15, 8), _cpl("110.0000", "-60.0000"), _pcb(tmp_path))
+    mod.check_fresh_cpl(_cpl(110, -60), _cpl(110, -60), _pcb(tmp_path))
+
+
+def test_cpl_gate_still_refuses_other_changes(mod, tmp_path):
+    pcb = _pcb(tmp_path)
+    for fresh in (
+        _cpl(110, -60, rotation="180.0"),  # not coordinates only
+        _cpl(110, -60, ref="R2"),  # designator changed
+        _cpl(16, 9),  # coordinates move but do not match the PCB frame
+    ):
+        with pytest.raises(mod.GateFailure, match="placement changed"):
+            mod.check_fresh_cpl(_cpl(15, 8, ref="R1"), fresh, pcb)

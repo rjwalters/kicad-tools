@@ -1,7 +1,7 @@
 {
   "version": "1.0",
   "kicad_tools_version": "0.23.0",
-  "generated_at": "2026-10-18T05:09:24.027893+00:00",
+  "generated_at": "2026-10-18T15:22:10.092143+00:00",
   "manufacturer": "jlcpcb-tier1",
   "files": {
     "DESIGN_REVIEW.md": {
@@ -29,12 +29,12 @@
       "size": 982
     },
     "check-report.json": {
-      "sha256": "4cdf4fb599f510468feaf2da83a17ddfadc63cd8bc201c5d4a47ce49ccfc81d7",
-      "size": 9617
+      "sha256": "d4d6bf7acdab7b82a327fb8fce63f4e364203448873b2ffc88165bd6c04baf10",
+      "size": 13917
     },
     "cpl_jlcpcb.csv": {
-      "sha256": "8b435e9347774c7f26e3536b35136d1cf2fc0c9ba3c1de5803fcfd2ab6086b5d",
-      "size": 2681
+      "sha256": "e84e35936dd6d2a46de1d9192f241259d7f628ce0604b4eee454366a57fc0ce4",
+      "size": 2763
     },
     "design-source/DESIGN_REVIEW.md": {
       "sha256": "9696ae5c33cbe92b09daa2e16817e8b20d7315301d2d7975dcb3b54f212103e3",
@@ -173,8 +173,8 @@
       "size": 2192
     },
     "gerbers/gerbers.zip": {
-      "sha256": "4582d3588537d011960de85d1509f2ff5ecce7cc3720b7fa455845d94b2a3d64",
-      "size": 126679
+      "sha256": "5e41227cdb0421f551aebe04238d6cff5d414173080b74908454d566efc73f69",
+      "size": 126675
     },
     "images/assembly.png": {
       "sha256": "4f7fe073c93985e6bbd8edf9f854c537106c24a7ea2763001f1b44914fa02cf3",
@@ -209,12 +209,12 @@
       "size": 482775
     },
     "images/schematic_usb_joystick.png": {
-      "sha256": "435c684096c4c22d4f460823a2584c6e3f09f6663b89176976bbbaec2728eea2",
-      "size": 486460
+      "sha256": "c0a3950fda2f26c18ad6359ba1ccd02e953d67c0be8d2b40d3d8553de7445c79",
+      "size": 486466
     },
     "kicad_project.zip": {
-      "sha256": "429be789ed10b5ff192cbd74d07ae9f56f19124e142c7427f6afc730a2e98236",
-      "size": 195315
+      "sha256": "ac5ee6bc16cf04bb6936e6ee642b01620235bdfcbe9fa479614dc60f8b881d76",
+      "size": 195339
     },
     "manual-assembly-bom.csv": {
       "sha256": "f51fef1b581623d69c00b1b3604f0a1b193c29e29134a3931e0853ab13030ef7",
@@ -317,12 +317,12 @@
       "size": 2354
     },
     "report.md": {
-      "sha256": "1770f50b30b94b8d926601b7d4e4105f278e8294e6fffe513af607bea0dc5997",
-      "size": 4928
+      "sha256": "29f381a6bc735e085c0e9592b4a4c346838b0450a32640634c08ff32b43b9274",
+      "size": 4954
     },
     "report.pdf": {
-      "sha256": "06cfb8a6cbd2e67cdcb27cb812771cfe283f59c7435e96e0b7779e04c07f5695",
-      "size": 3253376
+      "sha256": "e088e3023e2b04527eb91b3479004bb2ea74beaf27ec2ab89ead7b3d15845ccb",
+      "size": 3287421
     },
     "schematic.pdf": {
       "sha256": "6fe021a9ea56eb056b2fc6dc24e3fee47c4f6555c6141a4ad1ec755b51aa0d98",
@@ -371,10 +371,26 @@
       "message": "Drill holes present (105 vias, 20 TH pads)"
     },
     {
+      "name": "stackup_copper",
+      "status": "OK",
+      "message": "Stackup copper matches the jlcpcb-tier1 order (outer 1 oz, inner 0.5 oz)"
+    },
+    {
       "name": "tht_in_cpl",
       "status": "OK",
       "message": "1 through-hole component(s) excluded from CPL",
       "details": "THT references: J1"
+    },
+    {
+      "name": "bottom_side_in_cpl",
+      "status": "OK",
+      "message": "No bottom-side components in CPL (single-sided assembly)"
+    },
+    {
+      "name": "assembly_package_limits",
+      "status": "OK",
+      "message": "All placed packages fit JLCPCB Capability Plus Economic PCBA (min package 0402, IC pitch 0.4 mm, BGA pitch 0.5 mm)",
+      "details": "36 package/pitch requirement(s) checked"
     },
     {
       "name": "bom_fields",
@@ -383,8 +399,9 @@
     },
     {
       "name": "bom_lcsc_values",
-      "status": "OK",
-      "message": "No LCSC value/package mismatches detected (38 assigned item(s) checked against local parts cache)"
+      "status": "WARN",
+      "message": "0 of 38 assigned item(s) verified (no source); 38 unverifiable (not in parts cache or offline catalog)",
+      "details": "unverified: U1 -> C44854, J1 -> C7095263, U2 -> C7519, F1 -> C126817, Y1 -> C2442665, J2 -> C265104, J3 -> C21285200, R1 -> C105580 (and 30 more)"
     },
     {
       "name": "bom_pcb_match",
@@ -399,7 +416,7 @@
     {
       "name": "drc",
       "status": "WARN",
-      "message": "DRC passed with 11 warning(s)"
+      "message": "DRC passed with 17 warning(s)"
     },
     {
       "name": "erc",
@@ -418,5 +435,29 @@
     "min_component_hole_distance_mm": 0.5,
     "source": "https://jlcpcb.com/news/free-via-in-pad-6-20-layer-pcbs-pofv",
     "ordering_instructions": "Order the JLCPCB Capability Plus -- Plated-Over Filled Via (POFV), 4+ layer process (jlcpcb-tier1-pofv-4l): a >= 4-layer stackup with epoxy-filled and copper-capped (plated-over) vias, via drills between 0.2 and 0.5 mm, annular ring >= 0.1 mm, and in-pad vias kept >= 0.5 mm from any other component's drilled hole. Do not substitute ordinary open or merely tented vias. Source: https://jlcpcb.com/news/free-via-in-pad-6-20-layer-pcbs-pofv"
+  },
+  "ordered_copper": {
+    "layers": 4,
+    "stackup_outer_oz": 1.0,
+    "stackup_inner_oz": 0.4342857142857142,
+    "profile_options": [
+      [
+        1.0,
+        0.5
+      ],
+      [
+        1.0,
+        1.0
+      ],
+      [
+        2.0,
+        0.5
+      ]
+    ],
+    "ordered_outer_oz": 1.0,
+    "ordered_inner_oz": 0.5,
+    "status": "match",
+    "source": "https://jlcpcb.com/help/article/jlcpcb-copper-weight",
+    "source_verified": "2026-10-18"
   }
 }
