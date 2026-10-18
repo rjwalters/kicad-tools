@@ -54,11 +54,20 @@ class DRCReport:
     #: unknown (a report loaded from disk -- an empty ``schematic_parity``
     #: array cannot tell "clean" from "never ran").
     schematic_parity_ran: bool | None = None
+    #: Why parity did NOT RUN, when the run knows the cause (Issue #7147).
+    schematic_parity_reason: str | None = None
+    #: The schematic kicad-cli ran parity against, when known (Issue #7147).
+    schematic_parity_schematic: str | None = None
 
     @property
     def schematic_parity_status(self) -> SchematicParityStatus:
         """PASSED / FAILED / NOT RUN, derived in one place (Issue #7077)."""
-        return schematic_parity_status(self.schematic_parity, self.schematic_parity_ran)
+        return schematic_parity_status(
+            self.schematic_parity,
+            self.schematic_parity_ran,
+            self.schematic_parity_reason,
+            self.schematic_parity_schematic,
+        )
 
     @property
     def passed(self) -> bool:
@@ -171,6 +180,8 @@ class DRCReport:
             unconnected_items=list(self.unconnected_items),
             schematic_parity=list(self.schematic_parity),
             schematic_parity_ran=self.schematic_parity_ran,
+            schematic_parity_reason=self.schematic_parity_reason,
+            schematic_parity_schematic=self.schematic_parity_schematic,
         )
 
     def summary(self) -> dict:

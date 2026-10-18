@@ -7,6 +7,8 @@
 (rule "Via Drill - Seeed Fusion"
   (condition "A.Type == 'via' && A.Via_Type != 'Micro'")
   (constraint hole_size (min 0.3mm)))
+(rule "Max Hole Size - Seeed Fusion"
+  (constraint hole_size (max 6.3mm)))
 (rule "Via Diameter - Seeed Fusion"
   (condition "A.Type == 'via' && A.Via_Type != 'Micro'")
   (constraint via_diameter (min 0.6mm)))

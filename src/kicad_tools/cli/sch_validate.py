@@ -30,8 +30,6 @@ from pathlib import Path
 from kicad_tools.cli.runner import find_kicad_cli
 from kicad_tools.cli.sch_footprint_common import iter_missing_footprint_symbols
 from kicad_tools.erc.cross_sheet import (
-    filter_cross_sheet_global_labels,
-    filter_cross_sheet_power_violations,
     filter_phantom_wire_violations,
     reattribute_symbol_violations,
     reattribute_wire_dangling_violations,
@@ -177,19 +175,12 @@ def run_erc(schematic_path: str) -> list[ValidationIssue]:
                                 violation["_sheet_path"] = sheet.get("path", "")
                                 raw_violations.append(violation)
 
-                        # Filter false-positive single_global_label /
-                        # isolated_pin_label violations for labels that
-                        # actually appear on multiple sheets.
-                        raw_violations = filter_cross_sheet_global_labels(
-                            raw_violations, schematic_path
-                        )
-
-                        # Filter false-positive power_pin_not_driven
-                        # violations for power nets that have a
-                        # power_out driver on another sheet.
-                        raw_violations = filter_cross_sheet_power_violations(
-                            raw_violations, schematic_path
-                        )
+                        # No cross-sheet suppression of isolated_pin_label /
+                        # single_global_label / power_pin_not_driven: KiCad 10
+                        # aggregates both across the hierarchy, and the old
+                        # name-count heuristics only dropped true positives
+                        # (Issue #7161).  Connectivity is checked separately
+                        # by the orphan_label rule.
 
                         # Re-attribute wire_dangling / endpoint_off_grid
                         # violations from root sheet to the correct child

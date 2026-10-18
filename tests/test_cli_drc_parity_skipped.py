@@ -28,6 +28,7 @@ from kicad_tools.drc.parity import (
     PARITY_PASSED,
     PARITY_REASON_KICAD_CLI_SKIPPED,
     PARITY_REASON_REPORT_UNKNOWN,
+    parity_reason_no_schematic,
     schematic_parity_status,
 )
 
@@ -76,6 +77,10 @@ PARITY_ERROR = {
 }
 
 STATUS_PREFIX = "Schematic parity: "
+
+#: Issue #7147: the ``pcb`` fixture has no schematic, so run_drc names that
+#: cause rather than the generic kicad-cli reason.
+NO_SCH_REASON = parity_reason_no_schematic("noparity.kicad_pcb")
 
 
 @pytest.fixture
@@ -192,7 +197,7 @@ def test_not_run_text_formats_exit_2(monkeypatch, capsys, pcb, fmt):
     rc = drc_cmd.main([str(pcb), "--format", fmt])
     out = capsys.readouterr().out
     assert rc == 2  # NOT RUN never passes
-    assert _status_lines(out) == [f"Schematic parity: NOT RUN ({PARITY_REASON_KICAD_CLI_SKIPPED})"]
+    assert _status_lines(out) == [f"Schematic parity: NOT RUN ({NO_SCH_REASON})"]
     assert "DRC PASSED" not in out
 
 
@@ -232,9 +237,10 @@ def test_not_run_json(monkeypatch, capsys, pcb):
     assert data["schematic_parity"] == {
         "status": PARITY_NOT_RUN,
         "checked": False,
-        "reason": PARITY_REASON_KICAD_CLI_SKIPPED,
+        "reason": NO_SCH_REASON,
         "error_count": 0,
         "warning_count": 0,
+        "schematic": None,
         "issues": [],
     }
     assert data["schematic_parity_checked"] is False  # alias derived from status
@@ -338,7 +344,7 @@ def test_mfr_prints_status_but_keeps_exit_code(monkeypatch, capsys, pcb):
     rc = drc_cmd.main([str(pcb), "--mfr", "jlcpcb"])
     out = capsys.readouterr().out
     assert rc == 0  # --mfr answers "can the fab build it"; parity does not change that
-    assert _status_lines(out) == [f"Schematic parity: NOT RUN ({PARITY_REASON_KICAD_CLI_SKIPPED})"]
+    assert _status_lines(out) == [f"Schematic parity: NOT RUN ({NO_SCH_REASON})"]
 
 
 def test_kct_drc_uses_shared_kicad_cli_locator(monkeypatch, pcb):
@@ -402,7 +408,7 @@ def test_drc_summary_shows_status_line(monkeypatch, capsys, pcb):
     drc_summary.main([str(pcb)])
     out = capsys.readouterr().out
     assert [line.strip() for line in out.splitlines() if STATUS_PREFIX in line] == [
-        f"Schematic parity: NOT RUN ({PARITY_REASON_KICAD_CLI_SKIPPED})"
+        f"Schematic parity: NOT RUN ({NO_SCH_REASON})"
     ]
     assert "VERDICT: INCOMPLETE - Schematic parity NOT RUN" in out
 
@@ -453,6 +459,6 @@ def test_real_kicad_cli_no_schematic_is_not_run(tmp_path, capsys):
     rc = drc_cmd.main([str(pcb), "--format", "json"])
     data = json.loads(capsys.readouterr().out)
     assert data["schematic_parity"]["status"] == PARITY_NOT_RUN
-    assert data["schematic_parity"]["reason"] == PARITY_REASON_KICAD_CLI_SKIPPED
+    assert data["schematic_parity"]["reason"] == parity_reason_no_schematic(pcb.name)
     if data["summary"]["errors"] == 0:
         assert rc == 2

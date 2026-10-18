@@ -447,6 +447,14 @@ def generate_dru(
         f"  (constraint hole_size (min {rules.min_via_drill_mm}mm)))"
     )
 
+    # --- Max Hole Size ---
+    # Issue #7132: enforce the manufacturer's maximum drill.  Unconditional so
+    # it covers vias, PTH pads and NPTH pads alike (the limit is global).
+    lines.append(
+        f'(rule "Max Hole Size{label_suffix}"\n'
+        f"  (constraint hole_size (max {rules.max_hole_diameter_mm}mm)))"
+    )
+
     # --- Via Diameter ---
     lines.append(
         f'(rule "Via Diameter{label_suffix}"\n'

@@ -341,14 +341,6 @@ class TestRunERCWireDanglingIntegration:
             ),
             patch("kicad_tools.cli.sch_validate.subprocess.run") as mock_run,
             patch(
-                "kicad_tools.cli.sch_validate.filter_cross_sheet_global_labels",
-                side_effect=lambda v, p: v,
-            ),
-            patch(
-                "kicad_tools.cli.sch_validate.filter_cross_sheet_power_violations",
-                side_effect=lambda v, p: v,
-            ),
-            patch(
                 "kicad_tools.cli.sch_validate.reattribute_wire_dangling_violations",
                 side_effect=lambda v, p: v,
             ),
@@ -399,14 +391,6 @@ class TestRunERCWireDanglingIntegration:
                 return_value="/usr/bin/kicad-cli",
             ),
             patch("kicad_tools.cli.sch_validate.subprocess.run") as mock_run,
-            patch(
-                "kicad_tools.cli.sch_validate.filter_cross_sheet_global_labels",
-                side_effect=lambda v, p: v,
-            ),
-            patch(
-                "kicad_tools.cli.sch_validate.filter_cross_sheet_power_violations",
-                side_effect=lambda v, p: v,
-            ),
             patch(
                 "kicad_tools.cli.sch_validate.reattribute_wire_dangling_violations",
                 side_effect=lambda v, p: v,
@@ -1138,14 +1122,6 @@ class TestRunERCPhantomFilterIntegration:
                 return_value="/usr/bin/kicad-cli",
             ),
             patch("kicad_tools.cli.sch_validate.subprocess.run") as mock_run,
-            patch(
-                "kicad_tools.cli.sch_validate.filter_cross_sheet_global_labels",
-                side_effect=lambda v, p: v,
-            ),
-            patch(
-                "kicad_tools.cli.sch_validate.filter_cross_sheet_power_violations",
-                side_effect=lambda v, p: v,
-            ),
             patch(
                 "kicad_tools.cli.sch_validate.reattribute_wire_dangling_violations",
                 side_effect=lambda v, p: v,

@@ -442,14 +442,54 @@ def _add_erc_parser(subparsers) -> None:
         help="Parse ERC report (default command)",
         description="Parse and display ERC report from schematic or JSON file",
     )
+    # Every option of ``erc_cmd.build_parser`` is mirrored here and forwarded
+    # by the ``erc parse`` shim in ``cli/__init__.py`` (Issue #7161); the
+    # drift test in tests/test_cli_parser_drift.py keeps the two in step.
     erc_parse.add_argument(
         "report",
+        nargs="?",
         help="Path to schematic (.kicad_sch) or ERC report (.json or .rpt)",
     )
     erc_parse.add_argument("--format", choices=["table", "json", "summary"], default="table")
     erc_parse.add_argument("--errors-only", action="store_true")
-    erc_parse.add_argument("--type", dest="filter_type", help="Filter by violation type")
-    erc_parse.add_argument("--sheet", help="Filter by sheet path")
+    erc_parse.add_argument(
+        "--strict",
+        dest="erc_strict",
+        action="store_true",
+        help="Exit with code 2 when only warnings are found",
+    )
+    erc_parse.add_argument(
+        "--type", "-t", dest="filter_type", help="Filter by violation type (view only)"
+    )
+    erc_parse.add_argument("--sheet", help="Filter by sheet path (view only)")
+    erc_parse.add_argument(
+        "--by-sheet", dest="erc_by_sheet", action="store_true", help="Group violations by sheet"
+    )
+    erc_parse.add_argument(
+        "--verbose",
+        "-v",
+        dest="erc_verbose",
+        action="store_true",
+        help="Show detailed violation information",
+    )
+    erc_parse.add_argument(
+        "--filter-config",
+        dest="erc_filter_config",
+        help="TOML file with [[erc.filters]] rules to suppress or reclassify violations",
+    )
+    erc_parse.add_argument(
+        "--keep-report",
+        dest="erc_keep_report",
+        action="store_true",
+        help="Keep the ERC report file after running",
+    )
+    erc_parse.add_argument("--output", "-o", dest="erc_output", help="Save ERC report to this path")
+    erc_parse.add_argument(
+        "--list-types",
+        dest="erc_list_types",
+        action="store_true",
+        help="List all known ERC violation types and exit",
+    )
 
     # erc explain subcommand
     erc_explain = erc_subparsers.add_parser(
@@ -505,10 +545,23 @@ def _add_drc_parser(subparsers) -> None:
         "--allow-incomplete",
         action="store_true",
         help=(
-            "Exit 0 instead of 2 when schematic parity did NOT RUN (no or "
-            "unannotated schematic next to the board, or a report that does "
-            "not record whether parity ran). Same name and meaning as "
-            "kct check --allow-incomplete (Issue #7077)"
+            "Exit 0 instead of 2 when schematic parity did NOT RUN (no "
+            "schematic resolved, several candidates, one kicad-cli cannot "
+            "netlist, or a report that does not record whether parity ran). "
+            "Same name and meaning as kct check --allow-incomplete (Issue #7077)"
+        ),
+    )
+    drc_parser.add_argument(
+        "--schematic",
+        type=Path,
+        default=None,
+        help=(
+            "Schematic for the parity check (default: resolved from the board "
+            "-- project.kct, then <base>.kicad_sch with _routed/_optimized/... "
+            "stripped).  kicad-cli only reads <pcb-stem>.kicad_sch, so kct "
+            "runs it on a temporary copy of the board folder with this "
+            "schematic under the board's name (Issue #7147).  Ignored for "
+            ".json/.rpt report input"
         ),
     )
     drc_parser.add_argument(
@@ -4119,7 +4172,12 @@ def _add_optimize_parser(subparsers) -> None:
         default=0.5,
         help="45-degree chamfer size in mm (default: 0.5)",
     )
-    optimize_parser.add_argument("-v", "--verbose", action="store_true")
+    optimize_parser.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="Print a per-net table (segments and length before/after) after the summary",
+    )
     optimize_parser.add_argument(
         "--dry-run", action="store_true", help="Show results without writing"
     )
@@ -5471,6 +5529,15 @@ def _add_optimize_placement_parser(subparsers) -> None:
             "feasibility-gated convergence behaviour (issue #2821), "
             "where the loop refuses to declare convergence while the "
             "best-known placement is still infeasible. Default: no cap."
+        ),
+    )
+    op_parser.add_argument(
+        "--require-outline",
+        action="store_true",
+        default=False,
+        help=(
+            "Exit nonzero when the board has no Edge.Cuts outline instead of "
+            "falling back to a footprints+10 mm bounding box (issue #7148)."
         ),
     )
     op_parser.add_argument(

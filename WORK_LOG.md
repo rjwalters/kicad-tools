@@ -15,6 +15,19 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-18
 
+- **PR #7081**: fix(cli): add optimize-traces -v help; sync cli.md/machine-output.md with parser; add docs drift test
+- **PR #7156**: fix(optim): pick largest Edge.Cuts contour as board outline
+- **Issue #7155** (closed): extract_board_outline returns an Edge.Cuts cutout (gr_rect/gr_poly) instead of the outer gr_line outline
+- **Issue #7070** (closed): docs: CLI reference gaps after #7069 (parts import, optimize-traces -v/--length-match, sch validate options, stats.per_net)
+- **PR #7152**: fix(optimize-placement): handle gr_rect/gr_poly/gr_arc outlines in no-Shapely fallback
+- **PR #7151**: fix(drc): run schematic parity on _routed boards by staging the schematic
+- **PR #7146**: docs: record tuner budget counters for board 07m SDRAM groups
+- **PR #7145**: feat(dru): enforce manufacturer max hole size in generate_dru
+- **PR #7135**: test: fail JSON contract on stale-API crashes and cover --help for every CLI node
+- **Issue #7148** (closed): kct optimize-placement no-Shapely fallback ignores gr_rect board outlines (falls back to footprints+10mm box, can place parts off-board)
+- **Issue #7147** (closed): Fleet re-eval: board 04 J1 sch/PCB value drift passes validate --sync; kct drc parity NOT RUN on every _routed fleet board
+- **Issue #7132** (closed): generate_dru does not emit a max hole size rule (max_hole_diameter_mm is display-only)
+- **Issue #7126** (closed): kct argv shims ignore leading global flags (kct -q footprint generate, kct --verbose erc <report> fail) + harden CLI smoke contract
 - **PR #7143**: fix(drc): tolerate reports lacking schematic_parity in apply_waivers_to_report
 - **PR #7140**: fix(project): merge collinear grid-step segments in Project.route()
 - **PR #7134**: fix(placement): shift hierarchical fallback outline into origin-relative frame
