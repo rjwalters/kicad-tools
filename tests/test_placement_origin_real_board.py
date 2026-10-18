@@ -223,3 +223,30 @@ def test_board_edge_keepout_and_edges_are_origin_relative(
     zy = [p[1] for p in zone.polygon]
     assert (min(zx), max(zx)) == pytest.approx((1.0, w - 1.0))
     assert (min(zy), max(zy)) == pytest.approx((1.0, h - 1.0))
+
+
+def test_board04_hierarchical_fallback_outline_is_origin_relative(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The no-Shapely fallback in ``place_hierarchical_from_pcb`` shares the footprint frame (#7124)."""
+    from kicad_tools.optim.bottom_up_placement import place_hierarchical_from_pcb
+    from kicad_tools.pcb.board_geometry import BoardGeometry
+
+    def _boom(*_args, **_kwargs):
+        raise RuntimeError("force the raw Edge.Cuts fallback")
+
+    monkeypatch.setattr(BoardGeometry, "from_pcb", _boom)
+
+    pcb = PCB.load(str(_copy(BOARD_04, tmp_path)))
+    ox, oy = pcb.board_origin
+    assert (ox, oy) == (B04_MIN_X, B04_MIN_Y)
+
+    result = place_hierarchical_from_pcb(pcb)
+    assert len(result.positions) == 17
+
+    outside = [
+        ref
+        for ref, (x, y, _rot) in result.positions.items()
+        if not (B04_MIN_X <= x + ox <= B04_MAX_X and B04_MIN_Y <= y + oy <= B04_MAX_Y)
+    ]
+    assert outside == []
