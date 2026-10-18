@@ -562,24 +562,29 @@ Get AI-friendly placement improvement recommendations.
 | `pcb_path` | string | Yes | - | Path to .kicad_pcb file |
 | `component` | string | No | - | Specific component reference to analyze |
 | `max_suggestions` | integer | No | 10 | Maximum number of suggestions to return (1-50) |
-| `strategy` | string | No | `"balanced"` | `"balanced"`, `"wire_length"`, `"thermal"` or `"si"` |
+
+Suggestions are ordered most-in-need-first (most violated constraints, then lowest confidence). An unknown `component` returns `success: false` with an error naming it.
 
 **Response**:
 
 ```json
 {
   "success": true,
+  "pcb_path": "/path/to/board.kicad_pcb",
   "suggestions": [
     {
-      "component": "C1",
-      "current_position": [43.0, 30.5],
-      "suggested_position": [45.2, 32.1],
-      "rationale": "Move bypass capacitor closer to U1 VDD pin for better decoupling",
-      "expected_improvement": 2.5,
-      "category": "signal_integrity"
+      "reference": "C1",
+      "suggested_x": 45.2,
+      "suggested_y": 32.1,
+      "suggested_rotation": 0.0,
+      "confidence": 0.62,
+      "rationale": ["Close to U1 (decoupling)"],
+      "constraints_satisfied": [],
+      "constraints_violated": ["decoupling distance"],
+      "alternatives": []
     }
   ],
-  "current_score": 78.5
+  "count": 1
 }
 ```
 
