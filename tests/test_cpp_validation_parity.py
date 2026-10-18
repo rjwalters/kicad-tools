@@ -292,47 +292,6 @@ class TestSegmentPadClearanceParity:
         )
         assert result.valid is True
 
-    @pytest.mark.skip(
-        reason=(
-            "Stale fixture post-#2871/#2874: the segment runs through the pad "
-            "center (overlap=0 vs. trace_clearance=0.25), which the tightened "
-            "validator now correctly flags. Fixture needs to be rewritten to "
-            "exercise the signal-pad-escape path with realistic clearance. "
-            "Tracked in #3133."
-        )
-    )
-    def test_exclude_ref_hash(self):
-        """Segment near pad with excluded ref should pass (Issue #1764)."""
-        from kicad_tools.router import router_cpp
-
-        grid, rules = _make_grid_and_rules(trace_clearance=0.25)
-        pad = Pad(
-            x=5.0, y=5.0, width=1.0, height=1.0, net=2, net_name="GND", layer=Layer.F_CU, ref="R1"
-        )
-        grid.add_pad(pad)
-        cpp_grid = CppGrid.from_routing_grid(grid)
-
-        cs = router_cpp.Segment()
-        cs.x1, cs.y1 = 4.0, 5.0
-        cs.x2, cs.y2 = 6.0, 5.0
-        cs.width = 0.25
-        cs.layer = 0
-        cs.net = 1
-
-        # Exclude R1's ref hash
-        r1_hash = router_cpp.fnv1a_hash("R1")
-        result = cpp_grid._impl.validate_route([cs], [], 1, [r1_hash], 0.25, 0.25, 0.102)
-        assert result.valid is True
-
-    @pytest.mark.skip(
-        reason=(
-            "Stale fixture post-#2871/#2874: the segment passes through the "
-            "pad center at (5,5), so pad-segment distance is 0 and the "
-            "validator correctly rejects it. Fixture needs to be reshaped "
-            "so the segment maintains realistic escape clearance from the "
-            "pad body (e.g. ends at x=4.5 before the pad). Tracked in #3133."
-        )
-    )
     def test_exclude_ref_hash_preserves_signal_pad_escape(self):
         """Issue #1764 regression guard: signal pads (net != 0) on a
         component in the exclude set MUST still be skipped so the chip's
@@ -342,6 +301,17 @@ class TestSegmentPadClearanceParity:
         #1764 reachability fix; it must continue to pass after the
         Issue #2871 narrowing (only plane-net pads are re-engaged in the
         validator).
+
+        Issue #7012: the segment stops SHORT of the pad metal.  Since #2933
+        the carve-out only applies while the trace clears the pad's copper
+        (a trace through the pad centre is a real defect no exclusion may
+        silence), so the old through-the-centre fixture could never pass.
+        Ending at x=4.3 leaves a 0.075mm edge gap (pad body starts at 4.5,
+        trace half-width 0.125): metal-clear, but well inside the 0.25mm
+        trace_clearance band, so the exclusion is what decides validity.
+        (This also absorbs the former ``test_exclude_ref_hash``, whose
+        ``GND``-named pad is classified as a plane net and is therefore
+        correctly enforced -- see ``tests/router/test_validate_route_clearance_rect.py``.)
         """
         from kicad_tools.router import router_cpp
 
@@ -357,10 +327,16 @@ class TestSegmentPadClearanceParity:
 
         cs = router_cpp.Segment()
         cs.x1, cs.y1 = 4.0, 5.0
-        cs.x2, cs.y2 = 6.0, 5.0
+        cs.x2, cs.y2 = 4.3, 5.0
         cs.width = 0.25
         cs.layer = 0
         cs.net = 1
+
+        # Negative control: without the exclusion the 0.075mm gap violates
+        # the 0.25mm clearance, so the exclusion below is load-bearing.
+        control = cpp_grid._impl.validate_route([cs], [], 1, [], 0.25, 0.25, 0.102)
+        assert control.valid is False
+        assert control.violation_type == 1  # seg-pad
 
         # Exclude R1's ref hash; signal pad is skipped, segment passes.
         r1_hash = router_cpp.fnv1a_hash("R1")
@@ -729,15 +705,6 @@ class TestPythonValidateSegmentClearanceExcludeRefs:
     ``test_exclude_ref_hash_blocks_plane_net_pad`` above.
     """
 
-    @pytest.mark.skip(
-        reason=(
-            "Stale fixture post-#2871/#2874 (Python twin of the C++ test). "
-            "The segment passes through the pad center at (5,5), so the "
-            "Python validator now correctly rejects it. Fixture needs to be "
-            "reshaped so the segment maintains realistic escape clearance "
-            "from the pad body. Tracked in #3133."
-        )
-    )
     def test_validate_segment_clearance_preserves_signal_pad_escape_on_excluded_ref(
         self,
     ):
@@ -765,20 +732,34 @@ class TestPythonValidateSegmentClearanceExcludeRefs:
             ref="R1",
         )
         grid.add_pad(pad)
+        # Issue #7012: since #5004/#5166 the Python carve-out only skips a
+        # same-component pad when the ref's corridor was actually relaxed
+        # (``_relax_same_component_clearance``, Issue #2452) -- a bare
+        # exclude_refs entry on a standard-pitch part no longer suffices.
+        # Record R1 as relaxed exactly as that pass would.
+        grid._relaxed_clearance_refs.add("R1")
 
-        # Segment passes through the pad center on the same layer --
-        # the signal-pad escape geometry the original Issue #1764
-        # exclusion was designed to permit.
+        # Segment stops short of the pad metal (#2933: a trace through
+        # the pad copper is a real defect no carve-out may silence) with a
+        # 0.075mm edge gap -- inside the 0.25mm trace_clearance band, so
+        # the exclusion is what decides validity.
         seg = Segment(
             x1=4.0,
             y1=5.0,
-            x2=6.0,
+            x2=4.3,
             y2=5.0,
             width=0.25,
             layer=Layer.F_CU,
             net=1,
             net_name="OTHER",
         )
+
+        # Negative control: same geometry, empty exclude set -> rejected.
+        control_valid, _clearance, control_loc = grid.validate_segment_clearance(
+            seg, exclude_net=1, exclude_refs=set()
+        )
+        assert control_valid is False
+        assert control_loc == (5.0, 5.0)
 
         is_valid, _clearance, _location = grid.validate_segment_clearance(
             seg, exclude_net=1, exclude_refs={"R1"}
