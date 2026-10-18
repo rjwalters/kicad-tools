@@ -29,7 +29,7 @@ from kicad_tools.router.core import Autorouter
 from kicad_tools.router.layers import Layer
 from kicad_tools.router.match_group_length import MatchGroup, MatchGroupSource
 from kicad_tools.router.match_group_tuning import TuneResult
-from kicad_tools.router.primitives import Route, Segment
+from kicad_tools.router.primitives import Route, Segment, Via
 from kicad_tools.router.rules import NetClassRouting
 
 # =============================================================================
@@ -783,3 +783,87 @@ class TestPreservedCopperMeasured:
         assert results["DDR"][2][1].length_before_mm == pytest.approx(18.0, abs=0.05)
         assert all(r.net != 1 for r in ar.routes)
         assert full.segments[0].x2 == 22.0
+
+
+# =============================================================================
+# Issue #7159: foreign preserved copper is a clearance obstacle
+# =============================================================================
+
+
+def _foreign_via_router(*, via_y: float | None) -> tuple[Autorouter, MatchGroup, Route | None]:
+    """DQ0 22mm, DQ1 10mm at y=20 (needs ~12mm of meander); optional foreign
+    preserved via (net 3, not in the group) beside DQ1's host segment."""
+    ar = Autorouter(width=80.0, height=80.0)
+    ar.net_names = {1: "DQ0", 2: "DQ1", 3: "GND"}
+    ar.routes = [
+        _straight_route(1, "DQ0", 22.0, y=0.0),
+        Route(net=2, net_name="DQ1", segments=[_seg(2, "DQ1", 0.0, 10.0, 20.0)]),
+    ]
+    foreign = None
+    if via_y is not None:
+        foreign = Route(
+            net=3,
+            net_name="GND",
+            vias=[
+                Via(
+                    x=5.0,
+                    y=via_y,
+                    drill=0.3,
+                    diameter=0.6,
+                    layers=(Layer.F_CU, Layer.B_CU),
+                    net=3,
+                    net_name="GND",
+                )
+            ],
+        )
+        ar.existing_routes = [foreign]
+    nc = NetClassRouting(
+        name="DDR",
+        length_critical=True,
+        length_match_group="DDR",
+        length_match_tolerance_mm=0.5,
+    )
+    ar.net_class_map = {"DQ0": nc, "DQ1": nc}
+    group = MatchGroup(
+        name="DDR", net_ids=[1, 2], tolerance=0.5, source=MatchGroupSource.LEGACY_API
+    )
+    return ar, group, foreign
+
+
+def _min_gap_to_via(ar: Autorouter, via: Via) -> float:
+    from kicad_tools.router.clearance_kernel import copper_gap
+    from kicad_tools.router.clearance_shapes import segment_shape, via_shape
+
+    return min(
+        copper_gap(segment_shape(s), via_shape(via))
+        for r in ar.routes
+        if r.net == 2
+        for s in r.segments
+    )
+
+
+class TestForeignPreservedCopperClearance:
+    def test_meander_keeps_clearance_from_foreign_preserved_via(self):
+        # Control: with no obstacle the meander happily passes within the
+        # via clearance of (5.0, 20.8), so the test below is not vacuous.
+        probe_ar, group, _ = _foreign_via_router(via_y=None)
+        probe_ar.apply_match_group_tuning(detected_groups=[group], verbose=False)
+        probe_via = Via(
+            x=5.0,
+            y=20.8,
+            drill=0.3,
+            diameter=0.6,
+            layers=(Layer.F_CU, Layer.B_CU),
+            net=3,
+        )
+        floor = probe_ar.rules.via_clearance
+        assert _min_gap_to_via(probe_ar, probe_via) < floor
+
+        ar, group, foreign = _foreign_via_router(via_y=20.8)
+        results = ar.apply_match_group_tuning(detected_groups=[group], verbose=False)
+        via = foreign.vias[0]
+        assert _min_gap_to_via(ar, via) + 1e-9 >= floor
+        # The fixed foreign copper is never edited or republished.
+        assert ar.existing_routes == [foreign]
+        assert all(r.net != 3 for r in ar.routes)
+        assert 3 not in results["DDR"]
