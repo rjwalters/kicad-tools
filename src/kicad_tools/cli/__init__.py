@@ -76,8 +76,13 @@ def normalize_argv(argv: list[str]) -> list[str]:
     argv = list(argv)  # Make a copy to avoid mutating the original
     # Handle erc backwards compatibility: kct erc <file> -> kct erc parse <file>
     # Insert "parse" subcommand if the first arg after "erc" isn't a known subcommand
-    if len(argv) >= 2 and argv[0] == "erc" and argv[1] not in ("parse", "explain", "-h", "--help"):
-        argv.insert(1, "parse")
+    i = _command_index(argv)
+    if (
+        i + 1 < len(argv)
+        and argv[i] == "erc"
+        and argv[i + 1] not in ("parse", "explain", "-h", "--help")
+    ):
+        argv.insert(i + 1, "parse")
     return argv
 
 
@@ -110,6 +115,17 @@ def _global_flag_arity(token: str) -> int | None:
     return None if eq else 1
 
 
+def _command_index(argv: list[str]) -> int:
+    """Index of the first token after any leading global options."""
+    i = 0
+    while i < len(argv):
+        arity = _global_flag_arity(argv[i])
+        if arity is None:
+            break
+        i += arity
+    return i
+
+
 def split_passthrough_argv(argv: list[str]) -> tuple[list[str], str, list[str]] | None:
     """Split ``kct`` argv aimed at a passthrough subcommand (issue #7017).
 
@@ -120,12 +136,7 @@ def split_passthrough_argv(argv: list[str]) -> tuple[list[str], str, list[str]] 
     A ``nargs=REMAINDER`` subparser cannot do this: it lets the top-level
     parser steal leading ``--flag value`` pairs and ``--help``.
     """
-    i = 0
-    while i < len(argv):
-        arity = _global_flag_arity(argv[i])
-        if arity is None:
-            break
-        i += arity
+    i = _command_index(argv)
     if i < len(argv) and argv[i] in PASSTHROUGH_SUBCOMMANDS:
         return argv[:i], argv[i], argv[i + 1 :]
     return None
@@ -133,15 +144,24 @@ def split_passthrough_argv(argv: list[str]) -> tuple[list[str], str, list[str]] 
 
 def main(argv: list[str] | None = None) -> int:
     """Main entry point for kicad-tools CLI."""
+    # Windows consoles/pipes default to cp1252, which cannot encode characters
+    # such as the "Δ" in help text; degrade instead of crashing (Issue #6894).
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(errors="replace")
+
     parser = create_parser()
 
     # Handle footprint generate specially - it has its own subcommand parser
     if argv is None:
         argv = sys.argv[1:]
-    if len(argv) >= 2 and argv[0] == "footprint" and argv[1] == "generate":
+    # Leading global options are skipped so ``kct -q footprint generate`` works.
+    i = _command_index(argv)
+    if argv[i : i + 2] == ["footprint", "generate"]:
         from .footprint_generate import main as generate_main
 
-        return generate_main(argv[2:]) or 0
+        parser.parse_args(argv[:i])  # validate/apply the global prefix
+        return generate_main(argv[i + 2 :]) or 0
 
     # Passthrough subcommands (``kct route``) own their whole argv: parse only
     # the leading global options here and hand the rest over verbatim.

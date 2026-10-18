@@ -186,6 +186,74 @@ def placement_place_unplaced(
     return result.to_dict()
 
 
+def placement_suggestions(
+    pcb_path: str,
+    component: str | None = None,
+    max_suggestions: int = 10,
+) -> dict[str, Any]:
+    """Return ranked placement suggestions with rationale.
+
+    Wraps :func:`kicad_tools.optim.suggestions.generate_placement_suggestions`
+    (all components) or :func:`explain_placement` (one component), the same
+    engines used by ``kct placement suggest``.
+
+    Args:
+        pcb_path: Path to ``.kicad_pcb`` file.
+        component: Restrict the result to this reference designator.
+        max_suggestions: Maximum suggestions to return (clamped to 1-50).
+
+    Returns:
+        ``{"success", "pcb_path", "suggestions", "count"}`` or
+        ``{"success": False, "error": ...}``. Suggestions are ordered
+        most-in-need-first: more violated constraints, then lower confidence.
+    """
+    from kicad_tools.optim import (
+        PlacementOptimizer,
+        explain_placement,
+        generate_placement_suggestions,
+    )
+
+    path = Path(pcb_path)
+    if not path.exists():
+        return {"success": False, "error": f"PCB file not found: {pcb_path}"}
+    if path.suffix != ".kicad_pcb":
+        return {
+            "success": False,
+            "error": f"Invalid file extension: {path.suffix} (expected .kicad_pcb)",
+        }
+
+    try:
+        pcb = PCB.load(pcb_path)
+    except Exception as e:
+        return {"success": False, "error": f"Failed to parse PCB file: {e}"}
+
+    try:
+        optimizer = PlacementOptimizer.from_pcb(pcb)
+    except Exception as e:
+        return {"success": False, "error": f"Failed to create placement optimizer: {e}"}
+
+    limit = max(1, min(50, int(max_suggestions)))
+
+    if component:
+        single = explain_placement(optimizer=optimizer, reference=component)
+        if single is None:
+            return {"success": False, "error": f"Component '{component}' not found"}
+        ranked = [single]
+    else:
+        ranked = sorted(
+            generate_placement_suggestions(optimizer=optimizer).values(),
+            key=lambda s: (-len(s.constraints_violated), s.confidence, s.reference),
+        )
+
+    suggestions = [s.to_dict() for s in ranked[:limit]]
+    return {
+        "success": True,
+        "pcb_path": str(pcb_path),
+        "suggestions": suggestions,
+        "count": len(suggestions),
+    }
+
+
 def _compute_wire_length_score(pcb: PCB) -> float:
     """Compute wire length score based on estimated total wire length.
 

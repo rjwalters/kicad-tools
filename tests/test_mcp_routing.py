@@ -8,7 +8,7 @@ pytest.importorskip("pydantic")
 
 from kicad_tools.exceptions import FileNotFoundError as KiCadFileNotFoundError
 from kicad_tools.exceptions import ParseError
-from kicad_tools.mcp.tools.routing import get_unrouted_nets, route_net
+from kicad_tools.mcp.tools.routing import _resolve_output_path, get_unrouted_nets, route_net
 from kicad_tools.mcp.types import (
     NetRoutingStatus,
     RouteNetResult,
@@ -278,6 +278,165 @@ class TestRouteNet:
         # Routing may or may not succeed depending on router
         # but the result structure should be valid
         assert result.total_connections >= 0
+
+    def test_default_output_leaves_input_untouched(self, tmp_path: Path) -> None:
+        """Omitting output_path must not modify the input (Issue #7111)."""
+        pcb_file = tmp_path / "test.kicad_pcb"
+        pcb_file.write_text(UNROUTED_PCB)
+        before = pcb_file.read_bytes()
+
+        result = route_net(str(pcb_file), net_name="SIG1")
+
+        assert pcb_file.read_bytes() == before
+        expected = tmp_path / "test_routed.kicad_pcb"
+        # Issue #7114: the save step used to raise a TypeError, so this test
+        # silently skipped the success branch.  It must now really succeed.
+        assert result.success is True, result.error_message
+        assert result.output_path == str(expected)
+        assert expected.exists()
+
+    def test_routed_net_is_saved_end_to_end(self, tmp_path: Path) -> None:
+        """A routed 2-pad net is merged and written to disk (Issue #7114).
+
+        ``route_net`` used to call ``merge_routes_into_pcb`` with a signature
+        that never existed (``TypeError`` on ``net_map``) and so could never
+        save.  Route SIG1 on the unrouted fixture and check the output file.
+        """
+        from kicad_tools.schema.pcb import PCB
+
+        pcb_file = tmp_path / "test.kicad_pcb"
+        pcb_file.write_text(UNROUTED_PCB)
+        before = pcb_file.read_bytes()
+
+        result = route_net(str(pcb_file), net_name="SIG1")
+
+        assert result.success is True, result.error_message
+        assert result.error_message is None
+        assert result.routed_connections >= 1
+        assert result.trace_length_mm > 0
+        out = tmp_path / "test_routed.kicad_pcb"
+        assert result.output_path == str(out)
+        assert pcb_file.read_bytes() == before
+
+        routed = PCB.load(str(out))
+        sig1 = next(num for num, net in routed.nets.items() if net.name == "SIG1")
+        sig1_segments = [s for s in routed.segments if s.net_number == sig1]
+        assert sig1_segments, "no SIG1 copper in the saved board"
+        assert not [s for s in routed.segments if s.net_number != sig1]
+        # Width comes from the design rules the router actually used.
+        from kicad_tools.router.io import parse_pcb_design_rules
+
+        expected_width = parse_pcb_design_rules(UNROUTED_PCB).to_design_rules().trace_width
+        assert all(s.width == pytest.approx(expected_width) for s in sig1_segments)
+
+    def test_grid_step_run_is_merged_into_one_segment(self) -> None:
+        """90 collinear grid-step segments collapse to one (Issue #7120)."""
+        from kicad_tools.mcp.tools.routing import _merge_collinear_segments
+        from kicad_tools.router import Autorouter, DesignRules
+        from kicad_tools.router.layers import Layer
+        from kicad_tools.router.primitives import Route, Segment
+
+        def pad(x: float, n: str) -> dict:
+            return {
+                "number": n, "x": x, "y": 10.0, "width": 0.6, "height": 0.6, "net": 1,
+                "net_name": "S", "layer": Layer.F_CU, "through_hole": False,
+            }  # fmt: skip
+
+        router = Autorouter(
+            30, 20, rules=DesignRules(grid_resolution=0.1, trace_width=0.2, trace_clearance=0.2)
+        )
+        router.add_component("R1", [pad(5.0, "1")])
+        router.add_component("R2", [pad(14.0, "1")])
+        segs = [
+            Segment(
+                x1=5 + i * 0.1, y1=10.0, x2=5 + (i + 1) * 0.1, y2=10.0,
+                width=0.2, layer=Layer.F_CU, net=1, net_name="S",
+            )
+            for i in range(90)
+        ]  # fmt: skip
+        route = Route(net=1, net_name="S", segments=segs, vias=[])
+        router._mark_route(route)
+        router.routes.append(route)
+
+        merged = _merge_collinear_segments(router, 1, [route])
+
+        out = [s for r in merged for s in r.segments]
+        assert len(out) == 1
+        assert out[0].x1 == pytest.approx(5.0)
+        assert out[0].x2 == pytest.approx(14.0)
+
+    def test_optimizer_failure_falls_back_to_raw_routes(self, tmp_path: Path, monkeypatch) -> None:
+        """An optimizer exception must not fail routing (Issue #7120)."""
+        import kicad_tools.router.optimizer as opt
+
+        def boom(*a, **k):
+            raise RuntimeError("optimizer exploded")
+
+        monkeypatch.setattr(opt, "optimize_routes_grid_synced", boom)
+        pcb_file = tmp_path / "test.kicad_pcb"
+        pcb_file.write_text(UNROUTED_PCB)
+
+        result = route_net(str(pcb_file), net_name="SIG1")
+        assert result.success is True, result.error_message
+        assert result.trace_length_mm > 0
+
+    def test_routed_output_loads_in_kicad_cli(self, tmp_path: Path) -> None:
+        """kicad-cli parses the saved board without errors (Issue #7114)."""
+        import shutil
+        import subprocess
+
+        kicad_cli = shutil.which("kicad-cli")
+        mac_cli = Path("/Applications/KiCad/KiCad.app/Contents/MacOS/kicad-cli")
+        if kicad_cli is None and mac_cli.exists():
+            kicad_cli = str(mac_cli)
+        if kicad_cli is None:
+            pytest.skip("kicad-cli not available")
+
+        pcb_file = tmp_path / "test.kicad_pcb"
+        pcb_file.write_text(UNROUTED_PCB)
+        result = route_net(str(pcb_file), net_name="SIG1")
+        assert result.success is True, result.error_message
+
+        report = tmp_path / "drc.json"
+        proc = subprocess.run(
+            [
+                kicad_cli,
+                "pcb",
+                "drc",
+                "--format",
+                "json",
+                "--output",
+                str(report),
+                result.output_path,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert report.exists()
+
+    def test_save_failure_reports_error(self, tmp_path: Path) -> None:
+        """A write failure still returns success=False with a message."""
+        pcb_file = tmp_path / "test.kicad_pcb"
+        pcb_file.write_text(UNROUTED_PCB)
+        bad = tmp_path / "missing_dir" / "out.kicad_pcb"
+
+        result = route_net(str(pcb_file), net_name="SIG1", output_path=str(bad))
+
+        assert result.success is False
+        assert result.error_message is not None
+        assert "Failed to save routed PCB" in result.error_message
+
+    def test_explicit_same_output_path_is_reported(self, tmp_path: Path) -> None:
+        """Passing output_path == pcb_path is the explicit overwrite opt-in."""
+        pcb_file = tmp_path / "test.kicad_pcb"
+        pcb_file.write_text(PARTIAL_ROUTED_PCB)
+
+        result = route_net(str(pcb_file), net_name="SIG1", output_path=str(pcb_file))
+
+        # Already-routed early return writes nothing, so no output_path is reported.
+        assert result.output_path is None
 
     def test_route_already_routed_net(self, tmp_path: Path) -> None:
         """Test routing a net that's already fully routed."""
@@ -1074,3 +1233,22 @@ class TestBuildPadsForNetRotationSignConvention:
                 f"{canonical}, buggy={buggy}; fixture pad_local must have "
                 f"nonzero, distinct x/y components."
             )
+
+
+class TestResolveOutputPath:
+    """Direct tests of the route_net output path default (Issue #7111)."""
+
+    def test_default_is_routed_sibling(self) -> None:
+        assert _resolve_output_path("/a/b/board.kicad_pcb", None) == "/a/b/board_routed.kicad_pcb"
+
+    def test_empty_string_is_default(self) -> None:
+        assert _resolve_output_path("/a/b/board.kicad_pcb", "") == "/a/b/board_routed.kicad_pcb"
+
+    def test_explicit_path_wins(self) -> None:
+        assert (
+            _resolve_output_path("/a/b/board.kicad_pcb", "/x/out.kicad_pcb") == "/x/out.kicad_pcb"
+        )
+
+    def test_same_as_input_overwrites(self) -> None:
+        p = "/a/b/board.kicad_pcb"
+        assert _resolve_output_path(p, p) == p

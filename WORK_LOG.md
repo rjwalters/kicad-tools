@@ -15,6 +15,34 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-18
 
+- **PR #7130**: fix(cli): skip leading global options in footprint-generate and erc argv shims
+- **PR #7128**: feat: warn when a placement move clusters heat sources
+- **PR #7122**: fix(mcp): merge collinear segments in route_net before saving
+- **PR #7117**: fix: generate kct init DRU via generate_dru
+- **Issue #7120** (closed): MCP route_net writes one 0.1mm segment per grid cell (no collinear merge on saved copper)
+- **Issue #7116** (closed): kct init DRU template uses wrong constraint types (silkscreen width as silk_clearance; hole-to-edge as hole_to_hole)
+- **PR #7127**: fix(mcp): placement_suggestions, zipped Gerber count, board_view small sizes
+- **PR #7108**: fix(board03): re-derive copper from a class-clean lattice route (#6394)
+- **Issue #7045** (closed): Finish PredictiveAnalyzer._check_thermal: wire analysis/thermal.py into per-move predictive warnings
+- **Issue #7115** (closed): MCP tool smoke sweep: 5 more registered tools broken (placement_suggestions ImportError, export_gerbers zip false-failure, checkpoint/context no-ops, board_view blank) + call-every-tool test
+- **Issue #6824** (closed): board 03: fresh lattice routes fail routing_plan.usb_geometry (USB_D common run not on In2.Cu, MCU launch > 4 mm) — blocks #6394
+- **Issue #6394** (closed): board 03: 13 copper violations of the router's own Power class (0.2 mm) exposed by #6390
+- **PR #7109**: fix(optim): keep placement outline in the origin-relative component frame
+- **PR #7119**: fix(mcp): route_net saves routed nets via the real merge_routes_into_pcb API
+- **PR #7104**: docs: record tscircuit upstream defect outcomes (#5878)
+- **PR #7101**: test(router): pin board 03 tier-1 USB_D In2.Cu coupled run
+- **Issue #7106** (closed): PlacementOptimizer.from_pcb: outline in absolute frame but components origin-relative (every in-board part flagged outside)
+- **Issue #7114** (closed): MCP route_net never saves a routed net: calls merge_routes_into_pcb with a nonexistent signature (TypeError on net_map) since #505
+- **Issue #5878** (closed): File the 6 tscircuit upstream defects found by the interop gate (needs a credential with issue-write outside rjwalters/*)
+- **PR #7113**: fix(mcp): sync tools.md with server, register get_drc_violations, route_net stops overwriting input
+- **PR #7086**: fix(drc): match B.Silkscreen in silkscreen width/height rules
+- **PR #6874**: ci(board-07): move copper-safety DRC ratchet to scheduled slow-tests
+- **PR #6900**: ci: add Windows smoke job and skip RSS positivity test without resource
+- **PR #7110**: fix(optim,export): compute query_move routing impact and PnP rotation-correction count
+- **Issue #7111** (closed): MCP tools.md promises tools/params the server lacks (get_drc_violations unregistered, analyze_board renamed, route_net layer/width rejected)
+- **Issue #7078** (closed): Generated .kicad_dru silkscreen width/height rules apply to F.Silkscreen only
+- **Issue #6894** (closed): ci: add a Windows smoke job; skip test_peak_rss_bytes_positive where resource is unavailable
+- **Issue #7107** (closed): MCP responses report placeholders as measurements (query_move routing_impact, export_assembly rotation_corrections)
 - **PR #7090**: fix(drc): report when kicad-cli could not run schematic parity (#7077)
 - **PR #7100**: fix(export): safety floor and DRC preflight count opens and reject other-board reports
 - **PR #7095**: feat(creepage): add insulation-type input (basic/supplementary/reinforced), default basic

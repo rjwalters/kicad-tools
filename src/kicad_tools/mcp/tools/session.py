@@ -536,6 +536,8 @@ def query_move(
             recommendation += " | WARNING: Area becoming congested"
         if "intent_risk" in warning_types:
             recommendation += " | WARNING: May affect design intent constraints"
+        if "thermal" in warning_types:
+            recommendation += " | WARNING: Heat sources clustering"
 
     return QueryMoveResult(
         success=True,

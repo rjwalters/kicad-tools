@@ -130,9 +130,15 @@ def _write_pcb(tmp_path: Path, text: str, name: str) -> PCB:
 
 
 def _assert_all_in_bounds(pcb: PCB, margin: float) -> None:
-    """Assert every footprint center is within the real Edge.Cuts (minus margin)."""
+    """Assert every footprint center is within the real Edge.Cuts (minus margin).
+
+    ``Footprint.position`` is relative to ``pcb.board_origin``, so compare in
+    the absolute frame by adding the origin back.
+    """
+    ox, oy = pcb.board_origin
     for fp in pcb.footprints:
         x, y = fp.position
+        x, y = x + ox, y + oy
         assert BOARD_MIN_X + margin - 1e-6 <= x <= BOARD_MAX_X - margin + 1e-6, (
             f"{fp.reference} x={x} escaped board [{BOARD_MIN_X + margin}, {BOARD_MAX_X - margin}]"
         )
@@ -317,8 +323,9 @@ def test_oversized_margin_does_not_invert_clamp(tmp_path: Path) -> None:
     )
     workflow.run()
 
-    cx = (BOARD_MIN_X + BOARD_MAX_X) / 2
-    cy = (BOARD_MIN_Y + BOARD_MAX_Y) / 2
+    # Components live in the origin-relative frame (outline starts at 0,0).
+    cx = BOARD_W / 2
+    cy = BOARD_H / 2
     for comp in workflow.optimizer.components:
         if comp.fixed:
             continue
@@ -351,3 +358,63 @@ def test_out_of_bounds_components_flags_escapee() -> None:
     opt.add_component(Component(ref="R1", x=0.0, y=0.0, width=1.0, height=1.0))
     opt.add_component(Component(ref="R2", x=100.0, y=100.0, width=1.0, height=1.0))
     assert opt.out_of_bounds_components(margin=0.0) == ["R2"]
+
+
+# ---------------------------------------------------------------------------
+# Non-zero board origin: outline and components share one frame (#7106)
+# ---------------------------------------------------------------------------
+
+
+def test_nonzero_origin_outline_matches_component_frame(tmp_path: Path) -> None:
+    """In-board parts are not flagged outside when board_origin != (0, 0)."""
+    from kicad_tools.optim.placement import PlacementOptimizer
+
+    pcb = _write_pcb(
+        tmp_path, _build_pcb_text(_GR_RECT_OUTLINE, off_board=False), "board.kicad_pcb"
+    )
+    assert tuple(pcb.board_origin) == (BOARD_MIN_X, BOARD_MIN_Y)
+
+    opt = PlacementOptimizer.from_pcb(pcb)
+    xs = [v.x for v in opt.board_outline.vertices]
+    ys = [v.y for v in opt.board_outline.vertices]
+    assert (min(xs), max(xs)) == pytest.approx((0.0, BOARD_W))
+    assert (min(ys), max(ys)) == pytest.approx((0.0, BOARD_H))
+    assert opt.out_of_bounds_components() == []
+
+
+def test_nonzero_origin_legacy_outline_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The legacy (no-Shapely) outline path lands in the same frame."""
+    from kicad_tools.optim.placement import PlacementOptimizer
+    from kicad_tools.pcb import board_geometry
+
+    monkeypatch.setattr(board_geometry, "has_shapely", lambda: False)
+    pcb = _write_pcb(
+        tmp_path, _build_pcb_text(_GR_RECT_OUTLINE, off_board=False), "board.kicad_pcb"
+    )
+    opt = PlacementOptimizer.from_pcb(pcb)
+    xs = [v.x for v in opt.board_outline.vertices]
+    assert (min(xs), max(xs)) == pytest.approx((0.0, BOARD_W))
+    assert opt.out_of_bounds_components() == []
+
+
+def test_nonzero_origin_write_back_round_trip(tmp_path: Path) -> None:
+    """A moved component is persisted at the expected absolute (at) coordinates."""
+    pcb = _write_pcb(
+        tmp_path, _build_pcb_text(_GR_RECT_OUTLINE, off_board=False), "board.kicad_pcb"
+    )
+    workflow = OptimizationWorkflow(pcb, WorkflowConfig(strategy="force-directed", iterations=1))
+    workflow.run()
+    comp = workflow.optimizer._component_map["R2"]
+    comp.x, comp.y = 30.0, 20.0
+    workflow.write_to_pcb()
+
+    out = tmp_path / "out.kicad_pcb"
+    pcb.save(str(out))
+    reloaded = PCB.load(str(out))
+    r2 = next(fp for fp in reloaded.footprints if fp.reference == "R2")
+    assert r2.position == pytest.approx((30.0, 20.0), abs=1e-3)
+    # The (at) node in the saved file holds absolute coordinates.
+    saved = out.read_text()
+    assert f"(at {BOARD_MIN_X + 30.0:g} {BOARD_MIN_Y + 20.0:g}" in saved

@@ -1,7 +1,7 @@
 {
   "version": "1.0",
-  "kicad_tools_version": "0.22.0",
-  "generated_at": "2026-10-14T11:25:21.440602+00:00",
+  "kicad_tools_version": "0.23.0",
+  "generated_at": "2026-10-18T05:09:24.027893+00:00",
   "manufacturer": "jlcpcb-tier1",
   "files": {
     "DESIGN_REVIEW.md": {
@@ -29,8 +29,8 @@
       "size": 982
     },
     "check-report.json": {
-      "sha256": "dbd43c2882b75f9c694f1082f9f575b642f220bb40af886bc4a198f3671da7cc",
-      "size": 15406
+      "sha256": "4cdf4fb599f510468feaf2da83a17ddfadc63cd8bc201c5d4a47ce49ccfc81d7",
+      "size": 9617
     },
     "cpl_jlcpcb.csv": {
       "sha256": "8b435e9347774c7f26e3536b35136d1cf2fc0c9ba3c1de5803fcfd2ab6086b5d",
@@ -49,8 +49,8 @@
       "size": 6324
     },
     "design-source/generate_design.py": {
-      "sha256": "6d7dc4ca80bf0135017ea2767ea9e0eb75c65ff198bc982866466df1c33fbdb6",
-      "size": 52791
+      "sha256": "37985a70f9845b90d62a65f788e2958544366127d3b054455f80d837bf1a8595",
+      "size": 55111
     },
     "design-source/generate_pcb.py": {
       "sha256": "36afb9c6a8b81878b88b3cf38b91da058c7a281f706d1a16451622e07cc32104",
@@ -77,16 +77,16 @@
       "size": 7474
     },
     "design-source/route_demo.py": {
-      "sha256": "a7a5f7f5c227384d08a3f3c49a4e5f6a6c86925b984286840195a99e28082afc",
-      "size": 10114
+      "sha256": "0fca0042fac91f385db16120c90cf8f12332d1f463e9ff336417c8d0649b56c6",
+      "size": 10794
     },
     "design-source/routing-plan.json": {
-      "sha256": "d71934a443c58d28deefce99cf2c29f502414ba55f8bdd1eff9568460736e4c6",
-      "size": 387836
+      "sha256": "4589077f0a5f29a64e3e0b746e0a0f3bfb167099ea1a79f76ced8d920361e1c9",
+      "size": 215687
     },
     "design-source/routing_plan.py": {
-      "sha256": "744eca7c1d83cd72351d5500f21e846d9f1f368e800e945834655491e79cf408",
-      "size": 16899
+      "sha256": "cc6eedc7ea25af8f1dff4a3c449ad8c6221146ffaac37677b41bc42522781c0b",
+      "size": 18151
     },
     "firmware/.gitignore": {
       "sha256": "692b1af4436043e2e965c8d563bbf90d648cda3a6afa9bba38e1c38af1d38919",
@@ -173,48 +173,48 @@
       "size": 2192
     },
     "gerbers/gerbers.zip": {
-      "sha256": "46b04d4fc881f194e2242c98e45fd0c3f7097ed13a27d463ed13f4ea786c3904",
-      "size": 190208
+      "sha256": "4582d3588537d011960de85d1509f2ff5ecce7cc3720b7fa455845d94b2a3d64",
+      "size": 126679
     },
     "images/assembly.png": {
-      "sha256": "5116f2d20c6863b59b216a57f7e1e58d88e719b839c7076caa7faf6b5b3e78d6",
-      "size": 508198
+      "sha256": "4f7fe073c93985e6bbd8edf9f854c537106c24a7ea2763001f1b44914fa02cf3",
+      "size": 468972
     },
     "images/layer_B_Cu.png": {
-      "sha256": "dc094755d5343698529929d8ab74cb4cb74fb270822bbe1eebda93a4d2050438",
-      "size": 331233
+      "sha256": "70e8ffc4a8e015ae656bc7d8e7338ad61f266f51cf38530ec3cdd20c33f79d51",
+      "size": 265226
     },
     "images/layer_F_Cu.png": {
-      "sha256": "26343337b4377d98e6c6bb23f5c0838a104f8a6bb2ce0b79ff880a453abfed9b",
-      "size": 374884
+      "sha256": "579a86cadc1097a6fd5489d3216ba812fb06580575e67cb824cc1829c6c83d6b",
+      "size": 358116
     },
     "images/layer_In1_Cu.png": {
-      "sha256": "da90486a78802ce90073c5f95066611377a6e1240d15355666fa9891be066df1",
-      "size": 282094
+      "sha256": "053049debdfbb1e6b097a90ec5fc668d777aaf235f9c8b3a6a90f1e1fadcc064",
+      "size": 215858
     },
     "images/layer_In2_Cu.png": {
-      "sha256": "5a29dcd16a23072def3335e1e1f979f18af5db533ad105a654b5fa2c1b9b65ff",
-      "size": 333240
+      "sha256": "3049f5072b86ba58a65f1e135938591a15ab4c680e96e981e43083346f55928e",
+      "size": 198791
     },
     "images/pcb_back.png": {
-      "sha256": "b73cd06d8af4322cb17af92929954bae456778031ca4a6693092e2139215bb09",
-      "size": 334383
+      "sha256": "e78e3f6bed79ad429822262f39bf066e73b2c6bdcc7bd763dd37493f17ff7b57",
+      "size": 268335
     },
     "images/pcb_copper.png": {
-      "sha256": "67b1d0e9f33cb5f1d4f3d124f4376c9c6ff524e725c2a982e4eabece7d1b8630",
-      "size": 400050
+      "sha256": "fec2942e943224f3a0f43f2180e5e11067838637541c54e83e000b36bc197a42",
+      "size": 361196
     },
     "images/pcb_front.png": {
-      "sha256": "0aa5638253a9f24e78e10469406dd4bfc1bc7425aaca197eab02511295ba3f91",
-      "size": 497328
+      "sha256": "34810bfbe804b3159bf93675adca66bb5dab3887183a74a21f19603d1912f333",
+      "size": 482775
     },
     "images/schematic_usb_joystick.png": {
-      "sha256": "c0a3950fda2f26c18ad6359ba1ccd02e953d67c0be8d2b40d3d8553de7445c79",
-      "size": 486466
+      "sha256": "435c684096c4c22d4f460823a2584c6e3f09f6663b89176976bbbaec2728eea2",
+      "size": 486460
     },
     "kicad_project.zip": {
-      "sha256": "d2cc7fb5331e21ca0ac3f6cd713b1c9dd73c07e0e88b2106862bc34d53037685",
-      "size": 279532
+      "sha256": "429be789ed10b5ff192cbd74d07ae9f56f19124e142c7427f6afc730a2e98236",
+      "size": 195315
     },
     "manual-assembly-bom.csv": {
       "sha256": "f51fef1b581623d69c00b1b3604f0a1b193c29e29134a3931e0853ab13030ef7",
@@ -317,12 +317,12 @@
       "size": 2354
     },
     "report.md": {
-      "sha256": "912a83cae798faaa0686f9398f387d1c4b20f2f5aa695f93f28292896bba297e",
-      "size": 4951
+      "sha256": "1770f50b30b94b8d926601b7d4e4105f278e8294e6fffe513af607bea0dc5997",
+      "size": 4928
     },
     "report.pdf": {
-      "sha256": "af0ebb825aa539295dd660f0e2cdf5409471935865db0d9d63360d8d8f80e144",
-      "size": 3750775
+      "sha256": "06cfb8a6cbd2e67cdcb27cb812771cfe283f59c7435e96e0b7779e04c07f5695",
+      "size": 3253376
     },
     "schematic.pdf": {
       "sha256": "6fe021a9ea56eb056b2fc6dc24e3fee47c4f6555c6141a4ad1ec755b51aa0d98",
@@ -368,7 +368,7 @@
     {
       "name": "drill_holes",
       "status": "OK",
-      "message": "Drill holes present (153 vias, 20 TH pads)"
+      "message": "Drill holes present (105 vias, 20 TH pads)"
     },
     {
       "name": "tht_in_cpl",
@@ -398,9 +398,8 @@
     },
     {
       "name": "drc",
-      "status": "FAIL",
-      "message": "DRC has 13 error(s)",
-      "details": "netclass_clearance_copper: Segment to via clearance 0.175mm < netclass 'Power' minimum 0.200mm; netclass_clearance_copper: Segment to via clearance 0.175mm < netclass 'Power' minimum 0.200mm; netclass_clearance_copper: Segment to via clearance 0.194mm < netclass 'Power' minimum 0.200mm; netclass_clearance_copper: Segment to via clearance 0.195mm < netclass 'Power' minimum 0.200mm; netclass_clearance_copper: Segment to via clearance 0.154mm < netclass 'Power' minimum 0.200mm"
+      "status": "WARN",
+      "message": "DRC passed with 11 warning(s)"
     },
     {
       "name": "erc",

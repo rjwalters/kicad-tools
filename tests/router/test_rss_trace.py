@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import io
 
+import pytest
+
 from kicad_tools.router.rss_trace import (
     RSSTracer,
     child_peak_rss_bytes,
@@ -18,7 +20,12 @@ from kicad_tools.router.rss_trace import (
 
 
 def test_peak_rss_bytes_positive():
-    """The peak-RSS reading is a positive byte count on every platform."""
+    """The peak-RSS reading is a positive byte count where ``resource`` exists.
+
+    On Windows the ``resource`` module is absent and the reading is 0 by
+    design (issue #6739), so the positivity assertion does not apply there.
+    """
+    pytest.importorskip("resource")
     assert peak_rss_bytes() > 0
 
 

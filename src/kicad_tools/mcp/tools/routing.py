@@ -123,6 +123,60 @@ def get_unrouted_nets(
     )
 
 
+def _resolve_output_path(pcb_path: str, output_path: str | None) -> str:
+    """Return where route_net saves: ``<stem>_routed.kicad_pcb`` by default."""
+    if output_path:
+        return output_path
+    p = Path(pcb_path)
+    return str(p.with_name(f"{p.stem}_routed{p.suffix}"))
+
+
+def _merge_collinear_segments(router, net_number: int, routes: list) -> list:
+    """Collapse the router's per-grid-cell segments into straight runs.
+
+    Issue #7120: the router emits one segment per grid step, so a straight
+    9 mm run is ~90 collinear segments.  ``kct route`` runs the trace
+    optimizer before saving; this applies the conservative subset of it
+    (``merge_collinear`` only) to the freshly routed net, guarded by the
+    same connectivity invariant.  Any failure falls back to ``routes``.
+    """
+    import copy
+
+    from kicad_tools.router.connectivity_invariant import (
+        enforce_connectivity_invariant,
+        snapshot_connectivity,
+    )
+    from kicad_tools.router.optimizer import (
+        OptimizationConfig,
+        TraceOptimizer,
+        make_collision_checker,
+        optimize_routes_grid_synced,
+    )
+
+    original_router_routes = list(router.routes)
+    original_routes = copy.deepcopy(routes)
+    try:
+        snapshot = snapshot_connectivity(router)
+        optimizer = TraceOptimizer(
+            config=OptimizationConfig(
+                merge_collinear=True,
+                eliminate_zigzags=False,
+                compress_staircase=False,
+                convert_45_corners=False,
+                minimize_vias=False,
+            ),
+            collision_checker=make_collision_checker(router.grid),
+        )
+        optimize_routes_grid_synced(router, optimizer)
+        enforce_connectivity_invariant(router, snapshot, "optimize", quiet=True)
+        optimized = [r for r in router.routes if r.net == net_number]
+        return optimized or routes
+    except Exception:
+        logger.warning("Trace optimization failed for net %s; saving raw routes", net_number)
+        router.routes = original_router_routes
+        return original_routes
+
+
 def route_net(
     pcb_path: str,
     net_name: str,
@@ -133,13 +187,16 @@ def route_net(
     """Route a specific net.
 
     Attempts to route all unconnected pads on the specified net using
-    the autorouter. The result can be saved to a new file or overwrite
-    the original.
+    the autorouter. The result is saved to a new file by default; the
+    original is overwritten only if ``output_path`` equals ``pcb_path``.
 
     Args:
         pcb_path: Absolute path to .kicad_pcb file
         net_name: Name of the net to route (e.g., "GND", "SPI_CLK")
-        output_path: Path for output file. If None, overwrites the original.
+        output_path: Path for output file. If None, writes
+                     ``<stem>_routed.kicad_pcb`` next to the input and leaves
+                     the input untouched. Pass ``output_path == pcb_path``
+                     to overwrite the input explicitly.
         strategy: Routing strategy to use:
                   - "auto": Automatically choose best strategy
                   - "shortest": Minimize trace length
@@ -203,7 +260,7 @@ def route_net(
             trace_length_mm=_measure_existing_trace_length(pcb, net_number),
             vias_used=_count_vias_on_net(pcb, net_number),
             layers_used=_get_layers_used(pcb, net_number),
-            output_path=output_path or pcb_path,
+            output_path=None,  # nothing written on this early return
             suggestions=["Net is already fully routed"],
         )
 
@@ -341,7 +398,7 @@ def route_net(
             net_name=net_name,
             routed_connections=0,
             total_connections=0,
-            output_path=output_path or pcb_path,
+            output_path=None,  # nothing written on this early return
             suggestions=["Net has fewer than 2 pads, no routing needed"],
         )
 
@@ -362,6 +419,8 @@ def route_net(
             suggestions=_generate_suggestions(net_status, net_pads, pcb),
         )
 
+    routes = _merge_collinear_segments(router, net_number, routes)
+
     # Calculate results
     if routes:
         # Calculate trace length and count vias
@@ -378,20 +437,26 @@ def route_net(
 
             vias_count += len(route.vias)
 
-        # Merge the routed traces into the PCB
+        # Merge the routed traces into the PCB.
+        #
+        # Issue #7114: ``merge_routes_into_pcb`` is text-in/text-out -- it
+        # takes the board file text and the routes as an S-expression string
+        # (the same path ``project.py`` and ``placement_feedback`` use).  The
+        # previous call passed a PCB object, Route objects and width/via
+        # kwargs that never existed, so it always raised ``TypeError`` and
+        # ``route_net`` could never save.  Each emitted segment/via already
+        # carries the width / diameter / drill the router used (taken from
+        # ``design_rules``), so nothing has to be passed separately.
         try:
-            merge_routes_into_pcb(
-                pcb,
-                routes,
-                net_map={net_name: net_number},
-                trace_width=design_rules.trace_width,
-                via_diameter=design_rules.via_diameter,
-                via_drill=design_rules.via_drill,
-            )
+            # Issue #4416 dialect parity: a KiCad-10 name-only board keeps its
+            # ``(net "NAME")`` copper form.
+            name_only = bool(getattr(pcb, "_net_name_only_dialect", False))
+            route_sexp = "\n\t".join(route.to_sexp(name_only=name_only) for route in routes)
+            merged_text = merge_routes_into_pcb(pcb_text, route_sexp)
 
             # Save the result
-            save_path = output_path or pcb_path
-            pcb.save(save_path)
+            save_path = _resolve_output_path(pcb_path, output_path)
+            Path(save_path).write_text(merged_text)
 
             return RouteNetResult(
                 warnings=clearance_warnings,

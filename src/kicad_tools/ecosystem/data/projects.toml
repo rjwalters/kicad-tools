@@ -426,7 +426,7 @@ license_compat = "mit-clean"
 language = "TypeScript"
 stars = 2776
 last_push = "2026-09-30"
-last_verified = "2026-10-01"
+last_verified = "2026-10-18"
 # circuit-json-to-kicad@0.0.228 (tscircuit/circuit-json-to-kicad), the converter
 # actually measured by the interop gate. Rendered alongside
 # @tscircuit/core@0.0.2031 = 80ba2c4b07b88113d1e1d9724ffd66ae1d3aaa5e and
@@ -448,16 +448,20 @@ converters name the same net differently, so no emitted project can pass \
 LVS at all; vias, netclass and silkscreen defaults also sit below every \
 mainstream fab floor. Our parser reads the files without complaint, and \
 `kct route` produced opens where tscircuit's own autorouter produced \
-shorts. Six upstream defects recorded with reproducers; the relation \
-stays upstream/complementary and all six look fixable.\
+shorts. Six upstream defects were recorded with reproducers and \
+re-verified on upstream HEAD (2026-10-18): three confirmed and tracked \
+upstream, two fixed or covered upstream, one not a bug. The relation \
+stays upstream/complementary.\
 """
 reeval_trigger = """
-Re-run `benchmarks/interop/tscircuit/run_gate.py` once the \
-schematic-vs-PCB net-name divergence is fixed upstream (defect 2 in the \
-note) -- it is the one that makes every other number hard to read, and a \
-clean LVS pass is what would make tscircuit a supported front end. \
-Upstream filing is tracked in #5878; the kct-side gaps the gate exposed \
-are #5875 and #5876.\
+Re-run `benchmarks/interop/tscircuit/run_gate.py` when \
+tscircuit/circuit-json-to-kicad#674 (schematic-vs-PCB names for unnamed \
+pin-to-pin nets; the blocker for any LVS pass) is fixed. Also watch \
+circuit-json-to-kicad#665 (+ stacked #666; the package declares no runtime \
+dependencies), circuit-json-to-kicad#550 (pour edge clearance), and \
+tscircuit/footprinter#934 / #935 (explicit-dimension QFN corner pads \
+overlap). Outcomes are recorded in the note (#5878); the kct-side gaps the \
+gate exposed are #5875 and #5876.\
 """
 
 [projects.component-importer]

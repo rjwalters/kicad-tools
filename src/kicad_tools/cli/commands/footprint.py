@@ -13,8 +13,7 @@ def run_footprint_command(args) -> int:
     if args.footprint_command == "generate":
         from ..footprint_generate import main as generate_main
 
-        # Pass all remaining arguments to the generate subcommand
-        sub_argv = args.fp_args if hasattr(args, "fp_args") and args.fp_args else []
-        return generate_main(sub_argv) or 0
+        # Normally intercepted in cli.main() with its argv; reached only bare.
+        return generate_main([]) or 0
 
     return 1
