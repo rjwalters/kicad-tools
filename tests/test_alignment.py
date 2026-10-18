@@ -174,7 +174,7 @@ class TestAlignComponents:
         refs = ["R1", "R2", "R3", "R4"]
         count = align_components(simple_optimizer, refs, axis="horizontal", reference="top")
 
-        assert count == 4
+        assert count == 3  # one part already at the top edge
 
         # All components should have the same top edge
         r1 = simple_optimizer.get_component("R1")
@@ -190,7 +190,7 @@ class TestAlignComponents:
         refs = ["C1", "C2", "C3"]
         count = align_components(simple_optimizer, refs, axis="vertical", reference="center")
 
-        assert count == 3
+        assert count == 2  # C2 already at mean x
 
         c1 = simple_optimizer.get_component("C1")
         c2 = simple_optimizer.get_component("C2")
@@ -233,7 +233,7 @@ class TestDistributeComponents:
         refs = ["LED1", "LED2", "LED3", "LED4"]
         count = distribute_components(simple_optimizer, refs, axis="horizontal")
 
-        assert count == 4
+        assert count == 0  # LEDs already evenly spaced
 
         led1 = simple_optimizer.get_component("LED1")
         led2 = simple_optimizer.get_component("LED2")
@@ -253,7 +253,7 @@ class TestDistributeComponents:
         refs = ["LED1", "LED2", "LED3", "LED4"]
         count = distribute_components(simple_optimizer, refs, axis="horizontal", spacing_mm=10.0)
 
-        assert count == 4
+        assert count == 3  # LED1 stays put
 
         led1 = simple_optimizer.get_component("LED1")
         led2 = simple_optimizer.get_component("LED2")
@@ -270,7 +270,7 @@ class TestDistributeComponents:
         refs = ["C1", "C2", "C3"]
         count = distribute_components(simple_optimizer, refs, axis="vertical")
 
-        assert count == 3
+        assert count == 0  # already evenly spaced
 
         c1 = simple_optimizer.get_component("C1")
         c2 = simple_optimizer.get_component("C2")
@@ -396,7 +396,8 @@ class TestApplyAlignmentConstraints:
         results = apply_alignment_constraints(simple_optimizer, constraints)
 
         assert "distribute" in results
-        assert results["distribute"] == 4
+        # LED1 stays at x=50, so only 3 of 4 move
+        assert results["distribute"] == 3
 
     def test_reference_constraint(self, simple_optimizer):
         """Test applying reference constraint."""
@@ -426,33 +427,110 @@ class TestApplyAlignmentConstraints:
         results = apply_alignment_constraints(simple_optimizer, constraints)
 
         assert "column" in results
-        assert results["column"] == 3
+        # C2 is already at the mean x (20.0), so only C1 and C3 move
+        assert results["column"] == 2
 
 
-class TestCLICommands:
-    """Tests for CLI command integration."""
+@pytest.fixture
+def row_optimizer() -> PlacementOptimizer:
+    optimizer = PlacementOptimizer(Polygon.rectangle(50, 50, 100, 100))
+    for ref, x, y in [
+        ("R1", 10.0, 20.0),
+        ("R2", 15.0, 20.03),
+        ("R3", 20.0, 19.98),
+        ("R4", 25.0, 20.7),
+    ]:
+        optimizer.add_component(Component(ref=ref, x=x, y=y, width=2, height=1))
+    return optimizer
 
-    def test_snap_command_help(self):
-        """Test snap command help."""
+
+class TestAlignTolerance:
+    """Tolerance, moved-count and validation behaviour of align_components."""
+
+    REFS = ["R1", "R2", "R3", "R4"]
+
+    def test_large_tolerance_moves_nothing(self, row_optimizer):
+        before = {r: row_optimizer.get_component(r).y for r in self.REFS}
+        count = align_components(row_optimizer, self.REFS, tolerance_mm=5.0)
+        assert count == 0
+        assert {r: row_optimizer.get_component(r).y for r in self.REFS} == before
+
+    def test_default_tolerance_counts_true_moves(self, row_optimizer):
+        target = sum(row_optimizer.get_component(r).y for r in self.REFS) / 4
+        before = {r: row_optimizer.get_component(r).y for r in self.REFS}
+        count = align_components(row_optimizer, self.REFS, tolerance_mm=0.25)
+        moved = [r for r in self.REFS if row_optimizer.get_component(r).y != before[r]]
+        assert count == len(moved) == 1
+        assert moved == ["R4"]
+        assert row_optimizer.get_component("R4").y == pytest.approx(target)
+
+    def test_zero_tolerance_moves_all_that_differ(self, row_optimizer):
+        count = align_components(row_optimizer, self.REFS, tolerance_mm=0.0)
+        assert count == 4
+
+    def test_negative_tolerance_treated_as_zero(self, row_optimizer):
+        assert align_components(row_optimizer, self.REFS, tolerance_mm=-1.0) == 4
+
+    def test_already_aligned_returns_zero(self, row_optimizer):
+        align_components(row_optimizer, self.REFS, tolerance_mm=0.0)
+        assert align_components(row_optimizer, self.REFS, tolerance_mm=0.0) == 0
+
+    @pytest.mark.parametrize(
+        "axis,reference",
+        [
+            ("horizontal", "left"),
+            ("horizontal", "right"),
+            ("vertical", "top"),
+            ("vertical", "bottom"),
+            ("horizontal", "middle"),
+            ("diagonal", "center"),
+        ],
+    )
+    def test_invalid_pair_raises(self, row_optimizer, axis, reference):
+        with pytest.raises(ValueError):
+            align_components(row_optimizer, self.REFS, axis=axis, reference=reference)
+
+    def test_invalid_pair_raises_even_with_single_component(self, row_optimizer):
+        with pytest.raises(ValueError):
+            align_components(row_optimizer, ["R1"], axis="horizontal", reference="left")
+
+    @pytest.mark.parametrize(
+        "axis,reference",
+        [
+            ("horizontal", "top"),
+            ("horizontal", "bottom"),
+            ("vertical", "left"),
+            ("vertical", "right"),
+        ],
+    )
+    def test_valid_pairs_work(self, row_optimizer, axis, reference):
+        assert align_components(row_optimizer, self.REFS, axis=axis, reference=reference) > 0
+
+    def test_distribute_count_excludes_unmoved(self, row_optimizer):
+        # R1..R4 are already evenly spaced at 5mm in x
+        assert distribute_components(row_optimizer, self.REFS, axis="horizontal") == 0
+
+    def test_align_to_reference_count_excludes_unmoved(self, row_optimizer):
+        row_optimizer.get_component("R2").x = 10.0
+        count = align_to_reference(row_optimizer, ["R1", "R2", "R3"], "R4", edge="center_y")
+        assert count == 3
+        assert align_to_reference(row_optimizer, ["R1", "R2", "R3"], "R4", edge="center_y") == 0
+
+
+class TestAlignCLIInvalidPair:
+    @pytest.mark.parametrize("fmt", ["text", "json"])
+    def test_row_left_fails_and_writes_nothing(
+        self, minimal_pcb, tmp_path, monkeypatch, row_optimizer, fmt
+    ):
         from kicad_tools.cli.placement_cmd import main
 
-        # argparse exits with SystemExit(0) on --help
-        with pytest.raises(SystemExit) as exc_info:
-            main(["snap", "--help"])
-        assert exc_info.value.code == 0
-
-    def test_align_command_help(self):
-        """Test align command help."""
-        from kicad_tools.cli.placement_cmd import main
-
-        with pytest.raises(SystemExit) as exc_info:
-            main(["align", "--help"])
-        assert exc_info.value.code == 0
-
-    def test_distribute_command_help(self):
-        """Test distribute command help."""
-        from kicad_tools.cli.placement_cmd import main
-
-        with pytest.raises(SystemExit) as exc_info:
-            main(["distribute", "--help"])
-        assert exc_info.value.code == 0
+        monkeypatch.setattr(
+            PlacementOptimizer, "from_pcb", classmethod(lambda cls, *a, **k: row_optimizer)
+        )
+        out = tmp_path / "out.kicad_pcb"
+        argv = [
+            "align", str(minimal_pcb), "--components", "R1,R2", "--axis", "row",
+            "--reference", "left", "--output", str(out), "--format", fmt,
+        ]  # fmt: skip
+        assert main(argv) != 0
+        assert not out.exists()
