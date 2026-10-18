@@ -604,3 +604,69 @@ def test_unequal_via_pair_is_recorded_for_the_warning(monkeypatch) -> None:
         [pc], {}, committed=pf._fresh_committed(), history={}, present=0.0, escape_plan={}
     )
     assert pf.pair_via_mismatch == {pc.key: (2, 3)}
+
+
+def _chain_segments() -> list[CoupledConnection]:
+    """Board 03's USB_D shape: one pair, two chain segments J1->U2 and U2->U1."""
+
+    def seg(idx: int, a: str, b: str) -> CoupledConnection:
+        return CoupledConnection(
+            key=("pair", 20, 21, idx),
+            pair_name="USB_D",
+            pad_p_a=_pad(3.0, 5.0, 20, "USB_D+", a),
+            pad_n_a=_pad(3.0, 6.0, 21, "USB_D-", a),
+            pad_p_b=_pad(27.0, 5.0, 20, "USB_D+", b),
+            pad_n_b=_pad(27.0, 6.0, 21, "USB_D-", b),
+            net_class=_HS,
+            pitch=_PITCH,
+        )
+
+    return [seg(0, "J1", "U2"), seg(1, "U2", "U1")]
+
+
+def test_partially_coupled_pair_with_asymmetric_fallback_vias_warns() -> None:
+    # Issue #7093 (Judge on PR #7103): board 03's USB_D is partially coupled
+    # -- segment 1 couples, segment 0 falls back with (0, 1) vias.  The
+    # mismatch must be reported, not committed silently.
+    from kicad_tools.router.core import pair_via_mismatch_warnings
+    from kicad_tools.router.pairplan.outcome import aggregate_label
+
+    segs = _chain_segments()
+    outcomes = {
+        segs[0].key: "uncoupled-fallback:pair-no-path",
+        segs[1].key: "coupled",
+    }
+    assert aggregate_label([outcomes[s.key] for s in segs]) == "partially-coupled:1/2"
+    lines = pair_via_mismatch_warnings(segs, outcomes, {segs[0].key: (0, 1)})
+    assert len(lines) == 1
+    assert "WARNING: diff pair USB_D J1.1->U2.1 legs have unequal via counts" in lines[0]
+    assert "(P=0, N=1)" in lines[0]
+
+
+def test_uncoupled_fallback_pair_with_asymmetric_vias_warns() -> None:
+    from kicad_tools.router.core import pair_via_mismatch_warnings
+
+    _pf, pc = _walled_pair()
+    lines = pair_via_mismatch_warnings(
+        [pc], {pc.key: "uncoupled-fallback:pair-no-path"}, {pc.key: (2, 3)}
+    )
+    assert len(lines) == 1 and "(P=2, N=3)" in lines[0]
+
+
+@pytest.mark.parametrize("final", ["coupled", "hybrid:U1.1"])
+def test_stale_mismatch_on_a_segment_no_longer_in_fallback_is_not_reported(final) -> None:
+    # A segment that left the fallback (coupled later, or taken by the #6446
+    # hybrid retry, which removes it from the flush) was not committed by it.
+    from kicad_tools.router.core import pair_via_mismatch_warnings
+
+    segs = _chain_segments()
+    outcomes = {segs[0].key: final, segs[1].key: "coupled"}
+    assert pair_via_mismatch_warnings(segs, outcomes, {segs[0].key: (0, 1)}) == []
+
+
+def test_equal_via_fallback_segments_do_not_warn() -> None:
+    from kicad_tools.router.core import pair_via_mismatch_warnings
+
+    segs = _chain_segments()
+    outcomes = {s.key: "uncoupled-fallback:pair-no-path" for s in segs}
+    assert pair_via_mismatch_warnings(segs, outcomes, {}) == []
