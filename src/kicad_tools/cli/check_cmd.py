@@ -3386,6 +3386,12 @@ def run_selected_checks(
         category_results = method()
         results.merge(category_results)
         cov_map[category] = pre if pre is not None else cov.checked(category)
+        # Issue #7293: a matched diff pair with no judged segment is not
+        # "checked"; only knowable after the run.
+        unmeasured = getattr(checker, "impedance_unmeasured_pairs", None)
+        if category == "impedance" and unmeasured and pre is None:
+            names = ", ".join(f"{p}/{n}" for p, n in unmeasured)
+            cov_map[category] = cov.unknown(category, f"diff_pair_unmeasurable ({names})")
 
     return results
 

@@ -30,10 +30,11 @@ BOARD_04_RELPATH = BOARD_04_ROUTED_PCB.relative_to(REPO_ROOT).as_posix()
 # Issue #7220: the new ``thermal_asymmetry`` advisory reports the nine 0805s
 # whose +3.3V/+5V terminal the starved-thermal repair forced solid into the
 # F.Cu pour while the GND terminal sits on a 0.2 mm trace -- a real tombstoning
-# risk the fill-repair follow-up (narrower spokes before solid) removes.  The
-# reviewed gate fails on any warning, so until then it honestly reports
-# "0 errors, 9 warnings".  They are pinned EXACTLY (not waived, not filtered
-# by rule name): any other warning, error or failing meta-check still fails.
+# risk the fill-repair follow-up #7295 (narrower spokes before solid) removes.
+# Issue #7298: the reviewed gate accepts exactly these findings
+# (``BOARD04_KNOWN_WARNINGS``; not waived, not filtered by rule name): any
+# other warning, error or failing meta-check still fails
+# (tests/test_board_known_warnings.py).
 KNOWN_7220_WARNINGS = sorted(
     ("thermal_asymmetry", ref)
     for ref in ("C1", "C2", "C3", "C12", "C13", "C14", "C15", "C16", "R1")
@@ -61,12 +62,8 @@ def board_04_mfr_check(tmp_path_factory) -> dict:
         timeout=120,
         check=False,
     )
-    assert proc.returncode in (0, 2) and report.is_file(), proc.stdout + proc.stderr
-    data = json.loads(report.read_text())
-    if proc.returncode == 2:
-        # Only the pinned #7220 warnings may fail the gate (see above).
-        assert _warnings(data) == KNOWN_7220_WARNINGS, proc.stdout
-    return data
+    assert proc.returncode == 0 and report.is_file(), proc.stdout + proc.stderr
+    return json.loads(report.read_text())
 
 
 def test_board_04_reviewed_process_is_strictly_clean(board_04_mfr_check: dict) -> None:
@@ -74,10 +71,10 @@ def test_board_04_reviewed_process_is_strictly_clean(board_04_mfr_check: dict) -
     assert report["summary"]["errors"] == 0
     assert _warnings(report) == KNOWN_7220_WARNINGS
     meta = report["meta_checks"]
-    for gate in ("erc", "lvs", "manifest"):
+    for gate in ("drc", "erc", "lvs", "manifest"):
         assert meta[gate]["status"] == "PASSED", gate
-    # The DRC leg fails on the pinned #7220 advisories alone.
-    assert meta["drc"]["detail"] == f"0 errors, {len(KNOWN_7220_WARNINGS)} warnings"
+    n = len(KNOWN_7220_WARNINGS)
+    assert meta["drc"]["detail"] == f"0 errors, {n} warnings ({n} known, #7295)"
     assert report["fabrication_overrides"]["suppressed_findings"] == 0
     assert report["fabrication_overrides"]["paid_factory_option"] == "0.15 mm minimum via hole size"
     assert report["fabrication_overrides"]["via_type"] == "through"

@@ -646,8 +646,14 @@ def _thermal_ladder(
 
 
 def _pad_thermal_override(pad: SExp) -> tuple[float, float] | None:
-    """The pad's own ``(thermal_width W) (thermal_gap G)`` override, if both set."""
+    """The pad's own ``(thermal_width W) (thermal_gap G)`` override, if both set.
+
+    KiCad saves the width back as ``thermal_bridge_width``, so both spellings
+    are read (issue #7309).
+    """
     w_node = pad.find("thermal_width")
+    if w_node is None:
+        w_node = pad.find("thermal_bridge_width")
     g_node = pad.find("thermal_gap")
     if w_node is None or g_node is None:
         return None
@@ -664,7 +670,10 @@ def _set_pad_thermal(pad: SExp, width: float, gap: float) -> bool:
     ``fill`` block spells the width ``thermal_bridge_width``).  A pad that
     already declares either is a deliberate upstream choice and is untouched.
     """
-    if pad.find("thermal_width") is not None or pad.find("thermal_gap") is not None:
+    if any(
+        pad.find(tok) is not None
+        for tok in ("thermal_width", "thermal_bridge_width", "thermal_gap")
+    ):
         return False
     pad.append(SExp.list("thermal_width", width))
     pad.append(SExp.list("thermal_gap", gap))
@@ -875,6 +884,7 @@ def force_solid_on_isolated_island_pads(doc: SExp, zone_uuids: set[str]) -> int:
 
     name_map = _build_net_name_map(doc)
     obstacles = _collect_obstacles(doc, shapely, name_map)
+    pad_owner = {id(p): fp for fp in _find_all_footprints(doc) for p in fp.find_all("pad")}
 
     changed = 0
     for zone in doc.find_all("zone"):
@@ -923,6 +933,11 @@ def force_solid_on_isolated_island_pads(doc: SExp, zone_uuids: set[str]) -> int:
                     continue  # a via, not a pad -- has no thermal relief
                 if _set_pad_zone_connect(pad, _ZONE_CONNECT_SOLID):
                     changed += 1
+                    owner = pad_owner.get(id(pad))
+                    logger.info(
+                        "solid thermal override on %s: it anchors an isolated-copper sliver",
+                        _footprint_label(owner, pad) if owner is not None else pad.get_string(0),
+                    )
     return changed
 
 
@@ -979,9 +994,8 @@ def force_solid_on_pads_by_uuid(
         return ladder[-1] if ladder[-1] != cur else None
 
     def _narrow(pad: SExp, rung: tuple[float, float]) -> bool:
-        for tok in ("thermal_width", "thermal_gap"):
-            node = pad.find(tok)
-            if node is not None:
+        for tok in ("thermal_width", "thermal_bridge_width", "thermal_gap"):
+            for node in pad.find_all(tok):
                 pad.children.remove(node)
         return _set_pad_thermal(pad, *rung)
 
