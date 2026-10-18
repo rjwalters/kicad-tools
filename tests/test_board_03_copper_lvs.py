@@ -491,11 +491,15 @@ class TestBoard03FreshRegenCopperLVSClean:
         # The native saved-byte check must independently see a removed plane
         # stitch. Keep the already-filled islands: this tests actual copper
         # continuity, rather than merely checking the plan contains a via.
+        # Issue #6394: the plan's copper is now router-derived, so the witness
+        # is the router's GND pour-weld via at (146.47, 67.85) -- the old
+        # hand-placed C10.2 stitch at (131.275, 89.5) is gone.  Removing any
+        # one of the 24 GND/VCC plane vias trips this check (measured).
         import shutil
 
         from kicad_tools.sexp import parse_file, serialize_sexp
 
-        negative_dir = tmp_path / "missing-c10-stitch"
+        negative_dir = tmp_path / "missing-gnd-stitch"
         negative_dir.mkdir()
         for artifact in out_dir.glob("*.kicad_*"):
             shutil.copy2(artifact, negative_dir / artifact.name)
@@ -504,9 +508,9 @@ class TestBoard03FreshRegenCopperLVSClean:
         removed = []
         for via in doc.find_children("via"):
             at = via.find_child("at")
-            if abs(at.get_float(0) - 131.275) < 0.001 and abs(at.get_float(1) - 89.5) < 0.001:
+            if abs(at.get_float(0) - 146.47) < 0.001 and abs(at.get_float(1) - 67.85) < 0.001:
                 removed.append(via)
-        assert len(removed) == 1, "expected exactly one C10.2 plane stitch"
+        assert len(removed) == 1, "expected exactly one GND plane stitch at (146.47, 67.85)"
         doc.children.remove(removed[0])
         negative.write_text(serialize_sexp(doc))
         with pytest.raises(RuntimeError, match="native unconnected"):

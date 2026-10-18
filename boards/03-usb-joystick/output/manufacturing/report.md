@@ -1,8 +1,8 @@
 ---
 title: "usb_joystick_routed"
 subtitle: "Design Report"
-author: "kicad-tools 0.22.0"
-date: "Rev 1 | 2026-10-14 | jlcpcb-tier1"
+author: "kicad-tools 0.23.0"
+date: "Rev 1 | 2026-10-18 | jlcpcb-tier1"
 geometry: "margin=1in"
 fontsize: 11pt
 colorlinks: true
@@ -20,8 +20,8 @@ header-includes:
 | Layers | 4 copper (F.Cu, In1.Cu, In2.Cu, B.Cu) |
 | Footprints | 38 (37 SMD, 1 THT, 0 other) |
 | Nets | 27 |
-| Traces | 2050 segments |
-| Vias | 153 |
+| Traces | 1080 segments |
+| Vias | 105 |
 | Board Size | 80.0 x 60.0 mm |
 
 ## Stackup
@@ -155,30 +155,30 @@ The following 1 through-hole component is **excluded from the SMT pick-and-place
 
 | Metric | Count |
 |--------|-------|
-| Errors | 12 |
-| Warnings | 14 |
-| Blocking | 12 |
+| Errors | 0 |
+| Warnings | 15 |
+| Blocking | 0 |
 
-**Status**: FAIL
+**Status**: PASS
 ### Violations by Type
 
 | Violation Type | Count |
 |----------------|-------|
 | hole_to_hole_clearance | 14 |
-| kicad-cli:clearance | 12 |
+| diffpair_routing_continuity | 1 |
+| diffpair_uncoupled_length | 1 |
 
 
 \newpage
 
 ## Manufacturing Readiness
 
-**Verdict**: NOT_READY
+**Verdict**: WARNING
 
 ### Action Items
 
-- **[CRITICAL]** Fix 12 blocking DRC violations (kicad-cli: clearance (12))
-- **[OPTIONAL]** Verify zone fill in KiCad for 2 zone-connected nets
-- **[OPTIONAL]** Review 14 DRC warnings
+- **[OPTIONAL]** Refill zones to verify 2 zone-connected nets, then re-run kct audit
+- **[OPTIONAL]** Review 15 DRC warnings
 
 
 \newpage
