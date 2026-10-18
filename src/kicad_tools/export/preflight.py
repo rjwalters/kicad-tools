@@ -32,6 +32,7 @@ from .pnp import is_through_hole_footprint
 
 if TYPE_CHECKING:
     from ..drc.violation import DRCViolation
+    from ..schema.pcb import PCB
 
 logger = logging.getLogger(__name__)
 
@@ -112,6 +113,71 @@ def report_source_mismatch(
     if recorded_name == target_name:
         return None
     return recorded_name
+
+
+_COPPER_OZ_TOL = 0.05
+
+
+def _fmt_oz(oz: float | None) -> str:
+    return "n/a" if oz is None else f"{oz:g} oz"
+
+
+def resolve_ordered_copper(pcb: PCB, manufacturer: str) -> dict:
+    """Compare the board's declared stackup copper with what the fab provides.
+
+    Issue #7209: the ampacity gate reads copper weight from the board stackup,
+    while the order is built from the fab profile.  This reconciles the two.
+
+    Returns a dict with ``layers``, ``stackup_outer_oz`` / ``stackup_inner_oz``
+    (``None`` when the board declares no usable stackup), ``profile_options``
+    (list of ``[outer, inner]`` the fab offers for this layer count),
+    ``ordered_outer_oz`` / ``ordered_inner_oz`` (the matched option, else
+    ``None``) and ``status``: ``match`` | ``mismatch`` | ``undeclared`` |
+    ``unknown``.  Never raises.
+    """
+    info: dict = {
+        "layers": None,
+        "stackup_outer_oz": None,
+        "stackup_inner_oz": None,
+        "profile_options": [],
+        "ordered_outer_oz": None,
+        "ordered_inner_oz": None,
+        "status": "unknown",
+    }
+    try:
+        from ..manufacturers import get_profile
+        from ..physics.stackup import Stackup
+
+        layers = len(pcb.copper_layers)
+        info["layers"] = layers
+        profile = get_profile(manufacturer)
+        options = profile.copper_options(layers)
+        info["profile_options"] = [list(o) for o in options]
+        derived = Stackup.from_pcb(pcb).outer_inner_copper_oz()
+    except Exception as e:  # noqa: BLE001 - preflight must not crash on a stackup quirk
+        logger.debug("Could not resolve stackup copper: %s", e)
+        return info
+
+    if not options:
+        return info  # profile has no entry for this layer count: nothing to compare
+    if derived is None or (derived[0] is None and derived[1] is None):
+        # Profile default applies: the first entry is what gets ordered.
+        info["ordered_outer_oz"], info["ordered_inner_oz"] = options[0]
+        info["status"] = "undeclared"
+        return info
+
+    outer, inner = derived
+    info["stackup_outer_oz"], info["stackup_inner_oz"] = outer, inner
+    for opt_outer, opt_inner in options:
+        outer_ok = outer is None or abs(outer - opt_outer) <= _COPPER_OZ_TOL
+        # opt_inner == 0 means the profile entry has no inner layers (2-layer).
+        inner_ok = inner is None or opt_inner <= 0 or abs(inner - opt_inner) <= _COPPER_OZ_TOL
+        if outer_ok and inner_ok:
+            info["ordered_outer_oz"], info["ordered_inner_oz"] = opt_outer, opt_inner
+            info["status"] = "match"
+            return info
+    info["status"] = "mismatch"
+    return info
 
 
 @dataclass
@@ -247,6 +313,7 @@ class PreflightChecker:
             results.append(self._check_footprints_present())
             results.append(self._check_board_dimensions())
             results.append(self._check_drill_holes())
+            results.append(self._check_stackup_copper())
 
         # THT-in-CPL warning
         if self._pcb is not None:
@@ -677,6 +744,44 @@ class PreflightChecker:
             name="drill_holes",
             status="OK",
             message=f"Drill holes present ({via_count} vias, {th_pad_count} TH pads)",
+        )
+
+    def _check_stackup_copper(self) -> PreflightResult:
+        """Fail when the stackup's copper weight is not one the fab order provides (#7209)."""
+        info = resolve_ordered_copper(self._pcb, self.manufacturer)
+        status = info["status"]
+        if status == "match":
+            return PreflightResult(
+                name="stackup_copper",
+                status="OK",
+                message=(
+                    f"Stackup copper matches the {self.manufacturer} order "
+                    f"(outer {_fmt_oz(info['ordered_outer_oz'])}, "
+                    f"inner {_fmt_oz(info['ordered_inner_oz'])})"
+                ),
+            )
+        if status == "mismatch":
+            offered = "; ".join(
+                f"outer {_fmt_oz(o)} / inner {_fmt_oz(i)}" for o, i in info["profile_options"]
+            )
+            return PreflightResult(
+                name="stackup_copper",
+                status="FAIL",
+                message=(
+                    f"Board stackup declares outer {_fmt_oz(info['stackup_outer_oz'])} / "
+                    f"inner {_fmt_oz(info['stackup_inner_oz'])} copper, which "
+                    f"{self.manufacturer} does not provide for {info['layers']} layers"
+                ),
+                details=(
+                    f"Profile offers: {offered}. The ampacity gate trusts the stackup, so "
+                    "the board could pass on copper nobody orders. Change the order to "
+                    "the stackup's weights or correct the stackup."
+                ),
+            )
+        return PreflightResult(
+            name="stackup_copper",
+            status="OK",
+            message="No usable stackup copper to reconcile; profile default copper applies",
         )
 
     def _check_tht_in_cpl(self) -> PreflightResult:
