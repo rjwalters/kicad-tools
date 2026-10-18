@@ -6,32 +6,32 @@
   },
   "files": {
     "README.txt": {
-      "sha256": "add13e8d4a9eaf388986cd4be0bd59a6c5b5297719985521ef16a279d45f9d24",
+      "sha256": "b68505952057eefaa9a04c7272428b68e44a04e9fa8a34d00c86e0892586d1f5",
       "size": 1234
     },
     "assembly-back.pdf": {
-      "sha256": "94bec1010c1843cfa978ec9f879062410158177d2ecc12928ff550b5e55497ca",
+      "sha256": "12450fbfa76693a487f4f5f428fcbd636483f3f688fbca3fabdc03faf5b8a6fa",
       "size": 5983
     },
     "assembly-front.pdf": {
-      "sha256": "f01bbd3200e3ba60e6f66fcf4e143d0e8a96be465d67ed1d22a1808705cac4e6",
-      "size": 9305
+      "sha256": "b74b729344287674e4b2eb904aab08f8b65005a5c0aee78bc3e05571c1de178a",
+      "size": 9563
     },
     "bom_jlcpcb.csv": {
       "sha256": "bff6f5bac21cb349473f4bd2c2a55f1245bfe32e5a3a804ce99a46b8d502801c",
       "size": 194
     },
     "check-report.json": {
-      "sha256": "8e045235f6797904c0ba6b38a0005ac715612eec9b8e2845d9181600e17082f6",
-      "size": 8989
+      "sha256": "e282490fd4e786ab9c15cb99762b8218a68287ddb9b926a9a9f6395d06510f92",
+      "size": 8998
     },
     "cpl_jlcpcb.csv": {
       "sha256": "aae5fc27c33e43d1e058dab990fddd66a2092c4c9ada334c6f839e16a56cf811",
       "size": 270
     },
     "gerbers/gerbers.zip": {
-      "sha256": "f3e7865835f0bb128ee7b861dee035f7ca8dd78a3df0f8caa6868735f55b80a2",
-      "size": 11733
+      "sha256": "1b50715b752e1212a2e272d7febb8e5ce37ae264423e4afe04726099d27e0cf4",
+      "size": 12038
     },
     "images/assembly.png": {
       "sha256": "ca6a436bfa2f87e0a14faa2f9fecb9d608594f11a504aee0e92beb39cd1fea31",
@@ -42,8 +42,8 @@
       "size": 72269
     },
     "images/layer_F_Cu.png": {
-      "sha256": "ddbcbd7695bb1355511cdc30156531d8ffa3b3189a85cda71da8b0d61e6296b1",
-      "size": 78464
+      "sha256": "3e0257b67b1de57d5e9583b304d884fdef10428fe5d4354f310efda4a0d0677b",
+      "size": 82478
     },
     "images/pcb_back.png": {
       "sha256": "ba073176765de3d510c915ffcbb5e186f3426785d946aeaa000ff49eb9c0bfbf",
@@ -54,19 +54,19 @@
       "size": 81962
     },
     "images/pcb_front.png": {
-      "sha256": "8deaf4cdd6965aa7a5e5583eac0e20e412c40c83e495939f78e6059e28fe88da",
-      "size": 122270
+      "sha256": "4ebbad52305f649e825b7375207b61cfae6c56019499ef5e674d2e75ea213369",
+      "size": 124957
     },
     "images/schematic_simple_led.png": {
-      "sha256": "c90b07e37b51eb037d80cf8bcac2ab4392d8eca7868d0f6409ff154e62b7727a",
-      "size": 117853
+      "sha256": "ee6225e17a3ea7f6f4c076639be1465b2ae3537911bd0eeccf3ff708e42a306f",
+      "size": 117856
     },
     "kicad_project.zip": {
-      "sha256": "c0b02b8fed677a7b3bcbf43f92b04eedf2783e4e3ae2183b910eb2641e26bca3",
-      "size": 13261
+      "sha256": "df7c85fa087f85a233f03b825ef4cd38dff8de42e21c2e3fb751e8a4fec00837",
+      "size": 13557
     },
     "native-drc.json": {
-      "sha256": "0034f464c1923c3dd922504ba8ddd2cdd8c952e48e2114eaec0d3755fb3ada2e",
+      "sha256": "53de8d8077662a9d56993a256ba9bbdc9569e4a1d47d64da50cb658dc54cf50f",
       "size": 252
     },
     "procurement-review.md": {
@@ -74,19 +74,19 @@
       "size": 12096
     },
     "report.md": {
-      "sha256": "bf053f2cf8d6cd082567b20aa3a78829d22169c65aea6047161388a6f9a87093",
-      "size": 2708
+      "sha256": "a0c8bbf1a205382faeda43b355198bff1b2d87b3da62dfb3beb685ab89da9210",
+      "size": 2528
     },
     "report.pdf": {
-      "sha256": "5321fdd5abf86c0e91bf2632ed7e6eb016db98685bfee40db580d634996d171c",
-      "size": 742445
+      "sha256": "12a4d69c9dbb911f0dcd5d34d51245c94660446fd1c32a9acfec93c9e5a1f7fd",
+      "size": 756453
     },
     "schematic.pdf": {
-      "sha256": "ca0dd4470e058fd812156ad7bad3a1bd397f292db978b39da5df97bfcc2cc19f",
+      "sha256": "78af13827f8485435d890bca7a67fa3488a987a193e32f8ae3426f7a98c9ec44",
       "size": 47252
     }
   },
-  "generated_at": "2026-10-18T16:09:02.076985+00:00",
+  "generated_at": "2026-10-18T20:56:15.046973+00:00",
   "kicad_tools_version": "0.23.0",
   "manufacturer": "jlcpcb",
   "mode": "assembly",
@@ -176,8 +176,8 @@
       "status": "OK"
     },
     {
-      "details": "unverified: R1 -> C17630, D1 -> C87271",
-      "message": "1 of 3 assigned item(s) verified (offline catalog); 2 unverifiable (not in parts cache or offline catalog)",
+      "details": "unverified: J1 -> C7501260, R1 -> C17630, D1 -> C87271",
+      "message": "0 of 3 assigned item(s) verified (no source); 3 unverifiable (not in parts cache or offline catalog)",
       "name": "bom_lcsc_values",
       "status": "WARN"
     },
@@ -192,19 +192,19 @@
       "status": "OK"
     },
     {
-      "message": "DRC passed with 2 warning(s)",
+      "details": "Use --drc-report to specify a report file, or --skip-drc to skip",
+      "message": "No DRC report found; run kicad-cli or kct check first",
       "name": "drc",
       "status": "WARN"
     },
     {
-      "message": "ERC: 0 errors, 0 warnings",
+      "details": "Use --erc-report to specify a report file, or --skip-erc to skip",
+      "message": "No ERC report found; run kicad-cli first",
       "name": "erc",
-      "status": "OK"
+      "status": "WARN"
     }
   ],
   "producer": "kct readiness",
   "version": "1.0",
-  "warning_counts_by_rule": {
-    "thermal_asymmetry": 1
-  }
+  "warning_counts_by_rule": {}
 }

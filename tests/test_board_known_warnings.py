@@ -3,8 +3,10 @@
 #7220's ``thermal_asymmetry`` / ``via_at_pad_edge`` advisories turned main CI
 red on boards 04 and 05, whose gates fail on any warning.  Each board pins the
 exact ``(rule, ref, pad)`` findings its source fix (#7295 / #7296) removes.
-These tests prove that the pinned set passes and that any new warning, a
-different ref or pad, a repeat (higher count) or any error still fails.
+Board 04's source fix (#7295) landed, so its pinned set is empty; board 05
+still pins its #7296 findings.  These tests prove that the pinned set passes
+and that any new warning, a different ref or pad, a repeat (higher count) or
+any error still fails.
 """
 
 from __future__ import annotations
@@ -26,7 +28,6 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 BOARD04 = REPO_ROOT / "boards/04-stm32-devboard"
 BOARD05_REDESIGN = REPO_ROOT / "boards/05-bldc-motor-controller/redesign"
 
-BOARD04_REFS = ("C1", "C2", "C3", "C12", "C13", "C14", "C15", "C16", "R1")
 BOARD05_PADS = ("R11-1", "R9-1", "D1-1")
 
 
@@ -92,44 +93,39 @@ def test_waived_and_info_findings_are_ignored():
 
 
 # --------------------------------------------------------------------- board 04
-def test_board04_known_set_is_exact(board04):
-    assert set(board04.BOARD04_KNOWN_WARNINGS) == {
-        ("thermal_asymmetry", ref, f"{ref}-1") for ref in BOARD04_REFS
-    }
-    assert set(board04.BOARD04_KNOWN_WARNINGS.values()) == {"#7295"}
+def test_board04_known_set_is_empty(board04):
+    # Issue #7295 removed the nine 0805 ``thermal_asymmetry`` findings at the
+    # source (narrower thermal spokes), so nothing is accepted any more.
+    assert board04.BOARD04_KNOWN_WARNINGS == {}
 
 
-def test_board04_known_warnings_pass(board04):
-    verdict = board04.drc_verdict([_thermal(ref) for ref in BOARD04_REFS])
+def test_board04_clean_board_passes(board04):
+    verdict = board04.drc_verdict([])
     assert verdict.status == "PASSED", verdict.detail
-    assert verdict.detail == "0 errors, 9 warnings (9 known, #7295)"
-    # A partial source fix (fewer findings) still passes; none at all is clean.
-    assert board04.drc_verdict([_thermal("C1")]).status == "PASSED"
-    assert board04.drc_verdict([]).detail == "0 errors, 0 warnings"
+    assert verdict.detail == "0 errors, 0 warnings"
 
 
 @pytest.mark.parametrize(
-    "extra",
+    "finding",
     [
-        _thermal("C4"),  # a different ref
-        _thermal("C1", pad=2),  # a different pad of a known ref
-        _thermal("C1"),  # a repeat: higher count than pinned
+        _thermal("C1"),  # the formerly accepted findings now fail
+        _thermal("R1"),
+        _thermal("C4"),
         DRCViolation(
             rule_id="via_at_pad_edge", severity="warning", message="m", items=("v", "C1-1")
         ),
         DRCViolation(rule_id="silk_over_pad", severity="warning", message="m", items=("C1",)),
     ],
 )
-def test_board04_any_other_warning_fails(board04, extra):
-    verdict = board04.drc_verdict([_thermal(ref) for ref in BOARD04_REFS] + [extra])
+def test_board04_any_warning_fails(board04, finding):
+    verdict = board04.drc_verdict([finding])
     assert verdict.status == "FAILED", verdict.detail
     assert "unaccepted" in verdict.detail
 
 
 def test_board04_error_still_fails(board04):
-    findings = [_thermal(ref) for ref in BOARD04_REFS]
-    findings.append(DRCViolation(rule_id="clearance", severity="error", message="m"))
-    assert board04.drc_verdict(findings).status == "FAILED"
+    error = DRCViolation(rule_id="clearance", severity="error", message="m")
+    assert board04.drc_verdict([error]).status == "FAILED"
 
 
 # --------------------------------------------------------------------- board 05

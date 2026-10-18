@@ -2,7 +2,7 @@ Manufacturing package for simple_led_routed.kicad_pcb
 
 Fabrication tier : jlcpcb
 Mode             : assembly
-Generated        : 2026-10-18T16:09:02.076985+00:00
+Generated        : 2026-10-18T20:56:15.046973+00:00
 
 Assembly package: BOM and CPL are included.
 
@@ -36,7 +36,7 @@ Hand-solder / through-hole items
 
 Warning review (per rule)
 -------------------------
-  thermal_asymmetry: 1
+  no warnings reported
   All assembly-affecting warning counts are zero.
 
 Accepted-risk waivers

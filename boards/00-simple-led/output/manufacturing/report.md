@@ -51,8 +51,7 @@ Minimal LED circuit
 | Errors | 0 |
 | Warnings | 0 |
 
-**Status**: SKIPPED -- ERC skipped by user request
-
+**Status**: PASS
 
 \newpage
 
@@ -113,28 +112,22 @@ Minimal LED circuit
 | Errors | 0 |
 | Errors: kct (`--mfr jlcpcb` rules) | 0 |
 | Errors: kicad-cli (geometric) | 0 |
-| Warnings | 1 |
+| Warnings | 0 |
 | Blocking | 0 |
 
 **Status**: PASS
 
-### Violations by Type
-
-| Violation Type | Count |
-|----------------|-------|
-| thermal_asymmetry | 1 |
 
 
 \newpage
 
 ## Manufacturing Readiness
 
-**Verdict**: WARNING
+**Verdict**: READY
 
 ### Action Items
 
 - **[OPTIONAL]** Refill zones to verify 2 zone-connected nets, then re-run kct audit
-- **[OPTIONAL]** Review 1 DRC warnings
 
 
 \newpage
