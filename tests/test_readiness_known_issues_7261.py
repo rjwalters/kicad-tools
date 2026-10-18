@@ -282,4 +282,3 @@ def test_unified_cli_forwards_known_issue_flags(tmp_path, monkeypatch):
         "--resolve-known-issue",
         "2",
     ]
-
