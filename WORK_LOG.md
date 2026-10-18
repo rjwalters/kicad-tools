@@ -15,6 +15,17 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-18
 
+- **PR #7226**: feat(export): enforce JLCPCB Economic/Standard PCBA tiers in preflight (#7204 part C)
+- **PR #7225**: style: ruff format board 00 generate_design.py
+- **PR #7216**: fix(boards): emit stock F.Fab body for board 00 LED so pin1 rule sees the real outline
+- **PR #7203**: fix(boards): apply JLC rotation profile and Gerber frame to board 04/06 CPLs
+- **PR #7194**: fix: flush C++ unmarks on escape rollback and give each escape strategy its own budget
+- **PR #7163**: fix(physics): solve edge-coupled Zdiff by field solve, not an empirical coupling factor
+- **Issue #7223** (closed): ci: ruff format check fails on main (boards/00-simple-led/generate_design.py)
+- **Issue #7211** (closed): Board 00 D1: pin1_marker_obscured is a courtyard-proxy artifact; emit the stock F.Fab body so the rule sees the real 5 mm LED outline
+- **Issue #7200** (closed): Boards 04/06 CPLs: frame regen also changes Rotation (JLC rotation profile missing) — needs orientation review (split from #7199)
+- **Issue #7192** (closed): router escape follow-ups: flush deferred C++ unmarks after rollback; full-reorder never kept under default cap (#7171)
+- **Issue #7060** (closed): CoupledLines overstates differential impedance of tightly coupled pairs (+17 % microstrip, +12 % stripline)
 - **PR #7196**: test: run live pcbnew oracle + 10.0.6 keepout baseline in CI; show slow-suite skips
 - **Issue #7193** (closed): test: two live-KiCad oracle tests skip in every CI job despite the tool being present (rotation pcbnew oracle, keepout 10.0.1 baseline); slow suite hides skip reasons
 - **PR #7202**: fix(drc): skip kct keepout DRU rules on KiCad >= 10.0.6
