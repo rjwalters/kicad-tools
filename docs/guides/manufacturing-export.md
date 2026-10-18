@@ -61,6 +61,10 @@ A board is "ship-ready" when **all** gates are green:
 3. DRC report exists and has zero errors.
 4. Manufacturing artefacts (gerbers, BOM, CPL) are present and not stale
    relative to the routed PCB.
+5. No open known defect is recorded in `output/readiness.json` (Issue #7261).
+   An open defect adds a `known defect #N` blocker. Boards that are ready but
+   carry disclosed exceptions or advisories show `YES*` / `known: #N` instead
+   of a plain `YES`.
 
 If any gate fails, the table view lists the first blocker; `--format json`
 emits the full per-board breakdown. Treat `kct fleet status --ship-only`

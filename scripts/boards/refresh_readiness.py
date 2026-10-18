@@ -24,6 +24,8 @@ unless every gate passes:
    ``redesign/package.py:refresh_manifest``.  Only ``files`` may change.
 4. Gates, all run on the staged board:
    * ``kicad-cli pcb drc --refill-zones``: 0 errors, 0 unconnected items;
+   * saved copper equals an independent ``kicad-cli`` refill per copper layer
+     within ``kct readiness``'s 0.01 mm^2 tolerance (Issue #7337);
    * ``kct check --mfr <tier>``: 0 errors, no warnings beyond the allowance
      the board's recorded ``known_issues`` declare (Issue #7261; none means
      0 warnings), and the drc, erc, lvs and manifest meta-checks all PASSED.  A board whose fabrication
@@ -64,6 +66,7 @@ import argparse
 import hashlib
 import importlib.util
 import json
+import math
 import os
 import shutil
 import subprocess
@@ -115,6 +118,10 @@ class BoardConfig:
     tier: str
     erc: tuple[ErcJob, ...]
     manifest_refresher: str | None = None  # "path/to/module.py:function"
+    # Board-relative copies of the native DRC report that the refresh rewrites
+    # from the one staged kicad-cli run (Issue #7283).  Each is recorded in
+    # ``readiness.json`` ``report_sources`` as produced from the routed PCB.
+    drc_targets: tuple[str, ...] = ()
     # Board-local manufacturing check that replaces ``kct check --mfr <tier>``
     # (Issue #6269).  Run as ``python <check_script> <routed_pcb> <report>``;
     # it must write a ``kct check``-format JSON report, which is gated exactly
@@ -193,6 +200,7 @@ BOARDS: dict[str, BoardConfig] = {
         routed_pcb="output/bldc_controller_routed.kicad_pcb",
         schematic="output/bldc_controller.kicad_sch",
         tier="jlcpcb",
+        drc_targets=("output/drc_report.json",),
         erc=(
             ErcJob(
                 "05-native-erc.json",
@@ -211,6 +219,11 @@ BOARDS: dict[str, BoardConfig] = {
         routed_pcb="output/diffpair_test_routed.kicad_pcb",
         schematic="output/diffpair_test.kicad_sch",
         tier="jlcpcb-tier1",
+        drc_targets=(
+            "output/drc_report.json",
+            "output/readiness/native-drc.json",
+            "output/manufacturing/native-drc.json",
+        ),
         erc=(
             ErcJob(
                 "06-native-erc.json",
@@ -228,6 +241,11 @@ BOARDS: dict[str, BoardConfig] = {
         routed_pcb="output/matchgroup_test_routed.kicad_pcb",
         schematic="output/matchgroup_test.kicad_sch",
         tier="jlcpcb",
+        drc_targets=(
+            "output/drc_report.json",
+            "output/readiness/native-drc.json",
+            "output/manufacturing/native-drc.json",
+        ),
         erc=(
             ErcJob(
                 "07-native-erc.json",
@@ -369,7 +387,8 @@ def native_erc(board: Path, job: ErcJob, reuse: Path | None, save: Path | None) 
     return data
 
 
-def gate_native_drc(board: Path, cfg: BoardConfig) -> int:
+def gate_native_drc(board: Path, cfg: BoardConfig) -> tuple[int, bytes]:
+    """Run the refilled native DRC; return the error count and the raw report bytes."""
     with tempfile.TemporaryDirectory(prefix="refresh-readiness-drc-") as tmp:
         report = Path(tmp) / "drc.json"
         proc = run(
@@ -387,7 +406,8 @@ def gate_native_drc(board: Path, cfg: BoardConfig) -> int:
         )
         if not report.is_file():
             raise GateFailure(f"kicad-cli DRC did not run: {proc.stderr}")
-        data = json.loads(report.read_text())
+        raw = report.read_bytes()
+        data = json.loads(raw)
     # Issue #6962: a library-table finding means the environment, not the
     # board, was checked.
     require_library_environment(data, source=f"native DRC of {cfg.routed_pcb}")
@@ -399,7 +419,63 @@ def gate_native_drc(board: Path, cfg: BoardConfig) -> int:
     )
     if errors or unconnected:
         raise GateFailure("native DRC has errors or unconnected items")
-    return len(errors)
+    # Issue #7337: the run above refilled in memory only, so it certifies the
+    # refilled copper, not the saved fills the package ships.
+    gate_fill_identity(board, cfg)
+    return len(errors), raw
+
+
+def fill_divergence(
+    saved: dict[str, float], refilled: dict[str, float], tolerance: float
+) -> dict[str, float]:
+    """Layers whose saved copper differs from the refill by more than *tolerance*.
+
+    A layer present on one side only counts as fully divergent.  Same rule as
+    ``kct readiness``'s ``zone_fill`` gate (``readiness_cmd._gate_refill``).
+    """
+    divergent = {}
+    for layer in sorted(set(saved) | set(refilled)):
+        delta = abs(saved.get(layer, 0.0) - refilled.get(layer, 0.0))
+        missing = (layer in saved) != (layer in refilled)
+        if missing or (
+            delta > tolerance and not math.isclose(delta, tolerance, rel_tol=1e-12, abs_tol=0.0)
+        ):
+            divergent[layer] = round(delta, 6)
+    return divergent
+
+
+def gate_fill_identity(board: Path, cfg: BoardConfig) -> dict[str, float]:
+    """Saved copper must equal an independent native refill (Issue #7337).
+
+    The DRC gate above refills a throwaway copy, so it passes whatever the
+    saved fills hold.  ``kct readiness --verify`` compares the saved copper
+    with a fresh ``kicad-cli`` refill; without the same comparison here a
+    refresh could re-pin a ``ready`` record whose published fill diverges
+    (board 04 after #7317's carved fill).
+    """
+    from kicad_tools.cli.readiness_cmd import (
+        DEFAULT_FILL_TOLERANCE_MM2,
+        _copy_fill_context,
+        _fill_areas,
+        _refill_and_save,
+    )
+
+    pcb = board / cfg.routed_pcb
+    with tempfile.TemporaryDirectory(prefix="refresh-readiness-fill-") as tmp:
+        refilled = _copy_fill_context(pcb, Path(tmp))
+        result = _refill_and_save(refilled)
+        if not result.ok:
+            raise GateFailure(f"independent zone refill did not run: {result.detail}")
+        saved_areas, refilled_areas = _fill_areas(pcb), _fill_areas(refilled)
+    divergent = fill_divergence(saved_areas, refilled_areas, DEFAULT_FILL_TOLERANCE_MM2)
+    log(
+        f"  gate saved-vs-refilled copper: {len(saved_areas)} layer(s), "
+        f"divergent {divergent or 'none'} (tolerance {DEFAULT_FILL_TOLERANCE_MM2} mm^2)"
+    )
+    if divergent:
+        detail = ", ".join(f"{layer} {delta:.6f} mm^2" for layer, delta in divergent.items())
+        raise GateFailure(f"saved copper differs from an independent refill: {detail}")
+    return divergent
 
 
 def warning_counts_by_rule(data: dict) -> dict[str, int]:
@@ -629,6 +705,14 @@ def refresh(
                 (staged / target).write_bytes(data)
             log(f"  native ERC {job.schematic}: 0 violations -> {len(job.targets)} report copies")
 
+        # Issue #7283: run before the mirrors, archives and manifest, which
+        # hash the report copies written here.
+        drc_errors, drc_raw = gate_native_drc(staged, cfg)
+        for target in cfg.drc_targets:
+            (staged / target).write_bytes(drc_raw)
+        if cfg.drc_targets:
+            log(f"  native DRC report -> {len(cfg.drc_targets)} report copies")
+
         for mirror, source in cfg.mirrors:
             for path in sorted(p for p in (staged / mirror).rglob("*") if p.is_file()):
                 origin = staged / source / path.relative_to(staged / mirror)
@@ -653,7 +737,6 @@ def refresh(
         )
         log(f"  output/manufacturing.zip: rebuilt; members with new content {changed}")
 
-        drc_errors = gate_native_drc(staged, cfg)
         lvs_clean, lvs_mismatches = gate_check(staged, cfg)
         routed_pct = gate_net_status(staged, cfg)
         gate_sync(staged, cfg)
@@ -675,6 +758,11 @@ def refresh(
         if report.get("status") != "ready" or report.get("blockers"):
             raise GateFailure("readiness.json is not a ready report; refusing to re-pin")
 
+        if cfg.drc_targets:
+            # Issue #7283: record which PCB bytes the report copies were produced
+            # from, so report binding sees provenance and not just co-pinning.
+            pcb_sha = sha256(staged / cfg.routed_pcb)
+            report.setdefault("report_sources", {}).update(dict.fromkeys(cfg.drc_targets, pcb_sha))
         for name in report["inputs"]:
             report["inputs"][name] = sha256(staged / name)
         report["checked_at"] = checked_at

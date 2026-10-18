@@ -296,3 +296,44 @@ def test_cpl_gate_still_refuses_other_changes(mod, tmp_path):
     ):
         with pytest.raises(mod.GateFailure, match="placement changed"):
             mod.check_fresh_cpl(_cpl(15, 8, ref="R1"), fresh, pcb)
+
+
+def test_bundle_unpacks_gate_native_drc_tuple(mod, tmp_path, monkeypatch):
+    """Issue #7348: gate_native_drc returns (errors, raw); the metric must stay an int."""
+    board = _fake_board(tmp_path)
+    out = board / "output"
+    for name in ("drc_report.json", "native-drc.json"):
+        (out / name).write_text("old")
+    metrics = {"drc_violations": 0, "nets_routed_pct": 100.0, "lvs_clean": True}
+    (out / "readiness.json").write_text(
+        json.dumps({"status": "ready", "blockers": [], "metrics": metrics, "inputs": {}}) + "\n"
+    )
+    cfg = mod.rr.BoardConfig(
+        routed_pcb="output/board_routed.kicad_pcb",
+        schematic="output/board.kicad_sch",
+        tier="jlcpcb",
+        drc_targets=("output/drc_report.json", "output/native-drc.json"),
+        erc=(),
+        archives=(),
+    )
+    monkeypatch.setitem(mod.rr.BOARDS, board.name, cfg)
+    monkeypatch.setitem(mod.BUNDLES, board.name, mod.BundleConfig(manufacturer="jlcpcb"))
+    monkeypatch.setattr(mod, "stage_refill", lambda s, c: {"changed": False})
+    monkeypatch.setattr(mod, "gate_saved_fill_drc", lambda s, c: b"{}")
+    monkeypatch.setattr(mod, "bundle_is_stale", lambda s, c: False)
+    monkeypatch.setattr(mod.rr, "load_refresher", lambda *a: lambda mfg: None)
+    monkeypatch.setattr(mod.rr, "rebuild_archive", lambda *a: [])
+    monkeypatch.setattr(mod.rr, "gate_native_drc", lambda *a: (0, b'{"native": true}'))
+    monkeypatch.setattr(mod.rr, "gate_kct_check", lambda *a: (True, 0))
+    monkeypatch.setattr(mod.rr, "gate_net_status", lambda *a: 100.0)
+    monkeypatch.setattr(mod.rr, "gate_sync", lambda *a: None)
+    import kicad_tools.cli.board_readiness as br
+
+    monkeypatch.setattr(br, "read_readiness", lambda p: {"status": "ready", "metrics": {}})
+
+    published = mod.refresh_bundle(board, "2026-10-18T00:00:00+00:00")
+
+    assert "output/drc_report.json" in published
+    assert (out / "drc_report.json").read_bytes() == b'{"native": true}'
+    sources = json.loads((out / "readiness.json").read_text())["report_sources"]
+    assert set(sources) == {"output/drc_report.json", "output/native-drc.json"}

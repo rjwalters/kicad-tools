@@ -25,7 +25,7 @@
       "size": 526
     },
     "check-report.json": {
-      "sha256": "ea1eacfdf2c83c1d313e3be305b8cb26a726f6e14cdfa76720115d8074fad13b",
+      "sha256": "126c259001b592dc59309dcc57983b86c8c39a10ac4f56a2a0f7618d2ef5e784",
       "size": 2342
     },
     "cpl_jlcpcb.csv": {
@@ -57,12 +57,12 @@
       "size": 4932
     },
     "fill-consistency.json": {
-      "sha256": "b4af8337ea35fa89c08862d8f0d51e7cc13e9aa831b3c786562d6011fcc79b38",
-      "size": 61
+      "sha256": "3369e42a5c0ea40c718cdf6016b83fa85b04260ad66cf757b282ea30ef9561b6",
+      "size": 33
     },
     "gerbers/gerbers.zip": {
-      "sha256": "5adbfceb0bfa36fcccc2c7de862d470195ab7bf739e15ed9623e163ec30ecf4b",
-      "size": 54071
+      "sha256": "0e00d4ed090ec49cbc893dcd9639c58942ab9f35e22efdaf30e287e9c7d68ef2",
+      "size": 48545
     },
     "images/assembly.png": {
       "sha256": "13c8323b975a1191f79843c910fd5e1e4f3b6b936d0d9efd7a95f30d2e09a28f",
@@ -93,8 +93,8 @@
       "size": 278127
     },
     "kicad_project.zip": {
-      "sha256": "16f1b2d0d5c42e6cdfe10ceee40633be5b677bba72a0cfdf7b617b6b82d60d22",
-      "size": 76117
+      "sha256": "69e3b0aea7970407b3e06433c18ca4361250e436e71551a7512c588b7a8eaeef",
+      "size": 71517
     },
     "manual-assembly-bom.csv": {
       "sha256": "0d1620494f1492c9a57ccf7d29840d0643984cd23bdb2969e0d0ea660a4839a1",
@@ -105,7 +105,7 @@
       "size": 323
     },
     "native-drc.json": {
-      "sha256": "1d136d9c33fe07bdbbdb17b0fac70b9013e8e8390958ebef898eea263286d0de",
+      "sha256": "100e902c5b674120fb2a4d82ff0781c158a8b263f750ac44e1599b9d979d1197",
       "size": 1213
     },
     "native-erc-linux.json": {

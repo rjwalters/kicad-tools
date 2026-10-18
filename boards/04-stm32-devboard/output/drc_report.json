@@ -1,7 +1,7 @@
 {
   "file": "boards/04-stm32-devboard/output/stm32_devboard_routed.kicad_pcb",
   "manufacturer": "jlcpcb-tier1",
-  "pcb_sha256": "d2c30512322d98a3807a3bde0e2c67d9957d147a01569a00b03369eb146dd32c",
+  "pcb_sha256": "3681f8279be9b452fafa65e6559d1e4c5bae15ca1621f86ec9ed53b949ac24b4",
   "layers": 0,
   "summary": {
     "errors": 0,
