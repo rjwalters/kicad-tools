@@ -2652,6 +2652,31 @@ def main(argv: list[str] | None = None) -> int:
             for reason in assessment.reasons:
                 print(f"  {reason}")
 
+    # Exit code / verdict (decided before output so JSON can carry it).
+    # Exit 2 = check ran successfully but found issues (errors, or warnings+strict)
+    # Exit 1 = reserved for tool-level failures (file not found, parse error) above
+    # Exit 0 = no errors (warnings may be present without --strict; infos
+    #   never affect exit code -- they are advisory by definition).
+    # Issue #3750: when the meta-check rollup is in play (default mode),
+    # exit 2 also when any sub-check is FAILED, and -- per AC #3 --
+    # exit 2 when the rollup is INCOMPLETE (any sub-check is NOT RUN)
+    # unless the caller opted in to ``--allow-incomplete``.
+    #
+    # Issue #4326 (Tier 2 safety backstop): under --strict, a stackup-vs-
+    # --copper copper-weight disagreement is fatal on its own (a warning
+    # already fired above), so an autonomous agent cannot sail past an
+    # ampacity evaluation that silently ignored the board's declared build.
+    verdict, exit_code = _check_verdict(
+        mask_copper_failed=any(not a.passed for a in results.mask_copper_assessments),
+        strict_copper_disagreement=bool(args.strict and copper_disagreement),
+        drc_only=drc_only,
+        error_count=error_count,
+        warning_count=warning_count,
+        strict=bool(args.strict),
+        allow_incomplete=bool(getattr(args, "allow_incomplete", False)),
+        meta=meta,
+    )
+
     # Output results
     if args.format == "sarif":
         output_sarif(violations, results, pcb_path, coverage=coverage_dict)
@@ -2666,6 +2691,8 @@ def main(argv: list[str] | None = None) -> int:
             routing_quality=routing_quality_dict,
             fabrication_process=fabrication_process_dict,
             coverage=coverage_dict,
+            verdict=verdict,
+            exit_code=exit_code,
         )
     elif args.format == "summary":
         output_summary(violations, results, pcb_path)
@@ -2700,6 +2727,8 @@ def main(argv: list[str] | None = None) -> int:
             routing_quality=routing_quality_dict,
             fabrication_process=fabrication_process_dict,
             coverage=coverage_dict,
+            verdict=verdict,
+            exit_code=exit_code,
         )
 
     # Issue #4375: optionally emit DRC-constraint sidecars from the SAME
@@ -2719,42 +2748,38 @@ def main(argv: list[str] | None = None) -> int:
             emit_both=getattr(args, "emit_drc_constraints", False),
         )
 
-    if any(not a.passed for a in results.mask_copper_assessments):
-        return 2
+    return exit_code
 
-    # Determine exit code
-    # Exit 2 = check ran successfully but found issues (errors, or warnings+strict)
-    # Exit 1 = reserved for tool-level failures (file not found, parse error) above
-    # Exit 0 = no errors (warnings may be present without --strict; infos
-    #   never affect exit code -- they are advisory by definition).
-    # Issue #3750: when the meta-check rollup is in play (default mode),
-    # exit 2 also when any sub-check is FAILED, and -- per AC #3 --
-    # exit 2 when the rollup is INCOMPLETE (any sub-check is NOT RUN)
-    # unless the caller opted in to ``--allow-incomplete``.
-    #
-    # Issue #4326 (Tier 2 safety backstop): under --strict, a stackup-vs-
-    # --copper copper-weight disagreement is fatal on its own (a warning
-    # already fired above), so an autonomous agent cannot sail past an
-    # ampacity evaluation that silently ignored the board's declared build.
-    if args.strict and copper_disagreement:
-        return 2
 
-    if drc_only:
-        if error_count > 0 or (warning_count > 0 and args.strict):
-            return 2
-        return 0
+def _check_verdict(
+    *,
+    mask_copper_failed: bool,
+    strict_copper_disagreement: bool,
+    drc_only: bool,
+    error_count: int,
+    warning_count: int,
+    strict: bool,
+    allow_incomplete: bool,
+    meta: MetaCheckResult | None,
+) -> tuple[str, int]:
+    """The one ``kct check`` verdict + process exit code (Issue #7230).
 
-    # Default (meta) mode: PASSED -> 0, FAILED -> 2, INCOMPLETE -> 2
-    # (exit 0 only with --allow-incomplete).  Issue #3750 AC #3:
-    # honest exit codes mean "exit 0 only when every sub-check is
-    # PASSED" -- silently exiting 0 on NOT RUN re-introduces the
-    # false-positive class the issue exists to eliminate.
-    assert meta is not None  # guaranteed by the branch above
+    Computed before output so ``--format json`` can carry the exact code the
+    process returns.  ``verdict`` is ``pass`` / ``fail`` / ``incomplete``; under
+    ``--allow-incomplete`` an incomplete verdict still exits 0 (the verdict
+    stays honest).  Numbering is unchanged (Issue #3750).
+    """
+    if mask_copper_failed or strict_copper_disagreement:
+        return "fail", 2
+    if drc_only or meta is None:
+        if error_count > 0 or (warning_count > 0 and strict):
+            return "fail", 2
+        return "pass", 0
     if meta.overall == "FAILED":
-        return 2
-    if meta.overall == "INCOMPLETE" and not getattr(args, "allow_incomplete", False):
-        return 2
-    return 0
+        return "fail", 2
+    if meta.overall == "INCOMPLETE":
+        return "incomplete", (0 if allow_incomplete else 2)
+    return "pass", 0
 
 
 def _emit_drc_sidecars(
@@ -3749,6 +3774,8 @@ def output_json(
     routing_quality: dict | None = None,
     fabrication_process: dict | None = None,
     coverage: dict | None = None,
+    verdict: str | None = None,
+    exit_code: int | None = None,
 ) -> None:
     """Output violations as JSON.
 
@@ -3823,6 +3850,12 @@ def output_json(
         data["fabrication_process"] = fabrication_process
     if coverage is not None:
         data["coverage"] = coverage
+    # Issue #7230: additive top-level verdict/exit_code from the same call
+    # that decides the process exit.  ``summary.passed`` stays DRC-only.
+    if verdict is not None:
+        data["verdict"] = verdict
+    if exit_code is not None:
+        data["exit_code"] = exit_code
     print(json.dumps(data, indent=2))
 
 
@@ -3871,6 +3904,8 @@ def write_json_report(
     routing_quality: dict | None = None,
     fabrication_process: dict | None = None,
     coverage: dict | None = None,
+    verdict: str | None = None,
+    exit_code: int | None = None,
 ) -> None:
     """Write DRC results as a JSON report file.
 
@@ -3930,6 +3965,12 @@ def write_json_report(
         data["fabrication_process"] = fabrication_process
     if coverage is not None:
         data["coverage"] = coverage
+    # Issue #7230: additive top-level verdict/exit_code from the same call
+    # that decides the process exit.  ``summary.passed`` stays DRC-only.
+    if verdict is not None:
+        data["verdict"] = verdict
+    if exit_code is not None:
+        data["exit_code"] = exit_code
     output_path.write_text(json.dumps(data, indent=2) + "\n")
 
 

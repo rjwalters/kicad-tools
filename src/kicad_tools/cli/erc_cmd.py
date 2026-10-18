@@ -35,6 +35,7 @@ from ..erc import (
     ERCViolation,
     check_cross_sheet_duplicates,
 )
+from ._gate import hidden_by_view_filter  # noqa: F401  (re-exported; Issue #7230)
 from .runner import find_kicad_cli, run_erc
 
 
@@ -241,22 +242,6 @@ def main(argv: list[str] | None = None) -> int:
     elif warning_count > 0 and args.strict:
         return 2
     return 0
-
-
-def hidden_by_view_filter(
-    gate_violations: list[ERCViolation], shown: list[ERCViolation]
-) -> dict[str, int] | None:
-    """Errors/warnings in ``gate_violations`` that a view filter left out of ``shown``.
-
-    Returns ``None`` when nothing was hidden, so a filter that matches
-    everything (or no filter at all) produces exactly today's output.
-    """
-    shown_ids = {id(v) for v in shown}
-    hidden = [v for v in gate_violations if id(v) not in shown_ids]
-    if not hidden:
-        return None
-    errors = sum(1 for v in hidden if v.is_error)
-    return {"errors": errors, "warnings": len(hidden) - errors}
 
 
 def no_match_message(hidden: dict[str, int]) -> str:
