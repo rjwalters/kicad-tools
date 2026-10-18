@@ -15,6 +15,13 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-18
 
+- **PR #7109**: fix(optim): keep placement outline in the origin-relative component frame
+- **PR #7119**: fix(mcp): route_net saves routed nets via the real merge_routes_into_pcb API
+- **PR #7104**: docs: record tscircuit upstream defect outcomes (#5878)
+- **PR #7101**: test(router): pin board 03 tier-1 USB_D In2.Cu coupled run
+- **Issue #7106** (closed): PlacementOptimizer.from_pcb: outline in absolute frame but components origin-relative (every in-board part flagged outside)
+- **Issue #7114** (closed): MCP route_net never saves a routed net: calls merge_routes_into_pcb with a nonexistent signature (TypeError on net_map) since #505
+- **Issue #5878** (closed): File the 6 tscircuit upstream defects found by the interop gate (needs a credential with issue-write outside rjwalters/*)
 - **PR #7113**: fix(mcp): sync tools.md with server, register get_drc_violations, route_net stops overwriting input
 - **PR #7086**: fix(drc): match B.Silkscreen in silkscreen width/height rules
 - **PR #6874**: ci(board-07): move copper-safety DRC ratchet to scheduled slow-tests
