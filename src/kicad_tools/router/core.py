@@ -12080,9 +12080,8 @@ class Autorouter:
                 (advanced users / regression tests).  Default 16, chosen so the
                 board-07 workload trips the gate but boards 04/05 (60+ nets) do
                 not.
-            batch_routing: If True, use GPU-accelerated batch routing (Issue #1092).
-                Routes multiple independent nets simultaneously using GPU compute.
-                Best results with 4+ independent nets and Metal/CUDA GPU.
+            batch_routing: Deprecated and ignored (Issue #7051); emits a DeprecationWarning
+                when True.
             hierarchical: If True, use hierarchical coarse-to-fine routing (Issue #1092).
                 First performs global routing on a coarse grid, then refines with
                 the fine grid near pads and congestion points.
@@ -12374,7 +12373,14 @@ class Autorouter:
                 f"{max_parallel_workers} workers)"
             )
         if batch_routing:
-            print("  Batch routing: enabled (GPU-accelerated)")
+            import warnings
+
+            warnings.warn(
+                "batch_routing has no effect (GPU batch routing was removed, "
+                "Issue #7051) and will be removed",
+                DeprecationWarning,
+                stacklevel=2,
+            )
         if ema_smoothing:
             print(f"  EMA smoothing: enabled (alpha={ema_alpha})")
         if exponential_cost:

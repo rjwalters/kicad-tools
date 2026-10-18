@@ -1272,6 +1272,51 @@ register_tool(
 )
 
 
+def _handler_get_drc_violations(params: dict[str, Any]) -> dict[str, Any]:
+    """Handle get_drc_violations tool call."""
+    from kicad_tools.mcp.tools.analysis import get_drc_violations
+
+    result = get_drc_violations(
+        pcb_path=params["pcb_path"],
+        rules=params.get("manufacturer"),
+        severity_filter=params.get("severity_filter", "all"),
+    )
+    return result.to_dict()
+
+
+register_tool(
+    name="get_drc_violations",
+    description=(
+        "Run design rule check (DRC) on a KiCad PCB against manufacturer rules and "
+        "return violations with locations and fix suggestions, plus a pass/fail summary."
+    ),
+    parameters=_make_params(
+        properties={
+            "pcb_path": {
+                "type": "string",
+                "description": "Absolute path to .kicad_pcb file",
+            },
+            "manufacturer": {
+                "type": "string",
+                "description": (
+                    "Manufacturer preset (jlcpcb, oshpark, pcbway, seeed) or path "
+                    "to a custom rules file. Defaults to jlcpcb."
+                ),
+            },
+            "severity_filter": {
+                "type": "string",
+                "description": "Which violations to return",
+                "enum": ["all", "error", "warning"],
+                "default": "all",
+            },
+        },
+        required=["pcb_path"],
+    ),
+    handler=_handler_get_drc_violations,
+    category="analysis",
+)
+
+
 def _handler_board_summary(params: dict[str, Any]) -> dict[str, Any]:
     """Handle board_summary tool call."""
     from kicad_tools.mcp.tools.analysis import analyze_board
@@ -1448,7 +1493,7 @@ register_tool(
             },
             "output_path": {
                 "type": "string",
-                "description": "Output file path (optional, overwrites original if not specified)",
+                "description": "Output file path (optional). Defaults to <stem>_routed.kicad_pcb next to the input; the input is overwritten only if output_path equals pcb_path",
             },
             "strategy": {
                 "type": "string",

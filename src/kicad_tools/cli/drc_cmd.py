@@ -13,15 +13,18 @@ Usage:
 
 Exit Codes:
     0 - No errors (warnings may be present)
-    1 - Errors found or command failure
-    2 - Warnings found (only with --strict)
+    1 - Errors found (including error-severity schematic parity findings)
+        or command failure
+    2 - Warnings found (only with --strict; includes parity warnings), or
+        schematic parity NOT RUN (unless --allow-incomplete).  --mfr mode
+        keeps its own 0/1 manufacturer-compatibility exit code.
 """
 
 import argparse
 import json
 import sys
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from ..drc import (
     DRCReport,
@@ -34,6 +37,7 @@ from ..manufacturers import compare_design_rules, get_all_manufacturer_names, ge
 from .runner import find_kicad_cli, run_drc
 
 if TYPE_CHECKING:
+    from ..drc.parity import SchematicParityStatus
     from ..drc.waivers import WaiverApplication
     from ..validate.rules.waivers import Waivers
 
@@ -82,6 +86,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--strict",
         action="store_true",
         help="Exit with error code on warnings",
+    )
+    parser.add_argument(
+        "--allow-incomplete",
+        action="store_true",
+        help=(
+            "Exit 0 instead of 2 when schematic parity did NOT RUN (no or "
+            "unannotated schematic next to the board, or a report that does "
+            "not record whether parity ran). Same name and meaning as "
+            "kct check --allow-incomplete (Issue #7077)"
+        ),
     )
     parser.add_argument(
         "--type",
@@ -210,7 +224,9 @@ def main(argv: list[str] | None = None) -> int:
     if waiver_rc != 0:
         return waiver_rc
 
-    # Determine if input is PCB or report
+    # Determine if input is PCB or report.  For a PCB, run_drc_on_pcb records
+    # whether kicad-cli actually ran schematic parity on the report (Issue
+    # #7077); a loaded .json/.rpt report leaves it unknown.
     if input_path.suffix == ".kicad_pcb":
         # Run DRC on PCB
         report = run_drc_on_pcb(input_path, args.output, args.keep_report)
@@ -249,6 +265,10 @@ def main(argv: list[str] | None = None) -> int:
                     pcb_name=report.pcb_name,
                     violations=filter_result.kept,
                     footprint_errors=report.footprint_errors,
+                    # Issue #7077: parity findings and the run signal are not
+                    # geometric violations; carry them through untouched.
+                    schematic_parity=report.schematic_parity,
+                    schematic_parity_ran=report.schematic_parity_ran,
                 )
                 filter_ignored_count = filter_result.ignored_count
         except FileNotFoundError as e:
@@ -269,6 +289,8 @@ def main(argv: list[str] | None = None) -> int:
                 "waivers; run without --mfr for the waived DRC gate.",
                 file=sys.stderr,
             )
+        # The parity status line is printed, but the exit code stays the
+        # manufacturer-compatibility answer (Issue #7077).
         return output_manufacturer_check(report, args.mfr, args.layers, args.verbose)
 
     # Apply waivers to the parsed report (Issue #4691).  Runs before the
@@ -342,9 +364,20 @@ def main(argv: list[str] | None = None) -> int:
     waived_count = sum(1 for v in violations if v.is_waived)
     warning_count = len(violations) - error_count - waived_count
 
+    # Non-geometric finding collections fold into the same counts, by their
+    # own severity (after waivers).  Issue #7077: schematic parity.  Issue
+    # #7096 (unconnected items) is meant to fold in here the same way.
+    parity = report.schematic_parity_status
+    error_count += parity.error_count
+    warning_count += parity.warning_count
+
     if error_count > 0:
         return 1
     elif warning_count > 0 and args.strict:
+        return 2
+    elif not parity.checked and not args.allow_incomplete:
+        # A check that did not run never reads as a pass: INCOMPLETE -> 2,
+        # matching ``kct check`` (Issue #7077).
         return 2
     return 0
 
@@ -435,12 +468,49 @@ def _print_unused_waivers(waiver_result: "WaiverApplication | None") -> None:
         print(f"\n  [i] {message}")
 
 
+def _print_parity_status(parity: "SchematicParityStatus", *, issues: bool = False) -> None:
+    """Print the one ``Schematic parity: ...`` status line (Issue #7077).
+
+    The line itself comes from the shared
+    :meth:`~kicad_tools.drc.parity.SchematicParityStatus.status_line`, so
+    table, summary, ``--mfr`` and ``kct drc-summary`` cannot drift apart.
+    With ``issues=True`` a FAILED status also lists its findings.
+    """
+    print(f"\n{parity.status_line()}")
+    if issues and parity.issues:
+        print(f"\n{'-' * 60}")
+        for line in parity.issue_lines():
+            print(line)
+
+
+def _verdict_line(
+    has_errors: bool,
+    has_warnings: bool,
+    parity: "SchematicParityStatus",
+    passed_text: str,
+) -> str:
+    """Final table verdict.  NOT RUN parity never prints ``DRC PASSED``."""
+    if has_errors:
+        return "DRC FAILED - Fix errors before manufacturing"
+    if not parity.checked:
+        suffix = "; review warnings" if has_warnings else ""
+        return f"DRC INCOMPLETE - Schematic parity NOT RUN{suffix}"
+    if has_warnings:
+        return "DRC WARNING - Review warnings"
+    return f"DRC PASSED - {passed_text}"
+
+
 def run_drc_on_pcb(
     pcb_path: Path,
     output_path: Path | None,
     keep_report: bool,
 ) -> DRCReport | None:
-    """Run DRC on a PCB and return parsed report."""
+    """Run DRC on a PCB and return the parsed report.
+
+    The report's ``schematic_parity_ran`` is set from kicad-cli's output:
+    ``False`` when it said it could not fetch the schematic netlist, so the
+    ``--schematic-parity`` checks it was asked for never ran (Issue #7077).
+    """
     if not pcb_path.exists():
         print(f"Error: PCB not found: {pcb_path}", file=sys.stderr)
         return None
@@ -455,7 +525,7 @@ def run_drc_on_pcb(
 
     print(f"Running DRC on: {pcb_path.name}", file=sys.stderr)
 
-    result = run_drc(pcb_path, output_path)
+    result = run_drc(pcb_path, output_path, kicad_cli=kicad_cli)
 
     if not result.success:
         print(f"Error running DRC: {result.stderr}", file=sys.stderr)
@@ -472,6 +542,7 @@ def run_drc_on_pcb(
     if not keep_report and output_path is None and result.output_path:
         result.output_path.unlink(missing_ok=True)
 
+    report.schematic_parity_ran = not result.parity_skipped
     return report
 
 
@@ -484,7 +555,14 @@ def output_table(
     filtered_count: int = 0,
     waiver_result: "WaiverApplication | None" = None,
 ) -> None:
-    """Output violations as a formatted table."""
+    """Output violations as a formatted table.
+
+    The summary block carries one ``Schematic parity:`` status line; parity
+    findings get their own section and count toward the verdict by their
+    severity, and a NOT RUN parity makes the verdict INCOMPLETE rather than
+    PASSED (Issue #7077).
+    """
+    parity = report.schematic_parity_status
     error_count = sum(1 for v in violations if v.is_error)
     # Issue #4691/#4696: waived findings get their own bucket -- they are never
     # folded into the warning count.
@@ -507,10 +585,22 @@ def output_table(
         print(f"  Waived:     {waived_count}")
     if filtered_count > 0:
         print(f"  Filtered:   {filtered_count} violations filtered")
+    _print_parity_status(parity)
 
     if not violations:
+        if parity.issues:
+            print(f"\n{'-' * 60}")
+            for line in parity.issue_lines():
+                print(line)
         print(f"\n{'=' * 60}")
-        print("DRC PASSED - No violations found")
+        print(
+            _verdict_line(
+                parity.error_count > 0,
+                parity.warning_count > 0,
+                parity,
+                "No violations found",
+            )
+        )
         _print_unused_waivers(waiver_result)
         return
 
@@ -570,19 +660,27 @@ def output_table(
             if v.waiver_issue:
                 print(f"      Waiver issue: {v.waiver_issue}")
 
+    if parity.issues:
+        print(f"\n{'-' * 60}")
+        for line in parity.issue_lines():
+            print(line)
+
     _print_unused_waivers(waiver_result)
 
     print(f"\n{'=' * 60}")
+    print(
+        _verdict_line(
+            bool(errors) or parity.error_count > 0,
+            bool(warnings) or parity.warning_count > 0,
+            parity,
+            "No unwaived violations",
+        )
+    )
     if errors:
-        print("DRC FAILED - Fix errors before manufacturing")
         # Show manufacturer compatibility hint if violations might pass mfr rules
         hint = _get_manufacturer_compatibility_hint(violations, layers=layers)
         if hint:
             print(hint)
-    elif warnings:
-        print("DRC WARNING - Review warnings")
-    else:
-        print("DRC PASSED - No unwaived violations")
 
 
 def _bucket(v: DRCViolation) -> str:
@@ -651,7 +749,16 @@ def output_json(
     filtered_count: int = 0,
     waiver_result: "WaiverApplication | None" = None,
 ) -> None:
-    """Output violations as JSON."""
+    """Output violations as JSON.
+
+    Issue #7077: a top-level ``schematic_parity`` object (``status``,
+    ``checked``, ``reason``, ``error_count``, ``warning_count``, ``issues``)
+    plus ``parity_errors``/``parity_warnings`` in ``summary``.
+    ``schematic_parity_checked`` is a convenience alias derived from the
+    status (``false`` for NOT RUN, including report input that does not
+    record whether parity ran).
+    """
+    parity = report.schematic_parity_status
     violations_data = []
     for v in violations:
         v_dict = v.to_dict()
@@ -668,16 +775,20 @@ def output_json(
         "errors": sum(1 for v in violations if v.is_error),
         "warnings": sum(1 for v in violations if not v.is_error and not v.is_waived),
     }
+    summary["parity_errors"] = parity.error_count
+    summary["parity_warnings"] = parity.warning_count
     if waived_count > 0:
         summary["waived"] = waived_count
     if filtered_count > 0:
         summary["filtered"] = filtered_count
 
-    data = {
+    data: dict[str, Any] = {
         "source": report.source_file,
         "pcb_name": report.pcb_name,
         "summary": summary,
         "violations": violations_data,
+        "schematic_parity": parity.to_dict(),
+        "schematic_parity_checked": parity.checked,
     }
     if waiver_result is not None and waiver_result.unused:
         data["unused_waivers"] = waiver_result.to_dict_list()
@@ -690,12 +801,14 @@ def output_summary(
     filtered_count: int = 0,
     waiver_result: "WaiverApplication | None" = None,
 ) -> None:
-    """Output violation summary by type."""
+    """Output violation summary by type, plus the parity status line."""
+    parity = report.schematic_parity_status
     if not violations:
         if filtered_count > 0:
             print(f"No DRC violations found ({filtered_count} violations filtered).")
         else:
             print("No DRC violations found.")
+        _print_parity_status(parity, issues=True)
         _print_unused_waivers(waiver_result)
         return
 
@@ -728,6 +841,7 @@ def output_summary(
     waived_total_col = f" {total_waived:<8}" if any_waived else ""
     print(f"{'TOTAL':<25} {total_errors:<8} {total_warnings:<8}{waived_total_col}")
 
+    _print_parity_status(parity, issues=True)
     _print_unused_waivers(waiver_result)
 
 
@@ -737,7 +851,12 @@ def output_manufacturer_check(
     layers: int,
     verbose: bool,
 ) -> int:
-    """Check DRC violations against manufacturer limits."""
+    """Check DRC violations against manufacturer limits.
+
+    Prints the schematic parity status line (Issue #7077) but the exit code
+    stays the manufacturer-compatibility answer: parity does not change
+    whether the fab can build the board.
+    """
     profile = get_profile(mfr)
 
     print(f"\n{'=' * 60}")
@@ -780,6 +899,8 @@ def output_manufacturer_check(
             print(f"Parts Library: {profile.parts_library.name}")
     else:
         print("Assembly: Not available")
+
+    _print_parity_status(report.schematic_parity_status)
 
     return 1 if incompatible else 0
 

@@ -15,6 +15,37 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-18
 
+- **PR #7109**: fix(optim): keep placement outline in the origin-relative component frame
+- **PR #7119**: fix(mcp): route_net saves routed nets via the real merge_routes_into_pcb API
+- **PR #7104**: docs: record tscircuit upstream defect outcomes (#5878)
+- **PR #7101**: test(router): pin board 03 tier-1 USB_D In2.Cu coupled run
+- **Issue #7106** (closed): PlacementOptimizer.from_pcb: outline in absolute frame but components origin-relative (every in-board part flagged outside)
+- **Issue #7114** (closed): MCP route_net never saves a routed net: calls merge_routes_into_pcb with a nonexistent signature (TypeError on net_map) since #505
+- **Issue #5878** (closed): File the 6 tscircuit upstream defects found by the interop gate (needs a credential with issue-write outside rjwalters/*)
+- **PR #7113**: fix(mcp): sync tools.md with server, register get_drc_violations, route_net stops overwriting input
+- **PR #7086**: fix(drc): match B.Silkscreen in silkscreen width/height rules
+- **PR #6874**: ci(board-07): move copper-safety DRC ratchet to scheduled slow-tests
+- **PR #6900**: ci: add Windows smoke job and skip RSS positivity test without resource
+- **PR #7110**: fix(optim,export): compute query_move routing impact and PnP rotation-correction count
+- **Issue #7111** (closed): MCP tools.md promises tools/params the server lacks (get_drc_violations unregistered, analyze_board renamed, route_net layer/width rejected)
+- **Issue #7078** (closed): Generated .kicad_dru silkscreen width/height rules apply to F.Silkscreen only
+- **Issue #6894** (closed): ci: add a Windows smoke job; skip test_peak_rss_bytes_positive where resource is unavailable
+- **Issue #7107** (closed): MCP responses report placeholders as measurements (query_move routing_impact, export_assembly rotation_corrections)
+- **PR #7090**: fix(drc): report when kicad-cli could not run schematic parity (#7077)
+- **PR #7100**: fix(export): safety floor and DRC preflight count opens and reject other-board reports
+- **PR #7095**: feat(creepage): add insulation-type input (basic/supplementary/reinforced), default basic
+- **PR #7102**: fix(optim): query_move before-state snapshot gives real score_delta and violations
+- **Issue #7077** (closed): kct drc reports a clean result when kicad-cli could not run the schematic parity checks
+- **Issue #7091** (closed): kct export safety floor and DRC preflight pass unrouted boards: unconnected items never read since #4498, and a report for a different PCB is trusted
+- **Issue #7082** (closed): kct creepage/audit: add an insulation-type input (basic vs reinforced, IEC 60664-1 5.2.5) to the derived clearance/creepage
+- **Issue #7099** (closed): Fix PlacementSession.query_move before-state snapshot: score_delta always 0 and violations always empty in MCP query_move/apply_move
+- **PR #7098**: fix: validators no longer read clean when they didn't check (#7094)
+- **PR #7092**: docs: measure board 07 match-group spread after per-bump meander placement
+- **PR #7089**: fix(audit): un-run ERC or crashed sync check caps verdict at WARNING
+- **PR #7055**: fix!: deprecate --batch-routing (no-op that claimed GPU acceleration) and remove the unwired GPU batch-routing kernel
+- **Issue #7094** (closed): Three validators read clean when they didn't check: kct validate --lvs --min-confidence, kct erc --sheet/--type filters, kct sch validate with ERC not run
+- **Issue #7083** (closed): kct audit reports READY FOR MANUFACTURING when ERC never ran (kicad-cli off PATH on macOS, ERC timeout) or the sync check crashed
+- **Issue #7051** (closed): Remove no-op `kct route --batch-routing` and the orphaned 1,111-line BatchPathfinder GPU kernel (flag only prints 'GPU-accelerated')
 - **PR #7087**: fix(route): warn when --region-parallel is ignored; drop speedup claims
 - **PR #7085**: fix(cost): price unlisted layer counts at next tier and charge finish fee once
 - **PR #7068**: fix(board04): use global labels for power nets to clear same_local_global_label

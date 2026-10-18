@@ -880,6 +880,19 @@ class TestDruGenerator:
         # Silkscreen rules should be scoped to silk layer
         assert "A.Layer == 'F.Silkscreen'" in content
 
+    def test_generate_dru_silkscreen_rules_cover_both_sides(self):
+        """Silkscreen width/height rules must match B.Silkscreen text too (#7078)."""
+        from kicad_tools.manufacturers.dru_generator import generate_dru
+
+        profile = get_profile("jlcpcb")
+        rules = profile.get_design_rules(layers=2, copper_oz=1.0)
+        content = generate_dru(rules, manufacturer_name="JLCPCB")
+
+        for name in ("Silkscreen Width", "Silkscreen Height"):
+            block = content.split(f'(rule "{name}')[1].split("(rule ")[0]
+            assert "A.Layer == 'F.Silkscreen'" in block
+            assert "A.Layer == 'B.Silkscreen'" in block
+
     def test_generate_dru_omits_unsupported_mask_rules(self):
         """Numeric mask floors have no native custom-rule equivalent."""
         from kicad_tools.manufacturers.dru_generator import generate_dru

@@ -39,6 +39,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, NamedTuple
 
 from kicad_tools._shapely import has_shapely, require_shapely
+from kicad_tools.creepage.standards import DEFAULT_INSULATION
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from kicad_tools.creepage.standards import CreepageStandard
@@ -417,6 +418,9 @@ class CreepageReport:
     # ``required_creepage_mm`` / ``working_voltage`` are ``None`` (per-pair).
     voltage_map: dict[str, VoltageInterval] | None = None
     edge_voltage: float = 0.0
+    # Insulation type the derived requirement assumed (issue #7082): "basic",
+    # "supplementary" or "reinforced".  None in phase-1 (manual --min) mode.
+    insulation: str | None = None
 
     @property
     def passed(self) -> bool:
@@ -486,6 +490,7 @@ class CreepageReport:
             "working_voltage_v": self.working_voltage,
             "pollution_degree": self.pollution_degree,
             "material_group": self.material_group,
+            "insulation": self.insulation,
             "required_creepage_mm": (
                 round(self.required_creepage_mm, 4)
                 if self.required_creepage_mm is not None
@@ -977,6 +982,7 @@ def compute_creepage_census(
     standard_obj: CreepageStandard | None = None,
     edge_voltage: float = 0.0,
     overvoltage_category: str = "II",
+    insulation: str = DEFAULT_INSULATION,
 ) -> CreepageReport:
     """Build the full HV creepage/clearance census for a board.
 
@@ -1006,7 +1012,9 @@ def compute_creepage_census(
     about a common reference; AC phase relationships are NOT modelled, so
     ``|dv|`` is conservative for in-phase nets.  ``overvoltage_category``
     (default ``"II"``) selects the Table F.1 rated impulse voltage for the
-    per-pair clearance derivation (issue #7057).
+    per-pair clearance derivation (issue #7057); ``insulation`` (default
+    ``"reinforced"``) selects the basic / supplementary / reinforced rule for
+    both the per-pair creepage and clearance (issue #7082).
 
     In single-voltage mode (no ``voltage_map``) the derived requirement is
     identical for every pair (it depends only on the standard + voltage + PD +
@@ -1039,6 +1047,7 @@ def compute_creepage_census(
             else None
         ),
         edge_voltage=edge_voltage,
+        insulation=insulation if standard is not None else None,
     )
 
     # Merged per-pair provenance (creepage + clearance citations together).
@@ -1093,13 +1102,13 @@ def compute_creepage_census(
         else:
             assert standard_obj is not None and pollution_degree is not None
             creep, cprov = standard_obj.required_creepage(
-                dv, int(pollution_degree), material_group or "IIIa"
+                dv, int(pollution_degree), material_group or "IIIa", insulation
             )
             # ``dv`` (RMS) plays the role of the rated voltage for the Table
             # F.1 impulse lookup -- the same approximation the creepage lookup
             # makes (issue #7057); the steady-state peak is derived inside.
             clr, clprov = standard_obj.required_clearance(
-                dv, int(pollution_degree), overvoltage_category
+                dv, int(pollution_degree), overvoltage_category, insulation
             )
             res = (creep, clr, cprov, clprov)
         _req_cache[key] = res

@@ -419,3 +419,134 @@ class TestFilterCrossSheetPowerViolations:
         assert "label_dangling" in types
         assert "pin_not_connected" in types
         assert "power_pin_not_driven" not in types
+
+
+# ---------------------------------------------------------------------------
+# Issue #7094: view filters (--errors-only/--type/--sheet) must not read as a
+# clean board -- the exit code is computed before them.
+# ---------------------------------------------------------------------------
+
+
+def _write_erc_report(path: Path, severity: str = "error") -> Path:
+    import json as _json
+
+    data = {
+        "source": "board.kicad_sch",
+        "kicad_version": "10.0.6",
+        "coordinate_units": "mm",
+        "sheets": [
+            {
+                "path": "/",
+                "uuid_path": "/",
+                "violations": [
+                    {
+                        "type": "pin_not_connected",
+                        "severity": severity,
+                        "description": "Pin not connected",
+                        "pos": {"x": 10.0, "y": 10.0},
+                        "items": [{"description": "Pin 1 of R1"}],
+                        "excluded": False,
+                    }
+                ],
+            },
+            {"path": "/power/", "uuid_path": "/abcd/", "violations": []},
+        ],
+    }
+    path.write_text(_json.dumps(data))
+    return path
+
+
+class TestERCViewFiltersExitCode:
+    """``kct erc`` view filters are display-only for the verdict (#7094)."""
+
+    @pytest.fixture
+    def error_report(self, tmp_path: Path) -> Path:
+        return _write_erc_report(tmp_path / "erc.json")
+
+    @pytest.fixture
+    def warning_report(self, tmp_path: Path) -> Path:
+        return _write_erc_report(tmp_path / "erc_warn.json", severity="warning")
+
+    def test_unfiltered_fails(self, error_report: Path, capsys):
+        from kicad_tools.cli.erc_cmd import main
+
+        assert main([str(error_report)]) == 1
+        assert "ERC FAILED" in capsys.readouterr().out
+
+    @pytest.mark.parametrize(
+        "filter_args", [["--sheet", "/power"], ["--type", "label"]], ids=["sheet", "type"]
+    )
+    def test_filter_hiding_errors_table(self, error_report: Path, capsys, filter_args):
+        from kicad_tools.cli.erc_cmd import main
+
+        assert main([str(error_report), *filter_args]) == 1
+        out = capsys.readouterr().out
+        assert "ERC PASSED" not in out
+        assert "No ERC violations found" not in out
+        assert "No violations match the filter (1 hidden: 1 error(s), 0 warning(s))" in out
+        assert "ERC FAILED" in out
+
+    @pytest.mark.parametrize(
+        "filter_args", [["--sheet", "/power"], ["--type", "label"]], ids=["sheet", "type"]
+    )
+    def test_filter_hiding_errors_summary(self, error_report: Path, capsys, filter_args):
+        from kicad_tools.cli.erc_cmd import main
+
+        assert main([str(error_report), "--format", "summary", *filter_args]) == 1
+        out = capsys.readouterr().out
+        assert "No ERC violations found" not in out
+        assert "No violations match the filter (1 hidden: 1 error(s), 0 warning(s))" in out
+
+    @pytest.mark.parametrize(
+        "filter_args", [["--sheet", "/power"], ["--type", "label"]], ids=["sheet", "type"]
+    )
+    def test_filter_hiding_errors_json(self, error_report: Path, capsys, filter_args):
+        import json as _json
+
+        from kicad_tools.cli.erc_cmd import main
+
+        assert main([str(error_report), "--format", "json", *filter_args]) == 1
+        data = _json.loads(capsys.readouterr().out)
+        assert data["summary"]["errors"] == 0
+        assert data["summary"]["hidden_by_view_filter"] == {"errors": 1, "warnings": 0}
+        assert data["violations"] == []
+
+    def test_errors_only_on_warnings_report(self, warning_report: Path, capsys):
+        from kicad_tools.cli.erc_cmd import main
+
+        # Warnings do not fail, so exit 0 is right -- but the output must say
+        # a warning was hidden rather than "ERC PASSED - No violations found".
+        assert main([str(warning_report), "--errors-only"]) == 0
+        out = capsys.readouterr().out
+        assert "ERC PASSED" not in out
+        assert "No violations match the filter (1 hidden: 0 error(s), 1 warning(s))" in out
+
+    def test_filter_matching_everything_unchanged(self, error_report: Path, capsys):
+        import json as _json
+
+        from kicad_tools.cli.erc_cmd import main
+
+        assert main([str(error_report), "--format", "json", "--sheet", "/"]) == 1
+        data = _json.loads(capsys.readouterr().out)
+        assert data["summary"]["errors"] == 1
+        assert "hidden_by_view_filter" not in data["summary"]
+
+    def test_explain_type_filter_exit_code(self, error_report: Path, capsys):
+        from kicad_tools.cli.erc_explain_cmd import main
+
+        assert main([str(error_report)]) == 1
+        capsys.readouterr()
+        assert main([str(error_report), "--type", "label"]) == 1
+        out = capsys.readouterr().out
+        assert "No ERC violations to explain." not in out
+        assert "No violations match the filter (1 hidden: 1 error(s), 0 warning(s))" in out
+
+    def test_explain_type_filter_json(self, error_report: Path, capsys):
+        import json as _json
+
+        from kicad_tools.cli.erc_explain_cmd import main
+
+        assert main([str(error_report), "--type", "label", "--format", "json"]) == 1
+        data = _json.loads(capsys.readouterr().out)
+        assert data["explanations"] == []
+        assert data["summary"]["hidden_by_view_filter"] == {"errors": 1, "warnings": 0}

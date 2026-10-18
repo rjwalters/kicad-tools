@@ -147,35 +147,6 @@ class PnPExportResult:
 
 
 @dataclass
-class CostEstimate:
-    """Estimated manufacturing costs.
-
-    Attributes:
-        pcb_cost_usd: Estimated PCB fabrication cost in USD
-        assembly_cost_usd: Estimated assembly labor cost in USD
-        parts_cost_usd: Estimated component parts cost in USD
-        total_usd: Total estimated cost in USD
-        notes: Additional notes about the estimate
-    """
-
-    pcb_cost_usd: float | None = None
-    assembly_cost_usd: float | None = None
-    parts_cost_usd: float | None = None
-    total_usd: float | None = None
-    notes: list[str] = field(default_factory=list)
-
-    def to_dict(self) -> dict:
-        """Convert to dictionary for JSON serialization."""
-        return {
-            "pcb_cost_usd": self.pcb_cost_usd,
-            "assembly_cost_usd": self.assembly_cost_usd,
-            "parts_cost_usd": self.parts_cost_usd,
-            "total_usd": self.total_usd,
-            "notes": self.notes,
-        }
-
-
-@dataclass
 class AssemblyExportResult:
     """Result of a complete assembly package export.
 
@@ -188,7 +159,6 @@ class AssemblyExportResult:
         pnp: Pick-and-place export results if included
         zip_file: Path to combined zip archive ready for upload
         warnings: Any warnings encountered during export
-        cost_estimate: Optional cost estimate for manufacturing
         error: Error message if success is False
     """
 
@@ -200,7 +170,6 @@ class AssemblyExportResult:
     pnp: PnPExportResult | None = None
     zip_file: str | None = None
     warnings: list[str] = field(default_factory=list)
-    cost_estimate: CostEstimate | None = None
     error: str | None = None
 
     def to_dict(self) -> dict:
@@ -214,6 +183,5 @@ class AssemblyExportResult:
             "pnp": self.pnp.to_dict() if self.pnp else None,
             "zip_file": self.zip_file,
             "warnings": self.warnings,
-            "cost_estimate": self.cost_estimate.to_dict() if self.cost_estimate else None,
             "error": self.error,
         }

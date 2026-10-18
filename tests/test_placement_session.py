@@ -457,6 +457,69 @@ class TestViolation:
         assert d["location"] == [100.0, 100.0]
 
 
+class TestRoutingImpactComputed:
+    """query_move must compute routing_impact, not ship defaults (#7107)."""
+
+    @pytest.mark.parametrize(
+        ("ref", "dx", "dy", "expected_mm"),
+        [
+            ("C1", 14, 0, -28.00),
+            ("C1", 0, 14, 8.83),
+            ("C1", -14, 0, 28.00),
+            ("C2", 0, 14, -17.56),
+            ("C2", -14, 0, -15.75),
+        ],
+    )
+    def test_length_change_is_pin_mst_delta(
+        self, session: PlacementSession, ref: str, dx: float, dy: float, expected_mm: float
+    ):
+        comp = session._optimizer.get_component(ref)
+        result = session.query_move(ref, comp.x + dx, comp.y + dy)
+        assert result.routing_impact.estimated_length_change_mm == pytest.approx(
+            expected_mm, abs=0.01
+        )
+
+    def test_length_warning_follows_mst_value(self, session: PlacementSession):
+        comp = session._optimizer.get_component("C1")
+        grow = session.query_move("C1", comp.x - 14, comp.y)
+        shrink = session.query_move("C1", comp.x + 14, comp.y)
+        assert any("increases routing length by 28.0mm" in w for w in grow.warnings)
+        assert not any("routing length" in w for w in shrink.warnings)
+
+    def test_crossing_added(self, session: PlacementSession):
+        comp = session._optimizer.get_component("C1")
+        result = session.query_move("C1", comp.x + 14, comp.y)
+        assert result.routing_impact.crossing_changes == 2
+
+    def test_crossing_unchanged(self, session: PlacementSession):
+        comp = session._optimizer.get_component("C2")
+        result = session.query_move("C2", comp.x + 0.5, comp.y)
+        assert result.routing_impact.crossing_changes == 0
+
+    def test_crossing_removed(self, session: PlacementSession):
+        result = session.query_move("C2", 60.0, 45.0)
+        assert result.routing_impact.crossing_changes == -1
+
+    def test_query_move_does_not_mutate_state(self, session: PlacementSession):
+        comp = session._optimizer.get_component("C1")
+        before = (comp.x, comp.y, [(p.x, p.y) for p in comp.pins])
+        session.query_move("C1", comp.x + 14, comp.y)
+        assert (comp.x, comp.y, [(p.x, p.y) for p in comp.pins]) == before
+
+    def test_swap_totals_use_new_values(self, session: PlacementSession):
+        result = query_swap(session, "C1", "C2")
+        c1 = session._optimizer.get_component("C1")
+        c2 = session._optimizer.get_component("C2")
+        assert result.routing_impact.estimated_length_change_mm == pytest.approx(
+            session.query_move("C1", c2.x, c2.y).routing_impact.estimated_length_change_mm
+            + session.query_move("C2", c1.x, c1.y).routing_impact.estimated_length_change_mm,
+            abs=0.01,
+        )
+
+    def test_congestion_areas_not_reported(self):
+        assert "new_congestion_areas" not in RoutingImpact().to_dict()
+
+
 class TestRoutingImpact:
     """Tests for RoutingImpact dataclass."""
 
@@ -509,3 +572,91 @@ class TestFixedComponents:
         result = session.query_move("J1", 150.0, 150.0)
         assert result.success is False
         assert "fixed" in result.error_message.lower()
+
+
+class TestBoardOriginFrame:
+    """Regression for #7106: outline and components share one frame."""
+
+    def test_no_violations_at_load(self, session: PlacementSession):
+        assert session._check_violations() == []
+
+
+class TestQueryMoveBeforeState:
+    """Regression tests for issue #7099: before-state captured before the move."""
+
+    def _manual_delta(self, session, ref, x, y):
+        comp = session._optimizer.get_component(ref)
+        orig = (comp.x, comp.y, comp.rotation)
+        before = session._compute_score()
+        before_v = session._check_violations()
+        comp.x, comp.y = x, y
+        comp.update_pin_positions()
+        after = session._compute_score()
+        after_v = session._check_violations()
+        comp.x, comp.y, comp.rotation = orig
+        comp.update_pin_positions()
+        return after - before, before_v, after_v
+
+    def test_known_move_real_delta(self, session: PlacementSession):
+        # Start C1 off-board (origin-relative frame), then query a move inside.
+        comp = session._optimizer.get_component("C1")
+        comp.x, comp.y = 250.0, 250.0
+        comp.update_pin_positions()
+        expected, before_v, after_v = self._manual_delta(session, "C1", 70.0, 20.0)
+        assert expected != 0.0
+        result = session.query_move("C1", 70.0, 20.0)
+        assert result.success
+        assert result.score_delta == pytest.approx(expected)
+        assert len(after_v) < len(before_v)
+        assert result.resolved_violations
+
+    def test_offboard_move_nonzero_delta(self, session: PlacementSession):
+        expected, _, _ = self._manual_delta(session, "C1", 250.0, 250.0)
+        result = session.query_move("C1", 250.0, 250.0)
+        assert result.score_delta == pytest.approx(expected)
+        assert result.score_delta != 0.0
+
+    def test_query_move_no_state_leak(self, session: PlacementSession):
+        comp = session._optimizer.get_component("C1")
+        pins = [(p.x, p.y) for p in comp.pins]
+        orig = (comp.x, comp.y, comp.rotation)
+        score = session._compute_score()
+        session.query_move("C1", 141.0, 120.0, rotation=90.0)
+        assert (comp.x, comp.y, comp.rotation) == orig
+        assert [(p.x, p.y) for p in comp.pins] == pins
+        assert session._compute_score() == pytest.approx(score)
+        assert len(session.pending_moves) == 0
+        assert len(session.history) == 0
+
+    def test_apply_move_matches_query_and_undo(self, session: PlacementSession):
+        comp = session._optimizer.get_component("C1")
+        orig = (comp.x, comp.y, comp.rotation)
+        queried = session.query_move("C1", 141.0, 120.0)
+        applied = session.apply_move("C1", 141.0, 120.0)
+        assert applied.score_delta != 0.0
+        assert applied.score_delta == pytest.approx(queried.score_delta)
+        assert len(session.pending_moves) == 1
+        assert len(session.history) == 1
+        assert session.undo()
+        assert (comp.x, comp.y, comp.rotation) == orig
+        assert len(session.pending_moves) == 0
+        assert len(session.history) == 0
+
+    def test_find_best_position_ranked_nonempty(self, session: PlacementSession):
+        from kicad_tools.optim.query import Rectangle
+
+        region = Rectangle(x_min=10, y_min=10, x_max=45, y_max=45)
+        suggestions = find_best_position(session, "C1", region, num_suggestions=3)
+        assert suggestions
+        assert find_best_position(session, "C1", None, num_suggestions=3)
+        scores = [s.score for s in suggestions]
+        assert scores == sorted(scores, reverse=True)
+        assert all(s > 0 for s in scores)
+
+    def test_query_swap_and_alignment_real_deltas(self, session: PlacementSession):
+        swap = query_swap(session, "C1", "U1")
+        assert swap.success
+        assert swap.score_delta != 0.0
+        align = query_alignment(session, ["C1", "C2"], axis="x")
+        assert align.success
+        assert align.score_delta != 0.0

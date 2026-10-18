@@ -1232,9 +1232,9 @@ class TestOtherCallSites:
         monkeypatch.setattr(sch_validate, "find_kicad_cli", lambda: FAKE_CLI)
         _fake_kicad_cli(monkeypatch, sch_validate, returncode=-signal.SIGKILL, report=None)
 
-        issues = sch_validate.run_erc(str(tmp_path / "b.kicad_sch"))
-
-        assert any("ERC check failed" in i.message and "SIGKILL" in i.message for i in issues)
+        # Issue #7094: a killed ERC is "not run", not a warning issue.
+        with pytest.raises(sch_validate.CheckNotRun, match="SIGKILL"):
+            sch_validate.run_erc(str(tmp_path / "b.kicad_sch"))
 
     def test_export_netlist_killed_fails(self, monkeypatch, tmp_path):
         from kicad_tools.cli import export_netlist

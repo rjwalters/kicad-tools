@@ -1360,9 +1360,10 @@ class TestLVSCLI:
         assert exit_code == 2
 
     def test_cli_min_confidence_filter(self, sch_r1_c1: Path, pcb_swapped_ref: Path, capsys):
+        """--min-confidence filters display only; the verdict is unfiltered (#7094)."""
         from kicad_tools.cli.validate_lvs_cmd import main
 
-        main(
+        exit_code = main(
             [
                 "--schematic",
                 str(sch_r1_c1),
@@ -1376,13 +1377,64 @@ class TestLVSCLI:
         )
         captured = capsys.readouterr()
         data = __import__("json").loads(captured.out)
-        # Only exact matches should remain (C1)
         assert data["exact_matches"] == 1
-        # R1 (0.8 confidence) should be filtered out, leaving it as unmatched
-        # But note: filtering happens on display, the result still tracks R1->R5
-        # Actually the filter creates a new LVSResult with filtered matches
-        # so fuzzy_matches should be 0 after filtering
-        assert data["fuzzy_matches"] == 0
+        # The 0.8-confidence R1->R5 match is hidden from the listing but still
+        # counts toward the verdict.
+        assert data["fuzzy_matches"] == 1
+        assert data["hidden_below_min_confidence"] == 1
+        assert all(m["confidence"] >= 0.9 for m in data["matches"])
+        assert data["is_clean"] is False
+        assert exit_code == 1
+
+    def test_cli_min_confidence_zero_is_noop(self, sch_r1_c1: Path, pcb_swapped_ref: Path, capsys):
+        from kicad_tools.cli.validate_lvs_cmd import main
+
+        exit_code = main(
+            [
+                "--schematic",
+                str(sch_r1_c1),
+                "--pcb",
+                str(pcb_swapped_ref),
+                "--format",
+                "json",
+                "--min-confidence",
+                "0",
+            ]
+        )
+        data = __import__("json").loads(capsys.readouterr().out)
+        assert data["hidden_below_min_confidence"] == 0
+        assert data["fuzzy_matches"] == 1
+        assert exit_code == 1
+
+    @pytest.mark.parametrize("fmt", ["table", "summary", "json"])
+    def test_board00_r1_renamed_r9_min_confidence_not_clean(self, tmp_path: Path, capsys, fmt: str):
+        """Regression #7094: R1->R9 rename with --min-confidence 0.9 is NOT clean."""
+        import shutil
+
+        from kicad_tools.cli.validate_lvs_cmd import main
+
+        src = Path(__file__).resolve().parents[1] / "boards" / "00-simple-led" / "output"
+        sch = tmp_path / "simple_led.kicad_sch"
+        shutil.copy(src / "simple_led.kicad_sch", sch)
+        pcb_text = (src / "simple_led.kicad_pcb").read_text()
+        assert 'reference "R1"' in pcb_text
+        pcb = tmp_path / "r9.kicad_pcb"
+        pcb.write_text(pcb_text.replace('reference "R1"', 'reference "R9"'))
+
+        argv = ["--schematic", str(sch), "--pcb", str(pcb), "--format", fmt]
+        assert main(argv) == 1
+        capsys.readouterr()
+
+        exit_code = main([*argv, "--min-confidence", "0.9"])
+        out = capsys.readouterr().out
+        assert exit_code == 1
+        if fmt == "json":
+            data = __import__("json").loads(out)
+            assert data["is_clean"] is False
+            assert data["hidden_below_min_confidence"] == 1
+        else:
+            assert "CLEAN" not in out.replace("UNCLEAN", "")
+            assert "1 match(es) below --min-confidence 0.9 hidden" in out
 
     def test_cli_missing_files(self, capsys):
         from kicad_tools.cli.validate_lvs_cmd import main

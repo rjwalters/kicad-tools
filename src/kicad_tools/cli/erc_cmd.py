@@ -211,8 +211,15 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Error loading filter config: {e}", file=sys.stderr)
             return 1
 
-    # Apply filters
-    violations = [v for v in report.violations if not v.excluded]
+    # The verdict set: everything left after KiCad exclusions and the
+    # deliberate ``--filter-config`` suppression.  The exit code is computed
+    # from this set -- the view filters below only change what is *shown*, so
+    # a filter that hides every error can never read as a clean board
+    # (Issue #7094).
+    gate_violations = [v for v in report.violations if not v.excluded]
+
+    # View filters (display only)
+    violations = list(gate_violations)
 
     if args.errors_only:
         violations = [v for v in violations if v.is_error]
@@ -230,25 +237,57 @@ def main(argv: list[str] | None = None) -> int:
     if args.sheet:
         violations = [v for v in violations if args.sheet in v.sheet]
 
+    hidden = hidden_by_view_filter(gate_violations, violations)
+
     # Output
     if args.format == "json":
-        output_json(violations, report, filtered_count=filter_ignored_count)
+        output_json(violations, report, filtered_count=filter_ignored_count, hidden=hidden)
     elif args.format == "summary":
-        output_summary(violations, report, filtered_count=filter_ignored_count)
+        output_summary(violations, report, filtered_count=filter_ignored_count, hidden=hidden)
     else:
         output_table(
-            violations, report, args.verbose, args.by_sheet, filtered_count=filter_ignored_count
+            violations,
+            report,
+            args.verbose,
+            args.by_sheet,
+            filtered_count=filter_ignored_count,
+            hidden=hidden,
         )
 
-    # Exit code
-    error_count = sum(1 for v in violations if v.is_error)
-    warning_count = len(violations) - error_count
+    # Exit code -- from the pre-view-filter set
+    error_count = sum(1 for v in gate_violations if v.is_error)
+    warning_count = len(gate_violations) - error_count
 
     if error_count > 0:
         return 1
     elif warning_count > 0 and args.strict:
         return 2
     return 0
+
+
+def hidden_by_view_filter(
+    gate_violations: list[ERCViolation], shown: list[ERCViolation]
+) -> dict[str, int] | None:
+    """Errors/warnings in ``gate_violations`` that a view filter left out of ``shown``.
+
+    Returns ``None`` when nothing was hidden, so a filter that matches
+    everything (or no filter at all) produces exactly today's output.
+    """
+    shown_ids = {id(v) for v in shown}
+    hidden = [v for v in gate_violations if id(v) not in shown_ids]
+    if not hidden:
+        return None
+    errors = sum(1 for v in hidden if v.is_error)
+    return {"errors": errors, "warnings": len(hidden) - errors}
+
+
+def no_match_message(hidden: dict[str, int]) -> str:
+    """``No violations match the filter (N hidden: E error(s), W warning(s))``."""
+    total = hidden["errors"] + hidden["warnings"]
+    return (
+        f"No violations match the filter ({total} hidden: "
+        f"{hidden['errors']} error(s), {hidden['warnings']} warning(s))"
+    )
 
 
 def run_erc_on_schematic(
@@ -297,10 +336,17 @@ def output_table(
     verbose: bool = False,
     by_sheet: bool = False,
     filtered_count: int = 0,
+    hidden: dict[str, int] | None = None,
 ) -> None:
-    """Output violations as a formatted table."""
+    """Output violations as a formatted table.
+
+    ``hidden`` is the count of violations a view filter left out (see
+    :func:`hidden_by_view_filter`); the verdict line accounts for them.
+    """
     error_count = sum(1 for v in violations if v.is_error)
     warning_count = len(violations) - error_count
+    hidden_errors = hidden["errors"] if hidden else 0
+    hidden_warnings = hidden["warnings"] if hidden else 0
 
     print(f"\n{'=' * 60}")
     print("ERC VALIDATION SUMMARY")
@@ -318,10 +364,22 @@ def output_table(
         print(f"  Filtered:   {filtered_count} violations filtered")
     if report.exclusion_count > 0:
         print(f"  Excluded:   {report.exclusion_count} (not counted)")
+    if hidden:
+        print(
+            f"  Hidden:     {hidden_errors} error(s), {hidden_warnings} warning(s) "
+            "by view filter (still counted)"
+        )
 
     if not violations:
         print(f"\n{'=' * 60}")
-        print("ERC PASSED - No violations found")
+        if not hidden:
+            print("ERC PASSED - No violations found")
+            return
+        print(no_match_message(hidden))
+        if hidden_errors:
+            print("ERC FAILED - Fix errors before proceeding (hidden by view filter)")
+        else:
+            print("ERC WARNING - Review warnings (hidden by view filter)")
         return
 
     # Group by type summary
@@ -365,7 +423,7 @@ def output_table(
             print(f"\n  ... and {len(warnings) - 20} more warnings (use --verbose)")
 
     print(f"\n{'=' * 60}")
-    if errors:
+    if errors or hidden_errors:
         print("ERC FAILED - Fix errors before proceeding")
     else:
         print("ERC WARNING - Review warnings")
@@ -412,7 +470,12 @@ def _print_single(v: ERCViolation, verbose: bool, indent: str = "  ") -> None:
                 print(f"{indent}      - {suggestion}")
 
 
-def output_json(violations: list[ERCViolation], report: ERCReport, filtered_count: int = 0) -> None:
+def output_json(
+    violations: list[ERCViolation],
+    report: ERCReport,
+    filtered_count: int = 0,
+    hidden: dict[str, int] | None = None,
+) -> None:
     """Output violations as JSON."""
     summary: dict = {
         "errors": sum(1 for v in violations if v.is_error),
@@ -420,6 +483,8 @@ def output_json(violations: list[ERCViolation], report: ERCReport, filtered_coun
     }
     if filtered_count > 0:
         summary["filtered"] = filtered_count
+    if hidden:
+        summary["hidden_by_view_filter"] = hidden
 
     data = {
         "source": report.source_file,
@@ -431,11 +496,16 @@ def output_json(violations: list[ERCViolation], report: ERCReport, filtered_coun
 
 
 def output_summary(
-    violations: list[ERCViolation], report: ERCReport, filtered_count: int = 0
+    violations: list[ERCViolation],
+    report: ERCReport,
+    filtered_count: int = 0,
+    hidden: dict[str, int] | None = None,
 ) -> None:
     """Output violation summary by type."""
     if not violations:
-        if filtered_count > 0:
+        if hidden:
+            print(f"{no_match_message(hidden)}.")
+        elif filtered_count > 0:
             print(f"No ERC violations found ({filtered_count} violations filtered).")
         else:
             print("No ERC violations found.")
@@ -465,6 +535,11 @@ def output_summary(
     total_errors = sum(c["errors"] for c in by_type.values())
     total_warnings = sum(c["warnings"] for c in by_type.values())
     print(f"{'TOTAL':<35} {total_errors:<8} {total_warnings:<8}")
+    if hidden:
+        print(
+            f"Hidden by view filter: {hidden['errors']} error(s), "
+            f"{hidden['warnings']} warning(s) (still counted)"
+        )
 
 
 def print_types() -> None:

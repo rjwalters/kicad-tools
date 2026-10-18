@@ -134,7 +134,9 @@ def apply_waivers_to_report(report: DRCReport, waivers: Waivers) -> WaiverApplic
         return result
 
     used: set[int] = set()
-    for violation in report.violations:
+    # Issue #7077: schematic-parity findings gate by severity too, so the same
+    # sidecar matching applies to them.
+    for violation in [*report.violations, *report.schematic_parity]:
         if violation.waived:
             continue
         refs = extract_item_refs(violation.items)

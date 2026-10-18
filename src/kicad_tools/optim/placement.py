@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING
 logger = logging.getLogger(__name__)
 
 from kicad_tools.optim.board_outline import extract_board_outline as _extract_board_outline_shared
+from kicad_tools.optim.board_outline import to_origin_relative
 from kicad_tools.optim.components import (
     ClusterType,
     Component,
@@ -247,20 +248,9 @@ class PlacementOptimizer:
                     board_geom = BoardGeometry.from_pcb(pcb)
                     board = board_geom.to_optim_polygon()
                     # BoardGeometry.from_pcb subtracts pcb.board_origin from
-                    # every Edge.Cuts vertex, so to_optim_polygon() returns an
-                    # origin-relative outline. The optimizer, however, adds
-                    # components at their raw *absolute* positions (and
-                    # write_to_pcb persists absolute coordinates). Translate the
-                    # outline back into the absolute board frame so the clamp,
-                    # the polygon projection, and out_of_bounds_components() all
-                    # operate in the same coordinate frame the components live
-                    # in. Without this, containment "succeeds" against a board
-                    # at (0,0) while the parts sit ~origin mm away (#3804).
-                    from kicad_tools.optim.geometry import Vector2D
-
-                    ox, oy = pcb.board_origin
-                    if ox or oy:
-                        board = board.translate(Vector2D(ox, oy))
+                    # every Edge.Cuts vertex, so to_optim_polygon() is already
+                    # in the origin-relative frame that Footprint.position
+                    # uses. Components and outline therefore share one frame.
                     logger.debug("Using Shapely-based board geometry engine")
                 except ValueError as exc:
                     # Edge.Cuts could not be closed into a polygon. Remember
@@ -275,7 +265,9 @@ class PlacementOptimizer:
             pass
 
         if board is None:
-            board = cls._extract_board_outline(pcb)
+            # The legacy parser reads raw (absolute) Edge.Cuts coordinates;
+            # move them into the origin-relative frame of Footprint.position.
+            board = to_origin_relative(cls._extract_board_outline(pcb), pcb)
 
         if board is None:
             # Neither the Shapely engine nor the legacy parser could recover a
