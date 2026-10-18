@@ -343,7 +343,7 @@
     (fp_text reference "J1" (at 0 -9.0) (layer "F.SilkS") (uuid "86d6d2e7-f251-55f6-8d21-eb39beb1157c")
       (effects (font (size 1 1) (thickness 0.15)))
     )
-    (fp_text value "SWD" (at 0 8) (layer "F.Fab") (uuid "763b8660-3c3c-5dd8-809b-4a2781079915")
+    (fp_text value "SWD-6" (at 0 8) (layer "F.Fab") (uuid "763b8660-3c3c-5dd8-809b-4a2781079915")
       (effects (font (size 1 1) (thickness 0.15)))
     )
     (fp_line (start -1.38 -7.73) (end 0 -7.73)

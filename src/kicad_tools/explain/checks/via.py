@@ -25,7 +25,7 @@ def _no_via_in_pad_rules():
     """Design rules of a fab without via-in-pad: every in-pad via is reported."""
     from ...manufacturers.base import DesignRules
 
-    return DesignRules(
+    return DesignRules(  # noqa: MFR001 reason="synthetic fab-agnostic rules: only via_in_pad_supported=False matters; every other limit is zero so no manufacturer limit can leak into the in-pad scan"
         min_trace_width_mm=0.0,
         min_clearance_mm=0.0,
         min_via_drill_mm=0.0,

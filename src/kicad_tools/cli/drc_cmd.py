@@ -482,11 +482,6 @@ def _drc_exit_code(
     return 0
 
 
-def _error_connectivity_items(report: DRCReport) -> list[DRCViolation]:
-    """Error-severity (unwaived) connectivity entries of ``report`` (Issue #7096)."""
-    return [v for v in report.connectivity_items() if v.is_error]
-
-
 def _load_waivers(explicit: str | None, input_path: Path) -> tuple["Waivers | None", int]:
     """Resolve the ``.kct_waivers.json`` sidecar for this run (Issue #4691).
 
@@ -1060,7 +1055,7 @@ def output_manufacturer_check(
     error_count, warning_count = _manufacturer_gate_counts(checks)
     # Issue #7096: every error-severity connectivity item, for display; only
     # the ones not already judged in ``checks`` add to the gate.
-    unconnected = [] if ignore_unconnected else _error_connectivity_items(report)
+    unconnected = [] if ignore_unconnected else report.connectivity_errors()
     in_checks = {id(c.violation) for c in checks}
     unconnected_extra = [v for v in unconnected if id(v) not in in_checks]
     error_count += len(unconnected_extra)

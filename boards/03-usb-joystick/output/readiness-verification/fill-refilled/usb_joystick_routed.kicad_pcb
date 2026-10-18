@@ -149,7 +149,7 @@
 		(descr "JST PH series connector, S5B-PH-SM4-TB (http://www.jst-mfg.com/product/pdf/eng/ePH.pdf)")
 		(tags "connector JST PH horizontal")
 		(property "Reference" "J2"
-			(at 1.41421 1.41421 0)
+			(at 0 5.6 0)
 			(layer "F.SilkS")
 			(uuid "bad7ec87-22c2-4f65-b616-1903fee4ed50")
 			(effects
@@ -656,7 +656,7 @@
 		(descr "Low-profile SMD Tactile Switch, https://www.e-switch.com/system/asset/product_line/data_sheet/165/TL3342.pdf")
 		(tags "SPST Tactile Switch")
 		(property "Reference" "SW2"
-			(at 0 -1.5 0)
+			(at 0 -3.75 0)
 			(layer "F.SilkS")
 			(uuid "d04b516e-14c7-4828-a288-c5ac774c0828")
 			(effects
@@ -3514,7 +3514,7 @@
 		(descr "Low-profile SMD Tactile Switch, https://www.e-switch.com/system/asset/product_line/data_sheet/165/TL3342.pdf")
 		(tags "SPST Tactile Switch")
 		(property "Reference" "SW4"
-			(at 0 -1.5 0)
+			(at 0 -3.75 0)
 			(layer "F.SilkS")
 			(uuid "e790d169-8a3b-4a3e-a76e-cfcda9c11741")
 			(effects
@@ -6574,7 +6574,7 @@
 		(descr "Low-profile SMD Tactile Switch, https://www.e-switch.com/system/asset/product_line/data_sheet/165/TL3342.pdf")
 		(tags "SPST Tactile Switch")
 		(property "Reference" "SW1"
-			(at 0 -1.5 0)
+			(at 0 -3.75 0)
 			(layer "F.SilkS")
 			(uuid "d9d4c551-9661-4118-aec9-95aff41ef3a3")
 			(effects
@@ -7692,7 +7692,7 @@
 		(descr "TQFP, 44 Pin (JEDEC MS-026 variation ACB, 1.00mm body thickness, https://www.jedec.org/document_search?search_api_views_fulltext=MS-026, https://ww1.microchip.com/downloads/en/PackagingSpec/00000049BZ.pdf#page=658)")
 		(tags "TQFP QFP Microchip_44-Lead-Plastic-Thin-Quad-Flatpack-(PT)")
 		(property "Reference" "U1"
-			(at -1.5 0 0)
+			(at -7.4 0 0)
 			(layer "F.SilkS")
 			(uuid "c551fb1b-306b-4104-8ccb-75c09a66551b")
 			(effects
@@ -8786,7 +8786,7 @@
 		(descr "Low-profile SMD Tactile Switch, https://www.e-switch.com/system/asset/product_line/data_sheet/165/TL3342.pdf")
 		(tags "SPST Tactile Switch")
 		(property "Reference" "SW5"
-			(at 0 -2 0)
+			(at 0 -3.75 0)
 			(layer "F.SilkS")
 			(uuid "643f1563-2d04-4ac8-bd25-13c231f6d626")
 			(effects

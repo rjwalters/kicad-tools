@@ -4,10 +4,10 @@
   "layers": 4,
   "summary": {
     "errors": 0,
-    "warnings": 7,
+    "warnings": 1,
     "infos": 10,
     "waived": 0,
-    "rules_checked": 68,
+    "rules_checked": 67,
     "rules_checked_by_rule": {
       "connectivity": 1,
       "copper_sliver": 1,
@@ -252,161 +252,13 @@
       "waived": false,
       "key": "diffpair_uncoupled_length||USB_MCU_D+,USB_MCU_D-|",
       "evidence_hash": null
-    },
-    {
-      "rule_id": "thermal_asymmetry",
-      "type": "unknown",
-      "severity": "warning",
-      "message": "C10 thermal asymmetry (tombstoning risk): pad 2 (net 'GND') is solid to 'GND' fill on F.Cu; pad 1 (net 'JOY_X') has no zone connection (trace only) -- give the solid terminal a thermal relief (or balance the other terminal)",
-      "location": [
-        131.275,
-        89.5
-      ],
-      "layer": "F.Cu",
-      "actual_value": null,
-      "required_value": null,
-      "items": [
-        "C10",
-        "C10-2",
-        "C10-1"
-      ],
-      "nets": [
-        "GND",
-        "JOY_X"
-      ],
-      "status": "warning",
-      "waived": false,
-      "key": "thermal_asymmetry|C10,C10-1,C10-2|GND,JOY_X|F.Cu",
-      "evidence_hash": null
-    },
-    {
-      "rule_id": "thermal_asymmetry",
-      "type": "unknown",
-      "severity": "warning",
-      "message": "C11 thermal asymmetry (tombstoning risk): pad 2 (net 'GND') is solid to 'GND' fill on F.Cu; pad 1 (net 'JOY_Y') has no zone connection (trace only) -- give the solid terminal a thermal relief (or balance the other terminal)",
-      "location": [
-        131.275,
-        92.5
-      ],
-      "layer": "F.Cu",
-      "actual_value": null,
-      "required_value": null,
-      "items": [
-        "C11",
-        "C11-2",
-        "C11-1"
-      ],
-      "nets": [
-        "GND",
-        "JOY_Y"
-      ],
-      "status": "warning",
-      "waived": false,
-      "key": "thermal_asymmetry|C11,C11-1,C11-2|GND,JOY_Y|F.Cu",
-      "evidence_hash": null
-    },
-    {
-      "rule_id": "thermal_asymmetry",
-      "type": "unknown",
-      "severity": "warning",
-      "message": "PTH pin J1-A1 (net 'GND', drill 0.40mm) is connected solid to zone fill on 3 layers (F.Cu, In1.Cu, B.Cu); barrel fill is at risk when wave-, selective- or hand-soldered -- use thermal reliefs on this pin",
-      "location": [
-        149.475,
-        63.3
-      ],
-      "layer": "F.Cu",
-      "actual_value": 3.0,
-      "required_value": 1.0,
-      "items": [
-        "J1",
-        "J1-A1"
-      ],
-      "nets": [
-        "GND"
-      ],
-      "status": "warning",
-      "waived": false,
-      "key": "thermal_asymmetry|J1,J1-A1|GND|F.Cu",
-      "evidence_hash": null
-    },
-    {
-      "rule_id": "thermal_asymmetry",
-      "type": "unknown",
-      "severity": "warning",
-      "message": "PTH pin J1-A12 (net 'GND', drill 0.40mm) is connected solid to zone fill on 3 layers (F.Cu, In1.Cu, B.Cu); barrel fill is at risk when wave-, selective- or hand-soldered -- use thermal reliefs on this pin",
-      "location": [
-        143.525,
-        63.3
-      ],
-      "layer": "F.Cu",
-      "actual_value": 3.0,
-      "required_value": 1.0,
-      "items": [
-        "J1",
-        "J1-A12"
-      ],
-      "nets": [
-        "GND"
-      ],
-      "status": "warning",
-      "waived": false,
-      "key": "thermal_asymmetry|J1,J1-A12|GND|F.Cu",
-      "evidence_hash": null
-    },
-    {
-      "rule_id": "thermal_asymmetry",
-      "type": "unknown",
-      "severity": "warning",
-      "message": "PTH pin J1-B1 (net 'GND', drill 0.40mm) is connected solid to zone fill on 3 layers (F.Cu, In1.Cu, B.Cu); barrel fill is at risk when wave-, selective- or hand-soldered -- use thermal reliefs on this pin",
-      "location": [
-        143.525,
-        61.95
-      ],
-      "layer": "F.Cu",
-      "actual_value": 3.0,
-      "required_value": 1.0,
-      "items": [
-        "J1",
-        "J1-B1"
-      ],
-      "nets": [
-        "GND"
-      ],
-      "status": "warning",
-      "waived": false,
-      "key": "thermal_asymmetry|J1,J1-B1|GND|F.Cu",
-      "evidence_hash": null
-    },
-    {
-      "rule_id": "thermal_asymmetry",
-      "type": "unknown",
-      "severity": "warning",
-      "message": "PTH pin J1-B12 (net 'GND', drill 0.40mm) is connected solid to zone fill on 3 layers (F.Cu, In1.Cu, B.Cu); barrel fill is at risk when wave-, selective- or hand-soldered -- use thermal reliefs on this pin",
-      "location": [
-        149.475,
-        61.95
-      ],
-      "layer": "F.Cu",
-      "actual_value": 3.0,
-      "required_value": 1.0,
-      "items": [
-        "J1",
-        "J1-B12"
-      ],
-      "nets": [
-        "GND"
-      ],
-      "status": "warning",
-      "waived": false,
-      "key": "thermal_asymmetry|J1,J1-B12|GND|F.Cu",
-      "evidence_hash": null
     }
   ],
   "mask_copper_assessments": [],
   "meta_checks": {
     "drc": {
       "status": "FAILED",
-      "detail": "0 errors, 7 warnings; reviewed 0.45 mm pad-hole floor"
+      "detail": "0 errors, 1 warnings; reviewed 0.45 mm pad-hole floor"
     },
     "erc": {
       "status": "PASSED",

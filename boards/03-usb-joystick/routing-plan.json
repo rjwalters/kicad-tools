@@ -1225,7 +1225,7 @@
       "(property\n\t\"KiLib_Generator\"\n\t\"SMD_2terminal_chip_molded\"\n\t(at 0 0 0)\n\t(layer \"F.SilkS\")\n\t(hide yes)\n\t(uuid \"b1b5f7a4-dc1f-48ce-bd31-bbc2de2196cc\")\n\t(effects\n\t\t(font\n\t\t\t(size 1 1)\n\t\t\t(thickness 0.15)\n\t\t)\n\t)\n)"
     ],
     "J2": [
-      "(property\n\t\"Reference\"\n\t\"J2\"\n\t(at 1.41421 1.41421 0)\n\t(layer \"F.SilkS\")\n\t(uuid \"bad7ec87-22c2-4f65-b616-1903fee4ed50\")\n\t(effects\n\t\t(font\n\t\t\t(size 1 1)\n\t\t\t(thickness 0.15)\n\t\t)\n\t)\n)",
+      "(property\n\t\"Reference\"\n\t\"J2\"\n\t(at 0 5.6 0)\n\t(layer \"F.SilkS\")\n\t(uuid \"bad7ec87-22c2-4f65-b616-1903fee4ed50\")\n\t(effects\n\t\t(font\n\t\t\t(size 1 1)\n\t\t\t(thickness 0.15)\n\t\t)\n\t)\n)",
       "(property\n\t\"KiLib_Generator\"\n\t\"connector/SMD_single_row_plus_mounting_pad\"\n\t(at 0 0 0)\n\t(layer \"F.SilkS\")\n\t(hide yes)\n\t(uuid \"7060ed90-c1e4-4b97-b57e-463cefd971e9\")\n\t(effects\n\t\t(font\n\t\t\t(size 1 1)\n\t\t\t(thickness 0.15)\n\t\t)\n\t)\n)"
     ],
     "C6": [
@@ -1257,7 +1257,7 @@
       "(property\n\t\"KiLib_Generator\"\n\t\"SMD_2terminal_chip_molded\"\n\t(at 0 0 0)\n\t(layer \"F.SilkS\")\n\t(hide yes)\n\t(uuid \"224f577d-e228-4b95-80a0-32b288c669dc\")\n\t(effects\n\t\t(font\n\t\t\t(size 1 1)\n\t\t\t(thickness 0.15)\n\t\t)\n\t)\n)"
     ],
     "SW5": [
-      "(property\n\t\"Reference\"\n\t\"SW5\"\n\t(at 0 -2 0)\n\t(layer \"F.SilkS\")\n\t(uuid \"643f1563-2d04-4ac8-bd25-13c231f6d626\")\n\t(effects\n\t\t(font\n\t\t\t(size 1 1)\n\t\t\t(thickness 0.15)\n\t\t)\n\t)\n)"
+      "(property\n\t\"Reference\"\n\t\"SW5\"\n\t(at 0 -3.75 0)\n\t(layer \"F.SilkS\")\n\t(uuid \"643f1563-2d04-4ac8-bd25-13c231f6d626\")\n\t(effects\n\t\t(font\n\t\t\t(size 1 1)\n\t\t\t(thickness 0.15)\n\t\t)\n\t)\n)"
     ],
     "J1": [
       "(property\n\t\"Reference\"\n\t\"J1\"\n\t(at 0 -1.5 0)\n\t(layer \"F.SilkS\")\n\t(uuid \"ecf481ca-a7ed-4d51-8b54-1daa0b78da3d\")\n\t(effects\n\t\t(font\n\t\t\t(size 1 1)\n\t\t\t(thickness 0.15)\n\t\t)\n\t)\n)"
@@ -1267,7 +1267,7 @@
       "(property\n\t\"KiLib_Generator\"\n\t\"SMD_2terminal_chip_molded\"\n\t(at 0 0 0)\n\t(layer \"F.SilkS\")\n\t(hide yes)\n\t(uuid \"8a3b9abf-47f6-4c9a-b7d9-5e71c3e443b2\")\n\t(effects\n\t\t(font\n\t\t\t(size 1 1)\n\t\t\t(thickness 0.15)\n\t\t)\n\t)\n)"
     ],
     "SW1": [
-      "(property\n\t\"Reference\"\n\t\"SW1\"\n\t(at 0 -1.5 0)\n\t(layer \"F.SilkS\")\n\t(uuid \"d9d4c551-9661-4118-aec9-95aff41ef3a3\")\n\t(effects\n\t\t(font\n\t\t\t(size 1 1)\n\t\t\t(thickness 0.15)\n\t\t)\n\t)\n)"
+      "(property\n\t\"Reference\"\n\t\"SW1\"\n\t(at 0 -3.75 0)\n\t(layer \"F.SilkS\")\n\t(uuid \"d9d4c551-9661-4118-aec9-95aff41ef3a3\")\n\t(effects\n\t\t(font\n\t\t\t(size 1 1)\n\t\t\t(thickness 0.15)\n\t\t)\n\t)\n)"
     ],
     "C7": [
       "(property\n\t\"Reference\"\n\t\"C7\"\n\t(at 3.53553 -3.53553 0)\n\t(layer \"F.SilkS\")\n\t(uuid \"7e3bbf20-54c8-4160-9542-65bd35777a7c\")\n\t(effects\n\t\t(font\n\t\t\t(size 1 1)\n\t\t\t(thickness 0.15)\n\t\t)\n\t)\n)",
@@ -1302,7 +1302,7 @@
       "(property\n\t\"KiLib_Generator\"\n\t\"SMD_2terminal_chip_molded\"\n\t(at 0 0 0)\n\t(layer \"F.SilkS\")\n\t(hide yes)\n\t(uuid \"ca8a254f-b46f-4647-b06b-fadd72159f18\")\n\t(effects\n\t\t(font\n\t\t\t(size 1 1)\n\t\t\t(thickness 0.15)\n\t\t)\n\t)\n)"
     ],
     "SW2": [
-      "(property\n\t\"Reference\"\n\t\"SW2\"\n\t(at 0 -1.5 0)\n\t(layer \"F.SilkS\")\n\t(uuid \"d04b516e-14c7-4828-a288-c5ac774c0828\")\n\t(effects\n\t\t(font\n\t\t\t(size 1 1)\n\t\t\t(thickness 0.15)\n\t\t)\n\t)\n)"
+      "(property\n\t\"Reference\"\n\t\"SW2\"\n\t(at 0 -3.75 0)\n\t(layer \"F.SilkS\")\n\t(uuid \"d04b516e-14c7-4828-a288-c5ac774c0828\")\n\t(effects\n\t\t(font\n\t\t\t(size 1 1)\n\t\t\t(thickness 0.15)\n\t\t)\n\t)\n)"
     ],
     "R14": [
       "(property\n\t\"Reference\"\n\t\"R14\"\n\t(at -4.24264 -4.24264 0)\n\t(layer \"F.SilkS\")\n\t(uuid \"61711316-bbbc-44ab-a7a1-99aaaff4cc84\")\n\t(effects\n\t\t(font\n\t\t\t(size 1 1)\n\t\t\t(thickness 0.15)\n\t\t)\n\t)\n)",
@@ -1324,7 +1324,7 @@
       "(property\n\t\"KiLib_Generator\"\n\t\"package/gullwing\"\n\t(at 0 0 0)\n\t(layer \"F.SilkS\")\n\t(hide yes)\n\t(uuid \"98443523-5404-4e70-8ee0-f1fdf7398660\")\n\t(effects\n\t\t(font\n\t\t\t(size 1 1)\n\t\t\t(thickness 0.15)\n\t\t)\n\t)\n)"
     ],
     "U1": [
-      "(property\n\t\"Reference\"\n\t\"U1\"\n\t(at -1.5 0 0)\n\t(layer \"F.SilkS\")\n\t(uuid \"c551fb1b-306b-4104-8ccb-75c09a66551b\")\n\t(effects\n\t\t(font\n\t\t\t(size 1 1)\n\t\t\t(thickness 0.15)\n\t\t)\n\t)\n)",
+      "(property\n\t\"Reference\"\n\t\"U1\"\n\t(at -7.4 0 0)\n\t(layer \"F.SilkS\")\n\t(uuid \"c551fb1b-306b-4104-8ccb-75c09a66551b\")\n\t(effects\n\t\t(font\n\t\t\t(size 1 1)\n\t\t\t(thickness 0.15)\n\t\t)\n\t)\n)",
       "(property\n\t\"KiLib_Generator\"\n\t\"package/gullwing\"\n\t(at 0 0 0)\n\t(layer \"F.SilkS\")\n\t(hide yes)\n\t(uuid \"a23d192b-284f-4497-b7cd-334ea716d0fa\")\n\t(effects\n\t\t(font\n\t\t\t(size 1 1)\n\t\t\t(thickness 0.15)\n\t\t)\n\t)\n)"
     ],
     "C3": [
@@ -1348,7 +1348,7 @@
       "(property\n\t\"KiLib_Generator\"\n\t\"SMD_2terminal_chip_molded\"\n\t(at 0 0 0)\n\t(layer \"F.SilkS\")\n\t(hide yes)\n\t(uuid \"e1f6a6d2-955b-446e-9f1f-f78a3c9785bc\")\n\t(effects\n\t\t(font\n\t\t\t(size 1 1)\n\t\t\t(thickness 0.15)\n\t\t)\n\t)\n)"
     ],
     "SW4": [
-      "(property\n\t\"Reference\"\n\t\"SW4\"\n\t(at 0 -1.5 0)\n\t(layer \"F.SilkS\")\n\t(uuid \"e790d169-8a3b-4a3e-a76e-cfcda9c11741\")\n\t(effects\n\t\t(font\n\t\t\t(size 1 1)\n\t\t\t(thickness 0.15)\n\t\t)\n\t)\n)"
+      "(property\n\t\"Reference\"\n\t\"SW4\"\n\t(at 0 -3.75 0)\n\t(layer \"F.SilkS\")\n\t(uuid \"e790d169-8a3b-4a3e-a76e-cfcda9c11741\")\n\t(effects\n\t\t(font\n\t\t\t(size 1 1)\n\t\t\t(thickness 0.15)\n\t\t)\n\t)\n)"
     ],
     "Y1": [
       "(property\n\t\"Reference\"\n\t\"Y1\"\n\t(at 0 5 0)\n\t(layer \"F.SilkS\")\n\t(uuid \"cb339852-cad3-4c28-a009-1d8b82b607bc\")\n\t(effects\n\t\t(font\n\t\t\t(size 1 1)\n\t\t\t(thickness 0.15)\n\t\t)\n\t)\n)",

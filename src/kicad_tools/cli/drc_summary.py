@@ -141,7 +141,13 @@ SEVERITY_RULES: list[SeverityRule] = [
 
 
 def get_severity(violation: DRCViolation) -> IssueSeverity:
-    """Determine severity level for a violation."""
+    """Determine the *display* severity level for a violation from its type.
+
+    This is the type table only.  :func:`create_summary` additionally promotes
+    every entry kicad-cli itself reported at error severity (the report's
+    :meth:`~kicad_tools.drc.DRCReport.blocking_items`) to BLOCKING, whatever
+    this table says (Issue #7188).
+    """
     for rule in SEVERITY_RULES:
         if violation.type in rule.violation_types:
             return rule.severity
@@ -448,11 +454,20 @@ def create_summary(
 
     When manufacturer_id is specified, violations that pass manufacturer limits
     are reclassified as FAB_ACCEPTABLE instead of their default severity.
+
+    Issue #7188: an entry kicad-cli reported at **error** severity (one of
+    ``report.blocking_items()``) is BLOCKING regardless of the
+    :data:`SEVERITY_RULES` type table -- the table only classifies
+    warning-severity entries (and types it knows).  KiCad JSON opens live in
+    ``report.unconnected_items`` (#4498) and are summarised alongside the
+    geometric violations.
     """
+    entries = [*report.violations, *report.unconnected_items]
+    blocking_ids = {id(v) for v in report.blocking_items()}
     summary = DRCSummary(
         pcb_name=report.pcb_name,
         source_file=report.source_file,
-        total_violations=report.violation_count,
+        total_violations=len(entries),
         manufacturer=manufacturer_id,
         schematic_parity=report.schematic_parity_status,
     )
@@ -463,8 +478,10 @@ def create_summary(
         profile = get_profile(manufacturer_id)
         rules = profile.get_design_rules(layers)
 
-    for violation in report.violations:
+    for violation in entries:
         severity = get_severity(violation)
+        if id(violation) in blocking_ids:
+            severity = IssueSeverity.BLOCKING
 
         # Track unconnected items by net
         if violation.type == ViolationType.UNCONNECTED_ITEMS:
@@ -518,6 +535,8 @@ def output_table(summary: DRCSummary, blocking_only: bool = False) -> None:
     else:
         for type_str, count in summary.blocking_by_type.most_common():
             print(f"  X {count} {type_str}")
+        if "unconnected_items" in summary.blocking_by_type:
+            _print_unconnected_nets(summary)
 
     if blocking_only:
         _print_parity_line(summary)
@@ -542,10 +561,8 @@ def output_table(summary: DRCSummary, blocking_only: bool = False) -> None:
             print(f"  ! {count} {type_str}")
 
         # Show unconnected items breakdown
-        if summary.unconnected_by_net:
-            top_nets = summary.unconnected_by_net.most_common(5)
-            net_summary = ", ".join(f"{net}: {count}" for net, count in top_nets)
-            print(f"      {net_summary}")
+        if "unconnected_items" in summary.warning_by_type:
+            _print_unconnected_nets(summary)
 
     # COSMETIC section
     if summary.cosmetic_count > 0:
@@ -565,6 +582,14 @@ def output_table(summary: DRCSummary, blocking_only: bool = False) -> None:
     _print_parity_line(summary)
     print(f"\n{'=' * 60}")
     print(f"VERDICT: {summary.verdict}")
+
+
+def _print_unconnected_nets(summary: DRCSummary) -> None:
+    """Top-5 nets with unconnected items, under the section that lists them."""
+    if summary.unconnected_by_net:
+        top_nets = summary.unconnected_by_net.most_common(5)
+        net_summary = ", ".join(f"{net}: {count}" for net, count in top_nets)
+        print(f"      {net_summary}")
 
 
 def _print_parity_line(summary: DRCSummary) -> None:

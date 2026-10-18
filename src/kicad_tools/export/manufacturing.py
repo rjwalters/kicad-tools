@@ -127,6 +127,19 @@ class ManufacturingResult:
         """Check if generation was successful (no errors)."""
         return len(self.errors) == 0
 
+    def bundle_relpath(self, path: Path) -> str:
+        """Return ``path`` relative to the bundle root, for display.
+
+        The Gerber archive lives at ``gerbers/gerbers.zip``; printing only
+        ``path.name`` told the reader to look for a top-level
+        ``gerbers.zip`` that does not exist (issue #7153).  Falls back to
+        the bare file name for a path outside :attr:`output_dir`.
+        """
+        try:
+            return Path(path).resolve().relative_to(Path(self.output_dir).resolve()).as_posix()
+        except ValueError:
+            return Path(path).name
+
     @property
     def all_files(self) -> list[Path]:
         """Return list of all generated files."""
@@ -161,7 +174,7 @@ class ManufacturingResult:
             if self.assembly_result.pnp_path:
                 lines.append(f"  CPL: {self.assembly_result.pnp_path.name}")
             if self.assembly_result.gerber_path:
-                lines.append(f"  Gerbers: {self.assembly_result.gerber_path.name}")
+                lines.append(f"  Gerbers: {self.bundle_relpath(self.assembly_result.gerber_path)}")
         if self.report_path:
             lines.append(f"  Report: {self.report_path.name}")
         if self.image_paths:
@@ -810,7 +823,7 @@ class ManufacturingPackage:
             # separate collection that ``report.errors`` never contains, so
             # read them through the connectivity accessor (issue #7091).
             # Only error-severity (non-waived) items block.
-            opens = [v for v in report.connectivity_items() if v.is_error]
+            opens = report.connectivity_errors()
         except Exception as e:
             # If we can't read the report, don't block -- prefer a
             # false-negative over breaking boards that never ran DRC.
@@ -1622,7 +1635,10 @@ class ManufacturingPackage:
             ),
             "gerber": (
                 "Gerber files",
-                "PCB fabrication data (copper layers, silkscreen, solder mask, drill)",
+                (
+                    "PCB fabrication data (copper layers, silkscreen, solder mask,"
+                    " solder paste (stencil) where the preset plots it, drill)"
+                ),
             ),
             "report": ("Design report", "Manufacturing readiness report with DRC/ERC results"),
             "images": (
@@ -1657,7 +1673,7 @@ class ManufacturingPackage:
                 lines.append("")
             if result.assembly_result.gerber_path:
                 desc = file_descriptions["gerber"]
-                lines.append(f"  {result.assembly_result.gerber_path.name}")
+                lines.append(f"  {result.bundle_relpath(result.assembly_result.gerber_path)}")
                 lines.append(f"    {desc[0]}: {desc[1]}")
                 lines.append("")
 

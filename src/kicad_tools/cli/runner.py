@@ -636,7 +636,9 @@ def run_drc(
             run_pcb,
             output_path,
             format=format,
-            schematic_parity=schematic_parity and not staging_failed,
+            # Issue #7237: with no schematic there is nothing to compare; a
+            # silent kicad-cli would otherwise read as parity PASSED.
+            schematic_parity=schematic_parity and not staging_failed and parity_sch is not None,
             kicad_cli=kicad_cli,
             all_track_errors=all_track_errors,
             refill_zones=refill_zones,
@@ -645,7 +647,8 @@ def run_drc(
         from kicad_tools.drc.parity import parity_reason_netlist_failed
 
         result.parity_schematic = parity_sch
-        if staging_failed:
+        if staging_failed or parity_sch is None:
+            # Never ran parity (no/ambiguous schematic, or staging failed).
             result.parity_skipped = True
             result.parity_skip_reason = no_sch_reason
         elif result.parity_skipped:

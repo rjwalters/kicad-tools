@@ -57,7 +57,7 @@ class TestManufacturerPreset:
         preset = JLCPCB_PRESET
         assert preset.name == "JLCPCB"
         assert preset.config.use_protel_extensions is True
-        assert preset.config.include_solderpaste is False
+        assert preset.config.include_solderpaste is True
 
     def test_pcbway_preset(self):
         preset = PCBWAY_PRESET

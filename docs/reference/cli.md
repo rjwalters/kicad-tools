@@ -554,7 +554,7 @@ kct mfr <subcommand> [options]
 | `rules` | Show manufacturer design rules |
 | `compare` | Compare all manufacturers side by side |
 | `apply-rules` | Apply manufacturer design rules to project/PCB |
-| `validate` | Validate PCB against manufacturer rules |
+| `validate` | Validate PCB against manufacturer rules with the kct DRC engine (no kicad-cli; `kct drc --mfr` is the kicad-cli path) |
 | `export-dru` | Export manufacturer rules as a KiCad DRU file |
 | `import-dru` | Parse and display a KiCad design rules file |
 

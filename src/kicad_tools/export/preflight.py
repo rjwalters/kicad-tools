@@ -1646,12 +1646,18 @@ class PreflightChecker:
                     ),
                 )
 
+            # Issue #7153: a kct-check report records the manufacturer/tier
+            # whose rules produced it.  A report built for other rules (a
+            # board's ``jlcpcb-tier1`` report read by a ``--mfr jlcpcb``
+            # run) is not evidence for this run's rule set.
+            mfr_mismatch = self._drc_report_manufacturer_mismatch(report)
+
             error_count = report.error_count
             warning_count = report.warning_count
             # Issue #7091: since #4498 KiCad's ``unconnected_items`` (opens)
             # live outside ``violations``/``error_count``; count the
             # error-severity ones explicitly so an unrouted board FAILs.
-            open_errors = [v for v in report.connectivity_items() if v.is_error]
+            open_errors = report.connectivity_errors()
 
             if error_count > 0 or open_errors:
                 errors = report.errors
@@ -1666,11 +1672,23 @@ class PreflightChecker:
                     shown = [*errors[:3], *open_errors[:3]]
                 else:
                     shown = [*errors, *open_errors][:5]
+                details = "; ".join(_describe_drc_finding(v) for v in shown)
+                if mfr_mismatch is not None:
+                    details = f"{details}; {mfr_mismatch[0]}" if details else mfr_mismatch[0]
                 return PreflightResult(
                     name="drc",
                     status="FAIL",
                     message=message,
-                    details="; ".join(_describe_drc_finding(v) for v in shown),
+                    details=details,
+                )
+
+            if mfr_mismatch is not None:
+                message, details = mfr_mismatch
+                return PreflightResult(
+                    name="drc",
+                    status="FAIL" if self.config.strict_report_source else "WARN",
+                    message=message,
+                    details=details,
                 )
 
             if warning_count > 0:
@@ -1691,6 +1709,39 @@ class PreflightChecker:
                 status="WARN",
                 message=f"Could not parse DRC report: {e}",
             )
+
+    def _drc_report_manufacturer_mismatch(self, report) -> tuple[str, str] | None:
+        """Return ``(message, details)`` when the DRC report's rules differ.
+
+        Compares the report's recorded manufacturer with this run's, both
+        resolved to canonical ids.  Capability tiers are NOT folded into
+        their fab family: ``jlcpcb-tier1`` and ``jlcpcb`` check different
+        rules, so a tier difference is a mismatch (issue #7153).  Reports
+        without a recorded manufacturer (kicad-cli) are never a mismatch.
+        """
+        report_mfr = getattr(report, "manufacturer", None)
+        if not report_mfr:
+            return None
+        from ..manufacturers import canonical_manufacturer_id
+
+        report_id = canonical_manufacturer_id(report_mfr)
+        run_id = canonical_manufacturer_id(self.manufacturer)
+        if report_id == run_id:
+            return None
+
+        message = f"DRC report was generated for {report_id}, not {run_id}"
+        parts = [f"its 0-error verdict was computed against {report_id} rules"]
+        overrides = getattr(report, "fabrication_overrides", None)
+        if overrides:
+            option = overrides.get("paid_factory_option")
+            note = "it also applied a board fabrication_overrides block"
+            if option:
+                note += f" ({option})"
+            parts.append(note)
+        parts.append(
+            f"re-run DRC with --mfr {run_id}, or export with --mfr {report_id} to match the report"
+        )
+        return message, "; ".join(parts)
 
     def _check_erc(self) -> PreflightResult:
         """Check ERC status from a pre-existing report file."""

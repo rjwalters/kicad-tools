@@ -1900,11 +1900,9 @@ def main(argv: list[str] | None = None) -> int:
         print(_line, file=sys.stderr)
 
     # Auto-detect layer count from PCB if not explicitly provided
-    if args.layers is not None:
-        layers = args.layers
-    else:
-        detected = len(pcb.copper_layers)
-        layers = detected if detected > 0 else 2
+    from .mfr import resolve_layer_count
+
+    layers = resolve_layer_count(pcb, args.layers)
 
     # Load optional net-class-map sidecar (Issue #2684).  When supplied,
     # the diff-pair routing-continuity and length-skew rules can re-derive

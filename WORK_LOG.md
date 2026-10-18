@@ -15,6 +15,22 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-18
 
+- **PR #7154**: fix: seed creepage detour from both shapes and bridge sub-X cutouts
+- **PR #7157**: feat(validate): compare component values in validate --sync; fix board 04 J1 value
+- **Issue #7058** (closed): kct creepage overstates creepage around a slot: the detour is computed between the straight-line nearest points, and narrow gaps are not bridged
+- **PR #7191**: fix(drc): one blocking-findings definition across DRC entry points
+- **PR #7244**: docs: fix six unreleased changelog upgrade fragments
+- **Issue #7188** (closed): One DRC blocking-verdict helper: kicad-drc-summary, kct mfr validate and Project.check_drc() pass boards kicad-cli fails
+- **Issue #7240** (closed): Release notes: fix 6 upgrade-fragment defects (7077 vs 7170 --mfr contradiction; missing 7198/7206 upgrade notes; 7209/7213/7230 inaccuracies)
+- **Issue #7150** (closed): board 04 J1 value SWD-6 vs SWD (schematic vs PCB) + kct validate --sync should flag value mismatches (#7147 Part B)
+- **PR #7232**: feat(check): thermal_asymmetry and via_at_pad_edge warnings; detect-mistakes reuses them (#7220)
+- **PR #7221**: fix(validate): resolve board 05 phase paths and flag zone-only ampacity nets
+- **PR #7231**: refactor(geometry): shared point_in_polygon; footprint_outside_board accepts boundary origins (PR1 of #7224)
+- **PR #7229**: fix(export): fail 008004 chips and judge LFCSP by pin pitch in assembly preflight
+- **PR #7217**: feat(export): fail preflight when stackup copper differs from the fab order
+- **Issue #7210** (closed): ampacity: path_ampacity can't resolve board 05 phase paths; zone-only nets read 'checked' vacuously (#7206 follow-ups)
+- **Issue #7227** (closed): assembly-tier preflight gaps: 008004 chips pass silently; LFCSP judged as BGA; report vs preflight bottom-side count (#7226 follow-up)
+- **Issue #7209** (closed): board 05 ampacity relies on 1 oz inner copper the fab order never requests (JLCPCB default 0.5 oz → 1186 inner segments under-width)
 - **PR #7215**: ci: print skip and xfail reasons in the pytest short summary
 - **PR #7218**: fix(pcb): keep Library:Footprint lib ID in PCB.add_footprint
 - **PR #7234**: fix(drc,validate,check): view filters never change a verdict (Part A of #7230)

@@ -39,7 +39,11 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, NamedTuple
 
 from kicad_tools._shapely import has_shapely, require_shapely
-from kicad_tools.creepage.standards import DEFAULT_INSULATION
+from kicad_tools.creepage.standards import (
+    DEFAULT_DIMENSION_X_MM,
+    DEFAULT_INSULATION,
+    dimension_x_mm,
+)
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from kicad_tools.creepage.standards import CreepageStandard
@@ -54,6 +58,7 @@ BOARD_EDGE_LABEL = "<board edge>"
 # IEEE-754 noise for the coordinate space we operate in.
 _EPS = 1e-9
 _INTERIOR_SHRINK = 1e-6  # shrink a slot before the "crosses interior" test
+_BRIDGE_QUAD_SEGS = 16  # arc resolution of the dimension-X opening (round joins)
 # A pair is a PASS when creepage >= min within this tolerance (mm).  Mirrors
 # the spirit of DRC_TOLERANCE -- a sub-micron shortfall is not a real defect.
 _PASS_TOLERANCE = 1e-4
@@ -408,6 +413,8 @@ class CreepageReport:
     working_voltage: float | None = None
     pollution_degree: int | None = None
     material_group: str | None = None
+    # Dimension X (mm) used to bridge narrow cutouts (#7058).
+    dimension_x_mm: float | None = None
     required_creepage_mm: float | None = None
     required_clearance_mm: float | None = None
     creepage_provenance: dict[str, Any] = field(default_factory=dict)
@@ -490,6 +497,7 @@ class CreepageReport:
             "working_voltage_v": self.working_voltage,
             "pollution_degree": self.pollution_degree,
             "material_group": self.material_group,
+            "dimension_x_mm": self.dimension_x_mm,
             "insulation": self.insulation,
             "required_creepage_mm": (
                 round(self.required_creepage_mm, 4)
@@ -866,41 +874,256 @@ def _crosses_any_obstacle(line: Any, obstacles: list[Any]) -> bool:
     return False
 
 
-def _shortest_detour(
-    pa: tuple[float, float], pb: tuple[float, float], obstacles: list[Any]
-) -> float:
-    """Shortest visibility-graph path from ``pa`` to ``pb`` around obstacles.
+def _flatten_polygons(geoms: list[Any]) -> list[Any]:
+    """Explode multi-part geometries into their non-empty ``Polygon`` parts."""
+    out: list[Any] = []
+    for g in geoms:
+        if g is None or g.is_empty:
+            continue
+        if hasattr(g, "geoms"):
+            out.extend(_flatten_polygons(list(g.geoms)))
+        elif g.geom_type == "Polygon":
+            out.append(g)
+    return out
 
-    Nodes are the two endpoints plus every obstacle-polygon exterior vertex.
-    An edge between two nodes is admissible when the connecting segment does
-    not pass through the interior of any obstacle (segments that merely run
-    along a slot boundary are allowed -- that is the surface path hugging the
-    milled edge).  Returns the Euclidean length of the shortest admissible
-    path, or the straight-line distance if no path is found (defensive).
+
+def _bridge_narrow_cutouts(obstacles: list[Any], dimension_x_mm: float) -> list[Any]:
+    """Drop cutout parts narrower than ``dimension_x_mm`` (IEC 60664-1 dim. X).
+
+    A groove narrower than X is not followed by the creepage path; it is
+    measured straight across.  The morphological opening by a disc of diameter
+    X (round-joined erosion then dilation by X/2) keeps only the material in
+    which an X-diameter disc fits, so every narrow part -- stubs, tapers,
+    wedges, necks -- is dropped and the creepage path crosses it.  The small
+    ``eps`` keeps a slot exactly X wide counted as a groove (not bridged).
+
+    Round joins are deliberate: a mitre join would regrow sharp corners from
+    the eroded vertices and keep material where no X-disc fits, overstating
+    creepage.  The cost is that slot corners sharper than radius X/2 are
+    rounded, which can only shorten the measured path (understating creepage
+    is the conservative direction).  Clipping back to the source obstacle keeps
+    the opening anti-extensive, so it can only remove parts, never grow a slot.
+    """
+    if dimension_x_mm <= 0.0 or not obstacles:
+        return list(obstacles)
+
+    r = dimension_x_mm / 2.0 - 1e-4
+    opened = [
+        obs.buffer(-r, quad_segs=_BRIDGE_QUAD_SEGS)
+        .buffer(r, quad_segs=_BRIDGE_QUAD_SEGS)
+        .intersection(obs)
+        for obs in obstacles
+    ]
+    return _flatten_polygons(opened)
+
+
+def _boundary_segments(geom: Any) -> Any:
+    """Every boundary segment of ``geom`` as an ``(S, 2, 2)`` float array.
+
+    Walks multi-part geometries and collections; a polygon contributes its
+    exterior and hole rings, a line its own segments, and a point one
+    zero-length segment (so it still acts as a candidate endpoint).
+    """
+    import numpy as np
+
+    rings: list[Any] = []
+
+    def _walk(g: Any) -> None:
+        if g is None or g.is_empty:
+            return
+        gt = g.geom_type
+        if gt == "Polygon":
+            rings.append(np.asarray(g.exterior.coords, dtype=float)[:, :2])
+            for hole in g.interiors:
+                rings.append(np.asarray(hole.coords, dtype=float)[:, :2])
+        elif gt in ("LineString", "LinearRing"):
+            rings.append(np.asarray(g.coords, dtype=float)[:, :2])
+        elif gt == "Point":
+            pt = np.asarray(g.coords, dtype=float)[:, :2]
+            rings.append(np.vstack([pt, pt]))
+        elif hasattr(g, "geoms"):
+            for part in g.geoms:
+                _walk(part)
+
+    _walk(geom)
+    segs = [np.stack([r[:-1], r[1:]], axis=1) for r in rings if len(r) >= 2]
+    if not segs:
+        return np.zeros((0, 2, 2), dtype=float)
+    return np.concatenate(segs, axis=0)
+
+
+def _feet_on_segments(points: Any, segs: Any) -> Any:
+    """Closest point on each segment for each point: ``(P, S, 2)`` array."""
+    import numpy as np
+
+    a = segs[None, :, 0, :]
+    ab = segs[None, :, 1, :] - a
+    ap = points[:, None, :] - a
+    len2 = (ab * ab).sum(-1)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        t = np.where(len2 > 0.0, (ap * ab).sum(-1) / np.where(len2 > 0.0, len2, 1.0), 0.0)
+    t = np.clip(t, 0.0, 1.0)
+    return a + t[..., None] * ab
+
+
+def _obstacle_interiors(obstacles: list[Any]) -> list[Any]:
+    """Slightly shrunk obstacle interiors used by the admissibility test."""
+    out = []
+    for obs in obstacles:
+        interior = obs.buffer(-_INTERIOR_SHRINK)
+        if not interior.is_empty:
+            out.append(interior)
+    return out
+
+
+def _first_admissible(
+    lengths: Any, starts: Any, ends: Any, interiors: list[Any], bound: float
+) -> float:
+    """Shortest candidate segment (``< bound``) not crossing any obstacle interior.
+
+    Candidates are tested in ascending length order, in vectorised batches, so
+    the typical case (the shortest candidate is visible) costs one batch.
+    Returns ``inf`` when no candidate under ``bound`` is admissible.
+    """
+    import numpy as np
+    import shapely  # type: ignore[import-untyped]
+
+    keep = np.nonzero(lengths < bound)[0]
+    if keep.size == 0:
+        return math.inf
+    order = keep[np.argsort(lengths[keep], kind="stable")]
+    if not interiors:
+        return float(lengths[order[0]])
+    for interior in interiors:
+        shapely.prepare(interior)  # in-place and idempotent; speeds the intersects
+    # Small first batch keeps the common "shortest candidate is visible" case
+    # cheap; the batch then grows so a fully occluded pair (slot past both
+    # copper ends) stays linear in the candidate count.  The interiors are
+    # already shrunk by _INTERIOR_SHRINK, so a line running along a slot
+    # boundary does not intersect them and a plain predicate is enough.
+    lo, batch = 0, 64
+    while lo < order.size:
+        idx = order[lo : lo + batch]
+        lo += batch
+        batch = min(batch * 8, 65536)
+        lines = shapely.linestrings(np.stack([starts[idx], ends[idx]], axis=1))
+        ok = np.ones(idx.size, dtype=bool)
+        for interior in interiors:
+            ok &= ~shapely.intersects(lines, interior)
+        if ok.any():
+            return float(lengths[idx[int(np.argmax(ok))]])
+    return math.inf
+
+
+def _seed_length(
+    geom: Any,
+    segs: Any,
+    node: tuple[float, float],
+    interiors: list[Any],
+) -> float:
+    """Shortest admissible straight segment from ``geom`` to ``node`` (inf if none).
+
+    Exact for polygonal shapes: the candidates are the perpendicular foot of
+    ``node`` on *every* boundary segment of every part of ``geom`` plus every
+    vertex.  The minimum over the visible part of a segment is attained at the
+    foot, a segment end, or where the sight line grazes an obstacle vertex --
+    and that last case is the path through that obstacle-vertex graph node, so
+    the search loses nothing by skipping it (#7058 review).
+    """
+    import numpy as np
+    from shapely.geometry import Point
+
+    if geom.distance(Point(node)) <= 0.0:
+        return 0.0
+    p = np.asarray([node], dtype=float)
+    if segs.shape[0] == 0:
+        return math.inf
+    feet = _feet_on_segments(p, segs)[0]
+    starts = np.concatenate([feet, segs[:, 0, :], segs[:, 1, :]], axis=0)
+    lengths = np.hypot(starts[:, 0] - node[0], starts[:, 1] - node[1])
+    ends = np.broadcast_to(p, starts.shape)
+    return _first_admissible(lengths, starts, ends, interiors, math.inf)
+
+
+def _best_direct_hop(
+    segs_a: Any, segs_b: Any, interiors: list[Any], bound: float = math.inf
+) -> float:
+    """Shortest admissible straight segment from shape A to shape B (``< bound``).
+
+    Candidates are every vertex of A dropped onto every segment of B (its
+    perpendicular foot, clamped to the segment) and vice versa; segment-to-
+    segment distance is always attained at such a vertex/foot pair.
+    """
+    import numpy as np
+
+    best = bound
+    for src, dst in ((segs_a, segs_b), (segs_b, segs_a)):
+        if src.shape[0] == 0 or dst.shape[0] == 0:
+            continue
+        verts = np.unique(src.reshape(-1, 2), axis=0)
+        chunk = max(1, 200_000 // dst.shape[0])
+        for lo in range(0, verts.shape[0], chunk):
+            vs = verts[lo : lo + chunk]
+            feet = _feet_on_segments(vs, dst)  # (P, S, 2)
+            starts = np.broadcast_to(vs[:, None, :], feet.shape).reshape(-1, 2)
+            ends = feet.reshape(-1, 2)
+            lengths = np.hypot(ends[:, 0] - starts[:, 0], ends[:, 1] - starts[:, 1])
+            d = _first_admissible(lengths, starts, ends, interiors, best)
+            if d < best:
+                best = d
+    return best
+
+
+def _shortest_detour(geom_a: Any, geom_b: Any, obstacles: list[Any]) -> float:
+    """Shortest visibility-graph path from ``geom_a`` to ``geom_b`` around obstacles.
+
+    Nodes are a super-source (``geom_a``), a super-sink (``geom_b``) and every
+    obstacle-polygon exterior vertex.  Source/sink edges use the shortest
+    admissible segment from the whole shape -- any point of any part, not one
+    fixed nearest-point pair or only its vertices -- so the path may leave and
+    enter each shape wherever is shortest.  The direct source -> sink edge
+    likewise considers every vertex-to-edge foot of both shapes.  An edge
+    between two nodes is admissible when the connecting segment does not pass
+    through the interior of any obstacle (segments that merely run along a
+    slot boundary are allowed -- that is the surface path hugging the milled
+    edge).  Returns ``inf`` when no path is found.
     """
     from shapely.geometry import LineString
 
-    nodes: list[tuple[float, float]] = [pa, pb]
+    obstacles = _flatten_polygons(obstacles)
+    interiors = _obstacle_interiors(obstacles)
+    verts: list[tuple[float, float]] = []
     for obs in obstacles:
         for x, y in list(obs.exterior.coords)[:-1]:
-            nodes.append((x, y))
+            verts.append((x, y))
 
-    n = len(nodes)
+    segs_a = _boundary_segments(geom_a)
+    segs_b = _boundary_segments(geom_b)
 
-    def _admissible(i: int, j: int) -> bool:
-        seg = LineString([nodes[i], nodes[j]])
-        return not _crosses_any_obstacle(seg, obstacles)
+    n = len(verts) + 2  # node 0 = source, node 1 = sink
+    adj: list[list[tuple[int, float]]] = [[] for _ in range(n)]
+
+    def _add(i: int, j: int, w: float) -> None:
+        adj[i].append((j, w))
+        adj[j].append((i, w))
 
     # Dense O(n^2) adjacency -- n is tiny (a handful of slot corners).
-    adj: list[list[tuple[int, float]]] = [[] for _ in range(n)]
-    for i in range(n):
-        for j in range(i + 1, n):
-            if _admissible(i, j):
-                w = math.dist(nodes[i], nodes[j])
-                adj[i].append((j, w))
-                adj[j].append((i, w))
+    for i in range(len(verts)):
+        for j in range(i + 1, len(verts)):
+            seg = LineString([verts[i], verts[j]])
+            if not _crosses_any_obstacle(seg, obstacles):
+                _add(i + 2, j + 2, math.dist(verts[i], verts[j]))
+    for i, vert in enumerate(verts):
+        wa = _seed_length(geom_a, segs_a, vert, interiors)
+        if wa != math.inf:
+            _add(0, i + 2, wa)
+        wb = _seed_length(geom_b, segs_b, vert, interiors)
+        if wb != math.inf:
+            _add(1, i + 2, wb)
 
-    # Dijkstra from node 0 (pa) to node 1 (pb).
+    # Detour through the slot vertices first; the direct A -> B hop is the
+    # expensive search (it is quadratic when a slot occludes every straight
+    # line), so it only has to beat this bound.
     dist = [math.inf] * n
     dist[0] = 0.0
     pq: list[tuple[float, int]] = [(0.0, 0)]
@@ -909,22 +1132,22 @@ def _shortest_detour(
         if d > dist[u]:
             continue
         if u == 1:
-            return d
-        for v, w in adj[u]:
+            break
+        for nbr, w in adj[u]:
             nd = d + w
-            if nd < dist[v]:
-                dist[v] = nd
-                heapq.heappush(pq, (nd, v))
-
-    if dist[1] != math.inf:
-        return dist[1]
-    return math.dist(pa, pb)
+            if nd < dist[nbr]:
+                dist[nbr] = nd
+                heapq.heappush(pq, (nd, nbr))
+    return min(dist[1], _best_direct_hop(segs_a, segs_b, interiors, dist[1]))
 
 
 def surface_path_length(
     geom_a: Any,
     geom_b: Any,
     obstacles: list[Any] | None = None,
+    *,
+    dimension_x_mm: float = DEFAULT_DIMENSION_X_MM,
+    _bridged: bool = False,
 ) -> tuple[float, float]:
     """Return ``(clearance, creepage)`` between two shapely geometries.
 
@@ -932,6 +1155,11 @@ def surface_path_length(
     ``creepage`` equals ``clearance`` when the straight nearest-points segment
     does not cross an interior Edge.Cuts cutout; otherwise it is the shortest
     path routing around the intervening slot polygon(s) (``> clearance``).
+
+    Cutout parts narrower than ``dimension_x_mm`` (IEC 60664-1 dimension X)
+    are bridged -- measured straight across -- before the search; pass ``0``
+    to disable.  The path may leave/enter each shape at any point, not just
+    the straight-line nearest pair (#7058).
 
     Overlapping / touching geometries (``clearance <= 0``) have no meaningful
     surface detour, so ``creepage == clearance`` there too.
@@ -941,18 +1169,20 @@ def surface_path_length(
     from shapely.ops import nearest_points
 
     obstacles = obstacles or []
+    if not _bridged:
+        obstacles = _bridge_narrow_cutouts(obstacles, dimension_x_mm)
     clearance = geom_a.distance(geom_b)
     if clearance <= 0.0 or not obstacles:
         return clearance, clearance
 
     pa_pt, pb_pt = nearest_points(geom_a, geom_b)
-    pa = (pa_pt.x, pa_pt.y)
-    pb = (pb_pt.x, pb_pt.y)
-    straight = LineString([pa, pb])
+    straight = LineString([(pa_pt.x, pa_pt.y), (pb_pt.x, pb_pt.y)])
     if not _crosses_any_obstacle(straight, obstacles):
         return clearance, clearance
 
-    creepage = _shortest_detour(pa, pb, obstacles)
+    creepage = _shortest_detour(geom_a, geom_b, obstacles)
+    if creepage == math.inf:
+        creepage = clearance  # defensive: no admissible path
     # The detour can never be shorter than the straight clearance.
     return clearance, max(creepage, clearance)
 
@@ -1160,7 +1390,10 @@ def compute_creepage_census(
         return report
 
     number_to_name = {net.number: net.name for net in pcb.nets.values()}
-    obstacles = board_slot_obstacles(pcb)
+    # Bridge sub-dimension-X cutouts once per census (#7058).
+    x_mm = dimension_x_mm(pollution_degree)
+    report.dimension_x_mm = x_mm
+    obstacles = _bridge_narrow_cutouts(board_slot_obstacles(pcb), x_mm)
 
     # Per-layer per-net copper unions.
     layer_unions: dict[str, dict[int, Any]] = {}
@@ -1195,7 +1428,9 @@ def compute_creepage_census(
                     # Canonical dedup: evaluate each HV-HV pair once.
                     if other_num < hv_num:
                         continue
-                clearance, creepage = surface_path_length(hv_geom, other_geom, obstacles)
+                clearance, creepage = surface_path_length(
+                    hv_geom, other_geom, obstacles, _bridged=True
+                )
                 key = (hv_num, other_num)
                 prev = best.get(key)
                 if prev is None or creepage < prev[1]:
@@ -1244,7 +1479,7 @@ def compute_creepage_census(
             if not parts:
                 continue
             hv_all = unary_union(parts)
-            clearance, creepage = surface_path_length(hv_all, edge_geom, obstacles)
+            clearance, creepage = surface_path_length(hv_all, edge_geom, obstacles, _bridged=True)
             if map_mode:
                 req_creep, req_clear, prov = _pair_requirement(hv_nets[hv_num], None, edge=True)
                 report.pairs.append(
