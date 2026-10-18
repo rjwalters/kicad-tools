@@ -45,11 +45,12 @@ def main() -> int:
     netclasses = _load("declare_router_netclasses_6390", HERE / "declare_router_netclasses_6390.py")
     netclasses.refill_zones_in_place(ROUTED)
     regen = _load("regenerate_boards_03_04_6076", HERE / "regenerate_boards_03_04_6076.py")
-    delta = regen.fill_consistency(ROUTED)
-    print(f"  saved vs independent refill: {delta}")
-    if any(value > 0.01 for value in delta.values()):
-        print("REFUSED: the native refill does not reproduce itself", file=sys.stderr)
+    try:
+        delta = regen.fill_consistency(ROUTED)
+    except RuntimeError as exc:
+        print(f"REFUSED: the native refill does not reproduce itself ({exc})", file=sys.stderr)
         return 1
+    print(f"  saved vs independent refill: {delta}")
     return _load("regenerate_board_04_6404", HERE / "regenerate_board_04_6404.py").main()
 
 

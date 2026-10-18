@@ -1467,3 +1467,55 @@ class TestDiscoverTierFromSpec:
 
         (tmp_path / "project.kct").write_text(": : not yaml [")
         assert _discover_tier(tmp_path, self._pcb(tmp_path)) is None
+
+
+# ---------------------------------------------------------------------------
+# Issue #7356: one saved-vs-refilled rule shared by every producer
+# ---------------------------------------------------------------------------
+
+_FILL_CASES = [
+    ("equal", {"F.Cu": 100.0}, {"F.Cu": 100.0}, False),
+    ("within", {"F.Cu": 100.0}, {"F.Cu": 100.005}, False),
+    ("exactly_at_tolerance", {"F.Cu": 100.0}, {"F.Cu": 100.01}, False),
+    ("over", {"F.Cu": 100.0}, {"F.Cu": 100.5}, True),
+    ("one_sided_refilled", {"F.Cu": 100.0}, {"F.Cu": 100.0, "B.Cu": 2.0}, True),
+    ("one_sided_saved", {"F.Cu": 100.0, "B.Cu": 2.0}, {"F.Cu": 100.0}, True),
+]
+
+
+@pytest.mark.parametrize(("name", "saved", "refilled", "diverges"), _FILL_CASES)
+def test_saved_vs_refilled_gives_the_gate_verdict(tmp_path, name, saved, refilled, diverges):
+    """The shared function and ``_gate_refill`` agree on every case."""
+    from kicad_tools.cli.readiness_cmd import saved_vs_refilled
+
+    board = make_board(tmp_path)
+    pcb = board / "output" / PCB_NAME
+    areas = iter([saved, refilled])
+    fake = FakeEngines(board)
+    fake.fill_areas = lambda _pcb: next(areas)  # type: ignore[method-assign]
+    result = saved_vs_refilled(pcb, 0.01, engines=fake)
+    assert result.diverges is diverges
+
+    fake2 = FakeEngines(board)
+    areas2 = iter([saved, refilled])
+    fake2.fill_areas = lambda _pcb: next(areas2)  # type: ignore[method-assign]
+    _code, report = run(board, fake2)
+    assert (check_status(report, "zone_fill") == "failed") is diverges
+
+
+def test_saved_vs_refilled_rejects_bad_tolerance_and_missing_refill(tmp_path):
+    from kicad_tools.cli.readiness_cmd import (
+        EngineRun,
+        FillRefillUnavailable,
+        saved_vs_refilled,
+    )
+
+    board = make_board(tmp_path)
+    pcb = board / "output" / PCB_NAME
+    fake = FakeEngines(board)
+    for bad in (-1.0, float("nan"), float("inf")):
+        with pytest.raises(ValueError):
+            saved_vs_refilled(pcb, bad, engines=fake)
+    fake.refill = lambda _pcb: EngineRun(ok=False, detail="no kicad-cli")  # type: ignore[method-assign]
+    with pytest.raises(FillRefillUnavailable, match="no kicad-cli"):
+        saved_vs_refilled(pcb, engines=fake)

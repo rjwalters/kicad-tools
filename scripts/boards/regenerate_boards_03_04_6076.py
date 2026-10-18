@@ -226,16 +226,10 @@ def native_erc_linux(output: Path, schematic: str, target: Path) -> None:
 
 
 def fill_consistency(pcb: Path) -> dict[str, float]:
-    from kicad_tools.cli.readiness_cmd import _copy_fill_context, _fill_areas, _refill_and_save
+    """Per-layer saved-vs-refilled deltas; raises if the saved fill diverges (Issue #7356)."""
+    from kicad_tools.cli.readiness_cmd import require_saved_fill_matches_refill
 
-    with tempfile.TemporaryDirectory(prefix="regen-04-fill-") as tmp:
-        refilled = _copy_fill_context(pcb, Path(tmp))
-        result = _refill_and_save(refilled)
-        if not result.ok:
-            raise RuntimeError(f"refill failed: {result.detail}")
-        saved, fresh = _fill_areas(pcb), _fill_areas(refilled)
-    assert set(saved) == set(fresh), (saved, fresh)
-    return {layer: abs(saved[layer] - fresh[layer]) for layer in sorted(saved)}
+    return require_saved_fill_matches_refill(pcb).deltas
 
 
 def board04() -> None:
