@@ -366,12 +366,6 @@ The three states:
 
 **Forced-arm precedence.** The forced arm slots into the Builder model-resolution chain **above tier 3** but **below tier 1 / tier 2 operator pins**: an explicit dispatch param (tier 1) or a `roleConfig.model` workspace pin (tier 2) still wins — a pinned canary is intentionally opted out of the experiment. The forced arm only ever replaces what tier 3 would have resolved for the Builder.
 
-**Usage record (every mode, #9303).** Immediately after **each** `sweep-checkpoint.sh write` — `off` included (telemetry, not the experiment) — journal that subagent's per-model tokens + USD into the issue's story trace (always exits 0):
-
-```bash
-loom-daemon usage-record --issue N --role <role> --attempt <k> --agent-id <agent-id> --task-id "$RUN_ID" || true
-```
-
 **Durable stats store (`observe`/`experiment` only).** Also append one JSONL record per role phase to `.loom/stats/sweep-model-stats.jsonl` (gitignored; outlives the checkpoint):
 
 ```bash

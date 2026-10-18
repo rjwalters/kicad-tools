@@ -31,17 +31,16 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
+from kicad_tools.cli.sch_wire_common import (
+    _find_symbol_sexp,
+    _find_wires_at_point_indexed,
+)
 from kicad_tools.exceptions import FileNotFoundError as KiCadFileNotFoundError
 from kicad_tools.schema import LibraryManager, Schematic
-from kicad_tools.sexp import SExp
+from kicad_tools.schematic.grid import snap_to_grid
 
 GRID_STEP = 1.27  # mm - standard KiCad schematic grid
 POINT_TOLERANCE = 0.127  # mm - tolerance for endpoint matching (1/10 grid)
-
-
-def _snap(value: float, grid: float = GRID_STEP) -> float:
-    """Snap a coordinate to the nearest grid point."""
-    return round(value / grid) * grid
 
 
 @dataclass
@@ -54,51 +53,6 @@ class MoveComponentResult:
     properties_shifted: int = 0
     wires_adjusted: int = 0
     warnings: list[str] = field(default_factory=list)
-
-
-def _find_symbol_sexp(schematic: Schematic, reference: str) -> SExp | None:
-    """Find the top-level symbol S-expression node by reference designator."""
-    for sym_sexp in schematic.sexp.find_all("symbol"):
-        for prop in sym_sexp.find_all("property"):
-            prop_name = prop.get_string(0)
-            if prop_name == "Reference":
-                prop_value = prop.get_string(1)
-                if prop_value == reference:
-                    return sym_sexp
-    return None
-
-
-def _find_wires_at_point(
-    schematic: Schematic,
-    point: tuple[float, float],
-    tolerance: float = POINT_TOLERANCE,
-) -> list[tuple[SExp, int]]:
-    """Find all wire S-expression nodes with an endpoint at or near a point.
-
-    Returns list of (wire_sexp, endpoint_index) tuples where endpoint_index
-    is 0 for start or 1 for end.
-    """
-    target_x, target_y = point
-    matching: list[tuple[SExp, int]] = []
-
-    for wire_sexp in schematic.sexp.find_all("wire"):
-        pts_node = wire_sexp.find("pts")
-        if not pts_node:
-            continue
-
-        xy_nodes = pts_node.find_all("xy")
-        if len(xy_nodes) < 2:
-            continue
-
-        for idx, xy in enumerate(xy_nodes):
-            x = xy.get_float(0) or 0.0
-            y = xy.get_float(1) or 0.0
-
-            if abs(x - target_x) <= tolerance and abs(y - target_y) <= tolerance:
-                matching.append((wire_sexp, idx))
-                break  # Don't add same wire twice for both endpoints
-
-    return matching
 
 
 def move_component(
@@ -190,7 +144,7 @@ def move_component(
         ):
             continue
 
-        wire_hits = _find_wires_at_point(schematic, old_pin_pos)
+        wire_hits = _find_wires_at_point_indexed(schematic, old_pin_pos)
         for wire_sexp, endpoint_idx in wire_hits:
             wire_id = id(wire_sexp)
             if wire_id in adjusted_wire_ids:
@@ -258,7 +212,7 @@ def preview_move_component(
     wires_to_adjust = 0
     seen_wire_ids: set[int] = set()
     for pin_num, old_pin_pos in old_pin_positions.items():
-        wire_hits = _find_wires_at_point(schematic, old_pin_pos)
+        wire_hits = _find_wires_at_point_indexed(schematic, old_pin_pos)
         for wire_sexp, _ in wire_hits:
             wire_id = id(wire_sexp)
             if wire_id not in seen_wire_ids:
@@ -320,8 +274,8 @@ def run_move_component(args) -> int:
     lib_manager.load_embedded(sch)
 
     # Snap target to grid
-    new_x = _snap(args.to[0])
-    new_y = _snap(args.to[1])
+    new_x = snap_to_grid(args.to[0])
+    new_y = snap_to_grid(args.to[1])
     new_position = (new_x, new_y)
 
     # Check symbol exists

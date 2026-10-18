@@ -55,7 +55,7 @@ _DECLINES = [
     "pair-gateway-leg-pad-class",
 ]
 SEGMENT_LABELS = (
-    ["coupled", "deadline-exceeded", "not-attempted"]
+    ["coupled", "deadline-exceeded", "not-attempted", "hybrid:U4.B1", "hybrid:J1.A2"]
     + _DECLINES
     + [f"uncoupled-fallback:{r}" for r in _DECLINES]
 )
@@ -75,6 +75,9 @@ def test_segment_statuses() -> None:
         "uncoupled-fallback", "pair-no-path"
     )
     assert SegmentOutcome.from_label("deadline-exceeded").status == "deadline-exceeded"
+    # Issue #6446: a hybrid names its hard terminal and is not "coupled".
+    assert SegmentOutcome.from_label("hybrid:U4.B1") == SegmentOutcome.hybrid("U4.B1")
+    assert SegmentOutcome.hybrid("U4.B1").status == "hybrid"
     # A gateway name is carried but is not part of the label.
     assert SegmentOutcome.coupled("B.Cu gateway").label == "coupled"
 
@@ -86,6 +89,7 @@ def test_segment_statuses() -> None:
         lambda: SegmentOutcome("uncoupled-fallback"),
         lambda: SegmentOutcome("coupled", "pair-no-path"),
         lambda: SegmentOutcome("declined", "pair-no-path", gateway="g"),
+        lambda: SegmentOutcome("hybrid"),
     ],
 )
 def test_segment_outcome_rejects_inconsistent_fields(bad) -> None:
@@ -112,6 +116,8 @@ def _pair(*labels: str) -> PairOutcome:
         (("coupled", "pair-no-path", "coupled"), "partially-coupled:2/3"),
         (("uncoupled-fallback:x", "uncoupled-fallback:y"), "uncoupled-fallback:x"),
         (("uncoupled-fallback:x", "pair-no-parity"), "pair-no-parity"),
+        (("hybrid:U4.B1",), "hybrid:U4.B1"),
+        (("hybrid:U4.B1", "coupled"), "partially-coupled:1/2"),
     ],
 )
 def test_pair_label_matches_the_aggregate(labels: tuple[str, ...], expected: str) -> None:
@@ -221,3 +227,41 @@ def test_autorouter_keeps_a_pair_record_per_outcome_string() -> None:
     po = records["D"]
     assert po.label == "coupled" and po.coupled_segments == (1, 1)
     assert [span for span, _o in po.segments] == ["J1.1->U1.1"]
+
+
+# ---------------------------------------------------------------------------
+# Issue #6948: edge cases
+# ---------------------------------------------------------------------------
+
+
+def test_segment_outcomes_reject_a_none_default_clearly() -> None:
+    m = SegmentOutcomes()
+    with pytest.raises(TypeError, match="SegmentOutcome or an outcome label"):
+        m.setdefault("a")
+    assert "a" not in m
+    with pytest.raises(TypeError, match="SegmentOutcome or an outcome label"):
+        SegmentOutcomes.fromkeys(["a", "b"])
+    # A real default still works for both.
+    assert m.setdefault("a", "coupled") == "coupled"
+    assert SegmentOutcomes.fromkeys(["x"], "pair-no-path") == {"x": "pair-no-path"}
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "coupled",
+        "deadline-exceeded",
+        "not-attempted",
+        "uncoupled-fallback:pair-no-path",
+        "hybrid:U4.B1",
+    ],
+)
+def test_declined_reason_that_would_not_round_trip_is_rejected(reason: str) -> None:
+    with pytest.raises(ValueError, match="would read back as a different status"):
+        SegmentOutcome.declined(reason)
+
+
+@pytest.mark.parametrize("reason", _DECLINES)
+def test_real_declined_reasons_still_round_trip(reason: str) -> None:
+    rec = SegmentOutcome.declined(reason)
+    assert SegmentOutcome.from_label(rec.label) == rec

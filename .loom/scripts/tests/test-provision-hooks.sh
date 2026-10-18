@@ -871,53 +871,29 @@ deprovision_loom_hooks "$HOME26/.claude" >/dev/null 2>&1
 assert_eq "$(count_marker "$S26" "$UW")" "0" "deprovision removed both uncommitted-work entries"
 assert_eq "$(jq -r '.hooks.SubagentStop // "absent"' "$S26")" "absent" "deprovision leaves no empty SubagentStop array behind"
 
-# ── Test 27 (#11713): operator presence from config, opt-out, disable ────────
-echo "Test 27: operatorPresence.enabled wires/strips presence hooks; user settings survive"
+# ── Test 27 (#12121): retired operator presence wiring is stripped ───────────
+echo "Test 27: provision_operator_presence strips the retired presence-beat.sh wiring; user settings survive"
 H27=$(mktemp -d); mkdir -p "$H27/.claude"
-CFG27="$H27/defaults.json"
-printf '{"permissions":{"allow":["Bash(ls)"]},"env":{"KEEP":"1"},"hooks":{"Stop":[{"hooks":[{"type":"command","command":"echo mine"}]}]}}\n' > "$H27/.claude/settings.json"
 S27="$H27/.claude/settings.json"
-export LOOM_PRESENCE_OPTOUT_FILE="$H27/optout"
-unset LOOM_OPERATOR_PRESENCE
-# unset -> untouched
-printf '{}\n' > "$CFG27"
-LOOM_CONFIG_DEFAULTS_FILE="$CFG27" provision_operator_presence "$H27/.claude" >/dev/null 2>&1
-assert_eq "$(count_marker "$S27" presence-beat.sh)" "0" "key absent: presence not wired"
-# enabled -> wired on all three events, env set, other settings kept
-printf '{"operatorPresence":{"enabled":true}}\n' > "$CFG27"
-LOOM_CONFIG_DEFAULTS_FILE="$CFG27" provision_operator_presence "$H27/.claude" >/dev/null 2>&1
-assert_eq "$(count_marker "$S27" presence-beat.sh)" "3" "enabled: presence-beat.sh wired on 3 events"
-assert_eq "$(jq -r '.env.LOOM_OPERATOR_PRESENCE + "|" + .env.KEEP' "$S27")" "1|1" "enabled: env set, existing env kept"
-assert_eq "$(jq -r '.permissions.allow[0]' "$S27")" "Bash(ls)" "enabled: permissions kept"
-assert_eq "$(jq -r '[.hooks.Stop[].hooks[].command | select(. == "echo mine")] | length' "$S27")" "1" "enabled: user's own Stop hook kept"
-# idempotent
+PB27="bash -c 'H=\"\$HOME/.local/share/loom/defaults/hooks/presence-beat.sh\"; exec \"\$H\"'"
+jq -n --arg pb "$PB27" '{permissions:{allow:["Bash(ls)"]},env:{KEEP:"1",LOOM_OPERATOR_PRESENCE:"1"},
+  hooks:{Stop:[{hooks:[{type:"command",command:"echo mine"}]},{hooks:[{type:"command",command:$pb}]}],
+         UserPromptSubmit:[{hooks:[{type:"command",command:$pb}]}]}}' > "$S27"
+assert_eq "$(count_marker "$S27" presence-beat.sh)" "2" "fixture: two presence-beat.sh entries present"
+provision_operator_presence "$H27/.claude" >/dev/null 2>&1
+assert_eq "$(count_marker "$S27" presence-beat.sh)" "0" "presence-beat.sh entries stripped"
+assert_eq "$(jq -r '.env.LOOM_OPERATOR_PRESENCE // "absent"' "$S27")" "absent" "presence env=1 removed"
+assert_eq "$(jq -r '.env.KEEP' "$S27")" "1" "unrelated env kept"
+assert_eq "$(jq -r '.permissions.allow[0]' "$S27")" "Bash(ls)" "permissions kept"
+assert_eq "$(jq -r '[.hooks.Stop[].hooks[].command | select(. == "echo mine")] | length' "$S27")" "1" "user's own Stop hook kept"
+assert_eq "$(jq -r '.hooks.UserPromptSubmit // "absent"' "$S27")" "absent" "emptied event removed"
 cp "$S27" "$H27/before.json"
-LOOM_CONFIG_DEFAULTS_FILE="$CFG27" provision_operator_presence "$H27/.claude" >/dev/null 2>&1
-assert_eq "$(count_marker "$S27" presence-beat.sh)" "3" "re-run: still 3 entries"
+provision_operator_presence "$H27/.claude" >/dev/null 2>&1
 assert_eq "$(jq -S . "$S27")" "$(jq -S . "$H27/before.json")" "re-run: settings unchanged"
-# local opt-out beats fleet policy and strips
-touch "$H27/optout"
-LOOM_CONFIG_DEFAULTS_FILE="$CFG27" provision_operator_presence "$H27/.claude" >/dev/null 2>&1
-assert_eq "$(count_marker "$S27" presence-beat.sh)" "0" "opt-out file: presence stripped despite enabled=true"
-assert_eq "$(jq -r '.env.LOOM_OPERATOR_PRESENCE // "absent"' "$S27")" "absent" "opt-out: presence env removed"
-assert_eq "$(jq -r '.env.KEEP' "$S27")" "1" "opt-out: unrelated env kept"
-assert_eq "$(jq -r '[.hooks.Stop[].hooks[].command | select(. == "echo mine")] | length' "$S27")" "1" "opt-out: user's Stop hook kept"
-rm -f "$H27/optout"
-# enabled=false is the one-step disable
-LOOM_CONFIG_DEFAULTS_FILE="$CFG27" provision_operator_presence "$H27/.claude" >/dev/null 2>&1
-printf '{"operatorPresence":{"enabled":false}}\n' > "$CFG27"
-LOOM_CONFIG_DEFAULTS_FILE="$CFG27" provision_operator_presence "$H27/.claude" >/dev/null 2>&1
-assert_eq "$(count_marker "$S27" presence-beat.sh)" "0" "enabled=false: presence stripped"
-# inherited LOOM_OPERATOR_PRESENCE=1 (the installer's own settings.json env) must not defeat opt-out / enabled=false
-LOOM_OPERATOR_PRESENCE=1 LOOM_CONFIG_DEFAULTS_FILE="$CFG27" provision_operator_presence "$H27/.claude" >/dev/null 2>&1
-assert_eq "$(count_marker "$S27" presence-beat.sh)" "0" "inherited env=1: enabled=false still strips"
-printf '{}\n' > "$CFG27"; touch "$H27/optout"
-LOOM_OPERATOR_PRESENCE=1 LOOM_CONFIG_DEFAULTS_FILE="$CFG27" provision_operator_presence "$H27/.claude" >/dev/null 2>&1
-assert_eq "$(count_marker "$S27" presence-beat.sh)" "0" "inherited env=1: opt-out file still strips"
-rm -f "$H27/optout"
-LOOM_OPERATOR_PRESENCE=1 LOOM_CONFIG_DEFAULTS_FILE="$CFG27" provision_operator_presence "$H27/.claude" >/dev/null 2>&1
-assert_eq "$(count_marker "$S27" presence-beat.sh)" "3" "env=1 with no opt-out/disable: wired"
-unset LOOM_PRESENCE_OPTOUT_FILE
+# the opt-out value is the daemon's privacy switch and is never stripped
+jq '.env.LOOM_OPERATOR_PRESENCE = "0"' "$S27" > "$H27/optout.json" && mv "$H27/optout.json" "$S27"
+provision_operator_presence "$H27/.claude" >/dev/null 2>&1
+assert_eq "$(jq -r '.env.LOOM_OPERATOR_PRESENCE' "$S27")" "0" "env=0 opt-out kept"
 
 echo ""
 echo "======================================"

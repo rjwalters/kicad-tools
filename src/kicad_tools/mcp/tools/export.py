@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import dataclasses
 import logging
+import time
 import zipfile
 from pathlib import Path
 
@@ -95,6 +96,15 @@ def validate_assembly_bom(
         # Return as dict with success flag
         output = result.to_dict()
         output["success"] = True
+        # An empty (or all-DNP) BOM validated nothing; the library's
+        # vacuous ``assembly_ready=True`` must not reach the agent as a
+        # clean verdict (issue #6913).
+        if not result.items:
+            output["summary"]["assembly_ready"] = False
+            output["warnings"] = [
+                "No BOM items were validated (empty or all-DNP BOM); "
+                "assembly readiness could not be determined."
+            ]
         return output
 
     except ImportError as e:
@@ -189,6 +199,7 @@ def export_gerbers(
         config = dataclasses.replace(base, generate_drill=include_drill, create_zip=zip_output)
 
         # Export
+        export_started = time.time()
         result_path = exporter.export(config, out_dir)
 
         # Collect file information
@@ -196,7 +207,10 @@ def export_gerbers(
         out_dir.mkdir(parents=True, exist_ok=True)
 
         for file_path in out_dir.iterdir():
-            if file_path.is_file():
+            # Report only files this call produced, not stale leftovers from a
+            # previous export into the same directory (issue #6913).  The
+            # 2 s slack absorbs coarse filesystem mtime granularity.
+            if file_path.is_file() and file_path.stat().st_mtime >= export_started - 2:
                 # Determine layer from filename
                 layer = _extract_layer_from_filename(file_path.name)
                 file_type = _determine_file_type(file_path.name, layer)
@@ -222,6 +236,15 @@ def export_gerbers(
         # Count copper layers
         copper_layers = [f for f in files if f.file_type == "copper"]
         layer_count = len(copper_layers)
+
+        if layer_count == 0:
+            return GerberExportResult(
+                success=False,
+                output_dir=str(out_dir),
+                files=files,
+                error="Export produced no copper-layer Gerber files",
+                warnings=warnings,
+            )
 
         return GerberExportResult(
             success=True,
@@ -454,10 +477,11 @@ def export_assembly(
 
             copper_layers = [f for f in gerber_files if f.file_type == "copper"]
             gerbers_result = GerberExportResult(
-                success=True,
+                success=bool(copper_layers),
                 output_dir=str(gerber_dir),
                 files=gerber_files,
                 layer_count=len(copper_layers),
+                error=None if copper_layers else "Export produced no copper-layer Gerber files",
             )
 
         # Process BOM results

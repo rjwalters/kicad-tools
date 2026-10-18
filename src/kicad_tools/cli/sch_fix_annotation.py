@@ -59,7 +59,7 @@ from kicad_tools.cli.sch_repair_instances import (
     _insert_project_instance,
     _scan_symbol_children,
 )
-from kicad_tools.cli.sch_set_footprint import _collect_schematic_files
+from kicad_tools.cli.sch_wire_common import _collect_schematic_files
 
 # Whitespace token for regex: matches one or more tabs or spaces
 _WS = r"[ \t]+"

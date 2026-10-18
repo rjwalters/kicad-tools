@@ -6315,6 +6315,16 @@ says** (#10954): the loop is spawned on every host with a fleet store, and
   `floor_not_rolling`) is one of `unsatisfiable`, `no_release`,
   `unsupervised`, `backoff`, `terminal`, `roll_refused`; the human status
   prints `Below the fleet floor, NOT rolling (<reason>)`.
+- **Status shows the host's update state** (#12420, epic #10698): the
+  `Host update:` line (and `auto_update.host` in `status --json`) on every
+  `status`, whether or not the loop runs: `H0` current, `H1` settling, `H2`
+  fetching, `H3` staged, `H4` pausing, `H5` verifying, `H7` stalled, or
+  `unknown`, with the running and on-disk versions, the floor when set, and
+  the target with its source (`floor`, `repo-ahead`, `autoUpdate`, `none`).
+  There is no H6. An unreadable on-disk version is `unknown`, never the
+  running version. The `auto_update.tick` record carries `host_state` and
+  `target_source`. Read-only: it changes no target selection, pause/resume,
+  dispatch hold or resync, and starts no poll, timer or credential read.
 - **An unsupervised host fetches each target once** (#11042). With no
   launchd/systemd supervisor the pause-and-roll refuses to start (H7
   `unsupervised`). The release is installed by that first fetch, and later
@@ -8724,7 +8734,44 @@ flips spend. A read never goes to it, whatever its class or cause:
   running on the writer. The host with no reader pool at all is the one
   exception, as below. A GraphQL read that names its repo in the query says
   so with `GhInvocation::reader_repo(slug)` so the reader route serves it.
-- **Read-your-write rides the readers too (#12555).** The read-back helpers
+  **Break-glass consequence (#12571):** with `LOOM_FACADE_CWD_ROUTING=0` or
+  `LOOM_READ_ROUTING=legacy` no route is derived, so every *untargeted*
+  in-process daemon read on a host that has readers is shed instead of going
+  to the writer. Callers must treat a shed read as "unknown": the issue-sweep
+  lease tie-break fails closed (stands down and retries later), and a PR
+  reclaim whose label read is shed skips the `loom:review-requested`
+  backfill. Only a host with no reader pool and no gateway still reads on
+  the writer.
+- **Every read is reader-only, whatever builder made it (#12584).** The
+  rule is the invocation's, not the helper's: `GhInvocation::is_reader_only()`
+  holds for any `AccessIntent::Read` of the forge whose site did not pin
+  the writer with `writer_identity()`, whether it was built by a bare
+  `GhInvocation::new`, an `Operation::new` site, a CLI `.inv(..)` helper
+  (`loom-daemon pr-lease …`) or a transport's own `.invocation(.., cred)`.
+  Such a read is routed to a reader or shed, exactly as above. A credential
+  the site handed it (`gh_config_dir`, `without_token_env`, a writer
+  `identity_role`) does not exempt it: the facade sets that credential
+  aside before deriving the route (`GhInvocation::route_site_credential`)
+  and restores it only on a host with no reader pool, where it is the right
+  owner's writer and the only credential there is. A credential declared a
+  reader's (`identity_role(Reader)`, a site that routes its own reads, such
+  as the ETag store or `ci_telemetry`) is kept. Two argv shapes are not
+  forge reads and keep their credential: a command `gh` answers locally
+  (`--version`, `auth`, `config`, …) and `gh api rate_limit`, which is free
+  and reports the asking credential's own bucket. Reads whose argv names no
+  repository the facade can derive (GraphQL, search, `release`) name it
+  with `reader_repo(slug)`; `ci_telemetry`'s owner listings
+  (`orgs/<o>/repos`, `users/<o>…` and their page links) are routed for the
+  owner. The fleet store transport (`fleet_store::gh`) picks its own reader
+  and never falls back to the writer: a rate-limited or refused reader is
+  withdrawn and the next one serves the read, and a reader's `404` for a
+  ref (the resync claim) is the answer only when that reader can see the
+  repository (it served the repository within the hour, or answers
+  `GET repos/<o>/<r>`); otherwise the read is shed, never read as "absent".
+  The installation snapshot's telemetry reads (visibility, story key) use
+  the reader's snapshot only; with no reader they answer unavailable, which
+  visibility maps to private.
+- **Read-your-write rides the readers too (#12555, #12584).** The read-back helpers
   that pinned the writer (`gh_call::read_own_write`,
   `SweepRegistry::gh_read_own_write`) are removed. The writer bought a read
   only one thing: possibly fresher state for the credential that made the
@@ -8749,21 +8796,30 @@ flips spend. A read never goes to it, whatever its class or cause:
     can only miss its own lease (it is about to claim anyway) or a peer's;
     the outcome write-back probe looks for a comment from an earlier pass;
     the park-hold body read is a read-modify-write whose concurrent edits
-    are another actor's.
-- **Only writes use the writer**: POST, PATCH, PUT, DELETE, GraphQL
-  mutations and the minimal read a write needs in the same operation (a
-  lease read back right after a CLI command posts it, merge settings hidden
-  from a reader App). Each such read is pinned with `GhInvocation::writer_identity()` and
-  its file is listed with a reason in `loom-daemon/tests/writer_read_guard.rs`
-  (`READ_ON_WRITER`); an asker-dependent probe (`/user`, a write-scope
-  probe) is listed the same way.
+    are another actor's;
+  - the `loom-daemon pr-lease` CLI reads (`pr_lease.comments`,
+    `pr_lease.pr_head`, `pr_lease.checks_pending`, `pr_lease.commit_status`)
+    follow the same lease tie-break, and a missed own lease reads as "not
+    held yet" and is retried; the comment facade's footer read-back
+    (`comment.api_get`) only decides a best-effort footer edit; the
+    self-sync head attribution (`merge_guard.head_sync`) re-queues on any
+    head it cannot attribute (#12584).
+- **Only writes use the writer**, plus reads whose answer depends on who
+  asks: merge settings hidden from a reader App, classic branch protection,
+  a write-scope or permission probe, the writer installation's own
+  repository list. Each such read is pinned with
+  `GhInvocation::writer_identity()` and its file is listed with a reason in
+  `loom-daemon/tests/writer_read_guard.rs` (`READ_ON_WRITER`).
 - **Exception, no pool at all.** A host with no reader pool (no readers
   configured, another forge, a target with no repo) has no reader to be out of
   budget; its reads run on the only credential it has, pinned the same way.
 - **Guard.** `tests/writer_read_guard.rs` fails the build if a retired fallback
   name reappears, a new file pins a read to the writer without being listed,
-  a daemon read builder stops marking its reads `reader_only()`, or a
-  writer-pinned read-own-write helper returns (#12555).
+  a daemon read builder stops marking its reads `reader_only()`, a
+  writer-pinned read-own-write helper returns (#12555), any read builder
+  shape (a bare read, an explicit config dir, a stripped token env, a
+  writer role) stops answering `is_reader_only()`, or the route step stops
+  setting a site's credential aside (#12584).
   At runtime a read that reaches the writer unmarked logs an `error`
   (`gh_invocation: read on the writer credential: <op>`).
 - **Telemetry.** Writer-bucket spend by operation is the `forge.calls`
@@ -8865,7 +8921,7 @@ untargeted reads that will move to them.
 | Variable | Default | Effect |
 |---|---|---|
 | `LOOM_FACADE_CWD_ROUTING` | on | `0` disables the derivation: every untargeted read stays on the writer. Typed reads keep the class-aware chain, so a typed `Observability` read (`telemetry.repo_identity`) can still be shed. Read on every call. |
-| `LOOM_READ_ROUTING` | `v2` | `legacy` reverts W4-A's scoped withdrawal and W4-B's split and spill, and the router's class-aware derivation. It no longer restores a reader → writer fallback (#12394): that path, and the former `LOOM_READ_SHED=0` kill switch, are gone. `LOOM_FACADE_CWD_ROUTING=0` keeps untargeted reads off the readers (a pinned `writer_identity()` read, not a fallback). Read on every call. |
+| `LOOM_READ_ROUTING` | `v2` | `legacy` reverts W4-A's scoped withdrawal and W4-B's split and spill, and the router's class-aware derivation. It no longer restores a reader → writer fallback (#12394): that path, and the former `LOOM_READ_SHED=0` kill switch, are gone. `LOOM_FACADE_CWD_ROUTING=0` derives no route, so on a host with readers every untargeted in-process daemon read is shed rather than sent to the writer (#12571). Read on every call. |
 
 ### Hygiene read path: the checkout's own repo, conditional and fresh (`LOOM_HYGIENE_CONDITIONAL`)
 

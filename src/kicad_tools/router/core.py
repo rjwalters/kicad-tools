@@ -25,6 +25,7 @@ if TYPE_CHECKING:
 
     from .io import FineZone
     from .kicad_length import KicadLengthModel
+    from .pairplan.outcome import PairOutcome
     from .pathfinder import Router
     from .region_graph import RegionGraph
     from .routing_plan import RoutingPlan
@@ -36,6 +37,7 @@ logger = logging.getLogger(__name__)
 
 import contextlib
 
+from . import negotiated_budget as _negotiated_budget
 from . import via_conflict as _via_conflict_module
 from . import wall_deadline as _wall_deadline
 from .access_ripup import (
@@ -64,10 +66,10 @@ from .algorithms import (
     GRACE_PASS_BUDGET_S,
     GRACE_PASS_TIER_CAPS_S,
     PER_NET_CAP_STAGE_FRACTION,
-    POST_NEGOTIATION_SWEEP_BUDGET_S,
-    POST_NEGOTIATION_SWEEP_PER_NET_S,
-    POST_NEGOTIATION_SWEEP_PER_NET_SAFETY_BACKSTOP_S,
-    POST_NEGOTIATION_SWEEP_SAFETY_BACKSTOP_S,
+    POST_NEGOTIATION_SWEEP_BUDGET_S,  # noqa: F401  (re-exported; used by negotiated_budget)
+    POST_NEGOTIATION_SWEEP_PER_NET_S,  # noqa: F401  (re-exported; used by negotiated_budget)
+    POST_NEGOTIATION_SWEEP_PER_NET_SAFETY_BACKSTOP_S,  # noqa: F401  (re-exported; used by negotiated_budget)
+    POST_NEGOTIATION_SWEEP_SAFETY_BACKSTOP_S,  # noqa: F401  (re-exported; used by negotiated_budget)
     HierarchicalRouter,
     MonteCarloRouter,
     MSTRouter,
@@ -112,11 +114,17 @@ from .failure_analysis import (
     FailureCause,
     RootCauseAnalyzer,
 )
-from .grid import RoutingGrid
+from .grid import RoutingGrid, routed_halo_radius_cells
 from .kelvin import detect_kelvin_topology
 from .layers import Layer, LayerStack
 from .length import LengthTracker, LengthViolation
 from .match_group_length import MatchGroup, MatchGroupTracker
+from .negotiated_budget import (
+    RELIEF_RESCUE_TXN_FLOOR_S,
+    RELIEF_RESCUE_TXN_FRACTION,
+    RELIEF_SUBSEARCH_BUDGET_S,  # noqa: F401  (re-exported; cli/route_cmd.py imports it)
+    RELIEF_SUBSEARCH_SAFETY_BACKSTOP_S,  # noqa: F401  (re-exported)
+)
 from .net_class import NetClass, classify_from_name
 from .output import format_failed_nets_summary
 from .pad_access_invariant import AccessVeto, PadAccessInvariant
@@ -190,85 +198,6 @@ _ESCAPE_CORRIDOR_MAX_LENGTH_MM = 5.0
 # 4-layer stack this confines reservations to layers [1, 2] instead of spanning
 # all four; degrades gracefully to the outer layers on a 2-layer board.
 _ESCAPE_CORRIDOR_INNER_LAYERS_ONLY = True
-
-# Issue #4536: wall-clock budget for the relief rescue's SUB-searches (the
-# min-conflict probe rounds and the displaced-victim re-land passes inside
-# :meth:`Autorouter._relief_rescue`).  This is the historical value and is
-# LOAD-BEARING for routed reach on every run that is NOT expansion-capped -- a
-# victim that fails to re-land within the budget rolls the whole transaction
-# back (no-net-loss guarantee), so the value decides whether the rescued net is
-# kept or dropped.
-#
-# On board-06 seed-42 the natural victim re-land time sits in the 8-12 s band on
-# GitHub's ubuntu runners, i.e. this 10 s value STRADDLES it: the same commit
-# reached 21/21 on one runner and 20/21 on another purely on machine speed (CI
-# runs 31214686048 vs 31213011136 are line-identical up to the MIPI_RST rescue
-# and then diverge on whether MIPI_CLK- re-lands).
-#
-# ``deterministic_rescue=True`` swaps this wall clock for the per-net
-# node-expansion cap whenever one is active (``--deterministic-budget`` /
-# ``per_net_iterations``), which takes machine speed out of the rescue's
-# commit/roll-back decision.  Issue #4730 tried making that the fleet default
-# and MEASURED A REGRESSION -- see ``DETERMINISTIC_RESCUE_DEFAULT`` -- so this
-# value remains the default bound everywhere except callers that opt in
-# explicitly (board 06).
-RELIEF_SUBSEARCH_BUDGET_S = 10.0
-
-# Issue #4536: the wall clock kept under ``deterministic_rescue=True``.  It is
-# deliberately ~10x the measured natural sub-search time (a per-net search that
-# exhausts the 1M-expansion cap costs ~11 s on a CI runner), so it is NOT
-# load-bearing -- the binding bound is the node-expansion cap.  It exists only
-# to keep the one path that the expansion cap does not price in seconds (a
-# pure-Python A* fallback, 10-100x slower than the C++ backend) from grinding
-# for minutes inside a rescue, per the #3989 lesson.
-RELIEF_SUBSEARCH_SAFETY_BACKSTOP_S = 120.0
-
-# Issue #4781: proportional bound on a single relief-rescue TRANSACTION.  The
-# sub-search budgets above bound each stage of a rescue (probe rounds, victim
-# re-lands, nested rescues), but their PRODUCT is unbounded -- the #3413 defect
-# one level up.  Measured on board 07 (#4770, CI run 31281260812): one ``DQ3``
-# transaction spent 279.1 s -- 46% of the whole 600 s stage -- ripping 9
-# blockers and then rolling back verbatim, and the rip-up iteration that
-# produces the board's 26th net is the one that time starved.
-#
-# The bound: a transaction (INCLUDING its depth-1 nested rescues, which share
-# the parent's allowance -- the parent's commit gate depends on them, so a
-# separate allowance would just rebuild the unbounded product) may spend at
-# most ``max(RELIEF_RESCUE_TXN_FRACTION * remaining, RELIEF_RESCUE_TXN_FLOOR_S)``
-# where ``remaining = deadline - transaction_start`` is the stage budget left
-# when the transaction begins.  It is evaluated ONLY at the existing
-# ``_past_deadline()`` check sites (top of each probe round, per victim
-# re-land, before each nested rescue) -- never inside the A* sub-searches --
-# so a single sub-search can still legally overshoot the allowance by up to
-# one sub-search budget (120 s worst case under ``deterministic_rescue``).
-# On breach the transaction rolls back verbatim via the existing
-# ``_rollback()``; aborting early is free by construction (the board is
-# restored either way) -- it can only cost rescues that would have succeeded.
-#
-# Calibration, from the #4770 per-pass rescue tables
-# (``boards/07-matchgroup-test/diagnostic-runs/README.md``):
-#
-#   * The FLOOR (90 s) sits above the longest transaction the healthy `main`
-#     arm ever completes (70.6 s, ``DQ4``, board 07 initial pass) -- so on a
-#     main-shaped trajectory the bound never fires and board 07's A/B inputs
-#     are unchanged.  Near the stage end the stage deadline is checked first,
-#     so the floor never EXTENDS a transaction past ``deadline``.
-#   * The FRACTION (25%) caps an early-stage pathological transaction: the
-#     ``DQ3`` rescue began with ~337 s of stage remaining, so its allowance
-#     becomes max(84.3, 90) = 90 s instead of the 279.1 s it actually spent,
-#     returning ~189 s to the rip-up loop that produces reach.
-#
-# The bound is FLAT, not scaled by how much the rescue has already achieved:
-# ``DQ3`` had "achieved" 9 rips and 7/9 re-lands at 279 s and still rolled
-# back -- progress through the rescue pipeline is not a predictor of commit,
-# so paying more for it just re-opens the hole.
-#
-# When the stage has no deadline (``timeout=None`` -> ``relief_deadline is
-# None``: board 06's deterministic regen, the two-phase stall-relief hook)
-# there is no denominator and the bound is structurally inert -- behavior is
-# byte-identical to pre-#4781.
-RELIEF_RESCUE_TXN_FRACTION = 0.25
-RELIEF_RESCUE_TXN_FLOOR_S = 90.0
 
 # Issue #4730: the default for the relief-rescue sub-search bound, shared by
 # every entry point that can reach a rescue -- :meth:`Autorouter._relief_rescue`,
@@ -1910,7 +1839,7 @@ class Autorouter:
         self._lattice_pair_outcomes: dict[str, str] = {}
         # Issue #6837: the structured record behind each of those strings
         # (``PairOutcome.label`` is the string), rebuilt with them.
-        self._lattice_pair_outcome_records: dict[str, Any] = {}
+        self._lattice_pair_outcome_records: dict[str, PairOutcome] = {}
         # Issue #6378: a pair that passes through an interior part (board 03
         # USB_D through the ESD part U2) is routed as a chain -- one coupled
         # connection per segment plus single-ended P/N hops inside the part.
@@ -2592,8 +2521,9 @@ class Autorouter:
         # instead of the global rules.trace_width, matching the Python
         # grid's mark_route() behaviour for per-net-class trace widths.
         for seg in route.segments:
-            total_clearance = seg.width / 2 + self.rules.trace_clearance
-            clearance_cells = int(total_clearance / self.grid.resolution) + 1
+            clearance_cells = routed_halo_radius_cells(
+                seg, self.rules, self.grid.resolution, cpp=True
+            )
             gx1, gy1 = self.grid.world_to_grid(seg.x1, seg.y1)
             gx2, gy2 = self.grid.world_to_grid(seg.x2, seg.y2)
             layer_idx = self.grid.layer_to_index(seg.layer.value)
@@ -2602,20 +2532,9 @@ class Autorouter:
         # Mark all vias on C++ grid
         for via in route.vias:
             gx, gy = self.grid.world_to_grid(via.x, via.y)
-            # Issue #2466: Use ``ceil`` (not ``int``) for the via blocking
-            # radius so that grid-cell blocking matches the validator's
-            # geometric ``via_diameter/2 + via_clearance`` keepout.  The
-            # previous ``int(...)`` truncation under-blocked by up to one
-            # grid cell, allowing the search to place a via that the post-
-            # route validator would later flag.  Mirrors the +1 safety
-            # margin in ``RoutingGrid._mark_via`` (Issue #1797).
-            radius_cells = (
-                math.ceil(
-                    (via.diameter / 2 + self.rules.via_clearance + self.rules.trace_width / 2)
-                    / self.grid.resolution
-                )
-                + 1
-            )
+            # Issue #2466: the CPPV variant rounds up (see
+            # ``routed_halo_radius_cells``).
+            radius_cells = routed_halo_radius_cells(via, self.rules, self.grid.resolution, cpp=True)
             cpp_grid.mark_via(gx, gy, via.net, radius_cells)
 
     # ------------------------------------------------------------------
@@ -4672,6 +4591,28 @@ class Autorouter:
             hi_y = min(by1, lo_y + coarse)
         return (lo_x, lo_y, hi_x, hi_y)
 
+    @staticmethod
+    def _print_pair_gateway_lines(coupled: list, gateways: dict, gateway_log: dict) -> None:
+        """Print one gateway line per pair: the gateway it took, else why it declined.
+
+        Issue #6932: a decline is printed even when the pair then routed
+        planar (``coupled``) -- a gateway-first decline followed by a planar
+        success is exactly the case whose reason was previously suppressed.
+        A pair with no ``gateway_log`` entry (gateway-first gate never
+        entered) prints nothing.
+        """
+        for pc in coupled:
+            label = f"{pc.pad_p_a.ref}.{pc.pad_p_a.pin}->{pc.pad_p_b.ref}.{pc.pad_p_b.pin}"
+            if pc.key in gateways:
+                print(
+                    f"  Diff-pair gateway (lattice) {pc.pair_name} {label}: "
+                    f"coupled through {gateways[pc.key]}"
+                )
+            elif pc.key in gateway_log:
+                print(
+                    f"  Diff-pair gateway (lattice) {pc.pair_name} {label}: {gateway_log[pc.key]}"
+                )
+
     def _print_pair_threshold_report(self) -> None:
         """Print the continuity / skew thresholds ``kct check`` applies per pair (#6442)."""
         from kicad_tools.validate.diffpair_engagement import pair_threshold_report
@@ -4899,8 +4840,13 @@ class Autorouter:
             # anchor below slides past it instead of capping it.
             self._lattice_reserve_pair_escape_sites(pf, obstacles, pc, pair_nets)
             # The rule-area mask (+ #6401 pour-pad via reservations) installed
-            # by ``_negotiate_lattice_netset`` before this call.
-            keepouts = getattr(pf, "_keepouts", None)
+            # by ``_negotiate_lattice_netset`` before this call.  Issue #6956:
+            # without the pair-net exemptions -- the planar anchor still
+            # slides past the reservations exactly as before; only the
+            # search (fat body, gateway fans and attaches) may use them.
+            keepouts = self._lattice_keepouts_without_pair_exemptions(
+                getattr(pf, "_keepouts", None)
+            )
             trace_half = (getattr(pc.net_class, "trace_width", None) or self.rules.trace_width) / 2
             anchor_a = relocate_pair_anchor(
                 obstacles,
@@ -4984,6 +4930,15 @@ class Autorouter:
             ):
                 name_net = self.net_names.get(pad.net) or pad.net_name or str(pad.net)
                 name = f"pair-escape-via:{name_net}:{pad.ref}.{pad.pin}"
+                # Issue #6956: the pair this site exists for (its nets are
+                # exempted by ``_lattice_exempt_pair_reservations``).
+                owners: dict[str, frozenset[int]] | None = getattr(
+                    self, "_lattice_pair_escape_owner", None
+                )
+                if owners is None:
+                    owners = {}
+                    self._lattice_pair_escape_owner = owners
+                owners.setdefault(name, frozenset(pair_nets))
                 if name in have:
                     continue
                 # The sealed net's class clearance, floored at the pair's and
@@ -5012,6 +4967,81 @@ class Autorouter:
                 )
         if new:
             pf.set_keepouts(LatticeKeepoutMask(tuple(mask.areas if mask else ()) + tuple(new)))
+
+    def _lattice_exempt_pair_reservations(self, coupled: list[Any]) -> None:
+        """Exempt each declared pair's nets from its own reservations (#6956).
+
+        Board 03: ``USB_D[1]``'s In2.Cu gateway at U2 is closed by two static
+        keep-outs that block every net, the pair's own included -- the #6697
+        escape site for VBUS U2.5 (reserved between the pair's own pads,
+        on the only south route of the fans) and the #6401 pour-pad via site
+        for GND U2.2 (under U2's body, on the pass-under route).  Both exist
+        for a pair that stays on the pad layer and know nothing about its
+        gateway.
+
+        The policy: a reservation inside a declared pair's gateway envelope
+        at that pair's own footprint (:func:`~.plane_via_sites.
+        pair_gateway_envelope_contains`, grown by the largest gateway
+        setback) exempts the pair's two nets -- every #6697 escape site the
+        pair caused always does -- and stays a hard keep-out for every other
+        net.  The pour link / sealed net still has to close afterwards (the
+        post-route oracle and stitcher re-verify it).  The added exemptions
+        are recorded on :attr:`_lattice_pair_exempt_added` so the planar
+        anchor relocation can keep seeing the un-exempted reservations.
+        """
+        from dataclasses import replace
+
+        from .lattice.obstacles import LatticeKeepoutMask
+        from .pairplan.gateway import MAX_GATEWAY_SETBACK_MM
+        from .plane_via_sites import exempt_pair_in_gateway_envelope
+
+        pf = getattr(self, "_lattice_pathfinder", None)
+        mask = getattr(pf, "_keepouts", None)
+        if pf is None or not mask or not coupled:
+            return
+        added: dict[str, frozenset[int]] = getattr(self, "_lattice_pair_exempt_added", None) or {}
+        escape_owner: dict[str, frozenset[int]] = (
+            getattr(self, "_lattice_pair_escape_owner", None) or {}
+        )
+        areas = list(mask.areas)
+        changed = False
+        for pc in coupled:
+            nets = frozenset({pc.pad_p_a.net, pc.pad_n_a.net})
+            names: list[str] = []
+            for pad_p, pad_n in ((pc.pad_p_a, pc.pad_n_a), (pc.pad_p_b, pc.pad_n_b)):
+                areas, hit = exempt_pair_in_gateway_envelope(
+                    areas, pad_p, pad_n, nets, setback=MAX_GATEWAY_SETBACK_MM
+                )
+                names.extend(hit)
+            for idx, area in enumerate(areas):
+                if escape_owner.get(area.name) == nets and not nets <= area.exempt:
+                    areas[idx] = replace(area, exempt=area.exempt | nets)
+                    names.append(area.name)
+            for name in dict.fromkeys(names):
+                added[name] = added.get(name, frozenset()) | nets
+                changed = True
+                print(
+                    f"  Pair reservation exemption (#6956): {name} lies in "
+                    f"{pc.pair_name}'s gateway envelope; exempts the pair's nets"
+                )
+        self._lattice_pair_exempt_added = added
+        if changed:
+            pf.set_keepouts(LatticeKeepoutMask(tuple(areas)))
+
+    def _lattice_keepouts_without_pair_exemptions(self, mask: Any) -> Any:
+        """``mask`` with the #6956 pair-net exemptions taken back out."""
+        added = getattr(self, "_lattice_pair_exempt_added", None)
+        if not mask or not added:
+            return mask
+        from dataclasses import replace
+
+        from .lattice.obstacles import LatticeKeepoutMask
+
+        areas = tuple(
+            replace(a, exempt=a.exempt - added[a.name]) if a.name in added else a
+            for a in mask.areas
+        )
+        return LatticeKeepoutMask(areas)
 
     def _lattice_escape_via_node(
         self, pf: Any, net: int, site: tuple[float, float], clearance: float
@@ -5137,6 +5167,8 @@ class Autorouter:
         # (byte-identical no-constraint path).
         if hasattr(pf, "set_keepouts"):
             pf.set_keepouts(self._lattice_keepouts_with_plane_via_sites())
+            # Issue #6956: a fresh mask carries no pair-net exemptions.
+            self._lattice_pair_exempt_added = {}
 
         coupled, connections = self._lattice_netset_connections()
 
@@ -5434,6 +5466,14 @@ class Autorouter:
                     (label, o) for n, label, o in self._lattice_pair_segment_outcomes if n == name
                 ):
                     print(f"      {name}[{idx}] {label}: {seg_outcome}")
+            # Issue #6446: a hybrid pair (coupled trunk + single-ended legs at
+            # one terminal) is counted apart so the ``coupled`` line above
+            # keeps its meaning.
+            n_hybrid = sum(
+                1 for v in self._lattice_pair_outcomes.values() if v.startswith("hybrid:")
+            )
+            if n_hybrid:
+                print(f"  Diff pairs (lattice) hybrid: {n_hybrid}")
             # Issue #6444: name every fan-via gateway, and why a retried
             # segment's gateway declined (layer, setback, vias, candidates per
             # terminal).  Printed AFTER the outcome list, whose layout the
@@ -5443,17 +5483,16 @@ class Autorouter:
             rollback = getattr(pf, "pair_gateway_rollback", None)
             if isinstance(rollback, str):
                 print(f"  Diff-pair gateway (lattice): {rollback}")
+            self._print_pair_gateway_lines(coupled, gateways, gateway_log)
+            # Issue #6446: one line per segment the one-ended hybrid retry was
+            # offered to -- the coupled trunk and its legs on success, or the
+            # hard terminal and the shortest legs found against the cap.
+            hybrid_log = getattr(pf, "pair_hybrid_log", {}) or {}
             for pc in coupled:
-                label = f"{pc.pad_p_a.ref}.{pc.pad_p_a.pin}->{pc.pad_p_b.ref}.{pc.pad_p_b.pin}"
-                if pc.key in gateways:
+                if pc.key in hybrid_log and outcomes.get(pc.key, "") != "coupled":
+                    label = f"{pc.pad_p_a.ref}.{pc.pad_p_a.pin}->{pc.pad_p_b.ref}.{pc.pad_p_b.pin}"
                     print(
-                        f"  Diff-pair gateway (lattice) {pc.pair_name} {label}: "
-                        f"coupled through {gateways[pc.key]}"
-                    )
-                elif pc.key in gateway_log and outcomes.get(pc.key, "") != "coupled":
-                    print(
-                        f"  Diff-pair gateway (lattice) {pc.pair_name} {label}: "
-                        f"{gateway_log[pc.key]}"
+                        f"  Diff-pair hybrid (lattice) {pc.pair_name} {label}: {hybrid_log[pc.key]}"
                     )
             self._print_pair_threshold_report()
             # Issue #6373: a pair routed by the uncoupled fallback is a
@@ -5465,6 +5504,12 @@ class Autorouter:
                         f"  WARNING: diff pair {name} routed uncoupled "
                         f"(coupled run declined: {outcome.split(':', 1)[1]}); "
                         "intra-pair gap and length matching are not guaranteed"
+                    )
+                elif outcome.startswith("hybrid:"):
+                    print(
+                        f"  NOTE: diff pair {name} is hybrid (coupled trunk, single-ended "
+                        f"legs at {outcome.split(':', 1)[1]}); intra-pair gap holds on the "
+                        "trunk only"
                     )
                 elif outcome.startswith("partially-coupled:"):
                     # Issue #6378: name the segments that did not couple.
@@ -5504,6 +5549,9 @@ class Autorouter:
             if tap_chain_pairs
             else self._lattice_coupled_connections()
         )
+        # Issue #6956: a reservation in a declared pair's gateway envelope
+        # (and every #6697 escape site) exempts that pair's two nets.
+        self._lattice_exempt_pair_reservations(coupled)
 
         connections: list[tuple[object, Pad, Pad, object]] = []
         # Issue #6698: generated same-part equivalent-pin ties (rebuilt on
@@ -10496,7 +10544,8 @@ class Autorouter:
             progress_callback: Optional callback for progress updates
             parallel: If True, route independent nets in parallel using
                 bounding box analysis to find non-overlapping net groups.
-                Can provide 3-4x speedup for boards with many independent nets.
+                Net searches take the grid lock, so no speedup should be
+                expected (see docs/research/gpu-routing-design.md section 3).
             max_workers: Maximum number of parallel workers (default: 4).
                 Only used when parallel=True.
             interleaved: If True, use interleaved ordering for N-port nets.
@@ -11587,8 +11636,9 @@ class Autorouter:
         """Route all nets using parallel execution where possible.
 
         Groups nets by bounding box independence and routes independent
-        nets concurrently using ThreadPoolExecutor. This can provide
-        3-4x speedup for boards with many independent nets.
+        nets concurrently using ThreadPoolExecutor. Net searches take the
+        grid lock, so no speedup should be expected (see
+        docs/research/gpu-routing-design.md section 3).
 
         Args:
             net_order: Optional explicit net ordering (by priority)
@@ -12004,7 +12054,9 @@ class Autorouter:
                 This improves convergence for difficult routing scenarios.
             region_parallel: If True, use region-based parallelism (Issue #965).
                 Partitions the grid into regions and routes non-adjacent regions
-                in parallel during each iteration, providing 2-3x speedup.
+                in parallel during each iteration. Worker searches currently
+                serialize on the grid lock and the GIL, so no speedup should be
+                expected (docs/research/gpu-routing-design.md section 3).
             partition_rows: Number of region rows for partitioning (default 2)
             partition_cols: Number of region columns for partitioning (default 2)
             max_parallel_workers: Maximum parallel workers per region group (default 4)
@@ -12511,7 +12563,7 @@ class Autorouter:
 
         # Issue #3100: Auto-gate ``region_parallel`` on small / dense workloads.
         # PR #3068 wired ``--region-parallel`` through ``route_all_negotiated``
-        # but the docstring's "2-3x speedup" only materializes when each region
+        # but any benefit only materializes when each region
         # has enough independent nets to amortize the worker startup, grid
         # thread-safety conversion, and inter-iteration handoff costs.  The
         # board-07 re-benchmark on #3045 showed +55% wall-clock with 31 nets
@@ -16134,161 +16186,47 @@ class Autorouter:
         return probe_routes, victims
 
     def _active_expansion_cap(self) -> int:
-        """The binding per-net node-expansion cap, or ``0`` when uncapped.
-
-        The deterministic bound this router can hand a sub-search is the
-        SMALLER of the tuned per-net cap (``--per-net-iterations`` /
-        ``per_net_iterations``, #3881) and the memory backstop
-        (``--max-search-iterations``, #2610); ``--deterministic-budget``
-        sets both, an explicit flag may set only one.  ``0`` means neither
-        is active, i.e. there is no machine-independent bound available and
-        a wall clock has to stay in force.
-
-        Extracted (Issue #4724) so the relief rescue (#4536) and the
-        post-negotiation sweep (#4159) ask the SAME question -- a second
-        copy of this ``min()`` is exactly how two budget selectors drift
-        into disagreeing about what "deterministic mode" means.
-        """
-        return min(
-            (
-                cap
-                for cap in (
-                    getattr(self, "_per_net_iterations", 0),
-                    getattr(self, "_max_search_iterations", 0),
-                )
-                if cap
-            ),
-            default=0,
+        """The binding per-net node-expansion cap, or ``0`` when uncapped."""
+        return _negotiated_budget.active_expansion_cap(
+            getattr(self, "_per_net_iterations", 0),
+            getattr(self, "_max_search_iterations", 0),
         )
 
     def _wall_clock_free_arm(self, deterministic_rescue: bool) -> bool:
-        """True when the negotiated loop must not read a wall clock for reach.
-
-        Issue #6475.  ``deterministic_rescue`` with an active expansion cap
-        means the caller asked for a route that does not depend on machine
-        load.  The oscillation-escape budget (#2415) and the per-iteration
-        per-net cap derived from the remaining stage budget (#3989) are both
-        wall clocks that decide reach, so both switch off here.  The stage
-        deadline (``check_timeout``) is left alone.
-        """
-        return bool(deterministic_rescue and self._active_expansion_cap())
+        """See :func:`negotiated_budget.wall_clock_free_arm`."""
+        return _negotiated_budget.wall_clock_free_arm(
+            self._active_expansion_cap(), deterministic_rescue
+        )
 
     def _escape_budget(
         self, timeout: float | None, start_time: float, deterministic_rescue: bool
     ) -> float | None:
-        """Wall-clock budget for ``escape_local_minimum`` (Issue #2415 / #6475).
-
-        ``None`` (unbounded; each strategy is still bounded by the per-net
-        expansion cap) on the deterministic arm or when there is no stage
-        timeout; otherwise ``min(60, 25% of the remaining stage budget)``.
-        """
-        if timeout is None or self._wall_clock_free_arm(deterministic_rescue):
-            return None
-        remaining = timeout - (time.time() - start_time)
-        return max(0.0, min(60.0, remaining * 0.25))
+        """See :func:`negotiated_budget.escape_budget`."""
+        return _negotiated_budget.escape_budget(
+            self._active_expansion_cap(), timeout, start_time, deterministic_rescue
+        )
 
     def _wall_clock_arm_line(self, deterministic_rescue: bool) -> str:
-        """Routing-log line naming the escape-budget / per-iteration-cap arm (#6475)."""
-        if self._wall_clock_free_arm(deterministic_rescue):
-            return (
-                "  Escape budget / per-iteration per-net cap: iteration-bounded "
-                "(deterministic rescue; issue #6475) -- oscillation escape and "
-                "per-net searches do not read a wall clock"
-            )
-        return (
-            "  Escape budget / per-iteration per-net cap: wall clock "
-            "(60s escape budget, remaining-budget per-net cap; deterministic "
-            "rescue is off or no expansion cap is active; issue #6475)"
+        """See :func:`negotiated_budget.wall_clock_arm_line`."""
+        return _negotiated_budget.wall_clock_arm_line(
+            self._active_expansion_cap(), deterministic_rescue
         )
 
     def _relief_subsearch_budget(
         self, per_net_timeout: float | None, deterministic_rescue: bool
     ) -> float | None:
-        """Budget for the relief rescue's probe / victim-re-land searches.
-
-        Issue #4536.  The rescue is a TRANSACTION with a no-net-loss
-        guarantee: if a displaced victim does not re-land, the whole
-        rescue rolls back and the rescued net stays unrouted.  The budget
-        those sub-searches get is therefore **reach-determining**, not a
-        mere performance knob.
-
-        Historically that budget was a flat ``RELIEF_SUBSEARCH_BUDGET_S``
-        (10 s) wall clock.  On board-06 seed-42 the natural victim
-        re-land time on GitHub ubuntu runners sits in the 8-12 s band --
-        i.e. the budget STRADDLES it, and the SAME code at the SAME
-        commit lands 21/21 on a fast runner and 20/21 on a slow one (the
-        rescue of ``MIPI_RST`` at iteration 2 keeps or drops
-        ``MIPI_CLK-``).  That is the same defect class as the 360 s stage
-        backstop this issue removed, one level down.
-
-        ``deterministic_rescue=True`` replaces the wall clock with the
-        DETERMINISTIC per-net node-expansion cap that already bounds every
-        other search in the stage (``--deterministic-budget`` /
-        ``per_net_iterations``, #3877/#3881): the sub-search runs exactly
-        the same number of node expansions on every machine, so the rescue
-        commits or rolls back identically everywhere.
-        ``RELIEF_SUBSEARCH_SAFETY_BACKSTOP_S`` is kept as a NON-load-bearing
-        outer guard (~10x the natural sub-search time) purely for the
-        pure-Python A* fallback, which the expansion cap does not price in
-        seconds.
-
-        The deterministic mode requires an active expansion cap; without
-        one there is no deterministic bound to fall back on, so the
-        historical wall clock is kept (degrading to the pre-#4536
-        behavior rather than to an unbounded search).
-
-        Issue #4730 proposed making ``deterministic_rescue=True`` the
-        fleet default and measured a board-07 regression on the
-        negotiated entry point, so it stays OPT-IN
-        (:data:`DETERMINISTIC_RESCUE_DEFAULT` is ``False``); board 06
-        opts in explicitly.  Every entry point that can reach a rescue
-        now carries the value per call, so the choice is made where the
-        measurement is.
-        """
-        if deterministic_rescue and self._active_expansion_cap():
-            return RELIEF_SUBSEARCH_SAFETY_BACKSTOP_S
-        if per_net_timeout:
-            return min(RELIEF_SUBSEARCH_BUDGET_S, per_net_timeout)
-        return RELIEF_SUBSEARCH_BUDGET_S
+        """See :func:`negotiated_budget.relief_subsearch_budget`."""
+        return _negotiated_budget.relief_subsearch_budget(
+            self._active_expansion_cap(), per_net_timeout, deterministic_rescue
+        )
 
     def _relief_reland_retry_budget(
         self, per_net_timeout: float | None, subsearch_budget: float | None
     ) -> float | None:
-        """Budget for re-landing a victim whose reduced-budget re-land ran out of time.
-
-        Issue #6151.  The rescue re-lands its displaced victims under the
-        REDUCED :meth:`_relief_subsearch_budget` (10 s wall clock by default)
-        so a hopeless rescue fails fast.  A victim did originally land under
-        the caller's full ``per_net_timeout`` though, and on board 03 the
-        ``USB_D+`` re-land (a 5-pad net, two J1 rows plus the MCU side) needs
-        ~1.5 s idle but ~4.5 s at a load average of 60 and more beyond that --
-        the reduced budget straddles it, so the SAME rescue commits on an idle
-        machine and loses a net on a busy one.
-
-        A victim whose first re-land *consumed* its budget (a geometric
-        failure returns well before it -- the open set drains) is retried
-        once under the budget it originally routed with:
-
-        * the caller's ``per_net_timeout`` when one is set (the plain
-          ``kct route`` path: 30 s);
-        * otherwise, when a node-expansion cap is active
-          (``--deterministic-budget``), the non-binding
-          :data:`RELIEF_SUBSEARCH_SAFETY_BACKSTOP_S` -- the expansion cap is
-          then the binding, machine-independent bound, exactly the
-          ``deterministic_rescue`` arm of :meth:`_relief_subsearch_budget`;
-        * otherwise the sub-search budget unchanged (no larger bound exists
-          that is not unbounded).
-
-        Never smaller than ``subsearch_budget``; ``None`` (unbounded) stays
-        ``None``.
-        """
-        if subsearch_budget is None:
-            return None
-        if per_net_timeout:
-            return max(subsearch_budget, per_net_timeout)
-        if self._active_expansion_cap():
-            return max(subsearch_budget, RELIEF_SUBSEARCH_SAFETY_BACKSTOP_S)
-        return subsearch_budget
+        """See :func:`negotiated_budget.relief_reland_retry_budget`."""
+        return _negotiated_budget.relief_reland_retry_budget(
+            self._active_expansion_cap(), per_net_timeout, subsearch_budget
+        )
 
     @staticmethod
     def _relief_victim_connected_pads(
@@ -16315,82 +16253,13 @@ class Autorouter:
     def _relief_subsearch_bound_line(
         self, per_net_timeout: float | None, deterministic_rescue: bool
     ) -> str:
-        """Routing-log line recording which relief-rescue sub-search bound is live.
-
-        Issue #4536 put this in the log because the bound decides whether a
-        rescue COMMITS -- i.e. it decides routed reach, so any routing log
-        used as A/B evidence has to say which one was in force.  The
-        ``iteration-bounded`` wording is the greppable evidence line; do not
-        reword it.
-
-        The arms state facts, not caller intent.  The deterministic bound is
-        opt-in (:data:`DETERMINISTIC_RESCUE_DEFAULT` is ``False`` after #4730's
-        measured board-07 regression), so the OFF arm is reached both by the
-        ordinary default and by an explicit opt-out, and the capless
-        wall-clock arm is reached by an opt-in run that simply has no
-        expansion cap to hand the sub-searches to.  Neither arm claims a
-        request it cannot know about.
-
-        Emitted by both routing entry points that can reach a relief rescue:
-        :meth:`route_all_negotiated` and :meth:`route_all_two_phase` (whose
-        stall-relief hook, #3471, calls :meth:`_relief_rescue` positionally
-        with the bound bound on by ``functools.partial``).  Each reports the
-        value ITS call is running under, so an opt-in is visible in the log
-        rather than assumed.
-        """
+        """See :func:`negotiated_budget.relief_subsearch_bound_line`."""
         budget = self._relief_subsearch_budget(per_net_timeout, deterministic_rescue)
-        if deterministic_rescue and budget == RELIEF_SUBSEARCH_SAFETY_BACKSTOP_S:
-            return (
-                "  Relief-rescue sub-search cap: iteration-bounded "
-                "(per-net node-expansion cap; issue #4536) -- probe / "
-                "victim-re-land outcomes are machine-independent; "
-                f"{RELIEF_SUBSEARCH_SAFETY_BACKSTOP_S:.0f}s wall clock kept "
-                "only as a non-binding Python-fallback backstop"
-            )
-        wall_clock = float(budget if budget else RELIEF_SUBSEARCH_BUDGET_S)
-        if deterministic_rescue:
-            return (
-                f"  Relief-rescue sub-search cap: {wall_clock:.1f}s wall clock -- "
-                "no per-net node-expansion cap is active, so the machine-dependent "
-                "bound is kept (issue #4536)"
-            )
-        return (
-            f"  Relief-rescue sub-search cap: {wall_clock:.1f}s wall clock -- "
-            "deterministic rescue is off for this route (the default; opt in with "
-            "deterministic_rescue=True; issue #4730)"
-        )
+        return _negotiated_budget.relief_subsearch_bound_line(budget, deterministic_rescue)
 
     def _relief_txn_bound_line(self, timeout: float | None) -> str:
-        """Routing-log line recording the relief-rescue TRANSACTION bound in force.
-
-        Issue #4781.  Same evidence discipline as
-        :meth:`_relief_subsearch_bound_line` (#4536): the bound decides how
-        much of the stage budget a single rescue can burn before rolling
-        back -- i.e. it decides how many rip-up iterations the stage can
-        afford, which decides reach -- so any routing log used as A/B
-        evidence has to say which arm was live.  The
-        ``Relief-rescue transaction bound:`` prefix is the greppable
-        evidence token; do not reword it.
-
-        Args:
-            timeout: The stage wall-clock budget of the calling loop, or
-                ``None`` when the stage runs without a deadline (then
-                ``relief_deadline is None`` and the bound is structurally
-                inert -- there is no "remaining stage budget" denominator).
-        """
-        if timeout is not None:
-            return (
-                "  Relief-rescue transaction bound: proportional -- one rescue "
-                "transaction (nested rescues share the parent's allowance) may "
-                f"spend at most max({RELIEF_RESCUE_TXN_FRACTION:.0%} of the "
-                f"remaining stage budget, {RELIEF_RESCUE_TXN_FLOOR_S:.0f}s) "
-                "before rolling back verbatim (issue #4781)"
-            )
-        return (
-            "  Relief-rescue transaction bound: none -- the stage has no "
-            "wall-clock deadline, so transactions are bounded by their "
-            "sub-search caps only (issue #4781)"
-        )
+        """See :func:`negotiated_budget.relief_txn_bound_line`."""
+        return _negotiated_budget.relief_txn_bound_line(timeout)
 
     def _post_negotiation_sweep_bounds(
         self,
@@ -16399,77 +16268,10 @@ class Autorouter:
         elapsed: float,
         timed_out: bool,
     ) -> tuple[float, float | None]:
-        """Bounds for the #4159 post-negotiation rescue sweep.
-
-        Returns ``(whole_sweep_budget_s, per_net_budget_s)``.
-
-        Issue #4724.  The sweep decides WHICH stranded nets get one solo
-        re-attempt on the live grid, so both of its historical bounds --
-        ``POST_NEGOTIATION_SWEEP_BUDGET_S`` (60 s for the whole pass) and
-        ``POST_NEGOTIATION_SWEEP_PER_NET_S`` (10 s per net) -- decide routed
-        REACH, not runtime.  They were applied UNCONDITIONALLY, including on
-        the deterministic-budget callers that pass ``timeout=None`` /
-        ``per_net_timeout=None`` precisely so that no wall clock decides
-        anything (the #4536 rationale, board 06's regen).  A capped per-net
-        search that runs to its 1M-expansion cap costs ~11 s on a CI runner,
-        so the 10 s per-net bound straddles it exactly the way the relief
-        rescue's 10 s sub-search budget did.
-
-        Selection table -- the same shape as
-        :meth:`_relief_subsearch_budget`, so the two cannot drift:
-
-        * **Unbudgeted caller + active expansion cap** -> the deterministic
-          arm: the node-expansion cap is the binding bound and the returned
-          wall clocks are the ~10x non-binding backstops
-          (``POST_NEGOTIATION_SWEEP_SAFETY_BACKSTOP_S`` /
-          ``POST_NEGOTIATION_SWEEP_PER_NET_SAFETY_BACKSTOP_S``) that keep a
-          pure-Python fallback from grinding.
-        * **Unbudgeted caller, no expansion cap** -> unchanged 60 s / 10 s.
-          There is no machine-independent bound to fall back on, so the
-          historical wall clock is kept rather than degrading to an
-          unbounded sweep (identical reasoning to #4536's capless arm).
-        * **Budgeted caller** (``timeout`` set) -> unchanged: the sweep gets
-          ``min(60 s, remaining stage budget)`` when the loop exited with
-          budget left, else its own contained 60 s allowance, and the per-net
-          cap is clamped by any caller ``per_net_timeout``.
-
-        Args:
-            timeout: The stage wall-clock budget the caller passed, or
-                ``None`` for an unbudgeted (deterministic) run.
-            per_net_timeout: The caller's per-net A* budget, or ``None``.
-            elapsed: Seconds spent in the negotiated loop so far (used only
-                to compute the remaining stage budget of a budgeted caller).
-            timed_out: Whether the loop exited on the stage timeout (then
-                the remaining budget is spent and the sweep runs on its own
-                contained allowance, as before).
-        """
-        if timeout is None and per_net_timeout is None and self._active_expansion_cap():
-            return (
-                POST_NEGOTIATION_SWEEP_SAFETY_BACKSTOP_S,
-                POST_NEGOTIATION_SWEEP_PER_NET_SAFETY_BACKSTOP_S,
-            )
-
-        sweep_remaining: float | None = None
-        if timeout is not None:
-            sweep_remaining = timeout - elapsed
-        if sweep_remaining is not None and sweep_remaining > 0 and not timed_out:
-            sweep_budget = min(POST_NEGOTIATION_SWEEP_BUDGET_S, sweep_remaining)
-        else:
-            sweep_budget = POST_NEGOTIATION_SWEEP_BUDGET_S
-
-        sweep_per_net = per_net_timeout
-        if not sweep_per_net:
-            # Issue #4776: a literal ``0.0`` is the ``--deterministic-budget``
-            # "wall-clock cutoff disabled" sentinel.  Treat it the way
-            # :meth:`_relief_subsearch_budget` already does (falsy == absent);
-            # taking ``min(0.0, 10 s)`` instead handed every stranded net a
-            # zero-second solo budget and silently no-op'd the sweep.  The
-            # ``is None`` gate on the safety-backstop arm above is
-            # deliberately unchanged.
-            sweep_per_net = POST_NEGOTIATION_SWEEP_PER_NET_S
-        else:
-            sweep_per_net = min(sweep_per_net, POST_NEGOTIATION_SWEEP_PER_NET_S)
-        return max(0.0, sweep_budget), sweep_per_net
+        """See :func:`negotiated_budget.post_negotiation_sweep_bounds`."""
+        return _negotiated_budget.post_negotiation_sweep_bounds(
+            self._active_expansion_cap(), timeout, per_net_timeout, elapsed, timed_out
+        )
 
     def _post_negotiation_sweep_bound_line(
         self,
@@ -16478,39 +16280,12 @@ class Autorouter:
         elapsed: float,
         timed_out: bool,
     ) -> str:
-        """Routing-log line recording which sweep bound is live (Issue #4724).
-
-        Same evidence discipline as :meth:`_relief_subsearch_bound_line`
-        (#4536): the bound decides which stranded nets get a rescue, so a
-        routing log used as A/B evidence has to say which one was in force.
-        The ``iteration-bounded`` wording is the greppable evidence token;
-        do not reword it.
-        """
+        """See :func:`negotiated_budget.post_negotiation_sweep_bound_line`."""
         budget, per_net = self._post_negotiation_sweep_bounds(
             timeout, per_net_timeout, elapsed, timed_out
         )
-        if budget == POST_NEGOTIATION_SWEEP_SAFETY_BACKSTOP_S:
-            return (
-                "  Post-negotiation sweep bound: iteration-bounded "
-                "(per-net node-expansion cap; issue #4724) -- which stranded "
-                "nets are rescued is machine-independent; "
-                f"{POST_NEGOTIATION_SWEEP_SAFETY_BACKSTOP_S:.0f}s/"
-                f"{POST_NEGOTIATION_SWEEP_PER_NET_SAFETY_BACKSTOP_S:.0f}s wall "
-                "clocks kept only as non-binding Python-fallback backstops"
-            )
-        per_net_str = "unbounded" if per_net is None else f"{per_net:.1f}s"
-        if timeout is not None:
-            why = "the caller passed a stage timeout (issue #4159)"
-        elif per_net_timeout is not None:
-            why = "the caller passed an explicit per-net wall clock (issue #4159)"
-        else:
-            why = (
-                "no per-net node-expansion cap is active, so the "
-                "machine-dependent bound is kept (issue #4724)"
-            )
-        return (
-            f"  Post-negotiation sweep bound: {budget:.1f}s whole-sweep / "
-            f"{per_net_str} per-net wall clock -- {why}"
+        return _negotiated_budget.post_negotiation_sweep_bound_line(
+            budget, per_net, timeout, per_net_timeout
         )
 
     def _relief_rescue(
@@ -20703,6 +20478,20 @@ class Autorouter:
         )
         return results
 
+    def _net_class_clearance_mm(self, net: int, name: str = "") -> float:
+        """Net-class clearance (mm) declared for ``net``, or 0.0 when none.
+
+        Looked up by the net's name in ``net_class_map`` (``name`` is the
+        fallback for pads whose net id has no registered name).  Shared by
+        the skew-tune foreign-copper gate (Issue #6664) and the match-group
+        tuner's pairwise ``max(class(a), class(b))`` floor (Issue #6969).
+        """
+        class_map = getattr(self, "net_class_map", None) or {}
+        net_names = getattr(self, "net_names", None) or {}
+        key = (net_names.get(net, "") if net else "") or name
+        nc = class_map.get(key) if key else None
+        return float(getattr(nc, "clearance", 0.0) or 0.0) if nc is not None else 0.0
+
     def _skew_tune_foreign_clearance_ok(
         self,
         routes_by_net: dict[int, Route],
@@ -20728,16 +20517,10 @@ class Autorouter:
 
         from .grid import pad_segment_edge_clearance
 
-        class_map = getattr(self, "net_class_map", None) or {}
-        net_names = getattr(self, "net_names", None) or {}
         base = float(self.rules.trace_clearance)
         pads = list(getattr(self.grid, "_pads", None) or self.pads.values())
         pitches = self.component_pitches
-
-        def class_clearance(net: int, name: str = "") -> float:
-            key = (net_names.get(net, "") if net else "") or name
-            nc = class_map.get(key) if key else None
-            return float(getattr(nc, "clearance", 0.0) or 0.0) if nc is not None else 0.0
+        class_clearance = self._net_class_clearance_mm
 
         def ok(new_segments: list[Any], net: int) -> bool:
             own = max(base, class_clearance(net))
@@ -20855,7 +20638,43 @@ class Autorouter:
             cache[1], (p for p in self.pads.values() if not p.steiner_point)
         )
 
-    def _net_routes_merged(self) -> dict[int, Route]:
+    def _preserved_fragments(self, net_ids: set[int]) -> list[Route]:
+        """Preserved-copper fragments of ``net_ids`` not already in ``self.routes``.
+
+        Issue #6968: under ``--preserve-existing`` the input board's copper
+        (board 07's 7-9 mm SDRAM escape stubs) lives in ``existing_routes``,
+        not ``self.routes``, so a tuner measuring ``self.routes`` alone saw
+        only the newly routed part of each net.  Fragments already present in
+        ``self.routes`` (by identity) are skipped so nothing is counted twice.
+
+        Only copper the writer will actually re-emit is returned, mirroring
+        ``route_cmd._finalize_routes``: a net that was freshly routed drops
+        its preserved copper (the fresh route wins) unless it is a stub net
+        (``_stub_terminals``, #4170), and the placement disposition's
+        ``preserve_copper_nets`` / neutral routes are excluded.
+        """
+        in_routes = {id(r) for r in self.routes}
+        routed_net_ids = {r.net for r in self.routes} - set(
+            getattr(self, "_stub_terminals", None) or {}
+        )
+        disposition = getattr(self, "placement_disposition", None)
+        dropped_names: set[str] = set()
+        neutral_ids: set[int] = set()
+        if disposition is not None:
+            dropped_names = set(getattr(disposition, "preserve_copper_nets", ()) or ())
+            neutral_ids = {id(r) for r in getattr(self, "placement_neutral_routes", ()) or ()}
+        return [
+            r
+            for r in (getattr(self, "existing_routes", None) or ())
+            if r.net in net_ids
+            and r.net not in routed_net_ids
+            and id(r) not in in_routes
+            and id(r) not in neutral_ids
+            and r.net_name not in dropped_names
+            and (r.segments or r.vias)
+        ]
+
+    def _net_routes_merged(self, preserved: Iterable[Route] = ()) -> dict[int, Route]:
         """One complete-net :class:`Route` per net, for the length tuners.
 
         A net can be held as several Route fragments (fixed escapes plus
@@ -20865,19 +20684,29 @@ class Autorouter:
         counts such a via once, so the merged Route measures as the whole net
         (Issue #6792).  A single-fragment net keeps its Route object, so the
         tuners can still edit it in place.
+
+        ``preserved`` (Issue #6968) adds preserved-copper fragments (from
+        :meth:`_preserved_fragments`) to their nets' merged Route, so the
+        measured length is the whole net as written.  Callers must treat
+        those fragments' segments and vias as fixed.
         """
+        preserved = list(preserved)
+        preserved_ids = {id(r) for r in preserved}
         fragments_by_net: dict[int, list[Route]] = {}
-        for route in self.routes:
+        for route in [*self.routes, *preserved]:
             fragments_by_net.setdefault(route.net, []).append(route)
+        # A preserved fragment is never handed out by identity: the tuners
+        # may edit a single-fragment Route in place, and preserved copper
+        # must stay byte-identical.
         return {
             net: fragments[0]
-            if len(fragments) == 1
+            if len(fragments) == 1 and id(fragments[0]) not in preserved_ids
             else Route(
                 net=net,
                 net_name=fragments[0].net_name,
                 segments=[s for r in fragments for s in r.segments],
                 vias=[v for r in fragments for v in r.vias],
-                is_escape=all(r.is_escape for r in fragments),
+                is_escape=all(r.is_escape or id(r) in preserved_ids for r in fragments),
             )
             for net, fragments in fragments_by_net.items()
         }
@@ -21005,8 +20834,24 @@ class Autorouter:
 
         # A net can contain separate escape and channel Route objects. The
         # tuner needs their complete geometry for lengths and foreign clearance.
-        routes_by_net = self._net_routes_merged()
+        #
+        # Issue #6968: a group member's preserved copper (``existing_routes``
+        # under --preserve-existing, e.g. board 07's input escape stubs) is
+        # part of the net's length too.  It is merged in for measurement and
+        # held FIXED: its segments are never edited and never re-published
+        # into ``self.routes`` (the writer already emits it from the input).
+        member_net_ids: set[int] = set()
+        for _grp in detected_groups:
+            member_net_ids.update(_grp.net_ids)
+            for _pair in _grp.pair_ids:
+                member_net_ids.update(_pair)
+        preserved = self._preserved_fragments(member_net_ids)
+        preserved_segment_ids = {id(s) for r in preserved for s in r.segments}
+        preserved_via_ids = {id(v) for r in preserved for v in r.vias}
+        preserved_nets = {r.net for r in preserved}
+        routes_by_net = self._net_routes_merged(preserved)
         fixed_segment_ids = {id(s) for r in self.routes if r.is_escape for s in r.segments}
+        fixed_segment_ids |= preserved_segment_ids
 
         # Update the match-group skew tracker so the post-tuning results are
         # queryable.  Use the layer-stack count when available, else default
@@ -21036,7 +20881,7 @@ class Autorouter:
             )
 
         self._match_group_tracker.record_routes(
-            routes=self.routes,
+            routes=list(self._net_routes_merged(preserved).values()),
             groups=detected_groups,
             num_copper_layers=num_layers,
             board_thickness_mm=board_thickness_mm,
@@ -21080,6 +20925,27 @@ class Autorouter:
             pads_by_net.setdefault(pad.net, []).append(pad)
         pad_clearance_mm = self.rules.trace_clearance
 
+        # Issues #6969/#6979: per-net class clearances, so a group whose
+        # floor is relaxed to its own class holds every neighbour to the
+        # pairwise KiCad rule max(group class, neighbour class).  Pads
+        # contribute their net names as a fallback for ids without a
+        # registered name.  KiCad puts every net without a class -- and
+        # net-0 (no-net) copper -- in the Default class, so those neighbours
+        # get the Default class clearance, or ``rules.trace_clearance`` when
+        # no Default class is declared.  Every routed net and every pad's
+        # net (unrouted ones included) gets an entry.
+        net_clearance_mm: dict[int, float] = {}
+        _clearance_names: dict[int, str] = {}
+        for _pad in self.pads.values():
+            _clearance_names.setdefault(_pad.net, getattr(_pad, "net_name", "") or "")
+        _default_class = (getattr(self, "net_class_map", None) or {}).get("Default")
+        _default_class_mm = float(getattr(_default_class, "clearance", 0.0) or 0.0)
+        if _default_class_mm <= 0.0:
+            _default_class_mm = float(self.rules.trace_clearance)
+        for _nid in set(self.net_names) | set(routes_by_net) | set(_clearance_names):
+            _c = self._net_class_clearance_mm(_nid, _clearance_names.get(_nid, ""))
+            net_clearance_mm[_nid] = _c if _c > 0.0 else _default_class_mm
+
         if engage not in ("length_critical", "checker_limit"):
             raise ValueError(f"unknown match-group engage policy: {engage!r}")
 
@@ -21093,8 +20959,35 @@ class Autorouter:
             intra_pair_clearance_mm = self.rules.trace_clearance
             length_critical = True
 
+            group_via_clearance_mm = via_clearance_mm
+            group_pad_clearance_mm = pad_clearance_mm
+            group_net_clearance_mm: dict[int, float] | None = None
+
             net_class = self._resolve_net_class_for_group(group)
             if net_class is not None:
+                # Issue #6969: the post-insertion DRC self-check used the
+                # router-global clearance (0.200mm) even where the group's
+                # class declares less (SDRAM: 0.175mm), rejecting meanders
+                # the board's own rules allow.  Honour the class value, never
+                # below the manufacturer / authored floors, and never above
+                # the global rule (this only relaxes, it cannot tighten).
+                # KiCad's pairwise clearance is the larger of the two items'
+                # class values; ``class_floor_mm`` is only this group's half.
+                # Each neighbour is held to max(floor, its class) through
+                # ``net_clearance_mm`` below (Issue #6979), which replaces
+                # #6972's board-wide strictest-class clamp.
+                class_floor_mm = max(
+                    float(net_class.clearance),
+                    self.rules.mfr_clearance_floor or 0.0,
+                    self.rules.authored_min_clearance or 0.0,
+                )
+                if class_floor_mm < intra_group_clearance_mm:
+                    intra_group_clearance_mm = class_floor_mm
+                group_via_clearance_mm = min(via_clearance_mm, max(class_floor_mm, 0.0))
+                group_pad_clearance_mm = min(pad_clearance_mm, max(class_floor_mm, 0.0))
+                # The relaxed floor is this group's half of the rule only;
+                # KiCad holds each neighbour to max(own, neighbour class).
+                group_net_clearance_mm = net_clearance_mm
                 tolerance_mm = net_class.effective_length_match_tolerance(0.5)
                 # Issue #6443: floored like the routed gap.
                 intra_pair_clearance_mm = self._pair_gap_mm(net_class)
@@ -21192,10 +21085,11 @@ class Autorouter:
                     intra_group_clearance_mm=intra_group_clearance_mm,
                     intra_pair_clearance_mm=intra_pair_clearance_mm,
                     length_critical=length_critical,
-                    via_clearance_mm=via_clearance_mm,
+                    via_clearance_mm=group_via_clearance_mm,
                     diff_pair_partners=diff_pair_partners_by_id,
                     pads_by_net=pads_by_net,
-                    pad_clearance_mm=pad_clearance_mm,
+                    pad_clearance_mm=group_pad_clearance_mm,
+                    net_clearance_mm=group_net_clearance_mm,
                     board_thickness_mm=board_thickness_mm,
                     num_copper_layers=num_layers,
                     blind_buried_supported=blind_buried_supported,
@@ -21218,6 +21112,7 @@ class Autorouter:
             # Committing meanders that do not clear the error only adds copper
             # (07rf DDR_DATA_BYTE_0: "8 tuned" next to an unchanged 18.171mm).
             still_over_limit: tuple[float, float] | None = None
+            improved_still_over = False
             if engage == "checker_limit":
                 spread_after = self._checker_group_spread_mm(
                     group,
@@ -21229,17 +21124,32 @@ class Autorouter:
                 )
                 if spread_after is not None and spread_after > tolerance_mm:
                     still_over_limit = (spread_after, tolerance_mm)
-                    from .match_group_tuning import mark_group_rolled_back
-
-                    group_results = mark_group_rolled_back(
-                        group_results,
-                        before_by_net,
-                        spread_mm=spread_after,
-                        tolerance_mm=tolerance_mm,
+                    from .match_group_tuning import (
+                        mark_group_improved_still_over_limit,
+                        mark_group_rolled_back,
                     )
-                    for net in group_results:
-                        if net in before_by_net:
-                            routes_by_net[net] = before_by_net[net]
+
+                    # Issue #6969: keep the DRC-clean meanders when the spread
+                    # strictly improved; roll back only when it did not.  The
+                    # group is still reported as NOT achieved.
+                    if spread_mm is not None and spread_after < spread_mm:
+                        group_results = mark_group_improved_still_over_limit(
+                            group_results,
+                            spread_before_mm=spread_mm,
+                            spread_mm=spread_after,
+                            tolerance_mm=tolerance_mm,
+                        )
+                        improved_still_over = True
+                    else:
+                        group_results = mark_group_rolled_back(
+                            group_results,
+                            before_by_net,
+                            spread_mm=spread_after,
+                            tolerance_mm=tolerance_mm,
+                        )
+                        for net in group_results:
+                            if net in before_by_net:
+                                routes_by_net[net] = before_by_net[net]
 
             # The tuner mutates its lookup as members commit. Compare against
             # the pre-call view, preserving original fragments on no-op/rollback.
@@ -21255,6 +21165,9 @@ class Autorouter:
                 for net, route in changed.items():
                     escapes = [r for r in previous_routes if r.net == net and r.is_escape]
                     escape_via_ids = {id(v) for r in escapes for v in r.vias}
+                    # Issue #6968: preserved copper is fixed and stays out of
+                    # ``self.routes``; strip it like an escape fragment.
+                    escape_via_ids |= preserved_via_ids
                     replacements[net] = (
                         Route(
                             net=route.net,
@@ -21262,7 +21175,7 @@ class Autorouter:
                             segments=[s for s in route.segments if id(s) not in fixed_segment_ids],
                             vias=[v for v in route.vias if id(v) not in escape_via_ids],
                         )
-                        if escapes
+                        if escapes or net in preserved_nets
                         else route
                     )
                 published: list[Route] = []
@@ -21301,11 +21214,41 @@ class Autorouter:
                     print(
                         f"    STILL OVER LIMIT: spread {still_over_limit[0]:.3f}mm > "
                         f"limit {still_over_limit[1]:.3f}mm after tuning; "
-                        "rolled back every serpentine in the group"
+                        + (
+                            "kept the DRC-clean serpentines (improved, not achieved)"
+                            if improved_still_over
+                            else "rolled back every serpentine in the group"
+                        )
                     )
                 elif _skew is not None:
                     _skew_before, _skew_after = _skew
                     print(f"    skew: {_skew_before:.3f}mm -> {_skew_after:.3f}mm")
+                else:
+                    # Issue #6968: a group the tuner declined (e.g. gated off
+                    # by ``length_critical=False``) carries no per-member
+                    # lengths, so report its measured spread -- preserved
+                    # copper included -- the way ``kct check`` measures it.
+                    _spread_before = self._checker_group_spread_mm(
+                        group,
+                        before_by_net,
+                        board_thickness_mm,
+                        num_layers,
+                        length_model,
+                        blind_buried_supported=blind_buried_supported,
+                    )
+                    _spread_after = self._checker_group_spread_mm(
+                        group,
+                        routes_by_net,
+                        board_thickness_mm,
+                        num_layers,
+                        length_model,
+                        blind_buried_supported=blind_buried_supported,
+                    )
+                    if _spread_before is not None and _spread_after is not None:
+                        print(
+                            f"    skew: {_spread_before:.3f}mm -> {_spread_after:.3f}mm "
+                            f"(limit {tolerance_mm:.3f}mm)"
+                        )
                 # Issue #3440 addendum: rollbacks / budget exhaustion /
                 # missing segments must say WHY (which DRC rule the
                 # candidate meander violated, requested-vs-achieved mm)
@@ -21329,7 +21272,7 @@ class Autorouter:
         # the DRC rule) so the post-tuning skew query reflects drilled
         # length, not planar-only copper.
         self._match_group_tracker.record_routes(
-            routes=self.routes,
+            routes=list(self._net_routes_merged(preserved).values()),
             groups=detected_groups,
             num_copper_layers=num_layers,
             board_thickness_mm=board_thickness_mm,

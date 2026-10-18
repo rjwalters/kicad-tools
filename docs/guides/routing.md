@@ -148,8 +148,17 @@ terminal pads. If a chamfer, staircase compression or other rewrite would
 touch anything the routed branch did not already touch, the whole route
 keeps its routed geometry and the log prints
 `Kelvin branch isolation: N route(s) kept pre-optimization geometry`. Contact
-the router already committed is left alone, not reported here. Ordinary nets
+the router already committed is left alone, not reported here, but a rewrite
+may not push it further from the shunt pad: the sense tap reads the force
+path's IR drop up to the furthest point the branches share. Ordinary nets
 are optimized exactly as before.
+
+`kct optimize-traces` applies the same rules to an already-routed board. It
+reads the Kelvin nets from the board's pads, splits each one into the
+branches left once the shunt pad is cut away, optimizes each branch on its
+own and keeps any branch whose rewrite would touch a sibling. Branches the
+board already joins outside the shunt count as one branch. A board with no
+sense-named net is processed exactly as before, without reading its pads.
 
 The physical-isolation implementation described here covers the grid engine;
 mesh and lattice routing have separate implementations. It does not repair

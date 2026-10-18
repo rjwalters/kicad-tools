@@ -880,9 +880,16 @@ class GerberExporter:
         output_dir: str | Path | None = None,
         progress_callback: ProgressCallback | None = None,
         vscore_layers: list[str] | None = None,
+        *,
+        layers: list[str] | None = None,
+        generate_drill: bool | None = None,
+        create_zip: bool | None = None,
     ) -> Path:
         """
         Export Gerbers using manufacturer preset.
+
+        The preset supplies the defaults; any override argument that is not
+        ``None`` replaces the matching preset field (Issue #7023).
 
         Args:
             manufacturer: Manufacturer ID (jlcpcb, pcbway, oshpark)
@@ -890,9 +897,18 @@ class GerberExporter:
             progress_callback: Optional callback for progress reporting.
             vscore_layers: User layers to plot as V-score layers on top of
                 the preset (see :attr:`GerberConfig.vscore_layers`).
+            layers: Explicit Gerber layer list, passed verbatim to
+                ``kicad-cli --layers``. ``None`` keeps the preset's layer set.
+                A non-empty list without ``Edge.Cuts`` logs a warning (fabs
+                reject outline-less packages) but is still honoured.
+            generate_drill: ``False`` skips drill export, ``True`` forces it.
+                ``None`` keeps the preset value (drill on).
+            create_zip: ``False`` leaves the loose Gerber/drill files in
+                ``output_dir`` and returns the directory; ``True`` zips them.
+                ``None`` keeps the preset value (zip, loose files removed).
 
         Returns:
-            Path to output (directory or zip file)
+            Path to the zip file when zipping, otherwise the output directory
 
         Raises:
             ValueError: If manufacturer is not supported
@@ -910,6 +926,18 @@ class GerberExporter:
         config = preset.config
         if vscore_layers:
             config = replace(config, vscore_layers=list(vscore_layers))
+        if layers is not None:
+            if layers and "Edge.Cuts" not in layers:
+                logger.warning(
+                    "Gerber export: layer list %s has no Edge.Cuts; "
+                    "fabs usually reject packages without a board outline",
+                    layers,
+                )
+            config = replace(config, layers=list(layers))
+        if generate_drill is not None:
+            config = replace(config, generate_drill=generate_drill)
+        if create_zip is not None:
+            config = replace(config, create_zip=create_zip)
         return self.export(config, output_dir, progress_callback=progress_callback)
 
     def _export_gerbers(self, config: GerberConfig, output_dir: Path) -> None:

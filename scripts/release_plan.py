@@ -23,11 +23,15 @@ What one run does
    assemble (no fragments, empty ``[Unreleased]``) means no user-visible
    change, so the run exits quietly too.
 4. **Gate** (all on the exact ``origin/main`` SHA; :func:`evaluate_gate`):
-   the newest ``CI`` push run on the SHA completed with every release-topic
-   job in :data:`RELEASE_JOBS` green or skipped (skipped is never red, whatever
+   the newest ``CI`` main run (:data:`MAIN_CI_EVENTS` -- since #5986 main is
+   verified by scheduled / dispatched runs, not on every merge) on the SHA
+   completed with every release-topic job in :data:`RELEASE_JOBS` green or
+   skipped (skipped is never red, whatever
    the reason -- #5776 curator note §1); ``changelog_gap_report.py`` reports no
    gaps; ``uv lock --check`` passes.  A CI run still in progress is waited for
-   (bounded by ``--wait-ci``).  A red gate never releases: in ``on`` mode it
+   (bounded by ``--wait-ci``); when the SHA has no main run at all, one is
+   requested through ``workflow_dispatch`` first so the gate does not depend
+   on the next hourly run landing on this exact SHA.  A red gate never releases: in ``on`` mode it
    comments its reasons on the "Automated release status" tracking issue.
 5. **Release PR** (``on`` only): build ``release/vX.Y.Z`` from the gated SHA
    (:func:`build_release_tree` -- assembled CHANGELOG, fragments deleted,
@@ -42,7 +46,8 @@ What one run does
 Tokens
 ------
 Reads (Actions runs/jobs, PR lists, the gap report's PR lookups) use
-``GH_TOKEN`` -- the workflow's ``GITHUB_TOKEN`` with ``actions: read``.
+``GH_TOKEN`` -- the workflow's ``GITHUB_TOKEN`` with ``actions: write`` (read,
+plus the one ``workflow_dispatch`` of ``ci.yml`` the gate may request).
 Writes (PR create/edit/close/merge, branch delete, tracking-issue comments)
 use ``RELEASE_TOKEN`` -- the loom-fleet-dispatch App token, so the push and PR
 trigger ``ci.yml`` (a ``GITHUB_TOKEN`` push/PR would not; curator note §3).
@@ -102,6 +107,10 @@ TRACKING_ISSUE_TITLE = "Automated release status"
 #: Marks a PR body as opened by this workflow (a hand-opened release PR lacks it).
 AUTO_MARKER = "<!-- kct-auto-release -->"
 CI_WORKFLOW_FILE = "ci.yml"
+#: ``ci.yml`` events that verify main itself (Issue #5986): the hourly / nightly
+#: schedule and workflow_dispatch.  ``push`` is kept so runs from before the
+#: trigger change still count.  Every one runs the full job set.
+MAIN_CI_EVENTS: tuple[str, ...] = ("push", "schedule", "workflow_dispatch")
 
 #: The release-topic CI jobs (check-run / job ``name:`` in ci.yml).  A job whose
 #: name is ``<name> (<suffix>)`` (e.g. ``Diff-Pair Routing Regression
@@ -329,8 +338,11 @@ def evaluate_jobs(
     return problems
 
 
-def newest_run(runs: Iterable[dict[str, Any]], event: str | None = None) -> dict[str, Any] | None:
-    candidates = [r for r in runs if event is None or r.get("event") == event]
+def newest_run(
+    runs: Iterable[dict[str, Any]], event: str | Iterable[str] | None = None
+) -> dict[str, Any] | None:
+    events = None if event is None else {event} if isinstance(event, str) else set(event)
+    candidates = [r for r in runs if events is None or r.get("event") in events]
     if not candidates:
         return None
     return max(candidates, key=lambda r: (r.get("created_at") or "", r.get("id") or 0))
@@ -584,6 +596,19 @@ class Forge:
         ]
         return runs
 
+    def dispatch_ci(self) -> None:
+        """Request a ``workflow_dispatch`` run of ``ci.yml`` on the base branch.
+
+        Uses ``GH_TOKEN`` (the workflow's ``GITHUB_TOKEN``, ``actions: write``):
+        the App token has no ``actions`` permission, and a ``GITHUB_TOKEN``
+        dispatch is the one event that token may trigger.
+        """
+        self.api(
+            f"{{repo}}/actions/workflows/{CI_WORKFLOW_FILE}/dispatches",
+            method="POST",
+            body={"ref": BASE_BRANCH},
+        )
+
     def run_jobs(self, run_id: int) -> list[dict[str, Any]]:
         jobs: list[dict[str, Any]] = self.api(
             f"{{repo}}/actions/runs/{run_id}/jobs?filter=latest&per_page=100"
@@ -794,13 +819,32 @@ def wait_for(
 
 
 def main_ci_state(forge: Forge, sha: str) -> tuple[str, list[str]]:
-    run = newest_run(forge.runs_for_sha(sha, CI_WORKFLOW_FILE), event="push")
+    run = newest_run(forge.runs_for_sha(sha, CI_WORKFLOW_FILE), event=MAIN_CI_EVENTS)
     if run is None:
-        return "pending", [f"no CI push run found for {sha[:12]}"]
+        return "pending", [f"no CI main run found for {sha[:12]}"]
     if run.get("status") != "completed":
         return "pending", [f"CI run {run['id']} on {sha[:12]} is {run.get('status')}"]
     problems = evaluate_jobs(forge.run_jobs(run["id"]))
     return ("red" if problems else "green"), problems
+
+
+def request_main_ci(forge: Forge, sha: str) -> list[str]:
+    """Dispatch ``ci.yml`` on main when ``sha`` has no main run yet (#5986).
+
+    Main CI runs hourly on the newest main, so the SHA a release gates on may
+    never get a scheduled run if another merge lands first.  The dispatched
+    run verifies the newest main, which is ``sha`` unless main moved in the
+    seconds since the plan; then the bounded wait simply times out, as before.
+    A failed dispatch is not fatal: the gate still waits for a scheduled run.
+    """
+    if newest_run(forge.runs_for_sha(sha, CI_WORKFLOW_FILE), event=MAIN_CI_EVENTS):
+        return []
+    try:
+        forge.dispatch_ci()
+    except ReleaseError as exc:
+        print(f"warning: could not dispatch CI: {exc}", file=sys.stderr)
+        return [f"no main CI run on {sha[:12]}; dispatch failed, waited for a scheduled run"]
+    return [f"no main CI run on {sha[:12]}; dispatched one"]
 
 
 def pr_checks_state(forge: Forge, sha: str) -> tuple[str, list[str]]:
@@ -883,6 +927,7 @@ def evaluate_gate(
     sleep: Callable[[float], None] = time.sleep,
 ) -> GateResult:
     result = GateResult()
+    result.notes += request_main_ci(forge, plan.sha)
     state, reasons = wait_for(lambda: main_ci_state(forge, plan.sha), wait_ci, interval, sleep)
     if state == "green":
         result.notes.append(f"CI green on {plan.sha[:12]} (skipped jobs count as not red)")

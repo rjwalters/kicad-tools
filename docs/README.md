@@ -70,7 +70,8 @@ Detailed reference documentation:
 - [KiCad Image Pin](contributing/kicad-image-pin.md) - Bumping the pinned KiCad container image used by CI
 
 ### Research Notes & Audits
-Point-in-time working documents — dated entries describe the tree as of their date:
+Point-in-time working documents — dated entries describe the tree as of their date.
+Indexes: [Research notes](research/README.md) (ecosystem evaluations, router experiments, calibration notes, audits), [Diagnostics](diagnostics/README.md) (retained investigation evidence), [Stripline 5016 investigation](investigations/stripline-5016/README.md).
 
 | Document | Description |
 |----------|-------------|

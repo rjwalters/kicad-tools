@@ -68,6 +68,7 @@ from .diffpair_detection import (
 )
 from .diffpair_length import DiffPairLengthTracker
 from .edge_keepout import install_edge_keepout
+from .grid import routed_halo_radius_cells
 from .layers import Layer
 from .observability import validate_net_connectivity
 from .pair_layer_filter import pair_permitted_layers
@@ -79,6 +80,7 @@ from .quantize import (
     verify_segment_45,
 )
 from .route_halo_geometry import RouteHaloRefiner
+from .search_radius import search_radius_cells
 
 logger = logging.getLogger(__name__)
 
@@ -570,6 +572,21 @@ class _EscapeChannel(NamedTuple):
     reach: float
 
 
+def _via_to_trace_keepout_mm(rules: DesignRules, trace_width: float) -> float:
+    """Centre-to-centreline keep-out between a via barrel and a foreign trace (Epic #5509).
+
+    ``via_diameter/2 + trace_via_clearance_mm(trace_clearance, via_clearance)
+    + trace_width/2``: the same trace/via floor the exact gate
+    (``_segment_via_deficit`` / ``_via_copper_deficit``) enforces, so a
+    pre-screen can never admit a site that gate rejects (Issue #6963).
+    """
+    return (
+        rules.via_diameter / 2
+        + trace_via_clearance_mm(rules.trace_clearance, rules.via_clearance)
+        + trace_width / 2
+    )
+
+
 def _channel_seal_penalty(
     x: float,
     y: float,
@@ -579,8 +596,8 @@ def _channel_seal_penalty(
     """How deeply a via barrel at ``(x, y)`` plugs other nets' escapes (#4574).
 
     ``keepout`` is the centre-to-centre distance a foreign trace must keep
-    from the barrel (``via_diameter/2 + trace_clearance + trace_width/2``), so
-    a barrel closer than that to a channel's ray makes the pad's direct escape
+    from the barrel (``_via_to_trace_keepout_mm``: ``via_diameter/2 +
+    max(trace_clearance, via_clearance) + trace_width/2``), so a barrel closer than that to a channel's ray makes the pad's direct escape
     illegal.  The penalty is the summed intrusion depth over every channel the
     barrel reaches into -- ``0.0`` means the barrel leaves every modelled
     escape exactly as it found it, which is the overwhelmingly common case and
@@ -2052,20 +2069,15 @@ class CoupledPathfinder:
                 self._allow_smd_vias = bool(get_mfr_limits(rules.manufacturer).via_in_pad_supported)
         self._smd_pad_drill_memo: dict[tuple[int, int], bool] = {}
 
-        # Pre-calculate trace clearance radius
-        self._trace_half_width_cells = max(
-            1,
-            math.ceil(
-                (self.rules.trace_width / 2 + self.rules.trace_clearance) / self.grid.resolution
-            ),
+        # Pre-calculate trace clearance radius (Issue #6994: the guarded
+        # rule shared with the Python Router and the native A*).
+        self._trace_half_width_cells = search_radius_cells(
+            self.rules.trace_width / 2, self.rules.trace_clearance, self.grid.resolution
         )
 
         # Pre-calculate via blocking radius
-        self._via_half_cells = max(
-            1,
-            math.ceil(
-                (self.rules.via_diameter / 2 + self.rules.via_clearance) / self.grid.resolution
-            ),
+        self._via_half_cells = search_radius_cells(
+            self.rules.via_diameter / 2, self.rules.via_clearance, self.grid.resolution
         )
 
         # Issue #3508: extra radial slack a via needs BEYOND the trace
@@ -5566,11 +5578,8 @@ class DiffPairRouter:
         """
         grid = self.autorouter.grid
         for seg in route.segments:
-            total_clearance = seg.width / 2 + grid.rules.trace_clearance
-            clearance_cells = int(total_clearance / grid.resolution) + 1
-            # Mirror the #1666 grid-quantization safety margin used by
-            # ``RoutingGrid.mark_route``.
-            clearance_cells += 1
+            # Same PY halo radius as ``RoutingGrid.mark_route`` (#5858/#6982).
+            clearance_cells = routed_halo_radius_cells(seg, grid.rules, grid.resolution)
             grid._mark_segment(seg, clearance_cells=clearance_cells)
         self.autorouter._mark_route_on_cpp_grid(route)
 
@@ -7851,8 +7860,9 @@ class DiffPairRouter:
         pathfinder's via predicate, and -- because the partner guide is
         NOT in the grid -- explicit geometric clearance against the
         partner segments is enforced: same-layer segment portions and
-        via barrels keep ``via_diameter/2 + trace_clearance +
-        partner_width/2`` of centerline distance.
+        via barrels keep ``_via_to_trace_keepout_mm(rules, partner_width)``
+        (``via_diameter/2 + max(trace_clearance, via_clearance) +
+        partner_width/2``) of centerline distance.
         """
         grid = self.autorouter.grid
         rules = self.autorouter.rules
@@ -7862,8 +7872,8 @@ class DiffPairRouter:
         width = pathfinder._get_trace_width_for_net(head.net_name)
         partner_width = max((ps.width for ps in partner_segments), default=width)
         # Via barrel vs partner trace clearance bound (vias are not
-        # pair members; the standard manufacturer clearance applies).
-        via_clear = rules.via_diameter / 2 + rules.trace_clearance + partner_width / 2
+        # pair members; the trace/via floor the exact gate enforces applies).
+        via_clear = _via_to_trace_keepout_mm(rules, partner_width)
         # Same-layer trace vs partner trace: the intra-pair bound.
         seg_clear = self._pair_seg_clearance(pathfinder, head.net_name)
 
@@ -7957,7 +7967,7 @@ class DiffPairRouter:
             exclude.update(ps.net for ps in partner_segments)
             channels = self._escape_channel_registry(frozenset(exclude))
             if channels:
-                seal_keepout = rules.via_diameter / 2 + rules.trace_clearance + width / 2
+                seal_keepout = _via_to_trace_keepout_mm(rules, width)
                 seal_cache: dict[tuple[float, float], float] = {}
 
                 def _site_penalty(site: tuple[float, float]) -> float:
@@ -8568,7 +8578,7 @@ class DiffPairRouter:
         window = max(rules.via_drill + min_h2h + 2.0 * grid.resolution, 4.0 * grid.resolution)
         existing = self._collect_existing_drills()
         guide_width = max((s.width for s in leg.segments), default=rules.trace_width)
-        via_clear = rules.via_diameter / 2 + rules.trace_clearance + guide_width / 2
+        via_clear = _via_to_trace_keepout_mm(rules, guide_width)
 
         order = sorted(
             range(len(leg.segments)),
@@ -10489,7 +10499,8 @@ class DiffPairRouter:
         # stable relative to the fixed-gap constructor for the easy pairs).
         gap_ladder = self._shadow_gap_ladder(d, d_min, d_max)
         # Shadow via lateral offset: the barrel must clear the guide
-        # trace (via_r + clearance + guide_width/2), independent of the
+        # trace (``_via_to_trace_keepout_mm``: via_r + max(trace, via)
+        # clearance + guide_width/2), independent of the
         # tighter coupled gap d.
         guide_width = max((g.width for g in guide.segments), default=s_width)
         # Issue #3541: the perpendicular distance from the shadow via to
@@ -10503,7 +10514,7 @@ class DiffPairRouter:
         # enforces (see ``_synthesize_crossing_tail``); we validate each
         # candidate site against the guide polyline with it and widen the
         # perpendicular spread (the ``lat_mult`` lattice) until it holds.
-        via_clear = rules.via_diameter / 2 + rules.trace_clearance + guide_width / 2
+        via_clear = _via_to_trace_keepout_mm(rules, guide_width)
         via_lateral = max(d, via_clear + 0.05)
         guide_segs = list(guide.segments)
         # Longitudinal stagger so shadow-via-to-guide-via >= via pitch.

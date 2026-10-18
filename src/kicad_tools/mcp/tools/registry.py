@@ -123,6 +123,7 @@ def _make_params(
         "type": "object",
         "properties": properties,
         "required": required or [],
+        "additionalProperties": False,
     }
 
 

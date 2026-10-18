@@ -6177,6 +6177,16 @@ def load_pcb_for_routing(
             # Determine net ID from first available element
             net_id = segs[0].net if segs else vias[0].net
 
+            # Issue #6970: KiCad-10 name-only copper (no numeric net header)
+            # parses as net 0, which would make it foreign to every real net.
+            # Resolve it through the dialect-normalized net_map, as the
+            # preserve_placement re-key below does.
+            mapped_id = net_map.get(net_name, 0)
+            if net_id == 0 and mapped_id > 0:
+                net_id = mapped_id
+                segs = [replace(seg, net=net_id) for seg in segs]
+                vias = [replace(via, net=net_id) for via in vias]
+
             route = Route(
                 net=net_id,
                 net_name=net_name,

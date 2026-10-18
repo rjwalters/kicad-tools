@@ -98,7 +98,8 @@
 # Usage:
 #   post-verdict.sh <pr-number> <approved|changes-requested> <sha> \
 #       (--body TEXT | --body-file PATH) [--reviews-reconciled TEXT] \
-#       [--overrules-prior TEXT]
+#       [--overrules-prior TEXT] [--review-started RFC3339] \
+#       [--issue-body-sha N=HASH]...
 #
 #   PATH may be "-" to read the body from stdin.
 #
@@ -111,6 +112,17 @@
 #       verdict at this SAME head no longer blocks (at least 40 chars). Without
 #       it such an approval is refused (#10581); with no new push, the usual
 #       answer is to wait for the Doctor rather than to overrule.
+#
+#   --review-started RFC3339   Approvals only (#12614): when this review began
+#       (capture `date -u +%Y-%m-%dT%H:%M:%SZ` when you claim the PR). The gate
+#       refuses the approval when a trusted human comment on the PR or a linked
+#       issue is newer, or a linked issue body no longer matches its
+#       --issue-body-sha; the refusal (exit 7) names the comment or issue. Re-review
+#       against the current spec, then retry with a fresh value. Absent: no such
+#       check, and the gate warns.
+#
+#   --issue-body-sha N=HASH   (repeatable) Issue N's body as you reviewed it:
+#       `printf %s "$(gh api repos/OWNER/REPO/issues/N --jq .body)" | sha256sum | cut -d' ' -f1`.
 #
 # Output: whatever `gh pr comment` prints on success (the comment URL) —
 # unchanged, so a caller parsing that output needs no change.
@@ -168,7 +180,7 @@ shift 3
 BODY=""
 BODY_FILE=""
 HAVE_BODY=false
-RECONCILED="" OVERRULE=""
+RECONCILED="" OVERRULE="" REVIEW_STARTED="" ISSUE_HASHES=()
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -183,6 +195,8 @@ while [[ $# -gt 0 ]]; do
       ;;
     --reviews-reconciled) RECONCILED="${2:-}"; shift 2 ;;
     --overrules-prior) OVERRULE="${2:-}"; shift 2 ;;
+    --review-started) REVIEW_STARTED="${2:-}"; shift 2 ;;
+    --issue-body-sha) ISSUE_HASHES+=("${2:-}"); shift 2 ;;
     *)
       echo "post-verdict.sh: unknown argument: $1" >&2
       exit 2
@@ -373,7 +387,7 @@ if [[ "$VERDICT" == "approved" && "${GATE_SKIPPED:-false}" != "true" ]]; then
     RECONCILIATION_MARKER="<!-- loom:review-reconciliation state=$GATE_STATE_TOKEN reviews=${GATE_REVIEWS:-0} blocking_current=${GATE_BLOCK_CURRENT:-0} blocking_older=${GATE_BLOCK_OLDER:-0} inline_unresolved=${GATE_INLINE_UNRESOLVED:-0} source=${GATE_SOURCE:-none} reconciled=yes -->"
     RECONCILIATION_NOTE="---
 
-**Formal review reconciliation (#7647)** — \`check-review-feedback.sh\` reported **$GATE_STATE**: ${GATE_REVIEWS:-0} formal review(s), ${GATE_BLOCK_CURRENT:-0} outstanding at this head, ${GATE_BLOCK_OLDER:-0} at an older head, ${GATE_INLINE_UNRESOLVED:-0} unresolved inline thread(s) (resolution source: ${GATE_SOURCE:-none}).
+**Formal review reconciliation (#7647)** — \`check-review-feedback.sh\` reported **$GATE_STATE**: ${GATE_REVIEWS:-0} formal review(s) and comment verdict(s), ${GATE_BLOCK_CURRENT:-0} outstanding at this head, ${GATE_BLOCK_OLDER:-0} at an older head, ${GATE_INLINE_UNRESOLVED:-0} unresolved inline thread(s) (resolution source: ${GATE_SOURCE:-none}).
 
 $RECONCILED"
   fi
@@ -511,7 +525,8 @@ fi
 # the build that merges #10684; no version floor is declared for them, because the
 # capability probe above checks them on the resolved binary. Roll loom-daemon
 # before (or with) these scripts: until then, verdicts take the legacy path.
-VG_RC=0; VG_OUT="$("${LOOM_DAEMON_BIN:-loom-daemon}" forge verdict-gate "$PR" --repo "$REPO" --verdict "$VERDICT" --sha "$SHA" --overrules-prior "$OVERRULE" 2>&1)" || VG_RC=$?  # set -e is on (forge-helpers.sh)
+[[ "$VERDICT" == "approved" && -z "$REVIEW_STARTED" ]] && echo "post-verdict.sh: WARNING — no --review-started, so an operator comment or issue rescope made during this review is not checked (#12614)" >&2
+VG_RC=0; VG_OUT="$("${LOOM_DAEMON_BIN:-loom-daemon}" forge verdict-gate "$PR" --repo "$REPO" --verdict "$VERDICT" --sha "$SHA" --overrules-prior "$OVERRULE" ${REVIEW_STARTED:+--review-started "$REVIEW_STARTED"} ${ISSUE_HASHES[@]+"${ISSUE_HASHES[@]/#/--issue-body-sha=}"} 2>&1)" || VG_RC=$?  # set -e is on (forge-helpers.sh)
 case "$VG_RC:$VG_OUT" in
   "0:LOOM-VERDICT-GATE PROCEED"*) forge_gh_comment_rl_safe "$REPO" "$PR" "$FULL_BODY" 1 || exit 1 ;;
   "10:LOOM-VERDICT-GATE DEDUPE"*) NONCE=""; echo "post-verdict.sh: not posting a duplicate verdict on PR #$PR (applying its labels only): $VG_OUT" >&2 ;;

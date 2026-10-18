@@ -30,6 +30,7 @@ from unittest.mock import patch
 import pytest
 
 from kicad_tools.cli import route_cmd as route_cmd_module
+from tests.route_cli import kct_route
 
 # ---------------------------------------------------------------------------
 # Fixture: minimal 2-pad rectangular PCB, pads far enough apart that the
@@ -442,49 +443,23 @@ class TestEscalationPlaneAudit:
 
 
 # ---------------------------------------------------------------------------
-# Outer-parser shim forwarding (Issue #5789)
+# ``kct route`` passthrough (Issues #5789, #7017)
 # ---------------------------------------------------------------------------
 #
-# ``run_route_command`` (``src/kicad_tools/cli/commands/routing.py``) builds
-# the inner ``route_cmd.main`` argv from the outer parsed ``args``. Since the
-# flag now defaults to True on both parsers, the shim only needs to forward
-# the explicit opt-out; an unset or explicitly-true flag must NOT add
-# anything to ``sub_argv`` so the "byte-identical when unset" convention this
-# shim follows for its other flags holds for the opt-out direction instead.
+# ``kct route`` hands its argv to ``route_cmd.main`` verbatim, so the flag
+# reaches the router exactly as typed and nothing is added when it is unset.
 
 
-class TestReservePlaneLayersShimForwarding:
-    def test_shim_omits_flag_when_unset(self):
-        from kicad_tools.cli.commands.routing import run_route_command
-        from kicad_tools.cli.parser import create_parser
-
-        args = create_parser().parse_args(["route", "board.kicad_pcb"])
-        with patch("kicad_tools.cli.route_cmd.main", return_value=0) as inner_main:
-            assert run_route_command(args) == 0
-        sub_argv = inner_main.call_args[0][0]
-        assert "--reserve-plane-layers" not in sub_argv
-        assert "--no-reserve-plane-layers" not in sub_argv
-
-    def test_shim_omits_flag_when_explicitly_enabled(self):
-        # Explicit --reserve-plane-layers is redundant with the default, so
-        # the shim need not forward it either.
-        from kicad_tools.cli.commands.routing import run_route_command
-        from kicad_tools.cli.parser import create_parser
-
-        args = create_parser().parse_args(["route", "board.kicad_pcb", "--reserve-plane-layers"])
-        with patch("kicad_tools.cli.route_cmd.main", return_value=0) as inner_main:
-            assert run_route_command(args) == 0
-        sub_argv = inner_main.call_args[0][0]
-        assert "--reserve-plane-layers" not in sub_argv
-        assert "--no-reserve-plane-layers" not in sub_argv
-
-    def test_shim_forwards_explicit_opt_out(self):
-        from kicad_tools.cli.commands.routing import run_route_command
-        from kicad_tools.cli.parser import create_parser
-
-        args = create_parser().parse_args(["route", "board.kicad_pcb", "--no-reserve-plane-layers"])
-        with patch("kicad_tools.cli.route_cmd.main", return_value=0) as inner_main:
-            assert run_route_command(args) == 0
-        sub_argv = inner_main.call_args[0][0]
-        assert "--no-reserve-plane-layers" in sub_argv
-        assert "--reserve-plane-layers" not in sub_argv
+class TestReservePlaneLayersKctRoute:
+    @pytest.mark.parametrize(
+        ("extra", "expected"),
+        [
+            ([], True),
+            (["--reserve-plane-layers"], True),
+            (["--no-reserve-plane-layers"], False),
+        ],
+    )
+    def test_flag_reaches_router_as_typed(self, extra, expected):
+        forwarded, args = kct_route(["board.kicad_pcb", *extra])
+        assert forwarded == ["board.kicad_pcb", *extra]
+        assert args.reserve_plane_layers is expected

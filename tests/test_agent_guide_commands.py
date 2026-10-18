@@ -34,8 +34,8 @@ import pytest
 
 from kicad_tools.agent_skills.guide import render_guide
 from kicad_tools.agent_surfaces import HARNESSES, render
-from kicad_tools.cli import normalize_argv, sync_cmd
-from kicad_tools.cli.parser import create_parser
+from kicad_tools.cli import normalize_argv, split_passthrough_argv, sync_cmd
+from kicad_tools.cli.parser import create_parser, passthrough_parser
 
 # Concrete values for the ``<placeholder>`` arguments in the guide and skills.
 # A placeholder missing here fails the test, so a new one cannot silently skip
@@ -169,12 +169,20 @@ def _substitute(cmd: str) -> str:
 def check_invocation(cmd: str) -> str | None:
     """Parse *cmd* with the real CLI parser; return an error message or ``None``."""
     # Drop the leading "kct", then apply the same shorthands main() does.
-    argv = normalize_argv(shlex.split(_substitute(cmd))[1:])
-    parser = create_parser()
+    argv = shlex.split(_substitute(cmd))[1:]
+    # Passthrough subcommands (``kct route``, issue #7017) are a stub on the
+    # top-level parser; main() hands their argv to the real parser, so check
+    # it there -- the same split main() uses decides which lines those are.
+    passthrough = split_passthrough_argv(argv)
     stderr = io.StringIO()
     try:
         with contextlib.redirect_stderr(stderr), contextlib.redirect_stdout(io.StringIO()):
-            ns = parser.parse_args(argv)
+            if passthrough is not None:
+                prefix, command, sub_argv = passthrough
+                create_parser().parse_args(prefix)
+                passthrough_parser(command).parse_args(sub_argv)
+                return None
+            ns = create_parser().parse_args(normalize_argv(argv))
     except SystemExit as exc:
         # --help / --version exit 0 after printing; anything else is a parse error.
         if exc.code in (0, None):
@@ -253,6 +261,20 @@ def test_skill_invocation_parses(cmd: str) -> None:
 def test_checker_rejects_broken_invocations(cmd: str, fragment: str) -> None:
     error = check_invocation(cmd)
     assert error is not None and fragment in error, error
+
+
+@pytest.mark.parametrize(
+    "cmd",
+    [
+        "kct route <pcb> --show-congestion",
+        "kct -q route <pcb> --clearance 0.15 --mfr jlcpcb",
+        "kct --units=mils route <pcb> --format json",
+    ],
+)
+def test_checker_validates_route_against_the_real_route_parser(cmd: str) -> None:
+    # Issue #7017: ``route`` is a stub on create_parser(); the checker must
+    # resolve it to route_cmd._route_parser, which accepts these flags.
+    assert check_invocation(cmd) is None
 
 
 def test_extractor_handles_wrapped_spans_and_brace_sets() -> None:

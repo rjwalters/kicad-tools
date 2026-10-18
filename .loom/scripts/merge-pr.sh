@@ -1452,6 +1452,56 @@ _strip_closed_issue_building_labels() {
 }
 
 # ---------------------------------------------------------------------------
+# Branch-derived issue close (#12615). A `feature/issue-N` PR can merge with no
+# closing keyword (PR #12512 / issue #12509 -- a Doctor body edit dropped it),
+# leaving N open and `loom:issue`-eligible so Builders are re-dispatched onto
+# finished work. The branch name identifies the issue, so close N here unless
+# the PR (a) already closes it (close targets / body / commit keyword), or
+# (b) declares it a partial increment (`Part of #N` / `Contributes to #N`;
+# slice-branch reuse of feature/issue-N is legitimate, #3667/#3599).
+#
+# Fail-safe: if the partial-increment analysis cannot run, nothing is closed.
+# Runs BEFORE _strip_closed_issue_building_labels so that pass strips
+# loom:building / loom:issue from the issue closed here. GitHub-only,
+# best-effort, never fails the merge.
+_close_branch_derived_issue() {
+  [[ "$FORGE_TYPE" == "github" ]] || return 0
+  [[ "${PR_BRANCH:-}" =~ ^feature/issue-([0-9]+)$ ]] || return 0
+  local issue_num="${BASH_REMATCH[1]}"
+
+  local pr_body refs
+  pr_body="$(echo "$PR_JSON" | jq -r '.body // ""')"
+  refs="$(_partial_increment_refs "$pr_body")" || return 0
+  if grep -qx "$issue_num" <<<"$refs"; then
+    return 0
+  fi
+
+  local close_targets
+  close_targets="$(forge_pr_close_targets "$PR_NUMBER" "$GH" 2>/dev/null || true)"
+  if grep -qx "$issue_num" <<<"$close_targets"; then
+    return 0
+  fi
+  # closingIssuesReferences can be empty on API exhaustion; a closing keyword in
+  # the body or a commit message means GitHub closes the issue itself.
+  if printf '%s\n%s\n' "$pr_body" "$(_pr_commit_messages)" \
+      | grep -Eqi "\b(close[sd]?|fix(e[sd])?|resolve[sd]?)\b[[:space:]]+#${issue_num}\b"; then
+    return 0
+  fi
+
+  local state
+  state="$(gh api "repos/$REPO_NWO/issues/$issue_num" --jq 'if has("pull_request") then "pr" else .state end' 2>/dev/null || true)"
+  [[ "$state" == "open" ]] || return 0
+
+  if gh issue close "$issue_num" --repo "$REPO_NWO" --reason completed \
+      --comment "Closing: PR #$PR_NUMBER merged from \`$PR_BRANCH\` without a closing keyword or a \`Part of #$issue_num\` partial-increment reference, so this issue's work is delivered (#12615). If more work remains, reopen it and have the follow-up PR declare \`Part of #$issue_num\`." >/dev/null 2>&1; then
+    success "Issue #$issue_num: closed (merged from $PR_BRANCH with no closing keyword, #12615)"
+  else
+    warning "Could not close issue #$issue_num after merging $PR_BRANCH -- may need manual: gh issue close $issue_num --repo $REPO_NWO"
+  fi
+  return 0
+}
+
+# ---------------------------------------------------------------------------
 # Close-triggered `loom:blocked` re-check (#9102; item 2 of #8927's deferred
 # fix list). `loom-daemon check-stale-blocked` (#8927) finds a stale block at
 # the next sweep pre-wave; this finds it the moment the blocker closes: every
@@ -2279,6 +2329,12 @@ fi  # end synchronous-merge path (AUTO_MERGE != "true")
 # reached for `--auto` too; only the dry-run path exits earlier.
 # Best-effort — never fails the merge. See the function definitions above.
 _reset_partial_increment_labels || true
+
+# Branch-derived issue close (#12615): close feature/issue-N when the PR carried
+# no closing keyword and no partial-increment declaration. Must precede the
+# strip pass below so it strips the label from the issue closed here.
+# Best-effort -- never fails the merge.
+_close_branch_derived_issue || true
 
 # Closed-issue `loom:building` cleanup (#6199). Runs right after the partial-
 # increment pass (so a #4569 revert of a premature auto-close has already

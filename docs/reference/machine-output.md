@@ -92,8 +92,9 @@ The sixth batch swept the board-improvement / rule-derivation drivers --
 The seventh and final batch swept the multi-stage orchestrators -- `build`,
 `pipeline`, `stitch` (3). **The #4674 backlog is now empty**: the 4 leaves
 still in the audit's `prose-only` bucket are the 4 documented exemptions.
-The route workstream has since exposed its existing `--format` through the outer
-parser; its staged output still has the qualification described below.
+The route workstream has since exposed its existing `--format` through `kct
+route` (which, since #7017, hands its argv straight to `route_cmd`'s parser);
+its staged output still has the qualification described below.
 `tests/test_format_json_sweep_orchestrators.py` pins that bucket against
 exactly that list, so a new prose-only leaf fails a test rather than silently
 re-opening the backlog.
@@ -127,9 +128,12 @@ reachable through `kct`:
   machine-output flag. `kct mfr rules --format json` is now wired end-to-end
   (outer parser → shim → inner parser) and the inner `--json` boolean was
   removed rather than aliased — it never shipped on any reachable surface.
-- `route_cmd.py` `--format` — now forwarded by `kct route` as part of #5348.
-  The parser drift guard covers both entry points. See "Routing output" below
-  for the scope of its structured diagnostics.
+- `route_cmd.py` `--format` — reachable through `kct route` since #5348. Since
+  #7017 `kct route` is a passthrough (`cli/__init__.py` hands its raw argv to
+  `route_cmd.main`, like `footprint generate`), so every `route_cmd` flag is
+  user-facing; the audit resolves the `route` stub to `route_cmd._route_parser`
+  (`parser.resolve_passthrough`). See "Routing output" below for the scope of
+  its structured diagnostics.
 
 ## Classification of the 72 prose-only subcommands
 
@@ -321,7 +325,7 @@ Shapes:
 | `create-pcb` | `{"command": "create-pcb", "schematic", "output", "board": {width_mm, height_mm, layers}, "components_found", "placement": {skipped, placed, failed[], warnings[]}, "nets": {assigned, missing_footprints[]}, "summary", "dry_run", "saved", "success"}` |
 | `panel` | `{"command": "panel", "input", "output", "grid": {rows, cols, spacing_mm, spacing_x_mm, spacing_y_mm}, "board_count", "tabs", "cut_method", "vcut_layer", "tab_width_mm", "tab_count", "frame", "frame_space_mm", "vscore_clearance_mm", "vscore_clearance_source", "mfr", "vscore_supported", "warnings", "tooling_holes", "fiducials", "success"}` (`vcut_layer`, `vscore_clearance_mm`, `vscore_clearance_source` and `mfr` are `null` unless `--cut vcut`; `vscore_clearance_source` is `"cli"` for `--vscore-clearance`, `"fab"` for the resolved fab profile's published figure, or `"unsourced_default"` when that fab publishes none; `mfr` is the resolved fab profile (`null` with an explicit `--vscore-clearance` and no `--mfr`); `spacing_mm` is the resolved gap -- 0 for a butted V-cut panel -- or `null` when the two axes differ; `frame_space_mm` is `null` without `--frame`; `vscore_supported` is `false` when the resolved fab's docs say it offers no V-scoring (e.g. `oshpark`; `warnings` then also carries a message suggesting `--cut mousebite`), otherwise `null`; `warnings` lists gapped V-cut seams, copper too close to a score line and that unsupported-fab notice) |
 | `report generate` | `{"command": "generate", "input", "manufacturer", "output_dir", "project_name", "report_path", "pdf_path", "data_source": "auto-collect"\|"data-dir"\|"skeleton", "figures": {generated, skipped_reason}, "success"}` |
-| `screenshot` | `{"command": "screenshot", "input", "output", "width_px", "height_px", "layers_rendered", "success"}` |
+| `screenshot` | `{"command": "screenshot", "input", "output", "width_px", "height_px", "layers_rendered", "success"}` -- `--baseline-save DIR` replaces the render keys with `baseline: {saved, sidecar, renderer: {kicad_cli, cairosvg}, options, width_px, height_px}`; `--baseline-compare DIR` (issue #6912) emits `{"command", "input", "baseline", "status": "identical"\|"changed", "drift_fraction", "changed_pixels", "total_pixels", "success"}`, or `status: "renderer_mismatch"` with `differences: [{field, baseline, current}]`, no drift keys, `success: false` and a non-zero exit when the baseline's renderer versions, render options or dimensions differ; a missing/corrupt baseline is the usual `{"error", "success": false}` |
 | `board-view overview\|net\|layers\|crop` (issue #6316) | `{"command": "board-view", "view", "input", "output", "net", "units": "mm", "frame": "board-relative"\|"sheet-absolute", "board_origin_mm": [x, y], "frame_note", "window_mm": [x0, y0, x1, y1], "width_px", "height_px", "px_per_mm", "pad_labels_drawn", "title", "color_key", "pours_drawn": false, "unfinished_net_count", "missing_link_count", "missing_links": {net: [{"from", "to", "from_mm", "to_mm", "length_mm"}]}, "pour_advisory": [{"net", "open_connections", "islands", "zone_layers"}], "caveat", "success"}` — every coordinate is in `frame`; `board_origin_mm` is the sheet position of the board-relative (0, 0), so sheet-absolute = board-relative + origin; `missing_links` holds exactly the nets `kct check`'s connectivity rule reports, one entry per open connection; `pour_advisory` holds the pour nets that rule treats as advisory (no link); `outline_error` appears only when the board outline could not be read |
 | `board-view list` | the same document without the image keys (`output`, `window_mm`, `width_px`, `height_px`, `px_per_mm`, `pad_labels_drawn`, `title`, `color_key`, `pours_drawn`); JSON is this view's default format |
 

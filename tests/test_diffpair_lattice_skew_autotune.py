@@ -258,7 +258,9 @@ def test_pair_skew_tuning_runs_before_match_group_tuning():
 
     source = inspect.getsource(route_cmd)
     pair_call = source.index("_run_diffpair_skew_tuning(router, args, quiet=quiet)")
-    group_call = source.index("_mg_engage = _match_group_tuning_engage(args, router)")
+    # Issue #6968: the group tuner moved into ``_run_match_group_tuning_phase``;
+    # pin the tail's call site of that helper.
+    group_call = source.index("_run_match_group_tuning_phase(router, args, quiet=quiet)")
     assert pair_call < group_call
 
 

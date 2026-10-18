@@ -39,6 +39,13 @@ NB_MODULE(router_cpp, m) {
           "trace_clearance"_a, "via_clearance"_a,
           "Issue #6272: max(trace_clearance, via_clearance) -- the native "
           "trace/via copper floor.");
+    // Issue #6994: the native A* search radius, exposed for the Python/C++
+    // parity test against ``search_radius.search_radius_cells``.
+    m.def("search_radius_cells", &search_radius_cells,
+          "half_mm"_a, "clearance_mm"_a, "resolution"_a,
+          "Issue #6994: guarded A* search radius in cells, "
+          "max(1, ceil(x)) with x = (half + clearance) / resolution snapped "
+          "to the nearest integer within 1e-4 cells.");
     m.doc() = "C++ router core for high-performance PCB routing";
 
     // GridCell struct

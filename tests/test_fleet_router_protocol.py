@@ -213,11 +213,34 @@ def test_run_refuses_on_manifest_drift(fr, tmp_repo, tmp_path, monkeypatch, caps
     manifest["boards"][0]["input"]["sha256"] = "0" * 64
     path.write_text(json.dumps(manifest))
     verify = fr.verify_manifest
-    monkeypatch.setattr(fr, "verify_manifest", lambda m, repo=None: verify(m, repo=tmp_repo))
+    monkeypatch.setattr(
+        fr, "verify_manifest", lambda m, repo=None, keys=None: verify(m, repo=tmp_repo, keys=keys)
+    )
     assert fr.main(["--manifest", str(path), "verify"]) == 1
     rc = fr.main(["--manifest", str(path), "run", "--work-dir", str(tmp_path / "w"), "--tools", ""])
     assert rc == 2
     assert "manifest drift -- refusing to run" in capsys.readouterr().out
+
+
+def test_run_checks_drift_only_for_selected_boards(fr, tmp_repo, tmp_path, monkeypatch, capsys):
+    path = tmp_path / "manifest.json"
+    manifest = _frozen(fr, tmp_repo)
+    manifest["boards"][0]["input"]["sha256"] = "0" * 64  # board 00 drifted
+    real = fr.load_manifest()
+    for key in ("budgets", "pins", "stripping_policy"):
+        manifest[key] = real[key]
+    path.write_text(json.dumps(manifest))
+    verify = fr.verify_manifest
+    monkeypatch.setattr(
+        fr, "verify_manifest", lambda m, repo=None, keys=None: verify(m, repo=tmp_repo, keys=keys)
+    )
+    assert fr.verify_manifest(manifest, keys={"01"}) == []
+    assert any("hash drifted" in p for p in fr.verify_manifest(manifest, keys={"00", "01"}))
+    base = ["--manifest", str(path), "run", "--work-dir", str(tmp_path / "w"), "--tools", ""]
+    assert fr.main([*base, "--boards", "00"]) == 2
+    assert "manifest drift -- refusing to run" in capsys.readouterr().out
+    fr.main([*base, "--boards", "01"])
+    assert "manifest drift" not in capsys.readouterr().out
 
 
 def test_manifest_covers_fleet_with_explicit_markers(manifest):

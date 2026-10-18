@@ -24,8 +24,10 @@ import math
 #: cells in practice anyway.
 PYTHON_EXPLICIT_GRID_CELL_LIMIT = 20_000_000
 
-#: C++ backend: ~70 B/cell (C++ grid plus the Python mirror), ~7 GB at the
-#: limit -- the largest grid a typical workstation can still allocate.
+#: C++ backend: the grid cell is 52 B, the pathfinder's search arrays add
+#: ~12 B/cell and the per-column/row via arrays ~20 B, so the peak is about
+#: 85-90 B/cell -- ~8.5-9 GB at the limit, the largest grid a typical
+#: workstation can still allocate (Issue #6948).
 CPP_EXPLICIT_GRID_CELL_LIMIT = 100_000_000
 
 
@@ -73,21 +75,29 @@ def explicit_grid_ceiling_error(
     resolution: float,
     num_layers: int,
     backend: str,
+    clearance: float | None = None,
 ) -> str | None:
-    """The error text when an explicit grid exceeds the ceiling, else None."""
+    """The error text when an explicit grid exceeds the ceiling, else None.
+
+    ``clearance`` (mm), when known, bounds the suggested coarser pitch: a
+    grid coarser than the clearance is refused separately, so a suggestion
+    past it would only trade one error for another (Issue #6948).
+    """
     cells = estimate_grid_cells(width, height, resolution, num_layers)
     limit = explicit_grid_cell_limit(backend)
     if cells <= limit:
         return None
     backend_name = "C++" if backend == "cpp" else "Python"
     options: list[str] = []
-    if backend != "cpp":
+    # Building the C++ backend only helps when the grid fits its limit.
+    if backend != "cpp" and cells <= CPP_EXPLICIT_GRID_CELL_LIMIT:
         options.append(
             "Build the C++ backend: kct build-native "
             f"(raises the limit to {CPP_EXPLICIT_GRID_CELL_LIMIT:,} cells)"
         )
     coarser = finest_pitch_within(width, height, num_layers, limit)
-    options.append(f"Use a coarser grid: --grid {coarser:g} (the finest that fits)")
+    if clearance is None or coarser <= clearance:
+        options.append(f"Use a coarser grid: --grid {coarser:g} (the finest that fits)")
     options.append("Use --grid auto for budget-aware automatic selection")
     options.append("Use --force to route at the requested pitch anyway (may run out of memory)")
     numbered = "\n".join(f"  {i}. {text}" for i, text in enumerate(options, 1))

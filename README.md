@@ -755,20 +755,44 @@ uv run ruff format .
    already immune (it runs `--no-incremental`); see
    [`docs/contributing/development.md`](docs/contributing/development.md#the-stale-mypy_cache-trap).
 
-4. **Initialize KiCad's global library tables before trusting native ERC/DRC
-   results.** `kct check`'s native ERC leg (and the board 03/04 reviewed
-   paid-drill gates, which run `kct check` with `--strict`) shell out to
-   `kicad-cli`, which reads the host's `fp-lib-table`/`sym-lib-table` under
-   `~/.config/kicad/<version>/` (GUI-provisioned on first launch — a fresh
-   worktree or CI container has neither). Without them, kicad-cli raises
-   ordinary `lib_symbol_issues`/`footprint_link_issues` strict-mode ERC
-   warnings that read identically to a genuine footprint/symbol-link defect
-   in the schematic (issue #5860). CI always runs this first, so the
-   committed `boards/*/output/check-report.json` files are unaffected; run
-   it yourself once per host before relying on `kct check` locally:
+4. **Know where kicad-cli's library tables come from before trusting native
+   ERC/DRC results.** kicad-cli resolves stock nicknames (`Resistor_SMD:`)
+   through the *global* `fp-lib-table`/`sym-lib-table` in its config home,
+   which the GUI writes on first launch -- or never, on a fresh host, CI
+   container or `docker run --user 0:0`. Without them every stock footprint
+   becomes a `lib_footprint_issues` DRC warning and every stock symbol an ERC
+   warning that reads like a real defect (issues #5860, #6962; board 03 once
+   gained 37 of them). The library configuration is part of the pinned
+   toolchain, not of the host:
+
+   - **Where it comes from.** `src/kicad_tools/data/kicad-config/10.0/` holds
+     flat copies of the stock tables shipped in CI's pinned image (CI's
+     `KICAD_IMAGE` digest in `.github/workflows/ci.yml`).
+   - **How producers isolate it.** Every evidence producer (`kct readiness`,
+     `scripts/boards/refresh_readiness.py`, the `scripts/boards/regenerate_*`
+     scripts) and every KiCad CI job runs kicad-cli with a scratch
+     `KICAD_CONFIG_HOME` holding exactly those tables, and never reads or
+     writes your GUI config. kct's Docker fallback (`KCT_KICAD_DOCKER=1`)
+     runs the same pinned digest, not the floating `kicad/kicad:10.0` tag.
+   - **Native evidence needs the pinned toolchain.** Producers refuse (exit 2,
+     nothing written) a kicad-cli other than the image's release (10.0.6), and
+     refuse any DRC report with `lib_footprint_issues`. On a host with another
+     KiCad release, route kicad-cli through the image:
+     `KCT_KICAD_DOCKER=1 uv run kct readiness boards/<board> --verify --checked-at <ISO>`.
+     A fixed `--checked-at` makes two runs byte-identical.
+   - **How to check it.**
+
+     ```bash
+     uv run python -m kicad_tools.cli.kicad_toolchain --check            # host kicad-cli
+     KCT_KICAD_DOCKER=1 uv run python -m kicad_tools.cli.kicad_toolchain --check
+     ```
+
+   For ad-hoc `kct check` runs outside a producer, point the current shell
+   at the pinned tables (CI's container jobs do this in their "Initialize
+   stock KiCad libraries" step):
 
    ```bash
-   uv run python scripts/ci/init_kicad_libraries.py
+   eval "$(python3 scripts/ci/init_kicad_libraries.py --shell)"
    ```
 
 The build's `nanobind` dependency is composed into the default dev
@@ -905,7 +929,7 @@ weekly.
 ### Agent and MCP interfaces
 
 - **[Zeo](https://github.com/zeodotdev/zeo)** (AGPL-3.0, C++, 31★) -- a KiCad fork with an integrated AI agent sidebar and MCP server. Takes a complementary approach: live editor manipulation via IPC vs. our offline file-based analysis and optimization.
-- **[Konnect](https://github.com/mixelpixx/Konnect)** (AGPL-3.0, Rust, 841★) -- **Ideas adopted.** A single-binary native KiCad 10 plugin exposing a very large LLM tool surface (217 tools) across schematic, layout, routing, placement, review and manufacturing. AGPL means no code can move between it and this MIT repo in either direction, so our engagement is capability-level only: we audited its connectivity primitives, its tool-economy design and its design-rule handling against our own surface. Five of its six connectivity primitives we already had; the sixth (near-miss auto-snap repair) was a real gap. Our evaluations: [docs/research/konnect-connectivity-audit.md](docs/research/konnect-connectivity-audit.md), [docs/konnect-item1-toolset-economy-audit.md](docs/konnect-item1-toolset-economy-audit.md), [docs/konnect-item8-design-rules-audit.md](docs/konnect-item8-design-rules-audit.md).
+- **[Konnect](https://github.com/mixelpixx/Konnect)** (AGPL-3.0, Rust, 1200★) -- **Ideas adopted.** A single-binary native KiCad 10 plugin exposing a very large LLM tool surface (228 tools in 21 toolsets) across schematic, layout, routing, placement, review and manufacturing. AGPL means no code can move between it and this MIT repo in either direction, so our engagement is capability-level only: we audited its connectivity primitives, its tool-economy design and its design-rule handling against our own surface. Five of its six connectivity primitives we already had; the sixth (near-miss auto-snap repair) was a real gap. Re-checked at v0.13: four new ideas adopted as follow-ups (visual baselines, truth-contract audit, honest-schema CI guard, SES provenance). Our evaluations: [docs/research/konnect-connectivity-audit.md](docs/research/konnect-connectivity-audit.md), [docs/konnect-item1-toolset-economy-audit.md](docs/konnect-item1-toolset-economy-audit.md), [docs/konnect-item8-design-rules-audit.md](docs/konnect-item8-design-rules-audit.md), [docs/research/konnect-v013-delta.md](docs/research/konnect-v013-delta.md).
 - **[copperhead](https://github.com/copperheadhq/copperhead)** (Apache-2.0, TypeScript, 312★) -- **Ideas adopted.** "cursor for circuit boards": a natural-language brief drives direct edits to `.kicad_sch` / `.kicad_pcb`, gated by an LLM-free `check` and wrapped in a git snapshot that auto-rolls-back on failure. It does not route, and verifies with `kicad-cli` ERC/DRC only -- no LVS, no manufacturing cross-gate. Its *process* design (design memory as committed artifacts, a constraints registry, a per-run audit trail) is the part worth borrowing. Note: moved from `chouhanindustries/copperhead` since our note was written. Our evaluation: [docs/research/copperhead-workflow-ideas.md](docs/research/copperhead-workflow-ideas.md).
 - **[Seeed-Studio/kicad-mcp-server](https://github.com/Seeed-Studio/kicad-mcp-server)** (no `LICENSE` committed, Python, 135★) -- the closest peer to `kct mcp serve`: an MCP server that reads schematic and PCB files offline (shelling out to `kicad-cli` for validation) to trace pin-level connections and edit designs. Overlaps our read/analyze tools; carries no router, LVS or fab-readiness gates. Its README claims MIT but the repo commits no LICENSE file, so we treat it as all-rights-reserved and copy nothing.
 - **[circuit-skills](https://github.com/punkfab/circuit-skills)** (no `LICENSE` committed, Python, 9★) -- Claude Code skills for code-driven electronics: ngspice/Falstad circuit simulation, a tscircuit-placement -> KiCad IPC (`kipy`) route-and-DRC loop, board/enclosure fit co-design and 3D renders. Its `route_eval` harness now runs five routing backends on any KiCad board (two Freerouting versions, TraceMaker, the tscircuit router, and an experimental `srj-legal` that has TraceMaker re-route what KiCad's DRC rejects in tscircuit output) and keeps the best, with an optional fastroute backend and a PCBWorld D3 harness; it self-reports 0.98 Clean Pass on D3-A for `srj-legal`, unreproduced by us. Overlaps our `/kct:*` skills, but still assumes the tail is hand-finished in KiCad -- the opposite of our fully automated bar. No LICENSE committed, so ideas only; mining tracked in issue #5886. Our evaluations: [docs/research/circuit-skills-evaluation.md](docs/research/circuit-skills-evaluation.md), [docs/research/placement_score_calibration.md](docs/research/placement_score_calibration.md).

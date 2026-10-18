@@ -7,6 +7,7 @@ cd "$(dirname "${BASH_SOURCE[0]}")/../.."
 exec uv run --extra dev --frozen pytest -q -o addopts= --no-cov --timeout=60 \
   tests/test_content_contract_gate.py \
   tests/test_docs_source_citations.py \
+  tests/test_docs_reachability.py \
   tests/test_diffpair_docs.py \
   tests/test_match_group_docs.py \
   tests/test_kct_skills_consumer_generic.py \

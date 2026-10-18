@@ -151,6 +151,12 @@ def snap_to_grid(
     return count
 
 
+_VALID_ALIGN_REFERENCES: dict[str, tuple[str, ...]] = {
+    "horizontal": ("center", "top", "bottom"),
+    "vertical": ("center", "left", "right"),
+}
+
+
 def align_components(
     optimizer: PlacementOptimizer,
     refs: list[str],
@@ -164,58 +170,77 @@ def align_components(
     Args:
         optimizer: The placement optimizer containing components
         refs: List of component references or patterns to align
-        axis: Alignment axis - "horizontal" (align Y) or "vertical" (align X)
-        reference: Alignment reference point - "center", "top", "bottom", "left", "right"
-        tolerance_mm: Tolerance for already-aligned components
+        axis: Alignment axis - "horizontal" (row, align Y) or "vertical"
+            (column, align X)
+        reference: Alignment reference point. Valid for "horizontal":
+            "center", "top", "bottom". Valid for "vertical": "center",
+            "left", "right".
+        tolerance_mm: Components whose aligned coordinate is already within
+            this distance of the target are left untouched. Negative values
+            are treated as 0.
 
     Returns:
-        Number of components moved
+        Number of components actually moved
+
+    Raises:
+        ValueError: If axis is unknown or reference is not valid for the axis.
     """
+    valid_refs = _VALID_ALIGN_REFERENCES.get(axis)
+    if valid_refs is None:
+        raise ValueError(
+            f"Invalid axis {axis!r}; expected one of {sorted(_VALID_ALIGN_REFERENCES)}"
+        )
+    if reference not in valid_refs:
+        raise ValueError(
+            f"Invalid reference {reference!r} for axis {axis!r}; expected one of {list(valid_refs)}"
+        )
+    tol = max(tolerance_mm, 0.0)
+
     # Resolve patterns to refs
     actual_refs = _resolve_refs(optimizer, refs)
     if len(actual_refs) < 2:
         return 0
 
     # Get components
-    components = [optimizer.get_component(ref) for ref in actual_refs]
-    components = [c for c in components if c is not None and not c.fixed]
+    components = [
+        c for ref in actual_refs if (c := optimizer.get_component(ref)) is not None and not c.fixed
+    ]
 
     if len(components) < 2:
         return 0
 
-    # Calculate target position based on reference
+    # Compute new coordinate per component (target uses all selected parts)
     if axis == "horizontal":
-        # Align along Y axis (same Y position)
         if reference == "top":
             target = min(c.y - c.height / 2 for c in components)
-            for c in components:
-                c.y = target + c.height / 2
+            new_coord = {c.ref: target + c.height / 2 for c in components}
         elif reference == "bottom":
             target = max(c.y + c.height / 2 for c in components)
-            for c in components:
-                c.y = target - c.height / 2
+            new_coord = {c.ref: target - c.height / 2 for c in components}
         else:  # center
             target = sum(c.y for c in components) / len(components)
-            for c in components:
-                c.y = target
+            new_coord = {c.ref: target for c in components}
     else:
-        # Align along X axis (same X position)
         if reference == "left":
             target = min(c.x - c.width / 2 for c in components)
-            for c in components:
-                c.x = target + c.width / 2
+            new_coord = {c.ref: target + c.width / 2 for c in components}
         elif reference == "right":
             target = max(c.x + c.width / 2 for c in components)
-            for c in components:
-                c.x = target - c.width / 2
+            new_coord = {c.ref: target - c.width / 2 for c in components}
         else:  # center
             target = sum(c.x for c in components) / len(components)
-            for c in components:
-                c.x = target
+            new_coord = {c.ref: target for c in components}
 
-    # Update pin positions
     count = 0
     for c in components:
+        new = new_coord[c.ref]
+        old = c.y if axis == "horizontal" else c.x
+        if abs(new - old) <= tol:
+            continue
+        if axis == "horizontal":
+            c.y = new
+        else:
+            c.x = new
         c.vx = 0.0
         c.vy = 0.0
         c.update_pin_positions()
@@ -240,7 +265,7 @@ def distribute_components(
         spacing_mm: Fixed spacing in mm, or None for automatic even distribution
 
     Returns:
-        Number of components moved
+        Number of components whose position actually changed
     """
     # Resolve patterns to refs
     actual_refs = _resolve_refs(optimizer, refs)
@@ -248,11 +273,14 @@ def distribute_components(
         return 0
 
     # Get components
-    components = [optimizer.get_component(ref) for ref in actual_refs]
-    components = [c for c in components if c is not None and not c.fixed]
+    components = [
+        c for ref in actual_refs if (c := optimizer.get_component(ref)) is not None and not c.fixed
+    ]
 
     if len(components) < 2:
         return 0
+
+    old_pos = {c.ref: (c.x, c.y) for c in components}
 
     # Sort by current position along axis
     if axis == "horizontal":
@@ -288,9 +316,11 @@ def distribute_components(
                 for i, comp in enumerate(components):
                     comp.y = start + i * spacing
 
-    # Update pin positions
+    # Update pin positions for components that actually moved
     count = 0
     for c in components:
+        if (c.x, c.y) == old_pos[c.ref]:
+            continue
         c.vx = 0.0
         c.vy = 0.0
         c.update_pin_positions()
@@ -315,7 +345,7 @@ def align_to_reference(
         edge: Edge to align - "left", "right", "top", "bottom", "center_x", "center_y"
 
     Returns:
-        Number of components moved
+        Number of components whose position actually changed
     """
     # Get reference component
     ref_comp = optimizer.get_component(reference_ref)
@@ -326,11 +356,18 @@ def align_to_reference(
     actual_refs = _resolve_refs(optimizer, refs)
 
     # Get components to align (excluding reference)
-    components = [optimizer.get_component(ref) for ref in actual_refs]
-    components = [c for c in components if c is not None and not c.fixed and c.ref != reference_ref]
+    components = [
+        c
+        for ref in actual_refs
+        if (c := optimizer.get_component(ref)) is not None
+        and not c.fixed
+        and c.ref != reference_ref
+    ]
 
     if not components:
         return 0
+
+    old_pos = {c.ref: (c.x, c.y) for c in components}
 
     # Calculate reference edge position
     if edge == "left":
@@ -358,9 +395,11 @@ def align_to_reference(
     else:
         return 0
 
-    # Update pin positions
+    # Update pin positions for components that actually moved
     count = 0
     for c in components:
+        if (c.x, c.y) == old_pos[c.ref]:
+            continue
         c.vx = 0.0
         c.vy = 0.0
         c.update_pin_positions()

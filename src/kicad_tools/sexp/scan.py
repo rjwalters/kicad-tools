@@ -34,9 +34,12 @@ def _scanner(pattern: str) -> re.Pattern[str]:
 
 
 def iter_unquoted(text: str, pattern: str, pos: int = 0) -> Iterator[re.Match[str]]:
-    """Yield the matches of regex *pattern* in *text* that lie outside strings.
+    r"""Yield the matches of regex *pattern* in *text* that lie outside strings.
 
-    *pattern* must not itself match a ``"``; *pos* must be outside a string.
+    Each match of *pattern* must start and end outside a string: it may
+    consume whole quoted strings (``\(pad\s+"[^"]*"`` is fine), but it must
+    not begin inside one or stop partway through one, which would desync the
+    scanner's string tracking.  *pos* must be outside a string.
     The yielded matches are for the whole scanner, so use ``m.start("tok")``
     / ``m.end("tok")`` (equal to ``m.start()`` / ``m.end()``) or
     ``m.group("tok")``.

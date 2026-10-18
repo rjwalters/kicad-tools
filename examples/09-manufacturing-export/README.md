@@ -198,12 +198,17 @@ In KiCad's schematic editor:
 
 ### 2. Or Import Parts Programmatically
 
-```python
-from kicad_tools.parts import import_lcsc_part
+Import a part's symbol by manufacturer part number (MPN), then add the
+`LCSC` field as in step 1:
 
-# Import a part with LCSC number pre-populated
-import_lcsc_part("C123456", library="MyParts.kicad_sym")
+```python
+from kicad_tools.parts import PartImporter
+
+importer = PartImporter(symbol_library="MyParts.kicad_sym")
+result = importer.import_part("STM32F103C8T6")  # MPN, not an LCSC number
 ```
+
+To look up an LCSC number from the shell: `kct parts lookup C123456`
 
 ### 3. Access LCSC Numbers in BOM
 

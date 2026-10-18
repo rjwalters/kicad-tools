@@ -334,4 +334,6 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    from kicad_tools.cli.kicad_toolchain import run_on_evidence_toolchain
+
+    sys.exit(run_on_evidence_toolchain(main, [REPO_ROOT]))

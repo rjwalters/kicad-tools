@@ -137,27 +137,16 @@ class TestPlanGateExitCode:
 class TestPlanGateFlagSurface:
     """Exactly ONE flag is added; ``--force`` is the pre-existing override."""
 
-    def test_plan_gate_is_declared_on_both_parsers(self):
-        """Both ``kct route`` and ``route_cmd.main`` must accept the flag.
-
-        A flag on only one of the two is exactly the drift
-        ``tests/test_cli_parser_drift.py`` exists to catch: ``kct route
-        --plan-gate`` would be rejected by the outer parser, or accepted
-        there and dropped on the way to the inner one.
-        """
-        from kicad_tools.cli.parser import create_parser
+    def test_plan_gate_is_declared_on_kct_route(self):
+        """``kct route`` accepts the flag and hands it to ``route_cmd.main``."""
+        from tests.route_cli import kct_route
 
         assert "--plan-gate" in route_cmd._route_parser().format_help()
         assert route_cmd._route_parser().parse_args(["b.kicad_pcb", "--plan-gate"]).plan_gate
 
-        outer = create_parser()
-        route_sub = next(
-            action.choices["route"]
-            for action in outer._actions
-            if getattr(action, "choices", None) and "route" in action.choices
-        )
-        assert "--plan-gate" in route_sub.format_help()
-        assert outer.parse_args(["route", "b.kicad_pcb", "--plan-gate"]).plan_gate
+        forwarded, args = kct_route(["b.kicad_pcb", "--plan-gate"])
+        assert "--plan-gate" in forwarded
+        assert args.plan_gate
 
     def test_plan_gate_defaults_off(self):
         args = route_cmd._route_parser().parse_args(["board.kicad_pcb"])

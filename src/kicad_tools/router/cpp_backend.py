@@ -31,6 +31,7 @@ from typing import TYPE_CHECKING, Literal, NamedTuple
 from . import wall_deadline as _wall_deadline
 from .pad_landing import pad_landing_geometry
 from .resource_guard import reraise_if_resource_exhaustion
+from .search_radius import search_radius_cells
 
 if TYPE_CHECKING:
     import numpy as np
@@ -103,7 +104,11 @@ logger = logging.getLogger(__name__)
 # v59 (Issue #6840): ``CoupledPathfinder.set_partner_via_clearance`` -- the
 # joint search keeps each rail clear of the partner's via barrels on every
 # layer.  A v58 .so lacks the setter and diverges from the Python mirror.
-_REQUIRED_CPP_BUILD_VERSION = 59
+# v60 (Issue #6994): native A* search radii use the guarded
+# ``search_radius_cells`` rule shared with Python (new binding
+# ``router_cpp.search_radius_cells``).  A v59 .so searches one ring wider on
+# float-noise inputs (Default rules @ 0.1 mm) than the Python mirror.
+_REQUIRED_CPP_BUILD_VERSION = 60
 
 
 # Issue #5599: human-readable names for the ``ValidationResult::violation_type``
@@ -2469,15 +2474,16 @@ class CppPathfinder:
         net_class = self._net_class_map.get(start.net_name)
         net_trace_width = net_class.trace_width if net_class else self._rules.trace_width
         net_trace_clearance = net_class.clearance if net_class else self._rules.trace_clearance
-        trace_radius_cells = max(
-            1,
-            math.ceil((net_trace_width / 2 + net_trace_clearance) / self._grid.resolution),
+        # Issue #6994: the same guarded radius as the Python Router (was a
+        # bare ceil that added a phantom cell on float-noise inputs, e.g.
+        # Default rules @ 0.1 mm gave 4 cells instead of 3).
+        trace_radius_cells = search_radius_cells(
+            net_trace_width / 2, net_trace_clearance, self._grid.resolution
         )
 
         net_via_size = net_class.via_size if net_class else self._rules.via_diameter
-        via_radius_cells = max(
-            1,
-            math.ceil((net_via_size / 2 + self._rules.via_clearance) / self._grid.resolution),
+        via_radius_cells = search_radius_cells(
+            net_via_size / 2, self._rules.via_clearance, self._grid.resolution
         )
 
         # Issue #4433: hard per-net avoid_layers for the NATIVE backend (the
@@ -2535,11 +2541,8 @@ class CppPathfinder:
                 if intra_pair_clearance is not None:
                     partner_net_id = int(partner_id)
                     search_intra_pair_clearance = intra_pair_clearance
-                    intra_pair_radius_cells = max(
-                        1,
-                        math.ceil(
-                            (net_trace_width / 2 + intra_pair_clearance) / self._grid.resolution
-                        ),
+                    intra_pair_radius_cells = search_radius_cells(
+                        net_trace_width / 2, intra_pair_clearance, self._grid.resolution
                     )
 
         # Issue #2427: Compute pad metal bounds and approach zones.
@@ -4921,9 +4924,12 @@ class CppPathfinder:
         # falling back to the global rules.trace_width.
         net_trace_width = net_class.trace_width if net_class else self._rules.trace_width
         net_trace_clearance = net_class.clearance if net_class else self._rules.trace_clearance
-        trace_half_width_cells = max(
-            1,
-            int((net_trace_width / 2 + net_trace_clearance) / self._grid.resolution + 0.5),
+        # Issue #6994: scan the same guarded radius the search was blocked
+        # at.  The old round-to-nearest rule scanned one ring too few
+        # (Default rules @ 0.127 mm: 2 cells vs 3), so outer-ring nets that
+        # blocked the route were never offered for rip-up.
+        trace_half_width_cells = search_radius_cells(
+            net_trace_width / 2, net_trace_clearance, self._grid.resolution
         )
 
         while True:
@@ -5008,15 +5014,8 @@ class CppPathfinder:
         # Compute trace half-width in cells (mirrors pathfinder.py:117).
         # CppPathfinder doesn't currently cache _trace_half_width_cells,
         # so compute it here on demand.
-        trace_half_width_cells = max(
-            1,
-            math.ceil(
-                round(
-                    (self._rules.trace_width / 2 + self._rules.trace_clearance)
-                    / self._grid.resolution,
-                    6,
-                )
-            ),
+        trace_half_width_cells = search_radius_cells(
+            self._rules.trace_width / 2, self._rules.trace_clearance, self._grid.resolution
         )
 
         # _pad_blocked lookup requires the original Python RoutingGrid.

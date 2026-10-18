@@ -738,18 +738,21 @@ def run_cell(
 
 def render(rows: list[dict]) -> str:
     head = (
-        "| Board | Engine | Seed | Map | Valid | Pairs coupled | Nets | kct err (by rule) | "
-        "kicad-cli err (by type) | unconn | Manufacturable | Wall s |\n"
-        "|---|---|---|---|---|---|---|---|---|---|---|---|"
+        "| Board | Engine | Seed | Map | Valid | Pairs coupled | Pairs hybrid | Nets | "
+        "kct err (by rule) | kicad-cli err (by type) | unconn | Manufacturable | Wall s |\n"
+        "|---|---|---|---|---|---|---|---|---|---|---|---|---|"
     )
     out = [head]
     for r in rows:
         pairs = r.get("pairs") or []
         coupled = sum(1 for p in pairs if (p.get("outcome") or "").startswith("coupled"))
+        # Issue #6446: ``hybrid:<ref>.<pin>`` is a coupled trunk with
+        # single-ended legs at one terminal -- counted apart, never as coupled.
+        hybrid = sum(1 for p in pairs if (p.get("outcome") or "").startswith("hybrid:"))
         out.append(
             f"| {r['board']} | {r['engine']} | {r['seed']} | "
             f"{r.get('net_class_map_mode', 'committed')} | {r.get('valid')} | "
-            f"{coupled}/{len(pairs)} | {r.get('nets_routed', '-')} | "
+            f"{coupled}/{len(pairs)} | {hybrid} | {r.get('nets_routed', '-')} | "
             f"{r.get('kct_errors_by_rule') or '-'} | {r.get('kicad_cli_errors_by_type') or '-'} | "
             f"{r.get('kicad_drc_unconnected', '-')} | {r.get('manufacturable')} | {r.get('wall_s', '-')} |"
         )

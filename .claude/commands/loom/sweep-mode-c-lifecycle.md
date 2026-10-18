@@ -68,7 +68,7 @@ Determine the **closing issue number** (used for checkpoint scope below) from `c
 
 ### C1. Per-PR routing by current label
 
-Apply exactly one of the three branches below, based on the PR's current label. After each checkpoint write, run the `usage-record` step (Execution Model, "Usage record"):
+Apply exactly one of the three branches below, based on the PR's current label.
 
 #### C1a. `loom:review-requested` → Judge phase only
 

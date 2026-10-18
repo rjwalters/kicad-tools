@@ -94,6 +94,7 @@ see becomes a named `*_UNKNOWN` failure, never a pass.
 | Active `merge_queue` rule on the branch | `NO_MERGE_QUEUE_RULE`, `MERGE_QUEUE_UNKNOWN` |
 | Required status checks exist | `NO_REQUIRED_CHECKS` |
 | Each required check covers `merge_group` | `MISSING_REQUIRED_SUITE`, `REQUIRED_SUITE_UNCOVERED` |
+| Writer App installation has `statuses: write` | `WRITER_CANNOT_POST_STATUSES` |
 | No other audit finding | `WORKFLOW_NOT_QUALIFIED` |
 
 A GitHub App installation token (`ghs_…`, the fleet's usual credential) gets
@@ -102,9 +103,31 @@ check reads that as `PERMISSION_UNKNOWN`, not as a denial. To get a real
 answer, run `eligibility` with a credential whose permissions are visible, or
 record `can_push` in a `--facts` file.
 
+`WRITER_CANNOT_POST_STATUSES` is read from the writer App's installation
+(`GET /orgs/{org}/installations`, matched by app id or slug), never from
+`repos/{nwo}.permissions`. It fires when that installation's `statuses` is
+`read` or absent. It is not evaluated (no failure) when no writer App is
+configured for the owner or the installation list is unreadable.
+
 The `--facts` file has the shape
-`{"repository","owner_type","branch","can_push","rules":[{"type","ruleset_id","parameters"}]}`.
+`{"repository","owner_type","branch","can_push","writer_statuses","rules":[{"type","ruleset_id","parameters"}]}`
+(`writer_statuses` is `read`, `write` or `none`).
 A missing or `null` field means "unknown".
+
+## Handoff is idempotent and refuses a writer that cannot post
+
+`forge merge-queue step` / `handoff` posts the `loom/merge-authorization`
+status on the approved head, so the writer needs `statuses: write`. Two guards
+run before the first grant write or revoke (#12579):
+
+- A PR already queued at the approved head under a live grant for that same head
+  reports `LOOM-MERGE-QUEUE-HANDED-OFF` ("was already in the queue") and changes
+  nothing: no revoke, no re-grant, no status write. A credential that cannot
+  post statuses therefore cannot dequeue a PR another identity queued.
+- Otherwise, a writer App whose installation has `statuses` below `write` is
+  refused with `[WRITER_CANNOT_POST_STATUSES]` (exit 3) before any grant is
+  written. Nothing is revoked and an existing queue entry is left alone. Fix the
+  App's permission; Loom does not change it.
 
 ## How `ci.yml` is qualified
 
@@ -165,6 +188,28 @@ wait for a status that only its own approval can cause and time out. A posted
 `--required-only` modes. `merge-pr.sh`'s zero-row settle
 (`merge_pr/zero_checks.rs`) is unchanged: it runs post-authorization and does
 not use the verdict path.
+
+## A queue drop caused by lost infrastructure is retried once (#12573)
+
+GitHub reports a runner lost mid-job as `failed_checks`, which Loom first
+classified as `check-failure` and routed to Doctor (`loom:pr` →
+`loom:changes-requested`), though the PR's code was green. When the drop is
+`check-failure`, the reconcile pass reads the check runs on the removed group
+commit (`beforeCommit.oid` of the removal event, readable after the group ref
+is deleted) and reclassifies it as `dropped-infra` only if:
+
+- at least one run failed, and every failed run ended `cancelled` or
+  `timed_out`, and
+- none of those runs' jobs has a step that ended `failure` (a test or build
+  that ran and failed is a real failure), and
+- no earlier `dropped-infra` revoke marker covers the same head.
+
+`dropped-infra` takes the `timeout` route: labels unchanged, `loom:pr` kept,
+and the next Champion pass re-enqueues with a fresh authorization. The CLI
+prints `LOOM-MERGE-QUEUE-DROPPED reason=dropped-infra`. The one-retry bound is
+per head: the second infra drop on the same head, a mixed set, an in-progress
+run, an unreadable or empty check-run read, or a missing group commit all stay
+`check-failure` and go to Doctor as before (fail closed).
 
 ## Rollback to direct mode
 

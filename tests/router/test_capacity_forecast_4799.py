@@ -20,9 +20,9 @@ Sections:
    deferred **only** where a via drop actually exists.
 4. The document + human block, including "not applicable" staying distinct from
    a clean bill of health.
-5. ``emit_forecast`` never raising, and the ``kct route`` wiring: both parsers
-   carry the flags, the shim forwards them only when set, and the preflight
-   cannot change an exit code.
+5. ``emit_forecast`` never raising, and the ``kct route`` wiring: the flags
+   reach ``route_cmd`` only when given, and the preflight cannot change an
+   exit code.
 
 Everything but the two file-based tests runs on fabricated :class:`FieldPad`
 arrays, so this file costs milliseconds -- the point of a leading indicator.
@@ -500,47 +500,20 @@ class TestBoardLoading:
 
 
 class TestRouteWiring:
-    def test_outer_parser_accepts_and_forwards_the_flags(self):
-        """`kct route` parses with the OUTER parser and shells the inner one.
+    def test_kct_route_accepts_and_forwards_the_flags(self):
+        """``kct route --capacity-forecast`` reaches the router (#4862, #7017)."""
+        from tests.route_cli import kct_route
 
-        Adding the flags to ``route_cmd.py`` alone leaves ``kct route
-        --capacity-forecast`` dying with "unrecognized arguments" -- the #4862
-        lesson, restated for this pair.
-        """
-        from kicad_tools.cli import route_cmd
-        from kicad_tools.cli.commands import routing
-        from kicad_tools.cli.parser import create_parser
+        with_flags, args = kct_route(
+            ["board.kicad_pcb", "--capacity-forecast", "--capacity-forecast-json", "f.json"]
+        )
+        assert args.capacity_forecast is True
+        assert args.capacity_forecast_json == "f.json"
 
-        captured: list[list[str]] = []
+        without_flags, plain = kct_route(["board.kicad_pcb"])
+        assert plain.capacity_forecast is False
+        assert plain.capacity_forecast_json is None
 
-        def fake_main(argv):
-            captured.append(list(argv))
-            return 0
-
-        original = route_cmd.main
-        route_cmd.main = fake_main  # imported inside run_route_command
-        try:
-            args = create_parser().parse_args(
-                [
-                    "route",
-                    "board.kicad_pcb",
-                    "--capacity-forecast",
-                    "--capacity-forecast-json",
-                    "f.json",
-                ]
-            )
-            assert args.capacity_forecast is True
-            assert args.capacity_forecast_json == "f.json"
-            assert routing.run_route_command(args) == 0
-
-            plain = create_parser().parse_args(["route", "board.kicad_pcb"])
-            assert plain.capacity_forecast is False
-            assert plain.capacity_forecast_json is None
-            assert routing.run_route_command(plain) == 0
-        finally:
-            route_cmd.main = original
-
-        with_flags, without_flags = captured
         assert "--capacity-forecast" in with_flags
         assert with_flags[with_flags.index("--capacity-forecast-json") + 1] == "f.json"
         assert "--capacity-forecast" not in without_flags

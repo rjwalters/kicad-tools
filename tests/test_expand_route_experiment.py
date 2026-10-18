@@ -479,6 +479,20 @@ def test_in_tree_boards_resolve_and_chorus_override_is_honoured(tmp_path):
     assert ere.resolve_board_path(ere.BOARDS["chorus"], fake) == fake
 
 
+def test_board_03_routes_and_grades_under_the_recipes_tier1_sidecars():
+    """Issue #7026: a plain ``jlcpcb`` route has no native zone clearance, so its
+    pour links fragment under the recipe's tier-1 fill (3 GND opens)."""
+    board = ere.BOARDS["03"]
+    assert board.manufacturer == "jlcpcb-tier1"
+    assert board.kct_args[:2] == ("--manufacturer", "jlcpcb-tier1")
+    # The tier alone changes nothing; the native block is what the oracle needs.
+    assert "--native-zone-clearance" in board.kct_args
+    # Other in-tree rows keep the default manufacturer.
+    for key in ("00", "01", "02"):
+        assert ere.BOARDS[key].manufacturer == "jlcpcb"
+        assert "--native-zone-clearance" not in ere.BOARDS[key].kct_args
+
+
 def test_fleet_boards_scale_without_error():
     """Every in-tree board the note reports on must actually be scalable."""
     from kicad_tools.core.sexp_file import load_pcb

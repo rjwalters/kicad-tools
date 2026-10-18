@@ -26,7 +26,7 @@ import sys
 from pathlib import Path
 
 from kicad_tools.audit import AuditResult, AuditVerdict, ManufacturingAudit
-from kicad_tools.manufacturers import get_manufacturer_ids
+from kicad_tools.manufacturers import get_all_manufacturer_names, get_profile
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -50,7 +50,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--mfr",
         "-m",
-        choices=get_manufacturer_ids(),
+        choices=get_all_manufacturer_names(),
         default="jlcpcb",
         help="Target manufacturer (default: jlcpcb)",
     )
@@ -157,6 +157,16 @@ def main(argv: list[str] | None = None) -> int:
         help="Insulation material group by CTI (default: IIIa, conservative for FR-4).",
     )
     parser.add_argument(
+        "--hv-overvoltage-category",
+        dest="hv_overvoltage_category",
+        choices=["I", "II", "III", "IV"],
+        default="II",
+        help=(
+            "IEC 60664-1 overvoltage category for the derived clearance "
+            "(Table F.1 rated impulse voltage).  Default II (mains appliance)."
+        ),
+    )
+    parser.add_argument(
         "--strict",
         action="store_true",
         help="Exit with code 2 on warnings",
@@ -169,6 +179,7 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     args = parser.parse_args(argv)
+    args.mfr = get_profile(args.mfr).id
 
     # Validate input file - resolve to absolute path for reliable file access
     path = Path(args.project_or_pcb).resolve()
@@ -201,6 +212,7 @@ def main(argv: list[str] | None = None) -> int:
             hv_working_voltage=args.hv_working_voltage,
             hv_pollution_degree=args.hv_pollution_degree,
             hv_material_group=args.hv_material_group,
+            hv_overvoltage_category=args.hv_overvoltage_category,
         )
         result = audit.run()
     except ValueError as e:
@@ -259,15 +271,22 @@ def output_table(result: AuditResult, verbose: bool = False) -> None:
 
     # ERC
     erc = result.erc
-    erc_status = "PASS" if erc.passed else "FAIL"
-    erc_icon = "OK" if erc.passed else "X"
-    print(f"\n[{erc_icon}] ERC (Electrical Rules Check): {erc_status}")
-    if erc.error_count > 0 or erc.warning_count > 0:
-        print(f"    Errors: {erc.error_count}, Warnings: {erc.warning_count}")
+    if erc.could_not_verify:
+        # Issue #7083: kicad-cli missing / ERC timed out -- the schematic was
+        # never checked, so this is neither PASS nor FAIL.
+        print("\n[!!] ERC (Electrical Rules Check): NOT RUN")
         if erc.details:
-            print(f"    Details: {erc.details}")
-    elif erc.details:
-        print(f"    Note: {erc.details}")
+            print(f"    Note: {erc.details}")
+    else:
+        erc_status = "PASS" if erc.passed else "FAIL"
+        erc_icon = "OK" if erc.passed else "X"
+        print(f"\n[{erc_icon}] ERC (Electrical Rules Check): {erc_status}")
+        if erc.error_count > 0 or erc.warning_count > 0:
+            print(f"    Errors: {erc.error_count}, Warnings: {erc.warning_count}")
+            if erc.details:
+                print(f"    Details: {erc.details}")
+        elif erc.details:
+            print(f"    Note: {erc.details}")
 
     # DRC
     drc = result.drc
@@ -306,7 +325,12 @@ def output_table(result: AuditResult, verbose: bool = False) -> None:
 
     # Sync drift (schematic <-> PCB)
     sync = result.sync
-    if sync.skipped:
+    if sync.could_not_verify:
+        # Issue #7083: the sync check crashed, so drift was never measured.
+        print("\n[!!] Sync (Schematic <-> PCB): NOT RUN")
+        if sync.details:
+            print(f"    Note: {sync.details}")
+    elif sync.skipped:
         print("\n[--] Sync (Schematic <-> PCB): SKIPPED")
         if sync.details:
             print(f"    Note: {sync.details}")

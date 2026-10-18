@@ -23,11 +23,7 @@ from pathlib import Path
 from kicad_tools.cli.sch_json import add_format_flag, record, run_with_json_summary
 from kicad_tools.exceptions import FileNotFoundError as KiCadFileNotFoundError
 from kicad_tools.schema import Schematic
-
-
-def _snap(value: float, grid: float = 1.27) -> float:
-    """Snap a coordinate to the nearest grid point."""
-    return round(value / grid) * grid
+from kicad_tools.schematic.grid import snap_to_grid
 
 
 def run_add_junction(args) -> int:
@@ -40,7 +36,7 @@ def run_add_junction(args) -> int:
         print(f"Error: Schematic not found: {schematic_path}", file=sys.stderr)
         return 1
 
-    position = (_snap(args.at[0]), _snap(args.at[1]))
+    position = (snap_to_grid(args.at[0]), snap_to_grid(args.at[1]))
     record(position=[position[0], position[1]], junctions_added=0)
 
     print(f"Planned: Junction at ({position[0]:.2f}, {position[1]:.2f})")

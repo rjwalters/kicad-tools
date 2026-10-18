@@ -105,7 +105,7 @@ rm -rf "$NOTAREPO"
 # -------- Test 5: clean single-value local identity exits 0 --------
 echo "Test 5: clean single-value local identity exits 0"
 REPO=$(make_repo)
-git -C "$REPO" config user.email "dev@example.com"
+git -C "$REPO" config user.email "dev@example.org"
 git -C "$REPO" config user.name "Dev Person"
 run_check "$REPO"
 if [[ "$RC" -eq 0 ]]; then pass "exit 0 on clean single-value identity"; else fail "expected 0, got $RC; out=$OUT"; fi
@@ -115,7 +115,7 @@ rm -rf "$REPO"
 echo "Test 6: no local values (global-only identity) exits 0"
 REPO=$(make_repo)
 GLOBAL_WITH_ID="$WORKDIR/global-with-identity"
-git config --file "$GLOBAL_WITH_ID" user.email "global@example.com"
+git config --file "$GLOBAL_WITH_ID" user.email "global@example.org"
 git config --file "$GLOBAL_WITH_ID" user.name "Global Person"
 run_check "$REPO" "$GLOBAL_WITH_ID"
 if [[ "$RC" -eq 0 ]]; then
@@ -128,12 +128,12 @@ rm -rf "$REPO"
 # -------- Test 7: stacked (multi-value) local user.email -> warn (exit 1) --------
 echo "Test 7: stacked local user.email values warn (exit 1)"
 REPO=$(make_repo)
-git -C "$REPO" config user.email "first@example.com"
-git -C "$REPO" config --add user.email "second@example.com"
+git -C "$REPO" config user.email "first@example.org"
+git -C "$REPO" config --add user.email "second@example.org"
 run_check "$REPO"
 if [[ "$RC" -eq 1 ]] \
-   && grep -q "first@example.com" <<<"$OUT" \
-   && grep -q "second@example.com" <<<"$OUT" \
+   && grep -q "first@example.org" <<<"$OUT" \
+   && grep -q "second@example.org" <<<"$OUT" \
    && grep -qi "WARNING" <<<"$OUT"; then
     pass "exit 1 + both stacked values listed"
 else
@@ -200,14 +200,14 @@ rm -rf "$REPO"
 # -------- Test 13: worktree-specific config (extensions.worktreeConfig) is read --------
 echo "Test 13: a value set only in a per-worktree config is detected"
 REPO=$(make_repo)
-git -C "$REPO" config user.email "main@example.com"
+git -C "$REPO" config user.email "main@example.org"
 git -C "$REPO" config extensions.worktreeConfig true
 git -C "$REPO" worktree add -q "$WORKDIR/wt13" -b feature-13 >/dev/null 2>&1
-git -C "$WORKDIR/wt13" config --worktree user.email "worktree-only@example.com"
+git -C "$WORKDIR/wt13" config --worktree user.email "worktree-only@example.org"
 run_check "$WORKDIR/wt13"
 if [[ "$RC" -eq 1 ]] \
-   && grep -q "main@example.com" <<<"$OUT" \
-   && grep -q "worktree-only@example.com" <<<"$OUT"; then
+   && grep -q "main@example.org" <<<"$OUT" \
+   && grep -q "worktree-only@example.org" <<<"$OUT"; then
     pass "per-worktree config value detected alongside the repo-level value"
 else
     fail "expected 1 + both values, got rc=$RC; out=$OUT"
@@ -218,13 +218,57 @@ rm -rf "$REPO"
 # -------- Test 14: corruption takes priority over a co-occurring multi-value warning --------
 echo "Test 14: corruption (exit 3) takes priority over plain multi-value (exit 1)"
 REPO=$(make_repo)
-git -C "$REPO" config user.email "clean@example.com"
+git -C "$REPO" config user.email "clean@example.org"
 git -C "$REPO" config --add user.email "loom-worker@users.noreply.github.comecho"
 run_check "$REPO"
 if [[ "$RC" -eq 3 ]]; then
     pass "corruption exit code (3) wins over plain multi-value (1)"
 else
     fail "expected 3, got $RC; out=$OUT"
+fi
+rm -rf "$REPO"
+
+# -------- Test 15: fixture identity in global scope warns (exit 1) --------
+echo "Test 15: fixture global user.email warns and names the global file (#11332)"
+REPO=$(make_repo)
+FIXTURE_GLOBAL="$WORKDIR/global-fixture"
+git config --file "$FIXTURE_GLOBAL" user.email "ci@loom.test"
+run_check "$REPO" "$FIXTURE_GLOBAL"
+if [[ "$RC" -eq 1 ]] \
+   && grep -q "ci@loom.test" <<<"$OUT" \
+   && grep -q "$FIXTURE_GLOBAL" <<<"$OUT" \
+   && grep -q -- "--unset user.email" <<<"$OUT"; then
+    pass "exit 1 + fixture address and originating file reported"
+else
+    fail "expected 1 + address + origin, got rc=$RC; out=$OUT"
+fi
+rm -rf "$REPO"
+
+# -------- Test 16: other fixture addresses are flagged --------
+echo "Test 16: @loom.local, .test, .invalid and example.com addresses warn"
+for addr in "auditor@loom.local" "x@host.test" "x@a.invalid" "x@example.com" "x@mail.example.com"; do
+    REPO=$(make_repo)
+    git -C "$REPO" config user.email "$addr"
+    run_check "$REPO"
+    if [[ "$RC" -eq 1 ]] && grep -q "$addr" <<<"$OUT"; then
+        pass "$addr flagged (exit 1)"
+    else
+        fail "$addr: expected 1, got rc=$RC; out=$OUT"
+    fi
+    rm -rf "$REPO"
+done
+
+# -------- Test 17: normal identity stays clean; check is read-only --------
+echo "Test 17: normal global identity is clean and config is not mutated"
+REPO=$(make_repo)
+NORMAL_GLOBAL="$WORKDIR/global-normal"
+git config --file "$NORMAL_GLOBAL" user.email "dev@example.org"
+before=$(cat "$NORMAL_GLOBAL")
+run_check "$REPO" "$NORMAL_GLOBAL"
+if [[ "$RC" -eq 0 && "$before" == "$(cat "$NORMAL_GLOBAL")" ]]; then
+    pass "exit 0 for real identity; global config untouched"
+else
+    fail "expected 0, got rc=$RC; out=$OUT"
 fi
 rm -rf "$REPO"
 
