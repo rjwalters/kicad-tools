@@ -715,7 +715,14 @@ class Project:
         # Route all nets
         routes = router.route_all(nets_to_route)
 
-        # Get routing statistics
+        # Collapse per-grid-cell segments into straight runs, as `kct route`
+        # does (Issue #7138); falls back to the raw routes on failure.
+        if routes:
+            from .router.optimizer.merge import merge_collinear_routes
+
+            merge_collinear_routes(router)
+
+        # Get routing statistics (after the merge so they match saved copper)
         stats = router.get_statistics()
 
         # Merge routes into PCB if any routes were created
