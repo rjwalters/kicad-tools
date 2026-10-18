@@ -975,9 +975,11 @@ def _discover_tier(board_dir: Path, pcb: Path) -> str | None:
         try:
             from kicad_tools.spec import load_spec
 
-            fab = load_spec(spec).requirements.manufacturing.target_fab
+            requirements = load_spec(spec).requirements
         except Exception:
             return None
+        manufacturing = requirements.manufacturing if requirements is not None else None
+        fab = manufacturing.target_fab if manufacturing is not None else None
         if isinstance(fab, str) and fab:
             return fab
     return None
