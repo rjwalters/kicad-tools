@@ -483,6 +483,135 @@ class TestPreflightDRC:
         drc_result = _find_result(results, "drc")
         assert drc_result is None  # Should not appear when skipped
 
+    # -- Issue #7091: opens and source binding ---------------------------------
+
+    @staticmethod
+    def _write_kicad_cli_drc(
+        path: Path,
+        source: str,
+        violations: list | None = None,
+        unconnected: list | None = None,
+    ) -> Path:
+        """Write a kicad-cli-format DRC JSON report."""
+        path.write_text(
+            json.dumps(
+                {
+                    "$schema": "https://schemas.kicad.org/drc.v1.json",
+                    "source": source,
+                    "date": "2026-10-18T00:00:00+0000",
+                    "kicad_version": "10.0.6",
+                    "coordinate_units": "mm",
+                    "violations": violations or [],
+                    "unconnected_items": unconnected or [],
+                    "schematic_parity": [],
+                }
+            )
+        )
+        return path
+
+    @staticmethod
+    def _open(severity: str = "error") -> dict:
+        return {
+            "type": "unconnected_items",
+            "severity": severity,
+            "description": "Missing connection between items",
+            "items": [
+                {"description": "Pad 1 [VCC] of C1", "pos": {"x": 1.0, "y": 1.0}},
+                {"description": "Pad 1 [VCC] of C2", "pos": {"x": 2.0, "y": 1.0}},
+            ],
+        }
+
+    def _drc(self, pcb: Path, report: Path) -> PreflightResult:
+        checker = PreflightChecker(
+            pcb_path=pcb,
+            config=PreflightConfig(drc_report_path=str(report)),
+        )
+        return checker._check_drc()
+
+    def test_unconnected_items_only_fails(self, tmp_path):
+        """A report with only error-severity opens FAILs (was OK before #7091)."""
+        pcb = _create_minimal_pcb(tmp_path)
+        report = self._write_kicad_cli_drc(
+            tmp_path / "drc_report.json", "board.kicad_pcb", unconnected=[self._open()] * 3
+        )
+        result = self._drc(pcb, report)
+        assert result.status == "FAIL", result
+        assert "0 error(s), 3 unconnected item(s)" in result.message
+        assert "unconnected_items" in result.details
+
+    def test_unconnected_items_fail_blocks_export(self, tmp_path):
+        """The FAIL is what --strict-preflight blocks on."""
+        pcb = _create_minimal_pcb(tmp_path)
+        self._write_kicad_cli_drc(
+            tmp_path / "drc_report.json", "board.kicad_pcb", unconnected=[self._open()]
+        )
+        checker = PreflightChecker(pcb_path=pcb, config=PreflightConfig(skip_erc=True))
+        results = checker.run_all()
+        assert _find_result(results, "drc").status == "FAIL"
+        assert PreflightChecker.has_failures(results)
+
+    def test_warning_severity_unconnected_items_do_not_fail(self, tmp_path):
+        pcb = _create_minimal_pcb(tmp_path)
+        report = self._write_kicad_cli_drc(
+            tmp_path / "drc_report.json",
+            "board.kicad_pcb",
+            unconnected=[self._open("warning")],
+        )
+        assert self._drc(pcb, report).status == "OK"
+
+    def test_matching_clean_report_ok(self, tmp_path):
+        pcb = _create_minimal_pcb(tmp_path)
+        report = self._write_kicad_cli_drc(
+            tmp_path / "drc_report.json", "/other/host/abs/path/board.kicad_pcb"
+        )
+        result = self._drc(pcb, report)
+        assert result.status == "OK", result
+        assert result.message == "DRC: 0 errors, 0 warnings"
+
+    def test_report_for_other_board_warns_auto_discovered(self, tmp_path):
+        """The ``*_routed`` sibling's clean report is not evidence for this board."""
+        pcb = _create_minimal_pcb(tmp_path, filename="x.kicad_pcb")
+        self._write_kicad_cli_drc(tmp_path / "drc_report.json", "x_routed.kicad_pcb")
+        checker = PreflightChecker(pcb_path=pcb, config=PreflightConfig(skip_erc=True))
+        result = _find_result(checker.run_all(), "drc")
+        assert result.status == "WARN", result
+        assert result.message == "DRC report is for x_routed.kicad_pcb, not x.kicad_pcb"
+
+    def test_report_for_other_board_warns_explicit(self, tmp_path):
+        pcb = _create_minimal_pcb(tmp_path, filename="x.kicad_pcb")
+        report = self._write_kicad_cli_drc(
+            tmp_path / "custom.json", "C:\\boards\\x_routed.kicad_pcb"
+        )
+        result = self._drc(pcb, report)
+        assert result.status == "WARN"
+        assert "x_routed.kicad_pcb" in result.message
+
+    def test_report_without_source_judged_as_before(self, tmp_path):
+        pcb = _create_minimal_pcb(tmp_path)
+        report = self._write_kicad_cli_drc(
+            tmp_path / "drc_report.json", "", unconnected=[self._open()]
+        )
+        assert self._drc(pcb, report).status == "FAIL"
+
+    def test_text_report_unconnected_items_fail(self, tmp_path):
+        """Text ``.rpt`` reports keep opens in ``violations``; still FAIL."""
+        pcb = _create_minimal_pcb(tmp_path)
+        report = tmp_path / "drc_report.txt"
+        report.write_text(
+            "** Drc report for board.kicad_pcb **\n"
+            "** Created on 2026-10-18T00:00:00 **\n\n"
+            "** Found 0 DRC violations **\n\n"
+            "** Found 1 unconnected pads **\n"
+            "[unconnected_items]: Missing connection between items\n"
+            "    Local override; error\n"
+            "    @(1.0000 mm, 1.0000 mm): Pad 1 [VCC] of C1\n"
+            "    @(2.0000 mm, 1.0000 mm): Pad 1 [VCC] of C2\n\n"
+            "** End of Report **\n"
+        )
+        result = self._drc(pcb, report)
+        assert result.status == "FAIL", result
+        assert "1 unconnected item(s)" in result.message
+
 
 # ---------------------------------------------------------------------------
 # PreflightChecker -- ERC check
@@ -512,6 +641,56 @@ class TestPreflightERC:
         results = checker.run_all()
         erc_result = _find_result(results, "erc")
         assert erc_result is None
+
+    # -- Issue #7091: source binding -------------------------------------------
+
+    @staticmethod
+    def _write_erc(path: Path, source: str | None) -> Path:
+        data: dict = {
+            "$schema": "https://schemas.kicad.org/erc.v1.json",
+            "kicad_version": "10.0.6",
+            "coordinate_units": "mm",
+            "sheets": [{"path": "/", "uuid_path": "/", "violations": []}],
+        }
+        if source is not None:
+            data["source"] = source
+        path.write_text(json.dumps(data))
+        return path
+
+    def _erc(self, tmp_path: Path, sch_name: str, report: Path) -> PreflightResult:
+        pcb = _create_minimal_pcb(tmp_path)
+        sch = tmp_path / sch_name
+        sch.write_text("(kicad_sch)")
+        checker = PreflightChecker(
+            pcb_path=pcb,
+            schematic_path=sch,
+            config=PreflightConfig(skip_drc=True, erc_report_path=str(report)),
+        )
+        return checker._check_erc()
+
+    def test_report_for_other_schematic_warns(self, tmp_path):
+        report = self._write_erc(tmp_path / "erc_report.json", "/elsewhere/other.kicad_sch")
+        result = self._erc(tmp_path, "board.kicad_sch", report)
+        assert result.status == "WARN", result
+        assert result.message == "ERC report is for other.kicad_sch, not board.kicad_sch"
+
+    def test_matching_schematic_ok(self, tmp_path):
+        report = self._write_erc(tmp_path / "erc_report.json", "board.kicad_sch")
+        assert self._erc(tmp_path, "board.kicad_sch", report).status == "OK"
+
+    def test_sourceless_report_no_false_warn(self, tmp_path):
+        """``source_file`` falls back to the report's own path; not a mismatch."""
+        report = self._write_erc(tmp_path / "erc_report.json", None)
+        assert self._erc(tmp_path, "board.kicad_sch", report).status == "OK"
+
+    def test_no_schematic_skips_comparison(self, tmp_path):
+        pcb = _create_minimal_pcb(tmp_path)
+        report = self._write_erc(tmp_path / "erc_report.json", "other.kicad_sch")
+        checker = PreflightChecker(
+            pcb_path=pcb,
+            config=PreflightConfig(skip_drc=True, erc_report_path=str(report)),
+        )
+        assert checker._check_erc().status == "OK"
 
 
 # ---------------------------------------------------------------------------
