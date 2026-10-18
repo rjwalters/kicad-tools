@@ -329,6 +329,57 @@ class TestRouteNet:
         expected_width = parse_pcb_design_rules(UNROUTED_PCB).to_design_rules().trace_width
         assert all(s.width == pytest.approx(expected_width) for s in sig1_segments)
 
+    def test_grid_step_run_is_merged_into_one_segment(self) -> None:
+        """90 collinear grid-step segments collapse to one (Issue #7120)."""
+        from kicad_tools.mcp.tools.routing import _merge_collinear_segments
+        from kicad_tools.router import Autorouter, DesignRules
+        from kicad_tools.router.layers import Layer
+        from kicad_tools.router.primitives import Route, Segment
+
+        def pad(x: float, n: str) -> dict:
+            return {
+                "number": n, "x": x, "y": 10.0, "width": 0.6, "height": 0.6, "net": 1,
+                "net_name": "S", "layer": Layer.F_CU, "through_hole": False,
+            }  # fmt: skip
+
+        router = Autorouter(
+            30, 20, rules=DesignRules(grid_resolution=0.1, trace_width=0.2, trace_clearance=0.2)
+        )
+        router.add_component("R1", [pad(5.0, "1")])
+        router.add_component("R2", [pad(14.0, "1")])
+        segs = [
+            Segment(
+                x1=5 + i * 0.1, y1=10.0, x2=5 + (i + 1) * 0.1, y2=10.0,
+                width=0.2, layer=Layer.F_CU, net=1, net_name="S",
+            )
+            for i in range(90)
+        ]  # fmt: skip
+        route = Route(net=1, net_name="S", segments=segs, vias=[])
+        router._mark_route(route)
+        router.routes.append(route)
+
+        merged = _merge_collinear_segments(router, 1, [route])
+
+        out = [s for r in merged for s in r.segments]
+        assert len(out) == 1
+        assert out[0].x1 == pytest.approx(5.0)
+        assert out[0].x2 == pytest.approx(14.0)
+
+    def test_optimizer_failure_falls_back_to_raw_routes(self, tmp_path: Path, monkeypatch) -> None:
+        """An optimizer exception must not fail routing (Issue #7120)."""
+        import kicad_tools.router.optimizer as opt
+
+        def boom(*a, **k):
+            raise RuntimeError("optimizer exploded")
+
+        monkeypatch.setattr(opt, "optimize_routes_grid_synced", boom)
+        pcb_file = tmp_path / "test.kicad_pcb"
+        pcb_file.write_text(UNROUTED_PCB)
+
+        result = route_net(str(pcb_file), net_name="SIG1")
+        assert result.success is True, result.error_message
+        assert result.trace_length_mm > 0
+
     def test_routed_output_loads_in_kicad_cli(self, tmp_path: Path) -> None:
         """kicad-cli parses the saved board without errors (Issue #7114)."""
         import shutil

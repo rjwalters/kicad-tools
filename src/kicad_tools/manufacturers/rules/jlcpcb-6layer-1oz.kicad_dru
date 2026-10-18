@@ -20,6 +20,8 @@
 (rule "Via Drill - JLCPCB"
   (condition "A.Type == 'via' && A.Via_Type != 'Micro'")
   (constraint hole_size (min 0.2mm)))
+(rule "Max Hole Size - JLCPCB"
+  (constraint hole_size (max 6.3mm)))
 (rule "Via Diameter - JLCPCB"
   (condition "A.Type == 'via' && A.Via_Type != 'Micro'")
   (constraint via_diameter (min 0.45mm)))

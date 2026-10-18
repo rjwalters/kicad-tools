@@ -505,10 +505,23 @@ def _add_drc_parser(subparsers) -> None:
         "--allow-incomplete",
         action="store_true",
         help=(
-            "Exit 0 instead of 2 when schematic parity did NOT RUN (no or "
-            "unannotated schematic next to the board, or a report that does "
-            "not record whether parity ran). Same name and meaning as "
-            "kct check --allow-incomplete (Issue #7077)"
+            "Exit 0 instead of 2 when schematic parity did NOT RUN (no "
+            "schematic resolved, several candidates, one kicad-cli cannot "
+            "netlist, or a report that does not record whether parity ran). "
+            "Same name and meaning as kct check --allow-incomplete (Issue #7077)"
+        ),
+    )
+    drc_parser.add_argument(
+        "--schematic",
+        type=Path,
+        default=None,
+        help=(
+            "Schematic for the parity check (default: resolved from the board "
+            "-- project.kct, then <base>.kicad_sch with _routed/_optimized/... "
+            "stripped).  kicad-cli only reads <pcb-stem>.kicad_sch, so kct "
+            "runs it on a temporary copy of the board folder with this "
+            "schematic under the board's name (Issue #7147).  Ignored for "
+            ".json/.rpt report input"
         ),
     )
     drc_parser.add_argument(
@@ -5471,6 +5484,15 @@ def _add_optimize_placement_parser(subparsers) -> None:
             "feasibility-gated convergence behaviour (issue #2821), "
             "where the loop refuses to declare convergence while the "
             "best-known placement is still infeasible. Default: no cap."
+        ),
+    )
+    op_parser.add_argument(
+        "--require-outline",
+        action="store_true",
+        default=False,
+        help=(
+            "Exit nonzero when the board has no Edge.Cuts outline instead of "
+            "falling back to a footprints+10 mm bounding box (issue #7148)."
         ),
     )
     op_parser.add_argument(

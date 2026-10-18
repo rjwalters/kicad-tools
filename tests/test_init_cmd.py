@@ -58,7 +58,7 @@ class TestCreateDruContent:
 
         content = create_dru_content(rules, "jlcpcb", 2)
 
-        assert "Minimum Trace Width" in content
+        assert "Trace Width - JLCPCB" in content
         assert "track_width" in content
         assert f"{rules.min_trace_width_mm}mm" in content
 
@@ -69,7 +69,7 @@ class TestCreateDruContent:
 
         content = create_dru_content(rules, "jlcpcb", 2)
 
-        assert "Minimum Clearance" in content
+        assert "Clearance - JLCPCB" in content
         assert "clearance" in content
 
     def test_includes_via_rules(self):
@@ -79,8 +79,8 @@ class TestCreateDruContent:
 
         content = create_dru_content(rules, "jlcpcb", 2)
 
-        assert "Minimum Via Drill" in content
-        assert "Minimum Via Diameter" in content
+        assert "Via Drill - JLCPCB" in content
+        assert "Via Diameter - JLCPCB" in content
         assert "hole_size" in content
         assert "via_diameter" in content
 

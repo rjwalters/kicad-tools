@@ -131,6 +131,23 @@ def _resolve_output_path(pcb_path: str, output_path: str | None) -> str:
     return str(p.with_name(f"{p.stem}_routed{p.suffix}"))
 
 
+def _merge_collinear_segments(router, net_number: int, routes: list) -> list:
+    """Merge collinear grid-step segments, returning ``net_number``'s routes.
+
+    Issue #7120: see :func:`merge_collinear_routes`.  Any failure falls back
+    to ``routes``.
+    """
+    import copy
+
+    from kicad_tools.router.optimizer.merge import merge_collinear_routes
+
+    original_routes = copy.deepcopy(routes)
+    if not merge_collinear_routes(router):
+        return original_routes
+    optimized = [r for r in router.routes if r.net == net_number]
+    return optimized or routes
+
+
 def route_net(
     pcb_path: str,
     net_name: str,
@@ -372,6 +389,8 @@ def route_net(
             error_message=f"Routing failed: {e}",
             suggestions=_generate_suggestions(net_status, net_pads, pcb),
         )
+
+    routes = _merge_collinear_segments(router, net_number, routes)
 
     # Calculate results
     if routes:

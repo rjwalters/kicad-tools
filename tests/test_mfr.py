@@ -357,9 +357,10 @@ class TestDRUFiles:
             # four object-specific factory rules (#5059): Silk to Pad,
             # SMD Pad Clearance, PTH Hole to Track and Inner PTH Hole to
             # Copper.  Only the JLC profiles declare those optional floors,
-            # so the other fabs stay at the 9 base rules.
+            # so the other fabs stay at the 9 base rules plus Max Hole Size
+            # (#7132).
             rules = sexp.find_children("rule")
-            expected = 14 if dru_file.startswith("jlcpcb-") else 9
+            expected = 15 if dru_file.startswith("jlcpcb-") else 10
             assert len(rules) == expected
 
 
@@ -845,7 +846,7 @@ class TestDruGenerator:
         assert "(rule" in content
 
     def test_generate_dru_has_all_jlc_rules(self):
-        """JLC: base rules + its PTH ring floor + the object-specific rules.
+        """JLC: base rules + its PTH ring floor + Max Hole Size (#7132) + the object-specific rules.
 
         The object-specific factory rules add four: ``Silk to Pad``,
         ``PTH Hole to Track`` and ``Inner PTH Hole to Copper`` (#5152), plus
@@ -859,7 +860,7 @@ class TestDruGenerator:
         content = generate_dru(rules, manufacturer_name="JLCPCB")
 
         rule_count = content.count("(rule ")
-        assert rule_count == 14, f"Expected 14 rules, got {rule_count}"
+        assert rule_count == 15, f"Expected 15 rules, got {rule_count}"
         assert 'rule "Silk to Pad - JLCPCB"' in content
         assert 'rule "PTH Hole to Track - JLCPCB"' in content
         assert 'rule "Inner PTH Hole to Copper - JLCPCB"' in content
@@ -968,11 +969,11 @@ class TestDruGenerator:
             rules = profile.get_design_rules(layers=2, copper_oz=1.0)
             content = generate_dru(rules, manufacturer_name=profile.name)
             assert "(version 1)" in content, f"Failed for {mfr_id}"
-            # 9 base rules, plus one per OPTIONAL floor the profile declares
+            # 10 base rules, plus one per OPTIONAL floor the profile declares
             # (including the different-net SMD pad floor, emitted natively
             # since the Reference-based different-footprint scope was
             # measured working; #5059).
-            expected = 9 + sum(
+            expected = 10 + sum(
                 value is not None
                 for value in (
                     rules.min_pth_annular_ring_mm,

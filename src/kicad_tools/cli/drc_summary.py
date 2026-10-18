@@ -619,6 +619,10 @@ def run_drc_on_pcb(
 
     # Issue #7077: record whether kicad-cli actually ran schematic parity.
     report.schematic_parity_ran = not result.parity_skipped
+    # Issue #7147: the cause-specific NOT RUN reason and the schematic used.
+    report.schematic_parity_reason = result.parity_skip_reason
+    if result.parity_schematic is not None:
+        report.schematic_parity_schematic = str(result.parity_schematic)
     return report
 
 

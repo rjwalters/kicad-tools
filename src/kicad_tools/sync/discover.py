@@ -153,6 +153,22 @@ def resolve_schematic_for_pcb(pcb_path: str | Path) -> Path | None:
     return None
 
 
+def unresolved_schematic_candidates(pcb_path: str | Path) -> list[Path]:
+    """The candidate root schematics that made resolution ambiguous (Issue #7147).
+
+    Meant for the case where :func:`resolve_schematic_for_pcb` returned
+    ``None``: more than one entry means several candidates were found and the
+    resolver refused to guess; zero or one means nothing usable was found.
+    Paired roots (step 3) take precedence over the bare sibling list (step 4),
+    mirroring the resolver's own order.
+    """
+    project_dir = Path(pcb_path).parent
+    paired = _paired_root_schematics(project_dir)
+    if paired:
+        return paired
+    return sorted(project_dir.glob("*.kicad_sch"))
+
+
 def resolve_target_fab_for_pcb(pcb_path: str | Path) -> str | None:
     """Resolve the target fabricator profile declared for a PCB (issue #3920).
 
