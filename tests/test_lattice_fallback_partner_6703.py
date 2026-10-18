@@ -550,19 +550,21 @@ class _Leg:
         self.length = length
         self.route = self
         self.vias = [object()] * vias
+        self.runs = [(0, [(0.0, 0.0), (length, 0.0)], [0.2])]
 
 
 def _candidate_winner(monkeypatch, legs: list[tuple[float, int]]) -> tuple[int, int]:
     """(vias_P, vias_N) of the pair kept by ``_partner_aware_legs``.
 
     ``legs`` are the (length, vias) results of the searches, in call order:
-    P first, then N plain, N guided; N first, then P plain, P guided.
+    P first, then N plain, N guided; N first, then P plain, P guided.  Any
+    later search (the #7093 mirrored partner legs) finds nothing.
     """
     pf, pc = _walled_pair()
     pf.pair_length_measure = lambda route: route.length
     results = iter(_Leg(*lg) for lg in legs)
     monkeypatch.setattr(
-        LatticePathfinder, "_search_single", lambda self, item, **kw: (next(results), "")
+        LatticePathfinder, "_search_single", lambda self, item, **kw: (next(results, None), "")
     )
     monkeypatch.setattr(LatticePathfinder, "_partner_guide", lambda self, res, pc: object())
     monkeypatch.setattr(LatticePathfinder, "_legs_shortfalls", lambda self, pc, lg: 0)
