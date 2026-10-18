@@ -289,10 +289,93 @@ class TestRouteNet:
 
         assert pcb_file.read_bytes() == before
         expected = tmp_path / "test_routed.kicad_pcb"
-        assert result.output_path != str(pcb_file)
-        if result.success:
-            assert result.output_path == str(expected)
-            assert expected.exists()
+        # Issue #7114: the save step used to raise a TypeError, so this test
+        # silently skipped the success branch.  It must now really succeed.
+        assert result.success is True, result.error_message
+        assert result.output_path == str(expected)
+        assert expected.exists()
+
+    def test_routed_net_is_saved_end_to_end(self, tmp_path: Path) -> None:
+        """A routed 2-pad net is merged and written to disk (Issue #7114).
+
+        ``route_net`` used to call ``merge_routes_into_pcb`` with a signature
+        that never existed (``TypeError`` on ``net_map``) and so could never
+        save.  Route SIG1 on the unrouted fixture and check the output file.
+        """
+        from kicad_tools.schema.pcb import PCB
+
+        pcb_file = tmp_path / "test.kicad_pcb"
+        pcb_file.write_text(UNROUTED_PCB)
+        before = pcb_file.read_bytes()
+
+        result = route_net(str(pcb_file), net_name="SIG1")
+
+        assert result.success is True, result.error_message
+        assert result.error_message is None
+        assert result.routed_connections >= 1
+        assert result.trace_length_mm > 0
+        out = tmp_path / "test_routed.kicad_pcb"
+        assert result.output_path == str(out)
+        assert pcb_file.read_bytes() == before
+
+        routed = PCB.load(str(out))
+        sig1 = next(num for num, net in routed.nets.items() if net.name == "SIG1")
+        sig1_segments = [s for s in routed.segments if s.net_number == sig1]
+        assert sig1_segments, "no SIG1 copper in the saved board"
+        assert not [s for s in routed.segments if s.net_number != sig1]
+        # Width comes from the design rules the router actually used.
+        from kicad_tools.router.io import parse_pcb_design_rules
+
+        expected_width = parse_pcb_design_rules(UNROUTED_PCB).to_design_rules().trace_width
+        assert all(s.width == pytest.approx(expected_width) for s in sig1_segments)
+
+    def test_routed_output_loads_in_kicad_cli(self, tmp_path: Path) -> None:
+        """kicad-cli parses the saved board without errors (Issue #7114)."""
+        import shutil
+        import subprocess
+
+        kicad_cli = shutil.which("kicad-cli")
+        mac_cli = Path("/Applications/KiCad/KiCad.app/Contents/MacOS/kicad-cli")
+        if kicad_cli is None and mac_cli.exists():
+            kicad_cli = str(mac_cli)
+        if kicad_cli is None:
+            pytest.skip("kicad-cli not available")
+
+        pcb_file = tmp_path / "test.kicad_pcb"
+        pcb_file.write_text(UNROUTED_PCB)
+        result = route_net(str(pcb_file), net_name="SIG1")
+        assert result.success is True, result.error_message
+
+        report = tmp_path / "drc.json"
+        proc = subprocess.run(
+            [
+                kicad_cli,
+                "pcb",
+                "drc",
+                "--format",
+                "json",
+                "--output",
+                str(report),
+                result.output_path,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert report.exists()
+
+    def test_save_failure_reports_error(self, tmp_path: Path) -> None:
+        """A write failure still returns success=False with a message."""
+        pcb_file = tmp_path / "test.kicad_pcb"
+        pcb_file.write_text(UNROUTED_PCB)
+        bad = tmp_path / "missing_dir" / "out.kicad_pcb"
+
+        result = route_net(str(pcb_file), net_name="SIG1", output_path=str(bad))
+
+        assert result.success is False
+        assert result.error_message is not None
+        assert "Failed to save routed PCB" in result.error_message
 
     def test_explicit_same_output_path_is_reported(self, tmp_path: Path) -> None:
         """Passing output_path == pcb_path is the explicit overwrite opt-in."""
