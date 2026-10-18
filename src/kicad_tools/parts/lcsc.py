@@ -164,14 +164,8 @@ class RateLimiter:
 
 # JLCPCB API endpoints (same as KiCad JLCPCB Plugin)
 JLCPCB_API_BASE = "https://jlcpcb.com/api"
-LCSC_API_BASE = "https://wmsc.lcsc.com/ftps/wm"
 
-# Part lookup endpoint
-PART_LOOKUP_URL = (
-    f"{JLCPCB_API_BASE}/overseas-pcb-order/v1/shoppingCart/smtGood/selectSmtComponentDetail"
-)
-
-# Search endpoint
+# Search endpoint (also used for single-part lookup via an exact-code filter)
 SEARCH_URL = f"{JLCPCB_API_BASE}/overseas-pcb-order/v1/shoppingCart/smtGood/selectSmtComponentList"
 
 
@@ -648,26 +642,31 @@ class LCSCClient:
         ``_failures`` remains accepted for compatibility with existing adapters;
         lookup_many now records failures at its orchestration boundary.
         """
-        payload = {"componentCode": lcsc_part}
+        # The detail endpoint (selectSmtComponentDetail) returns 404; a keyword
+        # search on the LCSC code is the working anonymous lookup. A keyword
+        # search is not a unique-key lookup, so require an exact code match.
+        payload = {"keyword": lcsc_part, "pageSize": 20, "currentPage": 1}
 
-        data = self._make_request(PART_LOOKUP_URL, payload)
+        data = self._make_request(SEARCH_URL, payload)
         if not isinstance(data, dict) or data.get("code") != 200:
             code = data.get("code") if isinstance(data, dict) else None
             safe_code = code if isinstance(code, int) else "invalid"
             raise LCSCUnavailableError(
                 f"Anonymous detail business response unavailable (code {safe_code})"
             )
-        if "data" not in data:
+        result_data = data.get("data")
+        page_info = result_data.get("componentPageInfo") if isinstance(result_data, dict) else None
+        if not isinstance(page_info, dict) or "list" not in page_info:
             raise LCSCUnavailableError("Anonymous detail response is missing data")
-        component = data["data"]
-        if component is None or component == {}:
+        components = page_info["list"]
+        if components is None or components == []:
             return None
-        if not isinstance(component, dict) or component.get("componentCode") != lcsc_part:
-            raise LCSCUnavailableError(
-                "Anonymous detail response has malformed or mismatched identity"
-            )
-
-        return self._parse_component(component)
+        if not isinstance(components, list):
+            raise LCSCUnavailableError("Anonymous detail response is malformed")
+        for component in components:
+            if isinstance(component, dict) and component.get("componentCode") == lcsc_part:
+                return self._parse_component(component)
+        raise LCSCUnavailableError("Anonymous detail response has malformed or mismatched identity")
 
     def _parse_component(self, data: dict) -> Part:
         """Parse component data from API response."""
