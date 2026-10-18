@@ -15,6 +15,9 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-18
 
+- **PR #7179**: feat(cli): finish lib create-symbol-lib/create-footprint-lib/generate-footprint and estimate cost --bom CSV
+- **PR #7197**: fix(board-01): ship sym-lib-table and kicad_tools_pwr symbol library
+- **Issue #7175** (closed): Finish 4 stubbed CLI capabilities advertised in kct --help: lib create-symbol-lib / create-footprint-lib / generate-footprint (deps landed, #85/#87/#88 closed) and estimate cost --bom CSV
 - **PR #7171**: perf(router): make negotiated escape strategies transactional and cap their reroutes
 - **Issue #7071** (closed): router: negotiated oscillation escape burns ~27 s (≈40% of board-02 wall) on four non-transactional strategies, then is rolled back (P1 of #7053 note, mislabelled 'perturbation pass')
 - **PR #7183**: test(dru): model post-#4600 Max Hole Size rule in legacy sidecar fixture
