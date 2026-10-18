@@ -6639,6 +6639,27 @@ def _add_readiness_parser(subparsers) -> None:
         ),
     )
     rd_parser.add_argument(
+        "--known-issue",
+        dest="readiness_known_issue",
+        action="append",
+        default=[],
+        metavar="N:SUMMARY:KIND",
+        help=(
+            "Record an open issue against the board (repeatable). KIND is defect, "
+            "exception or advisory; an open defect makes the board not ready. "
+            "Append :rule=count[,rule=count] to name the kct check warnings it "
+            "accounts for. Recorded issues are carried forward until resolved."
+        ),
+    )
+    rd_parser.add_argument(
+        "--resolve-known-issue",
+        dest="readiness_resolve_known_issue",
+        action="append",
+        default=[],
+        metavar="N",
+        help="Drop a recorded known issue (repeatable), e.g. once its fix has landed.",
+    )
+    rd_parser.add_argument(
         "--include-tht",
         dest="readiness_include_tht",
         action="store_true",

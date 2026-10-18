@@ -45,6 +45,7 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 
 from kicad_tools.analysis.net_status import NetStatusAnalyzer
+from kicad_tools.cli.known_issues import KnownIssueError, defects, validate_known_issues
 from kicad_tools.schema.pcb import canonicalize_power_nets
 
 SCHEMA_VERSION = "1.1"
@@ -335,6 +336,8 @@ class BoardStatus:
     manufacturing: ManufacturingStatus
     drc: DRCStatus = field(default_factory=DRCStatus)
     blockers: list[str] = field(default_factory=list)
+    # Issue #7261: open issues recorded in ``output/readiness.json``.
+    known_issues: list[dict] = field(default_factory=list)
 
     @property
     def ship_ready(self) -> bool:
@@ -350,6 +353,7 @@ class BoardStatus:
             "drc": self.drc.to_dict(),
             "ship_ready": self.ship_ready,
             "blockers": list(self.blockers),
+            "known_issues": [dict(entry) for entry in self.known_issues],
         }
 
 
@@ -1064,6 +1068,26 @@ def _detect_source_drift(
     )
 
 
+def _detect_known_issues(board_dir: Path) -> list[dict]:
+    """Open issues recorded in ``output/readiness.json`` (Issue #7261).
+
+    Warn-only like the other report readers: a missing, unreadable or
+    malformed report contributes nothing (and never adds a blocker).  Hash
+    validation is ``kct readiness`` / ``read_readiness()``'s job; fleet only
+    surfaces what the report discloses.
+    """
+    report = board_dir / "output" / "readiness.json"
+    try:
+        data = json.loads(report.read_text())
+        return validate_known_issues(data.get("known_issues"))
+    except (OSError, ValueError, AttributeError, KnownIssueError):
+        return []
+
+
+def _known_label(entries: list[dict]) -> str:
+    return "known: " + ",".join(f"#{entry['issue']}" for entry in entries)
+
+
 def _compute_routing(routed_pcb: Path) -> RoutingStatus:
     """Run NetStatusAnalyzer on a routed PCB and tally pads/nets."""
     status = RoutingStatus()
@@ -1223,6 +1247,9 @@ def _survey_board(
         drc = _detect_drc(routed_pcb, drc_tolerances or {})
 
     blockers = _compute_blockers(routing, mfg, routed_pcb, drc)
+    known_issues = _detect_known_issues(board_dir)
+    # An open known defect means the board fails its own spec (Issue #7261).
+    blockers.extend(f"known defect #{entry['issue']}" for entry in defects(known_issues))
 
     return BoardStatus(
         name=board_dir.name,
@@ -1232,6 +1259,7 @@ def _survey_board(
         manufacturing=mfg,
         drc=drc,
         blockers=blockers,
+        known_issues=known_issues,
     )
 
 
@@ -1511,9 +1539,12 @@ def _format_table(
             stale = _stale_label(b.manufacturing)
             drc_cell = _drc_label(b.drc)
             if b.ship_ready:
-                ship = "YES"
+                # ``YES*``: ready, with disclosed exceptions/advisories.
+                ship = "YES*" if b.known_issues else "YES"
             else:
                 ship = f"NO  ({b.blockers[0]})"
+            if b.known_issues:
+                ship = f"{ship}  {_known_label(b.known_issues)}"
             lines.append(
                 f"{b.name[:28]:<28} {pads:>7} {pct:>5} {mfr:<8} {stale:<6} {drc_cell:>5} {ship}"
             )
@@ -1527,11 +1558,14 @@ def _format_table(
         )
         stale_count = sum(1 for b in boards if b.manufacturing.stale)
         drc_failing = sum(1 for b in boards if b.drc.over_tolerance)
+        with_known = sum(1 for b in boards if b.known_issues)
         lines.append(
             f"{len(boards)} boards surveyed, {ship_ready} ship-ready, "
             f"{incomplete} incomplete, {stale_count} artifacts stale, "
-            f"{drc_failing} DRC over tolerance"
+            f"{drc_failing} DRC over tolerance, {with_known} with known issues"
         )
+        if with_known:
+            lines.append("YES* = ship-ready with disclosed known issues (output/readiness.json)")
         lines.append(f"boards-dir: {boards_dir}")
 
     if skipped:
@@ -1556,6 +1590,7 @@ def _format_json(
         "stale_artifacts": sum(1 for b in boards if b.manufacturing.stale),
         "missing_artifacts": sum(1 for b in boards if not b.manufacturing.has_all),
         "drc_over_tolerance": sum(1 for b in boards if b.drc.over_tolerance),
+        "with_known_issues": sum(1 for b in boards if b.known_issues),
     }
     doc = {
         "schema_version": SCHEMA_VERSION,
