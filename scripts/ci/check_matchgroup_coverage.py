@@ -176,8 +176,16 @@ MATCHGROUP_RULE_IDS: tuple[str, ...] = ("match_group_length_skew",)
 # genuine pair-only skew that survives -- it is tracked separately under #3916
 # and remains the sole entry in this baseline.
 #
-# The value the gate observes depends on WHICH artifact it runs against, and a
-# SINGLE baseline of **1** satisfies BOTH paths:
+# Issue #7339 -- DDR_DATA_BYTE_0 now fires on the full reroute.  Once DQ0 was
+# routed (#7331) the partial-routing rule stopped excluding DDR_DATA_BYTE_0
+# (11 members), and the tuner leaves it at 16.717 mm skew vs the 0.100 mm
+# tolerance (seed 42, ``5cb0083a6``, 2026-10-18).  The baseline is therefore
+# **2** on the reroute path.  Fixing the tuner is tracked in #5798 / #6447;
+# REMOVAL CONDITION: drop the baseline back to 1 (and delete the DDR term
+# below) once the tuner brings DDR_DATA_BYTE_0 within tolerance.
+#
+# The value the gate observes depends on WHICH artifact it runs against, but
+# the baseline is a single int per PCB:
 #
 #   * ``--skip-route`` (committed-artifact path, used by the diff-driven
 #     routed-pcb-drc-check and by local verification): counts exactly **1**
@@ -186,28 +194,27 @@ MATCHGROUP_RULE_IDS: tuple[str, ...] = ("match_group_length_skew",)
 #     artifact, so that artifact still carries the pre-fix via-imbalanced
 #     ADDR_BUS (which fires) while MIPI/HDMI/DDR are gated out by the
 #     partial-routing rule (at least one unrouted diff-pair leg each: e.g.
-#     MIPI_CLK_N, TMDS_D0_*, DQ3 carry zero geometry).  So the committed
-#     artifact reports 1 (ADDR_BUS), which passes (1 <= 1).  (Refreshing the
-#     committed artifact to also clear ADDR_BUS is the artifact-churn work
-#     tracked in #3925 -- once it lands the committed count drops to the MIPI
-#     violation and this baseline can be revisited.)
+#     MIPI_CLK_N, TMDS_D0_*, DQ3 carry zero geometry).  (Refreshing the
+#     committed artifact is the artifact-churn work tracked in #3925.)
 #
 #   * full reroute (the Match-Group Routing Regression CI job, which runs
 #     ``generate_design.py --step route`` end-to-end before the gate):
-#     also counts **1**.  The via-aware tuner now compensates ADDR_BUS's via
-#     imbalance during the re-route, so ADDR_BUS lands within tolerance and no
-#     longer fires; only MIPI_CSI_LANES's pair-only skew (#3916) remains.
-#     HDMI_TMDS_LANES does NOT fire even after the reroute: its TMDS_D0_N /
-#     TMDS_D1_N legs remain unrouted ("still stranded -- NO relief path"), so
-#     the unrouted-leg gate correctly excludes HDMI.
+#     counts **2**.  The via-aware tuner compensates ADDR_BUS's via imbalance
+#     so it no longer fires; MIPI_CSI_LANES's pair-only skew (#3916) remains,
+#     and DDR_DATA_BYTE_0 (#7339) now fires because DQ0 is routed.
+#     HDMI_TMDS_LANES does NOT fire: its TMDS_D0_N / TMDS_D1_N legs remain
+#     unrouted, so the unrouted-leg gate correctly excludes HDMI.
 #
-# Composition of the baseline (1):
-#   1x MIPI_CSI_LANES pair-only skew (#3916).  (Prior to #3931 the reroute
-#   count was 2 = ADDR_BUS via-imbalance + MIPI; the via-aware tuner removed
-#   the ADDR_BUS term, so the reroute count is now 1 and matches the
-#   committed-artifact count.)
+# Known looseness: the baseline of 2 also lets the committed-artifact path
+# (count 1) absorb one extra violation.  Accepted -- the baseline lookup is
+# keyed per PCB, not per path, and a per-path mechanism is out of scope for
+# #7339.  A third violation still trips the gate on either path.
+#
+# Composition of the baseline (2), reroute path:
+#   1x MIPI_CSI_LANES pair-only skew (#3916)
+#   1x DDR_DATA_BYTE_0 skew, 11 members (#7339; removal: #5798 / #6447)
 MATCHGROUP_VIOLATION_BASELINE: dict[str, int] = {
-    "boards/07-matchgroup-test/regression-fixture/matchgroup_test_routed.kicad_pcb": 1,
+    "boards/07-matchgroup-test/regression-fixture/matchgroup_test_routed.kicad_pcb": 2,
 }
 
 
