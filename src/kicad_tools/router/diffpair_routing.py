@@ -17,6 +17,7 @@ import itertools
 import logging
 import math
 import os
+import re
 import time
 from dataclasses import dataclass, field
 from enum import Enum
@@ -125,7 +126,9 @@ COUPLED_HEURISTIC_WEIGHT: float = float(os.environ.get("KCT_COUPLED_HEURISTIC_WE
 # in that wide window: ~1.7x above npad's convergence floor (npad passes
 # in ~1.3s) while DQS still bails comfortably under the 60s CI timeout.
 #
-# Issue #6835: raised to 700000 total (350000 per phase).  The value is a
+# Issue #6835: raised to 700000 total (350000 per phase); the operator ruling of
+# 2026-10-18 later raised it to 1400000 (see the exception table below).  The
+# analysis that follows was done at 700000.  The value is a
 # shared per-pair total: the corridor phase gets at most half
 # (``per_pair_max_iterations // 2``) and the open phase gets the remainder
 # (``total - corridor_iterations_used``), so every phase is guaranteed at
@@ -156,7 +159,37 @@ COUPLED_HEURISTIC_WEIGHT: float = float(os.environ.get("KCT_COUPLED_HEURISTIC_WE
 #
 # Callers that plumb an explicit ``per_pair_max_iterations`` (board 06's
 # 2000, the re-route gate) are unaffected.
-COUPLED_FLAGOFF_MAX_ITERATIONS: int = int(os.environ.get("KCT_COUPLED_FLAGOFF_MAX_ITERS", "700000"))
+COUPLED_FLAGOFF_MAX_ITERATIONS: int = int(
+    os.environ.get("KCT_COUPLED_FLAGOFF_MAX_ITERS", "1400000")
+)
+
+# Issue #6835 (operator ruling 2026-10-18, Q3 option 1): the default is
+# raised again to 1,400,000 total (700,000 per phase).  The bench shows 1.4M
+# fixes 06rf USB3_RX1 but worsens PCIE_TX (06rf) and the 06b LVDS skew, so
+# those pairs keep the previous (pre-#6835) budget below.  The table is keyed
+# on the pair's base name (polarity suffix and trailing separators stripped,
+# upper-cased); an entry is a regex matched with ``fullmatch``.  It applies
+# only when the caller plumbed no explicit budget, like the default itself.
+COUPLED_FLAGOFF_PAIR_BUDGET_EXCEPTIONS: tuple[tuple[str, int], ...] = (
+    (r"PCIE_TX", 40000),
+    (r"LVDS\d*", 40000),
+)
+
+
+def _flagoff_budget_for_pair(base_name: str) -> int:
+    """Return the flag-off coupled iteration budget for one pair (Issue #6835).
+
+    ``COUPLED_FLAGOFF_MAX_ITERATIONS`` unless the pair matches
+    ``COUPLED_FLAGOFF_PAIR_BUDGET_EXCEPTIONS`` and the default is above that
+    entry's budget, so ``KCT_COUPLED_FLAGOFF_MAX_ITERS=40000`` still caps
+    every pair.
+    """
+    key = base_name.upper().rstrip("_-.")
+    for pattern, budget in COUPLED_FLAGOFF_PAIR_BUDGET_EXCEPTIONS:
+        if re.fullmatch(pattern, key):
+            return min(COUPLED_FLAGOFF_MAX_ITERATIONS, budget)
+    return COUPLED_FLAGOFF_MAX_ITERATIONS
+
 
 # Issue #3508: max joint remaining Manhattan distance (grid cells, max
 # over the two heads) at which a budget-exited coupled search qualifies
@@ -11457,7 +11490,7 @@ class DiffPairRouter:
             and (per_pair_max_iterations is None or per_pair_max_iterations <= 0)
             and COUPLED_FLAGOFF_MAX_ITERATIONS > 0
         ):
-            per_pair_max_iterations = COUPLED_FLAGOFF_MAX_ITERATIONS
+            per_pair_max_iterations = _flagoff_budget_for_pair(pair.positive.base_name)
 
         pathfinder = CoupledPathfinder(
             self.autorouter.grid,

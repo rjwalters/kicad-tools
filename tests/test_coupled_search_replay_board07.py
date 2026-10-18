@@ -435,7 +435,7 @@ def test_shipped_flagoff_phase_budget_lets_the_captured_pair_couple(searches):
     """
     from kicad_tools.router import diffpair_routing
 
-    phase_budget = 350_000
+    phase_budget = diffpair_routing.COUPLED_FLAGOFF_MAX_ITERATIONS // 2
     assert diffpair_routing.COUPLED_FLAGOFF_MAX_ITERATIONS // 2 >= 132_899
     [_, open_phase] = _replay(
         _with_route_args(searches, OPEN, max_iterations_budget=phase_budget, timeout_seconds=0.0)
