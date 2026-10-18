@@ -389,20 +389,26 @@ def route_net(
 
             vias_count += len(route.vias)
 
-        # Merge the routed traces into the PCB
+        # Merge the routed traces into the PCB.
+        #
+        # Issue #7114: ``merge_routes_into_pcb`` is text-in/text-out -- it
+        # takes the board file text and the routes as an S-expression string
+        # (the same path ``project.py`` and ``placement_feedback`` use).  The
+        # previous call passed a PCB object, Route objects and width/via
+        # kwargs that never existed, so it always raised ``TypeError`` and
+        # ``route_net`` could never save.  Each emitted segment/via already
+        # carries the width / diameter / drill the router used (taken from
+        # ``design_rules``), so nothing has to be passed separately.
         try:
-            merge_routes_into_pcb(
-                pcb,
-                routes,
-                net_map={net_name: net_number},
-                trace_width=design_rules.trace_width,
-                via_diameter=design_rules.via_diameter,
-                via_drill=design_rules.via_drill,
-            )
+            # Issue #4416 dialect parity: a KiCad-10 name-only board keeps its
+            # ``(net "NAME")`` copper form.
+            name_only = bool(getattr(pcb, "_net_name_only_dialect", False))
+            route_sexp = "\n\t".join(route.to_sexp(name_only=name_only) for route in routes)
+            merged_text = merge_routes_into_pcb(pcb_text, route_sexp)
 
             # Save the result
             save_path = _resolve_output_path(pcb_path, output_path)
-            pcb.save(save_path)
+            Path(save_path).write_text(merged_text)
 
             return RouteNetResult(
                 warnings=clearance_warnings,
