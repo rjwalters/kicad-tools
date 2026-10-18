@@ -323,6 +323,14 @@ EXPECTED_COMMITTED_DRC_RULES = {
     # library outline silk was always within the floor; restoring the silk is
     # what made it measurable.  WARNING severity; ceiling unchanged.
     "silk_edge_clearance",
+    # Issue #6394: 1 WARNING, "Differential pair USB_D+/USB_D- has unequal
+    # via counts (USB_D+: 2, USB_D-: 3)", on the plan re-derived from a fresh
+    # lattice route.  The pair's measured intra-pair skew is 1.32 mm against
+    # the USB2_FS 2.5 mm limit and uncoupled length 7.21 mm against 19.05 mm,
+    # and usb_geometry() passes; the reviewed hand-repaired plan it replaced
+    # had matched via counts.  WARNING severity, so the 0-error ceiling
+    # (MAX_COMMITTED_DRC_ERRORS) is unchanged.
+    "diffpair_uncoupled_length",
     # ``pin1_marker_missing`` is deliberately NOT listed.  It used to fire 5
     # WARNINGS (U1 TQFP-44, U2 SOT-23-6, Y1, J2, J3 -- "no silkscreen graphics
     # at all, so nothing marks pin 1"), which was a direct symptom of #5744:
@@ -837,9 +845,9 @@ def test_routing_reach_deterministic_across_seeds(unrouted_pcb_path: Path, tmp_p
 
 
 #: Router Power-class violations in the committed board-03 copper, exposed by
-#: #6390 and tracked in #6394 (also the tolerance entry in
-#: ``.github/routed-drc-tolerance.yml``).  Drop to 0 when that lands.
-BOARD03_KNOWN_NETCLASS_VIOLATIONS = 13
+#: #6390.  #6394 re-derived the plan from a class-clean lattice route and
+#: removed the ``.github/routed-drc-tolerance.yml`` entry: 13 -> 0.
+BOARD03_KNOWN_NETCLASS_VIOLATIONS = 0
 
 
 def test_committed_pcb_drc_state() -> None:

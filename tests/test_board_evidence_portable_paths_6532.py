@@ -41,8 +41,6 @@ ABSOLUTE_HOST_PATH = re.compile(r'"(?:/home/|/Users/|/private/var/|/tmp/|[A-Z]:\
 KNOWN_OFFENDERS = frozenset(
     {
         "boards/00-simple-led/output/drc_report.json",
-        "boards/03-usb-joystick/output/drc_report.json",
-        "boards/03-usb-joystick/output/manufacturing/check-report.json",
         "boards/03-usb-joystick/output/manufacturing/native-clearance-qualification/factory-check.json",
         "boards/03-usb-joystick/output/manufacturing/native-clearance-qualification/final-board-manufacturing-check.json",
         "boards/04-stm32-devboard/output/check-report.json",
