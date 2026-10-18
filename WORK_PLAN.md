@@ -44,20 +44,30 @@ Issues currently being built (`loom:building`).
 - **#7075**: transmission_line.py: CPWG impedance reads 53-233 % high, and microstrip/CPWG dielectric loss is too large by a factor of eps_eff
 - **#7076**: Microstrip Z0 with copper thickness reads 1.6-3.7 % low (docstring claims 0.2 %)
 - **#7079**: ImpedanceRule judges every detected differential pair at a 0.15 mm gap, whatever the routed spacing
-- **#7121**: MCP sessions: one session store for start_session/get_session_context/record_decision, and checkpoints that actually restore (#7115 Part 2)
 - **#7136**: kct sign-off skills don't refuse bad boards: Gate 1 exits 2 on every board, kicad-cli gate exits 0 on errors, export never gets the DRC report, audit ERC never runs
 - **#7150**: board 04 J1 value SWD-6 vs SWD (schematic vs PCB) + kct validate --sync should flag value mismatches (#7147 Part B)
 - **#7153**: kct export bundle inconsistencies: JLCPCB Gerbers omit paste layers for SMT bundles; board 04 manifest says DRC OK while report says FAIL/NOT_READY; report ERC falsely 'skipped by user request'
 - **#7188**: One DRC blocking-verdict helper: kicad-drc-summary, kct mfr validate and Project.check_drc() pass boards kicad-cli fails
 - **#7192**: router escape follow-ups: flush deferred C++ unmarks after rollback; full-reorder never kept under default cap (#7171)
-- **#7193**: test: two live-KiCad oracle tests skip in every CI job despite the tool being present (rotation pcbnew oracle, keepout 10.0.1 baseline); slow suite hides skip reasons
+- **#7200**: Boards 04/06 CPLs: frame regen also changes Rotation (JLC rotation profile missing) — needs orientation review (split from #7199)
+- **#7204**: DFA false-PASS: courtyard check silently skips courtyard-less footprints (boards 00/01/04 signed off with 0 courtyards) and AssemblyCapabilities is never enforced (board 07 double-sided CPL unflagged)
+- **#7209**: board 05 ampacity relies on 1 oz inner copper the fab order never requests (JLCPCB default 0.5 oz → 1186 inner segments under-width)
+- **#7210**: ampacity: path_ampacity can't resolve board 05 phase paths; zone-only nets read 'checked' vacuously (#7206 follow-ups)
+- **#7213**: PCB.add_footprint drops the library nickname: fix at source, delete 3 per-board workarounds, clear board 07's 43 parity warnings
+- **#7214**: ci: add -rs to the bulk Test step so skipped tests and reasons are visible (#7196 follow-up)
+- **#7220**: DFM: kct check is blind to thermal asymmetry its own solid-connect repair creates (13 passives, 4 PTH pins) and to via drills at SMD pad edges
 
 ## PRs Awaiting Review
 
 PRs waiting on Judge (`loom:review-requested`).
 
+- **#7163**: fix(physics): solve edge-coupled Zdiff by field solve, not an empirical coupling factor
 - **#7194**: fix: flush C++ unmarks on escape rollback and give each escape strategy its own budget
-- **#7196**: test: run live pcbnew oracle + 10.0.6 keepout baseline in CI; show slow-suite skips
+- **#7203**: fix(boards): apply JLC rotation profile and Gerber frame to board 04/06 CPLs
+- **#7215**: ci: print skip and xfail reasons in the pytest short summary
+- **#7217**: feat(export): fail preflight when stackup copper differs from the fab order
+- **#7218**: fix(pcb): keep Library:Footprint lib ID in PCB.add_footprint
+- **#7221**: fix(validate): resolve board 05 phase paths and flag zone-only ampacity nets
 
 ## Approved (Awaiting Merge)
 
@@ -92,7 +102,6 @@ Issues carrying `loom:curated`.
 - **#7076**: Microstrip Z0 with copper thickness reads 1.6-3.7 % low (docstring claims 0.2 %) *(curated)*
 - **#7079**: ImpedanceRule judges every detected differential pair at a 0.15 mm gap, whatever the routed spacing *(curated)*
 - **#7093**: router: differential pair gets unequal via counts when a leg falls back to uncoupled routing (board 03 USB_D 2 vs 3; blocks #6394) *(curated)*
-- **#7121**: MCP sessions: one session store for start_session/get_session_context/record_decision, and checkpoints that actually restore (#7115 Part 2) *(curated)*
 - **#7136**: kct sign-off skills don't refuse bad boards: Gate 1 exits 2 on every board, kicad-cli gate exits 0 on errors, export never gets the DRC report, audit ERC never runs *(curated)*
 - **#7150**: board 04 J1 value SWD-6 vs SWD (schematic vs PCB) + kct validate --sync should flag value mismatches (#7147 Part B) *(curated)*
 - **#7153**: kct export bundle inconsistencies: JLCPCB Gerbers omit paste layers for SMT bundles; board 04 manifest says DRC OK while report says FAIL/NOT_READY; report ERC falsely 'skipped by user request' *(curated)*
@@ -100,8 +109,15 @@ Issues carrying `loom:curated`.
 - **#7188**: One DRC blocking-verdict helper: kicad-drc-summary, kct mfr validate and Project.check_drc() pass boards kicad-cli fails *(curated)*
 - **#7190**: Fleet re-verify: no ready claim falsified, but kct export --strict-preflight passes a 6-error board on a stale committed drc_report.json; board 01 lacks kicad_tools_pwr sidecar *(curated)*
 - **#7192**: router escape follow-ups: flush deferred C++ unmarks after rollback; full-reorder never kept under default cap (#7171) *(curated)*
-- **#7193**: test: two live-KiCad oracle tests skip in every CI job despite the tool being present (rotation pcbnew oracle, keepout 10.0.1 baseline); slow suite hides skip reasons *(curated)*
-- **#7198**: keepout DRU rule may double-report on KiCad 10.0.6 (native DRC now catches the #6039 gap) *(curated)*
+- **#7199**: Committed fleet CPLs still in the pre-#7059 frame — regenerate packages + add a frame-consistency test *(curated)*
+- **#7200**: Boards 04/06 CPLs: frame regen also changes Rotation (JLC rotation profile missing) — needs orientation review (split from #7199) *(curated)*
+- **#7204**: DFA false-PASS: courtyard check silently skips courtyard-less footprints (boards 00/01/04 signed off with 0 courtyards) and AssemblyCapabilities is never enforced (board 07 double-sided CPL unflagged) *(curated)*
+- **#7206**: Spec-declared currents never reach the ampacity gate: board 05 motor phase necked to 0.2 mm passes check, audit and readiness *(curated)*
+- **#7209**: board 05 ampacity relies on 1 oz inner copper the fab order never requests (JLCPCB default 0.5 oz → 1186 inner segments under-width) *(curated)*
+- **#7210**: ampacity: path_ampacity can't resolve board 05 phase paths; zone-only nets read 'checked' vacuously (#7206 follow-ups) *(curated)*
+- **#7213**: PCB.add_footprint drops the library nickname: fix at source, delete 3 per-board workarounds, clear board 07's 43 parity warnings *(curated)*
+- **#7214**: ci: add -rs to the bulk Test step so skipped tests and reasons are visible (#7196 follow-up) *(curated)*
+- **#7220**: DFM: kct check is blind to thermal asymmetry its own solid-connect repair creates (13 passives, 4 PTH pins) and to via drills at SMD pad edges *(curated)*
 
 ## Proposed (Architect / Hermit)
 
@@ -114,7 +130,9 @@ Issues carrying `loom:curated`.
 - **#7153**: kct export bundle inconsistencies: JLCPCB Gerbers omit paste layers for SMT bundles; board 04 manifest says DRC OK while report says FAIL/NOT_READY; report ERC falsely 'skipped by user request' *(hermit)*
 - **#7188**: One DRC blocking-verdict helper: kicad-drc-summary, kct mfr validate and Project.check_drc() pass boards kicad-cli fails *(hermit)*
 - **#7190**: Fleet re-verify: no ready claim falsified, but kct export --strict-preflight passes a 6-error board on a stale committed drc_report.json; board 01 lacks kicad_tools_pwr sidecar *(hermit)*
-- **#7193**: test: two live-KiCad oracle tests skip in every CI job despite the tool being present (rotation pcbnew oracle, keepout 10.0.1 baseline); slow suite hides skip reasons *(hermit)*
+- **#7206**: Spec-declared currents never reach the ampacity gate: board 05 motor phase necked to 0.2 mm passes check, audit and readiness *(hermit)*
+- **#7213**: PCB.add_footprint drops the library nickname: fix at source, delete 3 per-board workarounds, clear board 07's 43 parity warnings *(hermit)*
+- **#7220**: DFM: kct check is blind to thermal asymmetry its own solid-connect repair creates (13 passives, 4 PTH pins) and to via drills at SMD pad edges *(hermit)*
 
 ## Epics
 
@@ -135,11 +153,11 @@ Issues carrying `loom:curated`.
 | Very important | 0 |
 | Important | 1 |
 | Ready (`loom:issue`) | 1 |
-| In Progress (`loom:building`) | 16 |
-| PRs awaiting review | 2 |
+| In Progress (`loom:building`) | 21 |
+| PRs awaiting review | 7 |
 | Approved PRs awaiting merge | 0 |
-| Curated | 33 |
-| Architect / Hermit proposals | 10 |
+| Curated | 39 |
+| Architect / Hermit proposals | 12 |
 | Active epics | 8 |
 <!-- guide:plan-body:end -->
 
