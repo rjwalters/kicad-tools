@@ -449,15 +449,6 @@ def _covered_by(seg: Segment, old: Segment) -> bool:
 # ---------------------------------------------------------------------------
 
 
-@dataclass
-class _PairState:
-    """Mutable working copy of one pair's fragments."""
-
-    p_id: int
-    n_id: int
-    fragments: list[Route]  # current self.routes (working list)
-
-
 def _pair_segments(routes: list[Route], net: int, *, editable: bool) -> list[Segment]:
     return [
         s for r in routes if r.net == net and (not editable or not r.is_escape) for s in r.segments
