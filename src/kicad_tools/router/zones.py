@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING
 
+from kicad_tools.core.geometry import point_in_polygon as _core_point_in_polygon
 from kicad_tools.schema.pcb import Zone
 
 if TYPE_CHECKING:
@@ -232,24 +233,7 @@ class ZoneFiller:
         Returns:
             True if point is inside polygon
         """
-        n = len(polygon)
-        if n < 3:
-            return False
-
-        inside = False
-
-        j = n - 1
-        for i in range(n):
-            xi, yi = polygon[i]
-            xj, yj = polygon[j]
-
-            # Check if ray crosses this edge
-            if ((yi > y) != (yj > y)) and (x < (xj - xi) * (y - yi) / (yj - yi) + xi):
-                inside = not inside
-
-            j = i
-
-        return inside
+        return _core_point_in_polygon(x, y, polygon, boundary_inside=False)
 
     def _can_fill_cell(self, gx: int, gy: int, layer_index: int, zone_net: int) -> bool:
         """Check if a cell can be filled with zone copper.

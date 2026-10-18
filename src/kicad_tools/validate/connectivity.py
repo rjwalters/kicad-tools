@@ -39,6 +39,7 @@ if TYPE_CHECKING:
 # tracing autorouter segment/via copper — never hard-fails.  The boolean
 # probe is delegated to the shared guard in :mod:`kicad_tools._shapely`.
 from kicad_tools._shapely import has_shapely as _has_shapely
+from kicad_tools.core.geometry import point_in_polygon as _core_point_in_polygon
 from kicad_tools.geometry.copper import (
     PAD_FALLBACK_ERODE,
     pad_copper_outline,
@@ -1696,23 +1697,7 @@ class ConnectivityValidator:
         Returns:
             True if point is inside polygon
         """
-        n = len(polygon)
-        if n < 3:
-            return False
-
-        x, y = point
-        inside = False
-        j = n - 1
-
-        for i in range(n):
-            xi, yi = polygon[i]
-            xj, yj = polygon[j]
-
-            if ((yi > y) != (yj > y)) and (x < (xj - xi) * (y - yi) / (yj - yi) + xi):
-                inside = not inside
-            j = i
-
-        return inside
+        return _core_point_in_polygon(point[0], point[1], polygon, boundary_inside=False)
 
     @staticmethod
     def _pad_layer_matches_zone(

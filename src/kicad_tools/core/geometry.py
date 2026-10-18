@@ -17,6 +17,7 @@ optim, reasoning).
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 
 # ---------------------------------------------------------------------------
 # Point-to-segment distance
@@ -72,6 +73,77 @@ def point_to_segment_distance(
     ry = apy - t * dy
 
     return math.sqrt(rx * rx + ry * ry)
+
+
+# ---------------------------------------------------------------------------
+# Point-in-polygon
+# ---------------------------------------------------------------------------
+
+# Tolerance (mm) for the "point lies on an edge" test used when the boundary
+# counts as inside.
+_ON_EDGE_EPS = 1e-7
+
+
+def _point_on_segment(
+    px: float,
+    py: float,
+    ax: float,
+    ay: float,
+    bx: float,
+    by: float,
+    eps: float = _ON_EDGE_EPS,
+) -> bool:
+    """True if ``(px, py)`` lies on segment ``a-b`` within ``eps``.
+
+    Safe for a zero-length segment (e.g. the closing edge of a ring whose
+    last vertex repeats the first): the cross product is then 0 and the
+    bounding-box test reduces to "within ``eps`` of that vertex".
+    """
+    cross = (bx - ax) * (py - ay) - (px - ax) * (by - ay)
+    if abs(cross) > eps * max(1.0, math.hypot(bx - ax, by - ay)):
+        return False
+    return (
+        min(ax, bx) - eps <= px <= max(ax, bx) + eps
+        and min(ay, by) - eps <= py <= max(ay, by) + eps
+    )
+
+
+def point_in_polygon(
+    x: float,
+    y: float,
+    polygon: Sequence[tuple[float, float]],
+    *,
+    boundary_inside: bool,
+) -> bool:
+    """Ray-casting point-in-polygon test.
+
+    Casts a ray from the point in the +X direction and counts edge
+    crossings (odd = inside).  The polygon may be given with or without a
+    repeated final vertex.  Fewer than 3 vertices is never inside.
+
+    Args:
+        x, y: Point to test.
+        polygon: Ordered ``(x, y)`` vertices.
+        boundary_inside: Required (no default) so every caller states its
+            choice.  ``True``: a point on any edge or vertex (within 1e-7 mm)
+            is inside.  ``False``: the plain half-open ray cast, under which
+            points on the bottom/left edges are inside and points on the
+            top/right edges are outside.
+    """
+    n = len(polygon)
+    if n < 3:
+        return False
+    inside = False
+    j = n - 1
+    for i in range(n):
+        xi, yi = polygon[i]
+        xj, yj = polygon[j]
+        if boundary_inside and _point_on_segment(x, y, xi, yi, xj, yj):
+            return True
+        if ((yi > y) != (yj > y)) and (x < (xj - xi) * (y - yi) / (yj - yi) + xi):
+            inside = not inside
+        j = i
+    return inside
 
 
 # ---------------------------------------------------------------------------

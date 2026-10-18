@@ -44,6 +44,7 @@ from functools import lru_cache
 from typing import Any
 
 from kicad_tools._shapely import has_shapely as _has_shapely
+from kicad_tools.core.geometry import point_to_segment_distance
 
 if _has_shapely():  # pragma: no cover - import guard exercised by environment
     from shapely.geometry import LineString as _ShapelyLineString  # type: ignore[import-untyped]
@@ -280,17 +281,15 @@ def point_segment_distance(
     seg_start: tuple[float, float],
     seg_end: tuple[float, float],
 ) -> float:
-    """Shortest distance from ``point`` to the closed segment ``start-end``."""
-    px, py = point
-    ax, ay = seg_start
-    bx, by = seg_end
-    dx, dy = bx - ax, by - ay
-    length_sq = dx * dx + dy * dy
-    if length_sq <= 0.0:
-        return math.hypot(px - ax, py - ay)
-    t = ((px - ax) * dx + (py - ay) * dy) / length_sq
-    t = max(0.0, min(1.0, t))
-    return math.hypot(px - (ax + t * dx), py - (ay + t * dy))
+    """Shortest distance from ``point`` to the closed segment ``start-end``.
+
+    Delegates to :func:`kicad_tools.core.geometry.point_to_segment_distance`,
+    whose rebased-difference form is exactly translation-invariant (#3714,
+    #7224).
+    """
+    return point_to_segment_distance(
+        point[0], point[1], seg_start[0], seg_start[1], seg_end[0], seg_end[1]
+    )
 
 
 def _orientation(p: tuple[float, float], q: tuple[float, float], r: tuple[float, float]) -> float:

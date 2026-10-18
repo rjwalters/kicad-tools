@@ -244,3 +244,28 @@ class TestFootprintOutsideBoardRule:
 
         assert len(results.violations) == 0
         assert results.rules_checked == 1
+
+
+# ---------------------------------------------------------------------------
+# Issue #7224: footprint origins exactly on the outline are inside
+# ---------------------------------------------------------------------------
+
+
+class TestOriginOnBoundary7224:
+    @pytest.mark.parametrize(
+        "pos",
+        [(5, 0), (0, 5), (5, 10), (10, 5), (0, 0), (10, 0), (10, 10), (0, 10)],
+        ids=["bottom", "left", "top", "right", "v00", "v10", "v1010", "v010"],
+    )
+    @pytest.mark.parametrize("closed_ring", [False, True])
+    def test_origin_on_edge_or_vertex_passes(self, pos, closed_ring):
+        outline = _RECT_OUTLINE + ([_RECT_OUTLINE[0]] if closed_ring else [])
+        pcb = _FakePCB([_FakeFootprint("J1", pos)], outline)
+        results = FootprintOutsideBoardRule().check(pcb, _DUMMY_RULES)
+        assert results.error_count == 0
+
+    @pytest.mark.parametrize("pos", [(10.001, 5), (-0.001, 5), (5, 10.001), (5, -0.001)])
+    def test_origin_1um_outside_still_errors(self, pos):
+        pcb = _FakePCB([_FakeFootprint("J1", pos)], _RECT_OUTLINE)
+        results = FootprintOutsideBoardRule().check(pcb, _DUMMY_RULES)
+        assert results.error_count == 1

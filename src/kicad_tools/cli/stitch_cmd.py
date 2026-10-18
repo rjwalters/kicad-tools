@@ -50,6 +50,7 @@ from kicad_tools.cli.format_options import (
     emit_json,
     stdout_to_stderr_when,
 )
+from kicad_tools.core.geometry import point_in_polygon as _core_point_in_polygon
 from kicad_tools.core.sexp_file import load_pcb, save_pcb, verify_pcb_write
 from kicad_tools.router.quantize import (
     OffAngleSegmentError,
@@ -4577,16 +4578,7 @@ def point_in_polygon(x: float, y: float, polygon: list[tuple[float, float]]) -> 
     Returns:
         True if the point is inside the polygon
     """
-    n = len(polygon)
-    inside = False
-    j = n - 1
-    for i in range(n):
-        xi, yi = polygon[i]
-        xj, yj = polygon[j]
-        if ((yi > y) != (yj > y)) and (x < (xj - xi) * (y - yi) / (yj - yi) + xi):
-            inside = not inside
-        j = i
-    return inside
+    return _core_point_in_polygon(x, y, polygon, boundary_inside=False)
 
 
 def generate_grid_positions(
