@@ -75,3 +75,20 @@ The sidecar explicitly excludes both inner reference layers from auxiliary
 routing. The finalizer applies four reviewed off-land via moves and rejects
 any signal track on a reference plane, non-through via span, or drill overlap
 with an SMT land. Ordinary via processing is used; POFV is not required.
+
+## 2026-10-18 CPL rotation correction (issue #7200)
+
+`cpl_jlcpcb.csv` is regenerated with the JLCPCB rotation profile
+(`jlcpcb_rotations.yaml`) and in the Gerber/drill-origin frame (#7059). The
+2026-09-10 package shipped these rotations uncorrected. Rotation changes are
+placement changes, so this section records them explicitly:
+
+| Reference | Footprint | Old rotation | New rotation |
+|---|---|---|---|
+| U1 | SOIC-8_3.9x4.9mm_P1.27mm | 0 | 270 |
+| U2 | SOIC-8_3.9x4.9mm_P1.27mm | 0 | 270 |
+
+Raw KiCad `pos` reports 0 for both; the new values come from the JLCPCB
+profile, not from the board. **Pending human orientation review:** no person
+has yet checked these against the JLC part footprints / datasheet pin-1 marks.
+Do not order assembly from this CPL until that review is recorded here.
