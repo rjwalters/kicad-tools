@@ -387,3 +387,28 @@ class TestMatchgroupJobContainer:
         15-min ceiling (Issue #3617 re-measure)."""
         job = _matchgroup_job()
         assert job.get("timeout-minutes", 0) >= 20
+
+
+# ---------------------------------------------------------------------------
+# Issue #7332: capped impedance tolerance on the baselined board-07 key
+# ---------------------------------------------------------------------------
+
+
+class TestUnexpectedBaselineErrors:
+    KEY = "boards/07-matchgroup-test/regression-fixture/matchgroup_test_routed.kicad_pcb"
+
+    def test_impedance_up_to_cap_tolerated(self):
+        mod = _load_helper_module()
+        assert mod.unexpected_baseline_errors(self.KEY, {"impedance": 4}) == {}
+
+    def test_impedance_over_cap_reported(self):
+        mod = _load_helper_module()
+        assert mod.unexpected_baseline_errors(self.KEY, {"impedance": 5}) == {"impedance": 5}
+
+    def test_unrelated_rule_reported(self):
+        mod = _load_helper_module()
+        assert mod.unexpected_baseline_errors(self.KEY, {"clearance": 1}) == {"clearance": 1}
+
+    def test_non_baselined_key_ignored(self):
+        mod = _load_helper_module()
+        assert mod.unexpected_baseline_errors("boards/other.kicad_pcb", {"impedance": 9}) == {}
