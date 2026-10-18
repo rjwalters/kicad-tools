@@ -7,12 +7,12 @@ routing between them.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from .blocks.base import PCBBlock
-from .geometry import Layer
+from .geometry import Layer, Point
 from .primitives import TraceSegment, Via
 
 if TYPE_CHECKING:
@@ -46,19 +46,54 @@ class PCBLayout:
         width: float = 0.25,
         layer: Layer = Layer.F_CU,
         net: str | None = None,
+        waypoints: Sequence[Point] | None = None,
     ):
         """
         Route between two block ports.
 
-        This creates a simple direct trace. More complex routing
-        would use waypoints or an autorouter.
-        """
-        start = self.blocks[from_block].port(from_port)
-        end = self.blocks[to_block].port(to_port)
+        Without ``waypoints`` this creates one direct trace and returns it.
+        With ``waypoints`` (board coordinates, in order) it creates a polyline
+        start -> waypoints -> end and returns the list of segments; the caller
+        supplies the dogleg, no obstacle search is done.
 
-        trace = TraceSegment(start=start, end=end, width=width, layer=layer, net=net)
-        self.inter_block_traces.append(trace)
-        return trace
+        Where a port names an ``internal_pad``, a short stub from that pad's
+        board position to the port point is also added (on the port's layer
+        and the route's net) so neither end is left floating. Stubs are not
+        part of the return value.
+        """
+        src = self.blocks[from_block]
+        dst = self.blocks[to_block]
+        start = src.port(from_port)
+        end = dst.port(to_port)
+
+        for block, port_name, point in ((src, from_port, start), (dst, to_port, end)):
+            port = block.ports[port_name]
+            if port.internal_pad is None:
+                continue
+            pad_pos = block.pad_board_position(port.internal_pad)
+            if pad_pos != point:
+                self.inter_block_traces.append(
+                    TraceSegment(
+                        start=pad_pos,
+                        end=point,
+                        width=width,
+                        layer=port.layer,
+                        net=net if net is not None else port.net,
+                    )
+                )
+
+        if waypoints is None:
+            trace = TraceSegment(start=start, end=end, width=width, layer=layer, net=net)
+            self.inter_block_traces.append(trace)
+            return trace
+
+        points = [start, *waypoints, end]
+        traces = [
+            TraceSegment(start=a, end=b, width=width, layer=layer, net=net)
+            for a, b in zip(points, points[1:], strict=False)
+        ]
+        self.inter_block_traces.extend(traces)
+        return traces
 
     def export_placements(self) -> list[dict]:
         """Export all component placements."""
