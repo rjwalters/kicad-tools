@@ -1906,14 +1906,16 @@ class PreflightChecker:
         * ``MISMATCH`` (records a different hash: the file changed since the
           report was generated) is FAIL under ``strict_report_source``, else
           WARN -- the same shape as the #7091/#7153 mismatch returns;
-        * ``UNHASHED`` (no hash, no readiness co-binding) is WARN even when
+        * ``UNHASHED`` (no hash, no readiness provenance) is WARN even when
           strict, matching #7091's missing-report policy.
 
         Returns ``None`` when the report is bound.
         """
         from ..drc.report_binding import BindingStatus, binding_status
 
-        status = binding_status(report_path, source_path, recorded_hash)
+        status = binding_status(
+            report_path, source_path, recorded_hash, hierarchical=(name == "erc")
+        )
         if status is BindingStatus.BOUND:
             return None
 
@@ -1949,8 +1951,8 @@ class PreflightChecker:
             status="WARN",
             message=f"{label} report is not bound to this {target} (unhashed); {rerun}",
             details=(
-                f"{report_path} records no {key} and no output/readiness.json pins it "
-                f"together with this {target}, so its verdict is not evidence for the "
+                f"{report_path} records no {key} and no output/readiness.json records it "
+                f"as produced from this {target}, so its verdict is not evidence for the "
                 f"current {target}"
             ),
         )

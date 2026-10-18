@@ -820,7 +820,10 @@ def _detect_erc(board_dir: Path) -> ERCStatus:
         recorded = data.get("schematic_sha256") if isinstance(data, dict) else None
         schematic = _erc_report_schematic(report_path, data, board_dir)
         binding = binding_status(
-            report_path, schematic, recorded if isinstance(recorded, str) else None
+            report_path,
+            schematic,
+            recorded if isinstance(recorded, str) else None,
+            hierarchical=True,
         )
         if binding is not BindingStatus.BOUND:
             return ERCStatus(report_path=str(report_path), unbound=True)

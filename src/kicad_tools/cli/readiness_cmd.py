@@ -2496,6 +2496,21 @@ def build_report(
             raise ValueError(f"extra readiness input is not a board file: {path}")
         hashed.add(resolved)
     report["inputs"] = {_rel(options, path): _sha256_file(path) for path in sorted(hashed)}
+    # Issue #7277: record which source bytes each report readiness itself
+    # produced was computed from, so report binding can tell "produced for
+    # this PCB" from merely "pinned beside it".
+    if options.pcb.is_file():
+        pcb_sha = _sha256_file(options.pcb)
+        produced = {
+            _rel(options, path): pcb_sha
+            for path in (
+                options.evidence_dir / "native-drc.json",
+                options.evidence_dir / "native-drc-raw.json",
+            )
+            if path.is_file()
+        }
+        if produced:
+            report["report_sources"] = produced
     external = _external_dependencies(options)
     if external:
         # Hash the exact collected out-of-directory dependencies (Issue #5813).
