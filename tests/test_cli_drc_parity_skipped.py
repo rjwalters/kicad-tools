@@ -339,12 +339,15 @@ def test_waiver_applies_to_parity_findings(monkeypatch, capsys, pcb, tmp_path):
     assert _status_lines(out) == ["Schematic parity: PASSED [1 waived]"]
 
 
-def test_mfr_prints_status_but_keeps_exit_code(monkeypatch, capsys, pcb):
+def test_mfr_shares_parity_exit_gate(monkeypatch, capsys, pcb):
+    """Issue #7170 reversed #7077's separate --mfr rule: parity NOT RUN is
+    INCOMPLETE (2) in --mfr mode too, unless --allow-incomplete."""
     _fake_kicad_cli(monkeypatch, stdout=PARITY_LINE)
     rc = drc_cmd.main([str(pcb), "--mfr", "jlcpcb"])
     out = capsys.readouterr().out
-    assert rc == 0  # --mfr answers "can the fab build it"; parity does not change that
+    assert rc == 2
     assert _status_lines(out) == [f"Schematic parity: NOT RUN ({NO_SCH_REASON})"]
+    assert drc_cmd.main([str(pcb), "--mfr", "jlcpcb", "--allow-incomplete"]) == 0
 
 
 def test_kct_drc_uses_shared_kicad_cli_locator(monkeypatch, pcb):
