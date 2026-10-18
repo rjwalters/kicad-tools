@@ -948,7 +948,20 @@ def _tune_match_group_single_ended(
     # --- Per-member iteration -------------------------------------------
     total_inserts_committed = 0  # group-level cumulative counter
 
-    for net_id in group.net_ids:
+    # Issue #5798: spend the group ceiling where it closes the most skew.
+    # ``group.net_ids`` order is declaration order, so on a 14-member group
+    # (board 07 SDRAM_ADDRESS) the ceiling was used up on early, small-deficit
+    # members and the shortest ones (BA0/BA1) never got their inserts.  Visit
+    # members by descending deficit instead (stable: ties keep declaration
+    # order).  Unrouted members have no length and sort last.
+    def _deficit(nid: int) -> float:
+        if ref_length is None or nid not in member_lengths:
+            return 0.0
+        return ref_length - member_lengths[nid]
+
+    visit_order = sorted(group.net_ids, key=lambda nid: -_deficit(nid))
+
+    for net_id in visit_order:
         route = routes_by_net.get(net_id)
         if route is None:
             results[net_id] = (
@@ -1497,7 +1510,8 @@ def _tune_match_group_single_ended(
         if per_member_result.inserts_applied > 0:
             routes_by_net[net_id] = current_route
 
-    return results
+    # Report in declaration order regardless of the visit order above.
+    return {nid: results[nid] for nid in group.net_ids if nid in results}
 
 
 def _place_bumps_per_host(
