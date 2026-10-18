@@ -153,24 +153,29 @@ DIFFPAIR_VIOLATION_BASELINE: dict[str, int] = {
 
 # Issue #7312 -- declared ``target_diff_impedance`` is now judged on coupled
 # segments (#7293).  The model is right and the fixture's copper is what
-# misses: the routed coupled gap is ~4-5x the solved ``intra_pair_clearance``
-# in regression-fixture/net_class_map.json (measured on the committed PCB,
-# edge-to-edge, via ImpedanceRule's own gap annotation):
-#   USB2_D-    F.Cu w=0.250  routed gap 0.351 mm vs solved 0.075 mm -> 114.8 ohm
-#   USB3_RX1+  F.Cu w=0.275  routed gap 0.432 mm vs solved 0.100 mm -> 112.6 ohm
-#   USB3_TX2+  F.Cu w=0.275  routed gap 0.432 mm vs solved 0.100 mm -> 112.6 ohm
-# (declared 90 ohm +/-15 %).  The fixture is a frozen historical witness whose
-# pairs already fail skew/continuity (0/9 converge, #3540-#3544), so the
-# pairs never get squeezed to the solved gap; the committed ``output/`` board
-# has no impedance finding.  A ``--skip-route`` run on the committed PCB
-# reports exactly these 3 findings.
+# misses: the routed coupled gap is several times the solved
+# ``intra_pair_clearance`` in regression-fixture/net_class_map.json.  The
+# fixture is a frozen historical witness whose pairs already fail
+# skew/continuity (0/9 converge, #3540-#3544), so the pairs never get squeezed
+# to the solved gap; the committed ``output/`` board has no impedance finding.
+#
+# The identities below are those of the CI seed-42 RE-ROUTE (the board the gate
+# actually judges), measured by running ``kct check --mfr jlcpcb --net-class-map``
+# on the ``board06-ci`` artifact of run 39175727997 (5 errors on 4 nets):
+#   USB3_RX1+ / USB3_RX1-  B.Cu w=0.275  110.7 ohm each
+#   USB3_TX2+              F.Cu w=0.275  112.5 ohm
+#   USB3_TX2-              F.Cu w=0.275  112.5 ohm and 109.1 ohm (two segments)
+# (declared 90 ohm +/-15 %).  A ``--skip-route`` run on the COMMITTED PCB
+# reports a different set (USB2_D-, USB3_RX1+, USB3_TX2+); do not key the
+# allowance from it.
 # Allowed by identity, not by count (#7359, #7270 Q3 ruling): only these nets
 # may carry an ``impedance`` error, and a listed net that stops failing makes
 # its entry stale and fails the gate.  Deleting an entry is the whole of #7349.
 DIFFPAIR_FIXTURE_ALLOWED_FINDINGS: Allowance = {
-    ("impedance", "USB2_D-"): 7312,
     ("impedance", "USB3_RX1+"): 7312,
+    ("impedance", "USB3_RX1-"): 7312,
     ("impedance", "USB3_TX2+"): 7312,
+    ("impedance", "USB3_TX2-"): 7312,
 }
 
 

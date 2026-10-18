@@ -47,7 +47,9 @@ def test_pair_improvement_cannot_hide_new_physical_error():
 
 
 BOARD06_KEY = "boards/06-diffpair-test/regression-fixture/diffpair_test_routed.kicad_pcb"
-BOARD06_IMPEDANCE_NETS = {"USB2_D-", "USB3_RX1+", "USB3_TX2+"}
+# Identities of the CI seed-42 re-route (run 39175727997, board06-ci artifact),
+# not of the committed PCB: the gate judges the re-route.
+BOARD06_IMPEDANCE_NETS = {"USB3_RX1+", "USB3_RX1-", "USB3_TX2+", "USB3_TX2-"}
 
 
 def test_board06_impedance_allowance_is_keyed_by_net_with_issue():
@@ -63,30 +65,30 @@ def test_board06_impedance_allowance_is_keyed_by_net_with_issue():
 def test_board06_listed_impedance_findings_pass():
     gate = load("check_diffpair_coverage")
     found = {"impedance": set(BOARD06_IMPEDANCE_NETS)}
-    assert gate.unexpected_baseline_errors(BOARD06_KEY, {"impedance": 3}, found) == {}
+    assert gate.unexpected_baseline_errors(BOARD06_KEY, {"impedance": 5}, found) == {}
     assert gate.stale_allowances(BOARD06_KEY, found) == []
 
 
 def test_board06_new_impedance_net_fails_even_within_old_cap():
     """A different net cannot hide behind the old cap of 5 (#7270 Q3)."""
     gate = load("check_diffpair_coverage")
-    found = {"impedance": {"USB2_D-", "USB3_RX1+", "DDR_CLK+"}}
-    assert gate.unexpected_baseline_errors(BOARD06_KEY, {"impedance": 3}, found) == {"impedance": 1}
-    # USB3_TX2+ was fixed and DDR_CLK+ took its slot: also reported stale.
-    assert gate.stale_allowances(BOARD06_KEY, found) == [("impedance", "USB3_TX2+", 7312)]
+    found = {"impedance": {"USB3_RX1+", "USB3_RX1-", "USB3_TX2+", "DDR_CLK+"}}
+    assert gate.unexpected_baseline_errors(BOARD06_KEY, {"impedance": 5}, found) == {"impedance": 1}
+    # USB3_TX2- was fixed and DDR_CLK+ took its slot: also reported stale.
+    assert gate.stale_allowances(BOARD06_KEY, found) == [("impedance", "USB3_TX2-", 7312)]
 
 
 def test_board06_fixed_impedance_finding_makes_allowance_stale():
     gate = load("check_diffpair_coverage")
-    found = {"impedance": {"USB2_D-", "USB3_RX1+"}}
-    assert gate.unexpected_baseline_errors(BOARD06_KEY, {"impedance": 2}, found) == {}
-    assert gate.stale_allowances(BOARD06_KEY, found) == [("impedance", "USB3_TX2+", 7312)]
+    found = {"impedance": {"USB3_RX1+", "USB3_RX1-", "USB3_TX2+"}}
+    assert gate.unexpected_baseline_errors(BOARD06_KEY, {"impedance": 3}, found) == {}
+    assert gate.stale_allowances(BOARD06_KEY, found) == [("impedance", "USB3_TX2-", 7312)]
     assert "#7312" in gate.format_stale(gate.stale_allowances(BOARD06_KEY, found))
 
 
 def test_board06_impedance_without_identities_is_not_trusted():
     gate = load("check_diffpair_coverage")
-    assert gate.unexpected_baseline_errors(BOARD06_KEY, {"impedance": 3}) == {"impedance": 3}
+    assert gate.unexpected_baseline_errors(BOARD06_KEY, {"impedance": 5}) == {"impedance": 5}
 
 
 def test_same_net_two_segments_use_one_identity_slot():
