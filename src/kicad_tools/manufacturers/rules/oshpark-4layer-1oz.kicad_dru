@@ -19,8 +19,8 @@
   (condition "(A.Type == 'via' || A.Type == 'pad') && B.Layer == 'Edge.Cuts'")
   (constraint physical_hole_clearance (min 0.381mm)))
 (rule "Silkscreen Width - OSHPark"
-  (condition "A.Type == 'text' && A.Layer == 'F.Silkscreen'")
+  (condition "A.Type == 'text' && (A.Layer == 'F.Silkscreen' || A.Layer == 'B.Silkscreen')")
   (constraint text_thickness (min 0.127mm)))
 (rule "Silkscreen Height - OSHPark"
-  (condition "A.Type == 'text' && A.Layer == 'F.Silkscreen'")
+  (condition "A.Type == 'text' && (A.Layer == 'F.Silkscreen' || A.Layer == 'B.Silkscreen')")
   (constraint text_height (min 0.762mm)))

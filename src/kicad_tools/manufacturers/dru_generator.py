@@ -483,14 +483,14 @@ def generate_dru(
     # --- Silkscreen Width ---
     lines.append(
         f'(rule "Silkscreen Width{label_suffix}"\n'
-        f"  (condition \"A.Type == 'text' && A.Layer == 'F.Silkscreen'\")\n"
+        f"  (condition \"A.Type == 'text' && (A.Layer == 'F.Silkscreen' || A.Layer == 'B.Silkscreen')\")\n"
         f"  (constraint text_thickness (min {rules.min_silkscreen_width_mm}mm)))"
     )
 
     # --- Silkscreen Height ---
     lines.append(
         f'(rule "Silkscreen Height{label_suffix}"\n'
-        f"  (condition \"A.Type == 'text' && A.Layer == 'F.Silkscreen'\")\n"
+        f"  (condition \"A.Type == 'text' && (A.Layer == 'F.Silkscreen' || A.Layer == 'B.Silkscreen')\")\n"
         f"  (constraint text_height (min {rules.min_silkscreen_height_mm}mm)))"
     )
 
