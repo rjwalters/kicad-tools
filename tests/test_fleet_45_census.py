@@ -239,10 +239,13 @@ def _artifact_id(path: Path) -> str:
 # preserves centerlines, components, opens and the (841, 12) census; its new
 # hash pins that explicit exception. No active output
 # or future archive path is excluded from the angle census. Issue #5044.
+# Issue #6730: ``kct retune-lengths`` re-tuned ADDR_BUS (nets A4/A6) and the
+# zones were refilled, so the hash is re-pinned and the census is (849, 12):
+# eight more on-grid meander segments, no new off-angle ones.
 HISTORICAL_WITNESS = (
     REPO_ROOT / "boards/07-matchgroup-test/regression-fixture/matchgroup_test_routed.kicad_pcb"
 )
-HISTORICAL_WITNESS_SHA256 = "fb58581eba53bb9f1dfe33a278fb896b2f08b5f4fc2e82211124d8586ba7aaf0"
+HISTORICAL_WITNESS_SHA256 = "fdbb69fd1cae5ee76a6a66788feebfed3490f090652df75fdbf04e864f3df83e"
 
 # Board09's routed development checkpoint (issue #5084): discovered by
 # _committed_routed_artifacts() now that discovery no longer relies solely
@@ -274,7 +277,7 @@ ARTIFACTS = [
 def test_historical_matchgroup_witness_is_unchanged() -> None:
     assert hashlib.sha256(HISTORICAL_WITNESS.read_bytes()).hexdigest() == HISTORICAL_WITNESS_SHA256
     total, bad = segment_angle_census(HISTORICAL_WITNESS)
-    assert (total, len(bad)) == (841, 12)
+    assert (total, len(bad)) == (849, 12)
 
 
 def test_blocked_development_checkpoint_is_tracked() -> None:
