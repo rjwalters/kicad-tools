@@ -246,10 +246,9 @@ and lists the issues with links.
 
 Board scripts that tolerate known `kct check` warnings should read the
 allowance from these entries (`kicad_tools.cli.known_issues.known_warning_allowance`)
-rather than keep their own list. Boards whose evidence cannot be regenerated
-yet are rebound with `scripts/boards/record_known_issues.py`, which hashes in
-only `known-issues.json` (and an edited board README, with `--doc`), re-runs no
-gate, and says so in `known_issues_binding`.
+rather than keep their own list; `scripts/boards/refresh_readiness.py` gates
+`kct check` warnings against exactly that allowance and carries the list
+forward when it re-pins a board.
 
 ### Engine fingerprint
 

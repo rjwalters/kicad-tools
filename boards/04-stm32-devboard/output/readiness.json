@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "checked_at": "2026-10-18T12:00:00+00:00",
+  "checked_at": "2026-10-18T20:30:00+00:00",
   "mode": "assembly",
   "status": "ready",
   "blockers": [],
@@ -40,7 +40,7 @@
   "inputs": {
     "DESIGN_REVIEW.md": "08076e07ddfe0d9ee014e870c1d21d0fd0b756a9df27947f47336e2222dbe6b4",
     "README.md": "c45b02a972642bb12adca3ad0ad9769bcbbbe4113004ef116115dd8006b87182",
-    "check_manufacturing.py": "54bc5d15ad2fd3792be5cb60932071729d3391cb3f6d343fb097c7177c05bcd0",
+    "check_manufacturing.py": "eafb2a1b316375c8aaf90b13d88fd63a21710298727ae5dec9fd8356bf18dae1",
     "generate_design.py": "50e5e87ba4425ffa7878a895febb124620da6c9eba740126df06f68419aff10c",
     "manufacturing_process.py": "9a723bf653188ca1940648763c97d43bf4d9b76acad9481e3dc60a76264acdde",
     "output/kicad_tools_pwr.kicad_sym": "bdc924f0386d4cf4c1e0c766e3b6ec577a96da54bddebab047b13b50b8d85837",
@@ -54,7 +54,7 @@
     "output/manufacturing/cpl_jlcpcb.csv": "d3844687fa28afae77462e26f9e783d66d6e4d76d169ba3cdd93416f2357cd56",
     "output/manufacturing/design-source/DESIGN_REVIEW.md": "08076e07ddfe0d9ee014e870c1d21d0fd0b756a9df27947f47336e2222dbe6b4",
     "output/manufacturing/design-source/README.md": "cdcf63b2473322456e32eae0e46afaea602d96edc779f2af6161d2a5616cc958",
-    "output/manufacturing/design-source/check_manufacturing.py": "54bc5d15ad2fd3792be5cb60932071729d3391cb3f6d343fb097c7177c05bcd0",
+    "output/manufacturing/design-source/check_manufacturing.py": "eafb2a1b316375c8aaf90b13d88fd63a21710298727ae5dec9fd8356bf18dae1",
     "output/manufacturing/design-source/generate_design.py": "50e5e87ba4425ffa7878a895febb124620da6c9eba740126df06f68419aff10c",
     "output/manufacturing/design-source/manufacturing_process.py": "9a723bf653188ca1940648763c97d43bf4d9b76acad9481e3dc60a76264acdde",
     "output/manufacturing/design-source/project.kct": "9cacd7cb85b1207fb3353da55e04a25a51b7323dc8cc4af416d4f47f252156f0",
@@ -68,7 +68,7 @@
     "output/manufacturing/images/pcb_front.png": "c199029e43608545425f43a202e21ebec8b74123c54d2bb028e6dfeba8c6b4a1",
     "output/manufacturing/images/schematic_stm32_devboard.png": "701fa6f1e47427d23becbd4c0d3e509a4dd66b0178ff50d7e61e7e7c5601cb1f",
     "output/manufacturing/kicad_project.zip": "5377948b2467c6b11a98bcd101726dc787fc2e924d90a7d1a8a00481f9c62c0a",
-    "output/manufacturing/manifest.json": "c40ba33f9c1d3305524ef9996df984daaf7dc005a93631cc62503f704cfe005d",
+    "output/manufacturing/manifest.json": "30c1494299fe5523b925fe7200e1d3751c5857344a4a6e936d4dd7eed9f5153b",
     "output/manufacturing/manual-assembly-bom.csv": "0d1620494f1492c9a57ccf7d29840d0643984cd23bdb2969e0d0ea660a4839a1",
     "output/manufacturing/manufacturing-requirements.json": "52ef1e5957c569c120a43b82a63c9dff8d3bf5dee2392e473e2e73f20b8fb199",
     "output/manufacturing/native-drc.json": "a0635b7977714bd732523366d44759d32d26a464358563be719ba21d36726792",
@@ -77,7 +77,7 @@
     "output/manufacturing/report.md": "ab87ea2ed6ff7b3005a9ac65bb3d55a24ef1047fcb515f46304b99ae190f917c",
     "output/manufacturing/report.pdf": "4ffc10dd629ae44f592640c37b000795e5dbc377c00e6bd33bf309edb341e384",
     "output/manufacturing-requirements.json": "52ef1e5957c569c120a43b82a63c9dff8d3bf5dee2392e473e2e73f20b8fb199",
-    "output/manufacturing.zip": "e92e0e701461b3c64595c0ec08d96d2700f7a229077775cec52061efb689f979",
+    "output/manufacturing.zip": "7752824bf1c34aed23287bd079dee0fdcaa8923b42be29a9d941b233133a3cd2",
     "output/readiness/fill-consistency.json": "3369e42a5c0ea40c718cdf6016b83fa85b04260ad66cf757b282ea30ef9561b6",
     "output/readiness/kct-check.json": "c440d3f390db5a3f1c75e2c8d450501ec7b6af50bc2d2038d502f29bebeceec5",
     "output/readiness/native-drc.json": "a0635b7977714bd732523366d44759d32d26a464358563be719ba21d36726792",
@@ -122,6 +122,5 @@
       }
     }
   ],
-  "manufacturer": "jlcpcb-tier1",
-  "known_issues_binding": "known_issues and manufacturer were added by scripts/boards/record_known_issues.py (Issue #7261) without re-running any gate: only known-issues.json was hashed into inputs (plus any edited board .md file named with --doc and its design-source mirror, manifest entry and outer archive). The checks, metrics and checked_at are those of the original run."
+  "manufacturer": "jlcpcb-tier1"
 }

@@ -24,8 +24,9 @@ unless every gate passes:
    ``redesign/package.py:refresh_manifest``.  Only ``files`` may change.
 4. Gates, all run on the staged board:
    * ``kicad-cli pcb drc --refill-zones``: 0 errors, 0 unconnected items;
-   * ``kct check --mfr <tier>``: 0 errors, 0 warnings, and the drc, erc,
-     lvs and manifest meta-checks all PASSED.  A board whose fabrication
+   * ``kct check --mfr <tier>``: 0 errors, no warnings beyond the allowance
+     the board's recorded ``known_issues`` declare (Issue #7261; none means
+     0 warnings), and the drc, erc, lvs and manifest meta-checks all PASSED.  A board whose fabrication
      process the generic tier cannot model (board 04's paid 0.15 mm drill)
      sets ``check_script`` instead; that board-local check must meet the same
      bar (Issue #6269);
@@ -358,17 +359,63 @@ def gate_native_drc(board: Path, cfg: BoardConfig) -> int:
     return len(errors)
 
 
-def check_report_verdict(data: dict, label: str) -> tuple[bool, int]:
-    """Gate a ``kct check``-format report: 0 errors, 0 warnings, meta all PASSED."""
+def warning_counts_by_rule(data: dict) -> dict[str, int]:
+    """Active (non-waived) warning findings of a ``kct check`` report, by rule."""
+    counts: dict[str, int] = {}
+    for violation in data.get("violations", []):
+        if (
+            isinstance(violation, dict)
+            and violation.get("severity") == "warning"
+            and not violation.get("waived")
+        ):
+            rule = str(violation.get("rule_id") or "unknown")
+            counts[rule] = counts.get(rule, 0) + 1
+    return dict(sorted(counts.items()))
+
+
+def unaccepted_warnings(data: dict, allowance: dict[str, int]) -> dict[str, int]:
+    """Warnings beyond *allowance* (``{rule: max count}``), as ``{rule: found}``."""
+    counts = warning_counts_by_rule(data)
+    total = data.get("summary", {}).get("warnings")
+    if total != sum(counts.values()):
+        # Summary and finding list disagree: never trust the allowance.
+        return {"<summary/violations mismatch>": total if isinstance(total, int) else -1}
+    return {rule: n for rule, n in counts.items() if n > allowance.get(rule, 0)}
+
+
+def check_report_verdict(
+    data: dict, label: str, allowance: dict[str, int] | None = None
+) -> tuple[bool, int]:
+    """Gate a ``kct check``-format report: 0 errors, meta all PASSED, and no
+    warnings beyond *allowance*.
+
+    The allowance is the board's own recorded ``known_issues`` warning
+    allowance from ``readiness.json`` (Issue #7261): the same record that
+    discloses the issue is the one that tolerates its warnings.  Without one,
+    any warning refuses.
+    """
     summary, meta = data.get("summary", {}), data.get("meta_checks", {})
     statuses = {k: meta.get(k, {}).get("status") for k in ("drc", "erc", "lvs", "manifest")}
     lvs = meta.get("lvs", {})
     mismatches = len(lvs.get("mismatches", [])) + len(lvs.get("copper_mismatches", []))
     errors, warnings = summary.get("errors"), summary.get("warnings")
     log(f"  gate {label}: {errors} error(s), {warnings} warning(s), meta {statuses}")
-    if errors != 0 or warnings != 0 or any(s != "PASSED" for s in statuses.values()):
+    if not isinstance(warnings, int):
+        raise GateFailure(f"{label} failed")
+    extra = unaccepted_warnings(data, allowance or {}) if warnings else {}
+    if extra:
+        log(f"  warnings beyond the recorded known_issues allowance {allowance or {}}: {extra}")
+    if errors != 0 or extra or any(s != "PASSED" for s in statuses.values()):
         raise GateFailure(f"{label} failed")
     return statuses["lvs"] == "PASSED", mismatches
+
+
+def known_issue_allowance(board: Path) -> dict[str, int]:
+    """The ``{rule: max count}`` the board's recorded ``known_issues`` account for."""
+    from kicad_tools.cli.known_issues import known_warning_allowance, validate_known_issues
+
+    report = json.loads((board / "output" / "readiness.json").read_text())
+    return known_warning_allowance(validate_known_issues(report.get("known_issues")))
 
 
 def gate_kct_check(board: Path, cfg: BoardConfig) -> tuple[bool, int]:
@@ -389,7 +436,7 @@ def gate_kct_check(board: Path, cfg: BoardConfig) -> tuple[bool, int]:
         if not report.is_file():
             raise GateFailure("kct check did not produce a report")
         data = json.loads(report.read_text())
-    return check_report_verdict(data, f"kct check --mfr {cfg.tier}")
+    return check_report_verdict(data, f"kct check --mfr {cfg.tier}", known_issue_allowance(board))
 
 
 def gate_board_check(board: Path, cfg: BoardConfig) -> tuple[bool, int]:
@@ -406,7 +453,7 @@ def gate_board_check(board: Path, cfg: BoardConfig) -> tuple[bool, int]:
         if not report.is_file():
             raise GateFailure(f"{cfg.check_script} did not produce a report: {proc.stderr[-2000:]}")
         data = json.loads(report.read_text())
-    verdict = check_report_verdict(data, cfg.check_script)
+    verdict = check_report_verdict(data, cfg.check_script, known_issue_allowance(board))
     if proc.returncode != 0:
         raise GateFailure(f"{cfg.check_script} exited {proc.returncode}")
     return verdict

@@ -22,7 +22,6 @@ from kicad_tools.cli.known_issues import (
     parse_known_issue,
     validate_known_issues,
 )
-from tests.test_kct_readiness_cmd import PCB_NAME as PCB
 from tests.test_kct_readiness_cmd import FakeEngines, make_board, run
 
 CHECKED_AT = "2026-10-18T12:00:00+00:00"
@@ -284,56 +283,3 @@ def test_unified_cli_forwards_known_issue_flags(tmp_path, monkeypatch):
         "2",
     ]
 
-
-# ---------------------------------------------------------------------------
-# scripts/boards/record_known_issues.py (rebind without re-running gates)
-# ---------------------------------------------------------------------------
-
-
-def _load_rebind():
-    import importlib.util
-    import sys
-
-    path = Path(__file__).resolve().parents[1] / "scripts/boards/record_known_issues.py"
-    spec = importlib.util.spec_from_file_location("record_known_issues_7261", path)
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-def test_rebind_adds_only_the_evidence_hash_and_blocks_on_defect(tmp_path):
-    board = make_board(tmp_path)
-    assert _run(board)[0] == 0
-    before = json.loads((board / "output" / "readiness.json").read_text())
-    rebind = _load_rebind()
-
-    # ``rebind()`` directly: ``main()`` also enters the pinned KiCad toolchain.
-    rebind.rebind(board, [parse_known_issue("7250:USB 71.6 ohm:defect", "2026-10-18")], [])
-    after = json.loads((board / "output" / "readiness.json").read_text())
-    added = set(after["inputs"]) - set(before["inputs"])
-    assert added == {"output/readiness/known-issues.json"}
-    assert {k: v for k, v in after["inputs"].items() if k not in added} == before["inputs"]
-    assert after["checked_at"] == before["checked_at"]
-    assert after["checks"] == before["checks"]
-    assert after["status"] == "blocked"
-    assert after["blockers"] == ["known defect #7250: USB 71.6 ohm"]
-    assert read_readiness(board)["status"] == "blocked"
-
-    # Resolving the defect restores the verdict the gates gave.
-    rebind.rebind(board, [], [7250])
-    final = json.loads((board / "output" / "readiness.json").read_text())
-    assert final["status"] == "ready" and final["blockers"] == []
-    assert "known_issues" not in final
-    assert read_readiness(board)["status"] == "ready"
-
-
-def test_rebind_refuses_stale_evidence_and_writes_nothing(tmp_path):
-    board = make_board(tmp_path)
-    assert _run(board)[0] == 0
-    (board / "output" / PCB).write_text("(kicad_pcb changed)\n")
-    report = (board / "output" / "readiness.json").read_text()
-    rebind = _load_rebind()
-    with pytest.raises(rebind.Refused):
-        rebind.rebind(board, [parse_known_issue("1:x:advisory", "2026-10-18")], [])
-    assert (board / "output" / "readiness.json").read_text() == report
