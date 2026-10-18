@@ -90,6 +90,13 @@ def pcb(tmp_path: Path) -> Path:
     return path
 
 
+@pytest.fixture
+def pcb_sch(pcb: Path) -> Path:
+    """A board with its native-stem schematic (Issue #7237: parity needs one)."""
+    pcb.with_suffix(".kicad_sch").write_text("(kicad_sch (version 20240108))\n")
+    return pcb
+
+
 def _fake_kicad_cli(
     monkeypatch, *, stdout: str = "", stderr: str = "", violations=None, parity=None
 ):
@@ -130,9 +137,9 @@ def test_run_drc_flags_parity_skipped_on_either_stream(monkeypatch, pcb, stream)
     assert result.parity_skipped is True
 
 
-def test_run_drc_not_flagged_when_netlist_fetched(monkeypatch, pcb):
+def test_run_drc_not_flagged_when_netlist_fetched(monkeypatch, pcb_sch):
     _fake_kicad_cli(monkeypatch, stdout="Found 0 violations\n")
-    result = runner.run_drc(pcb)
+    result = runner.run_drc(pcb_sch)
     assert result.success is True
     assert result.parity_skipped is False
 
@@ -257,9 +264,9 @@ def test_strict_warnings_take_precedence_over_not_run(monkeypatch, pcb):
 
 
 @pytest.mark.parametrize("fmt", ["table", "summary", "json"])
-def test_parity_ran_clean_passes(monkeypatch, capsys, pcb, fmt):
+def test_parity_ran_clean_passes(monkeypatch, capsys, pcb_sch, fmt):
     _fake_kicad_cli(monkeypatch, stdout="Found 0 violations\n")
-    rc = drc_cmd.main([str(pcb), "--format", fmt])
+    rc = drc_cmd.main([str(pcb_sch), "--format", fmt])
     out = capsys.readouterr().out
     assert rc == 0
     if fmt == "json":
