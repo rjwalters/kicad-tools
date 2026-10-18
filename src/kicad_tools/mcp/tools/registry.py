@@ -1064,8 +1064,6 @@ def _handler_create_checkpoint(params: dict[str, Any]) -> dict[str, Any]:
     result = create_checkpoint(
         session_id=params["session_id"],
         name=params.get("name"),
-        drc_violation_count=params.get("drc_violation_count", 0),
-        score=params.get("score", 0.0),
     )
     return result.to_dict()
 
@@ -1073,8 +1071,9 @@ def _handler_create_checkpoint(params: dict[str, Any]) -> dict[str, Any]:
 register_tool(
     name="create_checkpoint",
     description=(
-        "Create named checkpoint for potential rollback. Saves current "
-        "session state that can be restored later using restore_checkpoint."
+        "Create named checkpoint for potential rollback. Captures the live "
+        "placement state (positions, score, violations, move depth) so "
+        "restore_checkpoint can restore it."
     ),
     parameters=_make_params(
         properties={
@@ -1085,16 +1084,6 @@ register_tool(
             "name": {
                 "type": "string",
                 "description": "Human-readable checkpoint name (optional)",
-            },
-            "drc_violation_count": {
-                "type": "integer",
-                "description": "Current DRC violation count",
-                "default": 0,
-            },
-            "score": {
-                "type": "number",
-                "description": "Current placement score",
-                "default": 0.0,
             },
         },
         required=["session_id"],
@@ -1118,8 +1107,9 @@ def _handler_restore_checkpoint(params: dict[str, Any]) -> dict[str, Any]:
 register_tool(
     name="restore_checkpoint",
     description=(
-        "Restore session to checkpoint state. Retrieves the saved state "
-        "associated with a checkpoint for restoration."
+        "Restore the placement session to a checkpoint: moves made after it "
+        "are undone or reverted, and success is reported only if live "
+        "positions match the snapshot."
     ),
     parameters=_make_params(
         properties={

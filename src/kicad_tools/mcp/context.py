@@ -212,6 +212,9 @@ class StateSnapshot:
         changed_components: Components changed since last snapshot.
         decisions_since_last: Number of decisions since previous snapshot.
         score: Placement quality score at snapshot time.
+        pending_moves: Depth of the placement session's move stack.
+        moves: ``(ref, new_x, new_y, new_rotation)`` for each pending move,
+            used to decide whether a restore can simply undo back.
     """
 
     snapshot_id: str
@@ -223,6 +226,8 @@ class StateSnapshot:
     changed_components: list[str] = field(default_factory=list)
     decisions_since_last: int = 0
     score: float = 0.0
+    pending_moves: int = 0
+    moves: list[tuple[str, float, float, float]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for serialization."""
@@ -239,6 +244,7 @@ class StateSnapshot:
             "changed_components": self.changed_components,
             "decisions_since_last": self.decisions_since_last,
             "score": round(self.score, 4),
+            "pending_moves": self.pending_moves,
         }
 
     @classmethod
@@ -535,15 +541,22 @@ class CheckpointResult:
     checkpoint_id: str = ""
     name: str | None = None
     error_message: str | None = None
+    positions: dict[str, tuple[float, float, float]] | None = None
+    pending_moves: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for serialization."""
-        return {
+        result: dict[str, Any] = {
             "success": self.success,
             "checkpoint_id": self.checkpoint_id,
             "name": self.name,
             "error_message": self.error_message,
         }
+        if self.positions is not None:
+            result["positions"] = {ref: list(pos) for ref, pos in self.positions.items()}
+        if self.pending_moves is not None:
+            result["pending_moves"] = self.pending_moves
+        return result
 
 
 @dataclass

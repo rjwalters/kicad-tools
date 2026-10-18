@@ -9,7 +9,7 @@ Tools:
     - annotate_decision: Add feedback to a past decision
     - get_session_context: Get session context at specified detail level
     - create_checkpoint: Create named checkpoint for potential rollback
-    - restore_checkpoint: Restore session to checkpoint state
+    - restore_checkpoint: Restore the placement session to a checkpoint
     - get_session_summary: Get token-efficient session summary
 
 Example:
@@ -33,7 +33,6 @@ from kicad_tools.mcp.context import (
     Decision,
     DecisionHistoryResult,
     RecordDecisionResult,
-    SessionContext,
     SessionContextResult,
     SessionSummaryResult,
     StateSnapshot,
@@ -41,98 +40,28 @@ from kicad_tools.mcp.context import (
 from kicad_tools.mcp.preference_learner import PreferenceLearner
 
 if TYPE_CHECKING:
-    pass
+    from kicad_tools.mcp.tools.session import SessionMetadata
 
 # =============================================================================
-# Context Manager
+# Session resolution
 # =============================================================================
 
+# Shared learner. Session contexts live on ``SessionMetadata`` (one store).
+_learner = PreferenceLearner()
 
-class ContextManager:
-    """Manages session contexts for MCP operations.
 
-    Maintains a registry of session contexts indexed by session ID,
-    providing thread-safe access to context state.
+def _resolve(session_id: str) -> SessionMetadata | None:
+    """Resolve a session ID through the placement ``SessionManager``.
+
+    Intents are bound by reference at call time (``clear_intents`` rebinds
+    the list on the metadata, so a copy taken earlier would go stale).
     """
+    from kicad_tools.mcp.tools.session import get_session_manager
 
-    def __init__(self) -> None:
-        """Initialize the context manager."""
-        self._contexts: dict[str, SessionContext] = {}
-        self._learner = PreferenceLearner()
-
-    def get_or_create(self, session_id: str, pcb_path: str = "") -> SessionContext:
-        """Get existing context or create a new one.
-
-        Args:
-            session_id: Session identifier.
-            pcb_path: PCB file path for new contexts.
-
-        Returns:
-            SessionContext for the session.
-        """
-        if session_id not in self._contexts:
-            self._contexts[session_id] = SessionContext(
-                session_id=session_id,
-                pcb_path=pcb_path,
-            )
-        return self._contexts[session_id]
-
-    def get(self, session_id: str) -> SessionContext | None:
-        """Get context by session ID.
-
-        Args:
-            session_id: Session identifier.
-
-        Returns:
-            SessionContext or None if not found.
-        """
-        return self._contexts.get(session_id)
-
-    def close(self, session_id: str) -> bool:
-        """Close and remove a session context.
-
-        Args:
-            session_id: Session identifier.
-
-        Returns:
-            True if context was closed, False if not found.
-        """
-        if session_id in self._contexts:
-            del self._contexts[session_id]
-            return True
-        return False
-
-    def list_sessions(self) -> list[str]:
-        """List all active session IDs.
-
-        Returns:
-            List of session IDs.
-        """
-        return list(self._contexts.keys())
-
-    @property
-    def learner(self) -> PreferenceLearner:
-        """Get the preference learner instance."""
-        return self._learner
-
-
-# Global context manager instance
-_context_manager = ContextManager()
-
-
-def get_context_manager() -> ContextManager:
-    """Get the global context manager instance.
-
-    Returns:
-        The global ContextManager instance.
-    """
-    return _context_manager
-
-
-def reset_context_manager() -> None:
-    """Reset the global context manager (for testing)."""
-    global _context_manager
-    _context_manager = ContextManager()
+    metadata = get_session_manager().get(session_id)
+    if metadata is not None:
+        metadata.context.intents = metadata.intents
+    return metadata
 
 
 # =============================================================================
@@ -179,10 +108,13 @@ def record_decision(
         ...     confidence=0.9,
         ... )
     """
-    context = _context_manager.get(session_id)
-    if not context:
-        # Auto-create context if session exists but context doesn't
-        context = _context_manager.get_or_create(session_id)
+    metadata = _resolve(session_id)
+    if metadata is None:
+        return RecordDecisionResult(
+            success=False,
+            error_message=f"Session not found: {session_id}",
+        )
+    context = metadata.context
 
     try:
         decision = Decision.create(
@@ -232,12 +164,13 @@ def get_decision_history(
         ... )
         >>> print(result.patterns)  # ["bypass_cap_optimization", "edge_connector_placement"]
     """
-    context = _context_manager.get(session_id)
-    if not context:
+    metadata = _resolve(session_id)
+    if metadata is None:
         return DecisionHistoryResult(
             success=False,
             error_message=f"Session not found: {session_id}",
         )
+    context = metadata.context
 
     try:
         # Get decisions with optional filtering
@@ -250,8 +183,7 @@ def get_decision_history(
         recent = decisions[-limit:] if len(decisions) > limit else decisions
 
         # Analyze patterns
-        learner = _context_manager.learner
-        prefs = learner.analyze_decisions(context.decisions)
+        prefs = _learner.analyze_decisions(context.decisions)
 
         return DecisionHistoryResult(
             success=True,
@@ -294,12 +226,13 @@ def annotate_decision(
         ...     outcome="success",
         ... )
     """
-    context = _context_manager.get(session_id)
-    if not context:
+    metadata = _resolve(session_id)
+    if metadata is None:
         return AnnotateDecisionResult(
             success=False,
             error_message=f"Session not found: {session_id}",
         )
+    context = metadata.context
 
     # Find the decision
     decision = next((d for d in context.decisions if d.id == decision_id), None)
@@ -364,12 +297,13 @@ def get_session_context(
         ... )
         >>> print(result.context["recent_decisions"])
     """
-    context = _context_manager.get(session_id)
-    if not context:
+    metadata = _resolve(session_id)
+    if metadata is None:
         return SessionContextResult(
             success=False,
             error_message=f"Session not found: {session_id}",
         )
+    context = metadata.context
 
     try:
         if detail_level not in ("summary", "detailed", "full"):
@@ -394,62 +328,56 @@ def get_session_context(
 def create_checkpoint(
     session_id: str,
     name: str | None = None,
-    component_positions: dict[str, tuple[float, float, float]] | None = None,
-    drc_violation_count: int = 0,
-    score: float = 0.0,
 ) -> CheckpointResult:
     """Create named checkpoint for potential rollback.
 
-    Creates a snapshot of the current session state that can be
-    restored later using restore_checkpoint.
+    Captures the live placement state (move-stack depth, every component
+    position, score, violation counts and intent summary) so that
+    ``restore_checkpoint`` can actually restore it.
 
     Args:
         session_id: Active session identifier.
         name: Optional human-readable name for the checkpoint.
-        component_positions: Current component positions (ref -> (x, y, rot)).
-        drc_violation_count: Current number of DRC violations.
-        score: Current placement score.
 
     Returns:
         CheckpointResult with the checkpoint ID.
 
     Example:
-        >>> result = create_checkpoint(
-        ...     session_id="sess_123",
-        ...     name="before_power_layout",
-        ...     drc_violation_count=5,
-        ...     score=125.5,
-        ... )
+        >>> result = create_checkpoint(session_id="sess_123", name="before_power_layout")
         >>> print(result.checkpoint_id)  # "cp_xyz789"
     """
-    context = _context_manager.get(session_id)
-    if not context:
+    metadata = _resolve(session_id)
+    if metadata is None:
         return CheckpointResult(
             success=False,
             error_message=f"Session not found: {session_id}",
         )
+    context = metadata.context
+    session = metadata.session
 
     try:
-        # Create snapshot
+        state = session._capture_state()
         snapshot = StateSnapshot.create(name=name)
-        snapshot.component_positions = component_positions or {}
-        snapshot.drc_violation_count = drc_violation_count
-        snapshot.score = score
+        snapshot.component_positions = dict(state.positions)
+        snapshot.score = state.score
+        snapshot.drc_violation_count = session.get_drc_summary()["total_violations"]
+        snapshot.pending_moves = len(session.pending_moves)
+        snapshot.moves = [(m.ref, m.new_x, m.new_y, m.new_rotation) for m in session.pending_moves]
 
-        # Extract intent summary from context
         if context.intents:
             snapshot.intent_summary = [
                 i.interface_type if hasattr(i, "interface_type") else str(i)
                 for i in context.intents
             ]
 
-        # Create checkpoint
         checkpoint_id = context.create_checkpoint(name or "unnamed", snapshot)
 
         return CheckpointResult(
             success=True,
             checkpoint_id=checkpoint_id,
             name=name,
+            positions=snapshot.component_positions,
+            pending_moves=snapshot.pending_moves,
         )
     except Exception as e:
         return CheckpointResult(
@@ -462,47 +390,73 @@ def restore_checkpoint(
     session_id: str,
     checkpoint_id: str,
 ) -> CheckpointResult:
-    """Restore session to checkpoint state.
+    """Restore the placement session to a checkpoint.
 
-    Retrieves the state snapshot associated with a checkpoint.
-    Note: This returns the snapshot data - actual state restoration
-    must be performed by the caller using the returned positions.
+    If the current move stack still starts with the checkpoint's moves, the
+    extra moves are undone. Otherwise (the caller undid past the checkpoint
+    and then made new moves) each component whose position differs from the
+    snapshot is moved back with ``apply_move``, which keeps the change
+    undoable and commit-consistent. Success is reported only when every live
+    position equals the snapshot afterwards.
 
     Args:
         session_id: Active session identifier.
         checkpoint_id: ID of the checkpoint to restore.
 
     Returns:
-        CheckpointResult with checkpoint information and snapshot data.
-
-    Example:
-        >>> result = restore_checkpoint(
-        ...     session_id="sess_123",
-        ...     checkpoint_id="cp_xyz789",
-        ... )
-        >>> if result.success:
-        ...     # Apply the restored positions
-        ...     pass
+        CheckpointResult with the restored positions and move-stack depth.
     """
-    context = _context_manager.get(session_id)
-    if not context:
+    metadata = _resolve(session_id)
+    if metadata is None:
         return CheckpointResult(
             success=False,
             error_message=f"Session not found: {session_id}",
         )
 
-    snapshot = context.get_checkpoint_snapshot(checkpoint_id)
+    snapshot = metadata.context.get_checkpoint_snapshot(checkpoint_id)
     if not snapshot:
         return CheckpointResult(
             success=False,
             error_message=f"Checkpoint not found: {checkpoint_id}",
         )
 
-    return CheckpointResult(
-        success=True,
-        checkpoint_id=checkpoint_id,
-        name=snapshot.name,
-    )
+    session = metadata.session
+    depth = snapshot.pending_moves
+    try:
+        current = [(m.ref, m.new_x, m.new_y, m.new_rotation) for m in session.pending_moves]
+        if len(current) >= depth and current[:depth] == snapshot.moves:
+            while len(session.pending_moves) > depth:
+                if not session.undo():
+                    break
+        else:
+            live = session._capture_state().positions
+            for ref, target in snapshot.component_positions.items():
+                if live.get(ref) != target:
+                    session.apply_move(ref, target[0], target[1], target[2])
+
+        live = session._capture_state().positions
+        mismatched = sorted(
+            ref for ref, pos in snapshot.component_positions.items() if live.get(ref) != pos
+        )
+        if mismatched:
+            return CheckpointResult(
+                success=False,
+                checkpoint_id=checkpoint_id,
+                name=snapshot.name,
+                error_message=f"Restore did not reproduce snapshot for: {', '.join(mismatched)}",
+            )
+        return CheckpointResult(
+            success=True,
+            checkpoint_id=checkpoint_id,
+            name=snapshot.name,
+            positions=live,
+            pending_moves=len(session.pending_moves),
+        )
+    except Exception as e:
+        return CheckpointResult(
+            success=False,
+            error_message=f"Failed to restore checkpoint: {e}",
+        )
 
 
 def get_session_summary(
@@ -531,12 +485,13 @@ def get_session_summary(
         #   - move C3: success
         #   - route VDD: success
     """
-    context = _context_manager.get(session_id)
-    if not context:
+    metadata = _resolve(session_id)
+    if metadata is None:
         return SessionSummaryResult(
             success=False,
             error_message=f"Session not found: {session_id}",
         )
+    context = metadata.context
 
     try:
         summary = context.get_summary(max_tokens)
