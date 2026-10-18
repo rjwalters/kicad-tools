@@ -178,6 +178,20 @@ kct sch hierarchy project.kicad_sch --format json
 kct sch unconnected project.kicad_sch
 ```
 
+#### `sch validate`
+
+```bash
+kct sch validate <schematic> [options]
+```
+
+| Option | Description |
+|--------|-------------|
+| `--format` | Output format (`text` or `json`) |
+| `--lib-path` | Directory of `.kicad_sym` files used as a fallback for symbols missing from the schematic's embedded `lib_symbols` (embedded symbols stay authoritative); repeatable |
+| `--strict` | Exit with error on warnings |
+| `--quiet`, `-q` | Only show errors |
+| `--skip` | Skip a validation check category (e.g. `swd_routing`, `i2c_pullups`); repeatable |
+
 ---
 
 ### `pcb`
@@ -911,6 +925,9 @@ kct parts <subcommand> [options]
 | `search` | Search for parts |
 | `lookup` | Get part details by LCSC number |
 | `availability` | Check BOM part availability on LCSC for a schematic |
+| `import` | Import a part's symbol/footprint from its datasheet into a library |
+| `suggest` | Suggest LCSC part numbers for components without them |
+| `cache` | Cache management (`stats`, `clear`, `clear-expired`) |
 | `sync-catalog` | Download the jlcparts dataset (~620 MB) into the cache dir for fully-offline lookups (#4117) |
 
 **Examples:**
@@ -918,7 +935,22 @@ kct parts <subcommand> [options]
 kct parts search "STM32F103"
 kct parts lookup C8734
 kct parts availability project.kicad_sch --quantity 100
+kct parts import STM32F103C8T6 --library my.kicad_sym --dry-run
 ```
+
+#### `parts import`
+
+| Option | Description |
+|--------|-------------|
+| `--library`, `-l` | Output symbol library (`.kicad_sym`); required |
+| `--symbol-lib` | Alias for `--library` |
+| `--footprint-lib` | Project footprint library (`.pretty` directory) |
+| `--package`, `-p` | Specific package variant (e.g. `LQFP48`) |
+| `--layout` | Pin layout style: `functional` (default), `physical` or `simple` |
+| `--dry-run` | Preview what would be imported without making changes |
+| `--interactive`, `-i` | Deprecated: not implemented; ignored |
+| `--overwrite` | Overwrite existing symbols |
+| `--format` | Output format (`text` or `json`) |
 
 ---
 
@@ -1677,8 +1709,20 @@ kct optimize-traces <pcb_file> [options]
 
 | Option | Description |
 |--------|-------------|
-| `--output`, `-o` | Output file |
-| `--length-match` | Enable length matching |
+| `--output`, `-o` | Output file (default: modify in place) |
+| `--net` | Only optimize traces matching this net pattern |
+| `--no-merge` | Disable collinear merging |
+| `--no-zigzag` | Disable zigzag elimination |
+| `--no-45` | Disable 45-degree corners |
+| `--chamfer-size` | 45-degree chamfer size in mm (default: 0.5) |
+| `--verbose`, `-v` | Print a per-net table (segments and length before/after, `(rolled back)` marker) after the summary |
+| `--dry-run` | Show results without writing |
+| `--quiet`, `-q` | Suppress progress output |
+| `--drc-aware` | Roll back per-net optimizations that increase DRC violations (requires `--mfr`) |
+| `--mfr` | Target manufacturer for DRC rules (e.g. `jlcpcb`, `oshpark`); required with `--drc-aware` |
+| `--layers` | Number of copper layers for DRC checks (default: 2) |
+| `--copper` | Copper weight in oz for DRC checks (default: 1.0) |
+| `--format` | Output format (`text` or `json`); JSON shape in [machine-output.md](machine-output.md) |
 
 ---
 
