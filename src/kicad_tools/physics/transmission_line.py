@@ -514,7 +514,9 @@ class TransmissionLine:
     ) -> tuple[ImpedanceResult, float]:
         """Calculate differential microstrip impedance.
 
-        For edge-coupled differential pairs on outer layers.
+        For edge-coupled differential pairs on outer layers. The
+        differential impedance is that of
+        :meth:`CoupledLines.edge_coupled_microstrip`.
 
         Args:
             width_mm: Individual trace width in mm
@@ -525,20 +527,14 @@ class TransmissionLine:
         Returns:
             Tuple of (single-ended result, differential impedance)
         """
-        # First calculate single-ended impedance
+        # Imported here because coupled_lines imports this module.
+        from .coupled_lines import CoupledLines
+
         single = self.microstrip(width_mm, layer, frequency_ghz)
-
-        # Differential impedance approximation
-        # Zdiff ≈ 2 * Z0 * (1 - k), where k is coupling coefficient
-        # k depends on spacing/height ratio
-        h = self.stackup.get_reference_plane_distance(layer)
-        s_over_h = spacing_mm / h if h > 0 else 1.0
-
-        # Empirical coupling coefficient (loose coupling approximation)
-        # k decreases as spacing increases
-        k = math.exp(-2.0 * s_over_h) if s_over_h > 0 else 0.5
-
-        z_diff = 2 * single.z0 * (1 - 0.347 * k)
+        # One coupled-microstrip model: delegate to the field solve (#7060).
+        z_diff = (
+            CoupledLines(self.stackup).edge_coupled_microstrip(width_mm, spacing_mm, layer).zdiff
+        )
 
         return single, z_diff
 
