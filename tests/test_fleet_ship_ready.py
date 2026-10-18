@@ -16,6 +16,7 @@ The fake-board builder reuses the synthetic PCB fixtures from
 from __future__ import annotations
 
 import ast
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -39,6 +40,7 @@ def _write_erc_report(
     errors: int = 0,
     warnings: int = 0,
     location: str = "output",
+    bound: bool = True,
 ) -> Path:
     """Write an ``erc_report.json`` for a fake board.
 
@@ -58,6 +60,13 @@ def _write_erc_report(
         },
         "violations": [],
     }
+    if bound:
+        # Issue #7190: a clean report counts only when it is bound to the
+        # schematic's current bytes, so give it a schematic and its hash.
+        sch = path.parent / f"{board_dir.name}.kicad_sch"
+        if not sch.exists():
+            sch.write_text("(kicad_sch)\n")
+        payload["schematic_sha256"] = hashlib.sha256(sch.read_bytes()).hexdigest()
     path.write_text(json.dumps(payload))
     return path
 

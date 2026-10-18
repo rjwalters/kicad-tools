@@ -15,6 +15,16 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-18
 
+- **PR #7267**: fix(export): bind auto-discovered DRC/ERC reports to board content
+- **PR #7266**: fix(mcp): route get_drc_violations and export_assembly through kct check/export gates
+- **PR #7265**: fix(boards): make board specs validate; read fab tier via load_spec
+- **Issue #7260** (closed): Consolidate MCP sign-off tools onto CLI helpers: export_assembly skips all export preflight, get_drc_violations checks every board as 4-layer
+- **Issue #7190** (closed): Fleet re-verify: no ready claim falsified, but kct export --strict-preflight passes a 6-error board on a stale committed drc_report.json; board 01 lacks kicad_tools_pwr sidecar
+- **PR #7263**: fix: invalidate routing cache on kicad_tools code and router extension changes
+- **PR #7255**: feat(router): mirrored partner-leg search for asymmetric lattice fallback legs (#7093)
+- **PR #7248**: fix: compare effective zone clearance in mfr validate
+- **Issue #7258** (closed): kct route cache key ignores router code: router changes silently replay old cached copper (needs --no-cache)
+- **Issue #7246** (closed): kct mfr validate: zone clearance should use effective clearance (board 04 false 0.100 mm errors); 7188 upgrade note layer list (#7191 follow-ups)
 - **PR #7259**: fix: unbreak main after #7220 PR1 (MFR001 lint, board 03 thermal_asymmetry)
 - **PR #7252**: fix(drc): parity NOT RUN when no schematic resolves
 - **PR #7243**: fix(export): ship JLCPCB paste Gerbers and flag DRC reports built for another mfr

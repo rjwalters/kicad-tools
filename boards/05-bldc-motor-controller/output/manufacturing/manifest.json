@@ -33,8 +33,8 @@
       "size": 2559
     },
     "design-source.zip": {
-      "sha256": "68ea7667dedf08f15363d1444fac7394eaa9cdc9b327ffaa6093161cfa47ce38",
-      "size": 359890
+      "sha256": "a9361b864cb9b0ca1b4b776366fbfe6548f750fa039f5defd3ff12005d6e0bb1",
+      "size": 359908
     },
     "firmware/Makefile": {
       "sha256": "f105bf145347705a625a825aad34614c3e4001c7260793991f68cca37587516c",
@@ -109,12 +109,12 @@
       "size": 1214
     },
     "native-erc.json": {
-      "sha256": "802427d2cafd754b8d815ea984cf872829599ffc8cdb1287ff3d37201e9958ab",
+      "sha256": "056b64a39e4b2cf612053d5ca710070d2e2e379d9b045efb87334d1acc65d798",
       "size": 988
     },
     "project.kct": {
-      "sha256": "ba6911aa5aefe513c5e4db8fac019c11723b4e627d1554329d69b9c5131917ae",
-      "size": 3930
+      "sha256": "069f467cabeda773e36897cf2a4a7012577bda6258e119cb6cc24a0a856a0d6b",
+      "size": 4017
     },
     "renders/3d-back.png": {
       "sha256": "ec0126e348b9f440792f9224a68b713dd86d59b15ad3c9c3b5a4de8de6fe1a8e",

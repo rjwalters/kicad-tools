@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -1099,6 +1100,8 @@ class TestFleetStatusAdvisoryDRCFilter:
         report: dict = {
             "file": str(routed_pcb),
             "manufacturer": "jlcpcb",
+            # Issue #7190: bind the report to the routed PCB's bytes.
+            "pcb_sha256": hashlib.sha256(routed_pcb.read_bytes()).hexdigest(),
             "summary": {
                 "errors": connectivity_errors + blocking_errors,
                 "warnings": 0,

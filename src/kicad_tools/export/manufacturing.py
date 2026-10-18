@@ -785,19 +785,6 @@ class ManufacturingPackage:
         if report_path is None:
             return
 
-        # Surface a stale-report note: if the resolved DRC report predates the
-        # PCB, its verdict may not reflect the current board. The floor still
-        # blocks on a stale FAIL (staleness in the blocking direction is the
-        # safe side); this warning just explains a potentially spurious block.
-        try:
-            if report_path.stat().st_mtime < self.pcb_path.stat().st_mtime:
-                logger.warning(
-                    f"DRC report {report_path.name} is older than the PCB; "
-                    "safety-floor verdict may be stale."
-                )
-        except OSError:
-            pass
-
         try:
             if report_path.stat().st_size == 0:
                 # DRC was attempted but wrote nothing -- most likely kicad-cli
@@ -849,6 +836,23 @@ class ManufacturingPackage:
                 logger.warning(msg)
                 result.warnings.append(msg)
             return
+
+        # Issue #7190: note a report that is not bound to the PCB's current
+        # content (mtimes are meaningless after a git checkout, so this uses
+        # the report's recorded pcb_sha256 / readiness co-binding instead).
+        # Log only: the floor still blocks on a stale FAIL (staleness in the
+        # blocking direction is the safe side); this explains a potentially
+        # spurious block.  Preflight's ``_check_drc`` keeps an unbound report
+        # from ever *passing* the board.
+        if explicit is None:
+            from ..drc.report_binding import BindingStatus, binding_status
+
+            binding = binding_status(report_path, self.pcb_path, report.pcb_sha256)
+            if binding is not BindingStatus.BOUND:
+                logger.warning(
+                    f"DRC report {report_path.name} is not bound to the PCB's current "
+                    f"content ({binding.value}); safety-floor verdict may be stale."
+                )
 
         if shorts or opens:
             total = len(shorts) + len(opens)

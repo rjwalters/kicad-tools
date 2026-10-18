@@ -34,8 +34,8 @@ and mapping helpers it reuses.
    ``kct check --mfr jlcpcb``, ``kct net-status``, ``kct validate --sync``; and
    ``read_readiness()`` on the board itself.
 
-``output/erc_report.json`` and ``output/drc_report.json`` have no producer
-(the recipe no longer writes them) and are left as they are.
+``output/erc_report.json`` and ``output/drc_report.json`` had no producer
+(the recipe no longer writes them); issue #7190 deleted them.
 
 Rerunning is idempotent: once regenerated, every UUID map is the identity.
 

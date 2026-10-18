@@ -2604,52 +2604,14 @@ def main(argv: list[str] | None = None) -> int:
     if not getattr(args, "refill_zones", False):
         _warn_stale_zone_fills(results.violations, pcb_path)
 
-    # Issue #3750: build the DRC SubCheckResult that will feed both the
-    # exit-code computation and the meta-check rollup (when not in
-    # --drc-only mode).  DRC status mirrors the legacy exit-code rule:
-    # PASSED iff 0 errors and (0 warnings under --strict).
-    error_count = sum(1 for v in violations if v.is_error)
-    warning_count = sum(1 for v in violations if v.is_warning)
-    drc_passed = (
-        error_count == 0
-        and all(a.passed for a in results.mask_copper_assessments)
-        and not (warning_count > 0 and args.strict)
-    )
-    drc_sub = SubCheckResult(
-        status="PASSED" if drc_passed else "FAILED",
-        detail=(
-            f"{results.rules_checked} rules checked, "
-            f"{error_count} error(s), {warning_count} warning(s)"
-        ),
-    )
-
-    # Issue #3750: compute the meta-check rollup once and reuse it for
-    # both the human stanza and the JSON envelope.  Skipped entirely
-    # under --drc-only to preserve the legacy stdout/exit-code contract.
+    # Issue #3750 / #7260: the DRC sub-check, the meta-check rollup (ERC +
+    # LVS + manifest; skipped under --drc-only to preserve the legacy
+    # stdout/exit-code contract) and the verdict/exit code are computed by
+    # :func:`evaluate_check_verdict`, the one implementation shared with
+    # every in-process caller (the MCP ``get_drc_violations`` tool).
     # (``drc_only`` itself is resolved earlier, before the routing-quality
     # metrics block, #4651.)
-    meta: MetaCheckResult | None = None
-    if not drc_only:
-        meta = run_meta_checks(
-            pcb_path,
-            drc_status=drc_sub,
-            schematic=getattr(args, "schematic", None),
-            strict=args.strict,
-        )
-
-    # Issue #5009: resolve the active manufacturer's declared via-in-pad
-    # fabrication process (if any) into a machine-readable dict, bound to
-    # the same evidence this JSON report already carries -- generalizes
-    # boards 03/04's ad hoc ``fabrication_overrides`` block.  ``None`` when
-    # no ``via_in_pad_process_id`` is declared (the common case).
-    fabrication_process_dict = describe_selection(checker.design_rules)
-    machine_output = args.format in ("json", "sarif")
-    if results.mask_copper_assessments and not machine_output:
-        for assessment in results.mask_copper_assessments:
-            print(f"Mask-to-copper: {assessment.coverage}; passed={assessment.passed}")
-            for reason in assessment.reasons:
-                print(f"  {reason}")
-
+    #
     # Exit code / verdict (decided before output so JSON can carry it).
     # Exit 2 = check ran successfully but found issues (errors, or warnings+strict)
     # Exit 1 = reserved for tool-level failures (file not found, parse error) above
@@ -2664,16 +2626,31 @@ def main(argv: list[str] | None = None) -> int:
     # --copper copper-weight disagreement is fatal on its own (a warning
     # already fired above), so an autonomous agent cannot sail past an
     # ampacity evaluation that silently ignored the board's declared build.
-    verdict, exit_code = _check_verdict(
-        mask_copper_failed=any(not a.passed for a in results.mask_copper_assessments),
-        strict_copper_disagreement=bool(args.strict and copper_disagreement),
-        drc_only=drc_only,
-        error_count=error_count,
-        warning_count=warning_count,
+    check_verdict = evaluate_check_verdict(
+        pcb_path,
+        results,
+        violations,
+        schematic=getattr(args, "schematic", None),
         strict=bool(args.strict),
         allow_incomplete=bool(getattr(args, "allow_incomplete", False)),
-        meta=meta,
+        drc_only=drc_only,
+        strict_copper_disagreement=bool(args.strict and copper_disagreement),
     )
+    meta = check_verdict.meta
+    verdict, exit_code = check_verdict.verdict, check_verdict.exit_code
+
+    # Issue #5009: resolve the active manufacturer's declared via-in-pad
+    # fabrication process (if any) into a machine-readable dict, bound to
+    # the same evidence this JSON report already carries -- generalizes
+    # boards 03/04's ad hoc ``fabrication_overrides`` block.  ``None`` when
+    # no ``via_in_pad_process_id`` is declared (the common case).
+    fabrication_process_dict = describe_selection(checker.design_rules)
+    machine_output = args.format in ("json", "sarif")
+    if results.mask_copper_assessments and not machine_output:
+        for assessment in results.mask_copper_assessments:
+            print(f"Mask-to-copper: {assessment.coverage}; passed={assessment.passed}")
+            for reason in assessment.reasons:
+                print(f"  {reason}")
 
     # Output results
     if args.format == "sarif":
@@ -2747,6 +2724,96 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     return exit_code
+
+
+@dataclass
+class CheckVerdict:
+    """``kct check``'s verdict for one board (Issue #7260).
+
+    ``meta`` is ``None`` under ``drc_only``; ``error_count`` /
+    ``warning_count`` are counted over the violations the verdict saw.
+    """
+
+    verdict: str
+    exit_code: int
+    meta: MetaCheckResult | None
+    error_count: int
+    warning_count: int
+
+
+def evaluate_check_verdict(
+    pcb_path: Path,
+    results: DRCResults,
+    violations: Sequence[DRCViolation] | None = None,
+    *,
+    schematic: str | None = None,
+    strict: bool = False,
+    allow_incomplete: bool = False,
+    drc_only: bool = False,
+    strict_copper_disagreement: bool = False,
+) -> CheckVerdict:
+    """Turn DRC results into ``kct check``'s verdict + exit code (Issue #7260).
+
+    Builds the DRC :class:`SubCheckResult` (PASSED iff 0 errors, every
+    mask-to-copper assessment passed, and 0 warnings under ``strict``), runs
+    the ERC + LVS + manifest meta rollup (:func:`run_meta_checks`, skipped
+    under ``drc_only``) and folds both into :func:`_check_verdict`.  Shared by
+    ``kct check`` and in-process callers (the MCP ``get_drc_violations`` tool)
+    so a board gets one verdict regardless of interface.
+
+    Args:
+        pcb_path: The board under check (schematic discovery starts here).
+        results: The (waiver-applied) DRC results.
+        violations: The violations the verdict counts; defaults to
+            ``results.violations`` (``kct check --errors-only`` passes its
+            filtered list).
+        schematic: Explicit ``.kicad_sch`` for the meta rollup.
+        strict: Warnings are fatal (and ERC warnings fail ERC).
+        allow_incomplete: An ``incomplete`` verdict exits 0.
+        drc_only: Skip the meta rollup.
+        strict_copper_disagreement: ``--strict`` with a stackup-vs-``--copper``
+            disagreement (always a fail).
+    """
+    counted = list(results.violations) if violations is None else list(violations)
+    error_count = sum(1 for v in counted if v.is_error)
+    warning_count = sum(1 for v in counted if v.is_warning)
+    drc_passed = (
+        error_count == 0
+        and all(a.passed for a in results.mask_copper_assessments)
+        and not (warning_count > 0 and strict)
+    )
+    drc_sub = SubCheckResult(
+        status="PASSED" if drc_passed else "FAILED",
+        detail=(
+            f"{results.rules_checked} rules checked, "
+            f"{error_count} error(s), {warning_count} warning(s)"
+        ),
+    )
+    meta: MetaCheckResult | None = None
+    if not drc_only:
+        meta = run_meta_checks(
+            Path(pcb_path),
+            drc_status=drc_sub,
+            schematic=schematic,
+            strict=strict,
+        )
+    verdict, exit_code = _check_verdict(
+        mask_copper_failed=any(not a.passed for a in results.mask_copper_assessments),
+        strict_copper_disagreement=strict_copper_disagreement,
+        drc_only=drc_only,
+        error_count=error_count,
+        warning_count=warning_count,
+        strict=strict,
+        allow_incomplete=allow_incomplete,
+        meta=meta,
+    )
+    return CheckVerdict(
+        verdict=verdict,
+        exit_code=exit_code,
+        meta=meta,
+        error_count=error_count,
+        warning_count=warning_count,
+    )
 
 
 def _check_verdict(
@@ -3763,6 +3830,21 @@ def portable_report_path(pcb_path: Path | str, cwd: Path | None = None) -> str:
         return path.name
 
 
+def _pcb_sha256_or_none(pcb_path: Path | str) -> str | None:
+    """sha256 of the checked PCB's bytes for the report's ``pcb_sha256`` key.
+
+    Issue #7190: export preflight only trusts an auto-discovered clean
+    report whose recorded hash equals the current PCB's.  ``None`` (key
+    emitted as ``null``) when the file cannot be read.
+    """
+    from kicad_tools.drc.report_binding import sha256_file
+
+    try:
+        return sha256_file(pcb_path)
+    except OSError:
+        return None
+
+
 def output_json(
     violations: list[DRCViolation],
     results: DRCResults,
@@ -3836,6 +3918,8 @@ def output_json(
     data: dict = {
         "file": portable_report_path(pcb_path),
         "manufacturer": mfr,
+        # Issue #7190: bind the report to the PCB content it checked.
+        "pcb_sha256": _pcb_sha256_or_none(pcb_path),
         "layers": layers,
         "summary": summary_data,
         "violations": [v.to_dict() for v in violations],
@@ -3951,6 +4035,8 @@ def write_json_report(
     data: dict = {
         "file": portable_report_path(pcb_path),
         "manufacturer": mfr,
+        # Issue #7190: bind the report to the PCB content it checked.
+        "pcb_sha256": _pcb_sha256_or_none(pcb_path),
         "layers": layers,
         "summary": summary_data,
         "violations": [v.to_dict() for v in violations],

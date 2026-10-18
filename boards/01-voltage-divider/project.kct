@@ -139,7 +139,7 @@ decisions:
     alternatives: ["50mm x 50mm", "25mm x 20mm"]
 
 progress:
-  phase: complete
+  phase: production
   phases:
     concept:
       status: completed
@@ -160,7 +160,7 @@ progress:
         - "[x] Component placement"
         - "[x] Autorouting"
         - "[x] DRC verification"
-    validation:
+    production:
       status: completed
       checklist:
         - "[x] All nets routed"

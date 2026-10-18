@@ -18,6 +18,7 @@ from .bom_formats import (
     BOMExportConfig,
     apply_existing_lcsc_assignments,
     export_bom,
+    get_bom_formatter,
     read_existing_lcsc_assignments,
 )
 from .bom_spec_overlay import (
@@ -33,6 +34,7 @@ from .pnp import (
     _aux_origin_of,
     count_rotation_corrections,
     export_pnp,
+    extract_placements,
     extract_tht_exclusions,
     get_pnp_formatter,
 )
@@ -102,6 +104,16 @@ class AssemblyPackageResult:
     from the SMT pick-and-place file, so the assembler must hand-solder
     them.  Empty when the effective PnP config has ``exclude_tht=False``
     or the board has no THT parts."""
+    bom_component_count: int = 0
+    """Component instances written to the BOM (after DNP/virtual filtering)."""
+    bom_unique_parts: int = 0
+    """Distinct (value, footprint, LCSC) part groups in the BOM."""
+    bom_missing_lcsc: list[str] = field(default_factory=list)
+    """References written to the BOM with no LCSC part number."""
+    pnp_placement_count: int = 0
+    """Rows written to the CPL."""
+    pnp_layers: list[str] = field(default_factory=list)
+    """Sides with CPL placements (``"top"`` / ``"bottom"``)."""
     errors: list[str] = field(default_factory=list)
 
     @property
@@ -500,6 +512,17 @@ class AssemblyPackage:
         # Generate BOM
         bom_config = self.config.bom_config or BOMExportConfig()
         bom_csv = export_bom(items, self.fab_family, bom_config)
+        if result is not None:
+            # Issue #7260: record the BOM's facts from the items the
+            # formatter writes, so callers never re-parse the CSV.
+            written = get_bom_formatter(self.fab_family, bom_config).filter_items(items)
+            result.bom_component_count = len(written)
+            result.bom_unique_parts = len(
+                {(i.value, i.footprint, getattr(i, "lcsc", "") or "") for i in written}
+            )
+            result.bom_missing_lcsc = sorted(
+                i.reference for i in written if not (getattr(i, "lcsc", "") or "").strip()
+            )
 
         # Write to file
         filename = self.config.bom_filename.format(manufacturer=self.fab_family)
@@ -573,6 +596,17 @@ class AssemblyPackage:
                     len(result.tht_excluded),
                     ", ".join(p.reference for p in result.tht_excluded),
                 )
+            # Issue #7260: the CPL rows' facts, from the same placement
+            # filters export_pnp applies (callers never re-parse the CSV).
+            formatter = get_pnp_formatter(self.fab_family, pnp_config, rotation_corrections)
+            placements = formatter.filter_placements(
+                extract_placements(footprints, formatter.config, aux_origin)
+            )
+            result.pnp_placement_count = len(placements)
+            sides = {p.layer for p in placements}
+            result.pnp_layers = [
+                side for side, layer in (("top", "F.Cu"), ("bottom", "B.Cu")) if layer in sides
+            ]
 
         # Write to file
         filename = self.config.pnp_filename.format(manufacturer=self.fab_family)

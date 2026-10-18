@@ -4,6 +4,39 @@ Complete documentation for all kicad-tools MCP server tools.
 
 ## Export Tools
 
+### validate_assembly_bom
+
+Validate a BOM for JLCPCB assembly.
+
+**Description**: Checks every BOM component against the LCSC/JLCPCB parts library and categorizes it by tier (Basic/Extended), stock status and availability. When a PCB is supplied or found next to the schematic (`<stem>_routed.kicad_pcb`, then `<stem>.kicad_pcb`), it also runs `kct export`'s `bom_lcsc_values` preflight check (Issue #7260): each assigned LCSC part's value and package against the BOM row and the PCB footprint, using the local parts cache and the offline catalog (no network). A `FAIL` sets `summary.assembly_ready` to `false`; a `WARN` (part in neither source, so not checked) does not.
+
+**Parameters**:
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `schematic_path` | string | Yes | - | Path to .kicad_sch file |
+| `quantity` | integer | No | `1` | Number of boards (multiplies component quantities) |
+| `pcb_path` | string | No | discovered | Path to .kicad_pcb for the `bom_lcsc_values` package check |
+
+**Response** (abridged):
+
+```json
+{
+  "success": true,
+  "summary": {"total_items": 12, "assembly_ready": false, "...": "..."},
+  "items": [...],
+  "bom_lcsc_values": {
+    "status": "FAIL",
+    "message": "1 BOM item(s) assigned an LCSC part whose value or package does not match the BOM row",
+    "details": "C10 -> C1525 ..."
+  }
+}
+```
+
+`bom_lcsc_values` is absent when no PCB resolved.
+
+---
+
 ### export_gerbers
 
 Export Gerber files for PCB manufacturing.
@@ -88,7 +121,11 @@ Export Bill of Materials from a schematic file.
 
 Generate complete assembly package for manufacturing.
 
-**Description**: Creates a comprehensive manufacturing package including Gerber files, BOM, and pick-and-place (PnP/CPL) files tailored to specific manufacturers. Outputs a single zip file ready for upload.
+**Description**: Runs the same pipeline as `kct export` (Issue #7260): the DRC short/open safety floor, every preflight check (`bom_pcb_match`, `bom_cpl_match`, `bom_lcsc_values`, `assembly_package_limits`, `stackup_copper`, DRC/ERC report provenance, ...), then Gerbers, BOM, pick-and-place (PnP/CPL), a README and a manifest, plus a single zip file ready for upload. The report PDF and KiCad project zip that `kct export` also builds are not generated.
+
+- **Preflight gates the export.** With `strict_preflight` (the default here; `kct export` needs `--strict-preflight`) any preflight `FAIL` refuses the export. With `strict_preflight: false`, FAILs become `warnings`, except the unbuildable-BOM block (`bom_pcb_match`: BOM references with no PCB footprint) and the DRC safety floor, which always refuse. "Could not check" outcomes (no DRC/ERC report on disk, an LCSC part in neither the cache nor the catalog) are `WARN`s and never block.
+- **A refused export** returns `success: false`, the failures in `error`, and writes no BOM, CPL, Gerbers or upload zip (`zip_file: null`).
+- **Side effect**: like `kct export`, it writes sibling `<board>.kicad_pro` / `<board>.kicad_dru` holding the manufacturer's DRC constraints next to the source PCB (#5746). Run it on a scratch copy if the input directory must stay untouched.
 
 **Parameters**:
 
@@ -98,6 +135,7 @@ Generate complete assembly package for manufacturing.
 | `schematic_path` | string | Yes | - | Path to .kicad_sch file |
 | `output_dir` | string | Yes | - | Directory for output files |
 | `manufacturer` | string | No | `"jlcpcb"` | Target manufacturer: `"jlcpcb"`, `"pcbway"`, `"seeed"`, `"generic"` |
+| `strict_preflight` | boolean | No | `true` | Any preflight `FAIL` blocks the export. `false` matches `kct export` without `--strict-preflight` |
 
 **Response**:
 
@@ -112,21 +150,28 @@ Generate complete assembly package for manufacturing.
     "layer_count": 4
   },
   "bom": {
-    "output_path": "/path/to/bom.csv",
+    "output_path": "/path/to/bom_jlcpcb.csv",
     "component_count": 45,
-    "unique_parts": 45,
+    "unique_parts": 21,
     "missing_lcsc": 3
   },
   "pnp": {
-    "output_path": "/path/to/cpl.csv",
-    "component_count": 127,
+    "output_path": "/path/to/cpl_jlcpcb.csv",
+    "component_count": 42,
     "layers": ["top", "bottom"],
     "rotation_corrections": 2
   },
-  "zip_file": "/path/to/board-jlcpcb-assembly.zip",
-  "warnings": ["3 parts missing LCSC part numbers"]
+  "zip_file": "/path/to/bom_jlcpcb-jlcpcb-assembly.zip",
+  "preflight": [
+    {"name": "bom_pcb_match", "status": "OK", "message": "BOM and PCB references match", "details": ""},
+    {"name": "drc", "status": "WARN", "message": "No DRC report found", "details": ""}
+  ],
+  "warnings": ["3 parts missing LCSC part numbers"],
+  "error": null
 }
 ```
+
+`bom.component_count` counts component instances written to the BOM (DNP and virtual symbols excluded); `bom.unique_parts` counts distinct value/footprint/LCSC rows. `pnp.component_count` counts CPL rows (JLCPCB excludes through-hole parts by default).
 
 `pnp.rotation_corrections` is the number of CPL rows whose rotation was shifted by the manufacturer's per-footprint correction table (e.g. SOIC-8, SOT-23 on JLCPCB); it is `0` for manufacturers without corrections.
 
@@ -214,15 +259,17 @@ The response shape depends on `aspect`.
 
 Run design rule check and return violations.
 
-**Description**: Executes pure Python DRC against the board and returns violations with locations, affected items and a pass/fail flag. The `manufacturer` parameter is passed to the underlying function as `rules=`.
+**Description**: Runs `kct check`'s rule set against the board (Issue #7260) and returns violations with locations, affected items, and `kct check`'s `verdict` / `exit_code`. The rule set is the one `kct check` builds: layer count resolved from the board, stackup copper weights, the `.kicad_pro` authored minimum clearance, the reviewed fabrication-floor override, net-class-map / current-path / waiver sidecars and the path-dependent rules. The verdict includes the ERC + LVS + manifest meta rollup, so a board whose ERC or LVS cannot run (no kicad-cli, no schematic) is `incomplete` rather than `pass`. `passed` is `true` only when `verdict` is `"pass"`. The `manufacturer` parameter is passed to the underlying function as `rules=`. There is no `layers` parameter.
 
 **Parameters**:
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
 | `pcb_path` | string | Yes | - | Absolute path to .kicad_pcb file |
-| `manufacturer` | string | No | `"jlcpcb"` | Manufacturer preset (`"jlcpcb"`, `"oshpark"`, `"pcbway"`, `"seeed"`) or path to a custom rules file |
-| `severity_filter` | string | No | `"all"` | `"all"`, `"error"` or `"warning"` |
+| `manufacturer` | string | No | resolved like `kct check` | Manufacturer preset (`"jlcpcb"`, `"oshpark"`, `"pcbway"`, `"seeed"`). Omitted: `fab_profile.json` > `project.kct` `target_fab` > `"jlcpcb"` |
+| `severity_filter` | string | No | `"all"` | `"all"`, `"error"` or `"warning"`. A view filter: the verdict always counts every violation |
+| `allow_incomplete` | boolean | No | `false` | Like `kct check --allow-incomplete`: an `incomplete` verdict returns `exit_code: 0` (`passed` stays `false`) |
+| `schematic_path` | string | No | discovered | Explicit `.kicad_sch` for the ERC/LVS meta rollup |
 
 **Response**:
 
@@ -247,7 +294,10 @@ Run design rule check and return violations.
   ],
   "summary_by_type": {"connectivity": 2, "pin1_marker_missing": 1},
   "manufacturer": "jlcpcb",
-  "layers": 4
+  "layers": 2,
+  "verdict": "fail",
+  "exit_code": 2,
+  "notes": []
 }
 ```
 

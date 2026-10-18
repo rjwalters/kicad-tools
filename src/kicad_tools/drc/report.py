@@ -62,6 +62,12 @@ class DRCReport:
     #: Parsed from the kct-check JSON ``manufacturer`` key; ``None`` for
     #: kicad-cli reports, which do not record one.
     manufacturer: str | None = None
+    #: sha256 of the checked PCB's raw bytes, from the report's top-level
+    #: ``pcb_sha256`` key (issue #7190).  ``kct check --output`` writes it;
+    #: ``None`` when absent (kicad-cli reports, older kct reports).  Binds
+    #: the report to the PCB content it describes -- see
+    #: :mod:`kicad_tools.drc.report_binding`.
+    pcb_sha256: str | None = None
     #: The kct-check JSON ``fabrication_overrides`` block (board-local paid
     #: factory options the report was checked under), or ``None``.
     fabrication_overrides: dict | None = None
@@ -224,6 +230,7 @@ class DRCReport:
             schematic_parity_ran=self.schematic_parity_ran,
             schematic_parity_reason=self.schematic_parity_reason,
             schematic_parity_schematic=self.schematic_parity_schematic,
+            pcb_sha256=self.pcb_sha256,
         )
 
     def summary(self) -> dict:
@@ -494,6 +501,7 @@ def _parse_kct_check_json(data: dict, source_file: str = "") -> DRCReport:
         ],
         footprint_errors=0,
         manufacturer=_optional_str(data.get("manufacturer")),
+        pcb_sha256=_optional_str(data.get("pcb_sha256")),
         fabrication_overrides=(
             data["fabrication_overrides"]
             if isinstance(data.get("fabrication_overrides"), dict)
@@ -617,6 +625,7 @@ def _parse_kicad_cli_json(data: dict, source_file: str = "") -> DRCReport:
         footprint_errors=data.get("footprint_errors", 0),
         unconnected_items=unconnected,
         schematic_parity=parity,
+        pcb_sha256=_optional_str(data.get("pcb_sha256")),
     )
 
 

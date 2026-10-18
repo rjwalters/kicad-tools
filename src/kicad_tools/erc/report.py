@@ -21,6 +21,10 @@ class ERCReport:
     kicad_version: str = ""
     coordinate_units: str = "mm"
     violations: list[ERCViolation] = field(default_factory=list)
+    #: sha256 of the checked schematic's raw bytes, from the report's
+    #: top-level ``schematic_sha256`` key (issue #7190).  ``kct build``'s ERC
+    #: step stamps it into kicad-cli's JSON; ``None`` when absent.
+    schematic_sha256: str | None = None
 
     @property
     def violation_count(self) -> int:
@@ -79,6 +83,7 @@ class ERCReport:
             kicad_version=self.kicad_version,
             coordinate_units=self.coordinate_units,
             violations=result.kept,
+            schematic_sha256=self.schematic_sha256,
         )
 
     def by_type(self, vtype: ERCViolationType) -> list[ERCViolation]:
@@ -203,6 +208,9 @@ def parse_json_report(content: str, source_file: str = "") -> ERCReport:
         kicad_version=data.get("kicad_version", ""),
         coordinate_units=data.get("coordinate_units", "mm"),
     )
+    recorded_hash = data.get("schematic_sha256")
+    if isinstance(recorded_hash, str) and recorded_hash.strip():
+        report.schematic_sha256 = recorded_hash.strip()
 
     # Parse violations from all sheets
     for sheet_data in data.get("sheets", []):

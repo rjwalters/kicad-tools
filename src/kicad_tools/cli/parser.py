@@ -7689,7 +7689,10 @@ def _add_pipeline_parser(subparsers) -> None:
         dest="pipeline_no_cache",
         action="store_true",
         default=False,
-        help="Bypass routing cache (force fresh routing in the route step)",
+        help=(
+            "Bypass routing cache (force fresh routing in the route step). "
+            "Not needed after router edits: the cache invalidates on code changes"
+        ),
     )
     pipeline_parser.add_argument(
         "--clear-cache",

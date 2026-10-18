@@ -984,10 +984,16 @@ def _discover_tier(board_dir: Path, pcb: Path) -> str | None:
         return tier
     spec = board_dir / "project.kct"
     if spec.is_file():
-        for line in spec.read_text().splitlines():
-            stripped = line.strip()
-            if stripped.startswith("manufacturer") and "=" in stripped:
-                return stripped.split("=", 1)[1].strip().strip("\"'") or None
+        try:
+            from kicad_tools.spec import load_spec
+
+            requirements = load_spec(spec).requirements
+        except Exception:
+            return None
+        manufacturing = requirements.manufacturing if requirements is not None else None
+        fab = manufacturing.target_fab if manufacturing is not None else None
+        if isinstance(fab, str) and fab:
+            return fab
     return None
 
 

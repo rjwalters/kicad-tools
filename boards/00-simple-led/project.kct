@@ -28,9 +28,12 @@ requirements:
     led_current: 10mA
     led_forward_voltage: 2V
   mechanical:
-    board_width: 25mm
-    board_height: 20mm
-    layers: 2
+    dimensions:
+      width: 25mm
+      height: 20mm
+  manufacturing:
+    layers:
+      preferred: 2
   components:
     - id: J1
       type: 2-pin connector
