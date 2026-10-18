@@ -74,7 +74,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-import cpl_frame  # noqa: E402
+import _cpl_frame as cpl_frame  # noqa: E402
 import declare_router_netclasses_6390 as netclasses  # noqa: E402
 import refresh_readiness as rr  # noqa: E402
 

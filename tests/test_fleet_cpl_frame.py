@@ -4,7 +4,7 @@
 drill files use, but the committed packages kept the old Edge.Cuts-top-left,
 Y-down frame, so a fab loading one would place every part wrongly.  The
 expectation here comes from the routed PCB's raw footprint positions
-(``scripts/boards/cpl_frame.py``), not from ``kct export``, so a bug shared
+(``scripts/boards/_cpl_frame.py``), not from ``kct export``, so a bug shared
 with the exporter cannot hide.
 """
 
@@ -18,7 +18,7 @@ from pathlib import Path
 import pytest
 
 REPO = Path(__file__).resolve().parents[1]
-SCRIPT = REPO / "scripts" / "boards" / "cpl_frame.py"
+SCRIPT = REPO / "scripts" / "boards" / "_cpl_frame.py"
 
 spec = importlib.util.spec_from_file_location("cpl_frame_script", SCRIPT)
 cpl_frame = importlib.util.module_from_spec(spec)
