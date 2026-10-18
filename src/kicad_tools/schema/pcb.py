@@ -7922,23 +7922,33 @@ class PCB:
         *,
         manufacturer: str = "jlcpcb",
         layers: list[str] | None = None,
-        include_drill: bool = True,
-        create_zip: bool = False,
+        include_drill: bool | None = None,
+        create_zip: bool | None = None,
     ) -> Path:
         """
         Export Gerber files for PCB fabrication.
 
         Uses kicad-cli to generate Gerber files with manufacturer-specific settings.
 
+        Every argument is honoured for every manufacturer (Issue #7023). For the
+        presets (``"jlcpcb"``, ``"pcbway"``, ``"oshpark"``) the preset supplies the
+        defaults and an explicitly passed argument overrides it.
+
         Args:
             output_dir: Directory for output files
-            manufacturer: Manufacturer preset ("jlcpcb", "pcbway", "oshpark")
-            layers: Specific layers to export (default: all copper + required layers)
-            include_drill: Include drill files (default: True)
-            create_zip: Create a zip archive of all files (default: False)
+            manufacturer: Manufacturer preset ("jlcpcb", "pcbway", "oshpark") or
+                any other name for a generic export
+            layers: Specific layers to export, passed verbatim to kicad-cli
+                (default: all copper + required layers). A list without
+                ``Edge.Cuts`` logs a warning.
+            include_drill: Include drill files (default when omitted: True)
+            create_zip: Create a zip archive of all files. When omitted, presets
+                return a ready-to-upload zip (loose files removed) and the
+                generic path returns the directory. ``False`` always returns
+                the directory with loose files; ``True`` always returns a zip.
 
         Returns:
-            Path to output directory (or zip file if create_zip=True)
+            Path to the zip file when zipping, otherwise the output directory
 
         Raises:
             ValueError: If PCB has no stored path (save first)
@@ -7946,9 +7956,9 @@ class PCB:
 
         Example:
             >>> pcb = PCB.load("board.kicad_pcb")
-            >>> pcb.export_gerbers("./gerbers", manufacturer="jlcpcb")
-            >>> # Or with zip output
-            >>> pcb.export_gerbers("./output", manufacturer="jlcpcb", create_zip=True)
+            >>> pcb.export_gerbers("./output", manufacturer="jlcpcb")  # -> zip
+            >>> # Loose files instead of a zip
+            >>> pcb.export_gerbers("./gerbers", manufacturer="jlcpcb", create_zip=False)
         """
         from ..export import GerberConfig, GerberExporter
 
@@ -7960,13 +7970,16 @@ class PCB:
             result = exporter.export_for_manufacturer(
                 manufacturer.lower(),
                 output_dir,
+                layers=layers,
+                generate_drill=include_drill,
+                create_zip=create_zip,
             )
         else:
             config = GerberConfig(
                 output_dir=Path(output_dir),
                 layers=layers or [],
-                generate_drill=include_drill,
-                create_zip=create_zip,
+                generate_drill=True if include_drill is None else include_drill,
+                create_zip=False if create_zip is None else create_zip,
             )
             result = exporter.export(config, output_dir)
 
@@ -8256,7 +8269,8 @@ class PCB:
         Export Gerbers and drill files as a single zip archive.
 
         Convenience method for quick export of fabrication files ready
-        for upload to PCB manufacturers.
+        for upload to PCB manufacturers. The archive holds the Gerber and
+        drill files directly at its root (no nested ``gerbers.zip``).
 
         Args:
             output: Output zip file path
@@ -8281,7 +8295,14 @@ class PCB:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
             exporter = GerberExporter(pcb_path)
-            exporter.export_for_manufacturer(manufacturer.lower(), temp_path)
+            # Loose files only: the preset would otherwise zip and clean the
+            # temp dir, nesting its gerbers.zip inside ours (Issue #7023).
+            exporter.export_for_manufacturer(
+                manufacturer.lower(),
+                temp_path,
+                generate_drill=include_drill,
+                create_zip=False,
+            )
 
             # Create zip
             import zipfile
