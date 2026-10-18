@@ -1115,3 +1115,16 @@ class TestSessionManagerContainerProtocol:
 
         rollback_session(r1.session_id)
         rollback_session(r2.session_id)
+
+
+class TestQueryMoveImprovingRecommendation:
+    """Issue #7099: score_delta is real, so the improving-move branch is reachable."""
+
+    def test_improving_move_recommendation(self, session_pcb_path: str) -> None:
+        session_id = start_session(session_pcb_path).session_id
+        result = query_move(session_id, "R1", 30.0, 30.0)
+
+        assert result.score_delta < 0
+        assert "Move improves placement score" in result.recommendation
+
+        rollback_session(session_id)

@@ -52,6 +52,19 @@ class ValidationIssue:
     items: list[str] = field(default_factory=list)  # Contextual items (label/net names)
 
 
+class CheckNotRun(Exception):  # noqa: N818 -- an outcome, not an error
+    """Raised by a check that could not run (e.g. kicad-cli missing).
+
+    ``validate_schematic`` records the check under
+    ``ValidationResult.checks_not_run`` instead of ``checks_run`` and the
+    result can no longer pass (Issue #7094).
+    """
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
 @dataclass
 class ValidationResult:
     """Complete validation results."""
@@ -59,6 +72,9 @@ class ValidationResult:
     schematic: str
     issues: list[ValidationIssue] = field(default_factory=list)
     checks_run: list[str] = field(default_factory=list)
+    # Checks that were requested (not ``--skip``-ped) but did not run, as
+    # ``{"check": name, "reason": why}`` records (Issue #7094).
+    checks_not_run: list[dict[str, str]] = field(default_factory=list)
 
     @property
     def error_count(self) -> int:
@@ -70,7 +86,9 @@ class ValidationResult:
 
     @property
     def passed(self) -> bool:
-        return self.error_count == 0
+        # A check that did not run did not check anything: INCOMPLETE is not
+        # a pass (mirrors ``kct check``'s NOT RUN convention, Issue #7094).
+        return self.error_count == 0 and not self.checks_not_run
 
 
 # Violation types whose messages benefit from label/net name enrichment.
@@ -88,23 +106,22 @@ _LABEL_TYPES: frozenset[str] = frozenset(
 
 
 def run_erc(schematic_path: str) -> list[ValidationIssue]:
-    """Run KiCad ERC check."""
+    """Run KiCad ERC check.
+
+    Raises:
+        CheckNotRun: when ERC did not actually check the schematic --
+            kicad-cli missing, timed out, killed, wrote no report, or any
+            other failure (Issue #7094).  Use ``--skip erc`` to opt out.
+    """
     issues = []
 
-    try:
-        # Find kicad-cli using the shared lookup that checks PATH
-        # and platform-specific installation locations (e.g. macOS app bundle)
-        kicad_cli_path = find_kicad_cli()
-        if kicad_cli_path is None:
-            issues.append(
-                ValidationIssue(
-                    severity="warning",
-                    category="erc",
-                    message="kicad-cli not found, ERC check skipped",
-                )
-            )
-            return issues
+    # Find kicad-cli using the shared lookup that checks PATH
+    # and platform-specific installation locations (e.g. macOS app bundle)
+    kicad_cli_path = find_kicad_cli()
+    if kicad_cli_path is None:
+        raise CheckNotRun("kicad-cli not found")
 
+    try:
         kicad_cli = str(kicad_cli_path)
 
         # Run ERC
@@ -226,22 +243,10 @@ def run_erc(schematic_path: str) -> list[ValidationIssue]:
         finally:
             Path(output_file).unlink(missing_ok=True)
 
-    except subprocess.TimeoutExpired:
-        issues.append(
-            ValidationIssue(
-                severity="warning",
-                category="erc",
-                message="ERC check timed out",
-            )
-        )
+    except subprocess.TimeoutExpired as e:
+        raise CheckNotRun(f"ERC check timed out after {e.timeout:g}s") from e
     except Exception as e:
-        issues.append(
-            ValidationIssue(
-                severity="warning",
-                category="erc",
-                message=f"ERC check failed: {e}",
-            )
-        )
+        raise CheckNotRun(f"ERC check failed: {e}") from e
 
     return issues
 
@@ -3609,11 +3614,17 @@ def validate_schematic(
     def _run(category: str, fn, *, with_libs: bool = False):
         if category in _skip:
             return
+        try:
+            if with_libs and lib_manager is not None:
+                issues = fn(schematic_path, lib_manager)
+            else:
+                issues = fn(schematic_path)
+        except CheckNotRun as e:
+            result.checks_not_run.append({"check": category, "reason": e.reason})
+            return
+        # Only a check that actually completed is listed as run (#7094).
         result.checks_run.append(category)
-        if with_libs and lib_manager is not None:
-            result.issues.extend(fn(schematic_path, lib_manager))
-        else:
-            result.issues.extend(fn(schematic_path))
+        result.issues.extend(issues)
 
     # ERC
     _run("erc", run_erc)
@@ -3735,6 +3746,7 @@ def main(argv=None):
                     "error_count": result.error_count,
                     "warning_count": result.warning_count,
                     "checks_run": result.checks_run,
+                    "checks_not_run": result.checks_not_run,
                     "issues": [
                         {
                             "severity": i.severity,
@@ -3756,6 +3768,9 @@ def main(argv=None):
     # Exit code
     if result.error_count > 0:
         sys.exit(1)
+    if result.checks_not_run:
+        # INCOMPLETE is non-zero, like ``kct check``'s NOT RUN (#7094).
+        sys.exit(1)
     if args.strict and result.warning_count > 0:
         sys.exit(1)
 
@@ -3765,14 +3780,21 @@ def print_result(result: ValidationResult, quiet: bool = False):
     print(f"Validation: {Path(result.schematic).name}")
     print("=" * 60)
 
+    for not_run in result.checks_not_run:
+        print(f"INCOMPLETE: {not_run['check']} not run ({not_run['reason']})")
+
     if result.passed and result.warning_count == 0:
         print("✅ All checks passed!")
     elif result.passed:
         print(f"⚠️  Passed with {result.warning_count} warnings")
-    else:
+    elif result.error_count > 0 or not result.checks_not_run:
         print(f"❌ Failed: {result.error_count} errors, {result.warning_count} warnings")
+    else:
+        print(f"❌ Incomplete: {result.error_count} errors, {result.warning_count} warnings")
 
     print(f"\nChecks run: {', '.join(result.checks_run)}")
+    if result.checks_not_run:
+        print(f"Checks not run: {', '.join(c['check'] for c in result.checks_not_run)}")
 
     # Group issues by category
     by_category = {}

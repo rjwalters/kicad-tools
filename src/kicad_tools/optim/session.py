@@ -474,14 +474,16 @@ class PlacementSession:
         # Check DRC impact using incremental engine (preview only)
         drc_delta = self._drc_engine.check_move(ref, x, y)
 
+        # Capture the "before" state BEFORE the hypothetical move is applied (#7099)
+        old_state = self._capture_state()
+        old_violations = old_state.violations
+
         # Temporarily apply the move for placement violations
         comp.x, comp.y, comp.rotation = x, y, new_rot
         comp.update_pin_positions()
 
         # Check placement violations after move
         new_violations = self._check_violations()
-        old_state = self._capture_state()
-        old_violations = old_state.violations
 
         # Calculate which violations are new vs resolved
         old_violation_set = {(v.type, v.description) for v in old_violations}

@@ -5541,7 +5541,10 @@ def _add_validate_parser(subparsers) -> None:
         dest="validate_min_confidence",
         type=float,
         default=0.0,
-        help="Minimum match confidence to include in LVS results (0.0-1.0, default: 0.0)",
+        help=(
+            "Minimum LVS match confidence to display (0.0-1.0, default: 0.0). "
+            "Display only: hidden matches still count toward the verdict and exit code."
+        ),
     )
     validate_parser.add_argument(
         "--schematic",

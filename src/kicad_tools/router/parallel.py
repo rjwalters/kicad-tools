@@ -6,8 +6,9 @@ This module enables parallel routing of independent nets using:
 - ThreadPoolExecutor for concurrent routing
 - Conflict detection and resolution for parallel routes
 
-Performance Benefits:
-- 3-4x speedup for boards with many independent nets
+Performance Notes:
+- Net searches serialize on the grid lock and the GIL, so no speedup should
+  be expected (see docs/research/gpu-routing-design.md section 3)
 - Leverages thread-safe grid infrastructure
 - Automatic conflict resolution when routes overlap
 """
