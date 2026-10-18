@@ -44,11 +44,16 @@ import numpy as np
 from .constants import SPEED_OF_LIGHT, VACUUM_PERMITTIVITY
 
 _EPS = 1e-12
-# Panels per strip face, in the gap, and in each outer interface tail.
-_FACE_PANELS = 40
-_WALL_PANELS = 24
-_GAP_PANELS = 40
-_TAIL_PANELS = 50
+# Panels per strip face, per strip wall, in the whole gap (split evenly over
+# the two strip edges) and in each outer interface tail. Sized so the
+# single-ended limit (s >> h) is within ~0.5 % of independent finite-difference
+# anchors for 1 oz copper (#7164); the coarser 40/24/40/50 set read 0.6-2.5 %
+# high because the gap panels did not resolve the interface charge next to the
+# strip edges.
+_FACE_PANELS = 50
+_WALL_PANELS = 28
+_GAP_PANELS = 48
+_TAIL_PANELS = 70
 # Interface tail length beyond the strips, in units of h. The polarisation
 # charge decays like 1/x^2 against the ground plane, so the truncated tail
 # contributes well under 0.1 % to the capacitances.
@@ -59,6 +64,27 @@ def _graded(first: float, last: float, count: int) -> np.ndarray:
     """Nodes from ``first`` to ``last`` clustered toward both ends."""
     fractions = (1 - np.cos(np.linspace(0, math.pi, count + 1))) / 2
     return first + (last - first) * fractions
+
+
+def _edge_graded(length: float, first: float, count: int) -> np.ndarray:
+    """Nodes from 0 to ``length`` in ``count`` panels growing geometrically.
+
+    The first panel has size ``first`` and each next one is ``r`` times larger,
+    with ``r`` chosen so the panels span ``length`` exactly. Falls back to a
+    uniform split when ``first`` is already no smaller than the uniform size.
+    """
+    if first * count >= length:
+        return np.linspace(0, length, count + 1)
+    lo, hi = 1.0 + 1e-9, 50.0
+    for _ in range(100):
+        ratio = (lo + hi) / 2
+        if first * (ratio**count - 1) / (ratio - 1) < length:
+            lo = ratio
+        else:
+            hi = ratio
+    nodes = first * np.cumsum(np.concatenate([[0.0], ratio ** np.arange(count)]))
+    scaled: np.ndarray = nodes * (length / nodes[-1])
+    return scaled
 
 
 def _segment_terms(
@@ -130,7 +156,11 @@ def _geometry(u: float, g: float, t: float):
     fraction = np.linspace(0, 1, _TAIL_PANELS + 1)
     left_tail = -xb - _TAIL_LENGTH * (1 - fraction) ** 3
     right_tail = xb + _TAIL_LENGTH * fraction**3
-    gap = _graded(-xa, xa, _GAP_PANELS)
+    # The gap carries interface charge that peaks at both strip edges: start
+    # from the size of the strip's own edge panels and grow toward the middle,
+    # so the resolution holds as the gap widens (single-ended limit).
+    half_gap = _edge_graded(xa, u * (math.pi / _FACE_PANELS) ** 2 / 4, _GAP_PANELS // 2)
+    gap = np.concatenate([-xa + half_gap[:-1], (xa - half_gap)[::-1]])
     # Interface nodes, ascending in x; the strip bottoms are shared exactly.
     x = np.concatenate([left_tail[:-1], left_bottom[:-1], gap[:-1], right_bottom[:-1], right_tail])
     interface_a = np.stack([x[:-1], np.ones(len(x) - 1)], axis=1)
