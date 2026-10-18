@@ -192,6 +192,15 @@ class TestPlacementSession:
         assert abs(restored_pos["x"] - original_pos["x"]) < 0.01
         assert abs(restored_pos["y"] - original_pos["y"]) < 0.01
 
+    def test_undo_restores_drc_engine_count(self, session: PlacementSession):
+        """undo() puts the component back in the incremental DRC engine (#7121)."""
+        refs = [c.ref for c in session._optimizer.components]
+        before = session.get_drc_summary()["total_violations"]
+        target = session._optimizer.get_component(refs[1])
+        session.apply_move(refs[0], target.x, target.y)
+        assert session.undo()
+        assert session.get_drc_summary()["total_violations"] == before
+
     def test_undo_empty_history(self, session: PlacementSession):
         """Test undo with no history."""
         success = session.undo()
