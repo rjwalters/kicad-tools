@@ -223,8 +223,8 @@ class TestExportAssembly:
         assert "jlcpcb" in ASSEMBLY_MANUFACTURERS
         assert "pcbway" in ASSEMBLY_MANUFACTURERS
         assert "seeed" in ASSEMBLY_MANUFACTURERS
-        # oshpark is not in assembly manufacturers (gerber-only)
-        assert "oshpark" not in ASSEMBLY_MANUFACTURERS
+        # Same ids as ``kct export --mfr`` (#7276), tier ids included
+        assert "jlcpcb-tier1" in ASSEMBLY_MANUFACTURERS
 
 
 class TestMCPServerAssembly:
@@ -299,14 +299,15 @@ class TestMCPServerAssembly:
         assert "not found" in result_data["error"].lower()
 
     def test_handle_tools_call_assembly_default_manufacturer(self):
-        """Test that default manufacturer is jlcpcb."""
+        """An omitted manufacturer has no hard default: it resolves from target_fab (#7276)."""
         server = create_server()
         tools = server.get_tools_list()
 
         assembly_tool = next(t for t in tools if t["name"] == "export_assembly")
         manufacturer_prop = assembly_tool["inputSchema"]["properties"]["manufacturer"]
 
-        assert manufacturer_prop.get("default") == "jlcpcb"
+        assert "default" not in manufacturer_prop
+        assert "jlcpcb-tier1" in manufacturer_prop["enum"]
 
 
 ROTATION_PCB = """(kicad_pcb

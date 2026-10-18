@@ -157,8 +157,19 @@ def validate_assembly_bom(
         }
 
 
-# Supported manufacturers
-SUPPORTED_MANUFACTURERS = ["generic", "jlcpcb", "pcbway", "oshpark", "seeed"]
+def export_manufacturer_ids() -> list[str]:
+    """Every id ``kct export --mfr`` accepts: registry ids/aliases plus ``generic``.
+
+    Sourced from the manufacturer registry (Issue #7276) so the MCP tools can
+    never drift from the CLI -- tier ids such as ``jlcpcb-tier1`` included.
+    """
+    from kicad_tools.manufacturers import get_all_manufacturer_names
+
+    return [*get_all_manufacturer_names(), "generic"]
+
+
+# Supported manufacturers (computed once, like ``kct export``'s ``--mfr`` choices)
+SUPPORTED_MANUFACTURERS = export_manufacturer_ids()
 
 
 def _gerber_files_in(directory: Path, since: float | None = None) -> list[GerberFile]:
@@ -273,9 +284,13 @@ def export_gerbers(
         # Configure based on manufacturer
         # Copy the preset: assigning to the shared preset object would leak
         # this call's overrides into every later export in the process.
+        # Capability tiers (``jlcpcb-tier1``) use their parent fab's preset.
+        from kicad_tools.manufacturers import get_fab_family
+
+        preset_key = get_fab_family(manufacturer_lower)
         base = (
-            MANUFACTURER_PRESETS[manufacturer_lower].config
-            if manufacturer_lower in MANUFACTURER_PRESETS
+            MANUFACTURER_PRESETS[preset_key].config
+            if preset_key in MANUFACTURER_PRESETS
             else GerberConfig()
         )
         config = dataclasses.replace(base, generate_drill=include_drill, create_zip=zip_output)
@@ -422,15 +437,15 @@ def _determine_file_type(filename: str, layer: str) -> str:
     return extension_types.get(suffix, "other")
 
 
-# Supported assembly manufacturers (subset that supports full assembly)
-ASSEMBLY_MANUFACTURERS = ["generic", "jlcpcb", "pcbway", "seeed"]
+# Supported assembly manufacturers: the same ids as ``kct export --mfr`` (#7276)
+ASSEMBLY_MANUFACTURERS = SUPPORTED_MANUFACTURERS
 
 
 def export_assembly(
     pcb_path: str,
     schematic_path: str,
     output_dir: str,
-    manufacturer: str = "jlcpcb",
+    manufacturer: str | None = None,
     strict_preflight: bool = True,
 ) -> AssemblyExportResult:
     """
@@ -453,7 +468,11 @@ def export_assembly(
         pcb_path: Path to .kicad_pcb file
         schematic_path: Path to .kicad_sch file
         output_dir: Directory for output files
-        manufacturer: Target manufacturer ("jlcpcb", "pcbway", "seeed", "generic")
+        manufacturer: Target manufacturer or tier id -- any id ``kct export
+            --mfr`` accepts (e.g. ``"jlcpcb"``, ``"jlcpcb-tier1"``, ``"pcbway"``,
+            ``"generic"``).  Omitted (``None``): resolved like ``kct check``
+            (``fab_profile.json`` > ``project.kct`` ``target_fab`` > ``jlcpcb``)
+            and reported in the result's ``manufacturer`` / ``manufacturer_source``.
         strict_preflight: Any preflight FAIL blocks the export (default).
             ``False`` matches ``kct export`` without ``--strict-preflight``:
             FAILs become warnings -- except the unbuildable-BOM block and the
@@ -506,6 +525,14 @@ def export_assembly(
             f"Unusual schematic file extension: {schematic.suffix} (expected .kicad_sch)"
         )
 
+    # Resolve an omitted manufacturer from the board's declared fab (#7276)
+    manufacturer_source = "cli"
+    if manufacturer is None:
+        from kicad_tools.manufacturers.resolve import _resolve_effective_check_mfr
+
+        resolved = _resolve_effective_check_mfr(None, pcb)
+        manufacturer, manufacturer_source = resolved.mfr, resolved.source
+
     # Validate manufacturer
     manufacturer_lower = manufacturer.lower()
     if manufacturer_lower not in ASSEMBLY_MANUFACTURERS:
@@ -521,6 +548,7 @@ def export_assembly(
     try:
         from kicad_tools.cli.export_cmd import build_manufacturing_config
         from kicad_tools.export.manufacturing import ManufacturingPackage
+        from kicad_tools.manufacturers import get_fab_family
 
         config = build_manufacturing_config(
             output_dir=out_dir,
@@ -569,7 +597,11 @@ def export_assembly(
         # BOM / CPL facts come from the generator (Issue #7260), never from
         # re-parsing the CSV text.
         if assembly is not None and assembly.bom_path and assembly.bom_path.exists():
-            missing_lcsc = len(assembly.bom_missing_lcsc) if manufacturer_lower == "jlcpcb" else 0
+            missing_lcsc = (
+                len(assembly.bom_missing_lcsc)
+                if get_fab_family(manufacturer_lower) == "jlcpcb"
+                else 0
+            )
             if missing_lcsc > 0:
                 warnings.append(f"{missing_lcsc} parts missing LCSC part numbers")
 
@@ -595,22 +627,24 @@ def export_assembly(
                 success=False,
                 output_dir=str(out_dir),
                 manufacturer=manufacturer_lower,
+                manufacturer_source=manufacturer_source,
                 gerbers=gerbers_result,
                 bom=bom_result,
                 pnp=pnp_result,
                 zip_file=None,
                 preflight=preflight,
                 warnings=warnings,
-                error="; ".join(result.errors),
+                error=_with_mcp_mfr_hint("; ".join(result.errors)),
             )
 
         # Create combined zip file for upload
-        zip_file_path = _create_assembly_zip(out_dir, manufacturer_lower, assembly)
+        zip_file_path = _create_assembly_zip(out_dir, get_fab_family(manufacturer_lower), assembly)
 
         return AssemblyExportResult(
             success=True,
             output_dir=str(out_dir),
             manufacturer=manufacturer_lower,
+            manufacturer_source=manufacturer_source,
             gerbers=gerbers_result,
             bom=bom_result,
             pnp=pnp_result,
@@ -628,6 +662,17 @@ def export_assembly(
             error=str(e),
             warnings=warnings,
         )
+
+
+def _with_mcp_mfr_hint(error: str) -> str:
+    """Tell an MCP caller how to act on a ``--mfr`` remedy (#7276).
+
+    Refusals such as the report-provenance check say "export with --mfr X",
+    which is a CLI flag; the MCP equivalent is the ``manufacturer`` parameter.
+    """
+    if "--mfr" in error:
+        return f"{error} (over MCP, pass the id as the `manufacturer` parameter)"
+    return error
 
 
 def _create_assembly_zip(
