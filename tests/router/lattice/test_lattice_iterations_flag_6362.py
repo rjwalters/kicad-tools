@@ -17,7 +17,6 @@ These tests pin:
 
 from __future__ import annotations
 
-import argparse
 from pathlib import Path
 
 import pytest
@@ -74,10 +73,10 @@ class TestParsers:
 
         assert _route_parser().parse_args(["b.kicad_pcb"]).lattice_iterations is None
 
-    def test_outer_parser_accepts_flag(self):
-        from kicad_tools.cli.parser import create_parser
+    def test_kct_route_accepts_flag(self):
+        from tests.route_cli import kct_route
 
-        args = create_parser().parse_args(["route", "b.kicad_pcb", "--lattice-iterations", "20"])
+        _, args = kct_route(["b.kicad_pcb", "--lattice-iterations", "20"])
         assert args.lattice_iterations == 20
 
     @pytest.mark.parametrize("bad", ["0", "-1", "abc"])
@@ -89,50 +88,35 @@ class TestParsers:
         assert "--lattice-iterations" in capsys.readouterr().err
 
     @pytest.mark.parametrize("bad", ["0", "-5"])
-    def test_outer_parser_rejects_non_positive(self, bad):
-        from kicad_tools.cli.parser import create_parser
+    def test_kct_route_rejects_non_positive(self, bad):
+        from kicad_tools.cli import main
 
         with pytest.raises(SystemExit):
-            create_parser().parse_args(["route", "b.kicad_pcb", "--lattice-iterations", bad])
+            main(["route", "b.kicad_pcb", "--lattice-iterations", bad])
 
     def test_iterations_help_points_at_lattice_flag(self):
-        from kicad_tools.cli.parser import create_parser
         from kicad_tools.cli.route_cmd import _route_parser
 
-        inner = _route_parser().format_help()
-        assert "--lattice-iterations" in inner
-        route_sub = next(
-            a for a in create_parser()._actions if isinstance(a, argparse._SubParsersAction)
-        ).choices["route"]
-        iterations = next(a for a in route_sub._actions if "--iterations" in a.option_strings)
+        parser = _route_parser()
+        assert "--lattice-iterations" in parser.format_help()
+        iterations = next(a for a in parser._actions if "--iterations" in a.option_strings)
         assert "--lattice-iterations" in iterations.help
 
 
-class TestForwardingShim:
-    def test_shim_forwards_flag_only_when_set(self, monkeypatch, tmp_path):
-        from kicad_tools.cli import route_cmd
-        from kicad_tools.cli.commands import routing
-        from kicad_tools.cli.parser import create_parser
+class TestKctRoutePassthrough:
+    def test_flag_reaches_router_only_when_set(self, tmp_path):
+        from tests.route_cli import kct_route
 
-        captured: list[list[str]] = []
-
-        def fake_main(argv):
-            captured.append(list(argv))
-            return 0
-
-        monkeypatch.setattr(route_cmd, "main", fake_main)
         pcb = tmp_path / "b.kicad_pcb"
         pcb.write_text(STRANDED_BOARD)
 
-        for extra in (["--lattice-iterations", "7"], []):
-            args = create_parser().parse_args(["route", str(pcb), *extra])
-            routing.run_route_command(args)
+        with_flag, args = kct_route([str(pcb), "--lattice-iterations", "7"])
+        without_flag, plain = kct_route([str(pcb)])
 
-        assert len(captured) == 2
-        with_flag, without_flag = captured
-        i = with_flag.index("--lattice-iterations")
-        assert with_flag[i + 1] == "7"
+        assert with_flag[with_flag.index("--lattice-iterations") + 1] == "7"
+        assert args.lattice_iterations == 7
         assert "--lattice-iterations" not in without_flag
+        assert plain.lattice_iterations is None
 
 
 # ---------------------------------------------------------------------------

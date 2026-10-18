@@ -29,6 +29,7 @@ from kicad_tools.router.crossing_order import (
     minimum_spanning_skeleton,
     segments_cross,
 )
+from tests.route_cli import route_args
 
 # ---------------------------------------------------------------------------
 # segments_cross
@@ -265,10 +266,7 @@ def _flags_choices(parser: argparse.ArgumentParser, flag: str) -> list[str]:
 
 
 def test_outer_parser_accepts_crossing():
-    from kicad_tools.cli.parser import create_parser
-
-    parser = create_parser()
-    args = parser.parse_args(["route", "in.kicad_pcb", "--order-method", "crossing"])
+    args = route_args(["in.kicad_pcb", "--order-method", "crossing"])
     assert args.order_method == "crossing"
 
 
@@ -291,15 +289,12 @@ def test_inner_route_parser_accepts_crossing():
     assert "crossing" in _flags_choices(captured["parser"], "--order-method")
 
 
-def test_routing_shim_forwards_crossing():
-    from kicad_tools.cli.commands import routing
+def test_kct_route_forwards_crossing():
+    from tests.route_cli import kct_route
 
-    args = SimpleNamespace(order_method="crossing")
-    assert getattr(args, "order_method", None) == "crossing"
-    # The shim builds sub_argv generically from str(args.order_method); assert the
-    # choice list it forwards into actually accepts the value (the drift guard).
-    assert "crossing" in _flags_choices(_inner_parser(), "--order-method")
-    assert hasattr(routing, "run_route_command")
+    forwarded, args = kct_route(["x.kicad_pcb", "--order-method", "crossing"])
+    assert forwarded[forwarded.index("--order-method") + 1] == "crossing"
+    assert args.order_method == "crossing"
 
 
 def _inner_parser() -> argparse.ArgumentParser:

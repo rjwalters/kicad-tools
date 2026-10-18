@@ -37,7 +37,7 @@ from pathlib import Path
 
 import pytest
 
-from kicad_tools.cli.parser import create_parser
+from kicad_tools.cli.parser import create_parser, resolve_passthrough
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FIXTURES = REPO_ROOT / "tests" / "fixtures"
@@ -462,7 +462,7 @@ def _iter_json_leaves(parser: argparse.ArgumentParser, path: tuple[str, ...] = (
 
 
 def _discovered_json_leaves() -> set[str]:
-    return set(_iter_json_leaves(create_parser()))
+    return set(_iter_json_leaves(resolve_passthrough(create_parser())))
 
 
 def _kicad_cli_available() -> bool:

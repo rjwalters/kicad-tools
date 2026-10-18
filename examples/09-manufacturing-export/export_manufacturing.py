@@ -211,13 +211,15 @@ LCSC part numbers flow from schematic symbols to BOM:
    - Add a field named "LCSC" to your symbol
    - Set the value to the LCSC part number (e.g., "C123456")
 
-2. Or use the kicad-tools parts importer:
+2. Or import a part's symbol by manufacturer part number (MPN), then add
+   the "LCSC" field as in step 1:
    ```python
-   from kicad_tools.parts import import_lcsc_part
+   from kicad_tools.parts import PartImporter
 
-   # Import a specific LCSC part
-   import_lcsc_part("C123456", library="MyParts.kicad_sym")
+   importer = PartImporter(symbol_library="MyParts.kicad_sym")
+   result = importer.import_part("STM32F103C8T6")  # MPN, not an LCSC number
    ```
+   To look up an LCSC number from the shell: `kct parts lookup C123456`
 
 3. When extracting BOM, LCSC numbers are automatically included:
    ```python
@@ -261,16 +263,16 @@ def example_cli_commands() -> None:
 Manufacturing export is also available via the command line:
 
 # Generate complete assembly package
-kct export --manufacturer jlcpcb design.kicad_pcb design.kicad_sch -o output/
+kct export design.kicad_pcb --mfr jlcpcb --sch design.kicad_sch -o output/
 
 # Export Gerbers only
-kct export gerbers design.kicad_pcb --manufacturer jlcpcb -o gerbers/
+kct export design.kicad_pcb --mfr jlcpcb --no-bom --no-cpl --no-report -o gerbers/
 
 # Export BOM in specific format
-kct bom design.kicad_sch --format jlcpcb -o bom_jlcpcb.csv
+kct bom design.kicad_sch --format jlcpcb > bom_jlcpcb.csv
 
 # Export pick-and-place file
-kct export pnp design.kicad_pcb --manufacturer jlcpcb -o positions.csv
+kct export design.kicad_pcb --mfr jlcpcb --no-gerbers --no-bom --no-report -o positions/
 
 # Compare manufacturer capabilities
 kct mfr compare --layers 4

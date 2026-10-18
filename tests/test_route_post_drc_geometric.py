@@ -264,22 +264,15 @@ class TestStrictDrc:
         assert "DRC PASSED" in out
 
 
-def test_strict_drc_reaches_inner_through_outer_kct_route(monkeypatch):
-    """`kct route --strict-drc` forwards the flag to route_cmd.main (Issue #4178).
+def test_strict_drc_reaches_route_cmd_through_kct_route(monkeypatch):
+    """`kct route --strict-drc` reaches route_cmd.main (Issues #4178, #7017).
 
-    Regression guard for the #4187 inner/outer lesson: a flag registered
-    only on the inner parser would be dropped by the outer `kct route`
-    shim.  This parses via the OUTER parser (parser.create_parser), runs
-    the forwarding shim (run_route_command), and asserts the inner
-    route_cmd.main receives --strict-drc in its argv AND parses it onto
-    the namespace as strict_drc=True.
+    Runs the real ``kct`` entry point in-process and asserts route_cmd.main
+    receives --strict-drc in its argv AND its parser puts strict_drc=True on
+    the namespace.
     """
+    from kicad_tools.cli import main as cli_main
     from kicad_tools.cli import route_cmd
-    from kicad_tools.cli.commands.routing import run_route_command
-    from kicad_tools.cli.parser import create_parser
-
-    parser = create_parser()
-    args = parser.parse_args(["route", "board.kicad_pcb", "--strict-drc"])
 
     captured: dict[str, object] = {}
     real_main = route_cmd.main
@@ -304,13 +297,10 @@ def test_strict_drc_reaches_inner_through_outer_kct_route(monkeypatch):
 
     monkeypatch.setattr(route_cmd, "main", _fake_route_main)
 
-    run_route_command(args)
+    cli_main(["route", "board.kicad_pcb", "--strict-drc"])
 
-    assert "sub_argv" in captured, "outer shim never invoked route_cmd.main"
-    assert "--strict-drc" in captured["sub_argv"], (
-        "outer `kct route` shim dropped --strict-drc (regresses the #4187 "
-        "inner/outer forwarding lesson)"
-    )
+    assert "sub_argv" in captured, "kct route never invoked route_cmd.main"
+    assert "--strict-drc" in captured["sub_argv"], "kct route dropped --strict-drc"
     assert captured.get("strict_drc") is True, (
         "inner route_cmd.py parser must parse --strict-drc onto the namespace as strict_drc=True"
     )

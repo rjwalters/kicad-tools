@@ -73,7 +73,7 @@ from kicad_tools.core.kicad_lock import check_kicad_lock
 from kicad_tools.sexp.scan import has_unquoted
 
 from .route_deadline import record_stage, restore_stage
-from .route_exit_codes_help import ROUTE_EXIT_CODES_EPILOG
+from .route_exit_codes_help import ROUTE_EXIT_CODES_EPILOG, ROUTE_PERFORMANCE_EPILOG
 from .route_placement import for_attempt, select_result
 
 if TYPE_CHECKING:
@@ -3520,7 +3520,7 @@ def _process_state_guard() -> "Iterator[None]":
     """Snapshot/restore the process-global state that ``_main_impl`` stamps.
 
     ``route_cmd.main()`` is invoked **in-process** by ``kct route``
-    (``commands/routing.py``) and by dozens of test files, but the
+    (``cli.main``'s argv passthrough) and by dozens of test files, but the
     implementation mutates process-global state and (before issue #4559)
     restored none of it, silently poisoning every subsequent in-process
     invocation.  This guard wraps the outermost ``main()`` boundary and
@@ -16621,7 +16621,7 @@ _CENSUS_GATE_EXIT_CODE = 9
 def _census_gate_pct(value: str) -> float:
     """argparse ``type=`` for ``--census-advisory-gate-pct`` (#4799).
 
-    Delegates to the router-side validator so the inner and outer parsers
+    Delegates to the router-side validator so the parser and the router
     cannot disagree about what a legal threshold is.  Raises ``ValueError``,
     which argparse renders as its standard "invalid value" error (exit 2).
     """
@@ -18007,7 +18007,7 @@ def _in_process_main_impl(argv: list[str] | None = None) -> int:
     process-global state ``_main_impl`` stamps -- the ``KICAD_TOOLS_*``
     escalation env vars, the ``--seed`` global-RNG seeding, the SIGINT
     handler, and the ``_interrupt_state`` router pin -- so in-process
-    callers (``kct route`` via ``commands/routing.py`` and the test
+    callers (``kct route`` via ``cli.main`` and the test
     suite) are not poisoned.  The state stays stamped for the entire
     invocation; only the outermost exit (return *or* raise) restores it.
     """
@@ -18067,7 +18067,7 @@ def _route_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="kicad-tools route",
         description="Autoroute a KiCad PCB file",
-        epilog=ROUTE_EXIT_CODES_EPILOG,
+        epilog=ROUTE_EXIT_CODES_EPILOG + "\n" + ROUTE_PERFORMANCE_EPILOG,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("pcb", help="Path to .kicad_pcb file")
@@ -18587,9 +18587,7 @@ def _route_parser() -> argparse.ArgumentParser:
             "Use 0 to disable checkpointing (only the terminal save fires)."
         ),
     )
-    # Issue #5945: best-so-far checkpoint file + resume.  Mirror of the outer
-    # parser flags in parser.py; tests/test_cli_parser_drift.py keeps them in
-    # sync.
+    # Issue #5945: best-so-far checkpoint file + resume.
     parser.add_argument(
         "--checkpoint",
         metavar="PATH",
@@ -18619,8 +18617,7 @@ def _route_parser() -> argparse.ArgumentParser:
             "(Issue #5945)."
         ),
     )
-    # Issue #6054: --lint-gate.  Mirror of the outer parser flags in
-    # parser.py; tests/test_cli_parser_drift.py keeps them in sync.
+    # Issue #6054: --lint-gate.
     parser.add_argument(
         "--lint-gate",
         action="store_true",
@@ -18650,11 +18647,9 @@ def _route_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="With --lint-gate, new warning findings also roll the route back.",
     )
-    # Issue #2819: declare --max-search-iterations on the inner parser so the
-    # forwarding shim in ``commands/routing.py`` can hand it through.  Default
-    # 0 = use the historical ``cols * rows * 4`` heuristic (matches the outer
-    # parser declaration at parser.py and the C++ A* backstop semantics from
-    # Issue #2610).
+    # Issue #2819: --max-search-iterations.  Default 0 = use the historical
+    # ``cols * rows * 4`` heuristic (matches the C++ A* backstop semantics
+    # from Issue #2610).
     parser.add_argument(
         "--max-search-iterations",
         type=int,
@@ -18806,9 +18801,7 @@ def _route_parser() -> argparse.ArgumentParser:
             "historical whole-set PathFinder-style loop. 'sequential-n1' is "
             "a KRT-style prototype dispatched via "
             "``Autorouter._ripup_strategy`` (see "
-            "src/kicad_tools/router/sequential_ripup.py). Mirror of the "
-            "outer ``parser.py`` flag; both sites must stay in sync per "
-            "the --order-method precedent above."
+            "src/kicad_tools/router/sequential_ripup.py)."
         ),
     )
     parser.add_argument(
@@ -18823,8 +18816,7 @@ def _route_parser() -> argparse.ArgumentParser:
             "'blocked' (no path even on an empty board -- the JSON lists the "
             "pads/keepouts/edge closing it off as 'blockers'). Reported under "
             "'unrouted' in --format json output. Connections the budget does "
-            "not reach are 'unclassified'. 0 disables the pass. Default: 20. "
-            "Mirror of the outer parser.py flag."
+            "not reach are 'unclassified'. 0 disables the pass. Default: 20."
         ),
     )
     parser.add_argument(
@@ -19254,8 +19246,6 @@ def _route_parser() -> argparse.ArgumentParser:
         ),
     )
     # Issue #4178: hard-gate on native (kicad-cli) DRC actually running.
-    # Mirror of the outer parser.py flag; both sites must stay in sync per
-    # ``tests/test_cli_parser_drift.py``.
     parser.add_argument(
         "--strict-drc",
         action="store_true",
@@ -19270,9 +19260,7 @@ def _route_parser() -> argparse.ArgumentParser:
             "actually run and passed."
         ),
     )
-    # Issue #4433: opt-in HARD per-net avoid_layers.  Mirror of the outer
-    # parser.py flag; both sites must stay in sync per
-    # ``tests/test_cli_parser_drift.py``.
+    # Issue #4433: opt-in HARD per-net avoid_layers.
     parser.add_argument(
         "--fallback-bidirectional",
         action="store_true",
@@ -19302,8 +19290,7 @@ def _route_parser() -> argparse.ArgumentParser:
     # Issue #5014: HARD signal-layer eligibility for controlled-impedance
     # plane assignments. Issue #5789: defaults to ON -- a declared reference
     # plane is hard-excluded from signal routing unless the caller opts out
-    # with --no-reserve-plane-layers. Mirror of the outer parser.py flag;
-    # both sites must stay in sync per ``tests/test_cli_parser_drift.py``.
+    # with --no-reserve-plane-layers.
     parser.add_argument(
         "--reserve-plane-layers",
         action=argparse.BooleanOptionalAction,
@@ -19553,11 +19540,7 @@ def _route_parser() -> argparse.ArgumentParser:
         ),
     )
     # Issue #2606: stagnation + outer-timeout guards on the
-    # PlacementFeedbackLoop.  Mirror parser.py:2349-2376 so the
-    # top-level forwarder in commands/routing.py can pass these
-    # through without tripping argparse.  Defaults match parser.py.
-    # Issue #2620: previously missing on the inner parser, causing
-    # "unrecognized arguments" when the forwarder injected them.
+    # PlacementFeedbackLoop.
     parser.add_argument(
         "--placement-feedback-stagnation-patience",
         type=int,
@@ -19583,9 +19566,7 @@ def _route_parser() -> argparse.ArgumentParser:
         ),
     )
     # Issue #4468 (epic #3438 Phase 3): classifier-driven placement-DELTA
-    # feedback.  Mirror of the outer parser flags in parser.py + the
-    # forwarding shim in commands/routing.py; all three sites must stay in
-    # sync per ``tests/test_cli_parser_drift.py``.
+    # feedback.
     parser.add_argument(
         "--placement-delta-feedback",
         action=argparse.BooleanOptionalAction,
@@ -20024,9 +20005,8 @@ def _route_parser() -> argparse.ArgumentParser:
             "Enabled automatically in high-performance mode."
         ),
     )
-    # Issue #3054 (Phase 2 of #3045): expose region-based parallelism on the
-    # inner parser so the outer ``kct route --region-parallel`` flag has a
-    # forwarding target.  ``route_all_negotiated`` already implements the
+    # Issue #3054 (Phase 2 of #3045): expose region-based parallelism as
+    # ``kct route --region-parallel``.  ``route_all_negotiated`` already implements the
     # partitioning logic; this is wiring only.
     parser.add_argument(
         "--region-parallel",
@@ -22221,6 +22201,9 @@ def _run_main_impl(args, parser, argv) -> int:
                 cached_routes = cache.deserialize_routes(cached_result.routes_data)
 
                 cached_usage = cache.deserialize_route_usage(cached_result.routes_data)
+                cached_coupled_nets = cache.deserialize_committed_coupled_nets(
+                    cached_result.routes_data
+                )
 
             else:
                 if not quiet:
@@ -22261,6 +22244,9 @@ def _run_main_impl(args, parser, argv) -> int:
         try:
             router.grid.import_route_usage(cached_usage)
             router.restore_route_snapshot(cached_routes)
+            # Issue #7003: the optimizer skips coupled pairs the routing
+            # dispatch committed; a hit skips the dispatch, so replay them.
+            router._committed_coupled_nets = set(cached_coupled_nets)
             if not quiet:
                 print("  Using cached routing result")
         except Exception as exc:
@@ -22973,6 +22959,7 @@ def _run_main_impl(args, parser, argv) -> int:
                     stats,
                     routing_time_ms,
                     route_usage=router.grid.export_route_usage(),
+                    committed_coupled_nets=_committed_coupled_skip_nets(router),
                 )
                 if not quiet:
                     print(f"  Cached routing result ({routing_time_ms}ms compute time)")

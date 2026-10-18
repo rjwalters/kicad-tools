@@ -23,7 +23,6 @@ grid``.
 
 import logging
 import re
-import sys
 import warnings
 from pathlib import Path
 from types import SimpleNamespace
@@ -41,6 +40,7 @@ from kicad_tools.router.io import (
     compute_multi_resolution_plan,
     load_pcb_for_routing,
 )
+from tests.route_cli import route_args
 
 # Engines that never emit copper from the grid (#4271/#4283), so every
 # grid-quality advisory is inapplicable to them.
@@ -995,33 +995,19 @@ class TestClearanceRuleSourceHelpers:
 class TestOuterCliForwardsExplicitDefaults:
     """Issue #4875: ``kct route`` must forward a deliberately-default flag.
 
-    ``run_route_command`` builds the inner ``route_cmd`` argv by comparing
-    each outer flag against its default and forwarding only the differences
-    (so a flag-off invocation stays byte-identical).  That is exactly wrong
-    for the two flags whose *presence* now carries meaning: ``kct route
-    --clearance 0.15`` and ``--manufacturer jlcpcb`` were dropped, so the
-    board's declared rules silently outranked an explicit operator choice.
+    The old forwarding shim rebuilt the inner argv by comparing each flag
+    against its default, so ``kct route --clearance 0.15`` and
+    ``--manufacturer jlcpcb`` were dropped and the board's declared rules
+    silently outranked an explicit operator choice -- and, for in-process
+    callers, even its ``sys.argv`` workaround failed.  Since issue #7017
+    ``kct route`` passes argv through verbatim, with no ``sys.argv`` help.
     """
 
     def _sub_argv(self, argv: list[str]) -> list[str]:
-        from kicad_tools.cli.commands import routing
-        from kicad_tools.cli.parser import create_parser
+        from tests.route_cli import kct_route
 
-        cli_argv = ["route", "board.kicad_pcb", *argv]
-        args = create_parser().parse_args(cli_argv)
-
-        captured: dict[str, list[str]] = {}
-
-        def _capture(sub_argv):
-            captured["argv"] = list(sub_argv)
-            return 0
-
-        with (
-            patch.object(sys, "argv", ["kct", *cli_argv]),
-            patch("kicad_tools.cli.route_cmd.main", side_effect=_capture),
-        ):
-            routing.run_route_command(args)
-        return captured["argv"]
+        forwarded, _ = kct_route(["board.kicad_pcb", *argv])
+        return forwarded
 
     def test_flag_off_argv_stays_byte_identical(self):
         assert self._sub_argv([]) == ["board.kicad_pcb"]
@@ -1033,7 +1019,11 @@ class TestOuterCliForwardsExplicitDefaults:
         assert "--manufacturer" in self._sub_argv(["--manufacturer", "jlcpcb"])
 
     def test_explicit_default_mfr_alias_is_forwarded(self):
-        assert "--manufacturer" in self._sub_argv(["--mfr", "jlcpcb"])
+        from tests.route_cli import route_args
+
+        forwarded = self._sub_argv(["--mfr", "jlcpcb"])
+        assert "--mfr" in forwarded
+        assert route_args(forwarded).manufacturer == "jlcpcb"
 
 
 # ---------------------------------------------------------------------------
@@ -1114,7 +1104,6 @@ def test_printed_max_cells_flag_parses_and_clears_gate(tmp_path, capsys):
     (``kct route`` in ``cli/parser.py`` and ``route_cmd``'s own parser), and
     confirm that re-running selection with the parsed value clears the gate.
     """
-    from kicad_tools.cli.parser import create_parser
 
     result, _ = _select_memory_capped()
     assert result.memory_forced_unsafe_grid is True
@@ -1131,7 +1120,7 @@ def test_printed_max_cells_flag_parses_and_clears_gate(tmp_path, capsys):
     assert token == str(n)
 
     # 2. The token parses through the top-level ``kct route`` parser.
-    args = create_parser().parse_args(["route", "board.kicad_pcb", "--max-cells", token])
+    args = route_args(["board.kicad_pcb", "--max-cells", token])
     assert args.max_cells == n
     assert isinstance(args.max_cells, int)
 

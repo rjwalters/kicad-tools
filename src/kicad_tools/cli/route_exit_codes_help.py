@@ -1,10 +1,9 @@
-"""Exit-code help text shared by both ``kct route`` argparse parsers.
+"""Epilog text for ``kct route --help`` (``route_cmd._route_parser``).
 
-The outer parser (``cli/parser.py::_add_route_parser``, what ``kct route
---help`` prints) and the inner worker parser (``route_cmd._route_parser``)
-must show the same exit-code ladder.  Keeping the text here, import-light,
-lets ``parser.py`` use it without importing the huge ``route_cmd`` module
-(issue #6291).
+``route_cmd._route_parser`` is the only ``kct route`` parser: ``cli.main``
+hands the argv after ``route`` straight to ``route_cmd.main`` (issue #7017).
+The text lives in this import-light module so tests and docs can read it
+without importing the huge ``route_cmd`` module (issue #6291).
 """
 
 ROUTE_EXIT_CODES_EPILOG = """\
@@ -33,4 +32,11 @@ exit codes:
      kicad-cli crashed/was killed/timed out, issues #6273, #6724);
      the board is saved, run 'kct check' on it.
      JSON summary.verdict is "unverified"
+"""
+
+ROUTE_PERFORMANCE_EPILOG = """\
+PERFORMANCE: The C++ backend provides 10-100x faster routing.
+Check status with 'kct build-native --check' and build with
+'kct build-native'. The --backend flag defaults to 'auto' which
+uses C++ when available and falls back to Python otherwise.
 """

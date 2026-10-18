@@ -9,11 +9,10 @@ a safe, well-aligned grid.
 
 The flag must:
 
-* be declared on BOTH the standalone ``route_cmd.py`` parser and the unified
-  ``cli/parser.py`` route subcommand (guards argparse drift -- see
-  ``tests/test_cli_parser_drift.py``), defaulting to 500,000;
-* be forwarded by ``run_route_command`` only when the user changed it from the
-  default (flag-off argv byte-identical);
+* be declared on the ``kct route`` parser (``route_cmd._route_parser``),
+  defaulting to 500,000;
+* reach ``route_cmd.main`` only when the user passed it (``kct route`` hands
+  its argv over verbatim since issue #7017, so flag-off argv is unchanged);
 * thread through to BOTH the top-level ``auto_select_grid_resolution`` call and
   the ``compute_multi_resolution_plan`` call in ``route_cmd`` -- and
   ``compute_multi_resolution_plan`` must in turn forward it to its own internal
@@ -26,11 +25,13 @@ from __future__ import annotations
 import contextlib
 import sys
 from io import StringIO
-from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
+
+import pytest
 
 from kicad_tools.cli import route_cmd
 from kicad_tools.router.io import GridAutoSelection, PadPosition
+from tests.route_cli import kct_route, route_args
 
 # =============================================================================
 # Flag definition + default (both parsers)
@@ -54,17 +55,11 @@ class TestFlagDefinedInBothParsers:
         assert "max_cells" in collapsed
 
     def test_max_cells_in_unified_parser(self):
-        from kicad_tools.cli.parser import create_parser
-
-        parser = create_parser()
-        args = parser.parse_args(["route", "test.kicad_pcb", "--max-cells", "16000000"])
+        args = route_args(["test.kicad_pcb", "--max-cells", "16000000"])
         assert args.max_cells == 16_000_000
 
     def test_max_cells_default_in_unified_parser(self):
-        from kicad_tools.cli.parser import create_parser
-
-        parser = create_parser()
-        args = parser.parse_args(["route", "test.kicad_pcb"])
+        args = route_args(["test.kicad_pcb"])
         assert args.max_cells == 500_000
 
     def test_max_cells_default_in_route_cmd_parser(self):
@@ -93,96 +88,28 @@ class TestFlagDefinedInBothParsers:
 
     def test_max_cells_accepts_below_default(self):
         """It's a genuine override, not just a raise-the-ceiling flag."""
-        from kicad_tools.cli.parser import create_parser
 
-        parser = create_parser()
-        args = parser.parse_args(["route", "test.kicad_pcb", "--max-cells", "1000"])
+        args = route_args(["test.kicad_pcb", "--max-cells", "1000"])
         assert args.max_cells == 1000
 
 
 # =============================================================================
-# Forwarding: run_route_command -> route_cmd.main
+# Forwarding: kct route -> route_cmd.main
 # =============================================================================
 
 
-def _base_args(**overrides) -> SimpleNamespace:
-    base: dict[str, object] = {
-        "pcb": "test.kicad_pcb",
-        "output": None,
-        "strategy": "negotiated",
-        "skip_nets": None,
-        "grid": "auto",
-        "max_cells": 500_000,
-        "trace_width": 0.2,
-        "clearance": 0.15,
-        "via_drill": 0.3,
-        "via_diameter": 0.6,
-        "mc_trials": 10,
-        "iterations": 15,
-        "verbose": False,
-        "dry_run": True,
-        "quiet": True,
-        "power_nets": None,
-        "layers": "auto",
-        "force": False,
-        "no_optimize": False,
-        "auto_layers": False,
-        "max_layers": 6,
-        "min_completion": 0.95,
-        "adaptive_rules": False,
-        "min_trace": None,
-        "min_clearance_floor": None,
-        "manufacturer": "jlcpcb",
-        "high_performance": False,
-        "skip_drc": False,
-        "auto_fix": False,
-        "auto_fix_passes": None,
-        "export_failed_nets": None,
-        "differential_pairs": False,
-        "diffpair_spacing": None,
-        "diffpair_max_delta": None,
-        "length_match_diffpairs": False,
-        "length_match_groups": False,
-        "strict": False,
-    }
-    base.update(overrides)
-    return SimpleNamespace(**base)
-
-
 class TestForwarding:
-    def test_max_cells_forwarded_when_non_default(self):
-        from kicad_tools.cli.commands.routing import run_route_command
+    @pytest.mark.parametrize("value", ["16000000", "1000", "500000"])
+    def test_max_cells_passed_through_when_given(self, value):
+        """Includes the explicit default the old shim dropped (#7017)."""
+        forwarded, args = kct_route(["test.kicad_pcb", "--max-cells", value])
+        assert forwarded[forwarded.index("--max-cells") + 1] == value
+        assert args.max_cells == int(value)
 
-        args = _base_args(max_cells=16_000_000)
-        with patch("kicad_tools.cli.route_cmd.main") as mock_main:
-            mock_main.return_value = 0
-            run_route_command(args)
-            call_args = mock_main.call_args[0][0]
-            assert "--max-cells" in call_args
-            idx = call_args.index("--max-cells")
-            assert call_args[idx + 1] == "16000000"
-
-    def test_max_cells_not_forwarded_when_default(self):
-        from kicad_tools.cli.commands.routing import run_route_command
-
-        args = _base_args(max_cells=500_000)
-        with patch("kicad_tools.cli.route_cmd.main") as mock_main:
-            mock_main.return_value = 0
-            run_route_command(args)
-            call_args = mock_main.call_args[0][0]
-            assert "--max-cells" not in call_args
-
-    def test_max_cells_below_default_is_forwarded(self):
-        from kicad_tools.cli.commands.routing import run_route_command
-
-        args = _base_args(max_cells=1000)
-        with patch("kicad_tools.cli.route_cmd.main") as mock_main:
-            mock_main.return_value = 0
-            run_route_command(args)
-            call_args = mock_main.call_args[0][0]
-            assert "--max-cells" in call_args
-            idx = call_args.index("--max-cells")
-            assert call_args[idx + 1] == "1000"
+    def test_max_cells_not_forwarded_when_unset(self):
+        forwarded, args = kct_route(["test.kicad_pcb"])
+        assert "--max-cells" not in forwarded
+        assert args.max_cells == 500_000
 
 
 # =============================================================================
