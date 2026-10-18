@@ -18,6 +18,23 @@ if TYPE_CHECKING:
     from kicad_tools.schema.pcb import PCB
 
 
+def to_origin_relative(outline: Polygon | None, pcb: PCB) -> Polygon | None:
+    """Translate a raw (absolute) Edge.Cuts outline into the origin-relative frame.
+
+    The Edge.Cuts parsers in this module read raw sexp coordinates, which are
+    absolute.  ``Footprint.position`` and :class:`BoardGeometry` are relative
+    to ``pcb.board_origin`` (issue #7106), so every outline handed to the
+    optimizer must have the origin subtracted.  Returns ``outline`` unchanged
+    when it is ``None`` or the origin is ``(0, 0)``.
+    """
+    if outline is None:
+        return None
+    ox, oy = pcb.board_origin
+    if not (ox or oy):
+        return outline
+    return outline.translate(Vector2D(-ox, -oy))
+
+
 def extract_board_outline(pcb: PCB) -> Polygon | None:
     """Extract board outline from Edge.Cuts layer.
 
