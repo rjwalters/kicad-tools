@@ -21,7 +21,7 @@ def test_board06_package_export_applies_rotation_profile(tmp_path):
     )
     rows = _rows(package._generate_pnp(tmp_path))
     assert len(rows) == 33
-    for reference, rotation in {"U1": 270, "U2": 270}.items():
+    for reference, rotation in {f"U{n}": 270 for n in range(1, 9)}.items():
         assert ":" in rows[reference]["Package"]
         assert float(rows[reference]["Rotation"]) == rotation
 

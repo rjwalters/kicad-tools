@@ -87,8 +87,14 @@ placement changes, so this section records them explicitly:
 |---|---|---|---|
 | U1 | SOIC-8_3.9x4.9mm_P1.27mm | 0 | 270 |
 | U2 | SOIC-8_3.9x4.9mm_P1.27mm | 0 | 270 |
+| U3 | SOIC-8_3.9x4.9mm_P1.27mm | 0 | 270 |
+| U4 | SOIC-8_3.9x4.9mm_P1.27mm | 0 | 270 |
+| U5 | SOIC-8_3.9x4.9mm_P1.27mm | 0 | 270 |
+| U6 | SOIC-8_3.9x4.9mm_P1.27mm | 0 | 270 |
+| U7 | SOIC-8_3.9x4.9mm_P1.27mm | 0 | 270 |
+| U8 | SOIC-8_3.9x4.9mm_P1.27mm | 0 | 270 |
 
-Raw KiCad `pos` reports 0 for both; the new values come from the JLCPCB
+Raw KiCad `pos` reports 0 for all eight (U1–U8); the new values come from the JLCPCB
 profile, not from the board. **Pending human orientation review:** no person
 has yet checked these against the JLC part footprints / datasheet pin-1 marks.
 Do not order assembly from this CPL until that review is recorded here.
