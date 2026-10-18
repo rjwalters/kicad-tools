@@ -282,17 +282,25 @@ def extract_bom_hierarchical(root_schematic: str) -> BOM:
 
     Returns:
         Complete BOM with all components
-    """
-    hierarchy = build_hierarchy(root_schematic)
-    all_items = []
 
-    for node in hierarchy.all_nodes():
+    Raises:
+        FileNotFoundError: If the root schematic does not exist.
+        Exception: If the root schematic cannot be parsed. Failing
+            sub-sheets are skipped.
+    """
+    # The root sheet must load: a missing or unparseable root is an error,
+    # not an empty BOM. Only failing sub-sheets are skipped below.
+    root_sch = Schematic.load(root_schematic)
+    hierarchy = build_hierarchy(root_schematic)
+    all_items = extract_bom_from_schematic(root_sch)
+
+    for node in hierarchy.all_nodes()[1:]:
         try:
             sch = Schematic.load(node.path)
             items = extract_bom_from_schematic(sch)
             all_items.extend(items)
         except Exception:
-            # Skip sheets that can't be loaded
+            # Skip sub-sheets that can't be loaded
             pass
 
     return BOM(items=all_items, source=root_schematic)
