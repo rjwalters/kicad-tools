@@ -511,6 +511,13 @@ class TestFixedComponents:
         assert "fixed" in result.error_message.lower()
 
 
+class TestBoardOriginFrame:
+    """Regression for #7106: outline and components share one frame."""
+
+    def test_no_violations_at_load(self, session: PlacementSession):
+        assert session._check_violations() == []
+
+
 class TestQueryMoveBeforeState:
     """Regression tests for issue #7099: before-state captured before the move."""
 
@@ -528,9 +535,13 @@ class TestQueryMoveBeforeState:
         return after - before, before_v, after_v
 
     def test_known_move_real_delta(self, session: PlacementSession):
-        expected, before_v, after_v = self._manual_delta(session, "C1", 141.0, 120.0)
+        # Start C1 off-board (origin-relative frame), then query a move inside.
+        comp = session._optimizer.get_component("C1")
+        comp.x, comp.y = 250.0, 250.0
+        comp.update_pin_positions()
+        expected, before_v, after_v = self._manual_delta(session, "C1", 70.0, 20.0)
         assert expected != 0.0
-        result = session.query_move("C1", 141.0, 120.0)
+        result = session.query_move("C1", 70.0, 20.0)
         assert result.success
         assert result.score_delta == pytest.approx(expected)
         assert len(after_v) < len(before_v)
