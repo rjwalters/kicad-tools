@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "checked_at": "2026-10-18T12:00:00+00:00",
+  "checked_at": "2026-10-18T23:09:35+00:00",
   "mode": "assembly",
   "status": "ready",
   "blockers": [],
@@ -69,16 +69,16 @@
     "output/manufacturing/images/pcb_front.png": "93a32c7210e2bd680ddbf9e6016934cc66ac9aa942003b0926783cf416626085",
     "output/manufacturing/images/schematic_diffpair_test.png": "6e2505c68852ac1d387f672572cf126eada16b0620a1c82ab80ada6b24ec1899",
     "output/manufacturing/kicad_project.zip": "8834d53215ae9147c73e5ace443de9bd8dc847de42f11fa4acf2dd4f6f4e5769",
-    "output/manufacturing/manifest.json": "b161dcac00dc37daef1593848f5fb44d952ace86112a5c54bec2e3dbfa664c7b",
+    "output/manufacturing/manifest.json": "59ceed0601aeb6a0b71ce633cedf139b77110a476f9d5e5e0c498c9f8b4c39dd",
     "output/manufacturing/manual-assembly-bom.csv": "82c744bf3eb2a5345fdd83267d57e7ed7c6631f4790b7995ddd59f4cdfc5219c",
-    "output/manufacturing/native-drc.json": "75359cc8129e96d06d3eddc3de6f9f3fe6eae198e9a2d503bf7f9292c024d04d",
+    "output/manufacturing/native-drc.json": "7679a11f8294072bb3be6ac0271920253252ba229b3acd6bb0d2221425246844",
     "output/manufacturing/procurement-review.md": "b79e5aea626ff829d868ad27bb2eb272bfe09b9353cb228ee66c25773dbe6c71",
     "output/manufacturing/report.md": "83dbce3216d00b9d0707ea7bd2e06d01c37e20a6442f72f8fd6610218fa302b4",
     "output/manufacturing/report.pdf": "8ef68d1698f01a078b93e2b6f7771a0071f39de779da365e0f2a9409de6910a8",
-    "output/manufacturing.zip": "934927077e2ffb9cfab513ee6eaceb2d901245b7fd79d55072cc1c04dc892d47",
+    "output/manufacturing.zip": "dc6ecdf3c349a77d1bc60f9fd64559e4f637aacce208b131a874d7eb1057bbfa",
     "output/net_class_map.json": "a90e951b52272de3503cea92f7bec351201694ef0ee1b4e2ff3ed4a8493c2740",
     "output/readiness/kct-check.json": "97b241f8800f6de378c9285995a41229f3fb34c2c33f16937d0125bf39fd120e",
-    "output/readiness/native-drc.json": "75359cc8129e96d06d3eddc3de6f9f3fe6eae198e9a2d503bf7f9292c024d04d",
+    "output/readiness/native-drc.json": "7679a11f8294072bb3be6ac0271920253252ba229b3acd6bb0d2221425246844",
     "output/sym-lib-table": "90389d0ac68d104c9cde91ec7ab47b4b6a27d71fc6fe85befae8bc94b767d7aa",
     "project.kct": "1cfb8b27a2b2c5ba7991415f2f8d07a7374d98fbf0f5b7d8f3d380ab8d62c08c",
     "output/readiness/fill-consistency.json": "6aea658a7d30a148c08b041c382b38c562024696eda159f25addb85c3d45b944",
@@ -91,14 +91,19 @@
     "output/renders/pcb-front.svg": "a1f4864e51252d2a119d178aa1c116a1a11fb9752efe86edbc2855b928f8e656",
     "output/renders/3d-front.png": "8c60c059cfdcc8af5a9510140abdb957672425abfa211dd9d6c80d5ef94b0aed",
     "output/manufacturing/lvs.json": "8a44e465f8db5c6f95b19b46257bd87290819ef27e8b68a85cbf490bd0f47a68",
-    "output/manufacturing/native-erc.json": "50728b72e5e9f7e0438c2f9a90929a65e0d0152c8f6dc678967db3c59456886f",
+    "output/manufacturing/native-erc.json": "98313fc801b1376174f5df430844bdfc1ddd73db7b0bbad664272d59174b3b01",
     "output/manufacturing/schematic.pdf": "b16b940914d761df70f6af9310ba7c0bb8441130d4a848bce54336325dae80e8",
-    "output/readiness/native-erc.json": "50728b72e5e9f7e0438c2f9a90929a65e0d0152c8f6dc678967db3c59456886f",
-    "output/drc_report.json": "75359cc8129e96d06d3eddc3de6f9f3fe6eae198e9a2d503bf7f9292c024d04d",
-    "output/erc_report.json": "50728b72e5e9f7e0438c2f9a90929a65e0d0152c8f6dc678967db3c59456886f"
+    "output/readiness/native-erc.json": "98313fc801b1376174f5df430844bdfc1ddd73db7b0bbad664272d59174b3b01",
+    "output/drc_report.json": "7679a11f8294072bb3be6ac0271920253252ba229b3acd6bb0d2221425246844",
+    "output/erc_report.json": "98313fc801b1376174f5df430844bdfc1ddd73db7b0bbad664272d59174b3b01"
   },
   "evidence": {
     "kct_check": "output/readiness/kct-check.json",
     "native_drc": "output/readiness/native-drc.json"
+  },
+  "report_sources": {
+    "output/drc_report.json": "b07106a3eb16cab7ad0a87d857c2ed17a3c9b36fbea8bdbb4cff6737c6dcaebc",
+    "output/readiness/native-drc.json": "b07106a3eb16cab7ad0a87d857c2ed17a3c9b36fbea8bdbb4cff6737c6dcaebc",
+    "output/manufacturing/native-drc.json": "b07106a3eb16cab7ad0a87d857c2ed17a3c9b36fbea8bdbb4cff6737c6dcaebc"
   }
 }
