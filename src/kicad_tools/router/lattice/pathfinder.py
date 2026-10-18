@@ -4637,7 +4637,8 @@ class LatticePathfinder:
 
         When none of those has equal P/N via counts, the partner-leg searches
         of :meth:`_mirrored_candidates` (issue #7093) are added: each leg
-        re-routed to its partner's layer sequence.
+        re-routed to its partner's layer sequence, then each parity hit's
+        partner re-routed under it.
 
         Every leg is searched holding each foreign pad at that pad's own class
         (see :meth:`_strict_pad_pairwise`).  The second leg of a candidate is searched against committed
@@ -4650,7 +4651,8 @@ class LatticePathfinder:
         failure), then the smallest skew (:meth:`_pair_skew`), then the
         smallest total length; ties keep the earlier candidate, so the
         selection is deterministic.  A via-count advantage counts only when
-        it costs (almost) no skew or length (#7284, :meth:`_fallback_rank`).
+        it costs (almost) no skew or length (#7284, :meth:`_fallback_rank`);
+        among such candidates inside the pair's skew budget the shortest wins.
         Its legs are committed.  Returns
         ``(legs, is_partner_blind)`` -- the flag is set when the winner is
         exactly the copper :meth:`_partner_blind_legs` would have produced.
@@ -4776,6 +4778,12 @@ class LatticePathfinder:
         candidate with less skew than the reference still wins on skew).  A
         free parity win is kept unchanged, and nothing is gated when no fully
         routed candidate has unequal via counts.
+
+        Issue #7093 (length-aware parity): a candidate that keeps its parity
+        advantage AND is inside the pair's skew budget has met the skew
+        requirement, so its skew term is zeroed and the shortest such pair
+        wins (board 03 arm C: USB_D- 16.33 -> 15.74 mm at 0.33 mm skew).
+        Past the budget skew still decides.
         """
         measure = self.pair_length_measure or _default_pair_length
         lengths: dict[int, tuple[float, float]] = {}
@@ -4818,10 +4826,17 @@ class LatticePathfinder:
             if p_r is None or n_r is None:
                 return (-routed, short, 0, 0.0, 0.0)
             lp, ln = lengths[id(cand)]
+            skew = abs(lp - ln)
             mismatch = self._pair_via_mismatch(cand)
-            if ref is not None and mismatch < ref_mismatch and not admissible(cand):
-                mismatch = ref_mismatch
-            return (-routed, short, mismatch, round(abs(lp - ln), 3), round(lp + ln, 3))
+            if ref is not None and mismatch < ref_mismatch:
+                if not admissible(cand):
+                    mismatch = ref_mismatch
+                elif skew <= budget + 1e-9:
+                    # Issue #7093: between parity candidates that passed the
+                    # gate inside the pair's skew budget, skew has already
+                    # met its requirement; the shortest pair wins.
+                    return (-routed, short, mismatch, 0.0, round(lp + ln, 3))
+            return (-routed, short, mismatch, round(skew, 3), round(lp + ln, 3))
 
         return rank
 
@@ -4844,33 +4859,62 @@ class LatticePathfinder:
         finds nothing).  Both directions are tried: the leg with more vias
         may route without them, or the leg with fewer may take the partner's
         layer change.  The partner keeps its own copper, so each new candidate
-        is legal exactly as it would be routed alone.  Returned for ranking
-        with the rest; nothing is committed.
+        is legal exactly as it would be routed alone.
+
+        A second round (issue #7093, length-aware parity) re-searches the
+        partner of every first-round candidate that reached via parity, under
+        the mirrored leg and mirroring it in turn: the partner was laid with
+        no regard for the mirrored leg, so it may be the long way round (board
+        03 arm C: 6.025 -> 5.41 mm).  Searches are memoised per (kept leg,
+        moved polarity), so the round costs at most one guided (plus, on a
+        miss, one unguided) search per first-round parity hit.  Returned for
+        ranking with the rest; nothing is committed.
         """
         full = [c for c in candidates if c["P"][0] is not None and c["N"][0] is not None]
         if not full or any(self._pair_via_mismatch(c) == 0 for c in full):
             return []
-        out: list[_FallbackLegs] = []
         seen: set[tuple[int, str]] = set()
+
+        def mirrored(cand: _FallbackLegs, moved: str, kept: str) -> _FallbackLegs | None:
+            kept_res = cand[kept][0]
+            if kept_res is None or (id(kept_res), moved) in seen:
+                return None
+            seen.add((id(kept_res), moved))
+            mirror = _mirror_of(kept_res)
+            if mirror is None:
+                return None
+            mark = committed.begin_trial()
+            try:
+                self._commit_single(items[kept], kept_res, {}, committed)
+                leg = search(moved, self._partner_guide(kept_res, pc), mirror)
+                if leg[0] is None:
+                    leg = search(moved, None, mirror)
+            finally:
+                committed.rollback_trial(mark)
+            if leg[0] is None:
+                return None
+            return {kept: cand[kept], moved: leg}
+
+        out: list[_FallbackLegs] = []
+        moves: list[tuple[_FallbackLegs, str]] = []
         for cand in full:
             for moved, kept in (("P", "N"), ("N", "P")):
-                kept_res = cand[kept][0]
-                if kept_res is None or (id(kept_res), moved) in seen:
-                    continue
-                seen.add((id(kept_res), moved))
-                mirror = _mirror_of(kept_res)
-                if mirror is None:
-                    continue
-                mark = committed.begin_trial()
-                try:
-                    self._commit_single(items[kept], kept_res, {}, committed)
-                    leg = search(moved, self._partner_guide(kept_res, pc), mirror)
-                    if leg[0] is None:
-                        leg = search(moved, None, mirror)
-                finally:
-                    committed.rollback_trial(mark)
-                if leg[0] is not None:
-                    out.append({kept: cand[kept], moved: leg})
+                got = mirrored(cand, moved, kept)
+                if got is not None:
+                    out.append(got)
+                    moves.append((got, moved))
+        # Second round (this issue, length-aware parity): a first-round leg
+        # was searched under a partner the router laid with no regard for it,
+        # so the partner may now be the long way round.  Re-search that
+        # partner under the new leg, mirroring it in turn -- once per
+        # first-round parity candidate, so the round costs at most as many
+        # searches as the first.
+        for got, moved in moves:
+            if self._pair_via_mismatch(got) != 0:
+                continue
+            again = mirrored(got, "N" if moved == "P" else "P", moved)
+            if again is not None:
+                out.append(again)
         return out
 
     def _route_fallback_pairs_into(
