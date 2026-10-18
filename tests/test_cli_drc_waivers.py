@@ -223,6 +223,7 @@ class TestJsonOutput:
         assert data["summary"] == {
             "errors": 0,
             "warnings": 0,
+            "unconnected": 0,
             "parity_errors": 0,
             "parity_warnings": 0,
             "waived": 2,
@@ -244,6 +245,7 @@ class TestJsonOutput:
         assert data["summary"] == {
             "errors": 2,
             "warnings": 0,
+            "unconnected": 0,
             "parity_errors": 0,
             "parity_warnings": 0,
         }

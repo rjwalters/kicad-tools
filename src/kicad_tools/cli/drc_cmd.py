@@ -30,6 +30,7 @@ from ..drc import (
     DRCReport,
     DRCViolation,
     ViolationCategory,
+    ViolationType,
     check_manufacturer_rules,
     generate_fix_suggestions,
 )
@@ -95,6 +96,15 @@ def build_parser() -> argparse.ArgumentParser:
             "schematic resolved, several candidates, one kicad-cli cannot "
             "netlist, or a report that does not record whether parity ran). "
             "Same name and meaning as kct check --allow-incomplete (Issue #7077)"
+        ),
+    )
+    parser.add_argument(
+        "--ignore-unconnected",
+        action="store_true",
+        help=(
+            "Do not count unconnected-item (missing connection) findings toward "
+            "the verdict and exit code -- the old clearance-only semantics. By "
+            "default an unrouted board fails DRC (Issue #7096)"
         ),
     )
     parser.add_argument(
@@ -288,6 +298,9 @@ def main(argv: list[str] | None = None) -> int:
                     pcb_name=report.pcb_name,
                     violations=filter_result.kept,
                     footprint_errors=report.footprint_errors,
+                    # Issue #7096: keep connectivity items so filtering cannot
+                    # turn an unrouted board into a pass.
+                    unconnected_items=report.unconnected_items,
                     # Issue #7077: parity findings and the run signal are not
                     # geometric violations; carry them through untouched.
                     schematic_parity=report.schematic_parity,
@@ -316,7 +329,13 @@ def main(argv: list[str] | None = None) -> int:
             )
         # The parity status line is printed, but the exit code stays the
         # manufacturer-compatibility answer (Issue #7077).
-        return output_manufacturer_check(report, args.mfr, args.layers, args.verbose)
+        return output_manufacturer_check(
+            report,
+            args.mfr,
+            args.layers,
+            args.verbose,
+            ignore_unconnected=args.ignore_unconnected,
+        )
 
     # Apply waivers to the parsed report (Issue #4691).  Runs before the
     # --errors-only / --type / --net / --category filters and before the exit
@@ -329,6 +348,14 @@ def main(argv: list[str] | None = None) -> int:
 
     # Apply filters
     violations = list(report.violations)
+
+    # Issue #7096: error-severity connectivity items (KiCad's separate
+    # ``unconnected_items`` array) gate the verdict like any other error, so an
+    # unrouted board cannot read as DRC PASSED.  ``connectivity_items()`` also
+    # returns text-report entries already in ``violations``; skip those.
+    if not args.ignore_unconnected:
+        listed = {id(v) for v in violations}
+        violations.extend(v for v in _error_connectivity_items(report) if id(v) not in listed)
 
     if args.errors_only:
         violations = [v for v in violations if v.is_error]
@@ -391,7 +418,7 @@ def main(argv: list[str] | None = None) -> int:
 
     # Non-geometric finding collections fold into the same counts, by their
     # own severity (after waivers).  Issue #7077: schematic parity.  Issue
-    # #7096 (unconnected items) is meant to fold in here the same way.
+    # #7096 (unconnected items) is folded into ``violations`` above.
     parity = report.schematic_parity_status
     error_count += parity.error_count
     warning_count += parity.warning_count
@@ -405,6 +432,11 @@ def main(argv: list[str] | None = None) -> int:
         # matching ``kct check`` (Issue #7077).
         return 2
     return 0
+
+
+def _error_connectivity_items(report: DRCReport) -> list[DRCViolation]:
+    """Error-severity (unwaived) connectivity entries of ``report`` (Issue #7096)."""
+    return [v for v in report.connectivity_items() if v.is_error]
 
 
 def _load_waivers(explicit: str | None, input_path: Path) -> tuple["Waivers | None", int]:
@@ -806,6 +838,8 @@ def output_json(
         "errors": sum(1 for v in violations if v.is_error),
         "warnings": sum(1 for v in violations if not v.is_error and not v.is_waived),
     }
+    # Issue #7096: explicit count of missing-connection findings in ``violations``.
+    summary["unconnected"] = sum(1 for v in violations if v.type == ViolationType.UNCONNECTED_ITEMS)
     summary["parity_errors"] = parity.error_count
     summary["parity_warnings"] = parity.warning_count
     if waived_count > 0:
@@ -881,8 +915,12 @@ def output_manufacturer_check(
     mfr: str,
     layers: int,
     verbose: bool,
+    ignore_unconnected: bool = False,
 ) -> int:
     """Check DRC violations against manufacturer limits.
+
+    Issue #7096: error-severity unconnected items fail this check too (unless
+    ``ignore_unconnected``) -- no fab can build an unrouted board.
 
     Prints the schematic parity status line (Issue #7077) but the exit code
     stays the manufacturer-compatibility answer: parity does not change
@@ -921,8 +959,17 @@ def output_manufacturer_check(
         print(f"\n{'-' * 60}")
         print(f"All {compatible_count} checked violations are compatible!")
 
+    unconnected = [] if ignore_unconnected else _error_connectivity_items(report)
+    if unconnected:
+        print(f"\n{'-' * 60}")
+        print(f"UNCONNECTED ITEMS ({len(unconnected)}): board is not fully routed")
+        for v in unconnected:
+            print(f"  [X] {v.message}")
+
     print(f"\n{'=' * 60}")
     print(f"Compatible: {compatible_count}, Incompatible: {len(incompatible)}")
+    if unconnected:
+        print(f"Unconnected: {len(unconnected)}")
 
     if profile.supports_assembly():
         print("Assembly: Supported")
@@ -933,7 +980,7 @@ def output_manufacturer_check(
 
     _print_parity_status(report.schematic_parity_status)
 
-    return 1 if incompatible else 0
+    return 1 if incompatible or unconnected else 0
 
 
 def print_manufacturer_rules(mfr: str, layers: int) -> None:
