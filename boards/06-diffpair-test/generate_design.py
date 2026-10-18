@@ -3395,7 +3395,7 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
             # uses, rounded to 0.005 mm and never tighter than the
             # recipe's authored gap (which stays the minimum).  Solutions
             # on jlcpcb_4layer F.Cu under the #7060 model:
-            #   USB2  90 Ω: 0.250 mm @ 0.105 mm gap -> Zdiff  89.9 (-0.1 %)
+            #   USB2  90 Ω: 0.250 mm @ 0.105 mm gap -> Zdiff  89.9 (-0.2 %)
             #   USB3  90 Ω: 0.275 mm @ 0.125 mm gap -> Zdiff  90.4 (+0.4 %)
             #   PCIe 100 Ω: 0.225 mm @ 0.135 mm gap -> Zdiff  99.7 (-0.3 %)
             #   MIPI 100 Ω: 0.225 mm @ 0.135 mm gap -> Zdiff  99.7 (-0.3 %)
