@@ -20685,8 +20685,12 @@ class Autorouter:
             cache[1], (p for p in self.pads.values() if not p.steiner_point)
         )
 
-    def _preserved_fragments(self, net_ids: set[int]) -> list[Route]:
+    def _preserved_fragments(self, net_ids: set[int], *, invert: bool = False) -> list[Route]:
         """Preserved-copper fragments of ``net_ids`` not already in ``self.routes``.
+
+        ``invert=True`` returns the fragments of every net *outside*
+        ``net_ids`` instead (Issue #7159): foreign preserved copper the
+        length tuner must clear but never measure or edit.
 
         Issue #6968: under ``--preserve-existing`` the input board's copper
         (board 07's 7-9 mm SDRAM escape stubs) lives in ``existing_routes``,
@@ -20713,7 +20717,7 @@ class Autorouter:
         return [
             r
             for r in (getattr(self, "existing_routes", None) or ())
-            if r.net in net_ids
+            if (r.net in net_ids) != invert
             and r.net not in routed_net_ids
             and id(r) not in in_routes
             and id(r) not in neutral_ids
@@ -20896,7 +20900,14 @@ class Autorouter:
         preserved_segment_ids = {id(s) for r in preserved for s in r.segments}
         preserved_via_ids = {id(v) for r in preserved for v in r.vias}
         preserved_nets = {r.net for r in preserved}
-        routes_by_net = self._net_routes_merged(preserved)
+        # Issue #7159: preserved copper of nets OUTSIDE the groups (board 07's
+        # input vias/tracks) is invisible to the tuner's clearance passes
+        # unless it is in ``routes_by_net``.  Merge it in for clearance only:
+        # it stays out of ``preserved_*`` (so it is never stripped/published)
+        # and out of the skew tracker below.  Groups never name these nets,
+        # so the tuner neither measures nor edits them.
+        foreign_preserved = self._preserved_fragments(member_net_ids, invert=True)
+        routes_by_net = self._net_routes_merged([*preserved, *foreign_preserved])
         fixed_segment_ids = {id(s) for r in self.routes if r.is_escape for s in r.segments}
         fixed_segment_ids |= preserved_segment_ids
 
