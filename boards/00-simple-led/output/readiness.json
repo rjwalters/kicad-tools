@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "checked_at": "2026-10-18T20:30:00+00:00",
+  "checked_at": "2026-10-18T22:00:00+00:00",
   "mode": "assembly",
   "status": "ready",
   "blockers": [],
@@ -13,7 +13,7 @@
     {
       "name": "kct_check",
       "status": "passed",
-      "detail": "0 electrical/manufacturing errors; DRC and ERC sub-checks passed; warning counts: thermal_asymmetry=1. Manifest verification is deferred to the artifacts gate."
+      "detail": "0 electrical/manufacturing errors; DRC and ERC sub-checks passed; warning counts: none. Manifest verification is deferred to the artifacts gate."
     },
     {
       "name": "native_drc",
@@ -33,7 +33,7 @@
     {
       "name": "warning_review",
       "status": "passed",
-      "detail": "Per-rule warning table reviewed: thermal_asymmetry=1."
+      "detail": "Per-rule warning table reviewed: none."
     },
     {
       "name": "artifacts",
@@ -50,23 +50,12 @@
     "kicad_tools_version": "0.23.0",
     "dirty": true,
     "manufacturer": "jlcpcb",
-    "commit": "c6c01121ecafe89bfec12a4cff41477938842826",
-    "source_digest": "c813d7db0bad098374b8008a8880a8d8c15e13bf33e00345875abecc26166049",
+    "commit": "fcd5987ef0272b8dbccabc8987a889c78f3c2834",
+    "source_digest": "cbced68c002b1db9994df467975a93df9b5c916e43f15b87707b798f92255a79",
     "kicad_cli_version": "10.0.6",
     "rules_digest": "fb4201ba98bfbe5cfb8bc0721cb18b5fd2059d8b61d436f9b10b82e1c4f76350"
   },
   "manufacturer": "jlcpcb",
-  "known_issues": [
-    {
-      "issue": 7220,
-      "kind": "advisory",
-      "summary": "One-sided thermal connection on R1 (VCC pad solid to the F.Cu pour, LED_ANODE pad on a 0.20 mm trace): tombstoning risk; narrower-spoke repair tracked in #7295",
-      "recorded": "2026-10-18",
-      "warnings": {
-        "thermal_asymmetry": 1
-      }
-    }
-  ],
   "evidence": {
     "zone_fill": "output/readiness/fill-consistency.json",
     "kct_check": "output/readiness/kct-check.json",
@@ -80,47 +69,46 @@
     "nets_routed_pct": 100.0
   },
   "inputs": {
-    "output/manufacturing/README.txt": "9f15e702f05e92d0ae229d3403a6f82607a25ed4805c09a4818f8287e6e9445a",
-    "output/manufacturing/assembly-back.pdf": "dcdb8e9cf05a0ae1bce3c6a60735e72c1c7be92834253a465a51fac1d8a734c9",
-    "output/manufacturing/assembly-front.pdf": "e242854d18694023ec7a46f61cb15eed2c859ed69335270acd474afdb5d03701",
+    "output/manufacturing/README.txt": "83f916fcbab8ffd0cc3453760417e67b8727995aa655cdc0fe4f3c1f888427b8",
+    "output/manufacturing/assembly-back.pdf": "a0d4693a6d88d29559c05f20d7b19ef14c04e05dd1d8dd4245a08c57a5d8ebcb",
+    "output/manufacturing/assembly-front.pdf": "51d78fc423fc5d83e3712b32d1e05d89bc69ca321359366d1ed1cb12f561b50b",
     "output/manufacturing/bom_jlcpcb.csv": "bff6f5bac21cb349473f4bd2c2a55f1245bfe32e5a3a804ce99a46b8d502801c",
-    "output/manufacturing/check-report.json": "a63e874912211932dfa42386e3c395d4878888a9752a09b22dfb508eaad350b5",
+    "output/manufacturing/check-report.json": "e282490fd4e786ab9c15cb99762b8218a68287ddb9b926a9a9f6395d06510f92",
     "output/manufacturing/cpl_jlcpcb.csv": "aae5fc27c33e43d1e058dab990fddd66a2092c4c9ada334c6f839e16a56cf811",
-    "output/manufacturing/gerbers/gerbers.zip": "67ce58dc150125449cc75c713f88544f3b0786b34e6429acb570e0242ca99ac2",
+    "output/manufacturing/gerbers/gerbers.zip": "5632022fc2e18552d66c8f8e450a19258c15f19ffedd86b754876b403f432bbf",
     "output/manufacturing/images/assembly.png": "ca6a436bfa2f87e0a14faa2f9fecb9d608594f11a504aee0e92beb39cd1fea31",
     "output/manufacturing/images/layer_B_Cu.png": "020d8d05263f15aa381c09fd9646ea3a767e13b87a7fe9225157800dff7ca655",
-    "output/manufacturing/images/layer_F_Cu.png": "ddbcbd7695bb1355511cdc30156531d8ffa3b3189a85cda71da8b0d61e6296b1",
+    "output/manufacturing/images/layer_F_Cu.png": "3e0257b67b1de57d5e9583b304d884fdef10428fe5d4354f310efda4a0d0677b",
     "output/manufacturing/images/pcb_back.png": "ba073176765de3d510c915ffcbb5e186f3426785d946aeaa000ff49eb9c0bfbf",
     "output/manufacturing/images/pcb_copper.png": "79582d20380fce3a1718612f73308afb69f4f24dfd63aa2ef738940b54b259c1",
-    "output/manufacturing/images/pcb_front.png": "8deaf4cdd6965aa7a5e5583eac0e20e412c40c83e495939f78e6059e28fe88da",
+    "output/manufacturing/images/pcb_front.png": "4ebbad52305f649e825b7375207b61cfae6c56019499ef5e674d2e75ea213369",
     "output/manufacturing/images/schematic_simple_led.png": "c90b07e37b51eb037d80cf8bcac2ab4392d8eca7868d0f6409ff154e62b7727a",
-    "output/manufacturing/kicad_project.zip": "c0b02b8fed677a7b3bcbf43f92b04eedf2783e4e3ae2183b910eb2641e26bca3",
-    "output/manufacturing/manifest.json": "bb5bf102a4ceaa03550b5c5e073a2d75873829379247b6d7e34124b9d57772de",
-    "output/manufacturing/native-drc.json": "0034f464c1923c3dd922504ba8ddd2cdd8c952e48e2114eaec0d3755fb3ada2e",
+    "output/manufacturing/kicad_project.zip": "df7c85fa087f85a233f03b825ef4cd38dff8de42e21c2e3fb751e8a4fec00837",
+    "output/manufacturing/manifest.json": "3dd32d0596e92c9c0a2d578c217e449ba0a9a11a6b06cd91cd744172b556489e",
+    "output/manufacturing/native-drc.json": "53de8d8077662a9d56993a256ba9bbdc9569e4a1d47d64da50cb658dc54cf50f",
     "output/manufacturing/procurement-review.md": "9031a5c3b93e948252943a0d3211e727c20aa2eff9d32fc3632386a931af9d80",
-    "output/manufacturing/report.md": "08de2c7c0a02e06901a8c5a66a56ab8907e94bca42f6f1c9fd838f7f96da89c1",
-    "output/manufacturing/report.pdf": "1d78eea6f6ff2e160c905db3af72d3773f909e1377ccce6d7eed0beb55eed3b6",
-    "output/manufacturing/schematic.pdf": "337642214f412e26cfddd13b08a3f77ae227b914568c187e429fc8b7eb556f93",
-    "output/manufacturing.zip": "6d7efb2219c70355f2dc6c9b1967827074b5cc2ee40d2fc8dc0bbd478df57a66",
-    "output/readiness/fill-consistency.json": "707544510980714a4787e918c6a3006da550571f7e9aafe043e538aa51557013",
+    "output/manufacturing/report.md": "a0c8bbf1a205382faeda43b355198bff1b2d87b3da62dfb3beb685ab89da9210",
+    "output/manufacturing/report.pdf": "bdacfb129af236f2d8291a3b1703b9df5ec21cbb90b4e40bac9fab42cc6a4f35",
+    "output/manufacturing/schematic.pdf": "c60cb1259ea550d08443a8f815712dbe5954006c88c41363ebf68a2302b579db",
+    "output/manufacturing.zip": "21aeb531e705270f0e08ed223bbcfe6fa77db8a7c2d6aaf1d65337a511cc86d6",
+    "output/readiness/fill-consistency.json": "e378a7f110ec0aae166bacfe5e814e3680e6aae8aa4e7f1ca3756130cc26a515",
     "output/readiness/fill-refilled/simple_led.kicad_pro": "3caf1e78675ae98ed2583327391677b4ce51e4f2fd712c2c155529f81476265a",
     "output/readiness/fill-refilled/simple_led_routed.kicad_dru": "b1be95e9fb56ff826f5ca6d9ee9b5c085987f1257ec1cd0e8d41c23e0f396f81",
-    "output/readiness/fill-refilled/simple_led_routed.kicad_pcb": "4edd1d30b0a1b1ddafd8146e21f5f4534782a67c6bf0004129af20bad627dd7a",
+    "output/readiness/fill-refilled/simple_led_routed.kicad_pcb": "fbcd0bf9044fa2309a03cbf718147f7da8136c7e29d8fcca8571d69c01699115",
     "output/readiness/fill-refilled/simple_led_routed.kicad_pro": "53d8f23774031e1bb024cfc201c2fb0ae800afd2f4bb554b46a4359b8834b4f8",
     "output/readiness/fill-saved/simple_led.kicad_pro": "3caf1e78675ae98ed2583327391677b4ce51e4f2fd712c2c155529f81476265a",
     "output/readiness/fill-saved/simple_led_routed.kicad_dru": "b1be95e9fb56ff826f5ca6d9ee9b5c085987f1257ec1cd0e8d41c23e0f396f81",
-    "output/readiness/fill-saved/simple_led_routed.kicad_pcb": "4edd1d30b0a1b1ddafd8146e21f5f4534782a67c6bf0004129af20bad627dd7a",
+    "output/readiness/fill-saved/simple_led_routed.kicad_pcb": "fbcd0bf9044fa2309a03cbf718147f7da8136c7e29d8fcca8571d69c01699115",
     "output/readiness/fill-saved/simple_led_routed.kicad_pro": "53d8f23774031e1bb024cfc201c2fb0ae800afd2f4bb554b46a4359b8834b4f8",
-    "output/readiness/kct-check.json": "a63e874912211932dfa42386e3c395d4878888a9752a09b22dfb508eaad350b5",
-    "output/readiness/known-issues.json": "7d05a58eeb9b5c4663985b5378ff988bc5d8fecf8cf06fb51caf9790fd7cd91a",
-    "output/readiness/native-drc-raw.json": "9ef26f682e525d944aa83ea083785c294cc46b44733f46f727dbf8c60b846fab",
-    "output/readiness/native-drc.json": "0034f464c1923c3dd922504ba8ddd2cdd8c952e48e2114eaec0d3755fb3ada2e",
-    "output/readiness/refilled-native/native-drc-raw.json": "9ef26f682e525d944aa83ea083785c294cc46b44733f46f727dbf8c60b846fab",
-    "output/readiness/refilled-native/native-drc.json": "0034f464c1923c3dd922504ba8ddd2cdd8c952e48e2114eaec0d3755fb3ada2e",
+    "output/readiness/kct-check.json": "e282490fd4e786ab9c15cb99762b8218a68287ddb9b926a9a9f6395d06510f92",
+    "output/readiness/native-drc-raw.json": "6b0377352c3c415bbaa10375806b36ef0bc07ce97ede5828f90c760a28018b8c",
+    "output/readiness/native-drc.json": "53de8d8077662a9d56993a256ba9bbdc9569e4a1d47d64da50cb658dc54cf50f",
+    "output/readiness/refilled-native/native-drc-raw.json": "6b0377352c3c415bbaa10375806b36ef0bc07ce97ede5828f90c760a28018b8c",
+    "output/readiness/refilled-native/native-drc.json": "53de8d8077662a9d56993a256ba9bbdc9569e4a1d47d64da50cb658dc54cf50f",
     "output/simple_led.kicad_pro": "3caf1e78675ae98ed2583327391677b4ce51e4f2fd712c2c155529f81476265a",
     "output/simple_led.kicad_sch": "0af2bb15d959931f4c3880569199596aa497fac1fd631594b76739c45327d8d0",
     "output/simple_led_routed.kicad_dru": "b1be95e9fb56ff826f5ca6d9ee9b5c085987f1257ec1cd0e8d41c23e0f396f81",
-    "output/simple_led_routed.kicad_pcb": "4edd1d30b0a1b1ddafd8146e21f5f4534782a67c6bf0004129af20bad627dd7a",
+    "output/simple_led_routed.kicad_pcb": "fbcd0bf9044fa2309a03cbf718147f7da8136c7e29d8fcca8571d69c01699115",
     "output/simple_led_routed.kicad_pro": "53d8f23774031e1bb024cfc201c2fb0ae800afd2f4bb554b46a4359b8834b4f8",
     "project.kct": "97212ac6bd4c357972b9bdedb01235675efe63da05946c1d76bf3c8ea5ce5e51"
   }

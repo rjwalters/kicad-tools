@@ -30,11 +30,11 @@ kct build boards/01-voltage-divider --mfr jlcpcb
 
 | # | Board | Status | Components | Nets | Notes |
 |---|-------|--------|------------|------|-------|
-| 00 | [Simple LED](00-simple-led/) | Assembly ready · 1 known issue | 3 | 3 | Manual D1/J1 after SMT. Advisory [#7220] (one-sided thermal, R1). |
-| 01 | [Voltage Divider](01-voltage-divider/) | Assembly ready · 1 known issue | 4 | 3 | Manual J1/J2 after SMT. Advisory [#7220] (one-sided thermal, R2). |
+| 00 | [Simple LED](00-simple-led/) | Assembly ready | 3 | 3 | Manual D1/J1 after SMT. |
+| 01 | [Voltage Divider](01-voltage-divider/) | Assembly ready | 4 | 3 | Manual J1/J2 after SMT. |
 | 02 | [Charlieplex LED](02-charlieplex-led/) | Assembly ready · 1 known issue | 19 | 12 | Real ATtiny85, compiled firmware; manual MCU and headers. Advisory [#7220] (vias at R3/R4 pad edges). |
 | 03 | [USB Joystick](03-usb-joystick/) | **Not ready** (known defect) | 38 | 27 | Real ATmega32U4 HID circuit; four-layer filled/capped via process. Defect [#7250]: USB pair 71.6 Ω vs the 90 Ω spec. Advisory [#7220]. |
-| 04 | [STM32 Dev Board](04-stm32-devboard/) | Assembly ready · 2 known issues | 17 | 12 | Correct MCP1825S regulator; paid 0.15 mm mechanical drills (exception [#6269], ruling #7147). Advisory [#7220]. |
+| 04 | [STM32 Dev Board](04-stm32-devboard/) | Assembly ready · 1 known issue | 17 | 12 | Correct MCP1825S regulator; paid 0.15 mm mechanical drills (exception [#6269], ruling #7147). |
 | 05 | [BLDC Motor Controller](05-bldc-motor-controller/) | Assembly ready · 2 known issues | 42 | 37 | DRV8313 + ATmega328P; firmware and conservative bring-up limits supplied. Order 1 oz inner copper (advisory [#7209]). Advisory [#7220]. |
 | 06 | [Four-channel LVDS demo](06-diffpair-test/) | Assembly ready | 36 | 18 | Real SN65LVDS1/2, four-layer stack with outer-layer signals; three manual headers. |
 | 07 | [8 MiB SDRAM exerciser](07-matchgroup-test/) | Assembly ready | 43 | 55 | STM32F429 + IS42S16400J, six layers, 48 MHz SDRAM; legacy Epic [#2661] fixture archived. |
