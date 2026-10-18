@@ -134,6 +134,12 @@ class PreflightConfig:
     drc_report_path: str | Path | None = None
     erc_report_path: str | Path | None = None
 
+    # When True, a DRC/ERC report recorded for a different PCB/schematic is a
+    # FAIL instead of a WARN (issue #7091).  ``ManufacturingPackage`` sets this
+    # from ``strict_preflight`` so strict exports never ship on a verdict that
+    # was computed for another board.
+    strict_report_source: bool = False
+
 
 class PreflightChecker:
     """
@@ -1067,7 +1073,7 @@ class PreflightChecker:
             if other is not None:
                 return PreflightResult(
                     name="drc",
-                    status="WARN",
+                    status="FAIL" if self.config.strict_report_source else "WARN",
                     message=f"DRC report is for {other}, not {self.pcb_path.name}",
                     details=(
                         f"{report_path} was generated for another board; re-run DRC "
@@ -1173,7 +1179,7 @@ class PreflightChecker:
             if other is not None and self.schematic_path is not None:
                 return PreflightResult(
                     name="erc",
-                    status="WARN",
+                    status="FAIL" if self.config.strict_report_source else "WARN",
                     message=f"ERC report is for {other}, not {self.schematic_path.name}",
                     details=(
                         f"{report_path} was generated for another schematic; re-run "

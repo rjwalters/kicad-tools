@@ -7,6 +7,7 @@ KiCad project ZIP, and a manifest with SHA256 checksums.
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import json
 import logging
@@ -720,8 +721,9 @@ class ManufacturingPackage:
         an error to ``result`` when it contains error-severity net shorts
         (SHORTING_ITEMS) or unconnected items (opens, read through
         ``DRCReport.connectivity_items()``; issue #7091).  A report recorded
-        for a different PCB is treated like a missing report (warning only).  Because ``ManufacturingResult.success``
-        is ``len(errors) == 0``, appending an error causes ``export()`` to
+        for a different PCB is treated like a missing report (warning only),
+        except under ``--strict-preflight`` where it blocks export.  Because
+        ``ManufacturingResult.success`` is ``len(errors) == 0``, appending an error causes ``export()`` to
         return a non-success result and skip writing output files.
 
         This gate runs even when ``preflight.skip_all`` (``--skip-preflight``)
@@ -819,8 +821,13 @@ class ManufacturingPackage:
                 f"{self.pcb_path.name}; the safety floor cannot verify this "
                 "board's connectivity -- re-run DRC on it."
             )
-            logger.warning(msg)
-            result.warnings.append(msg)
+            if self.config.strict_preflight:
+                msg = f"Safety floor (strict): {msg}"
+                result.errors.append(msg)
+                logger.error(msg)
+            else:
+                logger.warning(msg)
+                result.warnings.append(msg)
             return
 
         if shorts or opens:
@@ -838,6 +845,8 @@ class ManufacturingPackage:
     def _run_preflight(self) -> list[PreflightResult]:
         """Run pre-flight validation checks."""
         preflight_cfg = self.config.preflight or PreflightConfig()
+        if self.config.strict_preflight and not preflight_cfg.strict_report_source:
+            preflight_cfg = dataclasses.replace(preflight_cfg, strict_report_source=True)
 
         # Pass explicit THT exclusion setting when the user provided a PnP config
         exclude_tht = None

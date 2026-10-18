@@ -2014,7 +2014,9 @@ class TestDRCSafetyFloorOpensAndSource:
             )
         )
 
-    def _export(self, tmp_path, monkeypatch, pcb_name="board.kicad_pcb", **pf):
+    def _export(
+        self, tmp_path, monkeypatch, pcb_name="board.kicad_pcb", strict=False, skip_all=True, **pf
+    ):
         project_dir = tmp_path / "project"
         project_dir.mkdir(exist_ok=True)
         pcb = project_dir / pcb_name
@@ -2026,7 +2028,8 @@ class TestDRCSafetyFloorOpensAndSource:
             include_project_zip=False,
             include_manifest=False,
             include_readme=False,
-            preflight=PreflightConfig(skip_all=True, **pf),
+            strict_preflight=strict,
+            preflight=PreflightConfig(skip_all=skip_all, **pf),
         )
         pkg = ManufacturingPackage(pcb_path=pcb, manufacturer="jlcpcb", config=config)
         return pkg.export(tmp_path / "out"), assembly_called
@@ -2091,6 +2094,50 @@ class TestDRCSafetyFloorOpensAndSource:
             result.warnings
         )
         assert any("x_routed.kicad_pcb" in r.getMessage() for r in caplog.records)
+
+    def test_strict_blocks_auto_discovered_other_board_report(self, tmp_path, monkeypatch):
+        """--strict-preflight: a sibling report for another board blocks, nothing written."""
+        (tmp_path / "project").mkdir()
+        self._write_kicad_cli_report(
+            tmp_path / "project" / "drc_report.json", "/abs/elsewhere/x_routed.kicad_pcb"
+        )
+        result, assembly_called = self._export(
+            tmp_path, monkeypatch, pcb_name="x.kicad_pcb", strict=True
+        )
+        assert not result.success
+        assert not assembly_called["value"]
+        assert not (tmp_path / "out").exists()
+        assert any("is for x_routed.kicad_pcb" in e for e in result.errors), result.errors
+
+    def test_strict_preflight_drc_check_fails_on_other_board_report(self, tmp_path, monkeypatch):
+        (tmp_path / "project").mkdir()
+        self._write_kicad_cli_report(
+            tmp_path / "project" / "drc_report.json", "/abs/elsewhere/x_routed.kicad_pcb"
+        )
+        result, assembly_called = self._export(
+            tmp_path,
+            monkeypatch,
+            pcb_name="x.kicad_pcb",
+            strict=True,
+            skip_all=False,
+            skip_drc_floor=True,
+        )
+        assert not result.success
+        assert not assembly_called["value"]
+        assert not (tmp_path / "out").exists()
+        assert any("Preflight FAIL [drc]" in e for e in result.errors), result.errors
+
+    def test_non_strict_other_board_report_warns_and_exports(self, tmp_path, monkeypatch):
+        (tmp_path / "project").mkdir()
+        self._write_kicad_cli_report(
+            tmp_path / "project" / "drc_report.json", "/abs/elsewhere/x_routed.kicad_pcb"
+        )
+        result, assembly_called = self._export(
+            tmp_path, monkeypatch, pcb_name="x.kicad_pcb", strict=False
+        )
+        assert result.success, result.errors
+        assert assembly_called["value"]
+        assert any("is for x_routed.kicad_pcb" in w for w in result.warnings)
 
     def test_explicit_report_for_other_board_is_not_evidence(self, tmp_path, monkeypatch):
         report_path = tmp_path / "custom.json"
