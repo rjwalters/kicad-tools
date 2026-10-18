@@ -292,7 +292,7 @@ class TestWiring:
 _FLEET = {
     "00-simple-led/output/simple_led_routed.kicad_pcb": (["R1-1"], 0),
     "01-voltage-divider/output/voltage_divider_routed.kicad_pcb": (["R2-2"], 0),
-    "02-charlieplex-led/output/charlieplex_3x3_routed.kicad_pcb": ([], 2),
+    "02-charlieplex-led/output/charlieplex_3x3_routed.kicad_pcb": ([], 0),
     "03-usb-joystick/output/usb_joystick_routed.kicad_pcb": (
         ["C10-2", "C11-2", "J1-A1", "J1-A12", "J1-B1", "J1-B12"],
         0,
@@ -301,8 +301,8 @@ _FLEET = {
         ["C1-1", "C12-1", "C13-1", "C14-1", "C15-1", "C16-1", "C2-1", "C3-1", "R1-1"],
         0,
     ),
-    "05-bldc-motor-controller/output/bldc_controller_routed.kicad_pcb": ([], 3),
-    "06-diffpair-test/output/diffpair_test_routed.kicad_pcb": ([], 17),
+    "05-bldc-motor-controller/output/bldc_controller_routed.kicad_pcb": ([], 0),
+    "06-diffpair-test/output/diffpair_test_routed.kicad_pcb": ([], 0),
     "07-matchgroup-test/output/matchgroup_test_routed.kicad_pcb": ([], 0),
 }
 

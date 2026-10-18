@@ -108,7 +108,7 @@ logger = logging.getLogger(__name__)
 # ``search_radius_cells`` rule shared with Python (new binding
 # ``router_cpp.search_radius_cells``).  A v59 .so searches one ring wider on
 # float-noise inputs (Default rules @ 0.1 mm) than the Python mirror.
-_REQUIRED_CPP_BUILD_VERSION = 60
+_REQUIRED_CPP_BUILD_VERSION = 61
 
 
 # Issue #5599: human-readable names for the ``ValidationResult::violation_type``
@@ -5488,6 +5488,9 @@ class CppCoupledPathfinder:
         # single-ended marshalling does, so the coupled via move can refuse a
         # barrel drilled into an SMD pad (its endpoint waiver let one through).
         cpp_rules.allow_smd_vias = _allow_smd_vias(rules)
+        # Issue #7296: the mask-dam floor, so the coupled via move refuses a
+        # drill edge within the fab's dam of an SMD pad.
+        cpp_rules.min_via_pad_edge_gap = float(getattr(rules, "min_via_pad_edge_gap", 0.0) or 0.0)
         self._impl = router_cpp.CoupledPathfinder(
             cpp_grid._impl,
             cpp_rules,

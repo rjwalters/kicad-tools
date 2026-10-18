@@ -342,7 +342,8 @@ namespace router {
 // instead of a bare float32 ``ceil`` that added a phantom cell on float-noise
 // inputs.  Routing output changes, and the Python parity test calls the new
 // ``router_cpp.search_radius_cells`` binding, so a v59 .so must be rejected.
-constexpr int ROUTER_CPP_BUILD_VERSION = 60;
+// v61: ``DesignRules::min_via_pad_edge_gap`` + coupled pad-edge refusal (#7296).
+constexpr int ROUTER_CPP_BUILD_VERSION = 61;
 
 
 // Issue #4071: fixed-capacity owner-set size for per-cell corridor
@@ -744,6 +745,10 @@ struct DesignRules {
     float congestion_threshold = 0.5f;
     float min_drill_clearance = 0.102f;
     float min_hole_to_hole = 0.5f;
+    // Issue #7296: mask-dam floor, drill edge to SMD pad copper edge, for a
+    // via that does not overlap the pad (Python
+    // ``DesignRules.min_via_pad_edge_gap``).  0 disables.
+    float min_via_pad_edge_gap = 0.0f;
     // Issue #4071: soft corridor-attractor bonus (mirrors Python
     // ``DesignRules.cost_corridor_attractor``, default 3.0).  Subtracted
     // from a cell's positive step cost when the cell is reserved for the

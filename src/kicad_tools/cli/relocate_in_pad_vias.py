@@ -62,12 +62,14 @@ import json
 import math
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from shapely.geometry import LineString, Point, box  # type: ignore[import-untyped]
 
 from kicad_tools.cli.stitch_cmd import point_in_polygon
 from kicad_tools.validate.rules.via_pad_geometry import (
+    DRC_TOLERANCE,
+    drill_to_mask_aperture_gap,
     is_smd_pad,
     pad_absolute_bbox,
     via_inside_pad,
@@ -1525,6 +1527,204 @@ def relocate_in_pad_vias(
             )
         )
 
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Pad-edge pass (Issue #7296)
+# ---------------------------------------------------------------------------
+
+#: Slide step along the escape track (mm) and the farthest a pad-edge via may
+#: travel from where the router left it.
+_PAD_EDGE_STEP_MM = 0.025
+_PAD_EDGE_MAX_SLIDE_MM = 0.8
+
+
+def _pad_edge_gap(
+    via: Via,
+    x: float,
+    y: float,
+    candidates: list[tuple[Footprint, Pad, tuple[float, float, float, float]]],
+    pad_to_mask: float,
+) -> float | None:
+    """Smallest drill-edge-to-aperture gap of a via placed at ``(x, y)``.
+
+    Negative when the drill reaches into a same-net pad's copper (via-in-pad).
+    ``None`` when no same-net pad has a measurable aperture.
+    """
+    from types import SimpleNamespace
+
+    probe: Any = SimpleNamespace(position=(x, y), drill=via.drill)
+    gaps = [
+        gap
+        for fp, pad, _bbox in candidates
+        if (gap := drill_to_mask_aperture_gap(probe, pad, fp, pad_to_mask_clearance=pad_to_mask))
+        is not None
+    ]
+    return min(gaps) if gaps else None
+
+
+def relocate_pad_edge_vias(
+    pcb: PCB,
+    design_rules: DesignRules,
+    *,
+    nets: set[str] | None = None,
+    min_hole_clearance_mm: float | None = None,
+) -> RelocationResult:
+    """Slide vias out of the mask-dam zone beside an SMD pad (Issue #7296).
+
+    Fixes exactly what ``kct check``'s ``via_at_pad_edge`` warning reports
+    (Issue #7220): a same-net via whose drill misses the pad copper but sits
+    closer than ``design_rules.min_solder_mask_dam_mm`` to the pad's mask
+    aperture.  The via moves along its escape track (then an 8-direction
+    ladder) to the nearest spot where, for every same-net SMD pad, the drill
+    edge is at least the dam from the aperture, using the checker's own
+    :func:`~kicad_tools.validate.rules.via_pad_geometry.drill_to_mask_aperture_gap`.
+    Connectivity is kept with stubs from the old position on every connected
+    layer, and the move is gated by the same clearance / hole-to-hole /
+    stub-clearance checks as :func:`relocate_in_pad_vias`.  A via with no legal
+    spot is reported ``unresolvable`` and left in place.
+    """
+    result = RelocationResult()
+    dam = float(getattr(design_rules, "min_solder_mask_dam_mm", 0.0) or 0.0)
+    if dam <= DRC_TOLERANCE:
+        return result
+    setup = getattr(pcb, "setup", None)
+    pad_to_mask = float(getattr(setup, "pad_to_mask_clearance", 0.0) or 0.0)
+    min_clearance = design_rules.min_clearance_mm
+    min_hole_to_hole = design_rules.min_hole_to_hole_mm
+    min_hole_clearance = _resolve_hole_clearance(pcb, min_hole_clearance_mm)
+
+    pads_by_net = _collect_smd_pads_by_net(pcb)
+    tht_pads = _collect_tht_pads(pcb)
+    steps = [
+        _PAD_EDGE_STEP_MM * i for i in range(1, int(_PAD_EDGE_MAX_SLIDE_MM / _PAD_EDGE_STEP_MM) + 1)
+    ]
+
+    for via in list(pcb.vias):
+        if via.net_number == 0:
+            continue
+        candidates = pads_by_net.get(via.net_number)
+        if not candidates:
+            continue
+        vx, vy = via.position
+        flagged = next(
+            (
+                (fp, pad)
+                for fp, pad, bbox in candidates
+                if not via_inside_pad(via, bbox, pad, fp)
+                and (
+                    gap := drill_to_mask_aperture_gap(
+                        via, pad, fp, pad_to_mask_clearance=pad_to_mask
+                    )
+                )
+                is not None
+                and gap < dam - DRC_TOLERANCE
+            ),
+            None,
+        )
+        if flagged is None:
+            continue
+        fp, pad = flagged
+        pad_ref = f"{fp.reference}-{pad.number}"
+        net_name = via.net_name or pad.net_name or ""
+        if nets is not None and net_name not in nets:
+            continue
+
+        connected: list[tuple[Segment, tuple[float, float]]] = []
+        for seg in pcb.segments_in_net(via.net_number):
+            far = _endpoint_at(seg, vx, vy)
+            if far is not None:
+                connected.append((seg, far))
+        stub_layers: list[str] = []
+        for layer in [_pad_copper_layer(pad), *(seg.layer for seg, _ in connected)]:
+            if layer and layer not in stub_layers:
+                stub_layers.append(layer)
+        stub_width = max((seg.width for seg, _ in connected), default=0.2) or 0.2
+
+        # Candidate order: along each escape track first (copper already runs
+        # that way), then the compass ladder around the old position.
+        directions: list[tuple[float, float]] = []
+        for _seg, far in sorted(
+            connected, key=lambda it: -math.hypot(it[1][0] - vx, it[1][1] - vy)
+        ):
+            length = math.hypot(far[0] - vx, far[1] - vy)
+            if length > 1e-9:
+                directions.append(((far[0] - vx) / length, (far[1] - vy) / length))
+        directions.extend(_PLANE_DIRECTIONS)
+
+        target = None
+        reason = "no clearance-legal location outside the mask-dam zone"
+        for dx, dy in directions:
+            for step in steps:
+                # Whole micrometres: what KiCad's own serializer keeps.
+                nx, ny = round(vx + dx * step, 3), round(vy + dy * step, 3)
+                gap = _pad_edge_gap(via, nx, ny, candidates, pad_to_mask)
+                if gap is None or gap < dam + 1e-6:
+                    # Still in the zone, or into a pad's copper: keep sliding.
+                    continue
+                failure = _check_clearance(
+                    pcb,
+                    via,
+                    nx,
+                    ny,
+                    pads_by_net,
+                    tht_pads,
+                    min_clearance,
+                    min_hole_to_hole,
+                    min_hole_clearance,
+                ) or _check_stub_clearance(
+                    pcb, via, (nx, ny), stub_layers, stub_width, min_clearance, min_hole_clearance
+                )
+                if failure is None:
+                    target = (nx, ny)
+                    break
+                reason = failure
+            if target is not None:
+                break
+
+        if target is None:
+            result.unresolvable.append(
+                ViaRelocationSkip(
+                    x=vx,
+                    y=vy,
+                    net=via.net_number,
+                    net_name=net_name,
+                    pad_ref=pad_ref,
+                    reason=reason,
+                    uuid=via.uuid,
+                    category="unresolvable",
+                )
+            )
+            continue
+        if not _persist_via_with_stubs(pcb, via, target, stub_layers, stub_width, net_name):
+            result.unresolvable.append(
+                ViaRelocationSkip(
+                    x=vx,
+                    y=vy,
+                    net=via.net_number,
+                    net_name=net_name,
+                    pad_ref=pad_ref,
+                    reason="could not locate backing (via ...) node to persist move",
+                    uuid=via.uuid,
+                    category="unresolvable",
+                )
+            )
+            continue
+        result.moved.append(
+            ViaRelocation(
+                old_x=vx,
+                old_y=vy,
+                new_x=target[0],
+                new_y=target[1],
+                net=via.net_number,
+                net_name=net_name,
+                pad_ref=pad_ref,
+                uuid=via.uuid,
+                stub_layers=stub_layers,
+                kind="pad-edge",
+            )
+        )
     return result
 
 

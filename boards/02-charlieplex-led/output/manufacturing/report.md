@@ -20,7 +20,7 @@ header-includes:
 | Layers | 2 copper (F.Cu, B.Cu) |
 | Footprints | 19 (16 SMD, 3 THT, 0 other) |
 | Nets | 12 |
-| Traces | 452 segments |
+| Traces | 456 segments |
 | Vias | 28 |
 | Board Size | 50.0 x 55.0 mm |
 
@@ -53,8 +53,7 @@ The following 3 through-hole components are **excluded from the SMT pick-and-pla
 | Errors | 0 |
 | Warnings | 0 |
 
-**Status**: SKIPPED -- ERC skipped by user request
-
+**Status**: PASS
 
 \newpage
 
@@ -113,20 +112,22 @@ The following 3 through-hole components are **excluded from the SMT pick-and-pla
 
 \newpage
 
-## DRC Status
+## DRC Status (`--mfr jlcpcb` rules)
 
 | Metric | Count |
 |--------|-------|
 | Errors | 0 |
-| Warnings | 2 |
+| Errors: kct (`--mfr jlcpcb` rules) | 0 |
+| Errors: kicad-cli (geometric) | 0 |
+| Warnings | 0 |
 | Blocking | 0 |
 
 **Status**: PASS
+
 ### Violations by Type
 
 | Violation Type | Count |
 |----------------|-------|
-| via_at_pad_edge | 2 |
 | silk_geometry_unmodeled | 1 |
 
 
@@ -134,11 +135,10 @@ The following 3 through-hole components are **excluded from the SMT pick-and-pla
 
 ## Manufacturing Readiness
 
-**Verdict**: WARNING
+**Verdict**: READY
 
 ### Action Items
 
-- **[OPTIONAL]** Review 2 DRC warnings
 - **[OPTIONAL]** Analog net: LINE_A — audio signal; keep short, away from digital/switching nets
 - **[OPTIONAL]** Analog net: LINE_B — audio signal; keep short, away from digital/switching nets
 - **[OPTIONAL]** Analog net: LINE_C — audio signal; keep short, away from digital/switching nets

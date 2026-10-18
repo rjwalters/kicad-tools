@@ -2144,6 +2144,7 @@ class CoupledPathfinder:
             with contextlib.suppress(ValueError):
                 self._allow_smd_vias = bool(get_mfr_limits(rules.manufacturer).via_in_pad_supported)
         self._smd_pad_drill_memo: dict[tuple[int, int], bool] = {}
+        self._smd_pad_edge_memo: dict[tuple[int, int], bool] = {}
 
         # Pre-calculate trace clearance radius (Issue #6994: the guarded
         # rule shared with the Python Router and the native A*).
@@ -2525,6 +2526,34 @@ class CoupledPathfinder:
                 if not pad.through_hole
             )
             self._smd_pad_drill_memo[key] = hit
+        return hit
+
+    def _via_drill_at_smd_pad_edge(self, gx: int, gy: int) -> bool:
+        """Would a via drilled at ``(gx, gy)`` leave no mask dam to an SMD pad? (#7296).
+
+        Mirror of the C++ ``CoupledPathfinder::via_drill_at_smd_pad_edge``:
+        the drill clears the pad copper but its edge is within
+        ``rules.min_via_pad_edge_gap`` of it (see
+        :func:`~.via_in_pad_eligibility.via_drill_at_pad_edge`).  Applies
+        whether or not the fab allows via-in-pad.
+        """
+        floor = float(self.rules.min_via_pad_edge_gap or 0.0)
+        if floor <= 0.0:
+            return False
+        from .pad_geometry import pad_point_distance
+        from .via_in_pad_eligibility import via_drill_at_pad_edge
+
+        key = (gx, gy)
+        hit = self._smd_pad_edge_memo.get(key)
+        if hit is None:
+            wx, wy = self.grid.grid_to_world(gx, gy)
+            drill = self.rules.via_drill
+            hit = any(
+                via_drill_at_pad_edge(pad_point_distance(pad, wx, wy), drill, floor)
+                for pad in getattr(self.grid, "_pads", ())
+                if not pad.through_hole
+            )
+            self._smd_pad_edge_memo[key] = hit
         return hit
 
     def _coupled_own_vias_clear(
@@ -3185,9 +3214,15 @@ class CoupledPathfinder:
             # Issue #6840: the fab's via-in-pad process, at the endpoint pads
             # too (where ``_is_via_blocked`` is waived below).
             if smd_vias_ok is None:
-                smd_vias_ok = self._allow_smd_vias or not (
-                    self._via_drill_in_smd_pad(state.p_pos.x, state.p_pos.y)
-                    or self._via_drill_in_smd_pad(state.n_pos.x, state.n_pos.y)
+                smd_vias_ok = (
+                    self._allow_smd_vias
+                    or not (
+                        self._via_drill_in_smd_pad(state.p_pos.x, state.p_pos.y)
+                        or self._via_drill_in_smd_pad(state.n_pos.x, state.n_pos.y)
+                    )
+                ) and not (
+                    self._via_drill_at_smd_pad_edge(state.p_pos.x, state.p_pos.y)
+                    or self._via_drill_at_smd_pad_edge(state.n_pos.x, state.n_pos.y)
                 )
             if not smd_vias_ok:
                 self.last_rejections["via_in_pad"] += 1
