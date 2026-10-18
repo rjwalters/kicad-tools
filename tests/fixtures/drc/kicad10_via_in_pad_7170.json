@@ -1,0 +1,133 @@
+{
+    "$schema": "https://schemas.kicad.org/drc.v1.json",
+    "coordinate_units": "mm",
+    "date": "2026-10-18T02:16:32",
+    "ignored_checks": [
+        {
+            "description": "Footprint has no courtyard defined",
+            "key": "missing_courtyard"
+        },
+        {
+            "description": "Track endpoint not centered on via",
+            "key": "track_not_centered_on_via"
+        },
+        {
+            "description": "Tuning profile track geometries",
+            "key": "tuning_profile_track_geometries"
+        },
+        {
+            "description": "Footprint doesn't match symbol's footprint filters",
+            "key": "footprint_filters_mismatch"
+        },
+        {
+            "description": "Footprint component type doesn't match footprint pads",
+            "key": "footprint_type_mismatch"
+        },
+        {
+            "description": "Footprint doesn't match copy in library",
+            "key": "lib_footprint_mismatch"
+        }
+    ],
+    "included_severities": [
+        "error",
+        "warning",
+        "exclusion"
+    ],
+    "kicad_version": "10.0.6",
+    "schematic_parity": [],
+    "source": "simple_led_routed.kicad_pcb",
+    "unconnected_items": [],
+    "violations": [
+        {
+            "description": "Annular width (rule 'Annular Ring - jlcpcb' min annular width 0.1500 mm; actual 0.0500 mm)",
+            "items": [
+                {
+                    "description": "Via [GND] on F.Cu - B.Cu",
+                    "pos": {
+                        "x": 155.6,
+                        "y": 87.5
+                    },
+                    "uuid": "aaaaaaaa-0000-0000-0000-000000000001"
+                }
+            ],
+            "severity": "error",
+            "type": "annular_width"
+        },
+        {
+            "description": "Via diameter (rule 'Via Diameter - jlcpcb' min diameter 0.6000 mm; actual 0.4000 mm)",
+            "items": [
+                {
+                    "description": "Via [GND] on F.Cu - B.Cu",
+                    "pos": {
+                        "x": 155.6,
+                        "y": 87.5
+                    },
+                    "uuid": "aaaaaaaa-0000-0000-0000-000000000001"
+                }
+            ],
+            "severity": "error",
+            "type": "via_diameter"
+        },
+        {
+            "description": "Via is not connected or connected on only one layer",
+            "items": [
+                {
+                    "description": "Via [GND] on F.Cu - B.Cu",
+                    "pos": {
+                        "x": 155.6,
+                        "y": 87.5
+                    },
+                    "uuid": "aaaaaaaa-0000-0000-0000-000000000001"
+                }
+            ],
+            "severity": "warning",
+            "type": "via_dangling"
+        },
+        {
+            "description": "Drilled hole too close to other hole (board setup constraints min 0.5000 mm; actual 0.2700 mm)",
+            "items": [
+                {
+                    "description": "PTH pad 1 [GND] of D1",
+                    "pos": {
+                        "x": 154.73,
+                        "y": 87.5
+                    },
+                    "uuid": "64fc289f-9d09-5741-886f-9dab05a0ae7e"
+                },
+                {
+                    "description": "Via [GND] on F.Cu - B.Cu",
+                    "pos": {
+                        "x": 155.6,
+                        "y": 87.5
+                    },
+                    "uuid": "aaaaaaaa-0000-0000-0000-000000000001"
+                }
+            ],
+            "severity": "warning",
+            "type": "hole_to_hole"
+        },
+        {
+            "description": "Drilled hole too close to other hole (board setup constraints min 0.5000 mm; actual 0.2700 mm)",
+            "items": [
+                {
+                    "description": "PTH pad 1 [GND] of D1",
+                    "pos": {
+                        "x": 154.73,
+                        "y": 87.5
+                    },
+                    "uuid": "64fc289f-9d09-5741-886f-9dab05a0ae7e"
+                },
+                {
+                    "description": "Via [GND] on F.Cu - B.Cu",
+                    "pos": {
+                        "x": 155.6,
+                        "y": 87.5
+                    },
+                    "uuid": "aaaaaaaa-0000-0000-0000-000000000001"
+                }
+            ],
+            "severity": "warning",
+            "type": "hole_to_hole"
+        }
+    ]
+}

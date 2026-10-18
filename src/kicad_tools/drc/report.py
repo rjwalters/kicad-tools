@@ -314,6 +314,14 @@ def parse_text_report(content: str, source_file: str = "") -> DRCReport:
             current_violation["severity"] = Severity.from_string(rule_match.group(2))
             continue
 
+        # Severity line without a rule: "Local override; warning" (kicad-cli 10
+        # writes it for e.g. via_dangling).  Without this the violation kept
+        # the default ERROR severity (Issue #7170).
+        override_match = re.match(r"\s+Local override;\s*(error|warning)", line, re.IGNORECASE)
+        if override_match:
+            current_violation["severity"] = Severity.from_string(override_match.group(1))
+            continue
+
         # Location line: @(x mm, y mm): description
         loc_match = re.match(r"\s+@\s*\(\s*([\d.]+)\s*mm\s*,\s*([\d.]+)\s*mm\s*\):\s*(.+)", line)
         if loc_match:
@@ -586,13 +594,30 @@ def _extract_values(data: dict, message: str) -> None:
         data["actual_value_mm"] = float(width_match.group(2))
         return
 
-    # Pattern: "min X.XXXX mm; actual Y.YYYY mm" (kicad-cli 10 hole-to-hole wording)
+    # Pattern: "min X.XXXX mm; actual Y.YYYY mm" (kicad-cli 10 hole-to-hole
+    # wording), also with words between ``min`` and the number -- "min
+    # diameter 0.6000 mm; actual 0.4000 mm" (via_diameter) and "min hole
+    # 0.3000 mm; actual ..." (drill_out_of_range).  Issue #7170.
     min_actual_match = re.search(
-        r"\bmin(?:imum)?\s+([\d.]+)\s*mm.*?actual\s+(-?[\d.]+)\s*mm", message, re.IGNORECASE
+        r"\bmin(?:imum)?\s+(?:[a-z]+\s+)*?([\d.]+)\s*mm.*?actual\s+(-?[\d.]+)\s*mm",
+        message,
+        re.IGNORECASE,
     )
     if min_actual_match:
         data["required_value_mm"] = float(min_actual_match.group(1))
         data["actual_value_mm"] = float(min_actual_match.group(2))
+        return
+
+    # Pattern: "max hole X.XXXX mm; actual Y.YYYY mm" (upper-bound constraints,
+    # e.g. drill_out_of_range on a too-large hole).  Issue #7170.
+    max_actual_match = re.search(
+        r"\bmax(?:imum)?\s+(?:[a-z]+\s+)*?([\d.]+)\s*mm.*?actual\s+(-?[\d.]+)\s*mm",
+        message,
+        re.IGNORECASE,
+    )
+    if max_actual_match:
+        data["required_value_mm"] = float(max_actual_match.group(1))
+        data["actual_value_mm"] = float(max_actual_match.group(2))
         return
 
 
