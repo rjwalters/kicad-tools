@@ -1,11 +1,9 @@
 {
-  "all_by_type": {
-    "silk_overlap": 2
-  },
+  "all_by_type": {},
   "by_type": {},
   "error_count": 0,
   "note": null,
-  "pcb_sha256": "e76168e65070120105a0e79a99dc6703e1fdd43c1308208d3cce183b6ffa6e9e",
+  "pcb_sha256": "a07693a2dbc33114cd3ae5eeea68f940151af5adc566c5b6303225b727d02b98",
   "ran": true,
   "reason": "ok",
   "refill_during_check": false,

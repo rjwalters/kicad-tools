@@ -100,9 +100,11 @@ def test_saved_plan_replay_still_applies_reviewed_silk_text_placement(routing, t
         text = next(t for t in footprint.texts if t.text_type == "reference")
         return (round(text.position[0], 5), round(text.position[1], 5))
 
-    # U1's reviewed designator sits left of the body, not above it.
+    # The generator puts U1's designator at a library offset; the plan moves
+    # it to the reviewed spot just outside the TQFP body (Issue #7228: the
+    # old reviewed offset (-1.5, 0) printed it under the package).
     assert reference_text_offset(UNROUTED_03, "U1") == (0.0, -7.35)
-    assert reference_text_offset(replayed, "U1") == (-1.5, 0.0)
+    assert reference_text_offset(replayed, "U1") == (-7.4, 0.0)
 
 
 @pytest.mark.parametrize(
