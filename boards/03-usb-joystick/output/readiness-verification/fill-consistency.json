@@ -4,8 +4,8 @@
     "footprints/Joystick.pretty/Samtec_TSM-103-01-T-DV.kicad_mod": "492671cda5112d330aaf0cf514ce2188b589834eb10d493769ad0dd6bc5f9b86",
     "fp-lib-table": "d5eea395214efa8406e88c8e54435a0cbf9cf83b69ee3ed4d2519e109ce76c02",
     "usb_joystick.kicad_pro": "09c8746ffab5b0449d13f3b777d87c4786c2abc2cfa2df7eb796e12f83822c05",
-    "usb_joystick_routed.kicad_dru": "ee0e079e5223ca08bc491b6c10abdd4584a0b3b90050f78168c6e4acff5a3c78",
-    "usb_joystick_routed.kicad_pcb": "e76168e65070120105a0e79a99dc6703e1fdd43c1308208d3cce183b6ffa6e9e",
+    "usb_joystick_routed.kicad_dru": "874cc0b7c8160aef48b42e06ad4825ea168f5a27fce24a0047cd8b47de42963e",
+    "usb_joystick_routed.kicad_pcb": "a07693a2dbc33114cd3ae5eeea68f940151af5adc566c5b6303225b727d02b98",
     "usb_joystick_routed.kicad_pro": "e1b779bc9454f7e182c9f507a78162bc3e5b96e7cb9fc9231fb9bbabc046db00"
   },
   "deltas_mm2": {
@@ -23,7 +23,7 @@
     "In2.Cu": 4528.535277
   },
   "refilled_pcb": "output/readiness-verification/fill-refilled/usb_joystick_routed.kicad_pcb",
-  "refilled_sha256": "490caf2c347ed4b0b7382aa3521e2d540a744f15195d543a3d5b662b0d0132d2",
+  "refilled_sha256": "75f12a123ca185b3d0d64d7fa8522de04c62c602875c5702e22707696bb97f4f",
   "saved_areas_mm2": {
     "B.Cu": 4227.227745,
     "F.Cu": 3874.788502,
@@ -31,6 +31,6 @@
     "In2.Cu": 4528.535277
   },
   "saved_pcb": "output/readiness-verification/fill-saved/usb_joystick_routed.kicad_pcb",
-  "saved_sha256": "e76168e65070120105a0e79a99dc6703e1fdd43c1308208d3cce183b6ffa6e9e",
+  "saved_sha256": "a07693a2dbc33114cd3ae5eeea68f940151af5adc566c5b6303225b727d02b98",
   "tolerance_mm2": 0.01
 }
