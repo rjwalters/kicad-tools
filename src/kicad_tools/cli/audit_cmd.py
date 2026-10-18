@@ -18,6 +18,10 @@ Exit Codes:
     0 - Ready for manufacturing (no errors)
     1 - Command failure (file not found, parse error, etc.)
     2 - Not ready (errors found) or warnings found with --strict
+
+--format json keeps the audit's own top-level "verdict"
+(ready|warning|not_ready) and adds "gate_verdict" (pass|fail) and
+"exit_code", the process exit code (Issue #7230).
 """
 
 import argparse
@@ -27,6 +31,8 @@ from pathlib import Path
 
 from kicad_tools.audit import AuditResult, AuditVerdict, ManufacturingAudit
 from kicad_tools.manufacturers import get_all_manufacturer_names, get_profile
+
+from ._gate import gate_exit_code
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -235,23 +241,27 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Error running audit: {e}", file=sys.stderr)
         return 1
 
+    # Exit code, decided before output so ``--format json`` can carry it
+    # (Issue #7230).
+    # Exit 2 = audit ran successfully but found issues (NOT_READY or WARNING+strict)
+    # Exit 1 = reserved for tool-level failures (file not found, parse error) above
+    # Exit 0 = board is ready for manufacturing
+    exit_code, gate_verdict = gate_exit_code(
+        1 if result.verdict == AuditVerdict.NOT_READY else 0,
+        1 if result.verdict == AuditVerdict.WARNING else 0,
+        strict=args.strict,
+        style="check",
+    )
+
     # Output results
     if args.format == "json":
-        output_json(result)
+        output_json(result, gate_verdict=gate_verdict, exit_code=exit_code)
     elif args.format == "summary":
         output_summary(result)
     else:
         output_table(result, args.verbose)
 
-    # Determine exit code
-    # Exit 2 = audit ran successfully but found issues (NOT_READY or WARNING+strict)
-    # Exit 1 = reserved for tool-level failures (file not found, parse error) above
-    # Exit 0 = board is ready for manufacturing
-    if result.verdict == AuditVerdict.NOT_READY or (
-        result.verdict == AuditVerdict.WARNING and args.strict
-    ):
-        return 2
-    return 0
+    return exit_code
 
 
 def output_table(result: AuditResult, verbose: bool = False) -> None:
@@ -568,9 +578,24 @@ def _output_isolation_section(iso) -> None:
         print(f"    NOTE: {DISCLAIMER}")
 
 
-def output_json(result: AuditResult) -> None:
-    """Output audit results as JSON."""
-    print(json.dumps(result.to_dict(), indent=2, default=str))
+def output_json(
+    result: AuditResult,
+    *,
+    gate_verdict: str | None = None,
+    exit_code: int | None = None,
+) -> None:
+    """Output audit results as JSON.
+
+    Issue #7230: ``verdict`` stays the audit's own ``ready``/``warning``/
+    ``not_ready``; the exit gate's ``pass``/``fail`` is the additive
+    ``gate_verdict`` next to ``exit_code``.
+    """
+    data = result.to_dict()
+    if gate_verdict is not None:
+        data["gate_verdict"] = gate_verdict
+    if exit_code is not None:
+        data["exit_code"] = exit_code
+    print(json.dumps(data, indent=2, default=str))
 
 
 def output_summary(result: AuditResult) -> None:

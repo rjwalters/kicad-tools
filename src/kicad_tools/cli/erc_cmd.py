@@ -27,6 +27,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
+from typing import Any
 
 from ..erc import (
     ERC_CATEGORIES,
@@ -35,7 +36,7 @@ from ..erc import (
     ERCViolation,
     check_cross_sheet_duplicates,
 )
-from ._gate import hidden_by_view_filter  # noqa: F401  (re-exported; Issue #7230)
+from ._gate import gate_exit_code, hidden_by_view_filter  # noqa: F401  (re-exported; Issue #7230)
 from .runner import find_kicad_cli, run_erc
 
 
@@ -218,9 +219,22 @@ def main(argv: list[str] | None = None) -> int:
 
     hidden = hidden_by_view_filter(gate_violations, violations)
 
+    # Exit code -- from the pre-view-filter set, decided before output so
+    # ``--format json`` can carry it (Issue #7230).
+    error_count = sum(1 for v in gate_violations if v.is_error)
+    warning_count = len(gate_violations) - error_count
+    exit_code, verdict = gate_exit_code(error_count, warning_count, strict=args.strict, style="drc")
+
     # Output
     if args.format == "json":
-        output_json(violations, report, filtered_count=filter_ignored_count, hidden=hidden)
+        output_json(
+            violations,
+            report,
+            filtered_count=filter_ignored_count,
+            hidden=hidden,
+            verdict=verdict,
+            exit_code=exit_code,
+        )
     elif args.format == "summary":
         output_summary(violations, report, filtered_count=filter_ignored_count, hidden=hidden)
     else:
@@ -233,15 +247,7 @@ def main(argv: list[str] | None = None) -> int:
             hidden=hidden,
         )
 
-    # Exit code -- from the pre-view-filter set
-    error_count = sum(1 for v in gate_violations if v.is_error)
-    warning_count = len(gate_violations) - error_count
-
-    if error_count > 0:
-        return 1
-    elif warning_count > 0 and args.strict:
-        return 2
-    return 0
+    return exit_code
 
 
 def no_match_message(hidden: dict[str, int]) -> str:
@@ -438,8 +444,13 @@ def output_json(
     report: ERCReport,
     filtered_count: int = 0,
     hidden: dict[str, int] | None = None,
+    verdict: str | None = None,
+    exit_code: int | None = None,
 ) -> None:
-    """Output violations as JSON."""
+    """Output violations as JSON.
+
+    Issue #7230: top-level ``verdict`` and ``exit_code`` when given.
+    """
     summary: dict = {
         "errors": sum(1 for v in violations if v.is_error),
         "warnings": sum(1 for v in violations if not v.is_error),
@@ -449,12 +460,16 @@ def output_json(
     if hidden:
         summary["hidden_by_view_filter"] = hidden
 
-    data = {
+    data: dict[str, Any] = {
         "source": report.source_file,
         "kicad_version": report.kicad_version,
         "summary": summary,
         "violations": [v.to_dict() for v in violations],
     }
+    if verdict is not None:
+        data["verdict"] = verdict
+    if exit_code is not None:
+        data["exit_code"] = exit_code
     print(json.dumps(data, indent=2))
 
 

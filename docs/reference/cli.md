@@ -188,9 +188,14 @@ kct sch validate <schematic> [options]
 |--------|-------------|
 | `--format` | Output format (`text` or `json`) |
 | `--lib-path` | Directory of `.kicad_sym` files used as a fallback for symbols missing from the schematic's embedded `lib_symbols` (embedded symbols stay authoritative); repeatable |
-| `--strict` | Exit with error on warnings |
+| `--strict` | Exit 1 on any warning (errors and checks not run already exit 1) |
 | `--quiet`, `-q` | Only show errors |
 | `--skip` | Skip a validation check category (e.g. `swd_routing`, `i2c_pullups`); repeatable |
+
+Exit codes: `0` pass; `1` errors, a requested check that did not run, warnings
+with `--strict`, or the tool could not run. `--format json` carries top-level
+`verdict` (`pass`|`fail`|`incomplete`) and `exit_code` (#7230). See
+[Sign-off exit codes](#sign-off-exit-codes).
 
 ---
 
@@ -319,6 +324,8 @@ disclosed as `Filtered:` / `summary.filtered` (Issue #7161).
 | `--list-types` | List known ERC violation types and exit |
 
 Exit codes: `0` no errors, `1` errors (or failure), `2` warnings with `--strict`.
+`--format json` carries top-level `verdict` (`pass`|`fail`) and `exit_code`
+(the process exit code, #7230). See [Sign-off exit codes](#sign-off-exit-codes).
 
 **Examples:**
 ```bash
@@ -375,7 +382,10 @@ one status line, also in `summary`, `--mfr` and `kicad-drc-summary` output:
 Exit codes: error-severity parity findings exit 1; warning-severity ones exit
 2 under `--strict`; NOT RUN exits 2 (the verdict reads `DRC INCOMPLETE`, never
 `DRC PASSED`) unless `--allow-incomplete` is given. Errors take precedence.
-`--mfr` uses the same exit gate (#7170, see below). `--format json` adds a
+`--mfr` uses the same exit gate (#7170, see below). `--format json` (plain
+and `--mfr`) carries top-level `verdict` (`pass`|`fail`|`incomplete`) and
+`exit_code` (the process exit code, #7230); under `--allow-incomplete` a NOT
+RUN parity is `verdict: "incomplete"` with `exit_code: 0`. It also adds a
 `schematic_parity` object (`status`, `checked`, `reason`, `error_count`,
 `warning_count`, `issues`), a derived `schematic_parity_checked` alias, and
 `parity_errors`/`parity_warnings` in `summary`. Waiver entries match parity
@@ -408,7 +418,7 @@ checked, compatible, incompatible, not_checked, not_checked_errors,
 not_checked_warnings, not_checked_by_type, parity_errors, parity_warnings},
 checks: [{type_str, severity, result, rule_name, message, violation_message,
 manufacturer_limit, actual_value}], schematic_parity, schematic_parity_checked,
-exit_code}`; `checked + not_checked == total`. Other `--format` values print
+verdict, exit_code}`; `checked + not_checked == total`. Other `--format` values print
 the table.
 
 **Waivers (`--waivers`, #4691)**
@@ -473,6 +483,12 @@ kct check <pcb_file> [options]
 and `exit_code` (the process exit code). `summary.passed` is DRC-only: it can be
 `true` while `verdict` is `incomplete` (#7230).
 
+Exit codes: `0` pass (or `incomplete` with `--allow-incomplete`); `2` the check
+ran and the board fails (DRC errors, warnings with `--strict`, an ERC/LVS/manifest
+sub-check FAILED) or is incomplete (a sub-check NOT RUN); `1` the tool could not
+run (file not found, parse error, usage error). `--drc-only` has no incomplete
+state. See [Sign-off exit codes](#sign-off-exit-codes).
+
 | Option | Description |
 |--------|-------------|
 | `--format {table,json,summary}` | Output format |
@@ -504,10 +520,48 @@ kct validate --sync <schematic> <pcb>
 with `--strict`) reflects all findings, and the hidden counts are reported in
 `summary.hidden_by_view_filter` (#7230).
 
+Exit codes: `0` in sync (warnings allowed without `--strict`), `1` errors (or
+the tool could not run), `2` warnings with `--strict`. `--format json` carries
+top-level `verdict` (`pass`|`fail`) and `exit_code` (#7230). See
+[Sign-off exit codes](#sign-off-exit-codes).
+
 **Examples:**
 ```bash
 kct validate --sync project.kicad_sch board.kicad_pcb
 ```
+
+---
+
+### `audit`
+
+Manufacturing readiness audit: ERC, DRC (internal engine plus kicad-cli
+geometric DRC), schematic-PCB sync, connectivity, manufacturer compatibility,
+HV isolation and a cost estimate, rolled up into one verdict.
+
+```bash
+kct audit <project.kicad_pro | board.kicad_pcb> [options]
+```
+
+| Option | Description |
+|--------|-------------|
+| `--format {table,json,summary}` | Output format (default: table) |
+| `--mfr`, `-m MFR` | Target manufacturer (default: the board's `project.kct` `target_fab`, else `jlcpcb`) |
+| `--layers N`, `-l` | Layer count (auto-detected by default) |
+| `--copper OZ`, `-c` | Copper weight in oz (default: 1.0) |
+| `--quantity N`, `-q` | Quantity for the cost estimate (default: 5) |
+| `--skip-erc` | Skip ERC (PCB-only audits) |
+| `--pcb PATH` | Override the auto-detected PCB path |
+| `--strict` | Exit 2 on a `warning` verdict |
+| `--net-class-map PATH` | Net-class sidecar (enables the diff-pair DRC rules) |
+| `--hv-*` | HV isolation (creepage/clearance) audit; see `kct audit --help` |
+
+The verdict is `ready`, `warning` (review recommended, including a gate that
+could not verify) or `not_ready`. Exit codes: `0` `ready` (or `warning` without
+`--strict`); `2` `not_ready`, or `warning` with `--strict`; `1` the tool could
+not run (file not found, wrong file type, audit crash). `--format json` keeps
+the top-level `verdict` (`ready`|`warning`|`not_ready`) and adds `gate_verdict`
+(`pass`|`fail`) and `exit_code`, the process exit code (#7230). See
+[Sign-off exit codes](#sign-off-exit-codes).
 
 ---
 
@@ -662,6 +716,10 @@ is `blocked` (a gate failed) or `unverified` (a gate could not run), always with
 named `blockers`. **The command exits non-zero for anything other than `ready`
 and has no flag that produces `ready` on a partial run** — a gate that cannot
 run is a blocker, not a waiver.
+
+Exit codes: `0` `ready`; `1` `blocked` or `unverified`; `2` the command could
+not run at all (bad arguments, or the KiCad environment was refused and no
+evidence was written). See [Sign-off exit codes](#sign-off-exit-codes).
 
 `--verify` and `--generate` are mutually exclusive; `--verify` is the default.
 **A bare `kct readiness <board>` verifies an already-generated package — it
@@ -2235,14 +2293,49 @@ machine output to new commands.
 
 ## Exit Codes
 
-### Default (most commands)
+### Default (non-sign-off commands)
 
 | Code | Meaning |
 |------|---------|
 | 0 | Success |
 | 1 | Error (invalid input, file not found, etc.) |
-| 2 | Invalid arguments |
+| 2 | Invalid arguments (argparse usage error; true for every command) |
 | 130 | Interrupted (Ctrl+C) |
+
+Sign-off commands also use `2` (and some `1`) for findings, so the default
+table does not apply to them; see the next section.
+
+### Sign-off exit codes
+
+The commands that judge a board keep **two numbering ladders** (operator
+decision on #7230, option 1): the `drc` family returns `1` for "board has
+errors", while `check`/`audit` return `2` and keep `1` for "the tool could not
+run". View and format flags (`--net`, `--type`, `--category`, `--sheet`,
+`--errors-only`, `--format`) never change the exit code (#7230). Rather than
+mapping numbers per command, pipelines should read the top-level JSON
+`verdict` (`pass`|`fail`|`incomplete`; `gate_verdict` for `kct audit`, whose
+`verdict` is its own `ready`|`warning`|`not_ready`) and `exit_code`, which
+come from the same call that decides the process exit.
+
+The ladders live in `EXIT_LADDERS` in
+[`src/kicad_tools/cli/_gate.py`](../../src/kicad_tools/cli/_gate.py)
+(`gate_exit_code`); `tests/test_gate_exit_code_7230.py` checks this table
+against it.
+
+| Command | Ladder | Errors | Warnings with `--strict` | Check not run | Tool could not run |
+|---------|--------|--------|--------------------------|---------------|--------------------|
+| `kct drc` (plain and `--mfr`) | `drc` | 1 | 2 | 2 (schematic parity NOT RUN; 0 with `--allow-incomplete`) | 1 |
+| `kct erc` | `drc` | 1 | 2 | — | 1 |
+| `kct validate --sync` | `drc` | 1 | 2 | — | 1 |
+| `kct sch validate` | `sch` | 1 | 1 | 1 (a requested check did not run) | 1 |
+| `kct check` (meta rollup and `--drc-only`) | `check` | 2 | 2 | 2 (a sub-check NOT RUN; 0 with `--allow-incomplete`; none under `--drc-only`) | 1 |
+| `kct audit` | `check` | 2 | 2 | — (a could-not-verify gate reads as `warning`: 0, or 2 with `--strict`) | 1 |
+| `kct readiness` | — | 1 (`blocked`) | — | 1 (`unverified`) | 2 |
+| `kct fleet status` | — | 2 (any board not ship-ready, or no boards found) | — | — | — |
+
+Errors take precedence over warnings, and warnings under `--strict` over a
+check that did not run. Warnings without `--strict` always exit 0. `readiness`
+and `fleet` are not on `gate_exit_code` and keep their own numbering.
 
 ### `kct route` ladder
 
