@@ -1,7 +1,7 @@
 {
   "version": "1.0",
   "kicad_tools_version": "0.23.0",
-  "generated_at": "2026-10-18T19:45:54.955339+00:00",
+  "generated_at": "2026-10-18T20:01:01.032046+00:00",
   "manufacturer": "jlcpcb-tier1",
   "files": {
     "DESIGN_REVIEW.md": {
@@ -173,8 +173,8 @@
       "size": 2192
     },
     "gerbers/gerbers.zip": {
-      "sha256": "6ea1d0bd4b9839851bc4cd5d60f7ddc79dab85a1dc9313fbb3df5345fb89894b",
-      "size": 128891
+      "sha256": "9eb1313fa67602a65c2ee2f1d821892d78b49cacfab0140da05d7d2c6c5e62d3",
+      "size": 128873
     },
     "images/assembly.png": {
       "sha256": "26b109c1b656a2b0cde61770cba90124abf1a2feea0046292f4cb66f1f76d599",
@@ -213,7 +213,7 @@
       "size": 486460
     },
     "kicad_project.zip": {
-      "sha256": "b4db0454fd2fd92f7c5c69cdc2929716805a1ab9e8baaa98566f7d6f8943ede4",
+      "sha256": "e1b7c43a21e5e769f64b1826f0a70e1aef6ae62519cd60b982004d59f242d33c",
       "size": 195363
     },
     "manufacturing-requirements.json": {
@@ -418,7 +418,7 @@
       "name": "erc",
       "status": "WARN",
       "message": "ERC report is not bound to this schematic (unhashed); re-run kct build's ERC step or pass --erc-report",
-      "details": "/Users/rwalters/GitHub/kicad-tools/.loom/worktrees/issue-7239/boards/03-usb-joystick/output/erc_report.json records no schematic_sha256 and no output/readiness.json pins it together with this schematic, so its verdict is not evidence for the current schematic"
+      "details": "boards/03-usb-joystick/output/erc_report.json records no schematic_sha256 and no output/readiness.json pins it together with this schematic, so its verdict is not evidence for the current schematic"
     }
   ],
   "fabrication_process": {
