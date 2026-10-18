@@ -20,9 +20,6 @@ src/kicad_tools/acceleration/backend.py	import-not-found	Cannot find implementat
 src/kicad_tools/acceleration/backend.py	no-any-return	Returning Any from function declared to return "bool"
 src/kicad_tools/acceleration/backend.py	no-any-return	Returning Any from function declared to return "ndarray[tuple[Any, ...], dtype[Any]]"
 src/kicad_tools/acceleration/backend.py	no-any-return	Returning Any from function declared to return "ndarray[tuple[Any, ...], dtype[Any]]"
-src/kicad_tools/acceleration/kernels/routing.py	assignment	Incompatible types in assignment (expression has type "int", variable has type "ndarray[tuple[Any, ...], dtype[signedinteger[_32Bit]]]")
-src/kicad_tools/acceleration/kernels/routing.py	no-any-return	Returning Any from function declared to return "ndarray[tuple[Any, ...], dtype[Any]]"
-src/kicad_tools/acceleration/kernels/routing.py	var-annotated	Need type annotation for "conflicts"
 src/kicad_tools/analysis/congestion.py	var-annotated	Need type annotation for "result" (hint: "result: list[<type>] = ...")
 src/kicad_tools/analysis/signal_integrity.py	arg-type	Argument N to "add" of "set" has incompatible type "tuple[int, ...]"; expected "tuple[int, int]"
 src/kicad_tools/assembly/validation.py	assignment	Incompatible types in assignment (expression has type "LCSCClient", variable has type "None")
