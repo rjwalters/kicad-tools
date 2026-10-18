@@ -90,6 +90,13 @@ from board_recipe_artifacts import (  # noqa: E402
     recipe_baseline_key,
     recipe_output_dir,
 )
+from identity_allowance import (  # noqa: E402
+    Allowance,
+    error_identities,
+    format_stale,
+    stale_entries,
+    unlisted_findings,
+)
 
 # --- shared with check_routed_drc.py ------------------------------------------
 
@@ -156,23 +163,52 @@ DIFFPAIR_VIOLATION_BASELINE: dict[str, int] = {
 # pairs already fail skew/continuity (0/9 converge, #3540-#3544), so the
 # pairs never get squeezed to the solved gap; the committed ``output/`` board
 # has no impedance finding.  A ``--skip-route`` run on the committed PCB
-# reports 3 findings (one per distinct segment above); the cap stays at the 5
-# originally measured in #7312 rather than being tightened on a count not
-# re-checked under the CI re-route.
-# Capped, not open: a sixth impedance error still fails the gate.
-DIFFPAIR_FIXTURE_RULE_CAPS: dict[str, int] = {"impedance": 5}
+# reports exactly these 3 findings.
+# Allowed by identity, not by count (#7359, #7270 Q3 ruling): only these nets
+# may carry an ``impedance`` error, and a listed net that stops failing makes
+# its entry stale and fails the gate.  Deleting an entry is the whole of #7349.
+DIFFPAIR_FIXTURE_ALLOWED_FINDINGS: Allowance = {
+    ("impedance", "USB2_D-"): 7312,
+    ("impedance", "USB3_RX1+"): 7312,
+    ("impedance", "USB3_TX2+"): 7312,
+}
 
 
-def unexpected_baseline_errors(key: str, errors: dict[str, int]) -> dict[str, int]:
-    """Pair improvements cannot hide a new physical error within the total 18."""
+def unexpected_baseline_errors(
+    key: str,
+    errors: dict[str, int],
+    identities: dict[str, set[str]] | None = None,
+) -> dict[str, int]:
+    """Pair improvements cannot hide a new physical error within the total 18.
+
+    ``identities`` maps rule -> nets carrying an error (``error_identities``).
+    A rule with allowance entries is judged per net; without ``identities``
+    nothing of such a rule is trusted, so every finding counts as unexpected.
+    """
     if key not in DIFFPAIR_VIOLATION_BASELINE:
         return {}
     expected = {"diffpair_length_skew", "diffpair_routing_continuity"}
-    return {
-        rule: count
-        for rule, count in errors.items()
-        if count and rule not in expected and count > DIFFPAIR_FIXTURE_RULE_CAPS.get(rule, 0)
-    }
+    allowed_rules = {rule for rule, _ in DIFFPAIR_FIXTURE_ALLOWED_FINDINGS}
+    unexpected: dict[str, int] = {}
+    for rule, count in errors.items():
+        if not count or rule in expected:
+            continue
+        if rule in allowed_rules and identities is not None:
+            count = len(
+                unlisted_findings(
+                    DIFFPAIR_FIXTURE_ALLOWED_FINDINGS, rule, identities.get(rule, set())
+                )
+            )
+        if count:
+            unexpected[rule] = count
+    return unexpected
+
+
+def stale_allowances(key: str, identities: dict[str, set[str]]) -> list[tuple[str, str, int]]:
+    """Listed findings that no longer occur on the baselined board."""
+    if key not in DIFFPAIR_VIOLATION_BASELINE:
+        return []
+    return stale_entries(DIFFPAIR_FIXTURE_ALLOWED_FINDINGS, identities)
 
 
 def check_zero_violations(
@@ -603,7 +639,10 @@ def _measure_skew_data_from_pcb(
 
 
 def count_errors_via_kct_check(
-    pcb_path: Path, sidecar: Path | None = None
+    pcb_path: Path,
+    sidecar: Path | None = None,
+    *,
+    error_violations: list[dict] | None = None,
 ) -> tuple[int, dict[str, int]]:
     """Count errors via ``kct check --mfr jlcpcb --errors-only --format json``.
 
@@ -677,6 +716,8 @@ def count_errors_via_kct_check(
         rid = v.get("rule_id")
         if isinstance(rid, str):
             per_rule_errors[rid] = per_rule_errors.get(rid, 0) + 1
+        if error_violations is not None:
+            error_violations.append(v)
     return errors, per_rule_errors
 
 
@@ -856,6 +897,7 @@ def check_board(
     #      -- the only way to exercise the diff-pair rules whose
     #      engagement is gated on router context.  Also returns per-rule
     #      error-violation counts for the zero-violation assertion.
+    error_violations: list[dict] = []
     try:
         with resolve_net_class_map_sidecar(routed_pcb) as sidecar:
             if sidecar is None:
@@ -870,7 +912,9 @@ def check_board(
                     "#3828).",
                 )
                 return 1
-            error_count, per_rule_errors = count_errors_via_kct_check(routed_pcb, sidecar)
+            error_count, per_rule_errors = count_errors_via_kct_check(
+                routed_pcb, sidecar, error_violations=error_violations
+            )
     except RuntimeError as e:
         annotate_error(str(routed_pcb), f"kct check failed: {e}")
         return 1
@@ -1011,9 +1055,14 @@ def check_board(
                 f"within documented baseline {baseline}."
             )
 
-    unexpected = unexpected_baseline_errors(lookup_key, per_rule_errors)
+    identities = error_identities(error_violations)
+    unexpected = unexpected_baseline_errors(lookup_key, per_rule_errors, identities)
     if unexpected:
         annotate_error(str(routed_pcb), f"Errors outside historical pair baseline: {unexpected}")
+        failed = True
+    stale = stale_allowances(lookup_key, identities)
+    if stale:
+        annotate_error(str(routed_pcb), f"Stale identity allowance: {format_stale(stale)}")
         failed = True
 
     # AC #1 (allowlist semantic): error count must be <= allowed.
