@@ -107,9 +107,12 @@ def test_detour_not_pinned_to_nearest_point_pair():
     a, b = _pads()
     slot = _box(-3.0, 0.6, 3.0, 1.8)
     expected = 2 * math.hypot(2.0, 0.4) + 1.2
-    for x in (0.0, 1.0):
-        _, creepage = surface_path_length(a, b, obstacles=[slot], dimension_x_mm=x)
-        assert creepage == pytest.approx(expected, abs=1e-3)
+    _, creepage = surface_path_length(a, b, obstacles=[slot], dimension_x_mm=0.0)
+    assert creepage == pytest.approx(expected, abs=1e-3)
+    # The X opening rounds the sharp slot corners (radius X/2), which can only
+    # shorten the path: conservative, never overstated.
+    _, bridged = surface_path_length(a, b, obstacles=[slot], dimension_x_mm=1.0)
+    assert 2.2 + 1.0 < bridged <= expected + 1e-3
 
 
 def test_narrow_slot_unbridged_follows_detour_and_bridged_is_clearance():
@@ -148,10 +151,10 @@ def test_multipolygon_source_and_multilinestring_target():
     src = MultiPolygon([a1, _box(-20.0, -1.0, -19.0, 0.2)])
     slot = _box(-3.0, 0.6, 3.0, 1.8)
     expected = 2 * math.hypot(2.0, 0.4) + 1.2
-    _, c = surface_path_length(src, b, obstacles=[slot])
+    _, c = surface_path_length(src, b, obstacles=[slot], dimension_x_mm=0)
     assert c == pytest.approx(expected, abs=1e-3)
     edge = MultiLineString([[(-1.0, 2.2), (1.0, 2.2)], [(-1.0, 2.2), (-1.0, 3.0)]])
-    _, c = surface_path_length(a1, edge, obstacles=[slot])
+    _, c = surface_path_length(a1, edge, obstacles=[slot], dimension_x_mm=0)
     assert c == pytest.approx(expected, abs=1e-3)
 
 
@@ -202,12 +205,11 @@ def test_obstacle_vertex_seeds_onto_far_edge_foot():
 
 
 def test_rounded_slot_wider_than_x_is_untouched_by_bridging():
-    # A router-milled 1.2 mm slot with r=0.3 ends is wider than X=1.0, so the
-    # dimension-X opening must not grow it (mitre re-squaring overstated
-    # creepage by up to ~10%).
+    # A router-milled 1.2 mm slot with r=0.5 (>= X/2) ends is wider than X=1.0,
+    # so the dimension-X opening must leave it unchanged.
     from shapely.geometry import box
 
-    slot = box(-3, -0.6, 3, 0.6).buffer(-0.3).buffer(0.3, quad_segs=8)
+    slot = box(-3, -0.6, 3, 0.6).buffer(-0.5).buffer(0.5, quad_segs=16)
     pairs = [
         (box(1, -2, 2.5, -1), box(1, 1, 2.5, 2)),
         (box(-2.5, -1.2, 2.5, -0.8), box(-2.5, 0.8, 2.5, 1.2)),
@@ -215,7 +217,9 @@ def test_rounded_slot_wider_than_x_is_untouched_by_bridging():
     for a, b in pairs:
         _, c0 = surface_path_length(a, b, obstacles=[slot], dimension_x_mm=0)
         _, c1 = surface_path_length(a, b, obstacles=[slot], dimension_x_mm=1.0)
-        assert c1 == pytest.approx(c0, abs=1e-6)
+        # eps (X/2 - 1e-4) and arc discretisation shave a sub-micron sliver.
+        assert c1 == pytest.approx(c0, abs=2e-3)
+        assert c1 <= c0 + 1e-9
 
 
 def test_fully_occluded_dense_pair_is_fast():
@@ -1051,3 +1055,68 @@ def test_to_dict_empty_report_verdicts_vacuously_true():
     assert d["passed"] is True
     assert d["gate_passed"] is True
     assert d["waived_count"] == 0
+
+
+def _disc_opening_len(a, b, obs, x):
+    """Creepage with ``obs`` replaced by its true disc opening (reference)."""
+    r = x / 2.0 - 1e-4
+    opened = obs.buffer(-r, quad_segs=64).buffer(r, quad_segs=64).intersection(obs)
+    _, c = surface_path_length(a, b, obstacles=[opened], dimension_x_mm=0)
+    return c
+
+
+@pytest.mark.parametrize(
+    "name, obs, a, b, expected",
+    [
+        (
+            # Wedge slot, local width <= 0.9 mm where the path crosses it.
+            "wedge",
+            lambda: __import__("shapely.geometry", fromlist=["Polygon"]).Polygon(
+                [(0, 0), (4, -0.6), (4, 0.6)]
+            ),
+            lambda: _box(2.7, -3.0, 3.3, -1.0),
+            lambda: _box(2.7, 1.0, 3.3, 3.0),
+            2.0,
+        ),
+        (
+            # Wide body plus a 0.7 mm-wide tapered leg crossed by the path.
+            "taper",
+            lambda: __import__("shapely.ops", fromlist=["unary_union"]).unary_union(
+                [
+                    _box(-3, 0, 3, 1.5),
+                    __import__("shapely.geometry", fromlist=["Polygon"]).Polygon(
+                        [(-0.05, 0), (0.05, 0), (0.8, -2.5), (-0.8, -2.5)]
+                    ),
+                ]
+            ),
+            lambda: _box(-5, -1.2, -4, -0.8),
+            lambda: _box(4, -1.2, 5, -0.8),
+            8.0,
+        ),
+    ],
+)
+def test_bridging_never_keeps_material_narrower_than_x(name, obs, a, b, expected):
+    # The mitre opening regrew sharp corners where no X-disc fits, so tapers
+    # and wedges stayed unbridged and creepage was overstated (#7058 review).
+    obs, a, b = obs(), a(), b()
+    _, c1 = surface_path_length(a, b, obstacles=[obs], dimension_x_mm=1.0)
+    assert c1 <= _disc_opening_len(a, b, obs, 1.0) + 1e-3
+    assert c1 == pytest.approx(expected, abs=2e-3)
+
+
+def test_bridging_stub_at_30_degrees_and_two_bar_neck():
+    from shapely.affinity import rotate
+    from shapely.geometry import box
+    from shapely.ops import unary_union
+
+    stub = unary_union([box(-3, 0, 3, 1.5), rotate(box(0, -0.3, 6, 0.3), 30, origin=(0, 0))])
+    stub = stub.intersection(box(-10, 0, 10, 10))
+    a, b = box(-1, -0.0, 0, 0.1), box(2.5, 1.2, 3.5, 1.4)
+    c1 = surface_path_length(a, b, obstacles=[stub], dimension_x_mm=1.0)[1]
+    assert c1 <= _disc_opening_len(a, b, stub, 1.0) + 1e-3
+
+    # Two wide bars joined through a 0.10 mm neck: the neck must be bridged.
+    neck = unary_union([box(-3, -1, -0.05, 1), box(0.05, -1, 3, 1), box(-0.05, -0.2, 0.05, 0.2)])
+    a, b = box(-4, -3, -3.5, -2.5), box(3.5, -3, 4, -2.5)
+    c1 = surface_path_length(a, b, obstacles=[neck], dimension_x_mm=1.0)[1]
+    assert c1 <= _disc_opening_len(a, b, neck, 1.0) + 1e-3

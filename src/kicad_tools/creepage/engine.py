@@ -58,6 +58,7 @@ BOARD_EDGE_LABEL = "<board edge>"
 # IEEE-754 noise for the coordinate space we operate in.
 _EPS = 1e-9
 _INTERIOR_SHRINK = 1e-6  # shrink a slot before the "crosses interior" test
+_BRIDGE_QUAD_SEGS = 16  # arc resolution of the dimension-X opening (round joins)
 # A pair is a PASS when creepage >= min within this tolerance (mm).  Mirrors
 # the spirit of DRC_TOLERANCE -- a sub-micron shortfall is not a real defect.
 _PASS_TOLERANCE = 1e-4
@@ -891,21 +892,25 @@ def _bridge_narrow_cutouts(obstacles: list[Any], dimension_x_mm: float) -> list[
 
     A groove narrower than X is not followed by the creepage path; it is
     measured straight across.  The morphological opening by a disc of diameter
-    X removes exactly those parts and leaves wider parts' outline intact.  The
-    small ``eps`` keeps a slot exactly X wide counted as a groove (not bridged).
+    X (round-joined erosion then dilation by X/2) keeps only the material in
+    which an X-diameter disc fits, so every narrow part -- stubs, tapers,
+    wedges, necks -- is dropped and the creepage path crosses it.  The small
+    ``eps`` keeps a slot exactly X wide counted as a groove (not bridged).
+
+    Round joins are deliberate: a mitre join would regrow sharp corners from
+    the eroded vertices and keep material where no X-disc fits, overstating
+    creepage.  The cost is that slot corners sharper than radius X/2 are
+    rounded, which can only shorten the measured path (understating creepage
+    is the conservative direction).  Clipping back to the source obstacle keeps
+    the opening anti-extensive, so it can only remove parts, never grow a slot.
     """
     if dimension_x_mm <= 0.0 or not obstacles:
         return list(obstacles)
-    from shapely.geometry import JOIN_STYLE
 
     r = dimension_x_mm / 2.0 - 1e-4
-    # The mitre dilation re-squares rounded slot ends, so the raw opening can
-    # poke past the real milled outline.  Clipping back to the source obstacle
-    # makes the opening anti-extensive (it can only remove parts, never grow
-    # a slot), which keeps creepage from being overstated.
     opened = [
-        obs.buffer(-r, join_style=JOIN_STYLE.mitre)
-        .buffer(r, join_style=JOIN_STYLE.mitre)
+        obs.buffer(-r, quad_segs=_BRIDGE_QUAD_SEGS)
+        .buffer(r, quad_segs=_BRIDGE_QUAD_SEGS)
         .intersection(obs)
         for obs in obstacles
     ]
