@@ -2,7 +2,7 @@ Manufacturing package for simple_led_routed.kicad_pcb
 
 Fabrication tier : jlcpcb
 Mode             : assembly
-Generated        : 2026-10-18T20:30:00+00:00
+Generated        : 2026-10-18T22:00:00+00:00
 
 Assembly package: BOM and CPL are included.
 
@@ -36,12 +36,12 @@ Hand-solder / through-hole items
 
 Warning review (per rule)
 -------------------------
-  thermal_asymmetry: 1
+  no warnings reported
   All assembly-affecting warning counts are zero.
 
 Accepted-risk waivers
 ---------------------
-  #7220 [advisory] One-sided thermal connection on R1 (VCC pad solid to the F.Cu pour, LED_ANODE pad on a 0.20 mm trace): tombstoning risk; narrower-spoke repair tracked in #7295
+  no accepted-risk waivers
 
 Sign-off
 --------

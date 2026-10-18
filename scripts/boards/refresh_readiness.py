@@ -123,6 +123,12 @@ class BoardConfig:
     # ``(mirror_dir, source_dir)``: every file already in ``mirror_dir`` is
     # refreshed from ``source_dir`` before the archives are rebuilt.
     mirrors: tuple[tuple[str, str], ...] = ()
+    # Directories searched (relative to the board) when rebuilding
+    # ``output/manufacturing.zip``.  Its member names are relative to the first
+    # entry that holds them: boards 04-09 ship bare names (``README.txt``), the
+    # ``kct readiness`` packages 00-02 prefix them with ``manufacturing/``, so
+    # those search ``output`` instead (Issue #7273).
+    bundle_search: tuple[str, ...] = ("output/manufacturing",)
     archives: tuple[tuple[str, tuple[str, ...]], ...] = field(
         default=(
             ("output/manufacturing/kicad_project.zip", ("output", ".")),
@@ -145,6 +151,43 @@ BOARDS: dict[str, BoardConfig] = {
         check_script="check_manufacturing.py",
         mirrors=(("output/manufacturing/design-source", "."),),
         archives=(("output/manufacturing/kicad_project.zip", ("output", ".")),),
+    ),
+    # Boards 00-02 are ``kct readiness`` packages (no board-local check),
+    # refreshed through the same gates (Issue #7273).  Their recorded
+    # ``known_issues`` carry the warning allowance.  Board 00/01 ship no
+    # native-ERC report copies, so ``erc`` is empty.
+    "00-simple-led": BoardConfig(
+        routed_pcb="output/simple_led_routed.kicad_pcb",
+        schematic="output/simple_led.kicad_sch",
+        tier="jlcpcb",
+        erc=(),
+        archives=(("output/manufacturing/kicad_project.zip", ("output", ".")),),
+        bundle_search=("output",),
+    ),
+    "01-voltage-divider": BoardConfig(
+        routed_pcb="output/voltage_divider_routed.kicad_pcb",
+        schematic="output/voltage_divider.kicad_sch",
+        tier="jlcpcb",
+        erc=(),
+        archives=(("output/manufacturing/kicad_project.zip", ("output", ".")),),
+        bundle_search=("output",),
+    ),
+    "02-charlieplex-led": BoardConfig(
+        routed_pcb="output/charlieplex_3x3_routed.kicad_pcb",
+        schematic="output/charlieplex_3x3.kicad_sch",
+        tier="jlcpcb",
+        erc=(
+            ErcJob(
+                "02-native-erc.json",
+                "output",
+                "charlieplex_3x3.kicad_sch",
+                (
+                    "output/readiness/native-erc.json",
+                    "output/manufacturing/native-erc.json",
+                ),
+            ),
+        ),
+        bundle_search=("output",),
     ),
     "05-bldc-motor-controller": BoardConfig(
         routed_pcb="output/bldc_controller_routed.kicad_pcb",
@@ -510,6 +553,49 @@ def compare_metrics(recorded: dict, measured: dict) -> list[str]:
 
 
 # --------------------------------------------------------------------------- refresh
+def apply_known_issues(
+    staged: Path,
+    checked_at: str,
+    known_issue: list[str],
+    resolve_known_issue: list[str],
+) -> str | None:
+    """Apply ``--known-issue`` / ``--resolve-known-issue`` to the staged report (Issue #7323).
+
+    Uses the same merge as ``kct readiness`` (``cli/known_issues.py``) and keeps
+    ``readiness.json`` and the hash-bound ``known-issues.json`` consistent: the
+    evidence file is written (or removed when no entry remains) and its
+    ``inputs`` entry added (or dropped).  Returns the evidence path relative to
+    the board.  ``refresh`` re-hashes ``inputs`` afterwards.
+    """
+    from kicad_tools.cli.known_issues import KNOWN_ISSUES_FILENAME, KnownIssueError
+    from kicad_tools.cli.readiness_cmd import _resolve_known_issues
+
+    args = argparse.Namespace(known_issue=known_issue, resolve_known_issue=resolve_known_issue)
+    try:
+        merged = _resolve_known_issues(staged, args, checked_at)
+    except KnownIssueError as exc:
+        raise GateFailure(str(exc)) from None
+    report_path = staged / "output" / "readiness.json"
+    report = json.loads(report_path.read_text())
+    inputs = report.setdefault("inputs", {})
+    bound = [name for name in inputs if Path(name).name == KNOWN_ISSUES_FILENAME]
+    if len(bound) > 1:
+        raise GateFailure("known_issues is bound to more than one evidence file")
+    rel = bound[0] if bound else f"output/readiness/{KNOWN_ISSUES_FILENAME}"
+    evidence = staged / rel
+    if merged:
+        evidence.parent.mkdir(parents=True, exist_ok=True)
+        evidence.write_text(json.dumps({"known_issues": merged}, indent=2) + "\n")
+        inputs[rel] = sha256(evidence)
+        report["known_issues"] = merged
+    else:
+        evidence.unlink(missing_ok=True)
+        inputs.pop(rel, None)
+        report.pop("known_issues", None)
+    report_path.write_text(json.dumps(report, indent=2) + "\n")
+    return rel
+
+
 def refresh(
     board: Path,
     checked_at: str,
@@ -517,6 +603,8 @@ def refresh(
     reuse_erc: Path | None = None,
     save_erc: Path | None = None,
     dry_run: bool = False,
+    known_issue: list[str] | None = None,
+    resolve_known_issue: list[str] | None = None,
 ) -> list[str]:
     from kicad_tools.cli.board_readiness import read_readiness
 
@@ -526,6 +614,14 @@ def refresh(
         shutil.copytree(board, staged, ignore=shutil.ignore_patterns("__pycache__"))
         out = staged / "output"
         mfg = out / "manufacturing"
+
+        known_rel = None
+        if known_issue or resolve_known_issue:
+            # Before the gates: the kct check allowance reads the staged known_issues.
+            known_rel = apply_known_issues(
+                staged, checked_at, known_issue or [], resolve_known_issue or []
+            )
+            log(f"  known_issues updated -> {known_rel}")
 
         for job in cfg.erc:
             data = native_erc(staged, job, reuse_erc, save_erc)
@@ -552,7 +648,9 @@ def refresh(
             k: v for k, v in after.items() if k != "files"
         }:
             raise GateFailure("manifest refresh changed fields other than 'files'")
-        changed = rebuild_archive(out / "manufacturing.zip", [mfg])
+        changed = rebuild_archive(
+            out / "manufacturing.zip", [staged / s for s in cfg.bundle_search]
+        )
         log(f"  output/manufacturing.zip: rebuilt; members with new content {changed}")
 
         drc_errors = gate_native_drc(staged, cfg)
@@ -594,9 +692,21 @@ def refresh(
             and (board / p.relative_to(staged)).is_file()
             and p.read_bytes() != (board / p.relative_to(staged)).read_bytes()
         )
+        removed: list[str] = []
+        if known_rel is not None:
+            # The evidence file may be new (not yet in the board) or resolved away.
+            if (staged / known_rel).is_file():
+                if known_rel not in published and not (board / known_rel).is_file():
+                    published = sorted([*published, known_rel])
+            elif (board / known_rel).is_file():
+                removed.append(known_rel)
         if not dry_run:
             for name in published:
+                (board / name).parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(staged / name, board / name)
+            for name in removed:
+                (board / name).unlink()
+        published = sorted([*published, *(f"{name} (removed)" for name in removed)])
         log(f"  {'would publish' if dry_run else 'published'} {len(published)} file(s)")
         return published
 
@@ -608,6 +718,20 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--reuse-erc", type=Path, help="replay ERC reports saved by --save-erc")
     parser.add_argument("--save-erc", type=Path, help="keep the native ERC reports here")
     parser.add_argument("--dry-run", action="store_true", help="run every gate, publish nothing")
+    parser.add_argument(
+        "--known-issue",
+        action="append",
+        default=[],
+        metavar="N:SUMMARY[:KIND[:RULE=COUNT,...]]",
+        help="record a known issue (repeatable; same syntax as `kct readiness`, Issue #7323)",
+    )
+    parser.add_argument(
+        "--resolve-known-issue",
+        action="append",
+        default=[],
+        metavar="N",
+        help="drop a recorded known issue by number (repeatable, Issue #7323)",
+    )
     args = parser.parse_args(argv)
     try:
         with evidence_toolchain(mounts=[REPO_ROOT, *(b.resolve() for b in args.boards)]):
@@ -631,6 +755,8 @@ def _refresh_all(parser: argparse.ArgumentParser, args: argparse.Namespace) -> i
                 reuse_erc=args.reuse_erc,
                 save_erc=args.save_erc,
                 dry_run=args.dry_run,
+                known_issue=args.known_issue,
+                resolve_known_issue=args.resolve_known_issue,
             ):
                 log(f"    {name}")
         except GateFailure as exc:

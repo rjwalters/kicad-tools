@@ -1,11 +1,11 @@
 {
   "file": "output/simple_led_routed.kicad_pcb",
   "manufacturer": "jlcpcb",
-  "pcb_sha256": "4edd1d30b0a1b1ddafd8146e21f5f4534782a67c6bf0004129af20bad627dd7a",
+  "pcb_sha256": "fbcd0bf9044fa2309a03cbf718147f7da8136c7e29d8fcca8571d69c01699115",
   "layers": 2,
   "summary": {
     "errors": 0,
-    "warnings": 1,
+    "warnings": 0,
     "infos": 1,
     "waived": 0,
     "rules_checked": 66,
@@ -63,39 +63,13 @@
       "waived": false,
       "key": "connector_edge_distance|J1||F.Cu",
       "evidence_hash": "ev2:e474f9a88cdb95e5"
-    },
-    {
-      "rule_id": "thermal_asymmetry",
-      "type": "unknown",
-      "severity": "warning",
-      "message": "R1 thermal asymmetry (tombstoning risk): pad 1 (net 'VCC') is solid to 'VCC' fill on F.Cu; pad 2 (net 'LED_ANODE') has no zone connection (trace only) -- give the solid terminal a thermal relief (or balance the other terminal)",
-      "location": [
-        147.5,
-        85.5
-      ],
-      "layer": "F.Cu",
-      "actual_value": null,
-      "required_value": null,
-      "items": [
-        "R1",
-        "R1-1",
-        "R1-2"
-      ],
-      "nets": [
-        "VCC",
-        "LED_ANODE"
-      ],
-      "status": "warning",
-      "waived": false,
-      "key": "thermal_asymmetry|R1,R1-1,R1-2|LED_ANODE,VCC|F.Cu",
-      "evidence_hash": "ev2:82f7b176fe55fef7"
     }
   ],
   "mask_copper_assessments": [],
   "meta_checks": {
     "drc": {
       "status": "PASSED",
-      "detail": "66 rules checked, 0 error(s), 1 warning(s)"
+      "detail": "66 rules checked, 0 error(s), 0 warning(s)"
     },
     "erc": {
       "status": "PASSED",

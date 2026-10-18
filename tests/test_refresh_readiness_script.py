@@ -248,3 +248,90 @@ def test_allowance_comes_from_the_boards_recorded_known_issues(mod, tmp_path):
     assert mod.known_issue_allowance(board) == {"thermal_asymmetry": 9}
     (board / "output" / "readiness.json").write_text(json.dumps({}))
     assert mod.known_issue_allowance(board) == {}
+
+
+_NO_REFRESH_CONFIG = {"03-usb-joystick"}
+
+
+def test_every_demo_board_has_a_refresh_config(mod):
+    boards = sorted(p.name for p in (mod.REPO_ROOT / "boards").glob("0[0-7]-*") if p.is_dir())
+    assert len(boards) == 8
+    assert not _NO_REFRESH_CONFIG & set(mod.BOARDS)  # stale exemption
+    boards = [b for b in boards if b not in _NO_REFRESH_CONFIG]
+    for name in boards:
+        cfg = mod.BOARDS[name]
+        board = mod.REPO_ROOT / "boards" / name
+        assert (board / cfg.routed_pcb).is_file(), name
+        assert (board / cfg.schematic).is_file(), name
+        for archive, _ in cfg.archives:
+            assert (board / archive).is_file(), (name, archive)
+        for job in cfg.erc:
+            assert (board / job.directory / job.schematic).is_file(), (name, job.key)
+
+
+def test_outer_archive_members_resolve_against_committed_tree(mod, tmp_path):
+    """Rebuilding ``output/manufacturing.zip`` finds every member (needs no KiCad).
+
+    Boards 00-02 prefix members with ``manufacturing/``; a search root that
+    ignores that refused them all (Issue #7273 review).
+    """
+    import shutil
+
+    for name, cfg in mod.BOARDS.items():
+        board = mod.REPO_ROOT / "boards" / name
+        if not (board / "output" / "manufacturing.zip").is_file():
+            continue
+        staged = tmp_path / name
+        shutil.copytree(board / "output", staged / "output")
+        mod.rebuild_archive(
+            staged / "output" / "manufacturing.zip", [staged / s for s in cfg.bundle_search]
+        )
+
+
+# ---------------------------------------------------------------- known issues (#7323)
+CHECKED_AT = "2026-10-18T00:00:00+00:00"
+ADVISORY = "7220:one-sided thermal:advisory:thermal_asymmetry=1"
+
+
+def _evidence(board: Path) -> Path:
+    return board / "output" / "readiness" / "known-issues.json"
+
+
+def test_known_issue_flag_binds_the_evidence_file_into_inputs(mod, tmp_path, monkeypatch):
+    board = _hooked_board(mod, tmp_path, monkeypatch, warnings=0)
+    published = mod.refresh(board, CHECKED_AT, known_issue=[ADVISORY])
+
+    assert "output/readiness/known-issues.json" in published
+    report = json.loads((board / "output" / "readiness.json").read_text())
+    assert [e["issue"] for e in report["known_issues"]] == [7220]
+    assert json.loads(_evidence(board).read_text()) == {"known_issues": report["known_issues"]}
+    assert report["inputs"]["output/readiness/known-issues.json"] == mod.sha256(_evidence(board))
+
+
+def test_resolve_known_issue_flag_drops_entry_file_and_binding(mod, tmp_path, monkeypatch):
+    board = _hooked_board(mod, tmp_path, monkeypatch, warnings=0)
+    mod.refresh(board, CHECKED_AT, known_issue=["7220:thermal:advisory"])
+    assert _evidence(board).is_file()
+
+    published = mod.refresh(board, CHECKED_AT, resolve_known_issue=["#7220"])
+
+    assert "output/readiness/known-issues.json (removed)" in published
+    report = json.loads((board / "output" / "readiness.json").read_text())
+    assert "known_issues" not in report
+    assert "output/readiness/known-issues.json" not in report["inputs"]
+    assert not _evidence(board).exists()
+
+
+def test_resolving_an_unrecorded_issue_publishes_nothing(mod, tmp_path, monkeypatch):
+    board = _hooked_board(mod, tmp_path, monkeypatch, warnings=0)
+    before = {p: p.read_bytes() for p in board.rglob("*") if p.is_file()}
+    with pytest.raises(mod.GateFailure, match="not recorded on this board"):
+        mod.refresh(board, CHECKED_AT, resolve_known_issue=["7220"])
+    assert {p: p.read_bytes() for p in board.rglob("*") if p.is_file()} == before
+
+
+def test_dry_run_with_known_issue_leaves_the_board_untouched(mod, tmp_path, monkeypatch):
+    board = _hooked_board(mod, tmp_path, monkeypatch, warnings=0)
+    before = {p: p.read_bytes() for p in board.rglob("*") if p.is_file()}
+    mod.refresh(board, CHECKED_AT, dry_run=True, known_issue=["7220:thermal:advisory"])
+    assert {p: p.read_bytes() for p in board.rglob("*") if p.is_file()} == before
