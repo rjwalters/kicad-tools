@@ -564,7 +564,9 @@ class AssemblyPackage:
                 rotation_corrections=rotation_corrections,
             )
             effective_config = get_pnp_formatter(self.fab_family, pnp_config).config
-            result.tht_excluded = extract_tht_exclusions(footprints, effective_config)
+            result.tht_excluded = extract_tht_exclusions(
+                footprints, effective_config, aux_origin=aux_origin
+            )
             if result.tht_excluded:
                 logger.info(
                     "CPL excludes %d through-hole component(s) (hand-solder): %s",

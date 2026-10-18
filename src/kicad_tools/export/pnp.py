@@ -390,7 +390,16 @@ def _pos_frame_xy(
     and drill files use), and without it otherwise.  Works from the
     sheet-absolute position so it is independent of Edge.Cuts detection.
     """
-    xa, ya = fp.sheet_position
+    # ``Footprint.position`` is board-relative (sheet coordinates minus the
+    # board origin used by Edge.Cuts detection); ``Footprint.sheet_position``
+    # adds that origin back, giving the absolute ``(at ...)`` value KiCad's
+    # ``pcb export pos`` and the aux/drill origin are measured in.  The two
+    # differ only for parsed PCB footprints with a non-zero board origin.
+    # Footprint-like objects (the public export entry points accept them)
+    # carry no board origin, so ``position`` is already the absolute value
+    # and is the correct fallback.
+    sheet_pos = getattr(fp, "sheet_position", None)
+    xa, ya = sheet_pos if sheet_pos is not None else fp.position
     if config.use_aux_origin:
         aux_x, aux_y = aux_origin or (0.0, 0.0)
         return xa - aux_x, aux_y - ya
