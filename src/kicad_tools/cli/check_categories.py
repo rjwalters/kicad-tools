@@ -39,6 +39,7 @@ CHECK_CATEGORIES = [
     "single_pad_net",
     "solder_mask",
     "mask_to_copper",
+    "thermal_asymmetry",
     "via_in_pad",
     "via_type",
     "via_under_body",

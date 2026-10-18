@@ -3235,6 +3235,7 @@ def run_selected_checks(
         "single_pad_net": checker.check_single_pad_nets,
         "solder_mask": checker.check_solder_mask_pads,
         "mask_to_copper": checker.check_mask_to_copper,
+        "thermal_asymmetry": checker.check_thermal_asymmetry,
         "via_in_pad": checker.check_via_in_pad,
         "via_type": checker.check_via_type_capability,
         "via_under_body": checker.check_via_under_body,

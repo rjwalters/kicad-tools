@@ -47,6 +47,18 @@ Geometry of "via inside pad":
 * Any drill overlap with SMT copper requires the process, including partial
   overlap where the drill is not fully contained by the land.
 
+Via at pad edge (issue #7220):
+
+* A drill that does NOT overlap pad copper can still sit closer than the
+  fab's ``design_rules.min_solder_mask_dam_mm`` (JLCPCB 0.1 mm) to the
+  pad's solder-mask aperture -- the copper outline grown by the pad's
+  ``solder_mask_margin``, else ``setup.pad_to_mask_clearance``.  No mask
+  web is left to hold the via tent, so in practice it wicks like a
+  via-in-pad without the filled-and-capped process.  Reported as the
+  advisory warning ``via_at_pad_edge`` (never on a pair already reported
+  as ``via_in_pad``, and not for a via that is legal in-pad under the
+  declared eligible process).
+
 Out of scope (explicitly): blind/buried vias, microvias, and
 controlled-impedance differential pairs.  These require additional
 DesignRules fields (see issue #2635 acceptance criteria and the
@@ -59,6 +71,7 @@ check lives entirely in pure-Python ``DRCChecker.check_via_in_pad``.
 
 from __future__ import annotations
 
+import math
 from typing import TYPE_CHECKING
 
 from kicad_tools.manufacturers.fabrication_process import (
@@ -75,6 +88,10 @@ from ..copper_refs import board_origin
 from ..copper_refs import via_ref as copper_via_ref
 from ..violations import DRCResults, DRCViolation
 from .base import DRC_TOLERANCE, DRCRule
+from .via_pad_geometry import (
+    drill_to_mask_aperture_gap,
+    pad_mask_margin,
+)
 
 # The pad-bbox / overlap geometry now lives in a shared module so the
 # ``fix-vias --relocate-in-pad`` command reuses exactly the same detector as
@@ -92,8 +109,15 @@ from .via_pad_geometry import (
     via_inside_pad as _via_inside_pad,
 )
 
+#: Advisory warning: drill misses the pad copper but sits closer than the
+#: fab's ``min_solder_mask_dam_mm`` to the pad's mask aperture (issue #7220).
+VIA_AT_PAD_EDGE_RULE_ID = "via_at_pad_edge"
+
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from kicad_tools.manufacturers import DesignRules
+    from kicad_tools.router.primitives import Pad as RouterPad
     from kicad_tools.schema.pcb import PCB, Footprint, Pad, Via
 
 
@@ -129,6 +153,18 @@ class ViaInPadRule(DRCRule):
         "Detects vias drilled inside SMD pads that lack an eligible "
         "filled-and-capped via-in-pad fabrication process"
     )
+
+    def __init__(self, *, report_pad_edge: bool = False) -> None:
+        """Configure the rule.
+
+        Args:
+            report_pad_edge: Also emit the advisory ``via_at_pad_edge``
+                warning (issue #7220).  Off by default so direct callers --
+                board finalizers, ``fix-vias`` and ``detect-mistakes``, which
+                treat every result as an in-pad drill -- keep that contract;
+                :meth:`DRCChecker.check_via_in_pad` (``kct check``) turns it on.
+        """
+        self.report_pad_edge = report_pad_edge
 
     def check(
         self,
@@ -177,6 +213,22 @@ class ViaInPadRule(DRCRule):
 
         layer_count = len(pcb.copper_layers) if hasattr(pcb, "copper_layers") else None
 
+        # Issue #7220: ``via_at_pad_edge`` inputs.  The mask aperture is the
+        # copper grown by the pad's own margin, else the board-wide
+        # ``pad_to_mask_clearance``.
+        dam = float(getattr(design_rules, "min_solder_mask_dam_mm", 0.0) or 0.0)
+        setup = getattr(pcb, "setup", None)
+        pad_to_mask = float(getattr(setup, "pad_to_mask_clearance", 0.0) or 0.0)
+        mask_reach = max(
+            [pad_to_mask, 0.0]
+            + [
+                float(margin)
+                for entries in pads_by_net.values()
+                for _fp, pad, _bbox in entries
+                if (margin := getattr(pad, "solder_mask_margin", None)) is not None
+            ]
+        )
+
         # For each via, check pads on the same net.
         for via in pcb.vias:
             if via.net_number == 0:
@@ -186,6 +238,27 @@ class ViaInPadRule(DRCRule):
                 continue
             for fp, pad, bbox in candidates:
                 if not _via_inside_pad(via, bbox, pad, fp):
+                    # Issue #7220: a drill that misses the copper can still
+                    # sit closer to the pad's mask aperture than the fab's
+                    # minimum mask dam -- no web is left to hold the tent.
+                    if (
+                        self.report_pad_edge
+                        and dam > DRC_TOLERANCE
+                        and self._near_bbox(via, bbox, dam + mask_reach)
+                    ):
+                        gap = drill_to_mask_aperture_gap(
+                            via, pad, fp, pad_to_mask_clearance=pad_to_mask
+                        )
+                        if (
+                            gap is not None
+                            and gap < dam - DRC_TOLERANCE
+                            and not self._pofv_eligible(via, process, layer_count, component_holes)
+                        ):
+                            results.add(
+                                self._make_edge_violation(
+                                    via, fp, pad, gap, dam, pad_mask_margin(pad, pad_to_mask)
+                                )
+                            )
                     continue
                 if not supported:
                     results.add(self._make_violation(via, fp, pad))
@@ -207,6 +280,74 @@ class ViaInPadRule(DRCRule):
                     )
 
         return results
+
+    @staticmethod
+    def _near_bbox(via: Via, bbox: tuple[float, float, float, float], reach: float) -> bool:
+        """Cheap prefilter: is the drill edge within ``reach`` of the pad bbox?"""
+        cx, cy = via.position
+        min_x, min_y, max_x, max_y = bbox
+        distance = math.hypot(max(min_x - cx, 0.0, cx - max_x), max(min_y - cy, 0.0, cy - max_y))
+        return distance - via.drill / 2.0 < reach
+
+    def _pofv_eligible(
+        self,
+        via: Via,
+        process: FabricationProcess | None,
+        layer_count: int | None,
+        component_holes: Sequence[RouterPad] | None,
+    ) -> bool:
+        """True when ``via`` would be legal in-pad under the declared POFV process.
+
+        Such a via is designed to be filled and capped (#5009), so a drill at
+        the pad edge needs no mask dam and ``via_at_pad_edge`` stays silent.
+        """
+        if process is None:
+            return False
+        reasons = self._check_process_eligibility(
+            via,
+            process,
+            layer_count=layer_count,
+            hole_context=resolve_component_hole_context(
+                *via.position, via.drill, all_pads=component_holes
+            ),
+        )
+        return not reasons
+
+    def _make_edge_violation(
+        self,
+        via: Via,
+        fp: Footprint,
+        pad: Pad,
+        gap: float,
+        dam: float,
+        margin: float,
+    ) -> DRCViolation:
+        """Build a ``via_at_pad_edge`` warning for a single (via, pad) pair."""
+        ref_label = f"{fp.reference}-{pad.number}"
+        via_ref = copper_via_ref(via, getattr(self, "_origin", (0.0, 0.0)))
+        net_name = via.net_name or pad.net_name or ""
+        if abs(gap) <= DRC_TOLERANCE:
+            gap = 0.0  # tangent: report 0, not a float-noise "-0.0"
+        gap_text = f"{gap:.3f}mm" if gap >= 0 else f"overlaps it by {-gap:.3f}mm"
+        return DRCViolation(
+            rule_id=VIA_AT_PAD_EDGE_RULE_ID,
+            severity="warning",
+            message=(
+                f"Via at ({via.position[0]:.3f}, {via.position[1]:.3f}) "
+                f"(drill {via.drill:.3f}mm) is at the edge of pad {ref_label} "
+                f"(net '{net_name}'): drill edge to the pad's mask aperture "
+                f"(copper + {margin:.3f}mm) is {gap_text}, below the "
+                f"{dam:.3f}mm minimum solder-mask dam -- no mask web holds the "
+                f"tent, so solder can wick into the via. Move the via at least "
+                f"{dam:.3f}mm clear of the opening, or order a filled-and-capped "
+                f"via-in-pad process."
+            ),
+            location=(round(via.position[0], 3), round(via.position[1], 3)),
+            actual_value=round(gap, 4),
+            required_value=round(dam, 4),
+            items=(via_ref, ref_label),
+            nets=(net_name,),
+        )
 
     def _check_process_eligibility(
         self,
