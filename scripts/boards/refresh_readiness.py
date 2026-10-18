@@ -115,6 +115,10 @@ class BoardConfig:
     tier: str
     erc: tuple[ErcJob, ...]
     manifest_refresher: str | None = None  # "path/to/module.py:function"
+    # Board-relative copies of the native DRC report that the refresh rewrites
+    # from the one staged kicad-cli run (Issue #7283).  Each is recorded in
+    # ``readiness.json`` ``report_sources`` as produced from the routed PCB.
+    drc_targets: tuple[str, ...] = ()
     # Board-local manufacturing check that replaces ``kct check --mfr <tier>``
     # (Issue #6269).  Run as ``python <check_script> <routed_pcb> <report>``;
     # it must write a ``kct check``-format JSON report, which is gated exactly
@@ -193,6 +197,7 @@ BOARDS: dict[str, BoardConfig] = {
         routed_pcb="output/bldc_controller_routed.kicad_pcb",
         schematic="output/bldc_controller.kicad_sch",
         tier="jlcpcb",
+        drc_targets=("output/drc_report.json",),
         erc=(
             ErcJob(
                 "05-native-erc.json",
@@ -211,6 +216,11 @@ BOARDS: dict[str, BoardConfig] = {
         routed_pcb="output/diffpair_test_routed.kicad_pcb",
         schematic="output/diffpair_test.kicad_sch",
         tier="jlcpcb-tier1",
+        drc_targets=(
+            "output/drc_report.json",
+            "output/readiness/native-drc.json",
+            "output/manufacturing/native-drc.json",
+        ),
         erc=(
             ErcJob(
                 "06-native-erc.json",
@@ -228,6 +238,11 @@ BOARDS: dict[str, BoardConfig] = {
         routed_pcb="output/matchgroup_test_routed.kicad_pcb",
         schematic="output/matchgroup_test.kicad_sch",
         tier="jlcpcb",
+        drc_targets=(
+            "output/drc_report.json",
+            "output/readiness/native-drc.json",
+            "output/manufacturing/native-drc.json",
+        ),
         erc=(
             ErcJob(
                 "07-native-erc.json",
@@ -369,7 +384,8 @@ def native_erc(board: Path, job: ErcJob, reuse: Path | None, save: Path | None) 
     return data
 
 
-def gate_native_drc(board: Path, cfg: BoardConfig) -> int:
+def gate_native_drc(board: Path, cfg: BoardConfig) -> tuple[int, bytes]:
+    """Run the refilled native DRC; return the error count and the raw report bytes."""
     with tempfile.TemporaryDirectory(prefix="refresh-readiness-drc-") as tmp:
         report = Path(tmp) / "drc.json"
         proc = run(
@@ -387,7 +403,8 @@ def gate_native_drc(board: Path, cfg: BoardConfig) -> int:
         )
         if not report.is_file():
             raise GateFailure(f"kicad-cli DRC did not run: {proc.stderr}")
-        data = json.loads(report.read_text())
+        raw = report.read_bytes()
+        data = json.loads(raw)
     # Issue #6962: a library-table finding means the environment, not the
     # board, was checked.
     require_library_environment(data, source=f"native DRC of {cfg.routed_pcb}")
@@ -399,7 +416,7 @@ def gate_native_drc(board: Path, cfg: BoardConfig) -> int:
     )
     if errors or unconnected:
         raise GateFailure("native DRC has errors or unconnected items")
-    return len(errors)
+    return len(errors), raw
 
 
 def warning_counts_by_rule(data: dict) -> dict[str, int]:
@@ -629,6 +646,14 @@ def refresh(
                 (staged / target).write_bytes(data)
             log(f"  native ERC {job.schematic}: 0 violations -> {len(job.targets)} report copies")
 
+        # Issue #7283: run before the mirrors, archives and manifest, which
+        # hash the report copies written here.
+        drc_errors, drc_raw = gate_native_drc(staged, cfg)
+        for target in cfg.drc_targets:
+            (staged / target).write_bytes(drc_raw)
+        if cfg.drc_targets:
+            log(f"  native DRC report -> {len(cfg.drc_targets)} report copies")
+
         for mirror, source in cfg.mirrors:
             for path in sorted(p for p in (staged / mirror).rglob("*") if p.is_file()):
                 origin = staged / source / path.relative_to(staged / mirror)
@@ -653,7 +678,6 @@ def refresh(
         )
         log(f"  output/manufacturing.zip: rebuilt; members with new content {changed}")
 
-        drc_errors = gate_native_drc(staged, cfg)
         lvs_clean, lvs_mismatches = gate_check(staged, cfg)
         routed_pct = gate_net_status(staged, cfg)
         gate_sync(staged, cfg)
@@ -675,6 +699,11 @@ def refresh(
         if report.get("status") != "ready" or report.get("blockers"):
             raise GateFailure("readiness.json is not a ready report; refusing to re-pin")
 
+        if cfg.drc_targets:
+            # Issue #7283: record which PCB bytes the report copies were produced
+            # from, so report binding sees provenance and not just co-pinning.
+            pcb_sha = sha256(staged / cfg.routed_pcb)
+            report.setdefault("report_sources", {}).update(dict.fromkeys(cfg.drc_targets, pcb_sha))
         for name in report["inputs"]:
             report["inputs"][name] = sha256(staged / name)
         report["checked_at"] = checked_at
