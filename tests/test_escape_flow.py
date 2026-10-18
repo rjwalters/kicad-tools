@@ -28,6 +28,7 @@ from kicad_tools.router.grid import RoutingGrid
 from kicad_tools.router.layers import Layer, LayerStack
 from kicad_tools.router.primitives import Pad
 from kicad_tools.router.rules import DesignRules
+from tests.route_cli import route_args
 
 # =============================================================================
 # Solver: min_cost_flow
@@ -450,12 +451,9 @@ def test_cli_flag_selects_flow_and_implies_reservation() -> None:
 
 
 def test_flag_hidden_from_help_and_parsed_by_both_parsers() -> None:
-    from kicad_tools.cli.parser import create_parser
-
-    parser = create_parser()
-    args = parser.parse_args(["route", "x.kicad_pcb", "--escape-corridor-assignment", "flow"])
+    args = route_args(["x.kicad_pcb", "--escape-corridor-assignment", "flow"])
     assert args.escape_corridor_assignment == "flow"
-    assert parser.parse_args(["route", "x.kicad_pcb"]).escape_corridor_assignment == "greedy"
+    assert route_args(["x.kicad_pcb"]).escape_corridor_assignment == "greedy"
 
 
 # =============================================================================

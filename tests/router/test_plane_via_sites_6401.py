@@ -27,6 +27,7 @@ from unittest.mock import patch
 
 import pytest
 
+from kicad_tools.cli import main as cli_main
 from kicad_tools.router.grid import RoutingGrid
 from kicad_tools.router.lattice.geometry import seg_near_polygon, seg_pt_dist
 from kicad_tools.router.lattice.obstacles import KeepoutArea, LatticeKeepoutMask
@@ -41,6 +42,7 @@ from kicad_tools.router.plane_via_sites import (
 )
 from kicad_tools.router.primitives import Layer, Pad, Route
 from kicad_tools.router.rules import DesignRules
+from tests.route_cli import route_args
 
 PLANE = "GND"
 
@@ -378,14 +380,11 @@ def test_apply_reserves_only_zoned_auto_skipped_nets(tmp_path) -> None:
 
 
 def test_opt_out_flag_survives_main_cli_dispatch(tmp_path) -> None:
-    from kicad_tools.cli.commands.routing import run_route_command
-    from kicad_tools.cli.parser import create_parser
-
     path = tmp_path / "board.kicad_pcb"
     path.write_text("(kicad_pcb)")
-    args = create_parser().parse_args(["route", str(path), "--no-plane-via-reservation"])
+    route_args([str(path), "--no-plane-via-reservation"])
     with patch("kicad_tools.cli.route_cmd.main", return_value=0) as main:
-        run_route_command(args)
+        cli_main(["route", str(path), "--no-plane-via-reservation"])
     assert "--no-plane-via-reservation" in main.call_args.args[0]
 
 

@@ -2079,7 +2079,8 @@ machine output to new commands.
 The router exposes a finer-grained ladder so CI can tell partial routing
 apart from clean routing with DRC issues. Source of truth: the `exit codes:`
 epilog in [`src/kicad_tools/cli/route_exit_codes_help.py`](../../src/kicad_tools/cli/route_exit_codes_help.py)
-(shared by `kct route --help` and the worker parser), expanded by the
+(the epilog of `route_cmd._route_parser`, the only `kct route` parser, so
+`kct route --help` prints it), expanded by the
 `# Exit codes:` comment block in `route_cmd.py`'s `_main_impl`
 (`main` is a thin wrapper around it).
 

@@ -20,7 +20,7 @@ directly or via :mod:`kicad_tools.cli` -- paid the full transitive import
 cost of *all* ~30 command domains (including the router's heaviest module,
 ``routing.py``/``route_cmd.py``) even for a cheap, unrelated command like
 ``kct zones fill`` or a bare ``--help``.  Measured locally: importing just
-``run_route_command`` this way cost ~1.7s of CPU time (~3s wall) beyond a
+``run_route_auto_command`` this way cost ~1.7s of CPU time (~3s wall) beyond a
 bare interpreter start, and every CLI subcommand paid it regardless of
 which domain it actually needed.  Board 06 / diff-pair regression's
 post-route pipeline alone spawns 2-7 ``kicad_tools.cli`` subprocesses per
@@ -31,8 +31,8 @@ This module now resolves each handler **lazily** on first attribute access
 (:pep:`562`), so a caller that only needs ``run_zones_command`` never
 imports ``routing``'s sibling domains (placement, reasoning, datasheet,
 ...). Behavior is unchanged: every name below remains importable exactly
-as before (``from kicad_tools.cli.commands import run_route_command``,
-``kicad_tools.cli.commands.run_route_command``, tab-completion via
+as before (``from kicad_tools.cli.commands import run_zones_command``,
+``kicad_tools.cli.commands.run_zones_command``, tab-completion via
 ``__dir__``, etc.) -- only the *timing* of the underlying submodule import
 moves from "this package's import time" to "this name's first access".
 """
@@ -81,7 +81,6 @@ _HANDLER_MODULES: dict[str, str] = {
     "run_optimize_command": ".routing",
     "run_retune_lengths_command": ".routing",
     "run_route_auto_command": ".routing",
-    "run_route_command": ".routing",
     "run_zones_command": ".routing",
     "run_run_command": ".run",
     "run_sch_command": ".schematic",

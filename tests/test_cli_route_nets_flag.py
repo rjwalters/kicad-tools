@@ -18,6 +18,9 @@ import argparse
 
 import pytest
 
+from kicad_tools.cli import main as cli_main
+from tests.route_cli import route_args
+
 
 # ---------------------------------------------------------------------------
 # A tiny fake board so the net-selection logic can be tested without a real
@@ -245,13 +248,10 @@ def test_nets_quiet_suppresses_implied_flag_notice(fake_board, capsys):
 
 
 # ---------------------------------------------------------------------------
-# Parser wiring (drift-adjacent): --nets present on both route parsers + shim.
+# Parser wiring: --nets on the kct route parser and through ``kct route``.
 # ---------------------------------------------------------------------------
-def test_nets_flag_on_outer_route_parser():
-    from kicad_tools.cli.parser import create_parser
-
-    parser = create_parser()
-    args = parser.parse_args(["route", "board.kicad_pcb", "--nets", "/A,/B"])
+def test_nets_flag_on_kct_route_parser():
+    args = route_args(["board.kicad_pcb", "--nets", "/A,/B"])
     assert args.nets == "/A,/B"
 
 
@@ -279,10 +279,9 @@ def test_nets_flag_on_inner_route_parser():
     assert captured["ns"].nets == "/A,/B"
 
 
-def test_route_command_shim_forwards_nets(monkeypatch):
-    """run_route_command forwards --nets into the inner argv."""
+def test_kct_route_forwards_nets(monkeypatch):
+    """``kct route`` hands --nets to route_cmd.main (issue #7017)."""
     from kicad_tools.cli import route_cmd
-    from kicad_tools.cli.commands import routing
 
     seen: dict[str, list[str]] = {}
 
@@ -292,11 +291,8 @@ def test_route_command_shim_forwards_nets(monkeypatch):
 
     monkeypatch.setattr(route_cmd, "main", fake_main)
 
-    from kicad_tools.cli.parser import create_parser
-
-    parser = create_parser()
-    args = parser.parse_args(["route", "board.kicad_pcb", "--nets", "/A,/B"])
-    routing.run_route_command(args)
+    route_args(["board.kicad_pcb", "--nets", "/A,/B"])
+    cli_main(["route", "board.kicad_pcb", "--nets", "/A,/B"])
 
     assert "--nets" in seen["argv"]
     assert seen["argv"][seen["argv"].index("--nets") + 1] == "/A,/B"

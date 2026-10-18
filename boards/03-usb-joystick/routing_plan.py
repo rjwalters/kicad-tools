@@ -27,7 +27,7 @@ from kicad_tools.router.pair_protocols import (
 )
 from kicad_tools.router.quantize import OffAngleSegmentError, verify_segment_45
 from kicad_tools.schema.pcb import PCB
-from kicad_tools.sexp import parse_file, parse_string, serialize_sexp
+from kicad_tools.sexp import SExp, parse_file, parse_string, serialize_sexp
 from kicad_tools.validate.rules.clearance import CopperElement
 from kicad_tools.validate.rules.diffpair_routing_continuity import DiffPairRoutingContinuityRule
 
@@ -319,6 +319,30 @@ def _require_45_degree_copper(path):
             ) from exc
 
 
+def _copper_by_net_name(doc):
+    """Serialize copper with ``(net "NAME")`` refs (Issue #7033).
+
+    Net ids are per-board, so a numeric ``(net N)`` stored in the plan would
+    bind to a different net (or none) on the board it is replayed onto.
+    Refs already carrying a name pass through untouched.
+    """
+    names = {n.get_int(0): n.get_string(1) for n in doc.find_children("net")}
+    copper = []
+    for node in doc.children:
+        if node.name not in {"segment", "via", "arc"}:
+            continue
+        net = node.find_child("net")
+        if net is not None and len(net.children) == 1 and isinstance(net.children[0].value, int):
+            net_id = net.children[0].value
+            if net_id not in names:
+                raise ValueError(
+                    f"{node.name} references net id {net_id} that is not in the board's net table"
+                )
+            net.children[0] = SExp.quoted_atom(names[net_id])
+        copper.append(serialize_sexp(node))
+    return copper
+
+
 def save_plan(reviewed_board, plan_path=PLAN):
     _require_45_degree_copper(reviewed_board)
     doc = parse_file(reviewed_board)
@@ -335,7 +359,7 @@ def save_plan(reviewed_board, plan_path=PLAN):
             "minimum_pad_hole_spacing_mm": 0.45,
         },
         "usb_geometry": usb_geometry(reviewed_board),
-        "copper": [serialize_sexp(n) for n in doc.children if n.name in {"segment", "via", "arc"}],
+        "copper": _copper_by_net_name(doc),
         # Text only, symmetric with ``apply_plan()`` below (Issue #5744).
         # Footprint silk *geometry* is regenerated from the library on every
         # rebuild and is deliberately NOT snapshotted here -- capturing it
@@ -361,6 +385,11 @@ def apply_plan(input_path, output_path, plan_path=PLAN):
     for source in plan["copper"]:
         node = parse_string(source)
         net = node.find_child("net")
+        if len(net.children) == 1 and isinstance(net.children[0].value, int):
+            raise ValueError(
+                f"Routing plan holds numeric net id {net.children[0].value}; net ids are "
+                "per-board, so recapture the plan with save_plan() to store net names"
+            )
         name = net.get_string(0) if len(net.children) == 1 else net.get_string(1)
         node.remove_child("net")
         node.add(parse_string(f"(net {nets[name]})"))

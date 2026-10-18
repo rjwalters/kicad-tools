@@ -13,8 +13,24 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 - [2026-02](work_log/WORK_LOG_2026-02.md)
 - [2026-01](work_log/WORK_LOG_2026-01.md)
 
+### 2026-10-18
+
+- **PR #7034**: fix: route the board-03 experiment row under jlcpcb-tier1 sidecars
+- **PR #7031**: docs: fix stale import_lcsc_part snippet in manufacturing-export example
+- **PR #7030**: fix: unify schematic wire endpoint bucketing on micron rounding
+- **Issue #7029** (closed): examples/09: help text references nonexistent kicad_tools.parts.import_lcsc_part
+- **Issue #7009** (closed): Unify kct sch wire endpoint bucketing on rounded micron
+- **PR #7021**: docs: fix stale kct command names in lcsc guide and mfg example
+- **PR #7016**: fix(router): key the routing cache on the native router build (#7014)
+- **PR #7013**: test: consolidate sch_validate S-expression builder helpers
+- **Issue #7019** (closed): docs: two references to nonexistent kct subcommands (kct pcb render, kct mfr check)
+- **Issue #7014** (closed): router cache key omits native BUILD_VERSION and PYTHONHASHSEED (stale copper after a C++ rebuild; follow-up #7003)
+- **Issue #7011** (closed): Consolidate 11 copy-pasted S-expression builder helpers across test_sch_validate_* tests (~700 LOC)
+
 ### 2026-10-17
 
+- **PR #7010**: refactor: consolidate copy-pasted sch wire helpers into sch_wire_common
+- **Issue #7008** (closed): Consolidate copy-pasted wire/grid helpers across kct sch CLI modules (9x _snap, 4x _point_on_wire_midpoint, 4x _find_wires_at_point)
 - **PR #7006**: fix: hold match-group meanders to max(group, neighbour) class clearance
 - **PR #7005**: refactor: remove unused MCPTools registry (mcp/util.py)
 - **PR #7002**: fix(router): diffpair partner-via keep-outs use the trace/via floor (#6963)

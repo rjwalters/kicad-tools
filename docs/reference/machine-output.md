@@ -92,8 +92,9 @@ The sixth batch swept the board-improvement / rule-derivation drivers --
 The seventh and final batch swept the multi-stage orchestrators -- `build`,
 `pipeline`, `stitch` (3). **The #4674 backlog is now empty**: the 4 leaves
 still in the audit's `prose-only` bucket are the 4 documented exemptions.
-The route workstream has since exposed its existing `--format` through the outer
-parser; its staged output still has the qualification described below.
+The route workstream has since exposed its existing `--format` through `kct
+route` (which, since #7017, hands its argv straight to `route_cmd`'s parser);
+its staged output still has the qualification described below.
 `tests/test_format_json_sweep_orchestrators.py` pins that bucket against
 exactly that list, so a new prose-only leaf fails a test rather than silently
 re-opening the backlog.
@@ -127,9 +128,12 @@ reachable through `kct`:
   machine-output flag. `kct mfr rules --format json` is now wired end-to-end
   (outer parser → shim → inner parser) and the inner `--json` boolean was
   removed rather than aliased — it never shipped on any reachable surface.
-- `route_cmd.py` `--format` — now forwarded by `kct route` as part of #5348.
-  The parser drift guard covers both entry points. See "Routing output" below
-  for the scope of its structured diagnostics.
+- `route_cmd.py` `--format` — reachable through `kct route` since #5348. Since
+  #7017 `kct route` is a passthrough (`cli/__init__.py` hands its raw argv to
+  `route_cmd.main`, like `footprint generate`), so every `route_cmd` flag is
+  user-facing; the audit resolves the `route` stub to `route_cmd._route_parser`
+  (`parser.resolve_passthrough`). See "Routing output" below for the scope of
+  its structured diagnostics.
 
 ## Classification of the 72 prose-only subcommands
 

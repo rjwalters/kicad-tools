@@ -24,8 +24,8 @@ Coverage:
    an explicit list; union behaviour when both flags are set.
 5. **AC #5: pour-net guard** -- a pour/ground net (``GNDA``) selected as
    analog keeps its pour semantics (not forced into the pathfinder).
-6. **AC #6: forwarding** -- ``run_route_command`` propagates the flags into
-   the inner ``route_cmd.main`` argv.
+6. **AC #6: forwarding** -- ``kct route`` hands the flags to
+   ``route_cmd.main`` (verbatim since issue #7017).
 7. **AC #7: no-op when absent** -- without the flags the map and net-priority
    ordering are unchanged vs. baseline.
 8. **Edge cases** -- empty list, unknown net name, dedup, zero-analog board.
@@ -39,12 +39,14 @@ from io import StringIO
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from kicad_tools.cli import main as cli_main
 from kicad_tools.router.core import Autorouter
 from kicad_tools.router.rules import (
     NET_CLASS_ANALOG,
     NET_CLASS_DIGITAL,
     DesignRules,
 )
+from tests.route_cli import kct_route, route_args
 
 # =============================================================================
 # Helpers
@@ -103,13 +105,10 @@ class TestFlagsDefinedInBothParsers:
     """Both flags must appear in the unified and standalone parsers."""
 
     def test_analog_nets_in_unified_parser_help(self):
-        from kicad_tools.cli.parser import create_parser
-
-        parser = create_parser()
         help_output = StringIO()
         with patch.object(sys, "stdout", help_output):
             with contextlib.suppress(SystemExit):
-                parser.parse_args(["route", "--help"])
+                cli_main(["route", "--help"])
         help_text = help_output.getvalue()
         assert "--analog-nets" in help_text
         assert "--auto-analog" in help_text
@@ -127,31 +126,21 @@ class TestFlagsDefinedInBothParsers:
 
     def test_help_notes_guard_traces_deferred(self):
         """AC #8: the --help text flags that guard-trace generation is deferred."""
-        from kicad_tools.cli.parser import create_parser
 
-        parser = create_parser()
         help_output = StringIO()
         with patch.object(sys, "stdout", help_output):
             with contextlib.suppress(SystemExit):
-                parser.parse_args(["route", "--help"])
+                cli_main(["route", "--help"])
         help_text = help_output.getvalue().lower()
         assert "guard" in help_text and "deferred" in help_text
 
     def test_analog_nets_parses_via_unified_parser(self):
-        from kicad_tools.cli.parser import create_parser
-
-        parser = create_parser()
-        args = parser.parse_args(
-            ["route", "test.kicad_pcb", "--analog-nets", "AUDIO_L,AUDIO_R", "--auto-analog"]
-        )
+        args = route_args(["test.kicad_pcb", "--analog-nets", "AUDIO_L,AUDIO_R", "--auto-analog"])
         assert args.analog_nets == "AUDIO_L,AUDIO_R"
         assert args.auto_analog is True
 
     def test_defaults_in_unified_parser(self):
-        from kicad_tools.cli.parser import create_parser
-
-        parser = create_parser()
-        args = parser.parse_args(["route", "test.kicad_pcb"])
+        args = route_args(["test.kicad_pcb"])
         assert args.analog_nets is None
         assert args.auto_analog is False
 
@@ -369,94 +358,30 @@ class TestPourNetGuard:
 
 
 # =============================================================================
-# AC #6: Forwarding through run_route_command
+# AC #6: Forwarding through ``kct route``
 # =============================================================================
 
 
-def _forwarding_args(**overrides) -> SimpleNamespace:
-    """Minimal args namespace for run_route_command forwarding tests."""
-    base: dict[str, object] = {
-        "pcb": "test.kicad_pcb",
-        "output": None,
-        "strategy": "negotiated",
-        "skip_nets": None,
-        "grid": "auto",
-        "trace_width": 0.2,
-        "clearance": 0.15,
-        "via_drill": 0.3,
-        "via_diameter": 0.6,
-        "mc_trials": 10,
-        "iterations": 15,
-        "verbose": False,
-        "dry_run": True,
-        "quiet": True,
-        "power_nets": None,
-        "layers": "auto",
-        "force": False,
-        "no_optimize": False,
-        "auto_layers": False,
-        "max_layers": 6,
-        "min_completion": 0.95,
-        "adaptive_rules": False,
-        "min_trace": None,
-        "min_clearance_floor": None,
-        "manufacturer": "jlcpcb",
-        "high_performance": False,
-        "skip_drc": False,
-        "auto_fix": False,
-        "auto_fix_passes": None,
-        "export_failed_nets": None,
-        "differential_pairs": False,
-        "diffpair_spacing": None,
-        "diffpair_max_delta": None,
-        "length_match_diffpairs": False,
-        "length_match_groups": False,
-        "strict": False,
-        "net_class_map": None,
-        "analog_nets": None,
-        "auto_analog": False,
-    }
-    base.update(overrides)
-    return SimpleNamespace(**base)
-
-
 class TestForwarding:
-    """``run_route_command`` forwards the flags when set, omits otherwise."""
+    """``kct route`` hands the flags to the router verbatim (issue #7017)."""
 
     def test_analog_nets_forwarded_when_set(self):
-        from kicad_tools.cli.commands.routing import run_route_command
-
-        args = _forwarding_args(analog_nets="AUDIO_L,AUDIO_R")
-        with patch("kicad_tools.cli.route_cmd.main") as mock_main:
-            mock_main.return_value = 0
-            run_route_command(args)
-            call_args = mock_main.call_args[0][0]
-            assert "--analog-nets" in call_args
-            idx = call_args.index("--analog-nets")
-            assert call_args[idx + 1] == "AUDIO_L,AUDIO_R"
-            assert "--auto-analog" not in call_args
+        forwarded, args = kct_route(["test.kicad_pcb", "--analog-nets", "AUDIO_L,AUDIO_R"])
+        assert forwarded[forwarded.index("--analog-nets") + 1] == "AUDIO_L,AUDIO_R"
+        assert "--auto-analog" not in forwarded
+        assert args.analog_nets == "AUDIO_L,AUDIO_R"
 
     def test_auto_analog_forwarded_when_set(self):
-        from kicad_tools.cli.commands.routing import run_route_command
-
-        args = _forwarding_args(auto_analog=True)
-        with patch("kicad_tools.cli.route_cmd.main") as mock_main:
-            mock_main.return_value = 0
-            run_route_command(args)
-            call_args = mock_main.call_args[0][0]
-            assert "--auto-analog" in call_args
-            assert "--analog-nets" not in call_args
+        forwarded, args = kct_route(["test.kicad_pcb", "--auto-analog"])
+        assert "--auto-analog" in forwarded
+        assert "--analog-nets" not in forwarded
+        assert args.auto_analog is True
 
     def test_flags_not_forwarded_when_absent(self):
-        from kicad_tools.cli.commands.routing import run_route_command
-
-        args = _forwarding_args()
-        with patch("kicad_tools.cli.route_cmd.main") as mock_main:
-            mock_main.return_value = 0
-            run_route_command(args)
-            call_args = mock_main.call_args[0][0]
-            assert "--analog-nets" not in call_args
-            assert "--auto-analog" not in call_args
+        forwarded, args = kct_route(["test.kicad_pcb"])
+        assert "--analog-nets" not in forwarded
+        assert "--auto-analog" not in forwarded
+        assert (args.analog_nets, args.auto_analog) == (None, False)
 
 
 # =============================================================================
