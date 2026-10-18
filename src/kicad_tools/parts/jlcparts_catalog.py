@@ -611,7 +611,45 @@ def sync_catalog(
 
     count = JlcpartsCatalog(dest).count()
     _log(f"Catalog ready: {dest} ({count:,} components)")
+    warning = catalog_coverage_warning(dest)
+    if warning:
+        _log(f"WARNING: {warning}")
     return dest
+
+
+# Long-lived JLCPCB *basic* parts every complete catalog carries (100nF 0402
+# MLCC, 10k 0805 and 10k 0402 resistors).  Their absence means the dataset
+# is a partial scrape, so "not in the catalog" proves nothing (issue #7166).
+COVERAGE_CANARY_PARTS = ("C1525", "C17414", "C25744")
+
+
+def catalog_coverage_warning(db_path: Path | None = None) -> str | None:
+    """Return a warning when the catalog lacks well-known basic parts.
+
+    ``None`` when every :data:`COVERAGE_CANARY_PARTS` entry is present, or
+    when there is no catalog file at all.  The check is advisory: the
+    upstream dataset is what it is, but callers must not treat absence from
+    a partial catalog as evidence that a part does not exist.
+    """
+    catalog = JlcpartsCatalog(db_path)
+    if not catalog.available:
+        return None
+    found = catalog.lookup_many(list(COVERAGE_CANARY_PARTS))
+    missing = [lcsc for lcsc in COVERAGE_CANARY_PARTS if lcsc not in found]
+    if not missing:
+        return None
+    lowest = ""
+    try:
+        with sqlite3.connect(f"file:{catalog.db_path}?mode=ro", uri=True) as conn:
+            row = conn.execute("SELECT MIN(lcsc) FROM jlc_components").fetchone()
+        if row and row[0] is not None:
+            lowest = f" (lowest LCSC id C{row[0]})"
+    except sqlite3.Error:
+        pass
+    return (
+        f"catalog lacks {len(missing)} of {len(COVERAGE_CANARY_PARTS)} known basic parts "
+        f"({', '.join(missing)}); offline coverage is partial{lowest}"
+    )
 
 
 def _is_split_archive(archive: Path) -> bool:
@@ -764,14 +802,17 @@ def _extract_split_archive(archive: Path, dest: Path) -> None:
                 while not decompressor.eof:
                     chunk = fh.read(1 << 20)
                     if not chunk:
-                        # No more input but the stream never reported EOF --
-                        # flush whatever remains and stop.
-                        out.write(decompressor.flush())
-                        break
+                        # No more input but the stream never reported EOF:
+                        # a short download.  Promoting it would install a
+                        # silently partial catalog (issue #7166), so refuse;
+                        # ``finally`` discards the temp file and ``dest``
+                        # is left untouched.
+                        raise RuntimeError(
+                            "jlcparts archive truncated: deflate stream ended before EOF"
+                        )
                     out.write(decompressor.decompress(chunk))
-                else:
-                    # decompressor.eof reached: flush any buffered tail.
-                    out.write(decompressor.flush())
+                # decompressor.eof reached: flush any buffered tail.
+                out.write(decompressor.flush())
 
         os.replace(tmp_dest, dest)
     finally:

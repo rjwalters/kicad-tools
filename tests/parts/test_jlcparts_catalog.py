@@ -25,6 +25,7 @@ from kicad_tools.parts.jlcparts_catalog import (
     _is_split_archive,
     _normalize_lcsc_id,
     _parse_price_column,
+    catalog_coverage_warning,
     get_catalog_path,
     sync_catalog,
 )
@@ -1332,3 +1333,94 @@ def test_suggestion_and_export_keep_offline_inventory(catalog_db, tmp_path, monk
     assert item.lcsc == "C25804"  # Offline identity matching remains useful.
     assert report.entries[0].inventory["source"] == "offline_catalog"
     assert any("Stock unverified" in line for line in report.summary_lines())
+
+
+# --------------------------------------------------------------------------
+# Issue #7166: truncated downloads and partial-coverage catalogs
+# --------------------------------------------------------------------------
+
+
+def _truncated_split(catalog_db: Path, tmp_path: Path) -> Path:
+    data = _builder.build_spanning_split_bytes(catalog_db)
+    cut = len(data) // 3
+    assert cut > 64  # past the local file header, inside the deflate stream
+    split = tmp_path / "truncated.zip"
+    split.write_bytes(data[:cut])
+    return split
+
+
+def test_truncated_split_archive_raises_and_creates_no_dest(catalog_db: Path, tmp_path: Path):
+    """A short download is refused, not promoted as a partial catalog."""
+    split = _truncated_split(catalog_db, tmp_path)
+    dest = tmp_path / "out.sqlite3"
+
+    with pytest.raises(RuntimeError, match="truncated"):
+        _extract_catalog(split, dest)
+
+    assert not dest.exists()
+    assert not dest.with_suffix(".extract.tmp").exists()
+
+
+def test_truncated_split_archive_leaves_existing_dest_untouched(catalog_db: Path, tmp_path: Path):
+    split = _truncated_split(catalog_db, tmp_path)
+    dest = tmp_path / "out.sqlite3"
+    dest.write_bytes(catalog_db.read_bytes())
+
+    with pytest.raises(RuntimeError, match="truncated"):
+        _extract_catalog(split, dest)
+
+    assert dest.read_bytes() == catalog_db.read_bytes()
+
+
+def test_coverage_warning_names_missing_canary_parts(catalog_db: Path):
+    # The sample fixture carries C1525 but not C17414 / C25744.
+    warning = catalog_coverage_warning(catalog_db)
+    assert warning is not None
+    assert "lacks 2 of 3 known basic parts" in warning
+    assert "C17414" in warning and "C25744" in warning
+    assert "C1525," not in warning
+    assert "lowest LCSC id C100" in warning
+
+
+def test_coverage_warning_silent_for_full_canary_set(tmp_path: Path):
+    rows = [dict(_builder.SAMPLE_ROWS[0], lcsc=lcsc) for lcsc in (1525, 17414, 25744)]
+    db = _builder.build_fixture(tmp_path / "full.sqlite3", rows=rows)
+    assert catalog_coverage_warning(db) is None
+    assert catalog_coverage_warning(tmp_path / "absent.sqlite3") is None
+
+
+def test_sync_catalog_prints_coverage_warning(
+    catalog_db: Path, tmp_path: Path, monkeypatch, capsys
+):
+    data_dir = tmp_path / "dataset"
+    _builder.build_split_zip_dataset(data_dir, catalog_db)
+    monkeypatch.setitem(sys.modules, "requests", _make_fake_requests(data_dir))
+
+    dest = tmp_path / "out" / "jlcparts.sqlite3"
+    sync_catalog(dest=dest, base_url="https://fake.local/data", progress=True)
+
+    out = capsys.readouterr().out
+    assert "WARNING: catalog lacks 2 of 3 known basic parts" in out
+
+
+def test_cli_sync_catalog_json_reports_coverage_warning(
+    catalog_db: Path, tmp_path: Path, monkeypatch, capsys
+):
+    import json
+
+    from kicad_tools.cli import parts_cmd
+
+    data_dir = tmp_path / "dataset"
+    _builder.build_split_zip_dataset(data_dir, catalog_db)
+    dest = tmp_path / "cli-out" / "jlcparts.sqlite3"
+    monkeypatch.setitem(sys.modules, "requests", _make_fake_requests(data_dir))
+    monkeypatch.setattr("kicad_tools.parts.jlcparts_catalog.get_catalog_path", lambda: dest)
+
+    rc = parts_cmd.main(
+        ["sync-catalog", "--base-url", "https://fake.local/data", "--format", "json"]
+    )
+
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["count"] == 4
+    assert "C17414" in payload["coverage_warning"]
