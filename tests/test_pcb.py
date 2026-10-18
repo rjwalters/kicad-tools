@@ -1388,6 +1388,55 @@ class TestAddFootprintProjectLibraryResolution:
         assert fp.reference == "R1"
         assert len(fp.pads) == 2
 
+    def test_project_nickname_keeps_library_id(self, minimal_pcb, tmp_path):
+        """The placed footprint keeps ``Library:Footprint`` (issue #7213)."""
+        pcb = PCB(load_pcb(str(minimal_pcb)))
+        sch_path = self._write_project(tmp_path, fp_lib_table_text=self._FP_LIB_TABLE)
+
+        fp = pcb.add_footprint("local:OnlyHere", "R1", 50.0, 30.0, schematic_path=sch_path)
+
+        assert fp.name == "local:OnlyHere"
+        out = tmp_path / "out.kicad_pcb"
+        pcb.save(out)
+        assert '(footprint "local:OnlyHere"' in out.read_text()
+
+    def test_global_library_keeps_library_id(self, minimal_pcb, tmp_path, monkeypatch):
+        """Global-library path writes the lib ID, including a guessed nickname."""
+        fixture = TestAddFootprint.TEST_PRETTY_DIR / "C_0402_1005Metric.kicad_mod"
+
+        class _Paths:
+            found = True
+            footprints_path = tmp_path
+
+            @staticmethod
+            def get_footprint_file(library, name):
+                return fixture
+
+        monkeypatch.setattr("kicad_tools.schema.pcb.detect_kicad_library_path", lambda: _Paths)
+        pcb = PCB(load_pcb(str(minimal_pcb)))
+
+        explicit = pcb.add_footprint("Capacitor_SMD:C_0402_1005Metric", "C1", 10.0, 10.0)
+        guessed = pcb.add_footprint("C_0402_1005Metric", "C2", 20.0, 10.0)
+
+        assert explicit.name == "Capacitor_SMD:C_0402_1005Metric"
+        assert guessed.name == "Capacitor_SMD:C_0402_1005Metric"
+        out = tmp_path / "out.kicad_pcb"
+        pcb.save(out)
+        assert out.read_text().count('(footprint "Capacitor_SMD:C_0402_1005Metric"') == 2
+
+    def test_add_footprint_from_file_library_id(self, minimal_pcb):
+        """``library_id`` overrides the file's name; the default keeps it."""
+        fixture = TestAddFootprint.TEST_PRETTY_DIR / "C_0402_1005Metric.kicad_mod"
+        pcb = PCB(load_pcb(str(minimal_pcb)))
+
+        plain = pcb.add_footprint_from_file(fixture, "C1", 10.0, 10.0)
+        named = pcb.add_footprint_from_file(
+            fixture, "C2", 20.0, 10.0, library_id="Test_Library:C_0402_1005Metric"
+        )
+
+        assert plain.name == "C_0402_1005Metric"
+        assert named.name == "Test_Library:C_0402_1005Metric"
+
     def test_no_schematic_path_raises_for_project_only_nickname(self, minimal_pcb, tmp_path):
         """Without ``schematic_path``, a project-only nickname is unresolvable
         (unchanged pre-existing behavior -- this parameter only adds a

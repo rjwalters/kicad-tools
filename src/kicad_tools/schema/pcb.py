@@ -6165,6 +6165,7 @@ class PCB:
         rotation: float = 0.0,
         layer: str = "F.Cu",
         value: str = "",
+        library_id: str | None = None,
     ) -> Footprint:
         """
         Add a footprint from a .kicad_mod file to the PCB.
@@ -6186,6 +6187,9 @@ class PCB:
             rotation: Rotation angle in degrees (default: 0)
             layer: Layer to place footprint on ("F.Cu" or "B.Cu", default: "F.Cu")
             value: Component value (e.g., "100nF", "10k")
+            library_id: Optional ``Library:Footprint`` lib ID to write as the
+                placed footprint's name. Defaults to the file's own name,
+                which is bare (no library nickname) for ``.kicad_mod`` files.
 
         Returns:
             The Footprint object that was added to the PCB
@@ -6207,6 +6211,11 @@ class PCB:
         """
         # Load the footprint from file
         fp_sexp = load_footprint(kicad_mod_path)
+
+        # Keep the Library:Footprint lib ID so kicad-cli's schematic-parity
+        # check can match it against the symbol's Footprint field (#7213).
+        if library_id:
+            fp_sexp.set_value(0, library_id)
 
         # Deterministic UUID for this footprint instance (Issue #6076)
         new_uuid = self.mint_uuid("footprint", reference)
@@ -6489,6 +6498,7 @@ class PCB:
                             rotation=rotation,
                             layer=layer,
                             value=value,
+                            library_id=f"{library_name}:{footprint_name.removesuffix('.kicad_mod')}",
                         )
                     break
 
@@ -6518,6 +6528,7 @@ class PCB:
             rotation=rotation,
             layer=layer,
             value=value,
+            library_id=f"{library_name}:{footprint_name.removesuffix('.kicad_mod')}",
         )
 
     def add_net(self, net_name: str) -> Net:

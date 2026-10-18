@@ -96,7 +96,7 @@
     "generate_design.py": "7d8c45b1e3fec62201cff0042c82a2105dd6f8b382853157b795953b87c95b42",
     "generate_pcb.py": "7c7da806f5d80f1bf435c29750d64999efee037b425535a70b55b2d6e90f1a7e",
     "generate_schematic.py": "6d82ec558453329317b4d3215fcb54a0a0c5f0c2be7151cc120423056c8844b6",
-    "hardware_design.py": "38b48ba26e8d7a9fccc45a78c27b0e4ddebc9dea2713410ba19d55795c7a01c4",
+    "hardware_design.py": "ede7646febffbf1ef72d850a2e9e94975fb1db294923bf49fd1028af1e066db8",
     "native_via_repair.py": "ccfb03ae572617e9b47d584c0d291c44d5d3f7047b3817c27e55bdbf7397912e",
     "output/charlieplex_3x3.kicad_pro": "c151d047aecc35b8dcffb8df692c7be105c4864a8cfe66a899aefcdc7689ae38",
     "output/charlieplex_3x3.kicad_sch": "4321516c5b27778d8b810c0c9ef01f9a74959ac64d114b3338fbdc1e4e0c0451",
