@@ -380,6 +380,12 @@ class KiCadCLIResult:
     #: #7077).  kicad-cli still exits 0 and writes ``"schematic_parity": []``,
     #: so this flag is the only sign of it.  Does not affect ``success``.
     parity_skipped: bool = False
+    #: The schematic kicad-cli ran (or tried to run) parity against: the one
+    #: next to the board or the one staged under the board's name (Issue
+    #: #7147).  ``None`` when parity was not requested or none resolved.
+    parity_schematic: Path | None = None
+    #: Cause-specific NOT RUN reason when :attr:`parity_skipped` (Issue #7147).
+    parity_skip_reason: str | None = None
 
 
 #: The line kicad-cli prints (and then exits 0) when ``--schematic-parity``
@@ -500,6 +506,70 @@ def run_erc(
         return KiCadCLIResult(success=False, stderr=f"Failed to run ERC: {e}")
 
 
+def _link_or_copy(src: Path, dst: Path) -> None:
+    """Symlink ``dst -> src``; copy when symlinks are unavailable (Windows)."""
+    try:
+        dst.symlink_to(src, target_is_directory=src.is_dir())
+    except OSError:
+        if src.is_dir():
+            shutil.copytree(src, dst, symlinks=True)
+        else:
+            shutil.copy2(src, dst)
+
+
+def stage_pcb_for_parity(pcb_path: Path, schematic: Path, stage_dir: Path) -> Path:
+    """Mirror the board folder into ``stage_dir`` with ``schematic`` under the board's name.
+
+    kicad-cli ``pcb drc --schematic-parity`` has no ``--schematic`` option: it
+    only reads ``<pcb-stem>.kicad_sch`` next to the board, so a routed board
+    (``foo_routed.kicad_pcb``) never finds ``foo.kicad_sch`` (Issue #7147).
+    Every sibling of the board is linked in -- ``${KIPRJMOD}`` becomes the
+    staging dir, and board-local library tables point at sibling
+    ``.pretty``/``.kicad_sym`` paths -- except ``*.kicad_prl`` (kicad-cli writes
+    one per run, which now lands in the staging dir instead of the user's
+    folder) and any existing ``<pcb-stem>.kicad_sch``.  When the schematic
+    lives elsewhere its sibling ``.kicad_sch`` sub-sheets are linked too, so
+    hierarchical sheet references resolve.  Returns the staged PCB path.
+    """
+    pcb_path = Path(pcb_path).resolve()
+    schematic = Path(schematic).resolve()
+    staged_sch_name = f"{pcb_path.stem}.kicad_sch"
+    for entry in sorted(pcb_path.parent.iterdir()):
+        if entry.suffix == ".kicad_prl" or entry.name == staged_sch_name:
+            continue
+        _link_or_copy(entry, stage_dir / entry.name)
+    _link_or_copy(schematic, stage_dir / staged_sch_name)
+    if schematic.parent != pcb_path.parent:
+        for sheet in sorted(schematic.parent.glob("*.kicad_sch")):
+            target = stage_dir / sheet.name
+            if sheet == schematic or target.exists() or target.is_symlink():
+                continue
+            _link_or_copy(sheet, target)
+    return stage_dir / pcb_path.name
+
+
+def _resolve_parity_schematic(
+    pcb_path: Path, schematic: Path | None
+) -> tuple[Path | None, str | None]:
+    """The schematic parity should use, or ``(None, reason)`` (Issue #7147)."""
+    from kicad_tools.drc.parity import parity_reason_ambiguous, parity_reason_no_schematic
+    from kicad_tools.sync.discover import (
+        resolve_schematic_for_pcb,
+        unresolved_schematic_candidates,
+    )
+
+    if schematic is not None:
+        if Path(schematic).is_file():
+            return Path(schematic), None
+        return None, parity_reason_no_schematic(pcb_path.name)
+    resolved = resolve_schematic_for_pcb(pcb_path)
+    if resolved is not None:
+        return resolved, None
+    if len(unresolved_schematic_candidates(pcb_path)) > 1:
+        return None, parity_reason_ambiguous(pcb_path.name)
+    return None, parity_reason_no_schematic(pcb_path.name)
+
+
 def run_drc(
     pcb_path: Path,
     output_path: Path | None = None,
@@ -508,6 +578,7 @@ def run_drc(
     kicad_cli: Path | None = None,
     all_track_errors: bool = False,
     refill_zones: bool = False,
+    schematic: Path | None = None,
 ) -> KiCadCLIResult:
     """Run KiCad DRC on a PCB.
 
@@ -515,7 +586,12 @@ def run_drc(
         pcb_path: Path to .kicad_pcb file
         output_path: Where to save the report (default: temp file)
         format: Output format - "json" or "report"
-        schematic_parity: Check schematic parity
+        schematic_parity: Check schematic parity.  The schematic is
+            ``schematic`` when given, else :func:`resolve_schematic_for_pcb`
+            (which strips ``_routed`` etc.).  When it is not already
+            ``<pcb-stem>.kicad_sch`` next to the board, kicad-cli runs on a
+            temporary mirror of the board folder (:func:`stage_pcb_for_parity`)
+            -- the user's folder is never written (Issue #7147).
         kicad_cli: Path to kicad-cli (auto-detected if not provided)
         all_track_errors: Pass ``--all-track-errors`` (report every track
             violation, not just the first per track) -- the gate the fleet's
@@ -524,10 +600,74 @@ def run_drc(
             board file is not saved).  Only when this kicad-cli supports it
             (KiCad 10+); KiCad 8/9 reject the option, so it is dropped there
             (Issue #6724).
+        schematic: Explicit schematic for parity (``kct drc --schematic``);
+            ignored when ``schematic_parity`` is false.
 
     Returns:
         KiCadCLIResult with success status and output path
     """
+    with contextlib.ExitStack() as stack:
+        parity_sch: Path | None = None
+        no_sch_reason: str | None = None
+        staging_failed = False
+        run_pcb = Path(pcb_path)
+        if schematic_parity:
+            parity_sch, no_sch_reason = _resolve_parity_schematic(run_pcb, schematic)
+            native_sch = run_pcb.with_suffix(".kicad_sch")
+            if parity_sch is not None and not (
+                native_sch.exists() and native_sch.resolve() == parity_sch.resolve()
+            ):
+                stage_dir = Path(
+                    stack.enter_context(tempfile.TemporaryDirectory(prefix="kct_drc_"))
+                )
+                try:
+                    run_pcb = stage_pcb_for_parity(run_pcb, parity_sch, stage_dir)
+                except OSError as exc:
+                    # Setup failed (permissions, disk full, unreadable
+                    # sibling): run DRC without parity and report parity NOT
+                    # RUN with the cause instead of a traceback.
+                    staging_failed = True
+                    no_sch_reason = (
+                        "could not stage a temporary copy of the board folder "
+                        f"for the parity check: {exc}"
+                    )
+                    run_pcb = Path(pcb_path)
+        result = _run_drc_once(
+            run_pcb,
+            output_path,
+            format=format,
+            schematic_parity=schematic_parity and not staging_failed,
+            kicad_cli=kicad_cli,
+            all_track_errors=all_track_errors,
+            refill_zones=refill_zones,
+        )
+    if schematic_parity:
+        from kicad_tools.drc.parity import parity_reason_netlist_failed
+
+        result.parity_schematic = parity_sch
+        if staging_failed:
+            result.parity_skipped = True
+            result.parity_skip_reason = no_sch_reason
+        elif result.parity_skipped:
+            result.parity_skip_reason = (
+                parity_reason_netlist_failed(str(parity_sch))
+                if parity_sch is not None
+                else no_sch_reason
+            )
+    return result
+
+
+def _run_drc_once(
+    pcb_path: Path,
+    output_path: Path | None,
+    *,
+    format: str,
+    schematic_parity: bool,
+    kicad_cli: Path | None,
+    all_track_errors: bool,
+    refill_zones: bool,
+) -> KiCadCLIResult:
+    """One ``kicad-cli pcb drc`` run on ``pcb_path`` as given (see :func:`run_drc`)."""
     if kicad_cli is None:
         kicad_cli = find_kicad_cli()
         if kicad_cli is None:

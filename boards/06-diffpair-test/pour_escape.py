@@ -73,12 +73,17 @@ _IGNORED_FLOOR_FAMILIES = {
     "Silkscreen Width": ("text_thickness", None),
     "Silkscreen Height": ("text_height", None),
     "Solder Mask Clearance": ("solder_mask_margin", None),
+    # Issue #7132: the manufacturer's maximum drill.  This search only adds
+    # small via drills, so an upper bound on hole size never constrains it.
+    "Max Hole Size": ("hole_size", None),
 }
+# Families whose constraint is an upper bound rather than a ``min`` floor.
+_MAX_CONSTRAINT_FAMILIES = frozenset({"Max Hole Size"})
 _DRU_RULE_RE = re.compile(
     r'\(rule "(?P<name>[^"]+)"\n'
     r"(?:\s*\(layer (?P<layer>\w+)\)\n)?"
     r'(?:\s*\(condition "(?P<condition>[^"]*)"\)\n)?'
-    r"\s*\(constraint (?P<constraint>\w+) \(min (?P<value>[0-9.]+)mm\)\)\)"
+    r"\s*\(constraint (?P<constraint>\w+) \((?P<kind>min|max) (?P<value>[0-9.]+)mm\)\)\)"
 )
 
 # Issue #6443: the router's managed diff-pair block
@@ -201,6 +206,8 @@ def _floor_block_minima(dru_text: str) -> dict[str, float] | None:
             return None  # hand-edited or unrecognized stanza -- fail closed
         family = match.group("name").split(" - ")[0]
         constraint = match.group("constraint")
+        if match.group("kind") != ("max" if family in _MAX_CONSTRAINT_FAMILIES else "min"):
+            return None  # a floor became a ceiling (or vice versa) -- fail closed
         folded = _FOLDED_FLOOR_FAMILIES.get(family)
         if folded is not None:
             expected, field = folded
