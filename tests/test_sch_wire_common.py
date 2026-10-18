@@ -1,19 +1,18 @@
-"""Pin the endpoint-bucketing semantics of the shared wire helpers (issue #7008).
+"""Pin the endpoint-bucketing semantics of the shared wire helpers (issues #7008, #7009).
 
-``remove-wire`` / ``remove-component`` / ``disconnect`` bucket by 0.1 mm
-truncation while ``cleanup-wires`` buckets at micron resolution by rounding.
-They are intentionally different; unifying them is a user-visible change that
-needs its own changelog fragment.  These tests fail if a tidy-up merges them.
+``remove-wire`` / ``remove-component`` / ``disconnect`` / ``cleanup-wires`` all
+bucket endpoints with :func:`endpoint_bucket` (micron resolution, by rounding),
+so they agree on whether two endpoints coincide.
 """
 
 from __future__ import annotations
 
-from kicad_tools.cli.sch_cleanup_wires import _quantize
 from kicad_tools.cli.sch_wire_common import (
     _find_wires_at_point,
     _find_wires_at_point_indexed,
     _wire_endpoint_counts,
-    truncating_bucket,
+    endpoint_bucket,
+    tolerance_units,
 )
 from kicad_tools.operations.symbol_ops import _find_wires_at_point as symbol_ops_find
 from kicad_tools.schema import Schematic
@@ -36,21 +35,25 @@ def _wire(x1: float, y1: float, x2: float, y2: float) -> SExp:
     return SExp.list("wire", SExp.list("pts", SExp.list("xy", x1, y1), SExp.list("xy", x2, y2)))
 
 
-def _micron_key(x: float, y: float) -> tuple[int, int]:
-    return (_quantize(x), _quantize(y))
-
-
-class TestEndpointBucketSplit:
-    def test_truncating_key_separates_12_69999_from_12_7(self):
+class TestEndpointBucket:
+    def test_12_69999_and_12_7_share_a_bucket(self):
         wires = [_wire(12.69999, 0.0, 20.0, 0.0), _wire(12.7, 0.0, 30.0, 0.0)]
-        counts = _wire_endpoint_counts(wires, key=truncating_bucket)
-        assert counts[(126, 0)] == 1
-        assert counts[(127, 0)] == 1
+        counts = _wire_endpoint_counts(wires, key=endpoint_bucket)
+        assert counts[(12700, 0)] == 2
 
-    def test_micron_key_merges_12_69999_with_12_7(self):
-        wires = [_wire(12.69999, 0.0, 20.0, 0.0), _wire(12.7, 0.0, 30.0, 0.0)]
-        counts = _wire_endpoint_counts(wires, key=_micron_key)
-        assert counts[(_quantize(12.7), 0)] == 2
+    def test_negative_coordinates_round_symmetrically(self):
+        assert endpoint_bucket(-12.69999, -0.0004) == (-12700, 0)
+        assert endpoint_bucket(-12.7, 0.0004) == (-12700, 0)
+
+    def test_tolerance_units_match_mm(self):
+        assert tolerance_units(0) == 0
+        assert tolerance_units(0.1) == 100
+        assert tolerance_units(1.27) == 1270
+
+    def test_cleanup_wires_uses_the_shared_key(self):
+        from kicad_tools.cli import sch_cleanup_wires
+
+        assert sch_cleanup_wires.endpoint_bucket is endpoint_bucket
 
     def test_key_is_required(self):
         try:

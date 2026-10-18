@@ -5,16 +5,13 @@ These used to be copy-pasted across a dozen ``sch_*.py`` modules.  Centralising
 them keeps the commands in lock-step: if one copy drifts, the others no longer
 silently drift with it.
 
-Endpoint-coincidence semantics deliberately stay *per caller*:
+Endpoint coincidence for ``sch_remove_wire`` / ``sch_remove_component`` /
+``sch_disconnect`` / ``sch_cleanup_wires`` is decided by one definition:
+:func:`endpoint_bucket`, which rounds to micron resolution.  Tolerances given
+in mm are converted to the same unit with :func:`tolerance_units`.
 
-* ``sch_remove_wire`` / ``sch_remove_component`` / ``sch_disconnect`` bucket
-  at 0.1 mm by truncation (``int(x * 10)``, see :func:`truncating_bucket`).
-* ``sch_cleanup_wires`` buckets at micron resolution by rounding.
-* ``sch_move_component`` / ``operations.symbol_ops`` match with a float
-  tolerance and report the endpoint index.
-
-Do not unify these without a changelog fragment; they can disagree for
-coordinates within float epsilon of a 0.1 mm boundary.
+``sch_move_component`` / ``operations.symbol_ops`` still match with a float
+tolerance and report the endpoint index.
 """
 
 from __future__ import annotations
@@ -31,16 +28,31 @@ from kicad_tools.operations.wire_primitives import (
 from kicad_tools.schema import Schematic
 from kicad_tools.sexp import SExp
 
-# Default matching tolerance for the truncating-bucket ``_find_wires_at_point``.
+# Default matching tolerance for the bucketed ``_find_wires_at_point``.
 POINT_TOLERANCE = 1.27  # mm - standard KiCad grid
 
 # Default float tolerance for endpoint matching with an endpoint index.
 INDEXED_POINT_TOLERANCE = 0.127  # mm - 1/10 grid
 
 
-def truncating_bucket(x: float, y: float) -> tuple[int, int]:
-    """Bucket a point at 0.1 mm by truncation (``remove-wire`` / ``remove-component``)."""
-    return (int(x * 10), int(y * 10))
+# Quantization multiplier for coordinate hashing.  1000 gives micron
+# (0.001 mm) resolution.
+QUANT = 1000
+
+
+def quantize(coord: float) -> int:
+    """Quantize a coordinate (mm) to an integer bucket at micron resolution."""
+    return int(round(coord * QUANT))
+
+
+def endpoint_bucket(x: float, y: float) -> tuple[int, int]:
+    """Bucket a point at micron resolution by rounding."""
+    return (quantize(x), quantize(y))
+
+
+def tolerance_units(tolerance: float) -> int:
+    """Convert a tolerance in mm to :func:`endpoint_bucket` units."""
+    return int(round(tolerance * QUANT))
 
 
 def _point_on_wire_midpoint(
@@ -102,8 +114,7 @@ def _wire_endpoint_counts(
     """Count how many wires touch each endpoint bucket.
 
     *key* maps an endpoint ``(x, y)`` to its bucket.  It is required on
-    purpose: callers disagree on bucketing (see module docstring) and a
-    default would silently pick one.
+    purpose: keeping the key explicit leaves the bucketing visible at each call site.
     """
     counts: dict[tuple[int, int], int] = {}
     for ws in wire_sexps:
@@ -121,15 +132,15 @@ def _find_wires_at_point(
 ) -> list[SExp]:
     """Find all wire S-expression nodes with an endpoint at or near a point.
 
-    Matches on 0.1 mm truncating buckets (``sch_disconnect`` /
-    ``sch_remove_component`` semantics); *tolerance* is converted to 0.1 mm
-    units via ``int(tolerance * 10)``.
+    Matches on micron buckets (``sch_disconnect`` /
+    ``sch_remove_component`` semantics); *tolerance* (mm) is converted to bucket
+    units via ``tolerance_units(tolerance)``.
     """
-    target_key = truncating_bucket(*point)
-    tol_units = int(tolerance * 10)
+    target_key = endpoint_bucket(*point)
+    tol_units = tolerance_units(tolerance)
 
     def _matches(x: float, y: float) -> bool:
-        key = truncating_bucket(x, y)
+        key = endpoint_bucket(x, y)
         return abs(key[0] - target_key[0]) <= tol_units and abs(key[1] - target_key[1]) <= tol_units
 
     return [wire for wire, _idx in iter_wire_endpoint_matches(schematic.sexp, _matches)]
