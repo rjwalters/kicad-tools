@@ -49,10 +49,12 @@ RIPUP_TRADED = "traded"
 
 
 class EscapeAttempts:
-    """Deterministic reroute-attempt budget for one escape (Issue #7071).
+    """Deterministic reroute-attempt budget for one escape strategy (Issue #7071).
 
-    Counts per-net ``route_net_negotiated`` calls across every strategy of
-    one :meth:`NegotiatedRouter.escape_local_minimum`.  Unlike the wall-clock
+    Counts per-net ``route_net_negotiated`` calls of one strategy of
+    :meth:`NegotiatedRouter.escape_local_minimum`; each strategy gets its own
+    instance (Issue #7192) so an earlier strategy cannot starve a later one.
+    Unlike the wall-clock
     escape budget (#2415) it does not depend on host speed, so a seeded
     ``--deterministic-budget`` route reaches the same strategies every time.
     ``cap=None`` means unlimited (only counts).
@@ -70,6 +72,17 @@ class EscapeAttempts:
 
     def spend(self) -> None:
         self.used += 1
+
+    def cut_if_exhausted(self, net_pads: list[Pad] | None) -> bool:
+        """Flag the strategy as cut when a routable net is left without budget.
+
+        Only a net with ``>= 2`` pads needs a reroute; a trailing 1-pad or
+        0-pad net never marks a finished strategy as partial (Issue #7192).
+        """
+        if len(net_pads or ()) >= 2 and self.exhausted():
+            self.cut = True
+            return True
+        return False
 
 
 @dataclass(frozen=True)
@@ -3831,8 +3844,9 @@ class NegotiatedRouter:
                 search within escape strategies (Issue #2415)
             escape_budget: Wall-clock budget in seconds for the entire escape
                 attempt across all strategies (Issue #2415). None means no limit.
-            reroute_cap: Deterministic cap on per-net reroute attempts across
-                all strategies (Issue #7071). None means no limit.
+            reroute_cap: Deterministic cap on per-net reroute attempts per
+                strategy (Issue #7071, per-strategy since #7192); the full
+                reorder gets ``max(cap, routable nets)``. None means no limit.
 
         Each strategy is a transaction (Issue #7071): when it does not
         succeed, the routes and grid usage it changed are restored, so the
@@ -3855,7 +3869,11 @@ class NegotiatedRouter:
         num_strategies = len(strategies)
         strategies_tried = 0
         escape_start = time.time()
-        attempts = EscapeAttempts(reroute_cap)
+        total_reroutes = 0
+        caps_used: list[int] = []
+        # Issue #7192: C++ unmarks queued before this escape; a rolled-back
+        # strategy's discarded copper is flushed from there on.
+        queue_start = self._pending_cpp_unmarks()
         overflow_before = self.grid.get_total_overflow()
         original_routes = {net: list(routes) for net, routes in net_routes.items()}
         original_list = list(routes_list)
@@ -3872,6 +3890,13 @@ class NegotiatedRouter:
             for net in [n for n in net_routes if n not in original_routes]:
                 del net_routes[net]
             routes_list[:] = original_list
+            # Issue #7192: inside an open corridor-reservation window the
+            # unmarks above were only queued, leaving the failed strategy's
+            # copper on the C++ grid for the next strategy to route around.
+            # Restored routes are back in ``grid.routes`` and stay queued.
+            flush = getattr(self.grid, "flush_discarded_cpp_unmarks", None)
+            if callable(flush):
+                flush(queue_start)
 
         def _finish(success: bool) -> tuple[bool, int, int]:
             live_overflow = self.grid.get_total_overflow()
@@ -3881,8 +3906,8 @@ class NegotiatedRouter:
                 overflow_before=overflow_before,
                 overflow_after=live_overflow,
                 kept=success,
-                reroutes=attempts.used,
-                reroute_cap=reroute_cap,
+                reroutes=total_reroutes,
+                reroute_cap=max(caps_used) if caps_used else reroute_cap,
             )
             return success, live_overflow, strategies_tried
 
@@ -3891,12 +3916,21 @@ class NegotiatedRouter:
             if escape_budget is not None:
                 if time.time() - escape_start >= escape_budget:
                     break
-            if attempts.exhausted():
-                break
 
             idx = (strategy_index + i) % num_strategies
             strategy = strategies[idx]
             strategies_tried += 1
+
+            # Issue #7192: one allowance per strategy.  A full reorder
+            # reroutes every net, so a cap below its scope would always cut
+            # it short (and discard it); size it to cover the scope.
+            strategy_cap = reroute_cap
+            if strategy_cap is not None and strategy == self._escape_full_reorder:
+                routable = sum(1 for n in net_routes if len(pads_by_net.get(n, ())) >= 2)
+                strategy_cap = max(strategy_cap, routable)
+            attempts = EscapeAttempts(strategy_cap)
+            if strategy_cap is not None:
+                caps_used.append(strategy_cap)
 
             success, _new_overflow = strategy(
                 overflow_history=overflow_history,
@@ -3911,6 +3945,7 @@ class NegotiatedRouter:
                 escape_budget=escape_budget,
                 attempts=attempts,
             )
+            total_reroutes += attempts.used
 
             if success and not attempts.cut:
                 return _finish(True)
@@ -3969,10 +4004,9 @@ class NegotiatedRouter:
             if escape_budget is not None and escape_budget_start is not None:
                 if time.time() - escape_budget_start >= escape_budget:
                     break
-            if attempts is not None and attempts.exhausted():
-                attempts.cut = True
-                break
             net_pads = pads_by_net.get(net, [])
+            if attempts is not None and attempts.cut_if_exhausted(net_pads):
+                break
             if net_pads and len(net_pads) >= 2:
                 if attempts is not None:
                     attempts.spend()
@@ -4039,10 +4073,9 @@ class NegotiatedRouter:
             if escape_budget is not None and escape_budget_start is not None:
                 if time.time() - escape_budget_start >= escape_budget:
                     break
-            if attempts is not None and attempts.exhausted():
-                attempts.cut = True
-                break
             net_pads = pads_by_net.get(net, [])
+            if attempts is not None and attempts.cut_if_exhausted(net_pads):
+                break
             if net_pads and len(net_pads) >= 2:
                 if attempts is not None:
                     attempts.spend()
@@ -4112,10 +4145,9 @@ class NegotiatedRouter:
             if escape_budget is not None and escape_budget_start is not None:
                 if time.time() - escape_budget_start >= escape_budget:
                     break
-            if attempts is not None and attempts.exhausted():
-                attempts.cut = True
-                break
             net_pads = pads_by_net.get(net, [])
+            if attempts is not None and attempts.cut_if_exhausted(net_pads):
+                break
             if net_pads and len(net_pads) >= 2:
                 if attempts is not None:
                     attempts.spend()
@@ -4191,10 +4223,9 @@ class NegotiatedRouter:
             if escape_budget is not None and escape_budget_start is not None:
                 if time.time() - escape_budget_start >= escape_budget:
                     break
-            if attempts is not None and attempts.exhausted():
-                attempts.cut = True
-                break
             net_pads = pads_by_net.get(net, [])
+            if attempts is not None and attempts.cut_if_exhausted(net_pads):
+                break
             if net_pads and len(net_pads) >= 2:
                 if attempts is not None:
                     attempts.spend()
