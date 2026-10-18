@@ -593,13 +593,13 @@ def test_overvoltage_category_defaults_to_ii():
 
 
 # ---------------------------------------------------------------------------
-# Issue #7082: insulation-type input (default reinforced)
+# Issue #7082: insulation-type input (default basic)
 # ---------------------------------------------------------------------------
 
 
-def test_insulation_defaults_to_reinforced():
+def test_insulation_defaults_to_basic():
     args = create_parser().parse_args(["creepage", "x.kicad_pcb"])
-    assert args.insulation == "reinforced"
+    assert args.insulation == "basic"
 
 
 def test_insulation_rejects_invalid_value():
@@ -609,18 +609,30 @@ def test_insulation_rejects_invalid_value():
         )
 
 
-def test_230v_default_reinforced_requires_3mm_clearance(tmp_path, capsys):
-    """Default (reinforced) at 230 V OVC II: 2500 -> 4000 V impulse -> 3.0 mm."""
+def test_230v_default_basic_requires_1p5mm_clearance(tmp_path, capsys):
+    """Default (basic) at 230 V OVC II equals the pre-#7082 output: 1.5 mm."""
     pcb = _write(tmp_path, board_two_pad_gap_source(1.3))
     ncm = _gap_hv_map_file(tmp_path)
     rc = _run(_repro_argv(pcb, ncm))
     out = capsys.readouterr().out
     assert rc == 1
+    assert "Insulation: basic" in out
+    assert "Derived required clearance: 1.500 mm" in out
+    assert "rated impulse 2500 V" in out
+    assert "reinforced step-up" not in out
+    assert "Derived required creepage: 1.250 mm" in out
+
+
+def test_230v_reinforced_opt_in_requires_3mm_clearance(tmp_path, capsys):
+    """Explicit --insulation reinforced: 2500 -> 4000 V impulse -> 3.0 mm."""
+    pcb = _write(tmp_path, board_two_pad_gap_source(1.3))
+    ncm = _gap_hv_map_file(tmp_path)
+    rc = _run(_repro_argv(pcb, ncm, "--insulation", "reinforced"))
+    out = capsys.readouterr().out
+    assert rc == 1
     assert "Insulation: reinforced" in out
     assert "Derived required clearance: 3.000 mm" in out
-    assert "rated impulse 2500 V" in out
     assert "reinforced step-up -> 4000 V" in out
-    # Table F.5 250 V row, group I: 1.25 mm basic -> 2.5 mm reinforced.
     assert "Derived required creepage: 2.500 mm" in out
 
 
@@ -648,7 +660,7 @@ def test_reinforced_3mm_gap_passes_clearance(tmp_path, capsys):
     """A 3.2 mm gap clears the 3.0 mm reinforced clearance (and 2.5 mm creepage)."""
     pcb = _write(tmp_path, board_two_pad_gap_source(3.2))
     ncm = _gap_hv_map_file(tmp_path)
-    rc = _run(_repro_argv(pcb, ncm, "--format", "json"))
+    rc = _run(_repro_argv(pcb, ncm, "--insulation", "reinforced", "--format", "json"))
     payload = json.loads(capsys.readouterr().out)
     assert rc == 0
     pair = next(p for p in payload["pairs"] if p["net_b"] == "SELV")

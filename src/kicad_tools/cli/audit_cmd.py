@@ -170,12 +170,12 @@ def main(argv: list[str] | None = None) -> int:
         "--hv-insulation",
         dest="hv_insulation",
         choices=["basic", "supplementary", "reinforced"],
-        default="reinforced",
+        default="basic",
         help=(
             "Insulation type the derived creepage/clearance must provide "
-            "(IEC 60664-1 clause 5.2.5 / 6.2).  Default reinforced -- the "
-            "mains-to-SELV barrier case: Table F.1 impulse voltage one step "
-            "higher, 2x creepage.  basic/supplementary use the table values."
+            "(IEC 60664-1 clause 5.2.5 / 6.2).  Default basic; opt in to "
+            "reinforced for mains-to-SELV barriers (Table F.1 impulse voltage "
+            "one step higher, 2x creepage).  supplementary uses the basic values."
         ),
     )
     parser.add_argument(

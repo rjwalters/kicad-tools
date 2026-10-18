@@ -615,7 +615,7 @@ def _add_creepage_parser(subparsers) -> None:
             "impulse voltage and Table F.8 at the steady-state peak) or "
             "iec62368 (IEC 62368-1 Table 17 / Table 14, same clearance "
             "derivation).  Requires --working-voltage and --pollution-degree.  "
-            "Insulation type per --insulation (default reinforced), altitude "
+            "Insulation type per --insulation (default basic), altitude "
             "<= 2000 m.  Engineering aid, NOT a certification."
         ),
     )
@@ -663,14 +663,14 @@ def _add_creepage_parser(subparsers) -> None:
         "--insulation",
         dest="insulation",
         choices=["basic", "supplementary", "reinforced"],
-        default="reinforced",
+        default="basic",
         help=(
             "Insulation type the derived creepage/clearance must provide "
-            "(IEC 60664-1 clause 5.2.5 / 6.2).  Default reinforced -- the "
-            "mains-to-SELV barrier case: the Table F.1 rated impulse voltage "
-            "steps up one preferred-series value before Table F.2 (230 V OVC II: "
-            "4000 V -> 3.0 mm) and creepage doubles.  basic/supplementary use "
-            "the table values (230 V OVC II: 1.5 mm)."
+            "(IEC 60664-1 clause 5.2.5 / 6.2).  Default basic (230 V OVC II: "
+            "1.5 mm); supplementary uses the same table values.  Opt in to "
+            "reinforced for mains-to-SELV barriers: the Table F.1 rated impulse "
+            "voltage steps up one preferred-series value before Table F.2 "
+            "(230 V OVC II: 4000 V -> 3.0 mm) and creepage doubles."
         ),
     )
     # Per-net voltage model (#4371): derive the requirement per pair from |ΔV|.
@@ -6220,12 +6220,12 @@ def _add_audit_parser(subparsers) -> None:
         "--hv-insulation",
         dest="audit_hv_insulation",
         choices=["basic", "supplementary", "reinforced"],
-        default="reinforced",
+        default="basic",
         help=(
             "Insulation type the derived creepage/clearance must provide "
-            "(IEC 60664-1 clause 5.2.5 / 6.2).  Default reinforced -- the "
-            "mains-to-SELV barrier case: Table F.1 impulse voltage one step "
-            "higher, 2x creepage.  basic/supplementary use the table values."
+            "(IEC 60664-1 clause 5.2.5 / 6.2).  Default basic; opt in to "
+            "reinforced for mains-to-SELV barriers (Table F.1 impulse voltage "
+            "one step higher, 2x creepage).  supplementary uses the basic values."
         ),
     )
 

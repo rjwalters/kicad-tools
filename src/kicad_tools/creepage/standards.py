@@ -72,9 +72,9 @@ Table provenance (transcribed values -- spot-check before certifying)
   Not modelled: altitude correction above 2000 m (Table A.2) and the
   homogeneous-field "case B" columns.
 * **Insulation type** (issue #7082) -- ``basic``, ``supplementary`` or
-  ``reinforced``; the default is **reinforced** (operator ruling on #7082:
-  mains-to-SELV isolation is the main case this check exists for, and a basic
-  default under-reports it ~2x).  Reinforced clearance steps the Table F.1
+  ``reinforced``; the default is **basic** (operator ruling on #7082: no
+  behaviour change unless the caller opts in; mains-to-SELV barriers must
+  pass ``reinforced`` explicitly, which needs ~2x the basic value).  Reinforced clearance steps the Table F.1
   ``U_imp`` up one row in the Table F.1 preferred impulse series before the
   Table F.2 lookup (clause 5.2.5); reinforced creepage is twice the basic
   Table F.5 value (clause 6.2).  Supplementary insulation is dimensioned as
@@ -549,10 +549,11 @@ _CLEARANCE_PD_FLOOR_MM: dict[int, float] = {
 # "double" insulation (basic + supplementary) is out of scope for #7082.
 INSULATION_TYPES: tuple[str, ...] = ("basic", "supplementary", "reinforced")
 
-# Default insulation type: reinforced.  source: operator ruling on issue #7082
-# (2026-10-18) -- mains-to-SELV isolation is the main case this check exists
-# for; a basic default reports ~1.5 mm where ~3.0 mm is needed at 230 V OVC II.
-DEFAULT_INSULATION = "reinforced"
+# Default insulation type: basic.  source: operator ruling on issue #7082
+# (2026-10-18, supersedes the earlier reinforced-default comment) -- results are
+# unchanged from the pre-#7082 derivation unless the caller opts in to
+# supplementary / reinforced (230 V OVC II: basic 1.5 mm, reinforced 3.0 mm).
+DEFAULT_INSULATION = "basic"
 
 # Table F.1 preferred impulse-voltage series (V peak): the union of every
 # U_imp value in Table F.1's body.  Reinforced insulation steps U_imp up ONE
@@ -731,7 +732,7 @@ class CreepageStandard:
         ``working_voltage_rms`` keys the table directly (step-up to the next
         higher row; never interpolated).  ``insulation`` (issue #7082) is
         ``basic`` / ``supplementary`` (the table value) or ``reinforced``
-        (2 x the table value, clause 6.2); default ``reinforced``.  Raises
+        (2 x the table value, clause 6.2); default ``basic``.  Raises
         :class:`StandardLookupError` for an out-of-range voltage, an
         undocumented ``(PD, group)`` combo or an unknown insulation type.
         """
@@ -831,7 +832,7 @@ class CreepageStandard:
         """Derive the required clearance (mm) plus structured provenance.
 
         Case A, altitude ``<= 2000 m`` (issue #7057), for the given
-        ``insulation`` type (issue #7082, default ``reinforced``):
+        ``insulation`` type (issue #7082, default ``basic``):
 
         1. ``working_voltage_rms`` (taken as the line-to-neutral rated
            voltage) + ``overvoltage_category`` -> rated impulse withstand

@@ -175,22 +175,31 @@ def test_audit_cli_230v_reports_1p5mm(tmp_path, capsys):
 
 
 # --------------------------------------------------------------------------
-# Issue #7082: insulation type (default reinforced)
+# Issue #7082: insulation type (default basic)
 # --------------------------------------------------------------------------
 
 
-def test_230v_audit_default_is_reinforced_3mm(tmp_path):
-    """Default ``hv_insulation`` is reinforced: 230 V OVC II -> 3.0 mm, 2x creepage."""
+def test_230v_audit_default_is_basic_1p5mm(tmp_path):
+    """Default ``hv_insulation`` is basic: 230 V OVC II -> 1.5 mm (pre-#7082 values)."""
     result = _gap_audit(tmp_path)
+    iso = result.isolation
+    assert iso.insulation == "basic"
+    assert iso.required_clearance_mm == pytest.approx(1.5)
+    assert iso.required_creepage_mm == pytest.approx(1.25)  # F.5, 250 V, PD2 group I
+    clp = iso.report["clearance_provenance"]
+    assert clp["insulation"] == "basic"
+    assert clp["required_impulse_voltage_v"] == 2500.0
+    assert iso.report["insulation"] == "basic"
+
+
+def test_230v_audit_reinforced_opt_in_3mm(tmp_path):
+    """Explicit ``hv_insulation="reinforced"``: 3.0 mm, 2x creepage."""
+    result = _gap_audit(tmp_path, hv_insulation="reinforced")
     iso = result.isolation
     assert iso.insulation == "reinforced"
     assert iso.required_clearance_mm == pytest.approx(3.0)
-    assert iso.required_creepage_mm == pytest.approx(2.5)  # 2 x 1.25 (F.5, 250 V, I)
-    assert iso.passed is False
-    clp = iso.report["clearance_provenance"]
-    assert clp["insulation"] == "reinforced"
-    assert clp["required_impulse_voltage_v"] == 4000.0
-    assert iso.report["insulation"] == "reinforced"
+    assert iso.required_creepage_mm == pytest.approx(2.5)
+    assert iso.report["clearance_provenance"]["required_impulse_voltage_v"] == 4000.0
 
 
 def test_audit_cli_hv_insulation_reaches_engine(tmp_path, capsys):
@@ -651,7 +660,7 @@ class TestKctAuditForwardsHvFlags:
                 "--hv-overvoltage-category",
                 "III",
                 "--hv-insulation",
-                "basic",
+                "reinforced",
             ],
         )
         assert sub_argv == [
@@ -673,7 +682,7 @@ class TestKctAuditForwardsHvFlags:
             "--hv-overvoltage-category",
             "III",
             "--hv-insulation",
-            "basic",
+            "reinforced",
         ]
 
     def test_defaults_forward_nothing(self, monkeypatch):

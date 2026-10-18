@@ -327,7 +327,7 @@ def check_isolation(
     hv_pollution_degree: int | None = None,
     hv_material_group: str = "IIIa",
     hv_overvoltage_category: str = "II",
-    hv_insulation: str = "reinforced",
+    hv_insulation: str = "basic",
 ) -> IsolationStatus:
     """Standalone HV creepage/clearance isolation check (issue #4333, phase 3).
 
@@ -347,7 +347,7 @@ def check_isolation(
     lookup error) -> WARNING; no HV nets -> inert (``checked=False``).
 
     ``hv_insulation`` (``basic`` / ``supplementary`` / ``reinforced``, default
-    ``reinforced``) selects the insulation rule for the derived creepage and
+    ``basic``) selects the insulation rule for the derived creepage and
     clearance (issue #7082).
     """
     status = IsolationStatus(standard=hv_standard)
@@ -801,7 +801,7 @@ class ManufacturingAudit:
         hv_pollution_degree: int | None = None,
         hv_material_group: str = "IIIa",
         hv_overvoltage_category: str = "II",
-        hv_insulation: str = "reinforced",
+        hv_insulation: str = "basic",
     ):
         """Initialize the audit.
 
@@ -834,7 +834,7 @@ class ManufacturingAudit:
                 (``I``-``IV``, default ``II``) selecting the Table F.1 rated
                 impulse voltage for the derived clearance (issue #7057).
             hv_insulation: Insulation type (``basic`` / ``supplementary`` /
-                ``reinforced``, default ``reinforced``) for the derived
+                ``reinforced``, default ``basic``) for the derived
                 creepage and clearance (issue #7082).
         """
         self.path = Path(project_or_pcb)

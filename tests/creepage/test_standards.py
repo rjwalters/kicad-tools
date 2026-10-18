@@ -543,14 +543,17 @@ def test_basic_vs_reinforced_clearance(standard_id, key, expected):
     assert "UNVERIFIED" in rprov["insulation_unverified"]
 
 
-def test_default_insulation_is_reinforced_230v_ovc_ii_is_3mm():
-    assert DEFAULT_INSULATION == "reinforced"
-    value, prov = get_standard("iec60664").required_clearance(230, 2)
-    assert value == pytest.approx(3.0)
-    assert prov["insulation"] == "reinforced"
-    creep, cprov = get_standard("iec60664").required_creepage(230, 2, "I")
-    assert creep == pytest.approx(2.5)  # 2 x 1.25 (F.5, 250 V row, group I)
-    assert cprov["insulation"] == "reinforced"
+def test_default_insulation_is_basic_230v_ovc_ii_is_1p5mm():
+    """Default output equals the pre-#7082 basic values (byte-identical to main)."""
+    assert DEFAULT_INSULATION == "basic"
+    std = get_standard("iec60664")
+    value, prov = std.required_clearance(230, 2)
+    assert value == pytest.approx(1.5)
+    assert prov["insulation"] == "basic"
+    assert (value, prov) == std.required_clearance(230, 2, insulation="basic")
+    creep, cprov = std.required_creepage(230, 2, "I")
+    assert creep == pytest.approx(1.25)  # F.5, 250 V row, group I
+    assert cprov["insulation"] == "basic"
 
 
 @pytest.mark.parametrize("voltage,group", [(230, "I"), (230, "IIIa"), (400, "II"), (400, "IIIa")])
