@@ -1888,13 +1888,13 @@ class TestDRCSafetyFloor:
         )
 
     def test_stale_drc_report_emits_warning(self, tmp_path, monkeypatch, caplog):
-        """A DRC report older than the PCB emits a one-line stale-mtime warning.
+        """A DRC report bound to other PCB content emits a stale warning.
 
-        The floor still blocks on the stale FAIL (staleness in the blocking
-        direction is the safe side); the warning just explains the block.
+        Issue #7190: staleness is judged by the report's recorded
+        ``pcb_sha256`` (mtimes are meaningless after a git checkout), not by
+        mtime.  The floor still blocks on the stale FAIL (staleness in the
+        blocking direction is the safe side); the warning just explains it.
         """
-        import os
-
         project_dir = tmp_path / "project"
         project_dir.mkdir()
         pcb = project_dir / "board.kicad_pcb"
@@ -1902,10 +1902,9 @@ class TestDRCSafetyFloor:
         (project_dir / "board.kicad_sch").write_text("(kicad_sch)")
         report = project_dir / "drc_report.json"
         self._write_shorting_drc_report(report)
-
-        # Make the report older than the PCB.
-        pcb_mtime = pcb.stat().st_mtime
-        os.utime(report, (pcb_mtime - 100, pcb_mtime - 100))
+        data = json.loads(report.read_text())
+        data["pcb_sha256"] = "0" * 64  # generated for some older PCB bytes
+        report.write_text(json.dumps(data))
 
         self._patch_assembly(monkeypatch)
 
@@ -1923,9 +1922,44 @@ class TestDRCSafetyFloor:
         # Still blocks (stale FAIL is the safe side).
         assert not result.success
         # And warns that the verdict may be stale.
-        assert any("older than the PCB" in rec.getMessage() for rec in caplog.records), (
-            "Expected a stale-mtime warning when the report predates the PCB"
+        assert any(
+            "not bound to the PCB's current content (mismatch)" in rec.getMessage()
+            for rec in caplog.records
+        ), "Expected a stale-binding warning when the report hashes other PCB bytes"
+
+    def test_bound_drc_report_emits_no_stale_warning(self, tmp_path, monkeypatch, caplog):
+        """A report whose pcb_sha256 matches the PCB is not called stale,
+        whatever the files' mtimes (issue #7190)."""
+        import hashlib
+        import os
+
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        pcb = project_dir / "board.kicad_pcb"
+        pcb.write_text("(kicad_pcb)")
+        (project_dir / "board.kicad_sch").write_text("(kicad_sch)")
+        report = project_dir / "drc_report.json"
+        self._write_clean_drc_report(report)
+        data = json.loads(report.read_text())
+        data["pcb_sha256"] = hashlib.sha256(pcb.read_bytes()).hexdigest()
+        report.write_text(json.dumps(data))
+        pcb_mtime = pcb.stat().st_mtime
+        os.utime(report, (pcb_mtime - 100, pcb_mtime - 100))
+
+        self._patch_assembly(monkeypatch)
+        config = ManufacturingConfig(
+            include_report=False,
+            include_project_zip=False,
+            include_manifest=False,
+            include_readme=False,
+            preflight=PreflightConfig(skip_all=True),
         )
+        pkg = ManufacturingPackage(pcb_path=pcb, manufacturer="jlcpcb", config=config)
+        with caplog.at_level(logging.WARNING, logger="kicad_tools.export.manufacturing"):
+            result = pkg.export(tmp_path / "out")
+
+        assert result.success, result.errors
+        assert not any("not bound" in rec.getMessage() for rec in caplog.records)
 
     def test_clean_drc_report_does_not_block(self, tmp_path, monkeypatch):
         """A clean pre-existing DRC report must not block export (no regression)."""

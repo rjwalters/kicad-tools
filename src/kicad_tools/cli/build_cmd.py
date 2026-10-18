@@ -2523,6 +2523,13 @@ def _run_step_erc(ctx: BuildContext, console: Console) -> BuildResult:
                 message=f"ERC failed: {result.stderr or 'kicad-cli returned no output'}",
             )
 
+        # Issue #7190: bind the report to the schematic bytes it checked so
+        # export preflight's auto-discovery can trust it.  kicad-cli ignores
+        # the extra top-level key; ``ERCReport`` reads it back.
+        from kicad_tools.drc.report_binding import ERC_HASH_KEY, stamp_report_hash
+
+        stamp_report_hash(erc_report_path, ctx.schematic_file, ERC_HASH_KEY)
+
         # Parse the report to surface error/warning counts.
         try:
             from kicad_tools.erc.report import ERCReport
