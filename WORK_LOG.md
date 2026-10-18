@@ -15,6 +15,13 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-18
 
+- **PR #7098**: fix: validators no longer read clean when they didn't check (#7094)
+- **PR #7092**: docs: measure board 07 match-group spread after per-bump meander placement
+- **PR #7089**: fix(audit): un-run ERC or crashed sync check caps verdict at WARNING
+- **PR #7055**: fix!: deprecate --batch-routing (no-op that claimed GPU acceleration) and remove the unwired GPU batch-routing kernel
+- **Issue #7094** (closed): Three validators read clean when they didn't check: kct validate --lvs --min-confidence, kct erc --sheet/--type filters, kct sch validate with ERC not run
+- **Issue #7083** (closed): kct audit reports READY FOR MANUFACTURING when ERC never ran (kicad-cli off PATH on macOS, ERC timeout) or the sync check crashed
+- **Issue #7051** (closed): Remove no-op `kct route --batch-routing` and the orphaned 1,111-line BatchPathfinder GPU kernel (flag only prints 'GPU-accelerated')
 - **PR #7087**: fix(route): warn when --region-parallel is ignored; drop speedup claims
 - **PR #7085**: fix(cost): price unlisted layer counts at next tier and charge finish fee once
 - **PR #7068**: fix(board04): use global labels for power nets to clear same_local_global_label
