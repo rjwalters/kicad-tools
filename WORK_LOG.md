@@ -15,6 +15,14 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-18
 
+- **PR #7301**: test: write board-00 DRC/ERC reports in tmp_path for #7260 preflight tests (main CI red)
+- **PR #7281**: fix: measure routed intra-pair gap in ImpedanceRule instead of assuming 0.15 mm
+- **PR #7251**: fix(audit,skills): sign-off skills refuse bad boards; kct audit runs ERC on .kicad_pcb
+- **PR #7245**: fix(boards): put board 02 and 03 CPLs in the Gerber frame and add a fleet frame test
+- **Issue #7300** (closed): Main CI red: TestExportAssemblyPreflight7260 copies board-00 drc/erc reports deleted by #7190
+- **Issue #7299** (closed): main CI red: TestExportAssemblyPreflight7260 copies board-00 drc_report.json/erc_report.json that #7267 deleted
+- **Issue #7136** (closed): kct sign-off skills don't refuse bad boards: Gate 1 exits 2 on every board, kicad-cli gate exits 0 on errors, export never gets the DRC report, audit ERC never runs
+- **Issue #7079** (closed): ImpedanceRule judges every detected differential pair at a 0.15 mm gap, whatever the routed spacing
 - **PR #7279**: fix(router): post-route short check ignores input copper the writer drops
 - **Issue #7270** (closed): board 03 thermal_asymmetry: classify the findings and replace #7259's count-based allowance with a narrow one or a fix
 - **PR #7274**: test(board03): pin thermal_asymmetry allowance to the six classified pads
