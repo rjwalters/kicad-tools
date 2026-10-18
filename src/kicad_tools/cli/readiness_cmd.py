@@ -68,6 +68,7 @@ from .known_issues import (
     KNOWN_ISSUES_FILENAME,
     KnownIssueError,
     defects,
+    known_error_allowance,
     merge_known_issues,
     parse_known_issue,
     validate_known_issues,
@@ -1235,6 +1236,37 @@ def _format_warning_table(counts: dict[str, int]) -> str:
     return ", ".join(f"{rule}={count}" for rule, count in counts.items())
 
 
+def _error_counts(report: dict) -> dict[str, int]:
+    """Group ``violations[]`` by ``rule_id``, errors only (Issue #7355)."""
+    counts: dict[str, int] = {}
+    for violation in report.get("violations", []):
+        if not isinstance(violation, dict) or violation.get("severity") != "error":
+            continue
+        rule = str(violation.get("rule_id") or "unknown")
+        counts[rule] = counts.get(rule, 0) + 1
+    return dict(sorted(counts.items()))
+
+
+def _unaccepted_errors(report: dict, allowance: dict[str, int]) -> list[str] | None:
+    """Rules whose error count differs from the recorded allowance, or ``None``.
+
+    ``None`` means "no exact waiver applies": either there is no allowance, or
+    the report's errors cannot be fully attributed to rules (the summary count
+    disagrees with the listed violations), so nothing may be waived.
+    """
+    if not allowance:
+        return None
+    counts = _error_counts(report)
+    summary = report.get("summary") if isinstance(report.get("summary"), dict) else {}
+    if sum(counts.values()) != int(summary.get("errors", 0) or 0):
+        return None
+    return [
+        f"{rule} (found {counts.get(rule, 0)}, recorded {allowance.get(rule, 0)})"
+        for rule in sorted(set(counts) | set(allowance))
+        if counts.get(rule, 0) != allowance.get(rule, 0)
+    ]
+
+
 def _blocking_unknown_coverage(report: dict) -> list[str]:
     """``name (reason)`` for each blocking category ``kct check`` marked unknown."""
     coverage = report.get("coverage")
@@ -1313,6 +1345,31 @@ def _gate_kct_check(options: ReadinessOptions, engines: Engines) -> tuple[CheckO
     not_run = sorted(name for name, status in gating.items() if status == "NOT RUN")
     deferred = " Manifest verification is deferred to the artifacts gate."
 
+    # Issue #7355: an ``exception`` known issue may account for an exact set of
+    # errors (an approved deviation the generic tier cannot model).  Only an
+    # exact match waives them -- and the FAILED drc/erc roll-up they cause.
+    allowance = known_error_allowance(options.known_issues)
+    mismatch = _unaccepted_errors(report, allowance)
+    waived_errors = 0
+    if errors and mismatch == [] and not not_run:
+        waived_errors, errors = errors, 0
+        failed = []
+    elif mismatch:  # also a stale allowance naming a rule that no longer fires
+        table_err = "; ".join(mismatch)
+        return (
+            CheckOutcome(
+                name="kct_check",
+                status=FAILED,
+                detail=(
+                    f"{errors} electrical/manufacturing error(s) do not match the recorded "
+                    f"exception allowance: {table_err}; warning counts: {table}."
+                ),
+                evidence=evidence_rel,
+                blockers=[f"kct check reports {errors} error(s); unaccepted rule(s): {table_err}."],
+            ),
+            report,
+        )
+
     if errors or failed:
         named = ", ".join(failed) or "none"
         return (
@@ -1390,8 +1447,13 @@ def _gate_kct_check(options: ReadinessOptions, engines: Engines) -> tuple[CheckO
             name="kct_check",
             status=PASSED,
             detail=(
-                f"0 electrical/manufacturing errors; DRC and ERC sub-checks passed; "
-                f"warning counts: {table}.{deferred}"
+                (
+                    "0 electrical/manufacturing errors; DRC and ERC sub-checks passed; "
+                    if not waived_errors
+                    else f"{waived_errors} error(s) accepted exactly by the recorded exception "
+                    "allowance; no other errors; "
+                )
+                + f"warning counts: {table}.{deferred}"
             ),
             evidence=evidence_rel,
         ),

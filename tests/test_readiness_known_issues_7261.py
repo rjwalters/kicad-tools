@@ -17,6 +17,7 @@ from kicad_tools.cli import readiness_cmd
 from kicad_tools.cli.board_readiness import read_readiness
 from kicad_tools.cli.known_issues import (
     KnownIssueError,
+    known_error_allowance,
     known_warning_allowance,
     merge_known_issues,
     parse_known_issue,
@@ -338,3 +339,116 @@ def test_stray_known_issues_file_in_the_records_own_evidence_folder_is_rejected(
     verdict = read_readiness(board)
     assert verdict["status"] == "unverified"
     assert "output/readiness/fill-saved/known-issues.json" in verdict["blockers"][0]
+
+
+# ---------------------------------------------------------------------------
+# Exact ``errors`` allowance on an exception (Issue #7355)
+# ---------------------------------------------------------------------------
+
+
+class _RuleErrorEngines(FakeEngines):
+    """FakeEngines whose ``kct check`` errors carry the given ``{rule: count}``."""
+
+    def __init__(self, board: Path, rules: dict[str, int], **kwargs) -> None:
+        super().__init__(board, check_errors=sum(rules.values()), **kwargs)
+        self.rules = rules
+
+    def kct_check(self, pcb, mfr, report_path, extra):
+        result = super().kct_check(pcb, mfr, report_path, extra)
+        report = json.loads(report_path.read_text())
+        errors = iter(r for r, n in self.rules.items() for _ in range(n))
+        for violation in report["violations"]:
+            if violation["severity"] == "error":
+                violation["rule_id"] = next(errors)
+        report_path.write_text(json.dumps(report, indent=2) + "\n")
+        return result
+
+
+def _sub(tmp_path: Path, name: str) -> Path:
+    (tmp_path / name).mkdir()
+    return tmp_path / name
+
+
+def _run_errors(board: Path, rules: dict[str, int], spec: str, **kwargs) -> tuple[int, dict]:
+    fake = _RuleErrorEngines(board, rules, meta_overall="FAILED", drc_status="FAILED", **kwargs)
+    return run(board, fake, "--checked-at", CHECKED_AT, "--known-issue", spec)
+
+
+ALLOWED = {"dimension_via_drill": 7, "netclass_via_drill": 1}
+SPEC = "6269:paid drill:exception:!dimension_via_drill=7,!netclass_via_drill=1"
+
+
+def test_parse_accepts_an_error_allowance_on_an_exception():
+    entry = parse_known_issue(SPEC, "2026-10-18")
+    assert entry["errors"] == ALLOWED
+    assert "warnings" not in entry
+    assert known_error_allowance([entry]) == dict(sorted(ALLOWED.items()))
+
+
+def test_parse_splits_warning_and_error_allowances():
+    entry = parse_known_issue("1:s:exception:thermal=2,!via=3", "2026-10-18")
+    assert entry["warnings"] == {"thermal": 2}
+    assert entry["errors"] == {"via": 3}
+
+
+@pytest.mark.parametrize("kind", ["defect", "advisory"])
+def test_errors_allowance_is_rejected_off_an_exception(kind):
+    with pytest.raises(KnownIssueError, match="only an exception"):
+        parse_known_issue(f"1:s:{kind}:!via=3", "2026-10-18")
+    with pytest.raises(KnownIssueError, match="only an exception"):
+        validate_known_issues(
+            [
+                {
+                    "issue": 1,
+                    "kind": kind,
+                    "summary": "s",
+                    "recorded": "2026-10-18",
+                    "errors": {"v": 1},
+                }
+            ]
+        )
+
+
+def test_exact_error_allowance_passes_and_the_unwaived_run_blocks(tmp_path):
+    code, report = _run_errors(make_board(_sub(tmp_path, "a")), ALLOWED, SPEC)
+    assert code == 0, report["blockers"]
+    assert report["status"] == "ready"
+    assert (
+        "accepted exactly"
+        in next(c for c in report["checks"] if c["name"] == "kct_check")["detail"]
+    )
+    # Without the allowance the same errors block.
+    other = make_board(_sub(tmp_path, "b"))
+    code, report = run(
+        other,
+        _RuleErrorEngines(other, ALLOWED, meta_overall="FAILED", drc_status="FAILED"),
+        "--checked-at",
+        CHECKED_AT,
+        "--known-issue",
+        "6269:paid drill:exception",
+    )
+    assert code != 0 and report["status"] == "blocked"
+
+
+@pytest.mark.parametrize(
+    "found",
+    [
+        {**ALLOWED, "dimension_via_drill": 8},  # count over the allowance
+        {**ALLOWED, "dimension_via_drill": 6},  # count under (stale allowance)
+        {**ALLOWED, "clearance": 1},  # an unnamed rule
+        {"dimension_via_drill": 7},  # a named rule no longer fires
+    ],
+)
+def test_any_mismatch_with_the_error_allowance_blocks(tmp_path, found):
+    board = make_board(tmp_path)
+    code, report = _run_errors(board, found, SPEC)
+    assert code != 0
+    assert report["status"] == "blocked"
+    assert any("unaccepted rule" in b for b in report["blockers"])
+
+
+def test_error_allowance_does_not_waive_another_failed_gate(tmp_path):
+    board = make_board(tmp_path)
+    code, report = _run_errors(board, ALLOWED, SPEC, erc_status="NOT RUN")
+    assert code != 0
+    assert report["status"] != "ready"
