@@ -132,49 +132,20 @@ def _resolve_output_path(pcb_path: str, output_path: str | None) -> str:
 
 
 def _merge_collinear_segments(router, net_number: int, routes: list) -> list:
-    """Collapse the router's per-grid-cell segments into straight runs.
+    """Merge collinear grid-step segments, returning ``net_number``'s routes.
 
-    Issue #7120: the router emits one segment per grid step, so a straight
-    9 mm run is ~90 collinear segments.  ``kct route`` runs the trace
-    optimizer before saving; this applies the conservative subset of it
-    (``merge_collinear`` only) to the freshly routed net, guarded by the
-    same connectivity invariant.  Any failure falls back to ``routes``.
+    Issue #7120: see :func:`merge_collinear_routes`.  Any failure falls back
+    to ``routes``.
     """
     import copy
 
-    from kicad_tools.router.connectivity_invariant import (
-        enforce_connectivity_invariant,
-        snapshot_connectivity,
-    )
-    from kicad_tools.router.optimizer import (
-        OptimizationConfig,
-        TraceOptimizer,
-        make_collision_checker,
-        optimize_routes_grid_synced,
-    )
+    from kicad_tools.router.optimizer.merge import merge_collinear_routes
 
-    original_router_routes = list(router.routes)
     original_routes = copy.deepcopy(routes)
-    try:
-        snapshot = snapshot_connectivity(router)
-        optimizer = TraceOptimizer(
-            config=OptimizationConfig(
-                merge_collinear=True,
-                eliminate_zigzags=False,
-                compress_staircase=False,
-                convert_45_corners=False,
-                minimize_vias=False,
-            ),
-            collision_checker=make_collision_checker(router.grid),
-        )
-        optimize_routes_grid_synced(router, optimizer)
-        enforce_connectivity_invariant(router, snapshot, "optimize", quiet=True)
-        optimized = [r for r in router.routes if r.net == net_number]
-        return optimized or routes
-    except Exception:
-        logger.warning("Trace optimization failed for net %s; saving raw routes", net_number)
-        router.routes = original_router_routes
+    if not merge_collinear_routes(router):
         return original_routes
+    optimized = [r for r in router.routes if r.net == net_number]
+    return optimized or routes
 
 
 def route_net(
