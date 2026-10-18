@@ -32,8 +32,12 @@ from datetime import datetime
 from pathlib import Path
 
 from kicad_tools.cli.sch_json import add_format_flag, record, run_with_json_summary
+from kicad_tools.cli.sch_wire_common import (
+    _point_on_wire_midpoint,
+)
 from kicad_tools.exceptions import FileNotFoundError as KiCadFileNotFoundError
 from kicad_tools.schema import Schematic
+from kicad_tools.schematic.grid import snap_to_grid
 
 
 @dataclass
@@ -42,44 +46,6 @@ class PlannedAction:
 
     kind: str  # "label", "global_label", "hierarchical_label", "wire", "junction"
     description: str
-
-
-def _snap(value: float, grid: float = 1.27) -> float:
-    """Snap a coordinate to the nearest grid point."""
-    return round(value / grid) * grid
-
-
-def _point_on_wire_midpoint(
-    point: tuple[float, float],
-    wire_start: tuple[float, float],
-    wire_end: tuple[float, float],
-    tolerance: float = 0.1,
-) -> bool:
-    """Check if a point lies on a wire segment but not at its endpoints."""
-    x, y = point
-
-    # Check if point is at either endpoint
-    for ep in (wire_start, wire_end):
-        if abs(x - ep[0]) < tolerance and abs(y - ep[1]) < tolerance:
-            return False
-
-    # Check if point is on the segment
-    x1, y1 = wire_start
-    x2, y2 = wire_end
-
-    # Bounding box check
-    if not (min(x1, x2) - tolerance <= x <= max(x1, x2) + tolerance):
-        return False
-    if not (min(y1, y2) - tolerance <= y <= max(y1, y2) + tolerance):
-        return False
-
-    # Perpendicular distance check
-    length = ((x2 - x1) ** 2 + (y2 - y1) ** 2) ** 0.5
-    if length < tolerance:
-        return False
-
-    dist = abs((y2 - y1) * x - (x2 - x1) * y + x2 * y1 - y2 * x1) / length
-    return dist < tolerance
 
 
 def parse_connect_target(spec: str) -> tuple[float, float]:
@@ -125,8 +91,8 @@ def run_add_label(args) -> int:
         return 1
 
     # Snap placement coordinates to grid
-    at_x = _snap(args.at[0])
-    at_y = _snap(args.at[1])
+    at_x = snap_to_grid(args.at[0])
+    at_y = snap_to_grid(args.at[1])
     position = (at_x, at_y)
 
     rotation = getattr(args, "rotation", 0) or 0
@@ -173,7 +139,7 @@ def run_add_label(args) -> int:
                 print(f"Error: {e}", file=sys.stderr)
                 return 1
             # Snap connect target to grid
-            target = (_snap(target[0]), _snap(target[1]))
+            target = (snap_to_grid(target[0]), snap_to_grid(target[1]))
             connect_targets.append(target)
 
     for target in connect_targets:

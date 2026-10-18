@@ -25,14 +25,15 @@ from __future__ import annotations
 import argparse
 import shutil
 import sys
-import uuid as uuid_mod
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
 from kicad_tools.cli.sch_json import add_format_flag, record, run_with_json_summary
+from kicad_tools.cli.sch_wire_common import (
+    _build_no_connect_sexp,
+)
 from kicad_tools.schema import LibraryManager, Schematic
-from kicad_tools.sexp import SExp
 
 
 @dataclass
@@ -43,15 +44,6 @@ class NoConnectAction:
     pin_number: str
     pin_name: str
     position: tuple[float, float]
-
-
-def _build_no_connect_sexp(x: float, y: float) -> SExp:
-    """Build an S-expression node for a no_connect marker."""
-    return SExp.list(
-        "no_connect",
-        SExp.list("at", x, y),
-        SExp.list("uuid", str(uuid_mod.uuid4())),
-    )
 
 
 def _find_existing_no_connects(schematic: Schematic) -> set[tuple[int, int]]:

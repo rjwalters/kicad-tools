@@ -11,13 +11,13 @@ from pathlib import Path
 import pytest
 
 from kicad_tools.cli.sch_add_wire import (
-    _point_on_wire_midpoint,
-    _snap,
-)
-from kicad_tools.cli.sch_add_wire import (
     main as add_wire_main,
 )
+from kicad_tools.cli.sch_wire_common import (
+    _point_on_wire_midpoint,
+)
 from kicad_tools.schema import Schematic
+from kicad_tools.schematic.grid import snap_to_grid
 
 # ---------------------------------------------------------------------------
 # Minimal schematic content for testing
@@ -93,9 +93,9 @@ def _write_sch(tmp_path: Path, content: str = MINIMAL_SCHEMATIC) -> Path:
 class TestUtilityFunctions:
     def test_snap(self):
         # round(100/1.27) = round(78.74) = 79, 79 * 1.27 = 100.33
-        assert _snap(100.0) == pytest.approx(100.33, abs=0.01)
-        assert _snap(100.33) == pytest.approx(100.33, abs=0.01)
-        assert _snap(2.54) == pytest.approx(2.54, abs=0.01)
+        assert snap_to_grid(100.0) == pytest.approx(100.33, abs=0.01)
+        assert snap_to_grid(100.33) == pytest.approx(100.33, abs=0.01)
+        assert snap_to_grid(2.54) == pytest.approx(2.54, abs=0.01)
 
     def test_point_on_wire_midpoint(self):
         # Point at midpoint of horizontal wire
@@ -222,10 +222,10 @@ class TestGridSnap:
         sch = Schematic.load(sch_path)
         new_wire = sch.wires[-1]
         # 100 -> snapped to 100.33, 50 -> snapped to 49.53
-        assert new_wire.start[0] == pytest.approx(_snap(100), abs=0.02)
-        assert new_wire.start[1] == pytest.approx(_snap(50), abs=0.02)
-        assert new_wire.end[0] == pytest.approx(_snap(120), abs=0.02)
-        assert new_wire.end[1] == pytest.approx(_snap(50), abs=0.02)
+        assert new_wire.start[0] == pytest.approx(snap_to_grid(100), abs=0.02)
+        assert new_wire.start[1] == pytest.approx(snap_to_grid(50), abs=0.02)
+        assert new_wire.end[0] == pytest.approx(snap_to_grid(120), abs=0.02)
+        assert new_wire.end[1] == pytest.approx(snap_to_grid(50), abs=0.02)
 
 
 # ---------------------------------------------------------------------------

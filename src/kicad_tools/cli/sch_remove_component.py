@@ -31,6 +31,14 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
+from kicad_tools.cli.sch_wire_common import (
+    _find_symbol_sexp,
+    _find_wires_at_point,
+    _wire_endpoint_counts,
+    _wire_start_end,
+    endpoint_bucket,
+    tolerance_units,
+)
 from kicad_tools.schema import LibraryManager, Schematic
 from kicad_tools.sexp import SExp
 
@@ -47,71 +55,6 @@ class RemoveComponentResult:
     junctions_removed: int
     lib_symbol_removed: bool
     instance_path_removed: bool
-
-
-def _find_wires_at_point(
-    schematic: Schematic,
-    point: tuple[float, float],
-    tolerance: float = POINT_TOLERANCE,
-) -> list[SExp]:
-    """Find all wire S-expression nodes with an endpoint at or near a point."""
-    target_key = (int(point[0] * 10), int(point[1] * 10))
-    matching = []
-
-    for wire_sexp in schematic.sexp.find_all("wire"):
-        pts_node = wire_sexp.find("pts")
-        if not pts_node:
-            continue
-
-        xy_nodes = pts_node.find_all("xy")
-        if len(xy_nodes) < 2:
-            continue
-
-        for xy in xy_nodes:
-            x = xy.get_float(0) or 0.0
-            y = xy.get_float(1) or 0.0
-            key = (int(x * 10), int(y * 10))
-
-            tol_units = int(tolerance * 10)
-            if (
-                abs(key[0] - target_key[0]) <= tol_units
-                and abs(key[1] - target_key[1]) <= tol_units
-            ):
-                matching.append(wire_sexp)
-                break  # Don't add same wire twice
-
-    return matching
-
-
-def _wire_start_end(wire_sexp: SExp) -> tuple[tuple[float, float], tuple[float, float]]:
-    """Extract start and end points from a wire S-expression node."""
-    pts_node = wire_sexp.find("pts")
-    if not pts_node:
-        return (0.0, 0.0), (0.0, 0.0)
-
-    xy_nodes = pts_node.find_all("xy")
-    if len(xy_nodes) < 2:
-        return (0.0, 0.0), (0.0, 0.0)
-
-    x1 = xy_nodes[0].get_float(0) or 0.0
-    y1 = xy_nodes[0].get_float(1) or 0.0
-    x2 = xy_nodes[1].get_float(0) or 0.0
-    y2 = xy_nodes[1].get_float(1) or 0.0
-
-    return (x1, y1), (x2, y2)
-
-
-def _wire_endpoint_counts(
-    wire_sexps: list[SExp],
-) -> dict[tuple[int, int], int]:
-    """Count how many wires touch each endpoint."""
-    counts: dict[tuple[int, int], int] = {}
-    for ws in wire_sexps:
-        start, end = _wire_start_end(ws)
-        for pt in [start, end]:
-            key = (int(pt[0] * 10), int(pt[1] * 10))
-            counts[key] = counts.get(key, 0) + 1
-    return counts
 
 
 def _collect_all_connectable_points(
@@ -147,10 +90,10 @@ def _collect_all_connectable_points(
                 mirror=sym.mirror,
             )
             for pos in pin_positions.values():
-                points.add((int(pos[0] * 10), int(pos[1] * 10)))
+                points.add(endpoint_bucket(pos[0], pos[1]))
         else:
             # Fallback: use symbol origin as a connectable point
-            points.add((int(sym.position[0] * 10), int(sym.position[1] * 10)))
+            points.add(endpoint_bucket(sym.position[0], sym.position[1]))
 
     # Labels (local, global, hierarchical)
     for tag in ("label", "global_label", "hierarchical_label"):
@@ -159,7 +102,7 @@ def _collect_all_connectable_points(
             if at_node:
                 x = at_node.get_float(0) or 0.0
                 y = at_node.get_float(1) or 0.0
-                points.add((int(x * 10), int(y * 10)))
+                points.add(endpoint_bucket(x, y))
 
     # No-connect markers (wire endpoints touching these are NOT exclusive)
     for nc_sexp in schematic.sexp.find_all("no_connect"):
@@ -167,7 +110,7 @@ def _collect_all_connectable_points(
         if at_node:
             x = at_node.get_float(0) or 0.0
             y = at_node.get_float(1) or 0.0
-            points.add((int(x * 10), int(y * 10)))
+            points.add(endpoint_bucket(x, y))
 
     return points
 
@@ -187,11 +130,11 @@ def _is_wire_exclusive(
     In other words, a wire is shared (not exclusive) if at least one of its
     endpoints touches a connectable point belonging to another element.
     """
-    tol_units = int(tolerance * 10)
+    tol_units = tolerance_units(tolerance)
     start, end = _wire_start_end(wire_sexp)
 
     for pt in [start, end]:
-        pt_key = (int(pt[0] * 10), int(pt[1] * 10))
+        pt_key = endpoint_bucket(pt[0], pt[1])
 
         # If this endpoint is one of the removed symbol's pins, it's fine
         is_own_pin = False
@@ -213,18 +156,6 @@ def _is_wire_exclusive(
         # connectable point, the wire endpoint is dangling and exclusive
 
     return True
-
-
-def _find_symbol_sexp(schematic: Schematic, reference: str) -> SExp | None:
-    """Find the top-level symbol S-expression node by reference designator."""
-    for sym_sexp in schematic.sexp.find_all("symbol"):
-        for prop in sym_sexp.find_all("property"):
-            prop_name = prop.get_string(0)
-            if prop_name == "Reference":
-                prop_value = prop.get_string(1)
-                if prop_value == reference:
-                    return sym_sexp
-    return None
 
 
 def _get_symbol_uuid(sym_sexp: SExp) -> str | None:
@@ -316,11 +247,11 @@ def remove_component(
             mirror=symbol.mirror,
         )
 
-    pin_keys = {(int(p[0] * 10), int(p[1] * 10)) for p in pin_positions.values()}
+    pin_keys = {endpoint_bucket(p[0], p[1]) for p in pin_positions.values()}
 
     # If no pin positions resolved, use symbol origin as fallback
     if not pin_keys:
-        pin_keys = {(int(symbol.position[0] * 10), int(symbol.position[1] * 10))}
+        pin_keys = {endpoint_bucket(symbol.position[0], symbol.position[1])}
 
     # Collect connectable points from other elements
     other_connectable = _collect_all_connectable_points(
@@ -364,11 +295,11 @@ def remove_component(
     # Clean up orphaned junctions at former wire endpoints
     if wire_endpoints:
         remaining_wires = list(schematic.sexp.find_all("wire"))
-        endpoint_counts = _wire_endpoint_counts(remaining_wires)
+        endpoint_counts = _wire_endpoint_counts(remaining_wires, key=endpoint_bucket)
 
         checked_keys: set[tuple[int, int]] = set()
         for pt in wire_endpoints:
-            pt_key = (int(pt[0] * 10), int(pt[1] * 10))
+            pt_key = endpoint_bucket(pt[0], pt[1])
             if pt_key in checked_keys:
                 continue
             checked_keys.add(pt_key)
@@ -383,7 +314,7 @@ def remove_component(
                     continue
                 jx = at_node.get_float(0) or 0.0
                 jy = at_node.get_float(1) or 0.0
-                junc_key = (int(jx * 10), int(jy * 10))
+                junc_key = endpoint_bucket(jx, jy)
 
                 if junc_key == pt_key:
                     if schematic.sexp.remove(junc_sexp):
@@ -436,9 +367,9 @@ def preview_remove_component(
             mirror=symbol.mirror,
         )
 
-    pin_keys = {(int(p[0] * 10), int(p[1] * 10)) for p in pin_positions.values()}
+    pin_keys = {endpoint_bucket(p[0], p[1]) for p in pin_positions.values()}
     if not pin_keys:
-        pin_keys = {(int(symbol.position[0] * 10), int(symbol.position[1] * 10))}
+        pin_keys = {endpoint_bucket(symbol.position[0], symbol.position[1])}
 
     other_connectable = _collect_all_connectable_points(
         schematic,

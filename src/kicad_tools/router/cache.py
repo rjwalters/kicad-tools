@@ -28,7 +28,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from .primitives import Pad, Route
@@ -76,7 +76,22 @@ def routing_cache_context(options: Mapping[str, object], net_class_map: dict) ->
 # Bumped strictly above both parents so neither isolated implementation's
 # cache entries are silently reused.
 # Auto-grid candidate preference and phase-shifted zones change routed copper.
-CACHE_VERSION = "2.5.2-safe-auto-grid"
+# Issue #7014: the version tag now also carries the loaded native router
+# ``BUILD_VERSION`` (``_cache_version_tag``).  Numbered above #7003's
+# 2.5.3 so entries keyed without the native build are dropped either way.
+#
+# ``PYTHONHASHSEED`` is deliberately NOT keyed (#7014 measurement,
+# 2026-10-17): board 01 (negotiated, seed 42) and board 06b (LVDS copper
+# stripped; lattice, --differential-pairs, --deterministic-budget) routed
+# with ``PYTHONHASHSEED=0`` and ``=42`` gave byte-identical normalized
+# copper (13 and 445 items), matching a same-seed replicate.  If a future
+# routing path iterates a str-keyed set/dict in hash order, fix the order
+# (sort) rather than keying the cache on the seed.
+# A cache hit must restore the committed coupled diff-pair nets (Issue #7003):
+# entries written before that carry none and would let the optimizer rewrite
+# the pair rails a fresh route leaves untouched.
+# Numbered above #7014's 2.5.4: entries it wrote predate the coupled-net replay.
+CACHE_VERSION = "2.5.5-coupled-nets"
 
 
 def get_default_cache_path() -> Path:
@@ -99,6 +114,39 @@ def _get_kicad_tools_version() -> str:
         return __version__
     except ImportError:
         return "unknown"
+
+
+def _native_router_build_version() -> int | None:
+    """``BUILD_VERSION`` of the C++ router this process routes with (Issue #7014).
+
+    Same source as ``kct build-native --check`` (``get_backend_info``).
+    ``None`` when the extension is missing *or* disabled as stale: routing
+    then falls back to the Python backend, whose copper must not share an
+    entry with a C++ route of the same inputs.
+    """
+    try:
+        from .cpp_backend import get_backend_info
+
+        info = get_backend_info()
+    except Exception:  # pragma: no cover - defensive: never break caching
+        return None
+    if not info.get("available"):
+        return None
+    build_version = info.get("build_version")
+    return int(build_version) if build_version is not None else None
+
+
+def _cache_version_tag() -> str:
+    """Version string stored with, and required of, every cache entry.
+
+    Combines the package version, ``CACHE_VERSION`` and the loaded native
+    router build (Issue #7014).  A C++ rebuild that bumps ``BUILD_VERSION``
+    (e.g. #6994) changes routed copper without touching any Python input,
+    so before this a cache hit replayed the previous router's copper.
+    """
+    build = _native_router_build_version()
+    native = "none" if build is None else str(build)
+    return f"{_get_kicad_tools_version()}+cache.{CACHE_VERSION}+native.{native}"
 
 
 @dataclass
@@ -220,10 +268,10 @@ class CacheKey:
         rules_json = json.dumps(rules_data, sort_keys=True, default=str)
         rules_hash = hashlib.sha256(rules_json.encode()).hexdigest()
 
-        # Combine the package version with CACHE_VERSION so that either a
-        # new release *or* a manual CACHE_VERSION bump invalidates the cache.
-        pkg_version = _get_kicad_tools_version()
-        version = f"{pkg_version}+cache.{CACHE_VERSION}"
+        # Package version + CACHE_VERSION + loaded native router build
+        # (Issue #7014): a new release, a manual CACHE_VERSION bump *or* a
+        # C++ router rebuild each invalidate the cache.
+        version = _cache_version_tag()
 
         return cls(
             pcb_hash=pcb_hash,
@@ -818,11 +866,21 @@ class RoutingCache:
         created_time = datetime.fromisoformat(created_at)
         return datetime.now() - created_time > self.ttl
 
-    def serialize_routes(self, routes: list[Route], *, route_usage: dict | None = None) -> bytes:
+    def serialize_routes(
+        self,
+        routes: list[Route],
+        *,
+        route_usage: dict | None = None,
+        committed_coupled_nets: set[int] | None = None,
+    ) -> bytes:
         """Serialize routes to compressed bytes for storage.
 
         Args:
             routes: List of Route objects
+            route_usage: Full-run congestion snapshot to persist alongside
+            committed_coupled_nets: Nets of diff pairs the coupled pre-pass
+                committed (Issue #7003); the optimizer must skip them on a
+                cache hit exactly as it does on a fresh route
 
         Returns:
             Compressed JSON bytes
@@ -872,11 +930,11 @@ class RoutingCache:
             }
             routes_data.append(route_dict)
 
-        payload = (
-            routes_data
-            if route_usage is None
-            else {"routes": routes_data, "route_usage": route_usage}
-        )
+        if route_usage is None:
+            payload: Any = routes_data
+        else:
+            payload = {"routes": routes_data, "route_usage": route_usage}
+            payload["committed_coupled_nets"] = sorted(committed_coupled_nets or ())
         json_bytes = json.dumps(payload).encode("utf-8")
         return zlib.compress(json_bytes)
 
@@ -889,6 +947,14 @@ class RoutingCache:
         usage = payload["route_usage"]
         assert isinstance(usage, dict)
         return usage
+
+    @staticmethod
+    def deserialize_committed_coupled_nets(data: bytes) -> set[int]:
+        """Read the committed coupled diff-pair nets (Issue #7003)."""
+        payload = json.loads(zlib.decompress(data))
+        if not isinstance(payload, dict):
+            return set()
+        return {int(net) for net in payload.get("committed_coupled_nets", ())}
 
     def deserialize_routes(self, data: bytes) -> list[Route]:
         """Deserialize routes from compressed bytes.
@@ -1006,6 +1072,7 @@ class RoutingCache:
         compute_time_ms: int = 0,
         *,
         route_usage: dict | None = None,
+        committed_coupled_nets: set[int] | None = None,
     ) -> None:
         """
         Store routing result in cache.
@@ -1016,7 +1083,9 @@ class RoutingCache:
             statistics: Routing statistics dict
             compute_time_ms: Time taken for routing in milliseconds
         """
-        routes_data = self.serialize_routes(routes, route_usage=route_usage)
+        routes_data = self.serialize_routes(
+            routes, route_usage=route_usage, committed_coupled_nets=committed_coupled_nets
+        )
         data_size = len(routes_data)
         now = datetime.now().isoformat()
 
@@ -1073,8 +1142,7 @@ class RoutingCache:
         route_data = self.serialize_routes([route])
         data_size = len(route_data)
         now = datetime.now().isoformat()
-        pkg_version = _get_kicad_tools_version()
-        version = f"{pkg_version}+cache.{CACHE_VERSION}"
+        version = _cache_version_tag()
 
         with self._connect() as conn:
             conn.execute(
@@ -1113,8 +1181,7 @@ class RoutingCache:
         Returns:
             Route if cached and pad positions match, None otherwise
         """
-        pkg_version = _get_kicad_tools_version()
-        version = f"{pkg_version}+cache.{CACHE_VERSION}"
+        version = _cache_version_tag()
 
         with self._connect() as conn:
             cursor = conn.execute(
@@ -1149,8 +1216,7 @@ class RoutingCache:
             Dict mapping net_id to cached Route for unchanged nets
         """
         unchanged_routes = {}
-        pkg_version = _get_kicad_tools_version()
-        version = f"{pkg_version}+cache.{CACHE_VERSION}"
+        version = _cache_version_tag()
 
         with self._connect() as conn:
             for net_id, pad_hash in net_pad_hashes.items():
@@ -1193,8 +1259,7 @@ class RoutingCache:
         route_data = self.serialize_routes(routes)
         data_size = len(route_data)
         now = datetime.now().isoformat()
-        pkg_version = _get_kicad_tools_version()
-        version = f"{pkg_version}+cache.{CACHE_VERSION}"
+        version = _cache_version_tag()
 
         seg_count = sum(len(r.segments) for r in routes)
         via_count = sum(len(r.vias) for r in routes)
@@ -1242,8 +1307,7 @@ class RoutingCache:
         Returns:
             CachedSubProblem if found and not expired, None otherwise.
         """
-        pkg_version = _get_kicad_tools_version()
-        version = f"{pkg_version}+cache.{CACHE_VERSION}"
+        version = _cache_version_tag()
 
         with self._connect() as conn:
             cursor = conn.execute(

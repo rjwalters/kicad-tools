@@ -29,7 +29,7 @@ import sys
 from pathlib import Path
 
 from kicad_tools.cli.modify_schematic import create_backup
-from kicad_tools.cli.sch_set_footprint import _collect_schematic_files
+from kicad_tools.cli.sch_wire_common import _collect_schematic_files
 
 # Prefixes for power/flag symbols that should be excluded from renumbering
 # by default.  When ``include_power=True`` is passed, ``#PWR`` and ``#FLG``
