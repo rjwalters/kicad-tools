@@ -195,7 +195,7 @@ class TestApply:
         assert results.violations[0].stale_waiver_hash == "ev1:then"
 
     def test_kicad_cli_path_ignores_keyed_entries(self):
-        report = SimpleNamespace(violations=[])
+        report = SimpleNamespace(violations=[], schematic_parity=[])
         w = waivers_from_dict({"version": 3, "waivers": [_keyed(_v())]})
         assert apply_waivers_to_report(report, w).unused == []
 
