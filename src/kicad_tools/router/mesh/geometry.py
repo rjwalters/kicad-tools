@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import math
 
+from kicad_tools.core.geometry import point_in_polygon as _core_point_in_polygon
+
 Pt = tuple[float, float]
 
 # Distances below this (mm) are treated as coincident. Board features live at
@@ -56,27 +58,9 @@ def point_in_triangle(p: Pt, a: Pt, b: Pt, c: Pt) -> bool:
 def point_in_polygon(p: Pt, poly: list[Pt]) -> bool:
     """Ray-cast point-in-polygon test (boundary counts as inside).
 
-    ``poly`` is a closed ring given as an ordered vertex list WITHOUT a
-    repeated final vertex.
+    Delegates to :func:`kicad_tools.core.geometry.point_in_polygon`.
     """
-    n = len(poly)
-    if n < 3:
-        return False
-    inside = False
-    j = n - 1
-    for i in range(n):
-        xi, yi = poly[i]
-        xj, yj = poly[j]
-        # On-edge check: treat boundary as inside.
-        if _point_on_segment(p, poly[i], poly[j]):
-            return True
-        intersects = ((yi > p[1]) != (yj > p[1])) and (
-            p[0] < (xj - xi) * (p[1] - yi) / (yj - yi + 0.0) + xi
-        )
-        if intersects:
-            inside = not inside
-        j = i
-    return inside
+    return _core_point_in_polygon(p[0], p[1], poly, boundary_inside=True)
 
 
 def _point_on_segment(p: Pt, a: Pt, b: Pt, eps: float = 1e-7) -> bool:
