@@ -178,3 +178,63 @@ def test_backends_agree_with_the_floor_on():
     assert py is not None and cpp is not None
     for a, b in zip(py, cpp, strict=True):
         assert [(v.x, v.y) for v in a.vias] == [(v.x, v.y) for v in b.vias]
+
+
+# ---------------------------------------------------------------------------
+# Single-ended A* (the main router) refuses the zone too
+# ---------------------------------------------------------------------------
+
+
+def _single_ended(floor: float, backend: str, manufacturer: str = "jlcpcb"):
+    """F.Cu SMD pad -> B.Cu SMD pad on one net: the route needs a layer change."""
+    from kicad_tools.router.cpp_backend import create_hybrid_router
+
+    rules = DesignRules(
+        trace_width=0.2,
+        trace_clearance=0.15,
+        via_clearance=0.2,
+        via_diameter=0.6,
+        via_drill=DRILL,
+        grid_resolution=0.1,
+        min_hole_to_hole=0.25,
+        manufacturer=manufacturer,
+        min_via_pad_edge_gap=floor,
+    )
+    grid = RoutingGrid(width=8.0, height=8.0, rules=rules)
+    start = Pad(x=2.0, y=2.0, width=0.3, height=0.8, net=1, net_name="SIG", layer=Layer.F_CU)
+    end = Pad(x=2.3, y=6.0, width=0.2, height=0.2, net=1, net_name="SIG", layer=Layer.B_CU)
+    for pad in (start, end):
+        grid.add_pad(pad)
+    router = create_hybrid_router(grid, rules, force_python=backend == "python")
+    return grid, router.route(start, end)
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_single_ended_search_never_drops_a_via_in_the_dam_zone(backend):
+    grid, control = _single_ended(0.0, backend)
+    assert control is not None and control.vias
+    assert _edge_zone_vias(grid, [control], WIDE_FLOOR), "control must exercise the zone"
+
+    grid, result = _single_ended(WIDE_FLOOR, backend)
+    assert result is not None, "the net stays routable with a legal via"
+    assert result.vias
+    assert _edge_zone_vias(grid, [result], WIDE_FLOOR) == []
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_single_ended_floor_applies_where_via_in_pad_is_allowed(backend):
+    """The floor is independent of ``allow_smd_vias`` (tier1 allows in-pad)."""
+    grid, result = _single_ended(DAM, backend, "jlcpcb-tier1")
+    assert result is not None
+    assert _edge_zone_vias(grid, [result], DAM) == []
+
+
+def test_single_ended_backends_agree_with_the_floor_on():
+    if not is_cpp_available():
+        pytest.skip("C++ backend not built")
+    _, py = _single_ended(WIDE_FLOOR, "python")
+    _, cpp = _single_ended(WIDE_FLOOR, "cpp")
+    assert py is not None and cpp is not None
+    assert len(py.vias) == len(cpp.vias)
+    for a, b in zip(py.vias, cpp.vias, strict=True):
+        assert (a.x, a.y) == pytest.approx((b.x, b.y), abs=1e-4)  # float32 noise

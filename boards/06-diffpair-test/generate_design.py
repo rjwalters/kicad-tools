@@ -1742,6 +1742,27 @@ def _connector_profile(points, neck_width, trunk_width, neck_length=0.75):
     return legs
 
 
+def _relocate_pad_edge_vias(pcb_path: Path) -> int:
+    """Slide vias out of the mask-dam zone beside SMD pads (issue #7296).
+
+    The stitcher, the pour repair and the single-ended escape vias do not know
+    the fab's mask dam, so this pass lands the board on a ``via_at_pad_edge``
+    clean result.  Returns the number of vias moved; a via with no legal spot
+    raises (the surrounding transaction restores the board).
+    """
+    from kicad_tools.cli.relocate_in_pad_vias import relocate_pad_edge_vias
+    from kicad_tools.manufacturers import get_profile
+    from kicad_tools.schema.pcb import PCB
+
+    pcb = PCB.load(pcb_path)
+    result = relocate_pad_edge_vias(pcb, get_profile("jlcpcb").get_design_rules(layers=4))
+    if result.skipped or result.unresolvable:
+        raise RuntimeError(f"Pad-edge vias left in the mask-dam zone: {result}")
+    if result.changed:
+        pcb.save(pcb_path)
+    return len(result.moved)
+
+
 def _legalize_signal_vias(pcb_path: Path) -> int:
     """Repair same-net ``via_in_pad`` + sub-floor drill-pair residuals.
 
@@ -3075,10 +3096,14 @@ def _finalize_signal_copper(
         before = _clearance_signature(pcb_path)
         n_split = _split_offangle_chords(pcb_path, before)
         n_vias = _legalize_signal_vias(pcb_path)
-        if not (n_split or n_vias):
+        n_edge = _relocate_pad_edge_vias(pcb_path)
+        if not (n_split or n_vias or n_edge):
             print("   No repairable via/chord residuals detected")
             return
-        print(f"   {n_vias} via defect(s) repaired, {n_split} chord(s) split")
+        print(
+            f"   {n_vias} via defect(s) repaired, {n_edge} pad-edge via(s) moved, "
+            f"{n_split} chord(s) split"
+        )
         print("13b. Re-filling zones after legalization...")
         result = subprocess.run(fill_argv, capture_output=True, text=True)
         if result.returncode != 0:
@@ -3095,6 +3120,7 @@ def _finalize_signal_copper(
             if not (added_vias or added_bridges):
                 break
             _legalize_signal_vias(pcb_path)
+            _relocate_pad_edge_vias(pcb_path)
             result = subprocess.run(fill_argv, capture_output=True, text=True)
             if result.returncode != 0:
                 raise RuntimeError(f"Post-legalize pour re-fill failed (rc={result.returncode})")

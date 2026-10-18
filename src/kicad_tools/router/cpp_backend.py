@@ -108,7 +108,10 @@ logger = logging.getLogger(__name__)
 # ``search_radius_cells`` rule shared with Python (new binding
 # ``router_cpp.search_radius_cells``).  A v59 .so searches one ring wider on
 # float-noise inputs (Default rules @ 0.1 mm) than the Python mirror.
-_REQUIRED_CPP_BUILD_VERSION = 61
+# v61 (Issue #7296): ``DesignRules.min_via_pad_edge_gap`` + the coupled
+# pathfinder's mask-dam refusal; v62: the same floor in the single-ended A*'s
+# via check.  A v61 .so lets single-ended vias into the dam zone.
+_REQUIRED_CPP_BUILD_VERSION = 62
 
 
 # Issue #5599: human-readable names for the ``ValidationResult::violation_type``
@@ -1421,6 +1424,8 @@ class CppPathfinder:
         cpp_rules.via_clearance = rules.via_clearance
         cpp_rules.min_drill_clearance = rules.min_drill_clearance
         cpp_rules.min_hole_to_hole = rules.min_hole_to_hole
+        # Issue #7296: the mask-dam floor for the single-ended via check.
+        cpp_rules.min_via_pad_edge_gap = float(getattr(rules, "min_via_pad_edge_gap", 0.0) or 0.0)
         cpp_rules.grid_resolution = rules.grid_resolution
         cpp_rules.cost_straight = rules.cost_straight
         cpp_rules.cost_turn = rules.cost_turn

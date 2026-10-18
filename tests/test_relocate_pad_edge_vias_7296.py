@@ -122,3 +122,17 @@ def test_zero_dam_profile_is_a_noop(tmp_path):
     )
     result = relocate_pad_edge_vias(pcb, rules)
     assert result.moved == [] and result.unresolvable == []
+
+
+def test_fix_vias_cli_runs_the_pass_and_saves(tmp_path):
+    """``kct fix-vias --relocate-pad-edge`` is the pass's CLI entry point."""
+    from kicad_tools.cli.fix_vias_cmd import main
+
+    path = tmp_path / "board.kicad_pcb"
+    path.write_text(_HEAD.format(mask=0.0) + _EDGE_VIA)
+
+    assert main([str(path), "--mfr", "jlcpcb", "--relocate-pad-edge", "--quiet"]) == 0
+
+    assert _edge_warnings(PCB.load(path)) == []
+    # Idempotent: a clean board is a no-op.
+    assert main([str(path), "--mfr", "jlcpcb", "--relocate-pad-edge", "--quiet"]) == 0

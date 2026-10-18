@@ -343,7 +343,8 @@ namespace router {
 // inputs.  Routing output changes, and the Python parity test calls the new
 // ``router_cpp.search_radius_cells`` binding, so a v59 .so must be rejected.
 // v61: ``DesignRules::min_via_pad_edge_gap`` + coupled pad-edge refusal (#7296).
-constexpr int ROUTER_CPP_BUILD_VERSION = 61;
+// v62: the same floor in the single-ended A*'s via check (#7296).
+constexpr int ROUTER_CPP_BUILD_VERSION = 62;
 
 
 // Issue #4071: fixed-capacity owner-set size for per-cell corridor

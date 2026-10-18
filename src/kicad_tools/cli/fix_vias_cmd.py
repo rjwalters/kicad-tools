@@ -762,8 +762,13 @@ def print_fix_results(
             print(f"  ... and {len(warnings) - 5} more")
 
 
-def _run_relocate_in_pad(args, pcb_path: Path, resolved_layers: int) -> int:
+def _run_relocate_in_pad(
+    args, pcb_path: Path, resolved_layers: int, *, pad_edge: bool = False
+) -> int:
     """Run the --relocate-in-pad pass on the PCB schema and save if changed.
+
+    ``pad_edge=True`` runs the ``--relocate-pad-edge`` pass instead (Issue
+    #7296): the same load / report / save / exit-code contract.
 
     Returns a process exit code: 0 on success (incl. clean no-op), 1 on
     load/save error, 2 when some vias could not be relocated (skipped or
@@ -771,7 +776,11 @@ def _run_relocate_in_pad(args, pcb_path: Path, resolved_layers: int) -> int:
     """
     from kicad_tools.schema.pcb import PCB
 
-    from .relocate_in_pad_vias import print_relocation_results, relocate_in_pad_vias
+    from .relocate_in_pad_vias import (
+        print_relocation_results,
+        relocate_in_pad_vias,
+        relocate_pad_edge_vias,
+    )
 
     rules = get_mfr_design_rules(args.mfr, resolved_layers, args.copper)
     if rules is None:
@@ -791,13 +800,16 @@ def _run_relocate_in_pad(args, pcb_path: Path, resolved_layers: int) -> int:
 
     # Resolve the source project's hole floor before a renamed output is saved.
     try:
-        result = relocate_in_pad_vias(
-            pcb,
-            rules,
-            nets=nets,
-            dry_run=args.dry_run,
-            search_alternatives=getattr(args, "search_alternatives", False),
-        )
+        if pad_edge:
+            result = relocate_pad_edge_vias(pcb, rules, nets=nets)
+        else:
+            result = relocate_in_pad_vias(
+                pcb,
+                rules,
+                nets=nets,
+                dry_run=args.dry_run,
+                search_alternatives=getattr(args, "search_alternatives", False),
+            )
     except (ValueError, OSError) as exc:
         print(f"Error resolving relocation constraints: {exc}", file=sys.stderr)
         return 1
@@ -921,6 +933,16 @@ Examples:
         ),
     )
     parser.add_argument(
+        "--relocate-pad-edge",
+        action="store_true",
+        help=(
+            "Slide vias out of the mask-dam zone beside an SMD pad (the geometry "
+            "`kct check` reports as via_at_pad_edge) along their escape track, "
+            "keeping connectivity with stubs. Vias with no legal spot are "
+            "reported unresolvable and left in place (Issue #7296)."
+        ),
+    )
+    parser.add_argument(
         "--search-alternatives",
         action="store_true",
         help="With --relocate-in-pad, try up to 24 safe cardinal/45-degree alternatives when the preferred escape is blocked (default: disabled).",
@@ -930,7 +952,9 @@ Examples:
         action="append",
         dest="nets",
         metavar="NET",
-        help=("Restrict --relocate-in-pad to the given net name (repeatable). Default: all nets."),
+        help=(
+            "Restrict --relocate-in-pad / --relocate-pad-edge to the given net name (repeatable). Default: all nets."
+        ),
     )
 
     args = parser.parse_args(argv)
@@ -963,6 +987,8 @@ Examples:
     # return, leaving the resize path untouched (issue #4359).
     if getattr(args, "relocate_in_pad", False):
         return _run_relocate_in_pad(args, pcb_path, resolved_layers)
+    if getattr(args, "relocate_pad_edge", False):
+        return _run_relocate_in_pad(args, pcb_path, resolved_layers, pad_edge=True)
 
     # Get target dimensions
     target_drill, target_diameter, min_annular_ring, min_clearance = get_design_rules(
