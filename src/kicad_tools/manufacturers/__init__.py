@@ -76,6 +76,7 @@ __all__ = [
     "describe_selection",
     # Functions
     "get_profile",
+    "canonical_manufacturer_id",
     "get_fab_family",
     "list_manufacturers",
     "get_manufacturer_ids",
@@ -137,6 +138,18 @@ _ALIASES: dict[str, str] = {
     "jlcpcb_capabilityplus": "jlcpcb-tier1",
     "jlcpcb-capability-plus": "jlcpcb-tier1",
 }
+
+
+def canonical_manufacturer_id(manufacturer_id: str) -> str:
+    """Resolve aliases to the canonical manufacturer/tier id.
+
+    Unlike :func:`get_fab_family`, capability tiers stay distinct:
+    ``jlcpcb_tier1`` -> ``jlcpcb-tier1`` (not ``jlcpcb``), because the two
+    carry different DRC rules (issue #7153).  Unknown ids come back
+    lowercased/stripped.
+    """
+    normalized = manufacturer_id.lower().strip()
+    return _ALIASES.get(normalized, normalized)
 
 
 def get_profile(manufacturer_id: str) -> ManufacturerProfile:

@@ -62,7 +62,7 @@ def run_mfr_command(args) -> int:
 
     elif args.mfr_command == "validate":
         sub_argv = ["validate", args.file, args.manufacturer]
-        if args.layers != 2:
+        if args.layers is not None:
             sub_argv.extend(["--layers", str(args.layers)])
         if args.copper != 1.0:
             sub_argv.extend(["--copper", str(args.copper)])

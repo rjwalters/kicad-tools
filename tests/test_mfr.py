@@ -1,5 +1,7 @@
 """Tests for kicad_tools.manufacturers module."""
 
+import json
+
 import pytest
 
 from kicad_tools.manufacturers import (
@@ -592,55 +594,103 @@ class TestMfrCLICommands:
         assert default_cls["via_drill"] == pytest.approx(rules.min_via_drill_mm)
 
     def test_validate_command(self, tmp_path):
-        """Test validate command."""
+        """``mfr validate`` on a clean routed board exits 0 (Issue #7188)."""
         from pathlib import Path
 
         from kicad_tools.cli.mfr import main as mfr_main
 
-        src_pcb = Path("boards/03-usb-joystick/usb_joystick_routed.kicad_pcb")
+        src_pcb = (
+            Path(__file__).resolve().parent.parent
+            / "boards/02-charlieplex-led/output/charlieplex_3x3_routed.kicad_pcb"
+        )
         if not src_pcb.exists():
             pytest.skip("Demo PCB file not found")
 
-        # Run validate - should pass without violations
-        try:
-            mfr_main(["validate", str(src_pcb), "jlcpcb"])
-        except SystemExit as e:
-            # Should exit with 0 (success) if no violations
-            assert e.code == 0 or e.code is None
+        # Returns normally (no SystemExit) when the kct engine finds no errors.
+        mfr_main(["validate", str(src_pcb), "jlcpcb"])
 
-    def test_validate_pcb_design(self):
-        """Test PCB design validation function."""
-        from kicad_tools.cli.mfr import _validate_pcb_design
-        from kicad_tools.manufacturers import get_profile
-        from kicad_tools.sexp import SExp
+    def test_validate_autodetects_layers_from_board(self, capsys):
+        """A 4-layer board validates with 4-layer rules without --layers (#7188)."""
+        import json
+        from pathlib import Path
 
-        profile = get_profile("jlcpcb")
-        rules = profile.get_design_rules(layers=2)
+        from kicad_tools.cli.mfr import main as mfr_main
 
-        # Create a simple PCB sexp with a thin trace
-        sexp = SExp.list(
-            "kicad_pcb",
-            SExp.list(
-                "segment",
-                SExp.list("width", 0.05),  # 0.05mm, below minimum
-            ),
+        src_pcb = (
+            Path(__file__).resolve().parent.parent
+            / "boards/03-usb-joystick/output/usb_joystick_routed.kicad_pcb"
         )
+        if not src_pcb.exists():
+            pytest.skip("Demo PCB file not found")
 
-        violations = _validate_pcb_design(sexp, rules)
+        mfr_main(["validate", str(src_pcb), "jlcpcb", "--format", "json"])
+        data = json.loads(capsys.readouterr().out)
+        assert data["layers"] == 4
+        assert data["ok"] is True
 
-        # Should find the trace width violation
-        assert len(violations) > 0
-        assert any("TRACE_WIDTH" in v[0] for v in violations)
+        # Explicit --layers still overrides detection (2-layer annular-ring
+        # floor is stricter, so the 4-layer board fails).
+        with pytest.raises(SystemExit) as exc:
+            mfr_main(["validate", str(src_pcb), "jlcpcb", "--layers", "2", "--format", "json"])
+        assert exc.value.code == 1
+        data = json.loads(capsys.readouterr().out)
+        assert data["layers"] == 2
 
-    def test_validate_pcb_design_hole_size_in_legacy_module(self):
+    def test_fab_zone_clearance_setting_skips_keepout_zones(self):
+        """Keepout cutouts carry a placeholder clearance 0; not a pour (#7188)."""
+        from kicad_tools.cli.mfr import _fab_setting_findings
+        from kicad_tools.manufacturers import get_profile
+        from kicad_tools.sexp import parse_string
+
+        rules = get_profile("jlcpcb").get_design_rules(2, 1.0)
+        pcb = parse_string(
+            '(kicad_pcb (zone (net "GND") (connect_pads (clearance 0)))'
+            " (zone (connect_pads (clearance 0))"
+            " (keepout (copperpour not_allowed))))"
+        )
+        findings = _fab_setting_findings(pcb, rules)
+        assert [f[1] for f in findings] == ["fab_zone_clearance_setting"]
+        assert "'GND'" in findings[0][2]
+
+    def test_validate_thin_trace_fails(self, tmp_path, capsys):
+        """A sub-minimum trace is caught by the kct DRC engine (Issue #7188).
+
+        Trace width used to be checked by ``_validate_pcb_design``'s own
+        segment loop; ``DRCChecker``'s dimension rules own it now.
+        """
+        from pathlib import Path
+
+        from kicad_tools.cli.mfr import main as mfr_main
+
+        src_pcb = (
+            Path(__file__).resolve().parent.parent
+            / "boards/02-charlieplex-led/output/charlieplex_3x3_routed.kicad_pcb"
+        )
+        if not src_pcb.exists():
+            pytest.skip("Demo PCB file not found")
+        text = src_pcb.read_text()
+        seg = text.index("(segment")
+        idx = text.index("(width ", seg)
+        end = text.index(")", idx)
+        pcb = tmp_path / "thin.kicad_pcb"
+        pcb.write_text(text[:idx] + "(width 0.05" + text[end:])
+
+        with pytest.raises(SystemExit) as exc:
+            mfr_main(["validate", str(pcb), "jlcpcb", "--format", "json"])
+        assert exc.value.code == 1
+        data = json.loads(capsys.readouterr().out)
+        assert any("width" in v["rule_id"] for v in data["violations"])
+
+    def test_fab_setting_findings_hole_size_in_legacy_module(self):
         """A pad drill below the minimum inside a ``(module ...)`` block is caught.
 
         Before issue #4892, ``_validate_pcb_design`` only recognized the
         modern ``(footprint ...)`` tag (``child.tag == "footprint"``), so a
         pre-KiCad-6 ``(module ...)`` footprint's undersized pad drill was
-        silently invisible to this check.
+        silently invisible to this check.  The check now lives in
+        ``_fab_setting_findings`` (Issue #7188).
         """
-        from kicad_tools.cli.mfr import _validate_pcb_design
+        from kicad_tools.cli.mfr import _fab_setting_findings
         from kicad_tools.manufacturers import get_profile
         from kicad_tools.sexp import SExp
 
@@ -663,14 +713,54 @@ class TestMfrCLICommands:
             ),
         )
 
-        violations = _validate_pcb_design(sexp, rules)
+        findings = _fab_setting_findings(sexp, rules)
 
-        assert any(v[0] == "HOLE_SIZE" for v in violations)
-        assert any("R1" in v[1] for v in violations)
+        assert any(f[0] == "HOLE_SIZE" for f in findings)
+        assert any("R1" in f[2] for f in findings)
 
-    def test_validate_pcb_design_no_footprints_of_either_spelling(self):
+    def test_fab_setting_findings_zone_clearance(self):
+        """A zone ``connect_pads`` clearance setting below the floor is an error."""
+        from kicad_tools.cli.mfr import _fab_setting_findings
+        from kicad_tools.manufacturers import get_profile
+        from kicad_tools.sexp import SExp
+
+        rules = get_profile("jlcpcb").get_design_rules(layers=2)
+        sexp = SExp.list(
+            "kicad_pcb",
+            SExp.list(
+                "zone",
+                SExp.list("net_name", "GND"),
+                SExp.list("connect_pads", SExp.list("clearance", 0.05)),
+            ),
+        )
+        findings = _fab_setting_findings(sexp, rules)
+        assert [f[0] for f in findings] == ["ZONE_CLEARANCE"]
+
+    def test_fab_setting_findings_zone_clearance_masked_by_larger_rule(self):
+        """A low raw zone setting is not an error when a larger rule applies (#7246)."""
+        from kicad_tools.cli.mfr import _fab_setting_findings
+        from kicad_tools.manufacturers import get_profile
+        from kicad_tools.sexp import SExp
+
+        rules = get_profile("jlcpcb").get_design_rules(layers=2)
+        sexp = SExp.list(
+            "kicad_pcb",
+            SExp.list(
+                "zone",
+                SExp.list("net_name", "GND"),
+                SExp.list("connect_pads", SExp.list("clearance", 0.1)),
+            ),
+        )
+        floor = rules.min_clearance_mm
+        assert _fab_setting_findings(sexp, rules, declared_clearance_mm=floor) == []
+        # A declared rule that is itself below the floor does not mask it.
+        low = _fab_setting_findings(sexp, rules, declared_clearance_mm=0.05)
+        assert [f[0] for f in low] == ["ZONE_CLEARANCE"]
+        assert [f[0] for f in _fab_setting_findings(sexp, rules)] == ["ZONE_CLEARANCE"]
+
+    def test_fab_setting_findings_no_footprints_of_either_spelling(self):
         """No footprint/module nodes at all should not raise and yield no HOLE_SIZE."""
-        from kicad_tools.cli.mfr import _validate_pcb_design
+        from kicad_tools.cli.mfr import _fab_setting_findings
         from kicad_tools.manufacturers import get_profile
         from kicad_tools.sexp import SExp
 
@@ -679,8 +769,8 @@ class TestMfrCLICommands:
 
         sexp = SExp.list("kicad_pcb", SExp.list("net", 0, ""))
 
-        violations = _validate_pcb_design(sexp, rules)
-        assert not any(v[0] == "HOLE_SIZE" for v in violations)
+        findings = _fab_setting_findings(sexp, rules)
+        assert not any(f[0] == "HOLE_SIZE" for f in findings)
 
 
 class TestTwoLayerRules:

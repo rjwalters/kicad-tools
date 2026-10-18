@@ -189,6 +189,24 @@ def test_no_schematic_is_not_staged_and_names_the_cause(monkeypatch, board):
     assert "--schematic PATH" in result.parity_skip_reason
 
 
+def test_no_schematic_silent_cli_is_not_run_and_flag_not_passed(monkeypatch, board):
+    """Issue #7237: no output-text sniffing; parity must not be requested."""
+    (board.parent / "foo.kicad_sch").unlink()
+    cli = FakeCli(monkeypatch)  # silent kicad-cli
+    argvs: list[list[str]] = []
+    orig = cli._run
+
+    def spy(build_cmd, *a, **k):
+        argvs.append(build_cmd(False))
+        return orig(build_cmd, *a, **k)
+
+    monkeypatch.setattr(runner, "run_kicad_drc_command", spy)
+    result = runner.run_drc(board)
+    assert result.parity_skipped is True
+    assert result.parity_skip_reason == parity_reason_no_schematic(board.name)
+    assert argvs and "--schematic-parity" not in argvs[0]
+
+
 def test_ambiguous_schematics_name_the_cause(monkeypatch, tmp_path):
     pcb = tmp_path / "board_v2.kicad_pcb"
     pcb.write_text("(kicad_pcb)\n")

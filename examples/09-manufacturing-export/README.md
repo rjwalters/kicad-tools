@@ -247,7 +247,9 @@ kct bom board.kicad_sch --format jlcpcb > bom.csv
 # Compare manufacturer capabilities
 kct mfr compare --layers 4
 
-# Check design against manufacturer rules
+# Check design against manufacturer rules with the kct DRC engine
+# (clearance, connectivity, dimensions, pad drill, zone clearance settings;
+# no kicad-cli needed -- use `kct drc board.kicad_pcb --mfr jlcpcb` for KiCad's DRC)
 kct mfr validate board.kicad_pcb jlcpcb
 ```
 

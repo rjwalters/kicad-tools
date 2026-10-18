@@ -274,15 +274,29 @@ hand (DNP for fab assembly).
 
 \newpage
 
-## DRC Status
+## DRC Status{% if drc.manufacturer is defined and drc.manufacturer %} (`--mfr {{ drc.manufacturer }}` rules){% endif %}
+
 
 | Metric | Count |
 |--------|-------|
 | Errors | {{ drc.error_count | default(0) }} |
+{% if drc.native_error_count is defined and drc.native_error_count is not none %}
+| Errors: kct (`--mfr {{ drc.manufacturer | default("?", true) }}` rules) | {{ drc.native_error_count }} |
+{% if drc.geometric_error_count is defined and drc.geometric_error_count is not none %}
+| Errors: kicad-cli (geometric) | {{ drc.geometric_error_count }} |
+{% else %}
+| Errors: kicad-cli (geometric) | not run |
+{% endif %}
+{% endif %}
 | Warnings | {{ drc.warning_count | default(0) }} |
 | Blocking | {{ drc.blocking_count | default(0) }} |
 
 **Status**: {% if drc.passed | default(false) %}PASS{% else %}FAIL{% endif %}
+
+{% if drc.geometric_error_count is defined and drc.geometric_error_count %}
+
+*The two engines run independently and one defect can be reported by both (e.g. an undersized via drill), so Blocking is their sum, not a count of distinct defects.*
+{% endif %}
 
 {% if drc.violations_by_type is defined and drc.violations_by_type %}
 ### Violations by Type

@@ -1335,7 +1335,8 @@ class ManufacturingAudit:
 
         Counts are *additive* on top of the ``--mfr`` engine's tally:
         ``error_count`` / ``blocking_count`` grow by the kicad-cli error
-        count, and each kicad-cli violation type is recorded in
+        count plus its error-severity ``unconnected_items`` (Issue #7188),
+        and each kicad-cli violation type is recorded in
         ``violations_by_type`` under a ``kicad-cli:`` namespace so it is
         clearly attributed to the geometric engine and never collides with
         a ``--mfr`` rule_id.
@@ -1373,21 +1374,32 @@ class ManufacturingAudit:
         # The geometric engine ran -- the verdict is now authoritative.
         status.geometric_drc_ran = True
 
-        if result.error_count > 0:
-            status.error_count += result.error_count
-            status.blocking_count += result.error_count
+        # Issue #7188: kicad-cli's error-severity ``unconnected_items`` are
+        # blocking too.  ``result.error_count`` is geometric-only (#4498), so
+        # fold them in explicitly.  run_geometric_drc refills zones first
+        # (#3969), so these opens are measured after the pour and are
+        # authoritative -- unlike the kct-native ``connectivity`` rule, which
+        # stays advisory here (#3044).
+        opens = sum(1 for v in result.unconnected_items if v.is_error)
+        fold = result.error_count + opens
+        if fold > 0:
+            status.error_count += fold
+            status.blocking_count += fold
             status.passed = status.blocking_count == 0
 
             # Record per-type counts under a kicad-cli namespace so the
             # report's by-type table makes the engine explicit and the
             # geometric types never collide with --mfr rule_ids.
+            cli_by_type = dict(result.by_type)
+            if opens:
+                cli_by_type["unconnected_items"] = cli_by_type.get("unconnected_items", 0) + opens
             by_type = status.violations_by_type
-            for type_str, count in result.by_type.items():
+            for type_str, count in cli_by_type.items():
                 key = f"kicad-cli:{type_str}"
                 by_type[key] = by_type.get(key, 0) + count
             status.violations_by_type = by_type
 
-            top = result.top_types(3)
+            top = sorted(cli_by_type.items(), key=lambda x: -x[1])[:3]
             cli_detail = "kicad-cli: " + ", ".join(f"{t} ({c})" for t, c in top)
             status.details = f"{status.details}; {cli_detail}" if status.details else cli_detail
 

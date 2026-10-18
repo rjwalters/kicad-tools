@@ -88,6 +88,8 @@ def check_manufacturer_rules(
     layers: int = 2,
     copper_oz: float = 1.0,
     progress_callback: ProgressCallback | None = None,
+    *,
+    include_unconnected: bool = False,
 ) -> list[ManufacturerCheck]:
     """Check DRC violations against manufacturer design rules.
 
@@ -99,6 +101,12 @@ def check_manufacturer_rules(
         progress_callback: Optional callback for progress reporting.
             Signature: (progress: float, message: str, cancelable: bool) -> bool
             Returns False to cancel, True to continue.
+        include_unconnected: Also judge the error-severity entries of
+            ``report.unconnected_items`` (KiCad JSON opens, #4498).  They get
+            the same ``CheckResult.FAIL`` / ``rule_name="connection"`` result
+            a text ``.rpt`` open (which lives in ``violations``) already gets
+            (Issue #7188).  Off by default so ``kct drc --mfr``, which lists
+            opens in its own section, is unchanged.
 
     Returns:
         Exactly one check result per input violation (Issue #7170).  A
@@ -108,6 +116,10 @@ def check_manufacturer_rules(
     """
     # Import here to avoid circular dependency
     from kicad_tools.manufacturers import get_profile
+
+    violations = list(report.violations)
+    if include_unconnected:
+        violations.extend(v for v in report.unconnected_items if v.is_error)
 
     try:
         profile = get_profile(manufacturer_id)
@@ -121,12 +133,11 @@ def check_manufacturer_rules(
                 manufacturer_id=manufacturer_id,
                 rule_name="unknown",
             )
-            for v in report.violations
+            for v in violations
         ]
 
     rules = profile.get_design_rules(layers=layers, copper_oz=copper_oz)
     results: list[ManufacturerCheck] = []
-    violations = list(report.violations)
     total = len(violations)
 
     for i, violation in enumerate(violations):
