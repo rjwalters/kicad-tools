@@ -123,6 +123,14 @@ def get_unrouted_nets(
     )
 
 
+def _resolve_output_path(pcb_path: str, output_path: str | None) -> str:
+    """Return where route_net saves: ``<stem>_routed.kicad_pcb`` by default."""
+    if output_path:
+        return output_path
+    p = Path(pcb_path)
+    return str(p.with_name(f"{p.stem}_routed{p.suffix}"))
+
+
 def route_net(
     pcb_path: str,
     net_name: str,
@@ -133,13 +141,16 @@ def route_net(
     """Route a specific net.
 
     Attempts to route all unconnected pads on the specified net using
-    the autorouter. The result can be saved to a new file or overwrite
-    the original.
+    the autorouter. The result is saved to a new file by default; the
+    original is overwritten only if ``output_path`` equals ``pcb_path``.
 
     Args:
         pcb_path: Absolute path to .kicad_pcb file
         net_name: Name of the net to route (e.g., "GND", "SPI_CLK")
-        output_path: Path for output file. If None, overwrites the original.
+        output_path: Path for output file. If None, writes
+                     ``<stem>_routed.kicad_pcb`` next to the input and leaves
+                     the input untouched. Pass ``output_path == pcb_path``
+                     to overwrite the input explicitly.
         strategy: Routing strategy to use:
                   - "auto": Automatically choose best strategy
                   - "shortest": Minimize trace length
@@ -203,7 +214,7 @@ def route_net(
             trace_length_mm=_measure_existing_trace_length(pcb, net_number),
             vias_used=_count_vias_on_net(pcb, net_number),
             layers_used=_get_layers_used(pcb, net_number),
-            output_path=output_path or pcb_path,
+            output_path=None,  # nothing written on this early return
             suggestions=["Net is already fully routed"],
         )
 
@@ -341,7 +352,7 @@ def route_net(
             net_name=net_name,
             routed_connections=0,
             total_connections=0,
-            output_path=output_path or pcb_path,
+            output_path=None,  # nothing written on this early return
             suggestions=["Net has fewer than 2 pads, no routing needed"],
         )
 
@@ -390,7 +401,7 @@ def route_net(
             )
 
             # Save the result
-            save_path = output_path or pcb_path
+            save_path = _resolve_output_path(pcb_path, output_path)
             pcb.save(save_path)
 
             return RouteNetResult(

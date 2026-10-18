@@ -392,7 +392,7 @@ The MCP server exposes these tools to AI agents:
 
 | Tool | Description |
 |------|-------------|
-| `analyze_board` | Get board summary (layers, components, nets) |
+| `board_summary` | Get board summary (layers, components, nets) |
 | `get_drc_violations` | Run DRC and return violations |
 | `measure_clearance` | Check clearance between items |
 | `export_gerbers` | Generate Gerber files |

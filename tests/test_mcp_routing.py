@@ -8,7 +8,7 @@ pytest.importorskip("pydantic")
 
 from kicad_tools.exceptions import FileNotFoundError as KiCadFileNotFoundError
 from kicad_tools.exceptions import ParseError
-from kicad_tools.mcp.tools.routing import get_unrouted_nets, route_net
+from kicad_tools.mcp.tools.routing import _resolve_output_path, get_unrouted_nets, route_net
 from kicad_tools.mcp.types import (
     NetRoutingStatus,
     RouteNetResult,
@@ -278,6 +278,31 @@ class TestRouteNet:
         # Routing may or may not succeed depending on router
         # but the result structure should be valid
         assert result.total_connections >= 0
+
+    def test_default_output_leaves_input_untouched(self, tmp_path: Path) -> None:
+        """Omitting output_path must not modify the input (Issue #7111)."""
+        pcb_file = tmp_path / "test.kicad_pcb"
+        pcb_file.write_text(UNROUTED_PCB)
+        before = pcb_file.read_bytes()
+
+        result = route_net(str(pcb_file), net_name="SIG1")
+
+        assert pcb_file.read_bytes() == before
+        expected = tmp_path / "test_routed.kicad_pcb"
+        assert result.output_path != str(pcb_file)
+        if result.success:
+            assert result.output_path == str(expected)
+            assert expected.exists()
+
+    def test_explicit_same_output_path_is_reported(self, tmp_path: Path) -> None:
+        """Passing output_path == pcb_path is the explicit overwrite opt-in."""
+        pcb_file = tmp_path / "test.kicad_pcb"
+        pcb_file.write_text(PARTIAL_ROUTED_PCB)
+
+        result = route_net(str(pcb_file), net_name="SIG1", output_path=str(pcb_file))
+
+        # Already-routed early return writes nothing, so no output_path is reported.
+        assert result.output_path is None
 
     def test_route_already_routed_net(self, tmp_path: Path) -> None:
         """Test routing a net that's already fully routed."""
@@ -1074,3 +1099,22 @@ class TestBuildPadsForNetRotationSignConvention:
                 f"{canonical}, buggy={buggy}; fixture pad_local must have "
                 f"nonzero, distinct x/y components."
             )
+
+
+class TestResolveOutputPath:
+    """Direct tests of the route_net output path default (Issue #7111)."""
+
+    def test_default_is_routed_sibling(self) -> None:
+        assert _resolve_output_path("/a/b/board.kicad_pcb", None) == "/a/b/board_routed.kicad_pcb"
+
+    def test_empty_string_is_default(self) -> None:
+        assert _resolve_output_path("/a/b/board.kicad_pcb", "") == "/a/b/board_routed.kicad_pcb"
+
+    def test_explicit_path_wins(self) -> None:
+        assert (
+            _resolve_output_path("/a/b/board.kicad_pcb", "/x/out.kicad_pcb") == "/x/out.kicad_pcb"
+        )
+
+    def test_same_as_input_overwrites(self) -> None:
+        p = "/a/b/board.kicad_pcb"
+        assert _resolve_output_path(p, p) == p
