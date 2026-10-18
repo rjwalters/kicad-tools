@@ -1304,7 +1304,11 @@ def _add_sch_parser(subparsers) -> None:
     sch_validate = sch_subparsers.add_parser("validate", help="Run validation checks")
     sch_validate.add_argument("schematic", help="Path to .kicad_sch file")
     sch_validate.add_argument("--format", choices=["text", "json"], default="text")
-    sch_validate.add_argument("--strict", action="store_true", help="Exit with error on warnings")
+    sch_validate.add_argument(
+        "--strict",
+        action="store_true",
+        help="Exit 1 on any warning (errors and checks not run already exit 1)",
+    )
     sch_validate.add_argument("-q", "--quiet", action="store_true", help="Only show errors")
     sch_validate.add_argument(
         "--lib-path",

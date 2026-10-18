@@ -174,8 +174,10 @@ class TestLayoutAssembly:
 
     def test_inter_block_route_created(self):
         layout, ldo, led = _create_ldo_led_layout()
-        assert len(layout.inter_block_traces) == 1
-        trace = layout.inter_block_traces[0]
+        # The VOUT port names an internal_pad, so route() also emits a pad
+        # stub (#7064) ahead of the route itself.
+        assert len(layout.inter_block_traces) == 2
+        trace = layout.inter_block_traces[-1]
         assert trace.net == "VOUT_TO_LED"
 
     def test_export_placements_includes_all_components(self):
@@ -194,7 +196,8 @@ class TestLayoutAssembly:
         internal = [t for t in traces if t.get("block_id") is not None]
         inter_block = [t for t in traces if t.get("block_id") is None]
         assert len(internal) > 0, "Should have block-internal traces"
-        assert len(inter_block) == 1, "Should have one inter-block trace"
+        # One pad stub (#7064) plus the inter-block route itself.
+        assert len(inter_block) == 2, "Should have a pad stub and one inter-block trace"
 
 
 # ===========================================================================

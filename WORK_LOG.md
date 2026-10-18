@@ -15,6 +15,13 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-18
 
+- **Issue #7239** (closed): Include THT parts in JLCPCB assembly output (operator decision; JLCPCB now offers THT PCBA)
+- **PR #7242**: feat: include through-hole parts in JLCPCB CPL and BOM
+- **PR #7302**: feat: try narrower per-pad thermal spokes before forcing solid pad connections
+- **PR #7304**: feat(check): detect thin silk text, off-board silk text and obscured refdes
+- **Issue #7228** (closed): Silkscreen false-PASS: kct misses text stroke width, off-board silk and refdes under body (board 03: 6), and readiness skips text height
+- **PR #7303**: feat: add spec_conformance check comparing project.kct to the routed board
+- **Issue #7292** (closed): kct check: spec_conformance category compares project.kct requirements to the routed board (#7250 PR-B)
 - **Issue #7284** (closed): router regression from #7255: mirrored fallback leg trades unbounded skew/length for via parity (board 03 tier-1 USB_D- 15.9→20.1 mm, skew 0.54→4.57)
 - **PR #7291**: fix(router): bound the skew/length a via-parity fallback leg pair may cost
 - **Issue #7075** (closed): transmission_line.py: CPWG impedance reads 53-233 % high, and microstrip/CPWG dielectric loss is too large by a factor of eps_eff

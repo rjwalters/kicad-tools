@@ -2832,19 +2832,28 @@ def _check_verdict(
     Computed before output so ``--format json`` can carry the exact code the
     process returns.  ``verdict`` is ``pass`` / ``fail`` / ``incomplete``; under
     ``--allow-incomplete`` an incomplete verdict still exits 0 (the verdict
-    stays honest).  Numbering is unchanged (Issue #3750).
+    stays honest).  Numbering is unchanged (Issue #3750): the ``"check"``
+    ladder of :func:`~kicad_tools.cli._gate.gate_exit_code`.
     """
+    from ._gate import gate_exit_code
+
     if mask_copper_failed or strict_copper_disagreement:
-        return "fail", 2
-    if drc_only or meta is None:
-        if error_count > 0 or (warning_count > 0 and strict):
-            return "fail", 2
-        return "pass", 0
-    if meta.overall == "FAILED":
-        return "fail", 2
-    if meta.overall == "INCOMPLETE":
-        return "incomplete", (0 if allow_incomplete else 2)
-    return "pass", 0
+        exit_code, verdict = gate_exit_code(1, 0, style="check")
+    elif drc_only or meta is None:
+        exit_code, verdict = gate_exit_code(
+            error_count, warning_count, strict=strict, style="check"
+        )
+    else:
+        # The meta rollup already folded DRC (incl. --strict warnings), ERC,
+        # LVS and the manifest into FAILED / INCOMPLETE / PASSED.
+        exit_code, verdict = gate_exit_code(
+            1 if meta.overall == "FAILED" else 0,
+            0,
+            incomplete=meta.overall == "INCOMPLETE",
+            allow_incomplete=allow_incomplete,
+            style="check",
+        )
+    return verdict, exit_code
 
 
 def _emit_drc_sidecars(
@@ -3386,6 +3395,12 @@ def run_selected_checks(
         category_results = method()
         results.merge(category_results)
         cov_map[category] = pre if pre is not None else cov.checked(category)
+        # Issue #7293: a matched diff pair with no judged segment is not
+        # "checked"; only knowable after the run.
+        unmeasured = getattr(checker, "impedance_unmeasured_pairs", None)
+        if category == "impedance" and unmeasured and pre is None:
+            names = ", ".join(f"{p}/{n}" for p, n in unmeasured)
+            cov_map[category] = cov.unknown(category, f"diff_pair_unmeasurable ({names})")
 
     return results
 
