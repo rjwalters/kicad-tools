@@ -1,0 +1,335 @@
+{
+  "_comment": "Issue #7166: LCSC part records for every part assigned on fleet boards 00-07, captured 2026-10-18 from LCSC product detail (encapStandard -> package, productModel -> mfr_part, productIntroEn -> description). Two manual-assembly connectors absent from that capture come from elsewhere: C7095263 from the jlcparts offline catalog, C124375 from board 07's committed manual-assembly-bom.csv. Used offline by tests/test_lcsc_ic_package_guard_7166.py; never fetched in CI.",
+  "parts": {
+    "C1588": {
+      "package": "0603",
+      "mfr_part": "CL10B102KB8NNNC",
+      "description": "1nF ±10% 50V Ceramic Capacitor X7R 0603"
+    },
+    "C1589": {
+      "package": "0603",
+      "mfr_part": "CL10B103KB8NNNC",
+      "description": "10nF ±10% 50V Ceramic Capacitor X7R 0603"
+    },
+    "C1705": {
+      "package": "0603",
+      "mfr_part": "CL10A475KP8NNNC",
+      "description": "4.7uF ±10% 10V Ceramic Capacitor X5R 0603"
+    },
+    "C1710": {
+      "package": "0805",
+      "mfr_part": "CL21B103KBANNNC",
+      "description": "10nF ±10% 50V Ceramic Capacitor X7R 0805"
+    },
+    "C1779": {
+      "package": "0805",
+      "mfr_part": "CL21A475KAQNNNE",
+      "description": "4.7uF ±10% 25V Ceramic Capacitor X5R 0805"
+    },
+    "C1798": {
+      "package": "0805",
+      "mfr_part": "CL21C200JBANNNC",
+      "description": "20pF ±5% 50V Ceramic Capacitor C0G 0805"
+    },
+    "C7519": {
+      "package": "SOT-23-6L",
+      "mfr_part": "USBLC6-2SC6",
+      "description": "17VC Clamp 5A Ipp ESD DIODE SOT-23-6L"
+    },
+    "C8734": {
+      "package": "LQFP-48(7x7)",
+      "mfr_part": "STM32F103C8T6",
+      "description": "ARM Cortex-M3 32 Bit 72MHz LQFP-48(7x7) Microcontrollers RoHS"
+    },
+    "C13967": {
+      "package": "0805",
+      "mfr_part": "CL21B474KBFNNNE",
+      "description": "470nF ±10% 50V Ceramic Capacitor X7R 0805"
+    },
+    "C14663": {
+      "package": "0603",
+      "mfr_part": "CC0603KRX7R9BB104",
+      "description": "100nF ±10% 50V Ceramic Capacitor X7R 0603"
+    },
+    "C14877": {
+      "package": "TQFP-32(7x7)",
+      "mfr_part": "ATMEGA328P-AU",
+      "description": "AVR 8 Bit 20MHz TQFP-32(7x7) Microcontrollers RoHS"
+    },
+    "C15849": {
+      "package": "0603",
+      "mfr_part": "CL10A105KB8NNNC",
+      "description": "1uF ±10% 50V Ceramic Capacitor X5R 0603"
+    },
+    "C15850": {
+      "package": "0805",
+      "mfr_part": "CL21A106KAYNNNE",
+      "description": "10uF ±10% 25V Ceramic Capacitor X5R 0805"
+    },
+    "C16015": {
+      "package": "SMA(DO-214AC)",
+      "mfr_part": "SS36",
+      "description": "Diode Independent 60V 3A Surface Mount SMA(DO-214AC)"
+    },
+    "C17414": {
+      "package": "0805",
+      "mfr_part": "0805W8F1002T5E",
+      "description": "10kΩ ±1% 125mW 0805 Thick Film Resistor"
+    },
+    "C17513": {
+      "package": "0805",
+      "mfr_part": "0805W8F1001T5E",
+      "description": "1kΩ ±1% 125mW 0805 Thick Film Resistor"
+    },
+    "C17630": {
+      "package": "0805",
+      "mfr_part": "0805W8F3300T5E",
+      "description": "330Ω ±1% 125mW 0805 Thick Film Resistor"
+    },
+    "C17756": {
+      "package": "0805",
+      "mfr_part": "0805W8F5602T5E",
+      "description": "56kΩ ±1% 125mW 0805 Thick Film Resistor"
+    },
+    "C19702": {
+      "package": "0603",
+      "mfr_part": "CL10A106KP8NNNC",
+      "description": "10uF ±10% 10V Ceramic Capacitor X5R 0603"
+    },
+    "C21189": {
+      "package": "0603",
+      "mfr_part": "0603WAF0000T5E",
+      "description": "0Ω ±1% 100mW 0603 Thick Film Resistor"
+    },
+    "C21190": {
+      "package": "0603",
+      "mfr_part": "0603WAF1001T5E",
+      "description": "1kΩ ±1% 100mW 0603 Thick Film Resistor"
+    },
+    "C22548": {
+      "package": "0603",
+      "mfr_part": "RC0603FR-071KL",
+      "description": "100mW 1kΩ 75V Thick Film Resistor ±100ppm/℃ ±1% 0603 Chip Resistor - Surface Mount RoHS"
+    },
+    "C22775": {
+      "package": "0603",
+      "mfr_part": "0603WAF1000T5E",
+      "description": "100Ω ±1% 100mW 0603 Thick Film Resistor"
+    },
+    "C23630": {
+      "package": "0603",
+      "mfr_part": "CL10A225KO8NNNC",
+      "description": "2.2uF ±10% 16V Ceramic Capacitor X5R 0603"
+    },
+    "C25803": {
+      "package": "0603",
+      "mfr_part": "0603WAF1003T5E",
+      "description": "100kΩ ±1% 100mW 0603 Thick Film Resistor"
+    },
+    "C25804": {
+      "package": "0603",
+      "mfr_part": "0603WAF1002T5E",
+      "description": "10kΩ ±1% 100mW 0603 Thick Film Resistor"
+    },
+    "C28323": {
+      "package": "0805",
+      "mfr_part": "CL21B105KBFNNNE",
+      "description": "1uF ±10% 50V Ceramic Capacitor X7R 0805"
+    },
+    "C34846": {
+      "package": "SIP-3P,9.5x4.8mm",
+      "mfr_part": "3296W-1-103LF",
+      "description": "10kΩ ±10% 500mW SIP-3P,9.5x4.8mm Potentiometers, Variable Resistors"
+    },
+    "C37208": {
+      "package": "Through Hole,P=2.54mm",
+      "mfr_part": "2.54-1x6P",
+      "description": "Pin Header 6 Position 2.54mm Pitch Single Row Through Hole -40℃~+105℃"
+    },
+    "C44854": {
+      "package": "QFP-44(10x10)",
+      "mfr_part": "ATMEGA32U4-AU",
+      "description": "AVR 8 Bit 16MHz QFP-44(10x10) Microcontrollers RoHS"
+    },
+    "C45000": {
+      "package": "0603",
+      "mfr_part": "GRM188R71C104KA01D",
+      "description": "100nF ±10% 16V Ceramic Capacitor X7R 0603"
+    },
+    "C49257": {
+      "package": "Through Hole,P=2.54mm",
+      "mfr_part": "2.54-1*3P",
+      "description": "Pin Header 3 Position 2.54mm Pitch Single Row Through Hole -40℃~+105℃"
+    },
+    "C49678": {
+      "package": "0805",
+      "mfr_part": "CC0805KRX7R9BB104",
+      "description": "100nF ±10% 50V Ceramic Capacitor X7R 0805"
+    },
+    "C51118": {
+      "package": "SOT-25-5",
+      "mfr_part": "AP2112K-3.3TRG1",
+      "description": "3.3V Positive Fixed SOT-25-5 Voltage Regulators - Linear, Low Drop Out (LDO) Regulators RoHS"
+    },
+    "C65114": {
+      "package": "Through Hole,P=2.54mm",
+      "mfr_part": "2.54-2*3P",
+      "description": "Pin Header 6 Position 2.54mm Pitch Dual Row Through Hole"
+    },
+    "C71633": {
+      "package": "0603",
+      "mfr_part": "GRM188R61A475KE15D",
+      "description": "4.7uF ±10% 10V Ceramic Capacitor X5R 0603"
+    },
+    "C71651": {
+      "package": "0603",
+      "mfr_part": "GRM1885C1H150JA01D",
+      "description": "15pF ±5% 50V Ceramic Capacitor C0G 0603"
+    },
+    "C77053": {
+      "package": "0603",
+      "mfr_part": "GRM188R71H103KA01D",
+      "description": "10nF ±10% 50V Ceramic Capacitor X7R 0603"
+    },
+    "C84808": {
+      "package": "LQFP-144(20x20)",
+      "mfr_part": "STM32F429ZIT6",
+      "description": "ARM Cortex-M4 32 Bit 180MHz LQFP-144(20x20) Microcontrollers RoHS"
+    },
+    "C87271": {
+      "package": "Through Hole,D=5mm",
+      "mfr_part": "333-2SURD/S530-A3",
+      "description": "Red 632nm LED Indication - Discrete 2V Through Hole,D=5mm"
+    },
+    "C92482": {
+      "package": "HTSSOP-28",
+      "mfr_part": "DRV8313PWPR",
+      "description": "HTSSOP-28 Motor Drivers, Controllers RoHS"
+    },
+    "C94869": {
+      "package": "0603",
+      "mfr_part": "LTST-C190KRKT",
+      "description": "Red 639nm LED Indication - Discrete 2V 0603"
+    },
+    "C97888": {
+      "package": "0603",
+      "mfr_part": "GRM188R71A105KA61D",
+      "description": "1uF ±10% 10V Ceramic Capacitor X7R 0603"
+    },
+    "C98220": {
+      "package": "0603",
+      "mfr_part": "RC0603FR-0710KL",
+      "description": "100mW 10kΩ 75V Thick Film Resistor ±100ppm/℃ ±1% 0603 Chip Resistor - Surface Mount RoHS"
+    },
+    "C105580": {
+      "package": "0603",
+      "mfr_part": "RC0603FR-075K1L",
+      "description": "100mW 5.1kΩ 75V Thick Film Resistor ±100ppm/℃ ±1% 0603 Chip Resistor - Surface Mount RoHS"
+    },
+    "C114765": {
+      "package": "0402",
+      "mfr_part": "RC0402FR-0722RL",
+      "description": "22Ω 62.5mW 50V Thick Film Resistor ±100ppm/℃ ±1% 0402 Chip Resistor - Surface Mount RoHS"
+    },
+    "C124375": {
+      "package": "Through Hole,P=2.54mm",
+      "mfr_part": "B-2100S02P-A110",
+      "description": "Through-hole, 1x2, 2.54mm pitch, vertical"
+    },
+    "C125094": {
+      "package": "0603",
+      "mfr_part": "LTST-C190KGKT",
+      "description": "Yellow Green 574nm LED Indication - Discrete 2V 0603"
+    },
+    "C126817": {
+      "package": "1206",
+      "mfr_part": "1206L035/16YR",
+      "description": "Polymeric PTC Resettable Fuse 16V 350mA Surface Mount 1206"
+    },
+    "C131244": {
+      "package": "0805",
+      "mfr_part": "17-21SURC/S530-A2/TR8",
+      "description": "Red LED Indication - Discrete 0805"
+    },
+    "C148031": {
+      "package": "SOT-223-3",
+      "mfr_part": "MCP1825S-3302E/DB",
+      "description": "3.3V Positive Fixed SOT-223-3 Voltage Regulators - Linear, Low Drop Out (LDO) Regulators RoHS"
+    },
+    "C178594": {
+      "package": "SMD",
+      "mfr_part": "EEEFT1H221AP",
+      "description": "220uF ±20% 50V Aluminum Electrolytic Capacitors 2000hrs@105℃"
+    },
+    "C224017": {
+      "package": "DO-214AA",
+      "mfr_part": "SMBJ24A",
+      "description": "38.9VC Clamp 15.5A@10/1000us Ipp TVS DIODE DO-214AA"
+    },
+    "C265104": {
+      "package": "SMD,P=2mm,Surface Mount,Right Angle",
+      "mfr_part": "S5B-PH-SM4-TB(LF)(SN)",
+      "description": "Connector Header 5 position 2mm Pitch 2A Surface Mount, Right Angle -25℃~+85℃"
+    },
+    "C468238": {
+      "package": "MSOP-8-EP",
+      "mfr_part": "TPS7A1650DGNR",
+      "description": "5V Positive Fixed MSOP-8-EP Voltage Regulators - Linear, Low Drop Out (LDO) Regulators RoHS"
+    },
+    "C511023": {
+      "package": "2512",
+      "mfr_part": "WSL2512R5000FEA",
+      "description": "1W 500mΩ ±75ppm/℃ ±1% 2512 Chip Resistor - Surface Mount RoHS"
+    },
+    "C965497": {
+      "package": "PDIP-8",
+      "mfr_part": "ATTINY85-20PU",
+      "description": "AVR 8 Bit 20MHz PDIP-8 Microcontrollers RoHS"
+    },
+    "C2442665": {
+      "package": "SMD3225-4P",
+      "mfr_part": "ECS-80-12-33-JGN-TR",
+      "description": "Crystal 8MHz ±20ppm 12pF 400Ω SMD3225-4P"
+    },
+    "C2671054": {
+      "package": "SOIC-8",
+      "mfr_part": "SN65LVDS2DR",
+      "description": "Transceiver 2.4V~3.6V 630Mbps SOIC-8 Drivers, Receivers, Transceivers RoHS"
+    },
+    "C2671256": {
+      "package": "SOIC-8",
+      "mfr_part": "SN65LVDS1DR",
+      "description": "Driver 2.4V~3.6V 630Mbps SOIC-8 Drivers, Receivers, Transceivers RoHS"
+    },
+    "C2886898": {
+      "package": "SMD-4P,5.2x5.2mm",
+      "mfr_part": "TL3342F160QG",
+      "description": "Tactile Switch SPST 160gf 1.54mm Gull Wing 5.2mm x 5.2mm Surface Mount"
+    },
+    "C3167176": {
+      "package": "1206",
+      "mfr_part": "SF-1206S100-2",
+      "description": "1A Fuse Surface Mount 1206"
+    },
+    "C7095263": {
+      "package": "插件",
+      "mfr_part": "USB4085-GF-A",
+      "description": "-40℃~+85℃ 1 48V 5A Black Female Right Angle Type-C USB 2.0 插件 USB Connectors ROHS"
+    },
+    "C7501260": {
+      "package": "Through Hole,P=2.54mm",
+      "mfr_part": "ZX-PZ2.54-1-2PZZ",
+      "description": "Pin Header 2 Position 2.54mm Pitch Single Row Through Hole -40℃~+105℃"
+    },
+    "C17216754": {
+      "package": "TSOP-54-10.2mm",
+      "mfr_part": "IS42S16400J-6TLI-TR",
+      "description": "64Mbit 200MHz TSOP-54-10.2mm Memory RoHS"
+    },
+    "C21285200": {
+      "package": "SMD,P=2.54mm",
+      "mfr_part": "TSM-103-01-T-DV-P-TR",
+      "description": "2.54mm Surface Mount,Vertical Square pin 2.54mm 5.84mm 6P -55℃~+105℃ Tin Black 2x3P 2.54mm 2 SMD,P=2.54mm Headers, Male Pins RoHS"
+    }
+  }
+}

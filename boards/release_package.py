@@ -29,6 +29,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from kicad_tools.cli import readiness_cmd
+from kicad_tools.cli.kicad_toolchain import run_on_evidence_toolchain
 from kicad_tools.cli.readiness_cmd import CheckOutcome, Engines, ReadinessOptions
 
 #: Fixed member timestamp for every ZIP a release script writes or normalises.
@@ -223,8 +224,14 @@ class Release:
             extra_inputs=self._extra_inputs,
         )
         try:
-            return readiness_cmd.main(
-                [str(self.board_dir), "--generate", "--mfr", self.manufacturer], engines=engines
+            # Custom ``engines`` skip readiness_cmd's own pinned-toolchain wrap, so
+            # enter it here (Issue #6962); otherwise the host's KiCad config is used.
+            return run_on_evidence_toolchain(
+                lambda: readiness_cmd.main(
+                    [str(self.board_dir), "--generate", "--mfr", self.manufacturer],
+                    engines=engines,
+                ),
+                mounts=[self.board_dir.parent],
             )
         finally:
             if not self.package_dir.is_dir():

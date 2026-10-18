@@ -375,11 +375,41 @@ one status line, also in `summary`, `--mfr` and `kicad-drc-summary` output:
 Exit codes: error-severity parity findings exit 1; warning-severity ones exit
 2 under `--strict`; NOT RUN exits 2 (the verdict reads `DRC INCOMPLETE`, never
 `DRC PASSED`) unless `--allow-incomplete` is given. Errors take precedence.
-`--mfr` keeps its manufacturer-compatibility exit code. `--format json` adds a
+`--mfr` uses the same exit gate (#7170, see below). `--format json` adds a
 `schematic_parity` object (`status`, `checked`, `reason`, `error_count`,
 `warning_count`, `issues`), a derived `schematic_parity_checked` alias, and
 `parity_errors`/`parity_warnings` in `summary`. Waiver entries match parity
 findings the same way they match DRC findings.
+
+**Manufacturer check (`--mfr`, #7170)**
+
+`--mfr <fab>` gives every kicad-cli violation exactly one verdict:
+
+- **compatible** — the fab's limit is met (e.g. a board rule stricter than the
+  fab's); the kicad-cli finding is cleared.
+- **incompatible** — the measured value breaches the fab's limit
+  (`clearance`, `track_width`, `copper_edge_clearance`, `annular_width`,
+  `via_diameter`, `hole_to_hole`, `drill_out_of_range` min *and* max,
+  `solder_mask_bridge`; `shorting_items` always fails). Blocking whatever
+  kicad-cli's severity was.
+- **not checked** — kct has no fab-limit check for the type (`hole_clearance`,
+  `via_dangling`, `courtyards_overlap`, `silk_*`, …). Listed in a
+  `NOT CHECKED against <fab> limits: N (errors E, warnings W)` section with a
+  per-type breakdown; kicad-cli's severity stands.
+
+The summary line reads `Compatible: a, Incompatible: b, Not checked: c`
+(`a + b + c` = every violation). Exit codes are the plain-mode ones: 1 when any
+incompatible or not-checked error (or parity error) remains; 2 for warnings
+under `--strict`, or when schematic parity did NOT RUN without
+`--allow-incomplete` (so `kct drc report.json --mfr X` exits 2 unless
+`--allow-incomplete`, like plain `kct drc report.json`); else 0.
+`--mfr --format json` prints `{manufacturer, layers, source, summary: {total,
+checked, compatible, incompatible, not_checked, not_checked_errors,
+not_checked_warnings, not_checked_by_type, parity_errors, parity_warnings},
+checks: [{type_str, severity, result, rule_name, message, violation_message,
+manufacturer_limit, actual_value}], schematic_parity, schematic_parity_checked,
+exit_code}`; `checked + not_checked == total`. Other `--format` values print
+the table.
 
 **Waivers (`--waivers`, #4691)**
 
@@ -423,7 +453,8 @@ The `kicad-cli pcb drc` cross-gate reads the same schema-v2 sidecar as
 **Examples:**
 ```bash
 kct drc board.drc
-kct drc board.kicad_pcb --mfr jlcpcb
+kct drc board.kicad_pcb --mfr jlcpcb              # exit 1 on any fab breach or not-checked error
+kct drc board-drc.json --mfr jlcpcb --format json --allow-incomplete
 kct drc board-drc.json --waivers .kct_waivers.json --allow-incomplete   # 0 unwaived errors gate
 kct mfr compare  # Show all manufacturer rules side by side
 ```
