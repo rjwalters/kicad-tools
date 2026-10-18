@@ -1012,7 +1012,8 @@ class TestSpecRoundTripFidelity:
         assert "requirements.components" in unknown
         assert "progress.checklist" in unknown
         assert "requirements.electrical.input_voltage" in unknown
-        assert "requirements.mechanical.board_width" in unknown
+        assert "requirements.mechanical.board_width" not in unknown
+        assert "requirements.mechanical.layers" not in unknown
 
     def test_validate_spec_detailed_warns_without_erroring(self):
         from kicad_tools.spec import validate_spec_detailed
@@ -1398,3 +1399,12 @@ class TestAppendDecision:
             if key != "decisions":
                 assert after[key] == before[key], f"{key} changed"
         assert after["decisions"][:-1] == before["decisions"]
+
+
+@pytest.mark.parametrize("project", sorted(Path(__file__).parents[1].glob("boards/*/project.kct")))
+def test_fleet_board_specs_validate(project):
+    """Issue #7250: every committed board spec is schema-valid."""
+    from kicad_tools.spec import validate_spec
+
+    ok, errors = validate_spec(project)
+    assert ok, errors

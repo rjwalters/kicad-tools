@@ -157,7 +157,7 @@ decisions:
     alternatives: ["Basic A*", "Negotiated congestion"]
 
 progress:
-  phase: manufacturing
+  phase: production
   phases:
     concept:
       status: completed
@@ -179,3 +179,7 @@ progress:
         - "[x] Run autorouter demo"
         - "[x] Deterministic route with reviewed escape corrections"
         - "[x] Native DRC, ERC and label/copper LVS verification"
+    production:
+      status: completed
+      checklist:
+        - "[x] Manufacturing files generated"

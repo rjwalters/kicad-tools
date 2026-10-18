@@ -296,12 +296,11 @@ class TestLadderLevels:
         err = capsys.readouterr().err
         assert "not found in phases" in err
 
-    def test_known_specs_still_fail_strict_phase_validation(self) -> None:
-        """All recipe specs parse; three retain phases outside their phase lists.
+    def test_all_recipe_specs_pass_strict_phase_validation(self) -> None:
+        """Every recipe spec parses and its phase is listed in its phase list.
 
-        Board01 says complete and boards02/05 say manufacturing. Keep strict
-        rejection until those source specs are deliberately repaired and
-        their hash-bound readiness evidence regenerated.
+        Boards 01, 02 and 05 used to carry phases outside their phase lists
+        (#7250); the specs were repaired so strict validation now passes.
         """
         l1_pass = [
             rel for rel in RECIPE_ENTRY_POINTS if require_spec(REPO_ROOT / rel, strict=False).ok
@@ -314,11 +313,7 @@ class TestLadderLevels:
                 require_spec(REPO_ROOT / rel, strict=True)
             except SystemExit:
                 l2_fail.append(rel)
-        assert l2_fail == [
-            "boards/01-voltage-divider/generate_design.py",
-            "boards/02-charlieplex-led/generate_design.py",
-            "boards/05-bldc-motor-controller/design.py",
-        ]
+        assert l2_fail == []
 
 
 class TestDiscoveryAnchor:
@@ -512,12 +507,11 @@ class TestEscapeHatchAndPosture:
 class TestNoBoardSpecsModified:
     """#4539 does not repair board content -- it only reports."""
 
-    def test_board_01_spec_still_l2_invalid(self) -> None:
+    def test_board_01_spec_is_l2_valid(self) -> None:
         from kicad_tools.spec.parser import validate_spec
 
         valid, errors = validate_spec(REPO_ROOT / "boards/01-voltage-divider/project.kct")
-        assert valid is False
-        assert any("not found in phases" in e for e in errors)
+        assert valid is True, errors
 
 
 def test_recipes_import_cleanly() -> None:
