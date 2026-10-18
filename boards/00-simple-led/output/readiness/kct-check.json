@@ -1,13 +1,14 @@
 {
   "file": "output/simple_led_routed.kicad_pcb",
   "manufacturer": "jlcpcb",
+  "pcb_sha256": "4edd1d30b0a1b1ddafd8146e21f5f4534782a67c6bf0004129af20bad627dd7a",
   "layers": 2,
   "summary": {
     "errors": 0,
     "warnings": 1,
     "infos": 1,
     "waived": 0,
-    "rules_checked": 58,
+    "rules_checked": 66,
     "rules_checked_by_rule": {
       "connectivity": 1,
       "copper_sliver": 1,
@@ -24,13 +25,21 @@
       "netclass_via_drill": 1,
       "netclass_annular_ring": 1,
       "sch_field_offset": 1,
-      "sch_field_overlap": 1
+      "sch_field_overlap": 1,
+      "spec_conformance_dimensions": 1,
+      "spec_conformance_layers": 1,
+      "spec_conformance_min_trace": 1,
+      "spec_conformance_min_via": 1,
+      "spec_conformance_min_drill": 1,
+      "spec_conformance_target_fab": 1
     },
     "passed": true,
     "stale_waivers": 0,
     "coverage_checked": 30,
     "coverage_skipped": 10,
-    "coverage_unknown": [],
+    "coverage_unknown": [
+      "spec_conformance"
+    ],
     "coverage_blocking_unknown": []
   },
   "violations": [
@@ -86,7 +95,7 @@
   "meta_checks": {
     "drc": {
       "status": "PASSED",
-      "detail": "58 rules checked, 0 error(s), 1 warning(s)"
+      "detail": "66 rules checked, 0 error(s), 1 warning(s)"
     },
     "erc": {
       "status": "PASSED",
@@ -314,6 +323,12 @@
       "state": "checked",
       "reason": null,
       "blocking": true
+    },
+    "spec_conformance": {
+      "status": "unknown:unread_spec_keys:requirements.components,requirements.electrical.input_voltage,requirements.electrical.led_current,requirements.electrical.led_forward_voltage",
+      "state": "unknown",
+      "reason": "unread_spec_keys:requirements.components,requirements.electrical.input_voltage,requirements.electrical.led_current,requirements.electrical.led_forward_voltage",
+      "blocking": false
     },
     "thermal_asymmetry": {
       "status": "checked",

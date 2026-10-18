@@ -6,15 +6,15 @@
   },
   "files": {
     "README.txt": {
-      "sha256": "add13e8d4a9eaf388986cd4be0bd59a6c5b5297719985521ef16a279d45f9d24",
-      "size": 1234
+      "sha256": "9f15e702f05e92d0ae229d3403a6f82607a25ed4805c09a4818f8287e6e9445a",
+      "size": 1379
     },
     "assembly-back.pdf": {
-      "sha256": "94bec1010c1843cfa978ec9f879062410158177d2ecc12928ff550b5e55497ca",
+      "sha256": "dcdb8e9cf05a0ae1bce3c6a60735e72c1c7be92834253a465a51fac1d8a734c9",
       "size": 5983
     },
     "assembly-front.pdf": {
-      "sha256": "f01bbd3200e3ba60e6f66fcf4e143d0e8a96be465d67ed1d22a1808705cac4e6",
+      "sha256": "e242854d18694023ec7a46f61cb15eed2c859ed69335270acd474afdb5d03701",
       "size": 9305
     },
     "bom_jlcpcb.csv": {
@@ -22,16 +22,16 @@
       "size": 194
     },
     "check-report.json": {
-      "sha256": "8e045235f6797904c0ba6b38a0005ac715612eec9b8e2845d9181600e17082f6",
-      "size": 8989
+      "sha256": "a63e874912211932dfa42386e3c395d4878888a9752a09b22dfb508eaad350b5",
+      "size": 9781
     },
     "cpl_jlcpcb.csv": {
       "sha256": "aae5fc27c33e43d1e058dab990fddd66a2092c4c9ada334c6f839e16a56cf811",
       "size": 270
     },
     "gerbers/gerbers.zip": {
-      "sha256": "f3e7865835f0bb128ee7b861dee035f7ca8dd78a3df0f8caa6868735f55b80a2",
-      "size": 11733
+      "sha256": "67ce58dc150125449cc75c713f88544f3b0786b34e6429acb570e0242ca99ac2",
+      "size": 11735
     },
     "images/assembly.png": {
       "sha256": "ca6a436bfa2f87e0a14faa2f9fecb9d608594f11a504aee0e92beb39cd1fea31",
@@ -74,19 +74,19 @@
       "size": 12096
     },
     "report.md": {
-      "sha256": "bf053f2cf8d6cd082567b20aa3a78829d22169c65aea6047161388a6f9a87093",
-      "size": 2708
+      "sha256": "08de2c7c0a02e06901a8c5a66a56ab8907e94bca42f6f1c9fd838f7f96da89c1",
+      "size": 2673
     },
     "report.pdf": {
-      "sha256": "5321fdd5abf86c0e91bf2632ed7e6eb016db98685bfee40db580d634996d171c",
-      "size": 742445
+      "sha256": "1d78eea6f6ff2e160c905db3af72d3773f909e1377ccce6d7eed0beb55eed3b6",
+      "size": 742330
     },
     "schematic.pdf": {
-      "sha256": "ca0dd4470e058fd812156ad7bad3a1bd397f292db978b39da5df97bfcc2cc19f",
+      "sha256": "337642214f412e26cfddd13b08a3f77ae227b914568c187e429fc8b7eb556f93",
       "size": 47252
     }
   },
-  "generated_at": "2026-10-18T16:09:02.076985+00:00",
+  "generated_at": "2026-10-18T20:30:00+00:00",
   "kicad_tools_version": "0.23.0",
   "manufacturer": "jlcpcb",
   "mode": "assembly",
@@ -192,14 +192,16 @@
       "status": "OK"
     },
     {
-      "message": "DRC passed with 2 warning(s)",
+      "details": "Use --drc-report to specify a report file, or --skip-drc to skip",
+      "message": "No DRC report found; run kicad-cli or kct check first",
       "name": "drc",
       "status": "WARN"
     },
     {
-      "message": "ERC: 0 errors, 0 warnings",
+      "details": "Use --erc-report to specify a report file, or --skip-erc to skip",
+      "message": "No ERC report found; run kicad-cli first",
       "name": "erc",
-      "status": "OK"
+      "status": "WARN"
     }
   ],
   "producer": "kct readiness",
