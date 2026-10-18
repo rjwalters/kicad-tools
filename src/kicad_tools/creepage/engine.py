@@ -962,14 +962,11 @@ def _feet_on_segments(points: Any, segs: Any) -> Any:
 
 
 def _obstacle_interiors(obstacles: list[Any]) -> list[Any]:
-    """Slightly shrunk, prepared obstacle interiors used by the admissibility test."""
-    import shapely  # type: ignore[import-untyped]
-
+    """Slightly shrunk obstacle interiors used by the admissibility test."""
     out = []
     for obs in obstacles:
         interior = obs.buffer(-_INTERIOR_SHRINK)
         if not interior.is_empty:
-            shapely.prepare(interior)  # in-place; speeds the batched intersects
             out.append(interior)
     return out
 
@@ -992,6 +989,8 @@ def _first_admissible(
     order = keep[np.argsort(lengths[keep], kind="stable")]
     if not interiors:
         return float(lengths[order[0]])
+    for interior in interiors:
+        shapely.prepare(interior)  # in-place and idempotent; speeds the intersects
     # Small first batch keeps the common "shortest candidate is visible" case
     # cheap; the batch then grows so a fully occluded pair (slot past both
     # copper ends) stays linear in the candidate count.  The interiors are
