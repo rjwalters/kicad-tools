@@ -842,6 +842,10 @@ def test_routing_reach_deterministic_across_seeds(unrouted_pcb_path: Path, tmp_p
 BOARD03_KNOWN_NETCLASS_VIOLATIONS = 0
 
 
+# Issue #7220: known thermal_asymmetry warnings on board 03 (see test body).
+BOARD03_KNOWN_THERMAL_ASYMMETRY = 6
+
+
 def test_committed_pcb_drc_state() -> None:
     """The shipped routed PCB does not silently degrade past its June 7 ceiling.
 
@@ -975,6 +979,17 @@ def test_committed_pcb_drc_state() -> None:
                 and (int(line.group(1)), line.group(2)) == (len(findings), "warning")
             ):
                 unexpected.discard("diffpair_uncoupled_length")
+        # Issue #7220 (PR1): the new ``thermal_asymmetry`` warning reports 6
+        # known findings on board 03 (C10, C11, J1 A1/A12/B1/B12); PR2 of
+        # #7220 will reduce them.  Allowed only while the count is bounded.
+        if "thermal_asymmetry" in unexpected:
+            line = re.search(r"\bthermal_asymmetry:\s+(\d+) (\w+)", by_rule_match.group(1))
+            if (
+                line is not None
+                and line.group(2) == "warnings"
+                and int(line.group(1)) <= BOARD03_KNOWN_THERMAL_ASYMMETRY
+            ):
+                unexpected.discard("thermal_asymmetry")
         assert not unexpected, (
             f"Committed routed PCB has NEW DRC rules failing on "
             f"jlcpcb-tier1: {sorted(unexpected)}.  The June 7 2026 "
