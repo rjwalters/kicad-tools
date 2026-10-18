@@ -130,8 +130,19 @@ def query_swap(session: PlacementSession, ref1: str, ref2: str) -> MoveResult:
         return result2
 
     # Combine results
-    combined_violations = list(set(result1.new_violations + result2.new_violations))
-    combined_resolved = list(set(result1.resolved_violations + result2.resolved_violations))
+    # Violation is an unhashable dataclass; dedupe by (type, description) (#7099)
+    def _dedupe(violations: list) -> list:
+        seen: set[tuple[str, str]] = set()
+        unique = []
+        for v in violations:
+            key = (v.type, v.description)
+            if key not in seen:
+                seen.add(key)
+                unique.append(v)
+        return unique
+
+    combined_violations = _dedupe(result1.new_violations + result2.new_violations)
+    combined_resolved = _dedupe(result1.resolved_violations + result2.resolved_violations)
     combined_affected = list(set(result1.affected_components + result2.affected_components))
 
     # Combine routing impacts
