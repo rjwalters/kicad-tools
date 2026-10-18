@@ -58,12 +58,22 @@ _UNREAD_KNOWN_KEYS: tuple[tuple[str, ...], ...] = (
 )
 
 
+# Synthetic recipe/fixture folders hold a PCB that is NOT the parent board
+# (e.g. a 4-layer regression witness under the 6-layer board folder), so the
+# parent's ``project.kct`` never describes it (Issue #7320).
+_SYNTHETIC_DIRS = frozenset({"regression-output", "regression-fixture"})
+
+
 def find_project_kct(pcb_path: Path) -> Path | None:
-    """``project.kct`` next to the PCB, else one directory up (as ``target_fab``)."""
-    for candidate in (
-        pcb_path.parent / "project.kct",
-        pcb_path.parent.parent / "project.kct",
-    ):
+    """``project.kct`` next to the PCB, else one directory up (as ``target_fab``).
+
+    The parent-folder fallback is skipped for synthetic fixture/output folders:
+    a spec belongs to such a board only when it sits next to the PCB.
+    """
+    candidates = [pcb_path.parent / "project.kct"]
+    if pcb_path.parent.name not in _SYNTHETIC_DIRS:
+        candidates.append(pcb_path.parent.parent / "project.kct")
+    for candidate in candidates:
         if candidate.is_file():
             return candidate
     return None
