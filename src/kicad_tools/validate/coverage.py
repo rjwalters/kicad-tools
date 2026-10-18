@@ -123,6 +123,27 @@ def _declares_ampacity(net_class_map: Any) -> bool:
     return any(getattr(nc, "target_ampacity", None) is not None for nc in net_class_map.values())
 
 
+def zone_only_ampacity_nets(checker: DRCChecker) -> list[str]:
+    """Nets with a declared current, a copper pour, and no routed track copper.
+
+    ``AmpacityRule`` measures track segments only, so such a net is carried
+    entirely by a pour and nothing about it was measured (Issue #7210).
+    """
+    from .ampacity_specs import derive_ampacity_specs
+
+    declared = derive_ampacity_specs(getattr(checker, "net_class_map", None))
+    if not declared:
+        return []
+    pcb = checker.pcb
+    tracked = {s.net_name for s in getattr(pcb, "segments", []) or [] if s.net_name}
+    poured = {
+        z.net_name
+        for z in getattr(pcb, "zones", []) or []
+        if z.net_name and getattr(z, "keepout", None) is None
+    }
+    return sorted(n for n in declared if n in poured and n not in tracked)
+
+
 def _unfilled_pour_zones(checker: DRCChecker) -> int:
     count = 0
     for zone in getattr(checker.pcb, "zones", []) or []:
@@ -164,6 +185,10 @@ def precheck(
 
     if category == "ampacity" and not _declares_ampacity(ncm):
         return skipped(category, "no_declared_targets")
+    if category == "ampacity":
+        zone_only = zone_only_ampacity_nets(checker)
+        if zone_only:
+            return unknown(category, f"zone-only, not measured ({', '.join(zone_only)})")
     if category == "path_ampacity" and not getattr(checker, "current_path_specs", None):
         return skipped(category, "no_declared_current_paths")
     if (
