@@ -25,10 +25,12 @@ The resulting specs are passed to ``ImpedanceRule(specs=...)`` as an
 suppression gate and always evaluate, so a net declared 50Ω single-ended
 still fires when its routed width is wrong.
 
-Scope: single-ended only.  Diff-pair impedance
-(:attr:`~kicad_tools.router.rules.NetClassRouting.target_diff_impedance`)
-is consumed via the router's ``detected_pairs`` / coupled-lines path and
-is intentionally NOT touched here.
+Differential targets (Issue #7293) follow the same shape:
+:func:`derive_diff_impedance_specs` maps each class's
+:attr:`~kicad_tools.router.rules.NetClassRouting.target_diff_impedance`
+to per-net specs, and :func:`default_diff_impedance_specs` returns the
+built-in diff-only name-pattern defaults (advisory, warning-capped) so they
+still apply when a net-class map replaces the default spec list.
 """
 
 from __future__ import annotations
@@ -36,7 +38,7 @@ from __future__ import annotations
 import re
 from typing import TYPE_CHECKING
 
-from kicad_tools.validate.rules.impedance import NetImpedanceSpec
+from kicad_tools.validate.rules.impedance import ImpedanceRule, NetImpedanceSpec
 
 if TYPE_CHECKING:
     from kicad_tools.router.rules import NetClassRouting
@@ -88,3 +90,41 @@ def derive_single_ended_impedance_specs(
             )
         )
     return specs
+
+
+def derive_diff_impedance_specs(
+    net_class_map: dict[str, NetClassRouting] | None,
+) -> list[NetImpedanceSpec]:
+    """Build explicit differential impedance specs from a net-class map.
+
+    Mirrors :func:`derive_single_ended_impedance_specs` for
+    :attr:`~kicad_tools.router.rules.NetClassRouting.target_diff_impedance`.
+    These are declared targets, so they are not advisory: a deviation above
+    20 % is an error.  Empty/``None`` maps return ``[]``.
+    """
+    if not net_class_map:
+        return []
+
+    specs: list[NetImpedanceSpec] = []
+    for net_name, nc in net_class_map.items():
+        target = getattr(nc, "target_diff_impedance", None)
+        if target is None:
+            continue
+        tolerance = getattr(nc, "impedance_tolerance_percent", 10.0)
+        specs.append(
+            NetImpedanceSpec(
+                net_pattern=f"^{re.escape(net_name)}$",
+                target_zdiff=float(target),
+                tolerance_percent=float(tolerance),
+            )
+        )
+    return specs
+
+
+def default_diff_impedance_specs() -> list[NetImpedanceSpec]:
+    """Built-in diff-only name-pattern defaults (``target_z0 is None``).
+
+    The single-ended heuristics stay out (Issue #3157).  The returned specs
+    are ``advisory``: their findings are capped at ``warning``.
+    """
+    return [s for s in ImpedanceRule._get_default_specs() if s.target_z0 is None]
