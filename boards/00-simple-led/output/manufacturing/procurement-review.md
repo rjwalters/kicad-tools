@@ -26,6 +26,22 @@ the CPL reviewed above, and `bom_jlcpcb.csv` is unchanged. The identity table
 above therefore still applies. No new supplier lookup or stock check was
 performed.
 
+## Through-hole parts now in the JLCPCB BOM/CPL — 2026-10-18 (issue #7239)
+
+JLCPCB's PCBA capability page
+(https://jlcpcb.com/capabilities/pcb-assembly-capabilities, fetched
+2026-10-18) lists both Economic and Standard PCBA as "SMT/Thru-hole", so by
+operator decision (issue #7239) `kct export --mfr jlcpcb` no longer excludes
+through-hole parts. This package's `cpl_jlcpcb.csv` now also lists the
+through-hole parts D1 (5 mm LED) and J1 (2-pin header) for JLCPCB assembly; `bom_jlcpcb.csv` is unchanged (it already listed D1 and J1).
+Any statement above that these parts are hand-soldered or excluded
+from the CPL describes the earlier package and is superseded for them.
+
+**Procurement must review these through-hole rows** (part identity, JLCPCB
+through-hole assembly eligibility and stock, and placement orientation)
+before ordering assembly. This note records the export change only: it is
+not a re-review, and no new supplier lookup or stock check was performed.
+
 ## Fleet audit context
 
 The source corrections and redesigns were integrated in commit
