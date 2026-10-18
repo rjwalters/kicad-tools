@@ -1,7 +1,7 @@
 {
   "version": "1.0",
   "kicad_tools_version": "0.23.0",
-  "generated_at": "2026-10-18T03:38:56.354658+00:00",
+  "generated_at": "2026-10-18T05:09:24.027893+00:00",
   "manufacturer": "jlcpcb-tier1",
   "files": {
     "DESIGN_REVIEW.md": {
@@ -77,8 +77,8 @@
       "size": 7474
     },
     "design-source/route_demo.py": {
-      "sha256": "a7a5f7f5c227384d08a3f3c49a4e5f6a6c86925b984286840195a99e28082afc",
-      "size": 10114
+      "sha256": "0fca0042fac91f385db16120c90cf8f12332d1f463e9ff336417c8d0649b56c6",
+      "size": 10794
     },
     "design-source/routing-plan.json": {
       "sha256": "4589077f0a5f29a64e3e0b746e0a0f3bfb167099ea1a79f76ced8d920361e1c9",
@@ -173,8 +173,8 @@
       "size": 2192
     },
     "gerbers/gerbers.zip": {
-      "sha256": "0c47778cbc6ae95063bdd806fe5e1c38321f95b75fb099b62c8f7d40c9632bca",
-      "size": 126674
+      "sha256": "4582d3588537d011960de85d1509f2ff5ecce7cc3720b7fa455845d94b2a3d64",
+      "size": 126679
     },
     "images/assembly.png": {
       "sha256": "4f7fe073c93985e6bbd8edf9f854c537106c24a7ea2763001f1b44914fa02cf3",
@@ -213,7 +213,7 @@
       "size": 486460
     },
     "kicad_project.zip": {
-      "sha256": "4d37b0ea8950d25f7808df23ec567b39bb4bd4d19b0c3bbafc98ff5d00391368",
+      "sha256": "429be789ed10b5ff192cbd74d07ae9f56f19124e142c7427f6afc730a2e98236",
       "size": 195315
     },
     "manual-assembly-bom.csv": {
@@ -317,12 +317,12 @@
       "size": 2354
     },
     "report.md": {
-      "sha256": "babdab1cd8b16ca64e942b7b7364056b8eeb9c9de5020658e2833d55bbecb601",
-      "size": 4912
+      "sha256": "1770f50b30b94b8d926601b7d4e4105f278e8294e6fffe513af607bea0dc5997",
+      "size": 4928
     },
     "report.pdf": {
-      "sha256": "000be5cb9f82ea14c31f68b924b872671d9d2ea38dc71300e872abf49073f1f7",
-      "size": 3253359
+      "sha256": "06cfb8a6cbd2e67cdcb27cb812771cfe283f59c7435e96e0b7779e04c07f5695",
+      "size": 3253376
     },
     "schematic.pdf": {
       "sha256": "6fe021a9ea56eb056b2fc6dc24e3fee47c4f6555c6141a4ad1ec755b51aa0d98",

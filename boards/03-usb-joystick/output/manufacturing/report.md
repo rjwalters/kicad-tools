@@ -177,7 +177,7 @@ The following 1 through-hole component is **excluded from the SMT pick-and-place
 
 ### Action Items
 
-- **[OPTIONAL]** Verify zone fill in KiCad for 2 zone-connected nets
+- **[OPTIONAL]** Refill zones to verify 2 zone-connected nets, then re-run kct audit
 - **[OPTIONAL]** Review 15 DRC warnings
 
 
