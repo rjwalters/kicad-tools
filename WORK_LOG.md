@@ -15,6 +15,11 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-18
 
+- **PR #7137**: test: move route --lint-gate JSON-contract variant to extended tier
+- **PR #7165**: fix(export): emit CPL in the Gerber/drill frame (aux origin, Y up)
+- **Issue #7161** (closed): kct erc reports PASS (exit 0) where kicad-cli reports errors: cross-sheet global-label name-count filter drops true isolated_pin_label findings; power-pin sibling filter is inert on KiCad 10
+- **Issue #7059** (closed): kct export CPL coordinates are relative to the Edge.Cuts top-left with Y down, while the gerbers use the drill/place origin with Y up
+- **PR #7168**: fix(erc): stop kct erc dropping true isolated_pin_label findings on hierarchical designs
 - **PR #7081**: fix(cli): add optimize-traces -v help; sync cli.md/machine-output.md with parser; add docs drift test
 - **PR #7156**: fix(optim): pick largest Edge.Cuts contour as board outline
 - **Issue #7155** (closed): extract_board_outline returns an Edge.Cuts cutout (gr_rect/gr_poly) instead of the outer gr_line outline
