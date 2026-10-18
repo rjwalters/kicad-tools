@@ -1,7 +1,19 @@
 """End-to-end: apply a ``PCBLayout`` to a real, netted ``.kicad_pcb`` (Issue #7022).
 
-The fixture board carries real footprints from ``tests/fixtures/Test_Library.pretty``
-with schematic-style pad nets, so the bridge runs on a real file with real pads.
+The fixture board carries the **real** KiCad 10 library footprints the blocks
+name (``tests/fixtures/KiCad10_Library.pretty``: verbatim copies of
+``Package_TO_SOT_SMD:SOT-23-5``, ``Capacitor_SMD:C_0805_2012Metric``,
+``LED_SMD:LED_0603_1608Metric`` and ``Resistor_SMD:R_0603_1608Metric`` from
+KiCad 10.0.6, CC-BY-SA 4.0 with the KiCad library exception) with
+schematic-style pad nets, so the bridge runs on real pads and its output can
+be DRC-checked by kicad-cli.  Every happy-path trace lands on a same-net pad:
+the bar is **no new kicad-cli DRC errors**.
+
+The stock ``LDOBlock``'s internal routing and ``PCBLayout.route()``'s straight
+port-to-port lines still short foreign pads (#7062, #7064), so the happy path
+uses a hand-routed LDO block and explicit inter-block segments; the stock
+layout is kept as the fixture the copper check must *reject*.
+
 Blocks sit at rotations 0 and 180 only: 90/270 use the opposite sign to KiCad's
 footprint rotation (#7046), which this bridge deliberately does not correct.
 """
@@ -12,6 +24,7 @@ import json
 import logging
 import re
 import subprocess
+from collections import Counter
 from pathlib import Path
 
 import pytest
@@ -25,14 +38,24 @@ from kicad_tools.pcb import (
 )
 from kicad_tools.pcb.blocks import LDOBlock, LEDBlock, PCBBlock
 from kicad_tools.pcb.geometry import Layer, Point
-from kicad_tools.pcb.primitives import Via
+from kicad_tools.pcb.placement import get_footprint_pads
+from kicad_tools.pcb.primitives import TraceSegment, Via
 from kicad_tools.schema.pcb import PCB
 
-LIB = Path(__file__).parent / "fixtures" / "Test_Library.pretty"
+LIB = Path(__file__).parent / "fixtures" / "KiCad10_Library.pretty"
+TEST_LIB = Path(__file__).parent / "fixtures" / "Test_Library.pretty"
 REPO = Path(__file__).resolve().parent.parent
 GUIDE = REPO / "docs" / "guides" / "schematic-to-pcb-workflow.md"
 
 NET_MAP = {"VOUT": "+3V3", "LED_MID": "Net-(D1-K)"}
+
+REFS = {
+    "U1": "SOT-23-5",
+    "C1": "C_0805_2012Metric",
+    "C2": "C_0805_2012Metric",
+    "D1": "LED_0603_1608Metric",
+    "R1": "R_0603_1608Metric",
+}
 
 # (ref, pad, net): what schematic-to-PCB sync would have given the pads.
 PAD_NETS = [
@@ -49,11 +72,20 @@ PAD_NETS = [
     ("R1", "2", "GND"),
 ]
 
+# Copper the happy-path layout writes.
+LDO_TRACES = 6  # VIN, VOUT, 4x GND
+LED_TRACES = 1  # LED_MID
+INTER_TRACES = 4  # 3x +3V3 (C2 -> D1 anode), 1x GND (R1 -> via)
+N_TRACES = LDO_TRACES + LED_TRACES + INTER_TRACES
+N_VIAS = 2
 
-def _build_board(path: Path, refs: dict[str, str], pad_nets, layers: int = 2) -> Path:
+
+def _build_board(
+    path: Path, refs: dict[str, str], pad_nets, layers: int = 2, lib: Path = LIB
+) -> Path:
     pcb = PCB.create(width=40, height=30, layers=layers, center=True)
     for i, (ref, footprint) in enumerate(refs.items()):
-        pcb.add_footprint_from_file(LIB / f"{footprint}.kicad_mod", ref, 5 + 5 * i, 25)
+        pcb.add_footprint_from_file(lib / f"{footprint}.kicad_mod", ref, 5 + 5 * i, 25)
     for ref, pad, net in pad_nets:
         assert pcb.assign_net_to_footprint_pad(ref, pad, net)
     pcb.save(str(path))
@@ -63,14 +95,7 @@ def _build_board(path: Path, refs: dict[str, str], pad_nets, layers: int = 2) ->
 @pytest.fixture(scope="module")
 def source(tmp_path_factory) -> Path:
     path = tmp_path_factory.mktemp("bridge") / "source.kicad_pcb"
-    refs = {
-        "U1": "SOT-23-5",
-        "C1": "R_0603_1608Metric",
-        "C2": "R_0603_1608Metric",
-        "D1": "R_0603_1608Metric",
-        "R1": "R_0603_1608Metric",
-    }
-    return _build_board(path, refs, PAD_NETS)
+    return _build_board(path, REFS, PAD_NETS)
 
 
 @pytest.fixture(scope="module")
@@ -80,19 +105,72 @@ def origin(source) -> tuple[float, float]:
     return ox, oy
 
 
+C0805 = {"1": (-0.95, 0.0), "2": (0.95, 0.0)}  # KiCad 10 C_0805_2012Metric
+
+
+def _ldo_block() -> PCBBlock:
+    """An LDO + in/out caps whose copper really lands on its own pads.
+
+    U1 (SOT-23-5) pins 1-3 down the left at x=-1.1375, pin 5 top-right.  The
+    caps are turned 270 degrees so pad 1 is on top: VIN and VOUT run straight
+    across at y=-0.95 and GND leaves pin 2 to the left, then runs under the
+    package at y=2.5 to C2.
+    """
+    block = PCBBlock("LDO_U1")
+    sot = get_footprint_pads("Package_TO_SOT_SMD:SOT-23-5")
+    u1 = block.add_component("U1", "Package_TO_SOT_SMD:SOT-23-5", 0, 0, pads=sot)
+    c1 = block.add_component("C1", "Capacitor_SMD:C_0805_2012Metric", -3.5, 0, 270, C0805)
+    c2 = block.add_component("C2", "Capacitor_SMD:C_0805_2012Metric", 3.5, 0, 270, C0805)
+    block.add_trace(u1.pad_position("1"), c1.pad_position("1"), width=0.4, net="VIN")
+    block.add_trace(u1.pad_position("5"), c2.pad_position("1"), width=0.4, net="VOUT")
+    gnd = [u1.pad_position("2"), Point(-3.5, 0), Point(-3.5, 2.5), Point(3.5, 2.5)]
+    gnd.append(c2.pad_position("2"))
+    for a, b in zip(gnd, gnd[1:], strict=False):
+        block.add_trace(a, b, width=0.4, net="GND")
+    block.add_via(0, 2.5, net="GND")  # a block-internal via on the GND run
+    block.add_port("VIN", -5.5, -0.95, direction="power")
+    block.add_port("VOUT", 5.5, -0.95, direction="power")
+    block.add_port("GND", 0, 2.5, direction="power")
+    block.add_port("EN", -2, 3, direction="in", internal_pad="U1.3")
+    return block
+
+
 def _layout(origin: tuple[float, float]) -> PCBLayout:
     """LDO (rotation 0) + LED (rotation 180), joined on VOUT, plus vias."""
     ox, oy = origin
     layout = PCBLayout("bridge")
+    ldo = _ldo_block()
+    ldo.place(ox + 10, oy + 12, rotation=0)
+    layout.add_block(ldo, name="ldo")
+    led = LEDBlock(led_ref="D1", res_ref="R1")
+    led.place(ox + 24, oy + 12, rotation=180)  # D1 at x=24, R1 at x=21
+    layout.add_block(led, name="led")
+
+    def seg(a: tuple[float, float], b: tuple[float, float], net: str) -> None:
+        layout.inter_block_traces.append(
+            TraceSegment(Point(ox + a[0], oy + a[1]), Point(ox + b[0], oy + b[1]), net=net)
+        )
+
+    # C2.1 (13.5, 11.05) up, across above the LED block, down onto D1.2 (24.8, 12).
+    path = [(13.5, 11.05), (13.5, 9.5), (24.8, 9.5), (24.8, 12)]
+    for a, b in zip(path, path[1:], strict=False):
+        seg(a, b, "VOUT")
+    seg((20.2, 12), (18.5, 12), "GND")  # R1.2 to a GND via
+    layout.inter_block_vias.append(Via(position=Point(ox + 18.5, oy + 12), net="GND"))
+    return layout
+
+
+def _stock_layout(origin: tuple[float, float]) -> PCBLayout:
+    """The stock LDOBlock + LEDBlock joined by ``route()`` -- copper that shorts."""
+    ox, oy = origin
+    layout = PCBLayout("stock")
     ldo = LDOBlock(ldo_ref="U1", input_cap="C1", output_caps=["C2"])
-    ldo.add_via(0, 3, net="GND")  # a block-internal via at the GND port
     ldo.place(ox + 10, oy + 12, rotation=0)
     layout.add_block(ldo, name="ldo")
     led = LEDBlock(led_ref="D1", res_ref="R1")
     led.place(ox + 28, oy + 12, rotation=180)
     layout.add_block(led, name="led")
     layout.route("ldo", "VOUT", "led", "ANODE", net="VOUT")
-    layout.inter_block_vias.append(Via(position=Point(ox + 20, oy + 20), net="GND"))
     return layout
 
 
@@ -123,11 +201,10 @@ def test_report(applied):
     assert report.moved == ["U1", "C1", "C2", "D1", "R1"]
     assert report.missing_refs == []
     assert report.skipped == []
-    # LDOBlock: 4 traces (VIN, VOUT, 2x GND); LEDBlock: 1; inter-block: 1.
-    assert report.segments_added == 6
-    assert report.vias_added == 2
-    # The block footprints are C_0805 / LED_0603; the board has R_0603.
-    assert report.footprint_mismatches == ["C1", "C2", "D1"]
+    assert report.segments_added == N_TRACES
+    assert report.vias_added == N_VIAS
+    # The board carries the very library footprints the blocks name.
+    assert report.footprint_mismatches == []
 
 
 def test_footprints_moved_to_sheet_absolute_placements(applied):
@@ -164,8 +241,9 @@ def test_every_trace_and_via_is_board_copper_on_the_mapped_net(source, applied):
         assert any(
             n == net_number(trace["net"])
             and layer == trace["layer"]
-            and s == pytest.approx(start, abs=1e-4)
-            and e == pytest.approx(end, abs=1e-4)
+            # The board file stores 3 decimals (8.8625 is saved as 8.863).
+            and s == pytest.approx(start, abs=1e-3)
+            and e == pytest.approx(end, abs=1e-3)
             and w == pytest.approx(trace["width"])
             for n, layer, s, e, w in segments
         ), trace
@@ -200,7 +278,7 @@ def test_deterministic_byte_identical_and_no_uuid_collision(source, origin, appl
     source_uuids = set(_uuids(source.read_text()))
     out_uuids = _uuids(out.read_text())
     assert len(out_uuids) == len(set(out_uuids)), "a UUID appears twice"
-    assert len(set(out_uuids) - source_uuids) == 6 + 2  # one per new segment/via
+    assert len(set(out_uuids) - source_uuids) == N_TRACES + N_VIAS  # one per new item
 
 
 def test_exporter_has_no_random_uuids():
@@ -323,11 +401,150 @@ def test_lenient_skips_and_warns(source, origin, tmp_path, caplog):
         assert sum(needle in s for s in report.skipped) == 1
         assert sum(needle in r.getMessage() for r in caplog.records) == 1
     assert report.missing_refs == ["U9"]
-    # The good items still went in: the five moves, 6 segments and 2 vias.
+    # The good items still went in: the five moves and all the good copper.
     assert report.moved == ["U1", "C1", "C2", "D1", "R1"]
-    assert report.segments_added == 6
-    assert report.vias_added == 2
+    assert report.segments_added == N_TRACES
+    assert report.vias_added == N_VIAS
     assert _net_table(PCB.load(str(out))) == _net_table(PCB.load(str(source)))
+
+
+# ---------------------------------------------------------------------------
+# Copper geometry: shorts and open ends are refused, against the real pads
+# ---------------------------------------------------------------------------
+
+
+def _with_bad_copper(origin: tuple[float, float], case: str) -> PCBLayout:
+    """The good layout plus one copper item that would short or dangle."""
+    ox, oy = origin
+    layout = _layout(origin)
+    if case == "open end":
+        # From the R1.2 GND pad straight down into empty board.
+        layout.inter_block_traces.append(
+            TraceSegment(Point(ox + 20.2, oy + 12), Point(ox + 20.2, oy + 16), net="GND")
+        )
+    elif case == "foreign pad":
+        # U1.2 (GND) straight down to the GND run at y=14.5 -- through U1.3 (EN).
+        layout.inter_block_traces.append(
+            TraceSegment(Point(ox + 8.8625, oy + 12), Point(ox + 8.8625, oy + 14.5), net="GND")
+        )
+    else:  # "via on foreign pad": a GND via on the unconnected U1.4.
+        layout.inter_block_vias.append(Via(position=Point(ox + 11.1375, oy + 12.95), net="GND"))
+    return layout
+
+
+GEOMETRY_CASES = {
+    "open end": "touches no pad, track or via on net 'GND'",
+    "foreign pad": "shorts pad U1.3 on net <no net>",
+    "via on foreign pad": "shorts pad U1.4 on net <no net>",
+}
+
+
+@pytest.mark.parametrize("case", sorted(GEOMETRY_CASES))
+def test_strict_refuses_copper_that_shorts_or_dangles(source, origin, tmp_path, case):
+    out = tmp_path / "never.kicad_pcb"
+    with pytest.raises(LayoutApplyError) as excinfo:
+        _with_bad_copper(origin, case).apply_to_pcb(source, out, net_map=NET_MAP)
+    (problem,) = excinfo.value.problems
+    assert GEOMETRY_CASES[case] in problem, problem
+    assert problem.startswith("via " if case.startswith("via") else "trace ")
+    assert not out.exists()
+
+
+@pytest.mark.parametrize("case", sorted(GEOMETRY_CASES))
+def test_lenient_skips_copper_that_shorts_or_dangles(source, origin, applied, tmp_path, case):
+    out = tmp_path / "lenient.kicad_pcb"
+    report = _with_bad_copper(origin, case).apply_to_pcb(
+        source, out, net_map=NET_MAP, strict=False
+    )  # fmt: skip
+    (skipped,) = report.skipped
+    assert GEOMETRY_CASES[case] in skipped
+    # Everything else went in, and nothing more: the board is the happy path's.
+    assert (report.segments_added, report.vias_added) == (N_TRACES, N_VIAS)
+    assert out.read_bytes() == applied[2].read_bytes()
+
+
+def test_open_end_is_ok_when_it_lands_on_new_or_existing_same_net_copper(source, origin, applied):
+    """An endpoint on another track (new, or already on the board) is connected."""
+    ox, oy = origin
+    layout = _layout(origin)
+    # From the middle of the new GND run at y=14.5 down to a GND via.
+    layout.inter_block_traces.append(
+        TraceSegment(Point(ox + 10, oy + 14.5), Point(ox + 10, oy + 16.5), net="GND")
+    )
+    layout.inter_block_vias.append(Via(position=Point(ox + 10, oy + 16.5), net="GND"))
+    pcb = PCB.load(str(source))
+    report = KiCadPCBExporter(layout, net_map=NET_MAP).apply_to(pcb)
+    assert report.segments_added == N_TRACES + 1 and report.skipped == []
+
+    # Re-applied on top of the first result, the stub's ends sit on existing copper.
+    stub = PCBLayout("stub")
+    stub.inter_block_traces.append(
+        TraceSegment(Point(ox + 10, oy + 16.5), Point(ox + 12, oy + 16.5), net="GND")
+    )
+    stub.inter_block_vias.append(Via(position=Point(ox + 12, oy + 16.5), net="GND"))
+    assert KiCadPCBExporter(stub).apply_to(pcb).segments_added == 1
+
+
+def test_foreign_copper_already_on_the_board_is_checked(source, origin, applied):
+    ox, oy = origin
+    layout = PCBLayout("cross")
+    # Net-(D1-K) from D1.1 up across the existing +3V3 run at y=9.5.
+    layout.inter_block_traces.append(
+        TraceSegment(Point(ox + 23.2, oy + 12), Point(ox + 23.2, oy + 8), net="LED_MID")
+    )
+    pcb = PCB.load(str(applied[2]))
+    with pytest.raises(LayoutApplyError) as excinfo:
+        KiCadPCBExporter(layout, net_map=NET_MAP).apply_to(pcb)
+    (problem,) = excinfo.value.problems
+    assert "shorts an existing track on net '+3V3'" in problem
+
+
+def test_clearance_comes_from_the_board_rules(source, origin, tmp_path):
+    """A gap legal at KiCad's 0.2 mm default fails a stricter project rule."""
+    from kicad_tools.router.board_clearance_rules import BoardClearanceRules
+
+    ox, oy = origin
+    layout = _layout(origin)
+    # The LDO block's GND run at y=0 clears C1.1 (VIN) by 0.25 mm: fine at
+    # 0.2 mm, too close at 0.3 mm.
+    strict = BoardClearanceRules(class_clearance={"Default": 0.3})
+    with pytest.raises(LayoutApplyError) as excinfo:
+        KiCadPCBExporter(layout, net_map=NET_MAP, clearance_rules=strict).apply_to(
+            PCB.load(str(source))
+        )
+    assert any(
+        "0.250 mm from pad C1.1 on net 'VIN' (clearance 0.3 mm)" in p
+        for p in excinfo.value.problems
+    ), excinfo.value.problems
+
+    # The same rule read from a .kicad_pro beside the board.
+    board = tmp_path / "rules.kicad_pcb"
+    board.write_bytes(source.read_bytes())
+    board.with_suffix(".kicad_pro").write_text(
+        json.dumps({"net_settings": {"classes": [{"name": "Default", "clearance": 0.3}]}})
+    )
+    with pytest.raises(LayoutApplyError):
+        layout.apply_to_pcb(board, tmp_path / "never.kicad_pcb", net_map=NET_MAP)
+
+
+def test_stock_blocks_and_route_are_refused_not_shorted(source, origin, tmp_path):
+    """The stock LDOBlock routing and route()'s straight line short foreign pads."""
+    out = tmp_path / "never.kicad_pcb"
+    with pytest.raises(LayoutApplyError) as excinfo:
+        _stock_layout(origin).apply_to_pcb(source, out, net_map=NET_MAP)
+    problems = excinfo.value.problems
+    assert not out.exists()
+    # route() VOUT -> ANODE: a straight line across the LED block's pads.
+    assert any(
+        p.startswith("trace") and "(inter-block) on net" in p and "shorts pad R1." in p
+        for p in problems
+    ), problems
+    # LDOBlock: its GND traces cut through U1's VIN / +3V3 pads.
+    assert any("(block 'LDO_U1') on net 'GND'" in p and "shorts pad U1." in p for p in problems)
+    # The LEDBlock fix (#7022 review): its LED_MID trace no longer crosses D1.2;
+    # all that is wrong with it here is the inter-block line drawn over it.
+    led = [p for p in problems if p.split(" on net ")[0].endswith("(block 'LED_D1')")]
+    assert led and all("pad" not in p for p in led), led
 
 
 # ---------------------------------------------------------------------------
@@ -390,20 +607,43 @@ def _kicad_cli() -> Path | None:
     return find_kicad_cli()
 
 
-@pytest.mark.skipif(_kicad_cli() is None, reason="kicad-cli not installed")
-def test_kicad_cli_loads_the_output(applied, tmp_path):
-    _, _, out = applied
-    report = tmp_path / "drc.json"
-    # DRC violations are allowed (block pad geometry is approximate); this
-    # only shows KiCad parses and checks the board.
+def _drc_errors(board: Path, tmp_path: Path) -> Counter[str]:
+    """kicad-cli's error-severity DRC violations of ``board``, by type."""
+    report = tmp_path / f"{board.stem}.drc.json"
     result = subprocess.run(
-        [str(_kicad_cli()), "pcb", "drc", "--format", "json", "-o", str(report), str(out)],
+        [str(_kicad_cli()), "pcb", "drc", "--format", "json", "--severity-error",
+         "-o", str(report), str(board)],
         capture_output=True,
         text=True,
         check=False,
-    )
+    )  # fmt: skip
+    # A non-zero exit means kicad-cli did not check the board (#6724).
     assert result.returncode == 0, result.stderr
-    assert isinstance(json.loads(report.read_text()), dict)
+    data = json.loads(report.read_text())
+    return Counter(v["type"] for v in data["violations"] if v.get("severity") == "error")
+
+
+requires_kicad_cli = pytest.mark.skipif(_kicad_cli() is None, reason="kicad-cli not installed")
+
+
+@requires_kicad_cli
+def test_kicad_cli_drc_finds_no_new_errors(source, applied, tmp_path):
+    """The applied board has no error-severity DRC violation the source lacks."""
+    _, _, out = applied
+    before = _drc_errors(source, tmp_path)
+    after = _drc_errors(out, tmp_path)
+    assert after - before == Counter(), f"new DRC errors: {dict(after - before)}"
+
+
+@requires_kicad_cli
+def test_kicad_cli_drc_lenient_stock_layout_adds_no_errors(source, origin, tmp_path):
+    """Lenient mode drops the stock layout's shorts instead of writing them."""
+    out = tmp_path / "stock_lenient.kicad_pcb"
+    report = _stock_layout(origin).apply_to_pcb(source, out, net_map=NET_MAP, strict=False)
+    assert report.skipped
+    before = _drc_errors(source, tmp_path)
+    after = _drc_errors(out, tmp_path)
+    assert after - before == Counter(), f"new DRC errors: {dict(after - before)}"
 
 
 # ---------------------------------------------------------------------------
@@ -443,5 +683,9 @@ def test_guide_pcblayout_snippets_run(tmp_path, monkeypatch):
     exec(_guide_block("apply_to_pcb("), namespace)
     report = namespace["report"]
     assert report.moved == refs
-    assert report.segments_added == len(layout.export_traces())
+    # The stock blocks' copper shorts (#7062, #7064): the lenient snippet
+    # writes what is clean and lists the rest.
+    skipped_traces = sum(p.startswith("trace ") for p in report.skipped)
+    assert skipped_traces > 0
+    assert report.segments_added + skipped_traces == len(layout.export_traces())
     assert (tmp_path / "board_placed.kicad_pcb").exists()

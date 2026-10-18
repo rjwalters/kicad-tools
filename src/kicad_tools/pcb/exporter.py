@@ -32,6 +32,7 @@ from typing import TYPE_CHECKING, Any
 from .layout import PCBLayout
 
 if TYPE_CHECKING:
+    from kicad_tools.router.board_clearance_rules import BoardClearanceRules
     from kicad_tools.schema.pcb import PCB
 
 logger = logging.getLogger(__name__)
@@ -100,6 +101,16 @@ class KiCadPCBExporter:
     ``strict=False`` each offending item is skipped, logged as a warning and
     recorded in :attr:`LayoutApplyReport.skipped`.  No net is ever created.
 
+    Copper is also checked against the board's **real** pad geometry, at the
+    positions the placements are about to give the footprints: every trace
+    endpoint must land inside a pad, or on a track or via, of its own net,
+    and no trace or via may come closer than the board's clearance rule
+    (``.kicad_pro`` / ``.kicad_dru`` beside the board, else KiCad's 0.2 mm
+    default) to a pad, track or via on another net.  Copper that fails is a
+    strict-mode problem, or a skipped item in lenient mode -- the bridge never
+    writes a short or an open end it can see.  ``clearance_rules`` overrides
+    the rules read from the board's project files.
+
     Usage:
         exporter = KiCadPCBExporter(layout, net_map={"VOUT": "+3V3"})
         report = exporter.apply("board.kicad_pcb", "board_placed.kicad_pcb")
@@ -111,10 +122,12 @@ class KiCadPCBExporter:
         *,
         net_map: Mapping[str, str] | None = None,
         strict: bool = True,
+        clearance_rules: BoardClearanceRules | None = None,
     ):
         self.layout = layout
         self.net_map: dict[str, str] = dict(net_map or {})
         self.strict = strict
+        self.clearance_rules = clearance_rules
 
     # ------------------------------------------------------------------
     # Public API
@@ -220,6 +233,10 @@ class KiCadPCBExporter:
                 if len(problems) == before and board_net is not None:
                     via_items.append((via, board_net))
 
+        # -- validate copper geometry against the real board pads ---------
+        if segments or via_items:
+            segments, via_items = self._check_geometry(pcb, moves, segments, via_items, problems)
+
         if problems:
             if self.strict:
                 raise LayoutApplyError(problems)
@@ -263,6 +280,84 @@ class KiCadPCBExporter:
                 report.vias_added += 1
 
         return report
+
+    def _rules_for(self, pcb: PCB) -> BoardClearanceRules:
+        from kicad_tools.router.board_clearance_rules import BoardClearanceRules
+
+        if self.clearance_rules is not None:
+            return self.clearance_rules
+        if pcb.path is not None:
+            return BoardClearanceRules.from_board(pcb.path)
+        return BoardClearanceRules()
+
+    def _check_geometry(
+        self,
+        pcb: PCB,
+        moves: list[dict[str, Any]],
+        segments: list[tuple[dict[str, Any], str]],
+        via_items: list[tuple[dict[str, Any], str]],
+        problems: list[str],
+    ) -> tuple[list[tuple[dict[str, Any], str]], list[tuple[dict[str, Any], str]]]:
+        """Drop (and report) copper that would short or end in the air."""
+        from ._layout_copper import CopperItem, board_pads, check_copper, via_layers
+
+        ox, oy = pcb.board_origin
+        copper = [layer.name for layer in pcb.copper_layers]
+        pending = {
+            m["ref"]: (float(m["x"]) - ox, float(m["y"]) - oy, float(m["rotation"])) for m in moves
+        }
+        items: list[CopperItem] = []
+        for trace, board_net in segments:
+            sx, sy = trace["start"]
+            ex, ey = trace["end"]
+            items.append(
+                CopperItem(
+                    index=len(items),
+                    kind="trace",
+                    where=(
+                        f"{_fmt_xy(trace['start'])}->{_fmt_xy(trace['end'])}"
+                        f" ({_origin(trace['block_id'])})"
+                    ),
+                    net=board_net,
+                    layers=frozenset((trace["layer"],)),
+                    start=(float(sx) - ox, float(sy) - oy),
+                    end=(float(ex) - ox, float(ey) - oy),
+                    width=float(trace["width"]),
+                )
+            )
+        for via, board_net in via_items:
+            pos = (float(via["x"]) - ox, float(via["y"]) - oy)
+            items.append(
+                CopperItem(
+                    index=len(items),
+                    kind="via",
+                    where=f"at {_fmt_xy((via['x'], via['y']))} ({_origin(via['block_id'])})",
+                    net=board_net,
+                    layers=via_layers(via["layers"], copper),
+                    start=pos,
+                    end=pos,
+                    width=float(via["size"]),
+                )
+            )
+
+        check_copper(
+            pcb,
+            items,
+            board_pads(pcb, pending, copper),
+            self._rules_for(pcb),
+            copper,
+            (ox, oy),
+        )
+        for item in items:
+            if item.reasons:
+                problems.append(
+                    f"{item.kind} {item.where} on net {item.net!r} " + "; ".join(item.reasons)
+                )
+        n = len(segments)
+        return (
+            [seg for seg, item in zip(segments, items[:n], strict=True) if not item.reasons],
+            [via for via, item in zip(via_items, items[n:], strict=True) if not item.reasons],
+        )
 
     def apply(
         self,

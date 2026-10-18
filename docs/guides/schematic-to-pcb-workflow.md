@@ -392,16 +392,33 @@ report = layout.apply_to_pcb(
     "board.kicad_pcb",
     "board_placed.kicad_pcb",
     net_map={"VOUT": "+3V3", "VDD": "+3V3", "VIN": "/VIN"},
+    strict=False,  # skip (and report) copper that cannot be applied
 )
 print(f"moved {len(report.moved)} footprints, added {report.segments_added} segments")
+for problem in report.skipped:
+    print("skipped:", problem)
 ```
 
-A ref missing from the board, a ref used by two blocks, a route without a
-`net=`, a net the board does not have, or a layer that is not one of the
-board's copper layers raises one `LayoutApplyError` that lists every problem,
-and nothing is written. Pass `strict=False` to skip those items instead. Each
-skipped item is logged as a warning and listed in `report.skipped`. Applying
-the same layout again adds no duplicate copper.
+By default (`strict=True`) the bridge raises one `LayoutApplyError` that
+lists every problem, and nothing is written. These are the problems it
+checks for:
+
+- a ref missing from the board, or a ref used by two blocks;
+- a route without a `net=`, or a net the board does not have;
+- a layer that is not one of the board's copper layers;
+- copper that would short or dangle. The check measures every new trace and
+  via against the board's real pad shapes, at their new positions. Each trace
+  end must land in a pad, or on a track or via, of its own net. Nothing may
+  come closer than the board's clearance rule to a pad, track or via on
+  another net. The rule comes from the `.kicad_pro` / `.kicad_dru` beside the
+  board, or KiCad's 0.2 mm default when there is none.
+
+With `strict=False` each offending item is skipped instead, logged as a
+warning and listed in `report.skipped`. That is why the snippet above uses
+it. The stock `LDOBlock` / `MCUBlock` internal routing and `route()`'s
+straight port-to-port line still cross foreign pads (#7062, #7064), so in
+strict mode this layout is refused. Applying the same layout again adds no
+duplicate copper.
 
 ### Schematic Reading vs Writing
 

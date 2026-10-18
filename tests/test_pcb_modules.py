@@ -582,6 +582,7 @@ class TestKiCadPCBExporter:
         pcb = PCB.create(width=40, height=30)
         pcb.add_footprint_from_file(lib / "R_0603_1608Metric.kicad_mod", "U1", 5, 5)
         pcb.add_net("GND")
+        assert pcb.assign_net_to_footprint_pad("U1", "1", "GND")
         return pcb
 
     def test_exporter_creation(self):
@@ -618,18 +619,25 @@ class TestKiCadPCBExporter:
         layout = PCBLayout("test")
         block = PCBBlock("B1")
         block.add_component("U1", "R_0603_1608Metric", 0, 0)
-        block.add_trace((0, 0), (2, 0), net="GROUND")
+        # From the GND pad 1 (at -0.775) outwards, away from the unnetted pad 2,
+        # to a GND via; then a stub from that trace's midpoint to a second via.
+        block.add_trace((-0.775, 0), (-2.775, 0), net="GROUND")
+        block.add_via(-2.775, 0, net="GROUND")
+        block.add_trace((-1.775, 0), (-1.775, -2), net="GROUND")
+        block.add_via(-1.775, -2, net="GROUND")
         block.place(ox + 10, oy + 10)
         layout.add_block(block)
 
         report = KiCadPCBExporter(layout, net_map={"GROUND": "GND"}).apply_to(pcb)
 
         assert report.moved == ["U1"]
-        assert report.segments_added == 1
+        assert report.segments_added == 2
+        assert report.vias_added == 2
+        assert report.skipped == []
         assert pcb.get_footprint("U1").position == pytest.approx((10, 10))
-        (seg,) = pcb.segments
-        assert seg.start == pytest.approx((10, 10))
-        assert seg.end == pytest.approx((12, 10))
+        seg = pcb.segments[0]
+        assert seg.start == pytest.approx((9.225, 10))
+        assert seg.end == pytest.approx((7.225, 10))
         assert seg.net_number == pcb.get_net_by_name("GND").number
         assert dict(pcb.nets) == nets_before
 

@@ -80,19 +80,22 @@ FOOTPRINT_PADS: dict[str, dict[str, tuple[float, float]]] = {
         "1": (-1.0, 0),
         "2": (1.0, 0),
     },
-    # SOT-23 (3-pin, e.g., transistor)
+    # SOT-23 (3-pin, e.g., transistor) -- KiCad 10 Package_TO_SOT_SMD.pretty:
+    # pins 1/2 down the left side, pin 3 on the right (Issue #7022 review;
+    # the old table was this one rotated 90 degrees).
     "Package_TO_SOT_SMD:SOT-23": {
-        "1": (-0.95, 1.1),
-        "2": (0.95, 1.1),
-        "3": (0, -1.1),
+        "1": (-0.9375, -0.95),
+        "2": (-0.9375, 0.95),
+        "3": (0.9375, 0),
     },
-    # SOT-23-5 (5-pin, e.g., LDO)
+    # SOT-23-5 (5-pin, e.g., LDO) -- KiCad 10 Package_TO_SOT_SMD.pretty:
+    # pins 1-3 down the left side, 4 bottom-right, 5 top-right.
     "Package_TO_SOT_SMD:SOT-23-5": {
-        "1": (-0.95, 1.1),
-        "2": (0, 1.1),
-        "3": (0.95, 1.1),
-        "4": (0.95, -1.1),
-        "5": (-0.95, -1.1),
+        "1": (-1.1375, -0.95),
+        "2": (-1.1375, 0),
+        "3": (-1.1375, 0.95),
+        "4": (1.1375, 0.95),
+        "5": (1.1375, -0.95),
     },
     # TSSOP-20 (STM32C011)
     "Package_SO:TSSOP-20_4.4x6.5mm_P0.65mm": {
