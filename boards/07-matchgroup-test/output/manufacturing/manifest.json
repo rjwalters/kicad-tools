@@ -29,7 +29,7 @@
       "size": 2404
     },
     "design-source.zip": {
-      "sha256": "9c7296a1b029edb7add5f95ae926d7100e4dad9a0539797f2f09de2470689b60",
+      "sha256": "b6772e784f7b47b270d39629e0062389a661e824d121fb1c60e991bd58469fab",
       "size": 1091224
     },
     "engineering/README.md": {
@@ -229,11 +229,11 @@
       "size": 518
     },
     "native-drc.json": {
-      "sha256": "6512287532359c484627a78b940203944c0293a50c2cf3314fcdbe6dacba832e",
-      "size": 1235
+      "sha256": "6279412801df1ee897bb906445b6a6688bf7052a9119798fb61fc8157fc9b1ca",
+      "size": 1214
     },
     "native-erc.json": {
-      "sha256": "93857ab149854d815be5930d64ecf3ce3d7bb6293019e036c8dc2be8e77f585a",
+      "sha256": "cdf3ea5bcd414e4341847eec9cb090ecee22408d41c07c73399da0b9cee03da8",
       "size": 988
     },
     "procurement-review.md": {
