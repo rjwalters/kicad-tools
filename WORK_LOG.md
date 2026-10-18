@@ -15,6 +15,19 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-18
 
+- **Issue #7323** (closed): known_issues follow-ups: refresher resolve flags, orphaned known-issues.json detection, re-pin board 03 after #7306 (#7316 follow-up)
+- **PR #7324**: fix(board03): re-size USB diff pair to 90 ohm and declare target_diff_impedance
+- **Issue #7250** (closed): kct check never compares project.kct requirements to the routed board, and records diff-pair impedance as checked without evaluating it
+- **Issue #7294** (closed): board 03: re-size USB diff pairs to 90 ohm and declare target_diff_impedance (#7250 PR-D)
+- **PR #7341**: fix: refresh_readiness writes the staged DRC report and records report_sources
+- **PR #7338**: fix: grade coupled-microstrip gap panels from strip edge to remove finite-thickness bias
+- **Issue #7164** (closed): coupled_microstrip BEM finite-thickness reads 0.5-2.5% high vs field solve
+- **PR #7334**: fix(boards): derive board 05 CPL row check from placed parts; refresh 04/05 readiness
+- **Issue #7333** (closed): main CI red (remaining): board 05 package.py asserts 36 CPL rows after #7242 THT; boards 04/05 readiness stale after #7310
+- **PR #7285**: fix: bind readiness-fallback reports to producing PCB and hash full schematic hierarchy
+- **Issue #7277** (closed): Report binding: readiness.json fallback accepts stale reports after re-run; ERC binding ignores sub-sheets (#7267 follow-up)
+- **PR #7331**: fix(board07): size the DQS pair like MIPI/HDMI and gate re-route reach
+- **Issue #7319** (closed): Board 07 fixture: #7163 field solve narrows the synthesized DQS pair to 0.175 mm, dropping DQ0 (30/31 to 29/31) and tripling Match-Group gate time
 - **PR #7328**: fix(readiness): refresher known-issue flags and orphaned known-issues.json detection
 - **PR #7326**: docs(ci): record measured gap behind Board 06 fixture impedance cap
 - **PR #7317**: fix(boards): re-fill boards 00/01/04 under the thermal-spoke ladder
