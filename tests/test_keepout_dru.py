@@ -354,20 +354,31 @@ def test_native_drc_flags_track_through_keepout_after_emit(tmp_path):
 
 
 def test_native_drc_baseline_without_emitted_rule(tmp_path):
-    """Pins the KiCad gap this issue works around: no rule, no finding.
+    """Pins native keepout behaviour with NO emitted rule, per kicad-cli version.
 
-    Only asserted on 10.0.1 (the measured version); a KiCad that restores
-    the implicit keepout rule is allowed to report it on its own.
+    * 10.0.1 (local gate install): the #6039 gap -- no rule, no finding.
+    * ``PINNED_KICAD_VERSION`` (10.0.6, CI): the gap appears closed upstream;
+      native DRC reports the keepout itself as one ``items_not_allowed`` error
+      on the crossing track.  Whether the emitted ``A.intersectsArea`` rule
+      now double-reports or is still needed is a follow-up question (Issue
+      #7193); product code is deliberately unchanged here.
     """
-    board = _board(tmp_path / "cross.kicad_pcb")
-    findings = _native_not_allowed(board)
+    from kicad_tools.cli.kicad_toolchain import PINNED_KICAD_VERSION
     from kicad_tools.manufacturers.project_generator import _installed_kicad_cli_version
 
+    board = _board(tmp_path / "cross.kicad_pcb")
+    findings = _native_not_allowed(board)
     _installed_kicad_cli_version.cache_clear()
     version = _installed_kicad_cli_version() or ""
-    if not version.startswith("10.0.1"):
-        pytest.skip(f"baseline only pinned on kicad-cli 10.0.1 (have {version!r})")
-    assert findings == []
+    if version.startswith("10.0.1"):
+        assert findings == []
+    elif version.startswith(PINNED_KICAD_VERSION):
+        assert len(findings) == 1
+        assert any("Track [/SIG] on F.Cu" in i["description"] for i in findings[0]["items"])
+    else:
+        pytest.skip(
+            f"baseline only pinned on kicad-cli 10.0.1 / {PINNED_KICAD_VERSION} (have {version!r})"
+        )
 
 
 def test_native_drc_layer_scoped_area_ignores_other_layer(tmp_path):
