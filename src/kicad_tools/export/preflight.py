@@ -120,10 +120,13 @@ def report_source_mismatch(
 # ---------------------------------------------------------------------------
 
 # KiCad chip lib ids carry imperial and metric codes: ``R_0402_1005Metric``.
-_CHIP_METRIC_RE = re.compile(r"_(\d{4,5})_(\d{4})Metric", re.IGNORECASE)
+# The imperial code is 4-6 digits so ``R_008004_0201Metric`` (008004) parses.
+_CHIP_METRIC_RE = re.compile(r"_(\d{4,6})_(\d{4})Metric", re.IGNORECASE)
 # Pitch token in KiCad lib ids: ``LQFP-48_7x7mm_P0.5mm``.
 _PITCH_RE = re.compile(r"_P(\d+(?:\.\d+)?)mm", re.IGNORECASE)
-_BGA_RE = re.compile(r"BGA|CSP", re.IGNORECASE)
+# BGA-style packages: BGA, WLCSP and bare CSP tokens (``CSP-BGA``).  LFCSP is a
+# leadframe (QFN-like) package, so a CSP preceded by a letter does not match.
+_BGA_RE = re.compile(r"BGA|WLCSP|(?<![A-Za-z])CSP", re.IGNORECASE)
 
 # Imperial chip code -> body length in mm (the leading digits of the metric
 # code: 0402 imperial == 1005 metric == 1.0 mm long).

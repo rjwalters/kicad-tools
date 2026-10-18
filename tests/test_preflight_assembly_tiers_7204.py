@@ -180,6 +180,21 @@ class TestRequirementParsing:
         )
         assert req.label == "0402"
 
+    def test_chip_package_008004(self):
+        (req,) = _requirements_for_footprint("C1", "Capacitor_SMD:C_008004_0201Metric", ())
+        assert req.kind == "package"
+        assert req.label == "008004"
+        assert req.value == pytest.approx(0.2)
+
+    def test_lfcsp_is_ic_pitch(self):
+        (req,) = _requirements_for_footprint("U1", "Package_CSP:LFCSP-16-1EP_3x3mm_P0.5mm", ())
+        assert (req.kind, req.value) == ("ic_pitch", 0.5)
+
+    def test_wlcsp_and_csp_bga_are_bga_pitch(self):
+        (a,) = _requirements_for_footprint("U1", "Package_CSP:WLCSP-20_P0.4mm", ())
+        (b,) = _requirements_for_footprint("U2", "Package_BGA:CSP-BGA-49_P0.4mm", ())
+        assert a.kind == b.kind == "bga_pitch"
+
     def test_ic_pitch(self):
         (req,) = _requirements_for_footprint("U1", "Package_QFP:LQFP-48_7x7mm_P0.5mm", ())
         assert (req.kind, req.value, req.measured) == ("ic_pitch", 0.5, False)
@@ -310,6 +325,24 @@ class TestAssemblyPackageLimits:
     def test_01005_warns_not_fails(self, tmp_path):
         _, _, r = _run(tmp_path, [_fp("C1", "Capacitor_SMD:C_01005_0402Metric")])
         assert r["assembly_package_limits"].status == "WARN"
+
+    def test_008004_fails_every_tier(self, tmp_path):
+        fps = [_fp("C1", "Capacitor_SMD:C_008004_0201Metric")]
+        for tier in ("auto", "economic", "standard"):
+            _, results, r = _run(tmp_path, fps, tier=tier)
+            assert r["assembly_package_limits"].status == "FAIL"
+            assert "C1 package 008004" in r["assembly_package_limits"].details
+            assert PreflightChecker.has_failures(results)
+
+    def test_008004_dnp_not_judged(self, tmp_path):
+        fps = [_fp("C1", "Capacitor_SMD:C_008004_0201Metric", attr="smd dnp")]
+        _, _, r = _run(tmp_path, fps)
+        assert r["assembly_package_limits"].status == "OK"
+
+    def test_lfcsp_04_pitch_not_judged_as_bga(self, tmp_path):
+        _, _, r = _run(tmp_path, [_fp("U1", "Package_CSP:LFCSP-16_P0.4mm")])
+        res = r["assembly_package_limits"]
+        assert "BGA pitch" not in (res.details or "")
 
     def test_ic_pitch_035_warns(self, tmp_path):
         _, _, r = _run(tmp_path, [_fp("U1", "Package_QFP:LQFP-100_14x14mm_P0.35mm")])

@@ -1088,8 +1088,10 @@ class ReportDataCollector:
             if ref.startswith("D") or re.search(r"(CP_Elec|Polarized|LED)", fp_name, re.IGNORECASE):
                 polarized_count += 1
 
-            # Bottom-side placements (double-sided assembly), same CPL filter
-            # as the export: position-file-excluded and DNP parts are not placed.
+            # Bottom-side placements (double-sided assembly).  Applies the CPL
+            # filter's position-file-excluded and DNP rules but has no fab
+            # context, so unlike the JLCPCB CPL export it still counts
+            # through-hole parts; the figure is advisory.
             if (
                 getattr(fp, "layer", "") == "B.Cu"
                 and not getattr(fp, "exclude_from_pos_files", False)
