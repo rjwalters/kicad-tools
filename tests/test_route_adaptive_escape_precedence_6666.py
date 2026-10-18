@@ -239,20 +239,19 @@ def test_preview_phase1_reports_the_hard_fail(monkeypatch):
 @pytest.mark.parametrize("strategy", ["uniform", "adaptive"])
 def test_grid_strategy_reaches_route_cmd_through_kct_route(strategy):
     """``kct route ... --grid-strategy X`` lands as ``args.grid_strategy == X``
-    on the inner ``route_cmd`` parser (it used to die with "unrecognized
+    on the ``route_cmd`` parser (it used to die with "unrecognized
     arguments" because only ``route_cmd`` declared it)."""
-    from kicad_tools.cli.commands.routing import run_route_command
-    from kicad_tools.cli.parser import create_parser
+    from tests.route_cli import kct_route
 
-    outer = create_parser().parse_args(
-        ["route", "board.kicad_pcb", "--grid-strategy", strategy, "--dry-run"]
-    )
-    assert outer.grid_strategy == strategy
-    with patch("kicad_tools.cli.route_cmd.main", return_value=0) as mock_main:
-        run_route_command(outer)
-    sub_argv = mock_main.call_args[0][0]
-    if strategy == "adaptive":
-        # Default: flag-off argv stays byte-identical.
-        assert "--grid-strategy" not in sub_argv
-    inner = route_cmd._route_parser().parse_args(sub_argv)
-    assert inner.grid_strategy == strategy
+    argv = ["board.kicad_pcb", "--grid-strategy", strategy, "--dry-run"]
+    forwarded, args = kct_route(argv)
+    assert forwarded == argv  # passed through verbatim (issue #7017)
+    assert args.grid_strategy == strategy
+
+
+def test_unset_grid_strategy_is_not_invented():
+    from tests.route_cli import kct_route
+
+    forwarded, args = kct_route(["board.kicad_pcb", "--dry-run"])
+    assert "--grid-strategy" not in forwarded
+    assert args.grid_strategy == "adaptive"

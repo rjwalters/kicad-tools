@@ -22,6 +22,7 @@ from unittest.mock import patch
 
 import pytest
 
+from kicad_tools.cli import main as cli_main
 from kicad_tools.router.checkpoint import (
     BestCheckpointWriter,
     RouteScore,
@@ -30,6 +31,7 @@ from kicad_tools.router.checkpoint import (
     sidecar_path,
 )
 from kicad_tools.router.preserve_existing import fully_connected_nets
+from tests.route_cli import route_args
 
 REPO = Path(__file__).resolve().parents[1]
 VD_DIR = REPO / "boards" / "01-voltage-divider" / "output"
@@ -479,9 +481,7 @@ def test_flags_declared_on_route_and_route_auto():
     from kicad_tools.cli.parser import create_parser
 
     parser = create_parser()
-    ns = parser.parse_args(
-        ["route", "b.kicad_pcb", "--checkpoint", "c.kicad_pcb", "--resume", "r.kicad_pcb"]
-    )
+    ns = route_args(["b.kicad_pcb", "--checkpoint", "c.kicad_pcb", "--resume", "r.kicad_pcb"])
     assert ns.checkpoint == "c.kicad_pcb" and ns.resume == "r.kicad_pcb"
     ns = parser.parse_args(
         [
@@ -532,11 +532,9 @@ def test_resume_baseline_makes_route_scores_like_for_like():
 @pytest.mark.parametrize("flag", ["--checkpoint", "--resume"])
 def test_route_shim_forwards_flag(flag, monkeypatch):
     from kicad_tools.cli import route_cmd
-    from kicad_tools.cli.commands import routing
-    from kicad_tools.cli.parser import create_parser
 
     seen: list[list[str]] = []
     monkeypatch.setattr(route_cmd, "main", lambda argv: seen.append(argv) or 0)
-    ns = create_parser().parse_args(["route", "b.kicad_pcb", flag, "x.kicad_pcb"])
-    routing.run_route_command(ns)
+    route_args(["b.kicad_pcb", flag, "x.kicad_pcb"])
+    cli_main(["route", "b.kicad_pcb", flag, "x.kicad_pcb"])
     assert seen and flag in seen[0] and "x.kicad_pcb" in seen[0]

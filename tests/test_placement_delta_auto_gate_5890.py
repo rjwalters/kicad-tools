@@ -28,9 +28,11 @@ import argparse
 
 import pytest
 
+from kicad_tools.cli import main as cli_main
 from kicad_tools.cli import route_cmd
 from kicad_tools.router.core import Autorouter
 from kicad_tools.router.region_graph import RegionGraph
+from tests.route_cli import route_args
 
 
 @pytest.fixture
@@ -185,20 +187,15 @@ class TestRecordedDeltaArtifact:
 
 class TestTriStateFlag:
     def test_absence_of_both_flags_is_none_not_false(self):
-        from kicad_tools.cli.parser import create_parser
-
-        args = create_parser().parse_args(["route", "board.kicad_pcb"])
+        args = route_args(["board.kicad_pcb"])
         assert args.placement_delta_feedback is None, (
             "the default must be the AUTO sentinel; False would mean "
             "'explicitly off' and defeat the #5890 gate"
         )
 
     def test_explicit_flags_resolve_to_true_and_false(self):
-        from kicad_tools.cli.parser import create_parser
-
-        parser = create_parser()
-        on = parser.parse_args(["route", "b.kicad_pcb", "--placement-delta-feedback"])
-        off = parser.parse_args(["route", "b.kicad_pcb", "--no-placement-delta-feedback"])
+        on = route_args(["b.kicad_pcb", "--placement-delta-feedback"])
+        off = route_args(["b.kicad_pcb", "--no-placement-delta-feedback"])
         assert on.placement_delta_feedback is True
         assert off.placement_delta_feedback is False
 
@@ -271,25 +268,23 @@ class TestDecisionHelper:
 class TestSubcommandForwarding:
     """``kct route``'s wrapper forwards an EXPLICIT choice, and only an explicit one.
 
-    The wrapper (``cli.commands.routing.run_route_command``) re-serializes its
-    namespace into an argv for ``route_cmd.main``.  Before #5890 it forwarded
-    on truthiness, which would collapse the new AUTO sentinel into "off" --
-    turning the whole gate off for every ``kct route`` invocation.
+    The old wrapper re-serialized its namespace into an argv for
+    ``route_cmd.main``; before #5890 it forwarded on truthiness, which would
+    collapse the AUTO sentinel into "off".  Since #7017 ``kct route`` passes
+    argv through verbatim, so an unset flag stays AUTO by construction.
     """
 
     @staticmethod
     def _forwarded_argv(monkeypatch, tmp_path, *extra: str) -> list[str]:
         from kicad_tools.cli import route_cmd as route_cmd_module
-        from kicad_tools.cli.commands.routing import run_route_command
-        from kicad_tools.cli.parser import create_parser
 
         pcb = tmp_path / "b.kicad_pcb"
         pcb.write_text("(kicad_pcb)")
-        args = create_parser().parse_args(["route", str(pcb), *extra])
+        route_args([str(pcb), *extra])
 
         captured: list[list[str]] = []
         monkeypatch.setattr(route_cmd_module, "main", lambda argv: captured.append(argv) or 0)
-        run_route_command(args)
+        cli_main(["route", str(pcb), *extra])
         assert captured, "the wrapper never reached route_cmd.main"
         return captured[0]
 

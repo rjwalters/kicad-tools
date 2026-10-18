@@ -47,12 +47,13 @@ from kicad_tools.config import Config
 from kicad_tools.exceptions import KiCadToolsError
 from kicad_tools.units import get_unit_formatter, set_current_formatter
 
-from .parser import create_parser
+from .parser import PASSTHROUGH_SUBCOMMANDS, create_parser, passthrough_main
 from .utils import format_error, print_error
 
 __all__ = [
     "main",
     "normalize_argv",
+    "split_passthrough_argv",
     "symbols_main",
     "nets_main",
     "erc_main",
@@ -80,6 +81,56 @@ def normalize_argv(argv: list[str]) -> list[str]:
     return argv
 
 
+# Top-level options (``create_parser``) that may precede a subcommand.  Used
+# only to find where a passthrough subcommand starts; the prefix itself is
+# still parsed (and validated) by the real top-level parser.
+_GLOBAL_FLAGS = ("--verbose", "--quiet")
+_GLOBAL_VALUE_FLAGS = ("--units",)
+
+
+def _global_flag_arity(token: str) -> int | None:
+    """Tokens a leading global option consumes, or ``None`` if *token* is not one."""
+    if token.startswith("-") and not token.startswith("--"):
+        # Short options: only ``-q`` exists, possibly repeated (``-qq``).
+        return 1 if len(token) > 1 and set(token[1:]) == {"q"} else None
+    name, eq, _ = token.partition("=")
+    if len(name) < 3:
+        return None
+    # argparse accepts unique prefixes (``--verb``); mirror that, counting
+    # ``--version``/``--help`` so an ambiguous prefix is left to argparse.
+    matches = [
+        f
+        for f in (*_GLOBAL_FLAGS, *_GLOBAL_VALUE_FLAGS, "--version", "--help")
+        if f.startswith(name)
+    ]
+    if len(matches) != 1 or matches[0] in ("--version", "--help"):
+        return None
+    if matches[0] in _GLOBAL_VALUE_FLAGS:
+        return 1 if eq else 2
+    return None if eq else 1
+
+
+def split_passthrough_argv(argv: list[str]) -> tuple[list[str], str, list[str]] | None:
+    """Split ``kct`` argv aimed at a passthrough subcommand (issue #7017).
+
+    Returns ``(global_prefix, subcommand, sub_argv)`` when *argv* is leading
+    global options followed by a :data:`~.parser.PASSTHROUGH_SUBCOMMANDS`
+    name (``route``), else ``None``.  ``sub_argv`` is everything after the
+    subcommand, untouched, so the owning parser sees exactly what was typed.
+    A ``nargs=REMAINDER`` subparser cannot do this: it lets the top-level
+    parser steal leading ``--flag value`` pairs and ``--help``.
+    """
+    i = 0
+    while i < len(argv):
+        arity = _global_flag_arity(argv[i])
+        if arity is None:
+            break
+        i += arity
+    if i < len(argv) and argv[i] in PASSTHROUGH_SUBCOMMANDS:
+        return argv[:i], argv[i], argv[i + 1 :]
+    return None
+
+
 def main(argv: list[str] | None = None) -> int:
     """Main entry point for kicad-tools CLI."""
     parser = create_parser()
@@ -92,9 +143,19 @@ def main(argv: list[str] | None = None) -> int:
 
         return generate_main(argv[2:]) or 0
 
-    args = parser.parse_args(normalize_argv(argv))
+    # Passthrough subcommands (``kct route``) own their whole argv: parse only
+    # the leading global options here and hand the rest over verbatim.
+    passthrough = split_passthrough_argv(argv)
+    if passthrough is not None:
+        prefix, command, sub_argv = passthrough
+        args = parser.parse_args(prefix)
+        if args.global_quiet and not ({"-q", "--quiet"} & set(sub_argv)):
+            sub_argv = [*sub_argv, "--quiet"]
+    else:
+        args = parser.parse_args(normalize_argv(argv))
+        command = args.command
 
-    if not args.command:
+    if not command:
         parser.print_help()
         return 0
 
@@ -108,6 +169,8 @@ def main(argv: list[str] | None = None) -> int:
     set_current_formatter(formatter)
 
     try:
+        if passthrough is not None:
+            return passthrough_main(command)(sub_argv)
         return _dispatch_command(args)
     except KeyboardInterrupt:
         print("\nInterrupted", file=sys.stderr)
@@ -332,11 +395,6 @@ def _dispatch_command(args) -> int:
 
     elif args.command == "stitch":
         return _run_stitch_command(args)
-
-    elif args.command == "route":
-        from .commands.routing import run_route_command
-
-        return run_route_command(args)
 
     elif args.command == "route-auto":
         from .commands.routing import run_route_auto_command

@@ -1,24 +1,19 @@
-"""Explicit ``--auto-layers`` must survive the outer ``kct route`` dispatcher.
+"""Explicit ``--auto-layers`` must survive ``kct route`` (issues #4502, #7017).
 
-Regression tests for issue #4502.  The outer parser (``cli/parser.py``)
-previously declared ``--auto-layers`` as a ``BooleanOptionalAction`` with
-``default=True``, which collapsed "user explicitly typed ``--auto-layers``"
-and "user typed nothing" into the same ``args.auto_layers is True``.
-``run_route_command`` therefore forwarded only ``--no-auto-layers``, so the
-inner ``route_cmd`` argv-sniffing sites --
-``_apply_complete_mode_defaults`` (which disables auto-layers under
-``--complete`` "unless you pass ``--auto-layers``") and the
-``--auto-layers``/``--layers`` conflict check -- could never observe the
-user's explicit override.
+Issue #4502: the old outer parser collapsed "user explicitly typed
+``--auto-layers``" and "user typed nothing" into the same ``True``, so the
+forwarding shim dropped the explicit token and the inner ``route_cmd``
+argv-sniffing sites -- ``_apply_complete_mode_defaults`` (which disables
+auto-layers under ``--complete`` "unless you pass ``--auto-layers``") and the
+``--auto-layers``/``--layers`` conflict check -- could never observe it.
 
-These tests drive the **real** dispatcher (``create_parser()`` ->
-``run_route_command()`` -> mocked ``route_cmd.main``) rather than a
-hand-built ``SimpleNamespace``, which is precisely why the existing unit
-tests in ``tests/test_layer_escalation.py`` did not catch the bug.
+Since issue #7017 ``kct route`` hands its argv to ``route_cmd.main``
+verbatim.  These tests drive the **real** ``kct`` entry point (with
+``route_cmd.main`` stubbed) and check that the explicit tokens arrive and
+that the inner sites act on them.
 """
 
 from types import SimpleNamespace
-from unittest.mock import patch
 
 import pytest
 
@@ -32,16 +27,12 @@ def pcb_file(tmp_path):
 
 
 def _dispatch(argv):
-    """Parse ``argv`` with the real outer parser and capture the inner argv."""
-    from kicad_tools.cli.commands.routing import run_route_command
-    from kicad_tools.cli.parser import create_parser
+    """Run ``kct <argv>`` in-process; return (route namespace, route_cmd argv)."""
+    from tests.route_cli import kct_route
 
-    parser = create_parser()
-    args = parser.parse_args(argv)
-    with patch("kicad_tools.cli.route_cmd.main") as mock_main:
-        mock_main.return_value = 0
-        run_route_command(args)
-        return args, mock_main.call_args[0][0]
+    assert argv[0] == "route"
+    forwarded, args = kct_route(argv[1:])
+    return args, forwarded
 
 
 @pytest.mark.parametrize("flag", [None, "--auto-pour", "--no-auto-pour"])
@@ -57,12 +48,11 @@ def test_auto_pour_control_survives_dispatch(pcb_file, flag):
 
 
 class TestExplicitAutoLayersForwarding:
-    """The outer parser's tri-state value reaches the inner argv intact."""
+    """The typed ``--auto-layers`` / ``--no-auto-layers`` token reaches route_cmd."""
 
-    def test_explicit_auto_layers_survives_outer_dispatcher(self, pcb_file):
-        """Issue #4502: an explicit --auto-layers on the outer ``kct route``
-        parser must reach the inner route_cmd.main() argv, not collapse into
-        the default and get silently dropped."""
+    def test_explicit_auto_layers_survives_kct_route(self, pcb_file):
+        """Issue #4502: an explicit --auto-layers must reach route_cmd.main()'s
+        argv, not collapse into the default and get silently dropped."""
         args, sub_argv = _dispatch(
             ["route", str(pcb_file), "--complete", "--auto-layers", "--dry-run", "--quiet"]
         )
@@ -71,12 +61,12 @@ class TestExplicitAutoLayersForwarding:
         assert "--auto-layers" in sub_argv
         assert "--no-auto-layers" not in sub_argv
 
-    def test_unset_auto_layers_is_none_and_forwards_nothing(self, pcb_file):
-        """No flag => tri-state ``None`` and nothing forwarded, so the inner
-        parser's own ``default=True`` still supplies the effective default."""
+    def test_unset_auto_layers_forwards_nothing(self, pcb_file):
+        """No flag => nothing forwarded, so the route parser's own
+        ``default=True`` supplies the effective default."""
         args, sub_argv = _dispatch(["route", str(pcb_file), "--dry-run", "--quiet"])
 
-        assert args.auto_layers is None
+        assert args.auto_layers is True
         assert "--auto-layers" not in sub_argv
         assert "--no-auto-layers" not in sub_argv
 
@@ -148,7 +138,7 @@ class TestCompleteModeRespectsExplicitOverride:
         assert "disabling --auto-layers" not in capsys.readouterr().out
 
 
-class TestAutoLayersLayersConflictThroughDispatcher:
+class TestAutoLayersLayersConflictThroughKctRoute:
     """The ``--auto-layers`` + ``--layers`` conflict check now fires (#4502)."""
 
     def test_conflict_tokens_reach_inner_argv(self, pcb_file):

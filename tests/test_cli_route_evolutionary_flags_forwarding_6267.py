@@ -1,13 +1,13 @@
 """``kct route --pop-size/--generations`` reach the inner route command (#6267).
 
-The outer parser accepted both flags but ``cli/commands/routing.py`` never
-forwarded them, so every ``kct route --strategy evolutionary`` ran the default
+The old outer parser accepted both flags but its forwarding shim never passed
+them on, so every ``kct route --strategy evolutionary`` ran the default
 20 x 10 GA -- 200 full ``route_all()`` evaluations -- no matter what the user
 (or a test trying to keep the GA tiny, #5901) asked for.  That is why the
-"tiny GA" evolutionary CLI tests still blew the 30 s route deadline.
+"tiny GA" evolutionary CLI tests still blew the 30 s route deadline.  Since
+issue #7017 ``kct route`` hands its argv to ``route_cmd.main`` verbatim; these
+tests drive the real ``kct`` entry point with the router stubbed.
 """
-
-from unittest.mock import patch
 
 import pytest
 
@@ -20,14 +20,11 @@ def pcb_file(tmp_path):
 
 
 def _dispatch(argv):
-    from kicad_tools.cli.commands.routing import run_route_command
-    from kicad_tools.cli.parser import create_parser
+    from tests.route_cli import kct_route
 
-    args = create_parser().parse_args(argv)
-    with patch("kicad_tools.cli.route_cmd.main") as mock_main:
-        mock_main.return_value = 0
-        run_route_command(args)
-        return mock_main.call_args[0][0]
+    assert argv[0] == "route"
+    forwarded, _ = kct_route(argv[1:])
+    return forwarded
 
 
 def test_pop_size_and_generations_are_forwarded(pcb_file):
