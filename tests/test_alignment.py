@@ -534,3 +534,32 @@ class TestAlignCLIInvalidPair:
         ]  # fmt: skip
         assert main(argv) != 0
         assert not out.exists()
+
+
+class TestCLICommands:
+    """Tests for CLI command integration."""
+
+    def test_snap_command_help(self):
+        """Test snap command help."""
+        from kicad_tools.cli.placement_cmd import main
+
+        # argparse exits with SystemExit(0) on --help
+        with pytest.raises(SystemExit) as exc_info:
+            main(["snap", "--help"])
+        assert exc_info.value.code == 0
+
+    def test_align_command_help(self):
+        """Test align command help."""
+        from kicad_tools.cli.placement_cmd import main
+
+        with pytest.raises(SystemExit) as exc_info:
+            main(["align", "--help"])
+        assert exc_info.value.code == 0
+
+    def test_distribute_command_help(self):
+        """Test distribute command help."""
+        from kicad_tools.cli.placement_cmd import main
+
+        with pytest.raises(SystemExit) as exc_info:
+            main(["distribute", "--help"])
+        assert exc_info.value.code == 0
