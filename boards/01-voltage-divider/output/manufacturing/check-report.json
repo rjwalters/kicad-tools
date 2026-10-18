@@ -4,10 +4,10 @@
   "layers": 2,
   "summary": {
     "errors": 0,
-    "warnings": 0,
+    "warnings": 1,
     "infos": 2,
     "waived": 0,
-    "rules_checked": 57,
+    "rules_checked": 58,
     "rules_checked_by_rule": {
       "connectivity": 1,
       "copper_sliver": 1,
@@ -28,7 +28,7 @@
     },
     "passed": true,
     "stale_waivers": 0,
-    "coverage_checked": 29,
+    "coverage_checked": 30,
     "coverage_skipped": 10,
     "coverage_unknown": [],
     "coverage_blocking_unknown": []
@@ -75,13 +75,39 @@
       "waived": false,
       "key": "connector_edge_distance|J1||F.Cu",
       "evidence_hash": "ev2:47c6a04f9a2c6ff4"
+    },
+    {
+      "rule_id": "thermal_asymmetry",
+      "type": "unknown",
+      "severity": "warning",
+      "message": "R2 thermal asymmetry (tombstoning risk): pad 2 (net 'GND') is solid to 'GND' fill on F.Cu; pad 1 (net 'VOUT') has no zone connection (trace only) -- give the solid terminal a thermal relief (or balance the other terminal)",
+      "location": [
+        149.5,
+        92.0
+      ],
+      "layer": "F.Cu",
+      "actual_value": null,
+      "required_value": null,
+      "items": [
+        "R2",
+        "R2-2",
+        "R2-1"
+      ],
+      "nets": [
+        "GND",
+        "VOUT"
+      ],
+      "status": "warning",
+      "waived": false,
+      "key": "thermal_asymmetry|R2,R2-1,R2-2|GND,VOUT|F.Cu",
+      "evidence_hash": "ev2:a7087f05b757e70c"
     }
   ],
   "mask_copper_assessments": [],
   "meta_checks": {
     "drc": {
       "status": "PASSED",
-      "detail": "57 rules checked, 0 error(s), 0 warning(s)"
+      "detail": "58 rules checked, 0 error(s), 1 warning(s)"
     },
     "erc": {
       "status": "PASSED",
@@ -310,6 +336,12 @@
       "reason": null,
       "blocking": true
     },
+    "thermal_asymmetry": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": false
+    },
     "via_in_pad": {
       "status": "checked",
       "state": "checked",
@@ -352,5 +384,7 @@
       "reason": null,
       "blocking": true
     }
-  }
+  },
+  "verdict": "incomplete",
+  "exit_code": 2
 }
