@@ -838,6 +838,7 @@ class PreflightChecker:
         """
         try:
             bom = self._load_bom()
+            items = self._items_with_spec_overlay(bom)
         except Exception as e:
             return PreflightResult(
                 name="bom_lcsc_values",
@@ -880,7 +881,7 @@ class PreflightChecker:
         unverified: list[str] = []
         sources: set[str] = set()
         assigned = 0
-        for item in bom.items:
+        for item in items:
             if item.is_virtual or item.dnp or not item.lcsc:
                 continue
             assigned += 1
@@ -1322,6 +1323,32 @@ class PreflightChecker:
         except Exception as e:  # pragma: no cover - defensive
             logger.debug("Spec LCSC resolution failed (ignoring): %s", e)
             return set()
+
+    def _items_with_spec_overlay(self, bom) -> list:
+        """Return copies of ``bom.items`` with the ``.kct`` LCSC/MPN overlay applied.
+
+        Mirrors the assembly export (issue #7180) so ``bom_lcsc_values``
+        validates the parts the written BOM actually carries, not just
+        schematic fields.  Works on copies: the cached BOM other checks read
+        (e.g. ``bom_fields``) is left untouched.  Best-effort -- a missing or
+        malformed spec is logged and skipped, matching the export pipeline.
+        """
+        import copy
+
+        items = [copy.copy(i) for i in bom.items]
+        try:
+            from .bom_spec_overlay import apply_spec_overlay, find_spec_file
+
+            spec_file = find_spec_file(self.pcb_path.parent)
+            if spec_file is not None:
+                from ..spec.parser import load_spec
+
+                spec = load_spec(spec_file)
+                if spec.bom_entries:
+                    apply_spec_overlay(items, spec.bom_entries)
+        except Exception as e:
+            logger.warning("Spec overlay failed in preflight (continuing without): %s", e)
+        return items
 
     def _load_bom(self):
         """Load and cache BOM data.

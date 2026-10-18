@@ -215,6 +215,73 @@ def test_extra_pad_without_exposed_pad_marker_fails():
     assert find_ic_package_mismatch("SOIC-8_3.9x4.9mm", _numbers(9), "SOIC-8") is not None
 
 
+@pytest.mark.parametrize(
+    ("footprint", "package"),
+    [
+        ("Package_SO:TSSOP-8_4.4x3mm_P0.65mm", "SOIC-8"),
+        ("Package_SO:MSOP-8_3x3mm_P0.65mm", "SOIC-8"),
+        ("Package_SO:SOIC-8_3.9x4.9mm_P1.27mm", "TSSOP-8"),
+        ("Package_SO:SOIC-8_3.9x4.9mm_P1.27mm", "MSOP-8"),
+        ("SOIC-8", "VSSOP-8"),
+    ],
+)
+def test_so_pitch_mismatch_fails_issue_7180(footprint, package):
+    mismatch = find_ic_package_mismatch(footprint, _numbers(8), package)
+    assert mismatch is not None
+    assert "pitch" in mismatch.describe()
+
+
+@pytest.mark.parametrize(
+    ("footprint", "package"),
+    [
+        ("Package_SO:SOIC-8_3.9x4.9mm_P1.27mm", "SO-8"),
+        ("Package_SO:SOIC-8_3.9x4.9mm_P1.27mm", "SOP-8"),
+        ("Package_SO:TSSOP-8_4.4x3mm_P0.65mm", "MSOP-8"),
+        ("Package_SO:TSSOP-8_4.4x3mm_P0.65mm", "TSSOP-8"),
+        ("Package_TO_SOT_SMD:SOT-23-5", "SOT-25-5"),
+        ("Package_TO_SOT_SMD:SOT-23-5", "SOT-23-5"),
+        # SSOP pitch is unknown without an explicit token: never compared.
+        ("Package_SO:SSOP-8_P0.65mm", "SSOP-8"),
+        ("Package_SO:SSOP-8", "SOIC-8"),
+    ],
+)
+def test_so_aliases_and_unknown_pitch_still_match_issue_7180(footprint, package):
+    pads = _numbers(5 if "SOT" in footprint else 8)
+    assert find_ic_package_mismatch(footprint, pads, package) is None
+
+
+@pytest.mark.parametrize(
+    ("footprint", "package", "pins"),
+    [
+        ("Package_SO:MSOP-10_3x3mm_P0.5mm", "MSOP-10", 10),
+        ("Package_SO:VSSOP-10_3x3mm_P0.5mm", "VSSOP-10", 10),
+        ("Package_SO:MSOP-10-1EP_3x3mm_P0.5mm_EP1.68x1.88mm", "MSOP-10-EP", 10),
+        ("Package_SO:TSSOP-48_6.1x12.5mm_P0.5mm", "TSSOP-48", 48),
+        ("Package_SO:TSSOP-56_6.1x14mm_P0.5mm", "TSSOP-56", 56),
+    ],
+)
+def test_fine_pitch_footprint_with_family_only_part_passes_issue_7180(footprint, package, pins):
+    assert find_ic_package_mismatch(footprint, _numbers(pins), package) is None
+
+
+@pytest.mark.parametrize(
+    ("footprint", "package"),
+    [
+        ("Package_SO:TSSOP-8_4.4x3mm_P0.65mm", "SOIC-8"),
+        ("Package_SO:SOIC-8_3.9x4.9mm_P1.27mm", "TSSOP-8"),
+    ],
+)
+def test_coarse_vs_fine_still_fails_issue_7180(footprint, package):
+    assert find_ic_package_mismatch(footprint, _numbers(8), package) is not None
+
+
+def test_parse_ic_package_pitch_issue_7180():
+    assert parse_ic_package("Package_SO:SOIC-8_3.9x4.9mm_P1.27mm").pitch == 1.27
+    assert parse_ic_package("MSOP-8-EP").pitch == 0.65
+    assert parse_ic_package("SSOP-20").pitch is None
+    assert parse_ic_package("SOT-23-5").pitch is None
+
+
 # ---------------------------------------------------------------------------
 # AC6: enrichment-facing helpers keep their behaviour
 # ---------------------------------------------------------------------------
@@ -493,3 +560,54 @@ def test_fleet_committed_bom_rows_verify(tmp_path, board):
                     problems.append(f"{ref} {row['LCSC Part #']}: {verdict.status} {detail}")
     assert checked > 0
     assert problems == []
+
+
+# ---------------------------------------------------------------------------
+# Issue #7180: parts assigned only in the .kct spec are package-checked
+# ---------------------------------------------------------------------------
+
+BOARD00 = BOARDS / "00-simple-led" / "output"
+
+
+def _board00_checker(tmp_path: Path, lcsc: str | None) -> PreflightChecker:
+    """Scratch copy of board 00 whose .kct assigns ``lcsc`` to R1 (0805 part)."""
+    work = tmp_path / "board00"
+    work.mkdir()
+    pcb = shutil.copy(BOARD00 / "simple_led.kicad_pcb", work)
+    sch = shutil.copy(BOARD00 / "simple_led.kicad_sch", work)
+    kct = (BOARDS / "00-simple-led" / "project.kct").read_text()
+    if lcsc is not None:
+        kct = kct.replace("lcsc: C17630", f"lcsc: {lcsc}", 1)
+    (work / "project.kct").write_text(kct)
+    return PreflightChecker(
+        pcb_path=pcb,
+        schematic_path=sch,
+        config=PreflightConfig(skip_drc=True, skip_erc=True),
+        parts_cache=_seeded_cache(tmp_path, C25744_SPARSE),
+    )
+
+
+def test_board00_kct_assigned_parts_are_checked_issue_7180(tmp_path):
+    result = _run_lcsc_check(_board00_checker(tmp_path, None))
+    assert result.message != "No assigned LCSC parts to validate"
+    assert result.status in ("OK", "WARN"), result.details
+
+
+def test_board00_kct_wrong_package_fails_and_blocks_readiness_issue_7180(tmp_path):
+    from tests.test_kct_readiness_cmd import FakeEngines, check_status, make_board, run
+
+    result = _run_lcsc_check(_board00_checker(tmp_path, "C25744"))
+    assert result.status == "FAIL"
+    assert "R1" in result.details and "C25744" in result.details
+
+    board = make_board(tmp_path / "readiness")
+    code, report = run(board, FakeEngines(board, lcsc_check=result.to_dict()))
+    assert code != 0
+    assert check_status(report, "bom") == readiness_cmd.FAILED
+
+
+def test_malformed_kct_does_not_crash_preflight_issue_7180(tmp_path):
+    checker = _board00_checker(tmp_path, None)
+    (checker.pcb_path.parent / "project.kct").write_text("::: not [valid yaml")
+    result = _run_lcsc_check(checker)
+    assert result.status in ("OK", "WARN")

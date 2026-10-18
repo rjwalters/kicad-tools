@@ -1,5 +1,5 @@
 {
-  "_comment": "Issue #7166: LCSC part records for every part assigned on fleet boards 00-07, captured 2026-10-18 from LCSC product detail (encapStandard -> package, productModel -> mfr_part, productIntroEn -> description). Two manual-assembly connectors absent from that capture come from elsewhere: C7095263 from the jlcparts offline catalog, C124375 from board 07's committed manual-assembly-bom.csv. Used offline by tests/test_lcsc_ic_package_guard_7166.py; never fetched in CI.",
+  "_comment": "Issue #7166: LCSC part records for every part assigned on fleet boards 00-07, captured 2026-10-18 from LCSC product detail (encapStandard -> package, productModel -> mfr_part, productIntroEn -> description). Two manual-assembly connectors absent from that capture come from elsewhere: C7095263 from the jlcparts offline catalog, C124375 from board 07's committed manual-assembly-bom.csv. Used offline by tests/test_lcsc_ic_package_guard_7166.py; never fetched in CI. C114147 (board 04 Y1, assigned only in project.kct) added for issue #7180 from the same LCSC product-detail source, 2026-10-18.",
   "parts": {
     "C1588": {
       "package": "0603",
@@ -330,6 +330,11 @@
       "package": "SMD,P=2.54mm",
       "mfr_part": "TSM-103-01-T-DV-P-TR",
       "description": "2.54mm Surface Mount,Vertical Square pin 2.54mm 5.84mm 6P -55℃~+105℃ Tin Black 2x3P 2.54mm 2 SMD,P=2.54mm Headers, Male Pins RoHS"
+    },
+    "C114147": {
+      "package": "HC-49S",
+      "mfr_part": "X49SD8MSB2SC",
+      "description": "CRYSTAL 8MHz 20pF TH"
     }
   }
 }
