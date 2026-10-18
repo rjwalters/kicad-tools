@@ -294,18 +294,31 @@ not touch board X's copper".
 
 ### `erc`
 
-Parse and analyze ERC (Electrical Rule Check) reports.
+Run ERC on a schematic (via kicad-cli) or parse an existing ERC report.
 
 ```bash
-kct erc <report> [options]
+kct erc <schematic.kicad_sch | report.json | report.rpt> [options]
 ```
+
+Every violation kicad-cli reports (minus KiCad exclusions) counts toward the
+exit code; the only suppression is an explicit `--filter-config`, which is
+disclosed as `Filtered:` / `summary.filtered` (Issue #7161).
 
 | Option | Description |
 |--------|-------------|
 | `--format {table,json,summary}` | Output format (default: table) |
-| `--errors-only` | Show only errors, not warnings |
-| `--type TYPE` | Filter by error type |
-| `--sheet SHEET` | Filter by sheet name |
+| `--errors-only` | Show only errors, not warnings (view only) |
+| `--strict` | Exit 2 when only warnings are found |
+| `--type`, `-t TYPE` | Filter by error type (view only) |
+| `--sheet SHEET` | Filter by sheet name (view only) |
+| `--by-sheet` | Group violations by sheet |
+| `--verbose`, `-v` | Show detailed violation information |
+| `--filter-config FILE` | TOML `[[erc.filters]]` rules to suppress or reclassify violations |
+| `--output`, `-o FILE` | Save the kicad-cli ERC report to this path |
+| `--keep-report` | Keep the temporary ERC report |
+| `--list-types` | List known ERC violation types and exit |
+
+Exit codes: `0` no errors, `1` errors (or failure), `2` warnings with `--strict`.
 
 **Examples:**
 ```bash

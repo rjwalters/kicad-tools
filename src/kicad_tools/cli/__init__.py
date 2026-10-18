@@ -281,15 +281,29 @@ def _dispatch_command(args) -> int:
             # Parse subcommand (default behavior)
             from .erc_cmd import main as erc_cmd
 
-            sub_argv = [args.report]
+            sub_argv = [args.report] if args.report else []
             if args.format != "table":
                 sub_argv.extend(["--format", args.format])
             if args.errors_only:
                 sub_argv.append("--errors-only")
+            if args.erc_strict:
+                sub_argv.append("--strict")
             if args.filter_type:
                 sub_argv.extend(["--type", args.filter_type])
             if args.sheet:
                 sub_argv.extend(["--sheet", args.sheet])
+            if args.erc_by_sheet:
+                sub_argv.append("--by-sheet")
+            if args.erc_verbose:
+                sub_argv.append("--verbose")
+            if args.erc_filter_config:
+                sub_argv.extend(["--filter-config", args.erc_filter_config])
+            if args.erc_keep_report:
+                sub_argv.append("--keep-report")
+            if args.erc_output:
+                sub_argv.extend(["--output", args.erc_output])
+            if args.erc_list_types:
+                sub_argv.append("--list-types")
             return erc_cmd(sub_argv)
 
         else:

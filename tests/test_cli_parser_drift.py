@@ -1044,3 +1044,67 @@ def test_readiness_explicit_verify_dispatches_like_standalone_default():
         "kct readiness --verify must resolve to the same operation as the "
         f"standalone runner's bare default; got sub_argv={sub_argv}"
     )
+
+
+# ---------------------------------------------------------------------------
+# erc pair (Issue #7161):
+#   parser.py :: _add_erc_parser ("erc parse") -> cli/__init__.py shim ->
+#   erc_cmd.build_parser / erc_cmd.main
+#
+# ``kct erc x.kicad_sch --strict`` used to fail with "unrecognized
+# arguments" although erc_cmd documented and implemented it.
+# ---------------------------------------------------------------------------
+
+
+def _outer_erc_parse_parser() -> argparse.ArgumentParser:
+    erc = _outer_subparser("erc")
+    for action in erc._actions:
+        choices = getattr(action, "choices", None)
+        if choices and "parse" in choices:
+            return choices["parse"]
+    raise AssertionError("could not find 'erc parse' on the outer parser")
+
+
+def test_erc_parse_mirrors_every_erc_cmd_flag():
+    from kicad_tools.cli.erc_cmd import build_parser
+
+    inner = _flags_from_parser(build_parser()) - {"--help"}
+    outer = _flags_from_parser(_outer_erc_parse_parser()) - {"--help"}
+    assert "--strict" in inner, "erc_cmd parser capture is vacuous"
+    assert inner == outer, (
+        f"kct erc drift -- inner only: {sorted(inner - outer)}, outer only: {sorted(outer - inner)}"
+    )
+
+
+@pytest.mark.parametrize(
+    ("cli", "forwarded"),
+    [
+        (["--strict"], ["--strict"]),
+        (["--by-sheet"], ["--by-sheet"]),
+        (["-v"], ["--verbose"]),
+        (["--keep-report"], ["--keep-report"]),
+        (["--filter-config", "f.toml"], ["--filter-config", "f.toml"]),
+        (["-o", "r.json"], ["--output", "r.json"]),
+        (["-t", "pin"], ["--type", "pin"]),
+    ],
+)
+def test_erc_shim_forwards_flags_to_erc_cmd(cli, forwarded):
+    from kicad_tools.cli import main as kct_main
+    from kicad_tools.cli.erc_cmd import build_parser
+
+    with patch("kicad_tools.cli.erc_cmd.main", return_value=0) as inner_main:
+        assert kct_main(["erc", "board.kicad_sch", *cli]) == 0
+    sub_argv = inner_main.call_args[0][0]
+
+    assert sub_argv[0] == "board.kicad_sch"
+    assert sub_argv[1:] == forwarded
+    # ...and the forwarded argv parses on the real parser.
+    build_parser().parse_args(sub_argv)
+
+
+def test_erc_list_types_needs_no_input():
+    from kicad_tools.cli import main as kct_main
+
+    with patch("kicad_tools.cli.erc_cmd.main", return_value=0) as inner_main:
+        assert kct_main(["erc", "--list-types"]) == 0
+    assert inner_main.call_args[0][0] == ["--list-types"]

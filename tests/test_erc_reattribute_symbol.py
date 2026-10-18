@@ -139,6 +139,13 @@ class TestExtractIdentifiers:
         result = _extract_identifiers_from_items(items)
         assert "U3" in result
 
+    def test_reference_from_kicad10_power_pin_item(self):
+        # The item format kicad-cli 10.0.6 actually emits for
+        # power_pin_not_driven (Issue #7161).
+        items = [{"description": "Symbol U3 Pin 1 [VCC, Power input, Line]"}]
+        result = _extract_identifiers_from_items(items)
+        assert "U3" in result
+
     def test_reference_from_symbol_pattern(self):
         items = [{"description": "Symbol U5"}]
         result = _extract_identifiers_from_items(items)
