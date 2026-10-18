@@ -1257,7 +1257,8 @@ def _unaccepted_errors(report: dict, allowance: dict[str, int]) -> list[str] | N
     if not allowance:
         return None
     counts = _error_counts(report)
-    summary = report.get("summary") if isinstance(report.get("summary"), dict) else {}
+    raw_summary = report.get("summary")
+    summary = raw_summary if isinstance(raw_summary, dict) else {}
     if sum(counts.values()) != int(summary.get("errors", 0) or 0):
         return None
     return [
