@@ -23,6 +23,8 @@ from ..kelvin import detect_kelvin_topology
 from ..kelvin_obstacles import isolate_kelvin_branch
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
+
     from ..congestion_estimator import CongestionEstimator
     from ..grid import RoutingGrid
     from ..pathfinder import Router
@@ -44,6 +46,43 @@ RIPUP_BUDGET_EXHAUSTED = "budget_exhausted"
 RIPUP_VICTIM_GEOMETRIC = "victim_geometric"
 RIPUP_SIBLING_FAILED = "sibling_failed"
 RIPUP_TRADED = "traded"
+
+
+class EscapeAttempts:
+    """Deterministic reroute-attempt budget for one escape (Issue #7071).
+
+    Counts per-net ``route_net_negotiated`` calls across every strategy of
+    one :meth:`NegotiatedRouter.escape_local_minimum`.  Unlike the wall-clock
+    escape budget (#2415) it does not depend on host speed, so a seeded
+    ``--deterministic-budget`` route reaches the same strategies every time.
+    ``cap=None`` means unlimited (only counts).
+    """
+
+    def __init__(self, cap: int | None = None) -> None:
+        self.cap = cap
+        self.used = 0
+        # True when a strategy stopped early because the cap ran out; such a
+        # strategy is partial work and is rolled back, never kept.
+        self.cut = False
+
+    def exhausted(self) -> bool:
+        return self.cap is not None and self.used >= self.cap
+
+    def spend(self) -> None:
+        self.used += 1
+
+
+@dataclass(frozen=True)
+class EscapeSummary:
+    """What one ``escape_local_minimum`` call did (Issue #7071)."""
+
+    strategies_tried: int
+    seconds: float
+    overflow_before: int
+    overflow_after: int
+    kept: bool
+    reroutes: int
+    reroute_cap: int | None
 
 
 @dataclass(frozen=True)
@@ -1143,6 +1182,8 @@ class NegotiatedRouter:
         # method still returns a plain ``bool`` so existing callers keep their
         # meaning; callers that need to know *why* a rip-up failed read this.
         self.last_ripup_outcome: TargetedRipupOutcome | None = None
+        # Issue #7071: details of the most recent ``escape_local_minimum``.
+        self.last_escape_summary: EscapeSummary | None = None
 
     def route_net_negotiated(
         self,
@@ -2828,6 +2869,41 @@ class NegotiatedRouter:
             and callable(getattr(grid, "cpp_unmark_immediate", None))
         )
 
+    def _restore_route_snapshot(
+        self,
+        nets: Iterable[int],
+        original_routes: dict[int, list[Route]],
+        net_routes: dict[int, list[Route]],
+        routes_list: list[Route],
+        mark_route_callback: Callable,
+    ) -> None:
+        """Restore ``nets`` to the exact routes in ``original_routes``.
+
+        Shared by the targeted rip-up transaction (#3470) and the
+        oscillation-escape strategies (#7071).  Whatever is currently
+        placed for ``nets`` is unmarked, then the original ``Route``
+        objects are re-marked verbatim (same objects, so callers that
+        fingerprint by ``id()`` correctly see "no new routes").
+        """
+        nets = list(nets)
+        # Remove anything placed during the attempt.
+        for net in nets:
+            for route in list(net_routes.get(net, [])):
+                self.grid.unmark_route_usage(route)
+                self.grid.unmark_route(route)
+                if route in routes_list:
+                    routes_list.remove(route)
+            net_routes[net] = []
+        # Re-mark the original routes verbatim.
+        for net in nets:
+            restored = list(original_routes.get(net, []))
+            net_routes[net] = restored
+            for route in restored:
+                mark_route_callback(route)
+                self.grid.mark_route_usage(route)
+                if route not in routes_list:
+                    routes_list.append(route)
+
     def _targeted_ripup_txn(
         self,
         failed_net: int,
@@ -2898,25 +2974,9 @@ class NegotiatedRouter:
 
         def _rollback_to_snapshot() -> None:
             """Restore the exact pre-rip-up routing state for all nets."""
-            # Remove anything placed during this attempt.
-            for net in snapshot_nets:
-                for route in list(net_routes.get(net, [])):
-                    self.grid.unmark_route_usage(route)
-                    self.grid.unmark_route(route)
-                    if route in routes_list:
-                        routes_list.remove(route)
-                net_routes[net] = []
-            # Re-mark the original routes verbatim (same Route objects, so
-            # callers that fingerprint by ``id()`` correctly see "no new
-            # routes" after a rollback).
-            for net in snapshot_nets:
-                restored = list(original_routes.get(net, []))
-                net_routes[net] = restored
-                for route in restored:
-                    mark_route_callback(route)
-                    self.grid.mark_route_usage(route)
-                    if route not in routes_list:
-                        routes_list.append(route)
+            self._restore_route_snapshot(
+                snapshot_nets, original_routes, net_routes, routes_list, mark_route_callback
+            )
 
         # Rip up the blocking nets.  Also rip any stale (partial) routes
         # the FAILED net is still holding so its reroute starts from a
@@ -3749,6 +3809,7 @@ class NegotiatedRouter:
         strategy_index: int = 0,
         per_net_timeout: float | None = None,
         escape_budget: float | None = None,
+        reroute_cap: int | None = None,
     ) -> tuple[bool, int, int]:
         """Try escape strategies when router is stuck oscillating.
 
@@ -3770,10 +3831,19 @@ class NegotiatedRouter:
                 search within escape strategies (Issue #2415)
             escape_budget: Wall-clock budget in seconds for the entire escape
                 attempt across all strategies (Issue #2415). None means no limit.
+            reroute_cap: Deterministic cap on per-net reroute attempts across
+                all strategies (Issue #7071). None means no limit.
+
+        Each strategy is a transaction (Issue #7071): when it does not
+        succeed, the routes and grid usage it changed are restored, so the
+        next strategy starts from the state the escape was called with.
 
         Returns:
-            Tuple of (success, overflow, strategies_tried) where success indicates
-            if overflow improved and strategies_tried is how many were attempted
+            Tuple of (success, overflow, strategies_tried) where success
+            indicates if overflow improved and strategies_tried is how many
+            were attempted.  ``overflow`` is always the live grid overflow
+            after the last commit or rollback.  The call's details are left
+            in :attr:`last_escape_summary`.
         """
         strategies = [
             self._escape_shuffle_order,
@@ -3785,18 +3855,50 @@ class NegotiatedRouter:
         num_strategies = len(strategies)
         strategies_tried = 0
         escape_start = time.time()
+        attempts = EscapeAttempts(reroute_cap)
+        overflow_before = self.grid.get_total_overflow()
+        original_routes = {net: list(routes) for net, routes in net_routes.items()}
+        original_list = list(routes_list)
+
+        def _rollback() -> None:
+            changed = [
+                net
+                for net in set(net_routes) | set(original_routes)
+                if net_routes.get(net) != original_routes.get(net, [])
+            ]
+            self._restore_route_snapshot(
+                changed, original_routes, net_routes, routes_list, mark_route_callback
+            )
+            for net in [n for n in net_routes if n not in original_routes]:
+                del net_routes[net]
+            routes_list[:] = original_list
+
+        def _finish(success: bool) -> tuple[bool, int, int]:
+            live_overflow = self.grid.get_total_overflow()
+            self.last_escape_summary = EscapeSummary(
+                strategies_tried=strategies_tried,
+                seconds=time.time() - escape_start,
+                overflow_before=overflow_before,
+                overflow_after=live_overflow,
+                kept=success,
+                reroutes=attempts.used,
+                reroute_cap=reroute_cap,
+            )
+            return success, live_overflow, strategies_tried
 
         for i in range(num_strategies):
             # Check escape budget before starting each strategy
             if escape_budget is not None:
                 if time.time() - escape_start >= escape_budget:
                     break
+            if attempts.exhausted():
+                break
 
             idx = (strategy_index + i) % num_strategies
             strategy = strategies[idx]
             strategies_tried += 1
 
-            success, new_overflow = strategy(
+            success, _new_overflow = strategy(
                 overflow_history=overflow_history,
                 net_routes=net_routes,
                 routes_list=routes_list,
@@ -3807,14 +3909,18 @@ class NegotiatedRouter:
                 per_net_timeout=per_net_timeout,
                 escape_budget_start=escape_start,
                 escape_budget=escape_budget,
+                attempts=attempts,
             )
 
-            if success:
-                return True, new_overflow, strategies_tried
+            if success and not attempts.cut:
+                return _finish(True)
+
+            # Failed (or cut short by the reroute cap): put everything back
+            # so the next strategy starts from the real state.
+            _rollback()
 
         # All strategies exhausted (or budget expired) without success
-        current_overflow = overflow_history[-1] if overflow_history else 0
-        return False, current_overflow, strategies_tried
+        return _finish(False)
 
     def _escape_shuffle_order(
         self,
@@ -3828,6 +3934,7 @@ class NegotiatedRouter:
         per_net_timeout: float | None = None,
         escape_budget_start: float | None = None,
         escape_budget: float | None = None,
+        attempts: EscapeAttempts | None = None,
     ) -> tuple[bool, int]:
         """Escape strategy: shuffle the net order randomly.
 
@@ -3862,8 +3969,13 @@ class NegotiatedRouter:
             if escape_budget is not None and escape_budget_start is not None:
                 if time.time() - escape_budget_start >= escape_budget:
                     break
+            if attempts is not None and attempts.exhausted():
+                attempts.cut = True
+                break
             net_pads = pads_by_net.get(net, [])
             if net_pads and len(net_pads) >= 2:
+                if attempts is not None:
+                    attempts.spend()
                 expected_count += 1
                 routes = self.route_net_negotiated(
                     net_pads,
@@ -3898,6 +4010,7 @@ class NegotiatedRouter:
         per_net_timeout: float | None = None,
         escape_budget_start: float | None = None,
         escape_budget: float | None = None,
+        attempts: EscapeAttempts | None = None,
     ) -> tuple[bool, int]:
         """Escape strategy: reverse the net order.
 
@@ -3926,8 +4039,13 @@ class NegotiatedRouter:
             if escape_budget is not None and escape_budget_start is not None:
                 if time.time() - escape_budget_start >= escape_budget:
                     break
+            if attempts is not None and attempts.exhausted():
+                attempts.cut = True
+                break
             net_pads = pads_by_net.get(net, [])
             if net_pads and len(net_pads) >= 2:
+                if attempts is not None:
+                    attempts.spend()
                 expected_count += 1
                 routes = self.route_net_negotiated(
                     net_pads,
@@ -3962,6 +4080,7 @@ class NegotiatedRouter:
         per_net_timeout: float | None = None,
         escape_budget_start: float | None = None,
         escape_budget: float | None = None,
+        attempts: EscapeAttempts | None = None,
     ) -> tuple[bool, int]:
         """Escape strategy: rip up and reroute a random subset of nets.
 
@@ -3993,8 +4112,13 @@ class NegotiatedRouter:
             if escape_budget is not None and escape_budget_start is not None:
                 if time.time() - escape_budget_start >= escape_budget:
                     break
+            if attempts is not None and attempts.exhausted():
+                attempts.cut = True
+                break
             net_pads = pads_by_net.get(net, [])
             if net_pads and len(net_pads) >= 2:
+                if attempts is not None:
+                    attempts.spend()
                 expected_count += 1
                 routes = self.route_net_negotiated(
                     net_pads,
@@ -4029,6 +4153,7 @@ class NegotiatedRouter:
         per_net_timeout: float | None = None,
         escape_budget_start: float | None = None,
         escape_budget: float | None = None,
+        attempts: EscapeAttempts | None = None,
     ) -> tuple[bool, int]:
         """Escape strategy: rip up ALL nets and reroute in alternative order.
 
@@ -4066,8 +4191,13 @@ class NegotiatedRouter:
             if escape_budget is not None and escape_budget_start is not None:
                 if time.time() - escape_budget_start >= escape_budget:
                     break
+            if attempts is not None and attempts.exhausted():
+                attempts.cut = True
+                break
             net_pads = pads_by_net.get(net, [])
             if net_pads and len(net_pads) >= 2:
+                if attempts is not None:
+                    attempts.spend()
                 routes = self.route_net_negotiated(
                     net_pads,
                     boosted_cost,
