@@ -101,10 +101,7 @@ class PCBLayout:
         result = []
         for block in self.blocks.values():
             for via in block.vias:
-                pos = via.position
-                if block.rotation != 0:
-                    pos = pos.rotate(block.rotation)
-                pos = pos + block.origin
+                pos = block.to_board(via.position)
                 result.append(self._via_dict(via, pos.x, pos.y, block.block_id))
 
         for via in self.inter_block_vias:
