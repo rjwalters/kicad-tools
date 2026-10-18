@@ -24,9 +24,9 @@ unless every gate passes:
    ``redesign/package.py:refresh_manifest``.  Only ``files`` may change.
 4. Gates, all run on the staged board:
    * ``kicad-cli pcb drc --refill-zones``: 0 errors, 0 unconnected items;
-   * ``kct check --mfr <tier>``: 0 errors, no warnings beyond the board's
-     ``known_warnings`` allowlist (Issue #7273), and the drc, erc, lvs and
-     manifest meta-checks all PASSED.  A board whose fabrication
+   * ``kct check --mfr <tier>``: 0 errors, no warnings beyond the allowance
+     the board's recorded ``known_issues`` declare (Issue #7261; none means
+     0 warnings), and the drc, erc, lvs and manifest meta-checks all PASSED.  A board whose fabrication
      process the generic tier cannot model (board 04's paid 0.15 mm drill)
      sets ``check_script`` instead; that board-local check must meet the same
      bar (Issue #6269);
@@ -91,20 +91,6 @@ def _load_bundle_links():
 
 bundle_links = _load_bundle_links()
 
-
-def _load_known_warnings():
-    path = Path(__file__).resolve().with_name("_known_warnings.py")
-    spec = importlib.util.spec_from_file_location("_known_warnings", path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-_known = _load_known_warnings()
-KNOWN_WARNINGS = _known.KNOWN_WARNINGS
-warning_counts_by_rule = _known.warning_counts_by_rule
-unaccepted_warnings = _known.unaccepted_warnings
-
 from kicad_tools.cli.kicad_toolchain import (  # noqa: E402
     KiCadEnvironmentError,
     evidence_toolchain,
@@ -137,12 +123,6 @@ class BoardConfig:
     # ``(mirror_dir, source_dir)``: every file already in ``mirror_dir`` is
     # refreshed from ``source_dir`` before the archives are rebuilt.
     mirrors: tuple[tuple[str, str], ...] = ()
-    # Warning rules the board is known to carry, as ``{rule_id: max count}``
-    # (Issue #7273; the lists live in ``_known_warnings.py``, shared with the
-    # routed-PCB DRC gate).  A warning of any other rule, or more warnings of a
-    # listed rule than its count, still refuses; so does every error.  Empty
-    # means no warning is tolerated.
-    known_warnings: dict[str, int] = field(default_factory=dict)
     # Directories searched (relative to the board) when rebuilding
     # ``output/manufacturing.zip``.  Its member names are relative to the first
     # entry that holds them: boards 04-09 ship bare names (``README.txt``), the
@@ -169,13 +149,13 @@ BOARDS: dict[str, BoardConfig] = {
         tier="jlcpcb-tier1",
         erc=(ErcJob("04-native-erc.json", "output", "stm32_devboard.kicad_sch", ()),),
         check_script="check_manufacturing.py",
-        known_warnings=dict(KNOWN_WARNINGS["04-stm32-devboard"]),
         mirrors=(("output/manufacturing/design-source", "."),),
         archives=(("output/manufacturing/kicad_project.zip", ("output", ".")),),
     ),
-    # Boards 00-02 are ``kct readiness`` packages (no board-local check, no
-    # recorded warnings), refreshed through the same gates (Issue #7273).
-    # Board 00/01 ship no native-ERC report copies, so ``erc`` is empty.
+    # Boards 00-02 are ``kct readiness`` packages (no board-local check),
+    # refreshed through the same gates (Issue #7273).  Their recorded
+    # ``known_issues`` carry the warning allowance.  Board 00/01 ship no
+    # native-ERC report copies, so ``erc`` is empty.
     "00-simple-led": BoardConfig(
         routed_pcb="output/simple_led_routed.kicad_pcb",
         schematic="output/simple_led.kicad_sch",
@@ -226,7 +206,6 @@ BOARDS: dict[str, BoardConfig] = {
             ),
         ),
         manifest_refresher="redesign/package.py:refresh_manifest",
-        known_warnings=dict(KNOWN_WARNINGS["05-bldc-motor-controller"]),
     ),
     "06-diffpair-test": BoardConfig(
         routed_pcb="output/diffpair_test_routed.kicad_pcb",
@@ -423,19 +402,40 @@ def gate_native_drc(board: Path, cfg: BoardConfig) -> int:
     return len(errors)
 
 
-def check_report_verdict(
-    data: dict,
-    label: str,
-    known_warnings: dict[str, int] | None = None,
-    observed: dict[str, int] | None = None,
-) -> tuple[bool, int]:
-    """Gate a ``kct check``-format report.
+def warning_counts_by_rule(data: dict) -> dict[str, int]:
+    """Active (non-waived) warning findings of a ``kct check`` report, by rule."""
+    counts: dict[str, int] = {}
+    for violation in data.get("violations", []):
+        if (
+            isinstance(violation, dict)
+            and violation.get("severity") == "warning"
+            and not violation.get("waived")
+        ):
+            rule = str(violation.get("rule_id") or "unknown")
+            counts[rule] = counts.get(rule, 0) + 1
+    return dict(sorted(counts.items()))
 
-    0 errors, meta all PASSED, and no warning outside ``known_warnings``
-    (Issue #7273): the same semantics as ``kct readiness``, where listed
-    warnings are reviewed rather than blocking.  ``observed``, when given, is
-    filled with the measured per-rule warning counts so the caller can record
-    them in the published report.
+
+def unaccepted_warnings(data: dict, allowance: dict[str, int]) -> dict[str, int]:
+    """Warnings beyond *allowance* (``{rule: max count}``), as ``{rule: found}``."""
+    counts = warning_counts_by_rule(data)
+    total = data.get("summary", {}).get("warnings")
+    if total != sum(counts.values()):
+        # Summary and finding list disagree: never trust the allowance.
+        return {"<summary/violations mismatch>": total if isinstance(total, int) else -1}
+    return {rule: n for rule, n in counts.items() if n > allowance.get(rule, 0)}
+
+
+def check_report_verdict(
+    data: dict, label: str, allowance: dict[str, int] | None = None
+) -> tuple[bool, int]:
+    """Gate a ``kct check``-format report: 0 errors, meta all PASSED, and no
+    warnings beyond *allowance*.
+
+    The allowance is the board's own recorded ``known_issues`` warning
+    allowance from ``readiness.json`` (Issue #7261): the same record that
+    discloses the issue is the one that tolerates its warnings.  Without one,
+    any warning refuses.
     """
     summary, meta = data.get("summary", {}), data.get("meta_checks", {})
     statuses = {k: meta.get(k, {}).get("status") for k in ("drc", "erc", "lvs", "manifest")}
@@ -443,23 +443,25 @@ def check_report_verdict(
     mismatches = len(lvs.get("mismatches", [])) + len(lvs.get("copper_mismatches", []))
     errors, warnings = summary.get("errors"), summary.get("warnings")
     log(f"  gate {label}: {errors} error(s), {warnings} warning(s), meta {statuses}")
-    if observed is not None:
-        observed.update(warning_counts_by_rule(data))
-    if warnings:
-        log(f"    warnings by rule: {warning_counts_by_rule(data)}; allowed {known_warnings or {}}")
-    if errors != 0 or warnings is None or any(s != "PASSED" for s in statuses.values()):
+    if not isinstance(warnings, int):
         raise GateFailure(f"{label} failed")
-    extra = unaccepted_warnings(data, known_warnings)
+    extra = unaccepted_warnings(data, allowance or {}) if warnings else {}
     if extra:
-        raise GateFailure(
-            f"{label} failed: warnings beyond the known list (found, allowed): {extra}"
-        )
+        log(f"  warnings beyond the recorded known_issues allowance {allowance or {}}: {extra}")
+    if errors != 0 or extra or any(s != "PASSED" for s in statuses.values()):
+        raise GateFailure(f"{label} failed")
     return statuses["lvs"] == "PASSED", mismatches
 
 
-def gate_kct_check(
-    board: Path, cfg: BoardConfig, observed: dict[str, int] | None = None
-) -> tuple[bool, int]:
+def known_issue_allowance(board: Path) -> dict[str, int]:
+    """The ``{rule: max count}`` the board's recorded ``known_issues`` account for."""
+    from kicad_tools.cli.known_issues import known_warning_allowance, validate_known_issues
+
+    report = json.loads((board / "output" / "readiness.json").read_text())
+    return known_warning_allowance(validate_known_issues(report.get("known_issues")))
+
+
+def gate_kct_check(board: Path, cfg: BoardConfig) -> tuple[bool, int]:
     with tempfile.TemporaryDirectory(prefix="refresh-readiness-check-") as tmp:
         report = Path(tmp) / "check.json"
         run(
@@ -477,12 +479,10 @@ def gate_kct_check(
         if not report.is_file():
             raise GateFailure("kct check did not produce a report")
         data = json.loads(report.read_text())
-    return check_report_verdict(data, f"kct check --mfr {cfg.tier}", cfg.known_warnings, observed)
+    return check_report_verdict(data, f"kct check --mfr {cfg.tier}", known_issue_allowance(board))
 
 
-def gate_board_check(
-    board: Path, cfg: BoardConfig, observed: dict[str, int] | None = None
-) -> tuple[bool, int]:
+def gate_board_check(board: Path, cfg: BoardConfig) -> tuple[bool, int]:
     """Run the board's own manufacturing check in place of ``kct check`` (Issue #6269)."""
     assert cfg.check_script is not None
     script = board / cfg.check_script
@@ -491,53 +491,22 @@ def gate_board_check(
         proc = run(
             [sys.executable, str(script), str(board / cfg.routed_pcb), str(report)],
             cwd=board,
-            env={
-                **os.environ,
-                "PYTHONDONTWRITEBYTECODE": "1",
-                # The refresher applies ``cfg.known_warnings`` itself.
-                "KCT_BOARD_CHECK_REPORT_WARNINGS": "1",
-            },
+            env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
         )
         if not report.is_file():
             raise GateFailure(f"{cfg.check_script} did not produce a report: {proc.stderr[-2000:]}")
         data = json.loads(report.read_text())
-    verdict = check_report_verdict(data, cfg.check_script, cfg.known_warnings, observed)
+    verdict = check_report_verdict(data, cfg.check_script, known_issue_allowance(board))
     if proc.returncode != 0:
         raise GateFailure(f"{cfg.check_script} exited {proc.returncode}")
     return verdict
 
 
-def gate_check(
-    board: Path, cfg: BoardConfig, observed: dict[str, int] | None = None
-) -> tuple[bool, int]:
+def gate_check(board: Path, cfg: BoardConfig) -> tuple[bool, int]:
     """The board-local check hook when configured, else ``kct check --mfr <tier>``."""
     if cfg.check_script is not None:
-        return gate_board_check(board, cfg, observed)
-    return gate_kct_check(board, cfg, observed)
-
-
-def record_accepted_warnings(report: dict, observed: dict[str, int]) -> None:
-    """Publish the measured, accepted warnings in ``report`` (Issue #7273).
-
-    ``kct readiness`` lists reviewed warnings in its report; a refresh that only
-    re-dated a ``kct_check`` detail claiming zero warnings would restate a
-    clean-board attestation the measurement contradicts.  So the stored detail
-    must already name every measured rule and count as ``rule: N``, and the
-    per-rule counts are recorded as ``kct readiness`` does.
-    """
-    if not observed:
-        return
-    details = " ".join(
-        str(c.get("detail", "")) for c in report.get("checks", []) if c.get("name") == "kct_check"
-    )
-    missing = [f"{rule}: {n}" for rule, n in observed.items() if f"{rule}: {n}" not in details]
-    if missing:
-        raise GateFailure(
-            f"readiness.json kct_check detail does not list the measured warnings {missing}; "
-            "refusing to re-date a report whose stored detail contradicts the measurement"
-        )
-    report["acknowledged_warning_rules"] = sorted(observed)
-    report["warning_counts_by_rule"] = dict(sorted(observed.items()))
+        return gate_board_check(board, cfg)
+    return gate_kct_check(board, cfg)
 
 
 def gate_net_status(board: Path, cfg: BoardConfig) -> float:
@@ -632,8 +601,7 @@ def refresh(
         log(f"  output/manufacturing.zip: rebuilt; members with new content {changed}")
 
         drc_errors = gate_native_drc(staged, cfg)
-        observed_warnings: dict[str, int] = {}
-        lvs_clean, lvs_mismatches = gate_check(staged, cfg, observed_warnings)
+        lvs_clean, lvs_mismatches = gate_check(staged, cfg)
         routed_pct = gate_net_status(staged, cfg)
         gate_sync(staged, cfg)
 
@@ -654,7 +622,6 @@ def refresh(
         if report.get("status") != "ready" or report.get("blockers"):
             raise GateFailure("readiness.json is not a ready report; refusing to re-pin")
 
-        record_accepted_warnings(report, observed_warnings)
         for name in report["inputs"]:
             report["inputs"][name] = sha256(staged / name)
         report["checked_at"] = checked_at

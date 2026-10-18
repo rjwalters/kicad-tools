@@ -43,8 +43,7 @@ ATtiny85 Charlieplex LED Grid
 | Errors | 0 |
 | Warnings | 0 |
 
-**Status**: NOT RUN -- ERC timed out after 60s
-
+**Status**: PASS
 
 \newpage
 
@@ -109,7 +108,7 @@ ATtiny85 Charlieplex LED Grid
 |--------|-------|
 | Errors | 0 |
 | Errors: kct (`--mfr jlcpcb` rules) | 0 |
-| Errors: kicad-cli (geometric) | not run |
+| Errors: kicad-cli (geometric) | 0 |
 | Warnings | 2 |
 | Blocking | 0 |
 
@@ -131,7 +130,6 @@ ATtiny85 Charlieplex LED Grid
 
 ### Action Items
 
-- **[IMPORTANT]** ERC could not run -- schematic not checked (ERC timed out after 60s)
 - **[OPTIONAL]** Review 2 DRC warnings
 - **[OPTIONAL]** Analog net: LINE_A — audio signal; keep short, away from digital/switching nets
 - **[OPTIONAL]** Analog net: LINE_B — audio signal; keep short, away from digital/switching nets

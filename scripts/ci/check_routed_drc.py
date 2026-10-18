@@ -38,9 +38,7 @@ each offending file so the PR Files-changed view surfaces the failure inline.
 from __future__ import annotations
 
 import argparse
-import importlib.util
 import json
-import os
 import subprocess
 import sys
 import tempfile
@@ -77,19 +75,9 @@ DEFAULT_MANUFACTURER = "jlcpcb"
 # Board04 uses a paid mechanical-drill option (#5009), not laser microvias.
 # Its reviewed validator checks the actual geometry, option selection and
 # native floors before applying scoped rules. Stock tier1 alone cannot
-# express that process. Never turn this into an error-count allowance: only warnings are
-# allowed, per rule and count (``scripts/boards/_known_warnings.py``, #7273).
+# express that process. Never turn this into an error-count allowance.
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PAID_DRILL_BOARD = REPO_ROOT / "boards/04-stm32-devboard/output/stm32_devboard_routed.kicad_pcb"
-
-
-def _load_known_warnings():
-    """Load the allowlist shared with ``scripts/boards/refresh_readiness.py``."""
-    path = REPO_ROOT / "scripts/boards/_known_warnings.py"
-    spec = importlib.util.spec_from_file_location("_known_warnings", path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
 
 
 def _run_paid_drill_check(pcb_path: Path) -> tuple[int, dict[str, int]]:
@@ -102,9 +90,6 @@ def _run_paid_drill_check(pcb_path: Path) -> tuple[int, dict[str, int]]:
             text=True,
             check=False,
             timeout=180,
-            # Issue #7273: the checker stays strict on warnings unless told
-            # otherwise; they are gated per rule and count below instead.
-            env={**os.environ, "KCT_BOARD_CHECK_REPORT_WARNINGS": "1"},
         )
         if proc.returncode != 0 or not report.is_file():
             detail = proc.stderr.strip() or proc.stdout.strip()
@@ -124,13 +109,6 @@ def _run_paid_drill_check(pcb_path: Path) -> tuple[int, dict[str, int]]:
             data = json.loads(report.read_text())
             if data.get("meta_checks", {}).get("overall") != "PASSED":
                 raise ValueError("reviewed process meta-checks did not pass")
-            known = _load_known_warnings()
-            extra = known.unaccepted_warnings(data, known.KNOWN_WARNINGS["04-stm32-devboard"])
-            if extra:
-                raise ValueError(
-                    "warnings outside the known-warning list (found, allowed): "
-                    + ", ".join(f"{r}: {f}/{a}" for r, (f, a) in extra.items())
-                )
             return _count_blocking_errors(data)
         except (ValueError, TypeError, KeyError) as exc:
             raise RuntimeError(f"Invalid reviewed paid-drill report: {exc}") from exc

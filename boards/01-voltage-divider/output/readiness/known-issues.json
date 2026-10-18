@@ -1,0 +1,13 @@
+{
+  "known_issues": [
+    {
+      "issue": 7220,
+      "kind": "advisory",
+      "summary": "One-sided thermal connection on R2 (GND pad solid to the F.Cu pour, VOUT pad on a 0.50 mm trace): tombstoning risk; narrower-spoke repair tracked in #7295",
+      "recorded": "2026-10-18",
+      "warnings": {
+        "thermal_asymmetry": 1
+      }
+    }
+  ]
+}

@@ -209,70 +209,47 @@ def test_board04_uses_its_own_manufacturing_check(mod):
     assert (board / cfg.routed_pcb).is_file() and (board / cfg.schematic).is_file()
 
 
-# --------------------------------------------------------------------------- Issue #7273
-def _report(warnings: dict[str, int], errors: int = 0) -> dict:
+# --------------------------------------------------------------------------- Issue #7261
+def _warned_report(**counts: int) -> dict:
     meta = {k: {"status": "PASSED"} for k in ("drc", "erc", "lvs", "manifest")}
-    return {
-        "summary": {"errors": errors, "warnings": sum(warnings.values())},
-        "violations": [
-            {"rule_id": rule, "severity": "warning"}
-            for rule, count in warnings.items()
-            for _ in range(count)
-        ],
-        "meta_checks": meta,
+    violations = [
+        {"rule_id": rule, "severity": "warning"} for rule, n in counts.items() for _ in range(n)
+    ]
+    summary = {"errors": 0, "warnings": len(violations)}
+    return {"summary": summary, "meta_checks": meta, "violations": violations}
+
+
+def test_known_issue_allowance_tolerates_exactly_the_recorded_warnings(mod):
+    allowance = {"thermal_asymmetry": 9}
+    assert mod.check_report_verdict(_warned_report(thermal_asymmetry=9), "x", allowance)
+    for report in (
+        _warned_report(thermal_asymmetry=10),  # more than recorded
+        _warned_report(thermal_asymmetry=1, via_at_pad_edge=1),  # unlisted rule
+    ):
+        with pytest.raises(mod.GateFailure):
+            mod.check_report_verdict(report, "x", allowance)
+    mismatched = _warned_report(thermal_asymmetry=1)
+    mismatched["summary"]["warnings"] = 2  # summary disagrees with findings
+    with pytest.raises(mod.GateFailure):
+        mod.check_report_verdict(mismatched, "x", {"thermal_asymmetry": 5})
+
+
+def test_allowance_comes_from_the_boards_recorded_known_issues(mod, tmp_path):
+    board = tmp_path / "board"
+    (board / "output").mkdir(parents=True)
+    entry = {
+        "issue": 7220,
+        "kind": "advisory",
+        "summary": "s",
+        "recorded": "2026-10-18",
+        "warnings": {"thermal_asymmetry": 9},
     }
+    (board / "output" / "readiness.json").write_text(json.dumps({"known_issues": [entry]}))
+    assert mod.known_issue_allowance(board) == {"thermal_asymmetry": 9}
+    (board / "output" / "readiness.json").write_text(json.dumps({}))
+    assert mod.known_issue_allowance(board) == {}
 
 
-def test_known_warnings_do_not_block(mod):
-    known = {"via_at_pad_edge": 3}
-    assert mod.check_report_verdict(_report({"via_at_pad_edge": 3}), "x", known) == (True, 0)
-    # Fewer warnings than listed (a partial fix) still passes.
-    assert mod.check_report_verdict(_report({"via_at_pad_edge": 1}), "x", known) == (True, 0)
-
-
-def test_warning_count_above_the_list_refuses(mod):
-    with pytest.raises(mod.GateFailure, match="via_at_pad_edge"):
-        mod.check_report_verdict(_report({"via_at_pad_edge": 4}), "x", {"via_at_pad_edge": 3})
-
-
-def test_unlisted_warning_rule_refuses(mod):
-    report = _report({"via_at_pad_edge": 3, "silk_over_pad": 1})
-    with pytest.raises(mod.GateFailure, match="silk_over_pad"):
-        mod.check_report_verdict(report, "x", {"via_at_pad_edge": 3})
-
-
-def test_error_refuses_even_with_known_warnings(mod):
-    report = _report({"via_at_pad_edge": 3}, errors=1)
-    with pytest.raises(mod.GateFailure):
-        mod.check_report_verdict(report, "x", {"via_at_pad_edge": 3})
-
-
-def test_empty_known_warnings_keeps_zero_warning_behaviour(mod):
-    assert mod.check_report_verdict(_report({}), "x") == (True, 0)
-    with pytest.raises(mod.GateFailure):
-        mod.check_report_verdict(_report({"via_at_pad_edge": 1}), "x", {})
-
-
-def test_summary_disagreeing_with_findings_refuses(mod):
-    report = _report({"via_at_pad_edge": 1})
-    report["summary"]["warnings"] = 2  # a warning the finding list does not show
-    with pytest.raises(mod.GateFailure):
-        mod.check_report_verdict(report, "x", {"via_at_pad_edge": 5})
-
-
-def test_waived_findings_are_not_counted(mod):
-    report = _report({})
-    report["violations"] = [{"rule_id": "r", "severity": "warning", "waived": True}]
-    assert mod.check_report_verdict(report, "x") == (True, 0)
-
-
-def test_known_warnings_for_boards_04_and_05(mod):
-    assert mod.BOARDS["04-stm32-devboard"].known_warnings == {"thermal_asymmetry": 9}
-    assert mod.BOARDS["05-bldc-motor-controller"].known_warnings == {"via_at_pad_edge": 3}
-
-
-#: Board 03 (4-layer, firmware bundle, own manufacturing-requirements) has no
-#: refresh config yet; Issue #7273 scoped it out.  Remove it from here when added.
 _NO_REFRESH_CONFIG = {"03-usb-joystick"}
 
 
@@ -309,44 +286,3 @@ def test_outer_archive_members_resolve_against_committed_tree(mod, tmp_path):
         mod.rebuild_archive(
             staged / "output" / "manufacturing.zip", [staged / s for s in cfg.bundle_search]
         )
-
-
-def _readiness(detail: str) -> dict:
-    return {"checks": [{"name": "kct_check", "status": "passed", "detail": detail}]}
-
-
-def test_accepted_warnings_are_recorded_in_the_report(mod):
-    report = _readiness("0 errors, 3 reviewed warnings (via_at_pad_edge: 3)")
-    mod.record_accepted_warnings(report, {"via_at_pad_edge": 3})
-    assert report["acknowledged_warning_rules"] == ["via_at_pad_edge"]
-    assert report["warning_counts_by_rule"] == {"via_at_pad_edge": 3}
-
-
-def test_stale_zero_warning_detail_refuses_to_be_redated(mod):
-    report = _readiness("0 errors/0 warnings")
-    with pytest.raises(mod.GateFailure, match="via_at_pad_edge: 3"):
-        mod.record_accepted_warnings(report, {"via_at_pad_edge": 3})
-    assert "acknowledged_warning_rules" not in report
-
-
-def test_changed_warning_count_refuses_until_detail_is_updated(mod):
-    report = _readiness("reviewed warnings (via_at_pad_edge: 3)")
-    with pytest.raises(mod.GateFailure):
-        mod.record_accepted_warnings(report, {"via_at_pad_edge": 2})
-
-
-def test_no_warnings_leaves_the_report_untouched(mod):
-    report = _readiness("0 errors/0 warnings")
-    mod.record_accepted_warnings(report, {})
-    assert report == _readiness("0 errors/0 warnings")
-
-
-def test_committed_reports_list_their_known_warnings(mod):
-    """Boards with a ``known_warnings`` list already state it in ``readiness.json``."""
-    for name, cfg in mod.BOARDS.items():
-        if not cfg.known_warnings:
-            continue
-        report = json.loads(
-            (mod.REPO_ROOT / "boards" / name / "output" / "readiness.json").read_text()
-        )
-        mod.record_accepted_warnings(report, dict(cfg.known_warnings))

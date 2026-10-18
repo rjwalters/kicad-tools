@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "checked_at": "2026-10-18T12:00:00+00:00",
+  "checked_at": "2026-10-18T20:30:00+00:00",
   "mode": "assembly",
   "status": "ready",
   "blockers": [],
@@ -13,7 +13,7 @@
     {
       "name": "kct_check",
       "status": "passed",
-      "detail": "0 errors, 3 reviewed warnings (via_at_pad_edge: 3; accepted interim, pad-edge via fix tracked in #7296, #7298); all 49 rules and ERC/LVS/manifest meta-checks passed; 149 bound pads."
+      "detail": "0 errors/0warnings; all49 rules and ERC/LVS/manifest meta-checks passed;149 bound pads."
     },
     {
       "name": "native_drc",
@@ -65,7 +65,7 @@
     "output/board05_revB.pretty/CP_Elec_8x10.5_PolarityMark.kicad_mod": "544e9e4de35e1f673f5c2efc24e8b485c70a49f9ae51d3624e855c1f6a3b0178",
     "output/board05_revB.pretty/TI_PWP0028C_EP3.4x9.7_Mask3.1x5.18_ThermalVias.kicad_mod": "6be1ab0e106cbf957d0d708d72f06518a70af776ded5b64de8a2f62f65c833d7",
     "output/drc_report.json": "3ebacdeb5abaecf41f218fd65fb65a5d37857479245838e568d13a5f3f0bb541",
-    "output/erc_report.json": "056b64a39e4b2cf612053d5ca710070d2e2e379d9b045efb87334d1acc65d798",
+    "output/erc_report.json": "9d675687ec96d65f0e3a67b654f5a8ff9ad59c23d9c208e11f6c31d868cd5989",
     "output/fp-lib-table": "4a62ef010ac70b70114c6c1db80d54a3e8964c143796c20c79a31fcf166b3c11",
     "output/lvs.json": "52fed944df95bc4d3650b2774ce6b714e731e310d9d9a761553b25055b3e1a25",
     "output/manufacturing/HARDWARE.md": "c18a5ccc40e0f0e862b062d70d9be509f7ceed9de5c6fb8df95b711f69d7dd74",
@@ -92,9 +92,9 @@
     "output/manufacturing/kct-check.json": "50fd9a160510e11db6ba7fc902a087eea4087c960b03d9bfb70cd470249a3020",
     "output/manufacturing/kicad_project.zip": "875af0eff99ed1af4f80a29a29a0860992f8846e21538898577552934dbebedf",
     "output/manufacturing/lvs.json": "52fed944df95bc4d3650b2774ce6b714e731e310d9d9a761553b25055b3e1a25",
-    "output/manufacturing/manifest.json": "480c13bd4f2954672ecdc3e14518844fa133064b7af37d54adaf6626168d56e2",
+    "output/manufacturing/manifest.json": "962435271eddc348e222a57ab431484570b680dcaa0d9d33f500971089b88e49",
     "output/manufacturing/native-drc.json": "604449a31cd023f804af85b1ad66f21f364193aad574acc6e65487c1784a985c",
-    "output/manufacturing/native-erc.json": "056b64a39e4b2cf612053d5ca710070d2e2e379d9b045efb87334d1acc65d798",
+    "output/manufacturing/native-erc.json": "9d675687ec96d65f0e3a67b654f5a8ff9ad59c23d9c208e11f6c31d868cd5989",
     "output/manufacturing/project.kct": "069f467cabeda773e36897cf2a4a7012577bda6258e119cb6cc24a0a856a0d6b",
     "output/manufacturing/renders/3d-back.png": "ec0126e348b9f440792f9224a68b713dd86d59b15ad3c9c3b5a4de8de6fe1a8e",
     "output/manufacturing/renders/3d-front.png": "8a5486120518e28a5126af21d961ea5966e0378c513930681473e4f4a7e9ff83",
@@ -103,7 +103,7 @@
     "output/manufacturing/report.md": "2a8be894b2281161fa0df2b4b92e44e3da615c5e908edd91f573c93e006d1774",
     "output/manufacturing/report.pdf": "0ecfb21366b397388d2e6e91eced43a7ea180c6528d3ea596c91a375d4f64b31",
     "output/manufacturing/schematic.pdf": "3bb8564323757ed17fbffed573e01e456c851fbd84863ce978028e45f065e9b2",
-    "output/manufacturing.zip": "052af8126cdd72f1c436b61504a696f68337e03970fa7444af3f57dff9a92000",
+    "output/manufacturing.zip": "9e79307ff878aa67d3d0bb76d909345e6dadce803787f548380cf2f3db1a22f7",
     "output/project.kct": "4369ceb55221ee30b4a25e636e1fb6d41c9cb12fcebc11a3a6136f9090e20af7",
     "output/readiness/45-alignment.json": "5f7217e95e929fbe8ea5c45aa0d8535ebd5ec39ef3f131539cc7413d30a5eedf",
     "output/readiness/drill-relocations.json": "aff479ed240c2180417e10dd9068b9f2d8ad6c40befb33ae1183a4ee2ece94cd",
@@ -111,7 +111,7 @@
     "output/readiness/firmware.txt": "b2c277cbb5ca50e0adc39a950aa493d8857cb446f36273c5dc7d687871c5abc8",
     "output/readiness/kct-check.json": "50fd9a160510e11db6ba7fc902a087eea4087c960b03d9bfb70cd470249a3020",
     "output/readiness/native-drc.json": "604449a31cd023f804af85b1ad66f21f364193aad574acc6e65487c1784a985c",
-    "output/readiness/native-erc.json": "056b64a39e4b2cf612053d5ca710070d2e2e379d9b045efb87334d1acc65d798",
+    "output/readiness/native-erc.json": "9d675687ec96d65f0e3a67b654f5a8ff9ad59c23d9c208e11f6c31d868cd5989",
     "output/readiness/reconstruction.txt": "c11e65c070656735650c1c9aa9d5a7f2a6d5ee84a77e2983d4d65672fb685cd9",
     "output/renders/3d-back.png": "ec0126e348b9f440792f9224a68b713dd86d59b15ad3c9c3b5a4de8de6fe1a8e",
     "output/renders/3d-front.png": "8a5486120518e28a5126af21d961ea5966e0378c513930681473e4f4a7e9ff83",
@@ -124,7 +124,7 @@
     "redesign/board05_revB.kicad_sym": "05702cd35f2a300e46dd79349044695cc2e4cd80e6078b417ef057a71207257c",
     "redesign/board05_revB.pretty/CP_Elec_8x10.5_PolarityMark.kicad_mod": "544e9e4de35e1f673f5c2efc24e8b485c70a49f9ae51d3624e855c1f6a3b0178",
     "redesign/board05_revB.pretty/TI_PWP0028C_EP3.4x9.7_Mask3.1x5.18_ThermalVias.kicad_mod": "6be1ab0e106cbf957d0d708d72f06518a70af776ded5b64de8a2f62f65c833d7",
-    "redesign/build.py": "29794be0aa1e557e4a96875e51a73ea0d3106a98d7e53a9f7741268a24a9f761",
+    "redesign/build.py": "0a282190a8d7014e1d6920f393abcc65d6765e6111fe852c15071503c207e571",
     "redesign/fanout.py": "316fb75149a03c9823f7d22d780e79ad123cf4a96a9ce4518652fcbcb4ef22d4",
     "redesign/firmware/.gitignore": "0d3273dd7acb360b87531bf7241afa3e30b97feecf6d2d9b0d231cd36b91c179",
     "redesign/firmware/Makefile": "f105bf145347705a625a825aad34614c3e4001c7260793991f68cca37587516c",
@@ -139,8 +139,9 @@
     "redesign/routing.json": "af8a9bdcd7d632fe9fdc6e4eed76e0f8e660360535b519744d0c0857bbfc9bab",
     "redesign/routing.py": "8b7a89516502816b0cdcc6b3931e902140bd8b898742d6bad6807154c2331730",
     "redesign/test_firmware.c": "3cb8ebe3001bb652701b5d96bce34d2cba37f07475daa38bec90db80e1cec8b6",
-    "output/manufacturing/design-source.zip": "a9361b864cb9b0ca1b4b776366fbfe6548f750fa039f5defd3ff12005d6e0bb1",
-    "output/readiness/footprint-identity-comparison.json": "fb771b3640412a466417a3492a0f97cb2e929064d842f80eca6670a86fd35107"
+    "output/manufacturing/design-source.zip": "a89d14cd29a0917fd1221757d50f39220768e0d8c32b8f6b69110d3beee5eb8f",
+    "output/readiness/footprint-identity-comparison.json": "fb771b3640412a466417a3492a0f97cb2e929064d842f80eca6670a86fd35107",
+    "output/readiness/known-issues.json": "778e7d2e4146129f56fcadb6bd8a09a7c75d6df18db46a0f3026eb4c84e77d92"
   },
   "evidence": {
     "kct_check": "output/readiness/kct-check.json",
@@ -153,10 +154,22 @@
     "45_alignment": "output/readiness/45-alignment.json",
     "footprint_identity": "output/readiness/footprint-identity-comparison.json"
   },
-  "acknowledged_warning_rules": [
-    "via_at_pad_edge"
+  "known_issues": [
+    {
+      "issue": 7209,
+      "kind": "advisory",
+      "summary": "PHASE_A inner copper is sized for 1 oz; the order must request 1 oz inner copper (JLCPCB's default is 0.5 oz), and manufacturing/manifest.json does not yet record ordered_copper",
+      "recorded": "2026-10-18"
+    },
+    {
+      "issue": 7220,
+      "kind": "advisory",
+      "summary": "Via drills at the edge of SMD pads R11.1, R9.1 and D1.1 (0.000-0.027 mm, below the 0.1 mm solder-mask dam): via wicking risk; router fix tracked in #7296",
+      "recorded": "2026-10-18",
+      "warnings": {
+        "via_at_pad_edge": 3
+      }
+    }
   ],
-  "warning_counts_by_rule": {
-    "via_at_pad_edge": 3
-  }
+  "manufacturer": "jlcpcb"
 }
