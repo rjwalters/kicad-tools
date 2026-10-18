@@ -15,6 +15,15 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-18
 
+- **PR #7113**: fix(mcp): sync tools.md with server, register get_drc_violations, route_net stops overwriting input
+- **PR #7086**: fix(drc): match B.Silkscreen in silkscreen width/height rules
+- **PR #6874**: ci(board-07): move copper-safety DRC ratchet to scheduled slow-tests
+- **PR #6900**: ci: add Windows smoke job and skip RSS positivity test without resource
+- **PR #7110**: fix(optim,export): compute query_move routing impact and PnP rotation-correction count
+- **Issue #7111** (closed): MCP tools.md promises tools/params the server lacks (get_drc_violations unregistered, analyze_board renamed, route_net layer/width rejected)
+- **Issue #7078** (closed): Generated .kicad_dru silkscreen width/height rules apply to F.Silkscreen only
+- **Issue #6894** (closed): ci: add a Windows smoke job; skip test_peak_rss_bytes_positive where resource is unavailable
+- **Issue #7107** (closed): MCP responses report placeholders as measurements (query_move routing_impact, export_assembly rotation_corrections)
 - **PR #7090**: fix(drc): report when kicad-cli could not run schematic parity (#7077)
 - **PR #7100**: fix(export): safety floor and DRC preflight count opens and reject other-board reports
 - **PR #7095**: feat(creepage): add insulation-type input (basic/supplementary/reinforced), default basic
