@@ -15,6 +15,12 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-18
 
+- **PR #7130**: fix(cli): skip leading global options in footprint-generate and erc argv shims
+- **PR #7128**: feat: warn when a placement move clusters heat sources
+- **PR #7122**: fix(mcp): merge collinear segments in route_net before saving
+- **PR #7117**: fix: generate kct init DRU via generate_dru
+- **Issue #7120** (closed): MCP route_net writes one 0.1mm segment per grid cell (no collinear merge on saved copper)
+- **Issue #7116** (closed): kct init DRU template uses wrong constraint types (silkscreen width as silk_clearance; hole-to-edge as hole_to_hole)
 - **PR #7127**: fix(mcp): placement_suggestions, zipped Gerber count, board_view small sizes
 - **PR #7108**: fix(board03): re-derive copper from a class-clean lattice route (#6394)
 - **Issue #7045** (closed): Finish PredictiveAnalyzer._check_thermal: wire analysis/thermal.py into per-move predictive warnings
