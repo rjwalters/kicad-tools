@@ -47,6 +47,7 @@
     (fp_text value "IN" (at 0 4) (layer "F.Fab") (uuid "3cf18081-8b5f-5db8-89e2-26dffebcc7da")
       (effects (font (size 1 1) (thickness 0.15)))
     )
+    (fp_rect (start -1.77 -3.04) (end 1.77 3.05) (stroke (width 0.05) (type solid)) (fill no) (layer "F.CrtYd") (uuid "a6f27e22-b667-50df-821e-c55b2336d0cf"))
     (pad "1" thru_hole rect (at 0 -1.270) (size 1.7 1.7) (drill 1.0) (layers "*.Cu" "*.Mask") (net 1 "VIN") (pinfunction "Pin_1") (pintype "passive"))
     (pad "2" thru_hole oval (at 0 1.270) (size 1.7 1.7) (drill 1.0) (layers "*.Cu" "*.Mask") (net 3 "GND") (pinfunction "Pin_2") (pintype "passive"))
   	(model "${KICAD10_3DMODEL_DIR}/Connector_PinHeader_2.54mm.3dshapes/PinHeader_1x02_P2.54mm_Vertical.step"
@@ -71,6 +72,7 @@
     (fp_text value "10k" (at 0 1.5) (layer "F.Fab") (uuid "a26007d7-6bdb-5268-ac2a-0e92426b9bf0")
       (effects (font (size 1 1) (thickness 0.15)))
     )
+    (fp_rect (start -1.75 -0.95) (end 1.75 0.95) (stroke (width 0.05) (type solid)) (fill no) (layer "F.CrtYd") (uuid "e56bb8d9-c1e2-5996-a633-b738a9e4d87d"))
     (pad "1" smd roundrect (at -1.0 0) (size 1.0 1.3) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 1 "VIN") (pintype "passive"))
     (pad "2" smd roundrect (at 1.0 0) (size 1.0 1.3) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 2 "VOUT") (pintype "passive"))
   	(model "${KICAD10_3DMODEL_DIR}/Resistor_SMD.3dshapes/R_0805_2012Metric.step"
@@ -95,6 +97,7 @@
     (fp_text value "10k" (at 0 1.5) (layer "F.Fab") (uuid "26ce8dcf-a27b-5353-9658-15a8e0333c2a")
       (effects (font (size 1 1) (thickness 0.15)))
     )
+    (fp_rect (start -1.75 -0.95) (end 1.75 0.95) (stroke (width 0.05) (type solid)) (fill no) (layer "F.CrtYd") (uuid "89a11aba-32b1-5d58-bd0b-e4b4e361d255"))
     (pad "1" smd roundrect (at -1.0 0) (size 1.0 1.3) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 2 "VOUT") (pintype "passive"))
     (pad "2" smd roundrect (at 1.0 0) (size 1.0 1.3) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 3 "GND") (pintype "passive"))
   	(model "${KICAD10_3DMODEL_DIR}/Resistor_SMD.3dshapes/R_0805_2012Metric.step"
@@ -119,6 +122,7 @@
     (fp_text value "OUT" (at 0 4) (layer "F.Fab") (uuid "abe24c53-a3fe-5071-872b-bc41ed84ff72")
       (effects (font (size 1 1) (thickness 0.15)))
     )
+    (fp_rect (start -1.77 -3.04) (end 1.77 3.05) (stroke (width 0.05) (type solid)) (fill no) (layer "F.CrtYd") (uuid "5e688c37-3e3d-5fe8-891d-4a4d4ec8bd41"))
     (pad "1" thru_hole rect (at 0 -1.270) (size 1.7 1.7) (drill 1.0) (layers "*.Cu" "*.Mask") (net 2 "VOUT") (pinfunction "Pin_1") (pintype "passive"))
     (pad "2" thru_hole oval (at 0 1.270) (size 1.7 1.7) (drill 1.0) (layers "*.Cu" "*.Mask") (net 3 "GND") (pinfunction "Pin_2") (pintype "passive"))
   	(model "${KICAD10_3DMODEL_DIR}/Connector_PinHeader_2.54mm.3dshapes/PinHeader_1x02_P2.54mm_Vertical.step"

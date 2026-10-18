@@ -2,7 +2,7 @@ Manufacturing package for voltage_divider_routed.kicad_pcb
 
 Fabrication tier : jlcpcb
 Mode             : assembly
-Generated        : 2026-10-18T10:56:14.901788+00:00
+Generated        : 2026-10-18T11:41:07.299590+00:00
 
 Assembly package: BOM and CPL are included.
 
