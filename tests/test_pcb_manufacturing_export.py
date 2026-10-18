@@ -208,6 +208,9 @@ class TestExportGerbersZip:
                 with zipfile.ZipFile(output, "r") as zf:
                     names = zf.namelist()
                     assert len(names) > 0
+                    # Files sit at the root, not inside a nested gerbers.zip
+                    # (Issue #7023).
+                    assert not any(n.endswith(".zip") for n in names)
             except ExportError as e:
                 # kicad-cli may fail for various reasons
                 pytest.skip(f"kicad-cli export failed: {e}")
