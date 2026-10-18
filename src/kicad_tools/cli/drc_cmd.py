@@ -34,6 +34,7 @@ from ..drc import (
     DRCReport,
     DRCViolation,
     ViolationCategory,
+    ViolationType,
     check_manufacturer_rules,
     generate_fix_suggestions,
 )
@@ -100,6 +101,15 @@ def build_parser() -> argparse.ArgumentParser:
             "schematic resolved, several candidates, one kicad-cli cannot "
             "netlist, or a report that does not record whether parity ran). "
             "Same name and meaning as kct check --allow-incomplete (Issue #7077)"
+        ),
+    )
+    parser.add_argument(
+        "--ignore-unconnected",
+        action="store_true",
+        help=(
+            "Do not count unconnected-item (missing connection) findings toward "
+            "the verdict and exit code -- the old clearance-only semantics. By "
+            "default an unrouted board fails DRC (Issue #7096)"
         ),
     )
     parser.add_argument(
@@ -293,6 +303,9 @@ def main(argv: list[str] | None = None) -> int:
                     pcb_name=report.pcb_name,
                     violations=filter_result.kept,
                     footprint_errors=report.footprint_errors,
+                    # Issue #7096: keep connectivity items so filtering cannot
+                    # turn an unrouted board into a pass.
+                    unconnected_items=report.unconnected_items,
                     # Issue #7077: parity findings and the run signal are not
                     # geometric violations; carry them through untouched.
                     schematic_parity=report.schematic_parity,
@@ -322,6 +335,7 @@ def main(argv: list[str] | None = None) -> int:
         # Issue #7170: --mfr shares the plain path's exit gate
         # (_drc_exit_code), including schematic parity, --strict and
         # --allow-incomplete.  This replaces #7077's separate 0/1 rule.
+        # Issue #7096: error-severity unconnected items fold into it too.
         return output_manufacturer_check(
             report,
             args.mfr,
@@ -330,6 +344,7 @@ def main(argv: list[str] | None = None) -> int:
             fmt=args.format,
             strict=args.strict,
             allow_incomplete=args.allow_incomplete,
+            ignore_unconnected=args.ignore_unconnected,
         )
 
     # Apply waivers to the parsed report (Issue #4691).  Runs before the
@@ -343,6 +358,16 @@ def main(argv: list[str] | None = None) -> int:
 
     # Apply filters
     violations = list(report.violations)
+
+    # Issue #7096: connectivity items (KiCad's separate ``unconnected_items``
+    # array) are listed and gate the verdict by their own severity, like any
+    # other finding, so an unrouted board cannot read as DRC PASSED.  Every
+    # severity (and waived entries) is folded in so a JSON report reads the
+    # same as the text ``.rpt``, whose flat list already holds them;
+    # ``connectivity_items()`` also returns those, so skip them here.
+    if not args.ignore_unconnected:
+        listed = {id(v) for v in violations}
+        violations.extend(v for v in report.connectivity_items() if id(v) not in listed)
 
     if args.errors_only:
         violations = [v for v in violations if v.is_error]
@@ -424,8 +449,10 @@ def _drc_exit_code(
 
     ``error_count`` / ``warning_count`` are the caller's own findings; the
     schematic parity findings are folded in here, by their own severity
-    (Issue #7077), so neither path can forget them.  Issue #7096
-    (unconnected items) is meant to fold in the same way.
+    (Issue #7077), so neither path can forget them.  Error-severity unconnected
+    items (Issue #7096) are already in ``error_count``: the plain path folds
+    them into its ``violations`` list and ``--mfr`` adds them to its gate
+    counts, unless ``--ignore-unconnected``.
 
     Returns 1 when any error remains, 2 for warnings under ``strict`` or for
     schematic parity NOT RUN without ``allow_incomplete`` (a check that did
@@ -442,6 +469,11 @@ def _drc_exit_code(
     if not parity.checked and not allow_incomplete:
         return 2
     return 0
+
+
+def _error_connectivity_items(report: DRCReport) -> list[DRCViolation]:
+    """Error-severity (unwaived) connectivity entries of ``report`` (Issue #7096)."""
+    return [v for v in report.connectivity_items() if v.is_error]
 
 
 def _load_waivers(explicit: str | None, input_path: Path) -> tuple["Waivers | None", int]:
@@ -843,6 +875,8 @@ def output_json(
         "errors": sum(1 for v in violations if v.is_error),
         "warnings": sum(1 for v in violations if not v.is_error and not v.is_waived),
     }
+    # Issue #7096: explicit count of missing-connection findings in ``violations``.
+    summary["unconnected"] = sum(1 for v in violations if v.type == ViolationType.UNCONNECTED_ITEMS)
     summary["parity_errors"] = parity.error_count
     summary["parity_warnings"] = parity.warning_count
     if waived_count > 0:
@@ -965,6 +999,7 @@ def output_manufacturer_check(
     fmt: str = "table",
     strict: bool = False,
     allow_incomplete: bool = False,
+    ignore_unconnected: bool = False,
 ) -> int:
     """Check DRC violations against manufacturer limits.
 
@@ -975,6 +1010,13 @@ def output_manufacturer_check(
     format prints the table.  The exit code comes from :func:`_drc_exit_code`,
     the same gate plain ``kct drc`` uses, so schematic parity, ``--strict``
     and ``--allow-incomplete`` behave identically in both modes.
+
+    Issue #7096: error-severity unconnected items fail this check too (unless
+    ``ignore_unconnected``) -- no fab can build an unrouted board.  KiCad JSON
+    reports keep them in a separate collection that
+    :func:`check_manufacturer_rules` never sees, so they are added to the gate
+    counts here; text ``.rpt`` entries already sit in ``report.violations``
+    (and so in ``checks``) and are not counted twice.
     """
     profile = get_profile(mfr)
     parity = report.schematic_parity_status
@@ -984,6 +1026,12 @@ def output_manufacturer_check(
     nc_errors = sum(1 for c in not_checked if c.violation.is_error)
     nc_warnings = len(not_checked) - nc_errors
     error_count, warning_count = _manufacturer_gate_counts(checks)
+    # Issue #7096: every error-severity connectivity item, for display; only
+    # the ones not already judged in ``checks`` add to the gate.
+    unconnected = [] if ignore_unconnected else _error_connectivity_items(report)
+    in_checks = {id(c.violation) for c in checks}
+    unconnected_extra = [v for v in unconnected if id(v) not in in_checks]
+    error_count += len(unconnected_extra)
     exit_code = _drc_exit_code(
         error_count,
         warning_count,
@@ -1006,9 +1054,14 @@ def output_manufacturer_check(
                 "not_checked_errors": nc_errors,
                 "not_checked_warnings": nc_warnings,
                 "not_checked_by_type": _count_by_type(not_checked),
+                "unconnected": len(unconnected),
                 "parity_errors": parity.error_count,
                 "parity_warnings": parity.warning_count,
             },
+            # Issue #7096: error-severity missing connections (unrouted nets).
+            # Text ``.rpt`` entries also appear in ``checks`` (as connection
+            # failures); the exit gate counts each one once.
+            "unconnected_items": [v.to_dict() for v in unconnected],
             "checks": [
                 {
                     "type_str": c.violation.type_str or c.violation.type.value,
@@ -1066,14 +1119,24 @@ def output_manufacturer_check(
             print(f"All {len(compatible)} checked violations are compatible{suffix}.")
         elif not_checked:
             print(f"No violation could be checked against {profile.name} limits.")
-        else:
+        elif not unconnected_extra:
             print("No DRC violations to check.")
+
+    # Issue #7096: text-report entries are already judged (and listed) as
+    # INCOMPATIBLE connection failures above.
+    if unconnected_extra:
+        print(f"\n{'-' * 60}")
+        print(f"UNCONNECTED ITEMS ({len(unconnected_extra)}): board is not fully routed")
+        for v in unconnected_extra:
+            print(f"  [X] {v.message}")
 
     print(f"\n{'=' * 60}")
     print(
         f"Compatible: {len(compatible)}, Incompatible: {len(incompatible)}, "
         f"Not checked: {len(not_checked)}"
     )
+    if unconnected:
+        print(f"Unconnected: {len(unconnected)}")
 
     if profile.supports_assembly():
         print("Assembly: Supported")
