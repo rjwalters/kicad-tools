@@ -6613,6 +6613,15 @@ def _fill_zones_after_route(
                 coupled_pairs=coupled_pairs,
                 pair_gaps=_router_pair_gaps(coupled_pairs, class_map, router),
             )
+            # Issue #7026: the selective fill stages the sibling ``.kicad_dru``,
+            # so write the native zone-clearance block first, as the full-fill
+            # path below does.  A refusal lands in ``_placement_fill_error``.
+            if getattr(args, "native_zone_clearance", False):
+                from kicad_tools.zones.native_clearance import (
+                    write_native_zone_clearance_rules,
+                )
+
+                write_native_zone_clearance_rules(output_path)
             fill_around_fixed_copper(output_path, disposition.preserve_copper_nets)
             if not quiet:
                 print("  Zone fill: complete; placement-excluded copper preserved")
