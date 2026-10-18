@@ -23,24 +23,21 @@ _None._
 
 `loom:important`; taken before unlabelled work.
 
-- **#6835**: router: raise flag-off coupled iteration budget to 350k/phase (700k total) so Board07 couples 6/7 pairs; soften endpoint-tolerance comment (#6826 follow-up)
 - **#6858**: router: coupled pre-pass should keep the better of the joint-search and pose-centreline candidates (compare-and-keep; unblocks #6835)
 
 ## Ready
 
 Human-approved issues ready for implementation (`loom:issue`).
 
-- **#6835**: router: raise flag-off coupled iteration budget to 350k/phase (700k total) so Board07 couples 6/7 pairs; soften endpoint-tolerance comment (#6826 follow-up)
+_None._
 
 ## In Progress
 
 Issues currently being built (`loom:building`).
 
 - **#5798**: [Epic #5784] Phase 4: deconfound kct's match-group length tuning on board 07 (measure first)
-- **#6404**: boards 00-07: refill saved zones and refresh hash-bound bundles/readiness after #6390's sidecar update
 - **#6554**: diffpair: reproduce KiCad's diff_pair_uncoupled primitive pairing exactly (kct is a lower bound)
 - **#7058**: kct creepage overstates creepage around a slot: the detour is computed between the straight-line nearest points, and narrow gaps are not bridged
-- **#7059**: kct export CPL coordinates are relative to the Edge.Cuts top-left with Y down, while the gerbers use the drill/place origin with Y up
 - **#7060**: CoupledLines overstates differential impedance of tightly coupled pairs (+17 % microstrip, +12 % stripline)
 - **#7062**: LDOBlock internal routing shorts foreign pads and crosses itself on real SOT-23-5 geometry
 - **#7064**: PCBLayout.route() draws a straight port-to-port line that crosses foreign pads and never reaches a pad
@@ -56,26 +53,23 @@ Issues currently being built (`loom:building`).
 - **#7150**: board 04 J1 value SWD-6 vs SWD (schematic vs PCB) + kct validate --sync should flag value mismatches (#7147 Part B)
 - **#7153**: kct export bundle inconsistencies: JLCPCB Gerbers omit paste layers for SMT bundles; board 04 manifest says DRC OK while report says FAIL/NOT_READY; report ERC falsely 'skipped by user request'
 - **#7159**: Route-time match-group tuner meanders through preserved foreign-net vias (board 07: 16 kicad-cli errors with --length-match-groups)
-- **#7161**: kct erc reports PASS (exit 0) where kicad-cli reports errors: cross-sheet global-label name-count filter drops true isolated_pin_label findings; power-pin sibling filter is inert on KiCad 10
+- **#7175**: Finish 4 stubbed CLI capabilities advertised in kct --help: lib create-symbol-lib / create-footprint-lib / generate-footprint (deps landed, #85/#87/#88 closed) and estimate cost --bom CSV
+- **#7180**: Part/footprint check misses .kct-assigned parts (boards 00/01/02/06) and SOIC vs TSSOP pitch (#7166 follow-up)
 
 ## PRs Awaiting Review
 
 PRs waiting on Judge (`loom:review-requested`).
 
-- **#6838**: perf(router): raise flag-off coupled iteration budget to 1.4M (700k/phase) with PCIE_TX/PCIE_RX/LVDS exceptions
-- **#7133**: fix(boards): run package_release producers on pinned toolchain and refresh board 01 readiness
-- **#7137**: test: move route --lint-gate JSON-contract variant to extended tier
-- **#7142**: test(mcp): smoke test calling every registered tool
-- **#7154**: fix: seed creepage detour from both shapes and bridge sub-X cutouts
-- **#7162**: fix(router): match-group tuner clears foreign preserved copper
-- **#7163**: fix(physics): solve edge-coupled Zdiff by field solve, not an empirical coupling factor
-- **#7165**: fix(export): emit CPL in the Gerber/drill frame (aux origin, Y up)
+- **#7171**: perf(router): make negotiated escape strategies transactional and cap their reroutes
+- **#7174**: fix(drc): fail kct drc on error-severity unconnected items
+- **#7177**: test: narrow route --lint-gate contract variant and return it to required tier
+- **#7179**: feat(cli): finish lib create-symbol-lib/create-footprint-lib/generate-footprint and estimate cost --bom CSV
 
 ## Approved (Awaiting Merge)
 
 PRs that passed review and are queued for Champion auto-merge (`loom:pr`).
 
-- **#7160**: fix(router): keep a match-group member's commits when a later attempt fails
+- **#7162**: fix(router): match-group tuner clears foreign preserved copper
 
 ## Proposed
 
@@ -90,16 +84,13 @@ Issues carrying `loom:curated`.
 - **#5509**: Epic: one clearance kernel — search, commit, and final validation must agree with kicad-cli DRC *(curated)*
 - **#5550**: Reconcile 4 outstanding loom-quarantine stashes left by the worktree reaper (issues 5201, 4982, 5216, 5004) *(curated)*
 - **#5798**: [Epic #5784] Phase 4: deconfound kct's match-group length tuning on board 07 (measure first) *(curated)*
-- **#6404**: boards 00-07: refill saved zones and refresh hash-bound bundles/readiness after #6390's sidecar update *(curated)*
 - **#6445**: [Epic #6441] Phase 3: via pairs as a single move in the lattice coupled centreline *(curated)*
 - **#6446**: [Epic #6441] Phase 4: budget-driven hybrid fallback — longest coupled trunk plus single-ended terminal legs *(curated)*
 - **#6527**: router: Router.route_bidirectional has no production caller; wire it into the Python fallback and measure, or remove it *(curated)*
 - **#6554**: diffpair: reproduce KiCad's diff_pair_uncoupled primitive pairing exactly (kct is a lower bound) *(curated)*
-- **#6835**: router: raise flag-off coupled iteration budget to 350k/phase (700k total) so Board07 couples 6/7 pairs; soften endpoint-tolerance comment (#6826 follow-up) *(curated)*
 - **#6858**: router: coupled pre-pass should keep the better of the joint-search and pose-centreline candidates (compare-and-keep; unblocks #6835) *(curated)*
 - **#7026**: board 03: fresh class-clean lattice route is not complete under the recipe's tier-1 zone fill (3 GND opens) *(curated)*
 - **#7058**: kct creepage overstates creepage around a slot: the detour is computed between the straight-line nearest points, and narrow gaps are not bridged *(curated)*
-- **#7059**: kct export CPL coordinates are relative to the Edge.Cuts top-left with Y down, while the gerbers use the drill/place origin with Y up *(curated)*
 - **#7060**: CoupledLines overstates differential impedance of tightly coupled pairs (+17 % microstrip, +12 % stripline) *(curated)*
 - **#7062**: LDOBlock internal routing shorts foreign pads and crosses itself on real SOT-23-5 geometry *(curated)*
 - **#7064**: PCBLayout.route() draws a straight port-to-port line that crosses foreign pads and never reaches a pad *(curated)*
@@ -116,7 +107,8 @@ Issues carrying `loom:curated`.
 - **#7150**: board 04 J1 value SWD-6 vs SWD (schematic vs PCB) + kct validate --sync should flag value mismatches (#7147 Part B) *(curated)*
 - **#7153**: kct export bundle inconsistencies: JLCPCB Gerbers omit paste layers for SMT bundles; board 04 manifest says DRC OK while report says FAIL/NOT_READY; report ERC falsely 'skipped by user request' *(curated)*
 - **#7159**: Route-time match-group tuner meanders through preserved foreign-net vias (board 07: 16 kicad-cli errors with --length-match-groups) *(curated)*
-- **#7161**: kct erc reports PASS (exit 0) where kicad-cli reports errors: cross-sheet global-label name-count filter drops true isolated_pin_label findings; power-pin sibling filter is inert on KiCad 10 *(curated)*
+- **#7175**: Finish 4 stubbed CLI capabilities advertised in kct --help: lib create-symbol-lib / create-footprint-lib / generate-footprint (deps landed, #85/#87/#88 closed) and estimate cost --bom CSV *(curated)*
+- **#7180**: Part/footprint check misses .kct-assigned parts (boards 00/01/02/06) and SOIC vs TSSOP pitch (#7166 follow-up) *(curated)*
 
 ## Proposed (Architect / Hermit)
 
@@ -127,8 +119,7 @@ Issues carrying `loom:curated`.
 - **#6448**: [Epic #6441] Phase 6: unify diff-pair engines — grid consumes PairPlan or grid coupled pre-pass retired *(architect)*
 - **#7136**: kct sign-off skills don't refuse bad boards: Gate 1 exits 2 on every board, kicad-cli gate exits 0 on errors, export never gets the DRC report, audit ERC never runs *(hermit)*
 - **#7153**: kct export bundle inconsistencies: JLCPCB Gerbers omit paste layers for SMT bundles; board 04 manifest says DRC OK while report says FAIL/NOT_READY; report ERC falsely 'skipped by user request' *(hermit)*
-- **#7161**: kct erc reports PASS (exit 0) where kicad-cli reports errors: cross-sheet global-label name-count filter drops true isolated_pin_label findings; power-pin sibling filter is inert on KiCad 10 *(hermit)*
-- **#7166**: Part-footprint sign-off false-PASS: kct readiness ignores bom_lcsc_values, preflight counts LCSC cache misses as checked, no IC package/pin-count check *(hermit)*
+- **#7175**: Finish 4 stubbed CLI capabilities advertised in kct --help: lib create-symbol-lib / create-footprint-lib / generate-footprint (deps landed, #85/#87/#88 closed) and estimate cost --bom CSV *(hermit)*
 
 ## Epics
 
@@ -147,13 +138,13 @@ Issues carrying `loom:curated`.
 |------|-------|
 | Operator merge-risk holds | 0 |
 | Very important | 0 |
-| Important | 2 |
-| Ready (`loom:issue`) | 1 |
-| In Progress (`loom:building`) | 21 |
-| PRs awaiting review | 8 |
+| Important | 1 |
+| Ready (`loom:issue`) | 0 |
+| In Progress (`loom:building`) | 20 |
+| PRs awaiting review | 4 |
 | Approved PRs awaiting merge | 1 |
-| Curated | 36 |
-| Architect / Hermit proposals | 9 |
+| Curated | 34 |
+| Architect / Hermit proposals | 8 |
 | Active epics | 8 |
 <!-- guide:plan-body:end -->
 
