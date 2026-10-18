@@ -517,20 +517,37 @@ def test_mcp_persist_keeps_micro_and_drills_the_rest_through(tmp_path):
     assert _keywordless_partial(text) == []
 
 
-def test_block_exporter_never_writes_a_keywordless_partial_via(caplog):
-    from kicad_tools.pcb.exporter import KiCadPCBExporter
+def test_block_exporter_never_writes_a_keywordless_partial_via(tmp_path, caplog):
+    """The PCBLayout -> board bridge (#7022) writes block vias via ``add_via``."""
+    from kicad_tools.pcb.geometry import Layer as BlockLayer
+    from kicad_tools.pcb.geometry import Point as BlockPoint
+    from kicad_tools.pcb.layout import PCBLayout
+    from kicad_tools.pcb.primitives import Via as BlockVia
 
-    exporter = KiCadPCBExporter.__new__(KiCadPCBExporter)
-    exporter._uuid = lambda: "u-1"  # type: ignore[method-assign]
-    exporter._format_coord = lambda value: str(value)  # type: ignore[method-assign]
-    with caplog.at_level(logging.WARNING, logger="kicad_tools.pcb.exporter"):
-        assert _vias(exporter._generate_via(1, 2, 0.6, 0.3, ("F.Cu", "B.Cu"), 1)) == [
-            (None, ("F.Cu", "B.Cu"))
-        ]
-        assert caplog.text == ""
-        assert _vias(exporter._generate_via(1, 2, 0.6, 0.3, ("F.Cu", "In1.Cu"), 1)) == [
-            ("blind", ("F.Cu", "In1.Cu"))
-        ]
+    source = tmp_path / "four_layer.kicad_pcb"
+    board = PCB.create(width=40, height=30, layers=4)
+    board.add_net("SIG")
+    board.save(str(source))
+    ox, oy = board.board_origin
+
+    layout = PCBLayout("vias")
+    layout.inter_block_vias.append(BlockVia(position=BlockPoint(ox + 5, oy + 5), net="SIG"))
+    layout.inter_block_vias.append(
+        BlockVia(
+            position=BlockPoint(ox + 10, oy + 5),
+            net="SIG",
+            layers=(BlockLayer.F_CU, BlockLayer.IN1_CU),
+        )
+    )
+    output = tmp_path / "out.kicad_pcb"
+    with caplog.at_level(logging.WARNING):
+        report = layout.apply_to_pcb(source, output)
+    assert report.vias_added == 2
+    text = output.read_text()
+    assert sorted(_vias(text), key=str) == sorted(
+        [(None, ("F.Cu", "B.Cu")), ("blind", ("F.Cu", "In1.Cu"))], key=str
+    )
+    assert _keywordless_partial(text) == []
     # Deriving an HDI via type is never silent.
     assert "partial span" in caplog.text and "blind" in caplog.text
 

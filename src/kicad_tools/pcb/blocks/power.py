@@ -35,12 +35,12 @@ class LDOBlock(PCBBlock):
         ldo_pads = get_footprint_pads(ldo_footprint)
         cap_pads = get_footprint_pads(cap_footprint)
 
-        # SOT-23-5 pinout (typical LDO like AP2204):
-        # Pin 1: VIN (top left)
-        # Pin 2: GND (top center)
-        # Pin 3: EN (top right)
-        # Pin 4: NC or BYPASS (bottom right)
-        # Pin 5: VOUT (bottom left)
+        # SOT-23-5 pinout (typical LDO like AP2204), KiCad library geometry:
+        # Pin 1: VIN (left, top)
+        # Pin 2: GND (left, middle)
+        # Pin 3: EN (left, bottom)
+        # Pin 4: NC or BYPASS (right, bottom)
+        # Pin 5: VOUT (right, top)
 
         # Place LDO at center
         self.ldo = self.add_component(ldo_ref, ldo_footprint, 0, 0, pads=ldo_pads)

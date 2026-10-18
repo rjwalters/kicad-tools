@@ -592,6 +592,20 @@ declares an `HV` net class) runs the same measured creepage/clearance audit
 of the requirement is recorded in the report but can never by itself produce
 `passed`; only a thresholded census bound to that PCB and net-class-map can.
 
+**Derived clearance (IEC 60664-1, issue #7057).** With `--standard` /
+`--hv-standard`, the required clearance is
+`max(Table F.2[U_imp], Table F.8[V_rms x sqrt(2)], pollution-degree floor)`
+for basic insulation, case A, altitude <= 2000 m. `U_imp` is the Table F.1
+rated impulse withstand voltage for the working voltage (taken as the
+line-to-neutral rated voltage, stepped up to the 50/100/150/300/600/1000 V
+row) and the overvoltage category, set with
+`kct creepage --overvoltage-category {I,II,III,IV}` or
+`kct audit --hv-overvoltage-category {I,II,III,IV}` (default `II`, equipment
+fed from the fixed mains installation). For example 230 V at OVC II gives
+`U_imp` = 2500 V and 1.5 mm; OVC I 0.5 mm, III 3.0 mm, IV 5.5 mm. The
+`kct readiness` HV gate always uses the default `II`. Creepage is IEC
+60664-1:2020 Table F.5 (Table F.4 in the 2007 edition).
+
 **Examples:**
 ```bash
 # Generate the assembly package at the tier recorded in the board's own recipe

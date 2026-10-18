@@ -47,7 +47,12 @@ from .power import LDOBlock
 
 
 def __getattr__(name: str):
-    """Lazy import for layout and exporter to avoid circular imports."""
+    """Lazy import for ``PCBLayout`` and the layout -> board bridge.
+
+    Avoids the ``exporter`` -> ``layout`` -> ``blocks`` import cycle.  The
+    bridge's ``LayoutApplyError`` / ``LayoutApplyReport`` live in
+    ``kicad_tools.pcb`` only.
+    """
     if name == "PCBLayout":
         from ..layout import PCBLayout
 

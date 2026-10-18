@@ -249,10 +249,12 @@ def check_hard_constraints(
 
     Args:
         pcb: The PCB under evaluation.
-        manufacturer: Manufacturer profile name.  When supplied along with a
-            DRC report, the count is compared against the tolerance
-            allowlist.  When ``None`` (the default), the DRC check just
-            requires ``drc_report.error_count == 0``.
+        manufacturer: Reserved and currently unused (kept for signature
+            compatibility); ``None`` and any name behave identically.  The
+            DRC tolerance floor applies whenever both
+            ``tolerance_allowlist_path`` and ``pcb_path`` are given;
+            otherwise the floor is 0 and the check requires
+            ``drc_report.error_count == 0``.
         drc_report: A DRC report object exposing ``error_count``.
             ``None`` skips the DRC check.
         erc_report: An ERC report object exposing ``error_count``.
@@ -421,7 +423,8 @@ def compute_fom(
             :class:`~kicad_tools.schema.pcb.PCB`, not a path.
         weights: Per-term weights.  Defaults to :func:`default_weights`
             (uniform 1.0) when ``None``.
-        manufacturer: Manufacturer profile (forwarded to the DRC check).
+        manufacturer: Reserved and currently unused; forwarded to
+            :func:`check_hard_constraints`, which ignores it.
         drc_report: Optional DRC report (forwarded to
             :func:`check_hard_constraints`).
         erc_report: Optional ERC report (forwarded).

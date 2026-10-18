@@ -25,8 +25,11 @@ class LEDBlock(PCBBlock):
         led_pads = {"1": (-0.8, 0), "2": (0.8, 0)}  # 1=cathode, 2=anode
         res_pads = get_footprint_pads(res_footprint)
 
-        # LED and resistor in line
-        self.add_component(led_ref, led_footprint, 0, 0, pads=led_pads)
+        # LED and resistor in line.  The LED is turned 180 degrees so its
+        # cathode (pad 1) faces the resistor and its anode (pad 2) faces the
+        # ANODE port: at rotation 0 the cathode-to-resistor trace ran
+        # straight through the anode pad, a short (Issue #7022 review).
+        self.add_component(led_ref, led_footprint, 0, 0, rotation=180, pads=led_pads)
         self.add_component(res_ref, res_footprint, 3.0, 0, pads=res_pads)
 
         # LED cathode to resistor

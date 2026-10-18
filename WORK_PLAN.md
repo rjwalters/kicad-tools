@@ -37,25 +37,27 @@ _None._
 Issues currently being built (`loom:building`).
 
 - **#5798**: [Epic #5784] Phase 4: deconfound kct's match-group length tuning on board 07 (measure first)
-- **#6394**: board 03: 13 copper violations of the router's own Power class (0.2 mm) exposed by #6390
 - **#6554**: diffpair: reproduce KiCad's diff_pair_uncoupled primitive pairing exactly (kct is a lower bound)
 - **#6894**: ci: add a Windows smoke job; skip test_peak_rss_bytes_positive where resource is unavailable (follow-up #6739)
-- **#6969**: match-group tuner: meanders find no DRC room on dense kct copper, and all-or-nothing rollback discards partial progress (board 07)
-- **#6994**: [Epic #5509] Phase 4e slice 4: one search-radius rounding rule (guarded) for Python and C++ A*, rip-up and CoupledPathfinder
-- **#7003**: router cache: a cache hit on board 06b returns different copper (230 vs 254 items) than the fresh route
-- **#7008**: Consolidate copy-pasted wire/grid helpers across kct sch CLI modules (9x _snap, 4x _point_on_wire_midpoint, 4x _find_wires_at_point)
-- **#7011**: Consolidate 11 copy-pasted S-expression builder helpers across test_sch_validate_* tests (~700 LOC)
-- **#7012**: Resolve 10 tests that can never run: 9 skipped since #3133 closed (May), 1 self-skipping (~325 LOC delete, 3 fixtures to repair)
-- **#7014**: router cache key omits native BUILD_VERSION and PYTHONHASHSEED (stale copper after a C++ rebuild; follow-up #7003)
+- **#7022**: Finish pcb/exporter.py: working PCBLayout → real .kicad_pcb bridge (placements + inter-block traces) on the PCB model
+- **#7026**: board 03: fresh class-clean lattice route is not complete under the recipe's tier-1 zone fill (3 GND opens)
+- **#7042**: main red: #7036 changed board-03 routing_plan.py without refreshing readiness.json (test_committed_readiness_inputs_match_tree[03-usb-joystick])
+- **#7045**: Finish PredictiveAnalyzer._check_thermal: wire analysis/thermal.py into per-move predictive warnings
+- **#7046**: PCBBlock rotation at 90/270 deg disagrees with KiCad's footprint rotation: block traces miss their pads
+- **#7051**: Remove no-op `kct route --batch-routing` and the orphaned 1,111-line BatchPathfinder GPU kernel (flag only prints 'GPU-accelerated')
+- **#7056**: kct placement align --tolerance is a no-op: align_components ignores tolerance_mm, overcounts moves, silently centres on mismatched --reference
+- **#7057**: kct creepage --standard iec60664: required clearance is looked up in Table F.2 by peak working voltage, so mains clearance comes out 0.2 mm instead of 1.5 mm
+- **#7058**: kct creepage overstates creepage around a slot: the detour is computed between the straight-line nearest points, and narrow gaps are not bridged
+- **#7059**: kct export CPL coordinates are relative to the Edge.Cuts top-left with Y down, while the gerbers use the drill/place origin with Y up
+- **#7063**: board 04: KiCad 10.0.7 ERC reports 3 same_local_global_label warnings (power symbol vs local label); test_committed_pcb_within_gate_at_declared_tier[04] fails on 10.0.7 hosts
 
 ## PRs Awaiting Review
 
 PRs waiting on Judge (`loom:review-requested`).
 
-- **#7007**: fix: replay committed coupled diff pairs on routing-cache hit
-- **#7010**: refactor: consolidate copy-pasted sch wire helpers into sch_wire_common
-- **#7013**: test: consolidate sch_validate S-expression builder helpers
-- **#7015**: test: resolve 10 never-running tests left behind by #3133
+- **#7050**: feat(pcb): apply PCBLayout to a real board through the PCB model
+- **#7052**: fix(pcb): rotate PCBBlock in KiCad's footprint convention at 90/270
+- **#7055**: refactor: remove unwired GPU batch-routing kernel; deprecate --batch-routing
 
 ## Approved (Awaiting Merge)
 
@@ -63,7 +65,10 @@ PRs that passed review and are queued for Champion auto-merge (`loom:pr`).
 
 - **#6874**: ci(board-07): move copper-safety DRC ratchet to scheduled slow-tests
 - **#6900**: ci: add Windows smoke job and skip RSS positivity test without resource
-- **#7016**: fix(router): key the routing cache on the native router build (#7014)
+- **#7054**: chore(board-03): refresh readiness evidence after #7036 (main CI red, #7042)
+- **#7061**: fix(placement): honour align --tolerance, count real moves, reject bad axis/reference
+- **#7068**: fix(board04): use global labels for power nets to clear same_local_global_label
+- **#7069**: fix: make four documented-but-dead CLI flags real or honest
 
 ## Proposed
 
@@ -88,13 +93,20 @@ Issues carrying `loom:curated`.
 - **#6835**: router: raise flag-off coupled iteration budget to 350k/phase (700k total) so Board07 couples 6/7 pairs; soften endpoint-tolerance comment (#6826 follow-up) *(curated)*
 - **#6858**: router: coupled pre-pass should keep the better of the joint-search and pose-centreline candidates (compare-and-keep; unblocks #6835) *(curated)*
 - **#6894**: ci: add a Windows smoke job; skip test_peak_rss_bytes_positive where resource is unavailable (follow-up #6739) *(curated)*
-- **#6969**: match-group tuner: meanders find no DRC room on dense kct copper, and all-or-nothing rollback discards partial progress (board 07) *(curated)*
-- **#6994**: [Epic #5509] Phase 4e slice 4: one search-radius rounding rule (guarded) for Python and C++ A*, rip-up and CoupledPathfinder *(curated)*
-- **#7003**: router cache: a cache hit on board 06b returns different copper (230 vs 254 items) than the fresh route *(curated)*
-- **#7008**: Consolidate copy-pasted wire/grid helpers across kct sch CLI modules (9x _snap, 4x _point_on_wire_midpoint, 4x _find_wires_at_point) *(curated)*
-- **#7011**: Consolidate 11 copy-pasted S-expression builder helpers across test_sch_validate_* tests (~700 LOC) *(curated)*
-- **#7012**: Resolve 10 tests that can never run: 9 skipped since #3133 closed (May), 1 self-skipping (~325 LOC delete, 3 fixtures to repair) *(curated)*
-- **#7014**: router cache key omits native BUILD_VERSION and PYTHONHASHSEED (stale copper after a C++ rebuild; follow-up #7003) *(curated)*
+- **#7022**: Finish pcb/exporter.py: working PCBLayout → real .kicad_pcb bridge (placements + inter-block traces) on the PCB model *(curated)*
+- **#7026**: board 03: fresh class-clean lattice route is not complete under the recipe's tier-1 zone fill (3 GND opens) *(curated)*
+- **#7045**: Finish PredictiveAnalyzer._check_thermal: wire analysis/thermal.py into per-move predictive warnings *(curated)*
+- **#7046**: PCBBlock rotation at 90/270 deg disagrees with KiCad's footprint rotation: block traces miss their pads *(curated)*
+- **#7051**: Remove no-op `kct route --batch-routing` and the orphaned 1,111-line BatchPathfinder GPU kernel (flag only prints 'GPU-accelerated') *(curated)*
+- **#7056**: kct placement align --tolerance is a no-op: align_components ignores tolerance_mm, overcounts moves, silently centres on mismatched --reference *(curated)*
+- **#7057**: kct creepage --standard iec60664: required clearance is looked up in Table F.2 by peak working voltage, so mains clearance comes out 0.2 mm instead of 1.5 mm *(curated)*
+- **#7058**: kct creepage overstates creepage around a slot: the detour is computed between the straight-line nearest points, and narrow gaps are not bridged *(curated)*
+- **#7059**: kct export CPL coordinates are relative to the Edge.Cuts top-left with Y down, while the gerbers use the drill/place origin with Y up *(curated)*
+- **#7060**: CoupledLines overstates differential impedance of tightly coupled pairs (+17 % microstrip, +12 % stripline) *(curated)*
+- **#7063**: board 04: KiCad 10.0.7 ERC reports 3 same_local_global_label warnings (power symbol vs local label); test_committed_pcb_within_gate_at_declared_tier[04] fails on 10.0.7 hosts *(curated)*
+- **#7065**: Finish or make honest four CLI flags whose documented behaviour is never implemented (parts import -i, sch validate --lib-path, fom manufacturer, optimize-traces -v) *(curated)*
+- **#7070**: docs: CLI reference gaps after #7069 (parts import, optimize-traces -v/--length-match, sch validate options, stats.per_net) *(curated)*
+- **#7071**: router: negotiated oscillation escape burns ~27 s (≈40% of board-02 wall) on four non-transactional strategies, then is rolled back (P1 of #7053 note, mislabelled 'perturbation pass') *(curated)*
 
 ## Proposed (Architect / Hermit)
 
@@ -103,9 +115,9 @@ Issues carrying `loom:curated`.
 - **#6446**: [Epic #6441] Phase 4: budget-driven hybrid fallback — longest coupled trunk plus single-ended terminal legs *(architect)*
 - **#6447**: [Epic #6441] Phase 5: coupling-preserving skew tuning from a skew ledger, and pair invariants for post-passes *(architect)*
 - **#6448**: [Epic #6441] Phase 6: unify diff-pair engines — grid consumes PairPlan or grid coupled pre-pass retired *(architect)*
-- **#7008**: Consolidate copy-pasted wire/grid helpers across kct sch CLI modules (9x _snap, 4x _point_on_wire_midpoint, 4x _find_wires_at_point) *(hermit)*
-- **#7011**: Consolidate 11 copy-pasted S-expression builder helpers across test_sch_validate_* tests (~700 LOC) *(hermit)*
-- **#7017**: Collapse the kct route three-hop parser: pass argv straight to route_cmd (delete ~1,775-line outer parser + ~605-line forwarding shim) *(hermit)*
+- **#7051**: Remove no-op `kct route --batch-routing` and the orphaned 1,111-line BatchPathfinder GPU kernel (flag only prints 'GPU-accelerated') *(hermit)*
+- **#7071**: router: negotiated oscillation escape burns ~27 s (≈40% of board-02 wall) on four non-transactional strategies, then is rolled back (P1 of #7053 note, mislabelled 'perturbation pass') *(hermit)*
+- **#7072**: kct route --region-parallel is a silent no-op on the escape/two-phase/other paths and cannot overlap work where it engages (grid lock + GIL): warn when ignored, drop the 2-3x/3-4x speedup claims *(hermit)*
 
 ## Epics
 
@@ -126,10 +138,10 @@ Issues carrying `loom:curated`.
 | Very important | 0 |
 | Important | 0 |
 | Ready (`loom:issue`) | 0 |
-| In Progress (`loom:building`) | 11 |
-| PRs awaiting review | 4 |
-| Approved PRs awaiting merge | 3 |
-| Curated | 26 |
+| In Progress (`loom:building`) | 14 |
+| PRs awaiting review | 3 |
+| Approved PRs awaiting merge | 6 |
+| Curated | 33 |
 | Architect / Hermit proposals | 8 |
 | Active epics | 8 |
 <!-- guide:plan-body:end -->
