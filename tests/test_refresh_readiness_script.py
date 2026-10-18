@@ -248,3 +248,52 @@ def test_allowance_comes_from_the_boards_recorded_known_issues(mod, tmp_path):
     assert mod.known_issue_allowance(board) == {"thermal_asymmetry": 9}
     (board / "output" / "readiness.json").write_text(json.dumps({}))
     assert mod.known_issue_allowance(board) == {}
+
+
+# ---------------------------------------------------------------- known issues (#7323)
+CHECKED_AT = "2026-10-18T00:00:00+00:00"
+ADVISORY = "7220:one-sided thermal:advisory:thermal_asymmetry=1"
+
+
+def _evidence(board: Path) -> Path:
+    return board / "output" / "readiness" / "known-issues.json"
+
+
+def test_known_issue_flag_binds_the_evidence_file_into_inputs(mod, tmp_path, monkeypatch):
+    board = _hooked_board(mod, tmp_path, monkeypatch, warnings=0)
+    published = mod.refresh(board, CHECKED_AT, known_issue=[ADVISORY])
+
+    assert "output/readiness/known-issues.json" in published
+    report = json.loads((board / "output" / "readiness.json").read_text())
+    assert [e["issue"] for e in report["known_issues"]] == [7220]
+    assert json.loads(_evidence(board).read_text()) == {"known_issues": report["known_issues"]}
+    assert report["inputs"]["output/readiness/known-issues.json"] == mod.sha256(_evidence(board))
+
+
+def test_resolve_known_issue_flag_drops_entry_file_and_binding(mod, tmp_path, monkeypatch):
+    board = _hooked_board(mod, tmp_path, monkeypatch, warnings=0)
+    mod.refresh(board, CHECKED_AT, known_issue=["7220:thermal:advisory"])
+    assert _evidence(board).is_file()
+
+    published = mod.refresh(board, CHECKED_AT, resolve_known_issue=["#7220"])
+
+    assert "output/readiness/known-issues.json (removed)" in published
+    report = json.loads((board / "output" / "readiness.json").read_text())
+    assert "known_issues" not in report
+    assert "output/readiness/known-issues.json" not in report["inputs"]
+    assert not _evidence(board).exists()
+
+
+def test_resolving_an_unrecorded_issue_publishes_nothing(mod, tmp_path, monkeypatch):
+    board = _hooked_board(mod, tmp_path, monkeypatch, warnings=0)
+    before = {p: p.read_bytes() for p in board.rglob("*") if p.is_file()}
+    with pytest.raises(mod.GateFailure, match="not recorded on this board"):
+        mod.refresh(board, CHECKED_AT, resolve_known_issue=["7220"])
+    assert {p: p.read_bytes() for p in board.rglob("*") if p.is_file()} == before
+
+
+def test_dry_run_with_known_issue_leaves_the_board_untouched(mod, tmp_path, monkeypatch):
+    board = _hooked_board(mod, tmp_path, monkeypatch, warnings=0)
+    before = {p: p.read_bytes() for p in board.rglob("*") if p.is_file()}
+    mod.refresh(board, CHECKED_AT, dry_run=True, known_issue=["7220:thermal:advisory"])
+    assert {p: p.read_bytes() for p in board.rglob("*") if p.is_file()} == before
