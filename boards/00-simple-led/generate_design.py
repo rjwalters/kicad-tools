@@ -51,6 +51,9 @@ def generate_uuid() -> str:
 # the courtyards does not shift any pre-existing item's UUID.
 _CRTYD_UUIDS = UuidSequence("boards/00-simple-led/simple_led.kicad_pcb:courtyard")
 
+# F.Fab body UUIDs (Issue #7211) likewise get their own sequence.
+_FAB_UUIDS = UuidSequence("boards/00-simple-led/simple_led.kicad_pcb:fab")
+
 
 def courtyard_rect(x0: float, y0: float, x1: float, y1: float) -> str:
     """An ``F.CrtYd`` rectangle in footprint-local coordinates (Issue #7204).
@@ -268,6 +271,7 @@ def create_led_pcb(output_dir: Path) -> Path:
     print("=" * 60)
     _PCB_UUIDS.reset()
     _CRTYD_UUIDS.reset()
+    _FAB_UUIDS.reset()
 
     # Board dimensions (mm)
     BOARD_WIDTH = 25.0
@@ -475,6 +479,23 @@ def create_led_pcb(output_dir: Path) -> Path:
         # y +-3.21 with pad 1 at x=0; pad 1 sits at x=-1.27 here, so the
         # stock box becomes x -3.21..3.22.  It already contains the pads
         # plus 0.25 mm (x +-2.42, y +-1.15).
+        # F.Fab body (Issue #7211): stock KiCad 10 outline (r = 2.5 mm circle
+        # centred on the body plus the flat closed by an arc), shifted -1.27 mm
+        # like the rest of the footprint.  Without it ``package_body_polygon``
+        # falls back to the courtyard and ``pin1_marker_obscured`` tests the
+        # silk against that box instead of the real 5 mm LED body.
+        fab_stroke = "(stroke (width 0.1) (type solid))"
+        fab = "\n".join(
+            [
+                '    (fp_line (start -2.5 -1.469694) (end -2.5 1.469694) '
+                f'{fab_stroke} (layer "F.Fab") (uuid "{_FAB_UUIDS()}"))',
+                '    (fp_arc (start -2.5 -1.469694) (mid 2.9 0) (end -2.5 1.469694) '
+                f'{fab_stroke} (layer "F.Fab") (uuid "{_FAB_UUIDS()}"))',
+                '    (fp_circle (center 0 0) (end 2.5 0) '
+                f'{fab_stroke} (fill no) (layer "F.Fab") (uuid "{_FAB_UUIDS()}"))',
+            ]
+        )
+
         return f"""  (footprint "LED_THT:LED_D5.0mm"
     (layer "F.Cu")
     (uuid "{generate_uuid()}")
@@ -486,6 +507,7 @@ def create_led_pcb(output_dir: Path) -> Path:
       (effects (font (size 1 1) (thickness 0.15)))
     )
 {silk}
+{fab}
 {courtyard_rect(-3.21, -3.21, 3.22, 3.21)}
     (pad "1" thru_hole rect (at {-pitch:.3f} 0 0) (size 1.8 1.8) (drill 0.9) (layers "*.Cu" "*.Mask") (net {cathode_num} "{cathode_net}"))
     (pad "2" thru_hole circle (at {pitch:.3f} 0 0) (size 1.8 1.8) (drill 0.9) (layers "*.Cu" "*.Mask") (net {anode_num} "{anode_net}"))
