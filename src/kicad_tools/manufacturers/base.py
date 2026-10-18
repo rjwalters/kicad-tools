@@ -323,6 +323,27 @@ class AssemblyCapabilities:
     supports_bga: bool = True
     supports_fine_pitch: bool = True  # < 0.5mm pitch
 
+    # Service-tier fields (Issue #7204).  A fab that sells several PCBA
+    # services with different limits (JLCPCB Economic vs Standard) lists one
+    # ``AssemblyCapabilities`` per service in
+    # ``ManufacturerProfile.assembly_tiers``; these fields describe what
+    # distinguishes a tier.  All default to "no published limit".
+    tier_name: str | None = None
+    # Smallest chip package the service places, as an imperial size code
+    # (e.g. ``"0402"``).  ``None`` = no published minimum.
+    min_package: str | None = None
+    # Smallest single PCB (width, height) the service accepts unpanelized.
+    min_board_size_mm: tuple[float, float] | None = None
+    # Whether the service requires edge rails and fiducials.
+    requires_rails_and_fiducials: bool = False
+    # Minimum build time in working days (``None`` = not published).
+    min_build_days: int | None = None
+
+    @property
+    def display_name(self) -> str:
+        """Human label for messages: the tier name, or a generic label."""
+        return self.tier_name or "PCBA"
+
     def to_dict(self) -> dict:
         """Convert to dictionary for serialization."""
         return {
@@ -333,6 +354,11 @@ class AssemblyCapabilities:
             "supports_double_sided": self.supports_double_sided,
             "supports_bga": self.supports_bga,
             "supports_fine_pitch": self.supports_fine_pitch,
+            "tier_name": self.tier_name,
+            "min_package": self.min_package,
+            "min_board_size_mm": (list(self.min_board_size_mm) if self.min_board_size_mm else None),
+            "requires_rails_and_fiducials": self.requires_rails_and_fiducials,
+            "min_build_days": self.min_build_days,
         }
 
 
@@ -367,8 +393,15 @@ class ManufacturerProfile:
     # e.g., "2layer_1oz", "4layer_1oz", "4layer_2oz"
     design_rules: dict[str, DesignRules]
 
-    # Assembly capabilities (None if PCB-only)
+    # Assembly capabilities (None if PCB-only).  For a fab with several PCBA
+    # service tiers this is the capability *superset* (the most capable tier),
+    # so ``supports_assembly()`` and ``kct mfr`` stay truthful.
     assembly: AssemblyCapabilities | None = None
+
+    # PCBA service tiers, cheapest first (Issue #7204).  Empty when the fab
+    # publishes a single assembly service: checks then use ``assembly``
+    # alone and never invent tiers.
+    assembly_tiers: list[AssemblyCapabilities] = field(default_factory=list)
 
     # Parts library (None if no standard library)
     parts_library: PartsLibrary | None = None
@@ -452,6 +485,18 @@ class ManufacturerProfile:
     def supports_assembly(self) -> bool:
         """Check if manufacturer offers PCBA services."""
         return self.assembly is not None
+
+    def get_assembly_tiers(self) -> list[AssemblyCapabilities]:
+        """PCBA service tiers, cheapest first.
+
+        Returns ``assembly_tiers`` when the fab publishes several services,
+        else ``[assembly]`` for a single-service fab, else ``[]`` (PCB-only).
+        """
+        if self.assembly_tiers:
+            return list(self.assembly_tiers)
+        if self.assembly is not None:
+            return [self.assembly]
+        return []
 
     def to_dict(self) -> dict:
         """Convert to dictionary for serialization."""

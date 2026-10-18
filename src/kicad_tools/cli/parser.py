@@ -9295,6 +9295,18 @@ def _add_export_parser(subparsers) -> None:
         help="Block export when preflight checks fail (for CI; default: export proceeds with warnings)",
     )
     export_parser.add_argument(
+        "--assembly-tier",
+        dest="export_assembly_tier",
+        default="auto",
+        choices=["auto", "economic", "standard"],
+        help=(
+            "PCBA service tier preflight judges package/pitch limits against "
+            "(Issue #7204): 'auto' (default) reports the cheapest tier the board "
+            "fits; 'economic'/'standard' select a JLCPCB tier. Ignored by fabs "
+            "with a single assembly service"
+        ),
+    )
+    export_parser.add_argument(
         "--allow-unbuildable-bom",
         dest="export_allow_unbuildable_bom",
         action="store_true",
