@@ -527,6 +527,8 @@ class DRCChecker:
         "silkscreen_line_width": CATEGORY_ADVISORY,
         "silkscreen_over_pad": CATEGORY_ADVISORY,
         "silkscreen_text_height": CATEGORY_ADVISORY,
+        "silkscreen_text_thickness": CATEGORY_ADVISORY,
+        "silk_ref_obscured": CATEGORY_ADVISORY,
         # ---- Manufacturing DRC: fab-blocking copper/clearance/hole/
         #      edge/mask/drill/geometry. -----------------------------
         "clearance": CATEGORY_MANUFACTURING,

@@ -2,7 +2,7 @@
 
 This module implements DRC checks for silkscreen elements:
 - Minimum line width
-- Minimum text height
+- Minimum text height and stroke thickness
 - Silkscreen-over-pad detection (legacy centroid heuristic)
 - Silkscreen-over-copper detection (geometric, vs pad mask apertures)
 - Silkscreen-over-silkscreen detection (geometric, silk vs silk)
@@ -343,6 +343,83 @@ def check_silkscreen_text_height(
                         items=(item_name,),
                     )
                 )
+
+    return results
+
+
+def check_silkscreen_text_thickness(
+    pcb: PCB,
+    design_rules: DesignRules,
+    *,
+    suppress_library: bool = False,
+) -> DRCResults:
+    """Check silkscreen text stroke thickness against the fab minimum (#7228).
+
+    The text-thickness sibling of :func:`check_silkscreen_text_height`: a
+    visible silk text (board-level ``gr_text`` or footprint text) whose
+    ``font_thickness`` is below ``design_rules.min_silkscreen_width_mm``
+    prints too thin to be reliable.  Hidden text is skipped.
+
+    Args:
+        pcb: The PCB to check
+        design_rules: Design rules with min_silkscreen_width_mm
+        suppress_library: If True, suppress warnings for footprints that
+            originate from standard KiCad libraries (name contains ``:``)
+
+    Returns:
+        DRCResults containing any ``silkscreen_text_thickness`` warnings
+    """
+    results = DRCResults(rules_checked=1)
+    min_thickness = design_rules.min_silkscreen_width_mm
+
+    def too_thin(thickness: float) -> bool:
+        return thickness < min_thickness - _CLEARANCE_EPSILON_MM
+
+    for text in pcb.texts:
+        if not is_silkscreen_layer(text.layer) or text.hidden:
+            continue
+        if too_thin(text.font_thickness):
+            results.add(
+                DRCViolation(
+                    rule_id="silkscreen_text_thickness",
+                    severity="warning",
+                    message=(
+                        f"Silkscreen text thickness {text.font_thickness:.2f}mm "
+                        f"< minimum {min_thickness:.2f}mm"
+                    ),
+                    location=text.position,
+                    layer=text.layer,
+                    actual_value=text.font_thickness,
+                    required_value=min_thickness,
+                    items=(text.text[:20] if text.text else "gr_text",),
+                )
+            )
+
+    for footprint in pcb.footprints:
+        library = suppress_library and is_library_footprint(footprint)
+        for fp_text in footprint.texts:
+            if not is_silkscreen_layer(fp_text.layer) or fp_text.hidden:
+                continue
+            if not too_thin(fp_text.font_thickness):
+                continue
+            if library:
+                results.suppressed_count += 1
+                continue
+            results.add(
+                DRCViolation(
+                    rule_id="silkscreen_text_thickness",
+                    severity="warning",
+                    message=(
+                        f"Silkscreen text thickness {fp_text.font_thickness:.2f}mm "
+                        f"< minimum {min_thickness:.2f}mm on {footprint.reference}"
+                    ),
+                    location=footprint.position,
+                    layer=fp_text.layer,
+                    actual_value=fp_text.font_thickness,
+                    required_value=min_thickness,
+                    items=(f"{footprint.reference} ({fp_text.text_type})",),
+                )
+            )
 
     return results
 
@@ -1220,6 +1297,61 @@ def check_silk_overlap(
     return results
 
 
+def _iter_board_frame_texts(
+    pcb: PCB,
+) -> Iterator[tuple[_Geometry, str, tuple[float, float], str, str, str]]:
+    """Yield ``(geom, label, location, layer, uuid, item)`` per visible silk text.
+
+    Geometry is in the board-relative frame the outline uses.  Footprint
+    positions are already shifted by the board origin at parse time, but
+    board-level ``gr_text`` positions are the file's sheet-absolute values, so
+    those are shifted here -- without that a ``gr_text`` on a board with a
+    non-zero origin reads as hundreds of mm off the board.
+    """
+    ox, oy = getattr(pcb, "_board_origin", (0.0, 0.0))
+    for footprint in pcb.footprints:
+        transform = _fp_transform(footprint)
+        for fp_text in footprint.texts:
+            if _silk_side(fp_text.layer) is None or fp_text.hidden:
+                continue
+            center = transform(fp_text.position)
+            geom = _text_bbox_geometry(
+                fp_text.text, fp_text.font_size, fp_text.font_thickness, center
+            )
+            if geom is None:
+                continue
+            label = f"{footprint.reference} ({fp_text.text_type})"
+            yield geom, label, center, fp_text.layer, fp_text.uuid, label
+    for text in pcb.texts:
+        if _silk_side(text.layer) is None or text.hidden:
+            continue
+        center = (text.position[0] - ox, text.position[1] - oy)
+        geom = _text_bbox_geometry(text.text, text.font_size, text.font_thickness, center)
+        if geom is None:
+            continue
+        label = text.text[:20] if text.text else "gr_text"
+        yield geom, label, center, text.layer, text.uuid, label
+
+
+def _outline_material(pcb: PCB) -> _Geometry | None:
+    """Board material polygon (outline minus cutouts), or ``None`` if unprovable.
+
+    Reuses the place-refs resolver so ``kct check`` and ``kct place-silk-refs``
+    agree on what counts as board.  Any outline the resolver cannot prove
+    (curves, open contours, synthetic PCBs without a parse tree) yields
+    ``None`` and the off-board test is skipped rather than guessed.
+    """
+    from shapely.geometry import Polygon
+
+    from kicad_tools.silkscreen.place_refs import _board_material
+
+    try:
+        _segments, material, error = _board_material(pcb, Polygon)  # type: ignore[arg-type]
+    except (AttributeError, TypeError, ValueError):
+        return None
+    return None if error else material
+
+
 def check_silk_edge_clearance(
     pcb: PCB,
     design_rules: DesignRules,
@@ -1229,7 +1361,8 @@ def check_silk_edge_clearance(
     For each silk element, computes the minimum distance from its geometry to
     the ``Edge.Cuts`` outline.  Emits a ``silk_edge_clearance`` **warning** if
     the silk crosses the outline or sits within :data:`SILK_EDGE_CLEARANCE_MM`
-    of it.  No-op when the board has no outline (mirrors
+    of it, or (#7228) lies wholly outside the board material (reported as
+    ``outside``, with no distance).  No-op when the board has no outline (mirrors
     ``EdgeClearanceRule.check``).
 
     **Counting model: one violation per (silk item, outline) pair, matching
@@ -1256,7 +1389,33 @@ def check_silk_edge_clearance(
 
     outline = MultiLineString([[seg_start, seg_end] for seg_start, seg_end in outline_segments])
 
-    for _side, geom, silk_label, location, layer, _uuid, silk_item in _iter_silk_elements(pcb):
+    # Text wholly off the board (#7228) prints on no substrate, and the
+    # distance to the nearest edge says nothing about that.  Only text: a
+    # connector's body-outline strokes overhanging the edge by design (board 03
+    # J1, #6494) are drawn to be clipped, not read.
+    off_board: set[tuple[str, str]] = set()
+    material = _outline_material(pcb)
+    if material is not None:
+        for geom, silk_label, location, layer, uuid, silk_item in _iter_board_frame_texts(pcb):
+            if geom.intersects(material):
+                continue
+            off_board.add((silk_item, uuid))
+            results.add(
+                DRCViolation(
+                    rule_id="silk_edge_clearance",
+                    severity="warning",
+                    message=f"Silkscreen {silk_label} lies outside the board outline",
+                    location=location,
+                    layer=layer,
+                    actual_value=None,
+                    required_value=SILK_EDGE_CLEARANCE_MM,
+                    items=(silk_item, "Edge.Cuts"),
+                )
+            )
+
+    for _side, geom, silk_label, location, layer, uuid, silk_item in _iter_silk_elements(pcb):
+        if (silk_item, uuid) in off_board:
+            continue
         distance = geom.distance(outline)
         if distance < SILK_EDGE_CLEARANCE_MM - _CLEARANCE_EPSILON_MM:
             results.add(
@@ -1274,6 +1433,81 @@ def check_silk_edge_clearance(
                     # Per-primitive name (#6015): the generic ``J1 (fp_line)``
                     # label gave every offending stroke of a footprint one key.
                     items=(silk_item, "Edge.Cuts"),
+                )
+            )
+
+    return results
+
+
+def check_silk_ref_obscured(
+    pcb: PCB,
+    design_rules: DesignRules,
+) -> DRCResults:
+    """Advisory: a reference designator that cannot be read on the board (#7228).
+
+    Flags, per footprint, a reference that is either hidden (``hide yes``) or
+    whose visible text box lies entirely inside its own component's courtyard
+    (the body / F.Fab outline the assembler cannot see through).  The
+    containment test is the one ``kct place-silk-refs`` plans against
+    (:func:`~kicad_tools.silkscreen.place_refs._courtyard_polygon`), so the
+    fix it offers clears this finding.
+    """
+    del design_rules  # no manufacturer threshold
+    require_shapely("silk-ref-obscured geometry")
+    from shapely.geometry import Polygon
+
+    from kicad_tools.geometry.courtyard import _courtyard_polygon, _side_has_geometry
+    from kicad_tools.silkscreen.place_refs import (
+        _find_reference_node,
+        _oriented_text_geometry,
+        _read_text_angle,
+    )
+
+    results = DRCResults(rules_checked=1)
+
+    for footprint in pcb.footprints:
+        ref_text = next((t for t in footprint.texts if t.text_type == "reference"), None)
+        if ref_text is None or not footprint.reference:
+            continue
+        item = f"{footprint.reference} (reference)"
+        if ref_text.hidden:
+            results.add(
+                DRCViolation(
+                    rule_id="silk_ref_obscured",
+                    severity="warning",
+                    message=f"Reference designator {footprint.reference} is hidden",
+                    location=footprint.position,
+                    layer=ref_text.layer,
+                    items=(item, "hidden"),
+                )
+            )
+            continue
+        side = _silk_side(ref_text.layer)
+        if side is None or not _side_has_geometry(footprint, side):
+            continue
+        courtyard = _courtyard_polygon(footprint, side, Polygon)
+        if courtyard is None:
+            continue
+        center = _fp_transform(footprint)(ref_text.position)
+        ref_node = _find_reference_node(footprint)
+        angle = _read_text_angle(ref_node) if ref_node is not None else 0.0
+        geom = _oriented_text_geometry(
+            ref_text.text, ref_text.font_size, ref_text.font_thickness, center, angle
+        )
+        if geom is None:
+            continue
+        if courtyard.buffer(_CLEARANCE_EPSILON_MM).contains(geom):
+            results.add(
+                DRCViolation(
+                    rule_id="silk_ref_obscured",
+                    severity="warning",
+                    message=(
+                        f"Reference designator {footprint.reference} lies entirely "
+                        f"inside its own component body"
+                    ),
+                    location=center,
+                    layer=ref_text.layer,
+                    items=(item, "courtyard"),
                 )
             )
 
@@ -1303,6 +1537,9 @@ def check_all_silkscreen(
     results.merge(
         check_silkscreen_text_height(pcb, design_rules, suppress_library=suppress_library)
     )
+    results.merge(
+        check_silkscreen_text_thickness(pcb, design_rules, suppress_library=suppress_library)
+    )
     results.merge(check_silkscreen_over_pads(pcb, design_rules))
     results.merge(check_silk_over_copper(pcb, design_rules))
     from .factory_clearance import check_silk_pad_clearance
@@ -1310,6 +1547,7 @@ def check_all_silkscreen(
     results.merge(check_silk_pad_clearance(pcb, design_rules))
     results.merge(check_silk_overlap(pcb, design_rules))
     results.merge(check_silk_edge_clearance(pcb, design_rules))
+    results.merge(check_silk_ref_obscured(pcb, design_rules))
     # Last: state what the geometry model could NOT check, so an omitted
     # primitive is reported rather than read as a clean board (#5811).
     results.merge(check_silk_coverage(pcb, design_rules))
