@@ -91,10 +91,12 @@ design_rules:
     outer_copper_oz: 1.0
     inner_copper_oz: 0.5
 
-  # 1 oz inner copper is a 4-layer-only option at JLCPCB (default inner is 0.5 oz).
-  # Source: https://jlcpcb.com/help/article/jlcpcb-copper-weight
-  #   "1oz and 2oz inner copper weight is only available for 4 layer boards"
-  # (verified 2026-10-18; confirm the option on the live quote page when ordering).
+  # 1 oz inner copper is an option on 4- and 6-layer builds (default inner is 0.5 oz).
+  # Sources (verified 2026-10-18; confirm on the live quote page when ordering):
+  #   https://jlcpcb.com/help/article/jlcpcb-copper-weight -- inner copper
+  #     "0.5oz (default), 1oz, 2oz. Availability depends on total layers and overall thickness"
+  #   https://jlcpcb.com/capabilities/pcb-capabilities -- "Finished Inner Layer Copper
+  #     0.5 oz / 1 oz / 2 oz ... 0.5oz by default"
   4layer_1oz_inner1oz:
     min_trace_width_mm: 0.1016      # 4 mil
     min_clearance_mm: 0.1016        # 4 mil
@@ -175,3 +177,30 @@ design_rules:
     board_thickness_mm: 1.6
     outer_copper_oz: 1.0
     inner_copper_oz: 0.5
+
+  6layer_1oz_inner1oz:
+    min_trace_width_mm: 0.0889      # 3.5 mil
+    min_clearance_mm: 0.0889        # 3.5 mil
+    min_via_drill_mm: 0.2
+    min_via_diameter_mm: 0.45
+    min_annular_ring_mm: 0.15       # 6 mil (per JLCPCB specs)
+    min_pth_annular_ring_mm: 0.15  # JLC rigid PCB capabilities, PTH ring, verified 2026-09-09
+    min_hole_diameter_mm: 0.2
+    max_hole_diameter_mm: 6.3
+    min_copper_to_edge_mm: 0.3
+    min_copper_to_vscore_mm: 0.4  # JLC pcb-capabilities 'V-Cut', verified 2026-10-07
+    min_hole_to_edge_mm: 0.4
+    min_hole_to_hole_mm: 0.5      # drill-to-drill edge-to-edge
+    min_silkscreen_width_mm: 0.15
+    min_silkscreen_height_mm: 1.0   # 40 mil (per JLCPCB specs)
+    min_solder_mask_dam_mm: 0.1
+    min_solder_mask_clearance_mm: 0.05
+    # JLC rigid PCB capabilities, verified 2026-09-10; distances in mm.
+    min_silk_to_pad_clearance_mm: 0.15
+    min_smd_pad_clearance_mm: 0.15  # Different-net SMD copper, not general clearance
+    min_pth_hole_to_track_mm: 0.28 # PTH hole edge; 0.35 is recommended, not the floor
+    min_inner_pth_hole_to_copper_mm: 0.30
+    min_pad_size_mm: 0.25
+    board_thickness_mm: 1.6
+    outer_copper_oz: 1.0
+    inner_copper_oz: 1.0

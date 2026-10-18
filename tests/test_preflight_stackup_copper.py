@@ -64,10 +64,20 @@ def test_half_oz_inner_stackup_matches_default_profile(tmp_path):
 
 
 def test_unorderable_inner_copper_fails_naming_both_values(tmp_path):
-    r = _run(_pcb(tmp_path, 0.035, 0.07))  # 2 oz inner against 1 oz outer
+    r = _run(_pcb(tmp_path, 0.035, 0.105))  # 3 oz inner: not a JLCPCB option
     assert r.status == "FAIL"
-    assert "inner 2 oz" in r.message
+    assert "inner 3 oz" in r.message
     assert "outer 1 oz / inner 0.5 oz" in r.details
+
+
+def test_jlcpcb_finished_half_oz_inner_0152mm_matches(tmp_path):
+    # JLCPCB's published finished 0.5 oz inner copper (jlcpcb.com/impedance).
+    assert _run(_pcb(tmp_path, 0.035, 0.0152)).status == "OK"
+
+
+def test_six_layer_one_oz_inner_is_offered():
+    assert (1.0, 1.0) in get_profile("jlcpcb").copper_options(6)
+    assert (1.0, 1.0) in get_profile("jlcpcb-tier1").copper_options(4)
 
 
 def test_two_oz_outer_half_oz_inner_ok(tmp_path):
