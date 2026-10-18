@@ -55,15 +55,6 @@ class TestPcbWriters:
         assert gen is not None
         assert gen.get_string(0) == KICAD_GENERATOR_VERSION
 
-    def test_pcb_exporter_header_stamps_constants(self):
-        from kicad_tools.pcb.exporter import KiCadPCBExporter
-        from kicad_tools.pcb.layout import PCBLayout
-
-        exporter = KiCadPCBExporter(PCBLayout(name="t"))
-        header = exporter._generate_header()
-        assert f"(version {KICAD_BOARD_FORMAT_VERSION})" in header
-        assert f'(generator_version "{KICAD_GENERATOR_VERSION}")' in header
-
     def test_project_scaffold_pcb_stamps_board_constant(self, tmp_path: Path):
         from kicad_tools.project import Project
 

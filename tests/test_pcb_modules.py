@@ -566,58 +566,92 @@ class TestPCBLayout:
 
 
 class TestKiCadPCBExporter:
-    """Tests for KiCadPCBExporter class."""
+    """Tests for the PCBLayout -> board bridge (Issue #7022).
+
+    End-to-end coverage on a real, netted board lives in
+    ``tests/test_pcb_layout_bridge.py``.
+    """
+
+    @staticmethod
+    def _board():
+        from pathlib import Path
+
+        from kicad_tools.schema.pcb import PCB
+
+        lib = Path(__file__).parent / "fixtures" / "Test_Library.pretty"
+        pcb = PCB.create(width=40, height=30)
+        pcb.add_footprint_from_file(lib / "R_0603_1608Metric.kicad_mod", "U1", 5, 5)
+        pcb.add_net("GND")
+        return pcb
 
     def test_exporter_creation(self):
         """Test creating exporter."""
         layout = PCBLayout("test")
         exporter = KiCadPCBExporter(layout)
         assert exporter.layout is layout
+        assert exporter.strict is True
+        assert exporter.net_map == {}
 
-    def test_get_net_number(self):
-        """Test net number assignment."""
+    def test_exporter_net_map_is_copied(self):
+        net_map = {"VOUT": "+3V3"}
+        exporter = KiCadPCBExporter(PCBLayout("test"), net_map=net_map, strict=False)
+        net_map["VOUT"] = "changed"
+        assert exporter.net_map == {"VOUT": "+3V3"}
+        assert exporter.strict is False
+
+    def test_string_template_writer_is_removed(self):
+        for name in ("generate", "write", "generate_trace_segments", "_generate_header"):
+            assert not hasattr(KiCadPCBExporter, name)
+
+    def test_generate_placement_update(self):
         layout = PCBLayout("test")
-        exporter = KiCadPCBExporter(layout)
+        block = PCBBlock("B1")
+        block.add_component("U1", "Test:FP", 1, 2, rotation=90)
+        block.place(10, 10)
+        layout.add_block(block)
+        assert KiCadPCBExporter(layout).generate_placement_update() == {"U1": (11, 12, 90)}
 
-        num1 = exporter._get_net_number("GND")
-        num2 = exporter._get_net_number("VCC")
-        num3 = exporter._get_net_number("GND")  # Same net
-
-        assert num1 == 1
-        assert num2 == 2
-        assert num3 == 1  # Should return same number
-
-    def test_get_net_number_none(self):
-        """Test net number for None."""
+    def test_apply_to_moves_and_adds_copper(self):
+        pcb = self._board()
+        ox, oy = pcb.board_origin
+        nets_before = dict(pcb.nets)
         layout = PCBLayout("test")
-        exporter = KiCadPCBExporter(layout)
-        assert exporter._get_net_number(None) == 0
+        block = PCBBlock("B1")
+        block.add_component("U1", "R_0603_1608Metric", 0, 0)
+        block.add_trace((0, 0), (2, 0), net="GROUND")
+        block.place(ox + 10, oy + 10)
+        layout.add_block(block)
 
-    def test_generate_basic(self):
-        """Test generating PCB content."""
+        report = KiCadPCBExporter(layout, net_map={"GROUND": "GND"}).apply_to(pcb)
+
+        assert report.moved == ["U1"]
+        assert report.segments_added == 1
+        assert pcb.get_footprint("U1").position == pytest.approx((10, 10))
+        (seg,) = pcb.segments
+        assert seg.start == pytest.approx((10, 10))
+        assert seg.end == pytest.approx((12, 10))
+        assert seg.net_number == pcb.get_net_by_name("GND").number
+        assert dict(pcb.nets) == nets_before
+
+    def test_apply_to_strict_raises_before_mutating(self):
+        from kicad_tools.pcb import LayoutApplyError
+
+        pcb = self._board()
         layout = PCBLayout("test")
         block = PCBBlock("B1")
         block.add_component("U1", "Test:FP", 0, 0)
-        block.place(10, 10)
+        block.add_component("U9", "Test:FP", 1, 0)
+        block.add_trace((0, 0), (2, 0), net="NOPE")
+        block.place(50, 50)
         layout.add_block(block)
+        position = pcb.get_footprint("U1").position
 
-        exporter = KiCadPCBExporter(layout)
-        content = exporter.generate()
+        with pytest.raises(LayoutApplyError) as excinfo:
+            KiCadPCBExporter(layout).apply_to(pcb)
 
-        assert "(kicad_pcb" in content
-        assert "U1" in content
-
-    def test_write(self, tmp_path):
-        """Test writing PCB file."""
-        layout = PCBLayout("test")
-        exporter = KiCadPCBExporter(layout)
-
-        output_path = tmp_path / "test.kicad_pcb"
-        exporter.write(str(output_path))
-
-        assert output_path.exists()
-        content = output_path.read_text()
-        assert "(kicad_pcb" in content
+        assert len(excinfo.value.problems) == 2
+        assert pcb.get_footprint("U1").position == position
+        assert pcb.segments == []
 
 
 # =============================================================================

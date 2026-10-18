@@ -361,20 +361,47 @@ from kicad_tools.pcb.blocks import LDOBlock, MCUBlock
 
 layout = PCBLayout("power_system")
 
-# Add blocks
-layout.add_block(LDOBlock(part="AMS1117-3.3"), name="ldo")
-layout.add_block(MCUBlock(part="STM32F103"), name="mcu")
+# Add blocks. Block refs are the board refs, so give every block distinct
+# ones (both blocks would otherwise default to U1).
+layout.add_block(LDOBlock(ldo_ref="U1", input_cap="C1", output_caps=["C2"]), name="ldo")
+layout.add_block(MCUBlock(mcu_ref="U2", bypass_caps=["C3", "C4"]), name="mcu")
 
-# Position blocks
-layout.blocks["ldo"].place(10, 10)
-layout.blocks["mcu"].place(30, 10)
+# Position blocks (sheet-absolute mm, like a footprint's (at ...))
+layout.blocks["ldo"].place(110, 80)
+layout.blocks["mcu"].place(130, 80)
 
-# Route between blocks
-layout.route("ldo", "VOUT", "mcu", "VDD")
+# Route between blocks; name the net so the copper lands on a real one
+layout.route("ldo", "VOUT", "mcu", "VDD", net="VOUT")
 
 # Export placements
 placements = layout.export_placements()
 ```
+
+#### Apply to a real board
+
+`apply_to_pcb` moves the block footprints on an existing board to their
+layout positions and writes the block traces, the inter-block traces and any
+vias as copper on the board's **existing** nets. The board must already
+contain every block footprint, with netted pads, from Step 3. The bridge never
+creates footprints or nets. Blocks use generic net names (`VIN`, `VOUT`,
+`VDD`, `GND`), so `net_map` maps them to the board's names; a name that is
+not in `net_map` is looked up unchanged.
+
+```python
+report = layout.apply_to_pcb(
+    "board.kicad_pcb",
+    "board_placed.kicad_pcb",
+    net_map={"VOUT": "+3V3", "VDD": "+3V3", "VIN": "/VIN"},
+)
+print(f"moved {len(report.moved)} footprints, added {report.segments_added} segments")
+```
+
+A ref missing from the board, a ref used by two blocks, a route without a
+`net=`, a net the board does not have, or a layer that is not one of the
+board's copper layers raises one `LayoutApplyError` that lists every problem,
+and nothing is written. Pass `strict=False` to skip those items instead. Each
+skipped item is logged as a warning and listed in `report.skipped`. Applying
+the same layout again adds no duplicate copper.
 
 ### Schematic Reading vs Writing
 
