@@ -724,3 +724,36 @@ class TestDrcAwareDisplayMessage:
         # delta = 120 - 79 = 41
         assert "41 new errors" in captured.out
         assert "3 nets rolled back" in captured.out
+
+
+# ---------------------------------------------------------------------------
+# Tests: --verbose per-net rows and stats.per_net (Issue #7065)
+# ---------------------------------------------------------------------------
+
+
+class TestVerbosePerNet:
+    def test_verbose_prints_row_for_known_net(self, simple_pcb_path, capsys):
+        rc = main([str(simple_pcb_path), "--dry-run", "--verbose"])
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "Per-net statistics:" in out
+        row = next(line for line in out.splitlines() if "NET1" in line and "segments" in line)
+        assert "2 ->    1" in row
+
+    def test_non_verbose_output_has_no_rows(self, simple_pcb_path, capsys):
+        rc = main([str(simple_pcb_path), "--dry-run"])
+        assert rc == 0
+        assert "Per-net statistics" not in capsys.readouterr().out
+
+    def test_json_always_carries_per_net_and_single_document(self, simple_pcb_path, capsys):
+        import json
+
+        for extra in ([], ["--verbose"]):
+            rc = main([str(simple_pcb_path), "--dry-run", "--format", "json", *extra])
+            assert rc == 0
+            data = json.loads(capsys.readouterr().out)
+            rows = {r["net"]: r for r in data["stats"]["per_net"]}
+            assert rows["NET1"]["segments_before"] == 2
+            assert rows["NET1"]["segments_after"] == 1
+            assert rows["NET1"]["rolled_back"] is False
+            assert data["stats"]["nets_optimized"] == 1

@@ -15,6 +15,33 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-18
 
+- **PR #7049**: fix: Project.create builds .kicad_pcb via PCB.create (KiCad 10 failed to load the old board, #7047)
+- **PR #7066**: docs: GPU/batched routing design note (profile-first)
+- **PR #7015**: test: resolve 10 never-running tests left behind by #3133
+- **PR #7044**: docs: measure match-group meander room after #6972/#6979 and compare with KRT (#6969)
+- **Issue #7047** (closed): Project.create: build the .kicad_pcb via PCB.create instead of a drifted 70-line f-string template
+- **Issue #7053** (closed): Design: genuine GPU-accelerated / batched routing (profile first; successor to removed BatchPathfinder)
+- **Issue #7012** (closed): Resolve 10 tests that can never run: 9 skipped since #3133 closed (May), 1 self-skipping (~325 LOC dead)
+- **Issue #6969** (closed): match-group tuner: meanders find no DRC room on dense kct copper, and all-or-nothing rollback discards partial progress
+- **PR #7048**: feat: place match-group meander bumps individually when a whole trombone is rejected
+- **PR #7032**: fix: kct bom errors on missing or unparseable root schematic
+- **PR #7039**: feat: add kct route --native-zone-clearance for board-03 pour links
+- **PR #7020**: feat(router): one guarded search-radius rule for Python and C++ A*, rip-up and CoupledPathfinder (#6994)
+- **PR #7040**: fix: honour layers/include_drill/create_zip in preset Gerber export (#7023)
+- **PR #7037**: fix(cli): pass kct route argv straight to route_cmd.main; delete outer route parser and forwarding shim
+- **PR #7027**: docs: fix rejected kct commands in manufacturing export example
+- **PR #7036**: fix: store net names in board-03 routing plan and reject numeric net ids
+- **PR #7035**: refactor(router): route lattice pad-entry check through kernel_adapter (main CI red, #7024)
+- **PR #7007**: fix: replay committed coupled diff pairs on routing-cache hit
+- **Issue #7043** (closed): match-group tuner: per-bump meander placement to find room on dense copper (KRT comparison, board 07)
+- **Issue #7028** (closed): kct bom on a missing schematic prints a CSV header and exits 0 (silent failure)
+- **Issue #6994** (closed): [Epic #5509] Phase 4e slice 4: one search-radius rounding rule (guarded) for Python and C++ A*, rip-up and CoupledPathfinder
+- **Issue #7023** (closed): PCB.export_gerbers silently ignores layers/include_drill/create_zip for jlcpcb (the default), pcbway, oshpark
+- **Issue #7017** (closed): Collapse the kct route three-hop parser: pass argv straight to route_cmd (delete ~1,775-line outer parser + ~605-line forwarding shim)
+- **Issue #7025** (closed): docs: example 09 prints kct export invocations the CLI rejects (--manufacturer, gerbers/pnp subcommands)
+- **Issue #7033** (closed): board 03: routing_plan.save_plan() stores numeric (net N) refs that apply_plan() cannot resolve
+- **Issue #7024** (closed): main CI red: test_clearance_kernel_parity rejects lattice/coupled.py clearance_kernel import (from #6978)
+- **Issue #7003** (closed): router cache: a cache hit on board 06b returns different copper (230 vs 254 items) than the fresh route
 - **PR #7034**: fix: route the board-03 experiment row under jlcpcb-tier1 sidecars
 - **PR #7031**: docs: fix stale import_lcsc_part snippet in manufacturing-export example
 - **PR #7030**: fix: unify schematic wire endpoint bucketing on micron rounding

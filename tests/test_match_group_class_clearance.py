@@ -201,6 +201,31 @@ class TestApplyMatchGroupTuningFloors:
         # The pairwise floor the tuner applies to the neighbour:
         assert max(kw["intra_group_clearance_mm"], per_net[NEIGHBOUR_NET]) == pytest.approx(0.2)
 
+    def test_group_class_never_raises_floor_above_global_rule(self, monkeypatch):
+        # Issue #6969 R2: the class value only relaxes the global rule; a
+        # class stricter than the rule never tightens the tuner's own floor.
+        ar = _autorouter(group_clearance=0.3, neighbour_clearance=0.4)
+        kw = _captured_floors(ar, monkeypatch)
+        assert kw["intra_group_clearance_mm"] == pytest.approx(0.2)
+        assert kw["via_clearance_mm"] == pytest.approx(0.2)
+        assert kw["pad_clearance_mm"] == pytest.approx(0.2)
+
+    def test_stricter_unrouted_pad_net_class_reaches_the_tuner(self, monkeypatch):
+        # Issue #6969 R2: a classified net present only as a pad (unrouted)
+        # is held to its own class; the group's relaxed floor is untouched.
+        ar = _autorouter(group_clearance=0.175, neighbour_clearance=None)
+        ar.net_names[7] = "SENSE"
+        ar.pads = {
+            ("U9", "1"): Pad(
+                x=40.0, y=40.0, width=0.3, height=0.3, net=7, net_name="SENSE", ref="U9", pin="1"
+            )
+        }
+        ar.net_class_map["SENSE"] = NetClassRouting(name="SENSE", clearance=0.19)
+        kw = _captured_floors(ar, monkeypatch)
+        assert kw["pad_clearance_mm"] == pytest.approx(0.175)
+        assert kw["via_clearance_mm"] == pytest.approx(0.175)
+        assert kw["net_clearance_mm"][7] == pytest.approx(0.19)
+
     def test_classless_group_keeps_single_threshold(self, monkeypatch):
         ar = _autorouter(group_clearance=0.175)
         ar.net_class_map = {}

@@ -74,7 +74,7 @@ def main(argv: list[str] | None = None) -> int:
         help="Preview what would be imported without making changes",
     )
     import_parser.add_argument(
-        "--interactive", "-i", action="store_true", help="Interactive mode with prompts"
+        "--interactive", "-i", action="store_true", help="Deprecated: not implemented; ignored"
     )
     import_parser.add_argument(
         "--overwrite", action="store_true", help="Overwrite existing symbols"
@@ -491,6 +491,12 @@ def _cache(args) -> int:
 
 def _import(args) -> int:
     """Handle parts import command."""
+    if getattr(args, "interactive", False):
+        print(
+            "Warning: --interactive/-i is deprecated, not implemented, and ignored.",
+            file=sys.stderr,
+        )
+
     try:
         from ..parts import ImportOptions, LayoutStyle, PartImporter
     except ImportError as e:
