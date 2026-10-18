@@ -250,6 +250,44 @@ def test_allowance_comes_from_the_boards_recorded_known_issues(mod, tmp_path):
     assert mod.known_issue_allowance(board) == {}
 
 
+_NO_REFRESH_CONFIG = {"03-usb-joystick"}
+
+
+def test_every_demo_board_has_a_refresh_config(mod):
+    boards = sorted(p.name for p in (mod.REPO_ROOT / "boards").glob("0[0-7]-*") if p.is_dir())
+    assert len(boards) == 8
+    assert not _NO_REFRESH_CONFIG & set(mod.BOARDS)  # stale exemption
+    boards = [b for b in boards if b not in _NO_REFRESH_CONFIG]
+    for name in boards:
+        cfg = mod.BOARDS[name]
+        board = mod.REPO_ROOT / "boards" / name
+        assert (board / cfg.routed_pcb).is_file(), name
+        assert (board / cfg.schematic).is_file(), name
+        for archive, _ in cfg.archives:
+            assert (board / archive).is_file(), (name, archive)
+        for job in cfg.erc:
+            assert (board / job.directory / job.schematic).is_file(), (name, job.key)
+
+
+def test_outer_archive_members_resolve_against_committed_tree(mod, tmp_path):
+    """Rebuilding ``output/manufacturing.zip`` finds every member (needs no KiCad).
+
+    Boards 00-02 prefix members with ``manufacturing/``; a search root that
+    ignores that refused them all (Issue #7273 review).
+    """
+    import shutil
+
+    for name, cfg in mod.BOARDS.items():
+        board = mod.REPO_ROOT / "boards" / name
+        if not (board / "output" / "manufacturing.zip").is_file():
+            continue
+        staged = tmp_path / name
+        shutil.copytree(board / "output", staged / "output")
+        mod.rebuild_archive(
+            staged / "output" / "manufacturing.zip", [staged / s for s in cfg.bundle_search]
+        )
+
+
 # ---------------------------------------------------------------- known issues (#7323)
 CHECKED_AT = "2026-10-18T00:00:00+00:00"
 ADVISORY = "7220:one-sided thermal:advisory:thermal_asymmetry=1"

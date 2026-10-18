@@ -123,6 +123,12 @@ class BoardConfig:
     # ``(mirror_dir, source_dir)``: every file already in ``mirror_dir`` is
     # refreshed from ``source_dir`` before the archives are rebuilt.
     mirrors: tuple[tuple[str, str], ...] = ()
+    # Directories searched (relative to the board) when rebuilding
+    # ``output/manufacturing.zip``.  Its member names are relative to the first
+    # entry that holds them: boards 04-09 ship bare names (``README.txt``), the
+    # ``kct readiness`` packages 00-02 prefix them with ``manufacturing/``, so
+    # those search ``output`` instead (Issue #7273).
+    bundle_search: tuple[str, ...] = ("output/manufacturing",)
     archives: tuple[tuple[str, tuple[str, ...]], ...] = field(
         default=(
             ("output/manufacturing/kicad_project.zip", ("output", ".")),
@@ -145,6 +151,43 @@ BOARDS: dict[str, BoardConfig] = {
         check_script="check_manufacturing.py",
         mirrors=(("output/manufacturing/design-source", "."),),
         archives=(("output/manufacturing/kicad_project.zip", ("output", ".")),),
+    ),
+    # Boards 00-02 are ``kct readiness`` packages (no board-local check),
+    # refreshed through the same gates (Issue #7273).  Their recorded
+    # ``known_issues`` carry the warning allowance.  Board 00/01 ship no
+    # native-ERC report copies, so ``erc`` is empty.
+    "00-simple-led": BoardConfig(
+        routed_pcb="output/simple_led_routed.kicad_pcb",
+        schematic="output/simple_led.kicad_sch",
+        tier="jlcpcb",
+        erc=(),
+        archives=(("output/manufacturing/kicad_project.zip", ("output", ".")),),
+        bundle_search=("output",),
+    ),
+    "01-voltage-divider": BoardConfig(
+        routed_pcb="output/voltage_divider_routed.kicad_pcb",
+        schematic="output/voltage_divider.kicad_sch",
+        tier="jlcpcb",
+        erc=(),
+        archives=(("output/manufacturing/kicad_project.zip", ("output", ".")),),
+        bundle_search=("output",),
+    ),
+    "02-charlieplex-led": BoardConfig(
+        routed_pcb="output/charlieplex_3x3_routed.kicad_pcb",
+        schematic="output/charlieplex_3x3.kicad_sch",
+        tier="jlcpcb",
+        erc=(
+            ErcJob(
+                "02-native-erc.json",
+                "output",
+                "charlieplex_3x3.kicad_sch",
+                (
+                    "output/readiness/native-erc.json",
+                    "output/manufacturing/native-erc.json",
+                ),
+            ),
+        ),
+        bundle_search=("output",),
     ),
     "05-bldc-motor-controller": BoardConfig(
         routed_pcb="output/bldc_controller_routed.kicad_pcb",
@@ -605,7 +648,9 @@ def refresh(
             k: v for k, v in after.items() if k != "files"
         }:
             raise GateFailure("manifest refresh changed fields other than 'files'")
-        changed = rebuild_archive(out / "manufacturing.zip", [mfg])
+        changed = rebuild_archive(
+            out / "manufacturing.zip", [staged / s for s in cfg.bundle_search]
+        )
         log(f"  output/manufacturing.zip: rebuilt; members with new content {changed}")
 
         drc_errors = gate_native_drc(staged, cfg)
