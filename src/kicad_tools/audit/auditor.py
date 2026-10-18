@@ -892,8 +892,18 @@ class ManufacturingAudit:
         elif self.path.suffix == ".kicad_pcb":
             self.project_path = None
             self.pcb_path = self.path
-            self.schematic_path = self.path.with_suffix(".kicad_sch")
-            self.skip_erc = True  # Skip ERC for PCB-only
+            # Issue #7136: resolve the schematic the same way ``kct check``
+            # and the ``.kicad_pro`` branch do (project.kct, then the
+            # stage-stripped sibling, so ``board_routed.kicad_pcb`` finds
+            # ``board.kicad_sch``).  Do NOT force ``skip_erc`` here: a PCB
+            # input used to render ``[OK] ERC: PASS -- skipped by user
+            # request`` without ERC ever running.  ``self.skip_erc`` now
+            # reflects only the caller's ``--skip-erc`` / ``skip_erc=True``.
+            from kicad_tools.sync.discover import resolve_schematic_for_pcb
+
+            self.schematic_path = resolve_schematic_for_pcb(self.path) or self.path.with_suffix(
+                ".kicad_sch"
+            )
         else:
             raise ValueError(f"Expected .kicad_pro or .kicad_pcb file, got: {self.path}")
 
@@ -1038,14 +1048,21 @@ class ManufacturingAudit:
         )
 
         # Run checks
-        if not self.skip_erc and self.schematic_path.exists():
+        if self.skip_erc:
+            result.erc.skipped = True
+            result.erc.details = "ERC skipped by user request"
+        elif self.schematic_path.exists():
             result.erc = self._check_erc()
         else:
-            result.erc.skipped = True
-            if self.skip_erc:
-                result.erc.details = "ERC skipped by user request"
-            else:
-                result.erc.details = "ERC skipped (no schematic provided)"
+            # Issue #7136: ERC was not skipped by the caller but there is no
+            # schematic to check.  That verifies nothing, so it is NOT RUN
+            # (the #7089 convention: ``could_not_verify`` caps the verdict at
+            # WARNING and renders ``[!!] ERC ...: NOT RUN``), never a PASS.
+            result.erc.could_not_verify = True
+            result.erc.passed = False
+            result.erc.skipped = False
+            result.erc.blocking_error_count = 0
+            result.erc.details = f"no schematic found for {self.pcb_path.name}"
 
         if self.pcb_path.exists():
             pcb = self._load_pcb()
@@ -1904,7 +1921,14 @@ class ManufacturingAudit:
                         "ERC could not run -- schematic not checked"
                         + (f" ({result.erc.details})" if result.erc.details else "")
                     ),
-                    command=f"kicad-cli sch erc {self.schematic_path}",
+                    # No schematic on disk (issue #7136): there is nothing
+                    # to hand kicad-cli, so don't suggest a command that
+                    # would fail on a missing file.
+                    command=(
+                        f"kicad-cli sch erc {self.schematic_path}"
+                        if self.schematic_path.exists()
+                        else None
+                    ),
                 )
             )
 

@@ -623,14 +623,14 @@ class TestAddrBusViaInclusiveSkew:
         assert "ADDR_BUS" in skew_seen, (
             "ADDR_BUS group should be measured on the fully-routed board 07 artifact"
         )
-        # Issue #6725: the committed artifact was tuned against the #4007
-        # model (every via a full 1.6 mm through-barrel).  kicad-cli measures a
-        # via by the layers it connects (A4/A6 escape to In1.Cu, 0.5325 mm
-        # rather than 1.58 mm), so the same copper really is 1.0998 mm apart --
-        # the figure kicad-cli reports (see ``test_addr_bus_lengths_match_kicad_cli``).
-        # Regenerating the artifact with the #6725 tuners brings it back inside
-        # the 0.5 mm tolerance.
-        assert skew_seen["ADDR_BUS"] == pytest.approx(1.0998, abs=0.002)
+        # Issue #6730: the committed regression fixture was re-tuned in place
+        # with ``kct retune-lengths --group ADDR_BUS`` (nets A4/A6 only; all
+        # other copper preserved).  It was 1.0998 mm apart before (kicad-cli
+        # measures a via by the layers it connects); it is now 0.0169 mm,
+        # well inside the 0.5 mm tolerance, by both our checker and
+        # kicad-cli (see ``test_addr_bus_lengths_match_kicad_cli``).
+        assert skew_seen["ADDR_BUS"] == pytest.approx(0.0169, abs=0.002)
+        assert skew_seen["ADDR_BUS"] <= 0.5
 
     def test_standard_via_still_contributes_stackup_span(
         self, routed_pcb, net_class_map_from_sidecar
@@ -702,10 +702,9 @@ class TestAddrBusViaInclusiveSkew:
         results = checker.check_match_group_length_skew()
 
         addr_violations = [v for v in results.violations if "ADDR_BUS" in v.message]
-        # Issue #6725: kicad-cli sees this artifact's ADDR_BUS 1.0998 mm apart
-        # (> the 0.5 mm group tolerance), and now so does ``kct check``.
-        assert len(addr_violations) == 1
-        assert addr_violations[0].actual_value == pytest.approx(1.0998, abs=0.002)
+        # Issue #6730: the retuned fixture holds ADDR_BUS inside the 0.5 mm
+        # tolerance, so ``kct check`` reports no violation.
+        assert addr_violations == []
 
     @pytest.mark.skipif(shutil.which("kicad-cli") is None, reason="kicad-cli not installed")
     def test_addr_bus_lengths_match_kicad_cli(self, routed_pcb, tmp_path) -> None:

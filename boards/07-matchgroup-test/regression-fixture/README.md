@@ -301,6 +301,21 @@ without further width edits. The current script was verified from the original
 fixture; the contact-loss negative test separately proves that a narrower
 track losing a real connection is rejected.
 
+### ADDR_BUS retune (2026-10-18, #6730)
+
+`kct retune-lengths --group ADDR_BUS` re-applied the existing match-group tuner
+to the saved fixture (only `A4` and `A6` changed; all other nets, vias and
+pads are unchanged). ADDR_BUS skew went from **1.0998 mm to 0.0169 mm** (limit
+0.5 mm), measured by `kct check` and by `kicad-cli` per-net lengths
+(`test_addr_bus_lengths_match_kicad_cli`). The new meanders sit on In1.Cu, so the
+zones were refilled with `kct zones fill`; without the refill the stale GND fill
+reports six `clearance_segment_zone` errors. Error signatures are otherwise those
+of the previous fixture minus the ADDR_BUS skew finding (`diffpair_length_skew` 5,
+`via_in_pad` 5, `connectivity` 4). The census is now `(849, 12)` and the PCB
+SHA256 is `fdbb69fd1cae5ee76a6a66788feebfed3490f090652df75fdbf04e864f3df83e`.
+The input hash and per-net before/after lengths were recorded by the retuner's
+provenance record. Earlier sections describe the pre-retune bytes.
+
 ### Placement-delta feedback (#4468, epic #3438 Phase 3)
 
 The route step runs `kct route --placement-delta-feedback

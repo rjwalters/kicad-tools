@@ -3314,13 +3314,23 @@ def validate_routes(
     # loop walked, so the surviving vias are visited identically.
     _via_obstacles_by_net: dict[int, list[tuple[int, float, float, float]]] = {}
 
+    # Issue #5798: the preserved-copper obstacle universe is the copper the
+    # output CARRIES (:func:`kept_input_routes`), not every input route in
+    # ``router.existing_routes``.  A net this run re-routed drops its stale
+    # input copper on write (``_finalize_routes``), so checking routed copper
+    # against those stubs reported shorts the written board does not have:
+    # board 07 with ``--length-match-groups`` failed with 19 "routing short
+    # [via]" findings, every one against a dropped SDRAM escape-stub via,
+    # while kicad-cli 10.0.6 found no error on the saved board.
+    _kept_obstacle_routes = kept_input_routes(router)
+
     def _via_obstacles(route_net: int) -> list[tuple[int, float, float, float]]:
         """Vias from other-net routes, as ``(net, x, y, radius)`` tuples."""
         cached = _via_obstacles_by_net.get(route_net)
         if cached is not None:
             return cached
         entries: list[tuple[int, float, float, float]] = []
-        for other_route in itertools.chain(router.routes, getattr(router, "existing_routes", [])):
+        for other_route in itertools.chain(router.routes, _kept_obstacle_routes):
             if other_route.net == route_net:
                 continue
             for via in other_route.vias:
@@ -3355,7 +3365,7 @@ def validate_routes(
         if cached is not None:
             return cached
         entries: list[tuple[int, Segment, Layer, float, float, float, float]] = []
-        for other_route in getattr(router, "existing_routes", []):
+        for other_route in _kept_obstacle_routes:
             if other_route.net == route_net:
                 continue
             for other_seg in other_route.segments:
@@ -3913,9 +3923,9 @@ def validate_routes(
                         )
 
     # --- Via-to-via checks: new routes vs pre-existing routes ---
-    existing_routes = getattr(router, "existing_routes", [])
+    # Issue #5798: only kept copper the output carries (see above).
     for route_a in router.routes:
-        for route_b in existing_routes:
+        for route_b in _kept_obstacle_routes:
             if route_a.net == route_b.net:
                 continue
 

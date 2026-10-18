@@ -47,7 +47,7 @@ Maintain `<board-dir>/LAYOUT_NOTES.md` with these sections. Keep it terse and fa
 # LAYOUT_NOTES — <board name>
 
 Artifact-first: the committed <board>.kicad_pcb is shipping truth; this file is the WHY.
-Referee for every entry: `kicad-cli pcb drc --refill-zones <board.kicad_pcb>` → 0 new errors.
+Referee for every entry: `kicad-cli pcb drc --refill-zones --severity-error --exit-code-violations` → <E> error violations, <U> unconnected; pass = E 0 and U 0.
 
 ## Standing constraints
 - <constraint the hand-route must not violate — e.g. net class widths, keep-outs, Kelvin taps>
@@ -62,7 +62,7 @@ Referee for every entry: `kicad-cli pcb drc --refill-zones <board.kicad_pcb>` �
 ### YYYY-MM-DD — <one-line summary>
 - Touched: <nets ripped / re-dressed / newly routed>
 - Decision: <what you chose and WHY — corridor, layer, order>
-- Referee: `kicad-cli pcb drc --refill-zones` → <N new errors>; `kct check --mfr <tier>` → <result>
+- Referee: `kicad-cli pcb drc --refill-zones` → <E> error violations, <U> unconnected; `kct check --mfr <tier>` → <result>
 - Open: <what's still blocked, and on whom (owner call / EE review / another net)>
 ```
 
@@ -71,9 +71,13 @@ Referee for every entry: `kicad-cli pcb drc --refill-zones <board.kicad_pcb>` �
 1. **One dated entry per session, newest first.** Never overwrite prior entries — the history is the value.
 2. **Every entry names the referee result.** After a hand-route pass, run the cross-gate and record it:
    ```bash
-   kicad-cli pcb drc --refill-zones <board.kicad_pcb>
+   KICAD_CLI=$(uv run python -c "from kicad_tools.cli.runner import find_kicad_cli; print(find_kicad_cli() or '')")
+   "$KICAD_CLI" pcb drc --refill-zones --severity-error --exit-code-violations \
+     --format json --output <board-dir>/drc_report.json <board.kicad_pcb>
+   jq '{errors: (.violations | map(select(.severity == "error")) | length),
+        unconnected: (.unconnected_items | length)}' <board-dir>/drc_report.json
    ```
-   `--refill-zones` is load-bearing (it refills pours before checking, so DRC sees actual copper, not a stale fill). Record **new-error count**, not a bare "looks fine". A pass entry is one with **0 new errors**.
+   `--refill-zones` is load-bearing (it refills pours before checking, so DRC sees actual copper, not a stale fill), and kicad-cli counts unrouted connections separately from violations, so record **both counts** — `<E> error violations, <U> unconnected` — not a bare "looks fine" and not a count relative to some baseline (there is none). An entry with U > 0 is a **progress entry**, not a pass; only **E = 0 and U = 0** is a pass entry. `kicad-cli` is resolved the way `kct` does it (`find_kicad_cli()`, as in `{{skill:manufacturing-readiness}}` Gate 2); the venv does not provide it.
 3. **Record decisions, not just actions.** "Ripped 5 sense nets and re-dressed as one Kelvin-ordered bundle through the south band *because* the nearest blockers were 0.05-0.35mm" — the *because* is what a resumed session needs.
 4. **Surface blockers explicitly.** If a net is stuck on an owner/EE decision, say so in "Open" and in the net-status table — do not bury it. (For an analog/placement-blocked net, `{{skill:ee-review}} <board-path>` produces the decision document the hand-route then executes.)
 5. **Tie every claim to the committed artifact.** Measured facts ("nearest blocker 0.05mm") come from `kct net-status <pcb> --why` on the committed board, not memory.
@@ -110,7 +114,10 @@ writer never rewrites what is already recorded, so promotion is always safe.
 ## Referee gate (mandatory before you call a session done)
 
 ```bash
-kicad-cli pcb drc --refill-zones <board.kicad_pcb>   # 0 new errors
+KICAD_CLI=$(uv run python -c "from kicad_tools.cli.runner import find_kicad_cli; print(find_kicad_cli() or '')")
+"$KICAD_CLI" pcb drc --refill-zones --severity-error --exit-code-violations \
+  --format json --output <board-dir>/drc_report.json <board.kicad_pcb>
+# pass: exit 0, 0 error-severity violations AND 0 unconnected items
 kct check <board.kicad_pcb> --mfr <tier>             # tier resolved per {{skill:manufacturing-readiness}}
 ```
 
