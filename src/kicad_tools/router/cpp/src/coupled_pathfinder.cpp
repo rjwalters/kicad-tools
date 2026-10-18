@@ -397,9 +397,13 @@ CoupledRouteResult CoupledPathfinder::route(
     // joint midpoint admitted ~900-1,400 near-equal-f P-to-N offsets and the
     // joint A* flooded them (402k iterations against a 20k budget).  Bound
     // each end's tolerance by its own pad-pitch delta plus one cell instead:
-    // the pads themselves (spacing == pitch) stay legal, and the converging
-    // path never needs more.  Never looser than the radius-based value it
-    // replaces.  Mirrors ``_endpoint_zone_tolerance`` in diffpair_routing.py
+    // the pads themselves (spacing == pitch) stay legal.  That covers every
+    // ordinary geometry probed (in-line, perpendicular, 45/30 degrees,
+    // rotated, pitch below target, detour-forcing obstacles), but it is not
+    // a guarantee: when a foreign obstacle overlaps the N pad's own copper
+    // the converging path can need 1-4 cells more, the search then fails and
+    // the pair falls back to independent routing (Issue #6835).  Never
+    // looser than the radius-based value it replaces.  Mirrors ``_endpoint_zone_tolerance`` in diffpair_routing.py
     // (round-half-up via floor(x + 0.5) on both sides for exact parity).
     auto endpoint_zone_tolerance = [&](int ax, int ay, int bx, int by, int radius) -> int {
         double pdx = ax - bx, pdy = ay - by;

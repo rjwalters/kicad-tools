@@ -230,12 +230,18 @@ def _sync_catalog(args) -> int:
         return fail(f"failed to sync jlcparts catalog: {e}")
 
     if as_json:
+        from ..parts.jlcparts_catalog import JlcpartsCatalog, catalog_coverage_warning
+
         emit_json(
             {
                 "command": "sync-catalog",
                 "base_url": base_url,
                 "force": bool(args.force),
                 "path": str(dest),
+                "count": JlcpartsCatalog(dest).count(),
+                # Issue #7166: a partial upstream scrape must not pass for a
+                # full catalog; None when the canary basic parts are present.
+                "coverage_warning": catalog_coverage_warning(dest),
                 "success": True,
             }
         )

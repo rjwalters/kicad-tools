@@ -391,7 +391,20 @@ FLAG_VARIANT_ARGV: dict[str, list[str]] = {
     ],
     # Issue #6054: the gate's two lint runs must not leak onto stdout; the
     # verdict is merged into the command's one document as ``lint_gate``.
-    "route --lint-gate": ["route", "{pcb}", "--no-current-paths", "--lint-gate"],
+    # Narrowed like the ``route`` leaf (#5994) and to one net: the gate wraps the
+    # whole route, so the test routes less instead of skipping the gate (#7129).
+    "route --lint-gate": [
+        "route",
+        "{pcb}",
+        "--no-current-paths",
+        "--oracle-rounds",
+        "0",
+        "--no-auto-pour",
+        "--no-auto-layers",
+        "--nets",
+        "NET1",
+        "--lint-gate",
+    ],
     "route-auto --lint-gate": [
         "route-auto",
         "{pcb}",
@@ -571,8 +584,8 @@ def test_flag_variants_extend_registered_leaves():
 
 # CI runs pytest with ``--timeout=60``, which would preempt the 2 * 50 s inner
 # guard below (a genuine hang then surfaces as a pytest-timeout traceback, not
-# the "did not finish" message, and ``route --lint-gate`` -- 21.4 s idle -- fails
-# under ~3x CI slowdown). The per-test marker overrides the CLI value and leaves
+# the "did not finish" message, and a slow variant fails under ~3x CI
+# slowdown; ``route --lint-gate`` is narrowed to ~3.5 s for that reason). The per-test marker overrides the CLI value and leaves
 # headroom so the inner guard, which kills the process group, stays authoritative.
 @pytest.mark.timeout(2 * _SUBPROCESS_TIMEOUT_S + 30)
 @pytest.mark.parametrize("variant", sorted(FLAG_VARIANT_ARGV))

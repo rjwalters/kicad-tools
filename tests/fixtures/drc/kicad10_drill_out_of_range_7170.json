@@ -1,0 +1,210 @@
+{
+    "$schema": "https://schemas.kicad.org/drc.v1.json",
+    "coordinate_units": "mm",
+    "date": "2026-10-18T02:16:55",
+    "ignored_checks": [
+        {
+            "description": "Footprint has no courtyard defined",
+            "key": "missing_courtyard"
+        },
+        {
+            "description": "Track endpoint not centered on via",
+            "key": "track_not_centered_on_via"
+        },
+        {
+            "description": "Tuning profile track geometries",
+            "key": "tuning_profile_track_geometries"
+        },
+        {
+            "description": "Footprint doesn't match symbol's footprint filters",
+            "key": "footprint_filters_mismatch"
+        },
+        {
+            "description": "Footprint component type doesn't match footprint pads",
+            "key": "footprint_type_mismatch"
+        },
+        {
+            "description": "Footprint doesn't match copy in library",
+            "key": "lib_footprint_mismatch"
+        }
+    ],
+    "included_severities": [
+        "error",
+        "warning",
+        "exclusion"
+    ],
+    "kicad_version": "10.0.6",
+    "schematic_parity": [],
+    "source": "simple_led_routed.kicad_pcb",
+    "unconnected_items": [],
+    "violations": [
+        {
+            "description": "Clearance violation (rule 'Reviewed clearance - Power' clearance 0.2000 mm; actual 0.0000 mm)",
+            "items": [
+                {
+                    "description": "Via [GND] on F.Cu - B.Cu",
+                    "pos": {
+                        "x": 140.0,
+                        "y": 80.0
+                    },
+                    "uuid": "aaaaaaaa-0000-0000-0000-000000000002"
+                },
+                {
+                    "description": "Zone [VCC] on F.Cu, priority 1",
+                    "pos": {
+                        "x": 136.3,
+                        "y": 77.8
+                    },
+                    "uuid": "183805f5-c666-5727-b289-c2245fa1ea13"
+                }
+            ],
+            "severity": "error",
+            "type": "clearance"
+        },
+        {
+            "description": "Clearance violation (rule 'Reviewed clearance - Power' clearance 0.2000 mm; actual 0.0000 mm)",
+            "items": [
+                {
+                    "description": "Via [GND] on F.Cu - B.Cu",
+                    "pos": {
+                        "x": 150.0,
+                        "y": 80.0
+                    },
+                    "uuid": "aaaaaaaa-0000-0000-0000-000000000003"
+                },
+                {
+                    "description": "Zone [VCC] on F.Cu, priority 1",
+                    "pos": {
+                        "x": 136.3,
+                        "y": 77.8
+                    },
+                    "uuid": "183805f5-c666-5727-b289-c2245fa1ea13"
+                }
+            ],
+            "severity": "error",
+            "type": "clearance"
+        },
+        {
+            "description": "Hole clearance violation (board setup constraints hole clearance 0.2500 mm; actual 0.0000 mm)",
+            "items": [
+                {
+                    "description": "Via [GND] on F.Cu - B.Cu",
+                    "pos": {
+                        "x": 140.0,
+                        "y": 80.0
+                    },
+                    "uuid": "aaaaaaaa-0000-0000-0000-000000000002"
+                },
+                {
+                    "description": "Zone [VCC] on F.Cu, priority 1",
+                    "pos": {
+                        "x": 136.3,
+                        "y": 77.8
+                    },
+                    "uuid": "183805f5-c666-5727-b289-c2245fa1ea13"
+                }
+            ],
+            "severity": "error",
+            "type": "hole_clearance"
+        },
+        {
+            "description": "Hole clearance violation (board setup constraints hole clearance 0.2500 mm; actual 0.0000 mm)",
+            "items": [
+                {
+                    "description": "Via [GND] on F.Cu - B.Cu",
+                    "pos": {
+                        "x": 150.0,
+                        "y": 80.0
+                    },
+                    "uuid": "aaaaaaaa-0000-0000-0000-000000000003"
+                },
+                {
+                    "description": "Zone [VCC] on F.Cu, priority 1",
+                    "pos": {
+                        "x": 136.3,
+                        "y": 77.8
+                    },
+                    "uuid": "183805f5-c666-5727-b289-c2245fa1ea13"
+                }
+            ],
+            "severity": "error",
+            "type": "hole_clearance"
+        },
+        {
+            "description": "Hole clearance violation (rule 'Hole to Edge - jlcpcb' clearance 0.5000 mm; actual 0.0000 mm)",
+            "items": [
+                {
+                    "description": "Via [GND] on F.Cu - B.Cu",
+                    "pos": {
+                        "x": 150.0,
+                        "y": 80.0
+                    },
+                    "uuid": "aaaaaaaa-0000-0000-0000-000000000003"
+                },
+                {
+                    "description": "Rectangle on Edge.Cuts",
+                    "pos": {
+                        "x": 136.0,
+                        "y": 77.5
+                    },
+                    "uuid": "e0cc5969-b782-55c3-92c2-372eb4754395"
+                }
+            ],
+            "severity": "error",
+            "type": "hole_clearance"
+        },
+        {
+            "description": "Board edge clearance violation (rule 'Copper to Edge - jlcpcb' clearance 0.3000 mm; actual 0.0000 mm)",
+            "items": [
+                {
+                    "description": "Rectangle on Edge.Cuts",
+                    "pos": {
+                        "x": 136.0,
+                        "y": 77.5
+                    },
+                    "uuid": "e0cc5969-b782-55c3-92c2-372eb4754395"
+                },
+                {
+                    "description": "Via [GND] on F.Cu - B.Cu",
+                    "pos": {
+                        "x": 150.0,
+                        "y": 80.0
+                    },
+                    "uuid": "aaaaaaaa-0000-0000-0000-000000000003"
+                }
+            ],
+            "severity": "error",
+            "type": "copper_edge_clearance"
+        },
+        {
+            "description": "Hole size out of range (rule 'Max Hole - test' min hole 0.3000 mm; actual 0.1500 mm)",
+            "items": [
+                {
+                    "description": "Via [GND] on F.Cu - B.Cu",
+                    "pos": {
+                        "x": 140.0,
+                        "y": 80.0
+                    },
+                    "uuid": "aaaaaaaa-0000-0000-0000-000000000002"
+                }
+            ],
+            "severity": "error",
+            "type": "drill_out_of_range"
+        },
+        {
+            "description": "Hole size out of range (rule 'Max Hole - test' max hole 6.3000 mm; actual 7.0000 mm)",
+            "items": [
+                {
+                    "description": "Via [GND] on F.Cu - B.Cu",
+                    "pos": {
+                        "x": 150.0,
+                        "y": 80.0
+                    },
+                    "uuid": "aaaaaaaa-0000-0000-0000-000000000003"
+                }
+            ],
+            "severity": "error",
+            "type": "drill_out_of_range"
+        }
+    ]
+}
