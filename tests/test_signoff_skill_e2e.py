@@ -18,7 +18,8 @@ Each block's exit code is the gate verdict.  The good board must pass gates
 1-3 and leave a manifest; each bad board must be refused at the right gate.
 
 The gate-marker test never skips: a skill edit that drops a marker must fail
-CI.  The board runs skip when ``kicad-cli``, ``jq`` or ``uv`` is missing.
+CI.  The board runs skip locally when ``kicad-cli``, ``jq`` or ``uv`` is missing,
+but FAIL when ``CI`` is set so the coverage cannot silently vanish.
 """
 
 from __future__ import annotations
@@ -186,62 +187,79 @@ def _prerequisites_missing() -> str | None:
     return None
 
 
-@pytest.fixture(scope="module")
-def gate_runs(tmp_path_factory: pytest.TempPathFactory) -> dict[str, dict]:
-    """Run every gate block on every case (regardless of earlier refusals)."""
+def _run_case(case: str, root: Path) -> dict:
+    """Run every gate block on one case (regardless of earlier refusals)."""
     reason = _prerequisites_missing()
     if reason:
+        # CI must not silently lose this coverage: a missing tool fails there.
+        if os.environ.get("CI"):
+            pytest.fail(f"sign-off e2e prerequisite missing in CI: {reason}")
         pytest.skip(reason)
 
     blocks = extract_gate_blocks(SKILL.read_text(encoding="utf-8"))
     assert set(GATES) <= set(blocks), f"gate markers missing: {sorted(blocks)}"
     env = _tool_env()
-    root = tmp_path_factory.mktemp("signoff")
-    runs: dict[str, dict] = {}
-    for case in CASES:
-        pcb = _make_case(case, root / case)
-        out_dir = pcb.parent / "manufacturing"
-        results: dict[int, subprocess.CompletedProcess[str]] = {}
-        for gate in GATES:
-            results[gate] = subprocess.run(
-                ["bash", "-c", _render(blocks[gate], pcb, out_dir)],
-                cwd=REPO_ROOT,
-                env=env,
-                capture_output=True,
-                text=True,
-                timeout=600,
-            )
-        runs[case] = {"pcb": pcb, "out_dir": out_dir, "results": results}
-    return runs
+    pcb = _make_case(case, root / case)
+    out_dir = pcb.parent / "manufacturing"
+    results: dict[int, subprocess.CompletedProcess[str]] = {}
+    for gate in GATES:
+        results[gate] = subprocess.run(
+            ["bash", "-c", _render(blocks[gate], pcb, out_dir)],
+            cwd=REPO_ROOT,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=240,
+        )
+    return {"pcb": pcb, "out_dir": out_dir, "results": results}
 
 
-def _rc(runs: dict[str, dict], case: str, gate: int) -> int:
-    return runs[case]["results"][gate].returncode
+@pytest.fixture(scope="module")
+def _case_cache(tmp_path_factory: pytest.TempPathFactory) -> dict:
+    return {"root": tmp_path_factory.mktemp("signoff"), "runs": {}}
 
 
-def _diag(runs: dict[str, dict], case: str, gate: int) -> str:
-    proc = runs[case]["results"][gate]
+@pytest.fixture
+def run_case(_case_cache):
+    """Return ``run_case(case)``: run (once per module) the gates for one case."""
+
+    def _get(case: str) -> dict:
+        if case not in _case_cache["runs"]:
+            _case_cache["runs"][case] = _run_case(case, _case_cache["root"])
+        return _case_cache["runs"][case]
+
+    return _get
+
+
+def _rc(run: dict, gate: int) -> int:
+    return run["results"][gate].returncode
+
+
+def _diag(run: dict, case: str, gate: int) -> str:
+    proc = run["results"][gate]
     return f"{case} gate {gate} rc={proc.returncode}\nSTDOUT:\n{proc.stdout[-3000:]}\nSTDERR:\n{proc.stderr[-3000:]}"
 
 
-def _first_refusal(runs: dict[str, dict], case: str) -> int | None:
-    return next((g for g in GATES if _rc(runs, case, g) != 0), None)
+def _first_refusal(run: dict) -> int | None:
+    return next((g for g in GATES if _rc(run, g) != 0), None)
 
 
 @pytest.mark.integration
+@pytest.mark.timeout(300)
 class TestSignoffSkillEndToEnd:
     @pytest.mark.parametrize(
         ("case", "gate"),
         [("good", None), ("unrouted", 1), ("clearance", 1), ("nosch", 1)],
     )
-    def test_first_refusing_gate(self, gate_runs, case, gate):
-        first = _first_refusal(gate_runs, case)
-        assert first == gate, "\n\n".join(_diag(gate_runs, case, g) for g in GATES)
+    def test_first_refusing_gate(self, run_case, case, gate):
+        run = run_case(case)
+        assert _first_refusal(run) == gate, "\n\n".join(_diag(run, case, g) for g in GATES)
 
-    def test_good_board_signs_off_with_fresh_manifest(self, gate_runs):
+    def test_good_board_signs_off_with_fresh_manifest(self, run_case):
+        run = run_case("good")
         for gate in GATES:
-            assert _rc(gate_runs, "good", gate) == 0, _diag(gate_runs, "good", gate)
-        out_dir = gate_runs["good"]["out_dir"]
+            assert _rc(run, gate) == 0, _diag(run, "good", gate)
+        out_dir = run["out_dir"]
         assert (out_dir / "manifest.json").stat().st_size > 0
         report = json.loads((out_dir / "check-report.json").read_text())
         # kct check itself said INCOMPLETE (Manifest NOT RUN before export);
@@ -249,30 +267,33 @@ class TestSignoffSkillEndToEnd:
         assert report["meta_checks"]["manifest"]["status"] == "NOT RUN"
 
     @pytest.mark.parametrize("case", ["unrouted", "clearance"])
-    def test_drc_and_export_gates_refuse_independently(self, gate_runs, case):
+    def test_drc_and_export_gates_refuse_independently(self, run_case, case):
         """Gates 2 and 3 refuse the defective copper even if Gate 1 were misread."""
-        assert _rc(gate_runs, case, 2) != 0, _diag(gate_runs, case, 2)
-        assert _rc(gate_runs, case, 3) != 0, _diag(gate_runs, case, 3)
-        assert not (gate_runs[case]["out_dir"] / "manifest.json").exists()
+        run = run_case(case)
+        assert _rc(run, 2) != 0, _diag(run, case, 2)
+        assert _rc(run, 3) != 0, _diag(run, case, 3)
+        assert not (run["out_dir"] / "manifest.json").exists()
 
-        drc = json.loads((gate_runs[case]["pcb"].parent / "drc_report.json").read_text())
+        drc = json.loads((run["pcb"].parent / "drc_report.json").read_text())
         if case == "unrouted":
             assert len(drc["unconnected_items"]) > 0
         else:
             types = {v["type"] for v in drc["violations"] if v["severity"] == "error"}
             assert "clearance" in types, drc["violations"]
 
-    def test_schematic_less_board_refused_for_erc_and_lvs_not_run(self, gate_runs):
-        report = json.loads((gate_runs["nosch"]["out_dir"] / "check-report.json").read_text())
+    def test_schematic_less_board_refused_for_erc_and_lvs_not_run(self, run_case):
+        run = run_case("nosch")
+        report = json.loads((run["out_dir"] / "check-report.json").read_text())
         assert report["meta_checks"]["erc"]["status"] == "NOT RUN"
         assert report["meta_checks"]["lvs"]["status"] == "NOT RUN"
         # The copper itself is clean: only Gate 1's NOT RUN rule catches it.
-        assert _rc(gate_runs, "nosch", 2) == 0, _diag(gate_runs, "nosch", 2)
+        assert _rc(run, 2) == 0, _diag(run, "nosch", 2)
 
     @pytest.mark.parametrize("case", CASES)
-    def test_refused_export_leaves_no_manifest(self, gate_runs, case):
-        manifest = gate_runs[case]["out_dir"] / "manifest.json"
-        if _rc(gate_runs, case, 3) == 0:
+    def test_refused_export_leaves_no_manifest(self, run_case, case):
+        run = run_case(case)
+        manifest = run["out_dir"] / "manifest.json"
+        if _rc(run, 3) == 0:
             assert manifest.stat().st_size > 0
         else:
-            assert not manifest.exists(), _diag(gate_runs, case, 3)
+            assert not manifest.exists(), _diag(run, case, 3)
