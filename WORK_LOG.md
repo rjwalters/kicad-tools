@@ -15,6 +15,8 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-18
 
+- **PR #7171**: perf(router): make negotiated escape strategies transactional and cap their reroutes
+- **Issue #7071** (closed): router: negotiated oscillation escape burns ~27 s (≈40% of board-02 wall) on four non-transactional strategies, then is rolled back (P1 of #7053 note, mislabelled 'perturbation pass')
 - **PR #7183**: test(dru): model post-#4600 Max Hole Size rule in legacy sidecar fixture
 - **PR #7182**: fix(preflight): check .kct-assigned parts and SO lead pitch in LCSC guard
 - **PR #7177**: test: narrow route --lint-gate contract variant and return it to required tier
