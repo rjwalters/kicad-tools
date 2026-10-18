@@ -8,12 +8,6 @@
       "warnings": {
         "thermal_asymmetry": 6
       }
-    },
-    {
-      "issue": 7250,
-      "kind": "defect",
-      "summary": "USB D+/D- pair on In2.Cu (the VCC plane layer) measures 71.6 ohm differential against the 90 ohm spec in project.kct; not ready until #7250 is fixed",
-      "recorded": "2026-10-18"
     }
   ]
 }
