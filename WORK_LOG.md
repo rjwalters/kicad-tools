@@ -15,6 +15,25 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-18
 
+- **PR #7226**: feat(export): enforce JLCPCB Economic/Standard PCBA tiers in preflight (#7204 part C)
+- **PR #7225**: style: ruff format board 00 generate_design.py
+- **PR #7216**: fix(boards): emit stock F.Fab body for board 00 LED so pin1 rule sees the real outline
+- **PR #7203**: fix(boards): apply JLC rotation profile and Gerber frame to board 04/06 CPLs
+- **PR #7194**: fix: flush C++ unmarks on escape rollback and give each escape strategy its own budget
+- **PR #7163**: fix(physics): solve edge-coupled Zdiff by field solve, not an empirical coupling factor
+- **Issue #7223** (closed): ci: ruff format check fails on main (boards/00-simple-led/generate_design.py)
+- **Issue #7211** (closed): Board 00 D1: pin1_marker_obscured is a courtyard-proxy artifact; emit the stock F.Fab body so the rule sees the real 5 mm LED outline
+- **Issue #7200** (closed): Boards 04/06 CPLs: frame regen also changes Rotation (JLC rotation profile missing) — needs orientation review (split from #7199)
+- **Issue #7192** (closed): router escape follow-ups: flush deferred C++ unmarks after rollback; full-reorder never kept under default cap (#7171)
+- **Issue #7060** (closed): CoupledLines overstates differential impedance of tightly coupled pairs (+17 % microstrip, +12 % stripline)
+- **PR #7196**: test: run live pcbnew oracle + 10.0.6 keepout baseline in CI; show slow-suite skips
+- **Issue #7193** (closed): test: two live-KiCad oracle tests skip in every CI job despite the tool being present (rotation pcbnew oracle, keepout 10.0.1 baseline); slow suite hides skip reasons
+- **PR #7202**: fix(drc): skip kct keepout DRU rules on KiCad >= 10.0.6
+- **Issue #7198** (closed): keepout DRU rule may double-report on KiCad 10.0.6 (native DRC now catches the #6039 gap)
+- **PR #7212**: fix(pcb,patterns): unify trace-width calculators on IPC-2221 (Part A of #7206)
+- **PR #7208**: fix(boards): add F.CrtYd courtyards to boards 00 and 01 footprints
+- **PR #7205**: fix(mcp): share one session store and make restore_checkpoint restore
+- **Issue #7121** (closed): MCP sessions: one session store for start_session/get_session_context/record_decision, and checkpoints that actually restore (#7115 Part 2)
 - **PR #7179**: feat(cli): finish lib create-symbol-lib/create-footprint-lib/generate-footprint and estimate cost --bom CSV
 - **PR #7197**: fix(board-01): ship sym-lib-table and kicad_tools_pwr symbol library
 - **Issue #7175** (closed): Finish 4 stubbed CLI capabilities advertised in kct --help: lib create-symbol-lib / create-footprint-lib / generate-footprint (deps landed, #85/#87/#88 closed) and estimate cost --bom CSV

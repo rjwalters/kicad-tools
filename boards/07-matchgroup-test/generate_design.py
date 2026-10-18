@@ -273,13 +273,30 @@ def addr_bus_net_class() -> NetClassRouting:
     )
 
 
+# Issue #7060: widths the compact coupled routing on this board is validated
+# at (#4969 / ``repair_mipi.py``).  The tightly-coupled solve below holds
+# these and solves the GAP for the target Zdiff.
+_ROUTABLE_DIFF_WIDTH_MM: dict[str, float] = {
+    "MIPI_CSI_LANES": 0.225,
+    "HDMI_TMDS_LANES": 0.225,
+}
+
+
 def _size_tightly_coupled_class(net_class: NetClassRouting) -> NetClassRouting:
-    """Size an impedance-constrained pair without changing its authored gap.
+    """Size an impedance-constrained pair as a compact, tightly coupled pair.
 
     The unconstrained impedance resolver can choose an approximately 8 mm
     gap, which defeats the compact coupled routing this testbench exercises.
-    As on board 06, solve width at the declared gap on the JLCPCB stackup.
-    Classes without an explicit impedance target keep their declared width.
+    As on board 06 (Issue #7060), hold the class's routing-validated width
+    (``_ROUTABLE_DIFF_WIDTH_MM``) and solve the gap for the target Zdiff on
+    the JLCPCB stackup, rounded to 0.005 mm and never tighter than the
+    authored ``intra_pair_clearance``.  Solving width at the authored gap
+    instead narrowed both 100 ohm classes to 0.175 mm under the #7060
+    two-conductor field solve, and the seed-42 re-route at that width
+    exceeded the DRC allowlist (9 > 8).  A class with no validated width, or
+    whose target the gap cannot reach, falls back to solving width at the
+    authored gap.  Classes without an explicit impedance target keep their
+    declared geometry.
     """
     from dataclasses import replace
 
@@ -292,21 +309,37 @@ def _size_tightly_coupled_class(net_class: NetClassRouting) -> NetClassRouting:
         return net_class
 
     coupled_lines = CoupledLines(Stackup.jlcpcb_4layer())
-    lo, hi = 0.15, 1.0  # Board specification's minimum trace width.
-    for _ in range(40):
-        mid = (lo + hi) / 2
-        if coupled_lines.edge_coupled_microstrip(mid, gap, "F.Cu").zdiff > target:
-            lo = mid
-        else:
-            hi = mid
-    width = round(round(((lo + hi) / 2) / 0.025) * 0.025, 4)
-    actual = coupled_lines.edge_coupled_microstrip(width, gap, "F.Cu").zdiff
+
+    def zdiff(width_mm: float, gap_mm: float) -> float:
+        return coupled_lines.edge_coupled_microstrip(width_mm, gap_mm, "F.Cu").zdiff
+
+    held = _ROUTABLE_DIFF_WIDTH_MM.get(net_class.name)
+    if held is not None and zdiff(held, gap) <= target <= zdiff(held, 1.0):
+        lo, hi = gap, 1.0
+        while hi - lo > 0.0005:
+            mid = (lo + hi) / 2
+            if zdiff(held, mid) < target:
+                lo = mid
+            else:
+                hi = mid
+        width = held
+        gap = max(round(round(((lo + hi) / 2) / 0.005) * 0.005, 4), gap)
+    else:
+        lo, hi = 0.15, 1.0  # Board specification's minimum trace width.
+        for _ in range(40):
+            mid = (lo + hi) / 2
+            if zdiff(mid, gap) > target:
+                lo = mid
+            else:
+                hi = mid
+        width = round(round(((lo + hi) / 2) / 0.025) * 0.025, 4)
+    actual = zdiff(width, gap)
     if abs(actual - target) > target * net_class.impedance_tolerance_percent / 100:
         raise ValueError(
-            f"{net_class.name}: cannot meet {target:g} ohm at authored gap {gap:g} mm "
+            f"{net_class.name}: cannot meet {target:g} ohm at gap {gap:g} mm "
             f"with a manufacturable width (resolved {actual:.3f} ohm at {width:g} mm)"
         )
-    return replace(net_class, trace_width=width)
+    return replace(net_class, trace_width=width, intra_pair_clearance=gap)
 
 
 def build_net_class_map(*, preserve_authored_gap: bool = True) -> dict[str, NetClassRouting]:
@@ -334,6 +367,11 @@ def build_net_class_map(*, preserve_authored_gap: bool = True) -> dict[str, NetC
     must never disagree about pair sizing again (#4969).  Kept as an
     explicit opt-out (rather than removed outright) only so a future
     diagnostic run can still request the raw, un-widened declaration.
+
+    Issue #7060: under the two-conductor field solve the sizing holds the
+    0.225 mm routing width and widens the gap to 0.135 mm (99.7 ohm); the
+    authored 0.10 mm gap is now the minimum rather than a fixed value (see
+    ``_size_tightly_coupled_class``).
     """
     ddr = ddr_data_byte_0_net_class()
     dqs = ddr_dqs_pair_net_class()

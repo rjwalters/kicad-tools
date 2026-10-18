@@ -109,6 +109,9 @@ header-includes:
 {% if assembly_notes.polarized_count is defined and assembly_notes.polarized_count > 0 %}
 - **Polarized components**: {{ assembly_notes.polarized_count }} -- check orientation markings
 {% endif %}
+{% if assembly_notes.bottom_side_count is defined and assembly_notes.bottom_side_count > 0 %}
+- **Bottom-side parts**: {{ assembly_notes.bottom_side_count }}{% if assembly_notes.bottom_side_parts %} ({{ assembly_notes.bottom_side_parts | join(", ") }}{% if assembly_notes.bottom_side_count > assembly_notes.bottom_side_parts | length %}, ...{% endif %}){% endif %} -- double-sided assembly
+{% endif %}
 
 {% endif %}
 {% if tht_components %}
