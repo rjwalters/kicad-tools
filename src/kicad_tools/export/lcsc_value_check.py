@@ -658,6 +658,24 @@ _SO_FAMILY_PITCH_MM = {
 }
 
 
+# Pitches at or below this are the "fine" class (TSSOP/MSOP/VSSOP: 0.65 / 0.5 mm).
+_FINE_PITCH_MAX_MM = 0.65 + PITCH_TOLERANCE_MM
+
+
+def _pitches_conflict(a: IcPackage, b: IcPackage) -> bool:
+    """True when two SO packages' lead pitches provably disagree.
+
+    Two explicit ``_P`` tokens are compared exactly.  A family-name-derived
+    pitch is only a class hint (LCSC strings such as ``MSOP-10`` never state
+    pitch and real parts come in 0.5 mm as well as 0.65 mm), so then only the
+    coarse (1.27 mm) vs fine (<= 0.65 mm) class is compared.
+    """
+    assert a.pitch is not None and b.pitch is not None
+    if a.pitch_explicit and b.pitch_explicit:
+        return abs(a.pitch - b.pitch) > PITCH_TOLERANCE_MM
+    return (a.pitch <= _FINE_PITCH_MAX_MM) != (b.pitch <= _FINE_PITCH_MAX_MM)
+
+
 @dataclass(frozen=True)
 class IcPackage:
     """A recognized IC package: family, signal pin count, optional body."""
@@ -667,6 +685,7 @@ class IcPackage:
     body: tuple[float, float] | None = None
     exposed_pad: bool = False
     pitch: float | None = None  # lead pitch in mm; SO group only, None = unknown
+    pitch_explicit: bool = False  # True when read from a ``_P`` token, not the family name
 
 
 def parse_ic_package(text: str) -> IcPackage | None:
@@ -709,6 +728,7 @@ def parse_ic_package(text: str) -> IcPackage | None:
             None,
             exposed or family in ("HTSSOP", "HVSSOP"),
             pitch,
+            pitch_m is not None,
         )
 
     for regex, family in ((_QFP_RE, "QFP"), (_QFN_RE, "QFN")):
@@ -752,8 +772,9 @@ def find_ic_package_mismatch(
       the footprint name or implied by the part package).
     - When the footprint name also parses, the families must belong to the
       same group, the pin counts must agree (if no pads were supplied), SO
-      lead pitches must agree when both are known (SOIC 1.27 mm vs
-      TSSOP/MSOP 0.65 mm -- issue #7180), and QFP/QFN bodies must agree within :data:`BODY_TOLERANCE_MM` when both
+      lead pitches must not conflict when both are known (SOIC 1.27 mm vs
+      TSSOP/MSOP -- issue #7180; a pitch implied only by the family name
+      is compared as coarse vs fine class, never 0.65 vs 0.5 mm), and QFP/QFN bodies must agree within :data:`BODY_TOLERANCE_MM` when both
       sides state one.
 
     Returns:
@@ -792,7 +813,7 @@ def find_ic_package_mismatch(
         and part.family == "SO"
         and part.pitch is not None
         and footprint.pitch is not None
-        and abs(part.pitch - footprint.pitch) > PITCH_TOLERANCE_MM
+        and _pitches_conflict(part, footprint)
     ):
         return mismatch(f"pitch {part.pitch:g}mm vs footprint {footprint.pitch:g}mm")
 

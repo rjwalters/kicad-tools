@@ -250,6 +250,31 @@ def test_so_aliases_and_unknown_pitch_still_match_issue_7180(footprint, package)
     assert find_ic_package_mismatch(footprint, pads, package) is None
 
 
+@pytest.mark.parametrize(
+    ("footprint", "package", "pins"),
+    [
+        ("Package_SO:MSOP-10_3x3mm_P0.5mm", "MSOP-10", 10),
+        ("Package_SO:VSSOP-10_3x3mm_P0.5mm", "VSSOP-10", 10),
+        ("Package_SO:MSOP-10-1EP_3x3mm_P0.5mm_EP1.68x1.88mm", "MSOP-10-EP", 10),
+        ("Package_SO:TSSOP-48_6.1x12.5mm_P0.5mm", "TSSOP-48", 48),
+        ("Package_SO:TSSOP-56_6.1x14mm_P0.5mm", "TSSOP-56", 56),
+    ],
+)
+def test_fine_pitch_footprint_with_family_only_part_passes_issue_7180(footprint, package, pins):
+    assert find_ic_package_mismatch(footprint, _numbers(pins), package) is None
+
+
+@pytest.mark.parametrize(
+    ("footprint", "package"),
+    [
+        ("Package_SO:TSSOP-8_4.4x3mm_P0.65mm", "SOIC-8"),
+        ("Package_SO:SOIC-8_3.9x4.9mm_P1.27mm", "TSSOP-8"),
+    ],
+)
+def test_coarse_vs_fine_still_fails_issue_7180(footprint, package):
+    assert find_ic_package_mismatch(footprint, _numbers(8), package) is not None
+
+
 def test_parse_ic_package_pitch_issue_7180():
     assert parse_ic_package("Package_SO:SOIC-8_3.9x4.9mm_P1.27mm").pitch == 1.27
     assert parse_ic_package("MSOP-8-EP").pitch == 0.65
