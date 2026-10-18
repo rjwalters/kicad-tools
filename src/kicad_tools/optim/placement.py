@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING
 logger = logging.getLogger(__name__)
 
 from kicad_tools.optim.board_outline import extract_board_outline as _extract_board_outline_shared
+from kicad_tools.optim.board_outline import to_origin_relative
 from kicad_tools.optim.components import (
     ClusterType,
     Component,
@@ -264,13 +265,9 @@ class PlacementOptimizer:
             pass
 
         if board is None:
-            board = cls._extract_board_outline(pcb)
-            if board is not None:
-                # The legacy parser reads raw (absolute) Edge.Cuts coordinates;
-                # move them into the origin-relative frame of Footprint.position.
-                ox, oy = pcb.board_origin
-                if ox or oy:
-                    board = board.translate(Vector2D(-ox, -oy))
+            # The legacy parser reads raw (absolute) Edge.Cuts coordinates;
+            # move them into the origin-relative frame of Footprint.position.
+            board = to_origin_relative(cls._extract_board_outline(pcb), pcb)
 
         if board is None:
             # Neither the Shapely engine nor the legacy parser could recover a
