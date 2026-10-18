@@ -15,6 +15,16 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-18
 
+- **PR #7181**: fix(drc,erc): kct drc --mfr never drops a violation; delete dead phantom wire filter
+- **PR #7176**: fix(readiness,preflight): stop calling unchecked LCSC parts verified
+- **PR #7160**: fix(router): keep a match-group member's commits when a later attempt fails
+- **PR #7133**: fix(boards): run package_release producers on pinned toolchain and refresh board 01 readiness
+- **PR #6838**: perf(router): raise flag-off coupled iteration budget to 1.4M (700k/phase) with PCIE_TX/PCIE_RX/LVDS exceptions
+- **Issue #7170** (closed): kct drc --mfr silently drops unhandled DRC types and exits 0 on kicad-cli errors; delete dead phantom wire_dangling filter
+- **Issue #7166** (closed): Part-footprint sign-off false-PASS: kct readiness ignores bom_lcsc_values, preflight counts LCSC cache misses as checked, no IC package/pin-count check
+- **Issue #6893** (closed): router: 06rf USB3_RX1 skew regresses 1.365 → 5.823 mm at the 700k flag-off coupled budget on current main (blocks #6838)
+- **Issue #6835** (closed): router: raise flag-off coupled iteration budget to 350k/phase (700k total) so Board07 couples 6/7 pairs; soften endpoint-tolerance comment (#6826 follow-up)
+- **Issue #6404** (closed): boards 00-07: refill saved zones and refresh hash-bound bundles/readiness after #6390's sidecar update
 - **PR #7137**: test: move route --lint-gate JSON-contract variant to extended tier
 - **PR #7165**: fix(export): emit CPL in the Gerber/drill frame (aux origin, Y up)
 - **Issue #7161** (closed): kct erc reports PASS (exit 0) where kicad-cli reports errors: cross-sheet global-label name-count filter drops true isolated_pin_label findings; power-pin sibling filter is inert on KiCad 10
