@@ -28,10 +28,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
-from .pnp import is_through_hole_footprint
+from .pnp import _ref_sort_key, is_through_hole_footprint
 
 if TYPE_CHECKING:
     from ..drc.violation import DRCViolation
+    from ..manufacturers.base import AssemblyCapabilities, ManufacturerProfile
 
 logger = logging.getLogger(__name__)
 
@@ -114,6 +115,130 @@ def report_source_mismatch(
     return recorded_name
 
 
+# ---------------------------------------------------------------------------
+# Assembly package/pitch parsing (Issue #7204)
+# ---------------------------------------------------------------------------
+
+# KiCad chip lib ids carry imperial and metric codes: ``R_0402_1005Metric``.
+_CHIP_METRIC_RE = re.compile(r"_(\d{4,5})_(\d{4})Metric", re.IGNORECASE)
+# Pitch token in KiCad lib ids: ``LQFP-48_7x7mm_P0.5mm``.
+_PITCH_RE = re.compile(r"_P(\d+(?:\.\d+)?)mm", re.IGNORECASE)
+_BGA_RE = re.compile(r"BGA|CSP", re.IGNORECASE)
+
+# Imperial chip code -> body length in mm (the leading digits of the metric
+# code: 0402 imperial == 1005 metric == 1.0 mm long).
+_IMPERIAL_CHIP_LENGTH_MM = {
+    "01005": 0.4,
+    "0201": 0.6,
+    "0402": 1.0,
+    "0603": 1.6,
+    "0805": 2.0,
+    "1206": 3.2,
+    "1210": 3.2,
+    "2010": 5.0,
+    "2512": 6.3,
+}
+_PITCH_EPS = 1e-6
+# Pitch comparisons allow 0.01 mm: lib-id pitches are nominal metric values
+# and some fabs quote limits in mil (FlashPCB's "20 mil" = 0.508 mm is meant
+# to admit 0.5 mm-pitch QFPs), so a sub-0.01 mm gap is a unit-rounding
+# artefact, not a capability difference.
+_PITCH_TOLERANCE_MM = 0.01
+
+
+@dataclass(frozen=True)
+class _AssemblyRequirement:
+    """One placement constraint a CPL part puts on the assembly service."""
+
+    reference: str
+    kind: Literal["package", "ic_pitch", "bga_pitch"]
+    value: float  # chip body length (package) or pitch, in mm
+    label: str  # e.g. "0201" or "0.35 mm"
+    measured: bool = False  # pitch measured from pads, not read from lib id
+
+    def fits(self, tier: AssemblyCapabilities) -> bool:
+        if self.kind == "package":
+            if not tier.min_package:
+                return True
+            min_len = _IMPERIAL_CHIP_LENGTH_MM.get(tier.min_package)
+            return min_len is None or self.value >= min_len - _PITCH_EPS
+        if self.kind == "bga_pitch":
+            return (
+                bool(tier.supports_bga)
+                and self.value >= tier.min_bga_pitch_mm - _PITCH_TOLERANCE_MM
+            )
+        return self.value >= tier.min_component_pitch_mm - _PITCH_TOLERANCE_MM
+
+    def describe(self) -> str:
+        what = {"package": "package", "ic_pitch": "pin pitch", "bga_pitch": "BGA pitch"}
+        text = f"{self.reference} {what[self.kind]} {self.label}"
+        return text + " (measured)" if self.measured else text
+
+
+def _measured_pitch_mm(pads) -> float | None:
+    """Minimum centre spacing between same-size copper SMD pads.
+
+    Fallback for lib ids without a ``_P<pitch>mm`` token.  Stacked/coincident
+    pads (< 0.05 mm apart) and paste-only apertures are ignored.  Returns
+    ``None`` for parts with fewer than 4 such pads (chips, SOT-23).
+    """
+    copper = [
+        p
+        for p in pads
+        if getattr(p, "type", "") == "smd"
+        and any(str(layer).endswith(".Cu") for layer in (getattr(p, "layers", None) or ()))
+    ]
+    if len(copper) < 4:
+        return None
+    best: float | None = None
+    for i, a in enumerate(copper):
+        for b in copper[i + 1 :]:
+            if (round(a.size[0], 3), round(a.size[1], 3)) != (
+                round(b.size[0], 3),
+                round(b.size[1], 3),
+            ) and (round(a.size[0], 3), round(a.size[1], 3)) != (
+                round(b.size[1], 3),
+                round(b.size[0], 3),
+            ):
+                continue
+            d = ((a.position[0] - b.position[0]) ** 2 + (a.position[1] - b.position[1]) ** 2) ** 0.5
+            if d < 0.05:
+                continue
+            if best is None or d < best:
+                best = d
+    return best
+
+
+def _requirements_for_footprint(reference: str, lib_id: str, pads) -> list[_AssemblyRequirement]:
+    """Derive package/pitch requirements from a footprint's lib id (or pads)."""
+    reqs: list[_AssemblyRequirement] = []
+    fp_name = lib_id.split(":", 1)[-1]
+    chip = _CHIP_METRIC_RE.search(fp_name)
+    if chip:
+        imperial, metric = chip.group(1), chip.group(2)
+        reqs.append(_AssemblyRequirement(reference, "package", int(metric[:2]) / 10.0, imperial))
+        return reqs
+
+    is_bga = bool(_BGA_RE.search(fp_name))
+    # The "minimum IC pin spacing" limit is about ICs: connector libraries
+    # (FFC/FPC, headers) are not judged against it.
+    is_connector = lib_id.lower().startswith("connector")
+    if is_connector and not is_bga:
+        return reqs
+    kind: Literal["ic_pitch", "bga_pitch"] = "bga_pitch" if is_bga else "ic_pitch"
+    pitch_match = _PITCH_RE.search(fp_name)
+    if pitch_match:
+        pitch = float(pitch_match.group(1))
+        reqs.append(_AssemblyRequirement(reference, kind, pitch, f"{pitch:g} mm"))
+        return reqs
+    measured = _measured_pitch_mm(pads)
+    if measured is not None:
+        reqs.append(
+            _AssemblyRequirement(reference, kind, measured, f"{measured:.2f} mm", measured=True)
+        )
+    return reqs
+
+
 @dataclass
 class PreflightConfig:
     """Configuration for which pre-flight checks to run."""
@@ -139,6 +264,13 @@ class PreflightConfig:
     # from ``strict_preflight`` so strict exports never ship on a verdict that
     # was computed for another board.
     strict_report_source: bool = False
+
+    # PCBA service tier the package/pitch limits are judged against (Issue
+    # #7204): ``"auto"`` (default) judges against the fab's cheapest tier and
+    # reports the cheapest tier the board fits; a tier name (``"economic"``,
+    # ``"standard"``; matched case-insensitively against the tier's leading
+    # word) judges against that tier.  Fabs without published tiers ignore it.
+    assembly_tier: str = "auto"
 
 
 class PreflightChecker:
@@ -166,6 +298,11 @@ class PreflightChecker:
     # capability tiers such as ``jlcpcb-tier1`` share the parent fab's
     # assembly service and CPL format, so they must inherit the parent's
     # THT policy.  See ``get_fab_family()`` and issue #3497.
+    #
+    # TODO(#7204): JLCPCB's assembly capability page now lists THT placement
+    # in both its Economic and Standard PCBA tiers.  Whether to stop
+    # auto-excluding THT from JLCPCB CPLs changes CPL contents fleet-wide and
+    # is an operator decision, so this policy is intentionally unchanged.
     _SMT_ONLY_MANUFACTURERS = {"jlcpcb"}
 
     def __init__(
@@ -217,6 +354,8 @@ class PreflightChecker:
         # Lazy-loaded objects
         self._pcb = None
         self._bom = None
+        self._assembly_profile_cache: ManufacturerProfile | None = None
+        self._assembly_profile_resolved = False
 
     def run_all(self) -> list[PreflightResult]:
         """Run all applicable pre-flight checks.
@@ -251,6 +390,12 @@ class PreflightChecker:
         # THT-in-CPL warning
         if self._pcb is not None:
             results.append(self._check_tht_in_cpl())
+
+        # Assembly-capability checks against the fab's PCBA service tier(s)
+        # (Issue #7204).  Skipped entirely for PCB-only fabs (no assembly).
+        if self._pcb is not None and self._assembly_tiers():
+            results.append(self._check_bottom_side_in_cpl())
+            results.append(self._check_assembly_package_limits())
 
         # BOM checks: run if schematic is available OR bom_source is "pcb"/"auto"
         can_load_bom = (
@@ -596,19 +741,14 @@ class PreflightChecker:
                 message="Cannot check dimensions: PCB not loaded",
             )
 
-        outline = self._pcb.get_board_outline()
-        if not outline:
+        size = self._board_size_mm()
+        if size is None:
             return PreflightResult(
                 name="board_dimensions",
                 status="WARN",
                 message="Cannot determine board dimensions: no outline found",
             )
-
-        # Compute bounding box
-        xs = [p[0] for p in outline]
-        ys = [p[1] for p in outline]
-        width = max(xs) - min(xs)
-        height = max(ys) - min(ys)
+        width, height = size
 
         # Get manufacturer limits
         max_w, max_h = self._get_manufacturer_limits()
@@ -636,6 +776,20 @@ class PreflightChecker:
             status="OK",
             message=f"Board dimensions within limits ({width:.2f} x {height:.2f} mm)",
         )
+
+    def _board_size_mm(self) -> tuple[float, float] | None:
+        """Board outline bounding box (width, height) in mm, or ``None``."""
+        if self._pcb is None:
+            return None
+        try:
+            outline = self._pcb.get_board_outline()
+        except Exception:
+            return None
+        if not outline:
+            return None
+        xs = [p[0] for p in outline]
+        ys = [p[1] for p in outline]
+        return (max(xs) - min(xs), max(ys) - min(ys))
 
     def _check_drill_holes(self) -> PreflightResult:
         """Check that the board has drill holes (vias or through-hole pads)."""
@@ -730,6 +884,235 @@ class PreflightChecker:
             status="OK",
             message=f"{len(tht_refs)} through-hole component(s) included in CPL",
             details=f"THT references: {refs}{suffix}",
+        )
+
+    # ------------------------------------------------------------------
+    # Assembly-capability checks (Issue #7204)
+    # ------------------------------------------------------------------
+
+    def _assembly_profile(self) -> ManufacturerProfile | None:
+        """The manufacturer profile, or ``None`` when it cannot be resolved."""
+        if not self._assembly_profile_resolved:
+            self._assembly_profile_resolved = True
+            try:
+                from ..manufacturers import get_profile
+
+                self._assembly_profile_cache = get_profile(self.manufacturer)
+            except Exception:
+                self._assembly_profile_cache = None
+        return self._assembly_profile_cache
+
+    def _assembly_tiers(self) -> list[AssemblyCapabilities]:
+        """The fab's PCBA service tiers, cheapest first (``[]`` = PCB-only)."""
+        profile = self._assembly_profile()
+        if profile is None:
+            return []
+        return profile.get_assembly_tiers()
+
+    def _is_tiered(self) -> bool:
+        """Whether the fab publishes more than one PCBA service tier."""
+        profile = self._assembly_profile()
+        return bool(profile is not None and profile.assembly_tiers)
+
+    def _fab_display_name(self) -> str:
+        profile = self._assembly_profile()
+        return profile.name if profile is not None else self.manufacturer
+
+    def _selected_tier(self) -> tuple[int, str]:
+        """Index of the tier to judge against, plus a note for ``details``.
+
+        ``auto`` (and any unmatched name) selects the cheapest tier.
+        """
+        requested = (self.config.assembly_tier or "auto").strip().lower()
+        if requested == "auto":
+            return 0, ""
+        tiers = self._assembly_tiers()
+        if not self._is_tiered():
+            return 0, (
+                f"{self._fab_display_name()} publishes a single assembly service; "
+                f"--assembly-tier {requested} ignored"
+            )
+        for idx, tier in enumerate(tiers):
+            name = (tier.tier_name or "").lower()
+            if name == requested or name.split(" ")[0] == requested:
+                return idx, ""
+        names = ", ".join((t.tier_name or "?").split(" ")[0].lower() for t in tiers)
+        return 0, f"unknown assembly tier '{requested}' (choices: auto, {names}); using auto"
+
+    def _cpl_footprints(self) -> list:
+        """Footprints that land in the CPL (same filter as ``extract_placements``)."""
+        if self._pcb is None:
+            return []
+        return [
+            fp
+            for fp in self._pcb.footprints
+            if not getattr(fp, "exclude_from_pos_files", False)
+            and not getattr(fp, "dnp", False)
+            and not (self._exclude_tht and is_through_hole_footprint(fp))
+        ]
+
+    def _check_bottom_side_in_cpl(self) -> PreflightResult:
+        """Flag bottom-side CPL parts and the assembly tier they require.
+
+        Always WARN (never FAIL), even under ``--strict-preflight`` or an
+        explicit ``--assembly-tier``: double-sided placement is a cost and
+        service-tier decision, not an unbuildable board.
+        """
+        name = "bottom_side_in_cpl"
+        bottom = sorted(
+            (fp.reference for fp in self._cpl_footprints() if fp.layer == "B.Cu"),
+            key=_ref_sort_key,
+        )
+        if not bottom:
+            return PreflightResult(
+                name=name,
+                status="OK",
+                message="No bottom-side components in CPL (single-sided assembly)",
+            )
+
+        refs = ", ".join(bottom[:10])
+        suffix = f" (and {len(bottom) - 10} more)" if len(bottom) > 10 else ""
+        details = f"Bottom-side references: {refs}{suffix}"
+        fab = self._fab_display_name()
+        tiers = self._assembly_tiers()
+        need = next((t for t in tiers if t.supports_double_sided), None)
+        count = f"{len(bottom)} bottom-side component(s)"
+
+        if need is None:
+            message = f"{count}: {fab}'s assembly service does not list double-sided placement"
+        elif self._is_tiered():
+            terms = ["double-sided"]
+            if need.requires_rails_and_fiducials:
+                terms.append("edge rails + fiducials required")
+            if need.min_build_days:
+                terms.append(f">={need.min_build_days}-day build")
+            message = f"{count}: requires {fab} {need.display_name} ({'; '.join(terms)})"
+        else:
+            message = f"{count}: double-sided assembly (two placement passes, higher cost)"
+
+        size = self._board_size_mm()
+        if need is not None and need.min_board_size_mm and size is not None:
+            board = sorted(size)
+            minimum = sorted(need.min_board_size_mm)
+            if board[0] < minimum[0] or board[1] < minimum[1]:
+                min_w, min_h = need.min_board_size_mm
+                message += (
+                    f"; board is {size[0]:.1f}x{size[1]:.1f} mm, below "
+                    f"{need.display_name}'s {min_w:g}x{min_h:g} mm single-PCB "
+                    "minimum: panelize (`kct panel`)"
+                )
+
+        return PreflightResult(name=name, status="WARN", message=message, details=details)
+
+    def _assembly_requirements(self) -> list[_AssemblyRequirement]:
+        """Package/pitch requirements of every CPL part (lib id first, then measured)."""
+        reqs: list[_AssemblyRequirement] = []
+        for fp in self._cpl_footprints():
+            lib_id = getattr(fp, "name", "") or ""
+            ref = getattr(fp, "reference", "") or lib_id
+            reqs.extend(_requirements_for_footprint(ref, lib_id, getattr(fp, "pads", ())))
+        return reqs
+
+    def _check_assembly_package_limits(self) -> PreflightResult:
+        """Compare chip package size and IC/BGA pitch against the PCBA tier(s).
+
+        Within the selected tier -> OK.  Beyond it but within a costlier tier
+        -> WARN naming the tier needed.  Beyond every tier the fab offers ->
+        FAIL (no service at that fab can place it), except for pitches that
+        were *measured* from pads rather than read from the lib id, which cap
+        at WARN because the measurement is a heuristic.
+        """
+        name = "assembly_package_limits"
+        tiers = self._assembly_tiers()
+        tiered = self._is_tiered()
+        fab = self._fab_display_name()
+        selected_idx, note = self._selected_tier()
+        selected = tiers[selected_idx]
+        auto = (self.config.assembly_tier or "auto").strip().lower() == "auto"
+
+        reqs = self._assembly_requirements()
+        impossible: list[_AssemblyRequirement] = []
+        needs: dict[int, list[_AssemblyRequirement]] = {}
+        required_idx = 0
+        for req in reqs:
+            idx = next((i for i, t in enumerate(tiers) if req.fits(t)), None)
+            if idx is None:
+                impossible.append(req)
+                continue
+            required_idx = max(required_idx, idx)
+            if idx > selected_idx:
+                needs.setdefault(idx, []).append(req)
+
+        def _limits(tier: AssemblyCapabilities) -> str:
+            parts = []
+            if tier.min_package:
+                parts.append(f"min package {tier.min_package}")
+            parts.append(f"IC pitch {tier.min_component_pitch_mm:g} mm")
+            parts.append(f"BGA pitch {tier.min_bga_pitch_mm:g} mm")
+            return ", ".join(parts)
+
+        def _join(items: list[_AssemblyRequirement]) -> str:
+            shown = "; ".join(r.describe() for r in items[:10])
+            if len(items) > 10:
+                shown += f" (and {len(items) - 10} more)"
+            return shown
+
+        detail_lines: list[str] = []
+        if note:
+            detail_lines.append(note)
+        detail_lines.append(f"{len(reqs)} package/pitch requirement(s) checked")
+
+        if impossible:
+            hard = [r for r in impossible if not r.measured]
+            detail_lines.append(f"Beyond every {fab} assembly tier: {_join(impossible)}")
+            for idx in sorted(needs):
+                detail_lines.append(f"Needs {tiers[idx].display_name}: {_join(needs[idx])}")
+            best = tiers[-1]
+            where = f"{fab} {best.display_name}" if tiered else f"{fab} assembly"
+            return PreflightResult(
+                name=name,
+                status="FAIL" if hard else "WARN",
+                message=(
+                    f"{len(impossible)} part(s) beyond {where} limits ({_limits(best)})"
+                    + ("" if hard else "; pitch measured from pads, verify")
+                ),
+                details="; ".join(detail_lines),
+            )
+
+        if needs:
+            top = max(needs)
+            flagged = [r for idx in sorted(needs) for r in needs[idx]]
+            detail_lines.append(f"Parts: {_join(flagged)}")
+            if auto:
+                message = (
+                    f"Cheapest {fab} tier that fits: {tiers[top].display_name} "
+                    f"({len(flagged)} part(s) beyond {selected.display_name} limits: "
+                    f"{_limits(selected)})"
+                )
+            else:
+                message = (
+                    f"{len(flagged)} part(s) beyond {fab} {selected.display_name} limits; "
+                    f"requires {tiers[top].display_name}"
+                )
+            return PreflightResult(
+                name=name, status="WARN", message=message, details="; ".join(detail_lines)
+            )
+
+        if tiered:
+            if auto:
+                message = (
+                    f"All placed packages fit {fab} {tiers[required_idx].display_name} "
+                    f"({_limits(tiers[required_idx])})"
+                )
+            else:
+                message = (
+                    f"All placed packages within {fab} {selected.display_name} limits "
+                    f"({_limits(selected)})"
+                )
+        else:
+            message = f"All placed packages within {fab} assembly limits ({_limits(selected)})"
+        return PreflightResult(
+            name=name, status="OK", message=message, details="; ".join(detail_lines)
         )
 
     def _check_bom_fields(self) -> PreflightResult:
