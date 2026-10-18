@@ -214,15 +214,17 @@ The response shape depends on `aspect`.
 
 Run design rule check and return violations.
 
-**Description**: Executes pure Python DRC against the board and returns violations with locations, affected items and a pass/fail flag. The `manufacturer` parameter is passed to the underlying function as `rules=`.
+**Description**: Runs `kct check`'s rule set against the board (Issue #7260) and returns violations with locations, affected items, and `kct check`'s `verdict` / `exit_code`. The rule set is the one `kct check` builds: layer count resolved from the board, stackup copper weights, the `.kicad_pro` authored minimum clearance, the reviewed fabrication-floor override, net-class-map / current-path / waiver sidecars and the path-dependent rules. The verdict includes the ERC + LVS + manifest meta rollup, so a board whose ERC or LVS cannot run (no kicad-cli, no schematic) is `incomplete` rather than `pass`. `passed` is `true` only when `verdict` is `"pass"`. The `manufacturer` parameter is passed to the underlying function as `rules=`. There is no `layers` parameter.
 
 **Parameters**:
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
 | `pcb_path` | string | Yes | - | Absolute path to .kicad_pcb file |
-| `manufacturer` | string | No | `"jlcpcb"` | Manufacturer preset (`"jlcpcb"`, `"oshpark"`, `"pcbway"`, `"seeed"`) or path to a custom rules file |
-| `severity_filter` | string | No | `"all"` | `"all"`, `"error"` or `"warning"` |
+| `manufacturer` | string | No | resolved like `kct check` | Manufacturer preset (`"jlcpcb"`, `"oshpark"`, `"pcbway"`, `"seeed"`). Omitted: `fab_profile.json` > `project.kct` `target_fab` > `"jlcpcb"` |
+| `severity_filter` | string | No | `"all"` | `"all"`, `"error"` or `"warning"`. A view filter: the verdict always counts every violation |
+| `allow_incomplete` | boolean | No | `false` | Like `kct check --allow-incomplete`: an `incomplete` verdict returns `exit_code: 0` (`passed` stays `false`) |
+| `schematic_path` | string | No | discovered | Explicit `.kicad_sch` for the ERC/LVS meta rollup |
 
 **Response**:
 
@@ -247,7 +249,10 @@ Run design rule check and return violations.
   ],
   "summary_by_type": {"connectivity": 2, "pin1_marker_missing": 1},
   "manufacturer": "jlcpcb",
-  "layers": 4
+  "layers": 2,
+  "verdict": "fail",
+  "exit_code": 2,
+  "notes": []
 }
 ```
 

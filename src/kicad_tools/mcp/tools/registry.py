@@ -1263,6 +1263,8 @@ def _handler_get_drc_violations(params: dict[str, Any]) -> dict[str, Any]:
         pcb_path=params["pcb_path"],
         rules=params.get("manufacturer"),
         severity_filter=params.get("severity_filter", "all"),
+        allow_incomplete=params.get("allow_incomplete", False),
+        schematic_path=params.get("schematic_path"),
     )
     return result.to_dict()
 
@@ -1270,8 +1272,12 @@ def _handler_get_drc_violations(params: dict[str, Any]) -> dict[str, Any]:
 register_tool(
     name="get_drc_violations",
     description=(
-        "Run design rule check (DRC) on a KiCad PCB against manufacturer rules and "
-        "return violations with locations and fix suggestions, plus a pass/fail summary."
+        "Run `kct check`'s design rule check on a KiCad PCB and return violations with "
+        "locations and fix suggestions, plus `kct check`'s verdict (pass/fail/incomplete) "
+        "and exit code. Uses the same rule set as `kct check`: layer count from the board, "
+        "stackup copper, fabrication-floor override, waiver and net-class sidecars, and the "
+        "ERC + LVS + manifest meta rollup. `passed` is true only when the verdict is pass; "
+        "a board whose ERC/LVS cannot run (no kicad-cli or schematic) is incomplete."
     ),
     parameters=_make_params(
         properties={
@@ -1282,15 +1288,33 @@ register_tool(
             "manufacturer": {
                 "type": "string",
                 "description": (
-                    "Manufacturer preset (jlcpcb, oshpark, pcbway, seeed) or path "
-                    "to a custom rules file. Defaults to jlcpcb."
+                    "Manufacturer preset (jlcpcb, oshpark, pcbway, seeed). Omit to "
+                    "resolve it like `kct check` (fab_profile.json > project.kct > jlcpcb)."
                 ),
             },
             "severity_filter": {
                 "type": "string",
-                "description": "Which violations to return",
+                "description": (
+                    "Which violations to return (a view filter; the verdict always "
+                    "counts every violation)"
+                ),
                 "enum": ["all", "error", "warning"],
                 "default": "all",
+            },
+            "allow_incomplete": {
+                "type": "boolean",
+                "description": (
+                    "Like `kct check --allow-incomplete`: an incomplete verdict "
+                    "(ERC/LVS not run) returns exit_code 0. `passed` stays false."
+                ),
+                "default": False,
+            },
+            "schematic_path": {
+                "type": "string",
+                "description": (
+                    "Explicit .kicad_sch for the ERC/LVS meta rollup (default: "
+                    "discovered next to the PCB, as `kct check` does)"
+                ),
             },
         },
         required=["pcb_path"],
