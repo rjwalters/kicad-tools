@@ -1388,9 +1388,11 @@ def write_drc_constraints(
             path=dru_path,
         )
         # Issue #6039: explicit per-rule-area keepout rules, since headless
-        # kicad-cli does not enforce rule areas on its own.
+        # kicad-cli < 10.0.6 does not enforce rule areas on its own (#7198).
         if board.exists():
-            merged_dru = apply_keepout_rules(merged_dru, board) or merged_dru
+            keepout_dru = apply_keepout_rules(merged_dru, board, _installed_kicad_cli_version())
+            if keepout_dru is not None:
+                merged_dru = keepout_dru
         # Issue #6390: the router's classes under KCT_PRESERVE_BOARD_RULES=0.
         merged_dru = apply_netclass_dru_rules(
             merged_dru, rules, project_data, preserve_board_rules=preserve_board_rules

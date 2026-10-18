@@ -2842,9 +2842,15 @@ def _emit_drc_sidecars(
                 ),
                 path=dru_path,
             )
-            # Issue #6039: per-rule-area keepout rules (kicad-cli 10.0.1 does
-            # not enforce rule areas without them).
-            merged_dru = apply_keepout_rules(merged_dru, pcb_path) or merged_dru
+            # Issue #6039: per-rule-area keepout rules (kicad-cli < 10.0.6
+            # does not enforce rule areas without them, #7198).
+            from kicad_tools.manufacturers.project_generator import (
+                _installed_kicad_cli_version,
+            )
+
+            keepout_dru = apply_keepout_rules(merged_dru, pcb_path, _installed_kicad_cli_version())
+            if keepout_dru is not None:
+                merged_dru = keepout_dru
             # Issue #6390: router net classes under KCT_PRESERVE_BOARD_RULES=0.
             from kicad_tools.manufacturers.project_generator import apply_netclass_dru_rules
 
