@@ -299,6 +299,9 @@ def _dispatch_command(args) -> int:
         # Issue #6898: forward the run-DRC options the standalone kicad-drc has.
         if args.strict:
             sub_argv.append("--strict")
+        # Issue #7077: opt out of the NOT RUN parity -> exit 2 gate.
+        if getattr(args, "allow_incomplete", False):
+            sub_argv.append("--allow-incomplete")
         if args.category:
             sub_argv.extend(["--category", args.category])
         if args.verbose:

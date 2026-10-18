@@ -502,6 +502,16 @@ def _add_drc_parser(subparsers) -> None:
         "--strict", action="store_true", help="Exit with error code on warnings"
     )
     drc_parser.add_argument(
+        "--allow-incomplete",
+        action="store_true",
+        help=(
+            "Exit 0 instead of 2 when schematic parity did NOT RUN (no or "
+            "unannotated schematic next to the board, or a report that does "
+            "not record whether parity ran). Same name and meaning as "
+            "kct check --allow-incomplete (Issue #7077)"
+        ),
+    )
+    drc_parser.add_argument(
         "--type", "-t", dest="filter_type", help="Filter by violation type (partial match)"
     )
     drc_parser.add_argument("--net", help="Filter by net name")
