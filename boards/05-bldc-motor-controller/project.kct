@@ -26,10 +26,9 @@ requirements:
       regulated supply, 30mA maximum total 5V load; 20mA Hall allocation. Firmware
       25% duty cap.
   mechanical:
-    board_size:
-      width: 70
-      height: 90
-      unit: mm
+    dimensions:
+      width: 70mm
+      height: 90mm
   manufacturing:
     layers:
       preferred: 4
@@ -174,7 +173,7 @@ decisions:
   rationale: Original DRV8301 regulator/charge-pump/buck pins and procurement invalid,
     issue4993. Datasheet pin maps and native or TI-derived physical land patterns.
 progress:
-  phase: manufacturing
+  phase: production
   phases:
     schematic:
       status: completed
@@ -186,3 +185,7 @@ progress:
       checklist:
       - '[x] Physical component placement'
       - '[x] Native copper/DRC/manufacturing verification'
+    production:
+      status: completed
+      checklist:
+      - '[x] Manufacturing files generated'

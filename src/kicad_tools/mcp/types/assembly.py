@@ -157,7 +157,10 @@ class AssemblyExportResult:
         gerbers: Gerber export results if included
         bom: BOM export results if included
         pnp: Pick-and-place export results if included
-        zip_file: Path to combined zip archive ready for upload
+        zip_file: Path to combined zip archive ready for upload (``None``
+            whenever the export was refused or failed)
+        preflight: ``kct export`` preflight results, one
+            ``{name, status, message, details}`` dict per check
         warnings: Any warnings encountered during export
         error: Error message if success is False
     """
@@ -169,6 +172,7 @@ class AssemblyExportResult:
     bom: BOMExportResult | None = None
     pnp: PnPExportResult | None = None
     zip_file: str | None = None
+    preflight: list[dict] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     error: str | None = None
 
@@ -182,6 +186,7 @@ class AssemblyExportResult:
             "bom": self.bom.to_dict() if self.bom else None,
             "pnp": self.pnp.to_dict() if self.pnp else None,
             "zip_file": self.zip_file,
+            "preflight": self.preflight,
             "warnings": self.warnings,
             "error": self.error,
         }

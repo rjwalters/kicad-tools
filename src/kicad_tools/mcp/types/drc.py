@@ -100,24 +100,32 @@ class DRCResult:
     """Result of running a Design Rule Check on a PCB.
 
     Attributes:
-        passed: Whether the DRC passed (no errors, warnings allowed)
+        passed: Whether ``kct check`` would pass the board
+            (``verdict == "pass"``)
         violation_count: Total number of violations
         error_count: Number of error-severity violations
         warning_count: Number of warning-severity violations
         violations: List of all violations found
         summary_by_type: Count of violations by type
-        manufacturer: Manufacturer rules used for the check
-        layers: Number of PCB layers checked against
+        manufacturer: Effective manufacturer rules used for the check
+        layers: Copper-layer count resolved from the board
+        verdict: ``kct check``'s verdict: ``pass`` / ``fail`` / ``incomplete``
+        exit_code: The exit code ``kct check`` would return
+        notes: Rule-set notes (e.g. a fabrication-floor override, a skipped
+            malformed sidecar)
     """
 
     passed: bool
     violation_count: int
     error_count: int
     warning_count: int
+    manufacturer: str
+    layers: int
+    verdict: str
+    exit_code: int
     violations: list[DRCViolation] = field(default_factory=list)
     summary_by_type: dict[str, int] = field(default_factory=dict)
-    manufacturer: str = ""
-    layers: int = 4
+    notes: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         """Convert to dictionary for serialization."""
@@ -130,4 +138,7 @@ class DRCResult:
             "summary_by_type": self.summary_by_type,
             "manufacturer": self.manufacturer,
             "layers": self.layers,
+            "verdict": self.verdict,
+            "exit_code": self.exit_code,
+            "notes": self.notes,
         }

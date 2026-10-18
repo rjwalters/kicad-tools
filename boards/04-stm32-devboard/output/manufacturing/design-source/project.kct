@@ -81,7 +81,7 @@ requirements:
     target_fab: jlcpcb-tier1
     layers:
       preferred: 2
-    min_trace: "0.15mm"
+    min_trace: "0.127mm"
     min_space: "0.15mm"
     assembly: both
 

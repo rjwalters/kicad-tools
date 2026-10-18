@@ -43,7 +43,10 @@ def make_board(tmp_path: Path) -> Path:
     (output / SCH_NAME).write_text("(kicad_sch demo)\n")
     (output / PRO_NAME).write_text('{"board": {}}\n')
     (output / "demo_routed.kicad_dru").write_text("(version 1)\n")
-    (board / "project.kct").write_text("[project]\nmanufacturer = jlcpcb\n")
+    (board / "project.kct").write_text(
+        "kct_version: '1.0'\nproject:\n  name: t\n"
+        "requirements:\n  manufacturing:\n    target_fab: jlcpcb\n"
+    )
     return board
 
 
@@ -1388,3 +1391,35 @@ def test_verify_mode_reads_the_retained_manifest_lcsc_check(tmp_path):
     bom = _bom_check(report)
     assert bom["status"] == "failed"
     assert any("C51118" in b for b in report["blockers"])
+
+
+class TestDiscoverTierFromSpec:
+    """Issue #7250: _discover_tier reads target_fab through load_spec."""
+
+    def _pcb(self, tmp_path):
+        pcb = tmp_path / "output" / "b.kicad_pcb"
+        pcb.parent.mkdir()
+        pcb.write_text("")
+        return pcb
+
+    def test_yaml_spec_target_fab(self, tmp_path):
+        from kicad_tools.cli.readiness_cmd import _discover_tier
+
+        (tmp_path / "project.kct").write_text(
+            "kct_version: '1.0'\n"
+            "project:\n  name: t\n"
+            "requirements:\n  manufacturing:\n    target_fab: jlcpcb-tier1\n"
+        )
+        assert _discover_tier(tmp_path, self._pcb(tmp_path)) == "jlcpcb-tier1"
+
+    def test_spec_without_target_fab_is_none(self, tmp_path):
+        from kicad_tools.cli.readiness_cmd import _discover_tier
+
+        (tmp_path / "project.kct").write_text("kct_version: '1.0'\nproject:\n  name: t\n")
+        assert _discover_tier(tmp_path, self._pcb(tmp_path)) is None
+
+    def test_unloadable_spec_is_none(self, tmp_path):
+        from kicad_tools.cli.readiness_cmd import _discover_tier
+
+        (tmp_path / "project.kct").write_text(": : not yaml [")
+        assert _discover_tier(tmp_path, self._pcb(tmp_path)) is None

@@ -20137,7 +20137,11 @@ def _route_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--no-cache",
         action="store_true",
-        help="Disable routing cache (force fresh routing)",
+        help=(
+            "Disable routing cache (force fresh routing). The cache already "
+            "invalidates on kicad_tools code and native router build changes, "
+            "so this is not needed after router edits"
+        ),
     )
     parser.add_argument(
         "--cache-only",
