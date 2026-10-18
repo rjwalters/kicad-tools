@@ -44,15 +44,6 @@ Minimal LED circuit
 
 - **Polarized components**: 1 -- check orientation markings
 
-## Hand-Solder (THT) Components
-
-The following 2 through-hole components are **excluded from the SMT pick-and-place file** and must be hand-soldered (or wave/selective-soldered) after SMT assembly. They appear in the BOM for sourcing.
-
-| Value | Package | Qty | References |
-|-------|---------|-----|------------|
-| LED | LED_D5.0mm | 1 | D1 |
-| PWR | PinHeader_1x02_P2.54mm_Vertical | 1 | J1 |
-
 ## ERC Status
 
 | Metric | Count |
@@ -60,8 +51,7 @@ The following 2 through-hole components are **excluded from the SMT pick-and-pla
 | Errors | 0 |
 | Warnings | 0 |
 
-**Status**: SKIPPED -- ERC skipped by user request
-
+**Status**: PASS
 
 \newpage
 
@@ -115,15 +105,18 @@ The following 2 through-hole components are **excluded from the SMT pick-and-pla
 
 \newpage
 
-## DRC Status
+## DRC Status (`--mfr jlcpcb` rules)
 
 | Metric | Count |
 |--------|-------|
 | Errors | 0 |
+| Errors: kct (`--mfr jlcpcb` rules) | 0 |
+| Errors: kicad-cli (geometric) | 0 |
 | Warnings | 0 |
 | Blocking | 0 |
 
 **Status**: PASS
+
 
 
 \newpage

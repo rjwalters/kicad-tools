@@ -158,6 +158,19 @@ _SEARCH_FLOOR_MAX_FACTOR = 2.0
 # ones at the same routed-leg count (and no extra class-pad shortfall).
 _MIN_FLUSH_SKEW_GAIN_MM = 0.25
 
+# Issue #7284: a fallback leg-pair candidate earns its via-count advantage
+# (#7093) only when it costs (almost) nothing in length matching.  Against the
+# candidate the skew-first ranking would pick without the via term, it may add
+# at most this much P/N skew (mm) ...
+_PARITY_SKEW_TOLERANCE_MM = 0.5
+# ... and at most this much to its longer leg (mm).  The protocol table has no
+# per-net length budget, so this relative bound is the length gate.
+_PARITY_LENGTH_TOLERANCE_MM = 0.5
+# The pair skew budget when the pair's net class cannot supply one (no
+# ``effective_skew_tolerance``): the generic DRC default
+# (``NetClassRouting.effective_skew_tolerance``'s own fallback).
+_PARITY_FALLBACK_SKEW_BUDGET_MM = 0.5
+
 # One fallback leg pair: ``{"P"|"N": (search result or None, reason)}`` (#6703).
 _FallbackLegs = dict[str, tuple["_RouteResult | None", str]]
 
@@ -4636,7 +4649,9 @@ class LatticePathfinder:
         pair that changes layers a different number of times is a pair-rule
         failure), then the smallest skew (:meth:`_pair_skew`), then the
         smallest total length; ties keep the earlier candidate, so the
-        selection is deterministic.  Its legs are committed.  Returns
+        selection is deterministic.  A via-count advantage counts only when
+        it costs (almost) no skew or length (#7284, :meth:`_fallback_rank`).
+        Its legs are committed.  Returns
         ``(legs, is_partner_blind)`` -- the flag is set when the winner is
         exactly the copper :meth:`_partner_blind_legs` would have produced.
         """
@@ -4705,24 +4720,7 @@ class LatticePathfinder:
             candidates.insert(0, {"P": firsts["P"], "N": firsts["N"]})
         candidates.extend(self._mirrored_candidates(pc, candidates, items, search, committed))
 
-        measure = self.pair_length_measure or _default_pair_length
-
-        def rank(cand: _FallbackLegs) -> tuple[int, int, int, float, float]:
-            p_r, n_r = cand["P"][0], cand["N"][0]
-            routed = (p_r is not None) + (n_r is not None)
-            short = self._legs_shortfalls(pc, cand)
-            if p_r is None or n_r is None:
-                return (-routed, short, 0, 0.0, 0.0)
-            lp, ln = measure(p_r.route), measure(n_r.route)
-            # Rounded to 1 um so float noise never flips a tie.
-            return (
-                -routed,
-                short,
-                self._pair_via_mismatch(cand),
-                round(abs(lp - ln), 3),
-                round(lp + ln, 3),
-            )
-
+        rank = self._fallback_rank(pc, candidates)
         best = min(candidates, key=rank)  # ``min`` keeps the first on ties
         for pol in ("P", "N"):
             res = best[pol][0]
@@ -4734,6 +4732,98 @@ class LatticePathfinder:
             {"P": best["P"], "N": best["N"]},
             best is candidates[0] and strict is None and floor == 0.0,
         )
+
+    def _pair_skew_budget(self, pc: CoupledConnection) -> float:
+        """The pair's skew budget in mm (issue #7284).
+
+        The net class's :meth:`~kicad_tools.router.rules.NetClassRouting.effective_skew_tolerance`
+        (explicit ``skew_tolerance_mm``, else the declared protocol's
+        ``max_skew_mm``, else 0.5 mm); :data:`_PARITY_FALLBACK_SKEW_BUDGET_MM`
+        when the class has no such method.
+        """
+        resolve = getattr(pc.net_class, "effective_skew_tolerance", None)
+        if callable(resolve):
+            try:
+                return float(resolve(_PARITY_FALLBACK_SKEW_BUDGET_MM))
+            except (TypeError, ValueError):
+                pass
+        return _PARITY_FALLBACK_SKEW_BUDGET_MM
+
+    def _fallback_rank(
+        self, pc: CoupledConnection, candidates: list[_FallbackLegs]
+    ) -> Callable[[_FallbackLegs], tuple[int, int, int, float, float]]:
+        """Ranking key of :meth:`_partner_aware_legs`' leg-pair candidates.
+
+        ``(-routed legs, class-pad shortfalls, P/N via mismatch, skew, total
+        length)``, lengths rounded to 1 um so float noise never flips a tie.
+
+        Issue #7284: the via term alone let a parity candidate win however
+        much skew or length it cost (board 03 tier-1: USB_D- 15.9 -> 20.1 mm,
+        skew 0.54 -> 4.57 mm for 3/3 vias).  So the *reference* is the best
+        fully routed candidate with unequal via counts, by the key without
+        its via term (the fewest shortfalls, then skew, then length).  A
+        candidate with fewer mismatched vias than the reference keeps that
+        advantage only when, against the reference, it
+
+        * adds at most :data:`_PARITY_SKEW_TOLERANCE_MM` of skew,
+        * adds at most :data:`_PARITY_LENGTH_TOLERANCE_MM` to its longer leg,
+        * and stays within the pair's skew budget
+          (:meth:`_pair_skew_budget`) -- unless the reference is already
+          over it and the candidate is no worse.
+
+        Otherwise it is ranked with the reference's mismatch, so skew and
+        length decide, exactly as between two asymmetric candidates (a parity
+        candidate with less skew than the reference still wins on skew).  A
+        free parity win is kept unchanged, and nothing is gated when no fully
+        routed candidate has unequal via counts.
+        """
+        measure = self.pair_length_measure or _default_pair_length
+        lengths: dict[int, tuple[float, float]] = {}
+        for cand in candidates:
+            p_r, n_r = cand["P"][0], cand["N"][0]
+            if p_r is not None and n_r is not None:
+                lengths[id(cand)] = (measure(p_r.route), measure(n_r.route))
+
+        def plain(cand: _FallbackLegs) -> tuple[int, float, float]:
+            lp, ln = lengths[id(cand)]
+            return (self._legs_shortfalls(pc, cand), round(abs(lp - ln), 3), round(lp + ln, 3))
+
+        # Against the best candidate WITHOUT via parity: a parity candidate
+        # is what is being gated, so it cannot be its own reference.
+        unequal = [c for c in candidates if id(c) in lengths and self._pair_via_mismatch(c)]
+        ref = min(unequal, key=plain) if unequal else None
+        ref_skew = ref_max = 0.0
+        ref_mismatch = 0
+        budget = _PARITY_FALLBACK_SKEW_BUDGET_MM
+        if ref is not None:
+            ref_lp, ref_ln = lengths[id(ref)]
+            ref_skew = abs(ref_lp - ref_ln)
+            ref_max = max(ref_lp, ref_ln)
+            ref_mismatch = self._pair_via_mismatch(ref)
+            budget = self._pair_skew_budget(pc)
+
+        def admissible(cand: _FallbackLegs) -> bool:
+            lp, ln = lengths[id(cand)]
+            skew = abs(lp - ln)
+            return (
+                skew <= ref_skew + _PARITY_SKEW_TOLERANCE_MM + 1e-9
+                and max(lp, ln) <= ref_max + _PARITY_LENGTH_TOLERANCE_MM + 1e-9
+                and (skew <= budget + 1e-9 or skew <= ref_skew + 1e-9)
+            )
+
+        def rank(cand: _FallbackLegs) -> tuple[int, int, int, float, float]:
+            p_r, n_r = cand["P"][0], cand["N"][0]
+            routed = (p_r is not None) + (n_r is not None)
+            short = self._legs_shortfalls(pc, cand)
+            if p_r is None or n_r is None:
+                return (-routed, short, 0, 0.0, 0.0)
+            lp, ln = lengths[id(cand)]
+            mismatch = self._pair_via_mismatch(cand)
+            if ref is not None and mismatch < ref_mismatch and not admissible(cand):
+                mismatch = ref_mismatch
+            return (-routed, short, mismatch, round(abs(lp - ln), 3), round(lp + ln, 3))
+
+        return rank
 
     def _mirrored_candidates(
         self,

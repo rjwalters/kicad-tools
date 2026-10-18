@@ -24,8 +24,9 @@ unless every gate passes:
    ``redesign/package.py:refresh_manifest``.  Only ``files`` may change.
 4. Gates, all run on the staged board:
    * ``kicad-cli pcb drc --refill-zones``: 0 errors, 0 unconnected items;
-   * ``kct check --mfr <tier>``: 0 errors, 0 warnings, and the drc, erc,
-     lvs and manifest meta-checks all PASSED.  A board whose fabrication
+   * ``kct check --mfr <tier>``: 0 errors, no warnings beyond the allowance
+     the board's recorded ``known_issues`` declare (Issue #7261; none means
+     0 warnings), and the drc, erc, lvs and manifest meta-checks all PASSED.  A board whose fabrication
      process the generic tier cannot model (board 04's paid 0.15 mm drill)
      sets ``check_script`` instead; that board-local check must meet the same
      bar (Issue #6269);
@@ -358,17 +359,63 @@ def gate_native_drc(board: Path, cfg: BoardConfig) -> int:
     return len(errors)
 
 
-def check_report_verdict(data: dict, label: str) -> tuple[bool, int]:
-    """Gate a ``kct check``-format report: 0 errors, 0 warnings, meta all PASSED."""
+def warning_counts_by_rule(data: dict) -> dict[str, int]:
+    """Active (non-waived) warning findings of a ``kct check`` report, by rule."""
+    counts: dict[str, int] = {}
+    for violation in data.get("violations", []):
+        if (
+            isinstance(violation, dict)
+            and violation.get("severity") == "warning"
+            and not violation.get("waived")
+        ):
+            rule = str(violation.get("rule_id") or "unknown")
+            counts[rule] = counts.get(rule, 0) + 1
+    return dict(sorted(counts.items()))
+
+
+def unaccepted_warnings(data: dict, allowance: dict[str, int]) -> dict[str, int]:
+    """Warnings beyond *allowance* (``{rule: max count}``), as ``{rule: found}``."""
+    counts = warning_counts_by_rule(data)
+    total = data.get("summary", {}).get("warnings")
+    if total != sum(counts.values()):
+        # Summary and finding list disagree: never trust the allowance.
+        return {"<summary/violations mismatch>": total if isinstance(total, int) else -1}
+    return {rule: n for rule, n in counts.items() if n > allowance.get(rule, 0)}
+
+
+def check_report_verdict(
+    data: dict, label: str, allowance: dict[str, int] | None = None
+) -> tuple[bool, int]:
+    """Gate a ``kct check``-format report: 0 errors, meta all PASSED, and no
+    warnings beyond *allowance*.
+
+    The allowance is the board's own recorded ``known_issues`` warning
+    allowance from ``readiness.json`` (Issue #7261): the same record that
+    discloses the issue is the one that tolerates its warnings.  Without one,
+    any warning refuses.
+    """
     summary, meta = data.get("summary", {}), data.get("meta_checks", {})
     statuses = {k: meta.get(k, {}).get("status") for k in ("drc", "erc", "lvs", "manifest")}
     lvs = meta.get("lvs", {})
     mismatches = len(lvs.get("mismatches", [])) + len(lvs.get("copper_mismatches", []))
     errors, warnings = summary.get("errors"), summary.get("warnings")
     log(f"  gate {label}: {errors} error(s), {warnings} warning(s), meta {statuses}")
-    if errors != 0 or warnings != 0 or any(s != "PASSED" for s in statuses.values()):
+    if not isinstance(warnings, int):
+        raise GateFailure(f"{label} failed")
+    extra = unaccepted_warnings(data, allowance or {}) if warnings else {}
+    if extra:
+        log(f"  warnings beyond the recorded known_issues allowance {allowance or {}}: {extra}")
+    if errors != 0 or extra or any(s != "PASSED" for s in statuses.values()):
         raise GateFailure(f"{label} failed")
     return statuses["lvs"] == "PASSED", mismatches
+
+
+def known_issue_allowance(board: Path) -> dict[str, int]:
+    """The ``{rule: max count}`` the board's recorded ``known_issues`` account for."""
+    from kicad_tools.cli.known_issues import known_warning_allowance, validate_known_issues
+
+    report = json.loads((board / "output" / "readiness.json").read_text())
+    return known_warning_allowance(validate_known_issues(report.get("known_issues")))
 
 
 def gate_kct_check(board: Path, cfg: BoardConfig) -> tuple[bool, int]:
@@ -389,7 +436,7 @@ def gate_kct_check(board: Path, cfg: BoardConfig) -> tuple[bool, int]:
         if not report.is_file():
             raise GateFailure("kct check did not produce a report")
         data = json.loads(report.read_text())
-    return check_report_verdict(data, f"kct check --mfr {cfg.tier}")
+    return check_report_verdict(data, f"kct check --mfr {cfg.tier}", known_issue_allowance(board))
 
 
 def gate_board_check(board: Path, cfg: BoardConfig) -> tuple[bool, int]:
@@ -406,7 +453,7 @@ def gate_board_check(board: Path, cfg: BoardConfig) -> tuple[bool, int]:
         if not report.is_file():
             raise GateFailure(f"{cfg.check_script} did not produce a report: {proc.stderr[-2000:]}")
         data = json.loads(report.read_text())
-    verdict = check_report_verdict(data, cfg.check_script)
+    verdict = check_report_verdict(data, cfg.check_script, known_issue_allowance(board))
     if proc.returncode != 0:
         raise GateFailure(f"{cfg.check_script} exited {proc.returncode}")
     return verdict
@@ -463,6 +510,49 @@ def compare_metrics(recorded: dict, measured: dict) -> list[str]:
 
 
 # --------------------------------------------------------------------------- refresh
+def apply_known_issues(
+    staged: Path,
+    checked_at: str,
+    known_issue: list[str],
+    resolve_known_issue: list[str],
+) -> str | None:
+    """Apply ``--known-issue`` / ``--resolve-known-issue`` to the staged report (Issue #7323).
+
+    Uses the same merge as ``kct readiness`` (``cli/known_issues.py``) and keeps
+    ``readiness.json`` and the hash-bound ``known-issues.json`` consistent: the
+    evidence file is written (or removed when no entry remains) and its
+    ``inputs`` entry added (or dropped).  Returns the evidence path relative to
+    the board.  ``refresh`` re-hashes ``inputs`` afterwards.
+    """
+    from kicad_tools.cli.known_issues import KNOWN_ISSUES_FILENAME, KnownIssueError
+    from kicad_tools.cli.readiness_cmd import _resolve_known_issues
+
+    args = argparse.Namespace(known_issue=known_issue, resolve_known_issue=resolve_known_issue)
+    try:
+        merged = _resolve_known_issues(staged, args, checked_at)
+    except KnownIssueError as exc:
+        raise GateFailure(str(exc)) from None
+    report_path = staged / "output" / "readiness.json"
+    report = json.loads(report_path.read_text())
+    inputs = report.setdefault("inputs", {})
+    bound = [name for name in inputs if Path(name).name == KNOWN_ISSUES_FILENAME]
+    if len(bound) > 1:
+        raise GateFailure("known_issues is bound to more than one evidence file")
+    rel = bound[0] if bound else f"output/readiness/{KNOWN_ISSUES_FILENAME}"
+    evidence = staged / rel
+    if merged:
+        evidence.parent.mkdir(parents=True, exist_ok=True)
+        evidence.write_text(json.dumps({"known_issues": merged}, indent=2) + "\n")
+        inputs[rel] = sha256(evidence)
+        report["known_issues"] = merged
+    else:
+        evidence.unlink(missing_ok=True)
+        inputs.pop(rel, None)
+        report.pop("known_issues", None)
+    report_path.write_text(json.dumps(report, indent=2) + "\n")
+    return rel
+
+
 def refresh(
     board: Path,
     checked_at: str,
@@ -470,6 +560,8 @@ def refresh(
     reuse_erc: Path | None = None,
     save_erc: Path | None = None,
     dry_run: bool = False,
+    known_issue: list[str] | None = None,
+    resolve_known_issue: list[str] | None = None,
 ) -> list[str]:
     from kicad_tools.cli.board_readiness import read_readiness
 
@@ -479,6 +571,14 @@ def refresh(
         shutil.copytree(board, staged, ignore=shutil.ignore_patterns("__pycache__"))
         out = staged / "output"
         mfg = out / "manufacturing"
+
+        known_rel = None
+        if known_issue or resolve_known_issue:
+            # Before the gates: the kct check allowance reads the staged known_issues.
+            known_rel = apply_known_issues(
+                staged, checked_at, known_issue or [], resolve_known_issue or []
+            )
+            log(f"  known_issues updated -> {known_rel}")
 
         for job in cfg.erc:
             data = native_erc(staged, job, reuse_erc, save_erc)
@@ -547,9 +647,21 @@ def refresh(
             and (board / p.relative_to(staged)).is_file()
             and p.read_bytes() != (board / p.relative_to(staged)).read_bytes()
         )
+        removed: list[str] = []
+        if known_rel is not None:
+            # The evidence file may be new (not yet in the board) or resolved away.
+            if (staged / known_rel).is_file():
+                if known_rel not in published and not (board / known_rel).is_file():
+                    published = sorted([*published, known_rel])
+            elif (board / known_rel).is_file():
+                removed.append(known_rel)
         if not dry_run:
             for name in published:
+                (board / name).parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(staged / name, board / name)
+            for name in removed:
+                (board / name).unlink()
+        published = sorted([*published, *(f"{name} (removed)" for name in removed)])
         log(f"  {'would publish' if dry_run else 'published'} {len(published)} file(s)")
         return published
 
@@ -561,6 +673,20 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--reuse-erc", type=Path, help="replay ERC reports saved by --save-erc")
     parser.add_argument("--save-erc", type=Path, help="keep the native ERC reports here")
     parser.add_argument("--dry-run", action="store_true", help="run every gate, publish nothing")
+    parser.add_argument(
+        "--known-issue",
+        action="append",
+        default=[],
+        metavar="N:SUMMARY[:KIND[:RULE=COUNT,...]]",
+        help="record a known issue (repeatable; same syntax as `kct readiness`, Issue #7323)",
+    )
+    parser.add_argument(
+        "--resolve-known-issue",
+        action="append",
+        default=[],
+        metavar="N",
+        help="drop a recorded known issue by number (repeatable, Issue #7323)",
+    )
     args = parser.parse_args(argv)
     try:
         with evidence_toolchain(mounts=[REPO_ROOT, *(b.resolve() for b in args.boards)]):
@@ -584,6 +710,8 @@ def _refresh_all(parser: argparse.ArgumentParser, args: argparse.Namespace) -> i
                 reuse_erc=args.reuse_erc,
                 save_erc=args.save_erc,
                 dry_run=args.dry_run,
+                known_issue=args.known_issue,
+                resolve_known_issue=args.resolve_known_issue,
             ):
                 log(f"    {name}")
         except GateFailure as exc:

@@ -1842,23 +1842,26 @@ class TestSilkscreenRules:
 
         results = check_all_silkscreen(pcb, rules)
 
-        # Should have 2 violations (text + line); this fixture has no pads or
+        # Should have 3 violations (text height + text thickness + line); this
+        # fixture has no pads or
         # board outline so the geometric silk_over_copper / silk_edge_clearance
         # checks contribute no violations, and its refdes sits clear of its
         # silk line so silk_overlap contributes none either.
-        assert len(results) == 2
-        # 8 rule types checked: line width, text height, legacy over-pad,
+        assert len(results) == 3
+        # 10 rule types checked: line width, text height, text thickness
+        # (#7228), silk_ref_obscured (#7228), legacy over-pad,
         # geometric silk_over_copper, the object-specific silk-to-pad factory
         # floor (added by #5059 -- counted as checked even on a fixture with no
         # pads, same as every other rule here), silk_overlap (added by #4612),
         # silk_edge_clearance, and the silk geometry-coverage inventory (added
         # by #5811 -- this fixture's line is a modeled primitive, so it reports
         # no gap, but the rule still ran).
-        assert results.rules_checked == 8
+        assert results.rules_checked == 10
 
-        # Check that both rule types are represented
+        # Check that all rule types are represented
         rule_ids = {v.rule_id for v in results.violations}
         assert "silkscreen_text_height" in rule_ids
+        assert "silkscreen_text_thickness" in rule_ids
         assert "silkscreen_line_width" in rule_ids
 
     def test_drc_checker_silkscreen_integration(self):

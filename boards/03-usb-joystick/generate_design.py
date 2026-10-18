@@ -890,34 +890,21 @@ def export_manufacturing_bundle(routed_path: Path, output_dir: Path) -> bool:
         for error in result.errors:
             print(f"   Export error: {error}")
         return False
-    # Keep the separate manual assembly leg explicit in the supplier files.
-    import csv
+    # Issue #7239: JLCPCB assembles through-hole parts, so the export keeps the
+    # USB4085 J1 in bom_jlcpcb.csv and cpl_jlcpcb.csv.  The former separate
+    # manual-assembly leg (manual-assembly-bom.csv) is retired; remove a stale
+    # copy so the package does not list J1 as both fab- and hand-assembled.
     import hashlib
     import zipfile
 
-    bom = mfg_dir / "bom_jlcpcb.csv"
-    with bom.open(newline="") as handle:
-        reader = csv.DictReader(handle)
-        columns = reader.fieldnames
-        rows = list(reader)
-    manual = [row for row in rows if row["Designator"] == "J1"]
-    if len(manual) != 1:
-        raise ValueError("Expected exactly one USB-C J1 manual assembly BOM row")
-    for target, entries in [
-        (bom, [row for row in rows if row not in manual]),
-        (mfg_dir / "manual-assembly-bom.csv", manual),
-    ]:
-        with target.open("w", newline="") as handle:
-            writer = csv.DictWriter(handle, fieldnames=columns)
-            writer.writeheader()
-            writer.writerows(entries)
+    (mfg_dir / "manual-assembly-bom.csv").unlink(missing_ok=True)
 
     (mfg_dir / "README.txt").write_text(
         "USB joystick revision B — fabrication and assembly package\n"
         "\n"
         "Order the exact four-layer stackup and Epoxy-filled & Capped POFV/VIPPO process in manufacturing-requirements.json. Do not use ordinary open or merely tented vias.\n"
         "\n"
-        "Use bom_jlcpcb.csv and cpl_jlcpcb.csv for SMT assembly. J1 USB4085-GF-A is a separate manual through-hole assembly operation listed in manual-assembly-bom.csv. Use exact reviewed supplier parts; no automatic substitutions.\n"
+        "Use bom_jlcpcb.csv and cpl_jlcpcb.csv for assembly. Since issue #7239 they also list the through-hole J1 USB4085-GF-A for JLCPCB assembly (formerly a separate manual operation); procurement must review the J1 row before ordering (see procurement-review.json). Use exact reviewed supplier parts; no automatic substitutions.\n"
         "\n"
         "After inspection, program the supplied 8 MHz firmware and fuses through J3 as described in firmware/README.md. Power the programmer/board from one regulated 5 V source with USB disconnected. No bootloader is required.\n"
         "\n"

@@ -340,6 +340,27 @@ def test_erc_preflight_matrix(tmp_path, explicit, binding, verdict, strict):
     assert result.status == _expected_drc(explicit, binding, verdict, strict), result
 
 
+@pytest.mark.parametrize("binding", ["unhashed", "mismatch"])
+@pytest.mark.parametrize("kind", ["drc", "erc"])
+def test_unbound_details_record_no_absolute_host_path(tmp_path, monkeypatch, kind, binding):
+    """The details land in committed manifests (#6532): no absolute path."""
+    if kind == "drc":
+        pcb, report = _stage_drc(tmp_path, binding, "clean")
+        result = PreflightChecker(pcb_path=pcb, config=PreflightConfig())._check_drc()
+    else:
+        pcb, sch, report = _stage_erc(tmp_path, binding, "clean")
+        checker = PreflightChecker(pcb_path=pcb, schematic_path=sch, config=PreflightConfig())
+        result = checker._check_erc()
+    assert result.status == "WARN", result
+    assert not result.details.startswith("/"), result.details
+    monkeypatch.chdir(tmp_path)
+    if kind == "drc":
+        result = PreflightChecker(pcb_path=pcb, config=PreflightConfig())._check_drc()
+    else:
+        result = checker._check_erc()
+    assert result.details.startswith(f"board/output/{report.name} records"), result.details
+
+
 def test_erc_auto_without_configured_schematic_binds_via_report_source(tmp_path):
     """With no schematic configured, the report's ``source`` names it."""
     pcb, sch, report = _stage_erc(tmp_path, "bound", "clean")

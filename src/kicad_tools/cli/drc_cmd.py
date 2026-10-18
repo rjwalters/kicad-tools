@@ -402,6 +402,23 @@ def main(argv: list[str] | None = None) -> int:
             if suggestion:
                 v.suggestions = [suggestion]
 
+    # Exit code, decided before output so ``--format json`` can carry it
+    # (Issue #7230).  ``is_error`` already excludes waived findings (Issue
+    # #4691), so the gate is "nonzero iff UNWAIVED errors remain".  Waived
+    # findings are likewise kept out of the warning count so --strict never
+    # trips on them.
+    error_count = sum(1 for v in gate_violations if v.is_error)
+    waived_count = sum(1 for v in gate_violations if v.is_waived)
+    warning_count = len(gate_violations) - error_count - waived_count
+
+    exit_code, verdict = _drc_gate(
+        error_count,
+        warning_count,
+        report.schematic_parity_status,
+        strict=args.strict,
+        allow_incomplete=args.allow_incomplete,
+    )
+
     # Output
     if args.format == "json":
         output_json(
@@ -411,6 +428,8 @@ def main(argv: list[str] | None = None) -> int:
             filtered_count=filter_ignored_count,
             waiver_result=waiver_result,
             hidden=hidden,
+            verdict=verdict,
+            exit_code=exit_code,
         )
     elif args.format == "summary":
         output_summary(
@@ -432,20 +451,7 @@ def main(argv: list[str] | None = None) -> int:
             hidden=hidden,
         )
 
-    # Exit code.  ``is_error`` already excludes waived findings (Issue #4691),
-    # so the gate is "nonzero iff UNWAIVED errors remain".  Waived findings are
-    # likewise kept out of the warning count so --strict never trips on them.
-    error_count = sum(1 for v in gate_violations if v.is_error)
-    waived_count = sum(1 for v in gate_violations if v.is_waived)
-    warning_count = len(gate_violations) - error_count - waived_count
-
-    return _drc_exit_code(
-        error_count,
-        warning_count,
-        report.schematic_parity_status,
-        strict=args.strict,
-        allow_incomplete=args.allow_incomplete,
-    )
+    return exit_code
 
 
 def _drc_exit_code(
@@ -468,18 +474,42 @@ def _drc_exit_code(
     Returns 1 when any error remains, 2 for warnings under ``strict`` or for
     schematic parity NOT RUN without ``allow_incomplete`` (a check that did
     not run never reads as a pass, matching ``kct check``), else 0.
-    Issue #7170 moved ``--mfr`` onto this gate.
+    Issue #7170 moved ``--mfr`` onto this gate.  Thin wrapper over
+    :func:`_drc_gate`, which also returns the verdict.
     """
-    error_count += parity.error_count
-    warning_count += parity.warning_count
+    return _drc_gate(
+        error_count,
+        warning_count,
+        parity,
+        strict=strict,
+        allow_incomplete=allow_incomplete,
+    )[0]
 
-    if error_count > 0:
-        return 1
-    if warning_count > 0 and strict:
-        return 2
-    if not parity.checked and not allow_incomplete:
-        return 2
-    return 0
+
+def _drc_gate(
+    error_count: int,
+    warning_count: int,
+    parity: "SchematicParityStatus",
+    *,
+    strict: bool,
+    allow_incomplete: bool,
+) -> tuple[int, str]:
+    """``(exit_code, verdict)`` for :func:`_drc_exit_code` (Issue #7230).
+
+    The ``"drc"`` ladder of :func:`~kicad_tools.cli._gate.gate_exit_code`,
+    with the schematic parity findings folded in by their own severity and a
+    NOT RUN parity as the incomplete state.
+    """
+    from ._gate import gate_exit_code
+
+    return gate_exit_code(
+        error_count + parity.error_count,
+        warning_count + parity.warning_count,
+        incomplete=not parity.checked,
+        strict=strict,
+        allow_incomplete=allow_incomplete,
+        style="drc",
+    )
 
 
 def _load_waivers(explicit: str | None, input_path: Path) -> tuple["Waivers | None", int]:
@@ -868,8 +898,13 @@ def output_json(
     filtered_count: int = 0,
     waiver_result: "WaiverApplication | None" = None,
     hidden: dict[str, int] | None = None,
+    verdict: str | None = None,
+    exit_code: int | None = None,
 ) -> None:
     """Output violations as JSON.
+
+    Issue #7230: top-level ``verdict`` (``pass``/``fail``/``incomplete``) and
+    ``exit_code`` (the process exit code) when the caller passes them.
 
     Issue #7077: a top-level ``schematic_parity`` object (``status``,
     ``checked``, ``reason``, ``error_count``, ``warning_count``, ``issues``)
@@ -916,6 +951,10 @@ def output_json(
     }
     if waiver_result is not None and waiver_result.unused:
         data["unused_waivers"] = waiver_result.to_dict_list()
+    if verdict is not None:
+        data["verdict"] = verdict
+    if exit_code is not None:
+        data["exit_code"] = exit_code
     print(json.dumps(data, indent=2))
 
 
@@ -1059,7 +1098,7 @@ def output_manufacturer_check(
     in_checks = {id(c.violation) for c in checks}
     unconnected_extra = [v for v in unconnected if id(v) not in in_checks]
     error_count += len(unconnected_extra)
-    exit_code = _drc_exit_code(
+    exit_code, verdict = _drc_gate(
         error_count,
         warning_count,
         parity,
@@ -1104,6 +1143,7 @@ def output_manufacturer_check(
             ],
             "schematic_parity": parity.to_dict(),
             "schematic_parity_checked": parity.checked,
+            "verdict": verdict,
             "exit_code": exit_code,
         }
         print(json.dumps(data, indent=2))

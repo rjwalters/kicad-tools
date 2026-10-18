@@ -269,7 +269,9 @@ class TestBottomSideInCpl:
         _, _, r = _run(tmp_path, fps)
         assert r["bottom_side_in_cpl"].status == "OK"
 
-    def test_auto_excluded_tht_ignored(self, tmp_path):
+    def test_auto_excluded_tht_ignored(self, tmp_path, monkeypatch):
+        # Model an SMT-only fab: THT is auto-excluded from the CPL.
+        monkeypatch.setattr(PreflightChecker, "_SMT_ONLY_MANUFACTURERS", {"jlcpcb"})
         fps = [
             _fp(
                 "J1",
@@ -280,6 +282,19 @@ class TestBottomSideInCpl:
         ]
         _, _, r = _run(tmp_path, fps)
         assert r["bottom_side_in_cpl"].status == "OK"
+
+    def test_bottom_side_tht_in_cpl_warns(self, tmp_path):
+        # JLCPCB assembles THT, so a bottom-side THT part now lands in the CPL.
+        fps = [
+            _fp(
+                "J1",
+                "Connector_PinHeader_2.54mm:PinHeader_1x01_P2.54mm_Vertical",
+                layer="B.Cu",
+                attr="through_hole",
+            )
+        ]
+        _, _, r = _run(tmp_path, fps)
+        assert r["bottom_side_in_cpl"].status == "WARN"
 
     def test_untiered_fab_has_no_tier_wording(self, tmp_path):
         _, _, r = _run(tmp_path, [_fp("C1", R0603, layer="B.Cu")], manufacturer="pcbway")

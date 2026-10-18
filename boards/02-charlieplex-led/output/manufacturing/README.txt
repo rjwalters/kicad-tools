@@ -2,7 +2,7 @@ Manufacturing package for charlieplex_3x3_routed.kicad_pcb
 
 Fabrication tier : jlcpcb
 Mode             : assembly
-Generated        : 2026-10-18T15:17:50.280608+00:00
+Generated        : 2026-10-18T20:30:00+00:00
 
 Assembly package: BOM and CPL are included.
 
@@ -44,7 +44,7 @@ Contents
 
 Hand-solder / through-hole items
 --------------------------------
-  The following parts are EXCLUDED from the SMT CPL and must be hand-soldered:
+  The following through-hole parts are INCLUDED in the CPL and BOM for fab assembly (flag for procurement review):
   J1, J2, U1
 
 Warning review (per rule)
@@ -54,7 +54,7 @@ Warning review (per rule)
 
 Accepted-risk waivers
 ---------------------
-  no accepted-risk waivers
+  #7220 [advisory] Via drills at the edge of SMD pads R3.2 and R4.2 (0.03 mm, below the 0.1 mm solder-mask dam): via wicking risk; router fix tracked in #7296
 
 Sign-off
 --------
@@ -65,9 +65,9 @@ Sign-off
 
 ATtiny85 Charlieplex LED Grid, revision B
 -----------------------------------------
-  Assemble the sixteen SMT components using bom_jlcpcb.csv and cpl_jlcpcb.csv.
-  Hand-solder U1 (ATtiny85-20PU), J1 (power) and J2 (AVR ISP) afterward.
-  The BOM includes these three sourcing entries; they are intentionally absent from the SMT CPL.
+  Assemble the nineteen components using bom_jlcpcb.csv and cpl_jlcpcb.csv.
+  Since issue #7239 the CPL also lists the through-hole U1 (ATtiny85-20PU), J1 (power) and J2 (AVR ISP) for JLCPCB assembly.
+  Procurement must review those through-hole rows before ordering; see HARDWARE.md.
   Match the U1 notch/pin1 marker, J1/J2 square pin1 pads, and LED cathode marks to the drawings.
   Supply regulated 3.3-5.0V to J1 pin1, ground to pin2. Use only one power source.
   J2 pins: 1=MISO,2=VCC,3=SCK,4=MOSI,5=RESET,6=GND.

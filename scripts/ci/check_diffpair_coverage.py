@@ -140,13 +140,23 @@ DIFFPAIR_VIOLATION_BASELINE: dict[str, int] = {
     "boards/06-diffpair-test/regression-fixture/diffpair_test_routed.kicad_pcb": 18,
 }
 
+# Issue #7312 -- declared ``target_diff_impedance`` is now judged on coupled
+# segments (#7293).  The synthetic witness's coupled USB pairs sit at a wider
+# gap than their width sizing assumed, so ``impedance`` reports 5 errors there.
+# Capped, not open: a sixth impedance error still fails the gate.
+DIFFPAIR_FIXTURE_RULE_CAPS: dict[str, int] = {"impedance": 5}
+
 
 def unexpected_baseline_errors(key: str, errors: dict[str, int]) -> dict[str, int]:
     """Pair improvements cannot hide a new physical error within the total 18."""
     if key not in DIFFPAIR_VIOLATION_BASELINE:
         return {}
     expected = {"diffpair_length_skew", "diffpair_routing_continuity"}
-    return {rule: count for rule, count in errors.items() if count and rule not in expected}
+    return {
+        rule: count
+        for rule, count in errors.items()
+        if count and rule not in expected and count > DIFFPAIR_FIXTURE_RULE_CAPS.get(rule, 0)
+    }
 
 
 def check_zero_violations(

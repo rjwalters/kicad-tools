@@ -46,6 +46,14 @@ def test_pair_improvement_cannot_hide_new_physical_error():
     assert gate.unexpected_baseline_errors(key, errors) == {}
 
 
+def test_board06_fixture_impedance_allowance_is_capped():
+    """Issue #7312: the fixture tolerates 5 impedance errors, not a sixth."""
+    gate = load("check_diffpair_coverage")
+    key = "boards/06-diffpair-test/regression-fixture/diffpair_test_routed.kicad_pcb"
+    assert gate.unexpected_baseline_errors(key, {"impedance": 5}) == {}
+    assert gate.unexpected_baseline_errors(key, {"impedance": 6}) == {"impedance": 6}
+
+
 def test_board06_power_clearance_errors_are_not_accepted():
     """Issue #6772: the #6763 allowance for 3 Power-class clearance errors is gone."""
     gate = load("check_diffpair_coverage")

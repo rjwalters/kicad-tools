@@ -141,3 +141,54 @@ it("does not promote a missing summary from a ready report", () => {
   rmSync(join(root, "output/board.json"));
   expect(displayStatus(loadBoard(root))).toBe("development");
 });
+
+// ── Known issues (#7261) ────────────────────────────────────────────────────
+function bindKnownIssues(entries: unknown[]) {
+  const body = JSON.stringify({ known_issues: entries });
+  mkdirSync(join(root, "output/readiness"), { recursive: true });
+  writeFileSync(join(root, "output/readiness/known-issues.json"), body);
+  report.inputs["output/readiness/known-issues.json"] = createHash("sha256").update(body).digest("hex");
+  report.known_issues = entries;
+}
+const advisory = { issue: 7220, kind: "advisory", summary: "one-sided thermal", recorded: "2026-10-18" };
+const exception = { issue: 6269, kind: "exception", summary: "paid 0.15 mm drill", recorded: "2026-10-18" };
+const defect = { issue: 7250, kind: "defect", summary: "USB pair 71.6 ohm vs 90 ohm", recorded: "2026-10-18" };
+
+it("discloses bound exceptions/advisories and keeps the board ready", () => {
+  bindKnownIssues([exception, advisory]);
+  report.manufacturer = "jlcpcb";
+  save();
+  const board = loadBoard(root);
+  expect(displayStatus(board)).toBe("ready");
+  expect(displayStatusLabel(board)).toBe("PCB fabrication ready · 2 known issues");
+  expect(board.readiness?.known_issues?.map(e => e.issue)).toEqual([6269, 7220]);
+  expect(board.readiness?.manufacturer).toBe("jlcpcb");
+});
+it("renders a board blocked by a known defect as non-ready", () => {
+  bindKnownIssues([defect]);
+  report.status = "blocked";
+  report.blockers = ["known defect #7250: USB pair 71.6 ohm vs 90 ohm"];
+  save();
+  const board = loadBoard(root);
+  expect(displayStatus(board)).toBe("blocked");
+  expect(displayStatusLabel(board)).toBe("Needs work");
+});
+it("fails closed on a known-issues.json that inputs no longer lists (#7323)", () => {
+  bindKnownIssues([advisory]);
+  delete report.inputs["output/readiness/known-issues.json"];
+  delete report.known_issues;
+  save();
+  expect(displayStatus(loadBoard(root))).toBe("unverified");
+});
+it.each(["ready with defect", "unbound", "edited", "bad kind", "unsorted", "bad date", "bad manufacturer"])(
+  "fails closed on %s known issues", kind => {
+    if (kind === "ready with defect") bindKnownIssues([defect]);
+    if (kind === "unbound") report.known_issues = [advisory];
+    if (kind === "edited") { bindKnownIssues([advisory]); report.known_issues = [{ ...advisory, summary: "other" }]; }
+    if (kind === "bad kind") bindKnownIssues([{ ...advisory, kind: "waiver" }]);
+    if (kind === "unsorted") bindKnownIssues([advisory, exception]);
+    if (kind === "bad date") bindKnownIssues([{ ...advisory, recorded: "yesterday" }]);
+    if (kind === "bad manufacturer") report.manufacturer = 7;
+    save();
+    expect(displayStatus(loadBoard(root))).toBe("unverified");
+  });

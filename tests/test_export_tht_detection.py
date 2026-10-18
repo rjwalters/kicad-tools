@@ -57,11 +57,12 @@ def test_cpl_exclusions_and_preflight_use_same_pad_evidence(mixed_pcb, monkeypat
     assert [p.reference for p in included] == ["J2"]
     assert [p.reference for p in excluded] == ["J1", "J3"]
 
-    # Exercise the actual JLCPCB formatter's default SMT-only policy.
-    cpl = export_pnp(mixed_pcb.footprints, manufacturer="jlcpcb")
+    # JLCPCB assembles THT by default (issue #7239); exercise the exclusion
+    # path it shares with any still-SMT-only fab via an explicit override.
+    cpl = export_pnp(mixed_pcb.footprints, manufacturer="jlcpcb", config=config)
     assert [row["Designator"] for row in csv.DictReader(io.StringIO(cpl))] == ["J2"]
 
-    checker = PreflightChecker(mixed_pcb.path, manufacturer="jlcpcb")
+    checker = PreflightChecker(mixed_pcb.path, manufacturer="jlcpcb", exclude_tht=True)
     checker._pcb = mixed_pcb
     monkeypatch.setattr(
         checker,
@@ -82,7 +83,21 @@ def test_cpl_exclusions_and_preflight_use_same_pad_evidence(mixed_pcb, monkeypat
     assert "1 components, 2 THT excluded" in match.message
 
 
-def test_include_tht_override_keeps_unmarked_header(mixed_pcb):
+def test_jlcpcb_default_keeps_tht_in_cpl_and_preflight_agrees(mixed_pcb, monkeypatch):
+    cpl = export_pnp(mixed_pcb.footprints, manufacturer="jlcpcb")
+    assert [row["Designator"] for row in csv.DictReader(io.StringIO(cpl))] == ["J1", "J2", "J3"]
+
+    checker = PreflightChecker(mixed_pcb.path, manufacturer="jlcpcb")
+    checker._pcb = mixed_pcb
+    assert checker._exclude_tht is False
+    result = checker._check_tht_in_cpl()
+    assert result.status == "OK"
+    assert result.message == "2 through-hole component(s) included in CPL"
+
+
+def test_include_tht_override_keeps_unmarked_header(mixed_pcb, monkeypatch):
+    # Model a still-SMT-only fab: the WARN path needs a fab family in the set.
+    monkeypatch.setattr(PreflightChecker, "_SMT_ONLY_MANUFACTURERS", {"jlcpcb"})
     config = PnPExportConfig(exclude_tht=False)
     assert {p.reference for p in extract_placements(mixed_pcb.footprints, config)} == {
         "J1",

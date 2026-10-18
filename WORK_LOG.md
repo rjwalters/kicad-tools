@@ -15,6 +15,46 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-18
 
+- **PR #7329**: ci: gate Windows Smoke on main runs and warn on Test job time budget
+- **Issue #7327** (closed): CI: Windows Smoke never runs on main verification (== 'push' gate); Test job worst case 74.3 min vs 75 min timeout
+- **PR #7321**: fix(check): fixture folders never adopt parent board project.kct
+- **Issue #7320** (closed): main CI: Match-Group gate fails spec_conformance — fixture PCB picks up parent board's 6-layer project.kct (#7303 regression)
+- **Issue #7325** (closed): test_board_04_drill_clearance_regen fails: manufacturing-requirements.json missing from regen tmp dir (manufacturing_process.py:637)
+- **PR #7316**: feat(readiness): record known issues in readiness.json; open defects block ready
+- **Issue #7261** (closed): Ready claims omit known open defects: add readiness known_issues (via --ack-warnings sibling) surfaced by fleet status and site; drop stale board 04 status prose
+- **PR #7286**: fix: apply Hammerstad-Jensen 1980 thickness terms to microstrip Z0
+- **Issue #7076** (closed): Microstrip Z0 with copper thickness reads 1.6-3.7 % low (docstring claims 0.2 %)
+- **PR #7315**: feat(cli): one sign-off exit gate with JSON verdict/exit_code (Part B of #7230)
+- **Issue #7230** (closed): One sign-off exit-code contract: kct drc --net/--type/--category exits 0 on DRC errors, kct check JSON says passed while exiting 2, exit 2 means four things
+- **PR #7287**: feat(pcb): add waypoints and internal_pad stubs to PCBLayout.route
+- **Issue #7064** (closed): PCBLayout.route() draws a straight port-to-port line that crosses foreign pads and never reaches a pad
+- **PR #7306**: fix: judge differential-pair impedance on coupled segments
+- **Issue #7293** (closed): kct check: evaluate differential-pair impedance targets on coupled segments instead of recording impedance checked (#7250 PR-C)
+- **PR #7310**: fix(boards): accept only exact known #7220 warnings on board 04/05 gates (main CI red, #7298)
+- **Issue #7298** (closed): main CI red: #7232 thermal_asymmetry/via_at_pad_edge warnings fail board 04 gates (3 jobs + extended test) and Board 05 Routing Regression
+- **PR #7311**: fix(zones): read KiCad-saved thermal_bridge_width in starved-pad ladder
+- **Issue #7309** (closed): Regression (#7302): starved-pad repair loops forever after KiCad re-saves thermal_width as thermal_bridge_width — pads never go solid, starved_thermal ships
+- **Issue #7239** (closed): Include THT parts in JLCPCB assembly output (operator decision; JLCPCB now offers THT PCBA)
+- **PR #7242**: feat: include through-hole parts in JLCPCB CPL and BOM
+- **PR #7302**: feat: try narrower per-pad thermal spokes before forcing solid pad connections
+- **PR #7304**: feat(check): detect thin silk text, off-board silk text and obscured refdes
+- **Issue #7228** (closed): Silkscreen false-PASS: kct misses text stroke width, off-board silk and refdes under body (board 03: 6), and readiness skips text height
+- **PR #7303**: feat: add spec_conformance check comparing project.kct to the routed board
+- **Issue #7292** (closed): kct check: spec_conformance category compares project.kct requirements to the routed board (#7250 PR-B)
+- **Issue #7284** (closed): router regression from #7255: mirrored fallback leg trades unbounded skew/length for via parity (board 03 tier-1 USB_D- 15.9→20.1 mm, skew 0.54→4.57)
+- **PR #7291**: fix(router): bound the skew/length a via-parity fallback leg pair may cost
+- **Issue #7075** (closed): transmission_line.py: CPWG impedance reads 53-233 % high, and microstrip/CPWG dielectric loss is too large by a factor of eps_eff
+- **PR #7282**: fix: correct CPWG impedance and dielectric loss formulas
+- **Issue #7276** (closed): MCP export/check tools can't select fab tiers (jlcpcb-tier1) — boards 03/04 unexportable via MCP strict default (#7266 follow-up)
+- **PR #7280**: fix: accept registry manufacturer/tier ids in MCP export and DRC tools
+- **PR #7301**: test: write board-00 DRC/ERC reports in tmp_path for #7260 preflight tests (main CI red)
+- **PR #7281**: fix: measure routed intra-pair gap in ImpedanceRule instead of assuming 0.15 mm
+- **PR #7251**: fix(audit,skills): sign-off skills refuse bad boards; kct audit runs ERC on .kicad_pcb
+- **PR #7245**: fix(boards): put board 02 and 03 CPLs in the Gerber frame and add a fleet frame test
+- **Issue #7300** (closed): Main CI red: TestExportAssemblyPreflight7260 copies board-00 drc/erc reports deleted by #7190
+- **Issue #7299** (closed): main CI red: TestExportAssemblyPreflight7260 copies board-00 drc_report.json/erc_report.json that #7267 deleted
+- **Issue #7136** (closed): kct sign-off skills don't refuse bad boards: Gate 1 exits 2 on every board, kicad-cli gate exits 0 on errors, export never gets the DRC report, audit ERC never runs
+- **Issue #7079** (closed): ImpedanceRule judges every detected differential pair at a 0.15 mm gap, whatever the routed spacing
 - **PR #7279**: fix(router): post-route short check ignores input copper the writer drops
 - **Issue #7270** (closed): board 03 thermal_asymmetry: classify the findings and replace #7259's count-based allowance with a narrow one or a fix
 - **PR #7274**: test(board03): pin thermal_asymmetry allowance to the six classified pads

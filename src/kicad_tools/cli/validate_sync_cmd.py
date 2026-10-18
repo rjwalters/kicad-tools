@@ -19,11 +19,12 @@ import argparse
 import json
 import sys
 from pathlib import Path
+from typing import Any
 
 from kicad_tools.project import Project
 from kicad_tools.validate.netlist import NetlistValidator, SyncIssue, SyncResult
 
-from ._gate import hidden_by_view_filter
+from ._gate import gate_exit_code, hidden_by_view_filter
 
 
 def _classify_file(filepath: str) -> str | None:
@@ -175,20 +176,28 @@ def main(argv: list[str] | None = None) -> int:
     # every finding, and what the filter hid is disclosed.
     hidden = hidden_by_view_filter(result.issues, issues)
 
+    # Exit code from the unfiltered result, decided before output so
+    # ``--format json`` can carry it (Issue #7230).
+    exit_code, verdict = gate_exit_code(
+        result.error_count, result.warning_count, strict=args.strict, style="drc"
+    )
+
     # Output
     if args.format == "json":
-        output_json(filtered_result, schematic_path, pcb_path, hidden=hidden)
+        output_json(
+            filtered_result,
+            schematic_path,
+            pcb_path,
+            hidden=hidden,
+            verdict=verdict,
+            exit_code=exit_code,
+        )
     elif args.format == "summary":
         output_summary(filtered_result, schematic_path, pcb_path, hidden=hidden)
     else:
         output_table(filtered_result, schematic_path, pcb_path, args.verbose, hidden=hidden)
 
-    # Exit code (from the unfiltered result)
-    if result.error_count > 0:
-        return 1
-    elif result.warning_count > 0 and args.strict:
-        return 2
-    return 0
+    return exit_code
 
 
 def output_table(
@@ -276,9 +285,14 @@ def output_json(
     schematic_path: Path,
     pcb_path: Path,
     hidden: dict[str, int] | None = None,
+    verdict: str | None = None,
+    exit_code: int | None = None,
 ) -> None:
-    """Output issues as JSON."""
-    data = {
+    """Output issues as JSON.
+
+    Issue #7230: top-level ``verdict`` and ``exit_code`` when given.
+    """
+    data: dict[str, Any] = {
         "schematic": str(schematic_path),
         "pcb": str(pcb_path),
         "in_sync": result.in_sync,
@@ -295,7 +309,11 @@ def output_json(
         "issues": [i.to_dict() for i in result.issues],
     }
     if hidden:
-        data["summary"]["hidden_by_view_filter"] = hidden  # type: ignore[index]
+        data["summary"]["hidden_by_view_filter"] = hidden
+    if verdict is not None:
+        data["verdict"] = verdict
+    if exit_code is not None:
+        data["exit_code"] = exit_code
     print(json.dumps(data, indent=2))
 
 
