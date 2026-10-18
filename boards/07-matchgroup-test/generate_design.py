@@ -2142,6 +2142,16 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     #     the residual TMDS_D0/D1 disconnects at U4 sit in the
     #     two-phase EscapeRouter pipeline (#3143 escape endpoint
     #     overrides), i.e. the #3438 lane.
+    #
+    # Issue #6852 addendum (2026-10-16): live re-measure of
+    # ``--differential-pairs`` (one-line change, seed 42,
+    # ``PYTHONHASHSEED=42``, native build 59).  Six of seven pairs still
+    # hit the 20,000-iteration coupled-search phase cap in ~1 s and fall
+    # back to single-ended routing; final state is 28/29 routed with
+    # TMDS_D0_N stranded and ``skew_out_of_range=6``.  The bounded
+    # controls (tests/test_coupled_search_replay_board07_pairs.py) show
+    # the joint A* needs 48k-180k iterations even on an empty grid, so
+    # the flag stays off until a search-shape fix lands (#5333).
     cmd = [
         sys.executable,
         "-m",

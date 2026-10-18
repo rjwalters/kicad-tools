@@ -161,6 +161,9 @@ case "${BOARD}" in
       --backend cpp
       --deterministic-budget
       --timeout 600
+      # Issue #6829: route with the committed map so USB_D resolves USB2_FS
+      # rather than the generic 0.5 mm skew default.
+      --net-class-map boards/03-usb-joystick/output/net_class_map.json
     )
     ;;
   04)

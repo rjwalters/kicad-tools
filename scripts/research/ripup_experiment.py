@@ -69,7 +69,17 @@ BOARDS: dict[str, Board] = {
     "00": Board("00", "boards/00-simple-led/output/simple_led.kicad_pcb"),
     "01": Board("01", "boards/01-voltage-divider/output/voltage_divider.kicad_pcb"),
     "02": Board("02", "boards/02-charlieplex-led/output/charlieplex_3x3.kicad_pcb"),
-    "03": Board("03", "boards/03-usb-joystick/output/usb_joystick.kicad_pcb", layers=4),
+    "03": Board(
+        "03",
+        "boards/03-usb-joystick/output/usb_joystick.kicad_pcb",
+        layers=4,
+        # Issue #6829: without the committed map USB_D is held to the generic
+        # 0.5 mm skew default instead of its declared USB2_FS limit.
+        kct_args=(
+            "--net-class-map",
+            str(REPO / "boards/03-usb-joystick/output/net_class_map.json"),
+        ),
+    ),
     "06a": Board(
         "06a",
         "boards/06-diffpair-test/output/diffpair_test.kicad_pcb",

@@ -320,4 +320,6 @@ if __name__ == "__main__":
         [os.environ.get("KICAD_CLI_DIR", "/Applications/KiCad/KiCad.app/Contents/MacOS")]
         + os.environ.get("PATH", "").split(os.pathsep)
     )
-    raise SystemExit(main())
+    from kicad_tools.cli.kicad_toolchain import run_on_evidence_toolchain
+
+    raise SystemExit(run_on_evidence_toolchain(main, [REPO_ROOT]))

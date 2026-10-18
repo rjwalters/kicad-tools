@@ -34,6 +34,7 @@ from kicad_tools.cli.route_cmd import (
     DETERMINISTIC_BUDGET_MAX_SEARCH_ITERATIONS,
     _normalize_deterministic_budget,
 )
+from tests.route_cli import kct_route
 
 
 def _base_args(**overrides) -> SimpleNamespace:
@@ -136,72 +137,26 @@ class TestNormalizeDeterministicBudget:
 
 
 class TestDeterministicBudgetForwarding:
-    """The flag must flow end-to-end through the two-parser CLI shim."""
+    """The flag must reach the router through ``kct route`` (issue #7017)."""
 
-    def test_flag_forwarded_to_inner_parser(self):
-        """``--deterministic-budget`` is appended to the inner sub_argv."""
-        from kicad_tools.cli.commands.routing import run_route_command
-
-        args = SimpleNamespace(
-            pcb="test.kicad_pcb",
-            output=None,
-            strategy="negotiated",
-            skip_nets=None,
-            grid="auto",
-            trace_width=0.2,
-            clearance=0.15,
-            via_drill=0.3,
-            via_diameter=0.6,
-            mc_trials=10,
-            iterations=15,
-            verbose=False,
-            dry_run=True,
-            quiet=True,
-            power_nets=None,
-            deterministic_budget=True,
-        )
-        with patch("kicad_tools.cli.route_cmd.main") as mock_main:
-            mock_main.return_value = 0
-            run_route_command(args)
-            sub_argv = mock_main.call_args[0][0]
-            assert "--deterministic-budget" in sub_argv
+    def test_flag_forwarded_to_router(self):
+        forwarded, args = kct_route(["test.kicad_pcb", "--deterministic-budget"])
+        assert "--deterministic-budget" in forwarded
+        assert args.deterministic_budget is True
 
     def test_flag_not_forwarded_when_unset(self):
-        """The flag is omitted from sub_argv when not requested (default)."""
-        from kicad_tools.cli.commands.routing import run_route_command
-
-        args = SimpleNamespace(
-            pcb="test.kicad_pcb",
-            output=None,
-            strategy="negotiated",
-            skip_nets=None,
-            grid="auto",
-            trace_width=0.2,
-            clearance=0.15,
-            via_drill=0.3,
-            via_diameter=0.6,
-            mc_trials=10,
-            iterations=15,
-            verbose=False,
-            dry_run=True,
-            quiet=True,
-            power_nets=None,
-            deterministic_budget=False,
-        )
-        with patch("kicad_tools.cli.route_cmd.main") as mock_main:
-            mock_main.return_value = 0
-            run_route_command(args)
-            sub_argv = mock_main.call_args[0][0]
-            assert "--deterministic-budget" not in sub_argv
+        forwarded, args = kct_route(["test.kicad_pcb"])
+        assert "--deterministic-budget" not in forwarded
+        assert args.deterministic_budget is False
 
 
 class TestDeterministicBudgetParserDeclaration:
-    """The flag must be declared on BOTH parsers (drift guard, #3538)."""
+    """The flag is on the ``kct route`` parser and ``route_cmd.main`` (#3538)."""
 
-    def _outer_route_flags(self) -> set[str]:
-        from kicad_tools.cli.parser import create_parser
+    def _kct_route_flags(self) -> set[str]:
+        from kicad_tools.cli.parser import create_parser, resolve_passthrough
 
-        main_parser = create_parser()
+        main_parser = resolve_passthrough(create_parser())
         for action in main_parser._actions:
             choices = getattr(action, "choices", None)
             if choices and "route" in choices:
@@ -233,5 +188,5 @@ class TestDeterministicBudgetParserDeclaration:
 
     def test_flag_on_both_parsers(self):
         """``--deterministic-budget`` lives on both inner and outer parsers."""
-        assert "--deterministic-budget" in self._outer_route_flags()
+        assert "--deterministic-budget" in self._kct_route_flags()
         assert "--deterministic-budget" in self._inner_route_flags()

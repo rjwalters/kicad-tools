@@ -1685,7 +1685,7 @@ class TestAddNoConnect:
 
     def test_build_no_connect_sexp(self):
         """No-connect S-expression node is correctly built."""
-        from kicad_tools.cli.sch_add_no_connect import _build_no_connect_sexp
+        from kicad_tools.cli.sch_wire_common import _build_no_connect_sexp
 
         node = _build_no_connect_sexp(100.0, 50.0)
         assert node.name == "no_connect"
@@ -1758,7 +1758,7 @@ class TestDisconnect:
 
     def test_find_wires_at_point(self, tmp_path):
         """Wires at a given point are found correctly."""
-        from kicad_tools.cli.sch_disconnect import _find_wires_at_point
+        from kicad_tools.cli.sch_wire_common import _find_wires_at_point
 
         path = _write_sch(tmp_path, MINIMAL_SCHEMATIC)
         sch = Schematic.load(path)
@@ -1769,7 +1769,7 @@ class TestDisconnect:
 
     def test_find_wires_at_unconnected_point(self, tmp_path):
         """No wires are found at an unconnected point."""
-        from kicad_tools.cli.sch_disconnect import _find_wires_at_point
+        from kicad_tools.cli.sch_wire_common import _find_wires_at_point
 
         path = _write_sch(tmp_path, MINIMAL_SCHEMATIC)
         sch = Schematic.load(path)
@@ -1820,7 +1820,7 @@ class TestDisconnect:
 
     def test_build_no_connect_sexp(self):
         """No-connect S-expression is valid."""
-        from kicad_tools.cli.sch_disconnect import _build_no_connect_sexp
+        from kicad_tools.cli.sch_wire_common import _build_no_connect_sexp
 
         node = _build_no_connect_sexp(150.0, 75.0)
         assert node.name == "no_connect"
@@ -1947,7 +1947,8 @@ class TestRemoveWire:
 
     def test_find_nearest_wire(self, tmp_path):
         """Nearest wire is found by proximity to a point."""
-        from kicad_tools.cli.sch_remove_wire import _wire_start_end, find_nearest_wire
+        from kicad_tools.cli.sch_remove_wire import find_nearest_wire
+        from kicad_tools.cli.sch_wire_common import _wire_start_end
 
         path = _write_sch(tmp_path, MINIMAL_SCHEMATIC)
         sch = Schematic.load(path)

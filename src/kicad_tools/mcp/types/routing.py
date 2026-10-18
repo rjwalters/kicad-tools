@@ -91,7 +91,12 @@ class RouteNetResult:
         error_message: Error message if success is False
         suggestions: Suggestions if routing failed or was incomplete
         warnings: Non-fatal warnings, e.g. a declared clearance raised to
-            the board's fab floor (Issue #6283)
+            the board's fab floor (Issue #6283), or a routing pitch coarsened
+            by the adaptive cell cap (Issue #6875)
+        grid: The routing grid actually used (Issue #6875) --
+            ``{"requested_mm", "used_mm", "cols", "rows", "layers", "cells",
+            "selection", "coarsened", "coarsened_reason"}`` -- or None when
+            no router was built
     """
 
     success: bool
@@ -105,6 +110,7 @@ class RouteNetResult:
     error_message: str | None = None
     suggestions: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    grid: dict | None = None
 
     def to_dict(self) -> dict:
         """Convert to dictionary for serialization."""
@@ -120,4 +126,5 @@ class RouteNetResult:
             "error_message": self.error_message,
             "suggestions": self.suggestions,
             "warnings": self.warnings,
+            "grid": self.grid,
         }

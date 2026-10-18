@@ -106,17 +106,56 @@ _GH_APP_LAST_ERROR=""
 GITHUB_APP_INSTALLATION_ID=""
 GITHUB_APP_TOKEN_EXPIRES_AT=""
 
-# _github_app_load_config -> resolves _GH_APP_ID / _GH_APP_KEY_PATH from env
-# (highest precedence) or config (forge.githubApp.appId /
+# _github_app_load_config [owner] -> resolves _GH_APP_ID / _GH_APP_KEY_PATH
+# from env (highest precedence) or config (forge.githubApp.appId /
 # forge.githubApp.privateKeyPath), matching the #4061 GiteaConfig precedence
 # pattern (env beats config).
+#
+# With an `owner`, a `forge.identities.writers[]` entry whose `owners` lists
+# that owner (case-insensitive, first match wins) supplies the app id and key
+# path instead of `forge.githubApp` (#12446): a private App cannot install on
+# a second account, so a fleet spanning a user and an org needs one writer App
+# per owner. An owner no entry lists, an absent `writers` key, or no `owner`
+# at all resolves exactly as before. The env override still beats everything.
+# An owner that is not a valid GitHub login (1-39 alphanumerics or `-`, not
+# leading `-`) is dropped, as the daemon's `valid_owner` drops it, so both
+# sides pick the same App for the same config.
+# `_GH_APP_OWNER` remembers the owner so a later `github_app_configured` call
+# from inside the token flow (JWT signing) resolves the same App.
+_GH_APP_OWNER=""
 _github_app_load_config() {
+  _GH_APP_OWNER="${1:-}"
   _GH_APP_ID="${LOOM_GITHUB_APP_ID:-}"
   _GH_APP_KEY_PATH="${LOOM_GITHUB_APP_KEY_PATH:-}"
 
   if [[ ( -z "$_GH_APP_ID" || -z "$_GH_APP_KEY_PATH" ) ]] && command -v jq >/dev/null 2>&1; then
     local root
     root="$(_github_app_config_root)"
+    if [[ -n "$_GH_APP_OWNER" && -z "$_GH_APP_ID" && -z "$_GH_APP_KEY_PATH" ]]; then
+      local writer
+      writer="$(loom_resolve_config "$root" | jq -r --arg owner "$_GH_APP_OWNER" '
+        def trim: gsub("^\\s+|\\s+$"; "");
+        try ((.forge.identities.writers // [])
+          | if type == "array" then . else [] end
+          | map(select(type == "object")
+              | ((.appId | if type == "string" then trim elif type == "number" then tostring else "" end)) as $id
+              | ((.privateKeyPath | if type == "string" then trim else "" end)) as $key
+              | select($id != "" and $key != "")
+              | select([(.owners // []) | if type == "array" then .[] else empty end
+                        | strings | trim
+                        | select(test("^[A-Za-z0-9][A-Za-z0-9-]{0,38}$"))
+                        | ascii_downcase]
+                       | index($owner | trim | ascii_downcase) != null)
+              | "\($id)\t\($key)")
+          | .[0] // empty) catch empty' 2>/dev/null)"
+      if [[ -n "$writer" && "$writer" != "null" ]]; then
+        _GH_APP_ID="${writer%%$'\t'*}"
+        _GH_APP_KEY_PATH="${writer#*$'\t'}"
+        # Mirror the daemon's expand_home: a `~` path would read as unreadable.
+        _GH_APP_KEY_PATH="${_GH_APP_KEY_PATH/#\~\//$HOME/}"
+        return 0
+      fi
+    fi
     if [[ -z "$_GH_APP_ID" ]]; then
       _GH_APP_ID="$(loom_config_get "$root" "forge.githubApp.appId" "")"
     fi
@@ -132,7 +171,7 @@ _github_app_load_config() {
 # entry point checks before doing any work -- absent config is NOT an error,
 # just "fall back to ambient auth" (the load-bearing default, #4430 AC1).
 github_app_configured() {
-  _github_app_load_config
+  _github_app_load_config "${1:-}"
   if [[ -z "$_GH_APP_ID" ]]; then
     _GH_APP_LAST_ERROR="github app not configured (set LOOM_GITHUB_APP_ID or forge.githubApp.appId)"
     return 1
@@ -192,7 +231,7 @@ _github_app_b64url_decode_to_file() {
 # out, inside GitHub's 10-minute ceiling with headroom for the request
 # round-trip.
 github_app_jwt() {
-  if ! github_app_configured; then
+  if ! github_app_configured "$_GH_APP_OWNER"; then
     return 1
   fi
 
@@ -390,12 +429,14 @@ _github_app_api_mint_token() {
 # re-paid per call site.
 github_app_get_token() {
   local nwo="$1" force="${2:-}"
-  if ! github_app_configured; then
-    return 1
-  fi
   local owner="${nwo%%/*}"
   if [[ -z "$owner" || "$owner" == "$nwo" ]]; then
+    # Keep the legacy ordering: an unconfigured host reports "not configured".
+    github_app_configured || return 1
     _GH_APP_LAST_ERROR="expected owner/repo, got '${nwo}'"
+    return 1
+  fi
+  if ! github_app_configured "$owner"; then
     return 1
   fi
 
@@ -475,7 +516,7 @@ if [[ "${BASH_SOURCE[0]:-$0}" == "${0}" ]]; then
         jq -cn '{status:"error", message:"owner/repo argument required"}'
         exit 0
       fi
-      if ! github_app_configured; then
+      if ! github_app_configured "${_nwo%%/*}"; then
         jq -cn --arg message "$_GH_APP_LAST_ERROR" '{status:"not_configured", message:$message}'
         exit 0
       fi

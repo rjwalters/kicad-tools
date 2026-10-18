@@ -103,5 +103,17 @@
         "champion"
       ]
     }
+  },
+  "hyperparameters": {
+    "dispatch": {
+      "maxConcurrent": 3
+    },
+    "lifecycle": {
+      "leaseTtlMinutes": 15
+    },
+    "rework": {
+      "buildBackoffHigh": 40,
+      "buildBackoffLow": 25
+    }
   }
 }

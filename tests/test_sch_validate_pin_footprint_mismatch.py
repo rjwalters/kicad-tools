@@ -11,89 +11,16 @@ from kicad_tools.cli.sch_validate import (
     validate_schematic,
 )
 from kicad_tools.pcb.footprints import _FP_PAD_COUNT_RE, get_pad_count
+from tests._sch_sexp_builders import (
+    make_lib_symbol as _make_lib_symbol,
+)
+from tests._sch_sexp_builders import (
+    make_symbol_instance as _make_symbol_instance,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers: synthetic KiCad schematic generation
 # ---------------------------------------------------------------------------
-
-
-def _make_lib_symbol(
-    lib_id: str,
-    pins: list[tuple[str, str, str]],
-) -> str:
-    """Generate a lib_symbols entry for a component.
-
-    Args:
-        lib_id: e.g. "Regulator_Linear:AP2204K-1.5"
-        pins: list of (pin_number, pin_name, pin_type) tuples
-    """
-    part_name = lib_id.split(":")[-1] if ":" in lib_id else lib_id
-    pin_blocks = []
-    for i, (num, name, ptype) in enumerate(pins):
-        y = i * 2.54
-        pin_blocks.append(
-            f"""(pin {ptype} line
-                    (at 0 {y:.2f} 0)
-                    (length 2.54)
-                    (name "{name}")
-                    (number "{num}")
-                )"""
-        )
-    pin_str = "\n".join(pin_blocks)
-    return f"""(symbol "{lib_id}"
-            (pin_names (offset 0.254))
-            (symbol "{part_name}_0_1"
-                (rectangle
-                    (start -5.08 -{(len(pins) * 2.54) + 1.27:.2f})
-                    (end 5.08 1.27)
-                    (stroke (width 0.254))
-                    (fill (type background))
-                )
-            )
-            (symbol "{part_name}_1_1"
-                {pin_str}
-            )
-        )"""
-
-
-def _make_symbol_instance(
-    ref: str,
-    lib_id: str,
-    footprint: str,
-    pins: list[tuple[str, str, str]],
-    x: float = 100.0,
-    y: float = 50.0,
-    dnp: bool = False,
-) -> str:
-    """Generate a symbol instance S-expression."""
-    pin_entries = "\n".join(f'(pin "{num}" (uuid "pin-{ref.lower()}-{num}"))' for num, _, _ in pins)
-    dnp_str = "yes" if dnp else "no"
-    return f"""(symbol
-        (lib_id "{lib_id}")
-        (at {x} {y} 0)
-        (unit 1)
-        (in_bom yes)
-        (on_board yes)
-        (dnp {dnp_str})
-        (uuid "uuid-{ref.lower()}")
-        (property "Reference" "{ref}"
-            (at {x + 2} {y - 2} 0)
-            (effects (font (size 1.27 1.27)) (justify left))
-        )
-        (property "Value" "{lib_id.split(":")[-1]}"
-            (at {x + 2} {y} 0)
-            (effects (font (size 1.27 1.27)) (justify left))
-        )
-        (property "Footprint" "{footprint}"
-            (at {x} {y} 0)
-            (effects (font (size 1.27 1.27)) hide)
-        )
-        (property "Datasheet" "~"
-            (at {x} {y} 0)
-            (effects (font (size 1.27 1.27)) hide)
-        )
-        {pin_entries}
-    )"""
 
 
 def _make_schematic(*blocks: str, lib_symbols: str = "") -> str:
@@ -223,7 +150,7 @@ class TestPinFootprintMismatch:
         lib_id = "Regulator_Linear:AP2204K"
         lib_sym = _make_lib_symbol(lib_id, pins_5)
         # Use a footprint name that implies 3 pads (heuristic)
-        inst = _make_symbol_instance("U1", lib_id, "Package_TO_SOT_SMD:SOT-23-3", pins_5)
+        inst = _make_symbol_instance("U1", lib_id, pins_5, footprint="Package_TO_SOT_SMD:SOT-23-3")
         content = _make_schematic(inst, lib_symbols=lib_sym)
         sch_path = _write_sch(tmp_path, content)
 
@@ -247,7 +174,7 @@ class TestPinFootprintMismatch:
         lib_id = "Regulator_Linear:AP2204K"
         lib_sym = _make_lib_symbol(lib_id, pins_5)
         # SOT-23-5 is in COMMON_FOOTPRINTS with 5 pads
-        inst = _make_symbol_instance("U1", lib_id, "Package_TO_SOT_SMD:SOT-23-5", pins_5)
+        inst = _make_symbol_instance("U1", lib_id, pins_5, footprint="Package_TO_SOT_SMD:SOT-23-5")
         content = _make_schematic(inst, lib_symbols=lib_sym)
         sch_path = _write_sch(tmp_path, content)
 
@@ -260,7 +187,9 @@ class TestPinFootprintMismatch:
         lib_id = "IC:SomeQFN"
         lib_sym = _make_lib_symbol(lib_id, pins_20)
         # Footprint name implies 21 pads (20 signal + 1 thermal)
-        inst = _make_symbol_instance("U1", lib_id, "Package_DFN_QFN:QFN-21_5x5mm", pins_20)
+        inst = _make_symbol_instance(
+            "U1", lib_id, pins_20, footprint="Package_DFN_QFN:QFN-21_5x5mm"
+        )
         content = _make_schematic(inst, lib_symbols=lib_sym)
         sch_path = _write_sch(tmp_path, content)
 
@@ -319,7 +248,7 @@ class TestPinFootprintMismatch:
         ]
         # SOIC-8 -> 8 pads via heuristic
         inst = _make_symbol_instance(
-            "U1", lib_id, "Package_SO:SOIC-8_3.9x4.9mm_P1.27mm", pins_for_inst
+            "U1", lib_id, pins_for_inst, footprint="Package_SO:SOIC-8_3.9x4.9mm_P1.27mm"
         )
         content = _make_schematic(inst, lib_symbols=lib_sym_sexp)
         sch_path = _write_sch(tmp_path, content)
@@ -332,7 +261,7 @@ class TestPinFootprintMismatch:
         pins = [("1", "GND", "power_in")]
         lib_id = "power:GND"
         lib_sym = _make_lib_symbol(lib_id, pins)
-        inst = _make_symbol_instance("PWR1", lib_id, "Package_TO_SOT_SMD:SOT-23-5", pins)
+        inst = _make_symbol_instance("PWR1", lib_id, pins, footprint="Package_TO_SOT_SMD:SOT-23-5")
         content = _make_schematic(inst, lib_symbols=lib_sym)
         sch_path = _write_sch(tmp_path, content)
 
@@ -350,7 +279,9 @@ class TestPinFootprintMismatch:
         ]
         lib_id = "Regulator_Linear:AP2204K"
         lib_sym = _make_lib_symbol(lib_id, pins_5)
-        inst = _make_symbol_instance("U1", lib_id, "Package_TO_SOT_SMD:SOT-23-3", pins_5, dnp=True)
+        inst = _make_symbol_instance(
+            "U1", lib_id, pins_5, footprint="Package_TO_SOT_SMD:SOT-23-3", dnp=True
+        )
         content = _make_schematic(inst, lib_symbols=lib_sym)
         sch_path = _write_sch(tmp_path, content)
 
@@ -363,7 +294,7 @@ class TestPinFootprintMismatch:
         lib_id = "IC:SomeChip"
         lib_sym = _make_lib_symbol(lib_id, pins_8)
         # MSOP-10 not in COMMON_FOOTPRINTS, heuristic extracts 10
-        inst = _make_symbol_instance("U1", lib_id, "Package_SO:MSOP-10_3x3mm", pins_8)
+        inst = _make_symbol_instance("U1", lib_id, pins_8, footprint="Package_SO:MSOP-10_3x3mm")
         content = _make_schematic(inst, lib_symbols=lib_sym)
         sch_path = _write_sch(tmp_path, content)
 
@@ -379,7 +310,7 @@ class TestPinFootprintMismatch:
         lib_id = "Custom:Widget"
         lib_sym = _make_lib_symbol(lib_id, pins_3)
         # Footprint name has no extractable pad count
-        inst = _make_symbol_instance("U1", lib_id, "MyLib:CustomPart", pins_3)
+        inst = _make_symbol_instance("U1", lib_id, pins_3, footprint="MyLib:CustomPart")
         content = _make_schematic(inst, lib_symbols=lib_sym)
         sch_path = _write_sch(tmp_path, content)
 
@@ -400,7 +331,9 @@ class TestValidateSchematicIntegration:
         pins_2 = [("1", "A", "passive"), ("2", "B", "passive")]
         lib_id = "Device:R"
         lib_sym = _make_lib_symbol(lib_id, pins_2)
-        inst = _make_symbol_instance("R1", lib_id, "Resistor_SMD:R_0603_1608Metric", pins_2)
+        inst = _make_symbol_instance(
+            "R1", lib_id, pins_2, footprint="Resistor_SMD:R_0603_1608Metric"
+        )
         content = _make_schematic(inst, lib_symbols=lib_sym)
         sch_path = _write_sch(tmp_path, content)
 

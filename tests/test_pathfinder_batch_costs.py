@@ -40,11 +40,24 @@ from kicad_tools.router.rules import DesignRules
 # ---------------------------------------------------------------------------
 
 
+def _neighbor_offsets(router: Router) -> tuple[np.ndarray, np.ndarray]:
+    """Derive the neighbor dx/dy arrays locally from ``neighbors_2d``.
+
+    Issue #6984: the Router no longer keeps pre-computed neighbor offset
+    arrays (their only production reader was an uncalled batch
+    negotiated-cost helper), so the reference builds its own.
+    """
+    dx = np.array([d[0] for d in router.neighbors_2d], dtype=np.int32)
+    dy = np.array([d[1] for d in router.neighbors_2d], dtype=np.int32)
+    return dx, dy
+
+
 def _reference_batch_congestion_costs(
     router: Router, current_x: int, current_y: int, layer: int
 ) -> np.ndarray:
-    nx_arr = current_x + router._neighbor_dx
-    ny_arr = current_y + router._neighbor_dy
+    neighbor_dx, neighbor_dy = _neighbor_offsets(router)
+    nx_arr = current_x + neighbor_dx
+    ny_arr = current_y + neighbor_dy
 
     valid = (
         (nx_arr >= 0) & (nx_arr < router.grid.cols) & (ny_arr >= 0) & (ny_arr < router.grid.rows)
@@ -77,8 +90,9 @@ def _reference_batch_turn_costs(router: Router, current_direction: tuple[int, in
     if current_direction == (0, 0):
         return np.zeros(len(router.neighbors_2d), dtype=np.float64)
 
-    dx_match = router._neighbor_dx == current_direction[0]
-    dy_match = router._neighbor_dy == current_direction[1]
+    neighbor_dx, neighbor_dy = _neighbor_offsets(router)
+    dx_match = neighbor_dx == current_direction[0]
+    dy_match = neighbor_dy == current_direction[1]
     matches = dx_match & dy_match
 
     return np.where(matches, 0.0, router.rules.cost_turn)

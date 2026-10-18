@@ -58,7 +58,7 @@ import subprocess
 import sys
 import time
 from collections import Counter
-from collections.abc import Iterator
+from collections.abc import Collection, Iterator
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -241,8 +241,13 @@ def load_manifest(path: Path = MANIFEST_PATH) -> dict[str, Any]:
     return json.loads(path.read_text())
 
 
-def verify_manifest(manifest: dict[str, Any], repo: Path = REPO) -> list[str]:
+def verify_manifest(
+    manifest: dict[str, Any], repo: Path = REPO, keys: Collection[str] | None = None
+) -> list[str]:
     """Every frozen file must still hash the same, and every absence still hold.
+
+    ``keys`` limits the check to those board keys (``run --boards``); ``None``
+    checks the whole manifest.
 
     An absence is a manifest slot with ``path: None`` (board 09's DRU) or an
     excluded board (08, no PCB). If the file the slot would be frozen from now
@@ -250,6 +255,8 @@ def verify_manifest(manifest: dict[str, Any], repo: Path = REPO) -> list[str]:
     """
     problems: list[str] = []
     for board in manifest["boards"]:
+        if keys is not None and board["key"] not in keys:
+            continue
         expected = board_paths(board["key"])
         if board["status"] != "included":
             rel = expected["input"]
@@ -1457,7 +1464,7 @@ def _tool_spec(name: str, args: argparse.Namespace, manifest: dict[str, Any]) ->
 
 def cmd_run(args: argparse.Namespace) -> int:
     manifest = load_manifest(args.manifest)
-    problems = verify_manifest(manifest)
+    problems = verify_manifest(manifest, keys=set(args.boards.split(",")))
     if problems:
         print("manifest drift -- refusing to run (re-freeze deliberately):", *problems, sep="\n  ")
         return 2

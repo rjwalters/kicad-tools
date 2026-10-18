@@ -602,7 +602,18 @@ def measure_group_spread(pcb_path: Path, groups: dict[str, list[str]]) -> dict:
     the spread is comparable even though KRT's own matcher counts barrels.
     ``spread`` is max-minus-min over the group members that carry copper;
     ``members`` reports how many of the declared nets that was.
+
+    A member that carries copper is not necessarily *finished*: board 07's
+    input gives every SDRAM net a 7-9 mm escape stub and joins none of them
+    pad to pad, so on a capped run ``spread_mm`` mixes "net not matched" with
+    "net not finished" (Issue #5798). ``complete`` counts the members whose
+    pads are all joined (the ``NetStatusAnalyzer`` model ``completion`` uses)
+    and ``spread_complete_mm`` is the spread over those members alone --
+    ``None`` when fewer than two are finished, because one finished net has
+    nothing to be matched against. Only ``spread_complete_mm`` measures a
+    matcher; ``spread_mm`` is kept so earlier rows stay comparable.
     """
+    from kicad_tools.analysis.net_status import NetStatusAnalyzer
     from kicad_tools.schema.pcb import PCB
 
     pcb = PCB.load(str(pcb_path))
@@ -610,16 +621,24 @@ def measure_group_spread(pcb_path: Path, groups: dict[str, list[str]]) -> dict:
     for seg in pcb.segments:
         name = seg.net_name or ""
         length[name] = length.get(name, 0.0) + math.dist(seg.start, seg.end)
+    finished = {
+        net.net_name
+        for net in NetStatusAnalyzer(pcb, strict=True).analyze().nets
+        if net.total_pads >= 2 and net.status == "complete"
+    }
     out: dict[str, dict] = {}
     for group, members in groups.items():
         routed = [length[m] for m in members if length.get(m, 0.0) > 0.0]
         if not routed:
             continue
+        done = [length[m] for m in members if m in finished and length.get(m, 0.0) > 0.0]
         out[group] = {
             "min_mm": round(min(routed), 2),
             "max_mm": round(max(routed), 2),
             "spread_mm": round(max(routed) - min(routed), 2),
             "members": f"{len(routed)}/{len(members)}",
+            "complete": f"{len(done)}/{len(members)}",
+            "spread_complete_mm": round(max(done) - min(done), 2) if len(done) >= 2 else None,
         }
     return out
 
@@ -926,6 +945,39 @@ def print_table(results: dict) -> None:
             _runtime(r),
         ]  # fmt: skip
         print("| " + " | ".join(cells) + " |")
+    print_group_spread_table(results)
+
+
+def _spread_cell(g: dict) -> str:
+    """``all / finished-only (k/n finished)`` for one group (Issue #5798)."""
+    done = g.get("spread_complete_mm")
+    done_cell = "--" if done is None else str(done)
+    return f"{g['spread_mm']} / {done_cell} ({g.get('complete', '?')})"
+
+
+def print_group_spread_table(results: dict) -> None:
+    """Per-group spread, all members vs finished members only (Issue #5798).
+
+    The main table's single "max" column hides which group dominates and
+    whether its members were even finished. Each cell reads
+    ``spread over members with copper / spread over finished members
+    (finished/declared)``; ``--`` means fewer than two members are finished,
+    so there is no matching to measure.
+    """
+    rows = {tag: r for tag, r in results.items() if r.get("group_length_spread")}
+    if not rows:
+        return
+    groups: list[str] = []
+    for r in rows.values():
+        groups.extend(g for g in r["group_length_spread"] if g not in groups)
+    print("\nGroup length spread mm: all members with copper / finished members only")
+    print("\n| Board | Tool | " + " | ".join(groups) + " |")
+    print("|" + "---|" * (len(groups) + 2))
+    for tag in sorted(rows):
+        r = rows[tag]
+        spread = r["group_length_spread"]
+        cells = [_spread_cell(spread[g]) if g in spread else "--" for g in groups]
+        print(f"| {r['board']} | {r['tool']} | " + " | ".join(cells) + " |")
 
 
 if __name__ == "__main__":

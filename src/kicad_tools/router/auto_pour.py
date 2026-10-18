@@ -377,10 +377,16 @@ def _remove_zones_for_nets(pcb_path: Path, net_names: set[str]) -> None:
     # Iterate every ``(zone`` opener in the file and decide whether to
     # remove that span.  We walk forward across the text rebuilding it
     # rather than relying on per-line state.
+    #
+    # Issue #6873: only openers outside quoted strings count.  A zone name or
+    # footprint descr such as ``"pour (zone keepout, see note"`` used to be
+    # taken for a zone whose span never closed, and the bail-out below then
+    # left every real zone after it in place.
+    from kicad_tools.sexp.scan import iter_unquoted
+
     out_parts: list[str] = []
     cursor = 0
-    zone_start_pattern = re.compile(r"\(zone\b")
-    for m in zone_start_pattern.finditer(pcb_text):
+    for m in iter_unquoted(pcb_text, r"\(zone\b"):
         start = m.start()
         if start < cursor:
             # This opener lies inside a span we already removed (e.g. a
@@ -412,6 +418,24 @@ def _remove_zones_for_nets(pcb_path: Path, net_names: set[str]) -> None:
 
     out_parts.append(pcb_text[cursor:])
     pcb_path.write_text("".join(out_parts))
+
+
+def board_net_names(pcb_text: str) -> dict[int, str]:
+    """Return ``{net id: net name}`` for every named net on the board.
+
+    Resolves both KiCad net dialects with the routing loader's own mapping,
+    :func:`kicad_tools.router.io._build_net_number_map`: numbered
+    ``(net N "NAME")`` references keep their authored ids, and a KiCad-10
+    name-only board (``(net "NAME")`` everywhere, no header table) gets the
+    same synthetic ids the loader assigns.  Before issue #6989 this stage
+    read only the numbered form, so a name-only board had no nets here and
+    pour auto-skip, auto-pour and the plane-via reservation silently did
+    nothing.  The scan is quote-aware, so a ``(net ...)`` inside a string is
+    not mistaken for a net.
+    """
+    from kicad_tools.router.io import _build_net_number_map
+
+    return {num: name for name, num in _build_net_number_map(pcb_text).items() if num > 0 and name}
 
 
 def auto_skip_pour_nets(
@@ -482,11 +506,7 @@ def auto_skip_pour_nets(
         from kicad_tools.router.net_class import classify_and_apply_rules
 
         pcb_text = Path(pcb_path).read_text()
-        net_names: dict[int, str] = {}
-        for m in re.finditer(r'\(net\s+(\d+)\s+"([^"]+)"\)', pcb_text):
-            net_num, name = int(m.group(1)), m.group(2)
-            if net_num > 0:
-                net_names[net_num] = name
+        net_names = board_net_names(pcb_text)
 
         if net_names:
             class_map = classify_and_apply_rules(net_names)
@@ -646,13 +666,9 @@ def auto_pour_if_missing(
     pcb_text = pcb_path.read_text()
 
     # ------------------------------------------------------------------
-    # 1. Build net inventory from the file header
+    # 1. Build net inventory (numbered and name-only dialects, #6989)
     # ------------------------------------------------------------------
-    net_names: dict[int, str] = {}
-    for m in re.finditer(r'\(net\s+(\d+)\s+"([^"]+)"\)', pcb_text):
-        net_num, name = int(m.group(1)), m.group(2)
-        if net_num > 0:
-            net_names[net_num] = name
+    net_names = board_net_names(pcb_text)
 
     if not net_names:
         return 0, []

@@ -29,10 +29,8 @@ from kicad_tools.cli.modify_schematic import (
     set_value_text,
 )
 from kicad_tools.cli.sch_json import add_format_flag, record, run_with_json_summary
-from kicad_tools.cli.sch_set_footprint import (
-    _collect_schematic_files,
-    _load_mapping,
-)
+from kicad_tools.cli.sch_set_footprint import _load_mapping
+from kicad_tools.cli.sch_wire_common import _collect_schematic_files
 
 
 def run_set_value(

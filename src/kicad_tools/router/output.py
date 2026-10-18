@@ -545,6 +545,22 @@ def _calculate_route_length(route: Route) -> float:
     return length
 
 
+def _grid_report_block(router: Autorouter, selection: str | None) -> dict | None:
+    """``router.grid_report(selection)``, or None when unavailable (Issue #6875).
+
+    Test doubles and pre-#6875 router stand-ins have no real grid; the key is
+    then omitted rather than emitting a non-serializable value.
+    """
+    report_fn = getattr(type(router), "grid_report", None)
+    if report_fn is None:
+        return None
+    try:
+        block = router.grid_report(selection)
+    except Exception:  # pragma: no cover - defensive: never break the JSON
+        return None
+    return block if isinstance(block, dict) else None
+
+
 def get_routing_diagnostics_json(
     router: Autorouter,
     net_map: dict[str, int],
@@ -555,6 +571,7 @@ def get_routing_diagnostics_json(
     min_completion: float = 1.0,
     routing_plan: dict | None = None,
     diagnose_unrouted_budget: float | None = None,
+    grid_selection: str | None = None,
 ) -> dict:
     """Get routing diagnostics as a JSON-serializable dictionary.
 
@@ -587,6 +604,9 @@ def get_routing_diagnostics_json(
             under the ``"unrouted"`` key, with the pass's own timing under
             ``"unrouted_diagnosis"``.  ``None`` / ``0`` (the default) skips
             the pass; both keys are then absent.
+        grid_selection: Issue #6875.  ``"explicit"`` or ``"auto"`` -- how
+            ``kct route`` chose the requested pitch -- reported as
+            ``grid.selection`` (None for library callers).
 
     Returns:
         Dictionary with routing diagnostics in JSON-serializable format
@@ -882,6 +902,11 @@ def get_routing_diagnostics_json(
         "failed_routes": failed_routes,
         "suggestions": suggestions,
     }
+    # Issue #6875: the grid actually routed on (requested vs used pitch,
+    # cols/rows/layers/cells, explicit-or-auto, coarsened and why).
+    grid_block = _grid_report_block(router, grid_selection)
+    if grid_block is not None:
+        result_dict["grid"] = grid_block
     if disposition is not None:
         placement = RoutingPlacementReport(
             disposition, frozenset(reverse_net[nid] for nid in routed_net_ids if nid in reverse_net)
@@ -1040,6 +1065,7 @@ def print_routing_diagnostics_json(
     routing_plan: dict | None = None,
     diagnose_unrouted_budget: float | None = None,
     verdict: str | None = None,
+    grid_selection: str | None = None,
 ) -> None:
     """Print routing diagnostics as JSON to stdout.
 
@@ -1058,6 +1084,8 @@ def print_routing_diagnostics_json(
             :func:`get_routing_diagnostics_json`.
         verdict: The run's single final verdict (``"success"`` / ``"failed"``,
             Issue #6239).  Emitted as ``summary.verdict`` when given.
+        grid_selection: ``"explicit"`` / ``"auto"`` for ``grid.selection``
+            (Issue #6875) -- see :func:`get_routing_diagnostics_json`.
     """
     diagnostics = get_routing_diagnostics_json(
         router,
@@ -1068,6 +1096,7 @@ def print_routing_diagnostics_json(
         single_pad_count=single_pad_count,
         routing_plan=routing_plan,
         diagnose_unrouted_budget=diagnose_unrouted_budget,
+        grid_selection=grid_selection,
     )
     if verdict is not None:
         diagnostics["summary"]["verdict"] = verdict

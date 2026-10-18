@@ -278,3 +278,33 @@ def test_module_public_api():
     }
     missing = expected - set(bu.__all__)
     assert not missing, f"missing exports: {missing}"
+
+
+def test_ga_population_contains_bottom_up_seed():
+    """seed_bottom_up adds the hierarchical placement to the GA population (#6985)."""
+    from kicad_tools.optim.evolutionary import (
+        EvolutionaryConfig,
+        EvolutionaryPlacementOptimizer,
+    )
+
+    components, board = _build_four_cluster_fixture()
+    expected = place_hierarchical(components, board).positions
+
+    def population(seed: bool):
+        opt = EvolutionaryPlacementOptimizer(
+            board, EvolutionaryConfig(seed_bottom_up=seed, population_size=6)
+        )
+        for comp in components:
+            opt.add_component(comp)
+        return opt._initialize_population(6)
+
+    seeded = population(True)
+    assert len(seeded) == 6
+    movable = [c.ref for c in components if not c.fixed]
+    assert any(all(ind.positions[r] == expected[r][:2] for r in movable) for ind in seeded[1:])
+
+    unseeded = population(False)
+    assert len(unseeded) == 6
+    assert not any(
+        all(ind.positions[r] == expected[r][:2] for r in movable) for ind in unseeded[1:]
+    )

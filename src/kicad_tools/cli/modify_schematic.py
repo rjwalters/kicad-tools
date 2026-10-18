@@ -8,19 +8,19 @@ Always creates a backup before modifying.
 
 Usage:
     # Delete a symbol
-    python3 scripts/kicad/modify-schematic.py schematic.kicad_sch --delete U1
+    python -m kicad_tools.cli.modify_schematic schematic.kicad_sch --delete U1
 
     # List what would be deleted (dry run)
-    python3 scripts/kicad/modify-schematic.py schematic.kicad_sch --delete U1 --dry-run
+    python -m kicad_tools.cli.modify_schematic schematic.kicad_sch --delete U1 --dry-run
 
     # Replace a symbol's library reference
-    python3 scripts/kicad/modify-schematic.py schematic.kicad_sch --replace U1 --new-lib "TPA3116D2:TPA3116D2"
+    python -m kicad_tools.cli.modify_schematic schematic.kicad_sch --set-lib-id U1 "TPA3116D2:TPA3116D2"
 
     # Add embedded lib_symbol from file
-    python3 scripts/kicad/modify-schematic.py schematic.kicad_sch --add-lib-symbol lib/symbols/TPA3116D2.kicad_sym
+    python -m kicad_tools.cli.modify_schematic schematic.kicad_sch --add-lib-symbol lib/symbols/TPA3116D2.kicad_sym
 
     # Update symbol value
-    python3 scripts/kicad/modify-schematic.py schematic.kicad_sch --set-value U1 "TPA3116D2"
+    python -m kicad_tools.cli.modify_schematic schematic.kicad_sch --set-value U1 "TPA3116D2"
 """
 
 import argparse
@@ -33,8 +33,6 @@ from datetime import datetime
 from pathlib import Path
 
 from kicad_tools.sexp import SExp, parse_string
-
-KICAD_SCRIPTS = Path(__file__).resolve().parent
 
 
 def generate_uuid() -> str:
@@ -389,37 +387,6 @@ def regen_uuids_text(text: str, reference: str) -> tuple[str, bool, str]:
     return modified, True, f"Regenerated {uuid_count} UUIDs for {reference}"
 
 
-def find_symbol_indices(sexp: SExp, reference: str) -> list[int]:
-    """Find indices of symbol nodes matching reference."""
-    indices = []
-    for i, val in enumerate(sexp.values):
-        if isinstance(val, SExp) and val.tag == "symbol":
-            # Check if this is a symbol instance (has lib_id), not lib_symbols
-            if val.find("lib_id"):
-                # Find Reference property
-                for prop in val.find_all("property"):
-                    if prop.get_string(0) == "Reference":
-                        ref = prop.get_string(1) or ""
-                        if ref == reference:
-                            indices.append(i)
-                        break
-    return indices
-
-
-def find_lib_symbol_index(sexp: SExp, lib_id: str) -> int | None:
-    """Find index of a lib_symbol in lib_symbols section."""
-    lib_symbols = sexp.find("lib_symbols")
-    if not lib_symbols:
-        return None
-
-    for i, val in enumerate(lib_symbols.values):
-        if isinstance(val, SExp) and val.tag == "symbol":
-            name = val.get_string(0) or ""
-            if name == lib_id:
-                return i
-    return None
-
-
 def get_symbol_info(sexp: SExp, index: int) -> dict:
     """Extract information about a symbol at given index."""
     sym = sexp.values[index]
@@ -459,176 +426,6 @@ def get_symbol_info(sexp: SExp, index: int) -> dict:
     info["pin_count"] = len(sym.find_all("pin"))
 
     return info
-
-
-def delete_symbol(sexp: SExp, reference: str, dry_run: bool = False) -> tuple[bool, str]:
-    """
-    Delete a symbol from the schematic.
-
-    Returns (success, message).
-    """
-    indices = find_symbol_indices(sexp, reference)
-
-    if not indices:
-        return False, f"Symbol '{reference}' not found"
-
-    if len(indices) > 1:
-        return False, f"Multiple symbols found with reference '{reference}' ({len(indices)})"
-
-    info = get_symbol_info(sexp, indices[0])
-
-    if dry_run:
-        return True, f"Would delete: {reference} ({info['lib_id']}) at {info['position']}"
-
-    # Remove the symbol
-    del sexp.values[indices[0]]
-
-    return True, f"Deleted: {reference} ({info['lib_id']}) at {info['position']}"
-
-
-def set_symbol_value(
-    sexp: SExp, reference: str, new_value: str, dry_run: bool = False
-) -> tuple[bool, str]:
-    """
-    Set a symbol's Value property.
-
-    Returns (success, message).
-    """
-    indices = find_symbol_indices(sexp, reference)
-
-    if not indices:
-        return False, f"Symbol '{reference}' not found"
-
-    sym = sexp.values[indices[0]]
-    old_value = ""
-
-    for prop in sym.find_all("property"):
-        if prop.get_string(0) == "Value":
-            old_value = prop.get_string(1) or ""
-            if dry_run:
-                return True, f"Would change {reference} value: '{old_value}' -> '{new_value}'"
-            # Update the value
-            prop.set_value(1, new_value)
-            return True, f"Changed {reference} value: '{old_value}' -> '{new_value}'"
-
-    return False, f"Value property not found on {reference}"
-
-
-def set_symbol_lib_id(
-    sexp: SExp, reference: str, new_lib_id: str, dry_run: bool = False
-) -> tuple[bool, str]:
-    """
-    Change a symbol's library reference.
-
-    Returns (success, message).
-    """
-    indices = find_symbol_indices(sexp, reference)
-
-    if not indices:
-        return False, f"Symbol '{reference}' not found"
-
-    sym = sexp.values[indices[0]]
-
-    if lid := sym.find("lib_id"):
-        old_lib_id = lid.get_string(0) or ""
-        if dry_run:
-            return True, f"Would change {reference} lib_id: '{old_lib_id}' -> '{new_lib_id}'"
-        lid.set_value(0, new_lib_id)
-        return True, f"Changed {reference} lib_id: '{old_lib_id}' -> '{new_lib_id}'"
-
-    return False, f"lib_id not found on {reference}"
-
-
-def add_lib_symbol_from_file(sexp: SExp, lib_file: Path, dry_run: bool = False) -> tuple[bool, str]:
-    """
-    Add a library symbol from a .kicad_sym file to the schematic's lib_symbols section.
-
-    Returns (success, message).
-    """
-    if not lib_file.exists():
-        return False, f"Library file not found: {lib_file}"
-
-    # Parse the symbol library
-    lib_text = lib_file.read_text(encoding="utf-8")
-    lib_sexp = parse_string(lib_text)
-
-    if lib_sexp.tag != "kicad_symbol_lib":
-        return False, f"Not a symbol library: {lib_file}"
-
-    # Get symbols from library
-    lib_symbols_to_add = lib_sexp.find_all("symbol")
-    if not lib_symbols_to_add:
-        return False, f"No symbols found in library: {lib_file}"
-
-    # Find or create lib_symbols section in schematic
-    sch_lib_symbols = sexp.find("lib_symbols")
-    if not sch_lib_symbols:
-        return False, "Schematic has no lib_symbols section"
-
-    added = []
-    skipped = []
-
-    for sym in lib_symbols_to_add:
-        sym_name = sym.get_string(0) or ""
-        if not sym_name:
-            continue
-
-        # Check if already exists
-        existing = find_lib_symbol_index(sexp, sym_name)
-        if existing is not None:
-            skipped.append(sym_name)
-            continue
-
-        if dry_run:
-            added.append(sym_name)
-            continue
-
-        # Add to lib_symbols
-        sch_lib_symbols.values.append(sym)
-        added.append(sym_name)
-
-    msg_parts = []
-    if added:
-        action = "Would add" if dry_run else "Added"
-        msg_parts.append(f"{action}: {', '.join(added)}")
-    if skipped:
-        msg_parts.append(f"Skipped (already exist): {', '.join(skipped)}")
-
-    if not added and not skipped:
-        return False, "No symbols to add"
-
-    return True, "; ".join(msg_parts)
-
-
-def regenerate_symbol_uuids(sexp: SExp, reference: str, dry_run: bool = False) -> tuple[bool, str]:
-    """
-    Regenerate UUIDs for a symbol and its pins.
-
-    Returns (success, message).
-    """
-    indices = find_symbol_indices(sexp, reference)
-
-    if not indices:
-        return False, f"Symbol '{reference}' not found"
-
-    sym = sexp.values[indices[0]]
-
-    if dry_run:
-        pin_count = len(sym.find_all("pin"))
-        return True, f"Would regenerate UUIDs for {reference} (1 symbol + {pin_count} pins)"
-
-    # Regenerate symbol UUID
-    if u := sym.find("uuid"):
-        u.set_value(0, generate_uuid())
-
-    # Regenerate pin UUIDs
-    pin_count = 0
-    for pin in sym.find_all("pin"):
-        if u := pin.find("uuid"):
-            u.set_value(0, generate_uuid())
-            pin_count += 1
-
-    return True, f"Regenerated UUIDs for {reference}: 1 symbol + {pin_count} pins"
 
 
 def list_symbols(sexp: SExp) -> list[dict]:

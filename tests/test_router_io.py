@@ -20,6 +20,7 @@ from kicad_tools.router.io import (
     GridResolutionError,
     PCBDesignRules,
     _extract_edge_segments,
+    _extract_pad_blocks,
     adjust_grid_for_compliance,
     format_clearance_violations,
     generate_netclass_setup,
@@ -457,6 +458,58 @@ class TestLoadPcbForRouting:
         assert ("U1", "2") in pad_keys  # Unquoted numeric
         assert ("U2", "A1") in pad_keys  # Quoted alphanumeric
         assert ("U2", "B2") in pad_keys  # Quoted alphanumeric
+
+    def test_load_pcb_ignores_pad_text_inside_descr_string(self, tmp_path):
+        """Issue #6740: ``(pad `` inside a quoted ``descr`` is not a pad.
+
+        The pad-block scan used a plain ``str.find("(pad ")``, so this descr
+        produced a bogus pad ``4,`` with shape ``HS`` and ``kct route`` failed
+        with "Unsupported routing geometry 'HS' for pad J1.4,".
+        """
+        pcb_content = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+  )
+  (gr_rect (start 100 100) (end 160 150) (layer "Edge.Cuts"))
+  (net 0 "")
+  (net 1 "VCC")
+  (net 2 "GND")
+  (footprint "Test:Heatsink_Part"
+    (layer "F.Cu")
+    (at 130 120)
+    (descr "Test part. Heatsink pins (pad 4, net HS) are 25.4 mm apart.")
+    (fp_text reference "J1" (at 0 -3) (layer "F.SilkS"))
+    (pad "1" thru_hole circle (at 0 0) (size 1.7 1.7) (drill 1.0) (layers "*.Cu") (net 1 "VCC"))
+    (pad "2" thru_hole circle (at 2.54 0) (size 1.7 1.7) (drill 1.0) (layers "*.Cu") (net 2 "GND"))
+  )
+)
+"""
+        pcb_file = tmp_path / "descr_pad_text.kicad_pcb"
+        pcb_file.write_text(pcb_content)
+
+        router, _net_map = load_pcb_for_routing(str(pcb_file))
+
+        assert set(router.pads.keys()) == {("J1", "1"), ("J1", "2")}
+        assert ("J1", "4,") not in router.pads
+
+    def test_extract_pad_blocks_skips_quoted_strings(self):
+        """Issue #6740: only real ``(pad ...)`` nodes are extracted."""
+        section = (
+            '(footprint "X" (at 0 0)\n'
+            '  (descr "Heatsink pins (pad 4, net HS) and an \\"escaped (pad 9 x)\\" quote")\n'
+            '  (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu"))\n'
+            '  (property "Note" "(pad 5 smd HS)")\n'
+            '  (pad "2" smd rect (at 1 0) (size 1 1) (layers "F.Cu"))\n'
+            ")"
+        )
+
+        blocks = _extract_pad_blocks(section)
+
+        assert [b.split()[1] for b in blocks] == ['"1"', '"2"']
+        assert all("HS" not in b for b in blocks)
 
     def test_load_pcb_multiline_pad_format(self, tmp_path):
         """Test parsing pads in KiCad 7+ multi-line format.

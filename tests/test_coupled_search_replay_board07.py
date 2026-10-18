@@ -148,12 +148,13 @@ def _with_partner_via_clearance(calls: list[dict]) -> list[dict]:
     The capture predates the setter, so the recorded call list never installs
     it and a plain replay runs with the guard off.  Production calls it before
     every ``route`` with the radii :meth:`CoupledPathfinder.
-    _partner_via_radii_cells` derives; this rebuilds them from the captured
-    inputs alone -- the ``DesignRules`` struct the pathfinder was built with
-    and each rail's net-class width from ``set_halo_net_dimensions`` -- so the
-    fixture itself stays as recorded.
+    _partner_via_radii_cells` derives; this feeds the same production formula
+    (:func:`partner_via_radii_cells`, #6847) the captured inputs alone -- the
+    ``DesignRules`` struct the pathfinder was built with and each rail's
+    net-class width from ``set_halo_net_dimensions`` -- so the fixture itself
+    stays as recorded and follows any future change to the formula.
     """
-    from kicad_tools.router.clearance_resolver import trace_via_clearance_mm
+    from kicad_tools.router.diffpair_routing import partner_via_radii_cells
 
     ctor = next(c for c in calls if c["op"] == "new" and c["type"] == "CoupledPathfinder")
     rules = ctor["args"][1].fields
@@ -162,26 +163,25 @@ def _with_partner_via_clearance(calls: list[dict]) -> list[dict]:
         for c in calls
         if c["op"] == "call" and c["method"] == "set_halo_net_dimensions"
     }
-    res = rules["grid_resolution"]
-    floor = trace_via_clearance_mm(rules["trace_clearance"], rules["via_clearance"])
-    via_r = rules["via_diameter"] / 2
     out: list[dict] = []
     for call in calls:
         if _is_route(call):
             p_net = call["args"][ROUTE_ARGS.index("p_net")]
             n_net = call["args"][ROUTE_ARGS.index("n_net")]
-            p_w = widths.get(p_net, rules["trace_width"])
-            n_w = widths.get(n_net, rules["trace_width"])
+            radii = partner_via_radii_cells(
+                trace_clearance=rules["trace_clearance"],
+                via_clearance=rules["via_clearance"],
+                via_diameter=rules["via_diameter"],
+                resolution=rules["grid_resolution"],
+                p_width=widths.get(p_net, rules["trace_width"]),
+                n_width=widths.get(n_net, rules["trace_width"]),
+            )
             out.append(
                 {
                     "op": "call",
                     "obj": call["obj"],
                     "method": "set_partner_via_clearance",
-                    "args": [
-                        (via_r + p_w / 2 + floor) / res,
-                        (via_r + n_w / 2 + floor) / res,
-                        (rules["via_diameter"] + floor) / res,
-                    ],
+                    "args": list(radii),
                     "kwargs": {},
                 }
             )

@@ -20,6 +20,7 @@ import io
 import json
 import sys
 
+from ..exceptions import FileNotFoundError as KiCadFileNotFoundError
 from ..schema.bom import BOM, BOMItem, extract_bom
 
 
@@ -114,11 +115,11 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         bom = extract_bom(args.schematic)
-    except FileNotFoundError:
+    except (FileNotFoundError, KiCadFileNotFoundError):
         print(f"Error: File not found: {args.schematic}", file=sys.stderr)
         return 1
     except Exception as e:
-        print(f"Error loading schematic: {e}", file=sys.stderr)
+        print(f"Error loading schematic: {args.schematic}: {e}", file=sys.stderr)
         return 1
 
     # Run validation if requested

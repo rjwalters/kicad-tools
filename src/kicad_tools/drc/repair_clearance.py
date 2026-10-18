@@ -327,7 +327,7 @@ class RepairResult:
 class ClearanceRepairer:
     """Repairs clearance violations by nudging traces and vias.
 
-    Unlike DRCFixer which deletes traces, this tool computes minimal
+    Unlike a destructive fixer that deletes traces, this tool computes minimal
     displacements to achieve the required clearance without removing
     any routing.
     """

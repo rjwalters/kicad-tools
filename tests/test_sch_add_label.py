@@ -11,15 +11,17 @@ from pathlib import Path
 import pytest
 
 from kicad_tools.cli.sch_add_label import (
-    _point_on_wire_midpoint,
-    _snap,
-    parse_connect_target,
+    main as add_label_main,
 )
 from kicad_tools.cli.sch_add_label import (
-    main as add_label_main,
+    parse_connect_target,
+)
+from kicad_tools.cli.sch_wire_common import (
+    _point_on_wire_midpoint,
 )
 from kicad_tools.schema import Schematic
 from kicad_tools.schema.label import GlobalLabel, HierarchicalLabel, Label
+from kicad_tools.schematic.grid import snap_to_grid
 
 # ---------------------------------------------------------------------------
 # Minimal schematic content for testing
@@ -79,8 +81,8 @@ class TestParseConnectTarget:
 
 class TestUtilityFunctions:
     def test_snap(self):
-        assert _snap(100.0) == pytest.approx(100.33, abs=0.01)
-        assert _snap(2.54) == pytest.approx(2.54, abs=0.01)
+        assert snap_to_grid(100.0) == pytest.approx(100.33, abs=0.01)
+        assert snap_to_grid(2.54) == pytest.approx(2.54, abs=0.01)
 
     def test_point_on_wire_midpoint(self):
         assert _point_on_wire_midpoint((125, 50), (100, 50), (150, 50)) is True

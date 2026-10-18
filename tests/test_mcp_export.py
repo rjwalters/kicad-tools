@@ -368,3 +368,53 @@ class TestMCPServer:
         # Should raise for unknown tool
         with pytest.raises(ValueError, match="Unknown tool"):
             server.call_tool("nonexistent", {})
+
+
+class TestTruthContract:
+    """Results must come from observed output, never a vacuous pass (issue #6913)."""
+
+    def test_gerbers_with_no_copper_output_is_not_success(self, tmp_path):
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text("(kicad_pcb (version 20231014))")
+        out_dir = tmp_path / "out"
+        with patch("kicad_tools.mcp.tools.export.GerberExporter") as exporter_cls:
+            exporter_cls.return_value.export.return_value = out_dir
+            result = export_gerbers(str(pcb), str(out_dir))
+        assert result.success is False
+        assert "no copper" in result.error.lower()
+
+    def test_gerbers_do_not_report_stale_files(self, tmp_path):
+        import os
+
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text("(kicad_pcb (version 20231014))")
+        out_dir = tmp_path / "out"
+        out_dir.mkdir()
+        stale = out_dir / "old-B_Cu.gbr"
+        stale.write_text("stale")
+        os.utime(stale, (1, 1))
+
+        def fake_export(config, directory):
+            (directory / "new-F_Cu.gbr").write_text("fresh")
+            return directory
+
+        with patch("kicad_tools.mcp.tools.export.GerberExporter") as exporter_cls:
+            exporter_cls.return_value.export.side_effect = fake_export
+            result = export_gerbers(str(pcb), str(out_dir), zip_output=False)
+        names = [f.filename for f in result.files]
+        assert result.success is True
+        assert names == ["new-F_Cu.gbr"]
+
+    def test_assembly_bom_empty_is_not_ready(self, tmp_path):
+        from kicad_tools.mcp.tools.export import validate_assembly_bom
+
+        sch = tmp_path / "empty.kicad_sch"
+        sch.write_text(
+            "(kicad_sch (version 20230121) (generator eeschema)\n"
+            '  (uuid "12345678-1234-1234-1234-123456789012")\n)'
+        )
+        result = validate_assembly_bom(str(sch))
+        assert result["success"] is True
+        assert result["summary"]["total_items"] == 0
+        assert result["summary"]["assembly_ready"] is False
+        assert result["warnings"]

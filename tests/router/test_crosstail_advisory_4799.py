@@ -36,6 +36,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from kicad_tools.cli import main as cli_main
 from kicad_tools.router.crosstail_advisory import (
     ADVISORY_ENV_VAR,
     GATE_EXIT_CODE,
@@ -71,6 +72,7 @@ from kicad_tools.router.crosstail_census import (
     CrossingTailCensusRecord,
     write_report,
 )
+from tests.route_cli import route_args
 
 # --------------------------------------------------------------------------
 # helpers
@@ -600,16 +602,13 @@ def test_route_help_documents_the_flag(capsys):
     assert "Advisory only" in out
 
 
-def test_outer_kct_parser_accepts_and_forwards_the_flag():
-    """`kct route` parses with the OUTER parser and shells the inner one.
+def test_kct_route_accepts_and_forwards_the_flag():
+    """`kct route --census-advisory` reaches route_cmd.main (issue #7017).
 
-    Adding the flag to route_cmd.py alone leaves `kct route --census-advisory`
-    dying with "unrecognized arguments" -- which is exactly what happened
-    before this test existed.
+    Before #7017 `kct route` had its own outer parser, and a flag added to
+    route_cmd.py alone died there with "unrecognized arguments".
     """
     from kicad_tools.cli import route_cmd
-    from kicad_tools.cli.commands import routing
-    from kicad_tools.cli.parser import create_parser
 
     captured: list[list[str]] = []
 
@@ -618,18 +617,16 @@ def test_outer_kct_parser_accepts_and_forwards_the_flag():
         return 0
 
     original = route_cmd.main
-    route_cmd.main = _fake_route_main  # imported inside run_route_command
+    route_cmd.main = _fake_route_main  # resolved when kct route dispatches
     try:
-        args = create_parser().parse_args(
-            ["route", "board.kicad_pcb", "--census-advisory", "census.json"]
-        )
+        args = route_args(["board.kicad_pcb", "--census-advisory", "census.json"])
         assert args.census_advisory == "census.json"
-        assert routing.run_route_command(args) == 0
+        assert cli_main(["route", "board.kicad_pcb", "--census-advisory", "census.json"]) == 0
 
         # Unset stays unset: the flag-off path must be byte-identical.
-        plain = create_parser().parse_args(["route", "board.kicad_pcb"])
+        plain = route_args(["board.kicad_pcb"])
         assert plain.census_advisory is None
-        assert routing.run_route_command(plain) == 0
+        assert cli_main(["route", "board.kicad_pcb"]) == 0
     finally:
         route_cmd.main = original
 
@@ -983,10 +980,8 @@ def test_route_help_documents_the_gate_and_its_exit_code(capsys):
     assert "[crosstail-gate] --census-advisory-gate" in out
 
 
-def test_outer_kct_parser_accepts_and_forwards_the_gate_flags():
+def test_kct_route_accepts_and_forwards_the_gate_flags():
     from kicad_tools.cli import route_cmd
-    from kicad_tools.cli.commands import routing
-    from kicad_tools.cli.parser import create_parser
 
     captured: list[list[str]] = []
 
@@ -997,9 +992,8 @@ def test_outer_kct_parser_accepts_and_forwards_the_gate_flags():
     original = route_cmd.main
     route_cmd.main = _fake_route_main
     try:
-        args = create_parser().parse_args(
+        args = route_args(
             [
-                "route",
                 "board.kicad_pcb",
                 "--census-advisory",
                 "census.json",
@@ -1010,27 +1004,36 @@ def test_outer_kct_parser_accepts_and_forwards_the_gate_flags():
         )
         assert args.census_advisory_gate is True
         assert args.census_advisory_gate_pct == 75.0
-        assert routing.run_route_command(args) == 0
+        assert (
+            cli_main(
+                [
+                    "route",
+                    "board.kicad_pcb",
+                    "--census-advisory",
+                    "census.json",
+                    "--census-advisory-gate",
+                    "--census-advisory-gate-pct",
+                    "75",
+                ]
+            )
+            == 0
+        )
 
-        plain = create_parser().parse_args(["route", "board.kicad_pcb"])
+        plain = route_args(["board.kicad_pcb"])
         assert plain.census_advisory_gate is False
         assert plain.census_advisory_gate_pct is None
-        assert routing.run_route_command(plain) == 0
+        assert cli_main(["route", "board.kicad_pcb"]) == 0
     finally:
         route_cmd.main = original
 
     with_flags, without_flags = captured
     assert "--census-advisory-gate" in with_flags
-    assert with_flags[with_flags.index("--census-advisory-gate-pct") + 1] == "75.0"
+    assert with_flags[with_flags.index("--census-advisory-gate-pct") + 1] == "75"
     # Flag-off path stays byte-identical to the advisory-only behaviour.
     assert "--census-advisory-gate" not in without_flags
     assert "--census-advisory-gate-pct" not in without_flags
 
 
 def test_outer_parser_rejects_an_out_of_range_threshold():
-    from kicad_tools.cli.parser import create_parser
-
     with pytest.raises(SystemExit):
-        create_parser().parse_args(
-            ["route", "board.kicad_pcb", "--census-advisory-gate-pct", "150"]
-        )
+        route_args(["board.kicad_pcb", "--census-advisory-gate-pct", "150"])

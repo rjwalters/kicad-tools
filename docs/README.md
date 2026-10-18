@@ -30,6 +30,17 @@ Step-by-step guides for common tasks:
 | [LCSC/EasyEDA 3D Models](guides/lcsc-3d-models.md) | Fetch-on-demand 3D models for LCSC parts |
 | [Routing Benchmark Suite](guides/benchmarking.md) | Measure router quality and detect regressions |
 | [MCP Server](mcp/README.md) | Enable AI agents to interact via Model Context Protocol |
+| [Stackup Presets](guides/stackup-presets.md) | Named JLCPCB stackups and legacy migration |
+| [Physical Copper Gap](guides/physical-copper-gap.md) | Physical copper gap preflight in `kct check` |
+| [Mask-to-Copper](guides/mask-to-copper.md) | Checking mask-to-copper clearance and exposure |
+| [Mask Geometry](guides/mask-geometry.md) | Inspecting standard soldermask geometry |
+| [Netclass Diagnostics](guides/netclass-diagnostics.md) | Read-only netclass diagnostics |
+| [Footprint Arc Coordinates](guides/footprint-arc-schema.md) | How footprint arc midpoints are preserved |
+| [Analog Threshold Budgets](guides/analog-threshold-budgets.md) | Evaluate reviewed analog threshold sidecars |
+| [Drive Budget](guides/drive-budget.md) | Weak-source and gate-drive budget review |
+| [Resistor Rating](guides/resistor-rating.md) | Resistor operating budgets from a reviewed sidecar |
+| [Factory Selection](guides/factory-selection.md) | Compare factory-selected component evidence |
+| [Submission Preparation](guides/submission-preparation.md) | Offline assembly submission preparation |
 
 ### Reference
 Detailed reference documentation:
@@ -43,14 +54,24 @@ Detailed reference documentation:
 | [Python API](reference/api.md) | Module-by-module API documentation |
 | [Manufacturer Rules](reference/manufacturers.md) | JLCPCB, OSHPark, PCBWay design rules |
 | [Circuit Blocks](reference/circuit-blocks.md) | Reusable schematic building blocks |
+| [RoutingPlan Sidecar](reference/routing-plan.md) | `<output_stem>.routing_plan.json` written by every default `kct route` |
+| [Commit-Journal Sidecar](reference/commit-journal.md) | `<output_stem>.access_witness.json` pad-access witness |
+| [KiCad Lock Policy](reference/kicad-lock-policy.md) | KiCad lock-marker advisories on save |
+| [`board.json` Schema](board-json-schema.md) | Normalized per-board data contract (`kct board-metrics`) |
+| [External Benchmark Report Schema](benchmark-external-report-schema.md) | Per-board report contract for `kct bench external` |
+| [Agent Surfaces](agent-surfaces.md) | What each `kct` skill needs from its harness |
+| [Ecosystem](ecosystem.md) | Where kicad-tools sits among related projects (`kct ecosystem`) |
 
 ### For Contributors
 - [Development Guide](contributing/development.md) - Setup, testing, code style
 - [Stacked PRs](contributing/stacked-prs.md) - What CI does and does not validate for PRs not based on `main`
 - [Agent Guidance](contributing/agent-guidance.md) - Single source of the contributor guidance rendered into `CLAUDE.md` and `AGENTS.md`
+- [Squad Coordination](contributing/squad.md) - Shared chatroom and goal board for agents working in this repo
+- [KiCad Image Pin](contributing/kicad-image-pin.md) - Bumping the pinned KiCad container image used by CI
 
 ### Research Notes & Audits
-Point-in-time working documents — dated entries describe the tree as of their date:
+Point-in-time working documents — dated entries describe the tree as of their date.
+Indexes: [Research notes](research/README.md) (ecosystem evaluations, router experiments, calibration notes, audits), [Diagnostics](diagnostics/README.md) (retained investigation evidence), [Stripline 5016 investigation](investigations/stripline-5016/README.md).
 
 | Document | Description |
 |----------|-------------|
@@ -70,6 +91,14 @@ Point-in-time working documents — dated entries describe the tree as of their 
 | [Placement GA Routability A/B](benchmarks/placement_ga_routability_ab.md) | Inner-loop routing quality vs spacing proxy in the placement GA (#2720) |
 | [Board 05 U10-17 Investigation (2026-06)](investigations/2026-06-board05-u10-17.md) | Negative-clearance pair root-cause investigation (#3236) |
 | [Placement Optimizer Agent Prompt](PLACEMENT-OPTIMIZER-AGENT-PROMPT.md) | Continuation prompt for the physics-based placement optimizer |
+| [Konnect Item 1 Audit: MCP Toolsets (2026-09)](konnect-item1-toolset-economy-audit.md) | On-demand MCP toolsets for context economy (#4896, item 1 of the #4880 Konnect audit) |
+| [Konnect Item 8 Audit: Design-Rule Store (2026-09)](konnect-item8-design-rules-audit.md) | Natural-language design-rule store (#4902, item 8 of the #4880 Konnect audit) |
+| [Demo Manufacturing Readiness (2026-09-09)](demo-readiness-2026-09-09.md) | Per-board manufacturing-readiness audit of the demo boards, with hash-bound `output/readiness.json` evidence |
+| [HV Keepout Clearance Proof](hv-keepout-clearance-proof.md) | Geometry contract for `zones hv-keepout --clearance` minimum-clearance preservation (#5399) |
+| [JLCPCB Upload Protocol](jlc-upload-protocol.md) | Gerber upload/preview transport contract: explicit credentials, persisted ledger, no automatic retry on uncertain uploads |
+| [Parts Lookup Coverage](parts-lookup-coverage.md) | How `LCSCClient.lookup()` distinguishes a live no-match from a supplier outage (`LCSCUnavailableError`, `lookup_result()`) |
+| [Placement Scoring](placement-scoring.md) | The four placement-score surfaces, the three metrics behind them, and which to trust for what (#3940) |
+| [Placement-Excluded Fixed Copper](routing-fixed-copper.md) | How routing retains copper of placement-excluded nets as fixed obstacles (`placement_disposition`, `FixedFillObstacles`) |
 
 ---
 
@@ -84,7 +113,8 @@ kicad_tools/
 ├── pcb/           # PCB operations
 ├── router/        # A* autorouter with diff pairs
 ├── optim/         # Placement optimization
-├── drc/           # Pure Python design rule checking
+├── drc/           # DRC report parsing (kicad-cli output), fix suggestions
+├── validate/      # Pure Python DRC checker, netlist sync (no kicad-cli)
 ├── erc/           # Electrical rule checking
 ├── manufacturers/ # Manufacturer design rules
 ├── parts/         # LCSC parts database

@@ -150,7 +150,7 @@ class TestSinglePassFlow:
         source, output = board
         seen: dict[str, object] = {}
 
-        def interrupted_optimize(router, opt):
+        def interrupted_optimize(router, opt, skip_nets=None):
             _swallowed(_ctrl_c)
             # Still here: the handler's ``SystemExit`` was discarded.
             seen["interrupted"] = route_cmd._interrupt_state["interrupted"]
@@ -236,7 +236,7 @@ class TestDeadlinePath:
         monkeypatch.setattr(route_cmd, "_save_partial_results", saves)
         reached: list[bool] = []
 
-        def interrupted_optimize(router, opt):
+        def interrupted_optimize(router, opt, skip_nets=None):
             _swallowed(_deadline)
             reached.append(route_deadline.deadline_fired())
 

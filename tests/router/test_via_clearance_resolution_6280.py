@@ -29,6 +29,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from kicad_tools.cli import main as cli_main
 from kicad_tools.router.clearance_resolver import (
     DEFAULT_VIA_CLEARANCE_MM,
     DeclaredClearanceRules,
@@ -38,6 +39,7 @@ from kicad_tools.router.clearance_resolver import (
     resolve_via_clearance,
     trace_via_clearance_mm,
 )
+from tests.route_cli import route_args
 
 JLCPCB_FLOOR_MM = 0.127
 
@@ -393,29 +395,25 @@ def test_explicit_via_clearance_flag_is_authoritative(tmp_path, capsys) -> None:
 
 
 def test_via_clearance_flag_parses_on_both_parsers() -> None:
-    from kicad_tools.cli.parser import create_parser
     from kicad_tools.cli.route_cmd import _route_parser
 
     inner = _route_parser().parse_args(["board.kicad_pcb", "--via-clearance", "0.18"])
     assert inner.via_clearance == pytest.approx(0.18)
     assert _route_parser().parse_args(["board.kicad_pcb"]).via_clearance is None
 
-    outer = create_parser().parse_args(["route", "board.kicad_pcb", "--via-clearance", "0.18"])
+    outer = route_args(["board.kicad_pcb", "--via-clearance", "0.18"])
     assert outer.via_clearance == pytest.approx(0.18)
 
 
 def test_via_clearance_flag_is_forwarded_only_when_given(monkeypatch) -> None:
-    """The shim forwards an explicit value and keeps flag-off argv unchanged."""
+    """``kct route`` passes an explicit value through and invents none (#7017)."""
     from kicad_tools.cli import route_cmd
-    from kicad_tools.cli.commands.routing import run_route_command
-    from kicad_tools.cli.parser import create_parser
 
     seen: list[list[str]] = []
     monkeypatch.setattr(route_cmd, "main", lambda argv=None: seen.append(list(argv)) or 0)
 
     for extra in ([], ["--via-clearance", "0.18"]):
-        monkeypatch.setattr("sys.argv", ["kct", "route", "board.kicad_pcb", *extra])
-        run_route_command(create_parser().parse_args(["route", "board.kicad_pcb", *extra]))
+        cli_main(["route", "board.kicad_pcb", *extra])
 
     assert "--via-clearance" not in seen[0]
     flag = seen[1].index("--via-clearance")

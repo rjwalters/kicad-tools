@@ -56,6 +56,10 @@ from kicad_tools.sexp import SExp, parse_string
 logger = logging.getLogger(__name__)
 
 
+class StaleBoardError(ValueError):
+    """The board changed since the DSN behind this session was exported (issue #6915)."""
+
+
 def um_to_mm(um: float) -> float:
     """Convert micrometers to millimeters."""
     return um / 1000.0
@@ -321,6 +325,7 @@ class SESToKiCadImporter:
         default_trace_width: float = 0.25,
         default_via_size: float = 0.8,
         default_via_drill: float = 0.4,
+        allow_stale: bool = False,
     ) -> str:
         """Merge SES routes into a KiCad PCB file.
 
@@ -338,14 +343,21 @@ class SESToKiCadImporter:
                 padstack carries no circle diameter.
             default_via_drill: Via drill diameter in mm (Specctra does not
                 carry drill sizes).
+            allow_stale: Merge even when the board differs from the revision
+                recorded at DSN export time (issue #6915).
 
         Returns:
             The merged PCB content as a string.
+
+        Raises:
+            StaleBoardError: The board hash differs from the DSN-export
+                sidecar and ``allow_stale`` is False. Nothing is written.
         """
         if not self._parsed:
             self.parse()
 
         pcb_path = Path(pcb_path)
+        self.revision_status = self._check_revision(pcb_path, allow_stale)
         pcb_content = pcb_path.read_text(encoding="utf-8")
 
         route_sexp = self._generate_kicad_routes(
@@ -367,6 +379,37 @@ class SESToKiCadImporter:
         logger.info("Wrote merged PCB to %s", dest)
 
         return merged
+
+    def _check_revision(self, pcb_path: Path, allow_stale: bool) -> str:
+        """Compare the board against the DSN-export sidecar (issue #6915).
+
+        Returns ``verified``, ``unverified`` or ``stale-overridden``.
+        """
+        from .dsn import board_revision_hash, read_revision_sidecar
+
+        recorded = read_revision_sidecar(pcb_path)
+        if recorded is None:
+            logger.warning(
+                "No DSN revision sidecar for %s; cannot verify the session matches this board",
+                pcb_path,
+            )
+            return "unverified"
+        current = board_revision_hash(pcb_path)
+        if current == recorded:
+            return "verified"
+        if allow_stale:
+            logger.warning(
+                "Board %s changed since DSN export (%s != %s); merging stale session anyway",
+                pcb_path,
+                current[:8],
+                recorded[:8],
+            )
+            return "stale-overridden"
+        raise StaleBoardError(
+            f"Board {pcb_path} changed since the DSN was exported "
+            f"(board {current[:8]}, DSN export {recorded[:8]}). Re-export the DSN and "
+            "re-route, or pass --allow-stale to merge anyway."
+        )
 
     def _generate_kicad_routes(
         self,

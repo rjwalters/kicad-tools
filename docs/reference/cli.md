@@ -7,13 +7,16 @@ Complete reference for the `kct` (kicad-tools) command-line interface.
 ## Global Options
 
 ```bash
-kct [--help] [--version] <command> [options]
+kct [--help] [--version] [--verbose] [-q] [--units {mm,mils}] <command> [options]
 ```
 
 | Option | Description |
 |--------|-------------|
 | `--help`, `-h` | Show help message |
-| `--version`, `-V` | Show version number |
+| `--version` | Show version number |
+| `--verbose` | Show full stack traces on errors |
+| `--quiet`, `-q` | Suppress progress output (for scripting) |
+| `--units {mm,mils}` | Unit system for output; overrides config and env var |
 
 ---
 
@@ -67,6 +70,7 @@ kct [--help] [--version] <command> [options]
 | | `datasheet` | Datasheet search and PDF parsing |
 | **PCB Operations** | `route` | Autoroute a PCB |
 | | `route-auto` | Route a net with smart strategy selection |
+| | `retune-lengths` | Length-tune selected match groups / diff pairs on an already-routed PCB |
 | | `zones` | Add copper pour zones |
 | | `placement` | Detect and fix placement conflicts |
 | | `optimize-placement` | CMA-ES placement optimizer (anchor-aware) |
@@ -80,6 +84,7 @@ kct [--help] [--version] <command> [options]
 | **Advanced Analysis** | `analyze` | PCB analysis (congestion, thermal, signal integrity) |
 | | `board-metrics` | Emit a normalized `board.json` per board |
 | | `benchmark` | Run routing benchmarks and regression tests |
+| | `bench` | Run external DeepPCB-comparable board benchmarks (`bench external`; report schema in [benchmark-external-report-schema.md](../benchmark-external-report-schema.md)) |
 | | `calibrate` | Calibrate routing performance settings |
 | **Reporting** | `render` | Render per-board 2D SVGs + 3D PNGs |
 | | `screenshot` | Capture a PNG of a KiCad board or schematic |
@@ -156,21 +161,21 @@ kct sch <subcommand> <schematic> [options]
 | Subcommand | Description |
 |------------|-------------|
 | `summary` | Show schematic summary |
-| `symbols` | List symbols with details |
+| `info` | Show symbol details |
 | `labels` | List all labels |
 | `wires` | List wire segments |
 | `hierarchy` | Show sheet hierarchy |
 | `validate` | Validate schematic structure |
-| `pin-positions` | Get symbol pin positions |
-| `check-connections` | Check for unconnected pins |
-| `find-unconnected` | Find unconnected nets |
+| `pins` | Show symbol pin positions |
+| `connections` | Check pin connections using library positions |
+| `unconnected` | Find unconnected pins and issues |
 | `tidy` | Autoplace Reference/Value fields (headless; `--refs`, `--threshold`, `--dry-run`, cosmetic-only) |
 
 **Examples:**
 ```bash
 kct sch summary project.kicad_sch
 kct sch hierarchy project.kicad_sch --format json
-kct sch find-unconnected project.kicad_sch
+kct sch unconnected project.kicad_sch
 ```
 
 ---
@@ -185,8 +190,8 @@ kct pcb <subcommand> <pcb_file> [options]
 
 | Subcommand | Description |
 |------------|-------------|
-| `query` | Query footprints and tracks |
-| `modify` | Modify PCB elements |
+| `summary`, `footprints`, `nets`, `traces`, `stackup`, `zones` | Query the board (run `kct pcb --help` for the full subcommand list) |
+| `move-footprint`, `remove-footprint` | Modify footprints by reference designator |
 | `add-zone` | Add a copper pour zone |
 | `add-3d-models` | Patch missing `(model ...)` refs; `--refresh` rewrites existing refs through the current tier chain (see [LCSC 3D models guide](../guides/lcsc-3d-models.md)) |
 | `diff` | Geometric diff of two boards: which tracks, vias, pads, zones and outline changed (see below) |
@@ -204,8 +209,8 @@ explicit `-o <path>` to write a side file and leave the input untouched.
 
 **Examples:**
 ```bash
-kct pcb query board.kicad_pcb --footprints
-kct pcb query board.kicad_pcb --tracks --net GND
+kct pcb footprints board.kicad_pcb
+kct pcb traces board.kicad_pcb --layer F.Cu
 kct pcb add-zone board.kicad_pcb --net GND --layer B.Cu     # modifies board.kicad_pcb in place
 kct pcb add-zone board.kicad_pcb --net +3.3V --layer In2.Cu # accumulates onto the GND zone
 kct pcb add-zone board.kicad_pcb --net GND --layer B.Cu -o with_zones.kicad_pcb  # side file
@@ -283,7 +288,7 @@ kct erc <report> [options]
 
 | Option | Description |
 |--------|-------------|
-| `--format {table,json}` | Output format (default: table) |
+| `--format {table,json,summary}` | Output format (default: table) |
 | `--errors-only` | Show only errors, not warnings |
 | `--type TYPE` | Filter by error type |
 | `--sheet SHEET` | Filter by sheet name |
@@ -299,22 +304,32 @@ kct erc project.erc --type "unconnected"
 
 ### `drc`
 
-Parse DRC reports with optional manufacturer rule comparison.
+Run DRC on a PCB or parse a DRC report, with optional manufacturer rule comparison.
 
 ```bash
-kct drc <report> [options]
+kct drc <report|board.kicad_pcb> [options]
 ```
 
 | Option | Description |
 |--------|-------------|
-| `--format {table,json}` | Output format (default: table) |
+| `--format {table,json,summary}` | Output format (default: table) |
 | `--errors-only` | Show only errors |
-| `--type TYPE` | Filter by violation type |
+| `--strict` | Exit 2 when warnings are present (exit-code contract, #6898) |
+| `--type TYPE`, `-t` | Filter by violation type (partial match) |
 | `--net NET` | Filter by net name |
-| `--mfr {jlcpcb,oshpark,pcbway,seeed}` | Apply manufacturer rules |
-| `--layers N` | Number of layers (default: 2) |
-| `--compare` | Compare manufacturer rules |
+| `--category`, `-c {placement,routing,manufacturing,connectivity,cosmetic}` | Filter by root-cause category |
+| `--mfr`, `-m {jlcpcb,oshpark,pcbway,seeed}` | Apply manufacturer rules |
+| `--layers N`, `-l` | Number of layers (default: 2) |
+| `--verbose`, `-v` | Show detailed violation information |
+| `--suggest`, `-s` | Show fix suggestions for each violation |
+| `--filter-config PATH` | TOML file with `[[drc.filters]]` rules to suppress or reclassify violations |
+| `--keep-report` | Keep the DRC report file after running a PCB |
+| `--output PATH`, `-o` | Save the DRC report to this path |
 | `--waivers PATH` | Path to a `.kct_waivers.json` sidecar (schema v2 — the same file `kct check --waivers` reads) waiving cross-gate findings by KiCad rule type + component-ref set (#4691). Auto-discovered next to the input when omitted. Not applied in `--mfr` mode |
+
+The standalone `kicad-drc` also has `--rules` and `--compare`; they are
+deprecated (a stderr pointer is printed) in favour of `kct mfr rules` and
+`kct mfr compare`, and are intentionally not on `kct drc` (#6898).
 
 **Waivers (`--waivers`, #4691)**
 
@@ -360,7 +375,7 @@ The `kicad-cli pcb drc` cross-gate reads the same schema-v2 sidecar as
 kct drc board.drc
 kct drc board.kicad_pcb --mfr jlcpcb
 kct drc board-drc.json --waivers .kct_waivers.json   # 0 unwaived errors gate
-kct drc --compare  # Show all manufacturer rules
+kct mfr compare  # Show all manufacturer rules side by side
 ```
 
 ---
@@ -445,15 +460,20 @@ kct mfr <subcommand> [options]
 
 | Subcommand | Description |
 |------------|-------------|
+| `list` | List available manufacturers |
+| `info` | Show manufacturer details |
 | `rules` | Show manufacturer design rules |
-| `compare` | Compare multiple manufacturers |
-| `dru` | Generate KiCad DRU file |
+| `compare` | Compare all manufacturers side by side |
+| `apply-rules` | Apply manufacturer design rules to project/PCB |
+| `validate` | Validate PCB against manufacturer rules |
+| `export-dru` | Export manufacturer rules as a KiCad DRU file |
+| `import-dru` | Parse and display a KiCad design rules file |
 
 **Examples:**
 ```bash
 kct mfr rules jlcpcb
-kct mfr compare jlcpcb oshpark
-kct mfr dru jlcpcb -o jlcpcb.dru
+kct mfr compare --layers 4
+kct mfr export-dru jlcpcb -o jlcpcb.dru
 ```
 
 ---
@@ -571,6 +591,20 @@ declares an `HV` net class) runs the same measured creepage/clearance audit
 (`kicad_tools.audit.check_isolation`) against the checked PCB — a description
 of the requirement is recorded in the report but can never by itself produce
 `passed`; only a thresholded census bound to that PCB and net-class-map can.
+
+**Derived clearance (IEC 60664-1, issue #7057).** With `--standard` /
+`--hv-standard`, the required clearance is
+`max(Table F.2[U_imp], Table F.8[V_rms x sqrt(2)], pollution-degree floor)`
+for basic insulation, case A, altitude <= 2000 m. `U_imp` is the Table F.1
+rated impulse withstand voltage for the working voltage (taken as the
+line-to-neutral rated voltage, stepped up to the 50/100/150/300/600/1000 V
+row) and the overvoltage category, set with
+`kct creepage --overvoltage-category {I,II,III,IV}` or
+`kct audit --hv-overvoltage-category {I,II,III,IV}` (default `II`, equipment
+fed from the fixed mains installation). For example 230 V at OVC II gives
+`U_imp` = 2500 V and 1.5 mm; OVC I 0.5 mm, III 3.0 mm, IV 5.5 mm. The
+`kct readiness` HV gate always uses the default `II`. Creepage is IEC
+60664-1:2020 Table F.5 (Table F.4 in the 2007 edition).
 
 **Examples:**
 ```bash
@@ -773,14 +807,18 @@ kct lib <subcommand> [options]
 
 | Subcommand | Description |
 |------------|-------------|
-| `list` | List symbols in a library |
-| `info` | Show symbol details |
-| `create` | Create a new symbol |
+| `list` | List available KiCad libraries |
+| `symbols` | List symbols in a `.kicad_sym` library |
+| `footprints` | List footprints in a `.pretty` library directory |
+| `symbol-info` | Show details of a symbol by name |
+| `footprint-info` | Show details of a footprint by name |
+| `export` | Export library to JSON |
+| `purge` | List unused symbols/footprints in project-local libraries |
 
 **Examples:**
 ```bash
-kct lib list Device.kicad_sym
-kct lib info Device.kicad_sym R
+kct lib symbols Device.kicad_sym
+kct lib symbol-info Device.kicad_sym R
 ```
 
 ---
@@ -796,8 +834,9 @@ kct footprint <subcommand> [options]
 | Subcommand | Description |
 |------------|-------------|
 | `generate` | Generate parametric footprints |
-| `validate` | Validate footprint pad spacing |
-| `fix` | Fix footprint issues |
+
+Pad-spacing validation and repair live in the top-level
+`kct validate-footprints` and `kct fix-footprints` commands.
 
 ```bash
 kct footprint generate <type> [options]
@@ -808,17 +847,16 @@ kct footprint generate <type> [options]
 | `soic` | SOIC packages |
 | `qfp` | QFP packages |
 | `qfn` | QFN packages |
-| `dfn` | DFN packages |
-| `bga` | BGA packages |
 | `chip` | Chip resistors/capacitors |
 | `sot` | SOT packages |
 | `dip` | DIP packages |
+| `pin-header` | Pin headers |
 
 **Examples:**
 ```bash
 kct footprint generate soic --pins 8 --pitch 1.27
-kct footprint generate qfn --pins 24 --size 4x4
-kct footprint validate MyLib.kicad_mod
+kct footprint generate qfn --pins 24 --body-size 4
+kct footprint generate --list
 ```
 
 ---
@@ -835,14 +873,14 @@ kct parts <subcommand> [options]
 |------------|-------------|
 | `search` | Search for parts |
 | `lookup` | Get part details by LCSC number |
-| `check` | Check part availability |
+| `availability` | Check BOM part availability on LCSC for a schematic |
 | `sync-catalog` | Download the jlcparts dataset (~620 MB) into the cache dir for fully-offline lookups (#4117) |
 
 **Examples:**
 ```bash
 kct parts search "STM32F103"
 kct parts lookup C8734
-kct parts check C8734 --quantity 100
+kct parts availability project.kicad_sch --quantity 100
 ```
 
 ---
@@ -859,13 +897,14 @@ kct datasheet <subcommand> [options]
 |------------|-------------|
 | `search` | Search for datasheets |
 | `download` | Download a datasheet |
-| `parse` | Extract pin info from PDF |
+| `convert` | Convert PDF to markdown |
+| `extract-images`, `extract-tables` | Extract images / tables from a PDF |
 
 **Examples:**
 ```bash
 kct datasheet search "ATmega328P"
 kct datasheet download "ATmega328P" -o atmega328p.pdf
-kct datasheet parse atmega328p.pdf --pins
+kct datasheet convert atmega328p.pdf -o atmega328p.md
 ```
 
 ---
@@ -1346,6 +1385,68 @@ kct route board.kicad_pcb --lint-gate --seed 7 -o routed.kicad_pcb
 
 ---
 
+### `retune-lengths`
+
+Apply the existing match-group and diff-pair skew tuners to **named** groups of
+a board that is already routed, keeping the reviewed and hand-made copper
+around them (Issue #6885). It is an adapter over `tune_match_group_v2` /
+`tune_diff_pair_skew`, not a router: the board is never rerouted.
+
+```bash
+kct retune-lengths board.kicad_pcb -o board.retuned.kicad_pcb \
+    --net-class-map output/net_class_map.json \
+    --group ADDR_BUS --diffpair USB_D+ USB_D- [--timeout 300] [--provenance p.json]
+```
+
+| Flag | Meaning |
+|------|---------|
+| `-o, --output` | Required. Must differ from the input and must not exist (it is never overwritten) |
+| `--net-class-map` | Required. The sidecar `kct check` reads; groups, pairs and tolerances come only from here |
+| `--group NAME` | Declared `length_match_group` to tune; repeatable |
+| `--diffpair POS NEG` | Detected diff pair, as its two net names; repeatable |
+| `--timeout SEC` | Wall-clock budget for the tuning step (default 300) |
+| `--provenance PATH` | Provenance JSON (default `<output>.retune.json`); must not exist |
+
+At least one `--group` or `--diffpair` is required; there is no whole-board
+fallback.
+
+**Supported input.** A routed `.kicad_pcb` with copper layers, a
+`(general (thickness ..))` or `(setup (stackup ..))`, straight `(segment ..)`
+copper on the selected nets (a selected net carrying `(arc ..)` copper is
+refused), and a net-class map that declares the selected groups or pairs.
+
+**Limits.** Each target is tuned to exactly the limit `kct check` enforces
+(`resolve_group_tolerance_mm` for groups, `resolve_pair_thresholds` for pairs);
+nothing is inferred or loosened. A diff pair reports its gate (`tolerance_mm`)
+and its tighter stretch target (`stretch_target_mm`) as two separate numbers.
+
+**Guarantees.**
+
+- The input is only read. The output is written atomically, and only after
+  every selected target is **re-measured on the written board** with the
+  checker's own functions and found within its limit; tuner success alone is
+  never trusted.
+- Only `(segment ..)`/`(via ..)` blocks of the selected nets change. Unchanged
+  selected blocks keep their original text (uuid, `locked`). Unselected nets are
+  fixed obstacles the meanders must clear. With the selected nets' copper
+  removed, the output must equal the input byte for byte, otherwise the run
+  fails with `scope_violation`.
+- New copper uses seeded uuids, so the same input and settings give identical
+  output bytes.
+- A provenance record holds input/output SHA-256, selected groups, tool
+  version, settings, per-net before/after lengths and the changed-net list.
+
+**Failure modes** (exit 1, no output file, input unchanged; `--format json` adds
+a `code`): `no_selection`, `unknown_group`, `unknown_diffpair`,
+`ambiguous_group`, `missing_rules`, `missing_stackup`, `unsupported_pcb`,
+`no_geometry`, `unmeasurable`, `output_is_input`, `output_exists`, `timeout`,
+`unattainable` (a target stayed outside its limit), `scope_violation`. A
+selection already within its limits succeeds as `already_satisfied` with an
+output identical to the input.
+
+A successful run is **not** a board sign-off: still run `kct check`,
+`kicad-cli pcb drc --refill-zones` and the LVS/manufacturing gates on the output.
+
 ### `zones`
 
 Add copper pour zones.
@@ -1413,13 +1514,13 @@ kct placement <subcommand> <pcb_file> [options]
 |------------|-------------|
 | `check` | Check for placement conflicts |
 | `optimize` | Optimize component placement |
-| `suggestions` | Get placement suggestions |
+| `suggest` | Generate placement suggestions with rationale |
 
 **Examples:**
 ```bash
 kct placement check board.kicad_pcb
 kct placement optimize board.kicad_pcb -o optimized.kicad_pcb
-kct placement suggestions board.kicad_pcb --format json
+kct placement suggest board.kicad_pcb --format json
 ```
 
 ---
@@ -1580,8 +1681,9 @@ kct mcp serve [options]
 
 | Option | Description |
 |--------|-------------|
-| `--http` | Use HTTP transport instead of stdio |
-| `--port PORT` | HTTP port (default: 8080) |
+| `--transport {stdio,http}`, `-t` | Transport mode (default: stdio) |
+| `--host HOST` | Host address for HTTP mode (default: localhost) |
+| `--port PORT`, `-p` | HTTP port (default: 8080) |
 
 **Examples:**
 ```bash
@@ -1589,7 +1691,7 @@ kct mcp serve [options]
 kct mcp serve
 
 # Start HTTP server
-kct mcp serve --http --port 8080
+kct mcp serve --transport http --port 8080
 ```
 
 See [MCP Documentation](../mcp/README.md) for configuration details.
@@ -1991,7 +2093,8 @@ machine output to new commands.
 The router exposes a finer-grained ladder so CI can tell partial routing
 apart from clean routing with DRC issues. Source of truth: the `exit codes:`
 epilog in [`src/kicad_tools/cli/route_exit_codes_help.py`](../../src/kicad_tools/cli/route_exit_codes_help.py)
-(shared by `kct route --help` and the worker parser), expanded by the
+(the epilog of `route_cmd._route_parser`, the only `kct route` parser, so
+`kct route --help` prints it), expanded by the
 `# Exit codes:` comment block in `route_cmd.py`'s `_main_impl`
 (`main` is a thin wrapper around it).
 

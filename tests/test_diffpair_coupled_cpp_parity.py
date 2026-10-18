@@ -190,14 +190,9 @@ def test_route_coupled_falls_back_when_cpp_disabled():
     assert len(p.segments) > 0 and len(n.segments) > 0
 
 
-def test_swap_via_and_manhattan_defer_to_python():
-    """The v1-deferred features must NOT be handled by the C++ path."""
+def test_manhattan_defers_to_python():
+    """The v1-deferred manhattan_sum heuristic must NOT be handled by the C++ path."""
     grid = _make_grid()
-    # allow_swap_via -> deferred.
-    pf_swap = CoupledPathfinder(
-        grid=grid, rules=DesignRules(), target_spacing_cells=2, allow_swap_via=True
-    )
-    assert not pf_swap._cpp_coupled_available()
     # manhattan_sum heuristic -> deferred.
     pf_man = CoupledPathfinder(
         grid=grid,

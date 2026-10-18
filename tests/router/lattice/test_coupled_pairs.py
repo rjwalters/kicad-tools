@@ -219,10 +219,12 @@ def test_pair_routes_coupled_at_exact_pitch_with_correct_polarity() -> None:
     route_n = routes[(pc.key, "N")]
     assert route_p.net == 1 and route_n.net == 2
     assert not route_p.vias and not route_n.vias  # planar v1
-    # Legs terminate on their exact pads (polarity-correct attach).
+    # Legs terminate inside their own pads' copper (polarity-correct attach),
+    # at the pad-entry point rather than the pad centre (issue #6959).
     ends_p = {(s.x1, s.y1) for s in route_p.segments} | {(s.x2, s.y2) for s in route_p.segments}
-    assert (pc.pad_p_a.x, pc.pad_p_a.y) in ends_p
-    assert (pc.pad_p_b.x, pc.pad_p_b.y) in ends_p
+    for pad in (pc.pad_p_a, pc.pad_p_b):
+        reach = pad.width / 2.0 - _HS.trace_width / 2.0 + 1e-6
+        assert any(abs(x - pad.x) <= reach and abs(y - pad.y) <= reach for x, y in ends_p)
     # The coupled body sits at exactly the pitch: the straight mid-corridor
     # segments of the two legs are pitch apart.
     min_sep = min(
@@ -438,8 +440,10 @@ def test_polarity_twist_resolves_via_hook_when_room_exists() -> None:
     if pf.pair_outcomes[pc.key] == "coupled":
         route_p = routes[(pc.key, "P")]
         ends_p = {(s.x1, s.y1) for s in route_p.segments} | {(s.x2, s.y2) for s in route_p.segments}
-        assert (pc.pad_p_a.x, pc.pad_p_a.y) in ends_p
-        assert (pc.pad_p_b.x, pc.pad_p_b.y) in ends_p
+        # Inside the pad copper, not at its centre (issue #6959).
+        for pad in (pc.pad_p_a, pc.pad_p_b):
+            reach = pad.width / 2.0 - _HS.trace_width / 2.0 + 1e-6
+            assert any(abs(x - pad.x) <= reach and abs(y - pad.y) <= reach for x, y in ends_p)
         from kicad_tools.router.diffpair_routing import find_intra_pair_clearance_violations
 
         violation = find_intra_pair_clearance_violations(
@@ -1115,7 +1119,10 @@ def test_core_pair_leaves_a_sealed_routed_pad_its_escape_via(capsys) -> None:
     assert "Pair escape via site (#6697): VBUS U2.5 sits between D's pads" in out
     mask = router._ensure_lattice_pathfinder()._keepouts
     (site,) = [a for a in mask.areas if a.name == "pair-escape-via:VBUS:U2.5"]
-    assert site.exempt == frozenset({10})
+    # Issue #6956: the pair the site exists for is exempt too (its gateway
+    # fans may need the corridor); every other net is still kept out.
+    assert site.exempt == frozenset({10, 1, 2})
+    assert site.applies_to(30)
     vias = [v for r in routes[10] for v in r.vias]
     assert any(
         site.bbox[0] <= v.x <= site.bbox[2] and site.bbox[1] <= v.y <= site.bbox[3] for v in vias
@@ -1358,8 +1365,10 @@ def test_declined_trunk_is_retried_as_a_tap_chain(capsys, monkeypatch) -> None:
 
     pads = _tap_pads() + _tap_walls()
 
-    # Control: with the retry removed the trunk falls back uncoupled.
+    # Control: with the retry removed the trunk falls back uncoupled (the
+    # #6842 gateway offer would couple it through a fan-via gateway instead).
     monkeypatch.setattr(core, "_lattice_tap_chain_retry_pairs", lambda *a: frozenset())
+    monkeypatch.setattr(core, "_lattice_gateway_offer_keys", lambda *a: frozenset())
     router = _trunk_autorouter(pads)
     router.route_net(1)
     assert router._lattice_pair_outcomes == {"D": "uncoupled-fallback:pair-no-path"}
@@ -1650,11 +1659,13 @@ def test_discarded_tap_chain_retry_equals_a_run_without_retry(capsys, monkeypatc
         return router, routes
 
     monkeypatch.setattr(core, "_lattice_tap_chain_retry_pairs", lambda *a: frozenset())
+    monkeypatch.setattr(core, "_lattice_gateway_offer_keys", lambda *a: frozenset())
     base, base_routes = run()
     assert "tap-chain retry" not in capsys.readouterr().out
     monkeypatch.undo()
 
     monkeypatch.setattr(core, "_lattice_tap_chain_retry_keeps", lambda *a: (False, []))
+    monkeypatch.setattr(core, "_lattice_gateway_offer_keys", lambda *a: frozenset())
     forced, forced_routes = run()
     out = capsys.readouterr().out
     assert "tap-chain retry for 1 pair(s) whose trunk declined pair-no-path (D): discarded (" in out

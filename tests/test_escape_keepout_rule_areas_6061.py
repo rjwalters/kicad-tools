@@ -153,9 +153,18 @@ def _board(with_areas: bool) -> str:
 """
 
 
-def _rules() -> DesignRules:
+# Issue #6878: the sub-grid escape router only emits a leg for a pad that sits
+# OFF the routing grid.  At the default 0.05mm pitch every pad here (0.8mm BGA,
+# 0.5mm QFN, all centred on whole-mm footprints) lands on a grid cell, so the
+# sub-grid tests need a pitch the QFN pads miss.  Before #6741 the 0.05mm
+# request was silently coarsened to 0.08mm (the #972 adaptive cap); that pitch
+# is now chosen explicitly and honoured.
+SUBGRID_PITCH = 0.08
+
+
+def _rules(grid_resolution: float = 0.05) -> DesignRules:
     return DesignRules(
-        grid_resolution=0.05,
+        grid_resolution=grid_resolution,
         trace_width=0.15,
         trace_clearance=0.1,
         via_drill=0.2,
@@ -164,12 +173,12 @@ def _rules() -> DesignRules:
     )
 
 
-def _load(tmp_path: Path, with_areas: bool, force_python: bool):
+def _load(tmp_path: Path, with_areas: bool, force_python: bool, grid_resolution: float = 0.05):
     pcb = tmp_path / "board.kicad_pcb"
     pcb.write_text(_board(with_areas))
     router, _ = load_pcb_for_routing(
         str(pcb),
-        rules=_rules(),
+        rules=_rules(grid_resolution),
         use_pcb_rules=False,
         validate_drc=False,
         force_python=force_python,
@@ -312,12 +321,15 @@ def test_grid_predicates_include_static_areas(tmp_path: Path) -> None:
 def test_subgrid_prepass_installs_and_honours_areas(tmp_path: Path) -> None:
     """``prepare_subgrid_escapes`` (the ``route_with_subgrid`` pre-pass)
     installs the areas before generating stubs, and no stub enters one."""
-    router = _load(tmp_path, with_areas=True, force_python=True)
+    router = _load(tmp_path, with_areas=True, force_python=True, grid_resolution=SUBGRID_PITCH)
+    assert router.grid.resolution == SUBGRID_PITCH
     assert router.grid._rule_area_keepouts is None
     result = router.prepare_subgrid_escapes()
     assert router.grid._rule_area_keepouts is not None
     assert len(router.grid._rule_area_keepouts) == 3
     routes = router._subgrid.get_escape_routes(result)
+    # Issue #6878: an all-on-grid board emits no stubs and passes vacuously.
+    assert any(r.segments for r in routes), "the off-grid pads must still escape"
     assert _intrusions(routes) == []
 
 

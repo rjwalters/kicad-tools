@@ -37,7 +37,7 @@ from pathlib import Path
 
 import pytest
 
-from kicad_tools.cli.parser import create_parser
+from kicad_tools.cli.parser import create_parser, resolve_passthrough
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FIXTURES = REPO_ROOT / "tests" / "fixtures"
@@ -223,6 +223,17 @@ CONTRACT_ARGV: dict[str, list[str]] = {
     # Issue #6093: a valid tiny net (NET1, 3 pads), so the success path's
     # document is checked, not just the missing-``--net`` error (~1.5 s).
     "route-auto": ["{pcb}", "--net", "NET1"],
+    # Issue #6885: the refusal path (no net-class map on disk) is one JSON
+    # document too; the success document is covered by tests/test_pcb_retune.py.
+    "retune-lengths": [
+        "{pcb}",
+        "-o",
+        "{dir}/retuned.kicad_pcb",
+        "--net-class-map",
+        "{dir}/absent_net_class_map.json",
+        "--group",
+        "G",
+    ],
     "reason": ["{pcb}"],
     "optimize-traces": ["{pcb}", "--dry-run"],
     "validate-footprints": ["{pcb}"],
@@ -409,6 +420,7 @@ EXEMPT: dict[str, str] = {
     "parts search": "network: queries the LCSC/JLCPCB API",
     "parts availability": "network: queries the LCSC/JLCPCB API per BOM line",
     "parts suggest": "network: queries the LCSC/JLCPCB API per BOM line",
+    "parts import": "network: searches and downloads datasheets (mocked JSON run in tests/test_parts_cmd_import.py)",
     "suggest alternatives": "network: queries the LCSC/JLCPCB API",
     "parts sync-catalog": "network: downloads the JLCPCB parts catalog",
     "datasheet search": "network: queries datasheet providers",
@@ -451,7 +463,7 @@ def _iter_json_leaves(parser: argparse.ArgumentParser, path: tuple[str, ...] = (
 
 
 def _discovered_json_leaves() -> set[str]:
-    return set(_iter_json_leaves(create_parser()))
+    return set(_iter_json_leaves(resolve_passthrough(create_parser())))
 
 
 def _kicad_cli_available() -> bool:

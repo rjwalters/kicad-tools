@@ -8,87 +8,16 @@ from kicad_tools.cli.sch_validate import (
     check_lib_symbols_mismatch,
     validate_schematic,
 )
+from tests._sch_sexp_builders import (
+    make_lib_symbol as _make_lib_symbol,
+)
+from tests._sch_sexp_builders import (
+    make_symbol_instance as _make_symbol_instance,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers: synthetic KiCad schematic generation
 # ---------------------------------------------------------------------------
-
-
-def _make_lib_symbol(
-    lib_id: str,
-    pins: list[tuple[str, str, str]],
-) -> str:
-    """Generate a lib_symbols entry for a component.
-
-    Args:
-        lib_id: e.g. "Regulator_Linear:AP2204K-1.5"
-        pins: list of (pin_number, pin_name, pin_type) tuples
-    """
-    part_name = lib_id.split(":")[-1] if ":" in lib_id else lib_id
-    pin_blocks = []
-    for i, (num, name, ptype) in enumerate(pins):
-        y = i * 2.54
-        pin_blocks.append(
-            f"""(pin {ptype} line
-                    (at 0 {y:.2f} 0)
-                    (length 2.54)
-                    (name "{name}")
-                    (number "{num}")
-                )"""
-        )
-    pin_str = "\n".join(pin_blocks)
-    return f"""(symbol "{lib_id}"
-            (pin_names (offset 0.254))
-            (symbol "{part_name}_0_1"
-                (rectangle
-                    (start -5.08 -{(len(pins) * 2.54) + 1.27:.2f})
-                    (end 5.08 1.27)
-                    (stroke (width 0.254))
-                    (fill (type background))
-                )
-            )
-            (symbol "{part_name}_1_1"
-                {pin_str}
-            )
-        )"""
-
-
-def _make_symbol_instance(
-    ref: str,
-    lib_id: str,
-    footprint: str,
-    pins: list[tuple[str, str, str]],
-    x: float = 100.0,
-    y: float = 50.0,
-) -> str:
-    """Generate a symbol instance S-expression."""
-    pin_entries = "\n".join(f'(pin "{num}" (uuid "pin-{ref.lower()}-{num}"))' for num, _, _ in pins)
-    return f"""(symbol
-        (lib_id "{lib_id}")
-        (at {x} {y} 0)
-        (unit 1)
-        (in_bom yes)
-        (on_board yes)
-        (dnp no)
-        (uuid "uuid-{ref.lower()}")
-        (property "Reference" "{ref}"
-            (at {x + 2} {y - 2} 0)
-            (effects (font (size 1.27 1.27)) (justify left))
-        )
-        (property "Value" "{lib_id.split(":")[-1]}"
-            (at {x + 2} {y} 0)
-            (effects (font (size 1.27 1.27)) (justify left))
-        )
-        (property "Footprint" "{footprint}"
-            (at {x} {y} 0)
-            (effects (font (size 1.27 1.27)) hide)
-        )
-        (property "Datasheet" "~"
-            (at {x} {y} 0)
-            (effects (font (size 1.27 1.27)) hide)
-        )
-        {pin_entries}
-    )"""
 
 
 def _make_schematic(*blocks: str, lib_symbols: str = "") -> str:
@@ -140,8 +69,8 @@ class TestLibSymbolsMismatch:
         inst = _make_symbol_instance(
             "U1",
             "Regulator_Linear:AP2112K-3.3",
-            "Package_TO_SOT_SMD:SOT-23-5",
             wrong_pins,
+            footprint="Package_TO_SOT_SMD:SOT-23-5",
         )
         content = _make_schematic(inst, lib_symbols=lib_sym)
         sch_path = _write_sch(tmp_path, content)
@@ -164,7 +93,7 @@ class TestLibSymbolsMismatch:
         ]
         lib_id = "Regulator_Linear:AP2204K-1.5"
         lib_sym = _make_lib_symbol(lib_id, pins)
-        inst = _make_symbol_instance("U1", lib_id, "Package_TO_SOT_SMD:SOT-23-5", pins)
+        inst = _make_symbol_instance("U1", lib_id, pins, footprint="Package_TO_SOT_SMD:SOT-23-5")
         content = _make_schematic(inst, lib_symbols=lib_sym)
         sch_path = _write_sch(tmp_path, content)
 
@@ -175,7 +104,7 @@ class TestLibSymbolsMismatch:
         """Power symbols with no lib_symbols entry should not be flagged."""
         pins = [("1", "GND", "power_in")]
         # No lib_symbols entry for power:GND
-        inst = _make_symbol_instance("PWR1", "power:GND", "~", pins)
+        inst = _make_symbol_instance("PWR1", "power:GND", pins, footprint="~")
         content = _make_schematic(inst, lib_symbols="")
         sch_path = _write_sch(tmp_path, content)
 
@@ -187,10 +116,10 @@ class TestLibSymbolsMismatch:
         pins = [("1", "A", "passive"), ("2", "B", "passive")]
         # lib_symbols is empty but we have two non-power instances
         inst1 = _make_symbol_instance(
-            "U1", "IC:ChipA", "Package_SO:SOIC-8_3.9x4.9mm", pins, x=100.0
+            "U1", "IC:ChipA", pins, footprint="Package_SO:SOIC-8_3.9x4.9mm", x=100.0
         )
         inst2 = _make_symbol_instance(
-            "U2", "IC:ChipB", "Package_SO:SOIC-8_3.9x4.9mm", pins, x=200.0
+            "U2", "IC:ChipB", pins, footprint="Package_SO:SOIC-8_3.9x4.9mm", x=200.0
         )
         content = _make_schematic(inst1, inst2, lib_symbols="")
         sch_path = _write_sch(tmp_path, content)
@@ -206,7 +135,7 @@ class TestLibSymbolsMismatch:
         # Root sheet references a sub-sheet
         sub_pins = [("1", "A", "passive"), ("2", "B", "passive")]
         sub_inst = _make_symbol_instance(
-            "R1", "Device:R_Missing", "Resistor_SMD:R_0603_1608Metric", sub_pins
+            "R1", "Device:R_Missing", sub_pins, footprint="Resistor_SMD:R_0603_1608Metric"
         )
         sub_content = f"""(kicad_sch
     (version 20231120)
@@ -263,7 +192,9 @@ class TestLibSymbolsMismatch:
     def test_error_message_includes_sheet_location(self, tmp_path):
         """Error message should include the sheet location."""
         pins = [("1", "A", "passive")]
-        inst = _make_symbol_instance("U1", "IC:Missing", "Package_SO:SOIC-8_3.9x4.9mm", pins)
+        inst = _make_symbol_instance(
+            "U1", "IC:Missing", pins, footprint="Package_SO:SOIC-8_3.9x4.9mm"
+        )
         content = _make_schematic(inst, lib_symbols="")
         sch_path = _write_sch(tmp_path, content)
 
@@ -286,7 +217,7 @@ class TestValidateSchematicIntegration:
         pins = [("1", "A", "passive"), ("2", "B", "passive")]
         lib_id = "Device:R"
         lib_sym = _make_lib_symbol(lib_id, pins)
-        inst = _make_symbol_instance("R1", lib_id, "Resistor_SMD:R_0603_1608Metric", pins)
+        inst = _make_symbol_instance("R1", lib_id, pins, footprint="Resistor_SMD:R_0603_1608Metric")
         content = _make_schematic(inst, lib_symbols=lib_sym)
         sch_path = _write_sch(tmp_path, content)
 
@@ -296,7 +227,9 @@ class TestValidateSchematicIntegration:
     def test_check_skippable(self, tmp_path):
         """lib_symbols_mismatch can be skipped via skip_checks."""
         pins = [("1", "A", "passive")]
-        inst = _make_symbol_instance("U1", "IC:Missing", "Package_SO:SOIC-8_3.9x4.9mm", pins)
+        inst = _make_symbol_instance(
+            "U1", "IC:Missing", pins, footprint="Package_SO:SOIC-8_3.9x4.9mm"
+        )
         content = _make_schematic(inst, lib_symbols="")
         sch_path = _write_sch(tmp_path, content)
 

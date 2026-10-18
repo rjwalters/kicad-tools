@@ -108,11 +108,12 @@ kct audit <board.kicad_pcb> --mfr <tier> \
   --hv-standard <iec60664|iec62368> \
   --hv-working-voltage <V-rms> \
   --hv-pollution-degree <1|2|3> \
-  [--hv-material-group <I|II|IIIa|IIIb>]
+  [--hv-material-group <I|II|IIIa|IIIb>] \
+  [--hv-overvoltage-category <I|II|III|IV>]
 ```
 
 - HV nets are selected from the `--net-class-map` sidecar (the net whose class name is `HV`, or `--hv-net-class <name>`). Without a map the HV group will not resolve and the section is skipped.
-- The required creepage **and** clearance are derived from the IEC 60664-1 / 62368-1 tables for the `(working voltage, pollution degree, material group)` triple. To gate against a manually specified creepage instead, use `--hv-min <mm>` (phase-1).
+- The required creepage is derived from the IEC 60664-1 / 62368-1 tables for the `(working voltage, pollution degree, material group)` triple. The required clearance is the larger of Table F.2 at the rated impulse withstand voltage (Table F.1, from the working voltage and `--hv-overvoltage-category`, default `II` = mains appliance) and Table F.8 at the steady-state peak, floored by pollution degree — so 230 V mains needs 1.5 mm at OVC II (issue #7057). To gate against a manually specified creepage instead, use `--hv-min <mm>` (phase-1).
 - A below-derived-requirement HV pair makes the audit verdict `NOT_READY`, so **`kct audit` exits 2** — the manufacturing-readiness gate FAILs with a non-zero exit. A compliant board exits 0.
 - If HV nets are present but no threshold source (`--hv-min` / `--hv-standard`) is supplied, the audit downgrades to `WARNING` ("no isolation requirement specified") rather than silently passing — so an HV path is never signed off un-evaluated.
 - The derived values are an engineering aid, **NOT a certification** — the governing standard and a qualified engineer remain authoritative.

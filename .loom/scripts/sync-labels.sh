@@ -486,6 +486,11 @@ gh_label_write() {
   done
 }
 
+# Capitalize first letter. `${x^}` is bash 4.0+ (bad substitution on macOS 3.2).
+_capitalize() {
+  printf '%s%s' "$(printf '%s' "${1:0:1}" | tr '[:lower:]' '[:upper:]')" "${1:1}"
+}
+
 github_sync_label() {
   local name="$1" description="$2" color="$3" verb=create
   local args=("$name" -R "$REPO" --description "$description" --color "$color")
@@ -494,7 +499,7 @@ github_sync_label() {
   if gh_label_write "$verb" "${args[@]}" \
     || { [[ "$verb" == create && "$GH_WRITE_OUT" == *"already exists"* ]] && verb=edit && gh_label_write edit "${args[@]}"; }; then
     verb=${verb/edit/update}
-    info "${verb^}d label: $name"
+    info "$(_capitalize "$verb")d label: $name"
   else
     warning "Failed to ${verb/edit/update} label: $name"
     echo "$GH_WRITE_OUT" >&2
@@ -800,7 +805,7 @@ gitea_sync_label() {
   payload="{\"name\":$(printf '%s' "$name" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read().strip()))'),\"description\":$(printf '%s' "$description" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read().strip()))'),\"color\":\"#${color}\"}"
   [[ -z "$label_id" ]] || { verb=update method=PATCH; label_id="/${label_id}"; }
   if gitea_api "$method" "repos/${FORGE_OWNER}/${FORGE_REPO}/labels${label_id}" -d "$payload" >/dev/null 2>&1; then
-    info "${verb^}d label: $name"
+    info "$(_capitalize "$verb")d label: $name"
   else
     warning "Failed to $verb label: $name"
     WRITE_FAILURES=$((WRITE_FAILURES + 1))

@@ -31,8 +31,8 @@ Coverage:
 4. **Route-time / audit agreement** -- a bare ``kct check`` on the routed
    board auto-discovers the emitted sidecar and reaches the same
    ``path_ampacity`` verdict the route gate did.
-5. **Outer-shim forwarding** -- ``commands/routing.py`` forwards both flags
-   to the inner parser (the ``tests/test_cli_parser_drift.py`` bug class).
+5. **``kct route`` forwarding** -- both flags reach ``route_cmd.main``
+   through the real ``kct`` entry point (verbatim since issue #7017).
 """
 
 from __future__ import annotations
@@ -776,15 +776,13 @@ class TestRouteIntentAndAuditAgree:
 
 
 # ---------------------------------------------------------------------------
-# 5. Outer-shim forwarding (the tests/test_cli_parser_drift.py bug class)
+# 5. ``kct route`` forwarding (verbatim argv passthrough, issue #7017)
 # ---------------------------------------------------------------------------
 
 
 def _forwarded_argv(monkeypatch, argv: list[str]) -> list[str]:
-    """Parse ``kct <argv>`` and capture the sub-argv the shim builds."""
-    from kicad_tools.cli import route_cmd as route_cmd_mod
-    from kicad_tools.cli.commands import routing as routing_mod
-    from kicad_tools.cli.parser import create_parser
+    """Run ``kct <argv>`` in-process and capture what ``route_cmd.main`` receives."""
+    from kicad_tools.cli import main as cli_main
 
     captured: dict[str, list[str]] = {}
 
@@ -792,15 +790,13 @@ def _forwarded_argv(monkeypatch, argv: list[str]) -> list[str]:
         captured["argv"] = list(sub_argv)
         return 0
 
-    monkeypatch.setattr(route_cmd_mod, "main", _fake_main)
-    monkeypatch.setattr(routing_mod, "route_main", _fake_main, raising=False)
-
-    args = create_parser().parse_args(argv)
-    routing_mod.run_route_command(args)
+    monkeypatch.setattr(route_cmd, "main", _fake_main)
+    assert cli_main(argv) == 0
+    route_cmd._route_parser().parse_args(captured["argv"])  # the real parser accepts it
     return captured["argv"]
 
 
-class TestOuterShimForwarding:
+class TestKctRouteForwarding:
     def test_current_paths_is_forwarded(self, tmp_path, monkeypatch):
         pcb = _write_t_network_pcb(tmp_path / "b.kicad_pcb", trunk_width=13.0)
         sidecar = _write_sidecar(tmp_path / "declared.json", [_trunk_spec()])
@@ -821,9 +817,7 @@ class TestOuterShimForwarding:
 
 
 @pytest.mark.parametrize("flag", ["--current-paths", "--no-current-paths"])
-def test_flag_on_both_route_parsers(flag):
-    """Guards the #2817/#2819 argparse-drift bug class for the new flags."""
-    from tests.test_cli_parser_drift import _inner_route_parser_flags, _outer_route_parser_flags
-
-    assert flag in _inner_route_parser_flags()
-    assert flag in _outer_route_parser_flags()
+def test_flag_on_route_parser(flag):
+    """``kct route`` accepts the flag (its only parser is ``route_cmd._route_parser``)."""
+    flags = {opt for action in route_cmd._route_parser()._actions for opt in action.option_strings}
+    assert flag in flags

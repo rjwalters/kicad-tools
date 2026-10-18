@@ -16,7 +16,7 @@ board 03's `USB_D+`, with J1, R4 and U2, gets 19.05 mm). A limit that is an
 `uncited` table value is a warning. The finding names its source.
 
 ```bash
-kct check board.kicad_pcb --rules=diffpair_uncoupled_length
+kct check board.kicad_pcb --only diffpair_uncoupled_length
 ```
 
 How KiCad measures, and so how kct does (pinned on kicad-cli 10.0.6 by

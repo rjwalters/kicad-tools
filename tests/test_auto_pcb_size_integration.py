@@ -296,38 +296,17 @@ class TestCLIFlag:
 
     def test_flag_help_mentions_envelope(self):
         """Help text mentions the cost-vs-area tradeoff + Q5 layers-first policy."""
-        from kicad_tools.cli import route_cmd
+        from kicad_tools.cli.route_cmd import _route_parser
 
-        # Build the parser, find the --auto-pcb-size action, check help text.
-        # We do this by parsing argv with the flag set and looking at the
-        # resulting Namespace.
-        parser = _build_parser_from_main(route_cmd)
-        if parser is None:
-            pytest.skip("Cannot extract parser from route_cmd.main without invocation")
+        parser = _route_parser()
         for action in parser._actions:
             if "--auto-pcb-size" in action.option_strings:
                 # Help text must mention layers-first / envelope.
-                assert "envelope" in (action.help or "").lower()
-                assert "layers" in (action.help or "").lower()
+                help_text = (action.help or "").lower()
+                assert "envelope" in help_text
+                assert "layers" in help_text
                 return
         pytest.fail("--auto-pcb-size action not found on parser")
-
-
-def _build_parser_from_main(route_cmd_module):
-    """Reflectively build the argparser declared inside route_cmd.main.
-
-    The CLI builds the parser inside ``main()`` rather than at module
-    scope, so we can't import it directly.  This helper returns ``None``
-    so the dependent test skips gracefully -- the help-text content check
-    is exercised via source-string introspection in
-    ``test_flag_default_false`` instead.
-    """
-    import inspect
-
-    src = inspect.getsource(route_cmd_module.main)
-    if "argparse.ArgumentParser" not in src:
-        return None
-    return None
 
 
 # ---------------------------------------------------------------------------

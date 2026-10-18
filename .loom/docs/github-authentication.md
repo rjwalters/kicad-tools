@@ -243,9 +243,15 @@ exploration) starves the daemon.
   naming the account: its pool is shared with every PAT, OAuth token and `gh`
   login of that user. The report never carries a token value.
 - Reads by pool: `loom-daemon status --json | jq .forge_calls.identity_roles`
-  counts calls per identity role: `reader` (a reader App's pool), `writer`,
-  `writer-fallback` (a read a reader failed on, re-run on the writer) and
-  `unknown` (a call recorded outside the `gh` facade, or by an older binary).
+  counts calls per identity role: `reader` (a reader App's pool), `writer`
+  and `unknown` (a call recorded outside the `gh` facade, or by an older
+  binary). **The writer is never used for reads** (#12394): a read no reader
+  can serve is shed, not re-run on the writer, so `writer` rows should be
+  writes plus the few read-backs a write needs (listed in
+  `loom-daemon/tests/writer_read_guard.rs`); a read on the writer outside
+  that list logs an error. Older rows may still show `writer-fallback`.
+  Rule and exceptions: `daemon-reference.md` → "The writer is never used for
+  reads".
 - Calls by billed bucket (W1): `loom-daemon forge calls --by bucket` (or
   `--by caller|role|repo`, `--since 90m|3h`) rolls up this host's forge-call
   sink per `(account, cred_owner, resource, reset)`. Each row shows what this
@@ -475,6 +481,21 @@ Every host is configured the same way. There is no per-host pinning:
   - a **coverage** error (`403`/`404` the writer can read) withdraws the
     reader for that one repo for an hour;
   - only a **mint or key** failure withdraws the reader App-wide.
+
+- **Per-owner writers (#12446).** When the fleet manages repos under more than
+  one account (a user and an org) a single private App cannot write to both. Add
+  `forge.identities.writers: [{"appId": "...", "privateKeyPath": "...", "owners": ["acme"]}]`;
+  writes for a listed owner mint as that App, every other owner keeps
+  `forge.githubApp`. Absent key = unchanged behaviour. Check with
+  `loom-daemon forge identities` and `loom-daemon forge token --repo acme/x`
+  (the per-owner check: the owner is the `--repo` argument's, there is no
+  `--owner` flag). It needs **config-mode provisioning** (`forge.githubApp` in
+  config, no `LOOM_GITHUB_APP_ID` / `LOOM_GITHUB_APP_KEY_PATH` in the
+  environment): the env override still beats everything in
+  `github-app-token.sh`, so with it set credential delivery, agent writes and
+  `merge-pr.sh` use that one App for every owner, while `forge token` (lease
+  posting) ignores the env and follows `writers[]`. `forge identities` warns
+  when both are present.
 
   Each withdrawal is exported as a `forge.reader.withdrawn` span
   ([`telemetry-schema.md`](telemetry-schema.md)), and `loom-daemon status`

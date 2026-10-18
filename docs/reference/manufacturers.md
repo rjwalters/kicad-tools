@@ -24,10 +24,10 @@ kicad-tools includes design rules for common PCB manufacturers. Use these with D
 kct drc board.kicad_pcb --mfr jlcpcb
 
 # Compare manufacturers
-kct mfr compare jlcpcb oshpark pcbway
+kct mfr compare
 
 # Generate KiCad DRU file
-kct mfr dru jlcpcb -o jlcpcb.dru
+kct mfr export-dru jlcpcb -o jlcpcb.dru
 ```
 
 ### Python
@@ -208,7 +208,7 @@ checker = DRCChecker(rules=my_rules)
 Export rules as KiCad Design Rules files:
 
 ```bash
-kct mfr dru jlcpcb -o jlcpcb.dru
+kct mfr export-dru jlcpcb -o jlcpcb.dru
 ```
 
 Then import in KiCad: **Board Setup > Design Rules > Import**

@@ -14,8 +14,7 @@
 # Strategy: like test-create-pr-superseded-issue.sh, run create-pr.sh
 # directly as a subprocess with a stub `gh` on PATH and LOOM_FORGE_TYPE
 # forced to github. The daemon side of the guard (`forge check-open-pr`) is
-# stubbed via $LOOM_DAEMON_SELF_BIN -- the same seam
-# test-create-pr-provenance.sh's daemon-ok/daemon-old fixtures use -- so this
+# stubbed via $LOOM_DAEMON_SELF_BIN -- so this
 # suite pins create-pr.sh's OWN logic (parsing, exit code, message, fail-open
 # posture) without depending on a real daemon build or live network calls.
 #
@@ -30,20 +29,6 @@ CREATE_PR="$(cd "$SCRIPT_DIR/.." && pwd)/create-pr.sh"
 # shellcheck source=lib/assert.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/assert.sh"
 
-
-assert_contains() {
-  local haystack="$1" needle="$2" msg="$3"
-  TESTS_RUN=$((TESTS_RUN + 1))
-  if [[ "$haystack" == *"$needle"* ]]; then
-    TESTS_PASSED=$((TESTS_PASSED + 1))
-    echo -e "  ${GREEN}PASS${NC}: $msg"
-  else
-    TESTS_FAILED=$((TESTS_FAILED + 1))
-    echo -e "  ${RED}FAIL${NC}: $msg"
-    echo "    Looking for: '$needle'"
-    echo "    In output:   '$haystack'"
-  fi
-}
 
 if [[ ! -x "$CREATE_PR" ]]; then
   echo "ERROR: $CREATE_PR is not executable" >&2

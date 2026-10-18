@@ -663,9 +663,10 @@ class TestNoRoutingPlanFlag:
 
     @staticmethod
     def _outer_parser():
-        from kicad_tools.cli.parser import create_parser
+        """The ``kct`` parser with the ``route`` passthrough stub resolved (#7017)."""
+        from kicad_tools.cli.parser import create_parser, resolve_passthrough
 
-        return create_parser()
+        return resolve_passthrough(create_parser())
 
     def test_inner_parser_defaults_to_on(self):
         args = self._inner_parser().parse_args(["board.kicad_pcb"])
@@ -701,9 +702,8 @@ class TestNoRoutingPlanFlag:
         _apply_routing_plan_flag(router, Namespace())
         assert router.emit_routing_plan is True
 
-    def test_outer_command_forwards_the_flag_to_the_inner_cli(self, monkeypatch):
-        """The outer ``kct route`` shim rebuilds argv from a whitelist, so a
-        flag that is not forwarded is silently dropped."""
+    def test_kct_route_forwards_the_flag_to_route_cmd(self, monkeypatch):
+        """``kct route`` hands its argv to route_cmd.main verbatim (#7017)."""
         from kicad_tools.cli import route_cmd
 
         captured: list[list[str]] = []
@@ -713,15 +713,13 @@ class TestNoRoutingPlanFlag:
             return 0
 
         monkeypatch.setattr(route_cmd, "main", _fake_main)
-        from kicad_tools.cli.commands.routing import run_route_command
+        from kicad_tools.cli import main as cli_main
 
-        args = self._outer_parser().parse_args(["route", "board.kicad_pcb", "--no-routing-plan"])
-        run_route_command(args)
+        assert cli_main(["route", "board.kicad_pcb", "--no-routing-plan"]) == 0
         assert "--no-routing-plan" in captured[0]
 
         captured.clear()
-        args = self._outer_parser().parse_args(["route", "board.kicad_pcb"])
-        run_route_command(args)
+        assert cli_main(["route", "board.kicad_pcb"]) == 0
         assert "--no-routing-plan" not in captured[0]
 
 

@@ -665,3 +665,74 @@ class TestImportSesCli:
         assert rc == 1
         assert "no wires or vias imported" in cap.err
         assert out.read_text() == FOUR_LAYER_PCB
+
+
+class TestStaleBoardRevision:
+    """Issue #6915: refuse a session for a board edited after DSN export."""
+
+    @pytest.fixture
+    def board(self, tmp_path):
+        pcb = _write(tmp_path, FOUR_LAYER_PCB, "four.kicad_pcb")
+        from kicad_tools.export.dsn import write_revision_sidecar
+
+        write_revision_sidecar(pcb, tmp_path / "four.dsn")
+        return pcb
+
+    @pytest.fixture
+    def ses(self, tmp_path):
+        body = "    (network_out (net GND (wire (path F.Cu 2000 0 0 10000 0))))"
+        return _write(tmp_path, _session(body))
+
+    def _import(self, pcb, ses, out, **kw):
+        importer = SESToKiCadImporter(str(ses))
+        importer.merge_into(str(pcb), str(out), **kw)
+        return importer
+
+    def test_match_is_verified(self, board, ses, tmp_path):
+        importer = self._import(board, ses, tmp_path / "o.kicad_pcb")
+        assert importer.revision_status == "verified"
+
+    def test_mismatch_refused_and_nothing_written(self, board, ses, tmp_path):
+        from kicad_tools.export.ses import StaleBoardError
+
+        board.write_text(FOUR_LAYER_PCB + "\n; edited\n")
+        out = tmp_path / "o.kicad_pcb"
+        with pytest.raises(StaleBoardError, match="--allow-stale"):
+            self._import(board, ses, out)
+        assert not out.exists()
+
+    def test_override_merges(self, board, ses, tmp_path):
+        board.write_text(FOUR_LAYER_PCB + "\n; edited\n")
+        out = tmp_path / "o.kicad_pcb"
+        importer = self._import(board, ses, out, allow_stale=True)
+        assert importer.revision_status == "stale-overridden"
+        assert "(segment" in out.read_text()
+
+    def test_missing_sidecar_is_unverified(self, board, ses, tmp_path):
+        (tmp_path / "four.dsn-revision.json").unlink()
+        importer = self._import(board, ses, tmp_path / "o.kicad_pcb")
+        assert importer.revision_status == "unverified"
+
+    def test_malformed_sidecar_is_unverified(self, board, ses, tmp_path):
+        (tmp_path / "four.dsn-revision.json").write_text("{not json")
+        importer = self._import(board, ses, tmp_path / "o.kicad_pcb")
+        assert importer.revision_status == "unverified"
+
+    def test_cli_refuses_then_overrides(self, board, ses, tmp_path, capsys):
+        import json
+
+        from kicad_tools.cli.commands.pcb import run_pcb_command
+        from kicad_tools.cli.parser import create_parser
+
+        board.write_text(FOUR_LAYER_PCB + "\n; edited\n")
+        out = tmp_path / "o.kicad_pcb"
+        base = ["pcb", "import-ses", str(board), str(ses), "-o", str(out), "--format", "json"]
+        rc = run_pcb_command(create_parser().parse_args(base))
+        payload = json.loads(capsys.readouterr().out)
+        assert rc == 1 and payload["success"] is False
+        assert "re-route" in payload["error"].lower() or "Re-export" in payload["error"]
+        assert not out.exists()
+
+        rc = run_pcb_command(create_parser().parse_args([*base, "--allow-stale"]))
+        payload = json.loads(capsys.readouterr().out)
+        assert rc == 0 and payload["revision"] == "stale-overridden"

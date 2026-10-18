@@ -11,13 +11,11 @@ API:
 
 The underlying ``route_all_negotiated()`` implementation already
 supports these parameters; this CLI layer only needs to plumb them
-through three sites:
+through the ``kct route`` parser (``route_cmd._route_parser`` -- since issue
+#7017 ``kct route`` passes its argv straight to ``route_cmd.main``) and the
+call sites in ``cli/route_cmd.py``.
 
-1. Outer parser (``cli/parser.py :: _add_route_parser``).
-2. Forwarding shim (``cli/commands/routing.py :: run_route_command``).
-3. Inner parser + 7 call sites (``cli/route_cmd.py :: main``).
-
-These tests pin all three layers so the flag never silently goes
+These tests pin every layer so the flag never silently goes
 missing — the same drift bug class addressed by ``#2620``, ``#2622``,
 ``#2793``, ``#2812``, ``#2817``, ``#2819``, ``#3033`` and ``#3062``.
 """
@@ -64,57 +62,61 @@ def _inner_route_parser_flags() -> set[str]:
     return _flags_from_parser(captured["parser"])
 
 
-def _outer_route_parser_flags() -> set[str]:
-    from kicad_tools.cli.parser import create_parser
+def _kct_route_parser_flags() -> set[str]:
+    from kicad_tools.cli.parser import create_parser, resolve_passthrough
 
-    main_parser = create_parser()
+    # ``route`` is a passthrough stub on create_parser() (issue #7017);
+    # resolve it to the parser ``kct route`` actually runs.
+    main_parser = resolve_passthrough(create_parser())
     for action in main_parser._actions:
         choices = getattr(action, "choices", None)
         if choices and "route" in choices:
             return _flags_from_parser(choices["route"])
-    raise AssertionError("could not find 'route' subparser on outer parser")
+    raise AssertionError("could not find 'route' subparser on the kct parser")
 
 
-def _outer_route_subparser() -> argparse.ArgumentParser:
-    from kicad_tools.cli.parser import create_parser
+def _kct_route_subparser() -> argparse.ArgumentParser:
+    from kicad_tools.cli.parser import create_parser, resolve_passthrough
 
-    main_parser = create_parser()
+    # ``route`` is a passthrough stub on create_parser() (issue #7017);
+    # resolve it to the parser ``kct route`` actually runs.
+    main_parser = resolve_passthrough(create_parser())
     for action in main_parser._actions:
         choices = getattr(action, "choices", None)
         if choices and "route" in choices:
             return choices["route"]
-    raise AssertionError("could not find 'route' subparser on outer parser")
+    raise AssertionError("could not find 'route' subparser on the kct parser")
 
 
 # ---------------------------------------------------------------------------
-# Layer 1 — outer parser declares the flags with expected defaults
+# Layer 1 — the ``kct route`` parser declares the flags with expected defaults
 # ---------------------------------------------------------------------------
 
 
-def test_outer_parser_declares_region_parallel_flags():
-    """The four #3054 flags must be declared on the outer ``kct route`` parser.
+def test_kct_route_parser_declares_region_parallel_flags():
+    """The four #3054 flags must be declared on the ``kct route`` parser.
 
     Without this, ``kct route --region-parallel`` fails with
-    ``error: unrecognized arguments`` before even reaching the shim.
+    ``error: unrecognized arguments``.
     """
-    outer = _outer_route_parser_flags()
+    outer = _kct_route_parser_flags()
     assert "--region-parallel" in outer, (
-        "--region-parallel missing from outer parser (would regress #3054)"
+        "--region-parallel missing from the kct route parser (would regress #3054)"
     )
     assert "--partition-rows" in outer, (
-        "--partition-rows missing from outer parser (would regress #3054)"
+        "--partition-rows missing from the kct route parser (would regress #3054)"
     )
     assert "--partition-cols" in outer, (
-        "--partition-cols missing from outer parser (would regress #3054)"
+        "--partition-cols missing from the kct route parser (would regress #3054)"
     )
     assert "--max-parallel-workers" in outer, (
-        "--max-parallel-workers missing from outer parser (would regress #3054)"
+        "--max-parallel-workers missing from the kct route parser (would regress #3054)"
     )
 
 
-def test_outer_parser_default_values():
+def test_kct_route_parser_default_values():
     """Defaults preserve single-threaded routing bit-for-bit."""
-    route_parser = _outer_route_subparser()
+    route_parser = _kct_route_subparser()
     args = route_parser.parse_args(["dummy.kicad_pcb"])
     assert args.region_parallel is False
     assert args.partition_rows == 2
@@ -122,9 +124,9 @@ def test_outer_parser_default_values():
     assert args.max_parallel_workers == 4
 
 
-def test_outer_parser_accepts_region_parallel_with_overrides():
+def test_kct_route_parser_accepts_region_parallel_with_overrides():
     """Setting the flag and partition values parses cleanly."""
-    route_parser = _outer_route_subparser()
+    route_parser = _kct_route_subparser()
     args = route_parser.parse_args(
         [
             "dummy.kicad_pcb",
@@ -144,21 +146,16 @@ def test_outer_parser_accepts_region_parallel_with_overrides():
 
 
 # ---------------------------------------------------------------------------
-# Layer 2 — inner parser declares the flags (drift guard mirrors outer)
+# Layer 2 — route_cmd's parser declares the flags
 # ---------------------------------------------------------------------------
 
 
 def test_inner_parser_declares_region_parallel_flags():
-    """Inner ``route_cmd.py`` parser must also declare the four flags so the
-    shim has a forwarding target.  This guards the #2819-direction drift
-    bug — outer declared but inner missing would parse cleanly through
-    the outer ``kct route`` surface, then crash with ``unrecognized
-    arguments`` when the shim forwarded the flag to ``route_cmd.main``.
-    """
+    """``route_cmd.main`` itself (``python -m kicad_tools.cli.route_cmd``,
+    the deadline worker) must accept the four flags too."""
     inner = _inner_route_parser_flags()
     assert "--region-parallel" in inner, (
-        "--region-parallel missing from inner route_cmd.py parser "
-        "(would regress #3054 -- shim cannot forward to a non-existent flag)"
+        "--region-parallel missing from inner route_cmd.py parser (would regress #3054)"
     )
     assert "--partition-rows" in inner, "--partition-rows missing from inner parser"
     assert "--partition-cols" in inner, "--partition-cols missing from inner parser"
@@ -166,61 +163,44 @@ def test_inner_parser_declares_region_parallel_flags():
 
 
 # ---------------------------------------------------------------------------
-# Layer 3 — shim forwards the flags to the inner subprocess argv
+# Layer 3 — ``kct route`` passes the flags through to route_cmd.main
 # ---------------------------------------------------------------------------
 
 
-def _run_shim_capture_argv(extra_argv: list[str]) -> list[str]:
-    """Invoke ``run_route_command`` with ``extra_argv`` and capture the
-    ``sub_argv`` it builds for the inner ``route_cmd.main`` call.
+def _run_kct_route_capture_argv(extra_argv: list[str]) -> list[str]:
+    """Run ``kct route dummy.kicad_pcb <extra_argv>`` in-process and return the
+    argv ``route_cmd.main`` receives (the router itself is stubbed out)."""
+    from tests.route_cli import kct_route
 
-    Returns the captured argv list.  Mocks out the inner ``main`` so we
-    never actually try to route a (nonexistent) PCB file.
-    """
-    from kicad_tools.cli.commands.routing import run_route_command
-    from kicad_tools.cli.parser import create_parser
-
-    main_parser = create_parser()
-    args = main_parser.parse_args(["route", "dummy.kicad_pcb", *extra_argv])
-
-    captured: dict[str, list[str]] = {}
-
-    def fake_route_main(sub_argv):
-        captured["argv"] = list(sub_argv)
-        return 0
-
-    with patch("kicad_tools.cli.route_cmd.main", fake_route_main):
-        run_route_command(args)
-
-    assert "argv" in captured, "shim did not call inner route_main"
-    return captured["argv"]
+    forwarded, _ = kct_route(["dummy.kicad_pcb", *extra_argv])
+    return forwarded
 
 
-def test_shim_omits_region_parallel_flags_by_default():
-    """When the user does not pass the flags, the shim must not add them.
+def test_kct_route_omits_region_parallel_flags_by_default():
+    """When the user does not pass the flags, ``kct route`` must not add them.
 
     This preserves the byte-for-byte invariant for the default code path:
     existing ``kct route board.kicad_pcb`` invocations build the exact
     same ``sub_argv`` they did before #3054 landed.
     """
-    argv = _run_shim_capture_argv([])
+    argv = _run_kct_route_capture_argv([])
     assert "--region-parallel" not in argv
     assert "--partition-rows" not in argv
     assert "--partition-cols" not in argv
     assert "--max-parallel-workers" not in argv
 
 
-def test_shim_forwards_region_parallel_flag():
+def test_kct_route_forwards_region_parallel_flag():
     """``--region-parallel`` (boolean) is forwarded to the inner parser."""
-    argv = _run_shim_capture_argv(["--region-parallel"])
+    argv = _run_kct_route_capture_argv(["--region-parallel"])
     assert "--region-parallel" in argv
 
 
-def test_shim_forwards_partition_overrides_only_when_set():
+def test_kct_route_forwards_partition_overrides_only_when_set():
     """Partition flags are only forwarded when the user overrides the
     defaults, matching the pattern used by ``--per-net-timeout`` etc.
     """
-    argv = _run_shim_capture_argv(
+    argv = _run_kct_route_capture_argv(
         [
             "--region-parallel",
             "--partition-rows",
@@ -349,8 +329,7 @@ def test_router_route_all_negotiated_signature_matches_cli_defaults():
     assert "max_parallel_workers" in sig.parameters
 
     # Confirm defaults match what the CLI assumes (the ``getattr``
-    # fallbacks in route_cmd.py and the shim's "only forward when
-    # non-default" pattern both rely on these specific values).
+    # fallbacks in route_cmd.py rely on these specific values).
     assert sig.parameters["region_parallel"].default is False
     assert sig.parameters["partition_rows"].default == 2
     assert sig.parameters["partition_cols"].default == 2

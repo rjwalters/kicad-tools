@@ -375,17 +375,13 @@ class TestCliValidateCommand:
         assert "warning_count" in data
 
     def test_validate_with_missing_file(self, capsys):
-        """Validate should handle missing files gracefully (returns empty hierarchy)."""
+        """A missing root schematic is an error, not an empty hierarchy (#7028)."""
         from kicad_tools.cli.sch_hierarchy import main
 
-        # The hierarchy builder handles missing files by returning an empty hierarchy
-        # This is consistent with other hierarchy commands (tree, list, etc.)
-        result = main(["nonexistent.kicad_sch", "validate"])
-        # Returns 0 because empty hierarchy has no issues
-        assert result == 0
+        assert main(["nonexistent.kicad_sch", "validate"]) == 1
 
         captured = capsys.readouterr()
-        assert "No issues found" in captured.out
+        assert "File not found" in captured.err
 
 
 class TestValidateHierarchy:

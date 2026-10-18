@@ -32,6 +32,7 @@ from unittest.mock import patch
 import pytest
 
 from kicad_tools.router import sequential_ripup as sr
+from tests.route_cli import route_args
 
 # ---------------------------------------------------------------------------
 # Layer 1: select_ripup_targets / is_improvement (pure)
@@ -710,18 +711,12 @@ def _inner_parser() -> argparse.ArgumentParser:
 
 
 def test_outer_parser_defaults_to_negotiated():
-    from kicad_tools.cli.parser import create_parser
-
-    args = create_parser().parse_args(["route", "in.kicad_pcb"])
+    args = route_args(["in.kicad_pcb"])
     assert args.ripup_strategy == "negotiated"
 
 
 def test_outer_parser_accepts_sequential_n1():
-    from kicad_tools.cli.parser import create_parser
-
-    args = create_parser().parse_args(
-        ["route", "in.kicad_pcb", "--ripup-strategy", "sequential-n1"]
-    )
+    args = route_args(["in.kicad_pcb", "--ripup-strategy", "sequential-n1"])
     assert args.ripup_strategy == "sequential-n1"
 
 
@@ -731,30 +726,29 @@ def test_inner_route_parser_accepts_sequential_n1():
     assert parser.parse_args(["x.kicad_pcb"]).ripup_strategy == "negotiated"
 
 
-def test_outer_and_inner_choice_lists_agree():
-    """The shim forwards ``str(args.ripup_strategy)`` -- the lists must match."""
-    from kicad_tools.cli.parser import create_parser
+def test_kct_route_resolves_to_the_inner_choice_list():
+    """``kct route`` runs ``route_cmd._route_parser`` itself (issue #7017)."""
+    from kicad_tools.cli.parser import create_parser, resolve_passthrough
 
-    outer = None
-    for action in create_parser()._actions:
+    kct_route = None
+    for action in resolve_passthrough(create_parser())._actions:
         if action.dest == "command":
-            outer = action.choices["route"]
+            kct_route = action.choices["route"]
             break
-    assert outer is not None
-    assert _flags_choices(outer, "--ripup-strategy") == _flags_choices(
+    assert kct_route is not None
+    assert _flags_choices(kct_route, "--ripup-strategy") == _flags_choices(
         _inner_parser(), "--ripup-strategy"
     )
 
 
-def test_routing_shim_forwards_only_a_non_default_value():
-    """``negotiated`` must not be forwarded -- the default stays byte-identical."""
-    import inspect
+@pytest.mark.parametrize("extra", [[], ["--ripup-strategy", "sequential-n1"]])
+def test_kct_route_forwards_ripup_strategy_only_when_given(extra):
+    """An unset ``--ripup-strategy`` is never invented; a given one passes through."""
+    from tests.route_cli import kct_route
 
-    from kicad_tools.cli.commands import routing
-
-    source = inspect.getsource(routing.run_route_command)
-    assert 'getattr(args, "ripup_strategy", "negotiated") != "negotiated"' in source
-    assert '"--ripup-strategy"' in source
+    forwarded, args = kct_route(["x.kicad_pcb", *extra])
+    assert forwarded == ["x.kicad_pcb", *extra]
+    assert args.ripup_strategy == (extra[1] if extra else "negotiated")
 
 
 def test_apply_ripup_strategy_is_a_no_op_at_the_default():

@@ -331,17 +331,6 @@ src/kicad_tools/drc/checker.py	index	Value of type "int" is not indexable
 src/kicad_tools/drc/checker.py	operator	Unsupported right operand type for in ("int")
 src/kicad_tools/drc/cpp_backend.py	attr-defined	Module "kicad_tools.drc" has no attribute "drc_cpp"
 src/kicad_tools/drc/cpp_backend.py	unused-ignore	Unused "type: ignore" comment
-src/kicad_tools/drc/fixer.py	arg-type	Argument "layer" to "TraceInfo" has incompatible type "str | int | float | None"; expected "str"
-src/kicad_tools/drc/fixer.py	arg-type	Argument "uuid" to "TraceInfo" has incompatible type "str | int | float | None"; expected "str"
-src/kicad_tools/drc/fixer.py	arg-type	Argument "uuid" to "ViaInfo" has incompatible type "str | int | float | None"; expected "str"
-src/kicad_tools/drc/fixer.py	arg-type	Argument N to "float" has incompatible type "str | int | float | None"; expected "str | Buffer | SupportsFloat | SupportsIndex"
-src/kicad_tools/drc/fixer.py	arg-type	Argument N to "float" has incompatible type "str | int | float | None"; expected "str | Buffer | SupportsFloat | SupportsIndex"
-src/kicad_tools/drc/fixer.py	arg-type	Argument N to "float" has incompatible type "str | int | float | None"; expected "str | Buffer | SupportsFloat | SupportsIndex"
-src/kicad_tools/drc/fixer.py	arg-type	Argument N to "resolve_net_atom" has incompatible type "str | int | float | None"; expected "str | None"
-src/kicad_tools/drc/fixer.py	arg-type	Argument N to "resolve_net_atom" has incompatible type "str | int | float | None"; expected "str | None"
-src/kicad_tools/drc/fixer.py	arg-type	Argument N to "resolve_net_atom" has incompatible type "str | int | float | None"; expected "str | None"
-src/kicad_tools/drc/fixer.py	no-any-return	Returning Any from function declared to return "bool"
-src/kicad_tools/drc/fixer.py	no-any-return	Returning Any from function declared to return "bool"
 src/kicad_tools/drc/incremental.py	arg-type	Argument N to "add" of "set" has incompatible type "tuple[str, ...]"; expected "tuple[str, str]"
 src/kicad_tools/drc/local_rerouter.py	arg-type	Argument N to "float" has incompatible type "str | int | float | None"; expected "str | Buffer | SupportsFloat | SupportsIndex"
 src/kicad_tools/drc/local_rerouter.py	arg-type	Argument N to "float" has incompatible type "str | int | float | None"; expected "str | Buffer | SupportsFloat | SupportsIndex"

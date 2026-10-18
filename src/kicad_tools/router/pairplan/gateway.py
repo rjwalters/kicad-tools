@@ -241,30 +241,50 @@ def enumerate_gateways(
     return found[:cap], len(found)
 
 
-def gateway_side(gateway: Gateway, *, arriving: bool) -> bool:
+def gateway_side(gateway: Gateway, *, arriving: bool, through: bool = False) -> bool:
     """True when P's via is LEFT of the coupled body's travel at this end.
 
     The body leaves end A along the gateway heading and arrives at end B
-    against it.  "Left" is the same convention as
+    against it (``through=False``, the orientation every combination tried
+    since #6444 assumes).  "Left" is the same convention as
     :func:`~kicad_tools.router.lattice.coupled.side_bit`: the side an offset
     leg keeps all the way along the body, so both ends must agree.
+
+    ``through=True`` (issue #6836) is the **pass-under** orientation: the
+    body reaches the via pair from the PAD side, crossing the end's own pad
+    footprint on the gateway layer (legal only because those pads do not own
+    that layer -- the condition for a gateway at all).  Its travel at the
+    vias is the reverse of the ``through=False`` travel, so its side bit is
+    the opposite one.  Board 06rf's J1 is the case: the USB2 gateway vias
+    sit behind the A row, away from U1, and the only twist-free body runs
+    from U1 under the B and A rows on B.Cu.
     """
     h = HEADINGS[gateway.site.heading]
-    d = (-h[0], -h[1]) if arriving else h
+    d = (-h[0], -h[1]) if arriving != through else h
     n = (-d[1], d[0])
     vp, vn = gateway.site.via_p, gateway.site.via_n
     return (vp[0] - vn[0]) * n[0] + (vp[1] - vn[1]) * n[1] > 0.0
 
 
-def handedness_consistent(ga: Gateway | None, gb: Gateway | None) -> bool:
+def handedness_consistent(
+    ga: Gateway | None,
+    gb: Gateway | None,
+    *,
+    through_a: bool = False,
+    through_b: bool = False,
+) -> bool:
     """Whether a coupled body can join ``ga`` to ``gb`` without a twist.
 
     An end with no gateway (``None``, its pads already own the layer) keeps
     the pair agent's own parity search, so it never rules a combination out.
+    ``through_a`` / ``through_b`` select each end's body orientation (see
+    :func:`gateway_side`); both default to the pre-#6836 ``against`` model.
     """
     if ga is None or gb is None:
         return True
-    return gateway_side(ga, arriving=False) == gateway_side(gb, arriving=True)
+    return gateway_side(ga, arriving=False, through=through_a) == gateway_side(
+        gb, arriving=True, through=through_b
+    )
 
 
 def rank_gateway_combos(
@@ -280,6 +300,10 @@ def rank_gateway_combos(
     ends disagree on which side P runs (:func:`handedness_consistent`) is
     skipped: the body would need a polarity twist, which the pair agent
     declines.  Order is deterministic (cost, then list indices).
+
+    Every combination here uses the ``against`` orientation at both ends.
+    The pass-under combinations (issue #6836) are a separate, strictly later
+    group: :func:`rank_through_combos`.
     """
     combos: list[tuple[float, int, int, Gateway | None, Gateway | None]] = []
     for i, ga in enumerate(ends_a):
@@ -292,7 +316,60 @@ def rank_gateway_combos(
     return [(ga, gb) for _c, _i, _j, ga, gb in combos[:top_n]]
 
 
-def gateway_anchor_point(site: GatewaySite, reach: float, step: float = 0.05) -> Pt | None:
+#: Per-end body orientations of a pass-under combination, in try order:
+#: ``(through_a, through_b)``.  ``(False, False)`` is
+#: :func:`rank_gateway_combos`' group and never appears here.
+THROUGH_ORIENTATIONS: tuple[tuple[bool, bool], ...] = ((False, True), (True, False), (True, True))
+
+
+@dataclass(frozen=True)
+class GatewayCombo:
+    """One pass-under (end A, end B) combination (issue #6836).
+
+    ``through_a`` / ``through_b`` say which ends the coupled body reaches
+    from the pad side (see :func:`gateway_side`).  An end with no gateway
+    (``None``) is never ``through``.
+    """
+
+    ga: Gateway | None
+    gb: Gateway | None
+    through_a: bool
+    through_b: bool
+
+
+def rank_through_combos(
+    ends_a: list[Gateway | None],
+    ends_b: list[Gateway | None],
+    *,
+    top_n: int = MAX_GATEWAY_COMBOS,
+) -> list[GatewayCombo]:
+    """The ``top_n`` cheapest handedness-consistent PASS-UNDER combos (#6836).
+
+    The fallback group: a caller walks it only after every combination of
+    :func:`rank_gateway_combos` has declined, so a pair that couples today
+    keeps its combination (and copper) exactly.  At least one gatewayed end
+    is ``through``; an end with no gateway (``None``) cannot be.  Order is
+    deterministic: cost, then list indices, then
+    :data:`THROUGH_ORIENTATIONS` order.  Capped at ``top_n`` like the
+    ``against`` group, so the retry budget per segment at most doubles.
+    """
+    combos: list[tuple[float, int, int, int, GatewayCombo]] = []
+    for i, ga in enumerate(ends_a):
+        for j, gb in enumerate(ends_b):
+            for k, (ta, tb) in enumerate(THROUGH_ORIENTATIONS):
+                if (ta and ga is None) or (tb and gb is None):
+                    continue
+                if not handedness_consistent(ga, gb, through_a=ta, through_b=tb):
+                    continue
+                cost = (ga.cost if ga is not None else 0.0) + (gb.cost if gb is not None else 0.0)
+                combos.append((round(cost, 9), i, j, k, GatewayCombo(ga, gb, ta, tb)))
+    combos.sort(key=lambda c: (c[0], c[1], c[2], c[3]))
+    return [c[4] for c in combos[:top_n]]
+
+
+def gateway_anchor_point(
+    site: GatewaySite, reach: float, step: float = 0.05, *, through: bool = False
+) -> Pt | None:
     """Start of a gateway's coupled body (issue #6444).
 
     The nearest point along the gateway heading from the via pair's midpoint
@@ -300,9 +377,15 @@ def gateway_anchor_point(site: GatewaySite, reach: float, step: float = 0.05) ->
     from both vias, so the fat centerline can start there with the vias as
     obstacles.  ``None`` past 4 mm (never on a sane via pitch).
 
+    ``through=True`` (issue #6836, pass-under) walks the REVERSE heading
+    instead: the body reaches the vias from the pad side, so it starts
+    between the via pair and the pads it passes under.
+
     Moved from ``lattice/pathfinder.py`` (``_gateway_anchor``) by issue #6837.
     """
     h = HEADINGS[site.heading]
+    if through:
+        h = (-h[0], -h[1])
     g = ((site.via_p[0] + site.via_n[0]) / 2.0, (site.via_p[1] + site.via_n[1]) / 2.0)
     k = 0
     while k * step <= 4.0:

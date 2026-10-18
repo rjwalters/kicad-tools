@@ -362,3 +362,18 @@ def test_quantization_slack_does_not_trigger_fallback():
     assert not (v.actual_clearance_mm < 0.0), (
         "quantization-slack violation must NOT trigger severe-overlap fallback"
     )
+
+
+def test_coupled_pathfinder_has_no_swap_via_move():
+    """Issue #6853: the unsound swap-via move and its flag are gone."""
+    import inspect
+
+    import pytest
+
+    from kicad_tools.router.diffpair_routing import CoupledPathfinder
+
+    assert "allow_swap_via" not in inspect.signature(CoupledPathfinder.__init__).parameters
+    with pytest.raises(TypeError):
+        CoupledPathfinder(  # type: ignore[call-arg]
+            grid=None, rules=None, target_spacing_cells=2, allow_swap_via=True
+        )

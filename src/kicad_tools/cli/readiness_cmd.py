@@ -58,6 +58,12 @@ from typing import Any
 
 from .board_readiness import read_readiness
 from .format_options import FORMAT_JSON, add_format_flag, emit_json, stdout_to_stderr_when
+from .kicad_toolchain import (
+    KiCadEnvironmentError,
+    canonical_drc_report,
+    evidence_toolchain,
+    require_library_environment,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -260,6 +266,10 @@ def _run_native_drc(pcb: Path, report_path: Path) -> EngineRun:
                 or not isinstance(entry.get("items"), list)
             ):
                 raise ValueError("native DRC report contains a malformed finding")
+        # Issue #6962: a missing library table is an environment error, never
+        # evidence; and kicad-cli's finding order is not stable between runs.
+        require_library_environment(data, source=f"native DRC of {pcb.name}")
+        raw.write_text(json.dumps(canonical_drc_report(data), indent=4, ensure_ascii=False) + "\n")
         report = DRCReport.load(raw)
         errors = [v for v in report.violations if v.is_error]
         by_type: dict[str, int] = {}
@@ -281,6 +291,10 @@ def _run_native_drc(pcb: Path, report_path: Path) -> EngineRun:
             note=None,
         )
         result = EngineRun(True)
+    except KiCadEnvironmentError:
+        raw.unlink(missing_ok=True)
+        report_path.unlink(missing_ok=True)
+        raise
     except Exception as exc:
         payload["note"] = str(exc)
         result = EngineRun(False, str(exc))
@@ -784,6 +798,9 @@ class ReadinessOptions:
     # symbol/footprint libraries) may be collected from.  ``None`` keeps the
     # historical boundary (``board_dir``).
     project_root: Path | None = None
+    # Timestamp recorded as ``checked_at`` (and as every native DRC report's
+    # ``date``, Issue #6962).  ``None`` means "now", fixed once per run.
+    checked_at: str | None = None
 
     @property
     def root(self) -> Path:
@@ -937,6 +954,7 @@ def resolve_options(args: argparse.Namespace) -> tuple[ReadinessOptions | None, 
             fill_tolerance_mm2=float(args.fill_tolerance),
             operation="generate" if args.generate else "verify",
             project_root=project_root,
+            checked_at=getattr(args, "checked_at", None),
         ),
         None,
     )
@@ -1297,11 +1315,29 @@ def _gate_kct_check(options: ReadinessOptions, engines: Engines) -> tuple[CheckO
     )
 
 
+def _normalize_report_date(raw: Path, options: ReadinessOptions) -> None:
+    """Stamp a raw kicad-cli report with the run's ``checked_at`` (Issue #6962).
+
+    kicad-cli writes its wall-clock time; the run's own timestamp makes two runs
+    with the same ``--checked-at`` byte-identical.
+    """
+    data = _read_json(raw)
+    if "date" not in data or options.checked_at is None:
+        return
+    raw.write_text(
+        json.dumps(
+            canonical_drc_report(data, date=options.checked_at), indent=4, ensure_ascii=False
+        )
+        + "\n"
+    )
+
+
 def _gate_native_drc(options: ReadinessOptions, engines: Engines) -> tuple[CheckOutcome, dict]:
     """Gate 2 — the mandatory independent native check of saved candidate copper."""
     report_path = options.evidence_dir / "native-drc.json"
     report_path.parent.mkdir(parents=True, exist_ok=True)
     run = engines.native_drc(options.pcb, report_path)
+    _normalize_report_date(report_path.with_name(report_path.stem + "-raw.json"), options)
     evidence_rel = _rel(options, report_path)
     payload = _read_json(report_path)
     if not run.ok or not payload.get("ran"):
@@ -1639,7 +1675,7 @@ def _write_full_manifest(options: ReadinessOptions, warning_counts: dict[str, in
         {
             "version": manifest.get("version", "1.0"),
             "producer": "kct readiness",
-            "generated_at": _iso_now(),
+            "generated_at": options.checked_at or _iso_now(),
             "manufacturer": options.manufacturer,
             "mode": options.mode,
             "files": files,
@@ -1864,7 +1900,7 @@ def _write_readme(
         "",
         f"Fabrication tier : {options.manufacturer}",
         f"Mode             : {options.mode}",
-        f"Generated        : {_iso_now()}",
+        f"Generated        : {options.checked_at or _iso_now()}",
         "",
     ]
     if options.assembly:
@@ -2378,7 +2414,7 @@ def build_report(
 
     report: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
-        "checked_at": _iso_now(),
+        "checked_at": options.checked_at or _iso_now(),
         "mode": options.mode,
         "status": status,
         "blockers": blockers,
@@ -2571,6 +2607,8 @@ def run_readiness(options: ReadinessOptions, engines: Engines | None = None) -> 
     PCB, native context, instructions, manifest, nested ZIP and outer archive.
     """
     engines = engines or Engines()
+    if options.checked_at is None:
+        options = replace(options, checked_at=_iso_now())
     original = options.board_dir.resolve()
     project_root = options.root
     try:
@@ -2649,6 +2687,10 @@ def run_readiness(options: ReadinessOptions, engines: Engines | None = None) -> 
             report_path.parent.mkdir(parents=True, exist_ok=True)
             report_path.write_text(json.dumps(report, indent=2) + "\n")
             return replace(result, report_path=report_path)
+        except KiCadEnvironmentError:
+            # Issue #6962: the environment, not the board, failed -- write no
+            # evidence at all, not even a blocked diagnostic receipt.
+            raise
         except Exception as exc:
             if "staged" in locals() and staged.evidence_dir.exists():
                 shutil.copytree(staged.evidence_dir, diagnostics, dirs_exist_ok=True)
@@ -2988,6 +3030,16 @@ def add_readiness_arguments(parser: argparse.ArgumentParser) -> None:
             f"saved-vs-refilled equivalence check (default: {DEFAULT_FILL_TOLERANCE_MM2})"
         ),
     )
+    parser.add_argument(
+        "--checked-at",
+        dest="checked_at",
+        default=None,
+        metavar="ISO",
+        help=(
+            "Timestamp to record as checked_at and as each native DRC report's date "
+            "(default: now). Fix it to reproduce evidence byte-for-byte."
+        ),
+    )
     add_format_flag(parser)
 
 
@@ -3019,8 +3071,29 @@ def run_from_args(args: argparse.Namespace, engines: Engines | None = None) -> i
             print(f"error: {error}", file=sys.stderr)
         return 2
 
-    with stdout_to_stderr_when(as_json):
-        result = run_readiness(options, engines)
+    try:
+        with stdout_to_stderr_when(as_json):
+            if engines is None:
+                # Issue #6962: production engines run on the pinned toolchain
+                # (isolated library tables, qualified kicad-cli version).
+                with evidence_toolchain(mounts=[options.root]):
+                    result = run_readiness(options, engines)
+            else:
+                result = run_readiness(options, engines)
+    except KiCadEnvironmentError as exc:
+        error = f"KiCad environment refused; no evidence written: {exc}"
+        if as_json:
+            emit_json(
+                {
+                    "command": "readiness",
+                    "success": False,
+                    "error": error,
+                    "status": STATUS_UNVERIFIED,
+                }
+            )
+        else:
+            print(f"error: {error}", file=sys.stderr)
+        return 2
 
     if as_json:
         emit_json(

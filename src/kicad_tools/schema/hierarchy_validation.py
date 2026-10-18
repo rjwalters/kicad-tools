@@ -176,7 +176,7 @@ def validate_hierarchy(
     result = ValidationResult(root_schematic=root_schematic)
 
     # Build hierarchy
-    root = build_hierarchy(root_schematic)
+    root = build_hierarchy(root_schematic, strict_root=True)
 
     # Validate each node
     for node in root.all_nodes():

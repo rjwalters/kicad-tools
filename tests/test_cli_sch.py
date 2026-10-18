@@ -7,30 +7,22 @@ from pathlib import Path
 import pytest
 
 
-class TestSchListSymbols:
-    """Tests for sch_list_symbols.py CLI."""
+class TestSymbolsMain:
+    """Tests for the ``kct symbols`` CLI (``kicad_tools.cli.symbols.main``)."""
 
     def test_file_not_found(self, capsys):
         """Test handling of missing file."""
-        import sys
+        from kicad_tools.cli.symbols import main
 
-        from kicad_tools.cli.sch_list_symbols import main
-
-        # Capture the sys.exit
-        with pytest.raises(SystemExit) as exc_info:
-            sys.argv = ["sch-list-symbols", "nonexistent.kicad_sch"]
-            main()
-
-        assert exc_info.value.code == 1
+        assert main(["nonexistent.kicad_sch"]) == 1
         captured = capsys.readouterr()
         assert "Error" in captured.err
 
-    def test_table_output(self, simple_rc_schematic: Path, capsys, monkeypatch):
+    def test_table_output(self, simple_rc_schematic: Path, capsys):
         """Test table format output."""
-        from kicad_tools.cli.sch_list_symbols import main
+        from kicad_tools.cli.symbols import main
 
-        monkeypatch.setattr("sys.argv", ["sch-list-symbols", str(simple_rc_schematic)])
-        main()
+        assert main([str(simple_rc_schematic)]) == 0
 
         captured = capsys.readouterr()
         # Should have some output
@@ -38,28 +30,22 @@ class TestSchListSymbols:
         # Should show symbol table or "No symbols found"
         assert "Ref" in captured.out or "No symbols" in captured.out
 
-    def test_json_output(self, simple_rc_schematic: Path, capsys, monkeypatch):
+    def test_json_output(self, simple_rc_schematic: Path, capsys):
         """Test JSON format output."""
-        from kicad_tools.cli.sch_list_symbols import main
+        from kicad_tools.cli.symbols import main
 
-        monkeypatch.setattr(
-            "sys.argv", ["sch-list-symbols", str(simple_rc_schematic), "--format", "json"]
-        )
-        main()
+        assert main([str(simple_rc_schematic), "--format", "json"]) == 0
 
         captured = capsys.readouterr()
         # Should be valid JSON
         data = json.loads(captured.out)
         assert isinstance(data, list)
 
-    def test_csv_output(self, simple_rc_schematic: Path, capsys, monkeypatch):
+    def test_csv_output(self, simple_rc_schematic: Path, capsys):
         """Test CSV format output."""
-        from kicad_tools.cli.sch_list_symbols import main
+        from kicad_tools.cli.symbols import main
 
-        monkeypatch.setattr(
-            "sys.argv", ["sch-list-symbols", str(simple_rc_schematic), "--format", "csv"]
-        )
-        main()
+        assert main([str(simple_rc_schematic), "--format", "csv"]) == 0
 
         captured = capsys.readouterr()
         # Should have CSV header
@@ -67,25 +53,20 @@ class TestSchListSymbols:
         assert len(lines) >= 1
         assert "Reference" in lines[0]
 
-    def test_filter_option(self, simple_rc_schematic: Path, capsys, monkeypatch):
+    def test_filter_option(self, simple_rc_schematic: Path, capsys):
         """Test filtering by reference pattern."""
-        from kicad_tools.cli.sch_list_symbols import main
+        from kicad_tools.cli.symbols import main
 
-        monkeypatch.setattr(
-            "sys.argv", ["sch-list-symbols", str(simple_rc_schematic), "--filter", "R*"]
-        )
-        main()
+        assert main([str(simple_rc_schematic), "--filter", "R*"]) == 0
 
         captured = capsys.readouterr()
-        # Should work without error
-        assert captured.err == "" or "Error" not in captured.err
+        assert "Error" not in captured.err
 
-    def test_verbose_output(self, simple_rc_schematic: Path, capsys, monkeypatch):
+    def test_verbose_output(self, simple_rc_schematic: Path, capsys):
         """Test verbose output."""
-        from kicad_tools.cli.sch_list_symbols import main
+        from kicad_tools.cli.symbols import main
 
-        monkeypatch.setattr("sys.argv", ["sch-list-symbols", str(simple_rc_schematic), "--verbose"])
-        main()
+        assert main([str(simple_rc_schematic), "--verbose"]) == 0
 
         captured = capsys.readouterr()
         # Verbose should include additional columns like Footprint or Position
@@ -259,16 +240,17 @@ class TestSchListLabels:
 class TestSchHierarchy:
     """Tests for sch_hierarchy.py CLI."""
 
-    def test_missing_file_handles_gracefully(self, capsys):
-        """Test that missing files are handled gracefully (returns empty hierarchy)."""
+    def test_missing_file_is_an_error(self, capsys):
+        """A missing root schematic is an error, not an empty hierarchy (#7028)."""
         from kicad_tools.cli.sch_hierarchy import main
 
-        # The hierarchy builder handles missing files by returning an empty hierarchy
-        main(["nonexistent.kicad_sch"])
+        with pytest.raises(SystemExit) as exc_info:
+            main(["nonexistent.kicad_sch"])
+        assert exc_info.value.code == 1
 
         captured = capsys.readouterr()
-        # Should output something (even if it's an empty hierarchy)
-        assert len(captured.out) > 0
+        assert "File not found" in captured.err
+        assert "nonexistent.kicad_sch" in captured.err
 
     def test_tree_command(self, simple_rc_schematic: Path, capsys):
         """Test tree command (default)."""
@@ -417,17 +399,18 @@ class TestSchHierarchy:
 class TestSchSummary:
     """Tests for sch_summary.py CLI."""
 
-    def test_missing_file_handles_gracefully(self, capsys, monkeypatch):
-        """Test that missing files are handled gracefully (returns empty summary)."""
+    def test_missing_file_is_an_error(self, capsys, monkeypatch):
+        """A missing root schematic is an error, not an empty summary (#7028)."""
         from kicad_tools.cli.sch_summary import main
 
-        # The summary builder handles missing files gracefully
         monkeypatch.setattr("sys.argv", ["sch-summary", "nonexistent.kicad_sch"])
-        main()
+        with pytest.raises(SystemExit) as exc_info:
+            main()
+        assert exc_info.value.code == 1
 
         captured = capsys.readouterr()
-        # Should output a summary (even if mostly empty)
-        assert "Schematic:" in captured.out
+        assert "File not found" in captured.err
+        assert "Schematic:" not in captured.out
 
     def test_text_output(self, simple_rc_schematic: Path, capsys, monkeypatch):
         """Test text format output."""
@@ -481,16 +464,17 @@ class TestSchSummary:
         data = json.loads(captured.out)
         assert "file" in data
 
-    def test_run_summary_missing_file_handles_gracefully(self, capsys):
-        """Test run_summary with missing file returns success (empty summary)."""
+    def test_run_summary_missing_file_is_an_error(self, capsys):
+        """run_summary on a missing root schematic returns 1, not 0 (#7028)."""
         from pathlib import Path
 
         from kicad_tools.cli.sch_summary import run_summary
 
-        # The summary builder handles missing files gracefully
         result = run_summary(Path("nonexistent.kicad_sch"))
-        # Returns 0 because it produces an empty summary, not an error
-        assert result == 0
+        assert result == 1
+
+        captured = capsys.readouterr()
+        assert "File not found" in captured.err
 
     def test_gather_summary(self, simple_rc_schematic: Path):
         """Test gather_summary function."""

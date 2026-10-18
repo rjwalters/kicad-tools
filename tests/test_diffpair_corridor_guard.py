@@ -993,6 +993,15 @@ def test_negotiated_tail_abandons_instead_of_running_safety_nets_past_the_deadli
     """A spent deadline at the post-loop safety nets: skip them and abandon.
 
     Outside an excursion the same call runs every safety net as before.
+
+    Timing-independent by construction (issue #6862).  ``deadline(0.0)`` is
+    spent the instant it is installed, so the tail's ``remaining()`` is
+    ``<= 0`` however fast or slow the host is.  The wall strands SIG in BOTH
+    calls, so the loop can never take the all-routed early return that skips
+    the tail.  Without the wall, SIG routed inside the spent-deadline
+    search floor whenever a warm worker reached net 0 before the 0.01 s stage
+    budget lapsed.  The loop then returned before the abandon decision, and
+    the test failed on whether setup took more or less than 10 ms.
     """
     from kicad_tools.router import wall_deadline as wd
 
@@ -1005,14 +1014,17 @@ def test_negotiated_tail_abandons_instead_of_running_safety_nets_past_the_deadli
         monkeypatch.setattr(Autorouter, name, lambda self, *_a, _n=name, **_k: ran.append(_n) or [])
 
     router = _channel_router()
+    _commit(router, _wall_routes(router))
     with wd.deadline(0.0) as excursion:
         router.route_all_negotiated(max_iterations=2, timeout=1000.0, per_net_timeout=5.0)
     assert ran == []
     assert excursion.abandoned is True
+    # The abandon came from the post-loop safety-net decision, not elsewhere.
+    assert excursion.abandon_reason is not None
+    assert "post-loop DRC safety nets" in excursion.abandon_reason
 
-    # Control: same tail reached without an excursion.  The wall strands SIG
-    # so the loop exits through the post-loop tail rather than the
-    # all-routed early return.
+    # Control: same tail reached without an excursion (same wall, same
+    # stranded SIG, so the same post-loop tail).
     router = _channel_router()
     _commit(router, _wall_routes(router))
     router.route_all_negotiated(max_iterations=2, timeout=1000.0, per_net_timeout=5.0)

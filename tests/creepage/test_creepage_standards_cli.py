@@ -17,7 +17,7 @@ from kicad_tools._shapely import has_shapely
 from kicad_tools.cli.commands.creepage import run_creepage_command
 from kicad_tools.cli.parser import create_parser
 
-from .fixtures import board_source
+from .fixtures import board_source, board_two_pad_gap_source
 
 pytestmark = pytest.mark.skipif(not has_shapely(), reason="creepage requires shapely")
 
@@ -96,16 +96,23 @@ def test_standard_json_carries_provenance(tmp_path, capsys):
     assert payload["pollution_degree"] == 2
     assert payload["material_group"] == "IIIa"
     assert payload["required_creepage_mm"] == 2.0
-    assert payload["required_clearance_mm"] == 0.2  # PD2 floor
+    # 170 V RMS -> Table F.1 300 V row, OVC II (default) -> 2500 V impulse ->
+    # Table F.2 1.5 mm (issue #7057; was 0.2 mm when F.2 was keyed on the
+    # 240 V working-voltage peak).
+    assert payload["required_clearance_mm"] == 1.5
+    clp = payload["clearance_provenance"]
+    assert clp["overvoltage_category"] == "II"
+    assert clp["impulse_withstand_voltage_v"] == 2500.0
+    assert clp["governing_component"] == "impulse"
     cp = payload["creepage_provenance"]
-    assert cp["table_id"] == "Table F.4"
+    assert cp["table_id"] == "Table F.5"
     assert cp["voltage_row_used_v"] == 200.0
     assert "disclaimer" in cp
     # Every pair carries the derived requirement + governing bound.
     for pair in payload["pairs"]:
         assert pair["required_creepage_mm"] == 2.0
         assert pair["governing_bound"] == "derived"
-        assert pair["required_clearance_mm"] == 0.2
+        assert pair["required_clearance_mm"] == 1.5
         assert "clearance_pass" in pair
         assert "provenance" in pair
         # Phase-2 drift-guard (#4403): ``relationship`` is always emitted; the
@@ -497,3 +504,84 @@ def test_single_voltage_json_does_not_leak_map_keys(tmp_path, capsys):
     assert payload["required_creepage_mm"] is not None
     for leaked in ("voltage_source", "voltage_map", "edge_voltage_v"):
         assert leaked not in payload
+
+
+# ---------------------------------------------------------------------------
+# Issue #7057: clearance keyed on the rated impulse voltage (Table F.1 -> F.2)
+# ---------------------------------------------------------------------------
+
+
+def _gap_hv_map_file(tmp_path):
+    p = tmp_path / "net_class_map.json"
+    p.write_text(json.dumps({"HV_LINE": {"name": "HV"}}))
+    return p
+
+
+def _repro_argv(pcb, ncm, *extra):
+    return [
+        "creepage",
+        str(pcb),
+        "--net-class-map",
+        str(ncm),
+        "--standard",
+        "iec60664",
+        "--working-voltage",
+        "230",
+        "--pollution-degree",
+        "2",
+        "--material-group",
+        "I",
+        *extra,
+    ]
+
+
+def test_230v_mains_1p3mm_gap_fails_clearance(tmp_path, capsys):
+    """Reporter's repro: 1.3 mm HV_LINE<->SELV gap at 230 V must FAIL (1.5 mm)."""
+    pcb = _write(tmp_path, board_two_pad_gap_source(1.3))
+    ncm = _gap_hv_map_file(tmp_path)
+    rc = _run(_repro_argv(pcb, ncm))
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "Derived required clearance: 1.500 mm" in out
+    assert "rated impulse 2500 V" in out
+    selv_rows = [ln for ln in out.splitlines() if ln.startswith("HV_LINE") and "SELV" in ln]
+    assert selv_rows, out
+    assert "1.500" in selv_rows[0]
+    assert "FAIL" in selv_rows[0]
+
+
+def test_230v_mains_1p3mm_gap_json(tmp_path, capsys):
+    pcb = _write(tmp_path, board_two_pad_gap_source(1.3))
+    ncm = _gap_hv_map_file(tmp_path)
+    rc = _run(_repro_argv(pcb, ncm, "--format", "json"))
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == 1
+    assert payload["required_clearance_mm"] == 1.5
+    assert payload["required_creepage_mm"] == 1.25  # Table F.5, 250 V row, group I
+    pair = next(p for p in payload["pairs"] if p["net_b"] == "SELV")
+    assert pair["clearance_mm"] == pytest.approx(1.3)
+    assert pair["required_clearance_mm"] == 1.5
+    assert pair["clearance_pass"] is False
+    assert pair["pass"] is False
+
+
+def test_230v_mains_ovc_i_passes_1p3mm_gap(tmp_path, capsys):
+    """OVC I (1500 V impulse -> 0.5 mm) clears the 1.3 mm gap; creepage 1.25 too."""
+    pcb = _write(tmp_path, board_two_pad_gap_source(1.3))
+    ncm = _gap_hv_map_file(tmp_path)
+    rc = _run(_repro_argv(pcb, ncm, "--overvoltage-category", "I"))
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    assert "Derived required clearance: 0.500 mm" in out
+
+
+def test_overvoltage_category_rejects_invalid_value(capsys):
+    with pytest.raises(SystemExit):
+        create_parser().parse_args(
+            ["creepage", "x.kicad_pcb", "--standard", "iec60664", "--overvoltage-category", "V"]
+        )
+
+
+def test_overvoltage_category_defaults_to_ii():
+    args = create_parser().parse_args(["creepage", "x.kicad_pcb"])
+    assert args.overvoltage_category == "II"

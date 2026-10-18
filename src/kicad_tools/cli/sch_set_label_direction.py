@@ -24,6 +24,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from kicad_tools.cli.sch_json import add_format_flag, record, run_with_json_summary
+from kicad_tools.cli.sch_wire_common import (
+    _collect_schematic_files,
+)
 
 VALID_SHAPES = ("input", "output", "bidirectional", "tri_state", "passive")
 
@@ -54,41 +57,6 @@ class SetLabelDirectionResult:
 # Hierarchy traversal (shared helper, duplicated from sch_set_footprint.py to
 # keep the module self-contained without circular imports).
 # ---------------------------------------------------------------------------
-
-
-def _find_subsheet_files(text: str, schematic_dir: Path) -> list[Path]:
-    """Extract sub-sheet file paths from schematic text."""
-    subsheets: list[Path] = []
-    pattern = re.compile(r'\(property "Sheetfile" "([^"]+)"')
-    for match in pattern.finditer(text):
-        subsheet_path = schematic_dir / match.group(1)
-        if subsheet_path.exists():
-            subsheets.append(subsheet_path)
-    return subsheets
-
-
-def _collect_schematic_files(root_path: Path) -> list[Path]:
-    """Recursively collect all schematic files in the hierarchy."""
-    visited: set[Path] = set()
-    result: list[Path] = []
-
-    def _walk(sch_path: Path) -> None:
-        resolved = sch_path.resolve()
-        if resolved in visited:
-            return
-        visited.add(resolved)
-        result.append(sch_path)
-
-        try:
-            text = sch_path.read_text(encoding="utf-8")
-        except OSError:
-            return
-
-        for sub in _find_subsheet_files(text, sch_path.parent):
-            _walk(sub)
-
-    _walk(root_path)
-    return result
 
 
 # ---------------------------------------------------------------------------
