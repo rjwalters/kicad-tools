@@ -608,6 +608,12 @@ def refresh_bundle(
                 (staged / target).write_bytes(data)
             log(f"  native ERC {job.schematic}: 0 violations -> {len(job.targets)} report copies")
 
+        # Issue #7348 / #7283: run before the archives and manifest, which hash
+        # the report copies written here (same order as refresh_readiness).
+        drc_errors, drc_raw = rr.gate_native_drc(staged, cfg)
+        for target in cfg.drc_targets:
+            (staged / target).write_bytes(drc_raw)
+
         for archive, search in cfg.archives:
             changed = rr.rebuild_archive(staged / archive, [staged / s for s in search])
             log(f"  {archive}: rebuilt; members with new content {changed}")
@@ -628,7 +634,6 @@ def refresh_bundle(
         changed = rr.rebuild_archive(out / "manufacturing.zip", [mfg])
         log(f"  output/manufacturing.zip: rebuilt; members with new content {changed}")
 
-        drc_errors = rr.gate_native_drc(staged, cfg)
         lvs_clean, lvs_mismatches = rr.gate_kct_check(staged, cfg)
         routed_pct = rr.gate_net_status(staged, cfg)
         rr.gate_sync(staged, cfg)
@@ -649,6 +654,9 @@ def refresh_bundle(
             )
         if report.get("status") != "ready" or report.get("blockers"):
             raise GateFailure("readiness.json is not a ready report; refusing to re-pin")
+        if cfg.drc_targets:
+            pcb_sha = sha256(staged / cfg.routed_pcb)
+            report.setdefault("report_sources", {}).update(dict.fromkeys(cfg.drc_targets, pcb_sha))
         for name in report["inputs"]:
             report["inputs"][name] = sha256(staged / name)
         report["checked_at"] = checked_at
