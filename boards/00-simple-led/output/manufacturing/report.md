@@ -1,8 +1,8 @@
 ---
 title: "simple_led_routed"
 subtitle: "Design Report"
-author: "kicad-tools 0.22.0"
-date: "Rev 1 | 2026-10-13 | jlcpcb"
+author: "kicad-tools 0.23.0"
+date: "Rev 1 | 2026-10-18 | jlcpcb"
 geometry: "margin=1in"
 fontsize: 11pt
 colorlinks: true
@@ -120,21 +120,27 @@ The following 2 through-hole components are **excluded from the SMT pick-and-pla
 | Metric | Count |
 |--------|-------|
 | Errors | 0 |
-| Warnings | 0 |
+| Warnings | 1 |
 | Blocking | 0 |
 
 **Status**: PASS
+### Violations by Type
+
+| Violation Type | Count |
+|----------------|-------|
+| pin1_marker_obscured | 1 |
 
 
 \newpage
 
 ## Manufacturing Readiness
 
-**Verdict**: READY
+**Verdict**: WARNING
 
 ### Action Items
 
-- **[OPTIONAL]** Verify zone fill in KiCad for 2 zone-connected nets
+- **[OPTIONAL]** Refill zones to verify 2 zone-connected nets, then re-run kct audit
+- **[OPTIONAL]** Review 1 DRC warnings
 
 
 \newpage
