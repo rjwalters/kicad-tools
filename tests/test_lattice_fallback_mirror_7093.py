@@ -85,11 +85,23 @@ def _decline_coupled(pf: LatticePathfinder, monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.setattr(pf, "_route_pair_impl", lambda *a, **k: (None, "pair-no-path"))
 
 
+def _ungate_parity(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Let via parity win at any skew / length cost (the pre-#7284 ranking)."""
+    from kicad_tools.router.lattice import pathfinder
+
+    monkeypatch.setattr(pathfinder, "_PARITY_SKEW_TOLERANCE_MM", float("inf"))
+    monkeypatch.setattr(pathfinder, "_PARITY_LENGTH_TOLERANCE_MM", float("inf"))
+    monkeypatch.setattr(LatticePathfinder, "_pair_skew_budget", lambda self, pc: float("inf"))
+
+
 def test_fallback_legs_with_asymmetric_layer_changes_get_equal_vias(monkeypatch) -> None:
     # Fails without the mirrored search: every plain / guided candidate is
-    # (0, 1) or (1, 0) vias, and the pair commits (0, 1).
+    # (0, 1) or (1, 0) vias, and the pair commits (0, 1).  The parity gate
+    # (#7284) is lifted here because this fixture's cheapest mirrored pair
+    # costs skew and length (see the next test); this one checks the mirror.
     pf, pc = _gapped_pair()
     _decline_coupled(pf, monkeypatch)
+    _ungate_parity(monkeypatch)
     routes, stats = pf.route_netset([], coupled=[pc], uncoupled_fallback=True)
     assert pf.pair_outcomes[pc.key] == "uncoupled-fallback:pair-no-path"
     assert stats.routed == 2 and stats.total == 2, stats
@@ -103,6 +115,19 @@ def test_fallback_legs_with_asymmetric_layer_changes_get_equal_vias(monkeypatch)
             if a.layer == b.layer:
                 d = seg_seg_dist((a.x1, a.y1), (a.x2, a.y2), (b.x1, b.y1), (b.x2, b.y2))
                 assert d >= gap - 1e-6
+
+
+def test_mirrored_parity_that_costs_skew_and_length_is_not_kept(monkeypatch) -> None:
+    # Issue #7284.  The fixture's best mirrored (1, 1) pair measures 26.760 /
+    # 28.720 mm (skew 1.960) against the (0, 1) pair's 25.325 / 25.931 mm
+    # (skew 0.606): 1.35 mm more skew and 2.8 mm on the longer leg, past the
+    # gate's tolerances and the class's 0.5 mm skew budget, so the
+    # asymmetric pair stays.
+    pf, pc = _gapped_pair()
+    _decline_coupled(pf, monkeypatch)
+    routes, stats = pf.route_netset([], coupled=[pc], uncoupled_fallback=True)
+    assert stats.routed == 2 and stats.total == 2, stats
+    assert sorted(pf.pair_via_mismatch[pc.key]) == [0, 1]
 
 
 def test_fixture_candidates_are_all_asymmetric_without_the_mirror(monkeypatch) -> None:
