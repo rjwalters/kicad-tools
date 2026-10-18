@@ -487,11 +487,11 @@ def create_led_pcb(output_dir: Path) -> Path:
         fab_stroke = "(stroke (width 0.1) (type solid))"
         fab = "\n".join(
             [
-                '    (fp_line (start -2.5 -1.469694) (end -2.5 1.469694) '
+                "    (fp_line (start -2.5 -1.469694) (end -2.5 1.469694) "
                 f'{fab_stroke} (layer "F.Fab") (uuid "{_FAB_UUIDS()}"))',
-                '    (fp_arc (start -2.5 -1.469694) (mid 2.9 0) (end -2.5 1.469694) '
+                "    (fp_arc (start -2.5 -1.469694) (mid 2.9 0) (end -2.5 1.469694) "
                 f'{fab_stroke} (layer "F.Fab") (uuid "{_FAB_UUIDS()}"))',
-                '    (fp_circle (center 0 0) (end 2.5 0) '
+                "    (fp_circle (center 0 0) (end 2.5 0) "
                 f'{fab_stroke} (fill no) (layer "F.Fab") (uuid "{_FAB_UUIDS()}"))',
             ]
         )
