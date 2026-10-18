@@ -227,10 +227,15 @@ def test_committed_board03_usb_dm_is_connected(board03):
 
 
 def test_board03_with_b7_stub_cut_reports_b7_stranded(board03):
-    """The curator's reproduction: delete only B7's first B.Cu stub segment."""
+    """The curator's reproduction: delete only B7's first stub segment.
+
+    Issue #6394: in the copper re-derived from a fresh lattice route, B7's
+    only stub is the In2.Cu segment (146.925, 61.95) -> (146.075, 62.8); the
+    pre-#6394 copper used a B.Cu stub to (146.925, 62.45).
+    """
     text, pads, names, nid = board03
     cut = re.sub(
-        r"\(segment\s*\(start 146\.925 61\.95\)\s*\(end 146\.925 62\.45\)"
+        r"\(segment\s*\(start 146\.925 61\.95\)\s*\(end 146\.075 62\.8\)"
         r"(?:[^()]*\([^()]*\))*[^()]*\)",
         "",
         text,

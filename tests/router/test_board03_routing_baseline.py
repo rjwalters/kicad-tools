@@ -837,9 +837,9 @@ def test_routing_reach_deterministic_across_seeds(unrouted_pcb_path: Path, tmp_p
 
 
 #: Router Power-class violations in the committed board-03 copper, exposed by
-#: #6390 and tracked in #6394 (also the tolerance entry in
-#: ``.github/routed-drc-tolerance.yml``).  Drop to 0 when that lands.
-BOARD03_KNOWN_NETCLASS_VIOLATIONS = 13
+#: #6390.  #6394 re-derived the plan from a class-clean lattice route and
+#: removed the ``.github/routed-drc-tolerance.yml`` entry: 13 -> 0.
+BOARD03_KNOWN_NETCLASS_VIOLATIONS = 0
 
 
 def test_committed_pcb_drc_state() -> None:
@@ -940,6 +940,41 @@ def test_committed_pcb_drc_state() -> None:
         # All rules seen must be in our expected set; new rules indicate
         # a new failure mode worth investigating.
         unexpected = rules_seen - EXPECTED_COMMITTED_DRC_RULES - {"netclass_clearance_copper"}
+        # Issue #7093 (operator ruling on #6394): the ONE excepted finding is
+        # board 03's USB_D via-count-mismatch warning.  ``diffpair_uncoupled_length``
+        # stays out of EXPECTED_COMMITTED_DRC_RULES; it is dropped here only when
+        # every finding it reports is that one, and the BY RULE line agrees.
+        # Remove this block when #7093 lands.
+        if "diffpair_uncoupled_length" in unexpected:
+            from kicad_tools.router.rules import net_class_map_from_path
+            from kicad_tools.schema.pcb import PCB
+            from kicad_tools.validate.checker import DRCChecker
+            from tests.board03_via_count_exception_7093 import BOARD, is_excepted
+
+            ncm = net_class_map_from_path(
+                COMMITTED_ROUTED_PCB.parent / "net_class_map.json",
+                pcb_path=COMMITTED_ROUTED_PCB,
+            )
+            findings = [
+                v
+                for v in DRCChecker(
+                    PCB.load(str(COMMITTED_ROUTED_PCB)),
+                    manufacturer="jlcpcb-tier1",
+                    layers=4,
+                    net_class_map=ncm,
+                )
+                .check_diffpair_uncoupled_length()
+                .violations
+                if v.severity in ("error", "warning")
+            ]
+            line = re.search(r"\bdiffpair_uncoupled_length:\s+(\d+) (\w+)", by_rule_match.group(1))
+            if (
+                findings
+                and all(is_excepted(BOARD, v) for v in findings)
+                and line is not None
+                and (int(line.group(1)), line.group(2)) == (len(findings), "warning")
+            ):
+                unexpected.discard("diffpair_uncoupled_length")
         assert not unexpected, (
             f"Committed routed PCB has NEW DRC rules failing on "
             f"jlcpcb-tier1: {sorted(unexpected)}.  The June 7 2026 "
