@@ -15,6 +15,15 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-18
 
+- **PR #7329**: ci: gate Windows Smoke on main runs and warn on Test job time budget
+- **Issue #7327** (closed): CI: Windows Smoke never runs on main verification (== 'push' gate); Test job worst case 74.3 min vs 75 min timeout
+- **PR #7321**: fix(check): fixture folders never adopt parent board project.kct
+- **Issue #7320** (closed): main CI: Match-Group gate fails spec_conformance — fixture PCB picks up parent board's 6-layer project.kct (#7303 regression)
+- **Issue #7325** (closed): test_board_04_drill_clearance_regen fails: manufacturing-requirements.json missing from regen tmp dir (manufacturing_process.py:637)
+- **PR #7316**: feat(readiness): record known issues in readiness.json; open defects block ready
+- **Issue #7261** (closed): Ready claims omit known open defects: add readiness known_issues (via --ack-warnings sibling) surfaced by fleet status and site; drop stale board 04 status prose
+- **PR #7286**: fix: apply Hammerstad-Jensen 1980 thickness terms to microstrip Z0
+- **Issue #7076** (closed): Microstrip Z0 with copper thickness reads 1.6-3.7 % low (docstring claims 0.2 %)
 - **PR #7315**: feat(cli): one sign-off exit gate with JSON verdict/exit_code (Part B of #7230)
 - **Issue #7230** (closed): One sign-off exit-code contract: kct drc --net/--type/--category exits 0 on DRC errors, kct check JSON says passed while exiting 2, exit 2 means four things
 - **PR #7287**: feat(pcb): add waypoints and internal_pad stubs to PCBLayout.route
