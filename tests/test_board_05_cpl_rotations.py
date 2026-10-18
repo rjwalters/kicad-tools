@@ -60,7 +60,7 @@ def test_board05_saved_cpl_smt_rows_apply_rotation_profile(tmp_path):
     reason=(
         "#7268: the committed board 05 CPL predates THT inclusion (#7239) and lacks "
         "J1-J5/RV1; refresh_readiness.py refuses to re-pin it on #7220 "
-        "via_at_pad_edge warnings"
+        "via_at_pad_edge warnings (#7273; old-frame CPL, #7241)"
     ),
 )
 def test_board05_saved_cpl_includes_tht_rows():

@@ -35,7 +35,7 @@ def test_board04_package_export_applies_rotation_profile(tmp_path):
     reason=(
         "#7268: the committed board 04 CPL predates THT inclusion (#7239) and lacks "
         "J1/Y1; refresh_readiness.py refuses to re-pin it on #7220 thermal_asymmetry "
-        "warnings"
+        "warnings (#7273)"
     ),
 )
 def test_board04_saved_cpl_matches_fresh_export(tmp_path):
