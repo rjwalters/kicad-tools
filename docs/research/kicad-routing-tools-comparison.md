@@ -896,62 +896,75 @@ measured a matcher.**
    bumps on either side of that via. The generator change is tracked
    separately as #7043, as #6969 required.
 
-6. **After #7043 (per-bump placement): the matcher closes the two groups
-   whose members are finished (Issue #5798).** Measured on 2026-10-18 at `main`
-   `ba43926d2`, which includes `06d537822`. Same local 8-core host, but with
-   load average about 7 from other sweeps, so the runtimes below are soft.
-   KRT was not run (no checkout on this host).
-   `krt_compare.py --boards 07a,07m --tools kct,ref`:
+6. **After #7043 (PR #7048, per-bump placement): the matcher closes
+   SDRAM_COMMAND and narrows SDRAM_BYTE0 (Issue #5798).** Measured on
+   2026-10-18 at `main` `ba43926d2`, which includes `06d537822`. Same local
+   8-core host, with load average about 7-8 from other sweeps. KRT was not run
+   (no checkout on this host).
 
-   | Board | Tool | Nets | Connections | Shared-referee errors | Runtime s |
-   |---|---|---|---|---|---|
-   | 07a | kct | 49/55 | 155/161 | 1 (clearance) | 1054.96 |
-   | 07m | kct | 48/55 | 154/161 | 0 | 1220.06 (TIMEOUT) |
-
-   Both kct rows are *worse* than item 2's uncapped re-run (158/161 and
-   160/161 in about 530 s and 390 s). 07m hit the 1200 s cap this time, purely
-   from host contention. Its log still reports `--length-match-groups is
-   INACTIVE` (the classes are `length_critical: false`), so the 154 vs 155
-   difference is run-to-run variance, not a matching effect. This run therefore
-   does not tell us whether `--length-match-groups` costs connections. Item 5's
-   160/161 vs 158/161 remains the clean comparison, and it holds only because
-   the flag runs no code on this path.
-
-   Handing that 07m kct output to `kct retune-lengths` (same
-   `tune_match_group_v2`, board's own 5.0 mm budget), one group per run, gives
-   the via-inclusive spread before → after:
+   **Complete route (the reproducible input).**
+   `krt_compare.py --boards 07m --tools kct --krt-dir <KRT checkout>
+   --timeout 1200` finishes in 340.57 s with 160/161 connections, on the same
+   board as items 2 and 5. Its spreads are 18.33 / 57.62 / 50.68 / 19.49 mm.
+   These match the #7048 Judge run to the hundredth of a mm. Handing that
+   output to `kct retune-lengths` (same `tune_match_group_v2`, board's own
+   5.0 mm budget), one group per run, gives the via-inclusive spread
+   before → after:
 
    | Group | Finished members | Spread mm | Result |
    |---|---|---|---|
-   | SDRAM_BYTE0 | 9/9 | 20.21 → **4.75** | tuned, inside 5.0 |
-   | SDRAM_COMMAND | 6/6 | 20.08 → **3.15** | tuned, inside 5.0 |
-   | SDRAM_BYTE1 | 7/9 | 61.55 → 61.55 | no output, `no_suitable_segment` |
-   | SDRAM_ADDRESS | 10/14 | 59.18 → 59.18 | no output, `no_suitable_segment` |
+   | SDRAM_BYTE0 | 9/9 | 20.21 → 5.80 | over the 5.0 limit, nothing written |
+   | SDRAM_COMMAND | 6/6 | 20.69 → **4.46** | tuned, inside 5.0, written |
+   | SDRAM_BYTE1 | has an unfinished member | 61.89 → 61.89 | no output, `no_suitable_segment` |
+   | SDRAM_ADDRESS | 14/14 | 52.44 → 52.44 | `cascade_budget_exhausted`, rolled back |
 
-   Before #7043 the same two finished groups stopped at 8.62 and 5.86 mm and
-   were rolled back (item 5). Now both land inside the budget and are written.
-   The other two groups still have unfinished members, so their numbers are
-   not a matching result. BYTE0 (4.75 mm) is tighter than KRT's 6.34 mm, and
-   COMMAND (3.15 mm) is close to KRT's 2.69 mm. Both tuned boards
-   score the same 9 violations and 7 unconnected items under `kicad-cli pcb
-   drc --refill-zones` against the board's input `.kicad_pro` as the
-   un-tuned 07m output, so the meanders add no error. That was kicad-cli
-   10.0.7, not the pinned 10.0.6, so it is a local check and not committed
-   evidence.
+   Before #7043, item 5 measured BYTE0 at 8.62 mm and COMMAND at 5.86 mm on
+   this same board, both kept as `improved_still_over_limit` (so
+   `retune-lengths` wrote nothing for them). #7043 therefore closes COMMAND and
+   narrows BYTE0 from 8.62 to 5.80 mm, which is still over budget. It does not
+   change ADDRESS, which has all 14 members finished and is still rolled back.
+   Rollback of partial progress was addressed by #6972 (item 5), not #7043.
+   KRT's 6.34 mm (BYTE0) and 2.69 mm (COMMAND) are from item 2's table.
 
-   What is left is not a matcher problem: `kct route` does not finish the
-   SDRAM groups on this board under load, and the route-time path never calls
-   the tuner here.
+   **Degraded timed-out route (a separate input, not comparable).** An earlier
+   `krt_compare.py --boards 07a,07m --tools kct,ref` run on the same host hit
+   the 1200 s cap on 07m (154/161 connections, 1220.06 s TIMEOUT) and 07a
+   finished 155/161 in 1054.96 s with 1 shared-referee error. The same
+   host load probably contributed, but the complete run above finished in 340 s
+   under similar load, so contention alone does not explain it. That 07m output
+   gave different spreads (BYTE0 20.21 → 4.75 and COMMAND 20.08 → 3.15,
+   both written; BYTE1 61.55 and ADDRESS 59.18, `no_suitable_segment` with 7/9
+   and 10/14 members finished). It is a different, incomplete board, so those
+   numbers do not support a claim about the normal route. Its log still reports
+   `--length-match-groups is INACTIVE` (the classes are `length_critical:
+   false`), so its connection count says nothing about whether the flag costs
+   connections. Item 5's 160/161 vs 158/161 remains the clean comparison, and
+   it holds only because the flag runs no code on this path.
+
+   On the degraded run, both tuned boards scored the same 9 violations and 7
+   unconnected items under `kicad-cli pcb drc --refill-zones` against the
+   board's input `.kicad_pro` as the un-tuned output, so those meanders added no
+   error. That was kicad-cli 10.0.7, not the pinned 10.0.6, so it is a local
+   check and not committed evidence.
+
+   What is left on the complete route is a tuner problem as well as a routing
+   one: BYTE0 and ADDRESS miss the budget with every member finished. Only
+   BYTE1 is limited by an unfinished member. The route-time path still never
+   calls the tuner here, because board 07's classes are `length_critical:
+   false`.
 
 **Verdict.** The gap survives deconfounding. It is not the routing cap. It is
 the three wiring gaps in (1), then DRC-limited meander room and the
-all-or-nothing rollback in (3); item 6 shows #7043 closes both of those for
-finished groups. Enabling `--length-match-groups` no longer
-costs connections (160/161 vs 158/161), but only because it runs no code on
-this path. Follow-ups: #6968 (the flag's three gaps), #6969 (meander room and
-rollback policy; item 5 shows the clearance floor was not the limit), #7043
-(per-bump meander placement), and #6970 (the loader's net-0 keying, for
-`kct route`).
+all-or-nothing rollback in (3). Item 6 shows #7043 (PR #7048) closes
+SDRAM_COMMAND and narrows SDRAM_BYTE0 from 8.62 to 5.80 mm, still over
+budget; SDRAM_ADDRESS is still rolled back. Enabling `--length-match-groups`
+no longer costs connections (160/161 vs 158/161), but only because it runs no
+code on this path. Follow-ups: #6969 (meander room and rollback policy; item 5
+shows the clearance floor was not the limit), #7043 (per-bump meander
+placement, PR #7048), and #6970 (the loader's net-0 keying, for `kct route`).
+#6968 (the flag's three gaps) is closed: PR #6974 runs
+`--length-match-groups` on the layer-escalation path. The remaining route-time
+gate on board 07 is `length_critical: false` in the class map.
 
 **Reference planes.** On board 06, kct put 22.8 mm of OUT4 on the In1.Cu GND
 plane. It warned about this, and the fix is the opt-in
