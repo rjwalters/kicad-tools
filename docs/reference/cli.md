@@ -340,12 +340,12 @@ kct drc <report|board.kicad_pcb> [options]
 | Option | Description |
 |--------|-------------|
 | `--format {table,json,summary}` | Output format (default: table) |
-| `--errors-only` | Show only errors |
+| `--errors-only` | Show only errors (view only; the exit code reflects all findings, #7230) |
 | `--strict` | Exit 2 when warnings are present (exit-code contract, #6898) |
 | `--allow-incomplete` | Exit 0 instead of 2 when schematic parity did NOT RUN (#7077); same meaning as `kct check --allow-incomplete` |
-| `--type TYPE`, `-t` | Filter by violation type (partial match) |
-| `--net NET` | Filter by net name |
-| `--category`, `-c {placement,routing,manufacturing,connectivity,cosmetic}` | Filter by root-cause category |
+| `--type TYPE`, `-t` | Filter by violation type (partial match; view only, the exit code reflects all findings) |
+| `--net NET` | Filter by net name (view only; the exit code reflects all findings) |
+| `--category`, `-c {placement,routing,manufacturing,connectivity,cosmetic}` | Filter by root-cause category (view only; the exit code reflects all findings) |
 | `--mfr`, `-m {jlcpcb,oshpark,pcbway,seeed}` | Apply manufacturer rules |
 | `--layers N`, `-l` | Number of layers (default: 2) |
 | `--verbose`, `-v` | Show detailed violation information |
@@ -469,6 +469,10 @@ Pure Python DRC (no kicad-cli required).
 kct check <pcb_file> [options]
 ```
 
+`kct check --format json` carries top-level `verdict` (`pass`|`fail`|`incomplete`)
+and `exit_code` (the process exit code). `summary.passed` is DRC-only: it can be
+`true` while `verdict` is `incomplete` (#7230).
+
 | Option | Description |
 |--------|-------------|
 | `--format {table,json,summary}` | Output format |
@@ -495,6 +499,10 @@ Validate schematic-to-PCB synchronization.
 ```bash
 kct validate --sync <schematic> <pcb>
 ```
+
+`--errors-only` is a view filter: the exit code (1 on errors, 2 on warnings
+with `--strict`) reflects all findings, and the hidden counts are reported in
+`summary.hidden_by_view_filter` (#7230).
 
 **Examples:**
 ```bash

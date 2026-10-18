@@ -23,6 +23,8 @@ from pathlib import Path
 from kicad_tools.project import Project
 from kicad_tools.validate.netlist import NetlistValidator, SyncIssue, SyncResult
 
+from ._gate import hidden_by_view_filter
+
 
 def _classify_file(filepath: str) -> str | None:
     """Classify a file by extension. Returns 'project', 'schematic', 'pcb', or None."""
@@ -169,18 +171,22 @@ def main(argv: list[str] | None = None) -> int:
     # Create filtered result for output
     filtered_result = SyncResult(issues=issues)
 
+    # Issue #7230: --errors-only is a view filter; the exit code reflects
+    # every finding, and what the filter hid is disclosed.
+    hidden = hidden_by_view_filter(result.issues, issues)
+
     # Output
     if args.format == "json":
-        output_json(filtered_result, schematic_path, pcb_path)
+        output_json(filtered_result, schematic_path, pcb_path, hidden=hidden)
     elif args.format == "summary":
-        output_summary(filtered_result, schematic_path, pcb_path)
+        output_summary(filtered_result, schematic_path, pcb_path, hidden=hidden)
     else:
-        output_table(filtered_result, schematic_path, pcb_path, args.verbose)
+        output_table(filtered_result, schematic_path, pcb_path, args.verbose, hidden=hidden)
 
-    # Exit code
-    if filtered_result.error_count > 0:
+    # Exit code (from the unfiltered result)
+    if result.error_count > 0:
         return 1
-    elif filtered_result.warning_count > 0 and args.strict:
+    elif result.warning_count > 0 and args.strict:
         return 2
     return 0
 
@@ -190,6 +196,7 @@ def output_table(
     schematic_path: Path,
     pcb_path: Path,
     verbose: bool = False,
+    hidden: dict[str, int] | None = None,
 ) -> None:
     """Output issues as a formatted table."""
     print(f"\n{'=' * 60}")
@@ -201,10 +208,17 @@ def output_table(
     print("\nResults:")
     print(f"  Errors:     {result.error_count}")
     print(f"  Warnings:   {result.warning_count}")
+    if hidden:
+        print(
+            f"  Hidden:     {_hidden_text(hidden)} (--errors-only; still counted in the exit code)"
+        )
 
     if not result.issues:
         print(f"\n{'=' * 60}")
-        print("NETLIST IN SYNC - No issues found")
+        if hidden:
+            print("NETLIST OUT OF SYNC - issues hidden by --errors-only")
+        else:
+            print("NETLIST IN SYNC - No issues found")
         return
 
     # Group by category
@@ -250,7 +264,17 @@ def _print_issue(issue: SyncIssue, verbose: bool, indent: str = "  ") -> None:
             print(f"{indent}    Pin: {issue.pin}")
 
 
-def output_json(result: SyncResult, schematic_path: Path, pcb_path: Path) -> None:
+def _hidden_text(hidden: dict[str, int]) -> str:
+    total = hidden["errors"] + hidden["warnings"]
+    return f"{total} hidden: {hidden['errors']} error(s), {hidden['warnings']} warning(s)"
+
+
+def output_json(
+    result: SyncResult,
+    schematic_path: Path,
+    pcb_path: Path,
+    hidden: dict[str, int] | None = None,
+) -> None:
     """Output issues as JSON."""
     data = {
         "schematic": str(schematic_path),
@@ -266,10 +290,17 @@ def output_json(result: SyncResult, schematic_path: Path, pcb_path: Path) -> Non
         },
         "issues": [i.to_dict() for i in result.issues],
     }
+    if hidden:
+        data["summary"]["hidden_by_view_filter"] = hidden  # type: ignore[index]
     print(json.dumps(data, indent=2))
 
 
-def output_summary(result: SyncResult, schematic_path: Path, pcb_path: Path) -> None:
+def output_summary(
+    result: SyncResult,
+    schematic_path: Path,
+    pcb_path: Path,
+    hidden: dict[str, int] | None = None,
+) -> None:
     """Output brief summary."""
     status = "IN SYNC" if result.in_sync else "OUT OF SYNC"
     print(f"Netlist Sync: {status}")
@@ -289,6 +320,8 @@ def output_summary(result: SyncResult, schematic_path: Path, pcb_path: Path) -> 
     print("-" * 40)
     print(f"Total errors:      {result.error_count}")
     print(f"Total warnings:    {result.warning_count}")
+    if hidden:
+        print(f"Hidden by --errors-only: {_hidden_text(hidden)} (still counted)")
 
 
 if __name__ == "__main__":

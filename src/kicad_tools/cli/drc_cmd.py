@@ -369,6 +369,10 @@ def main(argv: list[str] | None = None) -> int:
         listed = {id(v) for v in violations}
         violations.extend(v for v in report.connectivity_items() if id(v) not in listed)
 
+    # Issue #7230: view filters change what is shown, never the verdict.  The
+    # exit gate counts this snapshot (waived findings excluded, as always).
+    gate_violations = list(violations)
+
     if args.errors_only:
         violations = [v for v in violations if v.is_error]
 
@@ -387,6 +391,10 @@ def main(argv: list[str] | None = None) -> int:
         cat = ViolationCategory(args.category)
         violations = [v for v in violations if v.category == cat]
 
+    from ._gate import hidden_by_view_filter
+
+    hidden = hidden_by_view_filter([v for v in gate_violations if not v.is_waived], violations)
+
     # Generate suggestions if requested
     if args.suggest:
         for v in violations:
@@ -402,6 +410,7 @@ def main(argv: list[str] | None = None) -> int:
             show_suggestions=args.suggest,
             filtered_count=filter_ignored_count,
             waiver_result=waiver_result,
+            hidden=hidden,
         )
     elif args.format == "summary":
         output_summary(
@@ -409,6 +418,7 @@ def main(argv: list[str] | None = None) -> int:
             report,
             filtered_count=filter_ignored_count,
             waiver_result=waiver_result,
+            hidden=hidden,
         )
     else:
         output_table(
@@ -419,14 +429,15 @@ def main(argv: list[str] | None = None) -> int:
             layers=args.layers,
             filtered_count=filter_ignored_count,
             waiver_result=waiver_result,
+            hidden=hidden,
         )
 
     # Exit code.  ``is_error`` already excludes waived findings (Issue #4691),
     # so the gate is "nonzero iff UNWAIVED errors remain".  Waived findings are
     # likewise kept out of the warning count so --strict never trips on them.
-    error_count = sum(1 for v in violations if v.is_error)
-    waived_count = sum(1 for v in violations if v.is_waived)
-    warning_count = len(violations) - error_count - waived_count
+    error_count = sum(1 for v in gate_violations if v.is_error)
+    waived_count = sum(1 for v in gate_violations if v.is_waived)
+    warning_count = len(gate_violations) - error_count - waived_count
 
     return _drc_exit_code(
         error_count,
@@ -577,6 +588,12 @@ def _print_parity_status(parity: "SchematicParityStatus", *, issues: bool = Fals
             print(line)
 
 
+def _hidden_text(hidden: dict[str, int]) -> str:
+    """``N hidden: E error(s), W warning(s)`` for a view-filter disclosure."""
+    total = hidden["errors"] + hidden["warnings"]
+    return f"{total} hidden: {hidden['errors']} error(s), {hidden['warnings']} warning(s)"
+
+
 def _verdict_line(
     has_errors: bool,
     has_warnings: bool,
@@ -654,6 +671,7 @@ def output_table(
     layers: int = 2,
     filtered_count: int = 0,
     waiver_result: "WaiverApplication | None" = None,
+    hidden: dict[str, int] | None = None,
 ) -> None:
     """Output violations as a formatted table.
 
@@ -685,6 +703,10 @@ def output_table(
         print(f"  Waived:     {waived_count}")
     if filtered_count > 0:
         print(f"  Filtered:   {filtered_count} violations filtered")
+    if hidden:
+        print(f"  Hidden:     {_hidden_text(hidden)} (view filter; still counted in the verdict)")
+    hidden_errors = hidden["errors"] if hidden else 0
+    hidden_warnings = hidden["warnings"] if hidden else 0
     _print_parity_status(parity)
 
     if not violations:
@@ -695,11 +717,12 @@ def output_table(
         print(f"\n{'=' * 60}")
         print(
             _verdict_line(
-                parity.error_count > 0,
-                parity.warning_count > 0,
+                parity.error_count > 0 or hidden_errors > 0,
+                parity.warning_count > 0 or hidden_warnings > 0,
                 parity,
                 "No violations found",
             )
+            + (" (hidden by view filter)" if hidden else "")
         )
         _print_unused_waivers(waiver_result)
         return
@@ -770,11 +793,12 @@ def output_table(
     print(f"\n{'=' * 60}")
     print(
         _verdict_line(
-            bool(errors) or parity.error_count > 0,
-            bool(warnings) or parity.warning_count > 0,
+            bool(errors) or parity.error_count > 0 or hidden_errors > 0,
+            bool(warnings) or parity.warning_count > 0 or hidden_warnings > 0,
             parity,
             "No unwaived violations",
         )
+        + (" (hidden by view filter)" if hidden else "")
     )
     if errors:
         # Show manufacturer compatibility hint if violations might pass mfr rules
@@ -848,6 +872,7 @@ def output_json(
     show_suggestions: bool = False,
     filtered_count: int = 0,
     waiver_result: "WaiverApplication | None" = None,
+    hidden: dict[str, int] | None = None,
 ) -> None:
     """Output violations as JSON.
 
@@ -883,6 +908,8 @@ def output_json(
         summary["waived"] = waived_count
     if filtered_count > 0:
         summary["filtered"] = filtered_count
+    if hidden:
+        summary["hidden_by_view_filter"] = hidden
 
     data: dict[str, Any] = {
         "source": report.source_file,
@@ -902,6 +929,7 @@ def output_summary(
     report: DRCReport,
     filtered_count: int = 0,
     waiver_result: "WaiverApplication | None" = None,
+    hidden: dict[str, int] | None = None,
 ) -> None:
     """Output violation summary by type, plus the parity status line."""
     parity = report.schematic_parity_status
@@ -910,6 +938,8 @@ def output_summary(
             print(f"No DRC violations found ({filtered_count} violations filtered).")
         else:
             print("No DRC violations found.")
+        if hidden:
+            print(f"Hidden by view filter: {_hidden_text(hidden)} (still counted)")
         _print_parity_status(parity, issues=True)
         _print_unused_waivers(waiver_result)
         return
@@ -942,6 +972,8 @@ def output_summary(
     total_waived = sum(c["waived"] for c in by_type.values())
     waived_total_col = f" {total_waived:<8}" if any_waived else ""
     print(f"{'TOTAL':<25} {total_errors:<8} {total_warnings:<8}{waived_total_col}")
+    if hidden:
+        print(f"Hidden by view filter: {_hidden_text(hidden)} (still counted)")
 
     _print_parity_status(parity, issues=True)
     _print_unused_waivers(waiver_result)
