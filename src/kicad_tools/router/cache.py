@@ -16,6 +16,7 @@ Key features:
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
 import logging
@@ -91,6 +92,11 @@ def routing_cache_context(options: Mapping[str, object], net_class_map: dict) ->
 # entries written before that carry none and would let the optimizer rewrite
 # the pair rails a fresh route leaves untouched.
 # Numbered above #7014's 2.5.4: entries it wrote predate the coupled-net replay.
+#
+# Issue #7258: ``_cache_version_tag`` also carries a fingerprint of all
+# ``kicad_tools`` source plus the loaded router extension, so a code edit
+# invalidates the cache automatically.  Bump ``CACHE_VERSION`` only for
+# semantics the code hash cannot see.
 CACHE_VERSION = "2.5.5-coupled-nets"
 
 
@@ -136,17 +142,61 @@ def _native_router_build_version() -> int | None:
     return int(build_version) if build_version is not None else None
 
 
+def _hash_source_tree(root: Path, extension: Path | None = None) -> str:
+    """Hash every ``*.py`` under ``root`` (plus ``extension`` bytes) (Issue #7258)."""
+    h = hashlib.sha256()
+    for path in sorted(root.rglob("*.py")):
+        h.update(path.relative_to(root).as_posix().encode())
+        h.update(b"\0")
+        h.update(path.read_bytes())
+        h.update(b"\0")
+    if extension is not None:
+        h.update(extension.read_bytes())
+    return h.hexdigest()[:12]
+
+
+@functools.lru_cache(maxsize=1)
+def _code_fingerprint() -> str:
+    """Fingerprint of the running ``kicad_tools`` code, computed once per process.
+
+    Covers all package ``.py`` source (a router change can live in ``physics/``
+    or ``cli/`` as in #7163) and the router extension actually imported, since
+    ``BUILD_VERSION`` is not bumped on every C++ edit.
+    """
+    try:
+        import kicad_tools
+
+        root = Path(kicad_tools.__file__).parent
+        extension = None
+        try:
+            from .cpp_backend import get_backend_info
+
+            info = get_backend_info()
+            path = info.get("extension_path")
+            if info.get("available") and path:
+                extension = Path(path)
+        except Exception:  # pragma: no cover - defensive: never break caching
+            pass
+        return _hash_source_tree(root, extension)
+    except Exception:  # pragma: no cover - e.g. unreadable install
+        return "unknown"
+
+
 def _cache_version_tag() -> str:
     """Version string stored with, and required of, every cache entry.
 
     Combines the package version, ``CACHE_VERSION`` and the loaded native
     router build (Issue #7014).  A C++ rebuild that bumps ``BUILD_VERSION``
     (e.g. #6994) changes routed copper without touching any Python input,
-    so before this a cache hit replayed the previous router's copper.
+    so before this a cache hit replayed the previous router's copper.  The
+    ``code`` segment (Issue #7258) covers edits that bump neither.
     """
     build = _native_router_build_version()
     native = "none" if build is None else str(build)
-    return f"{_get_kicad_tools_version()}+cache.{CACHE_VERSION}+native.{native}"
+    return (
+        f"{_get_kicad_tools_version()}+cache.{CACHE_VERSION}"
+        f"+code.{_code_fingerprint()}+native.{native}"
+    )
 
 
 @dataclass
