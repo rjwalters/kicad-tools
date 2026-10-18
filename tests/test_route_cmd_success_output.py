@@ -290,3 +290,25 @@ def test_results_heading_annotated_when_preserving(tmp_path):
         line for line in output.splitlines() if line.strip().startswith("--- Results ---")
     )
     assert "newly-routed" in results_line, f"Results heading not scope-labeled: {results_line!r}"
+
+
+@pytest.mark.skipif(not BOARD_01.exists(), reason="board 01 fixture missing")
+def test_board01_escape_summary_survives_buffering(tmp_path):
+    """Issue #7071: an escape's cost stays visible on a 100%-routed board.
+
+    The buffered oscillation/escape wording is dropped on success (#3942), so
+    one unbuffered ``Escape: ...`` summary line reports the time instead.  It
+    must not match the failure-wording gates.
+    """
+    out = tmp_path / "board01_escape.kicad_pcb"
+    proc = _route(BOARD_01, out, "--layers", "2", "--verbose", "--no-cache")
+    output = proc.stdout + proc.stderr
+
+    assert out.exists(), f"route did not write output:\n{output}"
+    assert re.search(r"^  Escape: \d+ strategies, [\d.]+s, ", output, re.MULTILINE), (
+        f"expected the per-escape summary line:\n{output}"
+    )
+    assert not _OSCILLATION_RE.search(output), f"oscillation wording on success:\n{output}"
+    assert not _ESCAPE_EXHAUSTED_RE.search(output), (
+        f"escape-exhausted wording on success:\n{output}"
+    )

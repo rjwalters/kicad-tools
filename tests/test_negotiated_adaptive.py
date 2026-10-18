@@ -7,6 +7,8 @@ Also includes tests for matrix-conflict detection and layer preference
 assignment (Issue #2432).
 """
 
+from unittest.mock import MagicMock
+
 from kicad_tools.router.algorithms.negotiated import (
     _is_monotonically_diverging,
     calculate_history_increment,
@@ -304,6 +306,7 @@ class TestEscapeStrategyCycling:
         from kicad_tools.router.algorithms.negotiated import NegotiatedRouter
 
         mock_grid = MagicMock()
+        mock_grid.get_total_overflow.return_value = 5
         mock_router = MagicMock()
         neg = NegotiatedRouter(mock_grid, mock_router, MagicMock(), {})
 
@@ -367,6 +370,155 @@ class TestEscapeStrategyCycling:
         assert neg._escape_reverse_order.call_count == 1
         assert neg._escape_random_subset.call_count == 1
         assert neg._escape_full_reorder.call_count == 1
+
+
+class _FakeEscapeGrid:
+    """Minimal grid: overflow is the number of marked routes above one."""
+
+    def __init__(self) -> None:
+        self.marked: list[object] = []
+
+    def mark_route_usage(self, route) -> None:
+        self.marked.append(route)
+
+    def unmark_route_usage(self, route) -> None:
+        self.marked.remove(route)
+
+    def unmark_route(self, route) -> None:
+        pass
+
+    def get_total_overflow(self) -> int:
+        return max(0, len(self.marked) - 1)
+
+
+class TestEscapeTransaction:
+    """Escape strategies are transactional and report the live overflow (Issue #7071)."""
+
+    @staticmethod
+    def _setup():
+        from kicad_tools.router.algorithms.negotiated import NegotiatedRouter
+
+        grid = _FakeEscapeGrid()
+        neg = NegotiatedRouter(grid, MagicMock(), MagicMock(), {})
+        original = {1: [object()], 2: [object(), object()]}
+        net_routes = {n: list(r) for n, r in original.items()}
+        routes_list = [r for rs in original.values() for r in rs]
+        for route in routes_list:
+            grid.mark_route_usage(route)
+        return neg, grid, original, net_routes, routes_list
+
+    @staticmethod
+    def _damaging_strategy(neg, grid, net_routes, routes_list, result):
+        def strategy(**kwargs):
+            neg.rip_up_nets([2], net_routes, routes_list)
+            fresh = [object(), object(), object(), object()]
+            net_routes[2] = fresh
+            for route in fresh:
+                grid.mark_route_usage(route)
+                routes_list.append(route)
+            return result, grid.get_total_overflow()
+
+        return strategy
+
+    def _run(self, neg, net_routes, routes_list, **extra):
+        return neg.escape_local_minimum(
+            overflow_history=[2, 2, 2, 2],
+            net_routes=net_routes,
+            routes_list=routes_list,
+            pads_by_net={},
+            net_order=[],
+            present_cost_factor=0.5,
+            mark_route_callback=lambda r: None,
+            **extra,
+        )
+
+    def test_failed_strategies_leave_state_unchanged(self):
+        neg, grid, original, net_routes, routes_list = self._setup()
+        list_before = list(routes_list)
+        overflow_before = grid.get_total_overflow()
+        for name in (
+            "_escape_shuffle_order",
+            "_escape_reverse_order",
+            "_escape_random_subset",
+            "_escape_full_reorder",
+        ):
+            setattr(neg, name, self._damaging_strategy(neg, grid, net_routes, routes_list, False))
+
+        success, overflow, tried = self._run(neg, net_routes, routes_list)
+
+        assert success is False
+        assert tried == 4
+        assert net_routes == original
+        assert all(a is b for a, b in zip(routes_list, list_before, strict=False)) and len(
+            routes_list
+        ) == len(list_before)
+        assert grid.get_total_overflow() == overflow_before
+        assert overflow == overflow_before
+
+    def test_later_strategy_sees_restored_state_and_success_is_kept(self):
+        neg, grid, original, net_routes, routes_list = self._setup()
+        seen = []
+
+        def failing(**kwargs):
+            return self._damaging_strategy(neg, grid, net_routes, routes_list, False)(**kwargs)
+
+        def succeeding(**kwargs):
+            seen.append({n: list(r) for n, r in net_routes.items()})
+            return self._damaging_strategy(neg, grid, net_routes, routes_list, True)(**kwargs)
+
+        neg._escape_shuffle_order = failing
+        neg._escape_reverse_order = succeeding
+
+        success, overflow, tried = self._run(neg, net_routes, routes_list)
+
+        assert success is True and tried == 2
+        assert seen == [original]
+        assert len(net_routes[2]) == 4  # the successful strategy's work is kept
+        assert overflow == grid.get_total_overflow()
+
+    def test_returned_overflow_is_live_grid_overflow_on_both_paths(self):
+        for result in (True, False):
+            neg, grid, _, net_routes, routes_list = self._setup()
+            for name in (
+                "_escape_shuffle_order",
+                "_escape_reverse_order",
+                "_escape_random_subset",
+                "_escape_full_reorder",
+            ):
+                setattr(
+                    neg,
+                    name,
+                    self._damaging_strategy(neg, grid, net_routes, routes_list, result),
+                )
+            _, overflow, _ = self._run(neg, net_routes, routes_list)
+            assert overflow == grid.get_total_overflow()
+            assert neg.last_escape_summary.overflow_after == overflow
+            assert neg.last_escape_summary.kept is result
+
+    def test_reroute_cap_stops_escape_deterministically(self):
+        outcomes = []
+        for _ in range(2):
+            neg, grid, original, net_routes, routes_list = self._setup()
+
+            def strategy(attempts=None, **kwargs):
+                for _net in range(5):
+                    if attempts.exhausted():
+                        attempts.cut = True
+                        return True, 0  # cut work must not be kept, even if "improved"
+                    attempts.spend()
+                return False, grid.get_total_overflow()
+
+            for name in (
+                "_escape_shuffle_order",
+                "_escape_reverse_order",
+                "_escape_random_subset",
+                "_escape_full_reorder",
+            ):
+                setattr(neg, name, strategy)
+            success, _, tried = self._run(neg, net_routes, routes_list, reroute_cap=7)
+            outcomes.append((success, tried, neg.last_escape_summary.reroutes))
+            assert net_routes == original
+        assert outcomes[0] == outcomes[1] == (False, 2, 7)
 
 
 class TestEscapeFullReorder:
