@@ -15,6 +15,57 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-18
 
+- **PR #7370**: test: update board 03 USB impedance test for in-band pair (#7368)
+- **Issue #7368** (closed): test: test_checker_judges_board_03_usb_pair_on_both_branches fails after board 03 USB pair narrowed to 90 ohm
+- **PR #7369**: test: drop stale board 03 Power-class and board 07 netclass allowances
+- **PR #7343**: fix(readiness): scope orphaned known-issues scan; re-save board 04 native fill
+- **Issue #7351** (closed): test_committed_pcb_drc_state (extended) fails on main: new impedance finding on unchanged board 03
+- **Issue #7337** (closed): Fleet re-verify: #7328 orphan check makes kct readiness --verify block ready boards 02/05; board 04 saved copper
+- **Issue #7312** (closed): Board 06 regression fixture: coupled USB pairs miss declared 90 ohm differential impedance (5 errors)
+- **PR #7352**: fix(boards): unpack gate_native_drc tuple in refresh_bundles_6404
+- **Issue #7348** (closed): refresh_bundles_6404.py: gate_native_drc now returns (errors, raw) since #7341; drc_violations metric becomes a tuple
+- **PR #7347**: fix: cap known impedance findings on board-07 Match-Group baseline
+- **Issue #7332** (closed): Board 07 re-route: ImpedanceRule flags MIPI_DAT1 and TMDS_D1 at 122-125 ohm on unchanged copper
+- **PR #7345**: docs: correct seven stale doc/comment claims
+- **Issue #7342** (closed): Correct 7 stale doc and comment claims left by the 2026-10-18 THT-in-CPL, assembly-tier, spec-repair, thermal-ladder and known-issue merges
+- **Issue #7323** (closed): known_issues follow-ups: refresher resolve flags, orphaned known-issues.json detection, re-pin board 03 after #7306 (#7316 follow-up)
+- **PR #7324**: fix(board03): re-size USB diff pair to 90 ohm and declare target_diff_impedance
+- **Issue #7250** (closed): kct check never compares project.kct requirements to the routed board, and records diff-pair impedance as checked without evaluating it
+- **Issue #7294** (closed): board 03: re-size USB diff pairs to 90 ohm and declare target_diff_impedance (#7250 PR-D)
+- **PR #7341**: fix: refresh_readiness writes the staged DRC report and records report_sources
+- **PR #7338**: fix: grade coupled-microstrip gap panels from strip edge to remove finite-thickness bias
+- **Issue #7164** (closed): coupled_microstrip BEM finite-thickness reads 0.5-2.5% high vs field solve
+- **PR #7334**: fix(boards): derive board 05 CPL row check from placed parts; refresh 04/05 readiness
+- **Issue #7333** (closed): main CI red (remaining): board 05 package.py asserts 36 CPL rows after #7242 THT; boards 04/05 readiness stale after #7310
+- **PR #7285**: fix: bind readiness-fallback reports to producing PCB and hash full schematic hierarchy
+- **Issue #7277** (closed): Report binding: readiness.json fallback accepts stale reports after re-run; ERC binding ignores sub-sheets (#7267 follow-up)
+- **PR #7331**: fix(board07): size the DQS pair like MIPI/HDMI and gate re-route reach
+- **Issue #7319** (closed): Board 07 fixture: #7163 field solve narrows the synthesized DQS pair to 0.175 mm, dropping DQ0 (30/31 to 29/31) and tripling Match-Group gate time
+- **PR #7328**: fix(readiness): refresher known-issue flags and orphaned known-issues.json detection
+- **PR #7326**: docs(ci): record measured gap behind Board 06 fixture impedance cap
+- **PR #7317**: fix(boards): re-fill boards 00/01/04 under the thermal-spoke ladder
+- **PR #7289**: fix(boards): gate readiness refresh on a per-board known-warning list
+- **Issue #7295** (closed): Fill repair: try narrower thermal spokes before forcing solid connections (split from #7220, PR2)
+- **Issue #7273** (closed): Board 04/05 evidence refresh refuses on main (#7220 warnings); boards 00/01/02 lack refresh configs
+- **PR #7329**: ci: gate Windows Smoke on main runs and warn on Test job time budget
+- **Issue #7327** (closed): CI: Windows Smoke never runs on main verification (== 'push' gate); Test job worst case 74.3 min vs 75 min timeout
+- **PR #7321**: fix(check): fixture folders never adopt parent board project.kct
+- **Issue #7320** (closed): main CI: Match-Group gate fails spec_conformance — fixture PCB picks up parent board's 6-layer project.kct (#7303 regression)
+- **Issue #7325** (closed): test_board_04_drill_clearance_regen fails: manufacturing-requirements.json missing from regen tmp dir (manufacturing_process.py:637)
+- **PR #7316**: feat(readiness): record known issues in readiness.json; open defects block ready
+- **Issue #7261** (closed): Ready claims omit known open defects: add readiness known_issues (via --ack-warnings sibling) surfaced by fleet status and site; drop stale board 04 status prose
+- **PR #7286**: fix: apply Hammerstad-Jensen 1980 thickness terms to microstrip Z0
+- **Issue #7076** (closed): Microstrip Z0 with copper thickness reads 1.6-3.7 % low (docstring claims 0.2 %)
+- **PR #7315**: feat(cli): one sign-off exit gate with JSON verdict/exit_code (Part B of #7230)
+- **Issue #7230** (closed): One sign-off exit-code contract: kct drc --net/--type/--category exits 0 on DRC errors, kct check JSON says passed while exiting 2, exit 2 means four things
+- **PR #7287**: feat(pcb): add waypoints and internal_pad stubs to PCBLayout.route
+- **Issue #7064** (closed): PCBLayout.route() draws a straight port-to-port line that crosses foreign pads and never reaches a pad
+- **PR #7306**: fix: judge differential-pair impedance on coupled segments
+- **Issue #7293** (closed): kct check: evaluate differential-pair impedance targets on coupled segments instead of recording impedance checked (#7250 PR-C)
+- **PR #7310**: fix(boards): accept only exact known #7220 warnings on board 04/05 gates (main CI red, #7298)
+- **Issue #7298** (closed): main CI red: #7232 thermal_asymmetry/via_at_pad_edge warnings fail board 04 gates (3 jobs + extended test) and Board 05 Routing Regression
+- **PR #7311**: fix(zones): read KiCad-saved thermal_bridge_width in starved-pad ladder
+- **Issue #7309** (closed): Regression (#7302): starved-pad repair loops forever after KiCad re-saves thermal_width as thermal_bridge_width — pads never go solid, starved_thermal ships
 - **Issue #7239** (closed): Include THT parts in JLCPCB assembly output (operator decision; JLCPCB now offers THT PCBA)
 - **PR #7242**: feat: include through-hole parts in JLCPCB CPL and BOM
 - **PR #7302**: feat: try narrower per-pad thermal spokes before forcing solid pad connections

@@ -738,6 +738,44 @@ class TestCPWGvsOtherModes:
         assert 0.7 < delay_ratio < 1.3
 
 
+def _hj1980_microstrip_z0(w: float, h: float, er: float, t: float) -> float:
+    """Independent Hammerstad & Jensen (1980) reference with thickness terms."""
+    eta0 = 376.730313668
+
+    def ee0(u: float) -> float:
+        a = (
+            1
+            + math.log((u**4 + (u / 52) ** 2) / (u**4 + 0.432)) / 49
+            + math.log(1 + (u / 18.1) ** 3) / 18.7
+        )
+        b = 0.564 * ((er - 0.9) / (er + 3)) ** 0.053
+        return (er + 1) / 2 + (er - 1) / 2 * (1 + 10 / u) ** (-a * b)
+
+    def z01(u: float) -> float:
+        f = 6 + (2 * math.pi - 6) * math.exp(-((30.666 / u) ** 0.7528))
+        return eta0 / (2 * math.pi) * math.log(f / u + math.sqrt(1 + 4 / u**2))
+
+    u, big_t = w / h, t / h
+    du1 = (
+        big_t
+        / math.pi
+        * math.log(1 + 4 * math.e / (big_t * (1 / math.tanh(math.sqrt(6.517 * u))) ** 2))
+    )
+    dur = 0.5 * (1 + 1 / math.cosh(math.sqrt(er - 1))) * du1
+    return z01(u + dur) / math.sqrt(ee0(u + dur))
+
+
+class TestMicrostripThicknessVsHammerstadJensen:
+    """Issue #7076: thickness correction must follow H&J 1980."""
+
+    @pytest.mark.parametrize("w", [0.15, 0.3477, 0.60])
+    def test_z0_matches_hj1980_with_thickness(self, w):
+        tl = TransmissionLine(Stackup.jlcpcb_named("JLC04161H-7628"))
+        z0 = tl.microstrip(w, "F.Cu").z0
+        ref = _hj1980_microstrip_z0(w, 0.2104, 4.4, 0.035)
+        assert z0 == pytest.approx(ref, rel=0.002)
+
+
 class TestCPWGClosedFormRegression:
     """Issue #7075: CPWG Z0 and dielectric loss vs independent references."""
 

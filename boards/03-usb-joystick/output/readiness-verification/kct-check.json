@@ -1,14 +1,14 @@
 {
   "file": "output/usb_joystick_routed.kicad_pcb",
   "manufacturer": "jlcpcb-tier1",
-  "pcb_sha256": "a07693a2dbc33114cd3ae5eeea68f940151af5adc566c5b6303225b727d02b98",
+  "pcb_sha256": "9520237d99732b6f1b272cd9921345ad03bd94b87faa37c1f9c7a0a3ff9e014d",
   "layers": 4,
   "summary": {
     "errors": 0,
     "warnings": 7,
     "infos": 10,
     "waived": 0,
-    "rules_checked": 68,
+    "rules_checked": 76,
     "rules_checked_by_rule": {
       "connectivity": 1,
       "copper_sliver": 1,
@@ -29,13 +29,21 @@
       "netclass_via_drill": 1,
       "netclass_annular_ring": 1,
       "sch_field_offset": 1,
-      "sch_field_overlap": 1
+      "sch_field_overlap": 1,
+      "spec_conformance_dimensions": 1,
+      "spec_conformance_layers": 1,
+      "spec_conformance_min_trace": 1,
+      "spec_conformance_min_via": 1,
+      "spec_conformance_min_drill": 1,
+      "spec_conformance_target_fab": 1
     },
     "passed": true,
     "stale_waivers": 0,
     "coverage_checked": 34,
     "coverage_skipped": 6,
-    "coverage_unknown": [],
+    "coverage_unknown": [
+      "spec_conformance"
+    ],
     "coverage_blocking_unknown": []
   },
   "violations": [
@@ -411,7 +419,7 @@
   "meta_checks": {
     "drc": {
       "status": "PASSED",
-      "detail": "68 rules checked, 0 error(s), 7 warning(s)"
+      "detail": "76 rules checked, 0 error(s), 7 warning(s)"
     },
     "erc": {
       "status": "PASSED",
@@ -651,6 +659,12 @@
       "state": "checked",
       "reason": null,
       "blocking": true
+    },
+    "spec_conformance": {
+      "status": "unknown:unread_spec_keys:requirements.electrical.signals,requirements.manufacturing.min_space",
+      "state": "unknown",
+      "reason": "unread_spec_keys:requirements.electrical.signals,requirements.manufacturing.min_space",
+      "blocking": false
     },
     "thermal_asymmetry": {
       "status": "checked",

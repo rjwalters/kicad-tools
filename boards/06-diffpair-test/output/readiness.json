@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "checked_at": "2026-10-18T20:00:00+00:00",
+  "checked_at": "2026-10-18T23:09:35+00:00",
   "mode": "assembly",
   "status": "ready",
   "blockers": [],
@@ -48,7 +48,7 @@
     "output/diffpair_test.kicad_pro": "48e2bf25ed4c9aa03d2bd7b818adedcfad1d524134b3d3e97cfe816ad395567c",
     "output/diffpair_test.kicad_sch": "ee5a00408ae5906eff4738c24c51b58351771ac02264148fb9da821924ee95e5",
     "output/diffpair_test_routed.kicad_dru": "825b4a72d64154263d5c41685256590510d5358a7b8b3fdac45ac31a3052c466",
-    "output/diffpair_test_routed.kicad_pcb": "6d81d32008dc45005236da689a706ff792b72f102fab4da49d8b15f64d8a22ca",
+    "output/diffpair_test_routed.kicad_pcb": "b07106a3eb16cab7ad0a87d857c2ed17a3c9b36fbea8bdbb4cff6737c6dcaebc",
     "output/diffpair_test_routed.kicad_pro": "a6618d8b6a963f92d270ee210c7e0c7afdc70386c0d3102bb1cb29fb7c2f0430",
     "output/lvds_demo.kicad_sym": "57b72a1ebf6ba00daedc83e37d16e21e1fc5d956f2d287f09fcb39f30e7b9ca1",
     "output/lvs.json": "8a44e465f8db5c6f95b19b46257bd87290819ef27e8b68a85cbf490bd0f47a68",
@@ -58,7 +58,7 @@
     "output/manufacturing/bom_jlcpcb.csv": "7c53d58c9732fb72e9e59ef8e5a8fc0c143e0e429f0ae1afa21906e4436e042e",
     "output/manufacturing/check-report.json": "97b241f8800f6de378c9285995a41229f3fb34c2c33f16937d0125bf39fd120e",
     "output/manufacturing/cpl_jlcpcb.csv": "9236191f6388c8ec933854be8fc961cfdd53b3adcf5b06fcb59779ee003e8923",
-    "output/manufacturing/gerbers/gerbers.zip": "298cc310584c95066a3c0a7c47bb73fea4ace47d36c2c6f22af935f4fae45bbf",
+    "output/manufacturing/gerbers/gerbers.zip": "a714959d70e674ceb5b5b0931f66d8d13e1c1a7bc144db3f4d31fa7931cdebdd",
     "output/manufacturing/images/assembly.png": "ac6d6c21b93967c47632662be9d8fdaf1a7ee71ca00aa6dca1b12f4b1f85cd44",
     "output/manufacturing/images/layer_B_Cu.png": "4905bfd3c81b21116f09694d6fbe98880d44d383d233cf473958394cec982025",
     "output/manufacturing/images/layer_F_Cu.png": "872bb16d9f735ae5cc1574ae0cb4dfe61997dab0ca7f36559c1d10ff0cf62c67",
@@ -68,17 +68,17 @@
     "output/manufacturing/images/pcb_copper.png": "2cd6d83fc0bee8530bc07b68f1d07a6f6e391c44177ef17e155c4afd683e7b01",
     "output/manufacturing/images/pcb_front.png": "93a32c7210e2bd680ddbf9e6016934cc66ac9aa942003b0926783cf416626085",
     "output/manufacturing/images/schematic_diffpair_test.png": "6e2505c68852ac1d387f672572cf126eada16b0620a1c82ab80ada6b24ec1899",
-    "output/manufacturing/kicad_project.zip": "b19c207662fdd2ed98292ec05569f1a004c75f75b8e07345d43c7aed11055df2",
-    "output/manufacturing/manifest.json": "1efabcc869f1f53982245af3ca171df3dd2c74756e418bcf2f6908d81628aeea",
+    "output/manufacturing/kicad_project.zip": "8834d53215ae9147c73e5ace443de9bd8dc847de42f11fa4acf2dd4f6f4e5769",
+    "output/manufacturing/manifest.json": "59ceed0601aeb6a0b71ce633cedf139b77110a476f9d5e5e0c498c9f8b4c39dd",
     "output/manufacturing/manual-assembly-bom.csv": "82c744bf3eb2a5345fdd83267d57e7ed7c6631f4790b7995ddd59f4cdfc5219c",
-    "output/manufacturing/native-drc.json": "75359cc8129e96d06d3eddc3de6f9f3fe6eae198e9a2d503bf7f9292c024d04d",
+    "output/manufacturing/native-drc.json": "7679a11f8294072bb3be6ac0271920253252ba229b3acd6bb0d2221425246844",
     "output/manufacturing/procurement-review.md": "b79e5aea626ff829d868ad27bb2eb272bfe09b9353cb228ee66c25773dbe6c71",
     "output/manufacturing/report.md": "83dbce3216d00b9d0707ea7bd2e06d01c37e20a6442f72f8fd6610218fa302b4",
     "output/manufacturing/report.pdf": "8ef68d1698f01a078b93e2b6f7771a0071f39de779da365e0f2a9409de6910a8",
-    "output/manufacturing.zip": "7222f4cc73c4b00fbc6aa6785b40591467eb5e5a18a0eef2ed17b5f8b3603665",
+    "output/manufacturing.zip": "dc6ecdf3c349a77d1bc60f9fd64559e4f637aacce208b131a874d7eb1057bbfa",
     "output/net_class_map.json": "a90e951b52272de3503cea92f7bec351201694ef0ee1b4e2ff3ed4a8493c2740",
     "output/readiness/kct-check.json": "97b241f8800f6de378c9285995a41229f3fb34c2c33f16937d0125bf39fd120e",
-    "output/readiness/native-drc.json": "75359cc8129e96d06d3eddc3de6f9f3fe6eae198e9a2d503bf7f9292c024d04d",
+    "output/readiness/native-drc.json": "7679a11f8294072bb3be6ac0271920253252ba229b3acd6bb0d2221425246844",
     "output/sym-lib-table": "90389d0ac68d104c9cde91ec7ab47b4b6a27d71fc6fe85befae8bc94b767d7aa",
     "project.kct": "1cfb8b27a2b2c5ba7991415f2f8d07a7374d98fbf0f5b7d8f3d380ab8d62c08c",
     "output/readiness/fill-consistency.json": "6aea658a7d30a148c08b041c382b38c562024696eda159f25addb85c3d45b944",
@@ -91,14 +91,19 @@
     "output/renders/pcb-front.svg": "a1f4864e51252d2a119d178aa1c116a1a11fb9752efe86edbc2855b928f8e656",
     "output/renders/3d-front.png": "8c60c059cfdcc8af5a9510140abdb957672425abfa211dd9d6c80d5ef94b0aed",
     "output/manufacturing/lvs.json": "8a44e465f8db5c6f95b19b46257bd87290819ef27e8b68a85cbf490bd0f47a68",
-    "output/manufacturing/native-erc.json": "eba1181b5eab89a01ce942d39a28868fb11e96a732c3c32e6743f7f88df33e51",
+    "output/manufacturing/native-erc.json": "98313fc801b1376174f5df430844bdfc1ddd73db7b0bbad664272d59174b3b01",
     "output/manufacturing/schematic.pdf": "b16b940914d761df70f6af9310ba7c0bb8441130d4a848bce54336325dae80e8",
-    "output/readiness/native-erc.json": "eba1181b5eab89a01ce942d39a28868fb11e96a732c3c32e6743f7f88df33e51",
-    "output/drc_report.json": "75359cc8129e96d06d3eddc3de6f9f3fe6eae198e9a2d503bf7f9292c024d04d",
-    "output/erc_report.json": "eba1181b5eab89a01ce942d39a28868fb11e96a732c3c32e6743f7f88df33e51"
+    "output/readiness/native-erc.json": "98313fc801b1376174f5df430844bdfc1ddd73db7b0bbad664272d59174b3b01",
+    "output/drc_report.json": "7679a11f8294072bb3be6ac0271920253252ba229b3acd6bb0d2221425246844",
+    "output/erc_report.json": "98313fc801b1376174f5df430844bdfc1ddd73db7b0bbad664272d59174b3b01"
   },
   "evidence": {
     "kct_check": "output/readiness/kct-check.json",
     "native_drc": "output/readiness/native-drc.json"
+  },
+  "report_sources": {
+    "output/drc_report.json": "b07106a3eb16cab7ad0a87d857c2ed17a3c9b36fbea8bdbb4cff6737c6dcaebc",
+    "output/readiness/native-drc.json": "b07106a3eb16cab7ad0a87d857c2ed17a3c9b36fbea8bdbb4cff6737c6dcaebc",
+    "output/manufacturing/native-drc.json": "b07106a3eb16cab7ad0a87d857c2ed17a3c9b36fbea8bdbb4cff6737c6dcaebc"
   }
 }

@@ -358,10 +358,12 @@ class TestDeterministicGeneration:
         sidecar = generate_design_mod.write_sidecar(classes, tmp_path)
         serialized = json.loads(sidecar.read_text())
         physics = CoupledLines(Stackup.jlcpcb_4layer())
-        for name in ("MIPI_CLK_P", "MIPI_DAT0_N", "TMDS_D0_P", "TMDS_D2_N"):
+        for name in ("MIPI_CLK_P", "MIPI_DAT0_N", "TMDS_D0_P", "TMDS_D2_N", "DQS_P", "DQS_N"):
             cls = classes[name]
             # Issue #7060: width held at 0.225 mm, gap solved for 100 ohm;
-            # the authored 0.10 mm gap is the minimum.
+            # the authored 0.10 mm gap is the minimum.  Issue #7319: the DDR
+            # strobe pair is sized the same way.
+            assert cls.target_diff_impedance == pytest.approx(100.0)
             assert cls.trace_width == pytest.approx(0.225)
             assert cls.intra_pair_clearance == pytest.approx(0.135)
             assert cls.clearance == pytest.approx(0.10)
@@ -378,7 +380,19 @@ class TestDeterministicGeneration:
             assert serialized[name]["coupled_continuity_threshold"] == 0.85
 
         # Sizing must not invent a target or alter unrelated routing geometry.
-        assert classes["DQS_P"] == generate_design_mod.ddr_dqs_pair_net_class()
+        # Issue #7319: DQS now carries an authored 100 ohm target; sizing
+        # changes only its width and gap.
+        from dataclasses import replace
+
+        authored_dqs = generate_design_mod.ddr_dqs_pair_net_class()
+        assert (
+            replace(
+                classes["DQS_P"],
+                trace_width=authored_dqs.trace_width,
+                intra_pair_clearance=authored_dqs.intra_pair_clearance,
+            )
+            == authored_dqs
+        )
         assert classes["DQ0"] == generate_design_mod.ddr_data_byte_0_net_class()
         assert classes["A0"] == generate_design_mod.addr_bus_net_class()
 
@@ -407,7 +421,7 @@ class TestDeterministicGeneration:
 
         classes = generate_design_mod.build_net_class_map()
         physics = CoupledLines(Stackup.jlcpcb_4layer())
-        for name in ("MIPI_CLK_P", "MIPI_DAT0_N", "TMDS_D0_P", "TMDS_D2_N"):
+        for name in ("MIPI_CLK_P", "MIPI_DAT0_N", "TMDS_D0_P", "TMDS_D2_N", "DQS_P", "DQS_N"):
             cls = classes[name]
             # Issue #7060: width held at 0.225 mm, gap solved for 100 ohm;
             # the authored 0.10 mm gap is the minimum.

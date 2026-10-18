@@ -378,6 +378,29 @@ def test_report_hashes_sources_rules_and_delivered_files(tmp_path):
     assert "output/readiness.json" not in inputs
 
 
+def test_report_sources_never_stamps_a_leftover_native_report(tmp_path):
+    """Issue #7277: a native-drc-raw.json from an earlier run is not 'produced'.
+
+    ``report_sources`` vouches that each listed report was computed from the
+    current PCB.  A raw report this run's engine did not write (here: left by
+    a previous run, and the fake engine writes only native-drc.json) must be
+    cleared, not stamped with the current PCB hash.
+    """
+    board = make_board(tmp_path)
+    evidence = board / "output" / "readiness"
+    evidence.mkdir(parents=True)
+    (evidence / "native-drc-raw.json").write_text('{"violations": [], "stale": true}\n')
+    fake = FakeEngines(board)
+
+    code, report = run(board, fake)
+
+    assert code == 0, report.get("blockers")
+    pcb_sha = hashlib.sha256((board / "output" / PCB_NAME).read_bytes()).hexdigest()
+    assert report["report_sources"] == {"output/readiness/native-drc.json": pcb_sha}
+    assert "output/readiness/native-drc-raw.json" not in report["inputs"]
+    assert not (evidence / "native-drc-raw.json").exists()
+
+
 def test_full_archive_lives_outside_the_checksummed_directory(tmp_path):
     board = make_board(tmp_path)
     fake = FakeEngines(board)

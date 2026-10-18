@@ -640,9 +640,11 @@ usage: kicad-tools fleet status [-h] [--boards-dir FLEET_BOARDS_DIR]
 | `--include-stale` | (Reserved) treat stale artifacts as not shippable |
 | `--pattern GLOB` | Glob to identify the routed PCB inside `output/` (default: `*_routed.kicad_pcb`) |
 
-Each board is scored on net completion, DRC status, and presence of the
-required manufacturing artifacts (gerbers, BOM, CPL). A board is "ship-ready"
-when every gate is green; otherwise the row lists the first blocker. The
+Each board is scored on net completion, DRC status, presence of the
+required manufacturing artifacts (gerbers, BOM, CPL), and open known defects
+recorded in `output/readiness.json` (a `known defect #N` blocker; ready boards
+with only disclosed exceptions/advisories show `YES*` / `known: #N`). A board
+is "ship-ready" when every gate is green; otherwise the row lists the first blocker. The
 table view summarises one board per line; `--format json` emits the full
 per-board breakdown for downstream tooling.
 
@@ -694,7 +696,9 @@ kct readiness <board-dir|board.kicad_pcb> [options]
 | `--project-root DIR` | Ancestor of the board directory that bounds where out-of-directory dependencies (a schematic hierarchy, sibling `symbols/` libraries referenced as `${KIPRJMOD}/../...`) may be collected from. Only referenced files are staged, hashed (`external_inputs` in `readiness.json`) and archived, root-relative, in `kicad_project.zip`; anything outside it, missing, symlink-escaping or a whole ancestor directory is refused. |
 | `--net-class-map PATH` | Net-class map sidecar (auto-discovered by default) |
 | `--ack-warnings RULES` | Comma-separated `rule_id`s whose assembly-affecting warnings are explicitly accepted |
-| `--include-tht` | Accept through-hole parts in the CPL (excluded by default) |
+| `--known-issue N:SUMMARY:KIND` | Record an open issue (repeatable; KIND `defect`, `exception` or `advisory`, optional `:rule=count,...` warning allowance). An open defect makes the board `blocked`; recorded issues carry forward (Issue #7261) |
+| `--resolve-known-issue N` | Drop a recorded known issue (repeatable) |
+| `--include-tht` | Accept through-hole parts in the CPL (excluded by default only for SMT-only fabs; JLCPCB includes them) |
 | `--no-archive` | Skip building `output/manufacturing.zip` |
 | `--hv-net-class NAME` | Net-class name identifying high-voltage nets (default: `HV`) |
 | `--hv-min MM` | Manual required creepage distance in mm (phase-1; stricter of this and `--hv-standard` governs) |

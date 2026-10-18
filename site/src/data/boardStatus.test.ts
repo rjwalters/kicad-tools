@@ -1,6 +1,6 @@
 /** Manufacturing badges require current readiness as well as known DRC/LVS. */
 import { describe, expect, it } from "vitest";
-import { displayStatus, displayStatusLabel } from "./boardStatus.ts";
+import { displayStatus, displayStatusLabel, knownIssueHref } from "./boardStatus.ts";
 import type { Board } from "./types.ts";
 
 function makeBoard(overrides: Partial<Board> = {}): Board {
@@ -109,5 +109,29 @@ describe("displayStatus", () => {
       lvs_clean: undefined,
     });
     expect(displayStatus(b)).toBe("drc");
+  });
+});
+
+describe("known issues (#7261)", () => {
+  const entry = (issue: number, kind: "defect" | "exception" | "advisory") =>
+    ({ issue, kind, summary: `issue ${issue}`, recorded: "2026-10-18" });
+
+  it("counts disclosed issues on a ready badge", () => {
+    const one = makeBoard({ readiness: { status: "ready", mode: "assembly", blockers: [], known_issues: [entry(7220, "advisory")] } });
+    expect(displayStatusLabel(one)).toBe("Assembly ready · 1 known issue");
+    const two = makeBoard({ readiness: { status: "ready", mode: "assembly", blockers: [],
+      known_issues: [entry(6269, "exception"), entry(7220, "advisory")] } });
+    expect(displayStatusLabel(two)).toBe("Assembly ready · 2 known issues");
+  });
+
+  it("follows the non-ready path for a board blocked by a defect", () => {
+    const b = makeBoard({ readiness: { status: "blocked", mode: "assembly",
+      blockers: ["known defect #7250: issue 7250"], known_issues: [entry(7250, "defect")] } });
+    expect(displayStatus(b)).toBe("blocked");
+    expect(displayStatusLabel(b)).toBe("Needs work");
+  });
+
+  it("links each issue to the tracker", () => {
+    expect(knownIssueHref(7250)).toBe("https://github.com/rjwalters/kicad-tools/issues/7250");
   });
 });

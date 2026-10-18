@@ -82,13 +82,23 @@ Budget-friendly manufacturer with fast turnaround.
 | Min annular ring | 0.1mm |
 | Via-in-pad | Supported |
 
-### Assembly (SMT)
+### Assembly (SMT / Thru-hole)
 
-| Parameter | Value |
-|-----------|-------|
-| Min component | 0201 |
-| Min pitch | 0.4mm |
-| Min BGA pitch | 0.35mm |
+JLCPCB offers two PCBA service tiers (Issue #7204). Select the tier preflight
+judges against with `kct export --assembly-tier {auto,economic,standard}`
+(`auto`, the default, reports the cheapest tier the board fits).
+
+| Parameter | Economic PCBA | Standard PCBA |
+|-----------|---------------|---------------|
+| Assembly types | Single-sided placement | Single & double sided |
+| Single PCB size | 10x10 - 470x500 mm | 70x70 - 460x500 mm |
+| Edge rails / fiducials | Not necessary | Necessary |
+| Min package | 0402 | 01005 |
+| Min IC pin pitch | 0.4mm | 0.35mm |
+| Min BGA pitch | 0.5mm (c-c) | 0.3mm (c-c) |
+| Build time | 1 - 3 days | >= 4 days |
+
+Through-hole parts are included in the JLCPCB CPL/BOM (Issue #7239).
 
 **Note:** JLCPCB has specific parts library for assembly. Use `kct parts search` to find compatible parts.
 

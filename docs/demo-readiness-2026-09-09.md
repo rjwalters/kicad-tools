@@ -1,5 +1,12 @@
 # Demo manufacturing readiness — 2026-09-09
 
+> **Superseded.** This is a point-in-time audit. The current state of each
+> board, including the open issues recorded against it, is its
+> `output/readiness.json` (`status` and `known_issues`, Issue #7261); run
+> `uv run kct fleet status`. As of 2026-10-18 board 03 is **not ready**
+> (defect #7250), board 04 ships under the paid-drill exception #6269 (ruling
+> #7147), and boards 00–05 carry #7220 advisories (and board 05 #7209).
+
 This audit used kicad-tools 0.20.0 with the local fixes described below and
 KiCad 10.0.6. Reports are stored in each board's `output/readiness/`;
 `output/readiness.json` binds the result to SHA256 hashes of source, rules,
@@ -22,7 +29,10 @@ must invalidate the result if any of those inputs change.
 All numbered demo boards 00–07 passed manufacturer checks, including ERC/LVS/manifest checks,
 and independent native KiCad DRC after zone refill. Their per-rule warning
 breakdowns are empty in both engines: all assembly-affecting warning counts
-are zero. No warning acknowledgements or rule waivers were added.
+are zero. At the time of this audit no warning acknowledgements or rule
+waivers were added. That is no longer true: board 04 relies on the #6269
+paid-drill exception, and later checks found the #7220 warnings and the #7250
+board 03 defect. They are recorded in each board's `known_issues`.
 
 Each ready board has a regenerated BOM, SMT-only CPL, Gerber/drill archive,
 KiCad project ZIP, schematic PDF, front/back assembly PDFs, procurement review,

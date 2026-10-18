@@ -1,13 +1,14 @@
 {
   "file": "boards/04-stm32-devboard/output/stm32_devboard_routed.kicad_pcb",
   "manufacturer": "jlcpcb-tier1",
+  "pcb_sha256": "3681f8279be9b452fafa65e6559d1e4c5bae15ca1621f86ec9ed53b949ac24b4",
   "layers": 0,
   "summary": {
     "errors": 0,
     "warnings": 0,
     "infos": 0,
     "waived": 0,
-    "rules_checked": 57,
+    "rules_checked": 66,
     "rules_checked_by_rule": {
       "connectivity": 1,
       "copper_sliver": 1,
@@ -24,7 +25,13 @@
       "netclass_via_drill": 1,
       "netclass_annular_ring": 1,
       "sch_field_offset": 1,
-      "sch_field_overlap": 1
+      "sch_field_overlap": 1,
+      "spec_conformance_dimensions": 1,
+      "spec_conformance_layers": 1,
+      "spec_conformance_min_trace": 1,
+      "spec_conformance_min_via": 1,
+      "spec_conformance_min_drill": 1,
+      "spec_conformance_target_fab": 1
     },
     "passed": true,
     "stale_waivers": 0
