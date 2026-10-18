@@ -35,6 +35,8 @@ from kicad_tools.constraints import ConstraintManager
 from kicad_tools.drc.incremental import DRCDelta, IncrementalDRC
 from kicad_tools.manufacturers import get_profile
 from kicad_tools.optim.components import Component
+from kicad_tools.optim.fom_features import BoardFeatures, PadFeature
+from kicad_tools.optim.fom_geometry import crossing_count
 from kicad_tools.optim.placement import PlacementOptimizer
 
 if TYPE_CHECKING:
@@ -73,21 +75,38 @@ class Violation:
         }
 
 
+def _euclidean_mst_length(points: list[tuple[float, float]]) -> float:
+    """Total length of the Euclidean minimum spanning tree (Prim's algorithm)."""
+    n = len(points)
+    if n < 2:
+        return 0.0
+    best = [math.dist(points[0], p) for p in points]
+    in_tree = [False] * n
+    in_tree[0] = True
+    total = 0.0
+    for _ in range(n - 1):
+        j = min((k for k in range(n) if not in_tree[k]), key=best.__getitem__)
+        total += best[j]
+        in_tree[j] = True
+        for k in range(n):
+            if not in_tree[k]:
+                best[k] = min(best[k], math.dist(points[j], points[k]))
+    return total
+
+
 @dataclass
 class RoutingImpact:
     """Impact of a move on routing."""
 
     affected_nets: list[str] = field(default_factory=list)
-    estimated_length_change_mm: float = 0.0  # Positive = longer
-    new_congestion_areas: list[tuple[float, float]] = field(default_factory=list)
-    crossing_changes: int = 0  # Net crossing count change
+    estimated_length_change_mm: float = 0.0  # Euclidean pin-MST delta; positive = longer
+    crossing_changes: int = 0  # Inter-net crossing count change (after - before)
 
     def to_dict(self) -> dict:
         """Convert to dictionary for JSON serialization."""
         return {
             "affected_nets": self.affected_nets,
             "estimated_length_change_mm": round(self.estimated_length_change_mm, 3),
-            "new_congestion_areas": [list(c) for c in self.new_congestion_areas],
             "crossing_changes": self.crossing_changes,
         }
 
@@ -397,42 +416,62 @@ class PlacementSession:
 
         return sorted(nets)
 
+    def _net_pin_positions(self, nets: list[str]) -> dict[str, list[tuple[float, float]]]:
+        """Snapshot current pin positions for the given net names."""
+        wanted = set(nets)
+        positions: dict[str, list[tuple[float, float]]] = {n: [] for n in wanted}
+        for comp in self._optimizer.components:
+            for pin in comp.pins:
+                if pin.net_name in wanted:
+                    positions[pin.net_name].append((pin.x, pin.y))
+        return positions
+
+    def _count_crossings(self) -> int:
+        """Count inter-net crossings of the current pin positions."""
+        nets_to_pads: dict[int, list[PadFeature]] = {}
+        for comp in self._optimizer.components:
+            for pin in comp.pins:
+                if not pin.net_name or pin.net <= 0:
+                    continue
+                nets_to_pads.setdefault(pin.net, []).append(
+                    PadFeature(
+                        x=pin.x,
+                        y=pin.y,
+                        net_number=pin.net,
+                        net_name=pin.net_name,
+                        reference=comp.ref,
+                        pad_number=pin.number,
+                        layers=(),
+                        pad_type="smd",
+                    )
+                )
+        return int(crossing_count(BoardFeatures(nets_to_pads=nets_to_pads)))
+
     def _estimate_routing_impact(
         self,
         ref: str,
-        old_x: float,
-        old_y: float,
-        new_x: float,
-        new_y: float,
+        before_pins: dict[str, list[tuple[float, float]]],
+        before_crossings: int,
     ) -> RoutingImpact:
-        """Estimate the routing impact of a move."""
+        """Estimate the routing impact of the move currently applied to ``ref``.
+
+        Must be called while the hypothetical move is applied; ``before_pins``
+        and ``before_crossings`` are snapshots taken before it was applied.
+        Length change is the sum over the nets of ``ref`` of the change in
+        Euclidean pin-MST length; crossings use ``crossing_count`` on all pins.
+        """
         affected_nets = self._get_affected_nets(ref)
+        after_pins = self._net_pin_positions(affected_nets)
 
-        # Estimate wire length change using Manhattan distance
-        # For each spring connected to this component, estimate length change
-        comp = self._optimizer.get_component(ref)
-        if not comp:
-            return RoutingImpact(affected_nets=affected_nets)
-
-        length_change = 0.0
-        for spring in self._optimizer.springs:
-            if spring.comp1_ref != ref and spring.comp2_ref != ref:
-                continue
-
-            # Get the other component
-            other_ref = spring.comp2_ref if spring.comp1_ref == ref else spring.comp1_ref
-            other = self._optimizer.get_component(other_ref)
-            if not other:
-                continue
-
-            # Calculate old and new distances
-            old_dist = math.sqrt((old_x - other.x) ** 2 + (old_y - other.y) ** 2)
-            new_dist = math.sqrt((new_x - other.x) ** 2 + (new_y - other.y) ** 2)
-            length_change += new_dist - old_dist
+        length_change = sum(
+            _euclidean_mst_length(after_pins[n]) - _euclidean_mst_length(before_pins[n])
+            for n in affected_nets
+        )
 
         return RoutingImpact(
             affected_nets=affected_nets,
             estimated_length_change_mm=length_change,
+            crossing_changes=self._count_crossings() - before_crossings,
         )
 
     def query_move(
@@ -477,6 +516,8 @@ class PlacementSession:
         # Capture the "before" state BEFORE the hypothetical move is applied (#7099)
         old_state = self._capture_state()
         old_violations = old_state.violations
+        before_pins = self._net_pin_positions(self._get_affected_nets(ref))
+        before_crossings = self._count_crossings()
 
         # Temporarily apply the move for placement violations
         comp.x, comp.y, comp.rotation = x, y, new_rot
@@ -497,7 +538,7 @@ class PlacementSession:
         score_delta = new_score - old_state.score
 
         # Estimate routing impact
-        routing_impact = self._estimate_routing_impact(ref, old_x, old_y, x, y)
+        routing_impact = self._estimate_routing_impact(ref, before_pins, before_crossings)
 
         # Get affected components
         affected = self._get_affected_components(ref)
