@@ -835,6 +835,7 @@ class TestForceSolidOnIsolatedIslandPads:
       (net 0 "")
       (net 1 "GND")
       (footprint "lib:sliver" (layer "F.Cu") (at 10 0.5)
+        (property "Reference" "R9")
         (pad "1" smd rect (at 0 0) (size 0.4 0.4) (layers "F.Cu")
           (net 1 "GND") (uuid "pad-sliver")))
       (footprint "lib:main" (layer "F.Cu") (at 2 2.5)
@@ -867,12 +868,17 @@ class TestForceSolidOnIsolatedIslandPads:
                     return zc.get_int(0) if zc is not None else None
         raise AssertionError(uuid)
 
-    def test_forces_sliver_anchor_pad_solid(self):
+    def test_forces_sliver_anchor_pad_solid(self, caplog):
         from kicad_tools.zones.fill_clearance import force_solid_on_isolated_island_pads
 
         doc = parse_string(self._BOARD)
-        changed = force_solid_on_isolated_island_pads(doc, {"z-iso"})
+        with caplog.at_level("INFO", logger="kicad_tools.zones.fill_clearance"):
+            changed = force_solid_on_isolated_island_pads(doc, {"z-iso"})
         assert changed == 1
+        # Issue #7309: the island solid is logged with its footprint and pad.
+        assert "solid thermal override on R9.1: it anchors an isolated-copper sliver" in (
+            caplog.text
+        )
         # The pad whose copper touches the tiny sliver is forced solid...
         assert self._zc(doc, "pad-sliver") == 2
         # ...while the pad in the substantial main pour keeps thermal relief.
