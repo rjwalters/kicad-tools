@@ -69,16 +69,16 @@ class TestSchValidateUsesFinderFunction:
 
     @patch("kicad_tools.cli.sch_validate.find_kicad_cli", return_value=None)
     def test_run_erc_calls_find_kicad_cli(self, mock_find):
-        """When find_kicad_cli returns None, run_erc should return a
-        warning about kicad-cli not being found."""
-        from kicad_tools.cli.sch_validate import run_erc
+        """When find_kicad_cli returns None, run_erc reports ERC as not run
+        (Issue #7094) rather than returning a warning issue."""
+        import pytest
 
-        issues = run_erc("dummy.kicad_sch")
+        from kicad_tools.cli.sch_validate import CheckNotRun, run_erc
+
+        with pytest.raises(CheckNotRun, match="not found"):
+            run_erc("dummy.kicad_sch")
 
         mock_find.assert_called_once()
-        assert len(issues) == 1
-        assert issues[0].severity == "warning"
-        assert "not found" in issues[0].message
 
     @patch("subprocess.run")
     @patch(
@@ -95,9 +95,13 @@ class TestSchValidateUsesFinderFunction:
             args=[], returncode=0, stdout="", stderr=""
         )
 
-        from kicad_tools.cli.sch_validate import run_erc
+        import contextlib
 
-        run_erc("dummy.kicad_sch")
+        from kicad_tools.cli.sch_validate import CheckNotRun, run_erc
+
+        # No report is written, so ERC is reported as not run (#7094).
+        with contextlib.suppress(CheckNotRun):
+            run_erc("dummy.kicad_sch")
 
         mock_find.assert_called_once()
         # The subprocess should be called with the path from find_kicad_cli

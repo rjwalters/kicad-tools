@@ -35,6 +35,9 @@ the same net differently, so every one of five boards fails LVS. The
 `[projects.tscircuit]` verdict therefore moves from an unmeasured
 `complementary` to **`evaluated-not-adopted`**, with the relation left at
 upstream/complementary because all six upstream defects found look fixable.
+Re-verified on upstream HEAD on 2026-10-18 (#5878): three are confirmed and
+tracked upstream, two are already fixed or covered upstream, and one (defect 5)
+was not a bug; see "Upstream defect reports".
 
 ## What tscircuit is now
 
@@ -497,16 +500,41 @@ Every distinct failure, classified per the issue's taxonomy:
 | tscircuit cannot express more than one netclass at all (no netclass prop exists in `@tscircuit/props`) | (c) design limitation | recorded here; not a defect, a missing feature |
 | `kct route` leaves `routing_status()['unrouted_pads'] > 0` on zone-carried power nets | (c) not a defect | trace-only connectivity does not credit zone fills; LVS copper confirms the nets are connected |
 
-### Upstream defect reports (ready to file)
+### Upstream defect reports (re-verified and filed, 2026-10-18)
 
-**No agent in this fleet can file these.** The available forge credential is a
-GitHub App installation token scoped to 13 `rjwalters/*` repositories
-(`gh api repos/tscircuit/footprinter --jq .permissions` → all `false`), so
-posting to `tscircuit/*` needs a credential this session does not have. Tracked
-as **#5878** (`loom:operator-only`, `loom:operator-mechanical`). The six reports
-below are written to be filed as-is.
+Issue **#5878** asked for the six reports below to be filed upstream. Under the
+operator's 2026-10-18 ruling, each one was first re-verified on current
+upstream HEAD, and only the confirmed bugs were posted (as `@rjwalters`).
+Upstream revisions checked:
+
+| package | commit | version |
+|---|---|---|
+| `tscircuit/circuit-json-to-kicad` | `main` @ `2b4d81ed` | 0.0.236 (0.0.237 also checked for defects 1 and 3) |
+| `tscircuit/core` | `957802d9` | 0.0.2171 |
+| `tscircuit/footprinter` | `55e623d` | 0.0.440 |
+
+| # | defect | outcome | upstream |
+|---|---|---|---|
+| 1 | package declares no runtime dependencies | **confirmed**; already covered by an open upstream PR | supporting comment on [circuit-json-to-kicad#665](https://github.com/tscircuit/circuit-json-to-kicad/pull/665#issuecomment-6245970646) (stacked #666) |
+| 2 | schematic and PCB net names differ | **confirmed, narrower than first reported** | filed [circuit-json-to-kicad#674](https://github.com/tscircuit/circuit-json-to-kicad/issues/674) |
+| 3 | `<net>` emitted as a footprint-less symbol | **fixed upstream** (circuit-json-to-kicad PR #662, released in 0.0.237) | not filed |
+| 4 | fab floors and pours | **partly fixed, partly by design, rest covered upstream** | not filed; edge clearance tracked by open [circuit-json-to-kicad#550](https://github.com/tscircuit/circuit-json-to-kicad/pull/550) |
+| 5 | bottom `<copperpour>` dropped | **not a bug**: deliberate island removal (core PR #3699) | not filed |
+| 6 | explicit-dimension QFN corner pads overlap | **confirmed** | filed [footprinter#934](https://github.com/tscircuit/footprinter/issues/934), fix PR [footprinter#935](https://github.com/tscircuit/footprinter/pull/935) |
+
+The original 2026-10-01 write-ups are kept below. Each one now begins with its
+outcome; where re-verification showed that the original text was wrong, the
+correction is stated there.
 
 #### 1. `tscircuit/circuit-json-to-kicad` — published package cannot be imported
+
+**Outcome (2026-10-18): confirmed; already covered upstream.** This is still
+present in 0.0.237, which now fails first on `@tscircuit/circuit-json-util`.
+`dist/` has 7 undeclared imports. It duplicates the open upstream PR
+[tscircuit/circuit-json-to-kicad#665](https://github.com/tscircuit/circuit-json-to-kicad/pull/665),
+with #666 stacked on top, so we added a
+[supporting comment](https://github.com/tscircuit/circuit-json-to-kicad/pull/665#issuecomment-6245970646)
+there instead of filing a duplicate issue.
 
 `package.json` declares `"dependencies": {}`, but `dist/index.js` imports
 `polygon-clipping`, which appears only under `devDependencies`
@@ -523,6 +551,13 @@ Fix: move `polygon-clipping` to `dependencies` (or bundle it). Installing it
 explicitly is a working workaround and is what our harness pins.
 
 #### 2. `tscircuit/circuit-json-to-kicad` — the schematic and the PCB name the same net differently
+
+**Outcome (2026-10-18): confirmed, but narrower than reported below.** Named
+nets (`<net>` names such as `VCC`) now agree between the two files. Only
+unnamed pin-to-pin nets, and unconnected pins, still differ. Filed as
+[tscircuit/circuit-json-to-kicad#674](https://github.com/tscircuit/circuit-json-to-kicad/issues/674),
+with an offer to send a PR. The `J1.1 … 'VCC'` row below no longer reproduces;
+the `C1.1` row still does.
 
 The `.kicad_sch` converter assigns KiCad-style auto names (`Net-(C1-1)`) while
 the `.kicad_pcb` converter assigns names derived from the Circuit JSON trace
@@ -543,6 +578,9 @@ KiCad but awkward; a `Net-(R1-Pad2)` style name would be friendlier.
 
 #### 3. `tscircuit/circuit-json-to-kicad` — a `<net>` becomes a schematic symbol with no footprint
 
+**Outcome (2026-10-18): fixed upstream.** circuit-json-to-kicad PR #662 fixed
+it, and the fix shipped in 0.0.237. Not filed.
+
 A declared `<net name="GND" />` is emitted into the `.kicad_sch` as a component
 with reference `GND` and one pad, which has no counterpart in the `.kicad_pcb`:
 
@@ -554,6 +592,15 @@ Reproduced on `led_indicator` and `soic_opamp` (both declare `<net>` children).
 A net should become a power symbol / label, never a placeable component.
 
 #### 4. `tscircuit/circuit-json-to-kicad` — emitted projects are below every mainstream fab floor
+
+**Outcome (2026-10-18): not filed.** The defect splits three ways:
+
+- **Netclass and via values are by design.** The 0.1 mm track and 0.3/0.2 mm
+  vias are tscircuit core's own deliberate defaults. Choosing them is a
+  manufacturing-tier decision, not a converter bug.
+- **Pours: fixed upstream.** Pours are now emitted filled and inset 0.2 mm.
+- **Remaining edge clearance:** covered by the open upstream PR
+  [tscircuit/circuit-json-to-kicad#550](https://github.com/tscircuit/circuit-json-to-kicad/pull/550).
 
 The `.kicad_pro` carries exactly one netclass and no patterns:
 
@@ -588,6 +635,14 @@ raise the silk defaults to 0.15 mm / 1.0 mm.
 
 #### 5. `tscircuit/tscircuit` (`@tscircuit/core`) — `<copperpour layer="bottom">` is silently dropped
 
+**Outcome (2026-10-18): not a bug; the cause stated below was wrong.** The
+bottom pour is not dropped because of its layer. Core PR #3699 deliberately
+removes any pour that has no copper path to a same-net pad or via. On our test
+board the bottom GND plane is a genuine island: nothing connects it to a GND
+pad or via. Adding a GND via keeps the bottom pour. Not filed. The
+only reasonable upstream ask is an optional feature request for a warning when
+a pour is removed as an island.
+
 Only `layer="top"` copper pours reach Circuit JSON. Declaring one of each
 yields exactly one `pcb_copper_pour` (the top one), regardless of declaration
 order or whether the pours are named. On a two-layer board this loses the
@@ -609,8 +664,19 @@ the pours above; `await circuit.renderUntilSettled()` then count
 
 #### 6. `tscircuit/footprinter` — the explicit-dimension QFN form overlaps corner pads
 
-`qfn32_w5_h5_p0.5mm` and `qfn16_w3_h3_p0.5mm` place the pad rows 0.963 mm from
-the centre, so the last pad of one side and the first pad of the next side
+**Outcome (2026-10-18): confirmed; filed with a fix.** The cause is that the
+default pad length `pl` of 0.875 mm ignores `w`/`h`. Two figures below need
+correcting. The 0.963 mm row offset applies to `qfn16_w3_h3_p0.5mm` only;
+`qfn32_w5_h5_p0.5mm` uses 1.9625 mm (and also overlaps). The README's own
+example `qfn24_w6_h6_p0.8mm` overlaps as well. Filed
+[tscircuit/footprinter#934](https://github.com/tscircuit/footprinter/issues/934),
+with the fix PR
+[tscircuit/footprinter#935](https://github.com/tscircuit/footprinter/pull/935),
+which overlaps their open #895.
+
+`qfn32_w5_h5_p0.5mm` and `qfn16_w3_h3_p0.5mm` place the pad rows too close to
+the centre (0.963 mm for qfn16, 1.9625 mm for qfn32; as originally written this
+said 0.963 mm for both), so the last pad of one side and the first pad of the next side
 **intersect**. tscircuit's own DRC catches it and then skips autorouting
 entirely; the overlapping pads are still written to the `.kicad_pcb`. The bare
 `qfn32` / `qfn16` forms use 1.462 mm and are correct.
@@ -627,7 +693,8 @@ tqfp32 / qfp32         32    0
 For `qfn16_w3_h3_p0.5mm`, pad 4 spans x ∈ [-1.4005, -0.5255], y ∈ [-0.875,
 -0.625] and pad 5 spans x ∈ [-0.875, -0.625], y ∈ [-1.4005, -0.5255] — they
 share the square [-0.875, -0.625]². The row offset appears to be computed from
-the body dimension without accounting for pad length.
+the body dimension without accounting for pad length. (Corrected 2026-10-18:
+the cause is that the default `pl` of 0.875 mm is not scaled with `w`/`h`.)
 
 ### Reproducing
 
@@ -641,7 +708,7 @@ uv run python benchmarks/interop/tscircuit/run_gate.py
 1. ~~**Interop gate on tscircuit-emitted KiCad projects** (Issue #5847)~~ —
    done, 2026-10-01; results above. Its own follow-ups: **#5875** and
    **#5876** (kct gaps), **#5877** (host `kicad-cli` hang), **#5878** (file the
-   six upstream defects once a credential exists).
+   six upstream defects; done 2026-10-18, see "Upstream defect reports").
 2. **Benchmark the tscircuit autorouter on the dataset-srj18 source
    boards** (Issue #5848) -- *done, see "Benchmark results": 16 boards
    pinned, audited and swept under a 600 s cap. Open follow-up: rerun with
@@ -649,7 +716,8 @@ uv run python benchmarks/interop/tscircuit/run_gate.py
    equal terms.*  Original task: Add license-checked boards to `benchmarks/external/boards.toml`,
    rip up their copper, and route each one with both routers under the shared
    `kicad-cli` referee, as was done for KiCadRoutingTools.
-3. **Re-run this gate** once upstream defect #2 (net-name divergence) lands —
+3. **Re-run this gate** once upstream defect #2 (net-name divergence,
+   [circuit-json-to-kicad#674](https://github.com/tscircuit/circuit-json-to-kicad/issues/674)) lands —
    it is the one that makes every other result hard to interpret, because a
    board that cannot pass LVS cannot be called manufacturable whatever its DRC
    count. The harness is parameterless: bump the pins in

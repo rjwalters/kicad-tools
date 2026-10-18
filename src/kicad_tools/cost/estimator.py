@@ -594,12 +594,19 @@ class ManufacturingCostEstimator:
         area_cost = area_cm2 * pricing["per_cm2"] * quantity
 
         # Layer multiplier
-        layer_mult = pricing["layer_multiplier"].get(layer_count, 1.0)
+        layer_table = pricing["layer_multiplier"]
+        listed = sorted(int(k) for k in layer_table)
+        tier = next((n for n in listed if n >= layer_count), None)
+        if tier is None:
+            raise ValueError(
+                f"Unsupported layer count {layer_count}; supported layer counts: {listed}"
+            )
+        layer_mult = layer_table.get(tier, layer_table.get(str(tier), 1.0))
         layer_cost = base_cost * (layer_mult - 1.0) * quantity
 
         # Surface finish
         finish_key = surface_finish.lower().replace("-", "_").replace(" ", "_")
-        finish_cost = pricing["finish"].get(finish_key, 0.0) * quantity
+        finish_cost = pricing["finish"].get(finish_key, 0.0)  # per order
 
         # Solder mask color
         color_key = solder_mask_color.lower().replace("-", "_").replace(" ", "_")

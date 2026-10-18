@@ -42,6 +42,7 @@ from typing import TYPE_CHECKING
 import yaml
 
 from kicad_tools.optim.board_outline import extract_board_outline as _extract_board_outline
+from kicad_tools.optim.board_outline import to_origin_relative
 from kicad_tools.optim.components import Keepout
 from kicad_tools.optim.geometry import Polygon, Vector2D
 
@@ -379,7 +380,9 @@ def create_keepout_from_board_edge(
         except ImportError:
             pass
         if outline is None:
-            outline = _extract_board_outline(pcb)
+            # Raw Edge.Cuts coordinates are absolute; the Shapely path above
+            # (and Footprint.position) are origin-relative (#7106).
+            outline = to_origin_relative(_extract_board_outline(pcb), pcb)
 
     if outline is None:
         return None
@@ -502,6 +505,10 @@ def _detect_kicad_keepout_zones(pcb: PCB) -> list[KeepoutZone]:
     """Detect existing KiCad zones marked as keepout."""
     zones = []
 
+    # Zone (xy ...) values in the sexp are absolute, but the optimizer works in
+    # the origin-relative frame of Footprint.position (#7106).
+    ox, oy = pcb.board_origin
+
     # Access raw S-expression to find zone elements with keepout properties
     sexp = pcb._sexp
 
@@ -536,7 +543,7 @@ def _detect_kicad_keepout_zones(pcb: PCB) -> list[KeepoutZone]:
                 for xy in pts_node.find_all("xy"):
                     x = xy.get_float(0) or 0.0
                     y = xy.get_float(1) or 0.0
-                    polygon_vertices.append((x, y))
+                    polygon_vertices.append((x - ox, y - oy))
 
         if polygon_vertices:
             zones.append(

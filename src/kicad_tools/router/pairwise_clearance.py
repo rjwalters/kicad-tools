@@ -607,9 +607,12 @@ def subthreshold_coverage_gap(
                 continue
             if dv not in lookup_cache:
                 try:
-                    lookup_cache[dv] = std.required_creepage(dv, pollution_degree, material_group)[
-                        0
-                    ]
+                    # Explicitly basic (also the #7082 default): routing
+                    # spacing never takes the reinforced opt-in used by
+                    # kct creepage / kct audit.
+                    lookup_cache[dv] = std.required_creepage(
+                        dv, pollution_degree, material_group, insulation="basic"
+                    )[0]
                 except StandardLookupError:
                     lookup_cache[dv] = None
             required = lookup_cache[dv]

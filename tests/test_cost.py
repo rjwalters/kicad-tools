@@ -1570,3 +1570,35 @@ class TestIsBasicPartWithCache:
         estimator = ManufacturingCostEstimator(use_lcsc_pricing=False, parts_cache=mock_cache)
         # _is_basic_part should still query the cache
         assert estimator._is_basic_part("C100") is True
+
+
+class TestPCBLayerAndFinishPricing:
+    """Regression tests for Issue #7080."""
+
+    def _est(self):
+        return ManufacturingCostEstimator("jlcpcb", use_lcsc_pricing=False)
+
+    def test_exact_layer_counts_unchanged(self):
+        # 50x50mm = 25 cm2, qty 5: base 2.0 + area 25*0.02*5 = 2.5 -> 4.50
+        # 4-layer adds base 2.0 * (1.8 - 1) * 5 = 8.0 -> 12.50
+        e = self._est()
+        assert e.estimate_pcb(50, 50, layers=2, quantity=5).total == pytest.approx(4.5)
+        assert e.estimate_pcb(50, 50, layers=4, quantity=5).total == pytest.approx(12.5)
+
+    def test_unlisted_layer_count_priced_at_next_tier_up(self):
+        e = self._est()
+        three = e.estimate_pcb(50, 50, layers=3, quantity=5).total
+        assert three == pytest.approx(12.5)
+        assert three > e.estimate_pcb(50, 50, layers=2, quantity=5).total
+
+    def test_layer_count_above_max_raises(self):
+        with pytest.raises(ValueError, match="supported layer counts"):
+            self._est().estimate_pcb(50, 50, layers=18, quantity=5)
+
+    def test_finish_fee_is_per_order(self):
+        e = self._est()
+        costs = [
+            e._estimate_pcb_cost(50, 50, 2, "enig", "green", 1.6, q).finish_cost
+            for q in (5, 100, 1000)
+        ]
+        assert costs == [pytest.approx(1.0)] * 3

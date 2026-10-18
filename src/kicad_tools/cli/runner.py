@@ -375,6 +375,26 @@ class KiCadCLIResult:
     stdout: str = ""
     stderr: str = ""
     return_code: int = 0
+    #: ``kct drc`` asked for ``--schematic-parity`` but kicad-cli could not
+    #: fetch the schematic netlist, so the parity checks never ran (Issue
+    #: #7077).  kicad-cli still exits 0 and writes ``"schematic_parity": []``,
+    #: so this flag is the only sign of it.  Does not affect ``success``.
+    parity_skipped: bool = False
+
+
+#: The line kicad-cli prints (and then exits 0) when ``--schematic-parity``
+#: was requested but no annotated schematic netlist could be built (Issue
+#: #7077, KiCad 10.0.6).
+PARITY_SKIPPED_MARKER = "Failed to fetch schematic netlist"
+
+
+def parity_skipped_in_output(stdout: object, stderr: object) -> bool:
+    """Whether kicad-cli said it could not run the schematic parity checks.
+
+    The marker is looked for on both streams: which one carries it is a
+    kicad-cli implementation detail (Issue #7077).
+    """
+    return any(isinstance(s, str) and PARITY_SKIPPED_MARKER in s for s in (stdout, stderr))
 
 
 def run_erc(
@@ -575,6 +595,9 @@ def run_drc(
                 stdout=result.stdout,
                 stderr=result.stderr,
                 return_code=result.returncode,
+                # Issue #7077: only meaningful when parity was requested.
+                parity_skipped=schematic_parity
+                and parity_skipped_in_output(result.stdout, result.stderr),
             )
         stderr = (result.stderr or "").strip()
         return KiCadCLIResult(

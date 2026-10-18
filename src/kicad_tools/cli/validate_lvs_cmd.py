@@ -78,7 +78,10 @@ def main(argv: list[str] | None = None) -> int:
         "--min-confidence",
         type=float,
         default=0.0,
-        help="Minimum match confidence to display (0.0-1.0, default: 0.0)",
+        help=(
+            "Minimum match confidence to display (0.0-1.0, default: 0.0). "
+            "Display only: hidden matches still count toward the verdict and exit code."
+        ),
     )
     parser.add_argument(
         "-v",
@@ -144,23 +147,20 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Error during LVS check: {e}", file=sys.stderr)
         return 1
 
-    # Apply confidence filter
-    if args.min_confidence > 0.0:
-        result = LVSResult(
-            matches=[m for m in result.matches if m.confidence >= args.min_confidence],
-            unmatched_pcb=result.unmatched_pcb,
-            unmatched_sch=result.unmatched_sch,
-        )
+    # Apply confidence filter -- display only (Issue #7094).  The verdict
+    # (is_clean, exit code) is always computed from the unfiltered result so a
+    # below-threshold mismatch can never be filtered into a CLEAN board.
+    min_conf = args.min_confidence
 
     # Output
     if args.format == "json":
-        output_json(result, schematic_path, pcb_path)
+        output_json(result, schematic_path, pcb_path, min_conf)
     elif args.format == "summary":
-        output_summary(result, schematic_path, pcb_path)
+        output_summary(result, schematic_path, pcb_path, min_conf)
     else:
-        output_table(result, schematic_path, pcb_path, args.verbose, args.errors_only)
+        output_table(result, schematic_path, pcb_path, args.verbose, args.errors_only, min_conf)
 
-    # Exit code
+    # Exit code (from the unfiltered result)
     if result.unmatched_pcb or result.unmatched_sch:
         return 1
     if result.fuzzy_match_count > 0 and args.strict:
@@ -170,14 +170,35 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
+def _visible_matches(result: LVSResult, min_confidence: float) -> list[LVSMatch]:
+    """Matches at or above ``min_confidence`` (the display filter)."""
+    if min_confidence <= 0.0:
+        return list(result.matches)
+    return [m for m in result.matches if m.confidence >= min_confidence]
+
+
+def _hidden_line(result: LVSResult, min_confidence: float) -> str | None:
+    """``N match(es) below --min-confidence X hidden`` or None when none hidden."""
+    hidden = len(result.matches) - len(_visible_matches(result, min_confidence))
+    if hidden <= 0:
+        return None
+    return f"{hidden} match(es) below --min-confidence {min_confidence:g} hidden"
+
+
 def output_table(
     result: LVSResult,
     schematic_path: Path,
     pcb_path: Path,
     verbose: bool = False,
     errors_only: bool = False,
+    min_confidence: float = 0.0,
 ) -> None:
-    """Output LVS results as a formatted table."""
+    """Output LVS results as a formatted table.
+
+    Counts and the verdict line come from the unfiltered ``result``; only the
+    per-match listings honour ``min_confidence`` (Issue #7094).
+    """
+    visible = _visible_matches(result, min_confidence)
     print(f"\n{'=' * 60}")
     print("LAYOUT vs SCHEMATIC (LVS) CHECK")
     print(f"{'=' * 60}")
@@ -195,7 +216,7 @@ def output_table(
 
     # Show exact matches unless --errors-only
     if not errors_only:
-        exact = [m for m in result.matches if m.confidence >= 1.0]
+        exact = [m for m in visible if m.confidence >= 1.0]
         if exact:
             print(f"\n{'-' * 60}")
             print(f"EXACT MATCHES ({len(exact)}):")
@@ -203,7 +224,7 @@ def output_table(
                 print(f"  {m.sch_ref} = {m.pcb_ref}")
 
     # Show fuzzy matches
-    fuzzy = [m for m in result.matches if m.confidence < 1.0]
+    fuzzy = [m for m in visible if m.confidence < 1.0]
     if fuzzy:
         print(f"\n{'-' * 60}")
         print(f"FUZZY MATCHES ({len(fuzzy)}):")
@@ -222,6 +243,11 @@ def output_table(
         print(f"UNMATCHED PCB COMPONENTS ({len(result.unmatched_pcb)}):")
         for ref in result.unmatched_pcb:
             print(f"  {ref} - no schematic symbol found")
+
+    hidden_line = _hidden_line(result, min_confidence)
+    if hidden_line:
+        print(f"\n{'-' * 60}")
+        print(hidden_line)
 
     print(f"\n{'=' * 60}")
     if result.is_clean:
@@ -243,25 +269,40 @@ def _print_match(match: LVSMatch, verbose: bool, indent: str = "  ") -> None:
         print(f"{indent}    Value:     [{value_icon}]  Footprint: [{fp_icon}]")
 
 
-def output_json(result: LVSResult, schematic_path: Path, pcb_path: Path) -> None:
-    """Output LVS results as JSON."""
+def output_json(
+    result: LVSResult, schematic_path: Path, pcb_path: Path, min_confidence: float = 0.0
+) -> None:
+    """Output LVS results as JSON.
+
+    ``is_clean`` and the counts are unfiltered; ``matches`` lists only the
+    matches at or above ``min_confidence`` and ``hidden_below_min_confidence``
+    says how many were left out (Issue #7094).
+    """
+    visible = _visible_matches(result, min_confidence)
     data = {
         "schematic": str(schematic_path),
         "pcb": str(pcb_path),
-        "is_clean": result.is_clean,
         **result.to_dict(),
+        "is_clean": result.is_clean,
+        "matches": [m.to_dict() for m in visible],
+        "hidden_below_min_confidence": len(result.matches) - len(visible),
     }
     print(json.dumps(data, indent=2))
 
 
-def output_summary(result: LVSResult, schematic_path: Path, pcb_path: Path) -> None:
-    """Output brief LVS summary."""
+def output_summary(
+    result: LVSResult, schematic_path: Path, pcb_path: Path, min_confidence: float = 0.0
+) -> None:
+    """Output brief LVS summary (verdict and counts are unfiltered)."""
     status = "CLEAN" if result.is_clean else "MISMATCHES"
     print(f"LVS: {status}")
     print(f"Schematic: {schematic_path.name}")
     print(f"PCB: {pcb_path.name}")
     print("=" * 40)
     print(result.summary())
+    hidden_line = _hidden_line(result, min_confidence)
+    if hidden_line:
+        print(hidden_line)
 
 
 if __name__ == "__main__":

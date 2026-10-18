@@ -533,7 +533,7 @@ def export_assembly(
                 output_path=str(result.pnp_path),
                 component_count=component_count,
                 layers=layers,
-                rotation_corrections=0,  # Would need manufacturer-specific tracking
+                rotation_corrections=result.rotation_corrections_applied,
             )
 
         # Propagate errors from assembly package
@@ -552,7 +552,6 @@ def export_assembly(
             pnp=pnp_result,
             zip_file=str(zip_file_path) if zip_file_path else None,
             warnings=warnings,
-            cost_estimate=None,  # Cost estimation could be added as future enhancement
         )
 
     except Exception as e:

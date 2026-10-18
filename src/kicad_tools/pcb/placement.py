@@ -8,6 +8,8 @@ This module provides:
 
 from dataclasses import dataclass, field
 
+from kicad_tools.core.geometry import rotate_pad_offset
+
 from .geometry import Layer, Point
 
 # Import footprint reader for accurate pad positions
@@ -18,6 +20,27 @@ try:
 except ImportError:
     _FOOTPRINT_READER_AVAILABLE = False
     _get_library_pads = None
+
+
+def kicad_rotate(point: Point, rotation: float, origin: Point | None = None) -> Point:
+    """Map a local point into its parent frame the way KiCad does.
+
+    Rotates ``point`` by a KiCad orientation of ``rotation`` degrees and then
+    translates it by ``origin``. KiCad applies orientations as a **negated**
+    angle relative to the standard counter-clockwise math that
+    :meth:`Point.rotate` uses (verified against pcbnew, #3739), so this
+    delegates to the canonical :func:`kicad_tools.core.geometry.rotate_pad_offset`.
+
+    It is the one transform for every block-relative -> board point (pads,
+    component origins, ports, trace ends, vias; #7046), and the same one used
+    for a footprint's pad offsets. Using it for both is what keeps a block
+    rotated as a rigid body in KiCad's own convention, so block traces end on
+    the pads KiCad draws at 90/270 degrees as well as 0/180.
+    """
+    rx, ry = rotate_pad_offset(point.x, point.y, rotation)
+    if origin is None:
+        origin = Point(0, 0)
+    return Point(rx + origin.x, ry + origin.y)
 
 
 @dataclass
@@ -43,18 +66,13 @@ class ComponentPlacement:
         # Start with pad position relative to component
         p = self.pads[pad_name]
 
-        # Rotate by component rotation. KiCad applies the footprint orientation
-        # as a NEGATED angle vs standard CCW math (verified vs pcbnew, #3739),
-        # so we rotate the pad offset by -rotation to match KiCad pad world
-        # positions. (Point.rotate itself stays standard-CCW for generic use.)
-        p = p.rotate(-self.rotation)
+        # Rotate by component rotation and translate to the component
+        # position (relative to block), in KiCad's convention (#3739).
+        p = kicad_rotate(p, self.rotation, self.position)
 
-        # Translate to component position (relative to block)
-        p = p + self.position
-
-        # Apply block rotation
+        # Apply block rotation, in the same convention (#7046).
         if block_rotation != 0:
-            p = p.rotate(block_rotation)
+            p = kicad_rotate(p, block_rotation)
 
         # Apply block origin
         if block_origin:
@@ -80,19 +98,22 @@ FOOTPRINT_PADS: dict[str, dict[str, tuple[float, float]]] = {
         "1": (-1.0, 0),
         "2": (1.0, 0),
     },
-    # SOT-23 (3-pin, e.g., transistor)
+    # SOT-23 (3-pin, e.g., transistor) -- KiCad 10 Package_TO_SOT_SMD.pretty:
+    # pins 1/2 down the left side, pin 3 on the right (Issue #7022 review;
+    # the old table was this one rotated 90 degrees).
     "Package_TO_SOT_SMD:SOT-23": {
-        "1": (-0.95, 1.1),
-        "2": (0.95, 1.1),
-        "3": (0, -1.1),
+        "1": (-0.9375, -0.95),
+        "2": (-0.9375, 0.95),
+        "3": (0.9375, 0),
     },
-    # SOT-23-5 (5-pin, e.g., LDO)
+    # SOT-23-5 (5-pin, e.g., LDO) -- KiCad 10 Package_TO_SOT_SMD.pretty:
+    # pins 1-3 down the left side, 4 bottom-right, 5 top-right.
     "Package_TO_SOT_SMD:SOT-23-5": {
-        "1": (-0.95, 1.1),
-        "2": (0, 1.1),
-        "3": (0.95, 1.1),
-        "4": (0.95, -1.1),
-        "5": (-0.95, -1.1),
+        "1": (-1.1375, -0.95),
+        "2": (-1.1375, 0),
+        "3": (-1.1375, 0.95),
+        "4": (1.1375, 0.95),
+        "5": (1.1375, -0.95),
     },
     # TSSOP-20 (STM32C011)
     "Package_SO:TSSOP-20_4.4x6.5mm_P0.65mm": {
@@ -140,4 +161,4 @@ def get_footprint_pads(footprint: str) -> dict[str, tuple[float, float]]:
     return {"1": (-0.8, 0), "2": (0.8, 0)}
 
 
-__all__ = ["ComponentPlacement", "get_footprint_pads"]
+__all__ = ["ComponentPlacement", "get_footprint_pads", "kicad_rotate"]

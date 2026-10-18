@@ -288,10 +288,13 @@ def get_board_edges(pcb: PCB) -> BoardEdges:
     Returns:
         BoardEdges with the four primary edges
     """
+    from kicad_tools.optim.board_outline import to_origin_relative
     from kicad_tools.optim.placement import PlacementOptimizer
 
-    # Use existing outline extraction logic
-    outline = PlacementOptimizer._extract_board_outline(pcb)
+    # Use existing outline extraction logic. The parser returns raw absolute
+    # Edge.Cuts coordinates; translate into the origin-relative frame that
+    # Footprint.position (and the optimizer) use (#7106).
+    outline = to_origin_relative(PlacementOptimizer._extract_board_outline(pcb), pcb)
 
     if outline is None:
         # Fall back to estimating from footprints

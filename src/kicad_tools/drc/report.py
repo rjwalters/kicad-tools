@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 
 from kicad_tools.validate.mask_copper import MaskCopperAssessment
 
+from .parity import SchematicParityStatus, schematic_parity_status
 from .violation import DRCViolation, Location, Severity, ViolationType
 
 if TYPE_CHECKING:
@@ -44,6 +45,20 @@ class DRCReport:
     #: Deliberately NOT part of ``violations`` -- see the class docstring.
     unconnected_items: list[DRCViolation] = field(default_factory=list)
     mask_copper_assessments: list[MaskCopperAssessment] = field(default_factory=list)
+    #: Board/schematic mismatches from KiCad's ``schematic_parity`` array
+    #: (Issue #7077).  Like :attr:`unconnected_items`, deliberately NOT part
+    #: of ``violations``; entries keep their kicad-cli severity.
+    schematic_parity: list[DRCViolation] = field(default_factory=list)
+    #: Whether kicad-cli actually ran the parity checks: ``True``/``False``
+    #: when this process ran kicad-cli and saw its output, ``None`` when
+    #: unknown (a report loaded from disk -- an empty ``schematic_parity``
+    #: array cannot tell "clean" from "never ran").
+    schematic_parity_ran: bool | None = None
+
+    @property
+    def schematic_parity_status(self) -> SchematicParityStatus:
+        """PASSED / FAILED / NOT RUN, derived in one place (Issue #7077)."""
+        return schematic_parity_status(self.schematic_parity, self.schematic_parity_ran)
 
     @property
     def passed(self) -> bool:
@@ -154,6 +169,8 @@ class DRCReport:
             # Connectivity relationships are not geometric violations and
             # are carried through the geometric filter pipeline untouched.
             unconnected_items=list(self.unconnected_items),
+            schematic_parity=list(self.schematic_parity),
+            schematic_parity_ran=self.schematic_parity_ran,
         )
 
     def summary(self) -> dict:
@@ -432,16 +449,19 @@ def _parse_kicad_cli_json(data: dict, source_file: str = "") -> DRCReport:
 
     violations: list[DRCViolation] = []
     unconnected: list[DRCViolation] = []
+    parity: list[DRCViolation] = []
 
     # KiCad stores connectivity relationships in a sibling top-level array,
     # not in ``violations``.  Both are parsed through the same typed
     # representation, but they land in *separate* collections: merging them
     # would silently redefine every geometric-DRC consumer of
     # ``DRCReport.violations`` / ``error_count`` as a combined
-    # geometry+connectivity check (issue #4498).
-    for item, is_connectivity in [
-        *((v, False) for v in data.get("violations", [])),
-        *((u, True) for u in data.get("unconnected_items", [])),
+    # geometry+connectivity check (issue #4498).  Schematic-parity findings
+    # get their own collection for the same reason (issue #7077).
+    for item, bucket in [
+        *((v, violations) for v in data.get("violations", [])),
+        *((u, unconnected) for u in data.get("unconnected_items", [])),
+        *((p, parity) for p in data.get("schematic_parity", [])),
     ]:
         type_str = item.get("type", "unknown")
         message = item.get("description", "")
@@ -513,10 +533,7 @@ def _parse_kicad_cli_json(data: dict, source_file: str = "") -> DRCReport:
         from kicad_tools.feedback import generate_drc_suggestions
 
         violation.suggestions = generate_drc_suggestions(violation)
-        if is_connectivity:
-            unconnected.append(violation)
-        else:
-            violations.append(violation)
+        bucket.append(violation)
 
     return DRCReport(
         source_file=source_file,
@@ -525,6 +542,7 @@ def _parse_kicad_cli_json(data: dict, source_file: str = "") -> DRCReport:
         violations=violations,
         footprint_errors=data.get("footprint_errors", 0),
         unconnected_items=unconnected,
+        schematic_parity=parity,
     )
 
 

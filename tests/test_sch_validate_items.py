@@ -9,7 +9,12 @@ from __future__ import annotations
 
 import contextlib
 import json
+import shutil
+import subprocess
+from pathlib import Path
 from unittest.mock import MagicMock, patch
+
+import pytest
 
 from kicad_tools.cli.sch_validate import (
     ValidationIssue,
@@ -365,3 +370,121 @@ class TestTextOutput:
         # Should not have any indented item lines
         item_lines = [l for l in lines if l.startswith("       ")]
         assert len(item_lines) == 0
+
+
+# ---------------------------------------------------------------------------
+# Issue #7094: an ERC that did not run is "not run", never a pass.
+# ---------------------------------------------------------------------------
+
+_BOARD00_SCH = (
+    Path(__file__).resolve().parents[1]
+    / "boards"
+    / "00-simple-led"
+    / "output"
+    / "simple_led.kicad_sch"
+)
+
+
+@pytest.fixture
+def board00_sch(tmp_path: Path) -> Path:
+    dst = tmp_path / "simple_led.kicad_sch"
+    shutil.copy(_BOARD00_SCH, dst)
+    return dst
+
+
+def _killed(*_args, **_kwargs):
+    return subprocess.CompletedProcess(args=[], returncode=-9, stdout="", stderr="")
+
+
+def _timeout(*_args, **_kwargs):
+    raise subprocess.TimeoutExpired(cmd="kicad-cli", timeout=60)
+
+
+_NOT_RUN_CASES = {
+    "missing": ({"find_kicad_cli": lambda: None}, "kicad-cli not found"),
+    "timeout": (
+        {"find_kicad_cli": lambda: Path("/fake/kicad-cli"), "subprocess.run": _timeout},
+        "timed out",
+    ),
+    "crash": (
+        {"find_kicad_cli": lambda: Path("/fake/kicad-cli"), "subprocess.run": _killed},
+        "SIGKILL",
+    ),
+}
+
+
+def _apply(monkeypatch, patches: dict) -> None:
+    for target, value in patches.items():
+        monkeypatch.setattr(f"kicad_tools.cli.sch_validate.{target}", value)
+
+
+def _run_main(argv: list[str]) -> int:
+    try:
+        main(argv)
+    except SystemExit as e:
+        return int(e.code or 0)
+    return 0
+
+
+class TestERCNotRun:
+    @pytest.mark.parametrize("case", sorted(_NOT_RUN_CASES))
+    def test_json_not_run(self, monkeypatch, capsys, board00_sch: Path, case: str):
+        patches, reason_fragment = _NOT_RUN_CASES[case]
+        _apply(monkeypatch, patches)
+
+        code = _run_main([str(board00_sch), "--format", "json", "--skip", "project_instances"])
+        data = json.loads(capsys.readouterr().out)
+
+        assert code == 1
+        assert data["passed"] is False
+        assert "erc" not in data["checks_run"]
+        assert [c["check"] for c in data["checks_not_run"]] == ["erc"]
+        assert reason_fragment in data["checks_not_run"][0]["reason"]
+        # Not-run is a distinct outcome, not a warning issue.
+        assert not any(i["category"] == "erc" for i in data["issues"])
+
+    @pytest.mark.parametrize("case", sorted(_NOT_RUN_CASES))
+    def test_text_not_run(self, monkeypatch, capsys, board00_sch: Path, case: str):
+        patches, reason_fragment = _NOT_RUN_CASES[case]
+        _apply(monkeypatch, patches)
+
+        code = _run_main([str(board00_sch), "--skip", "project_instances"])
+        out = capsys.readouterr().out
+
+        assert code == 1
+        assert "INCOMPLETE: erc not run (" in out
+        assert reason_fragment in out
+        assert "Checks not run: erc" in out
+        checks_run_line = next(line for line in out.splitlines() if line.startswith("Checks run:"))
+        assert "erc" not in checks_run_line.split(":", 1)[1].split(", ")
+        assert "Passed" not in out
+        assert "All checks passed" not in out
+
+    def test_skip_erc_is_opt_out(self, monkeypatch, capsys, board00_sch: Path):
+        _apply(monkeypatch, {"find_kicad_cli": lambda: None})
+
+        code = _run_main(
+            [
+                str(board00_sch),
+                "--format",
+                "json",
+                "--skip",
+                "project_instances",
+                "--skip",
+                "erc",
+            ]
+        )
+        data = json.loads(capsys.readouterr().out)
+
+        assert code == 0
+        assert data["passed"] is True
+        assert data["checks_not_run"] == []
+        assert "erc" not in data["checks_run"]
+
+    def test_validation_result_passed_false_when_not_run(self):
+        result = ValidationResult(
+            schematic="x.kicad_sch",
+            checks_not_run=[{"check": "erc", "reason": "kicad-cli not found"}],
+        )
+        assert result.error_count == 0
+        assert result.passed is False

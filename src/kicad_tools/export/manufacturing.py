@@ -7,6 +7,7 @@ KiCad project ZIP, and a manifest with SHA256 checksums.
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import json
 import logging
@@ -24,7 +25,12 @@ from kicad_tools.parts.lcsc import LCSCDependencyMissingError
 from kicad_tools.sexp import parse_file
 
 from .assembly import AssemblyConfig, AssemblyPackage, AssemblyPackageResult
-from .preflight import PreflightChecker, PreflightConfig, PreflightResult
+from .preflight import (
+    PreflightChecker,
+    PreflightConfig,
+    PreflightResult,
+    report_source_mismatch,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -712,9 +718,12 @@ class ManufacturingPackage:
 
         Reads any pre-existing DRC report next to the source PCB (or the
         explicit ``drc_report_path`` from the preflight config) and appends
-        an error to ``result`` when it contains SHORTING_ITEMS or other
-        connectivity-error violations.  Because ``ManufacturingResult.success``
-        is ``len(errors) == 0``, appending an error causes ``export()`` to
+        an error to ``result`` when it contains error-severity net shorts
+        (SHORTING_ITEMS) or unconnected items (opens, read through
+        ``DRCReport.connectivity_items()``; issue #7091).  A report recorded
+        for a different PCB is treated like a missing report (warning only),
+        except under ``--strict-preflight`` where it blocks export.  Because
+        ``ManufacturingResult.success`` is ``len(errors) == 0``, appending an error causes ``export()`` to
         return a non-success result and skip writing output files.
 
         This gate runs even when ``preflight.skip_all`` (``--skip-preflight``)
@@ -788,26 +797,47 @@ class ManufacturingPackage:
             from ..drc.violation import ViolationType
 
             report = DRCReport.load(report_path)
-            connectivity_errors = [
-                v
-                for v in report.errors
-                if v.type in (ViolationType.SHORTING_ITEMS, ViolationType.UNCONNECTED_ITEMS)
-            ]
+            # Shorts arrive through the geometric ``violations`` collection.
+            shorts = [v for v in report.errors if v.type == ViolationType.SHORTING_ITEMS]
+            # Opens: since #4498 KiCad's ``unconnected_items`` live in a
+            # separate collection that ``report.errors`` never contains, so
+            # read them through the connectivity accessor (issue #7091).
+            # Only error-severity (non-waived) items block.
+            opens = [v for v in report.connectivity_items() if v.is_error]
         except Exception as e:
             # If we can't read the report, don't block -- prefer a
             # false-negative over breaking boards that never ran DRC.
             logger.warning(f"DRC safety floor could not read {report_path}: {e}")
             return
 
-        if connectivity_errors:
-            short_count = sum(
-                1 for v in connectivity_errors if v.type == ViolationType.SHORTING_ITEMS
-            )
+        # Issue #7091: a report generated for a different PCB (e.g. the
+        # ``*_routed`` sibling's report sitting next to the unrouted board)
+        # is no evidence for this board.  Treat it like a missing report:
+        # warn, but do not block (same false-negative policy as above).
+        other = report_source_mismatch(report.pcb_name, self.pcb_path)
+        if other is not None:
             msg = (
-                f"Safety floor: {len(connectivity_errors)} connectivity error(s) "
-                f"({short_count} net short(s)) in DRC report ({report_path.name}); "
-                "export blocked. Fix the shorts, or pass --skip-drc-floor to "
-                "override (only for known-safe workarounds)."
+                f"DRC report {report_path.name} is for {other}, not "
+                f"{self.pcb_path.name}; the safety floor cannot verify this "
+                "board's connectivity -- re-run DRC on it."
+            )
+            if self.config.strict_preflight:
+                msg = f"Safety floor (strict): {msg}"
+                result.errors.append(msg)
+                logger.error(msg)
+            else:
+                logger.warning(msg)
+                result.warnings.append(msg)
+            return
+
+        if shorts or opens:
+            total = len(shorts) + len(opens)
+            msg = (
+                f"Safety floor: {total} connectivity error(s) "
+                f"({len(shorts)} net short(s), {len(opens)} unconnected item(s)) "
+                f"in DRC report ({report_path.name}); export blocked. Fix the "
+                "shorts/opens, or pass --skip-drc-floor to override (only for "
+                "known-safe workarounds)."
             )
             result.errors.append(msg)
             logger.error(msg)
@@ -815,6 +845,8 @@ class ManufacturingPackage:
     def _run_preflight(self) -> list[PreflightResult]:
         """Run pre-flight validation checks."""
         preflight_cfg = self.config.preflight or PreflightConfig()
+        if self.config.strict_preflight and not preflight_cfg.strict_report_source:
+            preflight_cfg = dataclasses.replace(preflight_cfg, strict_report_source=True)
 
         # Pass explicit THT exclusion setting when the user provided a PnP config
         exclude_tht = None

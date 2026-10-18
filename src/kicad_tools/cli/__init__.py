@@ -133,6 +133,12 @@ def split_passthrough_argv(argv: list[str]) -> tuple[list[str], str, list[str]] 
 
 def main(argv: list[str] | None = None) -> int:
     """Main entry point for kicad-tools CLI."""
+    # Windows consoles/pipes default to cp1252, which cannot encode characters
+    # such as the "Δ" in help text; degrade instead of crashing (Issue #6894).
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(errors="replace")
+
     parser = create_parser()
 
     # Handle footprint generate specially - it has its own subcommand parser
@@ -299,6 +305,9 @@ def _dispatch_command(args) -> int:
         # Issue #6898: forward the run-DRC options the standalone kicad-drc has.
         if args.strict:
             sub_argv.append("--strict")
+        # Issue #7077: opt out of the NOT RUN parity -> exit 2 gate.
+        if getattr(args, "allow_incomplete", False):
+            sub_argv.append("--allow-incomplete")
         if args.category:
             sub_argv.extend(["--category", args.category])
         if args.verbose:

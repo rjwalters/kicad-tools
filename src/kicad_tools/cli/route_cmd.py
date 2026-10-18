@@ -421,8 +421,6 @@ def _multistart_trial_kwargs(args) -> dict:
     """
     negotiated_kwargs: dict = {
         "max_iterations": args.iterations,
-        "batch_routing": getattr(args, "batch_routing", False)
-        or getattr(args, "high_performance", False),
         "hierarchical": getattr(args, "hierarchical", False),
         "perturbation": getattr(args, "perturbation", True),
         "use_targeted_ripup": getattr(args, "targeted_ripup", False),
@@ -11545,6 +11543,7 @@ def route_with_layer_escalation(
 
         try:
             if _should_use_escape_routing(router, escape_flag, quiet):
+                _warn_region_parallel_ignored(args, "escape pre-phase")
                 # Issue #3952: compose the escape pre-phase with the
                 # CoupledPathfinder diff-pair pre-pass when
                 # --differential-pairs is requested so Phase A runs on
@@ -11569,12 +11568,14 @@ def route_with_layer_escalation(
                         **_deterministic_rescue_kwargs(args),
                     )
             elif getattr(args, "multi_resolution", False):
+                _warn_region_parallel_ignored(args, "multi-resolution")
                 router.route_all_multi_resolution(
                     use_negotiated=(args.strategy == "negotiated"),
                     max_iterations=args.iterations,
                     timeout=_attempt_timeout,
                 )
             elif getattr(args, "two_phase", False) and args.strategy == "negotiated":
+                _warn_region_parallel_ignored(args, "two-phase")
                 router.route_all_two_phase(
                     use_negotiated=True,
                     corridor_width_factor=2.0,
@@ -11601,8 +11602,6 @@ def route_with_layer_escalation(
                     max_iterations=args.iterations,
                     timeout=_attempt_timeout,
                     per_net_timeout=getattr(args, "per_net_timeout", None) or None,
-                    batch_routing=getattr(args, "batch_routing", False)
-                    or getattr(args, "high_performance", False),
                     hierarchical=getattr(args, "hierarchical", False),
                     perturbation=getattr(args, "perturbation", True),
                     # Issue #3039: forward --seed for deterministic routing.
@@ -11628,6 +11627,7 @@ def route_with_layer_escalation(
                     **_deterministic_rescue_kwargs(args),
                 )
             elif args.strategy == "basic":
+                _warn_region_parallel_ignored(args, "basic strategy")
                 # Issue #4697: forward the user's budgets rather than calling
                 # route_all() bare (which tripped the #2794 no-timeout guard
                 # pointing straight back here).  This binds the GRID engine;
@@ -11639,6 +11639,7 @@ def route_with_layer_escalation(
                     per_net_timeout=getattr(args, "per_net_timeout", None) or None,
                 )
             elif args.strategy == "monte-carlo":
+                _warn_region_parallel_ignored(args, "monte-carlo strategy")
                 router.route_all_monte_carlo(
                     num_trials=args.mc_trials,
                     **_multistart_trial_kwargs(args),
@@ -11646,6 +11647,7 @@ def route_with_layer_escalation(
                     timeout=_attempt_timeout,
                 )
             elif args.strategy == "evolutionary":
+                _warn_region_parallel_ignored(args, "evolutionary strategy")
                 router.route_all_evolutionary(
                     pop_size=args.pop_size,
                     generations=args.generations,
@@ -12804,6 +12806,7 @@ def route_with_rule_relaxation(
 
         try:
             if _should_use_escape_routing(router, escape_flag, quiet):
+                _warn_region_parallel_ignored(args, "escape pre-phase")
                 # Issue #3952: compose the escape pre-phase with the
                 # CoupledPathfinder diff-pair pre-pass when
                 # --differential-pairs is requested so Phase A runs on
@@ -12828,12 +12831,14 @@ def route_with_rule_relaxation(
                         **_deterministic_rescue_kwargs(args),
                     )
             elif getattr(args, "multi_resolution", False):
+                _warn_region_parallel_ignored(args, "multi-resolution")
                 router.route_all_multi_resolution(
                     use_negotiated=(args.strategy == "negotiated"),
                     max_iterations=args.iterations,
                     timeout=_attempt_timeout,
                 )
             elif getattr(args, "two_phase", False) and args.strategy == "negotiated":
+                _warn_region_parallel_ignored(args, "two-phase")
                 router.route_all_two_phase(
                     use_negotiated=True,
                     corridor_width_factor=2.0,
@@ -12860,8 +12865,6 @@ def route_with_rule_relaxation(
                     max_iterations=args.iterations,
                     timeout=_attempt_timeout,
                     per_net_timeout=getattr(args, "per_net_timeout", None) or None,
-                    batch_routing=getattr(args, "batch_routing", False)
-                    or getattr(args, "high_performance", False),
                     hierarchical=getattr(args, "hierarchical", False),
                     perturbation=getattr(args, "perturbation", True),
                     # Issue #3039: forward --seed for deterministic routing.
@@ -12887,6 +12890,7 @@ def route_with_rule_relaxation(
                     **_deterministic_rescue_kwargs(args),
                 )
             elif args.strategy == "basic":
+                _warn_region_parallel_ignored(args, "basic strategy")
                 # Issue #4697: forward the user's budgets rather than calling
                 # route_all() bare (which tripped the #2794 no-timeout guard
                 # pointing straight back here).  This binds the GRID engine;
@@ -12898,6 +12902,7 @@ def route_with_rule_relaxation(
                     per_net_timeout=getattr(args, "per_net_timeout", None) or None,
                 )
             elif args.strategy == "monte-carlo":
+                _warn_region_parallel_ignored(args, "monte-carlo strategy")
                 router.route_all_monte_carlo(
                     num_trials=args.mc_trials,
                     **_multistart_trial_kwargs(args),
@@ -12905,6 +12910,7 @@ def route_with_rule_relaxation(
                     timeout=_attempt_timeout,
                 )
             elif args.strategy == "evolutionary":
+                _warn_region_parallel_ignored(args, "evolutionary strategy")
                 router.route_all_evolutionary(
                     pop_size=args.pop_size,
                     generations=args.generations,
@@ -15367,6 +15373,7 @@ def route_with_combined_escalation(
 
             try:
                 if _should_use_escape_routing(router, escape_flag, quiet):
+                    _warn_region_parallel_ignored(args, "escape pre-phase")
                     # Issue #3952: compose escape + diff-pair pre-pass when
                     # --differential-pairs is requested (combined 2D
                     # escalation path); otherwise unchanged escape path.
@@ -15389,12 +15396,14 @@ def route_with_combined_escalation(
                             **_deterministic_rescue_kwargs(args),
                         )
                 elif getattr(args, "multi_resolution", False):
+                    _warn_region_parallel_ignored(args, "multi-resolution")
                     router.route_all_multi_resolution(
                         use_negotiated=(args.strategy == "negotiated"),
                         max_iterations=args.iterations,
                         timeout=_attempt_timeout,
                     )
                 elif getattr(args, "two_phase", False) and args.strategy == "negotiated":
+                    _warn_region_parallel_ignored(args, "two-phase")
                     router.route_all_two_phase(
                         use_negotiated=True,
                         corridor_width_factor=2.0,
@@ -15410,8 +15419,6 @@ def route_with_combined_escalation(
                         max_iterations=args.iterations,
                         timeout=_attempt_timeout,
                         per_net_timeout=getattr(args, "per_net_timeout", None) or None,
-                        batch_routing=getattr(args, "batch_routing", False)
-                        or getattr(args, "high_performance", False),
                         hierarchical=getattr(args, "hierarchical", False),
                         perturbation=getattr(args, "perturbation", True),
                         # Issue #3039: forward --seed for deterministic routing.
@@ -15437,6 +15444,7 @@ def route_with_combined_escalation(
                         **_deterministic_rescue_kwargs(args),
                     )
                 elif args.strategy == "basic":
+                    _warn_region_parallel_ignored(args, "basic strategy")
                     # Issue #4697: forward the user's budgets rather than calling
                     # route_all() bare (which tripped the #2794 no-timeout guard
                     # pointing straight back here).  This binds the GRID engine;
@@ -15448,6 +15456,7 @@ def route_with_combined_escalation(
                         per_net_timeout=getattr(args, "per_net_timeout", None) or None,
                     )
                 elif args.strategy == "monte-carlo":
+                    _warn_region_parallel_ignored(args, "monte-carlo strategy")
                     router.route_all_monte_carlo(
                         num_trials=args.mc_trials,
                         **_multistart_trial_kwargs(args),
@@ -15455,6 +15464,7 @@ def route_with_combined_escalation(
                         timeout=_attempt_timeout,
                     )
                 elif args.strategy == "evolutionary":
+                    _warn_region_parallel_ignored(args, "evolutionary strategy")
                     router.route_all_evolutionary(
                         pop_size=args.pop_size,
                         generations=args.generations,
@@ -16239,6 +16249,29 @@ def _build_diffpair_config(args):
         # Issue #3275: forward the optional per-pair wall-clock budget so the
         # CoupledPathfinder's per-pair coupled A* search can be bounded.
         per_pair_timeout=getattr(args, "diffpair_per_pair_timeout", None),
+    )
+
+
+def _warn_region_parallel_ignored(args, path: str) -> None:
+    """Warn once per run that ``--region-parallel`` is ignored on ``path`` (Issue #7072).
+
+    Only ``route_all_negotiated`` honours ``region_parallel``; every other
+    dispatch branch (escape pre-phase, two-phase, multi-resolution, basic,
+    ...) never reads it.  Whether a branch is taken depends on board geometry,
+    so the call sits inside each non-forwarding branch.  The warning goes to
+    stderr (so ``--format json`` stdout is untouched) and is guarded by a flag
+    on ``args`` so escalation-ladder retries do not repeat it.
+    """
+    if not getattr(args, "region_parallel", False):
+        return
+    if getattr(args, "_region_parallel_warned", False):
+        return
+    with contextlib.suppress(AttributeError):  # frozen namespace
+        args._region_parallel_warned = True
+    print(
+        f"warning: --region-parallel ignored: the {path} path does not support region parallelism",
+        file=sys.stderr,
+        flush=True,
     )
 
 
@@ -20008,10 +20041,8 @@ def _route_parser() -> argparse.ArgumentParser:
         "--batch-routing",
         action="store_true",
         help=(
-            "Enable GPU-accelerated batch routing for parallel net processing. "
-            "Routes multiple independent nets simultaneously using GPU compute. "
-            "Best results with 4+ independent nets and Metal/CUDA GPU. "
-            "Enabled automatically in high-performance mode."
+            "DEPRECATED: no effect (GPU batch routing removed, #7051). "
+            "Use --region-parallel / the C++ backend instead."
         ),
     )
     # Issue #3054 (Phase 2 of #3045): expose region-based parallelism as
@@ -20022,14 +20053,16 @@ def _route_parser() -> argparse.ArgumentParser:
         action="store_true",
         default=False,
         help=(
-            "Enable region-based parallel routing (Issue #965). Partitions "
-            "the routing grid into regions and routes non-adjacent regions "
-            "in parallel during each negotiated iteration. Default off. "
+            "Enable region-based partitioning (Issue #965). Applies only to "
+            "the plain negotiated path; it is ignored (with a warning) on the "
+            "escape pre-phase, two-phase, multi-resolution and basic paths. "
+            "Worker searches currently serialize on the grid lock and the "
+            "GIL, so no speedup should be expected. Default off. "
             "NOTE: auto-disabled with a log warning on small / dense boards "
             "where nets-per-region falls below 16 -- the partition + worker "
             "overhead would exceed the per-region A* savings on those "
             "workloads (Issue #3100; board-07 case showed +55%% wall-clock). "
-            "Best used on >= 64-net boards with a 2x2 partition."
+            "Only engages on >= 64-net boards with a 2x2 partition."
         ),
     )
     parser.add_argument(
@@ -21018,6 +21051,18 @@ def _run_main_impl(args, parser, argv) -> int:
             file=sys.stderr,
         )
         return 1
+
+    # Issue #7051: --batch-routing is a deprecated no-op (GPU batch routing was
+    # never wired in).  Warn once per invocation; routing is unaffected.
+    if getattr(args, "batch_routing", False):
+        import warnings
+
+        _msg = (
+            "--batch-routing has no effect and will be removed; "
+            "use --region-parallel / the C++ backend (see #7051, #7053)"
+        )
+        print(f"Warning: {_msg}", file=sys.stderr)
+        warnings.warn(_msg, DeprecationWarning, stacklevel=2)
 
     # Apply high-performance settings if requested
     if getattr(args, "high_performance", False):
@@ -22454,8 +22499,6 @@ def _run_main_impl(args, parser, argv) -> int:
                                     max_iterations=args.iterations,
                                     timeout=_budgeted_timeout(args),
                                     per_net_timeout=getattr(args, "per_net_timeout", None) or None,
-                                    batch_routing=getattr(args, "batch_routing", False)
-                                    or getattr(args, "high_performance", False),
                                     hierarchical=getattr(args, "hierarchical", False),
                                     perturbation=getattr(args, "perturbation", True),
                                     # Issue #3039: forward --seed for deterministic routing.
@@ -22481,6 +22524,7 @@ def _run_main_impl(args, parser, argv) -> int:
                                     ),
                                     **_deterministic_rescue_kwargs(args),
                                 )
+                            _warn_region_parallel_ignored(args, "basic strategy")
                             # Issue #4697: forward the user's budgets rather than calling
                             # route_all() bare (which tripped the #2794 no-timeout guard
                             # pointing straight back here).  This binds the GRID engine;
@@ -22515,6 +22559,7 @@ def _run_main_impl(args, parser, argv) -> int:
                         diffpair_budget_exit_pairs.extend(router.diffpair_budget_exit_pair_names())
                         return result
                     if args.strategy == "evolutionary":
+                        _warn_region_parallel_ignored(args, "evolutionary strategy (adaptive grid)")
                         return router.route_all_evolutionary(
                             pop_size=args.pop_size,
                             generations=args.generations,
@@ -22523,6 +22568,7 @@ def _run_main_impl(args, parser, argv) -> int:
                             timeout=_budgeted_timeout(args),
                         )
                     elif args.strategy == "monte-carlo":
+                        _warn_region_parallel_ignored(args, "monte-carlo strategy")
                         return router.route_all_monte_carlo(
                             num_trials=args.mc_trials,
                             **_multistart_trial_kwargs(args),
@@ -22530,6 +22576,7 @@ def _run_main_impl(args, parser, argv) -> int:
                             timeout=_budgeted_timeout(args),
                         )
                     elif getattr(args, "two_phase", False) and args.strategy == "negotiated":
+                        _warn_region_parallel_ignored(args, "two-phase")
                         return router.route_all_two_phase(
                             use_negotiated=True,
                             corridor_width_factor=2.0,
@@ -22545,8 +22592,6 @@ def _run_main_impl(args, parser, argv) -> int:
                             max_iterations=args.iterations,
                             timeout=_budgeted_timeout(args),
                             per_net_timeout=getattr(args, "per_net_timeout", None) or None,
-                            batch_routing=getattr(args, "batch_routing", False)
-                            or getattr(args, "high_performance", False),
                             hierarchical=getattr(args, "hierarchical", False),
                             perturbation=getattr(args, "perturbation", True),
                             # Issue #3039: forward --seed for deterministic routing.
@@ -22570,6 +22615,7 @@ def _run_main_impl(args, parser, argv) -> int:
                             **_deterministic_rescue_kwargs(args),
                         )
                     else:
+                        _warn_region_parallel_ignored(args, "basic strategy")
                         # Issue #4697: forward the user's budgets rather than calling
                         # route_all() bare (which tripped the #2794 no-timeout guard
                         # pointing straight back here).  This binds the GRID engine;
@@ -22595,6 +22641,7 @@ def _run_main_impl(args, parser, argv) -> int:
             # Check if escape routing should run as a pre-phase (decided once
             # above -- Issue #6666)
             if use_escape_routing:
+                _warn_region_parallel_ignored(args, "escape pre-phase")
                 # Issue #3952: compose the escape pre-phase with the
                 # CoupledPathfinder diff-pair pre-pass when
                 # --differential-pairs is requested so Phase A runs on
@@ -22628,6 +22675,7 @@ def _run_main_impl(args, parser, argv) -> int:
 
             # Progressive clearance relaxation mode
             if getattr(args, "progressive_clearance", False):
+                _warn_region_parallel_ignored(args, "progressive-clearance")
                 routes, relaxed_nets_report = router.route_with_progressive_clearance(
                     min_clearance=getattr(args, "min_clearance", None),
                     num_relaxation_levels=getattr(args, "relaxation_levels", 3),
@@ -22636,12 +22684,14 @@ def _run_main_impl(args, parser, argv) -> int:
                 )
                 return routes
             elif getattr(args, "multi_resolution", False):
+                _warn_region_parallel_ignored(args, "multi-resolution")
                 return router.route_all_multi_resolution(
                     use_negotiated=(args.strategy == "negotiated"),
                     max_iterations=args.iterations,
                     timeout=_budgeted_timeout(args),
                 )
             elif getattr(args, "two_phase", False) and args.strategy == "negotiated":
+                _warn_region_parallel_ignored(args, "two-phase")
                 return router.route_all_two_phase(
                     use_negotiated=True,
                     corridor_width_factor=2.0,
@@ -22661,8 +22711,6 @@ def _run_main_impl(args, parser, argv) -> int:
                         max_iterations=args.iterations,
                         timeout=_budgeted_timeout(args),
                         per_net_timeout=getattr(args, "per_net_timeout", None) or None,
-                        batch_routing=getattr(args, "batch_routing", False)
-                        or getattr(args, "high_performance", False),
                         hierarchical=getattr(args, "hierarchical", False),
                         perturbation=getattr(args, "perturbation", True),
                         # Issue #3039: forward --seed for deterministic routing.
@@ -22708,8 +22756,6 @@ def _run_main_impl(args, parser, argv) -> int:
                     max_iterations=args.iterations,
                     timeout=_budgeted_timeout(args),
                     per_net_timeout=getattr(args, "per_net_timeout", None) or None,
-                    batch_routing=getattr(args, "batch_routing", False)
-                    or getattr(args, "high_performance", False),
                     hierarchical=getattr(args, "hierarchical", False),
                     perturbation=getattr(args, "perturbation", True),
                     # Issue #3039: forward --seed for deterministic routing.
@@ -22734,6 +22780,7 @@ def _run_main_impl(args, parser, argv) -> int:
                     **_deterministic_rescue_kwargs(args),
                 )
             elif args.differential_pairs and args.strategy == "basic":
+                _warn_region_parallel_ignored(args, "basic strategy")
                 # Issue #3321: forward --timeout so the diff-pair pre-pass
                 # derives a per-pair budget when the user has not opted in
                 # via --diffpair-per-pair-timeout.
@@ -22747,8 +22794,10 @@ def _run_main_impl(args, parser, argv) -> int:
                 diffpair_budget_exit_pairs.extend(router.diffpair_budget_exit_pair_names())
                 return result
             elif args.bus_routing and args.strategy == "basic":
+                _warn_region_parallel_ignored(args, "basic strategy")
                 return router.route_all_with_buses(bus_config)
             elif args.strategy == "basic":
+                _warn_region_parallel_ignored(args, "basic strategy")
                 # Issue #4697: forward the user's budgets rather than calling
                 # route_all() bare (which tripped the #2794 no-timeout guard
                 # pointing straight back here).  This binds the GRID engine;
@@ -22760,6 +22809,7 @@ def _run_main_impl(args, parser, argv) -> int:
                     per_net_timeout=getattr(args, "per_net_timeout", None) or None,
                 )
             elif args.differential_pairs and args.strategy in ("monte-carlo", "evolutionary"):
+                _warn_region_parallel_ignored(args, "monte-carlo/evolutionary strategy")
                 # Issue #2464: MC/GA reset the grid per trial (see
                 # _reset_for_new_trial), which would wipe pre-routed
                 # diff-pair traces.  For now, surface a warning and fall
@@ -22787,6 +22837,7 @@ def _run_main_impl(args, parser, argv) -> int:
                         timeout=_budgeted_timeout(args),
                     )
             elif args.strategy == "monte-carlo":
+                _warn_region_parallel_ignored(args, "monte-carlo strategy")
                 return router.route_all_monte_carlo(
                     num_trials=args.mc_trials,
                     **_multistart_trial_kwargs(args),
@@ -22794,6 +22845,7 @@ def _run_main_impl(args, parser, argv) -> int:
                     timeout=_budgeted_timeout(args),
                 )
             elif args.strategy == "evolutionary":
+                _warn_region_parallel_ignored(args, "evolutionary strategy")
                 return router.route_all_evolutionary(
                     pop_size=args.pop_size,
                     generations=args.generations,
