@@ -40,6 +40,13 @@ PLAN = Path(__file__).with_name("routing-plan.json")
 # skew tuner (#6447) aims for; the reviewed copper sits at 0.166 mm.
 USB_FS_MAX_SKEW_MM = float(PROTOCOL_DEFAULTS[PairProtocol.USB2_FS].max_skew_mm.value)
 USB_SKEW_STRETCH_TARGET_MM = SKEW_STRETCH_TARGET_MM
+# Issue #7256: the MCU launch bound was an uncited 4.0 mm.  After #7163's
+# field-solved Zdiff narrows the pair to 0.275 mm, a fresh route launches
+# 4.14/4.28 mm.  Bound total launch copper by the sourced USB2_FS uncoupled
+# length per terminal instead (TI breakout guidance, 6.35 mm).
+USB_FS_MAX_LAUNCH_MM = float(
+    PROTOCOL_DEFAULTS[PairProtocol.USB2_FS].max_uncoupled_per_terminal_mm.value
+)
 
 # Issue #5006: the board's reviewed, cited fabrication floors live in this
 # committed sidecar -- the single source of truth shared by the Python
@@ -296,8 +303,12 @@ def usb_geometry(path):
             f"USB branch bounds failed: lengths={lengths}, common={coupled}, skew={skew} "
             f"(limit {USB_FS_MAX_SKEW_MM} mm)"
         )
-    if max(lengths["USB_MCU_D+"], lengths["USB_MCU_D-"]) > 4.0:
-        raise ValueError("MCU USB launch exceeds 4 mm")
+    launches = {n: lengths[n] for n in ["USB_MCU_D+", "USB_MCU_D-"]}
+    if max(launches.values()) > USB_FS_MAX_LAUNCH_MM:
+        raise ValueError(
+            f"MCU USB launch exceeds {USB_FS_MAX_LAUNCH_MM} mm: launches={launches} "
+            f"(limit {USB_FS_MAX_LAUNCH_MM} mm)"
+        )
     return {"lengths_mm": lengths, "common_coupled_mm": coupled, "branch_skew_mm": skew}
 
 

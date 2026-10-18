@@ -110,14 +110,19 @@ The main ESD-to-series-resistor run is paired on In2.Cu beside In1 ground.
 The connector's reversed duplicate contacts and the ESD device's 1.9mm channel
 spacing necessarily introduce short uncoupled launches. The saved layout has
 15.072/15.268mm total copper per connector/ESD net, 0.197mm skew, and a connected
-4.711mm common coupled run. MCU-side lengths are both 3.535mm, with 73.5%
-coupling. Pair traces are 0.20mm wide with 0.15mm minimum edge gap.
+4.711mm common coupled run. MCU-side lengths are 3.804/3.649mm. Pair traces
+are 0.30mm wide in the committed board; a re-derive sizes them at 0.275mm
+(90-ohm target under the field solve of #7163), which launches the MCU legs
+at about 4.14/4.28mm.
 
 The circuit-specific replay gate independently requires a connected common
 run of at least 4mm, at most 16mm total copper per connector/ESD net, and at
 most 2.5mm skew (the full-speed USB limit in the Renesas full-speed board
 guide, Table 2; 0.5mm stays the stretch target). MCU launches must remain at
-most 4mm. The branched-net
+most 6.35mm of total copper per net: the USB2_FS uncoupled length per terminal
+(TI SPRAAR7J §3.3 breakout guidance, `PROTOCOL_DEFAULTS`). For a 12Mbit/s link
+the extra 0.3-0.5mm over the former 4mm literal is about 0.03ns for 4.3mm
+against a 4ns edge, electrically negligible (Issue #7256). The branched-net
 continuity threshold is 25% (4mm/16mm), while the MCU pair retains 70%.
 These are design-review bounds, not USB standard limits; adding long meanders
 to raise a percentage would defeat the short-link intent. No verified 90-ohm
