@@ -85,7 +85,11 @@ from typing import NamedTuple
 import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from board_recipe_artifacts import recipe_baseline_key, recipe_output_dir  # noqa: E402
+from board_recipe_artifacts import (  # noqa: E402
+    measure_signal_reach,  # shared with check_matchgroup_coverage (#7319)
+    recipe_baseline_key,
+    recipe_output_dir,
+)
 
 # --- shared with check_routed_drc.py ------------------------------------------
 
@@ -448,37 +452,6 @@ from net_class_map_resolver import (  # noqa: E402
     load_board_recipe_module,
     resolve_net_class_map_sidecar,
 )
-
-
-def measure_signal_reach(pcb_path: Path, pour_nets: set[str]) -> tuple[int, int, list[str]]:
-    """Measure routed-signal-net reach on a routed PCB.
-
-    Issue #3413 phase 5: the gate previously asserted only the DRC error
-    count + rule-exercise, so a reach regression (e.g. 18/21 with 3
-    connectivity errors) stayed green as long as the error count fit
-    under the allowlist floor.  This helper counts COMPLETE signal nets
-    per :class:`~kicad_tools.analysis.net_status.NetStatusAnalyzer` --
-    the same per-net completeness model the connectivity DRC rule uses.
-
-    Pour nets are excluded: their connectivity is plane/stitching-based
-    and is gated separately (the board recipe's copper-union audit;
-    see boards/06-diffpair-test/generate_design.py step 11).
-
-    Args:
-        pcb_path: Routed PCB to measure.
-        pour_nets: Net names excluded from the signal universe (the
-            board module's ``POUR_NETS``).
-
-    Returns:
-        ``(complete_count, signal_total, incomplete_names)``.
-    """
-    from kicad_tools.analysis.net_status import NetStatusAnalyzer
-
-    result = NetStatusAnalyzer(pcb_path).analyze()
-    signal = [n for n in result.nets if n.net_name and n.net_name not in pour_nets]
-    complete = [n for n in signal if n.status == "complete"]
-    incomplete_names = sorted(n.net_name for n in signal if n.status != "complete")
-    return len(complete), len(signal), incomplete_names
 
 
 def measure_pour_connectivity(recipe_mod, pcb_path: Path, pour_nets: set[str]) -> list[str]:

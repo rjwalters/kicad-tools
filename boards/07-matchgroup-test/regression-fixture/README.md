@@ -708,6 +708,33 @@ The gate is a sibling of the `diffpair-routing-regression` job (board
    breaks `derive_group_skew_data` or unwires `length_match_group`
    from the net classes) would silently produce a 0-violation report
    and hide the defect.
+4. Asserts signal reach (Issue #7319): at least `REQUIRED_SIGNAL_REACH`
+   (30) of the 31 non-pour nets are complete per `NetStatusAnalyzer`,
+   the same counter board 06's gate uses.  Below it the gate exits 2 and
+   names the open nets.  The committed 27/31 routed artifact in this
+   directory is below the contract on purpose; it is the witness that
+   the assertion bites (`--skip-route` against it fails).
+
+### Re-route reach (seed 42, Issue #7319)
+
+The gate's seed-42 re-route reaches **30/31** (`TMDS_D0_N` open) with 0
+placement-delta probes.  #7163 briefly dropped it to 29/31: the DDR strobe
+pair carried no impedance target, so the router synthesized 100 ohm from
+the validator's `.*_[PN]$` default and re-solved the DQS **width** at the
+0.1016 mm manufacturer gap floor -- 0.175 mm under the #7163 field solve
+(0.225 mm before it).  DQ0 went open and a `U2 mirror` probe tripled the
+gate's wall time.  `DDR_DQS` now declares the 100 ohm target and is sized
+like MIPI/HDMI (0.225 mm held, 0.135 mm gap, 99.7 ohm).  Measured
+back-to-back on one host (C++ backend, `PYTHONHASHSEED=42`):
+
+| run | iteration-0 | final | probes | channel phase | gate wall |
+|---|---|---|---|---|---|
+| `bd3c8fb10` (pre-#7163) | 30/31 | 30/31 | 0 | 507 s | 992 s |
+| DQS sized (#7319) | 30/31 | 30/31 | 0 | 358 s | 702 s |
+
+The committed `net_class_map.json` here still describes the committed
+routed artifact (DQS 0.150/0.100, MIPI/HDMI gap 0.100); it is regenerated
+with that artifact under #6730 / #7283, not by the gate.
 
 ### Interpreting a failure
 
@@ -720,6 +747,11 @@ The gate is a sibling of the `diffpair-routing-regression` job (board
   See `src/kicad_tools/validate/match_group_skew.py` and
   `src/kicad_tools/validate/rules/match_group_length_skew.py` for
   the engagement conditions.
+- **`Reach regression on re-routed ...`** -- fewer signal nets
+  complete than `REQUIRED_SIGNAL_REACH` in `generate_design.py`.  The
+  message names the open nets.  Measure which routing input changed
+  (class geometry in the sidecar, per-net copper widths) before
+  lowering the contract.
 - **`DRC regression on re-routed ...`** -- the routing algorithm
   produced more errors than the allowlist value.  Fix the router
   regression OR (with reviewer sign-off) raise the allowlist value
