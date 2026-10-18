@@ -39,7 +39,11 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, NamedTuple
 
 from kicad_tools._shapely import has_shapely, require_shapely
-from kicad_tools.creepage.standards import DEFAULT_INSULATION
+from kicad_tools.creepage.standards import (
+    DEFAULT_DIMENSION_X_MM,
+    DEFAULT_INSULATION,
+    dimension_x_mm,
+)
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from kicad_tools.creepage.standards import CreepageStandard
@@ -408,6 +412,8 @@ class CreepageReport:
     working_voltage: float | None = None
     pollution_degree: int | None = None
     material_group: str | None = None
+    # Dimension X (mm) used to bridge narrow cutouts (#7058).
+    dimension_x_mm: float | None = None
     required_creepage_mm: float | None = None
     required_clearance_mm: float | None = None
     creepage_provenance: dict[str, Any] = field(default_factory=dict)
@@ -490,6 +496,7 @@ class CreepageReport:
             "working_voltage_v": self.working_voltage,
             "pollution_degree": self.pollution_degree,
             "material_group": self.material_group,
+            "dimension_x_mm": self.dimension_x_mm,
             "insulation": self.insulation,
             "required_creepage_mm": (
                 round(self.required_creepage_mm, 4)
@@ -866,41 +873,117 @@ def _crosses_any_obstacle(line: Any, obstacles: list[Any]) -> bool:
     return False
 
 
-def _shortest_detour(
-    pa: tuple[float, float], pb: tuple[float, float], obstacles: list[Any]
-) -> float:
-    """Shortest visibility-graph path from ``pa`` to ``pb`` around obstacles.
+def _flatten_polygons(geoms: list[Any]) -> list[Any]:
+    """Explode multi-part geometries into their non-empty ``Polygon`` parts."""
+    out: list[Any] = []
+    for g in geoms:
+        if g is None or g.is_empty:
+            continue
+        if hasattr(g, "geoms"):
+            out.extend(_flatten_polygons(list(g.geoms)))
+        elif g.geom_type == "Polygon":
+            out.append(g)
+    return out
 
-    Nodes are the two endpoints plus every obstacle-polygon exterior vertex.
+
+def _bridge_narrow_cutouts(obstacles: list[Any], dimension_x_mm: float) -> list[Any]:
+    """Drop cutout parts narrower than ``dimension_x_mm`` (IEC 60664-1 dim. X).
+
+    A groove narrower than X is not followed by the creepage path; it is
+    measured straight across.  The morphological opening by a disc of diameter
+    X removes exactly those parts and leaves wider parts' outline intact.  The
+    small ``eps`` keeps a slot exactly X wide counted as a groove (not bridged).
+    """
+    if dimension_x_mm <= 0.0 or not obstacles:
+        return list(obstacles)
+    from shapely.geometry import JOIN_STYLE
+
+    r = dimension_x_mm / 2.0 - 1e-4
+    opened = [
+        obs.buffer(-r, join_style=JOIN_STYLE.mitre).buffer(r, join_style=JOIN_STYLE.mitre)
+        for obs in obstacles
+    ]
+    return _flatten_polygons(opened)
+
+
+def _seed_length(geom: Any, node: tuple[float, float], obstacles: list[Any]) -> float:
+    """Shortest admissible straight segment from ``geom`` to ``node`` (inf if none).
+
+    Tries the nearest point first; when that segment is occluded, falls back to
+    each vertex of ``geom``.
+    """
+    import shapely
+    from shapely.geometry import LineString, Point
+    from shapely.ops import nearest_points
+
+    pt = nearest_points(geom, Point(node))[0]
+    start = (pt.x, pt.y)
+    if not _crosses_any_obstacle(LineString([start, node]), obstacles):
+        return math.dist(start, node)
+    best = math.inf
+    for c in shapely.get_coordinates(geom):
+        cand = (float(c[0]), float(c[1]))
+        d = math.dist(cand, node)
+        if d < best and not _crosses_any_obstacle(LineString([cand, node]), obstacles):
+            best = d
+    return best
+
+
+def _shortest_detour(geom_a: Any, geom_b: Any, obstacles: list[Any]) -> float:
+    """Shortest visibility-graph path from ``geom_a`` to ``geom_b`` around obstacles.
+
+    Nodes are a super-source (``geom_a``), a super-sink (``geom_b``) and every
+    obstacle-polygon exterior vertex.  Source/sink edges use the shortest
+    admissible segment from the whole shape (not one fixed nearest-point
+    pair), so the path may leave and enter each shape wherever is shortest.
     An edge between two nodes is admissible when the connecting segment does
     not pass through the interior of any obstacle (segments that merely run
     along a slot boundary are allowed -- that is the surface path hugging the
-    milled edge).  Returns the Euclidean length of the shortest admissible
-    path, or the straight-line distance if no path is found (defensive).
+    milled edge).  Returns ``inf`` when no path is found.
     """
+    import shapely
     from shapely.geometry import LineString
 
-    nodes: list[tuple[float, float]] = [pa, pb]
+    obstacles = _flatten_polygons(obstacles)
+    verts: list[tuple[float, float]] = []
     for obs in obstacles:
         for x, y in list(obs.exterior.coords)[:-1]:
-            nodes.append((x, y))
+            verts.append((x, y))
 
-    n = len(nodes)
+    n = len(verts) + 2  # node 0 = source, node 1 = sink
+    adj: list[list[tuple[int, float]]] = [[] for _ in range(n)]
 
-    def _admissible(i: int, j: int) -> bool:
-        seg = LineString([nodes[i], nodes[j]])
-        return not _crosses_any_obstacle(seg, obstacles)
+    def _add(i: int, j: int, w: float) -> None:
+        adj[i].append((j, w))
+        adj[j].append((i, w))
 
     # Dense O(n^2) adjacency -- n is tiny (a handful of slot corners).
-    adj: list[list[tuple[int, float]]] = [[] for _ in range(n)]
-    for i in range(n):
-        for j in range(i + 1, n):
-            if _admissible(i, j):
-                w = math.dist(nodes[i], nodes[j])
-                adj[i].append((j, w))
-                adj[j].append((i, w))
+    for i in range(len(verts)):
+        for j in range(i + 1, len(verts)):
+            seg = LineString([verts[i], verts[j]])
+            if not _crosses_any_obstacle(seg, obstacles):
+                _add(i + 2, j + 2, math.dist(verts[i], verts[j]))
+    for i, v in enumerate(verts):
+        wa = _seed_length(geom_a, v, obstacles)
+        if wa != math.inf:
+            _add(0, i + 2, wa)
+        wb = _seed_length(geom_b, v, obstacles)
+        if wb != math.inf:
+            _add(1, i + 2, wb)
 
-    # Dijkstra from node 0 (pa) to node 1 (pb).
+    # Direct source -> sink hop from any vertex pair (straight nearest pair is
+    # handled by the caller's short-circuit).
+    best_direct = math.inf
+    for ca in shapely.get_coordinates(geom_a):
+        for cb in shapely.get_coordinates(geom_b):
+            d = math.dist(ca, cb)
+            if d < best_direct and not _crosses_any_obstacle(
+                LineString([tuple(ca), tuple(cb)]), obstacles
+            ):
+                best_direct = d
+    if best_direct != math.inf:
+        _add(0, 1, best_direct)
+
     dist = [math.inf] * n
     dist[0] = 0.0
     pq: list[tuple[float, int]] = [(0.0, 0)]
@@ -915,16 +998,16 @@ def _shortest_detour(
             if nd < dist[v]:
                 dist[v] = nd
                 heapq.heappush(pq, (nd, v))
-
-    if dist[1] != math.inf:
-        return dist[1]
-    return math.dist(pa, pb)
+    return dist[1]
 
 
 def surface_path_length(
     geom_a: Any,
     geom_b: Any,
     obstacles: list[Any] | None = None,
+    *,
+    dimension_x_mm: float = DEFAULT_DIMENSION_X_MM,
+    _bridged: bool = False,
 ) -> tuple[float, float]:
     """Return ``(clearance, creepage)`` between two shapely geometries.
 
@@ -932,6 +1015,11 @@ def surface_path_length(
     ``creepage`` equals ``clearance`` when the straight nearest-points segment
     does not cross an interior Edge.Cuts cutout; otherwise it is the shortest
     path routing around the intervening slot polygon(s) (``> clearance``).
+
+    Cutout parts narrower than ``dimension_x_mm`` (IEC 60664-1 dimension X)
+    are bridged -- measured straight across -- before the search; pass ``0``
+    to disable.  The path may leave/enter each shape at any point, not just
+    the straight-line nearest pair (#7058).
 
     Overlapping / touching geometries (``clearance <= 0``) have no meaningful
     surface detour, so ``creepage == clearance`` there too.
@@ -941,18 +1029,20 @@ def surface_path_length(
     from shapely.ops import nearest_points
 
     obstacles = obstacles or []
+    if not _bridged:
+        obstacles = _bridge_narrow_cutouts(obstacles, dimension_x_mm)
     clearance = geom_a.distance(geom_b)
     if clearance <= 0.0 or not obstacles:
         return clearance, clearance
 
     pa_pt, pb_pt = nearest_points(geom_a, geom_b)
-    pa = (pa_pt.x, pa_pt.y)
-    pb = (pb_pt.x, pb_pt.y)
-    straight = LineString([pa, pb])
+    straight = LineString([(pa_pt.x, pa_pt.y), (pb_pt.x, pb_pt.y)])
     if not _crosses_any_obstacle(straight, obstacles):
         return clearance, clearance
 
-    creepage = _shortest_detour(pa, pb, obstacles)
+    creepage = _shortest_detour(geom_a, geom_b, obstacles)
+    if creepage == math.inf:
+        creepage = clearance  # defensive: no admissible path
     # The detour can never be shorter than the straight clearance.
     return clearance, max(creepage, clearance)
 
@@ -1160,7 +1250,10 @@ def compute_creepage_census(
         return report
 
     number_to_name = {net.number: net.name for net in pcb.nets.values()}
-    obstacles = board_slot_obstacles(pcb)
+    # Bridge sub-dimension-X cutouts once per census (#7058).
+    x_mm = dimension_x_mm(pollution_degree)
+    report.dimension_x_mm = x_mm
+    obstacles = _bridge_narrow_cutouts(board_slot_obstacles(pcb), x_mm)
 
     # Per-layer per-net copper unions.
     layer_unions: dict[str, dict[int, Any]] = {}
@@ -1195,7 +1288,9 @@ def compute_creepage_census(
                     # Canonical dedup: evaluate each HV-HV pair once.
                     if other_num < hv_num:
                         continue
-                clearance, creepage = surface_path_length(hv_geom, other_geom, obstacles)
+                clearance, creepage = surface_path_length(
+                    hv_geom, other_geom, obstacles, _bridged=True
+                )
                 key = (hv_num, other_num)
                 prev = best.get(key)
                 if prev is None or creepage < prev[1]:
@@ -1244,7 +1339,7 @@ def compute_creepage_census(
             if not parts:
                 continue
             hv_all = unary_union(parts)
-            clearance, creepage = surface_path_length(hv_all, edge_geom, obstacles)
+            clearance, creepage = surface_path_length(hv_all, edge_geom, obstacles, _bridged=True)
             if map_mode:
                 req_creep, req_clear, prov = _pair_requirement(hv_nets[hv_num], None, edge=True)
                 report.pairs.append(

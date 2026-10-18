@@ -66,7 +66,7 @@ def test_slot_on_path_lengthens_creepage():
     b = _box(10.0, -1e-3, 11.0, 1e-3)
     slot = _box(4.9, -3.0, 5.1, 3.0)  # tall bar straddling the straight path
 
-    clearance, creepage = surface_path_length(a, b, obstacles=[slot])
+    clearance, creepage = surface_path_length(a, b, obstacles=[slot], dimension_x_mm=0)
     assert clearance == pytest.approx(10.0, abs=1e-3)
     # Detour: (0,0)->(4.9,3)->(5.1,3)->(10,0) (or the symmetric bottom route).
     expected = 2 * math.hypot(4.9, 3.0) + 0.2
@@ -90,11 +90,75 @@ def test_multiple_slots_in_series_sum_detours():
     slot1 = _box(4.9, -3.0, 5.1, 3.0)
     slot2 = _box(14.9, -3.0, 15.1, 3.0)
 
-    clearance, creepage = surface_path_length(a, b, obstacles=[slot1, slot2])
+    clearance, creepage = surface_path_length(a, b, obstacles=[slot1, slot2], dimension_x_mm=0)
     assert clearance == pytest.approx(20.0, abs=1e-3)
     # Two slots each force a detour up to y=3 and back -- creepage exceeds the
     # single-slot detour and, of course, the straight clearance.
     assert creepage > clearance + 1.0
+
+
+def _pads():
+    return _box(-1.0, -1.0, 1.0, 0.2), _box(-1.0, 2.2, 1.0, 3.0)
+
+
+def test_detour_not_pinned_to_nearest_point_pair():
+    # Wide (1.2 mm along the path) slot: not bridged at X=1.0.  The shortest
+    # path leaves the pads at their corners, not at the straight nearest pair.
+    a, b = _pads()
+    slot = _box(-3.0, 0.6, 3.0, 1.8)
+    expected = 2 * math.hypot(2.0, 0.4) + 1.2
+    for x in (0.0, 1.0):
+        _, creepage = surface_path_length(a, b, obstacles=[slot], dimension_x_mm=x)
+        assert creepage == pytest.approx(expected, abs=1e-3)
+
+
+def test_narrow_slot_unbridged_follows_detour_and_bridged_is_clearance():
+    a, b = _pads()
+    slot = _box(-3.0, 1.0, 3.0, 1.4)  # 0.4 mm along the path
+    clearance, c0 = surface_path_length(a, b, obstacles=[slot], dimension_x_mm=0)
+    assert c0 == pytest.approx(2 * math.hypot(2.0, 0.8) + 0.4, abs=1e-3)
+    _, c1 = surface_path_length(a, b, obstacles=[slot], dimension_x_mm=1.0)
+    assert clearance == pytest.approx(2.0, abs=1e-9)
+    assert c1 == pytest.approx(clearance, abs=1e-9)
+
+
+def test_dimension_x_boundary():
+    a, b = _pads()
+    # Exactly X wide along the path: a groove, not bridged.
+    _, exact = surface_path_length(a, b, obstacles=[_box(-3.0, 0.7, 3.0, 1.7)], dimension_x_mm=1.0)
+    assert exact > 2.0 + 0.1
+    _, under = surface_path_length(a, b, obstacles=[_box(-3.0, 0.7, 3.0, 1.69)], dimension_x_mm=1.0)
+    assert under == pytest.approx(2.0, abs=1e-9)
+
+
+def test_narrow_then_wide_slots_only_wide_detours():
+    a, b = _pads()
+    narrow = _box(-3.0, 0.4, 3.0, 0.6)
+    wide = _box(-3.0, 0.8, 3.0, 2.0)
+    _, both = surface_path_length(a, b, obstacles=[narrow, wide], dimension_x_mm=1.0)
+    _, only_wide = surface_path_length(a, b, obstacles=[wide], dimension_x_mm=1.0)
+    assert both == pytest.approx(only_wide, abs=1e-3)
+    assert both > 2.0 + 0.5
+
+
+def test_multipolygon_source_and_multilinestring_target():
+    from shapely.geometry import MultiLineString, MultiPolygon
+
+    a1, b = _pads()
+    src = MultiPolygon([a1, _box(-20.0, -1.0, -19.0, 0.2)])
+    slot = _box(-3.0, 0.6, 3.0, 1.8)
+    expected = 2 * math.hypot(2.0, 0.4) + 1.2
+    _, c = surface_path_length(src, b, obstacles=[slot])
+    assert c == pytest.approx(expected, abs=1e-3)
+    edge = MultiLineString([[(-1.0, 2.2), (1.0, 2.2)], [(-1.0, 2.2), (-1.0, 3.0)]])
+    _, c = surface_path_length(a1, edge, obstacles=[slot])
+    assert c == pytest.approx(expected, abs=1e-3)
+
+
+def test_census_records_dimension_x(tmp_path):
+    pcb = _load(tmp_path, board_source(with_slot=True))
+    report = compute_creepage_census(pcb, resolve_hv_nets(pcb, "HV"), min_mm=1.0)
+    assert report.dimension_x_mm == 1.0
 
 
 def test_overlapping_geometries_have_zero_creepage():

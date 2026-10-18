@@ -542,6 +542,28 @@ _CLEARANCE_PD_FLOOR_MM: dict[int, float] = {
 }
 
 # ---------------------------------------------------------------------------
+# Dimension X -- minimum groove width (issue #7058)
+# ---------------------------------------------------------------------------
+
+# IEC 60664-1:2020 clause 6.8 / Figure 4 / Table 1 minimum groove width X (mm)
+# by pollution degree.  A groove narrower than X is bridged (measured straight
+# across) rather than followed.  UNVERIFIED: values are as cited by the issue
+# reporter; the standard text is paywalled and was not checked.
+DIMENSION_X_MM: dict[int, float] = {1: 0.25, 2: 1.0, 3: 1.5}
+
+# Used when no pollution degree is supplied (pure ``--min`` mode); PD2 is the
+# typical FR-4 case.
+DEFAULT_DIMENSION_X_MM = DIMENSION_X_MM[2]
+
+
+def dimension_x_mm(pollution_degree: int | None) -> float:
+    """Dimension X (mm) for ``pollution_degree`` (PD2 value when ``None``)."""
+    if pollution_degree is None:
+        return DEFAULT_DIMENSION_X_MM
+    return DIMENSION_X_MM.get(int(pollution_degree), DEFAULT_DIMENSION_X_MM)
+
+
+# ---------------------------------------------------------------------------
 # Insulation type (issue #7082)
 # ---------------------------------------------------------------------------
 
