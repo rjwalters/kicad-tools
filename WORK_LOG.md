@@ -15,6 +15,9 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-18
 
+- **PR #7154**: fix: seed creepage detour from both shapes and bridge sub-X cutouts
+- **PR #7157**: feat(validate): compare component values in validate --sync; fix board 04 J1 value
+- **Issue #7058** (closed): kct creepage overstates creepage around a slot: the detour is computed between the straight-line nearest points, and narrow gaps are not bridged
 - **PR #7191**: fix(drc): one blocking-findings definition across DRC entry points
 - **PR #7244**: docs: fix six unreleased changelog upgrade fragments
 - **Issue #7188** (closed): One DRC blocking-verdict helper: kicad-drc-summary, kct mfr validate and Project.check_drc() pass boards kicad-cli fails
