@@ -1397,6 +1397,14 @@ class Footprint:
             # don't drop tokens the parser doesn't yet model.
             self._sync_attr_node()
 
+    @property
+    def sheet_position(self) -> tuple[float, float]:
+        """Footprint origin in sheet-absolute coordinates (Y down), as stored
+        in the ``(at ...)`` node -- ``position`` plus the board origin."""
+        ox, oy = self.__dict__.get("_board_origin", (0.0, 0.0))
+        x, y = self.position
+        return (x + ox, y + oy)
+
     def _placement_frame(self) -> _FootprintFrame | None:
         """Board-relative ``(x, y, rotation, is_back)``; None before init."""
         state = self.__dict__
@@ -8130,6 +8138,7 @@ class PCB:
             >>> pcb.export_placement("cpl_jlcpcb.csv", format="jlcpcb")
         """
         from ..export import export_pnp as _export_pnp
+        from ..export.pnp import _aux_origin_of
 
         footprints = list(self.footprints)
 
@@ -8147,7 +8156,7 @@ class PCB:
         # the single source of truth (issues #3616/#3618).  Synthesizing a
         # bare PnPExportConfig() here would defeat manufacturer defaults such
         # as JLCPCB's exclude_tht=True, shipping THT rows in the CPL.
-        pnp_csv = _export_pnp(footprints, mfr, config=None)
+        pnp_csv = _export_pnp(footprints, mfr, config=None, aux_origin=_aux_origin_of(self.setup))
 
         # Write to file
         output_path = Path(output)

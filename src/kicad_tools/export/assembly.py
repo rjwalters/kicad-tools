@@ -30,6 +30,7 @@ from .gerber import MANUFACTURER_PRESETS, GerberConfig, GerberExporter
 from .pnp import (
     PlacementData,
     PnPExportConfig,
+    _aux_origin_of,
     count_rotation_corrections,
     export_pnp,
     extract_tht_exclusions,
@@ -534,11 +535,21 @@ class AssemblyPackage:
 
         # Generate CPL – pass None when no explicit config so that the
         # formatter can apply its own defaults (e.g. JLCPCB exclude_tht=True).
+        # The CPL must share the Gerbers' frame, so take use_aux_origin from
+        # the same preset the package plots with (OSH Park: False) unless
+        # the caller supplied an explicit pnp_config.
+        pnp_config = self.config.pnp_config
+        if pnp_config is None and self.fab_family in MANUFACTURER_PRESETS:
+            use_aux = MANUFACTURER_PRESETS[self.fab_family].config.use_aux_origin
+            if not use_aux:
+                pnp_config = PnPExportConfig(use_aux_origin=False)
+        aux_origin = _aux_origin_of(pcb.setup)
         pnp_csv = export_pnp(
             footprints,
             self.fab_family,
-            self.config.pnp_config,
+            pnp_config,
             rotation_corrections=rotation_corrections,
+            aux_origin=aux_origin,
         )
 
         # Record the THT hand-solder set excluded from the CPL.  Use the
@@ -549,10 +560,10 @@ class AssemblyPackage:
             result.rotation_corrections_applied = count_rotation_corrections(
                 footprints,
                 self.fab_family,
-                self.config.pnp_config,
+                pnp_config,
                 rotation_corrections=rotation_corrections,
             )
-            effective_config = get_pnp_formatter(self.fab_family, self.config.pnp_config).config
+            effective_config = get_pnp_formatter(self.fab_family, pnp_config).config
             result.tht_excluded = extract_tht_exclusions(footprints, effective_config)
             if result.tht_excluded:
                 logger.info(
