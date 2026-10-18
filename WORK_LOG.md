@@ -15,6 +15,11 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-18
 
+- **PR #7034**: fix: route the board-03 experiment row under jlcpcb-tier1 sidecars
+- **PR #7031**: docs: fix stale import_lcsc_part snippet in manufacturing-export example
+- **PR #7030**: fix: unify schematic wire endpoint bucketing on micron rounding
+- **Issue #7029** (closed): examples/09: help text references nonexistent kicad_tools.parts.import_lcsc_part
+- **Issue #7009** (closed): Unify kct sch wire endpoint bucketing on rounded micron
 - **PR #7021**: docs: fix stale kct command names in lcsc guide and mfg example
 - **PR #7016**: fix(router): key the routing cache on the native router build (#7014)
 - **PR #7013**: test: consolidate sch_validate S-expression builder helpers
