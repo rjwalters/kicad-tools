@@ -1,14 +1,14 @@
 {
   "file": "boards/03-usb-joystick/output/usb_joystick_routed.kicad_pcb",
   "manufacturer": "jlcpcb-tier1",
-  "pcb_sha256": "a07693a2dbc33114cd3ae5eeea68f940151af5adc566c5b6303225b727d02b98",
+  "pcb_sha256": "9520237d99732b6f1b272cd9921345ad03bd94b87faa37c1f9c7a0a3ff9e014d",
   "layers": 4,
   "summary": {
     "errors": 0,
     "warnings": 7,
     "infos": 10,
     "waived": 0,
-    "rules_checked": 68,
+    "rules_checked": 76,
     "rules_checked_by_rule": {
       "connectivity": 1,
       "copper_sliver": 1,
@@ -29,7 +29,13 @@
       "netclass_via_drill": 1,
       "netclass_annular_ring": 1,
       "sch_field_offset": 1,
-      "sch_field_overlap": 1
+      "sch_field_overlap": 1,
+      "spec_conformance_dimensions": 1,
+      "spec_conformance_layers": 1,
+      "spec_conformance_min_trace": 1,
+      "spec_conformance_min_via": 1,
+      "spec_conformance_min_drill": 1,
+      "spec_conformance_target_fab": 1
     },
     "passed": true,
     "stale_waivers": 0
