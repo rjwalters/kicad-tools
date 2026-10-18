@@ -118,6 +118,9 @@ class ManufacturingResult:
     # human-readable ordering instructions travel with the bundle rather
     # than requiring per-board hand-typed prose.
     fabrication_process: dict | None = None
+    # Issue #7209: outer/inner copper weight the order requests, derived from the
+    # board stackup (see ``preflight.resolve_ordered_copper``).
+    ordered_copper: dict | None = None
 
     @property
     def success(self) -> bool:
@@ -401,6 +404,9 @@ def _build_manifest(
     if result.fabrication_process is not None:
         manifest["fabrication_process"] = result.fabrication_process
 
+    if result.ordered_copper is not None:
+        manifest["ordered_copper"] = result.ordered_copper
+
     return manifest
 
 
@@ -511,6 +517,7 @@ class ManufacturingPackage:
         # actual layer/copper configuration, so the manifest and README
         # steps below can bind it into the bundle.
         self._resolve_fabrication_process(result)
+        self._resolve_ordered_copper(result)
 
         # Step 0: Pre-flight validation
         preflight_cfg = self.config.preflight
@@ -959,6 +966,25 @@ class ManufacturingPackage:
             return
 
         result.drc_constraint_paths = written
+
+    def _resolve_ordered_copper(self, result: ManufacturingResult) -> None:
+        """Record the outer/inner copper weight the order requests (#7209).
+
+        Taken from the board stackup (matched against the fab profile), not a
+        constant.  Best-effort: failures leave ``result.ordered_copper`` unset.
+        """
+        try:
+            from ..schema.pcb import PCB
+            from .preflight import resolve_ordered_copper
+
+            info = resolve_ordered_copper(PCB.load(str(self.pcb_path)), self.manufacturer)
+            if info["ordered_outer_oz"] is not None:
+                if self.manufacturer.startswith("jlcpcb"):
+                    info["source"] = "https://jlcpcb.com/help/article/jlcpcb-copper-weight"
+                    info["source_verified"] = "2026-10-18"
+                result.ordered_copper = info
+        except Exception as e:
+            logger.debug("Could not resolve ordered copper: %s", e)
 
     def _resolve_fabrication_process(self, result: ManufacturingResult) -> None:
         """Resolve the profile's declared via-in-pad process for this board (#5009).
@@ -1672,6 +1698,18 @@ class ManufacturingPackage:
                 lines.append(f"  {instructions}")
             else:
                 lines.append(f"  Process: {result.fabrication_process.get('name', '(unnamed)')}")
+            lines.append("")
+
+        if result.ordered_copper:
+            oc = result.ordered_copper
+            lines.append("Copper weight to order:")
+            lines.append("-" * 23)
+            lines.append(
+                f"  Outer {oc['ordered_outer_oz']:g} oz / inner {oc['ordered_inner_oz']:g} oz "
+                f"({oc['layers']} layers; board stackup: {oc['status']})"
+            )
+            if oc.get("source"):
+                lines.append(f"  Source: {oc['source']} (verified {oc['source_verified']})")
             lines.append("")
 
         readme_path = out_dir / "README.txt"

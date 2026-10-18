@@ -461,6 +461,21 @@ class ManufacturerProfile:
         # Return first available
         return list(self.design_rules.values())[0]
 
+    def copper_options(self, layers: int) -> list[tuple[float, float]]:
+        """Distinct ``(outer_oz, inner_oz)`` builds the profile offers for a layer count.
+
+        Derived from the ``<N>layer_*`` design-rule entries so the stackup-vs-order
+        preflight check (issue #7209) compares against what the fab provides.
+        """
+        prefix = f"{layers}layer_"
+        options: list[tuple[float, float]] = []
+        for key, rules in self.design_rules.items():
+            if key.startswith(prefix):
+                opt = (float(rules.outer_copper_oz), float(rules.inner_copper_oz))
+                if opt not in options:
+                    options.append(opt)
+        return options
+
     def get_part_search_url(self, part_number: str) -> str | None:
         """Get URL to search for a part in manufacturer's library."""
         if self.parts_library:
