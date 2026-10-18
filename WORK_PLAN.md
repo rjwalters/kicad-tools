@@ -39,42 +39,43 @@ Issues currently being built (`loom:building`).
 - **#5798**: [Epic #5784] Phase 4: deconfound kct's match-group length tuning on board 07 (measure first)
 - **#6404**: boards 00-07: refill saved zones and refresh hash-bound bundles/readiness after #6390's sidecar update
 - **#6554**: diffpair: reproduce KiCad's diff_pair_uncoupled primitive pairing exactly (kct is a lower bound)
-- **#7026**: board 03: fresh class-clean lattice route is not complete under the recipe's tier-1 zone fill (3 GND opens)
 - **#7058**: kct creepage overstates creepage around a slot: the detour is computed between the straight-line nearest points, and narrow gaps are not bridged
 - **#7059**: kct export CPL coordinates are relative to the Edge.Cuts top-left with Y down, while the gerbers use the drill/place origin with Y up
 - **#7060**: CoupledLines overstates differential impedance of tightly coupled pairs (+17 % microstrip, +12 % stripline)
 - **#7062**: LDOBlock internal routing shorts foreign pads and crosses itself on real SOT-23-5 geometry
 - **#7064**: PCBLayout.route() draws a straight port-to-port line that crosses foreign pads and never reaches a pad
-- **#7070**: docs: CLI reference gaps after #7069 (parts import, optimize-traces -v/--length-match, sch validate options, stats.per_net)
 - **#7071**: router: negotiated oscillation escape burns ~27 s (≈40% of board-02 wall) on four non-transactional strategies, then is rolled back (P1 of #7053 note, mislabelled 'perturbation pass')
 - **#7075**: transmission_line.py: CPWG impedance reads 53-233 % high, and microstrip/CPWG dielectric loss is too large by a factor of eps_eff
 - **#7076**: Microstrip Z0 with copper thickness reads 1.6-3.7 % low (docstring claims 0.2 %)
 - **#7079**: ImpedanceRule judges every detected differential pair at a 0.15 mm gap, whatever the routed spacing
 - **#7093**: router: differential pair gets unequal via counts when a leg falls back to uncoupled routing (board 03 USB_D 2 vs 3; blocks #6394)
 - **#7096**: kct drc reports DRC PASSED / exit 0 on an unrouted board: unconnected items (opens) are never counted
-- **#7120**: MCP route_net writes one 0.1mm segment per grid cell (no collinear merge on saved copper)
-- **#7124**: Two more placement outline fallbacks miss the board-origin shift (bottom_up_placement.py, optimize_placement_cmd.py) — latent #7106 off-board write
-- **#7126**: kct argv shims ignore leading global flags (kct -q footprint generate, kct --verbose erc <report> fail) + harden CLI smoke contract
+- **#7121**: MCP sessions: one session store for start_session/get_session_context/record_decision, and checkpoints that actually restore (#7115 Part 2)
 - **#7129**: test flake: format_json_stdout_contract[route --lint-gate] still times out at 100s under CI load (follow-up to #6744)
-- **#7132**: generate_dru does not emit a max hole size rule (max_hole_diameter_mm is display-only)
+- **#7136**: kct sign-off skills don't refuse bad boards: Gate 1 exits 2 on every board, kicad-cli gate exits 0 on errors, export never gets the DRC report, audit ERC never runs
+- **#7150**: board 04 J1 value SWD-6 vs SWD (schematic vs PCB) + kct validate --sync should flag value mismatches (#7147 Part B)
+- **#7153**: kct export bundle inconsistencies: JLCPCB Gerbers omit paste layers for SMT bundles; board 04 manifest says DRC OK while report says FAIL/NOT_READY; report ERC falsely 'skipped by user request'
+- **#7159**: Route-time match-group tuner meanders through preserved foreign-net vias (board 07: 16 kicad-cli errors with --length-match-groups)
+- **#7161**: kct erc reports PASS (exit 0) where kicad-cli reports errors: cross-sheet global-label name-count filter drops true isolated_pin_label findings; power-pin sibling filter is inert on KiCad 10
 
 ## PRs Awaiting Review
 
 PRs waiting on Judge (`loom:review-requested`).
 
 - **#6838**: perf(router): raise flag-off coupled iteration budget to 1.4M (700k/phase) with PCIE_TX/PCIE_RX/LVDS exceptions
-- **#7081**: fix(cli): add optimize-traces -v help; sync cli.md/machine-output.md with parser; add docs drift test
 - **#7133**: fix(boards): run package_release producers on pinned toolchain and refresh board 01 readiness
-- **#7134**: fix(placement): shift hierarchical fallback outline into origin-relative frame
-- **#7135**: test: fail JSON contract on stale-API crashes and cover --help for every CLI node
 - **#7137**: test: move route --lint-gate JSON-contract variant to extended tier
+- **#7142**: test(mcp): smoke test calling every registered tool
+- **#7154**: fix: seed creepage detour from both shapes and bridge sub-X cutouts
+- **#7162**: fix(router): match-group tuner clears foreign preserved copper
+- **#7163**: fix(physics): solve edge-coupled Zdiff by field solve, not an empirical coupling factor
+- **#7165**: fix(export): emit CPL in the Gerber/drill frame (aux origin, Y up)
 
 ## Approved (Awaiting Merge)
 
 PRs that passed review and are queued for Champion auto-merge (`loom:pr`).
 
-- **#7103**: fix: rank lattice fallback pair legs by P/N via-count parity
-- **#7122**: fix(mcp): merge collinear segments in route_net before saving
+- **#7160**: fix(router): keep a match-group member's commits when a later attempt fails
 
 ## Proposed
 
@@ -102,19 +103,20 @@ Issues carrying `loom:curated`.
 - **#7060**: CoupledLines overstates differential impedance of tightly coupled pairs (+17 % microstrip, +12 % stripline) *(curated)*
 - **#7062**: LDOBlock internal routing shorts foreign pads and crosses itself on real SOT-23-5 geometry *(curated)*
 - **#7064**: PCBLayout.route() draws a straight port-to-port line that crosses foreign pads and never reaches a pad *(curated)*
-- **#7070**: docs: CLI reference gaps after #7069 (parts import, optimize-traces -v/--length-match, sch validate options, stats.per_net) *(curated)*
 - **#7071**: router: negotiated oscillation escape burns ~27 s (≈40% of board-02 wall) on four non-transactional strategies, then is rolled back (P1 of #7053 note, mislabelled 'perturbation pass') *(curated)*
 - **#7075**: transmission_line.py: CPWG impedance reads 53-233 % high, and microstrip/CPWG dielectric loss is too large by a factor of eps_eff *(curated)*
 - **#7076**: Microstrip Z0 with copper thickness reads 1.6-3.7 % low (docstring claims 0.2 %) *(curated)*
 - **#7079**: ImpedanceRule judges every detected differential pair at a 0.15 mm gap, whatever the routed spacing *(curated)*
 - **#7093**: router: differential pair gets unequal via counts when a leg falls back to uncoupled routing (board 03 USB_D 2 vs 3; blocks #6394) *(curated)*
 - **#7096**: kct drc reports DRC PASSED / exit 0 on an unrouted board: unconnected items (opens) are never counted *(curated)*
-- **#7120**: MCP route_net writes one 0.1mm segment per grid cell (no collinear merge on saved copper) *(curated)*
 - **#7121**: MCP sessions: one session store for start_session/get_session_context/record_decision, and checkpoints that actually restore (#7115 Part 2) *(curated)*
-- **#7124**: Two more placement outline fallbacks miss the board-origin shift (bottom_up_placement.py, optimize_placement_cmd.py) — latent #7106 off-board write *(curated)*
-- **#7126**: kct argv shims ignore leading global flags (kct -q footprint generate, kct --verbose erc <report> fail) + harden CLI smoke contract *(curated)*
+- **#7123**: MCP: parametrized smoke test calling every registered tool through MCPServer.call_tool (#7115 Part 3) *(curated)*
 - **#7129**: test flake: format_json_stdout_contract[route --lint-gate] still times out at 100s under CI load (follow-up to #6744) *(curated)*
-- **#7132**: generate_dru does not emit a max hole size rule (max_hole_diameter_mm is display-only) *(curated)*
+- **#7136**: kct sign-off skills don't refuse bad boards: Gate 1 exits 2 on every board, kicad-cli gate exits 0 on errors, export never gets the DRC report, audit ERC never runs *(curated)*
+- **#7150**: board 04 J1 value SWD-6 vs SWD (schematic vs PCB) + kct validate --sync should flag value mismatches (#7147 Part B) *(curated)*
+- **#7153**: kct export bundle inconsistencies: JLCPCB Gerbers omit paste layers for SMT bundles; board 04 manifest says DRC OK while report says FAIL/NOT_READY; report ERC falsely 'skipped by user request' *(curated)*
+- **#7159**: Route-time match-group tuner meanders through preserved foreign-net vias (board 07: 16 kicad-cli errors with --length-match-groups) *(curated)*
+- **#7161**: kct erc reports PASS (exit 0) where kicad-cli reports errors: cross-sheet global-label name-count filter drops true isolated_pin_label findings; power-pin sibling filter is inert on KiCad 10 *(curated)*
 
 ## Proposed (Architect / Hermit)
 
@@ -124,6 +126,9 @@ Issues carrying `loom:curated`.
 - **#6447**: [Epic #6441] Phase 5: coupling-preserving skew tuning from a skew ledger, and pair invariants for post-passes *(architect)*
 - **#6448**: [Epic #6441] Phase 6: unify diff-pair engines — grid consumes PairPlan or grid coupled pre-pass retired *(architect)*
 - **#7136**: kct sign-off skills don't refuse bad boards: Gate 1 exits 2 on every board, kicad-cli gate exits 0 on errors, export never gets the DRC report, audit ERC never runs *(hermit)*
+- **#7153**: kct export bundle inconsistencies: JLCPCB Gerbers omit paste layers for SMT bundles; board 04 manifest says DRC OK while report says FAIL/NOT_READY; report ERC falsely 'skipped by user request' *(hermit)*
+- **#7161**: kct erc reports PASS (exit 0) where kicad-cli reports errors: cross-sheet global-label name-count filter drops true isolated_pin_label findings; power-pin sibling filter is inert on KiCad 10 *(hermit)*
+- **#7166**: Part-footprint sign-off false-PASS: kct readiness ignores bom_lcsc_values, preflight counts LCSC cache misses as checked, no IC package/pin-count check *(hermit)*
 
 ## Epics
 
@@ -145,10 +150,10 @@ Issues carrying `loom:curated`.
 | Important | 2 |
 | Ready (`loom:issue`) | 1 |
 | In Progress (`loom:building`) | 21 |
-| PRs awaiting review | 6 |
-| Approved PRs awaiting merge | 2 |
-| Curated | 35 |
-| Architect / Hermit proposals | 6 |
+| PRs awaiting review | 8 |
+| Approved PRs awaiting merge | 1 |
+| Curated | 36 |
+| Architect / Hermit proposals | 9 |
 | Active epics | 8 |
 <!-- guide:plan-body:end -->
 
