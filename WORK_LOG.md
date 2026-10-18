@@ -15,6 +15,24 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-18
 
+- **Issue #7284** (closed): router regression from #7255: mirrored fallback leg trades unbounded skew/length for via parity (board 03 tier-1 USB_D- 15.9→20.1 mm, skew 0.54→4.57)
+- **PR #7291**: fix(router): bound the skew/length a via-parity fallback leg pair may cost
+- **Issue #7075** (closed): transmission_line.py: CPWG impedance reads 53-233 % high, and microstrip/CPWG dielectric loss is too large by a factor of eps_eff
+- **PR #7282**: fix: correct CPWG impedance and dielectric loss formulas
+- **Issue #7276** (closed): MCP export/check tools can't select fab tiers (jlcpcb-tier1) — boards 03/04 unexportable via MCP strict default (#7266 follow-up)
+- **PR #7280**: fix: accept registry manufacturer/tier ids in MCP export and DRC tools
+- **PR #7301**: test: write board-00 DRC/ERC reports in tmp_path for #7260 preflight tests (main CI red)
+- **PR #7281**: fix: measure routed intra-pair gap in ImpedanceRule instead of assuming 0.15 mm
+- **PR #7251**: fix(audit,skills): sign-off skills refuse bad boards; kct audit runs ERC on .kicad_pcb
+- **PR #7245**: fix(boards): put board 02 and 03 CPLs in the Gerber frame and add a fleet frame test
+- **Issue #7300** (closed): Main CI red: TestExportAssemblyPreflight7260 copies board-00 drc/erc reports deleted by #7190
+- **Issue #7299** (closed): main CI red: TestExportAssemblyPreflight7260 copies board-00 drc_report.json/erc_report.json that #7267 deleted
+- **Issue #7136** (closed): kct sign-off skills don't refuse bad boards: Gate 1 exits 2 on every board, kicad-cli gate exits 0 on errors, export never gets the DRC report, audit ERC never runs
+- **Issue #7079** (closed): ImpedanceRule judges every detected differential pair at a 0.15 mm gap, whatever the routed spacing
+- **PR #7279**: fix(router): post-route short check ignores input copper the writer drops
+- **Issue #7270** (closed): board 03 thermal_asymmetry: classify the findings and replace #7259's count-based allowance with a narrow one or a fix
+- **PR #7274**: test(board03): pin thermal_asymmetry allowance to the six classified pads
+- **PR #7254**: fix(boards): retune board 03 USB_D and board 07 ADDR_BUS skew in place
 - **PR #7267**: fix(export): bind auto-discovered DRC/ERC reports to board content
 - **PR #7266**: fix(mcp): route get_drc_violations and export_assembly through kct check/export gates
 - **PR #7265**: fix(boards): make board specs validate; read fab tier via load_spec

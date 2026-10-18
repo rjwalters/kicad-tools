@@ -38,6 +38,7 @@ CHECK_CATEGORIES = [
     "silkscreen",
     "single_pad_net",
     "solder_mask",
+    "spec_conformance",
     "mask_to_copper",
     "thermal_asymmetry",
     "via_in_pad",

@@ -36,16 +36,6 @@ ATtiny85 Charlieplex LED Grid
 
 - **Polarized components**: 9 -- check orientation markings
 
-## Hand-Solder (THT) Components
-
-The following 3 through-hole components are **excluded from the SMT pick-and-place file** and must be hand-soldered (or wave/selective-soldered) after SMT assembly. They appear in the BOM for sourcing.
-
-| Value | Package | Qty | References |
-|-------|---------|-----|------------|
-| POWER | PinHeader_1x02_P2.54mm_Vertical | 1 | J1 |
-| AVR-ISP | PinHeader_2x03_P2.54mm_Vertical | 1 | J2 |
-| ATtiny85-20PU | DIP-8_W7.62mm | 1 | U1 |
-
 ## ERC Status
 
 | Metric | Count |

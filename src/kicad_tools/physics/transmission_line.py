@@ -368,10 +368,10 @@ class TransmissionLine:
             alpha_c_db = 0
 
         # Dielectric loss
-        # alpha_d = (pi * f * sqrt(eps_eff) * tan_d) / c
-        # But for microstrip, we need the filling factor
+        # alpha_d = pi * f * er * q * tan_d / (sqrt(eps_eff) * c)  (Pozar eq. 3.198)
+        # where q is the filling factor
         q = (eps_eff - 1) / (er - 1) if er > 1 else 0.5
-        alpha_d = math.pi * freq_hz * math.sqrt(eps_eff) * er * q * tan_d / SPEED_OF_LIGHT
+        alpha_d = math.pi * freq_hz * er * q * tan_d / (math.sqrt(eps_eff) * SPEED_OF_LIGHT)
         alpha_d_db = alpha_d * 8.686  # Np/m to dB/m
 
         return alpha_c_db + alpha_d_db
@@ -634,45 +634,33 @@ class TransmissionLine:
         k0 = a / b
         k0_prime = math.sqrt(1 - k0 * k0)
 
-        # k1: modulus accounting for bottom ground plane
-        # Uses sinh transformation for finite ground plane distance
-        try:
-            sinh_a = math.sinh(math.pi * a / (2 * h))
-            sinh_b = math.sinh(math.pi * b / (2 * h))
-            k1 = sinh_a / sinh_b if sinh_b != 0 else k0
-        except OverflowError:
-            # For very large a/h or b/h, sinh overflows
-            # In this limit, k1 approaches k0
-            k1 = k0
-        k1_prime = math.sqrt(1 - k1 * k1)
+        # k3: modulus accounting for the bottom ground plane (conductor-backed
+        # CPW, Ghione & Naldi 1987). tanh, not sinh: the back conductor sits
+        # below the dielectric, so the strip-to-ground mapping is a tanh.
+        tanh_b = math.tanh(math.pi * b / (2 * h))
+        k3 = math.tanh(math.pi * a / (2 * h)) / tanh_b if tanh_b > 0 else k0
+        k3_prime = math.sqrt(1 - k3 * k3)
 
         # Complete elliptic integrals
         K_k0 = _elliptic_k(k0)
         K_k0_prime = _elliptic_k(k0_prime)
-        K_k1 = _elliptic_k(k1)
-        K_k1_prime = _elliptic_k(k1_prime)
+        K_k3 = _elliptic_k(k3)
+        K_k3_prime = _elliptic_k(k3_prime)
 
-        # Effective dielectric constant
-        # q is the filling factor based on conformal mapping
-        if K_k1_prime > 0 and K_k0 > 0:
-            q = (K_k1 * K_k0_prime) / (K_k1_prime * K_k0)
-        else:
-            q = 0.5  # Default filling factor
-        eps_eff = 1 + (er - 1) * q / 2
+        if not all(math.isfinite(v) and v > 0 for v in (K_k0, K_k0_prime, K_k3, K_k3_prime)):
+            raise ValueError(
+                f"CPWG geometry out of range for closed-form model "
+                f"(w={w}, g={g}, h={h}): elliptic integrals are degenerate"
+            )
+
+        # Effective dielectric constant (conductor-backed CPW)
+        # r = K(k0') K(k3) / (K(k0) K(k3')); eps_eff = (1 + er*r) / (1 + r)
+        r = (K_k0_prime * K_k3) / (K_k0 * K_k3_prime)
+        eps_eff = (1 + er * r) / (1 + r)
 
         # Characteristic impedance
-        # Z0 = (60*pi / sqrt(eps_eff)) * 1 / (K(k0)/K(k0') + K(k1)/K(k1'))
-        if K_k0_prime > 0 and K_k1_prime > 0:
-            sum_ratios = K_k0 / K_k0_prime + K_k1 / K_k1_prime
-            if sum_ratios > 0:
-                z0 = (60 * math.pi / math.sqrt(eps_eff)) / sum_ratios
-            else:
-                z0 = 50.0  # Fallback
-        else:
-            z0 = 50.0  # Fallback
-
-        # Clamp to reasonable range
-        z0 = max(10, min(z0, 200))
+        # Z0 = (60*pi / sqrt(eps_eff)) / (K(k0)/K(k0') + K(k3)/K(k3'))
+        z0 = (60 * math.pi / math.sqrt(eps_eff)) / (K_k0 / K_k0_prime + K_k3 / K_k3_prime)
 
         # Phase velocity
         v_p = SPEED_OF_LIGHT / math.sqrt(eps_eff)
@@ -738,7 +726,7 @@ class TransmissionLine:
         # Dielectric loss
         # Similar to microstrip with filling factor
         q = (eps_eff - 1) / (er - 1) if er > 1 else 0.5
-        alpha_d = math.pi * freq_hz * math.sqrt(eps_eff) * er * q * tan_d / SPEED_OF_LIGHT
+        alpha_d = math.pi * freq_hz * er * q * tan_d / (math.sqrt(eps_eff) * SPEED_OF_LIGHT)
         alpha_d_db = alpha_d * 8.686  # Np/m to dB/m
 
         return alpha_c_db + alpha_d_db
@@ -888,24 +876,34 @@ class TransmissionLine:
         tolerance: float,
         max_iterations: int,
     ) -> tuple[float, float]:
-        """Solve for balanced CPWG geometry (gap ≈ width)."""
-        # For balanced geometry, width ≈ gap
-        # Start with rough estimate based on height
-        w_initial = h * 0.5  # Reasonable starting point
+        """Solve for balanced CPWG geometry (gap == width).
 
-        # Iterate: for each width, find gap, then adjust width toward gap
-        w = w_initial
+        Z0(w, w) is not monotonic for w well below h (it peaks near w ~ h/2
+        and then falls off), so bisect only on the monotonically decreasing
+        branch w >= h. Targets outside that branch raise ValueError rather
+        than returning a degenerate micron-scale geometry.
+        """
+        w_lo = h
+        w_hi = h * 20.0
+        z_lo = self.cpwg(w_lo, w_lo, layer).z0
+        z_hi = self.cpwg(w_hi, w_hi, layer).z0
+        if not (z_hi <= z0_target <= z_lo):
+            raise ValueError(
+                f"No balanced CPWG geometry (gap == width) on {layer} gives "
+                f"{z0_target} ohm; reachable range is {z_hi:.1f}-{z_lo:.1f} ohm "
+                f"for w in [{w_lo:.3f}, {w_hi:.3f}] mm"
+            )
+
         for _ in range(max_iterations):
-            # Find gap for current width
-            _, g = self._solve_cpwg_gap(z0_target, w, layer, h, tolerance, max_iterations // 2)
+            w_mid = (w_lo + w_hi) / 2
+            z_mid = self.cpwg(w_mid, w_mid, layer).z0
+            if abs(z_mid - z0_target) / z0_target < tolerance:
+                return (w_mid, w_mid)
+            # Impedance decreases with width on this branch
+            if z_mid > z0_target:
+                w_lo = w_mid
+            else:
+                w_hi = w_mid
 
-            # Check if balanced
-            if abs(w - g) / max(w, g) < tolerance:
-                return (w, g)
-
-            # Move width toward gap
-            w = (w + g) / 2
-
-        # Return last result
-        _, g = self._solve_cpwg_gap(z0_target, w, layer, h, tolerance, max_iterations // 2)
-        return (w, g)
+        w_mid = (w_lo + w_hi) / 2
+        return (w_mid, w_mid)

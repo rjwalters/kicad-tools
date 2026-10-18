@@ -3,6 +3,8 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from kicad_tools.export.preflight import (
     PreflightChecker,
     PreflightConfig,
@@ -1769,8 +1771,29 @@ class TestPreflightTHTInCPL:
         assert result.status == "OK"
         assert "No through-hole" in result.message
 
-    def test_tht_present_jlcpcb_excluded(self, tmp_path):
-        """JLCPCB (SMT-only default) with THT should show excluded message."""
+    @pytest.fixture
+    def smt_only_jlcpcb(self, monkeypatch):
+        """Model a still-SMT-only fab (JLCPCB itself assembles THT, issue #7239)."""
+        monkeypatch.setattr(PreflightChecker, "_SMT_ONLY_MANUFACTURERS", {"jlcpcb"})
+
+    def test_tht_present_jlcpcb_default_included(self, tmp_path):
+        """JLCPCB assembles THT (issue #7239): default includes THT in the CPL."""
+        pcb = _create_pcb_with_mixed_footprints(tmp_path, ["R1"], ["J1"])
+        for mfr in ("jlcpcb", "jlcpcb-tier1"):
+            checker = PreflightChecker(
+                pcb_path=pcb,
+                manufacturer=mfr,
+                config=PreflightConfig(skip_drc=True, skip_erc=True),
+            )
+            assert checker._exclude_tht is False, mfr
+            checker.run_all()
+            result = checker._check_tht_in_cpl()
+            assert result.status == "OK", mfr
+            assert "included in CPL" in result.message
+            assert "J1" in result.details
+
+    def test_tht_present_jlcpcb_excluded(self, tmp_path, smt_only_jlcpcb):
+        """An SMT-only fab with THT should show excluded message."""
         pcb = _create_pcb_with_mixed_footprints(tmp_path, ["R1"], ["J1"])
         checker = PreflightChecker(
             pcb_path=pcb,
@@ -1783,7 +1806,7 @@ class TestPreflightTHTInCPL:
         assert "excluded from CPL" in result.message
         assert "J1" in result.details
 
-    def test_tht_present_jlcpcb_include_override(self, tmp_path):
+    def test_tht_present_jlcpcb_include_override(self, tmp_path, smt_only_jlcpcb):
         """JLCPCB with explicit exclude_tht=False should warn about THT."""
         pcb = _create_pcb_with_mixed_footprints(tmp_path, ["R1"], ["J1"])
         checker = PreflightChecker(
@@ -1815,6 +1838,7 @@ class TestPreflightBomCplMatchTHT:
     """Tests for BOM/CPL match check accounting for THT exclusions."""
 
     def test_tht_excluded_not_false_positive(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(PreflightChecker, "_SMT_ONLY_MANUFACTURERS", {"jlcpcb"})
         """THT components excluded from CPL should not cause BOM/CPL mismatch."""
         pcb = _create_pcb_with_mixed_footprints(tmp_path, ["R1", "C1"], ["J1"])
         sch = tmp_path / "board.kicad_sch"
@@ -1887,6 +1911,11 @@ class TestPreflightFabFamilyTHT:
     producing a false ``tht_in_cpl`` OK and a spurious ``bom_cpl_match``
     FAIL (issue #4591).
     """
+
+    @pytest.fixture(autouse=True)
+    def _smt_only_jlcpcb(self, monkeypatch):
+        """Model a still-SMT-only fab (JLCPCB itself assembles THT, issue #7239)."""
+        monkeypatch.setattr(PreflightChecker, "_SMT_ONLY_MANUFACTURERS", {"jlcpcb"})
 
     def test_tier_id_resolves_exclude_tht(self, tmp_path):
         pcb = _create_pcb_with_mixed_footprints(tmp_path, ["R1"], ["J1"])

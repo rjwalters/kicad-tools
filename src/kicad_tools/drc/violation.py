@@ -267,6 +267,8 @@ class ViolationType(Enum):
     SILK_OVERLAP = "silk_overlap"
     SILKSCREEN_LINE_WIDTH = "silkscreen_line_width"
     SILKSCREEN_TEXT_HEIGHT = "silkscreen_text_height"
+    SILKSCREEN_TEXT_THICKNESS = "silkscreen_text_thickness"
+    SILK_REF_OBSCURED = "silk_ref_obscured"
     SILKSCREEN_OVER_PAD = "silkscreen_over_pad"
     # Coverage advisory, not a board defect (Issue #5811): a silk primitive
     # kct's clearance geometry does not model (circle/arc) was skipped, so
@@ -434,6 +436,8 @@ class ViolationType(Enum):
             # silkscreen rules from validate silkscreen checker
             "silkscreen_line_width": cls.SILKSCREEN_LINE_WIDTH,
             "silkscreen_text_height": cls.SILKSCREEN_TEXT_HEIGHT,
+            "silkscreen_text_thickness": cls.SILKSCREEN_TEXT_THICKNESS,
+            "silk_ref_obscured": cls.SILK_REF_OBSCURED,
             "silkscreen_over_pad": cls.SILKSCREEN_OVER_PAD,
             # solder mask rules from validate solder_mask checker
             "solder_mask_clearance": cls.SOLDER_MASK_CLEARANCE,
