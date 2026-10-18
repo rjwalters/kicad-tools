@@ -189,6 +189,7 @@ import re
 import shutil
 import subprocess
 import sys
+from collections.abc import Iterable
 from pathlib import Path
 
 import pytest
@@ -842,8 +843,34 @@ def test_routing_reach_deterministic_across_seeds(unrouted_pcb_path: Path, tmp_p
 BOARD03_KNOWN_NETCLASS_VIOLATIONS = 0
 
 
-# Issue #7220: known thermal_asymmetry warnings on board 03 (see test body).
-BOARD03_KNOWN_THERMAL_ASYMMETRY = 6
+#: Issue #7270 (follow-up to #7220/#7259): the six ``thermal_asymmetry``
+#: warnings on board 03 are REAL, each keyed by its ``items`` tuple.  The solid
+#: ``(zone_connect 2)`` comes from kct's starved-thermal repair
+#: (``zones/fill_clearance.py``).  C10-2/C11-2: GND pad solid to the F.Cu GND
+#: fill, signal pad trace-only.  J1 A1/A12/B1/B12: GND PTH pin (0.40 mm drill)
+#: solid on F.Cu + In1.Cu + B.Cu.  Fixing them needs a recipe change and
+#: regenerated evidence on the pinned toolchain; until then ONLY these exact
+#: findings are allowed -- any other pad fails.  Remove with that fix.
+BOARD03_KNOWN_THERMAL_ASYMMETRY: frozenset[tuple[str, ...]] = frozenset(
+    {
+        ("C10", "C10-2", "C10-1"),
+        ("C11", "C11-2", "C11-1"),
+        ("J1", "J1-A1"),
+        ("J1", "J1-A12"),
+        ("J1", "J1-B1"),
+        ("J1", "J1-B12"),
+    }
+)
+
+
+def board03_thermal_asymmetry_is_known(items: Iterable[tuple[str, ...]]) -> bool:
+    """True when every finding is one of the pinned #7270 pads and none repeats."""
+    found = [tuple(i) for i in items]
+    return (
+        bool(found)
+        and len(found) == len(set(found))
+        and set(found) <= BOARD03_KNOWN_THERMAL_ASYMMETRY
+    )
 
 
 def test_committed_pcb_drc_state() -> None:
@@ -979,15 +1006,29 @@ def test_committed_pcb_drc_state() -> None:
                 and (int(line.group(1)), line.group(2)) == (len(findings), "warning")
             ):
                 unexpected.discard("diffpair_uncoupled_length")
-        # Issue #7220 (PR1): the new ``thermal_asymmetry`` warning reports 6
-        # known findings on board 03 (C10, C11, J1 A1/A12/B1/B12); PR2 of
-        # #7220 will reduce them.  Allowed only while the count is bounded.
+        # Issue #7270: allow only the six pinned thermal_asymmetry pads (see
+        # BOARD03_KNOWN_THERMAL_ASYMMETRY); the BY RULE count must agree.
         if "thermal_asymmetry" in unexpected:
+            from kicad_tools.schema.pcb import PCB
+            from kicad_tools.validate.checker import DRCChecker
+
+            findings = [
+                v
+                for v in DRCChecker(
+                    PCB.load(str(COMMITTED_ROUTED_PCB)),
+                    manufacturer="jlcpcb-tier1",
+                    layers=4,
+                )
+                .check_thermal_asymmetry()
+                .violations
+                if v.severity in ("error", "warning")
+            ]
             line = re.search(r"\bthermal_asymmetry:\s+(\d+) (\w+)", by_rule_match.group(1))
             if (
                 line is not None
-                and line.group(2) == "warnings"
-                and int(line.group(1)) <= BOARD03_KNOWN_THERMAL_ASYMMETRY
+                and all(v.severity == "warning" for v in findings)
+                and board03_thermal_asymmetry_is_known(v.items for v in findings)
+                and (int(line.group(1)), line.group(2)) == (len(findings), "warnings")
             ):
                 unexpected.discard("thermal_asymmetry")
         assert not unexpected, (
@@ -999,3 +1040,14 @@ def test_committed_pcb_drc_state() -> None:
             "expanding EXPECTED_COMMITTED_DRC_RULES.\n"
             f"stdout (last 4000 chars):\n{stdout[-4000:]}"
         )
+
+
+def test_board03_thermal_asymmetry_allowance_is_pad_specific() -> None:
+    """Issue #7270: a new asymmetry on any other pad is NOT covered."""
+    known = sorted(BOARD03_KNOWN_THERMAL_ASYMMETRY)
+    assert board03_thermal_asymmetry_is_known(known)
+    assert not board03_thermal_asymmetry_is_known([*known, ("U1", "U1-1")])
+    # Swapping one known pad for another pad, count unchanged, still fails.
+    assert not board03_thermal_asymmetry_is_known([*known[1:], ("C12", "C12-2", "C12-1")])
+    assert not board03_thermal_asymmetry_is_known([*known, known[0]])
+    assert not board03_thermal_asymmetry_is_known([])
