@@ -1322,6 +1322,21 @@ class PreflightChecker:
             details="; ".join(issues + notes),
         )
 
+    def check_bom_lcsc_values(self) -> PreflightResult:
+        """Run the ``bom_lcsc_values`` check on its own (Issue #7260).
+
+        The same check :meth:`run_all` runs, for callers that only need the
+        LCSC value/package verdict (the MCP ``validate_assembly_bom`` tool).
+        Loads the PCB first, when it parses, so the IC package-family /
+        pin-count clause (#7166) sees the board's footprints.
+        """
+        if self._pcb is None and self.pcb_path.exists():
+            with contextlib.suppress(Exception):
+                from ..schema.pcb import PCB
+
+                self._pcb = PCB.load(str(self.pcb_path))  # type: ignore[assignment]
+        return self._check_bom_lcsc_values()
+
     def _check_bom_lcsc_values(self) -> PreflightResult:
         """Validate assigned LCSC parts against known value AND package.
 
@@ -1591,6 +1606,10 @@ class PreflightChecker:
     def _check_drc(self) -> PreflightResult:
         """Check DRC status from a pre-existing report file."""
         report_path = self.config.drc_report_path
+        # Issue #7190: only an auto-discovered report must prove it was
+        # generated for this PCB's content; an explicit --drc-report is the
+        # caller's assertion and stays trusted.
+        auto_discovered = report_path is None
 
         if report_path is None:
             # Try to find a DRC report next to the PCB
@@ -1691,6 +1710,16 @@ class PreflightChecker:
                     details=details,
                 )
 
+            # Issue #7190: a passing verdict counts only when the report is
+            # bound to this PCB's content.  Checked here, on the pass branch,
+            # so an unbound report with errors still FAILs above.
+            if auto_discovered:
+                unbound = self._unbound_report_result(
+                    "drc", report_path, self.pcb_path, report.pcb_sha256
+                )
+                if unbound is not None:
+                    return unbound
+
             if warning_count > 0:
                 return PreflightResult(
                     name="drc",
@@ -1746,6 +1775,7 @@ class PreflightChecker:
     def _check_erc(self) -> PreflightResult:
         """Check ERC status from a pre-existing report file."""
         report_path = self.config.erc_report_path
+        auto_discovered = report_path is None  # Issue #7190, see _check_drc
 
         if report_path is None:
             # Try to find an ERC report next to the schematic
@@ -1815,6 +1845,17 @@ class PreflightChecker:
                     details="; ".join(f"{v.type_str}: {v.description}" for v in errors[:5]),
                 )
 
+            # Issue #7190: same pass-branch binding rule as _check_drc.
+            if auto_discovered:
+                unbound = self._unbound_report_result(
+                    "erc",
+                    report_path,
+                    self._erc_report_schematic(report_path, report.source_file),
+                    report.schematic_sha256,
+                )
+                if unbound is not None:
+                    return unbound
+
             if warning_count > 0:
                 return PreflightResult(
                     name="erc",
@@ -1833,6 +1874,86 @@ class PreflightChecker:
                 status="WARN",
                 message=f"Could not parse ERC report: {e}",
             )
+
+    def _erc_report_schematic(self, report_path: Path, recorded_source: str) -> Path | None:
+        """The schematic an auto-discovered ERC report should be bound to.
+
+        The configured schematic when known; otherwise the ``.kicad_sch``
+        the report names, looked up beside the report.
+        """
+        if self.schematic_path is not None:
+            return Path(self.schematic_path)
+        name = re.split(r"[\\/]", (recorded_source or "").strip())[-1]
+        if not name.lower().endswith(".kicad_sch"):
+            return None
+        candidate = report_path.parent / name
+        return candidate if candidate.is_file() else None
+
+    def _unbound_report_result(
+        self,
+        name: str,
+        report_path: Path,
+        source_path: Path | None,
+        recorded_hash: str | None,
+    ) -> PreflightResult | None:
+        """Downgrade a passing auto-discovered report that is not content-bound.
+
+        Issue #7190: a ``drc_report.json``/``erc_report.json`` found beside
+        the board says nothing about which *version* of the board it checked
+        (a git checkout resets mtimes).  It may pass the board only when it
+        is bound (see :mod:`kicad_tools.drc.report_binding`):
+
+        * ``MISMATCH`` (records a different hash: the file changed since the
+          report was generated) is FAIL under ``strict_report_source``, else
+          WARN -- the same shape as the #7091/#7153 mismatch returns;
+        * ``UNHASHED`` (no hash, no readiness co-binding) is WARN even when
+          strict, matching #7091's missing-report policy.
+
+        Returns ``None`` when the report is bound.
+        """
+        from ..drc.report_binding import BindingStatus, binding_status
+
+        status = binding_status(report_path, source_path, recorded_hash)
+        if status is BindingStatus.BOUND:
+            return None
+
+        label = name.upper()
+        if name == "drc":
+            target, key, rerun = (
+                "PCB",
+                "pcb_sha256",
+                "re-run kct check --output or pass --drc-report",
+            )
+        else:
+            target, key, rerun = (
+                "schematic",
+                "schematic_sha256",
+                "re-run kct build's ERC step or pass --erc-report",
+            )
+
+        if status is BindingStatus.MISMATCH:
+            return PreflightResult(
+                name=name,
+                status="FAIL" if self.config.strict_report_source else "WARN",
+                message=(
+                    f"{label} report is not bound to this {target} "
+                    "(stale: content changed since it was generated)"
+                ),
+                details=(
+                    f"{report_path} records a {key} that differs from the current "
+                    f"{target}'s; its verdict describes an older version -- {rerun}"
+                ),
+            )
+        return PreflightResult(
+            name=name,
+            status="WARN",
+            message=f"{label} report is not bound to this {target} (unhashed); {rerun}",
+            details=(
+                f"{report_path} records no {key} and no output/readiness.json pins it "
+                f"together with this {target}, so its verdict is not evidence for the "
+                f"current {target}"
+            ),
+        )
 
     # ------------------------------------------------------------------
     # Helpers

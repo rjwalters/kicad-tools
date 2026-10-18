@@ -45,7 +45,6 @@ UNDOCUMENTED_ALLOWLIST: dict[str, str] = {
     "route_net_auto": _PENDING,
     "screenshot_board": _PENDING,
     "screenshot_schematic": _PENDING,
-    "validate_assembly_bom": _PENDING,
     "validate_pattern": _PENDING,
 }
 

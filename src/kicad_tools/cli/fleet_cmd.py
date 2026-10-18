@@ -262,6 +262,13 @@ class DRCStatus:
     # report exists.
     blocking_errors: int = 0
     advisory_errors_by_rule: dict[str, int] = field(default_factory=dict)
+    # Issue #7190: True when a ``drc_report.json`` exists but is not bound
+    # to the routed PCB's current content (no matching ``pcb_sha256`` and no
+    # readiness co-binding) AND has no blocking errors.  Such a report is
+    # disregarded (``report_exists`` False): an unbound report can fail a
+    # board but never pass it.  An unbound report WITH blocking errors is
+    # kept (``report_exists`` True) so it still blocks.
+    unbound: bool = False
 
     @property
     def over_tolerance(self) -> bool:
@@ -313,6 +320,7 @@ class DRCStatus:
             "tolerance_key": self.tolerance_key,
             "over_tolerance": self.over_tolerance,
             "advisory_only": self.advisory_only,
+            "unbound": self.unbound,
         }
 
 
@@ -363,6 +371,9 @@ class ERCStatus:
     errors: int = 0
     warnings: int = 0
     report_path: str | None = None
+    # Issue #7190: a clean report found on disk but not bound to the
+    # schematic's current content -- disregarded, see ``DRCStatus.unbound``.
+    unbound: bool = False
 
     @property
     def has_errors(self) -> bool:
@@ -375,6 +386,7 @@ class ERCStatus:
             "warnings": self.warnings,
             "report_path": self.report_path,
             "has_errors": self.has_errors,
+            "unbound": self.unbound,
         }
 
 
@@ -704,6 +716,20 @@ def _detect_drc(
                 blocking += 1
         drc.blocking_errors = blocking
         drc.advisory_errors_by_rule = advisory
+
+    # Issue #7190: a report not bound to this PCB's content (git checkout
+    # resets mtimes, so only a recorded ``pcb_sha256`` or readiness
+    # co-binding counts) can fail the board but never pass it.
+    from kicad_tools.drc.report_binding import BindingStatus, binding_status
+
+    recorded = report.get("pcb_sha256") if isinstance(report, dict) else None
+    binding = binding_status(
+        report_path, routed_pcb, recorded if isinstance(recorded, str) else None
+    )
+    if binding is not BindingStatus.BOUND:
+        has_blocking = drc.blocking_errors > 0 if isinstance(violations, list) else drc.errors > 0
+        if not has_blocking:
+            return DRCStatus(tolerance=tolerance, tolerance_key=matched_key, unbound=True)
     drc.report_exists = True
     return drc
 
@@ -786,10 +812,46 @@ def _detect_erc(board_dir: Path) -> ERCStatus:
                 elif severity == "warning":
                     warnings += 1
 
+    # Issue #7190: a clean report not bound to the schematic's current
+    # content is disregarded (it can fail the board, never pass it).
+    if errors == 0:
+        from kicad_tools.drc.report_binding import BindingStatus, binding_status
+
+        recorded = data.get("schematic_sha256") if isinstance(data, dict) else None
+        schematic = _erc_report_schematic(report_path, data, board_dir)
+        binding = binding_status(
+            report_path, schematic, recorded if isinstance(recorded, str) else None
+        )
+        if binding is not BindingStatus.BOUND:
+            return ERCStatus(report_path=str(report_path), unbound=True)
+
     erc.report_exists = True
     erc.errors = errors
     erc.warnings = warnings
     return erc
+
+
+def _erc_report_schematic(report_path: Path, data: object, board_dir: Path) -> Path | None:
+    """The schematic an ERC report describes, for content binding (#7190).
+
+    Prefers the ``.kicad_sch`` the report names (kicad-cli ``source``),
+    looked up beside the report, in ``<board>/output`` and in ``<board>``;
+    falls back to ``<stem>`` of a ``<stem>-erc.json`` report name.
+    """
+    names: list[str] = []
+    source = data.get("source") if isinstance(data, dict) else None
+    if isinstance(source, str) and source.strip():
+        name = re.split(r"[\\/]", source.strip())[-1]
+        if name.lower().endswith(".kicad_sch"):
+            names.append(name)
+    if report_path.name.endswith("-erc.json"):
+        names.append(report_path.name[: -len("-erc.json")] + ".kicad_sch")
+    for name in names:
+        for directory in (report_path.parent, board_dir / "output", board_dir):
+            candidate = directory / name
+            if candidate.is_file():
+                return candidate
+    return None
 
 
 _SCH_LABEL_RE = re.compile(r'\(\s*(?:label|global_label|hierarchical_label)\s+"([^"]+)"')
@@ -1408,7 +1470,8 @@ def _drc_label(drc: DRCStatus) -> str:
     """Render the DRC column cell.
 
     ``-``       : no ``drc_report.json`` yet (backwards-compat: do not
-                  block ship-ready).
+                  block ship-ready), or a clean report that is not bound to
+                  the PCB's current content (issue #7190; JSON ``unbound``).
     ``N``       : N errors, within tolerance (N <= allowance).
     ``N!``      : N errors, exceeds tolerance (drives the ship-ready
                   ``NO`` blocker).

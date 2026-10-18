@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import shutil
 import tempfile
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -363,9 +365,9 @@ class TestRotationCorrectionCount:
         assert self._count(tmp_path, "generic") == 0
 
     def test_mcp_export_surfaces_count(self, tmp_path: Path):
-        from unittest.mock import patch
 
-        from kicad_tools.export.assembly import AssemblyPackage, AssemblyPackageResult
+        from kicad_tools.export.assembly import AssemblyPackageResult
+        from kicad_tools.export.manufacturing import ManufacturingPackage, ManufacturingResult
 
         pcb = tmp_path / "rot.kicad_pcb"
         pcb.write_text(ROTATION_PCB)
@@ -376,9 +378,255 @@ class TestRotationCorrectionCount:
         pnp = out / "cpl.csv"
         pnp.write_text("Designator,Layer\nU1,top\n")
 
-        fake = AssemblyPackageResult(output_dir=out, pnp_path=pnp, rotation_corrections_applied=2)
-        with patch.object(AssemblyPackage, "export", return_value=fake):
+        fake = AssemblyPackageResult(
+            output_dir=out,
+            pnp_path=pnp,
+            rotation_corrections_applied=2,
+            pnp_placement_count=1,
+            pnp_layers=["top"],
+        )
+        package = ManufacturingResult(output_dir=out, assembly_result=fake)
+        with patch.object(ManufacturingPackage, "export", return_value=package):
             result = export_assembly(str(pcb), str(sch), str(out), manufacturer="jlcpcb")
         assert result.pnp is not None
         assert result.pnp.rotation_corrections == 2
+        assert result.pnp.component_count == 1
+        assert result.pnp.layers == ["top"]
         assert "cost_estimate" not in result.to_dict()
+
+
+# =============================================================================
+# Issue #7260: export_assembly runs kct export's pipeline (preflight, strict)
+# =============================================================================
+
+BOARD_00 = Path(__file__).resolve().parent.parent / "boards" / "00-simple-led" / "output"
+
+
+def _board_00_copy(dest: Path, *, with_reports: bool = True) -> tuple[Path, Path]:
+    """Scratch copy of board 00 -- never export from ``boards/`` (#5746 sidecars)."""
+    if not BOARD_00.is_dir():
+        pytest.skip("boards/00-simple-led/output not present")
+    dest.mkdir(parents=True, exist_ok=True)
+    names = [
+        "simple_led_routed.kicad_pcb",
+        "simple_led_routed.kicad_pro",
+        "simple_led_routed.kicad_dru",
+        "simple_led.kicad_sch",
+        "simple_led.kicad_pro",
+    ]
+    if with_reports:
+        names += ["drc_report.json", "erc_report.json"]
+    for name in names:
+        shutil.copy2(BOARD_00 / name, dest / name)
+    return dest / "simple_led_routed.kicad_pcb", dest / "simple_led.kicad_sch"
+
+
+def _package_files(out: Path) -> list[str]:
+    if not out.exists():
+        return []
+    return sorted(p.name for p in out.iterdir())
+
+
+class TestExportAssemblyPreflight7260:
+    @pytest.mark.parametrize("strict", [True, False])
+    def test_r1_removed_is_refused(self, tmp_path: Path, strict: bool):
+        """Repro 1: BOM lists R1, PCB does not -> unbuildable, refused either way."""
+        from kicad_tools.cli.pcb_remove_footprint import run_remove_footprint
+
+        pcb, sch = _board_00_copy(tmp_path / "board")
+        assert run_remove_footprint(pcb, "R1", force=True) == 0
+        out = tmp_path / "out"
+
+        result = export_assembly(
+            str(pcb), str(sch), str(out), manufacturer="jlcpcb", strict_preflight=strict
+        )
+
+        assert result.success is False
+        assert result.error is not None
+        assert "bom_pcb_match" in result.error and "R1" in result.error
+        assert any(p["name"] == "bom_pcb_match" and p["status"] == "FAIL" for p in result.preflight)
+        assert result.zip_file is None
+        files = _package_files(out)
+        assert not [f for f in files if f.startswith(("bom_", "cpl_")) or f.endswith(".zip")]
+
+    def test_clean_board_exports(self, tmp_path: Path):
+        """No DRC/ERC report on disk is a WARN: never blocks, even under strict."""
+        pcb, sch = _board_00_copy(tmp_path / "board", with_reports=False)
+        out = tmp_path / "out"
+
+        result = export_assembly(str(pcb), str(sch), str(out), manufacturer="generic")
+
+        assert result.success is True, result.error
+        assert result.error is None
+        assert result.gerbers is not None and result.gerbers.layer_count >= 2
+        assert result.bom is not None and result.bom.component_count == 3
+        assert result.pnp is not None and result.pnp.component_count >= 1
+        assert result.zip_file is not None and Path(result.zip_file).exists()
+        statuses = {p["name"]: p["status"] for p in result.preflight}
+        assert statuses.get("drc") == "WARN"
+        assert "FAIL" not in statuses.values()
+        # kct export's report PDF and project zip are off for MCP.
+        assert "kicad_project.zip" not in _package_files(out)
+        # Documented side effect (#5746): DRC constraints next to the board.
+        assert pcb.with_suffix(".kicad_dru").exists()
+
+    def _board_with_drc_error(self, tmp_path: Path) -> tuple[Path, Path]:
+        """Board 00 whose DRC report records a (non-short) error: a plain preflight FAIL."""
+        pcb, sch = _board_00_copy(tmp_path / "board")
+        report_path = pcb.parent / "drc_report.json"
+        report = json.loads(report_path.read_text())
+        report["file"] = str(pcb)
+        report["summary"]["errors"] = 1
+        report["summary"]["passed"] = False
+        report["violations"].append(
+            {
+                "rule_id": "dimension_trace_width",
+                "type": "dimension_trace_width",
+                "severity": "error",
+                "message": "Trace width 0.110mm below minimum 0.127mm",
+                "location": [148.0, 85.0],
+                "layer": "F.Cu",
+                "actual_value": 0.11,
+                "required_value": 0.127,
+                "items": [],
+                "nets": [],
+            }
+        )
+        report_path.write_text(json.dumps(report))
+        return pcb, sch
+
+    def test_preflight_fail_refused_by_default(self, tmp_path: Path):
+        pcb, sch = self._board_with_drc_error(tmp_path)
+        out = tmp_path / "out"
+
+        result = export_assembly(str(pcb), str(sch), str(out), manufacturer="generic")
+
+        assert result.success is False
+        assert result.error is not None and "Preflight FAIL [drc]" in result.error
+        assert any(p["name"] == "drc" and p["status"] == "FAIL" for p in result.preflight)
+        assert result.zip_file is None
+        assert not [f for f in _package_files(out) if f.endswith((".csv", ".zip"))]
+
+    def test_strict_preflight_false_downgrades_to_warning(self, tmp_path: Path):
+        pcb, sch = self._board_with_drc_error(tmp_path)
+        out = tmp_path / "out"
+
+        result = export_assembly(
+            str(pcb), str(sch), str(out), manufacturer="generic", strict_preflight=False
+        )
+
+        assert result.success is True, result.error
+        assert any("Preflight FAIL [drc]" in w for w in result.warnings)
+        assert any(p["name"] == "drc" and p["status"] == "FAIL" for p in result.preflight)
+        assert result.bom is not None and Path(result.bom.output_path).exists()
+        assert result.zip_file is not None
+
+    def test_mcp_server_default_is_strict(self, tmp_path: Path):
+        pcb, sch = self._board_with_drc_error(tmp_path)
+        server = create_server()
+        out = server.call_tool(
+            "export_assembly",
+            {
+                "pcb_path": str(pcb),
+                "schematic_path": str(sch),
+                "output_dir": str(tmp_path / "out"),
+                "manufacturer": "generic",
+            },
+        )
+        assert out["success"] is False
+        assert out["zip_file"] is None
+        assert any(p["status"] == "FAIL" for p in out["preflight"])
+
+    def test_schema_documents_strict_preflight(self):
+        server = create_server()
+        tool = next(t for t in server.get_tools_list() if t["name"] == "export_assembly")
+        prop = tool["inputSchema"]["properties"]["strict_preflight"]
+        assert prop["type"] == "boolean"
+        assert prop["default"] is True
+        assert ".kicad_dru" in tool["description"]
+
+    def test_mcp_export_does_not_parse_csv(self):
+        """The BOM/CPL facts come from the generator, not CSV text (#7260)."""
+        import inspect
+
+        from kicad_tools.mcp.tools import export as export_mod
+
+        source = inspect.getsource(export_mod.export_assembly)
+        assert "read_text" not in source
+        assert 'split(",")' not in source
+
+
+class TestValidateAssemblyBomLcscValues7260:
+    """``validate_assembly_bom`` reports kct export's bom_lcsc_values check."""
+
+    def _run(self, tmp_path: Path, items, *, pcb: bool = True):
+        from kicad_tools.export.preflight import PreflightChecker
+        from kicad_tools.mcp.tools.export import validate_assembly_bom
+        from kicad_tools.parts.cache import PartsCache
+        from kicad_tools.parts.models import Part
+        from kicad_tools.schema.bom import BOM
+
+        sch = tmp_path / "board.kicad_sch"
+        sch.write_text(
+            "(kicad_sch (version 20230121) (generator eeschema)\n"
+            '  (uuid "12345678-1234-1234-1234-123456789012")\n)'
+        )
+        if pcb:
+            (tmp_path / "board.kicad_pcb").write_text("(kicad_pcb (version 20240108))")
+
+        cache = PartsCache(db_path=tmp_path / "parts.db")
+        cache.put(
+            Part(
+                lcsc_part="C1525",
+                mfr_part="CL05B104KO5NNNC",
+                manufacturer="Samsung Electro-Mechanics",
+                description="16V 100nF X7R 0402 Multilayer Ceramic Capacitors MLCC",
+                package="0402",
+                value="100nF",
+                is_basic=True,
+            )
+        )
+
+        validation = MagicMock()
+        validation.items = [object()]
+        validation.to_dict.return_value = {"summary": {"assembly_ready": True}, "items": []}
+        validator = MagicMock()
+        validator.__enter__.return_value.validate_bom.return_value = validation
+
+        with (
+            patch("kicad_tools.assembly.validation.AssemblyValidator", return_value=validator),
+            patch("kicad_tools.parts.cache.PartsCache", return_value=cache),
+            patch.object(PreflightChecker, "_load_bom", return_value=BOM(items=items)),
+        ):
+            return validate_assembly_bom(str(sch))
+
+    @staticmethod
+    def _item(ref: str, value: str):
+        from kicad_tools.schema.bom import BOMItem
+
+        return BOMItem(
+            reference=ref,
+            value=value,
+            footprint="Capacitor_SMD:C_0402_1005Metric",
+            lib_id="Device:C",
+            lcsc="C1525",
+        )
+
+    def test_value_mismatch_fails_and_blocks_readiness(self, tmp_path: Path):
+        result = self._run(tmp_path, [self._item("C10", "16nF")])
+
+        assert result["success"] is True
+        assert result["bom_lcsc_values"]["status"] == "FAIL"
+        assert "C1525" in result["bom_lcsc_values"]["details"]
+        assert result["summary"]["assembly_ready"] is False
+
+    def test_matching_part_keeps_readiness(self, tmp_path: Path):
+        result = self._run(tmp_path, [self._item("C1", "100nF")])
+
+        assert result["bom_lcsc_values"]["status"] == "OK"
+        assert result["summary"]["assembly_ready"] is True
+
+    def test_no_pcb_no_check(self, tmp_path: Path):
+        result = self._run(tmp_path, [self._item("C10", "16nF")], pcb=False)
+
+        assert "bom_lcsc_values" not in result
