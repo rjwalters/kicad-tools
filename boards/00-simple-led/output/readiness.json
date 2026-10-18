@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "checked_at": "2026-10-18T12:08:26.106222+00:00",
+  "checked_at": "2026-10-18T12:00:00+00:00",
   "mode": "assembly",
   "status": "ready",
   "blockers": [],
@@ -109,6 +109,6 @@
     "output/simple_led_routed.kicad_dru": "b1be95e9fb56ff826f5ca6d9ee9b5c085987f1257ec1cd0e8d41c23e0f396f81",
     "output/simple_led_routed.kicad_pcb": "4edd1d30b0a1b1ddafd8146e21f5f4534782a67c6bf0004129af20bad627dd7a",
     "output/simple_led_routed.kicad_pro": "53d8f23774031e1bb024cfc201c2fb0ae800afd2f4bb554b46a4359b8834b4f8",
-    "project.kct": "7c9ee2052133a3e09cb2ae3af979ee89fbdd979e8bef8013000568fc9766714e"
+    "project.kct": "97212ac6bd4c357972b9bdedb01235675efe63da05946c1d76bf3c8ea5ce5e51"
   }
 }
