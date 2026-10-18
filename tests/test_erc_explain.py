@@ -97,7 +97,7 @@ class TestERCExplainer:
             description="Power input pin not driven by any power output",
             pos_x=120.0,
             pos_y=60.0,
-            items=["Pin VCC (power_in) of U1"],
+            items=["Symbol U1 Pin 1 [VCC, Power input, Line]"],  # KiCad 10.0.6 format
         )
 
         explainer = ERCExplainer()

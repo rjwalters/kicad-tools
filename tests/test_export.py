@@ -59,6 +59,11 @@ class MockFootprint:
     attr: str = "smd"
     dnp: bool = False
 
+    @property
+    def sheet_position(self) -> tuple:
+        # Mock boards have a (0, 0) board origin: position is already sheet-absolute.
+        return self.position
+
 
 class TestBOMExportConfig:
     """Tests for BOMExportConfig."""
@@ -480,6 +485,13 @@ class TestGetAuxOrigin:
         assert origin == (0.0, 0.0)
 
 
+def _cpl_rows(output: str) -> dict[str, dict[str, str]]:
+    import csv
+    import io
+
+    return {r["Designator"]: r for r in csv.DictReader(io.StringIO(output))}
+
+
 class TestExportPnPWithAuxOrigin:
     """Tests for export_pnp with auxiliary origin auto-detection."""
 
@@ -489,9 +501,8 @@ class TestExportPnPWithAuxOrigin:
             MockFootprint("R1", "10k", "0402", (10.0, 20.0), 0.0, "F.Cu"),
         ]
         output = export_pnp(footprints, "jlcpcb")
-        assert "R1" in output
-        assert "10.0000mm" in output
-        assert "20.0000mm" in output
+        row = _cpl_rows(output)["R1"]
+        assert (row["Mid X"], row["Mid Y"]) == ("10.0000mm", "-20.0000mm")
 
     def test_export_pnp_with_pcb_path_zero_origin(self):
         """export_pnp with pcb_path but (0,0) aux origin should not change coords."""
@@ -500,8 +511,8 @@ class TestExportPnPWithAuxOrigin:
             MockFootprint("R1", "10k", "0402", (10.0, 20.0), 0.0, "F.Cu"),
         ]
         output = export_pnp(footprints, "jlcpcb", pcb_path=fixture)
-        assert "10.0000mm" in output
-        assert "20.0000mm" in output
+        row = _cpl_rows(output)["R1"]
+        assert (row["Mid X"], row["Mid Y"]) == ("10.0000mm", "-20.0000mm")
 
     def test_export_pnp_use_aux_origin_disabled(self):
         """export_pnp with use_aux_origin=False should skip origin auto-detection."""
@@ -511,8 +522,8 @@ class TestExportPnPWithAuxOrigin:
             MockFootprint("R1", "10k", "0402", (10.0, 20.0), 0.0, "F.Cu"),
         ]
         output = export_pnp(footprints, "jlcpcb", config=config, pcb_path=fixture)
-        assert "10.0000mm" in output
-        assert "20.0000mm" in output
+        row = _cpl_rows(output)["R1"]
+        assert (row["Mid X"], row["Mid Y"]) == ("10.0000mm", "-20.0000mm")
 
     def test_export_pnp_manual_offset_combined(self):
         """Manual x_offset/y_offset should combine with aux origin offset."""
@@ -523,9 +534,9 @@ class TestExportPnPWithAuxOrigin:
             MockFootprint("R1", "10k", "0402", (10.0, 20.0), 0.0, "F.Cu"),
         ]
         output = export_pnp(footprints, "jlcpcb", config=config, pcb_path=fixture)
-        # 10 + 5 = 15, 20 + (-3) = 17
-        assert "15.0000mm" in output
-        assert "17.0000mm" in output
+        # x: 10 + 5 = 15; Y-up frame: -20 + (-3) = -23
+        row = _cpl_rows(output)["R1"]
+        assert (row["Mid X"], row["Mid Y"]) == ("15.0000mm", "-23.0000mm")
 
     def test_aux_origin_config_none_jlcpcb_excludes_tht(self, tmp_path):
         """Aux-origin branch + config=None must honor JLCPCB's exclude_tht default.
@@ -562,11 +573,10 @@ class TestExportPnPWithAuxOrigin:
 
         # THT component excluded from the CPL (JLCPCB default)...
         assert "J1" not in output
-        # ...while the SMD part remains, shifted by the aux origin:
-        # 110 - 100 = 10, 70 - 50 = 20.
-        assert "R1" in output
-        assert "10.0000mm" in output
-        assert "20.0000mm" in output
+        # ...while the SMD part remains in the aux-origin, Y-up frame:
+        # x = 110 - 100 = 10, y = 50 - 70 = -20.
+        row = _cpl_rows(output)["R1"]
+        assert (row["Mid X"], row["Mid Y"]) == ("10.0000mm", "-20.0000mm")
 
         # The hand-solder set computed from the formatter's effective config
         # (the assembly.py pattern) must AGREE with the CPL: J1 is listed.
@@ -592,10 +602,63 @@ class TestExportPnPWithAuxOrigin:
 
         # Explicit exclude_tht=False overrides the JLCPCB default: J1 stays.
         assert "J1" in output
-        # Manual offsets combine with aux origin: 110 + 5 - 100 = 15,
-        # 70 + (-3) - 50 = 17.
-        assert "15.0000mm" in output
-        assert "17.0000mm" in output
+        # Manual offsets apply after the frame transform:
+        # x = 110 - 100 + 5 = 15; y = (50 - 70) + (-3) = -23.
+        row = _cpl_rows(output)["R1"]
+        assert (row["Mid X"], row["Mid Y"]) == ("15.0000mm", "-23.0000mm")
+
+
+class TestCplFrame:
+    """CPL coordinates use KiCad's pos frame / the Gerbers' frame (#7059)."""
+
+    FPS = [
+        MockFootprint("R1", "10k", "0402", (105.0, 105.0), 0.0, "F.Cu"),
+        MockFootprint("R2", "10k", "0402", (115.0, 107.0), 180.0, "B.Cu"),
+    ]
+
+    def _xy(self, output, ref):
+        row = _cpl_rows(output)[ref]
+        return row["Mid X"], row["Mid Y"]
+
+    def test_aux_origin_lower_left(self):
+        out = export_pnp(self.FPS, "jlcpcb", aux_origin=(100.0, 110.0))
+        assert self._xy(out, "R1") == ("5.0000mm", "5.0000mm")
+        assert self._xy(out, "R2") == ("15.0000mm", "3.0000mm")
+        assert _cpl_rows(out)["R2"]["Rotation"] == "180.0"
+        assert _cpl_rows(out)["R2"]["Layer"] == "Bottom"
+
+    def test_no_aux_origin(self):
+        out = export_pnp(self.FPS, "jlcpcb")
+        assert self._xy(out, "R1") == ("105.0000mm", "-105.0000mm")
+        assert self._xy(out, "R2") == ("115.0000mm", "-107.0000mm")
+
+    def test_use_aux_origin_false_ignores_origin(self):
+        cfg = PnPExportConfig(use_aux_origin=False)
+        out = export_pnp(self.FPS, "jlcpcb", config=cfg, aux_origin=(100.0, 110.0))
+        assert self._xy(out, "R1") == ("105.0000mm", "-105.0000mm")
+
+    @pytest.mark.parametrize("mfr", ["generic", "pcbway", "seeed"])
+    def test_other_formatters_share_frame(self, mfr):
+        out = export_pnp(self.FPS, mfr, aux_origin=(100.0, 110.0))
+        r2 = next(line for line in out.splitlines() if "R2" in line)
+        assert "15.0000" in r2 and "3.0000" in r2 and "-" not in r2
+
+    def test_pcb_path_reads_aux_origin(self, tmp_path):
+        fixture = Path(__file__).parent / "fixtures" / "projects" / "multilayer_zones.kicad_pcb"
+        text = fixture.read_text().replace("(aux_axis_origin 0 0)", "(aux_axis_origin 100 110)")
+        pcb_path = tmp_path / "b.kicad_pcb"
+        pcb_path.write_text(text)
+        out = export_pnp(self.FPS, "jlcpcb", pcb_path=pcb_path)
+        assert self._xy(out, "R2") == ("15.0000mm", "3.0000mm")
+
+    def test_footprint_sheet_position_adds_board_origin(self):
+        from kicad_tools.schema.pcb import Footprint
+
+        fp = Footprint(
+            name="x", layer="F.Cu", position=(5.0, 5.0), rotation=0.0, reference="R1", value="v"
+        )
+        object.__setattr__(fp, "_board_origin", (100.0, 100.0))
+        assert fp.sheet_position == (105.0, 105.0)
 
 
 class TestGerberExporter:

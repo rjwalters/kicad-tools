@@ -953,13 +953,138 @@ measured a matcher.**
    calls the tuner here, because board 07's classes are `length_critical:
    false`.
 
+7. **Budget counters on ADDRESS and BYTE0: the group ceiling is not the
+   limiter (Issue #5798).** Measured on 2026-10-18 at `main` `65b41559d`,
+   same local host (load average 6-30 from other sweeps), KRT not run. No
+   limit in `match_group_tuning.py` was changed, because the counters do not
+   implicate one.
+
+   **Input caveat.** The 07m route did not complete. Two `krt_compare.py
+   --boards 07m --tools kct` runs hit their caps (1200 s: 153/161
+   connections; 3600 s: 154/161), against item 6's 340 s on a quieter host.
+   The 3600 s output has BYTE0 (9/9) and COMMAND (6/6) finished, BYTE1 6/9 and
+   ADDRESS 11/14. So the ADDRESS rows below are **not** the 14/14 case item 6
+   describes, and one ADDRESS member (net 34) is a 0.70 mm stub that no tuner
+   can lengthen.
+
+   `kct retune-lengths` per group on that output, with `tune_match_group_v2`
+   wrapped to print each member's `reason`, `attempts` and `inserts_applied`:
+
+   | Group | Spread mm | Budget counters | Outcome |
+   |---|---|---|---|
+   | SDRAM_BYTE0 (9 members) | 20.21 → 4.75 | 10 of 16 inserts used; no member hit its per-member cap of 2 | tuned, inside 5.0, written |
+   | SDRAM_ADDRESS (14 members) | 67.61 → 67.61 | 16 of 16 used; 6 members `exceeded_max_inserts`, 1 `post_insertion_drc_violation`, net 34 `cascade_budget_exhausted` | rolled back |
+
+   BYTE0 reaches 4.75 mm here, where item 6's route gave 5.80 mm. The two
+   routes differ, so that is route variance, not a matcher change. Neither
+   BYTE0 result touches any budget.
+
+   **Single-limit probes on ADDRESS** (constants patched in the probe only):
+
+   | Ceiling | Per-member cap | Inserts used | What blocks the unfinished members |
+   |---|---|---|---|
+   | 16 (current) | 2 | 16 | `cascade_budget_exhausted` on net 34, `exceeded_max_inserts` on 5 members |
+   | 40 | 2 | 16 | `exceeded_max_inserts` on 5 members; the ceiling is no longer reached |
+   | 80 | 6 | 25 | DRC rejection on nets 23, 25, 27; `no_suitable_segment` on nets 22 and 34; `exceeded_max_inserts` on net 21 only |
+
+   Raising the ceiling alone moves the failure to the per-member cap. Raising
+   both moves it to DRC room and host availability. Each insert adds 3-8 mm
+   on these members, against 20-40 mm needed. Net 32 is the only member the
+   larger budget fixes, and it is not enough to bring the group inside 5.0 mm.
+   On this input the hypothesis "`MAX_TOTAL_INSERTS_PER_GROUP = 16` produces
+   `cascade_budget_exhausted`" is refuted as a sufficient explanation, since the
+   ceiling only trips once, on a stub. Whether it also holds with 14/14
+   finished members is **not measured**.
+
+   **Connection cost of `--length-match-groups`: not demonstrated.** With a
+   scratch copy of board 07's net-class map (`length_critical: true` on all
+   38 SDRAM group nets, committed map untouched), `kct route
+   --preserve-existing --net-class-map <scratch>` was run with and without
+   `--length-match-groups`, in parallel, under a 2700 s cap. Both runs hit the
+   cap in the same place (iteration 1 of rip-up and reroute, after 23/42 nets
+   in the first pass) and left the same board: 151/161 connections, 45/55 nets
+   complete. Neither reached the post-route tuner, so the two counts are
+   identical for a reason unrelated to the flag. The "on >= off" criterion
+   stays open until a complete route is available.
+
+8. **Complete route: a later attempt discarded earlier commits, and the
+   connection cost is measured (Issue #5798).** Measured on 2026-10-18 at
+   `main` `700cec215` with C++ build 60, on the same local host (load
+   average about 8-10). KRT was not run. kicad-cli is the pinned image
+   (`kicad/kicad:10.0`, 10.0.6). Each board was checked on its own with
+   `pcb drc --refill-zones` against the input board's `.kicad_pro`.
+
+   **Input.** `krt_compare.py --boards 07m --tools kct --timeout 2400`
+   finishes in 351.87 s: 54/55 nets, 160/161 connections, 0 shared-referee
+   errors. Its spreads are 18.33 / 57.62 / 50.68 / 19.49 mm, the same board
+   as items 2, 5 and 6. ADDRESS has all 14 members finished, which is the
+   case item 7 could not measure.
+
+   **ADDRESS counters on that input** (`kct retune-lengths --group
+   SDRAM_ADDRESS`, with the same reason/inserts wrapper as item 7). The
+   group used all 16 of its ceiling. The two shortest members set the
+   spread: BA0 (net 21, 24.44 mm) and BA1 (net 22, 26.19 mm). Each one
+   **committed** one DRC-clean meander, then found no host for a second
+   (`no_suitable_segment`), and came back at its original length with
+   `inserts_applied=1`. A9 (net 33) did the same when the ceiling tripped
+   halfway through its cascade (`cascade_budget_exhausted`). In both cases
+   the tuner reset the member to its original route, discarding commits it
+   had already charged to the group budget. The post-insertion-DRC path
+   two branches later already kept partial progress. With the shortest
+   member unchanged, the spread did not move (52.44 → 52.44 mm), so the
+   #6969 guard rolled the whole group back.
+
+   **Fix.** Both branches now reset to the original route only when the
+   member has committed nothing (`match_group_tuning.py`, single-ended
+   path). The result is via-inclusive spread before → after on the same
+   input, one group per run:
+
+   | Group | Before the fix | After the fix | Limiter after the fix |
+   |---|---|---|---|
+   | SDRAM_ADDRESS (14/14) | 52.44 → 52.44, rolled back | 52.44 → **41.69**, kept as `improved_still_over_limit` | BA0 has no host after one meander (`no_suitable_segment`); 16/16 ceiling used; A11 (net 34) never tried |
+   | SDRAM_BYTE0 (9/9) | 20.21 → 5.80 | 20.21 → 5.80 (unchanged) | 12 of 16 inserts; DQ6 (net 14) `exceeded_max_inserts` at the per-member cap of 2 |
+   | SDRAM_COMMAND (6/6) | 20.69 → 4.46, written | 20.69 → 4.46, written (unchanged) | none |
+   | SDRAM_BYTE1 (8/9) | 61.89 → 61.89 | 61.89 → 61.89 (unchanged) | DQ9 is a 0.70 mm stub (unfinished member) |
+
+   ADDRESS improves by 10.75 mm but stays far over 5.0 mm, so
+   `retune-lengths` still writes nothing for it. To DRC the kept meanders, a
+   probe forced the write. The tuned board and the untuned input both score
+   **0 errors** (2 `via_dangling` warnings, 1 unconnected), so the kept
+   meanders add no violation. This 160/161 board is not manufacturable.
+
+   **Connection cost of `--length-match-groups`, measured.** This uses the
+   scratch map from item 7 (`length_critical: true` on all 38 group nets;
+   committed map untouched) and `kct route --preserve-existing
+   --net-class-map <scratch>`, run with and without the flag, uncapped.
+   This time both runs finished (about 250 s each):
+
+   | Run | Connections | Nets | kicad-cli 10.0.6 errors | BYTE0 | BYTE1 ¹ | ADDRESS | COMMAND |
+   |---|---|---|---|---|---|---|---|
+   | flag off | 160/161 | 54/55 | 0 | 18.33 | 57.62 | 50.68 | 19.49 |
+   | flag on | 160/161 | 54/55 | **16** (shorting 12, clearance 4) | 3.06 | 62.72 | 42.89 | 7.63 |
+
+   ¹ One member is unfinished. Spreads are `krt_compare`'s 2-D metric on the
+   graded board, in mm.
+
+   The flag **no longer costs connections** on board 07 (on = off =
+   160/161). It does cost DRC. Every error pairs a meandered member (A10,
+   DQ7, DQ15, SDNWE) with a through-hole via on a preserved net outside the
+   group (+3V3, GND, VCAP1). The route-time tuner gets preserved copper for
+   group members only (#6968), so its clearance check cannot see these
+   vias. `retune-lengths` adopts every loaded track and adds no error.
+   Filed as #7159. The flag-on board is byte-identical with and without
+   this item's fix: on this route the route-time cascade never hits a
+   later-attempt failure after a commit.
+
 **Verdict.** The gap survives deconfounding. It is not the routing cap. It is
 the three wiring gaps in (1), then DRC-limited meander room and the
 all-or-nothing rollback in (3). Item 6 shows #7043 (PR #7048) closes
 SDRAM_COMMAND and narrows SDRAM_BYTE0 from 8.62 to 5.80 mm, still over
-budget; SDRAM_ADDRESS is still rolled back. Enabling `--length-match-groups`
-no longer costs connections (160/161 vs 158/161), but only because it runs no
-code on this path. Follow-ups: #6969 (meander room and rollback policy; item 5
+budget. Item 8 stops SDRAM_ADDRESS being rolled back (52.44 → 41.69 mm,
+still over budget). With `length_critical: true` in a scratch map,
+`--length-match-groups` no longer costs connections on board 07 (160/161 on
+and off), but its route-time meanders add 16 kicad-cli errors against
+preserved foreign-net vias (#7159). Follow-ups: #6969 (meander room and rollback policy; item 5
 shows the clearance floor was not the limit), #7043 (per-bump meander
 placement, PR #7048), and #6970 (the loader's net-0 keying, for `kct route`).
 #6968 (the flag's three gaps) is closed: PR #6974 runs

@@ -473,6 +473,21 @@ class ViolationType(Enum):
             "copper_sliver": cls.COPPER_SLIVER,
             "physical_copper_gap": cls.PHYSICAL_COPPER_GAP,
             "physical_copper_gap_incomplete": cls.PHYSICAL_COPPER_GAP_INCOMPLETE,
+            # kicad-cli 10 DRC type strings that ``kct drc --mfr`` judges
+            # against fab floors (Issue #7170).  Explicit, because the fuzzy
+            # fallback mis-routes every one of them: ``annular_width``,
+            # ``hole_to_hole`` and ``via_diameter`` fell to UNKNOWN (so the
+            # --mfr annular branch never fired on real kicad-cli output),
+            # ``hole_clearance`` (hole-to-copper) matched the generic
+            # ``"clearance"`` and was judged against the copper-to-copper
+            # floor, and ``drill_out_of_range`` only matched ``"drill"`` by
+            # accident.  tests/test_drc_mfr_not_checked_7170.py pins all 67
+            # kicad-cli 10.0.6 keys; do NOT delete these as "redundant".
+            "annular_width": cls.VIA_ANNULAR_WIDTH,
+            "hole_to_hole": cls.HOLE_TO_HOLE_CLEARANCE,
+            "via_diameter": cls.DIMENSION_VIA_DIAMETER,
+            "hole_clearance": cls.DRILL_CLEARANCE,
+            "drill_out_of_range": cls.DRILL_HOLE_TOO_SMALL,
         }
 
         alias_match = _ALIASES.get(s_lower)

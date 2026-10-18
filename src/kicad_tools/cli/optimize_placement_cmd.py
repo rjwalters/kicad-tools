@@ -59,6 +59,11 @@ from kicad_tools.placement.decoupling import (
     identify_decoupling_groups,
     snap_decoupling_caps,
 )
+from kicad_tools.placement.geometry import (
+    NO_OUTLINE_WARNING,
+    OutlineNotFoundError,
+    outline_from_pcb,
+)
 from kicad_tools.placement.geometry import extract_board_outline as _extract_board_outline
 from kicad_tools.placement.route_check import (
     DEFAULT_ROUTE_CHECK_BUDGET,
@@ -1012,6 +1017,7 @@ def _read_board_data(
     pcb_path: str,
     *,
     anchor_weight: float = 0.0,
+    require_outline: bool = False,
 ) -> tuple[
     list[ComponentDef],
     list[Net],
@@ -1053,7 +1059,15 @@ def _read_board_data(
     except ImportError:
         pass
     if board_outline is None:
-        board_outline = _extract_board_outline(pcb)
+        board_outline = outline_from_pcb(pcb)
+    if board_outline is None:
+        # No Edge.Cuts geometry at all (issue #7148): never fall back silently.
+        if require_outline:
+            raise OutlineNotFoundError(
+                "no Edge.Cuts board outline found and --require-outline was given"
+            )
+        print(f"WARNING: {NO_OUTLINE_WARNING}", file=sys.stderr)
+        board_outline = _extract_board_outline(pcb, warn=False)
 
     # --- Components from footprints ---
     # Track which footprints carry the (locked) attribute so we can later
@@ -1271,6 +1285,7 @@ def run_optimize_placement(
     route_check: bool = False,
     route_check_budget: int = DEFAULT_ROUTE_CHECK_BUDGET,
     route_check_timeout: float | None = None,
+    require_outline: bool = False,
 ) -> int:
     """Run placement optimization.
 
@@ -1400,6 +1415,7 @@ def run_optimize_placement(
         components, nets, board_outline, rules, board_origin = _read_board_data(
             pcb_path,
             anchor_weight=anchor_weight,
+            require_outline=require_outline,
         )
     except Exception as e:
         rc = _placement_error(

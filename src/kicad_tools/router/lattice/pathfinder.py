@@ -481,6 +481,9 @@ class LatticePathfinder:
         # holds the latest hybrid-retry diagnostic per key.
         self.pair_gateway_ends: dict[object, tuple[int | None, int | None]] = {}
         self.pair_hybrid_log: dict[object, str] = {}
+        # Issue #7093: ``key -> (vias_P, vias_N)`` of each fallback pair whose
+        # committed legs have unequal via counts (no candidate had parity).
+        self.pair_via_mismatch: dict[object, tuple[int, int]] = {}
         # Issue #4355: immovable copper from NON-listed nets (the preserved
         # ``router.existing_routes``), pre-processed into per-segment seed
         # tuples ``(layer_idx, a, b, net, half_width, clearance)`` plus via
@@ -4403,6 +4406,20 @@ class LatticePathfinder:
         measure = self.pair_length_measure or _default_pair_length
         return abs(measure(p_r.route) - measure(n_r.route))
 
+    @staticmethod
+    def _pair_via_counts(legs: _FallbackLegs) -> tuple[int, int] | None:
+        """``(vias_P, vias_N)`` of a fully routed leg pair, else ``None`` (#7093)."""
+        p_r, n_r = legs["P"][0], legs["N"][0]
+        if p_r is None or n_r is None:
+            return None
+        return len(p_r.route.vias), len(n_r.route.vias)
+
+    @classmethod
+    def _pair_via_mismatch(cls, legs: _FallbackLegs) -> int:
+        """``|vias_P - vias_N|`` of a fully routed leg pair, else ``0`` (#7093)."""
+        counts = cls._pair_via_counts(legs)
+        return 0 if counts is None else abs(counts[0] - counts[1])
+
     def _legs_shortfalls(self, pc: CoupledConnection, legs: _FallbackLegs) -> int:
         """Class-pad shortfalls of a leg pair (see :func:`class_pad_shortfalls`)."""
         from .class_pad_repair import class_pad_shortfalls
@@ -4534,7 +4551,9 @@ class LatticePathfinder:
         :meth:`CommittedCopper.begin_trial` that is rolled back), so every
         candidate is legal exactly as it would be had it been routed alone.
         The winner has the most routed legs, then the fewest class-pad
-        shortfalls, then the smallest skew (:meth:`_pair_skew`), then the
+        shortfalls, then the smallest P/N via-count difference (#7093: a
+        pair that changes layers a different number of times is a pair-rule
+        failure), then the smallest skew (:meth:`_pair_skew`), then the
         smallest total length; ties keep the earlier candidate, so the
         selection is deterministic.  Its legs are committed.  Returns
         ``(legs, is_partner_blind)`` -- the flag is set when the winner is
@@ -4604,15 +4623,21 @@ class LatticePathfinder:
 
         measure = self.pair_length_measure or _default_pair_length
 
-        def rank(cand: _FallbackLegs) -> tuple[int, int, float, float]:
+        def rank(cand: _FallbackLegs) -> tuple[int, int, int, float, float]:
             p_r, n_r = cand["P"][0], cand["N"][0]
             routed = (p_r is not None) + (n_r is not None)
             short = self._legs_shortfalls(pc, cand)
             if p_r is None or n_r is None:
-                return (-routed, short, 0.0, 0.0)
+                return (-routed, short, 0, 0.0, 0.0)
             lp, ln = measure(p_r.route), measure(n_r.route)
             # Rounded to 1 um so float noise never flips a tie.
-            return (-routed, short, round(abs(lp - ln), 3), round(lp + ln, 3))
+            return (
+                -routed,
+                short,
+                self._pair_via_mismatch(cand),
+                round(abs(lp - ln), 3),
+                round(lp + ln, 3),
+            )
 
         best = min(candidates, key=rank)  # ``min`` keeps the first on ties
         for pol in ("P", "N"):
@@ -4681,21 +4706,26 @@ class LatticePathfinder:
             "escape_plan": escape_plan,
         }
 
-        def score(flush: list[_FallbackLegs]) -> tuple[int, float, int]:
+        def score(flush: list[_FallbackLegs]) -> tuple[int, float, int, int]:
             routed = sum(legs[pol][0] is not None for legs in flush for pol in ("P", "N"))
             short = sum(
                 self._legs_shortfalls(pc, legs) for pc, legs in zip(pairs, flush, strict=True)
             )
             skews = [self._pair_skew(legs) for legs in flush]
-            return (-routed, round(sum(sk for sk in skews if sk is not None), 3), short)
+            vias = sum(self._pair_via_mismatch(legs) for legs in flush)
+            return (-routed, round(sum(sk for sk in skews if sk is not None), 3), short, vias)
 
-        def better(aware: tuple[int, float, int], blind: tuple[int, float, int]) -> bool:
+        def better(aware: tuple[int, float, int, int], blind: tuple[int, float, int, int]) -> bool:
             # More routed legs always wins.  Otherwise the partner-aware legs
             # must cut the summed skew by a material margin without adding a
             # class-pad shortfall: every leg it moves perturbs the rest of
             # the board, so a marginal gain is not worth the churn.
             if aware[0] != blind[0]:
                 return aware[0] < blind[0]
+            # Fewer unequal-via pairs (#7093) beats any skew gain, provided
+            # it adds no class-pad shortfall.
+            if aware[3] != blind[3]:
+                return aware[3] < blind[3] and aware[2] <= blind[2]
             return aware[1] <= blind[1] - _MIN_FLUSH_SKEW_GAIN_MM and aware[2] <= blind[2]
 
         def recommit(pc: CoupledConnection, legs: _FallbackLegs) -> None:
@@ -4747,6 +4777,11 @@ class LatticePathfinder:
         out: list[dict[str, tuple[Connection, str | None]]] = []
         for pc, legs in zip(pairs, chosen, strict=True):
             items = self._fallback_items(pc)
+            counts = self._pair_via_counts(legs)
+            if counts is not None and counts[0] != counts[1]:
+                self.pair_via_mismatch[pc.key] = counts
+            else:
+                self.pair_via_mismatch.pop(pc.key, None)
             per: dict[str, tuple[Connection, str | None]] = {}
             for pol in ("P", "N"):
                 res, reason = legs[pol]

@@ -20,10 +20,18 @@ bounding boxes (AABBs).
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING, Any, Sequence
 
 from .cost import BoardOutline
 from .vector import ComponentDef, PlacedComponent
+
+logger = logging.getLogger(__name__)
+
+
+class OutlineNotFoundError(ValueError):
+    """Raised when a board has no Edge.Cuts outline and one is required."""
+
 
 if TYPE_CHECKING:
     from kicad_tools.pcb.board_geometry import BoardGeometry
@@ -205,38 +213,72 @@ def compute_boundary_violation(
     return total
 
 
-def extract_board_outline(pcb: Any) -> BoardOutline:
-    """Extract board outline from Edge.Cuts graphic lines.
+def outline_from_pcb(pcb: Any) -> BoardOutline | None:
+    """Return the Edge.Cuts bounding rectangle in the board-relative frame.
 
-    Edge.Cuts coordinates are in sheet-absolute space, but footprint
-    positions on ``SchemaPCB`` are board-relative (the origin is already
-    subtracted).  We must convert the outline to the same board-relative
-    coordinate system so the optimizer bounds match component positions.
-
-    Args:
-        pcb: Parsed PCB schema object with ``graphic_lines``,
-            ``board_origin``, and ``footprints`` attributes.
-
-    Returns:
-        A :class:`BoardOutline` representing the bounding rectangle
-        of the Edge.Cuts outline, or a fallback based on footprint
-        positions / default dimensions.
+    Uses the shared :func:`kicad_tools.optim.board_outline.extract_board_outline`
+    (``gr_rect``/``gr_poly``/``gr_line``/``gr_arc``, absolute coordinates) and
+    converts once with ``to_origin_relative``.  Falls back to the schema
+    ``graphic_lines`` only when the sexp tree is unavailable.  Returns
+    ``None`` when no outline is found at all (issue #7148).
     """
-    xs: list[float] = []
-    ys: list[float] = []
+    sexp = getattr(pcb, "_sexp", None)
+    if sexp is not None:
+        from kicad_tools.optim.board_outline import extract_board_outline as shared
+        from kicad_tools.optim.board_outline import to_origin_relative
 
-    for line in pcb.graphic_lines:
+        poly = to_origin_relative(shared(pcb), pcb)
+        if poly is not None and poly.vertices:
+            xs = [v.x for v in poly.vertices]
+            ys = [v.y for v in poly.vertices]
+            return BoardOutline(min_x=min(xs), min_y=min(ys), max_x=max(xs), max_y=max(ys))
+
+    xs = []
+    ys = []
+    for line in getattr(pcb, "graphic_lines", ()):
         if line.layer == "Edge.Cuts":
             xs.extend([line.start[0], line.end[0]])
             ys.extend([line.start[1], line.end[1]])
-
     if xs and ys:
-        # Convert from sheet-absolute to board-relative coordinates.
         ox, oy = pcb.board_origin
-        xs = [x - ox for x in xs]
-        ys = [y - oy for y in ys]
-        return BoardOutline(min_x=min(xs), min_y=min(ys), max_x=max(xs), max_y=max(ys))
+        return BoardOutline(
+            min_x=min(xs) - ox, min_y=min(ys) - oy, max_x=max(xs) - ox, max_y=max(ys) - oy
+        )
+    return None
 
+
+NO_OUTLINE_WARNING = (
+    "No Edge.Cuts board outline found; falling back to a bounding box of the "
+    "footprints plus a 10 mm margin (or a 100x100 mm default). Parts may be "
+    "placed outside the real board."
+)
+
+
+def extract_board_outline(pcb: Any, *, warn: bool = True) -> BoardOutline:
+    """Extract the board outline in the board-relative coordinate frame.
+
+    Edge.Cuts coordinates are sheet-absolute while ``SchemaPCB`` footprint
+    positions are board-relative (origin subtracted), so the outline is
+    converted exactly once.  Handles ``gr_rect``, ``gr_poly``, ``gr_line``
+    and ``gr_arc`` via the shared outline reader (issue #7148).
+
+    Args:
+        pcb: Parsed PCB schema object.
+        warn: Log a warning when no outline exists and a fallback is used.
+
+    Returns:
+        A :class:`BoardOutline` for the Edge.Cuts bounding rectangle, or a
+        fallback based on footprint positions / default dimensions.
+    """
+    found = outline_from_pcb(pcb)
+    if found is not None:
+        return found
+
+    if warn:
+        logger.warning(NO_OUTLINE_WARNING)
+
+    xs: list[float] = []
+    ys: list[float] = []
     # Fallback: use footprint bounding box with margin
     for fp in pcb.footprints:
         xs.append(fp.position[0])

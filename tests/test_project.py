@@ -1049,6 +1049,88 @@ class TestProjectRoute:
         assert hasattr(result, "routed_nets")
         assert hasattr(result, "total_nets")
 
+    def test_route_merges_collinear_grid_steps(self, tmp_path, monkeypatch):
+        """A straight run is saved as merged copper, not one segment per grid step (#7138)."""
+        from kicad_tools.schema.pcb import PCB
+
+        pcb_content = """(kicad_pcb
+          (version 20240108)
+          (generator "test")
+          (general (thickness 1.6))
+          (layers
+            (0 "F.Cu" signal)
+            (31 "B.Cu" signal)
+            (44 "Edge.Cuts" user)
+          )
+          (net 0 "")
+          (net 1 "SIG")
+          (gr_line (start 0 0) (end 40 0) (layer "Edge.Cuts") (stroke (width 0.1)))
+          (gr_line (start 40 0) (end 40 20) (layer "Edge.Cuts") (stroke (width 0.1)))
+          (gr_line (start 40 20) (end 0 20) (layer "Edge.Cuts") (stroke (width 0.1)))
+          (gr_line (start 0 20) (end 0 0) (layer "Edge.Cuts") (stroke (width 0.1)))
+          (footprint "R_0603" (layer "F.Cu") (at 10 10) (attr smd)
+            (property "Reference" "R1")
+            (pad "1" smd rect (at 0 0) (size 0.6 0.6) (layers "F.Cu") (net 1 "SIG"))
+          )
+          (footprint "R_0603" (layer "F.Cu") (at 20 10) (attr smd)
+            (property "Reference" "R2")
+            (pad "1" smd rect (at 0 0) (size 0.6 0.6) (layers "F.Cu") (net 1 "SIG"))
+          )
+        )
+        """
+        pcb_path = tmp_path / "test.kicad_pcb"
+        pcb_path.write_text(pcb_content)
+
+        import dataclasses
+
+        from kicad_tools import router as router_pkg
+
+        real_load = router_pkg.load_pcb_for_routing
+
+        def fragmenting_load(*args, **kwargs):
+            """Make route_all emit one segment per 0.1 mm grid step."""
+            router, net_map = real_load(*args, **kwargs)
+            real_route_all = router.route_all
+
+            def route_all(*a, **k):
+                routes = real_route_all(*a, **k)
+                for route in routes:
+                    pieces = []
+                    for seg in route.segments:
+                        n = 100  # the 10 mm run in 0.1 mm steps
+                        for i in range(n):
+                            t0, t1 = i / n, (i + 1) / n
+                            pieces.append(
+                                dataclasses.replace(
+                                    seg,
+                                    x1=seg.x1 + (seg.x2 - seg.x1) * t0,
+                                    y1=seg.y1 + (seg.y2 - seg.y1) * t0,
+                                    x2=seg.x1 + (seg.x2 - seg.x1) * t1,
+                                    y2=seg.y1 + (seg.y2 - seg.y1) * t1,
+                                )
+                            )
+                    route.segments = pieces
+                return routes
+
+            router.route_all = route_all
+            return router, net_map
+
+        monkeypatch.setattr(router_pkg, "load_pcb_for_routing", fragmenting_load)
+
+        result = Project(pcb=pcb_path).route()
+
+        saved = PCB.load(str(pcb_path)).segments
+        assert saved, "no copper was saved"
+        # ~100 raw grid-step segments must collapse to a straight run.
+        assert len(saved) == 1
+        assert result.total_segments == len(saved)
+        assert result.total_length_mm == pytest.approx(
+            sum(
+                ((s.end[0] - s.start[0]) ** 2 + (s.end[1] - s.start[1]) ** 2) ** 0.5 for s in saved
+            ),
+            abs=0.01,
+        )
+
 
 class TestProjectCheckDRC:
     """Tests for Project.check_drc() method."""

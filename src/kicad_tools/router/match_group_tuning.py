@@ -1126,7 +1126,11 @@ def _tune_match_group_single_ended(
                     f"({MAX_TOTAL_INSERTS_PER_GROUP}) exhausted "
                     f"during tuning of net {net_id}."
                 )
-                current_route = original_route
+                # Issue #5798: keep this member's earlier DRC-clean commits
+                # (they already count toward the ceiling), as the
+                # post-insertion-DRC path below does.  Reset only when none.
+                if per_member_result.inserts_applied == 0:
+                    current_route = original_route
                 break
 
             # Rank up to MAX_SEGMENT_RETRY_CANDIDATES candidate
@@ -1163,7 +1167,13 @@ def _tune_match_group_single_ended(
                     f"No segment long enough for a trombone on net {net_id} "
                     f"(skew={current_skew:.4f}mm > tol={tolerance_mm:.4f}mm)"
                 )
-                current_route = original_route
+                # Issue #5798: a host can run out AFTER an earlier attempt
+                # committed (the first meander used the only long segment).
+                # Discarding that commit left board 07's shortest SDRAM_ADDRESS
+                # members untouched, so the group spread never moved and the
+                # whole group was rolled back.  Keep partial progress.
+                if per_member_result.inserts_applied == 0:
+                    current_route = original_route
                 break
 
             # Precompute the length needed (constant across this

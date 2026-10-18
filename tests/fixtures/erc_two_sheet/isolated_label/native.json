@@ -1,0 +1,92 @@
+{
+    "$schema": "https://schemas.kicad.org/erc.v1.json",
+    "coordinate_units": "mm",
+    "date": "2026-10-18T01:36:46",
+    "ignored_checks": [
+        {
+            "description": "Global label only appears once in the schematic",
+            "key": "single_global_label"
+        },
+        {
+            "description": "Four connection points are joined together",
+            "key": "four_way_junction"
+        },
+        {
+            "description": "SPICE model issue",
+            "key": "simulation_model_issue"
+        },
+        {
+            "description": "Symbol doesn't match copy in library",
+            "key": "lib_symbol_mismatch"
+        },
+        {
+            "description": "Assigned footprint doesn't match footprint filters",
+            "key": "footprint_filter"
+        }
+    ],
+    "included_severities": [
+        "error",
+        "warning",
+        "exclusion"
+    ],
+    "kicad_version": "10.0.6",
+    "sheets": [
+        {
+            "path": "/",
+            "uuid_path": "/9526c51d-1f0d-5f9f-8653-8e3cd845d3d0",
+            "violations": [
+                {
+                    "description": "Label connected to only one pin",
+                    "items": [
+                        {
+                            "description": "Global Label 'SIG'",
+                            "pos": {
+                                "x": 1.016,
+                                "y": 0.4064
+                            },
+                            "uuid": "0d719efa-bea9-5950-adf6-c727c3380e76"
+                        }
+                    ],
+                    "severity": "error",
+                    "type": "isolated_pin_label"
+                },
+                {
+                    "description": "Label connected to only one pin",
+                    "items": [
+                        {
+                            "description": "Global Label 'SIG'",
+                            "pos": {
+                                "x": 0.6096,
+                                "y": 0.508
+                            },
+                            "uuid": "c1b20fe7-719b-56c7-b4ad-ab7b3047beb2"
+                        }
+                    ],
+                    "severity": "error",
+                    "type": "isolated_pin_label"
+                },
+                {
+                    "description": "Label connected to only one pin",
+                    "items": [
+                        {
+                            "description": "Global Label 'SIG'",
+                            "pos": {
+                                "x": 0.7112,
+                                "y": 0.508
+                            },
+                            "uuid": "c6c306c0-018b-5529-a16a-1addb3df9389"
+                        }
+                    ],
+                    "severity": "error",
+                    "type": "isolated_pin_label"
+                }
+            ]
+        },
+        {
+            "path": "/Sub/",
+            "uuid_path": "/9526c51d-1f0d-5f9f-8653-8e3cd845d3d0/ec441572-c36c-5124-a8e3-95a1114bfbc5",
+            "violations": []
+        }
+    ],
+    "source": "h.kicad_sch"
+}

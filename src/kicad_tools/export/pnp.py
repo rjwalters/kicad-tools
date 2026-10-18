@@ -10,7 +10,7 @@ import csv
 import io
 import re
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -378,16 +378,50 @@ def is_through_hole_footprint(footprint: Footprint) -> bool:
     )
 
 
+def _pos_frame_xy(
+    fp: Footprint,
+    config: PnPExportConfig,
+    aux_origin: tuple[float, float] | None,
+) -> tuple[float, float]:
+    """Footprint origin in KiCad's ``pcb export pos`` frame (Y up).
+
+    Matches ``kicad-cli pcb export pos`` with ``--use-drill-file-origin``
+    when ``config.use_aux_origin`` is set (the frame the package's Gerbers
+    and drill files use), and without it otherwise.  Works from the
+    sheet-absolute position so it is independent of Edge.Cuts detection.
+    """
+    # ``Footprint.position`` is board-relative (sheet coordinates minus the
+    # board origin used by Edge.Cuts detection); ``Footprint.sheet_position``
+    # adds that origin back, giving the absolute ``(at ...)`` value KiCad's
+    # ``pcb export pos`` and the aux/drill origin are measured in.  The two
+    # differ only for parsed PCB footprints with a non-zero board origin.
+    # Footprint-like objects (the public export entry points accept them)
+    # carry no board origin, so ``position`` is already the absolute value
+    # and is the correct fallback.
+    sheet_pos = getattr(fp, "sheet_position", None)
+    xa, ya = sheet_pos if sheet_pos is not None else fp.position
+    if config.use_aux_origin:
+        aux_x, aux_y = aux_origin or (0.0, 0.0)
+        return xa - aux_x, aux_y - ya
+    return xa, -ya
+
+
 def extract_placements(
     footprints: list[Footprint],
     config: PnPExportConfig | None = None,
+    aux_origin: tuple[float, float] | None = None,
 ) -> list[PlacementData]:
     """
     Extract placement data from PCB footprints.
 
+    Coordinates are emitted in the frame of ``kicad-cli pcb export pos``:
+    sheet-absolute, Y up, relative to the aux (drill/place) origin when
+    ``config.use_aux_origin`` is True (the default).
+
     Args:
         footprints: List of Footprint objects from PCB
         config: Optional export config for filtering (exclude_tht, include_dnp)
+        aux_origin: Aux axis origin (sheet mm); ``None`` means (0, 0)
 
     Returns:
         List of PlacementData for assembly
@@ -407,7 +441,7 @@ def extract_placements(
         if config.exclude_tht and is_through_hole_footprint(fp):
             continue
 
-        x, y = fp.position
+        x, y = _pos_frame_xy(fp, config, aux_origin)
         placements.append(
             PlacementData(
                 reference=fp.reference,
@@ -435,6 +469,7 @@ def _ref_sort_key(reference: str) -> tuple[str, int, str]:
 def extract_tht_exclusions(
     footprints: list[Footprint],
     config: PnPExportConfig | None = None,
+    aux_origin: tuple[float, float] | None = None,
 ) -> list[PlacementData]:
     """Return the through-hole placements the CPL's THT filter drops.
 
@@ -452,6 +487,7 @@ def extract_tht_exclusions(
         config: Effective export config.  When ``exclude_tht`` is
             False (or config is None), no parts are excluded from the
             CPL, so this returns an empty list.
+        aux_origin: Aux axis origin (sheet mm), as for :func:`extract_placements`
 
     Returns:
         PlacementData for each excluded THT component, in natural
@@ -470,7 +506,7 @@ def extract_tht_exclusions(
         if not is_through_hole_footprint(fp):
             continue
 
-        x, y = fp.position
+        x, y = _pos_frame_xy(fp, config, aux_origin)
         excluded.append(
             PlacementData(
                 reference=fp.reference,
@@ -533,9 +569,15 @@ def get_aux_origin(pcb_path: str | Path) -> tuple[float, float]:
 
     pcb = PCB.load(pcb_path)
     setup = pcb.setup
-    if setup is None:
+    return _aux_origin_of(setup)
+
+
+def _aux_origin_of(setup: object | None) -> tuple[float, float]:
+    """Aux origin from a PCB setup, (0, 0) when missing or malformed."""
+    origin = getattr(setup, "aux_axis_origin", None)
+    if not origin or len(origin) != 2:
         return (0.0, 0.0)
-    return setup.aux_axis_origin
+    return (float(origin[0]), float(origin[1]))
 
 
 def export_pnp(
@@ -544,22 +586,26 @@ def export_pnp(
     config: PnPExportConfig | None = None,
     pcb_path: str | Path | None = None,
     rotation_corrections: dict[str, float] | None = None,
+    aux_origin: tuple[float, float] | None = None,
 ) -> str:
     """
     Export pick-and-place file.
+
+    Coordinates are in the frame of ``kicad-cli pcb export pos``: sheet
+    absolute, Y up, relative to the aux origin when ``config.use_aux_origin``
+    is True -- the same frame as the Gerbers/drill files in the package.
 
     Args:
         footprints: List of Footprint objects from PCB
         manufacturer: Manufacturer ID
         config: Export configuration
         pcb_path: Optional path to the .kicad_pcb file. When provided and
-            config.use_aux_origin is True (the default), the auxiliary axis
-            origin is read from the PCB and subtracted from all component
-            coordinates so that output positions are relative to the
-            board's manufacturing origin.
+            ``aux_origin`` is not, the auxiliary axis origin is read from it.
         rotation_corrections: Per-footprint rotation corrections
             (pattern -> degrees).  When provided, these are applied
             during formatting via ``PnPFormatter.apply_transforms()``.
+        aux_origin: Aux axis origin (sheet mm).  Overrides ``pcb_path``;
+            with neither, (0, 0) is used (KiCad's default).
 
     Returns:
         Formatted CPL as CSV string
@@ -572,20 +618,10 @@ def export_pnp(
     formatter = get_pnp_formatter(manufacturer, config, rotation_corrections)
     config = formatter.config
 
-    # Auto-apply auxiliary origin offset when a PCB path is provided
-    if pcb_path is not None and config.use_aux_origin:
-        aux_x, aux_y = get_aux_origin(pcb_path)
-        if aux_x != 0.0 or aux_y != 0.0:
-            # dataclasses.replace preserves every other field of the
-            # effective config (exclude_tht, include_dnp, ...).
-            config = replace(
-                config,
-                x_offset=config.x_offset - aux_x,
-                y_offset=config.y_offset - aux_y,
-            )
-            formatter = get_pnp_formatter(manufacturer, config, rotation_corrections)
+    if aux_origin is None and pcb_path is not None and config.use_aux_origin:
+        aux_origin = get_aux_origin(pcb_path)
 
-    placements = extract_placements(footprints, formatter.config)
+    placements = extract_placements(footprints, formatter.config, aux_origin)
     return formatter.format(placements)
 
 

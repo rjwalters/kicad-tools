@@ -15,6 +15,47 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-18
 
+- **PR #7181**: fix(drc,erc): kct drc --mfr never drops a violation; delete dead phantom wire filter
+- **PR #7176**: fix(readiness,preflight): stop calling unchecked LCSC parts verified
+- **PR #7160**: fix(router): keep a match-group member's commits when a later attempt fails
+- **PR #7133**: fix(boards): run package_release producers on pinned toolchain and refresh board 01 readiness
+- **PR #6838**: perf(router): raise flag-off coupled iteration budget to 1.4M (700k/phase) with PCIE_TX/PCIE_RX/LVDS exceptions
+- **Issue #7170** (closed): kct drc --mfr silently drops unhandled DRC types and exits 0 on kicad-cli errors; delete dead phantom wire_dangling filter
+- **Issue #7166** (closed): Part-footprint sign-off false-PASS: kct readiness ignores bom_lcsc_values, preflight counts LCSC cache misses as checked, no IC package/pin-count check
+- **Issue #6893** (closed): router: 06rf USB3_RX1 skew regresses 1.365 → 5.823 mm at the 700k flag-off coupled budget on current main (blocks #6838)
+- **Issue #6835** (closed): router: raise flag-off coupled iteration budget to 350k/phase (700k total) so Board07 couples 6/7 pairs; soften endpoint-tolerance comment (#6826 follow-up)
+- **Issue #6404** (closed): boards 00-07: refill saved zones and refresh hash-bound bundles/readiness after #6390's sidecar update
+- **PR #7137**: test: move route --lint-gate JSON-contract variant to extended tier
+- **PR #7165**: fix(export): emit CPL in the Gerber/drill frame (aux origin, Y up)
+- **Issue #7161** (closed): kct erc reports PASS (exit 0) where kicad-cli reports errors: cross-sheet global-label name-count filter drops true isolated_pin_label findings; power-pin sibling filter is inert on KiCad 10
+- **Issue #7059** (closed): kct export CPL coordinates are relative to the Edge.Cuts top-left with Y down, while the gerbers use the drill/place origin with Y up
+- **PR #7168**: fix(erc): stop kct erc dropping true isolated_pin_label findings on hierarchical designs
+- **PR #7081**: fix(cli): add optimize-traces -v help; sync cli.md/machine-output.md with parser; add docs drift test
+- **PR #7156**: fix(optim): pick largest Edge.Cuts contour as board outline
+- **Issue #7155** (closed): extract_board_outline returns an Edge.Cuts cutout (gr_rect/gr_poly) instead of the outer gr_line outline
+- **Issue #7070** (closed): docs: CLI reference gaps after #7069 (parts import, optimize-traces -v/--length-match, sch validate options, stats.per_net)
+- **PR #7152**: fix(optimize-placement): handle gr_rect/gr_poly/gr_arc outlines in no-Shapely fallback
+- **PR #7151**: fix(drc): run schematic parity on _routed boards by staging the schematic
+- **PR #7146**: docs: record tuner budget counters for board 07m SDRAM groups
+- **PR #7145**: feat(dru): enforce manufacturer max hole size in generate_dru
+- **PR #7135**: test: fail JSON contract on stale-API crashes and cover --help for every CLI node
+- **Issue #7148** (closed): kct optimize-placement no-Shapely fallback ignores gr_rect board outlines (falls back to footprints+10mm box, can place parts off-board)
+- **Issue #7147** (closed): Fleet re-eval: board 04 J1 sch/PCB value drift passes validate --sync; kct drc parity NOT RUN on every _routed fleet board
+- **Issue #7132** (closed): generate_dru does not emit a max hole size rule (max_hole_diameter_mm is display-only)
+- **Issue #7126** (closed): kct argv shims ignore leading global flags (kct -q footprint generate, kct --verbose erc <report> fail) + harden CLI smoke contract
+- **PR #7143**: fix(drc): tolerate reports lacking schematic_parity in apply_waivers_to_report
+- **PR #7140**: fix(project): merge collinear grid-step segments in Project.route()
+- **PR #7134**: fix(placement): shift hierarchical fallback outline into origin-relative frame
+- **PR #7103**: fix: rank lattice fallback pair legs by P/N via-count parity
+- **Issue #7141** (closed): main red: test_check_evidence_waivers_5946 AttributeError schematic_parity after #7077
+- **Issue #7138** (closed): Project.route() saves one segment per grid step (no collinear merge)
+- **Issue #7124** (closed): Two more placement outline fallbacks miss the board-origin shift (bottom_up_placement.py, optimize_placement_cmd.py) — latent #7106 off-board write
+- **PR #7130**: fix(cli): skip leading global options in footprint-generate and erc argv shims
+- **PR #7128**: feat: warn when a placement move clusters heat sources
+- **PR #7122**: fix(mcp): merge collinear segments in route_net before saving
+- **PR #7117**: fix: generate kct init DRU via generate_dru
+- **Issue #7120** (closed): MCP route_net writes one 0.1mm segment per grid cell (no collinear merge on saved copper)
+- **Issue #7116** (closed): kct init DRU template uses wrong constraint types (silkscreen width as silk_clearance; hole-to-edge as hole_to_hole)
 - **PR #7127**: fix(mcp): placement_suggestions, zipped Gerber count, board_view small sizes
 - **PR #7108**: fix(board03): re-derive copper from a class-clean lattice route (#6394)
 - **Issue #7045** (closed): Finish PredictiveAnalyzer._check_thermal: wire analysis/thermal.py into per-move predictive warnings

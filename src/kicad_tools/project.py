@@ -715,7 +715,14 @@ class Project:
         # Route all nets
         routes = router.route_all(nets_to_route)
 
-        # Get routing statistics
+        # Collapse per-grid-cell segments into straight runs, as `kct route`
+        # does (Issue #7138); falls back to the raw routes on failure.
+        if routes:
+            from .router.optimizer.merge import merge_collinear_routes
+
+            merge_collinear_routes(router)
+
+        # Get routing statistics (after the merge so they match saved copper)
         stats = router.get_statistics()
 
         # Merge routes into PCB if any routes were created
@@ -764,7 +771,12 @@ class Project:
             report_path: Path to KiCad DRC report file (.rpt)
 
         Returns:
-            List of ManufacturerCheck results
+            One ManufacturerCheck per violation in the report (Issue #7170).
+            A violation kct has no fab-limit check for is returned with
+            ``result == CheckResult.UNKNOWN`` and ``rule_name ==
+            "not_checked"`` (``check.is_not_checked``); it is not
+            ``is_compatible``, and keeps kicad-cli's severity on
+            ``check.violation``.
 
         Raises:
             FileNotFoundError: If no DRC report found
