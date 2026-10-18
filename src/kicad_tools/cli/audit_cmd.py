@@ -167,6 +167,18 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
+        "--hv-insulation",
+        dest="hv_insulation",
+        choices=["basic", "supplementary", "reinforced"],
+        default="reinforced",
+        help=(
+            "Insulation type the derived creepage/clearance must provide "
+            "(IEC 60664-1 clause 5.2.5 / 6.2).  Default reinforced -- the "
+            "mains-to-SELV barrier case: Table F.1 impulse voltage one step "
+            "higher, 2x creepage.  basic/supplementary use the table values."
+        ),
+    )
+    parser.add_argument(
         "--strict",
         action="store_true",
         help="Exit with code 2 on warnings",
@@ -213,6 +225,7 @@ def main(argv: list[str] | None = None) -> int:
             hv_pollution_degree=args.hv_pollution_degree,
             hv_material_group=args.hv_material_group,
             hv_overvoltage_category=args.hv_overvoltage_category,
+            hv_insulation=args.hv_insulation,
         )
         result = audit.run()
     except ValueError as e:
@@ -503,6 +516,8 @@ def _output_isolation_section(iso) -> None:
     if iso.standard:
         edition = f" {iso.standard_edition}" if iso.standard_edition else ""
         print(f"    Standard: {iso.standard}{edition}")
+        if iso.insulation:
+            print(f"    Insulation: {iso.insulation} (assumed for the derived requirement)")
 
     # Creepage (surface path) -- always thresholded.
     if iso.min_creepage_mm is not None and iso.required_creepage_mm is not None:

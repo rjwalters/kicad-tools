@@ -219,7 +219,11 @@ def build_required_by_domain_pair(
             dv = abs(domain_voltages[a] - domain_voltages[b])
             if dv == 0.0 or dv < hv_threshold:
                 continue
-            required, _prov = std.required_creepage(dv, pollution_degree, material_group)
+            # Pinned to basic: the issue #7082 reinforced default covers
+            # kct creepage / kct audit only; placement keeps basic creepage.
+            required, _prov = std.required_creepage(
+                dv, pollution_degree, material_group, insulation="basic"
+            )
             out[(a, b)] = required
     return out
 

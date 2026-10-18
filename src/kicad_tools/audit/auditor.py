@@ -282,6 +282,9 @@ class IsolationStatus:
     required_clearance_mm: float | None = None
     standard: str | None = None
     standard_edition: str | None = None
+    # Insulation type the standard-derived requirement assumed (issue #7082);
+    # None when no --hv-standard was supplied.
+    insulation: str | None = None
     failing_pairs: list[dict] = field(default_factory=list)
     details: str = ""
     # Full engine census dict (CreepageReport.to_dict()) -- kept verbatim so
@@ -305,6 +308,7 @@ class IsolationStatus:
             "required_clearance_mm": self.required_clearance_mm,
             "standard": self.standard,
             "standard_edition": self.standard_edition,
+            "insulation": self.insulation,
             "failing_pairs": [dict(p) for p in self.failing_pairs],
             "details": self.details,
             "report": self.report,
@@ -323,6 +327,7 @@ def check_isolation(
     hv_pollution_degree: int | None = None,
     hv_material_group: str = "IIIa",
     hv_overvoltage_category: str = "II",
+    hv_insulation: str = "reinforced",
 ) -> IsolationStatus:
     """Standalone HV creepage/clearance isolation check (issue #4333, phase 3).
 
@@ -340,8 +345,14 @@ def check_isolation(
     The returned status gates a verdict: a resolved below-standard pair ->
     hard FAIL; HV present but not gateable (no threshold / shapely absent /
     lookup error) -> WARNING; no HV nets -> inert (``checked=False``).
+
+    ``hv_insulation`` (``basic`` / ``supplementary`` / ``reinforced``, default
+    ``reinforced``) selects the insulation rule for the derived creepage and
+    clearance (issue #7082).
     """
     status = IsolationStatus(standard=hv_standard)
+    if hv_standard is not None:
+        status.insulation = hv_insulation
 
     # Parse the net-class-map sidecar with the SAME block ``kct check``'s
     # DRC rules use so HV selection agrees with the diff-pair DRC rules
@@ -458,6 +469,7 @@ def check_isolation(
                 float(hv_working_voltage),
                 int(hv_pollution_degree),
                 hv_material_group,
+                hv_insulation,
             )
             # Clearance = max(F.2 at the F.1 rated impulse voltage, F.8 at the
             # steady-state peak, PD floor) -- issue #7057.
@@ -465,6 +477,7 @@ def check_isolation(
                 float(hv_working_voltage),
                 int(hv_pollution_degree),
                 hv_overvoltage_category,
+                hv_insulation,
             )
             status.standard_edition = std.edition
         except StandardLookupError as e:
@@ -491,6 +504,8 @@ def check_isolation(
             material_group=(hv_material_group if hv_standard is not None else None),
             creepage_provenance=creepage_prov,
             clearance_provenance=clearance_prov,
+            overvoltage_category=hv_overvoltage_category,
+            insulation=hv_insulation,
         )
     except Exception as e:
         # A genuine census crash must NOT be coerced into a clean PASS.
@@ -786,6 +801,7 @@ class ManufacturingAudit:
         hv_pollution_degree: int | None = None,
         hv_material_group: str = "IIIa",
         hv_overvoltage_category: str = "II",
+        hv_insulation: str = "reinforced",
     ):
         """Initialize the audit.
 
@@ -817,6 +833,9 @@ class ManufacturingAudit:
             hv_overvoltage_category: IEC 60664-1 overvoltage category
                 (``I``-``IV``, default ``II``) selecting the Table F.1 rated
                 impulse voltage for the derived clearance (issue #7057).
+            hv_insulation: Insulation type (``basic`` / ``supplementary`` /
+                ``reinforced``, default ``reinforced``) for the derived
+                creepage and clearance (issue #7082).
         """
         self.path = Path(project_or_pcb)
         self.manufacturer = manufacturer
@@ -836,6 +855,7 @@ class ManufacturingAudit:
         self.hv_pollution_degree = hv_pollution_degree
         self.hv_material_group = hv_material_group
         self.hv_overvoltage_category = hv_overvoltage_category
+        self.hv_insulation = hv_insulation
 
         # Resolve paths
         if self.path.suffix == ".kicad_pro":
@@ -1491,6 +1511,7 @@ class ManufacturingAudit:
             hv_pollution_degree=self.hv_pollution_degree,
             hv_material_group=self.hv_material_group,
             hv_overvoltage_category=self.hv_overvoltage_category,
+            hv_insulation=self.hv_insulation,
         )
 
     def _check_compatibility(self, pcb: PCB) -> ManufacturerCompatibility:

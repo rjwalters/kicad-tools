@@ -615,8 +615,8 @@ def _add_creepage_parser(subparsers) -> None:
             "impulse voltage and Table F.8 at the steady-state peak) or "
             "iec62368 (IEC 62368-1 Table 17 / Table 14, same clearance "
             "derivation).  Requires --working-voltage and --pollution-degree.  "
-            "Basic insulation, altitude <= 2000 m.  Engineering aid, NOT a "
-            "certification."
+            "Insulation type per --insulation (default reinforced), altitude "
+            "<= 2000 m.  Engineering aid, NOT a certification."
         ),
     )
     creepage_parser.add_argument(
@@ -657,6 +657,20 @@ def _add_creepage_parser(subparsers) -> None:
             "energised from the fixed mains installation.  Use I for circuits "
             "with transient protection / not directly mains-connected, III/IV "
             "for fixed-installation / origin-of-installation equipment."
+        ),
+    )
+    creepage_parser.add_argument(
+        "--insulation",
+        dest="insulation",
+        choices=["basic", "supplementary", "reinforced"],
+        default="reinforced",
+        help=(
+            "Insulation type the derived creepage/clearance must provide "
+            "(IEC 60664-1 clause 5.2.5 / 6.2).  Default reinforced -- the "
+            "mains-to-SELV barrier case: the Table F.1 rated impulse voltage "
+            "steps up one preferred-series value before Table F.2 (230 V OVC II: "
+            "4000 V -> 3.0 mm) and creepage doubles.  basic/supplementary use "
+            "the table values (230 V OVC II: 1.5 mm)."
         ),
     )
     # Per-net voltage model (#4371): derive the requirement per pair from |ΔV|.
@@ -6200,6 +6214,18 @@ def _add_audit_parser(subparsers) -> None:
         help=(
             "IEC 60664-1 overvoltage category for the derived clearance "
             "(Table F.1 rated impulse voltage).  Default II (mains appliance)."
+        ),
+    )
+    audit_parser.add_argument(
+        "--hv-insulation",
+        dest="audit_hv_insulation",
+        choices=["basic", "supplementary", "reinforced"],
+        default="reinforced",
+        help=(
+            "Insulation type the derived creepage/clearance must provide "
+            "(IEC 60664-1 clause 5.2.5 / 6.2).  Default reinforced -- the "
+            "mains-to-SELV barrier case: Table F.1 impulse voltage one step "
+            "higher, 2x creepage.  basic/supplementary use the table values."
         ),
     )
 

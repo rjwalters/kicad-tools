@@ -69,9 +69,17 @@ Table provenance (transcribed values -- spot-check before certifying)
   Table 14 is *claimed* (unverified here) to be harmonised with this
   derivation, so ``--standard iec62368`` shares the same tables.
 
-  Not modelled: reinforced/double insulation (clause 5.2.5, one impulse step
-  higher), altitude correction above 2000 m (Table A.2) and the homogeneous-
-  field "case B" columns.  Provenance records ``insulation: "basic"``.
+  Not modelled: altitude correction above 2000 m (Table A.2) and the
+  homogeneous-field "case B" columns.
+* **Insulation type** (issue #7082) -- ``basic``, ``supplementary`` or
+  ``reinforced``; the default is **reinforced** (operator ruling on #7082:
+  mains-to-SELV isolation is the main case this check exists for, and a basic
+  default under-reports it ~2x).  Reinforced clearance steps the Table F.1
+  ``U_imp`` up one row in the Table F.1 preferred impulse series before the
+  Table F.2 lookup (clause 5.2.5); reinforced creepage is twice the basic
+  Table F.5 value (clause 6.2).  Supplementary insulation is dimensioned as
+  basic.  The rule applied is recorded in provenance; see
+  :data:`_INSULATION_RULES` for which parts are UNVERIFIED.
 """
 
 from __future__ import annotations
@@ -130,6 +138,22 @@ def normalize_material_group(group: str) -> str:
     raise StandardLookupError(
         f"unknown material group {group!r}; expected one of {', '.join(MATERIAL_GROUPS)} "
         "(I: CTI>=600, II: 400<=CTI<600, IIIa: 175<=CTI<400, IIIb: 100<=CTI<175)"
+    )
+
+
+def normalize_insulation(insulation: str) -> str:
+    """Return the canonical insulation type, or raise loudly.
+
+    Accepts case-insensitive ``basic`` / ``supplementary`` / ``reinforced``.
+    There is no alias for "double" insulation: issue #7082 leaves it out of
+    scope, so it fails loud instead of silently reusing the reinforced rule.
+    """
+    canon = (str(insulation) if insulation is not None else "").strip().lower()
+    if canon in INSULATION_TYPES:
+        return canon
+    raise StandardLookupError(
+        f"unknown insulation type {insulation!r}; expected one of "
+        f"{', '.join(INSULATION_TYPES)} (IEC 60664-1 clause 5.2.5 / 6.2)"
     )
 
 
@@ -376,6 +400,8 @@ _CREEPAGE_MM[2]["IIIb"] = _CREEPAGE_MM[2]["IIIa"]
 # Clearance tables (issue #7057)
 #
 # Basic insulation, inhomogeneous field ("case A"), altitude <= 2000 m.
+# (Supplementary / reinforced are derived from these basic tables -- see the
+# insulation-type block below, issue #7082.)
 # Required clearance = max(Table F.2[U_imp], Table F.8[steady peak], PD floor)
 # per IEC 60664-1:2020 clause 5.2.2.1 (the larger of the transient and the
 # steady-state requirement governs).
@@ -515,6 +541,108 @@ _CLEARANCE_PD_FLOOR_MM: dict[int, float] = {
     3: 0.8,  # PD3
 }
 
+# ---------------------------------------------------------------------------
+# Insulation type (issue #7082)
+# ---------------------------------------------------------------------------
+
+# Insulation types accepted by the clearance / creepage derivations.
+# "double" insulation (basic + supplementary) is out of scope for #7082.
+INSULATION_TYPES: tuple[str, ...] = ("basic", "supplementary", "reinforced")
+
+# Default insulation type: reinforced.  source: operator ruling on issue #7082
+# (2026-10-18) -- mains-to-SELV isolation is the main case this check exists
+# for; a basic default reports ~1.5 mm where ~3.0 mm is needed at 230 V OVC II.
+DEFAULT_INSULATION = "reinforced"
+
+# Table F.1 preferred impulse-voltage series (V peak): the union of every
+# U_imp value in Table F.1's body.  Reinforced insulation steps U_imp up ONE
+# entry of THIS series -- not one row of the denser Table F.2 axis.
+# source: IEC 60664-1:2020 clause 5.2.5, series as listed in the curator
+# comment on issue #7082 (330, 500, 800, 1500, 2500, 4000, 6000, 8000, 12000).
+_IMPULSE_PREFERRED_SERIES: tuple[float, ...] = (
+    330.0,
+    500.0,
+    800.0,
+    1500.0,
+    2500.0,
+    4000.0,
+    6000.0,
+    8000.0,
+    12000.0,
+)
+
+# Reinforced creepage = 2 x the basic Table F.5 value.
+# source: IEC 60664-1:2020 clause 6.2 (Table F.5 note), as cited by the curator
+# comment and the operator ruling on issue #7082.  UNVERIFIED against a
+# controlled copy of the 2020 text.
+_REINFORCED_CREEPAGE_FACTOR = 2.0
+
+# Reinforced steady-state factor: the Table F.8 route is evaluated at 160 % of
+# the steady-state peak.  source: IEC 60664-1:2020 clause 5.2.5 as RECALLED in
+# the curator comment on issue #7082 -- explicitly not checked against the
+# standard.  Applied because it can only raise the requirement (never less
+# safe); within the encoded 1000 V RMS range the reinforced impulse route
+# governs anyway, so it changes no reported value there.  UNVERIFIED.
+_REINFORCED_STEADY_STATE_FACTOR = 1.6
+
+# Human-readable rule recorded in provenance, plus what is UNVERIFIED.
+_INSULATION_RULES: dict[str, dict[str, str]] = {
+    "basic": {
+        "clearance": "basic: Table F.2 at the Table F.1 rated impulse voltage",
+        "creepage": "basic: Table F.5 value",
+        "unverified": "",
+    },
+    "supplementary": {
+        # source: IEC 60664-1 clause 5.2.5 / 6.2 (supplementary insulation is
+        # dimensioned as basic) -- recalled, NOT checked against the standard.
+        "clearance": "supplementary: dimensioned as basic (clause 5.2.5)",
+        "creepage": "supplementary: dimensioned as basic (clause 6.2)",
+        "unverified": (
+            "UNVERIFIED: 'supplementary = basic' is recalled from IEC 60664-1 "
+            "clauses 5.2.5 / 6.2, not checked against a controlled copy."
+        ),
+    },
+    "reinforced": {
+        "clearance": (
+            "reinforced: Table F.1 U_imp stepped up one entry of the preferred "
+            "impulse series before the Table F.2 lookup (clause 5.2.5); Table F.8 "
+            "route at 1.6 x the steady-state peak"
+        ),
+        "creepage": "reinforced: 2 x the basic Table F.5 value (clause 6.2)",
+        "unverified": (
+            "UNVERIFIED: the clause 5.2.5 one-step-up rule and the clause 6.2 2x "
+            "creepage factor are transcribed from the issue #7082 curator comment; "
+            "the 1.6x steady-state factor is recalled, not checked against the "
+            "standard."
+        ),
+    },
+}
+
+
+def reinforced_impulse_voltage(u_imp: float) -> float:
+    """Return the next-higher Table F.1 preferred-series impulse voltage.
+
+    IEC 60664-1 clause 5.2.5: reinforced insulation is dimensioned for the
+    rated impulse voltage one step higher in the preferred series.  Raises
+    :class:`StandardLookupError` when ``u_imp`` is not on the series or is
+    already its top entry (12000 V) -- never extrapolates.
+    """
+    for i, row in enumerate(_IMPULSE_PREFERRED_SERIES):
+        if abs(u_imp - row) <= 1e-9:
+            if i + 1 >= len(_IMPULSE_PREFERRED_SERIES):
+                raise StandardLookupError(
+                    f"rated impulse voltage {u_imp:g} V is the top of the Table F.1 "
+                    "preferred series; reinforced insulation needs the next-higher "
+                    "step, which is not tabulated -- the module does not extrapolate. "
+                    "Consult the controlled standard or supply an explicit --min."
+                )
+            return _IMPULSE_PREFERRED_SERIES[i + 1]
+    raise StandardLookupError(
+        f"rated impulse voltage {u_imp:g} V is not on the Table F.1 preferred series "
+        f"({', '.join(f'{v:g}' for v in _IMPULSE_PREFERRED_SERIES)} V)"
+    )
+
+
 # Sinusoidal RMS -> peak conversion for deriving the Table F.8 steady-state
 # axis from an RMS working voltage.
 RMS_TO_PEAK = math.sqrt(2.0)
@@ -592,14 +720,22 @@ class CreepageStandard:
         )
 
     def required_creepage(
-        self, working_voltage_rms: float, pollution_degree: int, material_group: str
+        self,
+        working_voltage_rms: float,
+        pollution_degree: int,
+        material_group: str,
+        insulation: str = DEFAULT_INSULATION,
     ) -> tuple[float, dict[str, Any]]:
         """Derive the required creepage (mm) plus structured provenance.
 
         ``working_voltage_rms`` keys the table directly (step-up to the next
-        higher row; never interpolated).  Raises :class:`StandardLookupError`
-        for an out-of-range voltage or an undocumented ``(PD, group)`` combo.
+        higher row; never interpolated).  ``insulation`` (issue #7082) is
+        ``basic`` / ``supplementary`` (the table value) or ``reinforced``
+        (2 x the table value, clause 6.2); default ``reinforced``.  Raises
+        :class:`StandardLookupError` for an out-of-range voltage, an
+        undocumented ``(PD, group)`` combo or an unknown insulation type.
         """
+        ins = normalize_insulation(insulation)
         group = normalize_material_group(material_group)
         pd_columns = self.creepage_values.get(pollution_degree)
         if pd_columns is None:
@@ -620,7 +756,9 @@ class CreepageStandard:
         idx = self._step_up_index(
             self.creepage_voltage_rows, working_voltage_rms, "working voltage (RMS)"
         )
-        value = column[idx]
+        basic_value = column[idx]
+        factor = _REINFORCED_CREEPAGE_FACTOR if ins == "reinforced" else 1.0
+        value = basic_value * factor
         row_used = self.creepage_voltage_rows[idx]
         provenance = {
             "standard": self.standard_id,
@@ -635,6 +773,11 @@ class CreepageStandard:
             "material_group": group if pollution_degree != 1 else "n/a (PD1)",
             "lookup_rule": "step-up to next-higher row (no interpolation)",
             "altitude_assumption": "n/a (creepage)",
+            "insulation": ins,
+            "insulation_rule": _INSULATION_RULES[ins]["creepage"],
+            "insulation_factor": factor,
+            "basic_value_mm": basic_value,
+            "insulation_unverified": _INSULATION_RULES[ins]["unverified"],
             "value_mm": value,
             "disclaimer": DISCLAIMER,
         }
@@ -683,22 +826,30 @@ class CreepageStandard:
         working_voltage_rms: float,
         pollution_degree: int,
         overvoltage_category: str = DEFAULT_OVERVOLTAGE_CATEGORY,
+        insulation: str = DEFAULT_INSULATION,
     ) -> tuple[float, dict[str, Any]]:
         """Derive the required clearance (mm) plus structured provenance.
 
-        Basic insulation, case A, altitude ``<= 2000 m`` (issue #7057):
+        Case A, altitude ``<= 2000 m`` (issue #7057), for the given
+        ``insulation`` type (issue #7082, default ``reinforced``):
 
         1. ``working_voltage_rms`` (taken as the line-to-neutral rated
            voltage) + ``overvoltage_category`` -> rated impulse withstand
-           voltage ``U_imp`` (Table F.1) -> transient clearance (Table F.2).
-        2. ``working_voltage_rms * sqrt(2)`` (steady-state peak) ->
-           steady-state clearance (Table F.8).
+           voltage ``U_imp`` (Table F.1).  For ``reinforced`` insulation
+           ``U_imp`` steps up one entry of the Table F.1 preferred series
+           (clause 5.2.5).  The result keys the transient clearance
+           (Table F.2).
+        2. ``working_voltage_rms * sqrt(2)`` (steady-state peak; x 1.6 for
+           ``reinforced``, UNVERIFIED) -> steady-state clearance (Table F.8).
         3. Result = ``max(step 1, step 2, pollution-degree floor)``.
 
-        Raises :class:`StandardLookupError` for an out-of-range voltage
-        (above 1000 V RMS), an unknown pollution degree or an unknown
-        overvoltage category -- never extrapolates.
+        ``basic`` and ``supplementary`` give identical values.  Raises
+        :class:`StandardLookupError` for an out-of-range voltage (above
+        1000 V RMS), an unknown pollution degree, overvoltage category or
+        insulation type, or a reinforced step above the top of the series --
+        never extrapolates.
         """
+        ins = normalize_insulation(insulation)
         floor = self.clearance_pd_floor.get(pollution_degree)
         if floor is None:
             raise StandardLookupError(
@@ -707,9 +858,13 @@ class CreepageStandard:
             )
         ovc = normalize_overvoltage_category(overvoltage_category)
         u_imp, rated_row = self.rated_impulse_voltage(working_voltage_rms, ovc)
-        impulse_mm, impulse_row = self.impulse_clearance(u_imp)
+        reinforced = ins == "reinforced"
+        required_u_imp = reinforced_impulse_voltage(u_imp) if reinforced else u_imp
+        impulse_mm, impulse_row = self.impulse_clearance(required_u_imp)
         peak_voltage = working_voltage_rms * RMS_TO_PEAK
-        steady_mm, steady_row = self.steady_state_clearance(peak_voltage)
+        steady_factor = _REINFORCED_STEADY_STATE_FACTOR if reinforced else 1.0
+        steady_voltage = peak_voltage * steady_factor
+        steady_mm, steady_row = self.steady_state_clearance(steady_voltage)
         value = max(impulse_mm, steady_mm, floor)
         # Ties resolve toward the floor, then the impulse route, so the
         # reported governing component is stable.
@@ -728,16 +883,23 @@ class CreepageStandard:
             "steady_state_table_id": self.steady_state_table_id,
             "harmonisation_note": self.clearance_harmonisation_note,
             "quantity": "clearance",
-            "insulation": "basic",
+            "insulation": ins,
+            "insulation_rule": _INSULATION_RULES[ins]["clearance"],
+            "insulation_unverified": _INSULATION_RULES[ins]["unverified"],
             "field": "inhomogeneous (case A)",
             "voltage_axis": "rated_impulse_and_steady_state_peak",
             "working_voltage_v": working_voltage_rms,
             "rated_voltage_row_used_v": rated_row,
             "overvoltage_category": ovc,
+            # Table F.1 value (pre-step).  ``required_impulse_voltage_v`` is
+            # the value Table F.2 is keyed on (stepped up for reinforced).
             "impulse_withstand_voltage_v": u_imp,
+            "required_impulse_voltage_v": required_u_imp,
             "impulse_row_used_v": impulse_row,
             "impulse_clearance_mm": impulse_mm,
             "peak_voltage_v": peak_voltage,
+            "steady_state_factor": steady_factor,
+            "steady_state_voltage_v": steady_voltage,
             "steady_state_row_used_v": steady_row,
             "steady_state_clearance_mm": steady_mm,
             "pollution_degree": pollution_degree,

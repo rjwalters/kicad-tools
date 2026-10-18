@@ -643,5 +643,7 @@ def run_audit_command(args) -> int:
         sub_argv.extend(["--hv-material-group", args.audit_hv_material_group])
     if getattr(args, "audit_hv_overvoltage_category", "II") != "II":
         sub_argv.extend(["--hv-overvoltage-category", args.audit_hv_overvoltage_category])
+    if getattr(args, "audit_hv_insulation", "reinforced") != "reinforced":
+        sub_argv.extend(["--hv-insulation", args.audit_hv_insulation])
 
     return audit_main(sub_argv)

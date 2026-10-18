@@ -602,9 +602,22 @@ row) and the overvoltage category, set with
 `kct creepage --overvoltage-category {I,II,III,IV}` or
 `kct audit --hv-overvoltage-category {I,II,III,IV}` (default `II`, equipment
 fed from the fixed mains installation). For example 230 V at OVC II gives
-`U_imp` = 2500 V and 1.5 mm; OVC I 0.5 mm, III 3.0 mm, IV 5.5 mm. The
-`kct readiness` HV gate always uses the default `II`. Creepage is IEC
-60664-1:2020 Table F.5 (Table F.4 in the 2007 edition).
+`U_imp` = 2500 V and 1.5 mm with basic insulation; OVC I 0.5 mm, III 3.0 mm,
+IV 5.5 mm. The `kct readiness` HV gate always uses the default `II`. Creepage
+is IEC 60664-1:2020 Table F.5 (Table F.4 in the 2007 edition).
+
+**Insulation type (issue #7082).** `kct creepage --insulation
+{basic,supplementary,reinforced}` / `kct audit --hv-insulation ...` select the
+insulation the barrier must provide; the **default is `reinforced`**, the
+mains-to-SELV case. Reinforced clearance steps `U_imp` up one value of the
+Table F.1 preferred series (330, 500, 800, 1500, 2500, 4000, 6000, 8000,
+12000 V) before the Table F.2 lookup (clause 5.2.5), so 230 V at OVC II needs
+`U_imp` = 4000 V and **3.0 mm**; reinforced creepage is twice the basic
+Table F.5 value (clause 6.2). Supplementary insulation uses the basic values.
+A `U_imp` already at 12000 V has no next step and fails loud. Both CLIs print
+the insulation type they assumed, and provenance records it with the rule
+applied (the reinforced rules are marked UNVERIFIED against a controlled copy
+of the standard). The `kct readiness` HV gate uses the default `reinforced`.
 
 **Examples:**
 ```bash
