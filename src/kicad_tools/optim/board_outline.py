@@ -10,8 +10,10 @@ physics-based placement optimizer.
 
 from __future__ import annotations
 
+import math
 from typing import TYPE_CHECKING
 
+from kicad_tools.core.arcs import arc_sweep
 from kicad_tools.optim.geometry import Polygon, Vector2D
 
 if TYPE_CHECKING:
@@ -38,9 +40,11 @@ def to_origin_relative(outline: Polygon | None, pcb: PCB) -> Polygon | None:
 def extract_board_outline(pcb: PCB) -> Polygon | None:
     """Extract board outline from Edge.Cuts layer.
 
-    Handles ``gr_rect`` and ``gr_line`` elements.  For ``gr_line`` outlines,
-    attempts to chain the lines into a closed polygon; falls back to bounding
-    box if chaining fails.
+    Handles ``gr_rect``, ``gr_poly``, ``gr_line`` and ``gr_arc`` elements
+    (issue #7148).  ``gr_line``/``gr_arc`` outlines are chained into a closed
+    polygon (arcs are sampled into short segments); falls back to bounding
+    box if chaining fails.  Coordinates are absolute (raw sexp); use
+    :func:`to_origin_relative` for the optimizer frame.
 
     Args:
         pcb: Parsed :class:`~kicad_tools.schema.pcb.PCB` instance.
@@ -72,7 +76,22 @@ def extract_board_outline(pcb: PCB) -> Polygon | None:
                         ]
                     )
 
-    # Collect gr_line elements on Edge.Cuts
+    # gr_poly on Edge.Cuts (explicit vertex list)
+    for child in sexp.iter_children():
+        if child.tag == "gr_poly":
+            layer = child.find("layer")
+            if layer and layer.get_string(0) == "Edge.Cuts":
+                pts = child.find("pts")
+                verts: list[Vector2D] = []
+                if pts:
+                    for xy in pts.find_all("xy"):
+                        x, y = xy.get_float(0), xy.get_float(1)
+                        if x is not None and y is not None:
+                            verts.append(Vector2D(x, y))
+                if len(verts) >= 3:
+                    return Polygon(vertices=verts)
+
+    # Collect gr_line / gr_arc elements on Edge.Cuts
     edge_lines: list[tuple[tuple[float, float], tuple[float, float]]] = []
     for child in sexp.iter_children():
         if child.tag == "gr_line":
@@ -86,6 +105,20 @@ def extract_board_outline(pcb: PCB) -> Polygon | None:
                     x2 = end.get_float(0) or 0.0
                     y2 = end.get_float(1) or 0.0
                     edge_lines.append(((x1, y1), (x2, y2)))
+
+    for child in sexp.iter_children():
+        if child.tag == "gr_arc":
+            layer = child.find("layer")
+            if layer and layer.get_string(0) == "Edge.Cuts":
+                a_start, a_mid, a_end = child.find("start"), child.find("mid"), child.find("end")
+                if a_start and a_mid and a_end:
+                    edge_lines.extend(
+                        _arc_segments(
+                            (a_start.get_float(0) or 0.0, a_start.get_float(1) or 0.0),
+                            (a_mid.get_float(0) or 0.0, a_mid.get_float(1) or 0.0),
+                            (a_end.get_float(0) or 0.0, a_end.get_float(1) or 0.0),
+                        )
+                    )
 
     if len(edge_lines) >= 3:
         # Try to chain the lines into a closed polygon
@@ -107,6 +140,30 @@ def extract_board_outline(pcb: PCB) -> Polygon | None:
         )
 
     return None
+
+
+def _arc_segments(
+    start: tuple[float, float],
+    mid: tuple[float, float],
+    end: tuple[float, float],
+    max_step_deg: float = 2.0,
+) -> list[tuple[tuple[float, float], tuple[float, float]]]:
+    """Sample a start/mid/end arc into short chord segments.
+
+    The first and last points are exactly *start* and *end* so the result
+    chains with neighbouring ``gr_line`` segments.  A collinear arc degrades
+    to a single straight segment.
+    """
+    sweep = arc_sweep(start, mid, end)
+    if sweep is None:
+        return [(start, end)]
+    n = max(2, math.ceil(math.degrees(sweep.sweep) / max_step_deg))
+    sign = 1.0 if sweep.counter_clockwise else -1.0
+    pts = [start]
+    for i in range(1, n):
+        pts.append(sweep.point_at(sweep.start_angle + sign * sweep.sweep * i / n))
+    pts.append(end)
+    return list(zip(pts[:-1], pts[1:], strict=True))
 
 
 def _chain_lines_to_polygon(

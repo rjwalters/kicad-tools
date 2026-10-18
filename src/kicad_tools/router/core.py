@@ -14,7 +14,7 @@ from fractions import Fraction
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable
+    from collections.abc import Callable, Iterable, Mapping
     from pathlib import Path
 
     from kicad_tools.explain.decisions import DecisionStore
@@ -651,6 +651,39 @@ def _lattice_tap_retry_outcomes() -> frozenset[str]:
     from .lattice.pathfinder import EXHAUSTED_SEARCH_REASONS
 
     return frozenset(f"uncoupled-fallback:pair-{r}" for r in EXHAUSTED_SEARCH_REASONS)
+
+
+def pair_via_mismatch_warnings(
+    coupled: list[Any],
+    outcomes: Mapping[object, str],
+    mismatch: Mapping[object, tuple[int, int]],
+) -> list[str]:
+    """One ``WARNING`` line per segment committed with unequal P/N via counts.
+
+    Issue #7093: ``mismatch`` is the pathfinder's ``pair_via_mismatch``
+    (``key -> (vias_P, vias_N)``, recorded when the #6373 fallback flush
+    commits legs no candidate could give via parity).  The check is per
+    segment, keyed by ``pc.key``, so it fires whatever the whole pair's
+    outcome is: ``uncoupled-fallback:``, ``partially-coupled:<k>/<n>`` (board
+    03's USB_D) or a chain whose other segment is ``hybrid:``.  Only a segment
+    whose final outcome is still the uncoupled fallback is reported -- a
+    hybrid or coupled segment's copper was not committed by the flush, so a
+    mismatch entry left from an earlier pass does not describe it.
+    """
+    from .pairplan.outcome import segment_record
+
+    lines: list[str] = []
+    for pc in coupled:
+        counts = mismatch.get(pc.key)
+        if counts is None or segment_record(outcomes, pc.key).status != "uncoupled-fallback":
+            continue
+        span = f"{pc.pad_p_a.ref}.{pc.pad_p_a.pin}->{pc.pad_p_b.ref}.{pc.pad_p_b.pin}"
+        lines.append(
+            f"  WARNING: diff pair {pc.pair_name} {span} legs have unequal via "
+            f"counts (P={counts[0]}, N={counts[1]}); no fallback candidate had "
+            "via parity"
+        )
+    return lines
 
 
 def _lattice_tap_chain_retry_pairs(
@@ -5524,6 +5557,14 @@ class Autorouter:
                         f"{', '.join(uncoupled)}; intra-pair gap and length "
                         "matching are not guaranteed there"
                     )
+            # Issue #7093: unequal layer changes on a segment's fallback legs
+            # are a pair-rule failure the fallback could not avoid; never
+            # silent.  Per segment, so a partially-coupled or hybrid pair's
+            # fallback segment warns too.
+            for line in pair_via_mismatch_warnings(
+                coupled, outcomes, getattr(pf, "pair_via_mismatch", {}) or {}
+            ):
+                print(line)
 
         by_net: dict[int, list[Route]] = {}
         for route in routes_by_key.values():
