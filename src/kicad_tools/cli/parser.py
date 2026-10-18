@@ -5474,6 +5474,15 @@ def _add_optimize_placement_parser(subparsers) -> None:
         ),
     )
     op_parser.add_argument(
+        "--require-outline",
+        action="store_true",
+        default=False,
+        help=(
+            "Exit nonzero when the board has no Edge.Cuts outline instead of "
+            "falling back to a footprints+10 mm bounding box (issue #7148)."
+        ),
+    )
+    op_parser.add_argument(
         "--allow-infeasible",
         action="store_true",
         default=False,

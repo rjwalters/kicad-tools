@@ -34,6 +34,7 @@ def run_optimize_placement_command(args) -> int:
         pad_anchored_wirelength=getattr(args, "pad_anchored_wirelength", False),
         time_budget=getattr(args, "time_budget", None),
         allow_infeasible=getattr(args, "allow_infeasible", False),
+        require_outline=getattr(args, "require_outline", False),
         voltage_map_path=getattr(args, "voltage_map", None),
         hv_domains_path=getattr(args, "hv_domains", None),
         creepage_standard=getattr(args, "creepage_standard", "iec60664"),
