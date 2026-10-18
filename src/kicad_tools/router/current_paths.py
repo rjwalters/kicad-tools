@@ -858,7 +858,8 @@ def _build_graph(segments: list[Segment], pcb: PCB, net_name: str) -> _CopperGra
     Supported contacts are same-layer track endpoints (including a T landing
     in a segment interior), via centers on a track, and nodes inside supported
     pad copper. Width-only overlaps, zone/arc connectivity and arbitrary pad
-    primitives are not modeled; no proximity tolerance invents a connection.
+    primitives are not modeled; no proximity tolerance invents a connection
+    (except the 1 µm via-centre snap, #7210).
     This is not a general PCB connectivity solver.
     """
     layers = {layer.name for layer in pcb.copper_layers}
