@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import shutil
 from dataclasses import replace
 from pathlib import Path
@@ -45,6 +46,28 @@ def _legacy_design_rules():
         min_pth_hole_to_track_mm=None,
         min_inner_pth_hole_to_copper_mm=None,
     )
+
+
+# Rules ``generate_dru`` emits today that a pre-#4600 generator never did.
+# The legacy detector's grammar is frozen, so the fixture strips these blocks
+# rather than the detector learning them.
+_POST_LEGACY_RULES = ("Max Hole Size",)
+
+
+def _legacy_dru_text() -> str:
+    """``generate_dru`` output as a pre-#4600 generator would have written it."""
+    from kicad_tools.manufacturers.dru_generator import generate_dru
+
+    text = generate_dru(_legacy_design_rules(), manufacturer_name="jlcpcb")
+    for name in _POST_LEGACY_RULES:
+        text = re.sub(
+            r'\(rule "'
+            + re.escape(name)
+            + r'[^"]*"\n(?:  \(condition [^\n]*\n)?  \(constraint [^\n]*\n',
+            "",
+            text,
+        )
+    return text
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -723,12 +746,11 @@ class TestDruManagedBlockMerge:
         """
         from kicad_tools.manufacturers.dru_generator import (
             DRU_FLOORS_BLOCK_BEGIN,
-            generate_dru,
         )
 
         board = tmp_path / "demo.kicad_pcb"
         board.write_text("(kicad_pcb)")
-        legacy = generate_dru(_legacy_design_rules(), manufacturer_name="jlcpcb")
+        legacy = _legacy_dru_text()
         assert DRU_FLOORS_BLOCK_BEGIN not in legacy
         dru = board.with_suffix(".kicad_dru")
         dru.write_text(legacy, encoding="utf-8")
@@ -765,7 +787,7 @@ class TestDruManagedBlockMerge:
             get_profile("jlcpcb-tier1").get_design_rules(layers=4),
             manufacturer_name="jlcpcb-tier1",
         )
-        legacy = generate_dru(_legacy_design_rules(), manufacturer_name="jlcpcb")
+        legacy = _legacy_dru_text()
         dru_path = tmp_path / "demo.kicad_dru"
 
         # Legacy branch with a path: exactly one stderr line naming the file.
@@ -802,13 +824,12 @@ class TestDruManagedBlockMerge:
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ):
         """``write_drc_constraints`` threads the real path into the warning."""
-        from kicad_tools.manufacturers.dru_generator import generate_dru
 
         board = tmp_path / "demo.kicad_pcb"
         board.write_text("(kicad_pcb)")
         dru = board.with_suffix(".kicad_dru")
         dru.write_text(
-            generate_dru(_legacy_design_rules(), manufacturer_name="jlcpcb"),
+            _legacy_dru_text(),
             encoding="utf-8",
         )
 
@@ -820,6 +841,15 @@ class TestDruManagedBlockMerge:
         # Second emit hits the marked-replace branch: silence.
         self._emit(board)
         assert capsys.readouterr().err == ""
+
+    def test_legacy_fixture_models_every_generated_rule(self):
+        """Guard: a new ``generate_dru`` rule must be accounted for here."""
+        from kicad_tools.manufacturers.dru_generator import _is_legacy_generated_dru
+
+        assert _is_legacy_generated_dru(_legacy_dru_text()), (
+            "generate_dru emitted a rule the legacy fixture does not model: "
+            "add it to _POST_LEGACY_RULES (do NOT widen the _LEGACY_* regexes)"
+        )
 
     def test_committed_board_sidecars_are_marked(self):
         """Every committed ``boards/*/output/*.kicad_dru`` uses the marked format.
