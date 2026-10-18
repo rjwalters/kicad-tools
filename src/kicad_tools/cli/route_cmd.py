@@ -22198,6 +22198,9 @@ def _run_main_impl(args, parser, argv) -> int:
                 cached_routes = cache.deserialize_routes(cached_result.routes_data)
 
                 cached_usage = cache.deserialize_route_usage(cached_result.routes_data)
+                cached_coupled_nets = cache.deserialize_committed_coupled_nets(
+                    cached_result.routes_data
+                )
 
             else:
                 if not quiet:
@@ -22238,6 +22241,9 @@ def _run_main_impl(args, parser, argv) -> int:
         try:
             router.grid.import_route_usage(cached_usage)
             router.restore_route_snapshot(cached_routes)
+            # Issue #7003: the optimizer skips coupled pairs the routing
+            # dispatch committed; a hit skips the dispatch, so replay them.
+            router._committed_coupled_nets = set(cached_coupled_nets)
             if not quiet:
                 print("  Using cached routing result")
         except Exception as exc:
@@ -22950,6 +22956,7 @@ def _run_main_impl(args, parser, argv) -> int:
                     stats,
                     routing_time_ms,
                     route_usage=router.grid.export_route_usage(),
+                    committed_coupled_nets=_committed_coupled_skip_nets(router),
                 )
                 if not quiet:
                     print(f"  Cached routing result ({routing_time_ms}ms compute time)")

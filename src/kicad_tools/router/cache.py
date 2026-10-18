@@ -28,7 +28,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from .primitives import Pad, Route
@@ -87,7 +87,11 @@ def routing_cache_context(options: Mapping[str, object], net_class_map: dict) ->
 # copper (13 and 445 items), matching a same-seed replicate.  If a future
 # routing path iterates a str-keyed set/dict in hash order, fix the order
 # (sort) rather than keying the cache on the seed.
-CACHE_VERSION = "2.5.4-native-build"
+# A cache hit must restore the committed coupled diff-pair nets (Issue #7003):
+# entries written before that carry none and would let the optimizer rewrite
+# the pair rails a fresh route leaves untouched.
+# Numbered above #7014's 2.5.4: entries it wrote predate the coupled-net replay.
+CACHE_VERSION = "2.5.5-coupled-nets"
 
 
 def get_default_cache_path() -> Path:
@@ -862,11 +866,21 @@ class RoutingCache:
         created_time = datetime.fromisoformat(created_at)
         return datetime.now() - created_time > self.ttl
 
-    def serialize_routes(self, routes: list[Route], *, route_usage: dict | None = None) -> bytes:
+    def serialize_routes(
+        self,
+        routes: list[Route],
+        *,
+        route_usage: dict | None = None,
+        committed_coupled_nets: set[int] | None = None,
+    ) -> bytes:
         """Serialize routes to compressed bytes for storage.
 
         Args:
             routes: List of Route objects
+            route_usage: Full-run congestion snapshot to persist alongside
+            committed_coupled_nets: Nets of diff pairs the coupled pre-pass
+                committed (Issue #7003); the optimizer must skip them on a
+                cache hit exactly as it does on a fresh route
 
         Returns:
             Compressed JSON bytes
@@ -916,11 +930,11 @@ class RoutingCache:
             }
             routes_data.append(route_dict)
 
-        payload = (
-            routes_data
-            if route_usage is None
-            else {"routes": routes_data, "route_usage": route_usage}
-        )
+        if route_usage is None:
+            payload: Any = routes_data
+        else:
+            payload = {"routes": routes_data, "route_usage": route_usage}
+            payload["committed_coupled_nets"] = sorted(committed_coupled_nets or ())
         json_bytes = json.dumps(payload).encode("utf-8")
         return zlib.compress(json_bytes)
 
@@ -933,6 +947,14 @@ class RoutingCache:
         usage = payload["route_usage"]
         assert isinstance(usage, dict)
         return usage
+
+    @staticmethod
+    def deserialize_committed_coupled_nets(data: bytes) -> set[int]:
+        """Read the committed coupled diff-pair nets (Issue #7003)."""
+        payload = json.loads(zlib.decompress(data))
+        if not isinstance(payload, dict):
+            return set()
+        return {int(net) for net in payload.get("committed_coupled_nets", ())}
 
     def deserialize_routes(self, data: bytes) -> list[Route]:
         """Deserialize routes from compressed bytes.
@@ -1050,6 +1072,7 @@ class RoutingCache:
         compute_time_ms: int = 0,
         *,
         route_usage: dict | None = None,
+        committed_coupled_nets: set[int] | None = None,
     ) -> None:
         """
         Store routing result in cache.
@@ -1060,7 +1083,9 @@ class RoutingCache:
             statistics: Routing statistics dict
             compute_time_ms: Time taken for routing in milliseconds
         """
-        routes_data = self.serialize_routes(routes, route_usage=route_usage)
+        routes_data = self.serialize_routes(
+            routes, route_usage=route_usage, committed_coupled_nets=committed_coupled_nets
+        )
         data_size = len(routes_data)
         now = datetime.now().isoformat()
 
