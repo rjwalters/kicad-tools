@@ -276,7 +276,7 @@ kct export pnp design.kicad_pcb --manufacturer jlcpcb -o positions.csv
 kct mfr compare --layers 4
 
 # Check design against manufacturer rules
-kct mfr check design.kicad_pcb --manufacturer jlcpcb
+kct check design.kicad_pcb --mfr jlcpcb
 
 # Show manufacturer info
 kct mfr info jlcpcb
