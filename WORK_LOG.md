@@ -15,6 +15,14 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-18
 
+- **PR #7232**: feat(check): thermal_asymmetry and via_at_pad_edge warnings; detect-mistakes reuses them (#7220)
+- **PR #7221**: fix(validate): resolve board 05 phase paths and flag zone-only ampacity nets
+- **PR #7231**: refactor(geometry): shared point_in_polygon; footprint_outside_board accepts boundary origins (PR1 of #7224)
+- **PR #7229**: fix(export): fail 008004 chips and judge LFCSP by pin pitch in assembly preflight
+- **PR #7217**: feat(export): fail preflight when stackup copper differs from the fab order
+- **Issue #7210** (closed): ampacity: path_ampacity can't resolve board 05 phase paths; zone-only nets read 'checked' vacuously (#7206 follow-ups)
+- **Issue #7227** (closed): assembly-tier preflight gaps: 008004 chips pass silently; LFCSP judged as BGA; report vs preflight bottom-side count (#7226 follow-up)
+- **Issue #7209** (closed): board 05 ampacity relies on 1 oz inner copper the fab order never requests (JLCPCB default 0.5 oz → 1186 inner segments under-width)
 - **PR #7215**: ci: print skip and xfail reasons in the pytest short summary
 - **PR #7218**: fix(pcb): keep Library:Footprint lib ID in PCB.add_footprint
 - **PR #7234**: fix(drc,validate,check): view filters never change a verdict (Part A of #7230)
