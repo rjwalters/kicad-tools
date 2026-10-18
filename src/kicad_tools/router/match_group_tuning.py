@@ -255,6 +255,15 @@ MAX_SEGMENT_RETRY_CANDIDATES: int = 3
 AMPLITUDE_BACKOFF_FACTORS: tuple[float, ...] = (1.0, 0.5, 0.25, 0.125)
 
 
+#: Per-bump placement (Issue #7043).  When every whole-trombone attempt on a
+#: net is rejected, the tuner places single bumps one at a time: each bump
+#: searches its own amplitude downward (``base * BUMP_AMPLITUDE_SHRINK**n``)
+#: to ``BUMP_MIN_AMPLITUDE_MM`` against the same clearance rules, so one
+#: blocked loop no longer disqualifies the whole host segment.
+BUMP_AMPLITUDE_SHRINK: float = 0.7
+BUMP_MIN_AMPLITUDE_MM: float = 0.2
+
+
 # ---------------------------------------------------------------------------
 # Reason registry + summary formatting (Issue #3440 observability)
 # ---------------------------------------------------------------------------
@@ -1358,6 +1367,45 @@ def _tune_match_group_single_ended(
                 if committed_this_attempt:
                     break  # exit candidate loop on successful commit
 
+            if not committed_this_attempt and not both_sides:
+                # Issue #7043: the whole-trombone attempts were all rejected.
+                # Place single bumps per host instead of giving up on the
+                # whole host because one loop conflicts with foreign copper.
+                def _bump_check(segs: list[Segment], _nid: int = net_id) -> str | None:
+                    return _post_insertion_clearance_detail_group(
+                        new_segments=segs,
+                        candidate_net_id=_nid,
+                        group_net_ids=set(group.net_ids),
+                        routes_by_net=routes_by_net,
+                        intra_group_clearance_mm=intra_group_clearance_mm,
+                        via_clearance_mm=via_clearance_mm,
+                        diff_pair_partners=diff_pair_partners,
+                        intra_pair_clearance_mm=intra_pair_clearance_mm,
+                        foreign_pads=foreign_pads,
+                        pad_clearance_mm=pad_clearance_mm,
+                        net_clearance_mm=net_clearance_mm,
+                    )
+
+                bumped_route = _place_bumps_per_host(
+                    current_route,
+                    length_needed=length_needed,
+                    tolerance_mm=tolerance_mm,
+                    base_config=base_config,
+                    host_floor=host_floor,
+                    fixed_segment_ids=fixed_segment_ids,
+                    other_group_routes=other_group_routes,
+                    check=_bump_check,
+                )
+                if bumped_route is not None:
+                    current_route = bumped_route
+                    per_member_result.inserts_applied += 1
+                    total_inserts_committed += 1
+                    committed_this_attempt = True
+                    current_skew = abs(target_length - _measure(current_route))
+                    if current_skew <= tolerance_mm:
+                        per_member_result.success = True
+                        per_member_result.reason = "tuned"
+
             if not committed_this_attempt:
                 # Every candidate in this attempt failed.  Surface the
                 # LAST failure reason (typically
@@ -1440,6 +1488,141 @@ def _tune_match_group_single_ended(
             routes_by_net[net_id] = current_route
 
     return results
+
+
+def _place_bumps_per_host(
+    route: Route,
+    *,
+    length_needed: float,
+    tolerance_mm: float,
+    base_config: SerpentineConfig,
+    host_floor: float,
+    fixed_segment_ids: set[int] | None,
+    other_group_routes: dict[int, Route],
+    check: Callable[[list[Segment]], str | None],
+) -> Route | None:
+    """Single-ended per-bump fallback (Issue #7043).
+
+    Walks the straight runs of ``route`` (best host first) and places one
+    single-loop bump at a time.  Each bump searches its amplitude downward
+    (``base * BUMP_AMPLITUDE_SHRINK**n`` to ``BUMP_MIN_AMPLITUDE_MM``) on the
+    outer side first, then the opposite side; when both sides are blocked the
+    cursor skips forward and any remaining length spills onto the next run.
+    A bump never adds more than the length still needed, so the route is
+    never pushed past the target.  ``check`` is the clearance gate
+    (``None`` = clear); it is applied to every bump and again to the
+    assembled result.
+
+    Returns the new route, or ``None`` when no bump could be placed or the
+    assembled result is rejected.
+    """
+    from .primitives import Route as _Route
+    from .primitives import Segment as _Segment
+
+    gap = base_config.min_spacing * base_config.gap_factor
+    bump_len = max((3.0 * gap) / 0.9 + 1e-6, 1e-6)
+    ladder: list[float] = []
+    amp = base_config.amplitude
+    while amp > BUMP_MIN_AMPLITUDE_MM:
+        ladder.append(amp)
+        amp *= BUMP_AMPLITUDE_SHRINK
+    ladder.append(BUMP_MIN_AMPLITUDE_MM)
+
+    hosts = _rank_candidate_segments(
+        route,
+        min_segment_length=max(host_floor, bump_len),
+        max_candidates=len(route.segments),
+        fixed_segment_ids=fixed_segment_ids,
+    )
+    remaining = length_needed
+    replacements: dict[int, list[Segment]] = {}
+    all_bumps: list[Segment] = []
+
+    def piece(host: Segment, x1: float, y1: float, x2: float, y2: float) -> Segment:
+        return _Segment(
+            x1=x1,
+            y1=y1,
+            x2=x2,
+            y2=y2,
+            width=host.width,
+            layer=host.layer,
+            net=host.net,
+            net_name=host.net_name,
+        )
+
+    for seg_idx, host in hosts:
+        if remaining <= tolerance_mm:
+            break
+        length = math.hypot(host.x2 - host.x1, host.y2 - host.y1)
+        ux = (host.x2 - host.x1) / length
+        uy = (host.y2 - host.y1) / length
+        hint = _outer_normal_hint_group(
+            host, candidate_net_id=host.net, group_routes=other_group_routes
+        )
+        out: list[Segment] = []
+        straight_x, straight_y = host.x1, host.y1
+        cursor = 0.0
+        placed_here = False
+        while remaining > tolerance_mm and cursor + bump_len <= length - 1e-6:
+            ax, ay = host.x1 + ux * cursor, host.y1 + uy * cursor
+            bx, by = ax + ux * bump_len, ay + uy * bump_len
+            sub_host = piece(host, ax, ay, bx, by)
+            placed: list[Segment] | None = None
+            added = 0.0
+            for side in (hint, (-hint[0], -hint[1])):
+                for ladder_amp in ladder:
+                    bump_amp = min(ladder_amp, remaining / 2.0)
+                    cfg = SerpentineConfig(
+                        style=base_config.style,
+                        amplitude=bump_amp,
+                        min_spacing=base_config.min_spacing,
+                        min_segment_length=bump_len,
+                        gap_factor=base_config.gap_factor,
+                        max_iterations=1,
+                        side="outer",
+                        outer_normal_hint=side,
+                    )
+                    result = SerpentineGenerator(cfg).generate_trombone(
+                        sub_host, 2.0 * bump_amp * (1.0 + 1e-9)
+                    )
+                    if not result.success or len(result.new_segments) <= 1:
+                        continue
+                    if check(result.new_segments) is None:
+                        placed = result.new_segments
+                        added = 2.0 * bump_amp
+                        break
+                if placed is not None:
+                    break
+            if placed is None:
+                cursor += bump_len  # both sides blocked: skip forward
+                continue
+            if math.hypot(ax - straight_x, ay - straight_y) > 1e-9:
+                out.append(piece(host, straight_x, straight_y, ax, ay))
+            out.extend(placed)
+            all_bumps.extend(placed)
+            straight_x, straight_y = bx, by
+            cursor += bump_len
+            remaining -= added
+            placed_here = True
+        if placed_here:
+            if math.hypot(host.x2 - straight_x, host.y2 - straight_y) > 1e-9:
+                out.append(piece(host, straight_x, straight_y, host.x2, host.y2))
+            replacements[seg_idx] = out
+
+    if not replacements:
+        return None
+    # Final gate on the assembled result.
+    if check(all_bumps) is not None:
+        return None
+    segments: list[Segment] = []
+    for i, seg in enumerate(route.segments):
+        segments.extend(replacements.get(i, [seg]))
+    return _Route(
+        net=route.net,
+        net_name=route.net_name,
+        segments=segments,
+        vias=route.vias.copy(),
+    )
 
 
 def _centered_sub_host(
