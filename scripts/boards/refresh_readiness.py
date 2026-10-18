@@ -91,6 +91,20 @@ def _load_bundle_links():
 
 bundle_links = _load_bundle_links()
 
+
+def _load_known_warnings():
+    path = Path(__file__).resolve().with_name("_known_warnings.py")
+    spec = importlib.util.spec_from_file_location("_known_warnings", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+_known = _load_known_warnings()
+KNOWN_WARNINGS = _known.KNOWN_WARNINGS
+warning_counts_by_rule = _known.warning_counts_by_rule
+unaccepted_warnings = _known.unaccepted_warnings
+
 from kicad_tools.cli.kicad_toolchain import (  # noqa: E402
     KiCadEnvironmentError,
     evidence_toolchain,
@@ -124,9 +138,10 @@ class BoardConfig:
     # refreshed from ``source_dir`` before the archives are rebuilt.
     mirrors: tuple[tuple[str, str], ...] = ()
     # Warning rules the board is known to carry, as ``{rule_id: max count}``
-    # (Issue #7273).  A warning of any other rule, or more warnings of a listed
-    # rule than its count, still refuses; so does every error.  Empty means no
-    # warning is tolerated.  Delete an entry when the tracked fix lands.
+    # (Issue #7273; the lists live in ``_known_warnings.py``, shared with the
+    # routed-PCB DRC gate).  A warning of any other rule, or more warnings of a
+    # listed rule than its count, still refuses; so does every error.  Empty
+    # means no warning is tolerated.
     known_warnings: dict[str, int] = field(default_factory=dict)
     # Directories searched (relative to the board) when rebuilding
     # ``output/manufacturing.zip``.  Its member names are relative to the first
@@ -154,8 +169,7 @@ BOARDS: dict[str, BoardConfig] = {
         tier="jlcpcb-tier1",
         erc=(ErcJob("04-native-erc.json", "output", "stm32_devboard.kicad_sch", ()),),
         check_script="check_manufacturing.py",
-        # Left for #7220 PR2 (narrower-spoke fill repair); delete when it lands.
-        known_warnings={"thermal_asymmetry": 9},
+        known_warnings=dict(KNOWN_WARNINGS["04-stm32-devboard"]),
         mirrors=(("output/manufacturing/design-source", "."),),
         archives=(("output/manufacturing/kicad_project.zip", ("output", ".")),),
     ),
@@ -212,8 +226,7 @@ BOARDS: dict[str, BoardConfig] = {
             ),
         ),
         manifest_refresher="redesign/package.py:refresh_manifest",
-        # Left for #7220 PR3 (router mask-dam fix); delete when it lands.
-        known_warnings={"via_at_pad_edge": 3},
+        known_warnings=dict(KNOWN_WARNINGS["05-bldc-motor-controller"]),
     ),
     "06-diffpair-test": BoardConfig(
         routed_pcb="output/diffpair_test_routed.kicad_pcb",
@@ -408,37 +421,6 @@ def gate_native_drc(board: Path, cfg: BoardConfig) -> int:
     if errors or unconnected:
         raise GateFailure("native DRC has errors or unconnected items")
     return len(errors)
-
-
-def warning_counts_by_rule(data: dict) -> dict[str, int]:
-    """Active (non-waived) warning findings of a ``kct check`` report, by rule."""
-    counts: dict[str, int] = {}
-    for violation in data.get("violations", []):
-        if (
-            isinstance(violation, dict)
-            and violation.get("severity") == "warning"
-            and not violation.get("waived")
-        ):
-            rule = str(violation.get("rule_id") or "unknown")
-            counts[rule] = counts.get(rule, 0) + 1
-    return dict(sorted(counts.items()))
-
-
-def unaccepted_warnings(
-    data: dict, known_warnings: dict[str, int] | None = None
-) -> dict[str, tuple[int, int]]:
-    """``{rule: (found, allowed)}`` for warnings the allowlist does not cover."""
-    known = known_warnings or {}
-    counts = warning_counts_by_rule(data)
-    summary_total = data.get("summary", {}).get("warnings")
-    if isinstance(summary_total, int) and summary_total != sum(counts.values()):
-        # The summary and the finding list disagree: never trust the allowlist.
-        counts["<summary/violations mismatch>"] = abs(summary_total - sum(counts.values()))
-    return {
-        rule: (count, known.get(rule, 0))
-        for rule, count in counts.items()
-        if count > known.get(rule, 0)
-    }
 
 
 def check_report_verdict(
