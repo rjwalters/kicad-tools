@@ -66,22 +66,21 @@ def gather_summary(schematic_path: str, verbose: bool = False) -> dict:
     }
 
     # Load hierarchy
-    try:
-        hierarchy = build_hierarchy(schematic_path)
-        all_nodes = hierarchy.all_nodes()
+    # The root must load (a failure propagates to run_summary); failing
+    # sub-sheets are tolerated by build_hierarchy itself.
+    hierarchy = build_hierarchy(schematic_path, strict_root=True)
+    all_nodes = hierarchy.all_nodes()
 
-        summary["hierarchy"] = {
-            "total_sheets": len(all_nodes),
-            "max_depth": max(n.depth for n in all_nodes),
-            "sheets": [
-                {"name": n.name, "path": n.get_path_string(), "labels": len(n.hierarchical_labels)}
-                for n in all_nodes
-            ]
-            if verbose
-            else [n.name for n in all_nodes if n.name != "Root"],
-        }
-    except Exception:
-        summary["hierarchy"] = {"total_sheets": 1, "sheets": []}
+    summary["hierarchy"] = {
+        "total_sheets": len(all_nodes),
+        "max_depth": max(n.depth for n in all_nodes),
+        "sheets": [
+            {"name": n.name, "path": n.get_path_string(), "labels": len(n.hierarchical_labels)}
+            for n in all_nodes
+        ]
+        if verbose
+        else [n.name for n in all_nodes if n.name != "Root"],
+    }
 
     # Load BOM
     try:

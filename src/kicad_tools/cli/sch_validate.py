@@ -3532,6 +3532,15 @@ def check_wire_stubs(schematic_path: str) -> list[ValidationIssue]:
     return issues
 
 
+def require_loadable_root(schematic_path: str) -> None:
+    """Raise if the root schematic cannot be loaded (#7028).
+
+    Each check below degrades a load failure into a warning, so without this
+    an empty or unparseable root would "pass" with a handful of warnings.
+    """
+    Schematic.load(schematic_path)
+
+
 def validate_schematic(
     schematic_path: str,
     lib_paths: list[str] = None,
@@ -3545,6 +3554,7 @@ def validate_schematic(
         skip_checks: Set of check category names to skip (e.g.
             ``{"swd_routing", "i2c_pullups"}``).
     """
+    require_loadable_root(schematic_path)
     result = ValidationResult(schematic=schematic_path)
     _skip: set[str] = skip_checks or set()
 
@@ -3659,7 +3669,11 @@ def main(argv=None):
         sys.exit(1)
 
     skip_set: set[str] = set(args.skip_checks) if args.skip_checks else set()
-    result = validate_schematic(args.schematic, args.lib_paths, skip_checks=skip_set)
+    try:
+        result = validate_schematic(args.schematic, args.lib_paths, skip_checks=skip_set)
+    except Exception as e:
+        print(f"Error loading schematic: {args.schematic}: {e}", file=sys.stderr)
+        sys.exit(1)
 
     if args.format == "json":
         print(

@@ -240,16 +240,17 @@ class TestSchListLabels:
 class TestSchHierarchy:
     """Tests for sch_hierarchy.py CLI."""
 
-    def test_missing_file_handles_gracefully(self, capsys):
-        """Test that missing files are handled gracefully (returns empty hierarchy)."""
+    def test_missing_file_is_an_error(self, capsys):
+        """A missing root schematic is an error, not an empty hierarchy (#7028)."""
         from kicad_tools.cli.sch_hierarchy import main
 
-        # The hierarchy builder handles missing files by returning an empty hierarchy
-        main(["nonexistent.kicad_sch"])
+        with pytest.raises(SystemExit) as exc_info:
+            main(["nonexistent.kicad_sch"])
+        assert exc_info.value.code == 1
 
         captured = capsys.readouterr()
-        # Should output something (even if it's an empty hierarchy)
-        assert len(captured.out) > 0
+        assert "File not found" in captured.err
+        assert "nonexistent.kicad_sch" in captured.err
 
     def test_tree_command(self, simple_rc_schematic: Path, capsys):
         """Test tree command (default)."""
@@ -398,17 +399,18 @@ class TestSchHierarchy:
 class TestSchSummary:
     """Tests for sch_summary.py CLI."""
 
-    def test_missing_file_handles_gracefully(self, capsys, monkeypatch):
-        """Test that missing files are handled gracefully (returns empty summary)."""
+    def test_missing_file_is_an_error(self, capsys, monkeypatch):
+        """A missing root schematic is an error, not an empty summary (#7028)."""
         from kicad_tools.cli.sch_summary import main
 
-        # The summary builder handles missing files gracefully
         monkeypatch.setattr("sys.argv", ["sch-summary", "nonexistent.kicad_sch"])
-        main()
+        with pytest.raises(SystemExit) as exc_info:
+            main()
+        assert exc_info.value.code == 1
 
         captured = capsys.readouterr()
-        # Should output a summary (even if mostly empty)
-        assert "Schematic:" in captured.out
+        assert "File not found" in captured.err
+        assert "Schematic:" not in captured.out
 
     def test_text_output(self, simple_rc_schematic: Path, capsys, monkeypatch):
         """Test text format output."""
@@ -462,16 +464,17 @@ class TestSchSummary:
         data = json.loads(captured.out)
         assert "file" in data
 
-    def test_run_summary_missing_file_handles_gracefully(self, capsys):
-        """Test run_summary with missing file returns success (empty summary)."""
+    def test_run_summary_missing_file_is_an_error(self, capsys):
+        """run_summary on a missing root schematic returns 1, not 0 (#7028)."""
         from pathlib import Path
 
         from kicad_tools.cli.sch_summary import run_summary
 
-        # The summary builder handles missing files gracefully
         result = run_summary(Path("nonexistent.kicad_sch"))
-        # Returns 0 because it produces an empty summary, not an error
-        assert result == 0
+        assert result == 1
+
+        captured = capsys.readouterr()
+        assert "File not found" in captured.err
 
     def test_gather_summary(self, simple_rc_schematic: Path):
         """Test gather_summary function."""

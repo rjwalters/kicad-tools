@@ -40,6 +40,7 @@ from .sch_validate import (
     check_missing_footprints,
     check_missing_values,
     print_result,
+    require_loadable_root,
 )
 
 # Bare type names that almost certainly need a real value before layout.
@@ -378,6 +379,7 @@ def check_power_flags(schematic_path: str) -> list[ValidationIssue]:
 
 def run_preflight(schematic_path: str) -> ValidationResult:
     """Run all preflight checks (inherited + new)."""
+    require_loadable_root(schematic_path)
     result = ValidationResult(schematic=schematic_path)
 
     # --- Inherited checks from sch validate ---
@@ -426,7 +428,11 @@ def main(argv=None):
         print(f"Error: File not found: {args.schematic}", file=sys.stderr)
         sys.exit(1)
 
-    result = run_preflight(args.schematic)
+    try:
+        result = run_preflight(args.schematic)
+    except Exception as e:
+        print(f"Error loading schematic: {args.schematic}: {e}", file=sys.stderr)
+        sys.exit(1)
 
     if args.format == "json":
         print(

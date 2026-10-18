@@ -249,14 +249,17 @@ class HierarchyBuilder:
     Builds a hierarchy tree from schematic files.
     """
 
-    def __init__(self, base_path: str):
+    def __init__(self, base_path: str, strict_root: bool = False):
         """
         Initialize with the base path for resolving relative filenames.
 
         Args:
             base_path: Directory containing the root schematic
+            strict_root: Raise if the root schematic cannot be loaded instead
+                of returning an empty node. Sub-sheets stay tolerant.
         """
         self.base_path = Path(base_path)
+        self.strict_root = strict_root
         self.loaded_files: dict[str, HierarchyNode] = {}
 
     def build(self, root_schematic: str) -> HierarchyNode:
@@ -307,6 +310,8 @@ class HierarchyBuilder:
             text = full_path.read_text()
             sexp = parse_string(text)
         except Exception:
+            if parent is None and self.strict_root:
+                raise
             # Return empty node if file can't be loaded
             return HierarchyNode(
                 name=name,
@@ -359,17 +364,20 @@ class HierarchyBuilder:
         return node
 
 
-def build_hierarchy(root_schematic: str) -> HierarchyNode:
+def build_hierarchy(root_schematic: str, strict_root: bool = False) -> HierarchyNode:
     """
     Build a hierarchy tree from a root schematic.
 
     Args:
         root_schematic: Path to the root .kicad_sch file
+        strict_root: Raise if the root cannot be loaded (missing or
+            unparseable) instead of returning an empty root node. Failing
+            sub-sheets are always tolerated.
 
     Returns:
         Root HierarchyNode
     """
-    builder = HierarchyBuilder(str(Path(root_schematic).parent))
+    builder = HierarchyBuilder(str(Path(root_schematic).parent), strict_root=strict_root)
     return builder.build(root_schematic)
 
 
