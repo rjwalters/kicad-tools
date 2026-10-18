@@ -15,6 +15,10 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-18
 
+- **PR #7279**: fix(router): post-route short check ignores input copper the writer drops
+- **Issue #7270** (closed): board 03 thermal_asymmetry: classify the findings and replace #7259's count-based allowance with a narrow one or a fix
+- **PR #7274**: test(board03): pin thermal_asymmetry allowance to the six classified pads
+- **PR #7254**: fix(boards): retune board 03 USB_D and board 07 ADDR_BUS skew in place
 - **PR #7267**: fix(export): bind auto-discovered DRC/ERC reports to board content
 - **PR #7266**: fix(mcp): route get_drc_violations and export_assembly through kct check/export gates
 - **PR #7265**: fix(boards): make board specs validate; read fab tier via load_spec
