@@ -15,6 +15,16 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-18
 
+- **PR #7087**: fix(route): warn when --region-parallel is ignored; drop speedup claims
+- **PR #7085**: fix(cost): price unlisted layer counts at next tier and charge finish fee once
+- **PR #7068**: fix(board04): use global labels for power nets to clear same_local_global_label
+- **PR #7052**: fix(pcb): rotate PCBBlock in KiCad's footprint convention at 90/270
+- **PR #7050**: feat(pcb): apply PCBLayout to a real board through the PCB model
+- **Issue #7080** (closed): Cost estimator prices unlisted layer counts as 2-layer and multiplies the per-order finish fee by quantity
+- **Issue #7072** (closed): kct route --region-parallel is a silent no-op on the escape/two-phase/other paths: warn when ignored, drop the speedup claims
+- **Issue #7063** (closed): board 04: KiCad 10.0.7 ERC reports 3 same_local_global_label warnings (power symbol vs local label)
+- **Issue #7046** (closed): PCBBlock rotation at 90/270 deg disagrees with KiCad's footprint rotation: block traces miss their pads
+- **Issue #7022** (closed): Finish pcb/exporter.py: working PCBLayout → real .kicad_pcb bridge on the PCB model
 - **PR #7054**: chore(board-03): refresh readiness evidence after #7036 (main CI red, #7042)
 - **PR #7074**: fix(creepage): key IEC 60664-1 clearance on rated impulse voltage, not working-voltage peak
 - **PR #7061**: fix(placement): honour align --tolerance, count real moves, reject bad axis/reference
