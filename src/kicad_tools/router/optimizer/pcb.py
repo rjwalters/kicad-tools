@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Callable
 from ...core.layers import kicad_read_via_layers, warn_normalised_vias
 from ..layers import Layer
 from ..primitives import Segment, Via
-from .config import OptimizationConfig, OptimizationStats
+from .config import NetOptimizationStats, OptimizationConfig, OptimizationStats
 from .geometry import count_corners, total_length
 
 if TYPE_CHECKING:
@@ -582,6 +582,8 @@ def optimize_pcb(
         stats.kelvin_vetoes = kelvin.gate.vetoes
         kelvin.gate.report()
 
+    rolled_back_nets: set[str] = set()
+
     # DRC-aware per-net rollback
     if config.drc_aware and config.drc_manufacturer:
         # Build fully-optimized text and check DRC
@@ -643,6 +645,7 @@ def optimize_pcb(
                     # Reverting this net helped -- keep original segments
                     final_segments[net] = segments_by_net[net]
                     stats.nets_rolled_back += 1
+                    rolled_back_nets.add(net)
                     full_errors = trial_total
                     current_counts = trial_counts
 
@@ -665,6 +668,20 @@ def optimize_pcb(
         stats.segments_after += len(segs)
         stats.corners_after += count_corners(segs, config.tolerance)
         stats.length_after += total_length(segs)
+
+    # Issue #7065: per-net rows, built from the final (post-rollback) dict.
+    for net, before_segs in segments_by_net.items():
+        after_segs = optimized_segments.get(net, before_segs)
+        stats.per_net.append(
+            NetOptimizationStats(
+                net=net,
+                segments_before=len(before_segs),
+                segments_after=len(after_segs),
+                length_before=total_length(before_segs),
+                length_after=total_length(after_segs),
+                rolled_back=net in rolled_back_nets,
+            )
+        )
 
     # Generate output (only if not dry run)
     if not dry_run:

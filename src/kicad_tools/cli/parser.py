@@ -1201,6 +1201,21 @@ def _add_sch_parser(subparsers) -> None:
     sch_validate.add_argument("--format", choices=["text", "json"], default="text")
     sch_validate.add_argument("--strict", action="store_true", help="Exit with error on warnings")
     sch_validate.add_argument("-q", "--quiet", action="store_true", help="Only show errors")
+    sch_validate.add_argument(
+        "--lib-path",
+        action="append",
+        dest="lib_paths",
+        metavar="DIR",
+        help="Directory of .kicad_sym files used when a symbol is missing from "
+        "the schematic's embedded lib_symbols. May be repeated.",
+    )
+    sch_validate.add_argument(
+        "--skip",
+        action="append",
+        dest="skip_checks",
+        metavar="CHECK",
+        help="Skip a validation check category (e.g. swd_routing). May be repeated.",
+    )
 
     # sch preflight
     sch_preflight = sch_subparsers.add_parser(
@@ -4601,6 +4616,45 @@ def _add_parts_parser(subparsers) -> None:
     parts_search.add_argument("--limit", type=int, default=20, help="Max results")
     parts_search.add_argument("--in-stock", action="store_true", help="Only in-stock parts")
     parts_search.add_argument("--basic", action="store_true", help="Only JLCPCB basic parts")
+
+    # parts import
+    parts_import = parts_subparsers.add_parser(
+        "import", help="Import part from datasheet to library"
+    )
+    parts_import.add_argument(
+        "parts", nargs="+", help="Part number(s) to import (e.g., STM32F103C8T6)"
+    )
+    parts_import.add_argument(
+        "--library", "-l", required=True, help="Output symbol library (.kicad_sym)"
+    )
+    parts_import.add_argument(
+        "--symbol-lib",
+        dest="symbol_library",
+        help="Symbol library (alias for --library)",
+    )
+    parts_import.add_argument(
+        "--footprint-lib", help="Project footprint library (.pretty directory)"
+    )
+    parts_import.add_argument("--package", "-p", help="Specific package variant (e.g., LQFP48)")
+    parts_import.add_argument(
+        "--layout",
+        choices=["functional", "physical", "simple"],
+        default="functional",
+        help="Pin layout style (default: functional)",
+    )
+    parts_import.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Preview what would be imported without making changes",
+    )
+    parts_import.add_argument(
+        "--interactive",
+        "-i",
+        action="store_true",
+        help="Deprecated: not implemented; ignored",
+    )
+    parts_import.add_argument("--overwrite", action="store_true", help="Overwrite existing symbols")
+    parts_import.add_argument("--format", choices=["text", "json"], default="text")
 
     # parts availability
     parts_avail = parts_subparsers.add_parser(
