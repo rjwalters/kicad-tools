@@ -15,6 +15,12 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-18
 
+- **Issue #7273** (closed): Board 04/05 evidence refresh refuses on main (#7220 warnings); boards 00/01/02 lack refresh configs
+- **PR #7289**: fix(boards): gate readiness refresh on a per-board known-warning list
+- **PR #7326**: docs(ci): record measured gap behind Board 06 fixture impedance cap
+- **PR #7328**: fix(readiness): refresher known-issue flags and orphaned known-issues.json detection
+- **Issue #7295** (closed): Fill repair: try narrower thermal spokes before forcing solid connections (split from #7220, PR2)
+- **PR #7317**: fix(boards): re-fill boards 00/01/04 under the thermal-spoke ladder
 - **PR #7329**: ci: gate Windows Smoke on main runs and warn on Test job time budget
 - **Issue #7327** (closed): CI: Windows Smoke never runs on main verification (== 'push' gate); Test job worst case 74.3 min vs 75 min timeout
 - **PR #7321**: fix(check): fixture folders never adopt parent board project.kct
