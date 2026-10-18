@@ -648,9 +648,13 @@ class PlacementSession:
                 comp.x, comp.y, comp.rotation = x, y, rot
                 comp.update_pin_positions()
 
-        # Remove the last pending move
+        # Remove the last pending move and put the component back in the
+        # incremental DRC engine too, so DRC counts do not go stale.
         if self.pending_moves:
-            self.pending_moves.pop()
+            move = self.pending_moves.pop()
+            self._drc_engine.apply_move(move.ref, move.old_x, move.old_y)
+            if self._drc_history:
+                self._drc_history.pop()
 
         return True
 

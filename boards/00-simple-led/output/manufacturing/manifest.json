@@ -6,32 +6,32 @@
   },
   "files": {
     "README.txt": {
-      "sha256": "611032cf5c4b4bfa16be1a3f4f717048b5f553981f49ec8e5882f6bc85b168e1",
-      "size": 1198
+      "sha256": "5587b93fb4208466f3f57971b92d533f532e751fdc0f84f2b0ff979ddf406f9b",
+      "size": 1201
     },
     "assembly-back.pdf": {
-      "sha256": "f6875bbdebb1d2a6da0f8521b9f63ed4010a8442bf4f27377d96c2bb4f7ef43e",
-      "size": 5984
+      "sha256": "c0ff34e501a5947a48a9d32d7ec59ba68643c63b339b9c361ba2d7462bb79bbe",
+      "size": 5983
     },
     "assembly-front.pdf": {
-      "sha256": "93ddbd9d68aafd243517097aabf453ca075c44bde2e2aa9b567f9fc0da6ef753",
-      "size": 9306
+      "sha256": "f6023f5de79fa3861d0e17ad9e34921950fcba910d1681d5ecac21825585bf61",
+      "size": 9305
     },
     "bom_jlcpcb.csv": {
       "sha256": "bff6f5bac21cb349473f4bd2c2a55f1245bfe32e5a3a804ce99a46b8d502801c",
       "size": 194
     },
     "check-report.json": {
-      "sha256": "e17fd7b17b74b92edb3e9b3035d339e64d615d71da6a1652611fdd17353abcdc",
-      "size": 7553
+      "sha256": "6d5c04f817a04dda024df65daf3388408fb5a6484642eaa62364a4908ec89100",
+      "size": 8717
     },
     "cpl_jlcpcb.csv": {
-      "sha256": "3d1ab253728d028da44280bd8d7de99d86907abc59fd23a34ed4f7c6bef5dc30",
-      "size": 115
+      "sha256": "9496269abd6829fadaca21099f0c1114a1ffca15fe01d7ca6c083e4de27e2614",
+      "size": 118
     },
     "gerbers/gerbers.zip": {
-      "sha256": "0dae4db0b917a13a6583dd20a8bafc161e9fba254a0a2274d320598d65b8a9e6",
-      "size": 10674
+      "sha256": "817d50a860b865bf548239809b69ed5b47dfa0c398583be891c081861d7ba022",
+      "size": 10515
     },
     "images/assembly.png": {
       "sha256": "ca6a436bfa2f87e0a14faa2f9fecb9d608594f11a504aee0e92beb39cd1fea31",
@@ -58,36 +58,36 @@
       "size": 122270
     },
     "images/schematic_simple_led.png": {
-      "sha256": "ee6225e17a3ea7f6f4c076639be1465b2ae3537911bd0eeccf3ff708e42a306f",
-      "size": 117856
+      "sha256": "c90b07e37b51eb037d80cf8bcac2ab4392d8eca7868d0f6409ff154e62b7727a",
+      "size": 117853
     },
     "kicad_project.zip": {
-      "sha256": "00f5c8b6b56f6721bb45bf2f0a67372d9c84a0f7f446b5dd65d0710bb1385ddf",
-      "size": 12980
+      "sha256": "6a3224ec92230be99036fcc50d72fb461982583d73d1e5ae395d08f621a42210",
+      "size": 13127
     },
     "native-drc.json": {
-      "sha256": "2fc1cda0e8487368548f8bfdeb98687e308da5eb0f9bf114defc96bc65ec9908",
+      "sha256": "01a03b9b7401adc45f7a6f0d7b4c0334c09e0e5d182cfbb8e3269840fe56a0dc",
       "size": 252
     },
     "procurement-review.md": {
-      "sha256": "5a92a3d3954169dfb8a85c450f48603b1b43fcfbf713a89661fd314b8166d847",
-      "size": 10400
+      "sha256": "67082a5d2c91addbb151c3bd67174a9626091c6a0a157aa8c453355b2ca640d4",
+      "size": 11124
     },
     "report.md": {
-      "sha256": "af69a28ed8da80e684eb89bba82e448567a77d3e64cc3c89c263948303c82861",
-      "size": 2838
+      "sha256": "3cdbf6ce975e9accc3c53937703d2cf35fa43b5f83b31b18ef87bfec6cf9774e",
+      "size": 3002
     },
     "report.pdf": {
-      "sha256": "c57602db68ac69d3f2ae7b48daf8c0bc6c1ca2cc41320e97bcfb8449cfc1acd7",
-      "size": 745380
+      "sha256": "750569f2f8492c0be76e579e0aa5efa8e4e9fe0bcb22b3dd5c357a7c66e2d6bf",
+      "size": 739162
     },
     "schematic.pdf": {
-      "sha256": "ee8f39bd8d7db799e897b67f8e8ba1d31d12eb245f8f080567a76a6faf68b37c",
+      "sha256": "851485faf3f73876575652d533c2991b85236528b857288129a14a7051a2ba80",
       "size": 47252
     }
   },
-  "generated_at": "2026-10-13T23:27:55.461119+00:00",
-  "kicad_tools_version": "0.22.0",
+  "generated_at": "2026-10-18T11:38:54.560119+00:00",
+  "kicad_tools_version": "0.23.0",
   "manufacturer": "jlcpcb",
   "mode": "assembly",
   "preflight": [
@@ -140,9 +140,10 @@
       "status": "OK"
     },
     {
-      "message": "No LCSC value/package mismatches detected (0 assigned item(s) checked against local parts cache)",
+      "details": "unverified: R1 -> C17630, D1 -> C87271",
+      "message": "1 of 3 assigned item(s) verified (offline catalog); 2 unverifiable (not in parts cache or offline catalog)",
       "name": "bom_lcsc_values",
-      "status": "OK"
+      "status": "WARN"
     },
     {
       "message": "BOM and PCB references match (3 components)",
@@ -167,5 +168,7 @@
   ],
   "producer": "kct readiness",
   "version": "1.0",
-  "warning_counts_by_rule": {}
+  "warning_counts_by_rule": {
+    "pin1_marker_obscured": 1
+  }
 }
