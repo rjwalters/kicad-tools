@@ -976,6 +976,72 @@ class TestThermalSpokeLadder7295:
             assert pad.find("thermal_width").get_float(0) == 0.2
             assert pad.find("thermal_gap").get_float(0) == 0.2
 
+    def test_reads_kicad_saved_thermal_bridge_width(self):
+        """Issue #7309: KiCad re-saves the pad width as ``thermal_bridge_width``."""
+        from kicad_tools.zones.fill_clearance import (
+            _pad_thermal_override,
+            _set_pad_thermal,
+            force_solid_on_pads_by_uuid,
+        )
+
+        doc = parse_string(self._board(["2.0"]))
+        pad = self._pad(doc, "p0")
+        pad.append(SExp.list("thermal_bridge_width", 0.3))
+        pad.append(SExp.list("thermal_gap", 0.2))
+        assert _pad_thermal_override(pad) == (0.3, 0.2)
+        assert _set_pad_thermal(pad, 0.2, 0.2) is False
+        # Next narrowing reads (0.3, 0.2) -> (0.2, 0.2) with no duplicate tokens.
+        assert force_solid_on_pads_by_uuid(doc, {"p0"}) == 1
+        assert _pad_thermal_override(pad) == (0.2, 0.2)
+        assert len(pad.find_all("thermal_bridge_width")) == 0
+        assert len(pad.find_all("thermal_width")) == 1
+        assert len(pad.find_all("thermal_gap")) == 1
+
+    def test_kicad_resave_roundtrip_narrows_then_goes_solid(self, tmp_path):
+        """Issue #7309: round-trip through kicad-cli's saved form between passes."""
+        import shutil
+        import subprocess
+
+        from kicad_tools.cli.runner import find_kicad_cli
+        from kicad_tools.core.sexp_file import save_pcb
+        from kicad_tools.sexp import parse_file
+        from kicad_tools.zones.fill_clearance import force_solid_on_pads_by_uuid
+
+        cli = find_kicad_cli()
+        if cli is None and shutil.which("kicad-cli") is None:
+            pytest.skip("kicad-cli not available")
+        cli = str(cli or shutil.which("kicad-cli"))
+
+        pcb = tmp_path / "b.kicad_pcb"
+        uid = "11111111-2222-4333-8444-555555555555"  # KiCad rewrites non-UUID ids
+        pcb.write_text(self._board(["2.0"]).replace('"p0"', f'"{uid}"'))
+        doc = parse_file(pcb)
+        history = []
+        for _ in range(5):
+            force_solid_on_pads_by_uuid(doc, {uid})
+            save_pcb(doc, pcb)
+            subprocess.run(
+                [
+                    cli, "pcb", "drc", "--refill-zones", "--save-board",
+                    "-o", str(tmp_path / "drc.json"), "--format", "json", str(pcb),
+                ],
+                check=False, capture_output=True, timeout=120,
+            )  # fmt: skip
+            doc = parse_file(pcb)
+            pad = self._pad(doc, uid)
+            w = pad.find("thermal_width") or pad.find("thermal_bridge_width")
+            g = pad.find("thermal_gap")
+            history.append(
+                "solid"
+                if pad.find("zone_connect") is not None
+                else (w.get_float(0), g.get_float(0))
+            )
+            assert len(pad.find_all("thermal_bridge_width")) <= 1
+            assert len(pad.find_all("thermal_gap")) <= 1
+            if history[-1] == "solid":
+                break
+        assert history[:3] == [(0.3, 0.2), (0.2, 0.2), "solid"], history
+
     def test_readback_narrows_then_goes_solid(self):
         from kicad_tools.zones.fill_clearance import force_solid_on_pads_by_uuid
 
