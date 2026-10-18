@@ -293,3 +293,89 @@ class TestRouteFillWiring:
             f"expected >= 5 occurrences of _fill_zones_after_route( "
             f"(1 def + 4 callers), found {call_count}"
         )
+
+
+class TestNativeZoneClearanceFlag:
+    """Issue #7026: ``--native-zone-clearance`` writes the DRU block pre-fill."""
+
+    def _run(self, pcb, args):
+        from types import SimpleNamespace
+
+        from kicad_tools.cli.route_cmd import _fill_zones_after_route
+        from kicad_tools.cli.runner import KiCadCLIResult, NetFormatReport
+
+        seen: dict = {}
+
+        def fake_fill(path, **kwargs):
+            dru = path.with_suffix(".kicad_dru")
+            seen["dru"] = dru.read_text() if dru.exists() else None
+            return KiCadCLIResult(success=True, return_code=0)
+
+        with (
+            patch(_FIND_CLI, return_value=Path("/usr/bin/kicad-cli")),
+            patch(_RUN_FILL, side_effect=fake_fill),
+            patch(_VALIDATE_NET, return_value=NetFormatReport(valid=True)),
+        ):
+            _fill_zones_after_route(pcb, quiet=True, args=SimpleNamespace(**args))
+        return seen["dru"]
+
+    @staticmethod
+    def _project(pcb):
+        import json
+
+        pcb.with_suffix(".kicad_pro").write_text(
+            json.dumps({"net_settings": {"classes": [{"name": "Default", "clearance": 0.2}]}})
+        )
+
+    def test_block_present_at_fill_time_when_flag_set(self, pcb_with_zone):
+        self._project(pcb_with_zone)
+        dru = self._run(pcb_with_zone, {"native_zone_clearance": True})
+        assert dru is not None
+        assert "# BEGIN kct native zone clearance" in dru
+
+    def test_no_block_and_no_sidecar_without_flag(self, pcb_with_zone):
+        self._project(pcb_with_zone)
+        assert self._run(pcb_with_zone, {}) is None
+        assert not pcb_with_zone.with_suffix(".kicad_dru").exists()
+
+    def test_refusal_fails_the_route_loudly(self, pcb_with_zone):
+        # No saved project: write_native_zone_clearance_rules refuses.
+        with pytest.raises(ValueError):
+            self._run(pcb_with_zone, {"native_zone_clearance": True})
+
+    def test_placement_fill_path_also_writes_block(self, pcb_with_zone):
+        """The selective ``fill_around_fixed_copper`` path honours the flag too."""
+        from types import SimpleNamespace
+
+        from kicad_tools.cli.route_cmd import _fill_zones_after_route
+
+        self._project(pcb_with_zone)
+        seen: dict = {}
+
+        def fake_selective(path, nets):
+            dru = path.with_suffix(".kicad_dru")
+            seen["dru"] = dru.read_text() if dru.exists() else None
+
+        router = SimpleNamespace(
+            placement_disposition=SimpleNamespace(preserve_copper_nets={"GND"}),
+            layer_stack=SimpleNamespace(num_layers=2),
+        )
+        args = SimpleNamespace(
+            native_zone_clearance=True, manufacturer="jlcpcb", pcb=str(pcb_with_zone)
+        )
+        rc = "kicad_tools.cli.route_cmd."
+        with (
+            patch(rc + "_canonicalize_routed_uuids"),
+            patch(rc + "_pour_closer_net_class_map", return_value={}),
+            patch(rc + "_router_coupled_pairs", return_value=[]),
+            patch(rc + "_router_pair_gaps", return_value={}),
+            patch(rc + "_write_drc_constraint_sidecars"),
+            patch(
+                "kicad_tools.zones.placement_fill.fill_around_fixed_copper",
+                side_effect=fake_selective,
+            ),
+        ):
+            _fill_zones_after_route(pcb_with_zone, quiet=True, args=args, router=router)
+        assert args._placement_fill_error is None
+        assert seen["dru"] is not None
+        assert "# BEGIN kct native zone clearance" in seen["dru"]
