@@ -184,8 +184,17 @@ class TestCategoryListMatchesDispatcher:
     #   file located from the PCB *path*, and the bare call here leaves
     #   ``pcb_path=None``, making the closure a silent no-op.  Same
     #   rationale: not a checker method, not in ``CHECK_ALL_METHODS``.
+    # * ``spec_conformance`` (Issue #7292): ``project.kct`` requirements vs the
+    #   board, located from the PCB *path*; the bare call leaves
+    #   ``pcb_path=None``, making the closure a silent no-op.
     NON_CHECKER_CATEGORIES = frozenset(
-        {"sch_fields", "doc_drift", "netclass_floor", "netclass_clearance_copper"}
+        {
+            "sch_fields",
+            "doc_drift",
+            "netclass_floor",
+            "netclass_clearance_copper",
+            "spec_conformance",
+        }
     )
 
     def test_categories_list_equals_dispatcher_keys(self) -> None:
