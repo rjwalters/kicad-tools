@@ -6636,7 +6636,7 @@ def _add_readiness_parser(subparsers) -> None:
         "--include-tht",
         dest="readiness_include_tht",
         action="store_true",
-        help="Accept through-hole parts in the CPL (excluded by default)",
+        help="Accept through-hole parts in the CPL (excluded by default only for SMT-only fabs; JLCPCB includes them)",
     )
     rd_parser.add_argument(
         "--no-archive",
@@ -9385,7 +9385,7 @@ def _add_export_parser(subparsers) -> None:
         "--include-tht",
         dest="export_include_tht",
         action="store_true",
-        help="Include through-hole components in CPL (they are excluded by default for JLCPCB)",
+        help="Include through-hole components in CPL (only needed for fabs whose CPL excludes them by default; JLCPCB includes them)",
     )
     export_parser.add_argument(
         "--format",

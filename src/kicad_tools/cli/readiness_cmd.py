@@ -445,6 +445,19 @@ def _through_hole_refs(pcb: Path) -> set[str]:
     }
 
 
+def _fab_excludes_tht(manufacturer: str) -> bool:
+    """True when the fab family's CPL auto-excludes THT parts (hand-solder set).
+
+    JLCPCB offers THT assembly (issue #7239), so this is False for it; the
+    answer comes from the same set the export preflight consults, so the
+    readiness gates cannot desync from the CPL that actually ships.
+    """
+    from kicad_tools.export.preflight import PreflightChecker
+    from kicad_tools.manufacturers import get_fab_family
+
+    return get_fab_family(manufacturer.lower()) in PreflightChecker._SMT_ONLY_MANUFACTURERS
+
+
 def _net_metrics(pcb: Path) -> dict[str, Any]:
     """Routing-completion metrics for the emitted ``metrics`` block."""
     from kicad_tools.analysis.net_status import NetStatusAnalyzer
@@ -1893,6 +1906,7 @@ def _write_readme(
     options: ReadinessOptions,
     warning_counts: dict[str, int],
     tht_refs: Sequence[str],
+    tht_assembled: Sequence[str] = (),
 ) -> Path:
     """Gate 7 — the human-facing bundle index."""
     lines = [
@@ -1919,6 +1933,12 @@ def _write_readme(
             "  The following parts are EXCLUDED from the SMT CPL and must be hand-soldered:"
         )
         lines.append(f"  {', '.join(tht_refs)}")
+    elif tht_assembled:
+        lines.append(
+            "  The following through-hole parts are INCLUDED in the CPL and BOM "
+            "for fab assembly (flag for procurement review):"
+        )
+        lines.append(f"  {', '.join(tht_assembled)}")
     else:
         lines.append("  none (every placed part is SMT)")
 
@@ -2028,6 +2048,7 @@ def _gate_artifacts(
     engines: Engines,
     warning_counts: dict[str, int],
     tht_refs: Sequence[str],
+    tht_assembled: Sequence[str] = (),
 ) -> CheckOutcome:
     """Gate 3/5/6/7/8 — export, drawings, README, full manifest, provenance."""
     from kicad_tools.export.manufacturing import verify_manifest
@@ -2083,7 +2104,7 @@ def _gate_artifacts(
             problems.append(f"board package extras failed: {exc}")
 
     # Gate 7 — README, written before the manifest so it is checksummed.
-    readme = _write_readme(options, warning_counts, tht_refs)
+    readme = _write_readme(options, warning_counts, tht_refs, tht_assembled)
     if readme_extra:
         readme.write_text(readme.read_text() + "\n".join(["", *readme_extra, ""]))
 
@@ -2129,7 +2150,12 @@ def _read_csv_rows(path: Path) -> tuple[list[str], list[list[str]]]:
     return rows[0], rows[1:]
 
 
-def _gate_bom(options: ReadinessOptions, engines: Engines, tht_refs: Sequence[str]) -> CheckOutcome:
+def _gate_bom(
+    options: ReadinessOptions,
+    engines: Engines,
+    tht_refs: Sequence[str],
+    tht_assembled: Sequence[str] = (),
+) -> CheckOutcome:
     """Gate 4 — procurement identity (assembly) / explicit no-claim (pcb_only)."""
     if not options.assembly:
         return CheckOutcome(
@@ -2338,6 +2364,8 @@ def _gate_bom(options: ReadinessOptions, engines: Engines, tht_refs: Sequence[st
     tht_note = (
         f"SMT CPL excludes {len(tht_refs)} manual through-hole component(s)."
         if tht_refs
+        else f"CPL includes {len(tht_assembled)} through-hole component(s) for fab assembly."
+        if tht_assembled
         else "every placed part is SMT."
     )
     return CheckOutcome(
@@ -2835,8 +2863,14 @@ def _run_readiness_candidate(
         logger.warning("could not determine through-hole parts: %s", exc)
         tht_refs = []
 
-    checks.append(_gate_artifacts(options, engines, warning_counts, tht_refs))
-    checks.append(_gate_bom(options, engines, tht_refs))
+    # Only a fab whose CPL auto-excludes THT has a hand-solder set; elsewhere
+    # (JLCPCB, issue #7239) THT parts are placed by the fab and listed as such.
+    if _fab_excludes_tht(options.manufacturer):
+        tht_assembled: list[str] = []
+    else:
+        tht_assembled, tht_refs = tht_refs, []
+    checks.append(_gate_artifacts(options, engines, warning_counts, tht_refs, tht_assembled))
+    checks.append(_gate_bom(options, engines, tht_refs, tht_assembled))
     if engines.extra_checks is not None:
         try:
             checks.extend(engines.extra_checks(options))
@@ -3015,7 +3049,7 @@ def add_readiness_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--include-tht",
         action="store_true",
-        help="Accept through-hole parts in the CPL (they are excluded by default)",
+        help="Accept through-hole parts in the CPL (only SMT-only fabs exclude them by default)",
     )
     parser.add_argument(
         "--no-archive",

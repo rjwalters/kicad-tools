@@ -128,9 +128,10 @@ class PnPFormatter(ABC):
 class JLCPCBPnPFormatter(PnPFormatter):
     """Pick-and-place formatter for JLCPCB assembly service.
 
-    JLCPCB's standard assembly service is SMT-only, so through-hole
-    components are excluded from the CPL by default.  Pass
-    ``PnPExportConfig(exclude_tht=False)`` to include them.
+    JLCPCB's Economic and Standard PCBA tiers both offer through-hole
+    assembly, so through-hole components are included in the CPL by default
+    (issue #7239).  Pass ``PnPExportConfig(exclude_tht=True)`` to leave them
+    out.
     """
 
     manufacturer_id = "jlcpcb"
@@ -142,7 +143,7 @@ class JLCPCBPnPFormatter(PnPFormatter):
         rotation_corrections: dict[str, float] | None = None,
     ):
         if config is None:
-            config = PnPExportConfig(exclude_tht=True)
+            config = PnPExportConfig(exclude_tht=False)
         super().__init__(config, rotation_corrections)
 
     def get_headers(self) -> list[str]:
@@ -611,7 +612,7 @@ def export_pnp(
         Formatted CPL as CSV string
     """
     # Resolve the effective config through the formatter FIRST so
-    # manufacturer defaults (e.g., JLCPCB defaults to exclude_tht=True)
+    # manufacturer defaults (e.g., a fab that defaults to exclude_tht=True)
     # apply regardless of which branch below runs.  The formatter is the
     # single source of truth for the effective config; synthesizing a
     # config here would silently drop those defaults (issue #3618).

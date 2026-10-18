@@ -534,7 +534,7 @@ class AssemblyPackage:
         rotation_corrections = self._get_rotation_corrections()
 
         # Generate CPL – pass None when no explicit config so that the
-        # formatter can apply its own defaults (e.g. JLCPCB exclude_tht=True).
+        # formatter can apply its own defaults (a fab-specific exclude_tht default).
         # The CPL must share the Gerbers' frame, so take use_aux_origin from
         # the same preset the package plots with (OSH Park: False) unless
         # the caller supplied an explicit pnp_config.
@@ -554,7 +554,7 @@ class AssemblyPackage:
 
         # Record the THT hand-solder set excluded from the CPL.  Use the
         # formatter's *effective* config so manufacturer defaults
-        # (JLCPCB: exclude_tht=True) are honoured when no explicit
+        # (fab-specific exclude_tht) are honoured when no explicit
         # pnp_config was supplied.
         if result is not None:
             result.rotation_corrections_applied = count_rotation_corrections(

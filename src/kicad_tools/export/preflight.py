@@ -375,11 +375,12 @@ class PreflightChecker:
     # assembly service and CPL format, so they must inherit the parent's
     # THT policy.  See ``get_fab_family()`` and issue #3497.
     #
-    # TODO(#7204): JLCPCB's assembly capability page now lists THT placement
-    # in both its Economic and Standard PCBA tiers.  Whether to stop
-    # auto-excluding THT from JLCPCB CPLs changes CPL contents fleet-wide and
-    # is an operator decision, so this policy is intentionally unchanged.
-    _SMT_ONLY_MANUFACTURERS = {"jlcpcb"}
+    # Currently empty: JLCPCB's assembly capability page lists
+    # "(SMT/Thru-hole)" for both its Economic and Standard PCBA tiers
+    # (https://jlcpcb.com/capabilities/pcb-assembly-capabilities, fetched
+    # 2026-10-18), so JLCPCB CPLs include THT parts (issue #7239).  Add a fab
+    # family here to make it auto-exclude THT again.
+    _SMT_ONLY_MANUFACTURERS: set[str] = set()
 
     def __init__(
         self,

@@ -8175,7 +8175,7 @@ class PCB:
         # Pass config=None so the formatter resolves the effective config —
         # the single source of truth (issues #3616/#3618).  Synthesizing a
         # bare PnPExportConfig() here would defeat manufacturer defaults such
-        # as JLCPCB's exclude_tht=True, shipping THT rows in the CPL.
+        # as a fab-specific exclude_tht default.
         pnp_csv = _export_pnp(footprints, mfr, config=None, aux_origin=_aux_origin_of(self.setup))
 
         # Write to file

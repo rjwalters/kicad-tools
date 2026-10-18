@@ -749,7 +749,28 @@ def test_placeholder_ids_are_ignored_for_a_pcb_only_order(tmp_path):
     assert check_status(report, "bom") == "passed"
 
 
-def test_through_hole_parts_must_not_ride_in_the_smt_cpl(tmp_path):
+@pytest.fixture
+def smt_only_fab(monkeypatch):
+    """Make ``jlcpcb`` behave as a still-SMT-only fab (JLCPCB itself offers THT, #7239)."""
+    from kicad_tools.export.preflight import PreflightChecker
+
+    monkeypatch.setattr(PreflightChecker, "_SMT_ONLY_MANUFACTURERS", {"jlcpcb"})
+
+
+def test_jlcpcb_cpl_may_carry_through_hole_parts(tmp_path):
+    board = make_board(tmp_path)
+    fake = FakeEngines(board, tht_refs=("D1", "J1"), cpl_refs=("R1", "U1", "D1", "J1"))
+
+    code, report = run(board, fake)
+
+    assert code == 0
+    assert check_status(report, "bom") == "passed"
+    readme = (board / "output" / "manufacturing" / "README.txt").read_text()
+    assert "INCLUDED in the CPL" in readme
+    assert "hand-soldered" not in readme
+
+
+def test_through_hole_parts_must_not_ride_in_the_smt_cpl(tmp_path, smt_only_fab):
     board = make_board(tmp_path)
     fake = FakeEngines(board, tht_refs=("D1", "J1"), cpl_refs=("R1", "U1", "D1"))
 
@@ -760,7 +781,7 @@ def test_through_hole_parts_must_not_ride_in_the_smt_cpl(tmp_path):
     assert any("hand-soldered" in blocker for blocker in report["blockers"])
 
 
-def test_include_tht_opts_into_a_cpl_carrying_through_hole_parts(tmp_path):
+def test_include_tht_opts_into_a_cpl_carrying_through_hole_parts(tmp_path, smt_only_fab):
     board = make_board(tmp_path)
     fake = FakeEngines(board, tht_refs=("D1",), cpl_refs=("R1", "U1", "D1"))
 
@@ -770,7 +791,7 @@ def test_include_tht_opts_into_a_cpl_carrying_through_hole_parts(tmp_path):
     assert check_status(report, "bom") == "passed"
 
 
-def test_excluded_tht_parts_are_named_as_hand_solder_items(tmp_path):
+def test_excluded_tht_parts_are_named_as_hand_solder_items(tmp_path, smt_only_fab):
     board = make_board(tmp_path)
     fake = FakeEngines(board, tht_refs=("D1", "J1"), cpl_refs=("R1", "U1"))
 
