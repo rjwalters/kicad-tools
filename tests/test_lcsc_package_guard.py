@@ -493,11 +493,14 @@ class TestPreflightLcscPackageCheck:
 
         assert result.status == "OK"
 
-    def test_unknown_parts_ok(self, tmp_path):
+    def test_unknown_parts_warn_not_ok(self, tmp_path):
+        """A part in neither cache nor catalog is unverified, not "OK" (#7166)."""
         cache = _make_cache(tmp_path)
         items = [_make_item("C12", "100nF", FP_0805_CAP, lcsc="C424242")]
         checker = self._checker(tmp_path, items, cache)
 
         result = checker._check_bom_lcsc_values()
 
-        assert result.status == "OK"
+        assert result.status == "WARN"
+        assert "0 of 1 assigned item(s) verified" in result.message
+        assert "C12 -> C424242" in result.details

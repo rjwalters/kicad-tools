@@ -39,6 +39,19 @@ from kicad_tools.schema.bom import extract_bom
 _VALUE_REL_TOLERANCE = 0.05
 
 
+def _footprints_equivalent(sch_fp: str, pcb_fp: str) -> bool:
+    """Compare footprint lib IDs, nickname-aware (Issue #7213).
+
+    When both sides carry a ``Library:`` nickname the full IDs must match, so
+    ``Capacitor_SMD:X`` vs ``Resistor_SMD:X`` is real drift. If either side is
+    a bare name (legacy boards) only the footprint names are compared.
+    Shares :func:`compare_footprint_lib_ids` with ``kct validate --sync``.
+    """
+    from kicad_tools.footprints.library_path import compare_footprint_lib_ids
+
+    return compare_footprint_lib_ids(sch_fp, pcb_fp) != "mismatch"
+
+
 def _values_equivalent(sch_value: str, pcb_value: str, reference: str) -> bool:
     """Return True when two value strings denote the same component value.
 
@@ -426,9 +439,7 @@ class Reconciler:
             sch_fp = sch.get("footprint", "")
             pcb_fp = pcb.get("footprint", "")
             if sch_fp and pcb_fp:
-                sch_fp_name = sch_fp.split(":")[-1] if ":" in sch_fp else sch_fp
-                pcb_fp_name = pcb_fp.split(":")[-1] if ":" in pcb_fp else pcb_fp
-                if sch_fp_name != pcb_fp_name:
+                if not _footprints_equivalent(sch_fp, pcb_fp):
                     actions.append(
                         {
                             "type": "update_footprint",
@@ -474,8 +485,6 @@ class Reconciler:
             if not sch_value or not sch_fp:
                 continue
 
-            sch_fp_name = sch_fp.split(":")[-1] if ":" in sch_fp else sch_fp
-
             # Find PCB candidates with same value+footprint
             candidates = []
             for pcb_ref in unmatched_pcb:
@@ -484,9 +493,10 @@ class Reconciler:
                 pcb = pcb_components[pcb_ref]
                 pcb_value = pcb.get("value", "")
                 pcb_fp = pcb.get("footprint", "")
-                pcb_fp_name = pcb_fp.split(":")[-1] if ":" in pcb_fp else pcb_fp
 
-                if _values_equivalent(sch_value, pcb_value, sch_ref) and sch_fp_name == pcb_fp_name:
+                if _values_equivalent(sch_value, pcb_value, sch_ref) and _footprints_equivalent(
+                    sch_fp, pcb_fp
+                ):
                     candidates.append(pcb_ref)
 
             if len(candidates) == 1:
@@ -521,16 +531,14 @@ class Reconciler:
             if not sch_fp:
                 continue
 
-            sch_fp_name = sch_fp.split(":")[-1] if ":" in sch_fp else sch_fp
             candidates = []
             for pcb_ref in unmatched_pcb:
                 if pcb_ref in matched_pcb:
                     continue
                 pcb = pcb_components[pcb_ref]
                 pcb_fp = pcb.get("footprint", "")
-                pcb_fp_name = pcb_fp.split(":")[-1] if ":" in pcb_fp else pcb_fp
 
-                if sch_fp_name == pcb_fp_name:
+                if _footprints_equivalent(sch_fp, pcb_fp):
                     candidates.append(pcb_ref)
 
             if len(candidates) == 1:

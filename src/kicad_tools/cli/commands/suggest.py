@@ -26,7 +26,7 @@ def _run_alternatives_command(args) -> int:
     """Suggest alternative parts for BOM items with availability issues."""
     from kicad_tools.cost import AlternativePartFinder
     from kicad_tools.parts import LCSCClient
-    from kicad_tools.schema.bom import extract_bom
+    from kicad_tools.schema.bom import extract_bom, load_bom_csv
 
     input_path = Path(args.schematic)
     if not input_path.exists():
@@ -37,7 +37,7 @@ def _run_alternatives_command(args) -> int:
     try:
         if args.bom:
             # Load from CSV
-            bom = _load_bom_from_csv(input_path)
+            bom = load_bom_csv(input_path)
         else:
             # Load from schematic
             bom = extract_bom(str(input_path))
@@ -107,68 +107,6 @@ def _run_alternatives_command(args) -> int:
         _print_text_suggestions(suggestions, verbose=args.verbose)
 
     return 0
-
-
-def _load_bom_from_csv(path: Path):
-    """Load BOM from a CSV file."""
-    import csv
-
-    from kicad_tools.schema.bom import BOM, BOMItem
-
-    items = []
-    with open(path, newline="", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            # Try to find common column names
-            reference = (
-                row.get("Reference")
-                or row.get("reference")
-                or row.get("Designator")
-                or row.get("designator")
-                or ""
-            )
-            value = (
-                row.get("Value")
-                or row.get("value")
-                or row.get("Comment")
-                or row.get("comment")
-                or ""
-            )
-            footprint = (
-                row.get("Footprint")
-                or row.get("footprint")
-                or row.get("Package")
-                or row.get("package")
-                or ""
-            )
-            lcsc = (
-                row.get("LCSC")
-                or row.get("lcsc")
-                or row.get("LCSC Part")
-                or row.get("JLC Part")
-                or ""
-            )
-            mpn = (
-                row.get("MPN")
-                or row.get("mpn")
-                or row.get("Manufacturer Part")
-                or row.get("Part Number")
-                or ""
-            )
-
-            if reference:
-                items.append(
-                    BOMItem(
-                        reference=reference,
-                        value=value,
-                        footprint=footprint,
-                        lib_id="",
-                        lcsc=lcsc,
-                        mpn=mpn,
-                    )
-                )
-
-    return BOM(items=items, source=str(path))
 
 
 def _print_json_suggestions(suggestions: list) -> None:

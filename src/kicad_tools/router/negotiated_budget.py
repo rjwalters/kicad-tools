@@ -155,6 +155,30 @@ def escape_budget(
     return max(0.0, min(60.0, remaining * 0.25))
 
 
+# Issue #7071: the escape may rerun at most this many multiples of a normal
+# rip-up iteration's per-net reroutes.
+ESCAPE_REROUTE_K = 1
+
+
+def escape_reroute_cap(
+    iteration_reroute_counts: list[int], k: int = ESCAPE_REROUTE_K
+) -> int | None:
+    """Deterministic cap on per-net reroute attempts in one escape (#7071).
+
+    ``k`` times the median number of nets rerouted per completed rip-up
+    iteration so far.  Counted in attempts rather than seconds so the
+    number of strategies an escape reaches does not depend on host speed:
+    ``--deterministic-budget --seed N`` stays byte-identical.  ``None``
+    (no cap) until at least one rip-up iteration has been observed.
+    """
+    counts = sorted(c for c in iteration_reroute_counts if c > 0)
+    if not counts:
+        return None
+    mid = len(counts) // 2
+    median = counts[mid] if len(counts) % 2 else (counts[mid - 1] + counts[mid]) / 2
+    return max(1, int(k * median + 0.5))
+
+
 def wall_clock_arm_line(cap: int, deterministic_rescue: bool) -> str:
     """Routing-log line naming the escape-budget / per-iteration-cap arm (#6475)."""
     if wall_clock_free_arm(cap, deterministic_rescue):

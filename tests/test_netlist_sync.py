@@ -748,6 +748,85 @@ class TestNetlistValidator:
         assert "pcb_footprints=" in repr_str
 
 
+class TestFootprintLibIdSync:
+    """``validate --sync`` compares footprint lib IDs, nickname included (#7213)."""
+
+    @pytest.mark.parametrize(
+        ("sch", "pcb", "expected"),
+        [
+            ("Capacitor_SMD:C_0402", "Capacitor_SMD:C_0402", "match"),
+            ("C_0402", "C_0402", "match"),
+            ("Capacitor_SMD:C_0402", "Resistor_SMD:C_0402", "mismatch"),
+            ("Capacitor_SMD:C_0402", "Capacitor_SMD:C_0603", "mismatch"),
+            ("C_0402", "C_0603", "mismatch"),
+            ("Capacitor_SMD:C_0402", "C_0402", "nickname_missing"),
+            ("C_0402", "Capacitor_SMD:C_0402", "nickname_missing"),
+        ],
+    )
+    def test_compare_footprint_lib_ids(self, sch, pcb, expected):
+        from kicad_tools.footprints.library_path import compare_footprint_lib_ids
+
+        assert compare_footprint_lib_ids(sch, pcb) == expected
+
+    def _validate(self, tmp_path, c1_pcb_footprint):
+        sch_file = tmp_path / "test.kicad_sch"
+        pcb_file = tmp_path / "test.kicad_pcb"
+        sch_file.write_text(MINIMAL_SCHEMATIC)
+        pcb_file.write_text(
+            MINIMAL_PCB_MATCHING.replace(
+                '(footprint "Capacitor_SMD:C_0402"', f'(footprint "{c1_pcb_footprint}"'
+            )
+        )
+        return NetlistValidator(sch_file, pcb_file).validate()
+
+    def test_matching_lib_ids_report_nothing(self, tmp_path):
+        result = self._validate(tmp_path, "Capacitor_SMD:C_0402")
+        assert result.footprint_mismatches == []
+
+    def test_nickname_drift_is_error(self, tmp_path):
+        result = self._validate(tmp_path, "Resistor_SMD:C_0402")
+        [issue] = result.footprint_mismatches
+        assert issue.reference == "C1"
+        assert issue.is_error
+        assert "Capacitor_SMD:C_0402" in issue.message
+        assert "Resistor_SMD:C_0402" in issue.message
+        assert result.in_sync is False
+
+    def test_package_drift_is_error(self, tmp_path):
+        result = self._validate(tmp_path, "Capacitor_SMD:C_0603")
+        [issue] = result.footprint_mismatches
+        assert issue.is_error
+        assert result.in_sync is False
+
+    def test_missing_nickname_is_warning(self, tmp_path):
+        result = self._validate(tmp_path, "C_0402")
+        [issue] = result.footprint_mismatches
+        assert issue.reference == "C1"
+        assert issue.is_warning
+        assert "nickname" in issue.message
+        # Same package: a warning, so the board is still in sync.
+        assert result.in_sync is True
+
+    def test_cli_flags_nickname_drift(self, tmp_path, capsys):
+        import json
+
+        from kicad_tools.cli.validate_sync_cmd import main
+
+        sch_file = tmp_path / "test.kicad_sch"
+        pcb_file = tmp_path / "test.kicad_pcb"
+        sch_file.write_text(MINIMAL_SCHEMATIC)
+        pcb_file.write_text(
+            MINIMAL_PCB_MATCHING.replace(
+                '(footprint "Capacitor_SMD:C_0402"', '(footprint "Resistor_SMD:C_0402"'
+            )
+        )
+        rc = main([str(sch_file), str(pcb_file), "--format", "json"])
+        out = json.loads(capsys.readouterr().out)
+        assert rc == 1
+        assert out["summary"]["footprint_mismatches"] == 1
+        assert any(i["category"] == "footprint_mismatch" for i in out["issues"])
+
+
 class TestProjectCheckSync:
     """Tests for Project.check_sync() method."""
 

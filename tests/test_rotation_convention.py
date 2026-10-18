@@ -129,32 +129,65 @@ class TestGetPadPositionMatchesPcbnewOracle:
         assert pos[1] == pytest.approx(expected[1], abs=1e-6)
 
 
+_LIVE_SCRIPT = """
+import json
+import pcbnew
+
+fp_pos = {fp_pos!r}
+pad_local = {pad_local!r}
+board = pcbnew.BOARD()
+fp = pcbnew.FOOTPRINT(board)
+fp.SetPosition(pcbnew.VECTOR2I(pcbnew.FromMM(fp_pos[0]), pcbnew.FromMM(fp_pos[1])))
+board.Add(fp)
+pad = pcbnew.PAD(fp)
+fp.Add(pad)
+fp.SetOrientationDegrees(0)
+pad.SetPosition(
+    pcbnew.VECTOR2I(
+        pcbnew.FromMM(fp_pos[0] + pad_local[0]),
+        pcbnew.FromMM(fp_pos[1] + pad_local[1]),
+    )
+)
+out = {{}}
+for rotation in (0.0, 90.0, 180.0, 270.0):
+    fp.SetOrientationDegrees(rotation)
+    p = pad.GetPosition()
+    out[str(rotation)] = [pcbnew.ToMM(p.x), pcbnew.ToMM(p.y)]
+print("LIVE_JSON=" + json.dumps(out))
+"""
+
+
 class TestLivePcbnewOracle:
-    """Re-derive the oracle from a live pcbnew if it is importable."""
+    """Re-derive the oracle from a live pcbnew in a KiCad-capable interpreter.
+
+    pcbnew is never importable in the uv venv, so probe through
+    ``find_kicad_python()`` (CI container ``/usr/bin/python3``, KiCad.app's
+    Python on macOS) and run the oracle there (Issue #7193).
+    """
 
     def test_helper_matches_live_pcbnew(self) -> None:
-        pcbnew = pytest.importorskip("pcbnew", reason="pcbnew not importable in this environment")
+        import json
+        import subprocess
 
-        board = pcbnew.BOARD()
-        fp = pcbnew.FOOTPRINT(board)
-        fp.SetPosition(pcbnew.VECTOR2I(pcbnew.FromMM(FP_POS[0]), pcbnew.FromMM(FP_POS[1])))
-        board.Add(fp)
+        from kicad_tools.zones.placement_fill import find_kicad_python
 
-        pad = pcbnew.PAD(fp)
-        fp.Add(pad)
-        # Define the pad's local offset by setting its world pos at deg 0.
-        fp.SetOrientationDegrees(0)
-        pad.SetPosition(
-            pcbnew.VECTOR2I(
-                pcbnew.FromMM(FP_POS[0] + PAD_LOCAL[0]),
-                pcbnew.FromMM(FP_POS[1] + PAD_LOCAL[1]),
-            )
+        kpy = find_kicad_python()
+        if kpy is None:
+            pytest.skip("no KiCad python interpreter with pcbnew found")
+
+        proc = subprocess.run(
+            [str(kpy), "-c", _LIVE_SCRIPT.format(fp_pos=FP_POS, pad_local=PAD_LOCAL)],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
         )
+        assert proc.returncode == 0, f"live pcbnew oracle failed:\n{proc.stderr}"
+        line = next(ln for ln in proc.stdout.splitlines() if ln.startswith("LIVE_JSON="))
+        live_all = json.loads(line[len("LIVE_JSON=") :])
 
         for rotation in (0.0, 90.0, 180.0, 270.0):
-            fp.SetOrientationDegrees(rotation)
-            p = pad.GetPosition()
-            live = (pcbnew.ToMM(p.x), pcbnew.ToMM(p.y))
+            live = tuple(live_all[str(rotation)])
             ours = _world_via_helper(rotation)
             assert ours[0] == pytest.approx(live[0], abs=1e-4), (
                 f"deg{rotation}: kicad-tools x={ours[0]} != live pcbnew {live[0]}"

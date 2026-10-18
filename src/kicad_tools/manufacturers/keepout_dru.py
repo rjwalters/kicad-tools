@@ -64,9 +64,30 @@ Expression strings: KiCad's DRC expression lexer knows exactly one escape,
 quote, so it is written as the ``?`` wildcard (``intersectsArea`` and
 ``memberOfFootprint`` match names with wildcards).
 
-If a future KiCad restores the implicit keepout rule, a violation may be
-reported twice (implicit + explicit).  That is harmless for a
-zero-violations gate.
+Native enforcement from KiCad 10.0.6 (Issue #7198).  Measured black-box on
+2026-10-18 with one offending item per case (``items_not_allowed`` counts; the
+boards are ``tests/test_keepout_dru.py``'s ``_board`` / ``_fp_board``):
+
+* ``kicad/kicad:10.0.1``: 0 native findings for every kind below, so the rule
+  above is the only enforcement.
+* The pinned 10.0.6 image enforces every kind natively with no kct rule: track,
+  via, pad, footprint, zone fill, layer scoping and footprint-embedded areas.
+  With the kct rule installed a *track* through a keepout is reported **twice**
+  (native + kct); vias, pads, footprints and zone fills are reported once
+  (under the kct rule's name), so only tracks inflate error totals.
+* 10.0.6 also flags the parent footprint's own pad inside a footprint-embedded
+  keepout, with or without the kct rule, so the ``memberOfFootprint`` exclusion
+  above does nothing there and "KiCad's implicit keepout exempts its parent"
+  was not observed.  That is KiCad's behaviour and is not worked around.
+* 10.0.2 and 10.0.4 were not measured; the gate is the measured 10.0.6.
+
+So :func:`apply_keepout_rules` emits the block only for a ``kicad-cli`` older
+than :data:`KEEPOUT_NATIVE_MIN_KICAD_VERSION`, and removes a stale block on
+newer releases.  An undetectable version fails toward enforcement (the block is
+emitted).  Consequence: the ``.kicad_dru`` content depends on the release that
+wrote it, so a sidecar written on 10.0.6 and checked on 10.0.1 loses keepout
+enforcement.  That is accepted because committed native evidence is pinned to
+10.0.6 (#6962).
 """
 
 from __future__ import annotations
@@ -75,6 +96,12 @@ import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+
+from .dru_generator import parse_kicad_cli_version
+
+#: First ``kicad-cli`` release whose native DRC enforces every keepout kind
+#: itself (Issue #7198) -- see the module docstring for the measurements.
+KEEPOUT_NATIVE_MIN_KICAD_VERSION = (10, 0, 6)
 
 #: Sentinel markers for the kct-owned keepout block.  Distinct from the
 #: fab-floors (#4600) and creepage (#4508) markers so all three coexist.
@@ -278,6 +305,23 @@ def merge_keepout_block(existing: str | None, rules: list[KeepoutDruRule]) -> st
     return f"{prefix}\n{block}\n"
 
 
-def apply_keepout_rules(existing: str | None, pcb_path: str | Path) -> str | None:
-    """Convenience: :func:`merge_keepout_block` with the board's own rules."""
+def apply_keepout_rules(
+    existing: str | None,
+    pcb_path: str | Path,
+    kicad_cli_version: str | None = None,
+) -> str | None:
+    """Convenience: :func:`merge_keepout_block` with the board's own rules.
+
+    ``kicad_cli_version`` is the raw ``kicad-cli version`` output.  At or above
+    :data:`KEEPOUT_NATIVE_MIN_KICAD_VERSION` native DRC already enforces every
+    keepout, so no block is written and a stale one is removed (Issue #7198).
+    ``None``/unparseable keeps the block: an unknown version fails toward
+    enforcement.
+
+    May return ``""`` (the stale block was the only content), so callers must
+    test ``is not None`` rather than ``or`` when falling back.
+    """
+    parsed = parse_kicad_cli_version(kicad_cli_version)
+    if parsed is not None and parsed >= KEEPOUT_NATIVE_MIN_KICAD_VERSION:
+        return merge_keepout_block(existing, [])
     return merge_keepout_block(existing, keepout_rules_for_board(pcb_path))

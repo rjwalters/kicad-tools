@@ -771,7 +771,12 @@ class Project:
             report_path: Path to KiCad DRC report file (.rpt)
 
         Returns:
-            List of ManufacturerCheck results
+            One ManufacturerCheck per violation in the report (Issue #7170).
+            A violation kct has no fab-limit check for is returned with
+            ``result == CheckResult.UNKNOWN`` and ``rule_name ==
+            "not_checked"`` (``check.is_not_checked``); it is not
+            ``is_compatible``, and keeps kicad-cli's severity on
+            ``check.violation``.
 
         Raises:
             FileNotFoundError: If no DRC report found

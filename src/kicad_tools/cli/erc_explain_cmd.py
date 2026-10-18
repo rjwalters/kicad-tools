@@ -1225,7 +1225,8 @@ def main(argv: list[str] | None = None) -> int:
     if schematic_path:
         all_labels = gather_labels_from_schematic(schematic_path)
 
-    from .erc_cmd import hidden_by_view_filter, no_match_message
+    from ._gate import hidden_by_view_filter
+    from .erc_cmd import no_match_message
 
     # Verdict set: the exit code is computed from this, before the view
     # filters, so a ``--type`` that hides every error is not a pass (#7094).

@@ -346,6 +346,17 @@ class TestDifferentialMicrostrip:
         # Looser coupling (wider spacing) should give higher differential Z
         assert z_diff_loose > z_diff_tight
 
+    def test_delegates_to_coupled_lines_model(self):
+        """One coupled-microstrip model: same Zdiff as CoupledLines (#7060)."""
+        from kicad_tools.physics import CoupledLines
+
+        stackup = Stackup.jlcpcb_4layer()
+        tl = TransmissionLine(stackup)
+        for width, spacing in ((0.2, 0.2), (0.127, 0.127), (0.3, 0.6)):
+            _, z_diff = tl.differential_microstrip(width, spacing, "F.Cu")
+            expected = CoupledLines(stackup).edge_coupled_microstrip(width, spacing, "F.Cu")
+            assert z_diff == expected.zdiff
+
 
 class TestStackupIntegration:
     """Tests for integration with different stackups."""

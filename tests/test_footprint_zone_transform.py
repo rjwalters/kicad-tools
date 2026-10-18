@@ -525,6 +525,8 @@ def test_router_mask_follows_an_in_memory_move(tmp_path):
 
 
 def _native_keepout_hits(board: Path) -> list[str]:
+    # Version-agnostic (#7198): kct's rule enforces the area on kicad-cli
+    # < 10.0.6, native DRC itself from 10.0.6; either way one finding.
     cli = find_kicad_cli()
     if cli is None:
         pytest.skip("Native KiCad CLI is not installed")
@@ -553,7 +555,7 @@ def _native_keepout_hits(board: Path) -> list[str]:
     return sorted(
         item["description"]
         for v in data["violations"]
-        if v["type"] == "items_not_allowed" and "kct keepout" in v["description"]
+        if v["type"] == "items_not_allowed"
         for item in v["items"]
         if item["description"].startswith("Track")
     )

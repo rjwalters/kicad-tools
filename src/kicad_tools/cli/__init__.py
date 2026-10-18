@@ -281,15 +281,29 @@ def _dispatch_command(args) -> int:
             # Parse subcommand (default behavior)
             from .erc_cmd import main as erc_cmd
 
-            sub_argv = [args.report]
+            sub_argv = [args.report] if args.report else []
             if args.format != "table":
                 sub_argv.extend(["--format", args.format])
             if args.errors_only:
                 sub_argv.append("--errors-only")
+            if args.erc_strict:
+                sub_argv.append("--strict")
             if args.filter_type:
                 sub_argv.extend(["--type", args.filter_type])
             if args.sheet:
                 sub_argv.extend(["--sheet", args.sheet])
+            if args.erc_by_sheet:
+                sub_argv.append("--by-sheet")
+            if args.erc_verbose:
+                sub_argv.append("--verbose")
+            if args.erc_filter_config:
+                sub_argv.extend(["--filter-config", args.erc_filter_config])
+            if args.erc_keep_report:
+                sub_argv.append("--keep-report")
+            if args.erc_output:
+                sub_argv.extend(["--output", args.erc_output])
+            if args.erc_list_types:
+                sub_argv.append("--list-types")
             return erc_cmd(sub_argv)
 
         else:
@@ -322,6 +336,9 @@ def _dispatch_command(args) -> int:
         # Issue #7077: opt out of the NOT RUN parity -> exit 2 gate.
         if getattr(args, "allow_incomplete", False):
             sub_argv.append("--allow-incomplete")
+        # Issue #7096: opt out of failing on unconnected items.
+        if getattr(args, "ignore_unconnected", False):
+            sub_argv.append("--ignore-unconnected")
         # Issue #7147: explicit parity schematic.
         if getattr(args, "schematic", None):
             sub_argv.extend(["--schematic", str(args.schematic)])
@@ -1080,6 +1097,9 @@ def _run_export_command(args) -> int:
         sub_argv.append("--skip-drc-floor")
     if getattr(args, "export_strict_preflight", False):
         sub_argv.append("--strict-preflight")
+    export_assembly_tier = getattr(args, "export_assembly_tier", "auto")
+    if export_assembly_tier and export_assembly_tier != "auto":
+        sub_argv.extend(["--assembly-tier", export_assembly_tier])
     if getattr(args, "export_allow_unbuildable_bom", False):
         sub_argv.append("--allow-unbuildable-bom")
     if getattr(args, "export_skip_drc", False):

@@ -553,14 +553,16 @@ class TestPreflightLcscValueCheck:
 
         assert result.status == "OK"
 
-    def test_unknown_parts_ok(self, tmp_path):
+    def test_unknown_parts_warn_not_ok(self, tmp_path):
+        """Unknown parts are unverified, never reported as checked (#7166)."""
         cache = _make_cache(tmp_path)
         items = [_make_item("C10", "16nF", FP_0402_CAP, lcsc="C424242")]
         checker = self._checker(tmp_path, items, cache)
 
         result = checker._check_bom_lcsc_values()
 
-        assert result.status == "OK"
+        assert result.status == "WARN"
+        assert "C10 -> C424242" in result.details
 
     def test_missing_lcsc_and_dnp_ignored(self, tmp_path):
         cache = _poisoned_cache(tmp_path)

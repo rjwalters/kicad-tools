@@ -442,14 +442,54 @@ def _add_erc_parser(subparsers) -> None:
         help="Parse ERC report (default command)",
         description="Parse and display ERC report from schematic or JSON file",
     )
+    # Every option of ``erc_cmd.build_parser`` is mirrored here and forwarded
+    # by the ``erc parse`` shim in ``cli/__init__.py`` (Issue #7161); the
+    # drift test in tests/test_cli_parser_drift.py keeps the two in step.
     erc_parse.add_argument(
         "report",
+        nargs="?",
         help="Path to schematic (.kicad_sch) or ERC report (.json or .rpt)",
     )
     erc_parse.add_argument("--format", choices=["table", "json", "summary"], default="table")
     erc_parse.add_argument("--errors-only", action="store_true")
-    erc_parse.add_argument("--type", dest="filter_type", help="Filter by violation type")
-    erc_parse.add_argument("--sheet", help="Filter by sheet path")
+    erc_parse.add_argument(
+        "--strict",
+        dest="erc_strict",
+        action="store_true",
+        help="Exit with code 2 when only warnings are found",
+    )
+    erc_parse.add_argument(
+        "--type", "-t", dest="filter_type", help="Filter by violation type (view only)"
+    )
+    erc_parse.add_argument("--sheet", help="Filter by sheet path (view only)")
+    erc_parse.add_argument(
+        "--by-sheet", dest="erc_by_sheet", action="store_true", help="Group violations by sheet"
+    )
+    erc_parse.add_argument(
+        "--verbose",
+        "-v",
+        dest="erc_verbose",
+        action="store_true",
+        help="Show detailed violation information",
+    )
+    erc_parse.add_argument(
+        "--filter-config",
+        dest="erc_filter_config",
+        help="TOML file with [[erc.filters]] rules to suppress or reclassify violations",
+    )
+    erc_parse.add_argument(
+        "--keep-report",
+        dest="erc_keep_report",
+        action="store_true",
+        help="Keep the ERC report file after running",
+    )
+    erc_parse.add_argument("--output", "-o", dest="erc_output", help="Save ERC report to this path")
+    erc_parse.add_argument(
+        "--list-types",
+        dest="erc_list_types",
+        action="store_true",
+        help="List all known ERC violation types and exit",
+    )
 
     # erc explain subcommand
     erc_explain = erc_subparsers.add_parser(
@@ -509,6 +549,15 @@ def _add_drc_parser(subparsers) -> None:
             "schematic resolved, several candidates, one kicad-cli cannot "
             "netlist, or a report that does not record whether parity ran). "
             "Same name and meaning as kct check --allow-incomplete (Issue #7077)"
+        ),
+    )
+    drc_parser.add_argument(
+        "--ignore-unconnected",
+        action="store_true",
+        help=(
+            "Do not count unconnected-item (missing connection) findings toward "
+            "the verdict and exit code -- the old clearance-only semantics. By "
+            "default an unrouted board fails DRC (Issue #7096)"
         ),
     )
     drc_parser.add_argument(
@@ -3335,31 +3384,47 @@ def _add_lib_parser(subparsers) -> None:
 
     # lib create-symbol-lib
     lib_create_sym = lib_subparsers.add_parser(
-        "create-symbol-lib", help="Create new symbol library (not yet implemented)"
+        "create-symbol-lib", help="Create a new empty symbol library (.kicad_sym)"
     )
     lib_create_sym.add_argument("path", help="Path for new .kicad_sym file")
+    lib_create_sym.add_argument("--force", action="store_true", help="Overwrite an existing file")
     add_format_flag(lib_create_sym)
 
     # lib create-footprint-lib
     lib_create_fp = lib_subparsers.add_parser(
-        "create-footprint-lib", help="Create new footprint library (not yet implemented)"
+        "create-footprint-lib", help="Create a new empty footprint library (.pretty directory)"
     )
     lib_create_fp.add_argument("path", help="Path for new .pretty directory")
+    lib_create_fp.add_argument(
+        "--force",
+        action="store_true",
+        help="Reuse a non-empty directory that already holds .kicad_mod files (never deletes)",
+    )
     add_format_flag(lib_create_fp)
 
     # lib generate-footprint
     lib_generate = lib_subparsers.add_parser(
-        "generate-footprint", help="Generate parametric footprint (not yet implemented)"
+        "generate-footprint",
+        help="Generate a parametric footprint into a .pretty library "
+        "(same generators as 'kct footprint generate')",
     )
-    lib_generate.add_argument("library", help="Target library path")
+    lib_generate.add_argument("library", help="Target .pretty directory (created if missing)")
     lib_generate.add_argument(
-        "type", choices=["soic", "qfp", "qfn", "dfn", "chip", "sot"], help="Footprint type"
+        "type", choices=["soic", "qfp", "qfn", "chip", "sot"], help="Footprint type"
     )
-    lib_generate.add_argument("--pins", type=int, help="Number of pins")
+    lib_generate.add_argument("--pins", type=int, help="Number of pins (soic/qfp/qfn)")
     lib_generate.add_argument("--pitch", type=float, help="Pin pitch in mm")
-    lib_generate.add_argument("--body-width", type=float, help="Body width in mm")
-    lib_generate.add_argument("--body-size", type=float, help="Body size (square) in mm")
-    lib_generate.add_argument("--prefix", help="Footprint name prefix")
+    lib_generate.add_argument("--body-width", type=float, help="Body width in mm (soic)")
+    lib_generate.add_argument("--body-length", type=float, help="Body length in mm (soic)")
+    lib_generate.add_argument("--body-size", type=float, help="Body size (square) in mm (qfp/qfn)")
+    lib_generate.add_argument("--exposed-pad", type=float, help="Exposed pad size in mm (qfn)")
+    lib_generate.add_argument("--size", help="Imperial size code, e.g. 0402 (chip)")
+    lib_generate.add_argument("--variant", help="Package variant, e.g. SOT-23 (sot)")
+    lib_generate.add_argument("--prefix", help="Component prefix, e.g. R (chip)")
+    lib_generate.add_argument("--name", help="Custom footprint name")
+    lib_generate.add_argument(
+        "--force", action="store_true", help="Overwrite an existing footprint of the same name"
+    )
     add_format_flag(lib_generate)
 
     # lib export
@@ -4132,7 +4197,12 @@ def _add_optimize_parser(subparsers) -> None:
         default=0.5,
         help="45-degree chamfer size in mm (default: 0.5)",
     )
-    optimize_parser.add_argument("-v", "--verbose", action="store_true")
+    optimize_parser.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="Print a per-net table (segments and length before/after) after the summary",
+    )
     optimize_parser.add_argument(
         "--dry-run", action="store_true", help="Show results without writing"
     )
@@ -9223,6 +9293,18 @@ def _add_export_parser(subparsers) -> None:
         dest="export_strict_preflight",
         action="store_true",
         help="Block export when preflight checks fail (for CI; default: export proceeds with warnings)",
+    )
+    export_parser.add_argument(
+        "--assembly-tier",
+        dest="export_assembly_tier",
+        default="auto",
+        choices=["auto", "economic", "standard"],
+        help=(
+            "PCBA service tier preflight judges package/pitch limits against "
+            "(Issue #7204): 'auto' (default) reports the cheapest tier the board "
+            "fits; 'economic'/'standard' select a JLCPCB tier. Ignored by fabs "
+            "with a single assembly service"
+        ),
     )
     export_parser.add_argument(
         "--allow-unbuildable-bom",

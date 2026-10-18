@@ -15,6 +15,68 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-18
 
+- **PR #7215**: ci: print skip and xfail reasons in the pytest short summary
+- **PR #7218**: fix(pcb): keep Library:Footprint lib ID in PCB.add_footprint
+- **PR #7234**: fix(drc,validate,check): view filters never change a verdict (Part A of #7230)
+- **Issue #7214** (closed): ci: add -rs to the bulk Test step so skipped tests and reasons are visible (#7196 follow-up)
+- **Issue #7213** (closed): PCB.add_footprint drops the library nickname: fix at source, delete 3 per-board workarounds, clear board 07's 43 parity warnings
+- **PR #7226**: feat(export): enforce JLCPCB Economic/Standard PCBA tiers in preflight (#7204 part C)
+- **PR #7225**: style: ruff format board 00 generate_design.py
+- **PR #7216**: fix(boards): emit stock F.Fab body for board 00 LED so pin1 rule sees the real outline
+- **PR #7203**: fix(boards): apply JLC rotation profile and Gerber frame to board 04/06 CPLs
+- **PR #7194**: fix: flush C++ unmarks on escape rollback and give each escape strategy its own budget
+- **PR #7163**: fix(physics): solve edge-coupled Zdiff by field solve, not an empirical coupling factor
+- **Issue #7223** (closed): ci: ruff format check fails on main (boards/00-simple-led/generate_design.py)
+- **Issue #7211** (closed): Board 00 D1: pin1_marker_obscured is a courtyard-proxy artifact; emit the stock F.Fab body so the rule sees the real 5 mm LED outline
+- **Issue #7200** (closed): Boards 04/06 CPLs: frame regen also changes Rotation (JLC rotation profile missing) — needs orientation review (split from #7199)
+- **Issue #7192** (closed): router escape follow-ups: flush deferred C++ unmarks after rollback; full-reorder never kept under default cap (#7171)
+- **Issue #7060** (closed): CoupledLines overstates differential impedance of tightly coupled pairs (+17 % microstrip, +12 % stripline)
+- **PR #7196**: test: run live pcbnew oracle + 10.0.6 keepout baseline in CI; show slow-suite skips
+- **Issue #7193** (closed): test: two live-KiCad oracle tests skip in every CI job despite the tool being present (rotation pcbnew oracle, keepout 10.0.1 baseline); slow suite hides skip reasons
+- **PR #7202**: fix(drc): skip kct keepout DRU rules on KiCad >= 10.0.6
+- **Issue #7198** (closed): keepout DRU rule may double-report on KiCad 10.0.6 (native DRC now catches the #6039 gap)
+- **PR #7212**: fix(pcb,patterns): unify trace-width calculators on IPC-2221 (Part A of #7206)
+- **PR #7208**: fix(boards): add F.CrtYd courtyards to boards 00 and 01 footprints
+- **PR #7205**: fix(mcp): share one session store and make restore_checkpoint restore
+- **Issue #7121** (closed): MCP sessions: one session store for start_session/get_session_context/record_decision, and checkpoints that actually restore (#7115 Part 2)
+- **PR #7179**: feat(cli): finish lib create-symbol-lib/create-footprint-lib/generate-footprint and estimate cost --bom CSV
+- **PR #7197**: fix(board-01): ship sym-lib-table and kicad_tools_pwr symbol library
+- **Issue #7175** (closed): Finish 4 stubbed CLI capabilities advertised in kct --help: lib create-symbol-lib / create-footprint-lib / generate-footprint (deps landed, #85/#87/#88 closed) and estimate cost --bom CSV
+- **PR #7171**: perf(router): make negotiated escape strategies transactional and cap their reroutes
+- **Issue #7071** (closed): router: negotiated oscillation escape burns ~27 s (≈40% of board-02 wall) on four non-transactional strategies, then is rolled back (P1 of #7053 note, mislabelled 'perturbation pass')
+- **PR #7183**: test(dru): model post-#4600 Max Hole Size rule in legacy sidecar fixture
+- **PR #7182**: fix(preflight): check .kct-assigned parts and SO lead pitch in LCSC guard
+- **PR #7177**: test: narrow route --lint-gate contract variant and return it to required tier
+- **PR #7174**: fix(drc): fail kct drc on error-severity unconnected items
+- **PR #7172**: fix(parts): look up LCSC parts via list endpoint with exact-code match
+- **PR #7162**: fix(router): match-group tuner clears foreign preserved copper
+- **PR #7142**: test(mcp): smoke test calling every registered tool
+- **Issue #7180** (closed): Part/footprint check misses .kct-assigned parts (boards 00/01/02/06) and SOIC vs TSSOP pitch (#7166 follow-up)
+- **Issue #7178** (closed): test: TestDruManagedBlockMerge legacy sidecar tests fail on main after Max Hole Size rule
+- **Issue #7169** (closed): kct parts lookup: JLCPCB selectSmtComponentDetail returns 404; migrate anonymous detail lookup
+- **Issue #7159** (closed): Route-time match-group tuner meanders through preserved foreign-net vias (board 07: 16 kicad-cli errors with --length-match-groups)
+- **Issue #7129** (closed): test flake: format_json_stdout_contract[route --lint-gate] still times out at 100s under CI load (follow-up to #6744)
+- **Issue #7123** (closed): MCP: parametrized smoke test calling every registered tool through MCPServer.call_tool (#7115 Part 3)
+- **Issue #7096** (closed): kct drc reports DRC PASSED / exit 0 on an unrouted board: unconnected items (opens) are never counted
+- **PR #7181**: fix(drc,erc): kct drc --mfr never drops a violation; delete dead phantom wire filter
+- **PR #7176**: fix(readiness,preflight): stop calling unchecked LCSC parts verified
+- **PR #7160**: fix(router): keep a match-group member's commits when a later attempt fails
+- **PR #7133**: fix(boards): run package_release producers on pinned toolchain and refresh board 01 readiness
+- **PR #6838**: perf(router): raise flag-off coupled iteration budget to 1.4M (700k/phase) with PCIE_TX/PCIE_RX/LVDS exceptions
+- **Issue #7170** (closed): kct drc --mfr silently drops unhandled DRC types and exits 0 on kicad-cli errors; delete dead phantom wire_dangling filter
+- **Issue #7166** (closed): Part-footprint sign-off false-PASS: kct readiness ignores bom_lcsc_values, preflight counts LCSC cache misses as checked, no IC package/pin-count check
+- **Issue #6893** (closed): router: 06rf USB3_RX1 skew regresses 1.365 → 5.823 mm at the 700k flag-off coupled budget on current main (blocks #6838)
+- **Issue #6835** (closed): router: raise flag-off coupled iteration budget to 350k/phase (700k total) so Board07 couples 6/7 pairs; soften endpoint-tolerance comment (#6826 follow-up)
+- **Issue #6404** (closed): boards 00-07: refill saved zones and refresh hash-bound bundles/readiness after #6390's sidecar update
+- **PR #7137**: test: move route --lint-gate JSON-contract variant to extended tier
+- **PR #7165**: fix(export): emit CPL in the Gerber/drill frame (aux origin, Y up)
+- **Issue #7161** (closed): kct erc reports PASS (exit 0) where kicad-cli reports errors: cross-sheet global-label name-count filter drops true isolated_pin_label findings; power-pin sibling filter is inert on KiCad 10
+- **Issue #7059** (closed): kct export CPL coordinates are relative to the Edge.Cuts top-left with Y down, while the gerbers use the drill/place origin with Y up
+- **PR #7168**: fix(erc): stop kct erc dropping true isolated_pin_label findings on hierarchical designs
+- **PR #7081**: fix(cli): add optimize-traces -v help; sync cli.md/machine-output.md with parser; add docs drift test
+- **PR #7156**: fix(optim): pick largest Edge.Cuts contour as board outline
+- **Issue #7155** (closed): extract_board_outline returns an Edge.Cuts cutout (gr_rect/gr_poly) instead of the outer gr_line outline
+- **Issue #7070** (closed): docs: CLI reference gaps after #7069 (parts import, optimize-traces -v/--length-match, sch validate options, stats.per_net)
 - **PR #7152**: fix(optimize-placement): handle gr_rect/gr_poly/gr_arc outlines in no-Shapely fallback
 - **PR #7151**: fix(drc): run schematic parity on _routed boards by staging the schematic
 - **PR #7146**: docs: record tuner budget counters for board 07m SDRAM groups

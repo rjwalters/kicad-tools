@@ -433,6 +433,16 @@ import importlib.util
 HAS_REQUESTS = importlib.util.find_spec("requests") is not None
 
 
+def _lookup_envelope(*components):
+    """Build the ``selectSmtComponentList`` ``data`` payload used by lookups."""
+    return {
+        "componentPageInfo": {
+            "list": list(components) if components else None,
+            "total": len(components),
+        }
+    }
+
+
 @pytest.mark.skipif(not HAS_REQUESTS, reason="requests not installed")
 class TestLCSCClient:
     """Tests for LCSCClient (with mocked HTTP)."""
@@ -442,21 +452,23 @@ class TestLCSCClient:
         """Create a mock API response."""
         return {
             "code": 200,
-            "data": {
-                "componentCode": "C123456",
-                "componentModelEn": "RC0402FR-0710KL",
-                "componentBrandEn": "Yageo",
-                "describe": "10K 1% 0402 Resistor",
-                "encapStandard": "0402",
-                "stockCount": 50000,
-                "minOrder": 10,
-                "componentLibraryType": "base",
-                "prices": [
-                    {"startNumber": 10, "productPrice": 0.005},
-                    {"startNumber": 100, "productPrice": 0.002},
-                ],
-                "dataManualUrl": "https://example.com/datasheet.pdf",
-            },
+            "data": _lookup_envelope(
+                {
+                    "componentCode": "C123456",
+                    "componentModelEn": "RC0402FR-0710KL",
+                    "componentBrandEn": "Yageo",
+                    "describe": "10K 1% 0402 Resistor",
+                    "encapStandard": "0402",
+                    "stockCount": 50000,
+                    "minOrder": 10,
+                    "componentLibraryType": "base",
+                    "prices": [
+                        {"startNumber": 10, "productPrice": 0.005},
+                        {"startNumber": 100, "productPrice": 0.002},
+                    ],
+                    "dataManualUrl": "https://example.com/datasheet.pdf",
+                }
+            ),
         }
 
     def test_lookup_success(self, mock_response, tmp_path):
@@ -481,6 +493,44 @@ class TestLCSCClient:
             assert part.is_basic is True
             assert len(part.prices) == 2
 
+    def test_lookup_parses_live_list_schema(self):
+        """Fields map from a real ``selectSmtComponentList`` item (C17414, trimmed)."""
+        item = {
+            "componentCode": "C17414",
+            "componentBrandEn": "UNI-ROYAL(Uniroyal Elec)",
+            "componentModelEn": "0805W8F1002T5E",
+            "componentSpecificationEn": "0805",
+            "describe": "-55\u2103~+155\u2103 10k\u03a9 125mW 150V Thick Film Resistor 0805",
+            "componentLibraryType": "base",
+            "stockCount": 56325047,
+            "minPurchaseNum": 1,
+            "dataManualUrl": "https://www.lcsc.com/datasheet/C17414.pdf",
+            "componentPrices": [
+                {"startNumber": 1, "endNumber": 999, "productPrice": 0.0033},
+                {"startNumber": 1000, "endNumber": 4999, "productPrice": 0.0026},
+            ],
+            "buyComponentPrices": [{"startNumber": 1, "endNumber": 999, "productPrice": 0.0032}],
+        }
+        other = {"componentCode": "C174140", "componentModelEn": "decoy"}
+        with patch("kicad_tools.parts.lcsc.LCSCClient._get_session") as mock_session:
+            mock_resp = MagicMock()
+            mock_resp.json.return_value = {"code": 200, "data": _lookup_envelope(other, item)}
+            mock_resp.raise_for_status = MagicMock()
+            mock_session.return_value.post.return_value = mock_resp
+
+            from kicad_tools.parts import LCSCClient
+
+            client = LCSCClient(use_cache=False, use_local_catalog=False)
+            part = client.lookup("C17414")
+
+        assert part is not None
+        assert part.package == "0805"
+        assert part.mfr_part == "0805W8F1002T5E"
+        assert part.description.startswith("-55")
+        assert part.min_order == 1
+        assert [(p.quantity, p.unit_price) for p in part.prices] == [(1, 0.0033), (1000, 0.0026)]
+        assert part.is_basic is True
+
     def test_lookup_not_found(self, tmp_path):
         """Test part not found.
 
@@ -491,7 +541,7 @@ class TestLCSCClient:
         """
         with patch("kicad_tools.parts.lcsc.LCSCClient._get_session") as mock_session:
             mock_resp = MagicMock()
-            mock_resp.json.return_value = {"code": 200, "data": None}
+            mock_resp.json.return_value = {"code": 200, "data": _lookup_envelope()}
             mock_resp.raise_for_status = MagicMock()
             mock_session.return_value.post.return_value = mock_resp
 
@@ -989,17 +1039,19 @@ class TestLCSCClientExtended:
             mock_resp = MagicMock()
             mock_resp.json.return_value = {
                 "code": 200,
-                "data": {
-                    "componentCode": "C123",
-                    "manufacturerPartNumber": "ALT-PART-NUM",  # Alternative field
-                    "manufacturer": "AltMfr",  # Alternative field
-                    "describe": "Alternative description",
-                    "package": "0402",  # Alternative field
-                    "stockCount": 1000,
-                    "priceList": [  # Alternative price field
-                        {"startNumber": 1, "productPrice": 0.01},
-                    ],
-                },
+                "data": _lookup_envelope(
+                    {
+                        "componentCode": "C123",
+                        "manufacturerPartNumber": "ALT-PART-NUM",  # Alternative field
+                        "manufacturer": "AltMfr",  # Alternative field
+                        "describe": "Alternative description",
+                        "package": "0402",  # Alternative field
+                        "stockCount": 1000,
+                        "priceList": [  # Alternative price field
+                            {"startNumber": 1, "productPrice": 0.01},
+                        ],
+                    }
+                ),
             }
             mock_resp.raise_for_status = MagicMock()
             mock_session.return_value.post.return_value = mock_resp
@@ -1132,6 +1184,74 @@ class TestLCSCClientAdditional:
             with pytest.raises(LCSCUnavailableError):
                 client._fetch_part("C123456")
 
+    def test_fetch_part_uses_list_endpoint_with_keyword(self):
+        """_fetch_part queries selectSmtComponentList by keyword, not the 404ing detail URL."""
+        with patch("kicad_tools.parts.lcsc.LCSCClient._get_session") as mock_session:
+            mock_resp = MagicMock()
+            mock_resp.json.return_value = {
+                "code": 200,
+                "data": _lookup_envelope({"componentCode": "C17414", "stockCount": 5}),
+            }
+            mock_resp.raise_for_status = MagicMock()
+            mock_session.return_value.post.return_value = mock_resp
+
+            from kicad_tools.parts import LCSCClient
+
+            client = LCSCClient(use_cache=False)
+            part = client._fetch_part("C17414")
+
+            assert part is not None and part.lcsc_part == "C17414"
+            args, kwargs = mock_session.return_value.post.call_args
+            assert args[0].endswith("selectSmtComponentList")
+            assert kwargs["json"]["keyword"] == "C17414"
+
+    def test_fetch_part_picks_exact_match_among_hits(self):
+        """A keyword search returns several hits; only the exact code is used."""
+        with patch("kicad_tools.parts.lcsc.LCSCClient._get_session") as mock_session:
+            mock_resp = MagicMock()
+            mock_resp.json.return_value = {
+                "code": 200,
+                "data": _lookup_envelope(
+                    {"componentCode": "C174140", "componentModelEn": "Wrong"},
+                    {"componentCode": "C17414", "componentModelEn": "Right"},
+                ),
+            }
+            mock_resp.raise_for_status = MagicMock()
+            mock_session.return_value.post.return_value = mock_resp
+
+            from kicad_tools.parts import LCSCClient
+
+            client = LCSCClient(use_cache=False)
+            part = client._fetch_part("C17414")
+
+            assert part is not None and part.mfr_part == "Right"
+
+    def test_fetch_part_empty_list_returns_none(self):
+        with patch("kicad_tools.parts.lcsc.LCSCClient._get_session") as mock_session:
+            mock_resp = MagicMock()
+            mock_resp.json.return_value = {"code": 200, "data": _lookup_envelope()}
+            mock_resp.raise_for_status = MagicMock()
+            mock_session.return_value.post.return_value = mock_resp
+
+            from kicad_tools.parts import LCSCClient
+
+            assert LCSCClient(use_cache=False)._fetch_part("C17414") is None
+
+    def test_fetch_part_no_exact_match_is_verified_miss(self):
+        """Fuzzy hits that never match the code yield no part (not a wrong one, not unavailable)."""
+        with patch("kicad_tools.parts.lcsc.LCSCClient._get_session") as mock_session:
+            mock_resp = MagicMock()
+            mock_resp.json.return_value = {
+                "code": 200,
+                "data": _lookup_envelope({"componentCode": "C174140"}),
+            }
+            mock_resp.raise_for_status = MagicMock()
+            mock_session.return_value.post.return_value = mock_resp
+
+            from kicad_tools.parts import LCSCClient
+
+            assert LCSCClient(use_cache=False)._fetch_part("C17414") is None
+
     def test_fetch_part_request_exception(self, tmp_path, lcsc_retry_clock):
         """Test _fetch_part with request exception."""
         with patch("kicad_tools.parts.lcsc.LCSCClient._get_session") as mock_session:
@@ -1156,14 +1276,16 @@ class TestLCSCClientAdditional:
             mock_resp = MagicMock()
             mock_resp.json.return_value = {
                 "code": 200,
-                "data": {
-                    "componentCode": "C123",
-                    "componentModelEn": "Test",
-                    "componentBrandEn": "Mfr",
-                    "encapStandard": "0402",
-                    "stockCount": 1000,
-                    "prices": [],
-                },
+                "data": _lookup_envelope(
+                    {
+                        "componentCode": "C123",
+                        "componentModelEn": "Test",
+                        "componentBrandEn": "Mfr",
+                        "encapStandard": "0402",
+                        "stockCount": 1000,
+                        "prices": [],
+                    }
+                ),
             }
             mock_resp.raise_for_status = MagicMock()
             mock_session.return_value.post.return_value = mock_resp
@@ -1190,14 +1312,16 @@ class TestLCSCClientAdditional:
                 mock_resp = MagicMock()
                 mock_resp.json.return_value = {
                     "code": 200,
-                    "data": {
-                        "componentCode": json.get("componentCode", "C123"),
-                        "componentModelEn": "Test",
-                        "componentBrandEn": "Mfr",
-                        "encapStandard": "0402",
-                        "stockCount": 1000,
-                        "prices": [],
-                    },
+                    "data": _lookup_envelope(
+                        {
+                            "componentCode": json.get("keyword", "C123"),
+                            "componentModelEn": "Test",
+                            "componentBrandEn": "Mfr",
+                            "encapStandard": "0402",
+                            "stockCount": 1000,
+                            "prices": [],
+                        }
+                    ),
                 }
                 mock_resp.raise_for_status = MagicMock()
                 return mock_resp
@@ -1691,8 +1815,8 @@ class TestLCSCLiveApiFailureNoise:
         client, _ = self._client_with_catalog(tmp_path, catalog_parts)
 
         # Real _fetch_part runs; _make_request raises the 404 RequestException
-        # for every part (simulating selectSmtComponentDetail returning 404).
-        err = requests.RequestException("C232604: 404 Client Error for selectSmtComponentDetail")
+        # for every part (simulating the lookup endpoint returning 404).
+        err = requests.RequestException("C232604: 404 Client Error for selectSmtComponentList")
         with patch.object(client, "_make_request", side_effect=err):
             with caplog.at_level(logging.DEBUG, logger="kicad_tools.parts.lcsc"):
                 result = client.lookup_many(part_nums)
@@ -1751,7 +1875,7 @@ class TestLCSCLiveApiFailureNoise:
             use_local_catalog=False,  # no offline fallback
         )
 
-        err = requests.RequestException("C232604: 404 Client Error for selectSmtComponentDetail")
+        err = requests.RequestException("C232604: 404 Client Error for selectSmtComponentList")
         with patch.object(client, "_make_request", side_effect=err):
             with caplog.at_level(logging.DEBUG, logger="kicad_tools.parts.lcsc"):
                 with pytest.raises(LCSCUnavailableError) as failure:
@@ -1786,7 +1910,9 @@ class TestLCSCLiveApiFailureNoise:
         )
 
         # code 200 + empty data => _fetch_part returns None (a clean miss).
-        with patch.object(client, "_make_request", return_value={"code": 200, "data": None}):
+        with patch.object(
+            client, "_make_request", return_value={"code": 200, "data": _lookup_envelope()}
+        ):
             with caplog.at_level(logging.DEBUG, logger="kicad_tools.parts.lcsc"):
                 result = client.lookup_many(["C999"])
 

@@ -6,6 +6,7 @@ Extracts component information from schematics for manufacturing.
 
 from __future__ import annotations
 
+import csv
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -448,3 +449,67 @@ def backfill_footprints_from_pcb(items: list[BOMItem], pcb_path: str | Path) -> 
             item.footprint = fp_name
             filled += 1
     return filled
+
+
+def load_bom_csv(path: str | Path) -> BOM:
+    """Load a BOM from a CSV file.
+
+    Recognises the common column spellings (Reference/Designator, Value/Comment,
+    Footprint/Package, LCSC/JLC Part, MPN/Part Number).  Rows without a reference
+    are skipped.  Raises ``OSError`` / ``UnicodeDecodeError`` / ``csv.Error`` for
+    unreadable input; an input with no usable rows yields an empty BOM.
+    """
+    items: list[BOMItem] = []
+    with open(path, newline="", encoding="utf-8-sig") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            # Try to find common column names
+            reference = (
+                row.get("Reference")
+                or row.get("reference")
+                or row.get("Designator")
+                or row.get("designator")
+                or ""
+            )
+            value = (
+                row.get("Value")
+                or row.get("value")
+                or row.get("Comment")
+                or row.get("comment")
+                or ""
+            )
+            footprint = (
+                row.get("Footprint")
+                or row.get("footprint")
+                or row.get("Package")
+                or row.get("package")
+                or ""
+            )
+            lcsc = (
+                row.get("LCSC")
+                or row.get("lcsc")
+                or row.get("LCSC Part")
+                or row.get("JLC Part")
+                or ""
+            )
+            mpn = (
+                row.get("MPN")
+                or row.get("mpn")
+                or row.get("Manufacturer Part")
+                or row.get("Part Number")
+                or ""
+            )
+
+            if reference:
+                items.append(
+                    BOMItem(
+                        reference=reference,
+                        value=value,
+                        footprint=footprint,
+                        lib_id="",
+                        lcsc=lcsc,
+                        mpn=mpn,
+                    )
+                )
+
+    return BOM(items=items, source=str(path))

@@ -14,17 +14,16 @@ Exit Codes:
     1 - Errors found or command failure
     2 - Warnings found (only with --strict)
 
-Cross-sheet global labels:
-    When run on a schematic, single_global_label / isolated_pin_label
-    false positives for global labels spanning multiple sheets are
-    suppressed automatically (matching `kct sch validate`). When parsing a
-    bare report (.json/.rpt) this suppression is skipped because the
-    schematic hierarchy needed to build the cross-sheet label inventory is
-    not available -- run on the .kicad_sch directly for filtered results.
+Verdict:
+    Every violation kicad-cli reports (minus KiCad exclusions) counts toward
+    the exit code.  The only suppression is an explicit --filter-config, and
+    it is always disclosed (`Filtered:` in the table, `summary.filtered` in
+    JSON).  Running on a schematic gives at least the findings of parsing
+    kicad-cli's own report for it; it additionally runs a cross-sheet
+    duplicate-reference check.
 """
 
 import argparse
-import contextlib
 import json
 import sys
 from pathlib import Path
@@ -35,13 +34,17 @@ from ..erc import (
     ERCReport,
     ERCViolation,
     check_cross_sheet_duplicates,
-    filter_cross_sheet_global_labels_objs,
 )
+from ._gate import hidden_by_view_filter  # noqa: F401  (re-exported; Issue #7230)
 from .runner import find_kicad_cli, run_erc
 
 
-def main(argv: list[str] | None = None) -> int:
-    """Main entry point for kicad-erc command."""
+def build_parser() -> argparse.ArgumentParser:
+    """Return the ``kicad-erc`` argument parser.
+
+    ``kct erc [parse]`` mirrors every option declared here (Issue #7161);
+    ``tests/test_cli_parser_drift.py`` fails if the two drift apart.
+    """
     parser = argparse.ArgumentParser(
         prog="kicad-erc",
         description="Run ERC on schematics or parse ERC reports",
@@ -111,7 +114,12 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="List all known ERC violation types and exit",
     )
+    return parser
 
+
+def main(argv: list[str] | None = None) -> int:
+    """Main entry point for kicad-erc command."""
+    parser = build_parser()
     args = parser.parse_args(argv)
 
     # Mode: List types
@@ -127,19 +135,12 @@ def main(argv: list[str] | None = None) -> int:
 
     input_path = Path(args.input)
 
-    # Root schematic used to build the cross-sheet global-label inventory.
-    # Only available when ERC is run on a schematic (not when parsing a bare
-    # report), so the false-positive filter is skipped for report-only input.
-    schematic_for_filter: str | None = None
-
     # Determine if input is schematic or report
     if input_path.suffix == ".kicad_sch":
         # Run ERC on schematic
         report = run_erc_on_schematic(input_path, args.output, args.keep_report)
         if report is None:
             return 1
-
-        schematic_for_filter = str(input_path)
 
         # Run cross-sheet duplicate reference check (supplements KiCad ERC)
         try:
@@ -162,28 +163,6 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Error: Unsupported file type: {input_path.suffix}", file=sys.stderr)
         print("Expected .kicad_sch (schematic) or .json/.rpt (report)", file=sys.stderr)
         return 1
-
-    # Suppress cross-sheet global-label false positives.
-    #
-    # KiCad's ERC engine emits single_global_label / isolated_pin_label
-    # per-sheet without aggregating a global label across the full
-    # hierarchy, so a label that legitimately spans >= 2 sheets is wrongly
-    # reported as isolated.  The dict-based filter is already applied on the
-    # `kct sch validate` / preflight path; apply the ERCViolation-aware
-    # variant here so `kct erc` is consistent.
-    #
-    # Building the inventory requires a real `.kicad_sch` hierarchy, so this
-    # is skipped when only a bare report (.json/.rpt) is supplied -- the
-    # hierarchy cannot be reconstructed from the report alone.  Wrapped in
-    # try/except to degrade gracefully (matching check_cross_sheet_duplicates)
-    # so a parsing hiccup never turns a clean ERC into a crash.
-    if schematic_for_filter is not None:
-        # Non-fatal: filtering is supplemental; on any error (e.g. a malformed
-        # or missing hierarchy) the raw violations are kept unchanged.
-        with contextlib.suppress(Exception):
-            report.violations = filter_cross_sheet_global_labels_objs(
-                report.violations, schematic_for_filter
-            )
 
     # Apply violation filters from config file
     filter_ignored_count = 0
@@ -263,22 +242,6 @@ def main(argv: list[str] | None = None) -> int:
     elif warning_count > 0 and args.strict:
         return 2
     return 0
-
-
-def hidden_by_view_filter(
-    gate_violations: list[ERCViolation], shown: list[ERCViolation]
-) -> dict[str, int] | None:
-    """Errors/warnings in ``gate_violations`` that a view filter left out of ``shown``.
-
-    Returns ``None`` when nothing was hidden, so a filter that matches
-    everything (or no filter at all) produces exactly today's output.
-    """
-    shown_ids = {id(v) for v in shown}
-    hidden = [v for v in gate_violations if id(v) not in shown_ids]
-    if not hidden:
-        return None
-    errors = sum(1 for v in hidden if v.is_error)
-    return {"errors": errors, "warnings": len(hidden) - errors}
 
 
 def no_match_message(hidden: dict[str, int]) -> str:
@@ -361,7 +324,7 @@ def output_table(
     print(f"  Errors:     {error_count}")
     print(f"  Warnings:   {warning_count}")
     if filtered_count > 0:
-        print(f"  Filtered:   {filtered_count} violations filtered")
+        print(f"  Filtered:   {filtered_count} (--filter-config, not counted)")
     if report.exclusion_count > 0:
         print(f"  Excluded:   {report.exclusion_count} (not counted)")
     if hidden:

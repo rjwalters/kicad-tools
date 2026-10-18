@@ -45,7 +45,7 @@ class SyncIssue:
     Attributes:
         severity: Either "error" or "warning"
         category: Issue category (missing_on_pcb, orphaned_on_pcb, net_mismatch,
-            pin_mismatch, value_mismatch)
+            pin_mismatch, value_mismatch, footprint_mismatch)
         message: Human-readable description of the issue
         suggestion: Actionable fix suggestion
         reference: Component reference involved (e.g., "R5", "C12")
@@ -73,6 +73,7 @@ class SyncIssue:
             "net_mismatch",
             "pin_mismatch",
             "value_mismatch",
+            "footprint_mismatch",
         )
         if self.category not in valid_categories:
             raise ValueError(f"category must be one of {valid_categories}, got {self.category!r}")
@@ -163,6 +164,11 @@ class SyncResult:
         """Different component values between schematic and PCB."""
         return [i for i in self.issues if i.category == "value_mismatch"]
 
+    @property
+    def footprint_mismatches(self) -> list[SyncIssue]:
+        """Footprint lib IDs that differ between schematic and PCB."""
+        return [i for i in self.issues if i.category == "footprint_mismatch"]
+
     def __iter__(self):
         """Iterate over all issues."""
         return iter(self.issues)
@@ -203,6 +209,8 @@ class SyncResult:
             parts.append(f"  Pin mismatches: {len(self.pin_mismatches)}")
         if self.value_mismatches:
             parts.append(f"  Value mismatches: {len(self.value_mismatches)}")
+        if self.footprint_mismatches:
+            parts.append(f"  Footprint mismatches: {len(self.footprint_mismatches)}")
 
         return "\n".join(parts)
 
@@ -305,6 +313,8 @@ class NetlistValidator:
     - Pads on a different net than their schematic pin (compared by
       connectivity, so net renaming alone is not drift)
     - PCB nets carrying another schematic net's name (swapped net names)
+    - Footprint lib IDs that differ from the symbol's ``Footprint`` field,
+      library nickname included (Issue #7213)
 
     Example:
         >>> validator = NetlistValidator("project.kicad_sch", "project.kicad_pcb")
@@ -480,6 +490,59 @@ class NetlistValidator:
                     category="orphaned_on_pcb",
                     message=f"{ref} on PCB has no schematic symbol",
                     suggestion=f"Remove {ref} from PCB or add to schematic",
+                    reference=ref,
+                )
+            )
+
+        self._check_footprint_ids(sch_refs, pcb_refs, result)
+
+    def _check_footprint_ids(
+        self,
+        sch_refs: dict[str, dict],
+        pcb_refs: dict[str, dict],
+        result: SyncResult,
+    ) -> None:
+        """Compare each placed footprint's lib ID with its symbol's.
+
+        The library nickname is part of the lib ID: kicad-cli's parity check
+        reports ``Capacitor_SMD:X`` vs ``X`` as ``footprint_symbol_mismatch``,
+        so this check no longer strips it (Issue #7213). A different package
+        or a different nickname is an error; a PCB (or schematic) side that
+        lacks the nickname entirely is the same package and only a warning.
+        """
+        from kicad_tools.footprints.library_path import compare_footprint_lib_ids
+
+        for ref in sorted(set(sch_refs) & set(pcb_refs)):
+            sch_fp = sch_refs[ref].get("footprint") or ""
+            pcb_fp = pcb_refs[ref].get("footprint") or ""
+            if not sch_fp or not pcb_fp:
+                continue
+            relation = compare_footprint_lib_ids(sch_fp, pcb_fp)
+            if relation == "match":
+                continue
+            if relation == "nickname_missing":
+                result.add(
+                    SyncIssue(
+                        severity="warning",
+                        category="footprint_mismatch",
+                        message=(
+                            f"{ref} footprint library nickname missing: "
+                            f"schematic {sch_fp}, PCB {pcb_fp}"
+                        ),
+                        suggestion=(
+                            f"Write the full lib ID {sch_fp if ':' in sch_fp else pcb_fp} "
+                            "on both sides (same package)"
+                        ),
+                        reference=ref,
+                    )
+                )
+                continue
+            result.add(
+                SyncIssue(
+                    severity="error",
+                    category="footprint_mismatch",
+                    message=f"{ref} footprint differs: schematic {sch_fp}, PCB {pcb_fp}",
+                    suggestion=f"Update {ref} on the PCB to {sch_fp} (or fix the schematic)",
                     reference=ref,
                 )
             )

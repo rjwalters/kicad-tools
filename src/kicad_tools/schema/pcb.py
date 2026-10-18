@@ -1397,6 +1397,14 @@ class Footprint:
             # don't drop tokens the parser doesn't yet model.
             self._sync_attr_node()
 
+    @property
+    def sheet_position(self) -> tuple[float, float]:
+        """Footprint origin in sheet-absolute coordinates (Y down), as stored
+        in the ``(at ...)`` node -- ``position`` plus the board origin."""
+        ox, oy = self.__dict__.get("_board_origin", (0.0, 0.0))
+        x, y = self.position
+        return (x + ox, y + oy)
+
     def _placement_frame(self) -> _FootprintFrame | None:
         """Board-relative ``(x, y, rotation, is_back)``; None before init."""
         state = self.__dict__
@@ -6157,6 +6165,7 @@ class PCB:
         rotation: float = 0.0,
         layer: str = "F.Cu",
         value: str = "",
+        library_id: str | None = None,
     ) -> Footprint:
         """
         Add a footprint from a .kicad_mod file to the PCB.
@@ -6178,6 +6187,9 @@ class PCB:
             rotation: Rotation angle in degrees (default: 0)
             layer: Layer to place footprint on ("F.Cu" or "B.Cu", default: "F.Cu")
             value: Component value (e.g., "100nF", "10k")
+            library_id: Optional ``Library:Footprint`` lib ID to write as the
+                placed footprint's name. Defaults to the file's own name,
+                which is bare (no library nickname) for ``.kicad_mod`` files.
 
         Returns:
             The Footprint object that was added to the PCB
@@ -6199,6 +6211,11 @@ class PCB:
         """
         # Load the footprint from file
         fp_sexp = load_footprint(kicad_mod_path)
+
+        # Keep the Library:Footprint lib ID so kicad-cli's schematic-parity
+        # check can match it against the symbol's Footprint field (#7213).
+        if library_id:
+            fp_sexp.set_value(0, library_id)
 
         # Deterministic UUID for this footprint instance (Issue #6076)
         new_uuid = self.mint_uuid("footprint", reference)
@@ -6481,6 +6498,7 @@ class PCB:
                             rotation=rotation,
                             layer=layer,
                             value=value,
+                            library_id=f"{library_name}:{footprint_name.removesuffix('.kicad_mod')}",
                         )
                     break
 
@@ -6510,6 +6528,7 @@ class PCB:
             rotation=rotation,
             layer=layer,
             value=value,
+            library_id=f"{library_name}:{footprint_name.removesuffix('.kicad_mod')}",
         )
 
     def add_net(self, net_name: str) -> Net:
@@ -8130,6 +8149,7 @@ class PCB:
             >>> pcb.export_placement("cpl_jlcpcb.csv", format="jlcpcb")
         """
         from ..export import export_pnp as _export_pnp
+        from ..export.pnp import _aux_origin_of
 
         footprints = list(self.footprints)
 
@@ -8147,7 +8167,7 @@ class PCB:
         # the single source of truth (issues #3616/#3618).  Synthesizing a
         # bare PnPExportConfig() here would defeat manufacturer defaults such
         # as JLCPCB's exclude_tht=True, shipping THT rows in the CPL.
-        pnp_csv = _export_pnp(footprints, mfr, config=None)
+        pnp_csv = _export_pnp(footprints, mfr, config=None, aux_origin=_aux_origin_of(self.setup))
 
         # Write to file
         output_path = Path(output)

@@ -22,7 +22,12 @@ from .base import (
     ManufacturerProfile,
     load_design_rules_from_yaml,
 )
-from .jlcpcb import _ROTATION_CORRECTIONS, JLCPCB_ASSEMBLY, LCSC_LIBRARY
+from .jlcpcb import (
+    _ROTATION_CORRECTIONS,
+    JLCPCB_ASSEMBLY,
+    JLCPCB_ASSEMBLY_TIERS,
+    LCSC_LIBRARY,
+)
 
 # Load design rules from YAML configuration
 _DESIGN_RULES = load_design_rules_from_yaml("jlcpcb_tier1")
@@ -34,6 +39,7 @@ JLCPCB_TIER1_PROFILE = ManufacturerProfile(
     website="https://jlcpcb.com",
     design_rules=_DESIGN_RULES,
     assembly=JLCPCB_ASSEMBLY,
+    assembly_tiers=list(JLCPCB_ASSEMBLY_TIERS),
     parts_library=LCSC_LIBRARY,
     lead_times={
         "pcb_standard": 5,

@@ -45,10 +45,28 @@ def test_business_and_malformed_lookup_are_unavailable(client, monkeypatch, resp
 
 
 def test_verified_empty_is_distinct(client, monkeypatch):
-    request = Mock(return_value={"code": 200, "data": None})
+    empty = {"code": 200, "data": {"componentPageInfo": {"list": None, "total": 0}}}
+    request = Mock(return_value=empty)
     monkeypatch.setattr(client, "_make_request", request)
     assert client.lookup("C1") is None
     assert client.lookup_result("C1").status == "not_found"
+    # Fuzzy hits without an exact code match are also a verified miss.
+    request.return_value = {
+        "code": 200,
+        "data": {
+            "componentPageInfo": {
+                "list": [{"componentCode": "C10"}, {"componentCode": "C11"}],
+                "total": 2,
+            }
+        },
+    }
+    assert client.lookup("C1") is None
+    assert client.lookup_result("C1").status == "not_found"
+    # A bare ``data: null`` is no longer a clean miss: the list schema always
+    # returns ``componentPageInfo``, so its absence is an unavailable response.
+    request.return_value = {"code": 200, "data": None}
+    with pytest.raises(LCSCUnavailableError):
+        client.lookup("C1")
     request.return_value = {"code": 200, "data": {"componentPageInfo": {"list": None, "total": 0}}}
     result = client.search("missing")
     assert result.parts == []

@@ -257,6 +257,33 @@ def parse_library_id(lib_id: str) -> tuple[str | None, str]:
     return None, lib_id
 
 
+def compare_footprint_lib_ids(schematic_id: str, pcb_id: str) -> str:
+    """Classify how a schematic footprint lib ID relates to a PCB one.
+
+    Returns one of:
+
+    * ``"match"`` -- same footprint name, and the library nicknames agree
+      (or neither side has one).
+    * ``"nickname_missing"`` -- same footprint name, but exactly one side
+      lacks the ``Library:`` nickname (a legacy board written before
+      ``PCB.add_footprint`` kept it, Issue #7213). kicad-cli's parity
+      check reports this as ``footprint_symbol_mismatch``; it is the same
+      package, so callers should treat it as informational, not drift.
+    * ``"mismatch"`` -- different footprint names, or both sides carry a
+      nickname and the nicknames differ (``Capacitor_SMD:X`` vs
+      ``Resistor_SMD:X``).
+    """
+    sch_lib, sch_name = parse_library_id(schematic_id)
+    pcb_lib, pcb_name = parse_library_id(pcb_id)
+    if sch_name != pcb_name:
+        return "mismatch"
+    if sch_lib and pcb_lib:
+        return "match" if sch_lib == pcb_lib else "mismatch"
+    if sch_lib or pcb_lib:
+        return "nickname_missing"
+    return "match"
+
+
 def list_available_libraries(paths: LibraryPaths) -> list[str]:
     """List all available footprint libraries.
 

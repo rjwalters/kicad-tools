@@ -75,8 +75,22 @@ class FakeEngines:
         drawings_ok: bool = True,
         coverage: dict | None = None,
         stale_waivers: int = 0,
+        lcsc_check: dict | None = None,
+        omit_lcsc_check: bool = False,
     ) -> None:
         self.board = board
+        # The bundle preflight's ``bom_lcsc_values`` entry the bom gate reads
+        # (issue #7166); ``omit_lcsc_check`` models a manifest without one.
+        self.lcsc_check = (
+            None
+            if omit_lcsc_check
+            else lcsc_check
+            or {
+                "name": "bom_lcsc_values",
+                "status": "OK",
+                "message": "3 of 3 assigned item(s) verified against parts cache",
+            }
+        )
         self.coverage = coverage
         self.stale_waivers = stale_waivers
         self.check_errors = check_errors
@@ -229,9 +243,10 @@ class FakeEngines:
                 if not source.is_relative_to(pcb.parent):
                     continue
                 zf.write(source, source.relative_to(pcb.parent).as_posix())
-        (output_dir / "manifest.json").write_text(
-            json.dumps({"version": "1.0", "manufacturer": mfr, "files": {}}, indent=2)
-        )
+        manifest: dict = {"version": "1.0", "manufacturer": mfr, "files": {}}
+        if self.lcsc_check is not None:
+            manifest["preflight"] = [self.lcsc_check]
+        (output_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))
         return EngineRun(ok=True)
 
     def schematic_pdf(self, schematic: Path, output: Path) -> EngineRun:
@@ -1269,3 +1284,107 @@ def test_unified_cli_dispatches_the_readiness_subcommand(tmp_path, monkeypatch):
 
     assert cli_main(["readiness", str(board), "--mfr", "jlcpcb", "--pcb-only"]) == 0
     assert seen["argv"] == [str(board), "--mfr", "jlcpcb", "--pcb-only"]
+
+
+# ---------------------------------------------------------------------------
+# Issue #7166: the bom gate reads the bundle's bom_lcsc_values preflight
+# ---------------------------------------------------------------------------
+
+
+def _bom_check(report: dict) -> dict:
+    return next(c for c in report["checks"] if c["name"] == "bom")
+
+
+def test_bom_gate_fails_when_bundle_lcsc_check_failed(tmp_path):
+    board = make_board(tmp_path)
+    fake = FakeEngines(
+        board,
+        lcsc_check={
+            "name": "bom_lcsc_values",
+            "status": "FAIL",
+            "message": "1 BOM item(s) assigned an LCSC part whose value or package "
+            "does not match the BOM row",
+            "details": "R5 (10k) -> C25744: part package '0402' (MPN leading size code "
+            "0402) does not match footprint package '0603' [parts cache]",
+        },
+    )
+
+    code, report = run(board, fake)
+
+    assert code != 0
+    assert report["status"] != "ready"
+    bom = _bom_check(report)
+    assert bom["status"] == "failed"
+    assert "LCSC part check FAIL" in bom["detail"]
+    assert any(
+        "does not match the BOM row's value/package" in b and "R5" in b and "C25744" in b
+        for b in report["blockers"]
+    )
+
+
+def test_bom_gate_not_run_when_manifest_lacks_lcsc_check(tmp_path):
+    board = make_board(tmp_path)
+    fake = FakeEngines(board, omit_lcsc_check=True)
+
+    code, report = run(board, fake)
+
+    assert code != 0
+    bom = _bom_check(report)
+    assert bom["status"] == "not_run"
+    assert any("LCSC part/package check did not run" in b for b in report["blockers"])
+
+
+def test_bom_gate_passes_unverified_warn_without_claiming_verified(tmp_path):
+    board = make_board(tmp_path)
+    message = (
+        "2 of 3 assigned item(s) verified (parts cache); 1 unverifiable "
+        "(not in parts cache or offline catalog)"
+    )
+    fake = FakeEngines(
+        board,
+        lcsc_check={
+            "name": "bom_lcsc_values",
+            "status": "WARN",
+            "message": message,
+            "details": "unverified: U1 -> C8734",
+        },
+    )
+
+    code, report = run(board, fake)
+
+    assert code == 0
+    bom = _bom_check(report)
+    assert bom["status"] == "passed"
+    assert "verified procurement identities" not in bom["detail"]
+    assert "part check WARN" in bom["detail"]
+    assert message in bom["detail"]
+
+
+def test_verify_mode_reads_the_retained_manifest_lcsc_check(tmp_path):
+    board = make_board(tmp_path)
+    assert run(board, FakeEngines(board))[0] == 0
+
+    manifest_path = board / "output" / "manufacturing" / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    assert [p["status"] for p in manifest["preflight"]] == ["OK"]
+    manifest["preflight"][0].update(
+        status="FAIL",
+        message="1 BOM item(s) assigned an LCSC part whose value or package does not match",
+        details="U2 (USBLC6) -> C51118: part package 'SOT-25-5' (pin count 5 vs 6 "
+        "footprint pads) does not match footprint package 'SOT-23-6' [offline catalog]",
+    )
+    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+
+    fake = FakeEngines(board)
+    code = readiness_cmd.main([str(board), "--mfr", "jlcpcb"], engines=fake.bundle())
+
+    # (The hand-edited manifest also no longer matches the outer archive, so
+    # the artifacts gate fails too; the point here is the named bom blocker.)
+    assert code != 0
+    assert "export" not in fake.calls
+    report = json.loads(
+        (board / "output" / "readiness-verification" / "readiness.json").read_text()
+    )
+    bom = _bom_check(report)
+    assert bom["status"] == "failed"
+    assert any("C51118" in b for b in report["blockers"])

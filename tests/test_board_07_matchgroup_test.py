@@ -360,7 +360,10 @@ class TestDeterministicGeneration:
         physics = CoupledLines(Stackup.jlcpcb_4layer())
         for name in ("MIPI_CLK_P", "MIPI_DAT0_N", "TMDS_D0_P", "TMDS_D2_N"):
             cls = classes[name]
-            assert cls.intra_pair_clearance == pytest.approx(0.10)
+            # Issue #7060: width held at 0.225 mm, gap solved for 100 ohm;
+            # the authored 0.10 mm gap is the minimum.
+            assert cls.trace_width == pytest.approx(0.225)
+            assert cls.intra_pair_clearance == pytest.approx(0.135)
             assert cls.clearance == pytest.approx(0.10)
             assert cls.trace_width >= 0.15
             actual = physics.edge_coupled_microstrip(
@@ -406,7 +409,10 @@ class TestDeterministicGeneration:
         physics = CoupledLines(Stackup.jlcpcb_4layer())
         for name in ("MIPI_CLK_P", "MIPI_DAT0_N", "TMDS_D0_P", "TMDS_D2_N"):
             cls = classes[name]
-            assert cls.intra_pair_clearance == pytest.approx(0.10)
+            # Issue #7060: width held at 0.225 mm, gap solved for 100 ohm;
+            # the authored 0.10 mm gap is the minimum.
+            assert cls.trace_width == pytest.approx(0.225)
+            assert cls.intra_pair_clearance == pytest.approx(0.135)
             actual = physics.edge_coupled_microstrip(
                 cls.trace_width, cls.intra_pair_clearance, "F.Cu"
             ).zdiff
