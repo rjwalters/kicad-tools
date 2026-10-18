@@ -10,8 +10,13 @@ Usage:
 Options:
     --format {text,json}   Output format (default: text)
     --lib-path <path>      Path to symbol libraries (for pin checking)
-    --strict               Exit with error on any warning
+    --strict               Exit 1 on any warning (errors and checks not run
+                           already exit 1)
     --quiet                Only show errors, not warnings
+
+Exit codes: 0 pass, 1 errors / a check not run / warnings with --strict.
+--format json carries the same answer as top-level "verdict"
+(pass|fail|incomplete) and "exit_code" (Issue #7230).
 
 Examples:
     python3 sch-validate.py project.kicad_sch
@@ -27,6 +32,7 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from kicad_tools.cli._gate import gate_exit_code
 from kicad_tools.cli.runner import find_kicad_cli
 from kicad_tools.cli.sch_footprint_common import iter_missing_footprint_symbols
 from kicad_tools.erc.cross_sheet import (
@@ -3702,7 +3708,11 @@ def main(argv=None):
     parser.add_argument(
         "--lib-path", action="append", dest="lib_paths", help="Path to symbol libraries"
     )
-    parser.add_argument("--strict", action="store_true", help="Exit with error on any warning")
+    parser.add_argument(
+        "--strict",
+        action="store_true",
+        help="Exit 1 on any warning (errors and checks not run already exit 1)",
+    )
     parser.add_argument("--quiet", "-q", action="store_true", help="Only show errors")
     parser.add_argument(
         "--skip",
@@ -3725,6 +3735,17 @@ def main(argv=None):
         print(f"Error loading schematic: {args.schematic}: {e}", file=sys.stderr)
         sys.exit(1)
 
+    # Exit code, decided before output so ``--format json`` can carry it
+    # (Issue #7230).  INCOMPLETE (a check not run) is non-zero, like
+    # ``kct check``'s NOT RUN (#7094).
+    exit_code, verdict = gate_exit_code(
+        result.error_count,
+        result.warning_count,
+        incomplete=bool(result.checks_not_run),
+        strict=args.strict,
+        style="sch",
+    )
+
     if args.format == "json":
         print(
             json.dumps(
@@ -3746,6 +3767,8 @@ def main(argv=None):
                         for i in result.issues
                         if not args.quiet or i.severity == "error"
                     ],
+                    "verdict": verdict,
+                    "exit_code": exit_code,
                 },
                 indent=2,
             )
@@ -3753,14 +3776,8 @@ def main(argv=None):
     else:
         print_result(result, args.quiet)
 
-    # Exit code
-    if result.error_count > 0:
-        sys.exit(1)
-    if result.checks_not_run:
-        # INCOMPLETE is non-zero, like ``kct check``'s NOT RUN (#7094).
-        sys.exit(1)
-    if args.strict and result.warning_count > 0:
-        sys.exit(1)
+    if exit_code:
+        sys.exit(exit_code)
 
 
 def print_result(result: ValidationResult, quiet: bool = False):
