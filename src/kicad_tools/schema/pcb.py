@@ -718,6 +718,11 @@ class Pad:
     net_name: str = ""
     drill: float = 0.0
     solder_mask_margin: float | None = None
+    # Per-pad zone connection override from ``(zone_connect N)``: 0 = none,
+    # 1 = thermal reliefs, 2 = solid, 3 = thermal reliefs for THT only.
+    # ``None`` when absent (the pad inherits its zone's ``connect_pads``).
+    # Read-only; ``thermal_asymmetry`` resolves the effective mode (#7220).
+    zone_connect: int | None = None
     uuid: str = ""
     # Per-pad rotation in degrees (the optional third token of ``(at x y angle)``).
     # KiCad stores this angle in the ABSOLUTE board frame -- it already includes
@@ -872,6 +877,10 @@ class Pad:
         # Solder mask margin (per-pad override)
         if mask_margin := sexp.find("solder_mask_margin"):
             pad.solder_mask_margin = mask_margin.get_float(0)
+
+        # Per-pad zone connection override (issue #7220)
+        if zone_connect := sexp.find_child("zone_connect"):
+            pad.zone_connect = zone_connect.get_int(0)
 
         # UUID
         if uuid := sexp.find("uuid"):

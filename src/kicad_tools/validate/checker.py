@@ -371,6 +371,7 @@ class DRCChecker:
         "check_pin1_markers",
         "check_single_pad_nets",
         "check_pad_grid_alignment",
+        "check_thermal_asymmetry",
         "check_via_in_pad",
         "check_via_type_capability",
         "check_via_under_body",
@@ -463,6 +464,13 @@ class DRCChecker:
         # fab-blocking defect.  Explicit entry REQUIRED -- the ``via``
         # prefix fallback would file it under Manufacturing.
         "via_under_body": CATEGORY_ADVISORY,
+        # Thermal asymmetry / via drill at pad edge (Issue #7220): soldering-
+        # yield advisories (tombstoning, PTH barrel fill, via tent wicking),
+        # not fab-blocking.  Explicit entries REQUIRED -- unknown ids default
+        # to Manufacturing and ``via_at_pad_edge`` would match the ``via``
+        # prefix fallback.
+        "thermal_asymmetry": CATEGORY_ADVISORY,
+        "via_at_pad_edge": CATEGORY_ADVISORY,
         "copper_sliver": CATEGORY_ADVISORY,
         # Trace width-consistency audit: heuristic routing-quality triage
         # (width islands / unexplained neck-downs), never fab-blocking.
@@ -1609,9 +1617,13 @@ class DRCChecker:
             ``via_in_pad_process_missing`` / ``via_in_pad_process_ineligible``
             violations (one per offending via/pad pair).  Empty only
             when every in-pad via satisfies a declared, eligible process
-            (e.g. JLCPCB Capability Plus's 4+ layer POFV process).
+            (e.g. JLCPCB Capability Plus's 4+ layer POFV process).  Also
+            ``via_at_pad_edge`` warnings (issue #7220).
         """
-        rule = ViaInPadRule()
+        # Issue #7220: ``kct check`` also reports the advisory
+        # ``via_at_pad_edge`` warning (drill closer than the fab's minimum
+        # solder-mask dam to the pad's mask aperture).
+        rule = ViaInPadRule(report_pad_edge=True)
         return self._absolutize(rule.check(self.pcb, self.design_rules))
 
     def check_width_consistency(self, **options: object) -> DRCResults:
@@ -1674,6 +1686,26 @@ class DRCChecker:
         from .rules.via_under_body import ViaUnderBodyRule
 
         rule = ViaUnderBodyRule()
+        return self._absolutize(rule.check(self.pcb, self.design_rules))
+
+    def check_thermal_asymmetry(self) -> DRCResults:
+        """Check for thermally asymmetric passives and solid multi-plane PTH pins.
+
+        Issue #7220: flags a 2-pad SMD R/C/L whose one terminal is tied solid
+        to its own-layer zone fill while the other reaches copper only through
+        a thermal relief or a trace (tombstoning risk), and a PTH pin tied
+        solid to zone fill on two or more layers (barrel-fill risk).  Uses the
+        committed fill geometry and the effective connect mode (pad
+        ``zone_connect`` override, then the zone's ``connect_pads``).  Warning
+        severity, advisory category.  See
+        :class:`~kicad_tools.validate.rules.thermal_asymmetry.ThermalAsymmetryRule`.
+
+        Returns:
+            DRCResults containing ``thermal_asymmetry`` warnings.
+        """
+        from .rules.thermal_asymmetry import ThermalAsymmetryRule
+
+        rule = ThermalAsymmetryRule()
         return self._absolutize(rule.check(self.pcb, self.design_rules))
 
     def check_zero_length_segments(self) -> DRCResults:

@@ -212,7 +212,10 @@ def precheck(
         if pairs:
             return unknown(category, f"needs_input:net_class_map ({pairs} diff-pair net(s))")
         return skipped(category, "no_diff_pairs_detected")
-    if category in ("segment_zone", "via_zone"):
+    if category in ("segment_zone", "via_zone", "thermal_asymmetry"):
+        # thermal_asymmetry (Issue #7220) reads the committed fill geometry
+        # too; it is advisory, so an unfilled board reports a non-blocking
+        # unknown rather than a vacuous ``checked``.
         unfilled = _unfilled_pour_zones(checker)
         if unfilled:
             return unknown(category, f"zone_fills_absent ({unfilled} unfilled zone(s))")

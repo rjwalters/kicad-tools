@@ -552,3 +552,144 @@ def test_final_rule_uses_complete_physical_hole_census(kind, drill, offset, elig
         ViaInPadRule().check(pcb, get_profile("jlcpcb-tier1").get_design_rules(layers=4)).violations
     )
     assert [v.rule_id for v in findings] == ([] if eligible else ["via_in_pad_process_ineligible"])
+
+
+# ---------------------------------------------------------------------------
+# via_at_pad_edge (issue #7220): drill misses the copper but sits closer than
+# the fab's minimum solder-mask dam to the pad's mask aperture.
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class _EdgeRules(_StubDesignRules):
+    min_solder_mask_dam_mm: float = 0.1
+
+
+@dataclass
+class _StubSetup:
+    pad_to_mask_clearance: float = 0.0
+
+
+@dataclass
+class _StubPCBWithSetup(_StubPCB):
+    setup: _StubSetup = field(default_factory=_StubSetup)
+
+
+def _edge_board(*via_x: float, margin: float | None = None, pad_to_mask: float = 0.0):
+    """1.0 x 1.25 rect pad centred at (10, 10); its right copper edge is x=10.5."""
+    from kicad_tools.schema.pcb import Footprint, Pad
+
+    pad = Pad(
+        "1",
+        "smd",
+        "rect",
+        (0, 0),
+        (1.0, 1.25),
+        ["F.Cu"],
+        net_number=1,
+        net_name="DATA",
+        solder_mask_margin=margin,
+    )
+    fp = Footprint("test", "F.Cu", (10, 10), 0, "R1", "test", pads=[pad])
+    vias = [_StubVia(position=(x, 10.0), drill=0.3, uuid=f"v{i}") for i, x in enumerate(via_x)]
+    return _StubPCBWithSetup(
+        footprints=[fp], vias=vias, setup=_StubSetup(pad_to_mask_clearance=pad_to_mask)
+    )
+
+
+_EDGE = ViaInPadRule(report_pad_edge=True)
+
+
+def _by_rule(results, rule_id):
+    return [v for v in results.violations if v.rule_id == rule_id]
+
+
+class TestViaAtPadEdge:
+    def test_off_by_default_for_direct_callers(self):
+        """Board finalizers treat every ViaInPadRule() result as an in-pad drill."""
+        assert ViaInPadRule().check(_edge_board(10.65), _EdgeRules()).violations == []
+
+    def test_tangent_drill_fires_with_zero_gap(self):
+        """The board-05 R11.1 shape: drill edge exactly on the pad edge."""
+        results = _EDGE.check(_edge_board(10.65), _EdgeRules())
+        (v,) = _by_rule(results, "via_at_pad_edge")
+        assert v.severity == "warning"
+        assert v.actual_value == 0.0
+        assert v.required_value == 0.1
+        assert v.items == ("Via@10.65/10:F.Cu-B.Cu:d0.3/s0.6", "R1-1")
+        assert "0.000mm" in v.message
+        assert _by_rule(results, "via_in_pad") == []
+
+    def test_gap_below_dam_fires(self):
+        results = _EDGE.check(_edge_board(10.70), _EdgeRules())
+        (v,) = _by_rule(results, "via_at_pad_edge")
+        assert v.actual_value == pytest.approx(0.05, abs=1e-6)
+
+    def test_gap_above_dam_does_not_fire(self):
+        results = _EDGE.check(_edge_board(10.80), _EdgeRules())
+        assert results.violations == []
+
+    def test_overlapping_drill_is_via_in_pad_only(self):
+        results = _EDGE.check(_edge_board(10.60), _EdgeRules())
+        assert [v.rule_id for v in results.violations] == ["via_in_pad"]
+
+    def test_no_dam_in_profile_means_no_edge_finding(self):
+        results = _EDGE.check(_edge_board(10.65), _StubDesignRules())
+        assert results.violations == []
+
+    def test_pad_solder_mask_margin_override_is_honoured(self):
+        """Copper gap 0.15 mm passes; a 0.1 mm mask margin leaves only 0.05 mm."""
+        assert _EDGE.check(_edge_board(10.80), _EdgeRules()).violations == []
+        results = _EDGE.check(_edge_board(10.80, margin=0.1), _EdgeRules())
+        (v,) = _by_rule(results, "via_at_pad_edge")
+        assert v.actual_value == pytest.approx(0.05, abs=1e-6)
+
+    def test_board_pad_to_mask_clearance_applies_without_override(self):
+        results = _EDGE.check(_edge_board(10.80, pad_to_mask=0.1), _EdgeRules())
+        assert len(_by_rule(results, "via_at_pad_edge")) == 1
+        # The pad's own margin wins over the board setting.
+        results = _EDGE.check(_edge_board(10.80, margin=0.0, pad_to_mask=0.1), _EdgeRules())
+        assert results.violations == []
+
+    def test_other_net_via_is_not_reported(self):
+        board = _edge_board(10.65)
+        board.vias[0].net_number = 2
+        assert _EDGE.check(board, _EdgeRules()).violations == []
+
+    def test_rotated_footprint_uses_true_pad_geometry(self):
+        """The board-07 C12 shape: footprint at -90 deg, pad 1.0 x 1.25 local.
+
+        Rotated, the pad is 1.25 wide in x and 1.0 tall in y.  A via 0.12 mm
+        beyond the pad's y edge is clear of the dam; the unrotated box the old
+        detect-mistakes copy used (0.625 half-height) would call it in-pad.
+        """
+        from kicad_tools.schema.pcb import Footprint, Pad
+        from kicad_tools.validate.rules.clearance import _transform_pad_position
+
+        pad = Pad(
+            "1",
+            "smd",
+            "rect",
+            (0.95, 0),
+            (1.0, 1.25),
+            ["B.Cu"],
+            net_number=1,
+            net_name="DATA",
+            rotation=-90,
+        )
+        fp = Footprint("test", "B.Cu", (25.0, 32.0), -90, "C12", "test", pads=[pad])
+        cx, cy = _transform_pad_position(pad, fp)
+        clear = _StubVia(position=(cx, cy + 0.5 + 0.15 + 0.12), drill=0.3, uuid="clear")
+        near = _StubVia(position=(cx + 0.625 + 0.15 + 0.05, cy), drill=0.3, uuid="near")
+        board = _StubPCBWithSetup(footprints=[fp], vias=[clear, near])
+        results = _EDGE.check(board, _EdgeRules())
+        (v,) = results.violations
+        assert v.rule_id == "via_at_pad_edge"
+        assert v.location == (round(near.position[0], 3), round(near.position[1], 3))
+        assert v.actual_value == pytest.approx(0.05, abs=1e-6)
+
+    def test_eligible_pofv_process_suppresses_edge_finding(self, monkeypatch):
+        """A via legal in-pad under the declared process needs no mask dam."""
+        rule = ViaInPadRule(report_pad_edge=True)
+        monkeypatch.setattr(rule, "_pofv_eligible", lambda *a, **k: True)
+        assert rule.check(_edge_board(10.65), _EdgeRules()).violations == []

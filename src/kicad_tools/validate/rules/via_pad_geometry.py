@@ -114,3 +114,45 @@ def via_inside_pad(
         copper = _pad_polygon(pad, footprint)
         return copper is not None and copper.distance(Point(cx, cy)) < radius - DRC_TOLERANCE
     return True
+
+
+def pad_mask_margin(pad: Pad, pad_to_mask_clearance: float = 0.0) -> float:
+    """Return the solder-mask expansion of ``pad``'s aperture beyond its copper.
+
+    The pad's own ``(solder_mask_margin X)`` override wins; otherwise the
+    board's ``setup.pad_to_mask_clearance`` applies (issue #7220).
+    """
+    margin = getattr(pad, "solder_mask_margin", None)
+    return float(margin) if margin is not None else float(pad_to_mask_clearance or 0.0)
+
+
+def drill_to_mask_aperture_gap(
+    via: Via,
+    pad: Pad,
+    footprint: Footprint,
+    *,
+    pad_to_mask_clearance: float = 0.0,
+) -> float | None:
+    """Return the gap from a via's drill edge to ``pad``'s mask aperture, in mm.
+
+    The aperture is the true pad copper outline (rounded corners and absolute
+    angles honoured, via :func:`clearance._pad_polygon`) grown by
+    :func:`pad_mask_margin`.  A negative result means the drill reaches into
+    the aperture.  ``None`` for a degenerate pad or a via without a drill.
+    """
+    radius = via.drill / 2.0
+    if radius <= DRC_TOLERANCE or not hasattr(pad, "shape"):
+        return None
+    require_shapely("via-at-pad-edge mask-dam geometry")
+    from shapely.geometry import Point
+
+    from .clearance import _pad_polygon
+
+    copper = _pad_polygon(pad, footprint)
+    if copper is None:
+        return None
+    margin = pad_mask_margin(pad, pad_to_mask_clearance)
+    aperture = copper.buffer(margin) if margin != 0 else copper
+    if aperture.is_empty:
+        return None
+    return float(aperture.distance(Point(via.position))) - radius
