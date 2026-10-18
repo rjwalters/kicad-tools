@@ -271,15 +271,22 @@ def output_table(result: AuditResult, verbose: bool = False) -> None:
 
     # ERC
     erc = result.erc
-    erc_status = "PASS" if erc.passed else "FAIL"
-    erc_icon = "OK" if erc.passed else "X"
-    print(f"\n[{erc_icon}] ERC (Electrical Rules Check): {erc_status}")
-    if erc.error_count > 0 or erc.warning_count > 0:
-        print(f"    Errors: {erc.error_count}, Warnings: {erc.warning_count}")
+    if erc.could_not_verify:
+        # Issue #7083: kicad-cli missing / ERC timed out -- the schematic was
+        # never checked, so this is neither PASS nor FAIL.
+        print("\n[!!] ERC (Electrical Rules Check): NOT RUN")
         if erc.details:
-            print(f"    Details: {erc.details}")
-    elif erc.details:
-        print(f"    Note: {erc.details}")
+            print(f"    Note: {erc.details}")
+    else:
+        erc_status = "PASS" if erc.passed else "FAIL"
+        erc_icon = "OK" if erc.passed else "X"
+        print(f"\n[{erc_icon}] ERC (Electrical Rules Check): {erc_status}")
+        if erc.error_count > 0 or erc.warning_count > 0:
+            print(f"    Errors: {erc.error_count}, Warnings: {erc.warning_count}")
+            if erc.details:
+                print(f"    Details: {erc.details}")
+        elif erc.details:
+            print(f"    Note: {erc.details}")
 
     # DRC
     drc = result.drc
@@ -318,7 +325,12 @@ def output_table(result: AuditResult, verbose: bool = False) -> None:
 
     # Sync drift (schematic <-> PCB)
     sync = result.sync
-    if sync.skipped:
+    if sync.could_not_verify:
+        # Issue #7083: the sync check crashed, so drift was never measured.
+        print("\n[!!] Sync (Schematic <-> PCB): NOT RUN")
+        if sync.details:
+            print(f"    Note: {sync.details}")
+    elif sync.skipped:
         print("\n[--] Sync (Schematic <-> PCB): SKIPPED")
         if sync.details:
             print(f"    Note: {sync.details}")
