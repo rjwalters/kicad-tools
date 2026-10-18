@@ -4651,8 +4651,7 @@ class LatticePathfinder:
         failure), then the smallest skew (:meth:`_pair_skew`), then the
         smallest total length; ties keep the earlier candidate, so the
         selection is deterministic.  A via-count advantage counts only when
-        it costs (almost) no skew or length (#7284, :meth:`_fallback_rank`);
-        among such candidates inside the pair's skew budget the shortest wins.
+        it costs (almost) no skew or length (#7284, :meth:`_fallback_rank`).
         Its legs are committed.  Returns
         ``(legs, is_partner_blind)`` -- the flag is set when the winner is
         exactly the copper :meth:`_partner_blind_legs` would have produced.
@@ -4779,11 +4778,10 @@ class LatticePathfinder:
         free parity win is kept unchanged, and nothing is gated when no fully
         routed candidate has unequal via counts.
 
-        Issue #7093 (length-aware parity): a candidate that keeps its parity
-        advantage AND is inside the pair's skew budget has met the skew
-        requirement, so its skew term is zeroed and the shortest such pair
-        wins (board 03 arm C: USB_D- 16.33 -> 15.74 mm at 0.33 mm skew).
-        Past the budget skew still decides.
+        Skew is never traded for length: the skew term always precedes the
+        length term, so a shorter parity pair wins only at equal (1 um) skew
+        or less (#7093 review: a skew-for-length trade made board 03's USB_D
+        skew worse than main's).
         """
         measure = self.pair_length_measure or _default_pair_length
         lengths: dict[int, tuple[float, float]] = {}
@@ -4828,14 +4826,8 @@ class LatticePathfinder:
             lp, ln = lengths[id(cand)]
             skew = abs(lp - ln)
             mismatch = self._pair_via_mismatch(cand)
-            if ref is not None and mismatch < ref_mismatch:
-                if not admissible(cand):
-                    mismatch = ref_mismatch
-                elif skew <= budget + 1e-9:
-                    # Issue #7093: between parity candidates that passed the
-                    # gate inside the pair's skew budget, skew has already
-                    # met its requirement; the shortest pair wins.
-                    return (-routed, short, mismatch, 0.0, round(lp + ln, 3))
+            if ref is not None and mismatch < ref_mismatch and not admissible(cand):
+                mismatch = ref_mismatch
             return (-routed, short, mismatch, round(skew, 3), round(lp + ln, 3))
 
         return rank

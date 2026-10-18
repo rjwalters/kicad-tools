@@ -126,21 +126,28 @@ def test_without_a_second_round_hit_the_first_round_pick_stands(monkeypatch) -> 
     assert got == (5.742, 6.025, 1, 1)
 
 
-def test_shortest_parity_pair_within_the_skew_budget_wins(monkeypatch) -> None:
+def test_skew_is_never_traded_for_length_inside_the_budget(monkeypatch) -> None:
     # Reference (2, 3): 10.0 / 10.4, skew 0.4.  Both mirrored parity pairs
     # pass the gate inside the 0.5 mm budget: P mirrored 10.35 / 10.4 (skew
     # 0.05, 20.75 mm) and N mirrored 10.0 / 10.3 (skew 0.3, 20.3 mm).  The
-    # shorter wins.  Fails on main, which keeps the 0.05 mm-skew pair.
+    # shorter one has more skew, so the better-matched pair is kept.
     legs = [(10.0, 2), (10.4, 3), (10.4, 3), (10.4, 3), (10.0, 2), (10.0, 2)]
     legs += [(10.35, 3), (10.3, 2)]
-    assert _winner(monkeypatch, legs) == (10.0, 10.3, 2, 2)
+    assert _winner(monkeypatch, legs) == (10.35, 10.4, 3, 3)
+
+
+def test_shorter_parity_pair_wins_at_equal_skew(monkeypatch) -> None:
+    # Same reference.  Both parity pairs have 0.1 mm skew; the shorter wins
+    # (P mirrored 10.3 / 10.4 = 20.7 mm vs N mirrored 10.0 / 10.1 = 20.1 mm).
+    legs = [(10.0, 2), (10.4, 3), (10.4, 3), (10.4, 3), (10.0, 2), (10.0, 2)]
+    legs += [(10.3, 3), (10.1, 2)]
+    assert _winner(monkeypatch, legs) == (10.0, 10.1, 2, 2)
 
 
 def test_skew_still_decides_past_the_budget(monkeypatch) -> None:
     # Reference (2, 3): 10.0 / 11.0, skew 1.0, already over the 0.5 mm
     # budget.  Both parity pairs are admitted as no worse than it (0.6 and
-    # 0.9 mm), but neither is inside the budget, so skew still decides and
-    # the longer, better-matched pair is kept.
+    # 0.9 mm), so skew decides and the longer, better-matched pair is kept.
     legs = [(10.0, 2), (11.0, 3), (11.0, 3), (11.0, 3), (10.0, 2), (10.0, 2)]
     legs += [(10.4, 3), (10.9, 2)]
     assert _winner(monkeypatch, legs) == (10.4, 11.0, 3, 3)
