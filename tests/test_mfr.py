@@ -609,6 +609,49 @@ class TestMfrCLICommands:
         # Returns normally (no SystemExit) when the kct engine finds no errors.
         mfr_main(["validate", str(src_pcb), "jlcpcb"])
 
+    def test_validate_autodetects_layers_from_board(self, capsys):
+        """A 4-layer board validates with 4-layer rules without --layers (#7188)."""
+        import json
+        from pathlib import Path
+
+        from kicad_tools.cli.mfr import main as mfr_main
+
+        src_pcb = (
+            Path(__file__).resolve().parent.parent
+            / "boards/03-usb-joystick/output/usb_joystick_routed.kicad_pcb"
+        )
+        if not src_pcb.exists():
+            pytest.skip("Demo PCB file not found")
+
+        mfr_main(["validate", str(src_pcb), "jlcpcb", "--format", "json"])
+        data = json.loads(capsys.readouterr().out)
+        assert data["layers"] == 4
+        assert data["ok"] is True
+
+        # Explicit --layers still overrides detection (2-layer annular-ring
+        # floor is stricter, so the 4-layer board fails).
+        with pytest.raises(SystemExit) as exc:
+            mfr_main(["validate", str(src_pcb), "jlcpcb", "--layers", "2", "--format", "json"])
+        assert exc.value.code == 1
+        data = json.loads(capsys.readouterr().out)
+        assert data["layers"] == 2
+
+    def test_fab_zone_clearance_setting_skips_keepout_zones(self):
+        """Keepout cutouts carry a placeholder clearance 0; not a pour (#7188)."""
+        from kicad_tools.cli.mfr import _fab_setting_findings
+        from kicad_tools.manufacturers import get_profile
+        from kicad_tools.sexp import parse_string
+
+        rules = get_profile("jlcpcb").get_design_rules(2, 1.0)
+        pcb = parse_string(
+            '(kicad_pcb (zone (net "GND") (connect_pads (clearance 0)))'
+            " (zone (connect_pads (clearance 0))"
+            " (keepout (copperpour not_allowed))))"
+        )
+        findings = _fab_setting_findings(pcb, rules)
+        assert [f[1] for f in findings] == ["fab_zone_clearance_setting"]
+        assert "'GND'" in findings[0][2]
+
     def test_validate_thin_trace_fails(self, tmp_path, capsys):
         """A sub-minimum trace is caught by the kct DRC engine (Issue #7188).
 

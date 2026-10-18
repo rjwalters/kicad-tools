@@ -3511,7 +3511,13 @@ def _add_mfr_parser(subparsers) -> None:
     )
     mfr_validate.add_argument("file", help="Path to .kicad_pcb file")
     mfr_validate.add_argument("manufacturer", help="Manufacturer ID (jlcpcb, seeed, etc.)")
-    mfr_validate.add_argument("-l", "--layers", type=int, default=2, help="Layer count")
+    mfr_validate.add_argument(
+        "-l",
+        "--layers",
+        type=int,
+        default=None,
+        help="Layer count (default: auto-detect from board)",
+    )
     mfr_validate.add_argument("-c", "--copper", type=float, default=1.0, help="Copper weight (oz)")
     add_format_flag(mfr_validate)
 

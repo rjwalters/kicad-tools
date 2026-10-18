@@ -635,6 +635,14 @@ def _update_zone_clearances(sexp, clearance_mm: float) -> int:
     return zones_updated
 
 
+def resolve_layer_count(pcb, explicit: int | None) -> int:
+    """Effective copper-layer count: explicit value, else the board's, else 2."""
+    if explicit is not None:
+        return explicit
+    detected = len(pcb.copper_layers)
+    return detected if detected > 0 else 2
+
+
 def cmd_validate(args):
     """Validate a PCB against manufacturer design rules with the kct DRC engine.
 
@@ -657,7 +665,6 @@ def cmd_validate(args):
     except ValueError as e:
         _fail(args, f"Error: {e}")
 
-    rules = profile.get_design_rules(args.layers, args.copper)
     file_path = Path(args.file)
 
     if not file_path.exists():
@@ -672,12 +679,17 @@ def cmd_validate(args):
     except Exception as e:
         _fail(args, f"Error loading PCB: {e}", stderr=True)
 
+    # Layer count: explicit --layers wins; otherwise read it from the board
+    # (same rule as ``kct check``) so 4-layer boards get 4-layer rules.
+    layers = resolve_layer_count(pcb, args.layers)
+    rules = profile.get_design_rules(layers, args.copper)
+
     if not json_mode:
         print(f"\n{'=' * 60}")
         print(f"VALIDATING AGAINST {profile.name.upper()} RULES")
         print(f"{'=' * 60}")
         print(f"\nFile: {file_path}")
-        print(f"Configuration: {args.layers}-layer, {args.copper}oz copper")
+        print(f"Configuration: {layers}-layer, {args.copper}oz copper")
 
         print("\nDesign Rules:")
         print(
@@ -694,7 +706,7 @@ def cmd_validate(args):
     checker = DRCChecker(
         pcb,
         manufacturer=args.manufacturer,
-        layers=args.layers,
+        layers=layers,
         copper_oz=args.copper,
     )
     results = checker.check_all(pad_grid_auto_derive=True)
@@ -719,7 +731,7 @@ def cmd_validate(args):
             {
                 "file": str(file_path),
                 "manufacturer": profile.id,
-                "layers": args.layers,
+                "layers": layers,
                 "copper_oz": args.copper,
                 "rules": rules.to_dict(),
                 "violations": errors,
@@ -740,7 +752,7 @@ def cmd_validate(args):
         for finding in errors:
             print(f"  [{finding['rule_id']}] {finding['detail']}")
     else:
-        print(f"\nNo errors from the kct DRC engine for {mfr} ({args.layers}-layer).")
+        print(f"\nNo errors from the kct DRC engine for {mfr} ({layers}-layer).")
 
     if warnings:
         print(
@@ -782,14 +794,19 @@ def _fab_setting_findings(sexp, rules) -> list[tuple[str, str, str]]:
     # Check zone clearance settings
     for child in sexp.values:
         if isinstance(child, SExp) and child.tag == "zone":
+            # Keepout zones (e.g. "Remove isolated pour fragment" cutouts)
+            # are not pours: their connect_pads clearance is a KiCad
+            # placeholder (0) that never applies, so it is not a fab setting.
+            if child.find_child("keepout") is not None:
+                continue
             connect_pads = child.find_child("connect_pads")
             if connect_pads:
                 clearance = connect_pads.find_child("clearance")
                 if clearance:
                     zone_clearance = clearance.get_float(0) or 0.0
                     if zone_clearance < rules.min_clearance_mm:
-                        net = child.find_child("net_name")
-                        net_name = net.get_string(0) if net else "unknown"
+                        net = child.find_child("net_name") or child.find_child("net")
+                        net_name = (net.get_string(0) if net else None) or "unknown"
                         findings.append(
                             (
                                 *_ZONE_CLEARANCE,
@@ -916,7 +933,13 @@ Examples:
     )
     p_validate.add_argument("file", help="Path to .kicad_pcb file")
     p_validate.add_argument("manufacturer", help="Manufacturer ID (jlcpcb, seeed, etc.)")
-    p_validate.add_argument("-l", "--layers", type=int, default=2, help="Layer count (default: 2)")
+    p_validate.add_argument(
+        "-l",
+        "--layers",
+        type=int,
+        default=None,
+        help="Layer count (default: auto-detect from board)",
+    )
     p_validate.add_argument("-c", "--copper", type=float, default=1.0, help="Copper weight (oz)")
     add_format_flag(p_validate)
     p_validate.set_defaults(func=cmd_validate)
