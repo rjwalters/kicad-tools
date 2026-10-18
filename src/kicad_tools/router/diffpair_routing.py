@@ -17,6 +17,7 @@ import itertools
 import logging
 import math
 import os
+import re
 import time
 from dataclasses import dataclass, field
 from enum import Enum
@@ -127,7 +128,77 @@ COUPLED_HEURISTIC_WEIGHT: float = float(os.environ.get("KCT_COUPLED_HEURISTIC_WE
 # on the CI no-coverage path regardless.  40000 total (20000/phase) sits
 # in that wide window: ~1.7x above npad's convergence floor (npad passes
 # in ~1.3s) while DQS still bails comfortably under the 60s CI timeout.
-COUPLED_FLAGOFF_MAX_ITERATIONS: int = int(os.environ.get("KCT_COUPLED_FLAGOFF_MAX_ITERS", "40000"))
+#
+# Issue #6835: raised to 700000 total (350000 per phase); the operator ruling of
+# 2026-10-18 later raised it to 1400000 (see the exception table below).  The
+# analysis that follows was done at 700000.  The value is a
+# shared per-pair total: the corridor phase gets at most half
+# (``per_pair_max_iterations // 2``) and the open phase gets the remainder
+# (``total - corridor_iterations_used``), so every phase is guaranteed at
+# least 350000.  #6826 allows a budget raise only when all three of its
+# rules hold:
+#
+#   (a) efficiency first -- #6826 / PR #6832 bounded the endpoint-zone
+#       tolerance by pad pitch, halving the flood (TMDS_D1 replay 402,163
+#       -> 213,996 iterations; empty-grid control 89,057 -> 48,031), so
+#       this is not a flat raise in place of an efficiency change;
+#   (b) smallest round value covering every pair that couples -- Board07
+#       ``--differential-pairs`` needs, per pair (measured with the budget
+#       lifted to 1M): MIPI_CLK 16,424 (corridor), TMDS_D0 194,615,
+#       TMDS_D1 205,407, TMDS_D2 205,490 (all corridor), MIPI_DAT0 250,560
+#       (open, after a 278,020-iteration corridor exhaustion), MIPI_DAT1
+#       337,780 (open, the largest need: 3.5% headroom at 350k).  DQS does
+#       not couple at 500k/phase either (a polarity-reversed landing, not a
+#       budget problem), so it sets no floor;
+#   (c) per-pair wall time inside the existing per-pair timeouts -- about
+#       12 us per iteration on the C++ backend, so a pair that fails both
+#       phases spends ~8.5 s instead of ~0.5 s.  Measured at this default
+#       (macOS arm64, C++ build 58, seed 42): Board07 pairs take 0.2-2.6 s
+#       each, DQS (fails both phases) 7.5 s, and the route's wall time
+#       stayed at 391 s (401 s at 40000); the coupled pre-pass runs once per
+#       route.  06rf's slowest pair takes 7.6 s.  Search-level is not
+#       commit-level: on Board07, 5 of the 6 pairs that now couple are
+#       rejected for via-aware P/N overlap and routed independently.
+#
+# Callers that plumb an explicit ``per_pair_max_iterations`` (board 06's
+# 2000, the re-route gate) are unaffected.
+COUPLED_FLAGOFF_MAX_ITERATIONS: int = int(
+    os.environ.get("KCT_COUPLED_FLAGOFF_MAX_ITERS", "1400000")
+)
+
+# Issue #6835 (operator ruling 2026-10-18, Q3 option 1): the default is
+# raised again to 1,400,000 total (700,000 per phase).  The bench shows 1.4M
+# fixes 06rf USB3_RX1 but worsens PCIE_TX (06rf) and the 06b LVDS skew, so
+# those pairs keep the previous (pre-#6835) budget below.  PCIE_RX is exempt
+# too: at 1.4M it couples, which changes PCIE_TX's single-ended fallback route
+# and regresses PCIE_TX even with its own exception (Judge bench on 06rf:
+# skew 3.657 -> 7.65 mm); with PCIE_RX exempt every 06rf pair is no worse
+# than main.  ``LVDS\d*`` matches by pair name, so it applies to any board's
+# ``LVDS<n>`` pairs, not only 06b's.  The table is keyed
+# on the pair's base name (polarity suffix and trailing separators stripped,
+# upper-cased); an entry is a regex matched with ``fullmatch``.  It applies
+# only when the caller plumbed no explicit budget, like the default itself.
+COUPLED_FLAGOFF_PAIR_BUDGET_EXCEPTIONS: tuple[tuple[str, int], ...] = (
+    (r"PCIE_TX", 40000),
+    (r"PCIE_RX", 40000),
+    (r"LVDS\d*", 40000),
+)
+
+
+def _flagoff_budget_for_pair(base_name: str) -> int:
+    """Return the flag-off coupled iteration budget for one pair (Issue #6835).
+
+    ``COUPLED_FLAGOFF_MAX_ITERATIONS`` unless the pair matches
+    ``COUPLED_FLAGOFF_PAIR_BUDGET_EXCEPTIONS`` and the default is above that
+    entry's budget, so ``KCT_COUPLED_FLAGOFF_MAX_ITERS=40000`` still caps
+    every pair.
+    """
+    key = base_name.upper().rstrip("_-.")
+    for pattern, budget in COUPLED_FLAGOFF_PAIR_BUDGET_EXCEPTIONS:
+        if re.fullmatch(pattern, key):
+            return min(COUPLED_FLAGOFF_MAX_ITERATIONS, budget)
+    return COUPLED_FLAGOFF_MAX_ITERATIONS
+
 
 # Issue #3508: max joint remaining Manhattan distance (grid cells, max
 # over the two heads) at which a budget-exited coupled search qualifies
@@ -879,7 +950,12 @@ def _endpoint_zone_tolerance(a: GridPos, b: GridPos, target_spacing_cells: int, 
     joint A* flooded them.  Bound the tolerance by this end's own pad-pitch
     delta plus one cell instead -- the pads themselves (spacing == pitch)
     stay legal -- and never loosen it past the radius-based value it
-    replaces.  ``floor(x + 0.5)`` (round half up, not Python's banker's
+    replaces.  This is enough on every ordinary geometry probed (in-line,
+    perpendicular, 45/30-degree and rotated pairs, pitch below target,
+    detour-forcing obstacles), but it is not a proof: when a foreign
+    obstacle overlaps the N pad's own copper, the converging path can need
+    one to four cells more than this, the coupled search then fails, and
+    the pair falls back to independent routing.  ``floor(x + 0.5)`` (round half up, not Python's banker's
     ``round``) mirrors ``endpoint_zone_tolerance`` in
     ``coupled_pathfinder.cpp`` exactly.
     """
@@ -11654,7 +11730,7 @@ class DiffPairRouter:
             and (per_pair_max_iterations is None or per_pair_max_iterations <= 0)
             and COUPLED_FLAGOFF_MAX_ITERATIONS > 0
         ):
-            per_pair_max_iterations = COUPLED_FLAGOFF_MAX_ITERATIONS
+            per_pair_max_iterations = _flagoff_budget_for_pair(pair.positive.base_name)
 
         pathfinder = CoupledPathfinder(
             self.autorouter.grid,

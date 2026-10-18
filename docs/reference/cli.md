@@ -178,6 +178,20 @@ kct sch hierarchy project.kicad_sch --format json
 kct sch unconnected project.kicad_sch
 ```
 
+#### `sch validate`
+
+```bash
+kct sch validate <schematic> [options]
+```
+
+| Option | Description |
+|--------|-------------|
+| `--format` | Output format (`text` or `json`) |
+| `--lib-path` | Directory of `.kicad_sym` files used as a fallback for symbols missing from the schematic's embedded `lib_symbols` (embedded symbols stay authoritative); repeatable |
+| `--strict` | Exit with error on warnings |
+| `--quiet`, `-q` | Only show errors |
+| `--skip` | Skip a validation check category (e.g. `swd_routing`, `i2c_pullups`); repeatable |
+
 ---
 
 ### `pcb`
@@ -280,18 +294,31 @@ not touch board X's copper".
 
 ### `erc`
 
-Parse and analyze ERC (Electrical Rule Check) reports.
+Run ERC on a schematic (via kicad-cli) or parse an existing ERC report.
 
 ```bash
-kct erc <report> [options]
+kct erc <schematic.kicad_sch | report.json | report.rpt> [options]
 ```
+
+Every violation kicad-cli reports (minus KiCad exclusions) counts toward the
+exit code; the only suppression is an explicit `--filter-config`, which is
+disclosed as `Filtered:` / `summary.filtered` (Issue #7161).
 
 | Option | Description |
 |--------|-------------|
 | `--format {table,json,summary}` | Output format (default: table) |
-| `--errors-only` | Show only errors, not warnings |
-| `--type TYPE` | Filter by error type |
-| `--sheet SHEET` | Filter by sheet name |
+| `--errors-only` | Show only errors, not warnings (view only) |
+| `--strict` | Exit 2 when only warnings are found |
+| `--type`, `-t TYPE` | Filter by error type (view only) |
+| `--sheet SHEET` | Filter by sheet name (view only) |
+| `--by-sheet` | Group violations by sheet |
+| `--verbose`, `-v` | Show detailed violation information |
+| `--filter-config FILE` | TOML `[[erc.filters]]` rules to suppress or reclassify violations |
+| `--output`, `-o FILE` | Save the kicad-cli ERC report to this path |
+| `--keep-report` | Keep the temporary ERC report |
+| `--list-types` | List known ERC violation types and exit |
+
+Exit codes: `0` no errors, `1` errors (or failure), `2` warnings with `--strict`.
 
 **Examples:**
 ```bash
@@ -348,11 +375,41 @@ one status line, also in `summary`, `--mfr` and `kicad-drc-summary` output:
 Exit codes: error-severity parity findings exit 1; warning-severity ones exit
 2 under `--strict`; NOT RUN exits 2 (the verdict reads `DRC INCOMPLETE`, never
 `DRC PASSED`) unless `--allow-incomplete` is given. Errors take precedence.
-`--mfr` keeps its manufacturer-compatibility exit code. `--format json` adds a
+`--mfr` uses the same exit gate (#7170, see below). `--format json` adds a
 `schematic_parity` object (`status`, `checked`, `reason`, `error_count`,
 `warning_count`, `issues`), a derived `schematic_parity_checked` alias, and
 `parity_errors`/`parity_warnings` in `summary`. Waiver entries match parity
 findings the same way they match DRC findings.
+
+**Manufacturer check (`--mfr`, #7170)**
+
+`--mfr <fab>` gives every kicad-cli violation exactly one verdict:
+
+- **compatible** — the fab's limit is met (e.g. a board rule stricter than the
+  fab's); the kicad-cli finding is cleared.
+- **incompatible** — the measured value breaches the fab's limit
+  (`clearance`, `track_width`, `copper_edge_clearance`, `annular_width`,
+  `via_diameter`, `hole_to_hole`, `drill_out_of_range` min *and* max,
+  `solder_mask_bridge`; `shorting_items` always fails). Blocking whatever
+  kicad-cli's severity was.
+- **not checked** — kct has no fab-limit check for the type (`hole_clearance`,
+  `via_dangling`, `courtyards_overlap`, `silk_*`, …). Listed in a
+  `NOT CHECKED against <fab> limits: N (errors E, warnings W)` section with a
+  per-type breakdown; kicad-cli's severity stands.
+
+The summary line reads `Compatible: a, Incompatible: b, Not checked: c`
+(`a + b + c` = every violation). Exit codes are the plain-mode ones: 1 when any
+incompatible or not-checked error (or parity error) remains; 2 for warnings
+under `--strict`, or when schematic parity did NOT RUN without
+`--allow-incomplete` (so `kct drc report.json --mfr X` exits 2 unless
+`--allow-incomplete`, like plain `kct drc report.json`); else 0.
+`--mfr --format json` prints `{manufacturer, layers, source, summary: {total,
+checked, compatible, incompatible, not_checked, not_checked_errors,
+not_checked_warnings, not_checked_by_type, parity_errors, parity_warnings},
+checks: [{type_str, severity, result, rule_name, message, violation_message,
+manufacturer_limit, actual_value}], schematic_parity, schematic_parity_checked,
+exit_code}`; `checked + not_checked == total`. Other `--format` values print
+the table.
 
 **Waivers (`--waivers`, #4691)**
 
@@ -396,7 +453,8 @@ The `kicad-cli pcb drc` cross-gate reads the same schema-v2 sidecar as
 **Examples:**
 ```bash
 kct drc board.drc
-kct drc board.kicad_pcb --mfr jlcpcb
+kct drc board.kicad_pcb --mfr jlcpcb              # exit 1 on any fab breach or not-checked error
+kct drc board-drc.json --mfr jlcpcb --format json --allow-incomplete
 kct drc board-drc.json --waivers .kct_waivers.json --allow-incomplete   # 0 unwaived errors gate
 kct mfr compare  # Show all manufacturer rules side by side
 ```
@@ -911,6 +969,9 @@ kct parts <subcommand> [options]
 | `search` | Search for parts |
 | `lookup` | Get part details by LCSC number |
 | `availability` | Check BOM part availability on LCSC for a schematic |
+| `import` | Import a part's symbol/footprint from its datasheet into a library |
+| `suggest` | Suggest LCSC part numbers for components without them |
+| `cache` | Cache management (`stats`, `clear`, `clear-expired`) |
 | `sync-catalog` | Download the jlcparts dataset (~620 MB) into the cache dir for fully-offline lookups (#4117) |
 
 **Examples:**
@@ -918,7 +979,22 @@ kct parts <subcommand> [options]
 kct parts search "STM32F103"
 kct parts lookup C8734
 kct parts availability project.kicad_sch --quantity 100
+kct parts import STM32F103C8T6 --library my.kicad_sym --dry-run
 ```
+
+#### `parts import`
+
+| Option | Description |
+|--------|-------------|
+| `--library`, `-l` | Output symbol library (`.kicad_sym`); required |
+| `--symbol-lib` | Alias for `--library` |
+| `--footprint-lib` | Project footprint library (`.pretty` directory) |
+| `--package`, `-p` | Specific package variant (e.g. `LQFP48`) |
+| `--layout` | Pin layout style: `functional` (default), `physical` or `simple` |
+| `--dry-run` | Preview what would be imported without making changes |
+| `--interactive`, `-i` | Deprecated: not implemented; ignored |
+| `--overwrite` | Overwrite existing symbols |
+| `--format` | Output format (`text` or `json`) |
 
 ---
 
@@ -1677,8 +1753,20 @@ kct optimize-traces <pcb_file> [options]
 
 | Option | Description |
 |--------|-------------|
-| `--output`, `-o` | Output file |
-| `--length-match` | Enable length matching |
+| `--output`, `-o` | Output file (default: modify in place) |
+| `--net` | Only optimize traces matching this net pattern |
+| `--no-merge` | Disable collinear merging |
+| `--no-zigzag` | Disable zigzag elimination |
+| `--no-45` | Disable 45-degree corners |
+| `--chamfer-size` | 45-degree chamfer size in mm (default: 0.5) |
+| `--verbose`, `-v` | Print a per-net table (segments and length before/after, `(rolled back)` marker) after the summary |
+| `--dry-run` | Show results without writing |
+| `--quiet`, `-q` | Suppress progress output |
+| `--drc-aware` | Roll back per-net optimizations that increase DRC violations (requires `--mfr`) |
+| `--mfr` | Target manufacturer for DRC rules (e.g. `jlcpcb`, `oshpark`); required with `--drc-aware` |
+| `--layers` | Number of copper layers for DRC checks (default: 2) |
+| `--copper` | Copper weight in oz for DRC checks (default: 1.0) |
+| `--format` | Output format (`text` or `json`); JSON shape in [machine-output.md](machine-output.md) |
 
 ---
 

@@ -7,7 +7,7 @@
     "warnings": 0,
     "infos": 2,
     "waived": 0,
-    "rules_checked": 56,
+    "rules_checked": 57,
     "rules_checked_by_rule": {
       "connectivity": 1,
       "copper_sliver": 1,
@@ -28,8 +28,8 @@
     },
     "passed": true,
     "stale_waivers": 0,
-    "coverage_checked": 32,
-    "coverage_skipped": 5,
+    "coverage_checked": 29,
+    "coverage_skipped": 10,
     "coverage_unknown": [],
     "coverage_blocking_unknown": []
   },
@@ -81,11 +81,11 @@
   "meta_checks": {
     "drc": {
       "status": "PASSED",
-      "detail": "56 rules checked, 0 error(s), 0 warning(s)"
+      "detail": "57 rules checked, 0 error(s), 0 warning(s)"
     },
     "erc": {
       "status": "PASSED",
-      "detail": "0 error(s), 0 warning(s)"
+      "detail": "0 error(s), 1 warning(s)"
     },
     "lvs": {
       "status": "PASSED",
@@ -167,21 +167,21 @@
       "blocking": true
     },
     "diffpair_length_skew": {
-      "status": "checked",
-      "state": "checked",
-      "reason": null,
+      "status": "skipped:no_diff_pairs_detected",
+      "state": "skipped",
+      "reason": "no_diff_pairs_detected",
       "blocking": true
     },
     "diffpair_routing_continuity": {
-      "status": "checked",
-      "state": "checked",
-      "reason": null,
+      "status": "skipped:no_diff_pairs_detected",
+      "state": "skipped",
+      "reason": "no_diff_pairs_detected",
       "blocking": true
     },
     "diffpair_uncoupled_length": {
-      "status": "checked",
-      "state": "checked",
-      "reason": null,
+      "status": "skipped:no_diff_pairs_detected",
+      "state": "skipped",
+      "reason": "no_diff_pairs_detected",
       "blocking": true
     },
     "dimensions": {
@@ -221,9 +221,9 @@
       "blocking": true
     },
     "match_group_length_skew": {
-      "status": "checked",
-      "state": "checked",
-      "reason": null,
+      "status": "skipped:no_net_class_map",
+      "state": "skipped",
+      "reason": "no_net_class_map",
       "blocking": true
     },
     "netclass_clearance_copper": {
@@ -274,6 +274,12 @@
       "reason": null,
       "blocking": false
     },
+    "routing_policy": {
+      "status": "skipped:no_declared_policies",
+      "state": "skipped",
+      "reason": "no_declared_policies",
+      "blocking": true
+    },
     "sch_fields": {
       "status": "checked",
       "state": "checked",
@@ -305,6 +311,12 @@
       "blocking": true
     },
     "via_in_pad": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    },
+    "via_type": {
       "status": "checked",
       "state": "checked",
       "reason": null,

@@ -174,3 +174,25 @@ def test_require_outline_refuses_and_default_warns(tmp_path, capsys) -> None:
         _read_board_data(str(src), require_outline=True)
     _read_board_data(str(src))
     assert "No Edge.Cuts board outline" in capsys.readouterr().err
+
+
+def _line(x1, y1, x2, y2) -> str:
+    return f'(gr_line (start {x1} {y1}) (end {x2} {y2}) (layer "Edge.Cuts") (width 0.1))'
+
+
+OUTER_LINES = "\n".join(
+    [_line(0, 0, 100, 0), _line(100, 0, 100, 80), _line(100, 80, 0, 80), _line(0, 80, 0, 0)]
+)
+CUTOUT_RECT = '(gr_rect (start 40 30) (end 60 50) (layer "Edge.Cuts") (width 0.1) (fill none))'
+CUTOUT_POLY = (
+    "(gr_poly (pts (xy 40 30) (xy 60 30) (xy 60 50) (xy 40 50)) "
+    '(layer "Edge.Cuts") (width 0.1) (fill none))'
+)
+
+
+@pytest.mark.parametrize("cutout", [CUTOUT_RECT, CUTOUT_POLY])
+@pytest.mark.parametrize("cutout_first", [True, False])
+def test_line_outline_beats_cutout(tmp_path, cutout, cutout_first) -> None:
+    body = cutout + "\n" + OUTER_LINES if cutout_first else OUTER_LINES + "\n" + cutout
+    b = _bbox(extract_board_outline(_pcb(tmp_path, body)))
+    assert b == pytest.approx((0, 0, 100, 80))
