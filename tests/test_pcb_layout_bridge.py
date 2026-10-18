@@ -310,20 +310,22 @@ def test_traces_and_vias_switches(source, origin, tmp_path):
 # Blocks at 90/270 degrees: copper lands on the real pads (#7046)
 # ---------------------------------------------------------------------------
 
-# R_0603_1608Metric in tests/fixtures/Test_Library.pretty: pads at x = -/+0.775.
-_R0603_PADS = {"1": (-0.775, 0.0), "2": (0.775, 0.0)}
+# KiCad 10 R_0603_1608Metric (tests/fixtures/KiCad10_Library.pretty): pads at x = -/+0.825.
+_R0603_PADS = {"1": (-0.825, 0.0), "2": (0.825, 0.0)}
 
 
 def _rotated_layout(origin: tuple[float, float], rotation: float) -> PCBLayout:
-    """A two-resistor block with the fixture's real pad offsets, at ``rotation``.
+    """A two-resistor block with the library's real pad offsets, at ``rotation``.
 
     R1 is itself rotated 90 degrees inside the block, so the board pad is the
-    composition of the block and the footprint rotations.
+    composition of the block and the footprint rotations.  R1 sits on D1's
+    -x side, next to D1.1, so the D1.1 -> R1.1 trace crosses no foreign pad
+    (D1.2 is on the far side) and the strict copper check passes.
     """
     ox, oy = origin
     block = PCBBlock("pair", block_id="PAIR")
     d1 = block.add_component("D1", "R_0603_1608Metric", 0, 0, pads=_R0603_PADS)
-    r1 = block.add_component("R1", "R_0603_1608Metric", 3, 1, rotation=90, pads=_R0603_PADS)
+    r1 = block.add_component("R1", "R_0603_1608Metric", -3, 0, rotation=90, pads=_R0603_PADS)
     block.add_trace(d1.pad_position("1"), r1.pad_position("1"), net="LED_MID")
     gnd = r1.pad_position("2")
     block.add_via(gnd.x, gnd.y, net="GND")
