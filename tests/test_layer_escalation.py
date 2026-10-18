@@ -10,279 +10,47 @@ from unittest.mock import patch
 
 import pytest
 
+from tests.route_cli import kct_route, route_args
+
 
 class TestLayerEscalationCLIParameters:
-    """Tests for --auto-layers parameter handling in route command."""
+    """``kct route`` hands the layer-escalation flags to the router verbatim (#7017)."""
 
-    def test_auto_layers_default_not_forwarded(self):
-        """auto-layers unset (Issue #4502 tri-state ``None``) is NOT forwarded
-        to the underlying CLI; the inner parser's own ``default=True`` applies.
-        --no-auto-layers IS forwarded when explicitly disabled."""
-        from kicad_tools.cli.commands.routing import run_route_command
+    def test_auto_layers_unset_is_not_invented(self):
+        """Unset: nothing forwarded; the route parser's ``default=True`` applies."""
+        forwarded, args = kct_route(["test.kicad_pcb"])
+        assert "--auto-layers" not in forwarded
+        assert "--no-auto-layers" not in forwarded
+        assert args.auto_layers is True
 
-        args = SimpleNamespace(
-            pcb="test.kicad_pcb",
-            output=None,
-            strategy="negotiated",
-            skip_nets=None,
-            grid=0.25,
-            trace_width=0.2,
-            clearance=0.15,
-            via_drill=0.3,
-            via_diameter=0.6,
-            mc_trials=10,
-            iterations=15,
-            verbose=False,
-            dry_run=True,
-            quiet=True,
-            power_nets=None,
-            layers="auto",
-            force=False,
-            no_optimize=False,
-            auto_layers=None,  # unset (outer parser default, Issue #4502)
-            max_layers=6,
-            min_completion=0.95,
-        )
+    def test_explicit_auto_layers_reaches_router(self):
+        """Issue #4502: the explicit token must reach route_cmd's argv-sniffing sites."""
+        forwarded, args = kct_route(["test.kicad_pcb", "--auto-layers"])
+        assert "--auto-layers" in forwarded
+        assert args.auto_layers is True
 
-        with patch("kicad_tools.cli.route_cmd.main") as mock_main:
-            mock_main.return_value = 0
-            run_route_command(args)
+    def test_no_auto_layers_reaches_router(self):
+        forwarded, args = kct_route(["test.kicad_pcb", "--no-auto-layers"])
+        assert "--no-auto-layers" in forwarded
+        assert args.auto_layers is False
 
-            call_args = mock_main.call_args[0][0]
-            # Unset: do not forward (the underlying CLI also defaults to True).
-            assert "--auto-layers" not in call_args
-            assert "--no-auto-layers" not in call_args
+    @pytest.mark.parametrize(
+        ("flag", "value", "dest", "expected"),
+        [
+            ("--max-layers", "4", "max_layers", 4),
+            ("--starting-layers", "4", "starting_layers", 4),
+            ("--min-completion", "0.9", "min_completion", 0.9),
+        ],
+    )
+    def test_value_flag_reaches_router(self, flag, value, dest, expected):
+        forwarded, args = kct_route(["test.kicad_pcb", "--auto-layers", flag, value])
+        assert forwarded[forwarded.index(flag) + 1] == value
+        assert getattr(args, dest) == expected
 
-    def test_explicit_auto_layers_forwarded_when_enabled(self):
-        """--auto-layers is forwarded when auto_layers=True (Issue #4502).
-
-        With the outer parser's tri-state default, ``True`` means the user
-        explicitly typed ``--auto-layers``; the token must reach the inner
-        argv so route_cmd's argv-sniffing sites can observe the override.
-        """
-        from kicad_tools.cli.commands.routing import run_route_command
-
-        args = SimpleNamespace(
-            pcb="test.kicad_pcb",
-            output=None,
-            strategy="negotiated",
-            skip_nets=None,
-            grid=0.25,
-            trace_width=0.2,
-            clearance=0.15,
-            via_drill=0.3,
-            via_diameter=0.6,
-            mc_trials=10,
-            iterations=15,
-            verbose=False,
-            dry_run=True,
-            quiet=True,
-            power_nets=None,
-            layers="auto",
-            force=False,
-            no_optimize=False,
-            auto_layers=True,  # user explicitly enabled
-            max_layers=6,
-            min_completion=0.95,
-        )
-
-        with patch("kicad_tools.cli.route_cmd.main") as mock_main:
-            mock_main.return_value = 0
-            run_route_command(args)
-
-            call_args = mock_main.call_args[0][0]
-            assert "--auto-layers" in call_args
-            assert "--no-auto-layers" not in call_args
-
-    def test_no_auto_layers_forwarded_when_disabled(self):
-        """--no-auto-layers is forwarded when auto_layers=False (Issue #2388)."""
-        from kicad_tools.cli.commands.routing import run_route_command
-
-        args = SimpleNamespace(
-            pcb="test.kicad_pcb",
-            output=None,
-            strategy="negotiated",
-            skip_nets=None,
-            grid=0.25,
-            trace_width=0.2,
-            clearance=0.15,
-            via_drill=0.3,
-            via_diameter=0.6,
-            mc_trials=10,
-            iterations=15,
-            verbose=False,
-            dry_run=True,
-            quiet=True,
-            power_nets=None,
-            layers="auto",
-            force=False,
-            no_optimize=False,
-            auto_layers=False,  # user explicitly disabled
-            max_layers=6,
-            min_completion=0.95,
-        )
-
-        with patch("kicad_tools.cli.route_cmd.main") as mock_main:
-            mock_main.return_value = 0
-            run_route_command(args)
-
-            call_args = mock_main.call_args[0][0]
-            assert "--no-auto-layers" in call_args
-            assert "--auto-layers" not in call_args
-
-    def test_max_layers_parameter_passed_when_not_default(self):
-        """max-layers parameter is passed when different from default 6."""
-        from kicad_tools.cli.commands.routing import run_route_command
-
-        args = SimpleNamespace(
-            pcb="test.kicad_pcb",
-            output=None,
-            strategy="negotiated",
-            skip_nets=None,
-            grid=0.25,
-            trace_width=0.2,
-            clearance=0.15,
-            via_drill=0.3,
-            via_diameter=0.6,
-            mc_trials=10,
-            iterations=15,
-            verbose=False,
-            dry_run=True,
-            quiet=True,
-            power_nets=None,
-            layers="auto",
-            force=False,
-            no_optimize=False,
-            auto_layers=True,
-            max_layers=4,  # Non-default value
-            min_completion=0.95,
-        )
-
-        with patch("kicad_tools.cli.route_cmd.main") as mock_main:
-            mock_main.return_value = 0
-            run_route_command(args)
-
-            call_args = mock_main.call_args[0][0]
-            assert "--max-layers" in call_args
-            idx = call_args.index("--max-layers")
-            assert call_args[idx + 1] == "4"
-
-    def test_starting_layers_forwarded_when_set(self):
-        """Issue #3400: --starting-layers is forwarded when the user supplied it."""
-        from kicad_tools.cli.commands.routing import run_route_command
-
-        args = SimpleNamespace(
-            pcb="test.kicad_pcb",
-            output=None,
-            strategy="negotiated",
-            skip_nets=None,
-            grid=0.25,
-            trace_width=0.2,
-            clearance=0.15,
-            via_drill=0.3,
-            via_diameter=0.6,
-            mc_trials=10,
-            iterations=15,
-            verbose=False,
-            dry_run=True,
-            quiet=True,
-            power_nets=None,
-            layers="auto",
-            force=False,
-            no_optimize=False,
-            auto_layers=True,
-            max_layers=6,
-            starting_layers=4,  # user supplied
-            min_completion=0.95,
-        )
-
-        with patch("kicad_tools.cli.route_cmd.main") as mock_main:
-            mock_main.return_value = 0
-            run_route_command(args)
-
-            call_args = mock_main.call_args[0][0]
-            assert "--starting-layers" in call_args
-            idx = call_args.index("--starting-layers")
-            assert call_args[idx + 1] == "4"
-
-    def test_starting_layers_not_forwarded_when_none(self):
-        """Issue #3400: --starting-layers is NOT forwarded when args.starting_layers is None.
-
-        Forwarding ``None`` would either crash the inner parser or
-        clobber the inner CLI > spec > default precedence chain.  The
-        outer parser stores ``None`` when the user did not pass the
-        flag, and the forwarder must drop it.
-        """
-        from kicad_tools.cli.commands.routing import run_route_command
-
-        args = SimpleNamespace(
-            pcb="test.kicad_pcb",
-            output=None,
-            strategy="negotiated",
-            skip_nets=None,
-            grid=0.25,
-            trace_width=0.2,
-            clearance=0.15,
-            via_drill=0.3,
-            via_diameter=0.6,
-            mc_trials=10,
-            iterations=15,
-            verbose=False,
-            dry_run=True,
-            quiet=True,
-            power_nets=None,
-            layers="auto",
-            force=False,
-            no_optimize=False,
-            auto_layers=True,
-            max_layers=6,
-            starting_layers=None,  # user did NOT supply
-            min_completion=0.95,
-        )
-
-        with patch("kicad_tools.cli.route_cmd.main") as mock_main:
-            mock_main.return_value = 0
-            run_route_command(args)
-
-            call_args = mock_main.call_args[0][0]
-            assert "--starting-layers" not in call_args
-
-    def test_min_completion_parameter_passed_when_not_default(self):
-        """min-completion parameter is passed when different from default 0.95."""
-        from kicad_tools.cli.commands.routing import run_route_command
-
-        args = SimpleNamespace(
-            pcb="test.kicad_pcb",
-            output=None,
-            strategy="negotiated",
-            skip_nets=None,
-            grid=0.25,
-            trace_width=0.2,
-            clearance=0.15,
-            via_drill=0.3,
-            via_diameter=0.6,
-            mc_trials=10,
-            iterations=15,
-            verbose=False,
-            dry_run=True,
-            quiet=True,
-            power_nets=None,
-            layers="auto",
-            force=False,
-            no_optimize=False,
-            auto_layers=True,
-            max_layers=6,
-            min_completion=0.90,  # Non-default value
-        )
-
-        with patch("kicad_tools.cli.route_cmd.main") as mock_main:
-            mock_main.return_value = 0
-            run_route_command(args)
-
-            call_args = mock_main.call_args[0][0]
-            assert "--min-completion" in call_args
-            idx = call_args.index("--min-completion")
-            assert call_args[idx + 1] == "0.9"
+    def test_starting_layers_unset_is_none(self):
+        forwarded, args = kct_route(["test.kicad_pcb"])
+        assert "--starting-layers" not in forwarded
+        assert args.starting_layers is None
 
 
 class TestLayerEscalationValidation:
@@ -2770,18 +2538,14 @@ class TestStartingLayersCLIParsing:
 
     def test_outer_parser_registers_starting_layers(self):
         """The outer ``kct route`` parser in parser.py also accepts the flag."""
-        from kicad_tools.cli.parser import create_parser
 
-        parser = create_parser()
-        args = parser.parse_args(["route", "dummy.kicad_pcb", "--starting-layers", "4"])
+        args = route_args(["dummy.kicad_pcb", "--starting-layers", "4"])
         assert args.starting_layers == 4
 
     def test_outer_parser_default_starting_layers_is_none(self):
         """Without the flag the outer parser leaves starting_layers as None."""
-        from kicad_tools.cli.parser import create_parser
 
-        parser = create_parser()
-        args = parser.parse_args(["route", "dummy.kicad_pcb"])
+        args = route_args(["dummy.kicad_pcb"])
         assert args.starting_layers is None
 
 

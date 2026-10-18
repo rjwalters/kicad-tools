@@ -816,7 +816,7 @@ def check_missing_project_instances(schematic_path: str) -> list[ValidationIssue
     from kicad_tools.cli.sch_repair_instances import (
         _extract_symbols_with_instance_info,
     )
-    from kicad_tools.cli.sch_set_footprint import _collect_schematic_files
+    from kicad_tools.cli.sch_wire_common import _collect_schematic_files
 
     issues: list[ValidationIssue] = []
 
@@ -2674,7 +2674,9 @@ def check_nrst_filter_cap(schematic_path: str) -> list[ValidationIssue]:
     return issues
 
 
-def check_symbol_footprint_pin_mismatch(schematic_path: str) -> list[ValidationIssue]:
+def check_symbol_footprint_pin_mismatch(
+    schematic_path: str, lib_manager=None
+) -> list[ValidationIssue]:
     """Check that each symbol's pin count matches its assigned footprint's pad count.
 
     Compares the number of pins in the embedded ``lib_symbols`` entry against
@@ -2719,6 +2721,8 @@ def check_symbol_footprint_pin_mismatch(schematic_path: str) -> list[ValidationI
                         continue
 
                     lib_sym = lib_sym_cache.get(sym.lib_id)
+                    if lib_sym is None and lib_manager is not None:
+                        lib_sym = lib_manager.get_symbol(sym.lib_id)
                     if lib_sym is None:
                         continue
 
@@ -2789,7 +2793,7 @@ def check_symbol_footprint_pin_mismatch(schematic_path: str) -> list[ValidationI
 # ---------------------------------------------------------------------------
 
 
-def check_lib_symbols_mismatch(schematic_path: str) -> list[ValidationIssue]:
+def check_lib_symbols_mismatch(schematic_path: str, lib_manager=None) -> list[ValidationIssue]:
     """Check that every placed symbol's ``lib_id`` has a matching ``lib_symbols`` entry.
 
     The ``lib_symbols`` section of a ``.kicad_sch`` file contains embedded
@@ -2824,6 +2828,9 @@ def check_lib_symbols_mismatch(schematic_path: str) -> list[ValidationIssue]:
                         continue
 
                     if sym.lib_id and sym.lib_id not in defined_lib_ids:
+                        hint = ""
+                        if lib_manager is not None and lib_manager.get_symbol(sym.lib_id):
+                            hint = " (resolvable from --lib-path)"
                         issues.append(
                             ValidationIssue(
                                 severity="error",
@@ -2831,7 +2838,7 @@ def check_lib_symbols_mismatch(schematic_path: str) -> list[ValidationIssue]:
                                 message=(
                                     f"{sym.reference}: placed symbol references "
                                     f"lib_id '{sym.lib_id}' which has no matching "
-                                    f"entry in lib_symbols"
+                                    f"entry in lib_symbols{hint}"
                                 ),
                                 location=node.get_path_string(),
                             )
@@ -3380,15 +3387,48 @@ def check_value_consistency(schematic_path: str) -> list[ValidationIssue]:
     return issues
 
 
+def build_lib_manager(lib_paths: list[str] | None):
+    """Build a :class:`LibraryManager` from ``--lib-path`` directories (#7065).
+
+    Follows the loading pattern of ``sch_check_connections``: every
+    ``*.kicad_sym`` directly under each path is loaded, and the path is also
+    registered as a search path.  Missing or unreadable locations warn on
+    stderr and are skipped.  Returns ``None`` when ``lib_paths`` is empty.
+
+    The manager deliberately does *not* include the schematic's embedded
+    symbols: embedded ``lib_symbols`` stay authoritative and this manager is
+    only consulted as a fallback on a miss.
+    """
+    if not lib_paths:
+        return None
+    from kicad_tools.schema.library import LibraryManager
+
+    manager = LibraryManager()
+    for path in lib_paths:
+        p = Path(path)
+        if not p.is_dir():
+            print(f"Warning: --lib-path is not a directory: {path}", file=sys.stderr)
+            continue
+        manager.add_search_path(str(p))
+        for lib_file in sorted(p.glob("*.kicad_sym")):
+            try:
+                manager.load_library(str(lib_file))
+            except Exception as e:
+                print(f"Warning: Could not load {lib_file}: {e}", file=sys.stderr)
+    return manager
+
+
 def _resolve_lib_symbols_for_design(
     schematic_path: str,
+    lib_manager=None,
 ) -> tuple[list[tuple[str, Schematic]], dict[str, object]]:
     """Build the (sheets, lib_symbols) inputs used by the new ERC rules.
 
     Walks the schematic hierarchy starting at ``schematic_path``,
     loads every sheet, and resolves every ``lib_id`` used to a
     :class:`LibrarySymbol` via the schematic's embedded
-    ``lib_symbols`` section.
+    ``lib_symbols`` section.  When ``lib_manager`` is given (``--lib-path``),
+    it is consulted only for ids the embedded section cannot resolve.
 
     Returns:
         Tuple ``(sheets, lib_symbols)`` where ``sheets`` is a list of
@@ -3411,6 +3451,8 @@ def _resolve_lib_symbols_for_design(
             for sym in sch.symbols:
                 if sym.lib_id and sym.lib_id not in lib_symbols:
                     resolved = sch.get_lib_symbol_resolved(sym.lib_id)
+                    if resolved is None and lib_manager is not None:
+                        resolved = lib_manager.get_symbol(sym.lib_id)
                     if resolved is not None:
                         lib_symbols[sym.lib_id] = resolved
     except Exception:
@@ -3421,6 +3463,8 @@ def _resolve_lib_symbols_for_design(
             for sym in sch.symbols:
                 if sym.lib_id and sym.lib_id not in lib_symbols:
                     resolved = sch.get_lib_symbol_resolved(sym.lib_id)
+                    if resolved is None and lib_manager is not None:
+                        resolved = lib_manager.get_symbol(sym.lib_id)
                     if resolved is not None:
                         lib_symbols[sym.lib_id] = resolved
         except Exception:
@@ -3429,7 +3473,7 @@ def _resolve_lib_symbols_for_design(
     return sheets, lib_symbols
 
 
-def check_orphan_labels(schematic_path: str) -> list[ValidationIssue]:
+def check_orphan_labels(schematic_path: str, lib_manager=None) -> list[ValidationIssue]:
     """Detect labels asserting a named signal that only reach one pin.
 
     A label with a meaningful name (e.g., ``UART_TX``) syntactically
@@ -3447,7 +3491,7 @@ def check_orphan_labels(schematic_path: str) -> list[ValidationIssue]:
     try:
         from kicad_tools.validate.sch_orphan_label import find_orphan_labels
 
-        sheets, lib_symbols = _resolve_lib_symbols_for_design(schematic_path)
+        sheets, lib_symbols = _resolve_lib_symbols_for_design(schematic_path, lib_manager)
         if not sheets:
             return issues
         findings = find_orphan_labels(sheets, lib_symbols)
@@ -3478,7 +3522,7 @@ def check_orphan_labels(schematic_path: str) -> list[ValidationIssue]:
     return issues
 
 
-def check_wire_stubs(schematic_path: str) -> list[ValidationIssue]:
+def check_wire_stubs(schematic_path: str, lib_manager=None) -> list[ValidationIssue]:
     """Detect wires whose free endpoint is short of a pin by N grid units.
 
     Catches the "off-by-one-grid" defect class found in the
@@ -3495,7 +3539,7 @@ def check_wire_stubs(schematic_path: str) -> list[ValidationIssue]:
     try:
         from kicad_tools.validate.sch_wire_stub import find_wire_stubs
 
-        sheets, lib_symbols = _resolve_lib_symbols_for_design(schematic_path)
+        sheets, lib_symbols = _resolve_lib_symbols_for_design(schematic_path, lib_manager)
         if not sheets:
             return issues
         findings = find_wire_stubs(sheets, lib_symbols)
@@ -3532,27 +3576,44 @@ def check_wire_stubs(schematic_path: str) -> list[ValidationIssue]:
     return issues
 
 
+def require_loadable_root(schematic_path: str) -> None:
+    """Raise if the root schematic cannot be loaded (#7028).
+
+    Each check below degrades a load failure into a warning, so without this
+    an empty or unparseable root would "pass" with a handful of warnings.
+    """
+    Schematic.load(schematic_path)
+
+
 def validate_schematic(
     schematic_path: str,
-    lib_paths: list[str] = None,
+    lib_paths: list[str] | None = None,
     skip_checks: set[str] | None = None,
 ) -> ValidationResult:
     """Run all validation checks.
 
     Args:
         schematic_path: Path to the root ``.kicad_sch`` file.
-        lib_paths: Optional symbol library paths.
+        lib_paths: Optional directories of ``.kicad_sym`` files used as a
+            fallback when a placed symbol is absent from the embedded
+            ``lib_symbols`` (embedded symbols stay authoritative).
         skip_checks: Set of check category names to skip (e.g.
             ``{"swd_routing", "i2c_pullups"}``).
     """
+    require_loadable_root(schematic_path)
     result = ValidationResult(schematic=schematic_path)
     _skip: set[str] = skip_checks or set()
 
-    def _run(category: str, fn):
+    lib_manager = build_lib_manager(lib_paths)
+
+    def _run(category: str, fn, *, with_libs: bool = False):
         if category in _skip:
             return
         result.checks_run.append(category)
-        result.issues.extend(fn(schematic_path))
+        if with_libs and lib_manager is not None:
+            result.issues.extend(fn(schematic_path, lib_manager))
+        else:
+            result.issues.extend(fn(schematic_path))
 
     # ERC
     _run("erc", run_erc)
@@ -3612,21 +3673,21 @@ def validate_schematic(
     _run("nrst_filter", check_nrst_filter_cap)
 
     # Symbol-to-footprint pin/pad count mismatch
-    _run("symbol_footprint_pin_count", check_symbol_footprint_pin_mismatch)
+    _run("symbol_footprint_pin_count", check_symbol_footprint_pin_mismatch, with_libs=True)
 
     # lib_symbols definition mismatch (placed lib_id missing from lib_symbols)
-    _run("lib_symbols_mismatch", check_lib_symbols_mismatch)
+    _run("lib_symbols_mismatch", check_lib_symbols_mismatch, with_libs=True)
 
     # Matched channel symmetry detection
     _run("matched_channel_symmetry", check_matched_channel_symmetry)
 
     # Orphan-label detection (label asserts named signal but only
     # reaches one pin in the design -- issue #2613).
-    _run("orphan_label", check_orphan_labels)
+    _run("orphan_label", check_orphan_labels, with_libs=True)
 
     # Wire-stub detection (wire endpoint misses a pin by an integer
     # multiple of the schematic grid -- issue #2613).
-    _run("wire_stub", check_wire_stubs)
+    _run("wire_stub", check_wire_stubs, with_libs=True)
 
     return result
 
@@ -3659,7 +3720,11 @@ def main(argv=None):
         sys.exit(1)
 
     skip_set: set[str] = set(args.skip_checks) if args.skip_checks else set()
-    result = validate_schematic(args.schematic, args.lib_paths, skip_checks=skip_set)
+    try:
+        result = validate_schematic(args.schematic, args.lib_paths, skip_checks=skip_set)
+    except Exception as e:
+        print(f"Error loading schematic: {args.schematic}: {e}", file=sys.stderr)
+        sys.exit(1)
 
     if args.format == "json":
         print(

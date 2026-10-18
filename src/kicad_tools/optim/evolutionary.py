@@ -165,6 +165,13 @@ class EvolutionaryConfig:
     # concrete evaluator when this flag is True.
     use_routing_fitness: bool = False
 
+    # Bottom-up seed (Issue #6985, follow-up to #2721).
+    # When True, one initial individual is built by the bottom-up hierarchical
+    # placer (``place_hierarchical``) and added after the current-placement
+    # individual.  Off by default: it is not yet measured on the fleet boards,
+    # so default behaviour is unchanged.
+    seed_bottom_up: bool = False
+
 
 @dataclass
 class Individual:
@@ -613,6 +620,23 @@ class EvolutionaryPlacementOptimizer:
             ind.rotations[comp.ref] = comp.rotation
         return ind
 
+    def _individual_from_bottom_up(self) -> Individual:
+        """Create an individual from the bottom-up hierarchical placement.
+
+        Fixed components are not part of an individual, so only movable
+        refs are copied from the placer's result.
+        """
+        from kicad_tools.optim.bottom_up_placement import place_hierarchical
+
+        result = place_hierarchical(self.components, self.board_outline)
+        ind = self._individual_from_current()
+        for ref in list(ind.positions):
+            if ref in result.positions:
+                x, y, rotation = result.positions[ref]
+                ind.positions[ref] = (x, y)
+                ind.rotations[ref] = rotation
+        return ind
+
     def _apply_individual(self, ind: Individual):
         """Apply individual's positions/rotations to components."""
         for ref, (x, y) in ind.positions.items():
@@ -644,8 +668,12 @@ class EvolutionaryPlacementOptimizer:
         # First individual preserves current placement
         population.append(self._individual_from_current())
 
+        # Optional bottom-up seed individual (Issue #6985)
+        if self.config.seed_bottom_up and population_size > 1:
+            population.append(self._individual_from_bottom_up())
+
         # Generate random individuals
-        for _ in range(population_size - 1):
+        for _ in range(population_size - len(population)):
             ind = Individual()
             for comp in movable:
                 # Random position within board bounds

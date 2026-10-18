@@ -183,10 +183,37 @@ class TestDSNExportToFile:
     """Test writing DSN to disk."""
 
     @pytest.fixture
-    def exporter(self):
+    def exporter(self, tmp_path):
         if not VOLTAGE_DIVIDER_PCB.exists():
             pytest.skip(f"Test board not found: {VOLTAGE_DIVIDER_PCB}")
-        return KiCadToDSNExporter(str(VOLTAGE_DIVIDER_PCB))
+        # Copy: export() writes a revision sidecar beside the board (issue #6915).
+        board = tmp_path / "board.kicad_pcb"
+        board.write_bytes(VOLTAGE_DIVIDER_PCB.read_bytes())
+        return KiCadToDSNExporter(str(board))
+
+    def test_export_writes_revision_sidecar(self, exporter, tmp_path):
+        import hashlib
+        import json
+
+        exporter.export(str(tmp_path / "out" / "test.dsn"))
+        sidecar = json.loads((tmp_path / "board.dsn-revision.json").read_text())
+        expected = hashlib.sha256(
+            (tmp_path / "board.kicad_pcb").read_bytes().replace(b"\r\n", b"\n")
+        ).hexdigest()
+        assert sidecar == {"board_sha256": expected, "dsn": "test.dsn"}
+
+    def test_export_string_writes_no_sidecar(self, exporter, tmp_path):
+        exporter.export()
+        assert not (tmp_path / "board.dsn-revision.json").exists()
+
+    def test_revision_hash_is_crlf_insensitive(self, tmp_path):
+        from kicad_tools.export.dsn import board_revision_hash
+
+        lf = tmp_path / "lf.kicad_pcb"
+        crlf = tmp_path / "crlf.kicad_pcb"
+        lf.write_bytes(b"(kicad_pcb\n  (a)\n)\n")
+        crlf.write_bytes(b"(kicad_pcb\r\n  (a)\r\n)\r\n")
+        assert board_revision_hash(lf) == board_revision_hash(crlf)
 
     def test_export_to_file(self, exporter, tmp_path):
         output = tmp_path / "test.dsn"

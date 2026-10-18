@@ -4614,72 +4614,6 @@
 	)
 	(no_connect (at 191.77 137.16) (uuid "5fa84cb2-167d-5f33-8a71-094ae067dec9")
 	)
-	(label "+5V"
-		(at 25.4 30.48 0)
-		(fields_autoplaced yes)
-		(effects
-			(font
-				(size 1.27 1.27)
-			)
-			(justify left bottom)
-		)
-		(uuid "8a639afc-ac25-57b0-be1c-a81da18af91e")
-	)
-	(label "+3.3V"
-		(at 80.01 69.85 0)
-		(fields_autoplaced yes)
-		(effects
-			(font
-				(size 1.27 1.27)
-			)
-			(justify left bottom)
-		)
-		(uuid "e2962f83-c92f-523b-b212-70c5bb97a624")
-	)
-	(label "GND"
-		(at 25.4 199.39 0)
-		(fields_autoplaced yes)
-		(effects
-			(font
-				(size 1.27 1.27)
-			)
-			(justify left bottom)
-		)
-		(uuid "5ce09895-a9e5-58dd-89a7-f100fcb931ac")
-	)
-	(label "+5V"
-		(at 85.09 100.33 0)
-		(fields_autoplaced yes)
-		(effects
-			(font
-				(size 1.27 1.27)
-			)
-			(justify left bottom)
-		)
-		(uuid "de4ed4ef-6d00-579f-8317-cf1c31e27d4c")
-	)
-	(label "GND"
-		(at 100.33 115.57 0)
-		(fields_autoplaced yes)
-		(effects
-			(font
-				(size 1.27 1.27)
-			)
-			(justify left bottom)
-		)
-		(uuid "b45b42fb-d868-5df0-bac9-453e9d542953")
-	)
-	(label "+3.3V"
-		(at 115.57 100.33 0)
-		(fields_autoplaced yes)
-		(effects
-			(font
-				(size 1.27 1.27)
-			)
-			(justify left bottom)
-		)
-		(uuid "b3f368a9-8609-530a-8e00-87d16ecef46b")
-	)
 	(label "OSC_IN"
 		(at 125.73 100.33 0)
 		(fields_autoplaced yes)
@@ -4834,17 +4768,6 @@
 		)
 		(uuid "28e9a817-8091-5fe8-a5cc-b9f513d6e415")
 	)
-	(label "+3.3V"
-		(at 261.62 142.24 0)
-		(fields_autoplaced yes)
-		(effects
-			(font
-				(size 1.27 1.27)
-			)
-			(justify left bottom)
-		)
-		(uuid "2d41b4ea-bfed-5fda-a28b-8ca075416bce")
-	)
 	(label "LED_K"
 		(at 269.24 157.48 0)
 		(fields_autoplaced yes)
@@ -4877,6 +4800,69 @@
 			(justify left bottom)
 		)
 		(uuid "c4be4204-408f-53f9-9333-b6e0e746040d")
+	)
+	(global_label "+5V" (shape passive) (at 25.4 30.48 0) (fields_autoplaced yes)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify left)
+		)
+		(uuid "d3872632-499c-5f68-9b7e-7def4e4d947e")
+	)
+	(global_label "+3.3V" (shape passive) (at 80.01 69.85 0) (fields_autoplaced yes)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify left)
+		)
+		(uuid "10379e08-42d4-5ba5-867f-ba0ec6f72f35")
+	)
+	(global_label "GND" (shape passive) (at 25.4 199.39 0) (fields_autoplaced yes)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify left)
+		)
+		(uuid "74baa208-1be6-57ea-a3de-46d4dc27d8eb")
+	)
+	(global_label "+5V" (shape passive) (at 85.09 100.33 0) (fields_autoplaced yes)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify left)
+		)
+		(uuid "5ec4fdbf-eb84-5227-a466-169e13d4ada9")
+	)
+	(global_label "GND" (shape passive) (at 100.33 115.57 0) (fields_autoplaced yes)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify left)
+		)
+		(uuid "1efe7bcd-accb-5802-813b-08c6cc31e128")
+	)
+	(global_label "+3.3V" (shape passive) (at 115.57 100.33 0) (fields_autoplaced yes)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify left)
+		)
+		(uuid "f892f089-33a6-52b1-be21-a94766b064e9")
+	)
+	(global_label "+3.3V" (shape passive) (at 261.62 142.24 0) (fields_autoplaced yes)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify left)
+		)
+		(uuid "fdf2abf6-ff6f-5b38-80ba-bbb523e69bd9")
 	)
 	(text "STM32F103C8T6 Pin Assignments:\n  PA13 = SWDIO    (pin 34)\n  PA14 = SWCLK    (pin 37)\n  PB3  = SWO      (pin 39)\n  NRST = Reset    (pin 7)\n  PD0  = OSC_IN   (pin 5, HSE)\n  PD1  = OSC_OUT  (pin 6, HSE)\n  PB12 = USER_LED (pin 25, active-low)\n  BOOT0 pulled low via R2 (10k) for flash boot\n  HSE: 8MHz crystal Y1 with 20pF load caps C10/C11\n  Decoupling: C12-C15 (100nF) per VDD pin, C16 (4.7uF) bulk" (exclude_from_sim no) (at 25.4 229.87 0)
 		(effects

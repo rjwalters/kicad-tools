@@ -150,6 +150,35 @@ def test_parse_pair_log_handles_chained_and_plain_logs():
     assert bench.parse_pair_log(plain)["outcomes"]["USB_MCU_D"] == "coupled"
 
 
+def test_hybrid_outcome_is_parsed_and_counted_apart_from_coupled():
+    """Issue #6446: ``hybrid:<ref>.<pin>`` is neither coupled nor a fallback."""
+    log = (
+        "  Diff pairs (lattice): 1/3 coupled\n"
+        "    TMDS_D0: hybrid:U4.B1\n"
+        "    TMDS_D1: uncoupled-fallback:pair-no-path\n"
+        "    TMDS_CK: coupled\n"
+        "  Diff pairs (lattice) hybrid: 1\n"
+        "  Diff-pair hybrid (lattice) TMDS_D0 J2.1->U4.B1: hybrid B.Cu trunk\n"
+    )
+    parsed = bench.parse_pair_log(log)
+    assert parsed["outcomes"] == {
+        "TMDS_D0": "hybrid:U4.B1",
+        "TMDS_D1": "uncoupled-fallback:pair-no-path",
+        "TMDS_CK": "coupled",
+    }
+    row = {
+        "board": "07rf",
+        "engine": "lattice",
+        "seed": 42,
+        "pairs": [{"outcome": o} for o in parsed["outcomes"].values()],
+    }
+    table = bench.render([row]).splitlines()
+    header = [c.strip() for c in table[0].strip("|").split("|")]
+    cells = [c.strip() for c in table[2].strip("|").split("|")]
+    assert cells[header.index("Pairs coupled")] == "1/3"
+    assert cells[header.index("Pairs hybrid")] == "1"
+
+
 def test_compare_flags_differing_pair_metrics():
     a = {"rows": [{"board": "03", "engine": "grid", "seed": 42, "pair_digest": "aa"}]}
     same = {"rows": [{"board": "03", "engine": "grid", "seed": 42, "pair_digest": "aa"}]}

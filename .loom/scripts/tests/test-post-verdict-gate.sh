@@ -68,6 +68,12 @@ if [[ "${1:-}" == "api" ]]; then
       [[ -f "$D/labels-post-fail" || -f "$D/labels-write-fail" ]] && { echo "HTTP 403" >&2; exit 1; }
       for l in "${adds[@]}"; do grep -qxF "$l" "$D/labels.txt" || echo "$l" >> "$D/labels.txt"; done
       echo '[]'; exit 0 ;;
+    "GET repos/owner/repo/issues/"[0-9]*)
+      # #12614: the PR / linked-issue objects the stale-read check re-reads.
+      n="${path##*/}"
+      [[ -f "$D/issue-$n-read-fail" ]] && { echo "HTTP 502" >&2; exit 1; }
+      [[ -f "$D/issue-$n.json" ]] && { cat "$D/issue-$n.json"; exit 0; }
+      echo '{"body":""}'; exit 0 ;;
     "DELETE repos/owner/repo/issues/comments/"*)
       jq --argjson id "${path##*/}" 'map(select(.id != $id))' "$D/comments.json" > "$D/c.tmp" && mv "$D/c.tmp" "$D/comments.json"; exit 0 ;;
     "DELETE repos/owner/repo/issues/"*/labels/*)
@@ -127,6 +133,9 @@ if [[ "${1:-} ${2:-}" == "forge comment" ]]; then
   done
   exec gh issue comment "$_n" --repo "$_repo" --body "$_body"
 fi
+# #12475: the reconciliation gate reads comment verdicts through the trust
+# filter on this binary; the stub gh lists none, so echo the (empty) stdin.
+if [[ "${1:-} ${2:-}" == "forge trusted-comments" ]]; then cat; exit 0; fi
 exit 127
 SELF
 chmod +x "$STUB_DIR/self-daemon"
@@ -387,6 +396,47 @@ state "[]" loom:review-requested loom:reviewing
 pv 10902 approved "$HEAD" --body "@reviewer this looks good because the tests cover the fix"
 check "@mention prose still posts" 0 "$RC"
 check "@mention prose: comment posted" 10902 "$POSTED"
+
+echo "== #12614: an approval against a stale read of the spec is refused =="
+NOW_T="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+PAST_T="$(date -u -d '@'"$(($(date +%s) - 3600))" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -r "$(($(date +%s) - 3600))" +%Y-%m-%dT%H:%M:%SZ)"
+OP_COMMENT="$(jq -n --arg t "$NOW_T" '[{id: 4242, body: "rescoped: review against the new body", created_at: $t, html_url: "https://example/c/4242", user: {login: "the-operator", type: "User"}, author_association: "OWNER"}]')"
+echo '{"body":"Closes #50"}' > "$STUB_DIR/issue-12614.json"
+echo '{"body":"the design as reviewed"}' > "$STUB_DIR/issue-50.json"
+OLD_HASH="$(printf %s 'the design as reviewed' | sha256sum | cut -d' ' -f1)"
+
+state "$OP_COMMENT" loom:review-requested loom:reviewing
+pv 12614 approved "$HEAD" --body "Approved: covered by the new tests." --review-started "$PAST_T"
+check "operator comment after start: exit 7" 7 "$RC"
+contains "names the comment id and author" "$OUT" "comment 4242 by the-operator"
+check "operator comment: nothing posted" "" "$POSTED"
+
+state "$OP_COMMENT" loom:review-requested loom:reviewing
+pv 12614 changes-requested "$HEAD" --body "Changes requested: see the spec." --review-started "$PAST_T"
+check "changes-requested is never refused by it" 0 "$RC"
+
+state "$OP_COMMENT" loom:review-requested loom:reviewing
+pv 12614 approved "$HEAD" --body "Approved: covered by the new tests."
+check "no --review-started: unchanged (approves)" 0 "$RC"
+contains "no --review-started: warns" "$OUT" "no --review-started"
+
+state "[]" loom:review-requested loom:reviewing
+pv 12614 approved "$HEAD" --body "Approved: covered by the new tests." --review-started "$PAST_T" --issue-body-sha "50=$OLD_HASH"
+check "issue body unchanged: exit 0" 0 "$RC"
+check "issue body unchanged: posted" 12614 "$POSTED"
+
+echo '{"body":"rescoped to a daemon-only design"}' > "$STUB_DIR/issue-50.json"
+state "[]" loom:review-requested loom:reviewing
+pv 12614 approved "$HEAD" --body "Approved: covered by the new tests." --review-started "$PAST_T" --issue-body-sha "50=$OLD_HASH"
+check "issue body rescoped: exit 7" 7 "$RC"
+contains "names the issue" "$OUT" "issue #50's body changed"
+check "issue body rescoped: nothing posted" "" "$POSTED"
+
+touch "$STUB_DIR/issue-50-read-fail"
+state "[]" loom:review-requested loom:reviewing
+pv 12614 approved "$HEAD" --body "Approved: covered by the new tests." --review-started "$PAST_T" --issue-body-sha "50=$OLD_HASH"
+check "unreadable PR/issue state fails closed: exit 7" 7 "$RC"
+rm -f "$STUB_DIR/issue-50-read-fail"
 
 echo ""
 echo "test-post-verdict-gate: $PASSED passed, $FAILED failed"

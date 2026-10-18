@@ -27,15 +27,14 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
+from kicad_tools.cli.sch_wire_common import (
+    _wire_endpoint_counts,
+    _wire_start_end,
+    endpoint_bucket,
+)
 from kicad_tools.schema import Schematic
 from kicad_tools.schema.library import LibrarySymbol
 from kicad_tools.sexp import SExp
-
-# Quantization multiplier for coordinate hashing.  Using 1000 gives
-# micron-level (0.001mm) resolution, which prevents false "connected"
-# results from bucket collisions that occurred at the old 0.1mm (×10)
-# resolution.
-_QUANT = 1000
 
 # Any wire shorter than this (mm) is unconditionally flagged as a stub,
 # regardless of how many endpoints appear connected.  No intentional
@@ -60,29 +59,6 @@ class WireIssue:
     wire_sexp: SExp
     start: tuple[float, float]
     end: tuple[float, float]
-
-
-def _quantize(coord: float) -> int:
-    """Quantize a coordinate to an integer bucket at micron resolution."""
-    return int(round(coord * _QUANT))
-
-
-def _wire_start_end(wire_sexp: SExp) -> tuple[tuple[float, float], tuple[float, float]]:
-    """Extract start and end points from a wire S-expression node."""
-    pts_node = wire_sexp.find("pts")
-    if not pts_node:
-        return (0.0, 0.0), (0.0, 0.0)
-
-    xy_nodes = pts_node.find_all("xy")
-    if len(xy_nodes) < 2:
-        return (0.0, 0.0), (0.0, 0.0)
-
-    x1 = xy_nodes[0].get_float(0) or 0.0
-    y1 = xy_nodes[0].get_float(1) or 0.0
-    x2 = xy_nodes[1].get_float(0) or 0.0
-    y2 = xy_nodes[1].get_float(1) or 0.0
-
-    return (x1, y1), (x2, y2)
 
 
 def _point_on_segment(
@@ -193,7 +169,7 @@ def _build_connection_map(
     """
     points: set[tuple[int, int]] = set()
     for x, y in _collect_strong_anchors(schematic):
-        points.add((_quantize(x), _quantize(y)))
+        points.add(endpoint_bucket(x, y))
     return points
 
 
@@ -283,19 +259,6 @@ def _endpoint_at_strong_anchor(
     return any(abs(px - ax) <= tolerance and abs(py - ay) <= tolerance for ax, ay in strong_anchors)
 
 
-def _wire_endpoint_counts(
-    wire_sexps: list[SExp],
-) -> dict[tuple[int, int], int]:
-    """Count how many wires touch each endpoint."""
-    counts: dict[tuple[int, int], int] = {}
-    for ws in wire_sexps:
-        start, end = _wire_start_end(ws)
-        for pt in [start, end]:
-            key = (_quantize(pt[0]), _quantize(pt[1]))
-            counts[key] = counts.get(key, 0) + 1
-    return counts
-
-
 def _endpoint_touches_other_wire_body(
     point: tuple[float, float],
     wire_sexp: SExp,
@@ -336,7 +299,7 @@ def _is_endpoint_connected(
     dangling detection).  For stub detection see
     :func:`_is_endpoint_electrically_connected`.
     """
-    key = (_quantize(point[0]), _quantize(point[1]))
+    key = endpoint_bucket(point[0], point[1])
     if key in connection_points:
         return True
     if endpoint_counts.get(key, 0) > 1:
@@ -364,7 +327,7 @@ def _is_endpoint_electrically_connected(
     sub-mm stubs whose only "connection" is a wire-body overlap are
     correctly flagged for removal.
     """
-    key = (_quantize(point[0]), _quantize(point[1]))
+    key = endpoint_bucket(point[0], point[1])
     if key in connection_points:
         return True
     if endpoint_counts.get(key, 0) > 1:
@@ -468,7 +431,7 @@ def find_cleanup_candidates(
     # Phase 3: dangling wires (endpoints not connected to anything else)
     connection_points = _build_connection_map(schematic, unique_wires)
     strong_anchors = _collect_strong_anchors(schematic)
-    endpoint_counts = _wire_endpoint_counts(unique_wires)
+    endpoint_counts = _wire_endpoint_counts(unique_wires, key=endpoint_bucket)
 
     for ws in unique_wires:
         start, end = _wire_start_end(ws)
@@ -579,8 +542,8 @@ def find_cleanup_candidates(
             # other wire endpoints without any component-level anchor is
             # very likely a repair artifact (the typical chorus-test-revA
             # pattern: 0.05-0.43mm fragments left between wire endpoints).
-            start_key = (_quantize(start[0]), _quantize(start[1]))
-            end_key = (_quantize(end[0]), _quantize(end[1]))
+            start_key = endpoint_bucket(start[0], start[1])
+            end_key = endpoint_bucket(end[0], end[1])
 
             start_at_connection_point = start_key in connection_points
             end_at_connection_point = end_key in connection_points

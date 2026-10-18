@@ -36,20 +36,6 @@ GUARD="$SCRIPTS_DIR/verdict-staleness-guard.sh"
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/assert.sh"
 
 
-assert_not_contains() {
-  local haystack="$1" needle="$2" msg="$3"
-  TESTS_RUN=$((TESTS_RUN + 1))
-  if [[ "$haystack" != *"$needle"* ]]; then
-    TESTS_PASSED=$((TESTS_PASSED + 1))
-    echo -e "  ${GREEN}PASS${NC}: $msg"
-  else
-    TESTS_FAILED=$((TESTS_FAILED + 1))
-    echo -e "  ${RED}FAIL${NC}: $msg"
-    echo "    Unexpected substring: '$needle'"
-    echo "    In: '$haystack'"
-  fi
-}
-
 
 if [[ ! -x "$POST_VERDICT" ]]; then
   echo -e "${RED}FATAL${NC}: $POST_VERDICT not found or not executable" >&2
@@ -210,6 +196,9 @@ if [[ "${1:-}" == forge && "${2:-}" == verdict-* && "${3:-}" == --help ]]; then
   exit 0
 fi
 if [[ "${1:-}" == --version ]]; then echo "loom-daemon 0.19.870 (mock)"; exit 0; fi
+# #12475: the reconciliation gate reads comment verdicts through the trust
+# filter; this suite posts none, so the filter just echoes its (empty) stdin.
+if [[ "${1:-} ${2:-}" == "forge trusted-comments" ]]; then cat; exit 0; fi
 if [[ "${1:-} ${2:-}" == "forge verdict-gate" ]]; then
   printf '%s\n' "$*" >> "$D/daemon-calls.log"
   [[ -f "$D/gate-answer" ]] || { echo "LOOM-VERDICT-GATE PROCEED ok"; exit 0; }

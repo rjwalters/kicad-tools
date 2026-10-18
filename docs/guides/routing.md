@@ -24,10 +24,10 @@ kicad-tools includes an A* pathfinding-based autorouter that supports:
 kct route board.kicad_pcb -o routed.kicad_pcb
 
 # Route specific net
-kct route board.kicad_pcb --net CLK -o routed.kicad_pcb
+kct route board.kicad_pcb --nets CLK -o routed.kicad_pcb
 
 # With custom trace width
-kct route board.kicad_pcb --width 0.25 -o routed.kicad_pcb
+kct route board.kicad_pcb --trace-width 0.25 -o routed.kicad_pcb
 ```
 
 ### Design Rules
@@ -37,7 +37,7 @@ kct route board.kicad_pcb --width 0.25 -o routed.kicad_pcb
 kct route board.kicad_pcb --mfr jlcpcb
 
 # Custom clearance
-kct route board.kicad_pcb --clearance 0.15 --via-size 0.6
+kct route board.kicad_pcb --clearance 0.15 --via-diameter 0.6
 ```
 
 ---
@@ -140,13 +140,35 @@ branches = router.route_net(1)
 assert len(branches) == 3
 ```
 
+**Post-route optimization keeps the branches apart.** The trace optimizer
+runs after routing and its collision checker guards other nets only. On a
+recognised Kelvin net it now also lists the same-net copper each rewritten
+route touches outside the shunt pad: sibling branches and the net's other
+terminal pads. If a chamfer, staircase compression or other rewrite would
+touch anything the routed branch did not already touch, the whole route
+keeps its routed geometry and the log prints
+`Kelvin branch isolation: N route(s) kept pre-optimization geometry`. Contact
+the router already committed is left alone, not reported here, but a rewrite
+may not push it further from the shunt pad: the sense tap reads the force
+path's IR drop up to the furthest point the branches share. Ordinary nets
+are optimized exactly as before.
+
+`kct optimize-traces` applies the same rules to an already-routed board. It
+reads the Kelvin nets from the board's pads, splits each one into the
+branches left once the shunt pad is cut away, optimizes each branch on its
+own and keeps any branch whose rewrite would touch a sibling. Branches the
+board already joins outside the shunt count as one branch. A board with no
+sense-named net is processed exactly as before, without reading its pads.
+
 The physical-isolation implementation described here covers the grid engine;
 mesh and lattice routing have separate implementations. It does not repair
 pre-existing copper that already joins sense and force branches away from the
 shunt. Small shunt pads or dense obstacles may still prevent completion. Check
 the emitted copper and native saved/refilled connectivity: an electrical
 same-net connectivity result alone does not prove the intended Kelvin tap.
-Dense-board completion remains tracked in [issue #5398](https://github.com/rjwalters/kicad-tools/issues/5398).
+On the board 05 DRV8301 stress fixture (`design.py::legacy_main()`), all five
+ISENSE nets now finish as stars that meet only on their shunt pads
+([issue #5398](https://github.com/rjwalters/kicad-tools/issues/5398)).
 
 #### Inward off-pad access for trapped Kelvin terminals
 
@@ -694,7 +716,6 @@ kct route board.kicad_pcb -o routed.kicad_pcb
 
 # Opt out (byte-identical to pre-#5891 behaviour).
 kct route board.kicad_pcb -o routed.kicad_pcb --no-pad-access-invariant
-kct route-auto board.kicad_pcb --no-pad-access-invariant
 ```
 
 Each refusal is retained as a witness, so a run can say *which* pad it

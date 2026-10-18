@@ -908,6 +908,34 @@ class TestProjectCreate:
         assert "(end 50" in pcb_content or "(end 50.0" in pcb_content
         assert "30)" in pcb_content or "30.0)" in pcb_content
 
+    def test_create_pcb_outline_is_origin_anchored(self, tmp_path):
+        """Blank board comes from PCB.create: origin (0,0), four gr_lines (#7047)."""
+        import datetime
+
+        from kicad_tools.schema.pcb import PCB
+
+        Project.create("t", directory=tmp_path, board_width=50, board_height=30)
+        pcb_file = tmp_path / "t.kicad_pcb"
+        text = pcb_file.read_text()
+
+        pcb = PCB.load(str(pcb_file))
+        assert pcb.board_size == (50.0, 30.0)
+        outline = pcb.get_board_outline()
+        assert min(x for x, _ in outline) == 0
+        assert min(y for _, y in outline) == 0
+        assert text.count("(gr_line") == 4
+        assert "gr_rect" not in text
+        assert '"F.Cu"' in text and '"B.Cu"' in text
+        assert datetime.date.today().isoformat() not in text
+
+    def test_create_pcb_is_byte_stable(self, tmp_path):
+        """Two runs write byte-identical PCB files (#7047, #6076)."""
+        a = tmp_path / "a"
+        b = tmp_path / "b"
+        Project.create("t", directory=a, board_width=50, board_height=30)
+        Project.create("t", directory=b, board_width=50, board_height=30)
+        assert (a / "t.kicad_pcb").read_bytes() == (b / "t.kicad_pcb").read_bytes()
+
     def test_create_in_nonexistent_directory(self, tmp_path):
         """Test that create makes the directory if it doesn't exist."""
         new_dir = tmp_path / "new" / "nested" / "dir"

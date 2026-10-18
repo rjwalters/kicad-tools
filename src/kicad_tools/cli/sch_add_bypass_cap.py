@@ -26,7 +26,6 @@ from __future__ import annotations
 
 import argparse
 import math
-import re
 import shutil
 import sys
 from dataclasses import dataclass
@@ -34,11 +33,16 @@ from datetime import datetime
 from pathlib import Path
 
 from kicad_tools.cli.sch_json import add_format_flag, record, run_with_json_summary
+from kicad_tools.cli.sch_wire_common import (
+    _auto_reference,
+    _point_on_wire_midpoint,
+)
 from kicad_tools.core.symbol_transform import normalize_mirror, symbol_to_sheet_offset
 from kicad_tools.exceptions import FileNotFoundError as KiCadFileNotFoundError
 from kicad_tools.schema import Schematic
 from kicad_tools.schema.instances import build_instance_path, find_project_name
 from kicad_tools.schema.library import LibrarySymbol
+from kicad_tools.schematic.grid import snap_to_grid
 
 
 @dataclass
@@ -47,63 +51,6 @@ class PlannedAction:
 
     kind: str  # "capacitor", "ground", "wire", "junction", "embed"
     description: str
-
-
-def _snap(value: float, grid: float = 1.27) -> float:
-    """Snap a coordinate to the nearest grid point."""
-    return round(value / grid) * grid
-
-
-def _point_on_wire_midpoint(
-    point: tuple[float, float],
-    wire_start: tuple[float, float],
-    wire_end: tuple[float, float],
-    tolerance: float = 0.1,
-) -> bool:
-    """Check if a point lies on a wire segment but not at its endpoints."""
-    x, y = point
-
-    # Check if point is at either endpoint
-    for ep in (wire_start, wire_end):
-        if abs(x - ep[0]) < tolerance and abs(y - ep[1]) < tolerance:
-            return False
-
-    # Check if point is on the segment
-    x1, y1 = wire_start
-    x2, y2 = wire_end
-
-    # Bounding box check
-    if not (min(x1, x2) - tolerance <= x <= max(x1, x2) + tolerance):
-        return False
-    if not (min(y1, y2) - tolerance <= y <= max(y1, y2) + tolerance):
-        return False
-
-    # Perpendicular distance check
-    length = ((x2 - x1) ** 2 + (y2 - y1) ** 2) ** 0.5
-    if length < tolerance:
-        return False
-
-    dist = abs((y2 - y1) * x - (x2 - x1) * y + x2 * y1 - y2 * x1) / length
-    return dist < tolerance
-
-
-def _auto_reference(sch: Schematic, prefix: str = "C") -> str:
-    """Find the next available reference designator for a given prefix.
-
-    Scans existing symbols and returns ``prefix + (max_N + 1)``
-    where max_N is the highest existing number for that prefix.
-    Falls back to ``prefix + "1"`` if none exist.
-    """
-    max_num = 0
-    pattern = re.compile(rf"^{re.escape(prefix)}(\d+)$")
-    for sym in sch.symbols:
-        ref = sym.reference
-        m = pattern.match(ref)
-        if m:
-            num = int(m.group(1))
-            if num > max_num:
-                max_num = num
-    return f"{prefix}{max_num + 1}"
 
 
 def _effective_pin_rotation(lib_pin_rotation: float, rotation: float, mirror: str) -> float:
@@ -247,7 +194,7 @@ def run_add_bypass_cap(args) -> int:
         )
         return 1
 
-    pin_pos = (_snap(pin_pos[0]), _snap(pin_pos[1]))
+    pin_pos = (snap_to_grid(pin_pos[0]), snap_to_grid(pin_pos[1]))
 
     # Get pin orientation from the library definition for offset computation.
     # We need the pin's rotation in library coordinates, adjusted for instance
@@ -264,14 +211,14 @@ def run_add_bypass_cap(args) -> int:
     offset_distance = args.offset
 
     cap_offset = _compute_cap_offset(effective_pin_rot, offset_distance)
-    cap_pos = (_snap(pin_pos[0] + cap_offset[0]), _snap(pin_pos[1] + cap_offset[1]))
+    cap_pos = (snap_to_grid(pin_pos[0] + cap_offset[0]), snap_to_grid(pin_pos[1] + cap_offset[1]))
 
     cap_rotation = _cap_rotation_for_pin(effective_pin_rot)
 
     ground_offset = _compute_ground_offset(effective_pin_rot, cap_offset, offset_distance)
     gnd_pos = (
-        _snap(pin_pos[0] + ground_offset[0]),
-        _snap(pin_pos[1] + ground_offset[1]),
+        snap_to_grid(pin_pos[0] + ground_offset[0]),
+        snap_to_grid(pin_pos[1] + ground_offset[1]),
     )
 
     # --- Determine capacitor reference ---
@@ -311,8 +258,8 @@ def run_add_bypass_cap(args) -> int:
         )
         return 1
 
-    cap_pin1_pos = (_snap(cap_pin1_pos[0]), _snap(cap_pin1_pos[1]))
-    cap_pin2_pos = (_snap(cap_pin2_pos[0]), _snap(cap_pin2_pos[1]))
+    cap_pin1_pos = (snap_to_grid(cap_pin1_pos[0]), snap_to_grid(cap_pin1_pos[1]))
+    cap_pin2_pos = (snap_to_grid(cap_pin2_pos[0]), snap_to_grid(cap_pin2_pos[1]))
 
     # --- Select near (VDD) and far (GND) cap pins based on distance from IC pin ---
     # The cap pin closer to the IC pin connects to VDD; the other connects to GND.

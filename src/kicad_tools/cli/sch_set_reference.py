@@ -32,10 +32,8 @@ from kicad_tools.cli.sch_re_annotate import (
     _apply_reference_rename,
     _extract_symbols_from_text,
 )
-from kicad_tools.cli.sch_set_footprint import (
-    _collect_schematic_files,
-    _load_mapping,
-)
+from kicad_tools.cli.sch_set_footprint import _load_mapping
+from kicad_tools.cli.sch_wire_common import _collect_schematic_files
 
 
 def _collect_all_references(all_files: list[Path]) -> set[str]:

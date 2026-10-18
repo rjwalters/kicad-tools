@@ -134,7 +134,8 @@ def describe_returncode(returncode: int, *, stdout: object = None, stderr: objec
             name = signal.Signals(-returncode).name
         except ValueError:
             name = f"signal {-returncode}"
-        hint = " (out of memory?)" if returncode == -signal.SIGKILL else ""
+        sigkill = getattr(signal, "SIGKILL", None)  # absent on Windows (#6739)
+        hint = " (out of memory?)" if sigkill is not None and returncode == -sigkill else ""
         return f"kicad-cli was killed by {name}{hint}"
     if returncode == KICAD_CLI_ERR_ARGS:
         option = unknown_argument(stdout, stderr)

@@ -1696,6 +1696,120 @@ class TestPerSegmentRetry:
         assert results[1][1].inserts_applied == 0
 
 
+class TestPerBumpPlacement:
+    """Issue #7043: a blocked loop must not disqualify the other bumps."""
+
+    CFG = SerpentineConfig(amplitude=0.5, min_spacing=0.2, gap_factor=2.0)
+
+    def _run(self, routes):
+        return tune_match_group_v2(
+            _ddr_group(net_ids=[1, 2], tolerance=0.1),
+            routes,
+            tolerance_mm=0.1,
+            intra_group_clearance_mm=0.3,
+            config=self.CFG,
+            max_inserts_per_member=1,
+        )
+
+    def test_blocked_loop_still_places_other_bumps(self):
+        # Net 1 (20 mm) must grow by 2 mm to match net 2 (22 mm).  A foreign
+        # stub sits above the host near x=2, blocking the bumps there on
+        # BOTH sides, so every whole-trombone attempt is rejected.
+        stub = Route(
+            net=99,
+            net_name="STUB",
+            segments=[
+                Segment(
+                    x1=1.0,
+                    y1=-0.5,
+                    x2=3.5,
+                    y2=-0.5,
+                    width=0.2,
+                    layer=Layer.F_CU,
+                    net=99,
+                    net_name="STUB",
+                ),
+                Segment(
+                    x1=1.0,
+                    y1=0.5,
+                    x2=3.5,
+                    y2=0.5,
+                    width=0.2,
+                    layer=Layer.F_CU,
+                    net=99,
+                    net_name="STUB",
+                ),
+            ],
+        )
+        routes = {
+            1: _straight_route(1, "D0", 20.0, y=0.0),
+            2: _straight_route(2, "D1", 22.0, y=6.0),
+            99: stub,
+        }
+        result_route, result = self._run(routes)[1]
+
+        assert result.inserts_applied >= 1
+        assert result.length_after_mm > result.length_before_mm + 1.0
+        assert result.success, result.message
+        # No added copper inside the blocked window.
+        added = [s for s in result_route.segments if s.y1 != 0.0 or s.y2 != 0.0]
+        assert added
+        assert not any(1.0 - 0.3 < min(s.x1, s.x2) < 3.5 + 0.3 for s in added)
+
+    def test_fully_blocked_host_rolls_back_untouched(self):
+        routes = {
+            1: _straight_route(1, "D0", 10.0, y=0.0),
+            2: _straight_route(2, "D1", 15.0, y=2.0),
+            3: _straight_route(3, "D2", 12.0, y=-0.3),
+        }
+        original = routes[1]
+        results = tune_match_group_v2(
+            _ddr_group(net_ids=[1, 2, 3], tolerance=0.1),
+            routes,
+            tolerance_mm=0.1,
+            intra_group_clearance_mm=0.4,
+            config=SerpentineConfig(amplitude=0.5, min_spacing=0.2, gap_factor=2.0),
+            max_inserts_per_member=1,
+        )
+        assert results[1][0] is original
+        assert results[1][1].inserts_applied == 0
+
+    def test_place_bumps_never_exceeds_needed_length(self):
+        from kicad_tools.router.match_group_tuning import _place_bumps_per_host
+
+        route = _straight_route(1, "D0", 20.0)
+        out = _place_bumps_per_host(
+            route,
+            length_needed=1.0,
+            tolerance_mm=0.05,
+            base_config=self.CFG,
+            host_floor=1.2,
+            fixed_segment_ids=None,
+            other_group_routes={},
+            check=lambda segs: None,
+        )
+        assert out is not None
+        grown = sum(((s.x2 - s.x1) ** 2 + (s.y2 - s.y1) ** 2) ** 0.5 for s in out.segments) - 20.0
+        assert 0.95 <= grown <= 1.05
+
+    def test_place_bumps_returns_none_when_everything_blocked(self):
+        from kicad_tools.router.match_group_tuning import _place_bumps_per_host
+
+        assert (
+            _place_bumps_per_host(
+                _straight_route(1, "D0", 20.0),
+                length_needed=1.0,
+                tolerance_mm=0.05,
+                base_config=self.CFG,
+                host_floor=1.2,
+                fixed_segment_ids=None,
+                other_group_routes={},
+                check=lambda segs: "blocked",
+            )
+            is None
+        )
+
+
 # =============================================================================
 # 11. Module-level invariants -- constants drift-prevention
 # =============================================================================

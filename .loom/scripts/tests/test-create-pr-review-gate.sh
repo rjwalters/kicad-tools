@@ -30,20 +30,6 @@ CREATE_PR="$(cd "$SCRIPT_DIR/.." && pwd)/create-pr.sh"
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/assert.sh"
 
 
-assert_contains() {
-  local haystack="$1" needle="$2" msg="$3"
-  TESTS_RUN=$((TESTS_RUN + 1))
-  if [[ "$haystack" == *"$needle"* ]]; then
-    TESTS_PASSED=$((TESTS_PASSED + 1))
-    echo -e "  ${GREEN}PASS${NC}: $msg"
-  else
-    TESTS_FAILED=$((TESTS_FAILED + 1))
-    echo -e "  ${RED}FAIL${NC}: $msg"
-    echo "    Looking for: '$needle'"
-    echo "    In output:   '$haystack'"
-  fi
-}
-
 if [[ ! -x "$CREATE_PR" ]]; then
   echo "ERROR: $CREATE_PR is not executable" >&2
   exit 1

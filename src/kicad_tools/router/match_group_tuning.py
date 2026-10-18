@@ -255,6 +255,15 @@ MAX_SEGMENT_RETRY_CANDIDATES: int = 3
 AMPLITUDE_BACKOFF_FACTORS: tuple[float, ...] = (1.0, 0.5, 0.25, 0.125)
 
 
+#: Per-bump placement (Issue #7043).  When every whole-trombone attempt on a
+#: net is rejected, the tuner places single bumps one at a time: each bump
+#: searches its own amplitude downward (``base * BUMP_AMPLITUDE_SHRINK**n``)
+#: to ``BUMP_MIN_AMPLITUDE_MM`` against the same clearance rules, so one
+#: blocked loop no longer disqualifies the whole host segment.
+BUMP_AMPLITUDE_SHRINK: float = 0.7
+BUMP_MIN_AMPLITUDE_MM: float = 0.2
+
+
 # ---------------------------------------------------------------------------
 # Reason registry + summary formatting (Issue #3440 observability)
 # ---------------------------------------------------------------------------
@@ -282,6 +291,7 @@ TUNE_RESULT_REASONS: tuple[str, ...] = (
     "not_length_critical",
     "rolled_back_pair_skew",
     "rolled_back_still_over_limit",
+    "improved_still_over_limit",
 )
 
 
@@ -301,6 +311,7 @@ REASON_SUMMARY_LABELS: dict[str, str] = {
     "no_suitable_segment": "no-segment",
     "rolled_back_pair_skew": "pair-skew rollback",
     "rolled_back_still_over_limit": "over-limit rollback",
+    "improved_still_over_limit": "improved, still over limit",
 }
 
 #: Buckets that are ALWAYS printed (the legacy five) in canonical order.
@@ -502,6 +513,7 @@ def tune_match_group_v2(
     diff_pair_partners: dict[int, int] | None = None,
     pads_by_net: dict[int, list[Pad]] | None = None,
     pad_clearance_mm: float | None = None,
+    net_clearance_mm: dict[int, float] | None = None,
     board_thickness_mm: float | None = None,
     num_copper_layers: int = 4,
     blind_buried_supported: bool = True,
@@ -743,6 +755,7 @@ def tune_match_group_v2(
             diff_pair_partners=diff_pair_partners,
             pads_by_net=pads_by_net,
             pad_clearance_mm=pad_clearance_mm,
+            net_clearance_mm=net_clearance_mm,
             board_thickness_mm=board_thickness_mm,
             num_copper_layers=num_copper_layers,
             blind_buried_supported=blind_buried_supported,
@@ -764,6 +777,7 @@ def tune_match_group_v2(
         intra_pair_clearance_mm=intra_pair_clearance_mm,
         pads_by_net=pads_by_net,
         pad_clearance_mm=pad_clearance_mm,
+        net_clearance_mm=net_clearance_mm,
         board_thickness_mm=board_thickness_mm,
         num_copper_layers=num_copper_layers,
         blind_buried_supported=blind_buried_supported,
@@ -786,6 +800,7 @@ def _tune_match_group_single_ended(
     intra_pair_clearance_mm: float | None = None,
     pads_by_net: dict[int, list[Pad]] | None = None,
     pad_clearance_mm: float | None = None,
+    net_clearance_mm: dict[int, float] | None = None,
     board_thickness_mm: float | None = None,
     num_copper_layers: int = 4,
     blind_buried_supported: bool = True,
@@ -1324,6 +1339,7 @@ def _tune_match_group_single_ended(
                         intra_pair_clearance_mm=intra_pair_clearance_mm,
                         foreign_pads=foreign_pads,
                         pad_clearance_mm=pad_clearance_mm,
+                        net_clearance_mm=net_clearance_mm,
                     )
                     if drc_detail is not None:
                         last_failure_reason = "post_insertion_drc_violation"
@@ -1350,6 +1366,45 @@ def _tune_match_group_single_ended(
 
                 if committed_this_attempt:
                     break  # exit candidate loop on successful commit
+
+            if not committed_this_attempt and not both_sides:
+                # Issue #7043: the whole-trombone attempts were all rejected.
+                # Place single bumps per host instead of giving up on the
+                # whole host because one loop conflicts with foreign copper.
+                def _bump_check(segs: list[Segment], _nid: int = net_id) -> str | None:
+                    return _post_insertion_clearance_detail_group(
+                        new_segments=segs,
+                        candidate_net_id=_nid,
+                        group_net_ids=set(group.net_ids),
+                        routes_by_net=routes_by_net,
+                        intra_group_clearance_mm=intra_group_clearance_mm,
+                        via_clearance_mm=via_clearance_mm,
+                        diff_pair_partners=diff_pair_partners,
+                        intra_pair_clearance_mm=intra_pair_clearance_mm,
+                        foreign_pads=foreign_pads,
+                        pad_clearance_mm=pad_clearance_mm,
+                        net_clearance_mm=net_clearance_mm,
+                    )
+
+                bumped_route = _place_bumps_per_host(
+                    current_route,
+                    length_needed=length_needed,
+                    tolerance_mm=tolerance_mm,
+                    base_config=base_config,
+                    host_floor=host_floor,
+                    fixed_segment_ids=fixed_segment_ids,
+                    other_group_routes=other_group_routes,
+                    check=_bump_check,
+                )
+                if bumped_route is not None:
+                    current_route = bumped_route
+                    per_member_result.inserts_applied += 1
+                    total_inserts_committed += 1
+                    committed_this_attempt = True
+                    current_skew = abs(target_length - _measure(current_route))
+                    if current_skew <= tolerance_mm:
+                        per_member_result.success = True
+                        per_member_result.reason = "tuned"
 
             if not committed_this_attempt:
                 # Every candidate in this attempt failed.  Surface the
@@ -1433,6 +1488,141 @@ def _tune_match_group_single_ended(
             routes_by_net[net_id] = current_route
 
     return results
+
+
+def _place_bumps_per_host(
+    route: Route,
+    *,
+    length_needed: float,
+    tolerance_mm: float,
+    base_config: SerpentineConfig,
+    host_floor: float,
+    fixed_segment_ids: set[int] | None,
+    other_group_routes: dict[int, Route],
+    check: Callable[[list[Segment]], str | None],
+) -> Route | None:
+    """Single-ended per-bump fallback (Issue #7043).
+
+    Walks the straight runs of ``route`` (best host first) and places one
+    single-loop bump at a time.  Each bump searches its amplitude downward
+    (``base * BUMP_AMPLITUDE_SHRINK**n`` to ``BUMP_MIN_AMPLITUDE_MM``) on the
+    outer side first, then the opposite side; when both sides are blocked the
+    cursor skips forward and any remaining length spills onto the next run.
+    A bump never adds more than the length still needed, so the route is
+    never pushed past the target.  ``check`` is the clearance gate
+    (``None`` = clear); it is applied to every bump and again to the
+    assembled result.
+
+    Returns the new route, or ``None`` when no bump could be placed or the
+    assembled result is rejected.
+    """
+    from .primitives import Route as _Route
+    from .primitives import Segment as _Segment
+
+    gap = base_config.min_spacing * base_config.gap_factor
+    bump_len = max((3.0 * gap) / 0.9 + 1e-6, 1e-6)
+    ladder: list[float] = []
+    amp = base_config.amplitude
+    while amp > BUMP_MIN_AMPLITUDE_MM:
+        ladder.append(amp)
+        amp *= BUMP_AMPLITUDE_SHRINK
+    ladder.append(BUMP_MIN_AMPLITUDE_MM)
+
+    hosts = _rank_candidate_segments(
+        route,
+        min_segment_length=max(host_floor, bump_len),
+        max_candidates=len(route.segments),
+        fixed_segment_ids=fixed_segment_ids,
+    )
+    remaining = length_needed
+    replacements: dict[int, list[Segment]] = {}
+    all_bumps: list[Segment] = []
+
+    def piece(host: Segment, x1: float, y1: float, x2: float, y2: float) -> Segment:
+        return _Segment(
+            x1=x1,
+            y1=y1,
+            x2=x2,
+            y2=y2,
+            width=host.width,
+            layer=host.layer,
+            net=host.net,
+            net_name=host.net_name,
+        )
+
+    for seg_idx, host in hosts:
+        if remaining <= tolerance_mm:
+            break
+        length = math.hypot(host.x2 - host.x1, host.y2 - host.y1)
+        ux = (host.x2 - host.x1) / length
+        uy = (host.y2 - host.y1) / length
+        hint = _outer_normal_hint_group(
+            host, candidate_net_id=host.net, group_routes=other_group_routes
+        )
+        out: list[Segment] = []
+        straight_x, straight_y = host.x1, host.y1
+        cursor = 0.0
+        placed_here = False
+        while remaining > tolerance_mm and cursor + bump_len <= length - 1e-6:
+            ax, ay = host.x1 + ux * cursor, host.y1 + uy * cursor
+            bx, by = ax + ux * bump_len, ay + uy * bump_len
+            sub_host = piece(host, ax, ay, bx, by)
+            placed: list[Segment] | None = None
+            added = 0.0
+            for side in (hint, (-hint[0], -hint[1])):
+                for ladder_amp in ladder:
+                    bump_amp = min(ladder_amp, remaining / 2.0)
+                    cfg = SerpentineConfig(
+                        style=base_config.style,
+                        amplitude=bump_amp,
+                        min_spacing=base_config.min_spacing,
+                        min_segment_length=bump_len,
+                        gap_factor=base_config.gap_factor,
+                        max_iterations=1,
+                        side="outer",
+                        outer_normal_hint=side,
+                    )
+                    result = SerpentineGenerator(cfg).generate_trombone(
+                        sub_host, 2.0 * bump_amp * (1.0 + 1e-9)
+                    )
+                    if not result.success or len(result.new_segments) <= 1:
+                        continue
+                    if check(result.new_segments) is None:
+                        placed = result.new_segments
+                        added = 2.0 * bump_amp
+                        break
+                if placed is not None:
+                    break
+            if placed is None:
+                cursor += bump_len  # both sides blocked: skip forward
+                continue
+            if math.hypot(ax - straight_x, ay - straight_y) > 1e-9:
+                out.append(piece(host, straight_x, straight_y, ax, ay))
+            out.extend(placed)
+            all_bumps.extend(placed)
+            straight_x, straight_y = bx, by
+            cursor += bump_len
+            remaining -= added
+            placed_here = True
+        if placed_here:
+            if math.hypot(host.x2 - straight_x, host.y2 - straight_y) > 1e-9:
+                out.append(piece(host, straight_x, straight_y, host.x2, host.y2))
+            replacements[seg_idx] = out
+
+    if not replacements:
+        return None
+    # Final gate on the assembled result.
+    if check(all_bumps) is not None:
+        return None
+    segments: list[Segment] = []
+    for i, seg in enumerate(route.segments):
+        segments.extend(replacements.get(i, [seg]))
+    return _Route(
+        net=route.net,
+        net_name=route.net_name,
+        segments=segments,
+        vias=route.vias.copy(),
+    )
 
 
 def _centered_sub_host(
@@ -1700,6 +1890,7 @@ def _post_insertion_clearance_ok_group(
     intra_pair_clearance_mm: float | None = None,
     foreign_pads: list[Pad] | None = None,
     pad_clearance_mm: float | None = None,
+    net_clearance_mm: dict[int, float] | None = None,
 ) -> bool:
     """Boolean wrapper around :func:`_post_insertion_clearance_detail_group`.
 
@@ -1718,6 +1909,7 @@ def _post_insertion_clearance_ok_group(
             intra_pair_clearance_mm=intra_pair_clearance_mm,
             foreign_pads=foreign_pads,
             pad_clearance_mm=pad_clearance_mm,
+            net_clearance_mm=net_clearance_mm,
         )
         is None
     )
@@ -1735,6 +1927,7 @@ def _post_insertion_clearance_detail_group(
     intra_pair_clearance_mm: float | None = None,
     foreign_pads: list[Pad] | None = None,
     pad_clearance_mm: float | None = None,
+    net_clearance_mm: dict[int, float] | None = None,
 ) -> str | None:
     """Return ``None`` if the proposed serpentine segments are DRC-safe,
     else a human-readable description of the FIRST violation found.
@@ -1854,6 +2047,15 @@ def _post_insertion_clearance_detail_group(
         pad_clearance_mm: Optional segment-to-pad edge clearance
             floor in mm.  Required when ``foreign_pads`` is non-empty.
             Typical value: ``DesignRules.trace_clearance`` (0.2 mm).
+        net_clearance_mm: Optional ``{net_id: class_clearance_mm}`` map
+            (Issue #6969).  When supplied, every foreign item in passes
+            1, 2, 3 and 5 is held to the pairwise KiCad rule
+            ``max(pass floor, neighbour's class clearance)`` instead of the
+            pass floor alone, so a group whose own class is looser than a
+            neighbour's class cannot place copper inside the neighbour's
+            clearance.  The candidate's diff-pair partner is exempt (it is
+            held to ``intra_pair_clearance_mm`` by pass 4).  ``None`` keeps
+            the single-threshold behaviour.
 
     Returns:
         ``None`` if no clearance violation is introduced; otherwise a
@@ -1862,6 +2064,15 @@ def _post_insertion_clearance_detail_group(
     """
     from .clearance_shapes import copper_gap, pad_shape, segment_shape, via_shape
 
+    partner_net_id = (diff_pair_partners or {}).get(candidate_net_id)
+
+    def _floor(base_mm: float, other_net_id: int | None) -> float:
+        # Issue #6969: KiCad holds two items to the larger of their two
+        # class clearances; ``base_mm`` is already this group's floor.
+        if not net_clearance_mm or other_net_id is None or other_net_id == partner_net_id:
+            return base_mm
+        return max(base_mm, net_clearance_mm.get(other_net_id, 0.0))
+
     # Pass 1: intra-group.  Every other group member.
     for other_id in group_net_ids:
         if other_id == candidate_net_id:
@@ -1869,6 +2080,7 @@ def _post_insertion_clearance_detail_group(
         other_route = routes_by_net.get(other_id)
         if other_route is None:
             continue
+        member_floor = _floor(intra_group_clearance_mm, other_id)
         for new_seg in new_segments:
             for pseg in other_route.segments:
                 if pseg.layer != new_seg.layer:
@@ -1877,15 +2089,15 @@ def _post_insertion_clearance_detail_group(
                 if not _segments_within(
                     new_seg,
                     pseg,
-                    intra_group_clearance_mm + new_seg.width / 2 + pseg.width / 2 + 1e-9,
+                    member_floor + new_seg.width / 2 + pseg.width / 2 + 1e-9,
                 ):
                     continue
                 clearance = copper_gap(segment_shape(new_seg), segment_shape(pseg))
-                if clearance + 1e-9 < intra_group_clearance_mm:
+                if clearance + 1e-9 < member_floor:
                     return (
                         f"intra-group clearance vs group member "
                         f"{other_route.net_name!r} on {new_seg.layer}: "
-                        f"{clearance:.3f}mm < {intra_group_clearance_mm:.3f}mm"
+                        f"{clearance:.3f}mm < {member_floor:.3f}mm"
                     )
 
     # Pass 2: inter-net.  Every non-group routed net.
@@ -1894,6 +2106,7 @@ def _post_insertion_clearance_detail_group(
             continue
         if other_net_id in group_net_ids:
             continue
+        neighbor_floor = _floor(intra_group_clearance_mm, other_net_id)
         for new_seg in new_segments:
             for oseg in other_route.segments:
                 if oseg.layer != new_seg.layer:
@@ -1902,15 +2115,15 @@ def _post_insertion_clearance_detail_group(
                 if not _segments_within(
                     new_seg,
                     oseg,
-                    intra_group_clearance_mm + new_seg.width / 2 + oseg.width / 2 + 1e-9,
+                    neighbor_floor + new_seg.width / 2 + oseg.width / 2 + 1e-9,
                 ):
                     continue
                 clearance = copper_gap(segment_shape(new_seg), segment_shape(oseg))
-                if clearance + 1e-9 < intra_group_clearance_mm:
+                if clearance + 1e-9 < neighbor_floor:
                     return (
                         f"inter-net clearance vs neighbor net "
                         f"{other_route.net_name!r} on {new_seg.layer}: "
-                        f"{clearance:.3f}mm < {intra_group_clearance_mm:.3f}mm"
+                        f"{clearance:.3f}mm < {neighbor_floor:.3f}mm"
                     )
 
     # Pass 3 (Issue #3317 follow-up): segment-vs-via clearance.
@@ -1922,6 +2135,7 @@ def _post_insertion_clearance_detail_group(
         for other_net_id, other_route in routes_by_net.items():
             if other_net_id == candidate_net_id:
                 continue
+            via_floor = _floor(via_clearance_mm, other_net_id)
             for via in other_route.vias:
                 # Ordinary vias serialize as through-hole barrels even when
                 # their routing endpoints name only part of the stack. Only
@@ -1933,12 +2147,12 @@ def _post_insertion_clearance_detail_group(
                     if via.is_micro and not first_layer <= new_seg.layer.stack_order <= last_layer:
                         continue
                     edge_clearance = copper_gap(segment_shape(new_seg), via_shape_)
-                    if edge_clearance + 1e-9 < via_clearance_mm:
+                    if edge_clearance + 1e-9 < via_floor:
                         return (
                             f"segment-vs-via clearance vs net "
                             f"{other_route.net_name!r} via at "
                             f"({via.x:.2f}, {via.y:.2f}) on {new_seg.layer}: "
-                            f"{edge_clearance:.3f}mm < {via_clearance_mm:.3f}mm"
+                            f"{edge_clearance:.3f}mm < {via_floor:.3f}mm"
                         )
 
     # Pass 4 (Issue #3317 follow-up): diff-pair intra-pair clearance.
@@ -1985,15 +2199,16 @@ def _post_insertion_clearance_detail_group(
             # specific.
             pad_through_hole = getattr(pad, "through_hole", False)
             pad_shape_ = pad_shape(pad)
+            pad_floor = _floor(pad_clearance_mm, getattr(pad, "net", None))
             for new_seg in new_segments:
                 if not pad_through_hole and pad.layer != new_seg.layer:
                     continue
                 edge_clearance = copper_gap(segment_shape(new_seg), pad_shape_)
-                if edge_clearance + 1e-9 < pad_clearance_mm:
+                if edge_clearance + 1e-9 < pad_floor:
                     return (
                         f"segment-vs-pad clearance vs foreign pad at "
                         f"({pad.x:.2f}, {pad.y:.2f}) on {new_seg.layer}: "
-                        f"{edge_clearance:.3f}mm < {pad_clearance_mm:.3f}mm"
+                        f"{edge_clearance:.3f}mm < {pad_floor:.3f}mm"
                     )
 
     return None
@@ -2476,6 +2691,7 @@ def _post_insertion_clearance_detail_pair_group(
     via_clearance_mm: float | None = None,
     pads_by_net: dict[int, list[Pad]] | None = None,
     pad_clearance_mm: float | None = None,
+    net_clearance_mm: dict[int, float] | None = None,
     candidate_p_route: Route | None = None,
     candidate_n_route: Route | None = None,
 ) -> str | None:
@@ -2566,6 +2782,7 @@ def _post_insertion_clearance_detail_pair_group(
             via_clearance_mm=via_clearance_mm,
             foreign_pads=foreign_pads,
             pad_clearance_mm=pad_clearance_mm,
+            net_clearance_mm=net_clearance_mm,
         )
         if detail is not None:
             return detail
@@ -2671,6 +2888,7 @@ def _tune_pair_lane_with_fallbacks(
     diff_pair_partners: dict[int, int] | None,
     pads_by_net: dict[int, list[Pad]] | None,
     pad_clearance_mm: float | None,
+    net_clearance_mm: dict[int, float] | None = None,
     board_thickness_mm: float | None,
     num_copper_layers: int,
     blind_buried_supported: bool,
@@ -2747,6 +2965,7 @@ def _tune_pair_lane_with_fallbacks(
             via_clearance_mm=via_clearance_mm,
             pads_by_net=pads_by_net,
             pad_clearance_mm=pad_clearance_mm,
+            net_clearance_mm=net_clearance_mm,
             candidate_p_route=cand_p,
             candidate_n_route=cand_n,
         )
@@ -2968,6 +3187,7 @@ def _tune_pair_lane_with_fallbacks(
             diff_pair_partners=diff_pair_partners,
             pads_by_net=pads_by_net,
             pad_clearance_mm=pad_clearance_mm,
+            net_clearance_mm=net_clearance_mm,
             board_thickness_mm=board_thickness_mm,
             num_copper_layers=num_copper_layers,
             blind_buried_supported=blind_buried_supported,
@@ -3033,6 +3253,7 @@ def _tune_pair_legs_single_ended(
     diff_pair_partners: dict[int, int] | None,
     pads_by_net: dict[int, list[Pad]] | None,
     pad_clearance_mm: float | None,
+    net_clearance_mm: dict[int, float] | None = None,
     board_thickness_mm: float | None,
     num_copper_layers: int,
     blind_buried_supported: bool,
@@ -3107,6 +3328,7 @@ def _tune_pair_legs_single_ended(
             intra_pair_clearance_mm=intra_pair_clearance_mm,
             pads_by_net=pads_by_net,
             pad_clearance_mm=pad_clearance_mm,
+            net_clearance_mm=net_clearance_mm,
             board_thickness_mm=board_thickness_mm,
             num_copper_layers=num_copper_layers,
             blind_buried_supported=blind_buried_supported,
@@ -3154,6 +3376,7 @@ def _tune_match_group_of_pairs(
     diff_pair_partners: dict[int, int] | None = None,
     pads_by_net: dict[int, list[Pad]] | None = None,
     pad_clearance_mm: float | None = None,
+    net_clearance_mm: dict[int, float] | None = None,
     board_thickness_mm: float | None = None,
     num_copper_layers: int = 4,
     blind_buried_supported: bool = True,
@@ -3455,6 +3678,7 @@ def _tune_match_group_of_pairs(
                 diff_pair_partners=diff_pair_partners,
                 pads_by_net=pads_by_net,
                 pad_clearance_mm=pad_clearance_mm,
+                net_clearance_mm=net_clearance_mm,
                 board_thickness_mm=board_thickness_mm,
                 num_copper_layers=num_copper_layers,
                 blind_buried_supported=blind_buried_supported,
@@ -3658,6 +3882,7 @@ def _tune_match_group_of_pairs(
                 via_clearance_mm=via_clearance_mm,
                 pads_by_net=pads_by_net,
                 pad_clearance_mm=pad_clearance_mm,
+                net_clearance_mm=net_clearance_mm,
                 candidate_p_route=candidate_p_route,
                 candidate_n_route=candidate_n_route,
             )
@@ -3770,6 +3995,7 @@ def _tune_match_group_of_pairs(
             diff_pair_partners=diff_pair_partners,
             pads_by_net=pads_by_net,
             pad_clearance_mm=pad_clearance_mm,
+            net_clearance_mm=net_clearance_mm,
             board_thickness_mm=board_thickness_mm,
             num_copper_layers=num_copper_layers,
             blind_buried_supported=blind_buried_supported,
@@ -3820,6 +4046,42 @@ def mark_group_rolled_back(
     return restored
 
 
+def mark_group_improved_still_over_limit(
+    group_results: dict[int, tuple[Route, TuneResult]],
+    *,
+    spread_before_mm: float,
+    spread_mm: float,
+    tolerance_mm: float,
+) -> dict[int, tuple[Route, TuneResult]]:
+    """Keep a group's meanders when it improved but is still over its limit (Issue #6969).
+
+    Routes are left as the tuner committed them (every one is DRC-clean by
+    the tuner's own post-insertion check).  Members that committed an
+    insertion are re-labelled ``"improved_still_over_limit"`` with
+    ``success=False`` so the group is never counted as achieved.
+    """
+    kept: dict[int, tuple[Route, TuneResult]] = {}
+    for net_id, (route, result) in group_results.items():
+        if result.inserts_applied > 0:
+            result = TuneResult(
+                success=False,
+                reason="improved_still_over_limit",
+                attempts=result.attempts,
+                inserts_applied=result.inserts_applied,
+                length_before_mm=result.length_before_mm,
+                length_after_mm=result.length_after_mm,
+                message=(
+                    f"Group improved (spread {spread_before_mm:.3f}mm -> "
+                    f"{spread_mm:.3f}mm) but is still over its limit "
+                    f"({tolerance_mm:.3f}mm); DRC-clean meanders kept "
+                    f"(tuner outcome was {result.reason!r})."
+                ),
+                serpentine_results=result.serpentine_results,
+            )
+        kept[net_id] = (route, result)
+    return kept
+
+
 # ---------------------------------------------------------------------------
 # Small helpers
 # ---------------------------------------------------------------------------
@@ -3849,6 +4111,7 @@ __all__ = [
     "TUNE_RESULT_REASONS",
     "TuneResult",
     "format_reason_counts",
+    "mark_group_improved_still_over_limit",
     "mark_group_rolled_back",
     "tune_match_group_v2",
 ]

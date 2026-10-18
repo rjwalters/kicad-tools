@@ -84,6 +84,10 @@ def run_readiness_command(args) -> int:
     if fill_tolerance is not None:
         sub_argv.extend(["--fill-tolerance", str(fill_tolerance)])
 
+    checked_at = getattr(args, "readiness_checked_at", None)
+    if checked_at:
+        sub_argv.extend(["--checked-at", checked_at])
+
     if getattr(args, "format", "text") != "text":
         sub_argv.extend(["--format", args.format])
 

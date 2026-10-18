@@ -404,6 +404,18 @@ class LatticeKeepoutMask:
                 return True
         return False
 
+    def blocking_names(self, a: Pt, b: Pt, layer: int, net: int, half: float) -> list[str]:
+        """Names of the track-blocking rule areas :meth:`segment_blocked`
+        would trip on for the same query (issue #6935 diagnostics)."""
+        return [
+            area.name or "<unnamed>"
+            for area in self.areas
+            if area.blocks_tracks
+            and layer in area.layers
+            and area.applies_to(net)
+            and seg_near_polygon(a, b, area.polygon, half)
+        ]
+
     def via_blocked(self, point: Pt, net: int, via_radius: float) -> bool:
         """True if a through-via at ``point`` would enter a via-blocking rule
         area governing ``net`` (layer-agnostic: the barrel spans the stack,

@@ -289,19 +289,39 @@ def test_known_layer_stack_from_schema_copper_names() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _escape_board(tmp_path: Path, force_python: bool = True):
-    """The #6061 board loaded for routing, plus its schema model."""
+def _escape_board(tmp_path: Path, force_python: bool = True, grid_resolution: float = 0.05):
+    """The #6061 board loaded for routing, plus its schema model.
+
+    The sub-grid tests pass ``esc.SUBGRID_PITCH``: SubGridRouter only emits
+    legs for off-grid pads, and every pad is on the 0.05mm grid (#6878).
+    """
     from tests import test_escape_keepout_rule_areas_6061 as esc
 
     text = esc._board(True)
     path = tmp_path / "escape.kicad_pcb"
     path.write_text(text)
-    router = esc._load(tmp_path, with_areas=True, force_python=force_python)
+    router = esc._load(
+        tmp_path, with_areas=True, force_python=force_python, grid_resolution=grid_resolution
+    )
     return esc, router, PCB.load(str(path))
 
 
 def _package_pads(router, ref: str) -> list:
     return [pad for (r, _pin), pad in sorted(router.pads.items()) if r == ref]
+
+
+def _subgrid_orchestrator(router, rule_areas):
+    """An orchestrator over ``router.grid`` (see ``_grid_orchestrator``)."""
+    from types import SimpleNamespace
+
+    from kicad_tools.router.orchestrator import RoutingOrchestrator
+
+    return RoutingOrchestrator(
+        pcb=SimpleNamespace(grid=router.grid, width=40.0, height=20.0),  # type: ignore[arg-type]
+        rules=router.rules,
+        layer_stack=router.layer_stack,
+        rule_areas=rule_areas,
+    )
 
 
 def _grid_orchestrator(router, schema_pcb):
@@ -384,6 +404,11 @@ def test_escape_strategy_without_install_would_intrude(tmp_path: Path) -> None:
         route.vias.extend(result.vias)
     assert esc._intrusions([route]) != []
 
+    # Issue #6878: the sub-grid step needs off-grid pads to emit any copper.
+    esc, router, _schema_pcb = _escape_board(tmp_path, grid_resolution=esc.SUBGRID_PITCH)
+    assert router.grid.resolution == esc.SUBGRID_PITCH
+    orchestrator = _subgrid_orchestrator(router, [])
+    _no_corridor(orchestrator)
     subgrid = Route(net=0, net_name="subgrid")
     pads = _package_pads(router, "U1") + _package_pads(router, "U2")
     result = orchestrator._route_subgrid_adaptive("pkg", pads)
@@ -393,7 +418,9 @@ def test_escape_strategy_without_install_would_intrude(tmp_path: Path) -> None:
 
 
 def test_subgrid_strategy_installs_areas_before_escaping(tmp_path: Path) -> None:
-    esc, router, schema_pcb = _escape_board(tmp_path)
+    from tests import test_escape_keepout_rule_areas_6061 as esc_mod
+
+    esc, router, schema_pcb = _escape_board(tmp_path, grid_resolution=esc_mod.SUBGRID_PITCH)
     orchestrator = _grid_orchestrator(router, schema_pcb)
     _no_corridor(orchestrator)
     assert router.grid._rule_area_keepouts is None
@@ -406,6 +433,8 @@ def test_subgrid_strategy_installs_areas_before_escaping(tmp_path: Path) -> None
     route.segments.extend(result.segments)
     route.vias.extend(result.vias)
     assert len(router.grid._rule_area_keepouts) == 3
+    # Issue #6878: with no escape copper this would pass vacuously.
+    assert route.segments, "the off-grid QFN pads must still escape"
     assert esc._intrusions([route]) == []
 
 

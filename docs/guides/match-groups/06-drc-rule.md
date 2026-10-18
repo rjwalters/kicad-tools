@@ -13,7 +13,7 @@ compares against `length_match_tolerance_mm` on the group's net class.
 Fires one violation per out-of-tolerance member.
 
 ```bash
-kct check routed.kicad_pcb --rules=match_group_length_skew
+kct check routed.kicad_pcb --only match_group_length_skew
 ```
 
 ```bash

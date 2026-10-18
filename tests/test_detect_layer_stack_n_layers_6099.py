@@ -26,6 +26,7 @@ from kicad_tools.core.types import (
 from kicad_tools.router.io import detect_layer_stack
 from kicad_tools.router.layers import LayerStack, LayerType
 from kicad_tools.router.rule_area_resolve import resolve_layer_spec
+from tests.route_cli import route_args
 from tests.test_grid_keepout_rule_areas_6008 import (
     BACKENDS,
     WALL_X0,
@@ -348,9 +349,7 @@ def test_auto_layers_ladder_unchanged_for_preset_counts(tmp_path: Path, n: int) 
 
 
 def test_max_layers_flag_accepts_eight() -> None:
-    from kicad_tools.cli.parser import create_parser
-
-    args = create_parser().parse_args(["route", "board.kicad_pcb", "--max-layers", "8"])
+    args = route_args(["board.kicad_pcb", "--max-layers", "8"])
     assert args.max_layers == 8
 
 

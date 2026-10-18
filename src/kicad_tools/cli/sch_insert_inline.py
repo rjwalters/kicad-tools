@@ -43,24 +43,27 @@ from __future__ import annotations
 
 import argparse
 import math
-import re
 import shutil
 import sys
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
+from kicad_tools.cli.sch_wire_common import (
+    _auto_reference,
+)
 from kicad_tools.exceptions import FileNotFoundError as KiCadFileNotFoundError
 from kicad_tools.schema import LibraryManager, Schematic
 from kicad_tools.schema.library import LibrarySymbol
+from kicad_tools.schematic.grid import snap_to_grid
 
 from .sch_json import add_format_flag, record, run_with_json_summary
 from .sch_remove_wire import (
-    _wire_start_end,
     find_nearest_wire,
     find_wire_by_endpoints,
     remove_wire_and_orphan_junctions,
 )
+from .sch_wire_common import _wire_start_end
 
 
 @dataclass
@@ -69,25 +72,6 @@ class PlannedAction:
 
     kind: str  # "remove-wire", "symbol", "wire", "shift", "embed"
     description: str
-
-
-def _snap(value: float, grid: float = 1.27) -> float:
-    """Snap a coordinate to the nearest grid point."""
-    return round(value / grid) * grid
-
-
-def _auto_reference(sch: Schematic, prefix: str) -> str:
-    """Find the next available reference designator for a given prefix."""
-    max_num = 0
-    pattern = re.compile(rf"^{re.escape(prefix)}(\d+)$")
-    for sym in sch.symbols:
-        ref = sym.reference
-        m = pattern.match(ref)
-        if m:
-            num = int(m.group(1))
-            if num > max_num:
-                max_num = num
-    return f"{prefix}{max_num + 1}"
 
 
 def _is_axis_aligned(
@@ -218,7 +202,7 @@ def _shift_downstream_wires(
         for attr in ("start", "end"):
             pt = getattr(wire, attr)
             if abs(pt[0] - anchor[0]) < tolerance and abs(pt[1] - anchor[1]) < tolerance:
-                new_pt = (_snap(pt[0] + dx), _snap(pt[1] + dy))
+                new_pt = (snap_to_grid(pt[0] + dx), snap_to_grid(pt[1] + dy))
                 setattr(wire, attr, new_pt)
                 shifted += 1
 
@@ -378,8 +362,8 @@ def run_insert_inline(args) -> int:
     if gap_deficit > 0.01:
         # Expand by shifting the end point outward
         effective_end = (
-            _snap(wire_end[0] + dir_x * gap_deficit),
-            _snap(wire_end[1] + dir_y * gap_deficit),
+            snap_to_grid(wire_end[0] + dir_x * gap_deficit),
+            snap_to_grid(wire_end[1] + dir_y * gap_deficit),
         )
     else:
         effective_end = wire_end
@@ -387,8 +371,8 @@ def run_insert_inline(args) -> int:
     _wire_length(effective_start, effective_end)
 
     # Component placement at midpoint
-    mid_x = _snap((effective_start[0] + effective_end[0]) / 2)
-    mid_y = _snap((effective_start[1] + effective_end[1]) / 2)
+    mid_x = snap_to_grid((effective_start[0] + effective_end[0]) / 2)
+    mid_y = snap_to_grid((effective_start[1] + effective_end[1]) / 2)
     comp_pos = (mid_x, mid_y)
 
     # Compute pin positions with the component placed at the midpoint
@@ -405,8 +389,8 @@ def run_insert_inline(args) -> int:
         )
         return 1
 
-    pin_a_pos = (_snap(pin_a_pos[0]), _snap(pin_a_pos[1]))
-    pin_b_pos = (_snap(pin_b_pos[0]), _snap(pin_b_pos[1]))
+    pin_a_pos = (snap_to_grid(pin_a_pos[0]), snap_to_grid(pin_a_pos[1]))
+    pin_b_pos = (snap_to_grid(pin_b_pos[0]), snap_to_grid(pin_b_pos[1]))
 
     # Assign pins to upstream/downstream: pin_a connects to wire start,
     # pin_b connects to wire end.  If pin_a is actually farther from

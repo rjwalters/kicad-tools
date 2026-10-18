@@ -1188,6 +1188,67 @@ else
 fi
 
 # ============================================================
+# 8g. Smoke-test bound is configurable; a pure timeout skips the rebuild (#12518)
+# ============================================================
+# A healthy server can take several seconds to answer `initialize` on a loaded
+# host. The bound comes from LOOM_MCP_PREFLIGHT_TIMEOUT (default 15 s); when it
+# fires the wrapper must log a timeout and NOT fall into the rebuild path, whose
+# "cannot rebuild" error hides the real cause.
+echo ""
+echo "Testing MCP pre-flight timeout handling (#12518)..."
+
+if $HAVE_NODE; then
+    _s8g="$(mktemp -d)"
+    mkdir -p "$_s8g/ws" "$_s8g/slow/dist" # no package.json: a rebuild attempt would log "cannot rebuild"
+    # Answers `initialize` only after SLOW_MS (default 2 s).
+    cat >"$_s8g/slow/dist/index.js" <<'JS'
+process.stdin.once("data", () => {
+    setTimeout(() => {
+        process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: 1, result: {} }) + "\n");
+        process.exit(0);
+    }, 2000);
+});
+JS
+    cat >"$_s8g/ws/.mcp.json" <<JSON
+{ "mcpServers": { "slow": { "command": "node", "args": ["$_s8g/slow/dist/index.js"] } } }
+JSON
+
+    _run_check_with_timeout() {
+        local ws="$1" t="$2"
+        LOOM_MCP_PREFLIGHT_TIMEOUT="$t" LOOM_WORKSPACE="$ws" CLAUDE_WRAPPER_SOURCE_ONLY=1 \
+            bash -c '
+                source "$1"
+                rc=0
+                _check_mcp_candidate "$2" || rc=$?
+                echo "RC=$rc"
+            ' _ "$WRAPPER" "$ws" 2>&1 || true
+    }
+
+    _out8g_timeout="$(_run_check_with_timeout "$_s8g/ws" 1)"
+    assert_contains "MCP smoke test timed out after 1s" "$_out8g_timeout" \
+        "8g: a smoke-test timeout is logged as a timeout"
+    assert_not_contains "cannot rebuild" "$_out8g_timeout" \
+        "8g: a pure timeout does not fall into the rebuild path"
+    assert_contains "RC=1" "$_out8g_timeout" \
+        "8g: a pure timeout reports an unhealthy candidate"
+
+    _out8g_ok="$(_run_check_with_timeout "$_s8g/ws" 10)"
+    assert_contains "RC=0" "$_out8g_ok" \
+        "8g: a server slower than 1 s but within the configured bound passes"
+
+    # A non-numeric / non-positive value falls back to the 15 s default, so the
+    # 2 s server passes instead of timing out.
+    for _bad in abc 0 -3; do
+        _out8g_bad="$(_run_check_with_timeout "$_s8g/ws" "$_bad")"
+        assert_contains "RC=0" "$_out8g_bad" \
+            "8g: invalid LOOM_MCP_PREFLIGHT_TIMEOUT='$_bad' falls back to the default"
+    done
+    rm -rf "$_s8g"
+else
+    echo -e "  ${YELLOW}SKIP${NC}: MCP pre-flight timeout tests (node not installed)"
+fi
+
+# ============================================================
 # Summary
 # ============================================================
 echo ""

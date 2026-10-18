@@ -13,6 +13,7 @@ import pytest
 from kicad_tools.router.core import Autorouter
 from kicad_tools.router.layers import Layer
 from kicad_tools.router.primitives import Pad
+from tests.route_cli import route_args
 
 
 def _add_pad(router: Autorouter, pad: Pad) -> None:
@@ -117,13 +118,10 @@ def test_mesh_strategy_never_constructs_lattice_state() -> None:
 
 
 def test_route_engine_flag_accepts_lattice_and_defaults_to_grid() -> None:
-    from kicad_tools.cli.parser import create_parser
-
-    parser = create_parser()
-    args = parser.parse_args(["route", "board.kicad_pcb"])
+    args = route_args(["board.kicad_pcb"])
     assert args.route_engine == "grid"
     for engine in ("grid", "mesh", "lattice"):
-        args = parser.parse_args(["route", "board.kicad_pcb", "--route-engine", engine])
+        args = route_args(["board.kicad_pcb", "--route-engine", engine])
         assert args.route_engine == engine
 
 

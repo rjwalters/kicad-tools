@@ -89,6 +89,8 @@ __all__ = [
     "PlaneViaStub",
     "area_array_link_keepout_areas",
     "area_array_pour_links",
+    "exempt_pair_in_gateway_envelope",
+    "pair_gateway_envelope_contains",
     "plane_fill_pullback",
     "plane_fills_from_pcb",
     "plane_via_keepout_areas",
@@ -1447,6 +1449,87 @@ def plane_via_keepout_areas(
             )
         )
     return areas
+
+
+#: Name prefixes of the #6401 / #6589 reservation discs a declared pair's
+#: gateway envelope may exempt (issue #6956).  The stubs are not included:
+#: they are the pad's own path to its via and stay closed to every net.
+PAIR_ENVELOPE_PREFIXES: tuple[str, ...] = ("plane-via-site:", "plane-via-fill:")
+
+
+def pair_gateway_envelope_contains(
+    pad_p: Pad, pad_n: Pad, point: tuple[float, float], *, setback: float
+) -> bool:
+    """True when ``point`` lies in a pair's gateway envelope (issue #6956).
+
+    The envelope is the box spanned by the P and N pads (their copper, in the
+    pair's own frame: along the P-N axis) grown along the P-N normal by
+    ``setback`` -- the largest gateway setback
+    :func:`~kicad_tools.router.pairplan.gateway.enumerate_gateways` can emit
+    -- on both sides, so it covers the against and the pass-under gateways.
+    Pads of two different footprints have no envelope (``False``): the
+    exemption is for a reservation at the pair's own footprint only.
+    """
+    if pad_p.ref != pad_n.ref:
+        return False
+    dx, dy = pad_p.x - pad_n.x, pad_p.y - pad_n.y
+    sep = math.hypot(dx, dy)
+    if sep <= 1e-9:
+        return False
+    ux, uy = dx / sep, dy / sep
+    vx, vy = -uy, ux
+    mx, my = (pad_p.x + pad_n.x) / 2.0, (pad_p.y + pad_n.y) / 2.0
+    along = (point[0] - mx) * ux + (point[1] - my) * uy
+    normal = (point[0] - mx) * vx + (point[1] - my) * vy
+    half_along = 0.0
+    half_normal = 0.0
+    for pad in (pad_p, pad_n):
+        hw, hh = pad_half_extents(pad)
+        half_along = max(half_along, abs(ux) * hw + abs(uy) * hh)
+        half_normal = max(half_normal, abs(vx) * hw + abs(vy) * hh)
+    return (
+        abs(along) <= sep / 2.0 + half_along + 1e-9 and abs(normal) <= half_normal + setback + 1e-9
+    )
+
+
+def exempt_pair_in_gateway_envelope(
+    areas: Sequence[Any],
+    pad_p: Pad,
+    pad_n: Pad,
+    pair_nets: Iterable[int],
+    *,
+    setback: float,
+    prefixes: Sequence[str] = PAIR_ENVELOPE_PREFIXES,
+) -> tuple[list[Any], list[str]]:
+    """Exempt a pair's nets from the reservations in its envelope (#6956).
+
+    A #6401 pour-pad via site (and its #6589 fill disc) whose centre lies in
+    :func:`pair_gateway_envelope_contains` for ``pad_p`` / ``pad_n`` gets the
+    pair's two nets added to its ``exempt`` set.  It stays a hard keep-out
+    for every other net.  Board 03: ``plane-via-site:GND:U2.2`` sits under
+    U2's body, on the only pass-under route of ``USB_D[1]``'s In2.Cu gateway.
+
+    Returns ``(areas, names)``: the areas in their original order (the
+    unchanged ones are the same objects) and the names of those exempted.
+    """
+    from dataclasses import replace
+
+    nets = frozenset(int(n) for n in pair_nets)
+    out: list[Any] = []
+    names: list[str] = []
+    for area in areas:
+        name = getattr(area, "name", "") or ""
+        if not nets or not name.startswith(tuple(prefixes)) or nets <= area.exempt:
+            out.append(area)
+            continue
+        x0, y0, x1, y1 = area.bbox
+        centre = ((x0 + x1) / 2.0, (y0 + y1) / 2.0)
+        if not pair_gateway_envelope_contains(pad_p, pad_n, centre, setback=setback):
+            out.append(area)
+            continue
+        out.append(replace(area, exempt=area.exempt | nets))
+        names.append(name)
+    return out, names
 
 
 def reserve_plane_via_sites(

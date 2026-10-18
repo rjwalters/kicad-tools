@@ -71,3 +71,13 @@ assert cpp_backend.router_cpp is original
 assert cpp_backend.router_cpp.DesignRules is rules_type
 assert isinstance(cpp_backend.router_cpp.DesignRules(), rules_type)
 """)
+
+
+def test_cli_parser_import_does_not_load_check_cmd():
+    """``kct`` startup must not pay for check_cmd's validate/router/numpy imports (#6896)."""
+    fresh("""
+import sys
+import kicad_tools.cli.parser
+assert 'kicad_tools.cli.check_cmd' not in sys.modules
+assert 'numpy' not in sys.modules
+""")

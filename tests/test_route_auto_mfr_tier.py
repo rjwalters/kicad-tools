@@ -18,35 +18,26 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from tests.route_cli import route_args
+
 
 class TestArgparseFlagPlumbing:
     """Argparse plumbing for --auto-mfr-tier / --mfr-tier-ladder."""
 
-    def _get_route_parser(self):
-        """Construct the route subcommand parser from kicad_tools.cli.parser."""
-        from kicad_tools.cli.parser import create_parser
-
-        parser = create_parser()
-        return parser
-
     def test_auto_mfr_tier_parses(self):
         """--auto-mfr-tier is a recognized boolean flag."""
-        parser = self._get_route_parser()
-        args = parser.parse_args(["route", "test.kicad_pcb", "--auto-mfr-tier"])
+        args = route_args(["test.kicad_pcb", "--auto-mfr-tier"])
         assert args.auto_mfr_tier is True
 
     def test_auto_mfr_tier_default_off(self):
         """--auto-mfr-tier is opt-in (default False)."""
-        parser = self._get_route_parser()
-        args = parser.parse_args(["route", "test.kicad_pcb"])
+        args = route_args(["test.kicad_pcb"])
         assert args.auto_mfr_tier is False
 
     def test_mfr_tier_ladder_parses(self):
         """--mfr-tier-ladder accepts a comma-separated value."""
-        parser = self._get_route_parser()
-        args = parser.parse_args(
+        args = route_args(
             [
-                "route",
                 "test.kicad_pcb",
                 "--auto-mfr-tier",
                 "--mfr-tier-ladder",
@@ -56,8 +47,7 @@ class TestArgparseFlagPlumbing:
         assert args.mfr_tier_ladder == "jlcpcb,jlcpcb-tier1"
 
     def test_mfr_tier_ladder_default_none(self):
-        parser = self._get_route_parser()
-        args = parser.parse_args(["route", "test.kicad_pcb"])
+        args = route_args(["test.kicad_pcb"])
         assert args.mfr_tier_ladder is None
 
 

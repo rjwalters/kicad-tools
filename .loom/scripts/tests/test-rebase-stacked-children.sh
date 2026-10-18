@@ -51,20 +51,6 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 
 
-assert_not_contains() {
-    local haystack="$1" needle="$2" msg="$3"
-    TESTS_RUN=$((TESTS_RUN + 1))
-    if ! [[ "$haystack" == *"$needle"* ]]; then
-        TESTS_PASSED=$((TESTS_PASSED + 1))
-        echo -e "  ${GREEN}PASS${NC}: $msg"
-    else
-        TESTS_FAILED=$((TESTS_FAILED + 1))
-        echo -e "  ${RED}FAIL${NC}: $msg"
-        echo "    Unexpected substring: '$needle'"
-        echo "    In: '$haystack'"
-    fi
-}
-
 # --- Minimal logging shims the extracted functions call ---
 err()  { echo "ERR: $*" >&2; }
 ok()   { echo "OK: $*"; }

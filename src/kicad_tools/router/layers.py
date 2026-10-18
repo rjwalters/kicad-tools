@@ -197,44 +197,6 @@ class LayerStack:
         """
         return [layer.index for layer in self.layers if not layer.is_outer and layer.is_routable]
 
-    def get_layers_adjacent_to_plane(self, plane_net: str | None = None) -> list[int]:
-        """Get layer indices adjacent to a plane layer.
-
-        For high-speed signals, routing on layers adjacent to ground planes
-        provides better impedance control and return current paths.
-
-        Args:
-            plane_net: Optional net name to filter by (e.g., "GND"). If None,
-                returns layers adjacent to any plane.
-
-        Returns:
-            List of layer indices adjacent to matching plane layers.
-        """
-        adjacent: list[int] = []
-        for i, layer in enumerate(self.layers):
-            if layer.layer_type == LayerType.PLANE:
-                if plane_net is None or layer.plane_net == plane_net:
-                    # Add adjacent layers (before and after in stack)
-                    if i > 0:
-                        prev_layer = self.layers[i - 1]
-                        if prev_layer.is_routable and prev_layer.index not in adjacent:
-                            adjacent.append(prev_layer.index)
-                    if i < len(self.layers) - 1:
-                        next_layer = self.layers[i + 1]
-                        if next_layer.is_routable and next_layer.index not in adjacent:
-                            adjacent.append(next_layer.index)
-        return sorted(adjacent)
-
-    def get_layers_with_reference_plane(self) -> list[int]:
-        """Get layer indices that have a reference plane defined.
-
-        Layers with reference planes are better for controlled impedance routing.
-
-        Returns:
-            List of layer indices with reference_plane set.
-        """
-        return [layer.index for layer in self.layers if layer.is_routable and layer.reference_plane]
-
     # =========================================================================
     # STANDARD LAYER STACK PRESETS
     # =========================================================================
@@ -485,18 +447,4 @@ class ViaRules:
                 cost_multiplier=0.5,
                 name="Micro",
             ),
-        )
-
-    @classmethod
-    def standard_6layer(cls) -> "ViaRules":
-        """Standard rules for 6-layer PCB."""
-        return cls(
-            through_via=ViaDefinition(
-                ViaType.THROUGH,
-                drill_mm=0.3,
-                annular_ring_mm=0.15,
-                start_layer=0,
-                end_layer=5,
-                name="Through",
-            )
         )

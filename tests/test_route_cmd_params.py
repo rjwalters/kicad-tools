@@ -1,7 +1,8 @@
 """Tests for route command parameter handling (issue #418).
 
-Verifies that CLI parameters like --grid and --clearance are correctly
-passed through the command handler to the underlying route_cmd.main().
+Verifies that CLI parameters like --grid and --clearance reach the
+underlying route_cmd.main() -- since issue #7017 ``kct route`` hands its argv
+over verbatim, so these check the passthrough and the real route parser.
 """
 
 from types import SimpleNamespace
@@ -9,255 +10,38 @@ from unittest.mock import patch
 
 import pytest
 
-
-def _route_forward_args(**overrides) -> SimpleNamespace:
-    """Minimal ``kct route`` args namespace for the argv-forwarding tests."""
-    base = {
-        "pcb": "test.kicad_pcb",
-        "output": None,
-        "strategy": "negotiated",
-        "skip_nets": None,
-        "grid": "auto",
-        "trace_width": 0.2,
-        "clearance": 0.15,
-        "via_drill": 0.3,
-        "via_diameter": 0.6,
-        "mc_trials": 10,
-        "iterations": 15,
-        "verbose": False,
-        "dry_run": True,
-        "quiet": True,
-        "power_nets": None,
-    }
-    base.update(overrides)
-    return SimpleNamespace(**base)
+from kicad_tools.cli import main as cli_main
+from tests.route_cli import kct_route, route_args
 
 
 class TestRouteCommandGridParameter:
-    """Tests for --grid parameter handling in route command."""
+    """``kct route --grid`` reaches route_cmd.main verbatim (issues #418, #7017)."""
 
-    def test_grid_parameter_passed_when_not_default(self):
-        """Grid parameter is passed when different from default 'auto'."""
-        from kicad_tools.cli.commands.routing import run_route_command
+    @pytest.mark.parametrize("grid", ["0.1", "0.25", "auto", "AUTO"])
+    def test_explicit_grid_is_passed_through(self, grid):
+        forwarded, args = kct_route(["test.kicad_pcb", "--grid", grid, "--dry-run"])
+        assert forwarded[forwarded.index("--grid") + 1] == grid
+        assert args.grid == grid
 
-        # Create args simulating --grid 0.1 (non-default)
-        args = SimpleNamespace(
-            pcb="test.kicad_pcb",
-            output=None,
-            strategy="negotiated",
-            skip_nets=None,
-            grid="0.1",  # Non-default value (string, as parser now emits)
-            trace_width=0.2,
-            clearance=0.15,
-            via_drill=0.3,
-            via_diameter=0.6,
-            mc_trials=10,
-            iterations=15,
-            verbose=False,
-            dry_run=True,
-            quiet=True,
-            power_nets=None,
-        )
-
-        with patch("kicad_tools.cli.route_cmd.main") as mock_main:
-            mock_main.return_value = 0
-            run_route_command(args)
-
-            # Verify --grid 0.1 is in the arguments
-            call_args = mock_main.call_args[0][0]
-            assert "--grid" in call_args
-            grid_idx = call_args.index("--grid")
-            assert call_args[grid_idx + 1] == "0.1"
-
-    def test_grid_parameter_not_duplicated_when_default(self):
-        """Grid parameter is not passed when equal to default 'auto'."""
-        from kicad_tools.cli.commands.routing import run_route_command
-
-        # Create args simulating default --grid auto
-        args = SimpleNamespace(
-            pcb="test.kicad_pcb",
-            output=None,
-            strategy="negotiated",
-            skip_nets=None,
-            grid="auto",  # Default value (string) - should not be passed
-            trace_width=0.2,
-            clearance=0.15,
-            via_drill=0.3,
-            via_diameter=0.6,
-            mc_trials=10,
-            iterations=15,
-            verbose=False,
-            dry_run=True,
-            quiet=True,
-            power_nets=None,
-        )
-
-        with patch("kicad_tools.cli.route_cmd.main") as mock_main:
-            mock_main.return_value = 0
-            run_route_command(args)
-
-            # Verify --grid is NOT in the arguments (uses default)
-            call_args = mock_main.call_args[0][0]
-            assert "--grid" not in call_args
-
-    def test_grid_auto_not_forwarded_as_default(self):
-        """Grid 'auto' is the default and should not be forwarded to route_cmd."""
-        from kicad_tools.cli.commands.routing import run_route_command
-
-        args = SimpleNamespace(
-            pcb="test.kicad_pcb",
-            output=None,
-            strategy="negotiated",
-            skip_nets=None,
-            grid="auto",  # Default value
-            trace_width=0.2,
-            clearance=0.15,
-            via_drill=0.3,
-            via_diameter=0.6,
-            mc_trials=10,
-            iterations=15,
-            verbose=False,
-            dry_run=True,
-            quiet=True,
-            power_nets=None,
-        )
-
-        with patch("kicad_tools.cli.route_cmd.main") as mock_main:
-            mock_main.return_value = 0
-            run_route_command(args)
-
-            # auto is the default in route_cmd too, so it should not be forwarded
-            call_args = mock_main.call_args[0][0]
-            assert "--grid" not in call_args
-
-    def test_grid_auto_uppercase_not_forwarded(self):
-        """Grid 'AUTO' (uppercase) is also treated as default and not forwarded."""
-        from kicad_tools.cli.commands.routing import run_route_command
-
-        args = SimpleNamespace(
-            pcb="test.kicad_pcb",
-            output=None,
-            strategy="negotiated",
-            skip_nets=None,
-            grid="AUTO",  # Auto mode uppercase
-            trace_width=0.2,
-            clearance=0.15,
-            via_drill=0.3,
-            via_diameter=0.6,
-            mc_trials=10,
-            iterations=15,
-            verbose=False,
-            dry_run=True,
-            quiet=True,
-            power_nets=None,
-        )
-
-        with patch("kicad_tools.cli.route_cmd.main") as mock_main:
-            mock_main.return_value = 0
-            run_route_command(args)
-
-            # AUTO (case-insensitive) is the default, so should not be forwarded
-            call_args = mock_main.call_args[0][0]
-            assert "--grid" not in call_args
-
-    def test_grid_explicit_025_forwarded(self):
-        """Explicit --grid 0.25 is forwarded since it's no longer the default."""
-        from kicad_tools.cli.commands.routing import run_route_command
-
-        args = SimpleNamespace(
-            pcb="test.kicad_pcb",
-            output=None,
-            strategy="negotiated",
-            skip_nets=None,
-            grid="0.25",  # Explicit non-default value
-            trace_width=0.2,
-            clearance=0.15,
-            via_drill=0.3,
-            via_diameter=0.6,
-            mc_trials=10,
-            iterations=15,
-            verbose=False,
-            dry_run=True,
-            quiet=True,
-            power_nets=None,
-        )
-
-        with patch("kicad_tools.cli.route_cmd.main") as mock_main:
-            mock_main.return_value = 0
-            run_route_command(args)
-
-            call_args = mock_main.call_args[0][0]
-            assert "--grid" in call_args
-            grid_idx = call_args.index("--grid")
-            assert call_args[grid_idx + 1] == "0.25"
+    def test_unset_grid_is_not_invented(self):
+        forwarded, args = kct_route(["test.kicad_pcb", "--dry-run"])
+        assert "--grid" not in forwarded
+        assert args.grid == "auto"
 
 
 class TestRouteCommandClearanceParameter:
-    """Tests for --clearance parameter handling in route command."""
+    """``kct route --clearance`` reaches route_cmd.main verbatim."""
 
-    def test_clearance_parameter_passed_when_not_default(self):
-        """Clearance parameter is passed when different from default 0.15."""
-        from kicad_tools.cli.commands.routing import run_route_command
+    @pytest.mark.parametrize("value", ["0.127", "0.15"])
+    def test_explicit_clearance_is_passed_through(self, value):
+        """Includes the 0.15 default the old shim dropped (#4875, #7017)."""
+        forwarded, args = kct_route(["test.kicad_pcb", "--clearance", value])
+        assert forwarded[forwarded.index("--clearance") + 1] == value
+        assert args.clearance == pytest.approx(float(value))
 
-        # Create args simulating --clearance 0.127 (non-default)
-        args = SimpleNamespace(
-            pcb="test.kicad_pcb",
-            output=None,
-            strategy="negotiated",
-            skip_nets=None,
-            grid="0.25",
-            trace_width=0.2,
-            clearance=0.127,  # Non-default value
-            via_drill=0.3,
-            via_diameter=0.6,
-            mc_trials=10,
-            iterations=15,
-            verbose=False,
-            dry_run=True,
-            quiet=True,
-            power_nets=None,
-        )
-
-        with patch("kicad_tools.cli.route_cmd.main") as mock_main:
-            mock_main.return_value = 0
-            run_route_command(args)
-
-            # Verify --clearance 0.127 is in the arguments
-            call_args = mock_main.call_args[0][0]
-            assert "--clearance" in call_args
-            clearance_idx = call_args.index("--clearance")
-            assert call_args[clearance_idx + 1] == "0.127"
-
-    def test_clearance_parameter_not_duplicated_when_default(self):
-        """Clearance parameter is not passed when equal to default 0.15."""
-        from kicad_tools.cli.commands.routing import run_route_command
-
-        # Create args simulating default --clearance 0.15
-        args = SimpleNamespace(
-            pcb="test.kicad_pcb",
-            output=None,
-            strategy="negotiated",
-            skip_nets=None,
-            grid="0.25",
-            trace_width=0.2,
-            clearance=0.15,  # Default value - should not be passed
-            via_drill=0.3,
-            via_diameter=0.6,
-            mc_trials=10,
-            iterations=15,
-            verbose=False,
-            dry_run=True,
-            quiet=True,
-            power_nets=None,
-        )
-
-        with patch("kicad_tools.cli.route_cmd.main") as mock_main:
-            mock_main.return_value = 0
-            run_route_command(args)
-
-            # Verify --clearance is NOT in the arguments (uses default)
-            call_args = mock_main.call_args[0][0]
-            assert "--clearance" not in call_args
+    def test_unset_clearance_is_not_invented(self):
+        forwarded, _ = kct_route(["test.kicad_pcb"])
+        assert "--clearance" not in forwarded
 
 
 class TestRouteCommandDefaultConsistency:
@@ -267,13 +51,10 @@ class TestRouteCommandDefaultConsistency:
         """Verify parser defaults match the values checked in routing.py handler."""
 
         from kicad_tools.cli import route_cmd
-        from kicad_tools.cli.parser import create_parser
-
-        parser = create_parser()
 
         # Extract route subparser defaults
         # We need to parse with empty args to get defaults
-        args = parser.parse_args(["route", "test.kicad_pcb", "--dry-run"])
+        args = route_args(["test.kicad_pcb", "--dry-run"])
 
         # These should match the checks in routing.py
         assert args.grid == "auto", "Grid default should be 'auto'"
@@ -290,18 +71,14 @@ class TestRouteCommandDefaultConsistency:
 
     def test_parser_accepts_grid_auto(self):
         """Top-level parser accepts --grid auto without error."""
-        from kicad_tools.cli.parser import create_parser
 
-        parser = create_parser()
-        args = parser.parse_args(["route", "test.kicad_pcb", "--grid", "auto"])
+        args = route_args(["test.kicad_pcb", "--grid", "auto"])
         assert args.grid == "auto", "Parser should accept 'auto' as a grid value"
 
     def test_parser_accepts_grid_numeric(self):
         """Top-level parser accepts --grid with numeric values as strings."""
-        from kicad_tools.cli.parser import create_parser
 
-        parser = create_parser()
-        args = parser.parse_args(["route", "test.kicad_pcb", "--grid", "0.1"])
+        args = route_args(["test.kicad_pcb", "--grid", "0.1"])
         assert args.grid == "0.1", "Parser should accept '0.1' as a grid value"
 
     def test_route_cmd_defaults_match_parser_defaults(self):
@@ -309,7 +86,6 @@ class TestRouteCommandDefaultConsistency:
         import contextlib
         import sys
         from io import StringIO
-        from unittest.mock import patch
 
         from kicad_tools.cli.route_cmd import main as route_main
 
@@ -429,7 +205,6 @@ class TestRouteCommandGridClearanceValidation:
         import contextlib
         import sys
         from io import StringIO
-        from unittest.mock import patch
 
         from kicad_tools.cli.route_cmd import main as route_main
 
@@ -445,240 +220,44 @@ class TestRouteCommandGridClearanceValidation:
 
 
 class TestRouteCommandAutoFixFlags:
-    """Tests for --skip-drc, --auto-fix, and --auto-fix-passes forwarding via centralized CLI."""
+    """--skip-drc, --auto-fix, --auto-fix-passes and the #4094 flags via ``kct route``."""
 
-    def _make_base_args(self, **overrides):
-        """Create a base args namespace with all required route fields."""
-        defaults = {
-            "pcb": "test.kicad_pcb",
-            "output": None,
-            "strategy": "negotiated",
-            "skip_nets": None,
-            "grid": "0.25",
-            "trace_width": 0.2,
-            "clearance": 0.15,
-            "via_drill": 0.3,
-            "via_diameter": 0.6,
-            "mc_trials": 10,
-            "iterations": 15,
-            "verbose": False,
-            "dry_run": True,
-            "quiet": True,
-            "power_nets": None,
-            "layers": "auto",
-            "force": False,
-            "no_optimize": False,
-            "auto_layers": False,
-            "max_layers": 6,
-            "min_completion": 0.95,
-            "adaptive_rules": False,
-            "min_trace": None,
-            "min_clearance_floor": None,
-            "manufacturer": "jlcpcb",
-            "high_performance": False,
-            "skip_drc": False,
-            "auto_fix": False,
-            "auto_fix_passes": None,
-        }
-        defaults.update(overrides)
-        return SimpleNamespace(**defaults)
+    BOOLEAN_FLAGS = [
+        ("--skip-drc", "skip_drc"),
+        ("--auto-fix", "auto_fix"),
+        ("--monotone-certificate-order", "monotone_certificate_order"),
+        ("--cross-package-pair-corridor", "cross_package_pair_corridor"),
+        ("--slack-corridor-widening", "slack_corridor_widening"),
+    ]
 
-    def test_skip_drc_forwarded(self):
-        """--skip-drc is forwarded to route_cmd.main."""
-        from kicad_tools.cli.commands.routing import run_route_command
+    @pytest.mark.parametrize(("flag", "dest"), BOOLEAN_FLAGS)
+    def test_flag_reaches_router_when_set(self, flag, dest):
+        forwarded, args = kct_route(["test.kicad_pcb", flag])
+        assert flag in forwarded
+        assert getattr(args, dest) is True
 
-        args = self._make_base_args(skip_drc=True)
-
-        with patch("kicad_tools.cli.route_cmd.main") as mock_main:
-            mock_main.return_value = 0
-            run_route_command(args)
-
-            call_args = mock_main.call_args[0][0]
-            assert "--skip-drc" in call_args
-
-    def test_skip_drc_not_forwarded_when_false(self):
-        """--skip-drc is not forwarded when not set."""
-        from kicad_tools.cli.commands.routing import run_route_command
-
-        args = self._make_base_args(skip_drc=False)
-
-        with patch("kicad_tools.cli.route_cmd.main") as mock_main:
-            mock_main.return_value = 0
-            run_route_command(args)
-
-            call_args = mock_main.call_args[0][0]
-            assert "--skip-drc" not in call_args
-
-    def test_auto_fix_forwarded(self):
-        """--auto-fix is forwarded to route_cmd.main."""
-        from kicad_tools.cli.commands.routing import run_route_command
-
-        args = self._make_base_args(auto_fix=True)
-
-        with patch("kicad_tools.cli.route_cmd.main") as mock_main:
-            mock_main.return_value = 0
-            run_route_command(args)
-
-            call_args = mock_main.call_args[0][0]
-            assert "--auto-fix" in call_args
-
-    def test_auto_fix_not_forwarded_when_false(self):
-        """--auto-fix is not forwarded when not set."""
-        from kicad_tools.cli.commands.routing import run_route_command
-
-        args = self._make_base_args(auto_fix=False)
-
-        with patch("kicad_tools.cli.route_cmd.main") as mock_main:
-            mock_main.return_value = 0
-            run_route_command(args)
-
-            call_args = mock_main.call_args[0][0]
-            assert "--auto-fix" not in call_args
+    @pytest.mark.parametrize(("flag", "dest"), BOOLEAN_FLAGS)
+    def test_flag_absent_and_off_when_unset(self, flag, dest):
+        forwarded, args = kct_route(["test.kicad_pcb"])
+        assert flag not in forwarded
+        assert getattr(args, dest) is False
 
     def test_auto_fix_passes_forwarded(self):
-        """--auto-fix-passes N is forwarded to route_cmd.main."""
-        from kicad_tools.cli.commands.routing import run_route_command
+        forwarded, args = kct_route(["test.kicad_pcb", "--auto-fix-passes", "5"])
+        assert forwarded[forwarded.index("--auto-fix-passes") + 1] == "5"
+        assert args.auto_fix_passes == 5
 
-        args = self._make_base_args(auto_fix_passes=5)
-
-        with patch("kicad_tools.cli.route_cmd.main") as mock_main:
-            mock_main.return_value = 0
-            run_route_command(args)
-
-            call_args = mock_main.call_args[0][0]
-            assert "--auto-fix-passes" in call_args
-            passes_idx = call_args.index("--auto-fix-passes")
-            assert call_args[passes_idx + 1] == "5"
-
-    # --- Issue #4094: monotone-certificate / cross-package / slack flags ---
-
-    def test_monotone_certificate_order_forwarded(self):
-        """--monotone-certificate-order is forwarded to route_cmd.main."""
-        from kicad_tools.cli.commands.routing import run_route_command
-
-        args = self._make_base_args(monotone_certificate_order=True)
-
-        with patch("kicad_tools.cli.route_cmd.main") as mock_main:
-            mock_main.return_value = 0
-            run_route_command(args)
-
-            call_args = mock_main.call_args[0][0]
-            assert "--monotone-certificate-order" in call_args
-
-    def test_monotone_certificate_order_not_forwarded_when_false(self):
-        """--monotone-certificate-order is not forwarded when not set."""
-        from kicad_tools.cli.commands.routing import run_route_command
-
-        args = self._make_base_args(monotone_certificate_order=False)
-
-        with patch("kicad_tools.cli.route_cmd.main") as mock_main:
-            mock_main.return_value = 0
-            run_route_command(args)
-
-            call_args = mock_main.call_args[0][0]
-            assert "--monotone-certificate-order" not in call_args
-
-    def test_cross_package_pair_corridor_forwarded(self):
-        """--cross-package-pair-corridor is forwarded to route_cmd.main."""
-        from kicad_tools.cli.commands.routing import run_route_command
-
-        args = self._make_base_args(cross_package_pair_corridor=True)
-
-        with patch("kicad_tools.cli.route_cmd.main") as mock_main:
-            mock_main.return_value = 0
-            run_route_command(args)
-
-            call_args = mock_main.call_args[0][0]
-            assert "--cross-package-pair-corridor" in call_args
-
-    def test_cross_package_pair_corridor_not_forwarded_when_false(self):
-        """--cross-package-pair-corridor is not forwarded when not set."""
-        from kicad_tools.cli.commands.routing import run_route_command
-
-        args = self._make_base_args(cross_package_pair_corridor=False)
-
-        with patch("kicad_tools.cli.route_cmd.main") as mock_main:
-            mock_main.return_value = 0
-            run_route_command(args)
-
-            call_args = mock_main.call_args[0][0]
-            assert "--cross-package-pair-corridor" not in call_args
-
-    def test_slack_corridor_widening_forwarded(self):
-        """--slack-corridor-widening is forwarded to route_cmd.main."""
-        from kicad_tools.cli.commands.routing import run_route_command
-
-        args = self._make_base_args(slack_corridor_widening=True)
-
-        with patch("kicad_tools.cli.route_cmd.main") as mock_main:
-            mock_main.return_value = 0
-            run_route_command(args)
-
-            call_args = mock_main.call_args[0][0]
-            assert "--slack-corridor-widening" in call_args
-
-    def test_slack_corridor_widening_not_forwarded_when_false(self):
-        """--slack-corridor-widening is not forwarded when not set."""
-        from kicad_tools.cli.commands.routing import run_route_command
-
-        args = self._make_base_args(slack_corridor_widening=False)
-
-        with patch("kicad_tools.cli.route_cmd.main") as mock_main:
-            mock_main.return_value = 0
-            run_route_command(args)
-
-            call_args = mock_main.call_args[0][0]
-            assert "--slack-corridor-widening" not in call_args
-
-    def test_new_routing_flags_all_absent_by_default(self):
-        """None of the three #4094 flags appear when the base args omit them.
-
-        Guards flag-off byte-identity at the sub_argv boundary: with no flag
-        set (the production default), the forwarded argv must not contain any
-        of the three new flags.
-        """
-        from kicad_tools.cli.commands.routing import run_route_command
-
-        args = self._make_base_args()
-
-        with patch("kicad_tools.cli.route_cmd.main") as mock_main:
-            mock_main.return_value = 0
-            run_route_command(args)
-
-            call_args = mock_main.call_args[0][0]
-            assert "--monotone-certificate-order" not in call_args
-            assert "--cross-package-pair-corridor" not in call_args
-            assert "--slack-corridor-widening" not in call_args
-
-    def test_auto_fix_passes_not_forwarded_when_none(self):
-        """--auto-fix-passes is not forwarded when None (default)."""
-        from kicad_tools.cli.commands.routing import run_route_command
-
-        args = self._make_base_args(auto_fix_passes=None)
-
-        with patch("kicad_tools.cli.route_cmd.main") as mock_main:
-            mock_main.return_value = 0
-            run_route_command(args)
-
-            call_args = mock_main.call_args[0][0]
-            assert "--auto-fix-passes" not in call_args
+    def test_auto_fix_passes_unset_is_none(self):
+        forwarded, args = kct_route(["test.kicad_pcb"])
+        assert "--auto-fix-passes" not in forwarded
+        assert args.auto_fix_passes is None
 
     def test_all_three_flags_forwarded_together(self):
-        """All three flags forwarded when set simultaneously."""
-        from kicad_tools.cli.commands.routing import run_route_command
-
-        args = self._make_base_args(skip_drc=True, auto_fix=True, auto_fix_passes=7)
-
-        with patch("kicad_tools.cli.route_cmd.main") as mock_main:
-            mock_main.return_value = 0
-            run_route_command(args)
-
-            call_args = mock_main.call_args[0][0]
-            assert "--skip-drc" in call_args
-            assert "--auto-fix" in call_args
-            assert "--auto-fix-passes" in call_args
-            passes_idx = call_args.index("--auto-fix-passes")
-            assert call_args[passes_idx + 1] == "7"
+        forwarded, args = kct_route(
+            ["test.kicad_pcb", "--skip-drc", "--auto-fix", "--auto-fix-passes", "7"]
+        )
+        assert forwarded == ["test.kicad_pcb", "--skip-drc", "--auto-fix", "--auto-fix-passes", "7"]
+        assert (args.skip_drc, args.auto_fix, args.auto_fix_passes) == (True, True, 7)
 
 
 class TestRouteParserAutoFixFlags:
@@ -686,50 +265,38 @@ class TestRouteParserAutoFixFlags:
 
     def test_parser_accepts_skip_drc(self):
         """Centralized parser accepts --skip-drc without error."""
-        from kicad_tools.cli.parser import create_parser
 
-        parser = create_parser()
-        args = parser.parse_args(["route", "test.kicad_pcb", "--skip-drc"])
+        args = route_args(["test.kicad_pcb", "--skip-drc"])
         assert args.skip_drc is True
 
     def test_parser_accepts_auto_fix(self):
         """Centralized parser accepts --auto-fix without error."""
-        from kicad_tools.cli.parser import create_parser
 
-        parser = create_parser()
-        args = parser.parse_args(["route", "test.kicad_pcb", "--auto-fix"])
+        args = route_args(["test.kicad_pcb", "--auto-fix"])
         assert args.auto_fix is True
 
     def test_parser_accepts_auto_fix_passes(self):
         """Centralized parser accepts --auto-fix-passes N without error."""
-        from kicad_tools.cli.parser import create_parser
 
-        parser = create_parser()
-        args = parser.parse_args(["route", "test.kicad_pcb", "--auto-fix-passes", "5"])
+        args = route_args(["test.kicad_pcb", "--auto-fix-passes", "5"])
         assert args.auto_fix_passes == 5
 
     def test_parser_auto_fix_passes_default_is_none(self):
         """--auto-fix-passes defaults to None when not provided."""
-        from kicad_tools.cli.parser import create_parser
 
-        parser = create_parser()
-        args = parser.parse_args(["route", "test.kicad_pcb"])
+        args = route_args(["test.kicad_pcb"])
         assert args.auto_fix_passes is None
 
     def test_parser_skip_drc_default_is_false(self):
         """--skip-drc defaults to False when not provided."""
-        from kicad_tools.cli.parser import create_parser
 
-        parser = create_parser()
-        args = parser.parse_args(["route", "test.kicad_pcb"])
+        args = route_args(["test.kicad_pcb"])
         assert args.skip_drc is False
 
     def test_parser_auto_fix_default_is_false(self):
         """--auto-fix defaults to False when not provided."""
-        from kicad_tools.cli.parser import create_parser
 
-        parser = create_parser()
-        args = parser.parse_args(["route", "test.kicad_pcb"])
+        args = route_args(["test.kicad_pcb"])
         assert args.auto_fix is False
 
     def test_route_help_shows_auto_fix_flags(self):
@@ -737,12 +304,9 @@ class TestRouteParserAutoFixFlags:
         import contextlib
         from io import StringIO
 
-        from kicad_tools.cli.parser import create_parser
-
-        parser = create_parser()
         help_output = StringIO()
         with contextlib.redirect_stdout(help_output), contextlib.suppress(SystemExit):
-            parser.parse_args(["route", "--help"])
+            cli_main(["route", "--help"])
 
         help_text = help_output.getvalue()
         assert "--skip-drc" in help_text
@@ -826,7 +390,6 @@ class TestEscapeRoutingFlag:
         import contextlib
         import sys
         from io import StringIO
-        from unittest.mock import patch
 
         from kicad_tools.cli.route_cmd import main as route_main
 
@@ -845,109 +408,25 @@ class TestRouteCommandNoCacheFlag:
 
     def test_parser_accepts_no_cache(self):
         """Centralized parser accepts --no-cache without error."""
-        from kicad_tools.cli.parser import create_parser
 
-        parser = create_parser()
-        args = parser.parse_args(["route", "test.kicad_pcb", "--no-cache"])
+        args = route_args(["test.kicad_pcb", "--no-cache"])
         assert args.no_cache is True
 
     def test_parser_no_cache_default_is_false(self):
         """--no-cache defaults to False when not provided."""
-        from kicad_tools.cli.parser import create_parser
 
-        parser = create_parser()
-        args = parser.parse_args(["route", "test.kicad_pcb"])
+        args = route_args(["test.kicad_pcb"])
         assert args.no_cache is False
 
     def test_no_cache_forwarded(self):
-        """--no-cache is forwarded to route_cmd.main."""
-        from kicad_tools.cli.commands.routing import run_route_command
+        forwarded, args = kct_route(["test.kicad_pcb", "--no-cache"])
+        assert "--no-cache" in forwarded
+        assert args.no_cache is True
 
-        args = SimpleNamespace(
-            pcb="test.kicad_pcb",
-            output=None,
-            strategy="negotiated",
-            skip_nets=None,
-            grid="0.25",
-            trace_width=0.2,
-            clearance=0.15,
-            via_drill=0.3,
-            via_diameter=0.6,
-            mc_trials=10,
-            iterations=15,
-            verbose=False,
-            dry_run=True,
-            quiet=True,
-            power_nets=None,
-            layers="auto",
-            force=False,
-            no_optimize=False,
-            auto_layers=False,
-            max_layers=6,
-            min_completion=0.95,
-            adaptive_rules=False,
-            min_trace=None,
-            min_clearance_floor=None,
-            manufacturer="jlcpcb",
-            high_performance=False,
-            skip_drc=False,
-            auto_fix=False,
-            auto_fix_passes=None,
-            export_failed_nets=None,
-            no_cache=True,
-        )
-
-        with patch("kicad_tools.cli.route_cmd.main") as mock_main:
-            mock_main.return_value = 0
-            run_route_command(args)
-
-            call_args = mock_main.call_args[0][0]
-            assert "--no-cache" in call_args
-
-    def test_no_cache_not_forwarded_when_false(self):
-        """--no-cache is not forwarded when False."""
-        from kicad_tools.cli.commands.routing import run_route_command
-
-        args = SimpleNamespace(
-            pcb="test.kicad_pcb",
-            output=None,
-            strategy="negotiated",
-            skip_nets=None,
-            grid="0.25",
-            trace_width=0.2,
-            clearance=0.15,
-            via_drill=0.3,
-            via_diameter=0.6,
-            mc_trials=10,
-            iterations=15,
-            verbose=False,
-            dry_run=True,
-            quiet=True,
-            power_nets=None,
-            layers="auto",
-            force=False,
-            no_optimize=False,
-            auto_layers=False,
-            max_layers=6,
-            min_completion=0.95,
-            adaptive_rules=False,
-            min_trace=None,
-            min_clearance_floor=None,
-            manufacturer="jlcpcb",
-            high_performance=False,
-            skip_drc=False,
-            auto_fix=False,
-            auto_fix_passes=None,
-            export_failed_nets=None,
-            no_cache=False,
-        )
-
-        with patch("kicad_tools.cli.route_cmd.main") as mock_main:
-            mock_main.return_value = 0
-            run_route_command(args)
-
-            call_args = mock_main.call_args[0][0]
-            assert "--no-cache" not in call_args
+    def test_no_cache_not_forwarded_when_unset(self):
+        forwarded, args = kct_route(["test.kicad_pcb"])
+        assert "--no-cache" not in forwarded
+        assert args.no_cache is False
 
 
 class TestRouteParserPerNetTimeoutFlag:
@@ -955,306 +434,63 @@ class TestRouteParserPerNetTimeoutFlag:
 
     def test_parser_accepts_per_net_timeout(self):
         """Centralized parser accepts --per-net-timeout without error."""
-        from kicad_tools.cli.parser import create_parser
 
-        parser = create_parser()
-        args = parser.parse_args(["route", "test.kicad_pcb", "--per-net-timeout", "60"])
+        args = route_args(["test.kicad_pcb", "--per-net-timeout", "60"])
         assert args.per_net_timeout == 60.0
 
     def test_parser_per_net_timeout_default_is_30(self):
         """--per-net-timeout defaults to 30.0 when not provided."""
-        from kicad_tools.cli.parser import create_parser
 
-        parser = create_parser()
-        args = parser.parse_args(["route", "test.kicad_pcb"])
+        args = route_args(["test.kicad_pcb"])
         assert args.per_net_timeout == 30.0
 
     def test_parser_accepts_per_net_timeout_zero(self):
         """--per-net-timeout 0 is accepted (disables timeout)."""
-        from kicad_tools.cli.parser import create_parser
 
-        parser = create_parser()
-        args = parser.parse_args(["route", "test.kicad_pcb", "--per-net-timeout", "0"])
+        args = route_args(["test.kicad_pcb", "--per-net-timeout", "0"])
         assert args.per_net_timeout == 0.0
 
     def test_parser_accepts_timeout(self):
         """Centralized parser accepts --timeout without error."""
-        from kicad_tools.cli.parser import create_parser
 
-        parser = create_parser()
-        args = parser.parse_args(["route", "test.kicad_pcb", "--timeout", "120"])
+        args = route_args(["test.kicad_pcb", "--timeout", "120"])
         assert args.timeout == 120.0
 
     def test_parser_timeout_default_is_none(self):
         """--timeout defaults to None when not provided."""
-        from kicad_tools.cli.parser import create_parser
 
-        parser = create_parser()
-        args = parser.parse_args(["route", "test.kicad_pcb"])
+        args = route_args(["test.kicad_pcb"])
         assert args.timeout is None
 
-    def test_per_net_timeout_forwarded(self):
-        """--per-net-timeout is forwarded to route_cmd.main when non-default."""
-        from kicad_tools.cli.commands.routing import run_route_command
+    @pytest.mark.parametrize(
+        ("flag", "value", "dest", "expected"),
+        [
+            ("--per-net-timeout", "60", "per_net_timeout", 60.0),
+            ("--per-net-timeout", "30", "per_net_timeout", 30.0),  # explicit default
+            ("--per-net-timeout", "0", "per_net_timeout", 0.0),
+            ("--timeout", "120", "timeout", 120.0),
+        ],
+    )
+    def test_timeout_flags_forwarded(self, flag, value, dest, expected):
+        forwarded, args = kct_route(["test.kicad_pcb", flag, value])
+        assert forwarded[forwarded.index(flag) + 1] == value
+        assert getattr(args, dest) == expected
 
-        args = SimpleNamespace(
-            pcb="test.kicad_pcb",
-            output=None,
-            strategy="negotiated",
-            skip_nets=None,
-            grid="0.25",
-            trace_width=0.2,
-            clearance=0.15,
-            via_drill=0.3,
-            via_diameter=0.6,
-            mc_trials=10,
-            iterations=15,
-            verbose=False,
-            dry_run=True,
-            quiet=True,
-            power_nets=None,
-            layers="auto",
-            force=False,
-            no_optimize=False,
-            auto_layers=False,
-            max_layers=6,
-            min_completion=0.95,
-            adaptive_rules=False,
-            min_trace=None,
-            min_clearance_floor=None,
-            manufacturer="jlcpcb",
-            high_performance=False,
-            skip_drc=False,
-            auto_fix=False,
-            auto_fix_passes=None,
-            export_failed_nets=None,
-            no_cache=False,
-            backend="auto",
-            strict=False,
-            per_net_timeout=60.0,
-            timeout=None,
-        )
-
-        with patch("kicad_tools.cli.route_cmd.main") as mock_main:
-            mock_main.return_value = 0
-            run_route_command(args)
-
-            call_args = mock_main.call_args[0][0]
-            assert "--per-net-timeout" in call_args
-            idx = call_args.index("--per-net-timeout")
-            assert call_args[idx + 1] == "60.0"
-
-    def test_per_net_timeout_not_forwarded_when_default(self):
-        """--per-net-timeout is not forwarded when equal to default 30.0."""
-        from kicad_tools.cli.commands.routing import run_route_command
-
-        args = SimpleNamespace(
-            pcb="test.kicad_pcb",
-            output=None,
-            strategy="negotiated",
-            skip_nets=None,
-            grid="0.25",
-            trace_width=0.2,
-            clearance=0.15,
-            via_drill=0.3,
-            via_diameter=0.6,
-            mc_trials=10,
-            iterations=15,
-            verbose=False,
-            dry_run=True,
-            quiet=True,
-            power_nets=None,
-            layers="auto",
-            force=False,
-            no_optimize=False,
-            auto_layers=False,
-            max_layers=6,
-            min_completion=0.95,
-            adaptive_rules=False,
-            min_trace=None,
-            min_clearance_floor=None,
-            manufacturer="jlcpcb",
-            high_performance=False,
-            skip_drc=False,
-            auto_fix=False,
-            auto_fix_passes=None,
-            export_failed_nets=None,
-            no_cache=False,
-            backend="auto",
-            strict=False,
-            per_net_timeout=30.0,
-            timeout=None,
-        )
-
-        with patch("kicad_tools.cli.route_cmd.main") as mock_main:
-            mock_main.return_value = 0
-            run_route_command(args)
-
-            call_args = mock_main.call_args[0][0]
-            assert "--per-net-timeout" not in call_args
-
-    def test_timeout_forwarded(self):
-        """--timeout is forwarded to route_cmd.main when set."""
-        from kicad_tools.cli.commands.routing import run_route_command
-
-        args = SimpleNamespace(
-            pcb="test.kicad_pcb",
-            output=None,
-            strategy="negotiated",
-            skip_nets=None,
-            grid="0.25",
-            trace_width=0.2,
-            clearance=0.15,
-            via_drill=0.3,
-            via_diameter=0.6,
-            mc_trials=10,
-            iterations=15,
-            verbose=False,
-            dry_run=True,
-            quiet=True,
-            power_nets=None,
-            layers="auto",
-            force=False,
-            no_optimize=False,
-            auto_layers=False,
-            max_layers=6,
-            min_completion=0.95,
-            adaptive_rules=False,
-            min_trace=None,
-            min_clearance_floor=None,
-            manufacturer="jlcpcb",
-            high_performance=False,
-            skip_drc=False,
-            auto_fix=False,
-            auto_fix_passes=None,
-            export_failed_nets=None,
-            no_cache=False,
-            backend="auto",
-            strict=False,
-            per_net_timeout=30.0,
-            timeout=120.0,
-        )
-
-        with patch("kicad_tools.cli.route_cmd.main") as mock_main:
-            mock_main.return_value = 0
-            run_route_command(args)
-
-            call_args = mock_main.call_args[0][0]
-            assert "--timeout" in call_args
-            idx = call_args.index("--timeout")
-            assert call_args[idx + 1] == "120.0"
-
-    def test_timeout_not_forwarded_when_none(self):
-        """--timeout is not forwarded when None (default)."""
-        from kicad_tools.cli.commands.routing import run_route_command
-
-        args = SimpleNamespace(
-            pcb="test.kicad_pcb",
-            output=None,
-            strategy="negotiated",
-            skip_nets=None,
-            grid="0.25",
-            trace_width=0.2,
-            clearance=0.15,
-            via_drill=0.3,
-            via_diameter=0.6,
-            mc_trials=10,
-            iterations=15,
-            verbose=False,
-            dry_run=True,
-            quiet=True,
-            power_nets=None,
-            layers="auto",
-            force=False,
-            no_optimize=False,
-            auto_layers=False,
-            max_layers=6,
-            min_completion=0.95,
-            adaptive_rules=False,
-            min_trace=None,
-            min_clearance_floor=None,
-            manufacturer="jlcpcb",
-            high_performance=False,
-            skip_drc=False,
-            auto_fix=False,
-            auto_fix_passes=None,
-            export_failed_nets=None,
-            no_cache=False,
-            backend="auto",
-            strict=False,
-            per_net_timeout=30.0,
-            timeout=None,
-        )
-
-        with patch("kicad_tools.cli.route_cmd.main") as mock_main:
-            mock_main.return_value = 0
-            run_route_command(args)
-
-            call_args = mock_main.call_args[0][0]
-            assert "--timeout" not in call_args
-
-    def test_per_net_timeout_zero_forwarded(self):
-        """--per-net-timeout 0 is forwarded (disables timeout)."""
-        from kicad_tools.cli.commands.routing import run_route_command
-
-        args = SimpleNamespace(
-            pcb="test.kicad_pcb",
-            output=None,
-            strategy="negotiated",
-            skip_nets=None,
-            grid="0.25",
-            trace_width=0.2,
-            clearance=0.15,
-            via_drill=0.3,
-            via_diameter=0.6,
-            mc_trials=10,
-            iterations=15,
-            verbose=False,
-            dry_run=True,
-            quiet=True,
-            power_nets=None,
-            layers="auto",
-            force=False,
-            no_optimize=False,
-            auto_layers=False,
-            max_layers=6,
-            min_completion=0.95,
-            adaptive_rules=False,
-            min_trace=None,
-            min_clearance_floor=None,
-            manufacturer="jlcpcb",
-            high_performance=False,
-            skip_drc=False,
-            auto_fix=False,
-            auto_fix_passes=None,
-            export_failed_nets=None,
-            no_cache=False,
-            backend="auto",
-            strict=False,
-            per_net_timeout=0.0,
-            timeout=None,
-        )
-
-        with patch("kicad_tools.cli.route_cmd.main") as mock_main:
-            mock_main.return_value = 0
-            run_route_command(args)
-
-            call_args = mock_main.call_args[0][0]
-            assert "--per-net-timeout" in call_args
-            idx = call_args.index("--per-net-timeout")
-            assert call_args[idx + 1] == "0.0"
+    def test_timeouts_not_forwarded_when_unset(self):
+        forwarded, args = kct_route(["test.kicad_pcb"])
+        assert "--per-net-timeout" not in forwarded
+        assert "--timeout" not in forwarded
+        assert args.per_net_timeout == 30.0
+        assert args.timeout is None
 
     def test_route_help_shows_per_net_timeout(self):
         """kct route --help output includes --per-net-timeout and --timeout."""
         import contextlib
         from io import StringIO
 
-        from kicad_tools.cli.parser import create_parser
-
-        parser = create_parser()
         help_output = StringIO()
         with contextlib.redirect_stdout(help_output), contextlib.suppress(SystemExit):
-            parser.parse_args(["route", "--help"])
+            cli_main(["route", "--help"])
 
         help_text = help_output.getvalue()
         assert "--per-net-timeout" in help_text
@@ -1307,7 +543,6 @@ class TestManufacturerTraceWidthFloor:
 
     def test_binding_floor_raises_the_default_and_announces_it(self, tmp_path, capsys):
         """A floor above 0.2 raises the default and prints one summary line."""
-        from unittest.mock import patch
 
         from kicad_tools.cli import route_cmd
 
@@ -1434,50 +669,35 @@ class TestRouteCopperFlagPlumbing:
     """Issue #4700: `kct route --copper` exists and forwards verbatim."""
 
     def test_parser_accepts_copper_scalar_and_keyed(self):
-        from kicad_tools.cli.parser import create_parser
-
-        parser = create_parser()
-        assert parser.parse_args(["route", "b.kicad_pcb", "--copper", "2"]).copper == "2"
-        keyed = parser.parse_args(["route", "b.kicad_pcb", "--copper", "outer=2,inner=0.5"])
+        assert route_args(["b.kicad_pcb", "--copper", "2"]).copper == "2"
+        keyed = route_args(["b.kicad_pcb", "--copper", "outer=2,inner=0.5"])
         assert keyed.copper == "outer=2,inner=0.5"
 
     def test_copper_default_is_none(self):
-        from kicad_tools.cli.parser import create_parser
-
-        assert create_parser().parse_args(["route", "b.kicad_pcb"]).copper is None
+        assert route_args(["b.kicad_pcb"]).copper is None
 
     def test_route_help_documents_the_floor_behavior(self):
         import contextlib
         from io import StringIO
 
-        from kicad_tools.cli.parser import create_parser
-
-        parser = create_parser()
         help_output = StringIO()
         with contextlib.redirect_stdout(help_output), contextlib.suppress(SystemExit):
-            parser.parse_args(["route", "--help"])
+            cli_main(["route", "--help"])
 
         help_text = help_output.getvalue()
         assert "--copper" in help_text
         # The warn-not-error contract is documented in --help per #4700.
         assert "dimension_trace_width" in help_text
 
-    def test_forwarder_omits_unset_trace_width(self):
-        """The None sentinel must not be forwarded as the string 'None'."""
-        from kicad_tools.cli.commands.routing import run_route_command
+    def test_unset_trace_width_is_not_invented(self):
+        """The ``None`` sentinel survives: nothing is forwarded for an unset width."""
+        forwarded, args = kct_route(["test.kicad_pcb"])
+        assert "--trace-width" not in forwarded
+        assert args.trace_width is None
 
-        args = _route_forward_args(trace_width=None)
-        with patch("kicad_tools.cli.route_cmd.main", return_value=0) as mock_main:
-            run_route_command(args)
-        sub_argv = mock_main.call_args[0][0]
-        assert "--trace-width" not in sub_argv
-
-    def test_forwarder_passes_explicit_trace_width_and_copper(self):
-        from kicad_tools.cli.commands.routing import run_route_command
-
-        args = _route_forward_args(trace_width=0.15, copper="2")
-        with patch("kicad_tools.cli.route_cmd.main", return_value=0) as mock_main:
-            run_route_command(args)
-        sub_argv = mock_main.call_args[0][0]
-        assert sub_argv[sub_argv.index("--trace-width") + 1] == "0.15"
-        assert sub_argv[sub_argv.index("--copper") + 1] == "2"
+    def test_explicit_trace_width_and_copper_pass_through(self):
+        forwarded, args = kct_route(["test.kicad_pcb", "--trace-width", "0.15", "--copper", "2"])
+        assert forwarded[forwarded.index("--trace-width") + 1] == "0.15"
+        assert forwarded[forwarded.index("--copper") + 1] == "2"
+        assert args.trace_width == pytest.approx(0.15)
+        assert args.copper == "2"

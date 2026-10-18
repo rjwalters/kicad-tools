@@ -137,9 +137,17 @@ def create_stm32_schematic(output_dir: Path) -> Path:
     # for issue #3765), so the rail no longer needs to extend to the LDO
     # VI column at x=93 -- ending it at the last physical +5V tap (C1)
     # avoids a dangling wire endpoint.
-    sch.add_rail(RAIL_5V, x_start=X_LEFT, x_end=64.77, net_label="+5V")
-    sch.add_rail(RAIL_3V3, x_start=80, x_end=rail_3v3_xend, net_label="+3.3V")
-    sch.add_rail(RAIL_GND, x_start=X_LEFT, x_end=rail_gnd_xend, net_label="GND")
+    #
+    # Power nets are named with *global* labels, never local ones: the power
+    # symbols below already publish these names globally, and KiCad 10.0.7
+    # ERC flags a local label sharing a name with a global one
+    # (``same_local_global_label``, issue #7063).
+    sch.add_rail(RAIL_5V, x_start=X_LEFT, x_end=64.77)
+    sch.add_global_label("+5V", X_LEFT, RAIL_5V, shape="passive")
+    sch.add_rail(RAIL_3V3, x_start=80, x_end=rail_3v3_xend)
+    sch.add_global_label("+3.3V", 80, RAIL_3V3, shape="passive")
+    sch.add_rail(RAIL_GND, x_start=X_LEFT, x_end=rail_gnd_xend)
+    sch.add_global_label("GND", X_LEFT, RAIL_GND, shape="passive")
     print("   Added +5V, +3.3V, and GND rails")
 
     # Add power symbols at the left ends of the rails, each wired down (or
@@ -230,7 +238,7 @@ def create_stm32_schematic(output_dir: Path) -> Path:
         pos = ldo.pin_position(pad_number)
         end = (pos[0] + dx, pos[1] + dy)
         sch.add_wire(pos, end, warn_on_collision=False)
-        sch.add_label(net_name, end[0], end[1], rotation=0)
+        sch.add_global_label(net_name, end[0], end[1], shape="passive", rotation=0)
 
     _label_ldo_pad("1", "+5V", -8.0, 0.0)
     _label_ldo_pad("2", "GND", 0.0, 8.0)
@@ -539,7 +547,10 @@ def create_stm32_schematic(output_dir: Path) -> Path:
         pos = sym.pin_position(pad_number)
         end = (pos[0] + dx, pos[1] + dy)
         sch.add_wire(pos, end, warn_on_collision=False)
-        sch.add_label(net_name, end[0], end[1], rotation=0)
+        if net_name == "+3.3V":  # power net: global label (issue #7063)
+            sch.add_global_label(net_name, end[0], end[1], shape="passive", rotation=0)
+        else:
+            sch.add_label(net_name, end[0], end[1], rotation=0)
 
     # R1.pad1 -> +3.3V, R1.pad2 -> LED_K
     _label_pad(r1, "1", "+3.3V", 0.0, -8.0)

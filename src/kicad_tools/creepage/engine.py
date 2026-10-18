@@ -976,6 +976,7 @@ def compute_creepage_census(
     voltage_map: dict[str, VoltageInterval] | None = None,
     standard_obj: CreepageStandard | None = None,
     edge_voltage: float = 0.0,
+    overvoltage_category: str = "II",
 ) -> CreepageReport:
     """Build the full HV creepage/clearance census for a board.
 
@@ -1003,7 +1004,9 @@ def compute_creepage_census(
     same-class nets at different potentials (bank-vs-bank, phase-vs-phase) are
     also evaluated.  Voltages are treated as worst-case DC-equivalent magnitudes
     about a common reference; AC phase relationships are NOT modelled, so
-    ``|dv|`` is conservative for in-phase nets.
+    ``|dv|`` is conservative for in-phase nets.  ``overvoltage_category``
+    (default ``"II"``) selects the Table F.1 rated impulse voltage for the
+    per-pair clearance derivation (issue #7057).
 
     In single-voltage mode (no ``voltage_map``) the derived requirement is
     identical for every pair (it depends only on the standard + voltage + PD +
@@ -1081,8 +1084,6 @@ def compute_creepage_census(
         short-circuits to a trivial ``0.0`` requirement (no lookup).  An
         out-of-range ``dv`` propagates ``StandardLookupError`` (fail loud).
         """
-        from kicad_tools.creepage.standards import RMS_TO_PEAK
-
         key = round(dv, 6)
         cached = _req_cache.get(key)
         if cached is not None:
@@ -1094,7 +1095,12 @@ def compute_creepage_census(
             creep, cprov = standard_obj.required_creepage(
                 dv, int(pollution_degree), material_group or "IIIa"
             )
-            clr, clprov = standard_obj.required_clearance(dv * RMS_TO_PEAK, int(pollution_degree))
+            # ``dv`` (RMS) plays the role of the rated voltage for the Table
+            # F.1 impulse lookup -- the same approximation the creepage lookup
+            # makes (issue #7057); the steady-state peak is derived inside.
+            clr, clprov = standard_obj.required_clearance(
+                dv, int(pollution_degree), overvoltage_category
+            )
             res = (creep, clr, cprov, clprov)
         _req_cache[key] = res
         return res

@@ -135,3 +135,35 @@ def test_resync_captures_static_baseline_before_first_route_mark():
     layer = router.grid.layer_to_index(Layer.F_CU.value)
     gx, gy = router.grid.world_to_grid(7.5, 7.5)
     assert router.grid.grid[layer][gy][gx].blocked, "keepout freed by a post-replay rip-up"
+
+
+def test_cache_roundtrip_preserves_committed_coupled_nets(tmp_path):
+    """Issue #7003: a hit must replay the coupled pairs a fresh route committed.
+
+    The optimizer skips them (``_committed_coupled_skip_nets``); the set is
+    filled by the routing dispatch a hit bypasses, so without it the hit
+    rewrote pair rails a fresh route leaves alone (board 06b: 284 vs 242 items).
+    """
+    cache = RoutingCache(cache_dir=tmp_path)
+    payload = cache.serialize_routes([Route(1, "p")], route_usage={}, committed_coupled_nets={7, 3})
+    assert cache.deserialize_committed_coupled_nets(payload) == {3, 7}
+    # Entries without the field (legacy / no usage) replay as "nothing committed".
+    assert cache.deserialize_committed_coupled_nets(cache.serialize_routes([])) == set()
+
+
+def test_cache_hit_optimizer_skips_same_nets_as_fresh_route(tmp_path):
+    from kicad_tools.cli.route_cmd import _committed_coupled_skip_nets
+
+    fresh = Autorouter(10, 10, rules=DesignRules(grid_resolution=0.1), force_python=True)
+    fresh._committed_coupled_nets = {4, 5}
+    cache = RoutingCache(cache_dir=tmp_path)
+    payload = cache.serialize_routes(
+        [],
+        route_usage=fresh.grid.export_route_usage(),
+        committed_coupled_nets=_committed_coupled_skip_nets(fresh),
+    )
+
+    hit = Autorouter(10, 10, rules=DesignRules(grid_resolution=0.1), force_python=True)
+    assert _committed_coupled_skip_nets(hit) is None
+    hit._committed_coupled_nets = set(cache.deserialize_committed_coupled_nets(payload))
+    assert _committed_coupled_skip_nets(hit) == _committed_coupled_skip_nets(fresh) == {4, 5}

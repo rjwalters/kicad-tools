@@ -37,16 +37,16 @@
       "size": 3223
     },
     "design-source/README.md": {
-      "sha256": "e63cd1d87bcf00548f7ea9834738f8e8a069c633d8d597b5a6771c6d84198499",
-      "size": 9888
+      "sha256": "ad5fc3b0d3721e8b5e158472753d4af1cbc2e069e2e7355b60abdb06b5c92252",
+      "size": 10000
     },
     "design-source/check_manufacturing.py": {
       "sha256": "54bc5d15ad2fd3792be5cb60932071729d3391cb3f6d343fb097c7177c05bcd0",
       "size": 2429
     },
     "design-source/generate_design.py": {
-      "sha256": "d7598d7ec0ce600311a98459f430b4167436243da61c88de45bccae9ff0fdaaf",
-      "size": 117975
+      "sha256": "5ac999391751e24b2716a9fd227c6b1a87dff299732c02e19784e06c8324a258",
+      "size": 118594
     },
     "design-source/manufacturing_process.py": {
       "sha256": "362b92beca0353ab6cce2a45a3c4f062dbfed3a4e56ac9ca7ecd803b11021a9e",
@@ -93,8 +93,8 @@
       "size": 278127
     },
     "kicad_project.zip": {
-      "sha256": "605e9c6d1b58207dbe622b42810c998faf79e61bf69e63d1d44c6d0c6500df45",
-      "size": 69163
+      "sha256": "68878352bcda7efc42bf66ee749d72d15a8db1c12f955be8b1050caffcc61de9",
+      "size": 69207
     },
     "manual-assembly-bom.csv": {
       "sha256": "0d1620494f1492c9a57ccf7d29840d0643984cd23bdb2969e0d0ea660a4839a1",

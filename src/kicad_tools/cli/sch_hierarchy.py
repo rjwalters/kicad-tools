@@ -82,7 +82,7 @@ def main(argv=None):
 
     # Build hierarchy
     try:
-        root = build_hierarchy(args.schematic)
+        root = build_hierarchy(args.schematic, strict_root=True)
     except FileNotFoundError:
         print(f"Error: File not found: {args.schematic}", file=sys.stderr)
         sys.exit(1)

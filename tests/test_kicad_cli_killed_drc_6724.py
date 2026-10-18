@@ -883,6 +883,23 @@ class TestLoadFailureAndRouteAdvice:
         for needle in must_not:
             assert needle not in text, (needle, text)
 
+    @pytest.mark.parametrize("returncode", [-9, -11, 1, None])
+    def test_route_advice_without_sigkill_attribute(self, monkeypatch, returncode):
+        """Windows has no ``signal.SIGKILL``; the advice must not raise (#6739)."""
+        from kicad_tools.cli.route_cmd import _native_drc_failure_advice
+
+        monkeypatch.delattr(signal, "SIGKILL")
+        geo = geometric.GeometricDRCResult(ran=False, reason=REASON_CRASH, returncode=returncode)
+        text = " ".join(_native_drc_failure_advice(geo))
+
+        assert "error output is quoted above" in text
+        assert "SIGKILL" not in text and "memory" not in text
+
+    def test_describe_returncode_without_sigkill_attribute(self, monkeypatch):
+        """``describe_returncode`` must not raise without ``signal.SIGKILL`` (#6739)."""
+        monkeypatch.delattr(signal, "SIGKILL")
+        assert geometric.describe_returncode(-11).startswith("kicad-cli was killed by")
+
 
 # ---------------------------------------------------------------------------
 # The kct route pour oracle and its stranded-pour gate
@@ -1155,12 +1172,16 @@ class TestOtherCallSites:
         pcb.write_text("(kicad_pcb)")
         (tmp_path / "board.kicad_sch").write_text("(kicad_sch)")
         _fake_kicad_cli(monkeypatch, auditor_mod, returncode=-signal.SIGKILL, report=None)
+        # _check_erc resolves kicad-cli before exec (#7083).
+        monkeypatch.setattr("kicad_tools.cli.runner.find_kicad_cli", lambda: FAKE_CLI)
 
         status = ManufacturingAudit(pcb, manufacturer="jlcpcb")._check_erc()
 
         assert status.passed is False
         assert status.blocking_error_count >= 1
         assert "SIGKILL" in status.details
+        # A killed ERC stays NOT_READY (#6724), not the softer #7083 path.
+        assert status.could_not_verify is False
 
     def test_audit_erc_empty_report_does_not_pass(self, monkeypatch, tmp_path):
         import kicad_tools.audit.auditor as auditor_mod
@@ -1170,6 +1191,8 @@ class TestOtherCallSites:
         pcb.write_text("(kicad_pcb)")
         (tmp_path / "board.kicad_sch").write_text("(kicad_sch)")
         _fake_kicad_cli(monkeypatch, auditor_mod, returncode=0, report=None)
+        # _check_erc resolves kicad-cli before exec (#7083).
+        monkeypatch.setattr("kicad_tools.cli.runner.find_kicad_cli", lambda: FAKE_CLI)
 
         status = ManufacturingAudit(pcb, manufacturer="jlcpcb")._check_erc()
 

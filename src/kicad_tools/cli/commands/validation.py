@@ -641,5 +641,7 @@ def run_audit_command(args) -> int:
         sub_argv.extend(["--hv-pollution-degree", str(args.audit_hv_pollution_degree)])
     if getattr(args, "audit_hv_material_group", "IIIa") != "IIIa":
         sub_argv.extend(["--hv-material-group", args.audit_hv_material_group])
+    if getattr(args, "audit_hv_overvoltage_category", "II") != "II":
+        sub_argv.extend(["--hv-overvoltage-category", args.audit_hv_overvoltage_category])
 
     return audit_main(sub_argv)

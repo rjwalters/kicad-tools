@@ -337,6 +337,41 @@ def merge_collinear_points(points: list[Pt]) -> list[Pt]:
     return out
 
 
+def trim_end_reversals(points: list[Pt]) -> list[Pt]:
+    """Trim a collinear overshoot-and-return at either end of a polyline.
+
+    The lattice search can reach a node beyond the goal anchor and append a
+    goal stub that returns along the same line, leaving a 180-degree
+    reversal on the last (or first) edge.  :func:`offset_polyline` cannot
+    offset that, so replace the two reversing steps ``a -> b -> p`` with the
+    single step ``a -> p`` (``p`` lies on segment ``a``-``b``).  When ``p``
+    coincides with ``a`` the whole out-and-back spur is dropped.
+
+    Only the first and last two steps are considered: a reversal in the
+    middle of the path is a genuine defect and must still decline.  The
+    caller re-verifies the trimmed centerline like any other.
+    """
+    pts = merge_collinear_points(points)
+
+    def trim_tail(seq: list[Pt]) -> list[Pt]:
+        while len(seq) >= 3:
+            a, b, p = seq[-3], seq[-2], seq[-1]
+            d1 = (b[0] - a[0], b[1] - a[1])
+            d2 = (p[0] - b[0], p[1] - b[1])
+            cross = d1[0] * d2[1] - d1[1] * d2[0]
+            dot = d1[0] * d2[0] + d1[1] * d2[1]
+            if abs(cross) > _EPS or dot >= 0.0 or dist(b, p) > dist(a, b) + _EPS:
+                break
+            # p is on segment a-b: drop the overshoot vertex b (and p too
+            # when it lands back on a, so the spur vanishes entirely).
+            seq = seq[:-2] if dist(a, p) <= _EPS else [*seq[:-2], p]
+        return seq
+
+    pts = trim_tail(pts)
+    pts = trim_tail(pts[::-1])[::-1]
+    return merge_collinear_points(pts)
+
+
 def offset_polyline(points: list[Pt], offset: float) -> list[Pt] | None:
     """Offset ``points`` perpendicular by ``offset`` (left of travel > 0).
 
@@ -486,6 +521,119 @@ def seg_rect_dist(a: Pt, b: Pt, rect: Rect) -> float:
     )
 
 
+def _seg_rect_entry(a: Pt, b: Pt, rect: Rect) -> float | None:
+    """Smallest ``t`` in ``[0, 1]`` where ``a + t (b - a)`` is inside ``rect``."""
+    x0, y0, x1, y1 = rect
+    t0, t1 = 0.0, 1.0
+    for p, q, lo, hi in ((a[0], b[0], x0, x1), (a[1], b[1], y0, y1)):
+        d = q - p
+        if abs(d) <= _EPS:
+            if p < lo - _EPS or p > hi + _EPS:
+                return None
+            continue
+        ta, tb = (lo - p) / d, (hi - p) / d
+        if ta > tb:
+            ta, tb = tb, ta
+        t0, t1 = max(t0, ta), min(t1, tb)
+        if t0 > t1:
+            return None
+    return t0
+
+
+#: Shapes whose copper the kernel's pad builder models exactly.
+_CLIP_SHAPES = frozenset({"rect", "roundrect", "circle", "oval", "obround"})
+
+#: How far inside the copper a clipped leg end must sit (mm).  A cut landing
+#: on the outline itself (a box corner that happens to touch a circle) is
+#: refused, so a float round-off can never turn it into an open circuit.
+_MIN_END_DEPTH = 0.01
+
+
+def _entry_in_copper(entry: Pt, pad: Pad) -> bool:
+    """True when ``entry`` lies inside ``pad``'s real copper (issue #6959).
+
+    "Inside" means at least :data:`_MIN_END_DEPTH` in from the outline.
+
+    The cut is computed on the pad's axis-aligned bounding box, which holds
+    area with no copper for a circle, an oval or a rounded corner.  This test
+    uses the clearance kernel's pad builder, which models the real outline:
+    a rotated rectangle, a disc, a stadium, or a roundrect whose corner radius
+    is ``roundrect_rratio * min(width, height)``.  One difference from
+    :func:`~kicad_tools.router.clearance_shapes.pad_shape`: a roundrect with
+    no file ratio is measured here at KiCad's largest ratio (0.5), not as its
+    full rectangle.  The full rectangle is the safe choice for a clearance
+    test and the unsafe one for a containment test, because it would accept
+    a point in a corner that may hold no copper.  Shapes the builder does not
+    model exactly (``custom``, ``trapezoid``, ...) never contain the point.
+    """
+    from ..clearance_shapes import pad_kernel_params
+    from .kernel_adapter import gap, pad_outline, site
+
+    if pad.shape not in _CLIP_SHAPES:
+        return False
+    if pad.shape == "roundrect" and getattr(pad, "roundrect_rratio", None) is None:
+        shape, rratio = "roundrect", 0.5
+    else:
+        shape, rratio = pad_kernel_params(pad)
+    # Shrink the pad by the margin on every side and test plain membership
+    # (the kernel's point distance is 0 anywhere inside, so it has no depth
+    # to compare).  For a roundrect the shrunk pad keeps the same ratio, so
+    # its corners come out slightly rounder than a true inset: it stays
+    # inside the true inset, which is the safe direction.
+    m = 2.0 * _MIN_END_DEPTH
+    kpad = pad_outline(shape, pad.width - m, pad.height - m, rratio, pad.rotation, (pad.x, pad.y))
+    return gap(kpad, site(entry, 0.0)) <= 1e-9
+
+
+def clip_to_pad_entry(points: list[Pt], pad: Pad, trace_w: float) -> list[Pt]:
+    """Trim the pad-end tail of ``points`` where the track enters ``pad``.
+
+    ``points`` ends at the pad (its last point is the pad position).  The
+    polyline is cut at the first point, walking from the far end, that lies
+    inside the pad rectangle inset by ``trace_w / 2`` along its travel axis --
+    the track end is then inside the pad copper and the in-pad tail (and any dogleg
+    within it) is dropped (issue #6959).  An axis no wider than the trace
+    keeps the pad's full extent.  Returned unchanged when neither axis can
+    inset (``vpad`` gateway pads have zero size), when the far end is
+    already inside the pad, or when no entry exists.
+    """
+    from ..primitives import pad_half_extents
+
+    # A non-cardinal residual rotation makes the AABB far larger than the
+    # copper, so a cut on it can land off the pad (an open circuit): keep
+    # the unclipped leg to the pad centre.
+    if pad.rotation % 90.0 > _EPS and 90.0 - pad.rotation % 90.0 > _EPS:
+        return points
+    half_w, half_h = pad_half_extents(pad)
+    inset = trace_w / 2.0
+    # The track end is inset only along the segment's travel axis: a leg
+    # running alongside the pad's edge region (inside the copper, outside the
+    # all-round inset) must still be cut at the pad's far edge.
+    ix = inset if half_w - inset > _EPS else 0.0
+    iy = inset if half_h - inset > _EPS else 0.0
+    if (ix == 0.0 and iy == 0.0) or len(points) < 2:
+        return points
+    x0, y0, x1, y1 = pad.x - half_w, pad.y - half_h, pad.x + half_w, pad.y + half_h
+    if pt_in_rect(points[0], (x0 + ix, y0 + iy, x1 - ix, y1 - iy)):
+        return points
+    for i, (a, b) in enumerate(zip(points, points[1:], strict=False)):
+        if abs(b[0] - a[0]) >= abs(b[1] - a[1]):
+            rect = (x0 + ix, y0, x1 - ix, y1)
+        else:
+            rect = (x0, y0 + iy, x1, y1 - iy)
+        t = _seg_rect_entry(a, b, rect)
+        if t is None:
+            continue
+        entry = (a[0] + t * (b[0] - a[0]), a[1] + t * (b[1] - a[1]))
+        if not _entry_in_copper(entry, pad):
+            return points
+        clipped = [*points[: i + 1], entry]
+        if sum(dist(u, v) for u, v in zip(clipped, clipped[1:], strict=False)) <= _EPS:
+            return points
+        return clipped
+    return points
+
+
 def relocate_pair_anchor(
     obstacles: LatticeObstacleModel,
     pad_p: Pad,
@@ -530,7 +678,7 @@ def relocate_pair_anchor(
     ``max_shift`` (the caller keeps the midpoint and the pair declines or
     falls back exactly as before).
     """
-    from ..quantize import dogleg_points
+    from ..pairplan.attach import anchor_shift_candidates, dogleg_attach_candidates
 
     mid = ((pad_p.x + pad_n.x) / 2.0, (pad_p.y + pad_n.y) / 2.0)
     if any(
@@ -538,14 +686,6 @@ def relocate_pair_anchor(
         for layer in layers
     ):
         return None
-    ux, uy = pad_p.x - pad_n.x, pad_p.y - pad_n.y
-    axis_len = (ux * ux + uy * uy) ** 0.5
-    if axis_len <= _EPS:
-        return None
-    ux, uy = ux / axis_len, uy / axis_len
-    nx, ny = -uy, ux  # perpendicular to the P-N axis
-    if (toward[0] - mid[0]) * nx + (toward[1] - mid[1]) * ny < 0:
-        nx, ny = -nx, -ny
 
     def seg_ok(pad: Pad, a: Pt, b: Pt, layer: int) -> bool:
         if dist(a, b) <= _EPS:
@@ -555,18 +695,14 @@ def relocate_pair_anchor(
         return not (keepouts and keepouts.segment_blocked(a, b, layer, pad.net, trace_half))
 
     def attach_clear(pad: Pad, target: Pt, layer: int) -> bool:
-        for axis_first in (False, True):
-            poly = dogleg_points(pad.x, pad.y, target[0], target[1], axis_first=axis_first)
+        for poly in dogleg_attach_candidates((pad.x, pad.y), target):
             if all(seg_ok(pad, a, b, layer) for a, b in zip(poly, poly[1:], strict=False)):
                 return True
         return False
 
-    steps = int(max_shift / step + 0.5)
-    for k in range(1, steps + 1):
-        shift = k * step
-        anchor = (mid[0] + nx * shift, mid[1] + ny * shift)
-        end_p = (anchor[0] + ux * half_pitch, anchor[1] + uy * half_pitch)
-        end_n = (anchor[0] - ux * half_pitch, anchor[1] - uy * half_pitch)
+    for anchor, end_p, end_n in anchor_shift_candidates(
+        pad_p, pad_n, toward, half_pitch=half_pitch, step=step, max_shift=max_shift
+    ):
         for layer in layers:
             if pads_block_point_grown(
                 obstacles, anchor, layer, pair_nets, half_pitch, exempt=exempt
@@ -619,6 +755,7 @@ def sandwiched_pad_escape_sites(
     nx, ny = -uy / axis_len, ux / axis_len
     if (toward[0] - mid[0]) * nx + (toward[1] - mid[1]) * ny < 0:
         nx, ny = -nx, -ny
+    from ..pairplan.attach import sandwich_via_site
     from ..primitives import pad_half_extents
 
     def box_gap(other: Pad, pt: Pt) -> float:
@@ -637,7 +774,7 @@ def sandwiched_pad_escape_sites(
         hw, hh = pad_half_extents(pad)
         # Support distance of the pad box along the outward normal.
         reach = abs(nx) * hw + abs(ny) * hh
-        site = (pad.x + nx * (reach + via_radius), pad.y + ny * (reach + via_radius))
+        site = sandwich_via_site(pad, (nx, ny), via_radius, reach)
         need = via_radius + clearance_for(pad.net)
         span = need + 3.0
         if any(

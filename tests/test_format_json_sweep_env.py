@@ -43,7 +43,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from kicad_tools.cli.parser import create_parser
+from kicad_tools.cli.parser import create_parser, resolve_passthrough
 
 FIXTURES = Path(__file__).parent / "fixtures"
 BOARD = FIXTURES / "routing-diagnostic.kicad_pcb"
@@ -70,7 +70,9 @@ def _iter_leaves(parser, path=()):
 
 @pytest.fixture(scope="module")
 def leaves():
-    return {" ".join(path): leaf for path, leaf in _iter_leaves(create_parser())}
+    return {
+        " ".join(path): leaf for path, leaf in _iter_leaves(resolve_passthrough(create_parser()))
+    }
 
 
 # ---------------------------------------------------------------------------

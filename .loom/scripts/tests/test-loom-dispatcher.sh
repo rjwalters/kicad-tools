@@ -257,6 +257,32 @@ assert_eq "$rc" "0" "'loom update --check' exits 0"
 assert_contains "$out" "read-only mode" "'update --check' skips the bundle refresh (read-only)"
 assert_contains "$out" "STUB_UPDATE args=[--check]" "'update --check' still delegates with --check"
 
+echo "Test 5d: 'update --help' / '-h' run no sync/provision/bundle refresh (#12558)"
+CHK3=$(make_checkout)
+# Stale bundle: src/ file newer than dist/index.js, so a non-read-only update
+# WOULD invoke npm. A recording npm stub proves it is never called for help.
+mkdir -p "$CHK3/mcp-loom/dist" "$CHK3/mcp-loom/src"
+: > "$CHK3/mcp-loom/dist/index.js"
+touch -d '2 hours ago' "$CHK3/mcp-loom/dist/index.js"
+: > "$CHK3/mcp-loom/src/index.ts"
+NPM_STUB_DIR=$(mktemp -d)
+NPM_LOG="$NPM_STUB_DIR/npm.calls"
+printf '#!/usr/bin/env bash\necho "$*" >> "%s"\nexit 1\n' "$NPM_LOG" > "$NPM_STUB_DIR/npm"
+chmod +x "$NPM_STUB_DIR/npm"
+bundle_mtime_before="$(stat -c %Y "$CHK3/mcp-loom/dist/index.js")"
+for helpflag in --help -h; do
+    set +e
+    out=$(LOOM_HOME="$CHK3" PATH="$NPM_STUB_DIR:$WITH_DAEMON_PATH" bash "$DISPATCHER" update "$helpflag" 2>&1)
+    rc=$?
+    set -e 2>/dev/null || true
+    assert_eq "$rc" "0" "'loom update $helpflag' exits 0"
+    assert_contains "$out" "STUB_UPDATE args=[$helpflag]" "'update $helpflag' delegates to the updater's usage"
+    assert_not_contains "$out" "refreshing the user-scoped mcp-loom bundle" "'update $helpflag' does not refresh the bundle"
+    assert_not_contains "$out" "read-only mode" "'update $helpflag' prints no read-only banner"
+done
+assert_eq "$([[ -e "$NPM_LOG" ]] && echo called || echo none)" "none" "'update --help' never invoked npm"
+assert_eq "$(stat -c %Y "$CHK3/mcp-loom/dist/index.js")" "$bundle_mtime_before" "'update --help' left dist/index.js untouched"
+
 # ── AC5: config resolution through the Phase 2 tier resolver ─────────────────
 if command -v jq >/dev/null 2>&1; then
     echo "Test 6: status resolves config through the tier chain — local tier wins (AC5)"

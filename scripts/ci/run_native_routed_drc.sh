@@ -38,7 +38,10 @@ apt-get install -y --no-install-recommends ca-certificates curl git
 # result deep inside check_manufacturing.py.
 kicad-cli --version
 
-python3 scripts/ci/init_kicad_libraries.py
+# Issue #6962: kicad-cli reads the pinned library tables from an isolated
+# KICAD_CONFIG_HOME (this job runs as --user 0:0, whose HOME has none).
+eval "$(python3 scripts/ci/init_kicad_libraries.py --shell)"
+echo "KICAD_CONFIG_HOME=$KICAD_CONFIG_HOME"
 
 echo "Installing uv..."
 curl -LsSf https://astral.sh/uv/install.sh | sh

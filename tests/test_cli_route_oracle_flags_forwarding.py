@@ -1,13 +1,11 @@
 """``kct route`` accepts and forwards the #5785 oracle-loop flags.
 
 ``--oracle-rounds`` and ``--allow-stranded-pour-pads`` are advertised to
-users in ``changelog.d/5785.upgrade.md`` as ``kct route`` options, so the
-outer dispatcher (``cli/parser.py`` -> ``cli/commands/routing.py``) must
-accept them and hand them to the inner ``route_cmd`` parser.  These tests
-drive the real outer parser and capture the inner argv.
+users in ``changelog.d/5785.upgrade.md`` as ``kct route`` options, so
+``kct route`` must accept them and hand them to ``route_cmd``.  These tests
+drive the real ``kct`` entry point (``kct route`` passes argv straight
+through since issue #7017) and capture what ``route_cmd.main`` receives.
 """
-
-from unittest.mock import patch
 
 import pytest
 
@@ -20,14 +18,12 @@ def pcb_file(tmp_path):
 
 
 def _dispatch(argv):
-    from kicad_tools.cli.commands.routing import run_route_command
-    from kicad_tools.cli.parser import create_parser
+    """Return (route namespace, argv route_cmd.main received)."""
+    from tests.route_cli import kct_route
 
-    args = create_parser().parse_args(argv)
-    with patch("kicad_tools.cli.route_cmd.main") as mock_main:
-        mock_main.return_value = 0
-        run_route_command(args)
-        return args, mock_main.call_args[0][0]
+    assert argv[0] == "route"
+    forwarded, args = kct_route(argv[1:])
+    return args, forwarded
 
 
 def _value_after(argv, flag):

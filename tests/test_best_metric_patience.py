@@ -469,10 +469,9 @@ class TestPatienceZeroDisablesEveryEarlyStop:
 
 
 class TestCLIFlagWiredThrough:
-    """The ``--early-stop-patience`` flag must exist on both the outer
-    ``parser.py`` route subparser and the inner ``route_cmd.py`` parser
-    (the parser-drift test enforces parity; this test pins the actual
-    presence so a regression here surfaces in this file too).
+    """The ``--early-stop-patience`` flag must exist on ``route_cmd.py``'s
+    parser and reach it through ``kct route`` (which passes its argv
+    straight to ``route_cmd.main`` since issue #7017).
     """
 
     def test_flag_on_inner_parser(self):
@@ -500,14 +499,12 @@ class TestCLIFlagWiredThrough:
         }
         assert "--early-stop-patience" in flags
 
-    def test_flag_on_outer_parser(self):
-        from kicad_tools.cli import parser as parser_mod
+    def test_flag_reaches_router_through_kct_route(self):
+        from tests.route_cli import kct_route
 
-        src = inspect.getsource(parser_mod)
-        # Outer parser declares the flag in build_parser; substring
-        # search keeps this test cheap and independent of parser
-        # construction details.
-        assert "--early-stop-patience" in src, "--early-stop-patience missing from outer parser.py"
+        forwarded, args = kct_route(["board.kicad_pcb", "--early-stop-patience", "5"])
+        assert forwarded[forwarded.index("--early-stop-patience") + 1] == "5"
+        assert args.early_stop_patience == 5
 
 
 class TestAllInnerCallsForwardPatience:

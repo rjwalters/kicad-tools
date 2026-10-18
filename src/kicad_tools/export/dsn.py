@@ -34,6 +34,8 @@ silently dropped or approximated.
 from __future__ import annotations
 
 import copy
+import hashlib
+import json
 import logging
 import re
 from dataclasses import dataclass, field
@@ -70,6 +72,39 @@ def mm_to_um(mm: float) -> float:
 def um_to_mm(um: float) -> float:
     """Convert micrometers back to millimeters."""
     return um / 1000.0
+
+
+REVISION_SIDECAR_SUFFIX = ".dsn-revision.json"
+
+
+def board_revision_hash(pcb_path: str | Path) -> str:
+    """SHA-256 of the board file with CRLF normalised to LF (issue #6915)."""
+    data = Path(pcb_path).read_bytes().replace(b"\r\n", b"\n")
+    return hashlib.sha256(data).hexdigest()
+
+
+def revision_sidecar_path(pcb_path: str | Path) -> Path:
+    """Sidecar recording which board revision a DSN was exported from."""
+    pcb_path = Path(pcb_path)
+    return pcb_path.with_name(pcb_path.stem + REVISION_SIDECAR_SUFFIX)
+
+
+def write_revision_sidecar(pcb_path: str | Path, dsn_path: str | Path) -> Path:
+    """Write ``<pcb stem>.dsn-revision.json`` beside the PCB."""
+    sidecar = revision_sidecar_path(pcb_path)
+    payload = {"board_sha256": board_revision_hash(pcb_path), "dsn": Path(dsn_path).name}
+    sidecar.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    return sidecar
+
+
+def read_revision_sidecar(pcb_path: str | Path) -> str | None:
+    """Return the recorded board hash, or None when absent or unreadable."""
+    sidecar = revision_sidecar_path(pcb_path)
+    try:
+        value = json.loads(sidecar.read_text(encoding="utf-8")).get("board_sha256")
+    except (OSError, ValueError, AttributeError):
+        return None
+    return value if isinstance(value, str) and value else None
 
 
 @dataclass
@@ -897,6 +932,7 @@ class KiCadToDSNExporter:
             output_path.parent.mkdir(parents=True, exist_ok=True)
             output_path.write_text(dsn, encoding="utf-8")
             logger.info("Exported DSN to %s", output_path)
+            write_revision_sidecar(self.pcb_path, output_path)
 
         return dsn
 

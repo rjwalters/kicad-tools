@@ -22,6 +22,15 @@ from pathlib import Path
 
 from kicad_tools.schema.pcb import FOOTPRINT_TAGS, _is_footprint_tag
 
+from .kicad_toolchain import (
+    KICAD_DOCKER_ENV,
+    KICAD_DOCKER_IMAGE_ENV,
+    PINNED_KICAD_IMAGE,
+    docker_fallback_enabled,
+    pinned_kicad_image,
+    process_config_home,
+)
+
 logger = logging.getLogger(__name__)
 
 #: Seconds to wait for ``kicad-cli version`` before declaring a candidate wedged.
@@ -38,9 +47,13 @@ KICAD_CLI_PROBE_TIMEOUT_ENV = "KCT_KICAD_CLI_PROBE_TIMEOUT"
 KICAD_CLI_PROBE_RETRY_FACTOR = 2
 
 #: Opt-in env var enabling the container fallback (``docker run kicad/kicad``).
-KICAD_DOCKER_ENV = "KCT_KICAD_DOCKER"
-KICAD_DOCKER_IMAGE_ENV = "KCT_KICAD_DOCKER_IMAGE"
-DEFAULT_KICAD_DOCKER_IMAGE = "kicad/kicad:10.0"
+#: The fallback runs CI's pinned image digest by default, not the floating
+#: ``kicad/kicad:10.0`` tag (Issue #6962); see :mod:`.kicad_toolchain`.
+#: ``KICAD_DOCKER_ENV`` / ``KICAD_DOCKER_IMAGE_ENV`` are imported from there.
+#:
+#: Mirror of CI's ``KICAD_IMAGE`` digest; :func:`pinned_kicad_image` reads the
+#: live value from ``.github/workflows/ci.yml`` in a checkout.
+DEFAULT_KICAD_DOCKER_IMAGE = PINNED_KICAD_IMAGE
 
 #: :class:`KiCadCLILookup` statuses.
 KICAD_CLI_FOUND = "found"
@@ -313,9 +326,8 @@ def _kicad_cli_candidates() -> list[Path]:
     return found
 
 
-def docker_fallback_enabled() -> bool:
-    """True when the user opted into the container fallback via ``KCT_KICAD_DOCKER``."""
-    return os.environ.get(KICAD_DOCKER_ENV, "").strip().lower() in ("1", "true", "yes", "on")
+#: Where :func:`build_docker_kicad_cmd` mounts the pinned config home.
+_DOCKER_CONFIG_HOME = "/kct-kicad-config"
 
 
 def build_docker_kicad_cmd(args: list[str], workdir: Path) -> list[str]:
@@ -324,8 +336,15 @@ def build_docker_kicad_cmd(args: list[str], workdir: Path) -> list[str]:
     Modeled on ``benchmarks/interop/tscircuit/run_gate.py``'s ``KicadCli``.
     Any path in ``args`` must be relative to (or under ``/work``, the mount of)
     ``workdir``.
+
+    The image defaults to CI's pinned digest (``KCT_KICAD_DOCKER_IMAGE``
+    overrides it), and kicad-cli reads its library tables from a mounted
+    scratch ``KICAD_CONFIG_HOME`` holding the pinned tables, so the result does
+    not depend on the image user's own config (``--user`` overrides, another
+    image) -- Issue #6962.
     """
-    image = os.environ.get(KICAD_DOCKER_IMAGE_ENV) or DEFAULT_KICAD_DOCKER_IMAGE
+    image = os.environ.get(KICAD_DOCKER_IMAGE_ENV) or pinned_kicad_image()
+    config_home = process_config_home()
     return [
         "docker",
         "run",
@@ -334,6 +353,10 @@ def build_docker_kicad_cmd(args: list[str], workdir: Path) -> list[str]:
         "linux/amd64",
         "-v",
         f"{workdir}:/work",
+        "-v",
+        f"{config_home}:{_DOCKER_CONFIG_HOME}",
+        "-e",
+        f"KICAD_CONFIG_HOME={_DOCKER_CONFIG_HOME}",
         "-w",
         "/work",
         "--entrypoint",
@@ -1659,6 +1682,14 @@ class NetFormatReport:
     """Count of vias with empty ``(net "")`` format."""
     empty_net_pads: int = 0
     """Count of pads with empty ``(net "")`` format."""
+    name_only_dialect: bool = False
+    """True when the board has no numeric net id anywhere (issue #6989).
+
+    A KiCad-10 board can be written entirely in the name-only dialect --
+    ``(net "NAME")`` on every pad, segment and via, with no header net
+    table.  Such a board is not corrupt, so its name-only references are
+    not counted.  Empty ``(net "")`` references are still reported.
+    """
 
     @property
     def total_corrupt(self) -> int:
@@ -1699,6 +1730,17 @@ def validate_net_format(pcb_path: Path) -> NetFormatReport:
 
     report = NetFormatReport(valid=True)
 
+    # Issue #6989: name-only references are corruption only on a board that
+    # also uses numeric ids (a header table or numbered references).  A board
+    # with no numeric id anywhere is name-only by design (KiCad 10).
+    def _has_numeric_id(node) -> bool:
+        if node.name == "net" and node.get_int(0) is not None:
+            return True
+        return any(_has_numeric_id(c) for c in node.children if c.children)
+
+    name_only_dialect = not _has_numeric_id(sexp)
+    report.name_only_dialect = name_only_dialect
+
     def _check_net_node(net_node, element_kind: str) -> None:
         """Classify a ``(net ...)`` node and update *report* counters."""
         if net_node is None:
@@ -1709,6 +1751,9 @@ def validate_net_format(pcb_path: Path) -> NetFormatReport:
             return
         # Name-only or empty-string format
         net_name = net_node.get_string(0)
+        if net_name and name_only_dialect:
+            # Name-only is the board's own dialect, not corruption (#6989).
+            return
         if net_name:
             # Name-only corruption: (net "SYNC_R")
             if element_kind == "segment":

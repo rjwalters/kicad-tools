@@ -43,8 +43,10 @@ from kicad_tools.analysis.routing_quality import (
     evaluate_routing_quality_thresholds,
     routing_quality_gate_dict,
 )
+from kicad_tools.cli.check_categories import CHECK_CATEGORIES  # noqa: F401  (re-exported, #6896)
 from kicad_tools.cli.copper_weight import add_check_copper_argument, parse_copper_weight_arg
 from kicad_tools.manufacturers import (
+    get_all_manufacturer_names,
     get_manufacturer_ids,
     get_profile,
     resolve_pcb_fabrication_overrides,
@@ -663,8 +665,9 @@ def _erc_subcheck(sch_path: Path | None, strict: bool) -> SubCheckResult:
                     f"{detail} (strict) -- KiCad global library tables not initialized: "
                     f"{len(uninitialized)} of these warning(s) reference library table "
                     f"entries missing from this host ({libs_str}), not necessarily a real "
-                    "schematic defect. Run `scripts/ci/init_kicad_libraries.py` once per "
-                    "host, then re-run this check (see README 'Fresh worktree checklist')."
+                    "schematic defect. Point kicad-cli at the pinned tables with "
+                    '`eval "$(python3 scripts/ci/init_kicad_libraries.py --shell)"` in this '
+                    "shell, then re-run this check (see README 'Fresh worktree checklist')."
                 ),
             )
         return SubCheckResult(status="FAILED", detail=detail + " (strict)")
@@ -1139,49 +1142,6 @@ def print_routing_quality_stanza(metrics: RoutingQualityMetrics) -> None:
     print(f"  Zero-length:  {metrics.zero_length_count}")
 
 
-CHECK_CATEGORIES = [
-    "physical_copper_gap",
-    "ampacity",
-    "path_ampacity",
-    "clearance",
-    "connectivity",
-    "connector_access",
-    "segment_zone",
-    "via_zone",
-    "copper_sliver",
-    "courtyard_overlap",
-    "dangling_copper",
-    "diffpair_clearance_intra",
-    "diffpair_length_skew",
-    "diffpair_routing_continuity",
-    "diffpair_uncoupled_length",
-    "dimensions",
-    "doc_drift",
-    "edge",
-    "impedance",
-    "isolated_copper",
-    "match_group_length_skew",
-    "netclass_clearance_copper",
-    "netclass_floor",
-    "netlist",
-    "pad_grid",
-    "pin1_marker",
-    "placement",
-    "routing_policy",
-    "sch_fields",
-    "silkscreen",
-    "single_pad_net",
-    "solder_mask",
-    "mask_to_copper",
-    "via_in_pad",
-    "via_type",
-    "via_under_body",
-    "width_consistency",
-    "zero_length_segment",
-    "zones",
-]
-
-
 def _warn_unevaluated_ampacity(
     declared_ampacity_targets: dict[str, float],
     ampacity_resolution: object,
@@ -1444,7 +1404,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--mfr",
         "-m",
-        choices=get_manufacturer_ids(),
+        choices=get_all_manufacturer_names(),
         default=None,
         help=(
             "Target manufacturer profile for design rules. When omitted, the "
@@ -1754,6 +1714,8 @@ def main(argv: list[str] | None = None) -> int:
 
     raw_argv = list(sys.argv[1:] if argv is None else argv)
     args = parser.parse_args(argv)
+    if args.mfr:
+        args.mfr = get_profile(args.mfr).id
 
     # Issue #5946: ``--diff OLD NEW`` checks both revisions with the remaining
     # flags and reports the difference instead of a single-board report.

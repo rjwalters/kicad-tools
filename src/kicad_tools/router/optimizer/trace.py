@@ -26,19 +26,12 @@ from .chain import sort_into_chains
 from .collision import CollisionChecker
 from .config import OptimizationConfig, OptimizationStats
 from .geometry import (
-    angle_between,
-    count_corners,
-    is_90_degree_corner,
-    is_connected,
-    is_zigzag,
-    same_direction,
     segment_direction,
     segments_touch,
-    shorten_segment_end,
-    shorten_segment_start,
     total_length,
 )
-from .pcb import optimize_pcb, parse_net_names, parse_segments, replace_segments
+from .kelvin_gate import kelvin_branch_gate
+from .pcb import optimize_pcb
 from .via_optimizer import ViaOptimizationConfig, ViaOptimizer
 
 
@@ -231,14 +224,30 @@ def optimize_routes_grid_synced(
         The new ``router.routes`` list (also assigned on the router).
     """
     gate = pairwise_route_gate(router)
+    # Issue #5398: the optimizer's collision checker ignores same-net copper,
+    # so without this gate a rewrite can join two branches of a Kelvin star
+    # away from the shunt pad.  ``None`` (no Kelvin net) costs nothing.
+    kelvin = kelvin_branch_gate(router)
+    accept: Callable[[Route, Route], bool] | None
+    if gate is not None and kelvin is not None:
+        pairwise, branches = gate, kelvin
+
+        def accept(original: Route, optimized: Route) -> bool:
+            return branches(original, optimized) and pairwise(original, optimized)
+
+    else:
+        accept = gate if gate is not None else kelvin
     routes = apply_route_transform_grid_synced(
-        router, optimizer.optimize_route, skip_nets=skip_nets, accept=gate
+        router, optimizer.optimize_route, skip_nets=skip_nets, accept=accept
     )
     if gate is not None:
         # Issue #4766 AC8: record the coarse-veto cost on the router (for
         # tests / callers) and surface it once per pass.
         router._pairwise_optimize_vetoes = gate.vetoes
         gate.report()
+    if kelvin is not None:
+        router._kelvin_optimize_vetoes = kelvin.vetoes
+        kelvin.report()
     return routes
 
 
@@ -677,12 +686,9 @@ class TraceOptimizer:
         )
 
     # =========================================================================
-    # Helper methods exposed for tests
+    # Helper methods exposed for tests (every shim below backs a test; untested
+    # shims were removed in #6984 -- call the ``geometry`` / ``pcb`` functions)
     # =========================================================================
-
-    def _is_connected(self, s1: Segment, s2: Segment) -> bool:
-        """Check if end of s1 connects to start of s2."""
-        return is_connected(s1, s2, self.config.tolerance)
 
     def _segments_touch(self, s1: Segment, s2: Segment) -> bool:
         """Check if two segments share any endpoint (regardless of direction)."""
@@ -691,34 +697,6 @@ class TraceOptimizer:
     def _sort_into_chains(self, segments: list[Segment]) -> list[list[Segment]]:
         """Sort segments into connected chains."""
         return sort_into_chains(segments, self.config.tolerance)
-
-    def _same_direction(self, s1: Segment, s2: Segment) -> bool:
-        """Check if two segments have the same direction."""
-        return same_direction(s1, s2, self.config.tolerance)
-
-    def _is_zigzag(self, s1: Segment, s2: Segment, s3: Segment) -> bool:
-        """Check if s2 is a zigzag (backtrack) between s1 and s3."""
-        return is_zigzag(s1, s2, s3, self.config.tolerance)
-
-    def _angle_between(self, s1: Segment, s2: Segment) -> float:
-        """Calculate angle between two segments in degrees (0-180)."""
-        return angle_between(s1, s2, self.config.tolerance)
-
-    def _is_90_degree_corner(self, s1: Segment, s2: Segment) -> bool:
-        """Check if two segments form a 90-degree corner."""
-        return is_90_degree_corner(s1, s2)
-
-    def _shorten_segment_end(self, seg: Segment, amount: float) -> Segment | None:
-        """Shorten a segment from its end by the given amount."""
-        return shorten_segment_end(seg, amount, self.config.min_segment_length)
-
-    def _shorten_segment_start(self, seg: Segment, amount: float) -> Segment | None:
-        """Shorten a segment from its start by the given amount."""
-        return shorten_segment_start(seg, amount, self.config.min_segment_length)
-
-    def _count_corners(self, segments: list[Segment]) -> int:
-        """Count number of corners (direction changes) in a segment list."""
-        return count_corners(segments, self.config.tolerance)
 
     def _total_length(self, segments: list[Segment]) -> float:
         """Calculate total length of segments."""
@@ -740,23 +718,6 @@ class TraceOptimizer:
     ) -> list[Segment]:
         """Generate an optimal 2-3 segment path from start to end."""
         return _optimal_path(start, end, template, self.config)
-
-    def _parse_net_names(self, pcb_text: str) -> dict[int, str]:
-        """Parse net ID to name mapping from PCB file."""
-        return parse_net_names(pcb_text)
-
-    def _parse_segments(self, pcb_text: str) -> dict[str, list[Segment]]:
-        """Parse segments from PCB file text, grouped by net name."""
-        return parse_segments(pcb_text)
-
-    def _replace_segments(
-        self,
-        pcb_text: str,
-        original: dict[str, list[Segment]],
-        optimized: dict[str, list[Segment]],
-    ) -> str:
-        """Replace original segments with optimized ones in PCB text."""
-        return replace_segments(pcb_text, original, optimized)
 
     def get_via_stats(self) -> dict:
         """Get via optimization statistics.

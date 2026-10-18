@@ -75,8 +75,9 @@ Tier 3 -- plane-layer signal-reservation guardrail (Issue #5014)
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from kicad_tools.physics.ampacity import width_for_current
 from kicad_tools.router.layers import LayerType
@@ -404,7 +405,9 @@ class PlaneLayerSignalViolation:
 
 
 def plane_layer_signal_violations(
-    routes: list[Route], layer_stack: LayerStack
+    routes: list[Route],
+    layer_stack: LayerStack,
+    net_class_map: Mapping[str, Any] | None = None,
 ) -> list[PlaneLayerSignalViolation]:
     """Scan committed routes for signal segments on a declared plane layer.
 
@@ -413,6 +416,11 @@ def plane_layer_signal_violations(
             :class:`~kicad_tools.router.primitives.Route` with ``segments``
             carrying a ``.layer`` :class:`~kicad_tools.core.types.CopperLayer`).
         layer_stack: The resolved stack this route ran against.
+        net_class_map: Optional net name -> ``NetClassRouting`` map.  Issue
+            #6876: a ``(net, layer)`` pair whose class opted in to that plane
+            layer via ``allow_plane_layers`` is deliberate and is not
+            reported.  Other nets on the same plane, and the opted-in net on
+            a different plane, still are.
 
     Returns:
         One :class:`PlaneLayerSignalViolation` per ``(net, plane layer)``
@@ -438,7 +446,22 @@ def plane_layer_signal_violations(
                 key = (route.net_name, layer_name)
                 counts[key] = counts.get(key, 0) + 1
 
+    from kicad_tools.router.rules import allowed_plane_layer_indices
+
+    def _opted_in(net_name: str, layer_name: str) -> bool:
+        if not net_class_map:
+            return False
+        net_class = net_class_map.get(net_name)
+        opted = getattr(net_class, "allow_plane_layers", None)
+        if not opted:
+            return False
+        if layer_name in opted:
+            return True
+        layer_def = layer_stack.get_layer_by_name(layer_name)
+        return layer_def is not None and layer_def.index in allowed_plane_layer_indices(net_class)
+
     return [
         PlaneLayerSignalViolation(net_name=net_name, layer_name=layer_name, segment_count=count)
         for (net_name, layer_name), count in sorted(counts.items())
+        if not _opted_in(net_name, layer_name)
     ]

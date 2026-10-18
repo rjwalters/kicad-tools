@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 @dataclass
@@ -63,6 +63,18 @@ class OptimizationConfig:
 
 
 @dataclass
+class NetOptimizationStats:
+    """Per-net before/after statistics (Issue #7065)."""
+
+    net: str
+    segments_before: int = 0
+    segments_after: int = 0
+    length_before: float = 0.0
+    length_after: float = 0.0
+    rolled_back: bool = False
+
+
+@dataclass
 class OptimizationStats:
     """Statistics from trace optimization."""
 
@@ -78,6 +90,10 @@ class OptimizationStats:
     nets_rolled_back: int = 0
     drc_errors_before: int = 0
     drc_errors_after: int = 0
+    # Issue #6889: Kelvin-branch rewrites kept at their original geometry.
+    kelvin_vetoes: int = 0
+    # Issue #7065: one row per optimized net, built after any DRC rollback.
+    per_net: list[NetOptimizationStats] = field(default_factory=list)
 
     @property
     def segment_reduction(self) -> float:
