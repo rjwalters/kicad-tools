@@ -891,3 +891,106 @@ class TestForceSolidOnIsolatedIslandPads:
 
         doc = parse_string(self._BOARD)
         assert force_solid_on_isolated_island_pads(doc, set()) == 0
+
+
+class TestThermalSpokeLadder7295:
+    """Issue #7295: narrower per-pad (W, G) rungs are tried before solid."""
+
+    @staticmethod
+    def _board(sizes, extra_pad_net="GND"):
+        fps = []
+        for i, size in enumerate(sizes):
+            fps.append(
+                f'(footprint "lib:r{i}" (layer "F.Cu") (at {5 + 4 * i} 5)'
+                f' (pad "1" smd rect (at 0 0) (size {size} {size}) (layers "F.Cu")'
+                f' (net 1 "GND") (uuid "p{i}")))'
+            )
+        return f"""
+        (kicad_pcb (version 20240108) (generator "test")
+          (net 0 "") (net 1 "GND")
+          {" ".join(fps)}
+          (zone (net 1) (net_name "GND") (layer "F.Cu") (uuid "z1")
+            (connect_pads (clearance 0.3)) (min_thickness 0.25)
+            (fill yes (thermal_gap 0.3) (thermal_bridge_width 0.4))
+            (polygon (pts (xy 0 0) (xy 30 0) (xy 30 20) (xy 0 20)))))
+        """
+
+    @staticmethod
+    def _pad(doc, uuid):
+        for fp in doc.find_all("footprint"):
+            for pad in fp.find_all("pad"):
+                if pad.find("uuid").get_string(0) == uuid:
+                    return pad
+        raise AssertionError(uuid)
+
+    def test_ladder_steps_to_floors(self):
+        from kicad_tools.zones.fill_clearance import _thermal_ladder
+
+        assert _thermal_ladder(0.4, 0.3) == [(0.4, 0.3), (0.3, 0.2), (0.2, 0.2)]
+        assert _thermal_ladder(0.2, 0.2) == [(0.2, 0.2)]
+        # Floors below 0.2 are raised to 0.2.
+        assert _thermal_ladder(0.3, 0.2, 0.1, 0.1)[-1] == (0.2, 0.2)
+
+    def test_pad_fitting_at_narrow_rung_gets_thermal_override_not_solid(self):
+        from kicad_tools.zones.fill_clearance import normalize_zone_pad_connection
+
+        # 0.75 mm: needs 0.4+0.6+0.1=1.1 (no), 0.3+0.4+0.1=0.8 (no), 0.2+0.4+0.1=0.7 (yes)
+        doc = parse_string(self._board(["0.75"]))
+        assert normalize_zone_pad_connection(doc) == 1
+        pad = self._pad(doc, "p0")
+        assert pad.find("zone_connect") is None
+        assert pad.find("thermal_width").get_float(0) == 0.2
+        assert pad.find("thermal_gap").get_float(0) == 0.2
+
+    def test_no_rung_fits_falls_back_to_solid_and_logs(self, caplog):
+        import logging
+
+        from kicad_tools.zones.fill_clearance import normalize_zone_pad_connection
+
+        doc = parse_string(self._board(["0.5"]))
+        with caplog.at_level(logging.INFO, logger="kicad_tools.zones.fill_clearance"):
+            assert normalize_zone_pad_connection(doc) == 1
+        pad = self._pad(doc, "p0")
+        assert pad.find("zone_connect").get_int(0) == 2
+        assert pad.find("thermal_width") is None
+        assert any("solid thermal override" in r.message for r in caplog.records)
+
+    def test_two_pad_passive_shares_one_rung(self):
+        from kicad_tools.zones.fill_clearance import normalize_zone_pad_connection
+
+        board = """
+        (kicad_pcb (version 20240108) (generator "test")
+          (net 0 "") (net 1 "GND")
+          (footprint "lib:c" (layer "F.Cu") (at 5 5)
+            (pad "1" smd rect (at -1 0) (size 0.75 0.75) (layers "F.Cu") (net 1 "GND") (uuid "a"))
+            (pad "2" smd rect (at 1 0) (size 0.95 0.95) (layers "F.Cu") (net 1 "GND") (uuid "b")))
+          (zone (net 1) (net_name "GND") (layer "F.Cu") (uuid "z1")
+            (connect_pads (clearance 0.3)) (min_thickness 0.25)
+            (fill yes (thermal_gap 0.3) (thermal_bridge_width 0.4))
+            (polygon (pts (xy 0 0) (xy 30 0) (xy 30 20) (xy 0 20)))))
+        """
+        doc = parse_string(board)
+        assert normalize_zone_pad_connection(doc) == 2
+        for u in ("a", "b"):
+            pad = self._pad(doc, u)
+            assert pad.find("thermal_width").get_float(0) == 0.2
+            assert pad.find("thermal_gap").get_float(0) == 0.2
+
+    def test_readback_narrows_then_goes_solid(self):
+        from kicad_tools.zones.fill_clearance import force_solid_on_pads_by_uuid
+
+        doc = parse_string(self._board(["2.0"]))
+        # First flag: step to the next rung, keep thermal relief.
+        assert force_solid_on_pads_by_uuid(doc, {"p0"}) == 1
+        pad = self._pad(doc, "p0")
+        assert pad.find("zone_connect") is None
+        assert (pad.find("thermal_width").get_float(0), pad.find("thermal_gap").get_float(0)) == (
+            0.3,
+            0.2,
+        )
+        # Second flag: floor rung.
+        assert force_solid_on_pads_by_uuid(doc, {"p0"}) == 1
+        assert pad.find("thermal_width").get_float(0) == 0.2
+        # Third flag: ladder exhausted -> solid.
+        assert force_solid_on_pads_by_uuid(doc, {"p0"}) == 1
+        assert pad.find("zone_connect").get_int(0) == 2
