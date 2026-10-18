@@ -171,7 +171,7 @@ Generate complete assembly package for manufacturing.
 }
 ```
 
-`bom.component_count` counts component instances written to the BOM (DNP and virtual symbols excluded); `bom.unique_parts` counts distinct value/footprint/LCSC rows. `pnp.component_count` counts CPL rows (JLCPCB excludes through-hole parts by default).
+`bom.component_count` counts component instances written to the BOM (DNP and virtual symbols excluded); `bom.unique_parts` counts distinct value/footprint/LCSC rows. `pnp.component_count` counts CPL rows (through-hole parts are included for JLCPCB; they are excluded only for SMT-only fabs).
 
 `pnp.rotation_corrections` is the number of CPL rows whose rotation was shifted by the manufacturer's per-footprint correction table (e.g. SOIC-8, SOT-23 on JLCPCB); it is `0` for manufacturers without corrections.
 

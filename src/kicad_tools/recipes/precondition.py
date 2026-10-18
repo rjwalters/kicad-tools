@@ -17,20 +17,19 @@ condition this refuses to let pass silently.
 
 Gate-strength ladder (issue #4539)
 ----------------------------------
-=====  =========================================================  ==========
+=====  =========================================================  ===========
 Level  Check                                                      Fleet
-=====  =========================================================  ==========
-L0     artifact exists and is non-empty                           8/8 pass
-L1     L0 + :func:`~kicad_tools.spec.parser.load_spec` parses     8/8 pass
-L2     L1 + :func:`~kicad_tools.spec.parser.validate_spec` clean  7/8 pass
-=====  =========================================================  ==========
+=====  =========================================================  ===========
+L0     artifact exists and is non-empty                           10/10 pass
+L1     L0 + :func:`~kicad_tools.spec.parser.load_spec` parses     10/10 pass
+L2     L1 + :func:`~kicad_tools.spec.parser.validate_spec` clean  10/10 pass
+=====  =========================================================  ===========
 
 **L1 is the default.**  **L2 is strict-mode only** (opt in with
-``KCT_REQUIRE_SPEC=1`` or ``strict=True``): as of ``origin/main`` @
-``83d7625e`` ``boards/01-voltage-divider/project.kct`` is semantically
-``Invalid`` (``Progress: current phase 'complete' not found in phases``), so
-a default-on L2 would fail that board's CI job for a bookkeeping defect that
-has nothing to do with this gate.  Repairing that spec is deliberately NOT
+``KCT_REQUIRE_SPEC=1`` or ``strict=True``).  All 10 ``boards/*/project.kct``
+specs currently pass ``validate_spec`` (board 01's ``progress.phase`` was repaired
+in Issue #7250), so the fleet is clean at L2, but whether L2 becomes the default
+is a separate decision and this module does not change it.  Repairing a spec is deliberately NOT
 this module's job -- the gate reports, it does not repair.
 
 **There is deliberately no L3.**  A hypothetical L3 ("the spec must *model*

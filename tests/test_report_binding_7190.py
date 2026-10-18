@@ -18,6 +18,7 @@ from kicad_tools.drc.report_binding import (
     ERC_HASH_KEY,
     BindingStatus,
     binding_status,
+    schematic_digest,
     stamp_report_hash,
 )
 from kicad_tools.erc.report import ERCReport
@@ -74,10 +75,15 @@ def _kicad_cli_drc(pcb: Path, *, errors: int = 0) -> dict:
     }
 
 
-def _write_readiness(board_dir: Path, inputs: dict[str, str]) -> Path:
+def _write_readiness(
+    board_dir: Path, inputs: dict[str, str], report_sources: dict[str, str] | None = None
+) -> Path:
     path = board_dir / "output" / "readiness.json"
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({"verdict": "READY", "inputs": inputs}))
+    data: dict = {"verdict": "READY", "inputs": inputs}
+    if report_sources is not None:
+        data["report_sources"] = report_sources
+    path.write_text(json.dumps(data))
     return path
 
 
@@ -132,6 +138,7 @@ class TestBindingStatus:
                 "output/b_routed.kicad_pcb": _sha(pcb),
                 "output/drc_report.json": _sha(report),
             },
+            {"output/drc_report.json": _sha(pcb)},
         )
         return pcb, report, readiness
 
@@ -247,6 +254,7 @@ def _stage_drc(tmp_path: Path, binding: str, verdict: str) -> tuple[Path, Path]:
         _write_readiness(
             board,
             {"output/board.kicad_pcb": _sha(pcb), "output/drc_report.json": _sha(report)},
+            {"output/drc_report.json": _sha(pcb)},
         )
     return pcb, report
 
@@ -313,6 +321,7 @@ def _stage_erc(tmp_path: Path, binding: str, verdict: str) -> tuple[Path, Path, 
         _write_readiness(
             board,
             {"output/board.kicad_sch": _sha(sch), "output/erc_report.json": _sha(report)},
+            {"output/erc_report.json": _sha(sch)},
         )
     return pcb, sch, report
 
@@ -479,10 +488,118 @@ def test_producerless_reports_are_gone(path):
     "board",
     ["05-bldc-motor-controller", "06-diffpair-test", "07-matchgroup-test"],
 )
-def test_readiness_pinned_fleet_reports_stay_bound(board):
-    """Boards 05/06/07 keep their reports bound via readiness co-binding."""
+def test_readiness_pinned_fleet_reports_need_provenance(board):
+    """Boards 05/06/07 carry no report provenance yet, so co-pinning no longer binds.
+
+    Issue #7277: regenerate their evidence on the pinned toolchain (producer
+    records ``report_sources``) to make them BOUND again.
+    """
     out = REPO_ROOT / "boards" / board / "output"
     pcb = next(out.glob("*_routed.kicad_pcb"))
     report = out / "drc_report.json"
     data = json.loads(report.read_text())
-    assert binding_status(report, pcb, data.get(DRC_HASH_KEY)) is BindingStatus.BOUND
+    readiness = json.loads((out / "readiness.json").read_text())
+    if "report_sources" in readiness:
+        expected = BindingStatus.BOUND
+    else:
+        expected = BindingStatus.UNHASHED
+    assert binding_status(report, pcb, data.get(DRC_HASH_KEY)) is expected
+
+
+# ---------------------------------------------------------------------------
+# Issue #7277: provenance-narrowed fallback + hierarchical ERC binding
+# ---------------------------------------------------------------------------
+
+
+class TestReadinessProvenance:
+    def test_pcb_edited_then_readiness_rerun_with_stale_report_is_unbound(self, tmp_path):
+        """Readiness re-pins old report + new PCB, but report_sources is stale."""
+        board = tmp_path / "board"
+        out = board / "output"
+        out.mkdir(parents=True)
+        pcb = _create_minimal_pcb(out, filename="b_routed.kicad_pcb")
+        report = out / "drc_report.json"
+        report.write_text(json.dumps(_kicad_cli_drc(pcb)))
+        old_sha = _sha(pcb)
+        pcb.write_bytes(pcb.read_bytes() + b" ")  # PCB edited; report not regenerated
+        _write_readiness(
+            board,
+            {"output/b_routed.kicad_pcb": _sha(pcb), "output/drc_report.json": _sha(report)},
+            {"output/drc_report.json": old_sha},
+        )
+        assert binding_status(report, pcb, None) is BindingStatus.UNHASHED
+
+    def test_co_pinning_without_provenance_is_unbound(self, tmp_path):
+        board = tmp_path / "board"
+        out = board / "output"
+        out.mkdir(parents=True)
+        pcb = _create_minimal_pcb(out, filename="b_routed.kicad_pcb")
+        report = out / "drc_report.json"
+        report.write_text(json.dumps(_kicad_cli_drc(pcb)))
+        _write_readiness(
+            board,
+            {"output/b_routed.kicad_pcb": _sha(pcb), "output/drc_report.json": _sha(report)},
+        )
+        assert binding_status(report, pcb, None) is BindingStatus.UNHASHED
+
+
+_ROOT_SHEET = '(kicad_sch (sheet (property "Sheetfile" "child.kicad_sch")))'
+
+
+def _hier(tmp_path: Path) -> tuple[Path, Path]:
+    root = tmp_path / "top.kicad_sch"
+    child = tmp_path / "child.kicad_sch"
+    root.write_text(_ROOT_SHEET)
+    child.write_text("(kicad_sch (version 1))")
+    return root, child
+
+
+class TestHierarchicalErc:
+    def test_flat_digest_equals_file_hash(self, tmp_path):
+        sch = tmp_path / "flat.kicad_sch"
+        sch.write_text("(kicad_sch)")
+        assert schematic_digest(sch) == _sha(sch)
+
+    def test_hierarchy_digest_differs_from_top_file_hash(self, tmp_path):
+        root, _ = _hier(tmp_path)
+        assert schematic_digest(root) != _sha(root)
+
+    def test_stamped_hierarchy_is_bound(self, tmp_path):
+        root, _ = _hier(tmp_path)
+        report = tmp_path / "erc_report.json"
+        report.write_text("{}")
+        assert stamp_report_hash(report, root, ERC_HASH_KEY)
+        recorded = json.loads(report.read_text())[ERC_HASH_KEY]
+        assert binding_status(report, root, recorded, hierarchical=True) is BindingStatus.BOUND
+
+    def test_sub_sheet_edit_is_mismatch(self, tmp_path):
+        root, child = _hier(tmp_path)
+        report = tmp_path / "erc_report.json"
+        report.write_text("{}")
+        stamp_report_hash(report, root, ERC_HASH_KEY)
+        recorded = json.loads(report.read_text())[ERC_HASH_KEY]
+        child.write_text("(kicad_sch (version 2))")
+        assert binding_status(report, root, recorded, hierarchical=True) is BindingStatus.MISMATCH
+
+    def test_legacy_flat_hash_still_binds_flat_schematic(self, tmp_path):
+        sch = tmp_path / "flat.kicad_sch"
+        sch.write_text("(kicad_sch)")
+        report = tmp_path / "erc_report.json"
+        report.write_text("{}")
+        assert binding_status(report, sch, _sha(sch), hierarchical=True) is BindingStatus.BOUND
+
+    def test_missing_sub_sheet_is_unhashed(self, tmp_path):
+        root, child = _hier(tmp_path)
+        child.unlink()
+        report = tmp_path / "erc_report.json"
+        report.write_text("{}")
+        assert binding_status(report, root, "0" * 64, hierarchical=True) is BindingStatus.UNHASHED
+        assert stamp_report_hash(report, root, ERC_HASH_KEY) is False
+
+    def test_sub_sheet_referenced_twice_is_digested_once(self, tmp_path):
+        root, _ = _hier(tmp_path)
+        once = schematic_digest(root)
+        root.write_text(
+            _ROOT_SHEET.replace("))", ')) (sheet (property "Sheetfile" "child.kicad_sch"))')
+        )
+        assert schematic_digest(root) != once  # top sheet bytes changed, no crash on duplicate

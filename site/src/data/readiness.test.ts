@@ -180,6 +180,17 @@ it("fails closed on a known-issues.json that inputs no longer lists (#7323)", ()
   save();
   expect(displayStatus(loadBoard(root))).toBe("unverified");
 });
+it("ignores a known-issues.json in another evidence folder (#7337)", () => {
+  bindKnownIssues([advisory]);
+  report.evidence = { kct_check: "output/readiness/kct-check.json" };
+  mkdirSync(join(root, "output/readiness-verification"), { recursive: true });
+  writeFileSync(join(root, "output/readiness-verification/known-issues.json"), '{"known_issues": []}');
+  save();
+  expect(displayStatus(loadBoard(root))).toBe("ready");
+  mkdirSync(join(root, "output/readiness/nested"), { recursive: true });
+  writeFileSync(join(root, "output/readiness/nested/known-issues.json"), '{"known_issues": []}');
+  expect(displayStatus(loadBoard(root))).toBe("unverified");
+});
 it.each(["ready with defect", "unbound", "edited", "bad kind", "unsorted", "bad date", "bad manufacturer"])(
   "fails closed on %s known issues", kind => {
     if (kind === "ready with defect") bindKnownIssues([defect]);

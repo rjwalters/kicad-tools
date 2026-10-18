@@ -304,3 +304,37 @@ def test_stray_known_issues_file_next_to_ready_board_is_rejected(tmp_path):
     assert read_readiness(board)["status"] == "ready"
     (board / "output" / "readiness" / "known-issues.json").write_text('{"known_issues": []}')
     assert read_readiness(board)["status"] == "unverified"
+
+
+def _verify(board: Path) -> tuple[int, dict]:
+    code = readiness_cmd.main(
+        [str(board), "--mfr", "jlcpcb", "--checked-at", CHECKED_AT],
+        engines=FakeEngines(board).bundle(),
+    )
+    path = board / "output" / "readiness-verification" / "readiness.json"
+    return code, json.loads(path.read_text())
+
+
+def test_verify_does_not_orphan_the_committed_known_issues_file(tmp_path):
+    """``--verify`` binds its own folder; the committed one is not an orphan (#7337)."""
+    board = _ready_board_with_advisory(tmp_path)
+    assert (board / "output" / "readiness" / "known-issues.json").is_file()
+    code, report = _verify(board)
+    assert code == 0, report["blockers"]
+    assert report["status"] == "ready"
+    assert "output/readiness-verification/known-issues.json" in report["inputs"]
+    assert "output/readiness/known-issues.json" not in report["inputs"]
+    assert [e["issue"] for e in report["known_issues"]] == [7220]
+    # The committed record still validates beside the verification folder.
+    assert read_readiness(board)["status"] == "ready"
+
+
+def test_stray_known_issues_file_in_the_records_own_evidence_folder_is_rejected(tmp_path):
+    """Scoping the scan (#7337) keeps the unlisted-sibling tamper case (#7323)."""
+    board = _ready_board_with_advisory(tmp_path)
+    nested = board / "output" / "readiness" / "fill-saved"
+    nested.mkdir(parents=True, exist_ok=True)
+    (nested / "known-issues.json").write_text('{"known_issues": []}')
+    verdict = read_readiness(board)
+    assert verdict["status"] == "unverified"
+    assert "output/readiness/fill-saved/known-issues.json" in verdict["blockers"][0]

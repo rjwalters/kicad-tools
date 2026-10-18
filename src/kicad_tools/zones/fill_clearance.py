@@ -515,8 +515,9 @@ _CONNECT_PAD_MODES = frozenset({"thru_hole_only", "yes", "no"})
 
 # The selective policy is a *meta* mode handled by this module rather than a
 # KiCad ``connect_pads`` keyword: it keeps the zone-level default as thermal
-# relief and forces a solid connection only on the individual pads that
-# physically cannot host 2 spokes (via a per-pad ``(zone_connect 2)``).
+# relief and, on pads that cannot host 2 spokes, applies the first narrower
+# per-pad ``(thermal_width W) (thermal_gap G)`` rung that fits (issue #7295);
+# only a pad with no fitting rung gets a solid ``(zone_connect 2)``.
 _SELECTIVE_MODE = "selective"
 
 # KiCad per-pad ``(zone_connect N)`` override codes.  This overrides the

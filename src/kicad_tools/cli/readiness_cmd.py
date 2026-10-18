@@ -1420,6 +1420,13 @@ def _gate_native_drc(options: ReadinessOptions, engines: Engines) -> tuple[Check
     """Gate 2 — the mandatory independent native check of saved candidate copper."""
     report_path = options.evidence_dir / "native-drc.json"
     report_path.parent.mkdir(parents=True, exist_ok=True)
+    # Issue #7277: ``build_report`` stamps every native-drc*.json present in
+    # the evidence dir into ``report_sources`` as produced from this PCB.
+    # Clear both before the run so a report left by an earlier run (e.g. one
+    # whose native DRC did not execute this time) is never stamped with the
+    # current PCB hash -- only what this engine run wrote survives.
+    report_path.unlink(missing_ok=True)
+    report_path.with_name(report_path.stem + "-raw.json").unlink(missing_ok=True)
     run = engines.native_drc(options.pcb, report_path)
     _normalize_report_date(report_path.with_name(report_path.stem + "-raw.json"), options)
     evidence_rel = _rel(options, report_path)
@@ -2600,6 +2607,21 @@ def build_report(
             raise ValueError(f"extra readiness input is not a board file: {path}")
         hashed.add(resolved)
     report["inputs"] = {_rel(options, path): _sha256_file(path) for path in sorted(hashed)}
+    # Issue #7277: record which source bytes each report readiness itself
+    # produced was computed from, so report binding can tell "produced for
+    # this PCB" from merely "pinned beside it".
+    if options.pcb.is_file():
+        pcb_sha = _sha256_file(options.pcb)
+        produced = {
+            _rel(options, path): pcb_sha
+            for path in (
+                options.evidence_dir / "native-drc.json",
+                options.evidence_dir / "native-drc-raw.json",
+            )
+            if path.is_file()
+        }
+        if produced:
+            report["report_sources"] = produced
     external = _external_dependencies(options)
     if external:
         # Hash the exact collected out-of-directory dependencies (Issue #5813).
