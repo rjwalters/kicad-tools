@@ -421,8 +421,6 @@ def _multistart_trial_kwargs(args) -> dict:
     """
     negotiated_kwargs: dict = {
         "max_iterations": args.iterations,
-        "batch_routing": getattr(args, "batch_routing", False)
-        or getattr(args, "high_performance", False),
         "hierarchical": getattr(args, "hierarchical", False),
         "perturbation": getattr(args, "perturbation", True),
         "use_targeted_ripup": getattr(args, "targeted_ripup", False),
@@ -11601,8 +11599,6 @@ def route_with_layer_escalation(
                     max_iterations=args.iterations,
                     timeout=_attempt_timeout,
                     per_net_timeout=getattr(args, "per_net_timeout", None) or None,
-                    batch_routing=getattr(args, "batch_routing", False)
-                    or getattr(args, "high_performance", False),
                     hierarchical=getattr(args, "hierarchical", False),
                     perturbation=getattr(args, "perturbation", True),
                     # Issue #3039: forward --seed for deterministic routing.
@@ -12860,8 +12856,6 @@ def route_with_rule_relaxation(
                     max_iterations=args.iterations,
                     timeout=_attempt_timeout,
                     per_net_timeout=getattr(args, "per_net_timeout", None) or None,
-                    batch_routing=getattr(args, "batch_routing", False)
-                    or getattr(args, "high_performance", False),
                     hierarchical=getattr(args, "hierarchical", False),
                     perturbation=getattr(args, "perturbation", True),
                     # Issue #3039: forward --seed for deterministic routing.
@@ -15410,8 +15404,6 @@ def route_with_combined_escalation(
                         max_iterations=args.iterations,
                         timeout=_attempt_timeout,
                         per_net_timeout=getattr(args, "per_net_timeout", None) or None,
-                        batch_routing=getattr(args, "batch_routing", False)
-                        or getattr(args, "high_performance", False),
                         hierarchical=getattr(args, "hierarchical", False),
                         perturbation=getattr(args, "perturbation", True),
                         # Issue #3039: forward --seed for deterministic routing.
@@ -20008,10 +20000,8 @@ def _route_parser() -> argparse.ArgumentParser:
         "--batch-routing",
         action="store_true",
         help=(
-            "Enable GPU-accelerated batch routing for parallel net processing. "
-            "Routes multiple independent nets simultaneously using GPU compute. "
-            "Best results with 4+ independent nets and Metal/CUDA GPU. "
-            "Enabled automatically in high-performance mode."
+            "DEPRECATED: no effect (GPU batch routing removed, #7051). "
+            "Use --region-parallel / the C++ backend instead."
         ),
     )
     # Issue #3054 (Phase 2 of #3045): expose region-based parallelism as
@@ -21018,6 +21008,18 @@ def _run_main_impl(args, parser, argv) -> int:
             file=sys.stderr,
         )
         return 1
+
+    # Issue #7051: --batch-routing is a deprecated no-op (GPU batch routing was
+    # never wired in).  Warn once per invocation; routing is unaffected.
+    if getattr(args, "batch_routing", False):
+        import warnings
+
+        _msg = (
+            "--batch-routing has no effect and will be removed; "
+            "use --region-parallel / the C++ backend (see #7051, #7053)"
+        )
+        print(f"Warning: {_msg}", file=sys.stderr)
+        warnings.warn(_msg, DeprecationWarning, stacklevel=2)
 
     # Apply high-performance settings if requested
     if getattr(args, "high_performance", False):
@@ -22454,8 +22456,6 @@ def _run_main_impl(args, parser, argv) -> int:
                                     max_iterations=args.iterations,
                                     timeout=_budgeted_timeout(args),
                                     per_net_timeout=getattr(args, "per_net_timeout", None) or None,
-                                    batch_routing=getattr(args, "batch_routing", False)
-                                    or getattr(args, "high_performance", False),
                                     hierarchical=getattr(args, "hierarchical", False),
                                     perturbation=getattr(args, "perturbation", True),
                                     # Issue #3039: forward --seed for deterministic routing.
@@ -22545,8 +22545,6 @@ def _run_main_impl(args, parser, argv) -> int:
                             max_iterations=args.iterations,
                             timeout=_budgeted_timeout(args),
                             per_net_timeout=getattr(args, "per_net_timeout", None) or None,
-                            batch_routing=getattr(args, "batch_routing", False)
-                            or getattr(args, "high_performance", False),
                             hierarchical=getattr(args, "hierarchical", False),
                             perturbation=getattr(args, "perturbation", True),
                             # Issue #3039: forward --seed for deterministic routing.
@@ -22661,8 +22659,6 @@ def _run_main_impl(args, parser, argv) -> int:
                         max_iterations=args.iterations,
                         timeout=_budgeted_timeout(args),
                         per_net_timeout=getattr(args, "per_net_timeout", None) or None,
-                        batch_routing=getattr(args, "batch_routing", False)
-                        or getattr(args, "high_performance", False),
                         hierarchical=getattr(args, "hierarchical", False),
                         perturbation=getattr(args, "perturbation", True),
                         # Issue #3039: forward --seed for deterministic routing.
@@ -22708,8 +22704,6 @@ def _run_main_impl(args, parser, argv) -> int:
                     max_iterations=args.iterations,
                     timeout=_budgeted_timeout(args),
                     per_net_timeout=getattr(args, "per_net_timeout", None) or None,
-                    batch_routing=getattr(args, "batch_routing", False)
-                    or getattr(args, "high_performance", False),
                     hierarchical=getattr(args, "hierarchical", False),
                     perturbation=getattr(args, "perturbation", True),
                     # Issue #3039: forward --seed for deterministic routing.
