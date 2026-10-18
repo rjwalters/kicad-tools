@@ -279,11 +279,15 @@ def _run_native_drc(pcb: Path, report_path: Path) -> EngineRun:
         for violation in errors:
             by_type[violation.type_str] = by_type.get(violation.type_str, 0) + 1
         opens = report.unconnected_item_count
-        if opens:
-            by_type["unconnected_items"] = opens
+        # Issue #7188: the gate counts only *error*-severity opens, via the
+        # shared ``DRCReport.blocking_count``; ``unconnected_count`` keeps
+        # meaning every open (informational, evidence schema unchanged).
+        error_opens = sum(1 for v in report.unconnected_items if v.is_error)
+        if error_opens:
+            by_type["unconnected_items"] = error_opens
         payload.update(
             ran=True,
-            error_count=len(errors) + opens,
+            error_count=report.blocking_count,
             by_type=by_type,
             all_by_type=all_by_type,
             unconnected_count=opens,

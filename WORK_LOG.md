@@ -15,6 +15,14 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-18
 
+- **PR #7154**: fix: seed creepage detour from both shapes and bridge sub-X cutouts
+- **PR #7157**: feat(validate): compare component values in validate --sync; fix board 04 J1 value
+- **Issue #7058** (closed): kct creepage overstates creepage around a slot: the detour is computed between the straight-line nearest points, and narrow gaps are not bridged
+- **PR #7191**: fix(drc): one blocking-findings definition across DRC entry points
+- **PR #7244**: docs: fix six unreleased changelog upgrade fragments
+- **Issue #7188** (closed): One DRC blocking-verdict helper: kicad-drc-summary, kct mfr validate and Project.check_drc() pass boards kicad-cli fails
+- **Issue #7240** (closed): Release notes: fix 6 upgrade-fragment defects (7077 vs 7170 --mfr contradiction; missing 7198/7206 upgrade notes; 7209/7213/7230 inaccuracies)
+- **Issue #7150** (closed): board 04 J1 value SWD-6 vs SWD (schematic vs PCB) + kct validate --sync should flag value mismatches (#7147 Part B)
 - **PR #7232**: feat(check): thermal_asymmetry and via_at_pad_edge warnings; detect-mistakes reuses them (#7220)
 - **PR #7221**: fix(validate): resolve board 05 phase paths and flag zone-only ampacity nets
 - **PR #7231**: refactor(geometry): shared point_in_polygon; footprint_outside_board accepts boundary origins (PR1 of #7224)

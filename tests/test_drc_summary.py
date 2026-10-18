@@ -166,12 +166,37 @@ class TestCreateSummary:
         assert summary.has_blocking
         assert "BLOCKING" in summary.verdict
 
+    def test_summary_error_severity_open_is_blocking(self):
+        """An error-severity open is BLOCKING despite the table (Issue #7188).
+
+        This test used to assert the opposite -- that kicad-cli's
+        error-severity ``unconnected_items`` read as WARNINGS and exit 0.
+        """
+        violation = DRCViolation(
+            type=ViolationType.UNCONNECTED_ITEMS,
+            type_str="unconnected_items",
+            severity=Severity.ERROR,
+            message="Unconnected pin",
+        )
+        report = DRCReport(
+            source_file="test.json",
+            created_at=None,
+            pcb_name="test.kicad_pcb",
+            violations=[violation],
+        )
+        summary = create_summary(report)
+
+        assert summary.has_blocking
+        assert summary.blocking_by_type["unconnected_items"] == 1
+        assert summary.warning_count == 0
+        assert "BLOCKING" in summary.verdict
+
     def test_summary_verdict_warnings_only(self):
         """Summary verdict should indicate warnings when no blocking issues."""
         violation = DRCViolation(
             type=ViolationType.UNCONNECTED_ITEMS,
             type_str="unconnected_items",
-            severity=Severity.ERROR,
+            severity=Severity.WARNING,
             message="Unconnected pin",
         )
         report = DRCReport(
@@ -395,7 +420,9 @@ class TestCLIMain:
                     "violations": [
                         {
                             "type": "unconnected_items",
-                            "severity": "error",
+                            # Issue #7188: an *error*-severity open is
+                            # BLOCKING (exit 1); a warning one tests --strict.
+                            "severity": "warning",
                             "description": "Unconnected pin",
                         }
                     ],
@@ -458,7 +485,7 @@ class TestFabReclassification:
         assert summary.warning_count == 0
 
     def test_annular_width_blocking_for_oshpark(self):
-        """Annular width below OSHPark limit should remain in default severity."""
+        """Error-severity annular width below OSHPark's limit stays BLOCKING."""
         # OSHPark has stricter annular ring requirements
         oshpark_rules = get_profile("oshpark").get_design_rules(2)
         # Use a value below OSHPark's limit
@@ -479,10 +506,11 @@ class TestFabReclassification:
         )
         summary = create_summary(report, manufacturer_id="oshpark")
 
-        # Via annular width defaults to WARNING, and it fails fab rules,
-        # so it stays as WARNING (not reclassified)
+        # It fails fab rules, so it is not reclassified; and kicad-cli said
+        # error, so it is BLOCKING whatever the type table says (Issue #7188).
         assert summary.fab_acceptable_count == 0
-        assert summary.warning_count == 1
+        assert summary.blocking_count == 1
+        assert summary.warning_count == 0
 
     def test_clearance_reclassified_when_above_fab_limit(self):
         """Clearance above manufacturer limit should be FAB_ACCEPTABLE."""
@@ -576,10 +604,11 @@ class TestFabReclassification:
         )
         summary = create_summary(report)
 
-        # Without manufacturer, no fab reclassification
+        # Without manufacturer, no fab reclassification.  Issue #7188: the
+        # error-severity via_annular_width is BLOCKING, not the table's WARNING.
         assert summary.fab_acceptable_count == 0
-        assert summary.blocking_count == 1  # clearance
-        assert summary.warning_count == 1  # via_annular_width
+        assert summary.blocking_count == 2  # clearance + via_annular_width
+        assert summary.warning_count == 0
         assert summary.cosmetic_count == 1  # silk
 
     def test_mixed_violations_with_fab(self):
@@ -608,7 +637,7 @@ class TestFabReclassification:
                 severity=Severity.ERROR,
                 message="Short circuit",
             ),
-            # Unconnected → WARNING (no fab comparison for this type)
+            # Error-severity unconnected → BLOCKING (Issue #7188)
             DRCViolation(
                 type=ViolationType.UNCONNECTED_ITEMS,
                 type_str="unconnected_items",
@@ -632,8 +661,8 @@ class TestFabReclassification:
         summary = create_summary(report, manufacturer_id="jlcpcb")
 
         assert summary.fab_acceptable_count == 1  # clearance above limit
-        assert summary.blocking_count == 2  # clearance below limit + short
-        assert summary.warning_count == 1  # unconnected
+        assert summary.blocking_count == 3  # clearance below limit + short + open
+        assert summary.warning_count == 0
         assert summary.cosmetic_count == 1  # silk
 
     def test_track_width_reclassified(self):

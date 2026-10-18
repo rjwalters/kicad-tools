@@ -768,7 +768,7 @@ class Project:
             manufacturer: Manufacturer ID (jlcpcb, pcbway, oshpark, etc.)
             layers: Layer count for rules lookup
             copper_oz: Copper weight in oz
-            report_path: Path to KiCad DRC report file (.rpt)
+            report_path: Path to KiCad DRC report file (.rpt or .json)
 
         Returns:
             One ManufacturerCheck per violation in the report (Issue #7170).
@@ -777,6 +777,12 @@ class Project:
             "not_checked"`` (``check.is_not_checked``); it is not
             ``is_compatible``, and keeps kicad-cli's severity on
             ``check.violation``.
+
+            Error-severity unconnected items ("missing connection" opens) are
+            included for both report formats: each is a ``CheckResult.FAIL``
+            with ``rule_name == "connection"`` (Issue #7188).  A KiCad JSON
+            report keeps them outside ``violations`` (#4498), so before this
+            they were silently dropped for ``.json`` input.
 
         Raises:
             FileNotFoundError: If no DRC report found
@@ -820,6 +826,7 @@ class Project:
             manufacturer_id=manufacturer,
             layers=layers,
             copper_oz=copper_oz,
+            include_unconnected=True,
         )
 
         logger.info(f"DRC check: {len(checks)} violations checked against {manufacturer} rules")

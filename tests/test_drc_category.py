@@ -352,12 +352,25 @@ class TestSummaryFinePitchSolderMask:
             ViolationType.SOLDER_MASK_BRIDGE,
             items=["Pad 1 of U3", "Pad 2 of U3"],
             actual_value_mm=0.15,
+            severity=Severity.WARNING,
         )
         report = self._make_report([violation])
         summary = create_summary(report)
 
-        # Without manufacturer context, SMB is just cosmetic
+        # Without manufacturer context, a warning-severity SMB is just cosmetic
         assert summary.cosmetic_count == 1
+
+    def test_error_severity_smb_is_blocking_without_mfr(self):
+        """kicad-cli said error, and no --fab reclassifies it: BLOCKING (Issue #7188)."""
+        violation = _make_violation(
+            ViolationType.SOLDER_MASK_BRIDGE,
+            items=["Pad 1 of U3", "Pad 2 of U3"],
+            actual_value_mm=0.15,
+        )
+        summary = create_summary(self._make_report([violation]))
+
+        assert summary.blocking_count == 1
+        assert summary.cosmetic_count == 0
 
     def test_compare_with_manufacturer_fine_pitch_is_false_positive(self):
         """compare_with_manufacturer should flag fine-pitch SMB as false positive."""

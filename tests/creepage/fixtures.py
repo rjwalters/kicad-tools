@@ -37,13 +37,14 @@ _OUTLINE = """\
   (gr_line (start 100 120) (end 100 100) (layer "Edge.Cuts") (width 0.1))
 """
 
-# Interior milled slot: a tall thin rectangle at x in [119.8, 120.2],
+# Interior milled slot: a tall rectangle at x in [119.0, 121.0] (2 mm wide --
+# wider than IEC 60664-1 dimension X so it is a detour, not a bridged groove),
 # y in [103, 117], lying directly between the two pads (which sit at y=110).
 _SLOT = """\
-  (gr_line (start 119.8 103) (end 120.2 103) (layer "Edge.Cuts") (width 0.1))
-  (gr_line (start 120.2 103) (end 120.2 117) (layer "Edge.Cuts") (width 0.1))
-  (gr_line (start 120.2 117) (end 119.8 117) (layer "Edge.Cuts") (width 0.1))
-  (gr_line (start 119.8 117) (end 119.8 103) (layer "Edge.Cuts") (width 0.1))
+  (gr_line (start 119.0 103) (end 121.0 103) (layer "Edge.Cuts") (width 0.1))
+  (gr_line (start 121.0 103) (end 121.0 117) (layer "Edge.Cuts") (width 0.1))
+  (gr_line (start 121.0 117) (end 119.0 117) (layer "Edge.Cuts") (width 0.1))
+  (gr_line (start 119.0 117) (end 119.0 103) (layer "Edge.Cuts") (width 0.1))
 """
 
 

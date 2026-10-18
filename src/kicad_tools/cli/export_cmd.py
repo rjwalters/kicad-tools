@@ -430,7 +430,8 @@ def run_export(args: argparse.Namespace) -> int:
             if result.assembly_result.pnp_path:
                 print(f"  [ok] CPL: {result.assembly_result.pnp_path.name}")
             if result.assembly_result.gerber_path:
-                print(f"  [ok] Gerbers: {result.assembly_result.gerber_path.name}")
+                gerber_rel = result.bundle_relpath(result.assembly_result.gerber_path)
+                print(f"  [ok] Gerbers: {gerber_rel}")
             # Report spec overlay results
             if result.assembly_result.spec_overlay:
                 overlay = result.assembly_result.spec_overlay
