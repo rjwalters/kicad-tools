@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -35,8 +36,12 @@ def check(pcb_path, report_path):
         apply_waivers(results, load_waivers(waivers_path))
     errors = sum(v.is_error for v in results.violations)
     warnings = sum(v.is_warning for v in results.violations)
+    # Issue #7273: ``scripts/boards/refresh_readiness.py`` sets this and gates
+    # the listed warnings by rule against its own allowlist; standalone runs
+    # stay strict.
+    report_warnings = os.environ.get("KCT_BOARD_CHECK_REPORT_WARNINGS") == "1"
     drc = SubCheckResult(
-        "PASSED" if not errors and not warnings else "FAILED",
+        "PASSED" if not errors and (report_warnings or not warnings) else "FAILED",
         f"{errors} errors, {warnings} warnings",
     )
     meta = run_meta_checks(pcb_path, drc, schematic=str(sch), strict=True)

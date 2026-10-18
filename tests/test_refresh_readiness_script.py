@@ -207,3 +207,86 @@ def test_board04_uses_its_own_manufacturing_check(mod):
     board = mod.REPO_ROOT / "boards" / "04-stm32-devboard"
     assert (board / cfg.check_script).is_file()
     assert (board / cfg.routed_pcb).is_file() and (board / cfg.schematic).is_file()
+
+
+# --------------------------------------------------------------------------- Issue #7273
+def _report(warnings: dict[str, int], errors: int = 0) -> dict:
+    meta = {k: {"status": "PASSED"} for k in ("drc", "erc", "lvs", "manifest")}
+    return {
+        "summary": {"errors": errors, "warnings": sum(warnings.values())},
+        "violations": [
+            {"rule_id": rule, "severity": "warning"}
+            for rule, count in warnings.items()
+            for _ in range(count)
+        ],
+        "meta_checks": meta,
+    }
+
+
+def test_known_warnings_do_not_block(mod):
+    known = {"via_at_pad_edge": 3}
+    assert mod.check_report_verdict(_report({"via_at_pad_edge": 3}), "x", known) == (True, 0)
+    # Fewer warnings than listed (a partial fix) still passes.
+    assert mod.check_report_verdict(_report({"via_at_pad_edge": 1}), "x", known) == (True, 0)
+
+
+def test_warning_count_above_the_list_refuses(mod):
+    with pytest.raises(mod.GateFailure, match="via_at_pad_edge"):
+        mod.check_report_verdict(_report({"via_at_pad_edge": 4}), "x", {"via_at_pad_edge": 3})
+
+
+def test_unlisted_warning_rule_refuses(mod):
+    report = _report({"via_at_pad_edge": 3, "silk_over_pad": 1})
+    with pytest.raises(mod.GateFailure, match="silk_over_pad"):
+        mod.check_report_verdict(report, "x", {"via_at_pad_edge": 3})
+
+
+def test_error_refuses_even_with_known_warnings(mod):
+    report = _report({"via_at_pad_edge": 3}, errors=1)
+    with pytest.raises(mod.GateFailure):
+        mod.check_report_verdict(report, "x", {"via_at_pad_edge": 3})
+
+
+def test_empty_known_warnings_keeps_zero_warning_behaviour(mod):
+    assert mod.check_report_verdict(_report({}), "x") == (True, 0)
+    with pytest.raises(mod.GateFailure):
+        mod.check_report_verdict(_report({"via_at_pad_edge": 1}), "x", {})
+
+
+def test_summary_disagreeing_with_findings_refuses(mod):
+    report = _report({"via_at_pad_edge": 1})
+    report["summary"]["warnings"] = 2  # a warning the finding list does not show
+    with pytest.raises(mod.GateFailure):
+        mod.check_report_verdict(report, "x", {"via_at_pad_edge": 5})
+
+
+def test_waived_findings_are_not_counted(mod):
+    report = _report({})
+    report["violations"] = [{"rule_id": "r", "severity": "warning", "waived": True}]
+    assert mod.check_report_verdict(report, "x") == (True, 0)
+
+
+def test_known_warnings_for_boards_04_and_05(mod):
+    assert mod.BOARDS["04-stm32-devboard"].known_warnings == {"thermal_asymmetry": 9}
+    assert mod.BOARDS["05-bldc-motor-controller"].known_warnings == {"via_at_pad_edge": 3}
+
+
+#: Board 03 (4-layer, firmware bundle, own manufacturing-requirements) has no
+#: refresh config yet; Issue #7273 scoped it out.  Remove it from here when added.
+_NO_REFRESH_CONFIG = {"03-usb-joystick"}
+
+
+def test_every_demo_board_has_a_refresh_config(mod):
+    boards = sorted(p.name for p in (mod.REPO_ROOT / "boards").glob("0[0-7]-*") if p.is_dir())
+    assert len(boards) == 8
+    assert not _NO_REFRESH_CONFIG & set(mod.BOARDS)  # stale exemption
+    boards = [b for b in boards if b not in _NO_REFRESH_CONFIG]
+    for name in boards:
+        cfg = mod.BOARDS[name]
+        board = mod.REPO_ROOT / "boards" / name
+        assert (board / cfg.routed_pcb).is_file(), name
+        assert (board / cfg.schematic).is_file(), name
+        for archive, _ in cfg.archives:
+            assert (board / archive).is_file(), (name, archive)
+        for job in cfg.erc:
+            assert (board / job.directory / job.schematic).is_file(), (name, job.key)

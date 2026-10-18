@@ -24,8 +24,9 @@ unless every gate passes:
    ``redesign/package.py:refresh_manifest``.  Only ``files`` may change.
 4. Gates, all run on the staged board:
    * ``kicad-cli pcb drc --refill-zones``: 0 errors, 0 unconnected items;
-   * ``kct check --mfr <tier>``: 0 errors, 0 warnings, and the drc, erc,
-     lvs and manifest meta-checks all PASSED.  A board whose fabrication
+   * ``kct check --mfr <tier>``: 0 errors, no warnings beyond the board's
+     ``known_warnings`` allowlist (Issue #7273), and the drc, erc, lvs and
+     manifest meta-checks all PASSED.  A board whose fabrication
      process the generic tier cannot model (board 04's paid 0.15 mm drill)
      sets ``check_script`` instead; that board-local check must meet the same
      bar (Issue #6269);
@@ -122,6 +123,11 @@ class BoardConfig:
     # ``(mirror_dir, source_dir)``: every file already in ``mirror_dir`` is
     # refreshed from ``source_dir`` before the archives are rebuilt.
     mirrors: tuple[tuple[str, str], ...] = ()
+    # Warning rules the board is known to carry, as ``{rule_id: max count}``
+    # (Issue #7273).  A warning of any other rule, or more warnings of a listed
+    # rule than its count, still refuses; so does every error.  Empty means no
+    # warning is tolerated.  Delete an entry when the tracked fix lands.
+    known_warnings: dict[str, int] = field(default_factory=dict)
     archives: tuple[tuple[str, tuple[str, ...]], ...] = field(
         default=(
             ("output/manufacturing/kicad_project.zip", ("output", ".")),
@@ -142,8 +148,43 @@ BOARDS: dict[str, BoardConfig] = {
         tier="jlcpcb-tier1",
         erc=(ErcJob("04-native-erc.json", "output", "stm32_devboard.kicad_sch", ()),),
         check_script="check_manufacturing.py",
+        # Left for #7220 PR2 (narrower-spoke fill repair); delete when it lands.
+        known_warnings={"thermal_asymmetry": 9},
         mirrors=(("output/manufacturing/design-source", "."),),
         archives=(("output/manufacturing/kicad_project.zip", ("output", ".")),),
+    ),
+    # Boards 00-02 are ``kct readiness`` packages (no board-local check, no
+    # recorded warnings), refreshed through the same gates (Issue #7273).
+    # Board 00/01 ship no native-ERC report copies, so ``erc`` is empty.
+    "00-simple-led": BoardConfig(
+        routed_pcb="output/simple_led_routed.kicad_pcb",
+        schematic="output/simple_led.kicad_sch",
+        tier="jlcpcb",
+        erc=(),
+        archives=(("output/manufacturing/kicad_project.zip", ("output", ".")),),
+    ),
+    "01-voltage-divider": BoardConfig(
+        routed_pcb="output/voltage_divider_routed.kicad_pcb",
+        schematic="output/voltage_divider.kicad_sch",
+        tier="jlcpcb",
+        erc=(),
+        archives=(("output/manufacturing/kicad_project.zip", ("output", ".")),),
+    ),
+    "02-charlieplex-led": BoardConfig(
+        routed_pcb="output/charlieplex_3x3_routed.kicad_pcb",
+        schematic="output/charlieplex_3x3.kicad_sch",
+        tier="jlcpcb",
+        erc=(
+            ErcJob(
+                "02-native-erc.json",
+                "output",
+                "charlieplex_3x3.kicad_sch",
+                (
+                    "output/readiness/native-erc.json",
+                    "output/manufacturing/native-erc.json",
+                ),
+            ),
+        ),
     ),
     "05-bldc-motor-controller": BoardConfig(
         routed_pcb="output/bldc_controller_routed.kicad_pcb",
@@ -162,6 +203,8 @@ BOARDS: dict[str, BoardConfig] = {
             ),
         ),
         manifest_refresher="redesign/package.py:refresh_manifest",
+        # Left for #7220 PR3 (router mask-dam fix); delete when it lands.
+        known_warnings={"via_at_pad_edge": 3},
     ),
     "06-diffpair-test": BoardConfig(
         routed_pcb="output/diffpair_test_routed.kicad_pcb",
@@ -358,16 +401,61 @@ def gate_native_drc(board: Path, cfg: BoardConfig) -> int:
     return len(errors)
 
 
-def check_report_verdict(data: dict, label: str) -> tuple[bool, int]:
-    """Gate a ``kct check``-format report: 0 errors, 0 warnings, meta all PASSED."""
+def warning_counts_by_rule(data: dict) -> dict[str, int]:
+    """Active (non-waived) warning findings of a ``kct check`` report, by rule."""
+    counts: dict[str, int] = {}
+    for violation in data.get("violations", []):
+        if (
+            isinstance(violation, dict)
+            and violation.get("severity") == "warning"
+            and not violation.get("waived")
+        ):
+            rule = str(violation.get("rule_id") or "unknown")
+            counts[rule] = counts.get(rule, 0) + 1
+    return dict(sorted(counts.items()))
+
+
+def unaccepted_warnings(
+    data: dict, known_warnings: dict[str, int] | None = None
+) -> dict[str, tuple[int, int]]:
+    """``{rule: (found, allowed)}`` for warnings the allowlist does not cover."""
+    known = known_warnings or {}
+    counts = warning_counts_by_rule(data)
+    summary_total = data.get("summary", {}).get("warnings")
+    if isinstance(summary_total, int) and summary_total != sum(counts.values()):
+        # The summary and the finding list disagree: never trust the allowlist.
+        counts["<summary/violations mismatch>"] = abs(summary_total - sum(counts.values()))
+    return {
+        rule: (count, known.get(rule, 0))
+        for rule, count in counts.items()
+        if count > known.get(rule, 0)
+    }
+
+
+def check_report_verdict(
+    data: dict, label: str, known_warnings: dict[str, int] | None = None
+) -> tuple[bool, int]:
+    """Gate a ``kct check``-format report.
+
+    0 errors, meta all PASSED, and no warning outside ``known_warnings``
+    (Issue #7273): the same semantics as ``kct readiness``, where listed
+    warnings are reviewed rather than blocking.
+    """
     summary, meta = data.get("summary", {}), data.get("meta_checks", {})
     statuses = {k: meta.get(k, {}).get("status") for k in ("drc", "erc", "lvs", "manifest")}
     lvs = meta.get("lvs", {})
     mismatches = len(lvs.get("mismatches", [])) + len(lvs.get("copper_mismatches", []))
     errors, warnings = summary.get("errors"), summary.get("warnings")
     log(f"  gate {label}: {errors} error(s), {warnings} warning(s), meta {statuses}")
-    if errors != 0 or warnings != 0 or any(s != "PASSED" for s in statuses.values()):
+    if warnings:
+        log(f"    warnings by rule: {warning_counts_by_rule(data)}; allowed {known_warnings or {}}")
+    if errors != 0 or warnings is None or any(s != "PASSED" for s in statuses.values()):
         raise GateFailure(f"{label} failed")
+    extra = unaccepted_warnings(data, known_warnings)
+    if extra:
+        raise GateFailure(
+            f"{label} failed: warnings beyond the known list (found, allowed): {extra}"
+        )
     return statuses["lvs"] == "PASSED", mismatches
 
 
@@ -389,7 +477,7 @@ def gate_kct_check(board: Path, cfg: BoardConfig) -> tuple[bool, int]:
         if not report.is_file():
             raise GateFailure("kct check did not produce a report")
         data = json.loads(report.read_text())
-    return check_report_verdict(data, f"kct check --mfr {cfg.tier}")
+    return check_report_verdict(data, f"kct check --mfr {cfg.tier}", cfg.known_warnings)
 
 
 def gate_board_check(board: Path, cfg: BoardConfig) -> tuple[bool, int]:
@@ -401,12 +489,17 @@ def gate_board_check(board: Path, cfg: BoardConfig) -> tuple[bool, int]:
         proc = run(
             [sys.executable, str(script), str(board / cfg.routed_pcb), str(report)],
             cwd=board,
-            env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+            env={
+                **os.environ,
+                "PYTHONDONTWRITEBYTECODE": "1",
+                # The refresher applies ``cfg.known_warnings`` itself.
+                "KCT_BOARD_CHECK_REPORT_WARNINGS": "1",
+            },
         )
         if not report.is_file():
             raise GateFailure(f"{cfg.check_script} did not produce a report: {proc.stderr[-2000:]}")
         data = json.loads(report.read_text())
-    verdict = check_report_verdict(data, cfg.check_script)
+    verdict = check_report_verdict(data, cfg.check_script, cfg.known_warnings)
     if proc.returncode != 0:
         raise GateFailure(f"{cfg.check_script} exited {proc.returncode}")
     return verdict
