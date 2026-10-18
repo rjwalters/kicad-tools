@@ -24,7 +24,12 @@ from .editor import (
     Via,
     Zone,
 )
-from .exporter import KiCadPCBExporter, update_pcb_placements
+from .exporter import (
+    KiCadPCBExporter,
+    LayoutApplyError,
+    LayoutApplyReport,
+    update_pcb_placements,
+)
 from .footprints import (
     Footprint,
     FootprintLibrary,
@@ -57,5 +62,7 @@ __all__ = [
     "PCBLayout",
     # Exporter
     "KiCadPCBExporter",
+    "LayoutApplyError",
+    "LayoutApplyReport",
     "update_pcb_placements",
 ]

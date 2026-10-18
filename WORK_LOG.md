@@ -15,6 +15,14 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-18
 
+- **PR #7054**: chore(board-03): refresh readiness evidence after #7036 (main CI red, #7042)
+- **PR #7074**: fix(creepage): key IEC 60664-1 clearance on rated impulse voltage, not working-voltage peak
+- **PR #7061**: fix(placement): honour align --tolerance, count real moves, reject bad axis/reference
+- **PR #7069**: fix: make four documented-but-dead CLI flags real or honest
+- **Issue #7042** (closed): main red: #7036 changed board-03 routing_plan.py without refreshing readiness.json
+- **Issue #7057** (closed): kct creepage --standard iec60664: required clearance is looked up in Table F.2 by peak working voltage, so mains clearance comes out 0.2 mm instead of 1.5 mm
+- **Issue #7056** (closed): kct placement align --tolerance is a no-op: align_components ignores tolerance_mm, overcounts moves, silently centres on mismatched --reference
+- **Issue #7065** (closed): Finish or make honest four CLI flags whose documented behaviour is never implemented
 - **PR #7049**: fix: Project.create builds .kicad_pcb via PCB.create (KiCad 10 failed to load the old board, #7047)
 - **PR #7066**: docs: GPU/batched routing design note (profile-first)
 - **PR #7015**: test: resolve 10 never-running tests left behind by #3133

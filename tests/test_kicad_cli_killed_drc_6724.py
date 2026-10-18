@@ -1172,12 +1172,16 @@ class TestOtherCallSites:
         pcb.write_text("(kicad_pcb)")
         (tmp_path / "board.kicad_sch").write_text("(kicad_sch)")
         _fake_kicad_cli(monkeypatch, auditor_mod, returncode=-signal.SIGKILL, report=None)
+        # _check_erc resolves kicad-cli before exec (#7083).
+        monkeypatch.setattr("kicad_tools.cli.runner.find_kicad_cli", lambda: FAKE_CLI)
 
         status = ManufacturingAudit(pcb, manufacturer="jlcpcb")._check_erc()
 
         assert status.passed is False
         assert status.blocking_error_count >= 1
         assert "SIGKILL" in status.details
+        # A killed ERC stays NOT_READY (#6724), not the softer #7083 path.
+        assert status.could_not_verify is False
 
     def test_audit_erc_empty_report_does_not_pass(self, monkeypatch, tmp_path):
         import kicad_tools.audit.auditor as auditor_mod
@@ -1187,6 +1191,8 @@ class TestOtherCallSites:
         pcb.write_text("(kicad_pcb)")
         (tmp_path / "board.kicad_sch").write_text("(kicad_sch)")
         _fake_kicad_cli(monkeypatch, auditor_mod, returncode=0, report=None)
+        # _check_erc resolves kicad-cli before exec (#7083).
+        monkeypatch.setattr("kicad_tools.cli.runner.find_kicad_cli", lambda: FAKE_CLI)
 
         status = ManufacturingAudit(pcb, manufacturer="jlcpcb")._check_erc()
 
