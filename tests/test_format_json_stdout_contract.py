@@ -28,6 +28,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -450,20 +451,48 @@ _SUBPROCESS_TIMEOUT_S = 50
 _MPLCONFIGDIR = Path(tempfile.gettempdir()) / "kct-contract-mplconfig"
 
 
-def _iter_json_leaves(parser: argparse.ArgumentParser, path: tuple[str, ...] = ()):
-    """Yield ``"a b"`` leaf paths whose ``--format`` offers ``json``."""
+def _iter_parser_nodes(parser: argparse.ArgumentParser, path: tuple[str, ...] = ()):
+    """Yield ``(path, parser)`` for every node, intermediate ones included."""
+    yield path, parser
     for action in parser._actions:
         if isinstance(action, argparse._SubParsersAction):
             for name, sub in action.choices.items():
-                yield from _iter_json_leaves(sub, (*path, name))
-    for action in parser._actions:
-        if "--format" in action.option_strings and action.choices and "json" in action.choices:
-            yield " ".join(path)
-            return
+                yield from _iter_parser_nodes(sub, (*path, name))
+
+
+def _offers_json(parser: argparse.ArgumentParser) -> bool:
+    return any(
+        "--format" in action.option_strings and action.choices and "json" in action.choices
+        for action in parser._actions
+    )
+
+
+def _iter_json_leaves(parser: argparse.ArgumentParser, path: tuple[str, ...] = ()):
+    """Yield ``"a b"`` leaf paths whose ``--format`` offers ``json``."""
+    for node_path, node in _iter_parser_nodes(parser, path):
+        if _offers_json(node):
+            yield " ".join(node_path)
 
 
 def _discovered_json_leaves() -> set[str]:
     return set(_iter_json_leaves(resolve_passthrough(create_parser())))
+
+
+# A stale-API crash (#7114/#7115 class) surfaces on stderr -- or in a JSON
+# ``error`` field -- as one of these; ordinary user errors do not match.
+_CRASH_RE = re.compile(
+    r"Traceback"
+    r"|(Type|Attribute|Import|ModuleNotFound|Key|Name|UnboundLocal)Error"
+    r"|has no attribute|unexpected keyword argument|cannot import name"
+)
+
+
+def _help_nodes() -> list[tuple[str, ...]]:
+    """Every parser node path, plus each ``footprint generate`` type."""
+    from kicad_tools.cli.footprint_generate import GENERATORS
+
+    paths = [p for p, _ in _iter_parser_nodes(resolve_passthrough(create_parser()))]
+    return [*paths, *(("footprint", "generate", name) for name in sorted(GENERATORS))]
 
 
 def _kicad_cli_available() -> bool:
@@ -575,7 +604,7 @@ def _assert_single_json_document(
     # pipes open after killing only the direct child, blocking communicate()
     # forever. Kill the whole group on timeout instead.
     child = subprocess.Popen(
-        [sys.executable, "-m", "kicad_tools.cli", *argv],
+        [sys.executable, "-m", "kicad_tools.cli", "--verbose", *argv],
         cwd=scratch,
         env=_hermetic_env(scratch),
         stdin=subprocess.DEVNULL,
@@ -592,11 +621,18 @@ def _assert_single_json_document(
         pytest.fail(f"kct {' '.join(argv)} did not finish within {timeout_s}s")
     proc = subprocess.CompletedProcess(child.args, child.returncode, stdout, stderr)
 
+    crash = _CRASH_RE.search(proc.stderr)
+    if crash:
+        pytest.fail(
+            f"kct {leaf} --format json crashed ({crash.group(0)!r}); exit={proc.returncode}\n"
+            f"--- stderr (tail) ---\n{proc.stderr[-1500:]}"
+        )
+
     if proc.returncode != 0 and not proc.stdout.strip():
-        return  # failure reported on stderr only; stdout is not corrupted
+        return  # user error reported on stderr only; stdout is not corrupted
 
     try:
-        json.loads(proc.stdout)
+        doc = json.loads(proc.stdout)
     except json.JSONDecodeError as exc:
         pytest.fail(
             f"kct {leaf} --format json wrote non-JSON to stdout ({exc}); "
@@ -604,3 +640,25 @@ def _assert_single_json_document(
             f"--- stdout (head) ---\n{proc.stdout[:1500]}\n"
             f"--- stderr (tail) ---\n{proc.stderr[-1500:]}"
         )
+    error = doc.get("error") if isinstance(doc, dict) else None
+    if isinstance(error, str) and _CRASH_RE.search(error):
+        pytest.fail(f"kct {leaf} --format json reported a crash in its error field: {error!r}")
+
+
+@pytest.mark.parametrize("path", _help_nodes(), ids=lambda p: " ".join(p))
+def test_every_subcommand_help_is_clean(path, capsys):
+    """``--help`` renders for every parser node without raising (#5028)."""
+    if path[:2] == ("footprint", "generate"):
+        # ``footprint generate`` owns its argv (passthrough); build its parser.
+        from kicad_tools.cli.footprint_generate import main as generate_main
+
+        run = lambda: generate_main([*path[2:], "--help"])  # noqa: E731
+    else:
+        parser = resolve_passthrough(create_parser())
+        run = lambda: parser.parse_args([*path, "--help"])  # noqa: E731
+    with pytest.raises(SystemExit) as exc:
+        run()
+    out = capsys.readouterr()
+    assert exc.value.code == 0, f"{' '.join(path)} --help exited {exc.value.code}\n{out.err}"
+    assert "Traceback" not in out.out + out.err
+    assert out.out.strip(), f"{' '.join(path)} --help printed nothing"

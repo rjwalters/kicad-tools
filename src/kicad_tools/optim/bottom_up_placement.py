@@ -510,7 +510,7 @@ def place_hierarchical_from_pcb(
     """
     # Importing inside the function keeps the module top-level cheap and
     # avoids circular imports (PCB module pulls in a lot).
-    from kicad_tools.optim.board_outline import extract_board_outline
+    from kicad_tools.optim.board_outline import extract_board_outline, to_origin_relative
 
     fixed = set(fixed_refs or [])
 
@@ -530,7 +530,8 @@ def place_hierarchical_from_pcb(
         pass
 
     if board is None:
-        board = extract_board_outline(pcb)
+        # Raw Edge.Cuts are absolute; footprints are origin-relative (#7106).
+        board = to_origin_relative(extract_board_outline(pcb), pcb)
 
     if board is None:
         # Mirror PlacementOptimizer.from_pcb's fallback: estimate from footprint

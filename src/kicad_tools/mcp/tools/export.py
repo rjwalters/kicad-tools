@@ -124,6 +124,51 @@ def validate_assembly_bom(
 SUPPORTED_MANUFACTURERS = ["generic", "jlcpcb", "pcbway", "oshpark", "seeed"]
 
 
+def _gerber_files_in(directory: Path, since: float | None = None) -> list[GerberFile]:
+    """List Gerber files in *directory*, looking inside any ``.zip`` archives.
+
+    Loose files are listed as-is.  For every ``*.zip`` the archive's own entry
+    is kept and its member names are added too, so a zipped export still
+    counts its copper layers (issue #7115).  ``since`` restricts the listing
+    to files (and archives) modified at or after that timestamp (issue #6913).
+    """
+    found: list[GerberFile] = []
+    for file_path in sorted(directory.iterdir()):
+        if not file_path.is_file():
+            continue
+        if since is not None and file_path.stat().st_mtime < since:
+            continue
+        layer = _extract_layer_from_filename(file_path.name)
+        found.append(
+            GerberFile(
+                filename=file_path.name,
+                layer=layer,
+                file_type=_determine_file_type(file_path.name, layer),
+                size_bytes=file_path.stat().st_size,
+            )
+        )
+        if file_path.suffix.lower() == ".zip":
+            try:
+                with zipfile.ZipFile(file_path) as zf:
+                    members = [i for i in zf.infolist() if not i.is_dir()]
+            except (zipfile.BadZipFile, OSError):
+                continue
+            for info in members:
+                name = Path(info.filename).name
+                if any(f.filename == name for f in found):
+                    continue  # also present loose; don't double count
+                member_layer = _extract_layer_from_filename(name)
+                found.append(
+                    GerberFile(
+                        filename=name,
+                        layer=member_layer,
+                        file_type=_determine_file_type(name, member_layer),
+                        size_bytes=info.file_size,
+                    )
+                )
+    return found
+
+
 def export_gerbers(
     pcb_path: str,
     output_dir: str,
@@ -206,23 +251,7 @@ def export_gerbers(
         files: list[GerberFile] = []
         out_dir.mkdir(parents=True, exist_ok=True)
 
-        for file_path in out_dir.iterdir():
-            # Report only files this call produced, not stale leftovers from a
-            # previous export into the same directory (issue #6913).  The
-            # 2 s slack absorbs coarse filesystem mtime granularity.
-            if file_path.is_file() and file_path.stat().st_mtime >= export_started - 2:
-                # Determine layer from filename
-                layer = _extract_layer_from_filename(file_path.name)
-                file_type = _determine_file_type(file_path.name, layer)
-
-                files.append(
-                    GerberFile(
-                        filename=file_path.name,
-                        layer=layer,
-                        file_type=file_type,
-                        size_bytes=file_path.stat().st_size,
-                    )
-                )
+        files.extend(_gerber_files_in(out_dir, since=export_started - 2))
 
         # Determine zip file path
         zip_file: str | None = None
@@ -241,6 +270,7 @@ def export_gerbers(
             return GerberExportResult(
                 success=False,
                 output_dir=str(out_dir),
+                zip_file=zip_file,
                 files=files,
                 error="Export produced no copper-layer Gerber files",
                 warnings=warnings,
@@ -462,18 +492,7 @@ def export_assembly(
             )
 
             if gerber_dir.exists():
-                for file_path in gerber_dir.iterdir():
-                    if file_path.is_file():
-                        layer = _extract_layer_from_filename(file_path.name)
-                        file_type = _determine_file_type(file_path.name, layer)
-                        gerber_files.append(
-                            GerberFile(
-                                filename=file_path.name,
-                                layer=layer,
-                                file_type=file_type,
-                                size_bytes=file_path.stat().st_size,
-                            )
-                        )
+                gerber_files.extend(_gerber_files_in(gerber_dir))
 
             copper_layers = [f for f in gerber_files if f.file_type == "copper"]
             gerbers_result = GerberExportResult(

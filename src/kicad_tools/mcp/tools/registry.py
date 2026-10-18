@@ -457,9 +457,8 @@ def _handler_placement_suggestions(params: dict[str, Any]) -> dict[str, Any]:
         pcb_path=params["pcb_path"],
         component=params.get("component"),
         max_suggestions=params.get("max_suggestions", 10),
-        strategy=params.get("strategy", "balanced"),
     )
-    return result.to_dict()
+    return result
 
 
 register_tool(
@@ -483,12 +482,6 @@ register_tool(
                 "type": "integer",
                 "description": "Maximum number of suggestions (1-50)",
                 "default": 10,
-            },
-            "strategy": {
-                "type": "string",
-                "description": "Optimization strategy (balanced, wire_length, thermal, si)",
-                "enum": ["balanced", "wire_length", "thermal", "si"],
-                "default": "balanced",
             },
         },
         required=["pcb_path"],

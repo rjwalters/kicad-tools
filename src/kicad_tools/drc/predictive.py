@@ -358,24 +358,104 @@ class PredictiveAnalyzer:
         ref: str,
         new_pos: tuple[float, float],
     ) -> list[PredictiveWarning]:
-        """Check if move has thermal implications.
+        """Check if moving a heat source clusters it with other heat sources.
 
-        Currently a placeholder for future thermal analysis.
-        Could check for:
-        - Moving heat sources close together
-        - Moving heat sources away from thermal vias
-        - Moving heat sources near heat-sensitive components
+        Uses :class:`~kicad_tools.analysis.thermal.ThermalAnalyzer` for the
+        heat-source model, cluster radius and severity. The cluster around the
+        moved component is scored before and after the move (using live
+        optimizer positions, not the stale PCB), and a warning is emitted only
+        when the move makes the cluster severity strictly worse and at least
+        WARM.
+
+        Checked: moving heat sources together.
+        Still follow-ups: moving heat sources away from thermal vias, moving
+        heat sources near heat-sensitive neighbours.
 
         Args:
             ref: Component reference
             new_pos: New (x, y) position
 
         Returns:
-            List of thermal warnings (currently empty)
+            List of thermal warnings (empty unless the move worsens a cluster)
         """
-        # Thermal analysis is a future enhancement
-        # For now, return empty list
-        return []
+        from dataclasses import replace
+
+        from kicad_tools.analysis.thermal import ThermalAnalyzer, ThermalSeverity
+
+        pcb = self.session.pcb
+        thermal = ThermalAnalyzer()
+        sources = thermal._identify_heat_sources(pcb)
+
+        moved = next((s for s in sources if s.reference == ref), None)
+        if moved is None:
+            return []
+
+        # Overlay live positions: the PCB object is stale after applied moves.
+        live = []
+        for s in sources:
+            comp = self._optimizer.get_component(s.reference)
+            live.append(replace(s, position=(comp.x, comp.y)) if comp else s)
+        current = next(s for s in live if s.reference == ref)
+        others = [s for s in live if s.reference != ref]
+
+        def cluster_around(pos: tuple[float, float]) -> list:
+            member = replace(current, position=pos)
+            near = [
+                s
+                for s in others
+                if math.hypot(s.position[0] - pos[0], s.position[1] - pos[1])
+                <= thermal.cluster_radius
+            ]
+            return [member, *near]
+
+        after_cluster = cluster_around(new_pos)
+        if len(after_cluster) < 2:
+            return []
+
+        before = thermal._analyze_cluster(cluster_around(current.position), pcb)
+        after = thermal._analyze_cluster(after_cluster, pcb)
+
+        order = [
+            ThermalSeverity.OK,
+            ThermalSeverity.WARM,
+            ThermalSeverity.HOT,
+            ThermalSeverity.CRITICAL,
+        ]
+        if order.index(after.severity) < 1 or order.index(after.severity) <= order.index(
+            before.severity
+        ):
+            return []
+
+        # Severity-to-confidence mapping (not a physical quantity)
+        confidence = {
+            ThermalSeverity.WARM: 0.6,
+            ThermalSeverity.HOT: 0.75,
+            ThermalSeverity.CRITICAL: 0.9,
+        }[after.severity]
+
+        neighbours = ", ".join(s.reference for s in after_cluster if s.reference != ref)
+        suggestions = thermal._suggest_improvements(after, pcb)
+        suggestion = (
+            suggestions[0]
+            if suggestions
+            else "Spread heat sources apart or add thermal vias / copper pour"
+        )
+
+        return [
+            PredictiveWarning(
+                type="thermal",
+                message=(
+                    f"Moving {ref} to ({new_pos[0]:.1f}, {new_pos[1]:.1f}) clusters "
+                    f"{len(after_cluster)} heat sources ({neighbours}) within "
+                    f"{thermal.cluster_radius:.0f} mm: {after.total_power_w:.2f} W combined, "
+                    f"est. +{after.max_temp_rise_c:.0f} C ({after.severity.value})"
+                ),
+                confidence=confidence,
+                suggestion=suggestion,
+                affected_nets=[],
+                location=after.position,
+            )
+        ]
 
     def _check_intent_risks(
         self,

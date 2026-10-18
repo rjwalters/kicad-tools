@@ -241,6 +241,37 @@ def create_zones_for_pcb(pcb_path: Path) -> int:
     return zone_count
 
 
+def router_net_class_map(routed_path: Path) -> dict | None:
+    """The net-class map ``kct route`` routed this board under (Issue #6394).
+
+    ``kct route --net-class-map`` routes with ``DEFAULT_NET_CLASS_MAP`` plus
+    the name classifier for every other board net (``router/io.py``), with
+    the loaded sidecar merged over it, and declares that whole map in the
+    routed ``.kicad_pro``/``.kicad_dru`` (#6390).  The recipe replays the
+    plan instead of routing, so it rebuilds the same map here: the sidecar
+    :func:`route_pcb` wrote beside *routed_path*, over the classifier's map
+    of the board's nets.  Declaring only the sidecar's nine nets would drop
+    the classifier's ``Digital``/``Clock`` clearances to ``Default`` and
+    loosen the board's rules.  ``None`` when there is no sidecar, which
+    keeps whatever the sidecars already declare.
+    """
+    sidecar = routed_path.parent / "net_class_map.json"
+    if not sidecar.exists():
+        return None
+    from kicad_tools.router.net_class import classify_and_apply_rules
+    from kicad_tools.router.rules import DEFAULT_NET_CLASS_MAP, net_class_map_from_path
+    from kicad_tools.schema.pcb import PCB
+
+    names = {
+        number: net.name for number, net in PCB.load(str(routed_path)).nets.items() if net.name
+    }
+    merged = dict(DEFAULT_NET_CLASS_MAP)
+    for name, routing in classify_and_apply_rules(names).items():
+        merged.setdefault(name, routing)
+    merged.update(net_class_map_from_path(sidecar, pcb_path=routed_path))
+    return merged
+
+
 def apply_manufacturing_profile(routed_path: Path, *, manufacturer: str = "jlcpcb-tier1") -> None:
     """Persist the manufacturer profile's design-rule floors BEFORE any fill.
 
@@ -297,6 +328,7 @@ def apply_manufacturing_profile(routed_path: Path, *, manufacturer: str = "jlcpc
         manufacturer_id=profile.id,
         layers=layers,
         copper_oz=1.0,
+        router_net_classes=router_net_class_map(routed_path),
     )
     if written:
         print("   DRC-constraint sidecars: " + ", ".join(str(p) for p in written))
@@ -662,10 +694,24 @@ def route_pcb(input_path: Path, output_path: Path, *, use_saved_plan: bool = Tru
                 # P5 stretch target (#6447).
                 pair_protocol="USB2_FS",
             )
+    # Issue #6876 (operator ruling on #6824): the USB-C-side pair may run on
+    # the reserved In2.Cu plane.  ``--reserve-plane-layers`` keeps every other
+    # class off it; ``allow_plane_layers`` makes In2.Cu legal for these two
+    # nets only, and ``preferred_layers`` (#6854's lattice surcharge) steers
+    # the common run there.  USB_MCU_D+/- (the <=4 mm MCU launches) keep
+    # their default layers.
+    from kicad_tools.router.rules import resolve_layer_index
+
+    in2 = resolve_layer_index("In2.Cu")
     for net in ["USB_D+", "USB_D-"]:
-        # Short USB-C/ESD branches: routing_plan.usb_geometry separately
-        # requires >=4 mm common run, <=16 mm copper, <=2.5 mm skew.
-        net_class_map[net] = _dc_replace(net_class_map[net], coupled_continuity_threshold=0.25)
+        net_class_map[net] = _dc_replace(
+            net_class_map[net], allow_plane_layers=[in2], preferred_layers=[in2]
+        )
+    # Issue #6443: no ``coupled_continuity_threshold`` override.  Continuity
+    # is info-only now; the short USB-C/ESD branches are bounded by the
+    # uncoupled-length limit (USB2_FS: 6.35 mm x components on the net) and
+    # by routing_plan.usb_geometry (>=4 mm common run, <=16 mm copper,
+    # <=2.5 mm skew).
     sidecar_path = output_path.parent / "net_class_map.json"
     sidecar_path.write_text(_json.dumps(net_class_map_to_dict(net_class_map), indent=2))
     print(f"   Wrote net-class-map sidecar: {sidecar_path}")

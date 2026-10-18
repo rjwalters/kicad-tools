@@ -352,8 +352,10 @@ def test_board03_local_check_reads_the_table_and_the_committed_copper_passes():
         geometry = mod.usb_geometry(B03 / "output" / "usb_joystick_routed.kicad_pcb")
     finally:
         sys.modules.pop(spec.name, None)
-    # The reviewed copper clears the gate and the stretch target.
-    assert geometry["branch_skew_mm"] == pytest.approx(0.166, abs=0.001)
+    # The committed copper clears the gate and the stretch target.  Issue
+    # #6394: re-derived from a fresh lattice route, its USB_D track lengths
+    # are equal (15.720 mm each), so the track-length skew is 0.
+    assert geometry["branch_skew_mm"] == pytest.approx(0.0, abs=0.001)
     assert geometry["branch_skew_mm"] < mod.USB_SKEW_STRETCH_TARGET_MM < mod.USB_FS_MAX_SKEW_MM
 
 

@@ -734,6 +734,11 @@ class TestImage:
     def test_max_size_is_honoured(self, board: Path, cap: int):
         for view, kwargs in (("overview", {}), ("layers", {"net": "SIG"})):
             result = board_view(str(board), view, max_size_px=cap, **kwargs)
+            if cap < 800 and not result["success"]:
+                # At a small cap the caption can leave no room for a readable
+                # board, which is refused rather than drawn (#7115).
+                assert "raise max_size_px" in result["error_message"]
+                continue
             assert result["success"], result["error_message"]
             assert max(result["width_px"], result["height_px"]) <= cap
 
