@@ -202,8 +202,9 @@ def align_components(
         return 0
 
     # Get components
-    components = [optimizer.get_component(ref) for ref in actual_refs]
-    components = [c for c in components if c is not None and not c.fixed]
+    components = [
+        c for ref in actual_refs if (c := optimizer.get_component(ref)) is not None and not c.fixed
+    ]
 
     if len(components) < 2:
         return 0
@@ -272,8 +273,9 @@ def distribute_components(
         return 0
 
     # Get components
-    components = [optimizer.get_component(ref) for ref in actual_refs]
-    components = [c for c in components if c is not None and not c.fixed]
+    components = [
+        c for ref in actual_refs if (c := optimizer.get_component(ref)) is not None and not c.fixed
+    ]
 
     if len(components) < 2:
         return 0
@@ -354,8 +356,13 @@ def align_to_reference(
     actual_refs = _resolve_refs(optimizer, refs)
 
     # Get components to align (excluding reference)
-    components = [optimizer.get_component(ref) for ref in actual_refs]
-    components = [c for c in components if c is not None and not c.fixed and c.ref != reference_ref]
+    components = [
+        c
+        for ref in actual_refs
+        if (c := optimizer.get_component(ref)) is not None
+        and not c.fixed
+        and c.ref != reference_ref
+    ]
 
     if not components:
         return 0
