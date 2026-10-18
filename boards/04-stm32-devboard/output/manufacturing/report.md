@@ -55,7 +55,7 @@ The following 2 through-hole components are **excluded from the SMT pick-and-pla
 
 | Value | Package | Qty | References |
 |-------|---------|-----|------------|
-| SWD | PinHeader_1x06_P2.54mm_Vertical | 1 | J1 |
+| SWD-6 | PinHeader_1x06_P2.54mm_Vertical | 1 | J1 |
 | 8MHz | Crystal_HC49-4H_Vertical | 1 | Y1 |
 
 ## ERC Status

@@ -50,6 +50,10 @@ from kicad_tools.schematic.models.schematic import Schematic
 warn_if_stale()
 
 
+# J1 value shared by the schematic (DebugHeader emits ``SWD-<pins>``) and the
+# PCB footprint, so the two sides cannot drift (#7150).
+J1_VALUE = "SWD-6"
+
 # Deterministic PCB item UUIDs (Issue #6076): the n-th call in a build returns
 # the same uuid5 every run, so a fresh build is byte-reproducible.
 _PCB_UUIDS = UuidSequence("boards/04-stm32-devboard/stm32_devboard.kicad_pcb")
@@ -384,7 +388,10 @@ def create_stm32_schematic(output_dir: Path) -> Path:
             "5": "NRST",
         },
     )
-    print(f"   Debug header: {debug.header.reference} (SWD-6)")
+    assert debug.header.value == J1_VALUE, (
+        f"DebugHeader value {debug.header.value!r} != J1_VALUE {J1_VALUE!r}"
+    )
+    print(f"   Debug header: {debug.header.reference} ({J1_VALUE})")
 
     # Wire pin 1 (+3.3V) up to the 3.3V rail and pin 6 (GND) down to the
     # GND rail so the header power pins unify with their rails.  Matches
@@ -1134,7 +1141,7 @@ def create_stm32_pcb(output_dir: Path) -> Path:
     (fp_text reference "{ref}" (at 0 -9.0) (layer "F.SilkS") (uuid "{generate_uuid()}")
       (effects (font (size 1 1) (thickness 0.15)))
     )
-    (fp_text value "SWD" (at 0 8) (layer "F.Fab") (uuid "{generate_uuid()}")
+    (fp_text value "{J1_VALUE}" (at 0 8) (layer "F.Fab") (uuid "{generate_uuid()}")
       (effects (font (size 1 1) (thickness 0.15)))
     )
     (fp_line (start -1.38 {pin1_y - 1.38:.2f}) (end 0 {pin1_y - 1.38:.2f})

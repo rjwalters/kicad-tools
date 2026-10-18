@@ -44,7 +44,8 @@ class SyncIssue:
 
     Attributes:
         severity: Either "error" or "warning"
-        category: Issue category (missing_on_pcb, orphaned_on_pcb, net_mismatch, pin_mismatch)
+        category: Issue category (missing_on_pcb, orphaned_on_pcb, net_mismatch,
+            pin_mismatch, value_mismatch)
         message: Human-readable description of the issue
         suggestion: Actionable fix suggestion
         reference: Component reference involved (e.g., "R5", "C12")
@@ -66,7 +67,13 @@ class SyncIssue:
         """Validate severity and category values."""
         if self.severity not in ("error", "warning"):
             raise ValueError(f"severity must be 'error' or 'warning', got {self.severity!r}")
-        valid_categories = ("missing_on_pcb", "orphaned_on_pcb", "net_mismatch", "pin_mismatch")
+        valid_categories = (
+            "missing_on_pcb",
+            "orphaned_on_pcb",
+            "net_mismatch",
+            "pin_mismatch",
+            "value_mismatch",
+        )
         if self.category not in valid_categories:
             raise ValueError(f"category must be one of {valid_categories}, got {self.category!r}")
 
@@ -151,6 +158,11 @@ class SyncResult:
         """Pin-to-pad mapping issues."""
         return [i for i in self.issues if i.category == "pin_mismatch"]
 
+    @property
+    def value_mismatches(self) -> list[SyncIssue]:
+        """Different component values between schematic and PCB."""
+        return [i for i in self.issues if i.category == "value_mismatch"]
+
     def __iter__(self):
         """Iterate over all issues."""
         return iter(self.issues)
@@ -189,6 +201,8 @@ class SyncResult:
             parts.append(f"  Net mismatches: {len(self.net_mismatches)}")
         if self.pin_mismatches:
             parts.append(f"  Pin mismatches: {len(self.pin_mismatches)}")
+        if self.value_mismatches:
+            parts.append(f"  Value mismatches: {len(self.value_mismatches)}")
 
         return "\n".join(parts)
 
@@ -354,6 +368,9 @@ class NetlistValidator:
         # Check component synchronization (missing/orphaned)
         self._check_components(result)
 
+        # Check component values (schematic value vs PCB footprint value)
+        self._check_values(result)
+
         # Check net synchronization
         self._check_nets(result)
 
@@ -466,6 +483,41 @@ class NetlistValidator:
                     reference=ref,
                 )
             )
+
+    def _check_values(self, result: SyncResult) -> None:
+        """Flag components whose value differs between schematic and PCB.
+
+        Only references present on both sides are compared, and a pair is
+        skipped when either value is empty (issue #7150).  Schematic values
+        come from :meth:`_collect_schematic_refs`, so hierarchical
+        sub-sheets are covered.
+
+        Args:
+            result: SyncResult to add issues to
+        """
+        sch_refs = self._collect_schematic_refs()
+        for fp in self.pcb.footprints:
+            ref = fp.reference
+            if not ref or ref.startswith("#") or ref not in sch_refs:
+                continue
+            sch_value = sch_refs[ref].get("value") or ""
+            pcb_value = fp.value or ""
+            if sch_value and pcb_value and sch_value != pcb_value:
+                result.add(
+                    SyncIssue(
+                        severity="error",
+                        category="value_mismatch",
+                        message=(
+                            f'{ref} value mismatch: schematic has "{sch_value}", '
+                            f'PCB has "{pcb_value}"'
+                        ),
+                        suggestion=(
+                            f"Update the {ref} value so both agree, or run "
+                            "`kct sync --apply` to copy the schematic value to the PCB"
+                        ),
+                        reference=ref,
+                    )
+                )
 
     def _check_nets(self, result: SyncResult) -> None:
         """Check net names and per-pad net connectivity.
