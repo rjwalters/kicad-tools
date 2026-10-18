@@ -472,7 +472,7 @@ def build_pcb():
         )
     )
     for part in parts():
-        (
+        if part.footprint.startswith("board05_revB:"):
             pcb.add_footprint_from_file(
                 ROOT / "board05_revB.pretty" / (part.footprint.split(":")[1] + ".kicad_mod"),
                 part.ref,
@@ -480,9 +480,8 @@ def build_pcb():
                 value=part.value,
                 library_id=part.footprint,
             )
-            if part.footprint.startswith("board05_revB:")
-            else pcb.add_footprint(part.footprint, part.ref, *part.xy, value=part.value)
-        )
+        else:
+            pcb.add_footprint(part.footprint, part.ref, *part.xy, value=part.value)
         for number, net in part.nets.items():
             assert pcb.assign_net_to_footprint_pad(part.ref, number, net), (part.ref, number)
     for footprint in pcb._sexp.find_all("footprint"):

@@ -45,10 +45,11 @@ def _footprints_equivalent(sch_fp: str, pcb_fp: str) -> bool:
     When both sides carry a ``Library:`` nickname the full IDs must match, so
     ``Capacitor_SMD:X`` vs ``Resistor_SMD:X`` is real drift. If either side is
     a bare name (legacy boards) only the footprint names are compared.
+    Shares :func:`compare_footprint_lib_ids` with ``kct validate --sync``.
     """
-    if ":" in sch_fp and ":" in pcb_fp:
-        return sch_fp == pcb_fp
-    return sch_fp.split(":")[-1] == pcb_fp.split(":")[-1]
+    from kicad_tools.footprints.library_path import compare_footprint_lib_ids
+
+    return compare_footprint_lib_ids(sch_fp, pcb_fp) != "mismatch"
 
 
 def _values_equivalent(sch_value: str, pcb_value: str, reference: str) -> bool:

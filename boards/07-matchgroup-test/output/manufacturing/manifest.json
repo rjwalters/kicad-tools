@@ -21,16 +21,16 @@
       "size": 860
     },
     "check-report.json": {
-      "sha256": "42c42a57248e14ac1aad1cab4e061ab60db9ee3f03e0b3e25a67bbc6498db89d",
-      "size": 9446
+      "sha256": "9e7048cc0f2e63d1cbbd0afec9b352537872864ff279109cc8bebc3a4c4886fc",
+      "size": 11341
     },
     "cpl_jlcpcb.csv": {
       "sha256": "fcfd09f56fedca12282e66a638d6ea80b9ebf06e83d99b06911239e7bef5324a",
       "size": 2404
     },
     "design-source.zip": {
-      "sha256": "9d1db3e5022a76eab98e6d1ad176f63143a269e8fe7f98afb7299bb57e29bfe0",
-      "size": 1090954
+      "sha256": "9c7296a1b029edb7add5f95ae926d7100e4dad9a0539797f2f09de2470689b60",
+      "size": 1091224
     },
     "engineering/README.md": {
       "sha256": "539341a88badbaaebf417c584ca02b0405d7f9bd26f89bbddc6ae1f2c2d15dd0",
@@ -229,11 +229,11 @@
       "size": 518
     },
     "native-drc.json": {
-      "sha256": "9faf57fd42516ff327583b52a6003286d4395a34d9fdbfd0192dfb73e6ffb7dc",
+      "sha256": "6512287532359c484627a78b940203944c0293a50c2cf3314fcdbe6dacba832e",
       "size": 1235
     },
     "native-erc.json": {
-      "sha256": "9a50f87047d22c18bc09cae3173d7808ec2a4ffd56138e9f970e36094f13976a",
+      "sha256": "93857ab149854d815be5930d64ecf3ce3d7bb6293019e036c8dc2be8e77f585a",
       "size": 988
     },
     "procurement-review.md": {

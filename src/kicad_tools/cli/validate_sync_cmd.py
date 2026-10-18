@@ -213,6 +213,7 @@ def output_table(
         "orphaned_on_pcb": ("ORPHANED ON PCB", result.orphaned_on_pcb),
         "net_mismatch": ("NET MISMATCHES", result.net_mismatches),
         "pin_mismatch": ("PIN MISMATCHES", result.pin_mismatches),
+        "footprint_mismatch": ("FOOTPRINT MISMATCHES", result.footprint_mismatches),
     }
 
     for category_id, (label, issues) in categories.items():
@@ -263,6 +264,7 @@ def output_json(result: SyncResult, schematic_path: Path, pcb_path: Path) -> Non
             "orphaned_on_pcb": len(result.orphaned_on_pcb),
             "net_mismatches": len(result.net_mismatches),
             "pin_mismatches": len(result.pin_mismatches),
+            "footprint_mismatches": len(result.footprint_mismatches),
         },
         "issues": [i.to_dict() for i in result.issues],
     }
@@ -285,6 +287,8 @@ def output_summary(result: SyncResult, schematic_path: Path, pcb_path: Path) -> 
         print(f"Net mismatches:    {len(result.net_mismatches)}")
     if result.pin_mismatches:
         print(f"Pin mismatches:    {len(result.pin_mismatches)}")
+    if result.footprint_mismatches:
+        print(f"Footprint mismatches: {len(result.footprint_mismatches)}")
 
     print("-" * 40)
     print(f"Total errors:      {result.error_count}")
