@@ -50,8 +50,8 @@
     "kicad_tools_version": "0.23.0",
     "dirty": true,
     "manufacturer": "jlcpcb-tier1",
-    "commit": "f332f8ab61e2b4fb838d7b26ef8e3cbdbeb3a690",
-    "source_digest": "4f23a1884ef23ab6f7a971a4c0cb1ca13455abf6c0f7d9978142e5d917d77ea9",
+    "commit": "3a34b88ef064e8278363227a3835c22a48e43dcc",
+    "source_digest": "81bd20907d08f680be6faaf27a7b39e1dd5f6f2038dc0ae4e4d9dfd4952a6240",
     "kicad_cli_version": "10.0.6",
     "rules_digest": "f245a1bd3032c47159c0d3e22015c97ebb64bc687e82f37c5587e9a7b625d8a9"
   },
