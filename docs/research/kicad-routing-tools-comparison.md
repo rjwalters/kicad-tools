@@ -832,13 +832,78 @@ measured a matcher.**
    on this board reported every group as "not tuned (a member is unrouted)"
    and changed nothing. The loader now resolves such copper to its real net id
    (Issue #6970).
+5. **After #6972 / #6979: the clearance floor was not what blocked the
+   meanders (Issue #6969).** Measured on 2026-10-17 on the same local host,
+   kicad-cli 10.0.6. Inputs:
+   - **Completion re-run.** `krt_compare.py --boards 07a,07m --tools kct,ref`
+     at `main` `39f98192d`.
+   - **Tuner runs.** `main` `f8fc64033`, which includes #6972's partial-progress
+     keep and #6979's pairwise `max(group, neighbour)` class floor.
+
+   **Completion did not regress.** The re-run reproduces item 2's rows. 07a
+   kct: 52/55 nets, 158/161 connections, 549.26 s, 1 shared-referee error
+   (clearance), against 16 before. 07m kct: 54/55, 160/161, 393.23 s, 0
+   shared-referee errors. The 07m routed board is byte-identical to item 2's,
+   and so are its group spreads. The route-time tuner still tunes nothing
+   there, because the classes are `length_critical: false`. The run now says
+   so in a warning: `--length-match-groups is INACTIVE`.
+
+   **The floor in use is the class floor.** The tuner ran on the 07m kct output
+   through `retune_pcb` with `verbose=True`. It received 0.175 mm for
+   via/pad/intra-group, and a per-net map of 55 nets at 0.175 mm plus 1 at
+   0.200 mm (the Default fallback). The pre-#6972 run is reproduced by forcing
+   0.200 mm and no per-net map:
+
+   | Group | Spread mm (before → after) | Rejected @0.200 | Rejected @class | Rejected by rule @class | Accepted (amp. median mm) |
+   |---|---|---|---|---|---|
+   | SDRAM_BYTE0 | 20.21 → 8.62, kept as `improved_still_over_limit` | 26 | 26 | via 16, inter-net 8, pad 2 | 11 (0.78) |
+   | SDRAM_BYTE1 ¹ | 61.89 → 61.89 | 24 | 24 | via 14, inter-net 10 | 10 (0.89) |
+   | SDRAM_ADDRESS | 52.44 → 52.44 (rolled back) | 105 | 81 | intra-group 32, via 24, inter-net 20, pad 5 | 16 (0.25) |
+   | SDRAM_COMMAND | 20.69 → 5.86, kept as `improved_still_over_limit` | 35 | 34 | inter-net 18, via 16 | 7 (0.49) |
+
+   ¹ One member is unfinished.
+
+   The spread is the same at either floor in all four groups. Between 77% and
+   92% of the rejections per group are copper gaps under 0.15 mm or outright
+   overlaps; per-run bins vary slightly because the first violation found
+   depends on iteration order. Rejected amplitudes cover the whole ladder,
+   from 0.12 to 0.99 mm with a median of about 0.48 mm. The "about 0.12 mm" in
+   item 3 is the ladder's bottom rung (0.125 × the 1.0 mm base, shrunk to an
+   exact fit), not a ceiling. The two kept boards add **0 kicad-cli errors**
+   (`pcb drc --refill-zones`):
+   - Against the shared referee (the input `.kicad_pro`), the input, BYTE0 and
+     COMMAND all score 0 errors and 1 unconnected.
+   - Against kct's emitted project, the meanders add no violation. A
+     byte-identical board itself varies by ±5 clearance errors between
+     kicad-cli runs, all of them on preserved GND/+3V3/BOOT0 items.
+
+   `retune-lengths` still writes nothing for these two groups. It writes only
+   when every target is achieved, so the kept partial progress reaches a board
+   only through the route-time path.
+
+   **Against KRT** (MIT, pinned `64df3f58`; read, not run, because this host
+   has no KRT checkout):
+
+   | | kct `tune_match_group_v2` | KRT `apply_meanders_to_route` / `generate_trombone_meander` |
+   |---|---|---|
+   | Accepted unit | A whole trombone on one host segment. One conflict rejects every loop. | One bump. `get_safe_amplitude_at_point` per position. |
+   | Amplitude search | 1.0 / 0.5 / 0.25 / 0.125 × base, uniform across the trombone | 1.0 × 0.7ⁿ down to 0.2 mm, per bump |
+   | Side | One per attempt (outer, away from the nearest group member); pair legs also try the other side | Alternates; a blocked bump flips side, or the cursor skips forward on the centreline |
+   | Hosts | At most 3 segments per attempt | Every straight run ≥ 2 × amplitude, spilled across up to 10 rounds |
+
+   The concrete gap is placement granularity, not amplitude. On dense copper
+   a trombone that one via blocks is lost whole, while KRT would place the
+   bumps on either side of that via. The generator change is tracked
+   separately as #7043, as #6969 required.
 
 **Verdict.** The gap survives deconfounding. It is not the routing cap. It is
 the three wiring gaps in (1), then DRC-limited meander room and the
 all-or-nothing rollback in (3). Enabling `--length-match-groups` no longer
 costs connections (160/161 vs 158/161), but only because it runs no code on
 this path. Follow-ups: #6968 (the flag's three gaps), #6969 (meander room and
-rollback policy), and #6970 (the loader's net-0 keying, for `kct route`).
+rollback policy; item 5 shows the clearance floor was not the limit), #7043
+(per-bump meander placement), and #6970 (the loader's net-0 keying, for
+`kct route`).
 
 **Reference planes.** On board 06, kct put 22.8 mm of OUT4 on the In1.Cu GND
 plane. It warned about this, and the fix is the opt-in
