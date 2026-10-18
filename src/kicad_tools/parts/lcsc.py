@@ -663,16 +663,25 @@ class LCSCClient:
             return None
         if not isinstance(components, list):
             raise LCSCUnavailableError("Anonymous detail response is malformed")
+        if not all(isinstance(component, dict) for component in components):
+            raise LCSCUnavailableError("Anonymous detail response is malformed")
         for component in components:
-            if isinstance(component, dict) and component.get("componentCode") == lcsc_part:
+            if component.get("componentCode") == lcsc_part:
                 return self._parse_component(component)
-        raise LCSCUnavailableError("Anonymous detail response has malformed or mismatched identity")
+        # Fuzzy hits, none exact: the code is genuinely absent from the catalog.
+        return None
 
     def _parse_component(self, data: dict) -> Part:
         """Parse component data from API response."""
         # Extract price breaks
         prices = []
-        price_list = data.get("prices") or data.get("priceList") or []
+        price_list = (
+            data.get("componentPrices")
+            or data.get("buyComponentPrices")
+            or data.get("prices")
+            or data.get("priceList")
+            or []
+        )
         for price_break in price_list:
             qty = price_break.get("startNumber", 0)
             unit_price = price_break.get("productPrice", 0)
@@ -683,11 +692,16 @@ class LCSCClient:
         prices.sort(key=lambda p: p.quantity)
 
         # Get package info
-        package = data.get("encapStandard") or data.get("package") or ""
+        package = (
+            data.get("componentSpecificationEn")
+            or data.get("encapStandard")
+            or data.get("package")
+            or ""
+        )
         package_type = _guess_package_type(package)
 
         # Get description
-        description = data.get("componentModelEn") or data.get("describe") or ""
+        description = data.get("describe") or data.get("componentModelEn") or ""
 
         # Categorize
         category = _categorize_part(description, package)
@@ -701,7 +715,7 @@ class LCSCClient:
             package=package,
             package_type=package_type,
             stock=data.get("stockCount", 0),
-            min_order=data.get("minOrder", 1),
+            min_order=data.get("minPurchaseNum") or data.get("minOrder") or 1,
             prices=prices,
             is_basic=data.get("componentLibraryType") == "base",
             is_preferred=data.get("componentLibraryType") == "preferred",

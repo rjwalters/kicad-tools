@@ -493,6 +493,44 @@ class TestLCSCClient:
             assert part.is_basic is True
             assert len(part.prices) == 2
 
+    def test_lookup_parses_live_list_schema(self):
+        """Fields map from a real ``selectSmtComponentList`` item (C17414, trimmed)."""
+        item = {
+            "componentCode": "C17414",
+            "componentBrandEn": "UNI-ROYAL(Uniroyal Elec)",
+            "componentModelEn": "0805W8F1002T5E",
+            "componentSpecificationEn": "0805",
+            "describe": "-55\u2103~+155\u2103 10k\u03a9 125mW 150V Thick Film Resistor 0805",
+            "componentLibraryType": "base",
+            "stockCount": 56325047,
+            "minPurchaseNum": 1,
+            "dataManualUrl": "https://www.lcsc.com/datasheet/C17414.pdf",
+            "componentPrices": [
+                {"startNumber": 1, "endNumber": 999, "productPrice": 0.0033},
+                {"startNumber": 1000, "endNumber": 4999, "productPrice": 0.0026},
+            ],
+            "buyComponentPrices": [{"startNumber": 1, "endNumber": 999, "productPrice": 0.0032}],
+        }
+        other = {"componentCode": "C174140", "componentModelEn": "decoy"}
+        with patch("kicad_tools.parts.lcsc.LCSCClient._get_session") as mock_session:
+            mock_resp = MagicMock()
+            mock_resp.json.return_value = {"code": 200, "data": _lookup_envelope(other, item)}
+            mock_resp.raise_for_status = MagicMock()
+            mock_session.return_value.post.return_value = mock_resp
+
+            from kicad_tools.parts import LCSCClient
+
+            client = LCSCClient(use_cache=False, use_local_catalog=False)
+            part = client.lookup("C17414")
+
+        assert part is not None
+        assert part.package == "0805"
+        assert part.mfr_part == "0805W8F1002T5E"
+        assert part.description.startswith("-55")
+        assert part.min_order == 1
+        assert [(p.quantity, p.unit_price) for p in part.prices] == [(1, 0.0033), (1000, 0.0026)]
+        assert part.is_basic is True
+
     def test_lookup_not_found(self, tmp_path):
         """Test part not found.
 
@@ -1199,8 +1237,8 @@ class TestLCSCClientAdditional:
 
             assert LCSCClient(use_cache=False)._fetch_part("C17414") is None
 
-    def test_fetch_part_no_exact_match_raises(self):
-        """Hits that never match the requested code must not yield a wrong part."""
+    def test_fetch_part_no_exact_match_is_verified_miss(self):
+        """Fuzzy hits that never match the code yield no part (not a wrong one, not unavailable)."""
         with patch("kicad_tools.parts.lcsc.LCSCClient._get_session") as mock_session:
             mock_resp = MagicMock()
             mock_resp.json.return_value = {
@@ -1212,8 +1250,7 @@ class TestLCSCClientAdditional:
 
             from kicad_tools.parts import LCSCClient
 
-            with pytest.raises(LCSCUnavailableError):
-                LCSCClient(use_cache=False)._fetch_part("C17414")
+            assert LCSCClient(use_cache=False)._fetch_part("C17414") is None
 
     def test_fetch_part_request_exception(self, tmp_path, lcsc_retry_clock):
         """Test _fetch_part with request exception."""
