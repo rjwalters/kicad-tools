@@ -774,3 +774,62 @@ class TestMicrostripThicknessVsHammerstadJensen:
         z0 = tl.microstrip(w, "F.Cu").z0
         ref = _hj1980_microstrip_z0(w, 0.2104, 4.4, 0.035)
         assert z0 == pytest.approx(ref, rel=0.002)
+
+
+class TestCPWGClosedFormRegression:
+    """Issue #7075: CPWG Z0 and dielectric loss vs independent references."""
+
+    H, ER, TAND = 0.2104, 4.4, 0.02
+
+    @pytest.fixture
+    def tl(self):
+        return TransmissionLine(Stackup.jlcpcb_named("JLC04161H-7628"))
+
+    @pytest.mark.parametrize(
+        ("w", "g", "z_ref"),
+        [
+            # Conductor-backed CPW, t=0 (Ghione & Naldi 1987), values computed
+            # independently with scipy.special.ellipk.
+            (0.25, 0.15, 60.04),
+            (0.30, 0.20, 56.63),
+            (0.50, 0.25, 42.89),
+            (1.00, 0.20, 26.19),
+        ],
+    )
+    def test_cpwg_z0_matches_conductor_backed_closed_form(self, tl, w, g, z_ref):
+        z0 = tl._cpwg_calc(w, g, self.H, self.ER, 0.0, self.TAND, 1.0).z0
+        assert z0 == pytest.approx(z_ref, rel=0.01)
+
+    @staticmethod
+    def _pozar_alpha_d(f_ghz, er, ee, tand):
+        k0 = 2 * math.pi * f_ghz * 1e9 / SPEED_OF_LIGHT
+        return k0 * er * (ee - 1) * tand / (2 * math.sqrt(ee) * (er - 1)) * 20 / math.log(10)
+
+    @pytest.mark.parametrize("f_ghz", [1.0, 5.0])
+    @pytest.mark.parametrize("kind", ["microstrip", "cpwg"])
+    def test_dielectric_loss_matches_pozar(self, tl, kind, f_ghz):
+        t = 0.035
+
+        def calc(td):
+            if kind == "microstrip":
+                return tl._microstrip_calc(0.3477, self.H, self.ER, t, td, f_ghz)
+            return tl._cpwg_calc(0.30, 0.20, self.H, self.ER, t, td, f_ghz)
+
+        lossy = calc(self.TAND)
+        alpha_d = lossy.loss_db_per_m - calc(0.0).loss_db_per_m
+        ref = self._pozar_alpha_d(f_ghz, self.ER, lossy.epsilon_eff, self.TAND)
+        assert alpha_d / ref == pytest.approx(1.0, abs=0.01)
+
+    def test_cpwg_solvers_converge_at_50_ohm(self, tl):
+        w, g = tl.cpwg_geometry_for_impedance(50, "F.Cu", width_mm=0.3)
+        assert tl.cpwg(w, g, "F.Cu").z0 == pytest.approx(50, rel=0.02)
+        w, g = tl.cpwg_geometry_for_impedance(50, "F.Cu", gap_mm=0.2)
+        assert tl.cpwg(w, g, "F.Cu").z0 == pytest.approx(50, rel=0.02)
+        w, g = tl.cpwg_geometry_for_impedance(50, "F.Cu")
+        assert w == pytest.approx(g)
+        assert w > 0.1  # not the degenerate micron-scale branch
+        assert tl.cpwg(w, g, "F.Cu").z0 == pytest.approx(50, rel=0.02)
+
+    def test_cpwg_balanced_unreachable_target_raises(self, tl):
+        with pytest.raises(ValueError, match="balanced"):
+            tl.cpwg_geometry_for_impedance(500, "F.Cu")

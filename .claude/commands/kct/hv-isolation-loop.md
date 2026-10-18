@@ -151,9 +151,12 @@ HV nets should route on outer layers (creepage is a surface path) and to their a
    ```
 3. **The mandatory referee cross-gate (non-skippable):**
    ```bash
-   kicad-cli pcb drc --refill-zones <board.kicad_pcb>
+   KICAD_CLI=$(uv run python -c "from kicad_tools.cli.runner import find_kicad_cli; print(find_kicad_cli() or '')")
+   test -n "$KICAD_CLI" || { echo "kicad-cli not found (run: kct doctor)"; exit 3; }
+   "$KICAD_CLI" pcb drc --refill-zones --severity-error --exit-code-violations \
+     --format json --output <pcb-dir>/drc_report.json <board.kicad_pcb>
    ```
-   This is a *second, independent* DRC engine and it is **not optional** — `--refill-zones` forces KiCad to refill the pours before checking, catching the stale-zone-fill false passes that `kct check` alone has missed (repo convention, 2026-07-04 live-short defect). Require **0 new errors**. A missing `kicad-cli` is a hard blocker, not a pass.
+   This is a *second, independent* DRC engine and it is **not optional** — `--refill-zones` forces KiCad to refill the pours before checking, catching the stale-zone-fill false passes that `kct check` alone has missed (repo convention, 2026-07-04 live-short defect). It passes only with **exit 0, 0 error-severity violations and 0 unconnected items** in the report, `<pcb-dir>` being the directory that holds the PCB (the same rule as `{{skill:manufacturing-readiness}}` Gate 2; there is no baseline to compare against). A `kicad-cli` that `find_kicad_cli()` cannot locate is a hard blocker, not a pass.
 
 ### Step 7 — Decision + sign-off handoff (do NOT duplicate those skills)
 
