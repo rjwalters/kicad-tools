@@ -169,12 +169,18 @@ COUPLED_FLAGOFF_MAX_ITERATIONS: int = int(
 # Issue #6835 (operator ruling 2026-10-18, Q3 option 1): the default is
 # raised again to 1,400,000 total (700,000 per phase).  The bench shows 1.4M
 # fixes 06rf USB3_RX1 but worsens PCIE_TX (06rf) and the 06b LVDS skew, so
-# those pairs keep the previous (pre-#6835) budget below.  The table is keyed
+# those pairs keep the previous (pre-#6835) budget below.  PCIE_RX is exempt
+# too: at 1.4M it couples, which changes PCIE_TX's single-ended fallback route
+# and regresses PCIE_TX even with its own exception (Judge bench on 06rf:
+# skew 3.657 -> 7.65 mm); with PCIE_RX exempt every 06rf pair is no worse
+# than main.  ``LVDS\d*`` matches by pair name, so it applies to any board's
+# ``LVDS<n>`` pairs, not only 06b's.  The table is keyed
 # on the pair's base name (polarity suffix and trailing separators stripped,
 # upper-cased); an entry is a regex matched with ``fullmatch``.  It applies
 # only when the caller plumbed no explicit budget, like the default itself.
 COUPLED_FLAGOFF_PAIR_BUDGET_EXCEPTIONS: tuple[tuple[str, int], ...] = (
     (r"PCIE_TX", 40000),
+    (r"PCIE_RX", 40000),
     (r"LVDS\d*", 40000),
 )
 

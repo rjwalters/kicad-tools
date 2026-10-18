@@ -625,16 +625,26 @@ def test_pose_search_honours_a_spent_wall_clock_budget(monkeypatch):
     assert router._diffpair._last_budget_exit_pair_names == ["DP"]
 
 
-def test_flagoff_budget_exceptions_keep_pcie_tx_and_lvds_at_the_old_cap():
-    """Issue #6835 (operator ruling 2026-10-18): PCIE_TX and the 06b LVDS pairs
-    keep the pre-#6835 40,000 budget; every other pair gets the default."""
+def test_flagoff_budget_exceptions_keep_pcie_and_lvds_at_the_old_cap():
+    """Issue #6835 (operator ruling 2026-10-18): PCIE_TX, PCIE_RX (coupling it
+    regresses PCIE_TX) and the LVDS<n> pairs keep the pre-#6835 40,000 budget;
+    every other pair gets the default."""
     from kicad_tools.router import diffpair_routing as dr
 
     default = dr.COUPLED_FLAGOFF_MAX_ITERATIONS
     assert default == 1_400_000
-    for name in ("PCIE_TX", "PCIE_TX_", "pcie_tx", "LVDS1", "LVDS4_", "LVDS"):
+    for name in (
+        "PCIE_TX",
+        "PCIE_TX_",
+        "pcie_tx",
+        "PCIE_RX",
+        "PCIE_RX_",
+        "LVDS1",
+        "LVDS4_",
+        "LVDS",
+    ):
         assert dr._flagoff_budget_for_pair(name) == 40_000, name
-    for name in ("PCIE_RX", "USB3_RX1", "MIPI_CLK", "USB2_D", "LVDS_CLK_X"):
+    for name in ("USB3_RX1", "USB3_TX1", "MIPI_CLK", "USB2_D", "LVDS_CLK_X"):
         assert dr._flagoff_budget_for_pair(name) == default, name
 
 
