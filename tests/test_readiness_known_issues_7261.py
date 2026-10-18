@@ -282,3 +282,25 @@ def test_unified_cli_forwards_known_issue_flags(tmp_path, monkeypatch):
         "--resolve-known-issue",
         "2",
     ]
+
+
+def test_unbind_and_drop_leaves_an_orphaned_evidence_file(tmp_path):
+    """Removing the ``inputs`` entry and the list must not verify as ready (#7323)."""
+    board = _ready_board_with_advisory(tmp_path)
+
+    def edit(report):
+        report.pop("known_issues")
+        del report["inputs"]["output/readiness/known-issues.json"]
+
+    _edit_report(board, edit)
+    verdict = read_readiness(board)
+    assert verdict["status"] == "unverified"
+    assert "orphaned known-issues evidence" in verdict["blockers"][0]
+
+
+def test_stray_known_issues_file_next_to_ready_board_is_rejected(tmp_path):
+    board = make_board(tmp_path)
+    assert _run(board)[0] == 0
+    assert read_readiness(board)["status"] == "ready"
+    (board / "output" / "readiness" / "known-issues.json").write_text('{"known_issues": []}')
+    assert read_readiness(board)["status"] == "unverified"

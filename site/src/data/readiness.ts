@@ -82,6 +82,12 @@ export function loadReadiness(boardPath: string): Readiness {
     // #7261: the list must equal its hashed known-issues.json evidence (already hash-checked above).
     const knownIssues = validateKnownIssues(data.known_issues);
     const bound = Object.keys(data.inputs).filter(n => n.split("/").pop() === "known-issues.json");
+    // #7323: a known-issues.json in the evidence folder that inputs does not list was unbound and dropped.
+    const orphan = (readdirSync(join(root, "output"), { recursive: true }) as string[])
+      .map(name => String(name).replaceAll("\\", "/"))
+      .find(name => name.split("/").pop() === "known-issues.json"
+        && statSync(join(root, "output", name)).isFile() && !("output/" + name in data.inputs));
+    if (orphan) throw new Error(`output/${orphan} is not listed in inputs (orphaned known-issues evidence)`);
     if (bound.length > 1) throw new Error("known_issues is bound to more than one evidence file");
     if (bound.length === 0 && knownIssues.length) throw new Error("known_issues is not bound to hashed evidence");
     if (bound.length === 1) {
