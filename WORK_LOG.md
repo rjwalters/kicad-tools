@@ -15,6 +15,11 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-18
 
+- **PR #7215**: ci: print skip and xfail reasons in the pytest short summary
+- **PR #7218**: fix(pcb): keep Library:Footprint lib ID in PCB.add_footprint
+- **PR #7234**: fix(drc,validate,check): view filters never change a verdict (Part A of #7230)
+- **Issue #7214** (closed): ci: add -rs to the bulk Test step so skipped tests and reasons are visible (#7196 follow-up)
+- **Issue #7213** (closed): PCB.add_footprint drops the library nickname: fix at source, delete 3 per-board workarounds, clear board 07's 43 parity warnings
 - **PR #7226**: feat(export): enforce JLCPCB Economic/Standard PCBA tiers in preflight (#7204 part C)
 - **PR #7225**: style: ruff format board 00 generate_design.py
 - **PR #7216**: fix(boards): emit stock F.Fab body for board 00 LED so pin1 rule sees the real outline
