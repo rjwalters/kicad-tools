@@ -528,6 +528,77 @@ class TestPCBLayout:
         layout.route("B1", "OUT", "B2", "IN", net="SIG1")
         assert len(layout.inter_block_traces) == 1
 
+    def test_route_waypoints_emit_polyline(self):
+        """waypoints produce start -> waypoints -> end segments, returned as a list."""
+        layout = PCBLayout("test")
+        b1 = PCBBlock("B1")
+        b1.add_port("OUT", 10, 0)
+        b1.place(0, 0)
+        layout.add_block(b1, "B1")
+        b2 = PCBBlock("B2")
+        b2.add_port("IN", 0, 0)
+        b2.place(50, 0)
+        layout.add_block(b2, "B2")
+
+        segs = layout.route(
+            "B1", "OUT", "B2", "IN", net="SIG1", waypoints=[Point(10, 5), Point(50, 5)]
+        )
+        assert isinstance(segs, list)
+        assert [(s.start.tuple(), s.end.tuple()) for s in segs] == [
+            ((10, 0), (10, 5)),
+            ((10, 5), (50, 5)),
+            ((50, 5), (50, 0)),
+        ]
+        assert all(s.net == "SIG1" for s in segs)
+        assert layout.inter_block_traces == segs
+
+    def test_route_empty_waypoints_is_one_segment_list(self):
+        layout = PCBLayout("test")
+        b1 = PCBBlock("B1")
+        b1.add_port("OUT", 10, 0)
+        b1.place(0, 0)
+        layout.add_block(b1, "B1")
+        b2 = PCBBlock("B2")
+        b2.add_port("IN", 0, 0)
+        b2.place(50, 0)
+        layout.add_block(b2, "B2")
+        assert len(layout.route("B1", "OUT", "B2", "IN", waypoints=[])) == 1
+
+    def test_route_emits_internal_pad_stub(self):
+        """A port with internal_pad gets a pad -> port stub on the route's net."""
+        layout = PCBLayout("test")
+        b1 = PCBBlock("B1")
+        b1.add_component("C1", "Test", 2, 0, pads={"1": (-1, 0), "2": (1, 0)})
+        b1.add_port("OUT", 10, 0, internal_pad="C1.2")
+        b1.place(100, 50)
+        layout.add_block(b1, "B1")
+        b2 = PCBBlock("B2")
+        b2.add_port("IN", 0, 0)
+        b2.place(150, 50)
+        layout.add_block(b2, "B2")
+
+        trace = layout.route("B1", "OUT", "B2", "IN", net="SIG1")
+        assert len(layout.inter_block_traces) == 2
+        stub = layout.inter_block_traces[0]
+        assert stub.start.tuple() == (103, 50)  # C1.2 on the board
+        assert stub.end.tuple() == (110, 50)  # the port
+        assert stub.net == "SIG1"
+        assert layout.inter_block_traces[1] is trace
+
+    def test_route_internal_pad_missing_pad_raises(self):
+        layout = PCBLayout("test")
+        b1 = PCBBlock("B1")
+        b1.add_component("C1", "Test", 2, 0, pads={"1": (-1, 0)})
+        b1.add_port("OUT", 10, 0, internal_pad="C1.9")
+        b1.place(0, 0)
+        layout.add_block(b1, "B1")
+        b2 = PCBBlock("B2")
+        b2.add_port("IN", 0, 0)
+        b2.place(50, 0)
+        layout.add_block(b2, "B2")
+        with pytest.raises(KeyError, match="C1.9"):
+            layout.route("B1", "OUT", "B2", "IN")
+
     def test_export_placements(self):
         """Test exporting all placements."""
         layout = PCBLayout("test")
