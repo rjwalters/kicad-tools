@@ -468,7 +468,7 @@ jobs:
           set -euo pipefail
           apt-get update
           apt-get install -y --no-install-recommends \
-            ca-certificates curl git cmake build-essential nodejs
+            ca-certificates curl git cmake build-essential nodejs jq
           kicad-cli --version
 
       - uses: actions/checkout@v7

@@ -424,7 +424,7 @@ class ImpedanceRule(DRCRule):
                 if self._segment_length_mm(trace) < self.NECK_DOWN_EXEMPT_LENGTH_MM:
                     continue
                 check_result = self._check_trace_impedance(trace, spec)
-                if not check_result.compliant:
+                if check_result is not None and not check_result.compliant:
                     results.add(self._create_violation(check_result, spec))
 
         return results
@@ -484,7 +484,63 @@ class ImpedanceRule(DRCRule):
                 }
             )
 
+        self._annotate_intra_pair_clearance(trace_data)
+
         return trace_data
+
+    # Segments whose directions differ by more than this (sine of the
+    # angle between them) are not treated as a coupled run.
+    _PARALLEL_SIN_TOLERANCE = 0.1
+
+    def _annotate_intra_pair_clearance(self, trace_data: dict[str, list[dict]]) -> None:
+        """Record each pair-net segment's edge-to-edge gap to its partner.
+
+        The gap is the smallest perpendicular distance between this
+        segment's centreline and any parallel, longitudinally overlapping
+        same-layer segment of the partner net, minus both half-widths.  It
+        is stored as ``intra_pair_clearance_mm``; segments with no
+        measurable partner run are left without the key so the check can
+        decline to judge them rather than assume a spacing (Issue #7079).
+        """
+        import math
+
+        for net_name, traces in trace_data.items():
+            partner_traces = trace_data.get(self._partner_map.get(net_name, ""), [])
+            if not partner_traces:
+                continue
+            for trace in traces:
+                x1, y1 = trace["start"]
+                x2, y2 = trace["end"]
+                length = math.hypot(x2 - x1, y2 - y1)
+                if length == 0.0:
+                    continue
+                ux, uy = (x2 - x1) / length, (y2 - y1) / length
+                best: float | None = None
+                for other in partner_traces:
+                    if other["layer"] != trace["layer"]:
+                        continue
+                    ox1, oy1 = other["start"]
+                    ox2, oy2 = other["end"]
+                    olen = math.hypot(ox2 - ox1, oy2 - oy1)
+                    if olen == 0.0:
+                        continue
+                    if (
+                        abs(ux * (oy2 - oy1) - uy * (ox2 - ox1)) / olen
+                        > self._PARALLEL_SIN_TOLERANCE
+                    ):
+                        continue
+                    # Longitudinal overlap of the partner on this segment.
+                    t1 = (ox1 - x1) * ux + (oy1 - y1) * uy
+                    t2 = (ox2 - x1) * ux + (oy2 - y1) * uy
+                    if min(max(t1, t2), length) <= max(min(t1, t2), 0.0):
+                        continue
+                    mx, my = (ox1 + ox2) / 2, (oy1 + oy2) / 2
+                    centre = abs((mx - x1) * uy - (my - y1) * ux)
+                    gap = centre - trace["width_mm"] / 2 - other["width_mm"] / 2
+                    if gap > 0 and (best is None or gap < best):
+                        best = gap
+                if best is not None:
+                    trace["intra_pair_clearance_mm"] = best
 
     @staticmethod
     def _collect_current_sense_nets(pcb: PCB) -> set[str]:
@@ -538,7 +594,7 @@ class ImpedanceRule(DRCRule):
         self,
         trace: dict,
         spec: NetImpedanceSpec,
-    ) -> ImpedanceCheckResult:
+    ) -> ImpedanceCheckResult | None:
         """Check a single trace against an impedance specification.
 
         When the trace's net is part of a detected differential pair
@@ -552,7 +608,9 @@ class ImpedanceRule(DRCRule):
             spec: Impedance specification to check against
 
         Returns:
-            ImpedanceCheckResult with calculated values
+            ImpedanceCheckResult with calculated values, or ``None`` when the
+            impedance cannot be determined (no measurable partner gap, or the
+            solver rejected the geometry) -- the trace is then not judged.
         """
         width_mm = trace["width_mm"]
         layer = trace["layer"]
@@ -563,38 +621,30 @@ class ImpedanceRule(DRCRule):
         )
 
         if is_diff_pair:
-            # Use coupled-lines model.  The gap is reconstructed from the
-            # trace's spatial relationship to its partner net's nearest
-            # trace; absent that, we use the conservative ``trace_clearance``
-            # fallback (effectively single-ended for un-routed pairs).
+            # The gap is measured from the routed partner net by
+            # ``_annotate_intra_pair_clearance``; without one there is
+            # nothing to judge (Issue #7079).
+            gap_mm = trace.get("intra_pair_clearance_mm")
+            if gap_mm is None:
+                return None
             try:
-                # Approximate gap from the trace's spec/class (the rule
-                # doesn't have direct access to the per-class clearance
-                # at this point; the calling context (the autorouter's
-                # check-impedance integration) provides per-net specs
-                # with the right zdiff target).  For now we fall back to
-                # the spec's tolerance window for compliance check only.
-                gap_mm = trace.get("intra_pair_clearance_mm", 0.15)
                 if self._stackup.is_outer_layer(layer):
                     result = self._cl.edge_coupled_microstrip(width_mm, gap_mm, layer)
                 else:
                     result = self._cl.edge_coupled_stripline(width_mm, gap_mm, layer)
-                calculated_z = result.zdiff
-                target_z = spec.target_zdiff
             except (ValueError, AttributeError):
-                calculated_z = 100.0
-                target_z = spec.target_zdiff or 100.0
+                return None
+            calculated_z = result.zdiff
+            target_z = spec.target_zdiff
         else:
-            # Calculate single-ended impedance
             try:
                 if self._stackup.is_outer_layer(layer):
                     result = self._tl.microstrip(width_mm, layer)
                 else:
                     result = self._tl.stripline(width_mm, layer)
-                calculated_z = result.z0
             except (ValueError, AttributeError):
-                # Calculation failed - assume 50 ohms as default
-                calculated_z = 50.0
+                return None
+            calculated_z = result.z0
             target_z = spec.target_z0 or 50.0
 
         # Calculate deviation
@@ -627,8 +677,16 @@ class ImpedanceRule(DRCRule):
         Returns:
             DRCViolation for the impedance mismatch
         """
-        # Calculate required width for correct impedance
+        # The single-ended solver cannot size a differential target, so
+        # pair violations carry no width hint (Issue #7079).
+        is_diff_pair = (
+            result.net_name in self._partner_map
+            and spec.target_zdiff is not None
+            and self._cl is not None
+        )
         try:
+            if is_diff_pair:
+                raise ValueError("no width hint for differential targets")
             required_width = self._tl.width_for_impedance(
                 result.target_z0,
                 result.layer,

@@ -24,6 +24,8 @@ _None._
 `loom:important`; taken before unlabelled work.
 
 - **#6858**: router: coupled pre-pass should keep the better of the joint-search and pose-centreline candidates (compare-and-keep; unblocks #6835)
+- **#7269**: board 07 MIPI_DAT0: recover 0.038 mm skew lost to compare-and-keep (blocks #6858)
+- **#7284**: router regression from #7255: mirrored fallback leg trades unbounded skew/length for via parity (board 03 tier-1 USB_D- 15.9→20.1 mm, skew 0.54→4.57)
 
 ## Ready
 
@@ -37,7 +39,7 @@ Issues currently being built (`loom:building`).
 
 - **#5798**: [Epic #5784] Phase 4: deconfound kct's match-group length tuning on board 07 (measure first)
 - **#6554**: diffpair: reproduce KiCad's diff_pair_uncoupled primitive pairing exactly (kct is a lower bound)
-- **#7058**: kct creepage overstates creepage around a slot: the detour is computed between the straight-line nearest points, and narrow gaps are not bridged
+- **#6730**: boards 03/07: regenerate routed artifacts under kicad-cli-exact length (USB_D 1.246 mm, ADDR_BUS 1.0998 mm skew)
 - **#7062**: LDOBlock internal routing shorts foreign pads and crosses itself on real SOT-23-5 geometry
 - **#7064**: PCBLayout.route() draws a straight port-to-port line that crosses foreign pads and never reaches a pad
 - **#7075**: transmission_line.py: CPWG impedance reads 53-233 % high, and microstrip/CPWG dielectric loss is too large by a factor of eps_eff
@@ -45,30 +47,45 @@ Issues currently being built (`loom:building`).
 - **#7079**: ImpedanceRule judges every detected differential pair at a 0.15 mm gap, whatever the routed spacing
 - **#7093**: router: differential pair gets unequal via counts when a leg falls back to uncoupled routing (board 03 USB_D 2 vs 3; blocks #6394)
 - **#7136**: kct sign-off skills don't refuse bad boards: Gate 1 exits 2 on every board, kicad-cli gate exits 0 on errors, export never gets the DRC report, audit ERC never runs
-- **#7150**: board 04 J1 value SWD-6 vs SWD (schematic vs PCB) + kct validate --sync should flag value mismatches (#7147 Part B)
 - **#7153**: kct export bundle inconsistencies: JLCPCB Gerbers omit paste layers for SMT bundles; board 04 manifest says DRC OK while report says FAIL/NOT_READY; report ERC falsely 'skipped by user request'
-- **#7188**: One DRC blocking-verdict helper: kicad-drc-summary, kct mfr validate and Project.check_drc() pass boards kicad-cli fails
-- **#7209**: board 05 ampacity relies on 1 oz inner copper the fab order never requests (JLCPCB default 0.5 oz → 1186 inner segments under-width)
-- **#7210**: ampacity: path_ampacity can't resolve board 05 phase paths; zone-only nets read 'checked' vacuously (#7206 follow-ups)
-- **#7227**: assembly-tier preflight gaps: 008004 chips pass silently; LFCSP judged as BGA; report vs preflight bottom-side count (#7226 follow-up)
+- **#7199**: Committed fleet CPLs still in the pre-#7059 frame — regenerate packages + add a frame-consistency test
+- **#7204**: DFA false-PASS: courtyard check silently skips courtyard-less footprints (boards 00/01/04 signed off with 0 courtyards) and AssemblyCapabilities is never enforced (board 07 double-sided CPL unflagged)
+- **#7220**: DFM: kct check is blind to thermal asymmetry its own solid-connect repair creates (13 passives, 4 PTH pins) and to via drills at SMD pad edges
+- **#7224**: hermit: re-consolidate point-in-polygon (8 copies) and point-to-segment distance (2 canonical + 7 private); footprint_outside_board misjudges top/right-edge origins
+- **#7228**: Silkscreen false-PASS: kct misses text stroke width, off-board silk and refdes under body (board 03: 6), and readiness skips text height
 - **#7230**: One sign-off exit-code contract: kct drc --net/--type/--category exits 0 on DRC errors, kct check JSON says passed while exiting 2, exit 2 means four things
+- **#7239**: Include THT parts in JLCPCB assembly output (operator decision; JLCPCB now offers THT PCBA)
+- **#7256**: board 03: after #7163 a fresh arm C route fails usb_geometry (MCU launch 4.138/4.284 > 4 mm; USB width 0.30 -> 0.275)
+- **#7261**: Ready claims omit known open defects: add readiness known_issues (via --ack-warnings sibling) surfaced by fleet status and site; drop stale board 04 status prose
+- **#7270**: board 03 thermal_asymmetry: classify the findings and replace #7259's count-based allowance with a narrow one or a fix
+- **#7273**: Board 04/05 evidence refresh refuses on main (#7220 warnings); boards 00/01/02 lack refresh configs
+- **#7276**: MCP export/check tools can't select fab tiers (jlcpcb-tier1) — boards 03/04 unexportable via MCP strict default (#7266 follow-up)
+- **#7277**: Report binding: readiness.json fallback accepts stale reports after re-run; ERC binding ignores sub-sheets (#7267 follow-up)
+- **#7284**: router regression from #7255: mirrored fallback leg trades unbounded skew/length for via parity (board 03 tier-1 USB_D- 15.9→20.1 mm, skew 0.54→4.57)
 
 ## PRs Awaiting Review
 
 PRs waiting on Judge (`loom:review-requested`).
 
-- **#7154**: fix: seed creepage detour from both shapes and bridge sub-X cutouts
-- **#7221**: fix(validate): resolve board 05 phase paths and flag zone-only ampacity nets
-- **#7235**: fix(board03): move six refdes out from under their part bodies
+- **#7245**: fix(boards): put board 02 and 03 CPLs in the Gerber frame and add a fleet frame test
+- **#7251**: fix(audit,skills): sign-off skills refuse bad boards; kct audit runs ERC on .kicad_pcb
+- **#7254**: fix(boards): retune board 03 USB_D and board 07 ADDR_BUS skew in place
+- **#7274**: test(board03): pin thermal_asymmetry allowance to the six classified pads
+- **#7279**: fix(router): post-route short check ignores input copper the writer drops
+- **#7280**: fix: accept registry manufacturer/tier ids in MCP export and DRC tools
+- **#7281**: fix: measure routed intra-pair gap in ImpedanceRule instead of assuming 0.15 mm
+- **#7282**: fix: correct CPWG impedance and dielectric loss formulas
+- **#7285**: fix: bind readiness-fallback reports to producing PCB and hash full schematic hierarchy
+- **#7286**: fix: apply Hammerstad-Jensen 1980 thickness terms to microstrip Z0
+- **#7287**: feat(pcb): add waypoints and internal_pad stubs to PCBLayout.route
+- **#7288**: fix: route stock LDOBlock copper clear of foreign pads
+- **#7289**: fix(boards): gate readiness refresh on a per-board known-warning list
 
 ## Approved (Awaiting Merge)
 
 PRs that passed review and are queued for Champion auto-merge (`loom:pr`).
 
-- **#7217**: feat(export): fail preflight when stackup copper differs from the fab order
-- **#7229**: fix(export): fail 008004 chips and judge LFCSP by pin pitch in assembly preflight
-- **#7231**: refactor(geometry): shared point_in_polygon; footprint_outside_board accepts boundary origins (PR1 of #7224)
-- **#7232**: feat(check): thermal_asymmetry and via_at_pad_edge warnings; detect-mistakes reuses them (#7220)
+_None._
 
 ## Proposed
 
@@ -89,7 +106,6 @@ Issues carrying `loom:curated`.
 - **#6554**: diffpair: reproduce KiCad's diff_pair_uncoupled primitive pairing exactly (kct is a lower bound) *(curated)*
 - **#6858**: router: coupled pre-pass should keep the better of the joint-search and pose-centreline candidates (compare-and-keep; unblocks #6835) *(curated)*
 - **#7026**: board 03: fresh class-clean lattice route is not complete under the recipe's tier-1 zone fill (3 GND opens) *(curated)*
-- **#7058**: kct creepage overstates creepage around a slot: the detour is computed between the straight-line nearest points, and narrow gaps are not bridged *(curated)*
 - **#7062**: LDOBlock internal routing shorts foreign pads and crosses itself on real SOT-23-5 geometry *(curated)*
 - **#7064**: PCBLayout.route() draws a straight port-to-port line that crosses foreign pads and never reaches a pad *(curated)*
 - **#7075**: transmission_line.py: CPWG impedance reads 53-233 % high, and microstrip/CPWG dielectric loss is too large by a factor of eps_eff *(curated)*
@@ -97,21 +113,26 @@ Issues carrying `loom:curated`.
 - **#7079**: ImpedanceRule judges every detected differential pair at a 0.15 mm gap, whatever the routed spacing *(curated)*
 - **#7093**: router: differential pair gets unequal via counts when a leg falls back to uncoupled routing (board 03 USB_D 2 vs 3; blocks #6394) *(curated)*
 - **#7136**: kct sign-off skills don't refuse bad boards: Gate 1 exits 2 on every board, kicad-cli gate exits 0 on errors, export never gets the DRC report, audit ERC never runs *(curated)*
-- **#7150**: board 04 J1 value SWD-6 vs SWD (schematic vs PCB) + kct validate --sync should flag value mismatches (#7147 Part B) *(curated)*
 - **#7153**: kct export bundle inconsistencies: JLCPCB Gerbers omit paste layers for SMT bundles; board 04 manifest says DRC OK while report says FAIL/NOT_READY; report ERC falsely 'skipped by user request' *(curated)*
 - **#7186**: kct post-route DRC reports 33 shorts on routed board 07m where pinned kicad-cli reports 0 (engine disagreement) *(curated)*
-- **#7188**: One DRC blocking-verdict helper: kicad-drc-summary, kct mfr validate and Project.check_drc() pass boards kicad-cli fails *(curated)*
-- **#7190**: Fleet re-verify: no ready claim falsified, but kct export --strict-preflight passes a 6-error board on a stale committed drc_report.json; board 01 lacks kicad_tools_pwr sidecar *(curated)*
 - **#7199**: Committed fleet CPLs still in the pre-#7059 frame — regenerate packages + add a frame-consistency test *(curated)*
 - **#7204**: DFA false-PASS: courtyard check silently skips courtyard-less footprints (boards 00/01/04 signed off with 0 courtyards) and AssemblyCapabilities is never enforced (board 07 double-sided CPL unflagged) *(curated)*
 - **#7206**: Spec-declared currents never reach the ampacity gate: board 05 motor phase necked to 0.2 mm passes check, audit and readiness *(curated)*
-- **#7209**: board 05 ampacity relies on 1 oz inner copper the fab order never requests (JLCPCB default 0.5 oz → 1186 inner segments under-width) *(curated)*
-- **#7210**: ampacity: path_ampacity can't resolve board 05 phase paths; zone-only nets read 'checked' vacuously (#7206 follow-ups) *(curated)*
 - **#7220**: DFM: kct check is blind to thermal asymmetry its own solid-connect repair creates (13 passives, 4 PTH pins) and to via drills at SMD pad edges *(curated)*
 - **#7224**: hermit: re-consolidate point-in-polygon (8 copies) and point-to-segment distance (2 canonical + 7 private); footprint_outside_board misjudges top/right-edge origins *(curated)*
-- **#7227**: assembly-tier preflight gaps: 008004 chips pass silently; LFCSP judged as BGA; report vs preflight bottom-side count (#7226 follow-up) *(curated)*
 - **#7228**: Silkscreen false-PASS: kct misses text stroke width, off-board silk and refdes under body (board 03: 6), and readiness skips text height *(curated)*
 - **#7230**: One sign-off exit-code contract: kct drc --net/--type/--category exits 0 on DRC errors, kct check JSON says passed while exiting 2, exit 2 means four things *(curated)*
+- **#7239**: Include THT parts in JLCPCB assembly output (operator decision; JLCPCB now offers THT PCBA) *(curated)*
+- **#7241**: Boards 05 and 07: committed CPLs still in the old frame; refresh producers refuse on evidence drift (split from #7199) *(curated)*
+- **#7256**: board 03: after #7163 a fresh arm C route fails usb_geometry (MCU launch 4.138/4.284 > 4 mm; USB width 0.30 -> 0.275) *(curated)*
+- **#7261**: Ready claims omit known open defects: add readiness known_issues (via --ack-warnings sibling) surfaced by fleet status and site; drop stale board 04 status prose *(curated)*
+- **#7269**: board 07 MIPI_DAT0: recover 0.038 mm skew lost to compare-and-keep (blocks #6858) *(curated)*
+- **#7270**: board 03 thermal_asymmetry: classify the findings and replace #7259's count-based allowance with a narrow one or a fix *(curated)*
+- **#7273**: Board 04/05 evidence refresh refuses on main (#7220 warnings); boards 00/01/02 lack refresh configs *(curated)*
+- **#7275**: board 03: fix the 6 real thermal_asymmetry findings via recipe and drop the pinned allowance *(curated)*
+- **#7276**: MCP export/check tools can't select fab tiers (jlcpcb-tier1) — boards 03/04 unexportable via MCP strict default (#7266 follow-up) *(curated)*
+- **#7277**: Report binding: readiness.json fallback accepts stale reports after re-run; ERC binding ignores sub-sheets (#7267 follow-up) *(curated)*
+- **#7284**: router regression from #7255: mirrored fallback leg trades unbounded skew/length for via parity (board 03 tier-1 USB_D- 15.9→20.1 mm, skew 0.54→4.57) *(curated)*
 
 ## Proposed (Architect / Hermit)
 
@@ -122,12 +143,9 @@ Issues carrying `loom:curated`.
 - **#6448**: [Epic #6441] Phase 6: unify diff-pair engines — grid consumes PairPlan or grid coupled pre-pass retired *(architect)*
 - **#7136**: kct sign-off skills don't refuse bad boards: Gate 1 exits 2 on every board, kicad-cli gate exits 0 on errors, export never gets the DRC report, audit ERC never runs *(hermit)*
 - **#7153**: kct export bundle inconsistencies: JLCPCB Gerbers omit paste layers for SMT bundles; board 04 manifest says DRC OK while report says FAIL/NOT_READY; report ERC falsely 'skipped by user request' *(hermit)*
-- **#7188**: One DRC blocking-verdict helper: kicad-drc-summary, kct mfr validate and Project.check_drc() pass boards kicad-cli fails *(hermit)*
-- **#7190**: Fleet re-verify: no ready claim falsified, but kct export --strict-preflight passes a 6-error board on a stale committed drc_report.json; board 01 lacks kicad_tools_pwr sidecar *(hermit)*
 - **#7206**: Spec-declared currents never reach the ampacity gate: board 05 motor phase necked to 0.2 mm passes check, audit and readiness *(hermit)*
-- **#7220**: DFM: kct check is blind to thermal asymmetry its own solid-connect repair creates (13 passives, 4 PTH pins) and to via drills at SMD pad edges *(hermit)*
-- **#7224**: hermit: re-consolidate point-in-polygon (8 copies) and point-to-segment distance (2 canonical + 7 private); footprint_outside_board misjudges top/right-edge origins *(hermit)*
 - **#7228**: Silkscreen false-PASS: kct misses text stroke width, off-board silk and refdes under body (board 03: 6), and readiness skips text height *(hermit)*
+- **#7250**: kct check never compares project.kct requirements to the routed board, and records diff-pair impedance as checked without evaluating it *(hermit)*
 
 ## Epics
 
@@ -146,13 +164,13 @@ Issues carrying `loom:curated`.
 |------|-------|
 | Operator merge-risk holds | 0 |
 | Very important | 0 |
-| Important | 1 |
+| Important | 3 |
 | Ready (`loom:issue`) | 0 |
-| In Progress (`loom:building`) | 17 |
-| PRs awaiting review | 3 |
-| Approved PRs awaiting merge | 4 |
-| Curated | 38 |
-| Architect / Hermit proposals | 13 |
+| In Progress (`loom:building`) | 25 |
+| PRs awaiting review | 13 |
+| Approved PRs awaiting merge | 0 |
+| Curated | 42 |
+| Architect / Hermit proposals | 10 |
 | Active epics | 8 |
 <!-- guide:plan-body:end -->
 

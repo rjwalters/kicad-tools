@@ -414,11 +414,45 @@ def _board_00_copy(dest: Path, *, with_reports: bool = True) -> tuple[Path, Path
         "simple_led.kicad_sch",
         "simple_led.kicad_pro",
     ]
-    if with_reports:
-        names += ["drc_report.json", "erc_report.json"]
     for name in names:
         shutil.copy2(BOARD_00 / name, dest / name)
-    return dest / "simple_led_routed.kicad_pcb", dest / "simple_led.kicad_sch"
+    pcb, sch = dest / "simple_led_routed.kicad_pcb", dest / "simple_led.kicad_sch"
+    if with_reports:
+        _write_clean_reports(pcb, sch)
+    return pcb, sch
+
+
+def _write_clean_reports(pcb: Path, sch: Path) -> None:
+    """Write clean DRC/ERC reports beside the scratch copy, hash-bound to it.
+
+    Board 00's committed reports were deleted as producer-less in #7190, so
+    the fixture writes its own instead of copying them out of ``boards/`` (#7299).
+    """
+    from kicad_tools.drc.report_binding import DRC_HASH_KEY, ERC_HASH_KEY, sha256_file
+
+    drc = {
+        "file": str(pcb),
+        "manufacturer": "jlcpcb",
+        "layers": 2,
+        DRC_HASH_KEY: sha256_file(pcb),
+        "summary": {
+            "errors": 0,
+            "warnings": 0,
+            "infos": 0,
+            "rules_checked": 32,
+            "passed": True,
+        },
+        "violations": [],
+    }
+    erc = {
+        "$schema": "https://schemas.kicad.org/erc.v1.json",
+        "coordinate_units": "mm",
+        "source": sch.name,
+        ERC_HASH_KEY: sha256_file(sch),
+        "sheets": [{"path": "/", "violations": []}],
+    }
+    (pcb.parent / "drc_report.json").write_text(json.dumps(drc, indent=2))
+    (pcb.parent / "erc_report.json").write_text(json.dumps(erc, indent=2))
 
 
 def _package_files(out: Path) -> list[str]:
