@@ -2,7 +2,7 @@
 
 Prioritized roadmap generated from current GitHub label state. Maintained by the Guide triage agent.
 
-*Last updated: 2026-10-17*
+*Last updated: 2026-10-18*
 
 ---
 
@@ -46,7 +46,6 @@ Issues currently being built (`loom:building`).
 - **#7076**: Microstrip Z0 with copper thickness reads 1.6-3.7 % low (docstring claims 0.2 %)
 - **#7079**: ImpedanceRule judges every detected differential pair at a 0.15 mm gap, whatever the routed spacing
 - **#7093**: router: differential pair gets unequal via counts when a leg falls back to uncoupled routing (board 03 USB_D 2 vs 3; blocks #6394)
-- **#7096**: kct drc reports DRC PASSED / exit 0 on an unrouted board: unconnected items (opens) are never counted
 - **#7121**: MCP sessions: one session store for start_session/get_session_context/record_decision, and checkpoints that actually restore (#7115 Part 2)
 - **#7129**: test flake: format_json_stdout_contract[route --lint-gate] still times out at 100s under CI load (follow-up to #6744)
 - **#7136**: kct sign-off skills don't refuse bad boards: Gate 1 exits 2 on every board, kicad-cli gate exits 0 on errors, export never gets the DRC report, audit ERC never runs
@@ -60,8 +59,8 @@ Issues currently being built (`loom:building`).
 
 PRs waiting on Judge (`loom:review-requested`).
 
+- **#7142**: test(mcp): smoke test calling every registered tool
 - **#7171**: perf(router): make negotiated escape strategies transactional and cap their reroutes
-- **#7174**: fix(drc): fail kct drc on error-severity unconnected items
 - **#7177**: test: narrow route --lint-gate contract variant and return it to required tier
 - **#7179**: feat(cli): finish lib create-symbol-lib/create-footprint-lib/generate-footprint and estimate cost --bom CSV
 
@@ -99,7 +98,6 @@ Issues carrying `loom:curated`.
 - **#7076**: Microstrip Z0 with copper thickness reads 1.6-3.7 % low (docstring claims 0.2 %) *(curated)*
 - **#7079**: ImpedanceRule judges every detected differential pair at a 0.15 mm gap, whatever the routed spacing *(curated)*
 - **#7093**: router: differential pair gets unequal via counts when a leg falls back to uncoupled routing (board 03 USB_D 2 vs 3; blocks #6394) *(curated)*
-- **#7096**: kct drc reports DRC PASSED / exit 0 on an unrouted board: unconnected items (opens) are never counted *(curated)*
 - **#7121**: MCP sessions: one session store for start_session/get_session_context/record_decision, and checkpoints that actually restore (#7115 Part 2) *(curated)*
 - **#7123**: MCP: parametrized smoke test calling every registered tool through MCPServer.call_tool (#7115 Part 3) *(curated)*
 - **#7129**: test flake: format_json_stdout_contract[route --lint-gate] still times out at 100s under CI load (follow-up to #6744) *(curated)*
@@ -120,6 +118,7 @@ Issues carrying `loom:curated`.
 - **#7136**: kct sign-off skills don't refuse bad boards: Gate 1 exits 2 on every board, kicad-cli gate exits 0 on errors, export never gets the DRC report, audit ERC never runs *(hermit)*
 - **#7153**: kct export bundle inconsistencies: JLCPCB Gerbers omit paste layers for SMT bundles; board 04 manifest says DRC OK while report says FAIL/NOT_READY; report ERC falsely 'skipped by user request' *(hermit)*
 - **#7175**: Finish 4 stubbed CLI capabilities advertised in kct --help: lib create-symbol-lib / create-footprint-lib / generate-footprint (deps landed, #85/#87/#88 closed) and estimate cost --bom CSV *(hermit)*
+- **#7188**: One DRC blocking-verdict helper: kicad-drc-summary, kct mfr validate and Project.check_drc() pass boards kicad-cli fails *(hermit)*
 
 ## Epics
 
@@ -140,11 +139,11 @@ Issues carrying `loom:curated`.
 | Very important | 0 |
 | Important | 1 |
 | Ready (`loom:issue`) | 0 |
-| In Progress (`loom:building`) | 20 |
+| In Progress (`loom:building`) | 19 |
 | PRs awaiting review | 4 |
 | Approved PRs awaiting merge | 1 |
-| Curated | 34 |
-| Architect / Hermit proposals | 8 |
+| Curated | 33 |
+| Architect / Hermit proposals | 9 |
 | Active epics | 8 |
 <!-- guide:plan-body:end -->
 
