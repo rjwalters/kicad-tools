@@ -457,9 +457,8 @@ def _fab_excludes_tht(manufacturer: str) -> bool:
     readiness gates cannot desync from the CPL that actually ships.
     """
     from kicad_tools.export.preflight import PreflightChecker
-    from kicad_tools.manufacturers import get_fab_family
 
-    return get_fab_family(manufacturer.lower()) in PreflightChecker._SMT_ONLY_MANUFACTURERS
+    return PreflightChecker.fab_excludes_tht(manufacturer)
 
 
 def _net_metrics(pcb: Path) -> dict[str, Any]:

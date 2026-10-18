@@ -382,6 +382,19 @@ class PreflightChecker:
     # family here to make it auto-exclude THT again.
     _SMT_ONLY_MANUFACTURERS: set[str] = set()
 
+    @classmethod
+    def fab_excludes_tht(cls, manufacturer: str) -> bool:
+        """True when *manufacturer*'s fab family auto-excludes THT from the CPL.
+
+        Public read of the SMT-only fab-family set, so callers outside
+        preflight (e.g. ``kct readiness``) share this single source of truth
+        without reaching into the private attribute.  Capability tiers
+        resolve to their parent fab family (``jlcpcb-tier1`` -> ``jlcpcb``).
+        """
+        from ..manufacturers import get_fab_family
+
+        return get_fab_family(manufacturer.lower()) in cls._SMT_ONLY_MANUFACTURERS
+
     def __init__(
         self,
         pcb_path: str | Path,
