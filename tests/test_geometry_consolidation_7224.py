@@ -186,6 +186,63 @@ def test_copper_distance_pinned(case, expected):
     assert point_segment_distance((px, py), (x1, y1), (x2, y2)) == pytest.approx(expected, abs=1e-9)
 
 
+def _seg(x1, y1, x2, y2):
+    from kicad_tools.router.primitives import Segment
+
+    return Segment(x1=x1, y1=y1, x2=x2, y2=y2, width=0.2, layer=_layer(), net=1)
+
+
+def _layer():
+    from kicad_tools.router.layers import Layer
+
+    return Layer.F_CU
+
+
+def _delegated_adapters():
+    """Every delegated private copy, adapted to ``(px, py, x1, y1, x2, y2)``."""
+    from kicad_tools.optim.fom_electrical import _point_segment_distance as fom
+    from kicad_tools.router import diffpair_routing as dp
+    from kicad_tools.router import pad_access, path, plane_via_sites, stuck_classifier
+    from kicad_tools.validate import evidence
+
+    return {
+        "evidence": evidence._point_segment_distance,
+        "path": path._point_segment_distance,
+        "pad_access": pad_access._point_segment_distance,
+        "stuck_classifier": stuck_classifier._point_to_segment_distance,
+        "plane_via_sites": lambda px, py, x1, y1, x2, y2: plane_via_sites._segment_point_distance(
+            x1, y1, x2, y2, px, py
+        ),
+        "fom_electrical": lambda px, py, x1, y1, x2, y2: fom((px, py), (x1, y1), (x2, y2)),
+        "diffpair_seg": lambda px, py, x1, y1, x2, y2: dp._point_seg_distance(
+            px, py, (x1, y1), (x2, y2)
+        ),
+        "diffpair_method": lambda px, py, x1, y1, x2, y2: dp.DiffPairRouter._point_segment_distance(
+            px, py, _seg(x1, y1, x2, y2)
+        ),
+    }
+
+
+@pytest.mark.parametrize("name", list(_delegated_adapters()))
+@pytest.mark.parametrize("case,expected", list(zip(DIST_CASES, GOLDEN_DIST, strict=True)))
+def test_delegated_private_distance_pinned(name, case, expected):
+    # fom_electrical / diffpair keep their own degenerate-length threshold at
+    # the call site, so a sub-threshold segment (case6) legitimately differs
+    # from core by ~|segment| (5.5e-8 here); everything else matches to 1e-9.
+    tol = 1e-6 if name in ("fom_electrical", "diffpair_seg", "diffpair_method") else 1e-9
+    assert _delegated_adapters()[name](*case) == pytest.approx(expected, abs=tol)
+
+
+@pytest.mark.parametrize("name", list(_delegated_adapters()))
+def test_delegated_private_distance_degenerate_segment(name):
+    # Zero-length segment collapses to point distance.
+    assert _delegated_adapters()[name](3.0, 4.0, 0.0, 0.0, 0.0, 0.0) == pytest.approx(5.0)
+    # Sub-threshold (< 1e-6 long) segment: still the point distance to ~1e-6.
+    assert _delegated_adapters()[name](3.0, 4.0, 0.0, 0.0, 1e-7, 0.0) == pytest.approx(
+        5.0, abs=1e-6
+    )
+
+
 # ---------------------------------------------------------------------------
 # core.geometry.point_in_polygon
 # ---------------------------------------------------------------------------
