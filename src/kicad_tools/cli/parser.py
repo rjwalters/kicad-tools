@@ -552,6 +552,15 @@ def _add_drc_parser(subparsers) -> None:
         ),
     )
     drc_parser.add_argument(
+        "--ignore-unconnected",
+        action="store_true",
+        help=(
+            "Do not count unconnected-item (missing connection) findings toward "
+            "the verdict and exit code -- the old clearance-only semantics. By "
+            "default an unrouted board fails DRC (Issue #7096)"
+        ),
+    )
+    drc_parser.add_argument(
         "--schematic",
         type=Path,
         default=None,
