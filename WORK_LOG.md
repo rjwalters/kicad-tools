@@ -15,6 +15,14 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-18
 
+- **PR #7090**: fix(drc): report when kicad-cli could not run schematic parity (#7077)
+- **PR #7100**: fix(export): safety floor and DRC preflight count opens and reject other-board reports
+- **PR #7095**: feat(creepage): add insulation-type input (basic/supplementary/reinforced), default basic
+- **PR #7102**: fix(optim): query_move before-state snapshot gives real score_delta and violations
+- **Issue #7077** (closed): kct drc reports a clean result when kicad-cli could not run the schematic parity checks
+- **Issue #7091** (closed): kct export safety floor and DRC preflight pass unrouted boards: unconnected items never read since #4498, and a report for a different PCB is trusted
+- **Issue #7082** (closed): kct creepage/audit: add an insulation-type input (basic vs reinforced, IEC 60664-1 5.2.5) to the derived clearance/creepage
+- **Issue #7099** (closed): Fix PlacementSession.query_move before-state snapshot: score_delta always 0 and violations always empty in MCP query_move/apply_move
 - **PR #7098**: fix: validators no longer read clean when they didn't check (#7094)
 - **PR #7092**: docs: measure board 07 match-group spread after per-bump meander placement
 - **PR #7089**: fix(audit): un-run ERC or crashed sync check caps verdict at WARNING
