@@ -144,7 +144,8 @@ class TransmissionLine:
 
         Microstrip is an outer layer trace (F.Cu or B.Cu) with the dielectric
         below and air above. This method uses the Hammerstad-Jensen equations
-        which are accurate to within 0.2% for most practical geometries.
+        including their finite-thickness terms; Z0 agrees with the published
+        Hammerstad-Jensen (1980) model to within 0.2% for typical PCB geometries.
 
         Args:
             width_mm: Trace width in millimeters
@@ -192,38 +193,43 @@ class TransmissionLine:
         Returns:
             ImpedanceResult
         """
-        # Effective width accounting for copper thickness
-        # From Hammerstad-Jensen, accounts for fringing due to copper thickness
+
+        def _z01(u_: float) -> float:
+            """Air-filled microstrip impedance (Hammerstad-Jensen)."""
+            f_u = 6 + (2 * math.pi - 6) * math.exp(-((30.666 / u_) ** 0.7528))
+            return 60 * math.log(f_u / u_ + math.sqrt(1 + (2 / u_) ** 2))
+
+        u = w / h
+
+        # Finite copper thickness (Hammerstad-Jensen 1980): a width increment
+        # du1 for the air-filled line and a smaller du_r in the dielectric.
+        du1 = 0.0
+        du_r = 0.0
         if t > 0 and h > 0:
-            # Prevent division by zero or log of non-positive values
-            denom1 = (t / h) ** 2
-            denom2 = (t / (w * math.pi + 1.1 * t * math.pi)) ** 2
-            if denom1 + denom2 > 0:
-                w_eff = w + (t / math.pi) * math.log(4 * math.e / math.sqrt(denom1 + denom2))
-            else:
-                w_eff = w
-        else:
-            w_eff = w
+            t_h = t / h
+            coth = 1 / math.tanh(math.sqrt(6.517 * u))
+            du1 = (t_h / math.pi) * math.log(1 + 4 * math.e / (t_h * coth**2))
+            du_r = 0.5 * (1 + 1 / math.cosh(math.sqrt(max(er - 1, 0.0)))) * du1
+        u_1 = u + du1
+        u_r = u + du_r
 
-        # Normalized width
-        u = w_eff / h
-
-        # Effective dielectric constant (Hammerstad-Jensen)
-        # Equation for epsilon_eff
+        # Effective dielectric constant (Hammerstad-Jensen) at the dielectric width
         a = (
             1
-            + (1 / 49) * math.log((u**4 + (u / 52) ** 2) / (u**4 + 0.432))
-            + (1 / 18.7) * math.log(1 + (u / 18.1) ** 3)
+            + (1 / 49) * math.log((u_r**4 + (u_r / 52) ** 2) / (u_r**4 + 0.432))
+            + (1 / 18.7) * math.log(1 + (u_r / 18.1) ** 3)
         )
 
         b = 0.564 * ((er - 0.9) / (er + 3)) ** 0.053
 
-        eps_eff = (er + 1) / 2 + ((er - 1) / 2) * (1 + 10 / u) ** (-a * b)
+        eps_eff = (er + 1) / 2 + ((er - 1) / 2) * (1 + 10 / u_r) ** (-a * b)
 
-        # Characteristic impedance (Hammerstad-Jensen)
-        # Two different formulas for narrow and wide traces
-        f_u = 6 + (2 * math.pi - 6) * math.exp(-((30.666 / u) ** 0.7528))
-        z0 = (60 / math.sqrt(eps_eff)) * math.log(f_u / u + math.sqrt(1 + (2 / u) ** 2))
+        # Characteristic impedance from the dielectric width
+        z0 = _z01(u_r) / math.sqrt(eps_eff)
+
+        # Thickness correction to eps_eff (Hammerstad-Jensen 1980)
+        if du1:
+            eps_eff *= (_z01(u_1) / _z01(u_r)) ** 2
 
         # Phase velocity
         v_p = SPEED_OF_LIGHT / math.sqrt(eps_eff)
