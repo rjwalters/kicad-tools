@@ -1249,6 +1249,157 @@ class TestCppPathfinderPythonFallback:
         assert pf.fallback_stats["fallback_count"] == 1
         assert pf.fallback_stats["fallback_nets"] == ["N1"]
 
+    @staticmethod
+    def _make_failing_impl(net=1):
+        """Build a ``_FakeImpl`` whose C++ search always reports FAILURE_NO_PATH."""
+        from kicad_tools.router.cpp_backend import router_cpp
+        from tests.router.test_resume_clearance_strategy_5599 import _FakeImpl
+
+        class _FailedResult:
+            success = False
+            segments: list = []
+            vias: list = []
+            goal_gx = goal_gy = goal_layer = -1
+            blocking_via_net = 0
+            failure_reason = int(router_cpp.FAILURE_NO_PATH)
+
+        _FailedResult.net = net
+
+        class _FailingImpl(_FakeImpl):
+            def route_resumable(self, *args, **kwargs):
+                self.route_resumable_calls.append((float(args[18]), int(args[19])))
+                return _FailedResult()
+
+        return _FailingImpl(net=net)
+
+    @staticmethod
+    def _make_pf(from_routing_grid=True):
+        from kicad_tools.router.cpp_backend import CppGrid, CppPathfinder
+        from kicad_tools.router.grid import RoutingGrid
+        from kicad_tools.router.layers import LayerStack
+        from kicad_tools.router.rules import DesignRules
+
+        rules = DesignRules()
+        rules.grid_resolution = 0.127
+        if from_routing_grid:
+            grid = RoutingGrid(
+                width=10.0,
+                height=10.0,
+                rules=rules,
+                layer_stack=LayerStack.two_layer(),
+            )
+            cpp_grid = CppGrid.from_routing_grid(grid)
+        else:
+            cpp_grid = CppGrid(cols=80, rows=80, layers=2, resolution=0.127)
+        return CppPathfinder(cpp_grid, rules)
+
+    @staticmethod
+    def _pads(net=1, net_name="N1"):
+        from kicad_tools.router.layers import Layer
+        from kicad_tools.router.primitives import Pad
+
+        start = Pad(
+            x=1.0, y=1.0, width=0.5, height=0.5, layer=Layer.F_CU, net=net, net_name=net_name
+        )
+        end = Pad(x=8.0, y=8.0, width=0.5, height=0.5, layer=Layer.F_CU, net=net, net_name=net_name)
+        return start, end
+
+    def test_fallback_none_result_not_counted(self):
+        """A Python fallback that finds no route returns None and is not counted.
+
+        Issue #7012 port of ``test_fallback_none_result`` (row 2).
+        """
+        if not is_cpp_available():
+            pytest.skip("C++ backend not available")
+
+        from unittest import mock
+
+        pf = self._make_pf()
+        start, end = self._pads()
+        fake = self._make_failing_impl()
+        with (
+            mock.patch.object(pf, "_impl", fake),
+            mock.patch("kicad_tools.router.pathfinder.Router.route", return_value=None) as py_route,
+        ):
+            result = pf.route(start, end)
+
+        py_route.assert_called_once()
+        assert result is None
+        assert pf.fallback_stats["fallback_count"] == 0
+
+    def test_fallback_skipped_when_no_py_grid(self):
+        """Fallback is skipped when the CppGrid has no ``_py_grid`` (row 3)."""
+        if not is_cpp_available():
+            pytest.skip("C++ backend not available")
+
+        from unittest import mock
+
+        pf = self._make_pf(from_routing_grid=False)
+        assert pf._grid._py_grid is None
+        start, end = self._pads()
+        fake = self._make_failing_impl()
+        with (
+            mock.patch.object(pf, "_impl", fake),
+            mock.patch("kicad_tools.router.pathfinder.Router.route") as py_route,
+        ):
+            result = pf.route(start, end)
+
+        assert fake.route_resumable_calls, "the (fake) C++ search was never invoked"
+        py_route.assert_not_called()
+        assert result is None
+        assert pf._py_router is None
+        assert pf.fallback_stats["fallback_count"] == 0
+
+    def test_fallback_stats_accumulate(self):
+        """Multiple fallbacks accumulate in ``fallback_stats`` (row 4)."""
+        if not is_cpp_available():
+            pytest.skip("C++ backend not available")
+
+        from unittest import mock
+
+        from kicad_tools.router.primitives import Route
+
+        pf = self._make_pf()
+        fake = self._make_failing_impl()
+        for i, net_name in enumerate(["NET_A", "NET_B", "NET_C"], start=1):
+            start, end = self._pads(net=i, net_name=net_name)
+            fallback_route = Route(net=i, net_name=net_name)
+            with (
+                mock.patch.object(pf, "_impl", fake),
+                mock.patch(
+                    "kicad_tools.router.pathfinder.Router.route", return_value=fallback_route
+                ),
+            ):
+                result = pf.route(start, end)
+            assert result is fallback_route
+
+        assert pf.fallback_stats["fallback_count"] == 3
+        assert pf.fallback_stats["fallback_nets"] == ["NET_A", "NET_B", "NET_C"]
+
+    def test_py_router_reused_across_fallbacks(self):
+        """The Python Router is constructed once and reused (row 5)."""
+        if not is_cpp_available():
+            pytest.skip("C++ backend not available")
+
+        from unittest import mock
+
+        from kicad_tools.router.primitives import Route
+
+        pf = self._make_pf()
+        start, end = self._pads()
+        fake = self._make_failing_impl()
+        fallback_route = Route(net=1, net_name="N1")
+        with (
+            mock.patch.object(pf, "_impl", fake),
+            mock.patch("kicad_tools.router.pathfinder.Router.route", return_value=fallback_route),
+        ):
+            pf.route(start, end)
+            first_router = pf._py_router
+            assert first_router is not None
+
+            pf.route(start, end)
+            assert pf._py_router is first_router
+
     def test_fallback_not_invoked_when_cpp_succeeds(self):
         """Test Python fallback is NOT constructed when C++ succeeds."""
         if not is_cpp_available():
