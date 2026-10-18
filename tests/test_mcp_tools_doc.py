@@ -129,7 +129,7 @@ def test_allowlist_has_no_stale_entries() -> None:
 def test_output_path_descriptions_match_real_default() -> None:
     """Only route_net defaults to a non-overwriting <stem>_routed output."""
     for tool in ("placement_place_unplaced", "commit_session", "route_net"):
-        desc = TOOL_REGISTRY[tool]["input_schema"]["properties"]["output_path"]["description"]
+        desc = TOOL_REGISTRY[tool].parameters["properties"]["output_path"]["description"]
         if tool == "route_net":
             assert "_routed" in desc
         else:
