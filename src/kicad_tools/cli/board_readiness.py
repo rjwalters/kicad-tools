@@ -142,11 +142,15 @@ def _bound_known_issues(data: dict, inputs: dict, root: Path) -> list[dict]:
     checked above).  A list missing from that file, or differing from it, is
     an edited or stale record.  A ``known-issues.json`` left in the evidence
     folder but absent from ``inputs`` is an unbound-and-dropped record (#7323).
+    Only the record's own evidence folder(s) are scanned: ``--verify`` writes
+    to ``output/readiness-verification/`` while the committed evidence stays in
+    ``output/readiness/``, and neither folder orphans the other (#7337).
     """
     known_issues = validate_known_issues(data.get("known_issues"))
     orphans = sorted(
         rel
-        for path in (root / "output").rglob(KNOWN_ISSUES_FILENAME)
+        for folder in _evidence_folders(data, inputs)
+        for path in (root / folder).rglob(KNOWN_ISSUES_FILENAME)
         if path.is_file() and (rel := path.relative_to(root).as_posix()) not in inputs
     )
     if orphans:
@@ -165,3 +169,28 @@ def _bound_known_issues(data: dict, inputs: dict, root: Path) -> list[dict]:
     ):
         raise ValueError("known_issues differs from its hashed evidence")
     return known_issues
+
+
+def _evidence_folders(data: dict, inputs: dict) -> set[str]:
+    """Board-relative evidence folders the record itself names (#7337).
+
+    The folder of an evidence path is its first directory below ``output/``
+    (``output/readiness/refilled-native/x.json`` -> ``output/readiness``), or
+    its first directory when the board has no ``output/`` folder.  Folders come
+    from the ``evidence`` map and from any bound ``known-issues.json``; a
+    record naming neither falls back to the default ``output/readiness``.
+    """
+    evidence = data.get("evidence")
+    names = (
+        [v for v in evidence.values() if isinstance(v, str)] if isinstance(evidence, dict) else []
+    )
+    names += [n for n in inputs if Path(n).name == KNOWN_ISSUES_FILENAME]
+    folders = set()
+    for name in names:
+        parts = Path(name).parts
+        if ".." in parts or Path(name).is_absolute():
+            continue
+        depth = 2 if parts[:1] == ("output",) else 1
+        if len(parts) > depth:
+            folders.add(Path(*parts[:depth]).as_posix())
+    return folders or {"output/readiness"}
