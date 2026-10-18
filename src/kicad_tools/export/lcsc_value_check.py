@@ -639,6 +639,23 @@ _BODY_RE = re.compile(r"[(_-](\d+(?:\.\d+)?)X(\d+(?:\.\d+)?)(?:MM)?(?:\)|_|$|-)"
 _EP_MARKER_RE = re.compile(r"(?<![A-Z])EP|POWERPAD|THERMAL|TAB")
 
 BODY_TOLERANCE_MM = 0.25
+PITCH_TOLERANCE_MM = 0.05
+
+# Explicit pitch token in a KiCad footprint name (``..._P1.27mm``).
+_PITCH_RE = re.compile(r"_P(\d+(?:\.\d+)?)MM")
+# Lead pitch implied by the SO family name (issue #7180).  SSOP / TSOP are
+# deliberately absent: their pitch varies (0.65/0.635/0.5 mm), so without an
+# explicit ``_P`` token the pitch is unknown and never compared.
+_SO_FAMILY_PITCH_MM = {
+    "SOIC": 1.27,
+    "SOP": 1.27,
+    "SO": 1.27,
+    "TSSOP": 0.65,
+    "HTSSOP": 0.65,
+    "MSOP": 0.65,
+    "VSSOP": 0.65,
+    "HVSSOP": 0.65,
+}
 
 
 @dataclass(frozen=True)
@@ -649,6 +666,7 @@ class IcPackage:
     pins: int
     body: tuple[float, float] | None = None
     exposed_pad: bool = False
+    pitch: float | None = None  # lead pitch in mm; SO group only, None = unknown
 
 
 def parse_ic_package(text: str) -> IcPackage | None:
@@ -683,7 +701,15 @@ def parse_ic_package(text: str) -> IcPackage | None:
     m = _SO_RE.match(name)
     if m is not None:
         family = m.group(1)
-        return IcPackage("SO", int(m.group(2)), None, exposed or family in ("HTSSOP", "HVSSOP"))
+        pitch_m = _PITCH_RE.search(name, m.end())
+        pitch = float(pitch_m.group(1)) if pitch_m else _SO_FAMILY_PITCH_MM.get(family)
+        return IcPackage(
+            "SO",
+            int(m.group(2)),
+            None,
+            exposed or family in ("HTSSOP", "HVSSOP"),
+            pitch,
+        )
 
     for regex, family in ((_QFP_RE, "QFP"), (_QFN_RE, "QFN")):
         m = regex.match(name)
@@ -725,8 +751,9 @@ def find_ic_package_mismatch(
       count minus one when the extra pad is an exposed pad / tab (marked in
       the footprint name or implied by the part package).
     - When the footprint name also parses, the families must belong to the
-      same group, the pin counts must agree (if no pads were supplied), and
-      QFP/QFN bodies must agree within :data:`BODY_TOLERANCE_MM` when both
+      same group, the pin counts must agree (if no pads were supplied), SO
+      lead pitches must agree when both are known (SOIC 1.27 mm vs
+      TSSOP/MSOP 0.65 mm -- issue #7180), and QFP/QFN bodies must agree within :data:`BODY_TOLERANCE_MM` when both
       sides state one.
 
     Returns:
@@ -759,6 +786,15 @@ def find_ic_package_mismatch(
                 return mismatch(f"pin count {part.pins} vs {count} footprint pads")
     elif footprint is not None and footprint.pins != part.pins:
         return mismatch(f"pin count {part.pins} vs footprint {footprint.pins}")
+
+    if (
+        footprint is not None
+        and part.family == "SO"
+        and part.pitch is not None
+        and footprint.pitch is not None
+        and abs(part.pitch - footprint.pitch) > PITCH_TOLERANCE_MM
+    ):
+        return mismatch(f"pitch {part.pitch:g}mm vs footprint {footprint.pitch:g}mm")
 
     if (
         footprint is not None
