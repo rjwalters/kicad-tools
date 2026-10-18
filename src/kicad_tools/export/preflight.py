@@ -1322,6 +1322,21 @@ class PreflightChecker:
             details="; ".join(issues + notes),
         )
 
+    def check_bom_lcsc_values(self) -> PreflightResult:
+        """Run the ``bom_lcsc_values`` check on its own (Issue #7260).
+
+        The same check :meth:`run_all` runs, for callers that only need the
+        LCSC value/package verdict (the MCP ``validate_assembly_bom`` tool).
+        Loads the PCB first, when it parses, so the IC package-family /
+        pin-count clause (#7166) sees the board's footprints.
+        """
+        if self._pcb is None and self.pcb_path.exists():
+            with contextlib.suppress(Exception):
+                from ..schema.pcb import PCB
+
+                self._pcb = PCB.load(str(self.pcb_path))  # type: ignore[assignment]
+        return self._check_bom_lcsc_values()
+
     def _check_bom_lcsc_values(self) -> PreflightResult:
         """Validate assigned LCSC parts against known value AND package.
 

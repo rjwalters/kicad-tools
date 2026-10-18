@@ -12,7 +12,6 @@ import time
 import zipfile
 from pathlib import Path
 
-from kicad_tools.export.assembly import AssemblyPackage
 from kicad_tools.export.bom_formats import (
     BOMExportConfig,
 )
@@ -44,25 +43,43 @@ logger = logging.getLogger(__name__)
 # =============================================================================
 
 
+def _sibling_pcb_for_schematic(sch_file: Path) -> Path | None:
+    """The board next to a schematic, preferring the routed one like ``kct export``."""
+    for name in (f"{sch_file.stem}_routed.kicad_pcb", f"{sch_file.stem}.kicad_pcb"):
+        candidate = sch_file.with_name(name)
+        if candidate.is_file():
+            return candidate
+    return None
+
+
 def validate_assembly_bom(
     schematic_path: str,
     quantity: int = 1,
+    pcb_path: str | None = None,
 ) -> dict:
     """
     Validate a BOM for JLCPCB assembly.
 
     Checks all components against the LCSC/JLCPCB parts library and categorizes
-    them by tier (Basic/Extended), stock status, and availability.
+    them by tier (Basic/Extended), stock status, and availability.  When a PCB
+    is supplied or found next to the schematic, also runs ``kct export``'s
+    ``bom_lcsc_values`` preflight check (Issue #7260): every assigned LCSC
+    part's value and package against the BOM row and the PCB footprint.  A
+    ``FAIL`` forces ``summary.assembly_ready`` false; a ``WARN`` (part not in
+    the local cache or catalog, so not checked) does not.
 
     Args:
         schematic_path: Path to .kicad_sch file
         quantity: Number of boards (multiplies component quantities)
+        pcb_path: Path to the .kicad_pcb (default: ``<stem>_routed.kicad_pcb``
+            or ``<stem>.kicad_pcb`` next to the schematic)
 
     Returns:
         Dictionary with validation results including:
         - summary: Statistics on parts by tier and status
         - items: Detailed validation results for each BOM item
         - assembly_ready: Whether all parts are available
+        - bom_lcsc_values: ``{status, message, details}`` when a PCB resolved
 
     Example:
         >>> result = validate_assembly_bom("/path/to/board.kicad_sch")
@@ -105,6 +122,26 @@ def validate_assembly_bom(
                 "No BOM items were validated (empty or all-DNP BOM); "
                 "assembly readiness could not be determined."
             ]
+
+        # Issue #7260: the value/package match ``kct export`` gates on.
+        pcb_file = Path(pcb_path) if pcb_path else _sibling_pcb_for_schematic(sch_file)
+        if pcb_file is not None and pcb_file.exists():
+            from kicad_tools.export.preflight import PreflightChecker
+
+            lcsc_values = PreflightChecker(
+                pcb_path=pcb_file, schematic_path=sch_file
+            ).check_bom_lcsc_values()
+            output["bom_lcsc_values"] = {
+                "status": lcsc_values.status,
+                "message": lcsc_values.message,
+                "details": lcsc_values.details,
+            }
+            if lcsc_values.status == "FAIL":
+                output["summary"]["assembly_ready"] = False
+        elif pcb_path:
+            output.setdefault("warnings", []).append(
+                f"PCB file not found: {pcb_path}; bom_lcsc_values was not checked."
+            )
         return output
 
     except ImportError as e:
@@ -394,23 +431,37 @@ def export_assembly(
     schematic_path: str,
     output_dir: str,
     manufacturer: str = "jlcpcb",
+    strict_preflight: bool = True,
 ) -> AssemblyExportResult:
     """
     Generate complete assembly package for manufacturing.
 
-    Creates a comprehensive manufacturing package including Gerber files,
-    bill of materials (BOM), and pick-and-place (PnP/CPL) files tailored
-    to the specified manufacturer's requirements.
+    Runs the same pipeline as ``kct export`` (Issue #7260):
+    :class:`~kicad_tools.export.manufacturing.ManufacturingPackage` with the
+    configuration built by
+    :func:`~kicad_tools.cli.export_cmd.build_manufacturing_config` -- the DRC
+    short/open safety floor, every preflight check, the unbuildable-BOM block
+    and (by default here) strict preflight.  A blocked export writes no BOM,
+    CPL, Gerbers or upload zip.  The report PDF and KiCad project zip are not
+    generated (MCP never produced them).
+
+    Side effect (as ``kct export``): sibling ``<board>.kicad_pro`` /
+    ``<board>.kicad_dru`` holding the manufacturer's DRC constraints are
+    written next to the source PCB (#5746).
 
     Args:
         pcb_path: Path to .kicad_pcb file
         schematic_path: Path to .kicad_sch file
         output_dir: Directory for output files
         manufacturer: Target manufacturer ("jlcpcb", "pcbway", "seeed", "generic")
+        strict_preflight: Any preflight FAIL blocks the export (default).
+            ``False`` matches ``kct export`` without ``--strict-preflight``:
+            FAILs become warnings -- except the unbuildable-BOM block and the
+            DRC safety floor, which always refuse.
 
     Returns:
         AssemblyExportResult with paths to all generated files, component counts,
-        and any warnings about missing part numbers or rotation issues.
+        the preflight results, and any warnings.
 
     Example:
         >>> result = export_assembly(
@@ -468,27 +519,39 @@ def export_assembly(
         )
 
     try:
-        # Create assembly package
-        pkg = AssemblyPackage.create(
-            pcb=pcb,
-            schematic=schematic,
-            manufacturer=manufacturer_lower,
+        from kicad_tools.cli.export_cmd import build_manufacturing_config
+        from kicad_tools.export.manufacturing import ManufacturingPackage
+
+        config = build_manufacturing_config(
             output_dir=out_dir,
+            strict_preflight=strict_preflight,
+            include_report=False,
+            include_project_zip=False,
         )
+        result = ManufacturingPackage(
+            pcb_path=pcb,
+            schematic_path=schematic,
+            manufacturer=manufacturer_lower,
+            config=config,
+        ).export(out_dir)
 
-        # Export all files
-        result = pkg.export(out_dir)
+        preflight = [
+            {"name": pr.name, "status": pr.status, "message": pr.message, "details": pr.details}
+            for pr in result.preflight_results
+        ]
+        warnings.extend(result.warnings)
 
-        # Convert to MCP result types
         gerbers_result = None
         bom_result = None
         pnp_result = None
+        assembly = result.assembly_result
 
-        # Process Gerber results
-        if result.gerber_path:
+        if assembly is not None and assembly.gerber_path:
             gerber_files: list[GerberFile] = []
             gerber_dir = (
-                result.gerber_path if result.gerber_path.is_dir() else result.gerber_path.parent
+                assembly.gerber_path
+                if assembly.gerber_path.is_dir()
+                else assembly.gerber_path.parent
             )
 
             if gerber_dir.exists():
@@ -503,73 +566,56 @@ def export_assembly(
                 error=None if copper_layers else "Export produced no copper-layer Gerber files",
             )
 
-        # Process BOM results
-        if result.bom_path and result.bom_path.exists():
-            # Count components in BOM file
-            bom_content = result.bom_path.read_text()
-            lines = [line for line in bom_content.strip().split("\n") if line.strip()]
-            # Subtract header row
-            component_count = max(0, len(lines) - 1) if lines else 0
-
-            # Count unique parts (assuming grouped BOM)
-            unique_parts = component_count
-
-            # Count missing LCSC parts (if JLCPCB format)
-            missing_lcsc = 0
-            if manufacturer_lower == "jlcpcb":
-                for line in lines[1:]:  # Skip header
-                    parts = line.split(",")
-                    if len(parts) >= 4 and not parts[3].strip().strip('"'):
-                        missing_lcsc += 1
-
+        # BOM / CPL facts come from the generator (Issue #7260), never from
+        # re-parsing the CSV text.
+        if assembly is not None and assembly.bom_path and assembly.bom_path.exists():
+            missing_lcsc = len(assembly.bom_missing_lcsc) if manufacturer_lower == "jlcpcb" else 0
             if missing_lcsc > 0:
                 warnings.append(f"{missing_lcsc} parts missing LCSC part numbers")
 
             bom_result = BOMExportResult(
-                output_path=str(result.bom_path),
-                component_count=component_count,
-                unique_parts=unique_parts,
+                output_path=str(assembly.bom_path),
+                component_count=assembly.bom_component_count,
+                unique_parts=assembly.bom_unique_parts,
                 missing_lcsc=missing_lcsc,
             )
 
-        # Process PnP results
-        if result.pnp_path and result.pnp_path.exists():
-            pnp_content = result.pnp_path.read_text()
-            lines = [line for line in pnp_content.strip().split("\n") if line.strip()]
-            # Subtract header row
-            component_count = max(0, len(lines) - 1) if lines else 0
-
-            # Determine which layers have components
-            layers: list[str] = []
-            for line in lines[1:]:
-                line_lower = line.lower()
-                if "top" in line_lower and "top" not in layers:
-                    layers.append("top")
-                if "bottom" in line_lower and "bottom" not in layers:
-                    layers.append("bottom")
-
+        if assembly is not None and assembly.pnp_path and assembly.pnp_path.exists():
             pnp_result = PnPExportResult(
-                output_path=str(result.pnp_path),
-                component_count=component_count,
-                layers=layers,
-                rotation_corrections=result.rotation_corrections_applied,
+                output_path=str(assembly.pnp_path),
+                component_count=assembly.pnp_placement_count,
+                layers=list(assembly.pnp_layers),
+                rotation_corrections=assembly.rotation_corrections_applied,
             )
 
-        # Propagate errors from assembly package
-        for error in result.errors:
-            warnings.append(error)
+        if not result.success:
+            # Refused (DRC safety floor, unbuildable BOM, strict preflight) or
+            # failed: never hand back an upload-ready zip.
+            return AssemblyExportResult(
+                success=False,
+                output_dir=str(out_dir),
+                manufacturer=manufacturer_lower,
+                gerbers=gerbers_result,
+                bom=bom_result,
+                pnp=pnp_result,
+                zip_file=None,
+                preflight=preflight,
+                warnings=warnings,
+                error="; ".join(result.errors),
+            )
 
         # Create combined zip file for upload
-        zip_file_path = _create_assembly_zip(out_dir, manufacturer_lower, result)
+        zip_file_path = _create_assembly_zip(out_dir, manufacturer_lower, assembly)
 
         return AssemblyExportResult(
-            success=result.success,
+            success=True,
             output_dir=str(out_dir),
             manufacturer=manufacturer_lower,
             gerbers=gerbers_result,
             bom=bom_result,
             pnp=pnp_result,
             zip_file=str(zip_file_path) if zip_file_path else None,
+            preflight=preflight,
             warnings=warnings,
         )
 

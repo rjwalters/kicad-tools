@@ -139,6 +139,7 @@ def _handler_validate_assembly_bom(params: dict[str, Any]) -> dict[str, Any]:
     return validate_assembly_bom(
         schematic_path=params["schematic_path"],
         quantity=params.get("quantity", 1),
+        pcb_path=params.get("pcb_path"),
     )
 
 
@@ -148,8 +149,11 @@ register_tool(
         "Validate a BOM for JLCPCB assembly. Checks all components against the "
         "LCSC/JLCPCB parts library and categorizes them by tier (Basic/Extended), "
         "stock status, and availability. Returns a summary of parts that are "
-        "available, out of stock, or missing LCSC part numbers. Use this to "
-        "verify assembly readiness before ordering."
+        "available, out of stock, or missing LCSC part numbers. When a PCB is given "
+        "or found next to the schematic, also returns `kct export`'s bom_lcsc_values "
+        "check (assigned LCSC part value/package vs the BOM row and PCB footprint); "
+        "a FAIL sets summary.assembly_ready false. Use this to verify assembly "
+        "readiness before ordering."
     ),
     parameters=_make_params(
         properties={
@@ -161,6 +165,14 @@ register_tool(
                 "type": "integer",
                 "description": "Number of boards (multiplies component quantities)",
                 "default": 1,
+            },
+            "pcb_path": {
+                "type": "string",
+                "description": (
+                    "Path to .kicad_pcb for the bom_lcsc_values package check "
+                    "(default: <stem>_routed.kicad_pcb or <stem>.kicad_pcb next to "
+                    "the schematic)"
+                ),
             },
         },
         required=["schematic_path"],
@@ -292,6 +304,7 @@ def _handler_export_assembly(params: dict[str, Any]) -> dict[str, Any]:
         schematic_path=params["schematic_path"],
         output_dir=params["output_dir"],
         manufacturer=params.get("manufacturer", "jlcpcb"),
+        strict_preflight=params.get("strict_preflight", True),
     )
     return result.to_dict()
 
@@ -301,8 +314,14 @@ register_tool(
     description=(
         "Generate complete assembly package for manufacturing. Creates Gerber files, "
         "bill of materials (BOM), and pick-and-place (PnP/CPL) files tailored to "
-        "specific manufacturers. Outputs a single zip file ready for upload to "
-        "JLCPCB, PCBWay, Seeed, or generic assembly services."
+        "specific manufacturers, plus a single zip file ready for upload to "
+        "JLCPCB, PCBWay, Seeed, or generic assembly services. Runs the same pipeline "
+        "as `kct export`: the DRC short/open safety floor and every preflight check "
+        "(returned in `preflight`). A preflight FAIL refuses the export by default "
+        "(strict_preflight); an unbuildable BOM or a DRC-floor failure always refuses. "
+        "A refused export returns success=false and writes no BOM, CPL, Gerbers or "
+        "zip. Side effect: writes sibling <board>.kicad_pro / <board>.kicad_dru "
+        "(the manufacturer's DRC constraints) next to the source PCB, as `kct export` does."
     ),
     parameters=_make_params(
         properties={
@@ -323,6 +342,15 @@ register_tool(
                 "description": "Target manufacturer for assembly",
                 "enum": ["jlcpcb", "pcbway", "seeed", "generic"],
                 "default": "jlcpcb",
+            },
+            "strict_preflight": {
+                "type": "boolean",
+                "description": (
+                    "Any preflight FAIL blocks the export (default true). false "
+                    "matches `kct export` without --strict-preflight: FAILs become "
+                    "warnings, except the unbuildable-BOM block and the DRC safety floor."
+                ),
+                "default": True,
             },
         },
         required=["pcb_path", "schematic_path", "output_dir"],
