@@ -1,8 +1,8 @@
 ---
 title: "charlieplex_3x3_routed"
 subtitle: "Design Report"
-author: "kicad-tools 0.22.0"
-date: "Rev 1 | 2026-10-14 | jlcpcb"
+author: "kicad-tools 0.23.0"
+date: "Rev 1 | 2026-10-18 | jlcpcb"
 geometry: "margin=1in"
 fontsize: 11pt
 colorlinks: true
@@ -118,7 +118,7 @@ The following 3 through-hole components are **excluded from the SMT pick-and-pla
 | Metric | Count |
 |--------|-------|
 | Errors | 0 |
-| Warnings | 0 |
+| Warnings | 2 |
 | Blocking | 0 |
 
 **Status**: PASS
@@ -126,6 +126,7 @@ The following 3 through-hole components are **excluded from the SMT pick-and-pla
 
 | Violation Type | Count |
 |----------------|-------|
+| via_at_pad_edge | 2 |
 | silk_geometry_unmodeled | 1 |
 
 
@@ -133,10 +134,11 @@ The following 3 through-hole components are **excluded from the SMT pick-and-pla
 
 ## Manufacturing Readiness
 
-**Verdict**: READY
+**Verdict**: WARNING
 
 ### Action Items
 
+- **[OPTIONAL]** Review 2 DRC warnings
 - **[OPTIONAL]** Analog net: LINE_A — audio signal; keep short, away from digital/switching nets
 - **[OPTIONAL]** Analog net: LINE_B — audio signal; keep short, away from digital/switching nets
 - **[OPTIONAL]** Analog net: LINE_C — audio signal; keep short, away from digital/switching nets

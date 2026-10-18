@@ -108,7 +108,7 @@ N. **[Most invasive]** <description>
 Each load-bearing claim carries its citation. Conflicts between sources are stated and resolved.>
 
 ### Method + referee handoff
-Artifact-first on `<path/to/board.kicad_pcb>` (recipe unchanged). Referee: `kicad-cli pcb drc --refill-zones` 0 new errors + `kct check`. Builder executes the approved ladder top-down; stops at the first level that clears all target nets.
+Artifact-first on `<path/to/board.kicad_pcb>` (recipe unchanged). Referee: `kicad-cli pcb drc --refill-zones --severity-error --exit-code-violations` with 0 error-severity violations and 0 unconnected items + `kct check`. Builder executes the approved ladder top-down; stops at the first level that clears all target nets.
 ```
 
 ## Grounding rules (mandatory, enforced)
@@ -164,7 +164,7 @@ The reviewer emits:
 The `--why` verdict is `PLACEMENT_BOUND` on ISENSE_A-/B-/C- and `CONGESTION_SATURATED` on ISENSE_B+ `[measured on this board via kct net-status --why @ committed artifact]` — i.e. not a targeted-copper fix but a "part must move" or "1:1 rip trade" call. Because the nearest strict blockers are non-zero (0.050mm on ISENSE_A-, 0.250–0.354mm on the others) `[measured]`, the ladder opens with the least-invasive re-dress rather than a part move: the measured geometry says there is *some* room. Literature governs *how* the re-dress must be done — Kelvin taps at-pad and ≤0.5mm differential gap (differential-pair / four-terminal-sensing theory) — because relocating or re-dressing sense copper without those rules would trade a routing win for a sense-accuracy loss, which is the exact reason the autonomous builders correctly punted (standing repo guidance: "analog parts need manual care"). The measured blocker identities (`PHASE_A`, `GATE_*L`, `PWM_CL` on every net `[measured]`) are what makes ladder step 2 (re-dress non-analog copper) viable before any part move. No paywalled paper was load-bearing here, so the confidence header is `med` (measured geometry + textbook/app-note theory), not low.
 
 ### Method + referee handoff
-Artifact-first on `<board>/output/<name>_routed.kicad_pcb` (recipe unchanged; regen does not reproduce the artifact). Referee: `kicad-cli pcb drc --refill-zones` 0 new errors + `kct check` (jlcpcb-tier1) + 45°-census. Builder executes the approved ladder top-down and stops at the first level that clears all 4 ISENSE nets.
+Artifact-first on `<board>/output/<name>_routed.kicad_pcb` (recipe unchanged; regen does not reproduce the artifact). Referee: `kicad-cli pcb drc --refill-zones --severity-error --exit-code-violations` with 0 error-severity violations and 0 unconnected items + `kct check` (jlcpcb-tier1) + 45°-census. Builder executes the approved ladder top-down and stops at the first level that clears all 4 ISENSE nets.
 
 ---
 

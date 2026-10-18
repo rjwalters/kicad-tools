@@ -833,7 +833,9 @@ class TestManufacturingAudit:
         audit = ManufacturingAudit(drc_clean_pcb, manufacturer="jlcpcb")
         assert audit.pcb_path == drc_clean_pcb
         assert audit.manufacturer == "jlcpcb"
-        assert audit.skip_erc is True  # Auto-set for PCB-only
+        # Issue #7136: a .kicad_pcb input no longer forces an ERC skip;
+        # skip_erc reflects only the caller's request.
+        assert audit.skip_erc is False
 
     def test_init_with_invalid_extension(self, tmp_path: Path):
         """Test initialization fails with invalid file extension."""
@@ -883,13 +885,24 @@ class TestManufacturingAudit:
         assert result.erc.error_count == 0
         assert "skipped" in result.erc.details.lower()
 
-    def test_pcb_only_audit_sets_erc_skipped(self, drc_clean_pcb: Path):
-        """PCB-only audit (no schematic) marks ERC as skipped."""
+    def test_pcb_only_audit_without_schematic_is_erc_not_run(self, drc_clean_pcb: Path):
+        """PCB-only audit with no schematic reports ERC NOT RUN, not a skip.
+
+        Issue #7136 inverted the old behaviour: a ``.kicad_pcb`` input used to
+        force ``skip_erc`` and render ``[OK] ERC: PASS -- skipped by user
+        request`` although ERC never ran.  A missing schematic verifies
+        nothing, so it is NOT RUN (the #7089 convention), which caps the
+        verdict at WARNING.
+        """
         audit = ManufacturingAudit(drc_clean_pcb)
-        assert audit.skip_erc is True
+        assert audit.skip_erc is False
         result = audit.run()
-        assert result.erc.skipped is True
-        assert result.erc.passed is True  # default, not a real pass
+        assert result.erc.skipped is False
+        assert result.erc.could_not_verify is True
+        assert result.erc.passed is False
+        assert result.erc.blocking_error_count == 0
+        assert "no schematic found" in result.erc.details
+        assert "by user request" not in result.erc.details
 
 
 class TestAuditCLI:
@@ -1956,7 +1969,10 @@ class TestZoneConnectedNets:
         pcb_path = tmp_path / "zone_board.kicad_pcb"
         pcb_path.write_text(self.PCB_WITH_ZONE)
 
-        audit = ManufacturingAudit(pcb_path)
+        # skip_erc: this test is about zone advisories.  Without it the
+        # schematic-less ERC NOT RUN item (issue #7136) names
+        # "zone_board.kicad_pcb" and would match the "zone" filter below.
+        audit = ManufacturingAudit(pcb_path, skip_erc=True)
         result = audit.run()
 
         # Should have a zone-fill verification advisory
@@ -3662,19 +3678,105 @@ class TestUnrunEngineCapsAtWarning7083:
         assert "Sync (Schematic <-> PCB): NOT RUN" in out
         assert "Sync (Schematic <-> PCB): PASS" not in out
 
-    def test_skip_erc_and_no_schematic_unchanged(self, tmp_path):
+    def test_no_schematic_is_erc_not_run_warning(self, tmp_path, capsys):
+        """Issue #7136 reverses #7089's "no-schematic unchanged" case.
+
+        A ``.kicad_pcb`` with no schematic used to report ERC as skipped
+        (rendered ``[OK] ... PASS``).  It now reports NOT RUN and the
+        verdict caps at WARNING; the sync check stays a plain skip.
+        """
+        from kicad_tools.cli.audit_cmd import output_table
+
         pcb = tmp_path / "board.kicad_pcb"
         pcb.write_text("(kicad_pcb)")
         # No schematic on disk.
         result = ManufacturingAudit(pcb, manufacturer="jlcpcb").run()
-        assert result.erc.skipped is True
-        assert result.erc.could_not_verify is False
+        assert result.erc.skipped is False
+        assert result.erc.could_not_verify is True
+        assert result.erc.details == "no schematic found for board.kicad_pcb"
         assert result.sync.could_not_verify is False
+        assert self._clean_result(result.erc).verdict == AuditVerdict.WARNING
 
+        output_table(result)
+        out = capsys.readouterr().out
+        assert "[!!] ERC (Electrical Rules Check): NOT RUN" in out
+        assert "no schematic found for board.kicad_pcb" in out
+        assert "skipped by user request" not in out
+
+    def test_no_schematic_action_item_has_no_failing_command(self, tmp_path):
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text("(kicad_pcb)")
+        audit = ManufacturingAudit(pcb, manufacturer="jlcpcb")
+        result = self._clean_result(
+            ERCStatus(passed=False, could_not_verify=True, details="no schematic found")
+        )
+        items = [i for i in audit._generate_action_items(result) if "ERC" in i.description]
+        assert len(items) == 1
+        assert items[0].command is None
+
+    def test_pcb_input_resolves_stage_suffixed_schematic(self, tmp_path, monkeypatch):
+        """``board_routed.kicad_pcb`` runs ERC against ``board.kicad_sch``."""
+        import kicad_tools.audit.auditor as auditor_mod
+
+        pcb = tmp_path / "board_routed.kicad_pcb"
+        pcb.write_text("(kicad_pcb)")
+        sch = tmp_path / "board.kicad_sch"
+        sch.write_text("(kicad_sch)")
+        monkeypatch.setattr(
+            "kicad_tools.cli.runner.find_kicad_cli", lambda *a, **k: Path("/usr/bin/kicad-cli")
+        )
+        calls: list[list[str]] = []
+
+        def fake_run(cmd, *a, **k):
+            calls.append([str(c) for c in cmd])
+            if "--output" in cmd:
+                out = Path(cmd[cmd.index("--output") + 1])
+                out.write_text(json.dumps(self.CLEAN_ERC))
+            return subprocess.CompletedProcess(cmd, 0, b"", b"")
+
+        monkeypatch.setattr(auditor_mod.subprocess, "run", fake_run)
+
+        audit = ManufacturingAudit(pcb, manufacturer="jlcpcb")
+        assert audit.skip_erc is False
+        assert audit.schematic_path == sch
+        result = audit.run()
+
+        erc_calls = [c for c in calls if c[1:3] == ["sch", "erc"]]
+        assert erc_calls, calls
+        assert str(sch) in erc_calls[0]
+        assert result.erc.skipped is False
+        assert result.erc.could_not_verify is False
+
+    @pytest.mark.parametrize(("strict", "expected"), [(False, 0), (True, 2)])
+    def test_cli_no_schematic_exit_code(self, tmp_path, monkeypatch, strict, expected):
+        """CLI: a schematic-less PCB audit is WARNING -- exit 0, or 2 under --strict."""
+        from kicad_tools.cli import audit_cmd
+
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text("(kicad_pcb)")
+        real_audit = audit_cmd.ManufacturingAudit
+        clean_result = self._clean_result
+
+        class _CleanBoardAudit(real_audit):  # type: ignore[misc, valid-type]
+            # Run the real ERC resolution, but keep the rest of the board
+            # clean so the ERC NOT RUN alone decides the verdict.
+            def run(self):
+                erc = super().run().erc
+                assert erc.could_not_verify is True
+                return clean_result(erc)
+
+        monkeypatch.setattr(audit_cmd, "ManufacturingAudit", _CleanBoardAudit)
+        argv = [str(pcb), "--format", "summary"] + (["--strict"] if strict else [])
+        assert audit_cmd.main(argv) == expected
+
+    def test_skip_erc_is_skipped_by_user_request(self, tmp_path):
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text("(kicad_pcb)")
         (tmp_path / "board.kicad_sch").write_text("(kicad_sch)")
         result = ManufacturingAudit(pcb, manufacturer="jlcpcb", skip_erc=True).run()
         assert result.erc.skipped is True
         assert result.erc.could_not_verify is False
+        assert result.erc.details == "ERC skipped by user request"
 
         # A skipped ERC on an otherwise-clean board still reaches READY.
         skipped = ERCStatus(skipped=True, details="ERC skipped by user request")

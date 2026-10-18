@@ -11,7 +11,7 @@ Produce a **complete, orderable manufacturing package** for a routed `.kicad_pcb
 
 The contract is exactly: **`tapeout` returning 0 (with a manifest written) means "upload this output directory to the fab as-is."** Anything less writes **no manifest** and exits non-zero, naming the gate that failed.
 
-> **The `kct` namespace.** This skill lives in `{{skills-dir}}` — the kicad-tools-native, harness-agnostic agent-tool namespace, invoked as `{{skill:tapeout}}`. It runs from inside a **consumer repo** that depends on kicad-tools as a `uv` dependency (`kct ...` and `kicad-cli ...` are on `PATH` via the venv). It does **not** assume the current directory is the kicad-tools repo, and it hardcodes no board path, no fab-tier list, and no CI-workflow context.
+> **The `kct` namespace.** This skill lives in `{{skills-dir}}` — the kicad-tools-native, harness-agnostic agent-tool namespace, invoked as `{{skill:tapeout}}`. It runs from inside a **consumer repo** that depends on kicad-tools as a `uv` dependency (`kct ...` is on `PATH` via the venv; `kicad-cli` comes from the KiCad install and is resolved as described below). It does **not** assume the current directory is the kicad-tools repo, and it hardcodes no board path, no fab-tier list, and no CI-workflow context.
 
 ## Prerequisite
 
@@ -25,7 +25,7 @@ uv run kct build-native
 
 `uv sync` does **not** build the native extension. A fresh checkout or git worktree needs this step explicitly.
 
-`kicad-cli` must be on `PATH` — it is required by both the mandatory DRC cross-gate (Gate 2, delegated) and the drawing-export gates (Gates 5–6). If `kicad-cli` is missing, `tapeout` **refuses** (see Refusal conditions); there is no partial-package fallback.
+`kicad-cli` is required by both the mandatory DRC cross-gate (Gate 2, delegated) and the drawing-export gates (Gates 5–6), and `jq` by the pre-gates and Gate 4b. The venv does not provide `kicad-cli`, and a stock macOS install is not on `PATH`, so resolve it the way `kct` does — with the `find_kicad_cli()` one-liner from `{{skill:manufacturing-readiness}}` Gate 2 (it checks `PATH`, then the macOS app bundle, Homebrew and the Linux and Windows default install paths; `kct doctor` prints the path it found). Only an empty result means it is missing; then `tapeout` **refuses** (see Refusal conditions) — there is no partial-package fallback.
 
 ## Model selection
 
@@ -76,13 +76,13 @@ If the resolved tier is not in that set, stop and ask — do not silently fall b
 
 ### Pre-gates (Gates 1–3): delegate to `{{skill:manufacturing-readiness}}`, do not re-describe
 
-`tapeout` is a **superset** of `{{skill:manufacturing-readiness}}` — it does **not** re-invent the sign-off gates. Before generating any package, satisfy the full sign-off ritual documented in **`{{skill-file:manufacturing-readiness}}`** at the resolved tier:
+`tapeout` is a **superset** of `{{skill:manufacturing-readiness}}` — it does **not** re-invent the sign-off gates. Before generating any package, run the `# sign-off gate 1`, `# sign-off gate 2` and `# sign-off gate 3` command blocks in **`{{skill-file:manufacturing-readiness}}`** exactly as written, in order, at the resolved tier and with `<dir>` set to this tapeout's output directory. Each block's exit code is its verdict; a non-zero block is a refusal. Do not restate, paraphrase, reorder or relax those blocks here — the sibling skill is the single source of truth for the commands and the pass rules:
 
-1. **Gate 1 — `kct check <board.kicad_pcb> --mfr <tier>`** exits clean (DRC / manufacturing-rules + ERC/LVS/Manifest sub-checks; `--net-class-map` auto-discovered). For tapeout, additionally pass `--output <dir>/check-report.json` (an existing `kct check` flag) so the run leaves a machine-readable report in the bundle: Gate 4b derives its per-rule warning table from that file, and Gate 8 checksums it. Do **not** run a separate fourth `kct check` just for the warning table — reuse this gate's report.
-2. **Gate 2 — the mandatory independent cross-gate `kicad-cli pcb drc --refill-zones <board.kicad_pcb>`** reports **0 new errors**. This is **not optional and not skippable**: it is a second, independent DRC engine that catches stale-zone-fill shorts `kct check` misses. A missing `kicad-cli` is a **hard blocker**, not a pass.
-3. **Gate 3 — `kct export <board.kicad_pcb> --output <dir> --mfr <tier>`** produces gerbers, drill, and (in `--assembly` mode) BOM + CPL, plus a first-pass `manifest.json`.
+1. **Gate 1** — `kct check --output <dir>/check-report.json`, judged by that skill's `jq` rule over the JSON report, not by `kct check`'s exit code (which is 2 on a good board before export). The report stays in the bundle: Gate 4b derives its per-rule warning table from it, and Gate 8 checksums it. Do **not** run a separate `kct check` just for the warning table — reuse this gate's report.
+2. **Gate 2** — the mandatory independent cross-gate `kicad-cli pcb drc --refill-zones --severity-error --exit-code-violations --format json`, writing `<pcb-dir>/drc_report.json`. It passes only with **0 error-severity violations and 0 unconnected items**. **Not optional and not skippable**: it is a second, independent DRC engine that catches stale-zone-fill shorts `kct check` misses. A kicad-cli that cannot be found is a **hard blocker**, not a pass.
+3. **Gate 3** — `kct export --drc-report <pcb-dir>/drc_report.json` after deleting the old manifest, producing gerbers, drill, and (in `--assembly` mode) BOM + CPL, plus a first-pass `manifest.json`.
 
-Run `{{skill:manufacturing-readiness}} <board-path> --mfr <tier> --output <dir>` (or execute its three gates directly) and **confirm it signs off**. If sign-off fails, `tapeout` **refuses** — do not proceed to package generation on a board that is not manufacturing-ready. Do not paraphrase or weaken those gates here; the sibling skill is the source of truth for them.
+Equivalently, run `{{skill:manufacturing-readiness}} <board-path> --mfr <tier> --output <dir>` and **confirm it signs off**. If sign-off fails, `tapeout` **refuses** — do not proceed to package generation on a board that is not manufacturing-ready.
 
 > Sequencing note: because `kct export` runs `kct check`'s rule set, and Gate 2 forces a zone refill, running the pre-gates *in this order* also side-steps two staleness traps a hand-assembled checklist hit — rules present in the board but not the paired `.kicad_pro` (#4097), and check-vs-fill staleness (#4096). Do not reorder.
 
@@ -135,8 +135,12 @@ The distinction is load-bearing: **matcher-broken → refuse the whole tapeout**
 `kct export` does **not** produce human-reviewable drawings; generate them with `kicad-cli` into the same output directory:
 
 ```bash
-kicad-cli sch export pdf <board-or-project>.kicad_sch --output <dir>/<board>-schematic.pdf
+KICAD_CLI=$(uv run python -c "from kicad_tools.cli.runner import find_kicad_cli; print(find_kicad_cli() or '')")
+test -n "$KICAD_CLI" || { echo "kicad-cli not found (run: kct doctor)"; exit 3; }
+"$KICAD_CLI" sch export pdf <board-or-project>.kicad_sch --output <dir>/<board>-schematic.pdf
 ```
+
+Each tool call is a fresh shell, so the `KICAD_CLI` resolution line must be inside every block that uses it.
 
 Export the **full hierarchy** (all sheets), not just the root sheet. **Gate condition:** the PDF exists, is non-empty, and its mtime is newer than the schematic source. No schematic PDF ⇒ no tapeout.
 
@@ -145,13 +149,16 @@ Export the **full hierarchy** (all sheets), not just the root sheet. **Gate cond
 Produce two board drawings a human (and the assembler) can read, with explicit, named layer sets:
 
 ```bash
+KICAD_CLI=$(uv run python -c "from kicad_tools.cli.runner import find_kicad_cli; print(find_kicad_cli() or '')")
+test -n "$KICAD_CLI" || { echo "kicad-cli not found (run: kct doctor)"; exit 3; }
+
 # Front assembly view: front copper + front silkscreen + board outline
-kicad-cli pcb export pdf <board.kicad_pcb> \
+"$KICAD_CLI" pcb export pdf <board.kicad_pcb> \
   --layers F.Cu,F.SilkS,Edge.Cuts \
   --output <dir>/<board>-assembly-front.pdf
 
 # Back assembly view: back copper + back silkscreen + board outline
-kicad-cli pcb export pdf <board.kicad_pcb> \
+"$KICAD_CLI" pcb export pdf <board.kicad_pcb> \
   --layers B.Cu,B.SilkS,Edge.Cuts \
   --output <dir>/<board>-assembly-back.pdf
 ```
@@ -200,13 +207,14 @@ If any applicable gate fails or could not run, **do not write the final manifest
 
 Refuse the tapeout, loudly, when any of these hold:
 
-- **Any pre-gate fails** — `kct check` not clean, the `kicad-cli pcb drc --refill-zones` cross-gate reports new errors, or `kct export` did not produce its first-pass bundle.
+- **Any pre-gate fails** — any of the `# sign-off gate 1-3` blocks in `{{skill-file:manufacturing-readiness}}` exits non-zero: Gate 1's rule is false, the `kicad-cli pcb drc` cross-gate reports any error-severity violation or unconnected item (or did not run), or `kct export --drc-report` did not produce its first-pass bundle.
+- **Gate 1's rule is false on a `meta_checks` sub-check** — any `meta_checks` sub-check other than Manifest is `NOT RUN` (e.g. ERC/LVS with no schematic found), `meta_checks.lvs` is vacuous, or `--allow-incomplete` / `--drc-only` was used. `summary.passed` can be `true` in exactly these cases, so it is not the signal; apply the manufacturing-readiness Gate 1 rule rather than restating it.
 - **A blocking check's coverage is `unknown`** — "unknown is not pass" (issue #5946). Gate 1's report carries a `coverage` map (one entry per check: `checked`, `skipped:<reason>` or `unknown:<reason>`, plus `blocking`), and `summary.coverage_blocking_unknown` lists every blocking check that could not evaluate the board (e.g. `segment_zone` with `zone_fills_absent`, `diffpair_length_skew` with `needs_input:net_class_map`). Zero findings from such a check is not a pass: refuse, quote the names and reasons, and say which input to supply (refill zones, pass the net-class map, fix the `.kicad_pro`). `kct readiness` enforces the same rule in its `kct_check` gate.
 - **A stale evidence-bound waiver** — `summary.stale_waivers` is nonzero, or any finding carries `"waiver_status": "stale"`. The geometry or nets under a reviewed waiver changed, so the finding is active again; it must be re-reviewed (and re-waived with `kct check --waive <key> --waive-reason ... --waive-reviewer ...` only if still intentional), never carried forward as accepted risk.
 - **Unacknowledged assembly-affecting warnings (Gate 4b)** — any rule in the assembly-affecting set (`silk_over_copper`, `silkscreen_line_width`, `silk_edge_clearance`, `silk_overlap`, at minimum) has a nonzero warning count with no matching `--ack-warnings` entry or per-rule accepted-risk line. Quote the per-rule warning table in the refusal. "0 errors" is not "fit to fabricate" — these two claims must never be conflated by this skill.
 - **`--assembly` with unresolved BOM lines** — one or more components have no fab-orderable part number (human selection required). Surface the unresolved report; do not ship an incomplete assembly order.
 - **BOM-resolution machinery unavailable** — the requested capability could not run: the `[parts]` extra is missing (so `--auto-lcsc` soft-fails to an empty column — **#4104**), or there is no network for part matching. This is a **refusal**, not a silently-empty BOM that exits 0.
-- **Requested capability unavailable** generally — e.g. `kicad-cli` not on `PATH` (drawings and the cross-gate cannot run), or the resolved tier is not in `get_manufacturer_ids()`.
+- **Requested capability unavailable** generally — e.g. `kicad-cli` cannot be found by the `find_kicad_cli()` resolution (drawings and the cross-gate cannot run), `jq` is missing, or the resolved tier is not in `get_manufacturer_ids()`.
 - **Board has no paired project rules** — the board file has no accompanying `.kicad_pro` (or the rules live only in the board / `.kicad_prl` and not the project file, echoing #4097). Without paired project rules the sign-off tier is not trustworthy; refuse.
 - **`--assembly` and `--pcb-only` both passed** — mutually exclusive; refuse rather than guessing.
 
@@ -216,7 +224,7 @@ Refuse the tapeout, loudly, when any of these hold:
 - **It does not fix the `--auto-lcsc` soft-fail defect (#4104).** It *surfaces* that defect as a refusal condition — the BOM gate independently verifies the part-number column is populated rather than trusting `kct export`'s exit code — but it does not change `kct export`'s behavior. When #4104 is fixed upstream, the BOM gate's independent check becomes belt-and-suspenders; until then it is the only thing standing between you and an empty BOM that "succeeded."
 - **It does not route copper, place parts, or edit the `.kicad_pcb` / schematic.** If the board is not manufacturing-ready, tapeout refuses; making it ready is `{{skill:manufacturing-readiness}}`'s upstream concern and the router's job.
 - **It does not enumerate fab tiers.** The tier set is owned by `kicad_tools.manufacturers.get_manufacturer_ids()`.
-- **It does not depend on any CI workflow or GitHub Actions context.** It runs identically as an interactive agent invocation inside any consumer repo's working tree, needing only `kct` and `kicad-cli` on `PATH`.
+- **It does not depend on any CI workflow or GitHub Actions context.** It runs identically as an interactive agent invocation inside any consumer repo's working tree, needing only `kct` (on `PATH` via the venv), a KiCad install for `kicad-cli`, and `jq`.
 
 ## References
 
