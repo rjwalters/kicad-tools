@@ -322,6 +322,9 @@ def _dispatch_command(args) -> int:
         # Issue #7077: opt out of the NOT RUN parity -> exit 2 gate.
         if getattr(args, "allow_incomplete", False):
             sub_argv.append("--allow-incomplete")
+        # Issue #7147: explicit parity schematic.
+        if getattr(args, "schematic", None):
+            sub_argv.extend(["--schematic", str(args.schematic)])
         if args.category:
             sub_argv.extend(["--category", args.category])
         if args.verbose:
