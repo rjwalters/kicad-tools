@@ -645,7 +645,7 @@ jobs:
           if [[ "$BOARD_07_CI_ENABLED" != "true" ]]; then
             test_args+=(--ignore=tests/test_board_07_matchgroup_test.py)
           fi
-          python3 scripts/ci/run_observed.py bulk -- uv run pytest -n auto -o addopts= --benchmark-disable --timeout=60 -m "not slow and not ci_extended" --junitxml "$RUNNER_TEMP/junit/bulk.xml" "${test_args[@]}"
+          python3 scripts/ci/run_observed.py bulk -- uv run pytest -n auto -rfEsx -o addopts= --benchmark-disable --timeout=60 -m "not slow and not ci_extended" --junitxml "$RUNNER_TEMP/junit/bulk.xml" "${test_args[@]}"
 
       - name: Retain test timings
         # Input for scripts/ci/update_ci_extended.py (Issue #6013).
@@ -744,7 +744,7 @@ jobs:
         # pool that "Test" deselects. Same container, same native-concurrency
         # bound, same per-test timeout.
         run: |
-          uv run pytest -n auto -o addopts= --benchmark-disable --timeout=60 -m "ci_extended and not slow" \
+          uv run pytest -n auto -rfEsx -o addopts= --benchmark-disable --timeout=60 -m "ci_extended and not slow" \
             --junitxml "$RUNNER_TEMP/junit/extended.xml"
 
       - name: Retain test timings
