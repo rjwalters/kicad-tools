@@ -339,7 +339,7 @@
 				)
 			)
 		)
-		(property "Value" "SWD"
+		(property "Value" "SWD-6"
 			(at 0 8 0)
 			(layer "F.Fab")
 			(uuid "2d2a3b6c-d8c6-5a6f-a1c5-bdec4af9aa52")

@@ -33,7 +33,7 @@ OPTIONS = {
     "source": SOURCE,
 }
 # Exact pad/net/placement contract; copper and UUIDs are checked separately.
-PHYSICAL_SHA256 = "bde54c82117736336cbe72c2bb6329ca152626027ffff3ed81b0da98e9eb1288"
+PHYSICAL_SHA256 = "f20b004a5f7af93d29eab55c7e1a0e4c5e23a464a1807892c37a87c0a70340a0"
 # ref.pad, net, reviewed original via center, reviewed off-pad center (board relative).
 MOVES = [
     ("U1.2", "GND", (10.24, 11.61), (10.24, 12.55)),
