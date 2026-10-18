@@ -103,6 +103,9 @@ ASSEMBLY_AFFECTING_RULES = frozenset(
         "silkscreen_line_width",
         "silk_edge_clearance",
         "silk_overlap",
+        "silkscreen_text_height",
+        "silkscreen_text_thickness",
+        "silk_ref_obscured",
     }
 )
 
