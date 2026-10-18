@@ -260,6 +260,13 @@ _COORD_DECIMALS = 6
 # below any manufacturable feature, so it never turns "near the pad" into "on
 # the pad".
 _PAD_EPS = 1e-6
+# A via centre and the track end that lands on it can be quantised apart by
+# the PCB file's coordinate grid (board 05 PHASE_A: In2.Cu end at x=20.9375
+# vs via at x=20.938, 0.35 um off).  KiCad connects a track that ends inside
+# the via's copper, so a sub-micron centre offset is a real contact.  Kept at
+# 1 um, far below any annular ring, so it never bridges genuinely separate
+# copper (Issue #7210).
+_VIA_CENTRE_EPS = 1e-3
 
 
 # Which waveform assumption produced a path's thermal design current
@@ -881,17 +888,20 @@ def _build_graph(segments: list[Segment], pcb: PCB, net_name: str) -> _CopperGra
             t = (ox * ey - oy * ex) / (dx * ey - dy * ex)
             point = _node_key((first.start[0] + t * dx, first.start[1] + t * dy))
             contacts[first.layer].add(point)
+    via_contacts: dict[str, set[tuple[float, float]]] = {layer: set() for layer in layers}
     for via in vias:
         for layer in layers:
             if via_spans_layer(via.layers, layer):
                 contacts[layer].add(_node_key(via.position))
+                via_contacts[layer].add(_node_key(via.position))
 
     edges: list[tuple[_Node, _Node, _GraphEdge]] = []
     for seg in segments:
         points = [
             point
             for point in contacts[seg.layer]
-            if point_to_segment_distance(*point, *seg.start, *seg.end) <= _PAD_EPS
+            if point_to_segment_distance(*point, *seg.start, *seg.end)
+            <= (_VIA_CENTRE_EPS if point in via_contacts[seg.layer] else _PAD_EPS)
         ]
         points.sort(key=lambda point: math.dist(point, seg.start))
         for point_a, point_b in zip(points, points[1:], strict=False):
