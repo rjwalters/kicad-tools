@@ -3830,6 +3830,21 @@ def portable_report_path(pcb_path: Path | str, cwd: Path | None = None) -> str:
         return path.name
 
 
+def _pcb_sha256_or_none(pcb_path: Path | str) -> str | None:
+    """sha256 of the checked PCB's bytes for the report's ``pcb_sha256`` key.
+
+    Issue #7190: export preflight only trusts an auto-discovered clean
+    report whose recorded hash equals the current PCB's.  ``None`` (key
+    emitted as ``null``) when the file cannot be read.
+    """
+    from kicad_tools.drc.report_binding import sha256_file
+
+    try:
+        return sha256_file(pcb_path)
+    except OSError:
+        return None
+
+
 def output_json(
     violations: list[DRCViolation],
     results: DRCResults,
@@ -3903,6 +3918,8 @@ def output_json(
     data: dict = {
         "file": portable_report_path(pcb_path),
         "manufacturer": mfr,
+        # Issue #7190: bind the report to the PCB content it checked.
+        "pcb_sha256": _pcb_sha256_or_none(pcb_path),
         "layers": layers,
         "summary": summary_data,
         "violations": [v.to_dict() for v in violations],
@@ -4018,6 +4035,8 @@ def write_json_report(
     data: dict = {
         "file": portable_report_path(pcb_path),
         "manufacturer": mfr,
+        # Issue #7190: bind the report to the PCB content it checked.
+        "pcb_sha256": _pcb_sha256_or_none(pcb_path),
         "layers": layers,
         "summary": summary_data,
         "violations": [v.to_dict() for v in violations],

@@ -17,6 +17,7 @@ Acceptance criteria covered:
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -41,6 +42,8 @@ def _write_drc_report(routed_pcb: Path, *, errors: int) -> Path:
     report = {
         "file": str(routed_pcb),
         "manufacturer": "jlcpcb-tier1",
+        # Issue #7190: bind the report to the routed PCB's bytes.
+        "pcb_sha256": hashlib.sha256(routed_pcb.read_bytes()).hexdigest(),
         "layers": 2,
         "summary": {
             "errors": errors,

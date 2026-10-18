@@ -98,8 +98,6 @@ mixed THT/SMD board — see the `decisions:` block in `project.kct`.
 | `output/simple_led.kicad_pcb` | Generated unrouted PCB (+ `.kicad_pro`, `.kicad_prl`) |
 | `output/simple_led_routed.kicad_pcb` | Routed PCB (+ `.kicad_pro`, `.kicad_prl`, `.kicad_dru` design rules) |
 | `output/lvs.json` | Copper + label LVS report; `clean: true` on the committed board |
-| `output/drc_report.json` | DRC snapshot from the run that produced these artifacts |
-| `output/erc_report.json` | `kicad-cli sch erc` JSON report |
 | `package_release.py` | Rebuilds the shipped package below through `kct readiness --generate`; run it after `generate_design.py` changes the PCB. |
 | `output/manufacturing/` | Full fab bundle — see below |
 | `output/readiness.json`, `output/readiness/` | Hash-bound readiness verdict and its gate evidence |
@@ -159,8 +157,10 @@ container. It is the contract this board must keep:
    `manufacturing/manifest.json`), `lvs.json` `clean: true`, and `board.json`
    reporting `status: ok`, `drc_violations: 0`, `lvs_clean: true`.
 
-Note that the gate re-derives DRC from scratch rather than trusting the
-committed `drc_report.json`; the recipe's own fast-fail gates (partial-route
+Note that the gate re-derives DRC from scratch; no `drc_report.json` is
+committed (the old unproduced snapshots were removed in issue #7190, and
+export preflight no longer trusts a report that is not bound to the PCB's
+content). The recipe's own fast-fail gates (partial-route
 detection, `write_lvs_report(require_clean=True)`) run inside step 2. Whether
 this job is a *required* status check on `main` is a separate repo-admin
 setting — it landed advisory, per the note in the job's own comment block.
