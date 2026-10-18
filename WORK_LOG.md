@@ -15,6 +15,12 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-18
 
+- **PR #7127**: fix(mcp): placement_suggestions, zipped Gerber count, board_view small sizes
+- **PR #7108**: fix(board03): re-derive copper from a class-clean lattice route (#6394)
+- **Issue #7045** (closed): Finish PredictiveAnalyzer._check_thermal: wire analysis/thermal.py into per-move predictive warnings
+- **Issue #7115** (closed): MCP tool smoke sweep: 5 more registered tools broken (placement_suggestions ImportError, export_gerbers zip false-failure, checkpoint/context no-ops, board_view blank) + call-every-tool test
+- **Issue #6824** (closed): board 03: fresh lattice routes fail routing_plan.usb_geometry (USB_D common run not on In2.Cu, MCU launch > 4 mm) — blocks #6394
+- **Issue #6394** (closed): board 03: 13 copper violations of the router's own Power class (0.2 mm) exposed by #6390
 - **PR #7109**: fix(optim): keep placement outline in the origin-relative component frame
 - **PR #7119**: fix(mcp): route_net saves routed nets via the real merge_routes_into_pcb API
 - **PR #7104**: docs: record tscircuit upstream defect outcomes (#5878)
