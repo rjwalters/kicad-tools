@@ -1056,9 +1056,10 @@ class ReportDataCollector:
     def _extract_assembly_notes(self, pcb: Any) -> dict[str, Any] | None:
         """Generate assembly guidance from PCB footprint analysis.
 
-        Detects fine-pitch packages (QFP, BGA), thermal pads, and
-        polarized components. Returns ``None`` when no noteworthy
-        assembly observations are found.
+        Detects fine-pitch packages (QFP, BGA), thermal pads, polarized
+        components and bottom-side (double-sided assembly) placements
+        (Issue #7204). Returns ``None`` when no noteworthy assembly
+        observations are found.
         """
         import re
 
@@ -1066,6 +1067,7 @@ class ReportDataCollector:
         thermal_pad_count = 0
         polarized_count = 0
         fine_pitch_parts: list[str] = []
+        bottom_side_parts: list[str] = []
         _FINE_PITCH_CAP = 10  # cap listed parts for readability
 
         for fp in pcb.footprints:
@@ -1086,7 +1088,25 @@ class ReportDataCollector:
             if ref.startswith("D") or re.search(r"(CP_Elec|Polarized|LED)", fp_name, re.IGNORECASE):
                 polarized_count += 1
 
-        if fine_pitch_count == 0 and thermal_pad_count == 0 and polarized_count == 0:
+            # Bottom-side placements (double-sided assembly), same CPL filter
+            # as the export: position-file-excluded and DNP parts are not placed.
+            if (
+                getattr(fp, "layer", "") == "B.Cu"
+                and not getattr(fp, "exclude_from_pos_files", False)
+                and not getattr(fp, "dnp", False)
+            ):
+                bottom_side_parts.append(ref or fp_name)
+
+        bottom_side_parts.sort(
+            key=lambda r: [int(t) if t.isdigit() else t for t in re.split(r"(\d+)", r)]
+        )
+        bottom_side_count = len(bottom_side_parts)
+        if (
+            fine_pitch_count == 0
+            and thermal_pad_count == 0
+            and polarized_count == 0
+            and bottom_side_count == 0
+        ):
             return None
 
         summary_parts: list[str] = []
@@ -1103,11 +1123,18 @@ class ReportDataCollector:
                 f"{polarized_count} polarized component{'s' if polarized_count != 1 else ''}"
             )
 
+        if bottom_side_count:
+            summary_parts.append(
+                f"{bottom_side_count} bottom-side component{'s' if bottom_side_count != 1 else ''}"
+            )
+
         return {
             "fine_pitch_count": fine_pitch_count,
             "fine_pitch_parts": fine_pitch_parts,
             "thermal_pad_count": thermal_pad_count,
             "polarized_count": polarized_count,
+            "bottom_side_count": bottom_side_count,
+            "bottom_side_parts": bottom_side_parts[:_FINE_PITCH_CAP],
             "summary": "; ".join(summary_parts),
         }
 
