@@ -86,8 +86,10 @@ class RoutingImpactInfo:
 
     Attributes:
         affected_nets: List of nets affected by the move
-        estimated_length_change_mm: Estimated change in routing length
-        crossing_changes: Change in net crossing count
+        estimated_length_change_mm: Change in Euclidean pin-MST length summed
+            over the affected nets (positive = longer)
+        crossing_changes: Signed change in inter-net crossing count
+            (after - before)
     """
 
     affected_nets: list[str] = field(default_factory=list)

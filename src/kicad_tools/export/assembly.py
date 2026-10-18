@@ -30,6 +30,7 @@ from .gerber import MANUFACTURER_PRESETS, GerberConfig, GerberExporter
 from .pnp import (
     PlacementData,
     PnPExportConfig,
+    count_rotation_corrections,
     export_pnp,
     extract_tht_exclusions,
     get_pnp_formatter,
@@ -90,6 +91,10 @@ class AssemblyPackageResult:
     gerber_path: Path | None = None
     spec_overlay: SpecOverlayReport | None = None
     lcsc_enrichment: EnrichmentReport | None = None
+    rotation_corrections_applied: int = 0
+    """Number of CPL rows whose rotation was shifted by a manufacturer
+    per-footprint correction (issue #7107).  0 when the manufacturer
+    profile has no corrections."""
     tht_excluded: list[PlacementData] = field(default_factory=list)
     """Through-hole components excluded from the CPL by the THT filter
     (issue #3539).  These are on the board and in the BOM but absent
@@ -541,6 +546,12 @@ class AssemblyPackage:
         # (JLCPCB: exclude_tht=True) are honoured when no explicit
         # pnp_config was supplied.
         if result is not None:
+            result.rotation_corrections_applied = count_rotation_corrections(
+                footprints,
+                self.fab_family,
+                self.config.pnp_config,
+                rotation_corrections=rotation_corrections,
+            )
             effective_config = get_pnp_formatter(self.fab_family, self.config.pnp_config).config
             result.tht_excluded = extract_tht_exclusions(footprints, effective_config)
             if result.tht_excluded:

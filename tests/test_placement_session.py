@@ -457,6 +457,69 @@ class TestViolation:
         assert d["location"] == [100.0, 100.0]
 
 
+class TestRoutingImpactComputed:
+    """query_move must compute routing_impact, not ship defaults (#7107)."""
+
+    @pytest.mark.parametrize(
+        ("ref", "dx", "dy", "expected_mm"),
+        [
+            ("C1", 14, 0, -28.00),
+            ("C1", 0, 14, 8.83),
+            ("C1", -14, 0, 28.00),
+            ("C2", 0, 14, -17.56),
+            ("C2", -14, 0, -15.75),
+        ],
+    )
+    def test_length_change_is_pin_mst_delta(
+        self, session: PlacementSession, ref: str, dx: float, dy: float, expected_mm: float
+    ):
+        comp = session._optimizer.get_component(ref)
+        result = session.query_move(ref, comp.x + dx, comp.y + dy)
+        assert result.routing_impact.estimated_length_change_mm == pytest.approx(
+            expected_mm, abs=0.01
+        )
+
+    def test_length_warning_follows_mst_value(self, session: PlacementSession):
+        comp = session._optimizer.get_component("C1")
+        grow = session.query_move("C1", comp.x - 14, comp.y)
+        shrink = session.query_move("C1", comp.x + 14, comp.y)
+        assert any("increases routing length by 28.0mm" in w for w in grow.warnings)
+        assert not any("routing length" in w for w in shrink.warnings)
+
+    def test_crossing_added(self, session: PlacementSession):
+        comp = session._optimizer.get_component("C1")
+        result = session.query_move("C1", comp.x + 14, comp.y)
+        assert result.routing_impact.crossing_changes == 2
+
+    def test_crossing_unchanged(self, session: PlacementSession):
+        comp = session._optimizer.get_component("C2")
+        result = session.query_move("C2", comp.x + 0.5, comp.y)
+        assert result.routing_impact.crossing_changes == 0
+
+    def test_crossing_removed(self, session: PlacementSession):
+        result = session.query_move("C2", 60.0, 45.0)
+        assert result.routing_impact.crossing_changes == -1
+
+    def test_query_move_does_not_mutate_state(self, session: PlacementSession):
+        comp = session._optimizer.get_component("C1")
+        before = (comp.x, comp.y, [(p.x, p.y) for p in comp.pins])
+        session.query_move("C1", comp.x + 14, comp.y)
+        assert (comp.x, comp.y, [(p.x, p.y) for p in comp.pins]) == before
+
+    def test_swap_totals_use_new_values(self, session: PlacementSession):
+        result = query_swap(session, "C1", "C2")
+        c1 = session._optimizer.get_component("C1")
+        c2 = session._optimizer.get_component("C2")
+        assert result.routing_impact.estimated_length_change_mm == pytest.approx(
+            session.query_move("C1", c2.x, c2.y).routing_impact.estimated_length_change_mm
+            + session.query_move("C2", c1.x, c1.y).routing_impact.estimated_length_change_mm,
+            abs=0.01,
+        )
+
+    def test_congestion_areas_not_reported(self):
+        assert "new_congestion_areas" not in RoutingImpact().to_dict()
+
+
 class TestRoutingImpact:
     """Tests for RoutingImpact dataclass."""
 
