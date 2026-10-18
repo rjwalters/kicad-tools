@@ -3507,7 +3507,7 @@ def _add_mfr_parser(subparsers) -> None:
 
     # mfr validate
     mfr_validate = mfr_subparsers.add_parser(
-        "validate", help="Validate PCB against manufacturer rules"
+        "validate", help="Validate PCB against manufacturer rules (kct DRC engine)"
     )
     mfr_validate.add_argument("file", help="Path to .kicad_pcb file")
     mfr_validate.add_argument("manufacturer", help="Manufacturer ID (jlcpcb, seeed, etc.)")

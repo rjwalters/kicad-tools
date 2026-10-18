@@ -810,7 +810,7 @@ class ManufacturingPackage:
             # separate collection that ``report.errors`` never contains, so
             # read them through the connectivity accessor (issue #7091).
             # Only error-severity (non-waived) items block.
-            opens = [v for v in report.connectivity_items() if v.is_error]
+            opens = report.connectivity_errors()
         except Exception as e:
             # If we can't read the report, don't block -- prefer a
             # false-negative over breaking boards that never ran DRC.

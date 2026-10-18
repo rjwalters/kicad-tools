@@ -98,6 +98,41 @@ class DRCReport:
             *(v for v in self.violations if v.type == ViolationType.UNCONNECTED_ITEMS),
         ]
 
+    def connectivity_errors(self) -> list[DRCViolation]:
+        """Return the unwaived, error-severity connectivity entries (Issue #7188).
+
+        :meth:`connectivity_items` filtered by :attr:`DRCViolation.is_error`,
+        covering both the KiCad JSON shape (:attr:`unconnected_items`) and the
+        text ``.rpt`` shape (opens inside :attr:`violations`).  This is the
+        single definition of "this board has blocking opens" shared by
+        ``kct drc``, export preflight and the manufacturing package.
+        """
+        return [v for v in self.connectivity_items() if v.is_error]
+
+    def blocking_items(self) -> list[DRCViolation]:
+        """Return every finding that should block fabrication (Issue #7188).
+
+        That is :attr:`errors` (error-severity geometric violations, which for
+        a text ``.rpt`` already include its opens) plus the error-severity
+        entries of :attr:`unconnected_items` (KiCad JSON opens).  The two
+        sources are disjoint by construction, so nothing is double counted.
+
+        :attr:`error_count` / :attr:`passed` deliberately keep their
+        geometric-only meaning (#4498); this is the wider gate count.
+
+        Not included, on purpose:
+
+        * :attr:`schematic_parity` -- parity has its own PASSED / FAILED /
+          NOT RUN gate (:attr:`schematic_parity_status`, #7077).
+        * :attr:`mask_copper_assessments` -- already gated by :attr:`passed`.
+        """
+        return [*self.errors, *(v for v in self.unconnected_items if v.is_error)]
+
+    @property
+    def blocking_count(self) -> int:
+        """Number of :meth:`blocking_items` (Issue #7188)."""
+        return len(self.blocking_items())
+
     @property
     def error_count(self) -> int:
         """Number of error-level violations."""
