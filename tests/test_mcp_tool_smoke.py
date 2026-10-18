@@ -214,26 +214,8 @@ SMOKE_ARGS: dict[str, Callable[[Fixtures], dict[str, Any]]] = {
 # Tools that cannot be called yet.  Every entry needs a reason and an issue number.
 SKIP: dict[str, str] = {}
 
-# Tools whose success payload is not asserted until #7121 lands.  They are still
-# called and must not raise.  Today the single session store makes the first two
-# report "Session not found", and the others only "succeed" because
-# record_decision auto-creates a context.  Whichever of #7121 and this test
-# merges second moves these into EXPECT_SUCCESS (delete the dict, then).
-EXPECT_SUCCESS_PENDING: dict[str, str] = dict.fromkeys(
-    (
-        "get_session_context",
-        "get_session_summary",
-        "record_decision",
-        "get_decision_history",
-        "annotate_decision",
-        "create_checkpoint",
-        "restore_checkpoint",
-    ),
-    "#7121",
-)
-
-# Every called tool not pending must return a non-failure payload.
-EXPECT_SUCCESS = sorted(set(SMOKE_ARGS) - set(EXPECT_SUCCESS_PENDING))
+# Every called tool must return a non-failure payload.
+EXPECT_SUCCESS = sorted(SMOKE_ARGS)
 
 
 @pytest.fixture(autouse=True)
@@ -268,7 +250,6 @@ def test_every_registered_tool_has_smoke_args():
     )
     assert not set(SMOKE_ARGS) & set(SKIP), "a tool is both in SMOKE_ARGS and SKIP"
     assert all(SKIP.values()), "every SKIP entry needs a reason"
-    assert set(EXPECT_SUCCESS_PENDING) <= set(SMOKE_ARGS)
 
 
 @pytest.mark.parametrize("name", sorted(SMOKE_ARGS))

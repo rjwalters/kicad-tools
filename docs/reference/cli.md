@@ -905,8 +905,12 @@ kct lib <subcommand> [options]
 | `list` | List available KiCad libraries |
 | `symbols` | List symbols in a `.kicad_sym` library |
 | `footprints` | List footprints in a `.pretty` library directory |
+| `footprint` | Show details of a footprint file (`.kicad_mod`) |
 | `symbol-info` | Show details of a symbol by name |
 | `footprint-info` | Show details of a footprint by name |
+| `create-symbol-lib` | Create a new empty `.kicad_sym` library |
+| `create-footprint-lib` | Create a new empty `.pretty` library directory |
+| `generate-footprint` | Generate a parametric footprint into a `.pretty` library |
 | `export` | Export library to JSON |
 | `purge` | List unused symbols/footprints in project-local libraries |
 
@@ -914,7 +918,25 @@ kct lib <subcommand> [options]
 ```bash
 kct lib symbols Device.kicad_sym
 kct lib symbol-info Device.kicad_sym R
+
+kct lib create-symbol-lib MyParts.kicad_sym
+kct lib create-footprint-lib MyParts.pretty
+kct lib generate-footprint MyParts.pretty soic --pins 8
+kct lib generate-footprint MyParts.pretty chip --size 0402 --prefix R --format json
 ```
+
+**Authoring commands** (`create-symbol-lib`, `create-footprint-lib`,
+`generate-footprint`) all accept `--format text|json` (JSON: one document with
+`command`, `implemented`, `success` plus `path` and either `symbol_count`,
+`footprint_count`, or `name`/`pad_count`/`parameters`). Exit codes: `0`
+success, `1` runtime/validation failure (target exists without `--force`,
+unwritable path, missing/invalid parameters), `2` usage error.
+
+| Subcommand | Behaviour |
+|------------|-----------|
+| `create-symbol-lib <path> [--force]` | Appends `.kicad_sym` if no suffix; refuses an existing file without `--force`. |
+| `create-footprint-lib <path> [--force]` | Appends `.pretty`; an empty existing directory is fine; a non-empty one is refused. `--force` only permits reusing a directory that already holds `.kicad_mod` files and never deletes anything. |
+| `generate-footprint <lib> <type> [options] [--name N] [--force]` | `type` is `soic`, `qfp`, `qfn`, `chip` or `sot`; creates the `.pretty` directory if missing and writes `<lib>/<name>.kicad_mod`. Options: `--pins`, `--pitch`, `--body-width`, `--body-length`, `--body-size`, `--exposed-pad`, `--size`, `--variant`, `--prefix`. Uses the same generator function as `kct footprint generate`. Refuses to overwrite a footprint of the same name without `--force`. |
 
 ---
 
@@ -2110,6 +2132,7 @@ kct estimate cost <pcb_file> [options]
 | `--format {table,json}` | Output format |
 | `--mfr {jlcpcb,pcbway,oshpark,seeed}` | Manufacturer |
 | `--quantity N` | Board quantity |
+| `--bom FILE` | Component BOM: a `.csv` (columns such as `Reference`/`Designator`, `Value`/`Comment`, `Footprint`/`Package`, `LCSC`, `MPN`) or a `.kicad_sch` schematic. An unreadable or empty CSV exits 1; notices go to stderr so `--format json` stdout stays one document. |
 
 ---
 

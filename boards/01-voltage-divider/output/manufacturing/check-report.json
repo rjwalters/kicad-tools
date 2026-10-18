@@ -38,13 +38,13 @@
       "rule_id": "connector_edge_distance",
       "type": "unknown",
       "severity": "info",
-      "message": "J2 (Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical): 4.15mm from nearest board edge",
+      "message": "J2 (Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical): 3.23mm from nearest board edge",
       "location": [
         158.5,
         87.5
       ],
       "layer": "F.Cu",
-      "actual_value": 4.149999999999999,
+      "actual_value": 3.2300000000000004,
       "required_value": null,
       "items": [
         "J2"
@@ -53,19 +53,19 @@
       "status": "info",
       "waived": false,
       "key": "connector_edge_distance|J2||F.Cu",
-      "evidence_hash": "ev2:83fc93fe488b4d73"
+      "evidence_hash": "ev2:74eed1079c727e55"
     },
     {
       "rule_id": "connector_edge_distance",
       "type": "unknown",
       "severity": "info",
-      "message": "J1 (Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical): 4.15mm from nearest board edge",
+      "message": "J1 (Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical): 3.23mm from nearest board edge",
       "location": [
         138.5,
         87.5
       ],
       "layer": "F.Cu",
-      "actual_value": 4.150000000000001,
+      "actual_value": 3.2300000000000004,
       "required_value": null,
       "items": [
         "J1"
@@ -74,7 +74,7 @@
       "status": "info",
       "waived": false,
       "key": "connector_edge_distance|J1||F.Cu",
-      "evidence_hash": "ev2:4efad749ae38e79d"
+      "evidence_hash": "ev2:47c6a04f9a2c6ff4"
     }
   ],
   "mask_copper_assessments": [],
@@ -85,7 +85,7 @@
     },
     "erc": {
       "status": "PASSED",
-      "detail": "0 error(s), 1 warning(s)"
+      "detail": "0 error(s), 0 warning(s)"
     },
     "lvs": {
       "status": "PASSED",

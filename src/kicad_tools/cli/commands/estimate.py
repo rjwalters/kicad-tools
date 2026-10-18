@@ -25,7 +25,7 @@ def run_estimate_command(args) -> int:
 def _run_cost_command(args) -> int:
     """Estimate manufacturing costs for a PCB."""
     from kicad_tools.cost import ManufacturingCostEstimator
-    from kicad_tools.schema.bom import extract_bom
+    from kicad_tools.schema.bom import extract_bom, load_bom_csv
     from kicad_tools.schema.pcb import PCB
 
     # Load PCB
@@ -55,7 +55,18 @@ def _run_cost_command(args) -> int:
                 print(f"Error loading schematic: {e}", file=sys.stderr)
                 return 1
         else:
-            print("Warning: CSV BOM import not yet implemented, using PCB only")
+            try:
+                bom = load_bom_csv(bom_path)
+            except Exception as e:
+                print(f"Error loading BOM: {e}", file=sys.stderr)
+                return 1
+            if not bom.items:
+                print(
+                    f"Error loading BOM: no component rows found in {bom_path} "
+                    "(expected a Reference/Designator column)",
+                    file=sys.stderr,
+                )
+                return 1
 
     # Issue #6169: an unflagged --mfr defaults from project.kct target_fab.
     from kicad_tools.manufacturers.resolve import resolve_cli_manufacturer

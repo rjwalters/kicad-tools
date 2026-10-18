@@ -7939,10 +7939,12 @@ def _warn_rule_areas_other_engine(pcb_path: Path, engine: str) -> None:
     the experimental MESH engine still commits copper straight through them
     -- say so once.  A warning, not a gate.  Headless ``kicad-cli pcb drc``
     10.0.1 does not flag copper inside a keepout rule area on its own; the
-    backstop is the explicit per-area ``intersectsArea`` disallow rule kct
-    writes into the routed board's ``.kicad_dru`` (Issue #6039,
-    :mod:`kicad_tools.manufacturers.keepout_dru`), so the native DRC run
-    after routing reports any crossing as ``items_not_allowed``.
+    backstop there is the explicit per-area ``intersectsArea`` disallow rule
+    kct writes into the routed board's ``.kicad_dru`` (Issue #6039,
+    :mod:`kicad_tools.manufacturers.keepout_dru`).  From 10.0.6 native DRC
+    enforces rule areas itself and kct writes no rule (Issue #7198); either
+    way the native DRC run after routing reports any crossing as
+    ``items_not_allowed``.
     Pour-void-only rule areas (the ``kct zones hv-keepout`` output) trigger
     nothing here: they never constrain routing on any engine.  A cheap text
     scan on purpose -- no board model is built this early.
