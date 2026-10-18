@@ -141,8 +141,20 @@ DIFFPAIR_VIOLATION_BASELINE: dict[str, int] = {
 }
 
 # Issue #7312 -- declared ``target_diff_impedance`` is now judged on coupled
-# segments (#7293).  The synthetic witness's coupled USB pairs sit at a wider
-# gap than their width sizing assumed, so ``impedance`` reports 5 errors there.
+# segments (#7293).  The model is right and the fixture's copper is what
+# misses: the routed coupled gap is ~4-5x the solved ``intra_pair_clearance``
+# in regression-fixture/net_class_map.json (measured on the committed PCB,
+# edge-to-edge, via ImpedanceRule's own gap annotation):
+#   USB2_D-    F.Cu w=0.250  routed gap 0.351 mm vs solved 0.075 mm -> 114.8 ohm
+#   USB3_RX1+  F.Cu w=0.275  routed gap 0.432 mm vs solved 0.100 mm -> 112.6 ohm
+#   USB3_TX2+  F.Cu w=0.275  routed gap 0.432 mm vs solved 0.100 mm -> 112.6 ohm
+# (declared 90 ohm +/-15 %).  The fixture is a frozen historical witness whose
+# pairs already fail skew/continuity (0/9 converge, #3540-#3544), so the
+# pairs never get squeezed to the solved gap; the committed ``output/`` board
+# has no impedance finding.  A ``--skip-route`` run on the committed PCB
+# reports 3 findings (one per distinct segment above); the cap stays at the 5
+# originally measured in #7312 rather than being tightened on a count not
+# re-checked under the CI re-route.
 # Capped, not open: a sixth impedance error still fails the gate.
 DIFFPAIR_FIXTURE_RULE_CAPS: dict[str, int] = {"impedance": 5}
 
