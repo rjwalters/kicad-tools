@@ -276,7 +276,7 @@ kct export design.kicad_pcb --mfr jlcpcb --no-gerbers --no-bom --no-report -o po
 kct mfr compare --layers 4
 
 # Check design against manufacturer rules
-kct mfr validate design.kicad_pcb jlcpcb
+kct check design.kicad_pcb --mfr jlcpcb
 
 # Show manufacturer info
 kct mfr info jlcpcb

@@ -193,7 +193,7 @@ the table is a human who actually rendered.
   doubles as the **path variable** in emitted refs
   (`(model "${KCT_LCSC_3D_DIR}/C50950.step" ...)`), so committed `.kicad_pcb`
   files stay machine-portable — each machine resolves the ref from its own
-  cache at render time. `kct pcb render` `setdefault`s this variable into the
+  cache at render time. `kct render` `setdefault`s this variable into the
   `kicad-cli` subprocess environment (mirroring the `${KICADn_3DMODEL_DIR}`
   precedent).
 - **`KCT_LCSC_FETCH`** — set to `1`/`true`/`yes`/`on` to enable fetch-on-demand
