@@ -623,7 +623,11 @@ JLCPCB_PRESET = GerberManufacturerPreset(
     config=GerberConfig(
         use_protel_extensions=True,
         use_aux_origin=True,
-        include_solderpaste=False,
+        # JLCPCB's KiCad 7 and KiCad 8 Gerber guides list F.Paste and
+        # B.Paste among the layers to plot (issue #7153): an SMT-assembly
+        # bundle without them gives the fab nothing to cut a stencil from.
+        # A paste layer absent from the board's layer table is not plotted.
+        include_solderpaste=True,
         generate_drill=True,
         merge_pth_npth=False,
         minimal_header=False,

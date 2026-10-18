@@ -58,6 +58,13 @@ class DRCReport:
     schematic_parity_reason: str | None = None
     #: The schematic kicad-cli ran parity against, when known (Issue #7147).
     schematic_parity_schematic: str | None = None
+    #: Manufacturer/tier id whose rules produced this report (issue #7153).
+    #: Parsed from the kct-check JSON ``manufacturer`` key; ``None`` for
+    #: kicad-cli reports, which do not record one.
+    manufacturer: str | None = None
+    #: The kct-check JSON ``fabrication_overrides`` block (board-local paid
+    #: factory options the report was checked under), or ``None``.
+    fabrication_overrides: dict | None = None
 
     @property
     def schematic_parity_status(self) -> SchematicParityStatus:
@@ -451,7 +458,20 @@ def _parse_kct_check_json(data: dict, source_file: str = "") -> DRCReport:
             MaskCopperAssessment.from_dict(a) for a in data.get("mask_copper_assessments", [])
         ],
         footprint_errors=0,
+        manufacturer=_optional_str(data.get("manufacturer")),
+        fabrication_overrides=(
+            data["fabrication_overrides"]
+            if isinstance(data.get("fabrication_overrides"), dict)
+            else None
+        ),
     )
+
+
+def _optional_str(value: object) -> str | None:
+    """Return a stripped non-empty string, else ``None``."""
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return None
 
 
 def _parse_kicad_cli_json(data: dict, source_file: str = "") -> DRCReport:
