@@ -116,7 +116,10 @@ class GapTighteningResult:
     def format_line(self) -> str:
         line = f"  {self.p_net_name}/{self.n_net_name}: {self.reason}"
         if self.runs:
-            worst = max(self.runs, key=lambda r: r.gap_before_mm)
+            # Show the widest committed run when there is one, else the
+            # widest declined run.
+            shown = [r for r in self.runs if r.status == "tightened"] or self.runs
+            worst = max(shown, key=lambda r: r.gap_before_mm)
             z_b = f"{worst.zdiff_before:.1f}" if worst.zdiff_before is not None else "?"
             z_a = f"{worst.zdiff_after:.1f}" if worst.zdiff_after is not None else "?"
             line += (
