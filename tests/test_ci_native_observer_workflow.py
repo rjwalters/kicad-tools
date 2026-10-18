@@ -126,6 +126,8 @@ def test_existing_workflow_command_and_failure_propagation(tmp_path, group, boar
             "pytest",
             "-n",
             "auto",
+            # Issue #7214: list skip/xfail reasons in the short summary.
+            "-rfEsx",
             # Issue #6013: the ci_extended slow tail runs in "Test (extended)",
             # and the bulk pool's timings are kept for update_ci_extended.py.
             "-o",
