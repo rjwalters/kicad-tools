@@ -428,7 +428,24 @@ class ReportDataCollector:
         """
         if audit_result is None:
             return None
-        return audit_result.drc.to_dict()
+        data = audit_result.drc.to_dict()
+        # Issue #7153: name the rule set and split the summed error count
+        # per engine.  ``error_count`` adds kicad-cli's geometric errors on
+        # top of the ``--mfr`` engine's, and one defect (e.g. an undersized
+        # via drill) is usually reported by both -- so a reader seeing only
+        # the sum double-counts it.  kicad-cli types are recorded under the
+        # ``kicad-cli:`` namespace in ``violations_by_type`` (errors only),
+        # so the native share is the remainder.  ``blocking_count`` and
+        # ``passed`` are left untouched.
+        data["manufacturer"] = self.manufacturer
+        by_type = data.get("violations_by_type") or {}
+        geometric = sum(
+            int(count) for key, count in by_type.items() if str(key).startswith("kicad-cli:")
+        )
+        error_count = int(data.get("error_count") or 0)
+        data["geometric_error_count"] = geometric if data.get("geometric_drc_ran") else None
+        data["native_error_count"] = max(error_count - geometric, 0)
+        return data
 
     def collect_erc(self, audit_result: AuditResult | None) -> dict[str, Any] | None:
         """Extract ERC sub-section from a pre-run AuditResult.
