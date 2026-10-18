@@ -58,6 +58,8 @@ def build(output: Path) -> dict:
     annotation = annotate_pcb_file_pintypes(candidate, output / "sdram_demo.kicad_sch")
     if annotation.missing_pads:
         raise ValueError(f"Pads without a schematic pin: {annotation.missing_pads}")
+    # Issue #7213: the fixture's bare footprint names get their library IDs.
+    source_builder.apply_library_ids(candidate, output / "sdram_demo.kicad_sch")
     evidence = output / "validation"
     if not validator.check(candidate, output, evidence):
         raise RuntimeError(f"Reviewed routing failed fresh validation; inspect {evidence}")

@@ -1,19 +1,19 @@
 WARNING: path_ampacity is INACTIVE without --current-paths and will silently pass. No sidecar was found at any of:
-  /private/tmp/claude-501/-Users-rwalters-GitHub-kicad-tools/f34e4871-8734-4974-96a5-fe4b7d266423/scratchpad/b07/build/validation/checked.current_paths.json
-  /private/tmp/claude-501/-Users-rwalters-GitHub-kicad-tools/f34e4871-8734-4974-96a5-fe4b7d266423/scratchpad/b07/build/validation/current_paths.json
-  /private/tmp/claude-501/-Users-rwalters-GitHub-kicad-tools/f34e4871-8734-4974-96a5-fe4b7d266423/scratchpad/b07/build/validation/output/checked.current_paths.json
-  /private/tmp/claude-501/-Users-rwalters-GitHub-kicad-tools/f34e4871-8734-4974-96a5-fe4b7d266423/scratchpad/b07/build/validation/output/current_paths.json
-  /private/tmp/claude-501/-Users-rwalters-GitHub-kicad-tools/f34e4871-8734-4974-96a5-fe4b7d266423/scratchpad/b07/build/output/checked.current_paths.json
-  /private/tmp/claude-501/-Users-rwalters-GitHub-kicad-tools/f34e4871-8734-4974-96a5-fe4b7d266423/scratchpad/b07/build/output/current_paths.json
+  /Users/rwalters/GitHub/kicad-tools/.loom/worktrees/pr-7218/.doctor-tmp/build07p/validation/checked.current_paths.json
+  /Users/rwalters/GitHub/kicad-tools/.loom/worktrees/pr-7218/.doctor-tmp/build07p/validation/current_paths.json
+  /Users/rwalters/GitHub/kicad-tools/.loom/worktrees/pr-7218/.doctor-tmp/build07p/validation/output/checked.current_paths.json
+  /Users/rwalters/GitHub/kicad-tools/.loom/worktrees/pr-7218/.doctor-tmp/build07p/validation/output/current_paths.json
+  /Users/rwalters/GitHub/kicad-tools/.loom/worktrees/pr-7218/.doctor-tmp/build07p/output/checked.current_paths.json
+  /Users/rwalters/GitHub/kicad-tools/.loom/worktrees/pr-7218/.doctor-tmp/build07p/output/current_paths.json
 Pass one explicitly with --current-paths, or place it at one of the paths above, to validate declared branch current paths.
 {
-  "file": "checked.kicad_pcb",
+  "file": ".doctor-tmp/build07p/validation/checked.kicad_pcb",
   "manufacturer": "jlcpcb",
   "layers": 6,
   "summary": {
     "errors": 0,
     "warnings": 0,
-    "infos": 4,
+    "infos": 7,
     "waived": 0,
     "rules_checked": 69,
     "rules_checked_by_rule": {
@@ -38,11 +38,74 @@ Pass one explicitly with --current-paths, or place it at one of the paths above,
     "passed": true,
     "stale_waivers": 0,
     "coverage_checked": 33,
-    "coverage_skipped": 5,
+    "coverage_skipped": 6,
     "coverage_unknown": [],
     "coverage_blocking_unknown": []
   },
   "violations": [
+    {
+      "rule_id": "connector_edge_distance",
+      "type": "unknown",
+      "severity": "info",
+      "message": "J1 (Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical): 3.23mm from nearest board edge",
+      "location": [
+        103.5,
+        75.0
+      ],
+      "layer": "F.Cu",
+      "actual_value": 3.2299999999999995,
+      "required_value": null,
+      "items": [
+        "J1"
+      ],
+      "nets": [],
+      "status": "info",
+      "waived": false,
+      "key": "connector_edge_distance|J1||F.Cu",
+      "evidence_hash": "ev2:5217f485d76520e5"
+    },
+    {
+      "rule_id": "connector_edge_distance",
+      "type": "unknown",
+      "severity": "info",
+      "message": "J2 (Connector_PinHeader_2.54mm:PinHeader_1x06_P2.54mm_Vertical): 3.23mm from nearest board edge",
+      "location": [
+        103.5,
+        110.0
+      ],
+      "layer": "F.Cu",
+      "actual_value": 3.2299999999999995,
+      "required_value": null,
+      "items": [
+        "J2"
+      ],
+      "nets": [],
+      "status": "info",
+      "waived": false,
+      "key": "connector_edge_distance|J2||F.Cu",
+      "evidence_hash": "ev2:097c94ba8e2c8dfa"
+    },
+    {
+      "rule_id": "connector_edge_distance",
+      "type": "unknown",
+      "severity": "info",
+      "message": "J3 (Connector_PinHeader_2.54mm:PinHeader_1x03_P2.54mm_Vertical): 3.23mm from nearest board edge",
+      "location": [
+        103.5,
+        133.0
+      ],
+      "layer": "F.Cu",
+      "actual_value": 3.2299999999999995,
+      "required_value": null,
+      "items": [
+        "J3"
+      ],
+      "nets": [],
+      "status": "info",
+      "waived": false,
+      "key": "connector_edge_distance|J3||F.Cu",
+      "evidence_hash": "ev2:e4e464a579b643f0"
+    },
     {
       "rule_id": "match_group_length_skew",
       "type": "match_group_length_skew",
@@ -313,6 +376,12 @@ Pass one explicitly with --current-paths, or place it at one of the paths above,
       "reason": null,
       "blocking": false
     },
+    "routing_policy": {
+      "status": "skipped:no_declared_policies",
+      "state": "skipped",
+      "reason": "no_declared_policies",
+      "blocking": true
+    },
     "sch_fields": {
       "status": "checked",
       "state": "checked",
@@ -386,5 +455,4 @@ Pass one explicitly with --current-paths, or place it at one of the paths above,
       "blocking": true
     }
   }
-}DRC-constraint sidecars updated: /private/tmp/claude-501/-Users-rwalters-GitHub-kicad-tools/f34e4871-8734-4974-96a5-fe4b7d266423/scratchpad/b07/build/validation/checked.kicad_pro, /private/tmp/claude-501/-Users-rwalters-GitHub-kicad-tools/f34e4871-8734-4974-96a5-fe4b7d266423/scratchpad/b07/build/validation/checked.kicad_dru
-
+}

@@ -33,8 +33,8 @@
       "size": 2559
     },
     "design-source.zip": {
-      "sha256": "c4e07274e88e94d2278023cfd442be65fca75ff716857de4f27b32fb6b26174e",
-      "size": 359986
+      "sha256": "68ea7667dedf08f15363d1444fac7394eaa9cdc9b327ffaa6093161cfa47ce38",
+      "size": 359890
     },
     "firmware/Makefile": {
       "sha256": "f105bf145347705a625a825aad34614c3e4001c7260793991f68cca37587516c",
@@ -109,7 +109,7 @@
       "size": 1214
     },
     "native-erc.json": {
-      "sha256": "48e717e6483d9b988994ec404ee2204506e06c9733a0042ff59838ce72c933ad",
+      "sha256": "802427d2cafd754b8d815ea984cf872829599ffc8cdb1287ff3d37201e9958ab",
       "size": 988
     },
     "project.kct": {
