@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any, Literal
 from kicad_tools.analysis.net_status import NetStatusAnalyzer
 from kicad_tools.exceptions import FileNotFoundError as KiCadFileNotFoundError
 from kicad_tools.exceptions import ParseError
+from kicad_tools.manufacturers import get_all_manufacturer_names
 from kicad_tools.mcp.types import (
     AffectedItem,
     BoardAnalysis,
@@ -42,8 +43,9 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Supported manufacturer presets for DRC
-MANUFACTURER_PRESETS = ("jlcpcb", "oshpark", "pcbway", "seeed")
+# Supported manufacturer presets for DRC: every registry id/alias (#7276), the
+# same set ``kct check --mfr`` accepts, so tier ids such as ``jlcpcb-tier1`` work.
+MANUFACTURER_PRESETS = tuple(get_all_manufacturer_names())
 
 
 def analyze_board(pcb_path: str) -> BoardAnalysis:
@@ -890,7 +892,7 @@ def get_drc_violations(
     # Validate an explicit manufacturer; ``None`` is resolved by the shared
     # rule-set builder exactly like ``kct check``.
     if rules is not None:
-        if rules in MANUFACTURER_PRESETS:
+        if rules.lower() in MANUFACTURER_PRESETS:
             pass  # Use as-is
         elif Path(rules).exists():
             # Custom rules file - not yet supported
