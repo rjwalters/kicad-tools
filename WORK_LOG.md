@@ -15,6 +15,16 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-18
 
+- **PR #7259**: fix: unbreak main after #7220 PR1 (MFR001 lint, board 03 thermal_asymmetry)
+- **PR #7252**: fix(drc): parity NOT RUN when no schematic resolves
+- **PR #7243**: fix(export): ship JLCPCB paste Gerbers and flag DRC reports built for another mfr
+- **PR #7235**: fix(board03): move six refdes out from under their part bodies
+- **Issue #7257** (closed): test_committed_pcb_drc_state (extended tier) fails on main: #7232 thermal_asymmetry flags unchanged board 03
+- **Issue #7253** (closed): test: manufacturer-propagation lint fails on main (explain/checks/via.py:28 _no_via_in_pad_rules)
+- **Issue #7237** (closed): test flake: test_real_kicad_cli_no_schematic_is_not_run fails on Test job
+- **PR #7154**: fix: seed creepage detour from both shapes and bridge sub-X cutouts
+- **PR #7157**: feat(validate): compare component values in validate --sync; fix board 04 J1 value
+- **Issue #7058** (closed): kct creepage overstates creepage around a slot: the detour is computed between the straight-line nearest points, and narrow gaps are not bridged
 - **PR #7191**: fix(drc): one blocking-findings definition across DRC entry points
 - **PR #7244**: docs: fix six unreleased changelog upgrade fragments
 - **Issue #7188** (closed): One DRC blocking-verdict helper: kicad-drc-summary, kct mfr validate and Project.check_drc() pass boards kicad-cli fails

@@ -173,6 +173,54 @@ def _default_pair_length(route: Route) -> float:
 
 
 @dataclass(frozen=True)
+class LayerMirror:
+    """A partner leg's layer sequence, imposed on a fallback leg (issue #7093).
+
+    When a declined pair's two uncoupled legs change layers a different number
+    of times, ranking the existing candidates cannot fix it: on board 03 every
+    candidate of the ``USB_D`` J1->U2 leg had ``(0, 1)`` or ``(1, 0)`` vias.
+    A mirrored search re-routes one leg constrained to its partner's layer
+    sequence so that a via-parity candidate exists to be ranked:
+
+    * ``start`` / ``end``: the only layers the leg may leave its start pad /
+      reach its end pad on (the partner's first and last copper layers);
+    * ``layers``: the only layers the leg may lay copper on (a via may still
+      step over any other layer -- every lattice via is a through via);
+    * ``planar``: the partner never changes layer, so neither may this leg.
+    """
+
+    start: int
+    end: int
+    layers: frozenset[int]
+    planar: bool
+
+
+def _layer_sequence(result: _RouteResult) -> tuple[int, ...]:
+    """The copper layers ``result`` visits, in order, merged runs (#7093).
+
+    A run with no non-degenerate segment (the landing of a stacked via, which
+    carries no copper) is skipped; consecutive repeats are merged.
+    """
+    seq: list[int] = []
+    for layer, points, _widths in result.runs:
+        if not any(dist(a, b) > 1e-9 for a, b in zip(points, points[1:], strict=False)):
+            continue
+        if not seq or seq[-1] != layer:
+            seq.append(layer)
+    if not seq and result.runs:
+        seq.append(result.runs[0][0])
+    return tuple(seq)
+
+
+def _mirror_of(result: _RouteResult) -> LayerMirror | None:
+    """The :class:`LayerMirror` that reproduces ``result``'s layer changes."""
+    seq = _layer_sequence(result)
+    if not seq:
+        return None
+    return LayerMirror(seq[0], seq[-1], frozenset(seq), len(seq) == 1)
+
+
+@dataclass(frozen=True)
 class PadGrowthRound:
     """One #6489 grown-keep-out re-negotiation attempt, for the log (issue #6670).
 
@@ -1738,6 +1786,7 @@ class LatticePathfinder:
         exempt_pads: frozenset[int] | None = None,
         escape_plan: dict[int, EscapeChoice] | None = None,
         guide: PartnerGuide | None = None,
+        mirror: LayerMirror | None = None,
     ) -> tuple[_RouteResult | None, str]:
         """Apply physical Kelvin isolation throughout every search stage."""
         from ..kelvin import detect_kelvin_topology
@@ -1772,6 +1821,7 @@ class LatticePathfinder:
                 exempt_pads=exempt_pads,
                 escape_plan=escape_plan,
                 guide=guide,
+                mirror=mirror,
             )
         finally:
             committed.kelvin_guard = previous
@@ -1793,6 +1843,7 @@ class LatticePathfinder:
         exempt_pads: frozenset[int] | None = None,
         escape_plan: dict[int, EscapeChoice] | None = None,
         guide: PartnerGuide | None = None,
+        mirror: LayerMirror | None = None,
     ) -> tuple[_RouteResult | None, str]:
         """Route one connection, staging via-in-pad as a last resort (#4475).
 
@@ -1846,6 +1897,8 @@ class LatticePathfinder:
             search_kwargs["escape_plan"] = escape_plan
         if guide is not None and not fat:
             search_kwargs["guide"] = guide
+        if mirror is not None and not fat:
+            search_kwargs["mirror"] = mirror
         if not last_resort:
             return self._route_search(start, end, net_class, **search_kwargs)
 
@@ -1890,6 +1943,7 @@ class LatticePathfinder:
         via_in_pad_override: bool | None = None,
         escape_plan: dict[int, EscapeChoice] | None = None,
         guide: PartnerGuide | None = None,
+        mirror: LayerMirror | None = None,
     ) -> tuple[_RouteResult | None, str]:
         """A* over the (node, layer) graph; returns ``(result, reason)``.
 
@@ -2010,6 +2064,10 @@ class LatticePathfinder:
         if allow_vias and hard_avoided and hard_avoided & {0, self.num_layers - 1}:
             allow_vias = False
             layer_pruned = True
+        # Issue #7093: a mirrored fallback leg copies its partner's layer
+        # changes; a partner that never changed layer admits no via here.
+        if mirror is not None and mirror.planar:
+            allow_vias = False
 
         # The lattice body is emitted (and spaced) at the full class width;
         # the pad-escape legs may taper to a narrower neck (issue #4293).
@@ -2053,6 +2111,15 @@ class LatticePathfinder:
             stubs_a, stubs_b = kept_a, kept_b
         else:
             had_stubs_a = had_stubs_b = False
+        if mirror is not None:
+            # Issue #7093: leave the start pad and reach the end pad on the
+            # partner's first / last copper layer only.
+            stubs_a = [s for s in stubs_a if s[1] == mirror.start]
+            stubs_b = [s for s in stubs_b if s[1] == mirror.end]
+            if not stubs_a:
+                return None, "mirror-layer-start"
+            if not stubs_b:
+                return None, "mirror-layer-end"
         # The substrate is built at global width. Check the actual emitted
         # neck and body radii against Edge.Cuts before admitting any state.
         boundary = self._escape_boundary
@@ -2344,7 +2411,14 @@ class LatticePathfinder:
                         # directly, so an F/B-only net can still cross F<->B on
                         # a 4-layer board instead of being stranded on the one
                         # outer layer its pads escaped onto.
-                        while 0 <= nl < self.num_layers and nl in hard_avoided:
+                        while 0 <= nl < self.num_layers and (
+                            nl in hard_avoided or (mirror is not None and nl not in mirror.layers)
+                        ):
+                            if nl not in hard_avoided:
+                                # Issue #7093: a mirrored leg steps over a
+                                # layer its partner never laid copper on.
+                                nl += direction
+                                continue
                             nl += direction
                             # The hard constraint removed a candidate landing
                             # layer from this search -- recorded so a later
@@ -4300,6 +4374,7 @@ class LatticePathfinder:
         present: float,
         escape_plan: dict[int, EscapeChoice],
         guide: PartnerGuide | None = None,
+        mirror: LayerMirror | None = None,
     ) -> tuple[_RouteResult | None, str]:
         """Search ONE single-ended connection without committing it.
 
@@ -4312,6 +4387,8 @@ class LatticePathfinder:
         options: dict[str, Any] = {"escape_plan": escape_plan} if escape_plan else {}
         if guide is not None:
             options["guide"] = guide
+        if mirror is not None:
+            options["mirror"] = mirror
         result, reason = self._route_impl(
             start,
             end,
@@ -4545,6 +4622,10 @@ class LatticePathfinder:
         * N unguided, then P unguided;
         * N unguided, then P guided by N's corridor.
 
+        When none of those has equal P/N via counts, the partner-leg searches
+        of :meth:`_mirrored_candidates` (issue #7093) are added: each leg
+        re-routed to its partner's layer sequence.
+
         Every leg is searched holding each foreign pad at that pad's own class
         (see :meth:`_strict_pad_pairwise`).  The second leg of a candidate is searched against committed
         copper that holds the candidate's first leg (a
@@ -4585,13 +4666,15 @@ class LatticePathfinder:
         # Committed copper keeps the leg's own clearance.
         strict, floor = self._strict_pad_pairwise(pc, items)
 
-        def search(pol: str, guide: PartnerGuide | None = None) -> tuple[_RouteResult | None, str]:
+        def search(
+            pol: str, guide: PartnerGuide | None = None, mirror: LayerMirror | None = None
+        ) -> tuple[_RouteResult | None, str]:
             previous = self._pairwise
             if strict is not None:
                 self._pairwise = strict
             self._search_clearance_floor = floor
             try:
-                return self._search_single(items[pol], guide=guide, **kw)
+                return self._search_single(items[pol], guide=guide, mirror=mirror, **kw)
             finally:
                 self._pairwise = previous
                 self._search_clearance_floor = 0.0
@@ -4620,6 +4703,7 @@ class LatticePathfinder:
             # P cannot route even alone: the pre-#6703 shape (N routed on
             # its own) leads, and wins unless an N-led candidate is no worse.
             candidates.insert(0, {"P": firsts["P"], "N": firsts["N"]})
+        candidates.extend(self._mirrored_candidates(pc, candidates, items, search, committed))
 
         measure = self.pair_length_measure or _default_pair_length
 
@@ -4650,6 +4734,54 @@ class LatticePathfinder:
             {"P": best["P"], "N": best["N"]},
             best is candidates[0] and strict is None and floor == 0.0,
         )
+
+    def _mirrored_candidates(
+        self,
+        pc: CoupledConnection,
+        candidates: list[_FallbackLegs],
+        items: dict[str, Connection],
+        search: Callable[..., tuple[_RouteResult | None, str]],
+        committed: CommittedCopper,
+    ) -> list[_FallbackLegs]:
+        """Partner-leg searches that mirror the other leg's layer changes (#7093).
+
+        Only when no fully routed candidate already has equal P/N via counts.
+        For every fully routed candidate whose legs change layers a different
+        number of times, each leg in turn is re-searched against committed
+        copper holding its partner (a rolled-back trial), constrained to the
+        partner's layer sequence (:class:`LayerMirror`) and pulled toward its
+        corridor (:class:`PartnerGuide`; unguided when the guided search
+        finds nothing).  Both directions are tried: the leg with more vias
+        may route without them, or the leg with fewer may take the partner's
+        layer change.  The partner keeps its own copper, so each new candidate
+        is legal exactly as it would be routed alone.  Returned for ranking
+        with the rest; nothing is committed.
+        """
+        full = [c for c in candidates if c["P"][0] is not None and c["N"][0] is not None]
+        if not full or any(self._pair_via_mismatch(c) == 0 for c in full):
+            return []
+        out: list[_FallbackLegs] = []
+        seen: set[tuple[int, str]] = set()
+        for cand in full:
+            for moved, kept in (("P", "N"), ("N", "P")):
+                kept_res = cand[kept][0]
+                if kept_res is None or (id(kept_res), moved) in seen:
+                    continue
+                seen.add((id(kept_res), moved))
+                mirror = _mirror_of(kept_res)
+                if mirror is None:
+                    continue
+                mark = committed.begin_trial()
+                try:
+                    self._commit_single(items[kept], kept_res, {}, committed)
+                    leg = search(moved, self._partner_guide(kept_res, pc), mirror)
+                    if leg[0] is None:
+                        leg = search(moved, None, mirror)
+                finally:
+                    committed.rollback_trial(mark)
+                if leg[0] is not None:
+                    out.append({kept: cand[kept], moved: leg})
+        return out
 
     def _route_fallback_pairs_into(
         self,
