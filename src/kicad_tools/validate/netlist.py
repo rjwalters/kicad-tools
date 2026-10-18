@@ -488,21 +488,31 @@ class NetlistValidator:
         """Flag components whose value differs between schematic and PCB.
 
         Only references present on both sides are compared, and a pair is
-        skipped when either value is empty (issue #7150).  Schematic values
+        skipped when either value is empty or ``~`` (issue #7150).  Values are
+        compared with the reconciler's ``_values_equivalent`` so case,
+        whitespace, SI-magnitude and rating-suffix differences are not
+        flagged, matching what ``kct sync --apply`` would act on.  Schematic values
         come from :meth:`_collect_schematic_refs`, so hierarchical
         sub-sheets are covered.
 
         Args:
             result: SyncResult to add issues to
         """
+        from kicad_tools.sync.reconciler import _values_equivalent
+
         sch_refs = self._collect_schematic_refs()
         for fp in self.pcb.footprints:
             ref = fp.reference
             if not ref or ref.startswith("#") or ref not in sch_refs:
                 continue
-            sch_value = sch_refs[ref].get("value") or ""
-            pcb_value = fp.value or ""
-            if sch_value and pcb_value and sch_value != pcb_value:
+            sch_value = (sch_refs[ref].get("value") or "").strip()
+            pcb_value = (fp.value or "").strip()
+            # "~" is KiCad's placeholder for "no value": treat it as empty.
+            if sch_value == "~":
+                sch_value = ""
+            if pcb_value == "~":
+                pcb_value = ""
+            if sch_value and pcb_value and not _values_equivalent(sch_value, pcb_value, ref):
                 result.add(
                     SyncIssue(
                         severity="error",

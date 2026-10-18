@@ -100,3 +100,18 @@ def test_sub_sheet_value_is_compared(tmp_path: Path) -> None:
     result = NetlistValidator(HIERARCHICAL_ROOT_SCH, pcb).validate()
     assert [i.reference for i in result.value_mismatches] == ["C2"]
     assert not result.in_sync
+
+
+@needs_board00
+@pytest.mark.parametrize(
+    "pcb_value",
+    ["330R", "330 ", "0.33k", "330Ω", "~"],
+)
+def test_equivalent_or_placeholder_values_are_not_mismatches(
+    tmp_path: Path, pcb_value: str
+) -> None:
+    """Case/whitespace/SI/rating differences and ``~`` are not drift (#7150)."""
+    sch, pcb = _board00(tmp_path, '(fp_text value "330"', f'(fp_text value "{pcb_value}"')
+    result = NetlistValidator(sch, pcb).validate()
+    assert result.value_mismatches == []
+    assert result.in_sync
