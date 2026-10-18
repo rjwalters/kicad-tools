@@ -8,6 +8,8 @@ becoming boundary-inclusive.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
 SQUARE = [(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)]
@@ -200,12 +202,19 @@ def _layer():
 
 def _delegated_adapters():
     """Every delegated private copy, adapted to ``(px, py, x1, y1, x2, y2)``."""
+    from kicad_tools.cli import relocate_in_pad_vias, stitch_cmd
     from kicad_tools.optim.fom_electrical import _point_segment_distance as fom
     from kicad_tools.router import diffpair_routing as dp
     from kicad_tools.router import pad_access, path, plane_via_sites, stuck_classifier
     from kicad_tools.validate import evidence
 
     return {
+        "stitch_cmd": stitch_cmd.point_to_segment_distance,
+        "relocate_in_pad_vias": lambda px, py, x1, y1, x2, y2: (
+            relocate_in_pad_vias._dist_point_to_segment(
+                px, py, SimpleNamespace(start=(x1, y1), end=(x2, y2))
+            )
+        ),
         "evidence": evidence._point_segment_distance,
         "path": path._point_segment_distance,
         "pad_access": pad_access._point_segment_distance,
@@ -229,7 +238,11 @@ def test_delegated_private_distance_pinned(name, case, expected):
     # fom_electrical / diffpair keep their own degenerate-length threshold at
     # the call site, so a sub-threshold segment (case6) legitimately differs
     # from core by ~|segment| (5.5e-8 here); everything else matches to 1e-9.
-    tol = 1e-6 if name in ("fom_electrical", "diffpair_seg", "diffpair_method") else 1e-9
+    tol = (
+        1e-6
+        if name in ("fom_electrical", "diffpair_seg", "diffpair_method", "relocate_in_pad_vias")
+        else 1e-9
+    )
     assert _delegated_adapters()[name](*case) == pytest.approx(expected, abs=tol)
 
 
