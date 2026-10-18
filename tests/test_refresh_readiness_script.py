@@ -337,6 +337,80 @@ def test_dry_run_with_known_issue_leaves_the_board_untouched(mod, tmp_path, monk
     assert {p: p.read_bytes() for p in board.rglob("*") if p.is_file()} == before
 
 
+# ---------------------------------------------------------------------------
+# Issue #7337: saved copper must equal an independent refill.
+# ---------------------------------------------------------------------------
+
+
+def test_fill_divergence_uses_the_readiness_tolerance(mod):
+    saved = {"B.Cu": 2258.871182, "F.Cu": 1438.71334}
+    assert mod.fill_divergence(saved, dict(saved), 0.01) == {}
+    assert mod.fill_divergence(saved, {**saved, "F.Cu": 1438.72334}, 0.01) == {}
+    assert mod.fill_divergence(saved, {"B.Cu": 2268.243206, "F.Cu": 1457.428272}, 0.01) == {
+        "B.Cu": 9.372024,
+        "F.Cu": 18.714932,
+    }
+    assert mod.fill_divergence(saved, {"B.Cu": 2258.871182}, 0.01) == {"F.Cu": 1438.71334}
+
+
+def _fill_board(tmp_path: Path):
+    board = tmp_path / "board"
+    (board / "output").mkdir(parents=True)
+    (board / "output" / "x_routed.kicad_pcb").write_text("(kicad_pcb)")
+    return board
+
+
+@pytest.mark.parametrize("refilled_f", [1438.71334, 1457.428272])
+def test_gate_fill_identity_refuses_a_divergent_saved_fill(mod, tmp_path, monkeypatch, refilled_f):
+    from kicad_tools.cli import readiness_cmd
+
+    board = _fill_board(tmp_path)
+    cfg = mod.BoardConfig(
+        routed_pcb="output/x_routed.kicad_pcb",
+        schematic="output/x.kicad_sch",
+        tier="jlcpcb",
+        erc=(),
+    )
+    saved_pcb = board / cfg.routed_pcb
+    monkeypatch.setattr(
+        readiness_cmd, "_refill_and_save", lambda pcb: readiness_cmd.EngineRun(ok=True)
+    )
+    monkeypatch.setattr(
+        readiness_cmd,
+        "_fill_areas",
+        lambda pcb: {"F.Cu": 1438.71334} if pcb == saved_pcb else {"F.Cu": refilled_f},
+    )
+    if refilled_f == 1438.71334:
+        assert mod.gate_fill_identity(board, cfg) == {}
+    else:
+        with pytest.raises(mod.GateFailure, match=r"F\.Cu 18\.714932 mm\^2"):
+            mod.gate_fill_identity(board, cfg)
+
+
+def test_native_drc_gate_runs_the_fill_identity_gate(mod, tmp_path, monkeypatch):
+    """A clean refilled DRC alone no longer certifies the saved fill."""
+    board = _fill_board(tmp_path)
+    cfg = mod.BoardConfig(
+        routed_pcb="output/x_routed.kicad_pcb",
+        schematic="output/x.kicad_sch",
+        tier="jlcpcb",
+        erc=(),
+    )
+
+    def fake_drc(cmd, **_):
+        Path(cmd[cmd.index("--output") + 1]).write_text(
+            json.dumps({"violations": [], "unconnected_items": []})
+        )
+
+    def divergent(*_):
+        raise mod.GateFailure("saved copper differs from an independent refill: F.Cu 1 mm^2")
+
+    monkeypatch.setattr(mod, "run", fake_drc)
+    monkeypatch.setattr(mod, "gate_fill_identity", divergent)
+    with pytest.raises(mod.GateFailure, match="independent refill"):
+        mod.gate_native_drc(board, cfg)
+
+
 # --------------------------------------------------------------------------- Issue #7283
 def test_drc_report_copies_are_written_and_recorded_in_report_sources(mod, tmp_path, monkeypatch):
     board = _fake_board(tmp_path)

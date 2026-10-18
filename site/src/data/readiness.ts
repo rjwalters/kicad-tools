@@ -1,6 +1,6 @@
 /** Content-bound manufacturing evidence. Runs only at build time. */
 import { createHash } from "node:crypto";
-import { readFileSync, readdirSync, realpathSync, statSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, realpathSync, statSync } from "node:fs";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import type { KnownIssue, Readiness } from "./types.ts";
 
@@ -36,6 +36,20 @@ export function validateKnownIssues(value: unknown): KnownIssue[] {
 function canonical(entries: KnownIssue[]): string {
   return JSON.stringify(entries.map(e => ({ issue: e.issue, kind: e.kind, summary: e.summary, recorded: e.recorded,
     warnings: e.warnings === undefined ? null : Object.fromEntries(Object.entries(e.warnings).sort()) })));
+}
+
+/** Mirrors `_evidence_folders` in `src/kicad_tools/cli/board_readiness.py` (#7337). */
+export function evidenceFolders(evidence: unknown, bound: string[]): Set<string> {
+  const names = evidence && typeof evidence === "object" && !Array.isArray(evidence)
+    ? Object.values(evidence).filter((v): v is string => typeof v === "string") : [];
+  const folders = new Set<string>();
+  for (const name of [...names, ...bound]) {
+    const parts = name.split("/").filter(part => part !== "" && part !== ".");
+    if (parts.includes("..") || isAbsolute(name)) continue;
+    const depth = parts[0] === "output" ? 2 : 1;
+    if (parts.length > depth) folders.add(parts.slice(0, depth).join("/"));
+  }
+  return folders.size ? folders : new Set(["output/readiness"]);
 }
 
 export function loadReadiness(boardPath: string): Readiness {
@@ -83,11 +97,17 @@ export function loadReadiness(boardPath: string): Readiness {
     const knownIssues = validateKnownIssues(data.known_issues);
     const bound = Object.keys(data.inputs).filter(n => n.split("/").pop() === "known-issues.json");
     // #7323: a known-issues.json in the evidence folder that inputs does not list was unbound and dropped.
-    const orphan = (readdirSync(join(root, "output"), { recursive: true }) as string[])
-      .map(name => String(name).replaceAll("\\", "/"))
-      .find(name => name.split("/").pop() === "known-issues.json"
-        && statSync(join(root, "output", name)).isFile() && !("output/" + name in data.inputs));
-    if (orphan) throw new Error(`output/${orphan} is not listed in inputs (orphaned known-issues evidence)`);
+    // #7337: only the record's own evidence folder(s) count; --verify's output/readiness-verification/
+    // and the committed output/readiness/ never orphan each other.
+    const orphan = [...evidenceFolders(data.evidence, bound)].flatMap(folder => {
+      const dir = join(root, folder);
+      if (!existsSync(dir) || !statSync(dir).isDirectory()) return [];
+      return (readdirSync(dir, { recursive: true }) as string[])
+        .map(name => `${folder}/${String(name).replaceAll("\\", "/")}`)
+        .filter(name => name.split("/").pop() === "known-issues.json"
+          && statSync(join(root, name)).isFile() && !(name in data.inputs));
+    }).sort()[0];
+    if (orphan) throw new Error(`${orphan} is not listed in inputs (orphaned known-issues evidence)`);
     if (bound.length > 1) throw new Error("known_issues is bound to more than one evidence file");
     if (bound.length === 0 && knownIssues.length) throw new Error("known_issues is not bound to hashed evidence");
     if (bound.length === 1) {

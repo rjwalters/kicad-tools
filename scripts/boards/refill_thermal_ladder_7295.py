@@ -16,6 +16,12 @@ Usage (repository root; pinned toolchain via ``KCT_KICAD_DOCKER=1`` off CI)::
 
 Follow with each board's ``package_release.py`` / ``refresh_readiness.py`` to
 re-pin the hash-bound evidence.
+
+Issue #7337: ``run_fill_zones`` ends with the foreign-pad carve, which an
+independent ``kicad-cli`` refill does not reproduce; on board 04 it left the
+saved copper ~28 mm^2 short of the refill.  ``native_refill_board_04_7337.py``
+re-saved board 04 with the native fill, and ``refresh_readiness.py`` now
+refuses a board whose saved copper differs from a refill.
 """
 
 from __future__ import annotations
@@ -50,6 +56,13 @@ def refill(board: str) -> None:
     )
 
 
-if __name__ == "__main__":
+def main() -> int:
     for name in sys.argv[1:] or list(BOARDS):
         refill(name)
+    return 0
+
+
+if __name__ == "__main__":
+    from kicad_tools.cli.kicad_toolchain import run_on_evidence_toolchain
+
+    sys.exit(run_on_evidence_toolchain(main, [REPO_ROOT]))
