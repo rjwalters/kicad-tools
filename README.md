@@ -198,7 +198,7 @@ Or configure Claude Desktop by hand (`~/Library/Application Support/Claude/claud
 ```
 
 Available MCP tools:
-- **Analysis**: `analyze_board`, `get_drc_violations`, `measure_clearance`
+- **Analysis**: `board_summary`, `get_drc_violations`, `measure_clearance`
 - **Export**: `export_gerbers`, `export_bom`, `export_assembly`
 - **Placement**: `placement_analyze`, `placement_suggestions`
 - **Sessions**: `start_session`, `query_move`, `apply_move`, `commit`, `rollback`

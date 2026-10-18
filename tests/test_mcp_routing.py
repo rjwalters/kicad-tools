@@ -279,6 +279,30 @@ class TestRouteNet:
         # but the result structure should be valid
         assert result.total_connections >= 0
 
+    def test_default_output_leaves_input_untouched(self, tmp_path: Path) -> None:
+        """Omitting output_path must not modify the input (Issue #7111)."""
+        pcb_file = tmp_path / "test.kicad_pcb"
+        pcb_file.write_text(UNROUTED_PCB)
+        before = pcb_file.read_bytes()
+
+        result = route_net(str(pcb_file), net_name="SIG1")
+
+        assert pcb_file.read_bytes() == before
+        expected = tmp_path / "test_routed.kicad_pcb"
+        assert result.output_path != str(pcb_file)
+        if result.success:
+            assert result.output_path == str(expected)
+            assert expected.exists()
+
+    def test_explicit_same_output_path_is_reported(self, tmp_path: Path) -> None:
+        """Passing output_path == pcb_path is the explicit overwrite opt-in."""
+        pcb_file = tmp_path / "test.kicad_pcb"
+        pcb_file.write_text(PARTIAL_ROUTED_PCB)
+
+        result = route_net(str(pcb_file), net_name="SIG1", output_path=str(pcb_file))
+
+        assert result.output_path == str(pcb_file)
+
     def test_route_already_routed_net(self, tmp_path: Path) -> None:
         """Test routing a net that's already fully routed."""
         pcb_file = tmp_path / "test.kicad_pcb"
