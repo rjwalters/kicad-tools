@@ -722,7 +722,9 @@ def cmd_validate(args):
     errors = [_finding(v) for v in results.errors]
     errors.extend(
         {"type": v_type, "detail": detail, "severity": "error", "rule_id": rule_id}
-        for v_type, rule_id, detail in _fab_setting_findings(sexp, rules)
+        for v_type, rule_id, detail in _fab_setting_findings(
+            sexp, rules, declared_clearance_mm=_declared_clearance_mm(file_path)
+        )
     )
     warnings = [_finding(v) for v in results.warnings]
 
@@ -770,12 +772,39 @@ _HOLE_SIZE = ("HOLE_SIZE", "fab_pad_drill_min")
 _ZONE_CLEARANCE = ("ZONE_CLEARANCE", "fab_zone_clearance_setting")
 
 
-def _fab_setting_findings(sexp, rules) -> list[tuple[str, str, str]]:
+def _declared_clearance_mm(pcb_path) -> float | None:
+    """Largest unconditional clearance the board's own files declare (Issue #7246).
+
+    Takes the max of the ``.kicad_dru``, project minimum and netclass
+    clearances; ``None`` when no sidecar declares one.
+    """
+    from kicad_tools.router.clearance_resolver import read_declared_clearance_rules
+
+    declared = read_declared_clearance_rules(pcb_path)
+    values = [
+        v
+        for v in (
+            declared.dru_mm,
+            declared.project_min_clearance_mm,
+            declared.net_class_clearance_mm,
+            declared.board_net_class_mm,
+        )
+        if v is not None
+    ]
+    return max(values) if values else None
+
+
+def _fab_setting_findings(
+    sexp, rules, declared_clearance_mm: float | None = None
+) -> list[tuple[str, str, str]]:
     """Fab-setting checks ``DRCChecker`` does not cover (Issue #7188).
 
     * a footprint pad drill below ``min_hole_diameter_mm`` (both
       ``(footprint ...)`` and legacy ``(module ...)`` tags, issue #4892);
-    * a zone ``connect_pads`` clearance *setting* below ``min_clearance_mm``.
+    * a zone ``connect_pads`` clearance *setting* below ``min_clearance_mm``
+      whose *effective* clearance is also below it: KiCad fills to the larger
+      of the setting and the rule clearance, so a larger
+      ``declared_clearance_mm`` masks a low raw setting (Issue #7246).
 
     Trace width and via size/drill are checked by ``DRCChecker``
     (``DimensionRules``) and are no longer duplicated here.
@@ -783,6 +812,8 @@ def _fab_setting_findings(sexp, rules) -> list[tuple[str, str, str]]:
     Args:
         sexp: PCB S-expression tree
         rules: DesignRules from manufacturer profile
+        declared_clearance_mm: Largest board/netclass/DRU clearance declared
+            for the board, or ``None`` when none is known.
 
     Returns:
         List of ``(type, rule_id, detail)`` tuples; every one is an error.
@@ -804,13 +835,14 @@ def _fab_setting_findings(sexp, rules) -> list[tuple[str, str, str]]:
                 clearance = connect_pads.find_child("clearance")
                 if clearance:
                     zone_clearance = clearance.get_float(0) or 0.0
-                    if zone_clearance < rules.min_clearance_mm:
+                    effective = max(zone_clearance, declared_clearance_mm or 0.0)
+                    if effective < rules.min_clearance_mm:
                         net = child.find_child("net_name") or child.find_child("net")
                         net_name = (net.get_string(0) if net else None) or "unknown"
                         findings.append(
                             (
                                 *_ZONE_CLEARANCE,
-                                f"Zone '{net_name}' clearance {zone_clearance:.4f}mm "
+                                f"Zone '{net_name}' clearance {effective:.4f}mm "
                                 f"< min {rules.min_clearance_mm:.4f}mm",
                             )
                         )
