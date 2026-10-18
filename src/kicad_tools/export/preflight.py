@@ -178,6 +178,7 @@ class PreflightChecker:
         exclude_tht: bool | None = None,
         bom_source: str = "schematic",
         parts_cache=None,
+        parts_catalog=None,
     ):
         self.pcb_path = Path(pcb_path)
         self.schematic_path = Path(schematic_path) if schematic_path else None
@@ -188,6 +189,10 @@ class PreflightChecker:
         # Optional injected PartsCache for LCSC value validation
         # (default: lazily constructed in _check_bom_lcsc_values).
         self._parts_cache = parts_cache
+        # Optional injected JlcpartsCatalog (offline fallback for parts the
+        # cache does not know, issue #7166).  Default: the catalog file that
+        # sits beside the parts cache's ``parts.db``.
+        self._parts_catalog = parts_catalog
 
         # Resolve the fab *family* once.  Export-format concerns (BOM/CPL
         # formatters, THT policy) are properties of the physical fab, not of
@@ -816,18 +821,20 @@ class PreflightChecker:
         """Validate assigned LCSC parts against known value AND package.
 
         For every active BOM item that HAS an LCSC number, look the part
-        up in the local parts cache/DB.  When the part is known and its
-        parametric value clearly disagrees with the BOM row value
-        (e.g. 100nF part on a 16nF row -- issue #3590) OR its chip
-        package clearly disagrees with the row's footprint (e.g. an 0402
-        part on 0805 footprints -- issue #3597), the check FAILS: a
-        wrong-value or wrong-size passive in a shipped BOM is a
-        manufacturing defect.  Value and package mismatches are reported
-        together in one combined result.
+        up in the local parts cache, falling back to the offline jlcparts
+        catalog (read-only; no network, nothing written to the cache).
+        When the part is known and its parametric value clearly disagrees
+        with the BOM row value (e.g. 100nF part on a 16nF row -- issue
+        #3590), its chip package disagrees with the row's footprint (an
+        0402 part on 0805 footprints -- issue #3597), or its IC package
+        family / pin count disagrees with the PCB footprint (a SOT-25-5
+        part on a SOT-23-6 footprint -- issue #7166), the check FAILS.
 
-        Items whose LCSC part is not in the local cache cannot be
-        validated and are reported as OK (this check is best-effort by
-        design; it must not require network access).
+        Items whose part is in neither source cannot be validated.  They
+        are counted separately and turn the result into a WARN that names
+        them (issue #7166): "not checked" must never read as "checked and
+        fine".  The WARN never blocks export, even under
+        ``--strict-preflight`` -- a fresh CI runner has an empty cache.
         """
         try:
             bom = self._load_bom()
@@ -851,20 +858,50 @@ class PreflightChecker:
                     message=f"Parts cache unavailable for LCSC value validation: {e}",
                 )
 
-        from .lcsc_value_check import check_lcsc_against_cache
+        catalog = self._parts_catalog
+        if catalog is None:
+            with contextlib.suppress(Exception):
+                from ..parts.jlcparts_catalog import CATALOG_FILENAME, JlcpartsCatalog
+
+                catalog = JlcpartsCatalog(Path(cache.db_path).parent / CATALOG_FILENAME)
+
+        from .lcsc_value_check import verify_lcsc_assignment
+
+        # PCB pad numbers per reference, for the IC pin-count check.  A
+        # reference carried by more than one footprint is ambiguous: give it
+        # no pads (the check then falls back to the footprint name).
+        pads_by_ref: dict[str, list[str] | None] = {}
+        if self._pcb is not None:
+            for fp in self._pcb.footprints:
+                pads = [str(p.number) for p in fp.pads]
+                pads_by_ref[fp.reference] = None if fp.reference in pads_by_ref else pads
 
         mismatches: list[str] = []
-        checked = 0
+        unverified: list[str] = []
+        sources: set[str] = set()
+        assigned = 0
         for item in bom.items:
             if item.is_virtual or item.dnp or not item.lcsc:
                 continue
-            checked += 1
-            mismatch = check_lcsc_against_cache(
-                cache, item.lcsc, item.value, item.reference, footprint=item.footprint
+            assigned += 1
+            verdict = verify_lcsc_assignment(
+                cache,
+                catalog,
+                item.lcsc,
+                item.value,
+                item.reference,
+                footprint=item.footprint,
+                pad_numbers=pads_by_ref.get(item.reference),
             )
-            if mismatch is not None:
+            if verdict.status == "unverified":
+                unverified.append(f"{item.reference} -> {item.lcsc}")
+                continue
+            if verdict.source:
+                sources.add(verdict.source)
+            if verdict.mismatch is not None:
                 mismatches.append(
-                    f"{item.reference} ({item.value}) -> {item.lcsc}: {mismatch.describe()}"
+                    f"{item.reference} ({item.value}) -> {item.lcsc}: "
+                    f"{verdict.mismatch.describe()} [{verdict.source}]"
                 )
 
         if mismatches:
@@ -880,12 +917,34 @@ class PreflightChecker:
                 details=f"{shown}{suffix}",
             )
 
+        if not assigned:
+            return PreflightResult(
+                name="bom_lcsc_values",
+                status="OK",
+                message="No assigned LCSC parts to validate",
+            )
+
+        verified = assigned - len(unverified)
+        against = " and ".join(sorted(sources)) or "no source"
+        if unverified:
+            shown = ", ".join(unverified[:8])
+            suffix = f" (and {len(unverified) - 8} more)" if len(unverified) > 8 else ""
+            return PreflightResult(
+                name="bom_lcsc_values",
+                status="WARN",
+                message=(
+                    f"{verified} of {assigned} assigned item(s) verified ({against}); "
+                    f"{len(unverified)} unverifiable (not in parts cache or offline catalog)"
+                ),
+                details=f"unverified: {shown}{suffix}",
+            )
+
         return PreflightResult(
             name="bom_lcsc_values",
             status="OK",
             message=(
-                f"No LCSC value/package mismatches detected "
-                f"({checked} assigned item(s) checked against local parts cache)"
+                f"{assigned} of {assigned} assigned item(s) verified against {against}; "
+                f"no LCSC value/package mismatches"
             ),
         )
 
