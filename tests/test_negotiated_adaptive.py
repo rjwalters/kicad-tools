@@ -501,7 +501,7 @@ class TestEscapeTransaction:
             neg, grid, original, net_routes, routes_list = self._setup()
 
             def strategy(attempts=None, **kwargs):
-                for _net in range(5):
+                for _net in range(10):
                     if attempts.exhausted():
                         attempts.cut = True
                         return True, 0  # cut work must not be kept, even if "improved"
@@ -518,7 +518,8 @@ class TestEscapeTransaction:
             success, _, tried = self._run(neg, net_routes, routes_list, reroute_cap=7)
             outcomes.append((success, tried, neg.last_escape_summary.reroutes))
             assert net_routes == original
-        assert outcomes[0] == outcomes[1] == (False, 2, 7)
+        # Issue #7192: every strategy gets its own allowance of 7 (4 x 7).
+        assert outcomes[0] == outcomes[1] == (False, 4, 28)
 
 
 class TestEscapeFullReorder:

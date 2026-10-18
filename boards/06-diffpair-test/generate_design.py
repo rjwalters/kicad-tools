@@ -3353,8 +3353,9 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
             # = 0.075-0.10 mm on USB/USB3/PCIe/MIPI for tightly-coupled
             # diff-pair routing -- an explicit author choice that takes
             # precedence over the solver's "loosely coupled" branch.
-            # Re-apply the recipe's per-class ``intra_pair_clearance``
-            # (and ``clearance``) on each resolved class.
+            # Re-apply the recipe's per-class ``clearance`` on each
+            # resolved class, and keep its ``intra_pair_clearance`` as the
+            # MINIMUM gap of the tightly-coupled solve below (#7060).
             #
             # Issue #3413 (phase 6) -- re-solve the WIDTH on the
             # tightly-coupled branch instead of keeping the resolver's
@@ -3371,24 +3372,54 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
             # the USB3_RX1- residual diagnosed in PR #3500 ("hard
             # obstacles at the J1 fan-out").
             #
-            # Given the author-chosen tight gap, solve
-            # ``Zdiff(width, gap) = target`` for width via bisection on
-            # the same ``CoupledLines.edge_coupled_microstrip`` model the
-            # resolver uses.  Measured solutions on jlcpcb_4layer F.Cu:
-            #   USB2  90 Ω @ 0.075 mm gap -> 0.250 mm (Zdiff 89.6, 0.4% off)
-            #   USB3  90 Ω @ 0.100 mm gap -> 0.275 mm (Zdiff 90.4, 0.4% off)
-            #   PCIe 100 Ω @ 0.100 mm gap -> 0.225 mm (Zdiff 102.3, 2.3% off)
-            #   MIPI 100 Ω @ 0.100 mm gap -> 0.225 mm (Zdiff 102.3, 2.3% off)
-            # All are within the classes' 10% tolerance; 0.275 + 0.3 mm
-            # clearance = 0.575 mm fits J1's 0.7 mm channels and the
-            # BGA-49's 0.82 mm channels with margin.  Single-ended
-            # classes (Sideband) keep the resolver's width -- the
-            # sidecar DRC gate validates SE impedance against it.
+            # Issue #7060 -- hold the routing-validated WIDTH, solve the GAP.
+            #
+            # Phase 6 originally solved width at the recipe's authored gap.
+            # That was only stable while the coupled model was the old
+            # empirical coupling factor; the two-conductor field solve
+            # (#7060, validated against Kirschning-Jansen within 0.3 %)
+            # couples tight gaps much more strongly, so the same solve
+            # moved every width down one-to-two 0.025 mm steps (USB2
+            # 0.250 -> 0.200, USB3 0.275 -> 0.250, PCIe/MIPI 0.225 ->
+            # 0.175).  The seed-42 re-route at those widths left USB2_D+
+            # with 16.6 mm uncoupled and 5 vias (limits 12.7 mm / 4), and
+            # a 0.225 mm USB2 width at a 0.090 mm gap still left one pair
+            # outside the uncoupled-length baseline.
+            #
+            # Width is the routability-critical dimension here (it sets
+            # the fabric through J1's 0.7 mm inter-pad channels and the
+            # BGA-49's 0.82 mm channels, see above), and the widths below
+            # are the ones the coupled router has been validated at since
+            # #3413 phase 6.  So width is held and the GAP is solved for
+            # the target Zdiff on the same field-solve model the resolver
+            # uses, rounded to 0.005 mm and never tighter than the
+            # recipe's authored gap (which stays the minimum).  Solutions
+            # on jlcpcb_4layer F.Cu under the #7060 model:
+            #   USB2  90 Ω: 0.250 mm @ 0.105 mm gap -> Zdiff  89.9 (-0.2 %)
+            #   USB3  90 Ω: 0.275 mm @ 0.125 mm gap -> Zdiff  90.4 (+0.4 %)
+            #   PCIe 100 Ω: 0.225 mm @ 0.135 mm gap -> Zdiff  99.7 (-0.3 %)
+            #   MIPI 100 Ω: 0.225 mm @ 0.135 mm gap -> Zdiff  99.7 (-0.3 %)
+            # (For comparison, the authored gaps at these widths model to
+            # 82.0 / 85.6 / 92.2 / 92.2 Ω.)  A class with no validated
+            # width, or whose target cannot be met by widening the gap,
+            # falls back to the width solve at the authored gap.
+            # Single-ended classes (Sideband) keep the resolver's width --
+            # the sidecar DRC gate validates SE impedance against it.
             import dataclasses as _dc
 
             from kicad_tools.physics import CoupledLines as _CoupledLines
 
             _cl = _CoupledLines(stackup)
+
+            _ROUTABLE_DIFF_WIDTH_MM = {
+                "USB2": 0.250,
+                "USB3": 0.275,
+                "PCIe": 0.225,
+                "MIPI": 0.225,
+            }
+
+            def _zdiff(width_mm: float, gap_mm: float) -> float:
+                return _cl.edge_coupled_microstrip(width_mm, gap_mm, "F.Cu").zdiff
 
             def _tightly_coupled_width(
                 target_zdiff: float, gap_mm: float, fallback: float
@@ -3398,8 +3429,7 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
                     lo, hi = 0.1, 1.0
                     for _ in range(40):
                         mid = (lo + hi) / 2
-                        z = _cl.edge_coupled_microstrip(mid, gap_mm, "F.Cu").zdiff
-                        if z > target_zdiff:
+                        if _zdiff(mid, gap_mm) > target_zdiff:
                             lo = mid
                         else:
                             hi = mid
@@ -3408,30 +3438,64 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
                 except (ValueError, AttributeError):
                     return fallback
 
+            def _gap_at_width(
+                target_zdiff: float, width_mm: float, min_gap_mm: float
+            ) -> float | None:
+                """Bisect Zdiff(width, gap)=target for gap >= min_gap; round to 0.005mm.
+
+                Zdiff rises monotonically with gap, so ``None`` means the
+                target is unreachable by widening the gap (the width is
+                already too narrow at ``min_gap_mm``, or too wide even at
+                1 mm) and the caller falls back to the width solve.
+                """
+                try:
+                    lo, hi = min_gap_mm, 1.0
+                    if _zdiff(width_mm, lo) > target_zdiff or _zdiff(width_mm, hi) < target_zdiff:
+                        return None
+                    while hi - lo > 0.0005:
+                        mid = (lo + hi) / 2
+                        if _zdiff(width_mm, mid) < target_zdiff:
+                            lo = mid
+                        else:
+                            hi = mid
+                    gap = round(round(((lo + hi) / 2) / 0.005) * 0.005, 4)
+                    return max(gap, min_gap_mm)
+                except (ValueError, AttributeError):
+                    return None
+
+            _diff_geometry: dict[str, tuple[float, float]] = {}
             for _name, _resolved_nc in list(resolved_map.items()):
                 _original_nc = net_class_map.get(_name)
                 if _original_nc is None:
                     continue
                 _width = _resolved_nc.trace_width
-                if (
-                    _original_nc.target_diff_impedance is not None
-                    and _original_nc.intra_pair_clearance is not None
-                ):
-                    _width = _tightly_coupled_width(
-                        _original_nc.target_diff_impedance,
-                        _original_nc.intra_pair_clearance,
-                        _resolved_nc.trace_width,
-                    )
+                _gap = _original_nc.intra_pair_clearance
+                if _original_nc.target_diff_impedance is not None and _gap is not None:
+                    _key = _original_nc.name
+                    if _key not in _diff_geometry:
+                        _target = _original_nc.target_diff_impedance
+                        _held = _ROUTABLE_DIFF_WIDTH_MM.get(_key)
+                        _solved_gap = (
+                            _gap_at_width(_target, _held, _gap) if _held is not None else None
+                        )
+                        if _held is not None and _solved_gap is not None:
+                            _diff_geometry[_key] = (_held, _solved_gap)
+                        else:
+                            _diff_geometry[_key] = (
+                                _tightly_coupled_width(_target, _gap, _resolved_nc.trace_width),
+                                _gap,
+                            )
+                    _width, _gap = _diff_geometry[_key]
                 resolved_map[_name] = _dc.replace(
                     _resolved_nc,
                     trace_width=_width,
-                    intra_pair_clearance=_original_nc.intra_pair_clearance,
+                    intra_pair_clearance=_gap,
                     clearance=_original_nc.clearance,
                 )
 
             net_class_map = resolved_map
             print("   Impedance sizing applied (stackup: jlcpcb_4layer)")
-            print("   Recipe intra_pair_clearance preserved; diff widths re-solved tightly-coupled")
+            print("   Diff widths held at routable values; gaps re-solved for target Zdiff")
             for _name in ("USB2_D+", "USB3_RX1-", "PCIE_TX+", "MIPI_CLK+", "MIPI_RST"):
                 _nc = net_class_map.get(_name)
                 if _nc is not None:

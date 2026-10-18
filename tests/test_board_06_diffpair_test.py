@@ -665,6 +665,10 @@ class TestManufacturabilityFloor:
         #   USB2  90 Ω @ 0.075 mm gap -> 0.250 mm
         #   PCIe/MIPI 100 Ω @ 0.100 mm gap -> 0.225 mm
         #   Sideband 50 Ω SE (resolver) -> 0.375 mm (unchanged)
+        # Issue #7060: under the two-conductor field solve the recipe
+        # HOLDS these diff widths and re-solves the gap instead (USB2
+        # 0.105, USB3 0.125, PCIe/MIPI 0.135 mm), so the width canaries
+        # below are unchanged.
         # The historical loosely-coupled 0.475 mm width must be GONE:
         # combined with the recipe's tight gap it measured ~62 Ω (31%
         # off target) and geometrically sealed J1's 0.7 mm channels

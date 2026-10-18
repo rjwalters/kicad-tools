@@ -92,3 +92,44 @@ def test_coupled_stripline_uses_correct_offset_single_line_limit():
     # The empirical model retains a 1% coupling floor, but must approach
     # twice the independently verified single-line impedance, not ~150 ohm.
     assert result.zdiff == pytest.approx(2 * 50.25155, rel=0.011)
+
+
+def test_two_strip_modes_are_symmetric_scale_invariant_and_ordered():
+    from kicad_tools.physics.stripline import coupled_stripline_impedances
+
+    even, odd = coupled_stripline_impedances(0.15, 0.1, 0.1, 0.3, 0.035, 4.4)
+    assert even > odd > 0
+    # Reflection about the strip plane and uniform scaling leave modes unchanged.
+    assert coupled_stripline_impedances(0.15, 0.1, 0.3, 0.1, 0.035, 4.4) == pytest.approx(
+        (even, odd)
+    )
+    assert coupled_stripline_impedances(1.5, 1.0, 1.0, 3.0, 0.35, 4.4) == pytest.approx(
+        (even, odd), rel=1e-9
+    )
+    # Permittivity scales both modes by 1/sqrt(er).
+    e2, o2 = coupled_stripline_impedances(0.15, 0.1, 0.1, 0.3, 0.035, 1.0)
+    assert (e2 / math.sqrt(4.4), o2 / math.sqrt(4.4)) == pytest.approx((even, odd))
+
+
+def test_two_strip_modes_converge_to_the_single_strip_as_gap_grows():
+    from kicad_tools.physics.stripline import coupled_stripline_impedances
+
+    single = stripline_impedance(0.15, 0.2, 0.2, 0.035, 4.4)
+    gaps = (0.4, 1.6, 6.4)
+    errors = []
+    for gap in gaps:
+        even, odd = coupled_stripline_impedances(0.15, gap, 0.2, 0.2, 0.035, 4.4)
+        assert even >= single * (1 - 1e-9)
+        assert single >= odd * (1 - 1e-9)
+        errors.append(even - odd)
+    assert errors[0] > errors[1] > 0.0
+    assert errors[-1] < 0.01 * single
+
+
+def test_two_strip_invalid_geometry_raises():
+    from kicad_tools.physics.stripline import coupled_stripline_impedances
+
+    with pytest.raises(ValueError):
+        coupled_stripline_impedances(0.15, 0.0, 0.2, 0.2, 0.035, 4.4)
+    with pytest.raises(ValueError):
+        coupled_stripline_impedances(0.15, 0.1, 0.2, 0.2, -0.1, 4.4)

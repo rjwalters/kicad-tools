@@ -120,27 +120,21 @@ The following 2 through-hole components are **excluded from the SMT pick-and-pla
 | Metric | Count |
 |--------|-------|
 | Errors | 0 |
-| Warnings | 1 |
+| Warnings | 0 |
 | Blocking | 0 |
 
 **Status**: PASS
-### Violations by Type
-
-| Violation Type | Count |
-|----------------|-------|
-| pin1_marker_obscured | 1 |
 
 
 \newpage
 
 ## Manufacturing Readiness
 
-**Verdict**: WARNING
+**Verdict**: READY
 
 ### Action Items
 
 - **[OPTIONAL]** Refill zones to verify 2 zone-connected nets, then re-run kct audit
-- **[OPTIONAL]** Review 1 DRC warnings
 
 
 \newpage
