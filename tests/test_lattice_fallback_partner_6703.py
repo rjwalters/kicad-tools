@@ -460,10 +460,13 @@ class _StubResult:
 def _keep_rule_winner(
     monkeypatch,
     *,
-    blind: tuple[bool, float, int],
-    aware: tuple[bool, float, int],
+    blind: tuple[bool, float, int] | tuple[bool, float, int, int],
+    aware: tuple[bool, float, int] | tuple[bool, float, int, int],
 ) -> str:
-    """Which legs the flush keeps; each tuple is (both legs routed, skew, shortfalls)."""
+    """Which legs the flush keeps.
+
+    Each tuple is (both legs routed, skew, shortfalls[, via-count mismatch]).
+    """
     pf, pairs = _open_pairs(1)
     pc = pairs[0]
 
@@ -474,7 +477,10 @@ def _keep_rule_winner(
         }
 
     blind_legs, aware_legs = legs("blind", blind[0]), legs("aware", aware[0])
-    scores = {id(blind_legs): blind[1:], id(aware_legs): aware[1:]}
+    scores = {
+        id(lg): (t[1], t[2], t[3] if len(t) > 3 else 0)
+        for lg, t in ((blind_legs, blind), (aware_legs, aware))
+    }
 
     monkeypatch.setattr(LatticePathfinder, "_partner_blind_legs", lambda self, pc, **kw: blind_legs)
     monkeypatch.setattr(
@@ -483,6 +489,9 @@ def _keep_rule_winner(
     monkeypatch.setattr(LatticePathfinder, "_pair_skew", lambda self, lg: scores[id(lg)][0])
     monkeypatch.setattr(
         LatticePathfinder, "_legs_shortfalls", lambda self, pc, lg: scores[id(lg)][1]
+    )
+    monkeypatch.setattr(
+        LatticePathfinder, "_pair_via_counts", staticmethod(lambda lg: (scores[id(lg)][2], 0))
     )
     monkeypatch.setattr(LatticePathfinder, "_commit_single", lambda self, *a, **k: None)
 
@@ -521,3 +530,77 @@ def test_keep_rule_keeps_a_material_skew_gain_without_shortfall(monkeypatch) -> 
 def test_keep_rule_margin_is_inclusive(monkeypatch) -> None:
     got = _keep_rule_winner(monkeypatch, blind=(True, 1.0, 0), aware=(True, 0.75, 0))
     assert got == "aware"
+
+
+def test_keep_rule_prefers_via_parity_over_a_skew_gain(monkeypatch) -> None:
+    # Issue #7093: the blind legs have the smaller skew but unequal vias.
+    got = _keep_rule_winner(monkeypatch, blind=(True, 0.1, 0, 1), aware=(True, 0.9, 0, 0))
+    assert got == "aware"
+
+
+def test_keep_rule_via_parity_does_not_add_a_shortfall(monkeypatch) -> None:
+    got = _keep_rule_winner(monkeypatch, blind=(True, 0.1, 0, 1), aware=(True, 0.1, 1, 0))
+    assert got == "blind"
+
+
+class _Leg:
+    """A routed leg reduced to what the candidate ranking reads."""
+
+    def __init__(self, length: float, vias: int) -> None:
+        self.length = length
+        self.route = self
+        self.vias = [object()] * vias
+
+
+def _candidate_winner(monkeypatch, legs: list[tuple[float, int]]) -> tuple[int, int]:
+    """(vias_P, vias_N) of the pair kept by ``_partner_aware_legs``.
+
+    ``legs`` are the (length, vias) results of the searches, in call order:
+    P first, then N plain, N guided; N first, then P plain, P guided.
+    """
+    pf, pc = _walled_pair()
+    pf.pair_length_measure = lambda route: route.length
+    results = iter(_Leg(*lg) for lg in legs)
+    monkeypatch.setattr(
+        LatticePathfinder, "_search_single", lambda self, item, **kw: (next(results), "")
+    )
+    monkeypatch.setattr(LatticePathfinder, "_partner_guide", lambda self, res, pc: object())
+    monkeypatch.setattr(LatticePathfinder, "_legs_shortfalls", lambda self, pc, lg: 0)
+    monkeypatch.setattr(LatticePathfinder, "_commit_single", lambda self, *a, **k: None)
+    got, _ = pf._partner_aware_legs(
+        pc, committed=pf._fresh_committed(), history={}, present=0.0, escape_plan={}
+    )
+    return len(got["P"][0].route.vias), len(got["N"][0].route.vias)
+
+
+def test_via_equal_candidate_beats_the_skew_best_asymmetric_one(monkeypatch) -> None:
+    # P-led plain N matches P's length exactly but changes layers one extra
+    # time; the guided N is 0.5 mm off but has the same via count as P.
+    got = _candidate_winner(
+        monkeypatch,
+        [(10.0, 2), (10.0, 3), (10.5, 2), (10.0, 2), (10.0, 3), (10.5, 2)],
+    )
+    assert got == (2, 2)
+
+
+def test_all_asymmetric_candidates_still_commit_the_best_skew(monkeypatch) -> None:
+    got = _candidate_winner(
+        monkeypatch,
+        [(10.0, 2), (10.0, 3), (10.5, 3), (10.0, 2), (10.0, 3), (10.5, 3)],
+    )
+    assert got == (2, 3)
+
+
+def test_unequal_via_pair_is_recorded_for_the_warning(monkeypatch) -> None:
+    pf, pc = _walled_pair()
+    pf.pair_length_measure = lambda route: route.length
+    legs = {"P": (_Leg(10.0, 2), ""), "N": (_Leg(10.0, 3), "")}
+    monkeypatch.setattr(LatticePathfinder, "_partner_blind_legs", lambda self, pc, **kw: legs)
+    monkeypatch.setattr(
+        LatticePathfinder, "_partner_aware_legs", lambda self, pc, **kw: (legs, True)
+    )
+    monkeypatch.setattr(LatticePathfinder, "_commit_single", lambda self, *a, **k: None)
+    pf._route_fallback_pairs_into(
+        [pc], {}, committed=pf._fresh_committed(), history={}, present=0.0, escape_plan={}
+    )
+    assert pf.pair_via_mismatch == {pc.key: (2, 3)}

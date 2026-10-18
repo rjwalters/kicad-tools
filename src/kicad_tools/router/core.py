@@ -5505,6 +5505,16 @@ class Autorouter:
                         f"(coupled run declined: {outcome.split(':', 1)[1]}); "
                         "intra-pair gap and length matching are not guaranteed"
                     )
+                    # Issue #7093: unequal layer changes are a pair-rule
+                    # failure the fallback could not avoid; never silent.
+                    for pc in coupled:
+                        mismatch = getattr(pf, "pair_via_mismatch", {}).get(pc.key)
+                        if pc.pair_name == name and mismatch is not None:
+                            print(
+                                f"  WARNING: diff pair {name} legs have unequal via "
+                                f"counts (P={mismatch[0]}, N={mismatch[1]}); no "
+                                "fallback candidate had via parity"
+                            )
                 elif outcome.startswith("hybrid:"):
                     print(
                         f"  NOTE: diff pair {name} is hybrid (coupled trunk, single-ended "
