@@ -315,6 +315,7 @@ kct drc <report|board.kicad_pcb> [options]
 | `--format {table,json,summary}` | Output format (default: table) |
 | `--errors-only` | Show only errors |
 | `--strict` | Exit 2 when warnings are present (exit-code contract, #6898) |
+| `--allow-incomplete` | Exit 0 instead of 2 when schematic parity did NOT RUN (#7077); same meaning as `kct check --allow-incomplete` |
 | `--type TYPE`, `-t` | Filter by violation type (partial match) |
 | `--net NET` | Filter by net name |
 | `--category`, `-c {placement,routing,manufacturing,connectivity,cosmetic}` | Filter by root-cause category |
@@ -330,6 +331,28 @@ kct drc <report|board.kicad_pcb> [options]
 The standalone `kicad-drc` also has `--rules` and `--compare`; they are
 deprecated (a stderr pointer is printed) in favour of `kct mfr rules` and
 `kct mfr compare`, and are intentionally not on `kct drc` (#6898).
+
+**Schematic parity (#7077)**
+
+`kct drc board.kicad_pcb` runs kicad-cli with `--schematic-parity` and prints
+one status line, also in `summary`, `--mfr` and `kicad-drc-summary` output:
+
+- `Schematic parity: PASSED` — parity ran and found nothing unwaived.
+- `Schematic parity: FAILED (N issue(s))` — findings listed in a
+  `SCHEMATIC PARITY` section, kept out of the geometric violation counts.
+- `Schematic parity: NOT RUN (<reason>)` — kicad-cli could not fetch the
+  schematic netlist (no schematic next to the board, or one that is not fully
+  annotated), or a `.json`/`.rpt` report has no parity findings: an empty
+  `schematic_parity` array cannot tell "clean" from "never ran".
+
+Exit codes: error-severity parity findings exit 1; warning-severity ones exit
+2 under `--strict`; NOT RUN exits 2 (the verdict reads `DRC INCOMPLETE`, never
+`DRC PASSED`) unless `--allow-incomplete` is given. Errors take precedence.
+`--mfr` keeps its manufacturer-compatibility exit code. `--format json` adds a
+`schematic_parity` object (`status`, `checked`, `reason`, `error_count`,
+`warning_count`, `issues`), a derived `schematic_parity_checked` alias, and
+`parity_errors`/`parity_warnings` in `summary`. Waiver entries match parity
+findings the same way they match DRC findings.
 
 **Waivers (`--waivers`, #4691)**
 
@@ -374,7 +397,7 @@ The `kicad-cli pcb drc` cross-gate reads the same schema-v2 sidecar as
 ```bash
 kct drc board.drc
 kct drc board.kicad_pcb --mfr jlcpcb
-kct drc board-drc.json --waivers .kct_waivers.json   # 0 unwaived errors gate
+kct drc board-drc.json --waivers .kct_waivers.json --allow-incomplete   # 0 unwaived errors gate
 kct mfr compare  # Show all manufacturer rules side by side
 ```
 

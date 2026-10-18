@@ -194,11 +194,27 @@ class TestCreateSummary:
             pcb_name="test.kicad_pcb",
             violations=[],
         )
+        # Issue #7077: only an affirmative "parity ran" may read as PASSED.
+        report.schematic_parity_ran = True
         summary = create_summary(report)
 
         assert not summary.has_blocking
         assert summary.warning_count == 0
         assert "PASSED" in summary.verdict
+
+    def test_summary_verdict_incomplete_when_parity_not_run(self):
+        """Issue #7077: a report that cannot say parity ran is not PASSED."""
+        report = DRCReport(
+            source_file="test.json",
+            created_at=None,
+            pcb_name="test.kicad_pcb",
+            violations=[],
+        )
+        summary = create_summary(report)
+
+        assert "PASSED" not in summary.verdict
+        assert "NOT RUN" in summary.verdict
+        assert summary.to_dict()["schematic_parity"]["status"] == "NOT RUN"
 
 
 class TestManufacturerComparison:
