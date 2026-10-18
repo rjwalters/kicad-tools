@@ -115,11 +115,16 @@ NET_CLASS_GATED_FAMILIES: tuple[str, ...] = (
 # Continuity is info-only since #6443 and no board 07 class declares an
 # uncoupled-length limit, so those families stay at 0. The real assembled
 # SDRAM demo has its own zero-error readiness checks.
+#
+# Re-pinned by #6730: the fixture's ADDR_BUS nets A4/A6 were re-tuned in place
+# with ``kct retune-lengths --group ADDR_BUS`` (skew 1.0998 -> 0.0169 mm), so
+# ``match_group_length_skew`` is now clean (0). The five pair-skew findings
+# above are untouched.
 BOARD_07_EXPECTED_FAMILY_DELTA = {
     "diffpair_length_skew": 5,
     "diffpair_routing_continuity": 0,
     "diffpair_uncoupled_length": 0,
-    "match_group_length_skew": 1,
+    "match_group_length_skew": 0,
 }
 
 
@@ -364,9 +369,9 @@ class TestBoard07KctCheckParity:
             )
 
         # The added families are EXACTLY the gated families that the
-        # committed artifact still has errors for: diffpair_length_skew and
-        # match_group_length_skew (ADDR_BUS) since the kicad-cli-exact length
-        # model (#6725 / PR #6729; re-pinned by #6802). Families pinned at 0
+        # committed artifact still has errors for: diffpair_length_skew since
+        # the kicad-cli-exact length model (#6725 / PR #6729; re-pinned by
+        # #6802; ADDR_BUS cleared by #6730). Families pinned at 0
         # are gated-but-clean; their ENGAGEMENT is pinned elsewhere (e.g. the
         # matchgroup CI gate's rules_checked_by_rule assertion).
         added = {

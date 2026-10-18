@@ -378,7 +378,9 @@ def test_gather_ignore_defaults_to_courtyard_and_old_sidecars_load() -> None:
 COMMITTED = {
     "boards/03-usb-joystick/output/usb_joystick_routed.kicad_pcb": {
         # Issue #6394: board 03 re-derived from a fresh lattice route.
-        ("USB_D+", "USB_D-"): 7.2120,
+        # Issue #6730: USB_D+ was length-tuned in place (``kct retune-lengths``),
+        # adding a meander that is uncoupled from USB_D- (7.2120 -> 8.0823).
+        ("USB_D+", "USB_D-"): 8.0823,
         ("USB_MCU_D+", "USB_MCU_D-"): 1.0550,
     },
     "boards/06-diffpair-test/output/diffpair_test_routed.kicad_pcb": {

@@ -320,11 +320,12 @@ def test_board03_bench_rows_carry_the_limit_and_the_stretch_figure():
         assert row["max_uncoupled_per_terminal_mm"] == 6.35
         assert row["max_vias_per_net"] == 4
     # Issue #6725: skew is measured the way kicad-cli does, vias included.
-    # Issue #6394: the copper re-derived from a fresh lattice route has equal
-    # track lengths but one more USB_D- via (#7093), which puts the pair
-    # 1.32 mm apart -- inside the 2.5 mm gate, outside the 0.5 mm stretch.
-    assert rows["USB_D"]["skew_mm"] == pytest.approx(1.32, abs=0.001)
-    assert rows["USB_D"]["skew_stretch_pass"] is False
+    # Issue #6730: the committed copper was re-tuned in place with
+    # ``kct retune-lengths --diffpair USB_D+ USB_D-`` (USB_D+ only), taking the
+    # pair from 1.32 mm to 0.45 mm apart -- inside the 0.5 mm stretch too.
+    assert rows["USB_D"]["skew_mm"] == pytest.approx(0.45, abs=0.001)
+    assert rows["USB_D"]["skew_mm"] <= 0.5
+    assert rows["USB_D"]["skew_stretch_pass"] is True
     assert rows["USB_MCU_D"]["skew_stretch_pass"] is True
     table = bench.render_pairs(
         [{"board": "03", "engine": "-", "seed": 0, "pairs": list(rows.values())}]

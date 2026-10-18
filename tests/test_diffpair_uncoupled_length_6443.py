@@ -559,9 +559,11 @@ def test_known_divergence_kct_never_exceeds_kicad_on_committed_copper(tmp_path) 
 
     KiCad pairs primitives in a way kct does not reproduce (it will not couple
     two parallel runs that have a nearer non-parallel neighbour), so its figure
-    is larger: 10.087 / 1.055 mm for board 03's USB_D / USB_MCU_D and 1.541 mm
-    for each board 06 LVDS pair, against kct's 7.212 / 1.055 / 1.216 mm (board
-    03 re-derived from a fresh lattice route in #6394; kicad-cli 10.0.6).  The
+    is larger: 11.357 / 1.055 mm for board 03's USB_D / USB_MCU_D and 1.541 mm
+    for each board 06 LVDS pair, against kct's 8.082 / 1.055 / 1.216 mm (board
+    03 re-derived from a fresh lattice route in #6394, then USB_D+ length-tuned
+    in place by ``kct retune-lengths`` in #6730, which widened the USB_D
+    gap from 2.9 to 3.3 mm; kicad-cli 10.0.6).  The
     documented gap (docs/guides/diff-pairs/08-uncoupled-length.md) is bounded here, so
     a change that widens it is noticed.
     """
@@ -569,7 +571,7 @@ def test_known_divergence_kct_never_exceeds_kicad_on_committed_copper(tmp_path) 
     import shutil
 
     expected = {
-        "USB_D": (10.0870, 7.2120),
+        "USB_D": (11.3574, 8.0823),
         "USB_MCU_D": (1.0550, 1.0550),
         "LVDS1": (1.5412, 1.2162),
     }
@@ -604,7 +606,7 @@ def test_known_divergence_kct_never_exceeds_kicad_on_committed_copper(tmp_path) 
                 # kicad-cli prints its figure to 4 decimals (0.1 um), so a pair
                 # both engines measure alike (board 03's USB_MCU_D: 1.0550055 vs
                 # 1.0550) is compared within that print rounding only (#6394).
-                assert mine <= theirs + 0.00005 and theirs <= mine + 3.0
+                assert mine <= theirs + 0.00005 and theirs <= mine + 3.5
 
 
 def test_limit_only_block_has_no_gap_header() -> None:

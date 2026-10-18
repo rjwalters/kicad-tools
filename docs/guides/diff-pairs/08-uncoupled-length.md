@@ -34,9 +34,9 @@ How KiCad measures, and so how kct does (pinned on kicad-cli 10.0.6 by
 * **KiCad's figure can be larger than kct's on real copper.** KiCad does not
   couple two parallel runs when a nearer non-parallel neighbour intervenes;
   kct couples any parallel overlap. On the committed boards KiCad reports
-  10.087 / 1.055 mm for board 03's `USB_D` / `USB_MCU_D` and 1.541 mm for each
-  board 06 LVDS pair, against kct's 7.212 / 1.055 / 1.216 mm. kct's figure is a
-  lower bound, so a pair that sits within ~3 mm of its limit can pass kct and
+  11.357 / 1.055 mm for board 03's `USB_D` / `USB_MCU_D` and 1.541 mm for each
+  board 06 LVDS pair, against kct's 8.082 / 1.055 / 1.216 mm. kct's figure is a
+  lower bound, so a pair that sits within ~3.5 mm of its limit can pass kct and
   fail kicad-cli. `test_known_divergence_kct_never_exceeds_kicad_on_committed_copper`
   pins the gap. Every committed pair is far below its limit in both engines.
 * **Arcs** are not measured by kct.
