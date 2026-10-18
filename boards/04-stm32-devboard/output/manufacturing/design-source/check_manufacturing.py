@@ -22,17 +22,12 @@ from kicad_tools.validate.rules.waivers import (
     load_waivers,
 )
 
-#: Issue #7298: the nine 0805s whose +3.3V/+5V pad 1 the starved-thermal repair
-#: forced solid into the F.Cu pour while pad 2 sits on a trace (#7220's
-#: ``thermal_asymmetry`` advisory).  #7295 (#7220 PR2, narrower spokes before
-#: solid) removes them at the source; until then ONLY these exact
-#: ``(rule, ref, pad)`` findings may pass the DRC leg.  Any other warning, ref
-#: or pad, or a repeat, still fails; errors are never allowed.  Delete the
-#: entries when #7295 lands.
-BOARD04_KNOWN_WARNINGS: dict[tuple[str, str, str], str] = {
-    ("thermal_asymmetry", ref, f"{ref}-1"): "#7295"
-    for ref in ("C1", "C2", "C3", "C12", "C13", "C14", "C15", "C16", "R1")
-}
+#: Issue #7298 / #7295: the nine 0805s whose pad 1 the starved-thermal repair
+#: used to force solid (``thermal_asymmetry``) now take a narrower spoke
+#: (#7295), so board 04 has no accepted warnings left.  The mechanism stays so
+#: a future reviewed exception is a pinned ``(rule, ref, pad)`` entry, not a
+#: loosened gate; any warning or error fails the DRC leg.
+BOARD04_KNOWN_WARNINGS: dict[tuple[str, str, str], str] = {}
 
 
 def drc_verdict(violations) -> SubCheckResult:

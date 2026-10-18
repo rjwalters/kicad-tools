@@ -140,9 +140,17 @@ def _bound_known_issues(data: dict, inputs: dict, root: Path) -> list[dict]:
     The report itself is not hashed, so the list is also written to a
     ``known-issues.json`` evidence file listed in ``inputs`` (whose hash was
     checked above).  A list missing from that file, or differing from it, is
-    an edited or stale record.
+    an edited or stale record.  A ``known-issues.json`` left in the evidence
+    folder but absent from ``inputs`` is an unbound-and-dropped record (#7323).
     """
     known_issues = validate_known_issues(data.get("known_issues"))
+    orphans = sorted(
+        rel
+        for path in (root / "output").rglob(KNOWN_ISSUES_FILENAME)
+        if path.is_file() and (rel := path.relative_to(root).as_posix()) not in inputs
+    )
+    if orphans:
+        raise ValueError(f"{orphans[0]} is not listed in inputs (orphaned known-issues evidence)")
     bound = [name for name in inputs if Path(name).name == KNOWN_ISSUES_FILENAME]
     if len(bound) > 1:
         raise ValueError("known_issues is bound to more than one evidence file")

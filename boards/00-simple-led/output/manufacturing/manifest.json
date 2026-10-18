@@ -6,32 +6,32 @@
   },
   "files": {
     "README.txt": {
-      "sha256": "9f15e702f05e92d0ae229d3403a6f82607a25ed4805c09a4818f8287e6e9445a",
-      "size": 1379
+      "sha256": "83f916fcbab8ffd0cc3453760417e67b8727995aa655cdc0fe4f3c1f888427b8",
+      "size": 1227
     },
     "assembly-back.pdf": {
-      "sha256": "dcdb8e9cf05a0ae1bce3c6a60735e72c1c7be92834253a465a51fac1d8a734c9",
+      "sha256": "a0d4693a6d88d29559c05f20d7b19ef14c04e05dd1d8dd4245a08c57a5d8ebcb",
       "size": 5983
     },
     "assembly-front.pdf": {
-      "sha256": "e242854d18694023ec7a46f61cb15eed2c859ed69335270acd474afdb5d03701",
-      "size": 9305
+      "sha256": "51d78fc423fc5d83e3712b32d1e05d89bc69ca321359366d1ed1cb12f561b50b",
+      "size": 9563
     },
     "bom_jlcpcb.csv": {
       "sha256": "bff6f5bac21cb349473f4bd2c2a55f1245bfe32e5a3a804ce99a46b8d502801c",
       "size": 194
     },
     "check-report.json": {
-      "sha256": "a63e874912211932dfa42386e3c395d4878888a9752a09b22dfb508eaad350b5",
-      "size": 9781
+      "sha256": "e282490fd4e786ab9c15cb99762b8218a68287ddb9b926a9a9f6395d06510f92",
+      "size": 8998
     },
     "cpl_jlcpcb.csv": {
       "sha256": "aae5fc27c33e43d1e058dab990fddd66a2092c4c9ada334c6f839e16a56cf811",
       "size": 270
     },
     "gerbers/gerbers.zip": {
-      "sha256": "67ce58dc150125449cc75c713f88544f3b0786b34e6429acb570e0242ca99ac2",
-      "size": 11735
+      "sha256": "5632022fc2e18552d66c8f8e450a19258c15f19ffedd86b754876b403f432bbf",
+      "size": 12036
     },
     "images/assembly.png": {
       "sha256": "ca6a436bfa2f87e0a14faa2f9fecb9d608594f11a504aee0e92beb39cd1fea31",
@@ -42,8 +42,8 @@
       "size": 72269
     },
     "images/layer_F_Cu.png": {
-      "sha256": "ddbcbd7695bb1355511cdc30156531d8ffa3b3189a85cda71da8b0d61e6296b1",
-      "size": 78464
+      "sha256": "3e0257b67b1de57d5e9583b304d884fdef10428fe5d4354f310efda4a0d0677b",
+      "size": 82478
     },
     "images/pcb_back.png": {
       "sha256": "ba073176765de3d510c915ffcbb5e186f3426785d946aeaa000ff49eb9c0bfbf",
@@ -54,19 +54,19 @@
       "size": 81962
     },
     "images/pcb_front.png": {
-      "sha256": "8deaf4cdd6965aa7a5e5583eac0e20e412c40c83e495939f78e6059e28fe88da",
-      "size": 122270
+      "sha256": "4ebbad52305f649e825b7375207b61cfae6c56019499ef5e674d2e75ea213369",
+      "size": 124957
     },
     "images/schematic_simple_led.png": {
       "sha256": "c90b07e37b51eb037d80cf8bcac2ab4392d8eca7868d0f6409ff154e62b7727a",
       "size": 117853
     },
     "kicad_project.zip": {
-      "sha256": "c0b02b8fed677a7b3bcbf43f92b04eedf2783e4e3ae2183b910eb2641e26bca3",
-      "size": 13261
+      "sha256": "df7c85fa087f85a233f03b825ef4cd38dff8de42e21c2e3fb751e8a4fec00837",
+      "size": 13557
     },
     "native-drc.json": {
-      "sha256": "0034f464c1923c3dd922504ba8ddd2cdd8c952e48e2114eaec0d3755fb3ada2e",
+      "sha256": "53de8d8077662a9d56993a256ba9bbdc9569e4a1d47d64da50cb658dc54cf50f",
       "size": 252
     },
     "procurement-review.md": {
@@ -74,19 +74,19 @@
       "size": 12096
     },
     "report.md": {
-      "sha256": "08de2c7c0a02e06901a8c5a66a56ab8907e94bca42f6f1c9fd838f7f96da89c1",
-      "size": 2673
+      "sha256": "a0c8bbf1a205382faeda43b355198bff1b2d87b3da62dfb3beb685ab89da9210",
+      "size": 2528
     },
     "report.pdf": {
-      "sha256": "1d78eea6f6ff2e160c905db3af72d3773f909e1377ccce6d7eed0beb55eed3b6",
-      "size": 742330
+      "sha256": "bdacfb129af236f2d8291a3b1703b9df5ec21cbb90b4e40bac9fab42cc6a4f35",
+      "size": 736503
     },
     "schematic.pdf": {
-      "sha256": "337642214f412e26cfddd13b08a3f77ae227b914568c187e429fc8b7eb556f93",
+      "sha256": "c60cb1259ea550d08443a8f815712dbe5954006c88c41363ebf68a2302b579db",
       "size": 47252
     }
   },
-  "generated_at": "2026-10-18T20:30:00+00:00",
+  "generated_at": "2026-10-18T22:00:00+00:00",
   "kicad_tools_version": "0.23.0",
   "manufacturer": "jlcpcb",
   "mode": "assembly",
@@ -206,7 +206,5 @@
   ],
   "producer": "kct readiness",
   "version": "1.0",
-  "warning_counts_by_rule": {
-    "thermal_asymmetry": 1
-  }
+  "warning_counts_by_rule": {}
 }

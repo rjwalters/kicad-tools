@@ -173,6 +173,13 @@ it("renders a board blocked by a known defect as non-ready", () => {
   expect(displayStatus(board)).toBe("blocked");
   expect(displayStatusLabel(board)).toBe("Needs work");
 });
+it("fails closed on a known-issues.json that inputs no longer lists (#7323)", () => {
+  bindKnownIssues([advisory]);
+  delete report.inputs["output/readiness/known-issues.json"];
+  delete report.known_issues;
+  save();
+  expect(displayStatus(loadBoard(root))).toBe("unverified");
+});
 it.each(["ready with defect", "unbound", "edited", "bad kind", "unsorted", "bad date", "bad manufacturer"])(
   "fails closed on %s known issues", kind => {
     if (kind === "ready with defect") bindKnownIssues([defect]);

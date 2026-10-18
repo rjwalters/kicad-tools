@@ -25,8 +25,8 @@
       "size": 526
     },
     "check-report.json": {
-      "sha256": "c440d3f390db5a3f1c75e2c8d450501ec7b6af50bc2d2038d502f29bebeceec5",
-      "size": 2027
+      "sha256": "ea1eacfdf2c83c1d313e3be305b8cb26a726f6e14cdfa76720115d8074fad13b",
+      "size": 2342
     },
     "cpl_jlcpcb.csv": {
       "sha256": "d3844687fa28afae77462e26f9e783d66d6e4d76d169ba3cdd93416f2357cd56",
@@ -41,8 +41,8 @@
       "size": 8273
     },
     "design-source/check_manufacturing.py": {
-      "sha256": "eafb2a1b316375c8aaf90b13d88fd63a21710298727ae5dec9fd8356bf18dae1",
-      "size": 3636
+      "sha256": "f2067a354c634e60d6f8082dfa27f31211db10d29b2fa56dfe4636ecf3202309",
+      "size": 3394
     },
     "design-source/generate_design.py": {
       "sha256": "50e5e87ba4425ffa7878a895febb124620da6c9eba740126df06f68419aff10c",
@@ -57,12 +57,12 @@
       "size": 4932
     },
     "fill-consistency.json": {
-      "sha256": "3369e42a5c0ea40c718cdf6016b83fa85b04260ad66cf757b282ea30ef9561b6",
-      "size": 33
+      "sha256": "b4af8337ea35fa89c08862d8f0d51e7cc13e9aa831b3c786562d6011fcc79b38",
+      "size": 61
     },
     "gerbers/gerbers.zip": {
-      "sha256": "9111c4fc93cae7e09b2e3bc31633200e921a217d1d9e2b7dc33f5c792d69ea63",
-      "size": 46015
+      "sha256": "5adbfceb0bfa36fcccc2c7de862d470195ab7bf739e15ed9623e163ec30ecf4b",
+      "size": 54071
     },
     "images/assembly.png": {
       "sha256": "13c8323b975a1191f79843c910fd5e1e4f3b6b936d0d9efd7a95f30d2e09a28f",
@@ -93,8 +93,8 @@
       "size": 278127
     },
     "kicad_project.zip": {
-      "sha256": "5377948b2467c6b11a98bcd101726dc787fc2e924d90a7d1a8a00481f9c62c0a",
-      "size": 69212
+      "sha256": "16f1b2d0d5c42e6cdfe10ceee40633be5b677bba72a0cfdf7b617b6b82d60d22",
+      "size": 76117
     },
     "manual-assembly-bom.csv": {
       "sha256": "0d1620494f1492c9a57ccf7d29840d0643984cd23bdb2969e0d0ea660a4839a1",
@@ -105,7 +105,7 @@
       "size": 323
     },
     "native-drc.json": {
-      "sha256": "a0635b7977714bd732523366d44759d32d26a464358563be719ba21d36726792",
+      "sha256": "1d136d9c33fe07bdbbdb17b0fac70b9013e8e8390958ebef898eea263286d0de",
       "size": 1213
     },
     "native-erc-linux.json": {

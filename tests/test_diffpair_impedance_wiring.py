@@ -50,14 +50,14 @@ class TestImpedanceDriftPreventionGate:
     value, not the constructor literal.  Before the wiring fix, the
     resolver was never invoked and ``trace_width`` stayed at its
     literal (e.g. 0.2 mm) -- the test asserts the resolved value
-    (~0.375 mm for 50Ω on JLCPCB 4-layer F.Cu) is present instead.
+    (~0.40 mm for 50Ω on JLCPCB 4-layer F.Cu) is present instead.
     """
 
     def _make_autorouter_with_50ohm_class(self) -> tuple[Autorouter, str]:
         """Build a minimal Autorouter with one net carrying a 50Ω target.
 
         The JLCPCB 4-layer stackup + JLCPCB rules produce a resolved
-        width around 0.375 mm for a 50Ω single-ended target on F.Cu --
+        width around 0.40 mm for a 50Ω single-ended target on F.Cu --
         well above the 0.2 mm literal -- which gives the test a wide
         margin for the equality check.
         """
@@ -91,7 +91,7 @@ class TestImpedanceDriftPreventionGate:
     def test_prepare_routing_resolves_single_impedance(self):
         """``_prepare_routing`` invokes the resolver and updates trace_width.
 
-        The literal is 0.2 mm; the resolver produces ~0.375 mm for 50Ω
+        The literal is 0.2 mm; the resolver produces ~0.40 mm for 50Ω
         on JLCPCB 4-layer F.Cu.  We assert "wider than literal" with a
         5% tolerance around the expected value, matching the
         acceptance-criteria wording.
@@ -105,7 +105,7 @@ class TestImpedanceDriftPreventionGate:
         ar._prepare_routing()
 
         resolved_nc = ar.net_class_map[net_name]
-        expected_width_mm = 0.375  # resolver output for 50Ω on JLCPCB 4-layer F.Cu
+        expected_width_mm = 0.40  # resolver output for 50Ω on JLCPCB 4-layer F.Cu
 
         # The resolved width must NOT still be the literal -- that
         # would mean the resolver never ran (the failure mode this
