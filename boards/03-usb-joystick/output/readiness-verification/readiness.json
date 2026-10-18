@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "checked_at": "2026-10-17T00:00:00+00:00",
+  "checked_at": "2026-10-18T02:30:00+00:00",
   "mode": "assembly",
   "status": "blocked",
   "blockers": [
@@ -54,8 +54,8 @@
     "kicad_tools_version": "0.23.0",
     "dirty": true,
     "manufacturer": "jlcpcb-tier1",
-    "commit": "476872c7cd949cc3c1733fbdb74221fc08dcffe8",
-    "source_digest": "e02153535273461af52896b99987e8cbd4c64c61d8db54fefc6077c87e1dddd6",
+    "commit": "ad4dd1cc0a42dbaca223e4db6b2e79ea6e94fea9",
+    "source_digest": "3c58402c0b5418df8ed1436b1a7ebee41efe823d659ae702b1e69df674c47318",
     "kicad_cli_version": "10.0.6",
     "rules_digest": "21f2f481e5f06369b48689474c9003922f13f9ecffb50efe7b3d37941342d3c5"
   },
@@ -172,9 +172,9 @@
     "output/readiness-verification/fill-saved/usb_joystick_routed.kicad_pcb": "c91ea8525d235ccdf371f2e2417bec62985f0530dc8a20f4b790de03b3b2b189",
     "output/readiness-verification/fill-saved/usb_joystick_routed.kicad_pro": "e1b779bc9454f7e182c9f507a78162bc3e5b96e7cb9fc9231fb9bbabc046db00",
     "output/readiness-verification/kct-check.json": "53e16f02e3ddd3a7b1afe240e969a0c0941f5d64da89894a3872afe6d395b255",
-    "output/readiness-verification/native-drc-raw.json": "4b71213582ffb10018f6231e525bb7c7077636ce5b958efaf3d783807fa0a454",
+    "output/readiness-verification/native-drc-raw.json": "07006ad428f59549d3fa8365a8afc715d5ff1b56b0ddd2d6c366287d44dde52e",
     "output/readiness-verification/native-drc.json": "0696fa871f08d6e8d17ba8c1e3a6b8687d3a0af699368807d5ba4a6188819663",
-    "output/readiness-verification/refilled-native/native-drc-raw.json": "4b71213582ffb10018f6231e525bb7c7077636ce5b958efaf3d783807fa0a454",
+    "output/readiness-verification/refilled-native/native-drc-raw.json": "07006ad428f59549d3fa8365a8afc715d5ff1b56b0ddd2d6c366287d44dde52e",
     "output/readiness-verification/refilled-native/native-drc.json": "2153e7ecd5df16b7390373cc5c178d67724671b17f383823657d8851d1e0f01f",
     "output/usb_joystick.kicad_pro": "09c8746ffab5b0449d13f3b777d87c4786c2abc2cfa2df7eb796e12f83822c05",
     "output/usb_joystick.kicad_sch": "f5e844b79f26bad1174a406b5fc51b35303fc44bd2a20806a47d5aeb62ba5e30",

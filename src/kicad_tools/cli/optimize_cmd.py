@@ -259,6 +259,17 @@ Examples:
                     "length_reduction_pct": stats.length_reduction,
                     "drc_errors_before": stats.drc_errors_before,
                     "drc_errors_after": stats.drc_errors_after,
+                    "per_net": [
+                        {
+                            "net": n.net,
+                            "segments_before": n.segments_before,
+                            "segments_after": n.segments_after,
+                            "length_before_mm": n.length_before,
+                            "length_after_mm": n.length_after,
+                            "rolled_back": n.rolled_back,
+                        }
+                        for n in stats.per_net
+                    ],
                 },
                 "dry_run": args.dry_run,
                 "saved": not args.dry_run,
@@ -308,6 +319,18 @@ Examples:
                 f"{stats.drc_errors_after:>6}  {suffix}"
             )
         print()
+
+        if args.verbose and stats.per_net:
+            print("Per-net statistics:")
+            width = max(len(n.net) for n in stats.per_net)
+            for n in stats.per_net:
+                note = "  (rolled back)" if n.rolled_back else ""
+                print(
+                    f"  {n.net:<{width}}  segments {n.segments_before:>4} -> "
+                    f"{n.segments_after:>4}  length {n.length_before:>7.2f}mm -> "
+                    f"{n.length_after:>7.2f}mm{note}"
+                )
+            print()
 
         if args.dry_run:
             print("(Dry run - no changes written)")

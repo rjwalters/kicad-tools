@@ -771,14 +771,17 @@ def cmd_align(args) -> int:
 
     # Align components
     axis = "horizontal" if args.axis == "row" else "vertical"
-    with spinner(f"Aligning {axis}ly...", quiet=quiet):
-        count = align_components(
-            optimizer,
-            refs,
-            axis=axis,
-            reference=args.reference,
-            tolerance_mm=args.tolerance,
-        )
+    try:
+        with spinner(f"Aligning {axis}ly...", quiet=quiet):
+            count = align_components(
+                optimizer,
+                refs,
+                axis=axis,
+                reference=args.reference,
+                tolerance_mm=args.tolerance,
+            )
+    except ValueError as e:
+        return _fail(args, f"Error: {e}")
 
     if not quiet:
         print(f"Aligned {count} components")

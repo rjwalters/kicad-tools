@@ -36,6 +36,7 @@ from tests.creepage.fixtures import (
     board_mains_named_source,
     board_no_hv_source,
     board_source,
+    board_two_pad_gap_source,
 )
 
 pytestmark = pytest.mark.skipif(not has_shapely(), reason="creepage requires shapely")
@@ -107,6 +108,67 @@ def test_standard_mode_pass_section_rendered(tmp_path, capsys):
     assert "iec60664" in out
     # The standards disclaimer must accompany a derived-value section.
     assert "certification" in out.lower()
+
+
+# --------------------------------------------------------------------------
+# Issue #7057: 230 V mains clearance keyed on the rated impulse voltage
+# --------------------------------------------------------------------------
+
+
+def _gap_audit(tmp_path, **hv):
+    pcb = _write(tmp_path, board_two_pad_gap_source(1.3))
+    ncm = tmp_path / "net_class_map.json"
+    ncm.write_text(json.dumps({"HV_LINE": {"name": "HV"}}))
+    return _audit(
+        pcb,
+        ncm,
+        hv_standard="iec60664",
+        hv_working_voltage=230.0,
+        hv_pollution_degree=2,
+        hv_material_group="I",
+        **hv,
+    ).run()
+
+
+def test_230v_mains_requires_1p5mm_clearance(tmp_path):
+    """Reporter's repro via ``kct audit``: 1.3 mm < 1.5 mm (OVC II) -> FAIL."""
+    result = _gap_audit(tmp_path)
+    iso = result.isolation
+    assert iso.checked is True
+    assert iso.required_clearance_mm == pytest.approx(1.5)
+    assert iso.passed is False
+    assert iso.report["clearance_provenance"]["impulse_withstand_voltage_v"] == 2500.0
+
+
+def test_230v_mains_ovc_i_clears_1p3mm(tmp_path):
+    result = _gap_audit(tmp_path, hv_overvoltage_category="I")
+    iso = result.isolation
+    assert iso.required_clearance_mm == pytest.approx(0.5)
+    assert iso.passed is True
+
+
+def test_audit_cli_230v_reports_1p5mm(tmp_path, capsys):
+    pcb = _write(tmp_path, board_two_pad_gap_source(1.3))
+    ncm = tmp_path / "net_class_map.json"
+    ncm.write_text(json.dumps({"HV_LINE": {"name": "HV"}}))
+    rc = audit_cmd.main(
+        [
+            str(pcb),
+            "--net-class-map",
+            str(ncm),
+            "--hv-standard",
+            "iec60664",
+            "--hv-working-voltage",
+            "230",
+            "--hv-pollution-degree",
+            "2",
+            "--format",
+            "json",
+        ]
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == 2
+    assert payload["isolation"]["required_clearance_mm"] == pytest.approx(1.5)
 
 
 # --------------------------------------------------------------------------
@@ -534,6 +596,8 @@ class TestKctAuditForwardsHvFlags:
                 "6.4",
                 "--hv-net-class",
                 "MAINS",
+                "--hv-overvoltage-category",
+                "III",
             ],
         )
         assert sub_argv == [
@@ -552,6 +616,8 @@ class TestKctAuditForwardsHvFlags:
             "3",
             "--hv-material-group",
             "II",
+            "--hv-overvoltage-category",
+            "III",
         ]
 
     def test_defaults_forward_nothing(self, monkeypatch):

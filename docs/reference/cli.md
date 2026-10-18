@@ -187,7 +187,7 @@ kct sch validate <schematic> [options]
 | Option | Description |
 |--------|-------------|
 | `--format` | Output format (`text` or `json`) |
-| `--lib-path` | Symbol library path; repeatable |
+| `--lib-path` | Directory of `.kicad_sym` files used as a fallback for symbols missing from the schematic's embedded `lib_symbols` (embedded symbols stay authoritative); repeatable |
 | `--strict` | Exit with error on warnings |
 | `--quiet`, `-q` | Only show errors |
 | `--skip` | Skip a validation check category (e.g. `swd_routing`, `i2c_pullups`); repeatable |
@@ -606,6 +606,20 @@ declares an `HV` net class) runs the same measured creepage/clearance audit
 of the requirement is recorded in the report but can never by itself produce
 `passed`; only a thresholded census bound to that PCB and net-class-map can.
 
+**Derived clearance (IEC 60664-1, issue #7057).** With `--standard` /
+`--hv-standard`, the required clearance is
+`max(Table F.2[U_imp], Table F.8[V_rms x sqrt(2)], pollution-degree floor)`
+for basic insulation, case A, altitude <= 2000 m. `U_imp` is the Table F.1
+rated impulse withstand voltage for the working voltage (taken as the
+line-to-neutral rated voltage, stepped up to the 50/100/150/300/600/1000 V
+row) and the overvoltage category, set with
+`kct creepage --overvoltage-category {I,II,III,IV}` or
+`kct audit --hv-overvoltage-category {I,II,III,IV}` (default `II`, equipment
+fed from the fixed mains installation). For example 230 V at OVC II gives
+`U_imp` = 2500 V and 1.5 mm; OVC I 0.5 mm, III 3.0 mm, IV 5.5 mm. The
+`kct readiness` HV gate always uses the default `II`. Creepage is IEC
+60664-1:2020 Table F.5 (Table F.4 in the 2007 edition).
+
 **Examples:**
 ```bash
 # Generate the assembly package at the tier recorded in the board's own recipe
@@ -886,6 +900,20 @@ kct parts lookup C8734
 kct parts availability project.kicad_sch --quantity 100
 kct parts import STM32F103C8T6 --library my.kicad_sym --dry-run
 ```
+
+**`parts import` options:**
+
+| Option | Description |
+|--------|-------------|
+| `--library`, `-l` | Output symbol library (`.kicad_sym`); required |
+| `--symbol-lib` | Alias for `--library` |
+| `--footprint-lib` | Project footprint library (`.pretty` directory) |
+| `--package`, `-p` | Specific package variant (e.g. `LQFP48`) |
+| `--layout` | Pin layout style: `functional` (default), `physical` or `simple` |
+| `--dry-run` | Preview what would be imported without making changes |
+| `--interactive`, `-i` | Deprecated: not implemented; ignored |
+| `--overwrite` | Overwrite existing symbols |
+| `--format` | Output format (`text` or `json`) |
 
 ---
 
@@ -1650,7 +1678,7 @@ kct optimize-traces <pcb_file> [options]
 | `--no-zigzag` | Disable zigzag elimination |
 | `--no-45` | Disable 45-degree corners |
 | `--chamfer-size` | 45-degree chamfer size in mm (default: 0.5) |
-| `--verbose`, `-v` | Verbose output |
+| `--verbose`, `-v` | Print a per-net table (segments and length before/after, `(rolled back)` marker) after the summary |
 | `--dry-run` | Show results without writing |
 | `--quiet`, `-q` | Suppress progress output |
 | `--drc-aware` | Roll back per-net optimizations that increase DRC violations (requires `--mfr`) |

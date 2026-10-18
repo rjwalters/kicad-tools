@@ -157,6 +157,16 @@ def main(argv: list[str] | None = None) -> int:
         help="Insulation material group by CTI (default: IIIa, conservative for FR-4).",
     )
     parser.add_argument(
+        "--hv-overvoltage-category",
+        dest="hv_overvoltage_category",
+        choices=["I", "II", "III", "IV"],
+        default="II",
+        help=(
+            "IEC 60664-1 overvoltage category for the derived clearance "
+            "(Table F.1 rated impulse voltage).  Default II (mains appliance)."
+        ),
+    )
+    parser.add_argument(
         "--strict",
         action="store_true",
         help="Exit with code 2 on warnings",
@@ -202,6 +212,7 @@ def main(argv: list[str] | None = None) -> int:
             hv_working_voltage=args.hv_working_voltage,
             hv_pollution_degree=args.hv_pollution_degree,
             hv_material_group=args.hv_material_group,
+            hv_overvoltage_category=args.hv_overvoltage_category,
         )
         result = audit.run()
     except ValueError as e:

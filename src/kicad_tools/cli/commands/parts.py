@@ -13,7 +13,7 @@ def run_parts_command(args) -> int:
     """Handle parts subcommands."""
     if not args.parts_command:
         print("Usage: kicad-tools parts <command> [options]")
-        print("Commands: lookup, search, import, availability, cache, suggest, sync-catalog")
+        print("Commands: lookup, search, availability, import, cache, suggest, sync-catalog")
         return 1
 
     from ..parts_cmd import main as parts_main
@@ -38,6 +38,18 @@ def run_parts_command(args) -> int:
             sub_argv.append("--basic")
         return parts_main(sub_argv) or 0
 
+    elif args.parts_command == "availability":
+        sub_argv = ["availability", args.schematic]
+        if args.quantity != 1:
+            sub_argv.extend(["--quantity", str(args.quantity)])
+        if args.format != "table":
+            sub_argv.extend(["--format", args.format])
+        if args.no_alternatives:
+            sub_argv.append("--no-alternatives")
+        if args.issues_only:
+            sub_argv.append("--issues-only")
+        return parts_main(sub_argv) or 0
+
     elif args.parts_command == "import":
         sub_argv = ["import", *args.parts, "--library", args.library]
         if args.symbol_library:
@@ -56,18 +68,6 @@ def run_parts_command(args) -> int:
             sub_argv.append("--overwrite")
         if args.format != "text":
             sub_argv.extend(["--format", args.format])
-        return parts_main(sub_argv) or 0
-
-    elif args.parts_command == "availability":
-        sub_argv = ["availability", args.schematic]
-        if args.quantity != 1:
-            sub_argv.extend(["--quantity", str(args.quantity)])
-        if args.format != "table":
-            sub_argv.extend(["--format", args.format])
-        if args.no_alternatives:
-            sub_argv.append("--no-alternatives")
-        if args.issues_only:
-            sub_argv.append("--issues-only")
         return parts_main(sub_argv) or 0
 
     elif args.parts_command == "cache":

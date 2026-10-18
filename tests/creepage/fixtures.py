@@ -89,6 +89,25 @@ def board_close_hv_source() -> str:
     return "".join(parts)
 
 
+def board_two_pad_gap_source(
+    gap_mm: float, hv_name: str = "HV_LINE", other_name: str = "SELV"
+) -> str:
+    """Two 2x2 mm pads ``gap_mm`` apart edge-to-edge (issue #7057 repro).
+
+    ``hv_name`` sits at x=110 (copper edge x=111); ``other_name`` is placed so
+    its copper edge sits at x=111+gap_mm.  No slot, so creepage == clearance
+    == ``gap_mm`` for the pad pair.  Both pads are >= 9 mm from the board edge.
+    """
+    header = _HEADER.replace('(net 1 "L_MAINS")', f'(net 1 "{hv_name}")').replace(
+        '(net 2 "GND")', f'(net 2 "{other_name}")'
+    )
+    parts = [header, _OUTLINE]
+    parts.append(_footprint("J1", 110, 110, 1, hv_name))
+    parts.append(_footprint("J2", round(112 + gap_mm, 6), 110, 2, other_name))
+    parts.append(")\n")
+    return "".join(parts)
+
+
 def board_no_hv_source() -> str:
     """Board whose only assigned nets are GND / SIG -- no HV net exists."""
     header = _HEADER.replace('(net 1 "L_MAINS")', '(net 1 "SIG")')

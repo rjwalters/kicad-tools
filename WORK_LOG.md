@@ -15,6 +15,14 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-18
 
+- **PR #7049**: fix: Project.create builds .kicad_pcb via PCB.create (KiCad 10 failed to load the old board, #7047)
+- **PR #7066**: docs: GPU/batched routing design note (profile-first)
+- **PR #7015**: test: resolve 10 never-running tests left behind by #3133
+- **PR #7044**: docs: measure match-group meander room after #6972/#6979 and compare with KRT (#6969)
+- **Issue #7047** (closed): Project.create: build the .kicad_pcb via PCB.create instead of a drifted 70-line f-string template
+- **Issue #7053** (closed): Design: genuine GPU-accelerated / batched routing (profile first; successor to removed BatchPathfinder)
+- **Issue #7012** (closed): Resolve 10 tests that can never run: 9 skipped since #3133 closed (May), 1 self-skipping (~325 LOC dead)
+- **Issue #6969** (closed): match-group tuner: meanders find no DRC room on dense kct copper, and all-or-nothing rollback discards partial progress
 - **PR #7048**: feat: place match-group meander bumps individually when a whole trombone is rejected
 - **PR #7032**: fix: kct bom errors on missing or unparseable root schematic
 - **PR #7039**: feat: add kct route --native-zone-clearance for board-03 pour links
