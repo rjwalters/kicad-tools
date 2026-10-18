@@ -175,7 +175,8 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=(
             "Disable the connectivity safety floor that blocks export on net "
-            "shorts found in a pre-existing DRC report. Only for known-safe "
+            "shorts or unconnected items found in a pre-existing DRC report. "
+            "Only for known-safe "
             "workarounds -- shipping a shorted board is never safe."
         ),
     )

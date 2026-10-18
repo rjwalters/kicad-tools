@@ -1976,6 +1976,183 @@ class TestDRCSafetyFloor:
         assert result.success, f"Unexpected errors: {result.errors}"
 
 
+class TestDRCSafetyFloorOpensAndSource:
+    """Issue #7091: the floor reads opens and ignores another board's report.
+
+    Since #4498 KiCad's ``unconnected_items`` live outside
+    ``DRCReport.errors``; the floor must read them through
+    ``connectivity_items()``.  A report generated for a different PCB is not
+    evidence for this board, so it is treated like a missing report.
+    """
+
+    @staticmethod
+    def _write_kicad_cli_report(path: Path, source: str, open_severity: str | None = "error"):
+        unconnected = []
+        if open_severity is not None:
+            unconnected = [
+                {
+                    "type": "unconnected_items",
+                    "severity": open_severity,
+                    "description": "Missing connection between items",
+                    "items": [
+                        {"description": "Pad 1 [VCC] of C1", "pos": {"x": 1.0, "y": 1.0}},
+                        {"description": "Pad 1 [VCC] of C2", "pos": {"x": 2.0, "y": 1.0}},
+                    ],
+                }
+            ] * 36
+        path.write_text(
+            json.dumps(
+                {
+                    "$schema": "https://schemas.kicad.org/drc.v1.json",
+                    "source": source,
+                    "kicad_version": "10.0.6",
+                    "coordinate_units": "mm",
+                    "violations": [],
+                    "unconnected_items": unconnected,
+                    "schematic_parity": [],
+                }
+            )
+        )
+
+    def _export(
+        self, tmp_path, monkeypatch, pcb_name="board.kicad_pcb", strict=False, skip_all=True, **pf
+    ):
+        project_dir = tmp_path / "project"
+        project_dir.mkdir(exist_ok=True)
+        pcb = project_dir / pcb_name
+        pcb.write_text("(kicad_pcb)")
+        pcb.with_suffix(".kicad_sch").write_text("(kicad_sch)")
+        assembly_called = TestDRCSafetyFloor._patch_assembly(self, monkeypatch)
+        config = ManufacturingConfig(
+            include_report=False,
+            include_project_zip=False,
+            include_manifest=False,
+            include_readme=False,
+            strict_preflight=strict,
+            preflight=PreflightConfig(skip_all=skip_all, **pf),
+        )
+        pkg = ManufacturingPackage(pcb_path=pcb, manufacturer="jlcpcb", config=config)
+        return pkg.export(tmp_path / "out"), assembly_called
+
+    def test_unconnected_items_block_export(self, tmp_path, monkeypatch):
+        (tmp_path / "project").mkdir()
+        self._write_kicad_cli_report(tmp_path / "project" / "drc_report.json", "board.kicad_pcb")
+        result, assembly_called = self._export(tmp_path, monkeypatch)
+        assert not result.success
+        assert not assembly_called["value"], "Nothing may be written when the floor blocks"
+        msg = " ".join(result.errors)
+        assert "36 connectivity error(s) (0 net short(s), 36 unconnected item(s))" in msg
+        assert "shorts/opens" in msg
+
+    def test_warning_severity_opens_do_not_block(self, tmp_path, monkeypatch):
+        (tmp_path / "project").mkdir()
+        self._write_kicad_cli_report(
+            tmp_path / "project" / "drc_report.json", "board.kicad_pcb", open_severity="warning"
+        )
+        result, assembly_called = self._export(tmp_path, monkeypatch)
+        assert result.success, result.errors
+        assert assembly_called["value"]
+
+    def test_waived_opens_do_not_block(self, tmp_path, monkeypatch):
+        from kicad_tools.drc.report import DRCReport
+
+        (tmp_path / "project").mkdir()
+        report_path = tmp_path / "project" / "drc_report.json"
+        self._write_kicad_cli_report(report_path, "board.kicad_pcb")
+        real_load = DRCReport.load
+
+        def load_waived(path):
+            report = real_load(path)
+            for v in report.unconnected_items:
+                v.waived = True
+            return report
+
+        monkeypatch.setattr(DRCReport, "load", staticmethod(load_waived))
+        result, _ = self._export(tmp_path, monkeypatch)
+        assert result.success, result.errors
+
+    def test_skip_drc_floor_bypasses_opens(self, tmp_path, monkeypatch):
+        (tmp_path / "project").mkdir()
+        self._write_kicad_cli_report(tmp_path / "project" / "drc_report.json", "board.kicad_pcb")
+        result, assembly_called = self._export(tmp_path, monkeypatch, skip_drc_floor=True)
+        assert result.success, result.errors
+        assert assembly_called["value"]
+
+    def test_report_for_other_board_is_not_evidence(self, tmp_path, monkeypatch, caplog):
+        """The ``*_routed`` sibling's report: warning only, never a block or a pass."""
+        (tmp_path / "project").mkdir()
+        # Even a FAILing report for another board must not block this one
+        # (it says nothing about this board): same policy as a missing report.
+        self._write_kicad_cli_report(
+            tmp_path / "project" / "drc_report.json", "/abs/elsewhere/x_routed.kicad_pcb"
+        )
+        with caplog.at_level(logging.WARNING, logger="kicad_tools.export.manufacturing"):
+            result, assembly_called = self._export(tmp_path, monkeypatch, pcb_name="x.kicad_pcb")
+        assert result.success, result.errors
+        assert assembly_called["value"]
+        assert any("is for x_routed.kicad_pcb, not x.kicad_pcb" in w for w in result.warnings), (
+            result.warnings
+        )
+        assert any("x_routed.kicad_pcb" in r.getMessage() for r in caplog.records)
+
+    def test_strict_blocks_auto_discovered_other_board_report(self, tmp_path, monkeypatch):
+        """--strict-preflight: a sibling report for another board blocks, nothing written."""
+        (tmp_path / "project").mkdir()
+        self._write_kicad_cli_report(
+            tmp_path / "project" / "drc_report.json", "/abs/elsewhere/x_routed.kicad_pcb"
+        )
+        result, assembly_called = self._export(
+            tmp_path, monkeypatch, pcb_name="x.kicad_pcb", strict=True
+        )
+        assert not result.success
+        assert not assembly_called["value"]
+        assert not (tmp_path / "out").exists()
+        assert any("is for x_routed.kicad_pcb" in e for e in result.errors), result.errors
+
+    def test_strict_preflight_drc_check_fails_on_other_board_report(self, tmp_path, monkeypatch):
+        (tmp_path / "project").mkdir()
+        self._write_kicad_cli_report(
+            tmp_path / "project" / "drc_report.json", "/abs/elsewhere/x_routed.kicad_pcb"
+        )
+        result, assembly_called = self._export(
+            tmp_path,
+            monkeypatch,
+            pcb_name="x.kicad_pcb",
+            strict=True,
+            skip_all=False,
+            skip_drc_floor=True,
+        )
+        assert not result.success
+        assert not assembly_called["value"]
+        assert not (tmp_path / "out").exists()
+        assert any("Preflight FAIL [drc]" in e for e in result.errors), result.errors
+
+    def test_non_strict_other_board_report_warns_and_exports(self, tmp_path, monkeypatch):
+        (tmp_path / "project").mkdir()
+        self._write_kicad_cli_report(
+            tmp_path / "project" / "drc_report.json", "/abs/elsewhere/x_routed.kicad_pcb"
+        )
+        result, assembly_called = self._export(
+            tmp_path, monkeypatch, pcb_name="x.kicad_pcb", strict=False
+        )
+        assert result.success, result.errors
+        assert assembly_called["value"]
+        assert any("is for x_routed.kicad_pcb" in w for w in result.warnings)
+
+    def test_explicit_report_for_other_board_is_not_evidence(self, tmp_path, monkeypatch):
+        report_path = tmp_path / "custom.json"
+        self._write_kicad_cli_report(report_path, "other.kicad_pcb")
+        result, _ = self._export(tmp_path, monkeypatch, drc_report_path=str(report_path))
+        assert result.success, result.errors
+        assert any("is for other.kicad_pcb" in w for w in result.warnings)
+
+    def test_report_without_source_still_blocks(self, tmp_path, monkeypatch):
+        (tmp_path / "project").mkdir()
+        self._write_kicad_cli_report(tmp_path / "project" / "drc_report.json", "")
+        result, _ = self._export(tmp_path, monkeypatch)
+        assert not result.success
+
+
 class TestManufacturingPreflightSpecOverlay:
     """Integration: preflight run by ManufacturingPackage must not falsely
     warn about LCSC fields that the ``.kct`` spec overlay will populate

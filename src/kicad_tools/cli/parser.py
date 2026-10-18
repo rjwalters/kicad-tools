@@ -9172,7 +9172,7 @@ def _add_export_parser(subparsers) -> None:
         action="store_true",
         help=(
             "Skip BOM/ERC/LCSC/cosmetic pre-flight validation checks. Does NOT "
-            "suppress the hard connectivity safety floor (net shorts). Use "
+            "suppress the hard connectivity safety floor (net shorts/opens). Use "
             "--skip-drc-floor to override that too."
         ),
     )
@@ -9182,7 +9182,8 @@ def _add_export_parser(subparsers) -> None:
         action="store_true",
         help=(
             "Disable the connectivity safety floor that blocks export on net "
-            "shorts in a pre-existing DRC report. Only for known-safe workarounds."
+            "shorts or unconnected items in a pre-existing DRC report. Only for "
+            "known-safe workarounds."
         ),
     )
     export_parser.add_argument(
