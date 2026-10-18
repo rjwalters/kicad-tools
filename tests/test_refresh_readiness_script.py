@@ -83,7 +83,7 @@ def test_metric_regression_publishes_nothing(mod, tmp_path, monkeypatch):
     )
     clean_erc = json.dumps({"sheets": [{"violations": []}], "date": "now"}).encode()
     monkeypatch.setattr(mod, "native_erc", lambda *a, **k: clean_erc)
-    monkeypatch.setattr(mod, "gate_native_drc", lambda *a: 0)
+    monkeypatch.setattr(mod, "gate_native_drc", lambda *a: (0, b"{}"))
     monkeypatch.setattr(mod, "gate_kct_check", lambda *a: (True, 0))
     monkeypatch.setattr(mod, "gate_net_status", lambda *a: 97.3)  # one net lost
     monkeypatch.setattr(mod, "gate_sync", lambda *a: None)
@@ -159,7 +159,7 @@ def _hooked_board(mod, tmp_path, monkeypatch, warnings: int) -> Path:
         raise AssertionError("kct check ran although the board has a check hook")
 
     monkeypatch.setattr(mod, "gate_kct_check", generic_check_must_not_run)
-    monkeypatch.setattr(mod, "gate_native_drc", lambda *a: 0)
+    monkeypatch.setattr(mod, "gate_native_drc", lambda *a: (0, b"{}"))
     monkeypatch.setattr(mod, "gate_net_status", lambda *a: 100.0)
     monkeypatch.setattr(mod, "gate_sync", lambda *a: None)
     return board
@@ -409,3 +409,46 @@ def test_native_drc_gate_runs_the_fill_identity_gate(mod, tmp_path, monkeypatch)
     monkeypatch.setattr(mod, "gate_fill_identity", divergent)
     with pytest.raises(mod.GateFailure, match="independent refill"):
         mod.gate_native_drc(board, cfg)
+
+
+# --------------------------------------------------------------------------- Issue #7283
+def test_drc_report_copies_are_written_and_recorded_in_report_sources(mod, tmp_path, monkeypatch):
+    board = _fake_board(tmp_path)
+    (board / "output" / "drc_report.json").write_text("{}")
+    (board / "output" / "manufacturing" / "native-drc.json").write_text("{}")
+    import kicad_tools.cli.board_readiness as board_readiness
+
+    monkeypatch.setattr(
+        board_readiness, "read_readiness", lambda _b: {"status": "ready", "blockers": []}
+    )
+    targets = ("output/drc_report.json", "output/manufacturing/native-drc.json")
+    monkeypatch.setitem(
+        mod.BOARDS,
+        board.name,
+        mod.BoardConfig(
+            routed_pcb="output/board_routed.kicad_pcb",
+            schematic="output/board.kicad_sch",
+            tier="jlcpcb",
+            erc=(),
+            archives=(),
+            drc_targets=targets,
+        ),
+    )
+    staged_report = b'{"violations": [], "unconnected_items": []}'
+    monkeypatch.setattr(mod, "gate_native_drc", lambda *a: (0, staged_report))
+    monkeypatch.setattr(mod, "gate_kct_check", lambda *a: (True, 0))
+    monkeypatch.setattr(mod, "gate_net_status", lambda *a: 100.0)
+    monkeypatch.setattr(mod, "gate_sync", lambda *a: None)
+
+    mod.refresh(board, "2026-10-18T00:00:00+00:00")
+
+    pcb_sha = mod.sha256(board / "output" / "board_routed.kicad_pcb")
+    report = json.loads((board / "output" / "readiness.json").read_text())
+    assert report["report_sources"] == dict.fromkeys(targets, pcb_sha)
+    for target in targets:
+        assert (board / target).read_bytes() == staged_report
+
+
+def test_demo_boards_with_drc_provenance_target_the_report_binding_reads(mod):
+    for name in ("05-bldc-motor-controller", "06-diffpair-test", "07-matchgroup-test"):
+        assert "output/drc_report.json" in mod.BOARDS[name].drc_targets

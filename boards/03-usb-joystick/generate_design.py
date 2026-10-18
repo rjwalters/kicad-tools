@@ -693,6 +693,9 @@ def route_pcb(input_path: Path, output_path: Path, *, use_saved_plan: bool = Tru
                 # Table 2) instead of the generic 0.5 mm.  0.5 mm remains the
                 # P5 stretch target (#6447).
                 pair_protocol="USB2_FS",
+                # Issue #7294 (#7250 PR-D): declare the USB 2.0 90 ohm
+                # differential target so ``kct check`` judges it at error level.
+                target_diff_impedance=90.0,
             )
     # Issue #6876 (operator ruling on #6824): the USB-C-side pair may run on
     # the reserved In2.Cu plane.  ``--reserve-plane-layers`` keeps every other
