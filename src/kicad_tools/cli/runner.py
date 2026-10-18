@@ -609,6 +609,7 @@ def run_drc(
     with contextlib.ExitStack() as stack:
         parity_sch: Path | None = None
         no_sch_reason: str | None = None
+        staging_failed = False
         run_pcb = Path(pcb_path)
         if schematic_parity:
             parity_sch, no_sch_reason = _resolve_parity_schematic(run_pcb, schematic)
@@ -619,12 +620,23 @@ def run_drc(
                 stage_dir = Path(
                     stack.enter_context(tempfile.TemporaryDirectory(prefix="kct_drc_"))
                 )
-                run_pcb = stage_pcb_for_parity(run_pcb, parity_sch, stage_dir)
+                try:
+                    run_pcb = stage_pcb_for_parity(run_pcb, parity_sch, stage_dir)
+                except OSError as exc:
+                    # Setup failed (permissions, disk full, unreadable
+                    # sibling): run DRC without parity and report parity NOT
+                    # RUN with the cause instead of a traceback.
+                    staging_failed = True
+                    no_sch_reason = (
+                        "could not stage a temporary copy of the board folder "
+                        f"for the parity check: {exc}"
+                    )
+                    run_pcb = Path(pcb_path)
         result = _run_drc_once(
             run_pcb,
             output_path,
             format=format,
-            schematic_parity=schematic_parity,
+            schematic_parity=schematic_parity and not staging_failed,
             kicad_cli=kicad_cli,
             all_track_errors=all_track_errors,
             refill_zones=refill_zones,
@@ -633,7 +645,10 @@ def run_drc(
         from kicad_tools.drc.parity import parity_reason_netlist_failed
 
         result.parity_schematic = parity_sch
-        if result.parity_skipped:
+        if staging_failed:
+            result.parity_skipped = True
+            result.parity_skip_reason = no_sch_reason
+        elif result.parity_skipped:
             result.parity_skip_reason = (
                 parity_reason_netlist_failed(str(parity_sch))
                 if parity_sch is not None

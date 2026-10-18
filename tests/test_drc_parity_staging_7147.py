@@ -125,6 +125,20 @@ def test_routed_board_is_staged_with_schematic_under_board_name(monkeypatch, boa
     assert result.parity_skip_reason is None
 
 
+def test_staging_setup_error_reports_parity_not_run(monkeypatch, board):
+    cli = FakeCli(monkeypatch)
+
+    def boom(*a, **k):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(runner, "stage_pcb_for_parity", boom)
+    result = runner.run_drc(board)
+
+    assert cli.pcbs == [board]
+    assert result.parity_skipped is True
+    assert "disk full" in (result.parity_skip_reason or "")
+
+
 def test_board_folder_is_never_written(monkeypatch, board):
     before = sorted(p.name for p in board.parent.iterdir())
     FakeCli(monkeypatch)
@@ -292,11 +306,29 @@ def test_kct_drc_forwards_schematic(monkeypatch, board, tmp_path):
 BOARDS = Path(__file__).resolve().parents[1] / "boards"
 
 
+def _snapshot(folder: Path) -> dict[str, tuple[str, int]]:
+    """Name -> (content hash, mtime_ns) for everything under ``folder``."""
+    import hashlib
+
+    snap: dict[str, tuple[str, int]] = {}
+    for p in sorted(folder.rglob("*")):
+        rel = str(p.relative_to(folder))
+        if p.is_file():
+            snap[rel] = (hashlib.sha256(p.read_bytes()).hexdigest(), p.stat().st_mtime_ns)
+        else:
+            snap[rel] = ("dir", 0)
+    return snap
+
+
 def _board_copy(tmp_path: Path, board: str) -> Path:
     if runner.find_kicad_cli() is None:
         pytest.skip("kicad-cli not installed")
     dst = tmp_path / board / "output"
-    shutil.copytree(BOARDS / board / "output", dst)
+    shutil.copytree(
+        BOARDS / board / "output",
+        dst,
+        ignore=shutil.ignore_patterns("*.kicad_prl", "fp-info-cache", "*-backups"),
+    )
     pcbs = sorted(dst.glob("*_routed.kicad_pcb"))
     assert len(pcbs) == 1
     return pcbs[0]
@@ -305,17 +337,20 @@ def _board_copy(tmp_path: Path, board: str) -> Path:
 @pytest.mark.integration
 def test_real_board02_routed_parity_passes(tmp_path, capsys):
     pcb = _board_copy(tmp_path, "02-charlieplex-led")
+    before = _snapshot(pcb.parent)
     rc = drc_cmd.main([str(pcb), "--format", "json"])
     data = json.loads(capsys.readouterr().out)
     assert data["schematic_parity"]["status"] == PARITY_PASSED
     assert data["schematic_parity"]["schematic"] == str(pcb.parent / "charlieplex_3x3.kicad_sch")
     assert rc == 0
-    assert not list(pcb.parent.glob("*.kicad_prl"))
+    # Staging must never write into the board folder.
+    assert _snapshot(pcb.parent) == before
 
 
 @pytest.mark.integration
 def test_real_board00_routed_parity_warnings(tmp_path, capsys):
     pcb = _board_copy(tmp_path, "00-simple-led")
+    before = _snapshot(pcb.parent)
     rc = drc_cmd.main([str(pcb), "--format", "json"])
     data = json.loads(capsys.readouterr().out)
     parity = data["schematic_parity"]
@@ -324,4 +359,5 @@ def test_real_board00_routed_parity_warnings(tmp_path, capsys):
     assert rc == 0
     assert drc_cmd.main([str(pcb), "--strict"]) == 2
     assert parity["status"] != PARITY_NOT_RUN
-    assert not list(pcb.parent.glob("*.kicad_prl"))
+    # Staging must never write into the board folder.
+    assert _snapshot(pcb.parent) == before
