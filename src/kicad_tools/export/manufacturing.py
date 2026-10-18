@@ -1635,7 +1635,7 @@ class ManufacturingPackage:
             "bom": ("BOM (Bill of Materials)", "Component list for PCB assembly ordering"),
             "pnp": (
                 "CPL (Component Placement List)",
-                "Pick-and-place coordinates for SMT assembly",
+                "Pick-and-place coordinates for SMT/THT assembly",
             ),
             "gerber": (
                 "Gerber files",

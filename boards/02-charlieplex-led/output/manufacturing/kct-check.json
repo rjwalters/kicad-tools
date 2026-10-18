@@ -1,6 +1,7 @@
 {
   "file": "output/charlieplex_3x3_routed.kicad_pcb",
   "manufacturer": "jlcpcb",
+  "pcb_sha256": "ac41950ffc39bd11a5aad43f90c1ec019cdf392ad1500ddd8c4741443f37680f",
   "layers": 2,
   "summary": {
     "errors": 0,

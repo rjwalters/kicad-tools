@@ -59,14 +59,6 @@ GPIO and ADC map is fixed to Microchip TQFP-44 pinout
 
 - **Fine-pitch components**: 1 (U1)
 
-## Hand-Solder (THT) Components
-
-The following 1 through-hole component is **excluded from the SMT pick-and-place file** and must be hand-soldered (or wave/selective-soldered) after SMT assembly. It appears in the BOM for sourcing.
-
-| Value | Package | Qty | References |
-|-------|---------|-----|------------|
-| USB4085-GF-A | USB_C_Receptacle_GCT_USB4085 | 1 | J1 |
-
 ## ERC Status
 
 | Metric | Count |
@@ -74,8 +66,7 @@ The following 1 through-hole component is **excluded from the SMT pick-and-place
 | Errors | 0 |
 | Warnings | 0 |
 
-**Status**: SKIPPED -- ERC skipped by user request
-
+**Status**: PASS
 
 \newpage
 
@@ -151,20 +142,24 @@ The following 1 through-hole component is **excluded from the SMT pick-and-place
 
 \newpage
 
-## DRC Status
+## DRC Status (`--mfr jlcpcb-tier1` rules)
 
 | Metric | Count |
 |--------|-------|
 | Errors | 0 |
-| Warnings | 15 |
+| Errors: kct (`--mfr jlcpcb-tier1` rules) | 0 |
+| Errors: kicad-cli (geometric) | 0 |
+| Warnings | 21 |
 | Blocking | 0 |
 
 **Status**: PASS
+
 ### Violations by Type
 
 | Violation Type | Count |
 |----------------|-------|
 | hole_to_hole_clearance | 14 |
+| thermal_asymmetry | 6 |
 | diffpair_routing_continuity | 1 |
 | diffpair_uncoupled_length | 1 |
 
@@ -178,7 +173,7 @@ The following 1 through-hole component is **excluded from the SMT pick-and-place
 ### Action Items
 
 - **[OPTIONAL]** Refill zones to verify 2 zone-connected nets, then re-run kct audit
-- **[OPTIONAL]** Review 15 DRC warnings
+- **[OPTIONAL]** Review 21 DRC warnings
 
 
 \newpage

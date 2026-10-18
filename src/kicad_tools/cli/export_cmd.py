@@ -253,7 +253,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--include-tht",
         action="store_true",
-        help="Include through-hole components in CPL (they are excluded by default for JLCPCB)",
+        help="Include through-hole components in CPL (only needed for fabs whose CPL excludes them by default; JLCPCB includes them)",
     )
     parser.add_argument(
         "--format",
