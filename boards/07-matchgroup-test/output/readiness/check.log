@@ -1,21 +1,22 @@
 WARNING: path_ampacity is INACTIVE without --current-paths and will silently pass. No sidecar was found at any of:
-  /Users/rwalters/GitHub/kicad-tools/.loom/worktrees/pr-7218/.doctor-tmp/build07p/validation/checked.current_paths.json
-  /Users/rwalters/GitHub/kicad-tools/.loom/worktrees/pr-7218/.doctor-tmp/build07p/validation/current_paths.json
-  /Users/rwalters/GitHub/kicad-tools/.loom/worktrees/pr-7218/.doctor-tmp/build07p/validation/output/checked.current_paths.json
-  /Users/rwalters/GitHub/kicad-tools/.loom/worktrees/pr-7218/.doctor-tmp/build07p/validation/output/current_paths.json
-  /Users/rwalters/GitHub/kicad-tools/.loom/worktrees/pr-7218/.doctor-tmp/build07p/output/checked.current_paths.json
-  /Users/rwalters/GitHub/kicad-tools/.loom/worktrees/pr-7218/.doctor-tmp/build07p/output/current_paths.json
+  /Users/rwalters/GitHub/kicad-tools/.loom/worktrees/issue-7241/tmp/b07build/validation/checked.current_paths.json
+  /Users/rwalters/GitHub/kicad-tools/.loom/worktrees/issue-7241/tmp/b07build/validation/current_paths.json
+  /Users/rwalters/GitHub/kicad-tools/.loom/worktrees/issue-7241/tmp/b07build/validation/output/checked.current_paths.json
+  /Users/rwalters/GitHub/kicad-tools/.loom/worktrees/issue-7241/tmp/b07build/validation/output/current_paths.json
+  /Users/rwalters/GitHub/kicad-tools/.loom/worktrees/issue-7241/tmp/b07build/output/checked.current_paths.json
+  /Users/rwalters/GitHub/kicad-tools/.loom/worktrees/issue-7241/tmp/b07build/output/current_paths.json
 Pass one explicitly with --current-paths, or place it at one of the paths above, to validate declared branch current paths.
 {
-  "file": ".doctor-tmp/build07p/validation/checked.kicad_pcb",
+  "file": "tmp/b07build/validation/checked.kicad_pcb",
   "manufacturer": "jlcpcb",
+  "pcb_sha256": "ae86ebe3111122a90415bb08d38caca86a2ab40edc4d90c1aa5d3186c99b6b58",
   "layers": 6,
   "summary": {
     "errors": 0,
     "warnings": 0,
     "infos": 7,
     "waived": 0,
-    "rules_checked": 69,
+    "rules_checked": 78,
     "rules_checked_by_rule": {
       "connectivity": 1,
       "copper_sliver": 1,
@@ -33,12 +34,18 @@ Pass one explicitly with --current-paths, or place it at one of the paths above,
       "netclass_via_drill": 1,
       "netclass_annular_ring": 1,
       "sch_field_offset": 1,
-      "sch_field_overlap": 1
+      "sch_field_overlap": 1,
+      "spec_conformance_dimensions": 1,
+      "spec_conformance_layers": 1,
+      "spec_conformance_min_trace": 1,
+      "spec_conformance_min_via": 1,
+      "spec_conformance_min_drill": 1,
+      "spec_conformance_target_fab": 1
     },
     "passed": true,
     "stale_waivers": 0,
-    "coverage_checked": 33,
-    "coverage_skipped": 6,
+    "coverage_checked": 34,
+    "coverage_skipped": 7,
     "coverage_unknown": [],
     "coverage_blocking_unknown": []
   },
@@ -183,7 +190,7 @@ Pass one explicitly with --current-paths, or place it at one of the paths above,
   "meta_checks": {
     "drc": {
       "status": "PASSED",
-      "detail": "69 rules checked, 0 error(s), 0 warning(s)"
+      "detail": "78 rules checked, 0 error(s), 0 warning(s)"
     },
     "erc": {
       "status": "PASSED",
@@ -412,6 +419,18 @@ Pass one explicitly with --current-paths, or place it at one of the paths above,
       "reason": null,
       "blocking": true
     },
+    "spec_conformance": {
+      "status": "skipped:no_project_kct",
+      "state": "skipped",
+      "reason": "no_project_kct",
+      "blocking": false
+    },
+    "thermal_asymmetry": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": false
+    },
     "via_in_pad": {
       "status": "checked",
       "state": "checked",
@@ -454,5 +473,8 @@ Pass one explicitly with --current-paths, or place it at one of the paths above,
       "reason": null,
       "blocking": true
     }
-  }
-}
+  },
+  "verdict": "incomplete",
+  "exit_code": 2
+}DRC-constraint sidecars updated: /Users/rwalters/GitHub/kicad-tools/.loom/worktrees/issue-7241/tmp/b07build/validation/checked.kicad_pro, /Users/rwalters/GitHub/kicad-tools/.loom/worktrees/issue-7241/tmp/b07build/validation/checked.kicad_dru
+

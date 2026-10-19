@@ -17,6 +17,7 @@ from __future__ import annotations
 import math
 from typing import TYPE_CHECKING
 
+from kicad_tools.core.geometry import point_to_segment_distance
 from kicad_tools.optim.fom_features import BoardFeatures, euclidean
 from kicad_tools.router.net_class import is_power_rail_name
 
@@ -220,16 +221,9 @@ def _point_segment_distance(
     """Distance from point p to the segment a-b."""
     abx = b[0] - a[0]
     aby = b[1] - a[1]
-    apx = p[0] - a[0]
-    apy = p[1] - a[1]
-    denom = abx * abx + aby * aby
-    if denom <= 1e-12:
+    if abx * abx + aby * aby <= 1e-12:
         return euclidean(p, a)
-    t = (apx * abx + apy * aby) / denom
-    t = max(0.0, min(1.0, t))
-    cx = a[0] + t * abx
-    cy = a[1] + t * aby
-    return math.hypot(p[0] - cx, p[1] - cy)
+    return point_to_segment_distance(p[0], p[1], a[0], a[1], b[0], b[1])
 
 
 def _looks_like_power_net(net_name: str) -> bool:

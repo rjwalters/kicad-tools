@@ -11,6 +11,8 @@ from __future__ import annotations
 import math
 from typing import TYPE_CHECKING
 
+from kicad_tools.core.geometry import point_to_segment_distance as _point_segment_distance
+
 if TYPE_CHECKING:
     from .primitives import Pad, Route
     from .rules import NetClassRouting
@@ -57,18 +59,6 @@ def _get_clearance_for_net(
     if net_class_map and net_name in net_class_map:
         return net_class_map[net_name].clearance
     return getattr(rules, "trace_clearance", 0.2)
-
-
-def _point_segment_distance(
-    px: float, py: float, x1: float, y1: float, x2: float, y2: float
-) -> float:
-    """Distance from point (px, py) to segment (x1,y1)-(x2,y2)."""
-    dx, dy = x2 - x1, y2 - y1
-    length_sq = dx * dx + dy * dy
-    if length_sq == 0.0:
-        return math.hypot(px - x1, py - y1)
-    t = max(0.0, min(1.0, ((px - x1) * dx + (py - y1) * dy) / length_sq))
-    return math.hypot(px - (x1 + t * dx), py - (y1 + t * dy))
 
 
 def _segments_intersect(

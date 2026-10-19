@@ -44,13 +44,64 @@ def test_no_thermal_imbalance_false_positives(board):
     assert _thermal_refs(_load(board)) == []
 
 
+_NET_COUNT_BOARD = """(kicad_pcb (version 20240108) (generator "test")
+  (layers (0 "F.Cu" signal) (31 "B.Cu" signal) (44 "Edge.Cuts" user))
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "") (net 1 "GND") (net 2 "VCC")
+{footprints}
+  (zone (net 1) (net_name "GND") (layer "F.Cu") (uuid "z-gnd")
+    (connect_pads (clearance 0.2)) (min_thickness 0.2) (filled_areas_thickness no)
+    (fill yes (thermal_gap 0.3) (thermal_bridge_width 0.3))
+    (polygon (pts (xy 0 0) (xy 9.8 0) (xy 9.8 40) (xy 0 40)))
+    (filled_polygon (layer "F.Cu") (pts (xy 0 0) (xy 9.8 0) (xy 9.8 40) (xy 0 40))))
+  (zone (net 2) (net_name "VCC") (layer "F.Cu") (uuid "z-vcc")
+    (connect_pads (clearance 0.2)) (min_thickness 0.2) (filled_areas_thickness no)
+    (fill yes (thermal_gap 0.3) (thermal_bridge_width 0.3))
+    (polygon (pts (xy 10.2 0) (xy 20 0) (xy 20 40) (xy 10.2 40)))
+    (filled_polygon (layer "F.Cu") (pts (xy 10.2 0) (xy 20 0) (xy 20 40) (xy 10.2 40))))
+)
+"""
+
+
+def _cap(ref: str, y: float, pad1: str = "") -> str:
+    """0805 at (10, y): pad 1 (GND) reaches the left fill, pad 2 (VCC) the right."""
+    return f"""  (footprint "Capacitor_SMD:C_0805_2012Metric" (layer "F.Cu") (at 10 {y})
+    (property "Reference" "{ref}" (at 0 -2) (layer "F.SilkS"))
+    (pad "1" smd roundrect (at -0.95 0) (size 1.0 1.25) (layers "F.Cu" "F.Paste" "F.Mask")
+      (roundrect_rratio 0.25) (net 1 "GND") {pad1})
+    (pad "2" smd roundrect (at 0.95 0) (size 1.0 1.25) (layers "F.Cu" "F.Paste" "F.Mask")
+      (roundrect_rratio 0.25) (net 2 "VCC"))
+  )
+"""
+
+
+def test_tombstoning_reports_solid_vs_thermal_passive_with_both_nets_poured(tmp_path):
+    """The case the net-count heuristic missed: both terminals' nets have a
+    fill, so counting zones looked balanced, yet C2's GND pad is tied solid
+    (``zone_connect 2``) while its VCC pad has a thermal relief.  C1 (both
+    thermal) is genuinely balanced and must stay quiet (issue #7374 keeps
+    this positive control after board 04's real cases were refilled away)."""
+    board = tmp_path / "net_count.kicad_pcb"
+    board.write_text(
+        _NET_COUNT_BOARD.format(footprints=_cap("C1", 10) + _cap("C2", 30, "(zone_connect 2)"))
+    )
+    pcb = PCB.load(str(board))
+    assert sorted(a.footprint.reference for a in asymmetric_passives(pcb)) == ["C2"]
+    assert _thermal_refs(pcb) == ["C2"]
+
+
 @pytest.mark.integration
 def test_tombstoning_reports_the_thermal_asymmetry_passives():
-    """Board 04's nine real cases, which the net-count heuristic missed."""
+    """detect-mistakes reports exactly the ``thermal_asymmetry`` passives.
+
+    Board 04 had nine real cases until the #7295 thermal-spoke ladder refill
+    (PR #7317) deliberately removed them; the expectation is derived from the
+    board, and the positive control lives in the synthetic test above.
+    """
     pcb = _load(BOARD_04)
     expected = sorted(a.footprint.reference for a in asymmetric_passives(pcb))
-    assert expected == ["C1", "C12", "C13", "C14", "C15", "C16", "C2", "C3", "R1"]
     assert _thermal_refs(pcb) == expected
+    assert expected == []
 
 
 @pytest.mark.integration

@@ -34,8 +34,8 @@
       "size": 1423
     },
     "design-source.zip": {
-      "sha256": "22dd93751525db5c709d4227b74b5112689c6323b8874f9b9e4c4d31c5505c25",
-      "size": 34683
+      "sha256": "c0568964a57468c190b9310a46b1def7b21aeaa8d40a9e51cb6ba0bef81747e7",
+      "size": 34644
     },
     "fill-consistency.json": {
       "sha256": "d27e460a36a7de46907d48f5754e32854768d0d77be5b6b3e7670916c83a1496",
@@ -90,8 +90,8 @@
       "size": 11924
     },
     "kicad_project.zip": {
-      "sha256": "96246e233a5a05717634e8158df9ea4f26433d7a07147d0d5d340f1e15701626",
-      "size": 41369
+      "sha256": "bc7c68251e7e241cb706e401a3b66765f6e73d580a934e672e96fc3f74062934",
+      "size": 40428
     },
     "lvs.json": {
       "sha256": "356b61ec235c657fe133747d662656d6f96f88531c6e0e77250dee36c9dab123",
@@ -102,7 +102,7 @@
       "size": 252
     },
     "native-erc.json": {
-      "sha256": "b27dcdbbed4fc1c15f694b81b3762c901a78ccbbcffc686011f2a6e578d80a8b",
+      "sha256": "a27b3db897332d4385f66184a9aaee4bd8b696d0af45a4557ab4f57b13ca8ae6",
       "size": 988
     },
     "project.kct": {
