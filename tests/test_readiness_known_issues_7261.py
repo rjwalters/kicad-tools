@@ -439,12 +439,17 @@ SPEC = "6269:paid drill:exception:" + ",".join(
 class _LocatedErrorEngines(FakeEngines):
     """FakeEngines whose ``kct check`` errors are the given ``(rule, x, y)`` findings.
 
-    A ``None`` position drops the violation's location.
+    A ``None`` position drops the violation's location.  ``summary_errors``
+    overrides the report's ``summary.errors`` so it can disagree with the
+    listed violations.
     """
 
-    def __init__(self, board: Path, found: list[tuple], **kwargs) -> None:
+    def __init__(
+        self, board: Path, found: list[tuple], summary_errors: int | None = None, **kwargs
+    ) -> None:
         super().__init__(board, check_errors=len(found), **kwargs)
         self.found = found
+        self.summary_errors = summary_errors
 
     def kct_check(self, pcb, mfr, report_path, extra):
         result = super().kct_check(pcb, mfr, report_path, extra)
@@ -453,6 +458,8 @@ class _LocatedErrorEngines(FakeEngines):
         for violation, (rule, x, y) in zip(errors, self.found, strict=True):
             violation["rule_id"] = rule
             violation["location"] = None if x is None else [x, y]
+        if self.summary_errors is not None:
+            report["summary"]["errors"] = self.summary_errors
         report_path.write_text(json.dumps(report, indent=2) + "\n")
         return result
 
@@ -561,6 +568,19 @@ def test_any_identity_mismatch_blocks(tmp_path, found, fragment):
     assert code != 0
     assert report["status"] == "blocked"
     assert any(fragment in b for b in report["blockers"]), report["blockers"]
+
+
+@pytest.mark.parametrize("delta", [1, -1])
+def test_a_summary_count_that_disagrees_with_the_violations_blocks(tmp_path, delta):
+    # The listed violations match the allowance exactly, but the report says
+    # there are more (or fewer) errors than it lists: not fully attributable.
+    found = [VIA_A, VIA_B, VIA_C]
+    code, report = _run_errors(make_board(tmp_path), found, summary_errors=len(found) + delta)
+    assert code != 0
+    assert report["status"] == "blocked"
+    check = next(c for c in report["checks"] if c["name"] == "kct_check")
+    assert check["status"] == "failed"
+    assert "accepted exactly" not in check["detail"]
 
 
 def test_a_location_inside_the_same_0_01_mm_cell_is_the_same_identity(tmp_path):
