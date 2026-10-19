@@ -311,17 +311,19 @@ class TestNoMergeLcscCliFlag:
         assert args_default.no_merge_lcsc is False
 
 
-@pytest.mark.parametrize("auto_lcsc", [True, False])
-def test_board06_default_repeat_export_preserves_non_lcsc_spec(tmp_path, auto_lcsc):
-    """Prior generic CSV IDs cannot supersede an explicit MPN-only selection."""
+def _board06_repeat_export(tmp_path, auto_lcsc, spec_path, stale_j1_lcsc):
+    """Export board 06 twice, editing J1's LCSC in the first CSV in between.
+
+    Returns ``(first_rows, second_rows, second_result)``. The catalog and parts
+    cache are stubbed out, so every assignment comes from the spec or the
+    prior CSV merge.
+    """
     import csv
     from unittest.mock import MagicMock, patch
 
     from kicad_tools.export.assembly import AssemblyConfig, AssemblyPackage
+    from tests._board06_sourcing import BOARD06_PCB
 
-    board = Path(__file__).resolve().parents[1] / "boards/06-diffpair-test"
-    pcb = board / "output/diffpair_test_routed.kicad_pcb"
-    before = _snapshot_dir(board)
     mock = MagicMock()
     mock.__enter__.return_value = mock
     mock._get_client.return_value = None
@@ -331,41 +333,83 @@ def test_board06_default_repeat_export_preserves_non_lcsc_spec(tmp_path, auto_lc
         patch("kicad_tools.parts.cache.PartsCache", return_value=None),
     ):
         config = AssemblyConfig(
-            include_bom=True, include_pnp=False, include_gerbers=False, auto_lcsc=auto_lcsc
+            include_bom=True,
+            include_pnp=False,
+            include_gerbers=False,
+            auto_lcsc=auto_lcsc,
+            spec_path=spec_path,
         )
         assert config.merge_lcsc
-        package = AssemblyPackage(pcb_path=pcb, manufacturer="jlcpcb-tier1", config=config)
-        first = package.export(output_dir=tmp_path)
+        package = AssemblyPackage(pcb_path=BOARD06_PCB, manufacturer="jlcpcb-tier1", config=config)
+        out = tmp_path / "out"
+        first = package.export(output_dir=out)
         with first.bom_path.open(newline="") as stream:
-            rows = list(csv.DictReader(stream))
-        target = next(row for row in rows if "J1" in row["Designator"].split(","))
-        assert target["LCSC Part #"] == ""
-        explicit_lcsc = {
-            row["Designator"]: row["LCSC Part #"] for row in rows if row["LCSC Part #"]
-        }
-        assert explicit_lcsc
-        target["LCSC Part #"] = "C404027"
+            first_rows = list(csv.DictReader(stream))
+        edited = [dict(row) for row in first_rows]
+        target = next(row for row in edited if "J1" in row["Designator"].split(","))
+        target["LCSC Part #"] = stale_j1_lcsc
         with first.bom_path.open("w", newline="") as stream:
-            writer = csv.DictWriter(stream, fieldnames=list(rows[0]))
+            writer = csv.DictWriter(stream, fieldnames=list(edited[0]))
             writer.writeheader()
-            writer.writerows(rows)
-        second = package.export(output_dir=tmp_path)
+            writer.writerows(edited)
+        second = package.export(output_dir=out)
         with second.bom_path.open(newline="") as stream:
-            rows = list(csv.DictReader(stream))
-        target = next(row for row in rows if "J1" in row["Designator"].split(","))
-        assert target["LCSC Part #"] == ""
-        assert all(
-            row["LCSC Part #"] == explicit_lcsc[row["Designator"]]
-            for row in rows
-            if row["Designator"] in explicit_lcsc
-        )
-        if auto_lcsc:
-            entries = [e for e in second.lcsc_enrichment.entries if "J1" in e.references]
-            assert len(entries) == 1 and entries[0].source == "spec_unresolved"
-            assert entries[0].lcsc_part == ""
-        else:
-            assert second.lcsc_enrichment is None
-    assert before == _snapshot_dir(board)
+            second_rows = list(csv.DictReader(stream))
+    return first_rows, second_rows, second
+
+
+def _j1(rows):
+    return next(row for row in rows if "J1" in row["Designator"].split(","))
+
+
+@pytest.mark.parametrize("auto_lcsc", [True, False])
+def test_board06_default_repeat_export_preserves_non_lcsc_spec(tmp_path, auto_lcsc):
+    """Prior generic CSV IDs cannot supersede an explicit MPN-only selection.
+
+    Board 06's committed J1-J3 are reviewed LCSC parts since #7422, so this
+    runs on its spec with the original #4995 Samtec MPN-only entries restored
+    (issue #7445) -- the real PCB, an explicit non-LCSC J1.
+    """
+    from tests._board06_sourcing import BOARD06, write_samtec_spec
+
+    before = _snapshot_dir(BOARD06)
+    spec_dir = tmp_path / "spec"
+    spec_dir.mkdir()
+    first_rows, rows, second = _board06_repeat_export(
+        tmp_path, auto_lcsc, write_samtec_spec(spec_dir), "C404027"
+    )
+    assert _j1(first_rows)["LCSC Part #"] == ""
+    explicit_lcsc = {
+        row["Designator"]: row["LCSC Part #"] for row in first_rows if row["LCSC Part #"]
+    }
+    assert explicit_lcsc
+    assert _j1(rows)["LCSC Part #"] == ""
+    assert all(
+        row["LCSC Part #"] == explicit_lcsc[row["Designator"]]
+        for row in rows
+        if row["Designator"] in explicit_lcsc
+    )
+    if auto_lcsc:
+        entries = [e for e in second.lcsc_enrichment.entries if "J1" in e.references]
+        assert len(entries) == 1 and entries[0].source == "spec_unresolved"
+        assert entries[0].lcsc_part == ""
+    else:
+        assert second.lcsc_enrichment is None
+    assert before == _snapshot_dir(BOARD06)
+
+
+@pytest.mark.parametrize("auto_lcsc", [True, False])
+def test_board06_repeat_export_keeps_reviewed_spec_lcsc(tmp_path, auto_lcsc):
+    """A stale prior-CSV LCSC cannot replace board 06's reviewed J1 sourcing (#7422)."""
+    from tests._board06_sourcing import BOARD06, REVIEWED_HEADERS
+
+    before = _snapshot_dir(BOARD06)
+    first_rows, rows, _ = _board06_repeat_export(tmp_path, auto_lcsc, None, "C404027")
+    for ref, (_mpn, lcsc) in REVIEWED_HEADERS.items():
+        for got in (first_rows, rows):
+            row = next(r for r in got if ref in r["Designator"].split(","))
+            assert row["LCSC Part #"] == lcsc, ref
+    assert before == _snapshot_dir(BOARD06)
 
 
 def test_snapshot_dir_ignores_transient_kicad_lock(tmp_path):
