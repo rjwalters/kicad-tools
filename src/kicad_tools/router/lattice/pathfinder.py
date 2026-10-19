@@ -4723,11 +4723,20 @@ class LatticePathfinder:
             pc, candidates, items, search, committed
         )
         candidates.extend(first_round)
+        # Only equal-via second-round pairs are kept.  ``LayerMirror`` bounds
+        # layers, not via counts, and the fat path drops the mirror, so a
+        # round-2 pair can come back asymmetric; ranked, it could become
+        # ``_fallback_rank``'s unequal-via reference, move #7291's gate and
+        # change main's round-1 pick for the worse (#7350 review).  With
+        # parity pairs only, the reference -- and so every round-1 rank -- is
+        # exactly main's.
+        second_round = [c for c in second_round if self._pair_via_mismatch(c) == 0]
 
-        # Main's pick is made without the second round; a second-round
-        # candidate replaces it only when it is no worse on skew AND no
-        # worse on length (#7093 review: round 2 alone traded 0.049 mm of
-        # skew for 0.615 mm of length on board 03 arm C).
+        # Main's pick is made from the first round alone (the reference
+        # above is unchanged by round 2); a second-round candidate replaces
+        # it only when it is no worse on skew AND no worse on length (#7093
+        # review: round 2 alone traded 0.049 mm of skew for 0.615 mm of
+        # length on board 03 arm C).
         rank = self._fallback_rank(pc, candidates + second_round)
         best = min(candidates, key=rank)  # ``min`` keeps the first on ties
         if second_round:

@@ -193,3 +193,56 @@ def test_second_round_is_bounded_by_the_first_round_parity_hits(monkeypatch) -> 
     # the parity hit re-searches its partner (N, under the new P leg).
     assert calls == ["P", "N", "N"]
     assert [pfmod.LatticePathfinder._pair_via_counts(c) for c in got] == [(1, 1), (0, 1), (1, 1)]
+
+
+def _pick_with_rounds(
+    monkeypatch,
+    first: list[tuple[tuple[float, int], tuple[float, int]]],
+    second: list[tuple[tuple[float, int], tuple[float, int]]],
+) -> tuple[float, float, int, int]:
+    """``_partner_aware_legs``' pick with the mirrored rounds stubbed out.
+
+    ``first`` / ``second`` are ``((len_P, vias_P), (len_N, vias_N))`` pairs
+    returned as ``_mirrored_candidates``' first and second rounds.
+    """
+    pf, pc = _pair()
+    pf.pair_length_measure = lambda route: route.length
+    plain = [(10.0, 2), (10.1, 3), (10.1, 3), (10.1, 3), (10.0, 2), (10.0, 2)]
+    results = iter(_Leg(*lg) for lg in plain)
+    monkeypatch.setattr(
+        LatticePathfinder, "_search_single", lambda self, item, **kw: (next(results, None), "")
+    )
+    monkeypatch.setattr(LatticePathfinder, "_partner_guide", lambda self, res, pc: object())
+    monkeypatch.setattr(LatticePathfinder, "_legs_shortfalls", lambda self, pc, lg: 0)
+    monkeypatch.setattr(LatticePathfinder, "_commit_single", lambda self, *a, **k: None)
+
+    def mk(p: tuple[float, int], n: tuple[float, int]) -> dict:
+        return {"P": (_Leg(*p), ""), "N": (_Leg(*n), "")}
+
+    monkeypatch.setattr(
+        LatticePathfinder,
+        "_mirrored_candidates",
+        lambda self, *a, **k: ([mk(*c) for c in first], [mk(*c) for c in second]),
+    )
+    got, _ = pf._partner_aware_legs(
+        pc, committed=pf._fresh_committed(), history={}, present=0.0, escape_plan={}
+    )
+    p_r, n_r = got["P"][0], got["N"][0]
+    return p_r.length, n_r.length, len(p_r.vias), len(n_r.vias)
+
+
+def test_unequal_second_round_candidate_cannot_shift_the_first_round_reference(
+    monkeypatch,
+) -> None:
+    # Main's pick: P 10.0 / N 10.1 at 2/3 vias (skew 0.1, 20.1 mm); the
+    # parity candidate Q = 11.0 / 11.3 at 1/1 fails #7291's length gate
+    # against that reference.  R = 11.0 / 11.05 at 1/2 is a second-round
+    # candidate whose legs do NOT have equal via counts (``LayerMirror``
+    # bounds layers, not vias, and the fat path drops the mirror).  Were R
+    # allowed into the rank reference it would replace main's, admit Q
+    # through the gate and pick Q (skew 0.3, 22.3 mm): worse on both.
+    q = ((11.0, 1), (11.3, 1))
+    r = ((11.0, 1), (11.05, 2))
+    main = _pick_with_rounds(monkeypatch, [q], [])
+    assert main == (10.0, 10.1, 2, 3)
+    assert _pick_with_rounds(monkeypatch, [q], [r]) == main
