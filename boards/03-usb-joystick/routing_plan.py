@@ -65,7 +65,7 @@ USB_COMMON_RUN_WINDOW = (37.5, 40.3, 13.0, 16.8)
 # with via-in-pad launches -- whichever comes first.  It expires on
 # USB_VIA_IN_PAD_EXCEPTION_EXPIRES: ``tests/test_board03_usb_window_7084.py``
 # fails after that date so the exception is re-ruled rather than kept.
-USB_VIA_IN_PAD_EXCEPTION_ISSUE = 7084
+USB_VIA_IN_PAD_EXCEPTION_ISSUE = 7487
 USB_VIA_IN_PAD_EXCEPTION_EXPIRES = "2027-04-19"
 USB_ESD_LANDS_7084 = {
     "USB_D+": (36.75, 37.35, 10.975, 12.30),  # U2 pad 4
@@ -287,6 +287,10 @@ def physical_contract(path):
                         "min_thickness": z.min_thickness,
                     }
                     for z in pcb.zones
+                    # Rule areas are routing steering, not circuit: a fresh
+                    # route may carry one (Issue #7498) and its plan must
+                    # still replay onto the keepout-free input.
+                    if z.keepout is None
                 ],
                 key=lambda z: (z["layer"], z["net"]),
             ),
