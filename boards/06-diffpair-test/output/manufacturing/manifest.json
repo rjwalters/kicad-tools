@@ -89,11 +89,11 @@
       "size": 153
     },
     "native-drc.json": {
-      "sha256": "75359cc8129e96d06d3eddc3de6f9f3fe6eae198e9a2d503bf7f9292c024d04d",
+      "sha256": "1850d7f44d3c5c3cf47fa02b4b59b805bfefcfe6224735c4ea7e6e7b36b4a51e",
       "size": 1212
     },
     "native-erc.json": {
-      "sha256": "eba1181b5eab89a01ce942d39a28868fb11e96a732c3c32e6743f7f88df33e51",
+      "sha256": "d0e5a400acc4549ed47e1a539e9f4d5f9c2e11cfa186a2aa46d2918f32574312",
       "size": 986
     },
     "procurement-review.md": {
