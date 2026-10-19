@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import dataclasses
 import math
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -345,7 +346,12 @@ def _three_run_board():
     )
 
 
-def test_repeated_squeezes_never_worsen_pair_skew_beyond_pre_pass_value():
+def test_repeated_squeezes_never_give_back_an_earlier_squeezes_skew_gain():
+    # Issue #7349 review (board 07 MIPI_DAT1 1.021 -> 1.025 mm): the bound is
+    # the best skew the pass has reached, not the pre-pass skew.  The first
+    # squeeze takes the skew from 0.010 to ~0.0015 mm; the second would leave
+    # it ~0.007 mm -- still under the pre-pass value, but worse than the
+    # first squeeze already reached -- so it, and the third, are declined.
     ar = _three_run_board()
     skew_before = abs(_skew(ar))
     assert skew_before == pytest.approx(0.01, abs=1e-6)
@@ -354,23 +360,42 @@ def test_repeated_squeezes_never_worsen_pair_skew_beyond_pre_pass_value():
 
     res = results[("MIPI_DAT1_P", "MIPI_DAT1_N")]
     assert len(res.runs) == 3, res
-    # Two runs fit under the pre-pass skew; the third would exceed it.
-    assert res.runs_tightened == 2, res
-    assert [r.mode for r in res.runs if r.status == "tightened"] == ["single_n", "single_n"]
-    # The third run is declined (its reported reason is the first rung's
-    # failure); the companion test below shows the cumulative skew bound is
-    # what declines it.
-    assert res.runs[2].status.startswith("declined:"), res
-    # The partly tightened pair still names why its leftover run was declined.
+    assert res.runs_tightened == 1, res
+    assert [r.mode for r in res.runs if r.status == "tightened"] == ["single_n"]
+    assert all(r.status.startswith("declined:") for r in res.runs[1:]), res
+    # The partly tightened pair still names why its leftover runs were declined.
     line = res.format_line()
     assert line.splitlines()[0].startswith("  MIPI_DAT1_P/MIPI_DAT1_N: tightened")
-    assert f"{res.runs[2].status}" in line.splitlines()[1], line
-    assert len(line.splitlines()) == 2, line
-    assert abs(_skew(ar)) <= skew_before + 1e-6
-    assert res.skew_after_mm <= res.skew_before_mm + 1e-6
+    assert f"{res.runs[1].status}" in line.splitlines()[1], line
+    assert len(line.splitlines()) == 3, line
+    assert abs(_skew(ar)) < 0.005
+    assert res.skew_after_mm < res.skew_before_mm
     assert _clearance_errors(ar) == []
     assert _connected(ar) == {1: True, 2: True}
     _assert_45(ar)
+
+
+def test_pre_pass_bound_lets_a_later_squeeze_give_back_skew(monkeypatch):
+    # The pre-#7349-review bound (pre-pass skew, not the running best): the
+    # second squeeze is admitted and the pair ends worse than the first
+    # squeeze left it -- the regression the running best closes.
+    import kicad_tools.router.diffpair_gap_tightening as dgt
+
+    real_gate = dgt._gate
+
+    def pre_pass_gate(*args, **kwargs):
+        kwargs["best_skew"] = 0.01
+        return real_gate(*args, **kwargs)
+
+    monkeypatch.setattr(dgt, "_gate", pre_pass_gate)
+    ar = _three_run_board()
+
+    res = ar.apply_diffpair_gap_tightening(verbose=False, stackup=STACKUP)[
+        ("MIPI_DAT1_P", "MIPI_DAT1_N")
+    ]
+
+    assert res.runs_tightened == 2, res
+    assert abs(_skew(ar)) > 0.005
 
 
 def test_per_squeeze_tolerance_alone_lets_skew_drift(monkeypatch):
@@ -477,30 +502,123 @@ def test_raw_segment_skew_misses_the_via_trim(monkeypatch):
     assert abs(_checker_skew(ar)) > skew_before + 0.005
 
 
-def _via_end_board_with_skew():
-    """``_via_end_board`` with N's lead-in 0.4 mm longer (checker skew -0.4)."""
+def _via_end_board_n_longer(dn=0.03, *, y_n=10.6, p_via_mm=0.4):
+    """``_via_end_board`` with N's lead-in ``dn`` mm longer (N the longer rail).
+
+    ``y_n`` sets the trunk gap (10.6: 0.375 mm, inside the 0.5 mm coupling
+    window; 10.8: 0.575 mm, outside it) and ``p_via_mm`` the diameter of P's
+    run-end via (a wider via trims more of P's jog, so the symmetric squeeze
+    drifts the checker skew).
+    """
+    from kicad_tools.router.primitives import Via
+
     ar = _via_end_board()
-    n_route = next(r for r in ar.routes if r.net == 2)
-    n_route.segments[0].x1 -= 0.4
+    for route in ar.routes:
+        if route.net == 2:
+            route.segments = [dataclasses.replace(s, y1=y_n, y2=y_n) for s in route.segments]
+            route.vias = [dataclasses.replace(v, y=y_n) for v in route.vias]
+            route.segments[0] = dataclasses.replace(route.segments[0], x1=route.segments[0].x1 - dn)
+        else:
+            route.vias = [
+                Via(v.x, v.y, v.drill, p_via_mm, v.layers, net=v.net, net_name=v.net_name)
+                if v.x == 5.0
+                else v
+                for v in route.vias
+            ]
     return ar
 
 
-def test_unequal_split_cancels_the_symmetric_skew_drift():
-    # Issue #7349: the symmetric squeeze drifts the checker skew ~0.01 mm
-    # (via trim), which the cumulative gate refuses.  Moving a little more on
-    # the shorter rail commits the squeeze with the skew no worse.
-    ar = _via_end_board_with_skew()
+def _pair_coupling(ar):
+    import kicad_tools.router.diffpair_gap_tightening as dgt
+
+    segs = {n: [s for r in ar.routes if r.net == n for s in r.segments] for n in (1, 2)}
+    return dgt._coupling(segs[1], segs[2])
+
+
+def test_unequal_split_commits_only_when_the_plain_ladder_declines():
+    # Issue #7349: on a run outside the coupling window every plain squeeze
+    # is refused for skew (the symmetric one drifts it via P's via trim, a
+    # single-rail one moves it ~0.3 mm), so a balanced split is tried.
+    # Coupling the trunk shrinks the pair's uncoupled length, so it commits
+    # with skew, uncoupled length and the coupled fraction no worse.
+    ar = _via_end_board_n_longer(0.03, y_n=10.8, p_via_mm=0.7)
     skew_before = abs(_checker_skew(ar))
+    cpl_before = _pair_coupling(ar)
 
     res = ar.apply_diffpair_gap_tightening(verbose=False, stackup=STACKUP)[
         ("MIPI_DAT1_P", "MIPI_DAT1_N")
     ]
 
     assert res.reason == "tightened", res
-    assert res.runs[0].mode.startswith("balanced_p_"), res
+    run = res.runs[0]
+    assert run.mode.startswith("balanced_p_"), res
+    plain = [a for a in run.attempts if "/balanced_" not in a]
+    assert len(plain) == 9 and all(":declined:skew" in a for a in plain), run.attempts
     assert abs(_checker_skew(ar)) <= skew_before + 1e-6
+    cpl_after = _pair_coupling(ar)
+    assert cpl_after.uncoupled_mm < cpl_before.uncoupled_mm
+    assert cpl_after.coupled_fraction > cpl_before.coupled_fraction
     assert _clearance_errors(ar) == []
     assert _connected(ar) == {1: True, 2: True}
+
+
+def test_unequal_split_that_grows_uncoupled_length_is_declined():
+    # Issue #7349 review (operator Q12; board 07 MIPI_DAT1 4.341 -> 5.095 mm,
+    # TMDS_D1 48.372 -> 49.379 mm): inside the coupling window the trunk is
+    # already coupled, so a squeeze only adds uncoupled jogs.  A balanced
+    # split that fits the skew is still declined, and the copper is untouched.
+    ar = _via_end_board_n_longer(0.03)
+    before = _snapshot(ar)
+    cpl_before = _pair_coupling(ar)
+
+    res = ar.apply_diffpair_gap_tightening(verbose=False, stackup=STACKUP)[
+        ("MIPI_DAT1_P", "MIPI_DAT1_N")
+    ]
+
+    assert res.reason.startswith("declined:"), res
+    assert _snapshot(ar) == before
+    assert _pair_coupling(ar) == cpl_before
+    assert any(
+        "/balanced_p_" in a and a.endswith(":declined:uncoupled_length")
+        for a in res.runs[0].attempts
+    ), res.runs[0].attempts
+
+
+def test_coupled_fraction_may_not_fall_below_the_threshold():
+    import kicad_tools.router.diffpair_gap_tightening as dgt
+
+    before = dgt._Coupling(uncoupled_mm=4.341, coupled_fraction=0.867)
+    # Board 07 MIPI_DAT1: 86.7 % -> 84.6 % crosses the 85 % threshold.
+    assert (
+        dgt._coupling_verdict(before, dgt._Coupling(4.341, 0.846), 0.85)
+        == "declined:coupled_fraction"
+    )
+    assert (
+        dgt._coupling_verdict(before, dgt._Coupling(5.095, 0.846), 0.85)
+        == "declined:uncoupled_length"
+    )
+    # Above the threshold, or no lower than before, the fraction is fine.
+    assert dgt._coupling_verdict(before, dgt._Coupling(4.3, 0.86), 0.85) is None
+    low = dgt._Coupling(10.0, 0.5)
+    assert dgt._coupling_verdict(low, dgt._Coupling(9.0, 0.6), 0.85) is None
+
+
+def test_squeeze_leaves_no_zero_length_remainder():
+    # Issue #7349 review (board 07 MIPI_DAT1_P / TMDS_D1_N): an overlap end
+    # within writer rounding of the segment's own end left a remainder whose
+    # endpoints are written (4 decimals) as one point.
+    import kicad_tools.router.diffpair_gap_tightening as dgt
+
+    p = _seg(1, "P", (0.0, 0.0), (10.00003, 0.0), MIPI_W)
+    n = _seg(2, "N", (0.0, 0.6), (10.0, 0.6), MIPI_W)
+    run = dgt._find_runs([p], [n], min_run_mm=1.0, max_gap_mm=1.0)[0]
+    chain, moved = dgt._rail_chain(p, run, (0.0, 1.0), 0.1)
+
+    assert all(not dgt._is_zero_length(s) for s in chain), chain
+    assert (chain[0].x1, chain[0].y1) == (p.x1, p.y1)
+    assert (chain[-1].x2, chain[-1].y2) == (p.x2, p.y2)
+    for a, b in zip(chain, chain[1:], strict=False):
+        assert (a.x2, a.y2) == (b.x1, b.y1)
 
 
 def test_declined_run_names_every_squeeze_that_was_tried():
@@ -516,7 +634,12 @@ def test_declined_run_names_every_squeeze_that_was_tried():
     assert _snapshot(ar) == before
     assert any(a.startswith("0.137/symmetric:declined:skew(") for a in res.runs[0].attempts)
     assert any("/balanced_p_" in a for a in res.runs[0].attempts)
-    assert "[0.137/symmetric:declined:skew(" in res.format_line()
+    line = res.format_line()
+    assert "[0.137/symmetric:declined:skew(" in line
+    # Each verdict is shown once with a count of the rest (Issue #7349 review).
+    n_skew = sum(":declined:skew" in a for a in res.runs[0].attempts)
+    assert f"(+{n_skew - 1} more)" in line, line
+    assert line.count(":declined:skew") == 1, line
 
 
 # --- No-op on an in-band pair (board 03 style, ~89 ohm of 90) -------------
