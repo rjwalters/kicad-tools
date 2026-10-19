@@ -6,12 +6,55 @@ import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from kicad_tools.schematic.grid import snap_point
+from kicad_tools.schematic.models.schematic import SnapMode
+
 if TYPE_CHECKING:
     from kicad_sch_helper import Schematic, SymbolInstance
 
     from kicad_tools.intent.types import InterfaceCategory
 
 logger = logging.getLogger(__name__)
+
+
+class _GridSnappedPorts(dict):
+    """Port table that snaps each position to the schematic grid on assignment.
+
+    Symbols and wires are snapped by the schematic (``SnapMode.AUTO``) while
+    blocks compute port positions from the raw ``(x, y)`` origin, so at an
+    off-grid origin a port misses its wire end by the snap distance
+    (issue #7510).  Snapping here applies the same rounding the wires get, in
+    one place; on-grid values are unchanged.
+    """
+
+    def __init__(self, block: CircuitBlock, items: dict | None = None) -> None:
+        super().__init__()
+        self._block = block
+        if items:
+            self.update(items)
+
+    def _snap(self, value):
+        sch = self._block.schematic
+        if (
+            value is None
+            or getattr(sch, "snap_mode", None) is not SnapMode.AUTO
+            or not isinstance(value, tuple)
+            or len(value) != 2
+        ):
+            return value
+        return snap_point(value)
+
+    def __setitem__(self, key, value) -> None:
+        super().__setitem__(key, self._snap(value))
+
+    def update(self, *args, **kwargs) -> None:
+        for key, value in dict(*args, **kwargs).items():
+            self[key] = value
+
+    def setdefault(self, key, default=None):
+        if key not in self:
+            self[key] = default
+        return self[key]
 
 
 @dataclass
@@ -88,9 +131,18 @@ class CircuitBlock:
         self.schematic: Schematic = sch
         self.x: float = x
         self.y: float = y
-        self.ports: dict[str, tuple[float, float]] = {}
+        self._ports: dict[str, tuple[float, float]] = _GridSnappedPorts(self)
         self.typed_ports: dict[str, Port] = {}
         self.components: dict[str, SymbolInstance] = {}
+
+    @property
+    def ports(self) -> dict[str, tuple[float, float]]:
+        """Port name -> (x, y), snapped to the schematic grid in AUTO mode."""
+        return self._ports
+
+    @ports.setter
+    def ports(self, value: dict[str, tuple[float, float]]) -> None:
+        self._ports = _GridSnappedPorts(self, value)
 
     def port(self, name: str) -> tuple[float, float]:
         """Get a port position by name."""
