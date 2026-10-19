@@ -108,16 +108,6 @@ def _xfail(reason: str, raises: type[BaseException] | None = None) -> pytest.Mar
 
 # -- Known defects -----------------------------------------------------------
 
-JTAG_DEFAULT = _xfail(
-    "#7402: DebugHeader(interface='jtag') rejects its own default pins=10",
-    ValueError,
-)
-UCC27211_LIB = _xfail(
-    "#7402: UCC27211GateDriver's default symbol softstart_custom:UCC27211 is "
-    "in a board-local library not shipped in this repo",
-)
-
-
 # -- Cases -------------------------------------------------------------------
 #
 # Each case is (id, export_name, factory).  ``export_name`` is the
@@ -272,7 +262,6 @@ case(
     "DebugHeader[jtag]",
     "DebugHeader",
     lambda s: B.DebugHeader(s, X, Y, interface="jtag"),
-    JTAG_DEFAULT,
 )
 case(
     "DebugHeader[jtag,20]",
@@ -392,7 +381,6 @@ case(
     "UCC27211GateDriver",
     "UCC27211GateDriver",
     lambda s: B.UCC27211GateDriver(s, X, Y),
-    UCC27211_LIB,
 )
 case("create_half_bridge", "create_half_bridge", lambda s: B.create_half_bridge(s, X, Y))
 case(
@@ -909,3 +897,30 @@ def test_create_voltage_sense_sizes_the_divider_from_the_adc_range() -> None:
 def test_voltage_divider_sense_rejects_a_ratio_that_cannot_divide(ratio: float) -> None:
     with pytest.raises(ValueError, match="ratio must be > 1"):
         B.VoltageDividerSense(Schematic(title="sense"), X, Y, ratio=ratio)
+
+
+@pytest.mark.parametrize("connector_type", sorted(B.USBConnector.CONNECTOR_CONFIGS))
+def test_usb_esd_array_is_wired_to_the_connector(connector_type: str) -> None:
+    """Every ESD array pin touches a wire, and D+/D-/VBUS/GND stay distinct nets.
+
+    The port check cannot catch an orphaned TVS: D+/D- ports lie on wires that
+    never reach a TVS pin (#7508).
+    """
+    sch = Schematic(title=f"usb esd: {connector_type}")
+    block = B.USBConnector(sch, X, Y, connector_type=connector_type)
+    tvs = block.components["TVS_ESD"]
+    assert tvs.symbol_def.name.startswith("USBLC6-2SC6")
+    nets, pins = _pin_nets(sch)
+    conn = block.components["CONN"]
+    ends = {_pt((w.x1, w.y1)) for w in sch.wires} | {_pt((w.x2, w.y2)) for w in sch.wires}
+    for pin in _placed_pins(tvs):
+        assert _pt(tvs.pin_position(pin.number)) in ends, f"TVS pin {pin.number} touches no wire"
+
+    ref = tvs.reference
+    pin_net = lambda sym, name: nets[_pt(sym.pin_position(_pin_number(sym, name)))]  # noqa: E731
+    dp, dm = pin_net(conn, "D+"), pin_net(conn, "D-")
+    assert {dp, dm} == {pins[f"{ref}.1"], pins[f"{ref}.3"]}
+    assert dp != dm
+    assert pins[f"{ref}.2"] == pin_net(conn, "GND")
+    assert pins[f"{ref}.5"] == pin_net(conn, "VBUS")
+    assert len({dp, dm, pins[f"{ref}.2"], pins[f"{ref}.5"]}) == 4
