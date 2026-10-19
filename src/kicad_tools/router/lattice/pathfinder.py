@@ -5215,6 +5215,28 @@ class LatticePathfinder:
 
         return rank
 
+    def _honoured_parity(
+        self,
+        pc: CoupledConnection,
+        ranked: list[_FallbackLegs],
+        among: list[_FallbackLegs],
+    ) -> bool:
+        """Whether a candidate in ``among`` has via parity the ranking honours.
+
+        :meth:`_fallback_rank` over ``ranked`` ranks a parity candidate that
+        costs too much skew or length (#7284) with the reference's mismatch;
+        such a candidate does not settle the pair (issue #7093).
+        """
+        parity = [
+            c
+            for c in among
+            if c["P"][0] is not None and c["N"][0] is not None and self._pair_via_mismatch(c) == 0
+        ]
+        if not parity:
+            return False
+        rank = self._fallback_rank(pc, ranked)
+        return any(rank(c)[2] == 0 for c in parity)
+
     def _mirrored_candidates(
         self,
         pc: CoupledConnection,
@@ -5225,7 +5247,10 @@ class LatticePathfinder:
     ) -> tuple[list[_FallbackLegs], list[_FallbackLegs]]:
         """Partner-leg searches that mirror the other leg's layer changes (#7093).
 
-        Only when no fully routed candidate already has equal P/N via counts.
+        Only when no fully routed candidate already has equal P/N via counts
+        that :meth:`_fallback_rank` honours: a parity candidate its #7284 gate
+        ranks with the reference's mismatch (too much skew or length) does not
+        count, so the mirror still runs beside it.
         For every fully routed candidate whose legs change layers a different
         number of times, each leg in turn is re-searched against committed
         copper holding its partner (a rolled-back trial), constrained to the
@@ -5248,16 +5273,27 @@ class LatticePathfinder:
         on skew and length.  Nothing is committed.
         """
         full = [c for c in candidates if c["P"][0] is not None and c["N"][0] is not None]
-        if not full or any(self._pair_via_mismatch(c) == 0 for c in full):
+        if not full:
             return [], []
-        seen: set[tuple[int, str]] = set()
+        # A parity candidate settles the pair only if the ranking honours its
+        # parity.  One that #7284's gate ranks with the reference's mismatch
+        # (too much skew or length for its equal vias) is not a parity win:
+        # skipping the mirror for it left board 03 tier-1's USB_D J1->U2 leg
+        # at (1, 0) vias, beside a (1, 1) candidate whose guided N leg went
+        # 3.4 mm the long way round.
+        if self._honoured_parity(pc, candidates, full):
+            return [], []
+        seen: set[tuple[int, str, LayerMirror | None]] = set()
 
-        def mirrored(cand: _FallbackLegs, moved: str, kept: str) -> _FallbackLegs | None:
+        def mirrored(
+            cand: _FallbackLegs, moved: str, kept: str, mirror: LayerMirror | None = None
+        ) -> _FallbackLegs | None:
             kept_res = cand[kept][0]
-            if kept_res is None or (id(kept_res), moved) in seen:
+            if kept_res is None or (id(kept_res), moved, mirror) in seen:
                 return None
-            seen.add((id(kept_res), moved))
-            mirror = _mirror_of(kept_res)
+            seen.add((id(kept_res), moved, mirror))
+            if mirror is None:
+                mirror = _mirror_of(kept_res)
             if mirror is None:
                 return None
             mark = committed.begin_trial()
@@ -5275,9 +5311,43 @@ class LatticePathfinder:
         out: list[_FallbackLegs] = []
         out2: list[_FallbackLegs] = []
         moves: list[tuple[_FallbackLegs, str]] = []
-        for cand in full:
+        asymmetric = [c for c in full if self._pair_via_mismatch(c) != 0]
+        for cand in asymmetric:
             for moved, kept in (("P", "N"), ("N", "P")):
                 got = mirrored(cand, moved, kept)
+                if got is not None:
+                    out.append(got)
+                    moves.append((got, moved))
+        # Layer-substituted mirrors (this issue, board 03 tier-1): the exact
+        # mirror keeps the moved leg on its partner's layers, so where the two
+        # legs must cross, the leg copying the partner's one layer change has
+        # to go round the partner on the same layer (USB_D J1->U2: an In2.Cu
+        # N leg 7.6 mm against P's 4.3 mm).  When the exact mirror leaves no
+        # parity pair the ranking honours, a partner that changes layer once
+        # (a -> b) is also copied with one end on another copper layer
+        # (L -> b, or a -> L): the same single layer change, crossing the
+        # partner on a layer of its own.  A layer the end pad does not have
+        # declines at once (``mirror-layer-start`` / ``-end``).
+        subs: list[tuple[_FallbackLegs, str, str, LayerMirror]] = []
+        for cand in asymmetric:
+            for moved, kept in (("P", "N"), ("N", "P")):
+                kept_res = cand[kept][0]
+                seq = _layer_sequence(kept_res) if kept_res is not None else ()
+                if len(seq) != 2:
+                    continue
+                a, b = seq
+                for sub in range(self.num_layers):
+                    if sub in (a, b):
+                        continue
+                    subs.append(
+                        (cand, moved, kept, LayerMirror(sub, b, frozenset((sub, b)), False))
+                    )
+                    subs.append(
+                        (cand, moved, kept, LayerMirror(a, sub, frozenset((a, sub)), False))
+                    )
+        if subs and not self._honoured_parity(pc, candidates + out, out):
+            for cand, moved, kept, mirror in subs:
+                got = mirrored(cand, moved, kept, mirror)
                 if got is not None:
                     out.append(got)
                     moves.append((got, moved))

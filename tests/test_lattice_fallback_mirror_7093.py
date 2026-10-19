@@ -209,6 +209,10 @@ def test_mirrored_search_follows_the_partner_layer_sequence() -> None:
 def test_no_mirrored_search_when_a_candidate_already_has_parity(monkeypatch) -> None:
     pf, pc = _gapped_pair()
     monkeypatch.setattr(LatticePathfinder, "_commit_single", lambda self, *a, **k: None)
+    # The parity pair must be one the ranking honours (equal lengths: no skew
+    # or length cost), else the mirror still runs beside it.
+    monkeypatch.setattr(LatticePathfinder, "_legs_shortfalls", lambda self, pc, lg: 0)
+    pf.pair_length_measure = lambda route: 1.0
     calls: list[object] = []
 
     def search(*a, **k):
