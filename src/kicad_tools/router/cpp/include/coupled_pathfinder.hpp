@@ -396,6 +396,10 @@ private:
     // waived -- that waiver is about pad metal, not the fab's via-in-pad
     // process.
     bool via_drill_in_smd_pad(int gx, int gy) const;
+    // Issue #7296: drill clears the pad copper but leaves less than
+    // ``min_via_pad_edge_gap`` to it (no mask dam).  Applies even where
+    // via-in-pad is allowed.
+    bool via_drill_at_smd_pad_edge(int gx, int gy) const;
 
     inline bool at_goal(int x, int y, int gx, int gy) const {
         return x == gx && y == gy;

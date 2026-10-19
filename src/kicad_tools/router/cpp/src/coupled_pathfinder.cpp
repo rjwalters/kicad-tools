@@ -163,6 +163,33 @@ bool CoupledPathfinder::via_drill_in_smd_pad(int gx, int gy) const {
     return false;
 }
 
+// Issue #7296: the drill clears the pad copper but sits inside the mask-dam
+// zone (``rules_.min_via_pad_edge_gap``).  Same arithmetic as Python
+// ``via_in_pad_eligibility.via_drill_at_pad_edge``.
+bool CoupledPathfinder::via_drill_at_smd_pad_edge(int gx, int gy) const {
+    const float floor_mm = rules_.min_via_pad_edge_gap;
+    if (floor_mm <= 0.0f) return false;
+    const auto [wx, wy] = grid_.grid_to_world(gx, gy);
+    const float radius = rules_.via_drill / 2.0f;
+    for (const auto& pad : grid_.pads()) {
+        if (pad.layer_idx < 0) continue;  // Through-hole pad, not SMD.
+        float local_x = static_cast<float>(wx) - pad.x;
+        float local_y = static_cast<float>(wy) - pad.y;
+        if (pad.rotation != 0.0f) {
+            const float angle = pad.rotation * 3.14159265358979323846f / 180.0f;
+            const float c = std::cos(angle), s = std::sin(angle);
+            const float rotated_x = c * local_x - s * local_y;
+            local_y = s * local_x + c * local_y;
+            local_x = rotated_x;
+        }
+        const float dx = std::max(std::abs(local_x) - pad.width / 2.0f, 0.0f);
+        const float dy = std::max(std::abs(local_y) - pad.height / 2.0f, 0.0f);
+        const float dist = std::sqrt(dx * dx + dy * dy);
+        if (dist >= radius && dist < radius + floor_mm) return true;
+    }
+    return false;
+}
+
 // Mirror of Python ``_is_via_blocked`` (diffpair_routing.py:793-832).
 bool CoupledPathfinder::is_via_blocked(int gx, int gy, int net) const {
     // Issue #6008: via-blocking keepout rule areas (Python
@@ -1011,9 +1038,13 @@ CoupledRouteResult CoupledPathfinder::route(
                 // Issue #6840: the fab's via-in-pad process, at the endpoint
                 // pads too (where ``is_via_blocked`` is waived).
                 if (smd_vias_ok < 0) {
-                    smd_vias_ok = (rules_.allow_smd_vias ||
-                                   (!via_drill_in_smd_pad(current.p_x, current.p_y) &&
-                                    !via_drill_in_smd_pad(current.n_x, current.n_y))) ? 1 : 0;
+                    // Issue #7296: plus the mask-dam floor, which applies
+                    // even where via-in-pad is allowed.
+                    smd_vias_ok = ((rules_.allow_smd_vias ||
+                                    (!via_drill_in_smd_pad(current.p_x, current.p_y) &&
+                                     !via_drill_in_smd_pad(current.n_x, current.n_y))) &&
+                                   !via_drill_at_smd_pad_edge(current.p_x, current.p_y) &&
+                                   !via_drill_at_smd_pad_edge(current.n_x, current.n_y)) ? 1 : 0;
                 }
                 if (smd_vias_ok == 0) { rej("via_in_pad"); continue; }
                 if (!p_at_ep && is_via_blocked(current.p_x, current.p_y, p_net)) { rej("via_blocked_p"); continue; }

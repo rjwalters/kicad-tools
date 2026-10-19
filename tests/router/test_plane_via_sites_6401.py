@@ -655,7 +655,9 @@ def test_offset_search_track_test_is_layer_aware() -> None:
     on_fcu = calculate_via_position(pad, other_net_tracks=[nrst_fcu], **kwargs)
     # The B.Cu track only refuses VIA candidates (a via spans the stack); the
     # straight stub to the site past the pin tip runs 0.16 mm from it.
-    assert on_bcu == pytest.approx((151.75, 94.8975))
+    # Issue #7296: candidates are snapped to the 0.01 mm write grid before the
+    # clearance check, so the site is 94.90, not the unrounded 94.8975.
+    assert on_bcu == pytest.approx((151.75, 94.90))
     assert on_fcu != on_bcu
     assert _stub_layer(pad) == "F.Cu"
     # A through-hole pad's copper spans the stack: every layer still counts.
