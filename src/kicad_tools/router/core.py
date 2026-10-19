@@ -20314,6 +20314,54 @@ class Autorouter:
             verbose=verbose,
         )
 
+    def apply_diffpair_gap_tightening(
+        self,
+        detected_pairs: list | None = None,
+        *,
+        verbose: bool = True,
+        stackup: Any = None,
+        candidate_window_mm: float | None = None,
+    ) -> dict[tuple[str, str], Any]:
+        """Squeeze uncoupled diff-pair trunks to their target gap (Issue #7344).
+
+        Opt-in post-route pass (``kct route --tighten-diffpair-gap``).  For
+        each pair whose class declares ``target_diff_impedance``, parallel
+        same-layer P/N runs whose coupled Zdiff is above the tolerance band
+        are moved symmetrically toward each other to the gap at which
+        ``ImpedanceRule``'s own model hits the target (never below
+        :meth:`_pair_gap_mm`), joined to the untouched ends with 45-degree
+        jogs.  Each edit is gated on foreign clearance
+        (:meth:`_skew_tune_foreign_clearance_ok`), pad connectivity, skew and
+        the impedance post-condition, and is skipped (copper unchanged) on
+        any failure.  See :mod:`kicad_tools.router.diffpair_gap_tightening`.
+
+        Args:
+            detected_pairs: Pairs to process; ``None`` detects them from the
+                class map the way ``kct check`` does.
+            verbose: Print one line per pair.
+            stackup: Stackup for the coupled model; ``None`` resolves the
+                one ``kct check`` will use for the routed board.
+            candidate_window_mm: Widest edge gap considered (default
+                :data:`~kicad_tools.router.diffpair_gap_tightening.DEFAULT_CANDIDATE_WINDOW_MM`).
+
+        Returns:
+            ``{(p_net_name, n_net_name): GapTighteningResult}``.
+        """
+        from .diffpair_gap_tightening import (
+            DEFAULT_CANDIDATE_WINDOW_MM,
+            tighten_diffpair_gaps,
+        )
+
+        return tighten_diffpair_gaps(
+            self,
+            detected_pairs,
+            verbose=verbose,
+            stackup=stackup,
+            candidate_window_mm=(
+                DEFAULT_CANDIDATE_WINDOW_MM if candidate_window_mm is None else candidate_window_mm
+            ),
+        )
+
     def apply_diffpair_length_tuning(
         self,
         detected_pairs: list,

@@ -13,8 +13,23 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 - [2026-02](work_log/WORK_LOG_2026-02.md)
 - [2026-01](work_log/WORK_LOG_2026-01.md)
 
+### 2026-10-19
+
+- **PR #7363**: refactor: route refresh_bundle through refresh_readiness.repin_staged
+
 ### 2026-10-18
 
+- **PR #7372**: chore(boards): regenerate 05/06/07 DRC evidence with report_sources
+- **Issue #7283** (closed): Regenerate boards 05/06/07 DRC evidence so report binding records provenance
+- **PR #7360**: feat(router): opt-in diff-pair gap tightening post-pass (--tighten-diffpair-gap)
+- **Issue #7344** (closed): Router: coupled pair trunks do not tighten to the solved intra_pair_clearance (113-125 ohm on boards 06/07)
+- **PR #7370**: test: update board 03 USB impedance test for in-band pair (#7368)
+- **Issue #7368** (closed): test: test_checker_judges_board_03_usb_pair_on_both_branches fails after board 03 USB pair narrowed to 90 ohm
+- **PR #7369**: test: drop stale board 03 Power-class and board 07 netclass allowances
+- **PR #7343**: fix(readiness): scope orphaned known-issues scan; re-save board 04 native fill
+- **Issue #7351** (closed): test_committed_pcb_drc_state (extended) fails on main: new impedance finding on unchanged board 03
+- **Issue #7337** (closed): Fleet re-verify: #7328 orphan check makes kct readiness --verify block ready boards 02/05; board 04 saved copper
+- **Issue #7312** (closed): Board 06 regression fixture: coupled USB pairs miss declared 90 ohm differential impedance (5 errors)
 - **PR #7352**: fix(boards): unpack gate_native_drc tuple in refresh_bundles_6404
 - **Issue #7348** (closed): refresh_bundles_6404.py: gate_native_drc now returns (errors, raw) since #7341; drc_violations metric becomes a tuple
 - **PR #7347**: fix: cap known impedance findings on board-07 Match-Group baseline
