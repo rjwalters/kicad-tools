@@ -6,7 +6,7 @@
 # the number may go down, never up (the job fails if this file's last change
 # on main raised it).
 floors:
-  # Provenance: #6736 (open at 2026-10-15) -- the +1V2 stub 0.1913 mm from
-  # U1.24 GND added by PR #6713 is a clearance error.  The PR that fixes
-  # #6736 must lower this to 0.
-  board-07-fresh-regen: 1
+  # Provenance: #6736 (closed 2026-10-15) -- the +1V2 stub 0.1913 mm from
+  # U1.24 GND added by PR #6713 was a clearance error.  Its fix left no
+  # allowance, so the floor is 0 (#7367).
+  board-07-fresh-regen: 0
