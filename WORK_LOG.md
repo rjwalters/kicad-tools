@@ -15,6 +15,15 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-19
 
+- **PR #7434**: fix(router): keep the shortest workable gateway combo; reject pass-under polarity crossings (#7362)
+- **PR #7429**: fix(board03): keep thermal relief on the six GND pads flagged thermal_asymmetry
+- **PR #7426**: fix(boards): swap board 06 Samtec headers for LCSC-stocked PZ254V headers
+- **PR #7417**: fix: forward the export's schematic to the report ERC audit
+- **Issue #7441** (closed): Board 03 tier-1 route: USB_D length regressed to 19.8 mm after #7101 (usb_geometry 16 mm bound)
+- **Issue #7422** (closed): Board 06: substitute LCSC-stocked connectors for Samtec J1–J3 so JLCPCB can assemble them (#7268 Q2 ruling)
+- **Issue #7362** (closed): main regression from #7324: board 03 fresh route USB_D 16.3→19.7 mm after 0.22 mm In2.Cu net class; tier-1 common-run test red
+- **Issue #7275** (closed): board 03: fix the 6 real thermal_asymmetry findings via recipe and drop the pinned allowance
+- **Issue #7153** (closed): kct export bundle inconsistencies: JLCPCB Gerbers omit paste layers for SMT bundles; board 04 manifest says DRC OK while report says FAIL/NOT_READY; report ERC falsely 'skipped by user request'
 - **PR #7424**: refactor: stop pintype annotator writing native-drc.json evidence
 - **Issue #7409** (closed): Gate annotate_pintypes_6025.py's native-drc.json writes through repin_staged (#7358 allowlist)
 - **PR #7421**: fix(router): report every diff pair committed with unequal via counts (#7093)
