@@ -66,7 +66,6 @@ import argparse
 import hashlib
 import importlib.util
 import json
-import math
 import os
 import shutil
 import subprocess
@@ -426,25 +425,6 @@ def gate_native_drc(board: Path, cfg: BoardConfig) -> tuple[int, bytes]:
     return len(errors), raw
 
 
-def fill_divergence(
-    saved: dict[str, float], refilled: dict[str, float], tolerance: float
-) -> dict[str, float]:
-    """Layers whose saved copper differs from the refill by more than *tolerance*.
-
-    A layer present on one side only counts as fully divergent.  Same rule as
-    ``kct readiness``'s ``zone_fill`` gate (``readiness_cmd._gate_refill``).
-    """
-    divergent = {}
-    for layer in sorted(set(saved) | set(refilled)):
-        delta = abs(saved.get(layer, 0.0) - refilled.get(layer, 0.0))
-        missing = (layer in saved) != (layer in refilled)
-        if missing or (
-            delta > tolerance and not math.isclose(delta, tolerance, rel_tol=1e-12, abs_tol=0.0)
-        ):
-            divergent[layer] = round(delta, 6)
-    return divergent
-
-
 def gate_fill_identity(board: Path, cfg: BoardConfig) -> dict[str, float]:
     """Saved copper must equal an independent native refill (Issue #7337).
 
@@ -452,67 +432,60 @@ def gate_fill_identity(board: Path, cfg: BoardConfig) -> dict[str, float]:
     saved fills hold.  ``kct readiness --verify`` compares the saved copper
     with a fresh ``kicad-cli`` refill; without the same comparison here a
     refresh could re-pin a ``ready`` record whose published fill diverges
-    (board 04 after #7317's carved fill).
+    (board 04 after #7317's carved fill).  The comparison is the shared
+    ``readiness_cmd.saved_vs_refilled`` (Issue #7356).
     """
     from kicad_tools.cli.readiness_cmd import (
         DEFAULT_FILL_TOLERANCE_MM2,
-        _copy_fill_context,
-        _fill_areas,
-        _refill_and_save,
+        FillRefillUnavailable,
+        saved_vs_refilled,
     )
 
-    pcb = board / cfg.routed_pcb
-    with tempfile.TemporaryDirectory(prefix="refresh-readiness-fill-") as tmp:
-        refilled = _copy_fill_context(pcb, Path(tmp))
-        result = _refill_and_save(refilled)
-        if not result.ok:
-            raise GateFailure(f"independent zone refill did not run: {result.detail}")
-        saved_areas, refilled_areas = _fill_areas(pcb), _fill_areas(refilled)
-    divergent = fill_divergence(saved_areas, refilled_areas, DEFAULT_FILL_TOLERANCE_MM2)
+    try:
+        result = saved_vs_refilled(board / cfg.routed_pcb, DEFAULT_FILL_TOLERANCE_MM2)
+    except FillRefillUnavailable as exc:
+        raise GateFailure(f"independent zone refill did not run: {exc.detail}") from exc
     log(
-        f"  gate saved-vs-refilled copper: {len(saved_areas)} layer(s), "
-        f"divergent {divergent or 'none'} (tolerance {DEFAULT_FILL_TOLERANCE_MM2} mm^2)"
+        f"  gate saved-vs-refilled copper: {len(result.saved_areas)} layer(s), "
+        f"divergent {result.divergent or 'none'} (tolerance {DEFAULT_FILL_TOLERANCE_MM2} mm^2)"
     )
-    if divergent:
-        detail = ", ".join(f"{layer} {delta:.6f} mm^2" for layer, delta in divergent.items())
-        raise GateFailure(f"saved copper differs from an independent refill: {detail}")
-    return divergent
+    if result.diverges:
+        raise GateFailure(f"saved copper differs from an independent refill: {result.describe()}")
+    return result.divergent
 
 
-def warning_counts_by_rule(data: dict) -> dict[str, int]:
-    """Active (non-waived) warning findings of a ``kct check`` report, by rule."""
-    counts: dict[str, int] = {}
-    for violation in data.get("violations", []):
-        if (
-            isinstance(violation, dict)
-            and violation.get("severity") == "warning"
-            and not violation.get("waived")
-        ):
-            rule = str(violation.get("rule_id") or "unknown")
-            counts[rule] = counts.get(rule, 0) + 1
-    return dict(sorted(counts.items()))
+def warning_mismatch(
+    data: dict, allowance: dict[tuple[str, str, str], int]
+) -> dict[str, list[str]]:
+    """Findings that break the identity *allowance*: ``{unaccepted, stale}`` (non-empty only).
 
+    ``allowance`` maps ``(rule, ref, pad)`` to the issue that accounts for it.
+    A finding the allowance does not name blocks, whatever the count; a listed
+    identity that no longer fires is stale and blocks too (Issue #7389).
+    """
+    from kicad_tools.cli.known_issues import match_warning_allowance
 
-def unaccepted_warnings(data: dict, allowance: dict[str, int]) -> dict[str, int]:
-    """Warnings beyond *allowance* (``{rule: max count}``), as ``{rule: found}``."""
-    counts = warning_counts_by_rule(data)
+    violations = [v for v in data.get("violations", []) if isinstance(v, dict)]
+    active = sum(1 for v in violations if v.get("severity") == "warning" and not v.get("waived"))
     total = data.get("summary", {}).get("warnings")
-    if total != sum(counts.values()):
+    if total != active:
         # Summary and finding list disagree: never trust the allowance.
-        return {"<summary/violations mismatch>": total if isinstance(total, int) else -1}
-    return {rule: n for rule, n in counts.items() if n > allowance.get(rule, 0)}
+        return {"unaccepted": [f"<summary/violations mismatch: {total} vs {active}>"]}
+    unaccepted, stale = match_warning_allowance(violations, allowance)
+    return {k: v for k, v in (("unaccepted", unaccepted), ("stale", stale)) if v}
 
 
 def check_report_verdict(
-    data: dict, label: str, allowance: dict[str, int] | None = None
+    data: dict, label: str, allowance: dict[tuple[str, str, str], int] | None = None
 ) -> tuple[bool, int]:
     """Gate a ``kct check``-format report: 0 errors, meta all PASSED, and no
     warnings beyond *allowance*.
 
     The allowance is the board's own recorded ``known_issues`` warning
-    allowance from ``readiness.json`` (Issue #7261): the same record that
-    discloses the issue is the one that tolerates its warnings.  Without one,
-    any warning refuses.
+    identities from ``readiness.json`` (Issues #7261, #7389): the same record
+    that discloses the issue is the one that tolerates its warnings.  Without
+    one, any warning refuses; a recorded identity that no longer fires refuses
+    as stale.
     """
     summary, meta = data.get("summary", {}), data.get("meta_checks", {})
     statuses = {k: meta.get(k, {}).get("status") for k in ("drc", "erc", "lvs", "manifest")}
@@ -522,16 +495,16 @@ def check_report_verdict(
     log(f"  gate {label}: {errors} error(s), {warnings} warning(s), meta {statuses}")
     if not isinstance(warnings, int):
         raise GateFailure(f"{label} failed")
-    extra = unaccepted_warnings(data, allowance or {}) if warnings else {}
+    extra = warning_mismatch(data, allowance or {})
     if extra:
-        log(f"  warnings beyond the recorded known_issues allowance {allowance or {}}: {extra}")
+        log(f"  warnings do not match the recorded known_issues allowance: {extra}")
     if errors != 0 or extra or any(s != "PASSED" for s in statuses.values()):
         raise GateFailure(f"{label} failed")
     return statuses["lvs"] == "PASSED", mismatches
 
 
-def known_issue_allowance(board: Path) -> dict[str, int]:
-    """The ``{rule: max count}`` the board's recorded ``known_issues`` account for."""
+def known_issue_allowance(board: Path) -> dict[tuple[str, str, str], int]:
+    """The ``{(rule, ref, pad): issue}`` the board's recorded ``known_issues`` account for."""
     from kicad_tools.cli.known_issues import known_warning_allowance, validate_known_issues
 
     report = json.loads((board / "output" / "readiness.json").read_text())

@@ -141,7 +141,7 @@
     "redesign/test_firmware.c": "3cb8ebe3001bb652701b5d96bce34d2cba37f07475daa38bec90db80e1cec8b6",
     "output/manufacturing/design-source.zip": "2292cf7cd014252120a60332b41e9bdb964467392fd9823d53b5447cefbc37d3",
     "output/readiness/footprint-identity-comparison.json": "fb771b3640412a466417a3492a0f97cb2e929064d842f80eca6670a86fd35107",
-    "output/readiness/known-issues.json": "778e7d2e4146129f56fcadb6bd8a09a7c75d6df18db46a0f3026eb4c84e77d92"
+    "output/readiness/known-issues.json": "8699a2008cb7141d9453579fe78147c227f37e7008aa05cf2600b8f4fcb07b8a"
   },
   "evidence": {
     "kct_check": "output/readiness/kct-check.json",
@@ -166,9 +166,23 @@
       "kind": "advisory",
       "summary": "Via drills at the edge of SMD pads R11.1, R9.1 and D1.1 (0.000-0.027 mm, below the 0.1 mm solder-mask dam): via wicking risk; router fix tracked in #7296",
       "recorded": "2026-10-18",
-      "warnings": {
-        "via_at_pad_edge": 3
-      }
+      "warnings": [
+        {
+          "rule": "via_at_pad_edge",
+          "ref": "D1",
+          "pad": "D1-1"
+        },
+        {
+          "rule": "via_at_pad_edge",
+          "ref": "R11",
+          "pad": "R11-1"
+        },
+        {
+          "rule": "via_at_pad_edge",
+          "ref": "R9",
+          "pad": "R9-1"
+        }
+      ]
     }
   ],
   "manufacturer": "jlcpcb",

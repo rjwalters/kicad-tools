@@ -62,9 +62,38 @@
       "kind": "advisory",
       "summary": "One-sided thermal connection on C10/C11 (GND pad solid to the F.Cu pour, JOY_X/JOY_Y pad on a 0.20 mm trace) and on the four J1 GND through-hole pins (solid on three copper layers): tombstoning and barrel-fill risk; narrower-spoke repair tracked in #7295",
       "recorded": "2026-10-18",
-      "warnings": {
-        "thermal_asymmetry": 6
-      }
+      "warnings": [
+        {
+          "rule": "thermal_asymmetry",
+          "ref": "C10",
+          "pad": "C10-2"
+        },
+        {
+          "rule": "thermal_asymmetry",
+          "ref": "C11",
+          "pad": "C11-2"
+        },
+        {
+          "rule": "thermal_asymmetry",
+          "ref": "J1",
+          "pad": "J1-A1"
+        },
+        {
+          "rule": "thermal_asymmetry",
+          "ref": "J1",
+          "pad": "J1-A12"
+        },
+        {
+          "rule": "thermal_asymmetry",
+          "ref": "J1",
+          "pad": "J1-B1"
+        },
+        {
+          "rule": "thermal_asymmetry",
+          "ref": "J1",
+          "pad": "J1-B12"
+        }
+      ]
     }
   ],
   "evidence": {
@@ -179,7 +208,7 @@
     "output/readiness-verification/fill-saved/usb_joystick_routed.kicad_pcb": "9520237d99732b6f1b272cd9921345ad03bd94b87faa37c1f9c7a0a3ff9e014d",
     "output/readiness-verification/fill-saved/usb_joystick_routed.kicad_pro": "e1b779bc9454f7e182c9f507a78162bc3e5b96e7cb9fc9231fb9bbabc046db00",
     "output/readiness-verification/kct-check.json": "ffc1ae7b09478a429991abe0357005fbecfec935d69b55743784c26b7f075750",
-    "output/readiness-verification/known-issues.json": "f030ea711cacb9cf77cca1acf65610ae719da2bf17ed57951f0c30b24016d87e",
+    "output/readiness-verification/known-issues.json": "cd7d4374ef1c710abaa66a1984efa7b747036930c3bfdc9bc489a6a485d1f992",
     "output/readiness-verification/native-drc-raw.json": "f95ee8ab0e790b142e0f2594748bdf24c219dbeaa5de182db9fb3caa612aa9cf",
     "output/readiness-verification/native-drc.json": "5b3e59dad1b0e9ac2bdf63aa9626494b01d4975d2ba9f9a9f5b535717c160c7a",
     "output/readiness-verification/refilled-native/native-drc-raw.json": "f95ee8ab0e790b142e0f2594748bdf24c219dbeaa5de182db9fb3caa612aa9cf",

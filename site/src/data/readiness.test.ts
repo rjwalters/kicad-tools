@@ -151,6 +151,7 @@ function bindKnownIssues(entries: unknown[]) {
   report.known_issues = entries;
 }
 const advisory = { issue: 7220, kind: "advisory", summary: "one-sided thermal", recorded: "2026-10-18" };
+const ident = (pad: string) => ({ rule: "via_at_pad_edge", ref: pad.split("-")[0], pad });
 const exception = { issue: 6269, kind: "exception", summary: "paid 0.15 mm drill", recorded: "2026-10-18" };
 const defect = { issue: 7250, kind: "defect", summary: "USB pair 71.6 ohm vs 90 ohm", recorded: "2026-10-18" };
 
@@ -165,13 +166,15 @@ it("discloses bound exceptions/advisories and keeps the board ready", () => {
   expect(board.readiness?.manufacturer).toBe("jlcpcb");
 });
 it("accepts canonical exception error identities and rejects malformed ones (#7355)", () => {
-  const ids = ["dimension_via_drill@10.00/20.50", "dimension_via_drill@11.25/-3.00"];
+  const ids = [{ rule: "dimension_via_drill", at: [10, 20.5] }, { rule: "dimension_via_drill", at: [11.25, -3] }];
   bindKnownIssues([{ ...exception, errors: ids }]);
   save();
   expect(displayStatus(loadBoard(root))).toBe("ready");
   const bad: Record<string, unknown> = {
     "count map": { dimension_via_drill: 7 },
-    "non-canonical": ["dimension_via_drill@10.0/20.5"],
+    "string form": ["dimension_via_drill@10.00/20.50"],
+    "unrounded": [{ rule: "dimension_via_drill", at: [10.001, 20.5] }],
+    "extra key": [{ rule: "dimension_via_drill", ref: "U1", at: [10, 20.5] }],
     "unsorted": [ids[1], ids[0]],
     "duplicate": [ids[0], ids[0]],
     "empty": [],
@@ -209,6 +212,17 @@ it("ignores a known-issues.json in another evidence folder (#7337)", () => {
   mkdirSync(join(root, "output/readiness/nested"), { recursive: true });
   writeFileSync(join(root, "output/readiness/nested/known-issues.json"), '{"known_issues": []}');
   expect(displayStatus(loadBoard(root))).toBe("unverified");
+});
+it("accepts sorted warning identities and rejects the count form, duplicates and unsorted lists (#7389)", () => {
+  bindKnownIssues([{ ...advisory, warnings: [ident("R3-2"), ident("R4-2")] }]);
+  save();
+  expect(displayStatus(loadBoard(root))).not.toBe("unverified");
+  for (const warnings of [{ via_at_pad_edge: 2 }, [], [ident("R3-2"), ident("R3-2")], [ident("R4-2"), ident("R3-2")],
+    [{ rule: "via_at_pad_edge", ref: "R3" }]]) {
+    bindKnownIssues([{ ...advisory, warnings }]);
+    save();
+    expect(displayStatus(loadBoard(root))).toBe("unverified");
+  }
 });
 it.each(["ready with defect", "unbound", "edited", "bad kind", "unsorted", "bad date", "bad manufacturer"])(
   "fails closed on %s known issues", kind => {

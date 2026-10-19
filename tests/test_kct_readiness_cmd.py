@@ -1467,3 +1467,127 @@ class TestDiscoverTierFromSpec:
 
         (tmp_path / "project.kct").write_text(": : not yaml [")
         assert _discover_tier(tmp_path, self._pcb(tmp_path)) is None
+
+
+# ---------------------------------------------------------------------------
+# Issue #7356: one saved-vs-refilled rule shared by every producer
+# ---------------------------------------------------------------------------
+
+_FILL_CASES = [
+    ("equal", {"F.Cu": 100.0}, {"F.Cu": 100.0}, False),
+    ("within", {"F.Cu": 100.0}, {"F.Cu": 100.005}, False),
+    ("exactly_at_tolerance", {"F.Cu": 100.0}, {"F.Cu": 100.01}, False),
+    ("over", {"F.Cu": 100.0}, {"F.Cu": 100.5}, True),
+    ("between_1x_and_2x_tolerance", {"F.Cu": 100.0}, {"F.Cu": 100.015}, True),
+    ("one_sided_refilled", {"F.Cu": 100.0}, {"F.Cu": 100.0, "B.Cu": 2.0}, True),
+    ("one_sided_saved", {"F.Cu": 100.0, "B.Cu": 2.0}, {"F.Cu": 100.0}, True),
+    # A layer present on one side only diverges even when its delta is within
+    # tolerance: the copper inventory changed, not just its area.
+    ("one_sided_refilled_zero_area", {"F.Cu": 100.0}, {"F.Cu": 100.0, "B.Cu": 0.0}, True),
+    ("one_sided_saved_zero_area", {"F.Cu": 100.0, "B.Cu": 0.0}, {"F.Cu": 100.0}, True),
+]
+
+
+@pytest.mark.parametrize(("name", "saved", "refilled", "diverges"), _FILL_CASES)
+def test_saved_vs_refilled_gives_the_gate_verdict(tmp_path, name, saved, refilled, diverges):
+    """The shared function and ``_gate_refill`` agree on every case."""
+    from kicad_tools.cli.readiness_cmd import saved_vs_refilled
+
+    board = make_board(tmp_path)
+    pcb = board / "output" / PCB_NAME
+    areas = iter([saved, refilled])
+    fake = FakeEngines(board)
+    fake.fill_areas = lambda _pcb: next(areas)  # type: ignore[method-assign]
+    result = saved_vs_refilled(pcb, 0.01, engines=fake)
+    assert result.diverges is diverges
+
+    fake2 = FakeEngines(board)
+    areas2 = iter([saved, refilled])
+    fake2.fill_areas = lambda _pcb: next(areas2)  # type: ignore[method-assign]
+    _code, report = run(board, fake2)
+    assert (check_status(report, "zone_fill") == "failed") is diverges
+
+
+def test_saved_vs_refilled_rejects_bad_tolerance_and_missing_refill(tmp_path):
+    from kicad_tools.cli.readiness_cmd import (
+        EngineRun,
+        FillRefillUnavailable,
+        saved_vs_refilled,
+    )
+
+    board = make_board(tmp_path)
+    pcb = board / "output" / PCB_NAME
+    fake = FakeEngines(board)
+    for bad in (-1.0, float("nan"), float("inf")):
+        with pytest.raises(ValueError):
+            saved_vs_refilled(pcb, bad, engines=fake)
+    fake.refill = lambda _pcb: EngineRun(ok=False, detail="no kicad-cli")  # type: ignore[method-assign]
+    with pytest.raises(FillRefillUnavailable, match="no kicad-cli"):
+        saved_vs_refilled(pcb, engines=fake)
+
+
+def _fake_with_areas(board, saved, refilled):
+    fake = FakeEngines(board)
+    areas = iter([saved, refilled])
+    fake.fill_areas = lambda _pcb: next(areas)  # type: ignore[method-assign]
+    return fake
+
+
+class TestRequireSavedFillMatchesRefill:
+    """The refusal shared by the board producer scripts (Issue #7356)."""
+
+    def test_divergent_areas_raise(self, tmp_path):
+        from kicad_tools.cli.readiness_cmd import require_saved_fill_matches_refill
+
+        board = make_board(tmp_path)
+        pcb = board / "output" / PCB_NAME
+        fake = _fake_with_areas(board, {"F.Cu": 100.0}, {"F.Cu": 100.5})
+        with pytest.raises(RuntimeError, match="differs from an independent refill"):
+            require_saved_fill_matches_refill(pcb, 0.01, engines=fake)
+
+    def test_one_sided_layer_within_tolerance_raises(self, tmp_path):
+        from kicad_tools.cli.readiness_cmd import require_saved_fill_matches_refill
+
+        board = make_board(tmp_path)
+        pcb = board / "output" / PCB_NAME
+        fake = _fake_with_areas(board, {"F.Cu": 100.0}, {"F.Cu": 100.0, "B.Cu": 0.0})
+        with pytest.raises(RuntimeError, match="changed layer inventory"):
+            require_saved_fill_matches_refill(pcb, 0.01, engines=fake)
+
+    def test_matching_areas_return_the_deltas_written_as_evidence(self, tmp_path):
+        from kicad_tools.cli.readiness_cmd import require_saved_fill_matches_refill
+
+        board = make_board(tmp_path)
+        pcb = board / "output" / PCB_NAME
+        saved = {"F.Cu": 100.0, "B.Cu": 50.0}
+        refilled = {"F.Cu": 100.005, "B.Cu": 50.0}
+        result = require_saved_fill_matches_refill(
+            pcb, 0.01, engines=_fake_with_areas(board, saved, refilled)
+        )
+        assert not result.diverges
+        assert result.deltas == pytest.approx({"F.Cu": 0.005, "B.Cu": 0.0})
+
+        # The gate writes its fill-consistency.json deltas from the same rule.
+        _code, report = run(board, _fake_with_areas(board, saved, refilled))
+        evidence = json.loads(
+            (board / "output" / "readiness" / "fill-consistency.json").read_text()
+        )
+        assert evidence["deltas_mm2"] == pytest.approx(result.deltas)
+        assert check_status(report, "zone_fill") == "passed"
+
+    def test_refill_unavailable_raises_a_runtime_error_subclass(self, tmp_path):
+        from kicad_tools.cli.readiness_cmd import (
+            EngineRun,
+            FillRefillUnavailable,
+            require_saved_fill_matches_refill,
+        )
+
+        board = make_board(tmp_path)
+        pcb = board / "output" / PCB_NAME
+        fake = FakeEngines(board)
+        fake.refill = lambda _pcb: EngineRun(ok=False, detail="no kicad-cli")  # type: ignore[method-assign]
+        # RuntimeError subclass: native_refill_board_04_7337 catches RuntimeError
+        # and prints REFUSED, so an unavailable refill refuses the same way.
+        assert issubclass(FillRefillUnavailable, RuntimeError)
+        with pytest.raises(FillRefillUnavailable, match="no kicad-cli"):
+            require_saved_fill_matches_refill(pcb, engines=fake)

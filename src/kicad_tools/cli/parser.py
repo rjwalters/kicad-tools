@@ -6651,7 +6651,8 @@ def _add_readiness_parser(subparsers) -> None:
         help=(
             "Record an open issue against the board (repeatable). KIND is defect, "
             "exception or advisory; an open defect makes the board not ready. "
-            "Append :rule=count[,rule=count] to name the kct check warnings it "
+            "Append :rule@pad[,rule@pad] (e.g. via_at_pad_edge@R3-2) to name the exact "
+            "kct check warning findings it "
             "accounts for. Recorded issues are carried forward until resolved."
         ),
     )

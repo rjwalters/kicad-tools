@@ -3,6 +3,7 @@
 import contextlib
 from typing import TYPE_CHECKING
 
+from .._pins import diode_pin_position
 from ..base import CircuitBlock
 from ..interfaces import DataPort, PowerPort
 
@@ -63,22 +64,25 @@ class USBConnector(CircuitBlock):
         sch.add_wire(usb.port("D-"), mcu.port("USB_DM"))
     """
 
-    # Connector type configurations
+    # Connector type configurations.  Symbol IDs are the KiCad 10 names
+    # (issue #7399): the bare ``USB_C_Receptacle_USB2.0`` became the
+    # ``_16P``/``_14P`` pair (16P is the common 16-pin USB 2.0 receptacle),
+    # and ``USB_Micro-B``/``USB_Mini-B`` are ``USB_B_Micro``/``USB_B_Mini``.
     CONNECTOR_CONFIGS = {
         "type-c": {
-            "symbol": "Connector:USB_C_Receptacle_USB2.0",
+            "symbol": "Connector:USB_C_Receptacle_USB2.0_16P",
             "pins": ["VBUS", "GND", "D+", "D-", "CC1", "CC2", "SHIELD"],
             "has_cc": True,
             "has_id": False,
         },
         "micro-b": {
-            "symbol": "Connector:USB_Micro-B",
+            "symbol": "Connector:USB_B_Micro",
             "pins": ["VBUS", "GND", "D+", "D-", "ID", "SHIELD"],
             "has_cc": False,
             "has_id": True,
         },
         "mini-b": {
-            "symbol": "Connector:USB_Mini-B",
+            "symbol": "Connector:USB_B_Mini",
             "pins": ["VBUS", "GND", "D+", "D-", "ID"],
             "has_cc": False,
             "has_id": True,
@@ -183,8 +187,8 @@ class USBConnector(CircuitBlock):
 
             # Wire D+ through TVS
             dp_conn = conn_pins["D+"]
-            tvs_pin1 = self.esd_tvs.pin_position("A")
-            tvs_pin2 = self.esd_tvs.pin_position("K")
+            tvs_pin1 = diode_pin_position(self.esd_tvs, "A")
+            tvs_pin2 = diode_pin_position(self.esd_tvs, "K")
 
             # Connect D+ from connector to TVS input
             sch.add_wire(dp_conn, (tvs_pin1[0], dp_conn[1]))
@@ -221,8 +225,8 @@ class USBConnector(CircuitBlock):
             tvs_idx += 1
 
             # Wire VBUS through TVS
-            vbus_anode = self.vbus_tvs.pin_position("A")
-            vbus_cathode = self.vbus_tvs.pin_position("K")
+            vbus_anode = diode_pin_position(self.vbus_tvs, "A")
+            vbus_cathode = diode_pin_position(self.vbus_tvs, "K")
 
             # Connect VBUS from connector to TVS
             sch.add_wire(vbus_conn, vbus_anode)

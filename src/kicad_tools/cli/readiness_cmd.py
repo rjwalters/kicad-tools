@@ -83,12 +83,17 @@ __all__ = [
     "EngineFingerprint",
     "EngineRun",
     "Engines",
+    "FillComparison",
+    "FillRefillUnavailable",
     "ReadinessOptions",
     "ReadinessResult",
     "build_report",
+    "compare_fill_areas",
     "main",
+    "require_saved_fill_matches_refill",
     "resolve_options",
     "run_readiness",
+    "saved_vs_refilled",
 ]
 
 SCHEMA_VERSION = 1
@@ -1110,6 +1115,141 @@ def _copy_fill_context(pcb: Path, destination: Path) -> Path:
     return destination / pcb.name
 
 
+@dataclass(frozen=True)
+class FillComparison:
+    """Saved copper measured against an independent native refill (Issue #7356)."""
+
+    saved_areas: dict[str, float]
+    refilled_areas: dict[str, float]
+    deltas: dict[str, float]
+    #: Layers present on one side only (the copper inventory changed).
+    missing_layers: list[str]
+    #: Layers whose delta exceeds the tolerance.
+    divergent: dict[str, float]
+
+    @property
+    def diverges(self) -> bool:
+        return bool(self.divergent or self.missing_layers)
+
+    def describe(self) -> str:
+        detail = ", ".join(f"{k} {v:.6f} mm^2" for k, v in self.divergent.items())
+        if self.missing_layers:
+            detail += f"; changed layer inventory: {', '.join(self.missing_layers)}"
+        return detail
+
+
+class FillRefillUnavailable(RuntimeError):
+    """The independent refill did not run, so nothing was compared."""
+
+    def __init__(self, detail: str, returncode: int | None = None):
+        super().__init__(detail)
+        self.detail = detail
+        self.returncode = returncode
+
+
+def compare_fill_areas(
+    saved: dict[str, float],
+    refilled: dict[str, float],
+    tolerance: float = DEFAULT_FILL_TOLERANCE_MM2,
+) -> FillComparison:
+    """The one saved-vs-refilled verdict rule (pure; no I/O)."""
+    if not math.isfinite(tolerance) or tolerance < 0:
+        raise ValueError("fill tolerance must be finite and nonnegative")
+    deltas = {
+        layer: abs(saved.get(layer, 0.0) - refilled.get(layer, 0.0))
+        for layer in sorted(set(saved) | set(refilled))
+    }
+    return FillComparison(
+        saved_areas=saved,
+        refilled_areas=refilled,
+        deltas=deltas,
+        missing_layers=sorted(set(saved) ^ set(refilled)),
+        divergent={
+            k: v
+            for k, v in deltas.items()
+            if v > tolerance and not math.isclose(v, tolerance, rel_tol=1e-12, abs_tol=0.0)
+        },
+    )
+
+
+def saved_vs_refilled(
+    pcb: Path,
+    tolerance: float = DEFAULT_FILL_TOLERANCE_MM2,
+    *,
+    engines: Engines | None = None,
+    snapshot_dir: Path | None = None,
+    evidence: dict[str, Any] | None = None,
+    label: Callable[[Path], str] = str,
+) -> FillComparison:
+    """Compare *pcb*'s saved copper with an independent native refill of a copy.
+
+    *pcb* is never modified.  With *snapshot_dir* the saved and refilled
+    copies (and their native context) are kept there as ``fill-saved/`` and
+    ``fill-refilled/``; otherwise a temporary directory is used.  *evidence*,
+    when given, is filled in step by step (paths rendered through *label*) so a
+    caller keeps the partial record if a later step raises.
+
+    Raises ``FillRefillUnavailable`` when the refill did not run and
+    ``ValueError`` for a malformed tolerance or measurement; callers must treat
+    either as a refusal, never as agreement.
+    """
+    engines = engines or Engines()
+    evidence = evidence if evidence is not None else {}
+    if not math.isfinite(tolerance) or tolerance < 0:
+        raise ValueError("fill tolerance must be finite and nonnegative")
+    with tempfile.TemporaryDirectory(prefix="saved-vs-refilled-") as tmp:
+        root = snapshot_dir if snapshot_dir is not None else Path(tmp)
+        # Clear only this check's diagnostic snapshots, never release content.
+        for name in ("fill-saved", "fill-refilled"):
+            if (root / name).exists():
+                shutil.rmtree(root / name)
+        saved = _copy_fill_context(pcb, root / "fill-saved")
+        refilled = _copy_fill_context(saved, root / "fill-refilled")
+        saved_areas = _fill_measurements(saved, engines)
+        evidence.update(
+            {
+                "saved_sha256": _sha256_file(saved),
+                "saved_areas_mm2": saved_areas,
+                "saved_pcb": label(saved),
+                "refilled_pcb": label(refilled),
+                "context_sha256": {
+                    path.relative_to(saved.parent).as_posix(): _sha256_file(path)
+                    for path in sorted(saved.parent.rglob("*"))
+                    if path.is_file() and not _is_transient_local(path.relative_to(saved.parent))
+                },
+            }
+        )
+        run = engines.refill(refilled)
+        evidence["refill_returncode"] = run.returncode
+        if not run.ok or run.returncode != 0:
+            raise FillRefillUnavailable(run.detail, run.returncode)
+        refilled_areas = _fill_measurements(refilled, engines)
+        result = compare_fill_areas(saved_areas, refilled_areas, tolerance)
+        evidence.update(
+            {
+                "refilled_sha256": _sha256_file(refilled),
+                "refilled_areas_mm2": refilled_areas,
+                "deltas_mm2": result.deltas,
+                "changed_layer_inventory": result.missing_layers,
+            }
+        )
+        return result
+
+
+def require_saved_fill_matches_refill(
+    pcb: Path, tolerance: float = DEFAULT_FILL_TOLERANCE_MM2, *, engines: Engines | None = None
+) -> FillComparison:
+    """``saved_vs_refilled`` that raises ``RuntimeError`` on any divergence.
+
+    The refusal every board producer script shares: a fill that does not
+    reproduce under an independent refill must not be published (Issue #7337).
+    """
+    result = saved_vs_refilled(pcb, tolerance, engines=engines)
+    if result.diverges:
+        raise RuntimeError(f"saved copper differs from an independent refill: {result.describe()}")
+    return result
+
+
 def _gate_refill(options: ReadinessOptions, engines: Engines) -> CheckOutcome:
     """Measure saved copper against an independent native refill without publishing it.
 
@@ -1125,64 +1265,16 @@ def _gate_refill(options: ReadinessOptions, engines: Engines) -> CheckOutcome:
         "tolerance_mm2": options.fill_tolerance_mm2,
     }
     try:
-        if not math.isfinite(options.fill_tolerance_mm2) or options.fill_tolerance_mm2 < 0:
-            raise ValueError("fill tolerance must be finite and nonnegative")
-        # Clear only this gate's diagnostic snapshots, never release content.
-        for name in ("fill-saved", "fill-refilled"):
-            directory = options.evidence_dir / name
-            if directory.exists():
-                shutil.rmtree(directory)
-        saved = _copy_fill_context(options.pcb, options.evidence_dir / "fill-saved")
-        refilled = _copy_fill_context(saved, options.evidence_dir / "fill-refilled")
-        saved_areas = _fill_measurements(saved, engines)
-        evidence.update(
-            {
-                "saved_sha256": _sha256_file(saved),
-                "saved_areas_mm2": saved_areas,
-                "saved_pcb": _rel(options, saved),
-                "refilled_pcb": _rel(options, refilled),
-                "context_sha256": {
-                    path.relative_to(saved.parent).as_posix(): _sha256_file(path)
-                    for path in sorted(saved.parent.rglob("*"))
-                    if path.is_file() and not _is_transient_local(path.relative_to(saved.parent))
-                },
-            }
+        result = saved_vs_refilled(
+            options.pcb,
+            options.fill_tolerance_mm2,
+            engines=engines,
+            snapshot_dir=options.evidence_dir,
+            evidence=evidence,
+            label=lambda path: _rel(options, path),
         )
-        run = engines.refill(refilled)
-        evidence["refill_returncode"] = run.returncode
-        if not run.ok or run.returncode != 0:
-            evidence["error"] = run.detail
-            return CheckOutcome(
-                name="zone_fill",
-                status=NOT_RUN,
-                evidence=evidence_rel,
-                detail=f"Independent zone refill did not run: {run.detail}",
-                blockers=[f"Independent zone refill unavailable ({run.detail})."],
-            )
-        refilled_areas = _fill_measurements(refilled, engines)
-        deltas = {
-            layer: abs(saved_areas.get(layer, 0.0) - refilled_areas.get(layer, 0.0))
-            for layer in sorted(set(saved_areas) | set(refilled_areas))
-        }
-        missing_layers = sorted(set(saved_areas) ^ set(refilled_areas))
-        evidence.update(
-            {
-                "refilled_sha256": _sha256_file(refilled),
-                "refilled_areas_mm2": refilled_areas,
-                "deltas_mm2": deltas,
-                "changed_layer_inventory": missing_layers,
-            }
-        )
-        divergent = {
-            k: v
-            for k, v in deltas.items()
-            if v > options.fill_tolerance_mm2
-            and not math.isclose(v, options.fill_tolerance_mm2, rel_tol=1e-12, abs_tol=0.0)
-        }
-        if divergent or missing_layers:
-            detail = ", ".join(f"{k} {v:.6f} mm^2" for k, v in divergent.items())
-            if missing_layers:
-                detail += f"; changed layer inventory: {', '.join(missing_layers)}"
+        if result.diverges:
+            detail = result.describe()
             return CheckOutcome(
                 name="zone_fill",
                 status=FAILED,
@@ -1194,7 +1286,16 @@ def _gate_refill(options: ReadinessOptions, engines: Engines) -> CheckOutcome:
             name="zone_fill",
             status=PASSED,
             evidence=evidence_rel,
-            detail=f"Saved copper area agrees with an independent refill on {len(deltas)} layer(s).",
+            detail=f"Saved copper area agrees with an independent refill on {len(result.deltas)} layer(s).",
+        )
+    except FillRefillUnavailable as exc:
+        evidence["error"] = exc.detail
+        return CheckOutcome(
+            name="zone_fill",
+            status=NOT_RUN,
+            evidence=evidence_rel,
+            detail=f"Independent zone refill did not run: {exc.detail}",
+            blockers=[f"Independent zone refill unavailable ({exc.detail})."],
         )
     except Exception as exc:
         evidence["error"] = str(exc)
@@ -1237,17 +1338,24 @@ def _format_warning_table(counts: dict[str, int]) -> str:
     return ", ".join(f"{rule}={count}" for rule, count in counts.items())
 
 
-def _violation_error_identity(violation: dict) -> str | None:
-    """``rule@x/y`` for an error violation, or ``None`` when it has no usable location."""
+def _violation_error_key(violation: dict) -> tuple[str, float, float] | None:
+    """``(rule, x_mm, y_mm)`` for an error violation, or ``None`` with no usable location."""
     location = violation.get("location")
     if not isinstance(location, (list, tuple)) or len(location) != 2:
         return None
     if not all(type(c) in (int, float) and math.isfinite(c) for c in location):
         return None
-    return error_identity(str(violation.get("rule_id") or "unknown"), location[0], location[1])
+    identity = error_identity(str(violation.get("rule_id") or "unknown"), location[0], location[1])
+    return (identity["rule"], identity["at"][0], identity["at"][1])
 
 
-def _unaccepted_errors(report: dict, allowance: dict[str, int]) -> list[str] | None:
+def _describe_error_key(key: tuple[str, float, float]) -> str:
+    return f"{key[0]} at {key[1]:.2f}/{key[2]:.2f}"
+
+
+def _unaccepted_errors(
+    report: dict, allowance: dict[tuple[str, float, float], int]
+) -> list[str] | None:
     """Error identities that differ from the recorded allowance, or ``None``.
 
     The report's error violations are matched against the listed identities as
@@ -1269,19 +1377,20 @@ def _unaccepted_errors(report: dict, allowance: dict[str, int]) -> list[str] | N
     if len(errors) != int(summary.get("errors", 0) or 0):
         return None
     problems: list[str] = []
-    seen: set[str] = set()
+    seen: set[tuple[str, float, float]] = set()
     for violation in errors:
-        identity = _violation_error_identity(violation)
-        if identity is None:
+        key = _violation_error_key(violation)
+        if key is None:
             problems.append(f"{violation.get('rule_id') or 'unknown'} (no usable location)")
-        elif identity not in allowance:
-            problems.append(f"{identity} (not recorded)")
-        elif identity in seen:
-            problems.append(f"{identity} (repeated)")
-        seen.add(identity or "")
+            continue
+        if key not in allowance:
+            problems.append(f"{_describe_error_key(key)} (not recorded)")
+        elif key in seen:
+            problems.append(f"{_describe_error_key(key)} (repeated)")
+        seen.add(key)
     problems.extend(
-        f"{i} (recorded for #{allowance[i]}, no longer fires)"
-        for i in sorted(set(allowance) - seen)
+        f"{_describe_error_key(k)} (recorded for #{allowance[k]}, no longer fires)"
+        for k in sorted(set(allowance) - seen)
     )
     return problems
 
@@ -3271,8 +3380,8 @@ def add_readiness_arguments(parser: argparse.ArgumentParser) -> None:
         help=(
             "Record an open issue against the board (repeatable). KIND is defect, "
             "exception or advisory; an open defect makes the board not ready. "
-            "Append :rule=count[,rule=count] to name the kct check warnings it "
-            "accounts for. Recorded issues are carried forward until resolved."
+            "Append :rule@pad[,rule@pad] (e.g. via_at_pad_edge@R3-2) to name the exact "
+            "kct check warning findings it accounts for. Recorded issues are carried forward until resolved."
         ),
     )
     parser.add_argument(

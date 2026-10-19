@@ -19,6 +19,7 @@ from kicad_tools.cli.known_issues import (
     KnownIssueError,
     known_error_allowance,
     known_warning_allowance,
+    match_warning_allowance,
     merge_known_issues,
     parse_known_issue,
     validate_known_issues,
@@ -49,12 +50,77 @@ def test_parse_splits_number_left_and_kind_right_so_summary_may_contain_colons()
 
 def test_parse_accepts_a_warning_allowance_suffix():
     entry = parse_known_issue(
-        "7220:one-sided thermal: C10/C11:advisory:thermal_asymmetry=6", "2026-10-18"
+        "7220:one-sided thermal: C10/C11:advisory:thermal_asymmetry@C11-2,thermal_asymmetry@C10-2",
+        "2026-10-18",
     )
     assert entry["kind"] == "advisory"
     assert entry["summary"] == "one-sided thermal: C10/C11"
-    assert entry["warnings"] == {"thermal_asymmetry": 6}
-    assert known_warning_allowance([entry]) == {"thermal_asymmetry": 6}
+    assert entry["warnings"] == [
+        {"rule": "thermal_asymmetry", "ref": "C10", "pad": "C10-2"},
+        {"rule": "thermal_asymmetry", "ref": "C11", "pad": "C11-2"},
+    ]
+    assert known_warning_allowance([entry]) == {
+        ("thermal_asymmetry", "C10", "C10-2"): 7220,
+        ("thermal_asymmetry", "C11", "C11-2"): 7220,
+    }
+
+
+_ID = {"rule": "via_at_pad_edge", "ref": "R3", "pad": "R3-2"}
+_BASE = {"issue": 7220, "kind": "advisory", "summary": "s", "recorded": "2026-10-18"}
+
+
+@pytest.mark.parametrize(
+    "warnings",
+    [
+        {"via_at_pad_edge": 2},  # the old count form: no dual format
+        [],
+        [{"rule": "via_at_pad_edge", "ref": "R3"}],  # missing pad
+        [{**_ID, "extra": "x"}],
+        [{**_ID, "pad": " R3-2"}],
+        [_ID, _ID],  # duplicate identity
+        [{**_ID, "pad": "R4-2", "ref": "R4"}, _ID],  # unsorted
+    ],
+)
+def test_validation_rejects_non_identity_warnings(warnings):
+    with pytest.raises(KnownIssueError):
+        validate_known_issues([{**_BASE, "warnings": warnings}])
+
+
+def test_validation_rejects_an_identity_listed_by_two_issues():
+    other = {**_BASE, "issue": 7221, "warnings": [_ID]}
+    with pytest.raises(KnownIssueError):
+        validate_known_issues([{**_BASE, "warnings": [_ID]}, other])
+
+
+def _warning(rule, items):
+    return {"rule_id": rule, "severity": "warning", "items": items}
+
+
+_ALLOW = {("via_at_pad_edge", "R3", "R3-2"): 7220, ("via_at_pad_edge", "R4", "R4-2"): 7220}
+_R3 = _warning("via_at_pad_edge", ["Via@1/1", "R3-2"])
+_R4 = _warning("via_at_pad_edge", ["Via@2/2", "R4-2"])
+
+
+def test_match_accepts_exactly_the_listed_identities():
+    assert match_warning_allowance([_R3, _R4], _ALLOW) == ([], [])
+
+
+def test_match_rejects_a_swapped_identity_at_the_same_count():
+    swapped = _warning("via_at_pad_edge", ["Via@3/3", "R9-1"])
+    unaccepted, stale = match_warning_allowance([_R3, swapped], _ALLOW)
+    assert len(unaccepted) == 1 and "R9-1" in unaccepted[0]
+    assert stale == ["via_at_pad_edge R4-2 (#7220)"]
+
+
+def test_match_flags_a_stale_identity():
+    assert match_warning_allowance([_R3], _ALLOW) == ([], ["via_at_pad_edge R4-2 (#7220)"])
+
+
+def test_match_rejects_a_repeated_unkeyable_or_waived_aware_finding():
+    unkeyable = _warning("diffpair_uncoupled_length", ["USB_D+", "USB_D-"])
+    waived = {**_R4, "waived": True}
+    unaccepted, _ = match_warning_allowance([_R3, _R3, unkeyable, waived], _ALLOW)
+    assert len(unaccepted) == 2  # the repeated R3-2 and the unkeyable rule
 
 
 @pytest.mark.parametrize(
@@ -135,7 +201,7 @@ def test_advisory_and_exception_keep_ready_and_are_disclosed(tmp_path):
     code, report = _run(
         board,
         "--known-issue",
-        "7220:one-sided thermal connection:advisory:thermal_asymmetry=1",
+        "7220:one-sided thermal connection:advisory:thermal_asymmetry@C10-2",
         "--known-issue",
         "6269:paid 0.15 mm drill (ruling #7147):exception",
     )
@@ -214,6 +280,16 @@ def _edit_report(board: Path, edit) -> None:
 def test_editing_the_recorded_list_is_detected(tmp_path):
     board = _ready_board_with_advisory(tmp_path)
     _edit_report(board, lambda r: r["known_issues"][0].update(summary="something else"))
+    verdict = read_readiness(board)
+    assert verdict["status"] == "unverified"
+    assert "differs from its hashed evidence" in verdict["blockers"][0]
+
+
+def test_editing_a_recorded_warning_identity_is_detected(tmp_path):
+    board = _ready_board_with_advisory(tmp_path)
+    ident = {"rule": "via_at_pad_edge", "ref": "R3", "pad": "R3-2"}
+    _edit_report(board, lambda r: r["known_issues"][0].update(warnings=[ident]))
+    # The report now names an identity the hashed known-issues.json does not.
     verdict = read_readiness(board)
     assert verdict["status"] == "unverified"
     assert "differs from its hashed evidence" in verdict["blockers"][0]
@@ -350,11 +426,13 @@ VIA_A = ("dimension_via_drill", 10.0, 20.5)
 VIA_B = ("dimension_via_drill", 11.25, -3.0)
 VIA_C = ("netclass_via_drill", 30.0, 5.0)
 IDS = [
-    "dimension_via_drill@10.00/20.50",
-    "dimension_via_drill@11.25/-3.00",
-    "netclass_via_drill@30.00/5.00",
+    {"rule": "dimension_via_drill", "at": [10.0, 20.5]},
+    {"rule": "dimension_via_drill", "at": [11.25, -3.0]},
+    {"rule": "netclass_via_drill", "at": [30.0, 5.0]},
 ]
-SPEC = "6269:paid drill:exception:" + ",".join(f"!{i}" for i in IDS)
+SPEC = "6269:paid drill:exception:" + ",".join(
+    f"!{i['rule']}@{i['at'][0]:.2f}/{i['at'][1]:.2f}" for i in IDS
+)
 
 
 class _LocatedErrorEngines(FakeEngines):
@@ -392,13 +470,13 @@ def test_parse_accepts_error_identities_on_an_exception():
     entry = parse_known_issue(SPEC, "2026-10-18")
     assert entry["errors"] == IDS
     assert "warnings" not in entry
-    assert known_error_allowance([entry]) == dict.fromkeys(IDS, 6269)
+    assert known_error_allowance([entry]) == {(i["rule"], *i["at"]): 6269 for i in IDS}
 
 
 def test_parse_canonicalises_identities_and_splits_warning_allowance():
-    entry = parse_known_issue("1:s:exception:thermal=2,!via@1.5/-0", "2026-10-18")
-    assert entry["warnings"] == {"thermal": 2}
-    assert entry["errors"] == ["via@1.50/0.00"]
+    entry = parse_known_issue("1:s:exception:thermal_asymmetry@U1-2,!via@1.5/-0", "2026-10-18")
+    assert entry["warnings"] == [{"rule": "thermal_asymmetry", "ref": "U1", "pad": "U1-2"}]
+    assert entry["errors"] == [{"rule": "via", "at": [1.5, 0.0]}]
 
 
 @pytest.mark.parametrize(
@@ -420,7 +498,7 @@ def test_errors_allowance_is_rejected_off_an_exception(kind):
         parse_known_issue(f"1:s:{kind}:!via@1/2", "2026-10-18")
     entry = {"issue": 1, "kind": kind, "summary": "s", "recorded": "2026-10-18"}
     with pytest.raises(KnownIssueError, match="only an exception"):
-        validate_known_issues([{**entry, "errors": ["v@1.00/2.00"]}])
+        validate_known_issues([{**entry, "errors": [{"rule": "v", "at": [1.0, 2.0]}]}])
 
 
 @pytest.mark.parametrize(
@@ -428,10 +506,12 @@ def test_errors_allowance_is_rejected_off_an_exception(kind):
     [
         {"dimension_via_drill": 7},  # the retired count map
         [],
-        ["via@1.0/2.0"],  # not canonical
-        ["b@1.00/2.00", "a@1.00/2.00"],  # unsorted
-        ["a@1.00/2.00", "a@1.00/2.00"],  # duplicate
-        ["a@-0.00/2.00"],  # negative zero
+        ["via@1.00/2.00"],  # the retired string form
+        [{"rule": "via", "at": [1.001, 2.0]}],  # not rounded to 0.01 mm
+        [{"rule": "via", "at": [1.0]}],  # not a position
+        [{"rule": "via", "ref": "U1", "at": [1.0, 2.0]}],  # not exactly {rule, at}
+        [{"rule": "b", "at": [1.0, 2.0]}, {"rule": "a", "at": [1.0, 2.0]}],  # unsorted
+        [{"rule": "a", "at": [1.0, 2.0]}, {"rule": "a", "at": [1.0, 2.0]}],  # duplicate
     ],
 )
 def test_validation_rejects_non_canonical_error_lists(errors):
@@ -512,11 +592,21 @@ def test_widening_the_allowance_in_known_issues_json_is_detected(tmp_path):
     assert code == 0
     evidence = board / "output" / "readiness" / "known-issues.json"
     data = json.loads(evidence.read_text())
-    data["known_issues"][0]["errors"].append("clearance@1.00/1.00")
+    data["known_issues"][0]["errors"].append({"rule": "clearance", "at": [1.0, 1.0]})
     evidence.write_text(json.dumps(data))
     verdict = read_readiness(board)
     assert verdict["status"] == "unverified"
     assert "stale" in verdict["blockers"][0]
     # Editing the report's copy too (so only the hashed file disagrees) is caught as well.
-    _edit_report(board, lambda r: r["known_issues"][0]["errors"].append("clearance@1.00/1.00"))
+    _edit_report(
+        board,
+        lambda r: r["known_issues"][0]["errors"].append({"rule": "clearance", "at": [1.0, 1.0]}),
+    )
     assert read_readiness(board)["status"] == "unverified"
+
+
+def test_an_identity_cannot_be_listed_by_two_issues():
+    one = parse_known_issue("1:a:exception:!via@1/2", "2026-10-18")
+    two = parse_known_issue("2:b:exception:!via@1/2", "2026-10-18")
+    with pytest.raises(KnownIssueError, match="listed by both #1 and #2"):
+        validate_known_issues([one, two])
