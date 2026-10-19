@@ -454,3 +454,58 @@ def test_known_issue_in_the_bundle_matches_the_readiness_refresh(mod, tmp_path, 
     assert (bundle_board / "output" / "readiness.json").read_bytes() == (
         refresh_board / "output" / "readiness.json"
     ).read_bytes()
+
+
+# --------------------------------------------------------------------------- board 04 (#7357)
+def test_board04_config_reuses_the_shared_pipeline(mod):
+    bundle, cfg = mod.BUNDLES["04-stm32-devboard"], mod.rr.BOARDS["04-stm32-devboard"]
+    # The board-local check hook is what repin_staged's gate runs, not bare kct check.
+    assert cfg.check_script == "check_manufacturing.py"
+    # Only the copper and front-silk members follow the saved fills.
+    assert bundle.export_members == () and bundle.assembly_pdfs == () and bundle.renders is None
+    assert [p.search("b-F_Cu.gbr") is not None for p in bundle.gerber_members] == [True, False]
+    assert [p.search("b-F_Silkscreen.gbr") is not None for p in bundle.gerber_members] == [
+        False,
+        True,
+    ]
+    assert bundle.recipe_drc == "generate_design.py"
+    for target in (*bundle.parity_drc_reports, *bundle.fill_consistency, *bundle.check_reports):
+        assert (REPO / "boards/04-stm32-devboard" / target).is_file()
+
+
+def test_board04_legacy_writers_are_gone():
+    boards = REPO / "scripts" / "boards"
+    assert not (boards / "regenerate_board_04_6269.py").exists()
+    assert not (boards / "regenerate_board_04_6404.py").exists()
+    assert "NOT re-pinned" not in (boards / "regenerate_boards_03_04_6076.py").read_text()
+
+
+def _parity_bundle(mod, tmp_path, monkeypatch, report: dict):
+    board, cfg = _staged(tmp_path)
+    committed = board / "output" / "native-drc.json"
+    committed.write_text(json.dumps({"date": "old", "violations": [], "unconnected_items": []}))
+    bundle = mod.BundleConfig(manufacturer="jlcpcb", parity_drc_reports=("output/native-drc.json",))
+
+    def run(cmd, **_):
+        Path(cmd[cmd.index("--output") + 1]).write_text(json.dumps(report))
+        return type("Proc", (), {"returncode": 0, "stderr": ""})()
+
+    monkeypatch.setattr(mod, "run", run)
+    return board, cfg, bundle, committed
+
+
+def test_parity_drc_refuses_a_finding_and_writes_nothing(mod, tmp_path, monkeypatch):
+    seeded = {"date": "new", "violations": [{"type": "clearance", "severity": "error"}]}
+    board, cfg, bundle, committed = _parity_bundle(mod, tmp_path, monkeypatch, seeded)
+    before = committed.read_bytes()
+    with pytest.raises(mod.GateFailure, match="schematic parity"):
+        mod.gate_parity_drc(board, cfg, bundle)
+    assert committed.read_bytes() == before
+
+
+def test_parity_drc_keeps_committed_report_when_only_the_date_differs(mod, tmp_path, monkeypatch):
+    clean = {"date": "new", "violations": [], "unconnected_items": []}
+    board, cfg, bundle, committed = _parity_bundle(mod, tmp_path, monkeypatch, clean)
+    before = committed.read_bytes()
+    mod.gate_parity_drc(board, cfg, bundle)
+    assert committed.read_bytes() == before
