@@ -1,5 +1,6 @@
 """Motor control circuit blocks: half-bridges, gate drivers, current sensing."""
 
+import warnings
 from typing import TYPE_CHECKING
 
 from ._pins import first_pin_position, output_pin_position
@@ -1896,8 +1897,11 @@ class UCC27211GateDriver(CircuitBlock):
     PEAK_DRIVE_A = 4.0
     DVDT_IMMUNITY_V_PER_NS = 50
 
-    # KiCad 10 ships no UCC27211; LM5109AMA is the pin-compatible half-bridge
-    # driver in the stock Driver_FET library.
+    # KiCad 10 ships no UCC27211; LM5109AMA is a half-bridge driver in the
+    # stock Driver_FET library with the same functions.  It is a
+    # schematic-level stand-in only: its pin *numbers* differ from the project
+    # UCC27211 symbol (``_CUSTOM_PIN_NUMBERS``), so pad assignment is wrong for
+    # a real UCC27211.  Not for fabrication.
     DEFAULT_DRIVER_SYMBOL = "Driver_FET:LM5109AMA"
     _CUSTOM_PIN_NUMBERS = {
         "HB": "1",
@@ -1959,9 +1963,12 @@ class UCC27211GateDriver(CircuitBlock):
             vcc_bulk_cap_value: VDD bulk decoupling capacitor.
             vcc_bypass_cap_value: VDD high-frequency bypass capacitor.
             driver_symbol: KiCad lib_id for the UCC27211 symbol.  ``None``
-                (default) uses the shipped, pin-compatible
-                ``Driver_FET:LM5109AMA`` so the block builds without a
-                board-local library.  Pass ``softstart_custom:UCC27211`` to
+                (default) uses the shipped ``Driver_FET:LM5109AMA`` as a
+                schematic-level stand-in so the block builds without a
+                board-local library.  Its pin numbering differs from the
+                UCC27211, so a ``UserWarning`` is emitted and the result must
+                not be used for fabrication; ``driver_symbol=`` is required
+                for a board with a real UCC27211.  Pass ``softstart_custom:UCC27211`` to
                 use the project symbol from ``local_symbol_libs`` (pointed at
                 ``boards/external/softstart/symbols/softstart_custom.kicad_sym``).
                 Pins resolve by name (VDD, VSS, ...), falling back to the
@@ -1974,6 +1981,14 @@ class UCC27211GateDriver(CircuitBlock):
 
         if driver_symbol is None:
             driver_symbol = self.DEFAULT_DRIVER_SYMBOL
+            warnings.warn(
+                f"UCC27211GateDriver is using the stand-in symbol {driver_symbol}; "
+                "its pin numbers differ from the UCC27211, so netlist/PCB pad "
+                "assignment is wrong for a real part. Pass driver_symbol= for "
+                "fabrication.",
+                UserWarning,
+                stacklevel=2,
+            )
 
         # Place the driver IC
         self.driver = sch.add_symbol(

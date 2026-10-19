@@ -147,9 +147,25 @@ class TestUCC27211GateDriver:
         The Q1 resolution explicitly rejected UCC27714D as a stand-in;
         this test prevents regression to it.
         """
-        UCC27211GateDriver(mock_schematic, x=100, y=100)
+        with pytest.warns(UserWarning, match="stand-in"):
+            UCC27211GateDriver(mock_schematic, x=100, y=100)
         first_call = mock_schematic.add_symbol.call_args_list[0]
         assert first_call.args[0] == "Driver_FET:LM5109AMA"
+
+    def test_default_stand_in_warns_pin_numbering_mismatch(self, mock_schematic):
+        """The LM5109AMA default has different pin numbers: it must warn."""
+        with pytest.warns(UserWarning, match="pin numbers differ"):
+            UCC27211GateDriver(mock_schematic, x=100, y=100)
+
+    def test_explicit_driver_symbol_does_not_warn(self, mock_schematic):
+        """An explicit driver_symbol is the fabrication path: no stand-in warning."""
+        import warnings
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            UCC27211GateDriver(
+                mock_schematic, x=100, y=100, driver_symbol="softstart_custom:UCC27211"
+            )
 
     def test_custom_driver_symbol_still_accepted(self, mock_schematic):
         """An explicit project-local symbol is passed through unchanged."""
