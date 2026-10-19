@@ -15,6 +15,8 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-19
 
+- **PR #7424**: refactor: stop pintype annotator writing native-drc.json evidence
+- **Issue #7409** (closed): Gate annotate_pintypes_6025.py's native-drc.json writes through repin_staged (#7358 allowlist)
 - **PR #7421**: fix(router): report every diff pair committed with unequal via counts (#7093)
 - **PR #7419**: fix: re-pin board 04 exception with its 24 error identities
 - **PR #7406**: test: ratchet board evidence producers onto the gated re-pin path
