@@ -25,6 +25,7 @@ import pytest
 
 from kicad_tools.router.diffpair_length_tuning import MAX_INSERTS_PER_PAIR
 from kicad_tools.router.layers import Layer
+from kicad_tools.router.length import LengthTracker
 from kicad_tools.router.match_group_length import MatchGroup, MatchGroupSource
 from kicad_tools.router.match_group_tuning import (
     AMPLITUDE_BACKOFF_FACTORS,
@@ -4078,6 +4079,74 @@ class TestNoOvershootAsWritten:
         )
         if placed is None:
             return
-        # The caller's guard (written measurement) is what rejects an
-        # overshoot; the placement itself must stay within a rounding step.
-        assert _written_length(placed) - before <= need + 5e-4
+        # The written placement must not end past the written target, with
+        # no tolerance: the old head ended up to 0.32 um past it.
+        written_target = before + need
+        excess = _written_length(placed) - written_target
+        assert _written_length(placed) <= written_target, (
+            f"written bump placement {excess * 1e6:.3f}nm past the written target"
+        )
+
+    @staticmethod
+    def _off_angle_reference(length: float, angle_deg: float) -> Route:
+        """A ``length`` mm reference at ``angle_deg`` whose 4 dp written copper
+        is SHORTER than its in-memory length (the start x is chosen from a
+        fixed set of sub-grid offsets to make it round short)."""
+        import math
+
+        a = math.radians(angle_deg)
+
+        def build(x0: float) -> Route:
+            return Route(
+                net=2,
+                net_name="D1",
+                segments=[
+                    Segment(
+                        x1=x0,
+                        y1=-40.0,
+                        x2=x0 + length * math.cos(a),
+                        y2=-40.0 + length * math.sin(a),
+                        width=0.2,
+                        layer=Layer.F_CU,
+                        net=2,
+                        net_name="D1",
+                    )
+                ],
+            )
+
+        candidates = [build(-40.0 - k * 1e-5) for k in range(10)]
+        return min(
+            candidates, key=lambda r: _written_length(r) - LengthTracker.calculate_route_length(r)
+        )
+
+    @pytest.mark.parametrize("host_angle", [0.0, 45.0, 90.0])
+    @pytest.mark.parametrize("ref_angle", [22.5, 31.1])
+    @pytest.mark.parametrize("need", [0.3, 0.9, 2.0])
+    @pytest.mark.parametrize("amplitude", [0.15, 0.5, 1.0])
+    def test_refit_path_never_past_off_angle_reference_as_written(
+        self, host_angle, ref_angle, need, amplitude
+    ):
+        """Issue #7423: ``kct check`` compares against the reference AS
+        WRITTEN.  An off-angle reference that rounds shorter must still bound
+        the tuned member in the file (the old head ended 40 nm past it)."""
+        host = self._host(host_angle, 6.0)
+        ref = self._off_angle_reference(
+            LengthTracker.calculate_route_length(host) + need, ref_angle
+        )
+        # Precondition: the reference really does round shorter when written.
+        assert _written_length(ref) < LengthTracker.calculate_route_length(ref) - 1e-5
+        group = _ddr_group(net_ids=[1, 2], tolerance=0.1)
+        routes = {1: host, 2: ref}
+        results = tune_match_group_v2(
+            group,
+            routes,
+            tolerance_mm=0.1,
+            intra_group_clearance_mm=0.2,
+            config=SerpentineConfig(amplitude=amplitude, gap_factor=2.0),
+        )
+        tuned, result = results[1]
+        assert result.inserts_applied >= 1, result.message
+        excess = _written_length(tuned) - _written_length(ref)
+        assert _written_length(tuned) <= _written_length(ref), (
+            f"written member {excess * 1e6:.3f}nm past the written reference"
+        )

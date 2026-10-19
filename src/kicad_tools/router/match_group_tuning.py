@@ -951,11 +951,18 @@ def _tune_match_group_single_ended(
 
     # Resolve the reference length per policy.
     ref_length: float | None
+    # Issue #7423: the member whose route supplies ``ref_length`` (``None``
+    # when the target is a caller-supplied lane/leg value with no route).
+    ref_source_net_id: int | None
     if group.reference_net_id is not None:
         ref_length = member_lengths.get(group.reference_net_id)
+        ref_source_net_id = group.reference_net_id
     else:
         # Longest-in-group default.
-        ref_length = max(member_lengths.values()) if member_lengths else None
+        if member_lengths:
+            ref_source_net_id, ref_length = max(member_lengths.items(), key=lambda kv: kv[1])
+        else:
+            ref_source_net_id, ref_length = None, None
 
     # --- Issue #3440: auto-promote when the pace car is not the longest -
     # The tuner is lengthen-only.  When the declared reference routes
@@ -978,6 +985,9 @@ def _tune_match_group_single_ended(
     # ``reason="longer_than_reference"``.
     if reference_length_mm is not None:
         ref_length = reference_length_mm
+        # A scalar declared reference (mixed group) still has its route; a
+        # pair-lane or per-leg target does not.
+        ref_source_net_id = group.reference_net_id
     effective_reference_net_id: int | None = group.reference_net_id
     if group.reference_net_id is not None and ref_length is not None and member_lengths:
         longest_id, longest_len = max(member_lengths.items(), key=lambda kv: kv[1])
@@ -999,6 +1009,21 @@ def _tune_match_group_single_ended(
             )
             effective_reference_net_id = None
             ref_length = longest_len
+            ref_source_net_id = longest_id
+
+    # Issue #7423: ``kct check`` compares a member against the reference AS
+    # WRITTEN (4 dp), not against its in-memory floats.  An off-angle
+    # reference can round shorter when written, so a member tuned exactly
+    # onto the in-memory target would end past it in the file.  Every
+    # tuning target (re-fit, per-bump, group maximum) is therefore capped at
+    # the reference's written length as well.  The reference itself is never
+    # modified by this pass, so the cap is computed once.
+    target_ceiling: float | None = ref_length
+    ref_source_route = (
+        routes_by_net.get(ref_source_net_id) if ref_source_net_id is not None else None
+    )
+    if ref_length is not None and ref_source_route is not None:
+        target_ceiling = min(ref_length, _measure(_as_written(ref_source_route)))
 
     # --- Per-member iteration -------------------------------------------
     total_inserts_committed = 0  # group-level cumulative counter
@@ -1201,7 +1226,8 @@ def _tune_match_group_single_ended(
             results[net_id] = (original_route, per_member_result)
             continue
 
-        target_length = ref_length
+        # Issue #7423: the reference as written, not its in-memory length.
+        target_length = target_ceiling if target_ceiling is not None else ref_length
 
         # Each iteration: rank candidate segments, then for each (best
         # first) compute the outer-normal hint, attempt one trombone,
