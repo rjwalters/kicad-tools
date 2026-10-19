@@ -47,11 +47,11 @@ def test_pair_improvement_cannot_hide_new_physical_error():
 
 
 def test_board06_fixture_impedance_allowance_is_capped():
-    """Issue #7312: the fixture tolerates 5 impedance errors, not a sixth."""
+    """Issue #7349: the tightening pass leaves 1 residual impedance error (USB3_TX2-)."""
     gate = load("check_diffpair_coverage")
     key = "boards/06-diffpair-test/regression-fixture/diffpair_test_routed.kicad_pcb"
-    assert gate.unexpected_baseline_errors(key, {"impedance": 5}) == {}
-    assert gate.unexpected_baseline_errors(key, {"impedance": 6}) == {"impedance": 6}
+    assert gate.unexpected_baseline_errors(key, {"impedance": 1}) == {}
+    assert gate.unexpected_baseline_errors(key, {"impedance": 2}) == {"impedance": 2}
 
 
 def test_board06_power_clearance_errors_are_not_accepted():

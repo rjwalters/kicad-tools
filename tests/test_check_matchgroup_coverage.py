@@ -390,20 +390,17 @@ class TestMatchgroupJobContainer:
 
 
 # ---------------------------------------------------------------------------
-# Issue #7332: capped impedance tolerance on the baselined board-07 key
+# Issue #7349: the board-07 impedance cap (#7332) is gone -- any impedance
+# error on the baselined key is unexpected
 # ---------------------------------------------------------------------------
 
 
 class TestUnexpectedBaselineErrors:
     KEY = "boards/07-matchgroup-test/regression-fixture/matchgroup_test_routed.kicad_pcb"
 
-    def test_impedance_up_to_cap_tolerated(self):
+    def test_any_impedance_error_reported(self):
         mod = _load_helper_module()
-        assert mod.unexpected_baseline_errors(self.KEY, {"impedance": 4}) == {}
-
-    def test_impedance_over_cap_reported(self):
-        mod = _load_helper_module()
-        assert mod.unexpected_baseline_errors(self.KEY, {"impedance": 5}) == {"impedance": 5}
+        assert mod.unexpected_baseline_errors(self.KEY, {"impedance": 1}) == {"impedance": 1}
 
     def test_unrelated_rule_reported(self):
         mod = _load_helper_module()

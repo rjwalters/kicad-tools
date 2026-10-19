@@ -581,19 +581,6 @@ def count_errors_via_kct_check(
     return blocking
 
 
-# Issue #7332 -- declared ``target_diff_impedance`` is judged on coupled
-# segments (#7306/#7293).  The model is right; the routed copper misses.  The
-# coupled trunk keeps the breakout pitch instead of tightening to the solved
-# ``intra_pair_clearance`` (0.100 mm in net_class_map.json):
-#   fixture MIPI_DAT1 trunk F.Cu w=0.225  gap 0.283 mm vs 0.100 mm -> 116.3 ohm
-#   seed-42 re-route MIPI_DAT1  gap ~0.43 mm -> 122.6 ohm
-#   seed-42 re-route TMDS_D1    gap ~0.49 mm -> 125.3 ohm
-# (declared 100 ohm +/-10 %).  Same root cause as #7312 (board 06) and the
-# shared router defect #7344.  Seed-42 yields 4 errors: MIPI_DAT1 P/N and
-# TMDS_D1 P/N.  Capped, not open: a fifth impedance error still fails.
-MATCHGROUP_FIXTURE_RULE_CAPS: dict[str, int] = {"impedance": 4}
-
-
 def unexpected_baseline_errors(key: str, errors: dict[str, int]) -> dict[str, int]:
     """Historical skew improvements cannot absorb new physical defects."""
     if key not in MATCHGROUP_VIOLATION_BASELINE:
@@ -604,11 +591,7 @@ def unexpected_baseline_errors(key: str, errors: dict[str, int]) -> dict[str, in
         "match_group_length_skew",
         "connectivity",
     }
-    return {
-        rule: count
-        for rule, count in errors.items()
-        if count and rule not in expected and count > MATCHGROUP_FIXTURE_RULE_CAPS.get(rule, 0)
-    }
+    return {rule: count for rule, count in errors.items() if count and rule not in expected}
 
 
 def compute_rule_coverage(
