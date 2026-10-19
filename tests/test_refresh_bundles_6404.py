@@ -439,7 +439,7 @@ def test_drc_targets_hold_the_refilled_report_and_have_one_writer(mod, tmp_path,
 
 def test_known_issue_in_the_bundle_matches_the_readiness_refresh(mod, tmp_path, monkeypatch):
     """``refresh_bundle(known_issue=...)`` stages the same evidence file ``refresh`` does."""
-    advisory = "7220:one-sided thermal:advisory:thermal_asymmetry=1"
+    advisory = "7220:one-sided thermal:advisory"
     evidence = "output/readiness/known-issues.json"
     checked_at = "2026-10-18T00:00:00+00:00"
 

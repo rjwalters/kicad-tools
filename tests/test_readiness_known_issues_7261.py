@@ -18,6 +18,7 @@ from kicad_tools.cli.board_readiness import read_readiness
 from kicad_tools.cli.known_issues import (
     KnownIssueError,
     known_warning_allowance,
+    match_warning_allowance,
     merge_known_issues,
     parse_known_issue,
     validate_known_issues,
@@ -48,12 +49,77 @@ def test_parse_splits_number_left_and_kind_right_so_summary_may_contain_colons()
 
 def test_parse_accepts_a_warning_allowance_suffix():
     entry = parse_known_issue(
-        "7220:one-sided thermal: C10/C11:advisory:thermal_asymmetry=6", "2026-10-18"
+        "7220:one-sided thermal: C10/C11:advisory:thermal_asymmetry@C11-2,thermal_asymmetry@C10-2",
+        "2026-10-18",
     )
     assert entry["kind"] == "advisory"
     assert entry["summary"] == "one-sided thermal: C10/C11"
-    assert entry["warnings"] == {"thermal_asymmetry": 6}
-    assert known_warning_allowance([entry]) == {"thermal_asymmetry": 6}
+    assert entry["warnings"] == [
+        {"rule": "thermal_asymmetry", "ref": "C10", "pad": "C10-2"},
+        {"rule": "thermal_asymmetry", "ref": "C11", "pad": "C11-2"},
+    ]
+    assert known_warning_allowance([entry]) == {
+        ("thermal_asymmetry", "C10", "C10-2"): 7220,
+        ("thermal_asymmetry", "C11", "C11-2"): 7220,
+    }
+
+
+_ID = {"rule": "via_at_pad_edge", "ref": "R3", "pad": "R3-2"}
+_BASE = {"issue": 7220, "kind": "advisory", "summary": "s", "recorded": "2026-10-18"}
+
+
+@pytest.mark.parametrize(
+    "warnings",
+    [
+        {"via_at_pad_edge": 2},  # the old count form: no dual format
+        [],
+        [{"rule": "via_at_pad_edge", "ref": "R3"}],  # missing pad
+        [{**_ID, "extra": "x"}],
+        [{**_ID, "pad": " R3-2"}],
+        [_ID, _ID],  # duplicate identity
+        [{**_ID, "pad": "R4-2", "ref": "R4"}, _ID],  # unsorted
+    ],
+)
+def test_validation_rejects_non_identity_warnings(warnings):
+    with pytest.raises(KnownIssueError):
+        validate_known_issues([{**_BASE, "warnings": warnings}])
+
+
+def test_validation_rejects_an_identity_listed_by_two_issues():
+    other = {**_BASE, "issue": 7221, "warnings": [_ID]}
+    with pytest.raises(KnownIssueError):
+        validate_known_issues([{**_BASE, "warnings": [_ID]}, other])
+
+
+def _warning(rule, items):
+    return {"rule_id": rule, "severity": "warning", "items": items}
+
+
+_ALLOW = {("via_at_pad_edge", "R3", "R3-2"): 7220, ("via_at_pad_edge", "R4", "R4-2"): 7220}
+_R3 = _warning("via_at_pad_edge", ["Via@1/1", "R3-2"])
+_R4 = _warning("via_at_pad_edge", ["Via@2/2", "R4-2"])
+
+
+def test_match_accepts_exactly_the_listed_identities():
+    assert match_warning_allowance([_R3, _R4], _ALLOW) == ([], [])
+
+
+def test_match_rejects_a_swapped_identity_at_the_same_count():
+    swapped = _warning("via_at_pad_edge", ["Via@3/3", "R9-1"])
+    unaccepted, stale = match_warning_allowance([_R3, swapped], _ALLOW)
+    assert len(unaccepted) == 1 and "R9-1" in unaccepted[0]
+    assert stale == ["via_at_pad_edge R4-2 (#7220)"]
+
+
+def test_match_flags_a_stale_identity():
+    assert match_warning_allowance([_R3], _ALLOW) == ([], ["via_at_pad_edge R4-2 (#7220)"])
+
+
+def test_match_rejects_a_repeated_unkeyable_or_waived_aware_finding():
+    unkeyable = _warning("diffpair_uncoupled_length", ["USB_D+", "USB_D-"])
+    waived = {**_R4, "waived": True}
+    unaccepted, _ = match_warning_allowance([_R3, _R3, unkeyable, waived], _ALLOW)
+    assert len(unaccepted) == 2  # the repeated R3-2 and the unkeyable rule
 
 
 @pytest.mark.parametrize(
@@ -134,7 +200,7 @@ def test_advisory_and_exception_keep_ready_and_are_disclosed(tmp_path):
     code, report = _run(
         board,
         "--known-issue",
-        "7220:one-sided thermal connection:advisory:thermal_asymmetry=1",
+        "7220:one-sided thermal connection:advisory:thermal_asymmetry@C10-2",
         "--known-issue",
         "6269:paid 0.15 mm drill (ruling #7147):exception",
     )
@@ -213,6 +279,16 @@ def _edit_report(board: Path, edit) -> None:
 def test_editing_the_recorded_list_is_detected(tmp_path):
     board = _ready_board_with_advisory(tmp_path)
     _edit_report(board, lambda r: r["known_issues"][0].update(summary="something else"))
+    verdict = read_readiness(board)
+    assert verdict["status"] == "unverified"
+    assert "differs from its hashed evidence" in verdict["blockers"][0]
+
+
+def test_editing_a_recorded_warning_identity_is_detected(tmp_path):
+    board = _ready_board_with_advisory(tmp_path)
+    ident = {"rule": "via_at_pad_edge", "ref": "R3", "pad": "R3-2"}
+    _edit_report(board, lambda r: r["known_issues"][0].update(warnings=[ident]))
+    # The report now names an identity the hashed known-issues.json does not.
     verdict = read_readiness(board)
     assert verdict["status"] == "unverified"
     assert "differs from its hashed evidence" in verdict["blockers"][0]
