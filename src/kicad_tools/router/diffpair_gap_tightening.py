@@ -24,7 +24,9 @@ This module is a geometry-only post-pass that squeezes such a trunk:
 4. Every candidate is gated on exact geometry before it is committed:
    foreign pad / via / copper clearance
    (:meth:`Autorouter._skew_tune_foreign_clearance_ok`), pad connectivity
-   of both nets, skew (<= ``SKEW_TOLERANCE_MM`` change), and the
+   of both nets, skew (measured the way ``kct check`` measures it;
+   <= ``SKEW_TOLERANCE_MM`` change per squeeze, and never above the pair's
+   skew before the pass -- see ``CUMULATIVE_SKEW_EPS_MM``), and the
    ``ImpedanceRule`` post-condition (the squeezed trunk is in band and no
    segment becomes a newly judged out-of-band one).  A run that fails all
    candidates is left byte-identical and reported as ``declined:<reason>``.
@@ -39,6 +41,7 @@ from __future__ import annotations
 import dataclasses
 import math
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -65,6 +68,13 @@ MIN_TRUNK_MM = 0.2
 
 #: A committed squeeze may change the pair's skew by at most this much (mm).
 SKEW_TOLERANCE_MM = 0.01
+
+#: Cumulative bound (Issue #7349 review): after any number of squeezes the
+#: pair's ``|skew|`` may not exceed its value before the pass by more than
+#: this float-noise epsilon (mm).  ``SKEW_TOLERANCE_MM`` alone is measured
+#: against the copper of the previous squeeze, so it compounds across runs
+#: (board 06 USB3_RX1 drifted +0.028 mm over two committed runs).
+CUMULATIVE_SKEW_EPS_MM = 1e-6
 
 #: Upper bound on runs attempted per pair (defensive loop guard).
 MAX_RUNS_PER_PAIR = 32
@@ -431,6 +441,42 @@ def _net_length(segments: list[Segment]) -> float:
     return sum(math.hypot(s.x2 - s.x1, s.y2 - s.y1) for s in segments)
 
 
+def _checker_net_length_fn(router: Autorouter) -> Callable[[list[Route], int], float] | None:
+    """``(routes, net_id) -> mm`` measured the way ``kct check`` measures skew.
+
+    Issue #7349 review: the skew gate must judge the number the checker
+    reports.  ``DiffPairLengthSkewRule`` takes the kicad-cli length of the
+    whole net (:mod:`kicad_tools.router.kicad_length`: segments minus the
+    in-copper portion of each chain entering a pad / via, plus via spans).
+    Raw segment sums miss a squeeze that changes one rail's pad-entry trim
+    (board 06 USB3_RX1: raw skew unchanged, checker skew +0.028 mm).  Falls
+    back to raw segment sums when the model cannot be built.
+    """
+    try:
+        from .kicad_length import net_length, route_geometry
+
+        layer_stack = getattr(router, "layer_stack", None)
+        num_layers = len(layer_stack.layers) if layer_stack is not None else 2
+        model = router._kicad_length_model(num_layers)
+    except Exception:  # noqa: BLE001 - partial routers in tests
+        return None
+
+    def measure(routes: list[Route], net: int) -> float:
+        fragments = [r for r in routes if r.net == net]
+        if not fragments:
+            return 0.0
+        merged = Route(
+            net=net,
+            net_name=fragments[0].net_name,
+            segments=[s for r in fragments for s in r.segments],
+            vias=[v for r in fragments for v in r.vias],
+        )
+        segs, vias = route_geometry(merged)
+        return net_length(segs, vias, model.pads_by_net.get(net, []), model.stackup)
+
+    return measure
+
+
 def _covered_by(seg: Segment, old: Segment) -> bool:
     """True when ``seg`` lies on ``old``'s centreline, within its extent."""
     if seg.layer != old.layer:
@@ -501,7 +547,11 @@ def tighten_pair(
     z_max = model.target * (1 + tolerance / 100.0)
     floor_gap = float(router._pair_gap_mm(net_class))
 
+    checker_length = _checker_net_length_fn(router)
+
     def skew_of(routes: list[Route]) -> float:
+        if checker_length is not None:
+            return checker_length(routes, p_id) - checker_length(routes, n_id)
         return _net_length(_pair_segments(routes, p_id, editable=False)) - _net_length(
             _pair_segments(routes, n_id, editable=False)
         )
@@ -529,6 +579,9 @@ def tighten_pair(
 
     routes = list(router.routes)
     result.skew_before_mm = abs(skew_of(routes))
+    # Captured once: every squeeze is bounded against the pre-pass skew, not
+    # against the previous squeeze's copper, so drift cannot accumulate.
+    baseline_skew = result.skew_before_mm
     attempted: set[tuple] = set()
     first_decline: str | None = None
     target_gaps: list[float] = []
@@ -587,8 +640,11 @@ def tighten_pair(
 
         before_judged = judge(routes)
         before_conn = connected(routes)
-        p_len = _net_length(_pair_segments(routes, p_id, editable=False))
-        n_len = _net_length(_pair_segments(routes, n_id, editable=False))
+        if checker_length is not None:
+            p_len, n_len = checker_length(routes, p_id), checker_length(routes, n_id)
+        else:
+            p_len = _net_length(_pair_segments(routes, p_id, editable=False))
+            n_len = _net_length(_pair_segments(routes, n_id, editable=False))
         shorter, longer = ("p", "n") if p_len <= n_len else ("n", "p")
         old_bad = [
             s
@@ -649,6 +705,7 @@ def tighten_pair(
                     foreign_preserved=foreign_preserved,
                     skew_before=skew_of(routes),
                     skew_after=skew_of(candidate),
+                    baseline_skew=baseline_skew,
                     before_conn=before_conn,
                     connected=connected,
                     judge=judge,
@@ -702,6 +759,7 @@ def _gate(
     foreign_preserved: list[Route],
     skew_before: float,
     skew_after: float,
+    baseline_skew: float,
     before_conn: dict[int, int],
     connected: Any,
     judge: Any,
@@ -709,8 +767,11 @@ def _gate(
     before_judged: dict[int, tuple[bool, float, float]],
 ) -> str | None:
     """None when ``candidate`` may be committed, else ``declined:<reason>``."""
-    # Skew: unchanged to first order for a symmetric squeeze.
+    # Skew: unchanged to first order for a symmetric squeeze.  Bounded both
+    # per squeeze and, cumulatively, against the pair's pre-pass skew.
     if abs(skew_after) > abs(skew_before) + SKEW_TOLERANCE_MM:
+        return "declined:skew"
+    if abs(skew_after) > baseline_skew + CUMULATIVE_SKEW_EPS_MM:
         return "declined:skew"
     # Foreign pads / vias / copper at the class clearance, the partner at the
     # floored intra-pair gap (the same gate the skew tuner uses).

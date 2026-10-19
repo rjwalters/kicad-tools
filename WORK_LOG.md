@@ -15,6 +15,10 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-19
 
+- **PR #7408**: fix(ci): lower board 07 copper-safety DRC floor to 0
+- **PR #7396**: fix: key known_issues warning allowances by finding identity
+- **Issue #7389** (closed): Key readiness known_issues warning/error allowances by finding identity, not per-rule counts (#7359 follow-up, #7270 Q3)
+- **PR #7394**: feat: tighten diff-pair gaps in board 06/07 recipes, lower impedance caps
 - **PR #7404**: fix(blocks): build stock schematic blocks on KiCad 10 libs; add real-symbol smoke test
 - **PR #7395**: fix: clamp init netclass template values to manufacturer floors
 - **Issue #7392** (closed): kct init --design-type writes netclass values below the fab floor (oshpark/seeed Default clearance 0.15 < 0.1524 mm)

@@ -304,6 +304,174 @@ def test_usb3_tx2_45_degree_shape_is_tightened_into_band():
     _assert_45(ar)
 
 
+# --- Skew is bounded cumulatively, not per squeeze (#7349 review) ---------
+
+
+def _three_run_board():
+    """Three collinear 5 mm runs, P pinned by mid-trunk test pads.
+
+    Each P trunk segment carries a P-net test pad at its midpoint that only
+    just touches P's copper, so moving P strands it: only a single-rail N
+    squeeze can commit.  The gap sits
+    0.003 mm above the 110-ohm band edge, so only the last ladder rung fits
+    under ``SKEW_TOLERANCE_MM`` and each committed run lengthens N by about
+    0.0085 mm.  P starts 0.010 mm longer than N.
+    """
+    band = _gap_for(MIPI_W, 110.0)
+    cc = round(band + 0.003 + MIPI_W, 4)
+    y_p, y_n = 10.0, round(10.0 + cc, 4)
+    xs = [5.0, 10.0, 15.0, 20.0]
+
+    def rail(y, end_x):
+        segs = [((4.4, y), (5.0, y), MIPI_W)]
+        segs += [((a, y), (b, y), MIPI_W) for a, b in zip(xs, xs[1:], strict=False)]
+        return segs + [((20.0, y), (end_x, y), MIPI_W)]
+
+    rails = {1: rail(y_p, 20.61), 2: rail(y_n, 20.6)}
+    pads = [
+        ("U1", 1, (4.4, y_p)),
+        ("U2", 2, (4.4, y_n)),
+        ("J1", 1, (20.61, y_p)),
+        ("J2", 2, (20.6, y_n)),
+    ]
+    test_pads = [
+        # 0.05 mm pad on P's outer edge overlapping its copper by 0.0025 mm:
+        # any move of P toward N strands it.
+        (f"TP{i}", 1, "MIPI_DAT1_P", ((a + b) / 2, y_p - 0.135), 0.05)
+        for i, (a, b) in enumerate(zip(xs, xs[1:], strict=False))
+    ]
+    return _board(
+        "MIPI_DAT1_P", "MIPI_DAT1_N", _class(100.0, 10.0), rails, pads, extra_pads=test_pads
+    )
+
+
+def test_repeated_squeezes_never_worsen_pair_skew_beyond_pre_pass_value():
+    ar = _three_run_board()
+    skew_before = abs(_skew(ar))
+    assert skew_before == pytest.approx(0.01, abs=1e-6)
+
+    results = ar.apply_diffpair_gap_tightening(verbose=False, stackup=STACKUP)
+
+    res = results[("MIPI_DAT1_P", "MIPI_DAT1_N")]
+    assert len(res.runs) == 3, res
+    # Two runs fit under the pre-pass skew; the third would exceed it.
+    assert res.runs_tightened == 2, res
+    assert [r.mode for r in res.runs if r.status == "tightened"] == ["single_n", "single_n"]
+    # The third run is declined (its reported reason is the first rung's
+    # failure); the companion test below shows the cumulative skew bound is
+    # what declines it.
+    assert res.runs[2].status.startswith("declined:"), res
+    assert abs(_skew(ar)) <= skew_before + 1e-6
+    assert res.skew_after_mm <= res.skew_before_mm + 1e-6
+    assert _clearance_errors(ar) == []
+    assert _connected(ar) == {1: True, 2: True}
+    _assert_45(ar)
+
+
+def test_per_squeeze_tolerance_alone_lets_skew_drift(monkeypatch):
+    # Shows the fixture really compounds: without the cumulative bound every
+    # squeeze passes the 0.01 mm per-squeeze gate, and the pair ends up worse
+    # than it started (the board 06 USB3_RX1 +0.028 mm drift).
+    import kicad_tools.router.diffpair_gap_tightening as dgt
+
+    monkeypatch.setattr(dgt, "CUMULATIVE_SKEW_EPS_MM", math.inf)
+    ar = _three_run_board()
+    skew_before = abs(_skew(ar))
+
+    res = ar.apply_diffpair_gap_tightening(verbose=False, stackup=STACKUP)[
+        ("MIPI_DAT1_P", "MIPI_DAT1_N")
+    ]
+
+    assert res.runs_tightened == 3, res
+    assert abs(_skew(ar)) > skew_before + 0.005
+
+
+def _via_end_board():
+    """B.Cu trunk whose P run starts at a via covering the squeeze jog.
+
+    kicad-cli trims a run end inside a via to a straight line to its centre,
+    so a jog that starts inside P's via is partly trimmed while N's (its via
+    sits clear of the overlap) is measured in full: the raw segment skew is
+    unchanged by a symmetric squeeze, the ``kct check`` skew is not (the
+    board 06 USB3_RX1 mechanism).
+    """
+    from kicad_tools.router.primitives import Via
+
+    y_p, y_n = 10.0, 10.6
+    names = {1: "MIPI_DAT1_P", 2: "MIPI_DAT1_N"}
+
+    def rail(net, y, via_x):
+        segs = [
+            _seg(net, names[net], (4.4, y), (via_x, y), MIPI_W),
+            _seg(net, names[net], (via_x, y), (20.3, y), MIPI_W, Layer.B_CU),
+            _seg(net, names[net], (20.3, y), (20.6, y), MIPI_W),
+        ]
+        vias = [
+            Via(x, y, 0.2, 0.4, (Layer.F_CU, Layer.B_CU), net=net, net_name=names[net])
+            for x in (via_x, 20.3)
+        ]
+        return Route(net=net, net_name=names[net], segments=segs, vias=vias)
+
+    pads = [
+        ("U1", 1, (4.4, y_p)),
+        ("U2", 2, (4.4, y_n)),
+        ("J1", 1, (20.6, y_p)),
+        ("J2", 2, (20.6, y_n)),
+    ]
+    ar = _board("MIPI_DAT1_P", "MIPI_DAT1_N", _class(100.0, 10.0), {1: [], 2: []}, pads)
+    ar.routes = [rail(1, y_p, 5.0), rail(2, y_n, 4.6)]
+    return ar
+
+
+def _checker_skew(ar):
+    """Pair skew the way ``kct check`` measures it (router tuner form)."""
+    measure = ar._checker_route_length(2)
+
+    def net_len(net):
+        frags = [r for r in ar.routes if r.net == net]
+        merged = Route(
+            net=net,
+            net_name=frags[0].net_name,
+            segments=[s for r in frags for s in r.segments],
+            vias=[v for r in frags for v in r.vias],
+        )
+        return measure(merged)
+
+    return net_len(1) - net_len(2)
+
+
+def test_skew_gate_uses_the_kct_check_length_not_raw_segments():
+    ar = _via_end_board()
+    before = _snapshot(ar)
+    skew_before = abs(_checker_skew(ar))
+
+    res = ar.apply_diffpair_gap_tightening(verbose=False, stackup=STACKUP)[
+        ("MIPI_DAT1_P", "MIPI_DAT1_N")
+    ]
+
+    assert abs(_checker_skew(ar)) <= skew_before + 1e-6
+    assert res.reason == "declined:skew", res
+    assert _snapshot(ar) == before
+
+
+def test_raw_segment_skew_misses_the_via_trim(monkeypatch):
+    # Without the checker length model the same squeeze is committed: the raw
+    # segment skew is unchanged but ``kct check``'s skew gets ~0.01 mm worse.
+    import kicad_tools.router.diffpair_gap_tightening as dgt
+
+    monkeypatch.setattr(dgt, "_checker_net_length_fn", lambda router: None)
+    ar = _via_end_board()
+    raw_before, skew_before = _skew(ar), abs(_checker_skew(ar))
+
+    res = ar.apply_diffpair_gap_tightening(verbose=False, stackup=STACKUP)[
+        ("MIPI_DAT1_P", "MIPI_DAT1_N")
+    ]
+
+    assert res.reason == "tightened", res
+    assert _skew(ar) == pytest.approx(raw_before, abs=1e-6)
+    assert abs(_checker_skew(ar)) > skew_before + 0.005
+
+
 # --- No-op on an in-band pair (board 03 style, ~89 ohm of 90) -------------
 
 

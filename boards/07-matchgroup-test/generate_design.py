@@ -2260,6 +2260,11 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
         ",".join(skip_nets),
         "--net-class-map",
         str(sidecar_path),
+        # Issue #7349 (follow-up to #7344): the pairs route single-ended
+        # (see the --differential-pairs note above), so their parallel trunks
+        # keep the breakout pitch.  The opt-in post-route pass squeezes each
+        # declared pair's trunk to the impedance-solved gap.
+        "--tighten-diffpair-gap",
         "--length-match-groups",
     ]
 
