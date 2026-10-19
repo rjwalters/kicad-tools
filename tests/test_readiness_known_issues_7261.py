@@ -17,6 +17,7 @@ from kicad_tools.cli import readiness_cmd
 from kicad_tools.cli.board_readiness import read_readiness
 from kicad_tools.cli.known_issues import (
     KnownIssueError,
+    identity_key,
     known_error_allowance,
     known_warning_allowance,
     match_warning_allowance,
@@ -610,3 +611,22 @@ def test_an_identity_cannot_be_listed_by_two_issues():
     two = parse_known_issue("2:b:exception:!via@1/2", "2026-10-18")
     with pytest.raises(KnownIssueError, match="listed by both #1 and #2"):
         validate_known_issues([one, two])
+
+
+def test_both_identity_shapes_share_one_checker_and_one_key():
+    pad = {"rule": "via", "ref": "U1", "pad": "U1-1"}
+    at = {"rule": "via", "at": [1.0, 2.0]}
+    assert identity_key(pad) != identity_key(at)
+    assert sorted([identity_key(pad), identity_key(at)]) == [identity_key(at), identity_key(pad)]
+    entry = {"issue": 1, "kind": "exception", "summary": "s", "recorded": "2026-10-18"}
+    # Each field accepts only its own shape, with the same checker's errors.
+    with pytest.raises(
+        KnownIssueError, match=r"warnings identity must be exactly \{rule, ref, pad\}"
+    ):
+        validate_known_issues([{**entry, "warnings": [at]}])
+    with pytest.raises(KnownIssueError, match=r"errors identity must be exactly \{rule, at"):
+        validate_known_issues([{**entry, "errors": [pad]}])
+    # Sorting and ownership use the same key: a repeated key is rejected in either field.
+    for field, item in (("warnings", pad), ("errors", at)):
+        with pytest.raises(KnownIssueError, match="more than once"):
+            validate_known_issues([{**entry, field: [item, item]}])

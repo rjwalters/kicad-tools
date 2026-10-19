@@ -7,65 +7,68 @@ import type { KnownIssue, Readiness } from "./types.ts";
 const KNOWN_ISSUE_KINDS = ["defect", "exception", "advisory"];
 const KNOWN_ISSUE_KEYS = new Set(["issue", "kind", "summary", "recorded", "warnings", "errors"]);
 
-const IDENTITY_KEYS = ["rule", "ref", "pad"] as const;
+type Shape = "pad" | "at";
+const SHAPE_KEYS: Record<Shape, readonly string[]> = { pad: ["rule", "ref", "pad"], at: ["rule", "at"] };
+const SORT_ORDER: Record<Shape, string> = { pad: "(rule, ref, pad)", at: "(rule, x, y)" };
 
-function tupleLess(a: string[], b: string[]): boolean {
+type Identity = { rule: string; ref?: string; pad?: string; at?: [number, number] };
+type IdentityKey = [string, string, string, number, number, number];
+
+/** Mirrors `identity_key` in `known_issues.py`: one key for sorting, duplicates and ownership. */
+function identityKey(item: Identity): IdentityKey {
+  const [x, y] = item.at ?? [0, 0];
+  return [item.rule, item.ref ?? "", item.pad ?? "", item.at ? 1 : 0, x, y];
+}
+
+function keyLess(a: IdentityKey, b: IdentityKey): boolean {
   for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return a[i] < b[i];
   return false;
 }
 
-/** Mirrors `_check_warnings` in `known_issues.py` (#7389): sorted, unique `{rule, ref, pad}` identities. */
-function checkWarnings(warnings: unknown, issue: number, owners: Map<string, number>): void {
-  const bad = (why: string) => new Error(`invalid warnings for known issue #${issue}: ${why}`);
-  if (!Array.isArray(warnings) || warnings.length === 0) throw bad("expected a non-empty list");
-  let previous: string[] | null = null;
-  for (const item of warnings) {
-    if (!item || typeof item !== "object" || Array.isArray(item)
-      || Object.keys(item).length !== IDENTITY_KEYS.length || IDENTITY_KEYS.some(k => !(k in item))) {
-      throw bad("an identity must be exactly {rule, ref, pad}");
+/** Mirrors `_check_identities` in `known_issues.py` (#7389, #7355): sorted, unique identities of the accepted shapes. */
+function checkIdentities(
+  value: unknown, field: "warnings" | "errors", shapes: Shape[], issue: number, owners: Map<string, number>,
+): void {
+  const bad = (why: string) => new Error(`invalid ${field} for known issue #${issue}: ${why}`);
+  const expected = shapes.map(s => `{${SHAPE_KEYS[s].map(k => (k === "at" ? "at: [x_mm, y_mm]" : k)).join(", ")}}`).join(" or ");
+  if (!Array.isArray(value) || value.length === 0) throw bad("expected a non-empty list");
+  let previous: IdentityKey | null = null;
+  for (const item of value) {
+    const keys = item && typeof item === "object" && !Array.isArray(item) ? Object.keys(item) : [];
+    const shape = shapes.find(s => keys.length === SHAPE_KEYS[s].length && SHAPE_KEYS[s].every(k => keys.includes(k)));
+    if (!shape) throw bad(`an identity must be exactly ${expected}`);
+    const record = item as Record<string, unknown>;
+    if (typeof record.rule !== "string" || !/^[A-Za-z0-9_.-]+$/.test(record.rule)) throw bad(`invalid rule id ${String(record.rule)}`);
+    let identity: Identity;
+    let text: string;
+    if (shape === "at") {
+      const at = record.at;
+      if (!Array.isArray(at) || at.length !== 2 || !at.every(c => typeof c === "number" && Number.isFinite(c))) {
+        throw bad("at must be [x_mm, y_mm]");
+      }
+      const [x, y] = at as [number, number];
+      if (Object.is(x, -0) || Object.is(y, -0) || Number(x.toFixed(2)) !== x || Number(y.toFixed(2)) !== y) {
+        throw bad("at must be rounded to 0.01 mm");
+      }
+      identity = { rule: record.rule, at: [x, y] };
+      text = `${record.rule} at ${x}/${y}`;
+    } else {
+      for (const key of ["ref", "pad"]) {
+        const part = record[key];
+        if (typeof part !== "string" || !part || part !== part.trim()) throw bad(`${key} must be non-empty, trimmed text`);
+      }
+      identity = { rule: record.rule, ref: record.ref as string, pad: record.pad as string };
+      text = `${record.rule} ${record.pad}`;
     }
-    for (const key of IDENTITY_KEYS) {
-      const text = (item as Record<string, unknown>)[key];
-      if (typeof text !== "string" || !text || text !== text.trim()) throw bad(`${key} must be non-empty, trimmed text`);
+    const key = identityKey(identity);
+    const id = JSON.stringify(key);
+    const owner = owners.get(id);
+    if (owner !== undefined) {
+      throw bad(owner === issue ? `${text} is listed more than once` : `${text} is listed by both #${owner} and #${issue}`);
     }
-    const { rule, ref, pad } = item as Record<string, string>;
-    if (!/^[A-Za-z0-9_.-]+$/.test(rule)) throw bad(`invalid rule id ${rule}`);
-    const key = JSON.stringify([rule, ref, pad]);
-    if (owners.has(key)) throw bad(`${rule} ${pad} is listed more than once`);
-    const tuple = [rule, ref, pad];
-    if (previous && !tupleLess(previous, tuple)) throw bad("identities must be sorted by (rule, ref, pad)");
-    previous = tuple;
-    owners.set(key, issue);
-  }
-}
-
-/** Mirrors `_check_errors` in `known_issues.py` (#7355): sorted, unique `{rule, at: [x_mm, y_mm]}` (0.01 mm). */
-function checkErrors(errors: unknown, issue: number, owners: Map<string, number>): void {
-  const bad = (why: string) => new Error(`invalid errors for known issue #${issue}: ${why}`);
-  if (!Array.isArray(errors) || errors.length === 0) throw bad("expected a non-empty list");
-  let previous: [string, number, number] | null = null;
-  for (const item of errors) {
-    if (!item || typeof item !== "object" || Array.isArray(item)
-      || Object.keys(item).length !== 2 || !("rule" in item) || !("at" in item)) {
-      throw bad("an identity must be exactly {rule, at: [x_mm, y_mm]}");
-    }
-    const { rule, at } = item as { rule: unknown; at: unknown };
-    if (typeof rule !== "string" || !/^[A-Za-z0-9_.-]+$/.test(rule)) throw bad(`invalid rule id ${String(rule)}`);
-    if (!Array.isArray(at) || at.length !== 2 || !at.every(c => typeof c === "number" && Number.isFinite(c))) {
-      throw bad("at must be [x_mm, y_mm]");
-    }
-    const [x, y] = at as [number, number];
-    if (Object.is(x, -0) || Object.is(y, -0) || Number(x.toFixed(2)) !== x || Number(y.toFixed(2)) !== y) {
-      throw bad("at must be rounded to 0.01 mm");
-    }
-    const key = JSON.stringify(["error", rule, x, y]);
-    if (owners.has(key)) throw bad(`${rule} at ${x}/${y} is listed more than once`);
-    if (previous && !(previous[0] < rule || (previous[0] === rule
-      && (previous[1] < x || (previous[1] === x && previous[2] < y))))) {
-      throw bad("identities must be sorted by (rule, x, y)");
-    }
-    previous = [rule, x, y];
-    owners.set(key, issue);
+    if (previous && !keyLess(previous, key)) throw bad(`identities must be sorted by ${SORT_ORDER[shapes[0]]}`);
+    previous = key;
+    owners.set(id, issue);
   }
 }
 
@@ -87,10 +90,10 @@ export function validateKnownIssues(value: unknown): KnownIssue[] {
     if (typeof recorded !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(recorded) || !Number.isFinite(Date.parse(recorded))) {
       throw new Error(`invalid recorded date for known issue #${issue}`);
     }
-    if (warnings !== undefined) checkWarnings(warnings, issue, owners);
+    if (warnings !== undefined) checkIdentities(warnings, "warnings", ["pad"], issue, owners);
     if (errors !== undefined) {
       if (kind !== "exception") throw new Error(`only an exception may carry errors (known issue #${issue})`);
-      checkErrors(errors, issue, owners);
+      checkIdentities(errors, "errors", ["at"], issue, owners);
     }
   }
   return value as KnownIssue[];

@@ -175,6 +175,7 @@ it("accepts canonical exception error identities and rejects malformed ones (#73
     "string form": ["dimension_via_drill@10.00/20.50"],
     "unrounded": [{ rule: "dimension_via_drill", at: [10.001, 20.5] }],
     "extra key": [{ rule: "dimension_via_drill", ref: "U1", at: [10, 20.5] }],
+    "pad shape": [{ rule: "dimension_via_drill", ref: "U1", pad: "U1-1" }],
     "unsorted": [ids[1], ids[0]],
     "duplicate": [ids[0], ids[0]],
     "empty": [],
