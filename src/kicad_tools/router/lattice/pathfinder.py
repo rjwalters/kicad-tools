@@ -641,13 +641,20 @@ class LatticePathfinder:
     def set_pad_class_clearances(self, values: list[float] | None) -> None:
         """Install (or clear) the per-pad net-class clearances (#6395).
 
-        ``values`` aligns with :attr:`pads`.  The search model does not read
-        them -- see :mod:`.class_pad_repair` for why the pair is enforced on
-        the negotiated copper instead -- so this never rebuilds the lattice.
+        ``values`` aligns with :attr:`pads`.  The search's keep-out rectangles
+        do not read them -- see :mod:`.class_pad_repair` for why the pair is
+        enforced on the negotiated copper instead -- but the exact-outline pad
+        test inside those rectangles does (issue #7503).  A change of values
+        after the static model was built rebuilds the pad masks only (never
+        the lattice); re-installing the same values is a no-op.
         """
         if values is not None and len(values) != len(self.pads):
             raise ValueError("pad_class_clearances must align with pads")
-        self.pad_class_clearances = list(values) if values is not None else None
+        new = list(values) if values is not None else None
+        changed = new != self.pad_class_clearances
+        self.pad_class_clearances = new
+        if changed and self._lattice is not None and self._obstacles is not None:
+            self._obstacles = self._make_obstacles(self._lattice)
 
     def set_keepouts(self, keepouts: LatticeKeepoutMask | None) -> None:
         """Install (or clear) the keepout rule-area mask (#4605).
@@ -713,15 +720,40 @@ class LatticePathfinder:
             return self._lattice
         self.lattice_builds += 1
         self._lattice = OctilinearLattice(self._bbox, self._refine_regions(), coarse=self.coarse)
-        self._obstacles = LatticeObstacleModel(
-            self._lattice,
+        self._obstacles = self._make_obstacles(self._lattice)
+        return self._lattice
+
+    def _make_obstacles(self, lattice: OctilinearLattice) -> LatticeObstacleModel:
+        return LatticeObstacleModel(
+            lattice,
             self.pads,
             [self._pad_layer_indices(p) for p in self.pads],
             self.num_layers,
             self._agent_radius,
             pad_extra=self._authored_pad_extra(),
+            pad_class_extra=self._class_outline_extra(),
         )
-        return self._lattice
+
+    def _class_outline_extra(self) -> list[float] | None:
+        """Per-pad class requirement above the base clearance (issue #7503).
+
+        The pad side of the KiCad pair rule (``pad_class_requirements``: pad
+        class, authored floor, base) minus the base clearance baked into the
+        agent radius.  It tightens only the exact-outline pad test, inside the
+        unchanged keep-out rectangle, so a point diagonal to a rounded corner
+        is released only when it clears the pad's class -- the gap the old
+        bounding square hid.  ``None`` when no pad classes are installed.
+        """
+        if self.pad_class_clearances is None:
+            return None
+        from .class_pad_repair import pad_class_requirements
+
+        reqs = pad_class_requirements(self)
+        if reqs is None:
+            return None
+        base = self.rules.trace_clearance
+        out = [max(0.0, r - base) for r in reqs]
+        return out if any(v > 0.0 for v in out) else None
 
     @property
     def obstacles(self) -> LatticeObstacleModel:

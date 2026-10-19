@@ -77,3 +77,99 @@ def test_circle_and_oval(shape):
     d_ok = (0.5 + 0.25) / 2**0.5
     assert not _hit(model, (d_ok, d_ok))
     assert _hit(model, (0.69 / 2**0.5, 0.69 / 2**0.5))
+
+
+# -- issue #7503 follow-up: the exact outline keeps the pad's net class ------
+#
+# Board 03 at seed 42: JOY_X (Digital, 0.15 mm) was laid 0.166 mm from the
+# rounded corner of GND pad Y1.4 (Power, 0.2 mm), inside the old bounding
+# square but outside a 0.15 mm exact keep-out, and the post-route authored
+# backstop demoted the net.  Y1.4 is a 1.4 x 1.2 roundrect, rratio 0.208333
+# (corner radius 0.25), the probe a 0.2 mm track over a 0.15 mm board default.
+
+Y1_HALF_TRACE = 0.1
+Y1_BASE_CLEARANCE = 0.15
+Y1_CLASS_CLEARANCE = 0.2
+
+
+def _y1_pad() -> Pad:
+    pad = _pad(x=135.4, y=84.65, width=1.4, height=1.2, net=6, net_name="GND")
+    pad.shape = "roundrect"
+    pad.roundrect_rratio = 0.208333
+    return pad
+
+
+def _y1_probe(copper_gap: float) -> tuple[float, float]:
+    """Track centre diagonal to Y1.4's +x/+y rounded corner at ``copper_gap``."""
+    r = 1.2 * 0.208333  # KiCad: rratio x min(width, height)
+    cx, cy = 135.4 + 0.7 - r, 84.65 + 0.6 - r
+    d = (r + copper_gap + Y1_HALF_TRACE) / 2**0.5
+    return (cx + d, cy + d)
+
+
+def _y1_model(class_extra: list[float] | None) -> LatticeObstacleModel:
+    lattice = SimpleNamespace(nodes={}, edges=[])
+    return LatticeObstacleModel(
+        lattice,  # type: ignore[arg-type]
+        [_y1_pad()],
+        [(0,)],
+        2,
+        Y1_HALF_TRACE + Y1_BASE_CLEARANCE,
+        pad_class_extra=class_extra,
+    )
+
+
+def test_y1_corner_probe_inside_bounding_square():
+    # Guard on the fixture: the probe is inside the broad-phase rectangle, so
+    # it is the exact test (not the rectangle) that decides.
+    model = _y1_model(None)
+    x, y = _y1_probe(0.166)
+    x0, y0, x1, y1 = model.pad_rects[0]
+    assert x0 < x < x1 and y0 < y < y1
+
+
+def test_y1_corner_rejected_at_pad_class():
+    model = _y1_model([Y1_CLASS_CLEARANCE - Y1_BASE_CLEARANCE])
+    assert model.segment_blocked(*(_y1_probe(0.166),) * 2, 0, net=12)
+    assert model.segment_blocked(*(_y1_probe(0.199),) * 2, 0, net=12)
+    # The corner is still released once the class is cleared.
+    assert not model.segment_blocked(*(_y1_probe(0.21),) * 2, 0, net=12)
+
+
+def test_y1_corner_without_class_is_the_base_clearance():
+    # No class installed: the exact test is the board default (0.15 mm), the
+    # pre-follow-up behaviour, which is what let JOY_X in at 0.166 mm.
+    model = _y1_model(None)
+    assert not model.segment_blocked(*(_y1_probe(0.166),) * 2, 0, net=12)
+    assert model.segment_blocked(*(_y1_probe(0.14),) * 2, 0, net=12)
+
+
+def test_class_never_grows_the_rectangle():
+    # Edge band beyond the rectangle stays with class_pad_repair (#6395): the
+    # class may only tighten the exact test, never block more than main did.
+    plain = _y1_model(None)
+    classed = _y1_model([Y1_CLASS_CLEARANCE - Y1_BASE_CLEARANCE])
+    assert plain.pad_rects == classed.pad_rects
+    # 0.17 mm straight off the +x edge: outside the 0.15 rectangle.
+    p = (135.4 + 0.7 + 0.17 + Y1_HALF_TRACE, 84.65)
+    assert not classed.segment_blocked(p, p, 0, net=12)
+
+
+def test_pathfinder_feeds_pad_class_into_outline_test():
+    from kicad_tools.router.lattice.pathfinder import LatticePathfinder
+    from kicad_tools.router.rules import DesignRules
+
+    rules = DesignRules(trace_width=0.2, trace_clearance=Y1_BASE_CLEARANCE)
+    pad = _y1_pad()
+    outline = [(130.0, 80.0), (140.0, 80.0), (140.0, 90.0), (130.0, 90.0)]
+    pf = LatticePathfinder(outline, [pad], rules)
+    probe = _y1_probe(0.166)
+    assert not pf.obstacles.segment_blocked(probe, probe, 0, net=12)
+    builds = pf.lattice_builds
+    pf.set_pad_class_clearances([Y1_CLASS_CLEARANCE])
+    assert pf.obstacles.segment_blocked(probe, probe, 0, net=12)
+    # Masks rebuilt, lattice not; re-installing the same values is a no-op.
+    assert pf.lattice_builds == builds
+    obstacles = pf.obstacles
+    pf.set_pad_class_clearances([Y1_CLASS_CLEARANCE])
+    assert pf.obstacles is obstacles

@@ -153,6 +153,10 @@ class LatticeObstacleModel:
             caller against the real :class:`~kicad_tools.router.layers.LayerStack`.
         num_layers: copper layer count of the stack.
         agent_radius: half trace width + clearance (Minkowski inflation).
+        pad_extra: per-pad growth of the keep-out rectangle AND exact test
+            (authored / grown floors above the base clearance).
+        pad_class_extra: per-pad net-class requirement above the base
+            clearance; tightens only the exact-outline test (issue #7503).
     """
 
     def __init__(
@@ -163,6 +167,7 @@ class LatticeObstacleModel:
         num_layers: int,
         agent_radius: float,
         pad_extra: list[float] | None = None,
+        pad_class_extra: list[float] | None = None,
     ) -> None:
         self.lattice = lattice
         self.pads = pads
@@ -176,14 +181,24 @@ class LatticeObstacleModel:
         # clearance baked into ``agent_radius`` -- the pad's own side of the
         # pair, honoured by every predicate that reads ``pad_rects``.
         self.pad_rects: list[Rect] = []
-        # Euclidean inflation radius per pad (agent radius + its own growth).
+        # Euclidean inflation radius per pad for the exact-outline test
+        # (issue #7503): agent radius + the larger of its own growth and
+        # ``pad_class_extra[i]``, the amount the pad's net-class requirement
+        # exceeds the board-global clearance.  The class side only tightens
+        # the exact test INSIDE the unchanged broad-phase rectangle, so a
+        # point the old bounding square blocked is released only when it
+        # also clears the pad's class (the pair rule a 0.2 mm Power pad next
+        # to a 0.15 mm board default needs) -- never more than main blocked,
+        # and the edge band beyond the rectangle stays with
+        # :mod:`.class_pad_repair` exactly as before.
         self._pad_reach: list[float] = []
         for i, pad in enumerate(pads):
             half_w, half_h = pad_half_extents(pad)
             grow = pad_extra[i] if pad_extra is not None else 0.0
+            class_grow = pad_class_extra[i] if pad_class_extra is not None else 0.0
             hx = half_w + agent_radius + grow
             hy = half_h + agent_radius + grow
-            self._pad_reach.append(agent_radius + grow)
+            self._pad_reach.append(agent_radius + max(grow, class_grow))
             self.pad_rects.append((pad.x - hx, pad.y - hy, pad.x + hx, pad.y + hy))
 
         self._pad_outlines: dict[int, ka.KPad] = {}
@@ -236,10 +251,11 @@ class LatticeObstacleModel:
         """True when segment ``a-b`` enters pad ``idx``'s keep-out (issue #7503).
 
         The keep-out is the pad's TRUE copper outline (circle, oval, roundrect
-        with a known ratio, rotated) grown by ``agent_radius + pad_extra +
-        extra`` -- exactly the set the DRC engines reject -- rather than the
-        inflated bounding rectangle ``pad_rects`` holds, which stays the broad
-        phase.  Callers pass only pads whose rectangle already hit, so the
+        with a known ratio, rotated) grown by ``agent_radius + max(pad_extra,
+        pad_class_extra) + extra`` -- the set the DRC engines reject under the
+        pair rule ``max(class(probe), class(pad))`` (the probe's side rides on
+        ``extra``) -- rather than the inflated bounding rectangle ``pad_rects``
+        holds, which stays the broad phase.  Callers pass only pads whose rectangle already hit, so the
         rectangle (a superset of the true keep-out) never lets a hit slip
         through.  Boundary contact counts as a hit, as the rectangle did.
         """
