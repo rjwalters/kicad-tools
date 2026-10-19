@@ -1021,7 +1021,7 @@ class KiCadToDSNExporter:
         if not outline or self._edge_clearance <= 0:
             return outline
         try:
-            from shapely.geometry import Polygon  # type: ignore[import-untyped]
+            from shapely.geometry import Polygon
 
             poly = Polygon(outline)
             inset = poly.buffer(-self._edge_clearance, join_style=2) if poly.is_valid else None
