@@ -1036,12 +1036,12 @@ class KiCadToDSNExporter:
         lines.append("  (structure")
 
         # Layers
-        for layer in self._layers:
+        for index, layer in enumerate(self._layers):
             dsn_layer = KICAD_TO_DSN_LAYER.get(layer, layer)
             lines.append(f"    (layer {_dsn_quote(dsn_layer)}")
             lines.append("      (type signal)")
             lines.append("      (property")
-            lines.append("        (index 0)")
+            lines.append(f"        (index {index})")
             lines.append("      )")
             lines.append("    )")
 
