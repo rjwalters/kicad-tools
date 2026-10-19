@@ -49,15 +49,6 @@ Demonstrates circuit blocks API
 - **Fine-pitch components**: 1 (U2)
 - **Polarized components**: 1 -- check orientation markings
 
-## Hand-Solder (THT) Components
-
-The following 2 through-hole components are **excluded from the SMT pick-and-place file** and must be hand-soldered (or wave/selective-soldered) after SMT assembly. They appear in the BOM for sourcing.
-
-| Value | Package | Qty | References |
-|-------|---------|-----|------------|
-| SWD-6 | PinHeader_1x06_P2.54mm_Vertical | 1 | J1 |
-| 8MHz | Crystal_HC49-4H_Vertical | 1 | Y1 |
-
 ## ERC Status
 
 Native KiCad ERC: **0 errors, 0 warnings**. The real MCP1825S pinout and
@@ -146,8 +137,9 @@ paid 0.15mm mechanical-drill option, two layers, 1.6mm FR4, 1oz copper and
 tented through vias. There are no laser microvias or drill overlaps with SMT
 lands. U1 must be MCP1825S-3302E/DB (C148031); do not fit AMS1117.
 
-Use the 15-placement SMT BOM/CPL, then manually solder J1 and Y1 from the
-separate through-hole BOM. Power only from regulated 5V. First-article supply,
+Use the 17-placement BOM/CPL: 15 SMT parts plus the through-hole J1 and Y1,
+which JLCPCB assembles (procurement must review those rows; see
+procurement-review.md). Power only from regulated 5V. First-article supply,
 thermal/load, SWD, crystal, reset and LED tests remain unperformed; see
 DESIGN_REVIEW.md. Geometric readiness does not claim physical qualification.
 
