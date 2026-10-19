@@ -580,7 +580,7 @@ def test_clearance_comes_from_the_board_rules(source, origin, tmp_path):
 @pytest.mark.parametrize("output_caps", [["C2"], ["C2", "C3"]])
 def test_stock_ldo_block_applies_clean_in_strict_mode(tmp_path, output_caps):
     """The stock LDOBlock's own copper lands on its pads and shorts nothing (#7062)."""
-    refs = {**REFS, **{c: "C_0805_2012Metric" for c in output_caps}}
+    refs = {**REFS, **dict.fromkeys(output_caps, "C_0805_2012Metric")}
     pad_nets = [t for t in PAD_NETS if t[0] in refs]
     pad_nets += [(c, "1", "+3V3") for c in output_caps if c != "C2"]
     pad_nets += [(c, "2", "GND") for c in output_caps if c != "C2"]
