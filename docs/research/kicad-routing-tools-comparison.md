@@ -1131,6 +1131,125 @@ measured a matcher.**
    group ceiling is spent first. The other limit is BYTE1's unfinished DQ9,
    which is a routing problem.
 
+10. **The ceiling starves the largest-deficit members because of visit
+    order (Issue #5798).** This item is a unit-level result. No board 07
+    route was run for it, so it makes no claim about board 07's spreads.
+    `_tune_match_group_single_ended` visited members in `group.net_ids`
+    (declaration) order. Item 9 shows the 16-insert ceiling spent before A9
+    and A11 are tried. The reproducer is
+    `tests/test_match_group_tuning.py::TestCascadeBudget::test_ceiling_is_spent_on_largest_deficits_first`:
+    a 14-net group of nine members 2 mm short and four members 30 mm short
+    (the per-member cap of 2 inserts each), so demand is 17 inserts against
+    the ceiling of 16. In declaration order the last 30 mm member got one
+    insert and reported `cascade_budget_exhausted`. Members are now visited
+    by descending deficit (ties keep declaration order), so every 30 mm
+    member gets its two inserts and the one 2 mm member that closes the least
+    skew reports `cascade_budget_exhausted`. The returned dict is still in
+    declaration order. `MAX_TOTAL_INSERTS_PER_GROUP` and the per-member caps
+    are unchanged; item 7 refutes them as the lever.
+
+    This does not close SDRAM_ADDRESS. BA0 and BA1 still need about 40 mm
+    each and the per-member cap supplies 7.8 and 11.7 mm (item 9), so the
+    group stays over 5.0 mm at current limits. What the change buys is that
+    the ceiling is spent on the members that set the group's minimum. Whether
+    that moves board 07's ADDRESS spread is unmeasured here.
+
+    Original acceptance criteria 3 and 4 are met: item 8 shows
+    `--length-match-groups` costs no connections (160/161 on and off) and
+    item 9 shows it adds no kicad-cli error under either rule set after
+    #7162. The kct and ref rows of `krt_compare.py` were re-run in items 8
+    and 9; KRT rows are reused from pass 2.
+
+11. **After #7375: re-measured on a complete route; BYTE0 closes with a
+    ceiling top-up, ADDRESS is limited by host room (Issue #5798).**
+    Measured on 2026-10-19 at `main` `91007182d` (includes #7375) with C++
+    build 60, `--no-cache --seed 42`, on the same local host (load average
+    about 5-12). The scratch map and command are item 9's: `kct route
+    --preserve-existing --net-class-map <scratch>` with and without
+    `--length-match-groups`, uncapped, run concurrently. kicad-cli is the
+    pinned image (10.0.6), one board at a time, against the input board's
+    `.kicad_pro`. Counters come from the same `reason` / `inserts_applied`
+    wrapper as items 7 and 8.
+
+    **Input.** Both runs finish (flag off 350 s, flag on 362 s): 160/161
+    connections, 54/55 nets, kicad-cli 0 errors (2 warnings, 1 unconnected).
+    Both exit on item 9's 14 kept-input-copper clearance findings. The
+    flag-off board is the same board as items 8 and 9 (2-D spreads 18.33 /
+    57.62 / 50.68 / 19.49 mm). This 160/161 board is not manufacturable.
+
+    **`kct retune-lengths`, one group per run, on the flag-off output.**
+    Spreads are via-inclusive, as `kct check` and the tuner measure them
+    (#3931), in mm:
+
+    | Group | Item 8 (before #7375) | After #7375 | After the top-up (this item) | Counters after the top-up |
+    |---|---|---|---|---|
+    | SDRAM_ADDRESS (14/14) | 52.44 → 41.69 | 52.44 → 41.69 | 52.44 → 41.69 (not written) | 16/16 ceiling. BA0 (net 21) 24.44 → 35.19 and BA1 (net 22) 26.19 → 37.33, each one meander then `no_suitable_segment`. A1, A4 `cascade_budget_exhausted` at 63 mm (they do not set the minimum) |
+    | SDRAM_BYTE0 (9/9) | 20.21 → 5.80 | 20.21 → 5.80 | 20.21 → **4.89** (written) | 13/16. DQ6 (net 14) 38.67 → 45.63 with 3 inserts; before the top-up it stopped at 43.70, `exceeded_max_inserts` at 2 with 4 ceiling inserts unused |
+    | SDRAM_BYTE1 (8/9) | 61.89 → 61.89 | 61.89 → 61.89 | 61.89 → 61.89 (rolled back) | DQ9 is the 0.70 mm stub (`no_suitable_segment`) |
+    | SDRAM_COMMAND (6/6) | 20.69 → 4.46 | 20.69 → 4.46 | 20.69 → 4.46 (written) | 8/16, no member capped |
+
+    #7375 moves no `retune-lengths` number on board 07. It changes which
+    ADDRESS members get the ceiling (A11 is now tried; A1 and A4 starve
+    instead), but the members that set the minimum, BA0 and BA1, stop on
+    host room after one meander, not on the ceiling. Item 8 recorded the
+    same stop in declaration order.
+
+    **Fix: one top-up round from the unused ceiling.** BYTE0's counters name
+    the limit: DQ6 stopped at the per-member cap of 2, 0.8 mm short, with 4 of
+    the 16 ceiling inserts unused. The per-member cap exists to share the
+    ceiling between members. So after the first pass, a member that stopped
+    at its cap (`exceeded_max_inserts`) now gets one more insert from the
+    leftover ceiling, largest remaining deficit first
+    (`_tune_match_group_single_ended`, `match_group_tuning.py`). The ceiling
+    still bounds the total. An explicit `max_inserts_per_member` stays a hard
+    cap, and a group whose ceiling is spent (ADDRESS) is unchanged. BYTE0
+    goes from 5.80 to **4.89 mm**, inside 5.0, and `retune-lengths` writes
+    the board. kicad-cli scores the tuned board and the untuned input the
+    same: **0 errors**, 2 warnings, 1 unconnected. The unit tests are
+    `TestCascadeBudget::test_capped_member_tops_up_from_unused_ceiling`,
+    `test_topup_is_one_round_only` and
+    `test_explicit_per_member_budget_gets_no_topup`.
+
+    **`kct route --length-match-groups` (route-time tuner).** The tuner's own
+    via-inclusive skew, then the 2-D spread over finished members that items
+    8 and 9 report:
+
+    | Group | Item 9, 2-D | After #7375: tuner skew | After #7375, 2-D | With the top-up, 2-D |
+    |---|---|---|---|---|
+    | SDRAM_BYTE0 | 3.16 | 20.21 → 4.75 | 3.16 | 3.16 (11/16 inserts, no member capped) |
+    | SDRAM_BYTE1 ¹ | 19.78 | 61.89 → 61.89 | 19.78 | **16.08** (DQ15 gets a third insert) |
+    | SDRAM_ADDRESS | 42.89 | 52.44 → 44.68 | 42.76 | 42.76 (16/16 ceiling spent) |
+    | SDRAM_COMMAND | 5.18 | 20.69 → 4.94 | 5.60 | 5.60 (7/16, no member capped) |
+
+    ¹ 8 of 9 members finished; DQ9 is the 0.70 mm stub on every run.
+
+    With the top-up the flag-on run takes 341 s and is still 160/161 with 0
+    kicad-cli errors. On ADDRESS the route-time path gives BA0 and BA1 their
+    two meanders at the cap (24.44 → 32.21 and 26.19 → 37.88 mm,
+    `exceeded_max_inserts`) and spends the ceiling before A0, A1 and A4. The
+    top-up has nothing left to spend.
+
+    **COMMAND flag-on is inside the limit `kct check` enforces.** The 5.18 mm
+    (item 9) and 5.60 mm (here) numbers are `krt_compare`'s via-exclusive 2-D
+    metric. The tuner and `kct check` count via barrels. `kct retune-lengths
+    --group SDRAM_COMMAND` on the flag-on board reads **4.94 mm,
+    `already_satisfied`**, and BYTE0 reads 4.75 mm. The gap to
+    `retune-lengths`' 4.46 mm is two different meander sets on two
+    different paths, not a miss.
+
+    **ADDRESS: not closable by meanders on this route.** BA0 needs about
+    47 mm (via-inclusive, to come within 5.0 mm of A5 at 76.88 mm) and BA1
+    about 46 mm. A meander on these members adds 4-11 mm. On the
+    `retune-lengths` path each gets one meander and then has no host segment
+    left (`no_suitable_segment`). On the route-time path each gets two at the
+    cap (+7.8 and +11.7 mm). Item 7 already showed that raising both limits
+    (cap 6, ceiling 80) runs into DRC rejections and `no_suitable_segment`
+    without bringing the group inside 5.0 mm. A second `retune-lengths` pass
+    on the flag-on board, with a fresh ceiling, takes ADDRESS from 44.67 to
+    32.55 mm, still far over. Closing ADDRESS needs BA0 and BA1 routed
+    longer in the first place, which is a routing change, not a tuner limit.
+    This is original AC 2's option (b) for this group.
+
 **Verdict.** The gap survives deconfounding. It is not the routing cap. It is
 the three wiring gaps in (1), then DRC-limited meander room and the
 all-or-nothing rollback in (3). Item 6 shows #7043 (PR #7048) closes
@@ -1147,7 +1266,12 @@ shows the clearance floor was not the limit), #7043 (per-bump meander
 placement, PR #7048), and #6970 (the loader's net-0 keying, for `kct route`).
 #6968 (the flag's three gaps) is closed: PR #6974 runs
 `--length-match-groups` on the layer-escalation path. The remaining route-time
-gate on board 07 is `length_critical: false` in the class map.
+gate on board 07 is `length_critical: false` in the class map. Item 11
+re-measures after #7375 on a complete route: a one-round top-up from the
+unused ceiling brings SDRAM_BYTE0 inside budget under `retune-lengths`
+(5.80 → 4.89 mm), SDRAM_COMMAND's flag-on reading is inside under `kct
+check`'s via-inclusive metric (4.94 mm), and SDRAM_ADDRESS is limited by
+BA0/BA1's host room, which a tuner limit cannot fix.
 
 **Reference planes.** On board 06, kct put 22.8 mm of OUT4 on the In1.Cu GND
 plane. It warned about this, and the fix is the opt-in

@@ -51,6 +51,7 @@ from kicad_tools.cli.format_options import (
     stdout_to_stderr_when,
 )
 from kicad_tools.core.geometry import point_in_polygon as _core_point_in_polygon
+from kicad_tools.core.geometry import point_to_segment_distance as _core_point_to_segment_distance
 from kicad_tools.core.sexp_file import load_pcb, save_pcb, verify_pcb_write
 from kicad_tools.router.quantize import (
     OffAngleSegmentError,
@@ -1760,23 +1761,7 @@ def point_to_segment_distance(
     Returns:
         Minimum distance from point to segment
     """
-    dx = ex - sx
-    dy = ey - sy
-    seg_len_sq = dx * dx + dy * dy
-
-    if seg_len_sq == 0:
-        # Degenerate segment (zero length)
-        return math.sqrt((px - sx) ** 2 + (py - sy) ** 2)
-
-    # Parameter t for projection of point onto line
-    t = ((px - sx) * dx + (py - sy) * dy) / seg_len_sq
-    t = max(0.0, min(1.0, t))
-
-    # Nearest point on segment
-    nearest_x = sx + t * dx
-    nearest_y = sy + t * dy
-
-    return math.sqrt((px - nearest_x) ** 2 + (py - nearest_y) ** 2)
+    return _core_point_to_segment_distance(px, py, sx, sy, ex, ey)
 
 
 def segment_to_segment_distance(

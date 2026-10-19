@@ -36,7 +36,7 @@ from kicad_tools.pcb import (
     PCBLayout,
     update_pcb_placements,
 )
-from kicad_tools.pcb.blocks import LDOBlock, LEDBlock, PCBBlock
+from kicad_tools.pcb.blocks import LDOBlock, LEDBlock, MCUBlock, OscillatorBlock, PCBBlock
 from kicad_tools.pcb.geometry import Layer, Point
 from kicad_tools.pcb.placement import get_footprint_pads
 from kicad_tools.pcb.primitives import TraceSegment, Via
@@ -585,8 +585,29 @@ def test_clearance_comes_from_the_board_rules(source, origin, tmp_path):
         layout.apply_to_pcb(board, tmp_path / "never.kicad_pcb", net_map=NET_MAP)
 
 
+@pytest.mark.parametrize("output_caps", [["C2"], ["C2", "C3"]])
+def test_stock_ldo_block_applies_clean_in_strict_mode(tmp_path, output_caps):
+    """The stock LDOBlock's own copper lands on its pads and shorts nothing (#7062)."""
+    refs = {**REFS, **dict.fromkeys(output_caps, "C_0805_2012Metric")}
+    pad_nets = [t for t in PAD_NETS if t[0] in refs]
+    pad_nets += [(c, "1", "+3V3") for c in output_caps if c != "C2"]
+    pad_nets += [(c, "2", "GND") for c in output_caps if c != "C2"]
+    board = _build_board(tmp_path / "ldo_src.kicad_pcb", refs, pad_nets)
+    ox, oy = PCB.load(str(board)).board_origin
+
+    layout = PCBLayout("ldo")
+    ldo = LDOBlock(ldo_ref="U1", input_cap="C1", output_caps=output_caps)
+    ldo.place(ox + 10, oy + 12, rotation=0)
+    layout.add_block(ldo, name="ldo")
+    net_map = {"VIN": "VIN", "VOUT": "+3V3", "GND": "GND"}
+    out = tmp_path / "ldo_out.kicad_pcb"
+    report = layout.apply_to_pcb(board, out, net_map=net_map)  # strict by default
+    assert report.skipped == []
+    assert report.segments_added == len(layout.export_traces())
+
+
 def test_stock_blocks_and_route_are_refused_not_shorted(source, origin, tmp_path):
-    """The stock LDOBlock routing and route()'s straight line short foreign pads."""
+    """route()'s straight line shorts foreign pads (the LDOBlock's own copper is clean)."""
     out = tmp_path / "never.kicad_pcb"
     with pytest.raises(LayoutApplyError) as excinfo:
         _stock_layout(origin).apply_to_pcb(source, out, net_map=NET_MAP)
@@ -597,8 +618,8 @@ def test_stock_blocks_and_route_are_refused_not_shorted(source, origin, tmp_path
         p.startswith("trace") and "(inter-block) on net" in p and "shorts pad R1." in p
         for p in problems
     ), problems
-    # LDOBlock: its GND traces cut through U1's VIN / +3V3 pads.
-    assert any("(block 'LDO_U1') on net 'GND'" in p and "shorts pad U1." in p for p in problems)
+    # LDOBlock (#7062): its own copper is clean now; only route() is refused.
+    assert not [p for p in problems if "(block 'LDO_U1')" in p], problems
     # The LEDBlock fix (#7022 review): its LED_MID trace no longer crosses D1.2;
     # all that is wrong with it here is the inter-block line drawn over it.
     led = [p for p in problems if p.split(" on net ")[0].endswith("(block 'LED_D1')")]
@@ -789,3 +810,53 @@ def test_guide_pcblayout_snippets_run(tmp_path, monkeypatch):
     assert skipped_traces > 0
     assert report.segments_added + skipped_traces == len(layout.export_traces())
     assert (tmp_path / "board_placed.kicad_pcb").exists()
+
+
+# ---------------------------------------------------------------------------
+# Stock MCUBlock / OscillatorBlock: copper clear of foreign pads (#7393)
+# ---------------------------------------------------------------------------
+
+TSSOP20 = "TSSOP-20_4.4x6.5mm_P0.65mm"
+
+
+def _apply_strict(tmp_path, block, refs, pad_nets, net_map, origin_offset=(10, 12)):
+    board = _build_board(tmp_path / "src.kicad_pcb", refs, pad_nets, lib=LIB)
+    ox, oy = PCB.load(str(board)).board_origin
+    layout = PCBLayout("stock")
+    block.place(ox + origin_offset[0], oy + origin_offset[1], rotation=0)
+    layout.add_block(block, name="stock")
+    out = tmp_path / "out.kicad_pcb"
+    report = layout.apply_to_pcb(board, out, net_map=net_map)  # strict by default
+    assert report.skipped == []
+    assert report.segments_added == len(layout.export_traces())
+
+
+@pytest.mark.parametrize(
+    ("caps", "vdd", "vss"),
+    [
+        (["C1"], "4", "5"),
+        (["C1", "C2"], "4", "5"),
+        (["C1", "C2", "C3"], "4", "5"),
+        (["C1", "C2"], "14", "15"),  # right-hand side, VSS above VDD
+        (["C1", "C2"], "9", "8"),
+    ],
+)
+def test_stock_mcu_block_applies_clean_in_strict_mode(tmp_path, caps, vdd, vss):
+    refs = {"U1": TSSOP20, **dict.fromkeys(caps, "C_0603_1608Metric")}
+    pad_nets = [("U1", vdd, "VDD"), ("U1", vss, "GND")]
+    pad_nets += [(c, "1", "VDD") for c in caps] + [(c, "2", "GND") for c in caps]
+    block = MCUBlock(mcu_ref="U1", bypass_caps=caps, vdd_pin=vdd, vss_pin=vss)
+    _apply_strict(tmp_path, block, refs, pad_nets, {"VDD": "VDD", "GND": "GND"})
+
+
+def test_stock_oscillator_block_applies_clean_in_strict_mode(tmp_path):
+    refs = {"Y1": "Oscillator_SMD_Abracon_ASE-4Pin_3.2x2.5mm", "C1": "C_0603_1608Metric"}
+    pad_nets = [
+        ("Y1", "1", "EN"),
+        ("Y1", "2", "GND"),
+        ("Y1", "3", "CLK"),
+        ("Y1", "4", "VDD"),
+        ("C1", "1", "VDD"),
+        ("C1", "2", "GND"),
+    ]
+    _apply_strict(tmp_path, OscillatorBlock(), refs, pad_nets, {"VDD": "VDD", "GND": "GND"})

@@ -172,7 +172,7 @@ from .optimizer.serpentine import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable
+    from collections.abc import Callable, Iterable, Iterator
 
     from .kicad_length import KicadLengthModel
     from .match_group_length import MatchGroup
@@ -732,6 +732,8 @@ def tune_match_group_v2(
     # member for budget purposes -- the geometry is logically a single
     # "lane perturbation" (Phase 2F AC #8).
     member_count = len(group.net_ids) + len(group.pair_ids)
+    # An explicit per-member budget is a hard cap: no ceiling top-up round.
+    ceiling_topup = max_inserts_per_member is None
     if max_inserts_per_member is None:
         if member_count > 4:
             max_inserts_per_member = MAX_INSERTS_PER_GROUP_MEMBER_LARGE
@@ -783,6 +785,7 @@ def tune_match_group_v2(
         blind_buried_supported=blind_buried_supported,
         length_model=length_model,
         fixed_segment_ids=fixed_segment_ids,
+        ceiling_topup=ceiling_topup,
     )
 
 
@@ -809,6 +812,7 @@ def _tune_match_group_single_ended(
     reference_length_mm: float | None = None,
     hint_routes: dict[int, Route] | None = None,
     both_sides: bool = False,
+    ceiling_topup: bool = False,
 ) -> dict[int, tuple[Route, TuneResult]]:
     """Scalar Phase 2E path: each net in ``group.net_ids`` tuned independently.
 
@@ -820,7 +824,10 @@ def _tune_match_group_single_ended(
     See :func:`tune_match_group_v2` for the public docstring; the
     arguments are passed through unchanged except that ``tolerance_mm``
     and ``max_inserts_per_member`` have already been resolved from the
-    public API's ``None`` defaults.
+    public API's ``None`` defaults.  ``ceiling_topup`` (Issue #5798) lets a
+    member that stopped at its per-member budget take one more insert from
+    the group ceiling's leftover after the first pass; the dispatcher sets it
+    only when the per-member budget was defaulted, not passed explicitly.
     """
     base_config = config or SerpentineConfig()
     results: dict[int, tuple[Route, TuneResult]] = {}
@@ -948,7 +955,51 @@ def _tune_match_group_single_ended(
     # --- Per-member iteration -------------------------------------------
     total_inserts_committed = 0  # group-level cumulative counter
 
-    for net_id in group.net_ids:
+    # Issue #5798: spend the group ceiling where it closes the most skew.
+    # ``group.net_ids`` order is declaration order, so on a 14-member group
+    # (board 07 SDRAM_ADDRESS) the ceiling was used up on early, small-deficit
+    # members and the shortest ones (BA0/BA1) never got their inserts.  Visit
+    # members by descending deficit instead (stable: ties keep declaration
+    # order).  Unrouted members have no length and sort last.
+    def _deficit(nid: int) -> float:
+        if ref_length is None or nid not in member_lengths:
+            return 0.0
+        return ref_length - member_lengths[nid]
+
+    visit_order = sorted(group.net_ids, key=lambda nid: -_deficit(nid))
+
+    # Issue #5798 (Revision 3): one top-up round from the unused ceiling.
+    # The per-member cap exists to share the group ceiling, so once every
+    # member has had its share, a member that stopped at the cap
+    # (``exceeded_max_inserts``) may take ONE more insert from whatever the
+    # ceiling has left, largest remaining deficit first.  On board 07's
+    # complete 07m route SDRAM_BYTE0 stopped at 5.80 mm with DQ6 at its cap
+    # 0.8 mm short and 4 of the 16 ceiling inserts unused.  The ceiling still
+    # bounds the total, and a group whose ceiling is spent (SDRAM_ADDRESS) is
+    # unchanged.  Only when the per-member budget was defaulted
+    # (``ceiling_topup``); an explicit budget stays a hard cap.
+    # ``topup_prior`` holds the first-pass result to merge into.
+    topup_prior: dict[int, TuneResult] = {}
+
+    def _visits() -> Iterator[tuple[int, int]]:
+        for nid in visit_order:
+            yield nid, max_inserts_per_member
+        if not ceiling_topup or ref_length is None:
+            return
+        capped = [
+            nid
+            for nid in visit_order
+            if nid in results and results[nid][1].reason == "exceeded_max_inserts"
+        ]
+        remaining = {nid: ref_length - results[nid][1].length_after_mm for nid in capped}
+        for nid in sorted(capped, key=lambda n: -remaining[n]):
+            if total_inserts_committed >= MAX_TOTAL_INSERTS_PER_GROUP:
+                return
+            topup_prior[nid] = results[nid][1]
+            member_lengths[nid] = results[nid][1].length_after_mm
+            yield nid, 1
+
+    for net_id, member_cap in _visits():
         route = routes_by_net.get(net_id)
         if route is None:
             results[net_id] = (
@@ -1115,7 +1166,7 @@ def _tune_match_group_single_ended(
         # now try up to :data:`MAX_SEGMENT_RETRY_CANDIDATES` segments
         # per attempt before rolling back -- this is the curator's
         # "Option A: per-segment retry" recipe.
-        for attempt in range(max_inserts_per_member):
+        for attempt in range(member_cap):
             per_member_result.attempts = attempt + 1
 
             # Group-level ceiling can trip mid-loop too.
@@ -1483,6 +1534,22 @@ def _tune_match_group_single_ended(
             assert current_route is original_route
             assert current_route.segments is original_segments
 
+        # Top-up visit: report one result per member, counted from the
+        # member's original route (the first pass's commits are kept).
+        prior = topup_prior.pop(net_id, None)
+        if prior is not None:
+            per_member_result.attempts += prior.attempts
+            per_member_result.inserts_applied += prior.inserts_applied
+            per_member_result.length_before_mm = prior.length_before_mm
+            per_member_result.serpentine_results = (
+                prior.serpentine_results + per_member_result.serpentine_results
+            )
+            per_member_result.message = (
+                f"{per_member_result.message} [ceiling top-up after "
+                f"{prior.inserts_applied} first-pass insert(s); "
+                f"{per_member_result.inserts_applied} in total]"
+            )
+
         results[net_id] = (current_route, per_member_result)
 
         # Issue #3440 staleness fix: publish the tuned route into
@@ -1497,7 +1564,8 @@ def _tune_match_group_single_ended(
         if per_member_result.inserts_applied > 0:
             routes_by_net[net_id] = current_route
 
-    return results
+    # Report in declaration order regardless of the visit order above.
+    return {nid: results[nid] for nid in group.net_ids if nid in results}
 
 
 def _place_bumps_per_host(

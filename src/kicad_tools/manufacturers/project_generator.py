@@ -450,6 +450,7 @@ def merge_project_rules(
     rules: DesignRules,
     *,
     preserve_board_rules: str | None = None,
+    apply_severities: bool = True,
 ) -> dict:
     """Apply DRC constraints + severities onto an existing project dict.
 
@@ -482,6 +483,14 @@ def merge_project_rules(
             *looser* than rules an earlier kct pass wrote (board 04's paid
             0.15 mm drilling option) passes ``"0"``, because under the default
             mode that earlier, stricter value would otherwise stick.
+        apply_severities: Write the ``_NON_BLOCKING_SEVERITIES`` (the #6191
+            downgrade of ``isolated_copper`` / ``lib_footprint_mismatch``).
+            ``kct route`` / ``kct check --emit-drc-constraints`` and project
+            generation pass the default ``True``.  The ``.kicad_pro`` CLI
+            writers (``kct mfr apply-rules``, ``kicad-fab-rules apply``,
+            ``kct init``) never touched ``rule_severities`` before #7385 and
+            pass ``False`` (through :func:`merge_project_rules_guarded`), so
+            an authored ``error`` severity is never downgraded by them.
 
     Returns:
         The same ``project_data`` dict, mutated.
@@ -503,12 +512,13 @@ def merge_project_rules(
 
     apply_minima(settings.setdefault("rules", {}), build_project_rules(rules))
 
-    severities = settings.setdefault("rule_severities", {})
-    for key, value in _NON_BLOCKING_SEVERITIES.items():
-        if mode == PRESERVE_MODE_FULL:
-            severities.setdefault(key, value)
-        else:
-            severities[key] = value
+    if apply_severities:
+        severities = settings.setdefault("rule_severities", {})
+        for key, value in _NON_BLOCKING_SEVERITIES.items():
+            if mode == PRESERVE_MODE_FULL:
+                severities.setdefault(key, value)
+            else:
+                severities[key] = value
 
     defaults = settings.setdefault("defaults", {})
     apply_minima(
@@ -547,6 +557,203 @@ def merge_project_rules(
         )
 
     return project_data
+
+
+def merge_policy_allowances(
+    project_data: dict,
+    *,
+    preserve_board_rules: str | None = None,
+    apply_severities: bool = True,
+) -> frozenset[str]:
+    """Return the loosenings :func:`merge_project_rules` may make, by design.
+
+    The ``allow=`` set for :func:`kicad_tools.core.rule_loosening.rule_loosenings`
+    that matches the documented #6191 policy for ``project_data`` (the project
+    *before* the merge):
+
+    * ``KCT_PRESERVE_BOARD_RULES=0`` -- ``{"*"}``: the project opted into the
+      legacy profile overwrite, so any loosening is explicit.
+    * default (``stricter``) -- the :data:`_NON_BLOCKING_SEVERITIES` keys,
+      plus the four signature values of a ``Default`` netclass that matches a
+      template signature (:func:`is_template_default_netclass`): that class
+      is unauthored and is relaxed to the profile.
+    * ``KCT_PRESERVE_BOARD_RULES=1`` -- nothing: authored severities and every
+      netclass are kept.
+
+    Args:
+        project_data: The project before the rewrite.
+        preserve_board_rules: The same override :func:`merge_project_rules`
+            accepts.
+        apply_severities: As for :func:`merge_project_rules`.  ``False``
+            (the CLI writers) leaves the severities out of the allowance, so
+            a downgrade of an authored severity is refused, not permitted.
+
+    Returns:
+        :mod:`fnmatch` patterns over ``Loosening.path``.
+    """
+    mode = preserve_board_rules_mode(project_data, preserve_board_rules)
+    if mode == PRESERVE_MODE_OFF:
+        return frozenset({"*"})
+    if mode == PRESERVE_MODE_FULL:
+        return frozenset()
+    allowed: set[str] = (
+        {f"rule_severities.{key}" for key in _NON_BLOCKING_SEVERITIES}
+        if apply_severities
+        else set()
+    )
+    classes = (project_data.get("net_settings") or {}).get("classes") or []
+    default_cls = next(
+        (c for c in classes if isinstance(c, dict) and c.get("name") == "Default"), None
+    )
+    if default_cls is not None and is_template_default_netclass(default_cls):
+        allowed.update(f"netclasses.Default.{key}" for key in _NETCLASS_SIGNATURE_KEYS)
+    return frozenset(allowed)
+
+
+class ProjectRulesMergeReport:
+    """What :func:`merge_project_rules_guarded` did to an existing project.
+
+    Attributes:
+        mode: The ``PRESERVE_MODE_*`` the project selected.
+        kept_stricter: Authored values the profile would have lowered (the
+            legacy overwrite's loosenings) that the merge kept instead.
+        relaxed_by_policy: Every authored rule the merge *did* loosen because
+            the policy permits it (:func:`merge_policy_allowances`) -- e.g. a
+            template-signature ``Default`` netclass relaxed to the profile, or
+            anything under ``KCT_PRESERVE_BOARD_RULES=0``.  Never silent: it is
+            printed by :meth:`messages` and serialised by :meth:`to_dict`
+            (Issue #7385).
+        loosened_by_opt_in: The subset of ``relaxed_by_policy`` the project
+            explicitly allowed with ``KCT_PRESERVE_BOARD_RULES=0`` (all of it
+            in that mode).  Empty in every other mode.
+    """
+
+    def __init__(
+        self,
+        mode: str,
+        kept_stricter: list,
+        loosened_by_opt_in: list,
+        relaxed_by_policy: list | None = None,
+    ) -> None:
+        self.mode = mode
+        self.kept_stricter = kept_stricter
+        self.loosened_by_opt_in = loosened_by_opt_in
+        self.relaxed_by_policy = (
+            list(loosened_by_opt_in) if relaxed_by_policy is None else relaxed_by_policy
+        )
+
+    def messages(self) -> list[str]:
+        """Human-readable lines a CLI writer prints after the merge."""
+        lines: list[str] = []
+        if self.kept_stricter:
+            lines.append(
+                f"Kept {len(self.kept_stricter)} stricter authored rule(s); the "
+                "profile is looser and rule rewrites only tighten (Issue #7385). "
+                f"Set {PRESERVE_BOARD_RULES_VARIABLE}=0 in the project's text "
+                "variables to replace them with the profile:"
+            )
+            lines.extend(
+                f"  - {item.path}: kept {item.before} (profile {item.after})"
+                for item in self.kept_stricter
+            )
+        if self.relaxed_by_policy:
+            if self.mode == PRESERVE_MODE_OFF:
+                lines.append(
+                    f"Lowered {len(self.relaxed_by_policy)} authored rule(s) because the "
+                    f"project sets {PRESERVE_BOARD_RULES_VARIABLE}=0:"
+                )
+            else:
+                lines.append(
+                    f"Relaxed {len(self.relaxed_by_policy)} rule(s) per the #6191 policy "
+                    f"(set {PRESERVE_BOARD_RULES_VARIABLE}=1 in the project's text "
+                    "variables to keep them):"
+                )
+            lines.extend(f"  - {item.describe()}" for item in self.relaxed_by_policy)
+        return lines
+
+    def to_dict(self) -> dict:
+        """JSON-serialisable form, for ``--format json`` payloads."""
+        return {
+            "preserve_mode": self.mode,
+            "kept_stricter": [item.to_dict() for item in self.kept_stricter],
+            "relaxed_by_policy": [item.to_dict() for item in self.relaxed_by_policy],
+            "loosened_by_opt_in": [item.to_dict() for item in self.loosened_by_opt_in],
+        }
+
+
+def merge_project_rules_guarded(
+    project_data: dict,
+    rules: DesignRules,
+    *,
+    writer: str,
+    preserve_board_rules: str | None = None,
+    apply_severities: bool = False,
+) -> ProjectRulesMergeReport:
+    """:func:`merge_project_rules`, checked against :func:`rule_loosenings`.
+
+    The entry point CLI writers that rewrite an *existing* ``.kicad_pro``
+    (``kct mfr apply-rules``, ``kicad-fab-rules apply``, ``kct init``) use, so
+    they all follow the one #6191 stricter-wins policy (Issue #7385):
+
+    1. merges ``rules`` into ``project_data`` (mutated in place);
+    2. raises :class:`~kicad_tools.core.rule_loosening.RuleLooseningError`
+       -- leaving the caller nothing to write -- if the result loosens an
+       authored rule beyond :func:`merge_policy_allowances`;
+    3. reports which stricter authored values were kept, so the writer can
+       say so instead of silently diverging from the profile it printed, and
+       which authored values the policy *did* relax (``relaxed_by_policy``),
+       so no loosening is ever silent.
+
+    Unlike ``kct route``, these writers leave ``rule_severities`` alone by
+    default (``apply_severities=False``), as they did before #7385: an
+    authored ``isolated_copper: error`` stays ``error``.
+
+    Args:
+        project_data: Parsed ``.kicad_pro`` data (mutated in place).
+        rules: Manufacturer design rules to apply.
+        writer: Command name, for the refusal message.
+        preserve_board_rules: As for :func:`merge_project_rules`.
+        apply_severities: As for :func:`merge_project_rules`; default
+            ``False`` (the CLI writers' pre-#7385 behaviour).
+
+    Returns:
+        A :class:`ProjectRulesMergeReport`.
+    """
+    from kicad_tools.core.rule_loosening import assert_no_loosenings, rule_loosenings
+
+    before = copy.deepcopy(project_data)
+    mode = preserve_board_rules_mode(before, preserve_board_rules)
+    allow = merge_policy_allowances(
+        before, preserve_board_rules=preserve_board_rules, apply_severities=apply_severities
+    )
+
+    merge_project_rules(
+        project_data,
+        rules,
+        preserve_board_rules=preserve_board_rules,
+        apply_severities=apply_severities,
+    )
+    assert_no_loosenings(before, project_data, allow=allow, writer=writer)
+
+    # Everything the merge loosened survived the guard above, so it is all
+    # policy-permitted -- and all of it is reported (never silent, #7385).
+    relaxed = rule_loosenings(before, project_data)
+    if mode == PRESERVE_MODE_OFF:
+        return ProjectRulesMergeReport(mode, [], relaxed, relaxed)
+
+    # What the legacy overwrite would have lowered, minus what the policy
+    # lowers anyway: exactly the authored values this merge kept.
+    legacy = merge_project_rules(
+        copy.deepcopy(before),
+        rules,
+        preserve_board_rules=PRESERVE_MODE_OFF_SPELLING,
+        apply_severities=apply_severities,
+    )
+    return ProjectRulesMergeReport(mode, rule_loosenings(before, legacy, allow=allow), [], relaxed)
+
+
+#: The ``KCT_PRESERVE_BOARD_RULES`` spelling that selects :data:`PRESERVE_MODE_OFF`.
+PRESERVE_MODE_OFF_SPELLING = "0"
 
 
 #: ``meta`` key recording which ``net_settings`` classes and
@@ -1390,7 +1597,9 @@ def write_drc_constraints(
         # Issue #6039: explicit per-rule-area keepout rules, since headless
         # kicad-cli < 10.0.6 does not enforce rule areas on its own (#7198).
         if board.exists():
-            keepout_dru = apply_keepout_rules(merged_dru, board, _installed_kicad_cli_version())
+            keepout_dru = apply_keepout_rules(
+                merged_dru, board, _installed_kicad_cli_version(), path=dru_path
+            )
             if keepout_dru is not None:
                 merged_dru = keepout_dru
         # Issue #6390: the router's classes under KCT_PRESERVE_BOARD_RULES=0.

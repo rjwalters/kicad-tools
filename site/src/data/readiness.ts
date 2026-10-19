@@ -7,11 +7,44 @@ import type { KnownIssue, Readiness } from "./types.ts";
 const KNOWN_ISSUE_KINDS = ["defect", "exception", "advisory"];
 const KNOWN_ISSUE_KEYS = new Set(["issue", "kind", "summary", "recorded", "warnings"]);
 
+const IDENTITY_KEYS = ["rule", "ref", "pad"] as const;
+
+function tupleLess(a: string[], b: string[]): boolean {
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return a[i] < b[i];
+  return false;
+}
+
+/** Mirrors `_check_warnings` in `known_issues.py` (#7389): sorted, unique `{rule, ref, pad}` identities. */
+function checkWarnings(warnings: unknown, issue: number, owners: Map<string, number>): void {
+  const bad = (why: string) => new Error(`invalid warnings for known issue #${issue}: ${why}`);
+  if (!Array.isArray(warnings) || warnings.length === 0) throw bad("expected a non-empty list");
+  let previous: string[] | null = null;
+  for (const item of warnings) {
+    if (!item || typeof item !== "object" || Array.isArray(item)
+      || Object.keys(item).length !== IDENTITY_KEYS.length || IDENTITY_KEYS.some(k => !(k in item))) {
+      throw bad("an identity must be exactly {rule, ref, pad}");
+    }
+    for (const key of IDENTITY_KEYS) {
+      const text = (item as Record<string, unknown>)[key];
+      if (typeof text !== "string" || !text || text !== text.trim()) throw bad(`${key} must be non-empty, trimmed text`);
+    }
+    const { rule, ref, pad } = item as Record<string, string>;
+    if (!/^[A-Za-z0-9_.-]+$/.test(rule)) throw bad(`invalid rule id ${rule}`);
+    const key = JSON.stringify([rule, ref, pad]);
+    if (owners.has(key)) throw bad(`${rule} ${pad} is listed more than once`);
+    const tuple = [rule, ref, pad];
+    if (previous && !tupleLess(previous, tuple)) throw bad("identities must be sorted by (rule, ref, pad)");
+    previous = tuple;
+    owners.set(key, issue);
+  }
+}
+
 /** Mirrors `validate_known_issues` in `src/kicad_tools/cli/known_issues.py` (#7261). */
 export function validateKnownIssues(value: unknown): KnownIssue[] {
   if (value === undefined || value === null) return [];
   if (!Array.isArray(value)) throw new Error("known_issues must be a list");
   let previous = 0;
+  const owners = new Map<string, number>();
   for (const entry of value) {
     if (!entry || typeof entry !== "object" || Array.isArray(entry)) throw new Error("known issue must be an object");
     if (Object.keys(entry).some(key => !KNOWN_ISSUE_KEYS.has(key))) throw new Error("unknown known-issue field");
@@ -24,18 +57,14 @@ export function validateKnownIssues(value: unknown): KnownIssue[] {
     if (typeof recorded !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(recorded) || !Number.isFinite(Date.parse(recorded))) {
       throw new Error(`invalid recorded date for known issue #${issue}`);
     }
-    if (warnings !== undefined && (!warnings || typeof warnings !== "object" || Array.isArray(warnings)
-      || Object.keys(warnings).length === 0
-      || Object.values(warnings).some(n => typeof n !== "number" || !Number.isInteger(n) || n < 1))) {
-      throw new Error(`invalid warnings for known issue #${issue}`);
-    }
+    if (warnings !== undefined) checkWarnings(warnings, issue, owners);
   }
   return value as KnownIssue[];
 }
 
 function canonical(entries: KnownIssue[]): string {
   return JSON.stringify(entries.map(e => ({ issue: e.issue, kind: e.kind, summary: e.summary, recorded: e.recorded,
-    warnings: e.warnings === undefined ? null : Object.fromEntries(Object.entries(e.warnings).sort()) })));
+    warnings: e.warnings === undefined ? null : e.warnings.map(w => ({ rule: w.rule, ref: w.ref, pad: w.pad })) })));
 }
 
 /** Mirrors `_evidence_folders` in `src/kicad_tools/cli/board_readiness.py` (#7337). */

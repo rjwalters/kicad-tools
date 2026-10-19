@@ -4476,6 +4476,16 @@ def _spy_shadow_entry(monkeypatch, shadow_enabled: bool) -> list[str]:
     assert dpr.enable_shadow_construction is False, "the default must stay OFF"
     dpr.enable_shadow_construction = shadow_enabled
 
+    # Issue #7374: the shadow branch is only reached when the single-ended
+    # guide probe returns copper.  The real probe is a wall-clock-bounded A*
+    # search that can come back empty on a loaded worker, which made the
+    # positive control flaky.  A fixed guide (as the ``test_shadow_claim_*``
+    # tests use) leaves the ``enable_shadow_construction`` gate as the only
+    # thing that can keep the spy from firing.
+    guide = _coupled_routes_for_pair(pair, p_end_x=25.0, n_end_x=25.0)[0]
+    assert guide.segments, "the stubbed guide must carry copper"
+    monkeypatch.setattr(dpr, "_single_ended_guide_route", lambda *a, **k: guide)
+
     calls: list[str] = []
     monkeypatch.setattr(
         DiffPairRouter,

@@ -37,6 +37,9 @@ import numpy as np
 
 from kicad_tools.acceleration import to_numpy
 from kicad_tools.core.geometry import (
+    point_to_segment_distance,
+)
+from kicad_tools.core.geometry import (
     segment_to_segment_distance as _segment_to_segment_distance,
 )
 
@@ -1148,11 +1151,9 @@ _GRID_DIRS: tuple[Point, ...] = (
 def _point_seg_distance(px: float, py: float, a: Point, b: Point) -> float:
     """Distance from ``(px, py)`` to the finite segment ``a -> b``."""
     dx, dy = b[0] - a[0], b[1] - a[1]
-    den = dx * dx + dy * dy
-    if den < 1e-18:
+    if dx * dx + dy * dy < 1e-18:
         return math.hypot(px - a[0], py - a[1])
-    t = max(0.0, min(1.0, ((px - a[0]) * dx + (py - a[1]) * dy) / den))
-    return math.hypot(px - (a[0] + dx * t), py - (a[1] + dy * t))
+    return point_to_segment_distance(px, py, a[0], a[1], b[0], b[1])
 
 
 def _polyline_points(segments: list[Segment]) -> list[Point] | None:
@@ -7848,13 +7849,9 @@ class DiffPairRouter:
         """Euclidean distance from a point to a segment's centerline."""
         vx = seg.x2 - seg.x1
         vy = seg.y2 - seg.y1
-        wx = px - seg.x1
-        wy = py - seg.y1
-        denom = vx * vx + vy * vy
-        if denom < 1e-12:
-            return math.hypot(wx, wy)
-        t = max(0.0, min(1.0, (wx * vx + wy * vy) / denom))
-        return math.hypot(px - (seg.x1 + t * vx), py - (seg.y1 + t * vy))
+        if vx * vx + vy * vy < 1e-12:
+            return math.hypot(px - seg.x1, py - seg.y1)
+        return point_to_segment_distance(px, py, seg.x1, seg.y1, seg.x2, seg.y2)
 
     def _min_distance_to_partner(
         self,

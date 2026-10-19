@@ -26,43 +26,41 @@ _None._
 - **#6858**: router: coupled pre-pass should keep the better of the joint-search and pose-centreline candidates (compare-and-keep; unblocks #6835)
 - **#7093**: router: differential pair gets unequal via counts when a leg falls back to uncoupled routing (board 03 USB_D 2 vs 3; blocks #6394)
 - **#7269**: board 07 MIPI_DAT0: recover 0.038 mm skew lost to compare-and-keep (blocks #6858)
-- **#7333**: main CI red (remaining): board 05 package.py asserts 36 CPL rows after #7242 THT; boards 04/05 readiness stale after #7310
+- **#7362**: main regression from #7324: board 03 fresh route USB_D 16.3→19.7 mm after 0.22 mm In2.Cu net class; tier-1 common-run test red
 
 ## Ready
 
 Human-approved issues ready for implementation (`loom:issue`).
 
-- **#7093**: router: differential pair gets unequal via counts when a leg falls back to uncoupled routing (board 03 USB_D 2 vs 3; blocks #6394)
+_None._
 
 ## In Progress
 
 Issues currently being built (`loom:building`).
 
-- **#5798**: [Epic #5784] Phase 4: deconfound kct's match-group length tuning on board 07 (measure first)
 - **#6554**: diffpair: reproduce KiCad's diff_pair_uncoupled primitive pairing exactly (kct is a lower bound)
-- **#7062**: LDOBlock internal routing shorts foreign pads and crosses itself on real SOT-23-5 geometry
+- **#7093**: router: differential pair gets unequal via counts when a leg falls back to uncoupled routing (board 03 USB_D 2 vs 3; blocks #6394)
 - **#7153**: kct export bundle inconsistencies: JLCPCB Gerbers omit paste layers for SMT bundles; board 04 manifest says DRC OK while report says FAIL/NOT_READY; report ERC falsely 'skipped by user request'
-- **#7164**: coupled_microstrip BEM finite-thickness reads 0.5-2.5% high vs field solve
-- **#7199**: Committed fleet CPLs still in the pre-#7059 frame — regenerate packages + add a frame-consistency test
-- **#7224**: hermit: re-consolidate point-in-polygon (8 copies) and point-to-segment distance (2 canonical + 7 private); footprint_outside_board misjudges top/right-edge origins
-- **#7277**: Report binding: readiness.json fallback accepts stale reports after re-run; ERC binding ignores sub-sheets (#7267 follow-up)
-- **#7294**: board 03: re-size USB diff pairs to 90 ohm and declare target_diff_impedance (#7250 PR-D)
 - **#7296**: Router: refuse pad-edge vias (mask-dam floor) and move existing ones on boards 02/05/06 (split from #7220, PR3)
-- **#7319**: Board 07 fixture: #7163 field solve narrows the synthesized DQS pair to 0.175 mm, dropping DQ0 (30/31 to 29/31) and tripling Match-Group gate time
-- **#7333**: main CI red (remaining): board 05 package.py asserts 36 CPL rows after #7242 THT; boards 04/05 readiness stale after #7310
+- **#7349**: Boards 06/07: enable diff-pair gap tightening on seed-42 re-routes and drop the impedance caps (#7344 PR 2)
+- **#7355**: kct readiness --verify doesn't honour board 04's recorded #6269 exception: blocks on 24 paid-drill via errors while the committed record says ready
+- **#7358**: Evidence producers: gate-parity ratchet test, one registered re-pin path per ready board (#7353 step 4)
+- **#7367**: Key remaining count-based CI/test allowances by identity (extends #7359): stale board-03/07 allowances, board-05 blocking cap, DRC tolerance counts
+- **#7399**: Schematic blocks: 10 stock factories fail on real KiCad 10 libs (stale symbol IDs, fictional mock pins); add a real-symbol smoke test
 
 ## PRs Awaiting Review
 
 PRs waiting on Judge (`loom:review-requested`).
 
-- **#7331**: fix(board07): size the DQS pair like MIPI/HDMI and gate re-route reach
-- **#7334**: fix(boards): derive board 05 CPL row check from placed parts; refresh 04/05 readiness
+- **#7350**: feat(router): length-aware choice among via-parity fallback leg pairs (#7093)
+- **#7394**: feat: tighten diff-pair gaps in board 06/07 recipes, lower impedance caps
+- **#7408**: fix(ci): lower board 07 copper-safety DRC floor to 0
 
 ## Approved (Awaiting Merge)
 
 PRs that passed review and are queued for Champion auto-merge (`loom:pr`).
 
-- **#7285**: fix: bind readiness-fallback reports to producing PCB and hash full schematic hierarchy
+_None._
 
 ## Proposed
 
@@ -83,25 +81,24 @@ Issues carrying `loom:curated`.
 - **#6554**: diffpair: reproduce KiCad's diff_pair_uncoupled primitive pairing exactly (kct is a lower bound) *(curated)*
 - **#6858**: router: coupled pre-pass should keep the better of the joint-search and pose-centreline candidates (compare-and-keep; unblocks #6835) *(curated)*
 - **#7026**: board 03: fresh class-clean lattice route is not complete under the recipe's tier-1 zone fill (3 GND opens) *(curated)*
-- **#7062**: LDOBlock internal routing shorts foreign pads and crosses itself on real SOT-23-5 geometry *(curated)*
 - **#7093**: router: differential pair gets unequal via counts when a leg falls back to uncoupled routing (board 03 USB_D 2 vs 3; blocks #6394) *(curated)*
 - **#7153**: kct export bundle inconsistencies: JLCPCB Gerbers omit paste layers for SMT bundles; board 04 manifest says DRC OK while report says FAIL/NOT_READY; report ERC falsely 'skipped by user request' *(curated)*
-- **#7164**: coupled_microstrip BEM finite-thickness reads 0.5-2.5% high vs field solve *(curated)*
 - **#7186**: kct post-route DRC reports 33 shorts on routed board 07m where pinned kicad-cli reports 0 (engine disagreement) *(curated)*
-- **#7199**: Committed fleet CPLs still in the pre-#7059 frame — regenerate packages + add a frame-consistency test *(curated)*
 - **#7204**: DFA false-PASS: courtyard check silently skips courtyard-less footprints (boards 00/01/04 signed off with 0 courtyards) and AssemblyCapabilities is never enforced (board 07 double-sided CPL unflagged) *(curated)*
 - **#7206**: Spec-declared currents never reach the ampacity gate: board 05 motor phase necked to 0.2 mm passes check, audit and readiness *(curated)*
-- **#7224**: hermit: re-consolidate point-in-polygon (8 copies) and point-to-segment distance (2 canonical + 7 private); footprint_outside_board misjudges top/right-edge origins *(curated)*
-- **#7241**: Boards 05 and 07: committed CPLs still in the old frame; refresh producers refuse on evidence drift (split from #7199) *(curated)*
 - **#7256**: board 03: after #7163 a fresh arm C route fails usb_geometry (MCU launch 4.138/4.284 > 4 mm; USB width 0.30 -> 0.275) *(curated)*
+- **#7268**: Regenerate JLCPCB packages of boards 02-07 with THT rows (follow-up to #7239) *(curated)*
 - **#7269**: board 07 MIPI_DAT0: recover 0.038 mm skew lost to compare-and-keep (blocks #6858) *(curated)*
 - **#7275**: board 03: fix the 6 real thermal_asymmetry findings via recipe and drop the pinned allowance *(curated)*
-- **#7277**: Report binding: readiness.json fallback accepts stale reports after re-run; ERC binding ignores sub-sheets (#7267 follow-up) *(curated)*
-- **#7294**: board 03: re-size USB diff pairs to 90 ohm and declare target_diff_impedance (#7250 PR-D) *(curated)*
 - **#7296**: Router: refuse pad-edge vias (mask-dam floor) and move existing ones on boards 02/05/06 (split from #7220, PR3) *(curated)*
-- **#7312**: Board 06 regression fixture: coupled USB pairs miss declared 90 ohm differential impedance (5 errors) *(curated)*
-- **#7319**: Board 07 fixture: #7163 field solve narrows the synthesized DQS pair to 0.175 mm, dropping DQ0 (30/31 to 29/31) and tripling Match-Group gate time *(curated)*
-- **#7333**: main CI red (remaining): board 05 package.py asserts 36 CPL rows after #7242 THT; boards 04/05 readiness stale after #7310 *(curated)*
+- **#7349**: Boards 06/07: enable diff-pair gap tightening on seed-42 re-routes and drop the impedance caps (#7344 PR 2) *(curated)*
+- **#7355**: kct readiness --verify doesn't honour board 04's recorded #6269 exception: blocks on 24 paid-drill via errors while the committed record says ready *(curated)*
+- **#7358**: Evidence producers: gate-parity ratchet test, one registered re-pin path per ready board (#7353 step 4) *(curated)*
+- **#7362**: main regression from #7324: board 03 fresh route USB_D 16.3→19.7 mm after 0.22 mm In2.Cu net class; tier-1 common-run test red *(curated)*
+- **#7367**: Key remaining count-based CI/test allowances by identity (extends #7359): stale board-03/07 allowances, board-05 blocking cap, DRC tolerance counts *(curated)*
+- **#7384**: Committed board evidence doesn't reproduce: refresh_readiness --dry-run (pinned 10.0.6, committed checked_at) rewrites files on 6 of 7 boards *(curated)*
+- **#7391**: Board 05: refresh report.md/pdf via its producer (still says THT parts excluded from CPL; #7241/#7383 follow-up) *(curated)*
+- **#7401**: router: board 06 USB2_D+ uncoupled 12.791 > 12.700 mm after v62 pad-edge floor reorders the single-ended fallback *(curated)*
 
 ## Proposed (Architect / Hermit)
 
@@ -112,8 +109,9 @@ Issues carrying `loom:curated`.
 - **#6448**: [Epic #6441] Phase 6: unify diff-pair engines — grid consumes PairPlan or grid coupled pre-pass retired *(architect)*
 - **#7153**: kct export bundle inconsistencies: JLCPCB Gerbers omit paste layers for SMT bundles; board 04 manifest says DRC OK while report says FAIL/NOT_READY; report ERC falsely 'skipped by user request' *(hermit)*
 - **#7206**: Spec-declared currents never reach the ampacity gate: board 05 motor phase necked to 0.2 mm passes check, audit and readiness *(hermit)*
-- **#7250**: kct check never compares project.kct requirements to the routed board, and records diff-pair impedance as checked without evaluating it *(hermit)*
-- **#7319**: Board 07 fixture: #7163 field solve narrows the synthesized DQS pair to 0.175 mm, dropping DQ0 (30/31 to 29/31) and tripling Match-Group gate time *(hermit)*
+- **#7367**: Key remaining count-based CI/test allowances by identity (extends #7359): stale board-03/07 allowances, board-05 blocking cap, DRC tolerance counts *(hermit)*
+- **#7377**: route: collapse the 4 copy-pasted post-route tails into one pipeline -- --length-match-diffpairs, --stitch-power-planes, --progressive-clearance, --bus-routing silently no-op on the default --auto-layers path *(hermit)*
+- **#7399**: Schematic blocks: 10 stock factories fail on real KiCad 10 libs (stale symbol IDs, fictional mock pins); add a real-symbol smoke test *(hermit)*
 
 ## Epics
 
@@ -133,12 +131,12 @@ Issues carrying `loom:curated`.
 | Operator merge-risk holds | 0 |
 | Very important | 0 |
 | Important | 4 |
-| Ready (`loom:issue`) | 1 |
-| In Progress (`loom:building`) | 12 |
-| PRs awaiting review | 2 |
-| Approved PRs awaiting merge | 1 |
-| Curated | 34 |
-| Architect / Hermit proposals | 9 |
+| Ready (`loom:issue`) | 0 |
+| In Progress (`loom:building`) | 9 |
+| PRs awaiting review | 3 |
+| Approved PRs awaiting merge | 0 |
+| Curated | 33 |
+| Architect / Hermit proposals | 10 |
 | Active epics | 8 |
 <!-- guide:plan-body:end -->
 

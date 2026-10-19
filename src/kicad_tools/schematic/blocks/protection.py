@@ -2,6 +2,7 @@
 
 from typing import TYPE_CHECKING, Literal
 
+from ._pins import diode_pin_position
 from .base import CircuitBlock
 
 if TYPE_CHECKING:
@@ -70,7 +71,9 @@ class ESDProtectionBlock(CircuitBlock):
             self.ports = {
                 "IN": (x - 10, y),
                 "OUT": (x + 10, y),
-                "GND": tvs.pin_position("A"),  # Anode to ground
+                # ``Device:D_TVS`` is bidirectional (A1/A2); the helper maps
+                # anode/cathode onto pins 2/1 when the names are absent.
+                "GND": diode_pin_position(tvs, "A"),  # Anode to ground
             }
 
             # Wire signal path
@@ -78,7 +81,7 @@ class ESDProtectionBlock(CircuitBlock):
             sch.add_wire((x, y), self.ports["OUT"])
 
             # Wire TVS cathode to signal path
-            cathode = tvs.pin_position("K")
+            cathode = diode_pin_position(tvs, "K")
             sch.add_wire(cathode, (x, y))
         else:
             # Multi-channel ESD array
@@ -214,7 +217,7 @@ class ReversePolarityBlock(CircuitBlock):
         y: float,
         topology: Literal["diode", "pfet"] = "pfet",
         ref: str = "Q1",
-        mosfet_symbol: str = "Device:Q_PMOS_GSD",
+        mosfet_symbol: str = "Device:Q_PMOS",
         diode_symbol: str = "Device:D_Schottky",
         resistor_symbol: str = "Device:R",
     ):
@@ -227,7 +230,9 @@ class ReversePolarityBlock(CircuitBlock):
             y: Y coordinate
             topology: Protection topology ("diode" or "pfet")
             ref: Reference designator
-            mosfet_symbol: KiCad symbol for P-FET
+            mosfet_symbol: KiCad symbol for P-FET (pins named G/S/D).
+                KiCad 10 replaced the per-pinout ``Q_PMOS_GSD`` variants with
+                the single generic ``Device:Q_PMOS`` (issue #7399).
             diode_symbol: KiCad symbol for diode
             resistor_symbol: KiCad symbol for resistor
         """
@@ -359,7 +364,7 @@ class ThermalCutoffBlock(CircuitBlock):
         y: float,
         temp_rating: str = "85C",
         ref: str = "TH1",
-        thermal_symbol: str = "Device:Thermal_Cutoff",
+        thermal_symbol: str = "Device:Fuse",
     ):
         """
         Create a thermal cutoff block.
@@ -370,7 +375,11 @@ class ThermalCutoffBlock(CircuitBlock):
             y: Y coordinate
             temp_rating: Temperature rating string
             ref: Reference designator
-            thermal_symbol: KiCad symbol for thermal cutoff
+            thermal_symbol: KiCad symbol for thermal cutoff.  KiCad 10 ships
+                no thermal-cutoff (TCO) symbol, so the default is the generic
+                two-terminal ``Device:Fuse`` -- a TCO is a one-shot thermal
+                fuse, and the value field carries the temperature rating
+                (issue #7399).  Pass a project symbol to override.
         """
         super().__init__(sch, x, y)
 

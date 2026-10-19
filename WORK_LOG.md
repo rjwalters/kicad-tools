@@ -13,8 +13,53 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 - [2026-02](work_log/WORK_LOG_2026-02.md)
 - [2026-01](work_log/WORK_LOG_2026-01.md)
 
+### 2026-10-19
+
+- **PR #7408**: fix(ci): lower board 07 copper-safety DRC floor to 0
+- **PR #7396**: fix: key known_issues warning allowances by finding identity
+- **Issue #7389** (closed): Key readiness known_issues warning/error allowances by finding identity, not per-rule counts (#7359 follow-up, #7270 Q3)
+- **PR #7394**: feat: tighten diff-pair gaps in board 06/07 recipes, lower impedance caps
+- **PR #7404**: fix(blocks): build stock schematic blocks on KiCad 10 libs; add real-symbol smoke test
+- **PR #7395**: fix: clamp init netclass template values to manufacturer floors
+- **Issue #7392** (closed): kct init --design-type writes netclass values below the fab floor (oshpark/seeed Default clearance 0.15 < 0.1524 mm)
+- **PR #7400**: fix: route stock MCUBlock and OscillatorBlock copper clear of foreign pads
+- **Issue #7393** (closed): Audit MCUBlock/OscillatorBlock stock copper for foreign-pad clearance (#7062 follow-up)
+- **PR #7397**: fix(router): let a capped match-group member top up from the unused ceiling (board 07 re-measure after #7375)
+- **PR #7364**: fix(boards): share one saved-vs-refilled fill check across readiness producers
+- **Issue #7356** (closed): Evidence producers: one shared saved-vs-refilled fill-identity gate for every producer (#7353 step 2)
+- **PR #7388**: fix: rule writers keep stricter authored .kicad_pro rules (#7385)
+- **PR #7379**: refactor(geometry): delegate private point-to-segment distance copies to core (PR2 of #7224)
+- **Issue #7385** (closed): Rule files may only tighten on rewrite: kct mfr apply-rules (.kicad_pro), fab-rules apply and kct init bypass the #6191 max() policy and loosen authored rules
+- **Issue #7390** (closed): Backlog consolidation 2026-10-18: close #7199 (done), unblock #7268, clear stale building on #6554/#7153, retire #7220 with #7296
+- **Issue #7224** (closed): hermit: re-consolidate point-in-polygon (8 copies) and point-to-segment distance (2 canonical + 7 private); footprint_outside_board misjudges top/right-edge origins
+- **Issue #7062** (closed): LDOBlock internal routing shorts foreign pads and crosses itself on real SOT-23-5 geometry
+- **PR #7288**: fix: route stock LDOBlock copper clear of foreign pads
+- **Issue #7339** (closed): Board 07 seed-42 re-route: DDR_DATA_BYTE_0 match-group skew 16.7 mm (tol 0.100) exceeds MATCHGROUP_VIOLATION_BASELINE once DQ0 routes
+- **PR #7340**: ci: key board 07 match-group allowance to named groups (adds DDR_DATA_BYTE_0)
+- **Issue #7383** (closed): kct export rewrites the routed .kicad_dru and drops the managed keepout-rule block (loosens board 05 rules)
+- **PR #7387**: fix(dru): kct init merges instead of clobbering .kicad_dru; report keepout-block removal
+- **Issue #7357** (closed): Board 04: retire the three regenerate_board_04 one-off evidence scripts into a refresh_bundles BundleConfig (#7353 step 3)
+- **PR #7381**: refactor: route board 04 evidence refresh through refresh_bundles_6404
+- **Issue #7199** (closed): Committed fleet CPLs still in the pre-#7059 frame — regenerate packages + add a frame-consistency test
+- **Issue #7365** (closed): Board 02 readiness.json is stale on main: README.md edited by #7342 without re-pin
+- **PR #7371**: chore(boards): re-pin board 02 readiness evidence after README edit
+- **Issue #7359** (closed): Replace count-based CI allowances with identity-keyed exceptions (#7270 Q3 ruling): diffpair/matchgroup impedance caps, known_issues warning counts
+- **PR #7366**: fix(ci): key synthetic-board impedance allowances by net, not count
+- **PR #7386**: fix(route): one post-route pipeline for all four kct route tails (--length-match-diffpairs on the default path)
+- **Issue #7241** (closed): Boards 05 and 07: committed CPLs still in the old frame; refresh producers refuse on evidence drift (split from #7199)
+- **PR #7382**: fix(boards): put board 05 and 07 CPLs in the Gerber frame; refresh 07 routed sidecar
+- **Issue #7374** (closed): main red after #7317: board-04 tombstoning/pintype tests stale, board-04 repair deepcopy timeouts, order-dependent diffpair shadow spy
+- **PR #7378**: test: clear main's board-04 and diff-pair reds left by #7317
+- **PR #7375**: fix: visit match-group members by descending deficit
+- **Issue #7353** (closed): Consolidate board evidence producers onto one shared gate pipeline (refresh_bundles copy, 5 fill-identity impls, board-04 one-offs)
+- **PR #7363**: refactor: route refresh_bundle through refresh_readiness.repin_staged
+
 ### 2026-10-18
 
+- **PR #7372**: chore(boards): regenerate 05/06/07 DRC evidence with report_sources
+- **Issue #7283** (closed): Regenerate boards 05/06/07 DRC evidence so report binding records provenance
+- **PR #7360**: feat(router): opt-in diff-pair gap tightening post-pass (--tighten-diffpair-gap)
+- **Issue #7344** (closed): Router: coupled pair trunks do not tighten to the solved intra_pair_clearance (113-125 ohm on boards 06/07)
 - **PR #7370**: test: update board 03 USB impedance test for in-band pair (#7368)
 - **Issue #7368** (closed): test: test_checker_judges_board_03_usb_pair_on_both_branches fails after board 03 USB pair narrowed to 90 ohm
 - **PR #7369**: test: drop stale board 03 Power-class and board 07 netclass allowances

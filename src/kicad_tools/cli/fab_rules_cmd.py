@@ -391,9 +391,13 @@ def cmd_compare(args):
 def cmd_apply(args):
     """Apply manufacturer rules to project."""
     from kicad_tools.core.project_file import (
-        apply_manufacturer_rules,
         save_project,
         set_manufacturer_metadata,
+    )
+    from kicad_tools.core.rule_loosening import RuleLooseningError
+    from kicad_tools.manufacturers.project_generator import (
+        build_project_rules,
+        merge_project_rules_guarded,
     )
 
     try:
@@ -433,7 +437,14 @@ def cmd_apply(args):
     )
     print(f"  Min via diameter:  {rules.min_via_diameter_mm:.3f} mm")
     print(f"  Min via drill:     {rules.min_via_drill_mm:.3f} mm")
-    print(f"  Min annular ring:  {rules.min_annular_ring_mm:.3f} mm")
+    # The .kicad_pro built-in floor is the micro-via one (#3734/#3736):
+    # KiCad has no micro-via annular key, so standard-via annular ring is
+    # enforced by the .kicad_dru "Annular Ring" rule and kct check --mfr.
+    print(
+        f"  Min annular ring:  {rules.min_annular_ring_mm:.3f} mm (standard vias; "
+        f".kicad_pro floor {build_project_rules(rules)['min_via_annular_width']:.3f} mm "
+        "for micro vias)"
+    )
     print(f"  Copper to edge:    {rules.min_copper_to_edge_mm:.3f} mm")
 
     if args.dry_run:
@@ -441,17 +452,16 @@ def cmd_apply(args):
         print(f"\n{'=' * 60}")
         return 0
 
-    # Apply rules
-    apply_manufacturer_rules(
-        data,
-        min_clearance_mm=rules.min_clearance_mm,
-        min_track_width_mm=rules.min_trace_width_mm,
-        min_via_diameter_mm=rules.min_via_diameter_mm,
-        min_via_drill_mm=rules.min_via_drill_mm,
-        min_annular_ring_mm=rules.min_annular_ring_mm,
-        min_hole_diameter_mm=rules.min_hole_diameter_mm,
-        min_copper_to_edge_mm=rules.min_copper_to_edge_mm,
-    )
+    # Apply rules through the one #6191 stricter-wins policy (Issue #7385):
+    # a stricter authored minimum or Default-netclass value is kept, and a
+    # rewrite that would loosen an authored rule refuses without writing.
+    try:
+        merge_report = merge_project_rules_guarded(data, rules, writer="kicad-fab-rules apply")
+    except RuleLooseningError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+    for line in merge_report.messages():
+        print(line)
 
     # Set manufacturer metadata
     set_manufacturer_metadata(

@@ -67,6 +67,7 @@ from typing import TYPE_CHECKING, Any
 from shapely.geometry import LineString, Point, box  # type: ignore[import-untyped]
 
 from kicad_tools.cli.stitch_cmd import point_in_polygon
+from kicad_tools.core.geometry import point_to_segment_distance
 from kicad_tools.validate.rules.via_pad_geometry import (
     DRC_TOLERANCE,
     drill_to_mask_aperture_gap,
@@ -190,14 +191,9 @@ def _dist_point_to_segment(px: float, py: float, seg: Segment) -> float:
     x2, y2 = seg.end
     dx = x2 - x1
     dy = y2 - y1
-    seg_len_sq = dx * dx + dy * dy
-    if seg_len_sq < 1e-12:
+    if dx * dx + dy * dy < 1e-12:
         return math.hypot(px - x1, py - y1)
-    t = ((px - x1) * dx + (py - y1) * dy) / seg_len_sq
-    t = max(0.0, min(1.0, t))
-    cx = x1 + t * dx
-    cy = y1 + t * dy
-    return math.hypot(px - cx, py - cy)
+    return point_to_segment_distance(px, py, x1, y1, x2, y2)
 
 
 def _endpoint_at(seg: Segment, x: float, y: float) -> tuple[float, float] | None:

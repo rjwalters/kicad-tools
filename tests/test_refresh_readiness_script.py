@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import shutil
 import sys
 import zipfile
 from pathlib import Path
@@ -210,28 +211,36 @@ def test_board04_uses_its_own_manufacturing_check(mod):
 
 
 # --------------------------------------------------------------------------- Issue #7261
-def _warned_report(**counts: int) -> dict:
+def _warned_report(*pads: str, rule: str = "thermal_asymmetry") -> dict:
     meta = {k: {"status": "PASSED"} for k in ("drc", "erc", "lvs", "manifest")}
     violations = [
-        {"rule_id": rule, "severity": "warning"} for rule, n in counts.items() for _ in range(n)
+        {"rule_id": rule, "severity": "warning", "items": [pad.rpartition("-")[0], pad]}
+        for pad in pads
     ]
     summary = {"errors": 0, "warnings": len(violations)}
     return {"summary": summary, "meta_checks": meta, "violations": violations}
 
 
+_C10 = ("thermal_asymmetry", "C10", "C10-2")
+_C11 = ("thermal_asymmetry", "C11", "C11-2")
+
+
 def test_known_issue_allowance_tolerates_exactly_the_recorded_warnings(mod):
-    allowance = {"thermal_asymmetry": 9}
-    assert mod.check_report_verdict(_warned_report(thermal_asymmetry=9), "x", allowance)
+    allowance = {_C10: 7220, _C11: 7220}
+    assert mod.check_report_verdict(_warned_report("C10-2", "C11-2"), "x", allowance)
     for report in (
-        _warned_report(thermal_asymmetry=10),  # more than recorded
-        _warned_report(thermal_asymmetry=1, via_at_pad_edge=1),  # unlisted rule
+        _warned_report("C10-2", "C11-2", "C12-2"),  # an extra, unlisted finding
+        _warned_report("C10-2", "C12-2"),  # swapped identity, unchanged count
+        _warned_report("C10-2"),  # C11-2 no longer fires: stale entry
+        _warned_report("C10-2", "C11-2", "C11-2"),  # a listed identity repeated
+        _warned_report("C10-2", "C11-2", rule="via_at_pad_edge"),  # same pads, other rule
     ):
         with pytest.raises(mod.GateFailure):
             mod.check_report_verdict(report, "x", allowance)
-    mismatched = _warned_report(thermal_asymmetry=1)
+    mismatched = _warned_report("C10-2")
     mismatched["summary"]["warnings"] = 2  # summary disagrees with findings
     with pytest.raises(mod.GateFailure):
-        mod.check_report_verdict(mismatched, "x", {"thermal_asymmetry": 5})
+        mod.check_report_verdict(mismatched, "x", {_C10: 7220})
 
 
 def test_allowance_comes_from_the_boards_recorded_known_issues(mod, tmp_path):
@@ -242,10 +251,10 @@ def test_allowance_comes_from_the_boards_recorded_known_issues(mod, tmp_path):
         "kind": "advisory",
         "summary": "s",
         "recorded": "2026-10-18",
-        "warnings": {"thermal_asymmetry": 9},
+        "warnings": [{"rule": "thermal_asymmetry", "ref": "C10", "pad": "C10-2"}],
     }
     (board / "output" / "readiness.json").write_text(json.dumps({"known_issues": [entry]}))
-    assert mod.known_issue_allowance(board) == {"thermal_asymmetry": 9}
+    assert mod.known_issue_allowance(board) == {_C10: 7220}
     (board / "output" / "readiness.json").write_text(json.dumps({}))
     assert mod.known_issue_allowance(board) == {}
 
@@ -275,7 +284,6 @@ def test_outer_archive_members_resolve_against_committed_tree(mod, tmp_path):
     Boards 00-02 prefix members with ``manufacturing/``; a search root that
     ignores that refused them all (Issue #7273 review).
     """
-    import shutil
 
     for name, cfg in mod.BOARDS.items():
         board = mod.REPO_ROOT / "boards" / name
@@ -290,7 +298,7 @@ def test_outer_archive_members_resolve_against_committed_tree(mod, tmp_path):
 
 # ---------------------------------------------------------------- known issues (#7323)
 CHECKED_AT = "2026-10-18T00:00:00+00:00"
-ADVISORY = "7220:one-sided thermal:advisory:thermal_asymmetry=1"
+ADVISORY = "7220:one-sided thermal:advisory"
 
 
 def _evidence(board: Path) -> Path:
@@ -306,6 +314,16 @@ def test_known_issue_flag_binds_the_evidence_file_into_inputs(mod, tmp_path, mon
     assert [e["issue"] for e in report["known_issues"]] == [7220]
     assert json.loads(_evidence(board).read_text()) == {"known_issues": report["known_issues"]}
     assert report["inputs"]["output/readiness/known-issues.json"] == mod.sha256(_evidence(board))
+
+
+def test_known_issue_naming_an_identity_that_no_longer_fires_refuses_as_stale(
+    mod, tmp_path, monkeypatch
+):
+    board = _hooked_board(mod, tmp_path, monkeypatch, warnings=0)
+    with pytest.raises(mod.GateFailure):
+        mod.refresh(
+            board, CHECKED_AT, known_issue=["7220:thermal:advisory:thermal_asymmetry@C10-2"]
+        )
 
 
 def test_resolve_known_issue_flag_drops_entry_file_and_binding(mod, tmp_path, monkeypatch):
@@ -342,17 +360,6 @@ def test_dry_run_with_known_issue_leaves_the_board_untouched(mod, tmp_path, monk
 # ---------------------------------------------------------------------------
 
 
-def test_fill_divergence_uses_the_readiness_tolerance(mod):
-    saved = {"B.Cu": 2258.871182, "F.Cu": 1438.71334}
-    assert mod.fill_divergence(saved, dict(saved), 0.01) == {}
-    assert mod.fill_divergence(saved, {**saved, "F.Cu": 1438.72334}, 0.01) == {}
-    assert mod.fill_divergence(saved, {"B.Cu": 2268.243206, "F.Cu": 1457.428272}, 0.01) == {
-        "B.Cu": 9.372024,
-        "F.Cu": 18.714932,
-    }
-    assert mod.fill_divergence(saved, {"B.Cu": 2258.871182}, 0.01) == {"F.Cu": 1438.71334}
-
-
 def _fill_board(tmp_path: Path):
     board = tmp_path / "board"
     (board / "output").mkdir(parents=True)
@@ -371,14 +378,16 @@ def test_gate_fill_identity_refuses_a_divergent_saved_fill(mod, tmp_path, monkey
         tier="jlcpcb",
         erc=(),
     )
-    saved_pcb = board / cfg.routed_pcb
-    monkeypatch.setattr(
-        readiness_cmd, "_refill_and_save", lambda pcb: readiness_cmd.EngineRun(ok=True)
-    )
+    real_engines = readiness_cmd.Engines
     monkeypatch.setattr(
         readiness_cmd,
-        "_fill_areas",
-        lambda pcb: {"F.Cu": 1438.71334} if pcb == saved_pcb else {"F.Cu": refilled_f},
+        "Engines",
+        lambda: real_engines(
+            refill=lambda pcb: readiness_cmd.EngineRun(ok=True),
+            fill_areas=lambda pcb: (
+                {"F.Cu": 1438.71334} if "fill-refilled" not in pcb.parts else {"F.Cu": refilled_f}
+            ),
+        ),
     )
     if refilled_f == 1438.71334:
         assert mod.gate_fill_identity(board, cfg) == {}
@@ -452,3 +461,29 @@ def test_drc_report_copies_are_written_and_recorded_in_report_sources(mod, tmp_p
 def test_demo_boards_with_drc_provenance_target_the_report_binding_reads(mod):
     for name in ("05-bldc-motor-controller", "06-diffpair-test", "07-matchgroup-test"):
         assert "output/drc_report.json" in mod.BOARDS[name].drc_targets
+
+
+# ------------------------------------------------------------ repin_staged (#7353)
+def test_repin_staged_gates_and_publishes_a_staged_copy(mod, tmp_path, monkeypatch):
+    """``repin_staged`` re-pins a caller-staged copy; ``after_manifest`` runs between re-hashes."""
+    board = _hooked_board(mod, tmp_path, monkeypatch, warnings=0)
+    cfg = mod.BOARDS[board.name]
+    staged = tmp_path / "staged" / board.name
+    shutil.copytree(board, staged)
+    rehashes: list[str] = []
+    monkeypatch.setattr(mod, "load_refresher", lambda *a: lambda mfg: rehashes.append("hash"))
+
+    def after_manifest() -> None:
+        rehashes.append("after")
+
+    published = mod.repin_staged(
+        board, staged, cfg, CHECKED_AT, dry_run=True, after_manifest=after_manifest
+    )
+
+    assert rehashes == ["hash", "after", "hash"]
+    assert "output/readiness.json" in published
+    assert (
+        json.loads((staged / "output" / "readiness.json").read_text())["checked_at"] == CHECKED_AT
+    )
+    # dry_run: the committed board is untouched
+    assert json.loads((board / "output" / "readiness.json").read_text())["checked_at"] != CHECKED_AT

@@ -337,3 +337,175 @@ def test_bundle_unpacks_gate_native_drc_tuple(mod, tmp_path, monkeypatch):
     assert (out / "drc_report.json").read_bytes() == b'{"native": true}'
     sources = json.loads((out / "readiness.json").read_text())["report_sources"]
     assert set(sources) == {"output/drc_report.json", "output/native-drc.json"}
+
+
+# --------------------------------------------------------------------------- Issue #7353
+_CHECK_SCRIPT = """\
+import json, sys
+from pathlib import Path
+
+warnings = int(Path(__file__).with_name("warnings.txt").read_text())
+meta = {k: {"status": "PASSED"} for k in ("drc", "erc", "manifest")}
+meta["lvs"] = {"status": "PASSED", "mismatches": [], "copper_mismatches": []}
+report = {"summary": {"errors": 0, "warnings": warnings}, "meta_checks": meta}
+Path(sys.argv[2]).write_text(json.dumps(report))
+sys.exit(2 if warnings else 0)
+"""
+
+
+def _repin_board(mod, tmp_path, monkeypatch, *, warnings: int | None = None) -> Path:
+    """A fake bundle board whose every external gate is stubbed, so only wiring is under test."""
+    board = _fake_board(tmp_path)
+    out = board / "output"
+    for name in ("drc_report.json", "native-drc.json"):
+        (out / name).write_text("old")
+    check_script = None
+    if warnings is not None:
+        (board / "check_board.py").write_text(_CHECK_SCRIPT)
+        (board / "warnings.txt").write_text(str(warnings))
+        check_script = "check_board.py"
+    cfg = mod.rr.BoardConfig(
+        routed_pcb="output/board_routed.kicad_pcb",
+        schematic="output/board.kicad_sch",
+        tier="jlcpcb",
+        drc_targets=("output/drc_report.json", "output/native-drc.json"),
+        erc=(),
+        archives=(),
+        check_script=check_script,
+    )
+    monkeypatch.setitem(mod.rr.BOARDS, board.name, cfg)
+    monkeypatch.setitem(mod.BUNDLES, board.name, mod.BundleConfig(manufacturer="jlcpcb"))
+    monkeypatch.setattr(mod, "stage_refill", lambda s, c: {"changed": False})
+    monkeypatch.setattr(mod, "gate_saved_fill_drc", lambda s, c: b"{}")
+    monkeypatch.setattr(mod, "bundle_is_stale", lambda s, c: False)
+    monkeypatch.setattr(mod.rr, "load_refresher", lambda *a: lambda mfg: None)
+    monkeypatch.setattr(mod.rr, "rebuild_archive", lambda *a: [])
+    monkeypatch.setattr(mod.rr, "gate_native_drc", lambda *a: (0, b'{"refilled": true}'))
+    monkeypatch.setattr(mod.rr, "gate_kct_check", lambda *a: (True, 0))
+    monkeypatch.setattr(mod.rr, "gate_net_status", lambda *a: 100.0)
+    monkeypatch.setattr(mod.rr, "gate_sync", lambda *a: None)
+    import kicad_tools.cli.board_readiness as br
+
+    monkeypatch.setattr(br, "read_readiness", lambda p: {"status": "ready", "metrics": {}})
+    return board
+
+
+def test_refresh_bundle_delegates_the_post_staging_tail(mod):
+    """The re-pin tail has one copy: ``refresh_bundle`` calls ``repin_staged``."""
+    import inspect
+
+    source = inspect.getsource(mod.refresh_bundle)
+    assert "rr.repin_staged(" in source
+    for gate in (
+        "gate_native_drc",
+        "gate_kct_check",
+        "gate_net_status",
+        "gate_sync",
+        "compare_metrics",
+        "read_readiness",
+    ):
+        assert gate not in source, f"refresh_bundle calls {gate} instead of repin_staged"
+
+
+def test_bundle_refuses_when_the_board_local_check_fails(mod, tmp_path, monkeypatch):
+    """``check_script`` is honoured by the bundle driver; the generic check must not run."""
+    board = _repin_board(mod, tmp_path, monkeypatch, warnings=1)
+
+    def generic_check_must_not_run(*_):
+        raise AssertionError("kct check ran although the board has a check hook")
+
+    monkeypatch.setattr(mod.rr, "gate_kct_check", generic_check_must_not_run)
+    before = {p: p.read_bytes() for p in board.rglob("*") if p.is_file()}
+    with pytest.raises(mod.GateFailure, match="check_board.py"):
+        mod.refresh_bundle(board, "2026-10-18T00:00:00+00:00")
+    assert {p: p.read_bytes() for p in board.rglob("*") if p.is_file()} == before
+
+
+def test_drc_targets_hold_the_refilled_report_and_have_one_writer(mod, tmp_path, monkeypatch):
+    """Every ``drc_targets`` file is the refilled raw report, recorded in ``report_sources``."""
+    for name, bundle in mod.BUNDLES.items():
+        assert not set(bundle.saved_drc_reports) & set(mod.rr.BOARDS[name].drc_targets), name
+
+    board = _repin_board(mod, tmp_path, monkeypatch)
+    mod.refresh_bundle(board, "2026-10-18T00:00:00+00:00")
+
+    cfg = mod.rr.BOARDS[board.name]
+    for target in cfg.drc_targets:
+        assert (board / target).read_bytes() == b'{"refilled": true}'
+    sources = json.loads((board / "output" / "readiness.json").read_text())["report_sources"]
+    pcb_sha = mod.sha256(board / cfg.routed_pcb)
+    assert sources == dict.fromkeys(cfg.drc_targets, pcb_sha)
+
+
+def test_known_issue_in_the_bundle_matches_the_readiness_refresh(mod, tmp_path, monkeypatch):
+    """``refresh_bundle(known_issue=...)`` stages the same evidence file ``refresh`` does."""
+    advisory = "7220:one-sided thermal:advisory"
+    evidence = "output/readiness/known-issues.json"
+    checked_at = "2026-10-18T00:00:00+00:00"
+
+    bundle_board = _repin_board(mod, tmp_path / "bundle", monkeypatch)
+    published = mod.refresh_bundle(bundle_board, checked_at, known_issue=[advisory])
+
+    refresh_board = _repin_board(mod, tmp_path / "refresh", monkeypatch)
+    mod.rr.refresh(refresh_board, checked_at, known_issue=[advisory])
+
+    assert evidence in published
+    assert (bundle_board / evidence).read_bytes() == (refresh_board / evidence).read_bytes()
+    assert (bundle_board / "output" / "readiness.json").read_bytes() == (
+        refresh_board / "output" / "readiness.json"
+    ).read_bytes()
+
+
+# --------------------------------------------------------------------------- board 04 (#7357)
+def test_board04_config_reuses_the_shared_pipeline(mod):
+    bundle, cfg = mod.BUNDLES["04-stm32-devboard"], mod.rr.BOARDS["04-stm32-devboard"]
+    # The board-local check hook is what repin_staged's gate runs, not bare kct check.
+    assert cfg.check_script == "check_manufacturing.py"
+    # Only the copper and front-silk members follow the saved fills.
+    assert bundle.export_members == () and bundle.assembly_pdfs == () and bundle.renders is None
+    assert [p.search("b-F_Cu.gbr") is not None for p in bundle.gerber_members] == [True, False]
+    assert [p.search("b-F_Silkscreen.gbr") is not None for p in bundle.gerber_members] == [
+        False,
+        True,
+    ]
+    assert bundle.recipe_drc == "generate_design.py"
+    for target in (*bundle.parity_drc_reports, *bundle.fill_consistency, *bundle.check_reports):
+        assert (REPO / "boards/04-stm32-devboard" / target).is_file()
+
+
+def test_board04_legacy_writers_are_gone():
+    boards = REPO / "scripts" / "boards"
+    assert not (boards / "regenerate_board_04_6269.py").exists()
+    assert not (boards / "regenerate_board_04_6404.py").exists()
+    assert "NOT re-pinned" not in (boards / "regenerate_boards_03_04_6076.py").read_text()
+
+
+def _parity_bundle(mod, tmp_path, monkeypatch, report: dict):
+    board, cfg = _staged(tmp_path)
+    committed = board / "output" / "native-drc.json"
+    committed.write_text(json.dumps({"date": "old", "violations": [], "unconnected_items": []}))
+    bundle = mod.BundleConfig(manufacturer="jlcpcb", parity_drc_reports=("output/native-drc.json",))
+
+    def run(cmd, **_):
+        Path(cmd[cmd.index("--output") + 1]).write_text(json.dumps(report))
+        return type("Proc", (), {"returncode": 0, "stderr": ""})()
+
+    monkeypatch.setattr(mod, "run", run)
+    return board, cfg, bundle, committed
+
+
+def test_parity_drc_refuses_a_finding_and_writes_nothing(mod, tmp_path, monkeypatch):
+    seeded = {"date": "new", "violations": [{"type": "clearance", "severity": "error"}]}
+    board, cfg, bundle, committed = _parity_bundle(mod, tmp_path, monkeypatch, seeded)
+    before = committed.read_bytes()
+    with pytest.raises(mod.GateFailure, match="schematic parity"):
+        mod.gate_parity_drc(board, cfg, bundle)
+    assert committed.read_bytes() == before
+
+
+def test_parity_drc_keeps_committed_report_when_only_the_date_differs(mod, tmp_path, monkeypatch):
+    clean = {"date": "new", "violations": [], "unconnected_items": []}
+    board, cfg, bundle, committed = _parity_bundle(mod, tmp_path, monkeypatch, clean)
+    before = committed.read_bytes()
+    mod.gate_parity_drc(board, cfg, bundle)
+    assert committed.read_bytes() == before
