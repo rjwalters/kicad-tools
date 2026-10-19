@@ -28,7 +28,10 @@ For each board it
    ``check_manufacturing.py``'s report, the recipe's ``drc_report.json`` and
    the outer archive), as ``regenerate_board_04_6269.py`` does.  It no longer
    writes ``native-drc.json``: that evidence is owned by ``refresh_readiness.py``
-   (pinned toolchain, Issue #7409), so re-pin it with the command below.
+   (pinned toolchain, Issue #7409), whose board 04 ``drc_targets`` rewrite
+   ``output/readiness/native-drc.json`` and ``output/manufacturing/native-drc.json``
+   (Issue #7435), so re-pin it with the command below (``KCT_KICAD_DOCKER=1`` on
+   a host whose ``kicad-cli`` is not the pinned release).
 
 Then re-pin each board's ``readiness.json`` with its producer::
 
@@ -294,7 +297,8 @@ def stage_board04_evidence(board: Path) -> None:
     refresh_tools.rebuild_archive(out / "manufacturing.zip", [mfg])
     regen.drop_bytecode(board)
     log(
-        "  native-drc.json NOT refreshed; re-pin it with: uv run --with shapely python "
+        "  native-drc.json NOT refreshed; re-pin readiness/ and manufacturing/ copies with: "
+        "uv run --with shapely python "
         "scripts/boards/refresh_readiness.py boards/04-stm32-devboard --checked-at <ISO>"
     )
 

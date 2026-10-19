@@ -28,6 +28,55 @@ def manufacturer_check_failures(check):
     return failures
 
 
+#: The router net classes the committed routed sidecars declare (#6390) and
+#: whose copper #6395 repaired.  ``Reviewed clearance - <class>`` rules for
+#: these must survive every regeneration (#7391).
+ROUTER_NETCLASSES = (
+    "Audio",
+    "Clock",
+    "Debug",
+    "Differential",
+    "Digital",
+    "HighCurrentSignal",
+    "Power",
+)
+
+
+def declare_router_netclasses(routed):
+    """Declare the router's net classes in the routed sidecars (#6390, #7391).
+
+    ``routing.json`` was routed by ``kct route`` at the router's per-class
+    clearances (Power/Clock/HighCurrentSignal 0.2 mm, Audio/Debug/
+    Differential/Digital 0.15 mm), and #6390 declared those classes in the
+    committed ``.kicad_pro``/``.kicad_dru`` so that kicad-cli and ``kct
+    check`` hold the copper to them (#6395 repaired the copper that sat
+    below).  The authored project from ``hardware.generate`` declares only
+    ``Default``, so without this step a regeneration silently dropped the
+    seven ``Reviewed clearance - <class>`` rules, loosening those nets to the
+    0.1016 mm fab floor.
+
+    The map is the router's effective one (``DEFAULT_NET_CLASS_MAP`` plus
+    its name classifier), exactly as ``scripts/boards/
+    declare_router_netclasses_6390.py`` derived the committed sidecars.  The
+    sidecar writer keeps stricter authored minima (``min_track_width``
+    0.15 mm, the routed copper's narrowest track).
+    """
+    from kicad_tools.cli.route_cmd import _write_drc_constraint_sidecars
+    from kicad_tools.manufacturers.project_generator import board_net_names
+    from kicad_tools.router.net_class import classify_and_apply_rules
+    from kicad_tools.router.rules import DEFAULT_NET_CLASS_MAP
+
+    nets = sorted(name for name in (board_net_names(routed) or ()) if name)
+    effective = dict(DEFAULT_NET_CLASS_MAP)
+    for name, routing in classify_and_apply_rules(dict(enumerate(nets, 1))).items():
+        effective.setdefault(name, routing)
+    _write_drc_constraint_sidecars(routed, "jlcpcb", 4, quiet=True, net_class_map=effective)
+    project = json.loads(routed.with_suffix(".kicad_pro").read_text())
+    declared = project.get("meta", {}).get("kct_router_netclasses", {}).get("classes", [])
+    if tuple(sorted(declared)) != ROUTER_NETCLASSES:
+        raise RuntimeError(f"Router net classes not declared in the routed project: {declared}")
+
+
 def build(output):
     output = Path(output).resolve()
     generate(output)
@@ -37,6 +86,7 @@ def build(output):
     shutil.copy2(output / "bldc_controller.kicad_pcb", routed)
     shutil.copy2(output / "bldc_controller.kicad_pro", routed.with_suffix(".kicad_pro"))
     fingerprint = apply_routing(routed)
+    declare_router_netclasses(routed)
     evidence = output / "readiness"
     evidence.mkdir(exist_ok=True)
     cli = [sys.executable, "-m", "kicad_tools.cli"]
@@ -81,6 +131,11 @@ def build(output):
         check=True,
     )
     native = json.loads((evidence / "native-drc.json").read_text())
+    from kicad_tools.cli.kicad_toolchain import require_library_environment
+
+    # Issue #6962: a library-table finding describes the environment, not
+    # the board, so it must never become evidence.
+    require_library_environment(native)
     # Only "error"-severity findings are a fab-stop. kicad-cli's default JSON
     # includes warnings in `violations` too (e.g. the JLCPCB "Silk to Pad"
     # floor is a legibility/DFM limit KiCad itself classifies as a warning,
@@ -161,4 +216,10 @@ def main():
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    from kicad_tools.cli.kicad_toolchain import run_on_evidence_toolchain
+
+    # Issue #6962: every bare ``kicad-cli`` this producer and package.py run
+    # resolves to the pinned evidence toolchain (KCT_KICAD_DOCKER=1 routes it
+    # through CI's image); any other release is refused before anything is
+    # written.
+    raise SystemExit(run_on_evidence_toolchain(main, [ROOT.parents[2]]))

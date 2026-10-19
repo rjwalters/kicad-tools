@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "checked_at": "2026-10-19T07:00:00+00:00",
+  "checked_at": "2026-10-19T09:30:00+00:00",
   "mode": "assembly",
   "status": "ready",
   "blockers": [],
@@ -68,19 +68,19 @@
     "output/manufacturing/images/pcb_front.png": "c199029e43608545425f43a202e21ebec8b74123c54d2bb028e6dfeba8c6b4a1",
     "output/manufacturing/images/schematic_stm32_devboard.png": "701fa6f1e47427d23becbd4c0d3e509a4dd66b0178ff50d7e61e7e7c5601cb1f",
     "output/manufacturing/kicad_project.zip": "69e3b0aea7970407b3e06433c18ca4361250e436e71551a7512c588b7a8eaeef",
-    "output/manufacturing/manifest.json": "f34d98a111e7d9557b33b743b38d3d2a6e1ce9961776c3172790a6ac145b3364",
+    "output/manufacturing/manifest.json": "cfeac4f910b6d8b32aaa7c92a18890fea2ada83f4db8bb20ef9108ae3573fece",
     "output/manufacturing/manual-assembly-bom.csv": "0d1620494f1492c9a57ccf7d29840d0643984cd23bdb2969e0d0ea660a4839a1",
     "output/manufacturing/manufacturing-requirements.json": "52ef1e5957c569c120a43b82a63c9dff8d3bf5dee2392e473e2e73f20b8fb199",
-    "output/manufacturing/native-drc.json": "100e902c5b674120fb2a4d82ff0781c158a8b263f750ac44e1599b9d979d1197",
+    "output/manufacturing/native-drc.json": "06631aa092d99144d63111936712463ee0d93ac45d4d7353aa326a96645c5639",
     "output/manufacturing/native-erc.json": "a63705556bc9c62121b86b9ba175962761eddaf7107211dc068c4acba96251ff",
     "output/manufacturing/procurement-review.md": "61cf3ee36370eeaee39cd44130f83481da4d980672d2072163c5de61ca1bbaef",
     "output/manufacturing/report.md": "ab87ea2ed6ff7b3005a9ac65bb3d55a24ef1047fcb515f46304b99ae190f917c",
     "output/manufacturing/report.pdf": "4ffc10dd629ae44f592640c37b000795e5dbc377c00e6bd33bf309edb341e384",
     "output/manufacturing-requirements.json": "52ef1e5957c569c120a43b82a63c9dff8d3bf5dee2392e473e2e73f20b8fb199",
-    "output/manufacturing.zip": "809bc7c905036fc63dbf99db27271c8f34abd11a06144d0abb4ef9bb0b868e9c",
+    "output/manufacturing.zip": "b644cf57bcaadf572304dacd159446ec42d9287310d167b1c720af12325df40c",
     "output/readiness/fill-consistency.json": "3369e42a5c0ea40c718cdf6016b83fa85b04260ad66cf757b282ea30ef9561b6",
     "output/readiness/kct-check.json": "126c259001b592dc59309dcc57983b86c8c39a10ac4f56a2a0f7618d2ef5e784",
-    "output/readiness/native-drc.json": "100e902c5b674120fb2a4d82ff0781c158a8b263f750ac44e1599b9d979d1197",
+    "output/readiness/native-drc.json": "06631aa092d99144d63111936712463ee0d93ac45d4d7353aa326a96645c5639",
     "output/readiness/native-erc.json": "a63705556bc9c62121b86b9ba175962761eddaf7107211dc068c4acba96251ff",
     "output/renders/3d-back.png": "7b86cc868f8427f05c80261393689c368e436fd1dd98a6df491c2ee6fa5d6149",
     "output/renders/3d-front.png": "425cc490539056c912db455d1acc6e78816ef61cf85b362d8752493344cb9539",
@@ -274,5 +274,9 @@
       ]
     }
   ],
-  "manufacturer": "jlcpcb-tier1"
+  "manufacturer": "jlcpcb-tier1",
+  "report_sources": {
+    "output/readiness/native-drc.json": "3681f8279be9b452fafa65e6559d1e4c5bae15ca1621f86ec9ed53b949ac24b4",
+    "output/manufacturing/native-drc.json": "3681f8279be9b452fafa65e6559d1e4c5bae15ca1621f86ec9ed53b949ac24b4"
+  }
 }

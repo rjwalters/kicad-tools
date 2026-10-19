@@ -32,7 +32,8 @@ _None._
 
 Human-approved issues ready for implementation (`loom:issue`).
 
-_None._
+- **#7093**: router: differential pair gets unequal via counts when a leg falls back to uncoupled routing (board 03 USB_D 2 vs 3; blocks #6394)
+- **#7423**: Board 07: enable route-time length matching in the committed map after #7397 (no-worse re-measure; #5798 Q4 ruling)
 
 ## In Progress
 
@@ -40,23 +41,19 @@ Issues currently being built (`loom:building`).
 
 - **#6554**: diffpair: reproduce KiCad's diff_pair_uncoupled primitive pairing exactly (kct is a lower bound)
 - **#7084**: router: routing board 03 under jlcpcb-tier1 collapses the USB_D In2.Cu common run to 1.4 mm (arm C under jlcpcb keeps 4.1 mm)
-- **#7093**: router: differential pair gets unequal via counts when a leg falls back to uncoupled routing (board 03 USB_D 2 vs 3; blocks #6394)
-- **#7349**: Boards 06/07: enable diff-pair gap tightening on seed-42 re-routes and drop the impedance caps (#7344 PR 2)
 - **#7399**: Schematic blocks: 10 stock factories fail on real KiCad 10 libs (stale symbol IDs, fictional mock pins); add a real-symbol smoke test
-- **#7410**: Gate regenerate_boards_03_04_6076.py's board-03 readiness.json promotion (#7358 allowlist)
-- **#7423**: Board 07: enable route-time length matching in the committed map after #7397 (no-worse re-measure; #5798 Q4 ruling)
 - **#7433**: JLCPCB CPL exports THT pin headers at pin 1 instead of body centre (~8.9 mm off on 1x8); affects boards 02-07 THT rows
-- **#7435**: refresh_readiness: board 04 has no drc_targets, so nothing re-pins its native-drc.json
+- **#7463**: board 03 arm C: VBUS U2.5 left unconnected (keepout-constrained escape next to USB_D U2 pads); last gate before re-deriving board 03 under #7093
+- **#7464**: Stale unbound native-drc.json copies in boards/*/output/ (board 04 top-level dated 2026-09-10); delete or bind
 
 ## PRs Awaiting Review
 
 PRs waiting on Judge (`loom:review-requested`).
 
-- **#7439**: fix(export): place THT parts at pad-bbox centre in JLCPCB CPL
-- **#7451**: build(deps): Bump the uv-minor-patch group across 1 directory with 4 updates
-- **#7452**: build(deps-dev): Bump cmake from 4.4.3 to 4.4.4
-- **#7455**: fix(readiness): give board 04 drc_targets so refresh re-pins its native-drc.json
 - **#7457**: fix: widen board 03 usb_geometry launch window for via-in-pad launches
+- **#7468**: fix(router): size and place the coupled-commit skew trim on tight pairs (#7269)
+- **#7469**: fix(check): add board 04 courtyards (Y1 moved to clear C2) and flag courtyard-less footprints as courtyard_missing
+- **#7476**: fix: surface pair via-parity failures in kct route and align the audit with kct check
 
 ## Approved (Awaiting Merge)
 
@@ -94,7 +91,6 @@ Issues carrying `loom:curated`.
 - **#7384**: Committed board evidence doesn't reproduce: refresh_readiness --dry-run (pinned 10.0.6, committed checked_at) rewrites files on 6 of 7 boards *(curated)*
 - **#7391**: Board 05: refresh report.md/pdf via its producer (still says THT parts excluded from CPL; #7241/#7383 follow-up) *(curated)*
 - **#7401**: router: board 06 USB2_D+ uncoupled 12.791 > 12.700 mm after v62 pad-edge floor reorders the single-ended fallback *(curated)*
-- **#7410**: Gate regenerate_boards_03_04_6076.py's board-03 readiness.json promotion (#7358 allowlist) *(curated)*
 
 ## Proposed (Architect / Hermit)
 
@@ -126,11 +122,11 @@ Issues carrying `loom:curated`.
 | Operator merge-risk holds | 0 |
 | Very important | 0 |
 | Important | 4 |
-| Ready (`loom:issue`) | 0 |
-| In Progress (`loom:building`) | 9 |
-| PRs awaiting review | 5 |
+| Ready (`loom:issue`) | 2 |
+| In Progress (`loom:building`) | 6 |
+| PRs awaiting review | 4 |
 | Approved PRs awaiting merge | 0 |
-| Curated | 27 |
+| Curated | 26 |
 | Architect / Hermit proposals | 9 |
 | Active epics | 8 |
 <!-- guide:plan-body:end -->
