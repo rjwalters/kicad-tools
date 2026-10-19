@@ -89,6 +89,20 @@ def get_rule_defaults(data: dict[str, Any]) -> dict[str, Any]:
     return settings["rules"]["defaults"]
 
 
+def _keep_stricter(target: dict[str, Any], key: str, value: float, keep: bool) -> None:
+    """Set ``target[key]`` to ``value``, or keep a larger numeric authored value.
+
+    Every key this module writes from a manufacturer profile is a *floor*
+    (minimum clearance, width, diameter, drill), so the larger of the two is
+    the stricter rule (Issues #6191, #7385).
+    """
+    previous = target.get(key)
+    if keep and isinstance(previous, (int, float)) and not isinstance(previous, bool):
+        target[key] = max(previous, value)
+    else:
+        target[key] = value
+
+
 def apply_manufacturer_rules(
     data: dict[str, Any],
     min_clearance_mm: float,
@@ -98,11 +112,20 @@ def apply_manufacturer_rules(
     min_annular_ring_mm: float,
     min_hole_diameter_mm: float = 0.3,
     min_copper_to_edge_mm: float = 0.3,
+    *,
+    keep_stricter: bool = True,
 ) -> dict[str, Any]:
     """
     Apply manufacturer design rules to project data.
 
     Updates the design_settings section with manufacturer-specific minimums.
+    An authored minimum that is already *stricter* (larger) than the profile
+    is kept (Issue #7385): a rule rewrite may only tighten, the same policy
+    :func:`kicad_tools.manufacturers.project_generator.merge_project_rules`
+    applies.  The CLI writers use
+    :func:`~kicad_tools.manufacturers.project_generator.merge_project_rules_guarded`,
+    which also honours ``KCT_PRESERVE_BOARD_RULES`` and the ``Default``
+    netclass; prefer it for a complete project rewrite.
 
     Args:
         data: Project data dictionary
@@ -113,6 +136,8 @@ def apply_manufacturer_rules(
         min_annular_ring_mm: Minimum annular ring in mm
         min_hole_diameter_mm: Minimum hole diameter in mm
         min_copper_to_edge_mm: Minimum copper to edge in mm
+        keep_stricter: Keep an authored minimum larger than the profile's.
+            ``False`` is the pre-#7385 overwrite and may loosen rules.
 
     Returns:
         Modified project data
@@ -126,23 +151,29 @@ def apply_manufacturer_rules(
     rules = settings["rules"]
 
     # Apply minimum constraints
-    rules["min_clearance"] = min_clearance_mm
-    rules["min_track_width"] = min_track_width_mm
-    rules["min_via_diameter"] = min_via_diameter_mm
-    rules["min_via_annular_width"] = min_annular_ring_mm
-    rules["min_through_hole_diameter"] = min_hole_diameter_mm
-    rules["min_via_hole"] = min_via_drill_mm
-    rules["min_copper_edge_clearance"] = min_copper_to_edge_mm
+    for key, value in (
+        ("min_clearance", min_clearance_mm),
+        ("min_track_width", min_track_width_mm),
+        ("min_via_diameter", min_via_diameter_mm),
+        ("min_via_annular_width", min_annular_ring_mm),
+        ("min_through_hole_diameter", min_hole_diameter_mm),
+        ("min_via_hole", min_via_drill_mm),
+        ("min_copper_edge_clearance", min_copper_to_edge_mm),
+    ):
+        _keep_stricter(rules, key, value, keep_stricter)
 
     # Also update defaults if they exist
     if "defaults" not in settings:
         settings["defaults"] = {}
 
     defaults = settings["defaults"]
-    defaults["track_min_width"] = min_track_width_mm
-    defaults["clearance_min"] = min_clearance_mm
-    defaults["via_min_diameter"] = min_via_diameter_mm
-    defaults["via_min_drill"] = min_via_drill_mm
+    for key, value in (
+        ("track_min_width", min_track_width_mm),
+        ("clearance_min", min_clearance_mm),
+        ("via_min_diameter", min_via_diameter_mm),
+        ("via_min_drill", min_via_drill_mm),
+    ):
+        _keep_stricter(defaults, key, value, keep_stricter)
 
     # Store manufacturer metadata
     if "meta" not in data:
@@ -396,22 +427,39 @@ def create_netclass_definition(
     return definition
 
 
+#: Netclass keys that are *floors*: :func:`add_netclass_definition` merges
+#: them into an existing class stricter-wins (Issue #7385).
+_NETCLASS_FLOOR_KEYS: tuple[str, ...] = ("track_width", "clearance", "via_diameter", "via_drill")
+
+
 def add_netclass_definition(
     data: dict[str, Any],
     name: str,
-    track_width: float = 0.25,
-    clearance: float = DEFAULT_NETCLASS_CLEARANCE_MM,
-    via_diameter: float = 0.6,
-    via_drill: float = 0.3,
+    track_width: float | None = None,
+    clearance: float | None = None,
+    via_diameter: float | None = None,
+    via_drill: float | None = None,
     pcb_color: str | None = None,
     schematic_color: str | None = None,
-    diff_pair_width: float = 0.2,
-    diff_pair_gap: float = 0.25,
+    diff_pair_width: float | None = None,
+    diff_pair_gap: float | None = None,
+    *,
+    keep_stricter: bool = True,
 ) -> dict[str, Any]:
     """
-    Add a netclass definition to project data.
+    Add a netclass definition to project data, or merge into an existing one.
 
-    If a netclass with the same name already exists, it will be updated.
+    A **new** netclass is created from :func:`create_netclass_definition`;
+    an argument left as ``None`` takes its default (track 0.25, clearance
+    :data:`DEFAULT_NETCLASS_CLEARANCE_MM`, via 0.6/0.3, diff pair 0.2/0.25).
+
+    An **existing** netclass of the same name is *merged into*, never replaced
+    (Issue #7385): only the arguments actually passed are written, so authored
+    keys this call does not mention (``diff_pair_gap``, ``microvia_*``,
+    ``bus_width``, colours, ...) survive.  The floors ``track_width``,
+    ``clearance``, ``via_diameter`` and ``via_drill`` keep the larger
+    (stricter) of the authored and the passed value unless
+    ``keep_stricter=False``.
 
     Args:
         data: Project data dictionary
@@ -424,41 +472,47 @@ def add_netclass_definition(
         schematic_color: Schematic editor color (RGBA string) or None for default
         diff_pair_width: Differential pair trace width in mm
         diff_pair_gap: Differential pair gap in mm
+        keep_stricter: For an existing class, keep an authored floor that is
+            larger than the passed value.  ``False`` overwrites it.
 
     Returns:
         The created/updated netclass definition
     """
     classes = get_netclass_definitions(data)
 
-    # Check if netclass already exists
-    for i, cls in enumerate(classes):
+    passed: dict[str, Any] = {
+        "track_width": track_width,
+        "clearance": clearance,
+        "via_diameter": via_diameter,
+        "via_drill": via_drill,
+        "pcb_color": pcb_color,
+        "schematic_color": schematic_color,
+        "diff_pair_width": diff_pair_width,
+        "diff_pair_gap": diff_pair_gap,
+    }
+    passed = {key: value for key, value in passed.items() if value is not None}
+
+    # Merge into an existing netclass
+    for cls in classes:
         if cls.get("name") == name:
-            # Update existing
-            definition = create_netclass_definition(
-                name=name,
-                track_width=track_width,
-                clearance=clearance,
-                via_diameter=via_diameter,
-                via_drill=via_drill,
-                pcb_color=pcb_color,
-                schematic_color=schematic_color,
-                diff_pair_width=diff_pair_width,
-                diff_pair_gap=diff_pair_gap,
-            )
-            classes[i] = definition
-            return definition
+            for key, value in passed.items():
+                if key in _NETCLASS_FLOOR_KEYS:
+                    _keep_stricter(cls, key, value, keep_stricter)
+                else:
+                    cls[key] = value
+            return cls
 
     # Add new netclass
     definition = create_netclass_definition(
         name=name,
-        track_width=track_width,
-        clearance=clearance,
-        via_diameter=via_diameter,
-        via_drill=via_drill,
+        track_width=0.25 if track_width is None else track_width,
+        clearance=DEFAULT_NETCLASS_CLEARANCE_MM if clearance is None else clearance,
+        via_diameter=0.6 if via_diameter is None else via_diameter,
+        via_drill=0.3 if via_drill is None else via_drill,
         pcb_color=pcb_color,
         schematic_color=schematic_color,
-        diff_pair_width=diff_pair_width,
-        diff_pair_gap=diff_pair_gap,
+        diff_pair_width=0.2 if diff_pair_width is None else diff_pair_width,
+        diff_pair_gap=0.25 if diff_pair_gap is None else diff_pair_gap,
     )
     classes.append(definition)
     return definition

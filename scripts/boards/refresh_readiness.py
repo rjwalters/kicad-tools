@@ -66,7 +66,6 @@ import argparse
 import hashlib
 import importlib.util
 import json
-import math
 import os
 import shutil
 import subprocess
@@ -426,25 +425,6 @@ def gate_native_drc(board: Path, cfg: BoardConfig) -> tuple[int, bytes]:
     return len(errors), raw
 
 
-def fill_divergence(
-    saved: dict[str, float], refilled: dict[str, float], tolerance: float
-) -> dict[str, float]:
-    """Layers whose saved copper differs from the refill by more than *tolerance*.
-
-    A layer present on one side only counts as fully divergent.  Same rule as
-    ``kct readiness``'s ``zone_fill`` gate (``readiness_cmd._gate_refill``).
-    """
-    divergent = {}
-    for layer in sorted(set(saved) | set(refilled)):
-        delta = abs(saved.get(layer, 0.0) - refilled.get(layer, 0.0))
-        missing = (layer in saved) != (layer in refilled)
-        if missing or (
-            delta > tolerance and not math.isclose(delta, tolerance, rel_tol=1e-12, abs_tol=0.0)
-        ):
-            divergent[layer] = round(delta, 6)
-    return divergent
-
-
 def gate_fill_identity(board: Path, cfg: BoardConfig) -> dict[str, float]:
     """Saved copper must equal an independent native refill (Issue #7337).
 
@@ -452,31 +432,26 @@ def gate_fill_identity(board: Path, cfg: BoardConfig) -> dict[str, float]:
     saved fills hold.  ``kct readiness --verify`` compares the saved copper
     with a fresh ``kicad-cli`` refill; without the same comparison here a
     refresh could re-pin a ``ready`` record whose published fill diverges
-    (board 04 after #7317's carved fill).
+    (board 04 after #7317's carved fill).  The comparison is the shared
+    ``readiness_cmd.saved_vs_refilled`` (Issue #7356).
     """
     from kicad_tools.cli.readiness_cmd import (
         DEFAULT_FILL_TOLERANCE_MM2,
-        _copy_fill_context,
-        _fill_areas,
-        _refill_and_save,
+        FillRefillUnavailable,
+        saved_vs_refilled,
     )
 
-    pcb = board / cfg.routed_pcb
-    with tempfile.TemporaryDirectory(prefix="refresh-readiness-fill-") as tmp:
-        refilled = _copy_fill_context(pcb, Path(tmp))
-        result = _refill_and_save(refilled)
-        if not result.ok:
-            raise GateFailure(f"independent zone refill did not run: {result.detail}")
-        saved_areas, refilled_areas = _fill_areas(pcb), _fill_areas(refilled)
-    divergent = fill_divergence(saved_areas, refilled_areas, DEFAULT_FILL_TOLERANCE_MM2)
+    try:
+        result = saved_vs_refilled(board / cfg.routed_pcb, DEFAULT_FILL_TOLERANCE_MM2)
+    except FillRefillUnavailable as exc:
+        raise GateFailure(f"independent zone refill did not run: {exc.detail}") from exc
     log(
-        f"  gate saved-vs-refilled copper: {len(saved_areas)} layer(s), "
-        f"divergent {divergent or 'none'} (tolerance {DEFAULT_FILL_TOLERANCE_MM2} mm^2)"
+        f"  gate saved-vs-refilled copper: {len(result.saved_areas)} layer(s), "
+        f"divergent {result.divergent or 'none'} (tolerance {DEFAULT_FILL_TOLERANCE_MM2} mm^2)"
     )
-    if divergent:
-        detail = ", ".join(f"{layer} {delta:.6f} mm^2" for layer, delta in divergent.items())
-        raise GateFailure(f"saved copper differs from an independent refill: {detail}")
-    return divergent
+    if result.diverges:
+        raise GateFailure(f"saved copper differs from an independent refill: {result.describe()}")
+    return result.divergent
 
 
 def warning_mismatch(

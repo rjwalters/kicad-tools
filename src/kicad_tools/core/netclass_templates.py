@@ -437,22 +437,42 @@ def apply_design_template(
     data: dict[str, Any],
     design_type: str,
     update_default: bool = True,
+    keep_stricter_default: bool | None = None,
 ) -> None:
     """
     Apply a design type template to project data.
 
     This adds netclass definitions and patterns from the template
-    to the project's net_settings section.
+    to the project's net_settings section.  Existing netclasses of the same
+    name are merged into, never replaced, and keep any stricter authored
+    floor (Issue #7385); existing patterns are never removed.
 
     Args:
         data: Project data dictionary
         design_type: Name of the design type template to apply
         update_default: If True, update the Default netclass with reasonable values
+        keep_stricter_default: Whether an existing ``Default`` keeps authored
+            floors stricter than the template's.  ``None`` decides from the
+            class itself: a known template signature is unauthored and is
+            overwritten.  A caller that already applied a
+            ``KCT_PRESERVE_BOARD_RULES`` policy (``kct init``) passes the
+            policy's answer, so a preserved template ``Default`` stays
+            preserved.
     """
     template = get_design_template(design_type)
 
     # Optionally update Default netclass
     if update_default:
+        from kicad_tools.manufacturers.project_generator import is_template_default_netclass
+
+        # An existing Default netclass is merged stricter-wins: an authored
+        # clearance/width/via floor larger than the template's is kept
+        # (Issue #7385).  A Default that still carries a known template
+        # signature is unauthored and takes the design template's values,
+        # exactly as merge_project_rules relaxes it (#6191).
+        existing_default = next(
+            (c for c in get_netclass_definitions(data) if c.get("name") == "Default"), None
+        )
         # Use values from the most generic netclass in the template
         add_netclass_definition(
             data,
@@ -461,6 +481,13 @@ def apply_design_template(
             clearance=0.15,
             via_diameter=0.6,
             via_drill=0.3,
+            keep_stricter=(
+                keep_stricter_default
+                if keep_stricter_default is not None
+                else not (
+                    existing_default is not None and is_template_default_netclass(existing_default)
+                )
+            ),
         )
 
     # Add netclasses from template

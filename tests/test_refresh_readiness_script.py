@@ -360,17 +360,6 @@ def test_dry_run_with_known_issue_leaves_the_board_untouched(mod, tmp_path, monk
 # ---------------------------------------------------------------------------
 
 
-def test_fill_divergence_uses_the_readiness_tolerance(mod):
-    saved = {"B.Cu": 2258.871182, "F.Cu": 1438.71334}
-    assert mod.fill_divergence(saved, dict(saved), 0.01) == {}
-    assert mod.fill_divergence(saved, {**saved, "F.Cu": 1438.72334}, 0.01) == {}
-    assert mod.fill_divergence(saved, {"B.Cu": 2268.243206, "F.Cu": 1457.428272}, 0.01) == {
-        "B.Cu": 9.372024,
-        "F.Cu": 18.714932,
-    }
-    assert mod.fill_divergence(saved, {"B.Cu": 2258.871182}, 0.01) == {"F.Cu": 1438.71334}
-
-
 def _fill_board(tmp_path: Path):
     board = tmp_path / "board"
     (board / "output").mkdir(parents=True)
@@ -389,14 +378,16 @@ def test_gate_fill_identity_refuses_a_divergent_saved_fill(mod, tmp_path, monkey
         tier="jlcpcb",
         erc=(),
     )
-    saved_pcb = board / cfg.routed_pcb
-    monkeypatch.setattr(
-        readiness_cmd, "_refill_and_save", lambda pcb: readiness_cmd.EngineRun(ok=True)
-    )
+    real_engines = readiness_cmd.Engines
     monkeypatch.setattr(
         readiness_cmd,
-        "_fill_areas",
-        lambda pcb: {"F.Cu": 1438.71334} if pcb == saved_pcb else {"F.Cu": refilled_f},
+        "Engines",
+        lambda: real_engines(
+            refill=lambda pcb: readiness_cmd.EngineRun(ok=True),
+            fill_areas=lambda pcb: (
+                {"F.Cu": 1438.71334} if "fill-refilled" not in pcb.parts else {"F.Cu": refilled_f}
+            ),
+        ),
     )
     if refilled_f == 1438.71334:
         assert mod.gate_fill_identity(board, cfg) == {}

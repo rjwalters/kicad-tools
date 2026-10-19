@@ -61,6 +61,8 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal, Protocol, runtime_checkable
 
+from kicad_tools.core.geometry import point_to_segment_distance as _point_segment_distance
+
 from .layers import Layer
 from .mfr_limits import MfrLimits, get_mfr_limits
 from .pad_geometry import pad_local_point, pad_point_distance, pad_segment_distance
@@ -574,17 +576,6 @@ def _iter_obstacle_routes(
 # ---------------------------------------------------------------------------
 # Small geometry helpers (labelling / envelopes only -- never legality)
 # ---------------------------------------------------------------------------
-
-
-def _point_segment_distance(
-    px: float, py: float, x1: float, y1: float, x2: float, y2: float
-) -> float:
-    dx, dy = x2 - x1, y2 - y1
-    if dx == 0.0 and dy == 0.0:
-        return math.hypot(px - x1, py - y1)
-    t = ((px - x1) * dx + (py - y1) * dy) / (dx * dx + dy * dy)
-    t = max(0.0, min(1.0, t))
-    return math.hypot(px - (x1 + t * dx), py - (y1 + t * dy))
 
 
 def _closest_point_on_segment(

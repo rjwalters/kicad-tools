@@ -517,12 +517,75 @@ class TestCascadeBudget:
                 config=cfg,
             )
 
-        # 5 non-reference members at MAX_INSERTS_LARGE=2 each -> 10 max.
-        # Also constrained by the group ceiling (16) -- which doesn't trip.
-        assert call_count["n"] <= 5 * MAX_INSERTS_PER_GROUP_MEMBER_LARGE
+        # 5 non-reference members at MAX_INSERTS_LARGE=2 each -> 10 max in
+        # the first pass, plus one top-up insert each from the unused group
+        # ceiling (Issue #5798): 15 <= 16, so the ceiling doesn't trip.
+        assert call_count["n"] <= 5 * (MAX_INSERTS_PER_GROUP_MEMBER_LARGE + 1)
         # Each non-reference member reports the correct attempts ceiling.
         for nid in net_ids[:-1]:
-            assert results[nid][1].attempts <= MAX_INSERTS_PER_GROUP_MEMBER_LARGE
+            assert results[nid][1].attempts <= MAX_INSERTS_PER_GROUP_MEMBER_LARGE + 1
+        total = sum(r.inserts_applied for _, r in results.values())
+        assert total <= MAX_TOTAL_INSERTS_PER_GROUP
+
+    @staticmethod
+    def _one_capped_member_group(need_mm: float):
+        """Six nets: four already matched, D5 ``need_mm`` short, REF longest."""
+        net_ids = list(range(1, 7))
+        routes = {nid: _straight_route(nid, f"D{nid}", 99.95, y=nid * 2.0) for nid in net_ids[:4]}
+        routes[5] = _straight_route(5, "D5", 100.0 - need_mm, y=10.0)
+        routes[6] = _straight_route(6, "REF", 100.0, y=12.0)
+        cfg = SerpentineConfig(amplitude=0.1, min_spacing=0.2, gap_factor=2.0, max_iterations=2)
+        return _ddr_group(net_ids=net_ids, tolerance=0.1), routes, cfg
+
+    def test_capped_member_tops_up_from_unused_ceiling(self):
+        """Issue #5798: a member at its per-member cap may use the leftover ceiling.
+
+        Mirrors board 07 SDRAM_BYTE0 on the complete 07m route: DQ6 stopped
+        at the LARGE cap (2) 0.8 mm short with 4 of the 16 ceiling inserts
+        unused, so the group stayed at 5.80 mm. Here each insert adds 0.4 mm
+        and D5 needs 1.0 mm: two inserts leave it 0.2 mm short (tolerance
+        0.1), the top-up insert closes it. The result reports the member's
+        whole history, measured from its original route.
+        """
+        group, routes, cfg = self._one_capped_member_group(1.0)
+        results = tune_match_group_v2(
+            group, routes, tolerance_mm=0.1, intra_group_clearance_mm=0.2, config=cfg
+        )
+        route, res = results[5]
+        assert res.reason == "tuned"
+        assert res.inserts_applied == MAX_INSERTS_PER_GROUP_MEMBER_LARGE + 1
+        assert res.attempts == MAX_INSERTS_PER_GROUP_MEMBER_LARGE + 1
+        assert res.length_before_mm == pytest.approx(99.0)
+        assert res.length_after_mm == pytest.approx(100.0, abs=0.1)
+        assert len(res.serpentine_results) >= res.inserts_applied
+        assert list(results) == group.net_ids
+
+    def test_topup_is_one_round_only(self):
+        """A member still short after its top-up insert stays ``exceeded_max_inserts``."""
+        group, routes, cfg = self._one_capped_member_group(1.5)
+        results = tune_match_group_v2(
+            group, routes, tolerance_mm=0.1, intra_group_clearance_mm=0.2, config=cfg
+        )
+        res = results[5][1]
+        assert res.reason == "exceeded_max_inserts"
+        assert res.inserts_applied == MAX_INSERTS_PER_GROUP_MEMBER_LARGE + 1
+        assert res.length_before_mm == pytest.approx(98.5)
+        assert 99.0 < res.length_after_mm < 100.0 - 0.1
+
+    def test_explicit_per_member_budget_gets_no_topup(self):
+        """An explicit ``max_inserts_per_member`` stays a hard per-member cap."""
+        group, routes, cfg = self._one_capped_member_group(1.0)
+        results = tune_match_group_v2(
+            group,
+            routes,
+            tolerance_mm=0.1,
+            intra_group_clearance_mm=0.2,
+            config=cfg,
+            max_inserts_per_member=MAX_INSERTS_PER_GROUP_MEMBER_LARGE,
+        )
+        res = results[5][1]
+        assert res.reason == "exceeded_max_inserts"
+        assert res.inserts_applied == MAX_INSERTS_PER_GROUP_MEMBER_LARGE
 
     def test_max_total_inserts_per_group_caps_cumulative_count(self):
         """The group-level ceiling fires for pathological cases."""

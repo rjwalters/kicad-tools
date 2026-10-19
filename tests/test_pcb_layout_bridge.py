@@ -585,8 +585,29 @@ def test_clearance_comes_from_the_board_rules(source, origin, tmp_path):
         layout.apply_to_pcb(board, tmp_path / "never.kicad_pcb", net_map=NET_MAP)
 
 
+@pytest.mark.parametrize("output_caps", [["C2"], ["C2", "C3"]])
+def test_stock_ldo_block_applies_clean_in_strict_mode(tmp_path, output_caps):
+    """The stock LDOBlock's own copper lands on its pads and shorts nothing (#7062)."""
+    refs = {**REFS, **dict.fromkeys(output_caps, "C_0805_2012Metric")}
+    pad_nets = [t for t in PAD_NETS if t[0] in refs]
+    pad_nets += [(c, "1", "+3V3") for c in output_caps if c != "C2"]
+    pad_nets += [(c, "2", "GND") for c in output_caps if c != "C2"]
+    board = _build_board(tmp_path / "ldo_src.kicad_pcb", refs, pad_nets)
+    ox, oy = PCB.load(str(board)).board_origin
+
+    layout = PCBLayout("ldo")
+    ldo = LDOBlock(ldo_ref="U1", input_cap="C1", output_caps=output_caps)
+    ldo.place(ox + 10, oy + 12, rotation=0)
+    layout.add_block(ldo, name="ldo")
+    net_map = {"VIN": "VIN", "VOUT": "+3V3", "GND": "GND"}
+    out = tmp_path / "ldo_out.kicad_pcb"
+    report = layout.apply_to_pcb(board, out, net_map=net_map)  # strict by default
+    assert report.skipped == []
+    assert report.segments_added == len(layout.export_traces())
+
+
 def test_stock_blocks_and_route_are_refused_not_shorted(source, origin, tmp_path):
-    """The stock LDOBlock routing and route()'s straight line short foreign pads."""
+    """route()'s straight line shorts foreign pads (the LDOBlock's own copper is clean)."""
     out = tmp_path / "never.kicad_pcb"
     with pytest.raises(LayoutApplyError) as excinfo:
         _stock_layout(origin).apply_to_pcb(source, out, net_map=NET_MAP)
@@ -597,8 +618,8 @@ def test_stock_blocks_and_route_are_refused_not_shorted(source, origin, tmp_path
         p.startswith("trace") and "(inter-block) on net" in p and "shorts pad R1." in p
         for p in problems
     ), problems
-    # LDOBlock: its GND traces cut through U1's VIN / +3V3 pads.
-    assert any("(block 'LDO_U1') on net 'GND'" in p and "shorts pad U1." in p for p in problems)
+    # LDOBlock (#7062): its own copper is clean now; only route() is refused.
+    assert not [p for p in problems if "(block 'LDO_U1')" in p], problems
     # The LEDBlock fix (#7022 review): its LED_MID trace no longer crosses D1.2;
     # all that is wrong with it here is the inter-block line drawn over it.
     led = [p for p in problems if p.split(" on net ")[0].endswith("(block 'LED_D1')")]
