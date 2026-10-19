@@ -65,6 +65,7 @@ from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from kicad_tools.core.geometry import point_to_segment_distance as _point_to_segment_distance
 from kicad_tools.router.failure_analysis import FailureCause
 from kicad_tools.schema.physical_identity import footprint_keys
 
@@ -507,31 +508,6 @@ class StuckClassifierResult:
 # code.  Both read the stranded pad positions AND the committed copper through
 # :class:`PCB` so they share the SAME board-coordinate frame -- the load-bearing
 # page-space-vs-board-space fix from #3861.
-
-
-def _point_to_segment_distance(
-    px: float,
-    py: float,
-    ax: float,
-    ay: float,
-    bx: float,
-    by: float,
-) -> float:
-    """Euclidean distance from point ``(px, py)`` to segment ``a->b``.
-
-    Distance is measured pad-to-segment (point-to-line-segment), not
-    pad-to-endpoint, so copper that *passes near* a pad without terminating
-    there is still recognised as a blocker (#3861).
-    """
-    dx = bx - ax
-    dy = by - ay
-    if dx == 0.0 and dy == 0.0:
-        return math.hypot(px - ax, py - ay)
-    t = ((px - ax) * dx + (py - ay) * dy) / (dx * dx + dy * dy)
-    t = max(0.0, min(1.0, t))
-    cx = ax + t * dx
-    cy = ay + t * dy
-    return math.hypot(px - cx, py - cy)
 
 
 def _find_blocking_strict_nets_from_pcb(
