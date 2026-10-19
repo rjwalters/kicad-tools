@@ -80,10 +80,11 @@ X = Y = 101.6
 # Off-grid origins: 100.0 snaps down to 99.06, 100.6 snaps up to 100.33.
 OFF_GRID_ORIGINS = [(100.0, 100.0), (100.6, 100.6)]
 
-# A non-default schematic grid and an origin on it (159 * 0.635) but off the
-# default 1.27 mm grid: ports must follow ``Schematic.grid``, not 1.27 mm.
-FINE_GRID = 0.635
-FINE_GRID_ORIGIN = (100.965, 100.965)
+# Non-default schematic grids with an origin on each.  0.635 at 159 * 0.635
+# is off the default 1.27 mm grid, so ports must follow ``Schematic.grid``,
+# not 1.27 mm.  On 2.54 the 1.27 mm-pitch pins sit off the grid, so ports
+# read from a pin must stay on it rather than snap away.
+NON_DEFAULT_GRIDS = [(0.635, 100.965), (2.54, 101.6)]
 
 # Pin names some blocks *probe* for and handle the absence of -- the
 # regulator blocks' alias chains (VIN/VI/IN, VOUT/VO/OUT, OUT/SW/VOUT,
@@ -604,17 +605,20 @@ def test_block_ports_stay_anchored_at_off_grid_origin(
     _build_and_find_floating_ports(export, factory, pin_misses)
 
 
+@pytest.mark.parametrize(("grid", "origin"), NON_DEFAULT_GRIDS, ids=lambda v: str(v))
 @pytest.mark.parametrize(("export", "factory"), _CASES)
 def test_block_ports_follow_non_default_schematic_grid(
     export: str,
     factory: Factory,
+    grid: float,
+    origin: float,
     pin_misses: list[tuple[str, str, str]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Ports snap to ``Schematic(grid=...)``, as symbols and wires do (#7510)."""
-    monkeypatch.setattr(sys.modules[__name__], "X", FINE_GRID_ORIGIN[0])
-    monkeypatch.setattr(sys.modules[__name__], "Y", FINE_GRID_ORIGIN[1])
-    _build_and_find_floating_ports(export, factory, pin_misses, grid=FINE_GRID)
+    monkeypatch.setattr(sys.modules[__name__], "X", origin)
+    monkeypatch.setattr(sys.modules[__name__], "Y", origin)
+    _build_and_find_floating_ports(export, factory, pin_misses, grid=grid)
 
 
 @pytest.mark.parametrize("origin", OFF_GRID_ORIGINS, ids=lambda o: f"{o[0]},{o[1]}")
