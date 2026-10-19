@@ -2,6 +2,7 @@
 
 from typing import TYPE_CHECKING
 
+from ..grid import snap_point
 from ._pins import first_pin_position, output_pin_position
 from ._stub_helpers import _emit_pin_net_stub
 from .base import CircuitBlock
@@ -1844,6 +1845,11 @@ class BackToBackFETPair(CircuitBlock):
             kelvin_port = hint_end
         else:
             kelvin_port = kelvin_node
+
+        # The wire ends snap to the schematic grid, but the midpoint of two
+        # source pins is generally off-grid.  Snap the exposed port the same
+        # way so it lands on the wire end instead of missing it (#7507).
+        kelvin_port = snap_point(kelvin_port)
 
         # Optional Kelvin label
         if kelvin_label is not None:
