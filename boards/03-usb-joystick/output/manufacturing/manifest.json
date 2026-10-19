@@ -1,7 +1,7 @@
 {
   "version": "1.0",
   "kicad_tools_version": "0.23.0",
-  "generated_at": "2026-10-19T09:37:06.556873+00:00",
+  "generated_at": "2026-10-19T18:52:04.763866+00:00",
   "manufacturer": "jlcpcb-tier1",
   "files": {
     "DESIGN_REVIEW.md": {
@@ -85,8 +85,8 @@
       "size": 215702
     },
     "design-source/routing_plan.py": {
-      "sha256": "cc6eedc7ea25af8f1dff4a3c449ad8c6221146ffaac37677b41bc42522781c0b",
-      "size": 18151
+      "sha256": "e22b6a9b203434c391460ccdbadf9dec51cb03eea4935d7edbe1ac22d523da1d",
+      "size": 21121
     },
     "firmware/.gitignore": {
       "sha256": "692b1af4436043e2e965c8d563bbf90d648cda3a6afa9bba38e1c38af1d38919",
@@ -173,8 +173,8 @@
       "size": 2192
     },
     "gerbers/gerbers.zip": {
-      "sha256": "d12091a26e3bccdd5161f122c89609b7b1985bfb299f2146349f04ff0bfbae62",
-      "size": 131982
+      "sha256": "0c5bc4775f015aae580f3f631ea6abde7d6771a183fa74ffe538e0b2ff1de1aa",
+      "size": 131983
     },
     "images/assembly.png": {
       "sha256": "9196b12f7c83ecd66e4b68f34c9b4783e8681289b6931d236f240885991381b9",
@@ -209,11 +209,11 @@
       "size": 485752
     },
     "images/schematic_usb_joystick.png": {
-      "sha256": "c0a3950fda2f26c18ad6359ba1ccd02e953d67c0be8d2b40d3d8553de7445c79",
-      "size": 486466
+      "sha256": "435c684096c4c22d4f460823a2584c6e3f09f6663b89176976bbbaec2728eea2",
+      "size": 486460
     },
     "kicad_project.zip": {
-      "sha256": "ef948c52814c765c30fc586f9cd2c1976461106ec9adbb51c7c65b5611e0c1ee",
+      "sha256": "5b6824b81d4f810c8df74c8264ca25d825ec7ed38c5530abf20a9405d1f8b395",
       "size": 198383
     },
     "manufacturing-requirements.json": {
@@ -317,8 +317,8 @@
       "size": 4641
     },
     "report.pdf": {
-      "sha256": "6c8c54fc27a3f9d268d97846146536f15643519bf2396cae8db7ad89f97a6e59",
-      "size": 3317014
+      "sha256": "ef50686cb50b339a7c4d40a8f59edaaebedb4933c58249cc1cc65a40ae6f2490",
+      "size": 3284088
     },
     "schematic.pdf": {
       "sha256": "6fe021a9ea56eb056b2fc6dc24e3fee47c4f6555c6141a4ad1ec755b51aa0d98",

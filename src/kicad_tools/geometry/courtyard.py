@@ -178,3 +178,58 @@ def _side_has_geometry(footprint: Footprint, side: str) -> bool:
     """True if the footprint has any CrtYd graphic on the given ``side``."""
     target_layer = Layer.F_CRTYD.value if side == "F" else Layer.B_CRTYD.value
     return any(graphic.layer == target_layer for graphic in footprint.graphics)
+
+
+# ---------------------------------------------------------------------------
+# Courtyard coverage (Issue #7204)
+# ---------------------------------------------------------------------------
+
+#: ``(attr ...)`` flags that opt a footprint out of needing a courtyard.
+#: ``allow_missing_courtyard`` is the opt-out KiCad's own ``missing_courtyard``
+#: rule honours; ``board_only`` marks board furniture with no assembled part.
+COURTYARD_EXEMPT_ATTR_FLAGS: frozenset[str] = frozenset({"allow_missing_courtyard", "board_only"})
+
+#: KiCad libraries whose footprints carry no component body to place.
+COURTYARD_EXEMPT_LIBRARIES: tuple[str, ...] = ("MountingHole:", "Fiducial:", "NetTie:")
+
+
+def courtyard_exempt(footprint: Footprint) -> bool:
+    """True when a footprint need not carry a courtyard (Issue #7204).
+
+    Deliberately narrow: an explicit ``allow_missing_courtyard`` /
+    ``board_only`` attr flag, a footprint with no pads (logos, graphics), or a
+    lib id in the ``MountingHole:``, ``Fiducial:`` or ``NetTie:`` libraries.
+    DNP parts are **not** exempt: their land pattern still occupies the board.
+    """
+    flags: frozenset[str] = getattr(footprint, "attr_flags", frozenset())
+    if flags & COURTYARD_EXEMPT_ATTR_FLAGS:
+        return True
+    if not getattr(footprint, "pads", None):
+        return True
+    return (footprint.name or "").startswith(COURTYARD_EXEMPT_LIBRARIES)
+
+
+def unevaluated_courtyards(footprints: Any, Polygon: Any) -> tuple[list[str], list[str], int]:
+    """Footprints whose courtyard overlap cannot be evaluated (Issue #7204).
+
+    Returns ``(missing, unresolved, total)`` over the non-exempt footprints
+    (see :func:`courtyard_exempt`): the references with no ``F.CrtYd`` /
+    ``B.CrtYd`` geometry at all, the references whose courtyard geometry
+    exists but resolves to no polygon on any side, and how many non-exempt
+    footprints there are.  ``missing + unresolved`` is the "N of M" that
+    ``kct check`` coverage reports.
+    """
+    missing: list[str] = []
+    unresolved: list[str] = []
+    total = 0
+    for fp in footprints:
+        if courtyard_exempt(fp):
+            continue
+        total += 1
+        if not _has_courtyard_geometry(fp):
+            missing.append(fp.reference)
+            continue
+        sides = [side for side in ("F", "B") if _side_has_geometry(fp, side)]
+        if not any(_courtyard_polygon(fp, side, Polygon) is not None for side in sides):
+            unresolved.append(fp.reference)
+    return missing, unresolved, total

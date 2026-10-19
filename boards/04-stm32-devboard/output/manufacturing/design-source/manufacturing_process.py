@@ -34,7 +34,9 @@ OPTIONS = {
     "source": SOURCE,
 }
 # Exact pad/net/placement contract; copper and UUIDs are checked separately.
-PHYSICAL_SHA256 = "f20b004a5f7af93d29eab55c7e1a0e4c5e23a464a1807892c37a87c0a70340a0"
+# Re-pinned for Issue #7204: Y1 moved 1 mm east (x=+22 -> +23) so its stock
+# HC49-4H courtyard clears C2's; no other pad, net or footprint changed.
+PHYSICAL_SHA256 = "bddb9aeb5d4c6ac1f78fa0daf2980fef796994e5b70cb03ca18bdcc93cc87f4f"
 # ref.pad, net, reviewed original via center, reviewed off-pad center (board relative).
 MOVES = [
     ("U1.2", "GND", (10.24, 11.61), (10.24, 12.55)),

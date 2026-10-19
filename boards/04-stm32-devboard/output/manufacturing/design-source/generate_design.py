@@ -24,6 +24,7 @@ If no output directory is specified, files are written to ./output/
 """
 
 import json
+import math
 import os
 import runpy
 import subprocess
@@ -62,6 +63,101 @@ _PCB_UUIDS = UuidSequence("boards/04-stm32-devboard/stm32_devboard.kicad_pcb")
 def generate_uuid() -> str:
     """Next deterministic KiCad-format UUID (Issue #6076)."""
     return _PCB_UUIDS()
+
+
+# F.CrtYd courtyard UUIDs come from their own sequence (Issue #7204) so adding
+# the courtyards does not shift any pre-existing item's UUID.
+_CRTYD_UUIDS = UuidSequence("boards/04-stm32-devboard/stm32_devboard.kicad_pcb:courtyard")
+# F.Fab body UUIDs (Issue #7204) likewise get their own sequence.
+_FAB_UUIDS = UuidSequence("boards/04-stm32-devboard/stm32_devboard.kicad_pcb:fab")
+
+# Courtyard rule (Issue #7204): each footprint's ``F.CrtYd`` outline is the
+# union of the stock KiCad 10.0.6 library courtyard (translated into this
+# generator's pad frame) and the pad extents plus the 0.25 mm IPC-7351B
+# nominal courtyard excess, rounded outward to 0.01 mm.  Without it neither
+# ``kct check`` nor kicad-cli had an outline to test, so courtyard overlap was
+# never evaluated on this board.
+
+
+def courtyard_rect(x0: float, y0: float, x1: float, y1: float) -> str:
+    """An ``F.CrtYd`` rectangle in footprint-local coordinates (Issue #7204)."""
+    return (
+        f"    (fp_rect (start {x0:.2f} {y0:.2f}) (end {x1:.2f} {y1:.2f}) "
+        f'(stroke (width 0.05) (type solid)) (fill no) (layer "F.CrtYd") '
+        f'(uuid "{_CRTYD_UUIDS()}"))'
+    )
+
+
+def courtyard_poly(points: list[tuple[float, float]]) -> str:
+    """A closed ``F.CrtYd`` polygon in footprint-local coordinates (Issue #7204)."""
+    pts = " ".join(f"(xy {x:.2f} {y:.2f})" for x, y in points)
+    return (
+        f"    (fp_poly (pts {pts}) "
+        f'(stroke (width 0.05) (type solid)) (fill no) (layer "F.CrtYd") '
+        f'(uuid "{_CRTYD_UUIDS()}"))'
+    )
+
+
+def _round_out(v: float) -> float:
+    """Round away from zero to 0.01 mm (outward for a footprint-centred outline)."""
+    return math.copysign(math.ceil(abs(v) * 100 - 1e-9) / 100, v)
+
+
+def stadium_courtyard_points(
+    half_span: float, radius: float, steps: int = 8
+) -> list[tuple[float, float]]:
+    """Polygon circumscribing a stadium (two semicircles joined by straight sides).
+
+    The arcs are centred at ``(+-half_span, 0)`` with ``radius``.  Each arc is
+    replaced by ``steps`` tangent edges whose vertices sit at
+    ``radius / cos(pi / (2 * steps))``, so the polygon contains the stadium
+    everywhere (Issue #7204: kct resolves ``fp_rect``/``fp_poly``/closed
+    ``fp_line`` courtyards, not ``fp_arc``).
+    """
+    step = math.pi / steps
+    r_vertex = radius / math.cos(step / 2)
+    points: list[tuple[float, float]] = []
+    # Left arc: from the top (-90 deg, y-down) round through 180 deg to +90 deg.
+    # The first and last vertices lie on the straight sides (y = +-radius), so
+    # the sides need no vertices of their own.
+    for k in range(steps):
+        a = -math.pi / 2 - step / 2 - k * step
+        points.append((-half_span + r_vertex * math.cos(a), r_vertex * math.sin(a)))
+    # Right arc: from the bottom (+90 deg) round through 0 deg to -90 deg.
+    for k in range(steps):
+        a = math.pi / 2 - step / 2 - k * step
+        points.append((half_span + r_vertex * math.cos(a), r_vertex * math.sin(a)))
+    return [(_round_out(x), _round_out(y)) for x, y in points]
+
+
+# Stock ``Package_QFP:LQFP-48_7x7mm_P0.5mm`` F.CrtYd (KiCad 10.0.6), copied
+# vertex for vertex: this footprint's pads are identical to the library's, so
+# no translation applies, and the stepped outline already equals pad extent
+# (4.9 mm) + 0.25 mm on every side.  A bounding rectangle would be more
+# conservative than the library and could invent overlaps with the decoupling
+# caps (Issue #7204).
+LQFP48_COURTYARD = [
+    (-3.15, -5.15),
+    (3.15, -5.15),
+    (3.15, -3.75),
+    (3.75, -3.75),
+    (3.75, -3.15),
+    (5.15, -3.15),
+    (5.15, 3.15),
+    (3.75, 3.15),
+    (3.75, 3.75),
+    (3.15, 3.75),
+    (3.15, 5.15),
+    (-3.15, 5.15),
+    (-3.15, 3.75),
+    (-3.75, 3.75),
+    (-3.75, 3.15),
+    (-5.15, 3.15),
+    (-5.15, -3.15),
+    (-3.75, -3.15),
+    (-3.75, -3.75),
+    (-3.15, -3.75),
+]
 
 
 def create_stm32_schematic(output_dir: Path) -> Path:
@@ -747,6 +843,8 @@ def create_stm32_pcb(output_dir: Path) -> Path:
     Returns the path to the generated PCB file.
     """
     _PCB_UUIDS.reset()  # Issue #6076: same sequence every build
+    _CRTYD_UUIDS.reset()  # Issue #7204
+    _FAB_UUIDS.reset()  # Issue #7204
     print("\n" + "=" * 60)
     print("Creating STM32 Development Board PCB...")
     print("=" * 60)
@@ -806,7 +904,13 @@ def create_stm32_pcb(output_dir: Path) -> Path:
     # and MCU horizontally, with OSC_IN/OSC_OUT load caps below it.
     # OSC_IN/OSC_OUT escape through the open space above the MCU's left
     # edge (PD0=pin 5, PD1=pin 6).
-    Y1_POS = (BOARD_ORIGIN_X + 22, BOARD_ORIGIN_Y + 10)  # 8MHz crystal
+    #
+    # Y1 sits at x=+23, not +22 (Issue #7204): the stock HC49-4H courtyard is
+    # a stadium reaching 6.03 mm either side of the footprint origin, and at
+    # x=+22 its west arc overlapped C2's courtyard by 1.46 mm^2.  C2 cannot
+    # move west instead (U1's courtyard leaves it only 0.07 mm of slack), so
+    # the crystal moves 1 mm east, leaving a 0.22 mm courtyard gap to C2.
+    Y1_POS = (BOARD_ORIGIN_X + 23, BOARD_ORIGIN_Y + 10)  # 8MHz crystal
     C10_POS = (BOARD_ORIGIN_X + 19, BOARD_ORIGIN_Y + 16)  # OSC_IN load cap
     C11_POS = (BOARD_ORIGIN_X + 25, BOARD_ORIGIN_Y + 16)  # OSC_OUT load cap
 
@@ -917,6 +1021,7 @@ def create_stm32_pcb(output_dir: Path) -> Path:
       (stroke (width 0.15) (type solid)) (layer "F.SilkS") (uuid "{generate_uuid()}"))
     (fp_poly (pts (xy -3.13 3.31) (xy -3.37 3.64) (xy -2.89 3.64))
       (stroke (width 0.15) (type solid)) (fill yes) (layer "F.SilkS") (uuid "{generate_uuid()}"))
+{courtyard_rect(-4.40, -3.60, 4.40, 3.60)}
     (pad "1" smd rect (at -3.15 2.3) (size 2 1.5) (layers "F.Cu" "F.Paste" "F.Mask") (net {NETS["+5V"]} "+5V"))
     (pad "2" smd rect (at -3.15 0) (size 2 1.5) (layers "F.Cu" "F.Paste" "F.Mask") (net {NETS["GND"]} "GND"))
     (pad "3" smd rect (at -3.15 -2.3) (size 2 1.5) (layers "F.Cu" "F.Paste" "F.Mask") (net {NETS["+3.3V"]} "+3.3V"))
@@ -928,6 +1033,10 @@ def create_stm32_pcb(output_dir: Path) -> Path:
         x, y = pos
         net1_num = NETS.get(net1, 0)
         net2_num = NETS.get(net2, 0)
+        # Courtyard (Issue #7204): stock KiCad 10 F.CrtYd is x +-1.70,
+        # y +-0.98, but these hand-made pads reach x +-1.5, so pad extent
+        # + 0.25 mm widens x to +-1.75 (y stays at the stock +-0.98).
+        courtyard = courtyard_rect(-1.75, -0.98, 1.75, 0.98)
         return f"""  (footprint "Capacitor_SMD:C_0805_2012Metric"
     (layer "F.Cu")
     (uuid "{generate_uuid()}")
@@ -938,6 +1047,7 @@ def create_stm32_pcb(output_dir: Path) -> Path:
     (fp_text value "{value}" (at 0 1.5) (layer "F.Fab") (uuid "{generate_uuid()}")
       (effects (font (size 1 1) (thickness 0.15)))
     )
+{courtyard}
     (pad "1" smd roundrect (at -1 0) (size 1.0 1.3) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net {net1_num} "{net1}"))
     (pad "2" smd roundrect (at 1 0) (size 1.0 1.3) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net {net2_num} "{net2}"))
   )"""
@@ -945,6 +1055,14 @@ def create_stm32_pcb(output_dir: Path) -> Path:
     def generate_crystal_hc49(ref: str, pos: tuple, value: str) -> str:
         """Generate HC49 crystal footprint."""
         x, y = pos
+        # Courtyard (Issue #7204): the stock KiCad 10 F.CrtYd is a stadium,
+        # straight sides at y +-2.83 from x -0.76 to 5.64 closed by two
+        # radius-2.83 arcs (x -3.59..8.47), with pad 1 at x=0.  Pad 1 sits at
+        # x=-2.44 here, so the arc centres move to x +-3.20.  The stadium is
+        # emitted as a circumscribing polygon (kct does not resolve fp_arc
+        # courtyards); it already contains the pads plus 0.25 mm
+        # (x +-3.44, y +-1.00).
+        courtyard = courtyard_poly(stadium_courtyard_points(3.20, 2.83))
         return f"""  (footprint "Crystal:Crystal_HC49-4H_Vertical"
     (layer "F.Cu")
     (uuid "{generate_uuid()}")
@@ -955,6 +1073,7 @@ def create_stm32_pcb(output_dir: Path) -> Path:
     (fp_text value "{value}" (at 0 3) (layer "F.Fab") (uuid "{generate_uuid()}")
       (effects (font (size 1 1) (thickness 0.15)))
     )
+{courtyard}
     (pad "1" thru_hole circle (at -2.44 0) (size 1.5 1.5) (drill 0.8) (layers "*.Cu" "*.Mask") (net {NETS["OSC_IN"]} "OSC_IN"))
     (pad "2" thru_hole circle (at 2.44 0) (size 1.5 1.5) (drill 0.8) (layers "*.Cu" "*.Mask") (net {NETS["OSC_OUT"]} "OSC_OUT"))
   )"""
@@ -977,6 +1096,10 @@ def create_stm32_pcb(output_dir: Path) -> Path:
         x, y = pos
         a_num = NETS.get(anode_net, 0)
         k_num = NETS.get(cathode_net, 0)
+        # Courtyard (Issue #7204): stock KiCad 10 F.CrtYd is x +-1.68,
+        # y +-0.95, but these pads reach x +-1.55, so pad extent + 0.25 mm
+        # widens x to +-1.80 (y stays at the stock +-0.95).
+        courtyard = courtyard_rect(-1.80, -0.95, 1.80, 0.95)
         return f"""  (footprint "LED_SMD:LED_0805_2012Metric"
     (layer "F.Cu")
     (uuid "{generate_uuid()}")
@@ -993,6 +1116,7 @@ def create_stm32_pcb(output_dir: Path) -> Path:
       (stroke (width 0.15) (type solid)) (layer "F.SilkS") (uuid "{generate_uuid()}"))
     (fp_line (start -1.85 1.15) (end 1.2 1.15)
       (stroke (width 0.15) (type solid)) (layer "F.SilkS") (uuid "{generate_uuid()}"))
+{courtyard}
     (pad "1" smd roundrect (at -1.05 0) (size 1.0 1.2) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net {a_num} "{anode_net}"))
     (pad "2" smd roundrect (at 1.05 0) (size 1.0 1.2) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net {k_num} "{cathode_net}"))
   )"""
@@ -1002,6 +1126,10 @@ def create_stm32_pcb(output_dir: Path) -> Path:
         x, y = pos
         net1_num = NETS.get(net1, 0)
         net2_num = NETS.get(net2, 0)
+        # Courtyard (Issue #7204): stock KiCad 10 F.CrtYd is x +-1.68,
+        # y +-0.95, but these hand-made pads reach x +-1.5, so pad extent
+        # + 0.25 mm widens x to +-1.75 (y stays at the stock +-0.95).
+        courtyard = courtyard_rect(-1.75, -0.95, 1.75, 0.95)
         return f"""  (footprint "Resistor_SMD:R_0805_2012Metric"
     (layer "F.Cu")
     (uuid "{generate_uuid()}")
@@ -1012,6 +1140,7 @@ def create_stm32_pcb(output_dir: Path) -> Path:
     (fp_text value "{value}" (at 0 1.5) (layer "F.Fab") (uuid "{generate_uuid()}")
       (effects (font (size 1 1) (thickness 0.15)))
     )
+{courtyard}
     (pad "1" smd roundrect (at -1 0) (size 1.0 1.3) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net {net1_num} "{net1}"))
     (pad "2" smd roundrect (at 1 0) (size 1.0 1.3) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net {net2_num} "{net2}"))
   )"""
@@ -1112,6 +1241,7 @@ def create_stm32_pcb(output_dir: Path) -> Path:
       (effects (font (size 1 1) (thickness 0.15)))
     )
 {silk_block}
+{courtyard_poly(LQFP48_COURTYARD)}
 {pads_block}
   )"""
 
@@ -1134,6 +1264,21 @@ def create_stm32_pcb(output_dir: Path) -> Path:
         # Stock silk, expressed relative to pin 1 and shifted onto this
         # footprint's centered origin (pin 1 at -2.5 * pitch).
         pin1_y = -2.5 * pitch
+        # Courtyard (Issue #7204): stock KiCad 10 F.CrtYd is x +-1.77,
+        # y -1.77..14.47 with pin 1 at y=0; pin 1 sits at y=-6.35 here, so the
+        # stock box becomes y -8.12..8.12.  It already contains the pads plus
+        # 0.25 mm (x +-1.10, y +-7.45).
+        courtyard = courtyard_rect(-1.77, -8.12, 1.77, 8.12)
+        # F.Fab body (Issue #7204): the stock outline, x +-1.27 by
+        # y -1.27..13.97 with the pin-1 corner chamfered 0.635 mm, shifted by
+        # the same -6.35 mm.  Without it the pin-1 rule falls back to the
+        # courtyard as the "body", which swallows the L mark beside pin 1.
+        fab_body = (
+            "    (fp_poly (pts (xy -1.27 -6.985) (xy -0.635 -7.62) (xy 1.27 -7.62) "
+            "(xy 1.27 7.62) (xy -1.27 7.62)) "
+            '(stroke (width 0.1) (type solid)) (fill no) (layer "F.Fab") '
+            f'(uuid "{_FAB_UUIDS()}"))'
+        )
         return f"""  (footprint "Connector_PinHeader_2.54mm:PinHeader_1x06_P2.54mm_Vertical"
     (layer "F.Cu")
     (uuid "{generate_uuid()}")
@@ -1156,6 +1301,8 @@ def create_stm32_pcb(output_dir: Path) -> Path:
       (stroke (width 0.15) (type solid)) (layer "F.SilkS") (uuid "{generate_uuid()}"))
     (fp_line (start 1.38 {pin1_y + 1.27:.2f}) (end 1.38 {pin1_y + 14.08:.2f})
       (stroke (width 0.15) (type solid)) (layer "F.SilkS") (uuid "{generate_uuid()}"))
+{fab_body}
+{courtyard}
     (pad "1" thru_hole rect (at 0 {-2.5 * pitch:.2f}) (size 1.7 1.7) (drill 1.0) (layers "*.Cu" "*.Mask") (net {NETS["+3.3V"]} "+3.3V"))
     (pad "2" thru_hole oval (at 0 {-1.5 * pitch:.2f}) (size 1.7 1.7) (drill 1.0) (layers "*.Cu" "*.Mask") (net {NETS["SWDIO"]} "SWDIO"))
     (pad "3" thru_hole oval (at 0 {-0.5 * pitch:.2f}) (size 1.7 1.7) (drill 1.0) (layers "*.Cu" "*.Mask") (net {NETS["SWCLK"]} "SWCLK"))
