@@ -20,9 +20,9 @@ ERC error count from 17 to 1 by:
   junction) so C19's pin-2 wire endpoint lands on a real GND wire
   endpoint.  Closes the C19 ``pin_not_connected`` error.
 
-The residual 1 error (``power_pin_not_driven`` on U1.VIN) is a
-known-shape demo-board churn item (curator's acceptance allows ≤4) and
-stems from a pre-existing label-placement issue in the buck-block (the
+The residual 1 error (``power_pin_not_driven`` on U1.VIN) was a
+known-shape demo-board churn item.  As of #7367 kicad-cli 10.0.6 reports 0
+errors on this frozen fixture and the budget is pinned at 0.  It stemmed from a pre-existing label-placement issue in the buck-block (the
 U1.FB ``+5V`` label lands on a C2-bulk-cap vertical wire that bridges
 +5V and VMOTOR globally; adding an explicit PWR_FLAG on VMOTOR triggers
 a worse ``pin_to_pin`` Output<->Power-output conflict against U1.OUT,
@@ -53,11 +53,11 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 BOARD_DIR = REPO_ROOT / "tests" / "fixtures" / "historical_demo_boards" / "05-bldc-motor-controller"
 SCH_PATH = BOARD_DIR / "output" / "bldc_controller.kicad_sch"
 
-# Issue #3004 acceptance criterion: ERC errors drop from 17 to ≤4.  The
-# current shipped state is 1; allow slack up to 4 to cover the curator's
-# "expected demo board churn" floor while still failing loudly if a
-# regression re-introduces a chunk of the 13 fixed errors.
-MAX_ALLOWED_ERC_ERRORS = 4
+# Issue #3004 dropped ERC errors from 17 to ≤4 and left 1.  Issue #7367
+# removed the remaining slack: kicad-cli 10.0.6 (the pinned toolchain)
+# reports 0 error-severity violations on this frozen fixture, so any error
+# is a regression.  No identity allowance is needed while the count is 0.
+MAX_ALLOWED_ERC_ERRORS = 0
 
 
 @pytest.fixture(scope="module")
@@ -116,7 +116,7 @@ class TestBoard05ERCRegression:
     """Pin the post-#3004 ERC state of board 05's committed schematic."""
 
     def test_erc_error_count_within_budget(self, schematic_path: Path) -> None:
-        """Acceptance: ERC error count drops from 17 (pre-#3004) to ≤4.
+        """Acceptance: the frozen fixture has zero ERC errors (#7367).
 
         A failure here means a regression re-introduced one of the
         category fixes shipped in PR #3004 (MCU NC markers, power-symbol
@@ -128,7 +128,7 @@ class TestBoard05ERCRegression:
         assert count <= MAX_ALLOWED_ERC_ERRORS, (
             f"Board 05 schematic has {count} ERC error(s), expected "
             f"<={MAX_ALLOWED_ERC_ERRORS}.  PR #3004 dropped this from 17 "
-            f"to 1; a regression here means one of the four fix categories "
+            f"and #7367 pinned it at 0; a regression here means one of the four fix categories "
             f"(MCU NC markers, power-symbol wire stubs, +3.3V rail extent, "
             f"or GND rail extent) was undone."
         )

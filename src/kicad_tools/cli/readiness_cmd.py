@@ -68,6 +68,8 @@ from .known_issues import (
     KNOWN_ISSUES_FILENAME,
     KnownIssueError,
     defects,
+    error_identity,
+    known_error_allowance,
     merge_known_issues,
     parse_known_issue,
     validate_known_issues,
@@ -1336,6 +1338,63 @@ def _format_warning_table(counts: dict[str, int]) -> str:
     return ", ".join(f"{rule}={count}" for rule, count in counts.items())
 
 
+def _violation_error_key(violation: dict) -> tuple[str, float, float] | None:
+    """``(rule, x_mm, y_mm)`` for an error violation, or ``None`` with no usable location."""
+    location = violation.get("location")
+    if not isinstance(location, (list, tuple)) or len(location) != 2:
+        return None
+    if not all(type(c) in (int, float) and math.isfinite(c) for c in location):
+        return None
+    identity = error_identity(str(violation.get("rule_id") or "unknown"), location[0], location[1])
+    return (identity["rule"], identity["at"][0], identity["at"][1])
+
+
+def _describe_error_key(key: tuple[str, float, float]) -> str:
+    return f"{key[0]} at {key[1]:.2f}/{key[2]:.2f}"
+
+
+def _unaccepted_errors(
+    report: dict, allowance: dict[tuple[str, float, float], int]
+) -> list[str] | None:
+    """Error identities that differ from the recorded allowance, or ``None``.
+
+    The report's error violations are matched against the listed identities as
+    a set (Issue #7355).  ``None`` means "no exact waiver applies": either
+    there is no allowance, or the report's errors cannot be fully attributed
+    (the summary count disagrees with the listed violations).  ``[]`` is an
+    exact match; otherwise each entry names an unlisted error, a repeated
+    identity, an error with no usable location, or a stale listed identity.
+    """
+    if not allowance:
+        return None
+    errors = [
+        v
+        for v in report.get("violations", [])
+        if isinstance(v, dict) and v.get("severity") == "error"
+    ]
+    raw_summary = report.get("summary")
+    summary = raw_summary if isinstance(raw_summary, dict) else {}
+    if len(errors) != int(summary.get("errors", 0) or 0):
+        return None
+    problems: list[str] = []
+    seen: set[tuple[str, float, float]] = set()
+    for violation in errors:
+        key = _violation_error_key(violation)
+        if key is None:
+            problems.append(f"{violation.get('rule_id') or 'unknown'} (no usable location)")
+            continue
+        if key not in allowance:
+            problems.append(f"{_describe_error_key(key)} (not recorded)")
+        elif key in seen:
+            problems.append(f"{_describe_error_key(key)} (repeated)")
+        seen.add(key)
+    problems.extend(
+        f"{_describe_error_key(k)} (recorded for #{allowance[k]}, no longer fires)"
+        for k in sorted(set(allowance) - seen)
+    )
+    return problems
+
+
 def _blocking_unknown_coverage(report: dict) -> list[str]:
     """``name (reason)`` for each blocking category ``kct check`` marked unknown."""
     coverage = report.get("coverage")
@@ -1414,6 +1473,36 @@ def _gate_kct_check(options: ReadinessOptions, engines: Engines) -> tuple[CheckO
     not_run = sorted(name for name, status in gating.items() if status == "NOT RUN")
     deferred = " Manifest verification is deferred to the artifacts gate."
 
+    # Issue #7355: an ``exception`` known issue may account for an exact set of
+    # errors (an approved deviation the generic tier cannot model).  Only an
+    # exact match waives them -- and the FAILED drc/erc roll-up they cause.
+    allowance = known_error_allowance(options.known_issues)
+    mismatch = _unaccepted_errors(report, allowance)
+    waived_errors = 0
+    if errors and mismatch == [] and not not_run:
+        waived_errors, errors = errors, 0
+        # The listed violations are ``kct check``'s own DRC findings, so the
+        # allowance accounts for the DRC roll-up only; a FAILED ERC (or any
+        # other sub-check) stays blocking.
+        failed = [name for name in failed if name != "drc"]
+    elif mismatch:  # also a stale allowance naming a rule that no longer fires
+        table_err = "; ".join(mismatch)
+        return (
+            CheckOutcome(
+                name="kct_check",
+                status=FAILED,
+                detail=(
+                    f"{errors} electrical/manufacturing error(s) do not match the recorded "
+                    f"exception identities: {table_err}; warning counts: {table}."
+                ),
+                evidence=evidence_rel,
+                blockers=[
+                    f"kct check reports {errors} error(s); unaccepted error(s): {table_err}."
+                ],
+            ),
+            report,
+        )
+
     if errors or failed:
         named = ", ".join(failed) or "none"
         return (
@@ -1491,8 +1580,13 @@ def _gate_kct_check(options: ReadinessOptions, engines: Engines) -> tuple[CheckO
             name="kct_check",
             status=PASSED,
             detail=(
-                f"0 electrical/manufacturing errors; DRC and ERC sub-checks passed; "
-                f"warning counts: {table}.{deferred}"
+                (
+                    "0 electrical/manufacturing errors; DRC and ERC sub-checks passed; "
+                    if not waived_errors
+                    else f"{waived_errors} error(s) accepted exactly by the recorded exception "
+                    "allowance; no other errors; "
+                )
+                + f"warning counts: {table}.{deferred}"
             ),
             evidence=evidence_rel,
         ),
