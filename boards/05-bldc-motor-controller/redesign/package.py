@@ -98,7 +98,7 @@ def export_package(output):
         "Program firmware/bldc.hex via slow AVR ISP, using factory internal-RC clock fuses.\n\n"
         "Fresh native DRC/refill:0 violations/0opens; native ERC:0; label/copper LVS:0.\n"
         "Manufacturer checks:0 errors/0warnings. No DRC waivers.\n"
-        "gerbers/gerbers.zip: fabrication; bom_jlcpcb.csv: procurement; cpl_jlcpcb.csv: SMT.\n"
+        "gerbers/gerbers.zip: fabrication; bom_jlcpcb.csv: procurement; cpl_jlcpcb.csv: SMT+THT.\n"
         "kicad_project.zip includes the exact PCB/schematic and local footprint/symbol libraries.\n"
         "schematic.pdf and assembly-front/back.pdf are production drawings.\n"
         "HARDWARE.md, firmware/, check reports and manifest.json complete the package.\n"
