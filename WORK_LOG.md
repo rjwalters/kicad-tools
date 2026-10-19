@@ -15,6 +15,8 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-19
 
+- **PR #7421**: fix(router): report every diff pair committed with unequal via counts (#7093)
+- **PR #7419**: fix: re-pin board 04 exception with its 24 error identities
 - **PR #7406**: test: ratchet board evidence producers onto the gated re-pin path
 - **Issue #7358** (closed): Evidence producers: gate-parity ratchet test, one registered re-pin path per ready board (#7353 step 4)
 - **PR #7361**: feat: honour an exact errors allowance on exception known issues in kct readiness
