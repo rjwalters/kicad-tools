@@ -157,7 +157,7 @@ from __future__ import annotations
 import logging
 import math
 from collections import Counter
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
 from .diffpair_length_tuning import (
@@ -260,6 +260,14 @@ AMPLITUDE_BACKOFF_FACTORS: tuple[float, ...] = (1.0, 0.5, 0.25, 0.125)
 MAX_OVERSHOOT_REFITS: int = 3
 OVERSHOOT_EPS_MM: float = 1e-9
 
+# Issue #7423: ``Segment.to_sexp`` writes coordinates at 4 decimal places and
+# ``kct check`` reads that written copper, so the overshoot guards measure the
+# route as written (see :func:`_as_written`).  A refit aims this far UNDER the
+# target so the next rounding of the rebuilt candidate lands on the safe side;
+# the undershoot (0.2 um) is far inside any tuning tolerance.
+WRITER_COORD_DECIMALS: int = 4
+QUANTIZED_REFIT_MARGIN_MM: float = 2e-4
+
 
 #: Per-bump placement (Issue #7043).  When every whole-trombone attempt on a
 #: net is rejected, the tuner places single bumps one at a time: each bump
@@ -268,6 +276,29 @@ OVERSHOOT_EPS_MM: float = 1e-9
 #: blocked loop no longer disqualifies the whole host segment.
 BUMP_AMPLITUDE_SHRINK: float = 0.7
 BUMP_MIN_AMPLITUDE_MM: float = 0.2
+
+
+def _as_written(route: Route) -> Route:
+    """Return ``route`` with segment coordinates rounded as the PCB writer does.
+
+    ``Segment.to_sexp`` formats with ``:.4f``; ``round`` is correctly rounded
+    on the same binary value, so the two agree.  Vias are written at full
+    precision by the writer and are left alone.
+    """
+    nd = WRITER_COORD_DECIMALS
+    return replace(
+        route,
+        segments=[
+            replace(
+                sg,
+                x1=round(sg.x1, nd),
+                y1=round(sg.y1, nd),
+                x2=round(sg.x2, nd),
+                y2=round(sg.y2, nd),
+            )
+            for sg in route.segments
+        ],
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -902,6 +933,15 @@ def _tune_match_group_single_ended(
             length_model=length_model,
         )
 
+    def _measure_written(route: Route) -> float:
+        """Worst of the in-memory and as-written length (Issue #7423).
+
+        ``kct check`` judges the 4 dp written copper, but the in-memory
+        route is what later passes see, so "never past the target" must
+        hold on both.
+        """
+        return max(_measure(route), _measure(_as_written(route)))
+
     member_lengths: dict[int, float] = {}
     for net_id in group.net_ids:
         route = routes_by_net.get(net_id)
@@ -1398,12 +1438,12 @@ def _tune_match_group_single_ended(
                     # Never grows the amplitude: an undershoot stays inside
                     # the tolerance and a bigger meander risks the DRC gate.
                     for _refit in range(MAX_OVERSHOOT_REFITS):
-                        overshoot = _measure(candidate_route) - target_length
+                        overshoot = _measure_written(candidate_route) - target_length
                         if overshoot <= OVERSHOOT_EPS_MM or serp_result.num_loops <= 0:
                             break
-                        refit_amplitude = attempt_config.amplitude - overshoot / (
-                            2.0 * serp_result.num_loops
-                        )
+                        refit_amplitude = attempt_config.amplitude - (
+                            overshoot + QUANTIZED_REFIT_MARGIN_MM
+                        ) / (2.0 * serp_result.num_loops)
                         if refit_amplitude <= 0.0:
                             break
                         attempt_config = SerpentineConfig(
@@ -1446,7 +1486,7 @@ def _tune_match_group_single_ended(
                     # changes, or the budget runs out).  "Never past the group
                     # target" is enforced here, on the measured route, so it
                     # holds by construction rather than by convergence.
-                    final_overshoot = _measure(candidate_route) - target_length
+                    final_overshoot = _measure_written(candidate_route) - target_length
                     if final_overshoot > OVERSHOOT_EPS_MM:
                         last_failure_reason = "overshoot"
                         last_failure_message = (
@@ -1538,7 +1578,7 @@ def _tune_match_group_single_ended(
                 # "never past the group target" on the measured route too, as
                 # the trombone path does, so it holds by construction.
                 if bumped_route is not None:
-                    bump_overshoot = _measure(bumped_route) - target_length
+                    bump_overshoot = _measure_written(bumped_route) - target_length
                     if bump_overshoot > OVERSHOOT_EPS_MM:
                         last_failure_reason = "overshoot"
                         last_failure_message = (
@@ -1738,7 +1778,11 @@ def _place_bumps_per_host(
             added = 0.0
             for side in (hint, (-hint[0], -hint[1])):
                 for ladder_amp in ladder:
-                    bump_amp = min(ladder_amp, remaining / 2.0)
+                    bump_amp = min(
+                        ladder_amp, max(remaining - QUANTIZED_REFIT_MARGIN_MM, 0.0) / 2.0
+                    )
+                    if bump_amp <= 0.0:
+                        continue
                     cfg = SerpentineConfig(
                         style=base_config.style,
                         amplitude=bump_amp,
@@ -1758,9 +1802,18 @@ def _place_bumps_per_host(
                     # off-angle host the snapped frame adds more than
                     # ``2 * bump_amp``.  A bump that would pass the target is
                     # skipped (the next rung is smaller).
-                    bump_added = (
-                        sum(math.hypot(sg.x2 - sg.x1, sg.y2 - sg.y1) for sg in result.new_segments)
-                        - bump_len
+                    # Measured as written (4 dp): ``kct check`` judges the
+                    # rounded copper, not the in-memory floats.
+                    written = _as_written(
+                        _Route(net=host.net, net_name=host.net_name, segments=result.new_segments)
+                    ).segments
+                    written_host = _as_written(
+                        _Route(net=host.net, net_name=host.net_name, segments=[sub_host])
+                    ).segments[0]
+                    bump_added = sum(
+                        math.hypot(sg.x2 - sg.x1, sg.y2 - sg.y1) for sg in written
+                    ) - math.hypot(
+                        written_host.x2 - written_host.x1, written_host.y2 - written_host.y1
                     )
                     if bump_added > remaining + OVERSHOOT_EPS_MM:
                         continue

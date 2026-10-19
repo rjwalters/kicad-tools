@@ -3994,3 +3994,90 @@ class TestViaCountImbalance:
             f"via-inclusive group skew should converge within tolerance, "
             f"got {skew:.4f}mm; totals={ {k: round(v, 3) for k, v in totals.items()} }"
         )
+
+
+def _written_length(route: Route) -> float:
+    """Planar length of ``route`` as ``Segment.to_sexp`` writes it (4 dp)."""
+    import math
+    import re
+
+    total = 0.0
+    for seg in route.segments:
+        text = seg.to_sexp()
+        x1, y1 = map(float, re.search(r"\(start ([-\d.]+) ([-\d.]+)\)", text).groups())
+        x2, y2 = map(float, re.search(r"\(end ([-\d.]+) ([-\d.]+)\)", text).groups())
+        total += math.hypot(x2 - x1, y2 - y1)
+    return total
+
+
+class TestNoOvershootAsWritten:
+    """Issue #7423: ``kct check`` reads the 4 dp written copper, so the guard
+    must hold on the rounded geometry, not only on the in-memory floats."""
+
+    @staticmethod
+    def _host(angle_deg: float, length: float) -> Route:
+        import math
+
+        a = math.radians(angle_deg)
+        return Route(
+            net=1,
+            net_name="D0",
+            segments=[
+                Segment(
+                    x1=0.0,
+                    y1=0.0,
+                    x2=length * math.cos(a),
+                    y2=length * math.sin(a),
+                    width=0.2,
+                    layer=Layer.F_CU,
+                    net=1,
+                    net_name="D0",
+                )
+            ],
+        )
+
+    @pytest.mark.parametrize("angle_deg", [0.0, 3.3, 22.5, 45.0, 67.5, 90.0])
+    @pytest.mark.parametrize("need", [0.3, 0.7, 1.3, 2.0])
+    @pytest.mark.parametrize("amplitude", [0.15, 0.4, 1.0])
+    def test_refit_path_written_length_never_past_target(self, angle_deg, need, amplitude):
+        import math
+
+        host = self._host(angle_deg, 20.0)
+        # Reference member is a straight run at exactly the written target.
+        target = round(_written_length(host) + need, 4)
+        group = _ddr_group(net_ids=[1, 2], tolerance=0.1)
+        routes = {1: host, 2: _straight_route(2, "D1", target, y=30.0)}
+        results = tune_match_group_v2(
+            group,
+            routes,
+            tolerance_mm=0.1,
+            intra_group_clearance_mm=0.2,
+            config=SerpentineConfig(amplitude=amplitude, gap_factor=2.0),
+        )
+        excess = _written_length(results[1][0]) - _written_length(routes[2])
+        assert excess <= 1e-9, f"written member {excess * 1000:.3f}um past the target"
+        assert math.isfinite(excess)
+
+    @pytest.mark.parametrize("angle_deg", [0.0, 3.3, 22.5, 45.0, 67.5, 90.0])
+    @pytest.mark.parametrize("need", [0.3, 0.7, 1.3, 2.0])
+    @pytest.mark.parametrize("amplitude", [0.15, 0.4, 1.0])
+    def test_per_bump_path_written_length_never_past_need(self, angle_deg, need, amplitude):
+        from kicad_tools.router.match_group_tuning import _place_bumps_per_host
+
+        host = self._host(angle_deg, 12.0)
+        before = _written_length(host)
+        placed = _place_bumps_per_host(
+            host,
+            length_needed=need,
+            tolerance_mm=0.1,
+            base_config=SerpentineConfig(amplitude=amplitude, gap_factor=2.0),
+            host_floor=1.0,
+            fixed_segment_ids=None,
+            other_group_routes={},
+            check=lambda segs: None,
+        )
+        if placed is None:
+            return
+        # The caller's guard (written measurement) is what rejects an
+        # overshoot; the placement itself must stay within a rounding step.
+        assert _written_length(placed) - before <= need + 5e-4
