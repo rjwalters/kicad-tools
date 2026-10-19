@@ -476,9 +476,12 @@ def apply_design_template(
     min_clear = rules.min_clearance_mm if rules else None
     min_via = rules.min_via_diameter_mm if rules else None
     min_drill = rules.min_via_drill_mm if rules else None
-    # Diff-pair width/gap defaults mirror add_netclass_definition's.
-    dp_width = floor(0.2, min_trace)
-    dp_gap = floor(0.25, min_clear)
+    # Diff-pair width/gap defaults mirror add_netclass_definition's.  They are
+    # passed only when the floor lifts them: an existing class is merged into
+    # key by key (Issue #7385), so an unconditional value would overwrite an
+    # authored diff pair.
+    dp_width = floor(0.2, min_trace) if floor(0.2, min_trace) > 0.2 else None
+    dp_gap = floor(0.25, min_clear) if floor(0.25, min_clear) > 0.25 else None
 
     # Optionally update Default netclass
     if update_default:
