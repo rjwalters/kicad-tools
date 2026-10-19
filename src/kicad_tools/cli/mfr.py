@@ -399,13 +399,16 @@ def cmd_export_dru(args):
 def cmd_apply_rules(args):
     """Apply manufacturer design rules to a KiCad project or PCB file."""
     from kicad_tools.core.project_file import (
-        add_netclass_definition,
-        apply_manufacturer_rules,
         load_project,
         save_project,
         set_manufacturer_metadata,
     )
+    from kicad_tools.core.rule_loosening import RuleLooseningError
     from kicad_tools.core.sexp_file import load_pcb, save_pcb
+    from kicad_tools.manufacturers.project_generator import (
+        build_project_rules,
+        merge_project_rules_guarded,
+    )
 
     json_mode = _wants_json(args)
 
@@ -447,7 +450,14 @@ def cmd_apply_rules(args):
         )
         print(f"  Min via diameter:  {rules.min_via_diameter_mm:.3f} mm")
         print(f"  Min via drill:     {rules.min_via_drill_mm:.3f} mm")
-        print(f"  Min annular ring:  {rules.min_annular_ring_mm:.3f} mm")
+        # The .kicad_pro built-in floor is the micro-via one (#3734/#3736):
+        # KiCad has no micro-via annular key, so standard-via annular ring is
+        # enforced by the .kicad_dru "Annular Ring" rule and kct check --mfr.
+        print(
+            f"  Min annular ring:  {rules.min_annular_ring_mm:.3f} mm (standard vias; "
+            f".kicad_pro floor {build_project_rules(rules)['min_via_annular_width']:.3f} mm "
+            "for micro vias)"
+        )
         print(f"  Copper to edge:    {rules.min_copper_to_edge_mm:.3f} mm")
 
     if args.dry_run:
@@ -465,17 +475,18 @@ def cmd_apply_rules(args):
         except Exception as e:
             _fail(args, f"Error loading project: {e}", stderr=True)
 
-        # Apply manufacturer rules
-        apply_manufacturer_rules(
-            data,
-            min_clearance_mm=rules.min_clearance_mm,
-            min_track_width_mm=rules.min_trace_width_mm,
-            min_via_diameter_mm=rules.min_via_diameter_mm,
-            min_via_drill_mm=rules.min_via_drill_mm,
-            min_annular_ring_mm=rules.min_annular_ring_mm,
-            min_hole_diameter_mm=rules.min_hole_diameter_mm,
-            min_copper_to_edge_mm=rules.min_copper_to_edge_mm,
-        )
+        # Apply manufacturer rules through the one #6191 stricter-wins policy
+        # the .kicad_pcb branch below already uses (Issue #7385): a stricter
+        # authored minimum or Default-netclass value is kept, and a rewrite
+        # that would loosen an authored rule refuses.  merge_project_rules
+        # also writes the Default netclass so KiCad's clearance DRC test
+        # (which reads the applied netclass clearance, not
+        # design_settings.rules.min_clearance) enforces the manufacturer tier
+        # instead of the stock 0.20 mm Default (issue #4097).
+        try:
+            merge_report = merge_project_rules_guarded(data, rules, writer="kct mfr apply-rules")
+        except RuleLooseningError as e:
+            _fail(args, f"Error: {e}", stderr=True)
 
         # Set manufacturer metadata
         set_manufacturer_metadata(
@@ -484,19 +495,10 @@ def cmd_apply_rules(args):
             layers=args.layers,
             copper_oz=args.copper,
         )
-
-        # Write/update the Default netclass so KiCad's clearance DRC test
-        # (which reads the applied netclass clearance, not
-        # design_settings.rules.min_clearance) enforces the manufacturer tier
-        # instead of the stock 0.20 mm Default (issue #4097).
-        add_netclass_definition(
-            data,
-            "Default",
-            track_width=rules.min_trace_width_mm,
-            clearance=rules.min_clearance_mm,
-            via_diameter=rules.min_via_diameter_mm,
-            via_drill=rules.min_via_drill_mm,
-        )
+        payload["rule_merge"] = merge_report.to_dict()
+        if not json_mode:
+            for line in merge_report.messages():
+                print(line)
 
         # Save
         output_path = Path(args.output) if args.output else file_path
