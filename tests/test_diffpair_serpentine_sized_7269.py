@@ -240,3 +240,24 @@ def test_partner_via_is_checked_geometrically():
         Via(x=9.3, y=2.95, drill=0.3, diameter=0.6, layers=(Layer.F_CU, Layer.B_CU), net=P_NET)
     ]
     assert not _serpentine_segments_ok([leg], n, p, INTRA, grid, partner_cells_passable=True)
+
+
+def test_legacy_comb_on_coupled_pair_is_gated():
+    """The legacy comb zigzags the whole host and must pass the Q12 gates too.
+
+    A 0.6 mm pitch pair (0.375 mm gap, coupled): the ungated comb matched the
+    skew (1.60 -> 0.16 mm) but took combined P+N uncoupled from 1.60 to 17.21 mm.
+    """
+    p = _route(P_NET, "A_P", [(1.0, 1.29), (1.0, 2.09), (16.0, 2.09), (16.0, 1.29)])
+    n = _route(N_NET, "A_N", [(1.0, 2.69), (16.0, 2.69)])
+    grid = _grid(p, n)
+    combined_before = _pair_combined_uncoupled_mm(p, n)
+    per_net_before = _pair_uncoupled_mm(p, n)
+    p_before, n_before = copy.deepcopy(p.segments), copy.deepcopy(n.segments)
+
+    match_pair_lengths(p, n, 0.5, add_serpentines=True, intra_pair_clearance_mm=INTRA, grid=grid)
+
+    assert _pair_combined_uncoupled_mm(p, n) <= combined_before + 1e-6
+    assert _pair_uncoupled_mm(p, n) <= per_net_before + 1e-6
+    assert n.segments == n_before
+    assert p.segments == p_before

@@ -4647,6 +4647,27 @@ _SIZED_SERPENTINE_MAX_AMPLITUDE_MM = 2.0
 _SIZED_SERPENTINE_MAX_BULGES = 12
 
 
+def _trial_passes_q12_gates(
+    trial: Route,
+    partner_route: Route,
+    combined_before: float,
+    per_net_before: float,
+) -> bool:
+    """Whether *trial* leaves the pair's uncoupled length no higher (Q12, #6795).
+
+    Operator ruling Q12 (#6858): the combined P+N uncoupled figure may not
+    rise; the #6795 per-net figure may not either.  Shared by every
+    partner-aware commit path so they cannot drift apart (Issue #7269).
+    """
+    from kicad_tools.validate.rules.diffpair_uncoupled_length import UNCOUPLED_EPSILON_MM
+
+    from .diffpair_length_tuning import _pair_combined_uncoupled_mm, _pair_uncoupled_mm
+
+    if _pair_combined_uncoupled_mm(trial, partner_route) > combined_before + UNCOUPLED_EPSILON_MM:
+        return False
+    return _pair_uncoupled_mm(trial, partner_route) <= per_net_before + UNCOUPLED_EPSILON_MM
+
+
 def _sized_outward_serpentine(
     route: Route,
     length_to_add: float,
@@ -4688,7 +4709,6 @@ def _sized_outward_serpentine(
     """
     if length_to_add <= 0 or max_length_to_add < length_to_add or not route.segments:
         return False
-    from kicad_tools.validate.rules.diffpair_uncoupled_length import UNCOUPLED_EPSILON_MM
 
     from .diffpair_length_tuning import (
         _outer_normal_hint,
@@ -4784,18 +4804,12 @@ def _sized_outward_serpentine(
                     continue
                 trial = Route(net=route.net, net_name=route.net_name)
                 trial.segments = route.segments[:idx] + new_segments + route.segments[idx + 1 :]
-                if (
-                    _pair_uncoupled_mm(trial, partner_route)
-                    > uncoupled_before + UNCOUPLED_EPSILON_MM
-                ):
-                    continue
                 # Operator ruling Q12 (#6858): the combined P+N figure is the
                 # acceptance gate.  A bulge's perpendicular legs are uncoupled,
                 # so this rejects every plan unless the bulge also couples
                 # partner copper that was uncoupled before.
-                if (
-                    _pair_combined_uncoupled_mm(trial, partner_route)
-                    > combined_before + UNCOUPLED_EPSILON_MM
+                if not _trial_passes_q12_gates(
+                    trial, partner_route, combined_before, uncoupled_before
                 ):
                     continue
                 route.segments = trial.segments
@@ -4850,7 +4864,6 @@ def _shorten_longer_half(
     commits.  Returns ``True`` when at least one chord was committed;
     ``longer`` is untouched otherwise.
     """
-    from kicad_tools.validate.rules.diffpair_uncoupled_length import UNCOUPLED_EPSILON_MM
 
     from .diffpair_length_tuning import _pair_combined_uncoupled_mm, _pair_uncoupled_mm
 
@@ -4921,9 +4934,7 @@ def _shorten_longer_half(
                 continue
             trial = Route(net=longer.net, net_name=longer.net_name)
             trial.segments = segs[:i] + [chord_seg] + segs[j + 1 :]
-            if _pair_combined_uncoupled_mm(trial, shorter) > combined_before + UNCOUPLED_EPSILON_MM:
-                continue
-            if _pair_uncoupled_mm(trial, shorter) > per_net_before + UNCOUPLED_EPSILON_MM:
+            if not _trial_passes_q12_gates(trial, shorter, combined_before, per_net_before):
                 continue
             longer.segments = trial.segments
             changed = committed = True
@@ -5165,6 +5176,24 @@ def create_serpentine(
         added = sum(math.hypot(g.x2 - g.x1, g.y2 - g.y1) for g in new_segments) - seg_length
         if legacy_ok and added > ceiling:
             legacy_ok = False
+        if legacy_ok:
+            # The legacy comb zigzags the whole host segment and none of that
+            # copper is coupled, so on a coupled pair it can add >15 mm of
+            # uncoupled length.  It owes the same Q12 gates as the other paths.
+            from .diffpair_length_tuning import _pair_combined_uncoupled_mm, _pair_uncoupled_mm
+
+            trial = Route(net=route.net, net_name=route.net_name)
+            trial.segments = (
+                route.segments[:best_segment_idx]
+                + new_segments
+                + route.segments[best_segment_idx + 1 :]
+            )
+            legacy_ok = _trial_passes_q12_gates(
+                trial,
+                partner_route,
+                _pair_combined_uncoupled_mm(route, partner_route),
+                _pair_uncoupled_mm(route, partner_route),
+            )
         if not legacy_ok:
             return _sized_outward_serpentine(
                 route,
