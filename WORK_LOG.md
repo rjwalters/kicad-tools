@@ -15,10 +15,12 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-19
 
+- **PR #7430**: test(readiness): verify every committed-ready board still verifies ready
 - **PR #7434**: fix(router): keep the shortest workable gateway combo; reject pass-under polarity crossings (#7362)
 - **PR #7429**: fix(board03): keep thermal relief on the six GND pads flagged thermal_asymmetry
 - **PR #7426**: fix(boards): swap board 06 Samtec headers for LCSC-stocked PZ254V headers
 - **PR #7417**: fix: forward the export's schematic to the report ERC audit
+- **Issue #7355** (closed): kct readiness --verify doesn't honour board 04's recorded #6269 exception: blocks on 24 paid-drill via errors while the committed record says ready
 - **Issue #7441** (closed): Board 03 tier-1 route: USB_D length regressed to 19.8 mm after #7101 (usb_geometry 16 mm bound)
 - **Issue #7422** (closed): Board 06: substitute LCSC-stocked connectors for Samtec J1–J3 so JLCPCB can assemble them (#7268 Q2 ruling)
 - **Issue #7362** (closed): main regression from #7324: board 03 fresh route USB_D 16.3→19.7 mm after 0.22 mm In2.Cu net class; tier-1 common-run test red
