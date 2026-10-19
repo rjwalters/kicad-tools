@@ -23087,6 +23087,24 @@ def _run_main_impl(args, parser, argv) -> int:
         )
 
     # Report nets that needed clearance relaxation (--progressive-clearance mode)
+    # Issue #7425 (#7093 AC1): engaged diff pairs the router committed with
+    # unequal P/N via counts -- the same pairs ``kct check`` reports as
+    # ``diffpair_uncoupled_length`` "unequal via counts".  Reported only: the
+    # exit status is unchanged (the JSON report carries the same list under
+    # ``pair_via_parity_failures``).
+    _parity_failures = getattr(router, "pair_via_parity_failures", None)
+    if _parity_failures and not quiet:
+        print(f"\n--- Pair Via-Parity Failures ({len(_parity_failures)}) ---")
+        for _f in _parity_failures:
+            print(
+                f"  {_f.p_name}/{_f.n_name}: {_f.p_name} {_f.vias_p} via(s), "
+                f"{_f.n_name} {_f.vias_n} via(s)"
+            )
+        print(
+            "  (reported only; exit status unchanged. `kct check` flags these as "
+            "diffpair_uncoupled_length)"
+        )
+
     if relaxed_nets_report and not quiet:
         original_clearance = rules.trace_clearance
         print(f"\n--- Clearance Relaxation Report ({len(relaxed_nets_report)} nets) ---")

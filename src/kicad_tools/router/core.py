@@ -8537,7 +8537,7 @@ class Autorouter:
                     board_thickness_mm=None,
                     num_copper_layers=None,
                 )
-            self._audit_pair_via_parity(detected_pairs, synth_routing, net_to_class)
+            self._audit_pair_via_parity()
         except ImportError:
             # diffpair_detection module unavailable -- silently skip the
             # diff-pair block but continue to the match-group block.
@@ -8577,30 +8577,41 @@ class Autorouter:
             num_copper_layers=None,
         )
 
-    def _audit_pair_via_parity(
-        self,
-        detected_pairs: list,
-        synth_routing: dict,
-        net_to_class: dict[str, str],
-    ) -> None:
+    def _audit_pair_via_parity(self) -> None:
         """Report every engaged pair committed with unequal via counts (#7093).
 
         Engine-agnostic backstop behind every ``route_all_*`` entry point (it
         runs in :meth:`_finalize_routing`).  The pairs are the ones ``kct
-        check`` engages -- detected, and opted in by their net class
-        (:func:`~.diffpair.should_engage_coupled`) -- and the counts are every
-        via on each net, as the checker's ``unequal via counts`` finding
-        counts them.  The router keeps the counts equal where it can (coupled
-        and gateway outcomes by construction, the lattice fallback by ranking
-        and mirrored legs); where it could not -- a lattice fallback or hybrid
-        leg, the grid engine's independent fallback, a pair deferred to the
-        single-ended main loop -- the result is a pair-rule failure, recorded
-        in :attr:`pair_via_parity_failures` and printed, never silent.  A pair
-        the lattice's per-segment report already named is not printed twice.
+        check`` engages -- detected through :func:`~.diffpair_detection.
+        build_synth_routing` (so a class whose per-net variants disagree picks
+        the same pairs the checker does, #7425) and opted in by their net
+        class (:func:`~.diffpair.should_engage_coupled`).  The counts are every
+        via on each net -- the routes committed this run plus the copper kept
+        by ``--preserve-existing`` / ``--nets`` -- as the checker counts them
+        on the written board.  The router keeps the counts equal where it can
+        (coupled and gateway outcomes by construction, the lattice fallback by
+        ranking and mirrored legs); where it could not -- a lattice fallback
+        or hybrid leg, the grid engine's independent fallback, a pair deferred
+        to the single-ended main loop -- the result is a pair-rule failure,
+        recorded in :attr:`pair_via_parity_failures` and printed, never
+        silent.  A pair the lattice's per-segment report already named is not
+        printed twice.
         """
         from .diffpair import should_engage_coupled
+        from .diffpair_detection import build_synth_routing, detect_diff_pairs
         from .pair_via_parity import audit_pair_via_parity
 
+        synth_routing, net_to_class = build_synth_routing(self.net_class_map)
+        try:
+            detected_pairs = detect_diff_pairs(
+                self.net_names,
+                net_class_routing=synth_routing,
+                net_to_class=net_to_class,
+                kicad_groups=getattr(self, "kicad_diff_pair_groups", None),
+            )
+        except Exception:
+            # Defensive: detection failure must not break routing.
+            detected_pairs = []
         pairs: list[tuple[int, str, int, str]] = []
         for dp in detected_pairs:
             pair = dp.pair
@@ -8610,7 +8621,7 @@ class Autorouter:
             if engaged:
                 pos, neg = pair.positive, pair.negative
                 pairs.append((pos.net_id, pos.net_name, neg.net_id, neg.net_name))
-        failures = audit_pair_via_parity(self.routes, pairs)
+        failures = audit_pair_via_parity([*self.routes, *self.existing_routes], pairs)
         self.pair_via_parity_failures = failures
         names = {name: net for net, name in self.net_names.items()}
         warned: set[frozenset[int | None]] = getattr(self, "_lattice_via_warned_nets", set())

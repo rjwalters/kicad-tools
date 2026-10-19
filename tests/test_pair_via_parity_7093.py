@@ -201,3 +201,49 @@ def test_every_route_all_tail_runs_the_audit(strategy: str) -> None:
     run(max_iterations=2) if strategy == "route_all_negotiated" else run()
     # The audit replaced the sentinel with the real (equal, planar) result.
     assert all(f.p_name != "x" for f in ar.pair_via_parity_failures)
+
+
+# -- #7425: preserved copper, checker-aligned pair set, surfacing -------------
+
+
+def test_finalize_counts_preserved_copper(capsys) -> None:
+    # ``--preserve-existing`` / ``--nets`` keep copper in ``existing_routes``;
+    # ``kct check`` sees it on the written board, so the audit must too.
+    ar = _usb_router()
+    ar.routes = [_route(1, "USB_D+", 1)]
+    ar.existing_routes = [_route(2, "USB_D-", 3)]
+    ar._finalize_routing()
+    assert ar.pair_via_parity_failures == [PairViaParityFailure("USB_D+", "USB_D-", 1, 3)]
+    assert "unequal via counts" in capsys.readouterr().out
+
+
+def test_finalize_uses_the_checkers_pair_set() -> None:
+    # Per-net variants of one class that disagree on ``coupled_routing``: the
+    # legacy ``setdefault(class name)`` idiom let the first net's variant win
+    # the class key (here: not coupled -> pair skipped), while
+    # ``build_synth_routing`` -- what ``kct check`` uses -- engages the pair
+    # through the coupled member.  The audit must follow the checker.
+    ar = _usb_router(engaged=False)
+    ar.net_class_map = {
+        "USB_D+": NetClassRouting(name="HighSpeed", coupled_routing=False),
+        "USB_D-": NetClassRouting(name="HighSpeed", coupled_routing=True),
+    }
+    ar.routes = [_route(1, "USB_D+", 0), _route(2, "USB_D-", 1)]
+    ar._finalize_routing()
+    assert ar.pair_via_parity_failures == [PairViaParityFailure("USB_D+", "USB_D-", 0, 1)]
+
+
+def test_json_report_carries_pair_via_parity_failures() -> None:
+    from kicad_tools.router.output import get_routing_diagnostics_json
+
+    ar = _usb_router()
+    ar.routes = [_route(1, "USB_D+", 2), _route(2, "USB_D-", 3)]
+    ar._finalize_routing()
+    net_map = {"USB_D+": 1, "USB_D-": 2}
+    report = get_routing_diagnostics_json(ar, net_map, 2)
+    assert report["pair_via_parity_failures"] == [
+        {"p_net": "USB_D+", "n_net": "USB_D-", "vias_p": 2, "vias_n": 3}
+    ]
+    ar.routes = [_route(1, "USB_D+", 2), _route(2, "USB_D-", 2)]
+    ar._finalize_routing()
+    assert "pair_via_parity_failures" not in get_routing_diagnostics_json(ar, net_map, 2)
