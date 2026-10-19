@@ -4495,6 +4495,258 @@ class CoupledPathfinder:
             route.segments.append(seg)
 
 
+def _serpentine_segments_ok(
+    new_segments: list[Segment],
+    route: Route,
+    partner_route: Route | None,
+    intra_pair_clearance_mm: float | None,
+    grid: RoutingGrid | None,
+    *,
+    partner_cells_passable: bool = False,
+) -> bool:
+    """Clearance self-checks for a proposed serpentine (Issues #3003/#3508).
+
+    ``partner_cells_passable`` (Issue #7269): on a tightly coupled pair the
+    partner's grid clearance envelope covers the shorter trace's own
+    centreline, so every bulge that leaves the trunk reads "blocked by a
+    foreign net" and the grid check rejects it before it has moved at all.
+    When set, cells owned by the partner net are passable in the grid scan;
+    the partner's segments are still checked exactly (below), its vias are
+    checked geometrically against ``max(trace, via)`` clearance, and every
+    segment must also pass :meth:`RoutingGrid.validate_segment_clearance`.
+    """
+    # Issue #3003: DRC self-check before committing.  If the caller
+    # supplied a partner route and an intra_pair_clearance threshold,
+    # verify the new bulges do not violate that threshold against the
+    # partner.  On rejection, leave the route untouched and report
+    # failure -- the caller (match_pair_lengths -> route_differential_
+    # pair_coupled) will fall through to the length-warning path, which
+    # is a valid output (matches the no-suitable-segment branch).
+    if partner_route is not None and intra_pair_clearance_mm is not None:
+        from kicad_tools.core.geometry import segment_clearance
+
+        for new_seg in new_segments:
+            for pseg in partner_route.segments:
+                if pseg.layer != new_seg.layer:
+                    continue
+                clearance = segment_clearance(
+                    new_seg.x1,
+                    new_seg.y1,
+                    new_seg.x2,
+                    new_seg.y2,
+                    new_seg.width,
+                    pseg.x1,
+                    pseg.y1,
+                    pseg.x2,
+                    pseg.y2,
+                    pseg.width,
+                )
+                if clearance + 1e-9 < intra_pair_clearance_mm:
+                    return False
+
+    # Issue #3508: grid self-check.  Rasterise every proposed segment
+    # against the grid's clearance envelope (the same convention as
+    # ``CoupledPathfinder._is_trace_blocked``: the grid already encodes
+    # the full centerline clearance envelope at marking time, so a cell
+    # is legal exactly when a trace centerline there satisfies
+    # clearance).  Own-net cells are passable; anything else (partner
+    # copper INCLUDING vias, other nets, pad halos, keepouts) rejects
+    # the serpentine -- leaving the pair with a length-mismatch warning
+    # is strictly better than committing clearance violations.
+    partner_net = partner_route.net if partner_route is not None else None
+    if partner_cells_passable and partner_route is not None and partner_route.vias:
+        trace_clr = getattr(getattr(grid, "rules", None), "trace_clearance", 0.0) or 0.0
+        via_clr = getattr(getattr(grid, "rules", None), "via_clearance", None)
+        floor = max(trace_via_clearance_mm(trace_clr, via_clr), intra_pair_clearance_mm or 0.0)
+        for new_seg in new_segments:
+            for via in partner_route.vias:
+                d = point_to_segment_distance(
+                    via.x, via.y, new_seg.x1, new_seg.y1, new_seg.x2, new_seg.y2
+                )
+                if d - via.diameter / 2.0 - new_seg.width / 2.0 + 1e-9 < floor:
+                    return False
+    if grid is not None:
+        for new_seg in new_segments:
+            li = grid.layer_to_index(new_seg.layer.value)
+            sgx1, sgy1 = grid.world_to_grid(new_seg.x1, new_seg.y1)
+            sgx2, sgy2 = grid.world_to_grid(new_seg.x2, new_seg.y2)
+            steps = max(abs(sgx2 - sgx1), abs(sgy2 - sgy1))
+            for i in range(steps + 1):
+                t = i / steps if steps else 0.0
+                gx = int(round(sgx1 + (sgx2 - sgx1) * t))
+                gy = int(round(sgy1 + (sgy2 - sgy1) * t))
+                if not (0 <= gx < grid.cols and 0 <= gy < grid.rows):
+                    return False
+                # Issue #5240: ``cell_at`` drop-in for the legacy
+                # ``grid.grid[layer][y][x]`` chain (see
+                # ``RoutingGrid.cell_at``'s docstring).
+                cell = grid.cell_at(li, gy, gx)
+                if cell.blocked and cell.net != route.net:
+                    if (
+                        partner_cells_passable
+                        and partner_net is not None
+                        and cell.net == partner_net
+                    ):
+                        continue
+                    return False
+        if partner_cells_passable:
+            # A cell carries one net, so own- and partner-net envelope cells
+            # can hide legal foreign copper just outside them that a bulge
+            # would then reach.  The relaxed scan is backed by the grid's
+            # exact clearance check against every committed obstacle.
+            for new_seg in new_segments:
+                ok, _clr, _where = grid.validate_segment_clearance(
+                    new_seg,
+                    exclude_net=route.net,
+                    partner_net=partner_net,
+                    partner_clearance=intra_pair_clearance_mm,
+                )
+                if not ok:
+                    return False
+    return True
+
+
+#: Upper bound on the sized comb's bulge height (mm), Issue #7269.
+_SIZED_SERPENTINE_MAX_AMPLITUDE_MM = 2.0
+#: Most bulges the sized comb places, matching the legacy comb's cap.
+_SIZED_SERPENTINE_MAX_BULGES = 12
+
+
+def _sized_outward_serpentine(
+    route: Route,
+    length_to_add: float,
+    max_length_to_add: float,
+    *,
+    min_amplitude: float,
+    min_segment_length: float,
+    partner_route: Route,
+    intra_pair_clearance_mm: float,
+    grid: RoutingGrid | None,
+) -> bool:
+    """One-sided comb sized to the request, placed where it fits (#7269).
+
+    The fallback for :func:`create_serpentine`'s partner-aware path when the
+    legacy whole-segment comb fails its checks or overshoots.  Each bulge is
+    rectangular (out, along, back) on an axis-aligned host segment, pointing
+    away from the partner.  ``k`` bulges of height ``A`` add exactly
+    ``2 * k * A``, and only the two perpendicular legs leave the partner's
+    side: the bulge top stays parallel to the partner, so the pair's
+    uncoupled-length figure grows by the added length on the shorter half and
+    not at all on the longer one (a 45-degree bulge would add ~3.4x that).
+    Plans keep ``A`` in ``[min_amplitude, 2 mm]`` and the added length in
+    ``[length_to_add, max_length_to_add]``; those that do not make the
+    shorter half the longer one are tried first, closest to the request's
+    upper end first.  The comb occupies only the span it needs and slides
+    along each host segment (centre first) until a placement passes every
+    clearance check (the grid scan treats partner-owned cells as passable,
+    see :func:`_serpentine_segments_ok`) and leaves the pair's uncoupled
+    figure no higher than it was (the Issue #6795 guard of the Phase 3I
+    tuner).  Leaves ``route`` untouched and returns ``False`` when nothing
+    fits.
+    """
+    if length_to_add <= 0 or max_length_to_add < length_to_add or not route.segments:
+        return False
+    from kicad_tools.validate.rules.diffpair_uncoupled_length import UNCOUPLED_EPSILON_MM
+
+    from .diffpair_length_tuning import _outer_normal_hint, _pair_uncoupled_mm
+
+    hosts = []
+    for idx, seg in enumerate(route.segments):
+        dx, dy = seg.x2 - seg.x1, seg.y2 - seg.y1
+        length = math.hypot(dx, dy)
+        if length < min_segment_length:
+            continue
+        if abs(dx) < 0.01 or abs(dy) < 0.01:
+            hosts.append((length, idx, seg))
+    hosts.sort(key=lambda h: (-h[0], h[1]))
+    if not hosts:
+        return False
+
+    partner_len = calculate_route_length([partner_route])
+    own_len = calculate_route_length([route])
+    match = partner_len - own_len  # added length that matches the halves exactly
+    plans: list[tuple[int, float, float]] = []
+    for k in range(1, _SIZED_SERPENTINE_MAX_BULGES + 1):
+        target = min(max(match, length_to_add), max_length_to_add)
+        amp = max(min_amplitude, target / (2.0 * k))
+        added = 2.0 * k * amp
+        if amp > _SIZED_SERPENTINE_MAX_AMPLITUDE_MM:
+            continue
+        if length_to_add - 1e-9 <= added <= max_length_to_add + 1e-9:
+            plans.append((k, amp, added))
+    if not plans:
+        return False
+    plans.sort(key=lambda p: (p[2] > match + 1e-9, abs(p[2] - match), p[1]))
+
+    uncoupled_before = _pair_uncoupled_mm(route, partner_route)
+    width = route.segments[0].width
+    top = max(2.0 * width, 0.25)
+    step = grid.resolution if grid is not None else 0.1
+    for length, idx, seg in hosts:
+        ux, uy = (seg.x2 - seg.x1) / length, (seg.y2 - seg.y1) / length
+        px, py = -uy, ux
+        hint_x, hint_y = _outer_normal_hint(seg, partner_route)
+        if px * hint_x + py * hint_y < 0.0:
+            px, py = -px, -py
+        for k, amp, _added in plans:
+            span = k * top + (k - 1) * top
+            margin = max(amp, 2.0 * width)
+            room = length - 2.0 * margin - span
+            if room < 0:
+                continue
+            centre = margin + room / 2.0
+            offsets = [centre]
+            n_steps = int(room / 2.0 / step)
+            for i in range(1, n_steps + 1):
+                offsets.extend((centre - i * step, centre + i * step))
+            for start in offsets:
+                pts = [(seg.x1, seg.y1)]
+                along = start
+                for _b in range(k):
+                    for da, dp in ((0.0, 0.0), (0.0, amp), (top, amp), (top, 0.0)):
+                        pts.append(
+                            (
+                                seg.x1 + ux * (along + da) + px * dp,
+                                seg.y1 + uy * (along + da) + py * dp,
+                            )
+                        )
+                    along += 2.0 * top
+                pts.append((seg.x2, seg.y2))
+                new_segments = [
+                    Segment(
+                        x1=a[0],
+                        y1=a[1],
+                        x2=b[0],
+                        y2=b[1],
+                        width=seg.width,
+                        layer=seg.layer,
+                        net=seg.net,
+                        net_name=seg.net_name,
+                    )
+                    for a, b in zip(pts, pts[1:], strict=False)
+                    if math.hypot(b[0] - a[0], b[1] - a[1]) > 1e-9
+                ]
+                if not _serpentine_segments_ok(
+                    new_segments,
+                    route,
+                    partner_route,
+                    intra_pair_clearance_mm,
+                    grid,
+                    partner_cells_passable=True,
+                ):
+                    continue
+                trial = Route(net=route.net, net_name=route.net_name)
+                trial.segments = route.segments[:idx] + new_segments + route.segments[idx + 1 :]
+                if (
+                    _pair_uncoupled_mm(trial, partner_route)
+                    > uncoupled_before + UNCOUPLED_EPSILON_MM
+                ):
+                    continue
+                route.segments = trial.segments
+                return True
+    return False
+
+
 def create_serpentine(
     route: Route,
     length_to_add: float,
@@ -4503,6 +4755,7 @@ def create_serpentine(
     partner_route: Route | None = None,
     intra_pair_clearance_mm: float | None = None,
     grid: RoutingGrid | None = None,
+    max_length_to_add: float | None = None,
 ) -> bool:
     """Add serpentine meander to a route to increase its length.
 
@@ -4711,62 +4964,35 @@ def create_serpentine(
         current_x = next_x
         current_y = next_y
 
-    # Issue #3003: DRC self-check before committing.  If the caller
-    # supplied a partner route and an intra_pair_clearance threshold,
-    # verify the new bulges do not violate that threshold against the
-    # partner.  On rejection, leave the route untouched and report
-    # failure -- the caller (match_pair_lengths -> route_differential_
-    # pair_coupled) will fall through to the length-warning path, which
-    # is a valid output (matches the no-suitable-segment branch).
-    if partner_route is not None and intra_pair_clearance_mm is not None:
-        from kicad_tools.core.geometry import segment_clearance
-
-        for new_seg in new_segments:
-            for pseg in partner_route.segments:
-                if pseg.layer != new_seg.layer:
-                    continue
-                clearance = segment_clearance(
-                    new_seg.x1,
-                    new_seg.y1,
-                    new_seg.x2,
-                    new_seg.y2,
-                    new_seg.width,
-                    pseg.x1,
-                    pseg.y1,
-                    pseg.x2,
-                    pseg.y2,
-                    pseg.width,
-                )
-                if clearance + 1e-9 < intra_pair_clearance_mm:
-                    return False
-
-    # Issue #3508: grid self-check.  Rasterise every proposed segment
-    # against the grid's clearance envelope (the same convention as
-    # ``CoupledPathfinder._is_trace_blocked``: the grid already encodes
-    # the full centerline clearance envelope at marking time, so a cell
-    # is legal exactly when a trace centerline there satisfies
-    # clearance).  Own-net cells are passable; anything else (partner
-    # copper INCLUDING vias, other nets, pad halos, keepouts) rejects
-    # the serpentine -- leaving the pair with a length-mismatch warning
-    # is strictly better than committing clearance violations.
-    if grid is not None:
-        for new_seg in new_segments:
-            li = grid.layer_to_index(new_seg.layer.value)
-            sgx1, sgy1 = grid.world_to_grid(new_seg.x1, new_seg.y1)
-            sgx2, sgy2 = grid.world_to_grid(new_seg.x2, new_seg.y2)
-            steps = max(abs(sgx2 - sgx1), abs(sgy2 - sgy1))
-            for i in range(steps + 1):
-                t = i / steps if steps else 0.0
-                gx = int(round(sgx1 + (sgx2 - sgx1) * t))
-                gy = int(round(sgy1 + (sgy2 - sgy1) * t))
-                if not (0 <= gx < grid.cols and 0 <= gy < grid.rows):
-                    return False
-                # Issue #5240: ``cell_at`` drop-in for the legacy
-                # ``grid.grid[layer][y][x]`` chain (see
-                # ``RoutingGrid.cell_at``'s docstring).
-                cell = grid.cell_at(li, gy, gx)
-                if cell.blocked and cell.net != route.net:
-                    return False
+    partner_aware = partner_route is not None and intra_pair_clearance_mm is not None
+    legacy_ok = _serpentine_segments_ok(
+        new_segments, route, partner_route, intra_pair_clearance_mm, grid
+    )
+    if partner_aware:
+        # Issue #7269: the legacy comb spans the WHOLE host segment and
+        # floors its amplitude at ``min_amplitude``, so on a short request
+        # it can add several times the requested length and leave the pair
+        # skew worse than it found it (board 07 MIPI_DAT0: 0.373 mm asked,
+        # 1.79 mm delivered, skew 0.623 -> 1.169 mm).  Treat that as a
+        # failed candidate, and when the legacy comb is unusable try a
+        # comb sized to the request instead.
+        ceiling = max_length_to_add if max_length_to_add is not None else 2.0 * length_to_add
+        added = sum(math.hypot(g.x2 - g.x1, g.y2 - g.y1) for g in new_segments) - seg_length
+        if legacy_ok and added > ceiling:
+            legacy_ok = False
+        if not legacy_ok:
+            return _sized_outward_serpentine(
+                route,
+                length_to_add,
+                ceiling,
+                min_amplitude=min_amplitude,
+                min_segment_length=min_segment_length,
+                partner_route=partner_route,
+                intra_pair_clearance_mm=intra_pair_clearance_mm,
+                grid=grid,
+            )
+    elif not legacy_ok:
+        return False
 
     # Replace the original segment with serpentine segments
     route.segments = (
@@ -4821,6 +5047,9 @@ def match_pair_lengths(
 
     # Add serpentine to shorter trace
     length_to_add = delta - max_delta * 0.5  # Leave some margin
+    # Issue #7269: the most the partner-aware path may add -- the same
+    # half-tolerance margin on the far side of an exact match.
+    max_length_to_add = delta + max_delta * 0.5
 
     if p_length < n_length:
         return create_serpentine(
@@ -4829,6 +5058,7 @@ def match_pair_lengths(
             partner_route=n_route if intra_pair_clearance_mm is not None else None,
             intra_pair_clearance_mm=intra_pair_clearance_mm,
             grid=grid,
+            max_length_to_add=max_length_to_add,
         )
     else:
         return create_serpentine(
@@ -4837,6 +5067,7 @@ def match_pair_lengths(
             partner_route=p_route if intra_pair_clearance_mm is not None else None,
             intra_pair_clearance_mm=intra_pair_clearance_mm,
             grid=grid,
+            max_length_to_add=max_length_to_add,
         )
 
 
