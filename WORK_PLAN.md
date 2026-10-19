@@ -27,30 +27,44 @@ _None._
 - **#7093**: router: differential pair gets unequal via counts when a leg falls back to uncoupled routing (board 03 USB_D 2 vs 3; blocks #6394)
 - **#7269**: board 07 MIPI_DAT0: recover 0.038 mm skew lost to compare-and-keep (blocks #6858)
 - **#7362**: main regression from #7324: board 03 fresh route USB_D 16.3→19.7 mm after 0.22 mm In2.Cu net class; tier-1 common-run test red
+- **#7401**: router: board 06 USB2_D+ uncoupled 12.791 > 12.700 mm after v62 pad-edge floor reorders the single-ended fallback
 
 ## Ready
 
 Human-approved issues ready for implementation (`loom:issue`).
 
-- **#7093**: router: differential pair gets unequal via counts when a leg falls back to uncoupled routing (board 03 USB_D 2 vs 3; blocks #6394)
+_None._
 
 ## In Progress
 
 Issues currently being built (`loom:building`).
 
 - **#6554**: diffpair: reproduce KiCad's diff_pair_uncoupled primitive pairing exactly (kct is a lower bound)
+- **#7084**: router: routing board 03 under jlcpcb-tier1 collapses the USB_D In2.Cu common run to 1.4 mm (arm C under jlcpcb keeps 4.1 mm)
+- **#7093**: router: differential pair gets unequal via counts when a leg falls back to uncoupled routing (board 03 USB_D 2 vs 3; blocks #6394)
 - **#7153**: kct export bundle inconsistencies: JLCPCB Gerbers omit paste layers for SMT bundles; board 04 manifest says DRC OK while report says FAIL/NOT_READY; report ERC falsely 'skipped by user request'
+- **#7204**: DFA false-PASS: courtyard check silently skips courtyard-less footprints (boards 00/01/04 signed off with 0 courtyards) and AssemblyCapabilities is never enforced (board 07 double-sided CPL unflagged)
+- **#7269**: board 07 MIPI_DAT0: recover 0.038 mm skew lost to compare-and-keep (blocks #6858)
+- **#7275**: board 03: fix the 6 real thermal_asymmetry findings via recipe and drop the pinned allowance
 - **#7296**: Router: refuse pad-edge vias (mask-dam floor) and move existing ones on boards 02/05/06 (split from #7220, PR3)
 - **#7349**: Boards 06/07: enable diff-pair gap tightening on seed-42 re-routes and drop the impedance caps (#7344 PR 2)
 - **#7355**: kct readiness --verify doesn't honour board 04's recorded #6269 exception: blocks on 24 paid-drill via errors while the committed record says ready
+- **#7362**: main regression from #7324: board 03 fresh route USB_D 16.3→19.7 mm after 0.22 mm In2.Cu net class; tier-1 common-run test red
 - **#7399**: Schematic blocks: 10 stock factories fail on real KiCad 10 libs (stale symbol IDs, fictional mock pins); add a real-symbol smoke test
+- **#7409**: Gate annotate_pintypes_6025.py's native-drc.json writes through repin_staged (#7358 allowlist)
+- **#7422**: Board 06: substitute LCSC-stocked connectors for Samtec J1–J3 so JLCPCB can assemble them (#7268 Q2 ruling)
+- **#7423**: Board 07: enable route-time length matching in the committed map after #7397 (no-worse re-measure; #5798 Q4 ruling)
 
 ## PRs Awaiting Review
 
 PRs waiting on Judge (`loom:review-requested`).
 
-- **#7308**: fix(router): refuse vias in the mask-dam zone beside SMD pads; clear boards 02/05/06
 - **#7417**: fix: forward the export's schematic to the report ERC audit
+- **#7424**: refactor: stop pintype annotator writing native-drc.json evidence
+- **#7426**: fix(boards): swap board 06 Samtec headers for LCSC-stocked PZ254V headers
+- **#7428**: fix(blocks): wire OpAmpBlock and multi-channel ESD array to real pins
+- **#7429**: fix(board03): keep thermal relief on the six GND pads flagged thermal_asymmetry
+- **#7430**: test(readiness): verify every committed-ready board still verifies ready
 
 ## Approved (Awaiting Merge)
 
@@ -124,10 +138,10 @@ Issues carrying `loom:curated`.
 |------|-------|
 | Operator merge-risk holds | 0 |
 | Very important | 0 |
-| Important | 4 |
-| Ready (`loom:issue`) | 1 |
-| In Progress (`loom:building`) | 6 |
-| PRs awaiting review | 2 |
+| Important | 5 |
+| Ready (`loom:issue`) | 0 |
+| In Progress (`loom:building`) | 15 |
+| PRs awaiting review | 6 |
 | Approved PRs awaiting merge | 0 |
 | Curated | 31 |
 | Architect / Hermit proposals | 10 |
