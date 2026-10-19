@@ -15,6 +15,12 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-19
 
+- **PR #7486**: fix(boards): refresh board 05 report via its producer, keep reviewed net-class rules
+- **PR #7465**: fix: delete stale board 04 native-drc.json and check for unbound DRC reports
+- **PR #7439**: fix(export): place THT parts at pad-bbox centre in JLCPCB CPL
+- **Issue #7464** (closed): Stale unbound native-drc.json copies in boards/*/output/ (board 04 top-level dated 2026-09-10); delete or bind
+- **Issue #7433** (closed): JLCPCB CPL exports THT pin headers at pin 1 instead of body centre (~8.9 mm off on 1x8); affects boards 02-07 THT rows
+- **Issue #7391** (closed): Board 05: refresh report.md/pdf via its producer (still says THT parts excluded from CPL; #7241/#7383 follow-up)
 - **PR #7455**: fix(readiness): give board 04 drc_targets so refresh re-pins its native-drc.json
 - **Issue #7435** (closed): refresh_readiness: board 04 has no drc_targets, so nothing re-pins its native-drc.json
 - **PR #7473**: ci: restore import-not-found nanobind entry in mypy baseline
