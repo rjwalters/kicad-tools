@@ -130,3 +130,18 @@ Not verified: pin cross-section and hole-size fit against the footprint's drill
 mating-cycle rating relative to the Samtec parts, and JLCPCB through-hole
 assembly eligibility of these two part numbers. Procurement must review these
 rows before ordering.
+
+## 2026-10-19 Design report no longer lists J1-J3 as hand-solder (issue #7268)
+
+`report.md`/`report.pdf` are regenerated with `kct export --mfr
+jlcpcb-tier1` from the committed routed PCB. Since issue #7239 the JLCPCB
+export keeps through-hole parts in the CPL, so the report's former
+"Hand-Solder (THT) Components" section, which said J1-J3 are excluded from
+the pick-and-place file, is gone. `bom_jlcpcb.csv` and `cpl_jlcpcb.csv` are
+unchanged: they already list J1-J3 (issue #7422).
+
+**Procurement must review the J1-J3 through-hole rows** (part identity,
+JLCPCB through-hole assembly eligibility and stock, and placement
+orientation) before ordering assembly. This note records the report change
+only: it is not a re-review, and no new supplier lookup or stock check was
+performed.
