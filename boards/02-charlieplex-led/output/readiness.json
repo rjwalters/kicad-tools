@@ -77,9 +77,18 @@
       "kind": "advisory",
       "summary": "Via drills at the edge of SMD pads R3.2 and R4.2 (0.03 mm, below the 0.1 mm solder-mask dam): via wicking risk; router fix tracked in #7296",
       "recorded": "2026-10-18",
-      "warnings": {
-        "via_at_pad_edge": 2
-      }
+      "warnings": [
+        {
+          "rule": "via_at_pad_edge",
+          "ref": "R3",
+          "pad": "R3-2"
+        },
+        {
+          "rule": "via_at_pad_edge",
+          "ref": "R4",
+          "pad": "R4-2"
+        }
+      ]
     }
   ],
   "evidence": {
@@ -165,7 +174,7 @@
     "output/readiness/fill-saved/charlieplex_3x3_routed.kicad_pcb": "ac41950ffc39bd11a5aad43f90c1ec019cdf392ad1500ddd8c4741443f37680f",
     "output/readiness/fill-saved/charlieplex_3x3_routed.kicad_pro": "c342d7bef40541498c43f4adaddff31fc4da05a9a8d23f1dba4028d78eecfd01",
     "output/readiness/kct-check.json": "9697f5d8d0d784226c463a555b9e41e2f07310eefd91395ddf0170da1ad9acd2",
-    "output/readiness/known-issues.json": "8c8c209cc9c76c0aed8512b45fe97626c18e699b9195e5f6a29fcb16e61ba0a9",
+    "output/readiness/known-issues.json": "7f1ee1d4d5327f9909d1e721d0ae7c83e827558e8cf68ae3d50b99382c9c8d5a",
     "output/readiness/native-drc-raw.json": "0426c7ad507ff43ac9571a37931fe47d2f15444d0357cf8936c96b47f92b8c5d",
     "output/readiness/native-drc.json": "b33894ae1eaaa941f2cc78058891fd9a8570c2be1767e51c2d65ae7c7d4a7f85",
     "output/readiness/native-erc.json": "a27b3db897332d4385f66184a9aaee4bd8b696d0af45a4557ab4f57b13ca8ae6",

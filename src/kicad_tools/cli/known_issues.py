@@ -13,10 +13,14 @@ per-board record of those issues:
   stays ``ready``.
 
 Each entry is ``{"issue": N, "kind": ..., "summary": ..., "recorded": "YYYY-MM-DD"}``
-plus an optional ``"warnings": {rule_id: max_count}`` naming the ``kct check``
-warnings the issue accounts for.  Board scripts that tolerate known warnings
-should read that allowance (:func:`known_warning_allowance`) instead of
-keeping their own list.
+plus an optional ``"warnings": [{"rule", "ref", "pad"}, ...]`` naming the exact
+``kct check`` warning findings the issue accounts for (Issue #7389).  The
+identity is the one :func:`kicad_tools.validate.known_warnings.warning_key`
+yields, so a *different* warning of the same rule cannot hide behind a known
+one, and an identity that no longer fires is stale.  Board scripts that
+tolerate known warnings should read that allowance
+(:func:`known_warning_allowance`) and match with :func:`match_warning_allowance`
+instead of keeping their own list.
 
 The list is hash-bound evidence: the producer also writes it to a
 ``known-issues.json`` file in the evidence directory, hashed into the report's
@@ -38,6 +42,7 @@ __all__ = [
     "KnownIssueError",
     "defects",
     "known_warning_allowance",
+    "match_warning_allowance",
     "merge_known_issues",
     "parse_known_issue",
     "validate_known_issues",
@@ -48,7 +53,9 @@ KNOWN_ISSUE_KINDS = ("defect", "exception", "advisory")
 KNOWN_ISSUES_FILENAME = "known-issues.json"
 
 _RULE_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
-_WARNINGS_RE = re.compile(r"^[A-Za-z0-9_.-]+=\d+(,[A-Za-z0-9_.-]+=\d+)*$")
+_IDENT_RE = r"[A-Za-z0-9_.-]+@[^\s,:@]+"
+_WARNINGS_RE = re.compile(rf"^{_IDENT_RE}(,{_IDENT_RE})*$")
+_IDENTITY_KEYS = ("rule", "ref", "pad")
 _ENTRY_KEYS = {"issue", "kind", "summary", "recorded", "warnings"}
 
 
@@ -56,17 +63,26 @@ class KnownIssueError(ValueError):
     """A ``--known-issue`` value or a recorded ``known_issues`` list is malformed."""
 
 
-def _check_warnings(value: Any) -> dict[str, int]:
-    if not isinstance(value, Mapping) or not value:
-        raise KnownIssueError("warnings must be a non-empty {rule: count} object")
-    out: dict[str, int] = {}
-    for rule, count in value.items():
-        if not isinstance(rule, str) or not _RULE_RE.match(rule):
-            raise KnownIssueError(f"invalid warning rule id: {rule!r}")
-        if type(count) is not int or count < 1:
-            raise KnownIssueError(f"warning count for {rule} must be a positive integer")
-        out[rule] = count
-    return dict(sorted(out.items()))
+def _check_warnings(value: Any) -> list[dict[str, str]]:
+    if not isinstance(value, list) or not value:
+        raise KnownIssueError("warnings must be a non-empty list of {rule, ref, pad} identities")
+    out: list[dict[str, str]] = []
+    for item in value:
+        if not isinstance(item, Mapping) or set(item) != set(_IDENTITY_KEYS):
+            raise KnownIssueError("a warning identity must be exactly {rule, ref, pad}")
+        for key in _IDENTITY_KEYS:
+            text = item[key]
+            if not isinstance(text, str) or not text or text != text.strip():
+                raise KnownIssueError(f"warning identity {key} must be non-empty, trimmed text")
+        if not _RULE_RE.match(item["rule"]):
+            raise KnownIssueError(f"invalid warning rule id: {item['rule']!r}")
+        out.append({key: item[key] for key in _IDENTITY_KEYS})
+    keys = [tuple(item[k] for k in _IDENTITY_KEYS) for item in out]
+    if len(set(keys)) != len(keys):
+        raise KnownIssueError("warnings lists an identity more than once")
+    if keys != sorted(keys):
+        raise KnownIssueError("warnings must be sorted by (rule, ref, pad)")
+    return out
 
 
 def _check_entry(entry: Any) -> dict[str, Any]:
@@ -116,11 +132,21 @@ def validate_known_issues(value: Any) -> list[dict[str, Any]]:
         raise KnownIssueError("known_issues lists an issue more than once")
     if numbers != sorted(numbers):
         raise KnownIssueError("known_issues must be sorted by issue number")
+    owners: dict[tuple[str, str, str], int] = {}
+    for entry in entries:
+        for item in entry.get("warnings") or ():
+            key = (item["rule"], item["ref"], item["pad"])
+            if key in owners:
+                raise KnownIssueError(
+                    f"warning {key[0]} {key[2]} is listed by both #{owners[key]} and "
+                    f"#{entry['issue']}"
+                )
+            owners[key] = entry["issue"]
     return entries
 
 
 def parse_known_issue(spec: str, recorded: str) -> dict[str, Any]:
-    """Parse ``N:summary:kind[:rule=count,...]`` (the ``--known-issue`` form).
+    """Parse ``N:summary:kind[:rule@pad,...]`` (the ``--known-issue`` form).
 
     The number is split from the left and the kind (plus the optional warning
     allowance) from the right, so the summary may itself contain ``:``.
@@ -134,16 +160,20 @@ def parse_known_issue(spec: str, recorded: str) -> dict[str, Any]:
     summary, sep, kind = rest.rpartition(":")
     if not sep:
         raise KnownIssueError(f"--known-issue {spec!r}: expected N:summary:kind")
-    warnings: dict[str, int] | None = None
+    warnings: list[dict[str, str]] | None = None
     if _WARNINGS_RE.match(kind.strip()) and ":" in summary:
         allowance = kind.strip()
         summary, _, kind = summary.rpartition(":")
-        warnings = {}
+        warnings = []
         for item in allowance.split(","):
-            rule, _, count = item.partition("=")
-            if rule in warnings:
-                raise KnownIssueError(f"--known-issue {spec!r}: rule {rule} listed twice")
-            warnings[rule] = int(count)
+            rule, _, pad = item.partition("@")
+            ref, sep, number_part = pad.rpartition("-")
+            if not sep or not ref or not number_part:
+                raise KnownIssueError(
+                    f"--known-issue {spec!r}: pad {pad!r} must look like <ref>-<number>"
+                )
+            warnings.append({"rule": rule, "ref": ref, "pad": pad})
+        warnings.sort(key=lambda item: tuple(item[k] for k in _IDENTITY_KEYS))
     entry: dict[str, Any] = {
         "issue": int(number),
         "kind": kind.strip(),
@@ -202,15 +232,56 @@ def defects(entries: Iterable[Mapping[str, Any]]) -> list[Mapping[str, Any]]:
     return [entry for entry in entries if entry.get("kind") == "defect"]
 
 
-def known_warning_allowance(entries: Iterable[Mapping[str, Any]]) -> dict[str, int]:
-    """``{rule_id: max count}`` the board's recorded issues account for.
+def known_warning_allowance(
+    entries: Iterable[Mapping[str, Any]],
+) -> dict[tuple[str, str, str], int]:
+    """``{(rule, ref, pad): issue}`` the board's recorded issues account for.
 
-    Counts for a rule named by several issues add up.  A board script gating
-    on ``kct check`` warnings should tolerate exactly this allowance, so the
-    tolerated warnings and their disclosure come from the same record.
+    A board script gating on ``kct check`` warnings should tolerate exactly
+    this allowance (via :func:`match_warning_allowance`), so the tolerated
+    warnings and their disclosure come from the same record.
     """
-    allowance: dict[str, int] = {}
+    allowance: dict[tuple[str, str, str], int] = {}
     for entry in entries:
-        for rule, count in (entry.get("warnings") or {}).items():
-            allowance[rule] = allowance.get(rule, 0) + int(count)
+        for item in entry.get("warnings") or ():
+            allowance[(item["rule"], item["ref"], item["pad"])] = int(entry["issue"])
     return dict(sorted(allowance.items()))
+
+
+def match_warning_allowance(
+    violations: Iterable[Any],
+    allowance: Mapping[tuple[str, str, str], int],
+) -> tuple[list[str], list[str]]:
+    """Match active warnings against *allowance* as a set: ``(unaccepted, stale)``.
+
+    * ``unaccepted`` -- active warnings no allowance names: an identity that is
+      not listed (a swapped identity at an unchanged count included), a rule
+      with no keyable layout, or a listed identity reported more than once.
+    * ``stale`` -- listed identities that no longer fire; the record must drop
+      them, otherwise they are silent headroom for a new finding.
+
+    ``violations`` are ``kct check`` JSON ``violations`` dicts or
+    ``DRCViolation`` objects.  Errors and waived findings are not examined.
+    """
+    from kicad_tools.validate.known_warnings import (
+        _describe,
+        _is_active_warning,
+        warning_key,
+    )
+
+    seen: set[tuple[str, str, str]] = set()
+    unaccepted: list[str] = []
+    for violation in violations:
+        if not _is_active_warning(violation):
+            continue
+        key = warning_key(violation)
+        if key is None or key not in allowance or key in seen:
+            unaccepted.append(_describe(violation))
+        else:
+            seen.add(key)
+    stale = [
+        f"{rule} {pad} (#{allowance[(rule, ref, pad)]})"
+        for rule, ref, pad in allowance
+        if (rule, ref, pad) not in seen
+    ]
+    return unaccepted, stale

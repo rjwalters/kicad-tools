@@ -211,28 +211,36 @@ def test_board04_uses_its_own_manufacturing_check(mod):
 
 
 # --------------------------------------------------------------------------- Issue #7261
-def _warned_report(**counts: int) -> dict:
+def _warned_report(*pads: str, rule: str = "thermal_asymmetry") -> dict:
     meta = {k: {"status": "PASSED"} for k in ("drc", "erc", "lvs", "manifest")}
     violations = [
-        {"rule_id": rule, "severity": "warning"} for rule, n in counts.items() for _ in range(n)
+        {"rule_id": rule, "severity": "warning", "items": [pad.rpartition("-")[0], pad]}
+        for pad in pads
     ]
     summary = {"errors": 0, "warnings": len(violations)}
     return {"summary": summary, "meta_checks": meta, "violations": violations}
 
 
+_C10 = ("thermal_asymmetry", "C10", "C10-2")
+_C11 = ("thermal_asymmetry", "C11", "C11-2")
+
+
 def test_known_issue_allowance_tolerates_exactly_the_recorded_warnings(mod):
-    allowance = {"thermal_asymmetry": 9}
-    assert mod.check_report_verdict(_warned_report(thermal_asymmetry=9), "x", allowance)
+    allowance = {_C10: 7220, _C11: 7220}
+    assert mod.check_report_verdict(_warned_report("C10-2", "C11-2"), "x", allowance)
     for report in (
-        _warned_report(thermal_asymmetry=10),  # more than recorded
-        _warned_report(thermal_asymmetry=1, via_at_pad_edge=1),  # unlisted rule
+        _warned_report("C10-2", "C11-2", "C12-2"),  # an extra, unlisted finding
+        _warned_report("C10-2", "C12-2"),  # swapped identity, unchanged count
+        _warned_report("C10-2"),  # C11-2 no longer fires: stale entry
+        _warned_report("C10-2", "C11-2", "C11-2"),  # a listed identity repeated
+        _warned_report("C10-2", "C11-2", rule="via_at_pad_edge"),  # same pads, other rule
     ):
         with pytest.raises(mod.GateFailure):
             mod.check_report_verdict(report, "x", allowance)
-    mismatched = _warned_report(thermal_asymmetry=1)
+    mismatched = _warned_report("C10-2")
     mismatched["summary"]["warnings"] = 2  # summary disagrees with findings
     with pytest.raises(mod.GateFailure):
-        mod.check_report_verdict(mismatched, "x", {"thermal_asymmetry": 5})
+        mod.check_report_verdict(mismatched, "x", {_C10: 7220})
 
 
 def test_allowance_comes_from_the_boards_recorded_known_issues(mod, tmp_path):
@@ -243,10 +251,10 @@ def test_allowance_comes_from_the_boards_recorded_known_issues(mod, tmp_path):
         "kind": "advisory",
         "summary": "s",
         "recorded": "2026-10-18",
-        "warnings": {"thermal_asymmetry": 9},
+        "warnings": [{"rule": "thermal_asymmetry", "ref": "C10", "pad": "C10-2"}],
     }
     (board / "output" / "readiness.json").write_text(json.dumps({"known_issues": [entry]}))
-    assert mod.known_issue_allowance(board) == {"thermal_asymmetry": 9}
+    assert mod.known_issue_allowance(board) == {_C10: 7220}
     (board / "output" / "readiness.json").write_text(json.dumps({}))
     assert mod.known_issue_allowance(board) == {}
 
@@ -290,7 +298,7 @@ def test_outer_archive_members_resolve_against_committed_tree(mod, tmp_path):
 
 # ---------------------------------------------------------------- known issues (#7323)
 CHECKED_AT = "2026-10-18T00:00:00+00:00"
-ADVISORY = "7220:one-sided thermal:advisory:thermal_asymmetry=1"
+ADVISORY = "7220:one-sided thermal:advisory"
 
 
 def _evidence(board: Path) -> Path:
@@ -306,6 +314,16 @@ def test_known_issue_flag_binds_the_evidence_file_into_inputs(mod, tmp_path, mon
     assert [e["issue"] for e in report["known_issues"]] == [7220]
     assert json.loads(_evidence(board).read_text()) == {"known_issues": report["known_issues"]}
     assert report["inputs"]["output/readiness/known-issues.json"] == mod.sha256(_evidence(board))
+
+
+def test_known_issue_naming_an_identity_that_no_longer_fires_refuses_as_stale(
+    mod, tmp_path, monkeypatch
+):
+    board = _hooked_board(mod, tmp_path, monkeypatch, warnings=0)
+    with pytest.raises(mod.GateFailure):
+        mod.refresh(
+            board, CHECKED_AT, known_issue=["7220:thermal:advisory:thermal_asymmetry@C10-2"]
+        )
 
 
 def test_resolve_known_issue_flag_drops_entry_file_and_binding(mod, tmp_path, monkeypatch):

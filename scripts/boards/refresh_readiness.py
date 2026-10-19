@@ -479,40 +479,38 @@ def gate_fill_identity(board: Path, cfg: BoardConfig) -> dict[str, float]:
     return divergent
 
 
-def warning_counts_by_rule(data: dict) -> dict[str, int]:
-    """Active (non-waived) warning findings of a ``kct check`` report, by rule."""
-    counts: dict[str, int] = {}
-    for violation in data.get("violations", []):
-        if (
-            isinstance(violation, dict)
-            and violation.get("severity") == "warning"
-            and not violation.get("waived")
-        ):
-            rule = str(violation.get("rule_id") or "unknown")
-            counts[rule] = counts.get(rule, 0) + 1
-    return dict(sorted(counts.items()))
+def warning_mismatch(
+    data: dict, allowance: dict[tuple[str, str, str], int]
+) -> dict[str, list[str]]:
+    """Findings that break the identity *allowance*: ``{unaccepted, stale}`` (non-empty only).
 
+    ``allowance`` maps ``(rule, ref, pad)`` to the issue that accounts for it.
+    A finding the allowance does not name blocks, whatever the count; a listed
+    identity that no longer fires is stale and blocks too (Issue #7389).
+    """
+    from kicad_tools.cli.known_issues import match_warning_allowance
 
-def unaccepted_warnings(data: dict, allowance: dict[str, int]) -> dict[str, int]:
-    """Warnings beyond *allowance* (``{rule: max count}``), as ``{rule: found}``."""
-    counts = warning_counts_by_rule(data)
+    violations = [v for v in data.get("violations", []) if isinstance(v, dict)]
+    active = sum(1 for v in violations if v.get("severity") == "warning" and not v.get("waived"))
     total = data.get("summary", {}).get("warnings")
-    if total != sum(counts.values()):
+    if total != active:
         # Summary and finding list disagree: never trust the allowance.
-        return {"<summary/violations mismatch>": total if isinstance(total, int) else -1}
-    return {rule: n for rule, n in counts.items() if n > allowance.get(rule, 0)}
+        return {"unaccepted": [f"<summary/violations mismatch: {total} vs {active}>"]}
+    unaccepted, stale = match_warning_allowance(violations, allowance)
+    return {k: v for k, v in (("unaccepted", unaccepted), ("stale", stale)) if v}
 
 
 def check_report_verdict(
-    data: dict, label: str, allowance: dict[str, int] | None = None
+    data: dict, label: str, allowance: dict[tuple[str, str, str], int] | None = None
 ) -> tuple[bool, int]:
     """Gate a ``kct check``-format report: 0 errors, meta all PASSED, and no
     warnings beyond *allowance*.
 
     The allowance is the board's own recorded ``known_issues`` warning
-    allowance from ``readiness.json`` (Issue #7261): the same record that
-    discloses the issue is the one that tolerates its warnings.  Without one,
-    any warning refuses.
+    identities from ``readiness.json`` (Issues #7261, #7389): the same record
+    that discloses the issue is the one that tolerates its warnings.  Without
+    one, any warning refuses; a recorded identity that no longer fires refuses
+    as stale.
     """
     summary, meta = data.get("summary", {}), data.get("meta_checks", {})
     statuses = {k: meta.get(k, {}).get("status") for k in ("drc", "erc", "lvs", "manifest")}
@@ -522,16 +520,16 @@ def check_report_verdict(
     log(f"  gate {label}: {errors} error(s), {warnings} warning(s), meta {statuses}")
     if not isinstance(warnings, int):
         raise GateFailure(f"{label} failed")
-    extra = unaccepted_warnings(data, allowance or {}) if warnings else {}
+    extra = warning_mismatch(data, allowance or {})
     if extra:
-        log(f"  warnings beyond the recorded known_issues allowance {allowance or {}}: {extra}")
+        log(f"  warnings do not match the recorded known_issues allowance: {extra}")
     if errors != 0 or extra or any(s != "PASSED" for s in statuses.values()):
         raise GateFailure(f"{label} failed")
     return statuses["lvs"] == "PASSED", mismatches
 
 
-def known_issue_allowance(board: Path) -> dict[str, int]:
-    """The ``{rule: max count}`` the board's recorded ``known_issues`` account for."""
+def known_issue_allowance(board: Path) -> dict[tuple[str, str, str], int]:
+    """The ``{(rule, ref, pad): issue}`` the board's recorded ``known_issues`` account for."""
     from kicad_tools.cli.known_issues import known_warning_allowance, validate_known_issues
 
     report = json.loads((board / "output" / "readiness.json").read_text())
