@@ -822,6 +822,7 @@ class ManufacturingAudit:
         hv_material_group: str = "IIIa",
         hv_overvoltage_category: str = "II",
         hv_insulation: str = "basic",
+        schematic_path: str | Path | None = None,
     ):
         """Initialize the audit.
 
@@ -856,6 +857,9 @@ class ManufacturingAudit:
             hv_insulation: Insulation type (``basic`` / ``supplementary`` /
                 ``reinforced``, default ``basic``) for the derived
                 creepage and clearance (issue #7082).
+            schematic_path: Explicit schematic for ``.kicad_pcb`` input, used
+                instead of auto-resolution (issue #7153).  Ignored for
+                ``.kicad_pro`` input.
         """
         self.path = Path(project_or_pcb)
         self.manufacturer = manufacturer
@@ -901,9 +905,14 @@ class ManufacturingAudit:
             # reflects only the caller's ``--skip-erc`` / ``skip_erc=True``.
             from kicad_tools.sync.discover import resolve_schematic_for_pcb
 
-            self.schematic_path = resolve_schematic_for_pcb(self.path) or self.path.with_suffix(
-                ".kicad_sch"
-            )
+            if schematic_path is not None and Path(schematic_path).exists():
+                # Issue #7153: an explicit schematic (e.g. the one the export
+                # already holds) wins over auto-resolution.
+                self.schematic_path = Path(schematic_path)
+            else:
+                self.schematic_path = resolve_schematic_for_pcb(self.path) or self.path.with_suffix(
+                    ".kicad_sch"
+                )
         else:
             raise ValueError(f"Expected .kicad_pro or .kicad_pcb file, got: {self.path}")
 
