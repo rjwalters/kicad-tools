@@ -4733,7 +4733,10 @@ class LatticePathfinder:
         if second_round:
             alt = min(second_round, key=rank)
             r_alt, r_best = rank(alt), rank(best)
-            if r_alt < r_best and r_alt[:3] <= r_best[:3] and r_alt[3:] <= r_best[3:]:
+            # Element-wise, never tuple ``<=`` (lexicographic: it would let
+            # lower skew excuse a longer pair).  ``rank`` already rounds skew
+            # and length to 1 um, so exact comparison is the 1 um tolerance.
+            if r_alt < r_best and all(a <= b for a, b in zip(r_alt, r_best, strict=True)):
                 best = alt
         for pol in ("P", "N"):
             res = best[pol][0]

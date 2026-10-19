@@ -128,6 +128,18 @@ def test_second_round_shorter_but_more_skewed_keeps_the_first_round_pick(monkeyp
     assert got == (5.742, 6.025, 1, 1)
 
 
+def test_second_round_less_skewed_but_longer_keeps_the_first_round_pick(monkeypatch) -> None:
+    # Re-searching N under the mirrored P 7.342 leg finds 7.2: 0.142 mm skew
+    # against main's 0.283, but a 14.542 mm pair against main's 11.767.  Both
+    # fail #7291's length gate, so they rank on (skew, length) at equal via
+    # terms.  Length is not traded for skew either: the gate compares skew
+    # and length element-wise (a lexicographic tuple ``<=`` let the lower
+    # skew excuse the longer pair).
+    round_2 = [(8.0, 1), (4.077, 0), (7.2, 1), (4.077, 0), (8.0, 1), (8.0, 1)]
+    got = _winner(monkeypatch, _ARM_C_PLAIN + _ARM_C_ROUND_1 + round_2)
+    assert got == (5.742, 6.025, 1, 1)
+
+
 def test_without_a_second_round_hit_the_first_round_pick_stands(monkeypatch) -> None:
     # The second round finds nothing: the #7291 choice is unchanged.
     got = _winner(monkeypatch, _ARM_C_PLAIN + _ARM_C_ROUND_1)
