@@ -24,9 +24,11 @@ For each board it
    ``refresh_bundles_6404.py`` instead (its ``build.py`` publishes the routed
    PCB), so it is skipped here;
 4. board 04 only: refreshes the evidence ``refresh_readiness.py`` does not
-   (native DRC, design-source, ``kicad_project.zip`` and manifest,
+   (design-source, ``kicad_project.zip`` and manifest,
    ``check_manufacturing.py``'s report, the recipe's ``drc_report.json`` and
-   the outer archive), exactly as ``regenerate_board_04_6269.py`` does.
+   the outer archive), as ``regenerate_board_04_6269.py`` does.  It no longer
+   writes ``native-drc.json``: that evidence is owned by ``refresh_readiness.py``
+   (pinned toolchain, Issue #7409), so re-pin it with the command below.
 
 Then re-pin each board's ``readiness.json`` with its producer::
 
@@ -49,7 +51,6 @@ import importlib.util
 import json
 import re
 import runpy
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -265,24 +266,6 @@ def stage_board04_evidence(board: Path) -> None:
     regen.drop_bytecode(board)
     sys.path.insert(0, str(board))
 
-    with tempfile.TemporaryDirectory(prefix="annotate-6025-04-drc-") as tmp:
-        report = Path(tmp) / "native-drc.json"
-        subprocess.run(
-            ["kicad-cli", "pcb", "drc", "--format", "json", "--severity-error",
-             "--severity-warning", "--schematic-parity", "--units", "mm",
-             "-o", str(report), str(routed)],
-            capture_output=True, check=False,
-        )  # fmt: skip
-        data = json.loads(report.read_text())
-        findings = [v["type"] for v in data["violations"]]
-        unconnected = len(data.get("unconnected_items", []))
-        parity = len(data.get("schematic_parity", []))
-        log(f"  native DRC: {findings or 'no violations'}, {unconnected} unconnected")
-        if findings or unconnected or parity:
-            raise RuntimeError("native DRC is not clean; refusing to write evidence")
-        shutil.copy2(report, readiness / "native-drc.json")
-    shutil.copy2(readiness / "native-drc.json", mfg / "native-drc.json")
-
     regen.refresh_design_source(board)
     changed = refresh_tools.rebuild_archive(mfg / "kicad_project.zip", [out, board])
     log(f"  kicad_project.zip rebuilt; changed members {changed}")
@@ -310,6 +293,10 @@ def stage_board04_evidence(board: Path) -> None:
     )
     refresh_tools.rebuild_archive(out / "manufacturing.zip", [mfg])
     regen.drop_bytecode(board)
+    log(
+        "  native-drc.json NOT refreshed; re-pin it with: uv run --with shapely python "
+        "scripts/boards/refresh_readiness.py boards/04-stm32-devboard --checked-at <ISO>"
+    )
 
 
 def annotate_family(key: str) -> None:

@@ -26,7 +26,6 @@ _EVIDENCE_PATH = re.compile(r"^[\w./-]*(readiness|native-drc[\w-]*|fill-consiste
 #: Scripts that still write gated evidence without the gated path -> the open
 #: issue that moves each onto it (operator ruling #7270 Q3=1).  Shrink only.
 ALLOWLIST = {
-    "annotate_pintypes_6025.py": 7409,
     "regenerate_boards_03_04_6076.py": 7410,
 }
 
