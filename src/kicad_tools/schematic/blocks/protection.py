@@ -84,18 +84,51 @@ class ESDProtectionBlock(CircuitBlock):
             cathode = diode_pin_position(tvs, "K")
             sch.add_wire(cathode, (x, y))
         else:
-            # Multi-channel ESD array
+            # Multi-channel ESD array (e.g. USBLC6-2SC6): each channel is a
+            # through-line -- an I/O pin on the left of the symbol and its
+            # twin on the right -- so the array sits in the signal path.
             esd = sch.add_symbol(esd_array_symbol, x, y, ref, "")
             self.components["U_ESD"] = esd
 
-            # Define ports based on typical ESD array pinout
-            spacing = 10
-            for i in range(min(channels, 4)):  # Most arrays have 2-4 channels
-                self.ports[f"IN{i + 1}"] = (x - 15, y - spacing * (i - 1))
-                self.ports[f"OUT{i + 1}"] = (x + 15, y - spacing * (i - 1))
+            lines = self._io_lines(esd)
+            if channels > len(lines):
+                raise ValueError(
+                    f"{esd_array_symbol} provides {len(lines)} ESD channel(s); {channels} requested"
+                )
+            for i, (left, right) in enumerate(lines[:channels], start=1):
+                self.ports[f"IN{i}"] = esd.pin_position(left)
+                self.ports[f"OUT{i}"] = esd.pin_position(right)
 
-            self.ports["GND"] = (x, y + 15)
-            self.ports["VCC"] = (x, y - 15)
+            self.ports["GND"] = esd.pin_position(self._rail_pin(esd, "GND"))
+            self.ports["VCC"] = esd.pin_position(self._rail_pin(esd, "VBUS", "VCC", "VDD"))
+
+    @staticmethod
+    def _io_lines(esd) -> list[tuple[str, str]]:
+        """Pair each ESD array I/O pin with its same-named twin.
+
+        Returns ``(left_pin_number, right_pin_number)`` per channel, ordered
+        top to bottom; ``USBLC6-2SC6`` has two such channels (pins 1/6, 3/4).
+        """
+        groups: dict[str, list] = {}
+        for pin in esd.symbol_def.pins:
+            if pin.name.upper().startswith("I/O"):
+                groups.setdefault(pin.name, []).append(pin)
+        lines = []
+        for pins in groups.values():
+            if len(pins) == 2:
+                left, right = sorted(pins, key=lambda p: esd.pin_position(p.number)[0])
+                lines.append((left.number, right.number))
+        lines.sort(key=lambda pair: esd.pin_position(pair[0])[1])
+        return lines
+
+    @staticmethod
+    def _rail_pin(esd, *names: str) -> str:
+        """Number of the first pin whose name matches one of ``names``."""
+        for name in names:
+            for pin in esd.symbol_def.pins:
+                if pin.name.upper() == name:
+                    return pin.number
+        raise ValueError(f"ESD array symbol has none of the pins {names}")
 
 
 class FuseBlock(CircuitBlock):

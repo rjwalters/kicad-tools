@@ -108,16 +108,6 @@ def _xfail(reason: str, raises: type[BaseException] | None = None) -> pytest.Mar
 
 # -- Known defects -----------------------------------------------------------
 
-STEP3_OPAMP = _xfail(
-    "#7399 step 3: OpAmpBlock places the op-amp, Rf/Rg and bypass cap but adds "
-    "no wires; IN/OUT/VCC/GND are arbitrary offsets matching no pin",
-    AssertionError,
-)
-STEP3_ESD_ARRAY = _xfail(
-    "#7399 step 3: ESDProtectionBlock(channels>=2) places USBLC6-2SC6 with no "
-    "wires; IN*/OUT*/GND/VCC ports are off-pin and channels is capped at 4",
-    AssertionError,
-)
 CAN_ESD = _xfail(
     "#7402: CANTransceiver ESD path puts CANH/CANL ports at tvs_anode.x + 5, "
     "past the TVS pin and off any wire",
@@ -472,7 +462,6 @@ for _topology in ("buffer", "non_inverting", "inverting"):
         f"OpAmpBlock[{_topology}]",
         "OpAmpBlock",
         lambda s, t=_topology: B.OpAmpBlock(s, X, Y, topology=t),
-        STEP3_OPAMP,
     )
 case("OvercurrentComparator", "OvercurrentComparator", lambda s: B.OvercurrentComparator(s, X, Y))
 case("ThermistorSense", "ThermistorSense", lambda s: B.ThermistorSense(s, X, Y))
@@ -487,9 +476,8 @@ case(
     "create_opamp_buffer",
     "create_opamp_buffer",
     lambda s: B.create_opamp_buffer(s, X, Y),
-    STEP3_OPAMP,
 )
-case("create_opamp_gain", "create_opamp_gain", lambda s: B.create_opamp_gain(s, X, Y), STEP3_OPAMP)
+case("create_opamp_gain", "create_opamp_gain", lambda s: B.create_opamp_gain(s, X, Y))
 case(
     "create_temperature_sense",
     "create_temperature_sense",
@@ -499,13 +487,11 @@ case("create_voltage_sense", "create_voltage_sense", lambda s: B.create_voltage_
 
 # Protection
 case("ESDProtectionBlock[1]", "ESDProtectionBlock", lambda s: B.ESDProtectionBlock(s, X, Y))
-for _channels in (2, 4, 8):
-    case(
-        f"ESDProtectionBlock[{_channels}]",
-        "ESDProtectionBlock",
-        lambda s, c=_channels: B.ESDProtectionBlock(s, X, Y, channels=c),
-        STEP3_ESD_ARRAY,
-    )
+case(
+    "ESDProtectionBlock[2]",
+    "ESDProtectionBlock",
+    lambda s: B.ESDProtectionBlock(s, X, Y, channels=2),
+)
 case("FuseBlock", "FuseBlock", lambda s: B.FuseBlock(s, X, Y))
 case("OvervoltageClampBlock", "OvervoltageClampBlock", lambda s: B.OvervoltageClampBlock(s, X, Y))
 case("PTCResetBlock", "PTCResetBlock", lambda s: B.PTCResetBlock(s, X, Y))
@@ -686,3 +672,10 @@ def test_rail_hookup_resolves_real_pins(
     assert len(sch.wires) > wires_before
     unexpected = [m for m in pin_misses if m[2] not in OPTIONAL_PIN_PROBES]
     assert not unexpected, f"pin lookups failed on real symbols: {unexpected}"
+
+
+@pytest.mark.parametrize("channels", [3, 4, 8])
+def test_esd_array_rejects_more_channels_than_the_part_has(channels: int) -> None:
+    """USBLC6-2SC6 has two channels; asking for more must raise, not invent ports."""
+    with pytest.raises(ValueError, match="2 ESD channel"):
+        B.ESDProtectionBlock(Schematic(title="esd"), X, Y, channels=channels)

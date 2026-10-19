@@ -189,47 +189,103 @@ class OpAmpBlock(CircuitBlock):
         # Calculate resistor values for desired gain
         # For non-inverting: G = 1 + Rf/Rg
         # For inverting: G = -Rf/Rin
-        if topology == "buffer":
-            # Unity gain buffer - no external components needed
+        # A non-inverting gain of 1 (or less) needs no resistors: it is a buffer.
+        if topology == "inverting":
+            rf_value = self._format_resistance(10000 * abs(gain))
+            rg_value = "10k"  # Rin for inverting
+        elif topology == "non_inverting" and gain > 1:
+            rf_value = self._format_resistance(10000 * (gain - 1))
+            rg_value = "10k"
+        else:
+            topology = "buffer"
             rf_value = None
             rg_value = None
-        elif topology == "non_inverting":
-            # Assume Rg = 10k, calculate Rf for desired gain
-            rg = 10000
-            rf = rg * (gain - 1)
-            rf_value = self._format_resistance(rf) if gain > 1 else None
-            rg_value = "10k" if gain > 1 else None
-        else:  # inverting
-            rin = 10000
-            rf = rin * abs(gain)
-            rf_value = self._format_resistance(rf)
-            rg_value = "10k"  # Rin for inverting
 
-        # Place feedback components if needed
-        if rf_value:
-            r_ref_num = int(ref[1:]) if ref[1:].isdigit() else 1
+        # Op-amp pins.  Unit A of dual parts (TL072, LM358) is the default
+        # unit, and its pins are looked up by number: both inputs and the
+        # supply pins share names across units on many symbols.
+        pin_out = self.opamp.pin_position("1")
+        pin_inv = self.opamp.pin_position("2")
+        pin_non_inv = self.opamp.pin_position("3")
+        pin_vcc = self.opamp.pin_position("8")
+        pin_vee = self.opamp.pin_position("4")
+
+        r_ref_num = int(ref[1:]) if ref[1:].isdigit() else 1
+        fb_x = x - 12.7  # column where the feedback network meets the inverting input
+        rail_y = pin_vee[1] + 8.89  # ground return runs below the op-amp
+
+        # Non-inverting input and the optional resistor network.
+        if topology == "buffer":
+            # Unity-gain follower: OUT feeds straight back to the inverting input.
+            self._wire(pin_out, (x + 12.7, pin_out[1]), (x + 12.7, y - 12.7))
+            self._wire((x + 12.7, y - 12.7), (fb_x, y - 12.7), (fb_x, pin_inv[1]), pin_inv)
+            in_port = (x - 12.7, pin_non_inv[1])
+            self._wire(in_port, pin_non_inv)
+        else:
             rf = sch.add_symbol(
-                resistor_symbol, x + 15, y - 15, f"R{r_ref_num}", rf_value, rotation=90
+                resistor_symbol, x, y - 17.78, f"R{r_ref_num}", rf_value, rotation=90
             )
             self.components["Rf"] = rf
+            rf_a, rf_b = self._ends(rf)
+            # Feedback: OUT -> Rf -> inverting input node.
+            self._wire(pin_out, (x + 12.7, pin_out[1]), (x + 12.7, rf_b[1]), rf_b)
+            self._wire(rf_a, (fb_x, rf_a[1]), (fb_x, pin_inv[1]), pin_inv)
 
-        if rg_value:
-            r_ref_num = int(ref[1:]) if ref[1:].isdigit() else 1
-            rg = sch.add_symbol(resistor_symbol, x - 15, y + 15, f"R{r_ref_num + 1}", rg_value)
-            self.components["Rg"] = rg
+            if topology == "non_inverting":
+                # Rg from the inverting-input node to ground.
+                rg = sch.add_symbol(resistor_symbol, fb_x, y + 12.7, f"R{r_ref_num + 1}", rg_value)
+                self.components["Rg"] = rg
+                rg_top, rg_bot = self._ends(rg)
+                self._wire((fb_x, pin_inv[1]), rg_top)
+                self._wire(rg_bot, (fb_x, rail_y), (pin_vee[0], rail_y), pin_vee)
+                in_port = (x - 25.4, pin_non_inv[1])
+                self._wire(in_port, pin_non_inv)
+            else:
+                # Inverting: IN -> Rin -> inverting node; non-inverting input to ground.
+                rin = sch.add_symbol(
+                    resistor_symbol,
+                    x - 22.86,
+                    pin_inv[1],
+                    f"R{r_ref_num + 1}",
+                    rg_value,
+                    rotation=90,
+                )
+                self.components["Rg"] = rin
+                rin_a, rin_b = self._ends(rin)
+                self._wire(rin_b, (fb_x, rin_b[1]))
+                in_port = rin_a
+                self._wire(
+                    pin_non_inv,
+                    (x - 10.16, pin_non_inv[1]),
+                    (x - 10.16, rail_y),
+                    (pin_vee[0], rail_y),
+                    pin_vee,
+                )
 
-        # Place decoupling capacitor
-        c_ref_num = int(ref[1:]) if ref[1:].isdigit() else 1
-        c_bypass = sch.add_symbol(capacitor_symbol, x + 10, y - 25, f"C{c_ref_num}", "100nF")
+        # Place decoupling capacitor between the supply pins
+        c_bypass = sch.add_symbol(capacitor_symbol, x + 25.4, y, f"C{r_ref_num}", "100nF")
         self.components["C_bypass"] = c_bypass
+        c_top, c_bot = self._ends(c_bypass)
+        self._wire(c_top, (c_top[0], pin_vcc[1] - 2.54), (pin_vcc[0], pin_vcc[1] - 2.54), pin_vcc)
+        self._wire(c_bot, (c_bot[0], rail_y), (pin_vee[0], rail_y), pin_vee)
 
-        # Define ports (positions will depend on actual symbol)
         self.ports = {
-            "IN": (x - 20, y),
-            "OUT": (x + 20, y),
-            "VCC": (x, y - 15),
-            "GND": (x, y + 15),
+            "IN": in_port,
+            "OUT": pin_out,
+            "VCC": pin_vcc,
+            "GND": pin_vee,
         }
+
+    def _wire(self, *points: tuple[float, float]) -> None:
+        """Draw a wire polyline through ``points``."""
+        for a, b in zip(points, points[1:], strict=False):
+            if a != b:
+                self.schematic.add_wire(a, b)
+
+    @staticmethod
+    def _ends(passive: "SymbolInstance") -> tuple[tuple[float, float], tuple[float, float]]:
+        """Return a two-pin passive's pin 1 and pin 2 positions."""
+        return passive.pin_position("1"), passive.pin_position("2")
 
     @staticmethod
     def _format_resistance(r_ohms: float) -> str:
