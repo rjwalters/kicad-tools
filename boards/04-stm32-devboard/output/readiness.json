@@ -23,7 +23,7 @@
     {
       "name": "bom",
       "status": "passed",
-      "detail": "17 exact supplier identities: 15 SMT placements; J1 and Y1 manual through-hole assembly. Corrected MCP1825S regulator; no AMS1117 substitution."
+      "detail": "17 exact supplier identities, all in the JLCPCB BOM/CPL: 17 placements, 15 SMT and the through-hole J1 and Y1 (fab-assembled since #7239/#7268). Corrected MCP1825S regulator; no AMS1117 substitution. See procurement-review.md."
     },
     {
       "name": "via_process",
