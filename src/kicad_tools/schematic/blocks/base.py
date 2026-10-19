@@ -6,6 +6,7 @@ import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from kicad_tools.core.symbol_transform import symbol_to_sheet_offset
 from kicad_tools.schematic.grid import DEFAULT_GRID, snap_point
 from kicad_tools.schematic.models.schematic import SnapMode
 
@@ -17,6 +18,24 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _is_anchor(sch: Any, point: tuple[float, float]) -> bool:
+    """True if ``point`` is a placed pin's connection point or a wire end."""
+    p = (round(point[0], 2), round(point[1], 2))
+    for wire in getattr(sch, "wires", ()):
+        if p in ((wire.x1, wire.y1), (wire.x2, wire.y2)):
+            return True
+    for sym in getattr(sch, "symbols", ()):
+        for pin in sym.symbol_def.pins:
+            if pin.unit not in (0, sym.unit):
+                continue
+            # Same transform as ``SymbolInstance.pin_position``.
+            conn_x, conn_y = pin.connection_point()
+            dx, dy = symbol_to_sheet_offset(conn_x, conn_y, sym.rotation, sym.mirror)
+            if (round(sym.x + dx, 2), round(sym.y + dy, 2)) == p:
+                return True
+    return False
+
+
 class _GridSnappedPorts(dict[str, tuple[float, float]]):
     """Port table that snaps each position to the schematic grid on assignment.
 
@@ -24,7 +43,8 @@ class _GridSnappedPorts(dict[str, tuple[float, float]]):
     blocks compute port positions from the raw ``(x, y)`` origin, so at an
     off-grid origin a port misses its wire end by the snap distance
     (issue #7510).  Snapping here applies the same rounding the wires get, in
-    one place; on-grid values are unchanged.
+    one place; on-grid values and ports already on a pin or wire end are
+    unchanged.
 
     Only item assignment, ``update`` and ``setdefault`` snap: ``ports |= ...``
     and ``dict.update(ports, ...)`` bypass it (nothing in-tree uses them).
@@ -52,7 +72,14 @@ class _GridSnappedPorts(dict[str, tuple[float, float]]):
             or len(value) != 2
         ):
             return value
-        return snap_point(value, getattr(sch, "grid", DEFAULT_GRID))
+        snapped = snap_point(value, getattr(sch, "grid", DEFAULT_GRID))
+        if snapped != value and _is_anchor(sch, value):
+            # Already on a placed pin or wire end: the schematic does not
+            # move pins, so neither must the port.  Pins sit off a coarse
+            # grid (e.g. 2.54 mm with 1.27 mm-pitch symbols), and snapping a
+            # port read from ``pin_position`` would pull it off its pin.
+            return value
+        return snapped
 
     def __setitem__(self, key: str, value: tuple[float, float]) -> None:
         super().__setitem__(key, self._snap(value))
