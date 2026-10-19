@@ -558,6 +558,66 @@ class TestCascadeBudget:
             f"({MAX_TOTAL_INSERTS_PER_GROUP})"
         )
 
+    def test_ceiling_is_spent_on_largest_deficits_first(self):
+        """Issue #5798: the group ceiling must not starve the shortest members.
+
+        Mirrors board 07 SDRAM_ADDRESS (docs item 9): the members that need
+        the most length (BA0/BA1) sit late in ``net_ids`` and the 16-insert
+        ceiling is spent on small-deficit members first.  Nine members need
+        one insert each; four need the per-member cap (2).  That is 17
+        inserts of demand against a ceiling of 16.  Visiting members by
+        descending deficit gives every large-deficit member its inserts
+        and leaves the one member that closes the least skew to report
+        ``cascade_budget_exhausted``.
+        """
+        small = list(range(1, 10))
+        big = list(range(10, 14))
+        ref = 14
+        routes = {nid: _straight_route(nid, f"D{nid}", 98.0, y=nid * 2.0) for nid in small}
+        routes.update({nid: _straight_route(nid, f"D{nid}", 70.0, y=nid * 2.0) for nid in big})
+        routes[ref] = _straight_route(ref, "REF", 100.0, y=ref * 2.0)
+        group = _ddr_group(net_ids=small + big + [ref], tolerance=0.1)
+        cfg = SerpentineConfig(
+            amplitude=0.5,
+            min_spacing=0.2,
+            gap_factor=2.0,
+            max_iterations=4,
+        )
+
+        results = tune_match_group_v2(
+            group,
+            routes,
+            tolerance_mm=0.1,
+            intra_group_clearance_mm=0.2,
+            config=cfg,
+        )
+
+        for nid in big:
+            assert results[nid][1].inserts_applied == MAX_INSERTS_PER_GROUP_MEMBER_LARGE, nid
+        exhausted = [n for n in small if results[n][1].reason == "cascade_budget_exhausted"]
+        assert exhausted == [small[-1]]
+        assert sum(r.inserts_applied for _, r in results.values()) == MAX_TOTAL_INSERTS_PER_GROUP
+
+    def test_small_deficit_group_unaffected_by_visit_order(self):
+        """Demand under the ceiling: every member tunes, results keyed as before."""
+        group = _ddr_group(net_ids=[1, 2, 3, 4], tolerance=0.1)
+        routes = {
+            1: _straight_route(1, "D0", 98.0, y=0.0),
+            2: _straight_route(2, "D1", 99.0, y=2.0),
+            3: _straight_route(3, "D2", 97.0, y=4.0),
+            4: _straight_route(4, "D3", 100.0, y=6.0),
+        }
+        results = tune_match_group_v2(
+            group,
+            routes,
+            tolerance_mm=0.1,
+            intra_group_clearance_mm=0.2,
+            config=SerpentineConfig(amplitude=0.5, min_spacing=0.2, gap_factor=2.0),
+        )
+        assert list(results) == [1, 2, 3, 4]
+        assert results[4][1].reason == "already_within_tolerance"
+        assert all(results[n][1].success for n in (1, 2, 3))
+
     def test_override_max_inserts_per_member(self):
         """Explicit ``max_inserts_per_member`` overrides the SMALL/LARGE default."""
         group = _ddr_group(net_ids=[1, 2, 3, 4], tolerance=0.01)

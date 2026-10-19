@@ -36,20 +36,7 @@ def test_fleet_cpls_are_discovered():
     assert len(BOARDS) >= 8
 
 
-#: Boards whose producers still refuse for reasons unrelated to the CPL (#7241).
-STILL_OLD_FRAME = {"05-bldc-motor-controller", "07-matchgroup-test"}
-
-
-def _board_param(board):
-    marks = (
-        [pytest.mark.xfail(strict=True, reason="old-frame CPL, regeneration blocked: #7241")]
-        if board.name in STILL_OLD_FRAME
-        else []
-    )
-    return pytest.param(board, id=board.name, marks=marks)
-
-
-@pytest.mark.parametrize("board", [_board_param(b) for b in BOARDS])
+@pytest.mark.parametrize("board", BOARDS, ids=lambda b: b.name)
 def test_committed_cpl_matches_gerber_frame(board):
     manufacturing = board / "output" / "manufacturing"
     manifest = json.loads((manufacturing / "manifest.json").read_text())

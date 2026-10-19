@@ -2947,7 +2947,9 @@ def _emit_drc_sidecars(
                 _installed_kicad_cli_version,
             )
 
-            keepout_dru = apply_keepout_rules(merged_dru, pcb_path, _installed_kicad_cli_version())
+            keepout_dru = apply_keepout_rules(
+                merged_dru, pcb_path, _installed_kicad_cli_version(), path=dru_path
+            )
             if keepout_dru is not None:
                 merged_dru = keepout_dru
             # Issue #6390: router net classes under KCT_PRESERVE_BOARD_RULES=0.
