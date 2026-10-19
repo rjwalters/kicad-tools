@@ -1848,8 +1848,9 @@ class BackToBackFETPair(CircuitBlock):
 
         # The wire ends snap to the schematic grid, but the midpoint of two
         # source pins is generally off-grid.  Snap the exposed port the same
-        # way so it lands on the wire end instead of missing it (#7507).
-        kelvin_port = snap_point(kelvin_port)
+        # way (to ``sch.grid``, #7510) so it lands on the wire end instead of
+        # missing it (#7507).
+        kelvin_port = snap_point(kelvin_port, sch.grid)
 
         # Optional Kelvin label
         if kelvin_label is not None:

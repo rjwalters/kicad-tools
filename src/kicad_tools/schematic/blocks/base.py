@@ -6,7 +6,7 @@ import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from kicad_tools.schematic.grid import snap_point
+from kicad_tools.schematic.grid import DEFAULT_GRID, snap_point
 from kicad_tools.schematic.models.schematic import SnapMode
 
 if TYPE_CHECKING:
@@ -25,6 +25,9 @@ class _GridSnappedPorts(dict[str, tuple[float, float]]):
     off-grid origin a port misses its wire end by the snap distance
     (issue #7510).  Snapping here applies the same rounding the wires get, in
     one place; on-grid values are unchanged.
+
+    Only item assignment, ``update`` and ``setdefault`` snap: ``ports |= ...``
+    and ``dict.update(ports, ...)`` bypass it (nothing in-tree uses them).
     """
 
     def __init__(
@@ -36,15 +39,20 @@ class _GridSnappedPorts(dict[str, tuple[float, float]]):
             self.update(items)
 
     def _snap(self, value: Any) -> Any:
+        # Mirror ``Schematic._snap_coord``: symbols and wires are snapped to
+        # ``sch.grid`` in both AUTO and STRICT mode (STRICT only adds a
+        # warning, which a computed port position does not warrant), and left
+        # unsnapped in WARN/OFF.  Using the schematic's own grid keeps ports
+        # on their pins for a non-default ``Schematic(grid=...)``.
         sch = self._block.schematic
         if (
             value is None
-            or getattr(sch, "snap_mode", None) is not SnapMode.AUTO
+            or getattr(sch, "snap_mode", None) not in (SnapMode.AUTO, SnapMode.STRICT)
             or not isinstance(value, tuple)
             or len(value) != 2
         ):
             return value
-        return snap_point(value)
+        return snap_point(value, getattr(sch, "grid", DEFAULT_GRID))
 
     def __setitem__(self, key: str, value: tuple[float, float]) -> None:
         super().__setitem__(key, self._snap(value))
@@ -139,7 +147,7 @@ class CircuitBlock:
 
     @property
     def ports(self) -> dict[str, tuple[float, float]]:
-        """Port name -> (x, y), snapped to the schematic grid in AUTO mode."""
+        """Port name -> (x, y), snapped to the schematic grid in AUTO/STRICT mode."""
         return self._ports
 
     @ports.setter

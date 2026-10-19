@@ -45,7 +45,7 @@ import pytest
 import kicad_tools.schematic.blocks as B
 from kicad_tools.schematic.grid import get_symbol_search_paths
 from kicad_tools.schematic.models import symbol as symbol_module
-from kicad_tools.schematic.models.schematic import Schematic
+from kicad_tools.schematic.models.schematic import Schematic, SnapMode
 
 
 def _kicad10_symbols_skip_reason() -> str | None:
@@ -79,6 +79,11 @@ X = Y = 101.6
 
 # Off-grid origins: 100.0 snaps down to 99.06, 100.6 snaps up to 100.33.
 OFF_GRID_ORIGINS = [(100.0, 100.0), (100.6, 100.6)]
+
+# A non-default schematic grid and an origin on it (159 * 0.635) but off the
+# default 1.27 mm grid: ports must follow ``Schematic.grid``, not 1.27 mm.
+FINE_GRID = 0.635
+FINE_GRID_ORIGIN = (100.965, 100.965)
 
 # Pin names some blocks *probe* for and handle the absence of -- the
 # regulator blocks' alias chains (VIN/VI/IN, VOUT/VO/OUT, OUT/SW/VOUT,
@@ -562,9 +567,12 @@ def pin_misses(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, str, str]]:
 
 
 def _build_and_find_floating_ports(
-    export: str, factory: Factory, pin_misses: list[tuple[str, str, str]]
+    export: str,
+    factory: Factory,
+    pin_misses: list[tuple[str, str, str]],
+    **sch_kwargs: Any,
 ) -> None:
-    sch = Schematic(title=f"real-symbol smoke: {export}")
+    sch = Schematic(title=f"real-symbol smoke: {export}", **sch_kwargs)
     with warnings.catch_warnings():
         # Wire-collision UserWarnings are layout advice, not build failures.
         warnings.simplefilter("ignore", UserWarning)
@@ -606,6 +614,34 @@ def test_block_ports_stay_anchored_at_off_grid_origin(
     monkeypatch.setattr(sys.modules[__name__], "X", origin[0])
     monkeypatch.setattr(sys.modules[__name__], "Y", origin[1])
     _build_and_find_floating_ports(export, factory, pin_misses)
+
+
+@pytest.mark.parametrize(("export", "factory"), _CASES)
+def test_block_ports_follow_non_default_schematic_grid(
+    export: str,
+    factory: Factory,
+    pin_misses: list[tuple[str, str, str]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ports snap to ``Schematic(grid=...)``, as symbols and wires do (#7510)."""
+    monkeypatch.setattr(sys.modules[__name__], "X", FINE_GRID_ORIGIN[0])
+    monkeypatch.setattr(sys.modules[__name__], "Y", FINE_GRID_ORIGIN[1])
+    _build_and_find_floating_ports(export, factory, pin_misses, grid=FINE_GRID)
+
+
+@pytest.mark.parametrize("origin", OFF_GRID_ORIGINS, ids=lambda o: f"{o[0]},{o[1]}")
+@pytest.mark.parametrize(("export", "factory"), _CASES)
+def test_block_ports_stay_anchored_in_strict_snap_mode(
+    export: str,
+    factory: Factory,
+    origin: tuple[float, float],
+    pin_misses: list[tuple[str, str, str]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """STRICT snaps symbols and wires like AUTO, so ports must follow (#7510)."""
+    monkeypatch.setattr(sys.modules[__name__], "X", origin[0])
+    monkeypatch.setattr(sys.modules[__name__], "Y", origin[1])
+    _build_and_find_floating_ports(export, factory, pin_misses, snap_mode=SnapMode.STRICT)
 
 
 def test_every_export_has_a_case() -> None:
