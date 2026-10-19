@@ -170,13 +170,19 @@ DIFFPAIR_VIOLATION_BASELINE: dict[str, int] = {
 #   USB3_TX2-              F.Cu w=0.275  109.1 ohm (1 of 2 runs tightened)
 # (declared 90 ohm +/-15 %).  A ``--skip-route`` run on the COMMITTED PCB
 # reports a different set; do not key the allowance from it.
+# Issue #7296: with the single-ended mask-dam floor (``min_via_pad_edge_gap``)
+# the CI seed-42 re-route changes board 06's single-ended ordering, which moves
+# the residual impedance set to USB3_TX2- alone (USB3_RX1+/- now clear) and
+# leaves USB2_D+/USB2_D- 0.091 mm over its uncoupled-length limit (12.791 vs
+# 12.700 mm).  The floor is the intended behaviour; the USB2_D pair needs to
+# route coupled, tracked in #7401.  The limit and the 18-error pair baseline are
+# NOT raised: this is one identity, deleted when #7401 lands.
 # Allowed by identity, not by count (#7359, #7270 Q3 ruling): only these nets
-# may carry an ``impedance`` error, and a listed net that stops failing makes
+# may carry the listed errors, and a listed net that stops failing makes
 # its entry stale and fails the gate.  Deleting an entry is the whole of #7349.
 DIFFPAIR_FIXTURE_ALLOWED_FINDINGS: Allowance = {
-    ("impedance", "USB3_RX1+"): 7312,
-    ("impedance", "USB3_RX1-"): 7312,
     ("impedance", "USB3_TX2-"): 7312,
+    ("diffpair_uncoupled_length", "USB2_D+/USB2_D-"): 7401,
 }
 
 
