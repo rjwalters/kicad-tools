@@ -44,12 +44,12 @@ compliance claim. This board is an LVDS demonstration, not a USB/PCIe/MIPI devic
 | C17 | Samsung CL21A106KAYNNNE, 10 µF | [C15850](https://www.lcsc.com/product-detail/C15850.html) | 0805, X5R, 25 V |
 | R1–R4 | UNI-ROYAL 0603WAF1000T5E, 100 Ω | [C22775](https://www.lcsc.com/product-detail/C22775.html) | 0603, 1% |
 | R5–R8 | UNI-ROYAL 0603WAF1003T5E, 100 kΩ | [C25803](https://www.lcsc.com/product-detail/C25803.html) | 0603, 1% |
-| J1 | Samtec TSW-102-07-G-S | [Manufacturer](https://www.samtec.com/products/tsw-102-07-g-s) | 1 × 2, 2.54 mm THT |
-| J2/J3 | Samtec TSW-108-07-G-S | [Manufacturer](https://www.samtec.com/products/tsw-108-07-g-s) | 1 × 8, 2.54 mm THT |
+| J1 | XFCN PZ254V-11-02P | [C492401](https://www.lcsc.com/product-detail/C492401.html) | 1 × 2, 2.54 mm THT, straight male pin header |
+| J2/J3 | XFCN PZ254V-11-08P | [C492407](https://www.lcsc.com/product-detail/C492407.html) | 1 × 8, 2.54 mm THT, straight male pin header |
 
 Supplier identities were checked 2026-09-10. Inventory and assembly-provider
 availability must be checked when ordering; a listing is not a reservation.
-The headers are manual through-hole assembly after SMT.
+The headers are assembled by JLCPCB (through-hole assembly) and are in `bom_jlcpcb.csv`/`cpl_jlcpcb.csv`.
 
 ## Reproduce
 

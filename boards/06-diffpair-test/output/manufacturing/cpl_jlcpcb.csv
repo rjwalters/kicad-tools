@@ -16,6 +16,9 @@ C6,100nF,Capacitor_SMD:C_0603_1608Metric,29.0000mm,-30.0000mm,0.0,Top
 C7,1nF,Capacitor_SMD:C_0603_1608Metric,73.0000mm,-32.5000mm,0.0,Top
 C8,100nF,Capacitor_SMD:C_0603_1608Metric,73.0000mm,-30.0000mm,0.0,Top
 C9,1nF,Capacitor_SMD:C_0603_1608Metric,29.0000mm,-44.5000mm,0.0,Top
+J1,3.3V regulated input,Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical,12.0000mm,-12.0000mm,0.0,Top
+J2,IN1-4 / GND,Connector_PinHeader_2.54mm:PinHeader_1x08_P2.54mm_Vertical,12.0000mm,-26.0000mm,0.0,Top
+J3,OUT1-4 / GND,Connector_PinHeader_2.54mm:PinHeader_1x08_P2.54mm_Vertical,88.0000mm,-26.0000mm,0.0,Top
 R1,100,Resistor_SMD:R_0603_1608Metric,63.0000mm,-22.7300mm,90.0,Top
 R2,100,Resistor_SMD:R_0603_1608Metric,63.0000mm,-34.7300mm,90.0,Top
 R3,100,Resistor_SMD:R_0603_1608Metric,63.0000mm,-46.7300mm,90.0,Top
