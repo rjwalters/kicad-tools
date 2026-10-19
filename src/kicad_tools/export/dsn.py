@@ -186,7 +186,8 @@ _TRIVIAL_CONDITIONS: dict[str, frozenset[str]] = {
 
 #: ``.kicad_pro`` ``design_settings.rules`` minima Specctra cannot express.
 #: ``min_copper_edge_clearance`` is not listed: it is carried by insetting the
-#: exported ``(boundary ...)`` (issue #6784).
+#: exported ``(boundary ...)`` and growing the Edge.Cuts cutout keepouts
+#: (issues #6784, #7482).
 _INEXPRESSIBLE_PROJECT_MINIMA = (
     "min_hole_clearance",
     "min_hole_to_hole",
@@ -207,6 +208,11 @@ class NetClassInfo:
     via_diameter: float
     via_drill: float
     nets: list[str] = field(default_factory=list)
+
+
+def _node_on_edge_cuts(node: SExp) -> bool:
+    layer = node.find("layer")
+    return bool(layer and layer.children and _get_str(layer.children[0]) == "Edge.Cuts")
 
 
 class KiCadToDSNExporter:
@@ -235,6 +241,8 @@ class KiCadToDSNExporter:
         self._net_class: dict[str, str] = {}  # net name -> KiCad class name
         self._planes: list[tuple[str, str, list[tuple[float, float]]]] = []
         self._keepouts: list[tuple[str, str, list[tuple[float, float]]]] = []
+        # Edge.Cuts interior loops at the raw cut edge; emitted as keepouts (#7482)
+        self._outline_cutouts: list[list[tuple[float, float]]] = []
         self._omissions: list[str] = []
         self._edge_clearance: float = 0.0  # mm, .kicad_pro min_copper_edge_clearance
         self._via_padstack_name: str = ""
@@ -347,46 +355,80 @@ class KiCadToDSNExporter:
                             self._default_via_drill = _get_float(nc_child.children[0]) or 0.4
 
     def _extract_board_outline(self) -> None:
-        """Extract board outline from Edge.Cuts layer."""
+        """Extract the board boundary and cutouts from the Edge.Cuts layer.
+
+        Every top-level Edge.Cuts graphic is polygonized, so segments need not
+        be stored head to tail. The board is the face whose *exterior* ring
+        encloses the most area: a face's own ``area`` has its holes subtracted,
+        so ranking by it lets a large cutout outrank the board around it. The
+        board's interior rings are its cutouts; ``_generate_structure`` emits
+        them as keepouts on every copper layer. Geometry that cannot be carried
+        is listed, never dropped.
+        """
         assert self._pcb is not None
-        points: list[tuple[float, float]] = []
+        self._board_outline = []
+        self._outline_cutouts = []
 
-        for child in self._pcb.children:
-            if not hasattr(child, "name"):
+        for fp_node in self._pcb.children:
+            if not hasattr(fp_node, "name") or not _is_footprint_tag(fp_node.name):
                 continue
+            if any(
+                _node_on_edge_cuts(g)
+                for g in fp_node.children
+                if (getattr(g, "name", None) or "").startswith("fp_")
+            ):
+                self._omit(
+                    "footprint-embedded Edge.Cuts graphics are not exported as board outline"
+                )
+                break
 
-            # Handle gr_rect on Edge.Cuts
-            if child.name == "gr_rect":
-                layer_node = child.find("layer")
-                if layer_node and len(layer_node.children) >= 1:
-                    layer_name = _get_str(layer_node.children[0])
-                    if layer_name == "Edge.Cuts":
-                        start = child.find("start")
-                        end = child.find("end")
-                        if start and end and len(start.children) >= 2 and len(end.children) >= 2:
-                            x1 = _get_float(start.children[0]) or 0.0
-                            y1 = _get_float(start.children[1]) or 0.0
-                            x2 = _get_float(end.children[0]) or 0.0
-                            y2 = _get_float(end.children[1]) or 0.0
-                            points = [(x1, y1), (x2, y1), (x2, y2), (x1, y2)]
+        from ..core.board_outline import board_outline_segments, outline_graphics
 
-            # Handle gr_line on Edge.Cuts
-            elif child.name == "gr_line":
-                layer_node = child.find("layer")
-                if layer_node and len(layer_node.children) >= 1:
-                    layer_name = _get_str(layer_node.children[0])
-                    if layer_name == "Edge.Cuts":
-                        start = child.find("start")
-                        end = child.find("end")
-                        if start and end and len(start.children) >= 2 and len(end.children) >= 2:
-                            x1 = _get_float(start.children[0]) or 0.0
-                            y1 = _get_float(start.children[1]) or 0.0
-                            x2 = _get_float(end.children[0]) or 0.0
-                            y2 = _get_float(end.children[1]) or 0.0
-                            points.append((x1, y1))
-                            points.append((x2, y2))
+        if not any(True for _ in outline_graphics(self._pcb)):
+            return
+        try:
+            segments = board_outline_segments(self._pcb)
+        except ValueError as exc:
+            self._omit(f"board outline not exported: {exc}")
+            return
 
-        self._board_outline = points
+        from shapely.geometry import LineString, Polygon  # type: ignore[import-untyped]
+        from shapely.ops import polygonize_full, unary_union  # type: ignore[import-untyped]
+
+        def snap(pt: tuple[float, float]) -> tuple[float, float]:
+            return (round(pt[0], 3), round(pt[1], 3))  # 1 um: close endpoint micro-gaps
+
+        lines = [LineString([snap(a), snap(b)]) for a, b in segments if snap(a) != snap(b)]
+        faces, dangles, cuts, invalid = (
+            polygonize_full(unary_union(lines)) if lines else ((), (), (), ())
+        )
+        faces = list(faces.geoms) if hasattr(faces, "geoms") else list(faces)
+        if not faces:
+            self._omit(
+                "board outline not exported: Edge.Cuts does not form a closed outline "
+                "(open or dangling segments)"
+            )
+            return
+        board = max(faces, key=lambda f: Polygon(f.exterior).area)
+        if not (hasattr(dangles, "is_empty") and dangles.is_empty):
+            self._omit("Edge.Cuts has dangling segments that do not close a loop; ignored")
+        self._board_outline = list(board.exterior.coords)[:-1]
+
+        shell = Polygon(board.exterior)
+        cutouts = [Polygon(ring) for ring in board.interiors]
+        for face in faces:
+            if face is board:
+                continue
+            inside = face.representative_point()
+            if not shell.contains(inside):
+                self._omit("Edge.Cuts closed loop outside the main board outline is not exported")
+                continue
+            host = next((c for c in cutouts if c.contains(inside)), None)
+            if host is None:
+                cutouts.append(Polygon(face.exterior))
+            elif Polygon(face.exterior).area < host.area - 1e-6:
+                self._omit("Edge.Cuts island inside a board cutout is not exported")
+        self._outline_cutouts = [list(c.exterior.coords)[:-1] for c in cutouts if c.area > 0]
 
     def _extract_footprints(self) -> None:
         """Extract footprint placements and pad info."""
@@ -1025,39 +1067,39 @@ class KiCadToDSNExporter:
         parts.append(")")
         return "\n".join(parts)
 
-    def _boundary_points(self) -> list[tuple[float, float]]:
-        """The outline exported as ``(boundary ...)``, inset by the edge clearance.
+    def _copper_region(
+        self,
+    ) -> tuple[list[tuple[float, float]], list[list[tuple[float, float]]]]:
+        """The ``(boundary ...)`` ring and cutout keepouts, both moved in by the edge clearance.
 
         Specctra has no copper-to-edge rule, but a router never places copper
-        outside the boundary, so insetting the polygon by
-        ``min_copper_edge_clearance`` carries it as plain geometry. Pads that
-        already sit inside the band are fixed placement: they stay where they
-        are and are listed as an omission rather than routed through. When the
-        inset cannot be computed the original outline is exported and the
-        clearance is listed as not carried.
+        outside the boundary or inside a keepout, so insetting the board (its
+        outer ring shrinks, its cutouts grow) by ``min_copper_edge_clearance``
+        carries the rule as plain geometry, around cutouts as well as the
+        outer edge. Pads that already sit inside the band are fixed placement:
+        they stay where they are and are listed as an omission rather than
+        routed through. When the inset cannot be computed the raw outline and
+        cutouts are exported and the clearance is listed as not carried.
         """
-        outline = self._board_outline
+        outline, cutouts = self._board_outline, self._outline_cutouts
         if not outline or self._edge_clearance <= 0:
-            return outline
+            return outline, cutouts
         try:
-            from shapely.geometry import Polygon  # type: ignore[import-untyped]
+            from shapely.geometry import Polygon
+            from shapely.ops import unary_union
 
-            ring: list[tuple[float, float]] = []
-            for pt in outline:  # gr_line outlines repeat each shared vertex
-                if not ring or pt != ring[-1]:
-                    ring.append(pt)
-            if len(ring) > 1 and ring[0] == ring[-1]:
-                ring.pop()
-            poly = Polygon(ring)
+            poly = Polygon(outline)
+            if cutouts:
+                poly = poly.difference(unary_union([Polygon(c) for c in cutouts]))
             inset = poly.buffer(-self._edge_clearance, join_style=2) if poly.is_valid else None
         except (ImportError, ValueError):
             inset = None
         if inset is None or inset.is_empty or inset.geom_type != "Polygon":
             self._omit(
                 f".kicad_pro rule min_copper_edge_clearance {self._edge_clearance:g} mm: "
-                "board outline cannot be inset; boundary exported uninset"
+                "board outline cannot be inset; boundary and cutouts exported uninset"
             )
-            return outline
+            return outline, cutouts
         in_band = sorted(
             f"{fp.reference}.{pad.number}"
             for fp in self._footprints
@@ -1069,7 +1111,10 @@ class KiCadToDSNExporter:
                 f"{len(in_band)} pad(s) sit inside the {self._edge_clearance:g} mm "
                 f"copper-to-edge band (fixed placement): {', '.join(in_band)}"
             )
-        return list(inset.exterior.coords)[:-1]
+        return (
+            list(inset.exterior.coords)[:-1],
+            [list(ring.coords)[:-1] for ring in inset.interiors],
+        )
 
     @staticmethod
     def _pad_center(fp: FootprintInfo, pad: PadInfo) -> Any:
@@ -1098,8 +1143,8 @@ class KiCadToDSNExporter:
             lines.append("      )")
             lines.append("    )")
 
-        # Board boundary, inset by min_copper_edge_clearance (issue #6784)
-        boundary = self._boundary_points()
+        # Board boundary and cutouts, inset by min_copper_edge_clearance (#6784, #7482)
+        boundary, cutouts = self._copper_region()
         if boundary:
             lines.append("    (boundary")
             lines.append("      (path pcb 0")
@@ -1127,7 +1172,9 @@ class KiCadToDSNExporter:
             lines.append(f"    (plane {_dsn_quote(net)}")
             lines.append(_dsn_polygon(dsn_layer, polygon))
             lines.append("    )")
-        for tag, layer, polygon in self._keepouts:
+        keepouts = list(self._keepouts)
+        keepouts += [("keepout", layer, c) for c in cutouts for layer in self._layers]
+        for tag, layer, polygon in keepouts:
             dsn_layer = KICAD_TO_DSN_LAYER.get(layer, layer)
             lines.append(f'    ({tag} ""')
             lines.append(_dsn_polygon(dsn_layer, polygon))
@@ -1136,21 +1183,35 @@ class KiCadToDSNExporter:
         lines.append("  )")
         return "\n".join(lines)
 
+    @staticmethod
+    def _image_name(fp: FootprintInfo) -> str:
+        """Image name for a footprint: one image per (library, side).
+
+        A Specctra reader mirrors a back-placed image in x, while KiCad's
+        file already stores back-side pad offsets flipped, so back images
+        are distinct from front ones and carry x-negated pins (issue #7481).
+        """
+        name = _sanitize_name(fp.footprint_lib)
+        return name if fp.layer == "F.Cu" else f"{name}__back"
+
     def _generate_placement(self) -> str:
         """Generate the (placement ...) section."""
         lines: list[str] = []
         lines.append("  (placement")
 
         for fp in self._footprints:
-            image_name = _sanitize_name(fp.footprint_lib)
+            image_name = self._image_name(fp)
             side = "front" if fp.layer == "F.Cu" else "back"
             x_um = mm_to_um(fp.x)
             y_um = mm_to_um(fp.y)
-            rot = fp.rotation
+            # KiCad's angle is CCW on a y-down board; a Specctra reader
+            # rotates by +theta in the numeric (x, y) frame, so write -theta
+            # (issue #7481). Matches ``_pad_center``.
+            rot = round((-fp.rotation) % 360.0, 4)
 
             lines.append(f"    (component {_dsn_quote(image_name)}")
             lines.append(
-                f"      (place {_dsn_quote(fp.reference)} {x_um:.1f} {y_um:.1f} {side} {rot:.1f})"
+                f"      (place {_dsn_quote(fp.reference)} {x_um:.1f} {y_um:.1f} {side} {rot:g})"
             )
             lines.append("    )")
 
@@ -1167,7 +1228,7 @@ class KiCadToDSNExporter:
         padstack_defs: dict[str, str] = {}
 
         for fp in self._footprints:
-            image_name = _sanitize_name(fp.footprint_lib)
+            image_name = self._image_name(fp)
             if image_name in seen_images:
                 continue
             seen_images.add(image_name)
@@ -1175,7 +1236,12 @@ class KiCadToDSNExporter:
             lines.append(f"    (image {_dsn_quote(image_name)}")
 
             for pad in fp.pads:
-                px_um = mm_to_um(pad.x)
+                # Back-side offsets are already flipped in the KiCad file;
+                # pre-negate x so the reader's back-side mirror restores them.
+                # Padstack layers stay as the file names them (B.Cu pads on
+                # B.Cu): whether a reader also swaps a back image's layers is
+                # not verified black-box yet (issue #7481 open question).
+                px_um = mm_to_um(-pad.x if fp.layer != "F.Cu" else pad.x)
                 py_um = mm_to_um(pad.y)
                 if pad.pad_type == "np_thru_hole":
                     lines.extend(self._npth_keepouts(pad, px_um, py_um))
