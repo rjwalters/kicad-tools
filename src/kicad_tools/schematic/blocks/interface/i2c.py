@@ -197,7 +197,6 @@ class I2CPullups(CircuitBlock):
                 "VCC": r1_pin1,
                 "SDA": r1_pin2,
                 "SCL": r2_pin2,
-                "GND": (r1_pin2[0], r1_pin2[1] + 15),  # Virtual GND point below
             }
             self._cap_gnd_positions = []
 

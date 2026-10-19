@@ -108,28 +108,9 @@ def _xfail(reason: str, raises: type[BaseException] | None = None) -> pytest.Mar
 
 # -- Known defects -----------------------------------------------------------
 
-CAN_ESD = _xfail(
-    "#7402: CANTransceiver ESD path puts CANH/CANL ports at tvs_anode.x + 5, "
-    "past the TVS pin and off any wire",
-    AssertionError,
-)
 GATE_DRIVER = _xfail(
     "#7402: GateDriverBlock adds no wires; VCC/GND/BOOT_*/GATE_*/PWM_* are "
     "fixed offsets matching no driver pin",
-    AssertionError,
-)
-B2B_SOURCE = _xfail(
-    "#7402: BackToBackFETPair SOURCE port sits at an off-grid Kelvin midpoint "
-    "and misses its grid-snapped wire end",
-    AssertionError,
-)
-I2C_GND = _xfail(
-    "#7402: I2CPullups without filter caps exposes a phantom 'virtual GND point'",
-    AssertionError,
-)
-GPIO_PULL_RAIL = _xfail(
-    "#7402: create_gpio_pull_resistor without a button exposes a phantom "
-    "opposite-rail alias (VCC for a pull-down, GND for a pull-up)",
     AssertionError,
 )
 JTAG_DEFAULT = _xfail(
@@ -270,7 +251,6 @@ case(
     "CANTransceiver[esd]",
     "CANTransceiver",
     lambda s: B.CANTransceiver(s, X, Y, esd_protection=True),
-    CAN_ESD,
 )
 case(
     "CANTransceiver[termination]",
@@ -284,7 +264,7 @@ case(
 )
 for _factory in ("mcp2551", "sn65hvd230", "tja1050"):
     _name = f"create_can_transceiver_{_factory}"
-    case(_name, _name, lambda s, n=_name: getattr(B, n)(s, X, Y), CAN_ESD)
+    case(_name, _name, lambda s, n=_name: getattr(B, n)(s, X, Y))
     case(
         f"{_name}[no_esd]",
         _name,
@@ -343,13 +323,12 @@ case("create_usb_type_c", "create_usb_type_c", lambda s: B.create_usb_type_c(s, 
 case("create_usb_micro_b", "create_usb_micro_b", lambda s: B.create_usb_micro_b(s, X, Y))
 
 # Interface: I2C, joystick
-case("I2CPullups", "I2CPullups", lambda s: B.I2CPullups(s, X, Y), I2C_GND)
+case("I2CPullups", "I2CPullups", lambda s: B.I2CPullups(s, X, Y))
 for _speed in ("standard", "fast", "fast_plus"):
     case(
         f"create_i2c_pullups[{_speed}]",
         "create_i2c_pullups",
         lambda s, sp=_speed: B.create_i2c_pullups(s, X, Y, speed=sp),
-        I2C_GND,
     )
 case(
     "create_i2c_pullups[filter]",
@@ -383,13 +362,11 @@ case(
     "create_gpio_pull_resistor[down]",
     "create_gpio_pull_resistor",
     lambda s: B.create_gpio_pull_resistor(s, X, Y),
-    GPIO_PULL_RAIL,
 )
 case(
     "create_gpio_pull_resistor[up]",
     "create_gpio_pull_resistor",
     lambda s: B.create_gpio_pull_resistor(s, X, Y, pull_type="up", rail="VCC"),
-    GPIO_PULL_RAIL,
 )
 
 # Motor control
@@ -416,7 +393,7 @@ case(
     "BootstrapCapacitorArray",
     lambda s: B.BootstrapCapacitorArray(s, X, Y),
 )
-case("BackToBackFETPair", "BackToBackFETPair", lambda s: B.BackToBackFETPair(s, X, Y), B2B_SOURCE)
+case("BackToBackFETPair", "BackToBackFETPair", lambda s: B.BackToBackFETPair(s, X, Y))
 case(
     "UCC27211GateDriver",
     "UCC27211GateDriver",

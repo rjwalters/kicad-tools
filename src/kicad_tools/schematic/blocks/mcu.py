@@ -1151,8 +1151,9 @@ def create_gpio_pull_resistor(
     Returns:
         The underlying :class:`BootModeSelector` instance with no button.
         ``ports[pin_name]`` is the GPIO side, ``ports[rail]`` is the rail
-        side. Standard ``ports["VCC"]`` / ``ports["GND"]`` aliases also
-        remain available for compatibility.
+        side. The standard alias for the pulled-to rail (``ports["GND"]``
+        for a pull-down, ``ports["VCC"]`` for a pull-up) also remains
+        available; the opposite-rail alias is not exposed.
 
     Raises:
         ValueError: If ``pull_type`` is not one of ``{"up", "down"}`` or
@@ -1203,6 +1204,11 @@ def create_gpio_pull_resistor(
     # custom rail names to "VCC"/"GND" — both aliases stay populated so
     # connect_to_rails still works for the standard cases. For non-standard
     # rails (e.g., "+3.3V") the caller wires the port manually.
+    # Without a button the block also exposes an alias for the *opposite*
+    # rail at a fixed offset that lands on no pin or wire; drop it so only
+    # real connection points remain (#7507).
+    block.ports.pop("VCC" if pull_type == "down" else "GND", None)
+
     if pull_type == "down":
         # Resistor's far end is at the GND rail port.
         if rail not in ("GND",):
