@@ -632,6 +632,357 @@ class TestExportDsnCliOmissions:
         assert "Not exported" in out and "min_hole_clearance" in out
 
 
+class TestBoardOutline:
+    """Edge.Cuts shapes become one valid boundary; cutouts become keepouts (#7482)."""
+
+    @staticmethod
+    def _export(tmp_path, edge_cuts, extra="", edge_clearance=None):
+        import json
+
+        pcb = tmp_path / "outline.kicad_pcb"
+        pcb.write_text(
+            '(kicad_pcb (version 20240108) (generator "t")\n'
+            '  (layers (0 "F.Cu" signal) (31 "B.Cu" signal) (44 "Edge.Cuts" user))\n'
+            f"{edge_cuts}\n{extra}\n)\n",
+            encoding="utf-8",
+        )
+        if edge_clearance is not None:
+            rules = {"min_copper_edge_clearance": edge_clearance}
+            pro = {"board": {"design_settings": {"rules": rules}}}
+            pcb.with_suffix(".kicad_pro").write_text(json.dumps(pro), encoding="utf-8")
+        exporter = KiCadToDSNExporter(pcb)
+        return exporter, exporter.export()
+
+    @staticmethod
+    def _keepouts(dsn):
+        """``(layer, Polygon)`` for every ``(keepout "" (polygon ...))``, in mm."""
+        from shapely.geometry import Polygon
+
+        out = []
+        for layer, body in re.findall(r'\(keepout ""\s*\(polygon (\S+) 0 ([^)]*)\)', dsn):
+            v = [float(x) / 1000.0 for x in body.split()]
+            out.append((layer, Polygon(list(zip(v[0::2], v[1::2], strict=True)))))
+        return out
+
+    @staticmethod
+    def _boundary(dsn):
+        from shapely.geometry import Polygon
+
+        m = re.search(r"\(boundary\s*\(path pcb 0([^)]*)\)", dsn)
+        assert m, "no boundary exported"
+        v = [float(x) / 1000.0 for x in m.group(1).split()]
+        return Polygon(list(zip(v[0::2], v[1::2], strict=True)))
+
+    @staticmethod
+    def _line(a, b):
+        return f'(gr_line (start {a[0]} {a[1]}) (end {b[0]} {b[1]}) (layer "Edge.Cuts"))'
+
+    def test_out_of_order_lines(self, tmp_path):
+        p = [(0, 0), (100, 0), (100, 60), (0, 60)]
+        edges = "\n".join(
+            [
+                self._line(p[2], p[3]),
+                self._line(p[1], p[0]),  # reversed
+                self._line(p[0], p[3]),
+                self._line(p[1], p[2]),
+                self._line(p[0], p[1]),  # duplicate edge
+            ]
+        )
+        _, dsn = self._export(tmp_path, edges)
+        poly = self._boundary(dsn)
+        assert poly.is_valid
+        assert poly.area == pytest.approx(6000)
+
+    def test_in_order_lines_have_no_duplicate_vertices(self, tmp_path):
+        p = [(0, 0), (100, 0), (100, 60), (0, 60)]
+        edges = "\n".join(self._line(p[i], p[(i + 1) % 4]) for i in range(4))
+        _, dsn = self._export(tmp_path, edges)
+        poly = self._boundary(dsn)
+        assert poly.area == pytest.approx(6000)
+        assert len(poly.exterior.coords) == 5  # 4 corners + closure
+
+    def test_gr_poly(self, tmp_path):
+        edges = '(gr_poly (pts (xy 0 0) (xy 100 0) (xy 100 60) (xy 0 60)) (layer "Edge.Cuts"))'
+        _, dsn = self._export(tmp_path, edges)
+        assert self._boundary(dsn).area == pytest.approx(6000)
+
+    def test_gr_circle(self, tmp_path):
+        edges = '(gr_circle (center 50 50) (end 80 50) (layer "Edge.Cuts"))'
+        _, dsn = self._export(tmp_path, edges)
+        poly = self._boundary(dsn)
+        assert poly.is_valid
+        assert poly.area == pytest.approx(3.14159265 * 900, rel=0.01)
+
+    def test_arc_corner(self, tmp_path):
+        import math
+
+        s = math.sqrt(0.5)
+        edges = "\n".join(
+            [
+                self._line((0, 0), (100, 0)),
+                self._line((100, 0), (100, 50)),
+                f"(gr_arc (start 100 50) (mid {90 + 10 * s} {50 + 10 * s}) (end 90 60) "
+                '(layer "Edge.Cuts"))',
+                self._line((90, 60), (0, 60)),
+                self._line((0, 60), (0, 0)),
+            ]
+        )
+        _, dsn = self._export(tmp_path, edges)
+        assert self._boundary(dsn).area == pytest.approx(6000 - 100 + 25 * math.pi, abs=0.1)
+
+    def test_rect_cutout_becomes_keepout(self, tmp_path):
+        edges = (
+            '(gr_rect (start 0 0) (end 100 60) (layer "Edge.Cuts"))\n'
+            '(gr_rect (start 40 20) (end 60 40) (layer "Edge.Cuts"))'
+        )
+        exporter, dsn = self._export(tmp_path, edges)
+        assert self._boundary(dsn).area == pytest.approx(6000)
+        assert len(re.findall(r'\(keepout ""', dsn)) == 2  # F.Cu and B.Cu
+        assert not any("Edge.Cuts" in o for o in exporter.omissions)
+
+    def test_annular_board_hole_larger_than_copper(self, tmp_path):
+        """An LED ring: the r=25 hole encloses more area than the copper annulus."""
+        import math
+
+        edges = (
+            '(gr_circle (center 50 50) (end 80 50) (layer "Edge.Cuts"))\n'
+            '(gr_circle (center 50 50) (end 75 50) (layer "Edge.Cuts"))'
+        )
+        exporter, dsn = self._export(tmp_path, edges)
+        assert self._boundary(dsn).area == pytest.approx(math.pi * 900, rel=0.01)
+        keepouts = self._keepouts(dsn)
+        assert sorted(layer for layer, _ in keepouts) == ["B.Cu", "F.Cu"]
+        for _, hole in keepouts:
+            assert hole.area == pytest.approx(math.pi * 625, rel=0.01)
+        assert not any("Edge.Cuts" in o for o in exporter.omissions)
+
+    def test_frame_board_window_larger_than_copper(self, tmp_path):
+        edges = (
+            '(gr_rect (start 0 0) (end 100 100) (layer "Edge.Cuts"))\n'
+            '(gr_rect (start 5 5) (end 95 95) (layer "Edge.Cuts"))'
+        )
+        exporter, dsn = self._export(tmp_path, edges)
+        assert self._boundary(dsn).area == pytest.approx(10000)
+        keepouts = self._keepouts(dsn)
+        assert len(keepouts) == 2
+        assert all(hole.area == pytest.approx(8100) for _, hole in keepouts)
+        assert not any("Edge.Cuts" in o for o in exporter.omissions)
+
+    def test_edge_clearance_grows_cutout_keepouts(self, tmp_path):
+        """min_copper_edge_clearance applies at a cutout edge, not only the outer one."""
+        from shapely.geometry import box
+
+        edges = (
+            '(gr_rect (start 0 0) (end 100 60) (layer "Edge.Cuts"))\n'
+            '(gr_rect (start 40 20) (end 60 40) (layer "Edge.Cuts"))'
+        )
+        fp = (
+            '(footprint "TP" (layer "F.Cu") (at 50 19.8)\n'
+            '  (property "Reference" "TP1" (at 0 0) (layer "F.SilkS"))\n'
+            '  (pad "1" smd rect (at 0 0) (size 0.2 0.2) (layers "F.Cu")))'
+        )
+        exporter, dsn = self._export(tmp_path, edges, fp, edge_clearance=0.5)
+        assert self._boundary(dsn).equals(box(0.5, 0.5, 99.5, 59.5))
+        keepouts = self._keepouts(dsn)
+        assert len(keepouts) == 2
+        for _, hole in keepouts:
+            assert hole.symmetric_difference(box(39.5, 19.5, 60.5, 40.5)).area < 1e-6
+        assert any("copper-to-edge band" in o and "TP1.1" in o for o in exporter.omissions)
+        assert not any("cannot be inset" in o for o in exporter.omissions)
+
+    def test_open_outline_is_omitted(self, tmp_path):
+        edges = "\n".join([self._line((0, 0), (100, 0)), self._line((100, 0), (100, 60))])
+        exporter, dsn = self._export(tmp_path, edges)
+        assert "(boundary" not in dsn
+        assert any("closed outline" in o for o in exporter.omissions)
+
+    def test_footprint_edge_cuts_listed(self, tmp_path):
+        fp = (
+            '(footprint "X" (layer "F.Cu") (at 5 5)\n'
+            '  (fp_line (start 0 0) (end 1 0) (layer "Edge.Cuts")))'
+        )
+        edges = '(gr_rect (start 0 0) (end 100 60) (layer "Edge.Cuts"))'
+        exporter, _ = self._export(tmp_path, edges, fp)
+        assert any("footprint-embedded Edge.Cuts" in o for o in exporter.omissions)
+
+    def test_micron_gap_is_snapped(self, tmp_path):
+        edges = "\n".join(
+            [
+                self._line((0, 0), (100, 0)),
+                self._line((100.0004, 0), (100, 60)),
+                self._line((100, 60.0004), (0, 60)),
+                self._line((0, 60), (0, 0)),
+            ]
+        )
+        _, dsn = self._export(tmp_path, edges)
+        poly = self._boundary(dsn)
+        assert poly.area == pytest.approx(6000, abs=0.1)
+        assert len(poly.exterior.coords) == 5  # 4 corners + closure, gaps welded
+
+    def test_charlieplex_routed_board_boundary_is_valid(self, tmp_path):
+        import shutil
+
+        src = (
+            Path(__file__).parent.parent
+            / "boards/02-charlieplex-led/output/charlieplex_3x3_routed.kicad_pcb"
+        )
+        dst = tmp_path / src.name
+        shutil.copy(src, dst)
+        shutil.copy(src.with_suffix(".kicad_pro"), dst.with_suffix(".kicad_pro"))
+        from shapely.geometry import box
+
+        boundary = self._boundary(KiCadToDSNExporter(dst).export())
+        assert boundary.is_valid
+        # Edge.Cuts is the 50 x 55 mm rectangle (123.5, 77.5)-(173.5, 132.5); the
+        # board's .kicad_pro min_copper_edge_clearance of 0.3 mm insets it.
+        assert len(boundary.exterior.coords) == 5
+        assert boundary.symmetric_difference(box(123.8, 77.8, 173.2, 132.2)).area < 1e-6
+
+
+# ---------------------------------------------------------------------------
+# Issue #7481: pin placement under the Specctra rule
+# ---------------------------------------------------------------------------
+
+
+def _specctra_pins(dsn: str) -> dict[tuple[str, str], tuple[float, float]]:
+    """Place every pin with ``place + R_ccw(theta) . (mirror-x if back) . offset``."""
+    import math
+
+    images: dict[str, dict[str, tuple[float, float]]] = {}
+    cur = None
+    for line in dsn.splitlines():
+        m = re.match(r'\s*\(image "?([^"\s]+)"?\s*$', line)
+        if m:
+            cur = m[1]
+            images[cur] = {}
+            continue
+        m = re.match(r'\s*\(pin "?[^"\s]+"? "?([^"\s]+)"? (\S+) (\S+)\)', line)
+        if m and cur:
+            images[cur][m[1]] = (float(m[2]), float(m[3]))
+    out: dict[tuple[str, str], tuple[float, float]] = {}
+    for img, ref, x, y, side, rot in re.findall(
+        r'\(component "?([^"\s]+)"?\s*\n\s*\(place "?([^"\s]+)"? (\S+) (\S+) (front|back) (\S+)\)',
+        dsn,
+    ):
+        a = math.radians(float(rot))
+        for num, (ox, oy) in images[img].items():
+            if side == "back":
+                ox = -ox
+            out[(ref, num)] = (
+                float(x) + ox * math.cos(a) - oy * math.sin(a),
+                float(y) + ox * math.sin(a) + oy * math.cos(a),
+            )
+    return out
+
+
+def _assert_pins_on_pads(exporter: KiCadToDSNExporter) -> int:
+    from kicad_tools.core.geometry import rotate_pad_offset
+
+    placed = _specctra_pins(exporter.export())
+    checked = 0
+    for fp in exporter._footprints:
+        counts: dict[str, int] = {}
+        for pad in fp.pads:
+            counts[pad.number] = counts.get(pad.number, 0) + 1
+        for pad in fp.pads:
+            if not pad.number or counts[pad.number] > 1:
+                continue  # unnumbered / repeated pad numbers share one DSN pin key
+            dx, dy = rotate_pad_offset(pad.x, pad.y, fp.rotation)
+            ex, ey = mm_to_um(fp.x + dx), mm_to_um(fp.y + dy)
+            got = placed[(fp.reference, pad.number)]
+            assert got == pytest.approx((ex, ey), abs=1.0), (
+                fp.reference,
+                pad.number,
+                fp.layer,
+                fp.rotation,
+            )
+            checked += 1
+    return checked
+
+
+def _fp_block(ref, lib, x, y, rot, layer):
+    pad_layer = layer
+    return f"""  (footprint "{lib}"
+    (layer "{layer}")
+    (at {x} {y} {rot})
+    (property "Reference" "{ref}" (at 0 0) (layer "F.SilkS"))
+    (pad "1" smd rect (at -2 0.5) (size 0.8 0.9) (layers "{pad_layer}") (net "A"))
+    (pad "2" smd rect (at 2 0.5) (size 0.8 0.9) (layers "{pad_layer}") (net "B"))
+    (pad "3" smd rect (at 1 -1.5) (size 0.8 0.9) (layers "{pad_layer}"))
+  )
+"""
+
+
+def _board_with(tmp_path, blocks):
+    text = (
+        '(kicad_pcb\n  (version 20260206)\n  (generator "pcbnew")\n'
+        '  (layers (0 "F.Cu" signal) (2 "B.Cu" signal) (25 "Edge.Cuts" user))\n'
+        '  (gr_rect (start 0 0) (end 80 60) (layer "Edge.Cuts"))\n' + "".join(blocks) + ")\n"
+    )
+    path = tmp_path / "rot.kicad_pcb"
+    path.write_text(text)
+    return KiCadToDSNExporter(str(path))
+
+
+class TestDSNPinPlacement:
+    def test_all_sides_and_rotations_land_on_kicad_pads(self, tmp_path):
+        blocks = [
+            _fp_block("F0", "Lib_A", 10, 10, 0, "F.Cu"),
+            _fp_block("F90", "Lib_A", 20, 10, 90, "F.Cu"),
+            _fp_block("FM90", "Lib_A", 30, 10, -90, "F.Cu"),
+            _fp_block("F180", "Lib_A", 40, 10, 180, "F.Cu"),
+            _fp_block("F45", "Lib_A", 50, 10, 45.5, "F.Cu"),
+            _fp_block("B0", "Lib_A", 10, 30, 0, "B.Cu"),
+            _fp_block("B90", "Lib_A", 20, 30, 90, "B.Cu"),
+            _fp_block("B270", "Lib_A", 30, 30, 270, "B.Cu"),
+            _fp_block("BM90", "Lib_A", 40, 30, -90, "B.Cu"),
+        ]
+        assert _assert_pins_on_pads(_board_with(tmp_path, blocks)) == 27
+
+    def test_rotation_written_negated_and_normalised(self, tmp_path):
+        dsn = _board_with(
+            tmp_path,
+            [
+                _fp_block("P", "Lib_A", 10, 10, 90, "F.Cu"),
+                _fp_block("Q", "Lib_A", 20, 10, -90, "F.Cu"),
+            ],
+        ).export()
+        assert "(place P 10000.0 10000.0 front 270)" in dsn
+        assert "(place Q 20000.0 10000.0 front 90)" in dsn
+
+    def test_library_on_both_sides_gets_two_images(self, tmp_path):
+        dsn = _board_with(
+            tmp_path,
+            [
+                _fp_block("F1", "Lib_A", 10, 10, 0, "F.Cu"),
+                _fp_block("B1", "Lib_A", 20, 10, 0, "B.Cu"),
+                _fp_block("B2", "Lib_A", 30, 10, 0, "B.Cu"),
+            ],
+        ).export()
+        images = re.findall(r'\(image "?([^"\s]+)"?\s*$', dsn, re.M)
+        assert sorted(images) == ["Lib_A", "Lib_A__back"]
+        # Back image pre-negates x; every back pad stays on B.Cu.
+        back = re.search(r'\(image "?Lib_A__back"?\s*\n(.*?)\n    \)', dsn, re.S).group(1)
+        assert re.search(r'"?1"? 2000\.0 500\.0', back)
+        assert "Rect[B]" in back
+
+    @pytest.mark.parametrize(
+        "board",
+        [
+            "03-usb-joystick",
+            "06-diffpair-test",
+            "07-matchgroup-test",
+            "09-usbc-pd-power",
+        ],
+    )
+    def test_fleet_boards_pins_land_on_pads(self, board):
+        pcbs = sorted((BOARDS / board / "output").glob("*.kicad_pcb"))
+        pcbs = [p for p in pcbs if "routed" not in p.name] or pcbs
+        if not pcbs:
+            pytest.skip(f"no committed PCB for {board}")
+        assert _assert_pins_on_pads(KiCadToDSNExporter(str(pcbs[0]))) > 0
+
+
 # ---------------------------------------------------------------------------
 # Issue #7483: NPTH holes and non-copper pads must not become pins
 # ---------------------------------------------------------------------------

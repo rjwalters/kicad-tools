@@ -559,6 +559,9 @@ def annotate_pcb_pintypes(
                 result.unchanged += 1
                 continue
             pad.pintype = pintype
+            # Keep the in-memory pinfunction in step with the node rewritten
+            # below, or ``PCB.save()`` flags the pad as an unpersisted edit.
+            pad.pinfunction = data.pinfunction
             result.updated += 1
             if node is None:
                 continue

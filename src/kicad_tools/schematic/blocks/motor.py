@@ -930,6 +930,31 @@ class BootstrapCapacitorArray(CircuitBlock):
                 sch.add_label(phase_nets[i], stub_x, stub_y, rotation=0)
 
 
+# Named block port -> real pin name, per default driver symbol.  Phase-scoped
+# ports (``*_A/_B/_C``) are skipped for phases the driver type does not have.
+_GATE_DRIVER_PORT_PINS: dict[str, dict[str, str]] = {
+    "Driver_Motor:DRV8308": {
+        "VCC": "VM",
+        "GND": "GND",
+        "GATE_HS_A": "UHSG",
+        "GATE_LS_A": "ULSG",
+        "GATE_HS_B": "VHSG",
+        "GATE_LS_B": "VLSG",
+        "GATE_HS_C": "WHSG",
+        "GATE_LS_C": "WLSG",
+    },
+    "Driver_FET:IR2110": {
+        "VCC": "VCC",
+        "GND": "COM",
+        "BOOT_A": "VB",
+        "GATE_HS_A": "HO",
+        "GATE_LS_A": "LO",
+        "PWM_H_A": "HIN",
+        "PWM_L_A": "LIN",
+    },
+}
+
+
 class GateDriverBlock(CircuitBlock):
     """
     Gate driver IC block with bootstrap capacitors.
@@ -1126,20 +1151,29 @@ class GateDriverBlock(CircuitBlock):
             self.bypass_caps.append(cap)
             self.components[f"C_BYPASS{i + 1}"] = cap
 
-        # Define placeholder ports (positions relative to driver center)
-        # These would be updated with actual pin positions from the symbol
-        self.ports = {
-            "VCC": (x, y - 20),
-            "GND": (x, y + 20),
-        }
-
-        for i, label in enumerate(phase_labels):
-            offset = (i - 1) * 15  # Spread ports horizontally
-            self.ports[f"BOOT_{label}"] = (x + offset - 30, y - 10)
-            self.ports[f"GATE_HS_{label}"] = (x + offset + 30, y - 5)
-            self.ports[f"GATE_LS_{label}"] = (x + offset + 30, y + 5)
-            self.ports[f"PWM_H_{label}"] = (x + offset - 30, y + 5)
-            self.ports[f"PWM_L_{label}"] = (x + offset - 30, y + 10)
+        # Expose named ports at the driver IC's real pin ends so each one
+        # lands on a pin (issue #7509).  Ports with no counterpart pin on
+        # the part (e.g. DRV8308 has no per-phase PWM inputs) are omitted
+        # rather than parked at an arbitrary offset that matches nothing.
+        self.ports = {}
+        port_pins = _GATE_DRIVER_PORT_PINS.get(driver_symbol)
+        if port_pins is None:
+            # Unknown custom symbol: pin names cannot be guessed, so keep the
+            # historical placeholder offsets relative to the driver center.
+            self.ports = {"VCC": (x, y - 20), "GND": (x, y + 20)}
+            for i, label in enumerate(phase_labels):
+                offset = (i - 1) * 15  # Spread ports horizontally
+                self.ports[f"BOOT_{label}"] = (x + offset - 30, y - 10)
+                self.ports[f"GATE_HS_{label}"] = (x + offset + 30, y - 5)
+                self.ports[f"GATE_LS_{label}"] = (x + offset + 30, y + 5)
+                self.ports[f"PWM_H_{label}"] = (x + offset - 30, y + 5)
+                self.ports[f"PWM_L_{label}"] = (x + offset - 30, y + 10)
+        else:
+            for port_name, pin_name in port_pins.items():
+                suffix = port_name.rsplit("_", 1)[-1]
+                if suffix in ("A", "B", "C") and suffix not in phase_labels:
+                    continue
+                self.ports[port_name] = self.driver.pin_position(pin_name)
 
         # Re-expose bootstrap-array ports so callers can wire HIGH_<label>
         # / PHASE_<label> to BST_<label> / PHASE_<label> nets.
@@ -1148,6 +1182,11 @@ class GateDriverBlock(CircuitBlock):
                 # Avoid clobbering driver ports if names ever collide
                 if name not in self.ports:
                     self.ports[name] = pos
+            # Parts without bootstrap pins (charge-pump drivers such as the
+            # DRV8308) have no real BOOT_<label> pin; the bootstrap cap's
+            # high side is that node, so alias it instead of leaving it off.
+            for label in phase_labels:
+                self.ports.setdefault(f"BOOT_{label}", self.ports[f"HIGH_{label}"])
 
         # Optional pin-net labels.  KiCad's label-only connectivity requires
         # the label coordinate to lie on a wire endpoint or segment; without

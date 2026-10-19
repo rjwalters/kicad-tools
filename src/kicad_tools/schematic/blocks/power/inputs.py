@@ -23,7 +23,13 @@ def _wire_path(sch: "Schematic", *points: Point) -> None:
             sch.add_wire(a, b)
 
 
-def _wire_reverse_pfet(sch: "Schematic", pfet: "SymbolInstance", vin: Point, gnd: Point) -> Point:
+def _wire_reverse_pfet(
+    sch: "Schematic",
+    pfet: "SymbolInstance",
+    vin: Point,
+    gnd: Point,
+    tie_gate: bool = True,
+) -> Point:
     """Wire a high-side reverse-polarity P-FET between ``vin`` and its load.
 
     The input goes to the **drain** and the **source** feeds the load: the body
@@ -33,13 +39,17 @@ def _wire_reverse_pfet(sch: "Schematic", pfet: "SymbolInstance", vin: Point, gnd
     old wiring put the input on the source, which leaves the body diode
     conducting from the load back into a reversed input; issue #7399.)
 
+    With ``tie_gate=False`` the gate is left unwired for the caller to bias
+    (``BarrelJackInput`` drops a gate resistor and Zener clamp on it).
+
     Returns the source position, the protected output.
     """
     drain = pfet.pin_position("D")
     gate = pfet.pin_position("G")
     jog_x = vin[0] + _INPUT_JOG
     _wire_path(sch, vin, (jog_x, vin[1]), (jog_x, drain[1]), drain)
-    _wire_path(sch, gate, (gate[0], gnd[1]), gnd)
+    if tie_gate:
+        _wire_path(sch, gate, (gate[0], gnd[1]), gnd)
     return pfet.pin_position("S")
 
 
@@ -54,8 +64,10 @@ class BarrelJackInput(CircuitBlock):
                │     │
         GND ───┴─────┘
 
-    The P-FET's drain takes the input and its source feeds the load, with
-    the gate tied to ground (see ``_wire_reverse_pfet``).
+    The P-FET's drain takes the input and its source feeds the load (see
+    ``_wire_reverse_pfet``).  The gate returns to ground through ``R_GATE``
+    and a Zener ``D_GATE`` (cathode on the source, anode on the gate) clamps
+    Vgs so a 12 V or 24 V jack cannot exceed the Si2301's +/-8 V Vgs(max).
 
     Schematic (with diode protection):
         VIN ──── [D] ──┬── [C_filt] ──┬── VOUT
@@ -81,6 +93,8 @@ class BarrelJackInput(CircuitBlock):
         pfet_symbol: str = "Device:Q_PMOS",
         diode_symbol: str = "Device:D_Schottky",
         cap_symbol: str = "Device:C_Polarized",
+        resistor_symbol: str = "Device:R",
+        zener_symbol: str = "Device:D_Zener",
     ):
         """
         Create a barrel jack power input block.
@@ -97,6 +111,8 @@ class BarrelJackInput(CircuitBlock):
             pfet_symbol: KiCad symbol for P-channel MOSFET
             diode_symbol: KiCad symbol for Schottky diode
             cap_symbol: KiCad symbol for polarized capacitor
+            resistor_symbol: KiCad symbol for the P-FET gate resistor
+            zener_symbol: KiCad symbol for the P-FET gate-clamp Zener
         """
         super().__init__(sch, x, y)
         self.protection = protection
@@ -130,8 +146,43 @@ class BarrelJackInput(CircuitBlock):
             self.pfet = sch.add_symbol(pfet_symbol, q_x, y, q_ref, "Si2301")
             self.components["Q"] = self.pfet
 
-            # Jack tip -> drain, gate -> sleeve; output from the source.
-            output_pos = _wire_reverse_pfet(sch, self.pfet, jack_tip, jack_sleeve)
+            # Jack tip -> drain; output from the source.  The gate is biased
+            # below instead of tied straight to the sleeve.
+            output_pos = _wire_reverse_pfet(sch, self.pfet, jack_tip, jack_sleeve, tie_gate=False)
+
+            # The conducting FET sees Vgs = -VIN, which a 12 V jack drives
+            # past the Si2301's +/-8 V Vgs(max) (Vishay Si2301 datasheet,
+            # absolute maximum ratings).  R_GATE returns the gate to the
+            # sleeve and a 5.1 V Zener (cathode on the source, anode on the
+            # gate) clamps |Vgs| to ~5.1 V: above the Si2301's ~1 V maximum
+            # Vgs(th) so the channel still enhances, below the 8 V limit.
+            # Both parts sit below the FET, clear of the source/output wire.
+            gate = self.pfet.pin_position("G")
+            source = self.pfet.pin_position("S")
+            rail_y = gate[1] + 7.62  # gate net rail, below the FET body
+            r_gate = sch.add_symbol(resistor_symbol, gate[0], rail_y + 3.81, f"R{base_num}", "10k")
+            d_gate = sch.add_symbol(
+                zener_symbol,
+                gate[0] + 3.81,  # one 1.5-grid step clear of R_GATE
+                rail_y + 3.81,
+                f"D{base_num}",
+                "5.1V",
+                rotation=90,  # anode up, cathode down
+            )
+            self.components["R_GATE"] = r_gate
+            self.components["D_GATE"] = d_gate
+
+            r_top = r_gate.pin_position("1")
+            r_bot = r_gate.pin_position("2")
+            a_pin = d_gate.pin_position("A")
+            k_pin = d_gate.pin_position("K")
+            # Gate net: gate -> R_GATE pin 1, and across to the Zener anode.
+            _wire_path(sch, gate, r_top)
+            _wire_path(sch, r_top, (a_pin[0], r_top[1]), a_pin)
+            # R_GATE pin 2 -> sleeve (ground).
+            _wire_path(sch, r_bot, (jack_sleeve[0], r_bot[1]), jack_sleeve)
+            # Zener cathode -> source net.
+            _wire_path(sch, k_pin, (source[0], k_pin[1]), source)
 
         elif protection == "diode":
             d_ref = f"D{base_num}"
