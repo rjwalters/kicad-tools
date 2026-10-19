@@ -850,32 +850,49 @@ _HEADER_PROSE_COUNT_RE = re.compile(
 )
 
 
+def _stated_header_counts(
+    part_description: str, part_mfr: str
+) -> tuple[set[int], set[tuple[int, int]]]:
+    """Every pin count and ``NxM`` shape an LCSC record states, in any form.
+
+    Collects all ``NxM`` / ``N*M`` shapes (description and MPN), every
+    ``-NNP`` MPN suffix, and every ``N Position`` / ``N Pin`` / ``N-pin``
+    description phrase.  Returns ``(totals, shapes)``; shapes are stored
+    sorted, so ``1x8`` and ``8x1`` are the same shape.
+    """
+    totals: set[int] = set()
+    shapes: set[tuple[int, int]] = set()
+    for text in (part_description, part_mfr):
+        for m in _HEADER_SHAPE_RE.finditer(text or ""):
+            rows, cols = int(m.group(1)), int(m.group(2))
+            if rows and cols:
+                totals.add(rows * cols)
+                shapes.add((min(rows, cols), max(rows, cols)))
+    totals.update(int(n) for n in _HEADER_MPN_COUNT_RE.findall(part_mfr or ""))
+    totals.update(int(n) for n in _HEADER_PROSE_COUNT_RE.findall(part_description or ""))
+    totals.discard(0)
+    return totals, shapes
+
+
 def _part_header_count(
     part_description: str, part_mfr: str
 ) -> tuple[int, tuple[int, int] | None] | None:
     """Return ``(total pins, (rows, cols) or None)`` stated by an LCSC record.
 
-    Tried in order: an ``NxM`` shape (description, then MPN), a ``-NNP`` MPN
-    suffix, then ``N Position`` / ``N Pin`` / ``N-pin`` description prose.
-    The last two give a total only, with no shape, so ``PZ254V-12-08P`` (2x4)
-    on a ``1x08`` footprint passes on total; a ``2x4P`` in the description
-    would still catch it.  Prose stating two different counts is ambiguous
-    and yields ``None``.
+    Every form the record states is collected (:func:`_stated_header_counts`):
+    an ``NxM`` shape (description or MPN), a ``-NNP`` MPN suffix, and
+    ``N Position`` / ``N Pin`` / ``N-pin`` description prose.  The last two
+    give a total only, with no shape, so ``PZ254V-12-08P`` (2x4) on a
+    ``1x08`` footprint passes on total; a ``2x4P`` in the description would
+    still catch it.  A record whose forms disagree -- two different totals
+    (``1x3 header 2 Pin``, or an MPN ``-02P`` against ``8 Pin`` prose) or
+    two different shapes with the same total -- is ambiguous and yields
+    ``None`` (issue #7446): no form may silently win over another.
     """
-    for text in (part_description, part_mfr):
-        m = _HEADER_SHAPE_RE.search(text or "")
-        if m is not None:
-            rows, cols = int(m.group(1)), int(m.group(2))
-            if rows and cols:
-                return rows * cols, (rows, cols)
-    m = _HEADER_MPN_COUNT_RE.search(part_mfr or "")
-    if m is not None and int(m.group(1)):
-        return int(m.group(1)), None
-    counts = {int(n) for n in _HEADER_PROSE_COUNT_RE.findall(part_description or "")}
-    counts.discard(0)
-    if len(counts) == 1:
-        return counts.pop(), None
-    return None
+    totals, shapes = _stated_header_counts(part_description, part_mfr)
+    if len(totals) != 1 or len(shapes) > 1:
+        return None
+    return totals.pop(), (shapes.pop() if shapes else None)
 
 
 def _header_footprint_label(footprint_name: str) -> str | None:
@@ -884,18 +901,37 @@ def _header_footprint_label(footprint_name: str) -> str | None:
     return fp_label if _HEADER_FP_RE.search(fp_label.upper()) else None
 
 
+def header_pin_count_problem(
+    footprint_name: str, part_description: str = "", part_mfr: str = ""
+) -> str | None:
+    """Why a header/socket footprint's part cannot be pin-checked, else ``None``.
+
+    :data:`UNVERIFIED_HEADER_CONFLICT` when the record states pin counts or
+    shapes that disagree with each other, :data:`UNVERIFIED_HEADER_COUNT`
+    when it states none.  ``None`` for a non-header footprint or a record
+    with one consistent count.
+    """
+    if _header_footprint_label(footprint_name) is None:
+        return None
+    if _part_header_count(part_description, part_mfr) is not None:
+        return None
+    totals, shapes = _stated_header_counts(part_description, part_mfr)
+    if len(totals) > 1 or len(shapes) > 1:
+        return UNVERIFIED_HEADER_CONFLICT
+    return UNVERIFIED_HEADER_COUNT
+
+
 def header_pin_count_unreadable(
     footprint_name: str, part_description: str = "", part_mfr: str = ""
 ) -> bool:
-    """True when a header/socket footprint's part states no readable pin count.
+    """True when a header/socket footprint's part states no usable pin count.
 
     :func:`find_header_pin_mismatch` returns ``None`` both for "counts agree"
     and for "cannot read a count"; this tells the two apart so callers can
     report the latter as ``unverified`` rather than ``match`` (issue #7446).
+    A record stating conflicting counts is unreadable too.
     """
-    if _header_footprint_label(footprint_name) is None:
-        return False
-    return _part_header_count(part_description, part_mfr) is None
+    return header_pin_count_problem(footprint_name, part_description, part_mfr) is not None
 
 
 def find_header_pin_mismatch(
@@ -937,7 +973,7 @@ def find_header_pin_mismatch(
         )
 
     if total != fp_rows * fp_cols or (
-        shape is not None and sorted(shape) != sorted((fp_rows, fp_cols))
+        shape is not None and shape != (min(fp_rows, fp_cols), max(fp_rows, fp_cols))
     ):
         label = f"{shape[0]}x{shape[1]}" if shape else str(total)
         return mismatch(f"pin count {label} vs footprint {fp_rows}x{fp_cols:02d}")
@@ -977,6 +1013,11 @@ class LcscVerdict:
 
 UNVERIFIED_NOT_FOUND = "not in parts cache or offline catalog"
 UNVERIFIED_HEADER_COUNT = "pin count not stated by part"
+UNVERIFIED_HEADER_CONFLICT = "conflicting pin counts stated by part"
+#: Reasons meaning "known header/socket part, pin count not verifiable".
+#: Deterministic facts about the part record (not the cache), so
+#: ``--strict-preflight`` fails on them (issue #7446).
+UNVERIFIED_HEADER_REASONS = frozenset({UNVERIFIED_HEADER_COUNT, UNVERIFIED_HEADER_CONFLICT})
 
 
 def _compare_part(
@@ -1062,9 +1103,10 @@ def verify_lcsc_assignment(
             return LcscVerdict("mismatch", source, mismatch)
     # A header/socket footprint whose part states no readable pin count was
     # never pin-checked: report it, never a bare ``match`` (issue #7446).
-    if all(
-        header_pin_count_unreadable(footprint, part.description, part.mfr_part)
+    problems = [
+        header_pin_count_problem(footprint, part.description, part.mfr_part)
         for part, _ in candidates
-    ):
-        return LcscVerdict("unverified", candidates[-1][1], reason=UNVERIFIED_HEADER_COUNT)
+    ]
+    if all(problems):
+        return LcscVerdict("unverified", candidates[-1][1], reason=problems[-1])
     return LcscVerdict("match", candidates[-1][1])

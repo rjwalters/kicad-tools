@@ -5,13 +5,17 @@ from __future__ import annotations
 import pytest
 
 from kicad_tools.export.lcsc_value_check import (
+    UNVERIFIED_HEADER_CONFLICT,
     UNVERIFIED_HEADER_COUNT,
+    _part_header_count,
     find_header_pin_mismatch,
     header_pin_count_unreadable,
     verify_lcsc_assignment,
 )
+from kicad_tools.export.preflight import PreflightChecker, PreflightConfig
 from kicad_tools.parts.cache import PartsCache
 from kicad_tools.parts.models import Part
+from kicad_tools.schema.bom import BOM, BOMItem
 
 FP = "Connector_PinHeader_2.54mm:PinHeader_{}_P2.54mm_Vertical"
 
@@ -147,3 +151,149 @@ def test_real_lcsc_description_with_noise_tokens():
     )
     assert find_header_pin_mismatch(FP.format("1x08"), _pads(8), "", desc, "PZ254V-11-08P") is None
     assert find_header_pin_mismatch(FP.format("1x02"), _pads(2), "", desc, "PZ254V-11-08P")
+
+
+# ---------------------------------------------------------------------------
+# Conflicting count forms give no count (Judge review of PR #7448).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "desc,mfr",
+    [
+        ("1x3 header 2 Pin", ""),  # shape vs prose in one description
+        ("Pin Header 2 Position 3 Pin", ""),  # prose vs prose
+        ("Pin Header 1x8P 2x4P", ""),  # same total, different shape
+        ("Pin Header 8 Pin 2.54mm", "PZ254V-11-02P"),  # MPN suffix vs description
+        ("", "PZ254-1x3-02P"),  # shape vs suffix inside the MPN
+    ],
+)
+def test_conflicting_count_forms_give_no_count(desc, mfr):
+    assert _part_header_count(desc, mfr) is None
+    for fp in ("1x02", "1x03", "1x08", "2x04"):
+        assert find_header_pin_mismatch(FP.format(fp), None, "", desc, mfr) is None
+        assert header_pin_count_unreadable(FP.format(fp), desc, mfr)
+
+
+@pytest.mark.parametrize(
+    "desc,mfr,expected",
+    [
+        ("1x3 header 3 Pin", "", (3, (1, 3))),
+        ("Pin Header 1x8P 8 Pin", "PZ254V-11-08P", (8, (1, 8))),
+        ("Pin Header 8 Pin", "PZ254V-11-08P", (8, None)),
+        ("Header 8x1", "", (8, (1, 8))),
+    ],
+)
+def test_agreeing_count_forms_give_the_count(desc, mfr, expected):
+    assert _part_header_count(desc, mfr) == expected
+
+
+def test_shape_vs_prose_conflict_is_unverified_with_conflict_reason(tmp_path):
+    part = Part(
+        lcsc_part="C999998",
+        mfr_part="X-HDR",
+        package="Through Hole,P=2.54mm",
+        description="1x3 header 2 Pin",
+    )
+    v = _verify(tmp_path, part, "1x03", 3)  # formerly a silent ``match``
+    assert (v.status, v.mismatch) == ("unverified", None)
+    assert v.reason == UNVERIFIED_HEADER_CONFLICT
+
+
+def test_mpn_vs_description_conflict_is_unverified(tmp_path):
+    part = Part(
+        lcsc_part="C999997",
+        mfr_part="PZ254V-11-02P",
+        package="Plugin,P=2.54mm",
+        description="Pin Header 8 Pin 2.54mm",
+    )
+    for fp, pads in (("1x02", 2), ("1x08", 8)):
+        (tmp_path / fp).mkdir()
+        v = _verify(tmp_path / fp, part, fp, pads)
+        assert v.status == "unverified"
+        assert v.reason == UNVERIFIED_HEADER_CONFLICT
+
+
+# ---------------------------------------------------------------------------
+# Strict policy: unverified header count FAILs under --strict-preflight.
+# ---------------------------------------------------------------------------
+
+UNREADABLE = Part(
+    lcsc_part="C999999",
+    mfr_part="ZX-HDR-ABC",
+    package="Through Hole,P=2.54mm",
+    description="Pin Header 2.54mm Pitch Single Row Through Hole",
+)
+
+
+def _preflight(tmp_path, parts, items, strict):
+    cache = PartsCache(db_path=tmp_path / "parts.db")
+    for part in parts:
+        cache.put(part)
+    checker = PreflightChecker(
+        pcb_path=tmp_path / "board.kicad_pcb",
+        config=PreflightConfig(skip_drc=True, skip_erc=True, strict_report_source=strict),
+        parts_cache=cache,
+        parts_catalog=None,
+    )
+    checker._bom = BOM(items=items)
+    return checker._check_bom_lcsc_values()
+
+
+def _hdr_item(ref, lcsc, fp="1x08"):
+    return BOMItem(
+        reference=ref, value="Conn", footprint=FP.format(fp), lib_id="Connector:Conn", lcsc=lcsc
+    )
+
+
+def test_unverified_header_is_warn_without_strict(tmp_path):
+    result = _preflight(tmp_path, [UNREADABLE], [_hdr_item("J1", "C999999")], strict=False)
+    assert result.status == "WARN"
+    assert "pin count not verifiable" in result.message
+    assert "J1 -> C999999 (pin count not stated by part)" in result.details
+    assert not PreflightChecker.has_failures([result])
+
+
+def test_unverified_header_fails_under_strict(tmp_path):
+    result = _preflight(tmp_path, [UNREADABLE], [_hdr_item("J1", "C999999")], strict=True)
+    assert result.status == "FAIL"
+    assert "pin count not verifiable" in result.message
+    assert "does not match" not in result.message
+    assert "J1 -> C999999 (pin count not stated by part)" in result.details
+    assert PreflightChecker.has_failures([result])
+
+
+def test_conflicting_header_fails_under_strict(tmp_path):
+    part = Part(
+        lcsc_part="C999998",
+        mfr_part="X-HDR",
+        package="Through Hole,P=2.54mm",
+        description="1x3 header 2 Pin",
+    )
+    result = _preflight(tmp_path, [part], [_hdr_item("J1", "C999998", "1x03")], strict=True)
+    assert result.status == "FAIL"
+    assert f"J1 -> C999998 ({UNVERIFIED_HEADER_CONFLICT})" in result.details
+
+
+@pytest.mark.parametrize("strict", [False, True])
+def test_cache_miss_header_stays_warn_even_under_strict(tmp_path, strict):
+    """CI runners start with an empty cache: a miss never blocks."""
+    result = _preflight(tmp_path, [], [_hdr_item("J1", "C7501260", "1x02")], strict=strict)
+    assert result.status == "WARN"
+    assert "not in parts cache or offline catalog" in result.message
+    assert not PreflightChecker.has_failures([result])
+
+
+def test_strict_fail_also_counts_cache_misses(tmp_path):
+    items = [_hdr_item("J1", "C999999"), _hdr_item("J2", "C1234567", "1x02")]
+    result = _preflight(tmp_path, [UNREADABLE], items, strict=True)
+    assert result.status == "FAIL"
+    assert "1 pin header/socket part(s): pin count not verifiable" in result.message
+    assert "1 more unverifiable (not in parts cache or offline catalog)" in result.message
+    assert "J2" not in result.details
+
+
+@pytest.mark.parametrize("strict", [False, True])
+def test_matching_header_is_ok_either_way(tmp_path, strict):
+    result = _preflight(tmp_path, [C7501260], [_hdr_item("J1", "C7501260", "1x02")], strict=strict)
+    assert result.status == "OK", result.details

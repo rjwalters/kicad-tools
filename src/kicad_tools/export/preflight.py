@@ -1371,12 +1371,14 @@ class PreflightChecker:
         ``--strict-preflight`` -- a fresh CI runner has an empty cache.
 
         A known part on a ``PinHeader_RxC`` / ``PinSocket_RxC`` footprint
-        whose record states no readable pin count is ``unverified`` too
-        (issue #7446) and joins the same WARN, tagged with its reason.  It
-        is deliberately a warning, not a FAIL: the pin count is unknown, not
-        wrong, so a board with correct parts must not newly fail -- but a
-        2-pin part on an 8-pin header must not read as verified either.
-        ``kct readiness`` records the WARN message in its ``bom`` gate.
+        whose record states no readable pin count (or conflicting ones) is
+        ``unverified`` too (issue #7446), tagged with its reason.  By default
+        it joins the same WARN.  Under ``strict_report_source`` (set from
+        ``--strict-preflight``, as for the #7091 report-source check) it is a
+        FAIL: unlike a cache miss it is a deterministic fact about the part
+        record, and the check that matters -- does a 2-pin part sit on an
+        8-pin header? -- never ran.  Parts missing from the cache stay WARN
+        even under strict.
         """
         try:
             bom = self._load_bom()
@@ -1419,11 +1421,11 @@ class PreflightChecker:
                 pads = [str(p.number) for p in fp.pads]
                 pads_by_ref[fp.reference] = None if fp.reference in pads_by_ref else pads
 
-        from .lcsc_value_check import UNVERIFIED_HEADER_COUNT
+        from .lcsc_value_check import UNVERIFIED_HEADER_REASONS
 
         mismatches: list[str] = []
         unverified: list[str] = []
-        header_unverified = 0
+        header_unverified: list[str] = []
         sources: set[str] = set()
         assigned = 0
         for item in items:
@@ -1442,9 +1444,10 @@ class PreflightChecker:
             if verdict.source:
                 sources.add(verdict.source)
             if verdict.status == "unverified":
-                if verdict.reason == UNVERIFIED_HEADER_COUNT:
-                    header_unverified += 1
-                    unverified.append(f"{item.reference} -> {item.lcsc} ({verdict.reason})")
+                if verdict.reason in UNVERIFIED_HEADER_REASONS:
+                    entry = f"{item.reference} -> {item.lcsc} ({verdict.reason})"
+                    header_unverified.append(entry)
+                    unverified.append(entry)
                 else:
                     unverified.append(f"{item.reference} -> {item.lcsc}")
                 continue
@@ -1476,22 +1479,37 @@ class PreflightChecker:
 
         verified = assigned - len(unverified)
         against = " and ".join(sorted(sources)) or "no source"
+        if header_unverified and self.config.strict_report_source:
+            shown = ", ".join(header_unverified[:8])
+            n_hdr = len(header_unverified)
+            suffix = f" (and {n_hdr - 8} more)" if n_hdr > 8 else ""
+            others = len(unverified) - n_hdr
+            also = f"; {others} more unverifiable (not in parts cache or offline catalog)"
+            return PreflightResult(
+                name="bom_lcsc_values",
+                status="FAIL",
+                message=(
+                    f"{n_hdr} pin header/socket part(s): pin count not verifiable "
+                    f"(strict preflight){also if others else ''}"
+                ),
+                details=f"pin count not verifiable: {shown}{suffix}",
+            )
         if unverified:
             shown = ", ".join(unverified[:8])
             suffix = f" (and {len(unverified) - 8} more)" if len(unverified) > 8 else ""
-            not_found = len(unverified) - header_unverified
+            not_found = len(unverified) - len(header_unverified)
             why = [
                 f"{n} {text}"
                 for n, text in (
                     (not_found, "not in parts cache or offline catalog"),
-                    (header_unverified, "header part(s) with no readable pin count"),
+                    (len(header_unverified), "header part(s) with pin count not verifiable"),
                 )
                 if n
             ]
             reasons = (
                 "not in parts cache or offline catalog"
                 if not header_unverified
-                else "header part(s) with no readable pin count"
+                else "header part(s) with pin count not verifiable"
                 if not not_found
                 else "; ".join(why)
             )
