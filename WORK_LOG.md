@@ -15,6 +15,21 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-19
 
+- **PR #7452**: build(deps-dev): Bump cmake from 4.4.3 to 4.4.4
+- **PR #7451**: build(deps): Bump the uv-minor-patch group across 1 directory with 4 updates
+- **PR #7438**: refactor(boards): run board 03 readiness receipt in-process via readiness_cmd.main
+- **PR #7428**: fix(blocks): wire OpAmpBlock and multi-channel ESD array to real pins
+- **Issue #7410** (closed): Gate regenerate_boards_03_04_6076.py's board-03 readiness.json promotion (#7358 allowlist)
+- **PR #7454**: build(deps-dev): Bump the npm-minor-patch group across 1 directory with 2 updates
+- **PR #7448**: fix: compare pin-header pin count in LCSC package guard
+- **PR #7447**: test: pin board 06's reviewed PZ254V header sourcing (fix main red)
+- **PR #7443**: feat: show per-run decline reasons in gap tightening and refresh board 07 sidecar
+- **PR #7432**: fix(router): give lattice hybrid legs a via-parity (mirrored) search (#7093)
+- **PR #7308**: fix(router): refuse vias in the mask-dam zone beside SMD pads; clear boards 02/05/06
+- **Issue #7445** (closed): main red: board 06 BOM/LCSC tests fail since #7426 (PZ254V headers C492401/C492407)
+- **Issue #7220** (closed): DFM: kct check is blind to thermal asymmetry its own solid-connect repair creates (13 passives, 4 PTH pins) and to via drills at SMD pad edges
+- **Issue #7296** (closed): Router: refuse pad-edge vias (mask-dam floor) and move existing ones on boards 02/05/06 (split from #7220, PR3)
+- **Issue #7446** (closed): LCSC package guard: pin-header row x pin count is not compared (2-pin part on 8-pin header passes)
 - **PR #7430**: test(readiness): verify every committed-ready board still verifies ready
 - **PR #7434**: fix(router): keep the shortest workable gateway combo; reject pass-under polarity crossings (#7362)
 - **PR #7429**: fix(board03): keep thermal relief on the six GND pads flagged thermal_asymmetry

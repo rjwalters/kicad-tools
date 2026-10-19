@@ -25,9 +25,7 @@ _EVIDENCE_PATH = re.compile(r"^[\w./-]*(readiness|native-drc[\w-]*|fill-consiste
 
 #: Scripts that still write gated evidence without the gated path -> the open
 #: issue that moves each onto it (operator ruling #7270 Q3=1).  Shrink only.
-ALLOWLIST = {
-    "regenerate_boards_03_04_6076.py": 7410,
-}
+ALLOWLIST = {}
 
 #: Board dir -> the one producer that owns its ``readiness.json`` re-pin.
 READINESS_REPIN_OWNER = {
