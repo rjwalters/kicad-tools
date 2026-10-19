@@ -27,6 +27,7 @@ _None._
 - **#7093**: router: differential pair gets unequal via counts when a leg falls back to uncoupled routing (board 03 USB_D 2 vs 3; blocks #6394)
 - **#7269**: board 07 MIPI_DAT0: recover 0.038 mm skew lost to compare-and-keep (blocks #6858)
 - **#7401**: router: board 06 USB2_D+ uncoupled 12.791 > 12.700 mm after v62 pad-edge floor reorders the single-ended fallback
+- **#7445**: main red: board 06 BOM/LCSC tests fail since #7426 (PZ254V headers C492401/C492407)
 
 ## Ready
 
@@ -50,20 +51,22 @@ Issues currently being built (`loom:building`).
 - **#7423**: Board 07: enable route-time length matching in the committed map after #7397 (no-worse re-measure; #5798 Q4 ruling)
 - **#7433**: JLCPCB CPL exports THT pin headers at pin 1 instead of body centre (~8.9 mm off on 1x8); affects boards 02-07 THT rows
 - **#7435**: refresh_readiness: board 04 has no drc_targets, so nothing re-pins its native-drc.json
+- **#7445**: main red: board 06 BOM/LCSC tests fail since #7426 (PZ254V headers C492401/C492407)
+- **#7446**: LCSC package guard: pin-header row x pin count is not compared (2-pin part on 8-pin header passes)
 
 ## PRs Awaiting Review
 
 PRs waiting on Judge (`loom:review-requested`).
 
-- **#7428**: fix(blocks): wire OpAmpBlock and multi-channel ESD array to real pins
-- **#7438**: refactor(boards): run board 03 readiness receipt in-process via readiness_cmd.main
-- **#7443**: feat: show per-run decline reasons in gap tightening and refresh board 07 sidecar
+- **#7308**: fix(router): refuse vias in the mask-dam zone beside SMD pads; clear boards 02/05/06
+- **#7439**: fix(export): place THT parts at pad-bbox centre in JLCPCB CPL
+- **#7448**: fix: compare pin-header pin count in LCSC package guard
 
 ## Approved (Awaiting Merge)
 
 PRs that passed review and are queued for Champion auto-merge (`loom:pr`).
 
-_None._
+- **#7447**: test: pin board 06's reviewed PZ254V header sourcing (fix main red)
 
 ## Proposed
 
@@ -97,6 +100,7 @@ Issues carrying `loom:curated`.
 - **#7391**: Board 05: refresh report.md/pdf via its producer (still says THT parts excluded from CPL; #7241/#7383 follow-up) *(curated)*
 - **#7401**: router: board 06 USB2_D+ uncoupled 12.791 > 12.700 mm after v62 pad-edge floor reorders the single-ended fallback *(curated)*
 - **#7410**: Gate regenerate_boards_03_04_6076.py's board-03 readiness.json promotion (#7358 allowlist) *(curated)*
+- **#7446**: LCSC package guard: pin-header row x pin count is not compared (2-pin part on 8-pin header passes) *(curated)*
 
 ## Proposed (Architect / Hermit)
 
@@ -127,12 +131,12 @@ Issues carrying `loom:curated`.
 |------|-------|
 | Operator merge-risk holds | 0 |
 | Very important | 0 |
-| Important | 4 |
+| Important | 5 |
 | Ready (`loom:issue`) | 0 |
-| In Progress (`loom:building`) | 12 |
+| In Progress (`loom:building`) | 14 |
 | PRs awaiting review | 3 |
-| Approved PRs awaiting merge | 0 |
-| Curated | 28 |
+| Approved PRs awaiting merge | 1 |
+| Curated | 29 |
 | Architect / Hermit proposals | 9 |
 | Active epics | 8 |
 <!-- guide:plan-body:end -->
