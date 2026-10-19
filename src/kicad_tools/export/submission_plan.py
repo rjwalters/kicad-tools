@@ -168,8 +168,35 @@ def _identity(info: os.stat_result) -> tuple[int, ...]:
     return info.st_dev, info.st_ino, info.st_mode, info.st_size, info.st_mtime_ns, info.st_ctime_ns
 
 
+def _read_portable(root: Path, name: str) -> _Snapshot:
+    """``_read`` for platforms without ``O_DIRECTORY``/``dir_fd`` (Windows).
+
+    Walks the path with ``islink`` checks instead of descriptor-relative opens;
+    not atomic against concurrent swaps, but the best that platform offers.
+    """
+    current = root
+    for part in name.split("/"):
+        current = current / part
+        if os.path.islink(current):
+            raise SubmissionError("Input missing, inaccessible, or symlinked")
+    try:
+        with open(current, "rb") as stream:
+            before = os.fstat(stream.fileno())
+            if not stat.S_ISREG(before.st_mode):
+                raise SubmissionError("Input must be a regular file")
+            data = stream.read()
+            after = os.fstat(stream.fileno())
+    except OSError as exc:
+        raise SubmissionError("Input missing, inaccessible, or symlinked") from exc
+    if _identity(before) != _identity(after):
+        raise SubmissionError("Input changed while reading")
+    return _Snapshot(root, name, data, _identity(after))
+
+
 def _read(root: Path, name: str) -> _Snapshot:
     name = _path(name)
+    if not hasattr(os, "O_DIRECTORY"):
+        return _read_portable(root, name)
     fd = _root_fd(root)
     file_fd = None
     try:
@@ -196,6 +223,33 @@ def _read(root: Path, name: str) -> _Snapshot:
         os.close(fd)
 
 
+def _inventory_portable(root: Path, expected: set[str], directories: set[str]) -> None:
+    """``_inventory`` without descriptor-relative opens (Windows)."""
+    found: set[str] = set()
+
+    def walk(directory: Path, prefix: str) -> None:
+        with os.scandir(directory) as entries:
+            for entry in entries:
+                name = _path(prefix + entry.name)
+                if entry.is_symlink():
+                    raise SubmissionError("Bundle contains a symlink")
+                if entry.is_dir(follow_symlinks=False):
+                    if name not in directories:
+                        raise SubmissionError("Unexpected bundle directory")
+                    walk(Path(entry.path), name + "/")
+                elif entry.is_file(follow_symlinks=False):
+                    found.add(name)
+                else:
+                    raise SubmissionError("Bundle contains a nonregular entry")
+
+    try:
+        walk(root, "")
+    except OSError as exc:
+        raise SubmissionError("Bundle changed during inventory") from exc
+    if found != expected:
+        raise SubmissionError("Bundle file set differs from declared allowlist")
+
+
 def _inventory(root: Path, expected: set[str]) -> None:
     """Check exact files and implied directories; never traverse symlinks."""
     found: set[str] = set()
@@ -205,6 +259,9 @@ def _inventory(root: Path, expected: set[str]) -> None:
         for parent in PurePosixPath(name).parents
         if str(parent) != "."
     }
+    if not hasattr(os, "O_DIRECTORY"):
+        _inventory_portable(root, expected, directories)
+        return
 
     def walk(fd: int, prefix: str) -> None:
         with os.scandir(fd) as entries:

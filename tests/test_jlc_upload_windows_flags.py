@@ -40,3 +40,34 @@ def test_symlink_refused_without_o_nofollow(tmp_path, no_posix_flags):
         ju.UploadLedger.open(link)
     with pytest.raises(OSError):
         ju._open_nofollow(link, os.O_WRONLY | os.O_APPEND)
+
+
+def test_ledger_round_trip_without_posix_flags(tmp_path, no_posix_flags):
+    ledger = ju.UploadLedger.open(tmp_path / "uploads.jsonl")
+    assert ledger.attempts() == {}
+    assert ledger.events() == []
+    record = {
+        "schema_version": ju.SCHEMA_VERSION,
+        "kind": ju._PREVIEW_KIND,
+        "attempt_id": "0" * 32,
+    }
+    ledger._append(record)
+    assert ledger.events() == [record]
+
+
+def test_submission_read_and_inventory_without_posix_flags(tmp_path, no_posix_flags):
+    from kicad_tools.export import submission_plan as sp
+
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "a.txt").write_bytes(b"x")
+    (tmp_path / "sub" / "b.txt").write_bytes(b"y")
+    assert sp._read(tmp_path, "sub/b.txt").data == b"y"
+    sp._inventory(tmp_path, {"a.txt", "sub/b.txt"})
+    with pytest.raises(sp.SubmissionError):
+        sp._inventory(tmp_path, {"a.txt"})
+    try:
+        (tmp_path / "ln.txt").symlink_to(tmp_path / "a.txt")
+    except OSError:
+        return
+    with pytest.raises(sp.SubmissionError):
+        sp._read(tmp_path, "ln.txt")
