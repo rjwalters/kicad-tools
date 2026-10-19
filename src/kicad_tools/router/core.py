@@ -8619,7 +8619,6 @@ class Autorouter:
                 continue
             reported.add(sig)
             print(f.warning())
-            logger.warning(f.warning().strip())
 
     # ------------------------------------------------------------------
     # Diff-pair partner map for escape routing
