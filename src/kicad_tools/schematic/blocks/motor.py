@@ -1990,9 +1990,11 @@ class UCC27211GateDriver(CircuitBlock):
         def _pin(name: str) -> tuple[float, float]:
             """Resolve by pin name; fall back to the custom symbol's number."""
             pins = getattr(getattr(self.driver, "symbol_def", None), "pins", None)
+            key = self._CUSTOM_PIN_NUMBERS[name]
             if isinstance(pins, list) and any(p.name == name for p in pins):
-                return self.driver.pin_position(name)
-            return self.driver.pin_position(self._CUSTOM_PIN_NUMBERS[name])
+                key = name
+            pos: tuple[float, float] = self.driver.pin_position(key)
+            return pos
 
         vdd = _pin("VDD")
         vss = _pin("VSS")  # Kelvin ref
