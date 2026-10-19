@@ -3830,12 +3830,15 @@ class LatticePathfinder:
         history: dict[Resource, float],
         present: float,
         escape_plan: dict[int, EscapeChoice],
+        guide: PartnerGuide | None = None,
+        mirror: LayerMirror | None = None,
     ) -> tuple[_RouteResult | None, str]:
         """One single-ended hybrid leg, held to every pad's own class.
 
         The same search a partner-aware fallback leg gets (see
         :meth:`_partner_aware_legs`): ``strict`` / ``floor`` come from
-        :meth:`_strict_pad_pairwise`.
+        :meth:`_strict_pad_pairwise`; ``guide`` / ``mirror`` are its
+        partner-corridor and layer-sequence constraints (issue #7093).
         """
         previous = self._pairwise
         if strict is not None:
@@ -3848,6 +3851,8 @@ class LatticePathfinder:
                 history=history,
                 present=present,
                 escape_plan=escape_plan,
+                guide=guide,
+                mirror=mirror,
             )
         finally:
             self._pairwise = previous
@@ -4099,6 +4104,7 @@ class LatticePathfinder:
                     f"legs P/N={lens[0]:.1f}/{lens[1]:.1f} mm (cap {cap_text}); "
                     f"vias P/N={sum(1 for v, _s in pres.vias if v == net_p)}/"
                     f"{sum(1 for v, _s in pres.vias if v == net_n)}"
+                    + ("; a leg mirrored for via parity (#7093)" if why == "ok-mirrored" else "")
                 )
                 return pres, terminal, ""
         if shortest is not None:
@@ -4217,12 +4223,161 @@ class LatticePathfinder:
         finally:
             committed.rollback_trial(mark)
 
+        pres, why, lens = self._hybrid_result(
+            pc,
+            hard_p,
+            hard_n,
+            trunk,
+            legs,
+            cap=cap,
+            max_vias=max_vias,
+            vias_used=vias_used,
+            reqs=reqs,
+            half=half,
+            clr=clr,
+        )
+        if pres is None or len(legs["P"].route.vias) == len(legs["N"].route.vias):
+            return pres, why, lens, trunk_mm
+
+        # Issue #7093: the legs change layers a different number of times.
+        # Offer each leg the partner's layer sequence (the #7255 mirrored
+        # search) and keep a via-equal result only when it is no worse than
+        # this pick on skew AND on length, element-wise: the pick above
+        # stays the reference, so no other decision moves.
+        def rank(res: _PairResult) -> tuple[float, float]:
+            lp, ln = (measure(r) for r in res.routes)
+            return (round(abs(lp - ln), 3), round(lp + ln, 3))
+
+        best = rank(pres)
+        for alt in self._hybrid_parity_legs(
+            pc,
+            items={"P": (hard_p, v_p), "N": (hard_n, v_n)},
+            trunk=trunk,
+            legs=legs,
+            committed=committed,
+            history=history,
+            present=present,
+            escape_plan=escape_plan,
+            strict=strict,
+            floor=floor,
+            half=half,
+            clr=clr,
+        ):
+            apres, _awhy, alens = self._hybrid_result(
+                pc,
+                hard_p,
+                hard_n,
+                trunk,
+                alt,
+                cap=cap,
+                max_vias=max_vias,
+                vias_used=vias_used,
+                reqs=reqs,
+                half=half,
+                clr=clr,
+            )
+            if apres is None:
+                continue
+            r_alt = rank(apres)
+            if all(a <= b for a, b in zip(r_alt, best, strict=True)):
+                pres, why, lens, best = apres, "ok-mirrored", alens, r_alt
+        return pres, why, lens, trunk_mm
+
+    def _hybrid_parity_legs(
+        self,
+        pc: CoupledConnection,
+        *,
+        items: dict[str, tuple[Pad, Pad]],
+        trunk: _PairResult,
+        legs: dict[str, _RouteResult],
+        committed: CommittedCopper,
+        history: dict[Resource, float],
+        present: float,
+        escape_plan: dict[int, EscapeChoice],
+        strict: LatticePairwise | None,
+        floor: float,
+        half: float,
+        clr: float,
+    ) -> list[dict[str, _RouteResult]]:
+        """Via-equal re-searches of a hybrid's two legs (issue #7093).
+
+        For each leg in turn, the leg is re-searched against committed copper
+        holding the trunk and its partner leg (a rolled-back trial), held to
+        the partner's layer sequence (:class:`LayerMirror`, the #7255
+        mirrored search of :meth:`_mirrored_candidates`) and pulled toward
+        its corridor (:class:`PartnerGuide`; unguided on a miss).  Only leg
+        pairs that come back with equal via counts are returned; the caller
+        re-checks and ranks them.  Nothing is committed.
+        """
+        conns: dict[str, Connection] = {
+            pol: ((pc.key, pol), real, virt, pc.net_class) for pol, (real, virt) in items.items()
+        }
+        kw: dict[str, Any] = {
+            "committed": committed,
+            "history": history,
+            "present": present,
+            "escape_plan": escape_plan,
+        }
+        out: list[dict[str, _RouteResult]] = []
+        for moved, kept in (("P", "N"), ("N", "P")):
+            mirror = _mirror_of(legs[kept])
+            if mirror is None:
+                continue
+            mark = committed.begin_trial()
+            try:
+                for net, run_layer, pts in trunk.runs:
+                    committed.add_run(run_layer, pts, net, half, clr)
+                self._commit_single(conns[kept], legs[kept], {}, committed)
+                guide = self._partner_guide(legs[kept], pc)
+                res, _why = self._search_hybrid_leg(
+                    conns[moved], strict, floor, guide=guide, mirror=mirror, **kw
+                )
+                if res is None:
+                    res, _why = self._search_hybrid_leg(
+                        conns[moved], strict, floor, mirror=mirror, **kw
+                    )
+            finally:
+                committed.rollback_trial(mark)
+            if res is None:
+                continue
+            virt = items[moved][1]
+            end = res.runs[-1][1][-1] if res.runs and res.runs[-1][1] else None
+            if end is None or dist(end, (virt.x, virt.y)) > 1e-6:
+                continue
+            # ``LayerMirror`` bounds layers, not via counts.
+            if len(res.route.vias) != len(legs[kept].route.vias):
+                continue
+            out.append({kept: legs[kept], moved: res})
+        return out
+
+    def _hybrid_result(
+        self,
+        pc: CoupledConnection,
+        hard_p: Pad,
+        hard_n: Pad,
+        trunk: _PairResult,
+        legs: dict[str, _RouteResult],
+        *,
+        cap: float,
+        max_vias: int | None,
+        vias_used: int,
+        reqs: list[float] | None,
+        half: float,
+        clr: float,
+    ) -> tuple[_PairResult | None, str, tuple[float, float]]:
+        """Check a hybrid's routed legs and join them to the trunk (#6446).
+
+        Returns ``(result, reason, leg lengths)``; ``result`` is ``None`` with
+        the decline reason when a leg is over budget, the vias exceed the
+        protocol limit, a leg breaks a pad's class or the junction is tight.
+        """
+        measure = self.pair_length_measure or _default_pair_length
         lens = (measure(legs["P"].route), measure(legs["N"].route))
         if max(lens) > cap + 1e-9:
-            return None, "pair-hybrid-leg-budget", lens, trunk_mm
+            return None, "pair-hybrid-leg-budget", lens
         vias_p, vias_n = len(legs["P"].route.vias), len(legs["N"].route.vias)
         if max_vias is not None and max(vias_p, vias_n) + vias_used > max_vias:
-            return None, "pair-hybrid-via-limit", lens, trunk_mm
+            return None, "pair-hybrid-via-limit", lens
 
         # The legs too: the search held them to the pad classes, but a leg is
         # pair-owned from here on and no later repair may move it.
@@ -4233,7 +4388,7 @@ class LatticePathfinder:
                     if dist(a, b) > 1e-9 and not self._gateway_pad_class_clear(
                         a, b, run_layer, leg_net, w / 2.0, reqs
                     ):
-                        return None, "pair-hybrid-leg-pad-class", lens, trunk_mm
+                        return None, "pair-hybrid-leg-pad-class", lens
 
         # Junction: each leg against everything of the PARTNER's -- its trunk
         # and its leg.  The searches above held the legs to the class
@@ -4263,7 +4418,7 @@ class LatticePathfinder:
                 for a, b in zip(pts, pts[1:], strict=False):
                     for c, d, other_layer in other_segs:
                         if other_layer == run_layer and seg_seg_dist(a, b, c, d) < need:
-                            return None, "pair-hybrid-junction", lens, trunk_mm
+                            return None, "pair-hybrid-junction", lens
 
         routes: list[Route] = []
         runs: list[tuple[int, int, list[Pt]]] = []
@@ -4283,7 +4438,7 @@ class LatticePathfinder:
             resources |= leg.resources
         runs.extend(trunk.runs)
         pres = _PairResult(routes=routes, runs=runs, resources=resources, vias=vias)
-        return pres, "ok", lens, trunk_mm
+        return pres, "ok", lens
 
     def _hybrid_anchor(self, start: Any, reach: float) -> tuple[Pt, Pt, Pt] | None:
         """``(anchor, site P, site N)`` of a hybrid trunk start (issue #6446).
