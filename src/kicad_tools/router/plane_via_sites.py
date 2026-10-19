@@ -74,6 +74,7 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 
 from kicad_tools.acceleration import to_numpy
+from kicad_tools.core.geometry import point_to_segment_distance
 
 from .primitives import Pad, pad_half_extents
 
@@ -291,12 +292,7 @@ def _segment_box_distance(ax: float, ay: float, bx: float, by: float, pad: Pad) 
 def _segment_point_distance(
     ax: float, ay: float, bx: float, by: float, px: float, py: float
 ) -> float:
-    dx, dy = bx - ax, by - ay
-    length_sq = dx * dx + dy * dy
-    if length_sq == 0.0:
-        return math.hypot(px - ax, py - ay)
-    t = max(0.0, min(1.0, ((px - ax) * dx + (py - ay) * dy) / length_sq))
-    return math.hypot(ax + t * dx - px, ay + t * dy - py)
+    return point_to_segment_distance(px, py, ax, ay, bx, by)
 
 
 def _segments_cross(
