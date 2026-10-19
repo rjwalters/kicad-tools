@@ -3457,6 +3457,7 @@ class LatticePathfinder:
         """
         from ..pairplan.gateway import (
             MAX_WORKABLE_GATEWAY_COMBOS,
+            MAX_WORKABLE_SEALED_GATEWAY_COMBOS,
             GatewayCombo,
             WorkableCombo,
             combo_length_floor,
@@ -3606,7 +3607,12 @@ class LatticePathfinder:
             tried = 0
             pruned = 0
             for order, (layer, lname, gated, combo) in enumerate(candidates):
-                if workable >= MAX_WORKABLE_GATEWAY_COMBOS:
+                # Issue #7463: a best that still seals a neighbour's escape
+                # site keeps the search going, up to the sealed-extra cap.
+                cap = MAX_WORKABLE_GATEWAY_COMBOS
+                if best is not None and best[0].sealed:
+                    cap = MAX_WORKABLE_SEALED_GATEWAY_COMBOS
+                if workable >= cap:
                     break
                 if deadline is not None and time.monotonic() >= deadline:
                     if best is not None:
@@ -3626,7 +3632,7 @@ class LatticePathfinder:
                 if best is not None:
                     fans = sum(g.fan_len_p + g.fan_len_n for g in (ga, gb) if g is not None)
                     floor = combo_length_floor(end_a, end_b, fans)
-                    if round(floor, 3) >= best[0].key()[0]:
+                    if best[0].sealed == 0 and round(floor, 3) >= best[0].key()[1]:
                         pruned += 1
                         continue
                 tried += 1
@@ -3655,7 +3661,9 @@ class LatticePathfinder:
                     lengths[0 if net == pc.pad_p_a.net else 1] += sum(
                         dist(a, b) for a, b in zip(poly, poly[1:], strict=False)
                     )
-                scored = WorkableCombo(order, lengths[0], lengths[1])
+                scored = WorkableCombo(
+                    order, lengths[0], lengths[1], self._escape_sites_sealed(pres, half)
+                )
                 if best is None or scored.key() < best[0].key():
                     desc = []
                     for tag, g, thr in (("A", ga, through[0]), ("B", gb, through[1])):
@@ -3686,6 +3694,36 @@ class LatticePathfinder:
             declined += f"; {summary}"
         self.pair_gateway_log[pc.key] = declined
         return None, reason
+
+    def _escape_sites_sealed(self, pres: _PairResult, half: float) -> int:
+        """Pair vias / tracks inside another net's #6697 escape site (#7463).
+
+        #6956 exempts a declared pair from the escape sites reserved in its
+        gateway envelope, so a gateway may legally land its vias on the exit
+        of a routed pad sandwiched between the pair's own pads (board 03 VBUS
+        U2.5: USB_D's In2.Cu gateway vias sit on its reserved via site).  The
+        pair then closes the pad in and the net can never leave it
+        (``decline[no-path-keepout-constrained]``).  This counts those hits
+        so :class:`~..pairplan.gateway.WorkableCombo` can rank a combination
+        that leaves every site open ahead of one that does not.
+        """
+        mask = self._keepouts
+        if mask is None:
+            return 0
+        sites = LatticeKeepoutMask(
+            tuple(a for a in mask.areas if a.name.startswith("pair-escape-via:"))
+        )
+        if not sites:
+            return 0
+        via_radius = float(self.rules.via_diameter) / 2.0
+        hits = sum(1 for _net, at in pres.vias if sites.via_blocked(at, -1, via_radius))
+        for _net, layer, poly in pres.runs:
+            hits += sum(
+                1
+                for a, b in zip(poly, poly[1:], strict=False)
+                if sites.segment_blocked(a, b, layer, -1, half)
+            )
+        return hits
 
     @staticmethod
     def _gateway_launch(g: Gateway | None, pad_p: Pad, pad_n: Pad) -> tuple[Pt, Pt]:
