@@ -897,8 +897,9 @@ jobs:
     # Issue #6894: nothing else in CI runs on Windows, so an unguarded
     # Unix-only import (resource, fcntl, signal.SIGKILL, os.fork, ...) at
     # module level would break `kct` there unnoticed, as #6739 did. This job
-    # only installs, runs the CLI help, and imports every router/cli module;
-    # it does not run the test suite. Advisory: not a required check.
+    # only installs, runs the CLI help, imports every router/cli module, and
+    # (issue #7478) does one real atomic write + PCB.save; it does not run the
+    # test suite. Advisory: not a required check.
     name: Windows Smoke
     needs: [changes, kicad_pin]
     # Issue #7327: main runs (schedule/workflow_dispatch) gate on
@@ -970,6 +971,35 @@ jobs:
               print(f"::error::import failed: {name}")
               print(tb)
           sys.exit(1 if failures else 0)
+          PY
+
+      # Issue #7478: atomic_write_text fsynced a read-only handle, which
+      # Windows rejects (EBADF), so every PCB.save failed there while imports
+      # and --help stayed green. POSIX tests can only emulate that; this step
+      # does a real write on the Windows runner.
+      - name: Real atomic write and PCB save
+        shell: bash
+        run: |
+          uv run python - <<'PY'
+          import tempfile
+          from pathlib import Path
+
+          from kicad_tools.core.atomic_write import atomic_write_text
+          from kicad_tools.schema.pcb import PCB
+
+          d = Path(tempfile.mkdtemp())
+          p = d / "x.kicad_pcb"
+          atomic_write_text(p, "x")
+          assert p.read_text() == "x", p.read_text()
+          assert not (d / "x.kicad_pcb.tmp").exists(), sorted(d.iterdir())
+
+          b = d / "board.kicad_pcb"
+          b.write_text('(kicad_pcb\n  (version 20240108)\n  (generator "test")\n)\n')
+          PCB.load(b).save(b)
+          assert "kicad_pcb" in b.read_text()
+          assert not (d / "board.kicad_pcb.tmp").exists(), sorted(d.iterdir())
+          PCB.load(b)
+          print("atomic write + PCB.save OK:", sorted(x.name for x in d.iterdir()))
           PY
 
   kicad-cli-smoke:

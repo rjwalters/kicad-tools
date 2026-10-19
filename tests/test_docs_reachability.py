@@ -75,3 +75,19 @@ def test_allowlist_entries_exist_and_are_needed():
         path = DOCS / rel
         assert path.is_file(), f"stale allowlist entry: {rel}"
         assert path.resolve() not in seen, f"allowlist entry is now reachable: {rel}"
+
+
+def test_every_research_note_is_listed_in_research_readme():
+    """The research index must list each note itself, not merely be reachable."""
+    index = DOCS / "research" / "README.md"
+    linked = set(_links(index))
+    missing = [
+        md.name
+        for md in sorted(index.parent.glob("*.md"))
+        if md.name != "README.md" and md.resolve() not in linked
+    ]
+    assert not missing, (
+        "docs/research/*.md not linked from docs/research/README.md:\n  "
+        + "\n  ".join(missing)
+        + "\nAdd one line per note (title + one-sentence summary) to the index."
+    )
