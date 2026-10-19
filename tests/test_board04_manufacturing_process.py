@@ -548,6 +548,60 @@ def test_weld_move_clears_the_land_and_is_idempotent(process, repaired):
     assert process.repair(repaired) == 0
 
 
+def test_repair_screen_without_fill_matches_the_full_copy_screen(process, repaired):
+    """Detaching the fill once screens moves exactly as a full copy did.
+
+    ``_repair_staged`` used to deep-copy the whole board per move and then
+    clear the copied zones' ``filled_polygons``; most of a repair run went
+    into copying fill vertices it threw away (issue #7374).  The screening
+    model built while the fill is detached must equal that one, and leaving
+    the context must restore ``doc`` byte for byte.
+    """
+    import copy
+    import dataclasses
+
+    from kicad_tools.schema.pcb import PCB
+
+    doc = parse_file(repaired)
+    before = serialize_sexp(doc)
+
+    legacy = PCB(copy.deepcopy(doc))
+    assert any(zone.filled_polygons for zone in legacy.zones)  # non-vacuous
+    for zone in legacy.zones:
+        zone.filled_polygons.clear()
+
+    with process._zone_fills_detached(doc):
+        assert not any(z.find_children("filled_polygon") for z in doc.find_children("zone"))
+        fast = PCB(copy.deepcopy(doc))
+    assert serialize_sexp(doc) == before
+
+    def zone_state(pcb):
+        return [
+            {
+                f.name: getattr(zone, f.name)
+                for f in dataclasses.fields(zone)
+                # Only the parallel fill-layer list differs: the legacy path
+                # never cleared it, and every reader indexes it by fill.
+                if f.name != "filled_polygon_layers" and not f.name.startswith("_")
+            }
+            for zone in pcb.zones
+        ]
+
+    assert zone_state(fast) == zone_state(legacy)
+    assert [(v.position, v.size, v.drill, v.layers, v.net_number) for v in fast.vias] == [
+        (v.position, v.size, v.drill, v.layers, v.net_number) for v in legacy.vias
+    ]
+    assert [(s.start, s.end, s.width, s.layer, s.net_number) for s in fast.segments] == [
+        (s.start, s.end, s.width, s.layer, s.net_number) for s in legacy.segments
+    ]
+    # The raw tree (read by the relocation helpers' source-copper checks) is
+    # the legacy copy minus exactly the fill children.
+    stripped = copy.deepcopy(legacy._sexp)
+    for zone in stripped.find_children("zone"):
+        zone.children = [c for c in zone.children if c.is_atom or c.name != "filled_polygon"]
+    assert serialize_sexp(fast._sexp) == serialize_sexp(stripped)
+
+
 def test_absent_weld_moves_are_allowed(process, repaired):
     """The committed (pre-#6425) route has none of the welds."""
     assert process.WELD_MOVES

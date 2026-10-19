@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import shutil
 import sys
 import zipfile
 from pathlib import Path
@@ -275,7 +276,6 @@ def test_outer_archive_members_resolve_against_committed_tree(mod, tmp_path):
     Boards 00-02 prefix members with ``manufacturing/``; a search root that
     ignores that refused them all (Issue #7273 review).
     """
-    import shutil
 
     for name, cfg in mod.BOARDS.items():
         board = mod.REPO_ROOT / "boards" / name
@@ -443,3 +443,29 @@ def test_drc_report_copies_are_written_and_recorded_in_report_sources(mod, tmp_p
 def test_demo_boards_with_drc_provenance_target_the_report_binding_reads(mod):
     for name in ("05-bldc-motor-controller", "06-diffpair-test", "07-matchgroup-test"):
         assert "output/drc_report.json" in mod.BOARDS[name].drc_targets
+
+
+# ------------------------------------------------------------ repin_staged (#7353)
+def test_repin_staged_gates_and_publishes_a_staged_copy(mod, tmp_path, monkeypatch):
+    """``repin_staged`` re-pins a caller-staged copy; ``after_manifest`` runs between re-hashes."""
+    board = _hooked_board(mod, tmp_path, monkeypatch, warnings=0)
+    cfg = mod.BOARDS[board.name]
+    staged = tmp_path / "staged" / board.name
+    shutil.copytree(board, staged)
+    rehashes: list[str] = []
+    monkeypatch.setattr(mod, "load_refresher", lambda *a: lambda mfg: rehashes.append("hash"))
+
+    def after_manifest() -> None:
+        rehashes.append("after")
+
+    published = mod.repin_staged(
+        board, staged, cfg, CHECKED_AT, dry_run=True, after_manifest=after_manifest
+    )
+
+    assert rehashes == ["hash", "after", "hash"]
+    assert "output/readiness.json" in published
+    assert (
+        json.loads((staged / "output" / "readiness.json").read_text())["checked_at"] == CHECKED_AT
+    )
+    # dry_run: the committed board is untouched
+    assert json.loads((board / "output" / "readiness.json").read_text())["checked_at"] != CHECKED_AT
