@@ -46,16 +46,7 @@ XDG_STATE_HOME="$(mktemp -d)"; export XDG_STATE_HOME
 DAEMON_STUB_DIR="$(mktemp -d)"
 for _s in loom-daemon node npm; do printf '#!/usr/bin/env bash\nexit 0\n' > "$DAEMON_STUB_DIR/$_s"; chmod +x "$DAEMON_STUB_DIR/$_s"; done
 WITH_DAEMON_PATH="$DAEMON_STUB_DIR:$PATH"
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-NC='\033[0m'
-
-TESTS_RUN=0
-TESTS_PASSED=0
-TESTS_FAILED=0
-
-pass() { TESTS_RUN=$((TESTS_RUN + 1)); TESTS_PASSED=$((TESTS_PASSED + 1)); echo -e "  ${GREEN}PASS${NC}: $1"; }
-fail() { TESTS_RUN=$((TESTS_RUN + 1)); TESTS_FAILED=$((TESTS_FAILED + 1)); echo -e "  ${RED}FAIL${NC}: $1"; }
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/assert.sh"
 
 assert_contains() {
     if [[ "$1" == *"$2"* ]]; then pass "$3"; else fail "$3 (missing substring: '$2' in: $1)"; fi
