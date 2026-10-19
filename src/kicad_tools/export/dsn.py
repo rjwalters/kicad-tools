@@ -231,6 +231,7 @@ class KiCadToDSNExporter:
         self._layers: list[str] = []
         self._nets: dict[int, str] = {}
         self._footprints: list[FootprintInfo] = []
+        self._image_names: dict[int, str] | None = None  # id(fp) -> image name
         self._segments: list[SegmentInfo] = []
         self._vias: list[ViaInfo] = []
         self._board_outline: list[tuple[float, float]] = []
@@ -969,6 +970,10 @@ class KiCadToDSNExporter:
                     v for x, y in hull for v in (sign * mm_to_um(x), mm_to_um(y))
                 )
             # Unsupported primitives and no bound either: the anchor box.
+            self._omit(
+                f"custom pad {pad.number!r} copper is exported as its anchor box; "
+                "its primitives could not be bounded"
+            )
             return rect_shape(w, h)
         a = math.radians(-rot)  # KiCad angles are CCW on a y-down board
         ca, sa = math.cos(a), math.sin(a)
@@ -1293,16 +1298,51 @@ class KiCadToDSNExporter:
         lines.append("  )")
         return "\n".join(lines)
 
-    @staticmethod
-    def _image_name(fp: FootprintInfo) -> str:
-        """Image name for a footprint: one image per (library, side).
+    def _image_name(self, fp: FootprintInfo) -> str:
+        """Image name for a footprint: one image per (library, side, pad geometry).
 
         A Specctra reader mirrors a back-placed image in x, while KiCad's
         file already stores back-side pad offsets flipped, so back images
         are distinct from front ones and carry x-negated pins (issue #7481).
+
+        Pad shapes depend on each pad's rotation *relative to the footprint*,
+        which differs between instances of one library footprint (same
+        absolute pad angle, different footprint rotation). The first variant
+        of a (library, side) keeps the plain name; any later variant with
+        different pad geometry gets a short hash suffix so it is not
+        flattened onto the first instance's copper (issue #7484).
         """
-        name = _sanitize_name(fp.footprint_lib)
-        return name if fp.layer == "F.Cu" else f"{name}__back"
+        if self._image_names is None:
+            self._image_names = {}
+            variants: dict[str, dict[tuple, str]] = {}
+            for other in self._footprints:
+                base = _sanitize_name(other.footprint_lib)
+                if other.layer != "F.Cu":
+                    base = f"{base}__back"
+                sig = tuple(
+                    (
+                        p.number,
+                        p.pad_type,
+                        p.shape,
+                        p.x,
+                        p.y,
+                        p.width,
+                        p.height,
+                        p.drill,
+                        p.drill_slot,
+                        tuple(p.layers),
+                        p.roundrect_rratio,
+                        p.rotation,
+                        p.block,
+                    )
+                    for p in other.pads
+                )
+                known = variants.setdefault(base, {})
+                if sig not in known:
+                    digest = hashlib.sha1(repr(sig).encode()).hexdigest()[:6]
+                    known[sig] = base if not known else f"{base}__{digest}"
+                self._image_names[id(other)] = known[sig]
+        return self._image_names.get(id(fp)) or _sanitize_name(fp.footprint_lib)
 
     def _generate_placement(self) -> str:
         """Generate the (placement ...) section."""

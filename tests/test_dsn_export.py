@@ -1114,6 +1114,37 @@ def _poly_area(nums):
     )
 
 
+def _abs_angle_fp(ref, rot):
+    # Same absolute pad angle (0) and non-square pad on every instance, so the
+    # pad's angle *relative* to the footprint differs with the footprint's.
+    return f"""  (footprint "Lib_C"
+    (layer "F.Cu")
+    (at 10 10 {rot})
+    (property "Reference" "{ref}" (at 0 0) (layer "F.SilkS"))
+    (pad "1" smd rect (at -0.775 0 0) (size 0.9 0.95) (layers "F.Cu"))
+  )
+"""
+
+
+class TestSharedImageRotation:
+    def test_instances_with_different_relative_pad_rotation_get_own_image(self, tmp_path):
+        dsn = _board_with(
+            tmp_path, [_abs_angle_fp("C1", 0), _abs_angle_fp("C2", 90), _abs_angle_fp("C3", 0)]
+        ).export()
+        comps = re.findall(r'\(component "?([^"\s]+)"?\s*\n\s*\(place "?([^"\s]+)', dsn)
+        by_ref = {ref: img for img, ref in comps}
+        assert by_ref["C1"] == "Lib_C"
+        assert by_ref["C2"] != by_ref["C1"]
+        images = re.findall(r'\(image "?([^"\s]+)"?\s*$', dsn, re.M)
+        assert sorted(images) == sorted({"Lib_C", by_ref["C2"]})
+        # Each image carries its own padstack: 0.9 x 0.95 vs the swapped one.
+        pins = {
+            img: re.search(rf'\(image "?{re.escape(img)}"?\s*\n\s*\(pin "?(\S+?)"? ', dsn).group(1)
+            for img in images
+        }
+        assert pins["Lib_C"] != pins[by_ref["C2"]]
+
+
 class TestPadShapes:
     def test_shapes_map_to_padstacks(self, tmp_path):
         shapes = _padstack_shapes(_shapes_dsn(tmp_path))
