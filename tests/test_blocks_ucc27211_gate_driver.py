@@ -141,12 +141,18 @@ class TestUCC27211GateDriver:
         labels = [c.args[0] for c in mock_schematic.add_label.call_args_list]
         assert "SRC_POS" in labels
 
-    def test_default_driver_symbol_is_custom(self, mock_schematic):
-        """Default symbol is the project-local UCC27211, not UCC27714D.
+    def test_default_driver_symbol_is_shipped(self, mock_schematic):
+        """Default symbol ships with KiCad (#7508), and is not UCC27714D.
 
         The Q1 resolution explicitly rejected UCC27714D as a stand-in;
         this test prevents regression to it.
         """
         UCC27211GateDriver(mock_schematic, x=100, y=100)
+        first_call = mock_schematic.add_symbol.call_args_list[0]
+        assert first_call.args[0] == "Driver_FET:LM5109AMA"
+
+    def test_custom_driver_symbol_still_accepted(self, mock_schematic):
+        """An explicit project-local symbol is passed through unchanged."""
+        UCC27211GateDriver(mock_schematic, x=100, y=100, driver_symbol="softstart_custom:UCC27211")
         first_call = mock_schematic.add_symbol.call_args_list[0]
         assert first_call.args[0] == "softstart_custom:UCC27211"

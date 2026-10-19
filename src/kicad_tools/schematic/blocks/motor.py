@@ -1896,6 +1896,20 @@ class UCC27211GateDriver(CircuitBlock):
     PEAK_DRIVE_A = 4.0
     DVDT_IMMUNITY_V_PER_NS = 50
 
+    # KiCad 10 ships no UCC27211; LM5109AMA is the pin-compatible half-bridge
+    # driver in the stock Driver_FET library.
+    DEFAULT_DRIVER_SYMBOL = "Driver_FET:LM5109AMA"
+    _CUSTOM_PIN_NUMBERS = {
+        "HB": "1",
+        "HO": "2",
+        "HS": "3",
+        "VDD": "4",
+        "HI": "5",
+        "LI": "6",
+        "VSS": "7",
+        "LO": "8",
+    }
+
     def __init__(
         self,
         sch: "Schematic",
@@ -1913,7 +1927,7 @@ class UCC27211GateDriver(CircuitBlock):
         bootstrap_cap_value: str = "100nF",
         vcc_bulk_cap_value: str = "10uF",
         vcc_bypass_cap_value: str = "100nF",
-        driver_symbol: str = "softstart_custom:UCC27211",
+        driver_symbol: str | None = None,
         driver_footprint: str = "Package_SO:SOIC-8_3.9x4.9mm_P1.27mm",
         cap_ref_prefix: str = "C",
         cap_ref_start: int = 1,
@@ -1944,15 +1958,22 @@ class UCC27211GateDriver(CircuitBlock):
             bootstrap_cap_value: Bootstrap capacitor value (HB ↔ HS).
             vcc_bulk_cap_value: VDD bulk decoupling capacitor.
             vcc_bypass_cap_value: VDD high-frequency bypass capacitor.
-            driver_symbol: KiCad lib_id for the UCC27211 symbol.  The
-                default ``softstart_custom:UCC27211`` requires the
-                schematic to have its ``local_symbol_libs`` pointed at
-                ``boards/external/softstart/symbols/softstart_custom.kicad_sym``.
+            driver_symbol: KiCad lib_id for the UCC27211 symbol.  ``None``
+                (default) uses the shipped, pin-compatible
+                ``Driver_FET:LM5109AMA`` so the block builds without a
+                board-local library.  Pass ``softstart_custom:UCC27211`` to
+                use the project symbol from ``local_symbol_libs`` (pointed at
+                ``boards/external/softstart/symbols/softstart_custom.kicad_sym``).
+                Pins resolve by name (VDD, VSS, ...), falling back to the
+                custom symbol's pin numbers.
             driver_footprint: SOIC-8 footprint for the IC.
             cap_ref_prefix: Reference prefix for the three caps.
             cap_ref_start: Starting cap reference number.
         """
         super().__init__(sch, x, y)
+
+        if driver_symbol is None:
+            driver_symbol = self.DEFAULT_DRIVER_SYMBOL
 
         # Place the driver IC
         self.driver = sch.add_symbol(
@@ -1966,14 +1987,21 @@ class UCC27211GateDriver(CircuitBlock):
         self.components = {"U_DRV": self.driver}
 
         # Get IC pin positions
-        vdd = self.driver.pin_position("4")  # VDD
-        vss = self.driver.pin_position("7")  # VSS (Kelvin ref)
-        li = self.driver.pin_position("6")
-        hi = self.driver.pin_position("5")
-        lo = self.driver.pin_position("8")
-        ho = self.driver.pin_position("2")
-        hb = self.driver.pin_position("1")
-        hs = self.driver.pin_position("3")
+        def _pin(name: str) -> tuple[float, float]:
+            """Resolve by pin name; fall back to the custom symbol's number."""
+            pins = getattr(getattr(self.driver, "symbol_def", None), "pins", None)
+            if isinstance(pins, list) and any(p.name == name for p in pins):
+                return self.driver.pin_position(name)
+            return self.driver.pin_position(self._CUSTOM_PIN_NUMBERS[name])
+
+        vdd = _pin("VDD")
+        vss = _pin("VSS")  # Kelvin ref
+        li = _pin("LI")
+        hi = _pin("HI")
+        lo = _pin("LO")
+        ho = _pin("HO")
+        hb = _pin("HB")
+        hs = _pin("HS")
 
         # Bootstrap capacitor between HB and HS (right side of IC)
         c_boot_ref = f"{cap_ref_prefix}{cap_ref_start}"
