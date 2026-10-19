@@ -1,5 +1,5 @@
 {
-  "_comment": "Issue #7166: LCSC part records for every part assigned on fleet boards 00-07, captured 2026-10-18 from LCSC product detail (encapStandard -> package, productModel -> mfr_part, productIntroEn -> description). Two manual-assembly connectors absent from that capture come from elsewhere: C7095263 from the jlcparts offline catalog, C124375 from board 07's committed manual-assembly-bom.csv. Used offline by tests/test_lcsc_ic_package_guard_7166.py; never fetched in CI. C114147 (board 04 Y1, assigned only in project.kct) added for issue #7180 from the same LCSC product-detail source, 2026-10-18.",
+  "_comment": "Issue #7166: LCSC part records for every part assigned on fleet boards 00-07, captured 2026-10-18 from LCSC product detail (encapStandard -> package, productModel -> mfr_part, productIntroEn -> description). Two manual-assembly connectors absent from that capture come from elsewhere: C7095263 from the jlcparts offline catalog, C124375 from board 07's committed manual-assembly-bom.csv. Used offline by tests/test_lcsc_ic_package_guard_7166.py; never fetched in CI. C114147 (board 04 Y1, assigned only in project.kct) added for issue #7180 from the same LCSC product-detail source, 2026-10-18. C492401 and C492407 (board 06 J1-J3, XFCN PZ254V-11-02P / -08P, substituted for the Samtec TSW headers by #7426 under operator ruling #7268 Q2 = 3) added for issue #7445, copied verbatim from the LCSC records that #7426's `kct parts lookup --no-cache` wrote to the parts cache on 2026-10-19 and that its review checked against the LCSC product pages.",
   "parts": {
     "C1588": {
       "package": "0603",
@@ -335,6 +335,18 @@
       "package": "HC-49S",
       "mfr_part": "X49SD8MSB2SC",
       "description": "CRYSTAL 8MHz 20pF TH"
+    },
+    "C492401": {
+      "package": "Plugin,P=2.54mm",
+      "mfr_part": "PZ254V-11-02P",
+      "manufacturer": "XFCN",
+      "description": "-40℃~+105℃ 1 1x2P 2.54mm 2.5mm 250V 2P 3A 3mm 6.1mm Black Brass Gold Square pin Through Hole Plugin,P=2.54mm Pin Headers ROHS"
+    },
+    "C492407": {
+      "package": "Plugin,P=2.54mm",
+      "mfr_part": "PZ254V-11-08P",
+      "manufacturer": "XFCN",
+      "description": "-40℃~+105℃ 1 1x8P 2.54mm 2.5mm 250V 3A 3mm 6.1mm 8P Black Brass Gold Square pin Through Hole Plugin,P=2.54mm Pin Headers ROHS"
     }
   }
 }

@@ -5,29 +5,6 @@
       "kind": "advisory",
       "summary": "PHASE_A inner copper is sized for 1 oz; the order must request 1 oz inner copper (JLCPCB's default is 0.5 oz), and manufacturing/manifest.json does not yet record ordered_copper",
       "recorded": "2026-10-18"
-    },
-    {
-      "issue": 7220,
-      "kind": "advisory",
-      "summary": "Via drills at the edge of SMD pads R11.1, R9.1 and D1.1 (0.000-0.027 mm, below the 0.1 mm solder-mask dam): via wicking risk; router fix tracked in #7296",
-      "recorded": "2026-10-18",
-      "warnings": [
-        {
-          "rule": "via_at_pad_edge",
-          "ref": "D1",
-          "pad": "D1-1"
-        },
-        {
-          "rule": "via_at_pad_edge",
-          "ref": "R11",
-          "pad": "R11-1"
-        },
-        {
-          "rule": "via_at_pad_edge",
-          "ref": "R9",
-          "pad": "R9-1"
-        }
-      ]
     }
   ]
 }

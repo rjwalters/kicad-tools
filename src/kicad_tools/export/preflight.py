@@ -1369,6 +1369,16 @@ class PreflightChecker:
         them (issue #7166): "not checked" must never read as "checked and
         fine".  The WARN never blocks export, even under
         ``--strict-preflight`` -- a fresh CI runner has an empty cache.
+
+        A known part on a ``PinHeader_RxC`` / ``PinSocket_RxC`` footprint
+        whose record states no readable pin count (or conflicting ones) is
+        ``unverified`` too (issue #7446), tagged with its reason.  By default
+        it joins the same WARN.  Under ``strict_report_source`` (set from
+        ``--strict-preflight``, as for the #7091 report-source check) it is a
+        FAIL: unlike a cache miss it is a deterministic fact about the part
+        record, and the check that matters -- does a 2-pin part sit on an
+        8-pin header? -- never ran.  Parts missing from the cache stay WARN
+        even under strict.
         """
         try:
             bom = self._load_bom()
@@ -1411,8 +1421,11 @@ class PreflightChecker:
                 pads = [str(p.number) for p in fp.pads]
                 pads_by_ref[fp.reference] = None if fp.reference in pads_by_ref else pads
 
+        from .lcsc_value_check import UNVERIFIED_HEADER_REASONS
+
         mismatches: list[str] = []
         unverified: list[str] = []
+        header_unverified: list[str] = []
         sources: set[str] = set()
         assigned = 0
         for item in items:
@@ -1428,11 +1441,16 @@ class PreflightChecker:
                 footprint=item.footprint,
                 pad_numbers=pads_by_ref.get(item.reference),
             )
-            if verdict.status == "unverified":
-                unverified.append(f"{item.reference} -> {item.lcsc}")
-                continue
             if verdict.source:
                 sources.add(verdict.source)
+            if verdict.status == "unverified":
+                if verdict.reason in UNVERIFIED_HEADER_REASONS:
+                    entry = f"{item.reference} -> {item.lcsc} ({verdict.reason})"
+                    header_unverified.append(entry)
+                    unverified.append(entry)
+                else:
+                    unverified.append(f"{item.reference} -> {item.lcsc}")
+                continue
             if verdict.mismatch is not None:
                 mismatches.append(
                     f"{item.reference} ({item.value}) -> {item.lcsc}: "
@@ -1461,15 +1479,46 @@ class PreflightChecker:
 
         verified = assigned - len(unverified)
         against = " and ".join(sorted(sources)) or "no source"
+        if header_unverified and self.config.strict_report_source:
+            shown = ", ".join(header_unverified[:8])
+            n_hdr = len(header_unverified)
+            suffix = f" (and {n_hdr - 8} more)" if n_hdr > 8 else ""
+            others = len(unverified) - n_hdr
+            also = f"; {others} more unverifiable (not in parts cache or offline catalog)"
+            return PreflightResult(
+                name="bom_lcsc_values",
+                status="FAIL",
+                message=(
+                    f"{n_hdr} pin header/socket part(s): pin count not verifiable "
+                    f"(strict preflight){also if others else ''}"
+                ),
+                details=f"pin count not verifiable: {shown}{suffix}",
+            )
         if unverified:
             shown = ", ".join(unverified[:8])
             suffix = f" (and {len(unverified) - 8} more)" if len(unverified) > 8 else ""
+            not_found = len(unverified) - len(header_unverified)
+            why = [
+                f"{n} {text}"
+                for n, text in (
+                    (not_found, "not in parts cache or offline catalog"),
+                    (len(header_unverified), "header part(s) with pin count not verifiable"),
+                )
+                if n
+            ]
+            reasons = (
+                "not in parts cache or offline catalog"
+                if not header_unverified
+                else "header part(s) with pin count not verifiable"
+                if not not_found
+                else "; ".join(why)
+            )
             return PreflightResult(
                 name="bom_lcsc_values",
                 status="WARN",
                 message=(
                     f"{verified} of {assigned} assigned item(s) verified ({against}); "
-                    f"{len(unverified)} unverifiable (not in parts cache or offline catalog)"
+                    f"{len(unverified)} unverifiable ({reasons})"
                 ),
                 details=f"unverified: {shown}{suffix}",
             )

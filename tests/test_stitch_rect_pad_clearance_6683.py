@@ -369,21 +369,34 @@ def test_extended_escape_samples_channel_centre_on_1_27mm_bga() -> None:
     is rejected, the next fixed step (2.0 mm) took the NEXT pad's channel and
     stranded U4.E6 on the board.  Half the pitch -- the channel centre --
     is sampled instead.
+
+    Issue #7296: candidates are checked where the writer puts them (0.01 mm
+    grid).  Offset 0.5 gives a 0.725 mm breakout, written 0.72, which clears
+    as written; 0.505 (breakout 0.73, on the grid) keeps the circle model's
+    under-check visible.
     """
+    offset = 0.505
     bboxes, circles = _grid(1.27, "rect")
     legacy = calculate_extended_escape_position(
-        STITCHED, 0.5, VIA_SIZE, [], CLEARANCE, other_net_pads=circles
+        STITCHED, offset, VIA_SIZE, [], CLEARANCE, other_net_pads=circles
     )
     assert legacy is not None
-    # The circle model still accepts the 0.5 mm step, 3 um inside clearance.
-    assert legacy[0] == pytest.approx(0.5)
-    assert _min_via_gap(legacy, bboxes) == pytest.approx(0.197, abs=1e-3)
+    # The circle model still accepts the 0.5 mm step, 7 um inside clearance.
+    assert legacy[:2] == pytest.approx((0.5, 0.73))
+    assert _min_via_gap(legacy, bboxes) == pytest.approx(0.193, abs=1e-3)
 
     fixed = calculate_extended_escape_position(
-        STITCHED, 0.5, VIA_SIZE, [], CLEARANCE, other_net_pads=circles, other_net_pad_bboxes=bboxes
+        STITCHED,
+        offset,
+        VIA_SIZE,
+        [],
+        CLEARANCE,
+        other_net_pads=circles,
+        other_net_pad_bboxes=bboxes,
     )
     assert fixed is not None
-    assert fixed[0] == pytest.approx(1.27 / 2)
+    # The channel centre (1.27 / 2), as written.
+    assert fixed[0] == pytest.approx(round(1.27 / 2, 2))
     assert _min_via_gap(fixed, bboxes) >= CLEARANCE
 
 

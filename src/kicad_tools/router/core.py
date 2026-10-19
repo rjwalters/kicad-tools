@@ -5565,6 +5565,13 @@ class Autorouter:
                     print(
                         f"  Diff-pair hybrid (lattice) {pc.pair_name} {label}: {hybrid_log[pc.key]}"
                     )
+                    # Issue #7093: the post-route via-parity pass on this hybrid.
+                    parity_note = (getattr(pf, "hybrid_parity_log", {}) or {}).get(pc.key)
+                    if isinstance(parity_note, str):
+                        print(
+                            f"  Diff-pair hybrid parity (lattice) {pc.pair_name} {label}: "
+                            f"{parity_note}"
+                        )
             self._print_pair_threshold_report()
             # Issue #6373: a pair routed by the uncoupled fallback is a
             # diff-pair WARNING (coupling / skew not guaranteed), not an open

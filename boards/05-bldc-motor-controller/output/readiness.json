@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "checked_at": "2026-10-18T23:59:00+00:00",
+  "checked_at": "2026-10-19T07:38:00+00:00",
   "mode": "assembly",
   "status": "ready",
   "blockers": [],
@@ -8,7 +8,7 @@
     {
       "name": "bom",
       "status": "passed",
-      "detail": "All42 exact LCSC identities match source parts;23 BOM groups,42 CPL placements (36 SMT + J1-J5/RV1 through-hole, JLCPCB-assembled since #7239)."
+      "detail": "All42 exact LCSC identities match source parts;23 BOM groups,36 SMT CPL placements;J1-J5/RV1 manual assembly."
     },
     {
       "name": "kct_check",
@@ -23,7 +23,7 @@
     {
       "name": "artifacts",
       "status": "passed",
-      "detail": "23 BOM groups/42 exact identities,42 CPL placements (36 SMT + 6 through-hole) in the Gerber/drill frame (#7059, #7241); complete Gerber/drill/drawings/KiCad source/firmware package and SHA256 integrity. CPL regenerated through manufacturer profile: D1/D2/D3=180 degrees, U1=270 degrees; library-qualified names preserve corrections. Other CPL fields unchanged; package archive and manifest verified."
+      "detail": "23 BOM groups/42 exact identities,36 SMT placements,6 manual parts; complete Gerber/drill/drawings/KiCad source/firmware package and SHA256 integrity. CPL regenerated through manufacturer profile: D1/D2/D3=180 degrees, U1=270 degrees; library-qualified names preserve corrections. Other CPL fields unchanged; package archive and manifest verified."
     },
     {
       "name": "source_reconstruction",
@@ -59,13 +59,13 @@
     "output/bldc_controller.kicad_pro": "3dc23815199999d4f6d55c47d8e8ab0ec3edd4b6f5a20af9e85d26da5568fbd2",
     "output/bldc_controller.kicad_sch": "e4f91070301fa9977446b0d483fb72bcdb8bc1d37dbc55b5930f5bd0464e3d3e",
     "output/bldc_controller_routed.kicad_dru": "8d2a82b2bef304dda540b329fcca1520b1addee2f489bf094e3b678d042b1d76",
-    "output/bldc_controller_routed.kicad_pcb": "3712b7fa3405b7dd81b9e28bd3bf0088ec461ad0d062122e6e0c8f496420cb4f",
+    "output/bldc_controller_routed.kicad_pcb": "8b4f1aadeed63d2bd2c9e67bd842b3e030830f3fbd63955018ef5b2da0495c73",
     "output/bldc_controller_routed.kicad_pro": "16b10e2574b92eff22c770af6707681299949ecff4ff1d2e3efa671c4fa53655",
     "output/board05_revB.kicad_sym": "05702cd35f2a300e46dd79349044695cc2e4cd80e6078b417ef057a71207257c",
     "output/board05_revB.pretty/CP_Elec_8x10.5_PolarityMark.kicad_mod": "544e9e4de35e1f673f5c2efc24e8b485c70a49f9ae51d3624e855c1f6a3b0178",
     "output/board05_revB.pretty/TI_PWP0028C_EP3.4x9.7_Mask3.1x5.18_ThermalVias.kicad_mod": "6be1ab0e106cbf957d0d708d72f06518a70af776ded5b64de8a2f62f65c833d7",
-    "output/drc_report.json": "bd5397ac1b18435df067f90c1767e77fa7b1976b185d918f3a9540af1df3d4e0",
-    "output/erc_report.json": "651abcfc8a766dfa0cbd606b487859cb596690fa405d3bfdf8d1ed78e2535ccd",
+    "output/drc_report.json": "ac35efa692f7039bb57b1739128a79a3e228e2134215de145e9c68a82b402f87",
+    "output/erc_report.json": "15050d6fcc8a03ba8349ba75137038b4a3cba9487f6dce0a3d7200a61034971a",
     "output/fp-lib-table": "4a62ef010ac70b70114c6c1db80d54a3e8964c143796c20c79a31fcf166b3c11",
     "output/lvs.json": "52fed944df95bc4d3650b2774ce6b714e731e310d9d9a761553b25055b3e1a25",
     "output/manufacturing/HARDWARE.md": "c18a5ccc40e0f0e862b062d70d9be509f7ceed9de5c6fb8df95b711f69d7dd74",
@@ -73,13 +73,13 @@
     "output/manufacturing/assembly-back.pdf": "f6c1d5815cbaf1a05c350590a5ee17e9a8dbf2c9b25d9ebbf77869c0155a7efd",
     "output/manufacturing/assembly-front.pdf": "9dff7451d0e7f5f797adf0071e2fa618f95036bd9bf64d9f29734febf96e14c6",
     "output/manufacturing/bom_jlcpcb.csv": "6e04b5c78e81ebd85f18e72142d21906dda4165d5ca9b7f7d6159729b54c5506",
-    "output/manufacturing/check-report.json": "50fd9a160510e11db6ba7fc902a087eea4087c960b03d9bfb70cd470249a3020",
+    "output/manufacturing/check-report.json": "ccf68619f5e814fc64b786326a32967ac5ac094082782961a9100fdca457a4c6",
     "output/manufacturing/cpl_jlcpcb.csv": "6b8231d3b65a8d0d7c13a0354f76fd852716c4ddacc2cd5f1410baabe0ce858d",
     "output/manufacturing/firmware/Makefile": "f105bf145347705a625a825aad34614c3e4001c7260793991f68cca37587516c",
     "output/manufacturing/firmware/bldc.hex": "4482dd25f19c36ab8ed4a6514904b6668bbe7a11264f788b50a9cd0810916412",
     "output/manufacturing/firmware/commutation.h": "2193ce070b97ab9591b9045b0b58fe84070fa04726e2f0ed7a7a7fb6111380d0",
     "output/manufacturing/firmware/main.c": "26f3aef6075cbf0b5dccb895974a816fc8baa40390a620a136a9cfa11b45035f",
-    "output/manufacturing/gerbers/gerbers.zip": "f8efef2d672555daabc8ae9a7346d4b8be4b247bcd4b90ea971d9bf9e6039955",
+    "output/manufacturing/gerbers/gerbers.zip": "3d661ea03ebc945070a2e853700c66cb2c2ef5332074f3dfc12af59240711c3f",
     "output/manufacturing/images/assembly.png": "56e07c74420ae321cbca7dd1e6b55dca323e3f65523ae66c82c27913820a3445",
     "output/manufacturing/images/layer_B_Cu.png": "f5cb2b6ec8483df1144eb974408d51eabdc77f296581c7133177ac433e378457",
     "output/manufacturing/images/layer_F_Cu.png": "38d0695a87a76bfc95bd54aaf622b440f232a5988404ff1dd5ac420a1063bd42",
@@ -89,12 +89,12 @@
     "output/manufacturing/images/pcb_copper.png": "95fd48e5322cc4005636e53945b27f28ecacb5ec23ae16aeb52d0ee0578e317b",
     "output/manufacturing/images/pcb_front.png": "fd1d392fa778650f4667fc589a413c959d5fd474d3995eec8c8e8138691f6a34",
     "output/manufacturing/images/schematic_bldc_controller.png": "5c7e9f99485b1d6dac315ce5da1dc49c8d0e0478e6d187d1129e11b57be83495",
-    "output/manufacturing/kct-check.json": "50fd9a160510e11db6ba7fc902a087eea4087c960b03d9bfb70cd470249a3020",
-    "output/manufacturing/kicad_project.zip": "875af0eff99ed1af4f80a29a29a0860992f8846e21538898577552934dbebedf",
+    "output/manufacturing/kct-check.json": "ccf68619f5e814fc64b786326a32967ac5ac094082782961a9100fdca457a4c6",
+    "output/manufacturing/kicad_project.zip": "9973b22e7cef9c34b1a8c57fcd28db254fb6ae992afe54c31977b7b545ce087d",
     "output/manufacturing/lvs.json": "52fed944df95bc4d3650b2774ce6b714e731e310d9d9a761553b25055b3e1a25",
-    "output/manufacturing/manifest.json": "b09437bc821692fa926fadeab9abaddfedbc1ea6fc07cf4fcf8b1c264572181d",
+    "output/manufacturing/manifest.json": "255170da92fb365ae1524ec1232843e9c41e6bbe31423615c35a4a95f1c13a8c",
     "output/manufacturing/native-drc.json": "604449a31cd023f804af85b1ad66f21f364193aad574acc6e65487c1784a985c",
-    "output/manufacturing/native-erc.json": "651abcfc8a766dfa0cbd606b487859cb596690fa405d3bfdf8d1ed78e2535ccd",
+    "output/manufacturing/native-erc.json": "15050d6fcc8a03ba8349ba75137038b4a3cba9487f6dce0a3d7200a61034971a",
     "output/manufacturing/project.kct": "069f467cabeda773e36897cf2a4a7012577bda6258e119cb6cc24a0a856a0d6b",
     "output/manufacturing/renders/3d-back.png": "ec0126e348b9f440792f9224a68b713dd86d59b15ad3c9c3b5a4de8de6fe1a8e",
     "output/manufacturing/renders/3d-front.png": "8a5486120518e28a5126af21d961ea5966e0378c513930681473e4f4a7e9ff83",
@@ -103,15 +103,15 @@
     "output/manufacturing/report.md": "2a8be894b2281161fa0df2b4b92e44e3da615c5e908edd91f573c93e006d1774",
     "output/manufacturing/report.pdf": "0ecfb21366b397388d2e6e91eced43a7ea180c6528d3ea596c91a375d4f64b31",
     "output/manufacturing/schematic.pdf": "3bb8564323757ed17fbffed573e01e456c851fbd84863ce978028e45f065e9b2",
-    "output/manufacturing.zip": "8db91dc24c7fa2777f3cf69c4a2eefe27adef766c16c15134df6d8e7032e9649",
+    "output/manufacturing.zip": "8395855aa637ca026991ffd9431f3b4ae43e22f1e1bf67ced4aced9b148b1762",
     "output/project.kct": "4369ceb55221ee30b4a25e636e1fb6d41c9cb12fcebc11a3a6136f9090e20af7",
     "output/readiness/45-alignment.json": "5f7217e95e929fbe8ea5c45aa0d8535ebd5ec39ef3f131539cc7413d30a5eedf",
     "output/readiness/drill-relocations.json": "aff479ed240c2180417e10dd9068b9f2d8ad6c40befb33ae1183a4ee2ece94cd",
     "output/readiness/drill-replay.txt": "bb4f159bd67fdc079c0a99b40278bb29bb7764232bfe35b2ecaad12301886009",
     "output/readiness/firmware.txt": "b2c277cbb5ca50e0adc39a950aa493d8857cb446f36273c5dc7d687871c5abc8",
-    "output/readiness/kct-check.json": "50fd9a160510e11db6ba7fc902a087eea4087c960b03d9bfb70cd470249a3020",
+    "output/readiness/kct-check.json": "ccf68619f5e814fc64b786326a32967ac5ac094082782961a9100fdca457a4c6",
     "output/readiness/native-drc.json": "604449a31cd023f804af85b1ad66f21f364193aad574acc6e65487c1784a985c",
-    "output/readiness/native-erc.json": "651abcfc8a766dfa0cbd606b487859cb596690fa405d3bfdf8d1ed78e2535ccd",
+    "output/readiness/native-erc.json": "15050d6fcc8a03ba8349ba75137038b4a3cba9487f6dce0a3d7200a61034971a",
     "output/readiness/reconstruction.txt": "c11e65c070656735650c1c9aa9d5a7f2a6d5ee84a77e2983d4d65672fb685cd9",
     "output/renders/3d-back.png": "ec0126e348b9f440792f9224a68b713dd86d59b15ad3c9c3b5a4de8de6fe1a8e",
     "output/renders/3d-front.png": "8a5486120518e28a5126af21d961ea5966e0378c513930681473e4f4a7e9ff83",
@@ -124,7 +124,7 @@
     "redesign/board05_revB.kicad_sym": "05702cd35f2a300e46dd79349044695cc2e4cd80e6078b417ef057a71207257c",
     "redesign/board05_revB.pretty/CP_Elec_8x10.5_PolarityMark.kicad_mod": "544e9e4de35e1f673f5c2efc24e8b485c70a49f9ae51d3624e855c1f6a3b0178",
     "redesign/board05_revB.pretty/TI_PWP0028C_EP3.4x9.7_Mask3.1x5.18_ThermalVias.kicad_mod": "6be1ab0e106cbf957d0d708d72f06518a70af776ded5b64de8a2f62f65c833d7",
-    "redesign/build.py": "0a282190a8d7014e1d6920f393abcc65d6765e6111fe852c15071503c207e571",
+    "redesign/build.py": "c05bc49b9bc3705681a7a5f7d87b20c7234d12d1141423236aeef04644252265",
     "redesign/fanout.py": "316fb75149a03c9823f7d22d780e79ad123cf4a96a9ce4518652fcbcb4ef22d4",
     "redesign/firmware/.gitignore": "0d3273dd7acb360b87531bf7241afa3e30b97feecf6d2d9b0d231cd36b91c179",
     "redesign/firmware/Makefile": "f105bf145347705a625a825aad34614c3e4001c7260793991f68cca37587516c",
@@ -136,12 +136,12 @@
     "redesign/original-circuit-audit.md": "b2ca320577ffc51e9bfb11eaf6553bf6008ea7d8dc870317899d10828b9a391a",
     "redesign/package.py": "9cd4de5561bbe859a4d1eb0db9c9a37ae7dcd99a461890fb41bba19610446684",
     "redesign/project.kct": "ba6911aa5aefe513c5e4db8fac019c11723b4e627d1554329d69b9c5131917ae",
-    "redesign/routing.json": "af8a9bdcd7d632fe9fdc6e4eed76e0f8e660360535b519744d0c0857bbfc9bab",
+    "redesign/routing.json": "857e521569f42f9e0e196698c980edcaa85efbd76686652de9a035f32f35a77e",
     "redesign/routing.py": "8b7a89516502816b0cdcc6b3931e902140bd8b898742d6bad6807154c2331730",
     "redesign/test_firmware.c": "3cb8ebe3001bb652701b5d96bce34d2cba37f07475daa38bec90db80e1cec8b6",
-    "output/manufacturing/design-source.zip": "2292cf7cd014252120a60332b41e9bdb964467392fd9823d53b5447cefbc37d3",
+    "output/manufacturing/design-source.zip": "3ca5331bf5486aa2c1aa56e97b4605837a35ea772c054d3bdaaa55b5afad1d5f",
     "output/readiness/footprint-identity-comparison.json": "fb771b3640412a466417a3492a0f97cb2e929064d842f80eca6670a86fd35107",
-    "output/readiness/known-issues.json": "8699a2008cb7141d9453579fe78147c227f37e7008aa05cf2600b8f4fcb07b8a"
+    "output/readiness/known-issues.json": "c39a0f4e4478344c253ffb14d23f32292b1c790d2dc8727253cb06387006619e"
   },
   "evidence": {
     "kct_check": "output/readiness/kct-check.json",
@@ -160,33 +160,10 @@
       "kind": "advisory",
       "summary": "PHASE_A inner copper is sized for 1 oz; the order must request 1 oz inner copper (JLCPCB's default is 0.5 oz), and manufacturing/manifest.json does not yet record ordered_copper",
       "recorded": "2026-10-18"
-    },
-    {
-      "issue": 7220,
-      "kind": "advisory",
-      "summary": "Via drills at the edge of SMD pads R11.1, R9.1 and D1.1 (0.000-0.027 mm, below the 0.1 mm solder-mask dam): via wicking risk; router fix tracked in #7296",
-      "recorded": "2026-10-18",
-      "warnings": [
-        {
-          "rule": "via_at_pad_edge",
-          "ref": "D1",
-          "pad": "D1-1"
-        },
-        {
-          "rule": "via_at_pad_edge",
-          "ref": "R11",
-          "pad": "R11-1"
-        },
-        {
-          "rule": "via_at_pad_edge",
-          "ref": "R9",
-          "pad": "R9-1"
-        }
-      ]
     }
   ],
   "manufacturer": "jlcpcb",
   "report_sources": {
-    "output/drc_report.json": "3712b7fa3405b7dd81b9e28bd3bf0088ec461ad0d062122e6e0c8f496420cb4f"
+    "output/drc_report.json": "8b4f1aadeed63d2bd2c9e67bd842b3e030830f3fbd63955018ef5b2da0495c73"
   }
 }

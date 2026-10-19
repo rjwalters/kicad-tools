@@ -140,6 +140,13 @@ class GapTighteningResult:
             if self.target_gap_mm is not None:
                 line += f", target gap {self.target_gap_mm:.3f}mm"
             line += ")"
+            # A partly tightened pair reports ``tightened``; surface why the
+            # leftover runs were declined (Issue #7349).
+            declined = [r for r in self.runs if r.status != "tightened"]
+            if declined and self.runs_tightened:
+                line += "".join(
+                    f"\n    {r.layer} run gap {r.gap_before_mm:.3f}mm: {r.status}" for r in declined
+                )
         return line
 
 
