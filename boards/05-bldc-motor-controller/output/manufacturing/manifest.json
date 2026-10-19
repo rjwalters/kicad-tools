@@ -9,8 +9,8 @@
       "size": 8833
     },
     "README.txt": {
-      "sha256": "f5a73c37465fba2197b746564bcea3be328c69094e3a7e773cef590cd8f6a6d9",
-      "size": 1591
+      "sha256": "820be1d9ae6a81171e5d07b69dce287e95b13a81431ff50a27252b178027dec7",
+      "size": 1600
     },
     "assembly-back.pdf": {
       "sha256": "f6c1d5815cbaf1a05c350590a5ee17e9a8dbf2c9b25d9ebbf77869c0155a7efd",
@@ -25,16 +25,16 @@
       "size": 1442
     },
     "check-report.json": {
-      "sha256": "50fd9a160510e11db6ba7fc902a087eea4087c960b03d9bfb70cd470249a3020",
-      "size": 4103
+      "sha256": "ccf68619f5e814fc64b786326a32967ac5ac094082782961a9100fdca457a4c6",
+      "size": 11456
     },
     "cpl_jlcpcb.csv": {
-      "sha256": "84a86a6db7a27d9a52b1aa7f45e7a4b7c4fd5965e45b23dbd4a48d2866b558cc",
-      "size": 2559
+      "sha256": "6b8231d3b65a8d0d7c13a0354f76fd852716c4ddacc2cd5f1410baabe0ce858d",
+      "size": 3255
     },
     "design-source.zip": {
-      "sha256": "dd8b18c58dc845a3cb266bb7e21c9bd906f183c6521f68f118890a2645f4cf68",
-      "size": 360707
+      "sha256": "3ca5331bf5486aa2c1aa56e97b4605837a35ea772c054d3bdaaa55b5afad1d5f",
+      "size": 360568
     },
     "firmware/Makefile": {
       "sha256": "f105bf145347705a625a825aad34614c3e4001c7260793991f68cca37587516c",
@@ -93,8 +93,8 @@
       "size": 443648
     },
     "kct-check.json": {
-      "sha256": "50fd9a160510e11db6ba7fc902a087eea4087c960b03d9bfb70cd470249a3020",
-      "size": 4103
+      "sha256": "ccf68619f5e814fc64b786326a32967ac5ac094082782961a9100fdca457a4c6",
+      "size": 11456
     },
     "kicad_project.zip": {
       "sha256": "9973b22e7cef9c34b1a8c57fcd28db254fb6ae992afe54c31977b7b545ce087d",
@@ -109,7 +109,7 @@
       "size": 1214
     },
     "native-erc.json": {
-      "sha256": "13d65d185013b622eef9f40afbba8287eb05f63ac75ea8c8ccc3099fb7be6695",
+      "sha256": "15050d6fcc8a03ba8349ba75137038b4a3cba9487f6dce0a3d7200a61034971a",
       "size": 988
     },
     "project.kct": {
