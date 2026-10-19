@@ -15,6 +15,11 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-19
 
+- **PR #7406**: test: ratchet board evidence producers onto the gated re-pin path
+- **Issue #7358** (closed): Evidence producers: gate-parity ratchet test, one registered re-pin path per ready board (#7353 step 4)
+- **PR #7361**: feat: honour an exact errors allowance on exception known issues in kct readiness
+- **PR #7350**: feat(router): length-aware choice among via-parity fallback leg pairs (#7093)
+- **PR #7413**: test: pin historical board 05 ERC error budget at 0
 - **PR #7408**: fix(ci): lower board 07 copper-safety DRC floor to 0
 - **PR #7396**: fix: key known_issues warning allowances by finding identity
 - **Issue #7389** (closed): Key readiness known_issues warning/error allowances by finding identity, not per-rule counts (#7359 follow-up, #7270 Q3)

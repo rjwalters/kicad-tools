@@ -2,7 +2,7 @@
 
 Prioritized roadmap generated from current GitHub label state. Maintained by the Guide triage agent.
 
-*Last updated: 2026-10-18*
+*Last updated: 2026-10-19*
 
 ---
 
@@ -32,19 +32,17 @@ _None._
 
 Human-approved issues ready for implementation (`loom:issue`).
 
-_None._
+- **#7093**: router: differential pair gets unequal via counts when a leg falls back to uncoupled routing (board 03 USB_D 2 vs 3; blocks #6394)
 
 ## In Progress
 
 Issues currently being built (`loom:building`).
 
 - **#6554**: diffpair: reproduce KiCad's diff_pair_uncoupled primitive pairing exactly (kct is a lower bound)
-- **#7093**: router: differential pair gets unequal via counts when a leg falls back to uncoupled routing (board 03 USB_D 2 vs 3; blocks #6394)
 - **#7153**: kct export bundle inconsistencies: JLCPCB Gerbers omit paste layers for SMT bundles; board 04 manifest says DRC OK while report says FAIL/NOT_READY; report ERC falsely 'skipped by user request'
 - **#7296**: Router: refuse pad-edge vias (mask-dam floor) and move existing ones on boards 02/05/06 (split from #7220, PR3)
 - **#7349**: Boards 06/07: enable diff-pair gap tightening on seed-42 re-routes and drop the impedance caps (#7344 PR 2)
 - **#7355**: kct readiness --verify doesn't honour board 04's recorded #6269 exception: blocks on 24 paid-drill via errors while the committed record says ready
-- **#7358**: Evidence producers: gate-parity ratchet test, one registered re-pin path per ready board (#7353 step 4)
 - **#7399**: Schematic blocks: 10 stock factories fail on real KiCad 10 libs (stale symbol IDs, fictional mock pins); add a real-symbol smoke test
 
 ## PRs Awaiting Review
@@ -52,9 +50,7 @@ Issues currently being built (`loom:building`).
 PRs waiting on Judge (`loom:review-requested`).
 
 - **#7308**: fix(router): refuse vias in the mask-dam zone beside SMD pads; clear boards 02/05/06
-- **#7350**: feat(router): length-aware choice among via-parity fallback leg pairs (#7093)
-- **#7361**: feat: honour an exact errors allowance on exception known issues in kct readiness
-- **#7413**: test: pin historical board 05 ERC error budget at 0
+- **#7417**: fix: forward the export's schematic to the report ERC audit
 
 ## Approved (Awaiting Merge)
 
@@ -93,9 +89,7 @@ Issues carrying `loom:curated`.
 - **#7296**: Router: refuse pad-edge vias (mask-dam floor) and move existing ones on boards 02/05/06 (split from #7220, PR3) *(curated)*
 - **#7349**: Boards 06/07: enable diff-pair gap tightening on seed-42 re-routes and drop the impedance caps (#7344 PR 2) *(curated)*
 - **#7355**: kct readiness --verify doesn't honour board 04's recorded #6269 exception: blocks on 24 paid-drill via errors while the committed record says ready *(curated)*
-- **#7358**: Evidence producers: gate-parity ratchet test, one registered re-pin path per ready board (#7353 step 4) *(curated)*
 - **#7362**: main regression from #7324: board 03 fresh route USB_D 16.3→19.7 mm after 0.22 mm In2.Cu net class; tier-1 common-run test red *(curated)*
-- **#7367**: Key remaining count-based CI/test allowances by identity (extends #7359): stale board-03/07 allowances, board-05 blocking cap, DRC tolerance counts *(curated)*
 - **#7384**: Committed board evidence doesn't reproduce: refresh_readiness --dry-run (pinned 10.0.6, committed checked_at) rewrites files on 6 of 7 boards *(curated)*
 - **#7391**: Board 05: refresh report.md/pdf via its producer (still says THT parts excluded from CPL; #7241/#7383 follow-up) *(curated)*
 - **#7401**: router: board 06 USB2_D+ uncoupled 12.791 > 12.700 mm after v62 pad-edge floor reorders the single-ended fallback *(curated)*
@@ -131,11 +125,11 @@ Issues carrying `loom:curated`.
 | Operator merge-risk holds | 0 |
 | Very important | 0 |
 | Important | 4 |
-| Ready (`loom:issue`) | 0 |
-| In Progress (`loom:building`) | 8 |
-| PRs awaiting review | 4 |
+| Ready (`loom:issue`) | 1 |
+| In Progress (`loom:building`) | 6 |
+| PRs awaiting review | 2 |
 | Approved PRs awaiting merge | 0 |
-| Curated | 33 |
+| Curated | 31 |
 | Architect / Hermit proposals | 10 |
 | Active epics | 8 |
 <!-- guide:plan-body:end -->
