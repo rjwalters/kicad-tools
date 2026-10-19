@@ -4150,3 +4150,239 @@ class TestNoOvershootAsWritten:
         assert _written_length(tuned) <= _written_length(ref), (
             f"written member {excess * 1e6:.3f}nm past the written reference"
         )
+
+
+def _seg_route(net_id: int, x0: float, y0: float, length: float, angle_deg: float) -> Route:
+    """One straight ``length`` mm segment from ``(x0, y0)`` at ``angle_deg``."""
+    import math
+
+    a = math.radians(angle_deg)
+    return Route(
+        net=net_id,
+        net_name=f"N{net_id}",
+        segments=[
+            Segment(
+                x1=x0,
+                y1=y0,
+                x2=x0 + length * math.cos(a),
+                y2=y0 + length * math.sin(a),
+                width=0.2,
+                layer=Layer.F_CU,
+                net=net_id,
+                net_name=f"N{net_id}",
+            )
+        ],
+    )
+
+
+def _short_rounding_reference(net_id: int, length: float, angle_deg: float) -> Route:
+    """An off-angle reference whose 4 dp written copper rounds SHORTER than
+    its in-memory length (start x picked from fixed sub-grid offsets)."""
+    candidates = [_seg_route(net_id, -40.0 - k * 1e-5, -40.0, length, angle_deg) for k in range(10)]
+    return min(
+        candidates, key=lambda r: _written_length(r) - LengthTracker.calculate_route_length(r)
+    )
+
+
+def _off_angle_reference_pair(length: float, angle_deg: float, dx: float) -> tuple[Route, Route]:
+    """Reference pair (nets 1, 2) at ``angle_deg``, 0.3 mm pitch, shifted by
+    a sub-grid ``dx`` so its written lane rounds differently from memory."""
+    import math
+
+    a = math.radians(angle_deg)
+    nx, ny = -math.sin(a) * 0.3, math.cos(a) * 0.3
+    return (
+        _seg_route(1, -40.0 + dx, -40.0, length, angle_deg),
+        _seg_route(2, -40.0 + dx + nx, -40.0 + ny, length, angle_deg),
+    )
+
+
+#: Float-summation tie slack (1 fm); see :func:`_assert_pair_not_past_reference`.
+_SUM_ULP_MM = 1e-12
+
+
+def _assert_pair_not_past_reference(
+    tuned_p: Route, tuned_n: Route, ref_p: Route, ref_n: Route
+) -> None:
+    """Q8 on written geometry: the tuned lane may not end past the reference
+    lane, and no tuned trace past the reference's longest trace.
+
+    The only slack is ``_SUM_ULP_MM``: the same written decimals can sum to
+    floats one ulp apart (8.9 vs 8.899999999999999), which is a tie, not an
+    overshoot -- the smallest real overshoot on the old head was ~1 nm."""
+    lane = (_written_length(tuned_p) + _written_length(tuned_n)) / 2.0
+    ref_lane = (_written_length(ref_p) + _written_length(ref_n)) / 2.0
+    assert lane <= ref_lane + _SUM_ULP_MM, (
+        f"written lane {(lane - ref_lane) * 1e6:.3f}nm past the written reference lane"
+    )
+    longest = max(_written_length(tuned_p), _written_length(tuned_n))
+    ref_longest = max(_written_length(ref_p), _written_length(ref_n))
+    assert longest <= ref_longest + _SUM_ULP_MM, (
+        f"written trace {(longest - ref_longest) * 1e6:.3f}nm past the longest "
+        "written reference trace"
+    )
+
+
+class TestNoOvershootAsWrittenMixedAndPairGroups:
+    """Issue #7423 (Q8): a member never ends past the target, measured on the
+    written copper -- for a mixed group whose default reference is a scalar,
+    and for pair lanes on every strategy (mirrored, centreline, per-leg)."""
+
+    @pytest.mark.parametrize("host_angle", [0.0, 45.0, 90.0])
+    @pytest.mark.parametrize("ref_angle", [22.5, 31.1])
+    @pytest.mark.parametrize("need", [0.3, 0.9, 2.0])
+    @pytest.mark.parametrize("amplitude", [0.15, 0.5, 1.0])
+    def test_mixed_group_default_scalar_reference_not_past_as_written(
+        self, host_angle, ref_angle, need, amplitude
+    ):
+        """No declared reference; the longest member is a scalar.  The
+        scalar sub-pass must still cap at that scalar's written length (the
+        old head dropped the source and ended up to 69.5 nm past it)."""
+        host = _seg_route(1, 0.0, 0.0, 6.0, host_angle)
+        ref = _short_rounding_reference(2, 6.0 + need, ref_angle)
+        assert _written_length(ref) < LengthTracker.calculate_route_length(ref) - 1e-5
+        group = MatchGroup(
+            name="G",
+            net_ids=[1, 2],
+            pair_ids=[(3, 4)],
+            tolerance=0.1,
+            reference_net_id=None,
+            source=MatchGroupSource.LEGACY_API,
+        )
+        routes = {
+            1: host,
+            2: ref,
+            3: _straight_route(3, "N3", 3.0, y=20.0),
+            4: _straight_route(4, "N4", 3.0, y=20.3),
+        }
+        results = tune_match_group_v2(
+            group,
+            routes,
+            tolerance_mm=0.1,
+            intra_group_clearance_mm=0.2,
+            config=SerpentineConfig(amplitude=amplitude, gap_factor=2.0),
+            diff_pair_partners={3: 4, 4: 3},
+            intra_pair_clearance_mm=0.1,
+        )
+        tuned, result = results[1]
+        assert result.inserts_applied >= 1, result.message
+        excess = _written_length(tuned) - _written_length(ref)
+        assert _written_length(tuned) <= _written_length(ref), (
+            f"written member {excess * 1e6:.3f}nm past the written reference"
+        )
+
+    @pytest.mark.parametrize("host_angle", [0.0, 90.0])
+    @pytest.mark.parametrize("ref_angle", [22.5, 31.1])
+    @pytest.mark.parametrize("need", [0.3, 0.9, 2.0])
+    @pytest.mark.parametrize("amplitude", [0.15, 0.5])
+    @pytest.mark.parametrize("dx", [0.0, 3.7e-5, 7.4e-5])
+    def test_pair_lane_not_past_written_reference_lane(
+        self, host_angle, ref_angle, need, amplitude, dx
+    ):
+        """Production pair path (``pair_fallbacks``): a coupled pair tuned by
+        centreline meanders against an off-angle reference pair (the old
+        head ended up to 38.2 nm past the written reference lane)."""
+        import math
+
+        ref_p, ref_n = _off_angle_reference_pair(8.0 + need, ref_angle, dx)
+        h = math.radians(host_angle)
+        hx, hy = -math.sin(h) * 0.3, math.cos(h) * 0.3
+        group = MatchGroup(
+            name="G",
+            net_ids=[],
+            pair_ids=[(1, 2), (3, 4)],
+            tolerance=0.1,
+            reference_net_id=None,
+            source=MatchGroupSource.LEGACY_API,
+        )
+        routes = {
+            1: ref_p,
+            2: ref_n,
+            3: _seg_route(3, 0.0, 0.0, 8.0, host_angle),
+            4: _seg_route(4, hx, hy, 8.0, host_angle),
+        }
+        results = tune_match_group_v2(
+            group,
+            routes,
+            tolerance_mm=0.1,
+            intra_group_clearance_mm=0.2,
+            intra_pair_clearance_mm=0.1,
+            config=SerpentineConfig(amplitude=amplitude, gap_factor=2.0),
+            diff_pair_partners={1: 2, 2: 1, 3: 4, 4: 3},
+            pair_fallbacks=True,
+        )
+        assert results[3][1].inserts_applied >= 1, results[3][1].message
+        _assert_pair_not_past_reference(results[3][0], results[4][0], ref_p, ref_n)
+
+    @pytest.mark.parametrize("ref_angle", [22.5, 31.1])
+    @pytest.mark.parametrize("need", [0.3, 0.9, 2.0])
+    @pytest.mark.parametrize("amplitude", [0.15, 0.5])
+    @pytest.mark.parametrize("dx", [0.0, 3.7e-5, 7.4e-5])
+    @pytest.mark.parametrize("skew", [0.0, 0.2])
+    def test_per_leg_tuning_not_past_written_reference(self, ref_angle, need, amplitude, dx, skew):
+        """Per-leg strategy: legs at right angles have neither a mirror host
+        nor a coupled span, so each leg is tuned single-ended (the old head
+        ended up to 38.2 nm past the written reference lane)."""
+        ref_p, ref_n = _off_angle_reference_pair(8.0 + need, ref_angle, dx)
+        group = MatchGroup(
+            name="G",
+            net_ids=[],
+            pair_ids=[(1, 2), (3, 4)],
+            tolerance=0.1,
+            reference_net_id=None,
+            source=MatchGroupSource.LEGACY_API,
+        )
+        routes = {
+            1: ref_p,
+            2: ref_n,
+            3: _seg_route(3, 0.0, 0.0, 8.0 + skew, 0.0),
+            4: _seg_route(4, -3.0, 2.0, 8.0 - skew, 90.0),
+        }
+        results = tune_match_group_v2(
+            group,
+            routes,
+            tolerance_mm=0.1,
+            intra_group_clearance_mm=0.2,
+            intra_pair_clearance_mm=0.1,
+            config=SerpentineConfig(amplitude=amplitude, gap_factor=2.0),
+            diff_pair_partners={1: 2, 2: 1, 3: 4, 4: 3},
+            pair_fallbacks=True,
+            pair_skew_limits_mm={(3, 4): 1.0},
+        )
+        assert results[3][1].reason == "tuned", results[3][1].message
+        _assert_pair_not_past_reference(results[3][0], results[4][0], ref_p, ref_n)
+
+    @pytest.mark.parametrize("pair_fallbacks", [False, True])
+    @pytest.mark.parametrize("ref_length", [8.30004, 8.70004, 8.90004, 9.30003, 10.00004])
+    @pytest.mark.parametrize("amplitude", [0.15, 0.3, 0.5])
+    def test_mirrored_pair_lane_not_past_written_reference(
+        self, pair_fallbacks, ref_length, amplitude
+    ):
+        """Mirrored meander (both modes): the reference pair ends 40 nm past
+        a 4 dp grid point, so it is written shorter; the mirrored N side
+        snaps to the 0.01 mm grid (the old head ended up to 10.1 um past)."""
+        group = MatchGroup(
+            name="G",
+            net_ids=[],
+            pair_ids=[(10, 11), (20, 21)],
+            tolerance=0.05,
+            source=MatchGroupSource.LEGACY_API,
+        )
+        routes = {
+            10: _straight_route(10, "P0", 8.0, y=0.0),
+            11: _straight_route(11, "N0", 8.0, y=0.5),
+            20: _straight_route(20, "P1", ref_length, y=2.5),
+            21: _straight_route(21, "N1", ref_length, y=3.0),
+        }
+        ref_p, ref_n = routes[20], routes[21]
+        results = tune_match_group_v2(
+            group,
+            routes,
+            tolerance_mm=0.1,
+            intra_group_clearance_mm=0.2,
+            intra_pair_clearance_mm=0.1,
+            config=SerpentineConfig(amplitude=amplitude, gap_factor=2.0),
+            pair_fallbacks=pair_fallbacks,
+        )
+        assert results[10][1].inserts_applied >= 1, results[10][1].message
+        _assert_pair_not_past_reference(results[10][0], results[11][0], ref_p, ref_n)

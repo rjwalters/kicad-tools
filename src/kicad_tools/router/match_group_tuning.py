@@ -301,6 +301,66 @@ def _as_written(route: Route) -> Route:
     )
 
 
+def _pair_leg_bounds(
+    leg_ceiling_mm: float | None,
+    lane_ceiling_mm: float,
+    len_p0: float,
+    len_n0: float,
+) -> tuple[float, float] | None:
+    """Per-trace ceilings for a pair lane (Issue #7423).
+
+    A tuned trace may not end past the reference's longest written trace
+    (``leg_ceiling_mm``) -- unless the pair's own routed skew already puts it
+    further above its lane than that: a lane matched to the target then
+    carries that trace ``lane_ceiling_mm + (L_trace - L_lane)`` and lane
+    matching (the length rule for pairs) needs that much.  The tuner never
+    adds overshoot to a trace; it keeps the excess the routed skew gave it.
+    ``len_p0`` / ``len_n0`` are the pair's lengths before any tuning.
+    """
+    if leg_ceiling_mm is None:
+        return None
+    lane0 = (len_p0 + len_n0) / 2.0
+    return (
+        max(leg_ceiling_mm, lane_ceiling_mm + max(0.0, len_p0 - lane0)),
+        max(leg_ceiling_mm, lane_ceiling_mm + max(0.0, len_n0 - lane0)),
+    )
+
+
+def _pair_overshoot_mm(
+    measure: Callable[[Route], float],
+    cand_p: Route,
+    cand_n: Route,
+    before_p: Route,
+    before_n: Route,
+    lane_ceiling_mm: float,
+    leg_bounds_mm: tuple[float, float] | None,
+) -> float:
+    """How far a pair candidate ends past its ceilings (Issue #7423).
+
+    Lengths are the worst of in-memory and as-written (4 dp), as for the
+    single-ended guard.  The lane ``(L(p) + L(n)) / 2`` is held to
+    ``lane_ceiling_mm``; a trace that this candidate lengthened is also held
+    to its bound in ``leg_bounds_mm`` (see :func:`_pair_leg_bounds`).
+    Returns the largest excess -- ``<= 0`` means the candidate is safe.
+    Mirrored and centreline meanders add the same length to both traces, so
+    lowering the requested length by this amount removes the excess.
+    """
+
+    def written(route: Route) -> float:
+        return max(measure(route), measure(_as_written(route)))
+
+    wp, wn = written(cand_p), written(cand_n)
+    excess = (wp + wn) / 2.0 - lane_ceiling_mm
+    if leg_bounds_mm is not None:
+        for after, before, bound in (
+            (wp, before_p, leg_bounds_mm[0]),
+            (wn, before_n, leg_bounds_mm[1]),
+        ):
+            if after > written(before) + OVERSHOOT_EPS_MM:
+                excess = max(excess, after - bound)
+    return excess
+
+
 # ---------------------------------------------------------------------------
 # Reason registry + summary formatting (Issue #3440 observability)
 # ---------------------------------------------------------------------------
@@ -849,6 +909,7 @@ def _tune_match_group_single_ended(
     length_model: KicadLengthModel | None = None,
     fixed_segment_ids: set[int] | None = None,
     reference_length_mm: float | None = None,
+    reference_ceiling_mm: float | None = None,
     hint_routes: dict[int, Route] | None = None,
     both_sides: bool = False,
     ceiling_topup: bool = False,
@@ -867,6 +928,12 @@ def _tune_match_group_single_ended(
     member that stopped at its per-member budget take one more insert from
     the group ceiling's leftover after the first pass; the dispatcher sets it
     only when the per-member budget was defaulted, not passed explicitly.
+
+    ``reference_ceiling_mm`` (Issue #7423) is a caller-computed cap on every
+    tuning target: the reference as written (4 dp) when the reference is not
+    a route in this sub-group -- a pair lane, a per-leg share of one, or a
+    scalar the caller already resolved.  The target is the minimum of it and
+    the in-group written reference.
     """
     base_config = config or SerpentineConfig()
     results: dict[int, tuple[Route, TuneResult]] = {}
@@ -984,10 +1051,20 @@ def _tune_match_group_single_ended(
     # members within tolerance above it return
     # ``reason="longer_than_reference"``.
     if reference_length_mm is not None:
+        # Issue #7423: keep the in-group source only while it really supplies
+        # the caller's value.  A declared scalar reference (mixed group)
+        # does; so does the longest scalar when the caller's group-wide
+        # maximum IS that scalar (mixed group, default reference).  A
+        # pair-lane or per-leg target has no route here and is capped by the
+        # caller's ``reference_ceiling_mm`` instead.
+        if group.reference_net_id is not None:
+            ref_source_net_id = group.reference_net_id
+        elif (
+            ref_source_net_id is not None
+            and member_lengths.get(ref_source_net_id) != reference_length_mm
+        ):
+            ref_source_net_id = None
         ref_length = reference_length_mm
-        # A scalar declared reference (mixed group) still has its route; a
-        # pair-lane or per-leg target does not.
-        ref_source_net_id = group.reference_net_id
     effective_reference_net_id: int | None = group.reference_net_id
     if group.reference_net_id is not None and ref_length is not None and member_lengths:
         longest_id, longest_len = max(member_lengths.items(), key=lambda kv: kv[1])
@@ -1024,6 +1101,11 @@ def _tune_match_group_single_ended(
     )
     if ref_length is not None and ref_source_route is not None:
         target_ceiling = min(ref_length, _measure(_as_written(ref_source_route)))
+    if ref_length is not None and reference_ceiling_mm is not None:
+        target_ceiling = min(
+            target_ceiling if target_ceiling is not None else ref_length,
+            reference_ceiling_mm,
+        )
 
     # --- Per-member iteration -------------------------------------------
     total_inserts_committed = 0  # group-level cumulative counter
@@ -1463,13 +1545,24 @@ def _tune_match_group_single_ended(
                     # amplitude by the measured overshoot and rebuild.
                     # Never grows the amplitude: an undershoot stays inside
                     # the tolerance and a bigger meander risks the DRC gate.
+                    prev_overshoot: float | None = None
                     for _refit in range(MAX_OVERSHOOT_REFITS):
                         overshoot = _measure_written(candidate_route) - target_length
                         if overshoot <= OVERSHOOT_EPS_MM or serp_result.num_loops <= 0:
                             break
-                        refit_amplitude = attempt_config.amplitude - (
-                            overshoot + QUANTIZED_REFIT_MARGIN_MM
-                        ) / (2.0 * serp_result.num_loops)
+                        amp_step = (overshoot + QUANTIZED_REFIT_MARGIN_MM) / (
+                            2.0 * serp_result.num_loops
+                        )
+                        if (
+                            prev_overshoot is not None
+                            and overshoot >= prev_overshoot - OVERSHOOT_EPS_MM
+                        ):
+                            # The last step was below the writer's 4 dp grid,
+                            # so the written copper did not move: step one
+                            # written quantum instead.
+                            amp_step = max(amp_step, 10.0**-WRITER_COORD_DECIMALS)
+                        prev_overshoot = overshoot
+                        refit_amplitude = attempt_config.amplitude - amp_step
                         if refit_amplitude <= 0.0:
                             break
                         attempt_config = SerpentineConfig(
@@ -3151,6 +3244,7 @@ def _tune_pair_lane_with_fallbacks(
     length_model: KicadLengthModel | None = None,
     measure: Callable[[Route], float],
     pair_skew_limit_mm: float | None,
+    leg_ceiling_mm: float | None = None,
 ) -> tuple[Route, Route, int]:
     """Lengthen one pair lane toward ``target_length`` (Issue #6675).
 
@@ -3173,6 +3267,13 @@ def _tune_pair_lane_with_fallbacks(
 
     Returns ``(p_route, n_route, inserts_committed)``.  When nothing commits,
     the original route objects are returned by reference.
+
+    Issue #7423: ``target_length`` is the reference lane as written, and no
+    candidate may end past it, or lengthen a trace past its bound from
+    ``leg_ceiling_mm`` (:func:`_pair_leg_bounds`), measured as written (see
+    :func:`_pair_overshoot_mm`).  A candidate that would is rebuilt with the
+    requested length lowered by the excess (at most
+    :data:`MAX_OVERSHOOT_REFITS` times) and otherwise rejected.
     """
     from .pair_centerline_meander import (
         centerline_meander,
@@ -3186,6 +3287,7 @@ def _tune_pair_lane_with_fallbacks(
     current_p, current_n = original_p, original_n
     len_p0, len_n0 = measure(original_p), measure(original_n)
     skew_allowance = _pair_skew_allowance(abs(len_p0 - len_n0), pair_skew_limit_mm)
+    leg_bounds = _pair_leg_bounds(leg_ceiling_mm, target_length, len_p0, len_n0)
     committed = 0
     last_reason = ""
     last_message = ""
@@ -3201,6 +3303,11 @@ def _tune_pair_lane_with_fallbacks(
 
     def skew_ok(p: Route, n: Route) -> bool:
         return abs(measure(p) - measure(n)) <= skew_allowance + 1e-9
+
+    def overshoot(cand_p: Route, cand_n: Route, before_p: Route, before_n: Route) -> float:
+        return _pair_overshoot_mm(
+            measure, cand_p, cand_n, before_p, before_n, target_length, leg_bounds
+        )
 
     def paired_drc(
         new_p: list[Segment],
@@ -3284,50 +3391,74 @@ def _tune_pair_lane_with_fallbacks(
                 candidate_n_id=n_id,
                 group_routes=other_member_routes,
             )
-            loops = max(1, math.ceil(length_needed / (2.0 * base_config.amplitude)))
-            generator = SerpentineGenerator(
-                SerpentineConfig(
-                    style=base_config.style,
-                    amplitude=length_needed / (2.0 * loops) * (1.0 + 1e-9),
-                    min_spacing=base_config.min_spacing,
-                    min_segment_length=base_config.min_segment_length,
-                    gap_factor=base_config.gap_factor,
-                    max_iterations=base_config.max_iterations,
-                    side="outer",
-                    outer_normal_hint=hint,
+            # Issue #7423: rebuild with a smaller request while the written
+            # candidate ends past the target (or a trace past the reference).
+            need = length_needed
+            built: tuple[Route, Route, list[Segment]] | None = None
+            excess = 0.0
+            for _refit in range(MAX_OVERSHOOT_REFITS + 1):
+                loops = max(1, math.ceil(need / (2.0 * base_config.amplitude)))
+                generator = SerpentineGenerator(
+                    SerpentineConfig(
+                        style=base_config.style,
+                        amplitude=need / (2.0 * loops) * (1.0 + 1e-9),
+                        min_spacing=base_config.min_spacing,
+                        min_segment_length=base_config.min_segment_length,
+                        gap_factor=base_config.gap_factor,
+                        max_iterations=base_config.max_iterations,
+                        side="outer",
+                        outer_normal_hint=hint,
+                    )
                 )
-            )
-            serp = generator.generate_trombone(p_seg, length_needed)
+                serp = generator.generate_trombone(p_seg, need)
+                built = None
+                if not serp.success:
+                    last_reason = "no_suitable_segment"
+                    last_message = (
+                        f"P-side trombone generation failed for pair ({p_id}, {n_id}): "
+                        f"{serp.message}"
+                    )
+                    break
+                new_n = _mirror_segments_about_centerline(
+                    serp.new_segments,
+                    p_net_id=p_id,
+                    n_net_id=n_id,
+                    n_net_name=current_n.net_name,
+                    cx=cx,
+                    cy=cy,
+                    nx=hint[0],
+                    ny=hint[1],
+                    grid_resolution_mm=grid_resolution_mm,
+                )
+                cand_n_or_none = _splice_mirrored_n_route(
+                    current_n, n_insertion_seg_index=n_idx, mirrored_segments=new_n
+                )
+                if cand_n_or_none is None:
+                    last_reason = "no_suitable_segment"
+                    last_message = (
+                        "Reflected P-side geometry does not correspond to the selected "
+                        f"N-side host segment's endpoints for pair ({p_id}, {n_id})."
+                    )
+                    break
+                built = (splice(current_p, p_idx, serp.new_segments), cand_n_or_none, new_n)
+                excess = overshoot(built[0], built[1], current_p, current_n)
+                if excess <= OVERSHOOT_EPS_MM:
+                    break
+                need -= excess + QUANTIZED_REFIT_MARGIN_MM
+                if need <= 0.0:
+                    break
             result_p.serpentine_results.append(serp)
             result_n.serpentine_results.append(serp)
-            if not serp.success:
-                last_reason = "no_suitable_segment"
+            if built is None:
+                continue
+            if excess > OVERSHOOT_EPS_MM:
+                last_reason = "overshoot"
                 last_message = (
-                    f"P-side trombone generation failed for pair ({p_id}, {n_id}): {serp.message}"
+                    f"Mirrored meander on pair ({p_id}, {n_id}) would end "
+                    f"{excess:.4f}mm past the group target as written."
                 )
                 continue
-            new_n = _mirror_segments_about_centerline(
-                serp.new_segments,
-                p_net_id=p_id,
-                n_net_id=n_id,
-                n_net_name=current_n.net_name,
-                cx=cx,
-                cy=cy,
-                nx=hint[0],
-                ny=hint[1],
-                grid_resolution_mm=grid_resolution_mm,
-            )
-            cand_n = _splice_mirrored_n_route(
-                current_n, n_insertion_seg_index=n_idx, mirrored_segments=new_n
-            )
-            if cand_n is None:
-                last_reason = "no_suitable_segment"
-                last_message = (
-                    "Reflected P-side geometry does not correspond to the selected "
-                    f"N-side host segment's endpoints for pair ({p_id}, {n_id})."
-                )
-                continue
-            cand_p = splice(current_p, p_idx, serp.new_segments)
+            cand_p, cand_n, new_n = built
             detail = paired_drc(serp.new_segments, new_n, cand_p, cand_n, intra_pair_clearance_mm)
             if detail is not None:
                 last_reason = "post_insertion_drc_violation"
@@ -3393,6 +3524,40 @@ def _tune_pair_lane_with_fallbacks(
                             break
                         cand_p = splice(merged_p, span.p_index, meander.p_segments)
                         cand_n = splice(merged_n, span.n_index, meander.n_segments)
+                        # Issue #7423: rebuild with a smaller request while
+                        # the written candidate ends past the target.
+                        need = length_needed
+                        excess = overshoot(cand_p, cand_n, current_p, current_n)
+                        for _refit in range(MAX_OVERSHOOT_REFITS):
+                            if excess <= OVERSHOOT_EPS_MM:
+                                break
+                            need -= excess + QUANTIZED_REFIT_MARGIN_MM
+                            refit = (
+                                centerline_meander(
+                                    span,
+                                    p_host,
+                                    n_host,
+                                    length_add_mm=need,
+                                    amplitude_mm=base_config.amplitude * amp_factor,
+                                    leg_spacing_mm=leg_spacing,
+                                    side=side,
+                                )
+                                if need > 0.0
+                                else None
+                            )
+                            if refit is None:
+                                break
+                            meander = refit
+                            cand_p = splice(merged_p, span.p_index, meander.p_segments)
+                            cand_n = splice(merged_n, span.n_index, meander.n_segments)
+                            excess = overshoot(cand_p, cand_n, current_p, current_n)
+                        if excess > OVERSHOOT_EPS_MM:
+                            last_reason = "overshoot"
+                            last_message = (
+                                f"Centreline meander on pair ({p_id}, {n_id}) would end "
+                                f"{excess:.4f}mm past the group target as written."
+                            )
+                            continue
                         detail = paired_drc(
                             meander.p_segments, meander.n_segments, cand_p, cand_n, pair_floor
                         )
@@ -3451,6 +3616,7 @@ def _tune_pair_lane_with_fallbacks(
             fixed_segment_ids=fixed_segment_ids,
             measure=measure,
             skew_allowance_mm=skew_allowance,
+            leg_bounds_mm=leg_bounds,
         )
         if isinstance(leg, tuple):
             current_p, current_n, leg_inserts = leg
@@ -3517,6 +3683,7 @@ def _tune_pair_legs_single_ended(
     fixed_segment_ids: set[int] | None,
     measure: Callable[[Route], float],
     skew_allowance_mm: float,
+    leg_bounds_mm: tuple[float, float] | None = None,
 ) -> tuple[Route, Route, int] | str:
     """Tune each leg of a pair on its own toward the group target (Issue #6675).
 
@@ -3528,17 +3695,29 @@ def _tune_pair_legs_single_ended(
 
     Returns ``(p_route, n_route, inserts)`` on a commit, else
     ``"<reason>|<message>"``.  On rejection ``routes_by_net`` is restored.
+
+    Issue #7423: the leg shares are computed from the legs as written, each
+    is capped at its bound in ``leg_bounds_mm`` (:func:`_pair_leg_bounds`)
+    and handed to the single-ended tuner as a written-precision ceiling, so
+    the written lane never ends past ``target_length`` and no leg past its
+    bound.
     """
     from .match_group_length import MatchGroup as _MatchGroup
     from .pair_centerline_meander import coupled_segment_ids
 
+    def written(route: Route) -> float:
+        return max(measure(route), measure(_as_written(route)))
+
     len_p, len_n = measure(p_route), measure(n_route)
-    if len_p <= target_length and len_n <= target_length:
+    wlen_p, wlen_n = written(p_route), written(n_route)
+    if wlen_p <= target_length and wlen_n <= target_length:
         target_p = target_n = target_length
-    elif len_p > target_length:
-        target_p, target_n = len_p, 2.0 * target_length - len_p
+    elif wlen_p > target_length:
+        target_p, target_n = len_p, 2.0 * target_length - wlen_p
     else:
-        target_p, target_n = 2.0 * target_length - len_n, len_n
+        target_p, target_n = 2.0 * target_length - wlen_n, len_n
+    if leg_bounds_mm is not None:
+        target_p, target_n = min(target_p, leg_bounds_mm[0]), min(target_n, leg_bounds_mm[1])
 
     locked = set(fixed_segment_ids or ()) | coupled_segment_ids(
         p_route, n_route, max_edge_gap_mm=_coupling_window_mm()
@@ -3591,6 +3770,7 @@ def _tune_pair_legs_single_ended(
             length_model=length_model,
             fixed_segment_ids=locked,
             reference_length_mm=target,
+            reference_ceiling_mm=target,
             hint_routes={partner: routes_by_net[partner], **other_member_routes},
             both_sides=True,
         )
@@ -3613,6 +3793,16 @@ def _tune_pair_legs_single_ended(
     if (measure(new_p) + measure(new_n)) / 2.0 <= (len_p + len_n) / 2.0 + 1e-9:
         restore()
         return reasons[-1] if reasons else ""
+    excess = _pair_overshoot_mm(
+        measure, new_p, new_n, p_route, n_route, target_length, leg_bounds_mm
+    )
+    if excess > OVERSHOOT_EPS_MM:
+        # Backstop: the per-leg ceilings above should make this unreachable.
+        restore()
+        return (
+            f"overshoot|Per-leg meanders on pair ({p_id}, {n_id}) would end "
+            f"{excess:.4f}mm past the group target as written; both legs rolled back."
+        )
     return new_p, new_n, inserts
 
 
@@ -3753,9 +3943,9 @@ def _tune_match_group_of_pairs(
     #   * group.reference_net_id = paired half -> that lane's average
     #     is the target.
     ref_length: float | None = None
+    ref_pair: tuple[int, int] | None = None
     if group.reference_net_id is not None:
         # Is the reference a paired half?
-        ref_pair: tuple[int, int] | None = None
         for p_id, n_id in group.pair_ids:
             if group.reference_net_id in (p_id, n_id):
                 ref_pair = (p_id, n_id)
@@ -3771,6 +3961,36 @@ def _tune_match_group_of_pairs(
                 candidates.append(member_lengths[net_id])
         if candidates:
             ref_length = max(candidates)
+
+    # Issue #7423: ``kct check`` judges the reference AS WRITTEN (4 dp).  A
+    # reference pair is still copper: its written lane ``(W(p) + W(n)) / 2``
+    # can round shorter than the in-memory lane, so a lane tuned exactly onto
+    # the in-memory target would end past it in the file.  Cap the lane
+    # target at the written reference lane (a scalar reference is a lane of
+    # one trace), and cap any tuned trace at the reference's longest written
+    # trace.  The reference is never modified here, so both caps are fixed.
+    ref_lane_ceiling: float | None = None
+    ref_leg_ceiling: float | None = None
+    if ref_length is not None:
+        ref_sources: list[tuple[int, ...]] = []
+        if group.reference_net_id is not None:
+            if ref_pair is not None and ref_pair in lane_lengths:
+                ref_sources = [ref_pair]
+            elif group.reference_net_id in member_lengths:
+                ref_sources = [(group.reference_net_id,)]
+        else:
+            ref_sources = [pair for pair, lane in lane_lengths.items() if lane == ref_length]
+            ref_sources += [
+                (nid,) for nid in group.net_ids if member_lengths.get(nid) == ref_length
+            ]
+        for src in ref_sources:
+            written = [_measure(_as_written(routes_by_net[nid])) for nid in src]
+            lane_w = min(ref_length, sum(written) / len(written))
+            leg_w = min(max(member_lengths[nid] for nid in src), max(written))
+            ref_lane_ceiling = lane_w if ref_lane_ceiling is None else min(ref_lane_ceiling, lane_w)
+            ref_leg_ceiling = leg_w if ref_leg_ceiling is None else min(ref_leg_ceiling, leg_w)
+        if ref_lane_ceiling is None:
+            ref_lane_ceiling = ref_length
 
     # --- Per-pair iteration --------------------------------------------
     total_inserts_committed = 0
@@ -3905,8 +4125,9 @@ def _tune_match_group_of_pairs(
             continue
 
         # Mirrored copper increases both halves equally, so the target is
-        # the reference lane average, measured with the same via context.
-        target_length = ref_length
+        # the reference lane average, measured with the same via context --
+        # capped at the reference as written (Issue #7423).
+        target_length = ref_lane_ceiling if ref_lane_ceiling is not None else ref_length
 
         if pair_fallbacks:
             # Issue #6675: host retry, centreline meanders for lattice
@@ -3941,6 +4162,7 @@ def _tune_match_group_of_pairs(
                 length_model=length_model,
                 measure=_measure,
                 pair_skew_limit_mm=(pair_skew_limits_mm or {}).get((p_id, n_id)),
+                leg_ceiling_mm=ref_leg_ceiling,
             )
             total_inserts_committed += committed
             results[p_id] = (current_p, per_pair_result_p)
@@ -4040,87 +4262,122 @@ def _tune_match_group_of_pairs(
                 group_routes=other_member_routes,
             )
 
-            # --- Step 4: generate P-side meander.
-            loops = max(1, math.ceil(length_needed / (2.0 * base_config.amplitude)))
-            amplitude = length_needed / (2.0 * loops) * (1.0 + 1e-9)
-            attempt_config = SerpentineConfig(
-                style=base_config.style,
-                amplitude=amplitude,
-                min_spacing=base_config.min_spacing,
-                min_segment_length=base_config.min_segment_length,
-                gap_factor=base_config.gap_factor,
-                max_iterations=base_config.max_iterations,
-                side="outer",
-                outer_normal_hint=hint,
-            )
-            attempt_generator = SerpentineGenerator(attempt_config)
-            if fixed_segment_ids:
-                # Honor the selected mutable host. add_serpentine would rank
-                # the full route again and could select a longer fixed escape.
-                p_serp_result = attempt_generator.generate_trombone(
-                    p_insertion_segment, length_needed
+            # --- Steps 4-5: generate the P-side meander and mirror it.
+            # Issue #7423: rebuilt with a smaller request while the written
+            # candidate ends past the target (or a trace past the reference);
+            # a candidate that still does is rejected like a failed build.
+            need = length_needed
+            build_failed = False
+            excess = 0.0
+            for _refit in range(MAX_OVERSHOOT_REFITS + 1):
+                loops = max(1, math.ceil(need / (2.0 * base_config.amplitude)))
+                amplitude = need / (2.0 * loops) * (1.0 + 1e-9)
+                attempt_config = SerpentineConfig(
+                    style=base_config.style,
+                    amplitude=amplitude,
+                    min_spacing=base_config.min_spacing,
+                    min_segment_length=base_config.min_segment_length,
+                    gap_factor=base_config.gap_factor,
+                    max_iterations=base_config.max_iterations,
+                    side="outer",
+                    outer_normal_hint=hint,
                 )
-                candidate_p_route = Route(
-                    net=current_p.net,
-                    net_name=current_p.net_name,
-                    segments=(
-                        current_p.segments[:_p_seg_idx]
-                        + p_serp_result.new_segments
-                        + current_p.segments[_p_seg_idx + 1 :]
+                attempt_generator = SerpentineGenerator(attempt_config)
+                if fixed_segment_ids:
+                    # Honor the selected mutable host. add_serpentine would rank
+                    # the full route again and could select a longer fixed escape.
+                    p_serp_result = attempt_generator.generate_trombone(p_insertion_segment, need)
+                    candidate_p_route = Route(
+                        net=current_p.net,
+                        net_name=current_p.net_name,
+                        segments=(
+                            current_p.segments[:_p_seg_idx]
+                            + p_serp_result.new_segments
+                            + current_p.segments[_p_seg_idx + 1 :]
+                        ),
+                        vias=current_p.vias.copy(),
+                        is_escape=current_p.is_escape,
+                    )
+                else:
+                    candidate_p_route, p_serp_result = attempt_generator.add_serpentine(
+                        current_p, LengthTracker.calculate_route_length(current_p) + need
+                    )
+
+                if not p_serp_result.success:
+                    for r in (per_pair_result_p, per_pair_result_n):
+                        r.reason = "no_suitable_segment"
+                        r.message = (
+                            f"P-side trombone generation failed for pair "
+                            f"({p_id}, {n_id}): {p_serp_result.message}"
+                        )
+                    build_failed = True
+                    break
+
+                # --- Step 5: mirror P-side segments to N-side.
+                new_n_segments = _mirror_segments_about_centerline(
+                    p_serp_result.new_segments,
+                    p_net_id=p_id,
+                    n_net_id=n_id,
+                    n_net_name=current_n.net_name,
+                    cx=cx,
+                    cy=cy,
+                    nx=hint[0],
+                    ny=hint[1],
+                    grid_resolution_mm=grid_resolution_mm,
+                )
+                maybe_n_candidate = _splice_mirrored_n_route(
+                    current_n,
+                    n_insertion_seg_index=n_insertion_seg_idx,
+                    mirrored_segments=new_n_segments,
+                )
+                if maybe_n_candidate is None:
+                    # Issue #4984: the reflected P-side geometry's endpoints
+                    # do not correspond to the selected N-side host
+                    # segment's own endpoints -- splicing anyway would
+                    # produce a discontinuous route with asymmetric added
+                    # length. Reject the candidate and roll back, same as
+                    # any other failed insertion attempt this cascade loop.
+                    for r in (per_pair_result_p, per_pair_result_n):
+                        r.reason = "no_suitable_segment"
+                        r.message = (
+                            "Reflected P-side geometry does not correspond to "
+                            "the selected N-side host segment's endpoints for "
+                            f"pair ({p_id}, {n_id}); rejecting candidate rather "
+                            "than splicing a malformed route."
+                        )
+                    build_failed = True
+                    break
+                candidate_n_route = maybe_n_candidate
+                excess = _pair_overshoot_mm(
+                    _measure,
+                    candidate_p_route,
+                    candidate_n_route,
+                    current_p,
+                    current_n,
+                    target_length,
+                    _pair_leg_bounds(
+                        ref_leg_ceiling,
+                        target_length,
+                        member_lengths[p_id],
+                        member_lengths[n_id],
                     ),
-                    vias=current_p.vias.copy(),
-                    is_escape=current_p.is_escape,
                 )
-            else:
-                candidate_p_route, p_serp_result = attempt_generator.add_serpentine(
-                    current_p, LengthTracker.calculate_route_length(current_p) + length_needed
-                )
+                if excess <= OVERSHOOT_EPS_MM:
+                    break
+                need -= excess + QUANTIZED_REFIT_MARGIN_MM
+                if need <= 0.0:
+                    break
             per_pair_result_p.serpentine_results.append(p_serp_result)
             per_pair_result_n.serpentine_results.append(p_serp_result)
-
-            if not p_serp_result.success:
+            if not build_failed and excess > OVERSHOOT_EPS_MM:
                 for r in (per_pair_result_p, per_pair_result_n):
-                    r.reason = "no_suitable_segment"
+                    r.reason = "overshoot"
                     r.message = (
-                        f"P-side trombone generation failed for pair "
-                        f"({p_id}, {n_id}): {p_serp_result.message}"
+                        f"Mirrored meander on pair ({p_id}, {n_id}) would end "
+                        f"{excess:.4f}mm past the group target as written; rolled back."
                     )
-                current_p = original_p_route
-                current_n = original_n_route
-                break
-
-            # --- Step 5: mirror P-side segments to N-side.
-            new_n_segments = _mirror_segments_about_centerline(
-                p_serp_result.new_segments,
-                p_net_id=p_id,
-                n_net_id=n_id,
-                n_net_name=current_n.net_name,
-                cx=cx,
-                cy=cy,
-                nx=hint[0],
-                ny=hint[1],
-                grid_resolution_mm=grid_resolution_mm,
-            )
-            candidate_n_route = _splice_mirrored_n_route(
-                current_n,
-                n_insertion_seg_index=n_insertion_seg_idx,
-                mirrored_segments=new_n_segments,
-            )
-            if candidate_n_route is None:
-                # Issue #4984: the reflected P-side geometry's endpoints
-                # do not correspond to the selected N-side host
-                # segment's own endpoints -- splicing anyway would
-                # produce a discontinuous route with asymmetric added
-                # length. Reject the candidate and roll back, same as
-                # any other failed insertion attempt this cascade loop.
-                for r in (per_pair_result_p, per_pair_result_n):
-                    r.reason = "no_suitable_segment"
-                    r.message = (
-                        "Reflected P-side geometry does not correspond to "
-                        "the selected N-side host segment's endpoints for "
-                        f"pair ({p_id}, {n_id}); rejecting candidate rather "
-                        "than splicing a malformed route."
-                    )
+                build_failed = True
+            if build_failed:
                 current_p = original_p_route
                 current_n = original_n_route
                 break
@@ -4257,6 +4514,9 @@ def _tune_match_group_of_pairs(
             blind_buried_supported=blind_buried_supported,
             length_model=length_model,
             reference_length_mm=ref_length,
+            # Issue #7423: the group reference as written, whichever member
+            # (lane or scalar) supplies it.
+            reference_ceiling_mm=ref_lane_ceiling,
         )
         for nid, (r_route, r_result) in scalar_results.items():
             results[nid] = (r_route, r_result)
