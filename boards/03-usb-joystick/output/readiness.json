@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "checked_at": "2026-10-18T21:45:00+00:00",
+  "checked_at": "2026-10-19T08:00:00+00:00",
   "mode": "assembly",
   "status": "ready",
   "blockers": [],
@@ -13,7 +13,7 @@
     {
       "name": "kct_check",
       "status": "passed",
-      "detail": "0 electrical/manufacturing errors; DRC and ERC sub-checks passed; warning counts: diffpair_uncoupled_length=1, thermal_asymmetry=6. Manifest verification is deferred to the artifacts gate."
+      "detail": "0 electrical/manufacturing errors; DRC and ERC sub-checks passed; warning counts: diffpair_uncoupled_length=1. Manifest verification is deferred to the artifacts gate."
     },
     {
       "name": "native_drc",
@@ -33,7 +33,7 @@
     {
       "name": "warning_review",
       "status": "passed",
-      "detail": "Per-rule warning table reviewed: diffpair_uncoupled_length=1, thermal_asymmetry=6."
+      "detail": "Per-rule warning table reviewed: diffpair_uncoupled_length=1."
     },
     {
       "name": "artifacts",
@@ -50,52 +50,12 @@
     "kicad_tools_version": "0.23.0",
     "dirty": true,
     "manufacturer": "jlcpcb-tier1",
-    "commit": "3a34b88ef064e8278363227a3835c22a48e43dcc",
-    "source_digest": "81bd20907d08f680be6faaf27a7b39e1dd5f6f2038dc0ae4e4d9dfd4952a6240",
+    "commit": "198cc6e5338d1010dc85188d004e5d53f49ff3b5",
+    "source_digest": "1fb8d5417dbb3bc7fab8e8e4a52d7f98136ca11d610e87a1156acecfbecd9f1f",
     "kicad_cli_version": "10.0.6",
     "rules_digest": "f245a1bd3032c47159c0d3e22015c97ebb64bc687e82f37c5587e9a7b625d8a9"
   },
   "manufacturer": "jlcpcb-tier1",
-  "known_issues": [
-    {
-      "issue": 7220,
-      "kind": "advisory",
-      "summary": "One-sided thermal connection on C10/C11 (GND pad solid to the F.Cu pour, JOY_X/JOY_Y pad on a 0.20 mm trace) and on the four J1 GND through-hole pins (solid on three copper layers): tombstoning and barrel-fill risk; narrower-spoke repair tracked in #7295",
-      "recorded": "2026-10-18",
-      "warnings": [
-        {
-          "rule": "thermal_asymmetry",
-          "ref": "C10",
-          "pad": "C10-2"
-        },
-        {
-          "rule": "thermal_asymmetry",
-          "ref": "C11",
-          "pad": "C11-2"
-        },
-        {
-          "rule": "thermal_asymmetry",
-          "ref": "J1",
-          "pad": "J1-A1"
-        },
-        {
-          "rule": "thermal_asymmetry",
-          "ref": "J1",
-          "pad": "J1-A12"
-        },
-        {
-          "rule": "thermal_asymmetry",
-          "ref": "J1",
-          "pad": "J1-B1"
-        },
-        {
-          "rule": "thermal_asymmetry",
-          "ref": "J1",
-          "pad": "J1-B12"
-        }
-      ]
-    }
-  ],
   "evidence": {
     "zone_fill": "output/readiness-verification/fill-consistency.json",
     "kct_check": "output/readiness-verification/kct-check.json",
@@ -117,12 +77,12 @@
     "output/manufacturing/assembly-bom.csv": "d699ced94327304215238928f381e41a8ea89f5028130f5d21ac489352892c21",
     "output/manufacturing/assembly-front.pdf": "3026eeea27bb069feaa3152ca3122e5fcf29a965a9e063f3d48e0512b474630e",
     "output/manufacturing/bom_jlcpcb.csv": "6e7b297e11713796e3f4c17b157a1ef0ba7d4e896fbfa56d17c94a535479a120",
-    "output/manufacturing/check-report.json": "f21e2df4ce54c1ce4fbb44932e8937ff23422e1f66c99fc814e488ef490fca82",
+    "output/manufacturing/check-report.json": "de06eca2818e1f3b2f26cbd554a57da7c6a71d6ed4daa28f9a069238f677dedc",
     "output/manufacturing/cpl_jlcpcb.csv": "77f4911b0cee3381fbff404690797ebb4bede6fabc174df4340815cc23ab3c62",
     "output/manufacturing/design-source/DESIGN_REVIEW.md": "9696ae5c33cbe92b09daa2e16817e8b20d7315301d2d7975dcb3b54f212103e3",
     "output/manufacturing/design-source/README.md": "897eb9e11295a733a916bc2f72e06ea5cd674f875b988c8da4b708bc77ee7a30",
     "output/manufacturing/design-source/check_manufacturing.py": "81d7da58af4b6e80644a4ef5654093a0aceed7e00a1696e225884e7e90aacc32",
-    "output/manufacturing/design-source/generate_design.py": "30712a57109c6c46cec1c5d2c61b17ec5455f3cc59400f17108cc09a7f159fc8",
+    "output/manufacturing/design-source/generate_design.py": "9d64432ed0a165518a3d2142dfe72f23992eddaf1aff94f6a28bd1725fb8319f",
     "output/manufacturing/design-source/generate_pcb.py": "36afb9c6a8b81878b88b3cf38b91da058c7a281f706d1a16451622e07cc32104",
     "output/manufacturing/design-source/generate_schematic.py": "f509834c144b688688971cfc0ea7614977457f4f56e402dcc569551fa909c464",
     "output/manufacturing/design-source/joystick_hardware.py": "ff31a60e7b453fd16e56cc04c2d176de951838f8a0a176a5d7838fb1658a5da0",
@@ -130,7 +90,7 @@
     "output/manufacturing/design-source/procurement-review.json": "e2b8bdf4b890697142c8be68d9235e4fbb77a476151b18e62d9c15aa0ccf47e2",
     "output/manufacturing/design-source/project.kct": "5083f66d5eaf2034ec5917ab56627ca1a2128bf9f79e723be04da5936a3f9573",
     "output/manufacturing/design-source/route_demo.py": "0fca0042fac91f385db16120c90cf8f12332d1f463e9ff336417c8d0649b56c6",
-    "output/manufacturing/design-source/routing-plan.json": "242658b4832ff2b6231771f158ba0ced91010fb0e43829c4381ecbe50fbafdd3",
+    "output/manufacturing/design-source/routing-plan.json": "9491eea72de04a303fb6eff1d1b2ca6e5724764e5229f5a6d7b5b0a1d09a2bbb",
     "output/manufacturing/design-source/routing_plan.py": "cc6eedc7ea25af8f1dff4a3c449ad8c6221146ffaac37677b41bc42522781c0b",
     "output/manufacturing/firmware/.gitignore": "692b1af4436043e2e965c8d563bbf90d648cda3a6afa9bba38e1c38af1d38919",
     "output/manufacturing/firmware/README.md": "08667b811161162459ab9950164f799e0549aa760c124e1fc4a933a20ce79e40",
@@ -153,18 +113,18 @@
     "output/manufacturing/firmware/patches/usbcore-suspend-resume.patch": "a2e64bec8ccd7f674f3497fa795cc33171091b2259c10f0c68138ea325333269",
     "output/manufacturing/firmware/platformio.ini": "f0364755a15cb54900ef01d3c0576a24f5d517c68a16648f1782a1111bd08052",
     "output/manufacturing/firmware/src/main.cpp": "8dae81d2e930969d6160d2f98509623bbd77fd46f5334cf5809bb9193dd996cf",
-    "output/manufacturing/gerbers/gerbers.zip": "fe692448c33121f81bb55dce275e9acf28e7ed5734b2c8d1af73e160944010f5",
-    "output/manufacturing/images/assembly.png": "26b109c1b656a2b0cde61770cba90124abf1a2feea0046292f4cb66f1f76d599",
-    "output/manufacturing/images/layer_B_Cu.png": "70e8ffc4a8e015ae656bc7d8e7338ad61f266f51cf38530ec3cdd20c33f79d51",
-    "output/manufacturing/images/layer_F_Cu.png": "579a86cadc1097a6fd5489d3216ba812fb06580575e67cb824cc1829c6c83d6b",
-    "output/manufacturing/images/layer_In1_Cu.png": "053049debdfbb1e6b097a90ec5fc668d777aaf235f9c8b3a6a90f1e1fadcc064",
+    "output/manufacturing/gerbers/gerbers.zip": "184a1bfaccbdc142cf0e5dffbf8b9ac3b1d5d0fa76fb1b8e1d5fe6fb94d2f4a7",
+    "output/manufacturing/images/assembly.png": "9196b12f7c83ecd66e4b68f34c9b4783e8681289b6931d236f240885991381b9",
+    "output/manufacturing/images/layer_B_Cu.png": "f74ab29809a5c4b75a469a055ed31c3f5d316de90b0fe926136003c79c4ca9f9",
+    "output/manufacturing/images/layer_F_Cu.png": "adb92347236cdee4892ebb3a74874b4f078cf684f54697dae07295be752e8078",
+    "output/manufacturing/images/layer_In1_Cu.png": "02eb7fcf24e32070619cbc4b08b73939c3698ddf0bcd2502f88917210b20d5fe",
     "output/manufacturing/images/layer_In2_Cu.png": "7ca29fbc8a871e663bba733b6d6c2dd5943ce269e0632f973e025c91765486e3",
-    "output/manufacturing/images/pcb_back.png": "e78e3f6bed79ad429822262f39bf066e73b2c6bdcc7bd763dd37493f17ff7b57",
-    "output/manufacturing/images/pcb_copper.png": "fec2942e943224f3a0f43f2180e5e11067838637541c54e83e000b36bc197a42",
-    "output/manufacturing/images/pcb_front.png": "b6482cad090964cb65f5697232b11f10fa6693f4c4c2edeb33ca9e07b0bfd3ea",
+    "output/manufacturing/images/pcb_back.png": "10ae9b1524bce775a7f1a12d8af2402f601faf64dd4b998fbfab86a89c792394",
+    "output/manufacturing/images/pcb_copper.png": "aa1196767571a61022bf8b70809fdce1454f7617dfae2dc441b504ff348da64f",
+    "output/manufacturing/images/pcb_front.png": "e9ae481714040f6ae15d222caacd711fa3bb5fa5f65890b76a6d3469bb3a4226",
     "output/manufacturing/images/schematic_usb_joystick.png": "435c684096c4c22d4f460823a2584c6e3f09f6663b89176976bbbaec2728eea2",
-    "output/manufacturing/kicad_project.zip": "ce40c656e355e13e201dec67a7325c3b093885c5a9c7284f18b307e753453cee",
-    "output/manufacturing/manifest.json": "0c6a2cdddad64bbb6eaf08f4b97a07bd98db7ee970a87c943ec186f377c73c69",
+    "output/manufacturing/kicad_project.zip": "a4f672c6f1f79cfa9319358fef908db92ff89a7a499b6e6ab8404a9f959e599d",
+    "output/manufacturing/manifest.json": "0ae2a88d95b4c9a620c1f9154affec5facc61651faa625ce41ac9fa45112b9db",
     "output/manufacturing/manufacturing-requirements.json": "48470a554e39b289ba0c079833a439c65dbc3611b505f7dd978552d25d13d37b",
     "output/manufacturing/native-clearance-qualification/control-inputs.json": "3ac8e8cb03eb81f4e3686d7aaa653c3322d01acad885cb0122babbdaf648de6c",
     "output/manufacturing/native-clearance-qualification/copper-check.log": "b4106a3222de5c09bdb3d909d57ad4b3e2853ca15118fec4586ec65450bfaaec",
@@ -189,42 +149,45 @@
     "output/manufacturing/native-erc.json": "887d4db29f8f966810f1d83af0a8385ec3516b5ec74a64ca4e2084dcf9e2c7fc",
     "output/manufacturing/native-refilled-drc.json": "d834ac5950a2966894c8939a491db96f371d792b6c36c44fb581c440db82ba7e",
     "output/manufacturing/procurement-review.json": "e2b8bdf4b890697142c8be68d9235e4fbb77a476151b18e62d9c15aa0ccf47e2",
-    "output/manufacturing/report.md": "3ef60146402da148be86ff96599c5923252f54dd1c08b57854ffcfd95314e045",
-    "output/manufacturing/report.pdf": "c9e6bb6bf13c93d1527f28136e00b06e28a3ea90eac802b599abe60c8fa65944",
+    "output/manufacturing/report.md": "ad06c3dcfecee2ac4a359b3a46a0b3a77850537ced09d5ae3cd62b2779477ca7",
+    "output/manufacturing/report.pdf": "8414db197753510caaa70f8f7c0d4c089ebe9364f35bc25f462cb573c96bf8e3",
     "output/manufacturing/schematic.pdf": "6fe021a9ea56eb056b2fc6dc24e3fee47c4f6555c6141a4ad1ec755b51aa0d98",
-    "output/manufacturing.zip": "fed1a3be2279c9324e9beb771b014d6c19054b36efbd1debccfc290d61d6ef81",
+    "output/manufacturing.zip": "cade88ef705d01dbe3292204a7a1ae60b2dd16e9f0169939c96e71c1d13d8eef",
     "output/net_class_map.json": "26a93ac56c944db95cf1ea74ae0c7771d70343c7941b01977708745e84987ca5",
-    "output/readiness-verification/fill-consistency.json": "48fb3b71a10e877eeb7e1316b5a8abb9e3c695bd7a5b3557aacb636810d41d63",
+    "output/readiness-verification/fill-consistency.json": "6f5652acf2b9ac0fba92eb4f2b41fccf65b794fc4fcdd717bce20af00119fa90",
     "output/readiness-verification/fill-refilled/footprints/Joystick.pretty/Samtec_TSM-103-01-T-DV.kicad_mod": "492671cda5112d330aaf0cf514ce2188b589834eb10d493769ad0dd6bc5f9b86",
     "output/readiness-verification/fill-refilled/fp-lib-table": "d5eea395214efa8406e88c8e54435a0cbf9cf83b69ee3ed4d2519e109ce76c02",
     "output/readiness-verification/fill-refilled/usb_joystick.kicad_pro": "09c8746ffab5b0449d13f3b777d87c4786c2abc2cfa2df7eb796e12f83822c05",
     "output/readiness-verification/fill-refilled/usb_joystick_routed.kicad_dru": "874cc0b7c8160aef48b42e06ad4825ea168f5a27fce24a0047cd8b47de42963e",
-    "output/readiness-verification/fill-refilled/usb_joystick_routed.kicad_pcb": "812b337425d9fb8e24d21baf932cff00a9c2361911ce5489b86984961a02eb78",
+    "output/readiness-verification/fill-refilled/usb_joystick_routed.kicad_pcb": "6c2c60117692a5dc9de5e8e76a0df06a0f1ca09e60349cefec914a737c224cec",
     "output/readiness-verification/fill-refilled/usb_joystick_routed.kicad_pro": "e1b779bc9454f7e182c9f507a78162bc3e5b96e7cb9fc9231fb9bbabc046db00",
     "output/readiness-verification/fill-saved/footprints/Joystick.pretty/Samtec_TSM-103-01-T-DV.kicad_mod": "492671cda5112d330aaf0cf514ce2188b589834eb10d493769ad0dd6bc5f9b86",
     "output/readiness-verification/fill-saved/fp-lib-table": "d5eea395214efa8406e88c8e54435a0cbf9cf83b69ee3ed4d2519e109ce76c02",
     "output/readiness-verification/fill-saved/usb_joystick.kicad_pro": "09c8746ffab5b0449d13f3b777d87c4786c2abc2cfa2df7eb796e12f83822c05",
     "output/readiness-verification/fill-saved/usb_joystick_routed.kicad_dru": "874cc0b7c8160aef48b42e06ad4825ea168f5a27fce24a0047cd8b47de42963e",
-    "output/readiness-verification/fill-saved/usb_joystick_routed.kicad_pcb": "9520237d99732b6f1b272cd9921345ad03bd94b87faa37c1f9c7a0a3ff9e014d",
+    "output/readiness-verification/fill-saved/usb_joystick_routed.kicad_pcb": "e87aedb5f5cf2d4a132e7029deb0707de299494014fdcb657b77a83025a6d7f6",
     "output/readiness-verification/fill-saved/usb_joystick_routed.kicad_pro": "e1b779bc9454f7e182c9f507a78162bc3e5b96e7cb9fc9231fb9bbabc046db00",
-    "output/readiness-verification/kct-check.json": "ffc1ae7b09478a429991abe0357005fbecfec935d69b55743784c26b7f075750",
-    "output/readiness-verification/known-issues.json": "cd7d4374ef1c710abaa66a1984efa7b747036930c3bfdc9bc489a6a485d1f992",
-    "output/readiness-verification/native-drc-raw.json": "f95ee8ab0e790b142e0f2594748bdf24c219dbeaa5de182db9fb3caa612aa9cf",
-    "output/readiness-verification/native-drc.json": "5b3e59dad1b0e9ac2bdf63aa9626494b01d4975d2ba9f9a9f5b535717c160c7a",
-    "output/readiness-verification/refilled-native/native-drc-raw.json": "f95ee8ab0e790b142e0f2594748bdf24c219dbeaa5de182db9fb3caa612aa9cf",
-    "output/readiness-verification/refilled-native/native-drc.json": "ec09dc0797cc15d42473498e56a19b8524944e06e092c8179a33d9e4a469b5fc",
+    "output/readiness-verification/kct-check.json": "7a8651ec59279b0ce35b204a4f3f3ce2283374e0ff0531f565c6ea49f30fae0a",
+    "output/readiness-verification/native-drc-raw.json": "b176534f23c24bfe109703eb18ef335d02babde3e0ad991099755e9ad1a4b864",
+    "output/readiness-verification/native-drc.json": "214ac46776cddd59353832e02bc930441ba603112ec6ee789cec49a8b4bd3c3e",
+    "output/readiness-verification/refilled-native/native-drc-raw.json": "b176534f23c24bfe109703eb18ef335d02babde3e0ad991099755e9ad1a4b864",
+    "output/readiness-verification/refilled-native/native-drc.json": "a8cdd6d3aafdaaabb2ff50230ca42eae9a116ea71672293a3cc9c143081d045c",
     "output/usb_joystick.kicad_pro": "09c8746ffab5b0449d13f3b777d87c4786c2abc2cfa2df7eb796e12f83822c05",
     "output/usb_joystick.kicad_sch": "f5e844b79f26bad1174a406b5fc51b35303fc44bd2a20806a47d5aeb62ba5e30",
     "output/usb_joystick_routed.kicad_dru": "874cc0b7c8160aef48b42e06ad4825ea168f5a27fce24a0047cd8b47de42963e",
-    "output/usb_joystick_routed.kicad_pcb": "9520237d99732b6f1b272cd9921345ad03bd94b87faa37c1f9c7a0a3ff9e014d",
+    "output/usb_joystick_routed.kicad_pcb": "e87aedb5f5cf2d4a132e7029deb0707de299494014fdcb657b77a83025a6d7f6",
     "output/usb_joystick_routed.kicad_pro": "e1b779bc9454f7e182c9f507a78162bc3e5b96e7cb9fc9231fb9bbabc046db00",
     "project.kct": "5083f66d5eaf2034ec5917ab56627ca1a2128bf9f79e723be04da5936a3f9573",
     "output/fabrication_overrides.json": "ecb93cc015df34a18b7aab12574e4570fed2471282313f1b533dcfb432a6944b",
     "output/manufacturing-requirements.json": "48470a554e39b289ba0c079833a439c65dbc3611b505f7dd978552d25d13d37b",
-    "routing-plan.json": "242658b4832ff2b6231771f158ba0ced91010fb0e43829c4381ecbe50fbafdd3",
-    "generate_design.py": "30712a57109c6c46cec1c5d2c61b17ec5455f3cc59400f17108cc09a7f159fc8",
+    "routing-plan.json": "9491eea72de04a303fb6eff1d1b2ca6e5724764e5229f5a6d7b5b0a1d09a2bbb",
+    "generate_design.py": "9d64432ed0a165518a3d2142dfe72f23992eddaf1aff94f6a28bd1725fb8319f",
     "check_manufacturing.py": "81d7da58af4b6e80644a4ef5654093a0aceed7e00a1696e225884e7e90aacc32",
     "routing_plan.py": "cc6eedc7ea25af8f1dff4a3c449ad8c6221146ffaac37677b41bc42522781c0b"
+  },
+  "report_sources": {
+    "output/readiness-verification/native-drc.json": "e87aedb5f5cf2d4a132e7029deb0707de299494014fdcb657b77a83025a6d7f6",
+    "output/readiness-verification/native-drc-raw.json": "e87aedb5f5cf2d4a132e7029deb0707de299494014fdcb657b77a83025a6d7f6"
   },
   "supplemental_factory_evidence": {
     "source_commit": "63813f418c55b68f53a31aaa6c80037563c6d5bf",

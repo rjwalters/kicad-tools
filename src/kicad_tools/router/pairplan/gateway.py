@@ -367,6 +367,101 @@ def rank_through_combos(
     return [c[4] for c in combos[:top_n]]
 
 
+#: Issue #7362: most WORKABLE combinations of one group (``against`` or
+#: pass-under) that are routed to completion and compared.  Until #7362 the
+#: first workable combination won, ranked only by fan length; the coupled
+#: body's length never entered.  Each extra evaluation is one more fat A*
+#: over the gateway layer, already within the ``MAX_GATEWAY_COMBOS`` tries
+#: per layer and group, so this caps how many of those can be spent after
+#: the first success.
+MAX_WORKABLE_GATEWAY_COMBOS = 4
+
+#: Issue #7362: an end's P/N axis must make at least this sine with the
+#: segment chord to have a side at all (30 degrees).
+POLARITY_SIDE_MIN_SIN = 0.5
+
+
+def polarity_crosses(end_a: tuple[Pt, Pt], end_b: tuple[Pt, Pt]) -> bool:
+    """Whether P sits on opposite sides of the segment at its two ends.
+
+    ``end_a`` / ``end_b`` are each end's ``(P, N)`` launch points: the via
+    pair of a gatewayed end, else the pads.  "Side" is measured against the
+    chord from end A's midpoint to end B's, so a pair whose P is right of
+    the chord at one end and left of it at the other must turn the coupled
+    body through a half loop to keep P and N apart -- issue #7362's board 03
+    ``USB_D`` (D+ right at J1, left via at U2) ran to y~9 on In2.Cu and
+    doubled back past its own via pair, about +3 mm per net.
+
+    The router rejects such a combination only in the PASS-UNDER group
+    (:func:`rank_through_combos`): there, flipping an end's side bit is
+    exactly what lets a crossed segment through
+    :func:`handedness_consistent`, and the body has to hairpin between the
+    vias and the pads to honour it.  An ``against`` combination that
+    crosses is kept: board 06rf PCIE_TX and 07rf DQS couple through one (a
+    U on the gateway layer around one end), and without it they fall back
+    to a hybrid (PCIE_TX: 26.8 -> 55.8 mm per net) or to uncoupled legs.  An end whose P/N axis lies within 30 degrees of the
+    chord has no clear side and never counts as crossing.
+    """
+    (pa, na), (pb, nb) = end_a, end_b
+    ma = ((pa[0] + na[0]) / 2.0, (pa[1] + na[1]) / 2.0)
+    mb = ((pb[0] + nb[0]) / 2.0, (pb[1] + nb[1]) / 2.0)
+    d = _unit((mb[0] - ma[0], mb[1] - ma[1]))
+    if d is None:
+        return False
+
+    def side(p: Pt, n: Pt) -> int:
+        axis = _unit((p[0] - n[0], p[1] - n[1]))
+        if axis is None:
+            return 0
+        cross = d[0] * axis[1] - d[1] * axis[0]
+        if abs(cross) < POLARITY_SIDE_MIN_SIN:
+            return 0
+        return 1 if cross > 0.0 else -1
+
+    sa, sb = side(pa, na), side(pb, nb)
+    return sa * sb < 0
+
+
+@dataclass(frozen=True)
+class WorkableCombo:
+    """One combination that routed, scored for selection (issue #7362).
+
+    ``order`` is its position in the ranked try order (the pre-#7362 pick
+    is the lowest workable one); ``length_p`` / ``length_n`` are the whole
+    pair-owned route per net (fans + coupled body).
+    """
+
+    order: int
+    length_p: float
+    length_n: float
+
+    @property
+    def score(self) -> float:
+        """P+N route length (mm)."""
+        return self.length_p + self.length_n
+
+    def key(self) -> tuple[float, int]:
+        """Deterministic sort key: score (to 1 um), then try order."""
+        return (round(self.score, 3), self.order)
+
+
+def best_workable(combos: list[WorkableCombo]) -> WorkableCombo | None:
+    """The combination to keep: lowest :meth:`WorkableCombo.key`."""
+    return min(combos, key=WorkableCombo.key) if combos else None
+
+
+def combo_length_floor(end_a: tuple[Pt, Pt], end_b: tuple[Pt, Pt], fans: float) -> float:
+    """A lower bound on a combination's P+N route length (issue #7362).
+
+    ``fans`` is the summed fan length of both nets at both ends; each net
+    then needs at least the straight distance between its own launch
+    points.  A combination whose floor already exceeds the best workable
+    score is skipped without routing it.
+    """
+    (pa, na), (pb, nb) = end_a, end_b
+    return fans + dist(pa, pb) + dist(na, nb)
+
+
 def gateway_anchor_point(
     site: GatewaySite, reach: float, step: float = 0.05, *, through: bool = False
 ) -> Pt | None:

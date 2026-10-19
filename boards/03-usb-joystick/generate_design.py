@@ -383,6 +383,80 @@ def fill_zones_in_routed_pcb(routed_path: Path) -> int:
         return 0
 
 
+#: Issue #7275: explicit per-pad thermal reliefs for the six GND pads the
+#: generic fill used to tie solid (``thermal_asymmetry``).  Keyed by
+#: ``(reference, pad number)``; each value is the extra per-pad thermal
+#: geometry written next to ``(zone_connect 1)``.  An explicit
+#: ``zone_connect`` makes the generic selective pass and the starved-thermal
+#: repair (``zones/fill_clearance.py``) leave the pad alone, so a starved
+#: spoke now fails pinned native DRC instead of silently turning solid.
+#:
+#: * C10-2: the JOY_X track above blocks the 0/90 degree top spoke; 45 degree
+#:   spokes land 2 in the pour below.
+#: * C11-2: default spokes.  Its bottom spoke needs the JOY_Y_RAW track moved
+#:   down to y=93.8 (``routing-plan.json``) so pour runs under the part.
+#: * J1-A1/A12: default spokes already land 2.
+#: * J1-B1/B12: the USB_CC2 track wrapping the shield tab cuts a pocket off
+#:   above the pin.  A 0.30 mm spoke pair on the shield side merges that
+#:   pocket with the copper shared with A1/A12 and the shield tab, so both
+#:   spokes reach a multiply-connected region.
+BOARD03_PAD_THERMALS: dict[tuple[str, str], dict[str, float]] = {
+    ("C10", "2"): {"thermal_bridge_angle": 45},
+    ("C11", "2"): {},
+    ("J1", "A1"): {},
+    ("J1", "A12"): {},
+    ("J1", "B1"): {"thermal_bridge_angle": 45, "thermal_bridge_width": 0.3, "thermal_gap": 0.2},
+    ("J1", "B12"): {"thermal_bridge_angle": 45, "thermal_bridge_width": 0.3, "thermal_gap": 0.2},
+}
+
+_PAD_THERMAL_TOKENS = (
+    "zone_connect",
+    "thermal_width",
+    "thermal_bridge_width",
+    "thermal_gap",
+    "thermal_bridge_angle",
+)
+
+
+def apply_pad_thermal_overrides(routed_path: Path) -> int:
+    """Write :data:`BOARD03_PAD_THERMALS` onto the routed PCB (Issue #7275).
+
+    Runs BEFORE :func:`fill_zones_in_routed_pcb`.  Any earlier per-pad
+    connection or thermal token on these pads is replaced, so the step is
+    idempotent.  Raises when a listed pad is missing, so a footprint change
+    cannot silently drop a relief.  Returns the number of pads written.
+    """
+    from kicad_tools.core.sexp_file import load_pcb, save_pcb
+    from kicad_tools.sexp import SExp
+
+    print("\nApplying per-pad thermal reliefs (issue #7275)...")
+    doc = load_pcb(routed_path)
+    found: set[tuple[str, str]] = set()
+    for fp in doc.find_all("footprint"):
+        ref = next(
+            (p.get_string(1) for p in fp.find_all("property") if p.get_string(0) == "Reference"),
+            None,
+        )
+        for pad in fp.find_all("pad"):
+            key = (ref or "", pad.get_string(0) or "")
+            extra = BOARD03_PAD_THERMALS.get(key)
+            if extra is None:
+                continue
+            for tok in _PAD_THERMAL_TOKENS:
+                for node in pad.find_all(tok):
+                    pad.children.remove(node)
+            pad.append(SExp.list("zone_connect", 1))
+            for tok, value in extra.items():
+                pad.append(SExp.list(tok, value))
+            found.add(key)
+    missing = sorted(set(BOARD03_PAD_THERMALS) - found)
+    if missing:
+        raise RuntimeError(f"pad thermal overrides: pads not found on the board: {missing}")
+    save_pcb(doc, routed_path)
+    print(f"   {len(found)} pad(s) set to explicit thermal relief")
+    return len(found)
+
+
 def add_gnd_stitching_vias(routed_path: Path) -> int:
     """Add GND F.Cu<->B.Cu stitching vias to bond F.Cu-only GND pads.
 
@@ -1103,6 +1177,11 @@ def main() -> int:
         # defaults instead of the profile the board is reviewed/routed/
         # exported against, producing real (not phantom) floating pads.
         apply_manufacturing_profile(routed_path)
+
+        # Step 5.47: Explicit thermal reliefs on the six GND pads the generic
+        # fill would tie solid (#7275), so they stay balanced and any starved
+        # spoke fails native DRC instead of being repaired into solid copper.
+        apply_pad_thermal_overrides(routed_path)
 
         # Step 5.5: Fill the zone polygons in the routed PCB so DRC's
         # ``connectivity`` rule sees the power-net pads as connected.  This
