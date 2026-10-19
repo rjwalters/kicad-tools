@@ -1083,21 +1083,35 @@ class KiCadToDSNExporter:
         lines.append("  )")
         return "\n".join(lines)
 
+    @staticmethod
+    def _image_name(fp: FootprintInfo) -> str:
+        """Image name for a footprint: one image per (library, side).
+
+        A Specctra reader mirrors a back-placed image in x, while KiCad's
+        file already stores back-side pad offsets flipped, so back images
+        are distinct from front ones and carry x-negated pins (issue #7481).
+        """
+        name = _sanitize_name(fp.footprint_lib)
+        return name if fp.layer == "F.Cu" else f"{name}__back"
+
     def _generate_placement(self) -> str:
         """Generate the (placement ...) section."""
         lines: list[str] = []
         lines.append("  (placement")
 
         for fp in self._footprints:
-            image_name = _sanitize_name(fp.footprint_lib)
+            image_name = self._image_name(fp)
             side = "front" if fp.layer == "F.Cu" else "back"
             x_um = mm_to_um(fp.x)
             y_um = mm_to_um(fp.y)
-            rot = fp.rotation
+            # KiCad's angle is CCW on a y-down board; a Specctra reader
+            # rotates by +theta in the numeric (x, y) frame, so write -theta
+            # (issue #7481). Matches ``_pad_center``.
+            rot = round((-fp.rotation) % 360.0, 4)
 
             lines.append(f"    (component {_dsn_quote(image_name)}")
             lines.append(
-                f"      (place {_dsn_quote(fp.reference)} {x_um:.1f} {y_um:.1f} {side} {rot:.1f})"
+                f"      (place {_dsn_quote(fp.reference)} {x_um:.1f} {y_um:.1f} {side} {rot:g})"
             )
             lines.append("    )")
 
@@ -1114,7 +1128,7 @@ class KiCadToDSNExporter:
         padstack_defs: dict[str, str] = {}
 
         for fp in self._footprints:
-            image_name = _sanitize_name(fp.footprint_lib)
+            image_name = self._image_name(fp)
             if image_name in seen_images:
                 continue
             seen_images.add(image_name)
@@ -1126,7 +1140,12 @@ class KiCadToDSNExporter:
                 if ps_name not in padstack_defs:
                     padstack_defs[ps_name] = self._build_padstack_def(ps_name, pad)
 
-                px_um = mm_to_um(pad.x)
+                # Back-side offsets are already flipped in the KiCad file;
+                # pre-negate x so the reader's back-side mirror restores them.
+                # Padstack layers stay as the file names them (B.Cu pads on
+                # B.Cu): whether a reader also swaps a back image's layers is
+                # not verified black-box yet (issue #7481 open question).
+                px_um = mm_to_um(-pad.x if fp.layer != "F.Cu" else pad.x)
                 py_um = mm_to_um(pad.y)
                 lines.append(
                     f"      (pin {_dsn_quote(ps_name)} {_dsn_quote(pad.number)} {px_um:.1f} {py_um:.1f})"

@@ -620,3 +620,147 @@ class TestExportDsnCliOmissions:
         assert _run_pcb(["pcb", "export-dsn", str(pcb), "-o", str(tmp_path / "b.dsn")]) == 0
         out = capsys.readouterr().out
         assert "Not exported" in out and "min_hole_clearance" in out
+
+
+# ---------------------------------------------------------------------------
+# Issue #7481: pin placement under the Specctra rule
+# ---------------------------------------------------------------------------
+
+
+def _specctra_pins(dsn: str) -> dict[tuple[str, str], tuple[float, float]]:
+    """Place every pin with ``place + R_ccw(theta) . (mirror-x if back) . offset``."""
+    import math
+
+    images: dict[str, dict[str, tuple[float, float]]] = {}
+    cur = None
+    for line in dsn.splitlines():
+        m = re.match(r'\s*\(image "?([^"\s]+)"?\s*$', line)
+        if m:
+            cur = m[1]
+            images[cur] = {}
+            continue
+        m = re.match(r'\s*\(pin "?[^"\s]+"? "?([^"\s]+)"? (\S+) (\S+)\)', line)
+        if m and cur:
+            images[cur][m[1]] = (float(m[2]), float(m[3]))
+    out: dict[tuple[str, str], tuple[float, float]] = {}
+    for img, ref, x, y, side, rot in re.findall(
+        r'\(component "?([^"\s]+)"?\s*\n\s*\(place "?([^"\s]+)"? (\S+) (\S+) (front|back) (\S+)\)',
+        dsn,
+    ):
+        a = math.radians(float(rot))
+        for num, (ox, oy) in images[img].items():
+            if side == "back":
+                ox = -ox
+            out[(ref, num)] = (
+                float(x) + ox * math.cos(a) - oy * math.sin(a),
+                float(y) + ox * math.sin(a) + oy * math.cos(a),
+            )
+    return out
+
+
+def _assert_pins_on_pads(exporter: KiCadToDSNExporter) -> int:
+    from kicad_tools.core.geometry import rotate_pad_offset
+
+    placed = _specctra_pins(exporter.export())
+    checked = 0
+    for fp in exporter._footprints:
+        counts: dict[str, int] = {}
+        for pad in fp.pads:
+            counts[pad.number] = counts.get(pad.number, 0) + 1
+        for pad in fp.pads:
+            if not pad.number or counts[pad.number] > 1:
+                continue  # unnumbered / repeated pad numbers share one DSN pin key
+            dx, dy = rotate_pad_offset(pad.x, pad.y, fp.rotation)
+            ex, ey = mm_to_um(fp.x + dx), mm_to_um(fp.y + dy)
+            got = placed[(fp.reference, pad.number)]
+            assert got == pytest.approx((ex, ey), abs=1.0), (
+                fp.reference,
+                pad.number,
+                fp.layer,
+                fp.rotation,
+            )
+            checked += 1
+    return checked
+
+
+def _fp_block(ref, lib, x, y, rot, layer):
+    pad_layer = layer
+    return f"""  (footprint "{lib}"
+    (layer "{layer}")
+    (at {x} {y} {rot})
+    (property "Reference" "{ref}" (at 0 0) (layer "F.SilkS"))
+    (pad "1" smd rect (at -2 0.5) (size 0.8 0.9) (layers "{pad_layer}") (net "A"))
+    (pad "2" smd rect (at 2 0.5) (size 0.8 0.9) (layers "{pad_layer}") (net "B"))
+    (pad "3" smd rect (at 1 -1.5) (size 0.8 0.9) (layers "{pad_layer}"))
+  )
+"""
+
+
+def _board_with(tmp_path, blocks):
+    text = (
+        '(kicad_pcb\n  (version 20260206)\n  (generator "pcbnew")\n'
+        '  (layers (0 "F.Cu" signal) (2 "B.Cu" signal) (25 "Edge.Cuts" user))\n'
+        '  (gr_rect (start 0 0) (end 80 60) (layer "Edge.Cuts"))\n' + "".join(blocks) + ")\n"
+    )
+    path = tmp_path / "rot.kicad_pcb"
+    path.write_text(text)
+    return KiCadToDSNExporter(str(path))
+
+
+class TestDSNPinPlacement:
+    def test_all_sides_and_rotations_land_on_kicad_pads(self, tmp_path):
+        blocks = [
+            _fp_block("F0", "Lib_A", 10, 10, 0, "F.Cu"),
+            _fp_block("F90", "Lib_A", 20, 10, 90, "F.Cu"),
+            _fp_block("FM90", "Lib_A", 30, 10, -90, "F.Cu"),
+            _fp_block("F180", "Lib_A", 40, 10, 180, "F.Cu"),
+            _fp_block("F45", "Lib_A", 50, 10, 45.5, "F.Cu"),
+            _fp_block("B0", "Lib_A", 10, 30, 0, "B.Cu"),
+            _fp_block("B90", "Lib_A", 20, 30, 90, "B.Cu"),
+            _fp_block("B270", "Lib_A", 30, 30, 270, "B.Cu"),
+            _fp_block("BM90", "Lib_A", 40, 30, -90, "B.Cu"),
+        ]
+        assert _assert_pins_on_pads(_board_with(tmp_path, blocks)) == 27
+
+    def test_rotation_written_negated_and_normalised(self, tmp_path):
+        dsn = _board_with(
+            tmp_path,
+            [
+                _fp_block("P", "Lib_A", 10, 10, 90, "F.Cu"),
+                _fp_block("Q", "Lib_A", 20, 10, -90, "F.Cu"),
+            ],
+        ).export()
+        assert "(place P 10000.0 10000.0 front 270)" in dsn
+        assert "(place Q 20000.0 10000.0 front 90)" in dsn
+
+    def test_library_on_both_sides_gets_two_images(self, tmp_path):
+        dsn = _board_with(
+            tmp_path,
+            [
+                _fp_block("F1", "Lib_A", 10, 10, 0, "F.Cu"),
+                _fp_block("B1", "Lib_A", 20, 10, 0, "B.Cu"),
+                _fp_block("B2", "Lib_A", 30, 10, 0, "B.Cu"),
+            ],
+        ).export()
+        images = re.findall(r'\(image "?([^"\s]+)"?\s*$', dsn, re.M)
+        assert sorted(images) == ["Lib_A", "Lib_A__back"]
+        # Back image pre-negates x; every back pad stays on B.Cu.
+        back = re.search(r'\(image "?Lib_A__back"?\s*\n(.*?)\n    \)', dsn, re.S).group(1)
+        assert re.search(r'"?1"? 2000\.0 500\.0', back)
+        assert "Rect[B]" in back
+
+    @pytest.mark.parametrize(
+        "board",
+        [
+            "03-usb-joystick",
+            "06-diffpair-test",
+            "07-matchgroup-test",
+            "09-usbc-pd-power",
+        ],
+    )
+    def test_fleet_boards_pins_land_on_pads(self, board):
+        pcbs = sorted((BOARDS / board / "output").glob("*.kicad_pcb"))
+        pcbs = [p for p in pcbs if "routed" not in p.name] or pcbs
+        if not pcbs:
+            pytest.skip(f"no committed PCB for {board}")
+        assert _assert_pins_on_pads(KiCadToDSNExporter(str(pcbs[0]))) > 0
