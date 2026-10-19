@@ -39,7 +39,7 @@ class BarrelJackInput(CircuitBlock):
         filter_cap: str = "100uF",
         ref_prefix: str = "J1",
         jack_symbol: str = "Connector:Barrel_Jack_Switch",
-        pfet_symbol: str = "Device:Q_PMOS_GSD",
+        pfet_symbol: str = "Device:Q_PMOS",
         diode_symbol: str = "Device:D_Schottky",
         cap_symbol: str = "Device:C_Polarized",
     ):
@@ -75,8 +75,11 @@ class BarrelJackInput(CircuitBlock):
         self.components = {"JACK": self.jack}
 
         # Get jack pin positions
-        jack_tip = self.jack.pin_position("Tip")  # Positive
-        jack_sleeve = self.jack.pin_position("Sleeve")  # Ground
+        # ``Connector:Barrel_Jack_Switch`` leaves its pins unnamed: pin 1 is the
+        # centre pin (tip, positive), pin 2 the sleeve (ground) and pin 3 the
+        # sleeve switch, which this block leaves unconnected (issue #7399).
+        jack_tip = self.jack.pin_position("1")  # Positive (centre pin)
+        jack_sleeve = self.jack.pin_position("2")  # Ground (sleeve)
 
         # Define VIN port at jack tip
         self.ports = {"VIN": jack_tip, "GND": jack_sleeve}
@@ -158,7 +161,7 @@ class BarrelJackInput(CircuitBlock):
         sch.add_wire(cap_neg, (cap_neg[0], gnd_rail_y))
 
         # Connect jack sleeve to GND rail
-        jack_sleeve = self.jack.pin_position("Sleeve")
+        jack_sleeve = self.jack.pin_position("2")  # Sleeve (unnamed pin 2)
         sch.add_wire(jack_sleeve, (jack_sleeve[0], gnd_rail_y))
 
         if add_junctions:
@@ -318,7 +321,7 @@ class BatteryInput(CircuitBlock):
         filter_cap: str = "10uF",
         ref_prefix: str = "J1",
         connector_symbol: str = "Connector_Generic:Conn_01x02",
-        pfet_symbol: str = "Device:Q_PMOS_GSD",
+        pfet_symbol: str = "Device:Q_PMOS",
         diode_symbol: str = "Device:D_Schottky",
         cap_symbol: str = "Device:C",
     ):

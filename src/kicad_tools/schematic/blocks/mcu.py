@@ -3,6 +3,7 @@
 import contextlib
 from typing import TYPE_CHECKING
 
+from ._pins import diode_pin_position
 from .base import CircuitBlock
 
 if TYPE_CHECKING:
@@ -473,8 +474,8 @@ class ResetButton(CircuitBlock):
             self.components["TVS"] = self.tvs
 
             # Get TVS pin positions
-            tvs_anode = self.tvs.pin_position("A")
-            tvs_cathode = self.tvs.pin_position("K")
+            tvs_anode = diode_pin_position(self.tvs, "A")
+            tvs_cathode = diode_pin_position(self.tvs, "K")
 
             # Wire TVS anode to reset node
             sch.add_wire(
