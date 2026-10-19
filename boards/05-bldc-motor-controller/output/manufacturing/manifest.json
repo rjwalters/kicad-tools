@@ -9,8 +9,8 @@
       "size": 8833
     },
     "README.txt": {
-      "sha256": "f5a73c37465fba2197b746564bcea3be328c69094e3a7e773cef590cd8f6a6d9",
-      "size": 1591
+      "sha256": "820be1d9ae6a81171e5d07b69dce287e95b13a81431ff50a27252b178027dec7",
+      "size": 1600
     },
     "assembly-back.pdf": {
       "sha256": "f6c1d5815cbaf1a05c350590a5ee17e9a8dbf2c9b25d9ebbf77869c0155a7efd",
@@ -29,8 +29,8 @@
       "size": 4103
     },
     "cpl_jlcpcb.csv": {
-      "sha256": "84a86a6db7a27d9a52b1aa7f45e7a4b7c4fd5965e45b23dbd4a48d2866b558cc",
-      "size": 2559
+      "sha256": "6b8231d3b65a8d0d7c13a0354f76fd852716c4ddacc2cd5f1410baabe0ce858d",
+      "size": 3255
     },
     "design-source.zip": {
       "sha256": "2292cf7cd014252120a60332b41e9bdb964467392fd9823d53b5447cefbc37d3",
@@ -109,7 +109,7 @@
       "size": 1214
     },
     "native-erc.json": {
-      "sha256": "45366e563ec5d2a850fc064407959b521617f5bbc33cac099b8c28405b0afd66",
+      "sha256": "651abcfc8a766dfa0cbd606b487859cb596690fa405d3bfdf8d1ed78e2535ccd",
       "size": 988
     },
     "project.kct": {
@@ -189,7 +189,7 @@
     {
       "name": "tht_in_cpl",
       "status": "OK",
-      "message": "6 through-hole component(s) excluded from CPL",
+      "message": "6 through-hole component(s) included in CPL",
       "details": "THT references: J1, J2, J3, J4, J5, RV1"
     },
     {
@@ -210,7 +210,7 @@
     {
       "name": "bom_cpl_match",
       "status": "OK",
-      "message": "BOM and CPL references match (36 components, 6 THT excluded)"
+      "message": "BOM and CPL references match (42 components)"
     },
     {
       "name": "drc",

@@ -16,9 +16,9 @@ hardware testing remains pending. Follow every construction requirement below.
 - Two-sided SMT assembly: 40 SMT components, including 25 back-side capacitors.
   Follow native package pin-1 and LED cathode marks and the generated placement
   drawings. Bottom placement rotations must come from the validated CPL.
-- Manually solder J1/J2/J3, the three 2.54 mm through-hole headers. Exclude
-  them from the SMT placement file; keep their exact selected part numbers in
-  the manual assembly BOM. Check pin-1 orientation against the drawings.
+- J1/J2/J3, the three 2.54 mm through-hole headers, are in the JLCPCB BOM
+  and CPL for fab through-hole assembly (issue #7239); procurement must review
+  those rows before ordering. Check pin-1 orientation against the drawings.
 - Supply exact BOM parts. A distributor listing is not a reservation of
   assembly inventory; confirm availability when ordering, especially U2.
 
