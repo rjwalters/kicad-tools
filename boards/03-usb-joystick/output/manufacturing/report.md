@@ -2,7 +2,7 @@
 title: "usb_joystick_routed"
 subtitle: "Design Report"
 author: "kicad-tools 0.23.0"
-date: "Rev 1 | 2026-10-18 | jlcpcb-tier1"
+date: "Rev 1 | 2026-10-19 | jlcpcb-tier1"
 geometry: "margin=1in"
 fontsize: 11pt
 colorlinks: true
@@ -149,7 +149,7 @@ GPIO and ADC map is fixed to Microchip TQFP-44 pinout
 | Errors | 0 |
 | Errors: kct (`--mfr jlcpcb-tier1` rules) | 0 |
 | Errors: kicad-cli (geometric) | 0 |
-| Warnings | 21 |
+| Warnings | 15 |
 | Blocking | 0 |
 
 **Status**: PASS
@@ -159,7 +159,6 @@ GPIO and ADC map is fixed to Microchip TQFP-44 pinout
 | Violation Type | Count |
 |----------------|-------|
 | hole_to_hole_clearance | 14 |
-| thermal_asymmetry | 6 |
 | diffpair_routing_continuity | 1 |
 | diffpair_uncoupled_length | 1 |
 
@@ -173,7 +172,7 @@ GPIO and ADC map is fixed to Microchip TQFP-44 pinout
 ### Action Items
 
 - **[OPTIONAL]** Refill zones to verify 2 zone-connected nets, then re-run kct audit
-- **[OPTIONAL]** Review 21 DRC warnings
+- **[OPTIONAL]** Review 15 DRC warnings
 
 
 \newpage

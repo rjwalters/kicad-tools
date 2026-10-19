@@ -56,7 +56,8 @@ def components():
         HEADER.format(2),
         (12, 12),
         {"1": "+3V3", "2": "GND"},
-        mpn="Samtec TSW-102-07-G-S",
+        lcsc="C492401",
+        mpn="PZ254V-11-02P",
     )
     for ref, x, prefix in (("J2", 12, "IN"), ("J3", 88, "OUT")):
         add(
@@ -65,7 +66,8 @@ def components():
             HEADER.format(8),
             (x, 26),
             {str(i): f"{prefix}{(i + 1) // 2}" if i % 2 else "GND" for i in range(1, 9)},
-            mpn="Samtec TSW-108-07-G-S",
+            lcsc="C492407",
+            mpn="PZ254V-11-08P",
         )
     add(
         "C17",
@@ -469,7 +471,7 @@ def main():
             "manufacturing": {
                 "target_fab": "jlcpcb",
                 "layers": {"preferred": 4},
-                "assembly": "smt",
+                "assembly": "both",
             }
         },
         "bom_entries": [

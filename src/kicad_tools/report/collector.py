@@ -67,6 +67,9 @@ class ReportDataCollector:
             DRC section instead of silently no-op'ing (Part B of #4008). When
             ``None`` the report keeps the documented graceful no-op behavior
             for external-router boards.
+        schematic_path: Optional explicit schematic forwarded to
+            ``ManufacturingAudit`` so the report's ERC runs against it when
+            auto-resolution from the PCB path would not find it (#7153).
     """
 
     def __init__(
@@ -76,8 +79,10 @@ class ReportDataCollector:
         quantity: int = 5,
         skip_erc: bool = False,
         net_class_map_path: str | Path | None = None,
+        schematic_path: str | Path | None = None,
     ) -> None:
         self.pcb_path = Path(pcb_path)
+        self.schematic_path = Path(schematic_path) if schematic_path is not None else None
         self.manufacturer = manufacturer
         self.quantity = quantity
         self.skip_erc = skip_erc
@@ -118,6 +123,7 @@ class ReportDataCollector:
                 quantity=self.quantity,
                 skip_erc=self.skip_erc,
                 net_class_map_path=self.net_class_map_path,
+                schematic_path=self.schematic_path,
             )
             audit_result = audit.run()
         except Exception:
