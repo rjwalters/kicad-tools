@@ -136,3 +136,96 @@ def test_fix_vias_cli_runs_the_pass_and_saves(tmp_path):
     assert _edge_warnings(PCB.load(path)) == []
     # Idempotent: a clean board is a no-op.
     assert main([str(path), "--mfr", "jlcpcb", "--relocate-pad-edge", "--quiet"]) == 0
+
+
+# ---------------------------------------------------------------------------
+# Netclass clearance (board 06 E2E regression on PR #7308)
+# ---------------------------------------------------------------------------
+
+# A foreign B.Cu track 0.16 mm (copper to copper) from the via's first legal
+# spot at x=100.75: clear of JLCPCB's 0.127 mm floor, short of a 0.2 mm class.
+_FOREIGN_TRACK = """  (segment (start 101.31 98) (end 101.31 102) (width 0.2) (layer "B.Cu") (net 2) (uuid "f1"))
+"""
+
+
+def _power_project(pcb_path: Path, pattern: str = "SIG1") -> None:
+    import json
+
+    from tests.router.test_authored_netclass_board import _netclass
+
+    project = {
+        "meta": {"filename": pcb_path.with_suffix(".kicad_pro").name, "version": 3},
+        "net_settings": {
+            "meta": {"version": 4},
+            "classes": [
+                _netclass("Default", 0.127, 2147483647),
+                _netclass("Power", 0.2, 0),
+            ],
+            "netclass_assignments": None,
+            "netclass_patterns": [{"netclass": "Power", "pattern": pattern}],
+        },
+    }
+    pcb_path.with_suffix(".kicad_pro").write_text(json.dumps(project, indent=2))
+
+
+def _netclass_errors(pcb: PCB) -> list:
+    from kicad_tools.validate.rules.netclass_clearance_copper import (
+        check_netclass_clearance_copper,
+    )
+
+    pcb.save(pcb.path)
+    reloaded = PCB.load(pcb.path)
+    return check_netclass_clearance_copper(pcb.path, reloaded, _RULES).violations
+
+
+def test_control_without_netclass_lands_inside_the_class_clearance(tmp_path):
+    """Non-vacuous control: the fab floor alone accepts the 0.16 mm spot."""
+    pcb = _load(tmp_path, _FOREIGN_TRACK + _EDGE_VIA)
+    result = relocate_pad_edge_vias(pcb, _RULES)
+    assert len(result.moved) == 1
+    assert pcb.vias[0].position[0] == pytest.approx(100.75, abs=0.03)
+    # The same geometry under a 0.2 mm Power class is a netclass error.
+    _power_project(pcb.path)
+    assert [v.rule_id for v in _netclass_errors(pcb)] == ["netclass_clearance_copper"]
+
+
+def test_relocation_honours_the_via_nets_netclass_clearance(tmp_path):
+    pcb = _load(tmp_path, _FOREIGN_TRACK + _EDGE_VIA)
+    _power_project(pcb.path)
+    assert _netclass_errors(PCB.load(pcb.path)) == [], "precondition: clean before the move"
+
+    result = relocate_pad_edge_vias(pcb, _RULES)
+
+    assert len(result.moved) == 1 and not result.unresolvable
+    assert _edge_warnings(pcb) == []
+    assert pcb.vias[0].position[0] != pytest.approx(100.75, abs=0.03)
+    assert _netclass_errors(pcb) == []
+
+
+def test_relocation_honours_the_foreign_nets_netclass_clearance(tmp_path):
+    """The pair requirement is max(class[a], class[b]): the obstacle's class counts."""
+    pcb = _load(tmp_path, _FOREIGN_TRACK + _EDGE_VIA)
+    _power_project(pcb.path, pattern="SIG2")
+    result = relocate_pad_edge_vias(pcb, _RULES)
+    assert len(result.moved) == 1 and not result.unresolvable
+    assert _netclass_errors(pcb) == []
+
+
+def test_unmodellable_netclasses_move_nothing(tmp_path):
+    import json
+
+    pcb = _load(tmp_path, _FOREIGN_TRACK + _EDGE_VIA)
+    _power_project(pcb.path)
+    project_path = pcb.path.with_suffix(".kicad_pro")
+    project = json.loads(project_path.read_text())
+    project["net_settings"]["netclass_patterns"] = [{"netclass": "Power", "pattern": "S[I"}]
+    project["net_settings"]["netclass_assignments"] = {"SIG1": ["NoSuchClass"]}
+    project_path.write_text(json.dumps(project))
+    before = pcb.vias[0].position
+
+    result = relocate_pad_edge_vias(pcb, _RULES)
+
+    assert result.moved == []
+    assert len(result.unresolvable) == 1
+    assert "netclass" in result.unresolvable[0].reason
+    assert pcb.vias[0].position == before

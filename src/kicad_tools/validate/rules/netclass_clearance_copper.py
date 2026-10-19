@@ -253,3 +253,60 @@ def check_netclass_clearance_copper(
                 )
             )
     return results
+
+
+def netclass_pair_requirement(
+    pcb_path: Path | None,
+    pcb: PCB,
+    fab_floor: float,
+):
+    """``(net_a, net_b) -> mm``: the copper clearance this category demands.
+
+    Issue #7296: a post-route pass that moves copper (the pad-edge via
+    relocation) must clear the same per-pair requirement this check enforces,
+    not just the fab floor, or it moves a ``Power`` via to 0.155 mm from a
+    signal track and this category fails the board.  The answer is
+    ``max(fab_floor, pair_floor(...))`` under the governance the check uses
+    for a via against other copper: a router-declared class does not govern
+    the P/N gap of a coupled pair (the ``same_package`` exemption is pad-pad
+    only, so it never applies to a via).  Same-net copper needs nothing.
+
+    Raises :class:`ProjectClearanceError` when the project declares classes
+    the resolver cannot model -- the caller must fail closed, exactly as the
+    check reports ``netclass_clearance_unsupported`` instead of passing.
+    Without a sibling ``.kicad_pro`` every foreign pair needs the fab floor.
+    """
+    from kicad_tools.router.authored_clearance import pair_floor
+
+    project = load_project(pcb_path) if pcb_path is not None else None
+    if project is None:
+        return lambda a, b: 0.0 if a == b and a != 0 else fab_floor
+
+    net_names = {net.number: net.name for net in pcb.nets.values() if net.name}
+    authored = authored_netclass_clearances(project, net_names.values())
+    floors = {num: authored[name].clearance for num, name in net_names.items() if name in authored}
+
+    from kicad_tools.manufacturers.netclass_dru import is_router_coupled_pair
+    from kicad_tools.manufacturers.project_generator import (
+        recorded_router_coupled_pairs,
+        router_netclass_provenance,
+    )
+
+    router_classes = set(router_netclass_provenance(project)[0])
+    recorded_pairs = recorded_router_coupled_pairs(project)
+    package_floors = {
+        num: value
+        for num, name in net_names.items()
+        if name in authored
+        for value in (authored[name].clearance,)
+        if authored[name].source_class not in router_classes
+    }
+
+    def requirement(net_a: int, net_b: int) -> float:
+        if net_a == net_b and net_a != 0:
+            return 0.0
+        coupled = is_router_coupled_pair(net_names.get(net_a), net_names.get(net_b), recorded_pairs)
+        governing = package_floors if coupled else floors
+        return max(fab_floor, pair_floor(governing, net_a, net_b))
+
+    return requirement

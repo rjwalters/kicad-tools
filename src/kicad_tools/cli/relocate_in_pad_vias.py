@@ -896,9 +896,14 @@ def _check_clearance(
     min_clearance: float,
     min_hole_to_hole: float,
     min_hole_clearance: float | None = None,
+    clearance_for: Callable[[int], float] | None = None,
 ) -> str | None:
     """Return a human reason string if placing ``via`` at ``(new_x, new_y)``
     would violate copper clearance or hole-to-hole; ``None`` when clear.
+
+    ``clearance_for(net)`` is the copper clearance the via must keep to
+    copper on ``net`` (Issue #7296: the netclass pair requirement); ``None``
+    applies the scalar ``min_clearance`` to every foreign net.
 
     Same-net copper is exempt (a via may touch its own net).  The following
     obstacles are considered: other vias (hole-to-hole any-net + copper
@@ -909,6 +914,9 @@ def _check_clearance(
     """
     via_r = via.size / 2.0
     hole_r = via.drill / 2.0
+
+    def required(net: int) -> float:
+        return min_clearance if clearance_for is None else clearance_for(net)
 
     # Other vias: hole-to-hole (any net) + copper clearance (different net).
     for other in pcb.vias:
@@ -923,7 +931,7 @@ def _check_clearance(
             )
         if other.net_number != via.net_number:
             cu_gap = d - via_r - other.size / 2.0
-            if cu_gap < min_clearance - 1e-6:
+            if cu_gap < required(other.net_number) - 1e-6:
                 return (
                     f"clearance {cu_gap:.3f}mm to via at "
                     f"({other.position[0]:.2f}, {other.position[1]:.2f})"
@@ -935,7 +943,7 @@ def _check_clearance(
             continue
         for fp, pad, bbox in entries:
             cu_gap = _dist_point_to_aabb(new_x, new_y, bbox) - via_r
-            if cu_gap < min_clearance - 1e-6:
+            if cu_gap < required(net_number) - 1e-6:
                 return f"clearance {cu_gap:.3f}mm to pad {fp.reference}-{pad.number}"
 
     # THT / NP-THT plated pads: hole-to-hole (any net) + copper clearance
@@ -951,7 +959,7 @@ def _check_clearance(
         # different net can violate copper clearance.
         if pad.net_number != 0 and pad.net_number != via.net_number:
             cu_gap = _dist_point_to_aabb(new_x, new_y, bbox) - via_r
-            if cu_gap < min_clearance - 1e-6:
+            if cu_gap < required(pad.net_number) - 1e-6:
                 return f"clearance {cu_gap:.3f}mm to THT pad {fp.reference}-{pad.number}"
 
     # Routed segments on other nets: copper clearance.
@@ -959,11 +967,11 @@ def _check_clearance(
         if seg.net_number == via.net_number:
             continue
         cu_gap = _dist_point_to_segment(new_x, new_y, seg) - via_r - seg.width / 2.0
-        if cu_gap < min_clearance - 1e-6:
+        if cu_gap < required(seg.net_number) - 1e-6:
             return f"clearance {cu_gap:.3f}mm to track on net {seg.net_number}"
 
     return _check_hole_to_copper(
-        pcb, via, new_x, new_y, _resolve_hole_clearance(pcb, min_hole_clearance), min_clearance
+        pcb, via, new_x, new_y, _resolve_hole_clearance(pcb, min_hole_clearance), required(0)
     )
 
 
@@ -975,8 +983,14 @@ def _check_stub_clearance(
     stub_width: float,
     min_clearance: float,
     min_hole_clearance: float | None = None,
+    clearance_for: Callable[[int], float] | None = None,
 ) -> str | None:
     """Validate the entire swept copper of a proposed set of straight stubs.
+
+    ``clearance_for(net)`` is the copper clearance the stubs must keep to
+    copper on ``net`` (Issue #7296); ``None`` applies ``min_clearance``.
+    Zone fills keep ``min_clearance``: a refill re-derives them around the
+    new copper under the zone's own rules.
 
     Centerline distances include both conductors' radii, avoiding polygonal
     approximations of round caps. Pad AABBs conservatively include rotations.
@@ -1014,6 +1028,9 @@ def _check_stub_clearance(
     def foreign(net: int) -> bool:
         return net == 0 or net != via.net_number
 
+    def required(net: int) -> float:
+        return min_clearance if clearance_for is None else clearance_for(net)
+
     def too_close(shape, other_radius: float = 0.0, clearance: float = min_clearance) -> bool:
         # Exact analytic distance quickly accepts geometry outside the entire
         # candidate envelope, without polygon discretization error.
@@ -1034,7 +1051,9 @@ def _check_stub_clearance(
 
     for seg in pcb.segments:
         if seg.layer in layers and foreign(seg.net_number):
-            if too_close(LineString([seg.start, seg.end]), seg.width / 2.0):
+            if too_close(
+                LineString([seg.start, seg.end]), seg.width / 2.0, required(seg.net_number)
+            ):
                 return f"stub clearance to track on {seg.layer}, net {seg.net_number}"
 
     for other in pcb.vias:
@@ -1047,7 +1066,9 @@ def _check_stub_clearance(
             span = copper_layers[min(indices) : max(indices) + 1]
         if overlaps(span) and too_close(Point(other.position), other.drill / 2, hole_floor):
             return f"stub hole-to-copper to via on net {other.net_number}"
-        if overlaps(span) and too_close(Point(other.position), other.size / 2.0):
+        if overlaps(span) and too_close(
+            Point(other.position), other.size / 2.0, required(other.net_number)
+        ):
             return f"stub clearance to via on net {other.net_number}"
 
     for fp in pcb.footprints:
@@ -1063,7 +1084,7 @@ def _check_stub_clearance(
                 center = Point((bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2)
                 if too_close(center, pad.drill / 2, hole_floor):
                     return f"stub hole-to-copper to pad {fp.reference}-{pad.number}"
-            if too_close(box(*pad_absolute_bbox(pad, fp))):
+            if too_close(box(*pad_absolute_bbox(pad, fp)), 0.0, required(pad.net_number)):
                 return f"stub clearance to pad {fp.reference}-{pad.number}"
 
     for zone in pcb.zones:
@@ -1076,7 +1097,7 @@ def _check_stub_clearance(
             if solid is not None and too_close(solid):
                 return f"stub clearance to filled zone on {zone.filled_polygon_layer(index)}"
 
-    return _check_raw_copper(pcb, via, path, radius, layers, min_clearance, "stub clearance")
+    return _check_raw_copper(pcb, via, path, radius, layers, required(0), "stub clearance")
 
 
 def _persist_via_with_stubs(
@@ -1584,7 +1605,17 @@ def relocate_pad_edge_vias(
     layer, and the move is gated by the same clearance / hole-to-hole /
     stub-clearance checks as :func:`relocate_in_pad_vias`.  A via with no legal
     spot is reported ``unresolvable`` and left in place.
+
+    Copper clearance is the effective per-pair requirement ``kct check``'s
+    ``netclass_clearance_copper`` enforces (the project's netclasses,
+    including the router-declared ``Power`` class, over the fab floor) --
+    not the fab floor alone, which let a +3V3 via land 0.155 mm from a signal
+    track on board 06.  A project whose netclasses cannot be modelled moves
+    nothing: every flagged via is reported ``unresolvable``.
     """
+    from kicad_tools.core.project_clearance import ProjectClearanceError
+    from kicad_tools.validate.rules.netclass_clearance_copper import netclass_pair_requirement
+
     result = RelocationResult()
     dam = float(getattr(design_rules, "min_solder_mask_dam_mm", 0.0) or 0.0)
     if dam <= DRC_TOLERANCE:
@@ -1594,6 +1625,12 @@ def relocate_pad_edge_vias(
     min_clearance = design_rules.min_clearance_mm
     min_hole_to_hole = design_rules.min_hole_to_hole_mm
     min_hole_clearance = _resolve_hole_clearance(pcb, min_hole_clearance_mm)
+    try:
+        pair_requirement = netclass_pair_requirement(pcb.path, pcb, min_clearance)
+        unsupported = None
+    except ProjectClearanceError as exc:
+        pair_requirement = None
+        unsupported = f"netclass clearances cannot be modelled ({exc}); not moved"
 
     pads_by_net = _collect_smd_pads_by_net(pcb)
     tht_pads = _collect_tht_pads(pcb)
@@ -1642,6 +1679,26 @@ def relocate_pad_edge_vias(
                 stub_layers.append(layer)
         stub_width = max((seg.width for seg, _ in connected), default=0.2) or 0.2
 
+        if pair_requirement is None:
+            result.unresolvable.append(
+                ViaRelocationSkip(
+                    x=vx,
+                    y=vy,
+                    net=via.net_number,
+                    net_name=net_name,
+                    pad_ref=pad_ref,
+                    reason=unsupported or "netclass clearances unavailable",
+                    uuid=via.uuid,
+                    category="unresolvable",
+                )
+            )
+            continue
+        own_net = via.net_number
+
+        def clearance_for(net: int, _own: int = own_net) -> float:
+            assert pair_requirement is not None
+            return pair_requirement(_own, net)
+
         # Candidate order: along each escape track first (copper already runs
         # that way), then the compass ladder around the old position.
         directions: list[tuple[float, float]] = []
@@ -1673,8 +1730,16 @@ def relocate_pad_edge_vias(
                     min_clearance,
                     min_hole_to_hole,
                     min_hole_clearance,
+                    clearance_for,
                 ) or _check_stub_clearance(
-                    pcb, via, (nx, ny), stub_layers, stub_width, min_clearance, min_hole_clearance
+                    pcb,
+                    via,
+                    (nx, ny),
+                    stub_layers,
+                    stub_width,
+                    min_clearance,
+                    min_hole_clearance,
+                    clearance_for,
                 )
                 if failure is None:
                     target = (nx, ny)
