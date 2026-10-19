@@ -15,6 +15,9 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-19
 
+- **PR #7404**: fix(blocks): build stock schematic blocks on KiCad 10 libs; add real-symbol smoke test
+- **PR #7395**: fix: clamp init netclass template values to manufacturer floors
+- **Issue #7392** (closed): kct init --design-type writes netclass values below the fab floor (oshpark/seeed Default clearance 0.15 < 0.1524 mm)
 - **PR #7400**: fix: route stock MCUBlock and OscillatorBlock copper clear of foreign pads
 - **Issue #7393** (closed): Audit MCUBlock/OscillatorBlock stock copper for foreign-pad clearance (#7062 follow-up)
 - **PR #7397**: fix(router): let a capped match-group member top up from the unused ceiling (board 07 re-measure after #7375)
