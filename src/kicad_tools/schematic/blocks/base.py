@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from kicad_tools.schematic.grid import snap_point
 from kicad_tools.schematic.models.schematic import SnapMode
@@ -17,7 +17,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-class _GridSnappedPorts(dict):
+class _GridSnappedPorts(dict[str, tuple[float, float]]):
     """Port table that snaps each position to the schematic grid on assignment.
 
     Symbols and wires are snapped by the schematic (``SnapMode.AUTO``) while
@@ -27,13 +27,15 @@ class _GridSnappedPorts(dict):
     one place; on-grid values are unchanged.
     """
 
-    def __init__(self, block: CircuitBlock, items: dict | None = None) -> None:
+    def __init__(
+        self, block: CircuitBlock, items: dict[str, tuple[float, float]] | None = None
+    ) -> None:
         super().__init__()
         self._block = block
         if items:
             self.update(items)
 
-    def _snap(self, value):
+    def _snap(self, value: Any) -> Any:
         sch = self._block.schematic
         if (
             value is None
@@ -44,14 +46,14 @@ class _GridSnappedPorts(dict):
             return value
         return snap_point(value)
 
-    def __setitem__(self, key, value) -> None:
+    def __setitem__(self, key: str, value: tuple[float, float]) -> None:
         super().__setitem__(key, self._snap(value))
 
-    def update(self, *args, **kwargs) -> None:
+    def update(self, *args: Any, **kwargs: Any) -> None:
         for key, value in dict(*args, **kwargs).items():
             self[key] = value
 
-    def setdefault(self, key, default=None):
+    def setdefault(self, key: str, default: tuple[float, float]) -> tuple[float, float]:
         if key not in self:
             self[key] = default
         return self[key]
