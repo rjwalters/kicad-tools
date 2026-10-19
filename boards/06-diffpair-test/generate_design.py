@@ -3987,6 +3987,15 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     except Exception as exc:  # pragma: no cover - degrade gracefully
         print(f"   WARNING: pair-overlap repair skipped: {exc}")
 
+    # Issue #7349 (follow-up to #7344): the coupled pre-pass leaves the pair
+    # trunks at the breakout pitch.  Squeeze each declared pair's parallel run
+    # to the impedance-solved gap.  This runs AFTER the optimiser, nudge and
+    # overlap-repair passes (which reshape pair copper) so the gated copper is
+    # what gets judged; every edit is gated on clearance, connectivity, skew
+    # and impedance, and a declined pair keeps its copper unchanged.
+    print("\n6c. Diff-pair gap tightening (#7344)...")
+    router.apply_diffpair_gap_tightening()
+
     stats = router.get_statistics()
     print(
         f"\n7. Final: {stats['routes']} routes / {stats['segments']} segments / {stats['vias']} vias"

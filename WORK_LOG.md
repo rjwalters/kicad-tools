@@ -15,6 +15,18 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-19
 
+- **PR #7408**: fix(ci): lower board 07 copper-safety DRC floor to 0
+- **PR #7396**: fix: key known_issues warning allowances by finding identity
+- **Issue #7389** (closed): Key readiness known_issues warning/error allowances by finding identity, not per-rule counts (#7359 follow-up, #7270 Q3)
+- **PR #7394**: feat: tighten diff-pair gaps in board 06/07 recipes, lower impedance caps
+- **PR #7404**: fix(blocks): build stock schematic blocks on KiCad 10 libs; add real-symbol smoke test
+- **PR #7395**: fix: clamp init netclass template values to manufacturer floors
+- **Issue #7392** (closed): kct init --design-type writes netclass values below the fab floor (oshpark/seeed Default clearance 0.15 < 0.1524 mm)
+- **PR #7400**: fix: route stock MCUBlock and OscillatorBlock copper clear of foreign pads
+- **Issue #7393** (closed): Audit MCUBlock/OscillatorBlock stock copper for foreign-pad clearance (#7062 follow-up)
+- **PR #7397**: fix(router): let a capped match-group member top up from the unused ceiling (board 07 re-measure after #7375)
+- **PR #7364**: fix(boards): share one saved-vs-refilled fill check across readiness producers
+- **Issue #7356** (closed): Evidence producers: one shared saved-vs-refilled fill-identity gate for every producer (#7353 step 2)
 - **PR #7388**: fix: rule writers keep stricter authored .kicad_pro rules (#7385)
 - **PR #7379**: refactor(geometry): delegate private point-to-segment distance copies to core (PR2 of #7224)
 - **Issue #7385** (closed): Rule files may only tighten on rewrite: kct mfr apply-rules (.kicad_pro), fab-rules apply and kct init bypass the #6191 max() policy and loosen authored rules

@@ -2,6 +2,7 @@
 
 from typing import TYPE_CHECKING
 
+from ._pins import first_pin_position, output_pin_position
 from ._stub_helpers import _emit_pin_net_stub
 from .base import CircuitBlock
 
@@ -561,7 +562,7 @@ class CurrentSenseShunt(CircuitBlock):
         ref_prefix: str = "R",
         resistor_symbol: str = "Device:R",
         amplifier: bool = False,
-        amplifier_symbol: str = "Amplifier_Current:INA240A1",
+        amplifier_symbol: str = "Amplifier_Current:INA240A1D",
         amplifier_ref: str = "U",
         gain: float = 20,
         amp_ref_start: int = 1,
@@ -636,10 +637,15 @@ class CurrentSenseShunt(CircuitBlock):
             self.components["CSA"] = self.amplifier
 
             # Get amplifier pin positions
-            amp_inp = self.amplifier.pin_position("IN+")
-            amp_inn = self.amplifier.pin_position("IN-")
-            amp_out = self.amplifier.pin_position("OUT")
-            amp_vs = self.amplifier.pin_position("VS")
+            # KiCad 10's INA240 symbols name the inputs ``+``/``-`` and the
+            # supply ``V+``, and leave the output unnamed (pin 5 on SOIC, 8 on
+            # TSSOP), so it is found by electrical type.  The historical
+            # IN+/IN-/VS/OUT names are still tried first for custom symbols
+            # (issue #7399).
+            amp_inp = first_pin_position(self.amplifier, "IN+", "+")
+            amp_inn = first_pin_position(self.amplifier, "IN-", "-")
+            amp_out = output_pin_position(self.amplifier)
+            amp_vs = first_pin_position(self.amplifier, "VS", "V+")
             amp_gnd = self.amplifier.pin_position("GND")
 
             # Wire shunt to amplifier inputs

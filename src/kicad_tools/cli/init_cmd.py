@@ -444,6 +444,7 @@ def init_project(
             apply_design_template(
                 project_data,
                 design_type,
+                rules=rules,
                 keep_stricter_default=not (
                     {"*", "netclasses.Default.track_width"}
                     & merge_policy_allowances(rules_before, apply_severities=False)
