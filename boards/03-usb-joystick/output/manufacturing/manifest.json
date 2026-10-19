@@ -1,7 +1,7 @@
 {
   "version": "1.0",
   "kicad_tools_version": "0.23.0",
-  "generated_at": "2026-10-19T08:01:34.271413+00:00",
+  "generated_at": "2026-10-19T09:37:06.556873+00:00",
   "manufacturer": "jlcpcb-tier1",
   "files": {
     "DESIGN_REVIEW.md": {
@@ -33,7 +33,7 @@
       "size": 9932
     },
     "cpl_jlcpcb.csv": {
-      "sha256": "77f4911b0cee3381fbff404690797ebb4bede6fabc174df4340815cc23ab3c62",
+      "sha256": "213c62a3a2c9292f5c3845b76f4b447141a2206a83043afddd2a42a4c3064b05",
       "size": 2854
     },
     "design-source/DESIGN_REVIEW.md": {
@@ -173,8 +173,8 @@
       "size": 2192
     },
     "gerbers/gerbers.zip": {
-      "sha256": "184a1bfaccbdc142cf0e5dffbf8b9ac3b1d5d0fa76fb1b8e1d5fe6fb94d2f4a7",
-      "size": 131981
+      "sha256": "d12091a26e3bccdd5161f122c89609b7b1985bfb299f2146349f04ff0bfbae62",
+      "size": 131982
     },
     "images/assembly.png": {
       "sha256": "9196b12f7c83ecd66e4b68f34c9b4783e8681289b6931d236f240885991381b9",
@@ -209,11 +209,11 @@
       "size": 485752
     },
     "images/schematic_usb_joystick.png": {
-      "sha256": "435c684096c4c22d4f460823a2584c6e3f09f6663b89176976bbbaec2728eea2",
-      "size": 486460
+      "sha256": "c0a3950fda2f26c18ad6359ba1ccd02e953d67c0be8d2b40d3d8553de7445c79",
+      "size": 486466
     },
     "kicad_project.zip": {
-      "sha256": "a4f672c6f1f79cfa9319358fef908db92ff89a7a499b6e6ab8404a9f959e599d",
+      "sha256": "ef948c52814c765c30fc586f9cd2c1976461106ec9adbb51c7c65b5611e0c1ee",
       "size": 198383
     },
     "manufacturing-requirements.json": {
@@ -317,8 +317,8 @@
       "size": 4641
     },
     "report.pdf": {
-      "sha256": "8414db197753510caaa70f8f7c0d4c089ebe9364f35bc25f462cb573c96bf8e3",
-      "size": 3236287
+      "sha256": "6c8c54fc27a3f9d268d97846146536f15643519bf2396cae8db7ad89f97a6e59",
+      "size": 3317014
     },
     "schematic.pdf": {
       "sha256": "6fe021a9ea56eb056b2fc6dc24e3fee47c4f6555c6141a4ad1ec755b51aa0d98",
@@ -396,8 +396,8 @@
     {
       "name": "bom_lcsc_values",
       "status": "WARN",
-      "message": "10 of 38 assigned item(s) verified (offline catalog and parts cache); 28 unverifiable (not in parts cache or offline catalog)",
-      "details": "unverified: U1 -> C44854, U2 -> C7519, F1 -> C126817, Y1 -> C2442665, J2 -> C265104, J3 -> C21285200, R1 -> C105580, R2 -> C105580 (and 20 more)"
+      "message": "2 of 38 assigned item(s) verified (parts cache); 36 unverifiable (not in parts cache or offline catalog)",
+      "details": "unverified: U1 -> C44854, J1 -> C7095263, U2 -> C7519, F1 -> C126817, Y1 -> C2442665, J2 -> C265104, J3 -> C21285200, R1 -> C105580 (and 28 more)"
     },
     {
       "name": "bom_pcb_match",
