@@ -5,7 +5,8 @@ import { isAbsolute, join, relative, resolve } from "node:path";
 import type { KnownIssue, Readiness } from "./types.ts";
 
 const KNOWN_ISSUE_KINDS = ["defect", "exception", "advisory"];
-const KNOWN_ISSUE_KEYS = new Set(["issue", "kind", "summary", "recorded", "warnings"]);
+const KNOWN_ISSUE_KEYS = new Set(["issue", "kind", "summary", "recorded", "warnings", "errors"]);
+const ERROR_IDENTITY = /^[A-Za-z0-9_.-]+@-?\d+\.\d{2}\/-?\d+\.\d{2}$/;
 
 /** Mirrors `validate_known_issues` in `src/kicad_tools/cli/known_issues.py` (#7261). */
 export function validateKnownIssues(value: unknown): KnownIssue[] {
@@ -15,7 +16,7 @@ export function validateKnownIssues(value: unknown): KnownIssue[] {
   for (const entry of value) {
     if (!entry || typeof entry !== "object" || Array.isArray(entry)) throw new Error("known issue must be an object");
     if (Object.keys(entry).some(key => !KNOWN_ISSUE_KEYS.has(key))) throw new Error("unknown known-issue field");
-    const { issue, kind, summary, recorded, warnings } = entry as Record<string, unknown>;
+    const { issue, kind, summary, recorded, warnings, errors } = entry as Record<string, unknown>;
     if (typeof issue !== "number" || !Number.isInteger(issue) || issue < 1) throw new Error("invalid known issue number");
     if (issue <= previous) throw new Error("known_issues must be unique and sorted by issue number");
     previous = issue;
@@ -29,13 +30,23 @@ export function validateKnownIssues(value: unknown): KnownIssue[] {
       || Object.values(warnings).some(n => typeof n !== "number" || !Number.isInteger(n) || n < 1))) {
       throw new Error(`invalid warnings for known issue #${issue}`);
     }
+    if (errors !== undefined) {
+      // Mirrors `_check_errors`: `rule@x/y` (mm, 0.01), unique, sorted, exceptions only (#7355).
+      if (kind !== "exception") throw new Error(`only an exception may carry errors (known issue #${issue})`);
+      if (!Array.isArray(errors) || errors.length === 0
+        || errors.some(e => typeof e !== "string" || !ERROR_IDENTITY.test(e) || e.endsWith("-0.00") || /@-0\.00\//.test(e))
+        || errors.some((e, i) => i > 0 && !(errors[i - 1] < e))) {
+        throw new Error(`invalid errors for known issue #${issue}`);
+      }
+    }
   }
   return value as KnownIssue[];
 }
 
 function canonical(entries: KnownIssue[]): string {
   return JSON.stringify(entries.map(e => ({ issue: e.issue, kind: e.kind, summary: e.summary, recorded: e.recorded,
-    warnings: e.warnings === undefined ? null : Object.fromEntries(Object.entries(e.warnings).sort()) })));
+    warnings: e.warnings === undefined ? null : Object.fromEntries(Object.entries(e.warnings).sort()),
+    errors: e.errors === undefined ? null : e.errors })));
 }
 
 /** Mirrors `_evidence_folders` in `src/kicad_tools/cli/board_readiness.py` (#7337). */

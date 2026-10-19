@@ -68,6 +68,7 @@ from .known_issues import (
     KNOWN_ISSUES_FILENAME,
     KnownIssueError,
     defects,
+    error_identity,
     known_error_allowance,
     merge_known_issues,
     parse_known_issue,
@@ -1236,36 +1237,53 @@ def _format_warning_table(counts: dict[str, int]) -> str:
     return ", ".join(f"{rule}={count}" for rule, count in counts.items())
 
 
-def _error_counts(report: dict) -> dict[str, int]:
-    """Group ``violations[]`` by ``rule_id``, errors only (Issue #7355)."""
-    counts: dict[str, int] = {}
-    for violation in report.get("violations", []):
-        if not isinstance(violation, dict) or violation.get("severity") != "error":
-            continue
-        rule = str(violation.get("rule_id") or "unknown")
-        counts[rule] = counts.get(rule, 0) + 1
-    return dict(sorted(counts.items()))
+def _violation_error_identity(violation: dict) -> str | None:
+    """``rule@x/y`` for an error violation, or ``None`` when it has no usable location."""
+    location = violation.get("location")
+    if not isinstance(location, (list, tuple)) or len(location) != 2:
+        return None
+    if not all(type(c) in (int, float) and math.isfinite(c) for c in location):
+        return None
+    return error_identity(str(violation.get("rule_id") or "unknown"), location[0], location[1])
 
 
 def _unaccepted_errors(report: dict, allowance: dict[str, int]) -> list[str] | None:
-    """Rules whose error count differs from the recorded allowance, or ``None``.
+    """Error identities that differ from the recorded allowance, or ``None``.
 
-    ``None`` means "no exact waiver applies": either there is no allowance, or
-    the report's errors cannot be fully attributed to rules (the summary count
-    disagrees with the listed violations), so nothing may be waived.
+    The report's error violations are matched against the listed identities as
+    a set (Issue #7355).  ``None`` means "no exact waiver applies": either
+    there is no allowance, or the report's errors cannot be fully attributed
+    (the summary count disagrees with the listed violations).  ``[]`` is an
+    exact match; otherwise each entry names an unlisted error, a repeated
+    identity, an error with no usable location, or a stale listed identity.
     """
     if not allowance:
         return None
-    counts = _error_counts(report)
+    errors = [
+        v
+        for v in report.get("violations", [])
+        if isinstance(v, dict) and v.get("severity") == "error"
+    ]
     raw_summary = report.get("summary")
     summary = raw_summary if isinstance(raw_summary, dict) else {}
-    if sum(counts.values()) != int(summary.get("errors", 0) or 0):
+    if len(errors) != int(summary.get("errors", 0) or 0):
         return None
-    return [
-        f"{rule} (found {counts.get(rule, 0)}, recorded {allowance.get(rule, 0)})"
-        for rule in sorted(set(counts) | set(allowance))
-        if counts.get(rule, 0) != allowance.get(rule, 0)
-    ]
+    problems: list[str] = []
+    seen: set[str] = set()
+    for violation in errors:
+        identity = _violation_error_identity(violation)
+        if identity is None:
+            problems.append(f"{violation.get('rule_id') or 'unknown'} (no usable location)")
+        elif identity not in allowance:
+            problems.append(f"{identity} (not recorded)")
+        elif identity in seen:
+            problems.append(f"{identity} (repeated)")
+        seen.add(identity or "")
+    problems.extend(
+        f"{i} (recorded for #{allowance[i]}, no longer fires)"
+        for i in sorted(set(allowance) - seen)
+    )
+    return problems
 
 
 def _blocking_unknown_coverage(report: dict) -> list[str]:
@@ -1363,10 +1381,12 @@ def _gate_kct_check(options: ReadinessOptions, engines: Engines) -> tuple[CheckO
                 status=FAILED,
                 detail=(
                     f"{errors} electrical/manufacturing error(s) do not match the recorded "
-                    f"exception allowance: {table_err}; warning counts: {table}."
+                    f"exception identities: {table_err}; warning counts: {table}."
                 ),
                 evidence=evidence_rel,
-                blockers=[f"kct check reports {errors} error(s); unaccepted rule(s): {table_err}."],
+                blockers=[
+                    f"kct check reports {errors} error(s); unaccepted error(s): {table_err}."
+                ],
             ),
             report,
         )

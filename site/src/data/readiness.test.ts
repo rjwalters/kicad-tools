@@ -164,6 +164,25 @@ it("discloses bound exceptions/advisories and keeps the board ready", () => {
   expect(board.readiness?.known_issues?.map(e => e.issue)).toEqual([6269, 7220]);
   expect(board.readiness?.manufacturer).toBe("jlcpcb");
 });
+it("accepts canonical exception error identities and rejects malformed ones (#7355)", () => {
+  const ids = ["dimension_via_drill@10.00/20.50", "dimension_via_drill@11.25/-3.00"];
+  bindKnownIssues([{ ...exception, errors: ids }]);
+  save();
+  expect(displayStatus(loadBoard(root))).toBe("ready");
+  const bad: Record<string, unknown> = {
+    "count map": { dimension_via_drill: 7 },
+    "non-canonical": ["dimension_via_drill@10.0/20.5"],
+    "unsorted": [ids[1], ids[0]],
+    "duplicate": [ids[0], ids[0]],
+    "empty": [],
+    "on advisory": ids,
+  };
+  for (const [name, errors] of Object.entries(bad)) {
+    bindKnownIssues([name === "on advisory" ? { ...advisory, errors } : { ...exception, errors }]);
+    save();
+    expect(displayStatus(loadBoard(root)), name).toBe("unverified");
+  }
+});
 it("renders a board blocked by a known defect as non-ready", () => {
   bindKnownIssues([defect]);
   report.status = "blocked";

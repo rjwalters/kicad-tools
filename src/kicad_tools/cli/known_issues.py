@@ -18,11 +18,14 @@ warnings the issue accounts for.  Board scripts that tolerate known warnings
 should read that allowance (:func:`known_warning_allowance`) instead of
 keeping their own list.
 
-An ``exception`` entry may likewise carry ``"errors": {rule_id: count}`` naming
-the exact ``kct check`` errors the approved deviation accounts for
-(:func:`known_error_allowance`, Issue #7355).  The readiness ``kct_check`` gate
-passes only when the report's errors match that allowance exactly -- an extra
-error, an unnamed rule or a different count still blocks.
+An ``exception`` entry may likewise carry ``"errors": ["rule@x/y", ...]`` naming
+the individual ``kct check`` errors the approved deviation accounts for
+(:func:`known_error_allowance`, Issue #7355).  Each identity is the rule id plus
+the violation's board location in mm, rounded to 0.01 (:func:`error_identity`),
+and is cited to the entry's issue -- never a bare rule count.  The readiness
+``kct_check`` gate passes only when the report's errors match the listed
+identities as a set: an error at an unlisted identity, a listed identity that no
+longer fires, a repeated identity or an error with no location still blocks.
 
 The list is hash-bound evidence: the producer also writes it to a
 ``known-issues.json`` file in the evidence directory, hashed into the report's
@@ -43,6 +46,7 @@ __all__ = [
     "KNOWN_ISSUE_KINDS",
     "KnownIssueError",
     "defects",
+    "error_identity",
     "known_error_allowance",
     "known_warning_allowance",
     "merge_known_issues",
@@ -56,8 +60,10 @@ KNOWN_ISSUES_FILENAME = "known-issues.json"
 
 _RULE_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 _ENTRY_KEYS = {"issue", "kind", "summary", "recorded", "warnings", "errors"}
-#: ``--known-issue`` allowance items: ``rule=count`` (warning) or ``!rule=count`` (error).
-_ITEM = r"!?[A-Za-z0-9_.-]+=\d+"
+_COORD = r"-?\d+(?:\.\d+)?"
+_ERROR_ID_RE = re.compile(rf"^([A-Za-z0-9_.-]+)@({_COORD})/({_COORD})$")
+#: ``--known-issue`` allowance items: ``rule=count`` (warning) or ``!rule@x/y`` (error).
+_ITEM = rf"(?:[A-Za-z0-9_.-]+=\d+|![A-Za-z0-9_.-]+@{_COORD}/{_COORD})"
 _ALLOWANCE_RE = re.compile(rf"^{_ITEM}(,{_ITEM})*$")
 
 
@@ -65,15 +71,44 @@ class KnownIssueError(ValueError):
     """A ``--known-issue`` value or a recorded ``known_issues`` list is malformed."""
 
 
-def _check_warnings(value: Any, field: str = "warning") -> dict[str, int]:
+def _coord(value: float) -> str:
+    text = f"{round(value, 2):.2f}"
+    return "0.00" if text == "-0.00" else text
+
+
+def error_identity(rule: str, x: float, y: float) -> str:
+    """``rule@x/y``: a ``kct check`` error's identity (location in mm, rounded to 0.01)."""
+    return f"{rule}@{_coord(x)}/{_coord(y)}"
+
+
+def _canonical_error_identity(value: Any) -> str:
+    match = _ERROR_ID_RE.match(value) if isinstance(value, str) else None
+    if not match:
+        raise KnownIssueError(f"invalid error identity {value!r}: expected rule@x/y (mm)")
+    rule, x, y = match.groups()
+    return error_identity(rule, float(x), float(y))
+
+
+def _check_errors(value: Any) -> list[str]:
+    if not isinstance(value, list) or not value:
+        raise KnownIssueError("errors must be a non-empty list of rule@x/y identities")
+    out = [_canonical_error_identity(item) for item in value]
+    if out != value:
+        raise KnownIssueError("error identities must be canonical (x/y to 0.01 mm)")
+    if out != sorted(set(out)):
+        raise KnownIssueError("error identities must be unique and sorted")
+    return out
+
+
+def _check_warnings(value: Any) -> dict[str, int]:
     if not isinstance(value, Mapping) or not value:
-        raise KnownIssueError(f"{field}s must be a non-empty {{rule: count}} object")
+        raise KnownIssueError("warnings must be a non-empty {rule: count} object")
     out: dict[str, int] = {}
     for rule, count in value.items():
         if not isinstance(rule, str) or not _RULE_RE.match(rule):
-            raise KnownIssueError(f"invalid {field} rule id: {rule!r}")
+            raise KnownIssueError(f"invalid warning rule id: {rule!r}")
         if type(count) is not int or count < 1:
-            raise KnownIssueError(f"{field} count for {rule} must be a positive integer")
+            raise KnownIssueError(f"warning count for {rule} must be a positive integer")
         out[rule] = count
     return dict(sorted(out.items()))
 
@@ -111,7 +146,7 @@ def _check_entry(entry: Any) -> dict[str, Any]:
             raise KnownIssueError(
                 f"known issue #{issue}: only an exception may carry an errors allowance"
             )
-        out["errors"] = _check_warnings(entry["errors"], "error")
+        out["errors"] = _check_errors(entry["errors"])
     return out
 
 
@@ -139,7 +174,7 @@ def parse_known_issue(spec: str, recorded: str) -> dict[str, Any]:
 
     The number is split from the left and the kind (plus the optional
     allowance) from the right, so the summary may itself contain ``:``.  In the
-    allowance, ``rule=count`` names warnings and ``!rule=count`` names errors
+    allowance, ``rule=count`` names warnings and ``!rule@x/y`` names one error
     (exceptions only).
     """
     head, sep, rest = spec.partition(":")
@@ -152,23 +187,23 @@ def parse_known_issue(spec: str, recorded: str) -> dict[str, Any]:
     if not sep:
         raise KnownIssueError(f"--known-issue {spec!r}: expected N:summary:kind")
     warnings: dict[str, int] | None = None
-    errors: dict[str, int] | None = None
+    errors: list[str] | None = None
     if _ALLOWANCE_RE.match(kind.strip()) and ":" in summary:
         allowance = kind.strip()
         summary, _, kind = summary.rpartition(":")
         for item in allowance.split(","):
+            if item.startswith("!"):
+                errors = [] if errors is None else errors
+                identity = _canonical_error_identity(item[1:])
+                if identity in errors:
+                    raise KnownIssueError(f"--known-issue {spec!r}: error {identity} listed twice")
+                errors.append(identity)
+                continue
+            warnings = {} if warnings is None else warnings
             rule, _, count = item.partition("=")
-            is_error = rule.startswith("!")
-            rule = rule.lstrip("!")
-            if is_error:
-                errors = {} if errors is None else errors
-            else:
-                warnings = {} if warnings is None else warnings
-            target = errors if is_error else warnings
-            assert target is not None
-            if rule in target:
+            if rule in warnings:
                 raise KnownIssueError(f"--known-issue {spec!r}: rule {rule} listed twice")
-            target[rule] = int(count)
+            warnings[rule] = int(count)
     entry: dict[str, Any] = {
         "issue": int(number),
         "kind": kind.strip(),
@@ -178,7 +213,7 @@ def parse_known_issue(spec: str, recorded: str) -> dict[str, Any]:
     if warnings is not None:
         entry["warnings"] = warnings
     if errors is not None:
-        entry["errors"] = errors
+        entry["errors"] = sorted(errors)
     try:
         return _check_entry(entry)
     except KnownIssueError as exc:
@@ -244,15 +279,16 @@ def known_warning_allowance(entries: Iterable[Mapping[str, Any]]) -> dict[str, i
 
 
 def known_error_allowance(entries: Iterable[Mapping[str, Any]]) -> dict[str, int]:
-    """``{rule_id: exact count}`` of ``kct check`` errors the recorded exceptions account for.
+    """``{error identity: issue}`` the recorded exceptions account for.
 
-    Counts for a rule named by several exceptions add up.  The readiness
-    ``kct_check`` gate tolerates errors only when they match this exactly.
+    The readiness ``kct_check`` gate tolerates errors only when the report's
+    error identities equal this set exactly.  An identity named by several
+    exceptions is cited to the lowest issue number.
     """
     allowance: dict[str, int] = {}
-    for entry in entries:
+    for entry in sorted(entries, key=lambda e: int(e["issue"])):
         if entry.get("kind") != "exception":
             continue
-        for rule, count in (entry.get("errors") or {}).items():
-            allowance[rule] = allowance.get(rule, 0) + int(count)
+        for identity in entry.get("errors") or ():
+            allowance.setdefault(identity, int(entry["issue"]))
     return dict(sorted(allowance.items()))

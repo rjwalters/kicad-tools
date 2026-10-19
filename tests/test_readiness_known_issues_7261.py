@@ -342,24 +342,38 @@ def test_stray_known_issues_file_in_the_records_own_evidence_folder_is_rejected(
 
 
 # ---------------------------------------------------------------------------
-# Exact ``errors`` allowance on an exception (Issue #7355)
+# Identity-keyed ``errors`` allowance on an exception (Issue #7355)
 # ---------------------------------------------------------------------------
 
+#: Three paid-drill vias, each a distinct ``rule@x/y`` identity (mm, 0.01).
+VIA_A = ("dimension_via_drill", 10.0, 20.5)
+VIA_B = ("dimension_via_drill", 11.25, -3.0)
+VIA_C = ("netclass_via_drill", 30.0, 5.0)
+IDS = [
+    "dimension_via_drill@10.00/20.50",
+    "dimension_via_drill@11.25/-3.00",
+    "netclass_via_drill@30.00/5.00",
+]
+SPEC = "6269:paid drill:exception:" + ",".join(f"!{i}" for i in IDS)
 
-class _RuleErrorEngines(FakeEngines):
-    """FakeEngines whose ``kct check`` errors carry the given ``{rule: count}``."""
 
-    def __init__(self, board: Path, rules: dict[str, int], **kwargs) -> None:
-        super().__init__(board, check_errors=sum(rules.values()), **kwargs)
-        self.rules = rules
+class _LocatedErrorEngines(FakeEngines):
+    """FakeEngines whose ``kct check`` errors are the given ``(rule, x, y)`` findings.
+
+    A ``None`` position drops the violation's location.
+    """
+
+    def __init__(self, board: Path, found: list[tuple], **kwargs) -> None:
+        super().__init__(board, check_errors=len(found), **kwargs)
+        self.found = found
 
     def kct_check(self, pcb, mfr, report_path, extra):
         result = super().kct_check(pcb, mfr, report_path, extra)
         report = json.loads(report_path.read_text())
-        errors = iter(r for r, n in self.rules.items() for _ in range(n))
-        for violation in report["violations"]:
-            if violation["severity"] == "error":
-                violation["rule_id"] = next(errors)
+        errors = [v for v in report["violations"] if v["severity"] == "error"]
+        for violation, (rule, x, y) in zip(errors, self.found, strict=True):
+            violation["rule_id"] = rule
+            violation["location"] = None if x is None else [x, y]
         report_path.write_text(json.dumps(report, indent=2) + "\n")
         return result
 
@@ -369,48 +383,65 @@ def _sub(tmp_path: Path, name: str) -> Path:
     return tmp_path / name
 
 
-def _run_errors(board: Path, rules: dict[str, int], spec: str, **kwargs) -> tuple[int, dict]:
-    fake = _RuleErrorEngines(board, rules, meta_overall="FAILED", drc_status="FAILED", **kwargs)
+def _run_errors(board: Path, found: list[tuple], spec: str = SPEC, **kwargs) -> tuple[int, dict]:
+    fake = _LocatedErrorEngines(board, found, meta_overall="FAILED", drc_status="FAILED", **kwargs)
     return run(board, fake, "--checked-at", CHECKED_AT, "--known-issue", spec)
 
 
-ALLOWED = {"dimension_via_drill": 7, "netclass_via_drill": 1}
-SPEC = "6269:paid drill:exception:!dimension_via_drill=7,!netclass_via_drill=1"
-
-
-def test_parse_accepts_an_error_allowance_on_an_exception():
+def test_parse_accepts_error_identities_on_an_exception():
     entry = parse_known_issue(SPEC, "2026-10-18")
-    assert entry["errors"] == ALLOWED
+    assert entry["errors"] == IDS
     assert "warnings" not in entry
-    assert known_error_allowance([entry]) == dict(sorted(ALLOWED.items()))
+    assert known_error_allowance([entry]) == dict.fromkeys(IDS, 6269)
 
 
-def test_parse_splits_warning_and_error_allowances():
-    entry = parse_known_issue("1:s:exception:thermal=2,!via=3", "2026-10-18")
+def test_parse_canonicalises_identities_and_splits_warning_allowance():
+    entry = parse_known_issue("1:s:exception:thermal=2,!via@1.5/-0", "2026-10-18")
     assert entry["warnings"] == {"thermal": 2}
-    assert entry["errors"] == {"via": 3}
+    assert entry["errors"] == ["via@1.50/0.00"]
+
+
+@pytest.mark.parametrize(
+    "spec",
+    [
+        "1:s:exception:!via=3",  # the retired rule-count form
+        "1:s:exception:!via@1/2,!via@1.001/2",  # same identity twice after rounding
+        "1:s:exception:!via@1",  # no y
+    ],
+)
+def test_parse_rejects_malformed_error_allowances(spec):
+    with pytest.raises(KnownIssueError):
+        parse_known_issue(spec, "2026-10-18")
 
 
 @pytest.mark.parametrize("kind", ["defect", "advisory"])
 def test_errors_allowance_is_rejected_off_an_exception(kind):
     with pytest.raises(KnownIssueError, match="only an exception"):
-        parse_known_issue(f"1:s:{kind}:!via=3", "2026-10-18")
+        parse_known_issue(f"1:s:{kind}:!via@1/2", "2026-10-18")
+    entry = {"issue": 1, "kind": kind, "summary": "s", "recorded": "2026-10-18"}
     with pytest.raises(KnownIssueError, match="only an exception"):
-        validate_known_issues(
-            [
-                {
-                    "issue": 1,
-                    "kind": kind,
-                    "summary": "s",
-                    "recorded": "2026-10-18",
-                    "errors": {"v": 1},
-                }
-            ]
-        )
+        validate_known_issues([{**entry, "errors": ["v@1.00/2.00"]}])
 
 
-def test_exact_error_allowance_passes_and_the_unwaived_run_blocks(tmp_path):
-    code, report = _run_errors(make_board(_sub(tmp_path, "a")), ALLOWED, SPEC)
+@pytest.mark.parametrize(
+    "errors",
+    [
+        {"dimension_via_drill": 7},  # the retired count map
+        [],
+        ["via@1.0/2.0"],  # not canonical
+        ["b@1.00/2.00", "a@1.00/2.00"],  # unsorted
+        ["a@1.00/2.00", "a@1.00/2.00"],  # duplicate
+        ["a@-0.00/2.00"],  # negative zero
+    ],
+)
+def test_validation_rejects_non_canonical_error_lists(errors):
+    entry = {"issue": 1, "kind": "exception", "summary": "s", "recorded": "2026-10-18"}
+    with pytest.raises(KnownIssueError):
+        validate_known_issues([{**entry, "errors": errors}])
+
+
+def test_exact_identity_match_passes_and_the_unwaived_run_blocks(tmp_path):
+    code, report = _run_errors(make_board(_sub(tmp_path, "a")), [VIA_A, VIA_B, VIA_C])
     assert code == 0, report["blockers"]
     assert report["status"] == "ready"
     assert (
@@ -418,37 +449,63 @@ def test_exact_error_allowance_passes_and_the_unwaived_run_blocks(tmp_path):
         in next(c for c in report["checks"] if c["name"] == "kct_check")["detail"]
     )
     # Without the allowance the same errors block.
-    other = make_board(_sub(tmp_path, "b"))
+    other = _sub(tmp_path, "b")
+    board = make_board(other)
+    fake = _LocatedErrorEngines(
+        board, [VIA_A, VIA_B, VIA_C], meta_overall="FAILED", drc_status="FAILED"
+    )
     code, report = run(
-        other,
-        _RuleErrorEngines(other, ALLOWED, meta_overall="FAILED", drc_status="FAILED"),
-        "--checked-at",
-        CHECKED_AT,
-        "--known-issue",
-        "6269:paid drill:exception",
+        board, fake, "--checked-at", CHECKED_AT, "--known-issue", "6269:paid drill:exception"
     )
     assert code != 0 and report["status"] == "blocked"
 
 
 @pytest.mark.parametrize(
-    "found",
+    ("found", "fragment"),
     [
-        {**ALLOWED, "dimension_via_drill": 8},  # count over the allowance
-        {**ALLOWED, "dimension_via_drill": 6},  # count under (stale allowance)
-        {**ALLOWED, "clearance": 1},  # an unnamed rule
-        {"dimension_via_drill": 7},  # a named rule no longer fires
+        # Same rules and the same counts, but one via moved: a swapped identity.
+        ([VIA_A, ("dimension_via_drill", 99.0, 99.0), VIA_C], "not recorded"),
+        # A listed identity no longer fires (stale allowance).
+        ([VIA_A, VIA_B], "no longer fires"),
+        # An extra error at an unlisted identity.
+        ([VIA_A, VIA_B, VIA_C, ("clearance", 1.0, 1.0)], "not recorded"),
+        # A listed identity reported twice (a higher count).
+        ([VIA_A, VIA_B, VIA_C, VIA_A], "repeated"),
+        # An error with no location cannot be matched to an identity.
+        ([VIA_A, VIA_B, VIA_C, ("clearance", None, None)], "no usable location"),
     ],
 )
-def test_any_mismatch_with_the_error_allowance_blocks(tmp_path, found):
-    board = make_board(tmp_path)
-    code, report = _run_errors(board, found, SPEC)
+def test_any_identity_mismatch_blocks(tmp_path, found, fragment):
+    code, report = _run_errors(make_board(tmp_path), found)
     assert code != 0
     assert report["status"] == "blocked"
-    assert any("unaccepted rule" in b for b in report["blockers"])
+    assert any(fragment in b for b in report["blockers"]), report["blockers"]
+
+
+def test_a_location_inside_the_same_0_01_mm_cell_is_the_same_identity(tmp_path):
+    jitter = ("dimension_via_drill", 10.004, 20.496)
+    code, report = _run_errors(make_board(tmp_path), [jitter, VIA_B, VIA_C])
+    assert code == 0, report["blockers"]
 
 
 def test_error_allowance_does_not_waive_another_failed_gate(tmp_path):
     board = make_board(tmp_path)
-    code, report = _run_errors(board, ALLOWED, SPEC, erc_status="NOT RUN")
+    code, report = _run_errors(board, [VIA_A, VIA_B, VIA_C], erc_status="NOT RUN")
     assert code != 0
     assert report["status"] != "ready"
+
+
+def test_widening_the_allowance_in_known_issues_json_is_detected(tmp_path):
+    board = make_board(tmp_path)
+    code, _ = _run_errors(board, [VIA_A, VIA_B, VIA_C])
+    assert code == 0
+    evidence = board / "output" / "readiness" / "known-issues.json"
+    data = json.loads(evidence.read_text())
+    data["known_issues"][0]["errors"].append("clearance@1.00/1.00")
+    evidence.write_text(json.dumps(data))
+    verdict = read_readiness(board)
+    assert verdict["status"] == "unverified"
+    assert "stale" in verdict["blockers"][0]
+    # Editing the report's copy too (so only the hashed file disagrees) is caught as well.
+    _edit_report(board, lambda r: r["known_issues"][0]["errors"].append("clearance@1.00/1.00"))
+    assert read_readiness(board)["status"] == "unverified"

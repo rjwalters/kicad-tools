@@ -47,6 +47,8 @@ export interface KnownIssue {
   recorded: string;
   /** `kct check` warnings the issue accounts for, as rule → max count. */
   warnings?: Record<string, number>;
+  /** `exception` only: `kct check` errors accepted, as sorted unique `rule@x/y` identities (mm, 0.01). */
+  errors?: string[];
 }
 
 export interface Readiness {
