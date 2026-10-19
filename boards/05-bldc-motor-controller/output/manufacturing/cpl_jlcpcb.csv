@@ -19,11 +19,11 @@ D1,SS36,Diode_SMD:D_SMA,136.5000mm,-68.0000mm,180.0,Top
 D2,SMBJ24A,Diode_SMD:D_SMB,145.5000mm,-68.0000mm,180.0,Top
 D3,RED,LED_SMD:LED_0805_2012Metric,147.5000mm,-129.0000mm,180.0,Top
 F1,1A 63V,Fuse:Fuse_1206_3216Metric,128.5000mm,-68.0000mm,0.0,Top
-J1,12-24V INPUT,Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical,121.5000mm,-68.0000mm,0.0,Top
-J2,MOTOR ABC,Connector_PinHeader_2.54mm:PinHeader_1x03_P2.54mm_Vertical,119.5000mm,-97.5000mm,0.0,Top
-J3,HALL,Connector_PinHeader_2.54mm:PinHeader_1x06_P2.54mm_Vertical,178.5000mm,-90.0000mm,0.0,Top
-J4,AVR ISP,Connector_PinHeader_2.54mm:PinHeader_2x03_P2.54mm_Vertical,170.5000mm,-116.0000mm,0.0,Top
-J5,RUN SWITCH,Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical,157.5000mm,-128.0000mm,0.0,Top
+J1,12-24V INPUT,Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical,121.5000mm,-69.2700mm,0.0,Top
+J2,MOTOR ABC,Connector_PinHeader_2.54mm:PinHeader_1x03_P2.54mm_Vertical,119.5000mm,-100.0400mm,0.0,Top
+J3,HALL,Connector_PinHeader_2.54mm:PinHeader_1x06_P2.54mm_Vertical,178.5000mm,-96.3500mm,0.0,Top
+J4,AVR ISP,Connector_PinHeader_2.54mm:PinHeader_2x03_P2.54mm_Vertical,171.7700mm,-118.5400mm,0.0,Top
+J5,RUN SWITCH,Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical,157.5000mm,-129.2700mm,0.0,Top
 R1,0.5R,Resistor_SMD:R_2512_6332Metric,127.5000mm,-110.0000mm,0.0,Top
 R10,10k,Resistor_SMD:R_0805_2012Metric,172.5000mm,-91.0000mm,0.0,Top
 R11,10k,Resistor_SMD:R_0805_2012Metric,172.5000mm,-94.0000mm,0.0,Top
@@ -37,7 +37,7 @@ R6,10k,Resistor_SMD:R_0805_2012Metric,153.5000mm,-111.0000mm,0.0,Top
 R7,10k,Resistor_SMD:R_0805_2012Metric,153.5000mm,-116.0000mm,0.0,Top
 R8,10k,Resistor_SMD:R_0805_2012Metric,147.5000mm,-110.0000mm,0.0,Top
 R9,10k,Resistor_SMD:R_0805_2012Metric,159.5000mm,-122.0000mm,0.0,Top
-RV1,10k,Potentiometer_THT:Potentiometer_Bourns_3296W_Vertical,172.5000mm,-131.0000mm,0.0,Top
+RV1,10k,Potentiometer_THT:Potentiometer_Bourns_3296W_Vertical,169.9600mm,-131.0000mm,0.0,Top
 U1,ATmega328P-AU,Package_QFP:TQFP-32_7x7mm_P0.8mm,160.5000mm,-100.0000mm,270.0,Top
 U2,DRV8313PWPR,board05_revB:TI_PWP0028C_EP3.4x9.7_Mask3.1x5.18_ThermalVias,138.5000mm,-100.0000mm,0.0,Top
 U3,TPS7A1650DGNR,Package_SO:HVSSOP-8-1EP_3x3mm_P0.65mm_EP1.57x1.89mm_ThermalVias,161.5000mm,-75.0000mm,0.0,Top
