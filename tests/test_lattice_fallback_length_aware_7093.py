@@ -8,9 +8,9 @@ the pair longer than it had to be:
   regard for it, so the partner could stay the long way round.  A second
   round re-searches that partner under the mirrored leg (once per
   first-round parity candidate);
-* among the parity candidates that pass #7291's gate, the skew-first ranking
-  preferred the lowest skew even when every one of them was inside the pair's
-  skew budget.  Within the budget the shortest pair now wins.
+* the second round may change the pick only when the result is no worse on
+  skew AND no worse on length than the pick main makes without it (a
+  skew-for-length trade made board 03's USB_D skew worse than main's).
 
 These are stubbed-search tests in the #6703 ``_candidate_winner`` style.
 """
@@ -110,14 +110,22 @@ _ARM_C_PLAIN = [(4.077, 0), (6.025, 1), (5.41, 1), (4.077, 0), (6.025, 1), (5.41
 _ARM_C_ROUND_1 = [(5.742, 1), (14.249, 0), (7.342, 1), (14.249, 0), (5.742, 1), (7.342, 1)]
 
 
-def test_second_round_re_searches_the_partner_under_the_mirrored_leg(monkeypatch) -> None:
-    # Without the second round the best pair is P 5.742 / N 6.025 (0.283 mm
-    # skew; its 6.025 leg fails #7291's length gate, so it wins on skew).
-    # Re-searching N under the mirrored P leg finds 5.41: inside the gate, so
-    # the parity pair is both shorter and kept.  Fails on main (N 6.025).
+def test_second_round_replaces_the_pick_when_no_worse_on_skew_and_length(monkeypatch) -> None:
+    # Main's pick is P 5.742 / N 6.025 (0.283 mm skew; its 6.025 leg fails
+    # #7291's length gate).  Re-searching N under the mirrored P leg finds
+    # 5.8: inside the gate, shorter AND less skewed, so it replaces the pick.
+    round_2 = [(5.8, 1), (4.077, 0), (5.8, 1), (4.077, 0), (5.8, 1), (5.8, 1)]
+    got = _winner(monkeypatch, _ARM_C_PLAIN + _ARM_C_ROUND_1 + round_2)
+    assert got == (5.742, 5.8, 1, 1)
+
+
+def test_second_round_shorter_but_more_skewed_keeps_the_first_round_pick(monkeypatch) -> None:
+    # Board 03 arm C: round 2 finds N 5.41 (20 um inside the gate), which is
+    # 0.615 mm shorter than main's 6.025 but has 0.332 mm skew against main's
+    # 0.283.  Skew is not traded for length: main's pick stays.
     round_2 = [(5.41, 1), (4.077, 0), (5.41, 1), (4.077, 0), (5.41, 1), (5.41, 1)]
     got = _winner(monkeypatch, _ARM_C_PLAIN + _ARM_C_ROUND_1 + round_2)
-    assert got == (5.742, 5.41, 1, 1)
+    assert got == (5.742, 6.025, 1, 1)
 
 
 def test_without_a_second_round_hit_the_first_round_pick_stands(monkeypatch) -> None:
@@ -165,9 +173,10 @@ def test_second_round_is_bounded_by_the_first_round_parity_hits(monkeypatch) -> 
         return _Leg(5.0, 1), ""
 
     unequal = {"P": (_Leg(5.0, 0), ""), "N": (_Leg(5.0, 1), "")}
-    got = pf._mirrored_candidates(
+    first, second = pf._mirrored_candidates(
         pc, [unequal], pf._fallback_items(pc), search, pf._fresh_committed()
     )
+    got = first + second
     # Round 1: P under N -> (1, 1) parity; N under P -> (0, 1).  Round 2: only
     # the parity hit re-searches its partner (N, under the new P leg).
     assert calls == ["P", "N", "N"]

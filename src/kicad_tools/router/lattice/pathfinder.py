@@ -4719,10 +4719,22 @@ class LatticePathfinder:
             # P cannot route even alone: the pre-#6703 shape (N routed on
             # its own) leads, and wins unless an N-led candidate is no worse.
             candidates.insert(0, {"P": firsts["P"], "N": firsts["N"]})
-        candidates.extend(self._mirrored_candidates(pc, candidates, items, search, committed))
+        first_round, second_round = self._mirrored_candidates(
+            pc, candidates, items, search, committed
+        )
+        candidates.extend(first_round)
 
-        rank = self._fallback_rank(pc, candidates)
+        # Main's pick is made without the second round; a second-round
+        # candidate replaces it only when it is no worse on skew AND no
+        # worse on length (#7093 review: round 2 alone traded 0.049 mm of
+        # skew for 0.615 mm of length on board 03 arm C).
+        rank = self._fallback_rank(pc, candidates + second_round)
         best = min(candidates, key=rank)  # ``min`` keeps the first on ties
+        if second_round:
+            alt = min(second_round, key=rank)
+            r_alt, r_best = rank(alt), rank(best)
+            if r_alt < r_best and r_alt[:3] <= r_best[:3] and r_alt[3:] <= r_best[3:]:
+                best = alt
         for pol in ("P", "N"):
             res = best[pol][0]
             if res is not None:
@@ -4778,10 +4790,11 @@ class LatticePathfinder:
         free parity win is kept unchanged, and nothing is gated when no fully
         routed candidate has unequal via counts.
 
-        Skew is never traded for length: the skew term always precedes the
-        length term, so a shorter parity pair wins only at equal (1 um) skew
-        or less (#7093 review: a skew-for-length trade made board 03's USB_D
-        skew worse than main's).
+        The skew term precedes the length term, so a shorter parity pair
+        wins only at equal (1 um) skew or less.  Second-round candidates
+        (:meth:`_mirrored_candidates`) are held to a stricter bar by
+        :meth:`_partner_aware_legs`: they replace the first-round pick only
+        when no worse on both skew and length.
         """
         measure = self.pair_length_measure or _default_pair_length
         lengths: dict[int, tuple[float, float]] = {}
@@ -4839,7 +4852,7 @@ class LatticePathfinder:
         items: dict[str, Connection],
         search: Callable[..., tuple[_RouteResult | None, str]],
         committed: CommittedCopper,
-    ) -> list[_FallbackLegs]:
+    ) -> tuple[list[_FallbackLegs], list[_FallbackLegs]]:
         """Partner-leg searches that mirror the other leg's layer changes (#7093).
 
         Only when no fully routed candidate already has equal P/N via counts.
@@ -4859,12 +4872,14 @@ class LatticePathfinder:
         no regard for the mirrored leg, so it may be the long way round (board
         03 arm C: 6.025 -> 5.41 mm).  Searches are memoised per (kept leg,
         moved polarity), so the round costs at most one guided (plus, on a
-        miss, one unguided) search per first-round parity hit.  Returned for
-        ranking with the rest; nothing is committed.
+        miss, one unguided) search per first-round parity hit.  Returns
+        ``(first_round, second_round)``: the caller ranks the second round
+        apart, since it may only replace the first-round pick when no worse
+        on skew and length.  Nothing is committed.
         """
         full = [c for c in candidates if c["P"][0] is not None and c["N"][0] is not None]
         if not full or any(self._pair_via_mismatch(c) == 0 for c in full):
-            return []
+            return [], []
         seen: set[tuple[int, str]] = set()
 
         def mirrored(cand: _FallbackLegs, moved: str, kept: str) -> _FallbackLegs | None:
@@ -4888,6 +4903,7 @@ class LatticePathfinder:
             return {kept: cand[kept], moved: leg}
 
         out: list[_FallbackLegs] = []
+        out2: list[_FallbackLegs] = []
         moves: list[tuple[_FallbackLegs, str]] = []
         for cand in full:
             for moved, kept in (("P", "N"), ("N", "P")):
@@ -4906,8 +4922,8 @@ class LatticePathfinder:
                 continue
             again = mirrored(got, "N" if moved == "P" else "P", moved)
             if again is not None:
-                out.append(again)
-        return out
+                out2.append(again)
+        return out, out2
 
     def _route_fallback_pairs_into(
         self,
