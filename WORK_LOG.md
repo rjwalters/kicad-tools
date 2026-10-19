@@ -15,6 +15,8 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-19
 
+- **PR #7400**: fix: route stock MCUBlock and OscillatorBlock copper clear of foreign pads
+- **Issue #7393** (closed): Audit MCUBlock/OscillatorBlock stock copper for foreign-pad clearance (#7062 follow-up)
 - **PR #7397**: fix(router): let a capped match-group member top up from the unused ceiling (board 07 re-measure after #7375)
 - **PR #7364**: fix(boards): share one saved-vs-refilled fill check across readiness producers
 - **Issue #7356** (closed): Evidence producers: one shared saved-vs-refilled fill-identity gate for every producer (#7353 step 2)
