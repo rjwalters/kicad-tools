@@ -9,8 +9,9 @@ polarity twist in disguise worth about +3 mm per net (USB_D 18.3/19.8 mm
 against the 16 mm bound).
 
 Now each group keeps its shortest workable combination (P+N route length,
-ties to the earlier try), at most ``MAX_WORKABLE_GATEWAY_COMBOS`` of them are
-routed, and a polarity-crossing combination is rejected before routing.
+ties to the earlier try), at most ``MAX_WORKABLE_GATEWAY_COMBOS`` workable ones
+are compared, and a pass-under combination that crosses polarity is rejected
+before routing (an ``against`` crossing is kept: 06rf PCIE_TX, 07rf DQS).
 """
 
 from __future__ import annotations
@@ -95,11 +96,11 @@ def _run_gateway(monkeypatch, lengths: list[float | None]):
     """
     pf, pc = _dual_row_board()
     pf.build()
-    calls: list[tuple[object, object]] = []
+    calls: list[tuple[object, tuple[bool, bool]]] = []
 
-    def fake(pc_, layer, combo, **_kw):
+    def fake(pc_, layer, combo, *, through=(False, False), **_kw):
         idx = len(calls)
-        calls.append(combo)
+        calls.append((combo, through))
         length = lengths[idx] if idx < len(lengths) else None
         if length is None:
             return None, "pair-no-path"
@@ -139,14 +140,34 @@ def test_gateway_selection_is_deterministic(monkeypatch) -> None:
     assert "picked #1 of 3 workable" in logs[0]  # equal lengths: first try wins
 
 
-def test_gateway_rejects_a_polarity_crossing_unrouted(monkeypatch) -> None:
+def test_gateway_rejects_a_pass_under_polarity_crossing_unrouted(monkeypatch) -> None:
+    # Every combination "crosses"; the against group declines on its own,
+    # so only the pass-under group's crossing check is left to decide.
     monkeypatch.setattr(pp_gateway, "polarity_crosses", lambda a, b: True)
-    pf, pc, pres, reason, calls = _run_gateway(monkeypatch, [100.0] * 20)
+    pf, pc, pres, reason, calls = _run_gateway(monkeypatch, [None] * 40)
     assert pres is None
-    assert calls == []  # never routed
-    assert reason.endswith("polarity-crossing")
+    assert calls, "the against group still routes its combinations"
+    assert all(through == (False, False) for _combo, through in calls)  # no pass-under
+    assert reason == "pair-gateway-pass-under-polarity-crossing"
     log = pf.pair_gateway_log[pc.key]
-    assert log.startswith("gateway declined") and "polarity-crossing" in log
+    assert log.startswith("gateway declined") and "pass-under polarity-crossing" in log
+
+
+def test_without_a_crossing_the_same_script_couples_through_pass_under(monkeypatch) -> None:
+    # Without the crossing check the same script couples through pass-under:
+    # the rejection, not the script, is what declines above.
+    pf, pc, pres, _reason, calls = _run_gateway(monkeypatch, [None] * 6 + [100.0] * 30)
+    assert pres is not None
+    assert any(through != (False, False) for _combo, through in calls)
+    assert "pass-under" in pf.pair_gateway_log[pc.key]
+
+
+def test_an_against_crossing_still_couples(monkeypatch) -> None:
+    # 06rf PCIE_TX / 07rf DQS: an against combination that crosses is kept.
+    monkeypatch.setattr(pp_gateway, "polarity_crosses", lambda a, b: True)
+    pf, pc, pres, reason, calls = _run_gateway(monkeypatch, [100.0] * 40)
+    assert pres is not None and reason == "ok"
+    assert all(through == (False, False) for _combo, through in calls)
 
 
 def test_real_dual_row_pair_still_couples_through_pass_under() -> None:

@@ -390,10 +390,16 @@ def polarity_crosses(end_a: tuple[Pt, Pt], end_b: tuple[Pt, Pt]) -> bool:
     the chord at one end and left of it at the other must turn the coupled
     body through a half loop to keep P and N apart -- issue #7362's board 03
     ``USB_D`` (D+ right at J1, left via at U2) ran to y~9 on In2.Cu and
-    doubled back, about +3 mm per net.  Such a combination is rejected: the
-    half loop is a polarity twist in disguise (the planar pair agent declines
-    an honest one), so the segment is left to the hybrid / uncoupled
-    fallback instead.  An end whose P/N axis lies within 30 degrees of the
+    doubled back past its own via pair, about +3 mm per net.
+
+    The router rejects such a combination only in the PASS-UNDER group
+    (:func:`rank_through_combos`): there, flipping an end's side bit is
+    exactly what lets a crossed segment through
+    :func:`handedness_consistent`, and the body has to hairpin between the
+    vias and the pads to honour it.  An ``against`` combination that
+    crosses is kept: board 06rf PCIE_TX and 07rf DQS couple through one (a
+    U on the gateway layer around one end), and without it they fall back
+    to a hybrid (PCIE_TX: 26.8 -> 55.8 mm per net) or to uncoupled legs.  An end whose P/N axis lies within 30 degrees of the
     chord has no clear side and never counts as crossing.
     """
     (pa, na), (pb, nb) = end_a, end_b

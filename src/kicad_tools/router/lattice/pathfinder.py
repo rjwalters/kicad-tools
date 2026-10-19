@@ -3547,9 +3547,11 @@ class LatticePathfinder:
                 for ga, gb in rank_gateway_combos(per_end[0], per_end[1])
             )
         # Issue #7362: each group keeps its best WORKABLE combination by
-        # whole-route length, not the first one in fan-length order, and a
-        # combination whose ends put P on opposite sides of the segment
-        # (a polarity crossing, routed as a half loop) is rejected unrouted.  The groups keep their #6836 precedence:
+        # whole-route length, not the first one in fan-length order.  A
+        # pass-under combination whose ends put P on opposite sides of the
+        # segment (a polarity crossing) is rejected unrouted.  ``against``
+        # crossings stay: 06rf PCIE_TX and 07rf DQS couple through one (a U
+        # on the gateway layer), and their fallbacks are far longer.  The groups keep their #6836 precedence:
         # the pass-under group is walked only after every ``against``
         # combination (on every layer) declined, so a segment that couples
         # through an ``against`` combination never gets pass-under copper.
@@ -3580,10 +3582,11 @@ class LatticePathfinder:
                 ga, gb = combo.ga, combo.gb
                 end_a = self._gateway_launch(ga, pc.pad_p_a, pc.pad_n_a)
                 end_b = self._gateway_launch(gb, pc.pad_p_b, pc.pad_n_b)
-                if polarity_crosses(end_a, end_b):
-                    # Issue #7362: a half loop on the gateway layer, not a pair.
-                    tag = "pair-gateway-" if group == "against" else "pair-gateway-pass-under-"
-                    reason = f"{tag}polarity-crossing"
+                if group == "pass-under" and polarity_crosses(end_a, end_b):
+                    # Issue #7362: flipping an end's side bit is what lets a
+                    # crossed segment through the handedness check; the body
+                    # then doubles back past its own via pair (board 03).
+                    reason = "pair-gateway-pass-under-polarity-crossing"
                     record(group, "polarity-crossing")
                     continue
                 if best is not None:
