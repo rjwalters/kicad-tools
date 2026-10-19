@@ -5,6 +5,8 @@ Comment,Designator,Footprint,LCSC Part #
 20pF,"C10,C11",Capacitor_SMD:C_0805_2012Metric,C1798
 330R,R1,Resistor_SMD:R_0805_2012Metric,C17630
 4.7uF,C16,Capacitor_SMD:C_0805_2012Metric,C1779
+8MHz,Y1,Crystal:Crystal_HC49-4H_Vertical,C114147
 LED,D1,LED_SMD:LED_0805_2012Metric,C131244
 MCP1825S-3302E/DB,U1,Package_TO_SOT_SMD:SOT-223-3_TabPin2,C148031
 STM32F103C8T6,U2,Package_QFP:LQFP-48_7x7mm_P0.5mm,C8734
+SWD-6,J1,Connector_PinHeader_2.54mm:PinHeader_1x06_P2.54mm_Vertical,C37208
