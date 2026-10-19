@@ -8,6 +8,8 @@ from .base import CircuitBlock
 if TYPE_CHECKING:
     from kicad_sch_helper import Schematic
 
+    from ..models.symbol import SymbolInstance
+
 
 class ESDProtectionBlock(CircuitBlock):
     """
@@ -103,7 +105,7 @@ class ESDProtectionBlock(CircuitBlock):
             self.ports["VCC"] = esd.pin_position(self._rail_pin(esd, "VBUS", "VCC", "VDD"))
 
     @staticmethod
-    def _io_lines(esd) -> list[tuple[str, str]]:
+    def _io_lines(esd: "SymbolInstance") -> list[tuple[str, str]]:
         """Pair each ESD array I/O pin with its same-named twin.
 
         Returns ``(left_pin_number, right_pin_number)`` per channel, ordered
@@ -122,7 +124,7 @@ class ESDProtectionBlock(CircuitBlock):
         return lines
 
     @staticmethod
-    def _rail_pin(esd, *names: str) -> str:
+    def _rail_pin(esd: "SymbolInstance", *names: str) -> str:
         """Number of the first pin whose name matches one of ``names``."""
         for name in names:
             for pin in esd.symbol_def.pins:

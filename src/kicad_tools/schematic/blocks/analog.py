@@ -207,8 +207,30 @@ class OpAmpBlock(CircuitBlock):
         pin_out = self.opamp.pin_position("1")
         pin_inv = self.opamp.pin_position("2")
         pin_non_inv = self.opamp.pin_position("3")
-        pin_vcc = self.opamp.pin_position("8")
-        pin_vee = self.opamp.pin_position("4")
+
+        # The supply pins (4 = V-, 8 = V+) live on their own power unit
+        # (unit 3 on TL072), so that unit has to be placed for the rails to
+        # land on a real pin.  Unit 2 (channel B) is tied off with no-connects.
+        sym_def = getattr(self.opamp, "symbol_def", None)
+        raw_unit_count = sym_def.unit_count() if sym_def is not None else 1
+        unit_count = raw_unit_count if isinstance(raw_unit_count, int) else 1
+        power_unit = sym_def.get_pin_unit("8") if sym_def is not None and unit_count > 1 else 1
+        supply = self.opamp
+        if power_unit != 1:
+            supply = sch.add_symbol(opamp_symbol, x + 25.4, y, ref, "", unit=power_unit)
+            self.components["U_PWR"] = supply
+        if sym_def is not None and unit_count > 1:
+            for u in range(2, unit_count + 1):
+                if u == power_unit:
+                    continue
+                spare = sch.add_symbol(opamp_symbol, x, y + 38.1, ref, "", unit=u)
+                self.components[f"U_B{u}"] = spare
+                for pin in sym_def.pins:
+                    if sym_def.get_pin_unit(pin.number) == u:
+                        pos = spare.pin_position(pin.number)
+                        sch.add_no_connect(pos[0], pos[1])
+        pin_vcc = supply.pin_position("8")
+        pin_vee = supply.pin_position("4")
 
         r_ref_num = int(ref[1:]) if ref[1:].isdigit() else 1
         fb_x = x - 12.7  # column where the feedback network meets the inverting input
@@ -217,8 +239,10 @@ class OpAmpBlock(CircuitBlock):
         # Non-inverting input and the optional resistor network.
         if topology == "buffer":
             # Unity-gain follower: OUT feeds straight back to the inverting input.
-            self._wire(pin_out, (x + 12.7, pin_out[1]), (x + 12.7, y - 12.7))
-            self._wire((x + 12.7, y - 12.7), (fb_x, y - 12.7), (fb_x, pin_inv[1]), pin_inv)
+            # The return runs below the part so that it never crosses the
+            # IN lead on the (higher) non-inverting input.
+            self._wire(pin_out, (x + 12.7, pin_out[1]), (x + 12.7, y + 12.7))
+            self._wire((x + 12.7, y + 12.7), (fb_x, y + 12.7), (fb_x, pin_inv[1]), pin_inv)
             in_port = (x - 12.7, pin_non_inv[1])
             self._wire(in_port, pin_non_inv)
         else:
@@ -263,7 +287,7 @@ class OpAmpBlock(CircuitBlock):
                 )
 
         # Place decoupling capacitor between the supply pins
-        c_bypass = sch.add_symbol(capacitor_symbol, x + 25.4, y, f"C{r_ref_num}", "100nF")
+        c_bypass = sch.add_symbol(capacitor_symbol, x + 38.1, y, f"C{r_ref_num}", "100nF")
         self.components["C_bypass"] = c_bypass
         c_top, c_bot = self._ends(c_bypass)
         self._wire(c_top, (c_top[0], pin_vcc[1] - 2.54), (pin_vcc[0], pin_vcc[1] - 2.54), pin_vcc)

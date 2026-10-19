@@ -532,11 +532,21 @@ def _pt(p: tuple[float, float]) -> tuple[float, float]:
     return (round(p[0], 2), round(p[1], 2))
 
 
+def _placed_pins(sym: Any) -> list[Any]:
+    """Pins of the unit this instance actually places (plus unit-0 common pins).
+
+    ``pin_position`` answers for any pin of the symbol def, including those of
+    units that were never placed, so counting every pin would anchor a port on
+    a point where no pin exists.
+    """
+    return [p for p in sym.symbol_def.pins if p.unit in (0, sym.unit)]
+
+
 def _anchor_points(sch: Schematic) -> set[tuple[float, float]]:
     """Every placed pin's connection point plus every wire endpoint."""
     points: set[tuple[float, float]] = set()
     for sym in sch.symbols:
-        for pin in sym.symbol_def.pins:
+        for pin in _placed_pins(sym):
             points.add(_pt(sym.pin_position(pin.number)))
     for wire in sch.wires:
         points.add(_pt((wire.x1, wire.y1)))
@@ -672,6 +682,81 @@ def test_rail_hookup_resolves_real_pins(
     assert len(sch.wires) > wires_before
     unexpected = [m for m in pin_misses if m[2] not in OPTIONAL_PIN_PROBES]
     assert not unexpected, f"pin lookups failed on real symbols: {unexpected}"
+
+
+def _nets(sch: Schematic) -> dict[tuple[float, float], int]:
+    """Union-find connectivity: wires join at endpoints, or where an endpoint
+    lands on another wire's span (KiCad joins those); pins join at their point.
+    Returns a point -> net-id map over every wire endpoint and placed pin."""
+    parent: dict[tuple[float, float], tuple[float, float]] = {}
+
+    def find(p: tuple[float, float]) -> tuple[float, float]:
+        parent.setdefault(p, p)
+        while parent[p] != p:
+            parent[p] = parent[parent[p]]
+            p = parent[p]
+        return p
+
+    def union(a: tuple[float, float], b: tuple[float, float]) -> None:
+        parent[find(a)] = find(b)
+
+    segs = [(_pt((w.x1, w.y1)), _pt((w.x2, w.y2))) for w in sch.wires]
+    for a, b in segs:
+        union(a, b)
+    for a, b in segs:
+        for end in (a, b):
+            for c, d in segs:
+                if (c, d) != (a, b) and _on_segment(end, c, d):
+                    union(end, c)
+    for sym in sch.symbols:
+        for pin in _placed_pins(sym):
+            find(_pt(sym.pin_position(pin.number)))
+    roots: dict[tuple[float, float], int] = {}
+    return {p: roots.setdefault(find(p), len(roots)) for p in list(parent)}
+
+
+def _on_segment(p: tuple[float, float], a: tuple[float, float], b: tuple[float, float]) -> bool:
+    eps = 1e-6
+    if a[0] == b[0] == p[0]:
+        return min(a[1], b[1]) - eps <= p[1] <= max(a[1], b[1]) + eps
+    if a[1] == b[1] == p[1]:
+        return min(a[0], b[0]) - eps <= p[0] <= max(a[0], b[0]) + eps
+    return False
+
+
+@pytest.mark.parametrize("topology", ["buffer", "non_inverting", "inverting"])
+def test_opamp_topologies_are_connected_as_drawn(topology: str) -> None:
+    """IN and OUT sit on different nets; OUT feeds back; supplies reach placed pins."""
+    sch = Schematic(title=f"opamp connectivity: {topology}")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        gain = 1.0 if topology == "buffer" else 3.0
+        block = B.OpAmpBlock(sch, X, Y, topology=topology, gain=gain)
+
+    nets = _nets(sch)
+    net = lambda p: nets[_pt(p)]  # noqa: E731
+    pins = {
+        (sym.reference, sym.unit, pin.number): _pt(sym.pin_position(pin.number))
+        for sym in sch.symbols
+        for pin in _placed_pins(sym)
+    }
+    out, inv, non_inv = (pins[("U1", 1, n)] for n in ("1", "2", "3"))
+
+    assert net(block.ports["IN"]) != net(block.ports["OUT"])
+    assert net(block.ports["OUT"]) == nets[out]
+    if topology == "buffer":
+        assert nets[out] == nets[inv], "follower: OUT must feed the inverting input"
+        assert nets[non_inv] == net(block.ports["IN"])
+        assert nets[inv] != nets[non_inv], "IN shorted to the feedback node"
+    else:
+        rf_nets = {nets[p] for k, p in pins.items() if k[0] == "R1"}
+        assert nets[out] in rf_nets and nets[inv] in rf_nets
+        assert nets[out] != nets[inv]
+    for port in ("VCC", "GND"):
+        assert net(block.ports[port]) in {nets[p] for k, p in pins.items() if k[0] == "U1"}
+    assert net(block.ports["VCC"]) != net(block.ports["GND"])
+    # The supply pins belong to the placed power unit, not a phantom one.
+    assert any(k[0] == "U1" and k[2] in ("4", "8") for k in pins)
 
 
 @pytest.mark.parametrize("channels", [3, 4, 8])
