@@ -27,13 +27,14 @@ _None._
 - **#7093**: router: differential pair gets unequal via counts when a leg falls back to uncoupled routing (board 03 USB_D 2 vs 3; blocks #6394)
 - **#7269**: board 07 MIPI_DAT0: recover 0.038 mm skew lost to compare-and-keep (blocks #6858)
 - **#7401**: router: board 06 USB2_D+ uncoupled 12.791 > 12.700 mm after v62 pad-edge floor reorders the single-ended fallback
+- **#7478**: `atomic_write_text` fsyncs a read-only handle: every `PCB.save` fails on Windows with `OSError: [Errno 9]` (0.22.0, 0.23.0)
 
 ## Ready
 
 Human-approved issues ready for implementation (`loom:issue`).
 
+- **#7026**: board 03: fresh class-clean lattice route is not complete under the recipe's tier-1 zone fill (3 GND opens)
 - **#7093**: router: differential pair gets unequal via counts when a leg falls back to uncoupled routing (board 03 USB_D 2 vs 3; blocks #6394)
-- **#7206**: Spec-declared currents never reach the ampacity gate: board 05 motor phase necked to 0.2 mm passes check, audit and readiness
 - **#7423**: Board 07: enable route-time length matching in the committed map after #7397 (no-worse re-measure; #5798 Q4 ruling)
 
 ## In Progress
@@ -41,19 +42,32 @@ Human-approved issues ready for implementation (`loom:issue`).
 Issues currently being built (`loom:building`).
 
 - **#6554**: diffpair: reproduce KiCad's diff_pair_uncoupled primitive pairing exactly (kct is a lower bound)
-- **#7026**: board 03: fresh class-clean lattice route is not complete under the recipe's tier-1 zone fill (3 GND opens)
-- **#7268**: Regenerate JLCPCB packages of boards 02-07 with THT rows (follow-up to #7239)
+- **#7206**: Spec-declared currents never reach the ampacity gate: board 05 motor phase necked to 0.2 mm passes check, audit and readiness
 - **#7349**: Boards 06/07: enable diff-pair gap tightening on seed-42 re-routes and drop the impedance caps (#7344 PR 2)
-- **#7399**: Schematic blocks: 10 stock factories fail on real KiCad 10 libs (stale symbol IDs, fictional mock pins); add a real-symbol smoke test
 - **#7463**: board 03 arm C: VBUS U2.5 left unconnected (keepout-constrained escape next to USB_D U2 pads); last gate before re-deriving board 03 under #7093
+- **#7478**: `atomic_write_text` fsyncs a read-only handle: every `PCB.save` fails on Windows with `OSError: [Errno 9]` (0.22.0, 0.23.0)
+- **#7480**: Windows: `find_kicad_cli()` and `detect_kicad_library_path()` only probe KiCad 7.0/8.0 install paths, so KiCad 9 and 10 are not found
+- **#7484**: DSN export: `custom` pads are written as their anchor rectangle only (primitives ignored); round, oval and rotated pads also collapse to an axis-aligned rectangle
+- **#7503**: Lattice router: pad-clearance check uses a square around pads, not the true (rounded/rotated) outline, so legal via/track points are rejected (board 03 VBUS, #7463)
+- **#7508**: Schematic blocks: fix DebugHeader jtag and UCC27211 defaults, wire USB ESD TVS
+- **#7510**: Schematic blocks: ports misplaced at off-grid origins (grid-snap mismatch)
+- **#7519**: PCB.save() falsely refuses an unedited board whose pads use nameless numbered nets (net N)
+- **#7520**: docs/research: add diff-pair skew-compensation note and a README index for all research notes
 
 ## PRs Awaiting Review
 
 PRs waiting on Judge (`loom:review-requested`).
 
 - **#7461**: fix(router): re-fit match-group meander amplitude so a member never ends past the target
-- **#7476**: fix: surface pair via-parity failures in kct route and align the audit with kct check
-- **#7490**: fix(blocks): reverse-polarity P-FET drain on the input; VoltageDividerSense over VoltageDivider
+- **#7468**: fix(router): gate the coupled-commit skew trim on combined P+N uncoupled length (#7269)
+- **#7494**: fix: detect versioned Windows KiCad 9/10 installs
+- **#7502**: fix(router): gap-tightening never worsens pair skew or uncoupled length
+- **#7514**: fix: make JTAG header, UCC27211 driver and USB ESD blocks build with defaults
+- **#7516**: fix: snap schematic block ports to the grid so off-grid origins stay wired
+- **#7517**: fix(router): judge lattice pad keep-outs against the true pad outline
+- **#7522**: docs: add diff-pair skew compensation note and enforce research index coverage
+- **#7524**: fix: skip pad net_name unpersisted-edit check for number-only net nodes
+- **#7527**: fix: fsync atomic-write tmp files through a writable handle (Windows PCB.save EBADF)
 
 ## Approved (Awaiting Merge)
 
@@ -84,21 +98,19 @@ Issues carrying `loom:curated`.
 - **#7186**: kct post-route DRC reports 33 shorts on routed board 07m where pinned kicad-cli reports 0 (engine disagreement) *(curated)*
 - **#7206**: Spec-declared currents never reach the ampacity gate: board 05 motor phase necked to 0.2 mm passes check, audit and readiness *(curated)*
 - **#7256**: board 03: after #7163 a fresh arm C route fails usb_geometry (MCU launch 4.138/4.284 > 4 mm; USB width 0.30 -> 0.275) *(curated)*
-- **#7268**: Regenerate JLCPCB packages of boards 02-07 with THT rows (follow-up to #7239) *(curated)*
 - **#7269**: board 07 MIPI_DAT0: recover 0.038 mm skew lost to compare-and-keep (blocks #6858) *(curated)*
 - **#7349**: Boards 06/07: enable diff-pair gap tightening on seed-42 re-routes and drop the impedance caps (#7344 PR 2) *(curated)*
 - **#7384**: Committed board evidence doesn't reproduce: refresh_readiness --dry-run (pinned 10.0.6, committed checked_at) rewrites files on 6 of 7 boards *(curated)*
 - **#7401**: router: board 06 USB2_D+ uncoupled 12.791 > 12.700 mm after v62 pad-edge floor reorders the single-ended fallback *(curated)*
 - **#7478**: `atomic_write_text` fsyncs a read-only handle: every `PCB.save` fails on Windows with `OSError: [Errno 9]` (0.22.0, 0.23.0) *(curated)*
-- **#7479**: `Pad.size` / `Pad.drill` assignments are not written back: `PCB.save()` silently keeps the old values *(curated)*
 - **#7480**: Windows: `find_kicad_cli()` and `detect_kicad_library_path()` only probe KiCad 7.0/8.0 install paths, so KiCad 9 and 10 are not found *(curated)*
-- **#7481**: DSN export: pins of ±90° footprints and of back-side footprints land in the wrong place in Freerouting (y not negated, rotation sense not converted) *(curated)*
-- **#7482**: DSN export: board boundary is built from Edge.Cuts `gr_line` endpoints in file order, giving a self-intersecting outline (and arcs, circles and polygons are ignored) *(curated)*
-- **#7483**: DSN export: `np_thru_hole` pads fall into the SMD branch and are written as a square pad on layer `*.Cu`; Freerouting rejects the layer, so mounting holes are no obstacle *(curated)*
 - **#7484**: DSN export: `custom` pads are written as their anchor rectangle only (primitives ignored); round, oval and rotated pads also collapse to an axis-aligned rectangle *(curated)*
-- **#7485**: DSN export writes `(property (index 0))` for every layer instead of the layer's stack position *(curated)*
-- **#7489**: BarrelJackInput: 12 V default exceeds the Si2301 P-FET's gate-source rating (gate tied straight to ground) *(curated)*
+- **#7487**: Re-rule or remove board 03 usb_geometry via-in-pad window exception by 2027-04-19 (#7457 / #7084 Q10) *(curated)*
 - **#7491**: router: C++ search finds no USB3_RX1- path on board 06 once USB2_D routes coupled (blocks #7401) *(curated)*
+- **#7503**: Lattice router: pad-clearance check uses a square around pads, not the true (rounded/rotated) outline, so legal via/track points are rejected (board 03 VBUS, #7463) *(curated)*
+- **#7508**: Schematic blocks: fix DebugHeader jtag and UCC27211 defaults, wire USB ESD TVS *(curated)*
+- **#7510**: Schematic blocks: ports misplaced at off-grid origins (grid-snap mismatch) *(curated)*
+- **#7519**: PCB.save() falsely refuses an unedited board whose pads use nameless numbered nets (net N) *(curated)*
 
 ## Proposed (Architect / Hermit)
 
@@ -110,7 +122,6 @@ Issues carrying `loom:curated`.
 - **#7206**: Spec-declared currents never reach the ampacity gate: board 05 motor phase necked to 0.2 mm passes check, audit and readiness *(hermit)*
 - **#7367**: Key remaining count-based CI/test allowances by identity (extends #7359): stale board-03/07 allowances, board-05 blocking cap, DRC tolerance counts *(hermit)*
 - **#7377**: route: collapse the 4 copy-pasted post-route tails into one pipeline -- --length-match-diffpairs, --stitch-power-planes, --progressive-clearance, --bus-routing silently no-op on the default --auto-layers path *(hermit)*
-- **#7399**: Schematic blocks: 10 stock factories fail on real KiCad 10 libs (stale symbol IDs, fictional mock pins); add a real-symbol smoke test *(hermit)*
 
 ## Epics
 
@@ -129,13 +140,13 @@ Issues carrying `loom:curated`.
 |------|-------|
 | Operator merge-risk holds | 0 |
 | Very important | 0 |
-| Important | 4 |
+| Important | 5 |
 | Ready (`loom:issue`) | 3 |
-| In Progress (`loom:building`) | 6 |
-| PRs awaiting review | 3 |
+| In Progress (`loom:building`) | 12 |
+| PRs awaiting review | 10 |
 | Approved PRs awaiting merge | 0 |
-| Curated | 34 |
-| Architect / Hermit proposals | 9 |
+| Curated | 32 |
+| Architect / Hermit proposals | 8 |
 | Active epics | 8 |
 <!-- guide:plan-body:end -->
 
