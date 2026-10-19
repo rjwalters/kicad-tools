@@ -8577,6 +8577,28 @@ class Autorouter:
             num_copper_layers=None,
         )
 
+    def _pair_via_parity_copper(self) -> list[Route]:
+        """The copper ``kct check`` sees on the written board, for the parity audit.
+
+        Mirrors ``_finalize_routes`` (``cli/route_cmd.py``): preserved copper of
+        a net re-routed this run is dropped ("the freshly-routed copper wins"),
+        except for ``_stub_terminals`` nets whose outside stub is kept.  A
+        route present in both lists is counted once (dedupe by ``id()``).
+        """
+        routed_net_ids = {r.net for r in self.routes} - set(
+            getattr(self, "_stub_terminals", None) or {}
+        )
+        copper: list[Route] = []
+        seen: set[int] = set()
+        for route in [
+            *self.routes,
+            *(r for r in self.existing_routes if r.net not in routed_net_ids),
+        ]:
+            if id(route) not in seen:
+                seen.add(id(route))
+                copper.append(route)
+        return copper
+
     def _audit_pair_via_parity(self) -> None:
         """Report every engaged pair committed with unequal via counts (#7093).
 
@@ -8621,7 +8643,7 @@ class Autorouter:
             if engaged:
                 pos, neg = pair.positive, pair.negative
                 pairs.append((pos.net_id, pos.net_name, neg.net_id, neg.net_name))
-        failures = audit_pair_via_parity([*self.routes, *self.existing_routes], pairs)
+        failures = audit_pair_via_parity(self._pair_via_parity_copper(), pairs)
         self.pair_via_parity_failures = failures
         names = {name: net for net, name in self.net_names.items()}
         warned: set[frozenset[int | None]] = getattr(self, "_lattice_via_warned_nets", set())
