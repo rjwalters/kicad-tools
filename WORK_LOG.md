@@ -15,6 +15,26 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-19
 
+- **Issue #7062** (closed): LDOBlock internal routing shorts foreign pads and crosses itself on real SOT-23-5 geometry
+- **PR #7288**: fix: route stock LDOBlock copper clear of foreign pads
+- **Issue #7339** (closed): Board 07 seed-42 re-route: DDR_DATA_BYTE_0 match-group skew 16.7 mm (tol 0.100) exceeds MATCHGROUP_VIOLATION_BASELINE once DQ0 routes
+- **PR #7340**: ci: key board 07 match-group allowance to named groups (adds DDR_DATA_BYTE_0)
+- **Issue #7383** (closed): kct export rewrites the routed .kicad_dru and drops the managed keepout-rule block (loosens board 05 rules)
+- **PR #7387**: fix(dru): kct init merges instead of clobbering .kicad_dru; report keepout-block removal
+- **Issue #7357** (closed): Board 04: retire the three regenerate_board_04 one-off evidence scripts into a refresh_bundles BundleConfig (#7353 step 3)
+- **PR #7381**: refactor: route board 04 evidence refresh through refresh_bundles_6404
+- **Issue #7199** (closed): Committed fleet CPLs still in the pre-#7059 frame — regenerate packages + add a frame-consistency test
+- **Issue #7365** (closed): Board 02 readiness.json is stale on main: README.md edited by #7342 without re-pin
+- **PR #7371**: chore(boards): re-pin board 02 readiness evidence after README edit
+- **Issue #7359** (closed): Replace count-based CI allowances with identity-keyed exceptions (#7270 Q3 ruling): diffpair/matchgroup impedance caps, known_issues warning counts
+- **PR #7366**: fix(ci): key synthetic-board impedance allowances by net, not count
+- **PR #7386**: fix(route): one post-route pipeline for all four kct route tails (--length-match-diffpairs on the default path)
+- **Issue #7241** (closed): Boards 05 and 07: committed CPLs still in the old frame; refresh producers refuse on evidence drift (split from #7199)
+- **PR #7382**: fix(boards): put board 05 and 07 CPLs in the Gerber frame; refresh 07 routed sidecar
+- **Issue #7374** (closed): main red after #7317: board-04 tombstoning/pintype tests stale, board-04 repair deepcopy timeouts, order-dependent diffpair shadow spy
+- **PR #7378**: test: clear main's board-04 and diff-pair reds left by #7317
+- **PR #7375**: fix: visit match-group members by descending deficit
+- **Issue #7353** (closed): Consolidate board evidence producers onto one shared gate pipeline (refresh_bundles copy, 5 fill-identity impls, board-04 one-offs)
 - **PR #7363**: refactor: route refresh_bundle through refresh_readiness.repin_staged
 
 ### 2026-10-18

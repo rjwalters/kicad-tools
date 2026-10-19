@@ -13,16 +13,16 @@ persisted on the pads themselves, so a native refill keeps them
 This script refills only the routed PCB's ``(zone ...)`` blocks natively
 (``declare_router_netclasses_6390.refill_zones_in_place``: footprints, pads,
 tracks and vias are untouched), refuses unless a second native refill
-reproduces the saved copper exactly, then regenerates the hash-bound bundle
-with ``regenerate_board_04_6404.py``.  Re-pin ``readiness.json`` afterwards::
+reproduces the saved copper exactly, then regenerates the hash-bound bundle and
+re-pins ``readiness.json`` with ``refresh_bundles_6404.py`` (Issue #7357)::
 
-    KCT_KICAD_DOCKER=1 uv run python scripts/boards/native_refill_board_04_7337.py
-    KCT_KICAD_DOCKER=1 uv run --with shapely python scripts/boards/refresh_readiness.py \\
-        boards/04-stm32-devboard --checked-at <ISO>
+    KCT_KICAD_DOCKER=1 uv run --with shapely python \\
+        scripts/boards/native_refill_board_04_7337.py --checked-at <ISO>
 """
 
 from __future__ import annotations
 
+import argparse
 import importlib.util
 import sys
 from pathlib import Path
@@ -41,7 +41,10 @@ def _load(name: str, path: Path):
     return module
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    parser.add_argument("--checked-at", required=True, help="ISO timestamp for readiness.json")
+    args = parser.parse_args(argv)
     netclasses = _load("declare_router_netclasses_6390", HERE / "declare_router_netclasses_6390.py")
     netclasses.refill_zones_in_place(ROUTED)
     regen = _load("regenerate_boards_03_04_6076", HERE / "regenerate_boards_03_04_6076.py")
@@ -51,7 +54,8 @@ def main() -> int:
         print(f"REFUSED: the native refill does not reproduce itself ({exc})", file=sys.stderr)
         return 1
     print(f"  saved vs independent refill: {delta}")
-    return _load("regenerate_board_04_6404", HERE / "regenerate_board_04_6404.py").main()
+    bundles = _load("refresh_bundles_6404", HERE / "refresh_bundles_6404.py")
+    return bundles.main([str(BOARD), "--checked-at", args.checked_at])
 
 
 if __name__ == "__main__":
