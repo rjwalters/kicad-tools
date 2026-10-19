@@ -2,7 +2,7 @@ Manufacturing package for simple_led_routed.kicad_pcb
 
 Fabrication tier : jlcpcb
 Mode             : assembly
-Generated        : 2026-10-18T22:00:00+00:00
+Generated        : 2026-10-19T20:30:00Z
 
 Assembly package: BOM and CPL are included.
 

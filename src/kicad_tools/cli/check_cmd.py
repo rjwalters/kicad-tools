@@ -2296,6 +2296,18 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1
 
+    from kicad_tools.sync.discover import resolve_declared_currents_for_pcb
+    from kicad_tools.validate.coverage import _declares_ampacity
+
+    declared_spec_currents = resolve_declared_currents_for_pcb(pcb_path)
+    if declared_spec_currents and not _declares_ampacity(net_class_map):
+        print(
+            f"Note: project.kct declares {len(declared_spec_currents)} current "
+            "requirement(s) but no net class carries target_ampacity; add "
+            "`target_ampacity` to the net classes carrying it (net_class_map.json).",
+            file=sys.stderr,
+        )
+
     # Create checker with manufacturer rules
     try:
         checker = DRCChecker(
@@ -2329,6 +2341,9 @@ def main(argv: list[str] | None = None) -> int:
             # Issue #4980/#5124: declared branch-specific current-path
             # intent (--current-paths sidecar, auto-discovered).
             current_path_specs=current_path_specs,
+            # Issue #7206: spec-declared currents with no target_ampacity
+            # make ampacity coverage ``unknown`` instead of a vacuous skip.
+            declared_spec_currents=declared_spec_currents,
             mask_copper_request=mask_copper_request,
             # Issue #6044: routing_policy options.  Pair-net via caps are
             # left to diffpair_uncoupled_length only when that category runs.
@@ -3099,6 +3114,8 @@ def build_check_rule_set(
         except (OSError, ValueError) as exc:
             notes.append(f"ignoring malformed current-paths sidecar {cp_path}: {exc}")
 
+    from kicad_tools.sync.discover import resolve_declared_currents_for_pcb
+
     copper_outer, copper_inner = stackup_copper_oz(pcb)
     checker = DRCChecker(
         pcb,
@@ -3113,6 +3130,7 @@ def build_check_rule_set(
         courtyard_waivers=courtyard_waivers,
         strict_connectivity=True,
         current_path_specs=current_path_specs,
+        declared_spec_currents=resolve_declared_currents_for_pcb(project_pcb_path),
     )
     checker.design_rules, override_msg = resolve_pcb_fabrication_overrides(
         project_pcb_path, checker.design_rules, manufacturer_id=effective_mfr

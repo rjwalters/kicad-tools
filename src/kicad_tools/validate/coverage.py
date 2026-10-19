@@ -202,6 +202,15 @@ def precheck(
     ncm = getattr(checker, "net_class_map", None)
 
     if category == "ampacity" and not _declares_ampacity(ncm):
+        # Issue #7206: a spec that declares a current but maps it onto no net
+        # was never checked against it -- unknown, not a vacuous skip.
+        declared = getattr(checker, "declared_spec_currents", None) or []
+        if declared:
+            return unknown(
+                category,
+                f"needs_input:target_ampacity (project.kct declares {len(declared)} "
+                "current requirement(s))",
+            )
         return skipped(category, "no_declared_targets")
     if category == "ampacity":
         zone_only = zone_only_ampacity_nets(checker)

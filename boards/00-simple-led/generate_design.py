@@ -689,6 +689,29 @@ def _rewrite_led_anode_route(pcb_path: Path, net_name: str) -> None:
     print(f"   LED_ANODE: deterministic route, {len(points) - 1} segment(s)")
 
 
+# Declared supply currents from project.kct (A), mapped onto nets (Issue #7206).
+# VCC is a pour-only net (no track copper to measure), so only LED_ANODE can be checked.
+AMPACITY_TARGETS_A = {"LED_ANODE": 0.01}
+
+
+def declare_ampacity_targets(output_dir: Path) -> None:
+    """Declare the spec's supply currents as ``target_ampacity`` (Issue #7206).
+
+    project.kct declares these currents; kct never infers which net carries
+    them, so the net-class-map sidecar must map them or ``kct check`` reports
+    ``ampacity: unknown``.
+    """
+    import json
+
+    sidecar = output_dir / "net_class_map.json"
+    data = json.loads(sidecar.read_text()) if sidecar.exists() else {}
+    for net, amps in AMPACITY_TARGETS_A.items():
+        entry = data.setdefault(net, {"name": "Power", "priority": 1, "trace_width": 0.25})
+        entry["target_ampacity"] = amps
+    sidecar.write_text(json.dumps(data, indent=2))
+    print(f"   Declared target_ampacity on {', '.join(AMPACITY_TARGETS_A)}: {sidecar}")
+
+
 def route_pcb(input_path: Path, output_path: Path) -> bool:
     """
     Route the PCB using the autorouter.
@@ -1083,6 +1106,7 @@ def main() -> int:
         # Step 5: Route PCB
         routed_path = output_dir / "simple_led_routed.kicad_pcb"
         route_success = route_pcb(pcb_path, routed_path)
+        declare_ampacity_targets(output_dir)
 
         # Step 5.5: route_success fast-fail gate (#4066, mirrors board 03's
         # ``route_success`` gate after ``route_pcb`` in

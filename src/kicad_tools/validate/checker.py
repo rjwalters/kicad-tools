@@ -133,6 +133,7 @@ class DRCChecker:
         strict_connectivity: bool = True,
         copper_oz_outer: float | None = None,
         copper_oz_inner: float | None = None,
+        declared_spec_currents: list[str] | None = None,
         current_path_specs: Sequence[CurrentPathSpec] | None = None,
         mask_copper_request: MaskCopperRequest | None = None,
         physical_copper_gap_mm: float | None = None,
@@ -259,6 +260,9 @@ class DRCChecker:
         self.copper_oz = copper_oz
         self.suppress_library = suppress_library
         self.net_class_map = net_class_map
+        # Issue #7206: currents the project spec declares (labels only); drives
+        # ``ampacity: unknown`` coverage when no net carries ``target_ampacity``.
+        self.declared_spec_currents = list(declared_spec_currents or [])
         # Set by :meth:`check_impedance`; read by ``kct check`` coverage.
         self.impedance_unmeasured_pairs: list[tuple[str, str]] = []
         # Issue #6044: ``routing_policy`` options.  ``require_routing_policy``

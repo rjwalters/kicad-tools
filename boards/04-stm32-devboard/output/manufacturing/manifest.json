@@ -45,8 +45,8 @@
       "size": 3394
     },
     "design-source/generate_design.py": {
-      "sha256": "2ee6ba82424a68983a456a473c10e8f958e345817d2e6d2fd552257d4ee2a196",
-      "size": 125632
+      "sha256": "a6790c680d55b7a55cc11d295244af023a9c1599e50b2cd5c69363966d6dc322",
+      "size": 126592
     },
     "design-source/manufacturing_process.py": {
       "sha256": "2c78e0029318595d5b53a64f5dac60edf82a4028ecc6279022d1edad46fd62bd",
@@ -105,7 +105,7 @@
       "size": 323
     },
     "native-drc.json": {
-      "sha256": "5d38297c5896000c16ee723e3a9bc114521bc45eafba58bbecf3bc0150e351c4",
+      "sha256": "945078b94cd66920704b9ddd930b0a1a466726add0938040842921317e8adf3b",
       "size": 1213
     },
     "native-erc-linux.json": {
