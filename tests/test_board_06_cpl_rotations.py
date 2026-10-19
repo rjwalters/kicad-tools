@@ -3,6 +3,8 @@
 import csv
 from pathlib import Path
 
+import pytest
+
 from kicad_tools.export.assembly import AssemblyPackage
 
 OUTPUT = Path(__file__).resolve().parents[1] / "boards/06-diffpair-test/output"
@@ -20,12 +22,22 @@ def test_board06_package_export_applies_rotation_profile(tmp_path):
         manufacturer="jlcpcb",
     )
     rows = _rows(package._generate_pnp(tmp_path))
-    assert len(rows) == 33
+    # 33 SMT rows + THT headers J1-J3 (JLCPCB assembles THT, #7239).
+    assert len(rows) == 36
+    assert {"J1", "J2", "J3"} <= rows.keys()
     for reference, rotation in {f"U{n}": 270 for n in range(1, 9)}.items():
         assert ":" in rows[reference]["Package"]
         assert float(rows[reference]["Rotation"]) == rotation
 
 
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "#7268: the committed board 06 CPL predates THT inclusion (#7239) and lacks "
+        "J1-J3; the Samtec headers have no LCSC ID, so a regenerated package fails "
+        "the readiness bom gate until procurement assigns parts"
+    ),
+)
 def test_board06_saved_cpl_matches_fresh_export(tmp_path):
     """Saved CPL equals a fresh export, coordinates (#7059 frame) included."""
     package = AssemblyPackage(

@@ -2232,6 +2232,48 @@ def _run_match_group_tuning_phase(router: Any, args: argparse.Namespace, *, quie
             )
 
 
+def _run_diffpair_gap_tightening_phase(
+    router: Any,
+    args: argparse.Namespace,
+    *,
+    quiet: bool = False,
+) -> Any:
+    """Run the opt-in diff-pair gap-tightening pass (Issue #7344).
+
+    Engaged only by ``--tighten-diffpair-gap``; without it this is a no-op,
+    so routing output is byte-identical.  Called after the geometric
+    post-passes and before skew / match-group tuning, so the tuners see the
+    final trunk lengths.  Returns the per-pair results, or ``None`` when the
+    pass did not run.
+    """
+    if not getattr(args, "tighten_diffpair_gap", False):
+        return None
+    if not router.routes:
+        if not quiet:
+            print("\n--- Diff-Pair Gap Tightening: skipped (no routes) ---")
+        return None
+    if not quiet:
+        print("\n--- Diff-Pair Gap Tightening (Issue #7344) ---")
+    _ci_snapshot = _connectivity_snapshot(router)
+    results = router.apply_diffpair_gap_tightening(verbose=not quiet)
+    _enforce_connectivity_invariant_or_exit(
+        router,
+        _ci_snapshot,
+        phase="tighten_diffpair_gap",
+        args=args,
+        quiet=quiet,
+    )
+    if not quiet:
+        if not results:
+            print("  No differential pairs detected; nothing to tighten.")
+        else:
+            n_tight = sum(1 for r in results.values() if r.reason == "tightened")
+            n_band = sum(1 for r in results.values() if r.reason == "in_band")
+            n_declined = len(results) - n_tight - n_band
+            print(f"  Summary: {n_tight} tightened, {n_band} in band, {n_declined} declined")
+    return results
+
+
 def _diffpair_skew_tuning_mode(args: argparse.Namespace) -> str | None:
     """Which diff-pair skew tuning (if any) runs after routing.
 
@@ -12124,6 +12166,10 @@ def route_with_layer_escalation(
     _record_stage_quality(_stage_quality, STAGE_POST_FINALIZE, final_result.router)
     _print_stage_quality_report(_stage_quality)
 
+    # Issue #7344: opt-in diff-pair gap tightening, before any length tuner
+    # so the tuners measure the final trunk geometry.
+    _run_diffpair_gap_tightening_phase(final_result.router, args, quiet=quiet)
+
     # Issue #6968: match-group length tuning on the escalation result.  This
     # is the default ``kct route`` flow; before #6968 only the single-attempt
     # tail of ``_run_main_impl`` ran the tuner, so --length-match-groups
@@ -13172,6 +13218,10 @@ def route_with_rule_relaxation(
         _finalize_committed_copper_or_demote(final_result.router, quiet=quiet)
     _record_stage_quality(_stage_quality, STAGE_POST_FINALIZE, final_result.router)
     _print_stage_quality_report(_stage_quality)
+
+    # Issue #7344: opt-in diff-pair gap tightening, before any length tuner
+    # so the tuners measure the final trunk geometry.
+    _run_diffpair_gap_tightening_phase(final_result.router, args, quiet=quiet)
 
     # Issue #6968: match-group length tuning on the escalation result.  This
     # is the default ``kct route`` flow; before #6968 only the single-attempt
@@ -15794,6 +15844,10 @@ def route_with_combined_escalation(
         _finalize_committed_copper_or_demote(final_result.router, quiet=quiet)
     _record_stage_quality(_stage_quality, STAGE_POST_FINALIZE, final_result.router)
     _print_stage_quality_report(_stage_quality)
+
+    # Issue #7344: opt-in diff-pair gap tightening, before any length tuner
+    # so the tuners measure the final trunk geometry.
+    _run_diffpair_gap_tightening_phase(final_result.router, args, quiet=quiet)
 
     # Issue #6968: match-group length tuning on the escalation result.  This
     # is the default ``kct route`` flow; before #6968 only the single-attempt
@@ -18958,6 +19012,22 @@ def _route_parser() -> argparse.ArgumentParser:
             "length-critical diff pair until skew is within the per-class "
             "tolerance. Requires --differential-pairs to be set; emits a "
             "warning and short-circuits otherwise."
+        ),
+    )
+    parser.add_argument(
+        "--tighten-diffpair-gap",
+        dest="tighten_diffpair_gap",
+        action="store_true",
+        help=(
+            "Opt-in post-route pass (Issue #7344): squeeze parallel diff-pair "
+            "trunks whose coupled Zdiff is above their class's "
+            "target_diff_impedance band toward the gap at which the "
+            "impedance check's own model hits the target (never below the "
+            "pair's floored intra-pair gap).  Both rails move symmetrically "
+            "with 45-degree jogs, so skew is unchanged; each edit is checked "
+            "for clearance, connectivity and impedance and skipped on any "
+            "failure.  Runs before skew and match-group tuning.  Off by "
+            "default: routing output is unchanged without it."
         ),
     )
     parser.add_argument(
@@ -23142,6 +23212,10 @@ def _run_main_impl(args, parser, argv) -> int:
             print(f"  Segments: {pre_segments} -> {post_segments} ({-segment_reduction:+.1f}%)")
             if pre_vias > 0:
                 print(f"  Vias:     {pre_vias} -> {post_vias} ({-via_reduction:+.1f}%)")
+
+    # Issue #7344: opt-in diff-pair gap tightening, before skew and
+    # match-group tuning so both tuners see the final trunk lengths.
+    _run_diffpair_gap_tightening_phase(router, args, quiet=quiet)
 
     # Differential-pair length-match (skew) tuning -- Epic #2556 Phase 3I
     # (Issue #2648) via --length-match-diffpairs, and auto-engaged on lattice

@@ -198,6 +198,14 @@ def ddr_dqs_pair_net_class() -> NetClassRouting:
         intra_pair_clearance=0.10,
         coupled_routing=True,  # Phase 2E
         coupled_continuity_threshold=0.85,  # Phase 2G
+        # Issue #7319: an explicit 100 ohm target, sized by
+        # ``_size_tightly_coupled_class`` like MIPI/HDMI (#7060).  Without it
+        # the router synthesizes the same target from the validator's
+        # ``.*_[PN]$`` default and re-solves the WIDTH at the 0.1016 mm
+        # manufacturer gap floor -- 0.175 mm under the #7163 field solve,
+        # which cost DQ0 on the seed-42 re-route (30/31 -> 29/31).
+        target_diff_impedance=100.0,
+        impedance_tolerance_percent=10.0,
         skew_tolerance_mm=0.05,  # Phase 3H: tight DDR strobe budget
         length_critical=True,
         length_match_group="DDR_DATA_BYTE_0",  # Group membership
@@ -279,6 +287,7 @@ def addr_bus_net_class() -> NetClassRouting:
 _ROUTABLE_DIFF_WIDTH_MM: dict[str, float] = {
     "MIPI_CSI_LANES": 0.225,
     "HDMI_TMDS_LANES": 0.225,
+    "DDR_DQS": 0.225,  # Issue #7319: pre-#7163 routed DQS width
 }
 
 
@@ -354,7 +363,7 @@ def build_net_class_map(*, preserve_authored_gap: bool = True) -> dict[str, NetC
 
     ``preserve_authored_gap`` opts into the fixed-gap width sizing measured
     by ``repair_mipi.py`` (Issue #4969): resolve ``trace_width`` for the
-    impedance-constrained MIPI/HDMI classes at their authored 0.10mm
+    impedance-constrained MIPI/HDMI/DQS classes at their authored 0.10mm
     ``intra_pair_clearance`` gap via the JLCPCB four-layer coupled-
     microstrip model, instead of leaving them at the raw declared width
     (0.15mm, which models to ~127.6 ohm -- outside the classes' 10%
@@ -372,6 +381,12 @@ def build_net_class_map(*, preserve_authored_gap: bool = True) -> dict[str, NetC
     0.225 mm routing width and widens the gap to 0.135 mm (99.7 ohm); the
     authored 0.10 mm gap is now the minimum rather than a fixed value (see
     ``_size_tightly_coupled_class``).
+
+    Issue #7319: all three diff classes -- MIPI, HDMI and the DDR strobe
+    pair -- are sized this way.  DQS used to carry no target, so the router
+    synthesized 100 ohm from the validator's ``.*_[PN]$`` default and
+    re-solved its WIDTH at the 0.1016 mm manufacturer gap floor (0.175 mm
+    under the #7163 field solve), which lost DQ0 on the seed-42 re-route.
     """
     ddr = ddr_data_byte_0_net_class()
     dqs = ddr_dqs_pair_net_class()
@@ -380,6 +395,7 @@ def build_net_class_map(*, preserve_authored_gap: bool = True) -> dict[str, NetC
     if preserve_authored_gap:
         mipi = _size_tightly_coupled_class(mipi)
         hdmi = _size_tightly_coupled_class(hdmi)
+        dqs = _size_tightly_coupled_class(dqs)
     addr = addr_bus_net_class()
 
     return {
@@ -437,6 +453,15 @@ def build_net_class_map(*, preserve_authored_gap: bool = True) -> dict[str, NetC
 # This mirrors board 06's POUR_NETS contract (Issue #3413 phase 5 / #3509)
 # so both boards declare their plane nets in one place.
 POUR_NETS: list[str] = ["GND", "+1V2", "+1V8"]
+
+# Issue #7319: reach contract, board 06's #3413 phase 5 shape.  The CI gate
+# (``check_matchgroup_coverage.py``) counts the re-routed artifact's COMPLETE
+# signal nets per ``NetStatusAnalyzer`` (pour nets excluded: 34 - 3 = 31) and
+# fails (exit 2, open nets named) below this.  30 is the seed-42 reach both
+# before #7163 and with the DQS pair sized like MIPI/HDMI (TMDS_D0_N open on
+# both).  Without it the #7163 drop of DQ0 (30 -> 29) passed silently and
+# showed up only as a tripled gate wall time.
+REQUIRED_SIGNAL_REACH: int = 30
 
 # Issue #3617: pour-connectivity contract.  When True, the CI gate runs
 # this recipe's shapely copper-union audit (``_audit_pour_nets``) against

@@ -85,7 +85,11 @@ from typing import NamedTuple
 import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from board_recipe_artifacts import recipe_baseline_key, recipe_output_dir  # noqa: E402
+from board_recipe_artifacts import (  # noqa: E402
+    measure_signal_reach,  # shared with check_matchgroup_coverage (#7319)
+    recipe_baseline_key,
+    recipe_output_dir,
+)
 
 # --- shared with check_routed_drc.py ------------------------------------------
 
@@ -140,13 +144,35 @@ DIFFPAIR_VIOLATION_BASELINE: dict[str, int] = {
     "boards/06-diffpair-test/regression-fixture/diffpair_test_routed.kicad_pcb": 18,
 }
 
+# Issue #7312 -- declared ``target_diff_impedance`` is now judged on coupled
+# segments (#7293).  The model is right and the fixture's copper is what
+# misses: the routed coupled gap is ~4-5x the solved ``intra_pair_clearance``
+# in regression-fixture/net_class_map.json (measured on the committed PCB,
+# edge-to-edge, via ImpedanceRule's own gap annotation):
+#   USB2_D-    F.Cu w=0.250  routed gap 0.351 mm vs solved 0.075 mm -> 114.8 ohm
+#   USB3_RX1+  F.Cu w=0.275  routed gap 0.432 mm vs solved 0.100 mm -> 112.6 ohm
+#   USB3_TX2+  F.Cu w=0.275  routed gap 0.432 mm vs solved 0.100 mm -> 112.6 ohm
+# (declared 90 ohm +/-15 %).  The fixture is a frozen historical witness whose
+# pairs already fail skew/continuity (0/9 converge, #3540-#3544), so the
+# pairs never get squeezed to the solved gap; the committed ``output/`` board
+# has no impedance finding.  A ``--skip-route`` run on the committed PCB
+# reports 3 findings (one per distinct segment above); the cap stays at the 5
+# originally measured in #7312 rather than being tightened on a count not
+# re-checked under the CI re-route.
+# Capped, not open: a sixth impedance error still fails the gate.
+DIFFPAIR_FIXTURE_RULE_CAPS: dict[str, int] = {"impedance": 5}
+
 
 def unexpected_baseline_errors(key: str, errors: dict[str, int]) -> dict[str, int]:
     """Pair improvements cannot hide a new physical error within the total 18."""
     if key not in DIFFPAIR_VIOLATION_BASELINE:
         return {}
     expected = {"diffpair_length_skew", "diffpair_routing_continuity"}
-    return {rule: count for rule, count in errors.items() if count and rule not in expected}
+    return {
+        rule: count
+        for rule, count in errors.items()
+        if count and rule not in expected and count > DIFFPAIR_FIXTURE_RULE_CAPS.get(rule, 0)
+    }
 
 
 def check_zero_violations(
@@ -438,37 +464,6 @@ from net_class_map_resolver import (  # noqa: E402
     load_board_recipe_module,
     resolve_net_class_map_sidecar,
 )
-
-
-def measure_signal_reach(pcb_path: Path, pour_nets: set[str]) -> tuple[int, int, list[str]]:
-    """Measure routed-signal-net reach on a routed PCB.
-
-    Issue #3413 phase 5: the gate previously asserted only the DRC error
-    count + rule-exercise, so a reach regression (e.g. 18/21 with 3
-    connectivity errors) stayed green as long as the error count fit
-    under the allowlist floor.  This helper counts COMPLETE signal nets
-    per :class:`~kicad_tools.analysis.net_status.NetStatusAnalyzer` --
-    the same per-net completeness model the connectivity DRC rule uses.
-
-    Pour nets are excluded: their connectivity is plane/stitching-based
-    and is gated separately (the board recipe's copper-union audit;
-    see boards/06-diffpair-test/generate_design.py step 11).
-
-    Args:
-        pcb_path: Routed PCB to measure.
-        pour_nets: Net names excluded from the signal universe (the
-            board module's ``POUR_NETS``).
-
-    Returns:
-        ``(complete_count, signal_total, incomplete_names)``.
-    """
-    from kicad_tools.analysis.net_status import NetStatusAnalyzer
-
-    result = NetStatusAnalyzer(pcb_path).analyze()
-    signal = [n for n in result.nets if n.net_name and n.net_name not in pour_nets]
-    complete = [n for n in signal if n.status == "complete"]
-    incomplete_names = sorted(n.net_name for n in signal if n.status != "complete")
-    return len(complete), len(signal), incomplete_names
 
 
 def measure_pour_connectivity(recipe_mod, pcb_path: Path, pour_nets: set[str]) -> list[str]:

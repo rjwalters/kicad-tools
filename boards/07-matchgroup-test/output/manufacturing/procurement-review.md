@@ -12,6 +12,36 @@ validation recipe.** Manufacturing export and package verification are separate
 release gates. No fabricated unit has been tested; hardware bring-up remains
 necessary before describing the design as hardware-proven.
 
+## CPL frame refresh — 2026-10-18
+
+Re-issuing this package for issue #7241 regenerated `cpl_jlcpcb.csv` in the
+Gerber/drill frame introduced by issue #7059 (no aux origin on this board, so
+X is sheet-absolute and Y is negated). For the 40 SMT rows only the
+`Mid X`/`Mid Y` columns moved, by one uniform translation (X + 98.5 mm,
+Y → −(Y + 65) mm; e.g. C1 `27.438,39.25` → `125.938,-104.25` mm), so every
+relative spacing is unchanged. `Package` now carries the KiCad library prefix
+(issue #7213, e.g. `Capacitor_SMD:C_0603_1608Metric`); `Designator`, `Val`,
+`Rotation` and `Layer` are identical to the CPL reviewed below. Copper is
+unchanged. No new supplier lookup or stock check was performed.
+
+## Through-hole parts now in the JLCPCB BOM/CPL — 2026-10-18 (issue #7239)
+
+JLCPCB's PCBA capability page
+(https://jlcpcb.com/capabilities/pcb-assembly-capabilities, fetched
+2026-10-18) lists both Economic and Standard PCBA as "SMT/Thru-hole", so by
+operator decision (issue #7239) `kct export --mfr jlcpcb` no longer excludes
+through-hole parts. This package's `cpl_jlcpcb.csv` and `bom_jlcpcb.csv` now
+also list the through-hole headers J1 (C124375), J2 (C37208) and J3 (C49257),
+with the part numbers already selected in `procurement.json`, for JLCPCB
+assembly; `manual-assembly-bom.csv` is retired. Any statement below that
+these headers are manually inserted or excluded from the CPL describes the
+earlier package and is superseded for them.
+
+**Procurement must review these through-hole rows** (part identity, JLCPCB
+through-hole assembly eligibility and stock, and placement orientation)
+before ordering assembly. This note records the export change only: it is
+not a re-review, and no new supplier lookup or stock check was performed.
+
 ## Circuit and references
 
 The MCU uses the 144-pin LQFP and the SDRAM uses the 54-pin TSOP-II, both actual
@@ -138,7 +168,7 @@ load estimate rather than series travel. Final group spreads are:
 
 All remain below 5 mm, and every bus member is within 10 mm of the 72.953 mm
 clock. The clock's estimated external load is 13.521 pF against its separate
-15 pF limit. Geometric impedance is 51.72 Ω on the outer layers and about
+15 pF limit. Geometric impedance is 53.64 Ω on the outer layers and about
 48.09 Ω on the inner signal layers. These are model-based engineering checks,
 not fabrication impedance certification or measured hardware timing.
 

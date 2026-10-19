@@ -361,6 +361,13 @@ def test_rotated_block_copper_lands_on_kicad_pads(tmp_path, rotation):
 # ---------------------------------------------------------------------------
 
 
+def bad(layout: PCBLayout, a: str, b: str, net: str | None, layer: Layer = Layer.F_CU) -> None:
+    """One bad ldo -> led segment.  Built directly rather than via route(),
+    which would add an equally bad pad stub per internal_pad port (#7064)."""
+    src, dst = layout.blocks["ldo"].port(a), layout.blocks["led"].port(b)
+    layout.inter_block_traces.append(TraceSegment(src, dst, layer=layer, net=net))
+
+
 def _bad_layout(origin: tuple[float, float]) -> PCBLayout:
     """The good layout plus one instance of every strict-mode problem."""
     layout = _layout(origin)
@@ -370,10 +377,11 @@ def _bad_layout(origin: tuple[float, float]) -> PCBLayout:
     ghost.add_component("R1", "R_0603_1608Metric", 2, 0)  # R1 is also in "led"
     ghost.place(ox + 30, oy + 25)
     layout.add_block(ghost, name="ghost")
-    layout.route("ldo", "GND", "led", "CATHODE")  # net=None
-    layout.route("ldo", "VIN", "led", "CATHODE", net="NOT_ON_BOARD")  # unmapped
-    layout.route("ldo", "EN", "led", "CATHODE", net="GND", layer=Layer.F_SILKS)
-    layout.route("ldo", "EN", "led", "ANODE", net="GND", layer=Layer.IN1_CU)
+
+    bad(layout, "GND", "CATHODE", None)  # net=None
+    bad(layout, "VIN", "CATHODE", "NOT_ON_BOARD")  # unmapped
+    bad(layout, "EN", "CATHODE", "GND", Layer.F_SILKS)
+    bad(layout, "EN", "ANODE", "GND", Layer.IN1_CU)
     return layout
 
 
@@ -414,13 +422,13 @@ def test_each_strict_case_alone_writes_nothing(source, origin, tmp_path, case):
         block.place(ox + 5, oy + 5)
         layout.add_block(block, name="dup")
     elif case == "net=None":
-        layout.route("ldo", "GND", "led", "CATHODE")
+        bad(layout, "GND", "CATHODE", None)
     elif case == "unmapped net":
-        layout.route("ldo", "VIN", "led", "CATHODE", net="NOT_ON_BOARD")
+        bad(layout, "VIN", "CATHODE", "NOT_ON_BOARD")
     elif case == "non-copper layer":
-        layout.route("ldo", "EN", "led", "CATHODE", net="GND", layer=Layer.F_SILKS)
+        bad(layout, "EN", "CATHODE", "GND", Layer.F_SILKS)
     else:
-        layout.route("ldo", "EN", "led", "ANODE", net="GND", layer=Layer.IN1_CU)
+        bad(layout, "EN", "ANODE", "GND", Layer.IN1_CU)
 
     out = tmp_path / "never.kicad_pcb"
     with pytest.raises(LayoutApplyError) as excinfo:
@@ -712,6 +720,48 @@ def test_kicad_cli_drc_lenient_stock_layout_adds_no_errors(source, origin, tmp_p
     out = tmp_path / "stock_lenient.kicad_pcb"
     report = _stock_layout(origin).apply_to_pcb(source, out, net_map=NET_MAP, strict=False)
     assert report.skipped
+    before = _drc_errors(source, tmp_path)
+    after = _drc_errors(out, tmp_path)
+    assert after - before == Counter(), f"new DRC errors: {dict(after - before)}"
+
+
+def _waypoint_layout(origin: tuple[float, float]) -> PCBLayout:
+    """Hand-routed LDO + LED joined by ``route(..., waypoints=...)`` (#7064).
+
+    The dogleg climbs above the LED block and drops onto the anode port; the
+    pad stubs (C2.1 -> VOUT port, D1.2 -> ANODE port) close both ends.
+    """
+    ox, oy = origin
+    layout = PCBLayout("waypoints")
+    ldo = _ldo_block()
+    ldo.ports["VOUT"].internal_pad = "C2.1"
+    ldo.place(ox + 10, oy + 12, rotation=0)
+    layout.add_block(ldo, name="ldo")
+    led = LEDBlock(led_ref="D1", res_ref="R1")
+    led.place(ox + 24, oy + 12, rotation=180)
+    layout.add_block(led, name="led")
+    layout.route(
+        "ldo", "VOUT", "led", "ANODE", net="VOUT",
+        waypoints=[Point(ox + 15.5, oy + 9.5), Point(ox + 26.5, oy + 9.5)],
+    )  # fmt: skip
+    return layout
+
+
+def test_route_with_waypoints_applies_in_strict_mode(source, origin, tmp_path):
+    """A dogleg route plus pad stubs clears the strict copper check."""
+    layout = _waypoint_layout(origin)
+    # 2 stubs (C2.1 -> port, D1.2 -> port) + 3 polyline segments.
+    assert len(layout.inter_block_traces) == 5
+    out = tmp_path / "waypoints.kicad_pcb"
+    report = layout.apply_to_pcb(source, out, net_map=NET_MAP)
+    assert report.skipped == []
+    assert report.segments_added == LDO_TRACES + LED_TRACES + 5
+
+
+@requires_kicad_cli
+def test_kicad_cli_drc_waypoint_route_adds_no_errors(source, origin, tmp_path):
+    out = tmp_path / "waypoints_drc.kicad_pcb"
+    _waypoint_layout(origin).apply_to_pcb(source, out, net_map=NET_MAP)
     before = _drc_errors(source, tmp_path)
     after = _drc_errors(out, tmp_path)
     assert after - before == Counter(), f"new DRC errors: {dict(after - before)}"

@@ -1076,6 +1076,90 @@ measured a matcher.**
    this item's fix: on this route the route-time cascade never hits a
    later-attempt failure after a commit.
 
+9. **After #7162: the flag is DRC-clean, and `kct route`'s own short gate
+   was the last thing failing it (Issue #5798).** Measured on 2026-10-18 at
+   `main` `3e456f025` with C++ build 60, `--no-cache` on every run (the route
+   cache ignores router code until #7258 is fixed). The input, scratch map
+   and command are item 8's: `kct route --preserve-existing --net-class-map
+   <scratch>` with and without `--length-match-groups`, uncapped, run in
+   parallel. kicad-cli is the pinned image (10.0.6), one board at a time.
+
+   | Run | Connections | Nets | Time | kicad-cli, input `.kicad_pro` | kicad-cli, emitted `.kicad_pro` + `.kicad_dru` | BYTE0 | BYTE1 ¹ | ADDRESS | COMMAND |
+   |---|---|---|---|---|---|---|---|---|---|
+   | flag off | 160/161 | 54/55 | 249 s | 0 errors | 129 errors (122 `annular_width`, 7 `clearance`) | 18.33 | 19.90 | 50.68 | 19.49 |
+   | flag on | 160/161 | 54/55 | 245 s | 0 errors | 129 errors (same 122 + 7) | **3.16** | 19.78 | 42.89 | **5.18** |
+
+   ¹ 8 of 9 members finished; DQ9 is a 0.70 mm stub on both runs. Spreads
+   are via-exclusive 2-D length over finished members, in mm.
+
+   The flag costs no connections and adds no kicad-cli error under either
+   rule set. The 129 errors under the emitted fab rules are identical on and
+   off: they are in kept input copper and its vias, not in tuned copper. #7162
+   removed the 16 errors item 8 measured.
+
+   **The flag-on run still reported `ROUTING FAILED: cross-net copper
+   shorts`.** Its post-route short gate listed 19 `routing short [via]`
+   findings, and the flag-off run listed none. An instrumented re-run traced
+   every one to a via in `router.existing_routes` that the output does not
+   contain. Each was an input escape-stub via of an SDRAM net that this run
+   re-routed (for example DQ1 at (160.25, 95.80) under a DQ0 meander, and BA0
+   at (147.41, 105.86) under a BA1 meander). `_finalize_routes` drops a
+   re-routed net's stale input copper, and the tuner's clearance pass already
+   skips it (#7162 uses the writer's filter). `validate_routes` instead
+   checked routed copper against every input route. Its segment-to-via,
+   segment-to-kept-segment and via-to-kept-via checks now use
+   `kept_input_routes`, which is the copper the output carries. Both boards
+   are byte-identical before and after the change. The flag-on run's 19 false
+   shorts are gone. Both runs now exit on the same 14 kept-input-copper
+   clearance findings: the input copper was laid at the board's 0.15 mm,
+   and board 07's class map (unchanged in the scratch copy) puts those nets
+   in `AUX`, which judges them at 0.175 mm.
+
+   **Should board 07 be committed from the flag-on route? No.** The committed
+   artifact is board 07's own tuned pipeline output: 161/161, with spreads of
+   0.63 / 2.82 / 2.92 / 0.94 mm, all inside 5.0 mm. The flag-on `kct route`
+   output is 160/161 (DQ9 unfinished), has two groups over budget (BYTE1
+   19.78, ADDRESS 42.89 mm), and fails 129 checks under its own emitted rules.
+   Replacing the artifact would regress completion and three of the four
+   groups. The flag is now safe to enable on board 07, but that does not make
+   the result manufacturable.
+
+   What is left, by size: ADDRESS (42.89 mm). Its two shortest members, BA0
+   at 31.7 mm and BA1 at 35.4 mm, need about 40 mm each to reach the longest
+   member (A5, 74.4 mm). They get 7.8 and 11.7 mm from their two meanders at
+   the per-member cap. A9 and A11 are never tried, because the 16-insert
+   group ceiling is spent first. The other limit is BYTE1's unfinished DQ9,
+   which is a routing problem.
+
+10. **The ceiling starves the largest-deficit members because of visit
+    order (Issue #5798).** This item is a unit-level result. No board 07
+    route was run for it, so it makes no claim about board 07's spreads.
+    `_tune_match_group_single_ended` visited members in `group.net_ids`
+    (declaration) order. Item 9 shows the 16-insert ceiling spent before A9
+    and A11 are tried. The reproducer is
+    `tests/test_match_group_tuning.py::TestCascadeBudget::test_ceiling_is_spent_on_largest_deficits_first`:
+    a 14-net group of nine members 2 mm short and four members 30 mm short
+    (the per-member cap of 2 inserts each), so demand is 17 inserts against
+    the ceiling of 16. In declaration order the last 30 mm member got one
+    insert and reported `cascade_budget_exhausted`. Members are now visited
+    by descending deficit (ties keep declaration order), so every 30 mm
+    member gets its two inserts and the one 2 mm member that closes the least
+    skew reports `cascade_budget_exhausted`. The returned dict is still in
+    declaration order. `MAX_TOTAL_INSERTS_PER_GROUP` and the per-member caps
+    are unchanged; item 7 refutes them as the lever.
+
+    This does not close SDRAM_ADDRESS. BA0 and BA1 still need about 40 mm
+    each and the per-member cap supplies 7.8 and 11.7 mm (item 9), so the
+    group stays over 5.0 mm at current limits. What the change buys is that
+    the ceiling is spent on the members that set the group's minimum. Whether
+    that moves board 07's ADDRESS spread is unmeasured here.
+
+    Original acceptance criteria 3 and 4 are met: item 8 shows
+    `--length-match-groups` costs no connections (160/161 on and off) and
+    item 9 shows it adds no kicad-cli error under either rule set after
+    #7162. The kct and ref rows of `krt_compare.py` were re-run in items 8
+    and 9; KRT rows are reused from pass 2.
+
 **Verdict.** The gap survives deconfounding. It is not the routing cap. It is
 the three wiring gaps in (1), then DRC-limited meander room and the
 all-or-nothing rollback in (3). Item 6 shows #7043 (PR #7048) closes
@@ -1084,7 +1168,10 @@ budget. Item 8 stops SDRAM_ADDRESS being rolled back (52.44 → 41.69 mm,
 still over budget). With `length_critical: true` in a scratch map,
 `--length-match-groups` no longer costs connections on board 07 (160/161 on
 and off), but its route-time meanders add 16 kicad-cli errors against
-preserved foreign-net vias (#7159). Follow-ups: #6969 (meander room and rollback policy; item 5
+preserved foreign-net vias (#7159). Item 9 shows #7162 removed those 16
+errors. After that, the only failure the flag added was `kct route`'s own
+short gate, which flagged copper the writer drops. That is now fixed, so the
+flag is DRC-neutral on board 07. Follow-ups: #6969 (meander room and rollback policy; item 5
 shows the clearance floor was not the limit), #7043 (per-bump meander
 placement, PR #7048), and #6970 (the loader's net-0 keying, for `kct route`).
 #6968 (the flag's three gaps) is closed: PR #6974 runs

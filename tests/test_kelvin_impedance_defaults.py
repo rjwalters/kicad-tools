@@ -69,7 +69,7 @@ def test_router_preserves_current_sense_width_unless_impedance_is_explicit(expli
 
 
 def _board(tmp_path, names, reference=None, footprint_name="Package_SO:SOIC-8"):
-    """Real schema/physics fixture: long, intentionally over-wide paired traces."""
+    """Real schema/physics fixture: long, intentionally over-wide coupled traces (0.3 mm gap)."""
     footprint = ""
     if reference is not None:
         footprint = f'''(footprint "{footprint_name}" (layer "F.Cu") (at 5 5)
@@ -87,7 +87,7 @@ def _board(tmp_path, names, reference=None, footprint_name="Package_SO:SOIC-8"):
       (net 0 "") (net 1 "{names[0]}") (net 2 "{names[1]}")
       {footprint}
       (segment (start 5 5) (end 15 5) (width 1.0) (layer "F.Cu") (net 1))
-      (segment (start 5 7) (end 15 7) (width 1.0) (layer "F.Cu") (net 2)))''')
+      (segment (start 5 6.3) (end 15 6.3) (width 1.0) (layer "F.Cu") (net 2)))''')
     return PCB.load(path)
 
 
@@ -112,8 +112,10 @@ def test_sense_substring_without_shunt_retains_real_drc(tmp_path, stem, referenc
         assert rule._find_matching_spec(name).target_zdiff == 100
     results = rule.check(pcb, get_profile("jlcpcb").get_design_rules(2))
     assert rule._stackup.has_explicit_data
-    assert {v.items[0] for v in results.errors} == set(names)
-    assert all(v.required_value == 100 for v in results.errors)
+    # Built-in default patterns are advisory: capped at warning (Issue #7293).
+    assert {v.items[0] for v in results.warnings} == set(names)
+    assert not results.errors
+    assert all(v.required_value == 100 for v in results.warnings)
 
 
 @pytest.mark.parametrize(
@@ -130,7 +132,7 @@ def test_shunt_exclusion_and_explicit_override_in_real_drc(tmp_path, reference, 
     assert {v.items[0] for v in explicit.check(pcb, rules).errors} == set(names)
     # Same rule, same names, different board: never retain a prior exemption.
     pcb_without_shunt = _board(tmp_path, names)
-    assert {v.items[0] for v in rule.check(pcb_without_shunt, rules).errors} == set(names)
+    assert {v.items[0] for v in rule.check(pcb_without_shunt, rules).warnings} == set(names)
 
 
 def test_resistor_on_unrelated_net_does_not_exempt_pair(tmp_path):
@@ -139,4 +141,4 @@ def test_resistor_on_unrelated_net_does_not_exempt_pair(tmp_path):
     for pad in pcb.footprints[0].pads:
         pad.net_name = "ISENSE_OTHER"
     results = _rule(names).check(pcb, get_profile("jlcpcb").get_design_rules(2))
-    assert {v.items[0] for v in results.errors} == set(names)
+    assert {v.items[0] for v in results.warnings} == set(names)

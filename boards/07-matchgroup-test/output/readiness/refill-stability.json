@@ -4,7 +4,7 @@
   "byte_identical": true,
   "fill_identical": true,
   "native_rule_sha256": {
-    ".kicad_dru": "4b7ed2eb30f225d6c18d7f4c8275a1cca926c338860d63fe23e39a714efa2cde",
+    ".kicad_dru": "93011b4981b5ce61aac093cdec9210878300c92d909fc079e5e26b02bf6bbc9e",
     ".kicad_pro": "631b225f4cd529c8a2d8ce94d5e40cbedb01139984528a132430dcc3adae63b7"
   },
   "native_unconnected_items": 0,

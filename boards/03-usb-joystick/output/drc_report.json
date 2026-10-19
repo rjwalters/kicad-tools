@@ -1,13 +1,14 @@
 {
   "file": "boards/03-usb-joystick/output/usb_joystick_routed.kicad_pcb",
   "manufacturer": "jlcpcb-tier1",
+  "pcb_sha256": "9520237d99732b6f1b272cd9921345ad03bd94b87faa37c1f9c7a0a3ff9e014d",
   "layers": 4,
   "summary": {
     "errors": 0,
-    "warnings": 1,
+    "warnings": 7,
     "infos": 10,
     "waived": 0,
-    "rules_checked": 65,
+    "rules_checked": 74,
     "rules_checked_by_rule": {
       "connectivity": 1,
       "copper_sliver": 1,
@@ -26,13 +27,21 @@
       "netclass_clearance": 1,
       "netclass_via_diameter": 1,
       "netclass_via_drill": 1,
-      "netclass_annular_ring": 1
+      "netclass_annular_ring": 1,
+      "spec_conformance_dimensions": 1,
+      "spec_conformance_layers": 1,
+      "spec_conformance_min_trace": 1,
+      "spec_conformance_min_via": 1,
+      "spec_conformance_min_drill": 1,
+      "spec_conformance_target_fab": 1
     },
     "passed": true,
     "stale_waivers": 0,
-    "coverage_checked": 32,
+    "coverage_checked": 33,
     "coverage_skipped": 7,
-    "coverage_unknown": [],
+    "coverage_unknown": [
+      "spec_conformance"
+    ],
     "coverage_blocking_unknown": []
   },
   "violations": [
@@ -254,6 +263,154 @@
       "waived": false,
       "key": "diffpair_uncoupled_length||USB_MCU_D+,USB_MCU_D-|",
       "evidence_hash": "ev2:9ca41e890dfecad0"
+    },
+    {
+      "rule_id": "thermal_asymmetry",
+      "type": "unknown",
+      "severity": "warning",
+      "message": "C10 thermal asymmetry (tombstoning risk): pad 2 (net 'GND') is solid to 'GND' fill on F.Cu; pad 1 (net 'JOY_X') has no zone connection (trace only) -- give the solid terminal a thermal relief (or balance the other terminal)",
+      "location": [
+        131.275,
+        89.5
+      ],
+      "layer": "F.Cu",
+      "actual_value": null,
+      "required_value": null,
+      "items": [
+        "C10",
+        "C10-2",
+        "C10-1"
+      ],
+      "nets": [
+        "GND",
+        "JOY_X"
+      ],
+      "status": "warning",
+      "waived": false,
+      "key": "thermal_asymmetry|C10,C10-1,C10-2|GND,JOY_X|F.Cu",
+      "evidence_hash": "ev2:1c3af2926b591285"
+    },
+    {
+      "rule_id": "thermal_asymmetry",
+      "type": "unknown",
+      "severity": "warning",
+      "message": "C11 thermal asymmetry (tombstoning risk): pad 2 (net 'GND') is solid to 'GND' fill on F.Cu; pad 1 (net 'JOY_Y') has no zone connection (trace only) -- give the solid terminal a thermal relief (or balance the other terminal)",
+      "location": [
+        131.275,
+        92.5
+      ],
+      "layer": "F.Cu",
+      "actual_value": null,
+      "required_value": null,
+      "items": [
+        "C11",
+        "C11-2",
+        "C11-1"
+      ],
+      "nets": [
+        "GND",
+        "JOY_Y"
+      ],
+      "status": "warning",
+      "waived": false,
+      "key": "thermal_asymmetry|C11,C11-1,C11-2|GND,JOY_Y|F.Cu",
+      "evidence_hash": "ev2:4f2870bb8e4cf43a"
+    },
+    {
+      "rule_id": "thermal_asymmetry",
+      "type": "unknown",
+      "severity": "warning",
+      "message": "PTH pin J1-A1 (net 'GND', drill 0.40mm) is connected solid to zone fill on 3 layers (F.Cu, In1.Cu, B.Cu); barrel fill is at risk when wave-, selective- or hand-soldered -- use thermal reliefs on this pin",
+      "location": [
+        149.475,
+        63.3
+      ],
+      "layer": "F.Cu",
+      "actual_value": 3.0,
+      "required_value": 1.0,
+      "items": [
+        "J1",
+        "J1-A1"
+      ],
+      "nets": [
+        "GND"
+      ],
+      "status": "warning",
+      "waived": false,
+      "key": "thermal_asymmetry|J1,J1-A1|GND|F.Cu",
+      "evidence_hash": "ev2:c5bc344b9959c160"
+    },
+    {
+      "rule_id": "thermal_asymmetry",
+      "type": "unknown",
+      "severity": "warning",
+      "message": "PTH pin J1-A12 (net 'GND', drill 0.40mm) is connected solid to zone fill on 3 layers (F.Cu, In1.Cu, B.Cu); barrel fill is at risk when wave-, selective- or hand-soldered -- use thermal reliefs on this pin",
+      "location": [
+        143.525,
+        63.3
+      ],
+      "layer": "F.Cu",
+      "actual_value": 3.0,
+      "required_value": 1.0,
+      "items": [
+        "J1",
+        "J1-A12"
+      ],
+      "nets": [
+        "GND"
+      ],
+      "status": "warning",
+      "waived": false,
+      "key": "thermal_asymmetry|J1,J1-A12|GND|F.Cu",
+      "evidence_hash": "ev2:6892792969380346"
+    },
+    {
+      "rule_id": "thermal_asymmetry",
+      "type": "unknown",
+      "severity": "warning",
+      "message": "PTH pin J1-B1 (net 'GND', drill 0.40mm) is connected solid to zone fill on 3 layers (F.Cu, In1.Cu, B.Cu); barrel fill is at risk when wave-, selective- or hand-soldered -- use thermal reliefs on this pin",
+      "location": [
+        143.525,
+        61.95
+      ],
+      "layer": "F.Cu",
+      "actual_value": 3.0,
+      "required_value": 1.0,
+      "items": [
+        "J1",
+        "J1-B1"
+      ],
+      "nets": [
+        "GND"
+      ],
+      "status": "warning",
+      "waived": false,
+      "key": "thermal_asymmetry|J1,J1-B1|GND|F.Cu",
+      "evidence_hash": "ev2:170b6462c1ef626c"
+    },
+    {
+      "rule_id": "thermal_asymmetry",
+      "type": "unknown",
+      "severity": "warning",
+      "message": "PTH pin J1-B12 (net 'GND', drill 0.40mm) is connected solid to zone fill on 3 layers (F.Cu, In1.Cu, B.Cu); barrel fill is at risk when wave-, selective- or hand-soldered -- use thermal reliefs on this pin",
+      "location": [
+        149.475,
+        61.95
+      ],
+      "layer": "F.Cu",
+      "actual_value": 3.0,
+      "required_value": 1.0,
+      "items": [
+        "J1",
+        "J1-B12"
+      ],
+      "nets": [
+        "GND"
+      ],
+      "status": "warning",
+      "waived": false,
+      "key": "thermal_asymmetry|J1,J1-B12|GND|F.Cu",
+      "evidence_hash": "ev2:eb6da3d0f974150e"
     }
   ],
   "mask_copper_assessments": [],
@@ -462,6 +619,18 @@
       "reason": null,
       "blocking": true
     },
+    "spec_conformance": {
+      "status": "unknown:unread_spec_keys:requirements.electrical.signals,requirements.manufacturing.min_space",
+      "state": "unknown",
+      "reason": "unread_spec_keys:requirements.electrical.signals,requirements.manufacturing.min_space",
+      "blocking": false
+    },
+    "thermal_asymmetry": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": false
+    },
     "via_in_pad": {
       "status": "checked",
       "state": "checked",
@@ -504,5 +673,7 @@
       "reason": null,
       "blocking": true
     }
-  }
+  },
+  "verdict": "pass",
+  "exit_code": 0
 }

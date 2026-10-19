@@ -1,13 +1,14 @@
 {
   "file": "output/charlieplex_3x3_routed.kicad_pcb",
   "manufacturer": "jlcpcb",
+  "pcb_sha256": "ac41950ffc39bd11a5aad43f90c1ec019cdf392ad1500ddd8c4741443f37680f",
   "layers": 2,
   "summary": {
     "errors": 0,
-    "warnings": 0,
+    "warnings": 2,
     "infos": 3,
     "waived": 0,
-    "rules_checked": 56,
+    "rules_checked": 66,
     "rules_checked_by_rule": {
       "connectivity": 1,
       "copper_sliver": 1,
@@ -24,13 +25,21 @@
       "netclass_via_drill": 1,
       "netclass_annular_ring": 1,
       "sch_field_offset": 1,
-      "sch_field_overlap": 1
+      "sch_field_overlap": 1,
+      "spec_conformance_dimensions": 1,
+      "spec_conformance_layers": 1,
+      "spec_conformance_min_trace": 1,
+      "spec_conformance_min_via": 1,
+      "spec_conformance_min_drill": 1,
+      "spec_conformance_target_fab": 1
     },
     "passed": true,
     "stale_waivers": 0,
-    "coverage_checked": 31,
-    "coverage_skipped": 5,
-    "coverage_unknown": [],
+    "coverage_checked": 34,
+    "coverage_skipped": 6,
+    "coverage_unknown": [
+      "spec_conformance"
+    ],
     "coverage_blocking_unknown": []
   },
   "violations": [
@@ -96,13 +105,61 @@
       "waived": false,
       "key": "silk_geometry_unmodeled|U1 (fp_arc) {92394ed2-9554-42c5-99ec-f5bcff5f5b9e}||F.SilkS",
       "evidence_hash": "ev2:c9d37fb2a9fef24d"
+    },
+    {
+      "rule_id": "via_at_pad_edge",
+      "type": "unknown",
+      "severity": "warning",
+      "message": "Via at (30.400, 35.200) (drill 0.300mm) is at the edge of pad R3-2 (net 'NODE_C'): drill edge to the pad's mask aperture (copper + 0.000mm) is 0.030mm, below the 0.100mm minimum solder-mask dam -- no mask web holds the tent, so solder can wick into the via. Move the via at least 0.100mm clear of the opening, or order a filled-and-capped via-in-pad process.",
+      "location": [
+        153.9,
+        112.7
+      ],
+      "layer": null,
+      "actual_value": 0.0303,
+      "required_value": 0.1,
+      "items": [
+        "Via@153.9/112.7:F.Cu-B.Cu:d0.3/s0.6",
+        "R3-2"
+      ],
+      "nets": [
+        "NODE_C"
+      ],
+      "status": "warning",
+      "waived": false,
+      "key": "via_at_pad_edge|R3-2,Via@153.9/112.7:F.Cu-B.Cu:d0.3/s0.6|NODE_C|",
+      "evidence_hash": "ev2:e6237556b9c4e712"
+    },
+    {
+      "rule_id": "via_at_pad_edge",
+      "type": "unknown",
+      "severity": "warning",
+      "message": "Via at (40.400, 35.200) (drill 0.300mm) is at the edge of pad R4-2 (net 'NODE_D'): drill edge to the pad's mask aperture (copper + 0.000mm) is 0.030mm, below the 0.100mm minimum solder-mask dam -- no mask web holds the tent, so solder can wick into the via. Move the via at least 0.100mm clear of the opening, or order a filled-and-capped via-in-pad process.",
+      "location": [
+        163.9,
+        112.7
+      ],
+      "layer": null,
+      "actual_value": 0.0303,
+      "required_value": 0.1,
+      "items": [
+        "Via@163.9/112.7:F.Cu-B.Cu:d0.3/s0.6",
+        "R4-2"
+      ],
+      "nets": [
+        "NODE_D"
+      ],
+      "status": "warning",
+      "waived": false,
+      "key": "via_at_pad_edge|R4-2,Via@163.9/112.7:F.Cu-B.Cu:d0.3/s0.6|NODE_D|",
+      "evidence_hash": "ev2:c6c3c7d82611e13d"
     }
   ],
   "mask_copper_assessments": [],
   "meta_checks": {
     "drc": {
       "status": "PASSED",
-      "detail": "56 rules checked, 0 error(s), 0 warning(s)"
+      "detail": "66 rules checked, 0 error(s), 2 warning(s)"
     },
     "erc": {
       "status": "PASSED",
@@ -199,6 +256,12 @@
       "reason": null,
       "blocking": true
     },
+    "diffpair_uncoupled_length": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    },
     "dimensions": {
       "status": "checked",
       "state": "checked",
@@ -289,6 +352,12 @@
       "reason": null,
       "blocking": false
     },
+    "routing_policy": {
+      "status": "skipped:no_declared_policies",
+      "state": "skipped",
+      "reason": "no_declared_policies",
+      "blocking": true
+    },
     "sch_fields": {
       "status": "checked",
       "state": "checked",
@@ -319,7 +388,25 @@
       "reason": null,
       "blocking": true
     },
+    "spec_conformance": {
+      "status": "unknown:unread_spec_keys:requirements.manufacturing.min_space",
+      "state": "unknown",
+      "reason": "unread_spec_keys:requirements.manufacturing.min_space",
+      "blocking": false
+    },
+    "thermal_asymmetry": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": false
+    },
     "via_in_pad": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    },
+    "via_type": {
       "status": "checked",
       "state": "checked",
       "reason": null,
@@ -355,5 +442,7 @@
       "reason": null,
       "blocking": true
     }
-  }
+  },
+  "verdict": "incomplete",
+  "exit_code": 2
 }

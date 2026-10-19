@@ -236,6 +236,11 @@ def precheck(
             json.loads(pro.read_text())
         except (OSError, ValueError):
             return unknown(category, "unreadable_kicad_pro")
+    if category == "spec_conformance":
+        from .spec_conformance import coverage_for
+
+        state = coverage_for(category, pcb_path)
+        return None if state.state == CHECKED else state
     if category == "netclass_floor":
         if pcb_path is None:
             return unknown(category, "needs_input:pcb_path")

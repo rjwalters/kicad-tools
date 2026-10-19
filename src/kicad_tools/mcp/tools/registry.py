@@ -131,6 +131,13 @@ def _make_params(
 # Export Tools
 # -----------------------------------------------------------------------------
 
+# Manufacturer id enums come from the registry, not a hard-coded list, so the
+# MCP tools accept exactly what the CLI's ``--mfr`` does (Issue #7276).
+from kicad_tools.manufacturers import get_all_manufacturer_names  # noqa: E402
+
+_DRC_MANUFACTURER_IDS: list[str] = get_all_manufacturer_names()
+_EXPORT_MANUFACTURER_IDS: list[str] = [*_DRC_MANUFACTURER_IDS, "generic"]
+
 
 def _handler_validate_assembly_bom(params: dict[str, Any]) -> dict[str, Any]:
     """Handle validate_assembly_bom tool call."""
@@ -215,8 +222,11 @@ register_tool(
             },
             "manufacturer": {
                 "type": "string",
-                "description": "Manufacturer preset",
-                "enum": ["generic", "jlcpcb", "pcbway", "oshpark", "seeed"],
+                "description": (
+                    "Manufacturer preset or tier id (the ids `kct export --mfr` accepts, "
+                    "e.g. jlcpcb, jlcpcb-tier1, oshpark, generic)"
+                ),
+                "enum": _EXPORT_MANUFACTURER_IDS,
                 "default": "generic",
             },
             "include_drill": {
@@ -303,7 +313,7 @@ def _handler_export_assembly(params: dict[str, Any]) -> dict[str, Any]:
         pcb_path=params["pcb_path"],
         schematic_path=params["schematic_path"],
         output_dir=params["output_dir"],
-        manufacturer=params.get("manufacturer", "jlcpcb"),
+        manufacturer=params.get("manufacturer"),
         strict_preflight=params.get("strict_preflight", True),
     )
     return result.to_dict()
@@ -339,9 +349,13 @@ register_tool(
             },
             "manufacturer": {
                 "type": "string",
-                "description": "Target manufacturer for assembly",
-                "enum": ["jlcpcb", "pcbway", "seeed", "generic"],
-                "default": "jlcpcb",
+                "description": (
+                    "Target manufacturer or tier id (the ids `kct export --mfr` accepts, "
+                    "e.g. jlcpcb, jlcpcb-tier1, pcbway, seeed, generic). Omit to use the "
+                    "board's project.kct target_fab (resolved like `kct check`, falling "
+                    "back to jlcpcb); the resolved id is returned as `manufacturer`."
+                ),
+                "enum": _EXPORT_MANUFACTURER_IDS,
             },
             "strict_preflight": {
                 "type": "boolean",
@@ -1316,9 +1330,11 @@ register_tool(
             "manufacturer": {
                 "type": "string",
                 "description": (
-                    "Manufacturer preset (jlcpcb, oshpark, pcbway, seeed). Omit to "
-                    "resolve it like `kct check` (fab_profile.json > project.kct > jlcpcb)."
+                    "Manufacturer preset or tier id (any registry id, e.g. jlcpcb, "
+                    "jlcpcb-tier1, oshpark, pcbway, seeed). Omit to resolve it like "
+                    "`kct check` (fab_profile.json > project.kct > jlcpcb)."
                 ),
+                "enum": _DRC_MANUFACTURER_IDS,
             },
             "severity_filter": {
                 "type": "string",

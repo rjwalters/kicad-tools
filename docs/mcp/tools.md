@@ -49,7 +49,7 @@ Export Gerber files for PCB manufacturing.
 |-----------|------|----------|---------|-------------|
 | `pcb_path` | string | Yes | - | Path to .kicad_pcb file |
 | `output_dir` | string | Yes | - | Directory for output files |
-| `manufacturer` | string | No | `"generic"` | Manufacturer preset: `"generic"`, `"jlcpcb"`, `"pcbway"`, `"oshpark"`, `"seeed"` |
+| `manufacturer` | string | No | `"generic"` | Manufacturer preset or tier id: any id `kct export --mfr` accepts (`"generic"`, `"jlcpcb"`, `"jlcpcb-tier1"`, `"pcbway"`, `"oshpark"`, `"seeed"`, plus registry aliases). Tier ids use their parent fab's Gerber preset (#7276) |
 | `include_drill` | boolean | No | `true` | Include drill files (Excellon format) |
 | `zip_output` | boolean | No | `true` | Create zip archive of all files |
 
@@ -134,7 +134,7 @@ Generate complete assembly package for manufacturing.
 | `pcb_path` | string | Yes | - | Path to .kicad_pcb file |
 | `schematic_path` | string | Yes | - | Path to .kicad_sch file |
 | `output_dir` | string | Yes | - | Directory for output files |
-| `manufacturer` | string | No | `"jlcpcb"` | Target manufacturer: `"jlcpcb"`, `"pcbway"`, `"seeed"`, `"generic"` |
+| `manufacturer` | string | No | board's `target_fab` | Target manufacturer or tier id: any id `kct export --mfr` accepts (`"jlcpcb"`, `"jlcpcb-tier1"`, `"pcbway"`, `"seeed"`, `"generic"`, ...). Omitted: resolved like `kct check` (`fab_profile.json` > `project.kct` `target_fab` > `"jlcpcb"`); the resolved id and its origin are returned as `manufacturer` / `manufacturer_source` (#7276). A report-provenance refusal names the tier to pass |
 | `strict_preflight` | boolean | No | `true` | Any preflight `FAIL` blocks the export. `false` matches `kct export` without `--strict-preflight` |
 
 **Response**:
@@ -171,7 +171,7 @@ Generate complete assembly package for manufacturing.
 }
 ```
 
-`bom.component_count` counts component instances written to the BOM (DNP and virtual symbols excluded); `bom.unique_parts` counts distinct value/footprint/LCSC rows. `pnp.component_count` counts CPL rows (JLCPCB excludes through-hole parts by default).
+`bom.component_count` counts component instances written to the BOM (DNP and virtual symbols excluded); `bom.unique_parts` counts distinct value/footprint/LCSC rows. `pnp.component_count` counts CPL rows (through-hole parts are included for JLCPCB; they are excluded only for SMT-only fabs).
 
 `pnp.rotation_corrections` is the number of CPL rows whose rotation was shifted by the manufacturer's per-footprint correction table (e.g. SOIC-8, SOT-23 on JLCPCB); it is `0` for manufacturers without corrections.
 
@@ -266,7 +266,7 @@ Run design rule check and return violations.
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
 | `pcb_path` | string | Yes | - | Absolute path to .kicad_pcb file |
-| `manufacturer` | string | No | resolved like `kct check` | Manufacturer preset (`"jlcpcb"`, `"oshpark"`, `"pcbway"`, `"seeed"`). Omitted: `fab_profile.json` > `project.kct` `target_fab` > `"jlcpcb"` |
+| `manufacturer` | string | No | resolved like `kct check` | Manufacturer preset or tier id (any registry id, e.g. `"jlcpcb"`, `"jlcpcb-tier1"`, `"oshpark"`, `"pcbway"`, `"seeed"`). Omitted: `fab_profile.json` > `project.kct` `target_fab` > `"jlcpcb"` |
 | `severity_filter` | string | No | `"all"` | `"all"`, `"error"` or `"warning"`. A view filter: the verdict always counts every violation |
 | `allow_incomplete` | boolean | No | `false` | Like `kct check --allow-incomplete`: an `incomplete` verdict returns `exit_code: 0` (`passed` stays `false`) |
 | `schematic_path` | string | No | discovered | Explicit `.kicad_sch` for the ERC/LVS meta rollup |

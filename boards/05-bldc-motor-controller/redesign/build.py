@@ -11,6 +11,29 @@ from pathlib import Path
 from hardware import ROOT, generate
 from routing import apply_routing
 
+from kicad_tools.validate.known_warnings import unaccepted_report_warnings
+
+#: Issue #7298: three committed vias sit at a pad's mask opening with no
+#: solder-mask dam (#7220's ``via_at_pad_edge`` advisory).  #7296 (#7220 PR3,
+#: the router refuses pad-edge vias) removes them at the source; until then
+#: ONLY these exact ``(rule, ref, pad)`` findings may pass.  Any other warning,
+#: ref or pad, or a repeat, still fails; errors are never allowed.  Delete the
+#: entries when #7296 lands.
+BOARD05_KNOWN_WARNINGS: dict[tuple[str, str, str], str] = {
+    ("via_at_pad_edge", "R11", "R11-1"): "#7296",
+    ("via_at_pad_edge", "R9", "R9-1"): "#7296",
+    ("via_at_pad_edge", "D1", "D1-1"): "#7296",
+}
+
+
+def manufacturer_check_failures(check):
+    """Why a ``kct check`` report fails this build's gate (empty when it passes)."""
+    failures = []
+    if check["summary"]["errors"]:
+        failures.append(f"{check['summary']['errors']} error(s)")
+    failures += unaccepted_report_warnings(check, BOARD05_KNOWN_WARNINGS)
+    return failures
+
 
 def build(output):
     output = Path(output).resolve()
@@ -113,8 +136,11 @@ def build(output):
         check=False,
     )
     check = json.loads((evidence / "kct-check.json").read_text())
-    if check["summary"]["errors"] or check["summary"]["warnings"]:
-        raise RuntimeError("Manufacturer check contains errors or warnings")
+    failures = manufacturer_check_failures(check)
+    if failures:
+        raise RuntimeError(
+            "Manufacturer check contains errors or unaccepted warnings: " + "; ".join(failures)
+        )
     if any(check["meta_checks"][gate]["status"] != "PASSED" for gate in ("drc", "erc", "lvs")):
         raise RuntimeError("Electrical/manufacturer meta-check failed")
     print(f"Revision B rebuilt and verified; pad/placement fingerprint {fingerprint}")

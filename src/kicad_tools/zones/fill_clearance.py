@@ -30,6 +30,7 @@ rather than silently returning a non-clearance-correct fill.
 
 from __future__ import annotations
 
+import logging
 import math
 from dataclasses import dataclass
 from typing import Any, Protocol
@@ -38,6 +39,8 @@ from kicad_tools._shapely import require_shapely
 from kicad_tools.core.layers import kicad_read_via_layers, via_node_type, via_spans_layer
 from kicad_tools.schema.pcb import _find_all_footprints
 from kicad_tools.sexp import SExp
+
+logger = logging.getLogger(__name__)
 
 
 class _Geometry(Protocol):
@@ -512,8 +515,9 @@ _CONNECT_PAD_MODES = frozenset({"thru_hole_only", "yes", "no"})
 
 # The selective policy is a *meta* mode handled by this module rather than a
 # KiCad ``connect_pads`` keyword: it keeps the zone-level default as thermal
-# relief and forces a solid connection only on the individual pads that
-# physically cannot host 2 spokes (via a per-pad ``(zone_connect 2)``).
+# relief and, on pads that cannot host 2 spokes, applies the first narrower
+# per-pad ``(thermal_width W) (thermal_gap G)`` rung that fits (issue #7295);
+# only a pad with no fitting rung gets a solid ``(zone_connect 2)``.
 _SELECTIVE_MODE = "selective"
 
 # KiCad per-pad ``(zone_connect N)`` override codes.  This overrides the
@@ -609,6 +613,97 @@ def _pad_can_host_two_spokes(
     return min_dim >= required
 
 
+# Narrowest per-pad thermal spoke / gap the ladder will step down to (mm).
+# The effective floors are ``max(fab minimum, this)``; callers holding a
+# manufacturer profile pass its ``min_trace_width_mm`` / ``min_clearance_mm``.
+_THERMAL_FLOOR_MM = 0.2
+
+# Each rung narrows the spoke and the gap by this much (clamped at the floors).
+_THERMAL_LADDER_STEP_MM = 0.1
+
+
+def _thermal_ladder(
+    width: float,
+    gap: float,
+    min_width: float = _THERMAL_FLOOR_MM,
+    min_gap: float = _THERMAL_FLOOR_MM,
+) -> list[tuple[float, float]]:
+    """Return the ``(W, G)`` rungs from the zone's own values down to the floors.
+
+    The first rung is the zone's ``(width, gap)`` unchanged; each later rung
+    steps both down by ``_THERMAL_LADDER_STEP_MM`` until they reach
+    ``max(min_width, 0.2)`` / ``max(min_gap, 0.2)``.  A zone already at or
+    below the floors yields a single rung.
+    """
+    w_floor = max(min_width, _THERMAL_FLOOR_MM)
+    g_floor = max(min_gap, _THERMAL_FLOOR_MM)
+    rungs = [(round(width, 4), round(gap, 4))]
+    w, g = width, gap
+    while w > w_floor + 1e-9 or g > g_floor + 1e-9:
+        w = max(w - _THERMAL_LADDER_STEP_MM, w_floor) if w > w_floor else w
+        g = max(g - _THERMAL_LADDER_STEP_MM, g_floor) if g > g_floor else g
+        rungs.append((round(w, 4), round(g, 4)))
+    return rungs
+
+
+def _pad_thermal_override(pad: SExp) -> tuple[float, float] | None:
+    """The pad's own ``(thermal_width W) (thermal_gap G)`` override, if both set.
+
+    KiCad saves the width back as ``thermal_bridge_width``, so both spellings
+    are read (issue #7309).
+    """
+    w_node = pad.find("thermal_width")
+    if w_node is None:
+        w_node = pad.find("thermal_bridge_width")
+    g_node = pad.find("thermal_gap")
+    if w_node is None or g_node is None:
+        return None
+    w, g = w_node.get_float(0), g_node.get_float(0)
+    if w is None or g is None:
+        return None
+    return w, g
+
+
+def _set_pad_thermal(pad: SExp, width: float, gap: float) -> bool:
+    """Set a per-pad thermal spoke width / gap override; ``False`` if pad has one.
+
+    KiCad's *pad* tokens are ``thermal_width`` / ``thermal_gap`` (the zone's
+    ``fill`` block spells the width ``thermal_bridge_width``).  A pad that
+    already declares either is a deliberate upstream choice and is untouched.
+    """
+    if any(
+        pad.find(tok) is not None
+        for tok in ("thermal_width", "thermal_bridge_width", "thermal_gap")
+    ):
+        return False
+    pad.append(SExp.list("thermal_width", width))
+    pad.append(SExp.list("thermal_gap", gap))
+    return True
+
+
+def _first_fitting_rung(pad: SExp, rungs: list[tuple[float, float]]) -> tuple[float, float] | None:
+    """First ladder rung at which ``pad`` can host 2 spokes, else ``None``."""
+    for w, g in rungs:
+        if _pad_can_host_two_spokes(pad, w, g):
+            return w, g
+    return None
+
+
+def _footprint_label(fp: SExp, pad: SExp) -> str:
+    """``REF.pad`` label for override logs (falls back to ``?``)."""
+    ref = "?"
+    for prop in fp.find_all("property"):
+        if prop.get_string(0) == "Reference":
+            ref = prop.get_string(1) or "?"
+            break
+    else:
+        for txt in fp.find_all("fp_text"):
+            if txt.get_string(0) == "reference":
+                ref = txt.get_string(1) or "?"
+                break
+    return f"{ref}.{pad.get_string(0) or '?'}"
+
+
 def _set_pad_zone_connect(pad: SExp, code: int) -> bool:
     """Set a pad's ``(zone_connect N)`` override, returning whether it changed.
 
@@ -622,24 +717,31 @@ def _set_pad_zone_connect(pad: SExp, code: int) -> bool:
     return True
 
 
-def _apply_selective_pad_connection(doc: SExp) -> int:
-    """Force a solid connection only on pads that cannot host 2 thermal spokes.
+def _apply_selective_pad_connection(
+    doc: SExp,
+    min_width: float = _THERMAL_FLOOR_MM,
+    min_gap: float = _THERMAL_FLOOR_MM,
+) -> int:
+    """Keep thermal relief on pads that can host 2 spokes, narrowing where needed.
 
-    Implements the selective default (issue #3729): the zone keeps its
-    thermal-relief default (no ``connect_pads`` mode token), and every
-    footprint pad on a zone's net that is too small to seat the 2 spokes
-    KiCad's DRC requires gets a per-pad ``(zone_connect 2)`` solid override.
-    Pads that *can* host 2 spokes keep thermal relief, preserving the
-    hand-rework benefit where it is geometrically valid.
+    Implements the selective default (issue #3729) with the spoke ladder of
+    issue #7295.  The zone keeps its thermal-relief default; for every pad on
+    a zone's net the 2-spoke fit test is tried at the zone's own ``(W, G)``
+    and then at each narrower rung of :func:`_thermal_ladder` (floors
+    ``min_width`` / ``min_gap``).  The first rung that fits is written as a
+    per-pad ``(thermal_width W) (thermal_gap G)`` override; only when no rung
+    fits does the pad get ``(zone_connect 2)`` (solid).  Both terminals of a
+    2-pad passive share one rung when a common one exists, so a narrowed
+    passive is not left with mismatched spokes.  Every solid fallback is
+    logged with footprint, pad and reason.
 
-    Returns the number of pads that received a new solid override.
+    Returns the number of pads that received a new override (ladder or solid).
     """
     name_map = _build_net_name_map(doc)
 
-    # Collect, per net, the tightest spoke-fit threshold across the zones on
-    # that net.  A pad must clear the threshold of every zone it sits in to
-    # keep thermal relief; using the largest required width is the safe
-    # (force-solid-if-any-zone-would-starve) choice.
+    # Per net, keep the zone whose ladder is the tightest (largest required
+    # fit at the zone's own values): a pad must work for every zone it is in.
+    net_ladder: dict[str, list[tuple[float, float]]] = {}
     net_required: dict[str, float] = {}
     for zone in doc.find_all("zone"):
         connect_pads = zone.find("connect_pads")
@@ -660,24 +762,48 @@ def _apply_selective_pad_connection(doc: SExp) -> int:
         prev = net_required.get(zone_net)
         if prev is None or required > prev:
             net_required[zone_net] = required
+            net_ladder[zone_net] = _thermal_ladder(bridge, gap, min_width, min_gap)
 
-    if not net_required:
+    if not net_ladder:
         return 0
+
+    def _rung_for(pad: SExp, ladder_start: list[tuple[float, float]]) -> tuple[float, float] | None:
+        return _first_fitting_rung(pad, ladder_start)
 
     changed = 0
     for fp in _find_all_footprints(doc):
-        for pad in fp.find_all("pad"):
+        pads = fp.find_all("pad")
+        candidates: list[tuple[SExp, list[tuple[float, float]]]] = []
+        for pad in pads:
             net_key = _net_key(pad.find("net"), name_map)
-            if net_key is None:
-                continue
-            pad_required = net_required.get(net_key)
-            if pad_required is None:
+            if net_key is None or net_key not in net_ladder:
                 continue  # pad's net has no thermal-relief zone
-            min_dim = _pad_min_dimension(pad)
-            if min_dim is not None and min_dim >= pad_required:
-                continue  # comfortably hosts 2 spokes -> keep thermal relief
-            if _set_pad_zone_connect(pad, _ZONE_CONNECT_SOLID):
-                changed += 1
+            candidates.append((pad, net_ladder[net_key]))
+
+        # Symmetric 2-pad passive: one shared rung for both terminals.
+        shared: tuple[float, float] | None = None
+        if len(pads) == 2 and len(candidates) == 2:
+            for cand in candidates[0][1]:
+                if all(_pad_can_host_two_spokes(p, *cand) for p, _ in candidates):
+                    shared = cand
+                    break
+
+        for pad, ladder in candidates:
+            rung = shared if shared is not None else _rung_for(pad, ladder)
+            if rung is None:
+                if _set_pad_zone_connect(pad, _ZONE_CONNECT_SOLID):
+                    changed += 1
+                    logger.info(
+                        "solid thermal override on %s: no (W, G) rung down to %.2f/%.2f mm "
+                        "hosts 2 spokes (pad min dimension %s mm)",
+                        _footprint_label(fp, pad),
+                        ladder[-1][0],
+                        ladder[-1][1],
+                        _pad_min_dimension(pad),
+                    )
+            elif rung != ladder[0]:
+                if _set_pad_thermal(pad, *rung):
+                    changed += 1
     return changed
 
 
@@ -759,6 +885,7 @@ def force_solid_on_isolated_island_pads(doc: SExp, zone_uuids: set[str]) -> int:
 
     name_map = _build_net_name_map(doc)
     obstacles = _collect_obstacles(doc, shapely, name_map)
+    pad_owner = {id(p): fp for fp in _find_all_footprints(doc) for p in fp.find_all("pad")}
 
     changed = 0
     for zone in doc.find_all("zone"):
@@ -807,37 +934,110 @@ def force_solid_on_isolated_island_pads(doc: SExp, zone_uuids: set[str]) -> int:
                     continue  # a via, not a pad -- has no thermal relief
                 if _set_pad_zone_connect(pad, _ZONE_CONNECT_SOLID):
                     changed += 1
+                    owner = pad_owner.get(id(pad))
+                    logger.info(
+                        "solid thermal override on %s: it anchors an isolated-copper sliver",
+                        _footprint_label(owner, pad) if owner is not None else pad.get_string(0),
+                    )
     return changed
 
 
-def force_solid_on_pads_by_uuid(doc: SExp, pad_uuids: set[str]) -> int:
-    """Set ``(zone_connect 2)`` on every pad whose UUID is in ``pad_uuids``.
+def force_solid_on_pads_by_uuid(
+    doc: SExp,
+    pad_uuids: set[str],
+    min_width: float = _THERMAL_FLOOR_MM,
+    min_gap: float = _THERMAL_FLOOR_MM,
+) -> int:
+    """Remediate every pad whose UUID is in ``pad_uuids`` (``starved_thermal``).
 
     This is the *measurement-driven* half of the selective policy
     (issue #3729): the size heuristic (:func:`_apply_selective_pad_connection`)
     handles the obvious small-SMD pads up front, but a handful of pads form
-    only a single spoke for reasons the pad size cannot predict (the pad sits
-    at the pour edge, or its only spoke lands on a fill island).  KiCad's own
+    only a single spoke for reasons the pad size cannot predict.  KiCad's own
     geometric DRC names exactly those pads, so we read the fill's DRC report
-    back and force a solid connection on precisely that set -- guaranteeing
-    0 ``starved_thermal`` without touching any pad DRC did not flag, so pads
-    that genuinely host 2 spokes keep their thermal relief.
+    back and fix precisely that set without touching any pad DRC did not flag.
+
+    Issue #7295: a flagged pad first steps one rung down the
+    :func:`_thermal_ladder` (from its current per-pad ``(W, G)``, or its
+    zone's, toward the floors) and keeps thermal relief; only a pad already at
+    the narrowest rung -- or with no thermal zone to narrow -- gets
+    ``(zone_connect 2)``.  Both terminals of a 2-pad passive move together
+    when both are flagged or already share a rung.  Every solid fallback is
+    logged with footprint, pad and reason.
 
     A pad that already carries a ``zone_connect`` is left untouched.  Returns
-    the number of pads that received a new solid override.
+    the number of pads that received a new override.
     """
     if not pad_uuids:
         return 0
+    name_map = _build_net_name_map(doc)
+    net_params: dict[str, tuple[float, float]] = {}
+    for zone in doc.find_all("zone"):
+        zone_net = _net_key(zone.find("net"), name_map)
+        if zone_net is None or zone.find("connect_pads") is None:
+            continue
+        gap, bridge = _zone_thermal_params(zone)
+        prev = net_params.get(zone_net)
+        if prev is None or bridge + 2 * gap > prev[0] + 2 * prev[1]:
+            net_params[zone_net] = (bridge, gap)
+
+    def _next_rung(pad: SExp) -> tuple[float, float] | None:
+        params = net_params.get(_net_key(pad.find("net"), name_map) or "")
+        if params is None:
+            return None
+        ladder = _thermal_ladder(params[0], params[1], min_width, min_gap)
+        cur = _pad_thermal_override(pad)
+        if cur is None:
+            return ladder[1] if len(ladder) > 1 else None
+        for i, rung in enumerate(ladder):
+            if rung[0] <= cur[0] + 1e-9 and rung[1] <= cur[1] + 1e-9:
+                return ladder[i + 1] if i + 1 < len(ladder) else None
+        return ladder[-1] if ladder[-1] != cur else None
+
+    def _narrow(pad: SExp, rung: tuple[float, float]) -> bool:
+        for tok in ("thermal_width", "thermal_bridge_width", "thermal_gap"):
+            for node in pad.find_all(tok):
+                pad.children.remove(node)
+        return _set_pad_thermal(pad, *rung)
+
     changed = 0
     for fp in _find_all_footprints(doc):
+        flagged = []
         for pad in fp.find_all("pad"):
             uuid_node = pad.find("uuid")
-            if uuid_node is None:
+            if uuid_node is None or (uuid_node.get_string(0) or "") not in pad_uuids:
                 continue
-            if (uuid_node.get_string(0) or "") not in pad_uuids:
+            if pad.find("zone_connect") is not None:
                 continue
+            flagged.append(pad)
+        pads = fp.find_all("pad")
+        # Symmetry: a 2-pad passive moves both terminals to the same rung.
+        targets = list(flagged)
+        if len(pads) == 2 and flagged and len(flagged) < 2:
+            other = next(p for p in pads if p is not flagged[0])
+            if (
+                other.find("zone_connect") is None
+                and _net_key(other.find("net"), name_map) in net_params
+            ):
+                targets.append(other)
+        next_rungs = [_next_rung(p) for p in targets]
+        narrower = [r for r in next_rungs if r is not None]
+        if targets and len(narrower) == len(next_rungs):
+            rung = min(narrower)
+            for pad in targets:
+                if _pad_thermal_override(pad) != rung and _narrow(pad, rung):
+                    changed += 1
+            continue
+        for pad in flagged:
             if _set_pad_zone_connect(pad, _ZONE_CONNECT_SOLID):
                 changed += 1
+                logger.info(
+                    "solid thermal override on %s: DRC reports starved_thermal and no "
+                    "narrower (W, G) rung remains above %.2f/%.2f mm",
+                    _footprint_label(fp, pad),
+                    max(min_width, _THERMAL_FLOOR_MM),
+                    max(min_gap, _THERMAL_FLOOR_MM),
+                )
     return changed
 
 

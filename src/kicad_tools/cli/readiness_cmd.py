@@ -64,6 +64,14 @@ from .kicad_toolchain import (
     evidence_toolchain,
     require_library_environment,
 )
+from .known_issues import (
+    KNOWN_ISSUES_FILENAME,
+    KnownIssueError,
+    defects,
+    merge_known_issues,
+    parse_known_issue,
+    validate_known_issues,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -103,6 +111,9 @@ ASSEMBLY_AFFECTING_RULES = frozenset(
         "silkscreen_line_width",
         "silk_edge_clearance",
         "silk_overlap",
+        "silkscreen_text_height",
+        "silkscreen_text_thickness",
+        "silk_ref_obscured",
     }
 )
 
@@ -449,6 +460,18 @@ def _through_hole_refs(pcb: Path) -> set[str]:
     }
 
 
+def _fab_excludes_tht(manufacturer: str) -> bool:
+    """True when the fab family's CPL auto-excludes THT parts (hand-solder set).
+
+    JLCPCB offers THT assembly (issue #7239), so this is False for it; the
+    answer comes from the same set the export preflight consults, so the
+    readiness gates cannot desync from the CPL that actually ships.
+    """
+    from kicad_tools.export.preflight import PreflightChecker
+
+    return PreflightChecker.fab_excludes_tht(manufacturer)
+
+
 def _net_metrics(pcb: Path) -> dict[str, Any]:
     """Routing-completion metrics for the emitted ``metrics`` block."""
     from kicad_tools.analysis.net_status import NetStatusAnalyzer
@@ -784,6 +807,10 @@ class ReadinessOptions:
     output_dir: Path
     evidence_dir: Path
     ack_warnings: frozenset[str] = frozenset()
+    # Known open issues recorded on the board (Issue #7261): the board's
+    # current list carried forward, plus ``--known-issue``, minus
+    # ``--resolve-known-issue``.  Any ``defect`` keeps the board from ready.
+    known_issues: tuple[dict[str, Any], ...] = ()
     include_tht: bool = False
     archive: bool = True
     net_class_map: Path | None = None
@@ -935,6 +962,12 @@ def resolve_options(args: argparse.Namespace) -> tuple[ReadinessOptions | None, 
 
     ack = frozenset(rule.strip() for rule in (args.ack_warnings or "").split(",") if rule.strip())
 
+    checked_at = getattr(args, "checked_at", None)
+    try:
+        known_issues = _resolve_known_issues(board_dir, args, checked_at)
+    except KnownIssueError as exc:
+        return None, str(exc)
+
     return (
         ReadinessOptions(
             board_dir=board_dir,
@@ -946,6 +979,7 @@ def resolve_options(args: argparse.Namespace) -> tuple[ReadinessOptions | None, 
             output_dir=output_dir,
             evidence_dir=evidence_dir,
             ack_warnings=ack,
+            known_issues=tuple(known_issues),
             include_tht=bool(args.include_tht),
             archive=not args.no_archive,
             net_class_map=net_class_map,
@@ -958,10 +992,50 @@ def resolve_options(args: argparse.Namespace) -> tuple[ReadinessOptions | None, 
             fill_tolerance_mm2=float(args.fill_tolerance),
             operation="generate" if args.generate else "verify",
             project_root=project_root,
-            checked_at=getattr(args, "checked_at", None),
+            checked_at=checked_at,
         ),
         None,
     )
+
+
+def _resolve_known_issues(
+    board_dir: Path, args: argparse.Namespace, checked_at: str | None
+) -> list[dict[str, Any]]:
+    """The board's recorded issues, updated by ``--known-issue`` / ``--resolve-known-issue``.
+
+    Entries already recorded in ``output/readiness.json`` are carried forward:
+    regenerating evidence must not silently drop a disclosure.  Only naming an
+    issue in ``--resolve-known-issue`` removes it.  Offline and format-only.
+    """
+    if checked_at:
+        try:
+            recorded = datetime.fromisoformat(checked_at.replace("Z", "+00:00")).date()
+        except ValueError:
+            raise KnownIssueError(f"--checked-at is not an ISO timestamp: {checked_at}") from None
+    else:
+        recorded = datetime.now(timezone.utc).date()
+    added = [
+        parse_known_issue(spec, recorded.isoformat())
+        for spec in (getattr(args, "known_issue", None) or [])
+    ]
+    resolved: list[int] = []
+    for value in getattr(args, "resolve_known_issue", None) or []:
+        text = str(value).strip().lstrip("#")
+        if not text.isdigit() or int(text) < 1:
+            raise KnownIssueError(f"--resolve-known-issue {value!r}: expected an issue number")
+        resolved.append(int(text))
+    previous: list[dict[str, Any]] = []
+    report = board_dir / "output" / _REPORT_NAME
+    if report.is_file():
+        try:
+            recorded_list = json.loads(report.read_text()).get("known_issues")
+        except (OSError, ValueError, AttributeError):
+            recorded_list = None
+        try:
+            previous = validate_known_issues(recorded_list)
+        except KnownIssueError as exc:
+            raise KnownIssueError(f"{report} records malformed known_issues: {exc}") from None
+    return merge_known_issues(previous, added, resolved)
 
 
 def _discover_tier(board_dir: Path, pcb: Path) -> str | None:
@@ -1346,6 +1420,13 @@ def _gate_native_drc(options: ReadinessOptions, engines: Engines) -> tuple[Check
     """Gate 2 — the mandatory independent native check of saved candidate copper."""
     report_path = options.evidence_dir / "native-drc.json"
     report_path.parent.mkdir(parents=True, exist_ok=True)
+    # Issue #7277: ``build_report`` stamps every native-drc*.json present in
+    # the evidence dir into ``report_sources`` as produced from this PCB.
+    # Clear both before the run so a report left by an earlier run (e.g. one
+    # whose native DRC did not execute this time) is never stamped with the
+    # current PCB hash -- only what this engine run wrote survives.
+    report_path.unlink(missing_ok=True)
+    report_path.with_name(report_path.stem + "-raw.json").unlink(missing_ok=True)
     run = engines.native_drc(options.pcb, report_path)
     _normalize_report_date(report_path.with_name(report_path.stem + "-raw.json"), options)
     evidence_rel = _rel(options, report_path)
@@ -1903,6 +1984,7 @@ def _write_readme(
     options: ReadinessOptions,
     warning_counts: dict[str, int],
     tht_refs: Sequence[str],
+    tht_assembled: Sequence[str] = (),
 ) -> Path:
     """Gate 7 — the human-facing bundle index."""
     lines = [
@@ -1929,6 +2011,12 @@ def _write_readme(
             "  The following parts are EXCLUDED from the SMT CPL and must be hand-soldered:"
         )
         lines.append(f"  {', '.join(tht_refs)}")
+    elif tht_assembled:
+        lines.append(
+            "  The following through-hole parts are INCLUDED in the CPL and BOM "
+            "for fab assembly (flag for procurement review):"
+        )
+        lines.append(f"  {', '.join(tht_assembled)}")
     else:
         lines.append("  none (every placed part is SMT)")
 
@@ -1952,9 +2040,12 @@ def _write_readme(
             "explicitly acknowledged via --ack-warnings."
         )
     lines.extend(["", "Accepted-risk waivers", "---------------------"])
-    lines.append(
-        "  no accepted-risk waivers" if not acked else f"  see the {len(acked)} line(s) above"
-    )
+    if acked:
+        lines.append(f"  see the {len(acked)} line(s) above")
+    for entry in options.known_issues:
+        lines.append(f"  #{entry['issue']} [{entry['kind']}] {entry['summary']}")
+    if not acked and not options.known_issues:
+        lines.append("  no accepted-risk waivers")
     lines.append("")
 
     readme = options.output_dir / "README.txt"
@@ -2038,6 +2129,7 @@ def _gate_artifacts(
     engines: Engines,
     warning_counts: dict[str, int],
     tht_refs: Sequence[str],
+    tht_assembled: Sequence[str] = (),
 ) -> CheckOutcome:
     """Gate 3/5/6/7/8 — export, drawings, README, full manifest, provenance."""
     from kicad_tools.export.manufacturing import verify_manifest
@@ -2093,7 +2185,7 @@ def _gate_artifacts(
             problems.append(f"board package extras failed: {exc}")
 
     # Gate 7 — README, written before the manifest so it is checksummed.
-    readme = _write_readme(options, warning_counts, tht_refs)
+    readme = _write_readme(options, warning_counts, tht_refs, tht_assembled)
     if readme_extra:
         readme.write_text(readme.read_text() + "\n".join(["", *readme_extra, ""]))
 
@@ -2139,7 +2231,12 @@ def _read_csv_rows(path: Path) -> tuple[list[str], list[list[str]]]:
     return rows[0], rows[1:]
 
 
-def _gate_bom(options: ReadinessOptions, engines: Engines, tht_refs: Sequence[str]) -> CheckOutcome:
+def _gate_bom(
+    options: ReadinessOptions,
+    engines: Engines,
+    tht_refs: Sequence[str],
+    tht_assembled: Sequence[str] = (),
+) -> CheckOutcome:
     """Gate 4 — procurement identity (assembly) / explicit no-claim (pcb_only)."""
     if not options.assembly:
         return CheckOutcome(
@@ -2348,6 +2445,8 @@ def _gate_bom(options: ReadinessOptions, engines: Engines, tht_refs: Sequence[st
     tht_note = (
         f"SMT CPL excludes {len(tht_refs)} manual through-hole component(s)."
         if tht_refs
+        else f"CPL includes {len(tht_assembled)} through-hole component(s) for fab assembly."
+        if tht_assembled
         else "every placed part is SMT."
     )
     return CheckOutcome(
@@ -2472,6 +2571,15 @@ def build_report(
         if missing:
             blockers.append(f"Required checks did not pass: {', '.join(missing)}.")
 
+    # Issue #7261: an open known defect means the board fails its own spec,
+    # whatever the automated checks say.  Exceptions/advisories keep ready.
+    known_defects = defects(options.known_issues)
+    if known_defects:
+        status = STATUS_BLOCKED
+        blockers.extend(
+            f"known defect #{entry['issue']}: {entry['summary']}" for entry in known_defects
+        )
+
     report: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "checked_at": options.checked_at or _iso_now(),
@@ -2480,7 +2588,10 @@ def build_report(
         "blockers": blockers,
         "checks": [check.to_dict() for check in checks],
         "engine": fingerprint.to_dict(),
+        "manufacturer": options.manufacturer,
     }
+    if options.known_issues:
+        report["known_issues"] = [dict(entry) for entry in options.known_issues]
 
     evidence = {check.name: check.evidence for check in checks if check.evidence}
     if evidence:
@@ -2496,6 +2607,21 @@ def build_report(
             raise ValueError(f"extra readiness input is not a board file: {path}")
         hashed.add(resolved)
     report["inputs"] = {_rel(options, path): _sha256_file(path) for path in sorted(hashed)}
+    # Issue #7277: record which source bytes each report readiness itself
+    # produced was computed from, so report binding can tell "produced for
+    # this PCB" from merely "pinned beside it".
+    if options.pcb.is_file():
+        pcb_sha = _sha256_file(options.pcb)
+        produced = {
+            _rel(options, path): pcb_sha
+            for path in (
+                options.evidence_dir / "native-drc.json",
+                options.evidence_dir / "native-drc-raw.json",
+            )
+            if path.is_file()
+        }
+        if produced:
+            report["report_sources"] = produced
     external = _external_dependencies(options)
     if external:
         # Hash the exact collected out-of-directory dependencies (Issue #5813).
@@ -2845,8 +2971,14 @@ def _run_readiness_candidate(
         logger.warning("could not determine through-hole parts: %s", exc)
         tht_refs = []
 
-    checks.append(_gate_artifacts(options, engines, warning_counts, tht_refs))
-    checks.append(_gate_bom(options, engines, tht_refs))
+    # Only a fab whose CPL auto-excludes THT has a hand-solder set; elsewhere
+    # (JLCPCB, issue #7239) THT parts are placed by the fab and listed as such.
+    if _fab_excludes_tht(options.manufacturer):
+        tht_assembled: list[str] = []
+    else:
+        tht_assembled, tht_refs = tht_refs, []
+    checks.append(_gate_artifacts(options, engines, warning_counts, tht_refs, tht_assembled))
+    checks.append(_gate_bom(options, engines, tht_refs, tht_assembled))
     if engines.extra_checks is not None:
         try:
             checks.extend(engines.extra_checks(options))
@@ -2897,6 +3029,7 @@ def _run_readiness_candidate(
         recipe=options.recipe,
     )
 
+    _write_known_issues_evidence(options)
     extra_inputs = list(engines.extra_inputs(options)) if engines.extra_inputs else []
     report = build_report(options, checks, metrics, fingerprint, extra_inputs=extra_inputs)
     report_path = options.board_dir / "output" / _REPORT_NAME
@@ -2918,6 +3051,22 @@ def _run_readiness_candidate(
     return ReadinessResult(report=report, report_path=report_path, exit_code=exit_code)
 
 
+def _write_known_issues_evidence(options: ReadinessOptions) -> None:
+    """Bind ``known_issues`` into the hashed evidence (Issue #7261).
+
+    ``readiness.json`` is not itself hashed, so the list is also written to
+    ``<evidence>/known-issues.json``, which ``inputs`` hashes and
+    ``read_readiness()`` compares against the report.  No entries, no file.
+    """
+    path = options.evidence_dir / KNOWN_ISSUES_FILENAME
+    if options.known_issues:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {"known_issues": [dict(entry) for entry in options.known_issues]}
+        path.write_text(json.dumps(payload, indent=2) + "\n")
+    elif path.exists():
+        path.unlink()
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
@@ -2931,6 +3080,11 @@ def _print_report(result: ReadinessResult, options: ReadinessOptions) -> None:
     print()
     for check in report["checks"]:
         print(f"  [{check['status']:>8s}] {check['name']}: {check['detail']}")
+    if report.get("known_issues"):
+        print()
+        print(f"  {len(report['known_issues'])} known issue(s):")
+        for entry in report["known_issues"]:
+            print(f"    - #{entry['issue']} [{entry['kind']}] {entry['summary']}")
     if report["blockers"]:
         print()
         print(f"  {len(report['blockers'])} blocker(s):")
@@ -3023,9 +3177,30 @@ def add_readiness_arguments(parser: argparse.ArgumentParser) -> None:
         ),
     )
     parser.add_argument(
+        "--known-issue",
+        dest="known_issue",
+        action="append",
+        default=[],
+        metavar="N:SUMMARY:KIND",
+        help=(
+            "Record an open issue against the board (repeatable). KIND is defect, "
+            "exception or advisory; an open defect makes the board not ready. "
+            "Append :rule=count[,rule=count] to name the kct check warnings it "
+            "accounts for. Recorded issues are carried forward until resolved."
+        ),
+    )
+    parser.add_argument(
+        "--resolve-known-issue",
+        dest="resolve_known_issue",
+        action="append",
+        default=[],
+        metavar="N",
+        help="Drop a recorded known issue (repeatable), e.g. once its fix has landed.",
+    )
+    parser.add_argument(
         "--include-tht",
         action="store_true",
-        help="Accept through-hole parts in the CPL (they are excluded by default)",
+        help="Accept through-hole parts in the CPL (only SMT-only fabs exclude them by default)",
     )
     parser.add_argument(
         "--no-archive",

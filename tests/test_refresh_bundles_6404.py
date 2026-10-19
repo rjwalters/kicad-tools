@@ -267,3 +267,190 @@ def test_board07_validate_fills_under_the_published_router_classes(mod):
     theirs = mod.netclasses.router_net_class_map(pcb)
     assert {k: v.name for k, v in ours.items()} == {k: v.name for k, v in theirs.items()}
     assert ours == theirs
+
+
+CPL_HEADER = "Designator,Val,Package,Mid X,Mid Y,Rotation,Layer\n"
+
+
+def _cpl(x, y, rotation="0.0", ref="R1"):
+    return f"{CPL_HEADER}{ref},10k,R_0805,{x}mm,{y}mm,{rotation},Top\n".encode()
+
+
+def _pcb(tmp_path):
+    pcb = tmp_path / "b.kicad_pcb"
+    pcb.write_text('(kicad_pcb (footprint "R" (at 110 60) (property "Reference" "R1")))')
+    return pcb
+
+
+def test_cpl_gate_accepts_frame_only_refresh(mod, tmp_path):
+    mod.check_fresh_cpl(_cpl(15, 8), _cpl("110.0000", "-60.0000"), _pcb(tmp_path))
+    mod.check_fresh_cpl(_cpl(110, -60), _cpl(110, -60), _pcb(tmp_path))
+
+
+def test_cpl_gate_still_refuses_other_changes(mod, tmp_path):
+    pcb = _pcb(tmp_path)
+    for fresh in (
+        _cpl(110, -60, rotation="180.0"),  # not coordinates only
+        _cpl(110, -60, ref="R2"),  # designator changed
+        _cpl(16, 9),  # coordinates move but do not match the PCB frame
+    ):
+        with pytest.raises(mod.GateFailure, match="placement changed"):
+            mod.check_fresh_cpl(_cpl(15, 8, ref="R1"), fresh, pcb)
+
+
+def test_bundle_unpacks_gate_native_drc_tuple(mod, tmp_path, monkeypatch):
+    """Issue #7348: gate_native_drc returns (errors, raw); the metric must stay an int."""
+    board = _fake_board(tmp_path)
+    out = board / "output"
+    for name in ("drc_report.json", "native-drc.json"):
+        (out / name).write_text("old")
+    metrics = {"drc_violations": 0, "nets_routed_pct": 100.0, "lvs_clean": True}
+    (out / "readiness.json").write_text(
+        json.dumps({"status": "ready", "blockers": [], "metrics": metrics, "inputs": {}}) + "\n"
+    )
+    cfg = mod.rr.BoardConfig(
+        routed_pcb="output/board_routed.kicad_pcb",
+        schematic="output/board.kicad_sch",
+        tier="jlcpcb",
+        drc_targets=("output/drc_report.json", "output/native-drc.json"),
+        erc=(),
+        archives=(),
+    )
+    monkeypatch.setitem(mod.rr.BOARDS, board.name, cfg)
+    monkeypatch.setitem(mod.BUNDLES, board.name, mod.BundleConfig(manufacturer="jlcpcb"))
+    monkeypatch.setattr(mod, "stage_refill", lambda s, c: {"changed": False})
+    monkeypatch.setattr(mod, "gate_saved_fill_drc", lambda s, c: b"{}")
+    monkeypatch.setattr(mod, "bundle_is_stale", lambda s, c: False)
+    monkeypatch.setattr(mod.rr, "load_refresher", lambda *a: lambda mfg: None)
+    monkeypatch.setattr(mod.rr, "rebuild_archive", lambda *a: [])
+    monkeypatch.setattr(mod.rr, "gate_native_drc", lambda *a: (0, b'{"native": true}'))
+    monkeypatch.setattr(mod.rr, "gate_kct_check", lambda *a: (True, 0))
+    monkeypatch.setattr(mod.rr, "gate_net_status", lambda *a: 100.0)
+    monkeypatch.setattr(mod.rr, "gate_sync", lambda *a: None)
+    import kicad_tools.cli.board_readiness as br
+
+    monkeypatch.setattr(br, "read_readiness", lambda p: {"status": "ready", "metrics": {}})
+
+    published = mod.refresh_bundle(board, "2026-10-18T00:00:00+00:00")
+
+    assert "output/drc_report.json" in published
+    assert (out / "drc_report.json").read_bytes() == b'{"native": true}'
+    sources = json.loads((out / "readiness.json").read_text())["report_sources"]
+    assert set(sources) == {"output/drc_report.json", "output/native-drc.json"}
+
+
+# --------------------------------------------------------------------------- Issue #7353
+_CHECK_SCRIPT = """\
+import json, sys
+from pathlib import Path
+
+warnings = int(Path(__file__).with_name("warnings.txt").read_text())
+meta = {k: {"status": "PASSED"} for k in ("drc", "erc", "manifest")}
+meta["lvs"] = {"status": "PASSED", "mismatches": [], "copper_mismatches": []}
+report = {"summary": {"errors": 0, "warnings": warnings}, "meta_checks": meta}
+Path(sys.argv[2]).write_text(json.dumps(report))
+sys.exit(2 if warnings else 0)
+"""
+
+
+def _repin_board(mod, tmp_path, monkeypatch, *, warnings: int | None = None) -> Path:
+    """A fake bundle board whose every external gate is stubbed, so only wiring is under test."""
+    board = _fake_board(tmp_path)
+    out = board / "output"
+    for name in ("drc_report.json", "native-drc.json"):
+        (out / name).write_text("old")
+    check_script = None
+    if warnings is not None:
+        (board / "check_board.py").write_text(_CHECK_SCRIPT)
+        (board / "warnings.txt").write_text(str(warnings))
+        check_script = "check_board.py"
+    cfg = mod.rr.BoardConfig(
+        routed_pcb="output/board_routed.kicad_pcb",
+        schematic="output/board.kicad_sch",
+        tier="jlcpcb",
+        drc_targets=("output/drc_report.json", "output/native-drc.json"),
+        erc=(),
+        archives=(),
+        check_script=check_script,
+    )
+    monkeypatch.setitem(mod.rr.BOARDS, board.name, cfg)
+    monkeypatch.setitem(mod.BUNDLES, board.name, mod.BundleConfig(manufacturer="jlcpcb"))
+    monkeypatch.setattr(mod, "stage_refill", lambda s, c: {"changed": False})
+    monkeypatch.setattr(mod, "gate_saved_fill_drc", lambda s, c: b"{}")
+    monkeypatch.setattr(mod, "bundle_is_stale", lambda s, c: False)
+    monkeypatch.setattr(mod.rr, "load_refresher", lambda *a: lambda mfg: None)
+    monkeypatch.setattr(mod.rr, "rebuild_archive", lambda *a: [])
+    monkeypatch.setattr(mod.rr, "gate_native_drc", lambda *a: (0, b'{"refilled": true}'))
+    monkeypatch.setattr(mod.rr, "gate_kct_check", lambda *a: (True, 0))
+    monkeypatch.setattr(mod.rr, "gate_net_status", lambda *a: 100.0)
+    monkeypatch.setattr(mod.rr, "gate_sync", lambda *a: None)
+    import kicad_tools.cli.board_readiness as br
+
+    monkeypatch.setattr(br, "read_readiness", lambda p: {"status": "ready", "metrics": {}})
+    return board
+
+
+def test_refresh_bundle_delegates_the_post_staging_tail(mod):
+    """The re-pin tail has one copy: ``refresh_bundle`` calls ``repin_staged``."""
+    import inspect
+
+    source = inspect.getsource(mod.refresh_bundle)
+    assert "rr.repin_staged(" in source
+    for gate in (
+        "gate_native_drc",
+        "gate_kct_check",
+        "gate_net_status",
+        "gate_sync",
+        "compare_metrics",
+        "read_readiness",
+    ):
+        assert gate not in source, f"refresh_bundle calls {gate} instead of repin_staged"
+
+
+def test_bundle_refuses_when_the_board_local_check_fails(mod, tmp_path, monkeypatch):
+    """``check_script`` is honoured by the bundle driver; the generic check must not run."""
+    board = _repin_board(mod, tmp_path, monkeypatch, warnings=1)
+
+    def generic_check_must_not_run(*_):
+        raise AssertionError("kct check ran although the board has a check hook")
+
+    monkeypatch.setattr(mod.rr, "gate_kct_check", generic_check_must_not_run)
+    before = {p: p.read_bytes() for p in board.rglob("*") if p.is_file()}
+    with pytest.raises(mod.GateFailure, match="check_board.py"):
+        mod.refresh_bundle(board, "2026-10-18T00:00:00+00:00")
+    assert {p: p.read_bytes() for p in board.rglob("*") if p.is_file()} == before
+
+
+def test_drc_targets_hold_the_refilled_report_and_have_one_writer(mod, tmp_path, monkeypatch):
+    """Every ``drc_targets`` file is the refilled raw report, recorded in ``report_sources``."""
+    for name, bundle in mod.BUNDLES.items():
+        assert not set(bundle.saved_drc_reports) & set(mod.rr.BOARDS[name].drc_targets), name
+
+    board = _repin_board(mod, tmp_path, monkeypatch)
+    mod.refresh_bundle(board, "2026-10-18T00:00:00+00:00")
+
+    cfg = mod.rr.BOARDS[board.name]
+    for target in cfg.drc_targets:
+        assert (board / target).read_bytes() == b'{"refilled": true}'
+    sources = json.loads((board / "output" / "readiness.json").read_text())["report_sources"]
+    pcb_sha = mod.sha256(board / cfg.routed_pcb)
+    assert sources == dict.fromkeys(cfg.drc_targets, pcb_sha)
+
+
+def test_known_issue_in_the_bundle_matches_the_readiness_refresh(mod, tmp_path, monkeypatch):
+    """``refresh_bundle(known_issue=...)`` stages the same evidence file ``refresh`` does."""
+    advisory = "7220:one-sided thermal:advisory:thermal_asymmetry=1"
+    evidence = "output/readiness/known-issues.json"
+    checked_at = "2026-10-18T00:00:00+00:00"
+
+    bundle_board = _repin_board(mod, tmp_path / "bundle", monkeypatch)
+    published = mod.refresh_bundle(bundle_board, checked_at, known_issue=[advisory])
+
+    refresh_board = _repin_board(mod, tmp_path / "refresh", monkeypatch)
+    mod.rr.refresh(refresh_board, checked_at, known_issue=[advisory])
+
+    assert evidence in published
+    assert (bundle_board / evidence).read_bytes() == (refresh_board / evidence).read_bytes()
+    assert (bundle_board / "output" / "readiness.json").read_bytes() == (
+        refresh_board / "output" / "readiness.json"
+    ).read_bytes()

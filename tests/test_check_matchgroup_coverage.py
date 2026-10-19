@@ -233,6 +233,109 @@ class TestBoard07PourContract:
 
 
 # ---------------------------------------------------------------------------
+# Issue #7319: reach contract (board 06's #3413 phase 5 shape)
+# ---------------------------------------------------------------------------
+
+# Two signal nets: SIG_A routed pad-to-pad, SIG_B unrouted.
+_REACH_PCB = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (general (thickness 1.6))
+  (layers
+    (0 "F.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (net 0 "")
+  (net 1 "SIG_A")
+  (net 2 "SIG_B")
+
+  (footprint "R_0402"
+    (layer "F.Cu")
+    (at 10 10)
+    (property "Reference" "R1")
+    (pad "1" smd rect (at -0.5 0) (size 0.6 0.6) (layers "F.Cu") (net 1 "SIG_A"))
+    (pad "2" smd rect (at 0.5 0) (size 0.6 0.6) (layers "F.Cu") (net 2 "SIG_B"))
+  )
+
+  (footprint "R_0402"
+    (layer "F.Cu")
+    (at 20 10)
+    (property "Reference" "R2")
+    (pad "1" smd rect (at -0.5 0) (size 0.6 0.6) (layers "F.Cu") (net 1 "SIG_A"))
+    (pad "2" smd rect (at 0.5 0) (size 0.6 0.6) (layers "F.Cu") (net 2 "SIG_B"))
+  )
+
+  (segment (start 9.5 10) (end 19.5 10) (width 0.25) (layer "F.Cu") (net 1))
+)
+"""
+
+
+class TestSignalReachContract:
+    """The gate must fail (exit 2, open nets named) below the contract."""
+
+    @pytest.fixture
+    def reach_pcb(self, tmp_path):
+        p = tmp_path / "reach.kicad_pcb"
+        p.write_text(_REACH_PCB)
+        return p
+
+    def test_below_contract_fails_and_names_open_nets(self, reach_pcb, tmp_path, capsys):
+        mod = _load_helper_module()
+        rc = mod.check_signal_reach(tmp_path, reach_pcb, 2, set())
+        assert rc == 2
+        out = capsys.readouterr().out
+        assert "::error" in out
+        assert "1/2 signal nets complete" in out
+        assert "SIG_B" in out
+
+    def test_at_contract_passes(self, reach_pcb, tmp_path):
+        mod = _load_helper_module()
+        assert mod.check_signal_reach(tmp_path, reach_pcb, 1, set()) == 0
+
+    def test_pour_nets_excluded(self, reach_pcb, tmp_path):
+        mod = _load_helper_module()
+        # SIG_B as a pour net leaves 1/1 complete: contract of 1 passes.
+        assert mod.check_signal_reach(tmp_path, reach_pcb, 1, {"SIG_B"}) == 0
+
+    def test_no_contract_skips(self, reach_pcb, tmp_path):
+        mod = _load_helper_module()
+        assert mod.check_signal_reach(tmp_path, reach_pcb, None, set()) == 0
+
+    def test_measurement_failure_is_tool_failure(self, tmp_path):
+        mod = _load_helper_module()
+        missing = tmp_path / "missing.kicad_pcb"
+        assert mod.check_signal_reach(tmp_path, missing, 1, set()) == 1
+
+    def test_gate_shares_board_06_reach_counter(self):
+        """One counter for both gates -- no copy (#7319)."""
+        mod = _load_helper_module()
+        sys.path.insert(0, str(REPO_ROOT / "scripts" / "ci"))
+        try:
+            import board_recipe_artifacts
+        finally:
+            sys.path.pop(0)
+        assert mod.measure_signal_reach is board_recipe_artifacts.measure_signal_reach
+
+    def test_board_07_declares_reach_contract(self):
+        mod = _load_board_recipe_module()
+        assert mod.REQUIRED_SIGNAL_REACH == 30
+
+    def test_committed_fixture_fails_reach_contract(self, tmp_path, capsys):
+        """The committed 27/31 fixture (#6730 / #7283) is below 30: it bites."""
+        mod = _load_helper_module()
+        recipe = _load_board_recipe_module()
+        board_dir = REPO_ROOT / "boards" / "07-matchgroup-test"
+        pcb = board_dir / "regression-fixture" / "matchgroup_test_routed.kicad_pcb"
+        rc = mod.check_signal_reach(
+            board_dir, pcb, recipe.REQUIRED_SIGNAL_REACH, set(recipe.POUR_NETS)
+        )
+        assert rc == 2
+        out = capsys.readouterr().out
+        for net in ("DQ3", "DQ4", "TMDS_D0_N", "TMDS_D1_N"):
+            assert net in out
+
+
+# ---------------------------------------------------------------------------
 # Issue #3617: CI job runs in the kicad/kicad:10.0 container
 # ---------------------------------------------------------------------------
 
@@ -284,3 +387,28 @@ class TestMatchgroupJobContainer:
         15-min ceiling (Issue #3617 re-measure)."""
         job = _matchgroup_job()
         assert job.get("timeout-minutes", 0) >= 20
+
+
+# ---------------------------------------------------------------------------
+# Issue #7332: capped impedance tolerance on the baselined board-07 key
+# ---------------------------------------------------------------------------
+
+
+class TestUnexpectedBaselineErrors:
+    KEY = "boards/07-matchgroup-test/regression-fixture/matchgroup_test_routed.kicad_pcb"
+
+    def test_impedance_up_to_cap_tolerated(self):
+        mod = _load_helper_module()
+        assert mod.unexpected_baseline_errors(self.KEY, {"impedance": 4}) == {}
+
+    def test_impedance_over_cap_reported(self):
+        mod = _load_helper_module()
+        assert mod.unexpected_baseline_errors(self.KEY, {"impedance": 5}) == {"impedance": 5}
+
+    def test_unrelated_rule_reported(self):
+        mod = _load_helper_module()
+        assert mod.unexpected_baseline_errors(self.KEY, {"clearance": 1}) == {"clearance": 1}
+
+    def test_non_baselined_key_ignored(self):
+        mod = _load_helper_module()
+        assert mod.unexpected_baseline_errors("boards/other.kicad_pcb", {"impedance": 9}) == {}
