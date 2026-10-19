@@ -4664,31 +4664,37 @@ def _sized_outward_serpentine(
     legacy whole-segment comb fails its checks or overshoots.  Each bulge is
     rectangular (out, along, back) on an axis-aligned host segment, pointing
     away from the partner.  ``k`` bulges of height ``A`` add exactly
-    ``2 * k * A``, and only the two perpendicular legs leave the partner's
-    side: the bulge top stays parallel to the partner, so the pair's
-    ``kct check`` per-net (max over the two halves) uncoupled figure grows by
-    the added length on the shorter half and not at all on the longer one (a
-    45-degree bulge would add ~3.4x that).  The KiCad-equivalent figure
-    (P plus N, the ``uncoupled_mm`` of the diff-pair bench and the one the
-    #6858 / #7269 acceptance tables use) is not bounded this way: it rises by
-    at least the added length and was measured at ~1.6x on 07rf MIPI_CLK
-    (+1.15 mm for 0.70 mm added).
+    ``2 * k * A``.
     Plans keep ``A`` in ``[min_amplitude, 2 mm]`` and the added length in
     ``[length_to_add, max_length_to_add]``; those that do not make the
     shorter half the longer one are tried first, closest to the request's
     upper end first.  The comb occupies only the span it needs and slides
     along each host segment (centre first) until a placement passes every
     clearance check (the grid scan treats partner-owned cells as passable,
-    see :func:`_serpentine_segments_ok`) and leaves the pair's uncoupled
-    figure no higher than it was (the Issue #6795 guard of the Phase 3I
-    tuner).  Leaves ``route`` untouched and returns ``False`` when nothing
-    fits.
+    see :func:`_serpentine_segments_ok`) and two uncoupled-length gates:
+
+    * the pair's ``kct check`` per-net (max over the two halves) figure does
+      not rise (the Issue #6795 guard of the Phase 3I tuner);
+    * the pair's combined P+N figure (the diff-pair bench's ``uncoupled_mm``,
+      :func:`~kicad_tools.router.diffpair_length_tuning._pair_combined_uncoupled_mm`)
+      does not rise.  This is the acceptance gate of operator ruling Q12 on
+      #6858.  The bulge's perpendicular legs are never coupled, so the gate
+      rejects every plan unless the bulge top also couples partner copper
+      that was uncoupled before.  On a pair whose halves are already coupled
+      end to end, nothing passes, and the caller falls back to
+      :func:`_shorten_longer_half`.
+
+    Leaves ``route`` untouched and returns ``False`` when nothing fits.
     """
     if length_to_add <= 0 or max_length_to_add < length_to_add or not route.segments:
         return False
     from kicad_tools.validate.rules.diffpair_uncoupled_length import UNCOUPLED_EPSILON_MM
 
-    from .diffpair_length_tuning import _outer_normal_hint, _pair_uncoupled_mm
+    from .diffpair_length_tuning import (
+        _outer_normal_hint,
+        _pair_combined_uncoupled_mm,
+        _pair_uncoupled_mm,
+    )
 
     hosts = []
     for idx, seg in enumerate(route.segments):
@@ -4719,6 +4725,7 @@ def _sized_outward_serpentine(
     plans.sort(key=lambda p: (p[2] > match + 1e-9, abs(p[2] - match), p[1]))
 
     uncoupled_before = _pair_uncoupled_mm(route, partner_route)
+    combined_before = _pair_combined_uncoupled_mm(route, partner_route)
     width = route.segments[0].width
     top = max(2.0 * width, 0.25)
     step = grid.resolution if grid is not None else 0.1
@@ -4782,9 +4789,148 @@ def _sized_outward_serpentine(
                     > uncoupled_before + UNCOUPLED_EPSILON_MM
                 ):
                     continue
+                # Operator ruling Q12 (#6858): the combined P+N figure is the
+                # acceptance gate.  A bulge's perpendicular legs are uncoupled,
+                # so this rejects every plan unless the bulge also couples
+                # partner copper that was uncoupled before.
+                if (
+                    _pair_combined_uncoupled_mm(trial, partner_route)
+                    > combined_before + UNCOUPLED_EPSILON_MM
+                ):
+                    continue
                 route.segments = trial.segments
                 return True
     return False
+
+
+#: Most consecutive segments one shortening chord may replace, Issue #7269.
+#: Grid routes split a straight run into resolution-length pieces, so a
+#: detour of a few millimetres spans dozens of segments.
+_SHORTEN_MAX_WINDOW = 96
+#: Candidate chords whose clearance checks run per pass (best skew first).
+_SHORTEN_MAX_CANDIDATES = 400
+#: Chords committed at most, one per pass.
+_SHORTEN_MAX_PASSES = 8
+
+
+def _shorten_longer_half(
+    longer: Route,
+    shorter: Route,
+    max_delta: float,
+    *,
+    intra_pair_clearance_mm: float,
+    grid: RoutingGrid | None,
+) -> bool:
+    """Trim skew by straightening the LONGER half (Issue #7269, ruling Q12).
+
+    Lengthening the shorter half raises the pair's combined P+N uncoupled
+    length by at least the length it adds, because a bulge's legs are never
+    coupled.  Removing length from the longer half does not have to: a detour
+    the longer half makes on its own is uncoupled, so cutting it lowers the
+    combined figure and the skew together.
+
+    Each pass tries replacing a run of consecutive same-layer segments of
+    ``longer`` with one straight chord between the run's end points.  The
+    run's interior vertices must be plain bends, not vias or branch points,
+    so connectivity is unchanged.  Candidates are tried in order of the skew
+    they leave, smallest first.  A chord is committed only when all of these
+    hold:
+
+    * it strictly reduces the skew (removes between 0 and twice the
+      mismatch);
+    * it passes the serpentine clearance checks against the partner (exact
+      segment and via clearance), the grid and every committed obstacle
+      (:func:`_serpentine_segments_ok`);
+    * it does not raise the pair's combined P+N uncoupled length
+      (:func:`~kicad_tools.router.diffpair_length_tuning._pair_combined_uncoupled_mm`,
+      the acceptance gate of ruling Q12 on #6858) or its ``kct check``
+      per-net figure (the Issue #6795 guard).
+
+    Passes repeat while the pair is outside ``max_delta`` and a chord
+    commits.  Returns ``True`` when at least one chord was committed;
+    ``longer`` is untouched otherwise.
+    """
+    from kicad_tools.validate.rules.diffpair_uncoupled_length import UNCOUPLED_EPSILON_MM
+
+    from .diffpair_length_tuning import _pair_combined_uncoupled_mm, _pair_uncoupled_mm
+
+    tol = 1e-6
+    changed = False
+    for _pass in range(_SHORTEN_MAX_PASSES):
+        segs = longer.segments
+        delta = calculate_route_length([longer]) - calculate_route_length([shorter])
+        if delta <= max_delta or len(segs) < 2:
+            break
+
+        def _key(x: float, y: float) -> tuple[int, int]:
+            return (round(x / tol), round(y / tol))
+
+        degree: collections.Counter[tuple[int, int]] = collections.Counter()
+        for s in segs:
+            degree[_key(s.x1, s.y1)] += 1
+            degree[_key(s.x2, s.y2)] += 1
+        via_pts = {_key(v.x, v.y) for v in longer.vias}
+        lengths = [math.hypot(s.x2 - s.x1, s.y2 - s.y1) for s in segs]
+
+        candidates: list[tuple[float, int, int, float]] = []
+        for i in range(len(segs)):
+            run = lengths[i]
+            for j in range(i + 1, min(len(segs), i + _SHORTEN_MAX_WINDOW)):
+                prev, cur = segs[j - 1], segs[j]
+                joint = _key(prev.x2, prev.y2)
+                if (
+                    cur.layer != segs[i].layer
+                    or joint != _key(cur.x1, cur.y1)
+                    or degree[joint] != 2
+                    or joint in via_pts
+                ):
+                    break
+                run += lengths[j]
+                chord = math.hypot(cur.x2 - segs[i].x1, cur.y2 - segs[i].y1)
+                saved = run - chord
+                if saved <= 1e-4 or saved >= 2.0 * delta - 1e-9:
+                    continue
+                candidates.append((abs(delta - saved), i, j, saved))
+        if not candidates:
+            break
+        candidates.sort()
+
+        combined_before = _pair_combined_uncoupled_mm(longer, shorter)
+        per_net_before = _pair_uncoupled_mm(longer, shorter)
+        committed = False
+        for _residual, i, j, _saved in candidates[:_SHORTEN_MAX_CANDIDATES]:
+            first, last = segs[i], segs[j]
+            chord_seg = Segment(
+                x1=first.x1,
+                y1=first.y1,
+                x2=last.x2,
+                y2=last.y2,
+                width=first.width,
+                layer=first.layer,
+                net=first.net,
+                net_name=first.net_name,
+            )
+            if not _serpentine_segments_ok(
+                [chord_seg],
+                longer,
+                shorter,
+                intra_pair_clearance_mm,
+                grid,
+                partner_cells_passable=True,
+            ):
+                continue
+            trial = Route(net=longer.net, net_name=longer.net_name)
+            trial.segments = segs[:i] + [chord_seg] + segs[j + 1 :]
+            if _pair_combined_uncoupled_mm(trial, shorter) > combined_before + UNCOUPLED_EPSILON_MM:
+                continue
+            if _pair_uncoupled_mm(trial, shorter) > per_net_before + UNCOUPLED_EPSILON_MM:
+                continue
+            longer.segments = trial.segments
+            changed = committed = True
+            break
+        if not committed:
+            break
+    return changed
 
 
 def create_serpentine(
@@ -5004,11 +5150,10 @@ def create_serpentine(
         current_x = next_x
         current_y = next_y
 
-    partner_aware = partner_route is not None and intra_pair_clearance_mm is not None
     legacy_ok = _serpentine_segments_ok(
         new_segments, route, partner_route, intra_pair_clearance_mm, grid
     )
-    if partner_aware:
+    if partner_route is not None and intra_pair_clearance_mm is not None:
         # Issue #7269: the legacy comb spans the WHOLE host segment and
         # floors its amplitude at ``min_amplitude``, so on a short request
         # it can add several times the requested length and leave the pair
@@ -5052,7 +5197,12 @@ def match_pair_lengths(
 ) -> bool:
     """Match lengths of differential pair traces.
 
-    Adds serpentine meander to the shorter trace to match lengths.
+    Adds serpentine meander to the shorter trace to match lengths.  On the
+    partner-aware path (``intra_pair_clearance_mm`` given), when no meander
+    passes its gates, the longer trace is straightened instead
+    (:func:`_shorten_longer_half`, Issue #7269).  The return is then ``True``
+    when a chord was committed, even if the pair is still outside tolerance,
+    so the caller re-marks the changed copper.
 
     Issue #3003: when ``intra_pair_clearance_mm`` is provided, the
     serpentine generator runs the clearance-aware path
@@ -5091,24 +5241,28 @@ def match_pair_lengths(
     # half-tolerance margin on the far side of an exact match.
     max_length_to_add = delta + max_delta * 0.5
 
-    if p_length < n_length:
-        return create_serpentine(
-            p_route,
-            length_to_add,
-            partner_route=n_route if intra_pair_clearance_mm is not None else None,
-            intra_pair_clearance_mm=intra_pair_clearance_mm,
-            grid=grid,
-            max_length_to_add=max_length_to_add,
-        )
-    else:
-        return create_serpentine(
-            n_route,
-            length_to_add,
-            partner_route=p_route if intra_pair_clearance_mm is not None else None,
-            intra_pair_clearance_mm=intra_pair_clearance_mm,
-            grid=grid,
-            max_length_to_add=max_length_to_add,
-        )
+    shorter, longer = (p_route, n_route) if p_length < n_length else (n_route, p_route)
+    if create_serpentine(
+        shorter,
+        length_to_add,
+        partner_route=longer if intra_pair_clearance_mm is not None else None,
+        intra_pair_clearance_mm=intra_pair_clearance_mm,
+        grid=grid,
+        max_length_to_add=max_length_to_add,
+    ):
+        return True
+    if intra_pair_clearance_mm is None:
+        return False
+    # Issue #7269 / operator ruling Q12 (#6858): no lengthening of the shorter
+    # half passed its gates.  Straighten the longer half instead, which can
+    # lower the combined P+N uncoupled length rather than raise it.
+    return _shorten_longer_half(
+        longer,
+        shorter,
+        max_delta,
+        intra_pair_clearance_mm=intra_pair_clearance_mm,
+        grid=grid,
+    )
 
 
 def _snap_route_ends_to_pads(route: Route, start: Pad, end: Pad, tol: float = 0.005) -> None:

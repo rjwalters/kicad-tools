@@ -558,6 +558,41 @@ def _pair_uncoupled_mm(a: Route, b: Route) -> float:
     return max(measure_uncoupled(sa, sb), measure_uncoupled(sb, sa))
 
 
+def _pair_combined_uncoupled_mm(a: Route, b: Route) -> float:
+    """The pair's combined P+N uncoupled length (issue #7269, operator ruling Q12).
+
+    The KiCad-equivalent figure the diff-pair bench reports as ``uncoupled_mm``
+    (``scripts/research/diffpair_bench.py``): each half's routed length minus
+    the part of it ``DiffPairRoutingContinuityRule`` counts as coupled to the
+    other half (parallel within its tolerance and inside its coupling window),
+    summed over both halves.  #6858's strict uncoupled-length criterion is
+    stated in this figure, so a skew trim must not raise it.  Symmetric in its
+    arguments.
+    """
+    from kicad_tools.validate.rules.clearance import CopperElement
+    from kicad_tools.validate.rules.diffpair_routing_continuity import (
+        DiffPairRoutingContinuityRule,
+        _segment_length,
+    )
+
+    def elements(route: Route) -> list[CopperElement]:
+        return [
+            CopperElement(
+                element_type="segment",
+                layer=str(s.layer),
+                net_number=s.net,
+                geometry=(s.x1, s.y1, s.x2, s.y2, s.width),
+                reference="",
+            )
+            for s in route.segments
+        ]
+
+    ea, eb = elements(a), elements(b)
+    rule = DiffPairRoutingContinuityRule(engaged_pairs=set())
+    total = sum(_segment_length(e) for e in ea) + sum(_segment_length(e) for e in eb)
+    return total - rule._coupled_length(ea, eb) - rule._coupled_length(eb, ea)
+
+
 # ---------------------------------------------------------------------------
 # Placement search (issue #6788)
 # ---------------------------------------------------------------------------
