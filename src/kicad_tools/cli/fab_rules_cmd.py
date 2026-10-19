@@ -395,7 +395,10 @@ def cmd_apply(args):
         set_manufacturer_metadata,
     )
     from kicad_tools.core.rule_loosening import RuleLooseningError
-    from kicad_tools.manufacturers.project_generator import merge_project_rules_guarded
+    from kicad_tools.manufacturers.project_generator import (
+        build_project_rules,
+        merge_project_rules_guarded,
+    )
 
     try:
         profile = get_profile(args.profile)
@@ -434,7 +437,14 @@ def cmd_apply(args):
     )
     print(f"  Min via diameter:  {rules.min_via_diameter_mm:.3f} mm")
     print(f"  Min via drill:     {rules.min_via_drill_mm:.3f} mm")
-    print(f"  Min annular ring:  {rules.min_annular_ring_mm:.3f} mm")
+    # The .kicad_pro built-in floor is the micro-via one (#3734/#3736):
+    # KiCad has no micro-via annular key, so standard-via annular ring is
+    # enforced by the .kicad_dru "Annular Ring" rule and kct check --mfr.
+    print(
+        f"  Min annular ring:  {rules.min_annular_ring_mm:.3f} mm (standard vias; "
+        f".kicad_pro floor {build_project_rules(rules)['min_via_annular_width']:.3f} mm "
+        "for micro vias)"
+    )
     print(f"  Copper to edge:    {rules.min_copper_to_edge_mm:.3f} mm")
 
     if args.dry_run:

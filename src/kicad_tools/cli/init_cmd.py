@@ -445,7 +445,8 @@ def init_project(
                 project_data,
                 design_type,
                 keep_stricter_default=not (
-                    {"*", "netclasses.Default.track_width"} & merge_policy_allowances(rules_before)
+                    {"*", "netclasses.Default.track_width"}
+                    & merge_policy_allowances(rules_before, apply_severities=False)
                 ),
             )
             project_data["meta"]["design_type"] = design_type
@@ -460,7 +461,7 @@ def init_project(
         assert_no_loosenings(
             rules_before,
             project_data,
-            allow=merge_policy_allowances(rules_before),
+            allow=merge_policy_allowances(rules_before, apply_severities=False),
             writer="kct init",
         )
     except RuleLooseningError as e:

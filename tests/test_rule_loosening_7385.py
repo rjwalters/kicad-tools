@@ -15,6 +15,11 @@ These tests pin:
 * each writer, on the issue's reproduction (all failed on main bd3c039ac);
 * ``add_netclass_definition`` merging into an existing class;
 * the ``KCT_PRESERVE_BOARD_RULES=0`` escape hatch still loosening on request;
+* the writers never downgrading an authored severity (they did not touch
+  ``rule_severities`` before #7385), and every policy-permitted relaxation
+  being reported as ``relaxed_by_policy`` -- never silent;
+* the refusal path: a merge that would loosen refuses, writes nothing and
+  names the items plus the ``KCT_PRESERVE_BOARD_RULES=0`` hint;
 * a guard over every committed ``boards/**/*.kicad_pro``: no writer's
   regeneration loosens a board's rules beyond the documented allowances.
 """
@@ -28,6 +33,7 @@ from pathlib import Path
 
 import pytest
 
+import kicad_tools.manufacturers.project_generator as project_generator
 from kicad_tools.cli.fab_rules_cmd import main as fab_rules_main
 from kicad_tools.cli.init_cmd import init_project
 from kicad_tools.cli.mfr import main as mfr_main
@@ -64,7 +70,11 @@ def _authored_project() -> dict:
             "design_settings": {
                 "rules": {"min_clearance": 0.2, "min_track_width": 0.2},
                 "defaults": {"clearance_min": 0.2, "track_min_width": 0.2},
-                "rule_severities": {"isolated_copper": "error", "clearance": "error"},
+                "rule_severities": {
+                    "isolated_copper": "error",
+                    "lib_footprint_mismatch": "error",
+                    "clearance": "error",
+                },
                 "drc_exclusions": [],
             }
         },
@@ -103,7 +113,12 @@ def _assert_authored_rules_kept(before: dict, after: dict) -> None:
     assert default_cls["clearance"] == pytest.approx(0.25)
     assert default_cls["diff_pair_gap"] == pytest.approx(0.12)
     assert default_cls["diff_pair_width"] == pytest.approx(0.15)
-    assert rule_loosenings(before, after, allow=merge_policy_allowances(before)) == []
+    # The writers never downgrade an authored severity (#7385 review).
+    assert (
+        after["board"]["design_settings"]["rule_severities"]
+        == (before["board"]["design_settings"]["rule_severities"])
+    )
+    assert rule_loosenings(before, after) == []
 
 
 def _write(path: Path, data: dict) -> Path:
@@ -220,6 +235,9 @@ class TestMergePolicyAllowances:
             {"rule_severities.isolated_copper", "rule_severities.lib_footprint_mismatch"}
         )
 
+    def test_writer_allowances_exclude_severities(self):
+        assert merge_policy_allowances(_authored_project(), apply_severities=False) == frozenset()
+
     def test_template_default_netclass_is_relaxable(self):
         data = _authored_project()
         _default(data).update(clearance=0.2, track_width=0.2, via_diameter=0.6, via_drill=0.3)
@@ -244,6 +262,40 @@ class TestMergePolicyAllowances:
         kept = {item.path for item in report.kept_stricter}
         assert {"rules.min_clearance", "netclasses.Default.clearance"} <= kept
         assert any("kept 0.2 (profile 0.127)" in line for line in report.messages())
+        assert report.relaxed_by_policy == []
+        assert report.to_dict()["relaxed_by_policy"] == []
+
+    def test_route_path_still_applies_non_blocking_severities(self):
+        # merge_project_rules' default (kct route / --emit-drc-constraints)
+        # keeps the #6191 downgrade; only the CLI writers opt out.
+        data = merge_project_rules(_authored_project(), get_profile(PROFILE).get_design_rules(2))
+        severities = data["board"]["design_settings"]["rule_severities"]
+        assert severities["isolated_copper"] == "warning"
+        assert severities["lib_footprint_mismatch"] == "ignore"
+
+    def test_guarded_merge_reports_template_default_relaxation(self):
+        data = _authored_project()
+        _default(data).update(clearance=0.2, track_width=0.2, via_diameter=0.6, via_drill=0.3)
+        rules = get_profile(PROFILE).get_design_rules(2, 1.0)
+        report = merge_project_rules_guarded(data, rules, writer="test")
+        relaxed = {item.path for item in report.relaxed_by_policy}
+        assert "netclasses.Default.clearance" in relaxed
+        assert not any(path.startswith("rule_severities.") for path in relaxed)
+        text = "\n".join(report.messages())
+        assert "Relaxed" in text and "KCT_PRESERVE_BOARD_RULES=1" in text
+        assert "netclasses.Default.clearance: lowered 0.2 -> 0.127" in text
+
+    def test_guarded_merge_reports_opt_out_relaxation(self):
+        data = _authored_project()
+        data["text_variables"]["KCT_PRESERVE_BOARD_RULES"] = "0"
+        rules = get_profile(PROFILE).get_design_rules(2, 1.0)
+        report = merge_project_rules_guarded(data, rules, writer="test")
+        relaxed = {item.path for item in report.relaxed_by_policy}
+        assert "rules.min_clearance" in relaxed
+        assert report.relaxed_by_policy == report.loosened_by_opt_in
+        # Severities are untouched even under =0: these writers never set them.
+        assert data["board"]["design_settings"]["rule_severities"]["isolated_copper"] == "error"
+        assert {item["path"] for item in report.to_dict()["relaxed_by_policy"]} == relaxed
 
 
 # ---------------------------------------------------------------------------
@@ -325,16 +377,107 @@ class TestWritersKeepStricterRules:
         assert init_project(str(pro), PROFILE, design_type=design_type) == 0
         _assert_authored_rules_kept(before, _read(pro))
 
-    def test_opt_out_still_overwrites(self, tmp_path):
+    def test_mfr_json_reports_policy_relaxation(self, tmp_path, capsys):
+        before = _authored_project()
+        _default(before).update(clearance=0.2, track_width=0.2, via_diameter=0.6, via_drill=0.3)
+        pro = _write(tmp_path / "board.kicad_pro", before)
+        mfr_main(["apply-rules", str(pro), PROFILE, "--format", "json"])
+        payload = json.loads(capsys.readouterr().out)
+        relaxed = {item["path"] for item in payload["rule_merge"]["relaxed_by_policy"]}
+        assert "netclasses.Default.clearance" in relaxed
+        severities = _read(pro)["board"]["design_settings"]["rule_severities"]
+        assert severities["isolated_copper"] == "error"
+        assert severities["lib_footprint_mismatch"] == "error"
+
+    def test_opt_out_still_overwrites(self, tmp_path, capsys):
         before = _authored_project()
         before["text_variables"]["KCT_PRESERVE_BOARD_RULES"] = "0"
         pro = _write(tmp_path / "board.kicad_pro", before)
         mfr_main(["apply-rules", str(pro), PROFILE])
+        out = capsys.readouterr().out
+        assert "because the project sets KCT_PRESERVE_BOARD_RULES=0" in out
+        assert "rules.min_clearance: lowered 0.2 -> 0.127" in out
         after = _read(pro)
         assert after["board"]["design_settings"]["rules"]["min_clearance"] == pytest.approx(0.127)
         assert _default(after)["clearance"] == pytest.approx(0.127)
         # Keys merge_project_rules does not own are never touched, even then.
         assert _default(after)["diff_pair_gap"] == pytest.approx(0.12)
+
+    def test_mfr_header_names_project_annular_floor(self, tmp_path, capsys):
+        pro = _write(tmp_path / "board.kicad_pro", _authored_project())
+        mfr_main(["apply-rules", str(pro), PROFILE])
+        out = capsys.readouterr().out
+        written = _read(pro)["board"]["design_settings"]["rules"]["min_via_annular_width"]
+        assert f".kicad_pro floor {written:.3f} mm for micro vias" in out
+
+
+# ---------------------------------------------------------------------------
+# Refusal path: a merge that would loosen writes nothing
+# ---------------------------------------------------------------------------
+
+
+def _loosening_merge(real_merge):
+    """Wrap ``merge_project_rules`` so it loosens two authored rules."""
+
+    def merge(project_data, rules, **kwargs):
+        result = real_merge(project_data, rules, **kwargs)
+        settings = result["board"]["design_settings"]
+        settings["rules"]["min_clearance"] = 0.05
+        settings.setdefault("drc_exclusions", []).append("clearance|1|2|3|4")
+        return result
+
+    return merge
+
+
+def _run_mfr_text(pro: Path) -> int:
+    try:
+        mfr_main(["apply-rules", str(pro), PROFILE])
+    except SystemExit as exc:
+        return int(exc.code or 0)
+    return 0
+
+
+def _run_mfr_json(pro: Path) -> int:
+    try:
+        mfr_main(["apply-rules", str(pro), PROFILE, "--format", "json"])
+    except SystemExit as exc:
+        return int(exc.code or 0)
+    return 0
+
+
+_WRITERS = {
+    "mfr-text": _run_mfr_text,
+    "mfr-json": _run_mfr_json,
+    "fab-rules": lambda pro: fab_rules_main(["apply", PROFILE, str(pro)]),
+    "init": lambda pro: init_project(str(pro), PROFILE),
+    "init-design-type": lambda pro: init_project(str(pro), PROFILE, design_type="digital"),
+}
+
+
+@pytest.mark.parametrize("writer", sorted(_WRITERS))
+def test_writer_refuses_a_loosening_merge(writer, tmp_path, capsys, monkeypatch):
+    monkeypatch.setattr(
+        project_generator,
+        "merge_project_rules",
+        _loosening_merge(project_generator.merge_project_rules),
+    )
+    pro = _write(tmp_path / "board.kicad_pro", _authored_project())
+    original = pro.read_bytes()
+
+    assert _WRITERS[writer](pro) != 0
+
+    assert pro.read_bytes() == original
+    assert not (tmp_path / "board.kicad_dru").exists()
+    captured = capsys.readouterr()
+    if writer == "mfr-json":
+        message = json.loads(captured.out)["error"]
+    else:
+        message = captured.out + captured.err
+    message = " ".join(message.split())  # rich wraps long lines
+    assert "refusing to write" in message
+    assert "rules.min_clearance: lowered 0.2 -> 0.05" in message
+    assert "drc_exclusions.clearance|1|2|3|4: new DRC exclusion" in message
+    assert "KCT_PRESERVE_BOARD_RULES=0" in message
 
 
 # ---------------------------------------------------------------------------
@@ -367,6 +510,8 @@ def test_committed_board_projects_found():
 def test_regenerating_committed_board_never_loosens(project, tmp_path):
     original = _read(project)
     allow = merge_policy_allowances(original)
+    # The CLI writers may not downgrade a severity at all (#7385 review).
+    writer_allow = merge_policy_allowances(original, apply_severities=False)
     manufacturer, layers = _board_profile(original)
     rules = get_profile(manufacturer).get_design_rules(layers, 1.0)
 
@@ -379,14 +524,14 @@ def test_regenerating_committed_board_never_loosens(project, tmp_path):
     mfr_copy.parent.mkdir()
     shutil.copy(project, mfr_copy)
     mfr_main(["apply-rules", str(mfr_copy), manufacturer, "--layers", str(layers)])
-    assert rule_loosenings(original, _read(mfr_copy), allow=allow) == []
+    assert rule_loosenings(original, _read(mfr_copy), allow=writer_allow) == []
 
     # kicad-fab-rules apply
     fab_copy = tmp_path / "fab" / project.name
     fab_copy.parent.mkdir()
     shutil.copy(project, fab_copy)
     assert fab_rules_main(["apply", manufacturer, str(fab_copy), "--layers", str(layers)]) == 0
-    assert rule_loosenings(original, _read(fab_copy), allow=allow) == []
+    assert rule_loosenings(original, _read(fab_copy), allow=writer_allow) == []
 
     # kct init on the existing project, with a netclass design template.
     init_copy = tmp_path / "init" / project.name
@@ -395,4 +540,4 @@ def test_regenerating_committed_board_never_loosens(project, tmp_path):
     assert (
         init_project(str(init_copy), manufacturer, layers=layers, design_type="mixed_signal") == 0
     )
-    assert rule_loosenings(original, _read(init_copy), allow=allow) == []
+    assert rule_loosenings(original, _read(init_copy), allow=writer_allow) == []
