@@ -1,7 +1,7 @@
 {
   "version": "1.0",
   "kicad_tools_version": "0.23.0",
-  "generated_at": "2026-10-19T15:55:26.973666+00:00",
+  "generated_at": "2026-10-19T17:48:53.576945+00:00",
   "manufacturer": "jlcpcb-tier1",
   "files": {
     "DESIGN_REVIEW.md": {
@@ -29,8 +29,8 @@
       "size": 1033
     },
     "check-report.json": {
-      "sha256": "80ecbe1bc4214a736eaa60704cef7fa2f66f5b1717e320058f3c90e111cb4eda",
-      "size": 9931
+      "sha256": "de06eca2818e1f3b2f26cbd554a57da7c6a71d6ed4daa28f9a069238f677dedc",
+      "size": 9932
     },
     "cpl_jlcpcb.csv": {
       "sha256": "77f4911b0cee3381fbff404690797ebb4bede6fabc174df4340815cc23ab3c62",
@@ -85,8 +85,8 @@
       "size": 215702
     },
     "design-source/routing_plan.py": {
-      "sha256": "799ce31861da6a1ad19531426936bb491def1483e2642495811bac42e49e8d8d",
-      "size": 18761
+      "sha256": "e22b6a9b203434c391460ccdbadf9dec51cb03eea4935d7edbe1ac22d523da1d",
+      "size": 21121
     },
     "firmware/.gitignore": {
       "sha256": "692b1af4436043e2e965c8d563bbf90d648cda3a6afa9bba38e1c38af1d38919",
@@ -173,8 +173,8 @@
       "size": 2192
     },
     "gerbers/gerbers.zip": {
-      "sha256": "ea9ac2b45cf9adbf0149dc8f8fa4a2f3c2c8d12ff4415cff9f53cc24b0852b06",
-      "size": 131981
+      "sha256": "f6937b18132cb354e4240a0291386c22def1db227226135e635d20289d40122b",
+      "size": 131986
     },
     "images/assembly.png": {
       "sha256": "9196b12f7c83ecd66e4b68f34c9b4783e8681289b6931d236f240885991381b9",
@@ -213,7 +213,7 @@
       "size": 486460
     },
     "kicad_project.zip": {
-      "sha256": "b0d011b7f79a76e98bb9ab0628d031d2b60fb0df2154c03da2c51121e6aa815b",
+      "sha256": "dd22bf30d66795a4dd5e8e85b71642c063284a4d10c3f04f2151476813ceb2ea",
       "size": 198383
     },
     "manufacturing-requirements.json": {
@@ -396,8 +396,8 @@
     {
       "name": "bom_lcsc_values",
       "status": "WARN",
-      "message": "10 of 38 assigned item(s) verified (offline catalog and parts cache); 28 unverifiable (not in parts cache or offline catalog)",
-      "details": "unverified: U1 -> C44854, U2 -> C7519, F1 -> C126817, Y1 -> C2442665, J2 -> C265104, J3 -> C21285200, R1 -> C105580, R2 -> C105580 (and 20 more)"
+      "message": "2 of 38 assigned item(s) verified (parts cache); 36 unverifiable (not in parts cache or offline catalog)",
+      "details": "unverified: U1 -> C44854, J1 -> C7095263, U2 -> C7519, F1 -> C126817, Y1 -> C2442665, J2 -> C265104, J3 -> C21285200, R1 -> C105580 (and 28 more)"
     },
     {
       "name": "bom_pcb_match",

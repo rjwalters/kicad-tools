@@ -49,7 +49,9 @@ USB_COMMON_RUN_WINDOW = (37.5, 40.3, 13.0, 16.8)
 
 # Issue #7084 via-in-pad exception (operator ruling 2026-10-19, Q10 = 1).
 # Under ``jlcpcb-tier1`` via-in-pad drops the USB_D launch vias *inside* the
-# ESD lands (U2.1 / U2.3) and the termination lands (R3 / R4 pad 1), at
+# ESD lands (U2 pads 4 / 6, y 10.975..12.30; the ruling cites them as
+# U2.1 / U2.3, which are the connector-side pair at y 8.70..10.03) and the
+# termination lands (R3 / R4 pad 1, y 17.22..17.76), at
 # y = 11.737 / 17.419, where the fixed window above clips both ends of the
 # coupled In2.Cu run.  Only when a USB_D via sits inside one of these lands is
 # the matching window edge moved out to that via, so the counted copper runs
@@ -66,8 +68,8 @@ USB_COMMON_RUN_WINDOW = (37.5, 40.3, 13.0, 16.8)
 USB_VIA_IN_PAD_EXCEPTION_ISSUE = 7084
 USB_VIA_IN_PAD_EXCEPTION_EXPIRES = "2027-04-19"
 USB_ESD_LANDS_7084 = {
-    "USB_D+": (36.75, 37.35, 10.975, 12.30),  # U2 pad 3
-    "USB_D-": (38.65, 39.25, 10.975, 12.30),  # U2 pad 1
+    "USB_D+": (36.75, 37.35, 10.975, 12.30),  # U2 pad 4
+    "USB_D-": (38.65, 39.25, 10.975, 12.30),  # U2 pad 6
 }
 USB_TERMINATION_LANDS_7084 = {
     "USB_D+": (39.13, 39.77, 17.22, 17.76),  # R4 pad 1
@@ -98,6 +100,7 @@ def usb_common_run_window(pcb):
         ):
             y1 = max(y1, via.position[1] + _VIA_EDGE_TOL_MM)
     return x0, x1, y0, y1
+
 
 # Issue #5006: the board's reviewed, cited fabrication floors live in this
 # committed sidecar -- the single source of truth shared by the Python

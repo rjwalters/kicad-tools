@@ -301,7 +301,7 @@
       "USB_MCU_D+": 3.8035802579248226,
       "USB_MCU_D-": 3.6491614418720992
     },
-    "common_coupled_mm": 4.59342712474619,
+    "common_coupled_mm": 4.100227124746189,
     "branch_skew_mm": 0.0
   }
 }
