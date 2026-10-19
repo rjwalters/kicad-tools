@@ -274,6 +274,16 @@ class TestDSNRoundTrip:
         assert layer_count == len(exporter.layers)
 
 
+class TestDSNLayerIndex:
+    """Issue #7485: each structure layer carries its stack-order index."""
+
+    def test_layer_index_follows_stack_order(self):
+        exporter = KiCadToDSNExporter("unused.kicad_pcb")
+        exporter._layers = ["F.Cu", "In1.Cu", "In2.Cu", "B.Cu"]
+        structure = exporter._generate_structure()
+        assert re.findall(r"\(index (\d+)\)", structure) == ["0", "1", "2", "3"]
+
+
 class TestDSNViaLayerSpan:
     """Issue #6614: pre-existing vias export the span KiCad reads."""
 
@@ -742,3 +752,87 @@ class TestBoardOutline:
         dst = tmp_path / src.name
         shutil.copy(src, dst)
         assert self._boundary(KiCadToDSNExporter(dst).export()).is_valid
+
+
+# ---------------------------------------------------------------------------
+# Issue #7483: NPTH holes and non-copper pads must not become pins
+# ---------------------------------------------------------------------------
+
+
+def _npth_pcb(tmp_path, *, copper_layers=("F.Cu", "B.Cu"), drill="3.2", back=False):
+    layers = "\n".join(f'    ({i} "{name}" signal)' for i, name in enumerate(copper_layers))
+    fp_layer = "B.Cu" if back else "F.Cu"
+    text = f"""(kicad_pcb
+  (version 20260206)
+  (generator "pcbnew")
+  (layers
+{layers}
+    (25 "Edge.Cuts" user)
+  )
+  (gr_rect (start 0 0) (end 40 30) (layer "Edge.Cuts"))
+  (footprint "MountingHole:MountingHole_3.2mm_M3"
+    (layer "{fp_layer}")
+    (at 10 10)
+    (property "Reference" "H1" (at 0 0) (layer "F.SilkS"))
+    (pad "" np_thru_hole circle (at 1 2) (size 3.2 3.2) (drill {drill}) (layers "*.Cu" "*.Mask"))
+  )
+  (footprint "Pkg:Thermal"
+    (layer "F.Cu")
+    (at 20 10)
+    (property "Reference" "U1" (at 0 0) (layer "F.SilkS"))
+    (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu" "F.Paste" "F.Mask") (net "A"))
+    (pad "2" smd rect (at 2 0) (size 1 1) (layers "F.Paste"))
+    (pad "3" smd rect (at 4 0) (size 1 1) (layers "F.Mask"))
+  )
+)
+"""
+    pcb = tmp_path / "npth.kicad_pcb"
+    pcb.write_text(text, encoding="utf-8")
+    return pcb
+
+
+def _library(dsn: str) -> str:
+    return dsn[dsn.index("(library") : dsn.index("(network")]
+
+
+class TestNpthAndNonCopperPads:
+    @pytest.mark.parametrize("layers", [("F.Cu", "B.Cu"), ("F.Cu", "In1.Cu", "In2.Cu", "B.Cu")])
+    def test_npth_is_keepout_per_copper_layer(self, tmp_path, layers):
+        dsn = KiCadToDSNExporter(_npth_pcb(tmp_path, copper_layers=layers)).export()
+        lib = _library(dsn)
+        image = lib[lib.index("(image MountingHole") : lib.index("(image Pkg")]
+        assert "(pin" not in image
+        keepouts = re.findall(r'\(keepout "" \(circle (\S+) 3200\.0 1000\.0 2000\.0\)\)', image)
+        assert keepouts == list(layers)
+        assert "*.Cu" not in dsn
+        assert "Rect[B]Pad_3200" not in dsn
+
+    def test_oval_drill_becomes_path_keepout(self, tmp_path):
+        pcb = _npth_pcb(tmp_path)
+        pcb.write_text(pcb.read_text().replace("(drill 3.2)", "(drill oval 3.0 1.0)"))
+        dsn = KiCadToDSNExporter(pcb).export()
+        paths = re.findall(r'\(keepout "" \(path (\S+) (\S+) (\S+) (\S+) (\S+) (\S+)\)\)', dsn)
+        assert [p[0] for p in paths] == ["F.Cu", "B.Cu"]
+        for _layer, width, x1, y1, x2, y2 in paths:
+            assert float(width) == 1000.0
+            assert (float(x1), float(y1), float(x2), float(y2)) == (0.0, 2000.0, 2000.0, 2000.0)
+
+    def test_paste_and_mask_only_pads_have_no_pin(self, tmp_path):
+        dsn = KiCadToDSNExporter(_npth_pcb(tmp_path)).export()
+        image = _library(dsn)
+        image = image[image.index("(image Pkg") :]
+        image = image[: image.index("(padstack")]
+        assert len(re.findall(r"\(pin ", image)) == 1
+        assert "F.Paste" not in dsn and "F.Mask" not in dsn
+
+    def test_fleet_shape_layers_are_declared(self):
+        boards = sorted(BOARDS.glob("*/output/*.kicad_pcb"))
+        if not boards:
+            pytest.skip("no fleet boards found")
+        for pcb in boards:
+            dsn = KiCadToDSNExporter(pcb).export()
+            structure = dsn[dsn.index("(structure") : dsn.index("(placement")]
+            declared = set(re.findall(r"\(layer (\S+)", structure))
+            used = set(re.findall(r"\(shape \((?:rect|circle|path|polygon) (\S+)", dsn))
+            used |= set(re.findall(r'\(keepout "" \((?:circle|path|polygon) (\S+)', dsn))
+            assert used <= declared, f"{pcb}: undeclared layers {used - declared}"

@@ -54,7 +54,10 @@ class ESDProtectionBlock(CircuitBlock):
             sch: Schematic to add to
             x: X coordinate
             y: Y coordinate
-            channels: Number of channels to protect (1-8)
+            channels: Number of channels to protect.  ``1`` places a single
+                TVS diode; ``2`` or more uses ``esd_array_symbol`` and may not
+                exceed the number of I/O channels that part has (2 for the
+                default ``USBLC6-2SC6``), otherwise ``ValueError`` is raised.
             ref: Reference designator
             tvs_symbol: KiCad symbol for single TVS diode
             esd_array_symbol: KiCad symbol for multi-channel ESD array
@@ -228,13 +231,22 @@ class ReversePolarityBlock(CircuitBlock):
     Reverse polarity protection.
 
     Schematic (P-FET):
-        VIN ──[Q1 P-FET]── VOUT
-                 │
-                 G
-                 │
-               [R_gate]
-                 │
-                GND
+        VIN ──D[Q1 P-FET]S── VOUT
+                   │
+                   G
+                   │
+                [R_gate]
+                   │
+                  GND
+
+    The P-FET's **drain** takes the input and its **source** feeds the load.
+    At power-up the body diode (anode on the drain, cathode on the source)
+    conducts forward, the source rises, and the grounded gate then sees
+    Vgs = -VOUT and turns the channel on, bypassing the diode drop.  With
+    the input reversed the body diode is reverse-biased and Vgs >= 0, so the
+    FET stays off and blocks.  Swapping drain and source would leave the
+    body diode conducting from the load back into a reversed input
+    (issue #7399).
 
     Schematic (Diode):
         VIN ──[D1]── VOUT
@@ -285,24 +297,24 @@ class ReversePolarityBlock(CircuitBlock):
                 "VOUT": diode.pin_position("K"),
             }
         else:
-            # P-FET topology (lower voltage drop)
-            # Place P-FET
+            # P-FET topology (lower voltage drop).  Rotated so the drain
+            # (input) is on the left, the source (output) on the right and
+            # the gate points down.
             pfet = sch.add_symbol(mosfet_symbol, x, y, ref, "", rotation=90)
             self.components["Q"] = pfet
 
-            # Place gate resistor
+            # Gate resistor stands vertically under the gate pin.
+            gate = pfet.pin_position("G")
             r_num = ref[1:] if ref[1:].isdigit() else "1"
-            r_gate = sch.add_symbol(resistor_symbol, x, y + 15, f"R{r_num}", "10k", rotation=90)
+            r_gate = sch.add_symbol(resistor_symbol, gate[0], gate[1] + 7.62, f"R{r_num}", "10k")
             self.components["R_gate"] = r_gate
 
             # Wire gate to resistor
-            gate = pfet.pin_position("G")
-            r_top = r_gate.pin_position("1")
-            sch.add_wire(gate, r_top)
+            sch.add_wire(gate, r_gate.pin_position("1"))
 
             self.ports = {
-                "VIN": pfet.pin_position("S"),  # Source (input)
-                "VOUT": pfet.pin_position("D"),  # Drain (output)
+                "VIN": pfet.pin_position("D"),  # Drain (input, body-diode anode)
+                "VOUT": pfet.pin_position("S"),  # Source (output, to the load)
                 "GND": r_gate.pin_position("2"),
             }
 

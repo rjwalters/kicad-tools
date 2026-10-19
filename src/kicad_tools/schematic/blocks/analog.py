@@ -4,6 +4,7 @@ import contextlib
 from typing import TYPE_CHECKING, Literal
 
 from .base import CircuitBlock
+from .power.passives import VoltageDivider
 
 if TYPE_CHECKING:
     from kicad_sch_helper import Schematic, SymbolInstance  # noqa: F401
@@ -149,9 +150,9 @@ class OpAmpBlock(CircuitBlock):
     Ports:
         - IN: Signal input
         - OUT: Signal output
-        - VCC: Positive supply
-        - VEE: Negative supply (optional)
-        - GND: Ground reference
+        - VCC: Positive supply (V+ of the power unit)
+        - GND: Ground reference; this is the V- pin, so the block is for a
+          single supply with V- at ground
     """
 
     def __init__(
@@ -321,9 +322,14 @@ class OpAmpBlock(CircuitBlock):
         return f"{r_ohms:.0f}R"
 
 
-class VoltageDividerSense(CircuitBlock):
+class VoltageDividerSense(VoltageDivider):
     """
-    Voltage divider for sensing higher voltages.
+    Voltage divider for sensing higher voltages, sized by division ratio.
+
+    A thin wrapper over :class:`~kicad_tools.schematic.blocks.VoltageDivider`
+    (issue #7399): it picks ``R_bottom = 10k`` and ``R_top = 10k * (ratio - 1)``
+    and builds the same, tested divider, including the optional output filter
+    capacitor. Use ``VoltageDivider`` directly to choose the resistor values.
 
     Schematic:
         VIN ──[R1]──┬── VOUT (to ADC)
@@ -346,51 +352,47 @@ class VoltageDividerSense(CircuitBlock):
         ratio: float = 11.0,
         ref_start: int = 1,
         resistor_symbol: str = "Device:R",
+        filter_cap: str | None = None,
     ):
         """
         Create a voltage divider for sensing.
 
         Args:
             sch: Schematic to add to
-            x: X coordinate
-            y: Y coordinate of junction point
-            ratio: Voltage division ratio (Vin/Vout)
+            x: X coordinate of the resistor chain
+            y: Y coordinate of the top resistor (as for ``VoltageDivider``)
+            ratio: Voltage division ratio (Vin/Vout); must be greater than 1
             ref_start: Starting reference number
             resistor_symbol: KiCad symbol for resistors
-        """
-        super().__init__(sch, x, y)
+            filter_cap: Optional output filter capacitor value (e.g. "100nF")
 
-        # Calculate resistor values for given ratio
-        # Vout = Vin * R2/(R1+R2)
-        # ratio = Vin/Vout = (R1+R2)/R2
-        # If R2 = 10k, then R1 = R2 * (ratio - 1)
+        Raises:
+            ValueError: If ``ratio`` is not greater than 1.
+        """
+        if ratio <= 1:
+            raise ValueError(f"VoltageDividerSense ratio must be > 1 (Vin/Vout), got {ratio}")
+        # Vout = Vin * R2/(R1+R2), so ratio = (R1+R2)/R2; with R2 = 10k,
+        # R1 = R2 * (ratio - 1).
         r2 = 10000
         r1 = r2 * (ratio - 1)
-
-        r1_value = self._format_resistance(r1)
-        r2_value = "10k"
-
-        # Place R1 (top resistor)
-        self.r1 = sch.add_symbol(resistor_symbol, x, y - 15, f"R{ref_start}", r1_value, rotation=90)
-
-        # Place R2 (bottom resistor)
-        self.r2 = sch.add_symbol(
-            resistor_symbol, x, y + 15, f"R{ref_start + 1}", r2_value, rotation=90
+        super().__init__(
+            sch,
+            x,
+            y,
+            r_top=self._format_resistance(r1),
+            r_bottom="10k",
+            filter_cap=filter_cap,
+            ref_start=ref_start,
+            resistor_symbol=resistor_symbol,
         )
-
-        self.components = {"R1": self.r1, "R2": self.r2}
-
-        # Wire R1 to R2
-        r1_out = self.r1.pin_position("2")
-        r2_in = self.r2.pin_position("1")
-        sch.add_wire(r1_out, r2_in)
-
-        # Define ports
-        self.ports = {
-            "VIN": self.r1.pin_position("1"),
-            "VOUT": r1_out,  # Junction point
-            "GND": self.r2.pin_position("2"),
-        }
+        self.ratio = ratio
+        # Historical names for the two resistors.
+        self.r1 = self.r_top
+        self.r2 = self.r_bottom
+        components = {"R1": self.r1, "R2": self.r2}
+        if "C_FILT" in self.components:
+            components["C_FILT"] = self.components["C_FILT"]
+        self.components = components
 
     @staticmethod
     def _format_resistance(r_ohms: float) -> str:

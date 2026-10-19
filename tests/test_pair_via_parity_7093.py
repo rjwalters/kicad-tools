@@ -201,3 +201,115 @@ def test_every_route_all_tail_runs_the_audit(strategy: str) -> None:
     run(max_iterations=2) if strategy == "route_all_negotiated" else run()
     # The audit replaced the sentinel with the real (equal, planar) result.
     assert all(f.p_name != "x" for f in ar.pair_via_parity_failures)
+
+
+# -- #7425: preserved copper, checker-aligned pair set, surfacing -------------
+
+
+def test_finalize_counts_preserved_copper(capsys) -> None:
+    # ``--preserve-existing`` / ``--nets`` keep copper in ``existing_routes``;
+    # ``kct check`` sees it on the written board, so the audit must too.
+    ar = _usb_router()
+    ar.routes = [_route(1, "USB_D+", 1)]
+    ar.existing_routes = [_route(2, "USB_D-", 3)]
+    ar._finalize_routing()
+    assert ar.pair_via_parity_failures == [PairViaParityFailure("USB_D+", "USB_D-", 1, 3)]
+    assert "unequal via counts" in capsys.readouterr().out
+
+
+def test_finalize_uses_the_checkers_pair_set() -> None:
+    # Per-net variants of one class that disagree on ``coupled_routing``: the
+    # legacy ``setdefault(class name)`` idiom let the first net's variant win
+    # the class key (here: not coupled -> pair skipped), while
+    # ``build_synth_routing`` -- what ``kct check`` uses -- engages the pair
+    # through the coupled member.  The audit must follow the checker.
+    ar = _usb_router(engaged=False)
+    ar.net_class_map = {
+        "USB_D+": NetClassRouting(name="HighSpeed", coupled_routing=False),
+        "USB_D-": NetClassRouting(name="HighSpeed", coupled_routing=True),
+    }
+    ar.routes = [_route(1, "USB_D+", 0), _route(2, "USB_D-", 1)]
+    ar._finalize_routing()
+    assert ar.pair_via_parity_failures == [PairViaParityFailure("USB_D+", "USB_D-", 0, 1)]
+
+
+def test_json_report_carries_pair_via_parity_failures() -> None:
+    from kicad_tools.router.output import get_routing_diagnostics_json
+
+    ar = _usb_router()
+    ar.routes = [_route(1, "USB_D+", 2), _route(2, "USB_D-", 3)]
+    ar._finalize_routing()
+    net_map = {"USB_D+": 1, "USB_D-": 2}
+    report = get_routing_diagnostics_json(ar, net_map, 2)
+    assert report["pair_via_parity_failures"] == [
+        {"p_net": "USB_D+", "n_net": "USB_D-", "vias_p": 2, "vias_n": 3}
+    ]
+    ar.routes = [_route(1, "USB_D+", 2), _route(2, "USB_D-", 2)]
+    ar._finalize_routing()
+    assert "pair_via_parity_failures" not in get_routing_diagnostics_json(ar, net_map, 2)
+
+
+# -- #7425 review: audit counts the copper the written board carries ----------
+
+
+def test_audit_drops_stale_preserved_copper_of_a_rerouted_net() -> None:
+    # False failure: the stale existing P copper (2 vias) is dropped by
+    # ``_finalize_routes`` because P was re-routed, so the board is 1/1.
+    ar = _usb_router()
+    ar.routes = [_route(1, "USB_D+", 1), _route(2, "USB_D-", 1)]
+    ar.existing_routes = [_route(1, "USB_D+", 2, x0=10.0)]
+    ar._finalize_routing()
+    assert ar.pair_via_parity_failures == []
+
+
+def test_audit_is_not_masked_by_stale_preserved_copper() -> None:
+    # Masked failure: the board carries P=1 / N=2; the stale 1-via P copper
+    # must not be added to P to even it out.
+    ar = _usb_router()
+    ar.routes = [_route(1, "USB_D+", 1), _route(2, "USB_D-", 2)]
+    ar.existing_routes = [_route(1, "USB_D+", 1, x0=10.0)]
+    ar._finalize_routing()
+    assert ar.pair_via_parity_failures == [PairViaParityFailure("USB_D+", "USB_D-", 1, 2)]
+
+
+def test_audit_counts_a_route_in_both_lists_once() -> None:
+    ar = _usb_router()
+    shared = _route(1, "USB_D+", 1)
+    ar.routes = [shared, _route(2, "USB_D-", 1)]
+    ar.existing_routes = [shared]
+    ar._finalize_routing()
+    assert ar.pair_via_parity_failures == []
+
+
+def test_audit_keeps_stub_net_preserved_copper() -> None:
+    ar = _usb_router()
+    ar._stub_terminals = {1: object()}
+    ar.routes = [_route(1, "USB_D+", 1), _route(2, "USB_D-", 2)]
+    ar.existing_routes = [_route(1, "USB_D+", 1, x0=10.0)]
+    ar._finalize_routing()
+    assert ar.pair_via_parity_failures == []
+
+
+# -- #7425 AC1: the end-of-run summary block ----------------------------------
+
+
+def test_route_summary_prints_the_failure_block(capsys) -> None:
+    from kicad_tools.cli.route_cmd import _print_pair_via_parity_summary
+
+    ar = _usb_router()
+    ar.pair_via_parity_failures = [PairViaParityFailure("USB_D+", "USB_D-", 2, 3)]
+    _print_pair_via_parity_summary(ar)
+    out = capsys.readouterr().out
+    assert "--- Pair Via-Parity Failures (1) ---" in out
+    assert "USB_D+/USB_D-: USB_D+ 2 via(s), USB_D- 3 via(s)" in out
+
+
+def test_route_summary_is_silent_when_quiet_or_clean(capsys) -> None:
+    from kicad_tools.cli.route_cmd import _print_pair_via_parity_summary
+
+    ar = _usb_router()
+    ar.pair_via_parity_failures = [PairViaParityFailure("USB_D+", "USB_D-", 2, 3)]
+    _print_pair_via_parity_summary(ar, quiet=True)
+    ar.pair_via_parity_failures = []
+    _print_pair_via_parity_summary(ar)
+    assert capsys.readouterr().out == ""

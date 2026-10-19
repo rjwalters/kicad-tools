@@ -123,6 +123,7 @@ class PadInfo:
     net_number: int
     net_name: str
     roundrect_rratio: float = 0.0
+    drill_slot: tuple[float, float] | None = None  # (w, h) mm of an oval drill
 
 
 @dataclass
@@ -499,9 +500,17 @@ class KiCadToDSNExporter:
 
         # Drill
         drill = 0.0
+        drill_slot: tuple[float, float] | None = None
         drill_node = pad_node.find("drill")
         if drill_node and drill_node.children:
-            drill = _get_float(drill_node.children[0]) or 0.0
+            if _get_str(drill_node.children[0]) == "oval":
+                # (drill oval W H [offset ...]): a slot
+                dims = [_get_float(c) for c in drill_node.children[1:3]]
+                if len(dims) == 2 and all(d for d in dims):
+                    drill_slot = (dims[0] or 0.0, dims[1] or 0.0)
+                    drill = min(drill_slot)
+            else:
+                drill = _get_float(drill_node.children[0]) or 0.0
 
         # Layers
         layers_node = pad_node.find("layers")
@@ -534,6 +543,7 @@ class KiCadToDSNExporter:
             net_number=net_num,
             net_name=net_name,
             roundrect_rratio=rratio,
+            drill_slot=drill_slot,
         )
 
     def _extract_existing_routes(self) -> None:
@@ -721,6 +731,10 @@ class KiCadToDSNExporter:
     def _expand_zone_layers(self, zone: Zone) -> list[str]:
         """The board copper layers a zone covers (wildcards expanded)."""
         specs = zone.layers or ([zone.layer] if zone.layer else [])
+        return self._resolve_copper_layers(specs)
+
+    def _resolve_copper_layers(self, specs: list[str]) -> list[str]:
+        """The board copper layers named by layer specs (wildcards expanded)."""
         out: list[str] = []
         for spec in specs:
             if spec == "*.Cu":
@@ -865,6 +879,47 @@ class KiCadToDSNExporter:
             net_name=net_name,
         )
 
+    def _pad_copper_layers(self, pad: PadInfo) -> list[str]:
+        """The board copper layers a pad's layer list covers."""
+        return self._resolve_copper_layers(pad.layers)
+
+    def _pad_is_pin(self, pad: PadInfo) -> bool:
+        """Whether a pad is exported as an image pin.
+
+        An NPTH hole is an obstacle, not a connection target (it becomes
+        an image keepout), and a pad with no copper layer on this board
+        (paste-only, mask-only) has nothing for the router to see.
+        """
+        if pad.pad_type == "np_thru_hole":
+            return False
+        return bool(self._pad_copper_layers(pad)) or pad.pad_type == "thru_hole"
+
+    def _npth_keepouts(self, pad: PadInfo, px_um: float, py_um: float) -> list[str]:
+        """Image keepouts for an NPTH hole: one per declared copper layer."""
+        if pad.width > pad.drill + 1e-6 and pad.drill > 0:
+            self._omit(
+                f"NPTH pad {pad.number!r} has a copper annulus; "
+                "only its drill is exported as a keepout"
+            )
+        lines: list[str] = []
+        slot = pad.drill_slot
+        for layer in self._layers:
+            dsn_layer = _dsn_quote(KICAD_TO_DSN_LAYER.get(layer, layer))
+            if slot and abs(slot[0] - slot[1]) > 1e-6:
+                w, h = mm_to_um(slot[0]), mm_to_um(slot[1])
+                half = abs(w - h) / 2
+                dx, dy = (half, 0.0) if w > h else (0.0, half)
+                lines.append(
+                    f'      (keepout "" (path {dsn_layer} {min(w, h):.1f} '
+                    f"{px_um - dx:.1f} {py_um - dy:.1f} {px_um + dx:.1f} {py_um + dy:.1f}))"
+                )
+            else:
+                d = mm_to_um(pad.drill or min(pad.width, pad.height))
+                lines.append(
+                    f'      (keepout "" (circle {dsn_layer} {d:.1f} {px_um:.1f} {py_um:.1f}))'
+                )
+        return lines
+
     def _make_padstack_name(self, pad: PadInfo) -> str:
         """Generate a unique padstack name for a pad geometry."""
         if pad.pad_type == "thru_hole":
@@ -877,8 +932,13 @@ class KiCadToDSNExporter:
             # SMD: layer-specific
             w = mm_to_um(pad.width)
             h = mm_to_um(pad.height)
-            layer = pad.layers[0] if pad.layers else "F.Cu"
-            side = "T" if "F.Cu" in layer else "B"
+            copper = self._pad_copper_layers(pad) or ["F.Cu"]
+            if copper == ["F.Cu"]:
+                side = "T"
+            elif copper == ["B.Cu"]:
+                side = "B"
+            else:
+                side = "M" + "".join(str(self._layers.index(c)) for c in copper)
             return f"Rect[{side}]Pad_{w}x{h}_um"
 
     def _build_padstack_def(self, name: str, pad: PadInfo) -> str:
@@ -903,21 +963,14 @@ class KiCadToDSNExporter:
                     )
             lines.append("      (attach off)")
         else:
-            # SMD pad: shape on one layer only
+            # SMD pad: a shape on each copper layer it covers
             w = mm_to_um(pad.width)
             h = mm_to_um(pad.height)
-            pad_layer = pad.layers[0] if pad.layers else "F.Cu"
-            # Map to copper layer only
-            if "F.Cu" in pad_layer:
-                dsn_layer = "F.Cu"
-            elif "B.Cu" in pad_layer:
-                dsn_layer = "B.Cu"
-            else:
-                dsn_layer = pad_layer
-            dsn_layer = KICAD_TO_DSN_LAYER.get(dsn_layer, dsn_layer)
-            lines.append(
-                f"      (shape (rect {_dsn_quote(dsn_layer)} {-w / 2:.1f} {-h / 2:.1f} {w / 2:.1f} {h / 2:.1f}))"
-            )
+            for layer in self._pad_copper_layers(pad) or ["F.Cu"]:
+                dsn_layer = KICAD_TO_DSN_LAYER.get(layer, layer)
+                lines.append(
+                    f"      (shape (rect {_dsn_quote(dsn_layer)} {-w / 2:.1f} {-h / 2:.1f} {w / 2:.1f} {h / 2:.1f}))"
+                )
             lines.append("      (attach off)")
 
         lines.append("    )")
@@ -1064,12 +1117,12 @@ class KiCadToDSNExporter:
         lines.append("  (structure")
 
         # Layers
-        for layer in self._layers:
+        for index, layer in enumerate(self._layers):
             dsn_layer = KICAD_TO_DSN_LAYER.get(layer, layer)
             lines.append(f"    (layer {_dsn_quote(dsn_layer)}")
             lines.append("      (type signal)")
             lines.append("      (property")
-            lines.append("        (index 0)")
+            lines.append(f"        (index {index})")
             lines.append("      )")
             lines.append("    )")
 
@@ -1150,12 +1203,18 @@ class KiCadToDSNExporter:
             lines.append(f"    (image {_dsn_quote(image_name)}")
 
             for pad in fp.pads:
+                px_um = mm_to_um(pad.x)
+                py_um = mm_to_um(pad.y)
+                if pad.pad_type == "np_thru_hole":
+                    lines.extend(self._npth_keepouts(pad, px_um, py_um))
+                    continue
+                if not self._pad_is_pin(pad):
+                    continue
+
                 ps_name = self._make_padstack_name(pad)
                 if ps_name not in padstack_defs:
                     padstack_defs[ps_name] = self._build_padstack_def(ps_name, pad)
 
-                px_um = mm_to_um(pad.x)
-                py_um = mm_to_um(pad.y)
                 lines.append(
                     f"      (pin {_dsn_quote(ps_name)} {_dsn_quote(pad.number)} {px_um:.1f} {py_um:.1f})"
                 )
@@ -1192,7 +1251,7 @@ class KiCadToDSNExporter:
             for pad in fp.pads:
                 # Keyed on the net *name*: a name-only (KiCad 9/10) net is
                 # still a net; only an empty name means "no net" (#6594).
-                if pad.net_name:
+                if pad.net_name and self._pad_is_pin(pad):
                     net_pins.setdefault(pad.net_name, []).append(f"{fp.reference}-{pad.number}")
 
         # Generate net definitions
