@@ -171,7 +171,7 @@ def test_exception_is_tied_to_7487_and_not_expired(routing_plan):
     assert routing_plan.USB_VIA_IN_PAD_EXCEPTION_ISSUE == 7487
     expires = datetime.date.fromisoformat(routing_plan.USB_VIA_IN_PAD_EXCEPTION_EXPIRES)
     assert datetime.date.today() <= expires, (
-        "board 03's #7084 via-in-pad usb_geometry() window exception expired on "
+        "board 03's #7487 via-in-pad usb_geometry() window exception expired on "
         f"{expires}; re-rule it or remove it (see routing_plan.py)"
     )
 
