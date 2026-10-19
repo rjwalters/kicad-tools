@@ -128,6 +128,7 @@ from .negotiated_budget import (
 from .net_class import NetClass, classify_from_name
 from .output import format_failed_nets_summary
 from .pad_access_invariant import AccessVeto, PadAccessInvariant
+from .pair_via_parity import PairViaParityFailure
 from .parallel import (
     ParallelRouter,
     RegionBasedNegotiatedRouter,
@@ -653,35 +654,65 @@ def _lattice_tap_retry_outcomes() -> frozenset[str]:
     return frozenset(f"uncoupled-fallback:pair-{r}" for r in EXHAUSTED_SEARCH_REASONS)
 
 
+def segment_via_counts(
+    coupled: list[Any], routes_by_key: Mapping[object, Route]
+) -> dict[object, tuple[int, int]]:
+    """``{segment key: (vias_P, vias_N)}`` of every segment's COMMITTED legs (#7093).
+
+    Every lattice pair outcome -- coupled, gateway, hybrid or uncoupled
+    fallback -- commits its two legs under ``(pc.key, "P")`` /
+    ``(pc.key, "N")``, so the counts are read off the copper the negotiation
+    actually returned.  A segment with a missing or empty leg is skipped (an
+    open is reported as an open).  Reading the routes, not the fallback
+    flush's :attr:`~.lattice.pathfinder.LatticePathfinder.pair_via_mismatch`
+    record, keeps the report true when a retry that re-flushed the pair is
+    discarded (#6535 tap chain, #6842 gateway offer, #6444 gateway rollback)
+    and covers the #6446 hybrid legs, which never reach the flush.
+    """
+    counts: dict[object, tuple[int, int]] = {}
+    for pc in coupled:
+        legs = (routes_by_key.get((pc.key, "P")), routes_by_key.get((pc.key, "N")))
+        if any(leg is None or not leg.segments for leg in legs):
+            continue
+        counts[pc.key] = (len(legs[0].vias), len(legs[1].vias))  # type: ignore[union-attr]
+    return counts
+
+
+#: Why a segment's unequal vias could not be avoided, by segment status.
+_VIA_MISMATCH_CAUSE = {
+    "uncoupled-fallback": "no fallback candidate had via parity",
+    "hybrid": "the hybrid's single-ended legs found no via-equal pair",
+}
+
+
 def pair_via_mismatch_warnings(
     coupled: list[Any],
     outcomes: Mapping[object, str],
-    mismatch: Mapping[object, tuple[int, int]],
+    counts: Mapping[object, tuple[int, int]],
 ) -> list[str]:
     """One ``WARNING`` line per segment committed with unequal P/N via counts.
 
-    Issue #7093: ``mismatch`` is the pathfinder's ``pair_via_mismatch``
-    (``key -> (vias_P, vias_N)``, recorded when the #6373 fallback flush
-    commits legs no candidate could give via parity).  The check is per
-    segment, keyed by ``pc.key``, so it fires whatever the whole pair's
-    outcome is: ``uncoupled-fallback:``, ``partially-coupled:<k>/<n>`` (board
-    03's USB_D) or a chain whose other segment is ``hybrid:``.  Only a segment
-    whose final outcome is still the uncoupled fallback is reported -- a
-    hybrid or coupled segment's copper was not committed by the flush, so a
-    mismatch entry left from an earlier pass does not describe it.
+    Issue #7093: ``counts`` is ``key -> (vias_P, vias_N)`` of each segment's
+    committed legs (:func:`segment_via_counts`).  The check is per segment,
+    keyed by ``pc.key``, so it fires whatever the whole pair's outcome is:
+    ``uncoupled-fallback:``, ``partially-coupled:<k>/<n>`` (board 03's USB_D)
+    or ``hybrid:``.  Unequal vias are a pair-rule failure the router could
+    not avoid; never silent.  The coupled and gateway outcomes give equal
+    counts by construction, so a line naming one of them is a router bug.
     """
     from .pairplan.outcome import segment_record
 
     lines: list[str] = []
     for pc in coupled:
-        counts = mismatch.get(pc.key)
-        if counts is None or segment_record(outcomes, pc.key).status != "uncoupled-fallback":
+        got = counts.get(pc.key)
+        if got is None or got[0] == got[1]:
             continue
+        status = segment_record(outcomes, pc.key).status
+        cause = _VIA_MISMATCH_CAUSE.get(status, f"segment outcome {status}")
         span = f"{pc.pad_p_a.ref}.{pc.pad_p_a.pin}->{pc.pad_p_b.ref}.{pc.pad_p_b.pin}"
         lines.append(
             f"  WARNING: diff pair {pc.pair_name} {span} legs have unequal via "
-            f"counts (P={counts[0]}, N={counts[1]}); no fallback candidate had "
-            "via parity"
+            f"counts (P={got[0]}, N={got[1]}); {cause}"
         )
     return lines
 
@@ -1873,6 +1904,13 @@ class Autorouter:
         # Issue #6837: the structured record behind each of those strings
         # (``PairOutcome.label`` is the string), rebuilt with them.
         self._lattice_pair_outcome_records: dict[str, PairOutcome] = {}
+        # Issue #7093: engaged pairs committed with unequal P/N via counts
+        # (see :meth:`_audit_pair_via_parity`), refreshed by every
+        # ``_finalize_routing``; plus the pairs the lattice's per-segment
+        # report already named and the failures already printed.
+        self.pair_via_parity_failures: list[PairViaParityFailure] = []
+        self._lattice_via_warned_nets: set[frozenset[int | None]] = set()
+        self._reported_pair_via_parity: set[tuple[str, str, int, int]] = set()
         # Issue #6378: a pair that passes through an interior part (board 03
         # USB_D through the ESD part U2) is routed as a chain -- one coupled
         # connection per segment plus single-ended P/N hops inside the part.
@@ -5561,10 +5599,16 @@ class Autorouter:
             # are a pair-rule failure the fallback could not avoid; never
             # silent.  Per segment, so a partially-coupled or hybrid pair's
             # fallback segment warns too.
-            for line in pair_via_mismatch_warnings(
-                coupled, outcomes, getattr(pf, "pair_via_mismatch", {}) or {}
-            ):
+            via_counts = segment_via_counts(coupled, routes_by_key)
+            for line in pair_via_mismatch_warnings(coupled, outcomes, via_counts):
                 print(line)
+            # The pair-level audit in ``_finalize_routing`` would repeat these
+            # pairs; it names only pairs this per-segment report did not.
+            self._lattice_via_warned_nets = {
+                frozenset((pc.pad_p_a.net, pc.pad_n_a.net))
+                for pc in coupled
+                if pc.key in via_counts and via_counts[pc.key][0] != via_counts[pc.key][1]
+            }
 
         by_net: dict[int, list[Route]] = {}
         for route in routes_by_key.values():
@@ -8486,6 +8530,7 @@ class Autorouter:
                     board_thickness_mm=None,
                     num_copper_layers=None,
                 )
+            self._audit_pair_via_parity(detected_pairs, synth_routing, net_to_class)
         except ImportError:
             # diffpair_detection module unavailable -- silently skip the
             # diff-pair block but continue to the match-group block.
@@ -8524,6 +8569,57 @@ class Autorouter:
             board_thickness_mm=None,
             num_copper_layers=None,
         )
+
+    def _audit_pair_via_parity(
+        self,
+        detected_pairs: list,
+        synth_routing: dict,
+        net_to_class: dict[str, str],
+    ) -> None:
+        """Report every engaged pair committed with unequal via counts (#7093).
+
+        Engine-agnostic backstop behind every ``route_all_*`` entry point (it
+        runs in :meth:`_finalize_routing`).  The pairs are the ones ``kct
+        check`` engages -- detected, and opted in by their net class
+        (:func:`~.diffpair.should_engage_coupled`) -- and the counts are every
+        via on each net, as the checker's ``unequal via counts`` finding
+        counts them.  The router keeps the counts equal where it can (coupled
+        and gateway outcomes by construction, the lattice fallback by ranking
+        and mirrored legs); where it could not -- a lattice fallback or hybrid
+        leg, the grid engine's independent fallback, a pair deferred to the
+        single-ended main loop -- the result is a pair-rule failure, recorded
+        in :attr:`pair_via_parity_failures` and printed, never silent.  A pair
+        the lattice's per-segment report already named is not printed twice.
+        """
+        from .diffpair import should_engage_coupled
+        from .pair_via_parity import audit_pair_via_parity
+
+        pairs: list[tuple[int, str, int, str]] = []
+        for dp in detected_pairs:
+            pair = dp.pair
+            engaged, _reason = should_engage_coupled(
+                pair, net_class_routing=synth_routing, net_to_class=net_to_class
+            )
+            if engaged:
+                pos, neg = pair.positive, pair.negative
+                pairs.append((pos.net_id, pos.net_name, neg.net_id, neg.net_name))
+        failures = audit_pair_via_parity(self.routes, pairs)
+        self.pair_via_parity_failures = failures
+        names = {name: net for net, name in self.net_names.items()}
+        warned: set[frozenset[int | None]] = getattr(self, "_lattice_via_warned_nets", set())
+        reported: set[tuple[str, str, int, int]] | None = getattr(
+            self, "_reported_pair_via_parity", None
+        )
+        if reported is None:
+            reported = self._reported_pair_via_parity = set()
+        for f in failures:
+            nets = frozenset((names.get(f.p_name), names.get(f.n_name)))
+            sig = (f.p_name, f.n_name, f.vias_p, f.vias_n)
+            if nets in warned or sig in reported:
+                continue
+            reported.add(sig)
+            print(f.warning())
+            logger.warning(f.warning().strip())
 
     # ------------------------------------------------------------------
     # Diff-pair partner map for escape routing
