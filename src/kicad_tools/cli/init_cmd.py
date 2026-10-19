@@ -11,6 +11,7 @@ Usage:
 """
 
 import argparse
+import copy
 import json
 import re
 import sys
@@ -24,8 +25,13 @@ from kicad_tools.core.netclass_templates import (
     get_available_design_types,
     get_netclass_summary,
 )
+from kicad_tools.core.rule_loosening import RuleLooseningError, assert_no_loosenings
 from kicad_tools.manufacturers import DesignRules, get_manufacturer_ids, get_profile
 from kicad_tools.manufacturers.dru_generator import generate_dru, merge_dru_floors
+from kicad_tools.manufacturers.project_generator import (
+    merge_policy_allowances,
+    merge_project_rules_guarded,
+)
 from kicad_tools.units import get_current_formatter
 
 console = Console()
@@ -410,32 +416,17 @@ def init_project(
         project_path.parent.mkdir(parents=True, exist_ok=True)
         project_data = create_project_file(project_path, project_name)
 
-    # Ensure nested structure exists
-    if "board" not in project_data:
-        project_data["board"] = {}
-    if "design_settings" not in project_data["board"]:
-        project_data["board"]["design_settings"] = {}
-    if "rules" not in project_data["board"]["design_settings"]:
-        project_data["board"]["design_settings"]["rules"] = {}
-    if "defaults" not in project_data["board"]["design_settings"]:
-        project_data["board"]["design_settings"]["defaults"] = {}
-
-    settings = project_data["board"]["design_settings"]
-
-    # Apply design rules
-    settings["rules"]["min_clearance"] = rules.min_clearance_mm
-    settings["rules"]["min_track_width"] = rules.min_trace_width_mm
-    settings["rules"]["min_via_diameter"] = rules.min_via_diameter_mm
-    settings["rules"]["min_via_annular_width"] = rules.min_annular_ring_mm
-    settings["rules"]["min_through_hole_diameter"] = rules.min_hole_diameter_mm
-    settings["rules"]["min_via_hole"] = rules.min_via_drill_mm
-    settings["rules"]["min_copper_edge_clearance"] = rules.min_copper_to_edge_mm
-
-    # Set defaults for new objects
-    settings["defaults"]["track_min_width"] = rules.min_trace_width_mm
-    settings["defaults"]["clearance_min"] = rules.min_clearance_mm
-    settings["defaults"]["via_min_diameter"] = rules.min_via_diameter_mm
-    settings["defaults"]["via_min_drill"] = rules.min_via_drill_mm
+    # Apply design rules through the one #6191 stricter-wins policy every
+    # .kicad_pro writer follows (Issue #7385).  On an existing project an
+    # authored minimum or Default-netclass value stricter than the profile
+    # is kept; a rewrite that would loosen an authored rule refuses below,
+    # before anything is written.
+    rules_before = copy.deepcopy(project_data)
+    try:
+        merge_report = merge_project_rules_guarded(project_data, rules, writer="kct init")
+    except RuleLooseningError as e:
+        err_console.print(f"Error: {e}", markup=False, highlight=False)
+        return 1
 
     # Store manufacturer metadata
     if "meta" not in project_data:
@@ -448,12 +439,39 @@ def init_project(
     netclass_summary = None
     if design_type:
         try:
-            apply_design_template(project_data, design_type, rules=rules)
+            # The Default netclass takes the template's values only where the
+            # merge policy already treats it as unauthored (Issue #7385).
+            apply_design_template(
+                project_data,
+                design_type,
+                rules=rules,
+                keep_stricter_default=not (
+                    {"*", "netclasses.Default.track_width"}
+                    & merge_policy_allowances(rules_before, apply_severities=False)
+                ),
+            )
             project_data["meta"]["design_type"] = design_type
             netclass_summary = get_netclass_summary(project_data)
         except ValueError as e:
             err_console.print(f"[red]Error:[/red] {e}")
             return 1
+
+    # The design template merges stricter-wins too; re-check the complete
+    # rewrite against the project as loaded, so neither step can loosen it.
+    try:
+        assert_no_loosenings(
+            rules_before,
+            project_data,
+            allow=merge_policy_allowances(rules_before, apply_severities=False),
+            writer="kct init",
+        )
+    except RuleLooseningError as e:
+        err_console.print(f"Error: {e}", markup=False, highlight=False)
+        return 1
+
+    if output_format == "text":
+        for line in merge_report.messages():
+            console.print(line, markup=False, highlight=False)
 
     # Write project file
     try:
