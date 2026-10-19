@@ -45,16 +45,16 @@ Issues currently being built (`loom:building`).
 - **#7349**: Boards 06/07: enable diff-pair gap tightening on seed-42 re-routes and drop the impedance caps (#7344 PR 2)
 - **#7355**: kct readiness --verify doesn't honour board 04's recorded #6269 exception: blocks on 24 paid-drill via errors while the committed record says ready
 - **#7358**: Evidence producers: gate-parity ratchet test, one registered re-pin path per ready board (#7353 step 4)
-- **#7367**: Key remaining count-based CI/test allowances by identity (extends #7359): stale board-03/07 allowances, board-05 blocking cap, DRC tolerance counts
 - **#7399**: Schematic blocks: 10 stock factories fail on real KiCad 10 libs (stale symbol IDs, fictional mock pins); add a real-symbol smoke test
 
 ## PRs Awaiting Review
 
 PRs waiting on Judge (`loom:review-requested`).
 
+- **#7308**: fix(router): refuse vias in the mask-dam zone beside SMD pads; clear boards 02/05/06
 - **#7350**: feat(router): length-aware choice among via-parity fallback leg pairs (#7093)
-- **#7394**: feat: tighten diff-pair gaps in board 06/07 recipes, lower impedance caps
-- **#7408**: fix(ci): lower board 07 copper-safety DRC floor to 0
+- **#7361**: feat: honour an exact errors allowance on exception known issues in kct readiness
+- **#7413**: test: pin historical board 05 ERC error budget at 0
 
 ## Approved (Awaiting Merge)
 
@@ -132,8 +132,8 @@ Issues carrying `loom:curated`.
 | Very important | 0 |
 | Important | 4 |
 | Ready (`loom:issue`) | 0 |
-| In Progress (`loom:building`) | 9 |
-| PRs awaiting review | 3 |
+| In Progress (`loom:building`) | 8 |
+| PRs awaiting review | 4 |
 | Approved PRs awaiting merge | 0 |
 | Curated | 33 |
 | Architect / Hermit proposals | 10 |
