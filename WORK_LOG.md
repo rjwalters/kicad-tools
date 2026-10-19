@@ -15,6 +15,11 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-19
 
+- **PR #7388**: fix: rule writers keep stricter authored .kicad_pro rules (#7385)
+- **PR #7379**: refactor(geometry): delegate private point-to-segment distance copies to core (PR2 of #7224)
+- **Issue #7385** (closed): Rule files may only tighten on rewrite: kct mfr apply-rules (.kicad_pro), fab-rules apply and kct init bypass the #6191 max() policy and loosen authored rules
+- **Issue #7390** (closed): Backlog consolidation 2026-10-18: close #7199 (done), unblock #7268, clear stale building on #6554/#7153, retire #7220 with #7296
+- **Issue #7224** (closed): hermit: re-consolidate point-in-polygon (8 copies) and point-to-segment distance (2 canonical + 7 private); footprint_outside_board misjudges top/right-edge origins
 - **Issue #7062** (closed): LDOBlock internal routing shorts foreign pads and crosses itself on real SOT-23-5 geometry
 - **PR #7288**: fix: route stock LDOBlock copper clear of foreign pads
 - **Issue #7339** (closed): Board 07 seed-42 re-route: DDR_DATA_BYTE_0 match-group skew 16.7 mm (tol 0.100) exceeds MATCHGROUP_VIOLATION_BASELINE once DQ0 routes
