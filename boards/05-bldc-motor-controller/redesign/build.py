@@ -82,6 +82,8 @@ def build(output):
     generate(output)
     # A local copy lets procurement/export discover exact identities in scratch.
     (output / "project.kct").write_text((ROOT / "project.kct").read_text().replace("output/", ""))
+    # Published beside the PCB so `kct check` auto-loads the declared ampacity targets.
+    shutil.copy2(ROOT / "net_class_map.json", output / "net_class_map.json")
     routed = output / "bldc_controller_routed.kicad_pcb"
     shutil.copy2(output / "bldc_controller.kicad_pcb", routed)
     shutil.copy2(output / "bldc_controller.kicad_pro", routed.with_suffix(".kicad_pro"))

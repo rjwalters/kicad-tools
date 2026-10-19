@@ -60,6 +60,7 @@ Measured experiments on `kct route`; several record negative results.
 | [Rip-up](kct-route-ripup-experiment.md) | KRT-style sequential N+1 rip-up: no gain |
 | [Expand, route, shrink](expand-route-shrink-experiment.md) | Routing an expanded placement then shrinking it back |
 | [Diff-pair bench, phase 0](diffpair-bench-phase0.md) | Diff-pair benchmark baseline |
+| [Diff-pair skew compensation](diffpair-skew-compensation.md) | Sourced skew limits and uncoupled-length budgets for the diff-pair skew fixer |
 | [Bundle crossing report](bundle-crossing-report.md) | Measured hit and false-alarm counts |
 | [Pad-budget via footprint](pad-budget-via-footprint-6415.md) | Via-footprint charging on board 05 |
 | [kct check vs kicad-cli lengths](kicad-length-bench-6725.md) | Per-net length and pair skew comparison |
@@ -83,3 +84,12 @@ Measured experiments on `kct route`; several record negative results.
 | [MCP clearance and grid audit](mcp-clearance-grid-audit.md) | MCP clearance and router grid audit |
 | [Connectivity contact paths](connectivity-contact-paths-5133.md) | Existing physical contact paths in the Board06 extractor |
 | [Copper LVS zone suppression](copper-lvs-zone-suppression.md) | Independent Board05 evidence |
+
+## Adding a note
+
+1. Add `docs/research/<topic>.md` and date it; say how each source was obtained.
+2. Add one line (title plus a one-sentence summary) to the matching table above.
+   `tests/test_docs_reachability.py` fails if a note is not listed here.
+3. If the note evaluates a neighbouring project, also add or update its entry in
+   the ecosystem registry (`src/kicad_tools/ecosystem/data/projects.toml`, then
+   `uv run python scripts/ecosystem_render.py --write`).

@@ -44,6 +44,12 @@
 (rule "Silkscreen Height - jlcpcb-tier1"
   (condition "A.Type == 'text' && (A.Layer == 'F.Silkscreen' || A.Layer == 'B.Silkscreen')")
   (constraint text_height (min 1.0mm)))
+(rule "Ampacity Min Width (Power, external) - jlcpcb-tier1"
+  (condition "A.NetClass == 'Power' && A.Type == 'track' && (A.Layer == 'F.Cu' || A.Layer == 'B.Cu')")
+  (constraint track_width (min 0.0125mm)))
+(rule "Ampacity Min Width (Power, internal) - jlcpcb-tier1"
+  (condition "A.NetClass == 'Power' && A.Type == 'track' && A.Layer != 'F.Cu' && A.Layer != 'B.Cu'")
+  (constraint track_width (min 0.0751mm)))
 
 (rule "Reviewed clearance - Debug"
   (condition "(A.NetClass == 'Debug' || B.NetClass == 'Debug') && !(A.Type == 'Pad' && B.Type == 'Pad' && A.Reference == B.Reference) && !A.isCoupledDiffPair()")

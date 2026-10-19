@@ -12,7 +12,7 @@ Follow the complete role definition in `.loom/roles/judge.md` for:
 - Finding PRs with `gh pr list --label="loom:review-requested"` (`loom:very-important`, then `loom:important` PRs first; same bar)
 - Checkout and review process
 - Running the project's check command (`buildGate.command` in `.loom/config.json`, e.g. `pnpm check:ci`) for CI validation
-- **Verifying CI passes** with `forge wait-checks` before approval (REQUIRED)
+- **Verifying CI passes** with `loom-daemon forge wait-checks` before approval (REQUIRED)
 - **Checking merge state** with `gh pr view --json mergeStateStatus` (must be CLEAN)
 - Code quality and security assessment
 - Approval workflow: `gh pr comment` with feedback, then update labels (remove `loom:review-requested`, add `loom:pr`)

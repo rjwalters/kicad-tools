@@ -782,6 +782,11 @@ def repin_staged(
         # from, so report binding sees provenance and not just co-pinning.
         pcb_sha = sha256(staged / cfg.routed_pcb)
         report.setdefault("report_sources", {}).update(dict.fromkeys(cfg.drc_targets, pcb_sha))
+    # ``read_readiness`` requires every output rule sidecar to be an input; a
+    # sidecar added since the report was issued (Issue #7206) is bound here.
+    for p in (staged / "output").iterdir():
+        if p.is_file() and p.name.endswith("net_class_map.json"):
+            report["inputs"].setdefault(p.relative_to(staged).as_posix(), "")
     for name in report["inputs"]:
         report["inputs"][name] = sha256(staged / name)
     report["checked_at"] = checked_at

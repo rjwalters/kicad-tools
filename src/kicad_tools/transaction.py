@@ -225,7 +225,7 @@ class BoardTransaction:
         tmp_path = path.with_name(path.name + ".txn-restore.tmp")
         try:
             tmp_path.write_bytes(snapshot)
-            with open(tmp_path, "rb") as f:
+            with open(tmp_path, "r+b") as f:
                 os.fsync(f.fileno())
             os.replace(tmp_path, path)
         finally:

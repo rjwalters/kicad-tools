@@ -1041,6 +1041,23 @@ work_log_has_pr() {
 work_log_has_issue() {
   grep -qE "^- \*\*Issue #${1}\*\* " "$DOCS_WT/WORK_LOG.md" 2>/dev/null
 }
+
+# Lookback-versus-rotation-floor invariant (#12634, slice 2 of #12589). The two
+# presence checks above read ONLY the active `$DOCS_WT/WORK_LOG.md`, and
+# `update_work_log()` re-queries the last `WORK_LOG_LOOKBACK_DAYS` days of
+# merged PRs / closed issues every tick. Rotation (Step 2b) moves whole-day
+# sections into `work_log/WORK_LOG_YYYY-MM.md`, where these checks cannot see
+# them. That is safe ONLY while the rotation cutoff is older than the lookback:
+# every candidate the query can return then still has its entry in the active
+# file. If the lookback grows (or the cutoff shrinks) past that, an archived
+# entry is re-appended as a duplicate. Rather than also grepping the archives
+# on every tick (more I/O, and it would hide the drift instead of failing
+# safe), `rotate_work_log()` asserts the invariant and SKIPS rotation with a
+# logged warning when it does not hold. `update_work_log()` derives `since`
+# from WORK_LOG_LOOKBACK_DAYS, so the assertion tracks the real lookback.
+WORK_LOG_LOOKBACK_DAYS=30
+WORK_LOG_ROTATE_OLDER_THAN_DAYS=60   # `work-docs archive` default; the verb itself refuses < 45
+WORK_LOG_ROTATE_MARGIN_DAYS=15       # required headroom of the cutoff over the lookback
 ```
 
 Read them from `$DOCS_WT` (a fresh checkout of `origin/<default-branch>`), not
@@ -1461,7 +1478,7 @@ update_work_log() {
   # `--limit 50` on closed issues can push an out-of-order closure out of the
   # query too.
   local since
-  since=$(date -u -d '30 days ago' +%Y-%m-%d 2>/dev/null || date -u -v-30d +%Y-%m-%d)
+  since=$(date -u -d "${WORK_LOG_LOOKBACK_DAYS} days ago" +%Y-%m-%d 2>/dev/null || date -u -v-"${WORK_LOG_LOOKBACK_DAYS}"d +%Y-%m-%d)
 
   # Get merged-PR candidates in the window, minus this phase's own docs PRs.
   #
@@ -1662,6 +1679,81 @@ update_work_log() {
 - **PR #1780**: Fix biome lint errors across quickstarts and src/lib
 - **Issue #1770** (closed): Stale heartbeat messages from previous phase
 ```
+
+### Step 2b: Rotate WORK_LOG.md Into Archives (#12634)
+
+Keeps the active `WORK_LOG.md` short by running `loom-daemon work-docs archive`
+(the content-preserving move verb; layout and eligibility floor in
+`.loom/docs/work-docs-archive.md`) against `$DOCS_WT`. Rotation rides the same
+bundled docs PR as everything else: it never opens a PR of its own.
+
+```bash
+# Exact archive pattern from the layout doc. Staged by `create_docs_pr()` one
+# file at a time; NEVER widen it to `work_log/` or `git add -A`.
+WORK_LOG_ARCHIVE_GLOB='work_log/WORK_LOG_[0-9][0-9][0-9][0-9]-[0-9][0-9].md'
+
+# $1 = 1 when update_work_log() wrote entries this tick (it returned 0), else 0.
+# Returns 0 only when it moved sections; every other path leaves $DOCS_WT as it was.
+rotate_work_log() {
+  local wrote="${1:-0}" report moved
+
+  # Fail-safe invariant (see the note above work_log_has_pr()): the cutoff must
+  # stay older than the lookback by the margin, or archived entries would be
+  # re-appended by update_work_log(). Skip loudly, never rotate.
+  if [ "$WORK_LOG_ROTATE_OLDER_THAN_DAYS" -lt $(( WORK_LOG_LOOKBACK_DAYS + WORK_LOG_ROTATE_MARGIN_DAYS )) ]; then
+    echo "WARNING: WORK_LOG rotation skipped: cutoff ${WORK_LOG_ROTATE_OLDER_THAN_DAYS}d is not at least ${WORK_LOG_ROTATE_MARGIN_DAYS}d older than the ${WORK_LOG_LOOKBACK_DAYS}d lookback (would re-append archived entries)." >&2
+    return 1
+  fi
+
+  # Dry run first: it writes nothing, so a tick with nothing eligible cannot
+  # produce a diff. A verb failure (or an installed daemon without `work-docs`)
+  # skips rotation; it never blocks the rest of Document Maintenance.
+  report="$(loom-daemon work-docs archive --root "$DOCS_WT" \
+    --older-than-days "$WORK_LOG_ROTATE_OLDER_THAN_DAYS" --dry-run 2>&1)" || {
+    echo "WARNING: WORK_LOG rotation skipped: dry run failed: $report" >&2
+    return 1
+  }
+  moved="$(printf '%s\n' "$report" | sed -n 's/^dry run: \([0-9][0-9]*\) sections.*/\1/p')"
+  [ "${moved:-0}" -gt 0 ] || return 1
+
+  # Trigger: rotate only when this tick already writes WORK_LOG, or when at
+  # least one whole month is past the floor. The dry run counts sections, not
+  # months, so approximate "a whole month" as >= 28 sections (one per day).
+  if [ "$wrote" != "1" ] && [ "$moved" -lt 28 ]; then
+    echo "WORK_LOG rotation deferred: $moved eligible section(s), and this tick writes no WORK_LOG entries."
+    return 1
+  fi
+
+  loom-daemon work-docs archive --root "$DOCS_WT" \
+    --older-than-days "$WORK_LOG_ROTATE_OLDER_THAN_DAYS" || {
+    echo "WARNING: WORK_LOG rotation failed; discarding its partial changes." >&2
+    git -C "$DOCS_WT" checkout -- WORK_LOG.md 2>/dev/null
+    return 1
+  }
+
+  # Conservation check before anything can be staged. Non-zero aborts rotation.
+  if ! loom-daemon work-docs check --root "$DOCS_WT"; then
+    echo "WARNING: WORK_LOG conservation check failed after rotation; discarding it." >&2
+    git -C "$DOCS_WT" checkout -- WORK_LOG.md 2>/dev/null
+    git -C "$DOCS_WT" clean -fdq -- work_log 2>/dev/null
+    return 1
+  fi
+  return 0
+}
+```
+
+Call it after `update_work_log()`, passing `1` when that function returned 0
+and `0` otherwise. Its result does not change whether the tick proceeds: the
+debounce (#6133), the `$GUIDE_DOCS_PR_EXCLUDE` self-loop filter and the
+docs-guide lock are untouched, and `create_docs_pr()` still opens no PR when
+nothing differs from `origin`.
+
+**Interrupted ticks need no special handling.** Rotation is repeatable (a second
+run is a byte-identical no-op) and `docs-worktree.sh` resets `$DOCS_WT` to a
+clean `origin/<default-branch>` checkout every tick (`reset --hard`, `clean -fd`).
+A tick that rotated but never opened its PR therefore leaves nothing behind;
+the next tick recomputes the same rotation from the committed documents. No
+gitignored sidecar holds any state.
 
 ### Step 3: Update WORK_PLAN.md
 
@@ -2137,6 +2229,15 @@ create_docs_pr() {
   # is what `git -C "$DOCS_WT"` makes them).
   git -C "$DOCS_WT" add WORK_LOG.md WORK_PLAN.md README.md
 
+  # Archive files (#12634): staged by EXACT pattern, one file at a time -- never
+  # `git add -A` or the `work_log/` directory, so an unrelated file placed there
+  # is not swept into the docs PR.
+  local archive_file
+  for archive_file in "$DOCS_WT"/$WORK_LOG_ARCHIVE_GLOB; do
+    [ -f "$archive_file" ] || continue
+    git -C "$DOCS_WT" add -- "work_log/${archive_file##*/}"
+  done
+
   # Snapshot which of the three files actually changed, for the telemetry
   # record below (issue #6136) — captured now, before the `diff --cached`
   # check below consumes the staged diff.
@@ -2295,6 +2396,8 @@ Document Maintenance Phase
   │       this phase may write (guards deny the main checkout)
   ├─ Update "$DOCS_WT/WORK_LOG.md" (append new entries; this phase's OWN
   │    docs PRs are filtered out — see the #5454 note in Step 2)
+  ├─ Rotate "$DOCS_WT/WORK_LOG.md" into work_log/ archives (#12634; only when
+  │    this tick writes WORK_LOG or a whole month is eligible; guard + check)
   ├─ Update "$DOCS_WT/WORK_PLAN.md" (regenerate if labels changed)
   ├─ Check "$DOCS_WT/README.md" staleness (only if architecture changed)
   ├─ If any changes:

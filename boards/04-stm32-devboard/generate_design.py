@@ -1418,6 +1418,28 @@ def create_stm32_pcb(output_dir: Path) -> Path:
     return pcb_path
 
 
+# Declared supply currents from project.kct (A), mapped onto nets (Issue #7206).
+AMPACITY_TARGETS_A = {"+5V": 0.5, "+3.3V": 0.3}
+
+
+def declare_ampacity_targets(output_dir: Path) -> None:
+    """Declare the spec's supply currents as ``target_ampacity`` (Issue #7206).
+
+    project.kct declares these currents; kct never infers which net carries
+    them, so the net-class-map sidecar must map them or ``kct check`` reports
+    ``ampacity: unknown``.
+    """
+    import json
+
+    sidecar = output_dir / "net_class_map.json"
+    data = json.loads(sidecar.read_text()) if sidecar.exists() else {}
+    for net, amps in AMPACITY_TARGETS_A.items():
+        entry = data.setdefault(net, {"name": "Power", "priority": 1, "trace_width": 0.25})
+        entry["target_ampacity"] = amps
+    sidecar.write_text(json.dumps(data, indent=2))
+    print(f"   Declared target_ampacity on {', '.join(AMPACITY_TARGETS_A)}: {sidecar}")
+
+
 def route_pcb(input_path: Path, output_path: Path) -> bool:
     """Route the reviewed two-layer, paid mechanical-drilling construction.
 
@@ -2387,6 +2409,7 @@ def main() -> int:
         # Step 5: Route PCB
         routed_path = output_dir / "stm32_devboard_routed.kicad_pcb"
         route_success = route_pcb(pcb_path, routed_path)
+        declare_ampacity_targets(output_dir)
 
         # Step 5.5a: route_success fast-fail gate (#4066, mirrors board 03's
         # ``route_success`` gate after ``route_pcb`` in

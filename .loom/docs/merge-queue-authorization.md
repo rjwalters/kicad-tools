@@ -173,6 +173,31 @@ Run `group-check` from a `merge_group` workflow with `statuses: write`
 (Phase C, `merge-queue-ci.md`). The installable template is
 `defaults/optional/github-workflows/merge-group-check.yml`.
 
+## External status poster (`forge.mergeQueue.statusCommand`, #12679)
+
+For consumers whose writer App lacks `statuses: write` (the grant is broad on a
+multi-repo installation), set `forge.mergeQueue.statusCommand` to an argv array
+(no shell) in the effective config. Every `loom/merge-authorization` post then
+goes to that command instead of `gh api .../statuses/...`: the handoff head
+`success`, the rollback `pending`/`failure`, head and group-commit revoke
+`failure`, and the daemon's periodic group check. The writer App's `statuses`
+permission is no longer read, and **there is no fallback to the daemon's own
+token**: a non-zero exit, timeout, spawn failure or malformed setting refuses
+the post (`HeadStatus`, or `WRITER_CANNOT_POST_STATUSES` at the preflight), so
+nothing is granted and no other host's grant is revoked. Unset, behaviour is
+unchanged.
+
+Flags appended to the argv: `--repo OWNER/REPO --sha SHA --context CTX --state
+success|pending|failure --description TEXT --idempotency-key KEY`, plus `--pr N`
+only when the post is about one PR's head (omitted for a group commit, which
+holds several PRs). The key is the SHA-256 of `repo|sha|context|state|description`.
+The preflight and `merge-group-ci eligibility` run the same command with
+`--dry-run` appended (sha all zeros, state `pending`); it must post nothing.
+Exit 0 means posted (or would post); any other exit is a refusal whose first
+stdout line is the reason. Each call is bounded at 60 s. Eligibility reports the
+route as `facts.status_route: "statusCommand"` and a refused probe as
+`STATUS_COMMAND_REFUSED`. Out of scope: the broker itself and its allowlist.
+
 Still open: the grant store is PR comments (not tamper-proof), the
 post-pass-to-merge window above, and no live pilot has yet confirmed the fake's
 model of GitHub's group semantics (2AMLogic/loom-ui, #10257).

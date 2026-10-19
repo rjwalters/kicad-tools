@@ -1065,3 +1065,163 @@ class TestNpthAndNonCopperPads:
             used = set(re.findall(r"\(shape \((?:rect|circle|path|polygon) (\S+)", dsn))
             used |= set(re.findall(r'\(keepout "" \((?:circle|path|polygon) (\S+)', dsn))
             assert used <= declared, f"{pcb}: undeclared layers {used - declared}"
+
+
+# ---------------------------------------------------------------------------
+# Issue #7484: pad shape, rotation and custom-pad copper
+# ---------------------------------------------------------------------------
+
+_SHAPES_FP = """  (footprint "T:Shapes"
+    (layer "{layer}")
+    (at 20 20 {rot})
+    (property "Reference" "U1" (at 0 0) (layer "F.SilkS"))
+    (pad "1" smd custom (at 0 0) (size 0.3 0.3) (layers "{cu}")
+      (options (clearance outline) (anchor rect))
+      (primitives
+        (gr_poly (pts (xy 1 0) (xy 0.5 -0.75) (xy -0.5 -0.75) (xy -0.5 0.75) (xy 0.5 0.75))
+          (width 0) (fill yes))))
+    (pad "2" smd circle (at 3 0) (size 1.5 1.5) (layers "{cu}"))
+    (pad "3" smd oval (at 6 0) (size 2.0 0.8) (layers "{cu}"))
+    (pad "4" smd rect (at 9 0 {rot45}) (size 2.0 0.5) (layers "{cu}"))
+    (pad "5" smd rect (at 12 0) (size 1.5 1.5) (layers "{cu}"))
+  )
+"""
+
+
+def _shapes_dsn(tmp_path, back=False):
+    layer, cu = ("B.Cu", "B.Cu") if back else ("F.Cu", "F.Cu")
+    block = _SHAPES_FP.format(layer=layer, cu=cu, rot=0, rot45=45)
+    dsn = _board_with(tmp_path, [block]).export()
+    return dsn
+
+
+def _padstack_shapes(dsn: str) -> dict[str, str]:
+    out = {}
+    for m in re.finditer(r"\(padstack (\S+)\s+\(shape (\(.*\))\)\s+\(attach", dsn):
+        out[m.group(1)] = m.group(2)
+    return out
+
+
+def _poly_area(nums):
+    pts = list(zip(nums[0::2], nums[1::2], strict=True))
+    return (
+        abs(
+            sum(
+                x1 * y2 - x2 * y1 for (x1, y1), (x2, y2) in zip(pts, pts[1:] + pts[:1], strict=True)
+            )
+        )
+        / 2
+    )
+
+
+def _abs_angle_fp(ref, rot):
+    # Same absolute pad angle (0) and non-square pad on every instance, so the
+    # pad's angle *relative* to the footprint differs with the footprint's.
+    return f"""  (footprint "Lib_C"
+    (layer "F.Cu")
+    (at 10 10 {rot})
+    (property "Reference" "{ref}" (at 0 0) (layer "F.SilkS"))
+    (pad "1" smd rect (at -0.775 0 0) (size 0.9 0.95) (layers "F.Cu"))
+  )
+"""
+
+
+class TestSharedImageRotation:
+    def test_instances_with_different_relative_pad_rotation_get_own_image(self, tmp_path):
+        dsn = _board_with(
+            tmp_path, [_abs_angle_fp("C1", 0), _abs_angle_fp("C2", 90), _abs_angle_fp("C3", 0)]
+        ).export()
+        comps = re.findall(r'\(component "?([^"\s]+)"?\s*\n\s*\(place "?([^"\s]+)', dsn)
+        by_ref = {ref: img for img, ref in comps}
+        assert by_ref["C1"] == "Lib_C"
+        assert by_ref["C2"] != by_ref["C1"]
+        images = re.findall(r'\(image "?([^"\s]+)"?\s*$', dsn, re.M)
+        assert sorted(images) == sorted({"Lib_C", by_ref["C2"]})
+        # Each image carries its own padstack: 0.9 x 0.95 vs the swapped one.
+        pins = {
+            img: re.search(rf'\(image "?{re.escape(img)}"?\s*\n\s*\(pin "?(\S+?)"? ', dsn).group(1)
+            for img in images
+        }
+        assert pins["Lib_C"] != pins[by_ref["C2"]]
+
+
+class TestPadShapes:
+    def test_shapes_map_to_padstacks(self, tmp_path):
+        shapes = _padstack_shapes(_shapes_dsn(tmp_path))
+        by_kind = {}
+        for name, shape in shapes.items():
+            by_kind.setdefault(shape.split()[0].lstrip("("), []).append((name, shape))
+        # circle d=1500, oval path width 800, no under-sized custom rect
+        assert any("1500.0 0.0 0.0" in s for _, s in by_kind["circle"])
+        assert any(s.split()[2] == "800.0" for _, s in by_kind["path"])
+        polygons = []
+        for _, s in by_kind["polygon"]:
+            nums = [float(v) for v in s.rstrip(")").split()[3:]]
+            polygons.append(nums)
+        areas = sorted(_poly_area(n) for n in polygons)
+        # rotated 2.0 x 0.5 (1.0 mm^2) and the custom pad's hull (>= 1.875 mm^2)
+        assert areas[0] == pytest.approx(1.0e6, rel=1e-3)
+        assert areas[-1] >= 1.875e6 - 1
+
+    def test_rotated_rect_polygon_contains_rotated_rectangle(self, tmp_path):
+        dsn = _shapes_dsn(tmp_path)
+        polys = [
+            [float(v) for v in s.rstrip(")").split()[3:]]
+            for s in _padstack_shapes(dsn).values()
+            if s.startswith("(polygon")
+        ]
+        rot = next(p for p in polys if _poly_area(p) < 1.5e6)
+        from shapely.affinity import rotate
+        from shapely.geometry import Polygon, box
+
+        expected = rotate(box(-1000, -250, 1000, 250), -45, origin=(0, 0))
+        assert Polygon(list(zip(rot[0::2], rot[1::2], strict=True))).buffer(1.0).contains(expected)
+
+    def test_equal_size_circle_and_rect_do_not_share_a_padstack(self, tmp_path):
+        names = list(_padstack_shapes(_shapes_dsn(tmp_path)))
+        pad_names = [n for n in names if "Pad_1500.0x1500.0" in n]
+        assert len(pad_names) == 2
+        assert len(set(pad_names)) == 2
+
+    def test_plain_rect_keeps_size_only_name(self, tmp_path):
+        assert "Rect[T]Pad_1500.0x1500.0_um" in _shapes_dsn(tmp_path)
+
+    def test_back_side_shapes_stay_on_back_copper(self, tmp_path):
+        shapes = _padstack_shapes(_shapes_dsn(tmp_path, back=True))
+        assert shapes
+        assert all("B.Cu" in s for s in shapes.values())
+
+    def test_back_side_custom_polygon_is_mirrored_like_pins(self, tmp_path):
+        front = _padstack_shapes(_shapes_dsn(tmp_path))
+        back = _padstack_shapes(_shapes_dsn(tmp_path, back=True))
+
+        def custom(shapes):
+            return max(
+                (
+                    [float(v) for v in s.rstrip(")").split()[3:]]
+                    for s in shapes.values()
+                    if s.startswith("(polygon")
+                ),
+                key=_poly_area,
+            )
+
+        f, b = custom(front), custom(back)
+        assert sorted(zip(f[0::2], f[1::2], strict=True)) == sorted(
+            zip((-x for x in b[0::2]), b[1::2], strict=True)
+        )
+
+    def test_pad_angle_is_absolute_so_footprint_rotation_cancels(self, tmp_path):
+        block = """  (footprint "T:R"
+    (layer "F.Cu")
+    (at 20 20 90)
+    (property "Reference" "R1" (at 0 0) (layer "F.SilkS"))
+    (pad "1" smd rect (at 0 0 90) (size 1.0 0.5) (layers "F.Cu"))
+  )
+"""
+        dsn = _board_with(tmp_path, [block]).export()
+        assert "Rect[T]Pad_1000.0x500.0_um" in dsn
+
+    def test_arbitrary_angle_polygon_not_axis_aligned_rect(self, tmp_path):
+        block = _SHAPES_FP.format(layer="F.Cu", cu="F.Cu", rot=0, rot45=30)
+        dsn = _board_with(tmp_path, [block]).export()
+        assert "(polygon" in dsn

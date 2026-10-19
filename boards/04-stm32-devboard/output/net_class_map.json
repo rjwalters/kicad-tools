@@ -1,0 +1,14 @@
+{
+  "+5V": {
+    "name": "Power",
+    "priority": 1,
+    "trace_width": 0.25,
+    "target_ampacity": 0.5
+  },
+  "+3.3V": {
+    "name": "Power",
+    "priority": 1,
+    "trace_width": 0.25,
+    "target_ampacity": 0.3
+  }
+}
