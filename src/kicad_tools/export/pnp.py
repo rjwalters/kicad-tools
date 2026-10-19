@@ -379,6 +379,37 @@ def is_through_hole_footprint(footprint: Footprint) -> bool:
     )
 
 
+def _tht_centroid_offset(fp: Footprint) -> tuple[float, float]:
+    """Board-frame offset (Y down) from a THT footprint origin to its pad-bbox centre.
+
+    JLCPCB defines CPL Mid X / Mid Y as the component centroid, but KiCad
+    through-hole footprints (pin headers, terminal blocks) usually put the
+    origin on pin 1, so the raw origin lands e.g. 8.89 mm off a 1x8 header
+    (issue #7433).  Surface-mount parts are untouched: their origins already
+    follow the placement-file convention.  Only numbered pads count, so
+    unnumbered NPTH pegs/mounting holes do not skew the centre.
+    """
+    if not is_through_hole_footprint(fp):
+        return (0.0, 0.0)
+    from ..core.geometry import rotate_pad_offset
+
+    xs: list[float] = []
+    ys: list[float] = []
+    for pad in getattr(fp, "pads", ()):
+        if not pad.number:
+            continue
+        rx, ry = rotate_pad_offset(pad.position[0], pad.position[1], fp.rotation)
+        w, h = pad.size
+        # pad.rotation is absolute; a quarter turn swaps the extents.
+        if round(pad.rotation / 90.0) % 2:
+            w, h = h, w
+        xs += [rx - w / 2, rx + w / 2]
+        ys += [ry - h / 2, ry + h / 2]
+    if not xs:
+        return (0.0, 0.0)
+    return ((min(xs) + max(xs)) / 2, (min(ys) + max(ys)) / 2)
+
+
 def _pos_frame_xy(
     fp: Footprint,
     config: PnPExportConfig,
@@ -401,6 +432,8 @@ def _pos_frame_xy(
     # and is the correct fallback.
     sheet_pos = getattr(fp, "sheet_position", None)
     xa, ya = sheet_pos if sheet_pos is not None else fp.position
+    dx, dy = _tht_centroid_offset(fp)
+    xa, ya = xa + dx, ya + dy
     if config.use_aux_origin:
         aux_x, aux_y = aux_origin or (0.0, 0.0)
         return xa - aux_x, aux_y - ya
