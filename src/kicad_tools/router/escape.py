@@ -5577,24 +5577,13 @@ class EscapeRouter:
         subtracts half-widths separately).
         """
 
-        def _dot(ax: float, ay: float, bx: float, by: float) -> float:
-            return ax * bx + ay * by
-
-        def _clamp01(v: float) -> float:
-            return max(0.0, min(1.0, v))
-
         def _point_seg_dist(
             px: float, py: float, ax: float, ay: float, bx: float, by: float
         ) -> float:
             abx, aby = bx - ax, by - ay
-            apx, apy = px - ax, py - ay
-            len_sq = abx * abx + aby * aby
-            if len_sq < 1e-12:
-                return math.sqrt(apx * apx + apy * apy)
-            t = _clamp01(_dot(apx, apy, abx, aby) / len_sq)
-            cx, cy = ax + t * abx, ay + t * aby
-            dx, dy_val = px - cx, py - cy
-            return math.sqrt(dx * dx + dy_val * dy_val)
+            if abx * abx + aby * aby < 1e-12:
+                return math.hypot(px - ax, py - ay)
+            return point_to_segment_distance(px, py, ax, ay, bx, by)
 
         # Check all four endpoint-to-segment distances, plus
         # segment-segment closest approach.
