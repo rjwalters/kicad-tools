@@ -4,9 +4,9 @@
       "rules": {
         "min_clearance": 0.1016,
         "min_through_hole_diameter": 0.2,
-        "min_track_width": 0.1016,
+        "min_track_width": 0.15,
         "min_via_diameter": 0.45,
-        "min_via_annular_width": 0.05,
+        "min_via_annular_width": 0.1,
         "min_via_hole": 0.2,
         "min_copper_edge_clearance": 0.3,
         "min_hole_to_hole": 0.5,
@@ -33,58 +33,58 @@
       {
         "name": "Default",
         "clearance": 0.1016,
-        "track_width": 0.1016,
-        "via_diameter": 0.45,
-        "via_drill": 0.2
+        "track_width": 0.2,
+        "via_diameter": 0.6,
+        "via_drill": 0.3
       },
       {
         "name": "Audio",
         "clearance": 0.15,
-        "track_width": 0.1016,
-        "via_diameter": 0.45,
-        "via_drill": 0.2
+        "track_width": 0.2,
+        "via_diameter": 0.6,
+        "via_drill": 0.3
       },
       {
         "name": "Clock",
         "clearance": 0.2,
-        "track_width": 0.1016,
-        "via_diameter": 0.45,
-        "via_drill": 0.2
+        "track_width": 0.2,
+        "via_diameter": 0.6,
+        "via_drill": 0.3
       },
       {
         "name": "Debug",
         "clearance": 0.15,
-        "track_width": 0.1016,
-        "via_diameter": 0.45,
-        "via_drill": 0.2
+        "track_width": 0.2,
+        "via_diameter": 0.6,
+        "via_drill": 0.3
       },
       {
         "name": "Differential",
         "clearance": 0.15,
-        "track_width": 0.1016,
-        "via_diameter": 0.45,
-        "via_drill": 0.2
+        "track_width": 0.2,
+        "via_diameter": 0.6,
+        "via_drill": 0.3
       },
       {
         "name": "Digital",
         "clearance": 0.15,
-        "track_width": 0.1016,
-        "via_diameter": 0.45,
-        "via_drill": 0.2
+        "track_width": 0.2,
+        "via_diameter": 0.6,
+        "via_drill": 0.3
       },
       {
         "name": "HighCurrentSignal",
         "clearance": 0.2,
-        "track_width": 0.1016,
-        "via_diameter": 0.45,
-        "via_drill": 0.2
+        "track_width": 0.2,
+        "via_diameter": 0.6,
+        "via_drill": 0.3
       },
       {
         "name": "Power",
         "clearance": 0.2,
-        "track_width": 0.1016,
-        "via_diameter": 0.45,
-        "via_drill": 0.2
+        "track_width": 0.2,
+        "via_diameter": 0.6,
+        "via_drill": 0.3
       }
     ],
     "netclass_assignments": {
@@ -253,6 +253,6 @@
         "nTRIP"
       ]
     },
-    "kct_sidecar_sha256": "b1e9e886ef7a4417b04eaaeb6c4ed254abaa361833c49f80bea0597fc94b9ff9"
+    "kct_sidecar_sha256": "65dfbac3f4161241f2430a0068f5841dbbf986b37d58a2640f0716eebbdd0b12"
   }
 }

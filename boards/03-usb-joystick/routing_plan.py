@@ -41,6 +41,67 @@ PLAN = Path(__file__).with_name("routing-plan.json")
 USB_FS_MAX_SKEW_MM = float(PROTOCOL_DEFAULTS[PairProtocol.USB2_FS].max_skew_mm.value)
 USB_SKEW_STRETCH_TARGET_MM = SKEW_STRETCH_TARGET_MM
 
+# Board-relative rectangle (x0, x1, y0, y1) around the USB_D In2.Cu common
+# ESD-to-termination run that ``usb_geometry()`` measures.  Unchanged since
+# before #7084: every profile is measured over y = 13..16.8 unless the
+# via-in-pad exception below applies.
+USB_COMMON_RUN_WINDOW = (37.5, 40.3, 13.0, 16.8)
+
+# Issue #7084 via-in-pad exception (operator ruling 2026-10-19, Q10 = 1).
+# Under ``jlcpcb-tier1`` via-in-pad drops the USB_D launch vias *inside* the
+# ESD lands (U2 pads 4 / 6, y 10.975..12.30; the ruling cites them as
+# U2.1 / U2.3, which are the connector-side pair at y 8.70..10.03) and the
+# termination lands (R3 / R4 pad 1, y 17.22..17.76), at
+# y = 11.737 / 17.419, where the fixed window above clips both ends of the
+# coupled In2.Cu run.  Only when a USB_D via sits inside one of these lands is
+# the matching window edge moved out to that via, so the counted copper runs
+# via to via.  A via outside the lands (plain ``jlcpcb``: y = 12.638 / 16.890)
+# leaves the window -- and the committed board's 4.100 mm -- untouched.
+# Lands are the pads' board-frame size boxes, (x0, x1, y0, y1), keyed by net.
+#
+# Removal condition: delete this exception (and the lookup in
+# ``usb_geometry()``) once board 03's gate measures the common run from the
+# launch via for every profile, or once board 03 no longer routes USB_D
+# with via-in-pad launches -- whichever comes first.  It expires on
+# USB_VIA_IN_PAD_EXCEPTION_EXPIRES: ``tests/test_board03_usb_window_7084.py``
+# fails after that date so the exception is re-ruled rather than kept.
+USB_VIA_IN_PAD_EXCEPTION_ISSUE = 7084
+USB_VIA_IN_PAD_EXCEPTION_EXPIRES = "2027-04-19"
+USB_ESD_LANDS_7084 = {
+    "USB_D+": (36.75, 37.35, 10.975, 12.30),  # U2 pad 4
+    "USB_D-": (38.65, 39.25, 10.975, 12.30),  # U2 pad 6
+}
+USB_TERMINATION_LANDS_7084 = {
+    "USB_D+": (39.13, 39.77, 17.22, 17.76),  # R4 pad 1
+    "USB_D-": (40.23, 40.87, 17.22, 17.76),  # R3 pad 1
+}
+# Segment endpoints sit on the via centre up to float noise.
+_VIA_EDGE_TOL_MM = 1e-6
+
+
+def _in_land(position, land):
+    x0, x1, y0, y1 = land
+    return x0 <= position[0] <= x1 and y0 <= position[1] <= y1
+
+
+def usb_common_run_window(pcb):
+    """``USB_COMMON_RUN_WINDOW``, widened only for via-in-pad launches (#7084).
+
+    Each y edge moves out to a USB_D via that sits inside that net's ESD land
+    (lower edge) or termination land (upper edge); otherwise it stays put.
+    """
+    x0, x1, y0, y1 = USB_COMMON_RUN_WINDOW
+    for via in pcb.vias:
+        name = pcb.nets[via.net_number].name if via.net_number in pcb.nets else None
+        if name in USB_ESD_LANDS_7084 and _in_land(via.position, USB_ESD_LANDS_7084[name]):
+            y0 = min(y0, via.position[1] - _VIA_EDGE_TOL_MM)
+        if name in USB_TERMINATION_LANDS_7084 and _in_land(
+            via.position, USB_TERMINATION_LANDS_7084[name]
+        ):
+            y1 = max(y1, via.position[1] + _VIA_EDGE_TOL_MM)
+    return x0, x1, y0, y1
+
+
 # Issue #5006: the board's reviewed, cited fabrication floors live in this
 # committed sidecar -- the single source of truth shared by the Python
 # checker (``check_manufacturing.py``), the native project emission below,
@@ -252,6 +313,7 @@ def usb_geometry(path):
         n: sum(math.dist(s.start, s.end) for s in tracks[n])
         for n in ["USB_D+", "USB_D-", "USB_MCU_D+", "USB_MCU_D-"]
     }
+    x0, x1, y0, y1 = usb_common_run_window(pcb)
     common = {}
     for name in ["USB_D+", "USB_D-"]:
         # Board-relative rectangle around the common ESD-to-termination run.
@@ -259,7 +321,7 @@ def usb_geometry(path):
             CopperElement.from_segment(s)
             for s in tracks[name]
             if s.layer == "In2.Cu"
-            and all(37.5 <= x <= 40.3 and 13 <= y <= 16.8 for x, y in [s.start, s.end])
+            and all(x0 <= x <= x1 and y0 <= y <= y1 for x, y in [s.start, s.end])
         ]
         segments = common[name]
         if not segments:

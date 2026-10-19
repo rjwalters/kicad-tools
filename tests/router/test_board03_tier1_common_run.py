@@ -13,6 +13,12 @@ In2.Cu -- 6.08 mm against 4.59 mm over the whole corridor -- but
 y = 13..16.8 window, which the tier-1 launch clips at both ends.  Forcing
 ``via_in_pad_supported`` off in the lattice restores the in-window 4.1 mm.
 
+The operator then ruled (2026-10-19, Q10 = 1) to keep that window and move
+an edge out only to a USB_D via that sits inside the ESD or termination land
+(``routing_plan.usb_common_run_window``), so the tier-1 run counts via to via
+while plain ``jlcpcb`` still measures 4.100 mm.  The route below must also
+pass ``usb_geometry()`` itself.
+
 This pin measures the corridor, not the plan-tuned window, so it holds the
 router to what it can control: the coupled In2.Cu run must stay at least the
 4.0 mm common-run bound, with ``usb_geometry()``'s length and skew bounds.
@@ -143,3 +149,9 @@ def test_tier1_route_keeps_the_usb_d_common_run(tmp_path):
         lengths[pcb.nets[segment.net_number].name] += math.dist(segment.start, segment.end)
     assert max(lengths["USB_D+"], lengths["USB_D-"]) <= 16.0
     assert abs(lengths["USB_D+"] - lengths["USB_D-"]) <= plan.USB_FS_MAX_SKEW_MM
+
+    # The #7084 via-in-pad exception must hold the tier-1 launches, so the
+    # board's own gate passes (it raises on any bound it fails).
+    _, _, y0, y1 = plan.usb_common_run_window(pcb)
+    assert y0 < plan.USB_COMMON_RUN_WINDOW[2] and y1 > plan.USB_COMMON_RUN_WINDOW[3]
+    assert plan.usb_geometry(routed)["common_coupled_mm"] >= COMMON_RUN_BOUND_MM
