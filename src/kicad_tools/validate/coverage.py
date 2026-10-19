@@ -166,6 +166,24 @@ def _diff_pair_candidates(checker: DRCChecker) -> int:
         return 0
 
 
+def _unevaluated_courtyards(checker: DRCChecker) -> tuple[int, int]:
+    """``(N, M)``: non-exempt footprints whose courtyard overlap cannot be evaluated.
+
+    N counts footprints with no courtyard geometry plus those whose outline
+    does not resolve to a polygon; M is every non-exempt footprint (Issue #7204).
+    """
+    from kicad_tools._shapely import require_shapely
+    from kicad_tools.geometry.courtyard import unevaluated_courtyards
+
+    require_shapely("courtyard-overlap coverage")
+    from shapely.geometry import Polygon  # type: ignore[import-untyped]
+
+    missing, unresolved, total = unevaluated_courtyards(
+        list(getattr(checker.pcb, "footprints", []) or []), Polygon
+    )
+    return len(missing) + len(unresolved), total
+
+
 def precheck(
     category: str,
     checker: DRCChecker,
@@ -219,6 +237,12 @@ def precheck(
         unfilled = _unfilled_pour_zones(checker)
         if unfilled:
             return unknown(category, f"zone_fills_absent ({unfilled} unfilled zone(s))")
+    if category == "courtyard_overlap":
+        # Issue #7204: a footprint with no resolvable courtyard was never
+        # tested against its neighbours, so zero overlaps is not a pass.
+        unevaluated, total = _unevaluated_courtyards(checker)
+        if unevaluated:
+            return unknown(category, f"no_courtyard_geometry ({unevaluated} of {total} footprints)")
     if category == "sch_fields":
         if drc_only:
             return skipped(category, "drc_only")

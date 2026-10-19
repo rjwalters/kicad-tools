@@ -3621,6 +3621,8 @@ _PWR_BOARD = """(kicad_pcb (version 20240108) (generator "pcbnew") (generator_ve
       (effects (font (size 1 1) (thickness 0.15))))
     (property "Value" "R" (at 0 1.5 0) (layer "F.Fab")
       (effects (font (size 1 1) (thickness 0.15))))
+    (fp_rect (start -0.75 -0.75) (end 0.75 0.75) (stroke (width 0.05) (type solid)) (fill no)
+      (layer "F.CrtYd"))
     (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu" "F.Paste" "F.Mask") (net 1 "GND") (uuid "pad-r1-1"))
   )
   (segment (start 100 100.225) (end 104 100.225) (width 0.2) (layer "F.Cu") (net 2) (uuid "trk-s"))

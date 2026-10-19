@@ -1492,6 +1492,26 @@ class Footprint:
             return 0
         return keep_footprint_texts_upright(sexp_node)
 
+    @property
+    def attr_flags(self) -> frozenset[str]:
+        """Every flag token in the footprint's ``(attr ...)`` block (Issue #7204).
+
+        Covers the modeled flags (``exclude_from_pos_files``,
+        ``exclude_from_bom``, ``dnp``) and the ones kept verbatim but not
+        modeled (``board_only``, ``allow_missing_courtyard``,
+        ``allow_soldermask_bridges``, ...).  The footprint type (``smd`` /
+        ``through_hole``) is :attr:`attr`, not a flag.
+        """
+        flags = set(self.__dict__.get("_attr_unknown_tokens", []) or [])
+        if self.exclude_from_pos_files:
+            flags.add("exclude_from_pos_files")
+        if self.exclude_from_bom:
+            flags.add("exclude_from_bom")
+        if self.dnp:
+            flags.add("dnp")
+        flags.discard("locked")
+        return frozenset(flags)
+
     def _sync_attr_node(self) -> None:
         """Rebuild the ``(attr ...)`` child of ``_sexp_node`` from Python state.
 
