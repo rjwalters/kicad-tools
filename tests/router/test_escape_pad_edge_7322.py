@@ -81,3 +81,20 @@ def test_through_hole_pads_have_no_dam():
 
 def test_drill_inside_copper_is_the_via_in_pad_question():
     assert _router(GAP)._can_place_via(0.0, 0.0, net=5, dam_pads=[_pad()])
+
+
+def _rotated_pad() -> Pad:
+    pad = _pad()
+    pad.rotation = 45.0  # residual non-cardinal angle (#4910)
+    return pad
+
+
+def test_rotated_pad_dam_follows_the_rotated_copper():
+    # Issue #7467: the long axis of the 45-degree pad points along (1, -1).
+    # (0.707, -0.707) is 0.25 mm past its tip: inside the dam, though the
+    # unrotated box puts it 0.56 mm away and the old gate accepted it.
+    er = _router(GAP)
+    assert not er._can_place_via(0.7071, -0.7071, net=1, dam_pads=[_rotated_pad()])
+    # (1.0, 0.0) is 0.25 mm from the unrotated box but 0.56 mm from the
+    # rotated copper: the old gate rejected a clear site.
+    assert er._can_place_via(1.0, 0.0, net=1, dam_pads=[_rotated_pad()])

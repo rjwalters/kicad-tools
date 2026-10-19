@@ -44,6 +44,7 @@ from kicad_tools.core.geometry import point_to_segment_distance
 from kicad_tools.core.types import copper_span_contains
 
 from .layers import Layer, LayerType
+from .pad_geometry import pad_point_distance
 from .primitives import Pad, Route, Segment, Via
 from .via_clearance import point_clear_of_copper, segment_clears_foreign_via
 from .via_in_pad_eligibility import (
@@ -7209,9 +7210,7 @@ class EscapeRouter:
         for p in pads:
             if getattr(p, "through_hole", False):
                 continue
-            outside_x = max(0.0, abs(x - p.x) - p.width / 2)
-            outside_y = max(0.0, abs(y - p.y) - p.height / 2)
-            if via_drill_at_pad_edge(math.hypot(outside_x, outside_y), drill, floor):
+            if via_drill_at_pad_edge(pad_point_distance(p, x, y), drill, floor):
                 return True
         return False
 
@@ -8588,8 +8587,6 @@ class EscapeRouter:
             offset = i * step_mm
             cand_x = pad.x + dx * offset
             cand_y = pad.y + dy * offset
-
-            from .pad_geometry import pad_point_distance
 
             # Do not merely mark the via off-pad: prove its copper is clear
             # of every SMT land in the package, including its own net.
