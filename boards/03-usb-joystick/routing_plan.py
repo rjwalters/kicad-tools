@@ -41,6 +41,15 @@ PLAN = Path(__file__).with_name("routing-plan.json")
 USB_FS_MAX_SKEW_MM = float(PROTOCOL_DEFAULTS[PairProtocol.USB2_FS].max_skew_mm.value)
 USB_SKEW_STRETCH_TARGET_MM = SKEW_STRETCH_TARGET_MM
 
+# Board-relative rectangle (x0, x1, y0, y1) around the USB_D In2.Cu common
+# ESD-to-termination run that ``usb_geometry()`` measures.  Issue #7084: the
+# old y = 13..16.8 span fitted only the plain-``jlcpcb`` launch vias (y =
+# 12.638 / 16.890, outside the ESD lands).  Under the board's own
+# ``jlcpcb-tier1`` profile via-in-pad puts them in the ESD lands (y = 11.737 /
+# 17.419), and the fixed window clipped both ends of an otherwise longer
+# coupled run.  The span now holds those launch positions with ~0.2 mm margin.
+USB_COMMON_RUN_WINDOW = (37.5, 40.3, 11.5, 17.6)
+
 # Issue #5006: the board's reviewed, cited fabrication floors live in this
 # committed sidecar -- the single source of truth shared by the Python
 # checker (``check_manufacturing.py``), the native project emission below,
@@ -252,6 +261,7 @@ def usb_geometry(path):
         n: sum(math.dist(s.start, s.end) for s in tracks[n])
         for n in ["USB_D+", "USB_D-", "USB_MCU_D+", "USB_MCU_D-"]
     }
+    x0, x1, y0, y1 = USB_COMMON_RUN_WINDOW
     common = {}
     for name in ["USB_D+", "USB_D-"]:
         # Board-relative rectangle around the common ESD-to-termination run.
@@ -259,7 +269,7 @@ def usb_geometry(path):
             CopperElement.from_segment(s)
             for s in tracks[name]
             if s.layer == "In2.Cu"
-            and all(37.5 <= x <= 40.3 and 13 <= y <= 16.8 for x, y in [s.start, s.end])
+            and all(x0 <= x <= x1 and y0 <= y <= y1 for x, y in [s.start, s.end])
         ]
         segments = common[name]
         if not segments:

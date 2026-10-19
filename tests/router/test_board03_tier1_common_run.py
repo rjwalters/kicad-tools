@@ -13,6 +13,9 @@ In2.Cu -- 6.08 mm against 4.59 mm over the whole corridor -- but
 y = 13..16.8 window, which the tier-1 launch clips at both ends.  Forcing
 ``via_in_pad_supported`` off in the lattice restores the in-window 4.1 mm.
 
+The operator then ruled (2026-10-19) to widen that window to y = 11.5..17.6
+(``routing_plan.USB_COMMON_RUN_WINDOW``), which holds the tier-1 launches.
+
 This pin measures the corridor, not the plan-tuned window, so it holds the
 router to what it can control: the coupled In2.Cu run must stay at least the
 4.0 mm common-run bound, with ``usb_geometry()``'s length and skew bounds.
