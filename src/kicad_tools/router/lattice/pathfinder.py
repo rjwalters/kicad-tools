@@ -1775,7 +1775,7 @@ class LatticePathfinder:
                 continue
             rect = obstacles.pad_rects[idx]
             grown = (rect[0] - grow, rect[1] - grow, rect[2] + grow, rect[3] + grow)
-            if pt_in_rect(point, grown):
+            if pt_in_rect(point, grown) and obstacles.pad_keepout_hit(idx, point, point, grow):
                 return False
         # Issue #4602: a through-via must additionally keep the PAIR (HV)
         # requirement from foreign pads on every layer (``layer=None``) --
@@ -3250,8 +3250,6 @@ class LatticePathfinder:
         """
         if reqs is None:
             return True
-        from .coupled import seg_rect_dist
-
         reach = half + max(reqs, default=0.0) + 0.5
         x0, x1 = min(a[0], b[0]) - reach, max(a[0], b[0]) + reach
         y0, y1 = min(a[1], b[1]) - reach, max(a[1], b[1]) + reach
@@ -3261,9 +3259,7 @@ class LatticePathfinder:
                 continue
             if layer is not None and layer not in self.obstacles.pad_layer_indices[idx]:
                 continue
-            hw, hh = pad_half_extents(pad)
-            rect = (pad.x - hw, pad.y - hh, pad.x + hw, pad.y + hh)
-            if seg_rect_dist(a, b, rect) < half + reqs[idx] - 1e-6:
+            if self.obstacles.pad_centerline_gap(idx, a, b) < half + reqs[idx] - 1e-6:
                 return False
         return True
 

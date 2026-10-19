@@ -26,8 +26,10 @@ net-id copper onto the kernel's net-agnostic shapes.  Only the *geometry*
 moved: the thresholds, the negotiation order and the #4506/#4602 exemption
 paths are untouched.  The pad-mask half of this module
 (:class:`LatticeObstacleModel`, :class:`LatticeKeepoutMask`) gates *site
-availability* against inflated keep-out rectangles rather than measuring a
-clearance, so it keeps its rectangle arithmetic.
+availability* against inflated keep-out rectangles as a broad phase; the
+final accept/reject for a pad hit is the exact pad outline (rounded, oval,
+rotated) measured by the same kernel (issue #7503), so a point diagonal to a
+pad corner is no longer judged against the corner's bounding square.
 """
 
 from __future__ import annotations
@@ -38,6 +40,7 @@ from typing import TYPE_CHECKING
 
 from kicad_tools.geometry.copper import pad_waiver_polygon as _pad_waiver_polygon
 
+from ..clearance_shapes import pad_kernel_params
 from ..primitives import Pad, pad_half_extents
 from . import kernel_adapter as ka
 from .geometry import (
@@ -173,12 +176,17 @@ class LatticeObstacleModel:
         # clearance baked into ``agent_radius`` -- the pad's own side of the
         # pair, honoured by every predicate that reads ``pad_rects``.
         self.pad_rects: list[Rect] = []
+        # Euclidean inflation radius per pad (agent radius + its own growth).
+        self._pad_reach: list[float] = []
         for i, pad in enumerate(pads):
             half_w, half_h = pad_half_extents(pad)
             grow = pad_extra[i] if pad_extra is not None else 0.0
             hx = half_w + agent_radius + grow
             hy = half_h + agent_radius + grow
+            self._pad_reach.append(agent_radius + grow)
             self.pad_rects.append((pad.x - hx, pad.y - hy, pad.x + hx, pad.y + hy))
+
+        self._pad_outlines: dict[int, ka.KPad] = {}
 
         # Pad-lookup buckets.
         self._pad_buckets: dict[tuple[int, int], list[int]] = defaultdict(list)
@@ -193,7 +201,9 @@ class LatticeObstacleModel:
         self.edge_pads: list[dict[EdgeKey, list[int]]] = [{} for _ in range(num_layers)]
         for key, point in lattice.nodes.items():
             for idx in self.pads_near(point[0], point[1], point[0], point[1]):
-                if pt_in_rect(point, self.pad_rects[idx]):
+                if pt_in_rect(point, self.pad_rects[idx]) and self.pad_keepout_hit(
+                    idx, point, point
+                ):
                     for layer in pad_layer_indices[idx]:
                         self.node_pads[layer].setdefault(key, []).append(idx)
         for edge in lattice.edges:
@@ -202,11 +212,39 @@ class LatticeObstacleModel:
             x0, x1 = min(a[0], b[0]), max(a[0], b[0])
             y0, y1 = min(a[1], b[1]), max(a[1], b[1])
             for idx in self.pads_near(x0, y0, x1, y1):
-                if seg_rect_intersect(a, b, self.pad_rects[idx]):
+                if seg_rect_intersect(a, b, self.pad_rects[idx]) and self.pad_keepout_hit(
+                    idx, a, b
+                ):
                     for layer in pad_layer_indices[idx]:
                         self.edge_pads[layer].setdefault(edge, []).append(idx)
 
     # -- queries -------------------------------------------------------------
+
+    def pad_centerline_gap(self, idx: int, a: Pt, b: Pt) -> float:
+        """Exact distance in mm from segment ``a-b`` to pad ``idx``'s copper outline."""
+        outline = self._pad_outlines.get(idx)
+        if outline is None:
+            pad = self.pads[idx]
+            shape, rratio = pad_kernel_params(pad)
+            outline = ka.pad_outline(
+                shape, pad.width, pad.height, rratio, pad.rotation, (pad.x, pad.y)
+            )
+            self._pad_outlines[idx] = outline
+        return ka.gap(outline, ka.trace(a, b, 0.0))
+
+    def pad_keepout_hit(self, idx: int, a: Pt, b: Pt, extra: float = 0.0) -> bool:
+        """True when segment ``a-b`` enters pad ``idx``'s keep-out (issue #7503).
+
+        The keep-out is the pad's TRUE copper outline (circle, oval, roundrect
+        with a known ratio, rotated) grown by ``agent_radius + pad_extra +
+        extra`` -- exactly the set the DRC engines reject -- rather than the
+        inflated bounding rectangle ``pad_rects`` holds, which stays the broad
+        phase.  Callers pass only pads whose rectangle already hit, so the
+        rectangle (a superset of the true keep-out) never lets a hit slip
+        through.  Boundary contact counts as a hit, as the rectangle did.
+        """
+        gap = self.pad_centerline_gap(idx, a, b)
+        return gap <= self._pad_reach[idx] + extra + ka.LATTICE_CLEARANCE_EPSILON_MM
 
     def pads_near(self, x0: float, y0: float, x1: float, y1: float) -> set[int]:
         """Pad indices whose inflated rect may touch the query box."""
@@ -244,7 +282,7 @@ class LatticeObstacleModel:
             rect = self.pad_rects[idx]
             if extra > 0.0:
                 rect = (rect[0] - extra, rect[1] - extra, rect[2] + extra, rect[3] + extra)
-            if seg_rect_intersect(a, b, rect):
+            if seg_rect_intersect(a, b, rect) and self.pad_keepout_hit(idx, a, b, extra):
                 return True
         return False
 
