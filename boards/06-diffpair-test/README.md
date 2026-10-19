@@ -8,8 +8,8 @@ and ordinary through vias outside SMT lands.
 See [the assembled design guide](assembled-demo/README.md) for exact components,
 source regeneration, routing checks, fabrication settings and bench bring-up.
 The complete fabrication/assembly download is `output/manufacturing.zip`;
-current readiness is recorded in `output/readiness.json`. Three Samtec headers
-require manual through-hole assembly. No firmware is required.
+current readiness is recorded in `output/readiness.json`. Three 2.54 mm
+headers (LCSC C492401, C492407) are assembled through-hole by JLCPCB. No firmware is required.
 
 The historical synthetic routing fixture and benchmark notes are archived in
 [regression-fixture](regression-fixture/README.md); they are not assembled hardware.

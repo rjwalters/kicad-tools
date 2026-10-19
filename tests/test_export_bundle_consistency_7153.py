@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import zipfile
 from pathlib import Path
@@ -324,3 +325,59 @@ def test_readme_lists_bundle_relative_gerber_path(tmp_path, monkeypatch):
     assert "solder paste" in content
     assert result.bundle_relpath(result.assembly_result.gerber_path) == "gerbers/gerbers.zip"
     assert "Gerbers: gerbers/gerbers.zip" in str(result)
+
+
+# ---------------------------------------------------------------------------
+# Item 3: the report's ERC receives the export's schematic (#7153)
+# ---------------------------------------------------------------------------
+
+
+def _isolated_board(tmp_path):
+    """Copy board 01's PCB and schematic apart so auto-resolution fails."""
+    import shutil
+
+    src = Path(__file__).resolve().parent.parent / "boards" / "01-voltage-divider" / "output"
+    pcb_dir = tmp_path / "pcb"
+    sch_dir = tmp_path / "elsewhere"
+    pcb_dir.mkdir()
+    sch_dir.mkdir()
+    pcb = pcb_dir / "renamed.kicad_pcb"
+    sch = sch_dir / "other_name.kicad_sch"
+    shutil.copy(src / "voltage_divider.kicad_pcb", pcb)
+    shutil.copy(src / "voltage_divider.kicad_sch", sch)
+    return pcb, sch
+
+
+def test_auditor_uses_explicit_schematic_for_pcb_input(tmp_path):
+    from kicad_tools.audit.auditor import ManufacturingAudit
+
+    pcb, sch = _isolated_board(tmp_path)
+    implicit = ManufacturingAudit(pcb)
+    assert implicit.schematic_path != sch
+    explicit = ManufacturingAudit(pcb, schematic_path=sch)
+    assert explicit.schematic_path == sch
+    assert explicit.skip_erc is False
+
+
+def test_auditor_explicit_skip_erc_still_wins(tmp_path):
+    from kicad_tools.audit.auditor import ManufacturingAudit
+
+    pcb, sch = _isolated_board(tmp_path)
+    assert ManufacturingAudit(pcb, schematic_path=sch, skip_erc=True).skip_erc is True
+
+
+def test_collector_forwards_schematic_path(tmp_path, monkeypatch):
+    from kicad_tools.audit import auditor
+
+    pcb, sch = _isolated_board(tmp_path)
+    seen = {}
+
+    def fake_init(self, *args, **kwargs):
+        seen.update(kwargs)
+        raise RuntimeError
+
+    monkeypatch.setattr(auditor.ManufacturingAudit, "__init__", fake_init)
+    collector = ReportDataCollector(pcb, schematic_path=sch)
+    with contextlib.suppress(Exception):
+        collector.collect_all(tmp_path / "data")
+    assert seen.get("schematic_path") == sch

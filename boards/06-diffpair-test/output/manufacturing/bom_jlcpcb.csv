@@ -4,5 +4,8 @@ Comment,Designator,Footprint,LCSC Part #
 100nF,"C10,C12,C14,C16,C2,C4,C6,C8",Capacitor_SMD:C_0603_1608Metric,C14663
 10uF,C17,Capacitor_SMD:C_0805_2012Metric,C15850
 1nF,"C1,C11,C13,C15,C3,C5,C7,C9",Capacitor_SMD:C_0603_1608Metric,C1588
+3.3V regulated input,J1,Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical,C492401
+IN1-4 / GND,J2,Connector_PinHeader_2.54mm:PinHeader_1x08_P2.54mm_Vertical,C492407
+OUT1-4 / GND,J3,Connector_PinHeader_2.54mm:PinHeader_1x08_P2.54mm_Vertical,C492407
 SN65LVDS1DR,"U1,U3,U5,U7",Package_SO:SOIC-8_3.9x4.9mm_P1.27mm,C2671256
 SN65LVDS2DR,"U2,U4,U6,U8",Package_SO:SOIC-8_3.9x4.9mm_P1.27mm,C2671054
