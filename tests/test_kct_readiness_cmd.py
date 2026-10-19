@@ -1431,6 +1431,51 @@ def test_bom_gate_passes_unverified_warn_without_claiming_verified(tmp_path):
     assert "verified procurement identities" not in bom["detail"]
     assert "part check WARN" in bom["detail"]
     assert message in bom["detail"]
+    # The refs behind the WARN are kept, not just its summary (issue #7446).
+    assert "unverified: U1 -> C8734" in bom["detail"]
+
+
+def test_bom_gate_keeps_header_unverified_refs_and_reason(tmp_path):
+    board = make_board(tmp_path)
+    fake = FakeEngines(
+        board,
+        lcsc_check={
+            "name": "bom_lcsc_values",
+            "status": "WARN",
+            "message": (
+                "2 of 3 assigned item(s) verified (parts cache); 1 unverifiable "
+                "(header part(s) with pin count not verifiable)"
+            ),
+            "details": "unverified: J1 -> C999999 (pin count not stated by part)",
+        },
+    )
+
+    code, report = run(board, fake)
+
+    assert code == 0
+    bom = _bom_check(report)
+    assert "J1 -> C999999 (pin count not stated by part)" in bom["detail"]
+
+
+def test_bom_gate_strict_header_fail_is_not_called_a_mismatch(tmp_path):
+    board = make_board(tmp_path)
+    fake = FakeEngines(
+        board,
+        lcsc_check={
+            "name": "bom_lcsc_values",
+            "status": "FAIL",
+            "message": "1 pin header/socket part(s): pin count not verifiable (strict preflight)",
+            "details": "pin count not verifiable: J1 -> C999999 (pin count not stated by part)",
+        },
+    )
+
+    code, report = run(board, fake)
+
+    assert code != 0
+    assert _bom_check(report)["status"] == "failed"
+    blockers = [b for b in report["blockers"] if "J1 -> C999999" in b]
+    assert blockers and all("does not match" not in b for b in blockers)
+    assert any("states no verifiable pin count" in b for b in blockers)
 
 
 def test_verify_mode_reads_the_retained_manifest_lcsc_check(tmp_path):

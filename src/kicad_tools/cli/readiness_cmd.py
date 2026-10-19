@@ -2630,14 +2630,18 @@ def _gate_bom(
     part_message = str(part_check.get("message", "")).strip()
     part_details = str(part_check.get("details", "") or "").strip()
     if part_status == "FAIL":
+        # A strict-preflight header row whose pin count is not verifiable
+        # (issue #7446) is not known to mismatch: don't say it does.
+        problem = (
+            "Assigned pin header/socket part states no verifiable pin count"
+            if "pin count not verifiable" in part_message
+            else "Assigned LCSC part does not match the BOM row's value/package"
+        )
         return CheckOutcome(
             name="bom",
             status=FAILED,
             detail=f"LCSC part check FAIL: {part_message}",
-            blockers=[
-                "Assigned LCSC part does not match the BOM row's value/package: "
-                f"{part_details or part_message}"
-            ],
+            blockers=[f"{problem}: {part_details or part_message}"],
         )
     if part_status not in ("OK", "WARN"):
         return CheckOutcome(
@@ -2657,12 +2661,15 @@ def _gate_bom(
         if tht_assembled
         else "every placed part is SMT."
     )
+    # Keep the WARN's refs and reasons (e.g. ``J1 -> C999999 (pin count not
+    # stated by part)``, issue #7446), not just its summary message.
+    warn_details = f" [{part_details}]" if part_status == "WARN" and part_details else ""
     return CheckOutcome(
         name="bom",
         status=PASSED,
         detail=(
             f"{len(rows)} BOM line(s) carry procurement identifiers; part check "
-            f"{part_status}: {part_message}; {tht_note}"
+            f"{part_status}: {part_message}{warn_details}; {tht_note}"
         ),
     )
 

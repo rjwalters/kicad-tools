@@ -244,7 +244,7 @@ class PowerInterfaceSpec:
         # Find the appropriate threshold
         for threshold, caps in reversed(self._DECOUPLING_THRESHOLDS):
             if current >= threshold:
-                return caps
+                return list(caps)
 
         # Default for very low current
         return [{"value": "100nF", "count": 1}]

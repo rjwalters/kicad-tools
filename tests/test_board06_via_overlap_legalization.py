@@ -164,6 +164,8 @@ def test_finalization_restores_copper_and_fills_on_every_failure(
     monkeypatch.setattr(recipe, "_clearance_signature", signature)
     monkeypatch.setattr(recipe, "_repair_pour_connectivity", lambda p, nets: (0, 0))
     monkeypatch.setattr(recipe, "_split_offangle_chords", split)
+    # Issue #7296: the pad-edge pass parses the board; these fixtures are bytes.
+    monkeypatch.setattr(recipe, "_relocate_pad_edge_vias", lambda p: 0)
     monkeypatch.setattr(recipe, "_legalize_signal_vias", legalize)
     monkeypatch.setattr(recipe.subprocess, "run", refill)
     with pytest.raises(KeyboardInterrupt if failure == "interrupt" else RuntimeError):
@@ -180,6 +182,8 @@ def test_finalization_commits_only_after_successful_physical_gates(tmp_path, rec
     calls = []
     monkeypatch.setattr(recipe, "_clearance_signature", lambda p: {("existing",)})
     monkeypatch.setattr(recipe, "_split_offangle_chords", lambda p, before: 0)
+    # Issue #7296: the pad-edge pass parses the board; these fixtures are bytes.
+    monkeypatch.setattr(recipe, "_relocate_pad_edge_vias", lambda p: 0)
 
     def legalize(candidate):
         candidate.write_bytes(b"new copper")
@@ -224,6 +228,8 @@ def test_finalization_recovers_pour_cut_by_relocated_copper(
     path.write_bytes(b"original")
     monkeypatch.setattr(recipe, "_clearance_signature", lambda p: set())
     monkeypatch.setattr(recipe, "_split_offangle_chords", lambda p, before: 0)
+    # Issue #7296: the pad-edge pass parses the board; these fixtures are bytes.
+    monkeypatch.setattr(recipe, "_relocate_pad_edge_vias", lambda p: 0)
     monkeypatch.setattr(recipe, "_legalize_signal_vias", lambda p: 1)
     calls = []
 

@@ -1048,6 +1048,31 @@ bool Pathfinder::is_via_blocked_diag(int x, int y, int net, bool allow_sharing,
             if (!grid_.fixed_fill_clear(wx, wy, wx, wy, layer, half, reach)) return true;
     }
 
+    // Issue #7296: mask-dam zone beside an SMD pad (drill clears the copper
+    // but leaves < min_via_pad_edge_gap to it).  Outside the allow_smd_vias
+    // gate: via-in-pad being allowed does not waive the dam.  Same arithmetic
+    // as Python ``Router._pad_edge_clear``.
+    if (rules_.min_via_pad_edge_gap > 0.0f) {
+        const auto [wx, wy] = grid_.grid_to_world(x, y);
+        const float radius = rules_.via_drill / 2.0f;
+        const float floor_mm = rules_.min_via_pad_edge_gap;
+        for (const auto& pad : grid_.pads()) {
+            if (pad.layer_idx < 0) continue;  // Through-hole pad, not SMD.
+            float local_x = wx - pad.x, local_y = wy - pad.y;
+            if (pad.rotation != 0.0f) {
+                const float angle = pad.rotation * 3.14159265358979323846f / 180.0f;
+                const float c = std::cos(angle), s = std::sin(angle);
+                const float rotated_x = c * local_x - s * local_y;
+                local_y = s * local_x + c * local_y;
+                local_x = rotated_x;
+            }
+            const float dx = std::max(std::abs(local_x) - pad.width / 2.0f, 0.0f);
+            const float dy = std::max(std::abs(local_y) - pad.height / 2.0f, 0.0f);
+            const float dist = std::sqrt(dx * dx + dy * dy);
+            if (dist >= radius && dist < radius + floor_mm) return true;
+        }
+    }
+
     if (!rules_.allow_smd_vias) {
         const auto [wx, wy] = grid_.grid_to_world(x, y);
         const float drill_radius = rules_.via_drill / 2.0f;
