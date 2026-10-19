@@ -7,17 +7,19 @@ import type { KnownIssue, Readiness } from "./types.ts";
 const KNOWN_ISSUE_KINDS = ["defect", "exception", "advisory"];
 const KNOWN_ISSUE_KEYS = new Set(["issue", "kind", "summary", "recorded", "warnings", "errors"]);
 
-type Shape = "pad" | "at";
-const SHAPE_KEYS: Record<Shape, readonly string[]> = { pad: ["rule", "ref", "pad"], at: ["rule", "at"] };
-const SORT_ORDER: Record<Shape, string> = { pad: "(rule, ref, pad)", at: "(rule, x, y)" };
+type Shape = "pad" | "at" | "item";
+const SHAPE_KEYS: Record<Shape, readonly string[]> = {
+  pad: ["rule", "ref", "pad"], at: ["rule", "at"], item: ["rule", "item"],
+};
+const SORT_ORDER: Record<Shape, string> = { pad: "(rule, ref, pad)", at: "(rule, x, y)", item: "(rule, item)" };
 
-type Identity = { rule: string; ref?: string; pad?: string; at?: [number, number] };
-type IdentityKey = [string, string, string, number, number, number];
+type Identity = { rule: string; ref?: string; pad?: string; item?: string; at?: [number, number] };
+type IdentityKey = [string, string, string, string, number, number, number];
 
 /** Mirrors `identity_key` in `known_issues.py`: one key for sorting, duplicates and ownership. */
 function identityKey(item: Identity): IdentityKey {
   const [x, y] = item.at ?? [0, 0];
-  return [item.rule, item.ref ?? "", item.pad ?? "", item.at ? 1 : 0, x, y];
+  return [item.rule, item.ref ?? "", item.pad ?? "", item.item ?? "", item.at ? 1 : 0, x, y];
 }
 
 function keyLess(a: IdentityKey, b: IdentityKey): boolean {
@@ -52,6 +54,11 @@ function checkIdentities(
       }
       identity = { rule: record.rule, at: [x, y] };
       text = `${record.rule} at ${x}/${y}`;
+    } else if (shape === "item") {
+      const part = record.item;
+      if (typeof part !== "string" || !part || part !== part.trim()) throw bad("item must be non-empty, trimmed text");
+      identity = { rule: record.rule, item: part };
+      text = `${record.rule} on ${part}`;
     } else {
       for (const key of ["ref", "pad"]) {
         const part = record[key];
@@ -66,7 +73,7 @@ function checkIdentities(
     if (owner !== undefined) {
       throw bad(owner === issue ? `${text} is listed more than once` : `${text} is listed by both #${owner} and #${issue}`);
     }
-    if (previous && !keyLess(previous, key)) throw bad(`identities must be sorted by ${SORT_ORDER[shapes[0]]}`);
+    if (previous && !keyLess(previous, key)) throw bad(`identities must be sorted by ${shapes.map(s => SORT_ORDER[s]).join(" then ")}`);
     previous = key;
     owners.set(id, issue);
   }
@@ -93,7 +100,7 @@ export function validateKnownIssues(value: unknown): KnownIssue[] {
     if (warnings !== undefined) checkIdentities(warnings, "warnings", ["pad"], issue, owners);
     if (errors !== undefined) {
       if (kind !== "exception") throw new Error(`only an exception may carry errors (known issue #${issue})`);
-      checkIdentities(errors, "errors", ["at"], issue, owners);
+      checkIdentities(errors, "errors", ["at", "item"], issue, owners);
     }
   }
   return value as KnownIssue[];
@@ -102,7 +109,7 @@ export function validateKnownIssues(value: unknown): KnownIssue[] {
 function canonical(entries: KnownIssue[]): string {
   return JSON.stringify(entries.map(e => ({ issue: e.issue, kind: e.kind, summary: e.summary, recorded: e.recorded,
     warnings: e.warnings === undefined ? null : e.warnings.map(w => ({ rule: w.rule, ref: w.ref, pad: w.pad })),
-    errors: e.errors === undefined ? null : e.errors.map(x => ({ rule: x.rule, at: x.at })) })));
+    errors: e.errors === undefined ? null : e.errors.map(x => ("at" in x ? { rule: x.rule, at: x.at } : { rule: x.rule, item: x.item })) })));
 }
 
 /** Mirrors `_evidence_folders` in `src/kicad_tools/cli/board_readiness.py` (#7337). */

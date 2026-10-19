@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "checked_at": "2026-10-19T00:00:00Z",
+  "checked_at": "2026-10-19T07:00:00+00:00",
   "mode": "assembly",
   "status": "ready",
   "blockers": [],
@@ -97,7 +97,7 @@
     "output/board04_symbols.kicad_sym": "551e09f27d91f87826b728b9436e23f38228bd17430c48a83deaa55cd419c396",
     "output/readiness/native-erc-linux.json": "9dd3742f1e9ebf0f5e44a107badabd035a933bf06552201fb0bb6a2f7eea22d8",
     "output/manufacturing/native-erc-linux.json": "9dd3742f1e9ebf0f5e44a107badabd035a933bf06552201fb0bb6a2f7eea22d8",
-    "output/readiness/known-issues.json": "46bc24ca252c53d77da39f3f16ccf9d0818c5250e6d700365afe4364a24fba24"
+    "output/readiness/known-issues.json": "ff57c006977693dc18d8e9f8f7d5259d5916e20de2af29bf0eedf864d11bd1ce"
   },
   "evidence": {
     "kct_check": "output/readiness/kct-check.json",
@@ -110,7 +110,168 @@
       "issue": 6269,
       "kind": "exception",
       "summary": "Paid 0.15 mm mechanical-drill via process (ruling #7147); the generic jlcpcb-tier1 kct check reports the reviewed vias as errors, the board's own check_manufacturing.py models the process",
-      "recorded": "2026-10-18"
+      "recorded": "2026-10-19",
+      "errors": [
+        {
+          "rule": "dimension_annular_ring",
+          "at": [
+            144.3,
+            90.25
+          ]
+        },
+        {
+          "rule": "dimension_annular_ring",
+          "at": [
+            146.45,
+            89.25
+          ]
+        },
+        {
+          "rule": "dimension_annular_ring",
+          "at": [
+            147.15,
+            89.75
+          ]
+        },
+        {
+          "rule": "dimension_annular_ring",
+          "at": [
+            147.25,
+            86.5
+          ]
+        },
+        {
+          "rule": "dimension_annular_ring",
+          "at": [
+            151.25,
+            86.5
+          ]
+        },
+        {
+          "rule": "dimension_annular_ring",
+          "at": [
+            151.75,
+            92.45
+          ]
+        },
+        {
+          "rule": "dimension_annular_ring",
+          "at": [
+            155.05,
+            87.25
+          ]
+        },
+        {
+          "rule": "dimension_via_diameter",
+          "at": [
+            144.3,
+            90.25
+          ]
+        },
+        {
+          "rule": "dimension_via_diameter",
+          "at": [
+            146.45,
+            89.25
+          ]
+        },
+        {
+          "rule": "dimension_via_diameter",
+          "at": [
+            147.15,
+            89.75
+          ]
+        },
+        {
+          "rule": "dimension_via_diameter",
+          "at": [
+            147.25,
+            86.5
+          ]
+        },
+        {
+          "rule": "dimension_via_diameter",
+          "at": [
+            151.25,
+            86.5
+          ]
+        },
+        {
+          "rule": "dimension_via_diameter",
+          "at": [
+            151.75,
+            92.45
+          ]
+        },
+        {
+          "rule": "dimension_via_diameter",
+          "at": [
+            155.05,
+            87.25
+          ]
+        },
+        {
+          "rule": "dimension_via_drill",
+          "at": [
+            144.3,
+            90.25
+          ]
+        },
+        {
+          "rule": "dimension_via_drill",
+          "at": [
+            146.45,
+            89.25
+          ]
+        },
+        {
+          "rule": "dimension_via_drill",
+          "at": [
+            147.15,
+            89.75
+          ]
+        },
+        {
+          "rule": "dimension_via_drill",
+          "at": [
+            147.25,
+            86.5
+          ]
+        },
+        {
+          "rule": "dimension_via_drill",
+          "at": [
+            151.25,
+            86.5
+          ]
+        },
+        {
+          "rule": "dimension_via_drill",
+          "at": [
+            151.75,
+            92.45
+          ]
+        },
+        {
+          "rule": "dimension_via_drill",
+          "at": [
+            155.05,
+            87.25
+          ]
+        },
+        {
+          "rule": "netclass_annular_ring",
+          "item": "netclass:Default"
+        },
+        {
+          "rule": "netclass_via_diameter",
+          "item": "netclass:Default"
+        },
+        {
+          "rule": "netclass_via_drill",
+          "item": "netclass:Default"
+        }
+      ]
     }
   ],
   "manufacturer": "jlcpcb-tier1"

@@ -1338,24 +1338,34 @@ def _format_warning_table(counts: dict[str, int]) -> str:
     return ", ".join(f"{rule}={count}" for rule, count in counts.items())
 
 
-def _violation_error_key(violation: dict) -> tuple[str, float, float] | None:
-    """``(rule, x_mm, y_mm)`` for an error violation, or ``None`` with no usable location."""
+def _violation_error_key(violation: dict) -> tuple[Any, ...] | None:
+    """``(rule, x_mm, y_mm)`` or ``(rule, item)`` for an error violation, else ``None``.
+
+    A violation with a board location is keyed by it.  One with none (a
+    ``netclass_*`` rule) is keyed by its single named item; anything else has
+    no usable identity.
+    """
+    rule = str(violation.get("rule_id") or "unknown")
     location = violation.get("location")
-    if not isinstance(location, (list, tuple)) or len(location) != 2:
+    if isinstance(location, (list, tuple)) and len(location) == 2:
+        if all(type(c) in (int, float) and math.isfinite(c) for c in location):
+            identity = error_identity(rule, location[0], location[1])
+            return (identity["rule"], identity["at"][0], identity["at"][1])
         return None
-    if not all(type(c) in (int, float) and math.isfinite(c) for c in location):
-        return None
-    identity = error_identity(str(violation.get("rule_id") or "unknown"), location[0], location[1])
-    return (identity["rule"], identity["at"][0], identity["at"][1])
+    items = violation.get("items")
+    if location is None and isinstance(items, list) and len(items) == 1:
+        if isinstance(items[0], str) and items[0] and items[0] == items[0].strip():
+            return (rule, items[0])
+    return None
 
 
-def _describe_error_key(key: tuple[str, float, float]) -> str:
+def _describe_error_key(key: tuple[Any, ...]) -> str:
+    if len(key) == 2:
+        return f"{key[0]} on {key[1]}"
     return f"{key[0]} at {key[1]:.2f}/{key[2]:.2f}"
 
 
-def _unaccepted_errors(
-    report: dict, allowance: dict[tuple[str, float, float], int]
-) -> list[str] | None:
+def _unaccepted_errors(report: dict, allowance: dict[tuple[Any, ...], int]) -> list[str] | None:
     """Error identities that differ from the recorded allowance, or ``None``.
 
     The report's error violations are matched against the listed identities as
@@ -1377,7 +1387,7 @@ def _unaccepted_errors(
     if len(errors) != int(summary.get("errors", 0) or 0):
         return None
     problems: list[str] = []
-    seen: set[tuple[str, float, float]] = set()
+    seen: set[tuple[Any, ...]] = set()
     for violation in errors:
         key = _violation_error_key(violation)
         if key is None:
@@ -1390,7 +1400,7 @@ def _unaccepted_errors(
         seen.add(key)
     problems.extend(
         f"{_describe_error_key(k)} (recorded for #{allowance[k]}, no longer fires)"
-        for k in sorted(set(allowance) - seen)
+        for k in sorted(set(allowance) - seen, key=lambda k: (len(k), *map(str, k)))
     )
     return problems
 

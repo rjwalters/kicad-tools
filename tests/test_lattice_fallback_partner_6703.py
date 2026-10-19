@@ -655,15 +655,20 @@ def test_uncoupled_fallback_pair_with_asymmetric_vias_warns() -> None:
     assert len(lines) == 1 and "(P=2, N=3)" in lines[0]
 
 
-@pytest.mark.parametrize("final", ["coupled", "hybrid:U1.1"])
-def test_stale_mismatch_on_a_segment_no_longer_in_fallback_is_not_reported(final) -> None:
-    # A segment that left the fallback (coupled later, or taken by the #6446
-    # hybrid retry, which removes it from the flush) was not committed by it.
+def test_hybrid_segment_with_asymmetric_legs_warns() -> None:
+    # Issue #7093: the counts are now read off each segment's committed legs
+    # (``segment_via_counts``), not the fallback flush's record, so a
+    # segment's final outcome no longer has to be the fallback for its
+    # unequal vias to count.  A #6446 hybrid's single-ended legs never reach
+    # the flush and used to commit (0, 1) vias with only a log line.
     from kicad_tools.router.core import pair_via_mismatch_warnings
 
     segs = _chain_segments()
-    outcomes = {segs[0].key: final, segs[1].key: "coupled"}
-    assert pair_via_mismatch_warnings(segs, outcomes, {segs[0].key: (0, 1)}) == []
+    outcomes = {segs[0].key: "hybrid:J1.1", segs[1].key: "coupled"}
+    lines = pair_via_mismatch_warnings(segs, outcomes, {segs[0].key: (0, 1)})
+    assert len(lines) == 1
+    assert "(P=0, N=1)" in lines[0]
+    assert "hybrid's single-ended legs found no via-equal pair" in lines[0]
 
 
 def test_equal_via_fallback_segments_do_not_warn() -> None:
