@@ -1180,6 +1180,11 @@ def _warn_unevaluated_ampacity(
     key_to_board = {user_key: board_net for board_net, user_key in resolved.items()}
 
     segment_nets = {getattr(seg, "net_name", "") for seg in getattr(pcb, "segments", [])}
+    # Issue #7206 (F3): a net with a copper pour is rated by its pour neck;
+    # one that cannot be rated is reported as ``ampacity: unknown`` coverage.
+    from kicad_tools.validate.pour_ampacity import poured_nets
+
+    rated_nets = segment_nets | set(poured_nets(pcb, sorted(resolved)))
 
     unevaluated: list[str] = []
     for user_key in sorted(declared_ampacity_targets):
@@ -1190,8 +1195,8 @@ def _warn_unevaluated_ampacity(
         elif not ampacity_active:
             # Net resolved but the whole category was skipped/excluded.
             unevaluated.append(board_net)
-        elif board_net not in segment_nets:
-            # Net resolved but carries no routed segment for the rule to size.
+        elif board_net not in rated_nets:
+            # Net resolved but carries no routed segment or pour to size.
             unevaluated.append(board_net)
 
     # Deduplicate while preserving first-seen order.
@@ -2296,6 +2301,18 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1
 
+    from kicad_tools.sync.discover import resolve_declared_currents_for_pcb
+    from kicad_tools.validate.coverage import _declares_ampacity
+
+    declared_spec_currents = resolve_declared_currents_for_pcb(pcb_path)
+    if declared_spec_currents and not _declares_ampacity(net_class_map):
+        print(
+            f"Note: project.kct declares {len(declared_spec_currents)} current "
+            "requirement(s) but no net class carries target_ampacity; add "
+            "`target_ampacity` to the net classes carrying it (net_class_map.json).",
+            file=sys.stderr,
+        )
+
     # Create checker with manufacturer rules
     try:
         checker = DRCChecker(
@@ -2329,6 +2346,9 @@ def main(argv: list[str] | None = None) -> int:
             # Issue #4980/#5124: declared branch-specific current-path
             # intent (--current-paths sidecar, auto-discovered).
             current_path_specs=current_path_specs,
+            # Issue #7206: spec-declared currents with no target_ampacity
+            # make ampacity coverage ``unknown`` instead of a vacuous skip.
+            declared_spec_currents=declared_spec_currents,
             mask_copper_request=mask_copper_request,
             # Issue #6044: routing_policy options.  Pair-net via caps are
             # left to diffpair_uncoupled_length only when that category runs.
@@ -3099,6 +3119,8 @@ def build_check_rule_set(
         except (OSError, ValueError) as exc:
             notes.append(f"ignoring malformed current-paths sidecar {cp_path}: {exc}")
 
+    from kicad_tools.sync.discover import resolve_declared_currents_for_pcb
+
     copper_outer, copper_inner = stackup_copper_oz(pcb)
     checker = DRCChecker(
         pcb,
@@ -3113,6 +3135,7 @@ def build_check_rule_set(
         courtyard_waivers=courtyard_waivers,
         strict_connectivity=True,
         current_path_specs=current_path_specs,
+        declared_spec_currents=resolve_declared_currents_for_pcb(project_pcb_path),
     )
     checker.design_rules, override_msg = resolve_pcb_fabrication_overrides(
         project_pcb_path, checker.design_rules, manufacturer_id=effective_mfr
@@ -3403,6 +3426,11 @@ def run_selected_checks(
         if category == "impedance" and unmeasured and pre is None:
             names = ", ".join(f"{p}/{n}" for p, n in unmeasured)
             cov_map[category] = cov.unknown(category, f"diff_pair_unmeasurable ({names})")
+        # Issue #7206 (F3): a declared net whose copper pour could not be
+        # rated (no fill, no current path, ...) is unknown, never a pass.
+        pour_unmeasured = getattr(checker, "ampacity_unmeasured_nets", None)
+        if category == "ampacity" and pour_unmeasured and pre is None:
+            cov_map[category] = cov.ampacity_pour_unknown(pour_unmeasured)
 
     return results
 

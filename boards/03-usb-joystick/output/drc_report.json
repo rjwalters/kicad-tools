@@ -37,8 +37,8 @@
     },
     "passed": true,
     "stale_waivers": 0,
-    "coverage_checked": 33,
-    "coverage_skipped": 7,
+    "coverage_checked": 34,
+    "coverage_skipped": 6,
     "coverage_unknown": [
       "spec_conformance"
     ],
@@ -280,9 +280,9 @@
   },
   "coverage": {
     "ampacity": {
-      "status": "skipped:no_declared_targets",
-      "state": "skipped",
-      "reason": "no_declared_targets",
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
       "blocking": true
     },
     "clearance": {
