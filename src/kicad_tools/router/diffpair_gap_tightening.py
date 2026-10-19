@@ -41,6 +41,7 @@ from __future__ import annotations
 import dataclasses
 import math
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -440,7 +441,7 @@ def _net_length(segments: list[Segment]) -> float:
     return sum(math.hypot(s.x2 - s.x1, s.y2 - s.y1) for s in segments)
 
 
-def _checker_net_length_fn(router: Autorouter) -> Any:
+def _checker_net_length_fn(router: Autorouter) -> Callable[[list[Route], int], float] | None:
     """``(routes, net_id) -> mm`` measured the way ``kct check`` measures skew.
 
     Issue #7349 review: the skew gate must judge the number the checker
