@@ -3641,6 +3641,59 @@ class TestExactFitAmplitude:
         )
 
 
+class TestNoOvershootPastGroupMaximum:
+    """Issue #7423: a tuned member must never end past the group target.
+
+    On a host that is not 8-direction aligned the trombone's snapped frame and
+    exit dogleg change the forward travel, so the added length differs from the
+    requested one by microns and the member used to raise the group maximum.
+    """
+
+    @staticmethod
+    def _run(host_dy: float, refits: int, monkeypatch):
+        import math
+
+        from kicad_tools.router import match_group_tuning as mgt
+        from kicad_tools.router.length import LengthTracker
+
+        monkeypatch.setattr(mgt, "MAX_OVERSHOOT_REFITS", refits)
+        host = Route(
+            net=1,
+            net_name="D0",
+            segments=[
+                Segment(
+                    x1=0.0,
+                    y1=0.0,
+                    x2=12.0,
+                    y2=host_dy,
+                    width=0.2,
+                    layer=Layer.F_CU,
+                    net=1,
+                    net_name="D0",
+                )
+            ],
+        )
+        target = math.hypot(12.0, host_dy) + 1.3
+        group = _ddr_group(net_ids=[1, 2], tolerance=0.1)
+        routes = {1: host, 2: _straight_route(2, "D1", target, y=10.0)}
+        results = tune_match_group_v2(
+            group,
+            routes,
+            tolerance_mm=0.1,
+            intra_group_clearance_mm=0.2,
+            config=SerpentineConfig(amplitude=1.0, gap_factor=2.0),
+        )
+        return LengthTracker.calculate_route_length(results[1][0]) - target
+
+    def test_off_angle_host_does_not_overshoot(self, monkeypatch):
+        excess = self._run(0.7, refits=3, monkeypatch=monkeypatch)
+        assert excess <= 1e-8, f"member ended {excess * 1000:.4f}um past the target"
+
+    def test_without_refit_the_host_overshoots(self, monkeypatch):
+        """Guards the test geometry: with the refit off it overshoots."""
+        assert self._run(0.7, refits=0, monkeypatch=monkeypatch) > 1e-6
+
+
 # =============================================================================
 # Via-count imbalance (Issue #3931)
 # =============================================================================

@@ -254,6 +254,12 @@ MAX_SEGMENT_RETRY_CANDIDATES: int = 3
 #: into A2's own corridor.
 AMPLITUDE_BACKOFF_FACTORS: tuple[float, ...] = (1.0, 0.5, 0.25, 0.125)
 
+# Issue #7423: a committed meander must not end past the group target.  The
+# amplitude is re-fitted (at most this many times) while the member is more
+# than ``OVERSHOOT_EPS_MM`` past it.
+MAX_OVERSHOOT_REFITS: int = 3
+OVERSHOOT_EPS_MM: float = 1e-9
+
 
 #: Per-bump placement (Issue #7043).  When every whole-trombone attempt on a
 #: net is rejected, the tuner places single bumps one at a time: each bump
@@ -1379,6 +1385,59 @@ def _tune_match_group_single_ended(
                         segments=new_segments_full,
                         vias=current_route.vias.copy(),
                     )
+
+                    # Issue #7423: the trombone's real added length is not
+                    # exactly ``length_needed`` -- the snapped frame and the
+                    # exit dogleg change the host's forward travel, so the
+                    # member can land a few microns past the group maximum
+                    # and raise it.  The added length is linear in the
+                    # amplitude (``2 * loops`` per mm), so shrink the
+                    # amplitude by the measured overshoot and rebuild.
+                    # Never grows the amplitude: an undershoot stays inside
+                    # the tolerance and a bigger meander risks the DRC gate.
+                    for _refit in range(MAX_OVERSHOOT_REFITS):
+                        overshoot = _measure(candidate_route) - target_length
+                        if overshoot <= OVERSHOOT_EPS_MM or serp_result.num_loops <= 0:
+                            break
+                        refit_amplitude = attempt_config.amplitude - overshoot / (
+                            2.0 * serp_result.num_loops
+                        )
+                        if refit_amplitude <= 0.0:
+                            break
+                        attempt_config = SerpentineConfig(
+                            style=attempt_config.style,
+                            amplitude=refit_amplitude,
+                            min_spacing=attempt_config.min_spacing,
+                            min_segment_length=attempt_config.min_segment_length,
+                            gap_factor=attempt_config.gap_factor,
+                            max_iterations=attempt_config.max_iterations,
+                            side=attempt_config.side,
+                            outer_normal_hint=attempt_config.outer_normal_hint,
+                        )
+                        refit_result = SerpentineGenerator(attempt_config).generate_trombone(
+                            host_segment,
+                            # Keep the generator's ceil() on the same loop count.
+                            2.0 * refit_amplitude * serp_result.num_loops * (1.0 - 1e-9),
+                        )
+                        if (
+                            not refit_result.success
+                            or refit_result.num_loops != serp_result.num_loops
+                        ):
+                            break
+                        serp_result = refit_result
+                        per_member_result.serpentine_results[-1] = serp_result
+                        candidate_route = _Route(
+                            net=current_route.net,
+                            net_name=current_route.net_name,
+                            segments=(
+                                current_route.segments[:seg_idx]
+                                + lead_in
+                                + serp_result.new_segments
+                                + lead_out
+                                + current_route.segments[seg_idx + 1 :]
+                            ),
+                            vias=current_route.vias.copy(),
+                        )
 
                     # Post-insertion DRC self-check.  Issue #3317
                     # follow-up: also check segment-vs-via at
