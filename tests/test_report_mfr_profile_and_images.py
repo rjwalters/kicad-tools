@@ -126,7 +126,15 @@ class TestProfileThreading:
         captured = {}
 
         class FakeAudit:
-            def __init__(self, path, manufacturer, quantity, skip_erc, net_class_map_path=None):
+            def __init__(
+                self,
+                path,
+                manufacturer,
+                quantity,
+                skip_erc,
+                net_class_map_path=None,
+                schematic_path=None,
+            ):
                 captured["manufacturer"] = manufacturer
                 captured["net_class_map_path"] = net_class_map_path
 
@@ -236,7 +244,7 @@ class TestProfileThreading:
         captured = {}
 
         class FakeCollector:
-            def __init__(self, pcb_path, manufacturer, net_class_map_path=None):
+            def __init__(self, pcb_path, manufacturer, net_class_map_path=None, schematic_path=None):
                 captured["manufacturer"] = manufacturer
                 captured["net_class_map_path"] = net_class_map_path
 
