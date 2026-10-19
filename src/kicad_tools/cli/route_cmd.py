@@ -8494,6 +8494,22 @@ def _audited_trace_copper(router: "Autorouter", *, id_to_name=None) -> "list[Rou
     return routed + _preserved_trace_copper(router, routed=routed, id_to_name=id_to_name)
 
 
+def _print_pair_via_parity_summary(router: "Autorouter", *, quiet: bool = False) -> None:
+    """Print the end-of-run ``Pair Via-Parity Failures`` block (#7425, #7093 AC1)."""
+    failures = getattr(router, "pair_via_parity_failures", None)
+    if not failures or quiet:
+        return
+    print(f"\n--- Pair Via-Parity Failures ({len(failures)}) ---")
+    for f in failures:
+        print(
+            f"  {f.p_name}/{f.n_name}: {f.p_name} {f.vias_p} via(s), {f.n_name} {f.vias_n} via(s)"
+        )
+    print(
+        "  (reported only; exit status unchanged. `kct check` flags these as "
+        "diffpair_uncoupled_length)"
+    )
+
+
 def _preserved_trace_copper(
     router: "Autorouter", *, routed: "list[Route]", id_to_name=None
 ) -> "list[Route]":
@@ -23085,6 +23101,13 @@ def _run_main_impl(args, parser, argv) -> int:
             "`kct check` results if this board is dense with matched-length "
             "bundles."
         )
+
+    # Issue #7425 (#7093 AC1): engaged diff pairs the router committed with
+    # unequal P/N via counts -- the same pairs ``kct check`` reports as
+    # ``diffpair_uncoupled_length`` "unequal via counts".  Reported only: the
+    # exit status is unchanged (the JSON report carries the same list under
+    # ``pair_via_parity_failures``).
+    _print_pair_via_parity_summary(router, quiet=quiet)
 
     # Report nets that needed clearance relaxation (--progressive-clearance mode)
     if relaxed_nets_report and not quiet:

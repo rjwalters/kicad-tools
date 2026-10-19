@@ -7,16 +7,55 @@ from ..base import CircuitBlock
 if TYPE_CHECKING:
     from kicad_sch_helper import Schematic
 
+    from ...models.symbol import SymbolInstance
+
+Point = tuple[float, float]
+
+# Horizontal jog (one 2.54 mm grid step) between an input pin and the P-FET
+# drain lead, so the input wire never runs along the gate tie.
+_INPUT_JOG = 2.54
+
+
+def _wire_path(sch: "Schematic", *points: Point) -> None:
+    """Draw an orthogonal polyline through ``points``, skipping zero-length legs."""
+    for a, b in zip(points, points[1:], strict=False):
+        if a != b:
+            sch.add_wire(a, b)
+
+
+def _wire_reverse_pfet(sch: "Schematic", pfet: "SymbolInstance", vin: Point, gnd: Point) -> Point:
+    """Wire a high-side reverse-polarity P-FET between ``vin`` and its load.
+
+    The input goes to the **drain** and the **source** feeds the load: the body
+    diode (anode on the drain) conducts at power-up, the gate tied to ``gnd``
+    then sees Vgs = -VOUT and the channel turns on.  With the input reversed
+    the body diode is reverse-biased and Vgs >= 0, so the FET blocks.  (The
+    old wiring put the input on the source, which leaves the body diode
+    conducting from the load back into a reversed input; issue #7399.)
+
+    Returns the source position, the protected output.
+    """
+    drain = pfet.pin_position("D")
+    gate = pfet.pin_position("G")
+    jog_x = vin[0] + _INPUT_JOG
+    _wire_path(sch, vin, (jog_x, vin[1]), (jog_x, drain[1]), drain)
+    _wire_path(sch, gate, (gate[0], gnd[1]), gnd)
+    return pfet.pin_position("S")
+
 
 class BarrelJackInput(CircuitBlock):
     """
     Barrel jack power input with optional reverse polarity protection.
 
     Schematic (with P-FET protection):
-        VIN ──┬── [Q] ──┬── [C_filt] ──┬── VOUT
-              │    │    │              │
-              └────┴────┼──────────────┘
-                       GND
+        VIN ──D[Q]S──┬── VOUT
+               │     │
+               G  [C_filt]
+               │     │
+        GND ───┴─────┘
+
+    The P-FET's drain takes the input and its source feeds the load, with
+    the gate tied to ground (see ``_wire_reverse_pfet``).
 
     Schematic (with diode protection):
         VIN ──── [D] ──┬── [C_filt] ──┬── VOUT
@@ -91,30 +130,24 @@ class BarrelJackInput(CircuitBlock):
             self.pfet = sch.add_symbol(pfet_symbol, q_x, y, q_ref, "Si2301")
             self.components["Q"] = self.pfet
 
-            # Wire jack tip to PFET source
-            pfet_source = self.pfet.pin_position("S")
-            pfet_gate = self.pfet.pin_position("G")
-            pfet_drain = self.pfet.pin_position("D")
-
-            sch.add_wire(jack_tip, pfet_source)
-
-            # Gate tied to ground for always-on reverse protection
-            sch.add_wire(pfet_gate, (pfet_gate[0], jack_sleeve[1]))
-
-            # Output comes from drain
-            output_pos = pfet_drain
+            # Jack tip -> drain, gate -> sleeve; output from the source.
+            output_pos = _wire_reverse_pfet(sch, self.pfet, jack_tip, jack_sleeve)
 
         elif protection == "diode":
             d_ref = f"D{base_num}"
             d_x = x + protection_offset
-            self.diode = sch.add_symbol(diode_symbol, d_x, y, d_ref, "SS34")
+            # Rotated 180 degrees so the anode faces the input and the
+            # cathode faces the filter cap; at 0 degrees the output wire
+            # would run through the anode pin and short the diode.
+            self.diode = sch.add_symbol(diode_symbol, d_x, y, d_ref, "SS34", rotation=180)
             self.components["D"] = self.diode
 
             # Wire jack tip to diode anode
             diode_anode = self.diode.pin_position("A")
             diode_cathode = self.diode.pin_position("K")
 
-            sch.add_wire(jack_tip, diode_anode)
+            jog_x = jack_tip[0] + _INPUT_JOG
+            _wire_path(sch, jack_tip, (jog_x, jack_tip[1]), (jog_x, diode_anode[1]), diode_anode)
 
             # Output comes from cathode
             output_pos = diode_cathode
@@ -132,8 +165,9 @@ class BarrelJackInput(CircuitBlock):
         cap_pos = self.filter_cap.pin_position("1")
         cap_neg = self.filter_cap.pin_position("2")
 
-        if protection != "none":
-            sch.add_wire(output_pos, cap_pos)
+        # (With no protection the input feeds the cap directly; it used to be
+        # left unwired, issue #7399.)
+        _wire_path(sch, output_pos, (cap_pos[0], output_pos[1]), cap_pos)
 
         # Define output port at cap positive
         self.ports["VOUT"] = cap_pos
@@ -299,10 +333,14 @@ class BatteryInput(CircuitBlock):
     Battery input with optional reverse polarity protection.
 
     Schematic (with P-FET protection):
-        VBAT_IN ──┬── [Q] ──┬── [C_filt] ──┬── VBAT
-                  │    │    │              │
-                  └────┴────┼──────────────┘
-                           GND
+        VBAT_IN ──D[Q]S──┬── VBAT
+                   │     │
+                   G  [C_filt]
+                   │     │
+        GND ───────┴─────┘
+
+    The P-FET's drain takes the input and its source feeds the load, with
+    the gate tied to ground (see ``_wire_reverse_pfet``).
 
     Ports:
         - VBAT_IN: Raw battery input
@@ -374,30 +412,24 @@ class BatteryInput(CircuitBlock):
             self.pfet = sch.add_symbol(pfet_symbol, q_x, y, q_ref, "Si2301")
             self.components["Q"] = self.pfet
 
-            # Wire connector positive to PFET source
-            pfet_source = self.pfet.pin_position("S")
-            pfet_gate = self.pfet.pin_position("G")
-            pfet_drain = self.pfet.pin_position("D")
-
-            sch.add_wire(conn_pos, pfet_source)
-
-            # Gate tied to ground for always-on reverse protection
-            sch.add_wire(pfet_gate, (pfet_gate[0], conn_neg[1]))
-
-            # Output from drain
-            output_pos = pfet_drain
+            # Connector + -> drain, gate -> connector -; output from the source.
+            output_pos = _wire_reverse_pfet(sch, self.pfet, conn_pos, conn_neg)
 
         elif protection == "diode":
             d_ref = f"D{base_num}"
             d_x = x + protection_offset
-            self.diode = sch.add_symbol(diode_symbol, d_x, y, d_ref, "SS34")
+            # Rotated 180 degrees so the anode faces the input and the
+            # cathode faces the filter cap; at 0 degrees the output wire
+            # would run through the anode pin and short the diode.
+            self.diode = sch.add_symbol(diode_symbol, d_x, y, d_ref, "SS34", rotation=180)
             self.components["D"] = self.diode
 
             # Wire connector positive to diode anode
             diode_anode = self.diode.pin_position("A")
             diode_cathode = self.diode.pin_position("K")
 
-            sch.add_wire(conn_pos, diode_anode)
+            jog_x = conn_pos[0] + _INPUT_JOG
+            _wire_path(sch, conn_pos, (jog_x, conn_pos[1]), (jog_x, diode_anode[1]), diode_anode)
 
             # Output from cathode
             output_pos = diode_cathode
@@ -414,8 +446,9 @@ class BatteryInput(CircuitBlock):
         # Wire protection output to cap
         cap_pos = self.filter_cap.pin_position("1")
 
-        if protection != "none":
-            sch.add_wire(output_pos, cap_pos)
+        # (With no protection the input feeds the cap directly; it used to be
+        # left unwired, issue #7399.)
+        _wire_path(sch, output_pos, (cap_pos[0], output_pos[1]), cap_pos)
 
         # Define output port
         self.ports["VBAT"] = cap_pos

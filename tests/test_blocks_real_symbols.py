@@ -764,3 +764,148 @@ def test_esd_array_rejects_more_channels_than_the_part_has(channels: int) -> Non
     """USBLC6-2SC6 has two channels; asking for more must raise, not invent ports."""
     with pytest.raises(ValueError, match="2 ESD channel"):
         B.ESDProtectionBlock(Schematic(title="esd"), X, Y, channels=channels)
+
+
+def _pin_nets(sch: Schematic) -> tuple[dict[tuple[float, float], int], dict[str, int]]:
+    """``_nets`` plus a ``"REF.PIN" -> net`` map over every placed pin."""
+    nets = _nets(sch)
+    pins = {
+        f"{sym.reference}.{pin.number}": nets[_pt(sym.pin_position(pin.number))]
+        for sym in sch.symbols
+        for pin in _placed_pins(sym)
+    }
+    return nets, pins
+
+
+def _net_at(sch: Schematic, nets: dict[tuple[float, float], int], p: tuple[float, float]) -> int:
+    """Net of point ``p``: a wire endpoint or pin, or a tap in a wire's span."""
+    p = _pt(p)
+    if p in nets:
+        return nets[p]
+    for w in sch.wires:
+        a, b = _pt((w.x1, w.y1)), _pt((w.x2, w.y2))
+        if _on_segment(p, a, b):
+            return nets[a]
+    raise AssertionError(f"{p} is on no pin or wire")
+
+
+def _pin_number(sym: Any, name: str) -> str:
+    return next(p.number for p in sym.symbol_def.pins if p.name == name)
+
+
+# (factory, input port, output port).  Each places Q1 as a high-side P-FET.
+_REVERSE_PFET_CASES = [
+    pytest.param(
+        lambda s: B.ReversePolarityBlock(s, X, Y), "VIN", "VOUT", id="ReversePolarityBlock"
+    ),
+    pytest.param(
+        lambda s: B.create_reverse_polarity_pfet(s, X, Y),
+        "VIN",
+        "VOUT",
+        id="create_reverse_polarity_pfet",
+    ),
+    pytest.param(lambda s: B.BarrelJackInput(s, X, Y), "VIN", "VOUT", id="BarrelJackInput"),
+    pytest.param(
+        lambda s: B.create_12v_barrel_jack(s, X, Y), "VIN", "VOUT", id="create_12v_barrel_jack"
+    ),
+    pytest.param(lambda s: B.BatteryInput(s, X, Y), "VBAT_IN", "VBAT", id="BatteryInput"),
+    pytest.param(
+        lambda s: B.create_lipo_battery(s, X, Y), "VBAT_IN", "VBAT", id="create_lipo_battery"
+    ),
+]
+
+
+@pytest.mark.parametrize(("factory", "vin", "vout"), _REVERSE_PFET_CASES)
+def test_reverse_polarity_pfet_takes_the_input_on_its_drain(
+    factory: Factory, vin: str, vout: str
+) -> None:
+    """Drain on the input, source on the load, gate to ground (issue #7399).
+
+    The body diode (anode = drain) must conduct from the input toward the
+    load; with the source on the input it conducts from the load back into a
+    reversed supply and the block protects nothing.
+    """
+    sch = Schematic(title="reverse-polarity P-FET orientation")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        block = factory(sch)
+    nets, pins = _pin_nets(sch)
+    port = lambda name: _net_at(sch, nets, block.ports[name])  # noqa: E731
+    q = next(s for s in sch.symbols if s.reference == "Q1")
+    d, s_, g = (f"Q1.{_pin_number(q, n)}" for n in ("D", "S", "G"))
+
+    assert pins[d] == port(vin), "the input must land on the P-FET drain"
+    assert pins[s_] == port(vout), "the protected output must come from the source"
+    assert len({port(vin), port(vout), port("GND")}) == 3
+    gate_net = pins[g]
+    if "R_gate" in block.components:
+        r_gate = block.components["R_gate"].reference
+        assert gate_net == pins[f"{r_gate}.1"]
+        assert pins[f"{r_gate}.2"] == port("GND")
+    else:
+        assert gate_net == port("GND"), "the gate must be tied to ground"
+    if "C_FILT" in block.components:
+        assert pins[f"{block.components['C_FILT'].reference}.1"] == port(vout)
+
+
+@pytest.mark.parametrize("protection", ["diode", "none"])
+@pytest.mark.parametrize(
+    ("make", "vin", "vout"),
+    [
+        pytest.param(B.BarrelJackInput, "VIN", "VOUT", id="BarrelJackInput"),
+        pytest.param(B.BatteryInput, "VBAT_IN", "VBAT", id="BatteryInput"),
+    ],
+)
+def test_power_input_feeds_its_filter_cap(make: Any, vin: str, vout: str, protection: str) -> None:
+    """The input reaches the filter cap through the diode, or directly with no protection."""
+    sch = Schematic(title=f"power input: {protection}")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        block = make(sch, X, Y, protection=protection)
+    nets, pins = _pin_nets(sch)
+    port = lambda name: _net_at(sch, nets, block.ports[name])  # noqa: E731
+    cap = block.components["C_FILT"].reference
+
+    assert pins["J1.1"] == port(vin)
+    assert pins[f"{cap}.1"] == port(vout)
+    if protection == "none":
+        assert port(vin) == port(vout), "unprotected input must feed the filter cap"
+    else:
+        diode = block.components["D"]
+        anode = pins[f"D1.{_pin_number(diode, 'A')}"]
+        cathode = pins[f"D1.{_pin_number(diode, 'K')}"]
+        assert (anode, cathode) == (port(vin), port(vout))
+        assert anode != cathode
+
+
+@pytest.mark.parametrize("filter_cap", [None, "100nF"])
+def test_voltage_divider_sense_is_a_voltage_divider(filter_cap: str | None) -> None:
+    """``VoltageDividerSense`` is the ratio-sized ``VoltageDivider`` (issue #7399 step 4)."""
+    sch = Schematic(title="voltage divider sense")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        block = B.VoltageDividerSense(sch, X, Y, ratio=11.0, filter_cap=filter_cap)
+    assert isinstance(block, B.VoltageDivider)
+    assert (block.r1.value, block.r2.value) == ("100.0k", "10k")
+    assert block.get_ratio() == pytest.approx(1 / 11)
+
+    nets, pins = _pin_nets(sch)
+    port = lambda name: _net_at(sch, nets, block.ports[name])  # noqa: E731
+    assert pins["R1.1"] == port("VIN")
+    assert pins["R1.2"] == pins["R2.1"] == port("VOUT")
+    assert pins["R2.2"] == port("GND")
+    assert len({port("VIN"), port("VOUT"), port("GND")}) == 3
+    if filter_cap is not None:
+        assert (pins["C1.1"], pins["C1.2"]) == (port("VOUT"), port("GND"))
+
+
+def test_create_voltage_sense_sizes_the_divider_from_the_adc_range() -> None:
+    block = B.create_voltage_sense(Schematic(title="sense"), X, Y, max_voltage=33.0, adc_ref=3.3)
+    assert isinstance(block, B.VoltageDivider)
+    assert block.get_output_voltage(33.0) == pytest.approx(3.3)
+
+
+@pytest.mark.parametrize("ratio", [1.0, 0.5])
+def test_voltage_divider_sense_rejects_a_ratio_that_cannot_divide(ratio: float) -> None:
+    with pytest.raises(ValueError, match="ratio must be > 1"):
+        B.VoltageDividerSense(Schematic(title="sense"), X, Y, ratio=ratio)
