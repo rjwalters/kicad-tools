@@ -471,7 +471,7 @@ def main():
             "manufacturing": {
                 "target_fab": "jlcpcb",
                 "layers": {"preferred": 4},
-                "assembly": "smt",
+                "assembly": "both",
             }
         },
         "bom_entries": [

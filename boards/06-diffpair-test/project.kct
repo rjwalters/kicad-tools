@@ -13,7 +13,7 @@ requirements:
     target_fab: jlcpcb-tier1
     layers:
       preferred: 4
-    assembly: smt
+    assembly: both
 bom_entries:
 - ref: J1
   part: PZ254V-11-02P

@@ -109,12 +109,15 @@ unchanged: the board already used the generic
 `PinHeader_1xNN_P2.54mm_Vertical` footprints, not Samtec-specific ones.
 
 Stock and price were read with `kct parts lookup --no-cache` on 2026-10-19.
-Stock changes daily and a listing is not a reservation.
+Stock changes daily and a listing is not a reservation. The price is the unit
+price at the lowest LCSC price break, which is 50 pcs for C492401 and 10 pcs for
+C492407 on LCSC's product pages (2026-10-19). `kct parts lookup` labels that
+first break "1", but single pieces are not sold at that price.
 
-| Ref | Was | Now | Pins | Stock | 1 pc |
-|-----|-----|-----|------|-------|------|
-| J1 | Samtec TSW-102-07-G-S | XFCN PZ254V-11-02P, C492401 | 1 × 2 | 1,082,699 | $0.0187 |
-| J2, J3 | Samtec TSW-108-07-G-S | XFCN PZ254V-11-08P, C492407 | 1 × 8 | 330,352 | $0.0523 |
+| Ref | Was | Now | Pins | Stock | Unit price (lowest break) |
+|-----|-----|-----|------|-------|---------------------------|
+| J1 | Samtec TSW-102-07-G-S | XFCN PZ254V-11-02P, C492401 | 1 × 2 | 1,082,699 | $0.0187 (50 pcs) |
+| J2, J3 | Samtec TSW-108-07-G-S | XFCN PZ254V-11-08P, C492407 | 1 × 8 | 330,352 | $0.0523 (10 pcs) |
 
 Equivalence for this board: same pin counts, single row, 2.54 mm pitch,
 straight male. Pin-to-net assignment is set by the unchanged footprint. The
