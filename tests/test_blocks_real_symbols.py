@@ -113,11 +113,6 @@ CAN_ESD = _xfail(
     "past the TVS pin and off any wire",
     AssertionError,
 )
-GATE_DRIVER = _xfail(
-    "#7402: GateDriverBlock adds no wires; VCC/GND/BOOT_*/GATE_*/PWM_* are "
-    "fixed offsets matching no driver pin",
-    AssertionError,
-)
 B2B_SOURCE = _xfail(
     "#7402: BackToBackFETPair SOURCE port sits at an off-grid Kelvin midpoint "
     "and misses its grid-snapped wire end",
@@ -406,7 +401,6 @@ for _driver in ("3-phase", "half-bridge"):
         f"GateDriverBlock[{_driver}]",
         "GateDriverBlock",
         lambda s, d=_driver: B.GateDriverBlock(s, X, Y, driver_type=d),
-        GATE_DRIVER,
     )
 case(
     "GateDriveResistorArray", "GateDriveResistorArray", lambda s: B.GateDriveResistorArray(s, X, Y)
