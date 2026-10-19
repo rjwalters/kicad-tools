@@ -25,11 +25,17 @@ This module is a geometry-only post-pass that squeezes such a trunk:
    foreign pad / via / copper clearance
    (:meth:`Autorouter._skew_tune_foreign_clearance_ok`), pad connectivity
    of both nets, skew (measured the way ``kct check`` measures it;
-   <= ``SKEW_TOLERANCE_MM`` change per squeeze, and never above the pair's
-   skew before the pass -- see ``CUMULATIVE_SKEW_EPS_MM``), and the
-   ``ImpedanceRule`` post-condition (the squeezed trunk is in band and no
-   segment becomes a newly judged out-of-band one).  A run that fails all
+   <= ``SKEW_TOLERANCE_MM`` change per squeeze, and never above the best
+   skew the pass has reached so far -- see ``CUMULATIVE_SKEW_EPS_MM``), and
+   the ``ImpedanceRule`` post-condition (the squeezed trunk is in band and
+   no segment becomes a newly judged out-of-band one).  A run that fails all
    candidates is left byte-identical and reported as ``declined:<reason>``.
+5. When that ladder commits nothing, unequal ``balanced_*`` splits are
+   tried (Issue #7349).  They are additionally held to the pair's uncoupled
+   length: P+N, measured the way ``diffpair_routing_continuity`` measures
+   it, may not grow, and the coupled fraction may not fall below the class
+   threshold (operator Q12).  The jogs a squeeze adds are uncoupled, so in
+   practice only a run that starts outside the coupling window can pass.
 
 The pass is opt-in (``kct route --tighten-diffpair-gap`` /
 :meth:`Autorouter.apply_diffpair_gap_tightening`): the grid engine is frozen
@@ -70,11 +76,24 @@ MIN_TRUNK_MM = 0.2
 SKEW_TOLERANCE_MM = 0.01
 
 #: Cumulative bound (Issue #7349 review): after any number of squeezes the
-#: pair's ``|skew|`` may not exceed its value before the pass by more than
-#: this float-noise epsilon (mm).  ``SKEW_TOLERANCE_MM`` alone is measured
-#: against the copper of the previous squeeze, so it compounds across runs
-#: (board 06 USB3_RX1 drifted +0.028 mm over two committed runs).
+#: pair's ``|skew|`` may not exceed the best (smallest) value the pass has
+#: reached so far -- the pre-pass skew, or the skew of the last committed
+#: squeeze when that was lower -- by more than this float-noise epsilon (mm).
+#: ``SKEW_TOLERANCE_MM`` alone is measured against the copper of the
+#: previous squeeze, so it compounds across runs (board 06 USB3_RX1 drifted
+#: +0.028 mm over two committed runs), and a bound on the pre-pass skew lets
+#: a later squeeze give back what an earlier one gained (board 07 MIPI_DAT1
+#: 1.021 -> 1.025 mm).
 CUMULATIVE_SKEW_EPS_MM = 1e-6
+
+#: A committed squeeze may not grow the pair's combined P+N uncoupled length
+#: by more than this float-noise epsilon (mm) (Issue #7349, operator Q12).
+UNCOUPLED_EPS_MM = 1e-6
+
+
+#: Fractions of the half-excess moved from the longer rail to the shorter one
+#: when a symmetric squeeze drifts the pair's skew (Issue #7349).
+BALANCE_FRACTIONS = (0.02, 0.03, 0.04, 0.05, 0.1, 0.2, 0.4)
 
 #: Upper bound on runs attempted per pair (defensive loop guard).
 MAX_RUNS_PER_PAIR = 32
@@ -99,6 +118,8 @@ class RunOutcome:
     zdiff_before: float | None
     zdiff_after: float | None
     mode: str | None = None
+    #: Every ``gap_goal/mode`` squeeze tried and why it failed, in order.
+    attempts: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -141,13 +162,31 @@ class GapTighteningResult:
                 line += f", target gap {self.target_gap_mm:.3f}mm"
             line += ")"
             # A partly tightened pair reports ``tightened``; surface why the
-            # leftover runs were declined (Issue #7349).
+            # leftover runs were declined, and which squeezes were tried
+            # (Issue #7349).
             declined = [r for r in self.runs if r.status != "tightened"]
-            if declined and self.runs_tightened:
-                line += "".join(
-                    f"\n    {r.layer} run gap {r.gap_before_mm:.3f}mm: {r.status}" for r in declined
-                )
+            if declined and (self.runs_tightened or any(r.attempts for r in declined)):
+                for r in declined:
+                    line += f"\n    {r.layer} run gap {r.gap_before_mm:.3f}mm: {r.status}"
+                    if r.attempts:
+                        line += " [" + ", ".join(_collapse_attempts(r.attempts)) + "]"
         return line
+
+
+def _collapse_attempts(attempts: list[str]) -> list[str]:
+    """``attempts`` with each verdict shown once, then ``(+N more)``.
+
+    Board 06 USB3_TX2's leftover run tries 30 squeezes, 27 of them declined
+    for ``clearance``; the first of each verdict says enough.
+    """
+    groups: dict[str, list[str]] = {}
+    for attempt in attempts:
+        verdict = attempt.split(":", 1)[-1].split("(", 1)[0]
+        groups.setdefault(verdict, []).append(attempt)
+    return [
+        items[0] if len(items) == 1 else f"{items[0]} (+{len(items) - 1} more)"
+        for items in groups.values()
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -426,8 +465,19 @@ def _rail_chain(
             return (seg.x2, seg.y2)
         return (_r4(seg.x1 + q * ex), _r4(seg.y1 + q * ey))
 
+    start, end = (seg.x1, seg.y1), (seg.x2, seg.y2)
     s1 = at(qa)
     s2 = at(qb)
+    # Issue #7349 review: an overlap end within writer rounding of the
+    # segment's own end would leave a remainder whose endpoints are written
+    # as the same point -- a ``zero_length_segment`` finding.  Run the jog
+    # from the segment's end instead and drop the remainder.
+    lead = qa > _EPS and not _same_written_point(start, s1)
+    tail = qb < q_total - _EPS and not _same_written_point(s2, end)
+    if not lead:
+        s1 = start
+    if not tail:
+        s2 = end
     k1 = (_r4(s1[0] + j_in[0]), _r4(s1[1] + j_in[1]))
     k2 = (_r4(s2[0] - j_out[0]), _r4(s2[1] - j_out[1]))
 
@@ -435,17 +485,99 @@ def _rail_chain(
         return dataclasses.replace(seg, x1=a[0], y1=a[1], x2=b[0], y2=b[1])
 
     moved = [mk(s1, k1), mk(k1, k2), mk(k2, s2)]
+    if any(_is_zero_length(s) for s in moved):
+        return None
     chain: list[Segment] = []
-    if qa > _EPS:
-        chain.append(mk((seg.x1, seg.y1), s1))
+    if lead:
+        chain.append(mk(start, s1))
     chain.extend(moved)
-    if qb < q_total - _EPS:
-        chain.append(mk(s2, (seg.x2, seg.y2)))
+    if tail:
+        chain.append(mk(s2, end))
     return chain, moved
+
+
+def _same_written_point(a: tuple[float, float], b: tuple[float, float]) -> bool:
+    """True when the board writer (4 decimals) emits ``a`` and ``b`` alike."""
+    return _r4(a[0]) == _r4(b[0]) and _r4(a[1]) == _r4(b[1])
+
+
+def _is_zero_length(seg: Segment) -> bool:
+    """A ``zero_length_segment`` finding once written (4 decimals)."""
+    return _same_written_point((seg.x1, seg.y1), (seg.x2, seg.y2))
 
 
 def _net_length(segments: list[Segment]) -> float:
     return sum(math.hypot(s.x2 - s.x1, s.y2 - s.y1) for s in segments)
+
+
+@dataclass(frozen=True)
+class _Coupling:
+    """A pair's combined uncoupled length and coupled fraction.
+
+    Measured the way ``diffpair_routing_continuity`` measures them (its
+    default coupling window and parallel tolerance, as ``kct check`` builds
+    the rule): ``uncoupled_mm`` is P+N routed length minus P+N coupled
+    length -- the "combined P+N uncoupled length" of operator Q12 and the
+    harness's ``uncoupled_mm`` -- and ``coupled_fraction`` the rule's
+    averaged per-net fraction.
+    """
+
+    uncoupled_mm: float
+    coupled_fraction: float
+
+
+def _coupling(p_segs: list[Segment], n_segs: list[Segment]) -> _Coupling:
+    """Uncoupled-length figures of one pair (Issue #7349, operator Q12)."""
+    from kicad_tools.validate.rules.clearance import CopperElement
+    from kicad_tools.validate.rules.diffpair_routing_continuity import (
+        DEFAULT_COUPLING_WINDOW_MM,
+        DEFAULT_PARALLEL_TOLERANCE_DEG,
+        _segment_coupled_overlap,
+        _segment_length,
+    )
+
+    def elems(segs: list[Segment]) -> list[CopperElement]:
+        return [
+            CopperElement(
+                element_type="segment",
+                layer=s.layer.kicad_name,
+                net_number=s.net,
+                geometry=(s.x1, s.y1, s.x2, s.y2, s.width),
+                reference="",
+            )
+            for s in segs
+        ]
+
+    def coupled(own: list[CopperElement], partner: list[CopperElement]) -> float:
+        # ``DiffPairRoutingContinuityRule._coupled_length``.
+        total = 0.0
+        for o in own:
+            length = _segment_length(o)
+            best = 0.0
+            for q in partner:
+                best = max(
+                    best,
+                    _segment_coupled_overlap(
+                        o, q, DEFAULT_COUPLING_WINDOW_MM, DEFAULT_PARALLEL_TOLERANCE_DEG
+                    ),
+                )
+                if best >= length:
+                    break
+            total += best
+        return total
+
+    pe, ne = elems(p_segs), elems(n_segs)
+    p_total = sum(_segment_length(e) for e in pe)
+    n_total = sum(_segment_length(e) for e in ne)
+    p_cpl, n_cpl = coupled(pe, ne), coupled(ne, pe)
+    if p_total > 0 and n_total > 0:
+        fraction = (min(p_cpl / p_total, 1.0) + min(n_cpl / n_total, 1.0)) / 2
+    else:
+        fraction = 0.0
+    return _Coupling(
+        uncoupled_mm=max(0.0, p_total - p_cpl) + max(0.0, n_total - n_cpl),
+        coupled_fraction=fraction,
+    )
 
 
 def _checker_net_length_fn(router: Autorouter) -> Callable[[list[Route], int], float] | None:
@@ -571,6 +703,24 @@ def tighten_pair(
             }
         )
 
+    def coupling(routes: list[Route]) -> _Coupling:
+        return _coupling(
+            _pair_segments(routes, p_id, editable=False),
+            _pair_segments(routes, n_id, editable=False),
+        )
+
+    from kicad_tools.validate.rules.diffpair_routing_continuity import (
+        DEFAULT_COUPLED_CONTINUITY_THRESHOLD,
+    )
+
+    continuity_threshold = DEFAULT_COUPLED_CONTINUITY_THRESHOLD
+    if hasattr(net_class, "effective_coupled_continuity_threshold"):
+        continuity_threshold = float(
+            net_class.effective_coupled_continuity_threshold(
+                default=DEFAULT_COUPLED_CONTINUITY_THRESHOLD
+            )
+        )
+
     net_pads = build_multi_pad_net_pads(router, {p_id, n_id})
 
     def connected(routes: list[Route]) -> dict[int, int]:
@@ -586,9 +736,11 @@ def tighten_pair(
 
     routes = list(router.routes)
     result.skew_before_mm = abs(skew_of(routes))
-    # Captured once: every squeeze is bounded against the pre-pass skew, not
-    # against the previous squeeze's copper, so drift cannot accumulate.
-    baseline_skew = result.skew_before_mm
+    # The running best: every squeeze is bounded against the smallest skew
+    # the pass has reached (the pre-pass skew, then each committed squeeze's
+    # when lower), so drift cannot accumulate and a later squeeze cannot give
+    # back an earlier one's gain (Issue #7349 review).
+    best_skew = result.skew_before_mm
     attempted: set[tuple] = set()
     first_decline: str | None = None
     target_gaps: list[float] = []
@@ -665,76 +817,121 @@ def tighten_pair(
             gap_target + 0.5 * (band_gap - gap_target),
             gap_target + 0.9 * (band_gap - gap_target),
         ]
+
+        def splits_for(phase: str, excess: float) -> list[tuple[str, tuple[float, float]]]:
+            """``(mode, (p_shift, n_shift))`` squeezes of one phase, in order."""
+            if phase == "plain":
+                return [
+                    ("symmetric", (excess / 2, excess / 2)),
+                    (f"single_{shorter}", (excess, 0.0) if shorter == "p" else (0.0, excess)),
+                    (f"single_{longer}", (excess, 0.0) if longer == "p" else (0.0, excess)),
+                ]
+            # Issue #7349: a symmetric squeeze leaves the checker-measured
+            # skew a few hundredths of a mm worse (rail lengths differ at the
+            # ends), which the cumulative gate refuses.  Shift a little more
+            # on the shorter rail so the extra jog length cancels that drift.
+            out = []
+            for frac in BALANCE_FRACTIONS:
+                extra = frac * excess / 2
+                to_short, to_long = excess / 2 + extra, excess / 2 - extra
+                out.append(
+                    (
+                        f"balanced_{shorter}_{frac:g}",
+                        (to_short, to_long) if shorter == "p" else (to_long, to_short),
+                    )
+                )
+            return out
+
         # The reported reason is the first failure: the one that stopped the
         # preferred (full, symmetric) squeeze.
         reason: str | None = None
         committed = False
-        for gap_goal in ladder:
-            excess = run.gap_mm - gap_goal
-            if excess <= 1e-4:
-                continue
-            for mode in ("symmetric", f"single_{shorter}", f"single_{longer}"):
-                shifts = {
-                    "symmetric": (excess / 2, excess / 2),
-                    "single_p": (excess, 0.0),
-                    "single_n": (0.0, excess),
-                }[mode]
-                candidate = routes
-                moved: dict[int, list[Segment]] = {p_id: [], n_id: []}
-                ok = True
-                for net, seg, toward, shift in (
-                    (p_id, run.p_seg, toward_p, shifts[0]),
-                    (n_id, run.n_seg, toward_n, shifts[1]),
-                ):
-                    if shift <= 0:
+        coupling_now = coupling(routes)
+        skew_now = skew_of(routes)
+        # Two phases (Issue #7349 review).  ``plain`` is the #7344 ladder
+        # (symmetric, then a single-rail move, at each gap rung).  Only when
+        # it commits nothing are the ``balanced`` unequal splits tried, and
+        # those are also held to the uncoupled-length gate: so a pair the
+        # plain ladder already tightens ends exactly as it did before the
+        # unequal splits existed, and a balanced squeeze can only be
+        # committed when it leaves skew, uncoupled length and the coupled
+        # fraction no worse.
+        for phase in ("plain", "balanced"):
+            for gap_goal in ladder:
+                excess = run.gap_mm - gap_goal
+                if excess <= 1e-4:
+                    continue
+                for mode, shifts in splits_for(phase, excess):
+                    candidate = routes
+                    moved: dict[int, list[Segment]] = {p_id: [], n_id: []}
+                    ok = True
+                    for net, seg, toward, shift in (
+                        (p_id, run.p_seg, toward_p, shifts[0]),
+                        (n_id, run.n_seg, toward_n, shifts[1]),
+                    ):
+                        if shift <= 0:
+                            continue
+                        built = _rail_chain(seg, run, toward, shift)
+                        if built is None:
+                            ok = False
+                            break
+                        chain, new_segs = built
+                        replaced = _replace_segment(candidate, seg, chain)
+                        if replaced is None:
+                            ok = False
+                            break
+                        candidate = replaced
+                        moved[net] = new_segs
+                    if not ok:
+                        reason = reason or "declined:jog_does_not_fit"
+                        outcome.attempts.append(f"{gap_goal:.3f}/{mode}:jog_does_not_fit")
                         continue
-                    built = _rail_chain(seg, run, toward, shift)
-                    if built is None:
-                        ok = False
-                        break
-                    chain, new_segs = built
-                    replaced = _replace_segment(candidate, seg, chain)
-                    if replaced is None:
-                        ok = False
-                        break
-                    candidate = replaced
-                    moved[net] = new_segs
-                if not ok:
-                    reason = reason or "declined:jog_does_not_fit"
-                    continue
-                verdict = _gate(
-                    router,
-                    candidate,
-                    moved,
-                    p_id=p_id,
-                    n_id=n_id,
-                    floor_gap=floor_gap,
-                    foreign_preserved=foreign_preserved,
-                    skew_before=skew_of(routes),
-                    skew_after=skew_of(candidate),
-                    baseline_skew=baseline_skew,
-                    before_conn=before_conn,
-                    connected=connected,
-                    judge=judge,
-                    old_bad=old_bad,
-                    before_judged=before_judged,
-                )
-                if verdict is not None:
-                    reason = reason or verdict
-                    continue
-                routes = candidate
-                committed = True
-                trunk = moved[p_id][1] if moved[p_id] else moved[n_id][1]
-                after_judged = judge(routes)
-                outcome.status = "tightened"
-                outcome.mode = mode
-                outcome.gap_after_mm = gap_goal
-                outcome.zdiff_after = (
-                    after_judged[id(trunk)][2]
-                    if id(trunk) in after_judged
-                    else model.zdiff(run.layer, run.width_mm, gap_goal)
-                )
-                break
+                    skew_cand = skew_of(candidate)
+                    verdict = _gate(
+                        router,
+                        candidate,
+                        moved,
+                        p_id=p_id,
+                        n_id=n_id,
+                        floor_gap=floor_gap,
+                        foreign_preserved=foreign_preserved,
+                        skew_before=skew_now,
+                        skew_after=skew_cand,
+                        best_skew=best_skew,
+                        coupling_before=coupling_now if phase == "balanced" else None,
+                        coupling=coupling,
+                        continuity_threshold=continuity_threshold,
+                        before_conn=before_conn,
+                        connected=connected,
+                        judge=judge,
+                        old_bad=old_bad,
+                        before_judged=before_judged,
+                    )
+                    if verdict is not None:
+                        reason = reason or verdict
+                        detail = (
+                            f"({abs(skew_now):.3f}->{abs(skew_cand):.3f}mm)"
+                            if verdict == "declined:skew"
+                            else ""
+                        )
+                        outcome.attempts.append(f"{gap_goal:.3f}/{mode}:{verdict}{detail}")
+                        continue
+                    routes = candidate
+                    best_skew = min(best_skew, abs(skew_cand))
+                    committed = True
+                    trunk = moved[p_id][1] if moved[p_id] else moved[n_id][1]
+                    after_judged = judge(routes)
+                    outcome.status = "tightened"
+                    outcome.mode = mode
+                    outcome.gap_after_mm = gap_goal
+                    outcome.zdiff_after = (
+                        after_judged[id(trunk)][2]
+                        if id(trunk) in after_judged
+                        else model.zdiff(run.layer, run.width_mm, gap_goal)
+                    )
+                    break
+                if committed:
+                    break
             if committed:
                 break
         if not committed:
@@ -766,7 +963,10 @@ def _gate(
     foreign_preserved: list[Route],
     skew_before: float,
     skew_after: float,
-    baseline_skew: float,
+    best_skew: float,
+    coupling_before: _Coupling | None,
+    coupling: Callable[[list[Route]], _Coupling],
+    continuity_threshold: float,
     before_conn: dict[int, int],
     connected: Any,
     judge: Any,
@@ -775,11 +975,21 @@ def _gate(
 ) -> str | None:
     """None when ``candidate`` may be committed, else ``declined:<reason>``."""
     # Skew: unchanged to first order for a symmetric squeeze.  Bounded both
-    # per squeeze and, cumulatively, against the pair's pre-pass skew.
+    # per squeeze and, cumulatively, against the best skew of the pass.
     if abs(skew_after) > abs(skew_before) + SKEW_TOLERANCE_MM:
         return "declined:skew"
-    if abs(skew_after) > baseline_skew + CUMULATIVE_SKEW_EPS_MM:
+    if abs(skew_after) > best_skew + CUMULATIVE_SKEW_EPS_MM:
         return "declined:skew"
+    # Uncoupled length (Issue #7349, operator Q12): the jogs a squeeze adds
+    # run beside no partner copper, so tightening a run that was already
+    # inside the coupling window trades a better Zdiff for more uncoupled
+    # copper.  When ``coupling_before`` is given, P+N uncoupled length may
+    # not grow, and the coupled fraction may not fall below the class
+    # threshold.
+    if coupling_before is not None:
+        verdict = _coupling_verdict(coupling_before, coupling(candidate), continuity_threshold)
+        if verdict is not None:
+            return verdict
     # Foreign pads / vias / copper at the class clearance, the partner at the
     # floored intra-pair gap (the same gate the skew tuner uses).
     routes_by_net: dict[int, Route] = {}
@@ -836,6 +1046,18 @@ def _gate(
         ):
             continue
         return "declined:impedance_regression"
+    return None
+
+
+def _coupling_verdict(before: _Coupling, after: _Coupling, threshold: float) -> str | None:
+    """None when ``after`` is no worse than ``before`` (Issue #7349, operator Q12)."""
+    if after.uncoupled_mm > before.uncoupled_mm + UNCOUPLED_EPS_MM:
+        return "declined:uncoupled_length"
+    if (
+        after.coupled_fraction + 1e-9 < threshold
+        and after.coupled_fraction < before.coupled_fraction - 1e-9
+    ):
+        return "declined:coupled_fraction"
     return None
 
 
