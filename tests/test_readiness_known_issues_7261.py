@@ -458,6 +458,8 @@ class _LocatedErrorEngines(FakeEngines):
         for violation, (rule, x, y) in zip(errors, self.found, strict=True):
             violation["rule_id"] = rule
             violation["location"] = None if x is None else [x, y]
+            if x is None and y:  # a location-less error names its item instead
+                violation["items"] = [y]
         if self.summary_errors is not None:
             report["summary"]["errors"] = self.summary_errors
         report_path.write_text(json.dumps(report, indent=2) + "\n")
@@ -650,3 +652,35 @@ def test_both_identity_shapes_share_one_checker_and_one_key():
     for field, item in (("warnings", pad), ("errors", at)):
         with pytest.raises(KnownIssueError, match="more than once"):
             validate_known_issues([{**entry, field: [item, item]}])
+
+
+NETCLASS = ("netclass_via_drill", "netclass:Default")
+
+
+def test_location_less_errors_are_identified_by_rule_and_item(tmp_path):
+    spec = SPEC + ",!netclass_via_drill@netclass~Default"
+    entry = parse_known_issue(spec, "2026-10-18")
+    assert entry["errors"][-1] == {"rule": "netclass_via_drill", "item": "netclass:Default"}
+    assert validate_known_issues([entry]) == [entry]
+    assert known_error_allowance([entry])[NETCLASS] == 6269
+
+    found = [VIA_A, VIA_B, VIA_C, ("netclass_via_drill", None, "netclass:Default")]
+    code, report = _run_errors(make_board(tmp_path), found, spec)
+    assert code == 0, report["blockers"]
+    # The same rule on another net class is an unlisted identity.
+    other = [VIA_A, VIA_B, VIA_C, ("netclass_via_drill", None, "netclass:Power")]
+    code, report = _run_errors(make_board(_sub(tmp_path, "other")), other, spec)
+    assert code != 0
+    assert "netclass_via_drill on netclass:Power (not recorded)" in " ".join(report["blockers"])
+
+
+def test_item_identities_validate_and_sort_by_the_one_canonical_key():
+    located = {"rule": "zone", "at": [1.0, 2.0]}
+    item = {"rule": "netclass_via_drill", "item": "netclass:Default"}
+    base = {"issue": 1, "kind": "exception", "summary": "s", "recorded": "2026-10-18"}
+    assert validate_known_issues([{**base, "errors": [item, located]}])
+    for bad in ([located, item], [item, item], [{"rule": "v", "item": " "}]):
+        with pytest.raises(KnownIssueError):
+            validate_known_issues([{**base, "errors": bad}])
+    with pytest.raises(KnownIssueError, match="only an exception"):
+        validate_known_issues([{**base, "kind": "advisory", "errors": [item]}])

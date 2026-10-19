@@ -70,15 +70,23 @@ _IDENT_RE = r"[A-Za-z0-9_.-]+@[^\s,:@]+"
 _COORD = r"-?\d+(?:\.\d+)?"
 _ERROR_ITEM = rf"![A-Za-z0-9_.-]+@{_COORD}/{_COORD}"
 _ERROR_ITEM_RE = re.compile(rf"^!([A-Za-z0-9_.-]+)@({_COORD})/({_COORD})$")
-_ITEM = rf"(?:{_IDENT_RE}|{_ERROR_ITEM})"
+#: ``!rule@kind~name`` is a location-less error on item ``kind:name`` (``:`` splits the spec).
+_ERROR_NAMED = r"![A-Za-z0-9_.-]+@[A-Za-z0-9_.-]+~[A-Za-z0-9_.-]+"
+_ERROR_NAMED_RE = re.compile(r"^!([A-Za-z0-9_.-]+)@([A-Za-z0-9_.-]+)~([A-Za-z0-9_.-]+)$")
+_ITEM = rf"(?:{_IDENT_RE}|{_ERROR_ITEM}|{_ERROR_NAMED})"
 #: ``--known-issue`` allowance: ``rule@pad`` (warning) or ``!rule@x/y`` (error) items.
 _ALLOWANCE_RE = re.compile(rf"^{_ITEM}(,{_ITEM})*$")
 #: Identity shapes: ``pad`` is a pad-scoped ``{rule, ref, pad}``, ``at`` a located ``{rule, at}``.
-_SHAPE_KEYS = {"pad": ("rule", "ref", "pad"), "at": ("rule", "at")}
-_SORT_ORDER = {"pad": "(rule, ref, pad)", "at": "(rule, x, y)"}
+#: ``item`` is a location-less ``{rule, item}`` for errors that name only a net class.
+_SHAPE_KEYS = {
+    "pad": ("rule", "ref", "pad"),
+    "at": ("rule", "at"),
+    "item": ("rule", "item"),
+}
+_SORT_ORDER = {"pad": "(rule, ref, pad)", "at": "(rule, x, y)", "item": "(rule, item)"}
 #: The shapes each field accepts.  The matchers handle exactly these.
 _WARNING_SHAPES = ("pad",)
-_ERROR_SHAPES = ("at",)
+_ERROR_SHAPES = ("at", "item")
 _ENTRY_KEYS = {"issue", "kind", "summary", "recorded", "warnings", "errors"}
 
 
@@ -105,12 +113,22 @@ def identity_key(item: Mapping[str, Any]) -> tuple[Any, ...]:
     """
     at = item.get("at")
     x, y = (at[0], at[1]) if at is not None else (0.0, 0.0)
-    return (item["rule"], item.get("ref", ""), item.get("pad", ""), at is not None, x, y)
+    return (
+        item["rule"],
+        item.get("ref", ""),
+        item.get("pad", ""),
+        item.get("item", ""),
+        at is not None,
+        x,
+        y,
+    )
 
 
 def _describe_identity(item: Mapping[str, Any]) -> str:
     if "at" in item:
         return f"{item['rule']} at {item['at'][0]}/{item['at'][1]}"
+    if "item" in item:
+        return f"{item['rule']} on {item['item']}"
     return f"{item['rule']} {item['pad']}"
 
 
@@ -158,7 +176,9 @@ def _check_identities(value: Any, field: str, shapes: Iterable[str]) -> list[dic
     if len(set(keys_)) != len(keys_):
         raise KnownIssueError(f"{field} lists an identity more than once")
     if keys_ != sorted(keys_):
-        raise KnownIssueError(f"{field} must be sorted by {_SORT_ORDER[next(iter(allowed))]}")
+        raise KnownIssueError(
+            f"{field} must be sorted by " + " then ".join(_SORT_ORDER[name] for name in allowed)
+        )
     return out
 
 
@@ -252,6 +272,12 @@ def parse_known_issue(spec: str, recorded: str) -> dict[str, Any]:
         allowance = kind.strip()
         summary, _, kind = summary.rpartition(":")
         for item in allowance.split(","):
+            named = _ERROR_NAMED_RE.match(item)
+            if named:
+                rule, kind_, name = named.groups()
+                errors = [] if errors is None else errors
+                errors.append({"rule": rule, "item": f"{kind_}:{name}"})
+                continue
             error = _ERROR_ITEM_RE.match(item)
             if error:
                 rule, x, y = error.groups()
@@ -387,14 +413,19 @@ def match_warning_allowance(
 
 def known_error_allowance(
     entries: Iterable[Mapping[str, Any]],
-) -> dict[tuple[str, float, float], int]:
-    """``{(rule, x_mm, y_mm): issue}`` the recorded exceptions account for.
+) -> dict[tuple[Any, ...], int]:
+    """``{key: issue}`` the recorded exceptions account for.
 
-    The readiness ``kct_check`` gate tolerates errors only when the report's
-    error identities equal this set exactly.
+    A located error is keyed ``(rule, x_mm, y_mm)``, a location-less one
+    ``(rule, item)``.  The readiness ``kct_check`` gate tolerates errors only
+    when the report's error keys equal this set exactly.
     """
-    allowance: dict[tuple[str, float, float], int] = {}
+    allowance: dict[tuple[Any, ...], int] = {}
     for entry in entries:
         for item in entry.get("errors") or ():
-            allowance[(item["rule"], item["at"][0], item["at"][1])] = int(entry["issue"])
-    return dict(sorted(allowance.items()))
+            if "at" in item:
+                key: tuple[Any, ...] = (item["rule"], item["at"][0], item["at"][1])
+            else:
+                key = (item["rule"], item["item"])
+            allowance[key] = int(entry["issue"])
+    return dict(sorted(allowance.items(), key=lambda kv: (len(kv[0]), *map(str, kv[0]))))
