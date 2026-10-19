@@ -7,13 +7,16 @@ appropriate trace widths, clearances, and pattern assignments.
 """
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from .project_file import (
     add_netclass_definition,
     add_netclass_patterns,
     get_netclass_definitions,
 )
+
+if TYPE_CHECKING:
+    from kicad_tools.manufacturers import DesignRules
 
 
 @dataclass
@@ -437,6 +440,7 @@ def apply_design_template(
     data: dict[str, Any],
     design_type: str,
     update_default: bool = True,
+    rules: "DesignRules | None" = None,
 ) -> None:
     """
     Apply a design type template to project data.
@@ -448,8 +452,23 @@ def apply_design_template(
         data: Project data dictionary
         design_type: Name of the design type template to apply
         update_default: If True, update the Default netclass with reasonable values
+        rules: Optional manufacturer design rules.  When given, every written
+            track width, clearance, via diameter and via drill (and the
+            diff-pair width/gap) is clamped *up* to the manufacturer minimum.
+            ``None`` keeps the template values unchanged.
     """
     template = get_design_template(design_type)
+
+    def floor(value: float, minimum: float | None) -> float:
+        return value if minimum is None else max(value, minimum)
+
+    min_trace = rules.min_trace_width_mm if rules else None
+    min_clear = rules.min_clearance_mm if rules else None
+    min_via = rules.min_via_diameter_mm if rules else None
+    min_drill = rules.min_via_drill_mm if rules else None
+    # Diff-pair width/gap defaults mirror add_netclass_definition's.
+    dp_width = floor(0.2, min_trace)
+    dp_gap = floor(0.25, min_clear)
 
     # Optionally update Default netclass
     if update_default:
@@ -457,10 +476,12 @@ def apply_design_template(
         add_netclass_definition(
             data,
             name="Default",
-            track_width=0.2,
-            clearance=0.15,
-            via_diameter=0.6,
-            via_drill=0.3,
+            track_width=floor(0.2, min_trace),
+            clearance=floor(0.15, min_clear),
+            via_diameter=floor(0.6, min_via),
+            via_drill=floor(0.3, min_drill),
+            diff_pair_width=dp_width,
+            diff_pair_gap=dp_gap,
         )
 
     # Add netclasses from template
@@ -468,11 +489,13 @@ def apply_design_template(
         add_netclass_definition(
             data,
             name=netclass.name,
-            track_width=netclass.track_width,
-            clearance=netclass.clearance,
-            via_diameter=netclass.via_diameter,
-            via_drill=netclass.via_drill,
+            track_width=floor(netclass.track_width, min_trace),
+            clearance=floor(netclass.clearance, min_clear),
+            via_diameter=floor(netclass.via_diameter, min_via),
+            via_drill=floor(netclass.via_drill, min_drill),
             pcb_color=netclass.pcb_color,
+            diff_pair_width=dp_width,
+            diff_pair_gap=dp_gap,
         )
 
         # Add patterns for this netclass

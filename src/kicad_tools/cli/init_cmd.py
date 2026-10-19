@@ -448,7 +448,7 @@ def init_project(
     netclass_summary = None
     if design_type:
         try:
-            apply_design_template(project_data, design_type)
+            apply_design_template(project_data, design_type, rules=rules)
             project_data["meta"]["design_type"] = design_type
             netclass_summary = get_netclass_summary(project_data)
         except ValueError as e:
