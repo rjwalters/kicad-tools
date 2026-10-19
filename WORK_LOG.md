@@ -15,6 +15,9 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-19
 
+- **PR #7462**: fix(router): equal vias for crossed lattice fallback diff-pair legs (#7093)
+- **Issue #7322** (closed): Stitcher and pour-repair/escape via placement ignore the mask-dam floor (follow-up to #7296)
+- **PR #7459**: fix: keep stitch and escape vias out of the SMD mask-dam zone
 - **PR #7452**: build(deps-dev): Bump cmake from 4.4.3 to 4.4.4
 - **PR #7451**: build(deps): Bump the uv-minor-patch group across 1 directory with 4 updates
 - **PR #7438**: refactor(boards): run board 03 readiness receipt in-process via readiness_cmd.main
