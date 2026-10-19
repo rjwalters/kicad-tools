@@ -37,8 +37,8 @@
       "size": 37
     },
     "gerbers/gerbers.zip": {
-      "sha256": "a714959d70e674ceb5b5b0931f66d8d13e1c1a7bc144db3f4d31fa7931cdebdd",
-      "size": 39940
+      "sha256": "298cc310584c95066a3c0a7c47bb73fea4ace47d36c2c6f22af935f4fae45bbf",
+      "size": 40168
     },
     "images/assembly.png": {
       "sha256": "ac6d6c21b93967c47632662be9d8fdaf1a7ee71ca00aa6dca1b12f4b1f85cd44",
@@ -77,19 +77,19 @@
       "size": 262590
     },
     "kicad_project.zip": {
-      "sha256": "9e464a8d2823afa0c5443f3ba22edd57eb6a79c7d8a56ec819d9c9264143096a",
-      "size": 78368
+      "sha256": "c95459f29d90474cafb05c98ac551b171e7a427f80994a8fcfe5d9ba5db67272",
+      "size": 79453
     },
     "lvs.json": {
       "sha256": "8a44e465f8db5c6f95b19b46257bd87290819ef27e8b68a85cbf490bd0f47a68",
       "size": 215
     },
     "native-drc.json": {
-      "sha256": "00d8a1ba5de95ef16ce6d64f338307ae77394f3040b430adf582681cb56ecd50",
+      "sha256": "a05eedd1bfa8abf3430982c5bc2be40761d4f7e5ebccf854418b3776cdc5fd59",
       "size": 1212
     },
     "native-erc.json": {
-      "sha256": "d511c78ce5f1f9af908cfa5dd41588b077a218bc1f82e9e5742c99f5b0c3ce3b",
+      "sha256": "8ef78f0e92fb1ecf346dba14e845e45e06016fd539453b59ab139153dc0e7d5f",
       "size": 986
     },
     "procurement-review.md": {

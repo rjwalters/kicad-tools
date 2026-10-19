@@ -1,0 +1,29 @@
+{
+  "changed_layer_inventory": [],
+  "context_sha256": {
+    "diffpair_test.kicad_pro": "48e2bf25ed4c9aa03d2bd7b818adedcfad1d524134b3d3e97cfe816ad395567c",
+    "diffpair_test_routed.kicad_dru": "825b4a72d64154263d5c41685256590510d5358a7b8b3fdac45ac31a3052c466",
+    "diffpair_test_routed.kicad_pcb": "6d81d32008dc45005236da689a706ff792b72f102fab4da49d8b15f64d8a22ca",
+    "diffpair_test_routed.kicad_pro": "a6618d8b6a963f92d270ee210c7e0c7afdc70386c0d3102bb1cb29fb7c2f0430",
+    "sym-lib-table": "90389d0ac68d104c9cde91ec7ab47b4b6a27d71fc6fe85befae8bc94b767d7aa"
+  },
+  "deltas_mm2": {
+    "In1.Cu": 0.0,
+    "In2.Cu": 0.0
+  },
+  "engine": "10.0.6",
+  "refill_returncode": 0,
+  "refilled_areas_mm2": {
+    "In1.Cu": 6080.067375,
+    "In2.Cu": 6049.979618
+  },
+  "refilled_pcb": "output/readiness-verification/fill-refilled/diffpair_test_routed.kicad_pcb",
+  "refilled_sha256": "824e968c29010d7326c4bea1abb8c7001a38f517c4d7a900bb9b6b9fbdc7f0b8",
+  "saved_areas_mm2": {
+    "In1.Cu": 6080.067375,
+    "In2.Cu": 6049.979618
+  },
+  "saved_pcb": "output/readiness-verification/fill-saved/diffpair_test_routed.kicad_pcb",
+  "saved_sha256": "6d81d32008dc45005236da689a706ff792b72f102fab4da49d8b15f64d8a22ca",
+  "tolerance_mm2": 0.01
+}

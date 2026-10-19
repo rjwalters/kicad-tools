@@ -13,17 +13,10 @@ from routing import apply_routing
 
 from kicad_tools.validate.known_warnings import unaccepted_report_warnings
 
-#: Issue #7298: three committed vias sit at a pad's mask opening with no
-#: solder-mask dam (#7220's ``via_at_pad_edge`` advisory).  #7296 (#7220 PR3,
-#: the router refuses pad-edge vias) removes them at the source; until then
-#: ONLY these exact ``(rule, ref, pad)`` findings may pass.  Any other warning,
-#: ref or pad, or a repeat, still fails; errors are never allowed.  Delete the
-#: entries when #7296 lands.
-BOARD05_KNOWN_WARNINGS: dict[tuple[str, str, str], str] = {
-    ("via_at_pad_edge", "R11", "R11-1"): "#7296",
-    ("via_at_pad_edge", "R9", "R9-1"): "#7296",
-    ("via_at_pad_edge", "D1", "D1-1"): "#7296",
-}
+#: Issue #7298: no warning is accepted.  #7296 (the router refuses pad-edge
+#: vias) removed the three ``via_at_pad_edge`` findings (R11-1, R9-1, D1-1)
+#: this board used to pin, so any warning now fails; errors never pass.
+BOARD05_KNOWN_WARNINGS: dict[tuple[str, str, str], str] = {}
 
 
 def manufacturer_check_failures(check):

@@ -93,6 +93,7 @@ NB_MODULE(router_cpp, m) {
         .def_rw("congestion_threshold", &DesignRules::congestion_threshold)
         .def_rw("min_drill_clearance", &DesignRules::min_drill_clearance)
         .def_rw("min_hole_to_hole", &DesignRules::min_hole_to_hole)
+        .def_rw("min_via_pad_edge_gap", &DesignRules::min_via_pad_edge_gap)
         // Issue #4071: soft corridor-attractor bonus (Python default 3.0).
         .def_rw("cost_corridor_attractor", &DesignRules::cost_corridor_attractor);
 

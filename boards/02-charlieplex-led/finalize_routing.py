@@ -85,6 +85,20 @@ def _relocate_escapes(pcb):
                     point.set_value(i, value)
 
 
+def _relocate_pad_edge(path):
+    """Slide vias out of the mask-dam zone beside SMD pads (issue #7296)."""
+    from kicad_tools.cli.relocate_in_pad_vias import relocate_pad_edge_vias
+    from kicad_tools.manufacturers import get_profile
+    from kicad_tools.schema.pcb import PCB
+
+    pcb = PCB.load(path)
+    result = relocate_pad_edge_vias(pcb, get_profile("jlcpcb").get_design_rules(layers=2))
+    if result.skipped or result.unresolvable:
+        raise ValueError(f"Board02 pad-edge vias left in the dam zone: {result}")
+    if result.changed:
+        pcb.save(path)
+
+
 def _native_report(path):
     report = path.with_suffix(".native-drc.json")
     subprocess.run(
@@ -165,6 +179,7 @@ def _finalize_candidate(path, schematic):
     _relocate_escapes(pcb)
     path.write_text(serialize_sexp(pcb))
     quantize_pcb_file(path)
+    _relocate_pad_edge(path)
     subprocess.run(
         [
             sys.executable,

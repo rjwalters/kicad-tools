@@ -2438,9 +2438,16 @@ def calculate_via_stub(
     test_offsets = [pad_radius + offset, pad_radius + offset * 1.5, pad_radius + offset * 2]
 
     # Issue #6401: reserved sites first, then the historical offsets.
-    reserved_candidates = [(float(x), float(y), True) for x, y in preferred_positions]
+    # Issue #7296: validate the coordinates that will be WRITTEN.  The board
+    # writer rounds every via to 0.01 mm (``sexp.builders.fmt``), so a
+    # candidate checked unrounded can land up to ~7 um closer to foreign
+    # copper than the clearance it passed (board 06: a GND stitch via at
+    # 0.197 mm of a USB3_RX1+ track under the 0.2 mm Power class).
+    reserved_candidates = [
+        (*_as_written((float(x), float(y))), True) for x, y in preferred_positions
+    ]
     offset_candidates = [
-        (pad.x + dx * test_offset, pad.y + dy * test_offset, False)
+        (*_as_written((pad.x + dx * test_offset, pad.y + dy * test_offset)), False)
         for test_offset in test_offsets
         for dx, dy in directions
     ]
@@ -2881,8 +2888,10 @@ def calculate_dogleg_via_position(
     for axial_dx, axial_dy in axial_dirs:
         for axial_dist in axial_distances:
             # Calculate the intermediate (corner) point
-            intermediate_x = pad.x + axial_dx * axial_dist
-            intermediate_y = pad.y + axial_dy * axial_dist
+            # Issue #7296: the corner as the writer emits it.
+            intermediate_x, intermediate_y = _as_written(
+                (pad.x + axial_dx * axial_dist, pad.y + axial_dy * axial_dist)
+            )
 
             for escape_dx, escape_dy in escape_dirs:
                 # Skip if escape direction is the same as axial direction
@@ -2904,8 +2913,13 @@ def calculate_dogleg_via_position(
                         via_x = round(corner_x + math.copysign(step, escape_dx), 2)
                         via_y = round(corner_y + math.copysign(step, escape_dy), 2)
                     else:
-                        via_x = intermediate_x + escape_dx * escape_offset
-                        via_y = intermediate_y + escape_dy * escape_offset
+                        # Issue #7296: check the coordinates the writer emits.
+                        via_x, via_y = _as_written(
+                            (
+                                intermediate_x + escape_dx * escape_offset,
+                                intermediate_y + escape_dy * escape_offset,
+                            )
+                        )
 
                     # Check via position clearance (same as straight-line)
                     conflict = False
@@ -3417,8 +3431,10 @@ def calculate_extended_escape_position(
     # then extend axially to find an open via position.
     for escape_dx, escape_dy in escape_dirs:
         for breakout in breakout_offsets:
-            waypoint_x = pad.x + escape_dx * breakout
-            waypoint_y = pad.y + escape_dy * breakout
+            # Issue #7296: the waypoint as the writer emits it.
+            waypoint_x, waypoint_y = _as_written(
+                (pad.x + escape_dx * breakout, pad.y + escape_dy * breakout)
+            )
 
             for axial_dx, axial_dy in axial_dirs:
                 # Skip if axial is same as escape (would be straight line)
@@ -3426,8 +3442,10 @@ def calculate_extended_escape_position(
                     continue
 
                 for axial_dist in axial_distances:
-                    via_x = waypoint_x + axial_dx * axial_dist
-                    via_y = waypoint_y + axial_dy * axial_dist
+                    # Issue #7296: check the coordinates the writer emits.
+                    via_x, via_y = _as_written(
+                        (waypoint_x + axial_dx * axial_dist, waypoint_y + axial_dy * axial_dist)
+                    )
 
                     total_len = breakout + axial_dist
                     if total_len > escape_distance:
@@ -3464,16 +3482,18 @@ def calculate_extended_escape_position(
     # break out perpendicular.
     for axial_dx, axial_dy in axial_dirs:
         for axial_dist in axial_distances:
-            waypoint_x = pad.x + axial_dx * axial_dist
-            waypoint_y = pad.y + axial_dy * axial_dist
+            waypoint_x, waypoint_y = _as_written(
+                (pad.x + axial_dx * axial_dist, pad.y + axial_dy * axial_dist)
+            )
 
             for escape_dx, escape_dy in escape_dirs:
                 if abs(axial_dx * escape_dx + axial_dy * escape_dy) > 0.1:
                     continue
 
                 for breakout in breakout_offsets:
-                    via_x = waypoint_x + escape_dx * breakout
-                    via_y = waypoint_y + escape_dy * breakout
+                    via_x, via_y = _as_written(
+                        (waypoint_x + escape_dx * breakout, waypoint_y + escape_dy * breakout)
+                    )
 
                     total_len = axial_dist + breakout
                     if total_len > escape_distance:
@@ -3513,21 +3533,24 @@ def calculate_extended_escape_position(
 
     for escape_dx, escape_dy in escape_dirs:
         for step_dist in step_distances:
-            wp1_x = pad.x + escape_dx * step_dist
-            wp1_y = pad.y + escape_dy * step_dist
+            wp1_x, wp1_y = _as_written(
+                (pad.x + escape_dx * step_dist, pad.y + escape_dy * step_dist)
+            )
 
             for axial_dx, axial_dy in axial_dirs:
                 if abs(axial_dx * escape_dx + axial_dy * escape_dy) > 0.1:
                     continue
 
                 for axial_dist in z_axial_distances:
-                    wp2_x = wp1_x + axial_dx * axial_dist
-                    wp2_y = wp1_y + axial_dy * axial_dist
+                    wp2_x, wp2_y = _as_written(
+                        (wp1_x + axial_dx * axial_dist, wp1_y + axial_dy * axial_dist)
+                    )
 
                     # Final breakout perpendicular
                     for breakout in breakout_offsets:
-                        via_x = wp2_x + escape_dx * breakout
-                        via_y = wp2_y + escape_dy * breakout
+                        via_x, via_y = _as_written(
+                            (wp2_x + escape_dx * breakout, wp2_y + escape_dy * breakout)
+                        )
 
                         total_len = step_dist + axial_dist + breakout
                         if total_len > escape_distance:
