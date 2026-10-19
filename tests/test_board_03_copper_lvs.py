@@ -167,6 +167,42 @@ def _load_board03_module():
     return module
 
 
+def test_pad_thermal_overrides_replace_solid_and_are_idempotent(tmp_path: Path) -> None:
+    """Issue #7275: the six pads get explicit thermal relief, never solid."""
+    from kicad_tools.sexp import parse_file
+
+    module = _load_board03_module()
+    pcb = tmp_path / "board.kicad_pcb"
+    pcb.write_text(BOARD_PCB.read_text())
+    assert module.apply_pad_thermal_overrides(pcb) == 6
+    once = pcb.read_text()
+    assert module.apply_pad_thermal_overrides(pcb) == 6
+    assert pcb.read_text() == once
+
+    seen = {}
+    for fp in parse_file(pcb).find_all("footprint"):
+        ref = next(
+            p.get_string(1) for p in fp.find_all("property") if p.get_string(0) == "Reference"
+        )
+        for pad in fp.find_all("pad"):
+            key = (ref, pad.get_string(0))
+            if key in module.BOARD03_PAD_THERMALS:
+                assert [n.get_int(0) for n in pad.find_all("zone_connect")] == [1]
+                seen[key] = {
+                    tok: pad.find(tok).get_float(0) for tok in module.BOARD03_PAD_THERMALS[key]
+                }
+    assert seen == module.BOARD03_PAD_THERMALS
+
+
+def test_pad_thermal_overrides_refuse_a_missing_pad(tmp_path: Path, monkeypatch) -> None:
+    module = _load_board03_module()
+    pcb = tmp_path / "board.kicad_pcb"
+    pcb.write_text(BOARD_PCB.read_text())
+    monkeypatch.setitem(module.BOARD03_PAD_THERMALS, ("J1", "Z99"), {})
+    with pytest.raises(RuntimeError, match="Z99"):
+        module.apply_pad_thermal_overrides(pcb)
+
+
 def _load_add_gnd_stitching_vias():
     """Import ``add_gnd_stitching_vias`` from the board-03 recipe module."""
     return _load_board03_module().add_gnd_stitching_vias
@@ -334,6 +370,9 @@ class TestBoard03PartialRouteFastFail:
         monkeypatch.setattr(
             module, "apply_manufacturing_profile", _boom("apply_manufacturing_profile")
         )
+        monkeypatch.setattr(
+            module, "apply_pad_thermal_overrides", _boom("apply_pad_thermal_overrides")
+        )
         monkeypatch.setattr(module, "fill_zones_in_routed_pcb", _boom("fill_zones_in_routed_pcb"))
         monkeypatch.setattr(module, "run_drc", _boom("run_drc"))
         monkeypatch.setattr(module, "write_lvs_report", _boom("write_lvs_report"))
@@ -376,6 +415,7 @@ class TestBoard03PartialRouteFastFail:
         monkeypatch.setattr(module, "route_pcb", lambda *a, **k: True)
         monkeypatch.setattr(module, "add_gnd_stitching_vias", lambda *a, **k: 0)
         monkeypatch.setattr(module, "apply_manufacturing_profile", lambda *a, **k: None)
+        monkeypatch.setattr(module, "apply_pad_thermal_overrides", lambda *a, **k: 6)
         monkeypatch.setattr(module, "fill_zones_in_routed_pcb", lambda *a, **k: None)
         monkeypatch.setattr(module, "run_drc", lambda *a, **k: True)
         monkeypatch.setattr(module, "require_saved_copper_connected", lambda *a, **k: None)
