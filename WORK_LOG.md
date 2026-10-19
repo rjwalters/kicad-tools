@@ -15,6 +15,12 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-19
 
+- **PR #7512**: fix: anchor GateDriverBlock ports to real driver pins
+- **Issue #7509** (closed): Schematic blocks: GateDriverBlock ports match no pin and add no wires
+- **PR #7511**: fix: clamp BarrelJackInput P-FET Vgs with a gate resistor and Zener
+- **Issue #7489** (closed): BarrelJackInput: 12 V default exceeds the Si2301 P-FET's gate-source rating (gate tied straight to ground)
+- **PR #7495**: fix: polygonize Edge.Cuts into a valid DSN boundary with cutout keepouts
+- **Issue #7482** (closed): DSN export: board boundary is built from Edge.Cuts `gr_line` endpoints in file order, giving a self-intersecting outline (and arcs, circles and polygons are ignored)
 - **PR #7499**: fix: write pad geometry through to the S-expression tree and refuse unpersisted edits on save
 - **Issue #7479** (closed): `Pad.size` / `Pad.drill` assignments are not written back: `PCB.save()` silently keeps the old values
 - **PR #7497**: fix: export NPTH holes as DSN image keepouts and drop non-copper pads
