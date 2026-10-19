@@ -121,6 +121,9 @@ ASSEMBLY_AFFECTING_RULES = frozenset(
         "silkscreen_text_height",
         "silkscreen_text_thickness",
         "silk_ref_obscured",
+        # Issue #7204: a footprint with no courtyard was never tested for
+        # overlap, which is a pick-and-place risk until someone looks.
+        "courtyard_missing",
     }
 )
 

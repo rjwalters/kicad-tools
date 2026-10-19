@@ -531,6 +531,9 @@ class DRCChecker:
         "silkscreen_text_height": CATEGORY_ADVISORY,
         "silkscreen_text_thickness": CATEGORY_ADVISORY,
         "silk_ref_obscured": CATEGORY_ADVISORY,
+        # Missing courtyard (Issue #7204): an assembly-review warning (a
+        # missing input to the overlap check), not a fab-blocking defect.
+        "courtyard_missing": CATEGORY_ADVISORY,
         # ---- Manufacturing DRC: fab-blocking copper/clearance/hole/
         #      edge/mask/drill/geometry. -----------------------------
         "clearance": CATEGORY_MANUFACTURING,
@@ -853,7 +856,8 @@ class DRCChecker:
         A courtyard that cannot be resolved to a polygon emits an ``info``
         finding rather than being silently skipped, and a waiver naming a
         component absent from the board emits an ``info`` "unused waiver"
-        finding (Issue #4137).
+        finding (Issue #4137).  A non-exempt footprint with no courtyard at
+        all emits a ``courtyard_missing`` warning (Issue #7204).
 
         Returns:
             DRCResults containing ``courtyards_overlap`` findings (error or

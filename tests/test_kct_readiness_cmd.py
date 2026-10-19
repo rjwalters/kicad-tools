@@ -663,6 +663,32 @@ def test_blocking_unknown_coverage_is_not_a_pass(tmp_path):
     assert "segment_zone" in joined and "zone_fills_absent" in joined
 
 
+def test_courtyard_less_board_refuses_sign_off_even_with_ack_warnings(tmp_path):
+    """Issue #7204: a board whose footprints lack courtyards cannot be signed off.
+
+    ``courtyard_missing`` warnings can be acknowledged, but the blocking
+    ``unknown:no_courtyard_geometry`` coverage behind them cannot.
+    """
+    board = make_board(tmp_path)
+    fake = FakeEngines(
+        board,
+        coverage={
+            "clearance": _coverage("checked", None, True),
+            "courtyard_overlap": _coverage(
+                "unknown", "no_courtyard_geometry (3 of 3 footprints)", True
+            ),
+        },
+    )
+
+    code, report = run(board, fake, "--ack-warnings", "courtyard_missing")
+
+    assert code != 0
+    assert report["status"] != "ready"
+    assert check_status(report, "kct_check") == "not_run"
+    joined = " ".join(report["blockers"])
+    assert "courtyard_overlap" in joined and "no_courtyard_geometry" in joined
+
+
 def test_advisory_unknown_and_skipped_coverage_still_pass(tmp_path):
     board = make_board(tmp_path)
     fake = FakeEngines(
