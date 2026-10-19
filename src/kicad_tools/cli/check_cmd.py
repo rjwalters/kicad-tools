@@ -1180,6 +1180,11 @@ def _warn_unevaluated_ampacity(
     key_to_board = {user_key: board_net for board_net, user_key in resolved.items()}
 
     segment_nets = {getattr(seg, "net_name", "") for seg in getattr(pcb, "segments", [])}
+    # Issue #7206 (F3): a net with a copper pour is rated by its pour neck;
+    # one that cannot be rated is reported as ``ampacity: unknown`` coverage.
+    from kicad_tools.validate.pour_ampacity import poured_nets
+
+    rated_nets = segment_nets | set(poured_nets(pcb, sorted(resolved)))
 
     unevaluated: list[str] = []
     for user_key in sorted(declared_ampacity_targets):
@@ -1190,8 +1195,8 @@ def _warn_unevaluated_ampacity(
         elif not ampacity_active:
             # Net resolved but the whole category was skipped/excluded.
             unevaluated.append(board_net)
-        elif board_net not in segment_nets:
-            # Net resolved but carries no routed segment for the rule to size.
+        elif board_net not in rated_nets:
+            # Net resolved but carries no routed segment or pour to size.
             unevaluated.append(board_net)
 
     # Deduplicate while preserving first-seen order.
@@ -3421,6 +3426,11 @@ def run_selected_checks(
         if category == "impedance" and unmeasured and pre is None:
             names = ", ".join(f"{p}/{n}" for p, n in unmeasured)
             cov_map[category] = cov.unknown(category, f"diff_pair_unmeasurable ({names})")
+        # Issue #7206 (F3): a declared net whose copper pour could not be
+        # rated (no fill, no current path, ...) is unknown, never a pass.
+        pour_unmeasured = getattr(checker, "ampacity_unmeasured_nets", None)
+        if category == "ampacity" and pour_unmeasured and pre is None:
+            cov_map[category] = cov.ampacity_pour_unknown(pour_unmeasured)
 
     return results
 

@@ -1,8 +1,11 @@
-"""Zone-only nets must not read ``ampacity: checked`` (Issue #7210).
+"""Poured nets with a declared current are rated, never assumed (Issues #7210, #7206).
 
-``AmpacityRule`` measures track segments only.  A net with a declared
-current that is carried entirely by a copper pour has nothing measured, so
-its coverage is ``unknown`` (blocking) rather than a vacuous ``checked``.
+``AmpacityRule`` used to measure track segments only, so a net carried by a
+copper pour read ``unknown (zone-only, not measured)`` from the precheck.
+The rule now rates the pour itself (``validate/pour_ampacity.py``), so the
+precheck no longer pre-judges poured nets: the coverage state follows from
+the run (``AmpacityRule.unmeasured_pour_nets``).  These tests pin the
+precheck side of that hand-off.
 """
 
 from __future__ import annotations
@@ -22,29 +25,22 @@ def _checker(*, declared: dict[str, float], segment_nets=(), zone_nets=(), keepo
     return SimpleNamespace(net_class_map=net_class_map, pcb=pcb)
 
 
-def test_pour_only_net_with_declared_current_is_unknown_and_blocking() -> None:
+def test_pour_only_net_is_left_to_the_rule() -> None:
     checker = _checker(declared={"+5V": 2.0, "+3.3V": 1.0}, zone_nets=["+5V", "+3.3V"])
-    result = cov.precheck("ampacity", checker)
-    assert result is not None
-    assert result.state == cov.UNKNOWN
-    assert result.blocking
-    assert "zone-only, not measured" in result.status
-    assert "+5V" in result.status and "+3.3V" in result.status
+    assert cov.precheck("ampacity", checker) is None
 
 
-def test_net_with_tracks_and_pour_stays_checked() -> None:
+def test_net_with_tracks_and_pour_is_left_to_the_rule() -> None:
     checker = _checker(declared={"+5V": 2.0}, segment_nets=["+5V"], zone_nets=["+5V"])
     assert cov.precheck("ampacity", checker) is None
 
 
-def test_pour_only_net_without_declared_current_stays_non_blocking() -> None:
-    checker = _checker(declared={"VBUS": 1.0}, segment_nets=["VBUS"], zone_nets=["GND"])
-    assert cov.precheck("ampacity", checker) is None
-
-
-def test_keepout_zone_is_not_a_pour() -> None:
-    checker = _checker(declared={"+5V": 2.0}, keepout_nets=["+5V"])
-    assert cov.precheck("ampacity", checker) is None
+def test_unmeasured_pour_is_unknown_and_blocking() -> None:
+    result = cov.ampacity_pour_unknown({"+5V": "zone fill absent", "+3.3V": "1 copper pad(s)"})
+    assert result.state == cov.UNKNOWN
+    assert result.blocking
+    assert result.reason is not None
+    assert "+3.3V: 1 copper pad(s); +5V: zone fill absent" in result.reason
 
 
 def test_no_declared_targets_still_skipped() -> None:

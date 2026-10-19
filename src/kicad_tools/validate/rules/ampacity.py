@@ -88,6 +88,11 @@ class AmpacityRule(DRCRule):
                 ``kct check`` contract when no sidecar is supplied.
         """
         self.specs: dict[str, float] = specs or {}
+        # Issue #7206 (F3): declared nets whose pour copper could not be
+        # rated, ``{net: reason}``; filled by :meth:`check` for coverage.
+        self.unmeasured_pour_nets: dict[str, str] = {}
+        # Narrowest pour neck (mm) of every rated poured net.
+        self.pour_necks_mm: dict[str, float] = {}
 
     @staticmethod
     def _is_external_layer(layer: str) -> bool:
@@ -149,12 +154,26 @@ class AmpacityRule(DRCRule):
             DRCResults with a per-segment ``error`` for every routed
             segment narrower than its net's IPC-2221 required width.
             Empty when no net declares a target (the standalone-CLI common
-            case).
+            case).  Nets with copper pours also get a pour finding when the
+            pour's narrowest neck is under the required width (Issue #7206).
         """
         results = DRCResults(rules_checked=1)
+        self.unmeasured_pour_nets = {}
+        self.pour_necks_mm = {}
 
         if not self.specs:
             return results
+
+        # Issue #7206 (F3): a net carried (partly or only) by a copper pour
+        # is rated by the pour's narrowest neck between its pads; a pour
+        # that cannot be rated stays unmeasured (coverage ``unknown``).
+        from ..pour_ampacity import measure_pour_ampacity
+
+        pour = measure_pour_ampacity(pcb, self.specs, design_rules)
+        for violation in pour.violations:
+            results.add(violation)
+        self.unmeasured_pour_nets = dict(pour.unmeasured)
+        self.pour_necks_mm = dict(pour.necks_mm)
 
         # Cache the required width per (net, layer-class) so we call the
         # IPC-2221 solver once per pair rather than once per segment.
