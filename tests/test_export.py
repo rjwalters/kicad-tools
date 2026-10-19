@@ -933,24 +933,27 @@ class TestAssemblyPackageJLCPCBTHTIntegration:
 
 
 class TestAssemblyPackageExplicitSourcingIntegration:
-    """Integration regression for issue #4995.
+    """Integration regression for issue #4995, on the real board 06 PCB.
 
-    Uses the real ``boards/06-diffpair-test`` fixture -- the exact
-    reproduction cited in the issue. Its ``project.kct`` spec explicitly
-    sources J1/J2/J3 as Samtec headers (``mpn`` set, no ``lcsc``). Before
-    the fix, ``enrich_bom_lcsc``'s generic (value, footprint) auto-matcher
-    silently assigned J1 an unrelated LCSC part (``C404027``); after the
-    fix, these three references must stay unresolved (blank ``LCSC Part
-    #``) even with default ``auto_lcsc=True``.
+    #4995: board 06's spec sourced J1/J2/J3 as Samtec headers (``mpn`` set,
+    no ``lcsc``) and ``enrich_bom_lcsc``'s generic (value, footprint)
+    auto-matcher silently gave J1 an unrelated LCSC part (``C404027``).
+    Explicit MPN-only parts must stay unresolved even with the default
+    ``auto_lcsc=True``.
+
+    Issue #7422 (operator ruling #7268 Q2 = 3) since swapped J1-J3 for
+    reviewed LCSC-stocked PZ254V headers, so the committed spec no longer
+    has an MPN-only part. The guard therefore runs against a temporary copy
+    of the spec with the Samtec entries restored (issue #7445), and a second
+    test pins the reviewed sourcing on the committed spec.
     """
 
-    def test_board06_explicit_samtec_headers_stay_unresolved(self):
+    @staticmethod
+    def _export_rows(spec_path: Path | None = None):
         from kicad_tools.export.assembly import AssemblyConfig, AssemblyPackage
+        from tests._board06_sourcing import BOARD06_PCB
 
-        repo_root = Path(__file__).resolve().parent.parent
-        board_dir = repo_root / "boards" / "06-diffpair-test"
-        pcb_path = board_dir / "output" / "diffpair_test_routed.kicad_pcb"
-        if not pcb_path.exists():
+        if not BOARD06_PCB.exists():
             pytest.skip("board06 routed fixture not present in this checkout")
 
         config = AssemblyConfig(
@@ -959,20 +962,14 @@ class TestAssemblyPackageExplicitSourcingIntegration:
             include_gerbers=False,
             auto_lcsc=True,  # exercise the default, not the --no-auto-lcsc workaround
             merge_lcsc=False,  # isolate spec-overlay behavior from any committed CSV
+            spec_path=spec_path,
         )
-
-        pkg = AssemblyPackage(
-            pcb_path=pcb_path,
-            manufacturer="jlcpcb-tier1",
-            config=config,
-        )
+        pkg = AssemblyPackage(pcb_path=BOARD06_PCB, manufacturer="jlcpcb-tier1", config=config)
 
         import tempfile
 
         with tempfile.TemporaryDirectory() as tmp:
-            out_dir = Path(tmp)
-            result = pkg.export(output_dir=out_dir)
-
+            result = pkg.export(output_dir=Path(tmp))
             assert result.bom_path is not None
             with open(result.bom_path, newline="") as f:
                 rows = list(csv.DictReader(f))
@@ -981,10 +978,17 @@ class TestAssemblyPackageExplicitSourcingIntegration:
         for row in rows:
             for ref in row["Designator"].split(","):
                 by_ref[ref.strip()] = row
+        return result, by_ref
 
-        # J1/J2/J3 are the explicit Samtec-sourced headers from the spec --
-        # they must never acquire a generic LCSC substitute.
-        for ref in ("J1", "J2", "J3"):
+    def test_board06_explicit_samtec_headers_stay_unresolved(self, tmp_path):
+        from tests._board06_sourcing import SAMTEC_HEADERS, write_samtec_spec
+
+        result, by_ref = self._export_rows(write_samtec_spec(tmp_path))
+
+        # The explicit Samtec-sourced headers must never acquire a generic
+        # LCSC substitute -- not the old C404027, and not the PZ254V parts
+        # the committed spec now reviews either.
+        for ref in SAMTEC_HEADERS:
             assert ref in by_ref, f"{ref} missing from generated BOM"
             assert by_ref[ref]["LCSC Part #"] == "", (
                 f"{ref} acquired an unreviewed LCSC substitute "
@@ -999,11 +1003,27 @@ class TestAssemblyPackageExplicitSourcingIntegration:
         assert result.lcsc_enrichment.spec_unresolved == 3
         assert {
             e for entry in result.lcsc_enrichment.spec_unresolved_entries for e in entry.references
-        } == {
-            "J1",
-            "J2",
-            "J3",
+        } == set(SAMTEC_HEADERS)
+
+    def test_board06_reviewed_pz254v_headers_come_from_the_spec(self):
+        """The committed spec's reviewed J1-J3 sourcing (#7422) is emitted exactly."""
+        from tests._board06_sourcing import REVIEWED_HEADERS
+
+        result, by_ref = self._export_rows()
+
+        for ref, (_mpn, lcsc) in REVIEWED_HEADERS.items():
+            assert by_ref[ref]["LCSC Part #"] == lcsc, ref
+        assert result.lcsc_enrichment is not None
+        assert result.lcsc_enrichment.spec_unresolved == 0
+        header_entries = {
+            ref: entry
+            for entry in result.lcsc_enrichment.entries
+            for ref in entry.references
+            if ref in REVIEWED_HEADERS
         }
+        assert set(header_entries) == set(REVIEWED_HEADERS)
+        for ref, entry in header_entries.items():
+            assert (entry.source, entry.lcsc_part) == ("spec", REVIEWED_HEADERS[ref][1]), ref
 
 
 class TestExtractTHTExclusions:
