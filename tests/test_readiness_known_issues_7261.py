@@ -495,6 +495,17 @@ def test_error_allowance_does_not_waive_another_failed_gate(tmp_path):
     assert report["status"] != "ready"
 
 
+def test_error_allowance_waives_drc_only_and_keeps_a_failed_erc_blocking(tmp_path):
+    board = make_board(tmp_path)
+    code, report = _run_errors(board, [VIA_A, VIA_B, VIA_C], erc_status="FAILED")
+    assert code != 0
+    assert report["status"] == "blocked"
+    check = next(c for c in report["checks"] if c["name"] == "kct_check")
+    assert check["status"] == "failed"
+    assert any("erc" in b for b in report["blockers"]), report["blockers"]
+    assert not any("drc" in b for b in report["blockers"]), report["blockers"]
+
+
 def test_widening_the_allowance_in_known_issues_json_is_detected(tmp_path):
     board = make_board(tmp_path)
     code, _ = _run_errors(board, [VIA_A, VIA_B, VIA_C])

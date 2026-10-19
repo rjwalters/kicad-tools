@@ -1372,7 +1372,10 @@ def _gate_kct_check(options: ReadinessOptions, engines: Engines) -> tuple[CheckO
     waived_errors = 0
     if errors and mismatch == [] and not not_run:
         waived_errors, errors = errors, 0
-        failed = []
+        # The listed violations are ``kct check``'s own DRC findings, so the
+        # allowance accounts for the DRC roll-up only; a FAILED ERC (or any
+        # other sub-check) stays blocking.
+        failed = [name for name in failed if name != "drc"]
     elif mismatch:  # also a stale allowance naming a rule that no longer fires
         table_err = "; ".join(mismatch)
         return (
