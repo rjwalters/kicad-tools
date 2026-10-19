@@ -25,7 +25,7 @@
       "size": 6952
     },
     "cpl_jlcpcb.csv": {
-      "sha256": "918f9d56a0b89fad57e2e50bc97115a1cd1ed6e5b6cdc30f040f5cdb21745f82",
+      "sha256": "cf68a29f553dbfc0332a67c018be523dd09f8a2017d441ba69e8cb17d310b86e",
       "size": 2750
     },
     "design-source.zip": {
@@ -85,11 +85,11 @@
       "size": 215
     },
     "native-drc.json": {
-      "sha256": "a05eedd1bfa8abf3430982c5bc2be40761d4f7e5ebccf854418b3776cdc5fd59",
+      "sha256": "7fb61280a461863f3d47a2f20490560a3a1f85aac0e8d634599ed98116c950be",
       "size": 1212
     },
     "native-erc.json": {
-      "sha256": "8ef78f0e92fb1ecf346dba14e845e45e06016fd539453b59ab139153dc0e7d5f",
+      "sha256": "a10fde009b58fefab084da1aa2c02a155accfee85ef281f371ebf4a47fdf4ee6",
       "size": 986
     },
     "procurement-review.md": {
