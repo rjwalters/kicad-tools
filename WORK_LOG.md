@@ -15,6 +15,14 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-19
 
+- **PR #7476**: fix: surface pair via-parity failures in kct route and align the audit with kct check
+- **Issue #7425** (closed): Surface pair via-parity failures in kct route summary/JSON; align audit pair set with kct check (#7421 follow-up, #7093 AC1)
+- **PR #7490**: fix(blocks): reverse-polarity P-FET drain on the input; VoltageDividerSense over VoltageDivider
+- **Issue #7399** (closed): Schematic blocks: 10 stock factories fail on real KiCad 10 libs (stale symbol IDs, fictional mock pins); add a real-symbol smoke test
+- **PR #7493**: fix: number DSN structure layers by stack order
+- **Issue #7485** (closed): DSN export writes `(property (index 0))` for every layer instead of the layer's stack position
+- **PR #7501**: fix(boards): include THT rows in board 04/06 JLCPCB packages; retire board 04 manual BOM
+- **Issue #7268** (closed): Regenerate JLCPCB packages of boards 02-07 with THT rows (follow-up to #7239)
 - **PR #7457**: fix: widen board 03 usb_geometry launch window for via-in-pad launches
 - **PR #7469**: fix(check): add board 04 courtyards (Y1 moved to clear C2) and flag courtyard-less footprints as courtyard_missing
 - **Issue #7084** (closed): router: routing board 03 under jlcpcb-tier1 collapses the USB_D In2.Cu common run to 1.4 mm (arm C under jlcpcb keeps 4.1 mm)
