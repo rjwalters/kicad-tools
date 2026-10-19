@@ -505,3 +505,52 @@ def test_repair_escapes_pad_with_existing_via_on_isolated_fill(tmp_path, pour_re
             block in after_text for block in pour_recipe._find_sexp_blocks(before_text, f"({kind}")
         )
     assert project.read_bytes() == before_rules
+
+
+def _dam_case(rules):
+    """Pour start at the origin; a same-net SMD pad 0.30 mm above the first
+    legal via site (0.3, 0), i.e. inside the 0.15 + 0.3 mm mask-dam band."""
+    smd = box(0.1, 0.30, 0.5, 0.7)
+    pads = [(smd, "GND", {"F.Cu"}, 0, (0.3, 0.5))]
+    primary = [(box(0.5, -0.2, 3, 0.2), {"In1.Cu"}, "fill")]
+    result = escape.find_escape(
+        (0, 0), "GND", "F.Cu", pads, [], [], primary, (-0.5, -0.6, 3, 0.6), rules
+    )
+    return smd, result
+
+
+def test_via_drill_stays_out_of_smd_mask_dam_band():
+    """Issue #7322: the pour escape applies the #7296 mask-dam floor."""
+    free_smd, free = _dam_case(escape.EscapeRules())
+    assert free is not None and free.via
+    # Control: with the floor off the via lands in the band.
+    band = free.rules.drill / 2 + 0.3
+    assert free_smd.distance(Point(free.points[-1])) < band
+
+    smd, guarded = _dam_case(escape.EscapeRules(pad_edge_gap=0.3))
+    assert guarded is not None and guarded.via
+    assert smd.distance(Point(guarded.points[-1])) >= guarded.rules.drill / 2 + 0.3 - 1e-6
+
+
+def test_through_hole_pads_have_no_mask_dam():
+    th = box(0.1, 0.30, 0.5, 0.7)
+    pads = [(th, "GND", {"F.Cu", "B.Cu"}, 0.2, (0.3, 0.5), "U1.1", True)]
+    primary = [(box(0.5, -0.2, 3, 0.2), {"In1.Cu"}, "fill")]
+
+    def run(gap):
+        rules = escape.EscapeRules(pad_edge_gap=gap)
+        return escape.find_escape(
+            (0, 0), "GND", "F.Cu", pads, [], [], primary, (-0.5, -0.6, 3, 0.6), rules
+        )
+
+    free, floored = run(0.0), run(0.3)
+    assert free is not None
+    assert floored is not None and floored.points == free.points
+
+
+def test_from_project_threads_the_pad_edge_gap(tmp_path):
+    rules = escape.EscapeRules.from_project(tmp_path / "none.kicad_pro", pad_edge_gap=0.1)
+    assert rules.pad_edge_gap == 0.1
+    assert escape.EscapeRules.from_project(tmp_path / "none.kicad_pro").pad_edge_gap == 0.0
+    with pytest.raises(ValueError):
+        escape.EscapeRules.from_project(tmp_path / "none.kicad_pro", pad_edge_gap=-1)

@@ -1503,7 +1503,7 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
                 project = pcb_path.with_suffix(".kicad_pro")
                 if not project.exists():
                     project = pcb_path.parent / "diffpair_test.kicad_pro"
-                escape_rules = EscapeRules.from_project(project)
+                escape_rules = EscapeRules.from_project(project, pad_edge_gap=_mask_dam_floor())
                 for pad_name in comp_pads:
                     escape = find_escape(
                         pad_center[pad_name],
@@ -1740,6 +1740,13 @@ def _connector_profile(points, neck_width, trunk_width, neck_length=0.75):
             legs.append((a, b, trunk_width))
         remaining = max(0.0, remaining - length)
     return legs
+
+
+def _mask_dam_floor() -> float:
+    """The fab's solder-mask dam (mm): the via-vs-SMD-pad-edge floor (#7322)."""
+    from kicad_tools.manufacturers import get_profile
+
+    return float(get_profile("jlcpcb").get_design_rules(layers=4).min_solder_mask_dam_mm)
 
 
 def _relocate_pad_edge_vias(pcb_path: Path) -> int:
@@ -2292,7 +2299,7 @@ def _legalize_signal_vias(pcb_path: Path) -> int:
                 project = pcb_path.with_suffix(".kicad_pro")
                 if not project.exists():
                     project = pcb_path.parent / "diffpair_test.kicad_pro"
-                rules = EscapeRules.from_project(project)
+                rules = EscapeRules.from_project(project, pad_edge_gap=_mask_dam_floor())
                 drill = max(rules.drill, v["drill"])
                 rules = replace(
                     rules,
