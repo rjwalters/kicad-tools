@@ -2,7 +2,7 @@
 title: "matchgroup_test_routed"
 subtitle: "Design Report"
 author: "kicad-tools 0.23.0"
-date: "Rev 1 | 2026-10-16 | jlcpcb"
+date: "Rev 1 | 2026-10-19 | jlcpcb"
 geometry: "margin=1in"
 fontsize: 11pt
 colorlinks: true
@@ -64,20 +64,11 @@ Board 07 real SDRAM memory test — DRAFT
 
 ## Assembly Notes
 
-1 fine-pitch component; 2 polarized components
+1 fine-pitch component; 2 polarized components; 25 bottom-side components
 
 - **Fine-pitch components**: 1 (U1)
 - **Polarized components**: 2 -- check orientation markings
-
-## Hand-Solder (THT) Components
-
-The following 3 through-hole components are **excluded from the SMT pick-and-place file** and must be hand-soldered (or wave/selective-soldered) after SMT assembly. They appear in the BOM for sourcing.
-
-| Value | Package | Qty | References |
-|-------|---------|-----|------------|
-| 5V_INPUT | PinHeader_1x02_P2.54mm_Vertical | 1 | J1 |
-| SWD_3V3 | PinHeader_1x06_P2.54mm_Vertical | 1 | J2 |
-| UART_3V3 | PinHeader_1x03_P2.54mm_Vertical | 1 | J3 |
+- **Bottom-side parts**: 25 (C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, ...) -- double-sided assembly
 
 ## ERC Status
 
@@ -86,8 +77,7 @@ The following 3 through-hole components are **excluded from the SMT pick-and-pla
 | Errors | 0 |
 | Warnings | 0 |
 
-**Status**: SKIPPED -- ERC skipped by user request
-
+**Status**: PASS
 
 \newpage
 
@@ -171,15 +161,18 @@ The following 3 through-hole components are **excluded from the SMT pick-and-pla
 
 \newpage
 
-## DRC Status
+## DRC Status (`--mfr jlcpcb` rules)
 
 | Metric | Count |
 |--------|-------|
 | Errors | 0 |
+| Errors: kct (`--mfr jlcpcb` rules) | 0 |
+| Errors: kicad-cli (geometric) | 0 |
 | Warnings | 0 |
 | Blocking | 0 |
 
 **Status**: PASS
+
 
 
 \newpage
@@ -190,7 +183,7 @@ The following 3 through-hole components are **excluded from the SMT pick-and-pla
 
 ### Action Items
 
-- **[OPTIONAL]** Verify zone fill in KiCad for 2 zone-connected nets
+- **[OPTIONAL]** Refill zones to verify 2 zone-connected nets, then re-run kct audit
 
 
 \newpage
