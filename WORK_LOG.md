@@ -15,6 +15,10 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-19
 
+- **PR #7457**: fix: widen board 03 usb_geometry launch window for via-in-pad launches
+- **PR #7469**: fix(check): add board 04 courtyards (Y1 moved to clear C2) and flag courtyard-less footprints as courtyard_missing
+- **Issue #7084** (closed): router: routing board 03 under jlcpcb-tier1 collapses the USB_D In2.Cu common run to 1.4 mm (arm C under jlcpcb keeps 4.1 mm)
+- **Issue #7204** (closed): DFA false-PASS: courtyard check silently skips courtyard-less footprints (boards 00/01/04 signed off with 0 courtyards) and AssemblyCapabilities is never enforced (board 07 double-sided CPL unflagged)
 - **PR #7486**: fix(boards): refresh board 05 report via its producer, keep reviewed net-class rules
 - **PR #7465**: fix: delete stale board 04 native-drc.json and check for unbound DRC reports
 - **PR #7439**: fix(export): place THT parts at pad-bbox centre in JLCPCB CPL
