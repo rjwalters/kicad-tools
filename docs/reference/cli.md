@@ -696,7 +696,7 @@ kct readiness <board-dir|board.kicad_pcb> [options]
 | `--project-root DIR` | Ancestor of the board directory that bounds where out-of-directory dependencies (a schematic hierarchy, sibling `symbols/` libraries referenced as `${KIPRJMOD}/../...`) may be collected from. Only referenced files are staged, hashed (`external_inputs` in `readiness.json`) and archived, root-relative, in `kicad_project.zip`; anything outside it, missing, symlink-escaping or a whole ancestor directory is refused. |
 | `--net-class-map PATH` | Net-class map sidecar (auto-discovered by default) |
 | `--ack-warnings RULES` | Comma-separated `rule_id`s whose assembly-affecting warnings are explicitly accepted |
-| `--known-issue N:SUMMARY:KIND` | Record an open issue (repeatable; KIND `defect`, `exception` or `advisory`, optional `:rule@pad,...` warning-identity allowance, e.g. `:via_at_pad_edge@R3-2`). An open defect makes the board `blocked`; recorded issues carry forward (Issue #7261) |
+| `--known-issue N:SUMMARY:KIND` | Record an open issue (repeatable; KIND `defect`, `exception` or `advisory`, optional `:rule@pad,...` warning-identity allowance, e.g. `:via_at_pad_edge@R3-2`; `!rule@x/y` names one `kct check` error (rule + location in mm, recorded as `{rule, at: [x, y]}` rounded to 0.01) an `exception` accounts for, and the report's errors must match the listed identities exactly, Issue #7355). An open defect makes the board `blocked`; recorded issues carry forward (Issue #7261) |
 | `--resolve-known-issue N` | Drop a recorded known issue (repeatable) |
 | `--include-tht` | Accept through-hole parts in the CPL (excluded by default only for SMT-only fabs; JLCPCB includes them) |
 | `--no-archive` | Skip building `output/manufacturing.zip` |
