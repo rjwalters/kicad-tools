@@ -100,10 +100,10 @@ class TestCheckZeroViolations:
         assert set(mod.MATCHGROUP_ALLOWED_GROUPS[key]) == {"MIPI_CSI_LANES", "DDR_DATA_BYTE_0"}
         assert not hasattr(mod, "MATCHGROUP_VIOLATION_BASELINE")
 
-    def test_fixture_impedance_allowance_removed(self):
-        """#7349: the tightening pass cleared board 07's impedance findings (net-keyed, #7359)."""
+    def test_fixture_impedance_allowance_kept(self):
+        """#7347's impedance allowance survives the group rework (net-keyed, #7359)."""
         mod = _load_helper_module()
-        assert not {rule for rule, _ in mod.MATCHGROUP_FIXTURE_ALLOWED_FINDINGS}
+        assert {rule for rule, _ in mod.MATCHGROUP_FIXTURE_ALLOWED_FINDINGS} == {"impedance"}
 
 
 class TestCheckGroupAllowances:
@@ -423,25 +423,34 @@ class TestMatchgroupJobContainer:
 
 
 # ---------------------------------------------------------------------------
-# Issue #7349: no impedance tolerance on the baselined board-07 key
+# Issue #7332: capped impedance tolerance on the baselined board-07 key
 # ---------------------------------------------------------------------------
 
 
 class TestUnexpectedBaselineErrors:
     KEY = "boards/07-matchgroup-test/regression-fixture/matchgroup_test_routed.kicad_pcb"
 
-    def test_any_impedance_error_reported(self):
-        """Issue #7349: the board-07 allowance is empty, so no impedance net is tolerated."""
-        mod = _load_helper_module()
-        found = {"impedance": {"MIPI_DAT1_N"}}
-        assert mod.unexpected_baseline_errors(self.KEY, {"impedance": 1}, found) == {"impedance": 1}
-        assert mod.unexpected_baseline_errors(self.KEY, {"impedance": 1}) == {"impedance": 1}
+    NETS = {"MIPI_DAT1_N", "MIPI_DAT1_P", "TMDS_D1_N", "TMDS_D1_P"}
 
-    def test_allowance_is_empty_and_cap_removed(self):
+    def test_listed_impedance_nets_tolerated(self):
         mod = _load_helper_module()
-        assert mod.MATCHGROUP_FIXTURE_ALLOWED_FINDINGS == {}
-        assert not hasattr(mod, "MATCHGROUP_FIXTURE_RULE_CAPS")
-        assert mod.stale_allowances(self.KEY, {}) == []
+        found = {"impedance": set(self.NETS)}
+        assert mod.unexpected_baseline_errors(self.KEY, {"impedance": 4}, found) == {}
+        assert mod.stale_allowances(self.KEY, found) == []
+
+    def test_unlisted_impedance_net_reported_within_old_cap(self):
+        mod = _load_helper_module()
+        found = {"impedance": {"MIPI_DAT1_N", "MIPI_DAT1_P", "TMDS_D1_N", "DDR_DQS0_P"}}
+        assert mod.unexpected_baseline_errors(self.KEY, {"impedance": 4}, found) == {"impedance": 1}
+
+    def test_fixed_listed_finding_is_stale(self):
+        mod = _load_helper_module()
+        found = {"impedance": self.NETS - {"TMDS_D1_P"}}
+        assert mod.unexpected_baseline_errors(self.KEY, {"impedance": 3}, found) == {}
+        assert mod.stale_allowances(self.KEY, found) == [("impedance", "TMDS_D1_P", 7332)]
+
+    def test_cap_constant_removed(self):
+        assert not hasattr(_load_helper_module(), "MATCHGROUP_FIXTURE_RULE_CAPS")
 
     def test_non_baselined_key_has_no_stale_entries(self):
         mod = _load_helper_module()

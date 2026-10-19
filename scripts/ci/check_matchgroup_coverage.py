@@ -620,12 +620,32 @@ def count_errors_via_kct_check(
     return blocking
 
 
-# Issue #7332 / #7349 -- declared ``target_diff_impedance`` is judged on coupled
-# segments (#7306/#7293).  The recipe now runs the #7344 gap-tightening pass,
-# which took the seed-42 re-route from 4 ``impedance`` errors (MIPI_DAT1 P/N,
-# TMDS_D1 P/N) to 0, so no impedance finding is allowed any more: every one is
-# unexpected.  The empty allowance keeps the identity-based plumbing in place.
-MATCHGROUP_FIXTURE_ALLOWED_FINDINGS: Allowance = {}
+# Issue #7332 -- declared ``target_diff_impedance`` is judged on coupled
+# segments (#7306/#7293).  The model is right; the routed copper misses.  The
+# coupled trunk keeps the breakout pitch instead of tightening to the solved
+# ``intra_pair_clearance`` (0.100 mm in net_class_map.json):
+#   fixture MIPI_DAT1 trunk F.Cu w=0.225  gap 0.283 mm vs 0.100 mm -> 116.3 ohm
+#   seed-42 re-route MIPI_DAT1  gap ~0.43 mm -> 122.6 ohm
+#   seed-42 re-route TMDS_D1    gap ~0.49 mm -> 125.3 ohm
+# (declared 100 ohm +/-10 %).  Same root cause as #7312 (board 06) and the
+# shared router defect #7344.  Seed-42 yields 4 errors: MIPI_DAT1 P/N and
+# TMDS_D1 P/N.
+# Issue #7349: the recipe now runs the #7344 gap-tightening pass
+# (``--tighten-diffpair-gap``).  Measured on the seed-42 re-route with #7397's
+# match-group top-up merged, the pass leaves all 4 findings: MIPI_DAT1 tightens
+# 1 of its 2 runs (the other is declined because it would worsen the pair's
+# ``kct check`` skew), so its remaining run still reads 122.5 ohm; TMDS_D1
+# (125.2 ohm) is declined for the same reason.  MIPI_DAT1's skew drops
+# 1.440 -> 1.021 mm.
+# Allowed by identity, not by count (#7359, #7270 Q3 ruling): only these nets
+# may carry an ``impedance`` error, and a listed net that stops failing makes
+# its entry stale and fails the gate.  Deleting an entry is the whole of #7349.
+MATCHGROUP_FIXTURE_ALLOWED_FINDINGS: Allowance = {
+    ("impedance", "MIPI_DAT1_N"): 7332,
+    ("impedance", "MIPI_DAT1_P"): 7332,
+    ("impedance", "TMDS_D1_N"): 7332,
+    ("impedance", "TMDS_D1_P"): 7332,
+}
 
 
 def unexpected_baseline_errors(
