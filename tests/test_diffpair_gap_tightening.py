@@ -477,6 +477,48 @@ def test_raw_segment_skew_misses_the_via_trim(monkeypatch):
     assert abs(_checker_skew(ar)) > skew_before + 0.005
 
 
+def _via_end_board_with_skew():
+    """``_via_end_board`` with N's lead-in 0.4 mm longer (checker skew -0.4)."""
+    ar = _via_end_board()
+    n_route = next(r for r in ar.routes if r.net == 2)
+    n_route.segments[0].x1 -= 0.4
+    return ar
+
+
+def test_unequal_split_cancels_the_symmetric_skew_drift():
+    # Issue #7349: the symmetric squeeze drifts the checker skew ~0.01 mm
+    # (via trim), which the cumulative gate refuses.  Moving a little more on
+    # the shorter rail commits the squeeze with the skew no worse.
+    ar = _via_end_board_with_skew()
+    skew_before = abs(_checker_skew(ar))
+
+    res = ar.apply_diffpair_gap_tightening(verbose=False, stackup=STACKUP)[
+        ("MIPI_DAT1_P", "MIPI_DAT1_N")
+    ]
+
+    assert res.reason == "tightened", res
+    assert res.runs[0].mode.startswith("balanced_p_"), res
+    assert abs(_checker_skew(ar)) <= skew_before + 1e-6
+    assert _clearance_errors(ar) == []
+    assert _connected(ar) == {1: True, 2: True}
+
+
+def test_declined_run_names_every_squeeze_that_was_tried():
+    # Zero baseline skew cannot be matched, so every rung is refused.
+    ar = _via_end_board()
+    before = _snapshot(ar)
+
+    res = ar.apply_diffpair_gap_tightening(verbose=False, stackup=STACKUP)[
+        ("MIPI_DAT1_P", "MIPI_DAT1_N")
+    ]
+
+    assert res.reason == "declined:skew", res
+    assert _snapshot(ar) == before
+    assert any(a.startswith("0.137/symmetric:declined:skew(") for a in res.runs[0].attempts)
+    assert any("/balanced_p_" in a for a in res.runs[0].attempts)
+    assert "[0.137/symmetric:declined:skew(" in res.format_line()
+
+
 # --- No-op on an in-band pair (board 03 style, ~89 ohm of 90) -------------
 
 

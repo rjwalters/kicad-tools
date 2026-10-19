@@ -76,6 +76,10 @@ SKEW_TOLERANCE_MM = 0.01
 #: (board 06 USB3_RX1 drifted +0.028 mm over two committed runs).
 CUMULATIVE_SKEW_EPS_MM = 1e-6
 
+#: Fractions of the half-excess moved from the longer rail to the shorter one
+#: when a symmetric squeeze drifts the pair's skew (Issue #7349).
+BALANCE_FRACTIONS = (0.02, 0.03, 0.04, 0.05, 0.1, 0.2, 0.4)
+
 #: Upper bound on runs attempted per pair (defensive loop guard).
 MAX_RUNS_PER_PAIR = 32
 
@@ -99,6 +103,8 @@ class RunOutcome:
     zdiff_before: float | None
     zdiff_after: float | None
     mode: str | None = None
+    #: Every ``gap_goal/mode`` squeeze tried and why it failed, in order.
+    attempts: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -141,12 +147,14 @@ class GapTighteningResult:
                 line += f", target gap {self.target_gap_mm:.3f}mm"
             line += ")"
             # A partly tightened pair reports ``tightened``; surface why the
-            # leftover runs were declined (Issue #7349).
+            # leftover runs were declined, and which squeezes were tried
+            # (Issue #7349).
             declined = [r for r in self.runs if r.status != "tightened"]
-            if declined and self.runs_tightened:
-                line += "".join(
-                    f"\n    {r.layer} run gap {r.gap_before_mm:.3f}mm: {r.status}" for r in declined
-                )
+            if declined and (self.runs_tightened or any(r.attempts for r in declined)):
+                for r in declined:
+                    line += f"\n    {r.layer} run gap {r.gap_before_mm:.3f}mm: {r.status}"
+                    if r.attempts:
+                        line += " [" + ", ".join(r.attempts) + "]"
         return line
 
 
@@ -673,12 +681,25 @@ def tighten_pair(
             excess = run.gap_mm - gap_goal
             if excess <= 1e-4:
                 continue
-            for mode in ("symmetric", f"single_{shorter}", f"single_{longer}"):
-                shifts = {
-                    "symmetric": (excess / 2, excess / 2),
-                    "single_p": (excess, 0.0),
-                    "single_n": (0.0, excess),
-                }[mode]
+            splits: list[tuple[str, tuple[float, float]]] = [
+                ("symmetric", (excess / 2, excess / 2))
+            ]
+            # Issue #7349: a symmetric squeeze leaves the checker-measured skew
+            # a few hundredths of a mm worse (rail lengths differ at the ends),
+            # which the cumulative gate refuses.  Shift a little more on the
+            # shorter rail so the extra jog length cancels that drift.
+            for frac in BALANCE_FRACTIONS:
+                extra = frac * excess / 2
+                to_short, to_long = excess / 2 + extra, excess / 2 - extra
+                splits.append(
+                    (
+                        f"balanced_{shorter}_{frac:g}",
+                        (to_short, to_long) if shorter == "p" else (to_long, to_short),
+                    )
+                )
+            splits.append((f"single_{shorter}", (excess, 0.0) if shorter == "p" else (0.0, excess)))
+            splits.append((f"single_{longer}", (excess, 0.0) if longer == "p" else (0.0, excess)))
+            for mode, shifts in splits:
                 candidate = routes
                 moved: dict[int, list[Segment]] = {p_id: [], n_id: []}
                 ok = True
@@ -701,7 +722,9 @@ def tighten_pair(
                     moved[net] = new_segs
                 if not ok:
                     reason = reason or "declined:jog_does_not_fit"
+                    outcome.attempts.append(f"{gap_goal:.3f}/{mode}:jog_does_not_fit")
                     continue
+                skew_now, skew_cand = skew_of(routes), skew_of(candidate)
                 verdict = _gate(
                     router,
                     candidate,
@@ -710,8 +733,8 @@ def tighten_pair(
                     n_id=n_id,
                     floor_gap=floor_gap,
                     foreign_preserved=foreign_preserved,
-                    skew_before=skew_of(routes),
-                    skew_after=skew_of(candidate),
+                    skew_before=skew_now,
+                    skew_after=skew_cand,
                     baseline_skew=baseline_skew,
                     before_conn=before_conn,
                     connected=connected,
@@ -721,6 +744,12 @@ def tighten_pair(
                 )
                 if verdict is not None:
                     reason = reason or verdict
+                    detail = (
+                        f"({abs(skew_now):.3f}->{abs(skew_cand):.3f}mm)"
+                        if verdict == "declined:skew"
+                        else ""
+                    )
+                    outcome.attempts.append(f"{gap_goal:.3f}/{mode}:{verdict}{detail}")
                     continue
                 routes = candidate
                 committed = True
