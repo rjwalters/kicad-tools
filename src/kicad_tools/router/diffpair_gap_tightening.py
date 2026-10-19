@@ -24,9 +24,9 @@ This module is a geometry-only post-pass that squeezes such a trunk:
 4. Every candidate is gated on exact geometry before it is committed:
    foreign pad / via / copper clearance
    (:meth:`Autorouter._skew_tune_foreign_clearance_ok`), pad connectivity
-   of both nets, skew (<= ``SKEW_TOLERANCE_MM`` change per squeeze, and
-   never above the pair's skew before the pass -- see
-   ``CUMULATIVE_SKEW_EPS_MM``), and the
+   of both nets, skew (measured the way ``kct check`` measures it;
+   <= ``SKEW_TOLERANCE_MM`` change per squeeze, and never above the pair's
+   skew before the pass -- see ``CUMULATIVE_SKEW_EPS_MM``), and the
    ``ImpedanceRule`` post-condition (the squeezed trunk is in band and no
    segment becomes a newly judged out-of-band one).  A run that fails all
    candidates is left byte-identical and reported as ``declined:<reason>``.
@@ -440,6 +440,42 @@ def _net_length(segments: list[Segment]) -> float:
     return sum(math.hypot(s.x2 - s.x1, s.y2 - s.y1) for s in segments)
 
 
+def _checker_net_length_fn(router: Autorouter) -> Any:
+    """``(routes, net_id) -> mm`` measured the way ``kct check`` measures skew.
+
+    Issue #7349 review: the skew gate must judge the number the checker
+    reports.  ``DiffPairLengthSkewRule`` takes the kicad-cli length of the
+    whole net (:mod:`kicad_tools.router.kicad_length`: segments minus the
+    in-copper portion of each chain entering a pad / via, plus via spans).
+    Raw segment sums miss a squeeze that changes one rail's pad-entry trim
+    (board 06 USB3_RX1: raw skew unchanged, checker skew +0.028 mm).  Falls
+    back to raw segment sums when the model cannot be built.
+    """
+    try:
+        from .kicad_length import net_length, route_geometry
+
+        layer_stack = getattr(router, "layer_stack", None)
+        num_layers = len(layer_stack.layers) if layer_stack is not None else 2
+        model = router._kicad_length_model(num_layers)
+    except Exception:  # noqa: BLE001 - partial routers in tests
+        return None
+
+    def measure(routes: list[Route], net: int) -> float:
+        fragments = [r for r in routes if r.net == net]
+        if not fragments:
+            return 0.0
+        merged = Route(
+            net=net,
+            net_name=fragments[0].net_name,
+            segments=[s for r in fragments for s in r.segments],
+            vias=[v for r in fragments for v in r.vias],
+        )
+        segs, vias = route_geometry(merged)
+        return net_length(segs, vias, model.pads_by_net.get(net, []), model.stackup)
+
+    return measure
+
+
 def _covered_by(seg: Segment, old: Segment) -> bool:
     """True when ``seg`` lies on ``old``'s centreline, within its extent."""
     if seg.layer != old.layer:
@@ -510,7 +546,11 @@ def tighten_pair(
     z_max = model.target * (1 + tolerance / 100.0)
     floor_gap = float(router._pair_gap_mm(net_class))
 
+    checker_length = _checker_net_length_fn(router)
+
     def skew_of(routes: list[Route]) -> float:
+        if checker_length is not None:
+            return checker_length(routes, p_id) - checker_length(routes, n_id)
         return _net_length(_pair_segments(routes, p_id, editable=False)) - _net_length(
             _pair_segments(routes, n_id, editable=False)
         )
@@ -599,8 +639,11 @@ def tighten_pair(
 
         before_judged = judge(routes)
         before_conn = connected(routes)
-        p_len = _net_length(_pair_segments(routes, p_id, editable=False))
-        n_len = _net_length(_pair_segments(routes, n_id, editable=False))
+        if checker_length is not None:
+            p_len, n_len = checker_length(routes, p_id), checker_length(routes, n_id)
+        else:
+            p_len = _net_length(_pair_segments(routes, p_id, editable=False))
+            n_len = _net_length(_pair_segments(routes, n_id, editable=False))
         shorter, longer = ("p", "n") if p_len <= n_len else ("n", "p")
         old_bad = [
             s
