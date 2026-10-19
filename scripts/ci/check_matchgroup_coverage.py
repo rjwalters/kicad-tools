@@ -637,6 +637,11 @@ def count_errors_via_kct_check(
 # ``kct check`` skew), so its remaining run still reads 122.5 ohm; TMDS_D1
 # (125.2 ohm) is declined for the same reason.  MIPI_DAT1's skew drops
 # 1.440 -> 1.021 mm.
+# The #7349 unequal (``balanced_*``) splits can bring both pairs to 100 ohm,
+# but only by adding uncoupled jogs to trunks that already sit inside the
+# 0.5 mm coupling window (MIPI_DAT1 uncoupled P+N 4.341 -> 5.095 mm, coupled
+# fraction 86.7 % -> 84.6 %; TMDS_D1 48.372 -> 49.379 mm), so the
+# uncoupled-length gate (operator Q12) declines them and the 4 entries stay.
 # Allowed by identity, not by count (#7359, #7270 Q3 ruling): only these nets
 # may carry an ``impedance`` error, and a listed net that stops failing makes
 # its entry stale and fails the gate.  Deleting an entry is the whole of #7349.

@@ -1738,7 +1738,7 @@ def _write_routed_pcb(
     tmp_path.write_text(output_content)
     # fsync the file so a crash between write and rename does not leave
     # a partial-content tmp file masquerading as the routed PCB.
-    with open(tmp_path, "rb") as f:
+    with open(tmp_path, "r+b") as f:
         os.fsync(f.fileno())
     os.replace(tmp_path, output_path)
     from .route_receipt import record_publication
@@ -3957,7 +3957,7 @@ def _save_partial_results() -> bool:
             # ``<path>.write_text(<content variable>)`` shape.
             tmp_path = save_path.with_suffix(save_path.suffix + ".tmp")
             tmp_path.write_text(output_content)
-            with open(tmp_path, "rb") as f:
+            with open(tmp_path, "r+b") as f:
                 os.fsync(f.fileno())
             os.replace(tmp_path, save_path)
             from .route_receipt import record_publication

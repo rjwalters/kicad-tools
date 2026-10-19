@@ -8132,8 +8132,14 @@ class PCB:
                 node_pad = Pad.from_sexp(pad_node)
                 if node_pad is None:
                     continue
-                fields = ["number", "type", "net_name", "uuid", "pintype", "pinfunction"]
+                fields = ["number", "type", "uuid", "pintype", "pinfunction"]
                 net_node = pad_node.find_child("net")
+                # Number-only ``(net N)`` pads get ``net_name`` filled in memory
+                # by ``_fixup_net_numbers``; only a node with a name atom can
+                # disagree (issue #7519).
+                name_idx = 0 if net_node is None or net_node.get_int(0) is None else 1
+                if net_node is None or net_node.get_string(name_idx) is not None:
+                    fields.append("net_name")
                 # Name-only ``(net "X")`` pads get ``net_number`` filled in memory
                 # by ``_fixup_net_numbers``; only a numbered node can disagree.
                 if net_node is not None and net_node.get_int(0) is not None:

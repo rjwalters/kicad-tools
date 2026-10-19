@@ -287,6 +287,10 @@ def physical_contract(path):
                         "min_thickness": z.min_thickness,
                     }
                     for z in pcb.zones
+                    # Rule areas are routing steering, not circuit: a fresh
+                    # route may carry one (Issue #7498) and its plan must
+                    # still replay onto the keepout-free input.
+                    if z.keepout is None
                 ],
                 key=lambda z: (z["layer"], z["net"]),
             ),

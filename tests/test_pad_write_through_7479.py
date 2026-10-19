@@ -225,3 +225,23 @@ def test_unedited_save_is_byte_identical(tmp_path):
 def test_name_only_net_board_saves(tmp_path):
     pcb = PCB.load(NAME_ONLY)
     assert pcb._unpersisted_edits() == []
+
+
+def test_number_only_net_pad_unedited_save_succeeds(tmp_path):
+    """``(net N)`` pads get ``net_name`` filled in memory; not an edit (#7519)."""
+    import re
+
+    src = tmp_path / "number_only.kicad_pcb"
+    text = FIXTURE.read_text()
+    # Strip the name atom from one pad's net node: (net N "name") -> (net N).
+    text, n = re.subn(
+        r'(\(pad [^\n]*\n(?:(?!\(pad ).*\n)*?\s*)\(net (\d+) "[^"]+"\)',
+        r"\1(net \2)",
+        text,
+        count=1,
+    )
+    assert n == 1
+    src.write_text(text)
+    pcb = PCB.load(src)
+    assert pcb._unpersisted_edits() == []
+    pcb.save(tmp_path / "out.kicad_pcb")

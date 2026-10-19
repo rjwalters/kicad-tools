@@ -106,9 +106,19 @@ toolless launch, a non-zero exit and a timeout. A success resets it to 1. A
 pre-spawn skip counts neither way. The count lives in daemon memory, so a
 restart starts every role at attempt 1.
 
-Sweep dispatch and `worker run` phases draw attempt 1. The `/<model>` segment
-is pinned only on role ticks; a sweep uses the drawn runtime and profile with
-its own model resolution.
+Sweep dispatch and `worker run` phases draw attempt 1.
+
+### Which launch paths honor the drawn `/<model>` (#12748)
+
+| Launch path | Drawn model |
+|---|---|
+| Role tick (role runner) | Pinned with `--model`, below only the runner's own override. |
+| Daemon stage step (`begin_step_spawn`): Curator, Judge, Doctor, Champion, **Builder** | Pinned with `--model`: the same draw → reconcile with the admitted runtime → refuse a provable runtime conflict (`model_runtime_mismatch`) path for every role. With no drawn model the role's own resolver (Builder: experiment/default) applies unchanged. |
+| Private Codex containment (step and role tick) | Account selection is made for the drawn candidate's model, and the launch uses that same model. A selection held for a different model is released and re-made, never reused. |
+| Issue sweep (`/loom:sweep` dispatch) | Draws the runtime and profile only; it uses its own model resolution and does not pin `/<model>` (`loom.role_draw.model_pinned` stays `false`). |
+| `worker run --role builder\|doctor` | Takes an explicit tap (runtime + profile) and passes no `--model`; a drawn `/<model>` is not applied. Inspected for #12748 and left unchanged: no current path needs it. |
+
+A native runtime's `/` segment is its profile, so it never becomes a model.
 
 ## Reproducibility and telemetry
 
@@ -140,6 +150,11 @@ What reaches SigNoz (#11726 follow-up):
   `loom.role_draw.model_pinned` (always `false` today, because a sweep does not
   pin the drawn `/model`). Both are absent when no `roleDraw` table decided the
   sweep.
+- **Steps:** the `loom.dispatch.step` span of a spawned step carries
+  `loom.step.model_selected` (the model the draw's pick named) and
+  `loom.step.model_launched` (the `--model` the child was given). Selected is a
+  fact about the draw record only; launched is what ran. Either is absent when
+  there is none.
 
 ## Explain view
 

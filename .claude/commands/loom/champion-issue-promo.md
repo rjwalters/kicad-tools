@@ -875,6 +875,31 @@ proposals get no priority label.
 
 Re-run the "Verdict-time recheck" (above) immediately before this write; abort if `loom:evaluating` is gone.
 
+**Author gate (#10827) — before ANY `loom:issue` write.** The criteria above judge
+the issue's content, not who wrote it. An issue whose author fails the comment-trust
+predicate (`comment-trust.md`) may be curated but is not approved by an automated
+verdict: a trusted maintainer adopts it (applies `loom:issue` by hand) or re-files
+it. Ask the daemon, which reuses that predicate (no second trust table):
+
+```bash
+GATE_OUT="$(loom-daemon forge promotion-author --number "$ISSUE_NUMBER")" || GATE_OUT="${GATE_OUT:-UNKNOWN the author check failed}"
+GATE="$(head -n1 <<<"$GATE_OUT")"
+if [ "$GATE" != "TRUSTED" ]; then
+  # Fail closed: UNTRUSTED and UNKNOWN (unreadable evidence) both hold the issue.
+  # One deduplicated explanation per issue, keyed on the marker.
+  if ! loom-daemon forge trusted-comments --fetch "$ISSUE_NUMBER" 2>/dev/null \
+      | grep -q 'loom:promotion-author-gate'; then
+    tail -n +2 <<<"$GATE_OUT" | ./.loom/scripts/post-comment.sh "$ISSUE_NUMBER" --body-file -
+  fi
+  gh issue edit "$ISSUE_NUMBER" --remove-label "loom:evaluating"   # release the claim; stays loom:curated
+  # HARD STOP for this issue: no loom:issue, no APPROVED comment. Continue the batch loop.
+fi
+```
+
+Only on `TRUSTED` continue below. The same gate guards every other automatic
+`loom:issue` write (`check-promotion-landed.sh --apply`). A trusted human applying
+`loom:issue` is the adoption and never passes through this prompt.
+
 **Label write FIRST, verified, THEN the comment (#6862).** The label edit and
 the verdict comment used to be two independent, unchecked `gh` calls — on
 issue #6464 the comment posted while the label edit silently did not, and the

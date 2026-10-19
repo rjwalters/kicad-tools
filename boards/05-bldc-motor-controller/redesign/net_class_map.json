@@ -3,71 +3,78 @@
     "name": "Motor power",
     "priority": 1,
     "trace_width": 0.5,
-    "neck_trace_width": 0.2,
+    "neck_trace_width": 0.3,
     "clearance": 0.127,
     "via_size": 0.65,
     "route_via": "pathfinder",
-    "is_pour_net": false
+    "is_pour_net": false,
+    "target_ampacity": 0.5
   },
   "FUSED": {
     "name": "Motor power",
     "priority": 1,
     "trace_width": 0.5,
-    "neck_trace_width": 0.2,
+    "neck_trace_width": 0.3,
     "clearance": 0.127,
     "via_size": 0.65,
     "route_via": "pathfinder",
-    "is_pour_net": false
+    "is_pour_net": false,
+    "target_ampacity": 0.5
   },
   "VM": {
     "name": "Motor power",
     "priority": 1,
     "trace_width": 0.5,
-    "neck_trace_width": 0.2,
+    "neck_trace_width": 0.3,
     "clearance": 0.127,
     "via_size": 0.65,
     "route_via": "pathfinder",
-    "is_pour_net": false
+    "is_pour_net": false,
+    "target_ampacity": 0.5
   },
   "PHASE_A": {
     "name": "Motor power",
     "priority": 1,
     "trace_width": 0.5,
-    "neck_trace_width": 0.2,
+    "neck_trace_width": 0.3,
     "clearance": 0.127,
     "via_size": 0.65,
     "route_via": "pathfinder",
-    "is_pour_net": false
+    "is_pour_net": false,
+    "target_ampacity": 0.5
   },
   "PHASE_B": {
     "name": "Motor power",
     "priority": 1,
     "trace_width": 0.5,
-    "neck_trace_width": 0.2,
+    "neck_trace_width": 0.3,
     "clearance": 0.127,
     "via_size": 0.65,
     "route_via": "pathfinder",
-    "is_pour_net": false
+    "is_pour_net": false,
+    "target_ampacity": 0.5
   },
   "PHASE_C": {
     "name": "Motor power",
     "priority": 1,
     "trace_width": 0.5,
-    "neck_trace_width": 0.2,
+    "neck_trace_width": 0.3,
     "clearance": 0.127,
     "via_size": 0.65,
     "route_via": "pathfinder",
-    "is_pour_net": false
+    "is_pour_net": false,
+    "target_ampacity": 0.5
   },
   "GND_SENSE": {
     "name": "Motor power",
     "priority": 1,
     "trace_width": 0.5,
-    "neck_trace_width": 0.2,
+    "neck_trace_width": 0.3,
     "clearance": 0.127,
     "via_size": 0.65,
     "route_via": "pathfinder",
-    "is_pour_net": false
+    "is_pour_net": false,
+    "target_ampacity": 0.5
   },
   "GND": {
     "name": "Ground plane",
