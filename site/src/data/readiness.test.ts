@@ -187,6 +187,18 @@ it("accepts canonical exception error identities and rejects malformed ones (#73
     expect(displayStatus(loadBoard(root)), name).toBe("unverified");
   }
 });
+it("accepts location-less {rule, item} error identities after located ones (#7355)", () => {
+  const located = { rule: "dimension_via_drill", at: [10, 20.5] };
+  const netclass = { rule: "netclass_via_drill", item: "netclass:Default" };
+  bindKnownIssues([{ ...exception, errors: [located, netclass] }]);
+  save();
+  expect(displayStatus(loadBoard(root))).toBe("ready");
+  for (const errors of [[netclass, located], [netclass, netclass], [{ rule: "netclass_via_drill", item: " " }]]) {
+    bindKnownIssues([{ ...exception, errors }]);
+    save();
+    expect(displayStatus(loadBoard(root))).toBe("unverified");
+  }
+});
 it("renders a board blocked by a known defect as non-ready", () => {
   bindKnownIssues([defect]);
   report.status = "blocked";

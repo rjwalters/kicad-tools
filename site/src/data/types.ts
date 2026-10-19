@@ -47,8 +47,8 @@ export interface KnownIssue {
   recorded: string;
   /** `kct check` warning findings the issue accounts for, as sorted unique identities (#7389). */
   warnings?: { rule: string; ref: string; pad: string }[];
-  /** `exception` only: `kct check` errors accepted, as sorted unique `{rule, at: [x_mm, y_mm]}` identities (#7355). */
-  errors?: { rule: string; at: [number, number] }[];
+  /** `exception` only: `kct check` errors accepted, as sorted unique `{rule, at: [x_mm, y_mm]}` or location-less `{rule, item}` identities (#7355). */
+  errors?: ({ rule: string; at: [number, number] } | { rule: string; item: string })[];
 }
 
 export interface Readiness {
