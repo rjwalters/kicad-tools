@@ -3422,7 +3422,12 @@ class LatticePathfinder:
         terminal) land in :attr:`pair_gateway_log` either way.
         """
         from ..pairplan.gateway import (
+            MAX_WORKABLE_GATEWAY_COMBOS,
+            GatewayCombo,
+            WorkableCombo,
+            combo_length_floor,
             enumerate_gateways,
+            polarity_crosses,
             rank_gateway_combos,
             rank_through_combos,
         )
@@ -3462,6 +3467,8 @@ class LatticePathfinder:
         # Issue #6836: layers that reached the combination stage, kept for the
         # pass-under group walked after EVERY layer's ``against`` group.
         staged: list[tuple[int, str, list[list[Gateway | None]], int]] = []
+        # Issue #7362: every layer's ``against`` combinations, in try order.
+        against: list[tuple[int, str, int, GatewayCombo]] = []
         legal_ends: list[int | None] = [0, 0]
         # Issue #6956: every combination's decline, per group, so the line
         # names each blocker -- not only the last combination's.
@@ -3535,47 +3542,58 @@ class LatticePathfinder:
                 continue
             reason = "pair-gateway-no-path"
             staged.append((layer, lname, per_end, gated))
-            for ga, gb in rank_gateway_combos(per_end[0], per_end[1]):
-                if deadline is not None and time.monotonic() >= deadline:
-                    self.pair_gateway_log[pc.key] = "gateway: " + "; ".join(notes + ["deadline"])
-                    return None, "pair-gateway-deadline"
-                pres, why = self._try_gateway_combo(
-                    pc,
-                    layer,
-                    (ga, gb),
-                    committed=committed,
-                    history=history,
-                    present=present,
-                    half=half,
-                    clr=clr,
-                    via_r=via_r,
-                    reqs=reqs,
-                )
-                if pres is None:
-                    reason = f"pair-gateway-{why.removeprefix('pair-')}"
-                    record("against", why)
-                    continue
-                desc = []
-                for tag, g in (("A", ga), ("B", gb)):
-                    desc.append(f"{tag}: {'pad layer' if g is None else g.describe()}")
-                pres.gateway = (
-                    f"gateway {lname} ({'; '.join(desc)}); vias P/N={gated}/{gated}; "
-                    + "; ".join(notes)
-                )
-                self.pair_gateway_log[pc.key] = pres.gateway
-                return pres, "ok"
-        # Issue #6836: the pass-under group.  Tried only after every
-        # combination above (on every layer) declined, so a segment that
-        # couples through an ``against`` combination keeps it -- and its
-        # copper -- exactly.  A ``through`` end's body reaches its via pair
-        # from the pad side, under pads that do not own the gateway layer
+            against.extend(
+                (layer, lname, gated, GatewayCombo(ga, gb, False, False))
+                for ga, gb in rank_gateway_combos(per_end[0], per_end[1])
+            )
+        # Issue #7362: each group keeps its best WORKABLE combination by
+        # whole-route length, not the first one in fan-length order, and a
+        # combination whose ends put P on opposite sides of the segment
+        # (a polarity crossing, routed as a half loop) is rejected unrouted.  The groups keep their #6836 precedence:
+        # the pass-under group is walked only after every ``against``
+        # combination (on every layer) declined, so a segment that couples
+        # through an ``against`` combination never gets pass-under copper.
+        # A pass-under end's body reaches its via pair from the pad side
         # (06rf J1: from U1 under the B and A rows on B.Cu).
-        for layer, lname, per_end, gated in staged:
-            for combo in rank_through_combos(per_end[0], per_end[1]):
+        for group in ("against", "pass-under"):
+            if group == "against":
+                candidates = against
+            else:
+                # Built only now: an ``against`` success never reaches it.
+                candidates = [
+                    (layer, lname, gated, combo)
+                    for layer, lname, per_end, gated in staged
+                    for combo in rank_through_combos(per_end[0], per_end[1])
+                ]
+            best: tuple[WorkableCombo, _PairResult, str] | None = None
+            workable = 0
+            tried = 0
+            pruned = 0
+            for order, (layer, lname, gated, combo) in enumerate(candidates):
+                if workable >= MAX_WORKABLE_GATEWAY_COMBOS:
+                    break
                 if deadline is not None and time.monotonic() >= deadline:
+                    if best is not None:
+                        break
                     self.pair_gateway_log[pc.key] = "gateway: " + "; ".join(notes + ["deadline"])
                     return None, "pair-gateway-deadline"
                 ga, gb = combo.ga, combo.gb
+                end_a = self._gateway_launch(ga, pc.pad_p_a, pc.pad_n_a)
+                end_b = self._gateway_launch(gb, pc.pad_p_b, pc.pad_n_b)
+                if polarity_crosses(end_a, end_b):
+                    # Issue #7362: a half loop on the gateway layer, not a pair.
+                    tag = "pair-gateway-" if group == "against" else "pair-gateway-pass-under-"
+                    reason = f"{tag}polarity-crossing"
+                    record(group, "polarity-crossing")
+                    continue
+                if best is not None:
+                    fans = sum(g.fan_len_p + g.fan_len_n for g in (ga, gb) if g is not None)
+                    floor = combo_length_floor(end_a, end_b, fans)
+                    if round(floor, 3) >= best[0].key()[0]:
+                        pruned += 1
+                        continue
+                tried += 1
+                through = (combo.through_a, combo.through_b)
                 pres, why = self._try_gateway_combo(
                     pc,
                     layer,
@@ -3587,22 +3605,42 @@ class LatticePathfinder:
                     clr=clr,
                     via_r=via_r,
                     reqs=reqs,
-                    through=(combo.through_a, combo.through_b),
+                    through=through,
                 )
                 if pres is None:
-                    reason = f"pair-gateway-pass-under-{why.removeprefix('pair-')}"
-                    record("pass-under", why)
+                    tag = "pair-gateway-" if group == "against" else "pair-gateway-pass-under-"
+                    reason = f"{tag}{why.removeprefix('pair-')}"
+                    record(group, why)
                     continue
-                desc = []
-                for tag, g, thr in (("A", ga, combo.through_a), ("B", gb, combo.through_b)):
-                    text = "pad layer" if g is None else g.describe()
-                    desc.append(f"{tag}: {text}{' pass-under' if thr else ''}")
-                pres.gateway = (
-                    f"gateway {lname} ({'; '.join(desc)}); vias P/N={gated}/{gated}; "
-                    + "; ".join(notes)
-                )
-                self.pair_gateway_log[pc.key] = pres.gateway
-                return pres, "ok"
+                workable += 1
+                lengths = [0.0, 0.0]
+                for net, _l, poly in pres.runs:
+                    lengths[0 if net == pc.pad_p_a.net else 1] += sum(
+                        dist(a, b) for a, b in zip(poly, poly[1:], strict=False)
+                    )
+                scored = WorkableCombo(order, lengths[0], lengths[1])
+                if best is None or scored.key() < best[0].key():
+                    desc = []
+                    for tag, g, thr in (("A", ga, through[0]), ("B", gb, through[1])):
+                        text = "pad layer" if g is None else g.describe()
+                        desc.append(f"{tag}: {text}{' pass-under' if thr else ''}")
+                    best = (
+                        scored,
+                        pres,
+                        f"gateway {lname} ({'; '.join(desc)}); vias P/N={gated}/{gated}",
+                    )
+            if best is None:
+                continue
+            scored, pres, head = best
+            pres.gateway = (
+                f"{head}; "
+                + "; ".join(notes)
+                + f"; picked #{scored.order + 1} of {workable} workable"
+                + f" ({tried} routed, {pruned} pruned)"
+                + f" P/N={scored.length_p:.2f}/{scored.length_n:.2f}mm"
+            )
+            self.pair_gateway_log[pc.key] = pres.gateway
+            return pres, "ok"
         declined = f"gateway declined ({reason}): " + "; ".join(notes)
         if reason.endswith("pad-attach") and self._attach_blocker:
             declined += f"; pad-attach blocked at {self._attach_blocker}"
@@ -3611,6 +3649,16 @@ class LatticePathfinder:
             declined += f"; {summary}"
         self.pair_gateway_log[pc.key] = declined
         return None, reason
+
+    @staticmethod
+    def _gateway_launch(g: Gateway | None, pad_p: Pad, pad_n: Pad) -> tuple[Pt, Pt]:
+        """``(P, N)`` launch points of one segment end (issue #7362).
+
+        The via pair of a gatewayed end, else the pads themselves.
+        """
+        if g is None:
+            return (pad_p.x, pad_p.y), (pad_n.x, pad_n.y)
+        return g.site.via_p, g.site.via_n
 
     def _try_gateway_combo(
         self,
