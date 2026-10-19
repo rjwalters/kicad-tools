@@ -135,7 +135,7 @@ def test_fixture_candidates_are_all_asymmetric_without_the_mirror(monkeypatch) -
     # best leg pair has unequal via counts.
     pf, pc = _gapped_pair()
     _decline_coupled(pf, monkeypatch)
-    monkeypatch.setattr(LatticePathfinder, "_mirrored_candidates", lambda self, *a, **k: [])
+    monkeypatch.setattr(LatticePathfinder, "_mirrored_candidates", lambda self, *a, **k: ([], []))
     pf.route_netset([], coupled=[pc], uncoupled_fallback=True)
     assert sorted(pf.pair_via_mismatch[pc.key]) == [0, 1]
 
@@ -226,7 +226,7 @@ def test_no_mirrored_search_when_a_candidate_already_has_parity(monkeypatch) -> 
     committed = pf._fresh_committed()
     items = pf._fallback_items(pc)
     got = pf._mirrored_candidates(pc, [unequal, equal], items, search, committed)
-    assert got == [] and calls == []
+    assert got == ([], []) and calls == []
     # All asymmetric: both legs are re-searched (guided, then unguided).
     pf._mirrored_candidates(pc, [unequal], items, search, committed)
     assert len(calls) == 4
