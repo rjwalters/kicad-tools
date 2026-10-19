@@ -2935,7 +2935,8 @@ class TestI2CPullupsMocked:
         """Verify I2C pull-ups port definitions."""
         pullups = I2CPullups(mock_schematic, x=100, y=100)
         assert "VCC" in pullups.ports
-        assert "GND" in pullups.ports
+        # Without filter caps there is no ground connection point (#7507)
+        assert "GND" not in pullups.ports
         assert "SDA" in pullups.ports
         assert "SCL" in pullups.ports
 

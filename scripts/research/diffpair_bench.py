@@ -235,6 +235,37 @@ def committed_copper_matches(routed: Path, board: ere.Board, nets: set[str]) -> 
     return None
 
 
+def add_route_keepouts(text: str, keepouts) -> str:
+    """Append track/via keepout rule areas to a ``.kicad_pcb`` text (Issue #7498).
+
+    Pours stay allowed, so the fill is unchanged; only the router is steered.
+    The areas live in the staged input and the routed output, never in the
+    committed board or the saved plan.
+    """
+    from kicad_tools.sexp import serialize_sexp
+    from kicad_tools.sexp.builders import keepout_node
+
+    body = text.rstrip()
+    if not body.endswith(")"):
+        raise PairBenchError("board text does not end with a closing parenthesis")
+    zones = "\n".join(
+        "  "
+        + serialize_sexp(
+            keepout_node(
+                list(points),
+                list(layers),
+                no_tracks=True,
+                no_vias=True,
+                no_pour=False,
+                uuid_str=f"7498{index:04d}-0000-4000-8000-000000000000",
+                name=name,
+            )
+        )
+        for index, (name, layers, points) in enumerate(keepouts)
+    )
+    return f"{body[:-1].rstrip()}\n{zones}\n)\n"
+
+
 def prepare_input(board: ere.Board, run_dir: Path, committed_map: bool = True) -> tuple[Path, dict]:
     """Copy *board*'s input into *run_dir* with pair copper stripped, then guard it.
 
@@ -250,6 +281,8 @@ def prepare_input(board: ere.Board, run_dir: Path, committed_map: bool = True) -
     stripped = 0
     if board.strip_nets:
         text, stripped = krt_compare.strip_net_copper(text, board.strip_nets)
+    if board.route_keepouts:
+        text = add_route_keepouts(text, board.route_keepouts)
     dst.write_text(text)
     for suffix in (".kicad_pro", ".kicad_dru"):
         sib = src.with_suffix(suffix)
