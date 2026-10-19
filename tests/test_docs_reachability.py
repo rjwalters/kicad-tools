@@ -80,7 +80,7 @@ def test_allowlist_entries_exist_and_are_needed():
 def test_every_research_note_is_listed_in_research_readme():
     """The research index must list each note itself, not merely be reachable."""
     index = DOCS / "research" / "README.md"
-    linked = {p for p in _links(index)}
+    linked = set(_links(index))
     missing = [
         md.name
         for md in sorted(index.parent.glob("*.md"))
