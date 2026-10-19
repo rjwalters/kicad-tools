@@ -48,8 +48,10 @@ def test_pair_improvement_cannot_hide_new_physical_error():
 
 BOARD06_KEY = "boards/06-diffpair-test/regression-fixture/diffpair_test_routed.kicad_pcb"
 # Identities of the residual CI seed-42 re-route findings after the #7344
-# gap-tightening pass (#7349), not of the committed PCB: the gate judges the re-route.
-BOARD06_IMPEDANCE_NETS = {"USB3_RX1+", "USB3_RX1-", "USB3_TX2-"}
+# gap-tightening pass (#7349) and the #7296 mask-dam floor, not of the committed
+# PCB: the gate judges the re-route.
+BOARD06_IMPEDANCE_NETS = {"USB3_TX2-"}
+BOARD06_UNCOUPLED_PAIR = "USB2_D+/USB2_D-"
 
 
 def test_board06_impedance_allowance_is_keyed_by_net_with_issue():
@@ -59,31 +61,62 @@ def test_board06_impedance_allowance_is_keyed_by_net_with_issue():
     assert {n for (r, n) in gate.DIFFPAIR_FIXTURE_ALLOWED_FINDINGS if r == "impedance"} == (
         BOARD06_IMPEDANCE_NETS
     )
-    assert set(gate.DIFFPAIR_FIXTURE_ALLOWED_FINDINGS.values()) == {7312}
+    assert {
+        n for (r, n) in gate.DIFFPAIR_FIXTURE_ALLOWED_FINDINGS if r == "diffpair_uncoupled_length"
+    } == {BOARD06_UNCOUPLED_PAIR}
+    assert set(gate.DIFFPAIR_FIXTURE_ALLOWED_FINDINGS.values()) == {7312, 7401}
 
 
 def test_board06_listed_impedance_findings_pass():
     gate = load("check_diffpair_coverage")
-    found = {"impedance": set(BOARD06_IMPEDANCE_NETS)}
-    assert gate.unexpected_baseline_errors(BOARD06_KEY, {"impedance": 3}, found) == {}
+    found = {
+        "impedance": set(BOARD06_IMPEDANCE_NETS),
+        "diffpair_uncoupled_length": {BOARD06_UNCOUPLED_PAIR},
+    }
+    errors = {"impedance": 1, "diffpair_uncoupled_length": 1}
+    assert gate.unexpected_baseline_errors(BOARD06_KEY, errors, found) == {}
     assert gate.stale_allowances(BOARD06_KEY, found) == []
+
+
+def test_board06_new_uncoupled_pair_fails():
+    """Only USB2_D (#7401) may exceed the uncoupled limit; another pair is new."""
+    gate = load("check_diffpair_coverage")
+    found = {"diffpair_uncoupled_length": {BOARD06_UNCOUPLED_PAIR, "USB3_RX1+/USB3_RX1-"}}
+    errors = {"diffpair_uncoupled_length": 2}
+    assert gate.unexpected_baseline_errors(BOARD06_KEY, errors, found) == {
+        "diffpair_uncoupled_length": 1
+    }
 
 
 def test_board06_new_impedance_net_fails():
     """USB3_TX2+ was cleared by #7349: it cannot fail again unnoticed (#7270 Q3)."""
     gate = load("check_diffpair_coverage")
-    found = {"impedance": set(BOARD06_IMPEDANCE_NETS) | {"USB3_TX2+"}}
-    assert gate.unexpected_baseline_errors(BOARD06_KEY, {"impedance": 4}, found) == {"impedance": 1}
+    found = {
+        "impedance": set(BOARD06_IMPEDANCE_NETS) | {"USB3_TX2+"},
+        "diffpair_uncoupled_length": {BOARD06_UNCOUPLED_PAIR},
+    }
+    errors = {"impedance": 2, "diffpair_uncoupled_length": 1}
+    assert gate.unexpected_baseline_errors(BOARD06_KEY, errors, found) == {"impedance": 1}
     assert gate.stale_allowances(BOARD06_KEY, found) == []
 
 
 def test_board06_fixed_impedance_finding_makes_allowance_stale():
     """Issue #7349: once USB3_TX2 tightens fully the entry must be deleted."""
     gate = load("check_diffpair_coverage")
-    found = {"impedance": {"USB3_RX1+", "USB3_RX1-"}}
-    assert gate.unexpected_baseline_errors(BOARD06_KEY, {"impedance": 2}, found) == {}
+    found = {"diffpair_uncoupled_length": {BOARD06_UNCOUPLED_PAIR}}
+    errors = {"diffpair_uncoupled_length": 1}
+    assert gate.unexpected_baseline_errors(BOARD06_KEY, errors, found) == {}
     assert gate.stale_allowances(BOARD06_KEY, found) == [("impedance", "USB3_TX2-", 7312)]
     assert "#7312" in gate.format_stale(gate.stale_allowances(BOARD06_KEY, found))
+
+
+def test_board06_fixed_uncoupled_finding_makes_allowance_stale():
+    """Issue #7401: once USB2_D routes coupled its entry must be deleted."""
+    gate = load("check_diffpair_coverage")
+    found = {"impedance": set(BOARD06_IMPEDANCE_NETS)}
+    assert gate.stale_allowances(BOARD06_KEY, found) == [
+        ("diffpair_uncoupled_length", BOARD06_UNCOUPLED_PAIR, 7401)
+    ]
 
 
 def test_board06_impedance_without_identities_is_not_trusted():

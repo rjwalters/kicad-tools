@@ -62,13 +62,15 @@ import json
 import math
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from shapely.geometry import LineString, Point, box  # type: ignore[import-untyped]
 
 from kicad_tools.cli.stitch_cmd import point_in_polygon
 from kicad_tools.core.geometry import point_to_segment_distance
 from kicad_tools.validate.rules.via_pad_geometry import (
+    DRC_TOLERANCE,
+    drill_to_mask_aperture_gap,
     is_smd_pad,
     pad_absolute_bbox,
     via_inside_pad,
@@ -890,9 +892,14 @@ def _check_clearance(
     min_clearance: float,
     min_hole_to_hole: float,
     min_hole_clearance: float | None = None,
+    clearance_for: Callable[[int], float] | None = None,
 ) -> str | None:
     """Return a human reason string if placing ``via`` at ``(new_x, new_y)``
     would violate copper clearance or hole-to-hole; ``None`` when clear.
+
+    ``clearance_for(net)`` is the copper clearance the via must keep to
+    copper on ``net`` (Issue #7296: the netclass pair requirement); ``None``
+    applies the scalar ``min_clearance`` to every foreign net.
 
     Same-net copper is exempt (a via may touch its own net).  The following
     obstacles are considered: other vias (hole-to-hole any-net + copper
@@ -903,6 +910,9 @@ def _check_clearance(
     """
     via_r = via.size / 2.0
     hole_r = via.drill / 2.0
+
+    def required(net: int) -> float:
+        return min_clearance if clearance_for is None else clearance_for(net)
 
     # Other vias: hole-to-hole (any net) + copper clearance (different net).
     for other in pcb.vias:
@@ -917,7 +927,7 @@ def _check_clearance(
             )
         if other.net_number != via.net_number:
             cu_gap = d - via_r - other.size / 2.0
-            if cu_gap < min_clearance - 1e-6:
+            if cu_gap < required(other.net_number) - 1e-6:
                 return (
                     f"clearance {cu_gap:.3f}mm to via at "
                     f"({other.position[0]:.2f}, {other.position[1]:.2f})"
@@ -929,7 +939,7 @@ def _check_clearance(
             continue
         for fp, pad, bbox in entries:
             cu_gap = _dist_point_to_aabb(new_x, new_y, bbox) - via_r
-            if cu_gap < min_clearance - 1e-6:
+            if cu_gap < required(net_number) - 1e-6:
                 return f"clearance {cu_gap:.3f}mm to pad {fp.reference}-{pad.number}"
 
     # THT / NP-THT plated pads: hole-to-hole (any net) + copper clearance
@@ -945,7 +955,7 @@ def _check_clearance(
         # different net can violate copper clearance.
         if pad.net_number != 0 and pad.net_number != via.net_number:
             cu_gap = _dist_point_to_aabb(new_x, new_y, bbox) - via_r
-            if cu_gap < min_clearance - 1e-6:
+            if cu_gap < required(pad.net_number) - 1e-6:
                 return f"clearance {cu_gap:.3f}mm to THT pad {fp.reference}-{pad.number}"
 
     # Routed segments on other nets: copper clearance.
@@ -953,11 +963,11 @@ def _check_clearance(
         if seg.net_number == via.net_number:
             continue
         cu_gap = _dist_point_to_segment(new_x, new_y, seg) - via_r - seg.width / 2.0
-        if cu_gap < min_clearance - 1e-6:
+        if cu_gap < required(seg.net_number) - 1e-6:
             return f"clearance {cu_gap:.3f}mm to track on net {seg.net_number}"
 
     return _check_hole_to_copper(
-        pcb, via, new_x, new_y, _resolve_hole_clearance(pcb, min_hole_clearance), min_clearance
+        pcb, via, new_x, new_y, _resolve_hole_clearance(pcb, min_hole_clearance), required(0)
     )
 
 
@@ -969,8 +979,14 @@ def _check_stub_clearance(
     stub_width: float,
     min_clearance: float,
     min_hole_clearance: float | None = None,
+    clearance_for: Callable[[int], float] | None = None,
 ) -> str | None:
     """Validate the entire swept copper of a proposed set of straight stubs.
+
+    ``clearance_for(net)`` is the copper clearance the stubs must keep to
+    copper on ``net`` (Issue #7296); ``None`` applies ``min_clearance``.
+    Zone fills keep ``min_clearance``: a refill re-derives them around the
+    new copper under the zone's own rules.
 
     Centerline distances include both conductors' radii, avoiding polygonal
     approximations of round caps. Pad AABBs conservatively include rotations.
@@ -1008,6 +1024,9 @@ def _check_stub_clearance(
     def foreign(net: int) -> bool:
         return net == 0 or net != via.net_number
 
+    def required(net: int) -> float:
+        return min_clearance if clearance_for is None else clearance_for(net)
+
     def too_close(shape, other_radius: float = 0.0, clearance: float = min_clearance) -> bool:
         # Exact analytic distance quickly accepts geometry outside the entire
         # candidate envelope, without polygon discretization error.
@@ -1028,7 +1047,9 @@ def _check_stub_clearance(
 
     for seg in pcb.segments:
         if seg.layer in layers and foreign(seg.net_number):
-            if too_close(LineString([seg.start, seg.end]), seg.width / 2.0):
+            if too_close(
+                LineString([seg.start, seg.end]), seg.width / 2.0, required(seg.net_number)
+            ):
                 return f"stub clearance to track on {seg.layer}, net {seg.net_number}"
 
     for other in pcb.vias:
@@ -1041,7 +1062,9 @@ def _check_stub_clearance(
             span = copper_layers[min(indices) : max(indices) + 1]
         if overlaps(span) and too_close(Point(other.position), other.drill / 2, hole_floor):
             return f"stub hole-to-copper to via on net {other.net_number}"
-        if overlaps(span) and too_close(Point(other.position), other.size / 2.0):
+        if overlaps(span) and too_close(
+            Point(other.position), other.size / 2.0, required(other.net_number)
+        ):
             return f"stub clearance to via on net {other.net_number}"
 
     for fp in pcb.footprints:
@@ -1057,7 +1080,7 @@ def _check_stub_clearance(
                 center = Point((bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2)
                 if too_close(center, pad.drill / 2, hole_floor):
                     return f"stub hole-to-copper to pad {fp.reference}-{pad.number}"
-            if too_close(box(*pad_absolute_bbox(pad, fp))):
+            if too_close(box(*pad_absolute_bbox(pad, fp)), 0.0, required(pad.net_number)):
                 return f"stub clearance to pad {fp.reference}-{pad.number}"
 
     for zone in pcb.zones:
@@ -1070,7 +1093,7 @@ def _check_stub_clearance(
             if solid is not None and too_close(solid):
                 return f"stub clearance to filled zone on {zone.filled_polygon_layer(index)}"
 
-    return _check_raw_copper(pcb, via, path, radius, layers, min_clearance, "stub clearance")
+    return _check_raw_copper(pcb, via, path, radius, layers, required(0), "stub clearance")
 
 
 def _persist_via_with_stubs(
@@ -1521,6 +1544,295 @@ def relocate_in_pad_vias(
             )
         )
 
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Pad-edge pass (Issue #7296)
+# ---------------------------------------------------------------------------
+
+#: Slide step along the escape track (mm) and the farthest a pad-edge via may
+#: travel from where the router left it.
+_PAD_EDGE_STEP_MM = 0.025
+_PAD_EDGE_MAX_SLIDE_MM = 0.8
+
+
+def _pad_edge_gap(
+    via: Via,
+    x: float,
+    y: float,
+    candidates: list[tuple[Footprint, Pad, tuple[float, float, float, float]]],
+    pad_to_mask: float,
+) -> float | None:
+    """Smallest drill-edge-to-aperture gap of a via placed at ``(x, y)``.
+
+    Negative when the drill reaches into a same-net pad's copper (via-in-pad).
+    ``None`` when no same-net pad has a measurable aperture.
+    """
+    from types import SimpleNamespace
+
+    probe: Any = SimpleNamespace(position=(x, y), drill=via.drill)
+    gaps = [
+        gap
+        for fp, pad, _bbox in candidates
+        if (gap := drill_to_mask_aperture_gap(probe, pad, fp, pad_to_mask_clearance=pad_to_mask))
+        is not None
+    ]
+    return min(gaps) if gaps else None
+
+
+def _diff_pair_net_names(pcb: PCB) -> set[str]:
+    """Names of nets that are one leg of a differential pair on this board.
+
+    The same pair predicate ``netclass_clearance_copper`` and the emitted
+    ``.kicad_dru`` use: KiCad's ``isCoupledDiffPair()`` name complement, or a
+    pair the router recorded under ``meta.kct_router_diff_pairs``.
+    """
+    from kicad_tools.manufacturers.netclass_dru import kicad_coupled_complement
+    from kicad_tools.manufacturers.project_generator import recorded_router_coupled_pairs
+    from kicad_tools.validate.rules.netclass_clearance_copper import load_project
+
+    names = {net.name for net in pcb.nets.values() if net.name}
+    legs = {name for name in names if kicad_coupled_complement(name) in names}
+    project = load_project(pcb.path) if pcb.path is not None else None
+    if project is not None:
+        for pair in recorded_router_coupled_pairs(project):
+            if all(name in names for name in pair):
+                legs.update(pair)
+    return legs
+
+
+def relocate_pad_edge_vias(
+    pcb: PCB,
+    design_rules: DesignRules,
+    *,
+    nets: set[str] | None = None,
+    min_hole_clearance_mm: float | None = None,
+) -> RelocationResult:
+    """Slide vias out of the mask-dam zone beside an SMD pad (Issue #7296).
+
+    Fixes exactly what ``kct check``'s ``via_at_pad_edge`` warning reports
+    (Issue #7220): a same-net via whose drill misses the pad copper but sits
+    closer than ``design_rules.min_solder_mask_dam_mm`` to the pad's mask
+    aperture.  The via moves along its escape track (then an 8-direction
+    ladder) to the nearest spot where, for every same-net SMD pad, the drill
+    edge is at least the dam from the aperture, using the checker's own
+    :func:`~kicad_tools.validate.rules.via_pad_geometry.drill_to_mask_aperture_gap`.
+    Connectivity is kept with stubs from the old position on every connected
+    layer, and the move is gated by the same clearance / hole-to-hole /
+    stub-clearance checks as :func:`relocate_in_pad_vias`.  A via with no legal
+    spot is reported ``unresolvable`` and left in place.
+
+    Copper clearance is the effective per-pair requirement ``kct check``'s
+    ``netclass_clearance_copper`` enforces (the project's netclasses,
+    including the router-declared ``Power`` class, over the fab floor) --
+    not the fab floor alone, which let a +3V3 via land 0.155 mm from a signal
+    track on board 06.  A project whose netclasses cannot be modelled moves
+    nothing: every flagged via is reported ``unresolvable``.
+
+    A via on one leg of a differential pair is reported ``skipped`` and left
+    in place: sliding one leg's via (and adding its stub) without the
+    partner's uncouples the pair -- on board 06 routed without the router's
+    pad-edge floor this pass moved USB2_D+/USB2_D- vias singly and pushed
+    USB2_D+ uncoupled length to 13.3 mm against a 12.7 mm limit.  The router
+    keeps pair vias out of the zone (``min_via_pad_edge_gap``); re-route the
+    pair rather than patch one leg.
+    """
+    from kicad_tools.core.project_clearance import ProjectClearanceError
+    from kicad_tools.validate.rules.netclass_clearance_copper import netclass_pair_requirement
+
+    result = RelocationResult()
+    dam = float(getattr(design_rules, "min_solder_mask_dam_mm", 0.0) or 0.0)
+    if dam <= DRC_TOLERANCE:
+        return result
+    setup = getattr(pcb, "setup", None)
+    pad_to_mask = float(getattr(setup, "pad_to_mask_clearance", 0.0) or 0.0)
+    min_clearance = design_rules.min_clearance_mm
+    min_hole_to_hole = design_rules.min_hole_to_hole_mm
+    min_hole_clearance = _resolve_hole_clearance(pcb, min_hole_clearance_mm)
+    try:
+        pair_requirement = netclass_pair_requirement(pcb.path, pcb, min_clearance)
+        unsupported = None
+    except ProjectClearanceError as exc:
+        pair_requirement = None
+        unsupported = f"netclass clearances cannot be modelled ({exc}); not moved"
+
+    pads_by_net = _collect_smd_pads_by_net(pcb)
+    tht_pads = _collect_tht_pads(pcb)
+    pair_legs = _diff_pair_net_names(pcb)
+    steps = [
+        _PAD_EDGE_STEP_MM * i for i in range(1, int(_PAD_EDGE_MAX_SLIDE_MM / _PAD_EDGE_STEP_MM) + 1)
+    ]
+
+    for via in list(pcb.vias):
+        if via.net_number == 0:
+            continue
+        candidates = pads_by_net.get(via.net_number)
+        if not candidates:
+            continue
+        vx, vy = via.position
+        flagged = next(
+            (
+                (fp, pad)
+                for fp, pad, bbox in candidates
+                if not via_inside_pad(via, bbox, pad, fp)
+                and (
+                    gap := drill_to_mask_aperture_gap(
+                        via, pad, fp, pad_to_mask_clearance=pad_to_mask
+                    )
+                )
+                is not None
+                and gap < dam - DRC_TOLERANCE
+            ),
+            None,
+        )
+        if flagged is None:
+            continue
+        fp, pad = flagged
+        pad_ref = f"{fp.reference}-{pad.number}"
+        net_name = via.net_name or pad.net_name or ""
+        if nets is not None and net_name not in nets:
+            continue
+        if net_name in pair_legs:
+            result.skipped.append(
+                ViaRelocationSkip(
+                    x=vx,
+                    y=vy,
+                    net=via.net_number,
+                    net_name=net_name,
+                    pad_ref=pad_ref,
+                    reason=(
+                        "differential-pair leg: moving one leg's via alone would uncouple "
+                        "the pair; re-route the pair with the router's pad-edge floor"
+                    ),
+                    uuid=via.uuid,
+                    category="skipped",
+                )
+            )
+            continue
+
+        connected: list[tuple[Segment, tuple[float, float]]] = []
+        for seg in pcb.segments_in_net(via.net_number):
+            far = _endpoint_at(seg, vx, vy)
+            if far is not None:
+                connected.append((seg, far))
+        stub_layers: list[str] = []
+        for layer in [_pad_copper_layer(pad), *(seg.layer for seg, _ in connected)]:
+            if layer and layer not in stub_layers:
+                stub_layers.append(layer)
+        stub_width = max((seg.width for seg, _ in connected), default=0.2) or 0.2
+
+        if pair_requirement is None:
+            result.unresolvable.append(
+                ViaRelocationSkip(
+                    x=vx,
+                    y=vy,
+                    net=via.net_number,
+                    net_name=net_name,
+                    pad_ref=pad_ref,
+                    reason=unsupported or "netclass clearances unavailable",
+                    uuid=via.uuid,
+                    category="unresolvable",
+                )
+            )
+            continue
+        own_net = via.net_number
+
+        def clearance_for(net: int, _own: int = own_net) -> float:
+            assert pair_requirement is not None
+            return pair_requirement(_own, net)
+
+        # Candidate order: along each escape track first (copper already runs
+        # that way), then the compass ladder around the old position.
+        directions: list[tuple[float, float]] = []
+        for _seg, far in sorted(
+            connected, key=lambda it: -math.hypot(it[1][0] - vx, it[1][1] - vy)
+        ):
+            length = math.hypot(far[0] - vx, far[1] - vy)
+            if length > 1e-9:
+                directions.append(((far[0] - vx) / length, (far[1] - vy) / length))
+        directions.extend(_PLANE_DIRECTIONS)
+
+        target = None
+        reason = "no clearance-legal location outside the mask-dam zone"
+        for dx, dy in directions:
+            for step in steps:
+                # Whole micrometres: what KiCad's own serializer keeps.
+                nx, ny = round(vx + dx * step, 3), round(vy + dy * step, 3)
+                gap = _pad_edge_gap(via, nx, ny, candidates, pad_to_mask)
+                if gap is None or gap < dam + 1e-6:
+                    # Still in the zone, or into a pad's copper: keep sliding.
+                    continue
+                failure = _check_clearance(
+                    pcb,
+                    via,
+                    nx,
+                    ny,
+                    pads_by_net,
+                    tht_pads,
+                    min_clearance,
+                    min_hole_to_hole,
+                    min_hole_clearance,
+                    clearance_for,
+                ) or _check_stub_clearance(
+                    pcb,
+                    via,
+                    (nx, ny),
+                    stub_layers,
+                    stub_width,
+                    min_clearance,
+                    min_hole_clearance,
+                    clearance_for,
+                )
+                if failure is None:
+                    target = (nx, ny)
+                    break
+                reason = failure
+            if target is not None:
+                break
+
+        if target is None:
+            result.unresolvable.append(
+                ViaRelocationSkip(
+                    x=vx,
+                    y=vy,
+                    net=via.net_number,
+                    net_name=net_name,
+                    pad_ref=pad_ref,
+                    reason=reason,
+                    uuid=via.uuid,
+                    category="unresolvable",
+                )
+            )
+            continue
+        if not _persist_via_with_stubs(pcb, via, target, stub_layers, stub_width, net_name):
+            result.unresolvable.append(
+                ViaRelocationSkip(
+                    x=vx,
+                    y=vy,
+                    net=via.net_number,
+                    net_name=net_name,
+                    pad_ref=pad_ref,
+                    reason="could not locate backing (via ...) node to persist move",
+                    uuid=via.uuid,
+                    category="unresolvable",
+                )
+            )
+            continue
+        result.moved.append(
+            ViaRelocation(
+                old_x=vx,
+                old_y=vy,
+                new_x=target[0],
+                new_y=target[1],
+                net=via.net_number,
+                net_name=net_name,
+                pad_ref=pad_ref,
+                uuid=via.uuid,
+                stub_layers=stub_layers,
+                kind="pad-edge",
+            )
+        )
     return result
 
 

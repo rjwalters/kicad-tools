@@ -2,7 +2,7 @@ Manufacturing package for charlieplex_3x3_routed.kicad_pcb
 
 Fabrication tier : jlcpcb
 Mode             : assembly
-Generated        : 2026-10-18T20:30:00+00:00
+Generated        : 2026-10-19T07:36:37.570657+00:00
 
 Assembly package: BOM and CPL are included.
 
@@ -49,12 +49,12 @@ Hand-solder / through-hole items
 
 Warning review (per rule)
 -------------------------
-  via_at_pad_edge: 2
+  no warnings reported
   All assembly-affecting warning counts are zero.
 
 Accepted-risk waivers
 ---------------------
-  #7220 [advisory] Via drills at the edge of SMD pads R3.2 and R4.2 (0.03 mm, below the 0.1 mm solder-mask dam): via wicking risk; router fix tracked in #7296
+  no accepted-risk waivers
 
 Sign-off
 --------

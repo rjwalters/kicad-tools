@@ -7999,8 +7999,8 @@
     "(via\n\t(at 143.363 103.575)\n\t(size 0.6)\n\t(drill 0.3)\n\t(layers \"F.Cu\" \"B.Cu\")\n\t(net \"+5V\")\n\t(uuid \"5ac6f4cc-8782-4db4-9e5f-74cdde8dea5c\")\n)",
     "(via\n\t(at 158.15 74.025)\n\t(size 0.6)\n\t(drill 0.3)\n\t(layers \"F.Cu\" \"B.Cu\")\n\t(capping no)\n\t(covering (front no) (back no)\n\t)\n\t(plugging (front no) (back no)\n\t)\n\t(filling no)\n\t(net \"+5V\")\n\t(uuid \"5c11fe71-4aad-4c2d-8fc1-26f1e61aab0c\")\n)",
     "(via\n\t(at 167.4 74.2)\n\t(size 0.8)\n\t(drill 0.3)\n\t(layers \"F.Cu\" \"B.Cu\")\n\t(capping no)\n\t(covering (front no) (back no)\n\t)\n\t(plugging (front no) (back no)\n\t)\n\t(filling no)\n\t(net \"+5V\")\n\t(uuid \"5ff540ca-9038-4b45-916d-9a42e7b795f9\")\n)",
-    "(via\n\t(at 171.59 93.2)\n\t(size 0.45)\n\t(drill 0.2)\n\t(layers \"F.Cu\" \"B.Cu\")\n\t(net \"+5V\")\n\t(uuid \"6ae4516c-56c3-5ee7-8952-29d70102bae4\")\n)",
-    "(via\n\t(at 157.9 122.4)\n\t(size 0.8)\n\t(drill 0.3)\n\t(layers \"F.Cu\" \"B.Cu\")\n\t(capping no)\n\t(covering (front no) (back no)\n\t)\n\t(plugging (front no) (back no)\n\t)\n\t(filling no)\n\t(net \"+5V\")\n\t(uuid \"6c5b07b6-f127-47bd-b862-32528c45b36c\")\n)",
+    "(via\n\t(at 171.59 93.075)\n\t(size 0.45)\n\t(drill 0.2)\n\t(layers \"F.Cu\" \"B.Cu\")\n\t(net \"+5V\")\n\t(uuid \"6ae4516c-56c3-5ee7-8952-29d70102bae4\")\n)",
+    "(via\n\t(at 157.8 122.4)\n\t(size 0.8)\n\t(drill 0.3)\n\t(layers \"F.Cu\" \"B.Cu\")\n\t(capping no)\n\t(covering (front no) (back no)\n\t)\n\t(plugging (front no) (back no)\n\t)\n\t(filling no)\n\t(net \"+5V\")\n\t(uuid \"6c5b07b6-f127-47bd-b862-32528c45b36c\")\n)",
     "(via\n\t(at 171.59 109.2)\n\t(size 0.45)\n\t(drill 0.2)\n\t(layers \"F.Cu\" \"B.Cu\")\n\t(net \"+5V\")\n\t(uuid \"726cf034-6bac-525a-9e21-1169b5b43096\")\n)",
     "(via\n\t(at 175.1 117.7)\n\t(size 0.8)\n\t(drill 0.3)\n\t(layers \"F.Cu\" \"B.Cu\")\n\t(capping no)\n\t(covering (front no) (back no)\n\t)\n\t(plugging (front no) (back no)\n\t)\n\t(filling no)\n\t(net \"+5V\")\n\t(uuid \"7a5cd426-5c1f-4f7b-81c4-dda8ccbf1dfe\")\n)",
     "(via\n\t(at 155.137 101.2)\n\t(size 0.45)\n\t(drill 0.2)\n\t(layers \"F.Cu\" \"B.Cu\")\n\t(capping no)\n\t(covering (front no) (back no)\n\t)\n\t(plugging (front no) (back no)\n\t)\n\t(filling no)\n\t(net \"+5V\")\n\t(uuid \"90406b3b-2e4d-458b-897c-937fe1508387\")\n)",
@@ -8060,7 +8060,7 @@
     "(via\n\t(at 123.5 95.6)\n\t(size 0.65)\n\t(drill 0.3)\n\t(layers \"F.Cu\" \"B.Cu\")\n\t(capping no)\n\t(covering (front no) (back no)\n\t)\n\t(plugging (front no) (back no)\n\t)\n\t(filling no)\n\t(net \"VM\")\n\t(uuid \"7414e3e1-a387-4e92-9362-0119efa9a0a3\")\n)",
     "(via\n\t(at 142.3 69.5)\n\t(size 0.65)\n\t(drill 0.3)\n\t(layers \"F.Cu\" \"B.Cu\")\n\t(capping no)\n\t(covering (front no) (back no)\n\t)\n\t(plugging (front no) (back no)\n\t)\n\t(filling no)\n\t(net \"VM\")\n\t(uuid \"8505d91d-f28b-4fb9-95bf-1edb3b79da1e\")\n)",
     "(via\n\t(at 133.1 69.1)\n\t(size 0.65)\n\t(drill 0.3)\n\t(layers \"F.Cu\" \"B.Cu\")\n\t(capping no)\n\t(covering (front no) (back no)\n\t)\n\t(plugging (front no) (back no)\n\t)\n\t(filling no)\n\t(net \"VM\")\n\t(uuid \"86351a54-bc54-48c1-bf40-8dcc9db1f7f9\")\n)",
-    "(via\n\t(at 135.9 68.8)\n\t(size 0.65)\n\t(drill 0.3)\n\t(layers \"F.Cu\" \"B.Cu\")\n\t(capping no)\n\t(covering (front no) (back no)\n\t)\n\t(plugging (front no) (back no)\n\t)\n\t(filling no)\n\t(net \"VM\")\n\t(uuid \"8f942977-b582-4f0c-bd23-36f45b44e6ed\")\n)",
+    "(via\n\t(at 135.971 68.871)\n\t(size 0.65)\n\t(drill 0.3)\n\t(layers \"F.Cu\" \"B.Cu\")\n\t(capping no)\n\t(covering (front no) (back no)\n\t)\n\t(plugging (front no) (back no)\n\t)\n\t(filling no)\n\t(net \"VM\")\n\t(uuid \"8f942977-b582-4f0c-bd23-36f45b44e6ed\")\n)",
     "(via\n\t(at 148.7 72.7)\n\t(size 0.65)\n\t(drill 0.3)\n\t(layers \"F.Cu\" \"B.Cu\")\n\t(capping no)\n\t(covering (front no) (back no)\n\t)\n\t(plugging (front no) (back no)\n\t)\n\t(filling no)\n\t(net \"VM\")\n\t(uuid \"94e74f26-29b0-4b37-8271-0779d864465a\")\n)",
     "(via\n\t(at 122.1 82.6)\n\t(size 0.65)\n\t(drill 0.3)\n\t(layers \"F.Cu\" \"B.Cu\")\n\t(capping no)\n\t(covering (front no) (back no)\n\t)\n\t(plugging (front no) (back no)\n\t)\n\t(filling no)\n\t(net \"VM\")\n\t(uuid \"a9151364-778a-469f-8b68-d94d40da9c7d\")\n)",
     "(via\n\t(at 164.85 75.975)\n\t(size 0.6)\n\t(drill 0.3)\n\t(layers \"F.Cu\" \"B.Cu\")\n\t(capping no)\n\t(covering (front no) (back no)\n\t)\n\t(plugging (front no) (back no)\n\t)\n\t(filling no)\n\t(net \"VM\")\n\t(uuid \"b0830013-3f2e-4967-a2ca-2ff667fbe293\")\n)",
@@ -8270,6 +8270,10 @@
     "(segment\n\t(start 130.7 113.2875)\n\t(end 130.7 112.7)\n\t(width 0.5)\n\t(layer \"F.Cu\")\n\t(uuid \"f83c7f3e-f2bc-5241-a0fd-a741d65626a6\")\n\t(net \"GND_SENSE\")\n)",
     "(segment\n\t(start 131.2875 114.7)\n\t(end 131.4 114.7)\n\t(width 0.5)\n\t(layer \"F.Cu\")\n\t(uuid \"6c32c324-b7ef-5afc-8fc0-b58505008822\")\n\t(net \"GND_SENSE\")\n)",
     "(segment\n\t(start 131.1 113.1)\n\t(end 131.1 113.2)\n\t(width 0.5)\n\t(layer \"B.Cu\")\n\t(uuid \"4e182766-c4d9-5afc-ae44-5456e772b78a\")\n\t(net \"GND_SENSE\")\n)",
-    "(segment\n\t(start 137.9 117.35)\n\t(end 137.9 117.1)\n\t(width 0.2)\n\t(layer \"F.Cu\")\n\t(uuid \"d386e96c-3f3e-50f2-8b2d-e53559744f07\")\n\t(net \"IREF\")\n)"
+    "(segment\n\t(start 137.9 117.35)\n\t(end 137.9 117.1)\n\t(width 0.2)\n\t(layer \"F.Cu\")\n\t(uuid \"d386e96c-3f3e-50f2-8b2d-e53559744f07\")\n\t(net \"IREF\")\n)",
+    "(segment\n\t(start 171.59 93.2)\n\t(end 171.59 93.075)\n\t(width 0.15)\n\t(layer \"F.Cu\")\n\t(net \"+5V\")\n\t(uuid \"34dcae21-fa55-4f20-be37-44ebaf5e1917\")\n)",
+    "(segment\n\t(start 157.9 122.4)\n\t(end 157.8 122.4)\n\t(width 0.5)\n\t(layer \"F.Cu\")\n\t(net \"+5V\")\n\t(uuid \"c7879092-8bc8-476a-8010-4adf9aadc908\")\n)",
+    "(segment\n\t(start 135.9 68.8)\n\t(end 135.971 68.871)\n\t(width 0.5)\n\t(layer \"F.Cu\")\n\t(net \"VM\")\n\t(uuid \"33c9f260-af20-4ea4-8e76-f5247858e594\")\n)",
+    "(segment\n\t(start 135.9 68.8)\n\t(end 135.971 68.871)\n\t(width 0.5)\n\t(layer \"B.Cu\")\n\t(net \"VM\")\n\t(uuid \"b18fb5f5-ecc5-4bcf-869c-ed9ed3878e32\")\n)"
   ]
 }

@@ -451,6 +451,9 @@ class Router:
         self._hole_site_cache_token: tuple[object, int, bool] | None = None
         self._pad_drill_site_cache: dict[tuple[int, int], bool] = {}
         self._pad_drill_cache_token: object | None = None
+        # Issue #7296: mask-dam-zone memo, tokened like ``_pad_drill_site_cache``.
+        self._pad_edge_site_cache: dict[tuple[int, int], bool] = {}
+        self._pad_edge_cache_token: object | None = None
 
         # Issue #5617: memo for ``_is_trace_blocked``'s Euclidean-disc
         # kernel (#3229).  ``(dist_sq, within_disc)`` is a pure function of
@@ -3884,6 +3887,46 @@ class Router:
             self._pad_drill_site_cache[key] = hit
         return hit
 
+    def _pad_edge_clear(self, gx: int, gy: int) -> bool:
+        """True unless a via at ``(gx, gy)`` sits in an SMD pad's mask-dam zone (#7296).
+
+        Same arithmetic as :func:`~.via_in_pad_eligibility.via_drill_at_pad_edge`
+        (the drill clears the copper but its edge is within
+        ``rules.min_via_pad_edge_gap`` of it), vectorised over every
+        non-through-hole pad like :meth:`_non_th_pad_drill_clear` and memoised
+        on the same geometry-tuple token.  Applies whether or not the fab
+        allows via-in-pad: a drill overlapping copper is that decision, not
+        this one.  Scans every SMD pad, not only other-net ones, so it errs
+        conservative against the same-net-only checker.
+        """
+        floor = float(self.rules.min_via_pad_edge_gap or 0.0)
+        if floor <= 0.0:
+            return True
+        geometry = self._non_th_pad_geometry()
+        if geometry is not self._pad_edge_cache_token:
+            self._pad_edge_site_cache.clear()
+            self._pad_edge_cache_token = geometry
+        key = (gx, gy)
+        hit = self._pad_edge_site_cache.get(key)
+        if hit is None:
+            pxs, pys, half_w, half_h, cos_r, sin_r = geometry
+            hit = True
+            if pxs.size:
+                wx, wy = self.grid.grid_to_world(gx, gy)
+                radius = self.rules.via_drill / 2.0
+                dx = wx - pxs
+                dy = wy - pys
+                lx = cos_r * dx - sin_r * dy
+                ly = sin_r * dx + cos_r * dy
+                ex = np.maximum(np.abs(lx) - half_w, 0.0)
+                ey = np.maximum(np.abs(ly) - half_h, 0.0)
+                dist = np.hypot(ex, ey)
+                hit = not bool(np.any((dist >= radius) & (dist < radius + floor)))
+            if len(self._pad_edge_site_cache) >= self._SITE_CACHE_MAX:
+                self._pad_edge_site_cache.clear()
+            self._pad_edge_site_cache[key] = hit
+        return hit
+
     def _check_via_placement_cached(
         self,
         gx: int,
@@ -3937,6 +3980,10 @@ class Router:
         # Issue #5617 memoises that sweep per cell -- it does not depend on
         # ``net``, ``radius`` or ``allow_sharing``.
         if not self._allow_smd_vias and not self._non_th_pad_drill_clear(gx, gy):
+            return False
+        # Issue #7296: the mask-dam zone beside an SMD pad, which applies even
+        # where via-in-pad is allowed (the drill does not touch the copper).
+        if not self._pad_edge_clear(gx, gy):
             return False
 
         # Check all layers using priority ordering.
