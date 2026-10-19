@@ -17,14 +17,13 @@ _None._
 
 `loom:very-important` (one counts per workspace); every stage takes these first.
 
-_None._
+- **#7093**: router: differential pair gets unequal via counts when a leg falls back to uncoupled routing (board 03 USB_D 2 vs 3; blocks #6394)
 
 ## Important
 
 `loom:important`; taken before unlabelled work.
 
 - **#6858**: router: coupled pre-pass should keep the better of the joint-search and pose-centreline candidates (compare-and-keep; unblocks #6835)
-- **#7093**: router: differential pair gets unequal via counts when a leg falls back to uncoupled routing (board 03 USB_D 2 vs 3; blocks #6394)
 - **#7269**: board 07 MIPI_DAT0: recover 0.038 mm skew lost to compare-and-keep (blocks #6858)
 - **#7401**: router: board 06 USB2_D+ uncoupled 12.791 > 12.700 mm after v62 pad-edge floor reorders the single-ended fallback
 - **#7478**: `atomic_write_text` fsyncs a read-only handle: every `PCB.save` fails on Windows with `OSError: [Errno 9]` (0.22.0, 0.23.0)
@@ -46,34 +45,31 @@ Issues currently being built (`loom:building`).
 - **#7349**: Boards 06/07: enable diff-pair gap tightening on seed-42 re-routes and drop the impedance caps (#7344 PR 2)
 - **#7463**: board 03 arm C: VBUS U2.5 left unconnected (keepout-constrained escape next to USB_D U2 pads); last gate before re-deriving board 03 under #7093
 - **#7478**: `atomic_write_text` fsyncs a read-only handle: every `PCB.save` fails on Windows with `OSError: [Errno 9]` (0.22.0, 0.23.0)
-- **#7480**: Windows: `find_kicad_cli()` and `detect_kicad_library_path()` only probe KiCad 7.0/8.0 install paths, so KiCad 9 and 10 are not found
 - **#7484**: DSN export: `custom` pads are written as their anchor rectangle only (primitives ignored); round, oval and rotated pads also collapse to an axis-aligned rectangle
 - **#7503**: Lattice router: pad-clearance check uses a square around pads, not the true (rounded/rotated) outline, so legal via/track points are rejected (board 03 VBUS, #7463)
 - **#7508**: Schematic blocks: fix DebugHeader jtag and UCC27211 defaults, wire USB ESD TVS
 - **#7510**: Schematic blocks: ports misplaced at off-grid origins (grid-snap mismatch)
 - **#7519**: PCB.save() falsely refuses an unedited board whose pads use nameless numbered nets (net N)
 - **#7520**: docs/research: add diff-pair skew-compensation note and a README index for all research notes
+- **#7529**: JLC upload ledger uses POSIX-only os.O_DIRECTORY / O_NOFOLLOW; AttributeError on Windows (found in #7527 review)
 
 ## PRs Awaiting Review
 
 PRs waiting on Judge (`loom:review-requested`).
 
-- **#7461**: fix(router): re-fit match-group meander amplitude so a member never ends past the target
 - **#7468**: fix(router): gate the coupled-commit skew trim on combined P+N uncoupled length (#7269)
-- **#7494**: fix: detect versioned Windows KiCad 9/10 installs
-- **#7502**: fix(router): gap-tightening never worsens pair skew or uncoupled length
 - **#7514**: fix: make JTAG header, UCC27211 driver and USB ESD blocks build with defaults
-- **#7516**: fix: snap schematic block ports to the grid so off-grid origins stay wired
-- **#7517**: fix(router): judge lattice pad keep-outs against the true pad outline
 - **#7522**: docs: add diff-pair skew compensation note and enforce research index coverage
 - **#7524**: fix: skip pad net_name unpersisted-edit check for number-only net nodes
-- **#7527**: fix: fsync atomic-write tmp files through a writable handle (Windows PCB.save EBADF)
+- **#7525**: fix(dsn): export circle, oval, rotated and custom pad copper as real shapes
+- **#7530**: fix: guard POSIX-only O_NOFOLLOW/O_DIRECTORY in JLC upload ledger
 
 ## Approved (Awaiting Merge)
 
 PRs that passed review and are queued for Champion auto-merge (`loom:pr`).
 
-_None._
+- **#7502**: fix(router): gap-tightening never worsens pair skew or uncoupled length
+- **#7527**: fix: fsync atomic-write tmp files through a writable handle (Windows PCB.save EBADF)
 
 ## Proposed
 
@@ -103,7 +99,6 @@ Issues carrying `loom:curated`.
 - **#7384**: Committed board evidence doesn't reproduce: refresh_readiness --dry-run (pinned 10.0.6, committed checked_at) rewrites files on 6 of 7 boards *(curated)*
 - **#7401**: router: board 06 USB2_D+ uncoupled 12.791 > 12.700 mm after v62 pad-edge floor reorders the single-ended fallback *(curated)*
 - **#7478**: `atomic_write_text` fsyncs a read-only handle: every `PCB.save` fails on Windows with `OSError: [Errno 9]` (0.22.0, 0.23.0) *(curated)*
-- **#7480**: Windows: `find_kicad_cli()` and `detect_kicad_library_path()` only probe KiCad 7.0/8.0 install paths, so KiCad 9 and 10 are not found *(curated)*
 - **#7484**: DSN export: `custom` pads are written as their anchor rectangle only (primitives ignored); round, oval and rotated pads also collapse to an axis-aligned rectangle *(curated)*
 - **#7487**: Re-rule or remove board 03 usb_geometry via-in-pad window exception by 2027-04-19 (#7457 / #7084 Q10) *(curated)*
 - **#7491**: router: C++ search finds no USB3_RX1- path on board 06 once USB2_D routes coupled (blocks #7401) *(curated)*
@@ -139,13 +134,13 @@ Issues carrying `loom:curated`.
 | Bucket | Count |
 |------|-------|
 | Operator merge-risk holds | 0 |
-| Very important | 0 |
-| Important | 5 |
+| Very important | 1 |
+| Important | 4 |
 | Ready (`loom:issue`) | 3 |
 | In Progress (`loom:building`) | 12 |
-| PRs awaiting review | 10 |
-| Approved PRs awaiting merge | 0 |
-| Curated | 32 |
+| PRs awaiting review | 6 |
+| Approved PRs awaiting merge | 2 |
+| Curated | 31 |
 | Architect / Hermit proposals | 8 |
 | Active epics | 8 |
 <!-- guide:plan-body:end -->
