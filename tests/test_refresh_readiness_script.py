@@ -463,6 +463,19 @@ def test_demo_boards_with_drc_provenance_target_the_report_binding_reads(mod):
         assert "output/drc_report.json" in mod.BOARDS[name].drc_targets
 
 
+def test_board04_drc_targets_cover_its_bound_native_drc_evidence(mod):
+    """Board 04's native-drc.json copies have a producer (Issue #7435).
+
+    The pintype annotator stopped writing them (#7409); without ``drc_targets``
+    no refresh rewrites the copies that ``readiness.json`` hash-binds.
+    """
+    board = SCRIPT.parent.parent.parent / "boards" / "04-stm32-devboard"
+    inputs = json.loads((board / "output" / "readiness.json").read_text())["inputs"]
+    bound = {name for name in inputs if name.endswith("native-drc.json")}
+    assert bound
+    assert bound <= set(mod.BOARDS["04-stm32-devboard"].drc_targets)
+
+
 # ------------------------------------------------------------ repin_staged (#7353)
 def test_repin_staged_gates_and_publishes_a_staged_copy(mod, tmp_path, monkeypatch):
     """``repin_staged`` re-pins a caller-staged copy; ``after_manifest`` runs between re-hashes."""

@@ -12,12 +12,48 @@ eight fleet boards.
 from __future__ import annotations
 
 import csv
+import math
 from pathlib import Path
 
 from kicad_tools.sexp import parse_file
 
 #: Largest accepted disagreement between a CPL coordinate and the PCB frame (mm).
 TOLERANCE_MM = 0.01
+
+
+def _tht_centroid_offset(footprint, angle_deg: float) -> tuple[float, float]:
+    """Board-frame (Y down) offset from the origin to the numbered-pad bbox centre of a THT part.
+
+    JLCPCB's Mid X/Mid Y is the component centroid, so a through-hole part
+    (pin 1 at the origin on a header) is placed at its pad-bbox centre
+    (Issue #7433).  Written from the raw ``(pad ...)`` nodes, not from the
+    exporter, to stay an independent check.
+    """
+    pads = []
+    for pad in footprint.find_all("pad"):
+        number = pad.get_string(0)
+        at, size = pad.find("at"), pad.find("size")
+        if not number or at is None or size is None:
+            continue
+        pads.append((number, pad.get_string(1), at, size))
+    smd = {n for n, kind, _, _ in pads if kind == "smd"}
+    tht = [(a, z) for n, kind, a, z in pads if kind == "thru_hole" and n not in smd]
+    if not tht:
+        return (0.0, 0.0)
+    theta = math.radians(angle_deg)
+    xs: list[float] = []
+    ys: list[float] = []
+    for at, size in tht:
+        lx, ly = float(at.get_value(0)), float(at.get_value(1))
+        rot = float(at.get_value(2)) if len(at.children) > 2 else 0.0
+        w, h = float(size.get_value(0)), float(size.get_value(1))
+        if round(rot / 90.0) % 2:
+            w, h = h, w
+        rx = lx * math.cos(theta) + ly * math.sin(theta)
+        ry = -lx * math.sin(theta) + ly * math.cos(theta)
+        xs += [rx - w / 2, rx + w / 2]
+        ys += [ry - h / 2, ry + h / 2]
+    return ((min(xs) + max(xs)) / 2, (min(ys) + max(ys)) / 2)
 
 
 def drill_frame_positions(pcb: Path) -> dict[str, tuple[float, float]]:
@@ -39,7 +75,12 @@ def drill_frame_positions(pcb: Path) -> dict[str, tuple[float, float]]:
         at = footprint.find("at")
         if reference is None or at is None:
             continue
-        positions[reference] = (float(at.get_value(0)) - ox, -(float(at.get_value(1)) - oy))
+        angle = float(at.get_value(2)) if len(at.children) > 2 else 0.0
+        dx, dy = _tht_centroid_offset(footprint, angle)
+        positions[reference] = (
+            float(at.get_value(0)) + dx - ox,
+            -(float(at.get_value(1)) + dy - oy),
+        )
     return positions
 
 
