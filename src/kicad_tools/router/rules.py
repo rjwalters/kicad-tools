@@ -116,6 +116,15 @@ class DesignRules:
     # pre-check and the DRC post-check agree.  Defaults to 0.5 so behavior is
     # correct even when no manufacturer profile is threaded in.
     min_hole_to_hole: float = 0.5  # mm
+    # Minimum gap, drill edge to SMD pad copper edge, for a via that does NOT
+    # overlap the pad (Issue #7296).  The checker's ``via_at_pad_edge`` warning
+    # (Issue #7220) fires when a drill edge sits closer than the fab's
+    # ``min_solder_mask_dam_mm`` to a pad's mask aperture -- no dam is left to
+    # hold the tent.  This is that dam plus the pad's mask expansion; ``None``
+    # takes the dam from :attr:`manufacturer`'s profile (0 when unresolvable).
+    # A drill that overlaps pad copper is the via-in-pad decision, governed by
+    # ``allow_smd_vias``, and is not affected.
+    min_via_pad_edge_gap: float | None = None  # mm
     grid_resolution: float = 0.1  # mm (routing grid)
     grid_origin_offset: tuple[float, float] = (
         0.0,
@@ -524,6 +533,17 @@ class DesignRules:
             except ValueError:
                 # Unknown manufacturer: keep the conservative 0.5 default.
                 pass
+        if self.min_via_pad_edge_gap is None:
+            self.min_via_pad_edge_gap = 0.0
+            if self.manufacturer:
+                try:
+                    from kicad_tools.manufacturers import get_profile
+
+                    self.min_via_pad_edge_gap = float(
+                        get_profile(self.manufacturer).get_design_rules().min_solder_mask_dam_mm
+                    )
+                except (ValueError, KeyError, ImportError, IndexError):
+                    pass
 
     def pair_gap(self, net_class: "NetClassRouting") -> "PairGap":
         """The edge-to-edge gap a coupled pair of ``net_class`` is laid at.

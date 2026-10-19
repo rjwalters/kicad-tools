@@ -745,11 +745,13 @@ class TestWriteRoundingGuard:
 
         pad = PadInfo("U2", "C7", 1, "GND", 0.0, 0.0, "F.Cu", BALL, BALL)
         first = calculate_via_position(pad, 0.5, VIA, [], 0.2, via_drill=DRILL)
-        assert first == pytest.approx((0.725, 0.0))
+        # Issue #7296: candidates are snapped to the 0.01 mm write grid, so the
+        # first site is 0.72, not the unrounded 0.725.
+        assert first == pytest.approx((0.72, 0.0))
         # A same-net via 0.800 mm away: on the floor, but the written
         # coordinates may land 0.797 mm apart.
-        again = calculate_via_position(pad, 0.5, VIA, [(0.725 + 0.8, 0.0, 1)], 0.2, via_drill=DRILL)
-        assert again is not None and again != pytest.approx((0.725, 0.0))
+        again = calculate_via_position(pad, 0.5, VIA, [(0.72 + 0.8, 0.0, 1)], 0.2, via_drill=DRILL)
+        assert again is not None and again != pytest.approx((0.72, 0.0))
 
     @staticmethod
     def _closest_written(spacing: float) -> float:

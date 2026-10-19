@@ -103,6 +103,26 @@ def resolve_process(
     return process
 
 
+def via_drill_at_pad_edge(pad_distance_mm: float, drill_mm: float, floor_mm: float) -> bool:
+    """Would a drill sit in the mask-dam zone just outside an SMD pad? (#7296).
+
+    ``pad_distance_mm`` is the unsigned distance from the drill centre to the
+    pad copper (zero inside).  True when the drill does not overlap the copper
+    yet its edge is closer than ``floor_mm`` -- the fab's mask dam plus the
+    pad's mask expansion -- to it: the geometry the validate-side
+    ``via_at_pad_edge`` warning reports via
+    :func:`~kicad_tools.validate.rules.via_pad_geometry.drill_to_mask_aperture_gap`
+    (``aperture_distance - radius < dam``, with the aperture the copper grown
+    by the expansion).  A drill overlapping copper is the via-in-pad question
+    and is not this predicate's business.  The C++ coupled pathfinder's
+    ``via_drill_at_smd_pad_edge`` is the same arithmetic.
+    """
+    if floor_mm <= 0.0:
+        return False
+    radius = drill_mm / 2.0
+    return radius <= pad_distance_mm < radius + floor_mm
+
+
 def via_geometry_eligible(
     process: FabricationProcess,
     *,

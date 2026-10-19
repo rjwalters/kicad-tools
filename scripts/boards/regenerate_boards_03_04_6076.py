@@ -45,8 +45,10 @@ for a board whose design files are already current.  With a fixed
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import importlib.util
+import io
 import json
 import os
 import shutil
@@ -244,27 +246,32 @@ def board03_receipt(base_commit: str, checked_at: str | None, known: tuple[str, 
     ``--resolve-known-issue`` pairs, Issue #7261).  Issues already recorded in
     ``output/readiness.json`` carry forward without it.
     """
+    from kicad_tools.cli import readiness_cmd
+
     board = BOARDS / "03-usb-joystick"
     out = board / "output"
-    py = sys.executable
     drop_bytecode(board)
-    cmd = [py, "-m", "kicad_tools.cli", "readiness", str(board), "--verify", "--format", "json"]
+    argv = [str(board), "--verify", "--format", "json"]
     if checked_at:
-        cmd += ["--checked-at", checked_at]
-    cmd += list(known)
+        argv += ["--checked-at", checked_at]
+    argv += list(known)
     verification = out / "readiness-verification"
     with tempfile.TemporaryDirectory(prefix="regen-03-receipt-") as tmp:
         previous = Path(tmp) / "previous"
         if verification.exists():
             shutil.move(str(verification), previous)
-        proc = subprocess.run(cmd, capture_output=True, text=True)
-        if proc.returncode == 2:
+        # In-process through the gated path (Issue #7410): the pinned-toolchain
+        # refusal (#6962) lives in readiness_cmd, not in a spawned CLI.
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            returncode = readiness_cmd.main(argv)
+        if returncode == 2:
             # Environment refusal (#6962): nothing was written, so put the
             # committed receipt back rather than leaving it deleted.
             shutil.rmtree(verification, ignore_errors=True)
             if previous.exists():
                 shutil.move(str(previous), verification)
-            raise RuntimeError(f"kct readiness refused board 03:\n{proc.stderr[-2000:]}")
+            raise RuntimeError(f"kct readiness refused board 03:\n{stderr.getvalue()[-2000:]}")
     receipt = json.loads((out / "readiness-verification/readiness.json").read_text())
     for rel in SUPPLEMENTAL_BINDINGS:
         receipt["inputs"][rel] = sha256(board / rel)

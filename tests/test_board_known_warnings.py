@@ -28,8 +28,6 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 BOARD04 = REPO_ROOT / "boards/04-stm32-devboard"
 BOARD05_REDESIGN = REPO_ROOT / "boards/05-bldc-motor-controller/redesign"
 
-BOARD05_PADS = ("R11-1", "R9-1", "D1-1")
-
 
 def _load(path: Path, name: str):
     sys.path.insert(0, str(path.parent))
@@ -129,41 +127,32 @@ def test_board04_error_still_fails(board04):
 
 
 # --------------------------------------------------------------------- board 05
-def test_board05_known_set_is_exact(board05):
-    assert set(board05.BOARD05_KNOWN_WARNINGS) == {
-        ("via_at_pad_edge", pad.rsplit("-", 1)[0], pad) for pad in BOARD05_PADS
-    }
-    assert set(board05.BOARD05_KNOWN_WARNINGS.values()) == {"#7296"}
-
-
-def test_board05_known_warnings_pass(board05):
-    assert board05.manufacturer_check_failures(_report([_via_edge(p) for p in BOARD05_PADS])) == []
-    assert board05.manufacturer_check_failures(_report([_via_edge("D1-1")])) == []
+def test_board05_accepts_no_warning(board05):
+    assert board05.BOARD05_KNOWN_WARNINGS == {}
     assert board05.manufacturer_check_failures(_report([])) == []
 
 
 @pytest.mark.parametrize(
     "extra",
     [
-        _via_edge("R10-1"),  # a different ref
-        _via_edge("R11-2"),  # a different pad of a known ref
-        _via_edge("R11-1", x=9.0),  # a repeat: higher count than pinned
+        _via_edge("R11-1"),  # the findings #7296 removed stay fatal
+        _via_edge("R9-1"),
+        _via_edge("D1-1"),
+        _via_edge("R10-1"),
         {"rule_id": "thermal_asymmetry", "severity": "warning", "items": ["R11", "R11-1"]},
         {"rule_id": "silk_over_pad", "severity": "warning", "items": ["R11"]},
     ],
 )
-def test_board05_any_other_warning_fails(board05, extra):
-    report = _report([_via_edge(p) for p in BOARD05_PADS] + [extra])
-    assert board05.manufacturer_check_failures(report)
+def test_board05_any_warning_fails(board05, extra):
+    assert board05.manufacturer_check_failures(_report([extra]))
 
 
 def test_board05_error_still_fails(board05):
-    report = _report([_via_edge(p) for p in BOARD05_PADS], errors=1)
-    assert board05.manufacturer_check_failures(report) == ["1 error(s)"]
+    assert board05.manufacturer_check_failures(_report([], errors=1)) == ["1 error(s)"]
 
 
 def test_board05_summary_disagreeing_with_findings_fails(board05):
-    report = _report([_via_edge(p) for p in BOARD05_PADS])
-    report["summary"]["warnings"] = 4  # a warning the finding list does not show
+    report = _report([])
+    report["summary"]["warnings"] = 1  # a warning the finding list does not show
     assert board05.manufacturer_check_failures(report)
     assert unaccepted_report_warnings(report, board05.BOARD05_KNOWN_WARNINGS)

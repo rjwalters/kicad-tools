@@ -25,16 +25,16 @@
       "size": 1442
     },
     "check-report.json": {
-      "sha256": "50fd9a160510e11db6ba7fc902a087eea4087c960b03d9bfb70cd470249a3020",
-      "size": 4103
+      "sha256": "ccf68619f5e814fc64b786326a32967ac5ac094082782961a9100fdca457a4c6",
+      "size": 11456
     },
     "cpl_jlcpcb.csv": {
-      "sha256": "2c67e2998be11853cb2f4687981d80f3a9f786fcad2c0d89901c99b3d3f467ae",
-      "size": 3256
+      "sha256": "6b8231d3b65a8d0d7c13a0354f76fd852716c4ddacc2cd5f1410baabe0ce858d",
+      "size": 3255
     },
     "design-source.zip": {
-      "sha256": "2292cf7cd014252120a60332b41e9bdb964467392fd9823d53b5447cefbc37d3",
-      "size": 360535
+      "sha256": "3ca5331bf5486aa2c1aa56e97b4605837a35ea772c054d3bdaaa55b5afad1d5f",
+      "size": 360568
     },
     "firmware/Makefile": {
       "sha256": "f105bf145347705a625a825aad34614c3e4001c7260793991f68cca37587516c",
@@ -53,8 +53,8 @@
       "size": 3516
     },
     "gerbers/gerbers.zip": {
-      "sha256": "f8efef2d672555daabc8ae9a7346d4b8be4b247bcd4b90ea971d9bf9e6039955",
-      "size": 270932
+      "sha256": "3d661ea03ebc945070a2e853700c66cb2c2ef5332074f3dfc12af59240711c3f",
+      "size": 271316
     },
     "images/assembly.png": {
       "sha256": "56e07c74420ae321cbca7dd1e6b55dca323e3f65523ae66c82c27913820a3445",
@@ -93,12 +93,12 @@
       "size": 443648
     },
     "kct-check.json": {
-      "sha256": "50fd9a160510e11db6ba7fc902a087eea4087c960b03d9bfb70cd470249a3020",
-      "size": 4103
+      "sha256": "ccf68619f5e814fc64b786326a32967ac5ac094082782961a9100fdca457a4c6",
+      "size": 11456
     },
     "kicad_project.zip": {
-      "sha256": "875af0eff99ed1af4f80a29a29a0860992f8846e21538898577552934dbebedf",
-      "size": 511942
+      "sha256": "9973b22e7cef9c34b1a8c57fcd28db254fb6ae992afe54c31977b7b545ce087d",
+      "size": 512792
     },
     "lvs.json": {
       "sha256": "52fed944df95bc4d3650b2774ce6b714e731e310d9d9a761553b25055b3e1a25",
@@ -109,7 +109,7 @@
       "size": 1214
     },
     "native-erc.json": {
-      "sha256": "c3cdb2a0658c1554b457bbd310213aa3c988f0139050a6c7fe6c9091a68ff534",
+      "sha256": "15050d6fcc8a03ba8349ba75137038b4a3cba9487f6dce0a3d7200a61034971a",
       "size": 988
     },
     "project.kct": {
@@ -189,7 +189,7 @@
     {
       "name": "tht_in_cpl",
       "status": "OK",
-      "message": "6 through-hole component(s) included in CPL",
+      "message": "6 through-hole component(s) excluded from CPL",
       "details": "THT references: J1, J2, J3, J4, J5, RV1"
     },
     {
@@ -210,7 +210,7 @@
     {
       "name": "bom_cpl_match",
       "status": "OK",
-      "message": "BOM and CPL references match (42 components)"
+      "message": "BOM and CPL references match (36 components, 6 THT excluded)"
     },
     {
       "name": "drc",

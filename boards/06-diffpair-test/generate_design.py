@@ -1742,6 +1742,32 @@ def _connector_profile(points, neck_width, trunk_width, neck_length=0.75):
     return legs
 
 
+def _relocate_pad_edge_vias(pcb_path: Path) -> int:
+    """Slide vias out of the mask-dam zone beside SMD pads (issue #7296).
+
+    The stitcher, the pour repair and the single-ended escape vias do not know
+    the fab's mask dam, so this pass lands the board on a ``via_at_pad_edge``
+    clean result.  Returns the number of vias moved; a via with no legal spot
+    raises (the surrounding transaction restores the board).
+    """
+    from kicad_tools.cli.relocate_in_pad_vias import relocate_pad_edge_vias
+    from kicad_tools.manufacturers import get_profile
+    from kicad_tools.schema.pcb import PCB
+
+    pcb = PCB.load(pcb_path)
+    result = relocate_pad_edge_vias(pcb, get_profile("jlcpcb").get_design_rules(layers=4))
+    if result.skipped or result.unresolvable:
+        raise RuntimeError(f"Pad-edge vias left in the mask-dam zone: {result}")
+    for move in result.moved:
+        print(
+            f"   pad-edge via {move.net_name} at {move.pad_ref}: "
+            f"({move.old_x:.3f}, {move.old_y:.3f}) -> ({move.new_x:.3f}, {move.new_y:.3f})"
+        )
+    if result.changed:
+        pcb.save(pcb_path)
+    return len(result.moved)
+
+
 def _legalize_signal_vias(pcb_path: Path) -> int:
     """Repair same-net ``via_in_pad`` + sub-floor drill-pair residuals.
 
@@ -2519,7 +2545,7 @@ def _reroute_offangle_chord(
             os.close(fd)
             try:
                 Path(tmp).write_text(new_text)
-                if _clearance_signature(Path(tmp)) - baseline:
+                if _clearance_signature(Path(tmp), pcb_path) - baseline:
                     continue
             finally:
                 os.unlink(tmp)
@@ -2591,7 +2617,7 @@ def _split_offangle_chords(pcb_path: Path, baseline: set[tuple[str, ...]]) -> in
                 os.close(fd)
                 try:
                     Path(tmp).write_text(new_text)
-                    if _clearance_signature(Path(tmp)) - baseline:
+                    if _clearance_signature(Path(tmp), pcb_path) - baseline:
                         continue
                 finally:
                     os.unlink(tmp)
@@ -2820,7 +2846,7 @@ class PostQuantizeClearanceError(RuntimeError):
     """
 
 
-def _clearance_signature(pcb_path: Path) -> set[tuple[str, ...]]:
+def _clearance_signature(pcb_path: Path, project_board: Path | None = None) -> set[tuple[str, ...]]:
     """Return the set of clearance-violation identities on ``pcb_path``.
 
     Issue #3913: used to diff the clearance state across the step-12
@@ -2833,15 +2859,29 @@ def _clearance_signature(pcb_path: Path) -> set[tuple[str, ...]]:
     pre-quantize twin (the location is rounded to 0.1 mm buckets).  A
     genuinely new graze at a different via/segment pair produces a new
     identity that is absent from the pre-quantize set.
+
+    Issue #7296: the set also carries ``netclass_clearance_copper`` errors
+    (the routed project's per-class minima, e.g. ``Power`` 0.2 mm), not just
+    the fab floor.  Every gate built on this signature -- post-quantize,
+    chord split / re-route, post-legalize -- previously passed copper moved
+    to 0.155 mm of a Power via, which ``kct check`` and the CI pair-baseline
+    gate then failed.  The classes come from the ``.kicad_pro`` beside
+    ``project_board`` (default ``pcb_path``): a candidate probed in a
+    ``tempfile`` copy has no project of its own and must name the real board,
+    or the netclass half silently checks nothing.
     """
     from kicad_tools.schema.pcb import PCB
     from kicad_tools.validate import DRCChecker
+    from kicad_tools.validate.rules.netclass_clearance_copper import (
+        check_netclass_clearance_copper,
+    )
 
     pcb = PCB.load(pcb_path)
     checker = DRCChecker(pcb, manufacturer="jlcpcb", layers=4)
     results = checker.check_clearances()
+    netclass = check_netclass_clearance_copper(project_board or pcb_path, pcb, checker.design_rules)
     signature: set[tuple[str, ...]] = set()
-    for v in results.violations:
+    for v in [*results.violations, *netclass.violations]:
         if not v.is_error:
             continue
         loc = ""
@@ -2989,7 +3029,7 @@ def _resolve_quantize_treatment(
                 axis_first_uuids=frozenset(u for u, t in treatment.items() if t == "flip"),
                 skip_uuids=frozenset(u for u, t in treatment.items() if t == "skip"),
             )
-            return _clearance_signature(Path(tmp)) - baseline
+            return _clearance_signature(Path(tmp), pre_quantize_path) - baseline
         finally:
             os.unlink(tmp)
 
@@ -3075,10 +3115,14 @@ def _finalize_signal_copper(
         before = _clearance_signature(pcb_path)
         n_split = _split_offangle_chords(pcb_path, before)
         n_vias = _legalize_signal_vias(pcb_path)
-        if not (n_split or n_vias):
+        n_edge = _relocate_pad_edge_vias(pcb_path)
+        if not (n_split or n_vias or n_edge):
             print("   No repairable via/chord residuals detected")
             return
-        print(f"   {n_vias} via defect(s) repaired, {n_split} chord(s) split")
+        print(
+            f"   {n_vias} via defect(s) repaired, {n_edge} pad-edge via(s) moved, "
+            f"{n_split} chord(s) split"
+        )
         print("13b. Re-filling zones after legalization...")
         result = subprocess.run(fill_argv, capture_output=True, text=True)
         if result.returncode != 0:
@@ -3095,6 +3139,7 @@ def _finalize_signal_copper(
             if not (added_vias or added_bridges):
                 break
             _legalize_signal_vias(pcb_path)
+            _relocate_pad_edge_vias(pcb_path)
             result = subprocess.run(fill_argv, capture_output=True, text=True)
             if result.returncode != 0:
                 raise RuntimeError(f"Post-legalize pour re-fill failed (rc={result.returncode})")
@@ -3103,9 +3148,9 @@ def _finalize_signal_copper(
         if not pours_ok or new_clearances:
             raise RuntimeError(
                 f"POST-LEGALIZE GATE: FAIL (pours={'OK' if pours_ok else 'BROKEN'}, "
-                f"{len(new_clearances)} new clearance violation(s))"
+                f"{len(new_clearances)} new clearance violation(s): {sorted(new_clearances)})"
             )
-        print("   POST-LEGALIZE GATE: PASS (0 new clearance violations)")
+        print("   POST-LEGALIZE GATE: PASS (0 new fab-floor or netclass clearance violations)")
     except BaseException:
         # Restoring saved bytes also restores the matching fill state. A second
         # refill is unnecessary and could itself fail after the rollback.

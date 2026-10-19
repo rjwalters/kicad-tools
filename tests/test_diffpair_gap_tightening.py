@@ -361,6 +361,11 @@ def test_repeated_squeezes_never_worsen_pair_skew_beyond_pre_pass_value():
     # failure); the companion test below shows the cumulative skew bound is
     # what declines it.
     assert res.runs[2].status.startswith("declined:"), res
+    # The partly tightened pair still names why its leftover run was declined.
+    line = res.format_line()
+    assert line.splitlines()[0].startswith("  MIPI_DAT1_P/MIPI_DAT1_N: tightened")
+    assert f"{res.runs[2].status}" in line.splitlines()[1], line
+    assert len(line.splitlines()) == 2, line
     assert abs(_skew(ar)) <= skew_before + 1e-6
     assert res.skew_after_mm <= res.skew_before_mm + 1e-6
     assert _clearance_errors(ar) == []
