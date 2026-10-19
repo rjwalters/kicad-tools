@@ -1369,6 +1369,14 @@ class PreflightChecker:
         them (issue #7166): "not checked" must never read as "checked and
         fine".  The WARN never blocks export, even under
         ``--strict-preflight`` -- a fresh CI runner has an empty cache.
+
+        A known part on a ``PinHeader_RxC`` / ``PinSocket_RxC`` footprint
+        whose record states no readable pin count is ``unverified`` too
+        (issue #7446) and joins the same WARN, tagged with its reason.  It
+        is deliberately a warning, not a FAIL: the pin count is unknown, not
+        wrong, so a board with correct parts must not newly fail -- but a
+        2-pin part on an 8-pin header must not read as verified either.
+        ``kct readiness`` records the WARN message in its ``bom`` gate.
         """
         try:
             bom = self._load_bom()
@@ -1411,8 +1419,11 @@ class PreflightChecker:
                 pads = [str(p.number) for p in fp.pads]
                 pads_by_ref[fp.reference] = None if fp.reference in pads_by_ref else pads
 
+        from .lcsc_value_check import UNVERIFIED_HEADER_COUNT
+
         mismatches: list[str] = []
         unverified: list[str] = []
+        header_unverified = 0
         sources: set[str] = set()
         assigned = 0
         for item in items:
@@ -1428,11 +1439,15 @@ class PreflightChecker:
                 footprint=item.footprint,
                 pad_numbers=pads_by_ref.get(item.reference),
             )
-            if verdict.status == "unverified":
-                unverified.append(f"{item.reference} -> {item.lcsc}")
-                continue
             if verdict.source:
                 sources.add(verdict.source)
+            if verdict.status == "unverified":
+                if verdict.reason == UNVERIFIED_HEADER_COUNT:
+                    header_unverified += 1
+                    unverified.append(f"{item.reference} -> {item.lcsc} ({verdict.reason})")
+                else:
+                    unverified.append(f"{item.reference} -> {item.lcsc}")
+                continue
             if verdict.mismatch is not None:
                 mismatches.append(
                     f"{item.reference} ({item.value}) -> {item.lcsc}: "
@@ -1464,12 +1479,28 @@ class PreflightChecker:
         if unverified:
             shown = ", ".join(unverified[:8])
             suffix = f" (and {len(unverified) - 8} more)" if len(unverified) > 8 else ""
+            not_found = len(unverified) - header_unverified
+            why = [
+                f"{n} {text}"
+                for n, text in (
+                    (not_found, "not in parts cache or offline catalog"),
+                    (header_unverified, "header part(s) with no readable pin count"),
+                )
+                if n
+            ]
+            reasons = (
+                "not in parts cache or offline catalog"
+                if not header_unverified
+                else "header part(s) with no readable pin count"
+                if not not_found
+                else "; ".join(why)
+            )
             return PreflightResult(
                 name="bom_lcsc_values",
                 status="WARN",
                 message=(
                     f"{verified} of {assigned} assigned item(s) verified ({against}); "
-                    f"{len(unverified)} unverifiable (not in parts cache or offline catalog)"
+                    f"{len(unverified)} unverifiable ({reasons})"
                 ),
                 details=f"unverified: {shown}{suffix}",
             )

@@ -842,12 +842,26 @@ _HEADER_FP_RE = re.compile(r"PIN(?:HEADER|SOCKET)_(\d+)X(\d+)")
 _HEADER_SHAPE_RE = re.compile(r"(?<![\d.])(\d+)\s*[xX*]\s*(\d+)P?(?![\d.]|\s*mm)")
 # Single-token total pin count in an MPN: ``PZ254V-11-08P`` (not ``-2PZZ``).
 _HEADER_MPN_COUNT_RE = re.compile(r"-(\d{1,3})P(?![A-Za-z0-9])")
+# Total pin count in description prose: ``Pin Header 2 Position``,
+# ``Connector Header 5 position``, ``8 Pin``, ``8-pin``.  The ``(?<![\d.])``
+# guard keeps pitch digits (``2.54``) from being read as a count.
+_HEADER_PROSE_COUNT_RE = re.compile(
+    r"(?<![\d.])(\d{1,3})\s*-?\s*(?:positions?|pins?)(?![A-Za-z])", re.IGNORECASE
+)
 
 
 def _part_header_count(
     part_description: str, part_mfr: str
 ) -> tuple[int, tuple[int, int] | None] | None:
-    """Return ``(total pins, (rows, cols) or None)`` stated by an LCSC record."""
+    """Return ``(total pins, (rows, cols) or None)`` stated by an LCSC record.
+
+    Tried in order: an ``NxM`` shape (description, then MPN), a ``-NNP`` MPN
+    suffix, then ``N Position`` / ``N Pin`` / ``N-pin`` description prose.
+    The last two give a total only, with no shape, so ``PZ254V-12-08P`` (2x4)
+    on a ``1x08`` footprint passes on total; a ``2x4P`` in the description
+    would still catch it.  Prose stating two different counts is ambiguous
+    and yields ``None``.
+    """
     for text in (part_description, part_mfr):
         m = _HEADER_SHAPE_RE.search(text or "")
         if m is not None:
@@ -857,7 +871,31 @@ def _part_header_count(
     m = _HEADER_MPN_COUNT_RE.search(part_mfr or "")
     if m is not None and int(m.group(1)):
         return int(m.group(1)), None
+    counts = {int(n) for n in _HEADER_PROSE_COUNT_RE.findall(part_description or "")}
+    counts.discard(0)
+    if len(counts) == 1:
+        return counts.pop(), None
     return None
+
+
+def _header_footprint_label(footprint_name: str) -> str | None:
+    """The ``PinHeader_RxC`` / ``PinSocket_RxC`` footprint label, else ``None``."""
+    fp_label = footprint_name.rsplit(":", 1)[-1] if footprint_name else ""
+    return fp_label if _HEADER_FP_RE.search(fp_label.upper()) else None
+
+
+def header_pin_count_unreadable(
+    footprint_name: str, part_description: str = "", part_mfr: str = ""
+) -> bool:
+    """True when a header/socket footprint's part states no readable pin count.
+
+    :func:`find_header_pin_mismatch` returns ``None`` both for "counts agree"
+    and for "cannot read a count"; this tells the two apart so callers can
+    report the latter as ``unverified`` rather than ``match`` (issue #7446).
+    """
+    if _header_footprint_label(footprint_name) is None:
+        return False
+    return _part_header_count(part_description, part_mfr) is None
 
 
 def find_header_pin_mismatch(
@@ -874,10 +912,12 @@ def find_header_pin_mismatch(
     ``PinHeader_1x08`` footprint passed on pitch alone.
 
     The footprint must be named ``PinHeader_RxC`` / ``PinSocket_RxC`` and the
-    part must state a count (``NxM`` in the description/MPN, or a ``-NNP`` MPN
-    suffix meaning total pins).  A mismatch is a different total, a different
+    part must state a count (``NxM`` in the description/MPN, a ``-NNP`` MPN
+    suffix meaning total pins, or ``N Position`` / ``N Pin`` prose -- see
+    :func:`_part_header_count`).  A mismatch is a different total, a different
     ``NxM`` shape, or a numeric pad count that differs from the part's total.
-    Anything unparseable returns ``None`` (cannot validate).
+    Anything unparseable returns ``None`` (cannot validate); use
+    :func:`header_pin_count_unreadable` to tell that apart from agreement.
     """
     fp_label = footprint_name.rsplit(":", 1)[-1] if footprint_name else ""
     fm = _HEADER_FP_RE.search(fp_label.upper())
@@ -921,13 +961,22 @@ class LcscVerdict:
 
     ``match``: the part is known (parts cache or offline catalog) and nothing
     we can compare disagrees.  ``mismatch``: a known part clearly disagrees
-    (``mismatch`` set).  ``unverified``: the part is in neither source, so
-    nothing was checked -- distinct from ``match``.
+    (``mismatch`` set).  ``unverified``: the check that matters could not be
+    run -- distinct from ``match``.  ``reason`` says why: the part is in
+    neither source (:data:`UNVERIFIED_NOT_FOUND`, ``source`` is ``None``), or
+    it is known but sits on a pin header/socket footprint and states no
+    readable pin count (:data:`UNVERIFIED_HEADER_COUNT`, issue #7446), so a
+    2-pin part on an 8-pin header cannot be ruled out.
     """
 
     status: VerdictStatus
     source: str | None = None  # "parts cache" | "offline catalog"
     mismatch: LcscMismatch | None = None
+    reason: str | None = None
+
+
+UNVERIFIED_NOT_FOUND = "not in parts cache or offline catalog"
+UNVERIFIED_HEADER_COUNT = "pin count not stated by part"
 
 
 def _compare_part(
@@ -982,7 +1031,7 @@ def verify_lcsc_assignment(
     :func:`check_lcsc_against_cache`, runs :func:`find_ic_package_mismatch`.
     """
     if not lcsc_part:
-        return LcscVerdict("unverified")
+        return LcscVerdict("unverified", reason=UNVERIFIED_NOT_FOUND)
 
     candidates: list[tuple[Part, str]] = []
     if cache is not None:
@@ -1003,7 +1052,7 @@ def verify_lcsc_assignment(
             candidates.append((listed, "offline catalog"))
 
     if not candidates:
-        return LcscVerdict("unverified")
+        return LcscVerdict("unverified", reason=UNVERIFIED_NOT_FOUND)
 
     for part, source in candidates:
         mismatch = _compare_part(
@@ -1011,4 +1060,11 @@ def verify_lcsc_assignment(
         )
         if mismatch is not None:
             return LcscVerdict("mismatch", source, mismatch)
+    # A header/socket footprint whose part states no readable pin count was
+    # never pin-checked: report it, never a bare ``match`` (issue #7446).
+    if all(
+        header_pin_count_unreadable(footprint, part.description, part.mfr_part)
+        for part, _ in candidates
+    ):
+        return LcscVerdict("unverified", candidates[-1][1], reason=UNVERIFIED_HEADER_COUNT)
     return LcscVerdict("match", candidates[-1][1])
