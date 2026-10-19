@@ -3,8 +3,6 @@
 import csv
 from pathlib import Path
 
-import pytest
-
 from kicad_tools.export.assembly import AssemblyPackage
 
 OUTPUT = Path(__file__).resolve().parents[1] / "boards/04-stm32-devboard/output"
@@ -30,14 +28,6 @@ def test_board04_package_export_applies_rotation_profile(tmp_path):
         assert float(rows[reference]["Rotation"]) == rotation
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "#7268: the committed board 04 CPL predates THT inclusion (#7239) and lacks "
-        "J1/Y1; refresh_readiness.py refuses to re-pin it on #7220 thermal_asymmetry "
-        "warnings (#7273)"
-    ),
-)
 def test_board04_saved_cpl_matches_fresh_export(tmp_path):
     """Saved CPL equals a fresh export, coordinates (#7059 frame) included."""
     package = AssemblyPackage(

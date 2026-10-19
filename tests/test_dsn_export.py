@@ -274,6 +274,16 @@ class TestDSNRoundTrip:
         assert layer_count == len(exporter.layers)
 
 
+class TestDSNLayerIndex:
+    """Issue #7485: each structure layer carries its stack-order index."""
+
+    def test_layer_index_follows_stack_order(self):
+        exporter = KiCadToDSNExporter("unused.kicad_pcb")
+        exporter._layers = ["F.Cu", "In1.Cu", "In2.Cu", "B.Cu"]
+        structure = exporter._generate_structure()
+        assert re.findall(r"\(index (\d+)\)", structure) == ["0", "1", "2", "3"]
+
+
 class TestDSNViaLayerSpan:
     """Issue #6614: pre-existing vias export the span KiCad reads."""
 
