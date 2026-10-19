@@ -13,7 +13,7 @@ from pathlib import Path
 from kicad_tools.kicad_install import windows_kicad_base_dirs, windows_kicad_install_roots
 
 # Default library paths for each platform
-_KICAD_LIBRARY_PATHS = {
+_KICAD_LIBRARY_PATHS: dict[str, list[str | Path]] = {
     "Darwin": [  # macOS
         # KiCad 8.x standard installation
         "/Applications/KiCad/KiCad.app/Contents/SharedSupport/footprints",
@@ -208,7 +208,7 @@ def detect_kicad_library_path(config_override: str | Path | None = None) -> Libr
 
     # 3. Check platform-specific defaults
     system = platform.system()
-    default_paths = list(_KICAD_LIBRARY_PATHS.get(system, []))
+    default_paths = [Path(p) for p in _KICAD_LIBRARY_PATHS.get(system, [])]
     if system == "Windows":
         # Versioned installs (newest first), then unversioned, then user dirs.
         default_paths = (
