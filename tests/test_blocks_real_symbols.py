@@ -838,14 +838,43 @@ def test_reverse_polarity_pfet_takes_the_input_on_its_drain(
     assert pins[s_] == port(vout), "the protected output must come from the source"
     assert len({port(vin), port(vout), port("GND")}) == 3
     gate_net = pins[g]
-    if "R_gate" in block.components:
-        r_gate = block.components["R_gate"].reference
+    gate_r = next((k for k in ("R_gate", "R_GATE") if k in block.components), None)
+    if gate_r:
+        r_gate = block.components[gate_r].reference
         assert gate_net == pins[f"{r_gate}.1"]
         assert pins[f"{r_gate}.2"] == port("GND")
     else:
         assert gate_net == port("GND"), "the gate must be tied to ground"
     if "C_FILT" in block.components:
         assert pins[f"{block.components['C_FILT'].reference}.1"] == port(vout)
+
+
+@pytest.mark.parametrize(
+    "factory",
+    [
+        pytest.param(lambda s: B.BarrelJackInput(s, X, Y), id="BarrelJackInput"),
+        pytest.param(lambda s: B.create_12v_barrel_jack(s, X, Y), id="create_12v_barrel_jack"),
+    ],
+)
+def test_barrel_jack_pfet_clamps_vgs_with_a_zener(factory: Factory) -> None:
+    """R_GATE returns the gate to the sleeve; D_GATE clamps G-S (issue #7489)."""
+    sch = Schematic(title="barrel jack gate clamp")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        block = factory(sch)
+    nets, pins = _pin_nets(sch)
+    port = lambda name: _net_at(sch, nets, block.ports[name])  # noqa: E731
+    q = block.components["Q"]
+    gate, source = pins[f"Q1.{_pin_number(q, 'G')}"], pins[f"Q1.{_pin_number(q, 'S')}"]
+    r, d = block.components["R_GATE"], block.components["D_GATE"]
+    ref_r, ref_d = r.reference, d.reference
+
+    assert gate != source, "the gate must not be shorted to the source"
+    assert pins[f"{ref_d}.{_pin_number(d, 'K')}"] == source, "Zener cathode on the source"
+    assert pins[f"{ref_d}.{_pin_number(d, 'A')}"] == gate, "Zener anode on the gate"
+    assert pins[f"{ref_r}.1"] == gate
+    assert pins[f"{ref_r}.2"] == port("GND"), "gate resistor returns to the sleeve"
+    assert gate != port("GND"), "the gate may no longer be tied straight to the sleeve"
 
 
 @pytest.mark.parametrize("protection", ["diode", "none"])
