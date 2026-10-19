@@ -1534,6 +1534,18 @@ def _tune_match_group_single_ended(
                     other_group_routes=other_group_routes,
                     check=_bump_check,
                 )
+                # Issue #7423: the per-bump booking is geometric; enforce
+                # "never past the group target" on the measured route too, as
+                # the trombone path does, so it holds by construction.
+                if bumped_route is not None:
+                    bump_overshoot = _measure(bumped_route) - target_length
+                    if bump_overshoot > OVERSHOOT_EPS_MM:
+                        last_failure_reason = "overshoot"
+                        last_failure_message = (
+                            f"Per-bump fallback rejected on net {net_id}: would end "
+                            f"{bump_overshoot:.4f}mm past the group target"
+                        )
+                        bumped_route = None
                 if bumped_route is not None:
                     current_route = bumped_route
                     per_member_result.inserts_applied += 1

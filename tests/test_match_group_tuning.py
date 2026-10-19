@@ -3771,6 +3771,52 @@ class TestNoOvershootPastGroupMaximum:
         added = LengthTracker.calculate_route_length(placed) - before
         assert added <= need + 1e-6, f"per-bump added {added:.6f}mm for a need of {need}mm"
 
+    def test_per_bump_result_past_target_is_rejected(self, monkeypatch):
+        """The per-bump fallback is gated on the measured route, not its own booking.
+
+        Force the whole-trombone attempts to fail and make the fallback return a
+        route that ends past the target; the member must be left untouched.
+        """
+        from kicad_tools.router import match_group_tuning as mgt
+        from kicad_tools.router.length import LengthTracker
+
+        def fail_trombone(self, *args, **kwargs):
+            from kicad_tools.router.optimizer.serpentine import SerpentineResult
+
+            return SerpentineResult(success=False, message="forced")
+
+        def overshooting_bumps(route, **kwargs):
+            seg = route.segments[0]
+            extra = Segment(
+                x1=seg.x2,
+                y1=seg.y2,
+                x2=seg.x2 + 5.0,
+                y2=seg.y2,
+                width=seg.width,
+                layer=seg.layer,
+                net=seg.net,
+                net_name=seg.net_name,
+            )
+            return Route(net=route.net, net_name=route.net_name, segments=[*route.segments, extra])
+
+        monkeypatch.setattr(mgt.SerpentineGenerator, "generate_trombone", fail_trombone)
+        monkeypatch.setattr(mgt, "_place_bumps_per_host", overshooting_bumps)
+        host = _straight_route(1, "D0", 12.0, y=0.0)
+        target = 13.0
+        group = _ddr_group(net_ids=[1, 2], tolerance=0.1)
+        routes = {1: host, 2: _straight_route(2, "D1", target, y=10.0)}
+        results = tune_match_group_v2(
+            group,
+            routes,
+            tolerance_mm=0.1,
+            intra_group_clearance_mm=0.2,
+            config=SerpentineConfig(amplitude=1.0, gap_factor=2.0),
+        )
+        route, result = results[1]
+        assert LengthTracker.calculate_route_length(route) - target <= 1e-8
+        assert result.inserts_applied == 0
+        assert result.reason == "overshoot"
+
     def test_without_refit_the_overshooting_candidate_is_rejected(self, monkeypatch):
         """With the refit off the raw trombone overshoots, so the guard rejects it.
 
