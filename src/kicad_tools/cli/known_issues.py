@@ -75,7 +75,7 @@ _ITEM = rf"(?:{_IDENT_RE}|{_ERROR_ITEM})"
 _ALLOWANCE_RE = re.compile(rf"^{_ITEM}(,{_ITEM})*$")
 #: Identity shapes: ``pad`` is a pad-scoped ``{rule, ref, pad}``, ``at`` a located ``{rule, at}``.
 _SHAPE_KEYS = {"pad": ("rule", "ref", "pad"), "at": ("rule", "at")}
-_SORT_ORDER = {("pad",): "(rule, ref, pad)", ("at",): "(rule, x, y)"}
+_SORT_ORDER = {"pad": "(rule, ref, pad)", "at": "(rule, x, y)"}
 #: The shapes each field accepts.  The matchers handle exactly these.
 _WARNING_SHAPES = ("pad",)
 _ERROR_SHAPES = ("at",)
@@ -158,7 +158,7 @@ def _check_identities(value: Any, field: str, shapes: Iterable[str]) -> list[dic
     if len(set(keys_)) != len(keys_):
         raise KnownIssueError(f"{field} lists an identity more than once")
     if keys_ != sorted(keys_):
-        raise KnownIssueError(f"{field} must be sorted by {_SORT_ORDER[tuple(allowed)]}")
+        raise KnownIssueError(f"{field} must be sorted by {_SORT_ORDER[next(iter(allowed))]}")
     return out
 
 
