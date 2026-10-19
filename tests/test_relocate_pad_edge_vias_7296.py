@@ -229,3 +229,52 @@ def test_unmodellable_netclasses_move_nothing(tmp_path):
     assert len(result.unresolvable) == 1
     assert "netclass" in result.unresolvable[0].reason
     assert pcb.vias[0].position == before
+
+
+# ---------------------------------------------------------------------------
+# Differential pairs: never move one leg alone
+# ---------------------------------------------------------------------------
+
+
+def _pair_board(tmp_path: Path, p_name: str, n_name: str) -> PCB:
+    body = (
+        _HEAD.format(mask=0.0)
+        .replace('"SIG1"', f'"{p_name}"')
+        .replace('(net 2 "SIG2")', f'(net 2 "{n_name}")')
+    )
+    path = tmp_path / "board.kicad_pcb"
+    path.write_text(body + _EDGE_VIA)
+    return PCB.load(path)
+
+
+def test_diff_pair_leg_is_skipped_not_moved(tmp_path):
+    pcb = _pair_board(tmp_path, "USB_D+", "USB_D-")
+    assert len(_edge_warnings(pcb)) == 1, "precondition"
+    before = pcb.vias[0].position
+    n_segments = len(pcb.segments)
+
+    result = relocate_pad_edge_vias(pcb, _RULES)
+
+    assert result.moved == []
+    assert len(result.skipped) == 1
+    assert "differential-pair leg" in result.skipped[0].reason
+    assert pcb.vias[0].position == before
+    assert len(pcb.segments) == n_segments
+
+
+def test_router_recorded_pair_is_a_pair_too(tmp_path):
+    import json
+
+    pcb = _pair_board(tmp_path, "X_POS", "X_NEG")
+    pcb.path.with_suffix(".kicad_pro").write_text(
+        json.dumps({"meta": {"kct_router_diff_pairs": [["X_POS", "X_NEG"]]}})
+    )
+    result = relocate_pad_edge_vias(PCB.load(pcb.path), _RULES)
+    assert result.moved == [] and len(result.skipped) == 1
+
+
+def test_lone_plus_suffix_net_without_partner_still_moves(tmp_path):
+    """Control: the guard keys on a real partner, not on a +/- suffix."""
+    pcb = _pair_board(tmp_path, "VCC+", "SIG2")
+    result = relocate_pad_edge_vias(pcb, _RULES)
+    assert len(result.moved) == 1

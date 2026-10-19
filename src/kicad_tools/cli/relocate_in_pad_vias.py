@@ -1585,6 +1585,27 @@ def _pad_edge_gap(
     return min(gaps) if gaps else None
 
 
+def _diff_pair_net_names(pcb: PCB) -> set[str]:
+    """Names of nets that are one leg of a differential pair on this board.
+
+    The same pair predicate ``netclass_clearance_copper`` and the emitted
+    ``.kicad_dru`` use: KiCad's ``isCoupledDiffPair()`` name complement, or a
+    pair the router recorded under ``meta.kct_router_diff_pairs``.
+    """
+    from kicad_tools.manufacturers.netclass_dru import kicad_coupled_complement
+    from kicad_tools.manufacturers.project_generator import recorded_router_coupled_pairs
+    from kicad_tools.validate.rules.netclass_clearance_copper import load_project
+
+    names = {net.name for net in pcb.nets.values() if net.name}
+    legs = {name for name in names if kicad_coupled_complement(name) in names}
+    project = load_project(pcb.path) if pcb.path is not None else None
+    if project is not None:
+        for pair in recorded_router_coupled_pairs(project):
+            if all(name in names for name in pair):
+                legs.update(pair)
+    return legs
+
+
 def relocate_pad_edge_vias(
     pcb: PCB,
     design_rules: DesignRules,
@@ -1612,6 +1633,14 @@ def relocate_pad_edge_vias(
     not the fab floor alone, which let a +3V3 via land 0.155 mm from a signal
     track on board 06.  A project whose netclasses cannot be modelled moves
     nothing: every flagged via is reported ``unresolvable``.
+
+    A via on one leg of a differential pair is reported ``skipped`` and left
+    in place: sliding one leg's via (and adding its stub) without the
+    partner's uncouples the pair -- on board 06 routed without the router's
+    pad-edge floor this pass moved USB2_D+/USB2_D- vias singly and pushed
+    USB2_D+ uncoupled length to 13.3 mm against a 12.7 mm limit.  The router
+    keeps pair vias out of the zone (``min_via_pad_edge_gap``); re-route the
+    pair rather than patch one leg.
     """
     from kicad_tools.core.project_clearance import ProjectClearanceError
     from kicad_tools.validate.rules.netclass_clearance_copper import netclass_pair_requirement
@@ -1634,6 +1663,7 @@ def relocate_pad_edge_vias(
 
     pads_by_net = _collect_smd_pads_by_net(pcb)
     tht_pads = _collect_tht_pads(pcb)
+    pair_legs = _diff_pair_net_names(pcb)
     steps = [
         _PAD_EDGE_STEP_MM * i for i in range(1, int(_PAD_EDGE_MAX_SLIDE_MM / _PAD_EDGE_STEP_MM) + 1)
     ]
@@ -1666,6 +1696,23 @@ def relocate_pad_edge_vias(
         pad_ref = f"{fp.reference}-{pad.number}"
         net_name = via.net_name or pad.net_name or ""
         if nets is not None and net_name not in nets:
+            continue
+        if net_name in pair_legs:
+            result.skipped.append(
+                ViaRelocationSkip(
+                    x=vx,
+                    y=vy,
+                    net=via.net_number,
+                    net_name=net_name,
+                    pad_ref=pad_ref,
+                    reason=(
+                        "differential-pair leg: moving one leg's via alone would uncouple "
+                        "the pair; re-route the pair with the router's pad-edge floor"
+                    ),
+                    uuid=via.uuid,
+                    category="skipped",
+                )
+            )
             continue
 
         connected: list[tuple[Segment, tuple[float, float]]] = []
