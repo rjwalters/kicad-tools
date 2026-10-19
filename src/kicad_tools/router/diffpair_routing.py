@@ -4631,8 +4631,13 @@ def _sized_outward_serpentine(
     away from the partner.  ``k`` bulges of height ``A`` add exactly
     ``2 * k * A``, and only the two perpendicular legs leave the partner's
     side: the bulge top stays parallel to the partner, so the pair's
-    uncoupled-length figure grows by the added length on the shorter half and
-    not at all on the longer one (a 45-degree bulge would add ~3.4x that).
+    ``kct check`` per-net (max over the two halves) uncoupled figure grows by
+    the added length on the shorter half and not at all on the longer one (a
+    45-degree bulge would add ~3.4x that).  The KiCad-equivalent figure
+    (P plus N, the ``uncoupled_mm`` of the diff-pair bench and the one the
+    #6858 / #7269 acceptance tables use) is not bounded this way: it rises by
+    at least the added length and was measured at ~1.6x on 07rf MIPI_CLK
+    (+1.15 mm for 0.70 mm added).
     Plans keep ``A`` in ``[min_amplitude, 2 mm]`` and the added length in
     ``[length_to_add, max_length_to_add]``; those that do not make the
     shorter half the longer one are tried first, closest to the request's
