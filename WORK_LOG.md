@@ -15,6 +15,8 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-19
 
+- **PR #7452**: build(deps-dev): Bump cmake from 4.4.3 to 4.4.4
+- **PR #7451**: build(deps): Bump the uv-minor-patch group across 1 directory with 4 updates
 - **PR #7438**: refactor(boards): run board 03 readiness receipt in-process via readiness_cmd.main
 - **PR #7428**: fix(blocks): wire OpAmpBlock and multi-channel ESD array to real pins
 - **Issue #7410** (closed): Gate regenerate_boards_03_04_6076.py's board-03 readiness.json promotion (#7358 allowlist)
