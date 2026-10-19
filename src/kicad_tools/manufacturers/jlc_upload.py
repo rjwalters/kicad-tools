@@ -71,6 +71,7 @@ selects a receipt.
 from __future__ import annotations
 
 import contextlib
+import errno
 import hashlib
 import os
 import re
@@ -569,21 +570,17 @@ class UploadLedger:
         parent = _root(ledger.path.parent)
         _path(ledger.path.name)
         try:
-            fd = os.open(ledger.path, os.O_CREAT | os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW, 0o600)
+            fd = _open_nofollow(ledger.path, os.O_CREAT | os.O_WRONLY | os.O_APPEND, 0o600)
         except OSError as exc:
             raise LedgerError("Upload ledger is missing, inaccessible, or symlinked") from exc
         os.close(fd)
-        dir_fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY)
-        try:
-            os.fsync(dir_fd)
-        finally:
-            os.close(dir_fd)
+        _fsync_dir(parent)
         return ledger
 
     def _append(self, core: Mapping[str, Any]) -> None:
         line = _json(dict(core))
         try:
-            fd = os.open(self.path, os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW)
+            fd = _open_nofollow(self.path, os.O_WRONLY | os.O_APPEND)
         except OSError as exc:
             raise LedgerError("Upload ledger is missing, inaccessible, or symlinked") from exc
         try:
@@ -1117,6 +1114,30 @@ def _check_response_identity(
 # --------------------------------------------------------------------------
 
 
+def _open_nofollow(path: Path, flags: int, mode: int = 0o777) -> int:
+    """``os.open`` that refuses a symlinked final component.
+
+    ``O_NOFOLLOW`` does not exist on Windows; there, fall back to an ``lstat``
+    check before opening (not atomic, but the best that platform offers).
+    """
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    if not nofollow and os.path.islink(path):
+        raise OSError(errno.ELOOP, "refusing to follow symlink", str(path))
+    return os.open(path, flags | nofollow, mode)
+
+
+def _fsync_dir(path: Path) -> None:
+    """fsync a directory so a new entry is durable; a no-op where unsupported."""
+    directory = getattr(os, "O_DIRECTORY", 0)
+    if not directory:
+        return  # Windows cannot open a directory fd for fsync
+    dir_fd = os.open(path, os.O_RDONLY | directory)
+    try:
+        os.fsync(dir_fd)
+    finally:
+        os.close(dir_fd)
+
+
 @contextlib.contextmanager
 def _upload_lock(ledger: UploadLedger) -> Iterator[None]:
     """Hold an exclusive cooperative lock beside the ledger for one attempt.
@@ -1130,7 +1151,7 @@ def _upload_lock(ledger: UploadLedger) -> Iterator[None]:
     """
     lock = ledger.path.parent / ("." + ledger.path.name + ".upload-lock")
     try:
-        lock_fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
+        lock_fd = _open_nofollow(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
     except OSError as exc:
         raise UploadBlockedError(
             "Another upload is already in progress for this ledger (or a previous"

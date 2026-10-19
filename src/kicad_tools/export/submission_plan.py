@@ -151,6 +151,14 @@ def _root_fd(root: Path) -> int:
 def _root(path: Path) -> Path:
     # abspath canonicalizes '.' and '..'; _root_fd rejects symlink ancestors.
     root = Path(os.path.abspath(path))
+    if not hasattr(os, "O_DIRECTORY"):
+        # Windows has no O_DIRECTORY/dir_fd: validate with lstat-style checks.
+        current = Path(root.anchor)
+        for part in root.parts[1:]:
+            current = current / part
+            if os.path.islink(current) or not os.path.isdir(current):
+                raise SubmissionError("Root must be an existing directory without symlinks")
+        return root
     fd = _root_fd(root)
     os.close(fd)
     return root
