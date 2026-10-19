@@ -77,6 +77,7 @@ from __future__ import annotations
 
 import json
 import math
+from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -259,7 +260,7 @@ def netclass_pair_requirement(
     pcb_path: Path | None,
     pcb: PCB,
     fab_floor: float,
-):
+) -> Callable[[int, int], float]:
     """``(net_a, net_b) -> mm``: the copper clearance this category demands.
 
     Issue #7296: a post-route pass that moves copper (the pad-edge via
